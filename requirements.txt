@@ -1,4 +1,7 @@
 fastapi[standard]
 python-multipart
+requests
 opencv-python
 numpy
+requests
+websockets
