@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import websockets
 import cv2
@@ -5,8 +6,9 @@ import base64
 import numpy as np
 import time
 
-async def display_video():
-    uri = "ws://127.0.0.1:8000/ai/video"
+
+async def display_video(client_id: str = "client_local", server_ws: str = "ws://127.0.0.1:8000"):
+    uri = f"{server_ws}/ai/video?client_id={client_id}"
     async with websockets.connect(uri) as websocket:  # 设置超时时间为10秒
         while True:
             try:
@@ -42,9 +44,6 @@ async def display_video():
                 # 显示图像
                 cv2.imshow("Inference Result", frame)
 
-                # # 固定帧率控制
-                # time.sleep(1/60)
-
                 # 按下 'q' 键退出
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
@@ -58,5 +57,14 @@ async def display_video():
 
     cv2.destroyAllWindows()
 
-# 运行异步函数
-asyncio.run(display_video())
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="显示客户端（接收 AI 推理结果）")
+    parser.add_argument('--client-id', default='client_local', help='客户端 ID，用于订阅对应结果')
+    parser.add_argument('--server-ws', default='ws://127.0.0.1:8000', help='服务 WS 地址')
+    args = parser.parse_args()
+
+    try:
+        asyncio.run(display_video(client_id=args.client_id, server_ws=args.server_ws))
+    except KeyboardInterrupt:
+        print('已中断')
