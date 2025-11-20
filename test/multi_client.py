@@ -93,7 +93,7 @@ async def ws_upload_worker(server_ws_url, client_id, frame_b64, send_interval, r
         print(f"[WS uploader {client_id}] connect error: {e}")
 
 
-async def ws_display_worker(server_ws_url, client_id, expected_color_bgr, stats, stats_lock, run_event, output_dir=None, save_every=5):
+async def ws_display_worker(server_ws_url, client_id, expected_color_bgr, stats, stats_lock, run_event, output_dir=None, save_every=5, save_frames=False):
     """Display worker: 接收推理后图像并验证左上标记颜色是否被保留。
 
     - expected_color_bgr: tuple(B, G, R)
@@ -148,7 +148,7 @@ async def ws_display_worker(server_ws_url, client_id, expected_color_bgr, stats,
                             rec["last_ok"] = False
 
                     # 可选保存
-                    if output_dir and (count % save_every == 0):
+                    if save_frames and output_dir and (count % save_every == 0):
                         fname = os.path.join(output_dir, f"{client_id}_{int(time.time())}_{count}.jpg")
                         with open(fname, 'wb') as f:
                             f.write(img_bytes)
@@ -184,7 +184,7 @@ async def _reporter(stats, stats_lock, run_event, interval=5):
             print(f"[report] clients={total}, last_ok={ok_clients}, recv={total_recv}, ok={total_ok}")
 
 
-async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_interval, display, output_dir):
+async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_interval, display, output_dir, save_frames):
     run_event = asyncio.Event()
     run_event.set()
 
@@ -193,7 +193,7 @@ async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_
     stats_lock = asyncio.Lock()
 
     # create output dir
-    if display and output_dir:
+    if display and save_frames and output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
     for i in range(num_clients):
@@ -209,7 +209,7 @@ async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_
 
         if display:
             # start display client for each one (can be heavy if many clients)
-            tasks.append(asyncio.create_task(ws_display_worker(server_ws, client_id, color, stats, stats_lock, run_event, output_dir)))
+            tasks.append(asyncio.create_task(ws_display_worker(server_ws, client_id, color, stats, stats_lock, run_event, output_dir, save_frames=save_frames)))
 
     # 启动汇报任务
     tasks.append(asyncio.create_task(_reporter(stats, stats_lock, run_event, interval=5)))
@@ -231,7 +231,8 @@ def main():
     parser.add_argument('--server-http', default='http://127.0.0.1:8000', help='服务 HTTP 地址')
     parser.add_argument('--server-ws', default='ws://127.0.0.1:8000', help='服务 WS 地址')
     parser.add_argument('--display', action='store_true', help='是否为每个客户端启动 display (接收推理结果)')
-    parser.add_argument('--output-dir', default='multi_output', help='保存接收帧的目录（若 --display）')
+    parser.add_argument('--save-frames', action='store_true', help='是否保存接收到的帧（需要 --display）')
+    parser.add_argument('--output-dir', default='multi_output', help='保存接收帧的目录（若 --save-frames）')
 
     args = parser.parse_args()
 
@@ -239,7 +240,7 @@ def main():
     frame_path = args.frame
 
     try:
-        asyncio.run(run_multi(args.num, args.server_http, args.server_ws, args.mode, frame_path, args.send_interval, args.display, args.output_dir))
+        asyncio.run(run_multi(args.num, args.server_http, args.server_ws, args.mode, frame_path, args.send_interval, args.display, args.output_dir, args.save_frames))
     except KeyboardInterrupt:
         print('已中断')
 

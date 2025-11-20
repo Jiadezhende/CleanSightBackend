@@ -19,7 +19,7 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 
 ```powershell
 # 创建虚拟环境并激活
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\activate
 # 安装依赖
 pip install -r requirements.txt
@@ -78,9 +78,10 @@ API 将可用在 <http://localhost:8000>
 - 默认以 **WebSocket** 模式运行（推荐用于性能与实时性测试）。
 - 上传端只保留并发送包含客户标记（左上角小方块）的帧，用于结果回传验证。
 - 展示端（若启用 `--display`）会接收推理后图像并验证左上角标记颜色是否保留，从而判断结果是否路由到对应 `client_id`。
-- 默认**不保存**接收的 output（节约磁盘）。如需保存，可使用 `--display --output-dir <dir>`。
+- 默认**不保存**接收的 output（节约磁盘）。如需保存，可使用 `--display --save-frames --output-dir <dir>`。
 
 依赖（如未安装）：
+
 ```powershell
 pip install aiohttp websockets opencv-python numpy
 ```
@@ -108,7 +109,7 @@ py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-int
 - 将展示端同时保存接收帧到目录：
 
 ```powershell
-py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --display --output-dir multi_output --server-ws ws://127.0.0.1:8000
+py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --display --save-frames --output-dir multi_output --server-ws ws://127.0.0.1:8000
 ```
 
 主要可选参数说明（摘录）：
@@ -119,14 +120,15 @@ py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-int
 - `--send-interval`: 每个客户端发送帧的间隔（秒），默认 `0.5`。
 - `--server-ws`: 服务的 WS 地址，默认 `ws://127.0.0.1:8000`。
 - `--display`: 启用每个客户端对应的展示/验证连接（默认关闭）。
-- `--output-dir`: 如果指定并启用 `--display`，接收的图像会按一定频率保存到该目录。
+- `--save-frames`: 启用保存接收到的帧（需要 `--display`），默认关闭。
+- `--output-dir`: 保存接收帧的目录（若启用 `--save-frames`），默认 `multi_output`。
 
 诊断提示：
 
 - 如果运行后统计显示 `clients=0, ok=0`，一般是因为未启用 `--display`（上传端不会填充 stats），或 display 端无法连接到 `/ai/video`（检查 `--server-ws` 地址与防火墙）。
 - 仅上传（不启用 `--display`）时，脚本用于压测上传通道与服务器接收能力；验证需要 `--display`。
 
-## 测试说明
+## 单客户端测试说明
 
 测试文件在 `test/` 目录下：
 
