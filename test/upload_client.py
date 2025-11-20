@@ -6,6 +6,7 @@ import argparse
 import os
 import asyncio
 import websockets
+import uuid
 
 # 读取本地图像（或视频帧）
 def get_base64_frame(image_path="test_frame.jpg"):
@@ -13,21 +14,27 @@ def get_base64_frame(image_path="test_frame.jpg"):
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 # 模拟上传帧
-def upload_frame(frame_data):
-    url = "http://127.0.0.1:8000/inspection/upload_frame"
-    data = {"frame": frame_data}
-    response = requests.post(url, data=data)
-    print("Upload response:", response.json())
+def upload_frame(frame_data, server_http="http://127.0.0.1:8000", client_id="client_local"):
+    url = f"{server_http}/inspection/upload_frame"
+    data = {"client_id": client_id, "frame": frame_data}
+    try:
+        response = requests.post(url, data=data, timeout=5)
+        try:
+            print("Upload response:", response.json())
+        except Exception:
+            print("Upload response (text):", response.text)
+    except Exception as e:
+        print(f"Upload error: {e}")
 
 # 模式1: 上传静态帧
-def upload_static_frame():
+def upload_static_frame(server_http="http://127.0.0.1:8000", client_id="client_local"):
     frame_data = get_base64_frame()
     while True:
-        upload_frame(frame_data)
+        upload_frame(frame_data, server_http=server_http, client_id=client_id)
         time.sleep(0.01)  # 每 0.01 秒上传一次，尽可能快
 
 # 模式2: 上传视频（传完自动停止）
-def upload_video(video_path="test_video.mp4"):
+def upload_video(video_path="test_video.mp4", server_http="http://127.0.0.1:8000", client_id="client_local"):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"无法打开视频文件: {video_path}")
@@ -51,12 +58,12 @@ def upload_video(video_path="test_video.mp4"):
             success, buffer = cv2.imencode('.jpg', frame)
             if success:
                 frame_data = base64.b64encode(buffer.tobytes()).decode("utf-8")
-                upload_frame(frame_data)
+                upload_frame(frame_data, server_http=server_http, client_id=client_id)
     finally:
         cap.release()
 
 # 模式3: 调取本地摄像头
-def upload_camera(source=0):
+def upload_camera(source=0, server_http="http://127.0.0.1:8000", client_id="client_local"):
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         print("无法打开摄像头")
@@ -73,15 +80,15 @@ def upload_camera(source=0):
             success, buffer = cv2.imencode('.jpg', frame)
             if success:
                 frame_data = base64.b64encode(buffer.tobytes()).decode("utf-8")
-                upload_frame(frame_data)
+                upload_frame(frame_data, server_http=server_http, client_id=client_id)
 
             # 移除 sleep，全速上传
     finally:
         cap.release()
 
 # 模式4: WebSocket 实时上传摄像头
-async def websocket_upload_camera(source=0):
-    uri = "ws://127.0.0.1:8000/inspection/upload_stream"
+async def websocket_upload_camera(source=0, server_ws="ws://127.0.0.1:8000", client_id="client_local"):
+    uri = f"{server_ws}/inspection/upload_stream?client_id={client_id}"
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         print(f"无法打开摄像头: {source}")
@@ -120,8 +127,8 @@ async def websocket_upload_camera(source=0):
         cap.release()
 
 # 模式5: WebSocket 上传视频
-async def websocket_upload_video(video_path="test_video.mp4"):
-    uri = "ws://127.0.0.1:8000/inspection/upload_stream"
+async def websocket_upload_video(video_path="test_video.mp4", server_ws="ws://127.0.0.1:8000", client_id="client_local"):
+    uri = f"{server_ws}/inspection/upload_stream?client_id={client_id}"
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"无法打开视频文件: {video_path}")
@@ -174,18 +181,21 @@ if __name__ == "__main__":
                         help="选择传输方式: http (POST请求), websocket (WebSocket连接) - 适用于 video 和 camera 模式")
     parser.add_argument("--video", default="test_video.mp4", help="视频文件路径 (用于 video 模式)")
     parser.add_argument("--source", type=int, default=0, help="摄像头索引 (用于 camera 模式)")
+    parser.add_argument("--client-id", default=f"client_{uuid.uuid4().hex[:6]}", help="客户端 ID")
+    parser.add_argument("--server-http", default="http://127.0.0.1:8000", help="服务 HTTP 地址")
+    parser.add_argument("--server-ws", default="ws://127.0.0.1:8000", help="服务 WS 地址")
 
     args = parser.parse_args()
 
     if args.mode == "frame":
-        upload_static_frame()
+        upload_static_frame(server_http=args.server_http, client_id=args.client_id)
     elif args.mode == "video":
         if args.transport == "http":
-            upload_video(args.video)
+            upload_video(args.video, server_http=args.server_http, client_id=args.client_id)
         elif args.transport == "websocket":
-            asyncio.run(websocket_upload_video(args.video))
+            asyncio.run(websocket_upload_video(args.video, server_ws=args.server_ws, client_id=args.client_id))
     elif args.mode == "camera":
         if args.transport == "http":
-            upload_camera(args.source)
+            upload_camera(args.source, server_http=args.server_http, client_id=args.client_id)
         elif args.transport == "websocket":
-            asyncio.run(websocket_upload_camera(args.source))
+            asyncio.run(websocket_upload_camera(args.source, server_ws=args.server_ws, client_id=args.client_id))

@@ -1,3 +1,4 @@
+unicorn
 fastapi[standard]
 python-multipart
 requests
@@ -5,3 +6,4 @@ opencv-python
 numpy
 requests
 websockets
+aiohttp # for multi-client tests
