@@ -37,7 +37,61 @@ API 将可用在 <http://localhost:8000>
 
 ## API 文档
 
-运行后，访问 <http://localhost:8000/docs> 查看交互式 API 文档。
+运行后，访问 <http://localhost:8000/docs> 查看交互式 HTTP API 文档。
+
+### WebSocket 接口文档
+
+由于 FastAPI 的 `/docs` 页面主要展示 HTTP API，WebSocket 接口需要单独文档说明：
+
+#### 1. 实时视频流结果推送
+
+- **URL**: `ws://localhost:8000/ai/video?client_id={client_id}`
+- **描述**: 实时接收 AI 处理后的视频帧
+- **连接参数**: 
+  - `client_id` (必需): 客户端唯一标识符
+- **数据格式**: Base64 编码的 JPEG 图像
+
+  ```javascript
+  // 接收示例
+  data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ...
+  ```
+
+#### 2. 视频帧上传流
+
+- **URL**: `ws://localhost:8000/inspection/upload_stream?client_id={client_id}`
+- **描述**: 实时上传视频帧进行 AI 处理
+- **连接参数**:
+  - `client_id` (必需): 客户端唯一标识符
+- **发送格式**: Base64 编码的帧数据
+- **响应格式**: 
+  - 成功: `"success"`
+  - 失败: `"error: {错误信息}"`
+
+#### 3. 任务状态实时更新
+
+- **URL**: `ws://localhost:8000/task/status/{client_id}`
+- **描述**: 实时接收任务状态更新
+- **路径参数**:
+  - `client_id` (必需): 客户端唯一标识符
+- **数据格式**: JSON
+  
+  ```json
+  // 有活跃任务时
+  {
+    "task_id": "task_123",
+    "status": "active",
+    "cleaning_stage": 1,
+    "bending_count": 5,
+    "bubble_detected": false,
+    "fully_submerged": true,
+    "updated_at": "2024-01-01T12:00:00"
+  }
+  
+  // 无活跃任务时
+  {
+    "status": "no_active_task"
+  }
+  ```
 
 ## 实时视频流
 
@@ -138,21 +192,29 @@ py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-int
 
 ### 测试方法
 
-1. **启动后端**:
+#### 1. 综合测试套件（推荐）
 
-   ```powershell
-   uvicorn app.main:app --reload
-   ```
+项目提供了完整的综合测试套件，可以一次性测试所有功能：
 
-2. **测试 WebSocket 推流**:
-   - 进入 `test/` 目录：`cd test`
-   - 运行 `py video_client.py` 连接到 `ws://localhost:8000/ai/video` 并显示结果。
+```powershell
+# 进入测试目录运行
+cd test
+python integrated_test.py --client-id test_client --actor-id test_actor
 
-3. **测试帧上传**:
-   - 进入 `test/` 目录：`cd test`
-   - 运行 `py upload_client.py --mode frame` 用于静态帧（HTTP）。
-   - 运行 `py upload_client.py --mode video --video [file_path] --transport http` 用于视频文件上传（HTTP）。
-   - 运行 `py upload_client.py --mode video --video [file_path] --transport websocket` 用于视频文件上传（WebSocket）。
-   - 运行 `py upload_client.py --mode camera --source 0 --transport http` 用于摄像头流（HTTP）。
-   - 运行 `py upload_client.py --mode camera --source 0 --transport websocket` 用于摄像头流（WebSocket）。
-   - 帧以 ~30 FPS 上传、处理并通过 WebSocket 推送。
+# 测试特定模块
+python integrated_test.py --test ai        # 仅测试AI服务集成
+python integrated_test.py --test http      # 仅测试HTTP API
+python integrated_test.py --test ws        # 仅测试WebSocket接口
+
+# 使用自定义图片进行帧上传测试
+python integrated_test.py --image test_frame.jpg
+
+# 连接到不同服务器
+python integrated_test.py --http-url http://192.168.1.100:8000 --ws-url ws://192.168.1.100:8000
+```
+
+#### 2. 专项测试脚本
+
+- **AI服务集成测试**: `cd test && python test_ai_integration.py`
+- **任务管理API测试**: `cd test && python test_task_apis.py`
+- **WebSocket接口测试**: `cd test && python websocket_test.py`

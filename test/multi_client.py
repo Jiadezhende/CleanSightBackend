@@ -2,15 +2,14 @@
 multi_client.py
 
 模拟多个客户端同时运行：
-- camera clients (上传帧到 `/inspection/upload_frame` 或 ws `/inspection/upload_stream?client_id=...`)
+- camera clients (上传帧到 ws `/inspection/upload_stream?client_id=...`)
 - display clients (连接 `/ai/video?client_id=...` 接收推理后的 base64 jpeg)
 
 用法示例：
-python test/multi_client.py --num 50 --mode http --frame test_frame.jpg
-python test/multi_client.py --num 100 --mode websocket --frame test_frame.jpg --display
+python test/multi_client.py --num 100 --frame test_frame.jpg --display
 
-注意：本脚本依赖 `websockets` 和 `aiohttp`。如果没有，请先安装：
-pip install aiohttp websockets
+注意：本脚本依赖 `websockets`。如果没有，请先安装：
+pip install websockets
 
 """
 
@@ -22,7 +21,6 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-import aiohttp
 import websockets
 import cv2
 import numpy as np
@@ -54,21 +52,6 @@ def _make_marked_frame_b64(frame_path: str, color_bgr, mark_size=24):
         raise RuntimeError('encode failed')
     b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
     return b64
-
-
-async def http_upload_worker(server_url, client_id, frame_b64, send_interval, run_event):
-    url = f"{server_url}/inspection/upload_frame"
-    data = {"client_id": client_id, "frame": frame_b64}
-    timeout = aiohttp.ClientTimeout(total=5)
-    async with aiohttp.ClientSession() as session:
-        while run_event.is_set():
-            try:
-                async with session.post(url, data=data, timeout=timeout) as resp:
-                    _ = await resp.text()
-            except Exception as e:
-                # 简短打印错误，继续重试
-                print(f"[HTTP uploader {client_id}] error: {e}")
-            await asyncio.sleep(send_interval)
 
 
 async def ws_upload_worker(server_ws_url, client_id, frame_b64, send_interval, run_event):
@@ -184,7 +167,7 @@ async def _reporter(stats, stats_lock, run_event, interval=5):
             print(f"[report] clients={total}, last_ok={ok_clients}, recv={total_recv}, ok={total_ok}")
 
 
-async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_interval, display, output_dir, save_frames):
+async def run_multi(num_clients, server_ws, frame_path, send_interval, display, output_dir, save_frames):
     run_event = asyncio.Event()
     run_event.set()
 
@@ -202,10 +185,7 @@ async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_
         # 预生成每个 client 的带标记帧 base64（减少循环开销）
         marked_b64 = _make_marked_frame_b64(frame_path, color)
 
-        if mode == 'http':
-            tasks.append(asyncio.create_task(http_upload_worker(server_http, client_id, marked_b64, send_interval, run_event)))
-        else:
-            tasks.append(asyncio.create_task(ws_upload_worker(server_ws, client_id, marked_b64, send_interval, run_event)))
+        tasks.append(asyncio.create_task(ws_upload_worker(server_ws, client_id, marked_b64, send_interval, run_event)))
 
         if display:
             # start display client for each one (can be heavy if many clients)
@@ -214,7 +194,7 @@ async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_
     # 启动汇报任务
     tasks.append(asyncio.create_task(_reporter(stats, stats_lock, run_event, interval=5)))
 
-    print(f"启动 {num_clients} 个上传客户端 (mode={mode}), display={display}")
+    print(f"启动 {num_clients} 个上传客户端, display={display}")
 
     try:
         await asyncio.gather(*tasks)
@@ -225,10 +205,8 @@ async def run_multi(num_clients, server_http, server_ws, mode, frame_path, send_
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--num', type=int, default=10, help='并发客户端数量')
-    parser.add_argument('--mode', choices=['http', 'websocket'], default='http')
     parser.add_argument('--frame', default='test_frame.jpg', help='用于上传的静态帧')
     parser.add_argument('--send-interval', type=float, default=0.5, help='每个客户端发送帧的间隔(s)')
-    parser.add_argument('--server-http', default='http://127.0.0.1:8000', help='服务 HTTP 地址')
     parser.add_argument('--server-ws', default='ws://127.0.0.1:8000', help='服务 WS 地址')
     parser.add_argument('--display', action='store_true', help='是否为每个客户端启动 display (接收推理结果)')
     parser.add_argument('--save-frames', action='store_true', help='是否保存接收到的帧（需要 --display）')
@@ -240,7 +218,7 @@ def main():
     frame_path = args.frame
 
     try:
-        asyncio.run(run_multi(args.num, args.server_http, args.server_ws, args.mode, frame_path, args.send_interval, args.display, args.output_dir, args.save_frames))
+        asyncio.run(run_multi(args.num, args.server_ws, frame_path, args.send_interval, args.display, args.output_dir, args.save_frames))
     except KeyboardInterrupt:
         print('已中断')
 

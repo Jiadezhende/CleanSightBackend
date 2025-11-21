@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
-from app.routers import ai, inspection
+from app.routers import ai, inspection, task
 
 
 @asynccontextmanager
@@ -22,6 +22,7 @@ app = FastAPI(
 # 注册路由器
 app.include_router(ai.router)
 app.include_router(inspection.router)
+app.include_router(task.router)
 
 
 @app.get("/")

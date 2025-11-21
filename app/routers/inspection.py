@@ -1,24 +1,7 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket
-from typing import List
+from fastapi import APIRouter, WebSocket
 from app.services import ai
-import asyncio
 
 router = APIRouter(prefix="/inspection", tags=["inspection"])
-
-
-@router.post("/upload_frame")
-async def upload_frame(client_id: str = Form(...), frame: str = Form(...)):
-    """
-    接收网络上传的视频帧（Base64编码）并加入处理队列。
-    - 参数: `client_id` (必需), `frame` (Base64 编码)
-    - 返回: 状态信息
-    """
-    result = ai.submit_base64_frame(client_id, frame)
-
-    if result == "success":
-        return {"status": "success", "message": "帧已成功上传。"}
-    else:
-        raise HTTPException(status_code=400, detail=f"帧处理失败: {result}")
 
 
 @router.websocket("/upload_stream")
