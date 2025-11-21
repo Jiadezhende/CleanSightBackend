@@ -1,2 +1,3 @@
 # services package
-from . import ai, inspection
+from . import ai
+from .ai_models import motion, detection
