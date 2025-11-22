@@ -15,14 +15,14 @@ router = APIRouter(prefix="/task", tags=["task"])
 # 请求/响应模型
 class InitializeTaskRequest(BaseModel):
     client_id: str
-    actor_id: str
+    actor_id: int
 
 class TerminateTaskRequest(BaseModel):
     client_id: str
-    task_id: str
+    task_id: int
 
 class TaskStatusResponse(BaseModel):
-    task_id: str
+    task_id: int
     status: str
     cleaning_stage: int
     bending_count: int
@@ -45,7 +45,7 @@ async def initialize_task(request: InitializeTaskRequest):
         return TaskStatusResponse(
             task_id=new_task.task_id,
             status=new_task.status,
-            cleaning_stage=new_task.cleaning_stage,
+            cleaning_stage=new_task.current_step,
             bending_count=new_task.bending_count,
             bubble_detected=new_task.bubble_detected,
             fully_submerged=new_task.fully_submerged,
@@ -91,7 +91,7 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
                 status_data = {
                     "task_id": current_task.task_id,
                     "status": current_task.status,
-                    "cleaning_stage": current_task.cleaning_stage,
+                    "cleaning_stage": current_task.current_step,
                     "bending_count": current_task.bending_count,
                     "bubble_detected": current_task.bubble_detected,
                     "fully_submerged": current_task.fully_submerged,

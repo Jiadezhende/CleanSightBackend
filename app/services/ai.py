@@ -8,9 +8,11 @@ from collections import deque
 import numpy as np
 from typing import Optional, Dict, Deque, Tuple, List, Union, Any
 
-from app.models.frame import RawFrame, ProcessedFrame, FrameSegment, FrameData
+from app.models.frame import RawFrame, ProcessedFrame, FrameSegment, HLSSegment
 from app.models.task import Task as CleaningTask
 from app.services.ai_models import motion, detection
+from app.database import get_db
+from datetime import datetime
 from datetime import datetime
 
 # Type aliases for better readability
@@ -139,7 +141,7 @@ class InferenceManager:
             } for client_id, client_queues in self._clients.items()}
             return {"clients": len(self._clients), "queues": stats}
 
-    def _create_processed_frame(self, frame: np.ndarray, task_id: Optional[str], client_id: str, timestamp: float) -> ProcessedFrame:
+    def _create_processed_frame(self, frame: np.ndarray, task_id: Optional[int], client_id: str, timestamp: float) -> ProcessedFrame:
         """创建ProcessedFrame对象。"""
         _, buf = cv2.imencode('.jpg', frame)
         b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
@@ -151,56 +153,72 @@ class InferenceManager:
             inference_result={"mock": True}
         )
 
-    def _create_frame_data(self, raw_frame: np.ndarray, processed_frame: np.ndarray, timestamp: float) -> FrameData:
-        """创建FrameData对象，编码帧为Base64。"""
-        _, buf_raw = cv2.imencode('.jpg', raw_frame)
-        _, buf_processed = cv2.imencode('.jpg', processed_frame)
-        return FrameData(
-            ts=datetime.fromtimestamp(timestamp),
-            raw_b64=base64.b64encode(buf_raw.tobytes()).decode('utf-8'),
-            processed_b64=base64.b64encode(buf_processed.tobytes()).decode('utf-8'),
-            inference={"mock": True}
-        )
-
     def _flush_segment_if_needed(self, client_id: str, client_queues):
-        # TODO: 落盘到数据库或文件系统，目前落盘到本地database目录下的JSON文件
         seg_len = client_queues.ca_segment_len
         if len(client_queues.ca_processed) >= seg_len and len(client_queues.ca_raw) >= seg_len:
-            frames: Dict[int, FrameData] = {}
-            # 从左侧弹出一段，使两条队列对齐（以较小者为准）
-            take = min(seg_len, len(client_queues.ca_processed), len(client_queues.ca_raw))
-            # 将要写入的时间范围
+            # 创建目录
+            client_dir = self._db_dir / client_id
+            task_id = client_queues.task.task_id if client_queues.task else "no_task"
+            task_dir = client_dir / str(task_id)
+            hls_dir = task_dir / "hls"
+            hls_dir.mkdir(parents=True, exist_ok=True)
+
+            # 收集帧
+            frames = []
+            timestamps = []
             start_ts = None
             end_ts = None
+            take = min(seg_len, len(client_queues.ca_processed), len(client_queues.ca_raw))
             for _ in range(take):
                 ts_p, proc = client_queues.ca_processed.popleft()
                 ts_r, raw = client_queues.ca_raw.popleft()
                 ts = min(ts_p, ts_r)
+                frames.append(proc)  # 使用处理后的帧生成视频
+                timestamps.append(ts)
                 start_ts = ts if start_ts is None else min(start_ts, ts)
                 end_ts = ts if end_ts is None else max(end_ts, ts)
-                frame_no = int(ts * 1e6)  # Use timestamp as unique frame number
-                frames[frame_no] = self._create_frame_data(raw, proc, ts)
 
-            # 写入文件
-            client_dir = self._db_dir / client_id
-            client_dir.mkdir(parents=True, exist_ok=True)
-            safe_start = start_ts if start_ts is not None else time.time()
-            safe_end = end_ts if end_ts is not None else safe_start
-            fname = f"segment_{int(safe_start)}_{int(safe_end)}_{int(time.time())}.json"
-            fpath = client_dir / fname
-            doc_model = FrameSegment(
-                client_id=client_id,
-                task_id=client_queues.task_id,
-                segment_start_ts=datetime.fromtimestamp(safe_start),
-                segment_end_ts=datetime.fromtimestamp(safe_end),
-                frames=frames
-            )
+            if start_ts is None or end_ts is None:
+                return
+
+            # 生成 HLS 段：用 OpenCV 创建 MP4 视频
+            segment_path = hls_dir / f"segment_{int(start_ts * 1e6)}.mp4"
+            height, width = frames[0].shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore
+            out = cv2.VideoWriter(str(segment_path), fourcc, 30.0, (width, height))
+            for frame in frames:
+                out.write(frame)
+            out.release()
+
+            # 更新 M3U8 播放列表
+            playlist_path = hls_dir / "playlist.m3u8"
+            segment_duration = len(frames) / 30.0  # 假设 30 FPS
+            with playlist_path.open('a') as f:
+                f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                f.write(f"{segment_path.name}\n")
+            if not playlist_path.exists() or playlist_path.stat().st_size == 0:
+                with playlist_path.open('w') as f:
+                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+
+            # 记录到数据库
+            db = next(get_db())
             try:
-                with fpath.open('w', encoding='utf-8') as f:
-                    json.dump(doc_model.model_dump(), f, ensure_ascii=False, default=str)
-                    print(f"已保存 JSON 片段 {client_id}: {fpath} (包含 {len(frames)} 帧)")
+                hls_segment = HLSSegment(
+                    client_id=client_id,
+                    task_id=task_id,
+                    segment_path=str(segment_path),
+                    playlist_path=str(playlist_path),
+                    start_ts=datetime.fromtimestamp(start_ts),
+                    end_ts=datetime.fromtimestamp(end_ts)
+                )
+                db.add(hls_segment)
+                db.commit()
+                print(f"已生成 HLS 段并记录到数据库 for {client_id}: {segment_path}")
             except Exception as e:
-                print(f"保存 JSON 片段失败 {client_id}: {e}")
+                db.rollback()
+                print(f"数据库记录失败 for {client_id}: {e}")
+            finally:
+                db.close()
 
     def _inference_loop(self):
         print("AI 推理服务已启动（多客户端管理：RT/CA 队列）")

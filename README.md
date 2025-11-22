@@ -47,7 +47,7 @@ API 将可用在 <http://localhost:8000>
 
 - **URL**: `ws://localhost:8000/ai/video?client_id={client_id}`
 - **描述**: 实时接收 AI 处理后的视频帧
-- **连接参数**: 
+- **连接参数**:
   - `client_id` (必需): 客户端唯一标识符
 - **数据格式**: Base64 编码的 JPEG 图像
 
@@ -63,7 +63,7 @@ API 将可用在 <http://localhost:8000>
 - **连接参数**:
   - `client_id` (必需): 客户端唯一标识符
 - **发送格式**: Base64 编码的帧数据
-- **响应格式**: 
+- **响应格式**:
   - 成功: `"success"`
   - 失败: `"error: {错误信息}"`
 

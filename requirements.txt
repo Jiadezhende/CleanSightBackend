@@ -6,4 +6,7 @@ opencv-python
 numpy
 requests
 websockets
-aiohttp # for multi-client tests
+# database related
+sqlalchemy
+psycopg2-binary
+alembic  # 用于数据库迁移

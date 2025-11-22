@@ -105,9 +105,9 @@ class CleanSightTester:
             # 测试动作分析
             print("   2. 测试动作分析...")
             task = Task(
-                task_id="test_task",
-                actor_id="test_actor",
-                cleaning_stage=1,
+                task_id=1,
+                initiator_operator_id=1,
+                current_step=1,
                 bending_count=0,
                 bubble_detected=False,
                 fully_submerged=False
