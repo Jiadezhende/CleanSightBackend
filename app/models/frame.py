@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 class BaseFrame(BaseModel):
-    task_id: Optional[str] = None
+    task_id: Optional[int] = None
     client_id: Optional[str] = None
     raw_timestamp: Optional[datetime] = None  # 原始视频帧写入时间戳
     width: Optional[int] = None
@@ -31,27 +31,27 @@ class ProcessedFrame(BaseFrame):
     inference_result: Optional[Dict[str, Any]] = None  # detection / analysis output
 
 
-class FrameData(BaseModel):
-    """
-    单帧数据，包含时间戳、原始与处理后图像的Base64编码，以及推理结果
-    """
-    ts: datetime
-    raw_b64: str
-    processed_b64: str
-    inference: Dict[str, Any]
-
-
 class FrameSegment(BaseModel):
     """
-    多帧数据段，包含客户端ID、任务ID、时间段及对应的多帧数据
+    多帧数据段，包含客户端ID、任务ID、时间段
     """
     client_id: str
-    task_id: Optional[str] = None
+    task_id: Optional[int] = None
     segment_start_ts: datetime
     segment_end_ts: datetime
-    frames: Dict[int, FrameData]  # key = frame_number, value = FrameData
 
-    # Example frame dict structure:
-    # {
-    #   frame_number: FrameData(ts=..., raw_b64=..., processed_b64=..., inference={...})
-    # }
+# SQLAlchemy models for database storage
+from sqlalchemy import Column, String, Integer, DateTime
+from app.database import Base
+
+class HLSSegment(Base):
+    __tablename__ = "hls_segments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String, index=True)
+    task_id = Column(Integer, index=True)  # 匹配 DBTask.task_id (str)
+    segment_path = Column(String)  # 文件系统路径，如 /database/client_1/task_123/hls/segment_001.mp4
+    playlist_path = Column(String)  # M3U8 文件路径
+    start_ts = Column(DateTime)
+    end_ts = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)

@@ -6,6 +6,7 @@ Currently a placeholder for future MotionModel implementation.
 """
 
 from typing import Dict, Any, Optional
+import time
 from app.models.task import Task
 
 
@@ -40,7 +41,7 @@ class MotionModel:
             # Simulate action detection
             actions["bending_detected"] = True
             current_task.bending_count += 1
-            current_task.updated_at = current_task.updated_at  # Update timestamp
+            current_task.updated_at = int(time.time())  # Update timestamp
 
         return actions
 
@@ -49,6 +50,18 @@ class MotionModel:
 motion_model = MotionModel()
 
 
-def analyze_motion(keypoints: Dict[str, Any], task: Task) -> Dict[str, Any]:
-    """Convenience function to analyze motion."""
-    return motion_model.analyze_action(keypoints, task)
+def analyze_motion(keypoints: Dict[str, Any], current_task: Optional[Task]) -> Dict[str, Any]:
+    """
+    Wrapper function for motion analysis.
+    
+    Args:
+        keypoints: Detected keypoints.
+        current_task: Current task to update.
+        
+    Returns:
+        Analysis results.
+    """
+    if current_task is None:
+        return {"error": "No task provided"}
+    
+    return motion_model.analyze_action(keypoints, current_task)

@@ -6,4 +6,12 @@ opencv-python
 numpy
 requests
 websockets
-aiohttp # for multi-client tests
+# database related
+sqlalchemy
+psycopg2-binary
+pydantic-settings  # 用于配置管理
+
+# testing
+pytest>=7.0.0
+pytest-asyncio
+httpx
