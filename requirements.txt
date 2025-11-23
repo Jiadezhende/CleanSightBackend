@@ -9,4 +9,9 @@ websockets
 # database related
 sqlalchemy
 psycopg2-binary
-alembic  # 用于数据库迁移
+pydantic-settings  # 用于配置管理
+
+# testing
+pytest>=7.0.0
+pytest-asyncio
+httpx

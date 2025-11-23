@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator
 
 class Settings(BaseSettings):
@@ -30,9 +30,11 @@ class Settings(BaseSettings):
             raise ValueError("数据库配置字段未设置或无效，请检查环境变量或 .env 文件")
         return self
     
-    class Config:
-        env_file = ".env"
-        env_prefix = "CLEANSIGHT_"
-        from_attributes = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="CLEANSIGHT_",
+        env_nested_delimiter="__",
+        env_ignore_empty=True
+    )
 
 settings = Settings()
