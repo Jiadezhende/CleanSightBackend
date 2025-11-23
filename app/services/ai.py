@@ -43,9 +43,8 @@ class ClientQueues:
 class InferenceManager:
     """按 client_id 管理实时(RT)与缓存(CA)队列，并在后台进行推理与持久化。
 
-    - RT 队列：rt_raw / rt_processed，保存约 1 秒的帧
-    - CA 队列：ca_raw / ca_processed，达阈值后落盘为 JSON（开发阶段模拟 HLS/数据库）
-    - 兼容原有 API：submit_*/get_result/status/remove_client
+    - RT 队列：保存约 1 秒的帧
+    - CA 队列：达阈值后落盘为 JSON/HLS 视频段
     """
 
     def __init__(self, rt_fps: int = 30, ca_segment_seconds: int = 5, db_dir: Optional[str] = None):
