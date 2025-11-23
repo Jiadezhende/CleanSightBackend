@@ -4,8 +4,29 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 
 ## 功能简介
 
-- **实时视频流处理**: 从摄像头或本地文件捕获视频，使用 AI 模型处理，并通过 WebSocket 推送结果。
-- **三线程架构**: 解耦帧捕获、AI 推理和 WebSocket 推送，优化性能。
+- **RTMP 流处理**: 从 RTMP 流以固定帧率提取视频帧，支持实时监控。
+- **AI 推理**: 关键点检测 + 动作分析，实时评估清洗过程。
+- **实时推送**: 通过 WebSocket 推送处理后的视频帧和推理结果。
+- **视频追溯**: 自动生成 HLS 视频段和关键点 JSON，支持任务回放。
+- **多客户端支持**: 同时处理多个 RTMP 流，每个客户端独立队列管理。
+
+## 架构特点
+
+### 三队列设计
+
+- **CA-RawQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理
+- **CA-ProcessedQueue**: 推理后的处理帧（含关键点），用于生成 HLS 段
+- **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送
+
+### 数据流
+
+```text
+RTMP 流 → 帧捕获线程 → CA-RawQueue → AI 推理 → CA-ProcessedQueue + RT-ProcessedQueue
+                                                       ↓                    ↓
+                                               HLS 段 + JSON          WebSocket 推送
+```
+
+详细架构文档见 [RTMP_ARCHITECTURE.md](RTMP_ARCHITECTURE.md)。
 
 ## 项目结构
 
@@ -39,14 +60,70 @@ API 将可用在 <http://localhost:8000>
 
 运行后，访问 <http://localhost:8000/docs> 查看交互式 HTTP API 文档。
 
-### WebSocket 接口文档
+### HTTP API 接口
 
-由于 FastAPI 的 `/docs` 页面主要展示 HTTP API，WebSocket 接口需要单独文档说明：
+#### 1. 启动 RTMP 流捕获
+
+- **URL**: `POST /inspection/start_rtmp_stream`
+- **描述**: 启动 RTMP 流捕获，以固定帧率提取视频帧
+- **请求体**:
+
+  ```json
+  {
+    "client_id": "camera_001",
+    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
+    "fps": 30
+  }
+  ```
+
+- **响应**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTMP 流捕获已启动 for camera_001"
+  }
+  ```
+
+#### 2. 停止 RTMP 流捕获
+
+- **URL**: `POST /inspection/stop_rtmp_stream?client_id={client_id}`
+- **描述**: 停止指定客户端的 RTMP 流捕获
+- **响应**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTMP 流捕获已停止 for camera_001"
+  }
+  ```
+
+#### 3. 查询 AI 服务状态
+
+- **URL**: `GET /ai/status`
+- **描述**: 获取所有客户端的队列状态
+- **响应**:
+
+  ```json
+  {
+    "clients": 2,
+    "queues": {
+      "camera_001": {
+        "ca_raw": 15,
+        "ca_processed": 120,
+        "rt_processed": 30,
+        "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope"
+      }
+    }
+  }
+  ```
+
+### WebSocket 接口文档
 
 #### 1. 实时视频流结果推送
 
 - **URL**: `ws://localhost:8000/ai/video?client_id={client_id}`
-- **描述**: 实时接收 AI 处理后的视频帧
+- **描述**: 实时接收 AI 处理后的视频帧（含关键点标注）
 - **连接参数**:
   - `client_id` (必需): 客户端唯一标识符
 - **数据格式**: Base64 编码的 JPEG 图像
@@ -56,25 +133,14 @@ API 将可用在 <http://localhost:8000>
   data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ...
   ```
 
-#### 2. 视频帧上传流
-
-- **URL**: `ws://localhost:8000/inspection/upload_stream?client_id={client_id}`
-- **描述**: 实时上传视频帧进行 AI 处理
-- **连接参数**:
-  - `client_id` (必需): 客户端唯一标识符
-- **发送格式**: Base64 编码的帧数据
-- **响应格式**:
-  - 成功: `"success"`
-  - 失败: `"error: {错误信息}"`
-
-#### 3. 任务状态实时更新
+#### 2. 任务状态实时更新
 
 - **URL**: `ws://localhost:8000/task/status/{client_id}`
 - **描述**: 实时接收任务状态更新
 - **路径参数**:
   - `client_id` (必需): 客户端唯一标识符
 - **数据格式**: JSON
-  
+
   ```json
   // 有活跃任务时
   {
@@ -86,12 +152,45 @@ API 将可用在 <http://localhost:8000>
     "fully_submerged": true,
     "updated_at": "2024-01-01T12:00:00"
   }
-  
+
   // 无活跃任务时
   {
     "status": "no_active_task"
   }
   ```
+
+## 使用示例
+
+### 完整流程示例
+
+```bash
+# 1. 启动 FastAPI 服务器
+uvicorn app.main:app --reload
+
+# 2. 启动 RTMP 流捕获
+curl -X POST http://localhost:8000/inspection/start_rtmp_stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "camera_001",
+    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
+    "fps": 30
+  }'
+
+# 3. 查询状态
+curl http://localhost:8000/ai/status
+
+# 4. 停止捕获
+curl -X POST "http://localhost:8000/inspection/stop_rtmp_stream?client_id=camera_001"
+```
+
+### 测试脚本
+
+使用集成测试脚本：
+
+```bash
+# 需要先启动 RTMP 服务器和推流
+python test/test_rtmp_integration.py --client_id test_camera --rtmp_url rtmp://localhost:1935/live/test
+```
 
 ## 实时视频流
 

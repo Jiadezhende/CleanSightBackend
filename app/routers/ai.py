@@ -57,14 +57,8 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
 @router.get("/status")
 async def get_ai_status():
-    """获取AI服务状态"""
-    st = ai.status()
-    return {
-        "status": "running",
-        "managed_clients": st.get("clients", 0),
-        "results_cached": st.get("results_cached", 0),
-        "threads_active": len([t for t in threading.enumerate() if t.name in ["InferenceThread"]])
-    }
+    """获取AI服务状态，返回详细的队列信息"""
+    return ai.status()
 
 
 def start_background_threads():

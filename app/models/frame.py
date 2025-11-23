@@ -9,6 +9,17 @@ returning to clients.
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+import numpy as np
+from dataclasses import dataclass
+
+
+@dataclass
+class FrameData:
+    """轻量级帧数据类，用于内存队列传递（避免 Base64 编码开销）"""
+    timestamp: float  # Unix timestamp
+    frame: np.ndarray  # 原始或处理后的帧（numpy 数组）
+    keypoints: Optional[Dict[str, Any]] = None  # 关键点检测结果（仅 ProcessedQueue）
+    inference_result: Optional[Dict[str, Any]] = None  # 完整推理结果
 
 class BaseFrame(BaseModel):
     task_id: Optional[int] = None
