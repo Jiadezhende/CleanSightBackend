@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     # AI 模型配置
     yolo_model_path: str = "/opt/homebrew/runs/detect/train5/weights/best.pt"
-    yolo_conf_threshold: float = 0.25
+    yolo_conf_threshold: float = 0.8
     yolo_iou_threshold: float = 0.45
 
     # .env 文件配置样例
