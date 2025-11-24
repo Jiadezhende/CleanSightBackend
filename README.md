@@ -6,14 +6,30 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 
 - **实时视频流处理**: 从摄像头或本地文件捕获视频，使用 AI 模型处理，并通过 WebSocket 推送结果。
 - **三线程架构**: 解耦帧捕获、AI 推理和 WebSocket 推送，优化性能。
+- **多任务并行推理**: 支持多种 AI 模型并行执行（关键点检测、动作分析、内镜弯折检测等）。
+- **可扩展架构**: 基于任务注册表的设计，便于添加新的检测任务。
 
 ## 项目结构
 
 - `models/`: 包含用于请求和响应验证的 Pydantic 数据结构。
 - `app/`: 主应用代码，包括 API 路由和 WebSocket 处理程序。
 - `routers/`: API 路由定义。
+  - `ai.py`: AI 推理服务路由
+  - `inspection.py`: 检查流程路由
+  - `task.py`: 任务管理路由
 - `services/`: 业务逻辑和 AI 模型集成。
+  - `ai.py`: 推理管理器和任务架构
+  - `ai_models/`: AI 模型实现
+    - `detection.py`: 关键点检测
+    - `motion.py`: 动作分析
+    - `yolo_detection.py`: 内镜弯折检测器
+    - `yolo_task.py`: 内镜弯折检测任务
+  - `example_custom_task.py`: 自定义任务示例
 - `test/`: 测试客户端代码，用于上传视频帧和显示推理结果。
+- `docs/`: 项目文档
+  - `AI_INFERENCE_ARCHITECTURE.md`: 推理架构说明
+  - `QUICK_START_CUSTOM_TASK.md`: 自定义任务快速开始
+  - `REFACTORING_SUMMARY.md`: 架构重构总结
 
 ## 安装
 
@@ -21,9 +37,31 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 # 创建虚拟环境并激活
 py -3.12 -m venv .venv
 .\.venv\Scripts\activate
-# 安装依赖
+
+# 安装依赖（包含 ultralytics 用于内镜弯折检测）
 pip install -r requirements.txt
 ```
+
+## AI 推理架构
+
+系统采用可扩展的任务注册架构，支持多种 AI 模型并行或串行执行：
+
+- **关键点检测**: 检测内窥镜清洗过程中的关键点
+- **动作分析**: 分析弯曲、浸泡等清洗动作
+- **内镜弯折检测**: 使用 YOLOv8 模型检测内镜是否弯折
+
+### 添加自定义推理任务
+
+系统支持快速扩展新的检测任务，只需 3 步：
+
+1. 创建继承 `InferenceTask` 的任务类
+2. 实现 `infer()` 和 `visualize()` 方法
+3. 在 `ai.py` 中注册任务
+
+详细说明请参考文档：
+- [推理架构说明](docs/AI_INFERENCE_ARCHITECTURE.md)
+- [自定义任务快速开始](docs/QUICK_START_CUSTOM_TASK.md)
+- [架构重构总结](docs/REFACTORING_SUMMARY.md)
 
 ## 运行应用
 
