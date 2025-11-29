@@ -9,12 +9,20 @@ class Settings(BaseSettings):
     db_user: str = ""
     db_password: str = ""
 
+    # AI 模型配置
+    yolo_model_path: str = "/opt/homebrew/runs/detect/train5/weights/best.pt"
+    yolo_conf_threshold: float = 0.8
+    yolo_iou_threshold: float = 0.45
+
     # .env 文件配置样例
     # CLEANSIGHT_DB_HOST=
     # CLEANSIGHT_DB_PORT=
     # CLEANSIGHT_DB_NAME=
     # CLEANSIGHT_DB_USER=
     # CLEANSIGHT_DB_PASSWORD=
+    # CLEANSIGHT_YOLO_MODEL_PATH=/path/to/your/model.pt
+    # CLEANSIGHT_YOLO_CONF_THRESHOLD=0.25
+    # CLEANSIGHT_YOLO_IOU_THRESHOLD=0.45
         
     # 构造完整的数据库URL
     @property

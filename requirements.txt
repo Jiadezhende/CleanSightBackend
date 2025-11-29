@@ -6,6 +6,10 @@ opencv-python
 numpy
 requests
 websockets
+
+# AI/ML related
+ultralytics  # YOLOv8 for object detection
+
 # database related
 sqlalchemy
 psycopg2-binary

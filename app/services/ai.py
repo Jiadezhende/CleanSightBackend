@@ -2,16 +2,215 @@ import cv2
 import time
 import threading
 import base64
-import json
 from pathlib import Path
 from collections import deque
 import numpy as np
-from typing import Optional, Dict, Deque, Tuple, List, Union, Any
+from typing import Optional, Dict, Deque, Tuple, Union, Any, Callable, List
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, Future
+from abc import ABC, abstractmethod
 
 from app.models.frame import RawFrame, ProcessedFrame, FrameSegment, HLSSegment, FrameData
 from app.models.task import Task as CleaningTask
 from app.services.ai_models import motion, detection
 from app.database import get_db
+from app.config import settings
+
+# Type aliases for better readability
+FrameTuple = Tuple[float, np.ndarray]  # (timestamp, frame_array)
+InferenceResult = Dict[str, Any]  # 推理结果类型
+
+
+class InferenceTask(ABC):
+    """推理任务基类，所有推理任务都应继承此类。
+    
+    每个任务都是独立的，可以并行执行。
+    """
+    
+    def __init__(self, name: str, enabled: bool = True):
+        """
+        Args:
+            name: 任务名称
+            enabled: 是否启用此任务
+        """
+        self.name = name
+        self.enabled = enabled
+    
+    @abstractmethod
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
+        """执行推理任务。
+        
+        Args:
+            frame: 输入帧
+            context: 上下文信息，包含其他任务的结果、任务对象等
+            
+        Returns:
+            推理结果字典
+        """
+        pass
+    
+    @abstractmethod
+    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
+        """在帧上可视化推理结果。
+        
+        Args:
+            frame: 输入帧
+            result: 推理结果
+            
+        Returns:
+            可视化后的帧
+        """
+        pass
+    
+    def requires_context(self) -> List[str]:
+        """返回此任务依赖的其他任务名称列表。
+        
+        Returns:
+            依赖的任务名称列表，空列表表示无依赖
+        """
+        return []
+
+
+class DetectionTask(InferenceTask):
+    """关键点检测任务"""
+    
+    def __init__(self):
+        super().__init__(name="detection", enabled=True)
+    
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
+        """执行检测推理"""
+        try:
+            # 调用检测模型
+            processed_frame, keypoints = detection.detect_keypoints(frame)
+            return {
+                "success": True,
+                "processed_frame": processed_frame,
+                "keypoints": keypoints
+            }
+        except Exception as e:
+            print(f"Detection task error: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "processed_frame": frame.copy(),
+                "keypoints": {}
+            }
+    
+    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
+        """可视化检测结果（检测模型已经画好了框）"""
+        return result.get("processed_frame", frame)
+
+
+class MotionTask(InferenceTask):
+    """动作分析任务（依赖检测结果）"""
+    
+    def __init__(self):
+        super().__init__(name="motion", enabled=True)
+    
+    def requires_context(self) -> List[str]:
+        """依赖检测任务的结果"""
+        return ["detection"]
+    
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
+        """执行动作分析"""
+        try:
+            # 获取检测结果
+            detection_result = context.get("results", {}).get("detection", {})
+            keypoints = detection_result.get("keypoints", {})
+            
+            # 获取任务对象
+            task = context.get("task")
+            
+            if not task or not keypoints:
+                return {
+                    "success": False,
+                    "error": "Missing task or keypoints",
+                    "actions": {}
+                }
+            
+            # 调用动作分析模型
+            actions = motion.analyze_motion(keypoints, task)
+            
+            return {
+                "success": True,
+                "actions": actions
+            }
+        except Exception as e:
+            print(f"Motion task error: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "actions": {}
+            }
+    
+    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
+        """可视化动作分析结果"""
+        if not result.get("success"):
+            return frame
+        
+        result_frame = frame.copy()
+        actions = result.get("actions", {})
+        y_offset = 100  # 避免与检测结果重叠
+        
+        if actions.get("bending_detected"):
+            cv2.putText(result_frame, "Bending Detected!", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            y_offset += 25
+        
+        if actions.get("bubble_detected"):
+            cv2.putText(result_frame, "Bubble Detected!", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            y_offset += 25
+        
+        status = actions.get("submersion_status", "unknown")
+        if status != "unknown":
+            cv2.putText(result_frame, f"Status: {status}", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        return result_frame
+
+
+class TaskRegistry:
+    """任务注册表，管理所有推理任务"""
+    
+    def __init__(self):
+        self._tasks: Dict[str, InferenceTask] = {}
+        self._execution_order: List[str] = []
+    
+    def register(self, task: InferenceTask):
+        """注册一个推理任务"""
+        self._tasks[task.name] = task
+        self._recompute_execution_order()
+    
+    def unregister(self, task_name: str):
+        """注销一个推理任务"""
+        if task_name in self._tasks:
+            del self._tasks[task_name]
+            self._recompute_execution_order()
+    
+    def get_task(self, name: str) -> Optional[InferenceTask]:
+        """获取指定任务"""
+        return self._tasks.get(name)
+    
+    def get_enabled_tasks(self) -> List[InferenceTask]:
+        """获取所有启用的任务，按执行顺序"""
+        return [self._tasks[name] for name in self._execution_order 
+                if self._tasks[name].enabled]
+    
+    def _recompute_execution_order(self):
+        """重新计算任务执行顺序（拓扑排序）"""
+        # 简单实现：先执行无依赖的，再执行有依赖的
+        independent = []
+        dependent = []
+        
+        for name, task in self._tasks.items():
+            if not task.requires_context():
+                independent.append(name)
+            else:
+                dependent.append(name)
+        
+        # TODO: 实现完整的拓扑排序以支持复杂依赖关系
+        self._execution_order = independent + dependent
 from datetime import datetime
 
 
@@ -57,11 +256,51 @@ class InferenceManager:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        
+        # 任务注册表
+        self._task_registry = TaskRegistry()
+        self._register_default_tasks()
+        
+        # 线程池用于并行推理
+        self._executor = ThreadPoolExecutor(max_workers=4)
 
         # 数据库存储目录（开发阶段使用 JSON 文件）
         base_dir = Path(__file__).parent.parent.parent.resolve()
         self._db_dir = Path(db_dir) if db_dir else base_dir / "database"
         self._db_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _register_default_tasks(self):
+        """注册默认的推理任务"""
+        self._task_registry.register(DetectionTask())
+        self._task_registry.register(MotionTask())
+        
+        # 注册内镜弯折检测任务
+        try:
+            from app.services.ai_models.yolo_task import EndoscopeBendingDetectionTask
+            bending_task = EndoscopeBendingDetectionTask(
+                model_path=settings.yolo_model_path,
+                conf_threshold=settings.yolo_conf_threshold,
+                iou_threshold=settings.yolo_iou_threshold,
+                enabled=True  # 默认启用，可通过 enable_task 控制
+            )
+            self._task_registry.register(bending_task)
+            print(f"内镜弯折检测任务已注册 (模型: {settings.yolo_model_path})")
+        except Exception as e:
+            print(f"内镜弯折检测任务注册失败 (可能未安装 ultralytics): {e}")
+        
+        # 未来可以在这里添加更多任务
+        # self._task_registry.register(BubbleDetectionTask())
+        # self._task_registry.register(CleanlinessTask())
+    
+    def register_task(self, task: InferenceTask):
+        """动态注册新的推理任务（用于扩展）"""
+        self._task_registry.register(task)
+    
+    def enable_task(self, task_name: str, enabled: bool = True):
+        """启用或禁用特定任务"""
+        task = self._task_registry.get_task(task_name)
+        if task:
+            task.enabled = enabled
 
     def _get_or_create_client(self, client_id: str) -> ClientQueues:
         client_queues = self._clients.get(client_id)
@@ -151,6 +390,164 @@ class InferenceManager:
             processed_frame_b64=b64,
             inference_result=frame_data.inference_result or {}
         )
+
+    def _execute_inference_pipeline(
+        self, 
+        frame: np.ndarray, 
+        task: Optional[CleaningTask]
+    ) -> Tuple[np.ndarray, Dict[str, InferenceResult]]:
+        """执行完整的推理管道。
+        
+        将任务分为独立任务和依赖任务两个阶段:
+        1. 并行执行所有独立任务
+        2. 串行执行依赖任务（按依赖顺序）
+        3. 合并所有可视化结果
+        
+        Args:
+            frame: 输入帧
+            task: 清洗任务对象
+            
+        Returns:
+            (可视化后的帧, 所有任务的结果字典)
+        """
+        all_results: Dict[str, InferenceResult] = {}
+        tasks = self._task_registry.get_enabled_tasks()
+        
+        # 构建上下文
+        context: Dict[str, Any] = {
+            "task": task,
+            "results": all_results
+        }
+        
+        # 阶段1: 并行执行独立任务
+        independent_tasks = [t for t in tasks if not t.requires_context()]
+        if independent_tasks:
+            futures: Dict[Future, InferenceTask] = {}
+            for inference_task in independent_tasks:
+                future = self._executor.submit(inference_task.infer, frame, context)
+                futures[future] = inference_task
+            
+            # 收集独立任务结果
+            for future, inference_task in futures.items():
+                try:
+                    result = future.result(timeout=5.0)
+                    all_results[inference_task.name] = result
+                except Exception as e:
+                    print(f"Task {inference_task.name} failed: {e}")
+                    all_results[inference_task.name] = {
+                        "success": False,
+                        "error": str(e)
+                    }
+        
+        # 阶段2: 串行执行依赖任务
+        dependent_tasks = [t for t in tasks if t.requires_context()]
+        for inference_task in dependent_tasks:
+            try:
+                result = inference_task.infer(frame, context)
+                all_results[inference_task.name] = result
+            except Exception as e:
+                print(f"Task {inference_task.name} failed: {e}")
+                all_results[inference_task.name] = {
+                    "success": False,
+                    "error": str(e)
+                }
+        
+        # 阶段3: 合并可视化结果
+        result_frame = frame.copy()
+        for inference_task in tasks:
+            task_result = all_results.get(inference_task.name, {})
+            if task_result.get("success", False):
+                try:
+                    result_frame = inference_task.visualize(result_frame, task_result)
+                except Exception as e:
+                    print(f"Visualization for {inference_task.name} failed: {e}")
+        
+        # 添加通用信息（任务状态等）
+        if task:
+            info_text = f"Task ID: {task.task_id} | Bending: {task.bending_count}"
+            cv2.putText(result_frame, info_text, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        return result_frame, all_results
+
+    def _execute_inference_pipeline(
+        self, 
+        frame: np.ndarray, 
+        task: Optional[CleaningTask]
+    ) -> Tuple[np.ndarray, Dict[str, InferenceResult]]:
+        """执行完整的推理管道。
+        
+        将任务分为独立任务和依赖任务两个阶段:
+        1. 并行执行所有独立任务
+        2. 串行执行依赖任务（按依赖顺序）
+        3. 合并所有可视化结果
+        
+        Args:
+            frame: 输入帧
+            task: 清洗任务对象
+            
+        Returns:
+            (可视化后的帧, 所有任务的结果字典)
+        """
+        all_results: Dict[str, InferenceResult] = {}
+        tasks = self._task_registry.get_enabled_tasks()
+        
+        # 构建上下文
+        context: Dict[str, Any] = {
+            "task": task,
+            "results": all_results
+        }
+        
+        # 阶段1: 并行执行独立任务
+        independent_tasks = [t for t in tasks if not t.requires_context()]
+        if independent_tasks:
+            futures: Dict[Future, InferenceTask] = {}
+            for inference_task in independent_tasks:
+                future = self._executor.submit(inference_task.infer, frame, context)
+                futures[future] = inference_task
+            
+            # 收集独立任务结果
+            for future, inference_task in futures.items():
+                try:
+                    result = future.result(timeout=5.0)
+                    all_results[inference_task.name] = result
+                except Exception as e:
+                    print(f"Task {inference_task.name} failed: {e}")
+                    all_results[inference_task.name] = {
+                        "success": False,
+                        "error": str(e)
+                    }
+        
+        # 阶段2: 串行执行依赖任务
+        dependent_tasks = [t for t in tasks if t.requires_context()]
+        for inference_task in dependent_tasks:
+            try:
+                result = inference_task.infer(frame, context)
+                all_results[inference_task.name] = result
+            except Exception as e:
+                print(f"Task {inference_task.name} failed: {e}")
+                all_results[inference_task.name] = {
+                    "success": False,
+                    "error": str(e)
+                }
+        
+        # 阶段3: 合并可视化结果
+        result_frame = frame.copy()
+        for inference_task in tasks:
+            task_result = all_results.get(inference_task.name, {})
+            if task_result.get("success", False):
+                try:
+                    result_frame = inference_task.visualize(result_frame, task_result)
+                except Exception as e:
+                    print(f"Visualization for {inference_task.name} failed: {e}")
+        
+        # 添加通用信息（任务状态等）
+        if task:
+            info_text = f"Task ID: {task.task_id} | Bending: {task.bending_count}"
+            cv2.putText(result_frame, info_text, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        return result_frame, all_results
 
     def _flush_segment_if_needed(self, client_id: str, client_queues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
@@ -272,7 +669,8 @@ class InferenceManager:
             db.close()
 
     def _inference_loop(self):
-        print("AI 推理服务已启动（RTMP 流处理：CA-ReadyQueue → 推理 + CA-RawQueue → CA/RT-ProcessedQueue）")
+        print("AI 推理服务已启动（多客户端管理：RT/CA 队列）")
+
         while not self._stop_event.is_set():
             with self._lock:
                 items = list(self._clients.items())
@@ -292,30 +690,25 @@ class InferenceManager:
                 if ready_frame is None:
                     continue
 
-                # 将原始帧副本推入 CA-RawQueue 用于落盘
-                with self._lock:
-                    client_queues.ca_raw.append(ready_frame)
+                ts, frame = item
 
                 try:
-                    # 第一层：关键点检测
-                    processed_img, keypoints = detection.detect_keypoints(ready_frame.frame)
-                    
-                    # 第二层：动作分析，更新任务状态
-                    inference_result = {"keypoints": keypoints}
-                    if client_queues.task:
-                        motion_result = motion.analyze_motion(keypoints, client_queues.task)
-                        inference_result["motion"] = motion_result
-                    
-                    # 创建处理后的 FrameData
-                    processed_frame = FrameData(
-                        timestamp=ready_frame.timestamp,
-                        frame=processed_img,
-                        keypoints=keypoints,
-                        inference_result=inference_result
+                    # 执行多任务并行推理
+                    final_frame, all_results = self._execute_inference_pipeline(
+                        frame, 
+                        client_queues.task
                     )
+                    
+                    # 写入队列
+                    with self._lock:
+                        client_queues.rt_processed.append((ts, final_frame))
+                        client_queues.ca_processed.append((ts, final_frame))
+                        client_queues.latest_processed = (ts, final_frame)
                         
                 except Exception as e:
                     print(f"推理异常 for {client_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
 
                 with self._lock:
@@ -347,6 +740,8 @@ class InferenceManager:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+        # 关闭线程池
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
         """为客户端设置任务。
