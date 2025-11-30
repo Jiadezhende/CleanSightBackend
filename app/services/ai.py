@@ -1,3 +1,4 @@
+import json
 import cv2
 import time
 import threading
@@ -10,7 +11,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, Future
 from abc import ABC, abstractmethod
 
-from app.models.frame import RawFrame, ProcessedFrame, FrameSegment, HLSSegment
+from app.models.frame import RawFrame, ProcessedFrame, FrameSegment, HLSSegment, FrameData
 from app.models.task import Task as CleaningTask
 from app.services.ai_models import motion, detection
 from app.database import get_db
@@ -211,27 +212,39 @@ class TaskRegistry:
         
         # TODO: 实现完整的拓扑排序以支持复杂依赖关系
         self._execution_order = independent + dependent
+from datetime import datetime
 
 
 class ClientQueues:
-    """Container for each client's real-time and cache queues (stores numpy arrays + metadata, delays encoding)."""
+    """容器，管理每个客户端的队列。
+    
+    架构说明：
+    - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（弹出后进入推理+落盘）
+    - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段
+    - CA-ProcessedQueue: 推理后的处理帧（含关键点），用于生成处理后 HLS 段
+    - RT-ProcessedQueue: 实时推理结果（含关键点），用于 WebSocket 推送
+    """
 
     def __init__(self, rt_maxlen: int, ca_segment_len: int):
-        self.rt_raw: Deque[FrameTuple] = deque(maxlen=rt_maxlen)
-        self.rt_processed: Deque[FrameTuple] = deque(maxlen=rt_maxlen)
-        self.ca_raw: Deque[FrameTuple] = deque()
-        self.ca_processed: Deque[FrameTuple] = deque()
+        # CA-ReadyQueue: 等待推理的原始帧（无最大长度限制）
+        self.ca_ready: Deque[FrameData] = deque()
+        # CA-RawQueue: 原始帧副本，用于落盘生成原始视频（无最大长度限制）
+        self.ca_raw: Deque[FrameData] = deque()
+        # CA-ProcessedQueue: 处理后的帧，用于生成 HLS（无最大长度限制）
+        self.ca_processed: Deque[FrameData] = deque()
+        # RT-ProcessedQueue: 实时推理结果，约 1 秒缓存用于 WebSocket 推送
+        self.rt_processed: Deque[FrameData] = deque(maxlen=rt_maxlen)
         self.ca_segment_len = ca_segment_len
-        self.latest_processed: Optional[FrameTuple] = None
+        self.latest_processed: Optional[FrameData] = None  # 快速访问最新处理帧
         self.task: Optional[CleaningTask] = None  # 关联的清洗任务
+        self.rtmp_url: Optional[str] = None  # RTMP 流地址
 
 
 class InferenceManager:
     """按 client_id 管理实时(RT)与缓存(CA)队列，并在后台进行推理与持久化。
 
-    - RT 队列：rt_raw / rt_processed，保存约 1 秒的帧
-    - CA 队列：ca_raw / ca_processed，达阈值后落盘为 JSON（开发阶段模拟 HLS/数据库）
-    - 兼容原有 API：submit_*/get_result/status/remove_client
+    - RT 队列：保存约 1 秒的帧
+    - CA 队列：达阈值后落盘为 JSON/HLS 视频段
     """
 
     def __init__(self, rt_fps: int = 30, ca_segment_seconds: int = 5, db_dir: Optional[str] = None):
@@ -298,58 +311,49 @@ class InferenceManager:
         return client_queues
 
     def submit_frame(self, client_id: str, frame: np.ndarray) -> None:
-        """Submit a frame for processing.
+        """从 RTMP 流中提交原始帧到 CA-ReadyQueue。
 
         Args:
             client_id: The client identifier.
             frame: The numpy array of the frame.
         """
         now = time.time()
+        frame_data = FrameData(timestamp=now, frame=frame)
         with self._lock:
             client_queues = self._get_or_create_client(client_id)
-            # 推入实时原始队列
-            client_queues.rt_raw.append((now, frame))
-            # 推入缓存原始队列
-            client_queues.ca_raw.append((now, frame))
+            # 推入 CA-ReadyQueue，等待推理
+            client_queues.ca_ready.append(frame_data)
 
-    def submit_base64(self, client_id: str, base64_frame: str) -> str:
-        """Submit a base64 encoded frame for processing.
+    def set_rtmp_url(self, client_id: str, rtmp_url: str) -> None:
+        """为客户端设置 RTMP 流地址。
 
         Args:
             client_id: The client identifier.
-            base64_frame: The base64 encoded frame string.
-
-        Returns:
-            "success" on success, or "error: <message>" on failure.
+            rtmp_url: RTMP 流地址，如 rtmp://localhost:1935/live/stream
         """
-        try:
-            frame_data = base64.b64decode(base64_frame)
-            np_arr = np.frombuffer(frame_data, np.uint8)
-            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            if img is None:
-                return "error: 无效的图像数据"
-            self.submit_frame(client_id, img)
-            return "success"
-        except Exception as e:
-            return f"error: {e}"
+        with self._lock:
+            client_queues = self._get_or_create_client(client_id)
+            client_queues.rtmp_url = rtmp_url
 
-    def get_result(self, client_id: str, as_model: bool = False) -> Union[None, np.ndarray, ProcessedFrame]:
-        """返回最新处理帧。
+    def get_result(self, client_id: str, as_model: bool = False) -> Union[None, FrameData, ProcessedFrame]:
+        """返回最新处理帧（从 RT-ProcessedQueue）。
 
-        as_model=True 时返回 ProcessedFrame Pydantic 对象（含 Base64），否则返回 numpy.ndarray。
+        as_model=True 时返回 ProcessedFrame Pydantic 对象（含 Base64），否则返回 FrameData。
         """
         with self._lock:
             client_queues = self._clients.get(client_id)
             if not client_queues:
                 return None
-            item = client_queues.rt_processed[-1] if client_queues.rt_processed else client_queues.latest_processed
-        if item is None:
+            frame_data = client_queues.rt_processed[-1] if client_queues.rt_processed else client_queues.latest_processed
+        
+        if frame_data is None:
             return None
-        ts, arr = item
+        
         if not as_model:
-            return arr
+            return frame_data
+        
         task_id = client_queues.task.task_id if client_queues.task else None
-        return self._create_processed_frame(arr, task_id, client_id, ts)
+        return self._create_processed_frame(frame_data, task_id, client_id)
 
     def remove_client(self, client_id: str) -> None:
         """Remove a client and its queues.
@@ -361,30 +365,31 @@ class InferenceManager:
             self._clients.pop(client_id, None)
 
     def status(self) -> Dict[str, Any]:
-        """Get the status of all clients and their queues.
+        """获取所有客户端及其队列状态。
 
         Returns:
-            A dict with client count and queue lengths per client.
+            包含客户端数量和每个客户端队列长度的字典。
         """
         with self._lock:
             stats = {client_id: {
-                "rt_raw": len(client_queues.rt_raw),
-                "rt_processed": len(client_queues.rt_processed),
+                "ca_ready": len(client_queues.ca_ready),
                 "ca_raw": len(client_queues.ca_raw),
-                "ca_processed": len(client_queues.ca_processed)
+                "ca_processed": len(client_queues.ca_processed),
+                "rt_processed": len(client_queues.rt_processed),
+                "rtmp_url": client_queues.rtmp_url
             } for client_id, client_queues in self._clients.items()}
             return {"clients": len(self._clients), "queues": stats}
 
-    def _create_processed_frame(self, frame: np.ndarray, task_id: Optional[int], client_id: str, timestamp: float) -> ProcessedFrame:
-        """创建ProcessedFrame对象。"""
-        _, buf = cv2.imencode('.jpg', frame)
+    def _create_processed_frame(self, frame_data: FrameData, task_id: Optional[int], client_id: str) -> ProcessedFrame:
+        """从 FrameData 创建 ProcessedFrame 对象（含 Base64 编码）。"""
+        _, buf = cv2.imencode('.jpg', frame_data.frame)
         b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
         return ProcessedFrame(
             task_id=task_id,
             client_id=client_id,
-            raw_timestamp=datetime.fromtimestamp(timestamp),  # 原始帧时间
+            raw_timestamp=datetime.fromtimestamp(frame_data.timestamp),
             processed_frame_b64=b64,
-            inference_result={"mock": True}
+            inference_result=frame_data.inference_result or {}
         )
 
     def _execute_inference_pipeline(
@@ -466,72 +471,125 @@ class InferenceManager:
         
         return result_frame, all_results
 
-    def _flush_segment_if_needed(self, client_id: str, client_queues):
+    def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
+        """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
         seg_len = client_queues.ca_segment_len
-        if len(client_queues.ca_processed) >= seg_len and len(client_queues.ca_raw) >= seg_len:
-            # 创建目录
-            client_dir = self._db_dir / client_id
-            task_id = client_queues.task.task_id if client_queues.task else "no_task"
-            task_dir = client_dir / str(task_id)
-            hls_dir = task_dir / "hls"
-            hls_dir.mkdir(parents=True, exist_ok=True)
+        # 检查是否同时达到阈值
+        if len(client_queues.ca_raw) < seg_len or len(client_queues.ca_processed) < seg_len:
+            return
 
-            # 收集帧
-            frames = []
-            timestamps = []
-            start_ts = None
-            end_ts = None
-            take = min(seg_len, len(client_queues.ca_processed), len(client_queues.ca_raw))
-            for _ in range(take):
-                ts_p, proc = client_queues.ca_processed.popleft()
-                ts_r, raw = client_queues.ca_raw.popleft()
-                ts = min(ts_p, ts_r)
-                frames.append(proc)  # 使用处理后的帧生成视频
-                timestamps.append(ts)
-                start_ts = ts if start_ts is None else min(start_ts, ts)
-                end_ts = ts if end_ts is None else max(end_ts, ts)
+        print(f"Generating HLS segment for client: {client_id}")
+        # 创建目录
+        client_dir = self._db_dir / client_id
+        task_id = client_queues.task.task_id if client_queues.task else "no_task"
+        task_dir = client_dir / str(task_id)
+        hls_dir = task_dir / "hls"
+        hls_dir.mkdir(parents=True, exist_ok=True)
 
-            if start_ts is None or end_ts is None:
-                return
+        # 收集原始帧数据
+        raw_frames_data: List[FrameData] = []
+        take = min(seg_len, len(client_queues.ca_raw))
+        for _ in range(take):
+            raw_frames_data.append(client_queues.ca_raw.popleft())
 
-            # 生成 HLS 段：用 OpenCV 创建 MP4 视频
-            segment_path = hls_dir / f"segment_{int(start_ts * 1e6)}.mp4"
-            height, width = frames[0].shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore
-            out = cv2.VideoWriter(str(segment_path), fourcc, 30.0, (width, height))
-            for frame in frames:
-                out.write(frame)
-            out.release()
+        # 收集处理后的帧数据
+        processed_frames_data: List[FrameData] = []
+        take = min(seg_len, len(client_queues.ca_processed))
+        for _ in range(take):
+            processed_frames_data.append(client_queues.ca_processed.popleft())
 
-            # 更新 M3U8 播放列表
-            playlist_path = hls_dir / "playlist.m3u8"
-            segment_duration = len(frames) / 30.0  # 假设 30 FPS
-            with playlist_path.open('a') as f:
-                f.write(f"#EXTINF:{segment_duration:.3f},\n")
-                f.write(f"{segment_path.name}\n")
-            if not playlist_path.exists() or playlist_path.stat().st_size == 0:
-                with playlist_path.open('w') as f:
-                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+        if not raw_frames_data or not processed_frames_data:
+            return
 
-            # 记录到数据库
-            db = next(get_db())
-            try:
-                hls_segment = HLSSegment(
-                    client_id=client_id,
-                    task_id=task_id,
-                    segment_path=str(segment_path),
-                    playlist_path=str(playlist_path),
-                    start_ts=datetime.fromtimestamp(start_ts),
-                    end_ts=datetime.fromtimestamp(end_ts)
-                )
-                db.add(hls_segment)
-                db.commit()
-                print(f"已生成 HLS 段并记录到数据库 for {client_id}: {segment_path}")
-            except Exception as e:
-                db.rollback()
-                print(f"数据库记录失败 for {client_id}: {e}")
-            finally:
-                db.close()
+        start_ts = processed_frames_data[0].timestamp
+        end_ts = processed_frames_data[-1].timestamp
+
+        # 生成原始视频 HLS 段
+        raw_segment_path = hls_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
+        height, width = raw_frames_data[0].frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore
+        out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, 30.0, (width, height))
+        for frame_data in raw_frames_data:
+            out_raw.write(frame_data.frame)
+        out_raw.release()
+
+        # 生成处理后视频 HLS 段（含关键点标注）
+        segment_path = hls_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
+        height, width = processed_frames_data[0].frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore
+        out_processed = cv2.VideoWriter(str(segment_path), fourcc, 30.0, (width, height))
+        for frame_data in processed_frames_data:
+            out_processed.write(frame_data.frame)
+        out_processed.release()
+
+        # 生成关键点 JSON 文件（每个段对应一个 JSON）
+        keypoints_path = hls_dir / f"keypoints_{int(start_ts * 1e6)}.json"
+        keypoints_list = [
+            {
+                "timestamp": fd.timestamp,
+                "keypoints": fd.keypoints,
+                "inference_result": fd.inference_result
+            }
+            for fd in processed_frames_data
+        ]
+        with keypoints_path.open('w', encoding='utf-8') as f:
+            json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
+
+        # 更新原始视频 M3U8 播放列表
+        raw_playlist_path = hls_dir / "raw_playlist.m3u8"
+        segment_duration = len(raw_frames_data) / 30.0  # 假设 30 FPS
+        if not raw_playlist_path.exists():
+            with raw_playlist_path.open('w') as f:
+                f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+        with raw_playlist_path.open('a') as f:
+            f.write(f"#EXTINF:{segment_duration:.3f},\n")
+            f.write(f"{raw_segment_path.name}\n")
+
+        # 更新处理后视频 M3U8 播放列表
+        playlist_path = hls_dir / "processed_playlist.m3u8"
+        segment_duration = len(processed_frames_data) / 30.0  # 假设 30 FPS 假设 30 FPS
+        
+        # 初始化播放列表（如果不存在）
+        if not playlist_path.exists():
+            with playlist_path.open('w') as f:
+                f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+        
+        # 追加段信息
+        with playlist_path.open('a') as f:
+            f.write(f"#EXTINF:{segment_duration:.3f},\n")
+            f.write(f"{segment_path.name}\n")
+
+        # 记录到数据库
+        db = next(get_db())
+        try:
+            # 记录原始视频段
+            raw_hls_segment = HLSSegment(
+                client_id=client_id,
+                task_id=task_id,
+                segment_path=str(raw_segment_path),
+                playlist_path=str(raw_playlist_path),
+                start_ts=datetime.fromtimestamp(start_ts),
+                end_ts=datetime.fromtimestamp(end_ts)
+            )
+            db.add(raw_hls_segment)
+            
+            # 记录处理后视频段
+            processed_hls_segment = HLSSegment(
+                client_id=client_id,
+                task_id=task_id,
+                segment_path=str(segment_path),
+                playlist_path=str(playlist_path),
+                start_ts=datetime.fromtimestamp(start_ts),
+                end_ts=datetime.fromtimestamp(end_ts)
+            )
+            db.add(processed_hls_segment)
+            db.commit()
+            print(f"已生成原始+处理后 HLS 段 + 关键点 JSON for {client_id}: raw={raw_segment_path.name}, processed={segment_path.name}")
+        except Exception as e:
+            db.rollback()
+            print(f"数据库记录失败 for {client_id}: {e}")
+        finally:
+            db.close()
 
     def _inference_loop(self):
         print("AI 推理服务已启动（多客户端管理：RT/CA 队列）")
@@ -548,14 +606,18 @@ class InferenceManager:
                 if self._stop_event.is_set():
                     break
 
-                # 从实时原始队列取一帧进行推理
+                # 从 CA-ReadyQueue 取一帧进行推理
                 with self._lock:
-                    item = client_queues.rt_raw.popleft() if client_queues.rt_raw else None
+                    ready_frame = client_queues.ca_ready.popleft() if client_queues.ca_ready else None
 
-                if item is None:
+                if ready_frame is None:
                     continue
 
-                ts, frame = item
+                ts, frame = ready_frame.timestamp, ready_frame.frame
+
+                # 推理前将帧副本放入 CA-RawQueue（用于生成原始视频 HLS 段）
+                with self._lock:
+                    client_queues.ca_raw.append(ready_frame)
 
                 try:
                     # 执行多任务并行推理
@@ -563,12 +625,16 @@ class InferenceManager:
                         frame, 
                         client_queues.task
                     )
-                    
-                    # 写入队列
+
+                    processed_frame = FrameData(timestamp=ts, frame=final_frame, inference_result=all_results)
+                    print(f"Inference completed for client: {client_id}, results: {all_results.keys()}")
                     with self._lock:
-                        client_queues.rt_processed.append((ts, final_frame))
-                        client_queues.ca_processed.append((ts, final_frame))
-                        client_queues.latest_processed = (ts, final_frame)
+                        # 写入 CA-ProcessedQueue（用于生成 HLS 段）
+                        client_queues.ca_processed.append(processed_frame)
+                        # 写入 RT-ProcessedQueue（用于实时推送）
+                        client_queues.rt_processed.append(processed_frame)
+                        # 更新快速访问
+                        client_queues.latest_processed = processed_frame
                         
                 except Exception as e:
                     print(f"推理异常 for {client_id}: {e}")
@@ -576,16 +642,16 @@ class InferenceManager:
                     traceback.print_exc()
                     continue
 
-                # 达到阈值时尝试落盘
+                # 达到阈值时生成 HLS 段
                 try:
                     self._flush_segment_if_needed(client_id, client_queues)
                 except Exception as e:
-                    print(f"落盘异常 for {client_id}: {e}")
+                    print(f"HLS 段生成异常 for {client_id}: {e}")
 
             # 轻微休眠，避免 CPU 占用过高
             time.sleep(0.001)
 
-        print("AI 推理服务已停止（多客户端管理：RT/CA 队列）")
+        print("AI 推理服务已停止")
 
     def start(self):
         if self._thread is None or not self._thread.is_alive():
@@ -641,12 +707,14 @@ def stop():
     manager.stop()
 
 
-def submit_base64_frame(client_id: str, base64_frame: str) -> str:
-    return manager.submit_base64(client_id, base64_frame)
-
-
 def submit_frame(client_id: str, frame: np.ndarray):
+    """从 RTMP 流提交帧到 CA-ReadyQueue。"""
     manager.submit_frame(client_id, frame)
+
+
+def set_rtmp_url(client_id: str, rtmp_url: str):
+    """设置客户端的 RTMP 流地址。"""
+    manager.set_rtmp_url(client_id, rtmp_url)
 
 
 def get_result(client_id: str, as_model: bool = False):
@@ -668,25 +736,3 @@ def set_task(client_id: str, task: Optional[CleaningTask]) -> bool:
 def get_task(client_id: str) -> Optional[CleaningTask]:
     """获取客户端的任务。"""
     return manager.get_task(client_id)
-
-
-def get_task_traceback(task_id: int) -> Optional[str]:
-    """
-    根据 task_id 查询 HLS 播放列表路径，返回任务的完整清洗视频追溯。
-    
-    Args:
-        task_id: 任务 ID
-        
-    Returns:
-        HLS 播放列表文件路径，如果不存在则返回 None
-    """
-    db = next(get_db())
-    try:
-        # 查询该任务的所有 HLS 段，按时间排序
-        segments = db.query(HLSSegment).filter(HLSSegment.task_id == task_id).order_by(HLSSegment.start_ts).all()
-        if not segments:
-            return None
-        # 返回播放列表路径（假设所有段共享同一个播放列表）
-        return segments[0].playlist_path  # type: ignore
-    finally:
-        db.close()
