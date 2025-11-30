@@ -1,3 +1,4 @@
+import json
 import cv2
 import time
 import threading
@@ -470,92 +471,14 @@ class InferenceManager:
         
         return result_frame, all_results
 
-    def _execute_inference_pipeline(
-        self, 
-        frame: np.ndarray, 
-        task: Optional[CleaningTask]
-    ) -> Tuple[np.ndarray, Dict[str, InferenceResult]]:
-        """执行完整的推理管道。
-        
-        将任务分为独立任务和依赖任务两个阶段:
-        1. 并行执行所有独立任务
-        2. 串行执行依赖任务（按依赖顺序）
-        3. 合并所有可视化结果
-        
-        Args:
-            frame: 输入帧
-            task: 清洗任务对象
-            
-        Returns:
-            (可视化后的帧, 所有任务的结果字典)
-        """
-        all_results: Dict[str, InferenceResult] = {}
-        tasks = self._task_registry.get_enabled_tasks()
-        
-        # 构建上下文
-        context: Dict[str, Any] = {
-            "task": task,
-            "results": all_results
-        }
-        
-        # 阶段1: 并行执行独立任务
-        independent_tasks = [t for t in tasks if not t.requires_context()]
-        if independent_tasks:
-            futures: Dict[Future, InferenceTask] = {}
-            for inference_task in independent_tasks:
-                future = self._executor.submit(inference_task.infer, frame, context)
-                futures[future] = inference_task
-            
-            # 收集独立任务结果
-            for future, inference_task in futures.items():
-                try:
-                    result = future.result(timeout=5.0)
-                    all_results[inference_task.name] = result
-                except Exception as e:
-                    print(f"Task {inference_task.name} failed: {e}")
-                    all_results[inference_task.name] = {
-                        "success": False,
-                        "error": str(e)
-                    }
-        
-        # 阶段2: 串行执行依赖任务
-        dependent_tasks = [t for t in tasks if t.requires_context()]
-        for inference_task in dependent_tasks:
-            try:
-                result = inference_task.infer(frame, context)
-                all_results[inference_task.name] = result
-            except Exception as e:
-                print(f"Task {inference_task.name} failed: {e}")
-                all_results[inference_task.name] = {
-                    "success": False,
-                    "error": str(e)
-                }
-        
-        # 阶段3: 合并可视化结果
-        result_frame = frame.copy()
-        for inference_task in tasks:
-            task_result = all_results.get(inference_task.name, {})
-            if task_result.get("success", False):
-                try:
-                    result_frame = inference_task.visualize(result_frame, task_result)
-                except Exception as e:
-                    print(f"Visualization for {inference_task.name} failed: {e}")
-        
-        # 添加通用信息（任务状态等）
-        if task:
-            info_text = f"Task ID: {task.task_id} | Bending: {task.bending_count}"
-            cv2.putText(result_frame, info_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        return result_frame, all_results
-
-    def _flush_segment_if_needed(self, client_id: str, client_queues):
+    def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
         seg_len = client_queues.ca_segment_len
         # 检查是否同时达到阈值
         if len(client_queues.ca_raw) < seg_len or len(client_queues.ca_processed) < seg_len:
             return
 
+        print(f"Generating HLS segment for client: {client_id}")
         # 创建目录
         client_dir = self._db_dir / client_id
         task_id = client_queues.task.task_id if client_queues.task else "no_task"
@@ -690,7 +613,11 @@ class InferenceManager:
                 if ready_frame is None:
                     continue
 
-                ts, frame = item
+                ts, frame = ready_frame.timestamp, ready_frame.frame
+
+                # 推理前将帧副本放入 CA-RawQueue（用于生成原始视频 HLS 段）
+                with self._lock:
+                    client_queues.ca_raw.append(ready_frame)
 
                 try:
                     # 执行多任务并行推理
@@ -698,26 +625,22 @@ class InferenceManager:
                         frame, 
                         client_queues.task
                     )
-                    
-                    # 写入队列
+
+                    processed_frame = FrameData(timestamp=ts, frame=final_frame, inference_result=all_results)
+                    print(f"Inference completed for client: {client_id}, results: {all_results.keys()}")
                     with self._lock:
-                        client_queues.rt_processed.append((ts, final_frame))
-                        client_queues.ca_processed.append((ts, final_frame))
-                        client_queues.latest_processed = (ts, final_frame)
+                        # 写入 CA-ProcessedQueue（用于生成 HLS 段）
+                        client_queues.ca_processed.append(processed_frame)
+                        # 写入 RT-ProcessedQueue（用于实时推送）
+                        client_queues.rt_processed.append(processed_frame)
+                        # 更新快速访问
+                        client_queues.latest_processed = processed_frame
                         
                 except Exception as e:
                     print(f"推理异常 for {client_id}: {e}")
                     import traceback
                     traceback.print_exc()
                     continue
-
-                with self._lock:
-                    # 写入 CA-ProcessedQueue（用于生成 HLS 段）
-                    client_queues.ca_processed.append(processed_frame)
-                    # 写入 RT-ProcessedQueue（用于实时推送）
-                    client_queues.rt_processed.append(processed_frame)
-                    # 更新快速访问
-                    client_queues.latest_processed = processed_frame
 
                 # 达到阈值时生成 HLS 段
                 try:

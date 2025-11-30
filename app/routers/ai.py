@@ -37,7 +37,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            processed_frame = cast(ProcessedFrame, ai.get_result(client_id, as_model=True))
+            processed_frame :ProcessedFrame= ai.get_result(client_id, as_model=True) # type: ignore
 
             if processed_frame is None:
                 await asyncio.sleep(0.03)
@@ -45,7 +45,6 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
             # 使用模型中的 Base64 编码图像
             data_url = f"data:image/jpeg;base64,{processed_frame.processed_frame_b64}"
-
             await websocket.send_text(data_url)
 
     except Exception as e:

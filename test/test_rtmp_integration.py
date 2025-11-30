@@ -1,14 +1,67 @@
 """
 测试 RTMP 流捕获和 AI 推理的集成脚本
 
-使用方法:
-1. 启动 RTMP 服务器 (如 nginx-rtmp 或 MediaMTX)
-2. 推流到 RTMP 服务器
-3. 运行此脚本启动捕获和推理
-4. 通过 WebSocket 客户端查看实时结果
+【测试目标】
+本脚本测试后端 RTMP 流捕获与 AI 推理管道的完整集成流程。
+注意: 此脚本不负责推流，需要外部 RTMP 源（如 OBS、ffmpeg 或摄像头）先推流到指定地址。
 
-示例:
-    python test/test_rtmp_integration.py --client_id camera_001 --rtmp_url rtmp://localhost:1935/live/test
+【测试内容】
+1. RTMP 流捕获 API 集成
+   - 测试 POST /inspection/start_rtmp_stream 端点
+   - 验证后端能否成功连接到外部 RTMP 流
+   - 检查帧捕获是否正常启动
+
+2. AI 推理管道验证
+   - 监控四队列架构运行状态 (CA-ReadyQueue, CA-RawQueue, CA-ProcessedQueue, RT-ProcessedQueue)
+   - 通过 GET /ai/status 端点检查队列深度
+   - 验证帧是否正确进入推理流程
+
+3. WebSocket 实时推送
+   - 连接到 ws://localhost:8000/ai/video 端点
+   - 接收 AI 处理后的推理结果（Base64 编码的 JPEG 帧）
+   - 统计接收帧率和帧数
+
+4. 生命周期管理
+   - 测试 RTMP 捕获的启动和停止
+   - 验证 POST /inspection/stop_rtmp_stream 端点
+   - 检查资源清理是否正常
+
+【测试架构】
+外部推流源 → RTMP 服务器 → 后端捕获 → AI 推理 → WebSocket 推送 → 本脚本接收
+
+【前置条件】
+1. RTMP 服务器运行中（nginx-rtmp/MediaMTX，默认端口 1935）
+2. 后端 API 服务运行在 http://localhost:8000
+3. 外部推流源正在推流到指定的 rtmp_url
+
+【使用方法】
+# 1. 启动 RTMP 服务器（MediaMTX 示例）
+mediamtx
+
+# 2. 使用 ffmpeg 推流测试视频
+ffmpeg -re -i test_video.mp4 -c:v libx264 -f flv rtmp://localhost:1935/live/test
+
+# 3. 运行本测试脚本
+python test/test_rtmp_integration.py --client_id camera_001 --rtmp_url rtmp://localhost:1935/live/test
+
+# 4. 可选参数
+python test/test_rtmp_integration.py \
+    --client_id camera_001 \
+    --rtmp_url rtmp://localhost:1935/live/test \
+    --fps 30 \
+    --duration 60
+
+【预期输出】
+- RTMP 捕获启动成功消息
+- AI 服务状态（客户端数量、队列深度）
+- 实时接收帧计数（每秒打印一次）
+- 测试结束后的总帧数统计
+- RTMP 捕获停止确认
+
+【与其他测试的区别】
+- test_rtmp_stream.py: 端到端测试，包含 ffmpeg 推流 + 接收处理后的帧
+- test_rtmp_integration.py (本文件): 仅测试后端捕获和推理，依赖外部推流源
+- test_websocket_video.py: 测试 WebSocket 上传（非 RTMP）+ 推理 + WebSocket 接收
 """
 
 import asyncio
