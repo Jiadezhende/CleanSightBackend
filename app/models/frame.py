@@ -56,7 +56,7 @@ from sqlalchemy import Column, String, Integer, DateTime
 from app.database import Base
 
 class HLSSegment(Base):
-    __tablename__ = "hls_segments"
+    __tablename__ = "file_path"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     client_id = Column(String, index=True)

@@ -1,9 +1,11 @@
-import threading
+from datetime import datetime
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import APIRouter, WebSocket
+import time
+from app.database import get_db
+from app.models.task import DBTask, Task, TaskStatusResponse
+from fastapi import APIRouter, HTTPException, WebSocket
 from app.services import ai
-from typing import cast
 from app.models.frame import ProcessedFrame
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -58,6 +60,62 @@ async def websocket_video_endpoint(websocket: WebSocket):
 async def get_ai_status():
     """获取AI服务状态，返回详细的队列信息"""
     return ai.status()
+
+@router.get("/load_task/{task_id}")
+async def start_task(task_id: int):
+    """
+    开始任务，为指定 task_id 的任务在 AI 服务中创建任务对象。
+    """
+    try:
+        # 获取当前任务
+        if task_id is None:
+            return False
+
+        db = next(get_db())
+        db_task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
+        if db_task is None:
+            return False
+        
+        # 构造内存中的任务对象
+        task = Task(
+            task_id=task_id,
+            current_step=db_task.current_step, # type: ignore
+            status="running",
+            updated_at=int(time.time()),
+            fully_submerged=False,
+            bending=False,
+            bubble_detected=False
+        )
+
+        # 为客户端设置任务
+        success = ai.set_task(db_task.source_ip, task) # type: ignore
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to set task for client")
+
+        return TaskStatusResponse(
+            task_id=task.task_id,
+            status=task.status,
+            cleaning_stage=task.current_step,
+            bending_count=task.bending,
+            bubble_detected=task.bubble_detected,
+            fully_submerged=task.fully_submerged,
+            updated_at=datetime.fromtimestamp(task.updated_at).isoformat()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize task: {str(e)}")
+    
+@router.post("/terminate_task/{client_id}")
+async def terminate_task(client_id: str):
+    """
+    终止任务，为指定 task_id 的任务在 AI 服务中标记为已终止。
+    """
+    try:
+        success = ai.terminate_task_by_id(client_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to terminate task")
+        return {"status": "success", "message": f"Task terminated"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
 
 
 def start_background_threads():

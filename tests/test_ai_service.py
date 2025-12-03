@@ -62,16 +62,12 @@ def test_update_task_instance(ai_manager, db_session):
     client_id = "test_client"
     task = CleaningTask(
         task_id=1,
-        initiator_operator_id=123,
         current_step="0",
-        bending_count=0,
+        bending=False,
         bubble_detected=False,
         fully_submerged=False,
         status="active",
-        created_at=0,
         updated_at=0,
-        start_time=0,
-        end_time=0
     )
     ai_manager.set_task(client_id, task)
     
@@ -85,16 +81,12 @@ def test_hls_persistence(ai_manager, temp_dir, db_session):
     client_id = "test_client"
     task = CleaningTask(
         task_id=1,
-        initiator_operator_id=123,
         current_step="0",
-        bending_count=0,
+        bending=False,
         bubble_detected=False,
         fully_submerged=False,
         status="active",
-        created_at=0,
         updated_at=0,
-        start_time=0,
-        end_time=0
     )
     ai_manager.set_task(client_id, task)
     
@@ -226,16 +218,12 @@ def test_keypoints_json_persistence(ai_manager, temp_dir, db_session):
     client_id = "test_client"
     task = CleaningTask(
         task_id=1,
-        initiator_operator_id=123,
         current_step="0",
-        bending_count=0,
+        bending=False,
         bubble_detected=False,
         fully_submerged=False,
         status="active",
-        created_at=0,
         updated_at=0,
-        start_time=0,
-        end_time=0
     )
     ai_manager.set_task(client_id, task)
     

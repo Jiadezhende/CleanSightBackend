@@ -4,116 +4,19 @@
 """
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from app.services import ai, task as task_service
-from app.models.task import Task as CleaningTask
+from fastapi.responses import FileResponse, JSONResponse
+from app.services import ai
 from app.models.frame import HLSSegment
 from app.database import get_db
 import json
 from datetime import datetime
 from pathlib import Path
-import os
 
 router = APIRouter(prefix="/task", tags=["task"])
 
-# 请求/响应模型
-class InitializeTaskRequest(BaseModel):
-    client_id: str
-    actor_id: int
-
-class StartTaskRequest(BaseModel):
-    client_id: str
-    task_id: int
-
-class TerminateTaskRequest(BaseModel):
-    client_id: str
-    task_id: int
-
-class TaskTracebackRequest(BaseModel):
-    task_id: int
-    video_type: str = "processed"  # "raw" 或 "processed"
-
-class TaskStatusResponse(BaseModel):
-    task_id: int
-    status: str
-    cleaning_stage: str  # current_step现在是str
-    bending_count: int
-    bubble_detected: bool
-    fully_submerged: bool
-    updated_at: str
-
-@router.post("/initialize", response_model=TaskStatusResponse)
-async def initialize_task(request: InitializeTaskRequest):
-    """初始化清洗任务"""
-    try:
-        # 创建新任务
-        new_task = task_service.initialize_task(request.actor_id)
-
-        # 为客户端设置任务
-        success = ai.set_task(request.client_id, new_task)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to set task for client")
-
-        return TaskStatusResponse(
-            task_id=new_task.task_id,
-            status=new_task.status,
-            cleaning_stage=new_task.current_step,
-            bending_count=new_task.bending_count,
-            bubble_detected=new_task.bubble_detected,
-            fully_submerged=new_task.fully_submerged,
-            updated_at=datetime.fromtimestamp(new_task.updated_at).isoformat()
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize task: {str(e)}")
-
-@router.post("/start")
-async def start_task(request: StartTaskRequest):
-    """开始任务，设置start_time"""
-    try:
-        # 获取当前任务
-        current_task = ai.get_task(request.client_id)
-        if current_task is None or current_task.task_id != request.task_id:
-            raise HTTPException(status_code=404, detail="Task not found for client")
-
-        # 开始任务
-        success = task_service.start_task(current_task)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to start task")
-
-        return {"message": "Task started successfully", "task_id": request.task_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start task: {str(e)}")
-
-@router.post("/terminate")
-async def terminate_task(request: TerminateTaskRequest):
-    """中断/终止任务"""
-    try:
-        # 获取当前任务
-        current_task = ai.get_task(request.client_id)
-        if current_task is None or current_task.task_id != request.task_id:
-            raise HTTPException(status_code=404, detail="Task not found for client")
-
-        # 终止任务
-        success = task_service.terminate_task(current_task)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to terminate task")
-
-        # 清除客户端的任务
-        ai.set_task(request.client_id, None)
-
-        return {"message": "Task terminated successfully", "task_id": request.task_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
-
 @router.websocket("/status/{client_id}")
 async def websocket_task_status(websocket: WebSocket, client_id: str):
-    """实时更新任务状态的WebSocket接口"""
+    """实时更新任务状态的WebSocket接口，此处的client_id也可以理解为摄像机ip/source_id"""
     await websocket.accept()
     try:
         while True:
@@ -126,7 +29,7 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
                     "task_id": current_task.task_id,
                     "status": current_task.status,
                     "cleaning_stage": current_task.current_step,
-                    "bending_count": current_task.bending_count,
+                    "bending_count": current_task.bending,
                     "bubble_detected": current_task.bubble_detected,
                     "fully_submerged": current_task.fully_submerged,
                     "updated_at": datetime.fromtimestamp(current_task.updated_at).isoformat()
