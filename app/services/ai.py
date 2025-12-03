@@ -6,12 +6,12 @@ import base64
 from pathlib import Path
 from collections import deque
 import numpy as np
-from typing import Optional, Dict, Deque, Tuple, Union, Any, Callable, List
+from typing import Optional, Dict, Deque, Tuple, Union, Any,List
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, Future
 from abc import ABC, abstractmethod
 
-from app.models.frame import RawFrame, ProcessedFrame, FrameSegment, HLSSegment, FrameData
+from app.models.frame import ProcessedFrame, HLSSegment, FrameData
 from app.models.task import Task as CleaningTask
 from app.services.ai_models import motion, detection
 from app.database import get_db
@@ -465,7 +465,7 @@ class InferenceManager:
         
         # 添加通用信息（任务状态等）
         if task:
-            info_text = f"Task ID: {task.task_id} | Bending: {task.bending_count}"
+            info_text = f"Task ID: {task.task_id} | Bending: {task.bending}"
             cv2.putText(result_frame, info_text, (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
@@ -681,6 +681,37 @@ class InferenceManager:
             client_queues.task = task
             return True
 
+    def terminate_task_by_id(self, client_id: str) -> bool:
+        """终止指定客户端的任务，清理所有队列和资源。
+
+        Args:
+            client_id: 客户端ID
+
+        Returns:
+            是否成功终止
+        """
+        with self._lock:
+            client_queues = self._clients.get(client_id)
+            if client_queues is None:
+                return False
+
+            # 清理所有队列，释放内存
+            client_queues.ca_ready.clear()
+            client_queues.ca_raw.clear()
+            client_queues.ca_processed.clear()
+            client_queues.rt_processed.clear()
+
+            # 清除其他引用
+            client_queues.latest_processed = None
+            client_queues.task = None
+            client_queues.rtmp_url = None
+
+            # 从客户端字典中移除
+            del self._clients[client_id]
+
+            print(f"任务已终止，客户端 {client_id} 的所有队列和资源已清理")
+            return True
+        
     def get_task(self, client_id: str) -> Optional[CleaningTask]:
         """获取客户端的任务。
 
@@ -732,6 +763,10 @@ def status():
 def set_task(client_id: str, task: Optional[CleaningTask]) -> bool:
     """为客户端设置任务。"""
     return manager.set_task(client_id, task)
+
+def terminate_task_by_id(client_id: str) -> bool:
+    """终止指定客户端的任务，清理所有队列和资源。"""
+    return manager.terminate_task_by_id(client_id)
 
 def get_task(client_id: str) -> Optional[CleaningTask]:
     """获取客户端的任务。"""
