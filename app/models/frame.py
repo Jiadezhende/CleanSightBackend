@@ -1,28 +1,68 @@
+"""Frame data models for AI inference pipeline.
+
+These Pydantic models represent raw and processed frames as they will be
+stored (e.g., later in a database). In in-memory realtime queues we keep
+numpy arrays for performance, converting to Base64 only when persisting or
+returning to clients.
 """
-Data models used to collect AI inference results and store task state.
-"""
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
+
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
 from datetime import datetime
+import numpy as np
+from dataclasses import dataclass
 
-class LabeledFrame(BaseModel):
+
+@dataclass
+class FrameData:
+    """轻量级帧数据类，用于内存队列传递（避免 Base64 编码开销）"""
+    timestamp: float  # Unix timestamp
+    frame: np.ndarray  # 原始或处理后的帧（numpy 数组）
+    keypoints: Optional[Dict[str, Any]] = None  # 关键点检测结果（仅 ProcessedQueue）
+    inference_result: Optional[Dict[str, Any]] = None  # 完整推理结果
+
+class BaseFrame(BaseModel):
+    task_id: Optional[int] = None
+    client_id: Optional[str] = None
+    raw_timestamp: Optional[datetime] = None  # 原始视频帧写入时间戳
+    width: Optional[int] = None
+    height: Optional[int] = None
+    metadata: Optional[Dict[str, Any]] = None   # Additional data (optional)
+
+
+class RawFrame(BaseFrame):
+    raw_frame_b64: str  # Base64 encoded original frame
+
+
+class ProcessedFrame(BaseFrame):
+    """
+    处理后帧数据，包含Base64编码的处理后图像及推理结果
+    """
+    processed_frame_b64: str  # Base64 encoded processed (annotated) frame
+    inference_result: Optional[Dict[str, Any]] = None  # detection / analysis output
+
+
+class FrameSegment(BaseModel):
+    """
+    多帧数据段，包含客户端ID、任务ID、时间段
+    """
     client_id: str
-    timestamp: float
-    processed_frame_b64: str  # Base64 encoded JPEG image
-    metadata: Optional[Dict[str, Any]] = None  # Additional metadata if needed
+    task_id: Optional[int] = None
+    segment_start_ts: datetime
+    segment_end_ts: datetime
 
-# 用于存储处理后帧和推理结果
-class ProcessedFrame(BaseModel):
-    id: Optional[int] = None  # 数据库主键
-    task_id: str
-    frame_number: int
-    processed_frame_b64: str  # 标注好的视频帧 (Base64)
-    inference_result: Dict[str, Any]  # 推理结果 JSON
-    created_at: datetime = datetime.now()
+# SQLAlchemy models for database storage
+from sqlalchemy import Column, String, Integer, DateTime
+from app.database import Base
 
-class RawFrame(BaseModel):
-    id: Optional[int] = None  # 数据库主键
-    task_id: str
-    frame_number: int
-    raw_frame_b64: str  # 原始视频帧 (Base64)
-    created_at: datetime = datetime.now()
+class HLSSegment(Base):
+    __tablename__ = "hls_segments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String, index=True)
+    task_id = Column(Integer, index=True)  # 匹配 DBTask.task_id (str)
+    segment_path = Column(String)  # 文件系统路径，如 /database/client_1/task_123/hls/segment_001.mp4
+    playlist_path = Column(String)  # M3U8 文件路径
+    start_ts = Column(DateTime)
+    end_ts = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)

@@ -6,14 +6,53 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 
 - **实时视频流处理**: 从摄像头或本地文件捕获视频，使用 AI 模型处理，并通过 WebSocket 推送结果。
 - **三线程架构**: 解耦帧捕获、AI 推理和 WebSocket 推送，优化性能。
+- **多任务并行推理**: 支持多种 AI 模型并行执行（关键点检测、动作分析、内镜弯折检测等）。
+- **可扩展架构**: 基于任务注册表的设计，便于添加新的检测任务。
+- **RTMP 流处理**: 从 RTMP 流以固定帧率提取视频帧，支持实时监控。
+- **AI 推理**: 关键点检测 + 动作分析，实时评估清洗过程。
+- **实时推送**: 通过 WebSocket 推送处理后的视频帧和推理结果。
+- **视频追溯**: 自动生成 HLS 视频段和关键点 JSON，支持任务回放。
+- **多客户端支持**: 同时处理多个 RTMP 流，每个客户端独立队列管理。
+
+## 架构特点
+
+### 三队列设计
+
+- **CA-RawQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理
+- **CA-ProcessedQueue**: 推理后的处理帧（含关键点），用于生成 HLS 段
+- **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送
+
+### 数据流
+
+```text
+RTMP 流 → 帧捕获线程 → CA-RawQueue → AI 推理 → CA-ProcessedQueue + RT-ProcessedQueue
+                                                       ↓                    ↓
+                                               HLS 段 + JSON          WebSocket 推送
+```
+
+详细架构文档见 [RTMP_ARCHITECTURE.md](RTMP_ARCHITECTURE.md)。
 
 ## 项目结构
 
 - `models/`: 包含用于请求和响应验证的 Pydantic 数据结构。
 - `app/`: 主应用代码，包括 API 路由和 WebSocket 处理程序。
 - `routers/`: API 路由定义。
+  - `ai.py`: AI 推理服务路由
+  - `inspection.py`: 检查流程路由
+  - `task.py`: 任务管理路由
 - `services/`: 业务逻辑和 AI 模型集成。
+  - `ai.py`: 推理管理器和任务架构
+  - `ai_models/`: AI 模型实现
+    - `detection.py`: 关键点检测
+    - `motion.py`: 动作分析
+    - `yolo_detection.py`: 内镜弯折检测器
+    - `yolo_task.py`: 内镜弯折检测任务
+  - `example_custom_task.py`: 自定义任务示例
 - `test/`: 测试客户端代码，用于上传视频帧和显示推理结果。
+- `docs/`: 项目文档
+  - `AI_INFERENCE_ARCHITECTURE.md`: 推理架构说明
+  - `QUICK_START_CUSTOM_TASK.md`: 自定义任务快速开始
+  - `REFACTORING_SUMMARY.md`: 架构重构总结
 
 ## 安装
 
@@ -21,9 +60,31 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 # 创建虚拟环境并激活
 py -3.12 -m venv .venv
 .\.venv\Scripts\activate
-# 安装依赖
+
+# 安装依赖（包含 ultralytics 用于内镜弯折检测）
 pip install -r requirements.txt
 ```
+
+## AI 推理架构
+
+系统采用可扩展的任务注册架构，支持多种 AI 模型并行或串行执行：
+
+- **关键点检测**: 检测内窥镜清洗过程中的关键点
+- **动作分析**: 分析弯曲、浸泡等清洗动作
+- **内镜弯折检测**: 使用 YOLOv8 模型检测内镜是否弯折
+
+### 添加自定义推理任务
+
+系统支持快速扩展新的检测任务，只需 3 步：
+
+1. 创建继承 `InferenceTask` 的任务类
+2. 实现 `infer()` 和 `visualize()` 方法
+3. 在 `ai.py` 中注册任务
+
+详细说明请参考文档：
+- [推理架构说明](docs/AI_INFERENCE_ARCHITECTURE.md)
+- [自定义任务快速开始](docs/QUICK_START_CUSTOM_TASK.md)
+- [架构重构总结](docs/REFACTORING_SUMMARY.md)
 
 ## 运行应用
 
@@ -37,7 +98,139 @@ API 将可用在 <http://localhost:8000>
 
 ## API 文档
 
-运行后，访问 <http://localhost:8000/docs> 查看交互式 API 文档。
+运行后，访问 <http://localhost:8000/docs> 查看交互式 HTTP API 文档。
+
+### HTTP API 接口
+
+#### 1. 启动 RTMP 流捕获
+
+- **URL**: `POST /inspection/start_rtmp_stream`
+- **描述**: 启动 RTMP 流捕获，以固定帧率提取视频帧
+- **请求体**:
+
+  ```json
+  {
+    "client_id": "camera_001",
+    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
+    "fps": 30
+  }
+  ```
+
+- **响应**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTMP 流捕获已启动 for camera_001"
+  }
+  ```
+
+#### 2. 停止 RTMP 流捕获
+
+- **URL**: `POST /inspection/stop_rtmp_stream?client_id={client_id}`
+- **描述**: 停止指定客户端的 RTMP 流捕获
+- **响应**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTMP 流捕获已停止 for camera_001"
+  }
+  ```
+
+#### 3. 查询 AI 服务状态
+
+- **URL**: `GET /ai/status`
+- **描述**: 获取所有客户端的队列状态
+- **响应**:
+
+  ```json
+  {
+    "clients": 2,
+    "queues": {
+      "camera_001": {
+        "ca_raw": 15,
+        "ca_processed": 120,
+        "rt_processed": 30,
+        "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope"
+      }
+    }
+  }
+  ```
+
+### WebSocket 接口文档
+
+#### 1. 实时视频流结果推送
+
+- **URL**: `ws://localhost:8000/ai/video?client_id={client_id}`
+- **描述**: 实时接收 AI 处理后的视频帧（含关键点标注）
+- **连接参数**:
+  - `client_id` (必需): 客户端唯一标识符
+- **数据格式**: Base64 编码的 JPEG 图像
+
+  ```javascript
+  // 接收示例
+  data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ...
+  ```
+
+#### 2. 任务状态实时更新
+
+- **URL**: `ws://localhost:8000/task/status/{client_id}`
+- **描述**: 实时接收任务状态更新
+- **路径参数**:
+  - `client_id` (必需): 客户端唯一标识符
+- **数据格式**: JSON
+
+  ```json
+  // 有活跃任务时
+  {
+    "task_id": "task_123",
+    "status": "active",
+    "cleaning_stage": 1,
+    "bending_count": 5,
+    "bubble_detected": false,
+    "fully_submerged": true,
+    "updated_at": "2024-01-01T12:00:00"
+  }
+
+  // 无活跃任务时
+  {
+    "status": "no_active_task"
+  }
+  ```
+
+## 使用示例
+
+### 完整流程示例
+
+```bash
+# 1. 启动 FastAPI 服务器
+uvicorn app.main:app --reload
+
+# 2. 启动 RTMP 流捕获
+curl -X POST http://localhost:8000/inspection/start_rtmp_stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "camera_001",
+    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
+    "fps": 30
+  }'
+
+# 3. 查询状态
+curl http://localhost:8000/ai/status
+
+# 4. 停止捕获
+curl -X POST "http://localhost:8000/inspection/stop_rtmp_stream?client_id=camera_001"
+```
+
+### 测试脚本
+
+使用集成测试脚本：
+
+```bash
+# 需要先启动 RTMP 服务器和推流
+python test/test_rtmp_integration.py --client_id test_camera --rtmp_url rtmp://localhost:1935/live/test
+```
 
 ## 实时视频流
 
@@ -138,21 +331,29 @@ py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-int
 
 ### 测试方法
 
-1. **启动后端**:
+#### 1. 综合测试套件（推荐）
 
-   ```powershell
-   uvicorn app.main:app --reload
-   ```
+项目提供了完整的综合测试套件，可以一次性测试所有功能：
 
-2. **测试 WebSocket 推流**:
-   - 进入 `test/` 目录：`cd test`
-   - 运行 `py video_client.py` 连接到 `ws://localhost:8000/ai/video` 并显示结果。
+```powershell
+# 进入测试目录运行
+cd test
+python integrated_test.py --client-id test_client --actor-id test_actor
 
-3. **测试帧上传**:
-   - 进入 `test/` 目录：`cd test`
-   - 运行 `py upload_client.py --mode frame` 用于静态帧（HTTP）。
-   - 运行 `py upload_client.py --mode video --video [file_path] --transport http` 用于视频文件上传（HTTP）。
-   - 运行 `py upload_client.py --mode video --video [file_path] --transport websocket` 用于视频文件上传（WebSocket）。
-   - 运行 `py upload_client.py --mode camera --source 0 --transport http` 用于摄像头流（HTTP）。
-   - 运行 `py upload_client.py --mode camera --source 0 --transport websocket` 用于摄像头流（WebSocket）。
-   - 帧以 ~30 FPS 上传、处理并通过 WebSocket 推送。
+# 测试特定模块
+python integrated_test.py --test ai        # 仅测试AI服务集成
+python integrated_test.py --test http      # 仅测试HTTP API
+python integrated_test.py --test ws        # 仅测试WebSocket接口
+
+# 使用自定义图片进行帧上传测试
+python integrated_test.py --image test_frame.jpg
+
+# 连接到不同服务器
+python integrated_test.py --http-url http://192.168.1.100:8000 --ws-url ws://192.168.1.100:8000
+```
+
+#### 2. 专项测试脚本
+
+- **AI服务集成测试**: `cd test && python test_ai_integration.py`
+- **任务管理API测试**: `cd test && python test_task_apis.py`
+- **WebSocket接口测试**: `cd test && python websocket_test.py`

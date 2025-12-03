@@ -1,10 +1,10 @@
-import cv2
-import base64
 import threading
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import APIRouter, WebSocket, HTTPException
+from fastapi import APIRouter, WebSocket
 from app.services import ai
+from typing import cast
+from app.models.frame import ProcessedFrame
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -37,21 +37,14 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            processed_frame = ai.get_result(client_id)
+            processed_frame :ProcessedFrame= ai.get_result(client_id, as_model=True) # type: ignore
 
             if processed_frame is None:
                 await asyncio.sleep(0.03)
                 continue
 
-            # 编码为 JPEG 并转换为 base64 字符串
-            success, buffer = cv2.imencode('.jpg', processed_frame)
-            if not success:
-                await asyncio.sleep(0.03)
-                continue
-
-            jpg_as_text = base64.b64encode(buffer.tobytes()).decode('utf-8')
-            data_url = f"data:image/jpeg;base64,{jpg_as_text}"
-
+            # 使用模型中的 Base64 编码图像
+            data_url = f"data:image/jpeg;base64,{processed_frame.processed_frame_b64}"
             await websocket.send_text(data_url)
 
     except Exception as e:
@@ -61,17 +54,10 @@ async def websocket_video_endpoint(websocket: WebSocket):
         ai.remove_client(client_id)
         print(f"WebSocket 连接已关闭 (client_id={client_id}): {websocket.client}")
 
-
 @router.get("/status")
 async def get_ai_status():
-    """获取AI服务状态"""
-    st = ai.status()
-    return {
-        "status": "running",
-        "managed_clients": st.get("clients", 0),
-        "results_cached": st.get("results_cached", 0),
-        "threads_active": len([t for t in threading.enumerate() if t.name in ["InferenceThread"]])
-    }
+    """获取AI服务状态，返回详细的队列信息"""
+    return ai.status()
 
 
 def start_background_threads():
