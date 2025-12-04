@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from app.services import ai
 from app.models.frame import HLSSegment
+from app.models.status_messages import get_task_status_response, get_no_task_response
 from app.database import get_db
 import json
 from datetime import datetime
@@ -16,7 +17,18 @@ router = APIRouter(prefix="/task", tags=["task"])
 
 @router.websocket("/status/{client_id}")
 async def websocket_task_status(websocket: WebSocket, client_id: str):
-    """实时更新任务状态的WebSocket接口，此处的client_id也可以理解为摄像机ip/source_id"""
+    """
+    实时更新任务状态的WebSocket接口
+    
+    返回格式化的状态信息，包含：
+    - 任务状态（运行中/暂停/完成等）和对应的显示文本
+    - 当前清洗步骤和步骤名称
+    - 异常检测结果（弯折、漏气、浸没）
+    - 前端可直接显示的消息列表
+    
+    Args:
+        client_id: 客户端ID（也可以理解为摄像机ip/source_id）
+    """
     await websocket.accept()
     try:
         while True:
@@ -24,20 +36,22 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
             current_task = ai.get_task(client_id)
 
             if current_task:
-                # 发送任务状态更新
-                status_data = {
-                    "task_id": current_task.task_id,
-                    "status": current_task.status,
-                    "cleaning_stage": current_task.current_step,
-                    "bending_count": current_task.bending,
-                    "bubble_detected": current_task.bubble_detected,
-                    "fully_submerged": current_task.fully_submerged,
-                    "updated_at": datetime.fromtimestamp(current_task.updated_at).isoformat()
-                }
-                await websocket.send_text(json.dumps(status_data))
+                # 使用字典表生成格式化的状态响应
+                status_data = get_task_status_response(
+                    task_id=current_task.task_id,
+                    status=current_task.status,
+                    current_step=current_task.current_step,
+                    bending=current_task.bending,
+                    bubble_detected=current_task.bubble_detected,
+                    fully_submerged=current_task.fully_submerged,
+                    bending_count=getattr(current_task, 'bending_count', 0),
+                    updated_at=datetime.fromtimestamp(current_task.updated_at).isoformat()
+                )
+                await websocket.send_text(json.dumps(status_data, ensure_ascii=False))
             else:
                 # 没有活跃任务
-                await websocket.send_text(json.dumps({"status": "no_active_task"}))
+                no_task_data = get_no_task_response()
+                await websocket.send_text(json.dumps(no_task_data, ensure_ascii=False))
 
             # 每秒更新一次状态
             import asyncio

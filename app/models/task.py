@@ -28,8 +28,7 @@ class DBTask(Base):
     source_ip = Column(String, index=True)  # initialize_task设定
     current_step = Column(String, default="0")  # 流程中断时设置，text类型
     status = Column(String, default="paused")  # 任务状态: running, completed, cancelled, paused
-    created_at = Column(BigInteger)  # 任务创建时间(initialize_task设定)，Unix timestamp
-    updated_at = Column(BigInteger)
+    updated_time = Column(BigInteger)
     start_time = Column(BigInteger, default=0)
     end_time = Column(BigInteger, default=0)
 
@@ -41,7 +40,7 @@ class TaskStatusResponse(BaseModel):
     task_id: int
     status: str
     cleaning_stage: str  # current_step现在是str
-    bending_count: int
+    bending: bool
     bubble_detected: bool
     fully_submerged: bool
     updated_at: str

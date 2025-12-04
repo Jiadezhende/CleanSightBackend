@@ -95,7 +95,7 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             
             return {
                 "success": True,
-                "annotated_frame": annotated_frame,
+                "annotated_frame": annotated_frame,  # 用于可视化，不会序列化
                 "bending_detected": bending_detected,
                 "detections": detections,
                 "detection_count": len(detections),
@@ -109,7 +109,7 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             return {
                 "success": False,
                 "error": str(e),
-                "annotated_frame": frame.copy(),
+                "annotated_frame": frame.copy(),  # 用于可视化，不会序列化
                 "bending_detected": False,
                 "detections": [],
                 "detection_count": 0,

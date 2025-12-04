@@ -85,7 +85,7 @@ class DetectionTask(InferenceTask):
             processed_frame, keypoints = detection.detect_keypoints(frame)
             return {
                 "success": True,
-                "processed_frame": processed_frame,
+                "processed_frame": processed_frame,  # 用于可视化，不会序列化
                 "keypoints": keypoints
             }
         except Exception as e:
@@ -93,7 +93,7 @@ class DetectionTask(InferenceTask):
             return {
                 "success": False,
                 "error": str(e),
-                "processed_frame": frame.copy(),
+                "processed_frame": frame.copy(),  # 用于可视化，不会序列化
                 "keypoints": {}
             }
     
@@ -384,13 +384,41 @@ class InferenceManager:
         """从 FrameData 创建 ProcessedFrame 对象（含 Base64 编码）。"""
         _, buf = cv2.imencode('.jpg', frame_data.frame)
         b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+        
+        # 过滤推理结果，移除不可序列化的对象（如 numpy 数组）
+        inference_result = self._make_json_serializable(frame_data.inference_result or {})
+        
         return ProcessedFrame(
             task_id=task_id,
             client_id=client_id,
             raw_timestamp=datetime.fromtimestamp(frame_data.timestamp),
             processed_frame_b64=b64,
-            inference_result=frame_data.inference_result or {}
+            inference_result=inference_result
         )
+    
+    def _make_json_serializable(self, obj: Any) -> Any:
+        """递归过滤对象，移除不可 JSON 序列化的内容（如 numpy 数组、annotated_frame 等）"""
+        if isinstance(obj, dict):
+            result = {}
+            for key, value in obj.items():
+                # 跳过已知的不可序列化字段
+                if key in ('annotated_frame', 'processed_frame', 'frame'):
+                    continue
+                result[key] = self._make_json_serializable(value)
+            return result
+        elif isinstance(obj, (list, tuple)):
+            return [self._make_json_serializable(item) for item in obj]
+        elif isinstance(obj, np.ndarray):
+            # numpy 数组转为列表（如果是小数组）或跳过
+            if obj.size < 100:  # 只转换小数组（如检测框坐标）
+                return obj.tolist()
+            return None
+        elif isinstance(obj, (np.integer, np.floating)):
+            # numpy 标量转为 Python 原生类型
+            return obj.item()
+        else:
+            # 基本类型直接返回
+            return obj
 
     def _execute_inference_pipeline(
         self, 
@@ -763,10 +791,6 @@ def status():
 def set_task(client_id: str, task: Optional[CleaningTask]) -> bool:
     """为客户端设置任务。"""
     return manager.set_task(client_id, task)
-
-def terminate_task_by_id(client_id: str) -> bool:
-    """终止指定客户端的任务，清理所有队列和资源。"""
-    return manager.terminate_task_by_id(client_id)
 
 def get_task(client_id: str) -> Optional[CleaningTask]:
     """获取客户端的任务。"""

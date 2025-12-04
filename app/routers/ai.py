@@ -62,58 +62,67 @@ async def get_ai_status():
     return ai.status()
 
 @router.get("/load_task/{task_id}")
-async def start_task(task_id: int):
+async def load_task(task_id: int):
     """
-    开始任务，为指定 task_id 的任务在 AI 服务中创建任务对象。
+    加载任务，为指定 task_id 的任务在 AI 服务中创建任务对象。
+    从数据库读取任务信息，使用 source_ip 作为 client_id。
     """
     try:
-        # 获取当前任务
-        if task_id is None:
-            return False
-
         db = next(get_db())
-        db_task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
-        if db_task is None:
-            return False
-        
-        # 构造内存中的任务对象
-        task = Task(
-            task_id=task_id,
-            current_step=db_task.current_step, # type: ignore
-            status="running",
-            updated_at=int(time.time()),
-            fully_submerged=False,
-            bending=False,
-            bubble_detected=False
-        )
+        try:
+            db_task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
+            if db_task is None:
+                raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+            
+            # 使用 source_ip 作为 client_id（转换为 str 类型）
+            client_id = str(db_task.source_ip)
+            if not client_id or client_id == "None":
+                raise HTTPException(status_code=400, detail="Task source_ip is empty")
+            
+            # 构造内存中的任务对象
+            task = Task(
+                task_id=task_id,
+                current_step=str(db_task.current_step),
+                status="running",
+                updated_at=int(time.time()),
+                fully_submerged=False,
+                bending=False,
+                bubble_detected=False
+            )
 
-        # 为客户端设置任务
-        success = ai.set_task(db_task.source_ip, task) # type: ignore
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to set task for client")
+            # 为客户端设置任务
+            success = ai.set_task(client_id, task)
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to set task for client")
 
-        return TaskStatusResponse(
-            task_id=task.task_id,
-            status=task.status,
-            cleaning_stage=task.current_step,
-            bending_count=task.bending,
-            bubble_detected=task.bubble_detected,
-            fully_submerged=task.fully_submerged,
-            updated_at=datetime.fromtimestamp(task.updated_at).isoformat()
-        )
+            return TaskStatusResponse(
+                task_id=task.task_id,
+                status=task.status,
+                cleaning_stage=task.current_step,
+                bending=task.bending,
+                bubble_detected=task.bubble_detected,
+                fully_submerged=task.fully_submerged,
+                updated_at=datetime.fromtimestamp(task.updated_at).isoformat()
+            )
+        finally:
+            db.close()
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize task: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to load task: {str(e)}")
     
 @router.post("/terminate_task/{client_id}")
 async def terminate_task(client_id: str):
     """
-    终止任务，为指定 task_id 的任务在 AI 服务中标记为已终止。
+    终止任务，清理指定 client_id 的所有 AI 服务资源（队列、任务对象等）。
+    
+    Args:
+        client_id: 客户端 ID（通常是 source_ip）
     """
     try:
-        success = ai.terminate_task_by_id(client_id)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to terminate task")
-        return {"status": "success", "message": f"Task terminated"}
+        # 清理 AI 服务中的客户端资源
+        ai.remove_client(client_id)
+        return {"status": "success", "message": f"Task terminated for client {client_id}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
 
