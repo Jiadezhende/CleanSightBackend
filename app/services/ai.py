@@ -219,19 +219,24 @@ class ClientQueues:
     """容器，管理每个客户端的队列。
     
     架构说明：
-    - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（弹出后进入推理+落盘）
-    - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段
-    - CA-ProcessedQueue: 推理后的处理帧（含关键点），用于生成处理后 HLS 段
-    - RT-ProcessedQueue: 实时推理结果（含关键点），用于 WebSocket 推送
+    - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（设置最大长度防止溢出）
+    - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段（设置最大长度防止溢出）
+    - CA-ProcessedQueue: 推理后的处理帧（含关键点），用于生成处理后 HLS 段（设置最大长度防止溢出）
+    - RT-ProcessedQueue: 实时推理结果（含关键点），用于 WebSocket 推送（约1秒缓存）
+    
+    内存保护：
+    - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
+    - 默认 CA 队列最大长度为 500 帧，约 16.7 秒的视频缓存（30fps）
+    - RT 队列长度约为 1 秒的帧数，用于实时推送
     """
 
-    def __init__(self, rt_maxlen: int, ca_segment_len: int):
-        # CA-ReadyQueue: 等待推理的原始帧（无最大长度限制）
-        self.ca_ready: Deque[FrameData] = deque()
-        # CA-RawQueue: 原始帧副本，用于落盘生成原始视频（无最大长度限制）
-        self.ca_raw: Deque[FrameData] = deque()
-        # CA-ProcessedQueue: 处理后的帧，用于生成 HLS（无最大长度限制）
-        self.ca_processed: Deque[FrameData] = deque()
+    def __init__(self, rt_maxlen: int, ca_segment_len: int, ca_maxlen: int = 500):
+        # CA-ReadyQueue: 等待推理的原始帧（设置最大长度限制防止溢出）
+        self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
+        # CA-RawQueue: 原始帧副本，用于落盘生成原始视频（设置最大长度限制）
+        self.ca_raw: Deque[FrameData] = deque(maxlen=ca_maxlen)
+        # CA-ProcessedQueue: 处理后的帧，用于生成 HLS（设置最大长度限制）
+        self.ca_processed: Deque[FrameData] = deque(maxlen=ca_maxlen)
         # RT-ProcessedQueue: 实时推理结果，约 1 秒缓存用于 WebSocket 推送
         self.rt_processed: Deque[FrameData] = deque(maxlen=rt_maxlen)
         self.ca_segment_len = ca_segment_len
@@ -247,11 +252,13 @@ class InferenceManager:
     - CA 队列：达阈值后落盘为 JSON/HLS 视频段
     """
 
-    def __init__(self, rt_fps: int = 30, ca_segment_seconds: int = 5, db_dir: Optional[str] = None):
+    def __init__(self, rt_fps: int = 30, ca_segment_seconds: int = 5, db_dir: Optional[str] = None, ca_maxlen: int = 500):
         # 约 1 秒实时缓存长度
         self._rt_maxlen = max(5, int(rt_fps))
         # 缓存段长度（帧数）
         self._ca_segment_len = max(10, int(rt_fps * ca_segment_seconds))
+        # CA 队列最大长度（防止内存溢出）
+        self._ca_maxlen = max(50, ca_maxlen)
         # 维护各个客户端队列
         self._clients: Dict[str, ClientQueues] = {}
         self._lock = threading.Lock()
@@ -306,7 +313,11 @@ class InferenceManager:
     def _get_or_create_client(self, client_id: str) -> ClientQueues:
         client_queues = self._clients.get(client_id)
         if client_queues is None:
-            client_queues = ClientQueues(rt_maxlen=self._rt_maxlen, ca_segment_len=self._ca_segment_len)
+            client_queues = ClientQueues(
+                rt_maxlen=self._rt_maxlen, 
+                ca_segment_len=self._ca_segment_len,
+                ca_maxlen=self._ca_maxlen
+            )
             self._clients[client_id] = client_queues
         return client_queues
 
