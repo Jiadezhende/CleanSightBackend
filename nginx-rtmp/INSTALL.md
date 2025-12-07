@@ -14,27 +14,41 @@
 
 ## 快速开始
 
-### 1. 一键部署
+### 1. 简化安装（推荐）
 
 ```bash
 # 进入nginx-rtmp目录
 cd nginx-rtmp
 
-# 运行一键部署脚本
-sudo ./quick_deploy.sh
+# 给脚本添加执行权限
+chmod +x simple_install.sh
+
+# 运行简化安装脚本
+sudo ./simple_install.sh
 ```
 
-### 2. 验证安装
+### 2. 完整安装（如果需要）
 
 ```bash
-# 检查服务状态
-sudo systemctl status nginx
+# 使用完整安装脚本
+chmod +x install_nginx_rtmp.sh
+sudo ./install_nginx_rtmp.sh
+```
 
-# 测试推流
-python3 test_rtmp_stream.py --generate --stream test
+### 3. 验证安装
 
-# 测试拉流
-python3 rtmp_stream_processor.py
+```bash
+# 检查nginx-rtmp服务状态
+sudo systemctl status nginx-rtmp
+
+# 检查RTMP模块
+sudo /usr/local/nginx/sbin/nginx -V | grep rtmp
+
+# 检查端口监听
+ss -tlnp | grep -E '(80|1935)'
+
+# 测试HTTP服务
+curl http://localhost/health
 ```
 
 ### 3. 项目集成
