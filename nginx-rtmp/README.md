@@ -154,6 +154,7 @@ nginx
 ### 1. 查看端口监听
 
 ```bash
+sudo ss -tulnp | grep nginx
 sudo ss -lntp | grep 1935
 sudo ss -lntp | grep :80
 ```

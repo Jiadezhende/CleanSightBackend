@@ -20,4 +20,4 @@ nginx -s reload
 ps -ef | grep nginx
 
 ### 查看端口监听
-ss -tulnp | grep nginx
+sudo ss -tulnp | grep nginx
