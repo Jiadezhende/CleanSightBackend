@@ -75,7 +75,6 @@ CLEANSIGHT_RTMP_BASE_URL=rtmp://localhost:1935/live
 - **RTMP拉流**: `rtmp://服务器IP:1935/live/{流名称}`
 - **统计页面**: `http://服务器IP/stat`
 - **健康检查**: `http://服务器IP/health`
-- **HLS播放**: `http://服务器IP/hls/{流名称}.m3u8`
 
 ## 使用方法
 
@@ -253,9 +252,8 @@ sudo /usr/local/bin/rtmp-monitor
 ### 2. 定期维护
 
 ```bash
-# 清理临时HLS文件（建议每天执行）
-find /tmp/hls -name "*.ts" -mtime +1 -delete
-find /tmp/hls -name "*.m3u8" -mtime +1 -delete
+# 清理临时文件（建议每天执行）
+find /tmp -name "nginx_*" -mtime +1 -delete
 
 # 清理旧日志
 sudo logrotate -f /etc/logrotate.d/nginx
@@ -284,7 +282,7 @@ sudo nginx -s reload
    - 使用更快的编码预设
 
 4. **内存使用过高**
-   - 限制HLS分片数量
+   - 限制临时文件数量
    - 定期清理临时文件
    - 调整worker进程数
 

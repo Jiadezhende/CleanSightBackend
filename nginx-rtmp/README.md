@@ -74,7 +74,6 @@ rtmp://服务器IP:1935/live/流名称
 
 - 统计页面: `http://服务器IP/stat`
 - 健康检查: `http://服务器IP/health`
-- HLS播放: `http://服务器IP/hls/流名称.m3u8`
 
 ## 后端集成
 
@@ -174,7 +173,7 @@ vlc rtmp://localhost:1935/live/test
 3. **权限问题**
    ```bash
    sudo chown -R www-data:www-data /var/cache/nginx
-   sudo chown -R www-data:www-data /tmp/hls
+   sudo chown -R www-data:www-data /var/log/nginx
    ```
 
 4. **防火墙阻止**

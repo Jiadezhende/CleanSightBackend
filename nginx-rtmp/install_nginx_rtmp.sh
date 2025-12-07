@@ -173,15 +173,11 @@ install_nginx() {
     mkdir -p /var/cache/nginx/uwsgi_temp
     mkdir -p /var/cache/nginx/scgi_temp
     mkdir -p /var/log/nginx
-    mkdir -p /tmp/hls
-    mkdir -p /tmp/dash
     mkdir -p /var/www/html
     
     # 设置权限
     chown -R www-data:www-data /var/cache/nginx
     chown -R www-data:www-data /var/log/nginx
-    chown -R www-data:www-data /tmp/hls
-    chown -R www-data:www-data /tmp/dash
     chown -R www-data:www-data /var/www/html
     
     log_success "nginx安装完成"
