@@ -175,32 +175,44 @@ install_nginx() {
     mkdir -p /var/log/nginx
     mkdir -p /var/www/html
     
+    # 创建nginx用户（如果不存在）
+    id -u nginx >/dev/null 2>&1 || useradd --system --home /var/cache/nginx --shell /sbin/nologin nginx
+    
     # 设置权限
-    chown -R www-data:www-data /var/cache/nginx
-    chown -R www-data:www-data /var/log/nginx
-    chown -R www-data:www-data /var/www/html
+    chown -R nginx:nginx /var/cache/nginx
+    chown -R nginx:nginx /var/log/nginx
+    chown -R nginx:nginx /var/www/html
+    
+    # 创建软链接便于使用
+    ln -sf /usr/sbin/nginx /usr/local/bin/nginx-rtmp
     
     log_success "nginx安装完成"
 }
 
-# 创建nginx用户
-create_nginx_user() {
-    log_info "创建nginx用户..."
+# 检查现有nginx并停止
+stop_existing_nginx() {
+    log_info "检查现有nginx服务..."
     
-    if ! id "www-data" &>/dev/null; then
-        useradd --system --home /var/cache/nginx --shell /sbin/nologin --comment "nginx user" --user-group www-data
+    # 停止系统默认nginx
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        log_warning "检测到系统nginx正在运行，正在停止..."
+        systemctl stop nginx
+        systemctl disable nginx
     fi
     
-    log_success "nginx用户创建完成"
+    # 杀死所有nginx进程
+    pkill nginx 2>/dev/null || true
+    
+    log_success "现有nginx服务已停止"
 }
 
 # 创建systemd服务
 create_systemd_service() {
     log_info "创建systemd服务..."
     
-    cat > /etc/systemd/system/nginx.service << 'EOF'
+    cat > /etc/systemd/system/nginx-rtmp.service << 'EOF'
 [Unit]
-Description=The nginx HTTP and reverse proxy server
+Description=NGINX HTTP and RTMP Server
 Documentation=http://nginx.org/en/docs/
 After=network.target remote-fs.target nss-lookup.target
 
@@ -210,6 +222,7 @@ PIDFile=/var/run/nginx.pid
 ExecStartPre=/usr/sbin/nginx -t
 ExecStart=/usr/sbin/nginx
 ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s QUIT $MAINPID
 KillSignal=SIGQUIT
 TimeoutStopSec=5
 KillMode=process
@@ -221,7 +234,7 @@ EOF
     
     # 重新加载systemd
     systemctl daemon-reload
-    systemctl enable nginx
+    systemctl enable nginx-rtmp
     
     log_success "systemd服务创建完成"
 }
@@ -298,14 +311,15 @@ test_config() {
 
 # 启动服务
 start_service() {
-    log_info "启动nginx服务..."
+    log_info "启动nginx-rtmp服务..."
     
-    systemctl start nginx
+    systemctl start nginx-rtmp
     
-    if systemctl is-active --quiet nginx; then
-        log_success "nginx服务启动成功"
+    if systemctl is-active --quiet nginx-rtmp; then
+        log_success "nginx-rtmp服务启动成功"
     else
-        log_error "nginx服务启动失败"
+        log_error "nginx-rtmp服务启动失败"
+        journalctl -u nginx-rtmp -n 10 --no-pager
         exit 1
     fi
 }
@@ -314,21 +328,31 @@ start_service() {
 show_status() {
     log_info "服务状态信息:"
     echo "----------------------------------------"
-    systemctl status nginx --no-pager -l
+    systemctl status nginx-rtmp --no-pager -l
     echo "----------------------------------------"
     
+    # 检查RTMP模块
+    log_info "RTMP模块检查:"
+    /usr/sbin/nginx -V 2>&1 | grep rtmp && echo "  ✅ RTMP模块已安装" || echo "  ❌ RTMP模块未找到"
+    
+    # 检查端口监听
+    log_info "端口监听状态:"
+    ss -tlnp | grep -E '(80|1935)' || echo "  未检测到RTMP相关端口监听"
+    
     log_info "RTMP服务地址:"
-    echo "  推流地址: rtmp://$(hostname -I | awk '{print $1}'):1935/live"
-    echo "  统计页面: http://$(hostname -I | awk '{print $1}')/stat"
-    echo "  健康检查: http://$(hostname -I | awk '{print $1}')/health"
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    echo "  推流地址: rtmp://$SERVER_IP:1935/live/{stream_name}"
+    echo "  统计页面: http://$SERVER_IP/stat"
+    echo "  健康检查: http://$SERVER_IP/health"
     
     log_info "常用命令:"
-    echo "  启动服务: sudo systemctl start nginx"
-    echo "  停止服务: sudo systemctl stop nginx"
-    echo "  重启服务: sudo systemctl restart nginx"
-    echo "  重载配置: sudo systemctl reload nginx"
-    echo "  查看状态: sudo systemctl status nginx"
-    echo "  查看日志: sudo journalctl -u nginx -f"
+    echo "  启动服务: sudo systemctl start nginx-rtmp"
+    echo "  停止服务: sudo systemctl stop nginx-rtmp"
+    echo "  重启服务: sudo systemctl restart nginx-rtmp"
+    echo "  重载配置: sudo systemctl reload nginx-rtmp"
+    echo "  查看状态: sudo systemctl status nginx-rtmp"
+    echo "  查看日志: sudo journalctl -u nginx-rtmp -f"
+    echo "  测试配置: sudo nginx -t"
 }
 
 # 清理临时文件
@@ -346,7 +370,7 @@ main() {
     detect_system
     update_system
     install_dependencies
-    create_nginx_user
+    stop_existing_nginx
     download_nginx
     compile_nginx
     install_nginx
@@ -359,6 +383,8 @@ main() {
     cleanup
     
     log_success "Nginx RTMP 服务安装完成!"
+    log_info "验证安装: sudo /usr/sbin/nginx -V | grep rtmp"
+    log_info "检查端口: ss -tlnp | grep -E '(80|1935)'"
 }
 
 # 捕获错误和清理

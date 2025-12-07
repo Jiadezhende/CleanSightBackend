@@ -148,54 +148,66 @@ class NginxRTMPManager:
             return False
     
     def start_service(self) -> bool:
-        """启动nginx服务"""
-        logger.info("启动nginx服务...")
+        """启动nginx-rtmp服务"""
+        logger.info("启动nginx-rtmp服务...")
         
-        try:
-            self._run_command(['systemctl', 'start', 'nginx'])
-            
-            # 检查服务状态
-            if self.is_service_running():
-                logger.info("nginx服务启动成功")
-                return True
-            else:
-                logger.error("nginx服务启动失败")
-                return False
-        except subprocess.CalledProcessError:
-            logger.error("无法启动nginx服务")
-            return False
+        # 优先尝试nginx-rtmp服务，如果不存在则尝试nginx
+        services = ['nginx-rtmp', 'nginx']
+        
+        for service in services:
+            try:
+                self._run_command(['systemctl', 'start', service])
+                
+                # 检查服务状态
+                if self.is_service_running(service):
+                    logger.info(f"{service}服务启动成功")
+                    return True
+            except subprocess.CalledProcessError:
+                logger.warning(f"无法启动{service}服务，尝试下一个...")
+                continue
+        
+        logger.error("所有nginx服务启动失败")
+        return False
     
     def stop_service(self) -> bool:
         """停止nginx服务"""
         logger.info("停止nginx服务...")
         
-        try:
-            self._run_command(['systemctl', 'stop', 'nginx'])
-            logger.info("nginx服务已停止")
-            return True
-        except subprocess.CalledProcessError:
-            logger.error("无法停止nginx服务")
-            return False
+        services = ['nginx-rtmp', 'nginx']
+        success = False
+        
+        for service in services:
+            try:
+                self._run_command(['systemctl', 'stop', service], check=False)
+                logger.info(f"{service}服务已停止")
+                success = True
+            except subprocess.CalledProcessError:
+                continue
+        
+        return success
     
     def restart_service(self) -> bool:
         """重启nginx服务"""
         logger.info("重启nginx服务...")
         
-        try:
-            self._run_command(['systemctl', 'restart', 'nginx'])
-            
-            # 等待服务启动
-            time.sleep(2)
-            
-            if self.is_service_running():
-                logger.info("nginx服务重启成功")
-                return True
-            else:
-                logger.error("nginx服务重启失败")
-                return False
-        except subprocess.CalledProcessError:
-            logger.error("无法重启nginx服务")
-            return False
+        services = ['nginx-rtmp', 'nginx']
+        
+        for service in services:
+            try:
+                self._run_command(['systemctl', 'restart', service])
+                
+                # 等待服务启动
+                time.sleep(2)
+                
+                if self.is_service_running(service):
+                    logger.info(f"{service}服务重启成功")
+                    return True
+            except subprocess.CalledProcessError:
+                logger.warning(f"无法重启{service}服务，尝试下一个...")
+                continue
+        
+        logger.error("所有nginx服务重启失败")
+        return False
     
     def reload_config(self) -> bool:
         """重载nginx配置"""
@@ -205,21 +217,34 @@ class NginxRTMPManager:
             # 先测试配置
             self._run_command(['nginx', '-t'])
             
-            # 重载配置
-            self._run_command(['systemctl', 'reload', 'nginx'])
-            logger.info("nginx配置重载成功")
-            return True
-        except subprocess.CalledProcessError:
+            # 尝试重载配置
+            services = ['nginx-rtmp', 'nginx']
+            for service in services:
+                try:
+                    self._run_command(['systemctl', 'reload', service])
+                    logger.info(f"{service}配置重载成功")
+                    return True
+                except subprocess.CalledProcessError:
+                    continue
+            
             logger.error("nginx配置重载失败")
             return False
-    
-    def is_service_running(self) -> bool:
-        """检查nginx服务是否运行"""
-        try:
-            result = self._run_command(['systemctl', 'is-active', 'nginx'], check=False)
-            return result.returncode == 0 and result.stdout.strip() == 'active'
         except subprocess.CalledProcessError:
+            logger.error("nginx配置文件语法错误")
             return False
+    
+    def is_service_running(self, service_name: str = None) -> bool:
+        """检查nginx服务是否运行"""
+        services = [service_name] if service_name else ['nginx-rtmp', 'nginx']
+        
+        for service in services:
+            try:
+                result = self._run_command(['systemctl', 'is-active', service], check=False)
+                if result.returncode == 0 and result.stdout.strip() == 'active':
+                    return True
+            except subprocess.CalledProcessError:
+                continue
+        return False
     
     def get_service_status(self) -> Dict[str, Any]:
         """获取服务状态"""
