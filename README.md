@@ -30,7 +30,9 @@ RTMP 流 → 帧捕获线程 → CA-RawQueue → AI 推理 → CA-ProcessedQueue
                                                HLS 段 + JSON          WebSocket 推送
 ```
 
-详细架构文档见 [RTMP_ARCHITECTURE.md](RTMP_ARCHITECTURE.md)。
+## RTMP 服务说明
+
+RTMP 服务独立运行，使用 nginx-rtmp 提供视频流中转功能。配置文件位于 `nginx-rtmp/` 目录。
 
 ## 项目结构
 
@@ -102,17 +104,16 @@ API 将可用在 <http://localhost:8000>
 
 ### HTTP API 接口
 
-#### 1. 启动 RTMP 流捕获
+#### 1. 启动任务
 
-- **URL**: `POST /inspection/start_rtmp_stream`
-- **描述**: 启动 RTMP 流捕获，以固定帧率提取视频帧
+- **URL**: `POST /task/create`
+- **描述**: 创建新的检查任务
 - **请求体**:
 
   ```json
   {
-    "client_id": "camera_001",
-    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
-    "fps": 30
+    "task_name": "内镜清洗检查_001",
+    "description": "日常内镜清洗质量检查"
   }
   ```
 
@@ -121,20 +122,8 @@ API 将可用在 <http://localhost:8000>
   ```json
   {
     "status": "success",
-    "message": "RTMP 流捕获已启动 for camera_001"
-  }
-  ```
-
-#### 2. 停止 RTMP 流捕获
-
-- **URL**: `POST /inspection/stop_rtmp_stream?client_id={client_id}`
-- **描述**: 停止指定客户端的 RTMP 流捕获
-- **响应**:
-
-  ```json
-  {
-    "status": "success",
-    "message": "RTMP 流捕获已停止 for camera_001"
+    "task_id": "task_12345",
+    "message": "任务创建成功"
   }
   ```
 
@@ -207,20 +196,19 @@ API 将可用在 <http://localhost:8000>
 # 1. 启动 FastAPI 服务器
 uvicorn app.main:app --reload
 
-# 2. 启动 RTMP 流捕获
-curl -X POST http://localhost:8000/inspection/start_rtmp_stream \
+# 2. 创建任务
+curl -X POST http://localhost:8000/task/create \
   -H "Content-Type: application/json" \
   -d '{
-    "client_id": "camera_001",
-    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
-    "fps": 30
+    "task_name": "内镜清洗检查_001",
+    "description": "日常内镜清洗质量检查"
   }'
 
-# 3. 查询状态
+# 3. 查询AI服务状态
 curl http://localhost:8000/ai/status
 
-# 4. 停止捕获
-curl -X POST "http://localhost:8000/inspection/stop_rtmp_stream?client_id=camera_001"
+# 4. 获取任务列表
+curl http://localhost:8000/task/list
 ```
 
 ### 测试脚本
@@ -228,8 +216,11 @@ curl -X POST "http://localhost:8000/inspection/stop_rtmp_stream?client_id=camera
 使用集成测试脚本：
 
 ```bash
-# 需要先启动 RTMP 服务器和推流
-python test/test_rtmp_integration.py --client_id test_camera --rtmp_url rtmp://localhost:1935/live/test
+# 运行完整的管道测试
+python integration_tests/test_full_pipeline.py
+
+# 测试数据库连接
+python test/test_db_connection.py
 ```
 
 ## 实时视频流
