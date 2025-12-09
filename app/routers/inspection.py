@@ -58,10 +58,12 @@ def _stream_capture_worker(client_id: str, stream_url: str, fps: int, stop_event
         print(f"[{protocol} Worker] ❌ 未找到 ffmpeg，无法捕获 {protocol} 流")
         return
     
-    # 构建 ffmpeg 命令 - 支持 RTMP 和 RTSP 协议
-    cmd = [
-        ffmpeg_path,
-        '-rtsp_transport', 'tcp',  # 确保 RTSP 使用 TCP 传输
+    # 根据协议动态调整 ffmpeg 命令
+    cmd = [ffmpeg_path]
+    if protocol == "RTSP":
+        cmd += ['-rtsp_transport', 'tcp']  # 确保 RTSP 使用 TCP 传输
+
+    cmd += [
         '-i', stream_url,
         '-f', 'rawvideo',
         '-pix_fmt', 'bgr24',
