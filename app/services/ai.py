@@ -279,6 +279,7 @@ class InferenceManager:
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
+        # return # Test Only
         self._task_registry.register(DetectionTask())
         self._task_registry.register(MotionTask())
         
@@ -345,6 +346,20 @@ class InferenceManager:
         with self._lock:
             client_queues = self._get_or_create_client(client_id)
             client_queues.rtmp_url = rtmp_url
+
+    def set_stream_url(self, client_id: str, stream_url: str) -> None:
+        """为客户端设置通用流地址（RTMP/RTSP/其他）。
+
+        该方法是对 `set_rtmp_url` 的通用替代，保留老接口以兼容历史代码。
+
+        Args:
+            client_id: The client identifier.
+            stream_url: 流地址，例如 `rtmp://...` 或 `rtsp://...`。
+        """
+        # 目前内部仍然使用 client_queues.rtmp_url 字段保持向后兼容
+        with self._lock:
+            client_queues = self._get_or_create_client(client_id)
+            client_queues.rtmp_url = stream_url
 
     def get_result(self, client_id: str, as_model: bool = False) -> Union[None, FrameData, ProcessedFrame]:
         """返回最新处理帧（从 RT-ProcessedQueue）。
@@ -785,6 +800,14 @@ def submit_frame(client_id: str, frame: np.ndarray):
 def set_rtmp_url(client_id: str, rtmp_url: str):
     """设置客户端的 RTMP 流地址。"""
     manager.set_rtmp_url(client_id, rtmp_url)
+
+
+def set_stream_url(client_id: str, stream_url: str):
+    """设置客户端的通用流地址（RTMP/RTSP）。
+
+    推荐在新代码中使用此函数以避免命名歧义。
+    """
+    manager.set_stream_url(client_id, stream_url)
 
 
 def get_result(client_id: str, as_model: bool = False):

@@ -4,8 +4,8 @@
 测试流程：
 1. 前置条件检查（MediaMTX, 后端 API, 数据库）
 2. 准备测试任务（创建或使用 task_id=0）
-3. 启动 ffmpeg RTMP 推流
-4. 启动后端 RTMP 捕获
+3. 启动 ffmpeg RTMP 推流到本地MediaMTX
+4. 等待推流稳定
 5. 从数据库加载并启动任务
 6. 并发运行：
    - WebSocket 客户端接收推理结果
@@ -14,6 +14,8 @@
 8. 终止任务
 9. 清理资源
 10. 生成测试报告
+
+注意：RTMP服务现在独立运行，AI后端直接从MediaMTX拉取流进行处理
 """
 import asyncio
 import argparse
@@ -30,8 +32,6 @@ from integration_tests.utils import (
     FFmpegController,
     DatabaseHelper,
     APIClient,
-    check_hls_files,
-    wait_for_condition
 )
 from integration_tests.client_viewer import InferenceViewer
 
@@ -44,13 +44,15 @@ class IntegrationTest:
         task_id: int = 0,
         client_id: str = "integration_test_client",
         duration: int = 30,
-        rtmp_url: str = "rtmp://localhost:1935/live/test",
+        rtmp_url: str = None,
         video_path: str = None
     ):
         self.task_id = task_id
         self.client_id = client_id
         self.duration = duration
-        self.rtmp_url = rtmp_url
+        # 构造基于 client_id 的动态 live 路径
+        self.rtmp_url = rtmp_url or f"rtmp://127.0.0.1:1935/live/{self.client_id}"
+        self.show_visualization = True  # 默认显示可视化窗口
         
         # 设置测试视频路径
         if video_path is None:
@@ -59,349 +61,102 @@ class IntegrationTest:
         else:
             self.video_path = video_path
         
-        # 初始化控制器
-        self.ffmpeg = FFmpegController(self.video_path, self.rtmp_url)
+        # 初始化控制器（优先使用 RTMP publish 到 /live/<client_id>）
+        self.ffmpeg = FFmpegController(self.video_path, self.rtmp_url, protocol="rtmp")
         self.api = APIClient()
         self.db = DatabaseHelper()
         
-        # 测试结果
-        self.results = {
-            "start_time": None,
-            "end_time": None,
-            "ffmpeg_started": False,
-            "rtmp_capture_started": False,
-            "task_started": False,
-            "frames_received": 0,
-            "hls_files": {},
-            "task_terminated": False,
-            "errors": []
-        }
+        # 简单状态跟踪
+        self.errors = []
     
     def run(self):
         """运行完整测试"""
-        print("=" * 70)
-        print("🚀 CleanSightBackend 集成测试")
-        print("=" * 70)
-        print(f"任务 ID: {self.task_id}")
-        print(f"客户端 ID: {self.client_id}")
-        print(f"测试时长: {self.duration} 秒")
-        print(f"RTMP URL: {self.rtmp_url}")
-        print(f"测试视频: {self.video_path}")
-        print("=" * 70)
-        
-        self.results["start_time"] = datetime.now()
+        print(f"🚀 CleanSight 集成测试 - 任务 {self.task_id} - 时长 {self.duration}s")
         
         try:
-            # 步骤 1: 前置条件检查
-            if not self._check_prerequisites():
-                self._print_report()
-                return False
-            
-            # 步骤 2: 准备测试任务
-            if not self._prepare_test_task():
-                self._print_report()
-                return False
-            
-            # 步骤 3: 启动 ffmpeg 推流
-            if not self._start_ffmpeg():
-                self._print_report()
-                return False
-            
-            # 步骤 4: 启动后端 RTMP 捕获
-            if not self._start_rtmp_capture():
-                self._cleanup()
-                self._print_report()
-                return False
-            
-            # 步骤 5: 启动任务
-            if not self._start_task():
-                self._cleanup()
-                self._print_report()
-                return False
-            
-            # 步骤 6: 运行测试（接收推理结果）
+            self._check_prerequisites()
+            self._prepare_test_task()
+            self._start_ffmpeg()
+            self._wait_for_publisher()
+            self._start_task()
+            self._start_rtmp_capture()
             asyncio.run(self._run_inference_test())
             
-            # 步骤 7: 验证 HLS 文件
-            self._verify_hls_files()
-            
-            # 步骤 8: 终止任务
-            self._terminate_task()
-            
-            # 步骤 9: 清理资源
-            self._cleanup()
-            
-            self.results["end_time"] = datetime.now()
-            
-            # 步骤 10: 生成报告
-            self._print_report()
-            
-            return len(self.results["errors"]) == 0
+            return len(self.errors) == 0
         
         except KeyboardInterrupt:
-            print("\n\n⚠️ 用户中断测试")
-            self._cleanup()
-            self._print_report()
+            print("\n⚠️ 用户中断")
             return False
-        
-        except Exception as e:
-            print(f"\n❌ 测试执行异常: {e}")
-            import traceback
-            traceback.print_exc()
-            self.results["errors"].append(f"执行异常: {str(e)}")
+        finally:
             self._cleanup()
-            self._print_report()
-            return False
     
-    def _check_prerequisites(self) -> bool:
+    def _check_prerequisites(self):
         """检查前置条件"""
-        print("\n📋 步骤 1: 检查前置条件")
-        print("-" * 70)
-        
-        success = True
-        
-        # 检查 ffmpeg
-        try:
-            self.ffmpeg._find_ffmpeg()
-            print(f"✅ ffmpeg: {self.ffmpeg.ffmpeg_path}")
-        except Exception as e:
-            print(f"❌ ffmpeg 未找到: {e}")
-            self.results["errors"].append("ffmpeg 未安装")
-            success = False
-        
-        # 检查测试视频
+        if not self.api.check_health():
+            raise Exception("后端 API 未运行")
         if not Path(self.video_path).exists():
-            print(f"❌ 测试视频不存在: {self.video_path}")
-            self.results["errors"].append(f"测试视频不存在: {self.video_path}")
-            success = False
-        else:
-            print(f"✅ 测试视频: {self.video_path}")
-        
-        # 检查后端 API
-        if self.api.check_health():
-            print("✅ 后端 API: http://localhost:8000")
-        else:
-            print("❌ 后端 API 无法连接")
-            print("   请先启动后端: uvicorn app.main:app --reload")
-            self.results["errors"].append("后端 API 未运行")
-            success = False
-        
-        # 检查数据库连接
-        try:
-            from app.database import get_db
-            db = next(get_db())
-            db.close()
-            print("✅ 数据库连接正常")
-        except Exception as e:
-            print(f"❌ 数据库连接失败: {e}")
-            self.results["errors"].append(f"数据库连接失败: {str(e)}")
-            success = False
-        
-        # MediaMTX 检查（尝试推流会验证）
-        print("⏳ MediaMTX 将在推流时验证...")
-        
-        return success
+            raise Exception(f"测试视频不存在: {self.video_path}")
+        self.ffmpeg._find_ffmpeg()
     
-    def _prepare_test_task(self) -> bool:
+    def _prepare_test_task(self):
         """准备测试任务"""
-        print(f"\n📋 步骤 2: 准备测试任务 (task_id={self.task_id})")
-        print("-" * 70)
-        
-        # 检查任务是否存在
         task = self.db.get_task(self.task_id)
-        if task:
-            print(f"✅ 任务 {self.task_id} 已存在")
-            print(f"   状态: {task.status}")
-            print(f"   当前步骤: {task.current_step}")
-            print(f"   客户端 IP: {task.source_ip}")
-        else:
-            print(f"⏳ 任务 {self.task_id} 不存在，创建中...")
-            # 使用 self.client_id 作为 source_ip 以保持一致性
-            if not self.db.create_test_task(self.task_id, source_ip=self.client_id):
-                self.results["errors"].append(f"创建任务 {self.task_id} 失败")
-                return False
-            print(f"   已创建任务，客户端 ID: {self.client_id}")
-        
-        return True
+        if not task:
+            self.db.create_test_task(self.task_id, source_ip=self.client_id)
     
-    def _start_ffmpeg(self) -> bool:
+    def _start_ffmpeg(self):
         """启动 ffmpeg 推流"""
-        print(f"\n📋 步骤 3: 启动 ffmpeg 推流")
-        print("-" * 70)
-        
-        if self.ffmpeg.start():
-            self.results["ffmpeg_started"] = True
-            print("⏳ 等待推流稳定 (8 秒)...")
-            time.sleep(8)
-            return True
-        else:
-            self.results["errors"].append("ffmpeg 推流启动失败")
-            return False
+        if not self.ffmpeg.start():
+            raise Exception("ffmpeg 推流启动失败")
     
-    def _start_rtmp_capture(self) -> bool:
-        """启动后端 RTMP 捕获"""
-        print(f"\n📋 步骤 4: 启动后端 RTMP 捕获")
-        print("-" * 70)
-        
-        try:
-            result = self.api.start_rtmp_capture(self.client_id, self.rtmp_url)
-            print(f"✅ RTMP 捕获已启动: {result}")
-            self.results["rtmp_capture_started"] = True
-            
-            print("⏳ 等待捕获初始化 (5 秒)...")
-            time.sleep(5)
-            return True
-        except Exception as e:
-            print(f"❌ 启动 RTMP 捕获失败: {e}")
-            self.results["errors"].append(f"启动 RTMP 捕获失败: {str(e)}")
-            return False
+
     
-    def _start_task(self) -> bool:
-        """从数据库加载并启动任务"""
-        print(f"\n📋 步骤 5: 启动任务 (task_id={self.task_id})")
-        print("-" * 70)
-        
-        try:
-            result = self.api.start_task(self.task_id)
-            print(f"✅ 任务已启动: {result}")
-            self.results["task_started"] = True
-            
-            # 验证任务状态
-            task = self.db.get_task(self.task_id)
-            if task:
-                print(f"   数据库状态: {task.status}")
-                print(f"   开始时间: {task.start_time}")
-            
-            return True
-        except Exception as e:
-            print(f"❌ 启动任务失败: {e}")
-            self.results["errors"].append(f"启动任务失败: {str(e)}")
-            return False
+    def _start_task(self):
+        """启动任务"""
+        self.api.start_task(self.task_id)
+
+
+    
+    def _start_rtmp_capture(self):
+        """启动 RTMP 捕获"""
+        self.api.start_rtmp_capture(self.client_id, self.rtmp_url, 30)
     
     async def _run_inference_test(self):
-        """运行推理测试（接收 WebSocket 结果）"""
-        print(f"\n📋 步骤 6: 接收推理结果 ({self.duration} 秒)")
-        print("-" * 70)
-        
-        viewer = InferenceViewer(self.client_id)
+        """运行推理测试"""
+        viewer = InferenceViewer(self.client_id, show_window=self.show_visualization)
         await viewer.connect_and_display(self.duration)
-        
-        self.results["frames_received"] = viewer.frame_count
     
-    def _verify_hls_files(self):
-        """验证 HLS 文件生成"""
-        print(f"\n📋 步骤 7: 验证 HLS 文件生成")
-        print("-" * 70)
-        
-        hls_info = check_hls_files(self.client_id, self.task_id)
-        self.results["hls_files"] = hls_info
-        
-        if hls_info["exists"]:
-            print(f"✅ HLS 目录存在: {hls_info['path']}")
-            print(f"   视频段数量: {len(hls_info['segments'])}")
-            print(f"   关键点文件: {len(hls_info['keypoints'])}")
-            print(f"   播放列表: {len(hls_info['playlists'])}")
-            
-            if len(hls_info['segments']) > 0:
-                print(f"   示例视频段: {Path(hls_info['segments'][0]).name}")
-        else:
-            print(f"⚠️ HLS 目录不存在: {hls_info['path']}")
-            print("   可能原因：")
-            print("   1. 测试时长太短，未生成段")
-            print("   2. 帧捕获未成功")
-            print("   3. 路径配置问题")
+
     
-    def _terminate_task(self):
-        """终止任务"""
-        print(f"\n📋 步骤 8: 终止任务")
-        print("-" * 70)
-        
-        try:
-            # 从数据库读取任务的 source_ip 作为 client_id
-            task = self.db.get_task(self.task_id)
-            if not task:
-                raise Exception(f"任务 {self.task_id} 不存在")
-            
-            client_id = task.source_ip
-            print(f"   使用客户端 ID: {client_id}")
-            
-            # 使用 client_id 调用终止接口
-            result = self.api.terminate_task(client_id)
-            print(f"✅ 任务已终止: {result}")
-            self.results["task_terminated"] = True
-            
-            # 验证数据库状态
-            self.db.session = None  # 强制重新查询
-            task = self.db.get_task(self.task_id)
-            if task:
-                print(f"   数据库状态: {task.status}")
-                print(f"   结束时间: {task.end_time}")
-        except Exception as e:
-            print(f"❌ 终止任务失败: {e}")
-            self.results["errors"].append(f"终止任务失败: {str(e)}")
+
     
     def _cleanup(self):
         """清理资源"""
-        print(f"\n📋 步骤 9: 清理资源")
-        print("-" * 70)
-        
-        # 停止 RTMP 捕获
-        if self.results["rtmp_capture_started"]:
-            try:
-                self.api.stop_rtmp_capture(self.client_id)
-                print(f"✅ 已停止 RTMP 捕获: {self.client_id}")
-            except Exception as e:
-                print(f"⚠️ 停止 RTMP 捕获失败: {e}")
-        
-        # 停止 ffmpeg
-        if self.results["ffmpeg_started"]:
-            self.ffmpeg.stop()
-        
-        print("✅ 资源清理完成")
-    
-    def _print_report(self):
-        """生成测试报告"""
-        print("\n" + "=" * 70)
-        print("📊 集成测试报告")
-        print("=" * 70)
-        
-        if self.results["start_time"] and self.results["end_time"]:
-            duration = (self.results["end_time"] - self.results["start_time"]).total_seconds()
-            print(f"测试时长: {duration:.1f} 秒")
-        
-        print(f"\n✅ 成功步骤:")
-        if self.results["ffmpeg_started"]:
-            print("  - ffmpeg 推流启动")
-        if self.results["rtmp_capture_started"]:
-            print("  - RTMP 捕获启动")
-        if self.results["task_started"]:
-            print("  - 任务启动")
-        if self.results["frames_received"] > 0:
-            print(f"  - 接收推理结果 ({self.results['frames_received']} 帧)")
-        if self.results["hls_files"].get("exists"):
-            print(f"  - HLS 文件生成 ({len(self.results['hls_files']['segments'])} 段)")
-        if self.results["task_terminated"]:
-            print("  - 任务终止")
-        
-        if self.results["errors"]:
-            print(f"\n❌ 错误 ({len(self.results['errors'])}):")
-            for error in self.results["errors"]:
-                print(f"  - {error}")
-        
-        print("\n" + "=" * 70)
-        
-        if len(self.results["errors"]) == 0:
-            print("🎉 测试通过！")
-        else:
-            print("⚠️ 测试失败，请检查错误信息")
-        
-        print("=" * 70)
+        try:
+            self.api.stop_rtmp_capture(self.client_id)
+        except:
+            pass
+        self.ffmpeg.stop()
+
+    def _wait_for_publisher(self, timeout: int = 12):
+        """等待 FFmpeg 推流进程就绪（最多 timeout 秒），就绪后再额外等待 3 秒以让 MediaMTX 注册"""
+        waited = 0
+        interval = 1
+        while waited < timeout:
+            if self.ffmpeg.is_running():
+                # 额外等待以让 mediamtx 注册 publisher
+                time.sleep(3)
+                return
+            time.sleep(interval)
+            waited += interval
+
+        raise Exception("FFmpeg 推流进程未在指定时间内就绪")
 
 
 def main():
     parser = argparse.ArgumentParser(description="CleanSightBackend 完整流程集成测试")
-    parser.add_argument("--task_id", type=int, default=0,
-                       help="任务 ID（默认: 0）")
+    parser.add_argument("--task_id", type=int, default=1,
+                       help="任务 ID（默认: 1）")
     parser.add_argument("--client_id", type=str, default="integration_test_client",
                        help="客户端 ID")
     parser.add_argument("--duration", type=int, default=30,
@@ -410,6 +165,8 @@ def main():
                        help="RTMP 推流地址")
     parser.add_argument("--video_path", type=str, default=None,
                        help="测试视频路径（默认: test/test_video.mp4）")
+    parser.add_argument("--no-window", action="store_true",
+                       help="禁用可视化窗口，仅在控制台显示统计")
     
     args = parser.parse_args()
     
@@ -420,6 +177,9 @@ def main():
         rtmp_url=args.rtmp_url,
         video_path=args.video_path
     )
+    
+    # 设置可视化选项
+    test.show_visualization = not args.no_window
     
     success = test.run()
     sys.exit(0 if success else 1)

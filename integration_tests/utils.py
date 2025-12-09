@@ -23,9 +23,10 @@ from sqlalchemy import text
 class FFmpegController:
     """FFmpeg 推流控制器"""
     
-    def __init__(self, video_path: str, rtmp_url: str):
+    def __init__(self, video_path: str, stream_url: str, protocol: str = "rtmp"):
         self.video_path = video_path
-        self.rtmp_url = rtmp_url
+        self.stream_url = stream_url
+        self.protocol = protocol.lower()
         self.process: Optional[subprocess.Popen] = None
         
         # 尝试查找 ffmpeg
@@ -56,17 +57,34 @@ class FFmpegController:
             print(f"❌ 测试视频不存在: {self.video_path}")
             return False
         
-        cmd = [
-            self.ffmpeg_path,
-            '-re',
-            '-stream_loop', '-1',  # 循环播放
-            '-i', self.video_path,
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-tune', 'zerolatency',
-            '-f', 'flv',
-            self.rtmp_url
-        ]
+        if self.protocol == "rtmp":
+            cmd = [
+                self.ffmpeg_path,
+                '-re',
+                '-stream_loop', '-1',  # 循环播放
+                '-i', self.video_path,
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-tune', 'zerolatency',
+                '-f', 'flv',
+                self.stream_url
+            ]
+        elif self.protocol == "rtsp":
+            cmd = [
+                self.ffmpeg_path,
+                '-re',
+                '-stream_loop', '-1',  # 循环播放
+                '-i', self.video_path,
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-tune', 'zerolatency',
+                '-rtsp_transport', 'tcp',  # RTSP over TCP
+                '-f', 'rtsp',
+                self.stream_url
+            ]
+        else:
+            print(f"❌ 不支持的协议: {self.protocol}")
+            return False
         
         try:
             creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -84,7 +102,7 @@ class FFmpegController:
                 print(f"❌ ffmpeg 推流进程已退出 (退出码: {self.process.returncode})")
                 return False
             
-            print(f"✅ ffmpeg 推流已启动: {self.rtmp_url}")
+            print(f"✅ ffmpeg {self.protocol.upper()} 推流已启动: {self.stream_url}")
             return True
         except Exception as e:
             print(f"❌ 启动 ffmpeg 失败: {e}")
@@ -198,6 +216,13 @@ class APIClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url
     
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+        """通用请求方法"""
+        url = f"{self.base_url}{endpoint}"
+        response = requests.request(method, url, timeout=10, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    
     def check_health(self) -> bool:
         """检查 API 是否可用"""
         try:
@@ -222,6 +247,26 @@ class APIClient:
     def stop_rtmp_capture(self, client_id: str) -> Dict[str, Any]:
         """停止 RTMP 捕获"""
         url = f"{self.base_url}/inspection/stop_rtmp_stream?client_id={client_id}"
+        response = requests.post(url, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    
+    def start_rtsp_capture(self, client_id: str, rtsp_url: str, fps: int = 30) -> Dict[str, Any]:
+        """启动 RTSP 捕获"""
+        url = f"{self.base_url}/inspection/start_rtsp_stream"
+        payload = {
+            "client_id": client_id,
+            "rtsp_url": rtsp_url,
+            "fps": fps
+        }
+        
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    
+    def stop_rtsp_capture(self, client_id: str) -> Dict[str, Any]:
+        """停止 RTSP 捕获"""
+        url = f"{self.base_url}/inspection/stop_rtsp_stream?client_id={client_id}"
         response = requests.post(url, timeout=5)
         response.raise_for_status()
         return response.json()
