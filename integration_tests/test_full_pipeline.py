@@ -138,8 +138,6 @@ class IntegrationTest:
         except:
             pass
         self.ffmpeg.stop()
-    
-
 
 
 def main():
