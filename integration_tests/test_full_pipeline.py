@@ -44,13 +44,14 @@ class IntegrationTest:
         task_id: int = 0,
         client_id: str = "integration_test_client",
         duration: int = 30,
-        rtmp_url: str = "rtmp://localhost:1935/live/test",
+        rtmp_url: str = None,
         video_path: str = None
     ):
         self.task_id = task_id
         self.client_id = client_id
         self.duration = duration
-        self.rtmp_url = rtmp_url
+        # 构造基于 client_id 的动态 live 路径
+        self.rtmp_url = rtmp_url or f"rtmp://127.0.0.1:1935/live/{self.client_id}"
         self.show_visualization = True  # 默认显示可视化窗口
         
         # 设置测试视频路径
@@ -60,8 +61,8 @@ class IntegrationTest:
         else:
             self.video_path = video_path
         
-        # 初始化控制器
-        self.ffmpeg = FFmpegController(self.video_path, self.rtmp_url)
+        # 初始化控制器（优先使用 RTMP publish 到 /live/<client_id>）
+        self.ffmpeg = FFmpegController(self.video_path, self.rtmp_url, protocol="rtmp")
         self.api = APIClient()
         self.db = DatabaseHelper()
         
@@ -76,7 +77,7 @@ class IntegrationTest:
             self._check_prerequisites()
             self._prepare_test_task()
             self._start_ffmpeg()
-            time.sleep(5)  # 等待推流稳定
+            self._wait_for_publisher()
             self._start_task()
             self._start_rtmp_capture()
             asyncio.run(self._run_inference_test())
@@ -136,6 +137,20 @@ class IntegrationTest:
         except:
             pass
         self.ffmpeg.stop()
+
+    def _wait_for_publisher(self, timeout: int = 12):
+        """等待 FFmpeg 推流进程就绪（最多 timeout 秒），就绪后再额外等待 3 秒以让 MediaMTX 注册"""
+        waited = 0
+        interval = 1
+        while waited < timeout:
+            if self.ffmpeg.is_running():
+                # 额外等待以让 mediamtx 注册 publisher
+                time.sleep(3)
+                return
+            time.sleep(interval)
+            waited += interval
+
+        raise Exception("FFmpeg 推流进程未在指定时间内就绪")
 
 
 def main():

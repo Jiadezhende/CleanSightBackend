@@ -122,6 +122,7 @@ class IntegrationTest:
     
     async def _run_inference_test(self):
         """运行推理测试"""
+        print("启动推理结果可视化客户端...")
         viewer = InferenceViewer(self.client_id, show_window=self.show_visualization)
         await viewer.connect_and_display(self.duration)
     

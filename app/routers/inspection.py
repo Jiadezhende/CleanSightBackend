@@ -8,6 +8,9 @@ import subprocess
 import numpy as np
 import os
 from typing import Dict
+import tempfile
+from urllib.parse import urlparse
+from pathlib import Path
 
 router = APIRouter(prefix="/inspection", tags=["inspection"])
 
@@ -28,29 +31,38 @@ class RTSPStreamConfig(BaseModel):
     client_id: str
     rtsp_url: str
     fps: int = 30  # 固定帧率
+ 
 
 
 def _stream_capture_worker(client_id: str, stream_url: str, fps: int, stop_event: threading.Event, protocol: str = "RTMP"):
-    """通用流捕获工作线程，支持 RTMP 和 RTSP 协议。"""
+    """通用流捕获工作线程，支持 RTMP 和 RTSP 协议。
+
+    注意：`stream_url` 是发布者上传（publish）的地址，本工作线程会从该地址拉取（pull）流并交给 AI 服务处理。
+    例如：客户端 publish 到 `rtsp://mediamtx:8554/live/cam1`，本后端以该 URL 为输入向 mediamtx/发布者拉流。
+    """
     print(f"[{protocol} Worker] 启动捕获线程 for {client_id}: {stream_url}")
     
     # 查找 ffmpeg 可执行文件
     def _find_ffmpeg():
         # 优先尝试系统 PATH
+        # 1) 环境变量指定的路径
+        env_path = os.environ.get('FFMPEG_PATH')
+        if env_path and os.path.exists(env_path):
+            return env_path
+
+        # 2) 系统 PATH
         try:
-            result = subprocess.run(['ffmpeg', '-version'], 
-                                  capture_output=True, 
-                                  timeout=2)
+            result = subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=2)
             if result.returncode == 0:
                 return 'ffmpeg'
-        except:
+        except Exception:
             pass
-        
-        # 备用：Chocolatey 安装的版本
+
+        # 3) 常见 Windows Chocolatey 路径
         choco_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
         if os.path.exists(choco_path):
             return choco_path
-        
+
         return None
     
     ffmpeg_path = _find_ffmpeg()
@@ -60,21 +72,94 @@ def _stream_capture_worker(client_id: str, stream_url: str, fps: int, stop_event
     
     # 根据协议动态调整 ffmpeg 命令
     cmd = [ffmpeg_path]
+
     if protocol == "RTSP":
-        cmd += ['-rtsp_transport', 'tcp']  # 确保 RTSP 使用 TCP 传输
+        cmd += [
+            "-rtsp_transport", "udp",
+
+            # 给FFmpeg足够时间拿到SPS/PPS和分辨率
+            "-analyzeduration", "10000000",
+            "-probesize", "10000000",
+
+            # 低延迟
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-max_delay", "500000",
+        ]
 
     cmd += [
-        '-i', stream_url,
-        '-f', 'rawvideo',
-        '-pix_fmt', 'bgr24',
-        '-vf', f'fps={fps},scale=640:480',
-        '-'
+        "-i", stream_url,
+
+        # 强制选择视频流，避免误选音频
+        "-map", "0:v:0",
+
+        # rawvideo 输出
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+
+        # 帧率 + 缩放
+        "-vf", f"fps={fps},scale=640:480",
+
+        "pipe:1"
     ]
+
 
     frame_count = 0
     frame_size = 640 * 480 * 3
+
+    # 读取模型/推理期望的配置（可通过环境变量覆盖）
+    MODEL_INPUT_WIDTH = int(os.environ.get('MODEL_INPUT_WIDTH', 0))  # 0 表示不强制缩放
+    MODEL_INPUT_HEIGHT = int(os.environ.get('MODEL_INPUT_HEIGHT', 0))
+    MODEL_INPUT_COLOR = os.environ.get('MODEL_INPUT_COLOR', 'bgr').lower()  # 'bgr' or 'rgb'
+
+    def _standardize_frame(frm: np.ndarray) -> np.ndarray:
+        """确保帧为 HxWx3 的 uint8 numpy 数组，并可选对颜色和大小做小范围转换。
+
+        不修改原始帧的纵横比（若设置了 MODEL_INPUT_* 则会做简单缩放）。
+        返回值保证为连续内存（C-order）。
+        """
+        if frm is None:
+            return frm
+
+        # 转为 numpy 数组并确保 dtype
+        if not isinstance(frm, np.ndarray):
+            frm = np.array(frm)
+
+        # 如果是灰度，转成 BGR
+        if frm.ndim == 2:
+            frm = cv2.cvtColor(frm, cv2.COLOR_GRAY2BGR)
+
+        # 如果有 alpha 通道，去掉
+        if frm.shape[2] == 4:
+            frm = frm[:, :, :3]
+
+        # 保证 dtype 为 uint8
+        if frm.dtype != np.uint8:
+            # 试图缩放/裁剪到 uint8
+            try:
+                frm = np.clip(frm, 0, 255).astype(np.uint8)
+            except Exception:
+                frm = frm.astype(np.uint8, copy=False)
+
+        # 可选缩放
+        if MODEL_INPUT_WIDTH > 0 and MODEL_INPUT_HEIGHT > 0:
+            try:
+                frm = cv2.resize(frm, (MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                pass
+
+        # 可选颜色空间调整（保持 BGR 为默认）
+        if MODEL_INPUT_COLOR == 'rgb':
+            try:
+                frm = cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)
+            except Exception:
+                pass
+
+        # 确保内存连续
+        frm = np.ascontiguousarray(frm)
+        return frm
     
-    print(f"[{protocol} Worker] 启动 ffmpeg: {' '.join(cmd[:3])}...")
+    print(f"[{protocol} Worker] 启动 ffmpeg: {' '.join(cmd)}")
     
     try:
         process = subprocess.Popen(
@@ -111,7 +196,9 @@ def _stream_capture_worker(client_id: str, stream_url: str, fps: int, stop_event
                     buffer = buffer[frame_size:]
                     
                     frame = np.frombuffer(frame_data, dtype=np.uint8).reshape((480, 640, 3))
-                    ai.submit_frame(client_id, frame)
+                    # 统一为推理期望的 numpy 格式（HxWx3, uint8, BGR 或 RGB 可选）
+                    std_frame = _standardize_frame(frame)
+                    ai.submit_frame(client_id, std_frame)
                     frame_count += 1
                     
                     if frame_count % 30 == 0:  # 每秒报告一次 (假设30fps)
@@ -145,9 +232,8 @@ def _stream_capture_worker(client_id: str, stream_url: str, fps: int, stop_event
                     process.kill()
                 except:
                     pass
-        
+        # 无需清理临时 SDP（不再生成 SDP 文件）
         print(f"[{protocol} Worker] 停止，共处理 {frame_count} 帧")
-
 
 @router.post("/start_rtmp_stream")
 async def start_rtmp_stream(config: RTMPStreamConfig):
@@ -163,8 +249,8 @@ async def start_rtmp_stream(config: RTMPStreamConfig):
     if client_id in _capture_threads and _capture_threads[client_id].is_alive():
         raise HTTPException(status_code=400, detail=f"RTMP 流已在运行 for {client_id}")
     
-    # 设置 RTMP URL
-    ai.set_rtmp_url(client_id, config.rtmp_url)
+    # 设置流地址（RTMP/RTSP 均使用通用接口）
+    ai.set_stream_url(client_id, config.rtmp_url)
     
     # 创建停止事件
     stop_event = threading.Event()
@@ -223,8 +309,8 @@ async def start_rtsp_stream(config: RTSPStreamConfig):
     if client_id in _capture_threads and _capture_threads[client_id].is_alive():
         raise HTTPException(status_code=400, detail=f"RTSP 流已在运行 for {client_id}")
     
-    # 设置 RTSP URL
-    ai.set_rtmp_url(client_id, config.rtsp_url)  # 重用现有的 AI 服务接口
+    # 设置流地址（RTMP/RTSP 均使用通用接口）
+    ai.set_stream_url(client_id, config.rtsp_url)
     
     # 创建停止事件
     stop_event = threading.Event()
