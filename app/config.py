@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # 其他配置
     debug: bool = False
     
+    # 服务配置
+    server_host: str = "127.0.0.1"  # 默认本地访问，生产环境建议设置为 "0.0.0.0"
+    server_port: int = 8000
+    
     @model_validator(mode='after')
     def check_required_fields(self):
         if not self.db_host or self.db_port == 0 or not self.db_name or not self.db_user or not self.db_password:
@@ -42,7 +46,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="CLEANSIGHT_",
         env_nested_delimiter="__",
-        env_ignore_empty=True
+        env_ignore_empty=True,
+        extra="ignore"  # 忽略额外的环境变量
     )
 
 settings = Settings()

@@ -4,6 +4,9 @@ from app.services import ai
 import threading
 import cv2
 import time
+import subprocess
+import numpy as np
+import os
 from typing import Dict
 
 router = APIRouter(prefix="/inspection", tags=["inspection"])
@@ -21,71 +24,119 @@ class RTMPStreamConfig(BaseModel):
 
 
 def _rtmp_capture_worker(client_id: str, rtmp_url: str, fps: int, stop_event: threading.Event):
-    """RTMP 流捕获工作线程，以固定帧率提取帧。"""
+    """RTMP 流捕获工作线程，使用 ffmpeg 简单捕获。"""
     print(f"[RTMP Worker] 启动捕获线程 for {client_id}: {rtmp_url}")
     
-    # 尝试打开 RTMP 流，增加重试机制
-    max_retries = 5
-    retry_count = 0
-    cap = None
-    
-    while retry_count < max_retries and not stop_event.is_set():
-        print(f"[RTMP Worker] 尝试打开 RTMP 流 (尝试 {retry_count + 1}/{max_retries})...")
-        cap = cv2.VideoCapture(rtmp_url)
+    # 查找 ffmpeg 可执行文件
+    def _find_ffmpeg():
+        # 优先尝试系统 PATH
+        try:
+            result = subprocess.run(['ffmpeg', '-version'], 
+                                  capture_output=True, 
+                                  timeout=2)
+            if result.returncode == 0:
+                return 'ffmpeg'
+        except:
+            pass
         
-        if cap.isOpened():
-            print(f"[RTMP Worker] ✅ 成功打开 RTMP 流 for {client_id}")
-            break
-        else:
-            print(f"[RTMP Worker] ❌ 无法打开 RTMP 流，等待 2 秒后重试...")
-            retry_count += 1
-            time.sleep(2)
+        # 备用：Chocolatey 安装的版本
+        choco_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
+        if os.path.exists(choco_path):
+            return choco_path
+        
+        return None
     
-    if cap is None or not cap.isOpened():
-        print(f"[RTMP Worker] ❌ 最终失败: 无法打开 RTMP 流 {rtmp_url}")
-        print(f"[RTMP Worker] 可能原因:")
-        print(f"  1. MediaMTX 未运行或端口不是 1935")
-        print(f"  2. ffmpeg 未成功推流到 {rtmp_url}")
-        print(f"  3. OpenCV 不支持 RTMP 协议 (需要重新编译)")
+    ffmpeg_path = _find_ffmpeg()
+    if not ffmpeg_path:
+        print(f"[RTMP Worker] ❌ 未找到 ffmpeg，无法捕获 RTMP 流")
         return
     
-    frame_interval = 1.0 / fps  # 帧间隔（秒）
-    last_capture_time = 0.0
-    frame_count = 0
+    # 简化的 ffmpeg 命令 - 使用合理尺寸避免WebSocket消息过大
+    cmd = [
+        ffmpeg_path,
+        '-i', rtmp_url,
+        '-f', 'rawvideo',
+        '-pix_fmt', 'bgr24',
+        '-vf', f'fps={fps},scale=640:480',
+        '-'
+    ]
     
-    print(f"[RTMP Worker] 开始捕获帧，目标帧率: {fps} FPS")
+    frame_count = 0
+    frame_size = 640 * 480 * 3
+    
+    print(f"[RTMP Worker] 启动 ffmpeg: {' '.join(cmd[:3])}...")
     
     try:
-        while not stop_event.is_set():
-            current_time = time.time()
-            
-            # 检查是否到达下一帧的时间
-            if current_time - last_capture_time >= frame_interval:
-                ret, frame = cap.read()
-                if not ret:
-                    print(f"[RTMP Worker] ⚠️ RTMP 流读取失败 for {client_id} (可能流中断)")
-                    time.sleep(0.1)
-                    continue
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,  # 捕获错误信息
+            bufsize=0
+        )
+        
+        print(f"[RTMP Worker] ffmpeg 进程已启动 (PID: {process.pid})")
+        
+        # 短暂等待看是否有立即的错误
+        time.sleep(2)
+        if process.poll() is not None:
+            stderr_output = process.stderr.read().decode('utf-8', errors='ignore')
+            print(f"[RTMP Worker] ffmpeg 进程提前退出 (退出码: {process.returncode})")
+            print(f"[RTMP Worker] 错误信息: {stderr_output}")
+            return
+        
+        buffer = b''
+        while not stop_event.is_set() and process.poll() is None:
+            try:
+                # 读取数据块
+                chunk = process.stdout.read(32768)  # 32KB 缓冲区
+                if len(chunk) == 0:
+                    print(f"[RTMP Worker] 接收到 0 字节数据，流结束")
+                    break
                 
-                # 提交到 CA-RawQueue
-                ai.submit_frame(client_id, frame)
-                frame_count += 1
-                last_capture_time = current_time
+                buffer += chunk
                 
-                # 每 100 帧打印一次统计
-                if frame_count % 100 == 0:
-                    print(f"[RTMP Worker] 已捕获 {frame_count} 帧 for {client_id}")
-            else:
-                # 短暂休眠，避免 CPU 空转
-                time.sleep(0.001)
-                
+                # 检查是否有完整帧
+                while len(buffer) >= frame_size:
+                    frame_data = buffer[:frame_size]
+                    buffer = buffer[frame_size:]
+                    
+                    frame = np.frombuffer(frame_data, dtype=np.uint8).reshape((480, 640, 3))
+                    ai.submit_frame(client_id, frame)
+                    frame_count += 1
+                    
+                    if frame_count % 30 == 0:  # 每秒报告一次 (假设30fps)
+                        print(f"[RTMP Worker] 已处理 {frame_count} 帧")
+                        
+            except Exception as e:
+                print(f"[RTMP Worker] 处理帧时出错: {e}")
+                break
+        
     except Exception as e:
-        print(f"[RTMP Worker] ❌ 捕获异常 for {client_id}: {e}")
+        print(f"[RTMP Worker] 异常: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        cap.release()
-        print(f"[RTMP Worker] 🛑 捕获线程已停止 for {client_id}, 总共捕获 {frame_count} 帧")
+        if 'process' in locals():
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=3)
+                else:
+                    # 进程已退出，获取错误信息
+                    if hasattr(process, 'stderr') and process.stderr:
+                        try:
+                            stderr_output = process.stderr.read().decode('utf-8', errors='ignore')
+                            if stderr_output:
+                                print(f"[RTMP Worker] 进程错误信息: {stderr_output}")
+                        except:
+                            pass
+            except:
+                try:
+                    process.kill()
+                except:
+                    pass
+        
+        print(f"[RTMP Worker] 停止，共处理 {frame_count} 帧")
 
 
 @router.post("/start_rtmp_stream")

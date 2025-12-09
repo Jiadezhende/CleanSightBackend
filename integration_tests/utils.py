@@ -198,6 +198,13 @@ class APIClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url
     
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+        """通用请求方法"""
+        url = f"{self.base_url}{endpoint}"
+        response = requests.request(method, url, timeout=10, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    
     def check_health(self) -> bool:
         """检查 API 是否可用"""
         try:
