@@ -384,7 +384,7 @@ CLEANSIGHT_SERVER_PORT=8000
 
 ```bash
 # 1. 启动 FastAPI 服务器
-uvicorn app.main:app --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # 2. 创建任务
 curl -X POST http://localhost:8000/task/create \

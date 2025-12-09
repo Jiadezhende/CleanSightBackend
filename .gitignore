@@ -148,3 +148,4 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+app/models/best.pt

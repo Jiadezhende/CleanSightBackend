@@ -1,10 +1,10 @@
 """
-完整流程集成测试
+完整流程集成测试 - RTSP版本
 
 测试流程：
 1. 前置条件检查（MediaMTX, 后端 API, 数据库）
 2. 准备测试任务（创建或使用 task_id=0）
-3. 启动 ffmpeg RTMP 推流到本地MediaMTX
+3. 启动 ffmpeg RTSP 推流到本地MediaMTX
 4. 等待推流稳定
 5. 从数据库加载并启动任务
 6. 并发运行：
@@ -15,7 +15,7 @@
 9. 清理资源
 10. 生成测试报告
 
-注意：RTMP服务现在独立运行，AI后端直接从MediaMTX拉取流进行处理
+注意：RTSP服务现在独立运行，AI后端直接从MediaMTX拉取流进行处理
 """
 import asyncio
 import argparse
@@ -44,13 +44,13 @@ class IntegrationTest:
         task_id: int = 0,
         client_id: str = "integration_test_client",
         duration: int = 30,
-        rtmp_url: str = "rtmp://localhost:1935/live/test",
+        rtsp_url: str = "rtsp://localhost:8554/live/test",
         video_path: str = None
     ):
         self.task_id = task_id
         self.client_id = client_id
         self.duration = duration
-        self.rtmp_url = rtmp_url
+        self.rtsp_url = rtsp_url
         self.show_visualization = True  # 默认显示可视化窗口
         
         # 设置测试视频路径
@@ -61,7 +61,7 @@ class IntegrationTest:
             self.video_path = video_path
         
         # 初始化控制器
-        self.ffmpeg = FFmpegController(self.video_path, self.rtmp_url)
+        self.ffmpeg = FFmpegController(self.video_path, self.rtsp_url, protocol="rtsp")
         self.api = APIClient()
         self.db = DatabaseHelper()
         
@@ -78,7 +78,7 @@ class IntegrationTest:
             self._start_ffmpeg()
             time.sleep(5)  # 等待推流稳定
             self._start_task()
-            self._start_rtmp_capture()
+            self._start_rtsp_capture()
             asyncio.run(self._run_inference_test())
             
             return len(self.errors) == 0
@@ -116,9 +116,9 @@ class IntegrationTest:
 
 
     
-    def _start_rtmp_capture(self):
-        """启动 RTMP 捕获"""
-        self.api.start_rtmp_capture(self.client_id, self.rtmp_url, 30)
+    def _start_rtsp_capture(self):
+        """启动 RTSP 捕获"""
+        self.api.start_rtsp_capture(self.client_id, self.rtsp_url, 30)
     
     async def _run_inference_test(self):
         """运行推理测试"""
@@ -132,7 +132,7 @@ class IntegrationTest:
     def _cleanup(self):
         """清理资源"""
         try:
-            self.api.stop_rtmp_capture(self.client_id)
+            self.api.stop_rtsp_capture(self.client_id)
         except:
             pass
         self.ffmpeg.stop()
@@ -146,8 +146,8 @@ def main():
                        help="客户端 ID")
     parser.add_argument("--duration", type=int, default=30,
                        help="测试时长（秒，默认: 30）")
-    parser.add_argument("--rtmp_url", type=str, default="rtmp://localhost:1935/live/test",
-                       help="RTMP 推流地址")
+    parser.add_argument("--rtsp_url", type=str, default="rtsp://localhost:8554/live/test",
+                       help="RTSP 推流地址")
     parser.add_argument("--video_path", type=str, default=None,
                        help="测试视频路径（默认: test/test_video.mp4）")
     parser.add_argument("--no-window", action="store_true",
@@ -159,7 +159,7 @@ def main():
         task_id=args.task_id,
         client_id=args.client_id,
         duration=args.duration,
-        rtmp_url=args.rtmp_url,
+        rtsp_url=args.rtsp_url,
         video_path=args.video_path
     )
     

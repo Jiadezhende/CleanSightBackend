@@ -15,7 +15,7 @@ class InferenceViewer:
         self.start_time = None
         self.last_print_time = 0
         self.show_window = show_window
-        self.window_name = f"AI推理结果 - {client_id}"
+        self.window_name = f"AI Inference Result - {client_id}"
     
     async def connect_and_display(self, duration_seconds=None):
         ws_url = f"ws://localhost:8000/ai/video?client_id={self.client_id}"
