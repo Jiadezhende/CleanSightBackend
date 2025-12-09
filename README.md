@@ -255,6 +255,43 @@ CLEANSIGHT_SERVER_PORT=8000
   }
   ```
 
+##### 3. 启动 RTSP 流捕获
+
+- **URL**: `POST /inspection/start_rtsp_stream`
+- **描述**: 启动 RTSP 流捕获；请求体包含 `client_id`, `rtsp_url`, `fps`。
+- **请求体示例**:
+
+  ```json
+  {
+    "client_id": "camera_001",
+    "rtsp_url": "rtsp://localhost:8554/live/stream",
+    "fps": 30
+  }
+  ```
+- **响应示例**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTSP 流捕获已启动 for camera_001"
+  }
+  ```
+
+##### 4. 停止 RTSP 流捕获
+
+- **URL**: `POST /inspection/stop_rtsp_stream?client_id={client_id}`
+- **描述**: 停止指定客户端的 RTSP 流捕获。
+- **查询参数**:
+  - `client_id` (str): 客户端唯一标识符
+- **响应示例**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTSP 流捕获已停止 for camera_001"
+  }
+  ```
+
 #### 路由 `/task`
 
 ##### 1. 获取任务视频段信息
@@ -398,6 +435,34 @@ curl -X POST http://localhost:8000/task/create \
 curl http://localhost:8000/ai/status
 
 # 4. 获取任务列表
+
+## 可视化 & 简要说明
+
+- WebSocket 输出：`ws://<host>:8000/ai/video?client_id={client_id}`，服务器发送 Data-URL 文本 `data:image/jpeg;base64,...`。
+- 本地可视化：运行 `python -m integration_tests.client_viewer --client_id <id>`（需要桌面环境与带 GUI 的 `opencv-python`）。
+- 快速排查：若看到帧计数但无窗口，通常是 `opencv-python` 为 headless 或在无图形会话运行；在有桌面的 Windows 上运行：
+  ```powershell
+  pip uninstall -y opencv-python-headless
+  pip install opencv-python
+  python -m integration_tests.client_viewer --client_id integration_test_client --duration 15
+  ```
+
+- 接口说明（重要）：`/inspection/start_rtsp_stream` 与 `/inspection/start_rtmp_stream` 接收客户端发布地址（`rtsp_url` / `rtmp_url`），后端将以该 URL 向 MediaMTX 或发布者拉流并进行推理。
+
+- 精简的 MediaMTX 推荐（生产/压测时采用）：
+  - 打开连续端口范围（示例 `8000-8100` UDP/TCP），并在 `mediamtx.yml` 中设置 `rtpAddress`/`rtcpAddress` 基址。
+  - 增大缓冲：`writeQueueSize: 2048`，`udpReadBufferSize: 4194304`。
+
+- 常用 FFmpeg 示例：
+  - 推流（publisher 使用 TCP 握手更可靠）：
+    ```powershell
+    ffmpeg -re -stream_loop -1 -i test/test_video.mp4 -c:v libx264 -preset veryfast -tune zerolatency -an -f rtsp -rtsp_transport tcp rtsp://localhost:8554/live/test
+    ```
+  - 后端拉流：
+    ```powershell
+    ffmpeg -rtsp_transport udp -protocol_whitelist file,udp,rtp,tcp -i rtsp://localhost:8554/live/test -f rawvideo -pix_fmt bgr24 -vf "fps=30,scale=640:480" pipe:1
+    ```
+
 curl http://localhost:8000/task/list
 ```
 
