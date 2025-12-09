@@ -254,27 +254,27 @@ rtspTransports: [udp, multicast, tcp]
 # Available values are "no", "strict", "optional".
 rtspEncryption: "no"
 # Address of the TCP/RTSP listener. This is needed only when encryption is "no" or "optional".
-rtspAddress: :8554
+rtspAddress: 0.0.0.0:8554
 # Address of the TCP/TLS/RTSPS listener. This is needed only when encryption is "strict" or "optional".
-rtspsAddress: :8322
+rtspsAddress: 0.0.0.0:8322
 # Address of the UDP/RTP listener. This is needed only when "udp" is in rtspTransports.
-rtpAddress: :8000
+rtpAddress: 0.0.0.0:8002
 # Address of the UDP/RTCP listener. This is needed only when "udp" is in rtspTransports.
-rtcpAddress: :8001
+rtcpAddress: 0.0.0.0:8003
 # IP range of all UDP-multicast listeners. This is needed only when "multicast" is in rtspTransports.
 multicastIPRange: 224.1.0.0/16
 # Port of all UDP-multicast/RTP listeners. This is needed only when "multicast" is in rtspTransports.
-multicastRTPPort: 8002
+multicastRTPPort: 8004
 # Port of all UDP-multicast/RTCP listeners. This is needed only when "multicast" is in rtspTransports.
-multicastRTCPPort: 8003
+multicastRTCPPort: 8005
 # Address of the UDP/SRTP listener. This is needed only when "udp" is in rtspTransports and encryption is enabled.
-srtpAddress: :8004
+srtpAddress: :8006
 # Address of the UDP/SRTCP listener. This is needed only when "udp" is in rtspTransports and encryption is enabled.
-srtcpAddress: :8005
+srtcpAddress: :8007
 # Port of all UDP-multicast/SRTP listeners. This is needed only when "multicast" is in rtspTransports and encryption is enabled.
-multicastSRTPPort: 8006
+multicastSRTPPort: 8008
 # Port of all UDP-multicast/SRTCP listeners. This is needed only when "multicast" is in rtspTransports and encryption is enabled.
-multicastSRTCPPort: 8007
+multicastSRTCPPort: 8009
 # Path to the server key. This is needed only when encryption is "strict" or "optional".
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -292,7 +292,7 @@ rtspAuthMethods: [basic]
 # Enable publishing and reading streams with the RTMP protocol.
 rtmp: yes
 # Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
-rtmpAddress: :1935
+rtmpAddress: 0.0.0.0:1935
 # Encrypt connections with TLS (RTMPS).
 # Available values are "no", "strict", "optional".
 rtmpEncryption: "no"
