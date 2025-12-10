@@ -14,8 +14,10 @@ from abc import ABC, abstractmethod
 from app.models.frame import ProcessedFrame, HLSSegment, FrameData
 from app.models.task import Task as CleaningTask
 from app.services.ai_models import motion, detection
-from app.database import get_db
+from app.database import get_db, engine
 from app.config import settings
+import urllib.request
+from sqlalchemy import text
 
 # Type aliases for better readability
 FrameTuple = Tuple[float, np.ndarray]  # (timestamp, frame_array)
@@ -276,6 +278,16 @@ class InferenceManager:
         base_dir = Path(__file__).parent.parent.parent.resolve()
         self._db_dir = Path(db_dir) if db_dir else base_dir / "database"
         self._db_dir.mkdir(parents=True, exist_ok=True)
+        # 报警去重/批量上报相关结构
+        self._alarm_lock = threading.Lock()
+        # pending_alarms: key -> { 'count': int, 'first_seen': ts, 'last_seen': ts, 'alarm_info': dict }
+        self._pending_alarms: Dict[str, Dict[str, Any]] = {}
+        # recent_alarms: key -> last_sent_timestamp
+        self._recent_alarms: Dict[str, float] = {}
+        # 批量上报间隔（秒）和去重冷却（秒），可从 settings 中配置
+        self._alarm_batch_interval = getattr(settings, 'alarm_batch_interval', 30)
+        self._alarm_cooldown_seconds = getattr(settings, 'alarm_cooldown_seconds', 60)
+        self._alarm_thread: Optional[threading.Thread] = None
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
@@ -522,8 +534,247 @@ class InferenceManager:
             info_text = f"Task ID: {task.task_id} | Bending: {task.bending}"
             cv2.putText(result_frame, info_text, (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
+        # 异常检测：
+        # - 任一子任务返回 success=False -> 认为推理异常
+        # - motion 任务返回 actions 指示的异常（如 bending_detected, bubble_detected）
+        try:
+            alarm_needed = False
+            alarm_info = {
+                "task_id": task.task_id if task else None,
+                "step_id": getattr(task, 'current_step', None) if task else None,
+                "detection_result": {}
+            }
+
+            # 检查是否有任务失败
+            for name, res in all_results.items():
+                if isinstance(res, dict) and res.get('success') is False:
+                    alarm_needed = True
+                    alarm_info['detection_result'][name] = {'error': res.get('error')}
+
+            # motion 异常判定（若存在）
+            motion_res = all_results.get('motion')
+            if isinstance(motion_res, dict) and motion_res.get('success'):
+                actions = motion_res.get('actions', {})
+                # 常见异常标志
+                if actions.get('bending_detected') or actions.get('bubble_detected') or actions.get('submersion_status') in ('not_submerged', 'partial'):
+                    alarm_needed = True
+                    alarm_info['detection_result']['motion'] = actions
+
+            if alarm_needed:
+                # 将告警入队，交由批量去重线程处理，避免高频重复上报
+                try:
+                    self._enqueue_alarm(alarm_info)
+                except Exception as e:
+                    print(f"Failed to enqueue alarm: {e}")
+
+        except Exception as e:
+            print(f"Alarm detection error: {e}")
+
         return result_frame, all_results
+
+    def _handle_alarm(self, alarm_info: Dict[str, Any]):
+        """统一处理告警：调用远端告警上报接口并在本地数据库记录一条告警记录。
+
+        alarm_info 示例结构:
+        {
+            'task_id': 1,
+            'step_id': '0',
+            'detection_result': { ... }
+        }
+        """
+        try:
+            task_id = alarm_info.get('task_id')
+            step_id = alarm_info.get('step_id')
+            detection_result = alarm_info.get('detection_result')
+
+            alarm_type = '流程违规' if detection_result else '推理异常'
+            alarm_level = 'high'
+            alarm_message = 'AI推理检测到异常' if detection_result else 'AI推理异常'
+
+            # 调用远端告警上报
+            try:
+                self._send_alarm_report(
+                    task_id=task_id or 0,
+                    step_id=step_id or 0,
+                    alarm_type=alarm_type,
+                    alarm_level=alarm_level,
+                    alarm_message=alarm_message,
+                    detection_result=detection_result,
+                    camera_ip=None,
+                    reader_ip=None
+                )
+            except Exception as e:
+                print(f"Remote alarm report failed: {e}")
+
+            # 写入本地数据库表 alarm_record（如果不存在则先创建）
+            try:
+                self._record_alarm_db(
+                    task_id=task_id,
+                    step_id=step_id,
+                    alarm_type=alarm_type,
+                    alarm_level=alarm_level,
+                    alarm_message=alarm_message,
+                    detection_result=detection_result
+                )
+            except Exception as e:
+                print(f"Local DB alarm record failed: {e}")
+
+        except Exception as e:
+            print(f"_handle_alarm exception: {e}")
+
+    def _enqueue_alarm(self, alarm_info: Dict[str, Any]):
+        """将告警信息入队，交由批量去重线程处理。"""
+        try:
+            key = f"{alarm_info.get('task_id')}_{alarm_info.get('step_id')}"
+            with self._alarm_lock:
+                if key not in self._pending_alarms:
+                    self._pending_alarms[key] = {
+                        'count': 1,
+                        'first_seen': time.time(),
+                        'last_seen': time.time(),
+                        'alarm_info': alarm_info
+                    }
+                else:
+                    self._pending_alarms[key]['count'] += 1
+                    self._pending_alarms[key]['last_seen'] = time.time()
+        except Exception as e:
+            print(f"_enqueue_alarm error: {e}")
+
+    def _flush_pending_alarms(self):
+        """检查并上报待处理的告警（去重/批量逻辑）。
+
+        策略：
+        - 每次 flush 遍历 pending_alarms
+        - 如果最近已上报且处于冷却期（_alarm_cooldown_seconds），则保留在 pending
+        - 否则将该告警聚合（添加 count/first_seen/last_seen）并提交到 `_handle_alarm`
+        """
+        now = time.time()
+        to_send = []
+        with self._alarm_lock:
+            keys = list(self._pending_alarms.keys())
+            for key in keys:
+                item = self._pending_alarms.get(key)
+                if not item:
+                    continue
+                last_sent = self._recent_alarms.get(key)
+                if last_sent and (now - last_sent) < self._alarm_cooldown_seconds:
+                    # 仍在冷却期，跳过（保留在 pending）
+                    continue
+                # 准备发送：构建聚合告警信息
+                agg = dict(item['alarm_info']) if item.get('alarm_info') else {}
+                agg['alarm_count'] = item.get('count', 1)
+                agg['first_seen'] = datetime.fromtimestamp(item.get('first_seen')).strftime("%Y-%m-%d %H:%M:%S")
+                agg['last_seen'] = datetime.fromtimestamp(item.get('last_seen')).strftime("%Y-%m-%d %H:%M:%S")
+                to_send.append((key, agg))
+                # 更新最近上报时间并移除 pending
+                self._recent_alarms[key] = now
+                del self._pending_alarms[key]
+
+        # 在锁外发送，避免阻塞其他操作
+        for key, agg_alarm in to_send:
+            try:
+                self._executor.submit(self._handle_alarm, agg_alarm)
+            except Exception as e:
+                print(f"Failed to submit aggregated alarm for {key}: {e}")
+
+    def _alarm_flush_loop(self):
+        """后台线程，周期性 flush pending alarms。"""
+        print("Alarm flush thread started")
+        while not self._stop_event.is_set():
+            try:
+                time.sleep(self._alarm_batch_interval)
+                self._flush_pending_alarms()
+            except Exception as e:
+                print(f"Alarm flush loop error: {e}")
+        # 在退出前再 flush 一次（尝试上报剩余告警）
+        try:
+            self._flush_pending_alarms()
+        except Exception as e:
+            print(f"Final alarm flush error: {e}")
+
+    def _send_alarm_report(self, task_id: int, step_id: int, alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None) -> bool:
+        """按照外部接口文档上报告警（同步调用，故需在后台线程使用）。"""
+        url = "http://116.204.65.72:8881/gdmp/v1/api/nt/alarm_report"
+        payload = {
+            "task_id": task_id or 0,
+            "step_id": step_id or 0,
+            "alarm_type": alarm_type,
+            "alarm_level": alarm_level,
+            "alarm_message": alarm_message,
+            "alarm_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        if detection_result is not None:
+            payload['detection_result'] = detection_result
+        if camera_ip:
+            payload['camera_ip'] = camera_ip
+        if reader_ip:
+            payload['reader_ip'] = reader_ip
+
+        data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                'Content-Type': 'application/json; charset=utf-8',
+                'User-Agent': 'AI-Backend/1.0'
+            },
+            method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp_text = resp.read().decode('utf-8')
+                try:
+                    j = json.loads(resp_text)
+                    if j.get('code') == 0:
+                        print(f"Alarm reported successfully: task_id={task_id}")
+                        return True
+                    else:
+                        print(f"Alarm report returned non-zero code: {j}")
+                        return False
+                except Exception:
+                    print(f"Alarm report response: {resp_text}")
+                    return False
+        except Exception as e:
+            print(f"Failed to send alarm report: {e}")
+            return False
+
+    def _record_alarm_db(self, task_id: Optional[int], step_id: Optional[Any], alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None) -> None:
+        """在数据库中创建表（若不存在）并插入一条告警记录。"""
+        try:
+            create_sql = '''
+            CREATE TABLE IF NOT EXISTS alarm_record (
+                id SERIAL PRIMARY KEY,
+                task_id INTEGER,
+                step_id VARCHAR(64),
+                alarm_type TEXT,
+                alarm_level TEXT,
+                alarm_message TEXT,
+                alarm_time TIMESTAMP,
+                detection_result JSONB,
+                camera_ip TEXT,
+                reader_ip TEXT,
+                created_at TIMESTAMP DEFAULT now()
+            )
+            '''
+            with engine.begin() as conn:
+                conn.execute(text(create_sql))
+                insert_sql = '''
+                INSERT INTO alarm_record (task_id, step_id, alarm_type, alarm_level, alarm_message, alarm_time, detection_result, camera_ip, reader_ip)
+                VALUES (:task_id, :step_id, :alarm_type, :alarm_level, :alarm_message, :alarm_time, :detection_result::jsonb, :camera_ip, :reader_ip)
+                '''
+                conn.execute(text(insert_sql), {
+                    'task_id': int(task_id) if task_id is not None else None,
+                    'step_id': str(step_id) if step_id is not None else None,
+                    'alarm_type': alarm_type,
+                    'alarm_level': alarm_level,
+                    'alarm_message': alarm_message,
+                    'alarm_time': datetime.now(),
+                    'detection_result': json.dumps(detection_result or {}),
+                    'camera_ip': camera_ip,
+                    'reader_ip': reader_ip
+                })
+        except Exception as e:
+            print(f"_record_alarm_db error: {e}")
 
     def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
@@ -712,11 +963,24 @@ class InferenceManager:
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._inference_loop, daemon=True, name="InferenceThread")
             self._thread.start()
+        # 启动告警批量上报线程（如果尚未运行）
+        if self._alarm_thread is None or not getattr(self._alarm_thread, 'is_alive', lambda: False)():
+            try:
+                self._alarm_thread = threading.Thread(target=self._alarm_flush_loop, daemon=True, name="AlarmFlushThread")
+                self._alarm_thread.start()
+            except Exception as e:
+                print(f"Failed to start alarm flush thread: {e}")
 
     def stop(self):
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+        # 停止并等待告警线程
+        if self._alarm_thread is not None:
+            try:
+                self._alarm_thread.join(timeout=1.0)
+            except Exception:
+                pass
         # 关闭线程池
         self._executor.shutdown(wait=True, cancel_futures=True)
 
