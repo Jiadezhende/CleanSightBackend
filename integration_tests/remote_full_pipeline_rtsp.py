@@ -42,15 +42,14 @@ class IntegrationTest:
     def __init__(
         self,
         task_id: int = 0,
-        client_id: str = "integration_test_client",
         duration: int = 30,
-        rtsp_url: str = "rtsp://36.103.203.206:8554/live/test",
         video_path: str = None
     ):
         self.task_id = task_id
-        self.client_id = client_id
+        # client_id and rtsp_url will be populated from DB at runtime
+        self.client_id = None
         self.duration = duration
-        self.rtsp_url = rtsp_url
+        self.rtsp_url = None
         self.show_visualization = True  # 默认显示可视化窗口
         
         # 设置测试视频路径
@@ -95,16 +94,31 @@ class IntegrationTest:
             raise Exception("后端 API 未运行")
         if not Path(self.video_path).exists():
             raise Exception(f"测试视频不存在: {self.video_path}")
-        self.ffmpeg._find_ffmpeg()
+        # FFmpeg 二进制检查将在创建 FFmpegController 时进行（延迟创建）
     
     def _prepare_test_task(self):
         """准备测试任务"""
         task = self.db.get_task(self.task_id)
         if not task:
-            self.db.create_test_task(self.task_id, source_ip=self.client_id)
+            # 如果任务不存在，使用 task_id 派生一个默认 source_ip（例如 172.16.77.<task_id>）
+            default_source = f"rtsp.test.{self.task_id if self.task_id>0 else 221}"
+            self.db.create_test_task(self.task_id, source_ip=default_source)
     
     def _start_ffmpeg(self):
         """启动 ffmpeg 推流"""
+        # 从数据库读取 task 的 source_ip 作为 client_id，并生成 RTSP 地址
+        task = self.db.get_task(self.task_id)
+        if task and getattr(task, 'source_ip', None):
+            self.client_id = str(task.source_ip)
+        else:
+            raise Exception("无法从数据库获取 task.source_ip 来生成 client_id")
+
+        # 生成 RTSP 地址（默认使用本地 Mediamtx 端口 8004）
+        self.rtsp_url = f"rtsp://36.103.203.206:8004/live/{self.client_id}"
+
+        # 创建 FFmpegController（延迟创建以使用正确的 rtsp_url）
+        self.ffmpeg = FFmpegController(self.video_path, self.rtsp_url, protocol="rtsp")
+
         if not self.ffmpeg.start():
             raise Exception("ffmpeg 推流启动失败")
     
