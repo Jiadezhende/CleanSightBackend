@@ -172,9 +172,7 @@ def main():
     
     test = IntegrationTest(
         task_id=args.task_id,
-        client_id=args.client_id,
         duration=args.duration,
-        rtsp_url=args.rtsp_url,
         video_path=args.video_path
     )
     
