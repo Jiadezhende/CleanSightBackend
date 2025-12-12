@@ -74,7 +74,7 @@ async def load_task(task_id: int):
             if db_task is None:
                 raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
             
-            # 使用 source_ip 作为 client_id（转换为 str 类型）
+            # 使用 source_ip 作为 client_id（转换为 str 类型）client_id = 172.16.77.221
             client_id = str(db_task.source_ip)
             if not client_id or client_id == "None":
                 raise HTTPException(status_code=400, detail="Task source_ip is empty")
@@ -89,6 +89,8 @@ async def load_task(task_id: int):
                 bending=False,
                 bubble_detected=False
             )
+
+            print(f"为 client_id={client_id} 加载任务 {task}")
 
             # 为客户端设置任务
             success = ai.set_task(client_id, task)

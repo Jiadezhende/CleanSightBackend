@@ -254,13 +254,13 @@ rtspTransports: [udp, multicast, tcp]
 # Available values are "no", "strict", "optional".
 rtspEncryption: "no"
 # Address of the TCP/RTSP listener. This is needed only when encryption is "no" or "optional".
-rtspAddress: 0.0.0.0:8554
+rtspAddress: :8554
 # Address of the TCP/TLS/RTSPS listener. This is needed only when encryption is "strict" or "optional".
-rtspsAddress: 0.0.0.0:8322
+rtspsAddress: :8322
 # Address of the UDP/RTP listener. This is needed only when "udp" is in rtspTransports.
-rtpAddress: 0.0.0.0:8002
+rtpAddress: :8002
 # Address of the UDP/RTCP listener. This is needed only when "udp" is in rtspTransports.
-rtcpAddress: 0.0.0.0:8003
+rtcpAddress: :8003
 # IP range of all UDP-multicast listeners. This is needed only when "multicast" is in rtspTransports.
 multicastIPRange: 224.1.0.0/16
 # Port of all UDP-multicast/RTP listeners. This is needed only when "multicast" is in rtspTransports.

@@ -116,19 +116,6 @@ API 将可用在：
 - 本地访问: <http://localhost:8000>
 - 外部访问: <http://服务器公网IP:8000>
 
-### 使用启动脚本（推荐）
-
-```powershell
-# 本地开发模式
-.\start_backend.ps1
-
-# 生产模式（允许外部访问）
-.\start_backend.ps1 -Host 0.0.0.0 -Port 8000
-
-# 自定义配置
-.\start_backend.ps1 -Host 192.168.1.100 -Port 9000 -Reload
-```
-
 ### 环境变量配置
 
 在 `.env` 文件中设置服务器配置：
@@ -264,7 +251,7 @@ CLEANSIGHT_SERVER_PORT=8000
   ```json
   {
     "client_id": "camera_001",
-    "rtsp_url": "rtsp://localhost:8554/live/stream",
+    "rtsp_url": "rtsp://localhost:8004/live/stream",
     "fps": 30
   }
   ```
@@ -374,6 +361,44 @@ CLEANSIGHT_SERVER_PORT=8000
   }
   ```
 
+##### 6. 获取任务告警记录
+
+- **URL**: `GET /task/{task_id}/alarms`
+- **描述**: 查询本地数据库中 `alarm_record` 表为指定 `task_id` 保存的所有告警记录，按 `created_at` 降序返回。适用于回溯某任务的所有异常事件与上报历史。
+- **路径参数**:
+  - `task_id` (int): 任务ID
+- **响应示例**:
+
+```json
+{
+  "task_id": 1,
+  "total": 2,
+  "alarms": [
+    {
+      "id": 123,
+      "task_id": 1,
+      "step_id": "0",
+      "alarm_type": "流程违规",
+      "alarm_level": "high",
+      "alarm_message": "检测到未按规范操作：操作员未佩戴手套",
+      "alarm_time": "2025-12-08T20:30:15",
+      "detection_result": {"detected_objects": ["person","glove"], "confidence": 0.95},
+      "camera_ip": "192.168.1.64",
+      "reader_ip": "172.16.77.221",
+      "created_at": "2025-12-08T20:30:20"
+    }
+  ]
+}
+```
+
+**cURL 示例**:
+
+```bash
+curl -X GET "http://localhost:8000/task/1/alarms"
+```
+
+注意：当前实现会在运行时尝试创建并写入 `alarm_record` 表（针对 PostgreSQL）。若使用其他数据库，请确保表结构兼容或采用 ORM/migration 管理表结构。
+
 ### WebSocket 接口文档
 
 #### 1. 实时视频流结果推送
@@ -417,65 +442,16 @@ CLEANSIGHT_SERVER_PORT=8000
 
 ## 使用示例
 
-### 完整流程示例
-
-```bash
-# 1. 启动 FastAPI 服务器
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# 2. 创建任务
-curl -X POST http://localhost:8000/task/create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_name": "内镜清洗检查_001",
-    "description": "日常内镜清洗质量检查"
-  }'
-
-# 3. 查询AI服务状态
-curl http://localhost:8000/ai/status
-
-# 4. 获取任务列表
-
-## 可视化 & 简要说明
-
-- WebSocket 输出：`ws://<host>:8000/ai/video?client_id={client_id}`，服务器发送 Data-URL 文本 `data:image/jpeg;base64,...`。
-- 本地可视化：运行 `python -m integration_tests.client_viewer --client_id <id>`（需要桌面环境与带 GUI 的 `opencv-python`）。
-- 快速排查：若看到帧计数但无窗口，通常是 `opencv-python` 为 headless 或在无图形会话运行；在有桌面的 Windows 上运行：
-  ```powershell
-  pip uninstall -y opencv-python-headless
-  pip install opencv-python
-  python -m integration_tests.client_viewer --client_id integration_test_client --duration 15
-  ```
-
-- 接口说明（重要）：`/inspection/start_rtsp_stream` 与 `/inspection/start_rtmp_stream` 接收客户端发布地址（`rtsp_url` / `rtmp_url`），后端将以该 URL 向 MediaMTX 或发布者拉流并进行推理。
-
-- 精简的 MediaMTX 推荐（生产/压测时采用）：
-  - 打开连续端口范围（示例 `8000-8100` UDP/TCP），并在 `mediamtx.yml` 中设置 `rtpAddress`/`rtcpAddress` 基址。
-  - 增大缓冲：`writeQueueSize: 2048`，`udpReadBufferSize: 4194304`。
-
-- 常用 FFmpeg 示例：
-  - 推流（publisher 使用 TCP 握手更可靠）：
-    ```powershell
-    ffmpeg -re -stream_loop -1 -i test/test_video.mp4 -c:v libx264 -preset veryfast -tune zerolatency -an -f rtsp -rtsp_transport tcp rtsp://localhost:8554/live/test
-    ```
-  - 后端拉流：
-    ```powershell
-    ffmpeg -rtsp_transport udp -protocol_whitelist file,udp,rtp,tcp -i rtsp://localhost:8554/live/test -f rawvideo -pix_fmt bgr24 -vf "fps=30,scale=640:480" pipe:1
-    ```
-
-curl http://localhost:8000/task/list
-```
-
 ### 测试脚本
 
 #### 本地完整管道测试
 
 ```bash
 # 运行完整的本地管道测试（需要本地MediaMTX服务）
+# rtmp
 python integration_tests/test_full_pipeline.py
-
-# 使用PowerShell便捷脚本
-.\integration_tests\run_integration_test.ps1
+# rtsp
+python integration_tests/test_full_pipeline_rtsp.py
 ```
 
 #### 远程服务器测试
@@ -487,11 +463,7 @@ python integration_tests/test_full_pipeline.py
 python integration_tests/remote_test_pipeline.py --server 192.168.1.100
 
 # 自定义参数
-python integration_tests/remote_test_pipeline.py --server 192.168.1.100 --duration 120 --task_id 0
-
-# 使用PowerShell便捷脚本（推荐）
-.\integration_tests\run_remote_test.ps1 -Server 192.168.1.100
-.\integration_tests\run_remote_test.ps1 -Server 192.168.1.100 -Duration 120 -TaskId 1
+python integration_tests/remote_test_pipeline.py --server 192.168.1.100 --duration 120 --task_id 0 --client_id remote_test_client
 ```
 
 远程测试功能：
@@ -502,13 +474,6 @@ python integration_tests/remote_test_pipeline.py --server 192.168.1.100 --durati
 - 自动化测试报告
 
 详细使用说明见：[远程测试框架文档](integration_tests/REMOTE_TEST_README.md)
-
-#### 其他测试
-
-```bash
-# 测试数据库连接
-python test/test_db_connection.py
-```
 
 ## 实时视频流
 
@@ -527,115 +492,3 @@ python test/test_db_connection.py
 - **连接参数**:
   - `client_id` (必需): 客户端唯一标识符
 - **数据格式**: Base64 编码的 JPEG 图像 (`data:image/jpeg;base64,...`)
-
-### Http视频帧上传接口
-
-- **URL**: `http://localhost:8000/inspection/upload_frame`
-- **描述**: 接收来自网络的 Base64 编码视频帧进行处理。
-- **请求类型**: POST
-- **状态**: 已废弃，不再支持
-
-### Websocket视频帧上传接口
-
-- **URL**: `ws://localhost:8000/inspection/upload_stream`
-- **请求类型**: WebSocket
-- **描述**: 接收来自网络的 Base64 编码视频帧进行处理
-- **状态**: 已废弃，不再支持
-
-### 多客户端并发测试 (推荐 — WebSocket)
-
-仓库自带一个用于模拟大量摄像头和展示端的测试脚本：`test/multi_client.py`。
-该脚本能并发启动若干上传客户端（camera clients）与可选的展示客户端（display clients），
-便于在本地进行端到端连通性与路由验证（适合模拟医院级别的多设备场景）。
-
-默认行为与设计要点：
-
-- 默认以 **WebSocket** 模式运行（推荐用于性能与实时性测试）。
-- 上传端只保留并发送包含客户标记（左上角小方块）的帧，用于结果回传验证。
-- 展示端（若启用 `--display`）会接收推理后图像并验证左上角标记颜色是否保留，从而判断结果是否路由到对应 `client_id`。
-- 默认**不保存**接收的 output（节约磁盘）。如需保存，可使用 `--display --save-frames --output-dir <dir>`。
-
-依赖（如未安装）：
-
-```powershell
-pip install aiohttp websockets opencv-python numpy
-```
-
-用法摘要（PowerShell）：
-
-- 在激活虚拟环境且启动后端后（见上文）进入 `test` 目录：
-
-```powershell
-cd test
-```
-
-- 启动默认的 WebSocket 多客户端测试（10 个客户端，上传间隔 0.5s，不保存 output）：
-
-```powershell
-py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --server-ws ws://127.0.0.1:8000
-```
-
-- 启动并启用展示端以进行验证（每个客户端都启动一个 display client，会显著增加本地连接数）：
-
-```powershell
-py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --display --server-ws ws://127.0.0.1:8000
-```
-
-- 将展示端同时保存接收帧到目录：
-
-```powershell
-py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --display --save-frames --output-dir multi_output --server-ws ws://127.0.0.1:8000
-```
-
-主要可选参数说明（摘录）：
-
-- `--num`: 并发客户端数量，默认 `10`。
-- `--mode`: `http` 或 `websocket`，默认 `websocket`（推荐）。
-- `--frame`: 用作上传的静态帧文件路径（脚本会在每个 client 的帧左上角画上颜色标记），默认 `test_frame.jpg`。
-- `--send-interval`: 每个客户端发送帧的间隔（秒），默认 `0.5`。
-- `--server-ws`: 服务的 WS 地址，默认 `ws://127.0.0.1:8000`。
-- `--display`: 启用每个客户端对应的展示/验证连接（默认关闭）。
-- `--save-frames`: 启用保存接收到的帧（需要 `--display`），默认关闭。
-- `--output-dir`: 保存接收帧的目录（若启用 `--save-frames`），默认 `multi_output`。
-
-诊断提示：
-
-- 如果运行后统计显示 `clients=0, ok=0`，一般是因为未启用 `--display`（上传端不会填充 stats），或 display 端无法连接到 `/ai/video`（检查 `--server-ws` 地址与防火墙）。
-- 仅上传（不启用 `--display`）时，脚本用于压测上传通道与服务器接收能力；验证需要 `--display`。
-
-## 单客户端测试说明
-
-测试文件在 `test/` 目录下：
-
-- **测试客户端**:
-  - `upload_client.py`: 支持上传静态帧、视频文件或摄像头流的模式，支持 HTTP 和 WebSocket 传输。
-  - `video_client.py`: 显示推理结果，支持自适应窗口和实时帧率。
-
-### 测试方法
-
-#### 1. 综合测试套件（推荐）
-
-项目提供了完整的综合测试套件，可以一次性测试所有功能：
-
-```powershell
-# 进入测试目录运行
-cd test
-python integrated_test.py --client-id test_client --actor-id test_actor
-
-# 测试特定模块
-python integrated_test.py --test ai        # 仅测试AI服务集成
-python integrated_test.py --test http      # 仅测试HTTP API
-python integrated_test.py --test ws        # 仅测试WebSocket接口
-
-# 使用自定义图片进行帧上传测试
-python integrated_test.py --image test_frame.jpg
-
-# 连接到不同服务器
-python integrated_test.py --http-url http://192.168.1.100:8000 --ws-url ws://192.168.1.100:8000
-```
-
-#### 2. 专项测试脚本
-
-- **AI服务集成测试**: `cd test && python test_ai_integration.py`
-- **任务管理API测试**: `cd test && python test_task_apis.py`
-- **WebSocket接口测试**: `cd test && python websocket_test.py`

@@ -290,6 +290,7 @@ class InferenceManager:
         self._alarm_thread: Optional[threading.Thread] = None
     
     def _register_default_tasks(self):
+        # return
         """注册默认的推理任务"""
         # return # Test Only
         self._task_registry.register(DetectionTask())
@@ -461,7 +462,8 @@ class InferenceManager:
     def _execute_inference_pipeline(
         self, 
         frame: np.ndarray, 
-        task: Optional[CleaningTask]
+        task: Optional[CleaningTask],
+        client_id: Optional[str] = None
     ) -> Tuple[np.ndarray, Dict[str, InferenceResult]]:
         """执行完整的推理管道。
         
@@ -477,6 +479,7 @@ class InferenceManager:
         Returns:
             (可视化后的帧, 所有任务的结果字典)
         """
+        print("Inferring on task:", task.task_id if task else "No Task")
         all_results: Dict[str, InferenceResult] = {}
         tasks = self._task_registry.get_enabled_tasks()
         
@@ -529,17 +532,25 @@ class InferenceManager:
                 except Exception as e:
                     print(f"Visualization for {inference_task.name} failed: {e}")
         
-        # 添加通用信息（任务状态等）
+        # 添加通用信息（任务状态等），放到底部以避免与顶部可视化文字重叠，并绘制背景框提高可读性
         if task:
             info_text = f"Task ID: {task.task_id} | Bending: {task.bending}"
-            cv2.putText(result_frame, info_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            h, w = result_frame.shape[:2]
+            # 文本尺寸与基线
+            (text_w, text_h), baseline = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            x, y = 10, h - 10
+            # 背景矩形（稍留边距）
+            rect_tl = (x - 6, y - text_h - 6)
+            rect_br = (x + text_w + 6, y + 6)
+            cv2.rectangle(result_frame, rect_tl, rect_br, (0, 0, 0), -1)
+            cv2.putText(result_frame, info_text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         # 异常检测：
         # - 任一子任务返回 success=False -> 认为推理异常
         # - motion 任务返回 actions 指示的异常（如 bending_detected, bubble_detected）
         try:
             alarm_needed = False
             alarm_info = {
+                "client_id": client_id,
                 "task_id": task.task_id if task else None,
                 "step_id": getattr(task, 'current_step', None) if task else None,
                 "detection_result": {}
@@ -585,24 +596,54 @@ class InferenceManager:
         try:
             task_id = alarm_info.get('task_id')
             step_id = alarm_info.get('step_id')
+            client_id = alarm_info.get('client_id')
+
+            # 若 task_id/step_id 缺失，可尝试从 client queue 补全
+            if (task_id is None or step_id is None) and client_id:
+                try:
+                    with self._lock:
+                        cq = self._clients.get(str(client_id))
+                        if cq:
+                            print(f"_handle_alarm: found client queue for {client_id}, task={cq.task}")
+                        else:
+                            print(f"_handle_alarm: no client queue found for {client_id}; available clients: {list(self._clients.keys())}")
+                        if cq and cq.task:
+                            if task_id is None:
+                                task_id = getattr(cq.task, 'task_id', None)
+                            if step_id is None:
+                                step_id = getattr(cq.task, 'current_step', None)
+                except Exception as e:
+                    print(f"Failed to fill task_id/step_id from client queues: {e}")
+
+            print(f"_handle_alarm: final task_id={task_id}, step_id={step_id}, client_id={client_id}")
             detection_result = alarm_info.get('detection_result')
 
             alarm_type = '流程违规' if detection_result else '推理异常'
             alarm_level = 'high'
             alarm_message = 'AI推理检测到异常' if detection_result else 'AI推理异常'
 
-            # 调用远端告警上报
+            # 调用远端告警上报（仅在 task_id 和 step_id 可用时上报）
             try:
-                self._send_alarm_report(
-                    task_id=task_id or 0,
-                    step_id=step_id or 0,
-                    alarm_type=alarm_type,
-                    alarm_level=alarm_level,
-                    alarm_message=alarm_message,
-                    detection_result=detection_result,
-                    camera_ip=None,
-                    reader_ip=None
-                )
+                # 把聚合字段一并上报（若存在）
+                alarm_count = alarm_info.get('alarm_count') if isinstance(alarm_info, dict) else None
+                first_seen = alarm_info.get('first_seen') if isinstance(alarm_info, dict) else None
+                last_seen = alarm_info.get('last_seen') if isinstance(alarm_info, dict) else None
+                if task_id and step_id:
+                    self._send_alarm_report(
+                        task_id=task_id,
+                        step_id=step_id,
+                        alarm_type=alarm_type,
+                        alarm_level=alarm_level,
+                        alarm_message=alarm_message,
+                        detection_result=detection_result,
+                        camera_ip=None,
+                        reader_ip=None,
+                        alarm_count=alarm_count,
+                        first_seen=first_seen,
+                        last_seen=last_seen
+                    )
+                else:
+                    print(f"Skipping remote alarm report: missing task_id or step_id (task_id={task_id}, step_id={step_id})")
             except Exception as e:
                 print(f"Remote alarm report failed: {e}")
 
@@ -692,12 +733,15 @@ class InferenceManager:
         except Exception as e:
             print(f"Final alarm flush error: {e}")
 
-    def _send_alarm_report(self, task_id: int, step_id: int, alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None) -> bool:
-        """按照外部接口文档上报告警（同步调用，故需在后台线程使用）。"""
+    def _send_alarm_report(self, task_id: int, step_id: int, alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None, alarm_count: Optional[int]=None, first_seen: Optional[str]=None, last_seen: Optional[str]=None) -> bool:
+        """按照外部接口文档上报告警（同步调用，故需在后台线程使用）。
+
+        增强：支持重试与可选的聚合字段（alarm_count, first_seen, last_seen）。
+        """
         url = "http://116.204.65.72:8881/gdmp/v1/api/nt/alarm_report"
         payload = {
-            "task_id": task_id or 0,
-            "step_id": step_id or 0,
+            "task_id": task_id if task_id is not None else 0,
+            "step_id": step_id if step_id is not None else 0,
             "alarm_type": alarm_type,
             "alarm_level": alarm_level,
             "alarm_message": alarm_message,
@@ -709,72 +753,110 @@ class InferenceManager:
             payload['camera_ip'] = camera_ip
         if reader_ip:
             payload['reader_ip'] = reader_ip
+        # 聚合字段（可选）
+        if alarm_count is not None:
+            payload['alarm_count'] = int(alarm_count)
+        if first_seen:
+            payload['first_seen'] = first_seen
+        if last_seen:
+            payload['last_seen'] = last_seen
 
         data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                'Content-Type': 'application/json; charset=utf-8',
-                'User-Agent': 'AI-Backend/1.0'
-            },
-            method='POST'
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                resp_text = resp.read().decode('utf-8')
-                try:
-                    j = json.loads(resp_text)
-                    if j.get('code') == 0:
-                        print(f"Alarm reported successfully: task_id={task_id}")
-                        return True
-                    else:
-                        print(f"Alarm report returned non-zero code: {j}")
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'User-Agent': 'AI-Backend/1.0'
+        }
+
+        # 重试逻辑
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp_text = resp.read().decode('utf-8')
+                    try:
+                        j = json.loads(resp_text)
+                        if j.get('code') == 0:
+                            print(f"Alarm reported successfully: task_id={task_id}")
+                            return True
+                        else:
+                            print(f"Alarm report returned non-zero code: {j}")
+                            # 不做立即重试，记录并返回 False
+                            return False
+                    except Exception:
+                        print(f"Alarm report response (non-json): {resp_text}")
                         return False
-                except Exception:
-                    print(f"Alarm report response: {resp_text}")
+            except Exception as e:
+                print(f"Attempt {attempt} failed to send alarm report: {e}")
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                else:
                     return False
-        except Exception as e:
-            print(f"Failed to send alarm report: {e}")
-            return False
 
     def _record_alarm_db(self, task_id: Optional[int], step_id: Optional[Any], alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None) -> None:
-        """在数据库中创建表（若不存在）并插入一条告警记录。"""
+        """在数据库中创建表 `clean_alarm`（若不存在）并插入一条告警记录。
+
+        使用最新字段属性：
+        - alarm_id (SERIAL PRIMARY KEY)
+        - task_id INTEGER
+        - step_id INTEGER
+        - alarm_type TEXT
+        - message TEXT
+        - severity TEXT
+        - resolved BOOLEAN
+        - resolved_by INTEGER
+        - detected_at TIMESTAMP
+        - resolved_at TIMESTAMP
+        """
         try:
             create_sql = '''
-            CREATE TABLE IF NOT EXISTS alarm_record (
-                id SERIAL PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS clean_alarm (
+                alarm_id SERIAL PRIMARY KEY,
                 task_id INTEGER,
-                step_id VARCHAR(64),
+                step_id INTEGER,
                 alarm_type TEXT,
-                alarm_level TEXT,
-                alarm_message TEXT,
-                alarm_time TIMESTAMP,
-                detection_result JSONB,
-                camera_ip TEXT,
-                reader_ip TEXT,
+                message TEXT,
+                severity TEXT,
+                resolved BOOLEAN DEFAULT FALSE,
+                resolved_by INTEGER,
+                detected_at BIGINT,
+                resolved_at BIGINT,
                 created_at TIMESTAMP DEFAULT now()
             )
             '''
             with engine.begin() as conn:
                 conn.execute(text(create_sql))
                 insert_sql = '''
-                INSERT INTO alarm_record (task_id, step_id, alarm_type, alarm_level, alarm_message, alarm_time, detection_result, camera_ip, reader_ip)
-                VALUES (:task_id, :step_id, :alarm_type, :alarm_level, :alarm_message, :alarm_time, :detection_result::jsonb, :camera_ip, :reader_ip)
+                INSERT INTO clean_alarm (task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at)
+                VALUES (:task_id, :step_id, :alarm_type, :message, :severity, :resolved, :resolved_by, :detected_at, :resolved_at)
                 '''
-                conn.execute(text(insert_sql), {
+                params = {
                     'task_id': int(task_id) if task_id is not None else None,
-                    'step_id': str(step_id) if step_id is not None else None,
+                    'step_id': int(step_id) if step_id is not None and str(step_id).isdigit() else None,
                     'alarm_type': alarm_type,
-                    'alarm_level': alarm_level,
-                    'alarm_message': alarm_message,
-                    'alarm_time': datetime.now(),
-                    'detection_result': json.dumps(detection_result or {}),
-                    'camera_ip': camera_ip,
-                    'reader_ip': reader_ip
-                })
+                    'message': alarm_message,
+                    'severity': alarm_level,
+                    'resolved': False,
+                    'resolved_by': None,
+                    'detected_at': int(time.time()),
+                    'resolved_at': None
+                }
+                conn.execute(text(insert_sql), params)
         except Exception as e:
             print(f"_record_alarm_db error: {e}")
+            try:
+                # 尝试打印表结构以协助排查 schema 不匹配
+                with engine.connect() as conn2:
+                    info_sql = text("SELECT column_name, column_default, is_nullable FROM information_schema.columns WHERE table_name = 'clean_alarm'")
+                    res = conn2.execute(info_sql).fetchall()
+                    print("clean_alarm table columns:")
+                    for row in res:
+                        print(row)
+            except Exception as e2:
+                print(f"Failed to fetch clean_alarm schema info: {e2}")
 
     def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
@@ -829,14 +911,15 @@ class InferenceManager:
 
         # 生成关键点 JSON 文件（每个段对应一个 JSON）
         keypoints_path = hls_dir / f"keypoints_{int(start_ts * 1e6)}.json"
-        keypoints_list = [
-            {
+        keypoints_list = []
+        for fd in processed_frames_data:
+            kp = fd.keypoints if hasattr(fd, 'keypoints') else None
+            ir = fd.inference_result if hasattr(fd, 'inference_result') else None
+            keypoints_list.append({
                 "timestamp": fd.timestamp,
-                "keypoints": fd.keypoints,
-                "inference_result": fd.inference_result
-            }
-            for fd in processed_frames_data
-        ]
+                "keypoints": self._make_json_serializable(kp),
+                "inference_result": self._make_json_serializable(ir)
+            })
         with keypoints_path.open('w', encoding='utf-8') as f:
             json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
 
@@ -928,7 +1011,8 @@ class InferenceManager:
                     # 执行多任务并行推理
                     final_frame, all_results = self._execute_inference_pipeline(
                         frame, 
-                        client_queues.task
+                        client_queues.task,
+                        client_id=client_id
                     )
 
                     processed_frame = FrameData(timestamp=ts, frame=final_frame, inference_result=all_results)
@@ -997,6 +1081,7 @@ class InferenceManager:
         with self._lock:
             client_queues = self._get_or_create_client(client_id)
             client_queues.task = task
+            print(f"任务已设置 for client {client_id}: {task}")
             return True
 
     def terminate_task_by_id(self, client_id: str) -> bool:

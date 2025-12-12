@@ -9,6 +9,8 @@ from app.services import ai
 from app.models.frame import HLSSegment
 from app.models.status_messages import get_task_status_response, get_no_task_response
 from app.database import get_db
+from app.database import engine
+from sqlalchemy import text
 import json
 from datetime import datetime
 from pathlib import Path
@@ -339,3 +341,49 @@ async def get_all_keypoints(task_id: int):
         
     finally:
         db.close()
+
+
+@router.get("/{task_id}/alarms")
+async def get_task_alarms(task_id: int):
+    """
+    获取指定任务的所有告警记录（clean_alarm 表）。
+
+    返回最新字段集合：alarm_id, task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at
+    """
+    try:
+        with engine.connect() as conn:
+            sql = text(
+                "SELECT alarm_id, task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at, created_at"
+                " FROM clean_alarm WHERE task_id = :task_id ORDER BY created_at DESC"
+            )
+            res = conn.execute(sql, {"task_id": int(task_id)})
+            rows = res.fetchall()
+
+        alarms = []
+        for r in rows:
+            alarms.append({
+                "alarm_id": r['alarm_id'] if 'alarm_id' in r.keys() else r[0],
+                "task_id": r['task_id'] if 'task_id' in r.keys() else r[1],
+                "step_id": r['step_id'] if 'step_id' in r.keys() else r[2],
+                "alarm_type": r['alarm_type'] if 'alarm_type' in r.keys() else r[3],
+                "message": r['message'] if 'message' in r.keys() else r[4],
+                "severity": r['severity'] if 'severity' in r.keys() else r[5],
+                "resolved": bool(r['resolved']) if 'resolved' in r.keys() else bool(r[6]) if len(r) > 6 else False,
+                "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else (r[7] if len(r) > 7 else None),
+                "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else (int(r[8]) if len(r) > 8 and r[8] is not None else None),
+                "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else (int(r[9]) if len(r) > 9 and r[9] is not None else None),
+                "created_at": r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else (r[10] if len(r) > 10 else None)
+            })
+
+        return {
+            "task_id": task_id,
+            "total": len(alarms),
+            "alarms": alarms
+        }
+    except Exception as e:
+        print(f"Failed to fetch alarms for task {task_id}: {e}")
+        return {
+            "task_id": task_id,
+            "total": 0,
+            "alarms": []
+        }
