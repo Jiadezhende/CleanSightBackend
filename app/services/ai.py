@@ -290,7 +290,6 @@ class InferenceManager:
         self._alarm_thread: Optional[threading.Thread] = None
     
     def _register_default_tasks(self):
-        # return
         """注册默认的推理任务"""
         # return # Test Only
         self._task_registry.register(DetectionTask())
@@ -847,19 +846,70 @@ class InferenceManager:
                 conn.execute(text(insert_sql), params)
         except Exception as e:
             print(f"_record_alarm_db error: {e}")
+            # 尝试回退：根据实际表结构动态构建 INSERT
             try:
-                # 尝试打印表结构以协助排查 schema 不匹配
                 with engine.connect() as conn2:
                     info_sql = text("SELECT column_name, column_default, is_nullable FROM information_schema.columns WHERE table_name = 'clean_alarm'")
                     res = conn2.execute(info_sql).fetchall()
                     print("clean_alarm table columns:")
+                    cols = {}
                     for row in res:
                         print(row)
+                        cols[row[0]] = {
+                            'default': row[1],
+                            'nullable': row[2]
+                        }
+
+                    # 只插入目标参数中存在于表中的列
+                    candidate_params = {
+                        'task_id': int(task_id) if task_id is not None else None,
+                        'step_id': int(step_id) if step_id is not None and str(step_id).isdigit() else None,
+                        'alarm_type': alarm_type,
+                        'message': alarm_message,
+                        'severity': alarm_level,
+                        'resolved': False,
+                        'resolved_by': None,
+                        'detected_at': int(time.time()),
+                        'resolved_at': None
+                    }
+
+                    insert_cols = []
+                    insert_vals = {}
+                    # 使用存在的列填充参数
+                    for k, v in candidate_params.items():
+                        if k in cols:
+                            insert_cols.append(k)
+                            insert_vals[k] = v
+
+                    # 对于表中非空且没有默认值的列，如果未提供则尝试生成合理的占位值
+                    for col_name, meta in cols.items():
+                        if col_name not in insert_cols and meta.get('nullable') == 'NO' and not meta.get('default'):
+                            # 生成占位值：带 id 字段用时间戳，文本列用空串，布尔用 False
+                            if 'id' in col_name or col_name.endswith('_id'):
+                                insert_cols.append(col_name)
+                                insert_vals[col_name] = int(time.time() * 1000)
+                            elif col_name in ('resolved',):
+                                insert_cols.append(col_name)
+                                insert_vals[col_name] = False
+                            else:
+                                insert_cols.append(col_name)
+                                insert_vals[col_name] = ''
+
+                    if not insert_cols:
+                        print("没有可用于回退插入的列，跳过 clean_alarm 回退插入")
+                    else:
+                        cols_sql = ", ".join(insert_cols)
+                        vals_sql = ", ".join([f":{c}" for c in insert_cols])
+                        fallback_sql = f"INSERT INTO clean_alarm ({cols_sql}) VALUES ({vals_sql})"
+                        print(f"尝试回退插入 clean_alarm，使用列: {insert_cols}")
+                        conn2.execute(text(fallback_sql), insert_vals)
+                        print("回退插入 clean_alarm 成功")
             except Exception as e2:
-                print(f"Failed to fetch clean_alarm schema info: {e2}")
+                print(f"Failed to fetch clean_alarm schema info or fallback insert failed: {e2}")
 
     def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
+        print(f"Checking HLS segment flush for client: {client_id}")
         seg_len = client_queues.ca_segment_len
         # 检查是否同时达到阈值
         if len(client_queues.ca_raw) < seg_len or len(client_queues.ca_processed) < seg_len:
@@ -947,37 +997,71 @@ class InferenceManager:
             f.write(f"#EXTINF:{segment_duration:.3f},\n")
             f.write(f"{segment_path.name}\n")
 
-        # 记录到数据库
-        db = next(get_db())
+        # 记录到数据库（使用与告警相同的 SQL 路径：创建表（若不存在）并以参数化 INSERT 写入）
         try:
-            # 记录原始视频段
-            raw_hls_segment = HLSSegment(
-                client_id=client_id,
-                task_id=task_id,
-                segment_path=str(raw_segment_path),
-                playlist_path=str(raw_playlist_path),
-                start_ts=datetime.fromtimestamp(start_ts),
-                end_ts=datetime.fromtimestamp(end_ts)
+            create_sql = '''
+            CREATE TABLE IF NOT EXISTS file_path (
+                _id BIGSERIAL PRIMARY KEY,
+                client_id TEXT,
+                task_id INTEGER,
+                segment_path TEXT,
+                playlist_path TEXT,
+                start_ts BIGINT,
+                end_ts BIGINT,
+                created_at BIGINT
             )
-            db.add(raw_hls_segment)
-            
-            # 记录处理后视频段
-            processed_hls_segment = HLSSegment(
-                client_id=client_id,
-                task_id=task_id,
-                segment_path=str(segment_path),
-                playlist_path=str(playlist_path),
-                start_ts=datetime.fromtimestamp(start_ts),
-                end_ts=datetime.fromtimestamp(end_ts)
-            )
-            db.add(processed_hls_segment)
-            db.commit()
+            '''
+
+            insert_sql = '''
+            INSERT INTO file_path (client_id, task_id, segment_path, playlist_path, start_ts, end_ts, created_at)
+            VALUES (:client_id, :task_id, :segment_path, :playlist_path, :start_ts, :end_ts, :created_at)
+            '''
+
+            # 尝试将 task_id 转为整数，否则使用 NULL
+            try:
+                t_id = int(task_id) if task_id is not None and str(task_id).isdigit() else None
+            except Exception:
+                t_id = None
+
+            params_raw = {
+                'client_id': str(client_id),
+                'task_id': t_id,
+                'segment_path': str(raw_segment_path),
+                'playlist_path': str(raw_playlist_path),
+                'start_ts': int(start_ts),
+                'end_ts': int(end_ts),
+                'created_at': int(time.time())
+            }
+
+            params_processed = {
+                'client_id': str(client_id),
+                'task_id': t_id,
+                'segment_path': str(segment_path),
+                'playlist_path': str(playlist_path),
+                'start_ts': int(start_ts),
+                'end_ts': int(end_ts),
+                'created_at': int(time.time())
+            }
+
+            with engine.begin() as conn:
+                conn.execute(text(create_sql))
+                conn.execute(text(insert_sql), params_raw)
+                conn.execute(text(insert_sql), params_processed)
+
             print(f"已生成原始+处理后 HLS 段 + 关键点 JSON for {client_id}: raw={raw_segment_path.name}, processed={segment_path.name}")
+
         except Exception as e:
-            db.rollback()
             print(f"数据库记录失败 for {client_id}: {e}")
-        finally:
-            db.close()
+            try:
+                # 打印 table schema 以辅助诊断
+                with engine.connect() as conn2:
+                    info_sql = text("SELECT column_name, column_default, is_nullable FROM information_schema.columns WHERE table_name = 'file_path'")
+                    res = conn2.execute(info_sql).fetchall()
+                    print("file_path table columns:")
+                    for row in res:
+                        print(row)
+            except Exception as e2:
+                print(f"Failed to fetch file_path schema info: {e2}")
 
     def _inference_loop(self):
         print("AI 推理服务已启动（多客户端管理：RT/CA 队列）")

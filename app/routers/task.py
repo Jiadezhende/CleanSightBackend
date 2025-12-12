@@ -121,8 +121,8 @@ async def get_task_segments(task_id: int, video_type: str = "processed"):
             segment_info = {
                 "segment_id": seg.id,  # type: ignore
                 "segment_path": str(seg.segment_path),  # type: ignore
-                "start_time": seg.start_ts.isoformat() if seg.start_ts else None,  # type: ignore
-                "end_time": seg.end_ts.isoformat() if seg.end_ts else None,  # type: ignore
+                "start_time": int(seg.start_ts) if seg.start_ts is not None else None,  # type: ignore
+                "end_time": int(seg.end_ts) if seg.end_ts is not None else None,  # type: ignore
                 "client_id": str(seg.client_id)  # type: ignore
             }
             
@@ -206,7 +206,7 @@ async def stream_video_segment(task_id: int, segment_id: int):
     try:
         # 查询段记录
         segment = db.query(HLSSegment).filter(
-            HLSSegment.id == segment_id,
+            HLSSegment._id == segment_id,
             HLSSegment.task_id == task_id
         ).first()
         
@@ -250,7 +250,7 @@ async def get_keypoints_data(task_id: int, segment_id: int):
     try:
         # 查询段记录
         segment = db.query(HLSSegment).filter(
-            HLSSegment.id == segment_id,
+            HLSSegment._id == segment_id,
             HLSSegment.task_id == task_id
         ).first()
         

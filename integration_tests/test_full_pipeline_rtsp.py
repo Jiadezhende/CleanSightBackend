@@ -42,19 +42,15 @@ class IntegrationTest:
     def __init__(
         self,
         task_id: int = 0,
-        client_id: str = "172.16.77.221",
         duration: int = 30,
-        rtsp_url: Optional[str] = None,
         video_path: str = None
     ):
         self.task_id = task_id
-        self.client_id = client_id
+        # client_id will be populated from task.source_ip at runtime
+        self.client_id: Optional[str] = None
         self.duration = duration
-        # RTSP 地址格式固定：使用 client_id 作为 source_id，当未显式提供 rtsp_url 时自动构建
-        if rtsp_url:
-            self.rtsp_url = rtsp_url
-        else:
-            self.rtsp_url = f"rtsp://localhost:8554/live/{self.client_id}"
+        # RTSP 地址将在启动 ffmpeg 时根据数据库中 task.source_ip 自动构建
+        self.rtsp_url: Optional[str] = None
         self.show_visualization = True  # 默认显示可视化窗口
         
         # 设置测试视频路径
@@ -64,8 +60,8 @@ class IntegrationTest:
         else:
             self.video_path = video_path
         
-        # 初始化控制器
-        self.ffmpeg = FFmpegController(self.video_path, self.rtsp_url, protocol="rtsp")
+        # FFmpegController 将在启动时根据实际 rtsp_url 创建
+        self.ffmpeg: Optional[FFmpegController] = None
         self.api = APIClient()
         self.db = DatabaseHelper()
         
@@ -101,16 +97,30 @@ class IntegrationTest:
             raise Exception("后端 API 未运行")
         if not Path(self.video_path).exists():
             raise Exception(f"测试视频不存在: {self.video_path}")
-        self.ffmpeg._find_ffmpeg()
+        # self.ffmpeg._find_ffmpeg()  # 延迟到启动时创建 ffmpeg 实例时检查
     
     def _prepare_test_task(self):
         """准备测试任务"""
         task = self.db.get_task(self.task_id)
         if not task:
-            self.db.create_test_task(self.task_id, source_ip=self.client_id)
+            # 如果任务不存在，使用 task_id 派生一个默认 source_ip（例如 172.16.77.<task_id>）
+            default_source = f"rtsp.test.{self.task_id if self.task_id>0 else 221}"
+            self.db.create_test_task(self.task_id, source_ip=default_source)
     
     def _start_ffmpeg(self):
         """启动 ffmpeg 推流"""
+        # 从数据库读取 task 的 source_ip 作为 client_id，并生成 RTSP 地址
+        task = self.db.get_task(self.task_id)
+        if task and getattr(task, 'source_ip', None):
+            self.client_id = str(task.source_ip)
+        # 生成 RTSP 地址
+        self.rtsp_url = f"rtsp://localhost:8004/live/{self.client_id}"
+
+        # 创建 FFmpegController（延迟创建以使用正确的 rtsp_url）
+        self.ffmpeg = FFmpegController(self.video_path, self.rtsp_url, protocol="rtsp")
+        
+        self.ffmpeg._find_ffmpeg()
+
         if not self.ffmpeg.start():
             raise Exception("ffmpeg 推流启动失败")
     
@@ -149,12 +159,10 @@ def main():
     parser = argparse.ArgumentParser(description="CleanSightBackend 完整流程集成测试")
     parser.add_argument("--task_id", type=int, default=1,
                        help="任务 ID（默认: 1）")
-    parser.add_argument("--client_id", type=str, default="172.16.77.221",
-                       help="客户端 ID")
+    # 不再需要提供 client_id，测试会根据 task_id 从数据库读取 source_ip 自动生成
     parser.add_argument("--duration", type=int, default=30,
                        help="测试时长（秒，默认: 30）")
-    parser.add_argument("--rtsp_url", type=str, default="rtsp://localhost:8554/live/172.16.77.221",
-                       help="RTSP 推流地址")
+    # 不再需要手动提供 rtsp_url，测试会根据 task_id 从数据库读取 source_ip 自动生成
     parser.add_argument("--video_path", type=str, default=None,
                        help="测试视频路径（默认: test/test_video.mp4）")
     parser.add_argument("--no-window", action="store_true",
@@ -164,9 +172,7 @@ def main():
     
     test = IntegrationTest(
         task_id=args.task_id,
-        client_id=args.client_id,
         duration=args.duration,
-        rtsp_url=args.rtsp_url,
         video_path=args.video_path
     )
     

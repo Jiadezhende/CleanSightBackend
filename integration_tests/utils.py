@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
+from urllib.parse import urlparse
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -56,7 +57,7 @@ class FFmpegController:
         if not Path(self.video_path).exists():
             print(f"❌ 测试视频不存在: {self.video_path}")
             return False
-        
+
         if self.protocol == "rtmp":
             cmd = [
                 self.ffmpeg_path,
@@ -88,20 +89,40 @@ class FFmpegController:
         
         try:
             creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            # 打印命令以便调试
+            try:
+                print("FFmpeg cmd:", " ".join(cmd))
+            except Exception:
+                pass
+
+            # 在 Ubuntu 上捕获 stderr 以便诊断失败原因
+            # 不将 stderr 保留为 PIPE（若不读取会导致缓冲区填满，从而使 ffmpeg 阻塞）
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creation_flags
             )
-            
+
             # 等待推流建立
-            time.sleep(3)
-            
+            print(f"正在向{self.stream_url}推流...")
+
+            time.sleep(5)
+
             if self.process.poll() is not None:
+                # 读取并打印 stderr 帮助定位错误（进程已退出）
+                stderr = ""
+                try:
+                    if self.process.stderr:
+                        stderr = self.process.stderr.read().decode(errors='ignore')
+                except Exception:
+                    stderr = "<failed to read stderr>"
+
                 print(f"❌ ffmpeg 推流进程已退出 (退出码: {self.process.returncode})")
+                if stderr:
+                    print("ffmpeg stderr:\n", stderr)
                 return False
-            
+
             print(f"✅ ffmpeg {self.protocol.upper()} 推流已启动: {self.stream_url}")
             return True
         except Exception as e:
@@ -143,7 +164,7 @@ class DatabaseHelper:
             db.close()
     
     @staticmethod
-    def create_test_task(task_id: int = 0, source_ip: str = "127.0.0.1") -> bool:
+    def create_test_task(task_id: int = 0, source_ip: str = "test") -> bool:
         """创建测试任务（如果不存在）"""
         db = next(get_db())
         try:
@@ -219,16 +240,23 @@ class APIClient:
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """通用请求方法"""
         url = f"{self.base_url}{endpoint}"
-        response = requests.request(method, url, timeout=10, **kwargs)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.request(method, url, timeout=10, **kwargs)
+            response.raise_for_status()
+            try:
+                return response.json()
+            except Exception:
+                return {"text": response.text}
+        except Exception as e:
+            # 捕获超时/网络错误，返回包含错误信息的结构，调用方可据此优雅停止任务
+            return {"error": str(e)}
     
     def check_health(self) -> bool:
         """检查 API 是否可用"""
         try:
             response = requests.get(f"{self.base_url}/ai/status", timeout=2)
             return response.status_code == 200
-        except:
+        except Exception:
             return False
     
     def start_rtmp_capture(self, client_id: str, rtmp_url: str, fps: int = 30) -> Dict[str, Any]:
@@ -240,16 +268,22 @@ class APIClient:
             "fps": fps
         }
         
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
     
     def stop_rtmp_capture(self, client_id: str) -> Dict[str, Any]:
         """停止 RTMP 捕获"""
         url = f"{self.base_url}/inspection/stop_rtmp_stream?client_id={client_id}"
-        response = requests.post(url, timeout=5)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.post(url, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
     
     def start_rtsp_capture(self, client_id: str, rtsp_url: str, fps: int = 30) -> Dict[str, Any]:
         """启动 RTSP 捕获"""
@@ -260,38 +294,56 @@ class APIClient:
             "fps": fps
         }
         
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
     
     def stop_rtsp_capture(self, client_id: str) -> Dict[str, Any]:
         """停止 RTSP 捕获"""
         url = f"{self.base_url}/inspection/stop_rtsp_stream?client_id={client_id}"
-        response = requests.post(url, timeout=5)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.post(url, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
     
     def start_task(self, task_id: int) -> Dict[str, Any]:
         """加载任务到 AI 服务"""
         url = f"{self.base_url}/ai/load_task/{task_id}"
-        response = requests.get(url, timeout=10)
-        print(f"加载任务响应: {response.text}")
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.get(url, timeout=10)
+            print(f"加载任务响应: {response.text}")
+            response.raise_for_status()
+            try:
+                return response.json()
+            except Exception:
+                return {"text": response.text}
+        except Exception as e:
+            return {"error": str(e)}
     
     def terminate_task(self, client_id: str) -> Dict[str, Any]:
         """终止任务（通过 client_id）"""
         url = f"{self.base_url}/ai/terminate_task/{client_id}"
-        response = requests.post(url, timeout=5)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.post(url, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
     
     def get_ai_status(self) -> Dict[str, Any]:
         """获取 AI 服务状态"""
         url = f"{self.base_url}/ai/status"
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
 
 
 def check_hls_files(client_id: str, task_id: int) -> Dict[str, Any]:

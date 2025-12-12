@@ -48,13 +48,14 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
     - `yolo_detection.py`: 内镜弯折检测器
     - `yolo_task.py`: 内镜弯折检测任务
   - `example_custom_task.py`: 自定义任务示例
+  - `task.py`: 任务管理和视频追溯
 - `test/`: 测试客户端代码，用于上传视频帧和显示推理结果。
 - `docs/`: 项目文档
   - `AI_INFERENCE_ARCHITECTURE.md`: 推理架构说明
   - `QUICK_START_CUSTOM_TASK.md`: 自定义任务快速开始
   - `REFACTORING_SUMMARY.md`: 架构重构总结
 
-RTMP 服务独立运行，使用 nginx-rtmp 提供视频流中转功能。配置文件位于 `nginx-rtmp/` 目录。
+RTMP 服务独立运行，使用 mediamtx 提供视频流中转功能。配置文件位于 [mediamtx_v1.15.4](mediamtx_v1.15.4) (for Windows Local Test), [mediamtx_v1.15.5_linux_amd64](mediamtx_v1.15.5_linux_amd64)(for Linux Remote Test)。
 
 ## Quick Start for app
 
