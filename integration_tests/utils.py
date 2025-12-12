@@ -274,7 +274,8 @@ class APIClient:
     def start_task(self, task_id: int) -> Dict[str, Any]:
         """加载任务到 AI 服务"""
         url = f"{self.base_url}/ai/load_task/{task_id}"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=10)
+        print(f"加载任务响应: {response.text}")
         response.raise_for_status()
         return response.json()
     

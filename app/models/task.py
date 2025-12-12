@@ -19,6 +19,7 @@ class Task(BaseModel):
     # 以下为测漏指标
     bending: bool  # 内镜弯曲
     bubble_detected: bool  # 气泡检测 (持续监测)
+    bending_count: int = 0  # 弯折计数
 
 # TODO: 数据库已实现初始化任务的相关脚本，后端只需做更新工作
 class DBTask(Base):

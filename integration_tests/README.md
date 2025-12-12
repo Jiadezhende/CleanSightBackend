@@ -69,7 +69,7 @@ python integration_tests/test_full_pipeline.py --task_id 0 --duration 60 --clien
 ### 参数说明
 
 - `--task_id`: 要测试的任务 ID（默认: 0）
-- `--client_id`: 客户端标识符（默认: integration_test_client）
+- `--client_id`: 客户端标识符（默认：172.16.77.221，请注意推流地址应与客户端id一致）
 - `--duration`: 测试时长秒数（默认: 30）
 - `--rtmp_url`: RTMP 推流地址（默认: rtmp://localhost:1935/live/test）
 - `--video_path`: 测试视频路径（默认: test/test_video.mp4）

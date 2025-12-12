@@ -23,7 +23,7 @@ import time
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -42,15 +42,19 @@ class IntegrationTest:
     def __init__(
         self,
         task_id: int = 0,
-        client_id: str = "integration_test_client",
+        client_id: str = "172.16.77.221",
         duration: int = 30,
-        rtsp_url: str = "rtsp://localhost:8554/live/test",
+        rtsp_url: Optional[str] = None,
         video_path: str = None
     ):
         self.task_id = task_id
         self.client_id = client_id
         self.duration = duration
-        self.rtsp_url = rtsp_url
+        # RTSP 地址格式固定：使用 client_id 作为 source_id，当未显式提供 rtsp_url 时自动构建
+        if rtsp_url:
+            self.rtsp_url = rtsp_url
+        else:
+            self.rtsp_url = f"rtsp://localhost:8554/live/{self.client_id}"
         self.show_visualization = True  # 默认显示可视化窗口
         
         # 设置测试视频路径
@@ -77,8 +81,10 @@ class IntegrationTest:
             self._prepare_test_task()
             self._start_ffmpeg()
             time.sleep(5)  # 等待推流稳定
+            print("加载任务")
             self._start_task()
             self._start_rtsp_capture()
+            print("开始推理测试客户端")
             asyncio.run(self._run_inference_test())
             
             return len(self.errors) == 0
@@ -143,11 +149,11 @@ def main():
     parser = argparse.ArgumentParser(description="CleanSightBackend 完整流程集成测试")
     parser.add_argument("--task_id", type=int, default=1,
                        help="任务 ID（默认: 1）")
-    parser.add_argument("--client_id", type=str, default="integration_test_client",
+    parser.add_argument("--client_id", type=str, default="172.16.77.221",
                        help="客户端 ID")
     parser.add_argument("--duration", type=int, default=30,
                        help="测试时长（秒，默认: 30）")
-    parser.add_argument("--rtsp_url", type=str, default="rtsp://localhost:8554/live/test",
+    parser.add_argument("--rtsp_url", type=str, default="rtsp://localhost:8554/live/172.16.77.221",
                        help="RTSP 推流地址")
     parser.add_argument("--video_path", type=str, default=None,
                        help="测试视频路径（默认: test/test_video.mp4）")
