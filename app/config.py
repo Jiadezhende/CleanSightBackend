@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # 服务配置
     server_host: str = "127.0.0.1"  # 默认本地访问，生产环境建议设置为 "0.0.0.0"
     server_port: int = 8000
+    # file_path 插入接口（用于把 HLS 段信息发送到无代码平台）
+    # 如果为空，则默认使用当前服务的 /api/file_path_insert
+    file_path_insert_url: str = ""
     
     @model_validator(mode='after')
     def check_required_fields(self):

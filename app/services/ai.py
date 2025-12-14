@@ -1043,25 +1043,65 @@ class InferenceManager:
                 'created_at': int(time.time())
             }
 
-            with engine.begin() as conn:
-                conn.execute(text(create_sql))
-                conn.execute(text(insert_sql), params_raw)
-                conn.execute(text(insert_sql), params_processed)
+            # 调用外部 file_path 插入接口，避免本服务直接生成主键 id
+            insert_url = settings.file_path_insert_url or f"http://116.204.65.72:8881/gdmp/v1/api/nt/file_path_insert"
+
+            payload_raw = {
+                'client_id': str(client_id),
+                'task_id': t_id,
+                'segment_path': str(raw_segment_path),
+                'playlist_path': str(raw_playlist_path),
+                'start_ts': int(start_ts),
+                'end_ts': int(end_ts)
+            }
+
+            payload_processed = {
+                'client_id': str(client_id),
+                'task_id': t_id,
+                'segment_path': str(segment_path),
+                'playlist_path': str(playlist_path),
+                'start_ts': int(start_ts),
+                'end_ts': int(end_ts)
+            }
+
+            # 使用 urllib 发送 POST 请求，带简单重试逻辑
+            def post_json(url, data, retries=3, timeout=10):
+                jd = json.dumps(data, ensure_ascii=False).encode('utf-8')
+                headers = {'Content-Type': 'application/json; charset=utf-8'}
+                attempt = 0
+                backoff = 1.0
+                while attempt < retries:
+                    attempt += 1
+                    try:
+                        req = urllib.request.Request(url, data=jd, headers=headers, method='POST')
+                        with urllib.request.urlopen(req, timeout=timeout) as resp:
+                            body = resp.read().decode('utf-8')
+                            return resp.getcode(), body
+                    except Exception as e:
+                        print(f"Attempt {attempt} to POST to {url} failed: {e}")
+                        if attempt < retries:
+                            time.sleep(backoff)
+                            backoff *= 2
+                        else:
+                            return None, str(e)
+
+            code1, body1 = post_json(insert_url, payload_raw)
+            code2, body2 = post_json(insert_url, payload_processed)
+
+            if code1 and (200 <= code1 < 300):
+                print(f"file_path insert raw succeeded: {code1} {body1}")
+            else:
+                print(f"file_path insert raw failed: {code1} {body1}")
+
+            if code2 and (200 <= code2 < 300):
+                print(f"file_path insert processed succeeded: {code2} {body2}")
+            else:
+                print(f"file_path insert processed failed: {code2} {body2}")
 
             print(f"已生成原始+处理后 HLS 段 + 关键点 JSON for {client_id}: raw={raw_segment_path.name}, processed={segment_path.name}")
 
         except Exception as e:
-            print(f"数据库记录失败 for {client_id}: {e}")
-            try:
-                # 打印 table schema 以辅助诊断
-                with engine.connect() as conn2:
-                    info_sql = text("SELECT column_name, column_default, is_nullable FROM information_schema.columns WHERE table_name = 'file_path'")
-                    res = conn2.execute(info_sql).fetchall()
-                    print("file_path table columns:")
-                    for row in res:
-                        print(row)
-            except Exception as e2:
-                print(f"Failed to fetch file_path schema info: {e2}")
+            print(f"HLS 插入接口调用失败 for {client_id}: {e}")
 
     def _inference_loop(self):
         print("AI 推理服务已启动（多客户端管理：RT/CA 队列）")
