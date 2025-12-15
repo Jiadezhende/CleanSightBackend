@@ -60,9 +60,9 @@ class EndoscopeBendingDetector:
         frame: np.ndarray,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45
-    ) -> Tuple[np.ndarray, List[Dict[str, Any]], bool]:
+    ) -> Tuple[List[Dict[str, Any]], bool]:
         """
-        检测内镜是否弯折
+        检测内镜是否弯折（仅返回检测结果，不绘制）
         
         Args:
             frame: 输入图像
@@ -70,7 +70,7 @@ class EndoscopeBendingDetector:
             iou_threshold: IOU 阈值
             
         Returns:
-            (标注后的帧, 检测结果列表, 是否检测到弯折)
+            (检测结果列表, 是否检测到弯折)
         """
         if self.model is None:
             raise RuntimeError("模型未加载")
@@ -85,7 +85,6 @@ class EndoscopeBendingDetector:
         
         # 解析结果
         detections = []
-        annotated_frame = frame.copy()
         bending_detected = False
         
         if results and len(results) > 0:
@@ -115,40 +114,8 @@ class EndoscopeBendingDetector:
                     # 假设模型训练时"bent"或"bending"表示弯折
                     if "bent" in class_name.lower() or "bending" in class_name.lower():
                         bending_detected = True
-                    
-                    # 在帧上绘制检测框
-                    x1, y1, x2, y2 = detection["bbox"]
-                    color = (0, 0, 255) if bending_detected else (0, 255, 0)
-                    
-                    # 绘制边界框
-                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                    
-                    # 绘制标签
-                    label = f"{class_name} {conf:.2f}"
-                    label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    label_y = max(y1 - 10, label_size[1])
-                    
-                    # 标签背景
-                    cv2.rectangle(
-                        annotated_frame,
-                        (x1, label_y - label_size[1] - 5),
-                        (x1 + label_size[0], label_y + 5),
-                        color,
-                        -1
-                    )
-                    
-                    # 标签文字
-                    cv2.putText(
-                        annotated_frame,
-                        label,
-                        (x1, label_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 255),
-                        1
-                    )
         
-        return annotated_frame, detections, bending_detected
+        return detections, bending_detected
 
 
 # 单例模式
