@@ -61,7 +61,7 @@ class IntegrationTest:
         
         # 初始化控制器
         self.ffmpeg = FFmpegController(self.video_path, self.rtsp_url, protocol="rtsp")
-        self.api = APIClient()
+        self.api = APIClient(base_url="http://36.103.203.206:8000")
         self.db = DatabaseHelper()
         
         # 简单状态跟踪
@@ -137,7 +137,7 @@ class IntegrationTest:
     async def _run_inference_test(self):
         """运行推理测试"""
         print("启动推理结果可视化客户端...")
-        viewer = InferenceViewer(self.client_id, show_window=self.show_visualization)
+        viewer = InferenceViewer(self.client_id, show_window=self.show_visualization,base_port="36.103.203.206:8000")
         await viewer.connect_and_display(self.duration)
     
 

@@ -73,6 +73,7 @@ class FFmpegController:
         elif self.protocol == "rtsp":
             cmd = [
                 self.ffmpeg_path,
+                '-an',
                 '-re',
                 '-stream_loop', '-1',  # 循环播放
                 '-i', self.video_path,

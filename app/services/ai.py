@@ -1288,6 +1288,7 @@ def get_result(client_id: str, as_model: bool = False):
 
 
 def remove_client(client_id: str):
+    print(f"Removing client: {client_id}")
     manager.remove_client(client_id)
 
 

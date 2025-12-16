@@ -9,16 +9,17 @@ from datetime import datetime, timedelta
 
 
 class InferenceViewer:
-    def __init__(self, client_id, show_window=True):
+    def __init__(self, client_id, show_window=True,base_port="localhost:8000"):
         self.client_id = client_id
         self.frame_count = 0
         self.start_time = None
         self.last_print_time = 0
         self.show_window = show_window
         self.window_name = f"AI Inference Result - {client_id}"
+        self.base_port = base_port
     
     async def connect_and_display(self, duration_seconds=None):
-        ws_url = f"ws://localhost:8000/ai/video?client_id={self.client_id}"
+        ws_url = f"ws://{self.base_port}/ai/video?client_id={self.client_id}"
         print(f"🔗 连接到 WebSocket: {ws_url}")
         
         self.start_time = datetime.now()
