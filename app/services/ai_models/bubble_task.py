@@ -1,7 +1,7 @@
 """
-内镜弯折检测任务
+气泡检测任务
 
-使用 YOLO 模型检测内镜是否弯折，并更新清洗任务的弯折计数
+使用 YOLO 模型检测内镜清洗过程中的气泡，并更新清洗任务的气泡计数
 """
 
 import cv2
@@ -9,11 +9,11 @@ import numpy as np
 from typing import Dict, Any, List, Optional
 
 from app.services.ai import InferenceTask, InferenceResult
-from app.services.ai_models.yolo_detection import get_detector
+from app.services.ai_models.bubble_detection import get_bubble_detector
 
 
-class EndoscopeBendingDetectionTask(InferenceTask):
-    """内镜弯折检测任务"""
+class BubbleDetectionTask(InferenceTask):
+    """气泡检测任务"""
     
     def __init__(
         self, 
@@ -23,25 +23,27 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         enabled: bool = True
     ):
         """
-        初始化内镜弯折检测任务
+        初始化气泡检测任务
         
         Args:
             model_path: YOLO 模型路径，如果为 None 则从配置读取
-            conf_threshold: 置信度阈值 (0.0-1.0)，如果为 None 则从配置读取
-            iou_threshold: IOU 阈值 (0.0-1.0)，如果为 None 则从配置读取
+            conf_threshold: 置信度阈值 (0.0-1.0)，如果为 None 则使用默认值 0.25
+            iou_threshold: IOU 阈值 (0.0-1.0)，如果为 None 则使用默认值 0.45
             enabled: 是否启用此任务
         """
-        super().__init__(name="endoscope_bending_detection", enabled=enabled)
+        super().__init__(name="bubble_detection", enabled=enabled)
         
         # 从配置读取默认值
-        if model_path is None or conf_threshold is None or iou_threshold is None:
+        if model_path is None:
             from app.config import settings
-            if model_path is None:
-                model_path = settings.yolo_model_path
-            if conf_threshold is None:
-                conf_threshold = settings.yolo_conf_threshold
-            if iou_threshold is None:
-                iou_threshold = settings.yolo_iou_threshold
+            # 尝试使用专门的气泡检测模型配置，否则使用通用 YOLO 配置
+            model_path = getattr(settings, 'bubble_model_path', settings.yolo_model_path)
+        
+        # 使用气泡检测的默认阈值
+        if conf_threshold is None:
+            conf_threshold = 0.25  # 气泡检测置信度阈值
+        if iou_threshold is None:
+            iou_threshold = 0.45  # NMS IOU 阈值
         
         self.model_path = model_path
         self.conf_threshold = conf_threshold
@@ -55,30 +57,30 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         """确保模型已加载"""
         if not self._model_loaded:
             try:
-                self.detector = get_detector(self.model_path)
+                self.detector = get_bubble_detector(self.model_path)
                 self._model_loaded = True
-                print(f"内镜弯折检测模型已加载: {self.model_path}")
+                print(f"气泡检测模型已加载: {self.model_path}")
             except Exception as e:
-                print(f"内镜弯折检测模型加载失败: {e}")
+                print(f"气泡检测模型加载失败: {e}")
                 raise
     
     def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
         """
-        执行内镜弯折检测
+        执行气泡检测
         
         Args:
             frame: 输入图像
             context: 上下文信息，包含清洗任务对象
             
         Returns:
-            检测结果，包含是否检测到弯折、检测框等信息
+            检测结果，包含是否检测到气泡、检测框、气泡数量等信息
         """
         try:
             # 确保模型已加载
             self._ensure_model_loaded()
             
             # 执行检测（仅获取检测结果，不绘制）
-            detections, bending_detected = self.detector.detect(
+            detections, bubble_detected, bubble_count = self.detector.detect(
                 frame,
                 conf_threshold=self.conf_threshold,
                 iou_threshold=self.iou_threshold
@@ -87,36 +89,40 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             # 获取清洗任务对象
             task = context.get("task")
             
-            # 如果检测到弯折且有任务对象，更新弯折计数
-            if bending_detected and task:
-                # 更新任务的弯折计数
-                task.bending_count += 1
-                print(f"检测到内镜弯折！任务 {task.task_id} 弯折计数: {task.bending_count}")
+            # 如果检测到气泡且有任务对象，更新气泡计数
+            # 注意：这里可以根据业务需求决定是累计总气泡数还是记录帧数
+            if bubble_detected and task:
+                # 这里假设任务对象有 bubble_count 属性
+                # 如果没有，需要在 Task 模型中添加此字段
+                if not hasattr(task, 'bubble_count'):
+                    task.bubble_count = 0
+                task.bubble_count += bubble_count
+                print(f"检测到 {bubble_count} 个气泡！任务 {task.task_id} 气泡总计: {task.bubble_count}")
             
             return {
                 "success": True,
-                "bending_detected": bending_detected,
+                "bubble_detected": bubble_detected,
                 "detections": detections,
-                "detection_count": len(detections),
-                "bending_count": task.bending_count if task else 0
+                "bubble_count": bubble_count,
+                "total_bubble_count": task.bubble_count if task and hasattr(task, 'bubble_count') else 0
             }
             
         except Exception as e:
-            print(f"内镜弯折检测错误: {e}")
+            print(f"气泡检测错误: {e}")
             import traceback
             traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
-                "bending_detected": False,
+                "bubble_detected": False,
                 "detections": [],
-                "detection_count": 0,
-                "bending_count": 0
+                "bubble_count": 0,
+                "total_bubble_count": 0
             }
     
     def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
         """
-        可视化内镜弯折检测结果（在此处绘制检测框和状态信息）
+        可视化气泡检测结果（在此处绘制检测框和状态信息）
         
         Args:
             frame: 输入图像
@@ -132,14 +138,15 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         
         # 获取检测结果
         detections = result.get("detections", [])
-        bending_detected = result.get("bending_detected", False)
-        bending_count = result.get("bending_count", 0)
+        bubble_detected = result.get("bubble_detected", False)
+        bubble_count = result.get("bubble_count", 0)
+        total_bubble_count = result.get("total_bubble_count", 0)
         
         # 颜色定义（BGR格式）
-        BENDING_COLOR = (0, 0, 255)   # 红色（弯折）
-        NORMAL_COLOR = (0, 255, 0)    # 绿色（正常）
+        BUBBLE_COLOR = (0, 255, 255)  # 黄色
+        NORMAL_COLOR = (0, 255, 0)    # 绿色
+        WARNING_COLOR = (0, 165, 255)  # 橙色
         TEXT_BG_COLOR = (0, 0, 0)     # 黑色
-        TEXT_COLOR = (255, 255, 255)  # 白色
         
         # 绘制所有检测框
         for detection in detections:
@@ -147,12 +154,8 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             conf = detection["confidence"]
             class_name = detection["class_name"]
             
-            # 根据是否弯折选择颜色
-            is_bending = "bent" in class_name.lower() or "bending" in class_name.lower()
-            box_color = BENDING_COLOR if is_bending else NORMAL_COLOR
-            
             # 绘制边界框
-            cv2.rectangle(result_frame, (x1, y1), (x2, y2), box_color, 2)
+            cv2.rectangle(result_frame, (x1, y1), (x2, y2), BUBBLE_COLOR, 2)
             
             # 绘制标签
             label = f"{class_name} {conf:.2f}"
@@ -164,36 +167,36 @@ class EndoscopeBendingDetectionTask(InferenceTask):
                 result_frame,
                 (x1, label_y - label_h - 5),
                 (x1 + label_w + 6, label_y + 2),
-                box_color,
+                BUBBLE_COLOR,
                 -1
             )
             
-            # 标签文字（白色更醒目）
+            # 标签文字（黑色更清晰）
             cv2.putText(
                 result_frame,
                 label,
                 (x1 + 3, label_y - 3),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                TEXT_COLOR,
+                TEXT_BG_COLOR,
                 1,
                 cv2.LINE_AA  # 抗锯齿
             )
         
-        # 在左上角显示弯折状态（简化逻辑）
-        if bending_detected:
-            status_text = f"BENDING! Count: {bending_count}"
-            status_color = BENDING_COLOR
+        # 在右上角显示气泡状态（简化信息）
+        if bubble_detected:
+            status_text = f"Bubbles: {bubble_count} (Total: {total_bubble_count})"
+            status_color = WARNING_COLOR if bubble_count > 5 else BUBBLE_COLOR
         else:
-            status_text = f"Normal (Count: {bending_count})"
+            status_text = f"No Bubbles (Total: {total_bubble_count})"
             status_color = NORMAL_COLOR
         
-        # 绘制状态栏（左上角，使用高效方法）
-        self._draw_status_bar(result_frame, status_text, status_color, position="top-left")
+        # 绘制状态栏（右上角，使用高效方法）
+        self._draw_status_bar(result_frame, status_text, status_color, position="top-right")
         
         return result_frame
     
-    def _draw_status_bar(self, frame: np.ndarray, text: str, color: tuple, position: str = "top-left"):
+    def _draw_status_bar(self, frame: np.ndarray, text: str, color: tuple, position: str = "top-right"):
         """
         绘制状态栏的辅助方法
         
@@ -249,7 +252,7 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         )
     
     def requires_context(self) -> List[str]:
-        """内镜弯折检测是独立任务，不依赖其他任务"""
+        """气泡检测是独立任务，不依赖其他任务"""
         return []
     
     def set_thresholds(self, conf_threshold: float = None, iou_threshold: float = None):
@@ -265,4 +268,4 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         if iou_threshold is not None:
             self.iou_threshold = max(0.0, min(1.0, iou_threshold))
         
-        print(f"内镜弯折检测阈值已更新: conf={self.conf_threshold}, iou={self.iou_threshold}")
+        print(f"气泡检测阈值已更新: conf={self.conf_threshold}, iou={self.iou_threshold}")

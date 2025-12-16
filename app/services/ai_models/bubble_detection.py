@@ -1,7 +1,7 @@
 """
-YOLO 内镜弯折检测服务
+YOLO 气泡检测服务
 
-使用 YOLOv8 模型检测内镜是否弯折
+使用 YOLOv8 模型检测内镜清洗过程中的气泡
 """
 
 import cv2
@@ -10,19 +10,20 @@ from typing import Dict, Any, List, Tuple, Optional
 from pathlib import Path
 
 
-class EndoscopeBendingDetector:
-    """内镜弯折检测器"""
+class BubbleDetector:
+    """气泡检测器"""
     
     def __init__(self, model_path: Optional[str] = None):
         """
-        初始化内镜弯折检测器
+        初始化气泡检测器
         
         Args:
             model_path: YOLO 模型文件路径，如果为 None 则从配置读取
         """
         if model_path is None:
             from app.config import settings
-            model_path = settings.yolo_model_path
+            # 使用专门的气泡检测模型路径配置
+            model_path = getattr(settings, 'bubble_model_path', settings.yolo_model_path)
             
         self.model_path = model_path
         self.model = None
@@ -38,7 +39,7 @@ class EndoscopeBendingDetector:
             if not model_path.exists():
                 raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
             
-            print(f"正在加载内镜弯折检测模型: {self.model_path}")
+            print(f"正在加载气泡检测模型: {self.model_path}")
             self.model = YOLO(self.model_path)
             
             # 获取类别名称
@@ -60,9 +61,9 @@ class EndoscopeBendingDetector:
         frame: np.ndarray,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45
-    ) -> Tuple[List[Dict[str, Any]], bool]:
+    ) -> Tuple[List[Dict[str, Any]], bool, int]:
         """
-        检测内镜是否弯折（仅返回检测结果，不绘制）
+        检测气泡（仅返回检测结果，不绘制）
         
         Args:
             frame: 输入图像
@@ -70,7 +71,7 @@ class EndoscopeBendingDetector:
             iou_threshold: IOU 阈值
             
         Returns:
-            (检测结果列表, 是否检测到弯折)
+            (检测结果列表, 是否检测到气泡, 气泡数量)
         """
         if self.model is None:
             raise RuntimeError("模型未加载")
@@ -85,7 +86,8 @@ class EndoscopeBendingDetector:
         
         # 解析结果
         detections = []
-        bending_detected = False
+        bubble_detected = False
+        bubble_count = 0
         
         if results and len(results) > 0:
             result = results[0]
@@ -93,13 +95,15 @@ class EndoscopeBendingDetector:
             # 获取检测框
             if result.boxes is not None and len(result.boxes) > 0:
                 boxes = result.boxes.cpu().numpy()
+                bubble_count = len(boxes)
+                bubble_detected = True
                 
                 for box in boxes:
                     # 提取信息
                     xyxy = box.xyxy[0]  # [x1, y1, x2, y2]
                     conf = float(box.conf[0])
                     cls = int(box.cls[0])
-                    class_name = self.class_names.get(cls, f"class_{cls}")
+                    class_name = self.class_names.get(cls, f"bubble")
                     
                     # 构建检测结果
                     detection = {
@@ -109,32 +113,27 @@ class EndoscopeBendingDetector:
                         "class_name": class_name,
                     }
                     detections.append(detection)
-                    
-                    # 检查是否为弯折类别（根据您的模型类别定义）
-                    # 假设模型训练时"bent"或"bending"表示弯折
-                    if "bent" in class_name.lower() or "bending" in class_name.lower():
-                        bending_detected = True
         
-        return detections, bending_detected
+        return detections, bubble_detected, bubble_count
 
 
 # 单例模式
-_detector_instance = None
+_bubble_detector_instance = None
 
 
-def get_detector(model_path: str = None) -> EndoscopeBendingDetector:
+def get_bubble_detector(model_path: str = None) -> BubbleDetector:
     """
-    获取内镜弯折检测器单例
+    获取气泡检测器单例
     
     Args:
         model_path: 模型路径（可选，如果为 None 则从配置读取）
         
     Returns:
-        EndoscopeBendingDetector 实例
+        BubbleDetector 实例
     """
-    global _detector_instance
+    global _bubble_detector_instance
     
-    if _detector_instance is None:
-        _detector_instance = EndoscopeBendingDetector(model_path)
+    if _bubble_detector_instance is None:
+        _bubble_detector_instance = BubbleDetector(model_path)
     
-    return _detector_instance
+    return _bubble_detector_instance

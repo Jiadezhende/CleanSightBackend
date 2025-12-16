@@ -292,8 +292,8 @@ class InferenceManager:
     def _register_default_tasks(self):
         """注册默认的推理任务"""
         # return # Test Only
-        self._task_registry.register(DetectionTask())
-        self._task_registry.register(MotionTask())
+        # self._task_registry.register(DetectionTask())
+        # self._task_registry.register(MotionTask())
         
         # 注册内镜弯折检测任务
         try:
@@ -309,8 +309,21 @@ class InferenceManager:
         except Exception as e:
             print(f"内镜弯折检测任务注册失败 (可能未安装 ultralytics): {e}")
         
+        # 注册气泡检测任务
+        try:
+            from app.services.ai_models.bubble_task import BubbleDetectionTask
+            bubble_task = BubbleDetectionTask(
+                model_path=settings.bubble_model_path,
+                conf_threshold=settings.bubble_conf_threshold,
+                iou_threshold=settings.bubble_iou_threshold,
+                enabled=True  # 默认启用，可通过 enable_task 控制
+            )
+            self._task_registry.register(bubble_task)
+            print(f"气泡检测任务已注册 (模型: {settings.bubble_model_path})")
+        except Exception as e:
+            print(f"气泡检测任务注册失败 (可能未安装 ultralytics): {e}")
+        
         # 未来可以在这里添加更多任务
-        # self._task_registry.register(BubbleDetectionTask())
         # self._task_registry.register(CleanlinessTask())
     
     def register_task(self, task: InferenceTask):
