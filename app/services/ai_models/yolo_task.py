@@ -113,6 +113,31 @@ class EndoscopeBendingDetectionTask(InferenceTask):
                 "detection_count": 0,
                 "bending_count": 0
             }
+
+    def infer_batch(self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]) -> List[InferenceResult]:
+        """利用 detector 的批量接口进行推理，返回每帧的结果列表。"""
+        try:
+            self._ensure_model_loaded()
+            batch_results = self.detector.detect_batch(frames, conf_threshold=self.conf_threshold, iou_threshold=self.iou_threshold)
+            out: List[InferenceResult] = []
+            for (detections, bending_detected), ctx in zip(batch_results, contexts):
+                task = ctx.get('task')
+                if bending_detected and task:
+                    task.bending_count += 1
+                out.append({
+                    "success": True,
+                    "bending_detected": bending_detected,
+                    "detections": detections,
+                    "detection_count": len(detections),
+                    "bending_count": task.bending_count if task else 0
+                })
+            return out
+        except Exception as e:
+            print(f"内镜弯折批量检测错误: {e}")
+            import traceback
+            traceback.print_exc()
+            # 回退：逐帧调用 infer
+            return [self.infer(f, c) for f, c in zip(frames, contexts)]
     
     def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
         """

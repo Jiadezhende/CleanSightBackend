@@ -117,6 +117,56 @@ class EndoscopeBendingDetector:
         
         return detections, bending_detected
 
+    def detect_batch(
+        self,
+        frames: List[np.ndarray],
+        conf_threshold: float = 0.25,
+        iou_threshold: float = 0.45
+    ) -> List[Tuple[List[Dict[str, Any]], bool]]:
+        """对一批图像执行检测，返回每帧的 (detections, bending_detected)。
+        使用 ultralytics 的 batch 支持以减少 GPU 调用开销。
+        """
+        if self.model is None:
+            raise RuntimeError("模型未加载")
+
+        results = self.model.predict(
+            frames,
+            conf=conf_threshold,
+            iou=iou_threshold,
+            verbose=False
+        )
+
+        out = []
+        if not results:
+            # 返回空结果对应每帧
+            for _ in frames:
+                out.append(([], False))
+            return out
+
+        # results 与输入 frames 一一对应
+        for result in results:
+            detections = []
+            bending_detected = False
+            if result is not None and result.boxes is not None and len(result.boxes) > 0:
+                boxes = result.boxes.cpu().numpy()
+                for box in boxes:
+                    xyxy = box.xyxy[0]
+                    conf = float(box.conf[0])
+                    cls = int(box.cls[0])
+                    class_name = self.class_names.get(cls, f"class_{cls}")
+                    detection = {
+                        "bbox": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
+                        "confidence": conf,
+                        "class_id": cls,
+                        "class_name": class_name,
+                    }
+                    detections.append(detection)
+                    if "bent" in class_name.lower() or "bending" in class_name.lower():
+                        bending_detected = True
+            out.append((detections, bending_detected))
+
+        return out
+
 
 # 单例模式
 _detector_instance = None

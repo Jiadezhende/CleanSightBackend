@@ -116,6 +116,53 @@ class BubbleDetector:
         
         return detections, bubble_detected, bubble_count
 
+    def detect_batch(
+        self,
+        frames: List[np.ndarray],
+        conf_threshold: float = 0.25,
+        iou_threshold: float = 0.45
+    ) -> List[Tuple[List[Dict[str, Any]], bool, int]]:
+        """对一批图像执行气泡检测，返回每帧的 (detections, bubble_detected, bubble_count)。"""
+        if self.model is None:
+            raise RuntimeError("模型未加载")
+
+        results = self.model.predict(
+            frames,
+            conf=conf_threshold,
+            iou=iou_threshold,
+            verbose=False
+        )
+
+        out = []
+        if not results:
+            for _ in frames:
+                out.append(([], False, 0))
+            return out
+
+        for result in results:
+            detections = []
+            bubble_detected = False
+            bubble_count = 0
+            if result is not None and result.boxes is not None and len(result.boxes) > 0:
+                boxes = result.boxes.cpu().numpy()
+                bubble_count = len(boxes)
+                bubble_detected = True
+                for box in boxes:
+                    xyxy = box.xyxy[0]
+                    conf = float(box.conf[0])
+                    cls = int(box.cls[0])
+                    class_name = self.class_names.get(cls, f"bubble")
+                    detection = {
+                        "bbox": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
+                        "confidence": conf,
+                        "class_id": cls,
+                        "class_name": class_name,
+                    }
+                    detections.append(detection)
+            out.append((detections, bubble_detected, bubble_count))
+
+        return out
+
 
 # 单例模式
 _bubble_detector_instance = None

@@ -149,3 +149,4 @@ Thumbs.db
 *.tmp
 *.temp
 app/models/best.pt
+app/models/bubble-best.pt
