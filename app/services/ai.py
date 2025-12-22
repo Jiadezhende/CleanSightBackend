@@ -307,7 +307,7 @@ class InferenceManager:
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
-        return # Test Only
+        # return # Test Only
         # self._task_registry.register(DetectionTask())
         # self._task_registry.register(MotionTask())
         
