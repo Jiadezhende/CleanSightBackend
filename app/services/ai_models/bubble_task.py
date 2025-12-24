@@ -119,6 +119,32 @@ class BubbleDetectionTask(InferenceTask):
                 "bubble_count": 0,
                 "total_bubble_count": 0
             }
+
+    def infer_batch(self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]) -> List[InferenceResult]:
+        """使用 detector 的批量接口进行气泡批量检测，返回每帧结果列表。"""
+        try:
+            self._ensure_model_loaded()
+            batch_results = self.detector.detect_batch(frames, conf_threshold=self.conf_threshold, iou_threshold=self.iou_threshold)
+            out: List[InferenceResult] = []
+            for (detections, bubble_detected, bubble_count), ctx in zip(batch_results, contexts):
+                task = ctx.get('task')
+                if bubble_detected and task:
+                    if not hasattr(task, 'bubble_count'):
+                        task.bubble_count = 0
+                    task.bubble_count += bubble_count
+                out.append({
+                    "success": True,
+                    "bubble_detected": bubble_detected,
+                    "detections": detections,
+                    "bubble_count": bubble_count,
+                    "total_bubble_count": task.bubble_count if task and hasattr(task, 'bubble_count') else 0
+                })
+            return out
+        except Exception as e:
+            print(f"气泡批量检测错误: {e}")
+            import traceback
+            traceback.print_exc()
+            return [self.infer(f, c) for f, c in zip(frames, contexts)]
     
     def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
         """

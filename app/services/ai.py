@@ -1,6 +1,7 @@
 import json
 import cv2
 import time
+import queue
 import threading
 import base64
 from pathlib import Path
@@ -64,6 +65,16 @@ class InferenceTask(ABC):
             可视化后的帧
         """
         pass
+
+    def infer_batch(self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]) -> List[InferenceResult]:
+        """可选的批量推理接口，默认逐帧串行调用 `infer`。
+
+        子类可覆盖以利用模型的 batch 接口（例如 YOLO 的 list-of-images 输入）。
+        """
+        results: List[InferenceResult] = []
+        for f, ctx in zip(frames, contexts):
+            results.append(self.infer(f, ctx))
+        return results
     
     def requires_context(self) -> List[str]:
         """返回此任务依赖的其他任务名称列表。
@@ -288,6 +299,11 @@ class InferenceManager:
         self._alarm_batch_interval = getattr(settings, 'alarm_batch_interval', 30)
         self._alarm_cooldown_seconds = getattr(settings, 'alarm_cooldown_seconds', 60)
         self._alarm_thread: Optional[threading.Thread] = None
+        # 持久化队列与线程（用于 HLS 段写盘与告警持久化，避免阻塞推理线程）
+        self._persist_queue: "queue.Queue" = queue.Queue()
+        self._persist_thread: Optional[threading.Thread] = None
+        # GPU 批量大小（可配置）
+        self._batch_size = getattr(settings, 'gpu_batch_size', 4)
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
@@ -595,15 +611,84 @@ class InferenceManager:
 
         return result_frame, all_results
 
-    def _handle_alarm(self, alarm_info: Dict[str, Any]):
-        """统一处理告警：调用远端告警上报接口并在本地数据库记录一条告警记录。
+    def _execute_inference_pipeline_batch(self, frames: List[np.ndarray], task: Optional[CleaningTask], client_id: Optional[str] = None) -> List[Tuple[np.ndarray, Dict[str, InferenceResult]]]:
+        """批量推理管道：接收多帧并尝试利用任务的 batch 接口加速独立任务。
 
-        alarm_info 示例结构:
-        {
-            'task_id': 1,
-            'step_id': '0',
-            'detection_result': { ... }
-        }
+        返回每帧的 (可视化后帧, all_results)
+        """
+        tasks = self._task_registry.get_enabled_tasks()
+        n = len(frames)
+        # 初始化每帧的结果容器
+        all_results_list: List[Dict[str, InferenceResult]] = [dict() for _ in range(n)]
+
+        # 构建上下文列表（独立任务可能会读取或写入 task）
+        contexts = [{"task": task, "results": all_results_list[i]} for i in range(n)]
+
+        # 阶段1: 并行执行独立任务，但优先使用 infer_batch
+        independent_tasks = [t for t in tasks if not t.requires_context()]
+        if independent_tasks:
+            futures: Dict[Future, InferenceTask] = {}
+            for inference_task in independent_tasks:
+                try:
+                    future = self._executor.submit(inference_task.infer_batch, frames, contexts)
+                    futures[future] = inference_task
+                except Exception as e:
+                    print(f"Failed to submit batch task {inference_task.name}: {e}")
+
+            for future, inference_task in futures.items():
+                try:
+                    results_list = future.result(timeout=10.0)
+                    # results_list 应为长度 n 的列表
+                    if isinstance(results_list, list):
+                        for i, res in enumerate(results_list):
+                            all_results_list[i][inference_task.name] = res
+                    else:
+                        # 回退：如果返回单个结果则复制
+                        for i in range(n):
+                            all_results_list[i][inference_task.name] = results_list
+                except Exception as e:
+                    print(f"Batch task {inference_task.name} failed: {e}")
+                    for i in range(n):
+                        all_results_list[i][inference_task.name] = {"success": False, "error": str(e)}
+
+        # 阶段2: 逐帧执行依赖任务（依赖上下文的任务）
+        dependent_tasks = [t for t in tasks if t.requires_context()]
+        for i, frame in enumerate(frames):
+            context = {"task": task, "results": all_results_list[i]}
+            for inference_task in dependent_tasks:
+                try:
+                    res = inference_task.infer(frame, context)
+                    all_results_list[i][inference_task.name] = res
+                except Exception as e:
+                    print(f"Task {inference_task.name} failed on frame {i}: {e}")
+                    all_results_list[i][inference_task.name] = {"success": False, "error": str(e)}
+
+        # 阶段3: 可视化
+        out: List[Tuple[np.ndarray, Dict[str, InferenceResult]]] = []
+        for i, frame in enumerate(frames):
+            result_frame = frame.copy()
+            for inference_task in tasks:
+                task_result = all_results_list[i].get(inference_task.name, {})
+                if task_result.get("success", False):
+                    try:
+                        result_frame = inference_task.visualize(result_frame, task_result)
+                    except Exception as e:
+                        print(f"Visualization for {inference_task.name} on frame {i} failed: {e}")
+            out.append((result_frame, all_results_list[i]))
+
+        return out
+
+    def _handle_alarm(self, alarm_info: Dict[str, Any]):
+        """将告警信息放入持久化队列，由持久化线程执行上报与写 DB，避免阻塞推理线程。"""
+        try:
+            self._persist_queue.put({"type": "alarm", "alarm": alarm_info})
+        except Exception as e:
+            print(f"_handle_alarm enqueue failed: {e}")
+
+    def _handle_alarm_now(self, alarm_info: Dict[str, Any]):
+        """实际执行告警上报与写库的函数（将在持久化线程中调用）。
+
+        该实现为原有 _handle_alarm 的实现内容。
         """
         try:
             task_id = alarm_info.get('task_id')
@@ -616,9 +701,9 @@ class InferenceManager:
                     with self._lock:
                         cq = self._clients.get(str(client_id))
                         if cq:
-                            print(f"_handle_alarm: found client queue for {client_id}, task={cq.task}")
+                            print(f"_handle_alarm_now: found client queue for {client_id}, task={cq.task}")
                         else:
-                            print(f"_handle_alarm: no client queue found for {client_id}; available clients: {list(self._clients.keys())}")
+                            print(f"_handle_alarm_now: no client queue found for {client_id}; available clients: {list(self._clients.keys())}")
                         if cq and cq.task:
                             if task_id is None:
                                 task_id = getattr(cq.task, 'task_id', None)
@@ -627,7 +712,7 @@ class InferenceManager:
                 except Exception as e:
                     print(f"Failed to fill task_id/step_id from client queues: {e}")
 
-            print(f"_handle_alarm: final task_id={task_id}, step_id={step_id}, client_id={client_id}")
+            print(f"_handle_alarm_now: final task_id={task_id}, step_id={step_id}, client_id={client_id}")
             detection_result = alarm_info.get('detection_result')
 
             alarm_type = '流程违规' if detection_result else '推理异常'
@@ -636,7 +721,6 @@ class InferenceManager:
 
             # 调用远端告警上报（仅在 task_id 和 step_id 可用时上报）
             try:
-                # 把聚合字段一并上报（若存在）
                 alarm_count = alarm_info.get('alarm_count') if isinstance(alarm_info, dict) else None
                 first_seen = alarm_info.get('first_seen') if isinstance(alarm_info, dict) else None
                 last_seen = alarm_info.get('last_seen') if isinstance(alarm_info, dict) else None
@@ -673,7 +757,7 @@ class InferenceManager:
                 print(f"Local DB alarm record failed: {e}")
 
         except Exception as e:
-            print(f"_handle_alarm exception: {e}")
+            print(f"_handle_alarm_now exception: {e}")
 
     def _enqueue_alarm(self, alarm_info: Dict[str, Any]):
         """将告警信息入队，交由批量去重线程处理。"""
@@ -726,9 +810,10 @@ class InferenceManager:
         # 在锁外发送，避免阻塞其他操作
         for key, agg_alarm in to_send:
             try:
-                self._executor.submit(self._handle_alarm, agg_alarm)
+                # 将告警入持久化队列，由持久化线程执行网络上报与写 DB
+                self._persist_queue.put({"type": "alarm", "alarm": agg_alarm})
             except Exception as e:
-                print(f"Failed to submit aggregated alarm for {key}: {e}")
+                print(f"Failed to enqueue aggregated alarm for {key}: {e}")
 
     def _alarm_flush_loop(self):
         """后台线程，周期性 flush pending alarms。"""
@@ -744,6 +829,160 @@ class InferenceManager:
             self._flush_pending_alarms()
         except Exception as e:
             print(f"Final alarm flush error: {e}")
+
+    def _persistent_worker(self):
+        """持久化线程：处理写盘 HLS 段与告警上报/落库等耗时操作。"""
+        print("Persistent worker started")
+        while not self._stop_event.is_set():
+            try:
+                job = None
+                try:
+                    job = self._persist_queue.get(timeout=1.0)
+                except Exception:
+                    job = None
+
+                if job is None:
+                    continue
+
+                jtype = job.get('type')
+                if jtype == 'segment':
+                    print("[Persistent worker] Processing segment job")
+                    try:
+                        client_id = job.get('client_id')
+                        client_dir = job.get('client_dir')
+                        raw_frames = job.get('raw_frames', [])
+                        processed_frames = job.get('processed_frames', [])
+                        task_id = job.get('task_id')
+                        # 调用原先的落盘逻辑（复用函数），但这里直接写文件并调用外部接口
+                        # 为简洁性，直接把原先 _flush_segment_if_needed 的实现重用但以传入的数据为准
+                        self._do_persist_segment(client_id, client_dir, raw_frames, processed_frames, task_id)
+                    except Exception as e:
+                        print(f"Persistent worker segment job failed: {e}")
+                elif jtype == 'alarm':
+                    print("[Persistent worker] Processing alarm job")
+                    try:
+                        alarm = job.get('alarm')
+                        # 直接处理告警上报与数据库记录
+                        self._handle_alarm_now(alarm)
+                    except Exception as e:
+                        print(f"Persistent worker alarm job failed: {e}")
+                else:
+                    print(f"Persistent worker unknown job type: {jtype}")
+
+            except Exception as e:
+                print(f"Persistent worker loop error: {e}")
+
+        print("Persistent worker stopped")
+
+    def _do_persist_segment(self, client_id: str, hls_dir: Path, raw_frames_data: List[FrameData], processed_frames_data: List[FrameData], task_id: Optional[Any] = None):
+        """实际在持久化线程中执行的写盘与上报逻辑（从原 _flush_segment_if_needed 拆分）。"""
+        try:
+            start_ts = processed_frames_data[0].timestamp
+            end_ts = processed_frames_data[-1].timestamp
+
+            # 生成原始视频段
+            raw_segment_path = hls_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
+            height, width = raw_frames_data[0].frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, 30.0, (width, height))
+            for fd in raw_frames_data:
+                out_raw.write(fd.frame)
+            out_raw.release()
+
+            # 生成处理后视频段
+            segment_path = hls_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
+            height, width = processed_frames_data[0].frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out_processed = cv2.VideoWriter(str(segment_path), fourcc, 30.0, (width, height))
+            for fd in processed_frames_data:
+                out_processed.write(fd.frame)
+            out_processed.release()
+
+            # 写 keypoints JSON
+            keypoints_path = hls_dir / f"keypoints_{int(start_ts * 1e6)}.json"
+            keypoints_list = []
+            for fd in processed_frames_data:
+                kp = fd.keypoints if hasattr(fd, 'keypoints') else None
+                ir = fd.inference_result if hasattr(fd, 'inference_result') else None
+                keypoints_list.append({
+                    "timestamp": fd.timestamp,
+                    "keypoints": self._make_json_serializable(kp),
+                    "inference_result": self._make_json_serializable(ir)
+                })
+            with keypoints_path.open('w', encoding='utf-8') as f:
+                json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
+
+            # 更新播放列表
+            raw_playlist_path = hls_dir / "raw_playlist.m3u8"
+            segment_duration = len(raw_frames_data) / 30.0
+            if not raw_playlist_path.exists():
+                with raw_playlist_path.open('w') as f:
+                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+            with raw_playlist_path.open('a') as f:
+                f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                f.write(f"{raw_segment_path.name}\n")
+
+            playlist_path = hls_dir / "processed_playlist.m3u8"
+            segment_duration = len(processed_frames_data) / 30.0
+            if not playlist_path.exists():
+                with playlist_path.open('w') as f:
+                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+            with playlist_path.open('a') as f:
+                f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                f.write(f"{segment_path.name}\n")
+
+            # 尝试上报 file_path（网络 IO），并包含 task_id（如果存在）
+            print("[Persistent worker] Posting file paths")
+            try:
+                insert_url = settings.file_path_insert_url or f"http://116.204.65.72:8881/gdmp/v1/api/nt/file_path_insert"
+                def post_json(url, data, retries=3, timeout=10):
+                    jd = json.dumps(data, ensure_ascii=False).encode('utf-8')
+                    headers = {'Content-Type': 'application/json; charset=utf-8'}
+                    attempt = 0
+                    backoff = 1.0
+                    while attempt < retries:
+                        attempt += 1
+                        try:
+                            req = urllib.request.Request(url, data=jd, headers=headers, method='POST')
+                            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                                body = resp.read().decode('utf-8')
+                                return resp.getcode(), body
+                        except Exception as e:
+                            if attempt < retries:
+                                time.sleep(backoff)
+                                backoff *= 2
+                            else:
+                                return None, str(e)
+
+                # 尝试解析 task_id 为整数（若可用）
+                try:
+                    t_id = int(task_id) if task_id is not None and str(task_id).isdigit() else None
+                except Exception:
+                    t_id = None
+
+                payload_raw = {
+                    'client_id': str(client_id),
+                    'task_id': t_id,
+                    'segment_path': str(raw_segment_path),
+                    'playlist_path': str(raw_playlist_path),
+                    'start_ts': int(start_ts),
+                    'end_ts': int(end_ts)
+                }
+                payload_processed = {
+                    'client_id': str(client_id),
+                    'task_id': t_id,
+                    'segment_path': str(segment_path),
+                    'playlist_path': str(playlist_path),
+                    'start_ts': int(start_ts),
+                    'end_ts': int(end_ts)
+                }
+                post_json(insert_url, payload_raw)
+                post_json(insert_url, payload_processed)
+            except Exception as e:
+                print(f"Persistent worker file_path post failed: {e}")
+
+        except Exception as e:
+            print(f"_do_persist_segment error: {e}")
 
     def _send_alarm_report(self, task_id: int, step_id: int, alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None, alarm_count: Optional[int]=None, first_seen: Optional[str]=None, last_seen: Optional[str]=None) -> bool:
         """按照外部接口文档上报告警（同步调用，故需在后台线程使用）。
@@ -922,27 +1161,26 @@ class InferenceManager:
 
     def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
+        # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
         print(f"Checking HLS segment flush for client: {client_id}")
         seg_len = client_queues.ca_segment_len
-        # 检查是否同时达到阈值
         if len(client_queues.ca_raw) < seg_len or len(client_queues.ca_processed) < seg_len:
             return
 
-        print(f"Generating HLS segment for client: {client_id}")
-        # 创建目录
+        print(f"Enqueueing HLS segment persist job for client: {client_id}")
+        # 构造目录信息
         client_dir = self._db_dir / client_id
-        task_id = client_queues.task.task_id if client_queues.task else "no_task"
+        task_id = client_queues.task.task_id if client_queues.task else None
         task_dir = client_dir / str(task_id)
         hls_dir = task_dir / "hls"
         hls_dir.mkdir(parents=True, exist_ok=True)
 
-        # 收集原始帧数据
+        # 从队列弹出对应帧并封装到 job 中
         raw_frames_data: List[FrameData] = []
         take = min(seg_len, len(client_queues.ca_raw))
         for _ in range(take):
             raw_frames_data.append(client_queues.ca_raw.popleft())
 
-        # 收集处理后的帧数据
         processed_frames_data: List[FrameData] = []
         take = min(seg_len, len(client_queues.ca_processed))
         for _ in range(take):
@@ -951,170 +1189,20 @@ class InferenceManager:
         if not raw_frames_data or not processed_frames_data:
             return
 
-        start_ts = processed_frames_data[0].timestamp
-        end_ts = processed_frames_data[-1].timestamp
-
-        # 生成原始视频 HLS 段
-        raw_segment_path = hls_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
-        height, width = raw_frames_data[0].frame.shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore
-        out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, 30.0, (width, height))
-        for frame_data in raw_frames_data:
-            out_raw.write(frame_data.frame)
-        out_raw.release()
-
-        # 生成处理后视频 HLS 段（含关键点标注）
-        segment_path = hls_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
-        height, width = processed_frames_data[0].frame.shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore
-        out_processed = cv2.VideoWriter(str(segment_path), fourcc, 30.0, (width, height))
-        for frame_data in processed_frames_data:
-            out_processed.write(frame_data.frame)
-        out_processed.release()
-
-        # 生成关键点 JSON 文件（每个段对应一个 JSON）
-        keypoints_path = hls_dir / f"keypoints_{int(start_ts * 1e6)}.json"
-        keypoints_list = []
-        for fd in processed_frames_data:
-            kp = fd.keypoints if hasattr(fd, 'keypoints') else None
-            ir = fd.inference_result if hasattr(fd, 'inference_result') else None
-            keypoints_list.append({
-                "timestamp": fd.timestamp,
-                "keypoints": self._make_json_serializable(kp),
-                "inference_result": self._make_json_serializable(ir)
-            })
-        with keypoints_path.open('w', encoding='utf-8') as f:
-            json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
-
-        # 更新原始视频 M3U8 播放列表
-        raw_playlist_path = hls_dir / "raw_playlist.m3u8"
-        segment_duration = len(raw_frames_data) / 30.0  # 假设 30 FPS
-        if not raw_playlist_path.exists():
-            with raw_playlist_path.open('w') as f:
-                f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
-        with raw_playlist_path.open('a') as f:
-            f.write(f"#EXTINF:{segment_duration:.3f},\n")
-            f.write(f"{raw_segment_path.name}\n")
-
-        # 更新处理后视频 M3U8 播放列表
-        playlist_path = hls_dir / "processed_playlist.m3u8"
-        segment_duration = len(processed_frames_data) / 30.0  # 假设 30 FPS 假设 30 FPS
-        
-        # 初始化播放列表（如果不存在）
-        if not playlist_path.exists():
-            with playlist_path.open('w') as f:
-                f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
-        
-        # 追加段信息
-        with playlist_path.open('a') as f:
-            f.write(f"#EXTINF:{segment_duration:.3f},\n")
-            f.write(f"{segment_path.name}\n")
-
-        # 记录到数据库（使用与告警相同的 SQL 路径：创建表（若不存在）并以参数化 INSERT 写入）
         try:
-            create_sql = '''
-            CREATE TABLE IF NOT EXISTS file_path (
-                _id BIGSERIAL PRIMARY KEY,
-                client_id TEXT,
-                task_id INTEGER,
-                segment_path TEXT,
-                playlist_path TEXT,
-                start_ts BIGINT,
-                end_ts BIGINT,
-                created_at BIGINT
-            )
-            '''
-
-            insert_sql = '''
-            INSERT INTO file_path (client_id, task_id, segment_path, playlist_path, start_ts, end_ts, created_at)
-            VALUES (:client_id, :task_id, :segment_path, :playlist_path, :start_ts, :end_ts, :created_at)
-            '''
-
-            # 尝试将 task_id 转为整数，否则使用 NULL
-            try:
-                t_id = int(task_id) if task_id is not None and str(task_id).isdigit() else None
-            except Exception:
-                t_id = None
-
-            params_raw = {
-                'client_id': str(client_id),
-                'task_id': t_id,
-                'segment_path': str(raw_segment_path),
-                'playlist_path': str(raw_playlist_path),
-                'start_ts': int(start_ts),
-                'end_ts': int(end_ts),
-                'created_at': int(time.time())
-            }
-
-            params_processed = {
-                'client_id': str(client_id),
-                'task_id': t_id,
-                'segment_path': str(segment_path),
-                'playlist_path': str(playlist_path),
-                'start_ts': int(start_ts),
-                'end_ts': int(end_ts),
-                'created_at': int(time.time())
-            }
-
-            # 调用外部 file_path 插入接口，避免本服务直接生成主键 id
-            insert_url = settings.file_path_insert_url or f"http://116.204.65.72:8881/gdmp/v1/api/nt/file_path_insert"
-
-            payload_raw = {
-                'client_id': str(client_id),
-                'task_id': t_id,
-                'segment_path': str(raw_segment_path),
-                'playlist_path': str(raw_playlist_path),
-                'start_ts': int(start_ts),
-                'end_ts': int(end_ts)
-            }
-
-            payload_processed = {
-                'client_id': str(client_id),
-                'task_id': t_id,
-                'segment_path': str(segment_path),
-                'playlist_path': str(playlist_path),
-                'start_ts': int(start_ts),
-                'end_ts': int(end_ts)
-            }
-
-            # 使用 urllib 发送 POST 请求，带简单重试逻辑
-            def post_json(url, data, retries=3, timeout=10):
-                jd = json.dumps(data, ensure_ascii=False).encode('utf-8')
-                headers = {'Content-Type': 'application/json; charset=utf-8'}
-                attempt = 0
-                backoff = 1.0
-                while attempt < retries:
-                    attempt += 1
-                    try:
-                        req = urllib.request.Request(url, data=jd, headers=headers, method='POST')
-                        with urllib.request.urlopen(req, timeout=timeout) as resp:
-                            body = resp.read().decode('utf-8')
-                            return resp.getcode(), body
-                    except Exception as e:
-                        print(f"Attempt {attempt} to POST to {url} failed: {e}")
-                        if attempt < retries:
-                            time.sleep(backoff)
-                            backoff *= 2
-                        else:
-                            return None, str(e)
-
-            code1, body1 = post_json(insert_url, payload_raw)
-            code2, body2 = post_json(insert_url, payload_processed)
-
-            if code1 and (200 <= code1 < 300):
-                print(f"file_path insert raw succeeded: {code1} {body1}")
-            else:
-                print(f"file_path insert raw failed: {code1} {body1}")
-
-            if code2 and (200 <= code2 < 300):
-                print(f"file_path insert processed succeeded: {code2} {body2}")
-            else:
-                print(f"file_path insert processed failed: {code2} {body2}")
-
-            print(f"已生成原始+处理后 HLS 段 + 关键点 JSON for {client_id}: raw={raw_segment_path.name}, processed={segment_path.name}")
-
+            self._persist_queue.put({
+                "type": "segment",
+                "client_id": client_id,
+                "task_id": task_id,
+                "client_dir": hls_dir,
+                "raw_frames": raw_frames_data,
+                "processed_frames": processed_frames_data
+            })
         except Exception as e:
-            print(f"HLS 插入接口调用失败 for {client_id}: {e}")
+            print(f"Failed to enqueue segment persist job for {client_id}: {e}")
+
+        # 已入队给持久化线程处理（播放列表更新、DB 写入等），本函数返回
+        return
 
     def _inference_loop(self):
         print("AI 推理服务已启动（多客户端管理：RT/CA 队列）")
@@ -1130,45 +1218,51 @@ class InferenceManager:
             for client_id, client_queues in items:
                 if self._stop_event.is_set():
                     break
-
-                # 从 CA-ReadyQueue 取一帧进行推理
+                # 尝试批量取若干帧以利用 GPU batch
+                batch: List[FrameData] = []
                 with self._lock:
-                    ready_frame = client_queues.ca_ready.popleft() if client_queues.ca_ready else None
+                    # 已弹出的第一帧
+                    first = client_queues.ca_ready.popleft() if client_queues.ca_ready else None
+                    if first:
+                        batch.append(first)
+                        # 取更多帧但不超过 batch_size
+                        for _ in range(self._batch_size - 1):
+                            if client_queues.ca_ready:
+                                batch.append(client_queues.ca_ready.popleft())
+                            else:
+                                break
 
-                if ready_frame is None:
+                if not batch:
                     continue
 
-                ts, frame = ready_frame.timestamp, ready_frame.frame
+                timestamps = [bd.timestamp for bd in batch]
+                frames = [bd.frame for bd in batch]
 
-                # 推理前将帧副本放入 CA-RawQueue（用于生成原始视频 HLS 段）
+                # 推理前把原始帧副本放入 ca_raw
                 with self._lock:
-                    client_queues.ca_raw.append(ready_frame)
+                    for bd in batch:
+                        client_queues.ca_raw.append(bd)
 
                 try:
-                    # 执行多任务并行推理
-                    final_frame, all_results = self._execute_inference_pipeline(
-                        frame, 
-                        client_queues.task,
-                        client_id=client_id
-                    )
+                    # 使用批处理管道（会利用任务的 infer_batch 接口）
+                    results = self._execute_inference_pipeline_batch(frames, client_queues.task, client_id=client_id)
 
-                    processed_frame = FrameData(timestamp=ts, frame=final_frame, inference_result=all_results)
-                    print(f"Inference completed for client: {client_id}, results: {all_results.keys()}")
-                    with self._lock:
-                        # 写入 CA-ProcessedQueue（用于生成 HLS 段）
-                        client_queues.ca_processed.append(processed_frame)
-                        # 写入 RT-ProcessedQueue（用于实时推送）
-                        client_queues.rt_processed.append(processed_frame)
-                        # 更新快速访问
-                        client_queues.latest_processed = processed_frame
-                        
+                    # 将每帧结果写回队列
+                    for ts, (final_frame, all_results) in zip(timestamps, results):
+                        processed_frame = FrameData(timestamp=ts, frame=final_frame, inference_result=all_results)
+                        with self._lock:
+                            client_queues.ca_processed.append(processed_frame)
+                            client_queues.rt_processed.append(processed_frame)
+                            client_queues.latest_processed = processed_frame
+                        # print(f"Inference completed for client: {client_id}, results keys: {list(all_results.keys())}")
+
                 except Exception as e:
-                    print(f"推理异常 for {client_id}: {e}")
+                    print(f"批量推理异常 for {client_id}: {e}")
                     import traceback
                     traceback.print_exc()
                     continue
 
-                # 达到阈值时生成 HLS 段
+                # 达到阈值时生成 HLS 段（将落盘交给持久化线程）
                 try:
                     self._flush_segment_if_needed(client_id, client_queues)
                 except Exception as e:
@@ -1191,6 +1285,13 @@ class InferenceManager:
                 self._alarm_thread.start()
             except Exception as e:
                 print(f"Failed to start alarm flush thread: {e}")
+        # 启动持久化线程（写盘/告警持久化）
+        if self._persist_thread is None or not getattr(self._persist_thread, 'is_alive', lambda: False)():
+            try:
+                self._persist_thread = threading.Thread(target=self._persistent_worker, daemon=True, name="PersistThread")
+                self._persist_thread.start()
+            except Exception as e:
+                print(f"Failed to start persistent worker thread: {e}")
 
     def stop(self):
         self._stop_event.set()
@@ -1200,6 +1301,12 @@ class InferenceManager:
         if self._alarm_thread is not None:
             try:
                 self._alarm_thread.join(timeout=1.0)
+            except Exception:
+                pass
+        # 停止并等待持久化线程
+        if self._persist_thread is not None:
+            try:
+                self._persist_thread.join(timeout=1.0)
             except Exception:
                 pass
         # 关闭线程池
