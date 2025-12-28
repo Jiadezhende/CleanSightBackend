@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy import Column, String, BigInteger, Integer
 from app.database import Base
 
-class Task(BaseModel):
+class CleanTask(BaseModel):
     """
     该模型仅用于推理过程中的任务状态跟踪，不用于数据库存储。
     """

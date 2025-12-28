@@ -4,11 +4,11 @@
 使用 YOLO 模型检测内镜清洗过程中的气泡，并更新清洗任务的气泡计数
 """
 
+from app.services.ai_tasks import InferenceTask,InferenceResult
 import cv2
 import numpy as np
 from typing import Dict, Any, List, Optional
 
-from app.services.ai import InferenceTask, InferenceResult
 from app.services.ai_models.bubble_detection import get_bubble_detector
 
 

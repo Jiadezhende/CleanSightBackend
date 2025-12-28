@@ -4,11 +4,12 @@
 这个文件展示了如何扩展新的检测任务。
 """
 
+from app.services.ai_tasks import InferenceTask
 import cv2
 import numpy as np
 from typing import Dict, Any, List
 
-from app.services.ai import InferenceTask, InferenceResult
+from app.services.ai_tasks import InferenceResult
 
 
 class BubbleDetectionTask(InferenceTask):

@@ -3,10 +3,10 @@ import asyncio
 from contextlib import asynccontextmanager
 import time
 from app.database import get_db
-from app.models.task import DBTask, Task, TaskStatusResponse
+from app.models.task import DBTask, CleanTask, TaskStatusResponse
 from fastapi import APIRouter, HTTPException, WebSocket
 import traceback
-from app.services import ai
+from app.services import ai_manager
 from app.models.frame import ProcessedFrame
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -15,11 +15,11 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 @asynccontextmanager
 async def lifespan():
     """AI服务生命周期管理：启动/停止推理管理器"""
-    ai.start()
+    ai_manager.start()
     try:
         yield
     finally:
-        ai.stop()
+        ai_manager.stop()
 
 
 @router.websocket("/video")
@@ -40,7 +40,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            processed_frame: ProcessedFrame = ai.get_result(client_id, as_model=True)  # type: ignore
+            processed_frame: ProcessedFrame = ai_manager.get_result(client_id, as_model=True)  # type: ignore
 
             if processed_frame is None:
                 await asyncio.sleep(0.03)
@@ -68,7 +68,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
     finally:
         # 客户端断开时尝试清理缓存（尽量容错）
         try:
-            ai.remove_client(client_id)
+            ai_manager.remove_client(client_id)
         except Exception:
             pass
         client_info = getattr(websocket, 'client', None)
@@ -77,7 +77,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
 @router.get("/status")
 async def get_ai_status():
     """获取AI服务状态，返回详细的队列信息"""
-    return ai.status()
+    return ai_manager.status()
 
 @router.get("/load_task/{task_id}")
 async def load_task(task_id: int):
@@ -98,7 +98,7 @@ async def load_task(task_id: int):
                 raise HTTPException(status_code=400, detail="Task source_ip is empty")
             
             # 构造内存中的任务对象
-            task = Task(
+            task = CleanTask(
                 task_id=task_id,
                 current_step=str(db_task.current_step),
                 status="running",
@@ -111,7 +111,7 @@ async def load_task(task_id: int):
             print(f"为 client_id={client_id} 加载任务 {task}")
 
             # 为客户端设置任务
-            success = ai.set_task(client_id, task)
+            success = ai_manager.set_task(client_id, task)
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to set task for client")
 
@@ -141,7 +141,7 @@ async def terminate_task(client_id: str):
     """
     try:
         # 清理 AI 服务中的客户端资源
-        ai.remove_client(client_id)
+        ai_manager.remove_client(client_id)
         return {"status": "success", "message": f"Task terminated for client {client_id}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
@@ -149,5 +149,5 @@ async def terminate_task(client_id: str):
 
 def start_background_threads():
     # 启动由 ai 管理器负责的推理线程
-    ai.start()
+    ai_manager.start()
     print("AI后台线程已启动（多客户端推理管理器）")

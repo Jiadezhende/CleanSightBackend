@@ -5,7 +5,7 @@
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
-from app.services import ai
+from app.services import ai_manager
 from app.models.frame import HLSSegment
 from app.models.status_messages import get_task_status_response, get_no_task_response
 from app.database import get_db
@@ -35,7 +35,7 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
     try:
         while True:
             # 获取当前任务状态
-            current_task = ai.get_task(client_id)
+            current_task = ai_manager.get_task(client_id)
 
             if current_task:
                 # 使用字典表生成格式化的状态响应

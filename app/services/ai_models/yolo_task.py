@@ -4,11 +4,11 @@
 使用 YOLO 模型检测内镜是否弯折，并更新清洗任务的弯折计数
 """
 
+from app.services.ai_tasks import InferenceTask,InferenceResult
 import cv2
 import numpy as np
 from typing import Dict, Any, List, Optional
 
-from app.services.ai import InferenceTask, InferenceResult
 from app.services.ai_models.yolo_detection import get_detector
 
 

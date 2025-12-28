@@ -5,8 +5,8 @@ import numpy as np
 import cv2
 import time
 from unittest.mock import patch, MagicMock
-from app.services.ai import InferenceManager
-from app.models.task import Task as CleaningTask
+from app.services.ai_manager import InferenceManager
+from app.models.task import CleanTask as CleaningTask
 from app.models.frame import HLSSegment, FrameData
 
 @pytest.fixture

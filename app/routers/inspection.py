@@ -1,6 +1,6 @@
 from fastapi import APIRouter, WebSocket, HTTPException, Query
 from pydantic import BaseModel
-from app.services import ai
+from app.services import ai_manager
 import threading
 import cv2
 import time
@@ -198,7 +198,7 @@ def _stream_capture_worker(client_id: str, stream_url: str, fps: int, stop_event
                     frame = np.frombuffer(frame_data, dtype=np.uint8).reshape((480, 640, 3))
                     # 统一为推理期望的 numpy 格式（HxWx3, uint8, BGR 或 RGB 可选）
                     std_frame = _standardize_frame(frame)
-                    ai.submit_frame(client_id, std_frame)
+                    ai_manager.submit_frame(client_id, std_frame)
                     frame_count += 1
                     
                     if frame_count % 30 == 0:  # 每秒报告一次 (假设30fps)
@@ -250,7 +250,7 @@ async def start_rtmp_stream(config: RTMPStreamConfig):
         raise HTTPException(status_code=400, detail=f"RTMP 流已在运行 for {client_id}")
     
     # 设置流地址（RTMP/RTSP 均使用通用接口）
-    ai.set_stream_url(client_id, config.rtmp_url)
+    ai_manager.set_stream_url(client_id, config.rtmp_url)
     
     # 创建停止事件
     stop_event = threading.Event()
@@ -290,7 +290,7 @@ async def stop_rtmp_stream(client_id: str = Query(..., description="客户端ID"
     # 清理
     _capture_threads.pop(client_id, None)
     _stop_events.pop(client_id, None)
-    ai.remove_client(client_id)
+    ai_manager.remove_client(client_id)
     
     return {"status": "success", "message": f"RTMP 流捕获已停止 for {client_id}"}
 
@@ -310,7 +310,7 @@ async def start_rtsp_stream(config: RTSPStreamConfig):
         raise HTTPException(status_code=400, detail=f"RTSP 流已在运行 for {client_id}")
     
     # 设置流地址（RTMP/RTSP 均使用通用接口）
-    ai.set_stream_url(client_id, config.rtsp_url)
+    ai_manager.set_stream_url(client_id, config.rtsp_url)
     
     # 创建停止事件
     stop_event = threading.Event()
@@ -350,7 +350,7 @@ async def stop_rtsp_stream(client_id: str = Query(..., description="客户端ID"
     # 清理
     _capture_threads.pop(client_id, None)
     _stop_events.pop(client_id, None)
-    ai.remove_client(client_id)
+    ai_manager.remove_client(client_id)
     
     return {"status": "success", "message": f"RTSP 流捕获已停止 for {client_id}"}
 
@@ -376,6 +376,6 @@ async def stop_stream(client_id: str):
     # 清理
     _capture_threads.pop(client_id, None)
     _stop_events.pop(client_id, None)
-    ai.remove_client(client_id)
+    ai_manager.remove_client(client_id)
     
     return {"status": "success", "message": f"流捕获已停止 for {client_id}"}
