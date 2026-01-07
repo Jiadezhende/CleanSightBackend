@@ -35,7 +35,7 @@ class BubbleDetectionTask(InferenceTask):
         
         # 从配置读取默认值
         if model_path is None:
-            from app.config import settings
+            from app.settings import settings
             # 尝试使用专门的气泡检测模型配置，否则使用通用 YOLO 配置
             model_path = getattr(settings, 'bubble_model_path', settings.yolo_model_path)
         

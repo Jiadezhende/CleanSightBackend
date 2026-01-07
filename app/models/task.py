@@ -1,4 +1,3 @@
-from datetime import datetime
 from pydantic import BaseModel
 from sqlalchemy import Column, String, BigInteger, Integer
 from app.database import Base

@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # Add project ro
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.database import Base, get_db
-from app.config import settings
+from app.settings import settings
 import tempfile
 from pathlib import Path
 

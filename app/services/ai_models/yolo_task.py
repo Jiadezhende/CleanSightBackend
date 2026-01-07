@@ -35,7 +35,7 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         
         # 从配置读取默认值
         if model_path is None or conf_threshold is None or iou_threshold is None:
-            from app.config import settings
+            from app.settings import settings
             if model_path is None:
                 model_path = settings.yolo_model_path
             if conf_threshold is None:

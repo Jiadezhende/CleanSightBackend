@@ -1,188 +1,28 @@
+"""
+AI 推理模块，实现推理任务注册，运行是的调度与落盘。
+"""
+
 import json
+from app.services.client import ClientQueues
+from app.services.infer_task import InferenceTask, InferenceResult
 import cv2
 import time
 import queue
 import threading
 import base64
 from pathlib import Path
-from collections import deque
 import numpy as np
-from typing import Optional, Dict, Deque, Tuple, Union, Any,List
+from typing import Optional, Dict, Tuple, Union, Any,List
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, Future
-from abc import ABC, abstractmethod
 
-from app.models.frame import ProcessedFrame, HLSSegment, FrameData
+from app.models.frame import ProcessedFrame, FrameData
 from app.models.task import Task as CleaningTask
-from app.services.ai_models import motion, detection
-from app.database import get_db, engine
-from app.config import settings
+
+from app.database import engine
+from app.settings import settings
 import urllib.request
 from sqlalchemy import text
-
-# Type aliases for better readability
-FrameTuple = Tuple[float, np.ndarray]  # (timestamp, frame_array)
-InferenceResult = Dict[str, Any]  # 推理结果类型
-
-
-class InferenceTask(ABC):
-    """推理任务基类，所有推理任务都应继承此类。
-    
-    每个任务都是独立的，可以并行执行。
-    """
-    
-    def __init__(self, name: str, enabled: bool = True):
-        """
-        Args:
-            name: 任务名称
-            enabled: 是否启用此任务
-        """
-        self.name = name
-        self.enabled = enabled
-    
-    @abstractmethod
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
-        """执行推理任务。
-        
-        Args:
-            frame: 输入帧
-            context: 上下文信息，包含其他任务的结果、任务对象等
-            
-        Returns:
-            推理结果字典
-        """
-        pass
-    
-    @abstractmethod
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """在帧上可视化推理结果。
-        
-        Args:
-            frame: 输入帧
-            result: 推理结果
-            
-        Returns:
-            可视化后的帧
-        """
-        pass
-
-    def infer_batch(self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]) -> List[InferenceResult]:
-        """可选的批量推理接口，默认逐帧串行调用 `infer`。
-
-        子类可覆盖以利用模型的 batch 接口（例如 YOLO 的 list-of-images 输入）。
-        """
-        results: List[InferenceResult] = []
-        for f, ctx in zip(frames, contexts):
-            results.append(self.infer(f, ctx))
-        return results
-    
-    def requires_context(self) -> List[str]:
-        """返回此任务依赖的其他任务名称列表。
-        
-        Returns:
-            依赖的任务名称列表，空列表表示无依赖
-        """
-        return []
-
-
-class DetectionTask(InferenceTask):
-    """关键点检测任务"""
-    
-    def __init__(self):
-        super().__init__(name="detection", enabled=True)
-    
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
-        """执行检测推理"""
-        try:
-            # 调用检测模型
-            processed_frame, keypoints = detection.detect_keypoints(frame)
-            return {
-                "success": True,
-                "processed_frame": processed_frame,  # 用于可视化，不会序列化
-                "keypoints": keypoints
-            }
-        except Exception as e:
-            print(f"Detection task error: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "processed_frame": frame.copy(),  # 用于可视化，不会序列化
-                "keypoints": {}
-            }
-    
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """可视化检测结果（检测模型已经画好了框）"""
-        return result.get("processed_frame", frame)
-
-
-class MotionTask(InferenceTask):
-    """动作分析任务（依赖检测结果）"""
-    
-    def __init__(self):
-        super().__init__(name="motion", enabled=True)
-    
-    def requires_context(self) -> List[str]:
-        """依赖检测任务的结果"""
-        return ["detection"]
-    
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
-        """执行动作分析"""
-        try:
-            # 获取检测结果
-            detection_result = context.get("results", {}).get("detection", {})
-            keypoints = detection_result.get("keypoints", {})
-            
-            # 获取任务对象
-            task = context.get("task")
-            
-            if not task or not keypoints:
-                return {
-                    "success": False,
-                    "error": "Missing task or keypoints",
-                    "actions": {}
-                }
-            
-            # 调用动作分析模型
-            actions = motion.analyze_motion(keypoints, task)
-            
-            return {
-                "success": True,
-                "actions": actions
-            }
-        except Exception as e:
-            print(f"Motion task error: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "actions": {}
-            }
-    
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """可视化动作分析结果"""
-        if not result.get("success"):
-            return frame
-        
-        result_frame = frame.copy()
-        actions = result.get("actions", {})
-        y_offset = 100  # 避免与检测结果重叠
-        
-        if actions.get("bending_detected"):
-            cv2.putText(result_frame, "Bending Detected!", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            y_offset += 25
-        
-        if actions.get("bubble_detected"):
-            cv2.putText(result_frame, "Bubble Detected!", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            y_offset += 25
-        
-        status = actions.get("submersion_status", "unknown")
-        if status != "unknown":
-            cv2.putText(result_frame, f"Status: {status}", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
-        return result_frame
-
 
 class TaskRegistry:
     """任务注册表，管理所有推理任务"""
@@ -225,37 +65,6 @@ class TaskRegistry:
         
         # TODO: 实现完整的拓扑排序以支持复杂依赖关系
         self._execution_order = independent + dependent
-from datetime import datetime
-
-
-class ClientQueues:
-    """容器，管理每个客户端的队列。
-    
-    架构说明：
-    - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（设置最大长度防止溢出）
-    - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段（设置最大长度防止溢出）
-    - CA-ProcessedQueue: 推理后的处理帧（含关键点），用于生成处理后 HLS 段（设置最大长度防止溢出）
-    - RT-ProcessedQueue: 实时推理结果（含关键点），用于 WebSocket 推送（约1秒缓存）
-    
-    内存保护：
-    - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
-    - 默认 CA 队列最大长度为 500 帧，约 16.7 秒的视频缓存（30fps）
-    - RT 队列长度约为 1 秒的帧数，用于实时推送
-    """
-
-    def __init__(self, rt_maxlen: int, ca_segment_len: int, ca_maxlen: int = 500):
-        # CA-ReadyQueue: 等待推理的原始帧（设置最大长度限制防止溢出）
-        self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
-        # CA-RawQueue: 原始帧副本，用于落盘生成原始视频（设置最大长度限制）
-        self.ca_raw: Deque[FrameData] = deque(maxlen=ca_maxlen)
-        # CA-ProcessedQueue: 处理后的帧，用于生成 HLS（设置最大长度限制）
-        self.ca_processed: Deque[FrameData] = deque(maxlen=ca_maxlen)
-        # RT-ProcessedQueue: 实时推理结果，约 1 秒缓存用于 WebSocket 推送
-        self.rt_processed: Deque[FrameData] = deque(maxlen=rt_maxlen)
-        self.ca_segment_len = ca_segment_len
-        self.latest_processed: Optional[FrameData] = None  # 快速访问最新处理帧
-        self.task: Optional[CleaningTask] = None  # 关联的清洗任务
-        self.rtmp_url: Optional[str] = None  # RTMP 流地址
 
 
 class InferenceManager:
@@ -375,7 +184,7 @@ class InferenceManager:
         with self._lock:
             client_queues = self._get_or_create_client(client_id)
             # 推入 CA-ReadyQueue，等待推理
-            client_queues.ca_ready.append(frame_data)
+            client_queues.append_ca_ready(frame_data)
 
     def set_rtmp_url(self, client_id: str, rtmp_url: str) -> None:
         """为客户端设置 RTMP 流地址。
@@ -411,7 +220,7 @@ class InferenceManager:
             client_queues = self._clients.get(client_id)
             if not client_queues:
                 return None
-            frame_data = client_queues.rt_processed[-1] if client_queues.rt_processed else client_queues.latest_processed
+            frame_data = client_queues.get_latest_result()
         
         if frame_data is None:
             return None
@@ -419,7 +228,7 @@ class InferenceManager:
         if not as_model:
             return frame_data
         
-        task_id = client_queues.task.task_id if client_queues.task else None
+        task_id = client_queues.get_task_id()
         return self._create_processed_frame(frame_data, task_id, client_id)
 
     def remove_client(self, client_id: str) -> None:
@@ -438,13 +247,7 @@ class InferenceManager:
             包含客户端数量和每个客户端队列长度的字典。
         """
         with self._lock:
-            stats = {client_id: {
-                "ca_ready": len(client_queues.ca_ready),
-                "ca_raw": len(client_queues.ca_raw),
-                "ca_processed": len(client_queues.ca_processed),
-                "rt_processed": len(client_queues.rt_processed),
-                "rtmp_url": client_queues.rtmp_url
-            } for client_id, client_queues in self._clients.items()}
+            stats = {client_id: client_queues.to_status_dict() for client_id, client_queues in self._clients.items()}
             return {"clients": len(self._clients), "queues": stats}
 
     def _create_processed_frame(self, frame_data: FrameData, task_id: Optional[int], client_id: str) -> ProcessedFrame:
@@ -883,7 +686,7 @@ class InferenceManager:
             # 生成原始视频段
             raw_segment_path = hls_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
             height, width = raw_frames_data[0].frame.shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') # type: ignore
             out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, 30.0, (width, height))
             for fd in raw_frames_data:
                 out_raw.write(fd.frame)
@@ -892,7 +695,7 @@ class InferenceManager:
             # 生成处理后视频段
             segment_path = hls_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
             height, width = processed_frames_data[0].frame.shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') # type: ignore
             out_processed = cv2.VideoWriter(str(segment_path), fourcc, 30.0, (width, height))
             for fd in processed_frames_data:
                 out_processed.write(fd.frame)
@@ -1164,27 +967,21 @@ class InferenceManager:
         # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
         print(f"Checking HLS segment flush for client: {client_id}")
         seg_len = client_queues.ca_segment_len
-        if len(client_queues.ca_raw) < seg_len or len(client_queues.ca_processed) < seg_len:
+        if not client_queues.has_enough_for_segment(seg_len):
             return
 
         print(f"Enqueueing HLS segment persist job for client: {client_id}")
         # 构造目录信息
         client_dir = self._db_dir / client_id
-        task_id = client_queues.task.task_id if client_queues.task else None
+        task_id = client_queues.get_task_id()
         task_dir = client_dir / str(task_id)
         hls_dir = task_dir / "hls"
         hls_dir.mkdir(parents=True, exist_ok=True)
 
         # 从队列弹出对应帧并封装到 job 中
-        raw_frames_data: List[FrameData] = []
-        take = min(seg_len, len(client_queues.ca_raw))
-        for _ in range(take):
-            raw_frames_data.append(client_queues.ca_raw.popleft())
-
-        processed_frames_data: List[FrameData] = []
-        take = min(seg_len, len(client_queues.ca_processed))
-        for _ in range(take):
-            processed_frames_data.append(client_queues.ca_processed.popleft())
+        # 从 client_queues 中弹出原始帧（pop_n_* 会自动限制数量）
+        raw_frames_data: List[FrameData] = client_queues.pop_n_ca_raw(seg_len)
+        processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(seg_len)
 
         if not raw_frames_data or not processed_frames_data:
             return
@@ -1221,16 +1018,8 @@ class InferenceManager:
                 # 尝试批量取若干帧以利用 GPU batch
                 batch: List[FrameData] = []
                 with self._lock:
-                    # 已弹出的第一帧
-                    first = client_queues.ca_ready.popleft() if client_queues.ca_ready else None
-                    if first:
-                        batch.append(first)
-                        # 取更多帧但不超过 batch_size
-                        for _ in range(self._batch_size - 1):
-                            if client_queues.ca_ready:
-                                batch.append(client_queues.ca_ready.popleft())
-                            else:
-                                break
+                    # 从 client_queues 弹出最多 batch_size 帧
+                    batch = client_queues.pop_n_ca_ready(self._batch_size)
 
                 if not batch:
                     continue
@@ -1241,19 +1030,18 @@ class InferenceManager:
                 # 推理前把原始帧副本放入 ca_raw
                 with self._lock:
                     for bd in batch:
-                        client_queues.ca_raw.append(bd)
+                        client_queues.append_ca_raw(bd)
 
                 try:
                     # 使用批处理管道（会利用任务的 infer_batch 接口）
-                    results = self._execute_inference_pipeline_batch(frames, client_queues.task, client_id=client_id)
+                    results = self._execute_inference_pipeline_batch(frames, client_queues.get_task(), client_id=client_id)
 
                     # 将每帧结果写回队列
                     for ts, (final_frame, all_results) in zip(timestamps, results):
                         processed_frame = FrameData(timestamp=ts, frame=final_frame, inference_result=all_results)
                         with self._lock:
-                            client_queues.ca_processed.append(processed_frame)
-                            client_queues.rt_processed.append(processed_frame)
-                            client_queues.latest_processed = processed_frame
+                            client_queues.append_ca_processed(processed_frame)
+                            client_queues.append_rt_processed(processed_frame)
                         # print(f"Inference completed for client: {client_id}, results keys: {list(all_results.keys())}")
 
                 except Exception as e:
@@ -1324,7 +1112,7 @@ class InferenceManager:
         """
         with self._lock:
             client_queues = self._get_or_create_client(client_id)
-            client_queues.task = task
+            client_queues.set_task(task)
             print(f"任务已设置 for client {client_id}: {task}")
             return True
 
@@ -1342,16 +1130,8 @@ class InferenceManager:
             if client_queues is None:
                 return False
 
-            # 清理所有队列，释放内存
-            client_queues.ca_ready.clear()
-            client_queues.ca_raw.clear()
-            client_queues.ca_processed.clear()
-            client_queues.rt_processed.clear()
-
-            # 清除其他引用
-            client_queues.latest_processed = None
-            client_queues.task = None
-            client_queues.rtmp_url = None
+            # 清理所有队列与引用
+            client_queues.clear()
 
             # 从客户端字典中移除
             del self._clients[client_id]
@@ -1370,7 +1150,7 @@ class InferenceManager:
         """
         with self._lock:
             client_queues = self._clients.get(client_id)
-            return client_queues.task if client_queues else None
+            return client_queues.get_task() if client_queues else None
 
 
 # 单例管理器（模块级）

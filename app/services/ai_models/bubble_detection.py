@@ -21,7 +21,7 @@ class BubbleDetector:
             model_path: YOLO 模型文件路径，如果为 None 则从配置读取
         """
         if model_path is None:
-            from app.config import settings
+            from app.settings import settings
             # 使用专门的气泡检测模型路径配置
             model_path = getattr(settings, 'bubble_model_path', settings.yolo_model_path)
             

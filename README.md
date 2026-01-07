@@ -31,10 +31,10 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
                                                HLS 段 + JSON          WebSocket 推送
 ```
 
-
-
 ## 项目结构
+
 `app/`: 主应用代码，包括 API 路由和 WebSocket 处理程序。
+
 - `models/`: 包含用于请求和响应验证的 Pydantic 数据结构。
 - `routers/`: API 路由定义。
   - `ai.py`: AI 推理服务路由
@@ -98,6 +98,11 @@ pip install -r requirements.txt
 .\.venv\Scripts\Activate.ps1
 
 # 启动服务（仅本地访问）
+# 默认会加载 `.env.dev`（若存在）。若要使用指定的 env 文件，请在启动前设置 `CLEANSIGHT_ENV_FILE`：
+uvicorn app.main:app --reload
+
+# 使用指定 env 文件（临时会话示例）
+$env:CLEANSIGHT_ENV_FILE = 'C:\path\to\.env'
 uvicorn app.main:app --reload
 ```
 
@@ -110,22 +115,41 @@ API 将可用在 <http://localhost:8000>
 .\.venv\Scripts\Activate.ps1
 
 # 启动服务（允许外部访问）
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# 在生产环境中推荐通过环境变量或服务管理器注入生产的 .env 文件（例如使用 CLEANSIGHT_ENV_FILE 指定路径）
+# 示例：在当前会话指定生产 env 文件并启动
+$env:CLEANSIGHT_ENV_FILE = 'C:\path\to\.env'  # 指向生产 env 文件
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 API 将可用在：
+
 - 本地访问: <http://localhost:8000>
 - 外部访问: <http://服务器公网IP:8000>
 
 ### 环境变量配置
 
-在 `.env` 文件中设置服务器配置：
+默认加载顺序（优先级自高到低）：
 
-```env
-# 服务器配置
-CLEANSIGHT_SERVER_HOST=0.0.0.0  # 允许外部访问
-CLEANSIGHT_SERVER_PORT=8000
+默认加载顺序（优先级自高到低）：
+
+1. 若设置 `CLEANSIGHT_ENV_FILE`，则读取该指定文件（路径可为绝对或相对）。
+2. 否则若项目根存在 `.env.dev`，则优先读取 `.env.dev`。
+3. 若 `.env.dev` 不存在，则读取项目根的 `.env` 作为回退。
+
+常用环境变量示例：
+
+- `CLEANSIGHT_ENV_FILE`：指定 env 文件路径（覆盖默认 `.env`/`.env.dev` 加载）。
+- `CLEANSIGHT_STRICT`：`1` 表示在非 dev 模式缺失关键配置时抛错；`0` 或不设置则仅打印警告。
+
+示例：使用 uvicorn 指定环境（临时会话）
+
+```powershell
+# 使用指定 env 文件（开发/生产皆可）
+$env:CLEANSIGHT_ENV_FILE = 'C:\secrets\cleansight.env'
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+建议：将 `.env` 或敏感文件路径通过 CI/服务管理器安全注入，而不是直接提交到仓库。
 
 ### 安全注意事项
 
@@ -135,10 +159,6 @@ CLEANSIGHT_SERVER_PORT=8000
 2. **HTTPS**: 生产环境建议使用HTTPS
 3. **认证**: 考虑添加API认证机制
 4. **反向代理**: 建议使用nginx等反向代理
-
-## API 文档
-
-运行后，访问 <http://localhost:8000/docs> 查看交互式 HTTP API 文档。
 
 ## API 文档
 
