@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import numpy as np
 from dataclasses import dataclass
+import time
 
 
 @dataclass
@@ -52,17 +53,18 @@ class FrameSegment(BaseModel):
     segment_end_ts: datetime
 
 # SQLAlchemy models for database storage
-from sqlalchemy import Column, String, Integer, DateTime
+from sqlalchemy import Column, String, Integer, BigInteger
 from app.database import Base
 
 class HLSSegment(Base):
-    __tablename__ = "hls_segments"
+    __tablename__ = "file_path"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    _id = Column(Integer, primary_key=True, autoincrement=True)
     client_id = Column(String, index=True)
     task_id = Column(Integer, index=True)  # 匹配 DBTask.task_id (str)
     segment_path = Column(String)  # 文件系统路径，如 /database/client_1/task_123/hls/segment_001.mp4
     playlist_path = Column(String)  # M3U8 文件路径
-    start_ts = Column(DateTime)
-    end_ts = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.now)
+    # 使用 UNIX 时间戳（BIGINT）存储，避免时区/类型不匹配
+    start_ts = Column(BigInteger)
+    end_ts = Column(BigInteger)
+    created_at = Column(BigInteger, default=lambda: int(time.time()))

@@ -148,3 +148,5 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+app/models/best.pt
+app/models/bubble-best.pt

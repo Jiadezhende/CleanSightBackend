@@ -4,116 +4,33 @@
 """
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from app.services import ai, task as task_service
-from app.models.task import Task as CleaningTask
+from fastapi.responses import FileResponse, JSONResponse
+from app.services import ai
 from app.models.frame import HLSSegment
+from app.models.status_messages import get_task_status_response, get_no_task_response
 from app.database import get_db
+from app.database import engine
+from sqlalchemy import text
 import json
 from datetime import datetime
 from pathlib import Path
-import os
 
 router = APIRouter(prefix="/task", tags=["task"])
 
-# 请求/响应模型
-class InitializeTaskRequest(BaseModel):
-    client_id: str
-    actor_id: int
-
-class StartTaskRequest(BaseModel):
-    client_id: str
-    task_id: int
-
-class TerminateTaskRequest(BaseModel):
-    client_id: str
-    task_id: int
-
-class TaskTracebackRequest(BaseModel):
-    task_id: int
-    video_type: str = "processed"  # "raw" 或 "processed"
-
-class TaskStatusResponse(BaseModel):
-    task_id: int
-    status: str
-    cleaning_stage: str  # current_step现在是str
-    bending_count: int
-    bubble_detected: bool
-    fully_submerged: bool
-    updated_at: str
-
-@router.post("/initialize", response_model=TaskStatusResponse)
-async def initialize_task(request: InitializeTaskRequest):
-    """初始化清洗任务"""
-    try:
-        # 创建新任务
-        new_task = task_service.initialize_task(request.actor_id)
-
-        # 为客户端设置任务
-        success = ai.set_task(request.client_id, new_task)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to set task for client")
-
-        return TaskStatusResponse(
-            task_id=new_task.task_id,
-            status=new_task.status,
-            cleaning_stage=new_task.current_step,
-            bending_count=new_task.bending_count,
-            bubble_detected=new_task.bubble_detected,
-            fully_submerged=new_task.fully_submerged,
-            updated_at=datetime.fromtimestamp(new_task.updated_at).isoformat()
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize task: {str(e)}")
-
-@router.post("/start")
-async def start_task(request: StartTaskRequest):
-    """开始任务，设置start_time"""
-    try:
-        # 获取当前任务
-        current_task = ai.get_task(request.client_id)
-        if current_task is None or current_task.task_id != request.task_id:
-            raise HTTPException(status_code=404, detail="Task not found for client")
-
-        # 开始任务
-        success = task_service.start_task(current_task)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to start task")
-
-        return {"message": "Task started successfully", "task_id": request.task_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start task: {str(e)}")
-
-@router.post("/terminate")
-async def terminate_task(request: TerminateTaskRequest):
-    """中断/终止任务"""
-    try:
-        # 获取当前任务
-        current_task = ai.get_task(request.client_id)
-        if current_task is None or current_task.task_id != request.task_id:
-            raise HTTPException(status_code=404, detail="Task not found for client")
-
-        # 终止任务
-        success = task_service.terminate_task(current_task)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to terminate task")
-
-        # 清除客户端的任务
-        ai.set_task(request.client_id, None)
-
-        return {"message": "Task terminated successfully", "task_id": request.task_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
-
 @router.websocket("/status/{client_id}")
 async def websocket_task_status(websocket: WebSocket, client_id: str):
-    """实时更新任务状态的WebSocket接口"""
+    """
+    实时更新任务状态的WebSocket接口
+    
+    返回格式化的状态信息，包含：
+    - 任务状态（运行中/暂停/完成等）和对应的显示文本
+    - 当前清洗步骤和步骤名称
+    - 异常检测结果（弯折、漏气、浸没）
+    - 前端可直接显示的消息列表
+    
+    Args:
+        client_id: 客户端ID（也可以理解为摄像机ip/source_id）
+    """
     await websocket.accept()
     try:
         while True:
@@ -121,20 +38,22 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
             current_task = ai.get_task(client_id)
 
             if current_task:
-                # 发送任务状态更新
-                status_data = {
-                    "task_id": current_task.task_id,
-                    "status": current_task.status,
-                    "cleaning_stage": current_task.current_step,
-                    "bending_count": current_task.bending_count,
-                    "bubble_detected": current_task.bubble_detected,
-                    "fully_submerged": current_task.fully_submerged,
-                    "updated_at": datetime.fromtimestamp(current_task.updated_at).isoformat()
-                }
-                await websocket.send_text(json.dumps(status_data))
+                # 使用字典表生成格式化的状态响应
+                status_data = get_task_status_response(
+                    task_id=current_task.task_id,
+                    status=current_task.status,
+                    current_step=current_task.current_step,
+                    bending=current_task.bending,
+                    bubble_detected=current_task.bubble_detected,
+                    fully_submerged=current_task.fully_submerged,
+                    bending_count=getattr(current_task, 'bending_count', 0),
+                    updated_at=datetime.fromtimestamp(current_task.updated_at).isoformat()
+                )
+                await websocket.send_text(json.dumps(status_data, ensure_ascii=False))
             else:
                 # 没有活跃任务
-                await websocket.send_text(json.dumps({"status": "no_active_task"}))
+                no_task_data = get_no_task_response()
+                await websocket.send_text(json.dumps(no_task_data, ensure_ascii=False))
 
             # 每秒更新一次状态
             import asyncio
@@ -202,8 +121,8 @@ async def get_task_segments(task_id: int, video_type: str = "processed"):
             segment_info = {
                 "segment_id": seg.id,  # type: ignore
                 "segment_path": str(seg.segment_path),  # type: ignore
-                "start_time": seg.start_ts.isoformat() if seg.start_ts else None,  # type: ignore
-                "end_time": seg.end_ts.isoformat() if seg.end_ts else None,  # type: ignore
+                "start_time": int(seg.start_ts) if seg.start_ts is not None else None,  # type: ignore
+                "end_time": int(seg.end_ts) if seg.end_ts is not None else None,  # type: ignore
                 "client_id": str(seg.client_id)  # type: ignore
             }
             
@@ -287,7 +206,7 @@ async def stream_video_segment(task_id: int, segment_id: int):
     try:
         # 查询段记录
         segment = db.query(HLSSegment).filter(
-            HLSSegment.id == segment_id,
+            HLSSegment._id == segment_id,
             HLSSegment.task_id == task_id
         ).first()
         
@@ -331,7 +250,7 @@ async def get_keypoints_data(task_id: int, segment_id: int):
     try:
         # 查询段记录
         segment = db.query(HLSSegment).filter(
-            HLSSegment.id == segment_id,
+            HLSSegment._id == segment_id,
             HLSSegment.task_id == task_id
         ).first()
         
@@ -422,3 +341,49 @@ async def get_all_keypoints(task_id: int):
         
     finally:
         db.close()
+
+
+@router.get("/{task_id}/alarms")
+async def get_task_alarms(task_id: int):
+    """
+    获取指定任务的所有告警记录（clean_alarm 表）。
+
+    返回最新字段集合：alarm_id, task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at
+    """
+    try:
+        with engine.connect() as conn:
+            sql = text(
+                "SELECT alarm_id, task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at, created_at"
+                " FROM clean_alarm WHERE task_id = :task_id ORDER BY created_at DESC"
+            )
+            res = conn.execute(sql, {"task_id": int(task_id)})
+            rows = res.fetchall()
+
+        alarms = []
+        for r in rows:
+            alarms.append({
+                "alarm_id": r['alarm_id'] if 'alarm_id' in r.keys() else r[0],
+                "task_id": r['task_id'] if 'task_id' in r.keys() else r[1],
+                "step_id": r['step_id'] if 'step_id' in r.keys() else r[2],
+                "alarm_type": r['alarm_type'] if 'alarm_type' in r.keys() else r[3],
+                "message": r['message'] if 'message' in r.keys() else r[4],
+                "severity": r['severity'] if 'severity' in r.keys() else r[5],
+                "resolved": bool(r['resolved']) if 'resolved' in r.keys() else bool(r[6]) if len(r) > 6 else False,
+                "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else (r[7] if len(r) > 7 else None),
+                "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else (int(r[8]) if len(r) > 8 and r[8] is not None else None),
+                "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else (int(r[9]) if len(r) > 9 and r[9] is not None else None),
+                "created_at": r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else (r[10] if len(r) > 10 else None)
+            })
+
+        return {
+            "task_id": task_id,
+            "total": len(alarms),
+            "alarms": alarms
+        }
+    except Exception as e:
+        print(f"Failed to fetch alarms for task {task_id}: {e}")
+        return {
+            "task_id": task_id,
+            "total": 0,
+            "alarms": []
+        }

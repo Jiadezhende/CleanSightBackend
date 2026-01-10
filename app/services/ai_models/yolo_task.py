@@ -35,7 +35,7 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         
         # 从配置读取默认值
         if model_path is None or conf_threshold is None or iou_threshold is None:
-            from app.config import settings
+            from app.settings import settings
             if model_path is None:
                 model_path = settings.yolo_model_path
             if conf_threshold is None:
@@ -77,8 +77,8 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             # 确保模型已加载
             self._ensure_model_loaded()
             
-            # 执行检测
-            annotated_frame, detections, bending_detected = self.detector.detect(
+            # 执行检测（仅获取检测结果，不绘制）
+            detections, bending_detected = self.detector.detect(
                 frame,
                 conf_threshold=self.conf_threshold,
                 iou_threshold=self.iou_threshold
@@ -95,7 +95,6 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             
             return {
                 "success": True,
-                "annotated_frame": annotated_frame,
                 "bending_detected": bending_detected,
                 "detections": detections,
                 "detection_count": len(detections),
@@ -109,16 +108,40 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             return {
                 "success": False,
                 "error": str(e),
-                "annotated_frame": frame.copy(),
                 "bending_detected": False,
                 "detections": [],
                 "detection_count": 0,
                 "bending_count": 0
             }
+
+    def infer_batch(self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]) -> List[InferenceResult]:
+        """利用 detector 的批量接口进行推理，返回每帧的结果列表。"""
+        try:
+            self._ensure_model_loaded()
+            batch_results = self.detector.detect_batch(frames, conf_threshold=self.conf_threshold, iou_threshold=self.iou_threshold)
+            out: List[InferenceResult] = []
+            for (detections, bending_detected), ctx in zip(batch_results, contexts):
+                task = ctx.get('task')
+                if bending_detected and task:
+                    task.bending_count += 1
+                out.append({
+                    "success": True,
+                    "bending_detected": bending_detected,
+                    "detections": detections,
+                    "detection_count": len(detections),
+                    "bending_count": task.bending_count if task else 0
+                })
+            return out
+        except Exception as e:
+            print(f"内镜弯折批量检测错误: {e}")
+            import traceback
+            traceback.print_exc()
+            # 回退：逐帧调用 infer
+            return [self.infer(f, c) for f, c in zip(frames, contexts)]
     
     def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
         """
-        可视化内镜弯折检测结果
+        可视化内镜弯折检测结果（在此处绘制检测框和状态信息）
         
         Args:
             frame: 输入图像
@@ -130,38 +153,125 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         if not result.get("success"):
             return frame
         
-        # 使用已标注的帧（包含检测框）
-        result_frame = result.get("annotated_frame", frame).copy()
+        result_frame = frame.copy()
         
-        # 在左上角显示弯折状态
+        # 获取检测结果
+        detections = result.get("detections", [])
         bending_detected = result.get("bending_detected", False)
         bending_count = result.get("bending_count", 0)
         
-        # 设置状态文本和颜色
+        # 颜色定义（BGR格式）
+        BENDING_COLOR = (0, 0, 255)   # 红色（弯折）
+        NORMAL_COLOR = (0, 255, 0)    # 绿色（正常）
+        TEXT_BG_COLOR = (0, 0, 0)     # 黑色
+        TEXT_COLOR = (255, 255, 255)  # 白色
+        
+        # 绘制所有检测框
+        for detection in detections:
+            x1, y1, x2, y2 = detection["bbox"]
+            conf = detection["confidence"]
+            class_name = detection["class_name"]
+            
+            # 根据是否弯折选择颜色
+            is_bending = "bent" in class_name.lower() or "bending" in class_name.lower()
+            box_color = BENDING_COLOR if is_bending else NORMAL_COLOR
+            
+            # 绘制边界框
+            cv2.rectangle(result_frame, (x1, y1), (x2, y2), box_color, 2)
+            
+            # 绘制标签
+            label = f"{class_name} {conf:.2f}"
+            (label_w, label_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            label_y = max(y1 - 10, label_h + 5)
+            
+            # 标签背景（带 padding）
+            cv2.rectangle(
+                result_frame,
+                (x1, label_y - label_h - 5),
+                (x1 + label_w + 6, label_y + 2),
+                box_color,
+                -1
+            )
+            
+            # 标签文字（白色更醒目）
+            cv2.putText(
+                result_frame,
+                label,
+                (x1 + 3, label_y - 3),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                TEXT_COLOR,
+                1,
+                cv2.LINE_AA  # 抗锯齿
+            )
+        
+        # 在左上角显示弯折状态（简化逻辑）
         if bending_detected:
-            status_text = f"BENDING DETECTED! Count: {bending_count}"
-            color = (0, 0, 255)  # 红色警告
+            status_text = f"BENDING! Count: {bending_count}"
+            status_color = BENDING_COLOR
         else:
-            status_text = f"Normal - Bending Count: {bending_count}"
-            color = (0, 255, 0)  # 绿色正常
+            status_text = f"Normal (Count: {bending_count})"
+            status_color = NORMAL_COLOR
         
-        # 绘制半透明背景
-        overlay = result_frame.copy()
-        cv2.rectangle(overlay, (5, 5), (450, 35), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, result_frame, 0.5, 0, result_frame)
-        
-        # 绘制状态文本
-        cv2.putText(
-            result_frame,
-            status_text,
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2
-        )
+        # 绘制状态栏（左上角，使用高效方法）
+        self._draw_status_bar(result_frame, status_text, status_color, position="top-left")
         
         return result_frame
+    
+    def _draw_status_bar(self, frame: np.ndarray, text: str, color: tuple, position: str = "top-left"):
+        """
+        绘制状态栏的辅助方法
+        
+        Args:
+            frame: 图像帧
+            text: 状态文本
+            color: 文本颜色
+            position: 位置 ("top-right", "top-left", "bottom-left", "bottom-right")
+        """
+        height, width = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.6
+        thickness = 2
+        padding = 10
+        
+        # 获取文本尺寸
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        
+        # 根据位置计算坐标
+        if position == "top-right":
+            x = width - text_w - padding
+            y = padding + text_h
+        elif position == "top-left":
+            x = padding
+            y = padding + text_h
+        elif position == "bottom-right":
+            x = width - text_w - padding
+            y = height - padding
+        else:  # bottom-left
+            x = padding
+            y = height - padding
+        
+        # 绘制背景矩形（不透明，性能更好）
+        bg_padding = 5
+        cv2.rectangle(
+            frame,
+            (x - bg_padding, y - text_h - bg_padding),
+            (x + text_w + bg_padding, y + bg_padding),
+            (0, 0, 0),
+            -1
+        )
+        
+        # 绘制文本
+        cv2.putText(
+            frame,
+            text,
+            (x, y),
+            font,
+            font_scale,
+            color,
+            thickness,
+            cv2.LINE_AA
+        )
     
     def requires_context(self) -> List[str]:
         """内镜弯折检测是独立任务，不依赖其他任务"""

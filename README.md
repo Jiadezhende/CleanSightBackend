@@ -4,7 +4,7 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 
 ## 功能简介
 
-- **实时视频流处理**: 从摄像头或本地文件捕获视频，使用 AI 模型处理，并通过 WebSocket 推送结果。
+- **实时视频流处理**: 捕获视频，使用 AI 模型处理，并通过 WebSocket 推送结果。
 - **三线程架构**: 解耦帧捕获、AI 推理和 WebSocket 推送，优化性能。
 - **多任务并行推理**: 支持多种 AI 模型并行执行（关键点检测、动作分析、内镜弯折检测等）。
 - **可扩展架构**: 基于任务注册表的设计，便于添加新的检测任务。
@@ -14,28 +14,11 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 - **视频追溯**: 自动生成 HLS 视频段和关键点 JSON，支持任务回放。
 - **多客户端支持**: 同时处理多个 RTMP 流，每个客户端独立队列管理。
 
-## 架构特点
-
-### 三队列设计
-
-- **CA-RawQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理
-- **CA-ProcessedQueue**: 推理后的处理帧（含关键点），用于生成 HLS 段
-- **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送
-
-### 数据流
-
-```text
-RTMP 流 → 帧捕获线程 → CA-RawQueue → AI 推理 → CA-ProcessedQueue + RT-ProcessedQueue
-                                                       ↓                    ↓
-                                               HLS 段 + JSON          WebSocket 推送
-```
-
-详细架构文档见 [RTMP_ARCHITECTURE.md](RTMP_ARCHITECTURE.md)。
-
 ## 项目结构
 
+`app/`: 主应用代码，包括 API 路由和 WebSocket 处理程序。
+
 - `models/`: 包含用于请求和响应验证的 Pydantic 数据结构。
-- `app/`: 主应用代码，包括 API 路由和 WebSocket 处理程序。
 - `routers/`: API 路由定义。
   - `ai.py`: AI 推理服务路由
   - `inspection.py`: 检查流程路由
@@ -47,25 +30,37 @@ RTMP 流 → 帧捕获线程 → CA-RawQueue → AI 推理 → CA-ProcessedQueue
     - `motion.py`: 动作分析
     - `yolo_detection.py`: 内镜弯折检测器
     - `yolo_task.py`: 内镜弯折检测任务
+  - `client.py`: 与摄像头/客户端通信的工具和示例客户端实现
+  - `infer_task.py`: 推理任务基类与调度辅助逻辑（多个任务类型的共有行为）
   - `example_custom_task.py`: 自定义任务示例
+  - `task.py`: 任务管理和视频追溯
 - `test/`: 测试客户端代码，用于上传视频帧和显示推理结果。
+- `integration_tests/`: 集成测试与端到端/远程测试脚本（用于验证完整管道）。
 - `docs/`: 项目文档
   - `AI_INFERENCE_ARCHITECTURE.md`: 推理架构说明
   - `QUICK_START_CUSTOM_TASK.md`: 自定义任务快速开始
   - `REFACTORING_SUMMARY.md`: 架构重构总结
 
-## 安装
+## 架构说明
 
-```powershell
-# 创建虚拟环境并激活
-py -3.12 -m venv .venv
-.\.venv\Scripts\activate
-
-# 安装依赖（包含 ultralytics 用于内镜弯折检测）
-pip install -r requirements.txt
+```text
+RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → CA-ProcessedQueue + RT-ProcessedQueue
+                                                       ↓                    ↓
+                                               HLS 段 + JSON          WebSocket 推送
 ```
 
-## AI 推理架构
+### 三队列设计
+
+- **CA-ReadyQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理，AI服务启动后才会开始捕获
+- **CA-RawQueue**: 等待落盘的原始视频
+- **CA-ProcessedQueue**: 目标检测后的处理帧（含关键点），用于生成 HLS 段以及JSON数据
+- **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送给前端展示
+
+### RTSP 服务
+
+独立运行，使用 mediamtx 提供视频流中转功能。配置文件位于 [mediamtx_v1.15.4](mediamtx_v1.15.4) (for Windows Local Test), [mediamtx_v1.15.5_linux_amd64](mediamtx_v1.15.5_linux_amd64)(for Linux Remote Test)。
+
+### AI 推理架构
 
 系统采用可扩展的任务注册架构，支持多种 AI 模型并行或串行执行：
 
@@ -82,19 +77,123 @@ pip install -r requirements.txt
 3. 在 `ai.py` 中注册任务
 
 详细说明请参考文档：
+
 - [推理架构说明](docs/AI_INFERENCE_ARCHITECTURE.md)
 - [自定义任务快速开始](docs/QUICK_START_CUSTOM_TASK.md)
-- [架构重构总结](docs/REFACTORING_SUMMARY.md)
+
+## Quick Start for app
+
+```powershell
+# 创建虚拟环境并激活
+py -3.13 -m venv .venv
+.\.venv\Scripts\activate
+
+# 安装依赖（包含 ultralytics 用于内镜弯折检测）
+pip install -r requirements.txt
+```
+
+参考 .env.example 创建 `.env` 或 `.env.dev` 文件，配置数据库等参数。该项目默认使用.env.dev 作为开发环境配置文件[[1]](#环境变量配置)。
+
+### Docker Compose 本地开发环境（开发中）
+
+Docker 化的双服务开发栈（Postgres + MediaMTX）已经编排在 [docker-compose.yml](docker-compose.yml)。
+
+- **启动**：第一次运行会拉取镜像并构建上述服务镜像。
+
+  ```powershell
+  # docker构建服务并启动
+  docker compose up --build
+  # 本地启动后端
+  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+  ```
+
+  启动完成后：
+  - API: <http://localhost:8000/docs>
+  - Postgres: `postgresql://cleansight:cleansight@localhost:5432/cleansight`
+  - MediaMTX: `rtmp://localhost:1935/live/<stream>`、`rtsp://localhost:8004/<path>`
+
+- **组件说明**
+  - `db`：`postgres:15-alpine`，持久化卷 `postgres_data` 保存数据文件。
+  - `mediamtx`：使用官方 `bluenviron/mediamtx:1.15.4` 镜像，并挂载 [mediamtx_v1.15.4/mediamtx.yml](mediamtx_v1.15.4/mediamtx.yml) 作为配置，可直接在宿主机修改后 `docker compose restart mediamtx` 生效。
+  - （开发中），改用python代码访问数据库，而非使用脚本。
+
+- **常用命令**
+  - 停止并移除资源：`docker compose down -v`
+  - 查看应用日志：`docker compose logs -f app`
+  - 进入数据库：`docker compose exec db psql -U cleansight -d cleansight`
+
+> 提示：如果需要变更数据库凭据或端口，可直接编辑 [docker-compose.yml](docker-compose.yml)，同时更新 `app` 服务的 `CLEANSIGHT_*` 变量即可。
 
 ## 运行应用
 
-在激活的虚拟环境中运行：
+### 本地开发模式（默认）
 
 ```powershell
-uvicorn app.main:app
+# 激活虚拟环境
+.\.venv\Scripts\activate
+
+# 启动服务（仅本地访问）
+# 默认会加载 `.env.dev`（若存在）。若要使用指定的 env 文件，请在启动前设置 `CLEANSIGHT_ENV_FILE`：
+uvicorn app.main:app --reload
+
+# 使用指定 env 文件（临时会话示例）
+$env:CLEANSIGHT_ENV_FILE = 'C:\path\to\.env'
+uvicorn app.main:app --reload
 ```
 
 API 将可用在 <http://localhost:8000>
+
+### 生产模式（允许外部访问）
+
+```powershell
+# 激活虚拟环境
+.\.venv\Scripts\activate
+
+# 启动服务（允许外部访问）
+# 在生产环境中推荐通过环境变量或服务管理器注入生产的 .env 文件（例如使用 CLEANSIGHT_ENV_FILE 指定路径）
+# 示例：在当前会话指定生产 env 文件并启动
+$env:CLEANSIGHT_ENV_FILE = 'C:\path\to\.env'  # 指向生产 env 文件
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+API 将可用在：
+
+- 本地访问: <http://localhost:8000>
+- 外部访问: <http://服务器公网IP:8000>
+
+### 环境变量配置
+
+默认加载顺序（优先级自高到低）：
+
+默认加载顺序（优先级自高到低）：
+
+1. 若设置 `CLEANSIGHT_ENV_FILE`，则读取该指定文件（路径可为绝对或相对）。
+2. 否则若项目根存在 `.env.dev`，则优先读取 `.env.dev`。
+3. 若 `.env.dev` 不存在，则读取项目根的 `.env` 作为回退。
+
+常用环境变量示例：
+
+- `CLEANSIGHT_ENV_FILE`：指定 env 文件路径（覆盖默认 `.env`/`.env.dev` 加载）。
+- `CLEANSIGHT_STRICT`：`1` 表示在非 dev 模式缺失关键配置时抛错；`0` 或不设置则仅打印警告。
+
+示例：使用 uvicorn 指定环境（临时会话）
+
+```powershell
+# 使用指定 env 文件（开发/生产皆可）
+$env:CLEANSIGHT_ENV_FILE = 'C:\secrets\cleansight.env'
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+建议：将 `.env` 或敏感文件路径通过 CI/服务管理器安全注入，而不是直接提交到仓库。
+
+### 安全注意事项
+
+当允许外部访问时，请注意：
+
+1. **防火墙配置**: 只开放必要端口
+2. **HTTPS**: 生产环境建议使用HTTPS
+3. **认证**: 考虑添加API认证机制
+4. **反向代理**: 建议使用nginx等反向代理
 
 ## API 文档
 
@@ -102,46 +201,12 @@ API 将可用在 <http://localhost:8000>
 
 ### HTTP API 接口
 
-#### 1. 启动 RTMP 流捕获
+#### 路由 `/ai`
 
-- **URL**: `POST /inspection/start_rtmp_stream`
-- **描述**: 启动 RTMP 流捕获，以固定帧率提取视频帧
-- **请求体**:
-
-  ```json
-  {
-    "client_id": "camera_001",
-    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
-    "fps": 30
-  }
-  ```
-
-- **响应**:
-
-  ```json
-  {
-    "status": "success",
-    "message": "RTMP 流捕获已启动 for camera_001"
-  }
-  ```
-
-#### 2. 停止 RTMP 流捕获
-
-- **URL**: `POST /inspection/stop_rtmp_stream?client_id={client_id}`
-- **描述**: 停止指定客户端的 RTMP 流捕获
-- **响应**:
-
-  ```json
-  {
-    "status": "success",
-    "message": "RTMP 流捕获已停止 for camera_001"
-  }
-  ```
-
-#### 3. 查询 AI 服务状态
+##### 1. 查询 AI 服务状态
 
 - **URL**: `GET /ai/status`
-- **描述**: 获取所有客户端的队列状态
+- **描述**: 获取所有客户端的队列状态和AI服务运行信息
 - **响应**:
 
   ```json
@@ -157,6 +222,238 @@ API 将可用在 <http://localhost:8000>
     }
   }
   ```
+
+##### 2. 加载任务
+
+- **URL**: `GET /ai/load_task/{task_id}`
+- **描述**: 从数据库加载任务，为指定task_id的任务在AI服务中创建任务对象
+- **路径参数**:
+  - `task_id` (int): 任务唯一标识符
+- **响应**:
+
+  ```json
+  {
+    "task_id": 0,
+    "status": "running",
+    "cleaning_stage": "1",
+    "bending": false,
+    "bubble_detected": false,
+    "fully_submerged": false,
+    "updated_at": "2024-01-01T12:00:00"
+  }
+  ```
+
+##### 3. 终止任务
+
+- **URL**: `POST /ai/terminate_task/{client_id}`
+- **描述**: 终止指定的清洗任务，清理所有AI服务资源
+- **路径参数**:
+  - `client_id` (str): 客户端唯一标识符
+- **响应**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "Task terminated for client camera_001"
+  }
+  ```
+
+#### 路由 `/inspection`
+
+##### 1. 启动 RTMP 流捕获
+
+- **URL**: `POST /inspection/start_rtmp_stream`
+- **描述**: 启动RTMP流捕获，以固定帧率提取视频帧
+- **请求体**:
+
+  ```json
+  {
+    "client_id": "camera_001",
+    "rtmp_url": "rtmp://localhost:1935/live/endoscope",
+    "fps": 30
+  }
+  ```
+
+- **响应**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTMP 流捕获已启动 for camera_001"
+  }
+  ```
+
+##### 2. 停止 RTMP 流捕获
+
+- **URL**: `POST /inspection/stop_rtmp_stream?client_id={client_id}`
+- **描述**: 停止指定客户端的RTMP流捕获
+- **查询参数**:
+  - `client_id` (str): 客户端唯一标识符
+- **响应**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTMP 流捕获已停止 for camera_001"
+  }
+  ```
+
+##### 3. 启动 RTSP 流捕获
+
+- **URL**: `POST /inspection/start_rtsp_stream`
+- **描述**: 启动 RTSP 流捕获；请求体包含 `client_id`, `rtsp_url`, `fps`。
+- **请求体示例**:
+
+  ```json
+  {
+    "client_id": "camera_001",
+    "rtsp_url": "rtsp://localhost:8004/live/stream",
+    "fps": 30
+  }
+  ```
+- **响应示例**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTSP 流捕获已启动 for camera_001"
+  }
+  ```
+
+##### 4. 停止 RTSP 流捕获
+
+- **URL**: `POST /inspection/stop_rtsp_stream?client_id={client_id}`
+- **描述**: 停止指定客户端的 RTSP 流捕获。
+- **查询参数**:
+  - `client_id` (str): 客户端唯一标识符
+- **响应示例**:
+
+  ```json
+  {
+    "status": "success",
+    "message": "RTSP 流捕获已停止 for camera_001"
+  }
+  ```
+
+#### 路由 `/task`
+
+##### 1. 获取任务视频段信息
+
+- **URL**: `GET /task/traceback/{task_id}/segments`
+- **描述**: 获取任务的所有HLS视频段路径和关键点JSON路径
+- **路径参数**:
+  - `task_id` (int): 任务ID
+- **查询参数**:
+  - `video_type` (str, 可选): 视频类型 ("raw" 或 "processed", 默认 "processed")
+- **响应**:
+
+  ```json
+  {
+    "task_id": 0,
+    "video_type": "processed",
+    "total_segments": 5,
+    "playlist_path": "/data/task_0/processed_playlist.m3u8",
+    "segments": [
+      {
+        "segment_id": 1,
+        "segment_path": "/data/task_0/processed_segment_1735689600000.mp4",
+        "start_time": "2024-01-01T12:00:00",
+        "end_time": "2024-01-01T12:00:10",
+        "client_id": "camera_001",
+        "keypoints_path": "/data/task_0/keypoints_1735689600000.json"
+      }
+    ]
+  }
+  ```
+
+##### 2. 获取任务播放列表
+
+- **URL**: `GET /task/traceback/{task_id}/playlist`
+- **描述**: 获取任务的HLS播放列表文件(.m3u8)
+- **路径参数**:
+  - `task_id` (int): 任务ID
+- **查询参数**:
+  - `video_type` (str, 可选): 视频类型 ("raw" 或 "processed", 默认 "processed")
+- **响应**: M3U8播放列表文件
+
+##### 3. 流式传输视频段
+
+- **URL**: `GET /task/traceback/{task_id}/video/{segment_id}`
+- **描述**: 流式传输指定的视频段
+- **路径参数**:
+  - `task_id` (int): 任务ID
+  - `segment_id` (int): 段ID
+- **响应**: MP4视频文件流
+
+##### 4. 获取关键点数据
+
+- **URL**: `GET /task/traceback/{task_id}/keypoints/{segment_id}`
+- **描述**: 获取指定视频段的关键点JSON数据
+- **路径参数**:
+  - `task_id` (int): 任务ID
+  - `segment_id` (int): 段ID
+- **响应**: 关键点JSON数据
+
+##### 5. 获取所有关键点数据
+
+- **URL**: `GET /task/traceback/{task_id}/all_keypoints`
+- **描述**: 获取任务的所有关键点数据（合并所有段）
+- **路径参数**:
+  - `task_id` (int): 任务ID
+- **响应**:
+
+  ```json
+  {
+    "task_id": 0,
+    "total_frames": 900,
+    "keypoints": [
+      {
+        "frame_id": 1,
+        "timestamp": 1735689600000,
+        "keypoints": [...],
+        "confidence": 0.95
+      }
+    ]
+  }
+  ```
+
+##### 6. 获取任务告警记录
+
+- **URL**: `GET /task/{task_id}/alarms`
+- **描述**: 查询本地数据库中 `alarm_record` 表为指定 `task_id` 保存的所有告警记录，按 `created_at` 降序返回。适用于回溯某任务的所有异常事件与上报历史。
+- **路径参数**:
+  - `task_id` (int): 任务ID
+- **响应示例**:
+
+```json
+{
+  "task_id": 1,
+  "total": 2,
+  "alarms": [
+    {
+      "id": 123,
+      "task_id": 1,
+      "step_id": "0",
+      "alarm_type": "流程违规",
+      "alarm_level": "high",
+      "alarm_message": "检测到未按规范操作：操作员未佩戴手套",
+      "alarm_time": "2025-12-08T20:30:15",
+      "detection_result": {"detected_objects": ["person","glove"], "confidence": 0.95},
+      "camera_ip": "192.168.1.64",
+      "reader_ip": "172.16.77.221",
+      "created_at": "2025-12-08T20:30:20"
+    }
+  ]
+}
+```
+
+**cURL 示例**:
+
+```bash
+curl -X GET "http://localhost:8000/task/1/alarms"
+```
+
+注意：当前实现会在运行时尝试创建并写入 `alarm_record` 表（针对 PostgreSQL）。若使用其他数据库，请确保表结构兼容或采用 ORM/migration 管理表结构。
 
 ### WebSocket 接口文档
 
@@ -201,36 +498,38 @@ API 将可用在 <http://localhost:8000>
 
 ## 使用示例
 
-### 完整流程示例
-
-```bash
-# 1. 启动 FastAPI 服务器
-uvicorn app.main:app --reload
-
-# 2. 启动 RTMP 流捕获
-curl -X POST http://localhost:8000/inspection/start_rtmp_stream \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "camera_001",
-    "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope",
-    "fps": 30
-  }'
-
-# 3. 查询状态
-curl http://localhost:8000/ai/status
-
-# 4. 停止捕获
-curl -X POST "http://localhost:8000/inspection/stop_rtmp_stream?client_id=camera_001"
-```
-
 ### 测试脚本
 
-使用集成测试脚本：
+#### 本地完整管道测试
 
 ```bash
-# 需要先启动 RTMP 服务器和推流
-python test/test_rtmp_integration.py --client_id test_camera --rtmp_url rtmp://localhost:1935/live/test
+# 运行完整的本地管道测试（需要本地MediaMTX服务）
+# rtmp
+python integration_tests/test_full_pipeline.py
+# rtsp
+python integration_tests/test_full_pipeline_rtsp.py
 ```
+
+#### 远程服务器测试
+
+用于测试部署在远程服务器上的CleanSight服务：
+
+```bash
+# 基本用法
+python integration_tests/remote_test_pipeline.py --server 192.168.1.100
+
+# 自定义参数
+python integration_tests/remote_test_pipeline.py --server 192.168.1.100 --duration 120 --task_id 0 --client_id remote_test_client
+```
+
+远程测试功能：
+- 向远程服务器推送RTMP视频流
+- 加载远程任务 (task_id=0)
+- 实时接收AI推理结果和状态更新
+- 本地可视化显示远程处理结果
+- 自动化测试报告
+
+详细使用说明见：[远程测试框架文档](integration_tests/REMOTE_TEST_README.md)
 
 ## 实时视频流
 
@@ -243,117 +542,9 @@ python test/test_rtmp_integration.py --client_id test_camera --rtmp_url rtmp://l
 
 ### Websocket推理结果获取接口
 
-- **URL**: `ws://localhost:8000/ai/video`
+- **URL**: `ws://localhost:8000/ai/video?client_id={client_id}`
 - **请求类型**: WebSocket
 - **描述**: 实时视频流，包含 AI 处理结果。
+- **连接参数**:
+  - `client_id` (必需): 客户端唯一标识符
 - **数据格式**: Base64 编码的 JPEG 图像 (`data:image/jpeg;base64,...`)
-
-### Http视频帧上传接口
-
-- **URL**: `http://localhost:8000/inspection/upload_frame`
-- **描述**: 接收来自网络的 Base64 编码视频帧进行处理。
-- **请求类型**: POST
-
-### Websocket视频帧上传接口
-
-- **URL**: `ws://localhost:8000/inspection/upload_stream`
-- **请求类型**: WebSocket
-- **描述**: 接收来自网络的 Base64 编码视频帧进行处理
-
-### 多客户端并发测试 (推荐 — WebSocket)
-
-仓库自带一个用于模拟大量摄像头和展示端的测试脚本：`test/multi_client.py`。
-该脚本能并发启动若干上传客户端（camera clients）与可选的展示客户端（display clients），
-便于在本地进行端到端连通性与路由验证（适合模拟医院级别的多设备场景）。
-
-默认行为与设计要点：
-
-- 默认以 **WebSocket** 模式运行（推荐用于性能与实时性测试）。
-- 上传端只保留并发送包含客户标记（左上角小方块）的帧，用于结果回传验证。
-- 展示端（若启用 `--display`）会接收推理后图像并验证左上角标记颜色是否保留，从而判断结果是否路由到对应 `client_id`。
-- 默认**不保存**接收的 output（节约磁盘）。如需保存，可使用 `--display --save-frames --output-dir <dir>`。
-
-依赖（如未安装）：
-
-```powershell
-pip install aiohttp websockets opencv-python numpy
-```
-
-用法摘要（PowerShell）：
-
-- 在激活虚拟环境且启动后端后（见上文）进入 `test` 目录：
-
-```powershell
-cd test
-```
-
-- 启动默认的 WebSocket 多客户端测试（10 个客户端，上传间隔 0.5s，不保存 output）：
-
-```powershell
-py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --server-ws ws://127.0.0.1:8000
-```
-
-- 启动并启用展示端以进行验证（每个客户端都启动一个 display client，会显著增加本地连接数）：
-
-```powershell
-py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --display --server-ws ws://127.0.0.1:8000
-```
-
-- 将展示端同时保存接收帧到目录：
-
-```powershell
-py .\multi_client.py --num 10 --mode websocket --frame test_frame.jpg --send-interval 0.5 --display --save-frames --output-dir multi_output --server-ws ws://127.0.0.1:8000
-```
-
-主要可选参数说明（摘录）：
-
-- `--num`: 并发客户端数量，默认 `10`。
-- `--mode`: `http` 或 `websocket`，默认 `websocket`（推荐）。
-- `--frame`: 用作上传的静态帧文件路径（脚本会在每个 client 的帧左上角画上颜色标记），默认 `test_frame.jpg`。
-- `--send-interval`: 每个客户端发送帧的间隔（秒），默认 `0.5`。
-- `--server-ws`: 服务的 WS 地址，默认 `ws://127.0.0.1:8000`。
-- `--display`: 启用每个客户端对应的展示/验证连接（默认关闭）。
-- `--save-frames`: 启用保存接收到的帧（需要 `--display`），默认关闭。
-- `--output-dir`: 保存接收帧的目录（若启用 `--save-frames`），默认 `multi_output`。
-
-诊断提示：
-
-- 如果运行后统计显示 `clients=0, ok=0`，一般是因为未启用 `--display`（上传端不会填充 stats），或 display 端无法连接到 `/ai/video`（检查 `--server-ws` 地址与防火墙）。
-- 仅上传（不启用 `--display`）时，脚本用于压测上传通道与服务器接收能力；验证需要 `--display`。
-
-## 单客户端测试说明
-
-测试文件在 `test/` 目录下：
-
-- **测试客户端**:
-  - `upload_client.py`: 支持上传静态帧、视频文件或摄像头流的模式，支持 HTTP 和 WebSocket 传输。
-  - `video_client.py`: 显示推理结果，支持自适应窗口和实时帧率。
-
-### 测试方法
-
-#### 1. 综合测试套件（推荐）
-
-项目提供了完整的综合测试套件，可以一次性测试所有功能：
-
-```powershell
-# 进入测试目录运行
-cd test
-python integrated_test.py --client-id test_client --actor-id test_actor
-
-# 测试特定模块
-python integrated_test.py --test ai        # 仅测试AI服务集成
-python integrated_test.py --test http      # 仅测试HTTP API
-python integrated_test.py --test ws        # 仅测试WebSocket接口
-
-# 使用自定义图片进行帧上传测试
-python integrated_test.py --image test_frame.jpg
-
-# 连接到不同服务器
-python integrated_test.py --http-url http://192.168.1.100:8000 --ws-url ws://192.168.1.100:8000
-```
-
-#### 2. 专项测试脚本
-
-- **AI服务集成测试**: `cd test && python test_ai_integration.py`
-- **任务管理API测试**: `cd test && python test_task_apis.py`
-- **WebSocket接口测试**: `cd test && python websocket_test.py`

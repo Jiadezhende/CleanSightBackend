@@ -40,7 +40,7 @@ class MotionModel:
         if keypoints.get("mock"):
             # Simulate action detection
             actions["bending_detected"] = True
-            current_task.bending_count += 1
+            current_task.bending += 1
             current_task.updated_at = int(time.time())  # Update timestamp
 
         return actions
