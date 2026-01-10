@@ -7,11 +7,13 @@ from pydantic import model_validator
 def _load_env_files():
     """按优先级加载环境文件：
     - 若环境变量 `CLEANSIGHT_ENV_FILE` 指定路径，则加载该文件（优先）
-    - 否则优先加载仓库根的 `.env.dev`（若存在），否则加载 `.env` 作为回退
+    - 若环境变量 `CLEANSIGHT_PROD=1`，则加载 `.env` 作为生产环境配置
+    - 否则默认加载 `.env.dev` 作为开发环境配置
     该函数会把键值对注入到 `os.environ`，以便 Pydantic 从环境读取。
     """
     base = Path(__file__).parent.parent
     env_file_override = os.environ.get('CLEANSIGHT_ENV_FILE')
+    prod_mode = os.environ.get('CLEANSIGHT_PROD', '').lower() in ('1', 'true', 'yes')
     # 记录是否加载了 .env.dev（供后续校验逻辑判断是否为开发模式）
     global _LOADED_DEV
     _LOADED_DEV = False
@@ -20,16 +22,19 @@ def _load_env_files():
     if env_file_override:
         # 指定文件优先使用（单个文件）
         candidates.append(Path(env_file_override))
+        _LOADED_DEV = False  # 自定义文件，不视为 dev 模式
+    elif prod_mode:
+        # 生产模式：只加载 .env
+        prod_path = base / '.env'
+        if prod_path.exists():
+            candidates.append(prod_path)
+        _LOADED_DEV = False
     else:
-        # 默认行为：优先使用 .env.dev（若存在），否则回退到 .env
+        # 开发模式（默认）：只加载 .env.dev
         dev_path = base / '.env.dev'
-        default_path = base / '.env'
         if dev_path.exists():
             candidates.append(dev_path)
             _LOADED_DEV = True
-        if default_path.exists():
-            # 允许同时存在时把 .env 作为回退，但已加入 candidates 列表顺序使得 later 文件不会覆盖前者
-            candidates.append(default_path)
 
     for p in candidates:
         try:

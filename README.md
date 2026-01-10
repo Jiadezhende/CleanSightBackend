@@ -92,7 +92,11 @@ py -3.13 -m venv .venv
 pip install -r requirements.txt
 ```
 
-参考 .env.example 创建 `.env` 或 `.env.dev` 文件，配置数据库等参数。该项目默认使用.env.dev 作为开发环境配置文件[[1]](#环境变量配置)。
+参考 [.env.example](.env.example) 创建 `.env.dev` (开发) 和 `.env` (生产) 配置文件。
+
+**环境配置**：
+- 开发环境：默认加载 `.env.dev`
+- 生产环境：使用 [start_prod.ps1](start_prod.ps1) (Windows) 或 [start_prod.sh](start_prod.sh) (Linux) 启动，自动加载 `.env`
 
 ### Docker Compose 本地开发环境（开发中）
 
@@ -126,61 +130,106 @@ Docker 化的双服务开发栈（Postgres + MediaMTX）已经编排在 [docker-
 
 ## 运行应用
 
-### 本地开发模式（默认）
+### 开发环境（默认）
 
 ```powershell
-# 激活虚拟环境
+# Windows
 .\.venv\Scripts\activate
-
-# 启动服务（仅本地访问）
-# 默认会加载 `.env.dev`（若存在）。若要使用指定的 env 文件，请在启动前设置 `CLEANSIGHT_ENV_FILE`：
 uvicorn app.main:app --reload
 
-# 使用指定 env 文件（临时会话示例）
-$env:CLEANSIGHT_ENV_FILE = 'C:\path\to\.env'
+# Linux/Mac
+source .venv/bin/activate
 uvicorn app.main:app --reload
 ```
 
-API 将可用在 <http://localhost:8000>
+默认加载 `.env.dev` 配置，本地访问：<http://localhost:8000>
 
-### 生产模式（允许外部访问）
+### 生产环境（快速启动）
+
+**Windows**:
+```powershell
+.\start_prod.ps1
+```
+
+**Linux/Mac**:
+```bash
+chmod +x start_prod.sh
+./start_prod.sh
+```
+
+这些脚本会：
+- 自动激活虚拟环境
+- 设置 `CLEANSIGHT_PROD=1` 加载 `.env` 配置
+- 启动服务允许外部访问 (`0.0.0.0:8000`)
+
+### 手动启动生产环境
 
 ```powershell
-# 激活虚拟环境
+# Windows
 .\.venv\Scripts\activate
+$env:CLEANSIGHT_PROD = '1'
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 启动服务（允许外部访问）
-# 在生产环境中推荐通过环境变量或服务管理器注入生产的 .env 文件（例如使用 CLEANSIGHT_ENV_FILE 指定路径）
-# 示例：在当前会话指定生产 env 文件并启动
-$env:CLEANSIGHT_ENV_FILE = 'C:\path\to\.env'  # 指向生产 env 文件
+# Linux/Mac
+source .venv/bin/activate
+export CLEANSIGHT_PROD=1
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-API 将可用在：
-
-- 本地访问: <http://localhost:8000>
-- 外部访问: <http://服务器公网IP:8000>
-
 ### 环境变量配置
 
-默认加载顺序（优先级自高到低）：
+#### 配置文件加载逻辑
 
-默认加载顺序（优先级自高到低）：
+系统按以下优先级加载配置文件（优先级从高到低）：
 
-1. 若设置 `CLEANSIGHT_ENV_FILE`，则读取该指定文件（路径可为绝对或相对）。
-2. 否则若项目根存在 `.env.dev`，则优先读取 `.env.dev`。
-3. 若 `.env.dev` 不存在，则读取项目根的 `.env` 作为回退。
+1. **`CLEANSIGHT_ENV_FILE`**（最高优先级）  
+   若设置此环境变量，则加载指定路径的配置文件（可为绝对或相对路径）
+   ```powershell
+   $env:CLEANSIGHT_ENV_FILE = 'C:\secrets\custom.env'
+   ```
 
-常用环境变量示例：
+2. **`CLEANSIGHT_PROD=1`**（生产模式）  
+   设置此环境变量后，系统将加载项目根目录下的 `.env` 文件作为生产环境配置
+   ```powershell
+   $env:CLEANSIGHT_PROD = '1'
+   ```
 
-- `CLEANSIGHT_ENV_FILE`：指定 env 文件路径（覆盖默认 `.env`/`.env.dev` 加载）。
-- `CLEANSIGHT_STRICT`：`1` 表示在非 dev 模式缺失关键配置时抛错；`0` 或不设置则仅打印警告。
+3. **`.env.dev`**（开发模式，默认）  
+   未设置以上环境变量时，系统默认加载项目根目录下的 `.env.dev` 文件作为开发环境配置
 
-示例：使用 uvicorn 指定环境（临时会话）
+#### 环境变量优先级总结
+
+```
+直接设置的环境变量 (CLEANSIGHT_*)
+    > CLEANSIGHT_ENV_FILE 指定的文件
+    > CLEANSIGHT_PROD=1 时的 .env 文件
+    > .env.dev 文件（默认）
+    > 代码中的默认值
+```
+
+#### 常用控制变量
+
+- **`CLEANSIGHT_ENV_FILE`**：指定配置文件路径（覆盖所有默认行为）
+- **`CLEANSIGHT_PROD`**：设置为 `1`、`true` 或 `yes` 启用生产模式
+- **`CLEANSIGHT_STRICT`**：设置为 `1` 时，在缺失关键配置时抛出异常（生产环境推荐）；否则仅打印警告
+
+#### 使用示例
 
 ```powershell
-# 使用指定 env 文件（开发/生产皆可）
+# 开发模式（默认，自动加载 .env.dev）
+uvicorn app.main:app --reload
+
+# 生产模式（加载 .env）
+$env:CLEANSIGHT_PROD = '1'
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 使用自定义配置文件
 $env:CLEANSIGHT_ENV_FILE = 'C:\secrets\cleansight.env'
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 生产模式 + 严格校验
+$env:CLEANSIGHT_PROD = '1'
+$env:CLEANSIGHT_STRICT = '1'
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
