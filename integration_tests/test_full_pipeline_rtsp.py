@@ -43,7 +43,7 @@ class IntegrationTest:
         self,
         task_id: int = 0,
         duration: int = 30,
-        video_path: str = None
+        video_path: str = None # type: ignore
     ):
         self.task_id = task_id
         # client_id will be populated from task.source_ip at runtime
@@ -134,7 +134,7 @@ class IntegrationTest:
     
     def _start_rtsp_capture(self):
         """启动 RTSP 捕获"""
-        self.api.start_rtsp_capture(self.client_id, self.rtsp_url, 30)
+        self.api.start_rtsp_capture(self.client_id, self.rtsp_url, 30) # type: ignore
     
     async def _run_inference_test(self):
         """运行推理测试"""
@@ -149,10 +149,10 @@ class IntegrationTest:
     def _cleanup(self):
         """清理资源"""
         try:
-            self.api.stop_rtsp_capture(self.client_id)
+            self.api.stop_rtsp_capture(self.client_id) # type: ignore
         except:
             pass
-        self.ffmpeg.stop()
+        self.ffmpeg.stop() # type: ignore
 
 
 def main():

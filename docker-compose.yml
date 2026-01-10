@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  db:
+    container_name: cleansight_db
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: cleansight
+      POSTGRES_PASSWORD: cleansight
+      POSTGRES_DB: cleansight
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleansight"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mediamtx:
+    container_name: cleansight_mediamtx
+    image: bluenviron/mediamtx:1.15.4
+    environment:
+      MTX_CONF: /mediamtx.yml
+    volumes:
+      - ./mediamtx_v1.15.4/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "1935:1935"      # RTMP
+      - "1936:1936"      # RTMPS
+      - "8002:8002/udp"  # RTP
+      - "8003:8003/udp"  # RTCP
+      - "8004:8004"      # RTSP TCP
+      - "8322:8322"      # RTSPS
+      - "8888:8888"      # HLS
+      - "8889:8889"      # WebRTC HTTP
+      - "8189:8189/udp"  # WebRTC UDP listener
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  pip_cache:

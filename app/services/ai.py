@@ -25,7 +25,12 @@ import urllib.request
 from sqlalchemy import text
 
 class TaskRegistry:
-    """任务注册表，管理所有推理任务"""
+    """
+    任务注册表，管理所有推理任务
+    注册策略，每个阶段所用模型组合可能不同，因此不适合静态设置TaskRegistry
+
+
+    """
     
     def __init__(self):
         self._tasks: Dict[str, InferenceTask] = {}
@@ -603,8 +608,8 @@ class InferenceManager:
                 # 准备发送：构建聚合告警信息
                 agg = dict(item['alarm_info']) if item.get('alarm_info') else {}
                 agg['alarm_count'] = item.get('count', 1)
-                agg['first_seen'] = datetime.fromtimestamp(item.get('first_seen')).strftime("%Y-%m-%d %H:%M:%S")
-                agg['last_seen'] = datetime.fromtimestamp(item.get('last_seen')).strftime("%Y-%m-%d %H:%M:%S")
+                agg['first_seen'] = datetime.fromtimestamp(item.get('first_seen')).strftime("%Y-%m-%d %H:%M:%S") # type: ignore
+                agg['last_seen'] = datetime.fromtimestamp(item.get('last_seen')).strftime("%Y-%m-%d %H:%M:%S") # type: ignore
                 to_send.append((key, agg))
                 # 更新最近上报时间并移除 pending
                 self._recent_alarms[key] = now
@@ -787,7 +792,7 @@ class InferenceManager:
         except Exception as e:
             print(f"_do_persist_segment error: {e}")
 
-    def _send_alarm_report(self, task_id: int, step_id: int, alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None, alarm_count: Optional[int]=None, first_seen: Optional[str]=None, last_seen: Optional[str]=None) -> bool:
+    def _send_alarm_report(self, task_id: int, step_id: int, alarm_type: str, alarm_level: str, alarm_message: str, detection_result: Optional[Dict]=None, camera_ip: Optional[str]=None, reader_ip: Optional[str]=None, alarm_count: Optional[int]=None, first_seen: Optional[str]=None, last_seen: Optional[str]=None) -> Optional[bool]:
         """按照外部接口文档上报告警（同步调用，故需在后台线程使用）。
 
         增强：支持重试与可选的聚合字段（alarm_count, first_seen, last_seen）。
@@ -1034,6 +1039,7 @@ class InferenceManager:
 
                 try:
                     # 使用批处理管道（会利用任务的 infer_batch 接口）
+                    # TODO: 实现多种流水线，设计一个流水线基类，包括
                     results = self._execute_inference_pipeline_batch(frames, client_queues.get_task(), client_id=client_id)
 
                     # 将每帧结果写回队列

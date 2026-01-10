@@ -235,7 +235,7 @@ class DatabaseHelper:
 class APIClient:
     """后端 API 客户端"""
     
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "http://127.0.0.1:8000"):
         self.base_url = base_url
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:

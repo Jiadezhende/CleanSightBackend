@@ -14,23 +14,6 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 - **视频追溯**: 自动生成 HLS 视频段和关键点 JSON，支持任务回放。
 - **多客户端支持**: 同时处理多个 RTMP 流，每个客户端独立队列管理。
 
-## 架构特点
-
-### 三队列设计
-
-- **CA-ReadyQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理，AI服务启动后才会开始捕获
-- **CA-RawQueue**: 等待落盘的原始视频
-- **CA-ProcessedQueue**: 目标检测后的处理帧（含关键点），用于生成 HLS 段以及JSON数据
-- **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送给前端展示
-
-### 数据流
-
-```text
-RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → CA-ProcessedQueue + RT-ProcessedQueue
-                                                       ↓                    ↓
-                                               HLS 段 + JSON          WebSocket 推送
-```
-
 ## 项目结构
 
 `app/`: 主应用代码，包括 API 路由和 WebSocket 处理程序。
@@ -47,28 +30,37 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
     - `motion.py`: 动作分析
     - `yolo_detection.py`: 内镜弯折检测器
     - `yolo_task.py`: 内镜弯折检测任务
+  - `client.py`: 与摄像头/客户端通信的工具和示例客户端实现
+  - `infer_task.py`: 推理任务基类与调度辅助逻辑（多个任务类型的共有行为）
   - `example_custom_task.py`: 自定义任务示例
   - `task.py`: 任务管理和视频追溯
 - `test/`: 测试客户端代码，用于上传视频帧和显示推理结果。
+- `integration_tests/`: 集成测试与端到端/远程测试脚本（用于验证完整管道）。
 - `docs/`: 项目文档
   - `AI_INFERENCE_ARCHITECTURE.md`: 推理架构说明
   - `QUICK_START_CUSTOM_TASK.md`: 自定义任务快速开始
   - `REFACTORING_SUMMARY.md`: 架构重构总结
 
-RTMP 服务独立运行，使用 mediamtx 提供视频流中转功能。配置文件位于 [mediamtx_v1.15.4](mediamtx_v1.15.4) (for Windows Local Test), [mediamtx_v1.15.5_linux_amd64](mediamtx_v1.15.5_linux_amd64)(for Linux Remote Test)。
+## 架构说明
 
-## Quick Start for app
-
-```powershell
-# 创建虚拟环境并激活
-py -3.12 -m venv .venv
-.\.venv\Scripts\activate
-
-# 安装依赖（包含 ultralytics 用于内镜弯折检测）
-pip install -r requirements.txt
+```text
+RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → CA-ProcessedQueue + RT-ProcessedQueue
+                                                       ↓                    ↓
+                                               HLS 段 + JSON          WebSocket 推送
 ```
 
-## AI 推理架构
+### 三队列设计
+
+- **CA-ReadyQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理，AI服务启动后才会开始捕获
+- **CA-RawQueue**: 等待落盘的原始视频
+- **CA-ProcessedQueue**: 目标检测后的处理帧（含关键点），用于生成 HLS 段以及JSON数据
+- **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送给前端展示
+
+### RTSP 服务
+
+独立运行，使用 mediamtx 提供视频流中转功能。配置文件位于 [mediamtx_v1.15.4](mediamtx_v1.15.4) (for Windows Local Test), [mediamtx_v1.15.5_linux_amd64](mediamtx_v1.15.5_linux_amd64)(for Linux Remote Test)。
+
+### AI 推理架构
 
 系统采用可扩展的任务注册架构，支持多种 AI 模型并行或串行执行：
 
@@ -85,9 +77,52 @@ pip install -r requirements.txt
 3. 在 `ai.py` 中注册任务
 
 详细说明请参考文档：
+
 - [推理架构说明](docs/AI_INFERENCE_ARCHITECTURE.md)
 - [自定义任务快速开始](docs/QUICK_START_CUSTOM_TASK.md)
-- [架构重构总结](docs/REFACTORING_SUMMARY.md)
+
+## Quick Start for app
+
+```powershell
+# 创建虚拟环境并激活
+py -3.13 -m venv .venv
+.\.venv\Scripts\activate
+
+# 安装依赖（包含 ultralytics 用于内镜弯折检测）
+pip install -r requirements.txt
+```
+
+参考 .env.example 创建 `.env` 或 `.env.dev` 文件，配置数据库等参数。该项目默认使用.env.dev 作为开发环境配置文件[[1]](#环境变量配置)。
+
+### Docker Compose 本地开发环境（开发中）
+
+Docker 化的双服务开发栈（Postgres + MediaMTX）已经编排在 [docker-compose.yml](docker-compose.yml)。
+
+- **启动**：第一次运行会拉取镜像并构建上述服务镜像。
+
+  ```powershell
+  # docker构建服务并启动
+  docker compose up --build
+  # 本地启动后端
+  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+  ```
+
+  启动完成后：
+  - API: <http://localhost:8000/docs>
+  - Postgres: `postgresql://cleansight:cleansight@localhost:5432/cleansight`
+  - MediaMTX: `rtmp://localhost:1935/live/<stream>`、`rtsp://localhost:8004/<path>`
+
+- **组件说明**
+  - `db`：`postgres:15-alpine`，持久化卷 `postgres_data` 保存数据文件。
+  - `mediamtx`：使用官方 `bluenviron/mediamtx:1.15.4` 镜像，并挂载 [mediamtx_v1.15.4/mediamtx.yml](mediamtx_v1.15.4/mediamtx.yml) 作为配置，可直接在宿主机修改后 `docker compose restart mediamtx` 生效。
+  - （开发中），改用python代码访问数据库，而非使用脚本。
+
+- **常用命令**
+  - 停止并移除资源：`docker compose down -v`
+  - 查看应用日志：`docker compose logs -f app`
+  - 进入数据库：`docker compose exec db psql -U cleansight -d cleansight`
+
+> 提示：如果需要变更数据库凭据或端口，可直接编辑 [docker-compose.yml](docker-compose.yml)，同时更新 `app` 服务的 `CLEANSIGHT_*` 变量即可。
 
 ## 运行应用
 
@@ -95,7 +130,7 @@ pip install -r requirements.txt
 
 ```powershell
 # 激活虚拟环境
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\activate
 
 # 启动服务（仅本地访问）
 # 默认会加载 `.env.dev`（若存在）。若要使用指定的 env 文件，请在启动前设置 `CLEANSIGHT_ENV_FILE`：
@@ -112,7 +147,7 @@ API 将可用在 <http://localhost:8000>
 
 ```powershell
 # 激活虚拟环境
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\activate
 
 # 启动服务（允许外部访问）
 # 在生产环境中推荐通过环境变量或服务管理器注入生产的 .env 文件（例如使用 CLEANSIGHT_ENV_FILE 指定路径）
