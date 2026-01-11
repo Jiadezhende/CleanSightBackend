@@ -1,26 +1,27 @@
-"""
-AI 推理模块，实现推理任务注册，运行是的调度与落盘。
-"""
+"""AI 推理模块，实现推理任务注册、调度与落盘。"""
 
+import base64
 import json
-from app.services.client import ClientQueues
-from app.services.infer_task import InferenceTask, InferenceResult
+from collections import deque
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import cv2
-import time
+import numpy as np
 import queue
 import threading
-import base64
-from pathlib import Path
-import numpy as np
-from typing import Optional, Dict, Tuple, Union, Any,List
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, Future
 
+from app.services.client import ClientQueues
+from app.services.infer_task import InferenceResult, InferenceTask
 from app.models.frame import ProcessedFrame, FrameData
 from app.models.task import Task as CleaningTask
 
 from app.database import engine
 from app.settings import settings
+from app.services.task_pipeline.leak.leak_test import LeakBubblePipelineService
 import urllib.request
 from sqlalchemy import text
 
@@ -118,6 +119,8 @@ class InferenceManager:
         self._persist_thread: Optional[threading.Thread] = None
         # GPU 批量大小（可配置）
         self._batch_size = getattr(settings, 'gpu_batch_size', 4)
+        # 每个客户端的 TaskPipeline（按需创建）
+        self._pipelines: Dict[str, LeakBubblePipelineService] = {}
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
@@ -295,6 +298,32 @@ class InferenceManager:
             # 基本类型直接返回
             return obj
 
+    # --- TaskPipeline 集成 ---
+
+    def _get_or_create_leak_pipeline(self, client_id: Optional[str]) -> LeakBubblePipelineService:
+        """按 client 创建/缓存泄漏+气泡 TaskPipeline。
+
+        当前简单按 client_id 复用同一组 YOLO 任务实例，
+        若未来需要按步骤区分，可在 key 中加入 step_id。
+        """
+
+        key = str(client_id) if client_id is not None else "default"
+        pipeline = self._pipelines.get(key)
+        if pipeline is not None:
+            return pipeline
+
+        # 复用已注册的 YOLO 任务实例，避免重复加载模型
+        bubble_task = self._task_registry.get_task("bubble_detection")
+        bending_task = self._task_registry.get_task("endoscope_bending_detection")
+
+        pipeline = LeakBubblePipelineService(
+            executor=self._executor,
+            bubble_task=bubble_task,
+            bending_task=bending_task,
+        )
+        self._pipelines[key] = pipeline
+        return pipeline
+
     def _execute_inference_pipeline(
         self, 
         frame: np.ndarray, 
@@ -420,69 +449,48 @@ class InferenceManager:
         return result_frame, all_results
 
     def _execute_inference_pipeline_batch(self, frames: List[np.ndarray], task: Optional[CleaningTask], client_id: Optional[str] = None) -> List[Tuple[np.ndarray, Dict[str, InferenceResult]]]:
-        """批量推理管道：接收多帧并尝试利用任务的 batch 接口加速独立任务。
+        """使用 TaskPipeline 进行批量推理。
 
-        返回每帧的 (可视化后帧, all_results)
+        当前实现：
+        - 为每个 client 维护一个 ``LeakBubblePipelineService`` 实例；
+        - 对 batch 中每帧调用一次 ``pipeline.infer_frame``，并传入包含 task 的上下文；
+        - 利用原有 YOLO 任务的 ``visualize`` 在结果帧上绘制弯折/气泡信息；
+        - 返回每帧的 (可视化后帧, pipeline 聚合结果)。
         """
-        tasks = self._task_registry.get_enabled_tasks()
+
         n = len(frames)
-        # 初始化每帧的结果容器
-        all_results_list: List[Dict[str, InferenceResult]] = [dict() for _ in range(n)]
+        if n == 0:
+            return []
 
-        # 构建上下文列表（独立任务可能会读取或写入 task）
-        contexts = [{"task": task, "results": all_results_list[i]} for i in range(n)]
+        pipeline = self._get_or_create_leak_pipeline(client_id)
 
-        # 阶段1: 并行执行独立任务，但优先使用 infer_batch
-        independent_tasks = [t for t in tasks if not t.requires_context()]
-        if independent_tasks:
-            futures: Dict[Future, InferenceTask] = {}
-            for inference_task in independent_tasks:
-                try:
-                    future = self._executor.submit(inference_task.infer_batch, frames, contexts)
-                    futures[future] = inference_task
-                except Exception as e:
-                    print(f"Failed to submit batch task {inference_task.name}: {e}")
-
-            for future, inference_task in futures.items():
-                try:
-                    results_list = future.result(timeout=10.0)
-                    # results_list 应为长度 n 的列表
-                    if isinstance(results_list, list):
-                        for i, res in enumerate(results_list):
-                            all_results_list[i][inference_task.name] = res
-                    else:
-                        # 回退：如果返回单个结果则复制
-                        for i in range(n):
-                            all_results_list[i][inference_task.name] = results_list
-                except Exception as e:
-                    print(f"Batch task {inference_task.name} failed: {e}")
-                    for i in range(n):
-                        all_results_list[i][inference_task.name] = {"success": False, "error": str(e)}
-
-        # 阶段2: 逐帧执行依赖任务（依赖上下文的任务）
-        dependent_tasks = [t for t in tasks if t.requires_context()]
-        for i, frame in enumerate(frames):
-            context = {"task": task, "results": all_results_list[i]}
-            for inference_task in dependent_tasks:
-                try:
-                    res = inference_task.infer(frame, context)
-                    all_results_list[i][inference_task.name] = res
-                except Exception as e:
-                    print(f"Task {inference_task.name} failed on frame {i}: {e}")
-                    all_results_list[i][inference_task.name] = {"success": False, "error": str(e)}
-
-        # 阶段3: 可视化
         out: List[Tuple[np.ndarray, Dict[str, InferenceResult]]] = []
+
         for i, frame in enumerate(frames):
-            result_frame = frame.copy()
-            for inference_task in tasks:
-                task_result = all_results_list[i].get(inference_task.name, {})
-                if task_result.get("success", False):
-                    try:
-                        result_frame = inference_task.visualize(result_frame, task_result)
-                    except Exception as e:
-                        print(f"Visualization for {inference_task.name} on frame {i} failed: {e}")
-            out.append((result_frame, all_results_list[i]))
+            context: Dict[str, Any] = {"task": task, "client_id": client_id}
+            try:
+                aggregated: Dict[str, InferenceResult] = pipeline.infer_frame(frame, context=context)
+            except Exception as e:
+                print(f"TaskPipeline 批量推理异常 on frame {i}: {e}")
+
+            # 从 TaskPipeline 的 rt_cache_frame 读取最新的 FrameData 作为 processed frame
+            fd = None
+            try:
+                cache = pipeline.rt_cache_frame
+                if cache:
+                    fd = cache[-1]
+            except Exception as e:
+                print(f"读取 TaskPipeline rt_cache 失败 on frame {i}: {e}")
+
+            if fd is None:
+                # 回退：若缓存中没有可用 FrameData，则直接使用原始帧和聚合结果
+                result_frame = frame.copy()
+                inference_result: Dict[str, InferenceResult] = aggregated
+            else:
+                result_frame = fd.frame
+                inference_result = fd.inference_result  # type: ignore[assignment]
+
+            out.append((result_frame, inference_result))
 
         return out
 
