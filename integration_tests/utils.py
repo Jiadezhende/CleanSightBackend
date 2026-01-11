@@ -161,6 +161,9 @@ class DatabaseHelper:
         try:
             task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
             return task
+        except Exception as e:
+            print(f"❌ 获取任务失败: {e}")
+            return None
         finally:
             db.close()
     
@@ -180,8 +183,7 @@ class DatabaseHelper:
                 source_ip=source_ip,
                 current_step="0",
                 status="paused",
-                created_at=now_ts,
-                updated_at=now_ts,
+                updated_time=now_ts,
                 start_time=0,
                 end_time=0
             )

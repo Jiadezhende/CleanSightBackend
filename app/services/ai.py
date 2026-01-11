@@ -314,13 +314,22 @@ class InferenceManager:
         Args:
             client_id: The client identifier to remove.
         """
+        # 先从客户端字典中取出对应队列引用
         with self._lock:
-            self._clients.pop(client_id, None)
-            # 同时清理与该客户端关联的 TaskPipeline
+            client_queues = self._clients.pop(client_id, None)
+
+        # 如果存在队列，则在移除前先强制将剩余缓存全部落盘
+        if client_queues is not None:
             try:
-                self._pipeline_registry.remove_pipelines_for_client(client_id)
-            except Exception:
-                pass
+                self._flush_all_remaining_segments(client_id, client_queues)
+            except Exception as e:
+                print(f"Failed to flush remaining segments when removing client {client_id}: {e}")
+
+        # 无论是否存在队列，都尝试清理与该客户端关联的 TaskPipeline
+        try:
+            self._pipeline_registry.remove_pipelines_for_client(client_id)
+        except Exception:
+            pass
 
     def status(self) -> Dict[str, Any]:
         """获取所有客户端及其队列状态。
@@ -387,130 +396,6 @@ class InferenceManager:
         """
 
         return self._pipeline_registry.get_or_create_pipeline(client_id, task, self._executor)
-
-    def _execute_inference_pipeline(
-        self, 
-        frame: np.ndarray, 
-        task: Optional[CleaningTask],
-        client_id: Optional[str] = None
-    ) -> Tuple[np.ndarray, Dict[str, InferenceResult]]:
-        """执行完整的推理管道。
-        
-        将任务分为独立任务和依赖任务两个阶段:
-        1. 并行执行所有独立任务
-        2. 串行执行依赖任务（按依赖顺序）
-        3. 合并所有可视化结果
-        
-        Args:
-            frame: 输入帧
-            task: 清洗任务对象
-            
-        Returns:
-            (可视化后的帧, 所有任务的结果字典)
-        """
-        print("Inferring on task:", task.task_id if task else "No Task")
-        all_results: Dict[str, InferenceResult] = {}
-        tasks = self._task_registry.get_enabled_tasks()
-        
-        # 构建上下文
-        context: Dict[str, Any] = {
-            "task": task,
-            "results": all_results
-        }
-        
-        # 阶段1: 并行执行独立任务
-        independent_tasks = [t for t in tasks if not t.requires_context()]
-        if independent_tasks:
-            futures: Dict[Future, InferenceTask] = {}
-            for inference_task in independent_tasks:
-                future = self._executor.submit(inference_task.infer, frame, context)
-                futures[future] = inference_task
-            
-            # 收集独立任务结果
-            for future, inference_task in futures.items():
-                try:
-                    result = future.result(timeout=5.0)
-                    all_results[inference_task.name] = result
-                except Exception as e:
-                    print(f"Task {inference_task.name} failed: {e}")
-                    all_results[inference_task.name] = {
-                        "success": False,
-                        "error": str(e)
-                    }
-        
-        # 阶段2: 串行执行依赖任务
-        dependent_tasks = [t for t in tasks if t.requires_context()]
-        for inference_task in dependent_tasks:
-            try:
-                result = inference_task.infer(frame, context)
-                all_results[inference_task.name] = result
-            except Exception as e:
-                print(f"Task {inference_task.name} failed: {e}")
-                all_results[inference_task.name] = {
-                    "success": False,
-                    "error": str(e)
-                }
-        
-        # 阶段3: 合并可视化结果
-        result_frame = frame.copy()
-        for inference_task in tasks:
-            task_result = all_results.get(inference_task.name, {})
-            if task_result.get("success", False):
-                try:
-                    result_frame = inference_task.visualize(result_frame, task_result)
-                except Exception as e:
-                    print(f"Visualization for {inference_task.name} failed: {e}")
-        
-        # 添加通用信息（任务状态等），放到底部以避免与顶部可视化文字重叠，并绘制背景框提高可读性
-        if task:
-            info_text = f"Task ID: {task.task_id} | Bending: {task.bending}"
-            h, w = result_frame.shape[:2]
-            # 文本尺寸与基线
-            (text_w, text_h), baseline = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            x, y = 10, h - 10
-            # 背景矩形（稍留边距）
-            rect_tl = (x - 6, y - text_h - 6)
-            rect_br = (x + text_w + 6, y + 6)
-            cv2.rectangle(result_frame, rect_tl, rect_br, (0, 0, 0), -1)
-            cv2.putText(result_frame, info_text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        # 异常检测：
-        # - 任一子任务返回 success=False -> 认为推理异常
-        # - motion 任务返回 actions 指示的异常（如 bending_detected, bubble_detected）
-        try:
-            alarm_needed = False
-            alarm_info = {
-                "client_id": client_id,
-                "task_id": task.task_id if task else None,
-                "step_id": getattr(task, 'current_step', None) if task else None,
-                "detection_result": {}
-            }
-
-            # 检查是否有任务失败
-            for name, res in all_results.items():
-                if isinstance(res, dict) and res.get('success') is False:
-                    alarm_needed = True
-                    alarm_info['detection_result'][name] = {'error': res.get('error')}
-
-            # motion 异常判定（若存在）
-            motion_res = all_results.get('motion')
-            if isinstance(motion_res, dict) and motion_res.get('success'):
-                actions = motion_res.get('actions', {})
-                # 常见异常标志
-                if actions.get('bending_detected') or actions.get('bubble_detected') or actions.get('submersion_status') in ('not_submerged', 'partial'):
-                    alarm_needed = True
-                    alarm_info['detection_result']['motion'] = actions
-
-            if alarm_needed:
-                # 将告警入队，交由批量去重线程处理，避免高频重复上报
-                try:
-                    self._enqueue_alarm(alarm_info)
-                except Exception as e:
-                    print(f"Failed to enqueue alarm: {e}")
-
-        except Exception as e:
-            print(f"Alarm detection error: {e}")
-
-        return result_frame, all_results
 
     def _execute_inference_pipeline_batch(self, frames: List[np.ndarray], timestamps: List[float], task: Optional[CleaningTask], client_id: Optional[str] = None) -> None:
         """使用 TaskPipeline 进行批量推理。
@@ -1063,15 +948,11 @@ class InferenceManager:
             except Exception as e2:
                 print(f"Failed to fetch clean_alarm schema info or fallback insert failed: {e2}")
 
-    def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
-        """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
-        # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
-        print(f"Checking HLS segment flush for client: {client_id}")
-        seg_len = client_queues.ca_segment_len
-        if not client_queues.has_enough_for_segment(seg_len):
-            return
+    def _enqueue_segment_job(self, client_id: str, client_queues: ClientQueues, seg_len: int) -> None:
+        """将指定长度的段落写盘任务放入持久化队列。
 
-        print(f"Enqueueing HLS segment persist job for client: {client_id}")
+        该方法不会检查长度阈值，只负责按给定 seg_len 弹出队列并入队 job。
+        """
         # 构造目录信息
         client_dir = self._db_dir / client_id
         task_id = client_queues.get_task_id()
@@ -1079,8 +960,7 @@ class InferenceManager:
         hls_dir = task_dir / "hls"
         hls_dir.mkdir(parents=True, exist_ok=True)
 
-        # 从队列弹出对应帧并封装到 job 中
-        # 从 client_queues 中弹出原始帧（pop_n_* 会自动限制数量）
+        # 从 client_queues 中弹出对应帧（pop_n_* 会自动限制数量）
         raw_frames_data: List[FrameData] = client_queues.pop_n_ca_raw(seg_len)
         processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(seg_len)
 
@@ -1099,7 +979,39 @@ class InferenceManager:
         except Exception as e:
             print(f"Failed to enqueue segment persist job for {client_id}: {e}")
 
+    def _flush_all_remaining_segments(self, client_id: str, client_queues: ClientQueues) -> None:
+        """在任务/客户端结束时，将剩余缓存（包括未达阈值的部分）全部落盘。
+
+        - 先按正常段长反复落盘完整段；
+        - 再将最后不足一个段长的残余部分也落为一个段。
+        """
+        try:
+            seg_len = client_queues.ca_segment_len
+            # 1. 先处理所有完整段
+            while client_queues.has_enough_for_segment(seg_len):
+                self._enqueue_segment_job(client_id, client_queues, seg_len)
+
+            # 2. 再处理最后不足一个段长的残余
+            remaining_raw = len(client_queues.ca_raw)
+            remaining_processed = len(client_queues.ca_processed)
+            final_len = min(remaining_raw, remaining_processed)
+
+            if final_len > 0:
+                self._enqueue_segment_job(client_id, client_queues, final_len)
+        except Exception as e:
+            print(f"_flush_all_remaining_segments error for {client_id}: {e}")
+
+    def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
+        """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
+        # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
+        print(f"Checking HLS segment flush for client: {client_id}")
+        seg_len = client_queues.ca_segment_len
+        if not client_queues.has_enough_for_segment(seg_len):
+            return
+
+        print(f"Enqueueing HLS segment persist job for client: {client_id}")
         # 已入队给持久化线程处理（播放列表更新、DB 写入等），本函数返回
+        self._enqueue_segment_job(client_id, client_queues, seg_len)
         return
 
     def _inference_loop(self):
@@ -1224,6 +1136,19 @@ class InferenceManager:
         Returns:
             是否成功终止
         """
+        # 先获取队列引用，用于在清理前落盘缓存
+        with self._lock:
+            client_queues = self._clients.get(client_id)
+        if client_queues is None:
+            return False
+
+        # 在真正清理前，将该客户端当前所有缓存（包括未达阈值部分）全部落盘
+        try:
+            self._flush_all_remaining_segments(client_id, client_queues)
+        except Exception as e:
+            print(f"Failed to flush remaining segments when terminating task for {client_id}: {e}")
+
+        # 再次进入锁范围，安全地清理队列和注册表
         with self._lock:
             client_queues = self._clients.get(client_id)
             if client_queues is None:
@@ -1241,8 +1166,8 @@ class InferenceManager:
             # 从客户端字典中移除
             del self._clients[client_id]
 
-            print(f"任务已终止，客户端 {client_id} 的所有队列和资源已清理")
-            return True
+        print(f"任务已终止，客户端 {client_id} 的所有队列和资源已清理")
+        return True
         
     def get_task(self, client_id: str) -> Optional[CleaningTask]:
         """获取客户端的任务。

@@ -372,7 +372,7 @@ async def get_task_alarms(task_id: int):
                 "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else (r[7] if len(r) > 7 else None),
                 "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else (int(r[8]) if len(r) > 8 and r[8] is not None else None),
                 "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else (int(r[9]) if len(r) > 9 and r[9] is not None else None),
-                "created_at": r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else (r[10] if len(r) > 10 else None)
+                "created_at": r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else (r[10] if len(r) > 10 else None) # TODO: this attribute is out of date
             })
 
         return {

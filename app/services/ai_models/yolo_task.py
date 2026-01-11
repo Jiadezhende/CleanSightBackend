@@ -161,20 +161,24 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         bending_count = result.get("bending_count", 0)
         
         # 颜色定义（BGR格式）
-        BENDING_COLOR = (0, 0, 255)   # 红色（弯折）
-        NORMAL_COLOR = (0, 255, 0)    # 绿色（正常）
-        TEXT_BG_COLOR = (0, 0, 0)     # 黑色
-        TEXT_COLOR = (255, 255, 255)  # 白色
+        BENDING_COLOR = (0, 0, 255)       # 红色（弯折）
+        NORMAL_COLOR = (0, 255, 0)        # 绿色（正常）
+        DEBUG_BENDING_COLOR = (255, 0, 255)  # 调试框：洋红色，与气泡调试框位置不同
+        TEXT_BG_COLOR = (0, 0, 0)         # 黑色
+        TEXT_COLOR = (255, 255, 255)      # 白色
         
         # 绘制所有检测框
         for detection in detections:
             x1, y1, x2, y2 = detection["bbox"]
             conf = detection["confidence"]
             class_name = detection["class_name"]
-            
-            # 根据是否弯折选择颜色
-            is_bending = "bent" in class_name.lower() or "bending" in class_name.lower()
-            box_color = BENDING_COLOR if is_bending else NORMAL_COLOR
+
+            # 调试框单独使用 DEBUG_BENDING_COLOR；否则根据是否弯折选择颜色
+            if class_name == "bending_debug_box":
+                box_color = DEBUG_BENDING_COLOR
+            else:
+                is_bending = "bent" in class_name.lower() or "bending" in class_name.lower()
+                box_color = BENDING_COLOR if is_bending else NORMAL_COLOR
             
             # 绘制边界框
             cv2.rectangle(result_frame, (x1, y1), (x2, y2), box_color, 2)

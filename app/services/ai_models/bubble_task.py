@@ -169,20 +169,24 @@ class BubbleDetectionTask(InferenceTask):
         total_bubble_count = result.get("total_bubble_count", 0)
         
         # 颜色定义（BGR格式）
-        BUBBLE_COLOR = (0, 255, 255)  # 黄色
-        NORMAL_COLOR = (0, 255, 0)    # 绿色
-        WARNING_COLOR = (0, 165, 255)  # 橙色
-        TEXT_BG_COLOR = (0, 0, 0)     # 黑色
+        BUBBLE_COLOR = (0, 255, 255)      # 正常气泡检测框：黄色
+        DEBUG_BUBBLE_COLOR = (255, 0, 255)  # 调试框：洋红色，便于与弯折区分
+        NORMAL_COLOR = (0, 255, 0)        # 绿色
+        WARNING_COLOR = (0, 165, 255)     # 橙色
+        TEXT_BG_COLOR = (0, 0, 0)         # 黑色
         
         # 绘制所有检测框
         for detection in detections:
             x1, y1, x2, y2 = detection["bbox"]
             conf = detection["confidence"]
             class_name = detection["class_name"]
-            
+
+            # 调试框单独使用 DEBUG_BUBBLE_COLOR
+            box_color = DEBUG_BUBBLE_COLOR if class_name == "bubble_debug_box" else BUBBLE_COLOR
+
             # 绘制边界框
-            cv2.rectangle(result_frame, (x1, y1), (x2, y2), BUBBLE_COLOR, 2)
-            
+            cv2.rectangle(result_frame, (x1, y1), (x2, y2), box_color, 2)
+
             # 绘制标签
             label = f"{class_name} {conf:.2f}"
             (label_w, label_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -193,7 +197,7 @@ class BubbleDetectionTask(InferenceTask):
                 result_frame,
                 (x1, label_y - label_h - 5),
                 (x1 + label_w + 6, label_y + 2),
-                BUBBLE_COLOR,
+                box_color,
                 -1
             )
             
