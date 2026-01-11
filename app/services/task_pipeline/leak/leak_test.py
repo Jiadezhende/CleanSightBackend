@@ -14,7 +14,7 @@
 使主进程只需消费 processed frame。
 """
 
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, List, Sequence
 
 import numpy as np
 import time
@@ -79,6 +79,65 @@ class BubbleSubtaskPipeline(SubtaskPipelineBase):
                 break
         return {"continuous_bubble_count": cnt}
 
+    def infer_batch(
+        self,
+        frames: Sequence[np.ndarray],
+        timestamps: Optional[Sequence[float]] = None,
+        prev_stage_cache: Optional[Mapping[str, Any]] = None,
+    ) -> List[JsonDict]:
+        """批量气泡检测：优先使用底层 InferenceTask 的 infer_batch 接口。
+
+        为保持与单帧接口一致，本方法内部仍通过 ``_process_single_result``
+        更新 history 与四类 cache。
+        """
+
+        if self._task is None:
+            # 无底层任务时退回到基类默认逐帧实现
+            return super().infer_batch(frames, timestamps, prev_stage_cache)
+
+        n = len(frames)
+        if n == 0:
+            return []
+
+        # 生成/对齐时间戳
+        if timestamps is not None and len(timestamps) == n:
+            ts_list = [float(t) for t in timestamps]
+        else:
+            base = time.time()
+            ts_list = [float(base + i * 1e-3) for i in range(n)]
+
+        # 构造 batch 上下文列表
+        base_ctx: Dict[str, Any] = {}
+        if isinstance(prev_stage_cache, Mapping):
+            ctx0 = prev_stage_cache.get("context")
+            if isinstance(ctx0, Mapping):
+                base_ctx = dict(ctx0)
+
+        contexts: List[Dict[str, Any]] = [dict(base_ctx) for _ in range(n)]
+
+        # 调用底层批量推理
+        try:
+            batch_results = self._task.infer_batch(list(frames), contexts)
+        except Exception as e:  # pragma: no cover - 运行时保护
+            print(f"BubbleSubtaskPipeline.infer_batch error, fallback to per-frame: {e}")
+            return super().infer_batch(frames, timestamps, prev_stage_cache)
+
+        out: List[JsonDict] = []
+        for res, ts in zip(batch_results, ts_list):
+            try:
+                bubble_detected = bool(res.get("bubble_detected", False))
+                success = bool(res.get("success", True))
+                single_res: JsonDict = {**res}
+                single_res["bubble_detected"] = bubble_detected
+                single_res["success"] = success
+            except Exception:  # pragma: no cover - 防御
+                single_res = {"success": False, "error": "invalid_batch_result", "bubble_detected": False, "detections": [], "bubble_count": 0}
+
+            merged = self._process_single_result(single_res, ts)
+            out.append(merged)
+
+        return out
+
 
 class BendingSubtaskPipeline(SubtaskPipelineBase):
     """弯折检测子任务流水线（单帧）。
@@ -119,6 +178,59 @@ class BendingSubtaskPipeline(SubtaskPipelineBase):
             return out
         except Exception as e:  # 运行时保护
             return {"success": False, "error": str(e), "bending_detected": False, "detections": []}
+
+    def infer_batch(
+        self,
+        frames: Sequence[np.ndarray],
+        timestamps: Optional[Sequence[float]] = None,
+        prev_stage_cache: Optional[Mapping[str, Any]] = None,
+    ) -> List[JsonDict]:
+        """批量弯折检测：优先使用底层 InferenceTask 的 infer_batch 接口。"""
+
+        if self._task is None:
+            return super().infer_batch(frames, timestamps, prev_stage_cache)
+
+        n = len(frames)
+        if n == 0:
+            return []
+
+        # 生成/对齐时间戳
+        if timestamps is not None and len(timestamps) == n:
+            ts_list = [float(t) for t in timestamps]
+        else:
+            base = time.time()
+            ts_list = [float(base + i * 1e-3) for i in range(n)]
+
+        # 构造 batch 上下文列表
+        base_ctx: Dict[str, Any] = {}
+        if isinstance(prev_stage_cache, Mapping):
+            ctx0 = prev_stage_cache.get("context")
+            if isinstance(ctx0, Mapping):
+                base_ctx = dict(ctx0)
+
+        contexts: List[Dict[str, Any]] = [dict(base_ctx) for _ in range(n)]
+
+        try:
+            batch_results = self._task.infer_batch(list(frames), contexts)
+        except Exception as e:  # pragma: no cover - 运行时保护
+            print(f"BendingSubtaskPipeline.infer_batch error, fallback to per-frame: {e}")
+            return super().infer_batch(frames, timestamps, prev_stage_cache)
+
+        out: List[JsonDict] = []
+        for res, ts in zip(batch_results, ts_list):
+            try:
+                bending_detected = bool(res.get("bending_detected", False))
+                success = bool(res.get("success", True))
+                single_res: JsonDict = {**res}
+                single_res["bending_detected"] = bending_detected
+                single_res["success"] = success
+            except Exception:  # pragma: no cover
+                single_res = {"success": False, "error": "invalid_batch_result", "bending_detected": False, "detections": []}
+
+            merged = self._process_single_result(single_res, ts)
+            out.append(merged)
+
+        return out
 
 
 class LeakBubblePipelineService(TaskPipelineBase):
@@ -231,6 +343,78 @@ class LeakBubblePipelineService(TaskPipelineBase):
         # 注意：此处不再向 rt/ca cache 写入 FrameData，
         # 由异步聚合线程在 _visualize_and_update_state 中统一写入。
         return aggregated
+
+    def infer_batch(
+        self,
+        frames: Sequence[np.ndarray],
+        timestamps: Optional[Sequence[float]] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> List[JsonDict]:
+        """TaskPipeline 级批量推理接口。
+
+        - 调用各子任务的 ``infer_batch``（内部会使用 YOLO 的 infer_batch）；
+        - 为每帧构建一次聚合 message/state，主要用于调试/日志；
+        - 实际可视化与聚合写 cache 仍由异步线程完成。
+        """
+
+        n = len(frames)
+        if n == 0:
+            return []
+
+        # 生成/对齐时间戳
+        if timestamps is not None and len(timestamps) == n:
+            ts_list = [float(t) for t in timestamps]
+        else:
+            base = time.time()
+            ts_list = [float(base + i * 1e-3) for i in range(n)]
+
+        # 更新最近一帧供异步可视化使用（取 batch 中最后一帧）
+        with self._frame_lock:
+            self._latest_frame = frames[-1].copy()
+            self._latest_timestamp = ts_list[-1]
+
+        # 统一构造传入子任务的 prev_stage_cache
+        prev_stage_cache: Dict[str, Any] = {}
+        if context is not None:
+            prev_stage_cache["context"] = context
+
+        # 找到两个子任务实例
+        bubble_st: Optional[SubtaskPipelineBase] = None
+        bending_st: Optional[SubtaskPipelineBase] = None
+        for st in self.subtasks:
+            if st.name == "bubble":
+                bubble_st = st
+            elif st.name == "bending":
+                bending_st = st
+
+        bubble_results: List[JsonDict] = []
+        bending_results: List[JsonDict] = []
+
+        if bubble_st is not None:
+            bubble_results = bubble_st.infer_batch(frames, ts_list, prev_stage_cache)
+        else:
+            bubble_results = [{"success": False, "error": "bubble_subtask_missing"} for _ in range(n)]
+
+        if bending_st is not None:
+            bending_results = bending_st.infer_batch(frames, ts_list, prev_stage_cache)
+        else:
+            bending_results = [{"success": False, "error": "bending_subtask_missing"} for _ in range(n)]
+
+        out: List[JsonDict] = []
+        for ts, br, er in zip(ts_list, bubble_results, bending_results):
+            subtask_results = {"bubble": br, "bending": er}
+            message = self.build_message(ts, subtask_results, context)
+            self._state = self.update_state(ts, subtask_results, message, context)
+            aggregated: JsonDict = {
+                "timestamp": ts,
+                "task_name": self._name,
+                "message": message,
+                "subtasks": subtask_results,
+                "state": self._state,
+            }
+            out.append(aggregated)
+
+        return out
 
     def _run_subtasks(
         self,

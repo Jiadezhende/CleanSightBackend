@@ -139,31 +139,40 @@ class SubtaskPipelineBase(ABC):
 
         # 1. 单帧处理（必须由子类实现）
         single_res = self._infer_single_frame(frame, ts, prev_stage_cache)
-        single_res = self._ensure_basic_fields(single_res, ts)
 
-        # 2. 记录到内部历史，供时间序列阶段使用
-        self._history.append(single_res)
+        # 2. 统一走内部单帧结果处理逻辑，保证与批量接口一致
+        return self._process_single_result(single_res, ts)
 
-        # 2.5 立刻写入位置 cache，提高实时性
-        # pos_result 主要用于位置/检测信息
-        pos_result = single_res
-        self._push_to_cache(self._rt_cache_pos, pos_result)
-        self._push_to_cache(self._ca_cache_pos, pos_result)
+    def infer_batch(
+        self,
+        frames: Sequence[np.ndarray],
+        timestamps: Optional[Sequence[float]] = None,
+        prev_stage_cache: Optional[Mapping[str, Any]] = None,
+    ) -> List[JsonDict]:
+        """默认批量推理实现：逐帧调用 ``infer_frame``。
 
-        # 3. 可选的时间序列处理
-        seq_res = self._infer_sequence(self._history)
-        if seq_res is not None:
-            seq_res = self._ensure_basic_fields(seq_res, ts)
+        子类可以覆写本方法以利用底层模型的批量接口（如 YOLO.detect_batch），
+        但应在内部调用 ``_process_single_result`` 以保证 cache/history 行为一致。
+        """
 
-        # 4. 合并结果：msg_result 除位置外包含时序/语义结果
-        merged = self._merge_results(single_res, seq_res)
-        msg_result = merged
+        n = len(frames)
+        if n == 0:
+            return []
 
-        # 5. 写入语义类 cache，供上层 TaskPipeline 聚合与主进程轮询
-        self._push_to_cache(self._rt_cache_msg, msg_result)
-        self._push_to_cache(self._ca_cache_msg, msg_result)
+        # 为每帧生成/对齐时间戳
+        if timestamps is not None and len(timestamps) == n:
+            ts_list = [float(t) for t in timestamps]
+        else:
+            base = time.time()
+            ts_list = [float(base + i * 1e-3) for i in range(n)]
 
-        return merged
+        out: List[JsonDict] = []
+        for frame, ts in zip(frames, ts_list):
+            single_res = self._infer_single_frame(frame, ts, prev_stage_cache)
+            merged = self._process_single_result(single_res, ts)
+            out.append(merged)
+
+        return out
 
     # ---- 子类需要/可以实现的接口 ----
 
@@ -223,6 +232,36 @@ class SubtaskPipelineBase(ABC):
         res.setdefault("timestamp", ts)
         res.setdefault("task_name", self._name)
         return res
+
+    def _process_single_result(self, single_res: JsonDict, ts: float) -> JsonDict:
+        """统一处理单帧推理结果：补全字段、更新 history 与四类 cache。
+
+        该方法被 ``infer_frame`` 与 ``infer_batch`` 内部复用，
+        保证无论单帧还是批量接口，cache/history 行为完全一致。
+        """
+
+        # 补全基础字段
+        single_res = self._ensure_basic_fields(single_res, ts)
+
+        # 历史记录
+        self._history.append(single_res)
+
+        # 位置类 cache（实时/持久化）
+        pos_result = single_res
+        self._push_to_cache(self._rt_cache_pos, pos_result)
+        self._push_to_cache(self._ca_cache_pos, pos_result)
+
+        # 时间序列处理
+        seq_res = self._infer_sequence(self._history)
+        if seq_res is not None:
+            seq_res = self._ensure_basic_fields(seq_res, ts)
+
+        # 合并结果并写入语义类 cache
+        merged = self._merge_results(single_res, seq_res)
+        self._push_to_cache(self._rt_cache_msg, merged)
+        self._push_to_cache(self._ca_cache_msg, merged)
+
+        return merged
 
 
 class TaskPipelineBase(ABC):
