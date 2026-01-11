@@ -127,8 +127,10 @@ async def load_task(task_id: int):
         finally:
             db.close()
     except HTTPException:
+        print(f"Database response: {db_task}")
         raise
     except Exception as e:
+        print(f"Database response: {db_task}")
         raise HTTPException(status_code=500, detail=f"Failed to load task: {str(e)}")
     
 @router.post("/terminate_task/{client_id}")

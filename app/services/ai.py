@@ -1,75 +1,143 @@
-"""
-AI 推理模块，实现推理任务注册，运行是的调度与落盘。
-"""
+"""AI 推理模块，实现推理任务注册、调度与落盘。"""
 
+import base64
 import json
-from app.services.client import ClientQueues
-from app.services.infer_task import InferenceTask, InferenceResult
+from collections import deque
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import cv2
-import time
+import numpy as np
 import queue
 import threading
-import base64
-from pathlib import Path
-import numpy as np
-from typing import Optional, Dict, Tuple, Union, Any,List
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, Future
 
+from app.services.client import ClientQueues
+from app.services.infer_task import InferenceResult, InferenceTask
 from app.models.frame import ProcessedFrame, FrameData
 from app.models.task import Task as CleaningTask
 
 from app.database import engine
 from app.settings import settings
+from app.services.task_pipeline.leak.leak_test import LeakBubblePipelineService
 import urllib.request
 from sqlalchemy import text
 
-class TaskRegistry:
-    """
-    任务注册表，管理所有推理任务
-    注册策略，每个阶段所用模型组合可能不同，因此不适合静态设置TaskRegistry
 
+class InferenceTaskRegistry:
+    """底层推理任务注册表（仅负责 InferenceTask）。
 
+    - 管理 YOLO 弯折 / 气泡等底层模型任务实例；
+    - 维护执行顺序与启用状态；
+    - 不关心具体客户端或 TaskPipeline。
     """
-    
+
     def __init__(self):
         self._tasks: Dict[str, InferenceTask] = {}
         self._execution_order: List[str] = []
-    
+
     def register(self, task: InferenceTask):
-        """注册一个推理任务"""
+        """注册一个底层推理任务（如 YOLO 检测）。"""
         self._tasks[task.name] = task
         self._recompute_execution_order()
-    
+
     def unregister(self, task_name: str):
-        """注销一个推理任务"""
+        """注销一个底层推理任务。"""
         if task_name in self._tasks:
             del self._tasks[task_name]
             self._recompute_execution_order()
-    
+
     def get_task(self, name: str) -> Optional[InferenceTask]:
-        """获取指定任务"""
+        """获取指定底层推理任务。"""
         return self._tasks.get(name)
-    
+
     def get_enabled_tasks(self) -> List[InferenceTask]:
-        """获取所有启用的任务，按执行顺序"""
-        return [self._tasks[name] for name in self._execution_order 
-                if self._tasks[name].enabled]
-    
+        """获取所有启用的底层推理任务（按执行顺序）。"""
+        return [self._tasks[name] for name in self._execution_order if self._tasks[name].enabled]
+
     def _recompute_execution_order(self):
-        """重新计算任务执行顺序（拓扑排序）"""
-        # 简单实现：先执行无依赖的，再执行有依赖的
-        independent = []
-        dependent = []
-        
+        """重新计算底层任务执行顺序（简单拓扑排序占位）。"""
+        independent: List[str] = []
+        dependent: List[str] = []
+
         for name, task in self._tasks.items():
             if not task.requires_context():
                 independent.append(name)
             else:
                 dependent.append(name)
-        
-        # TODO: 实现完整的拓扑排序以支持复杂依赖关系
+
         self._execution_order = independent + dependent
+
+
+class PipelineRegistry:
+    """TaskPipeline 注册表（按 client_id 管理流水线实例）。
+
+    只负责 per-client 的 Pipeline 生命周期与路由：
+    - 持有对 InferenceTaskRegistry 的引用，用于复用底层任务实例；
+    - 按 client_id（以及 CleanTask 上下文）创建 / 缓存 / 清理 TaskPipeline；
+    - 目前仅支持 LeakBubblePipelineService，一旦有更多 Pipeline，
+      可以在此类内部做集中路由。
+    """
+
+    def __init__(self, task_registry: InferenceTaskRegistry):
+        self._task_registry = task_registry
+        # 每个客户端当前活跃的 TaskPipeline（目前仅 LeakBubblePipelineService 一种）
+        # key 约定为 str(client_id)，对于无 client_id 的场景使用 "default"
+        self._pipelines: Dict[str, LeakBubblePipelineService] = {}
+        self._lock = threading.Lock()
+
+    def get_or_create_pipeline(
+        self,
+        client_id: Optional[str],
+        task: Optional[CleaningTask],
+        executor: ThreadPoolExecutor,
+    ) -> LeakBubblePipelineService:
+        """按 client + CleanTask 获取或创建当前活跃的 TaskPipeline。
+
+        当前仅实现一个 LeakBubblePipelineService：
+        - 将同一组 YOLO 任务实例复用到所有 Pipeline 中；
+        - 后续若根据 task.current_step 选择不同 Pipeline，只需在此方法内扩展分支。
+        """
+
+        key = str(client_id) if client_id is not None else "default"
+        with self._lock:
+            pipeline = self._pipelines.get(key)
+            if pipeline is not None:
+                return pipeline
+
+            # 复用已经注册的 YOLO 任务实例（如存在）
+            bubble_task = self._task_registry.get_task("bubble_detection")
+            bending_task = self._task_registry.get_task("endoscope_bending_detection")
+
+            pipeline = LeakBubblePipelineService(
+                executor=executor,
+                bubble_task=bubble_task,
+                bending_task=bending_task,
+            )
+            self._pipelines[key] = pipeline
+            return pipeline
+
+    def get_pipeline(self, client_id: Optional[str]) -> Optional[LeakBubblePipelineService]:
+        """仅按 client_id 获取已存在的 TaskPipeline（不创建）。"""
+
+        key = str(client_id) if client_id is not None else "default"
+        with self._lock:
+            return self._pipelines.get(key)
+
+    def remove_pipelines_for_client(self, client_id: str) -> None:
+        """清理指定客户端关联的所有 Pipeline 实例。"""
+
+        key = str(client_id)
+        with self._lock:
+            pipeline = self._pipelines.pop(key, None)
+        if pipeline is not None:
+            try:
+                pipeline.stop()
+            except Exception:
+                # 保护性清理，避免单个 Pipeline 停止失败影响整体
+                pass
 
 
 class InferenceManager:
@@ -92,12 +160,15 @@ class InferenceManager:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         
-        # 任务注册表
-        self._task_registry = TaskRegistry()
+        # 任务注册表（只管理底层 InferenceTask）
+        self._task_registry = InferenceTaskRegistry()
         self._register_default_tasks()
         
         # 线程池用于并行推理
         self._executor = ThreadPoolExecutor(max_workers=4)
+
+        # Pipeline 注册表：按 client_id 管理 per-client TaskPipeline
+        self._pipeline_registry = PipelineRegistry(self._task_registry)
 
         # 数据库存储目录（开发阶段使用 JSON 文件）
         base_dir = Path(__file__).parent.parent.parent.resolve()
@@ -118,6 +189,7 @@ class InferenceManager:
         self._persist_thread: Optional[threading.Thread] = None
         # GPU 批量大小（可配置）
         self._batch_size = getattr(settings, 'gpu_batch_size', 4)
+        # Task / Pipeline 注册表：统一管理底层 InferenceTask 与 per-client TaskPipeline
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
@@ -242,8 +314,22 @@ class InferenceManager:
         Args:
             client_id: The client identifier to remove.
         """
+        # 先从客户端字典中取出对应队列引用
         with self._lock:
-            self._clients.pop(client_id, None)
+            client_queues = self._clients.pop(client_id, None)
+
+        # 如果存在队列，则在移除前先强制将剩余缓存全部落盘
+        if client_queues is not None:
+            try:
+                self._flush_all_remaining_segments(client_id, client_queues)
+            except Exception as e:
+                print(f"Failed to flush remaining segments when removing client {client_id}: {e}")
+
+        # 无论是否存在队列，都尝试清理与该客户端关联的 TaskPipeline
+        try:
+            self._pipeline_registry.remove_pipelines_for_client(client_id)
+        except Exception:
+            pass
 
     def status(self) -> Dict[str, Any]:
         """获取所有客户端及其队列状态。
@@ -295,196 +381,91 @@ class InferenceManager:
             # 基本类型直接返回
             return obj
 
-    def _execute_inference_pipeline(
-        self, 
-        frame: np.ndarray, 
+    # --- TaskPipeline 集成 ---
+
+    def _get_or_create_leak_pipeline(
+        self,
+        client_id: Optional[str],
         task: Optional[CleaningTask],
-        client_id: Optional[str] = None
-    ) -> Tuple[np.ndarray, Dict[str, InferenceResult]]:
-        """执行完整的推理管道。
-        
-        将任务分为独立任务和依赖任务两个阶段:
-        1. 并行执行所有独立任务
-        2. 串行执行依赖任务（按依赖顺序）
-        3. 合并所有可视化结果
-        
-        Args:
-            frame: 输入帧
-            task: 清洗任务对象
-            
-        Returns:
-            (可视化后的帧, 所有任务的结果字典)
+    ) -> LeakBubblePipelineService:
+        """按 client + CleanTask 获取/创建泄漏+气泡 TaskPipeline。
+
+        具体 Pipeline 的创建与缓存逻辑委托给 PipelineRegistry：
+        - 由 PipelineRegistry 复用已注册的 YOLO 任务实例；
+        - 由 PipelineRegistry 管理每个 client 的活跃 Pipeline 实例。
         """
-        print("Inferring on task:", task.task_id if task else "No Task")
-        all_results: Dict[str, InferenceResult] = {}
-        tasks = self._task_registry.get_enabled_tasks()
-        
-        # 构建上下文
-        context: Dict[str, Any] = {
-            "task": task,
-            "results": all_results
-        }
-        
-        # 阶段1: 并行执行独立任务
-        independent_tasks = [t for t in tasks if not t.requires_context()]
-        if independent_tasks:
-            futures: Dict[Future, InferenceTask] = {}
-            for inference_task in independent_tasks:
-                future = self._executor.submit(inference_task.infer, frame, context)
-                futures[future] = inference_task
-            
-            # 收集独立任务结果
-            for future, inference_task in futures.items():
-                try:
-                    result = future.result(timeout=5.0)
-                    all_results[inference_task.name] = result
-                except Exception as e:
-                    print(f"Task {inference_task.name} failed: {e}")
-                    all_results[inference_task.name] = {
-                        "success": False,
-                        "error": str(e)
-                    }
-        
-        # 阶段2: 串行执行依赖任务
-        dependent_tasks = [t for t in tasks if t.requires_context()]
-        for inference_task in dependent_tasks:
-            try:
-                result = inference_task.infer(frame, context)
-                all_results[inference_task.name] = result
-            except Exception as e:
-                print(f"Task {inference_task.name} failed: {e}")
-                all_results[inference_task.name] = {
-                    "success": False,
-                    "error": str(e)
-                }
-        
-        # 阶段3: 合并可视化结果
-        result_frame = frame.copy()
-        for inference_task in tasks:
-            task_result = all_results.get(inference_task.name, {})
-            if task_result.get("success", False):
-                try:
-                    result_frame = inference_task.visualize(result_frame, task_result)
-                except Exception as e:
-                    print(f"Visualization for {inference_task.name} failed: {e}")
-        
-        # 添加通用信息（任务状态等），放到底部以避免与顶部可视化文字重叠，并绘制背景框提高可读性
-        if task:
-            info_text = f"Task ID: {task.task_id} | Bending: {task.bending}"
-            h, w = result_frame.shape[:2]
-            # 文本尺寸与基线
-            (text_w, text_h), baseline = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            x, y = 10, h - 10
-            # 背景矩形（稍留边距）
-            rect_tl = (x - 6, y - text_h - 6)
-            rect_br = (x + text_w + 6, y + 6)
-            cv2.rectangle(result_frame, rect_tl, rect_br, (0, 0, 0), -1)
-            cv2.putText(result_frame, info_text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        # 异常检测：
-        # - 任一子任务返回 success=False -> 认为推理异常
-        # - motion 任务返回 actions 指示的异常（如 bending_detected, bubble_detected）
-        try:
-            alarm_needed = False
-            alarm_info = {
-                "client_id": client_id,
-                "task_id": task.task_id if task else None,
-                "step_id": getattr(task, 'current_step', None) if task else None,
-                "detection_result": {}
-            }
 
-            # 检查是否有任务失败
-            for name, res in all_results.items():
-                if isinstance(res, dict) and res.get('success') is False:
-                    alarm_needed = True
-                    alarm_info['detection_result'][name] = {'error': res.get('error')}
+        return self._pipeline_registry.get_or_create_pipeline(client_id, task, self._executor)
 
-            # motion 异常判定（若存在）
-            motion_res = all_results.get('motion')
-            if isinstance(motion_res, dict) and motion_res.get('success'):
-                actions = motion_res.get('actions', {})
-                # 常见异常标志
-                if actions.get('bending_detected') or actions.get('bubble_detected') or actions.get('submersion_status') in ('not_submerged', 'partial'):
-                    alarm_needed = True
-                    alarm_info['detection_result']['motion'] = actions
+    def _execute_inference_pipeline_batch(self, frames: List[np.ndarray], timestamps: List[float], task: Optional[CleaningTask], client_id: Optional[str] = None) -> None:
+        """使用 TaskPipeline 进行批量推理。
 
-            if alarm_needed:
-                # 将告警入队，交由批量去重线程处理，避免高频重复上报
-                try:
-                    self._enqueue_alarm(alarm_info)
-                except Exception as e:
-                    print(f"Failed to enqueue alarm: {e}")
-
-        except Exception as e:
-            print(f"Alarm detection error: {e}")
-
-        return result_frame, all_results
-
-    def _execute_inference_pipeline_batch(self, frames: List[np.ndarray], task: Optional[CleaningTask], client_id: Optional[str] = None) -> List[Tuple[np.ndarray, Dict[str, InferenceResult]]]:
-        """批量推理管道：接收多帧并尝试利用任务的 batch 接口加速独立任务。
-
-        返回每帧的 (可视化后帧, all_results)
+        说明：
+        - 这里只负责驱动 ``LeakBubblePipelineService.infer_frame`` 填充各子任务 cache；
+        - 实际的可视化帧与聚合结果由 TaskPipeline 异步线程写入
+          ``rt_cache_frame/ca_cache_frame`` 和 ``rt_cache_msg/ca_cache_msg``；
+        - 推理主循环随后通过读取这些 cache 并写入 ClientQueues，
+          作为唯一的数据来源（不再直接依赖各 InferenceTask 的输出）。
         """
-        tasks = self._task_registry.get_enabled_tasks()
+
         n = len(frames)
-        # 初始化每帧的结果容器
-        all_results_list: List[Dict[str, InferenceResult]] = [dict() for _ in range(n)]
+        if n == 0:
+            return
 
-        # 构建上下文列表（独立任务可能会读取或写入 task）
-        contexts = [{"task": task, "results": all_results_list[i]} for i in range(n)]
+        if len(timestamps) != n:
+            # 时间戳长度不匹配时，简单重建一组时间戳
+            base = time.time()
+            timestamps = [float(base + i * 1e-3) for i in range(n)]
 
-        # 阶段1: 并行执行独立任务，但优先使用 infer_batch
-        independent_tasks = [t for t in tasks if not t.requires_context()]
-        if independent_tasks:
-            futures: Dict[Future, InferenceTask] = {}
-            for inference_task in independent_tasks:
-                try:
-                    future = self._executor.submit(inference_task.infer_batch, frames, contexts)
-                    futures[future] = inference_task
-                except Exception as e:
-                    print(f"Failed to submit batch task {inference_task.name}: {e}")
+        # 根据当前 CleanTask 从注册表中获取 / 创建对应 TaskPipeline
+        pipeline = self._get_or_create_leak_pipeline(client_id, task)
 
-            for future, inference_task in futures.items():
-                try:
-                    results_list = future.result(timeout=10.0)
-                    # results_list 应为长度 n 的列表
-                    if isinstance(results_list, list):
-                        for i, res in enumerate(results_list):
-                            all_results_list[i][inference_task.name] = res
-                    else:
-                        # 回退：如果返回单个结果则复制
-                        for i in range(n):
-                            all_results_list[i][inference_task.name] = results_list
-                except Exception as e:
-                    print(f"Batch task {inference_task.name} failed: {e}")
-                    for i in range(n):
-                        all_results_list[i][inference_task.name] = {"success": False, "error": str(e)}
+        context: Dict[str, Any] = {"task": task, "client_id": client_id}
+        try:
+            # 触发 TaskPipeline 级别的批量推理，内部会调用各子任务的 infer_batch，
+            # 利用 YOLO 的 detect_batch 接口提升整体推理效率。
+            pipeline.infer_batch(frames, timestamps=timestamps, context=context)
+        except Exception as e:
+            print(f"TaskPipeline 批量推理异常 for client {client_id}: {e}")
 
-        # 阶段2: 逐帧执行依赖任务（依赖上下文的任务）
-        dependent_tasks = [t for t in tasks if t.requires_context()]
-        for i, frame in enumerate(frames):
-            context = {"task": task, "results": all_results_list[i]}
-            for inference_task in dependent_tasks:
-                try:
-                    res = inference_task.infer(frame, context)
-                    all_results_list[i][inference_task.name] = res
-                except Exception as e:
-                    print(f"Task {inference_task.name} failed on frame {i}: {e}")
-                    all_results_list[i][inference_task.name] = {"success": False, "error": str(e)}
+    def _drain_pipeline_caches_to_client(self, client_id: str, client_queues: ClientQueues) -> None:
+        """将 TaskPipeline 的聚合 cache 映射到对应客户端队列。
 
-        # 阶段3: 可视化
-        out: List[Tuple[np.ndarray, Dict[str, InferenceResult]]] = []
-        for i, frame in enumerate(frames):
-            result_frame = frame.copy()
-            for inference_task in tasks:
-                task_result = all_results_list[i].get(inference_task.name, {})
-                if task_result.get("success", False):
-                    try:
-                        result_frame = inference_task.visualize(result_frame, task_result)
-                    except Exception as e:
-                        print(f"Visualization for {inference_task.name} on frame {i} failed: {e}")
-            out.append((result_frame, all_results_list[i]))
+        - rt_cache_frame -> ClientQueues.rt_processed（用于实时展示）
+        - ca_cache_frame -> ClientQueues.ca_processed（用于 HLS 段与 JSON 落盘）
 
-        return out
+        简化策略：
+        - TaskPipeline 作为生产者持续 append 到 deque 尾部；
+        - InferenceManager 作为消费者从队首 popleft，将元素转移到对应 client 队列；
+        - 这样无需维护额外 offset 状态，逻辑更直观。
+        """
+
+        # 通过 PipelineRegistry 获取当前 client 对应的 Pipeline（不创建新实例）
+        pipeline = self._pipeline_registry.get_pipeline(client_id)
+        if pipeline is None:
+            return
+
+        # 1. 映射实时帧到 RT-ProcessedQueue
+        try:
+            rt_cache = pipeline.rt_cache_frame
+            # 直接从队首消费所有可用帧，append 到客户端 RT 队列
+            while rt_cache:
+                fd = rt_cache.popleft()
+                client_queues.append_rt_processed(fd)
+        except Exception as e:
+            print(f"从 TaskPipeline rt_cache_frame 映射到客户端队列失败 for {client_id}: {e}")
+
+        # 2. 映射持久化帧到 CA-ProcessedQueue
+        try:
+            ca_cache = pipeline.ca_cache_frame
+            while ca_cache:
+                fd = ca_cache.popleft()
+                client_queues.append_ca_processed(fd)
+        except Exception as e:
+            print(f"从 TaskPipeline ca_cache_frame 映射到客户端队列失败 for {client_id}: {e}")
+
+        # 3. msg cache 目前主要由 TaskPipeline 内部与持久化逻辑消费，
+        # 此处不再维护偏移，保持只读/调试用途。
 
     def _handle_alarm(self, alarm_info: Dict[str, Any]):
         """将告警信息放入持久化队列，由持久化线程执行上报与写 DB，避免阻塞推理线程。"""
@@ -967,15 +948,11 @@ class InferenceManager:
             except Exception as e2:
                 print(f"Failed to fetch clean_alarm schema info or fallback insert failed: {e2}")
 
-    def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
-        """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
-        # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
-        print(f"Checking HLS segment flush for client: {client_id}")
-        seg_len = client_queues.ca_segment_len
-        if not client_queues.has_enough_for_segment(seg_len):
-            return
+    def _enqueue_segment_job(self, client_id: str, client_queues: ClientQueues, seg_len: int) -> None:
+        """将指定长度的段落写盘任务放入持久化队列。
 
-        print(f"Enqueueing HLS segment persist job for client: {client_id}")
+        该方法不会检查长度阈值，只负责按给定 seg_len 弹出队列并入队 job。
+        """
         # 构造目录信息
         client_dir = self._db_dir / client_id
         task_id = client_queues.get_task_id()
@@ -983,8 +960,7 @@ class InferenceManager:
         hls_dir = task_dir / "hls"
         hls_dir.mkdir(parents=True, exist_ok=True)
 
-        # 从队列弹出对应帧并封装到 job 中
-        # 从 client_queues 中弹出原始帧（pop_n_* 会自动限制数量）
+        # 从 client_queues 中弹出对应帧（pop_n_* 会自动限制数量）
         raw_frames_data: List[FrameData] = client_queues.pop_n_ca_raw(seg_len)
         processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(seg_len)
 
@@ -1003,7 +979,39 @@ class InferenceManager:
         except Exception as e:
             print(f"Failed to enqueue segment persist job for {client_id}: {e}")
 
+    def _flush_all_remaining_segments(self, client_id: str, client_queues: ClientQueues) -> None:
+        """在任务/客户端结束时，将剩余缓存（包括未达阈值的部分）全部落盘。
+
+        - 先按正常段长反复落盘完整段；
+        - 再将最后不足一个段长的残余部分也落为一个段。
+        """
+        try:
+            seg_len = client_queues.ca_segment_len
+            # 1. 先处理所有完整段
+            while client_queues.has_enough_for_segment(seg_len):
+                self._enqueue_segment_job(client_id, client_queues, seg_len)
+
+            # 2. 再处理最后不足一个段长的残余
+            remaining_raw = len(client_queues.ca_raw)
+            remaining_processed = len(client_queues.ca_processed)
+            final_len = min(remaining_raw, remaining_processed)
+
+            if final_len > 0:
+                self._enqueue_segment_job(client_id, client_queues, final_len)
+        except Exception as e:
+            print(f"_flush_all_remaining_segments error for {client_id}: {e}")
+
+    def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
+        """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
+        # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
+        print(f"Checking HLS segment flush for client: {client_id}")
+        seg_len = client_queues.ca_segment_len
+        if not client_queues.has_enough_for_segment(seg_len):
+            return
+
+        print(f"Enqueueing HLS segment persist job for client: {client_id}")
         # 已入队给持久化线程处理（播放列表更新、DB 写入等），本函数返回
+        self._enqueue_segment_job(client_id, client_queues, seg_len)
         return
 
     def _inference_loop(self):
@@ -1038,17 +1046,14 @@ class InferenceManager:
                         client_queues.append_ca_raw(bd)
 
                 try:
-                    # 使用批处理管道（会利用任务的 infer_batch 接口）
-                    # TODO: 实现多种流水线，设计一个流水线基类，包括
-                    results = self._execute_inference_pipeline_batch(frames, client_queues.get_task(), client_id=client_id)
+                    # 使用 TaskPipeline 进行批量推理：
+                    # 这里只驱动流水线填充内部 cache，不直接构造结果帧，
+                    # 主进程随后从 TaskPipeline 的四个缓存中读取标准化输出。
+                    self._execute_inference_pipeline_batch(frames, timestamps, client_queues.get_task(), client_id=client_id)
 
-                    # 将每帧结果写回队列
-                    for ts, (final_frame, all_results) in zip(timestamps, results):
-                        processed_frame = FrameData(timestamp=ts, frame=final_frame, inference_result=all_results)
-                        with self._lock:
-                            client_queues.append_ca_processed(processed_frame)
-                            client_queues.append_rt_processed(processed_frame)
-                        # print(f"Inference completed for client: {client_id}, results keys: {list(all_results.keys())}")
+                    # 将 TaskPipeline 缓存中新增的 FrameData 映射回客户端队列
+                    with self._lock:
+                        self._drain_pipeline_caches_to_client(client_id, client_queues)
 
                 except Exception as e:
                     print(f"批量推理异常 for {client_id}: {e}")
@@ -1131,6 +1136,19 @@ class InferenceManager:
         Returns:
             是否成功终止
         """
+        # 先获取队列引用，用于在清理前落盘缓存
+        with self._lock:
+            client_queues = self._clients.get(client_id)
+        if client_queues is None:
+            return False
+
+        # 在真正清理前，将该客户端当前所有缓存（包括未达阈值部分）全部落盘
+        try:
+            self._flush_all_remaining_segments(client_id, client_queues)
+        except Exception as e:
+            print(f"Failed to flush remaining segments when terminating task for {client_id}: {e}")
+
+        # 再次进入锁范围，安全地清理队列和注册表
         with self._lock:
             client_queues = self._clients.get(client_id)
             if client_queues is None:
@@ -1139,11 +1157,17 @@ class InferenceManager:
             # 清理所有队列与引用
             client_queues.clear()
 
+            # 清理与该客户端关联的 TaskPipeline
+            try:
+                self._pipeline_registry.remove_pipelines_for_client(client_id)
+            except Exception:
+                pass
+
             # 从客户端字典中移除
             del self._clients[client_id]
 
-            print(f"任务已终止，客户端 {client_id} 的所有队列和资源已清理")
-            return True
+        print(f"任务已终止，客户端 {client_id} 的所有队列和资源已清理")
+        return True
         
     def get_task(self, client_id: str) -> Optional[CleaningTask]:
         """获取客户端的任务。

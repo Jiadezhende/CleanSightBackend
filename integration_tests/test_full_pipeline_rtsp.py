@@ -25,6 +25,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional
 
+import requests
+
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -56,13 +58,15 @@ class IntegrationTest:
         # 设置测试视频路径
         if video_path is None:
             project_root = Path(__file__).parent.parent
-            self.video_path = str(project_root / "test" / "test_video.mp4")
+            self.video_path = str(project_root / "test" / "leak_test.mp4")
         else:
             self.video_path = video_path
         
         # FFmpegController 将在启动时根据实际 rtsp_url 创建
         self.ffmpeg: Optional[FFmpegController] = None
         self.api = APIClient()
+        # 仍保留 DatabaseHelper 引用，以便必要时本地调试；
+        # 但默认优先通过远端脚本接口获取任务信息。
         self.db = DatabaseHelper()
         
         # 简单状态跟踪
@@ -99,20 +103,75 @@ class IntegrationTest:
             raise Exception(f"测试视频不存在: {self.video_path}")
         # self.ffmpeg._find_ffmpeg()  # 延迟到启动时创建 ffmpeg 实例时检查
     
+    def _fetch_task_info_from_script(self) -> Optional[Dict[str, Any]]:
+        """通过远端脚本接口获取任务信息（CI 数据）。
+
+        使用文档中的接口:
+        http://116.204.65.72:8881/gdmp/v1/api/nt/get_task_information?task_id=X
+        """
+        url = "http://116.204.65.72:8881/gdmp/v1/api/nt/get_task_information"
+        try:
+            resp = requests.get(url, params={"task_id": self.task_id}, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"❌ 通过脚本接口获取任务信息失败: {e}")
+            return None
+
+        if not isinstance(data, dict):
+            print(f"❌ 脚本接口返回非 JSON 结构: {data}")
+            return None
+
+        if data.get("code") != 0 or not isinstance(data.get("data"), dict):
+            print(f"❌ 脚本接口返回错误: {data}")
+            return None
+
+        return data["data"]
+
     def _prepare_test_task(self):
-        """准备测试任务"""
+        """准备测试任务: 优先通过脚本接口获取任务信息, 失败则回退到本地数据库。"""
+        info = self._fetch_task_info_from_script()
+
+        # 1. 优先使用脚本接口返回的任务信息（CI 环境）
+        if info and info.get("source_ip"):
+            self.client_id = str(info["source_ip"])
+            print(f"✅ 从脚本获取任务信息成功: task_id={self.task_id}, client_id={self.client_id}")
+            return
+
+        # 2. 如果脚本接口返回 404 或其它错误, 回退到本地数据库逻辑
+        print(f"⚠️ 脚本接口未返回有效任务信息, 回退到本地数据库: task_id={self.task_id}")
+
+        # 先尝试从本地数据库获取任务
         task = self.db.get_task(self.task_id)
         if not task:
-            # 如果任务不存在，使用 task_id 派生一个默认 source_ip（例如 172.16.77.<task_id>）
-            default_source = f"rtsp.test.{self.task_id if self.task_id>0 else 221}"
-            self.db.create_test_task(self.task_id, source_ip=default_source)
+            # 若不存在则创建一个测试任务
+            fallback_client_id = self.client_id or f"rtsp_integration_{self.task_id}"
+            if not self.db.create_test_task(self.task_id, source_ip=fallback_client_id):
+                raise Exception(f"本地数据库无法创建测试任务 {self.task_id}")
+            task = self.db.get_task(self.task_id)
+
+        if not task or not getattr(task, "source_ip", None):
+            raise Exception(f"本地数据库中任务 {self.task_id} 缺少 source_ip 字段")
+
+        # 使用本地任务的 source_ip 作为 client_id
+        self.client_id = str(task.source_ip)
+        print(f"✅ 使用本地数据库任务: task_id={self.task_id}, client_id={self.client_id}")
     
     def _start_ffmpeg(self):
         """启动 ffmpeg 推流"""
-        # 从数据库读取 task 的 source_ip 作为 client_id，并生成 RTSP 地址
-        task = self.db.get_task(self.task_id)
-        if task and getattr(task, 'source_ip', None):
-            self.client_id = str(task.source_ip)
+        # 若尚未从脚本侧拿到 client_id，则再尝试获取一次
+        if not self.client_id:
+            info = self._fetch_task_info_from_script()
+            if info and info.get("source_ip"):
+                self.client_id = str(info["source_ip"])
+            else:
+                # 兜底：退回本地数据库查询
+                task = self.db.get_task(self.task_id)
+                if task and getattr(task, 'source_ip', None):
+                    self.client_id = str(task.source_ip)
+
+        if not self.client_id:
+            raise Exception(f"无法获取任务 {self.task_id} 的 client_id/source_ip")
         # 生成 RTSP 地址
         self.rtsp_url = f"rtsp://localhost:8004/live/{self.client_id}"
 
