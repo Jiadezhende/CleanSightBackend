@@ -43,8 +43,7 @@ class IntegrationTest:
         self,
         task_id: int = 0,
         duration: int = 30,
-        video_path: str = None,
-        server: str = "117.50.241.174",
+        video_path: str = None
     ):
         self.task_id = task_id
         # client_id and rtsp_url will be populated from DB at runtime
@@ -60,13 +59,9 @@ class IntegrationTest:
         else:
             self.video_path = video_path
         
-        # 初始化控制器（延迟创建，使用正确的 rtsp_url）
-        self.ffmpeg = None
-        # server 和端口设置（保留原始分别端口）
-        self.server = server
-        self.api_port = 8000
-        self.mediamtx_port = 8004
-        self.api = APIClient(base_url=f"http://{self.server}:{self.api_port}")
+        # 初始化控制器
+        self.ffmpeg = FFmpegController(self.video_path, self.rtsp_url, protocol="rtsp")
+        self.api = APIClient(base_url="http://localhost:8000")
         self.db = DatabaseHelper()
         
         # 简单状态跟踪
@@ -118,8 +113,8 @@ class IntegrationTest:
         else:
             raise Exception("无法从数据库获取 task.source_ip 来生成 client_id")
 
-        # 生成 RTSP 地址（使用 MediaMTX 端口）
-        self.rtsp_url = f"rtsp://{self.server}:{self.mediamtx_port}/live/{self.client_id}"
+        # 生成 RTSP 地址（默认使用本地 Mediamtx 端口 8004）
+        self.rtsp_url = f"rtsp://localhost:8004/live/{self.client_id}"
 
         # 创建 FFmpegController（延迟创建以使用正确的 rtsp_url）
         self.ffmpeg = FFmpegController(self.video_path, self.rtsp_url, protocol="rtsp")
@@ -142,7 +137,7 @@ class IntegrationTest:
     async def _run_inference_test(self):
         """运行推理测试"""
         print("启动推理结果可视化客户端...")
-        viewer = InferenceViewer(self.client_id, show_window=self.show_visualization, base_port=f"{self.server}:{self.api_port}")
+        viewer = InferenceViewer(self.client_id, show_window=self.show_visualization,base_port="localhost:8000")
         await viewer.connect_and_display(self.duration)
     
 
@@ -170,8 +165,6 @@ def main():
                        help="RTSP 推流地址")
     parser.add_argument("--video_path", type=str, default=None,
                        help="测试视频路径（默认: test/test_video.mp4）")
-    parser.add_argument("--server", type=str, default="117.50.241.174",
-                       help="后端 server 地址（默认: 117.50.241.174）")
     parser.add_argument("--no-window", action="store_true",
                        help="禁用可视化窗口，仅在控制台显示统计")
     
@@ -180,8 +173,7 @@ def main():
     test = IntegrationTest(
         task_id=args.task_id,
         duration=args.duration,
-        video_path=args.video_path,
-        server=args.server,
+        video_path=args.video_path
     )
     
     # 设置可视化选项

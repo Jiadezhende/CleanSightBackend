@@ -5,7 +5,7 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 ## 功能简介
 
 - **实时视频流处理**: 捕获视频，使用 AI 模型处理，并通过 WebSocket 推送结果。
-- **三线程架构**: 解耦帧捕获、AI 推理和 WebSocket 推送，优化性能。
+- **三服务架构**: 解耦视频流收发、AI 推理和 Client数据管理，优化性能。
 - **多任务并行推理**: 支持多种 AI 模型并行执行（关键点检测、动作分析、内镜弯折检测等）。
 - **可扩展架构**: 基于任务注册表的设计，便于添加新的检测任务。
 - **RTMP 流处理**: 从 RTMP 流以固定帧率提取视频帧，支持实时监控。
@@ -21,25 +21,22 @@ CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系�
 - `models/`: 包含用于请求和响应验证的 Pydantic 数据结构。
 - `routers/`: API 路由定义。
   - `ai.py`: AI 推理服务路由
-  - `inspection.py`: 检查流程路由
-  - `task.py`: 任务管理路由
+  - `inspection.py`: 视频流服务路由
+  - `task.py`: 消洗任务管理路由
 - `services/`: 业务逻辑和 AI 模型集成。
   - `ai.py`: 推理管理器和任务架构
   - `ai_models/`: AI 模型实现
-    - `detection.py`: 关键点检测
-    - `motion.py`: 动作分析
+    - `bubble_detection.py`: 气泡检测器
+    - `bubble_task.py`: 气泡检测任务
     - `yolo_detection.py`: 内镜弯折检测器
     - `yolo_task.py`: 内镜弯折检测任务
-  - `client.py`: 与摄像头/客户端通信的工具和示例客户端实现
-  - `infer_task.py`: 推理任务基类与调度辅助逻辑（多个任务类型的共有行为）
-  - `example_custom_task.py`: 自定义任务示例
+  - `client.py`: 客户端缓存结构实现
+  - `infer_task.py`: 推理任务基类
+  - `pipeline_base.py`: 推理流水线基类实现
   - `task.py`: 任务管理和视频追溯
 - `test/`: 测试客户端代码，用于上传视频帧和显示推理结果。
 - `integration_tests/`: 集成测试与端到端/远程测试脚本（用于验证完整管道）。
-- `docs/`: 项目文档
-  - `AI_INFERENCE_ARCHITECTURE.md`: 推理架构说明
-  - `QUICK_START_CUSTOM_TASK.md`: 自定义任务快速开始
-  - `REFACTORING_SUMMARY.md`: 架构重构总结
+- `docs/`: 核心设计文档
 
 ## 架构说明
 
@@ -49,7 +46,7 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
                                                HLS 段 + JSON          WebSocket 推送
 ```
 
-### 三队列设计
+### Client数据管理：三队列设计
 
 - **CA-ReadyQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理，AI服务启动后才会开始捕获
 - **CA-RawQueue**: 等待落盘的原始视频
@@ -60,43 +57,62 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
 
 独立运行，使用 mediamtx 提供视频流中转功能。配置文件位于 [mediamtx_v1.15.4](mediamtx_v1.15.4) (for Windows Local Test), [mediamtx_v1.15.5_linux_amd64](mediamtx_v1.15.5_linux_amd64)(for Linux Remote Test)。
 
+更详细的并发考量，请参考文档：[RTSP 多流处理(Coming Soon)](docs/RTSP_MULTI_STREAM.md)
+
 ### AI 推理架构
 
-系统采用可扩展的任务注册架构，支持多种 AI 模型并行或串行执行：
+系统采用可扩展的推理流水线注册架构，在流水线中支持多种 AI 模型并行或串行执行：
 
-- **关键点检测**: 检测内窥镜清洗过程中的关键点
-- **动作分析**: 分析弯曲、浸泡等清洗动作
-- **内镜弯折检测**: 使用 YOLOv8 模型检测内镜是否弯折
+将不同推理任务封装为独立的 `InferenceTask` 类，并通过 `SubTaskPipeline` 进行组合和调度。一个`SubTaskPipeline`可以分为以下两个阶段：
 
-### 添加自定义推理任务
+- **关键点检测/目标检测**: 检测内窥镜清洗过程中的关键点
+- **时序动作分析**: 分析弯曲、浸泡等清洗动作
 
-系统支持快速扩展新的检测任务，只需 3 步：
-
-1. 创建继承 `InferenceTask` 的任务类
-2. 实现 `infer()` 和 `visualize()` 方法
-3. 在 `ai.py` 中注册任务
+最后由`TaskPipeline`进行结果聚合和任务状态管理。
 
 详细说明请参考文档：
 
-- [推理架构说明](docs/AI_INFERENCE_ARCHITECTURE.md)
-- [自定义任务快速开始](docs/QUICK_START_CUSTOM_TASK.md)
+- [推理流水线设计](docs/PIPELINE_BASE.md)
+- [流水线切换逻辑(Coming soon)]()
+- [推理任务注册设计(Coming soon)]()
 
 ## Quick Start for app
 
-```powershell
-# 创建虚拟环境并激活
-py -3.13 -m venv .venv
-.\.venv\Scripts\activate
+### 环境配置
 
-# 安装依赖（包含 ultralytics 用于内镜弯折检测）
+```powershell
+# 创建虚拟环境并激活，使用python3.10+
+python -m venv .venv
+# source .venv/bin/activate # Linux/Mac
+.\.venv\Scripts\activate # Windows
+
+# 安装依赖（可能需要镜像源）
 pip install -r requirements.txt
 ```
 
-参考 [.env.example](.env.example) 创建 `.env.dev` (开发) 和 `.env` (生产) 配置文件。
+***另外，确保安装 ffmpeg 可执行文件，并将其路径添加到系统 PATH 中，用于解码 RTSP 流***
 
-**环境配置**：
-- 开发环境：默认加载 `.env.dev`
-- 生产环境：使用 [start_prod.ps1](start_prod.ps1) (Windows) 或 [start_prod.sh](start_prod.sh) (Linux) 启动，自动加载 `.env`
+参考 [.env.example](.env.example) 创建 `.env.dev` (开发) 和 `.env` (生产) 配置文件。主要需设定数据库地址、密码，以及模型参数文件路径。
+
+**启动**：
+使用 [start_prod.ps1](start_prod.ps1) (Windows) 或 [start_prod.sh](start_prod.sh) (Linux) 启动，通过修改CLEANSIGHT_PROD切换环境
+
+- 开发环境(CLEANSIGHT_PROD=0)：加载 `.env.dev`
+- 生产环境(CLEANSIGHT_PROD=1)：加载 `.env`
+
+**手动启动生产环境**:
+
+```powershell
+# Windows
+.\.venv\Scripts\activate
+$env:CLEANSIGHT_PROD = '1'
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Linux/Mac
+source .venv/bin/activate
+export CLEANSIGHT_PROD=1
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
 ### Docker Compose 本地开发环境（开发中）
 
@@ -119,7 +135,7 @@ Docker 化的双服务开发栈（Postgres + MediaMTX）已经编排在 [docker-
 - **组件说明**
   - `db`：`postgres:15-alpine`，持久化卷 `postgres_data` 保存数据文件。
   - `mediamtx`：使用官方 `bluenviron/mediamtx:1.15.4` 镜像，并挂载 [mediamtx_v1.15.4/mediamtx.yml](mediamtx_v1.15.4/mediamtx.yml) 作为配置，可直接在宿主机修改后 `docker compose restart mediamtx` 生效。
-  - （开发中），改用python代码访问数据库，而非使用脚本。
+  - **（开发中）** 完全采用python代码访问数据库，而非使用脚本。
 
 - **常用命令**
   - 停止并移除资源：`docker compose down -v`
@@ -128,121 +144,48 @@ Docker 化的双服务开发栈（Postgres + MediaMTX）已经编排在 [docker-
 
 > 提示：如果需要变更数据库凭据或端口，可直接编辑 [docker-compose.yml](docker-compose.yml)，同时更新 `app` 服务的 `CLEANSIGHT_*` 变量即可。
 
-## 运行应用
+## Quick Start for mediamtx
 
-### 开发环境（默认）
+本项目使用 MediaMTX ，用于 RTSP 流的中转和分发。
 
-```powershell
-# Windows
-.\.venv\Scripts\activate
-uvicorn app.main:app --reload
+根据运行平台，`cd`到对应目录`mediamtx_*/`，运行 MediaMTX 可执行文件即可。
 
-# Linux/Mac
-source .venv/bin/activate
-uvicorn app.main:app --reload
-```
+## 测试
 
-默认加载 `.env.dev` 配置，本地访问：<http://localhost:8000>
+### 本地完整管道测试
 
-### 生产环境（快速启动）
-
-**Windows**:
-```powershell
-.\start_prod.ps1
-```
-
-**Linux/Mac**:
 ```bash
-chmod +x start_prod.sh
-./start_prod.sh
+# 运行完整的本地管道测试（需要本地MediaMTX和后端服务）
+# rtsp
+python integration_tests/local_full_pipeline_rtsp.py -duration 30 --task_id 1
 ```
 
-这些脚本会：
-- 自动激活虚拟环境
-- 设置 `CLEANSIGHT_PROD=1` 加载 `.env` 配置
-- 启动服务允许外部访问 (`0.0.0.0:8000`)
+### 远程服务器测试
 
-### 手动启动生产环境
+用于测试部署在远程服务器上的CleanSight服务：
 
-```powershell
-# Windows
-.\.venv\Scripts\activate
-$env:CLEANSIGHT_PROD = '1'
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# Linux/Mac
-source .venv/bin/activate
-export CLEANSIGHT_PROD=1
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+```bash
+python integration_tests/remote_full_pipeline_rtsp.py --duration 120 --task_id 1 --server 36.103.203.206
 ```
 
-### 环境变量配置
+### 参数说明
 
-#### 配置文件加载逻辑
+- `--task_id`: 要测试的任务 ID（默认: 0）
+- `--client_id`: 客户端标识符，最好是和任务的source_id一致
+- `--duration`: 测试时长秒数（默认: 30）
+- `--video_path`: 测试视频路径（默认: test/test_video.mp4）
+- `--no-window`: 禁用可视化窗口
+- `--server`: 远程服务器地址
 
-系统按以下优先级加载配置文件（优先级从高到低）：
+远程测试功能：
 
-1. **`CLEANSIGHT_ENV_FILE`**（最高优先级）  
-   若设置此环境变量，则加载指定路径的配置文件（可为绝对或相对路径）
-   ```powershell
-   $env:CLEANSIGHT_ENV_FILE = 'C:\secrets\custom.env'
-   ```
+- 向远程服务器推送RTSP视频流
+- 加载远程任务 (task_id=1)
+- 实时接收AI推理结果和状态更新
+- 本地可视化显示远程处理结果
+- 自动化测试报告
 
-2. **`CLEANSIGHT_PROD=1`**（生产模式）  
-   设置此环境变量后，系统将加载项目根目录下的 `.env` 文件作为生产环境配置
-   ```powershell
-   $env:CLEANSIGHT_PROD = '1'
-   ```
-
-3. **`.env.dev`**（开发模式，默认）  
-   未设置以上环境变量时，系统默认加载项目根目录下的 `.env.dev` 文件作为开发环境配置
-
-#### 环境变量优先级总结
-
-```
-直接设置的环境变量 (CLEANSIGHT_*)
-    > CLEANSIGHT_ENV_FILE 指定的文件
-    > CLEANSIGHT_PROD=1 时的 .env 文件
-    > .env.dev 文件（默认）
-    > 代码中的默认值
-```
-
-#### 常用控制变量
-
-- **`CLEANSIGHT_ENV_FILE`**：指定配置文件路径（覆盖所有默认行为）
-- **`CLEANSIGHT_PROD`**：设置为 `1`、`true` 或 `yes` 启用生产模式
-- **`CLEANSIGHT_STRICT`**：设置为 `1` 时，在缺失关键配置时抛出异常（生产环境推荐）；否则仅打印警告
-
-#### 使用示例
-
-```powershell
-# 开发模式（默认，自动加载 .env.dev）
-uvicorn app.main:app --reload
-
-# 生产模式（加载 .env）
-$env:CLEANSIGHT_PROD = '1'
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# 使用自定义配置文件
-$env:CLEANSIGHT_ENV_FILE = 'C:\secrets\cleansight.env'
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# 生产模式 + 严格校验
-$env:CLEANSIGHT_PROD = '1'
-$env:CLEANSIGHT_STRICT = '1'
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-建议：将 `.env` 或敏感文件路径通过 CI/服务管理器安全注入，而不是直接提交到仓库。
-
-### 安全注意事项
-
-当允许外部访问时，请注意：
-
-1. **防火墙配置**: 只开放必要端口
-2. **HTTPS**: 生产环境建议使用HTTPS
-3. **认证**: 考虑添加API认证机制
-4. **反向代理**: 建议使用nginx等反向代理
+详细使用说明见：[RTSP测试流说明](docs/RTSP_FLOW.md)
 
 ## API 文档
 
@@ -360,6 +303,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
     "fps": 30
   }
   ```
+
 - **响应示例**:
 
   ```json
@@ -544,56 +488,3 @@ curl -X GET "http://localhost:8000/task/1/alarms"
     "status": "no_active_task"
   }
   ```
-
-## 使用示例
-
-### 测试脚本
-
-#### 本地完整管道测试
-
-```bash
-# 运行完整的本地管道测试（需要本地MediaMTX服务）
-# rtmp
-python integration_tests/test_full_pipeline.py
-# rtsp
-python integration_tests/test_full_pipeline_rtsp.py
-```
-
-#### 远程服务器测试
-
-用于测试部署在远程服务器上的CleanSight服务：
-
-```bash
-# 基本用法
-python integration_tests/remote_test_pipeline.py --server 192.168.1.100
-
-# 自定义参数
-python integration_tests/remote_test_pipeline.py --server 192.168.1.100 --duration 120 --task_id 0 --client_id remote_test_client
-```
-
-远程测试功能：
-- 向远程服务器推送RTMP视频流
-- 加载远程任务 (task_id=0)
-- 实时接收AI推理结果和状态更新
-- 本地可视化显示远程处理结果
-- 自动化测试报告
-
-详细使用说明见：[远程测试框架文档](integration_tests/REMOTE_TEST_README.md)
-
-## 实时视频流
-
-### 架构
-
-- **捕获线程**: 持续从视频源捕获最新帧。
-- **推理线程**: 使用 AI 模型处理帧（当前为模拟实现）。
-- **WebSocket 线程**: 将处理结果推送到连接的客户端。
-- **帧丢弃**: 自动丢弃旧帧以保持实时性能。
-
-### Websocket推理结果获取接口
-
-- **URL**: `ws://localhost:8000/ai/video?client_id={client_id}`
-- **请求类型**: WebSocket
-- **描述**: 实时视频流，包含 AI 处理结果。
-- **连接参数**:
-  - `client_id` (必需): 客户端唯一标识符
-- **数据格式**: Base64 编码的 JPEG 图像 (`data:image/jpeg;base64,...`)
