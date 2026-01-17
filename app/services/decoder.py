@@ -238,6 +238,12 @@ def _decoder_worker(worker_id: int,
                             if std_frame is not None:
                                 # 发送到队列（非阻塞，队列满时丢弃旧帧）
                                 try:
+                                    # 观测日志：记录放入共享队列前的时间和队列长度（若支持）
+                                    try:
+                                        qsz = frame_queue.qsize()
+                                    except Exception:
+                                        qsz = -1
+                                    print(f"[DecoderWorker-{worker_id}] put_frame ts={time.time():.3f} client={client_id} frame_count={frame_count} shared_qsize={qsz}")
                                     frame_queue.put((client_id, std_frame), block=False)
                                     frame_count += 1
                                     
@@ -539,12 +545,18 @@ class FrameDispatcher:
                 result = self.decoder_pool.get_frame(timeout=0.1)
                 
                 if result is not None:
-                    client_id, frame = result
-                    # 调用回调函数处理帧
-                    try:
-                        self.frame_callback(client_id, frame)
-                    except Exception as e:
-                        print(f"[FrameDispatcher] 处理帧回调错误 ({client_id}): {e}")
+                        client_id, frame = result
+                        # 观测日志：记录取帧时间与共享队列长度，帮助定位滞留
+                        try:
+                            shared_q = self.decoder_pool.frame_queue.qsize()
+                        except Exception:
+                            shared_q = -1
+                        print(f"[FrameDispatcher] get_frame ts={time.time():.3f} client={client_id} shared_qsize={shared_q}")
+                        # 调用回调函数处理帧（业务处理应尽快返回）
+                        try:
+                            self.frame_callback(client_id, frame)
+                        except Exception as e:
+                            print(f"[FrameDispatcher] 处理帧回调错误 ({client_id}): {e}")
                         
             except Exception as e:
                 print(f"[FrameDispatcher] 分发循环错误: {e}")

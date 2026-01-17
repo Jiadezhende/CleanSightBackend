@@ -262,6 +262,12 @@ class InferenceManager:
             client_queues = self._get_or_create_client(client_id)
             # 推入 CA-ReadyQueue，等待推理
             client_queues.append_ca_ready(frame_data)
+            try:
+                ca_len = len(client_queues.ca_ready)
+            except Exception:
+                ca_len = -1
+        # 观测日志（锁外打印以减少持锁时间）
+        print(f"[InferenceManager] submit_frame ts={time.time():.3f} client={client_id} ca_ready_len={ca_len} frame_ts={frame_data.timestamp:.3f}")
 
     def set_rtmp_url(self, client_id: str, rtmp_url: str) -> None:
         """为客户端设置 RTMP 流地址。
@@ -1004,7 +1010,7 @@ class InferenceManager:
     def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
         # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
-        print(f"Checking HLS segment flush for client: {client_id}")
+        # print(f"Checking HLS segment flush for client: {client_id}")
         seg_len = client_queues.ca_segment_len
         if not client_queues.has_enough_for_segment(seg_len):
             return
