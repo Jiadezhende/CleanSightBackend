@@ -17,6 +17,8 @@ class InferenceViewer:
         self.show_window = show_window
         self.window_name = f"AI Inference Result - {client_id}"
         self.base_port = base_port
+        self.last_display_time = 0
+        self.display_interval = 1 / 20  # 20 FPS 显示
     
     async def connect_and_display(self, duration_seconds=None):
         ws_url = f"ws://{self.base_port}/ai/video?client_id={self.client_id}"
@@ -51,6 +53,12 @@ class InferenceViewer:
         
         # 处理Base64图像
         if message.startswith('data:image') and self.show_window:
+            current_time = datetime.now().timestamp()
+            if current_time - self.last_display_time < self.display_interval:
+                return True  # 跳过显示，但仍计数
+            
+            self.last_display_time = current_time
+            
             try:
                 base64_data = message.split(',')[1]
                 img_data = base64.b64decode(base64_data)

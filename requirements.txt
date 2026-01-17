@@ -1,28 +1,30 @@
-# ========== Web 框架 ==========
-fastapi[standard]==0.121.2
-uvicorn[standard]==0.38.0
-python-multipart==0.0.20
-websockets==15.0.1
+# 推荐使用python3.10+
 
-# ========== HTTP 客户端 ==========
-requests==2.32.5
-httpx==0.28.1
+# ========== Core AI / CUDA ==========
+torch==2.8.0
+torchvision==0.23.0
+ultralytics~=8.3.200
 
-# ========== 计算机视觉 ==========
+# ========== Numerical / CV ==========
+numpy<2.3.0, >=2
 opencv-python==4.12.0.88
-numpy==2.2.6
-pillow==11.3.0
+pillow>=10.4,<12.0
 
-# ========== AI 推理 ==========
-ultralytics==8.3.233
-torch==2.9.0
-torchvision==0.24.0
+# ========== Web Framework ==========
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+python-multipart>=0.0.20
+websockets>=13,<16
 
-# ========== 数据库 ==========
+# ========== HTTP Clients ==========
+requests>=2.31,<3.0
+httpx>=0.27,<0.29
+
+# ========== Database ==========
 sqlalchemy==2.0.44
 psycopg2-binary==2.9.11
 pydantic-settings==2.12.0
 
-# ========== 测试（开发环境） ==========
-pytest>=7.0.0
-pytest-asyncio==1.3.0
+# ========== Testing (dev only) ==========
+pytest>=7.4,<9.0
+pytest-asyncio>=0.23,<1.4

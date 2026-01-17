@@ -85,7 +85,8 @@ class BubbleDetector:
             frame,
             conf=conf_threshold,
             iou=iou_threshold,
-            verbose=False
+            device='cuda:0',
+            verbose=True
         )
         
         # 解析结果
