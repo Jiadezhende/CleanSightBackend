@@ -1004,7 +1004,7 @@ class InferenceManager:
     def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
         # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
-        print(f"Checking HLS segment flush for client: {client_id}")
+        # print(f"Checking HLS segment flush for client: {client_id}")
         seg_len = client_queues.ca_segment_len
         if not client_queues.has_enough_for_segment(seg_len):
             return
