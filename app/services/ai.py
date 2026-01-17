@@ -250,7 +250,7 @@ class InferenceManager:
         return client_queues
 
     def submit_frame(self, client_id: str, frame: np.ndarray) -> None:
-        """从 RTMP 流中提交原始帧到 CA-ReadyQueue。
+        """从视频流中提交原始帧到 CA-ReadyQueue。
 
         Args:
             client_id: The client identifier.

@@ -251,6 +251,12 @@ class StreamService:
         self.sel = selectors.DefaultSelector() if os.name != 'nt' else None
         self.lock = threading.Lock()
         self.metrics = {}
+        self._stop_event = threading.Event()
+        # start selector polling thread on POSIX so stdout is consumed
+        self._selector_thread: Optional[threading.Thread] = None
+        if self.sel is not None:
+            self._selector_thread = threading.Thread(target=self._selector_loop, daemon=True, name="stream_service_selector")
+            self._selector_thread.start()
 
     def start_stream(self, client_id: str, stream_url: str, fps: int = 30, protocol: str = 'RTMP'):
         with self.lock:
@@ -311,6 +317,36 @@ class StreamService:
                 dec.on_stdout_ready()
             except Exception:
                 traceback.print_exc()
+
+    def _selector_loop(self, timeout: float = 0.05):
+        """Background loop that polls the selector and dispatches stdout reads.
+
+        This ensures on POSIX systems we actually consume ffmpeg stdout even
+        if no external loop is calling `run_once`.
+        """
+        while not self._stop_event.is_set():
+            try:
+                self.run_once(timeout=timeout)
+            except Exception:
+                traceback.print_exc()
+        # cleanup on exit
+        try:
+            if self.sel is not None:
+                try:
+                    # unregister any fds
+                    for key in list(self.sel.get_map().values()):
+                        try:
+                            self.sel.unregister(key.fd)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    self.sel.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 # singleton service instance
