@@ -39,7 +39,7 @@ class ClientQueues:
         ca_maxlen: int = 2700,
         resize_width: int = 640,
         resize_height: int = 480,
-        inference_fps: int = 10
+        inference_fps: int = 15
     ):
         # 客户端标识
         self.client_id = client_id

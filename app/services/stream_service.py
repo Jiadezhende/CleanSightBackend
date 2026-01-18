@@ -28,7 +28,9 @@ DEFAULT_WIDTH = 640
 DEFAULT_HEIGHT = 480
 DEFAULT_CHANNELS = 3
 CHUNK_READ = 32768
-PER_STREAM_MAX_PENDING = 3
+# 背压阈值：推理队列容量的百分比（不是固定值）
+# 当 CA-Ready-Queue 达到容量的 90% 时开始丢帧
+PER_STREAM_MAX_PENDING_RATIO = 0.90  # 90% 容量
 
 
 class FFmpegDecoder:
@@ -244,13 +246,24 @@ class FFmpegDecoder:
             frame_data = bytes(self.buffer[: self.frame_size])
             del self.buffer[: self.frame_size]
             
-            # 背压控制：检查队列深度
+            # 背压控制：检查推理队列深度
             pending = self.manager.get_pending_count(self.client_id)
-            if pending >= PER_STREAM_MAX_PENDING:
+            
+            # 动态计算背压阈值（基于队列容量）
+            if self.client_queues is not None:
+                # 使用队列实际容量计算阈值
+                max_ready = self.client_queues.ca_ready.maxlen or 2700
+                threshold = int(max_ready * PER_STREAM_MAX_PENDING_RATIO)
+            else:
+                # 兼容旧模式：使用固定阈值
+                threshold = 2430  # 默认 2700 * 0.9
+            
+            if pending >= threshold:
                 self.frames_dropped += 1
                 # log occasional drop
                 if self.frames_dropped % 50 == 0:
-                    self.logger.warning("dropped %s frames due to backpressure (pending=%s)", self.frames_dropped, pending)
+                    self.logger.warning("[BACKPRESSURE] dropped %s frames (pending=%s >= threshold=%s)", 
+                                       self.frames_dropped, pending, threshold)
                 continue
             
             try:
@@ -376,19 +389,44 @@ class StreamService:
 
     def get_pending_count(self, client_id: str) -> int:
         """
-        获取指定客户端的 CA-Raw-Queue 深度（用于背压控制）
+        获取指定客户端的 CA-Ready-Queue 深度（用于背压控制）
         
-        返回 CA-Raw-Queue 的当前长度，用于判断是否需要丢帧
+        关键修改：检查 CA-Ready-Queue（推理队列）而不是 CA-Raw-Queue
+        原因：CA-Raw-Queue 用于落盘，即使满了也不应阻塞拉流
+              CA-Ready-Queue 用于推理，如果满了说明推理跟不上，需要丢帧
         """
-        if client_manager is not None:
-            try:
-                client_queues = client_manager.get_client(client_id)
-                depths = client_queues.get_queue_depths()
-                return depths.get("ca_raw", 0)
-            except Exception:
-                pass
-        # 兼容旧版本或获取失败，返回 0
-        return 0
+        if client_manager is None:
+            logger.warning("[BACKPRESSURE] client_manager is None, import may have failed")
+            return 0
+        
+        try:
+            client_queues = client_manager.get_client(client_id)
+            if client_queues is None:
+                logger.warning("[BACKPRESSURE] client_queues is None for client_id=%s", client_id)
+                return 0
+            
+            depths = client_queues.get_queue_depths()
+            if not depths:
+                logger.warning("[BACKPRESSURE] get_queue_depths returned empty for client_id=%s", client_id)
+                return 0
+            
+            # 关键修改：检查 CA-Ready-Queue（推理队列）深度
+            ready_depth = depths.get("ca_ready", 0)
+            raw_depth = depths.get("ca_raw", 0)
+            
+            # 定期打印队列状态（每100帧打印一次）
+            decoder = self.decoders.get(client_id)
+            if decoder and decoder.frames_received % 100 == 0:
+                logger.info("[BACKPRESSURE] client=%s: ca_ready=%s/%s, ca_raw=%s/%s", 
+                           client_id, ready_depth, client_queues.ca_ready.maxlen,
+                           raw_depth, client_queues.ca_raw.maxlen)
+            
+            return ready_depth  # 返回推理队列深度
+            
+        except Exception as e:
+            logger.error("[BACKPRESSURE] get_pending_count failed for client_id=%s: %s", 
+                        client_id, e, exc_info=True)
+            return 0
 
     def run_once(self, timeout: float = 0.05):
         if self.sel is None:

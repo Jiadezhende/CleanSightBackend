@@ -23,6 +23,12 @@ from app.models.task import Task as CleaningTask
 from app.database import engine
 from app.settings import settings
 from app.services.task_pipeline.leak.leak_test import LeakBubblePipelineService
+
+# 导入 ClientManager 单例（关键修复：使用统一的队列管理）
+try:
+    from app.services.client_manager import client_manager
+except ImportError:
+    client_manager = None
 import urllib.request
 from sqlalchemy import text
 
@@ -240,14 +246,41 @@ class InferenceManager:
             task.enabled = enabled
 
     def _get_or_create_client(self, client_id: str) -> ClientQueues:
+        """
+        关键修复：使用 ClientManager 的队列实例，而不是创建独立的队列
+        
+        这确保拉流服务和推理服务使用同一个 ClientQueues 实例
+        """
+        # 先检查内部缓存
         client_queues = self._clients.get(client_id)
-        if client_queues is None:
-            client_queues = ClientQueues(
-                rt_maxlen=self._rt_maxlen, 
-                ca_segment_len=self._ca_segment_len,
-                ca_maxlen=self._ca_maxlen
-            )
-            self._clients[client_id] = client_queues
+        if client_queues is not None:
+            return client_queues
+        
+        # 关键修改：使用 ClientManager 获取队列（与拉流服务共享）
+        if client_manager is not None:
+            try:
+                client_queues = client_manager.get_client(
+                    client_id,
+                    rt_maxlen=self._rt_maxlen,
+                    ca_segment_len=self._ca_segment_len,
+                    ca_maxlen=self._ca_maxlen
+                )
+                # 缓存到内部字典
+                self._clients[client_id] = client_queues
+                print(f"[AI] Using ClientManager queue for client {client_id}")
+                return client_queues
+            except Exception as e:
+                print(f"[AI] Failed to get queue from ClientManager: {e}")
+        
+        # 回退方案：创建独立的队列（兼容旧版本）
+        print(f"[AI] WARNING: Creating independent queue for client {client_id} (ClientManager not available)")
+        client_queues = ClientQueues(
+            client_id=client_id,
+            rt_maxlen=self._rt_maxlen, 
+            ca_segment_len=self._ca_segment_len,
+            ca_maxlen=self._ca_maxlen
+        )
+        self._clients[client_id] = client_queues
         return client_queues
 
     def submit_frame(self, client_id: str, frame: np.ndarray) -> None:

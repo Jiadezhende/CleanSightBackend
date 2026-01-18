@@ -85,6 +85,9 @@ async def load_task(task_id: int):
     加载任务，为指定 task_id 的任务在 AI 服务中创建任务对象。
     从数据库读取任务信息，使用 source_ip 作为 client_id。
     """
+    db = None
+    db_task = None  # 初始化变量，避免 UnboundLocalError
+    
     try:
         db = next(get_db())
         try:
@@ -92,7 +95,7 @@ async def load_task(task_id: int):
             if db_task is None:
                 raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
             
-            # 使用 source_ip 作为 client_id（转换为 str 类型）client_id = 172.16.77.221
+            # 使用 source_ip 作为 client_id（转换为 str 类型）
             client_id = str(db_task.source_ip)
             if not client_id or client_id == "None":
                 raise HTTPException(status_code=400, detail="Task source_ip is empty")
@@ -125,13 +128,18 @@ async def load_task(task_id: int):
                 updated_at=datetime.fromtimestamp(task.updated_at).isoformat()
             )
         finally:
-            db.close()
+            if db:
+                db.close()
     except HTTPException:
-        print(f"Database response: {db_task}")
+        # HTTPException 直接抛出，不打印 db_task（可能未定义）
         raise
     except Exception as e:
-        print(f"Database response: {db_task}")
-        raise HTTPException(status_code=500, detail=f"Failed to load task: {str(e)}")
+        # 捕获所有其他异常，包括数据库连接错误
+        error_detail = f"Failed to load task {task_id}: {str(e)}"
+        if db_task:
+            error_detail += f" (DB Task: {db_task})"
+        print(f"[ERROR] {error_detail}")
+        raise HTTPException(status_code=500, detail=error_detail)
     
 @router.post("/terminate_task/{client_id}")
 async def terminate_task(client_id: str):
