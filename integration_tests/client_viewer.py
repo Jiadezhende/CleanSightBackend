@@ -14,6 +14,7 @@ class InferenceViewer:
         self.frame_count = 0
         self.start_time = None
         self.last_print_time = 0
+        self.last_second_frames = 0  # 上一秒的帧数计数器
         self.show_window = show_window
         self.window_name = f"AI Inference Result - {client_id}"
         self.base_port = base_port
@@ -23,6 +24,7 @@ class InferenceViewer:
         print(f"🔗 连接到 WebSocket: {ws_url}")
         
         self.start_time = datetime.now()
+        self.last_print_time = datetime.now().timestamp()  # 初始化打印时间
         
         try:
             async with websockets.connect(ws_url) as websocket:
@@ -48,6 +50,7 @@ class InferenceViewer:
     
     async def process_message(self, message):
         self.frame_count += 1
+        self.last_second_frames += 1  # 累计当前秒的帧数
         
         # 处理Base64图像
         if message.startswith('data:image') and self.show_window:
@@ -69,9 +72,18 @@ class InferenceViewer:
         # 每秒打印状态
         current_time = datetime.now().timestamp()
         if current_time - self.last_print_time >= 1.0:
+            # 计算瞬时FPS（最近1秒的实际帧率）
+            interval = current_time - self.last_print_time
+            instant_fps = self.last_second_frames / interval
+            
+            # 计算平均FPS（从开始到现在）
             elapsed = (datetime.now() - self.start_time).total_seconds()
-            fps = self.frame_count / max(elapsed, 1)
-            print(f"帧数: {self.frame_count} | FPS: {fps:.1f}")
+            avg_fps = self.frame_count / max(elapsed, 1)
+            
+            print(f"📊 总帧数: {self.frame_count} | 瞬时FPS: {instant_fps:.1f} | 平均FPS: {avg_fps:.1f}")
+            
+            # 重置计数器
+            self.last_second_frames = 0
             self.last_print_time = current_time
                     
         return True

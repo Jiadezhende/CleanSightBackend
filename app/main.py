@@ -1,7 +1,17 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+import logging
+import os
 
 from app.routers import ai, inspection, task
+
+# Configure root logger to output to terminal. Level can be controlled by LOG_LEVEL env var.
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+numeric_level = getattr(logging, log_level, logging.INFO)
+logging.basicConfig(
+    level=numeric_level,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 
 @asynccontextmanager

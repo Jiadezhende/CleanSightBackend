@@ -301,10 +301,15 @@ class LeakBubblePipelineService(TaskPipelineBase):
         # 初始化状态
         self._state = {"step_completed": False, "continuous_bubble_count": 0, "last_timestamp": None}
 
-        # 异步可视化所需的最近一帧原始图像
-        self._frame_lock = threading.Lock()
-        self._latest_frame: Optional[np.ndarray] = None
-        self._latest_timestamp: float = 0.0
+        # 异步可视化所需的上一次推理结果（用于沿用）
+        self._result_lock = threading.Lock()
+        self._last_inference_result: Optional[JsonDict] = None
+        
+        # 调试计数器（监控帧产出）
+        self._debug_frame_count = 0
+        self._debug_last_log_time = time.time()
+        
+        print(f"[LeakBubblePipeline] 初始化完成，异步聚合已启动 (interval={self._aggregation_interval:.3f}s, ~{1/self._aggregation_interval:.1f}fps)")
 
     def infer_frame(
         self,
@@ -322,11 +327,6 @@ class LeakBubblePipelineService(TaskPipelineBase):
 
         ts = float(timestamp or time.time())
 
-        # 先保存最近一帧原始图像，供异步线程使用
-        with self._frame_lock:
-            self._latest_frame = frame.copy()
-            self._latest_timestamp = ts
-
         # 执行子任务 + 同步构建一次聚合结果（作为返回值使用）
         subtask_results = self._run_subtasks(frame, ts, context)
         message = self.build_message(ts, subtask_results, context)
@@ -339,6 +339,10 @@ class LeakBubblePipelineService(TaskPipelineBase):
             "subtasks": subtask_results,
             "state": self._state,
         }
+
+        # 保存最新推理结果供异步聚合沿用（当没有新推理时）
+        with self._result_lock:
+            self._last_inference_result = aggregated
 
         # 注意：此处不再向 rt/ca cache 写入 FrameData，
         # 由异步聚合线程在 _visualize_and_update_state 中统一写入。
@@ -367,11 +371,6 @@ class LeakBubblePipelineService(TaskPipelineBase):
         else:
             base = time.time()
             ts_list = [float(base + i * 1e-3) for i in range(n)]
-
-        # 更新最近一帧供异步可视化使用（取 batch 中最后一帧）
-        with self._frame_lock:
-            self._latest_frame = frames[-1].copy()
-            self._latest_timestamp = ts_list[-1]
 
         # 统一构造传入子任务的 prev_stage_cache
         prev_stage_cache: Dict[str, Any] = {}
@@ -413,6 +412,11 @@ class LeakBubblePipelineService(TaskPipelineBase):
                 "state": self._state,
             }
             out.append(aggregated)
+
+        # 保存最后一个推理结果供异步聚合沿用
+        if out:
+            with self._result_lock:
+                self._last_inference_result = out[-1]
 
         return out
 
@@ -510,43 +514,70 @@ class LeakBubblePipelineService(TaskPipelineBase):
     ) -> None:
         """从各子任务最新结果异步聚合，完成可视化与状态更新。
 
-        - 使用子任务最新 msg 结果构造一次聚合 message/state；
-        - 在最近一帧原始图像上完成可视化，写入 rt/ca frame cache；
-        - 将聚合后的 JSON 结果写入 rt/ca msg cache。
+        优化策略：
+        - 从 ClientQueues 获取最新原始帧（解耦推理速率和可视化速率）
+        - 如果有新的子任务推理结果，则使用新结果；否则沿用上一个推理结果
+        - 保证 processed_frame 的稳定产出速率
         """
 
-        # 组装类似 subtask_results 的结构，过滤掉 None
+        # 1. 获取最新原始帧（从 ClientQueues）
+        client_queues = self.get_client_queues()
+        if client_queues is None:
+            return
+        
+        raw_frame_data = client_queues.get_latest_raw_frame()
+        if raw_frame_data is None:
+            return
+        
+        base_frame, frame_timestamp = raw_frame_data
+
+        # 2. 确定使用的推理结果：优先使用新结果，否则沿用上一个
         subtask_results: Dict[str, JsonDict] = {}
         for name, res in subtask_msg_latest.items():
             if isinstance(res, dict):
                 subtask_results[name] = res
 
+        # 如果没有新的推理结果，沿用上一个推理结果（或使用空结果）
+        has_new_inference = bool(subtask_results)
+        
         if not subtask_results:
-            return
+            with self._result_lock:
+                if self._last_inference_result is None:
+                    # 还没有任何推理结果，使用空结果（输出原始帧，不带标注）
+                    aggregated = {
+                        "timestamp": frame_timestamp,
+                        "task_name": self._name,
+                        "message": {"timestamp": frame_timestamp, "alerts": []},
+                        "subtasks": {},
+                        "state": self._state,
+                    }
+                    subtask_results = {}  # 空结果，跳过可视化
+                else:
+                    # 沿用上一个推理结果，但更新时间戳为当前帧时间戳
+                    last_result = self._last_inference_result.copy()
+                    last_result["timestamp"] = frame_timestamp
+                    # 关键：获取上一次的 subtasks 用于可视化
+                    subtask_results = last_result.get("subtasks", {})
+                    if isinstance(subtask_results, dict):
+                        subtask_results = dict(subtask_results)  # 复制一份避免修改原数据
+                    else:
+                        subtask_results = {}
+                    aggregated = last_result
+        else:
+            # 有新的推理结果，构建新的聚合结果
+            ts = frame_timestamp  # 使用当前帧的时间戳
+            message = self.build_message(ts, subtask_results, context=None)
+            self._state = self.update_state(ts, subtask_results, message, context=None)
+            aggregated = {
+                "timestamp": ts,
+                "task_name": self._name,
+                "message": message,
+                "subtasks": subtask_results,
+                "state": self._state,
+            }
 
-        # 选取一个代表性的时间戳（这里取子任务结果中的最大 timestamp）
-        ts_candidates = [float(res.get("timestamp", 0.0)) for res in subtask_results.values()]
-        ts = max(ts_candidates) if ts_candidates else time.time()
-
-        # 基于最新子任务结果重新构建 message/state
-        message = self.build_message(ts, subtask_results, context=None)
-        self._state = self.update_state(ts, subtask_results, message, context=None)
-
-        aggregated: JsonDict = {
-            "timestamp": ts,
-            "task_name": self._name,
-            "message": message,
-            "subtasks": subtask_results,
-            "state": self._state,
-        }
-
-        # 在最近一帧原始图像上进行可视化
-        with self._frame_lock:
-            if self._latest_frame is None:
-                return
-            base = self._latest_frame.copy()
-
-        annotated = base
+        # 3. 在最新原始帧上进行可视化
+        annotated = base_frame
         bubble_res = subtask_results.get("bubble", {})
         if self._bubble_task is not None and isinstance(bubble_res, dict) and bubble_res.get("success", True):
             try:
@@ -561,8 +592,20 @@ class LeakBubblePipelineService(TaskPipelineBase):
             except Exception as e:  # pragma: no cover - 保护
                 print(f"EndoscopeBendingDetectionTask visualize error (async): {e}")
 
-        fd = FrameData(timestamp=ts, frame=annotated, inference_result=aggregated)
+        # 4. 写入 frame 和 msg cache
+        fd = FrameData(timestamp=frame_timestamp, frame=annotated, inference_result=aggregated)
         self.rt_cache_frame.append(fd)
         self.ca_cache_frame.append(fd)
         self.rt_cache_msg.append(aggregated)
         self.ca_cache_msg.append(aggregated)
+        
+        # 调试日志：每秒输出一次统计信息
+        self._debug_frame_count += 1
+        current_time = time.time()
+        if current_time - self._debug_last_log_time >= 5.0:  # 每5秒输出一次
+            elapsed = current_time - self._debug_last_log_time
+            fps = self._debug_frame_count / elapsed
+            print(f"[LeakBubblePipeline] 异步聚合产出: {self._debug_frame_count}帧/{elapsed:.1f}秒 = {fps:.1f}fps | "
+                  f"新推理: {has_new_inference} | rt_cache: {len(self.rt_cache_frame)} | ca_cache: {len(self.ca_cache_frame)}")
+            self._debug_frame_count = 0
+            self._debug_last_log_time = current_time

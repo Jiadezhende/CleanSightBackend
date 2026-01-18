@@ -24,6 +24,7 @@
 ## 数据流与 Cache 语义
 
 设计原则：把不同用途的数据分层存储，分清实时（rt）与持久化（ca）用途。
+根据实际处理速度，调节ClientQueues中的inference_fps
 
 子任务级 cache（每个 `SubtaskPipelineBase`）
 

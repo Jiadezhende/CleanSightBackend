@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -22,6 +23,12 @@ from app.models.task import Task as CleaningTask
 from app.database import engine
 from app.settings import settings
 from app.services.task_pipeline.leak.leak_test import LeakBubblePipelineService
+
+# 导入 ClientManager 单例（关键修复：使用统一的队列管理）
+try:
+    from app.services.client_manager import client_manager
+except ImportError:
+    client_manager = None
 import urllib.request
 from sqlalchemy import text
 
@@ -190,6 +197,10 @@ class InferenceManager:
         # GPU 批量大小（可配置）
         self._batch_size = getattr(settings, 'gpu_batch_size', 4)
         # Task / Pipeline 注册表：统一管理底层 InferenceTask 与 per-client TaskPipeline
+        
+        # 预编码缓存：避免重复编码同一帧
+        self._encoded_cache: Dict[str, Dict[str, Any]] = {}  # client_id -> {timestamp, b64, inference_result}
+        self._encoded_cache_lock = threading.Lock()
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
@@ -239,18 +250,45 @@ class InferenceManager:
             task.enabled = enabled
 
     def _get_or_create_client(self, client_id: str) -> ClientQueues:
+        """
+        关键修复：使用 ClientManager 的队列实例，而不是创建独立的队列
+        
+        这确保拉流服务和推理服务使用同一个 ClientQueues 实例
+        """
+        # 先检查内部缓存
         client_queues = self._clients.get(client_id)
-        if client_queues is None:
-            client_queues = ClientQueues(
-                rt_maxlen=self._rt_maxlen, 
-                ca_segment_len=self._ca_segment_len,
-                ca_maxlen=self._ca_maxlen
-            )
-            self._clients[client_id] = client_queues
+        if client_queues is not None:
+            return client_queues
+        
+        # 关键修改：使用 ClientManager 获取队列（与拉流服务共享）
+        if client_manager is not None:
+            try:
+                client_queues = client_manager.get_client(
+                    client_id,
+                    rt_maxlen=self._rt_maxlen,
+                    ca_segment_len=self._ca_segment_len,
+                    ca_maxlen=self._ca_maxlen
+                )
+                # 缓存到内部字典
+                self._clients[client_id] = client_queues
+                print(f"[AI] Using ClientManager queue for client {client_id}")
+                return client_queues
+            except Exception as e:
+                print(f"[AI] Failed to get queue from ClientManager: {e}")
+        
+        # 回退方案：创建独立的队列（兼容旧版本）
+        print(f"[AI] WARNING: Creating independent queue for client {client_id} (ClientManager not available)")
+        client_queues = ClientQueues(
+            client_id=client_id,
+            rt_maxlen=self._rt_maxlen, 
+            ca_segment_len=self._ca_segment_len,
+            ca_maxlen=self._ca_maxlen
+        )
+        self._clients[client_id] = client_queues
         return client_queues
 
     def submit_frame(self, client_id: str, frame: np.ndarray) -> None:
-        """从 RTMP 流中提交原始帧到 CA-ReadyQueue。
+        """从视频流中提交原始帧到 CA-ReadyQueue。
 
         Args:
             client_id: The client identifier.
@@ -287,11 +325,53 @@ class InferenceManager:
         with self._lock:
             client_queues = self._get_or_create_client(client_id)
             client_queues.rtmp_url = stream_url
+    
+    def prepare_frame_for_inference(self, frame: np.ndarray) -> np.ndarray:
+        """
+        将原始帧预处理为模型输入格式（从拉流层接收的标准化帧）
+        
+        该方法负责模型相关的预处理：
+        - resize 到模型输入尺寸（如果配置）
+        - 颜色空间转换（BGR→RGB，如果配置）
+        - 归一化（如果需要）
+        
+        Args:
+            frame: 原始帧（已经过拉流层的基础 resize，通常为 640x480 BGR）
+        
+        Returns:
+            预处理后的帧，可直接输入模型
+        """
+        if frame is None:
+            return frame
+        
+        # 1. resize 到模型输入尺寸（从环境变量读取）
+        model_input_width = int(os.environ.get('MODEL_INPUT_WIDTH', 0))
+        model_input_height = int(os.environ.get('MODEL_INPUT_HEIGHT', 0))
+        
+        if model_input_width > 0 and model_input_height > 0:
+            try:
+                frame = cv2.resize(frame, (model_input_width, model_input_height), interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                pass
+        
+        # 2. 颜色转换（从环境变量读取）
+        model_input_color = os.environ.get('MODEL_INPUT_COLOR', 'bgr').lower()
+        if model_input_color == 'rgb':
+            try:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            except Exception:
+                pass
+        
+        # 3. 归一化（如果需要，目前保留原样）
+        frame = np.ascontiguousarray(frame)
+        return frame
 
     def get_result(self, client_id: str, as_model: bool = False) -> Union[None, FrameData, ProcessedFrame]:
         """返回最新处理帧（从 RT-ProcessedQueue）。
 
         as_model=True 时返回 ProcessedFrame Pydantic 对象（含 Base64），否则返回 FrameData。
+        
+        优化：使用缓存避免重复编码同一帧。
         """
         with self._lock:
             client_queues = self._clients.get(client_id)
@@ -305,8 +385,33 @@ class InferenceManager:
         if not as_model:
             return frame_data
         
+        # 检查缓存：避免重复编码同一帧
+        with self._encoded_cache_lock:
+            cached = self._encoded_cache.get(client_id)
+            if cached and cached['timestamp'] == frame_data.timestamp:
+                # 缓存命中，直接返回
+                task_id = client_queues.get_task_id()
+                return ProcessedFrame(
+                    task_id=task_id,
+                    client_id=client_id,
+                    raw_timestamp=datetime.fromtimestamp(frame_data.timestamp),
+                    processed_frame_b64=cached['b64'],
+                    inference_result=cached['inference_result']
+                )
+        
+        # 缓存未命中，编码并缓存
         task_id = client_queues.get_task_id()
-        return self._create_processed_frame(frame_data, task_id, client_id)
+        processed_frame = self._create_processed_frame(frame_data, task_id, client_id)
+        
+        # 更新缓存
+        with self._encoded_cache_lock:
+            self._encoded_cache[client_id] = {
+                'timestamp': frame_data.timestamp,
+                'b64': processed_frame.processed_frame_b64,
+                'inference_result': processed_frame.inference_result
+            }
+        
+        return processed_frame
 
     def remove_client(self, client_id: str) -> None:
         """Remove a client and its queues.
@@ -417,14 +522,31 @@ class InferenceManager:
             base = time.time()
             timestamps = [float(base + i * 1e-3) for i in range(n)]
 
+        # **新增：对所有原始帧进行模型预处理**
+        # 这里将原始帧（已经过拉流层的基础 resize）转换为模型输入格式
+        processed_frames = []
+        for frame in frames:
+            try:
+                processed_frame = self.prepare_frame_for_inference(frame)
+                processed_frames.append(processed_frame)
+            except Exception as e:
+                print(f"Frame preprocessing failed: {e}")
+                processed_frames.append(frame)  # 失败时使用原始帧
+
         # 根据当前 CleanTask 从注册表中获取 / 创建对应 TaskPipeline
         pipeline = self._get_or_create_leak_pipeline(client_id, task)
+        
+        # 关键：设置 ClientQueues 引用，供 pipeline 异步聚合时获取最新原始帧
+        if client_id:
+            client_queues = self._get_or_create_client(str(client_id))
+            pipeline.set_client_queues(client_queues)
 
         context: Dict[str, Any] = {"task": task, "client_id": client_id}
         try:
             # 触发 TaskPipeline 级别的批量推理，内部会调用各子任务的 infer_batch，
             # 利用 YOLO 的 detect_batch 接口提升整体推理效率。
-            pipeline.infer_batch(frames, timestamps=timestamps, context=context)
+            # **传入预处理后的帧**
+            pipeline.infer_batch(processed_frames, timestamps=timestamps, context=context)
         except Exception as e:
             print(f"TaskPipeline 批量推理异常 for client {client_id}: {e}")
 
@@ -1004,7 +1126,7 @@ class InferenceManager:
     def _flush_segment_if_needed(self, client_id: str, client_queues:ClientQueues):
         """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。"""
         # 检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作
-        print(f"Checking HLS segment flush for client: {client_id}")
+        # print(f"Checking HLS segment flush for client: {client_id}")
         seg_len = client_queues.ca_segment_len
         if not client_queues.has_enough_for_segment(seg_len):
             return

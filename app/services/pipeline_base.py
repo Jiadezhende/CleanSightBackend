@@ -286,7 +286,7 @@ class TaskPipelineBase(ABC):
         parallel: bool = True,
         max_cache_size: int = 256,
         enable_async_aggregation: bool = False,
-        aggregation_interval: float = 0.05,
+        aggregation_interval: float = 1/30, # 聚合频率，决定了推理返流的帧率？
     ) -> None:
         self._name = name
         self._subtasks: List[SubtaskPipelineBase] = list(subtasks)
@@ -307,6 +307,9 @@ class TaskPipelineBase(ABC):
         self._aggregation_interval = float(aggregation_interval)
         self._stop_event = threading.Event()
         self._aggregation_thread: Optional[threading.Thread] = None
+        
+        # ClientQueues 引用（用于异步聚合时获取最新原始帧）
+        self._client_queues: Optional[Any] = None
 
         if self._enable_async_aggregation:
             self._start_aggregation_thread()
@@ -349,8 +352,15 @@ class TaskPipelineBase(ABC):
         - progress: float       0~1 进度估计
         - last_timestamp: float 最近一次更新的时间戳
         """
-
         return self._state
+    
+    def set_client_queues(self, client_queues: Any) -> None:
+        """设置 ClientQueues 实例，用于异步聚合时获取最新原始帧。"""
+        self._client_queues = client_queues
+    
+    def get_client_queues(self) -> Optional[Any]:
+        """获取 ClientQueues 实例。"""
+        return self._client_queues
 
     def is_step_completed(self) -> bool:
         """快捷判断当前步骤是否已完成。
@@ -380,6 +390,7 @@ class TaskPipelineBase(ABC):
         thread = threading.Thread(target=self._aggregation_loop, daemon=True)
         self._aggregation_thread = thread
         thread.start()
+        print(f"[TaskPipeline] 异步聚合线程已启动: {self._name} (interval={self._aggregation_interval:.3f}s)")
 
     def stop(self) -> None:
         """停止后台聚合线程（如已启用）。"""
@@ -396,9 +407,11 @@ class TaskPipelineBase(ABC):
         while not self._stop_event.is_set():
             try:
                 self._aggregate_once_from_subtasks()
-            except Exception:
-                # 运行时保护：避免线程因异常退出
-                pass
+            except Exception as e:
+                # 运行时保护：避免线程因异常退出，但打印错误便于调试
+                print(f"[TaskPipeline] 异步聚合异常 ({self._name}): {e}")
+                import traceback
+                traceback.print_exc()
             # 使用 Event.wait 便于及时响应 stop 信号
             self._stop_event.wait(self._aggregation_interval)
 
