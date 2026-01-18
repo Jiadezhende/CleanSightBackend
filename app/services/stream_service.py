@@ -14,6 +14,13 @@ import logging
 logger = logging.getLogger("app.services.stream_service")
 
 from app.services import ai
+from app.models.frame import FrameData
+
+# 导入 ClientManager 单例（延迟导入避免循环依赖）
+try:
+    from app.services.client_manager import client_manager
+except ImportError:
+    client_manager = None  # 兼容旧版本
 
 # configuration
 FFMPEG_BIN = os.environ.get("FFMPEG_PATH", "ffmpeg")
@@ -25,7 +32,7 @@ PER_STREAM_MAX_PENDING = 3
 
 
 class FFmpegDecoder:
-    def __init__(self, manager, client_id: str, stream_url: str, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT, fps=30, pix_fmt="bgr24", protocol_opts=None, auto_restart=True, max_restarts=5):
+    def __init__(self, manager, client_id: str, stream_url: str, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT, fps=30, pix_fmt="bgr24", protocol_opts=None, auto_restart=True, max_restarts=5, client_queues=None):
         self.manager = manager
         self.client_id = client_id
         self.stream_url = stream_url
@@ -36,6 +43,9 @@ class FFmpegDecoder:
         self.protocol_opts = protocol_opts or []
         self.auto_restart = auto_restart
         self.max_restarts = max_restarts
+        
+        # 新增：客户端队列实例（用于直接写入队列）
+        self.client_queues = client_queues
 
         self.frame_size = width * height * DEFAULT_CHANNELS
         self.buffer = bytearray()
@@ -49,6 +59,8 @@ class FFmpegDecoder:
         # metrics
         self.frames_received = 0
         self.frames_dropped = 0
+        self.frames_written_to_raw = 0  # 新增：写入 CA-Raw-Queue 的帧数
+        self.frames_written_to_ready = 0  # 新增：写入 CA-Ready-Queue 的帧数
         self.logger = logging.getLogger(f"app.services.stream_service.FFmpegDecoder.{self.client_id}")
 
     def _build_cmd(self):
@@ -188,10 +200,23 @@ class FFmpegDecoder:
             pass
 
     def _standardize_frame(self, frm: np.ndarray) -> np.ndarray:
+        """
+        标准化帧（拉流层处理）：仅做统一 resize，不做模型相关预处理
+        
+        移除了：
+        - MODEL_INPUT_WIDTH/HEIGHT 相关的 resize（已移到 ai 服务的预处理）
+        - MODEL_INPUT_COLOR 相关的颜色转换（已移到 ai 服务的预处理）
+        
+        保留：
+        - 基本格式转换（GRAY→BGR、4通道→3通道）
+        - 统一 resize 到配置尺寸（默认 640x480）
+        """
         if frm is None:
             return frm
         if not isinstance(frm, np.ndarray):
             frm = np.array(frm)
+        
+        # 基本格式转换
         if frm.ndim == 2:
             frm = cv2.cvtColor(frm, cv2.COLOR_GRAY2BGR)
         if frm.shape[2] == 4:
@@ -201,19 +226,13 @@ class FFmpegDecoder:
                 frm = np.clip(frm, 0, 255).astype(np.uint8)
             except Exception:
                 frm = frm.astype(np.uint8, copy=False)
-        MODEL_INPUT_WIDTH = int(os.environ.get('MODEL_INPUT_WIDTH', 0))
-        MODEL_INPUT_HEIGHT = int(os.environ.get('MODEL_INPUT_HEIGHT', 0))
-        MODEL_INPUT_COLOR = os.environ.get('MODEL_INPUT_COLOR', 'bgr').lower()
-        if MODEL_INPUT_WIDTH > 0 and MODEL_INPUT_HEIGHT > 0:
-            try:
-                frm = cv2.resize(frm, (MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
-            except Exception:
-                pass
-        if MODEL_INPUT_COLOR == 'rgb':
-            try:
-                frm = cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)
-            except Exception:
-                pass
+        
+        # 统一 resize（使用 self.width/height，通常为 640x480）
+        try:
+            frm = cv2.resize(frm, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+        except Exception:
+            pass
+        
         frm = np.ascontiguousarray(frm)
         return frm
 
@@ -224,22 +243,47 @@ class FFmpegDecoder:
         while len(self.buffer) >= self.frame_size:
             frame_data = bytes(self.buffer[: self.frame_size])
             del self.buffer[: self.frame_size]
-            # backpressure
+            
+            # 背压控制：检查队列深度
             pending = self.manager.get_pending_count(self.client_id)
             if pending >= PER_STREAM_MAX_PENDING:
                 self.frames_dropped += 1
                 # log occasional drop
                 if self.frames_dropped % 50 == 0:
-                    self.logger.warning("dropped %s frames due to backpressure", self.frames_dropped)
+                    self.logger.warning("dropped %s frames due to backpressure (pending=%s)", self.frames_dropped, pending)
                 continue
+            
             try:
+                # 1. 组帧
                 arr = np.frombuffer(frame_data, dtype=np.uint8).reshape((self.height, self.width, 3))
+                
+                # 2. 标准化（仅 resize，不做模型预处理）
                 std = self._standardize_frame(arr)
-                ai.submit_frame(self.client_id, std)
+                
+                # 3. 写入队列或调用旧接口
+                if self.client_queues is not None:
+                    # 新模式：直接写入 ClientQueues
+                    now = time.time()
+                    frame_data_obj = FrameData(timestamp=now, frame=std)
+                    
+                    # 3.1 写入落盘队列（全量）
+                    if self.client_queues.append_ca_raw(frame_data_obj):
+                        self.frames_written_to_raw += 1
+                    
+                    # 3.2 写入推理队列（降频）
+                    if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
+                        self.frames_written_to_ready += 1
+                else:
+                    # 兼容旧模式：调用 ai.submit_frame
+                    ai.submit_frame(self.client_id, std)
+                
                 self.frames_received += 1
+                
                 # log every N frames to observe liveness
                 if self.frames_received % 300 == 0:
-                    self.logger.info("received %s frames", self.frames_received)
+                    self.logger.info("received %s frames (raw=%s, ready=%s, dropped=%s)", 
+                                    self.frames_received, self.frames_written_to_raw, 
+                                    self.frames_written_to_ready, self.frames_dropped)
             except Exception:
                 self.frames_dropped += 1
                 self.logger.exception("error processing frame bytes")
@@ -263,6 +307,20 @@ class StreamService:
             if client_id in self.decoders:
                 raise RuntimeError(f"stream {client_id} already started")
             logger.info("start_stream client=%s protocol=%s url=%s", client_id, protocol, stream_url)
+            
+            # 创建或获取 ClientQueues（通过 ClientManager）
+            client_queues = None
+            if client_manager is not None:
+                client_queues = client_manager.get_client(
+                    client_id,
+                    resize_width=640,
+                    resize_height=480,
+                    inference_fps=10,
+                    ca_maxlen=2700,  # 90秒缓冲
+                    ca_segment_len=150  # 5秒段
+                )
+                logger.info("ClientQueues created/retrieved for client=%s", client_id)
+            
             protocol_opts = []
             if protocol == 'RTSP':
                 protocol_opts = [
@@ -272,7 +330,14 @@ class StreamService:
                     "-analyzeduration", "1000000",
                     "-probesize", "1000000",
                 ]
-            dec = FFmpegDecoder(manager=self, client_id=client_id, stream_url=stream_url, fps=fps, protocol_opts=protocol_opts)
+            dec = FFmpegDecoder(
+                manager=self, 
+                client_id=client_id, 
+                stream_url=stream_url, 
+                fps=fps, 
+                protocol_opts=protocol_opts,
+                client_queues=client_queues  # 传入 ClientQueues
+            )
             self.decoders[client_id] = dec
             self.metrics[client_id] = {"frames_received": 0, "frames_dropped": 0, "restarts": 0}
             dec.start()
@@ -296,6 +361,12 @@ class StreamService:
                     pass
             dec.stop()
             self.metrics.pop(client_id, None)
+            
+            # 清理 ClientQueues（可选：保留用于查询历史）
+            if client_manager is not None:
+                # cleanup=False 保留队列数据，cleanup=True 清空队列
+                client_manager.remove_client(client_id, cleanup=False)
+            
             logger.info("stream stopped client=%s", client_id)
 
     def has_stream(self, client_id: str) -> bool:
@@ -304,7 +375,19 @@ class StreamService:
             return dec is not None and dec.is_alive()
 
     def get_pending_count(self, client_id: str) -> int:
-        # placeholder for pending counter; keep simple
+        """
+        获取指定客户端的 CA-Raw-Queue 深度（用于背压控制）
+        
+        返回 CA-Raw-Queue 的当前长度，用于判断是否需要丢帧
+        """
+        if client_manager is not None:
+            try:
+                client_queues = client_manager.get_client(client_id)
+                depths = client_queues.get_queue_depths()
+                return depths.get("ca_raw", 0)
+            except Exception:
+                pass
+        # 兼容旧版本或获取失败，返回 0
         return 0
 
     def run_once(self, timeout: float = 0.05):
@@ -347,6 +430,33 @@ class StreamService:
                     pass
         except Exception:
             pass
+    
+    def shutdown(self):
+        """
+        关闭服务，释放所有资源
+        
+        停止所有流，清理所有客户端资源
+        """
+        logger.info("Shutting down StreamService...")
+        
+        # 停止所有流
+        with self.lock:
+            client_ids = list(self.decoders.keys())
+        
+        for client_id in client_ids:
+            try:
+                self.stop_stream(client_id)
+            except Exception as e:
+                logger.error(f"Error stopping stream {client_id}: {e}")
+        
+        # 清空所有客户端队列
+        if client_manager is not None:
+            try:
+                client_manager.clear_all()
+            except Exception as e:
+                logger.error(f"Error clearing client manager: {e}")
+        
+        logger.info("StreamService shutdown complete")
 
 
 # singleton service instance

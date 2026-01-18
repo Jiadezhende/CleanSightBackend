@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -287,6 +288,46 @@ class InferenceManager:
         with self._lock:
             client_queues = self._get_or_create_client(client_id)
             client_queues.rtmp_url = stream_url
+    
+    def prepare_frame_for_inference(self, frame: np.ndarray) -> np.ndarray:
+        """
+        将原始帧预处理为模型输入格式（从拉流层接收的标准化帧）
+        
+        该方法负责模型相关的预处理：
+        - resize 到模型输入尺寸（如果配置）
+        - 颜色空间转换（BGR→RGB，如果配置）
+        - 归一化（如果需要）
+        
+        Args:
+            frame: 原始帧（已经过拉流层的基础 resize，通常为 640x480 BGR）
+        
+        Returns:
+            预处理后的帧，可直接输入模型
+        """
+        if frame is None:
+            return frame
+        
+        # 1. resize 到模型输入尺寸（从环境变量读取）
+        model_input_width = int(os.environ.get('MODEL_INPUT_WIDTH', 0))
+        model_input_height = int(os.environ.get('MODEL_INPUT_HEIGHT', 0))
+        
+        if model_input_width > 0 and model_input_height > 0:
+            try:
+                frame = cv2.resize(frame, (model_input_width, model_input_height), interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                pass
+        
+        # 2. 颜色转换（从环境变量读取）
+        model_input_color = os.environ.get('MODEL_INPUT_COLOR', 'bgr').lower()
+        if model_input_color == 'rgb':
+            try:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            except Exception:
+                pass
+        
+        # 3. 归一化（如果需要，目前保留原样）
+        frame = np.ascontiguousarray(frame)
+        return frame
 
     def get_result(self, client_id: str, as_model: bool = False) -> Union[None, FrameData, ProcessedFrame]:
         """返回最新处理帧（从 RT-ProcessedQueue）。
@@ -417,6 +458,17 @@ class InferenceManager:
             base = time.time()
             timestamps = [float(base + i * 1e-3) for i in range(n)]
 
+        # **新增：对所有原始帧进行模型预处理**
+        # 这里将原始帧（已经过拉流层的基础 resize）转换为模型输入格式
+        processed_frames = []
+        for frame in frames:
+            try:
+                processed_frame = self.prepare_frame_for_inference(frame)
+                processed_frames.append(processed_frame)
+            except Exception as e:
+                print(f"Frame preprocessing failed: {e}")
+                processed_frames.append(frame)  # 失败时使用原始帧
+
         # 根据当前 CleanTask 从注册表中获取 / 创建对应 TaskPipeline
         pipeline = self._get_or_create_leak_pipeline(client_id, task)
 
@@ -424,7 +476,8 @@ class InferenceManager:
         try:
             # 触发 TaskPipeline 级别的批量推理，内部会调用各子任务的 infer_batch，
             # 利用 YOLO 的 detect_batch 接口提升整体推理效率。
-            pipeline.infer_batch(frames, timestamps=timestamps, context=context)
+            # **传入预处理后的帧**
+            pipeline.infer_batch(processed_frames, timestamps=timestamps, context=context)
         except Exception as e:
             print(f"TaskPipeline 批量推理异常 for client {client_id}: {e}")
 
