@@ -38,18 +38,52 @@ async def websocket_video_endpoint(websocket: WebSocket):
     await websocket.accept()
     print(f"WebSocket 连接已建立 (client_id={client_id}): {websocket.client}")
 
+    # 帧率控制和去重
+    last_sent_timestamp = 0.0  # 上一帧的时间戳（来自帧本身）
+    last_sent_time = 0.0  # 上一次发送的系统时间
+    frame_interval = 1.0 / 30  # 30fps
+    frames_sent = 0
+    last_log_time = time.time()
+
     try:
         while True:
             processed_frame: ProcessedFrame = ai.get_result(client_id, as_model=True)  # type: ignore
 
             if processed_frame is None:
-                await asyncio.sleep(0.03)
+                await asyncio.sleep(0.01)  # 减少轮询间隔
                 continue
+
+            # 去重：检查时间戳，避免重复发送同一帧
+            current_timestamp = processed_frame.raw_timestamp.timestamp() if processed_frame.raw_timestamp else time.time()
+            if current_timestamp <= last_sent_timestamp:
+                await asyncio.sleep(0.01)
+                continue
+            
+            # 帧率控制：确保发送间隔不小于 frame_interval
+            current_time = time.time()
+            if last_sent_time > 0:
+                time_since_last = current_time - last_sent_time
+                if time_since_last < frame_interval:
+                    await asyncio.sleep(frame_interval - time_since_last)
+                    current_time = time.time()  # 更新时间
 
             # 使用模型中的 Base64 编码图像
             try:
                 data_url = f"data:image/jpeg;base64,{processed_frame.processed_frame_b64}"
                 await websocket.send_text(data_url)
+                
+                # 更新发送记录
+                last_sent_timestamp = current_timestamp
+                last_sent_time = current_time
+                frames_sent += 1
+                
+                # 每5秒输出统计
+                if current_time - last_log_time >= 5.0:
+                    elapsed = current_time - last_log_time
+                    fps = frames_sent / elapsed
+                    print(f"[WebSocket] client={client_id}: 发送 {frames_sent}帧/{elapsed:.1f}秒 = {fps:.1f}fps")
+                    frames_sent = 0
+                    last_log_time = current_time
             except Exception as send_exc:
                 # 避免在 except 子句中直接引用可能未导入的异常类名，改为运行时检查异常类型名或常见连接错误
                 exc_name = send_exc.__class__.__name__

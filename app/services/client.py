@@ -3,7 +3,7 @@
 """
 
 from collections import deque
-from typing import Deque, Optional, List
+from typing import Deque, Optional, List, Tuple
 import time
 import numpy as np
 import threading
@@ -52,8 +52,12 @@ class ClientQueues:
         self.inference_fps = inference_fps
         self.last_inference_timestamp: float = 0.0
         
-        # 线程锁（保护时间戳更新）
+        # 线程锁（保护时间戳更新和最新帧访问）
         self._lock = threading.Lock()
+        
+        # 最新原始帧缓存（用于异步聚合可视化）
+        self.latest_raw_frame: Optional[np.ndarray] = None
+        self.latest_raw_timestamp: float = 0.0
         
         # CA-ReadyQueue: 等待推理的原始帧（设置最大长度限制防止溢出）
         self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
@@ -112,13 +116,17 @@ class ClientQueues:
 
     def append_ca_raw(self, frame_data: FrameData) -> bool:
         """
-        添加原始帧到落盘队列
+        添加原始帧到落盘队列，同时更新最新原始帧缓存
         
         Returns:
             True 表示成功，False 表示队列已满
         """
         try:
             self.ca_raw.append(frame_data)
+            # 同步更新最新原始帧（用于异步聚合可视化）
+            with self._lock:
+                self.latest_raw_frame = frame_data.frame
+                self.latest_raw_timestamp = frame_data.timestamp
             return True
         except Exception:
             return False
@@ -136,6 +144,17 @@ class ClientQueues:
         if self.rt_processed:
             return self.rt_processed[-1]
         return self.latest_processed
+    
+    def get_latest_raw_frame(self) -> Optional[Tuple[np.ndarray, float]]:
+        """安全获取最新原始帧及其时间戳。
+        
+        Returns:
+            (frame, timestamp) 或 None（如果没有帧）
+        """
+        with self._lock:
+            if self.latest_raw_frame is not None:
+                return (self.latest_raw_frame.copy(), self.latest_raw_timestamp)
+            return None
 
     def get_task_id(self) -> Optional[int]:
         return self.task.task_id if self.task else None

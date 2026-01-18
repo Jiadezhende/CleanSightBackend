@@ -197,6 +197,10 @@ class InferenceManager:
         # GPU 批量大小（可配置）
         self._batch_size = getattr(settings, 'gpu_batch_size', 4)
         # Task / Pipeline 注册表：统一管理底层 InferenceTask 与 per-client TaskPipeline
+        
+        # 预编码缓存：避免重复编码同一帧
+        self._encoded_cache: Dict[str, Dict[str, Any]] = {}  # client_id -> {timestamp, b64, inference_result}
+        self._encoded_cache_lock = threading.Lock()
     
     def _register_default_tasks(self):
         """注册默认的推理任务"""
@@ -366,6 +370,8 @@ class InferenceManager:
         """返回最新处理帧（从 RT-ProcessedQueue）。
 
         as_model=True 时返回 ProcessedFrame Pydantic 对象（含 Base64），否则返回 FrameData。
+        
+        优化：使用缓存避免重复编码同一帧。
         """
         with self._lock:
             client_queues = self._clients.get(client_id)
@@ -379,8 +385,33 @@ class InferenceManager:
         if not as_model:
             return frame_data
         
+        # 检查缓存：避免重复编码同一帧
+        with self._encoded_cache_lock:
+            cached = self._encoded_cache.get(client_id)
+            if cached and cached['timestamp'] == frame_data.timestamp:
+                # 缓存命中，直接返回
+                task_id = client_queues.get_task_id()
+                return ProcessedFrame(
+                    task_id=task_id,
+                    client_id=client_id,
+                    raw_timestamp=datetime.fromtimestamp(frame_data.timestamp),
+                    processed_frame_b64=cached['b64'],
+                    inference_result=cached['inference_result']
+                )
+        
+        # 缓存未命中，编码并缓存
         task_id = client_queues.get_task_id()
-        return self._create_processed_frame(frame_data, task_id, client_id)
+        processed_frame = self._create_processed_frame(frame_data, task_id, client_id)
+        
+        # 更新缓存
+        with self._encoded_cache_lock:
+            self._encoded_cache[client_id] = {
+                'timestamp': frame_data.timestamp,
+                'b64': processed_frame.processed_frame_b64,
+                'inference_result': processed_frame.inference_result
+            }
+        
+        return processed_frame
 
     def remove_client(self, client_id: str) -> None:
         """Remove a client and its queues.
@@ -504,6 +535,11 @@ class InferenceManager:
 
         # 根据当前 CleanTask 从注册表中获取 / 创建对应 TaskPipeline
         pipeline = self._get_or_create_leak_pipeline(client_id, task)
+        
+        # 关键：设置 ClientQueues 引用，供 pipeline 异步聚合时获取最新原始帧
+        if client_id:
+            client_queues = self._get_or_create_client(str(client_id))
+            pipeline.set_client_queues(client_queues)
 
         context: Dict[str, Any] = {"task": task, "client_id": client_id}
         try:
