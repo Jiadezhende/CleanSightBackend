@@ -1,0 +1,177 @@
+"""Stage 感知的帧调度器。
+
+职责：
+- 轮询所有客户端的 ca_ready 队列
+- 按 stage 分组批量取帧
+- 保证流间公平（Round-Robin）
+"""
+
+from __future__ import annotations
+
+import threading
+from collections import defaultdict, deque
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional
+
+from app.services.inference.models import InferenceRequest
+
+if TYPE_CHECKING:
+    from app.services.client import ClientQueues
+
+
+class StageAwareDispatcher:
+    """Stage感知的帧调度器。
+
+    职责：
+    - 轮询所有客户端的 ca_ready 队列
+    - 按 stage 分组批量取帧
+    - 保证流间公平（Round-Robin）
+    """
+
+    def __init__(
+        self,
+        client_queues_map: Dict[str, ClientQueues],
+        max_batch_per_stage: int = 8,
+        fetch_interval: float = 0.01,  # 10ms 轮询间隔
+    ):
+        """
+        Args:
+            client_queues_map: {client_id: ClientQueues}
+            max_batch_per_stage: 每个 stage 最大 batch 大小
+            fetch_interval: 轮询间隔（秒）
+        """
+        self.client_queues_map = client_queues_map
+        self.max_batch_per_stage = max_batch_per_stage
+        self.fetch_interval = fetch_interval
+
+        self._stop_event = threading.Event()
+        self._dispatch_thread: Optional[threading.Thread] = None
+
+        # Stage分组队列：{stage: deque[InferenceRequest]}
+        self._stage_queues: Dict[str, Deque[InferenceRequest]] = defaultdict(
+            lambda: deque(maxlen=256)
+        )
+        self._lock = threading.Lock()
+
+        # 统计信息
+        self._stats = {
+            "total_dispatched": 0,
+            "by_stage": defaultdict(int),
+        }
+
+    def start(self):
+        """启动调度线程"""
+        if self._dispatch_thread is not None and self._dispatch_thread.is_alive():
+            return
+
+        self._stop_event.clear()
+        self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
+        self._dispatch_thread.start()
+        print(f"[StageAwareDispatcher] 已启动 (interval={self.fetch_interval*1000:.1f}ms)")
+
+    def stop(self):
+        """停止调度线程"""
+        self._stop_event.set()
+        if self._dispatch_thread is not None:
+            self._dispatch_thread.join(timeout=2.0)
+        print("[StageAwareDispatcher] 已停止")
+
+    def _dispatch_loop(self):
+        """调度循环：轮询所有客户端，按 stage 分组入队"""
+        while not self._stop_event.is_set():
+            try:
+                self._fetch_and_dispatch_round()
+            except Exception as e:
+                print(f"[StageAwareDispatcher] 异常: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+            # 使用 Event.wait 可及时响应 stop 信号
+            self._stop_event.wait(self.fetch_interval)
+
+    def _fetch_and_dispatch_round(self):
+        """一轮调度：轮询所有客户端，取帧并按 stage 分组。
+
+        容错设计：
+        - 使用 list() 创建客户端字典的快照，避免迭代时字典被修改
+        - 客户端动态添加/移除不会导致迭代异常
+        - 队列为空时跳过，不影响其他客户端
+        """
+        # 重要：使用 list() 创建快照，防止迭代时客户端字典被修改
+        # 场景：客户端在推理过程中被动态添加或移除
+        for client_id, cq in list(self.client_queues_map.items()):
+            # 从 ca_ready 队列取一帧（FIFO，保证公平）
+            if not cq.ca_ready:
+                continue
+
+            try:
+                frame_data = cq.ca_ready.popleft()
+            except IndexError:
+                # 并发场景：其他线程已取走帧
+                continue
+
+            # 获取该客户端当前的 stage
+            stage = self._get_client_stage(client_id, cq)
+
+            # 构造推理请求
+            req = InferenceRequest(
+                client_id=client_id,
+                frame=frame_data.frame,
+                timestamp=frame_data.timestamp,
+                stage=stage,
+                frame_data=frame_data,
+            )
+
+            # 按 stage 分组入队
+            with self._lock:
+                self._stage_queues[stage].append(req)
+                self._stats["total_dispatched"] += 1
+                self._stats["by_stage"][stage] += 1
+
+    def _get_client_stage(self, client_id: str, cq: ClientQueues) -> str:
+        """获取客户端当前所处的 stage。
+
+        优先从 ClientState 读取，否则从 task 推断。
+        """
+        # 优先从 ClientState 读取（新架构）
+        if hasattr(cq, "state") and cq.state is not None:
+            return cq.state.get_stage()
+
+        # 兼容旧架构：从 task 的 current_step 推断 stage
+        if cq.task is not None:
+            step = getattr(cq.task, "current_step", None)
+            if step == "leak_test":
+                return "LEAK"
+            elif step == "cleaning":
+                return "CLEAN"
+
+        # 默认 stage
+        return "LEAK"
+
+    def get_batch_for_stage(
+        self, stage: str, max_size: int = None
+    ) -> List[InferenceRequest]:
+        """获取指定 stage 的一个 batch。
+
+        Args:
+            stage: Stage 名称（LEAK/CLEAN/etc.）
+            max_size: 最大 batch 大小，默认使用 self.max_batch_per_stage
+
+        Returns:
+            InferenceRequest 列表（可能为空）
+        """
+        if max_size is None:
+            max_size = self.max_batch_per_stage
+
+        batch: List[InferenceRequest] = []
+        with self._lock:
+            queue = self._stage_queues[stage]
+            for _ in range(min(max_size, len(queue))):
+                batch.append(queue.popleft())
+
+        return batch
+
+    def get_stage_queue_depths(self) -> Dict[str, int]:
+        """获取各 stage 队列深度（调试用）"""
+        with self._lock:
+            return {stage: len(queue) for stage, queue in self._stage_queues.items()}

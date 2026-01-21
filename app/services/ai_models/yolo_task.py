@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from typing import Dict, Any, List, Optional
 
-from app.services.ai import InferenceTask, InferenceResult
+from app.services.infer_task import InferenceTask, InferenceResult
 from app.services.ai_models.yolo_detection import get_detector
 
 

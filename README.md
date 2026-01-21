@@ -61,6 +61,8 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
 
 ### AI 推理架构
 
+TODO: 更新 AI 推理架构设计
+
 系统采用可扩展的推理流水线注册架构，在流水线中支持多种 AI 模型并行或串行执行：
 
 将不同推理任务封装为独立的 `InferenceTask` 类，并通过 `SubTaskPipeline` 进行组合和调度。一个`SubTaskPipeline`可以分为以下两个阶段：
@@ -72,7 +74,7 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
 
 详细说明请参考文档：
 
-- [推理流水线设计](docs/PIPELINE_BASE.md)
+- [推理与后处理架构设计](docs/INFERENCE_SERVICE_ARCHITECTURE.md)
 - [流水线切换逻辑(Coming soon)]()
 - [推理任务注册设计(Coming soon)]()
 
