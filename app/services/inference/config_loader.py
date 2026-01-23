@@ -44,6 +44,13 @@ class InferenceConfig:
         for stage_name, stage_config in config_dict.get("stages", {}).items():
             self.stages[stage_name] = StageConfig(stage_name, stage_config)
 
+        # 全局配置
+        self.global_config: Dict[str, Any] = config_dict.get("global", {})
+        self.batch_size: int = self.global_config.get("batch_size", 4)
+        self.inference_decimation: int = self.global_config.get("inference_decimation", 2)
+        self.visualization_decimation: int = self.global_config.get("visualization_decimation", 1)
+        self.alarm_config: Dict[str, Any] = self.global_config.get("alarm", {})
+
     def get_stage_config(self, stage_name: str) -> Optional[StageConfig]:
         """获取指定 Stage 的配置"""
         return self.stages.get(stage_name)
@@ -52,8 +59,19 @@ class InferenceConfig:
         """列出所有 Stage 名称"""
         return list(self.stages.keys())
 
+    def get_inference_fps(self, base_fps: int = 30) -> int:
+        """根据降频配置计算实际推理FPS
+
+        Args:
+            base_fps: 原始视频帧率（默认30fps）
+
+        Returns:
+            实际推理帧率
+        """
+        return base_fps // self.inference_decimation
+
     def __repr__(self):
-        return f"InferenceConfig(stages={list(self.stages.keys())})"
+        return f"InferenceConfig(stages={list(self.stages.keys())}, batch_size={self.batch_size}, inference_decimation={self.inference_decimation})"
 
 
 def _expand_env_vars(config: Any) -> Any:

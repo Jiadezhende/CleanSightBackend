@@ -22,6 +22,14 @@ try:
 except ImportError:
     client_manager = None  # 兼容旧版本
 
+# 导入配置加载器
+try:
+    from app.services.inference.config_loader import load_stage_config
+    _inference_config = load_stage_config()
+except Exception as e:
+    logger.warning(f"Failed to load inference config: {e}, using defaults")
+    _inference_config = None
+
 # configuration
 FFMPEG_BIN = os.environ.get("FFMPEG_PATH", "ffmpeg")
 DEFAULT_WIDTH = 640
@@ -330,15 +338,18 @@ class StreamService:
             # 创建或获取 ClientQueues（通过 ClientManager）
             client_queues = None
             if client_manager is not None:
+                # 从配置文件读取推理FPS（base_fps=30, decimation=2 → 15fps）
+                inference_fps = _inference_config.get_inference_fps(30) if _inference_config else 15
+
                 client_queues = client_manager.get_client(
                     client_id,
                     resize_width=640,
                     resize_height=480,
-                    inference_fps=10,
-                    ca_maxlen=2700,  # 90秒缓冲
+                    inference_fps=inference_fps,
+                    ca_maxlen=600,  # 20秒缓冲
                     ca_segment_len=150  # 5秒段
                 )
-                logger.info("ClientQueues created/retrieved for client=%s", client_id)
+                logger.info("ClientQueues created for client=%s (inference_fps=%d)", client_id, inference_fps)
             
             protocol_opts = []
             if protocol == 'RTSP':
