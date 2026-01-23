@@ -50,9 +50,11 @@ class WriteBackWorker:
                     continue
 
                 # 2. 安全检查：客户端可能已清理
+                if not client_manager.has_client(data.client_id):
+                    continue
+
                 cq = client_manager.get_client(data.client_id)
                 if cq is None:
-                    # 客户端已被清理，跳过
                     continue
 
                 # 3. 构造 FrameData

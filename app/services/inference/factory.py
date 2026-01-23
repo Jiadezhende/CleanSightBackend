@@ -122,16 +122,15 @@ def create_model_worker_service_example(
 
 
 def _create_default_stage_configs() -> Dict[str, Dict[str, Any]]:
-    """创建默认的 Stage 配置（LEAK 阶段）。"""
+    """创建默认的 Stage 配置（LEAK 阶段）。
+
+    完全解耦版本：直接使用 InferenceTask，不依赖 pipeline_base。
+    """
     from app.services.ai_models.bubble_task import BubbleDetectionTask
     from app.services.ai_models.yolo_task import EndoscopeBendingDetectionTask
-    from app.services.task_pipeline.leak.leak_test import (
-        BendingSubtaskPipeline,
-        BubbleSubtaskPipeline,
-    )
     from app.settings import settings
 
-    # 创建模型实例（复用）
+    # 创建模型实例（基于 InferenceTask）
     bubble_task = BubbleDetectionTask(
         model_path=getattr(settings, "bubble_model_path", settings.yolo_model_path),
         conf_threshold=getattr(settings, "bubble_conf_threshold", 0.25),
@@ -146,18 +145,15 @@ def _create_default_stage_configs() -> Dict[str, Dict[str, Any]]:
         enabled=True,
     )
 
-    # Stage 配置
+    # Stage 配置（使用 InferenceTask，不再使用 SubtaskPipeline）
     stage_configs = {
         "LEAK": {
-            "subtasks": [
-                BubbleSubtaskPipeline(name="bubble", task=bubble_task),
-                BendingSubtaskPipeline(name="bending", task=bending_task),
-            ],
+            "models": [bubble_task, bending_task],  # 直接传入 InferenceTask 实例
             "batch_size": 4,
         },
         # 可以添加更多 stage
         # "CLEAN": {
-        #     "subtasks": [...],
+        #     "models": [...],
         #     "batch_size": 6,
         # },
     }

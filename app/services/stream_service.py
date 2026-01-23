@@ -241,11 +241,17 @@ class FFmpegDecoder:
     def _process_bytes(self, chunk: bytes):
         if not chunk:
             return
+        if self._stop_event.is_set():
+            return
+
         self.buffer += chunk
         while len(self.buffer) >= self.frame_size:
+            if self._stop_event.is_set():
+                return
+
             frame_data = bytes(self.buffer[: self.frame_size])
             del self.buffer[: self.frame_size]
-            
+
             # 背压控制：检查推理队列深度
             pending = self.manager.get_pending_count(self.client_id)
             
@@ -375,10 +381,10 @@ class StreamService:
             dec.stop()
             self.metrics.pop(client_id, None)
             
-            # 清理 ClientQueues（可选：保留用于查询历史）
+            # TODO: 清理 ClientQueues（可选：保留用于查询历史）
             if client_manager is not None:
                 # cleanup=False 保留队列数据，cleanup=True 清空队列
-                client_manager.remove_client(client_id, cleanup=False)
+                client_manager.remove_client(client_id, cleanup=True)
             
             logger.info("stream stopped client=%s", client_id)
 
@@ -390,7 +396,7 @@ class StreamService:
     def get_pending_count(self, client_id: str) -> int:
         """
         获取指定客户端的 CA-Ready-Queue 深度（用于背压控制）
-        
+
         关键修改：检查 CA-Ready-Queue（推理队列）而不是 CA-Raw-Queue
         原因：CA-Raw-Queue 用于落盘，即使满了也不应阻塞拉流
               CA-Ready-Queue 用于推理，如果满了说明推理跟不上，需要丢帧
@@ -398,33 +404,37 @@ class StreamService:
         if client_manager is None:
             logger.warning("[BACKPRESSURE] client_manager is None, import may have failed")
             return 0
-        
+
         try:
+            # 先检查客户端是否存在
+            if not client_manager.has_client(client_id):
+                return 0
+
             client_queues = client_manager.get_client(client_id)
             if client_queues is None:
                 logger.warning("[BACKPRESSURE] client_queues is None for client_id=%s", client_id)
                 return 0
-            
+
             depths = client_queues.get_queue_depths()
             if not depths:
                 logger.warning("[BACKPRESSURE] get_queue_depths returned empty for client_id=%s", client_id)
                 return 0
-            
+
             # 关键修改：检查 CA-Ready-Queue（推理队列）深度
             ready_depth = depths.get("ca_ready", 0)
             raw_depth = depths.get("ca_raw", 0)
-            
+
             # 定期打印队列状态（每100帧打印一次）
             decoder = self.decoders.get(client_id)
             if decoder and decoder.frames_received % 100 == 0:
-                logger.info("[BACKPRESSURE] client=%s: ca_ready=%s/%s, ca_raw=%s/%s", 
+                logger.info("[BACKPRESSURE] client=%s: ca_ready=%s/%s, ca_raw=%s/%s",
                            client_id, ready_depth, client_queues.ca_ready.maxlen,
                            raw_depth, client_queues.ca_raw.maxlen)
-            
+
             return ready_depth  # 返回推理队列深度
-            
+
         except Exception as e:
-            logger.error("[BACKPRESSURE] get_pending_count failed for client_id=%s: %s", 
+            logger.error("[BACKPRESSURE] get_pending_count failed for client_id=%s: %s",
                         client_id, e, exc_info=True)
             return 0
 
@@ -432,7 +442,7 @@ class StreamService:
         if self.sel is None:
             return
         events = self.sel.select(timeout=timeout)
-        for key, mask in events:
+        for key, _ in events:
             dec: FFmpegDecoder = key.data
             try:
                 dec.on_stdout_ready()

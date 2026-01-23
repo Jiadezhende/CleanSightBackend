@@ -14,6 +14,8 @@
 使主进程只需消费 processed frame。
 """
 
+# TODO:弃用，逐步迁移到 inference 模块下的新设计
+
 from typing import Any, Dict, Mapping, Optional, List, Sequence
 
 import numpy as np

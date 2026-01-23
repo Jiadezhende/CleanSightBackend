@@ -53,14 +53,14 @@ class ModelWorkerService:
         """
         Args:
             client_queues_map: {client_id: ClientQueues}，如果为 None 则从 client_manager 获取
-            stage_configs: Stage 配置，如果为 None 则使用示例配置
+            stage_configs: Stage 配置（完全解耦版本，使用 InferenceTask）
                 {
                     "LEAK": {
-                        "subtasks": [BubbleSubtaskPipeline, BendingSubtaskPipeline],
+                        "models": [bubble_task, bending_task],  # InferenceTask 实例列表
                         "batch_size": 4,
                     },
                     "CLEAN": {
-                        "subtasks": [BrushSubtaskPipeline, QualitySubtaskPipeline],
+                        "models": [quality_task],  # InferenceTask 实例列表
                         "batch_size": 6,
                     },
                 }
@@ -96,11 +96,14 @@ class ModelWorkerService:
         # 为每个 stage 创建 MultiModelWorkerPool
         self.worker_pools: Dict[str, MultiModelWorkerPool] = {}
         for stage, cfg in self.stage_configs.items():
-            subtasks = cfg.get("subtasks", [])
-            if subtasks:
+            # 支持新旧两种配置格式：
+            # - 新格式：models (InferenceTask 列表)
+            # - 旧格式：subtasks (SubtaskPipeline 列表，向后兼容)
+            models = cfg.get("models", cfg.get("subtasks", []))
+            if models:
                 self.worker_pools[stage] = MultiModelWorkerPool(
                     stage=stage,
-                    subtasks=subtasks,
+                    models=models,
                     use_cuda_stream=use_cuda_stream,
                 )
 
@@ -193,11 +196,13 @@ class ModelWorkerService:
         - 使用 get() 安全检查，客户端不存在时跳过回写
         - 不会因为客户端清理而导致推理服务崩溃
         """
+        dropped_count = 0
         for res in results:
             # 安全检查：客户端可能在推理过程中被清理
             cq = self.client_queues_map.get(res.client_id)
             if cq is None:
-                # 客户端已被清理（连接断开、任务完成等），跳过回写
+                # 客户端已被清理，丢弃此结果
+                dropped_count += 1
                 continue
 
             # 更新 ClientState（业务状态）
@@ -220,6 +225,10 @@ class ModelWorkerService:
                 # 写入队列
                 cq.append_ca_processed(frame_data)
                 cq.append_rt_processed(frame_data)
+
+        # 日志：如果有结果被丢弃，记录一下
+        if dropped_count > 0:
+            print(f"[InferWorker] 丢弃了 {dropped_count} 个无效结果（客户端已删除）")
 
     def _update_client_state(self, state: ClientState, result: InferenceResult):
         """更新客户端业务状态（可由子类覆写）。

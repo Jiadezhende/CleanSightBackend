@@ -97,10 +97,12 @@ class VisualizationWorker:
                     package.temporal_result,
                 )
 
-                # 3. 获取客户端的最新原始帧（而非推理时的旧帧）
+                # 3. 获取客户端的最新原始帧
+                if not client_manager.has_client(package.client_id):
+                    continue
+
                 cq = client_manager.get_client(package.client_id)
                 if cq is None:
-                    # 客户端已被清理，跳过
                     continue
 
                 latest_frame = cq.get_latest_frame()  # 取当前最新帧

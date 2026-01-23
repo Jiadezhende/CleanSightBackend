@@ -1,0 +1,92 @@
+# 推理服务阶段配置文件
+# 定义各个 Stage 的模型、时序分析器、可视化器和告警触发条件
+
+stages:
+  # ==================== LEAK 阶段（泄漏检测） ====================
+  LEAK:
+    # 模型列表（按顺序执行）
+    models:
+      - name: bubble_detection
+        class: app.services.ai_models.bubble_task.BubbleDetectionTask
+        params:
+          model_path: ${BUBBLE_MODEL_PATH:./weights/bubble.pt}
+          conf_threshold: 0.5
+          iou_threshold: 0.45
+          enabled: true
+
+      - name: bending_detection
+        class: app.services.ai_models.yolo_task.EndoscopeBendingDetectionTask
+        params:
+          model_path: ${YOLO_MODEL_PATH:./weights/yolo.pt}
+          conf_threshold: 0.6
+          iou_threshold: 0.45
+          enabled: true
+
+    # 时序分析器配置
+    temporal_analyzer:
+      class: app.services.inference.temporal_analyzer.DefaultTemporalAnalyzer
+      config:
+        bubble:
+          mode: consecutive          # 连续帧模式
+          threshold: 3               # 连续3帧才触发
+
+        bending:
+          mode: sliding_window       # 滑动窗口模式
+          window_seconds: 2.0        # 2秒窗口
+          ratio: 0.7                 # 70%比例才触发
+
+    # 可视化器配置
+    visualizer:
+      class: app.services.ai.DefaultVisualizer
+
+    # 告警触发条件
+    alarm_triggers:
+      - condition: bubble_detected == True
+        alarm_type: 流程违规
+        alarm_level: high
+        alarm_message: 检测到气泡异常
+
+      - condition: bending_detected == True
+        alarm_type: 流程违规
+        alarm_level: high
+        alarm_message: 检测到内镜弯折异常
+
+  # ==================== CLEAN 阶段（清洁检测） ====================
+  CLEAN:
+    # 模型列表
+    models:
+      # 未来可添加清洁质量检测模型
+      # - name: quality_detection
+      #   class: app.services.ai_models.quality_task.QualityDetectionTask
+      #   params:
+      #     model_path: ${QUALITY_MODEL_PATH:./weights/quality.pt}
+      #     enabled: true
+
+    # 时序分析器配置
+    temporal_analyzer:
+      class: app.services.inference.temporal_analyzer.DefaultTemporalAnalyzer
+      config:
+        quality:
+          mode: sliding_window
+          window_seconds: 2.0
+          ratio: 0.8
+
+    # 告警触发条件
+    alarm_triggers: []
+
+# ==================== 全局配置 ====================
+global:
+  # 推理批量大小
+  batch_size: 4
+
+  # 推理降帧率（1=不降帧，2=每2帧推理1次）
+  inference_decimation: 2
+
+  # 可视化帧率（1=全帧率，2=每2帧可视化1次）
+  visualization_decimation: 1
+
+  # 告警配置
+  alarm:
+    batch_interval: 30        # 批量上报间隔（秒）
+    cooldown_seconds: 60      # 告警冷却时间（秒）
+    report_url: ${ALARM_REPORT_URL:http://116.204.65.72:8881/gdmp/v1/api/nt/alarm_report}

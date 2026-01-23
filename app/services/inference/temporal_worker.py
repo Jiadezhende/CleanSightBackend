@@ -61,9 +61,11 @@ class TemporalWorker:
                     continue
 
                 # 2. 获取客户端状态
+                if not client_manager.has_client(result.client_id):
+                    continue
+
                 cq = client_manager.get_client(result.client_id)
                 if cq is None:
-                    # 客户端已被清理，跳过
                     continue
 
                 # 3. 执行时序分析
