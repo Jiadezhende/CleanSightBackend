@@ -1,8 +1,52 @@
 # 推流断线重连与超时清理功能实现文档
 
-> **版本**: 1.0
-> **日期**: 2026-01-24
+> **版本**: 2.0
+> **日期**: 2026-01-25
 > **状态**: ✅ 已完成并测试
+
+## 核心问题总结
+
+### 问题根源
+
+1. **两套重连机制冲突**
+   - FFmpegDecoder 的内置 `auto_restart` 机制（最多5次）
+   - StreamHealthMonitor 的统一重连机制（最多6次，每5秒）
+   - 两者同时工作导致不可预测的行为和日志混乱
+
+2. **启动失败无法检测**
+   - `ClientQueues.latest_raw_timestamp` 初始化为 0
+   - StreamHealthMonitor 跳过 `timestamp == 0` 的客户端
+   - FFmpeg 启动失败（一帧未解码）时，StreamHealthMonitor 无法介入
+
+3. **远程测试网络配置问题**
+   - 远程服务器无法用外网IP连接自己的RTSP服务器
+   - 测试脚本需要区分推流URL（外网IP）和拉流URL（localhost）
+
+4. **日志刷屏问题**
+   - `_try_restart()` 被无条件调用
+   - 重连期间每次失败都输出WARNING日志
+
+### 解决方案核心
+
+1. **完全移除 FFmpegDecoder.auto_restart**
+   - 删除 `auto_restart`、`max_restarts`、`restart_count` 属性
+   - 删除 `_try_restart()` 方法
+   - 所有重连由 StreamHealthMonitor 统一管理
+
+2. **初始化 timestamp 为创建时间**
+   - `latest_raw_timestamp` 初始化为 `time.time()`
+   - StreamHealthMonitor 可以检测"启动失败"场景（5秒内无帧）
+
+3. **规范化测试脚本**
+   - 支持 `--server` 参数（默认 localhost）
+   - 自动区分推流URL和拉流URL
+   - 远程服务器使用 localhost 拉流
+
+4. **清理日志**
+   - stream ended 时输出 DEBUG 级别日志
+   - 避免重连期间的WARNING刷屏
+
+---
 
 ## 目录
 
@@ -12,8 +56,9 @@
 4. [架构设计](#架构设计)
 5. [实现细节](#实现细节)
 6. [文件清单](#文件清单)
-7. [测试指南](#测试指南)
-8. [配置说明](#配置说明)
+7. [完整更改清单](#完整更改清单)
+8. [测试指南](#测试指南)
+9. [配置说明](#配置说明)
 
 ---
 
@@ -492,17 +537,26 @@ async def stop_rtsp_stream(client_id: str = Query(...)):
 |------|------|------|
 | `app/services/stream/cleanup.py` | 统一清理服务 | ~100 |
 | `app/services/stream/health_monitor.py` | 健康监控 + 自动重连 | ~250 |
-| `integration_tests/test_stream_disconnect_reconnect.py` | 断线重连测试脚本 | ~220 |
-| `integration_tests/test_stream_reconnect_timeout.py` | 超时清理测试脚本 | ~250 |
+| `integration_tests/test_reconnect_success.py` | 断线重连成功测试（规范版） | ~220 |
+| `integration_tests/test_reconnect_timeout.py` | 超时清理测试（规范版） | ~250 |
 | `integration_tests/TESTING_AUTO_RECONNECT.md` | 测试指南 | ~335 |
-| `docs/STREAM_RECONNECT_IMPLEMENTATION.md` | 本文档 | ~600 |
+| `docs/STREAM_RECONNECT_IMPLEMENTATION.md` | 本文档 | ~800 |
 
 ### 修改文件
 
 | 文件 | 修改内容 | 影响 |
 |------|----------|------|
 | `app/services/stream/service.py` | 1. 添加 `_cleanup_dead_decoder_unsafe()`<br>2. 修改 `start_stream()` 检测死亡 decoder<br>3. 添加 `get_stream_info()`<br>4. 添加 `restart_stream()`<br>5. 修改 `_ensure_health_monitor()` 传递 stream_service | +100行 |
+| `app/services/stream/decoder.py` | 1. 删除 `auto_restart`、`max_restarts`、`restart_count` 属性<br>2. 删除 `_try_restart()` 方法<br>3. 修改 `on_stdout_ready()` 简化EOF处理 | -30行 |
+| `app/services/client/queues.py` | 修改 `latest_raw_timestamp` 初始化为 `time.time()` | 1行 |
 | `app/routers/inspection.py` | 1. 修改 `stop_rtsp_stream` 使用 CleanupService<br>2. 修改 `stop_stream` 使用 CleanupService | 修改2个函数 |
+
+### 旧测试脚本（已废弃）
+
+| 文件 | 状态 |
+|------|------|
+| `integration_tests/test_stream_disconnect_reconnect.py` | 已被 `test_reconnect_success.py` 替代 |
+| `integration_tests/test_stream_reconnect_timeout.py` | 已被 `test_reconnect_timeout.py` 替代 |
 
 ### 文件依赖关系
 
@@ -518,6 +572,265 @@ app/services/stream/service.py
             ├─> app/services/stream/cleanup.py (CleanupService)
             └─> app/services/stream/service.py (StreamService) [循环依赖，通过参数注入]
 ```
+
+---
+
+## 完整更改清单
+
+### 核心修改
+
+#### 1. 删除 FFmpegDecoder.auto_restart 机制
+
+**文件**: `app/services/stream/decoder.py`
+
+**删除内容**:
+- `auto_restart` 参数（默认值 True）
+- `max_restarts` 参数（默认值 5）
+- `restart_count` 实例变量
+- `_try_restart()` 方法（完整删除）
+
+**修改内容**:
+```python
+# 修改前
+def __init__(self, ..., auto_restart=True, max_restarts=5, ...):
+    self.auto_restart = auto_restart
+    self.max_restarts = max_restarts
+    self.restart_count = 0
+
+def on_stdout_ready(self):
+    if not chunk:
+        self._try_restart()  # 调用重启
+        return
+
+def _try_restart(self):
+    # 复杂的重启逻辑...
+    if not self.auto_restart or self.restart_count >= self.max_restarts:
+        self.logger.warning("stream ended or crashed, not restarting")
+        return
+    # ...
+
+# 修改后
+def __init__(self, ..., client_queues=None):  # 删除 auto_restart 参数
+    # 删除 auto_restart, max_restarts, restart_count
+
+def on_stdout_ready(self):
+    if not chunk:
+        self.logger.debug("stream ended")  # 简化处理
+        return
+# 删除 _try_restart() 方法
+```
+
+**影响**: StreamHealthMonitor 统一管理所有重连
+
+---
+
+#### 2. 初始化 timestamp 支持启动失败检测
+
+**文件**: `app/services/client/queues.py`
+
+**修改**:
+```python
+# 修改前
+self.latest_raw_timestamp: float = 0.0
+
+# 修改后
+self.latest_raw_timestamp: float = time.time()  # 初始化为创建时间
+```
+
+**原因**:
+- 旧版本 `timestamp == 0` 导致 StreamHealthMonitor 跳过检查
+- 新版本可以检测"启动失败"场景（5秒内无帧）
+
+---
+
+#### 3. StreamHealthMonitor 增强
+
+**文件**: `app/services/stream/health_monitor.py`
+
+**新增数据结构**:
+```python
+@dataclass
+class ReconnectState:
+    client_id: str
+    stream_url: str
+    fps: int
+    protocol: str
+    attempt_count: int
+    last_attempt_time: float
+    last_frame_time_before_disconnect: float
+```
+
+**新增方法**:
+- `_enter_reconnect_mode()`: 进入重连模式
+- `_handle_reconnecting_client()`: 处理重连逻辑
+- `_exit_reconnect_mode()`: 退出重连模式
+
+**修改**:
+```python
+# _check_client_health() 更新
+def _check_client_health(self, client_id, cq, current_time):
+    # 1. 检查是否在重连模式
+    if client_id in self._reconnecting_clients:
+        self._handle_reconnecting_client(...)
+        return
+
+    # 2. 更新跳过逻辑（防御性检查）
+    if last_frame_time == 0:
+        logger.warning(f"WARN: {client_id} has zero timestamp (unexpected)")
+        return
+
+    # 3. 进入重连模式（5秒无新帧）
+    if 5.0 <= time_since_last_frame < 30.0:
+        self._enter_reconnect_mode(...)
+```
+
+---
+
+#### 4. StreamService 新增重连方法
+
+**文件**: `app/services/stream/service.py`
+
+**新增方法**:
+```python
+def get_stream_info(self, client_id: str) -> Optional[Dict[str, Any]]:
+    """获取流配置信息（用于重连）"""
+    # 返回 url, fps, protocol
+
+def restart_stream(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
+    """重启流（保留 ClientQueues）"""
+    # 1. 停止旧 Decoder
+    # 2. 获取现有 ClientQueues（不创建新的）
+    # 3. 创建新 Decoder（使用现有 ClientQueues）
+    # 4. 启动 Decoder
+```
+
+**关键差异**:
+| 特性 | start_stream() | restart_stream() |
+|------|----------------|------------------|
+| ClientQueues | 创建新的 | 复用现有 |
+| InferenceManager | 创建/更新 | 不操作 |
+| 使用场景 | 首次启动 | 自动重连 |
+
+---
+
+#### 5. CleanupService 创建
+
+**文件**: `app/services/stream/cleanup.py`（新增）
+
+**设计原则**:
+- **Best-effort**: 永不抛异常
+- **原子化**: 单一职责，只负责清理
+- **详细日志**: 记录所有清理步骤
+
+**核心方法**:
+```python
+def cleanup_client(self, client_id: str, reason: str = "manual") -> Dict[str, Any]:
+    """清理客户端资源（尽力而为，永不抛异常）
+
+    Returns:
+        {
+            "decoder_cleaned": bool,
+            "inference_cleaned": bool,
+            "errors": List[str]
+        }
+    """
+```
+
+---
+
+#### 6. stop API 优雅处理
+
+**文件**: `app/routers/inspection.py`
+
+**修改**:
+```python
+# 修改前
+@router.post("/stop_rtsp_stream")
+async def stop_rtsp_stream(client_id: str = Query(...)):
+    stream_service.stop_stream(client_id)  # 可能抛异常
+    return {"status": "success"}
+
+# 修改后
+@router.post("/stop_rtsp_stream")
+async def stop_rtsp_stream(client_id: str = Query(...)):
+    from app.services.stream.cleanup import cleanup_service
+    result = cleanup_service.cleanup_client(client_id, reason="api_stop")
+    return {
+        "status": "success",
+        "message": f"RTSP 流捕获已停止 for {client_id}",
+        "cleanup_details": result
+    }
+```
+
+**效果**: 永远返回 200，即使 Decoder 不存在
+
+---
+
+### 测试脚本规范化
+
+#### 新增脚本
+
+**1. test_reconnect_success.py**
+```bash
+# 本地测试
+python integration_tests/test_reconnect_success.py --task_id 1
+
+# 远程测试
+python integration_tests/test_reconnect_success.py --task_id 1 --server 117.50.241.174
+```
+
+**特性**:
+- 支持 `--server` 参数（默认 localhost）
+- 自动区分推流URL（外网IP）和拉流URL（localhost）
+- 测试断线重连成功场景
+
+**2. test_reconnect_timeout.py**
+```bash
+# 本地测试
+python integration_tests/test_reconnect_timeout.py --task_id 2
+
+# 远程测试
+python integration_tests/test_reconnect_timeout.py --task_id 2 --server 117.50.241.174
+```
+
+**特性**:
+- 观察35秒（6次重连 + 余量）
+- 验证自动清理
+- 默认 task_id=2（避免冲突）
+
+---
+
+### 配置变更
+
+无需修改配置文件，所有参数使用默认值：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| 检查间隔 | 3秒 | StreamHealthMonitor 监控周期 |
+| 断流阈值 | 5秒 | 触发重连模式 |
+| 重连间隔 | 5秒 | 每次重连尝试间隔 |
+| 最大重连次数 | 6次 | 连续失败后放弃 |
+| 清理阈值 | 30秒 | 6次失败后清理 |
+
+---
+
+### 代码统计
+
+| 类型 | 新增 | 删除 | 净增加 |
+|------|------|------|--------|
+| Python 代码 | ~850行 | ~50行 | ~800行 |
+| 文档 | ~1000行 | 0行 | ~1000行 |
+| 测试脚本 | ~500行 | 0行 | ~500行 |
+| **总计** | **~2350行** | **~50行** | **~2300行** |
+
+---
+
+### 向后兼容性
+
+✅ **完全兼容** - 所有修改都是内部实现，外部 API 未变化：
+- `start_rtsp_stream` API：签名不变
+- `stop_rtsp_stream` API：签名不变，行为改进（不再返回404）
+- FFmpegDecoder：外部不直接使用，移除 `auto_restart` 不影响调用方
 
 ---
 

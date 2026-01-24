@@ -59,6 +59,16 @@ class CleanupService:
 
         logger.info(f"[CleanupService] Cleaning up {client_id} (reason: {reason})")
 
+        # 诊断：检查ClientManager状态
+        if self._client_manager:
+            has_client = self._client_manager.has_client(client_id)
+            logger.info(f"[CleanupService] ClientManager.has_client({client_id}) = {has_client}")
+            if has_client:
+                all_clients = self._client_manager.get_all_clients()
+                logger.info(f"[CleanupService] Total clients in ClientManager: {len(all_clients)}")
+        else:
+            logger.warning(f"[CleanupService] ClientManager is None")
+
         # 步骤1：清理StreamService中的解码器
         try:
             self._stream_service.stop_stream(client_id)
@@ -72,9 +82,12 @@ class CleanupService:
         # 步骤2：清理InferenceManager（会自动清理ClientManager）
         try:
             if self._inference_manager:
+                logger.debug(f"[CleanupService] Calling InferenceManager.remove_client for {client_id}")
                 self._inference_manager.remove_client(client_id)
                 result["inference_cleaned"] = True
                 logger.info(f"[CleanupService] ✓ Inference resources cleaned up for {client_id}")
+            else:
+                logger.warning(f"[CleanupService] InferenceManager is None, skipping inference cleanup for {client_id}")
         except Exception as e:
             error_msg = f"inference: {e}"
             result["errors"].append(error_msg)

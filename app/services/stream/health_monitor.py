@@ -110,6 +110,14 @@ class StreamHealthMonitor:
                 # 统计
                 self._stats["checks"] += 1
 
+                # 日志：显示检查状态
+                if clients:
+                    reconnecting_count = len(self._reconnecting_clients)
+                    logger.debug(
+                        f"[StreamHealthMonitor] Checking {len(clients)} clients "
+                        f"({reconnecting_count} in reconnect mode)"
+                    )
+
                 # 检查每个客户端
                 for client_id, cq in clients.items():
                     self._check_client_health(client_id, cq, current_time)
@@ -164,14 +172,14 @@ class StreamHealthMonitor:
                 self._exit_reconnect_mode(client_id, cleanup=True)
 
         except Exception as e:
-            logger.error(f"[StreamHealthMonitor] Error checking {client_id}: {e}")
+            logger.error(f"[StreamHealthMonitor] Error checking {client_id}: {e}", exc_info=True)
 
     def _enter_reconnect_mode(self, client_id: str, cq, last_frame_time: float):
         """进入重连模式"""
         # 从StreamService获取流配置
         stream_info = self._stream_service.get_stream_info(client_id)
         if not stream_info:
-            logger.error(f"Cannot enter reconnect mode: no stream info for {client_id}")
+            logger.debug(f"[StreamHealthMonitor] Cannot enter reconnect mode: no stream info for {client_id} (decoder may not be ready yet)")
             return
 
         self._reconnecting_clients[client_id] = ReconnectState(
@@ -206,7 +214,13 @@ class StreamHealthMonitor:
             return
 
         # 检查是否该尝试重连了
-        if current_time - state.last_attempt_time < self.reconnect_interval:
+        time_since_last_attempt = current_time - state.last_attempt_time
+        if time_since_last_attempt < self.reconnect_interval:
+            logger.debug(
+                f"[StreamHealthMonitor] {client_id} waiting for reconnect interval "
+                f"(elapsed={time_since_last_attempt:.1f}s, need={self.reconnect_interval}s, "
+                f"attempts={state.attempt_count}/{self.max_reconnect_attempts})"
+            )
             return  # 还没到重连时间
 
         # 检查是否超过最大次数
@@ -229,18 +243,24 @@ class StreamHealthMonitor:
         self._stats["reconnects"] += 1
 
         # 调用StreamService重启decoder
-        success = self._stream_service.restart_stream(
-            client_id=client_id,
-            stream_url=state.stream_url,
-            fps=state.fps,
-            protocol=state.protocol
-        )
+        try:
+            success = self._stream_service.restart_stream(
+                client_id=client_id,
+                stream_url=state.stream_url,
+                fps=state.fps,
+                protocol=state.protocol
+            )
 
-        if not success:
-            logger.warning(f"[StreamHealthMonitor] Reconnect attempt failed to restart decoder for {client_id}")
-            return
+            if not success:
+                logger.warning(f"[StreamHealthMonitor] Reconnect attempt {state.attempt_count} failed to restart decoder for {client_id}, will retry in {self.reconnect_interval}s")
+                # 不要return，继续保持在重连模式，等待下一次尝试
+            else:
+                logger.debug(f"[StreamHealthMonitor] Decoder restarted for {client_id}, waiting for frames...")
+        except Exception as e:
+            logger.error(f"[StreamHealthMonitor] Exception during restart_stream for {client_id}: {e}, will retry in {self.reconnect_interval}s", exc_info=True)
+            # 不要return，继续保持在重连模式，等待下一次尝试
 
-        # 在下一次检查周期判断是否有新帧到达
+        # 在下一次检查周期判断是否有新帧到达（无论本次成功与否）
 
     def _exit_reconnect_mode(self, client_id: str, cleanup: bool):
         """退出重连模式"""

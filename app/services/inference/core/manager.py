@@ -379,7 +379,10 @@ class InferenceManager:
         阶段2: 从 ClientManager 移除并刷新推理服务
         阶段3: 正在处理的批次完成后会被自动丢弃
         """
+        print(f"[InferenceManager] remove_client called for {client_id}")
+
         if not client_manager.has_client(client_id):
+            print(f"[InferenceManager] Client {client_id} not found in ClientManager, already removed or never added")
             return
 
         print(f"[InferenceManager] 开始优雅停止客户端: {client_id}")

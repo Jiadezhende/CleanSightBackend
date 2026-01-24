@@ -95,8 +95,7 @@ class StreamService:
                 stream_url=stream_url,
                 fps=fps,
                 protocol_opts=protocol_opts,
-                client_queues=client_queues,  # 传入 ClientQueues
-                auto_restart=False  # 禁用内置重启，由 StreamHealthMonitor 统一管理
+                client_queues=client_queues  # 传入 ClientQueues
             )
             self.decoders[client_id] = dec
             self.metrics[client_id] = {"frames_received": 0, "frames_dropped": 0, "restarts": 0}
@@ -109,25 +108,47 @@ class StreamService:
                     pass
 
     def stop_stream(self, client_id: str):
+        """停止流解码（异步停止decoder，避免阻塞）"""
+        # 1. 从字典中移除decoder（在锁内）
+        dec = None
         with self.lock:
             dec = self.decoders.pop(client_id, None)
             if not dec:
                 return
+
             logger.info("stopping stream client=%s", client_id)
+
+            # 从selector中注销（必须在锁内）
             if self.sel is not None and dec.proc and dec.proc.stdout:
                 try:
                     self.sel.unregister(dec.proc.stdout.fileno())
                 except Exception:
                     pass
-            dec.stop()
+
+            # 清理metrics
             self.metrics.pop(client_id, None)
 
-            # TODO: 清理 ClientQueues（可选：保留用于查询历史）
-            if client_manager is not None:
-                # cleanup=False 保留队列数据，cleanup=True 清空队列
-                client_manager.remove_client(client_id, cleanup=True)
+        # 2. 异步停止decoder进程（避免阻塞）
+        if dec:
+            def stop_decoder_async():
+                try:
+                    dec.stop()  # 可能阻塞2秒+，在后台线程执行
+                    logger.info("decoder process stopped for %s", client_id)
+                except Exception as e:
+                    logger.error("Failed to stop decoder for %s: %s", client_id, e)
 
-            logger.info("stream stopped client=%s", client_id)
+            stop_thread = threading.Thread(
+                target=stop_decoder_async,
+                daemon=True,
+                name=f"stop-decoder-{client_id}"
+            )
+            stop_thread.start()
+
+        # 3. 清理ClientManager（快速操作，在主线程执行）
+        if client_manager is not None:
+            client_manager.remove_client(client_id, cleanup=True)
+
+        logger.info("stream stopped client=%s", client_id)
 
     def _cleanup_dead_decoder_unsafe(self, client_id: str):
         """内部清理方法（必须持有锁）
@@ -191,16 +212,32 @@ class StreamService:
         Returns:
             True表示重启成功，False表示失败
         """
+        # 1. 停止旧的decoder（异步执行，避免阻塞健康监控线程）
+        old_dec = None
         with self.lock:
-            # 1. 停止旧的decoder（如果存在）
             old_dec = self.decoders.get(client_id)
-            if old_dec and old_dec.is_alive():
+
+        if old_dec and old_dec.is_alive():
+            # 在后台线程中停止旧decoder，不等待完成
+            # 这样restart_stream可以快速返回，让健康监控线程继续执行
+            def stop_decoder_async():
                 try:
-                    old_dec.stop()
+                    logger.debug(f"[restart_stream] Stopping old decoder for {client_id}")
+                    old_dec.stop()  # 可能阻塞几秒，但在后台线程中执行
+                    logger.debug(f"[restart_stream] Old decoder stopped for {client_id}")
                 except Exception as e:
                     logger.error(f"Failed to stop old decoder for {client_id}: {e}")
 
-            # 2. 清理旧记录
+            stop_thread = threading.Thread(
+                target=stop_decoder_async,
+                daemon=True,
+                name=f"stop-decoder-{client_id}"
+            )
+            stop_thread.start()
+            logger.debug(f"[restart_stream] Started background thread to stop old decoder for {client_id}")
+
+        # 2. 清理旧记录并创建新decoder（在锁内执行）
+        with self.lock:
             self._cleanup_dead_decoder_unsafe(client_id)
 
             # 3. 获取现有的ClientQueues（不创建新的）
@@ -229,8 +266,7 @@ class StreamService:
                     stream_url=stream_url,
                     fps=fps,
                     protocol_opts=protocol_opts,
-                    client_queues=client_queues,
-                    auto_restart=False  # 禁用内置重启，由 StreamHealthMonitor 统一管理
+                    client_queues=client_queues
                 )
 
                 self.decoders[client_id] = dec

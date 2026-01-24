@@ -33,7 +33,7 @@ PER_STREAM_MAX_PENDING_RATIO = 0.90  # 90% 容量
 
 
 class FFmpegDecoder:
-    def __init__(self, manager, client_id: str, stream_url: str, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT, fps=30, pix_fmt="bgr24", protocol_opts=None, auto_restart=True, max_restarts=5, client_queues=None):
+    def __init__(self, manager, client_id: str, stream_url: str, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT, fps=30, pix_fmt="bgr24", protocol_opts=None, client_queues=None):
         self.manager = manager
         self.client_id = client_id
         self.stream_url = stream_url
@@ -42,8 +42,6 @@ class FFmpegDecoder:
         self.fps = fps
         self.pix_fmt = pix_fmt
         self.protocol_opts = protocol_opts or []
-        self.auto_restart = auto_restart
-        self.max_restarts = max_restarts
 
         # 新增：客户端队列实例（用于直接写入队列）
         self.client_queues = client_queues
@@ -54,7 +52,6 @@ class FFmpegDecoder:
         self._stop_event = threading.Event()
         self._stderr_thread: Optional[threading.Thread] = None
         self._reader_thread: Optional[threading.Thread] = None
-        self.restart_count = 0
         self.lock = threading.Lock()
 
         # metrics
@@ -108,7 +105,6 @@ class FFmpegDecoder:
                 self._reader_thread = threading.Thread(target=self._windows_reader_loop, daemon=True, name=f"reader-{self.client_id}")
                 self._reader_thread.start()
 
-            self.restart_count = 0
             self.logger.debug("decoder start complete")
     def stop(self, wait: float = 2.0):
         with self.lock:
@@ -184,11 +180,8 @@ class FFmpegDecoder:
         try:
             chunk = self.proc.stdout.read(CHUNK_READ)
             if not chunk:
-                # 只有启用 auto_restart 时才尝试重启，避免刷屏日志
-                if self.auto_restart:
-                    self._try_restart()
-                else:
-                    self.logger.debug("stream ended, auto_restart disabled")
+                # Stream ended - no auto-restart, managed by StreamHealthMonitor
+                self.logger.debug("stream ended")
                 return
             self.buffer.extend(chunk)
             self._process_frames()
@@ -196,21 +189,6 @@ class FFmpegDecoder:
             pass
         except Exception:
             self.logger.exception("on_stdout_ready error")
-
-    def _try_restart(self):
-        if not self.auto_restart or self.restart_count >= self.max_restarts:
-            self.logger.debug("stream ended or crashed, not restarting (auto_restart=%s, restart_count=%s)",
-                            self.auto_restart, self.restart_count)
-            return
-        self.restart_count += 1
-        self.logger.info("attempting restart %s/%s", self.restart_count, self.max_restarts)
-        self.stop(wait=1.0)
-        time.sleep(1)
-        # 检查是否在等待期间被外部stop
-        if self._stop_event.is_set():
-            self.logger.info("restart cancelled: decoder was stopped")
-            return
-        self.start()
 
     def _should_drop_frame(self, pending_count: int, queue_capacity: int) -> bool:
         """
