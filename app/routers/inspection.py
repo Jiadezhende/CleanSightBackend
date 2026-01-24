@@ -80,26 +80,54 @@ async def start_rtsp_stream(config: RTSPStreamConfig):
 @router.post("/stop_rtsp_stream")
 async def stop_rtsp_stream(client_id: str = Query(..., description="客户端ID")):
     """
-    停止 RTSP 流捕获。
-    
+    停止 RTSP 流捕获（尽力清理模式）。
+
+    即使解码器已死，也会尝试清理相关资源。
+
     POST /inspection/stop_rtsp_stream?client_id=xxx
     """
-    if not stream_service.has_stream(client_id):
-        raise HTTPException(status_code=404, detail=f"未找到 RTSP 流 for {client_id}")
-    stream_service.stop_stream(client_id)
-    ai.remove_client(client_id)
-    return {"status": "success", "message": f"RTSP 流捕获已停止 for {client_id}"}
+    from app.services.stream.cleanup import cleanup_service
+
+    # 尽力清理（永不失败）
+    if cleanup_service is None:
+        # 降级：使用旧方法
+        if stream_service.has_stream(client_id):
+            stream_service.stop_stream(client_id)
+        ai.remove_client(client_id)
+        return {"status": "success", "message": f"RTSP 流捕获已停止 for {client_id}"}
+
+    result = cleanup_service.cleanup_client(client_id, reason="api_stop")
+
+    return {
+        "status": "success",
+        "message": f"RTSP 流捕获已停止 for {client_id}",
+        "cleanup_details": result
+    }
 
 
 @router.post("/stop_stream")
 async def stop_stream(client_id: str):
     """
-    通用流停止接口，同时支持 RTMP 和 RTSP。
-    
+    通用流停止接口（尽力清理模式），同时支持 RTMP 和 RTSP。
+
+    即使解码器已死，也会尝试清理相关资源。
+
     POST /inspection/stop_stream?client_id=xxx
     """
-    if not stream_service.has_stream(client_id):
-        raise HTTPException(status_code=404, detail=f"未找到流 for {client_id}")
-    stream_service.stop_stream(client_id)
-    ai.remove_client(client_id)
-    return {"status": "success", "message": f"流捕获已停止 for {client_id}"}
+    from app.services.stream.cleanup import cleanup_service
+
+    # 尽力清理（永不失败）
+    if cleanup_service is None:
+        # 降级：使用旧方法
+        if stream_service.has_stream(client_id):
+            stream_service.stop_stream(client_id)
+        ai.remove_client(client_id)
+        return {"status": "success", "message": f"流捕获已停止 for {client_id}"}
+
+    result = cleanup_service.cleanup_client(client_id, reason="api_stop")
+
+    return {
+        "status": "success",
+        "message": f"流捕获已停止 for {client_id}",
+        "cleanup_details": result
+    }

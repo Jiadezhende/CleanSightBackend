@@ -6,7 +6,7 @@ import os
 import threading
 import traceback
 import selectors
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 import logging
 
 from .decoder import FFmpegDecoder
@@ -41,10 +41,27 @@ class StreamService:
             self._selector_thread = threading.Thread(target=self._selector_loop, daemon=True, name="stream_service_selector")
             self._selector_thread.start()
 
+        # 健康监控（懒加载）
+        self.health_monitor = None
+        self.cleanup_service = None
+
     def start_stream(self, client_id: str, stream_url: str, fps: int = 30, protocol: str = 'RTMP'):
+        # 第一次启动流时，启动健康监控（懒加载）
+        self._ensure_health_monitor()
+
         with self.lock:
+            # 检查是否已有解码器
             if client_id in self.decoders:
-                raise RuntimeError(f"stream {client_id} already started")
+                existing = self.decoders[client_id]
+
+                # 如果解码器已死，先清理
+                if not existing.is_alive():
+                    logger.warning(f"Removing dead decoder for {client_id} before restart")
+                    self._cleanup_dead_decoder_unsafe(client_id)
+                else:
+                    # 解码器还活着，不能重复启动
+                    raise RuntimeError(f"stream {client_id} already started")
+
             logger.info("start_stream client=%s protocol=%s url=%s", client_id, protocol, stream_url)
 
             # 创建或获取 ClientQueues（通过 ClientManager）
@@ -111,10 +128,164 @@ class StreamService:
 
             logger.info("stream stopped client=%s", client_id)
 
+    def _cleanup_dead_decoder_unsafe(self, client_id: str):
+        """内部清理方法（必须持有锁）
+
+        用于清理已死亡的解码器进程，支持重连场景。
+
+        注意：此方法必须在持有self.lock的情况下调用。
+
+        Args:
+            client_id: 客户端ID
+        """
+        dec = self.decoders.pop(client_id, None)
+        if dec and self.sel is not None and dec.proc and dec.proc.stdout:
+            try:
+                self.sel.unregister(dec.proc.stdout.fileno())
+            except Exception:
+                pass
+        self.metrics.pop(client_id, None)
+        logger.info(f"Dead decoder cleaned up: {client_id}")
+
     def has_stream(self, client_id: str) -> bool:
         with self.lock:
             dec = self.decoders.get(client_id)
             return dec is not None and dec.is_alive()
+
+    def get_stream_info(self, client_id: str) -> Optional[Dict[str, Any]]:
+        """获取流配置信息（用于重连）
+
+        Returns:
+            流配置字典，包含url, fps, protocol，如果不存在返回None
+        """
+        with self.lock:
+            dec = self.decoders.get(client_id)
+            if not dec:
+                return None
+
+            # 判断协议类型
+            protocol = 'RTMP'
+            if dec.protocol_opts and any('rtsp' in str(opt).lower() for opt in dec.protocol_opts):
+                protocol = 'RTSP'
+
+            return {
+                'url': dec.stream_url,
+                'fps': dec.fps,
+                'protocol': protocol
+            }
+
+    def restart_stream(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
+        """重启流（用于自动重连）
+
+        与start_stream的区别：
+        - 不创建新的ClientQueues（保留现有队列）
+        - 只重启FFmpegDecoder
+
+        Args:
+            client_id: 客户端ID
+            stream_url: 流URL
+            fps: 帧率
+            protocol: 协议（RTSP/RTMP）
+
+        Returns:
+            True表示重启成功，False表示失败
+        """
+        with self.lock:
+            # 1. 停止旧的decoder（如果存在）
+            old_dec = self.decoders.get(client_id)
+            if old_dec and old_dec.is_alive():
+                try:
+                    old_dec.stop()
+                except Exception as e:
+                    logger.error(f"Failed to stop old decoder for {client_id}: {e}")
+
+            # 2. 清理旧记录
+            self._cleanup_dead_decoder_unsafe(client_id)
+
+            # 3. 获取现有的ClientQueues（不创建新的）
+            client_queues = None
+            if client_manager is not None and client_manager.has_client(client_id):
+                client_queues = client_manager.get_client(client_id)
+            else:
+                logger.error(f"Cannot restart stream: no ClientQueues for {client_id}")
+                return False
+
+            # 4. 创建新的decoder
+            try:
+                protocol_opts = []
+                if protocol == 'RTSP':
+                    protocol_opts = [
+                        "-rtsp_transport", "udp",
+                        "-fflags", "nobuffer",
+                        "-flags", "low_delay",
+                        "-analyzeduration", "1000000",
+                        "-probesize", "1000000",
+                    ]
+
+                dec = FFmpegDecoder(
+                    manager=self,
+                    client_id=client_id,
+                    stream_url=stream_url,
+                    fps=fps,
+                    protocol_opts=protocol_opts,
+                    client_queues=client_queues
+                )
+
+                self.decoders[client_id] = dec
+                dec.start()
+
+                if self.sel is not None and dec.proc and dec.proc.stdout:
+                    try:
+                        self.sel.register(dec.proc.stdout.fileno(), selectors.EVENT_READ, data=dec)
+                    except Exception:
+                        pass
+
+                logger.info(f"Stream restarted for {client_id}")
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to restart stream for {client_id}: {e}")
+                return False
+
+    def _ensure_health_monitor(self):
+        """确保健康监控已启动（懒加载）
+
+        第一次启动流时初始化并启动健康监控。
+        """
+        if self.health_monitor is not None:
+            return  # 已启动
+
+        try:
+            from app.services.stream.health_monitor import StreamHealthMonitor
+            from app.services.stream.cleanup import CleanupService, init_cleanup_service
+            from app.services import ai  # AI服务模块
+
+            # 初始化清理服务（使用ai.manager作为InferenceManager实例）
+            init_cleanup_service(
+                stream_service=self,
+                client_manager=client_manager,
+                inference_manager=ai.manager
+            )
+
+            # 导入全局cleanup_service
+            from app.services.stream.cleanup import cleanup_service
+            self.cleanup_service = cleanup_service
+
+            # 初始化健康监控（传入stream_service以支持自动重连）
+            self.health_monitor = StreamHealthMonitor(
+                client_manager=client_manager,
+                cleanup_service=self.cleanup_service,
+                stream_service=self,
+                check_interval=3.0
+            )
+
+            # 启动监控线程
+            self.health_monitor.start()
+            logger.info("[StreamService] Health monitor started")
+
+        except Exception as e:
+            logger.error(f"[StreamService] Failed to start health monitor: {e}", exc_info=True)
+            # 失败不影响流服务，只是没有自动清理功能
 
     def get_pending_count(self, client_id: str) -> int:
         """
@@ -209,6 +380,14 @@ class StreamService:
         停止所有流，清理所有客户端资源
         """
         logger.info("Shutting down StreamService...")
+
+        # 停止健康监控
+        if self.health_monitor:
+            try:
+                self.health_monitor.stop()
+                logger.info("Health monitor stopped")
+            except Exception as e:
+                logger.error(f"Error stopping health monitor: {e}")
 
         # 停止所有流
         with self.lock:
