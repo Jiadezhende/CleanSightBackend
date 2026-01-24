@@ -95,7 +95,8 @@ class StreamService:
                 stream_url=stream_url,
                 fps=fps,
                 protocol_opts=protocol_opts,
-                client_queues=client_queues  # 传入 ClientQueues
+                client_queues=client_queues,  # 传入 ClientQueues
+                auto_restart=False  # 禁用内置重启，由 StreamHealthMonitor 统一管理
             )
             self.decoders[client_id] = dec
             self.metrics[client_id] = {"frames_received": 0, "frames_dropped": 0, "restarts": 0}
@@ -228,7 +229,8 @@ class StreamService:
                     stream_url=stream_url,
                     fps=fps,
                     protocol_opts=protocol_opts,
-                    client_queues=client_queues
+                    client_queues=client_queues,
+                    auto_restart=False  # 禁用内置重启，由 StreamHealthMonitor 统一管理
                 )
 
                 self.decoders[client_id] = dec

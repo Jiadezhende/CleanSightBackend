@@ -141,8 +141,10 @@ class StreamHealthMonitor:
             # 2. 正常监控逻辑
             last_frame_time = cq.latest_raw_timestamp
 
-            # 新客户端（还没有帧），跳过检查
+            # 防御性检查：如果 timestamp 异常为 0，跳过
+            # 注：latest_raw_timestamp 现在初始化为创建时间，所以正常情况下不会为 0
             if last_frame_time == 0:
+                logger.warning(f"[StreamHealthMonitor] WARN: {client_id} has zero timestamp (unexpected)")
                 return
 
             # 计算距离最后一帧的时间

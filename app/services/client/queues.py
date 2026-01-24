@@ -59,7 +59,7 @@ class ClientQueues:
 
         # 最新原始帧缓存（用于异步聚合可视化）
         self.latest_raw_frame: Optional[np.ndarray] = None
-        self.latest_raw_timestamp: float = 0.0
+        self.latest_raw_timestamp: float = time.time()  # 初始化为创建时间，支持启动失败检测
 
         # CA-ReadyQueue: 等待推理的原始帧（设置最大长度限制防止溢出）
         self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
