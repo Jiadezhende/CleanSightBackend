@@ -201,6 +201,10 @@ class FFmpegDecoder:
         self.logger.info("attempting restart %s/%s", self.restart_count, self.max_restarts)
         self.stop(wait=1.0)
         time.sleep(1)
+        # 检查是否在等待期间被外部stop
+        if self._stop_event.is_set():
+            self.logger.info("restart cancelled: decoder was stopped")
+            return
         self.start()
 
     def _should_drop_frame(self, pending_count: int, queue_capacity: int) -> bool:
