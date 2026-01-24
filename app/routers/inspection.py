@@ -1,7 +1,7 @@
 from fastapi import APIRouter, WebSocket, HTTPException, Query
 from pydantic import BaseModel
 from app.services import ai
-from app.services.stream_service import stream_service
+from app.services.stream import stream_service
 import threading
 import cv2
 import time

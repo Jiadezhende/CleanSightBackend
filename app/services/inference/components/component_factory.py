@@ -6,7 +6,7 @@
 - 可视化器（BaseVisualizer）
 
 使用方式：
-    from app.services.inference.component_factory import ComponentFactory
+    from app.services.inference.components.component_factory import ComponentFactory
 
     factory = ComponentFactory(config)
     models = factory.create_models_for_stage("LEAK")

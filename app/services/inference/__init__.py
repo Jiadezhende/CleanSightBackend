@@ -1,37 +1,68 @@
-"""推理服务模块。
+"""
+推理服务模块
 
-提供多客户端、多模型并行推理框架，支持：
-- Stage-Aware 调度
-- CUDA Stream 并行
-- 批处理优化
-- ClientManager 集成
-
-主要组件：
-- StageAwareDispatcher: 按阶段分组调度
-- MultiModelWorkerPool: 多模型并行推理
-- ModelWorkerService: 统一服务管理
+提供统一的推理、时序分析、可视化和持久化接口
 """
 
-from app.services.inference.dispatcher import StageAwareDispatcher
-from app.services.inference.models import InferenceRequest, InferenceResult
-from app.services.inference.service import ModelWorkerService
-from app.services.inference.worker_pool import MultiModelWorkerPool
-
-# 便捷工厂函数
-from app.services.inference.factory import (
-    create_model_worker_service_example,
+# 核心模块
+from .core import (
+    InferenceManager,
+    ModelWorkerService,
+    StageAwareDispatcher,
     create_model_worker_service_from_manager,
 )
 
+# Worker 池
+from .workers import (
+    MultiModelWorkerPool,
+    TemporalWorkerPool,
+    VisualizationWorkerPool,
+    WriteBackWorkerPool,
+)
+
+# 组件
+from .components import (
+    DefaultVisualizer,
+    TemporalAnalyzer,
+    DefaultTemporalAnalyzer,
+    ComponentFactory,
+)
+
+# 数据模型
+from .models import (
+    InferenceResult,
+    TemporalAnalysisResult,
+    TemporalAnalysisPackage,
+    WriteBackData,
+    FrontendMessage,
+)
+
+# 配置加载器
+from .config_loader import load_stage_config, StageConfig
+
 __all__ = [
-    # 核心类
-    "StageAwareDispatcher",
-    "MultiModelWorkerPool",
+    # 核心
+    "InferenceManager",
     "ModelWorkerService",
-    # 数据模型
-    "InferenceRequest",
-    "InferenceResult",
-    # 工厂函数
+    "StageAwareDispatcher",
     "create_model_worker_service_from_manager",
-    "create_model_worker_service_example",
+    # Worker 池
+    "MultiModelWorkerPool",
+    "TemporalWorkerPool",
+    "VisualizationWorkerPool",
+    "WriteBackWorkerPool",
+    # 组件
+    "DefaultVisualizer",
+    "TemporalAnalyzer",
+    "DefaultTemporalAnalyzer",
+    "ComponentFactory",
+    # 数据模型
+    "InferenceResult",
+    "TemporalAnalysisResult",
+    "TemporalAnalysisPackage",
+    "WriteBackData",
+    "FrontendMessage",
+    # 配置
+    "load_stage_config",
+    "StageConfig",
 ]

@@ -19,7 +19,7 @@ from app.services.inference.models import (
     TemporalAnalysisPackage,
     TemporalAnalysisResult,
 )
-from app.services.inference.temporal_analyzer import TemporalAnalyzer
+from app.services.inference.components.temporal_analyzer import TemporalAnalyzer
 
 
 class TemporalWorker:

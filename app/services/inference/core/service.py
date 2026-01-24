@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import numpy as np
 
 from app.models.frame import FrameData
-from app.services.inference.dispatcher import StageAwareDispatcher
+from app.services.inference.core.dispatcher import StageAwareDispatcher
 from app.services.inference.models import InferenceResult
-from app.services.inference.worker_pool import MultiModelWorkerPool
+from app.services.inference.workers.base import MultiModelWorkerPool
 
 if TYPE_CHECKING:
     from app.services.client import ClientQueues, ClientState, ClientManager

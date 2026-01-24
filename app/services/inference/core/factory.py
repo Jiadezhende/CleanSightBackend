@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from app.services.inference.service import ModelWorkerService
+from app.services.inference.core.service import ModelWorkerService
 
 
 def create_model_worker_service_from_manager(
