@@ -15,10 +15,14 @@ import numpy as np
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.inference.core.manager import InferenceManager
+from app.settings import settings
 
 # ========== 模块级单例（兼容旧代码） ==========
 
-manager = InferenceManager(use_async_pipeline=True)
+manager = InferenceManager(
+    use_async_pipeline=True,
+    ca_segment_seconds=settings.ca_segment_seconds,
+)
 
 
 def start():

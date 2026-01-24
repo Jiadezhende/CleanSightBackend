@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # 如果为空，则默认使用当前服务的 /api/file_path_insert
     file_path_insert_url: str = ""
 
+    # 推理与视频配置
+    inference_fps: int = 20  # 推理采样频率（同时控制可视化和视频输出帧率）
+    ca_segment_seconds: int = 10  # 视频段时长（秒）
+
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"

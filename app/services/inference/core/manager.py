@@ -687,18 +687,26 @@ class InferenceManager:
         try:
             start_ts = raw_frames_data[0].timestamp
 
-            # 生成原始视频段
+            # 生成原始视频段（使用原始视频源帧率30fps）
             raw_segment_path = hls_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
             height, width = raw_frames_data[0].frame.shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore
-            out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, 30.0, (width, height))
+            raw_fps = 30.0  # 原始视频保持30fps
+            out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, raw_fps, (width, height))
             for fd in raw_frames_data:
                 out_raw.write(fd.frame)
             out_raw.release()
 
-            # 更新播放列表
+            # 更新播放列表（使用实际时间戳计算时长，而非帧数/fps）
             raw_playlist_path = hls_dir / "raw_playlist.m3u8"
-            segment_duration = len(raw_frames_data) / 30.0
+            # 使用第一帧和最后一帧的实际时间戳差值
+            if len(raw_frames_data) > 1:
+                actual_duration = raw_frames_data[-1].timestamp - raw_frames_data[0].timestamp
+                # 加上最后一帧的持续时间（1/fps）
+                segment_duration = actual_duration + (1.0 / raw_fps)
+            else:
+                segment_duration = 1.0 / raw_fps
+
             if not raw_playlist_path.exists():
                 with raw_playlist_path.open("w") as f:
                     f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
@@ -706,7 +714,7 @@ class InferenceManager:
                 f.write(f"#EXTINF:{segment_duration:.3f},\n")
                 f.write(f"{raw_segment_path.name}\n")
 
-            print(f"[Persistent worker] Raw segment persisted: {client_id}, frames={len(raw_frames_data)}")
+            print(f"[Persistent worker] Raw segment persisted: {client_id}, frames={len(raw_frames_data)}, actual_duration={segment_duration:.3f}s, fps={raw_fps}")
 
         except Exception as e:
             print(f"_do_persist_raw_segment error: {e}")
@@ -728,12 +736,13 @@ class InferenceManager:
         try:
             start_ts = processed_frames_data[0].timestamp
 
-            # 生成处理后视频段
+            # 生成处理后视频段（使用推理帧率）
             segment_path = hls_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
             height, width = processed_frames_data[0].frame.shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore
+            processed_fps = float(settings.inference_fps)
             out_processed = cv2.VideoWriter(
-                str(segment_path), fourcc, 30.0, (width, height)
+                str(segment_path), fourcc, processed_fps, (width, height)
             )
             for fd in processed_frames_data:
                 out_processed.write(fd.frame)
@@ -755,9 +764,16 @@ class InferenceManager:
             with keypoints_path.open("w", encoding="utf-8") as f:
                 json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
 
-            # 更新播放列表
+            # 更新播放列表（使用实际时间戳计算时长，而非帧数/fps）
             playlist_path = hls_dir / "processed_playlist.m3u8"
-            segment_duration = len(processed_frames_data) / 30.0
+            # 使用第一帧和最后一帧的实际时间戳差值
+            if len(processed_frames_data) > 1:
+                actual_duration = processed_frames_data[-1].timestamp - processed_frames_data[0].timestamp
+                # 加上最后一帧的持续时间（1/fps）
+                segment_duration = actual_duration + (1.0 / processed_fps)
+            else:
+                segment_duration = 1.0 / processed_fps
+
             if not playlist_path.exists():
                 with playlist_path.open("w") as f:
                     f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
@@ -765,7 +781,7 @@ class InferenceManager:
                 f.write(f"#EXTINF:{segment_duration:.3f},\n")
                 f.write(f"{segment_path.name}\n")
 
-            print(f"[Persistent worker] Processed segment persisted: {client_id}, frames={len(processed_frames_data)}")
+            print(f"[Persistent worker] Processed segment persisted: {client_id}, frames={len(processed_frames_data)}, actual_duration={segment_duration:.3f}s, fps={processed_fps}")
 
         except Exception as e:
             print(f"_do_persist_processed_segment error: {e}")

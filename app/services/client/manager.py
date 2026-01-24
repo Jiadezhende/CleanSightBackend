@@ -12,6 +12,7 @@ from typing import Dict, Optional
 import logging
 
 from .queues import ClientQueues
+from app.settings import settings
 
 logger = logging.getLogger("app.services.client.manager")
 
@@ -48,10 +49,11 @@ class ClientManager:
         self._clients: Dict[str, ClientQueues] = {}
         self._clients_lock = threading.Lock()
 
-        # 默认配置参数
+        # 默认配置参数（从 settings 加载）
         self._default_rt_maxlen = 30  # 实时队列长度（约1秒@30fps）
         self._default_ca_segment_len = 300  # CA段长度（约10秒@30fps）
         self._default_ca_maxlen = 2700  # CA队列最大长度（约90秒@30fps）
+        self._default_inference_fps = settings.inference_fps  # 推理采样频率
 
         logger.info("ClientManager 单例已初始化")
 
@@ -79,13 +81,15 @@ class ClientManager:
                 rt_maxlen = kwargs.get('rt_maxlen', self._default_rt_maxlen)
                 ca_segment_len = kwargs.get('ca_segment_len', self._default_ca_segment_len)
                 ca_maxlen = kwargs.get('ca_maxlen', self._default_ca_maxlen)
+                inference_fps = kwargs.get('inference_fps', self._default_inference_fps)
 
                 # 创建新的 ClientQueues 实例
                 client_queues = ClientQueues(
                     client_id=client_id,
                     rt_maxlen=rt_maxlen,
                     ca_segment_len=ca_segment_len,
-                    ca_maxlen=ca_maxlen
+                    ca_maxlen=ca_maxlen,
+                    inference_fps=inference_fps
                 )
 
                 # 设置可选参数
@@ -93,8 +97,6 @@ class ClientManager:
                     client_queues.resize_width = kwargs['resize_width']
                 if 'resize_height' in kwargs:
                     client_queues.resize_height = kwargs['resize_height']
-                if 'inference_fps' in kwargs:
-                    client_queues.inference_fps = kwargs['inference_fps']
 
                 self._clients[client_id] = client_queues
                 logger.info(f"创建新客户端队列: {client_id}")
