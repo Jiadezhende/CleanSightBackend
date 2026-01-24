@@ -184,7 +184,11 @@ class FFmpegDecoder:
         try:
             chunk = self.proc.stdout.read(CHUNK_READ)
             if not chunk:
-                self._try_restart()
+                # 只有启用 auto_restart 时才尝试重启，避免刷屏日志
+                if self.auto_restart:
+                    self._try_restart()
+                else:
+                    self.logger.debug("stream ended, auto_restart disabled")
                 return
             self.buffer.extend(chunk)
             self._process_frames()
@@ -195,7 +199,8 @@ class FFmpegDecoder:
 
     def _try_restart(self):
         if not self.auto_restart or self.restart_count >= self.max_restarts:
-            self.logger.warning("stream ended or crashed, not restarting")
+            self.logger.debug("stream ended or crashed, not restarting (auto_restart=%s, restart_count=%s)",
+                            self.auto_restart, self.restart_count)
             return
         self.restart_count += 1
         self.logger.info("attempting restart %s/%s", self.restart_count, self.max_restarts)
