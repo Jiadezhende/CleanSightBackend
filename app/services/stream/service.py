@@ -161,6 +161,42 @@ class StreamService:
                         client_id, e, exc_info=True)
             return 0
 
+    def _reregister_decoder_selector(self, client_id: str):
+        """重新注册decoder的selector（用于decoder重启后）
+
+        当FFmpegDecoder重启时，旧的ffmpeg进程被终止，新的进程被启动。
+        新进程有新的stdout文件描述符，需要重新注册到selector中，
+        否则selector无法读取新进程的数据，导致推理管道停止。
+
+        Args:
+            client_id: 客户端ID
+        """
+        if self.sel is None:  # Windows系统或selector未启用
+            return
+
+        with self.lock:
+            dec = self.decoders.get(client_id)
+            if dec is None or dec.proc is None or dec.proc.stdout is None:
+                return
+
+            try:
+                # 尝试注销旧的fd（可能已经失效）
+                try:
+                    old_fd = dec.proc.stdout.fileno()
+                    self.sel.unregister(old_fd)
+                except (KeyError, ValueError, OSError):
+                    # fd已经不在selector中或已失效，忽略
+                    pass
+
+                # 注册新的fd
+                new_fd = dec.proc.stdout.fileno()
+                self.sel.register(new_fd, selectors.EVENT_READ, data=dec)
+                logger.info("reregistered decoder selector client=%s fd=%s", client_id, new_fd)
+
+            except Exception as e:
+                logger.error("failed to reregister decoder selector client=%s: %s",
+                            client_id, e, exc_info=True)
+
     def run_once(self, timeout: float = 0.05):
         if self.sel is None:
             return

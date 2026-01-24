@@ -113,6 +113,18 @@ class FFmpegDecoder:
     def stop(self, wait: float = 2.0):
         with self.lock:
             self._stop_event.set()
+
+            # 新增：在关闭进程前注销selector
+            # 这样可以避免selector尝试读取已关闭的fd
+            if self.manager and hasattr(self.manager, 'sel') and self.manager.sel is not None:
+                if self.proc and self.proc.stdout:
+                    try:
+                        fd = self.proc.stdout.fileno()
+                        self.manager.sel.unregister(fd)
+                        self.logger.debug("unregistered selector fd=%s", fd)
+                    except (KeyError, ValueError, OSError):
+                        pass  # fd已经注销或失效
+
             if self.proc is None:
                 return
             try:
@@ -202,6 +214,14 @@ class FFmpegDecoder:
         self.stop(wait=1.0)
         time.sleep(1)
         self.start()
+
+        # 新增：通知manager重新注册selector
+        # 这对于POSIX系统至关重要，因为新的ffmpeg进程有新的stdout fd
+        if hasattr(self.manager, '_reregister_decoder_selector'):
+            try:
+                self.manager._reregister_decoder_selector(self.client_id)
+            except Exception as e:
+                self.logger.error("failed to reregister selector after restart: %s", e)
 
     def _should_drop_frame(self, pending_count: int, queue_capacity: int) -> bool:
         """

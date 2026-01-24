@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     inference_fps: int = 20  # 推理采样频率（同时控制可视化和视频输出帧率）
     ca_segment_seconds: int = 10  # 视频段时长（秒）
 
+    # 调试配置
+    show_debug_boxes: bool = False  # 是否在可视化中显示调试方框（用于确认模型加载）
+
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
