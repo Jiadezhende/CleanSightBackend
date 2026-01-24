@@ -3,6 +3,7 @@
 """
 
 import os
+import time
 import threading
 import traceback
 import selectors
@@ -10,6 +11,7 @@ from typing import Optional, Dict
 import logging
 
 from .decoder import FFmpegDecoder
+from app.settings import settings
 
 logger = logging.getLogger("app.services.stream.service")
 
@@ -116,6 +118,38 @@ class StreamService:
             dec = self.decoders.get(client_id)
             return dec is not None and dec.is_alive()
 
+    def check_inactive_streams(self):
+        """检查并清理长时间无活动的流。
+
+        遍历所有 decoder，如果超过配置的超时时间没有接收到新帧，
+        则自动调用 stop_stream 清理资源。
+        """
+        now = time.time()
+        timeout = settings.stream_inactivity_timeout
+        inactive_clients = []
+
+        # 收集超时的客户端
+        with self.lock:
+            for client_id, dec in self.decoders.items():
+                if not hasattr(dec, 'last_frame_time'):
+                    continue  # 兼容旧版本
+
+                inactive_duration = now - dec.last_frame_time
+                if inactive_duration > timeout:
+                    inactive_clients.append((client_id, inactive_duration))
+                    logger.warning(
+                        "client=%s inactive for %.1fs (timeout=%ds), will stop stream",
+                        client_id, inactive_duration, timeout
+                    )
+
+        # 清理超时的流（在锁外操作，避免死锁）
+        for client_id, duration in inactive_clients:
+            try:
+                logger.info("stopping inactive stream client=%s (inactive=%.1fs)", client_id, duration)
+                self.stop_stream(client_id)
+            except Exception as e:
+                logger.error("failed to stop inactive stream client=%s: %s", client_id, e)
+
     def get_pending_count(self, client_id: str) -> int:
         """
         获取指定客户端的 CA-Ready-Queue 深度（用于背压控制）
@@ -213,10 +247,22 @@ class StreamService:
 
         This ensures on POSIX systems we actually consume ffmpeg stdout even
         if no external loop is calling `run_once`.
+
+        同时定期检查无活动的流并自动清理。
         """
+        last_check_time = time.time()
+        check_interval = 30  # 每30秒检查一次
+
         while not self._stop_event.is_set():
             try:
                 self.run_once(timeout=timeout)
+
+                # 定期检查无活动的流
+                now = time.time()
+                if now - last_check_time >= check_interval:
+                    self.check_inactive_streams()
+                    last_check_time = now
+
             except Exception:
                 traceback.print_exc()
         # cleanup on exit

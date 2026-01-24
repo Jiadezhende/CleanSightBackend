@@ -13,6 +13,7 @@ import cv2
 
 from app.services import ai
 from app.models.frame import FrameData
+from app.settings import settings
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -64,6 +65,10 @@ class FFmpegDecoder:
         self.frames_written_to_ready = 0  # 新增：写入 CA-Ready-Queue 的帧数
         self.logger = logging.getLogger(f"app.services.stream.decoder.FFmpegDecoder.{self.client_id}")
 
+        # 活动追踪（用于超时清理）
+        self.last_frame_time = time.time()  # 最后一次成功接收帧的时间
+        self.last_restart_time = 0  # 最后一次尝试重启的时间
+
     def _build_cmd(self):
         cmd = [FFMPEG_BIN]
         cmd += self.protocol_opts
@@ -109,6 +114,7 @@ class FFmpegDecoder:
                 self._reader_thread.start()
 
             self.restart_count = 0
+            self.last_frame_time = time.time()  # 重置最后帧时间
             self.logger.debug("decoder start complete")
     def stop(self, wait: float = 2.0):
         with self.lock:
@@ -209,10 +215,22 @@ class FFmpegDecoder:
         if not self.auto_restart or self.restart_count >= self.max_restarts:
             self.logger.warning("stream ended or crashed, not restarting")
             return
+
+        # 限制重启频率：避免频繁重试
+        now = time.time()
+        time_since_last_restart = now - self.last_restart_time
+        restart_interval = settings.stream_restart_interval
+
+        if time_since_last_restart < restart_interval:
+            self.logger.info("skipping restart (last restart was %.1fs ago, interval=%ds)",
+                           time_since_last_restart, restart_interval)
+            return
+
         self.restart_count += 1
+        self.last_restart_time = now
         self.logger.info("attempting restart %s/%s", self.restart_count, self.max_restarts)
         self.stop(wait=1.0)
-        time.sleep(1)
+        time.sleep(3)  # 等待3秒再重启
         self.start()
 
         # 新增：通知manager重新注册selector
@@ -294,6 +312,7 @@ class FFmpegDecoder:
                     ai.submit_frame(self.client_id, std)
 
                 self.frames_received += 1
+                self.last_frame_time = time.time()  # 更新最后帧时间
 
                 # log every N frames to observe liveness
                 if self.frames_received % 300 == 0:

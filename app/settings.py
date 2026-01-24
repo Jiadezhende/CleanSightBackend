@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # 调试配置
     show_debug_boxes: bool = False  # 是否在可视化中显示调试方框（用于确认模型加载）
 
+    # 流管理配置
+    stream_restart_interval: int = 30  # 推流断开后重启间隔（秒）
+    stream_inactivity_timeout: int = 180  # 无活动自动清理超时（秒，默认3分钟）
+
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
