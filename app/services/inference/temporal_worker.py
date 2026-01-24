@@ -12,7 +12,7 @@ import threading
 from queue import Empty, Queue
 from typing import Any, Dict
 
-from app.services.client_manager import client_manager
+from app.services.client import client_manager
 from app.services.inference.models import (
     FrontendMessage,
     InferenceResult,

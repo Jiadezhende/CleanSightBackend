@@ -23,7 +23,7 @@ def create_model_worker_service_from_manager(
 
     使用方法：
     ```python
-    from app.services.client_manager import client_manager
+    from app.services.client import client_manager
     from app.services.inference import create_model_worker_service_from_manager
     import threading
     import time

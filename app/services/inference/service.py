@@ -23,11 +23,10 @@ from app.services.inference.models import InferenceResult
 from app.services.inference.worker_pool import MultiModelWorkerPool
 
 if TYPE_CHECKING:
-    from app.services.client import ClientQueues, ClientState
-    from app.services.client_manager import ClientManager
+    from app.services.client import ClientQueues, ClientState, ClientManager
 
 # 避免循环导入，延迟导入
-from app.services.client_manager import client_manager
+from app.services.client import client_manager
 
 
 class ModelWorkerService:

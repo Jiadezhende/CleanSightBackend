@@ -18,7 +18,7 @@ from app.models.frame import FrameData
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
-    from app.services.client_manager import client_manager
+    from app.services.client import client_manager
 except ImportError:
     client_manager = None  # 兼容旧版本
 

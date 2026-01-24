@@ -27,8 +27,7 @@ import numpy as np
 from app.database import engine
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
-from app.services.client import ClientQueues
-from app.services.client_manager import client_manager
+from app.services.client import ClientQueues, client_manager
 from app.services.inference.factory import create_model_worker_service_from_manager
 from app.services.inference.models import (
     InferenceResult,

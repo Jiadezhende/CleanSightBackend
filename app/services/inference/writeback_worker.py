@@ -10,7 +10,7 @@ import threading
 from queue import Empty, Queue
 
 from app.models.frame import FrameData
-from app.services.client_manager import client_manager
+from app.services.client import client_manager
 from app.services.inference.models import WriteBackData
 
 

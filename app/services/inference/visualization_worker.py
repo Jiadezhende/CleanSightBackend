@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from app.services.client_manager import client_manager
+from app.services.client import client_manager
 from app.services.inference.models import (
     TemporalAnalysisPackage,
     TemporalAnalysisResult,
