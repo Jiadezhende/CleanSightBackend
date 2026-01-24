@@ -23,14 +23,16 @@ class StageConfig:
 
     def __init__(self, stage_name: str, config_dict: Dict[str, Any]):
         self.stage_name = stage_name
-        self.models: List[Dict[str, Any]] = config_dict.get("models", [])
+        # 确保即使 models 为 None 也转换为空列表
+        self.models: List[Dict[str, Any]] = config_dict.get("models") or []
         self.temporal_analyzer: Optional[Dict[str, Any]] = config_dict.get(
             "temporal_analyzer"
         )
         self.visualizer: Optional[Dict[str, Any]] = config_dict.get("visualizer")
+        # 确保即使 alarm_triggers 为 None 也转换为空列表
         self.alarm_triggers: List[Dict[str, Any]] = config_dict.get(
-            "alarm_triggers", []
-        )
+            "alarm_triggers"
+        ) or []
 
     def __repr__(self):
         return f"StageConfig(stage={self.stage_name}, models={len(self.models)})"
@@ -75,21 +77,37 @@ class InferenceConfig:
 
 
 def _expand_env_vars(config: Any) -> Any:
-    """递归展开配置中的环境变量（${VAR_NAME} 格式）"""
+    """递归展开配置中的环境变量（${VAR_NAME} 格式）
+
+    支持以下格式：
+    - ${VAR_NAME}：直接替换为环境变量值
+    - ${VAR_NAME:default}：如果环境变量不存在，使用默认值
+    - ${VAR_NAME}/suffix：替换后可以拼接路径（支持多个变量）
+
+    示例：
+    - ${MODEL_PATH}/model.pt → /path/to/models/model.pt
+    - ${MODEL_PATH:./weights}/model.pt → ./weights/model.pt (如果MODEL_PATH不存在)
+    """
     if isinstance(config, dict):
         return {k: _expand_env_vars(v) for k, v in config.items()}
     elif isinstance(config, list):
         return [_expand_env_vars(item) for item in config]
     elif isinstance(config, str):
-        # 支持 ${VAR_NAME} 和 ${VAR_NAME:default_value} 格式
-        if config.startswith("${") and config.endswith("}"):
-            var_expr = config[2:-1]
+        # 使用正则表达式匹配所有 ${VAR_NAME} 或 ${VAR_NAME:default} 模式
+        import re
+        pattern = r'\$\{([^}]+)\}'
+
+        def replace_var(match):
+            var_expr = match.group(1)
             if ":" in var_expr:
                 var_name, default = var_expr.split(":", 1)
                 return os.environ.get(var_name, default)
             else:
-                return os.environ.get(var_expr, config)
-        return config
+                return os.environ.get(var_expr, match.group(0))
+
+        # 替换所有匹配的环境变量
+        result = re.sub(pattern, replace_var, config)
+        return result
     else:
         return config
 
@@ -146,7 +164,8 @@ def load_stage_config(config_path: Optional[str] = None) -> InferenceConfig:
 
 def _create_default_config() -> InferenceConfig:
     """创建默认配置（用于向后兼容）"""
-    from app.settings import settings
+    # 从环境变量获取模型路径，如果未设置则使用默认值
+    model_base_path = os.environ.get("CLEANSIGHT_MODEL_PATH", "./app/data")
 
     default_config = {
         "stages": {
@@ -154,27 +173,27 @@ def _create_default_config() -> InferenceConfig:
                 "models": [
                     {
                         "name": "bubble_detection",
-                        "class": "app.services.ai_models.bubble_task.BubbleDetectionTask",
+                        "class": "app.services.models.bubble.BubbleDetectionTask",
                         "params": {
-                            "model_path": settings.bubble_model_path,
-                            "conf_threshold": settings.bubble_conf_threshold,
-                            "iou_threshold": settings.bubble_iou_threshold,
+                            "model_path": f"{model_base_path}/bubble-best.pt",
+                            "conf_threshold": 0.5,
+                            "iou_threshold": 0.45,
                             "enabled": True,
                         },
                     },
                     {
                         "name": "bending_detection",
-                        "class": "app.services.ai_models.yolo_task.EndoscopeBendingDetectionTask",
+                        "class": "app.services.models.bending.EndoscopeBendingDetectionTask",
                         "params": {
-                            "model_path": settings.yolo_model_path,
-                            "conf_threshold": settings.yolo_conf_threshold,
-                            "iou_threshold": settings.yolo_iou_threshold,
+                            "model_path": f"{model_base_path}/bend-best.pt",
+                            "conf_threshold": 0.6,
+                            "iou_threshold": 0.45,
                             "enabled": True,
                         },
                     },
                 ],
                 "temporal_analyzer": {
-                    "class": "app.services.inference.temporal_analyzer.DefaultTemporalAnalyzer",
+                    "class": "app.services.inference.components.DefaultTemporalAnalyzer",
                     "config": {
                         "bubble": {"mode": "consecutive", "threshold": 3},
                         "bending": {
@@ -185,7 +204,7 @@ def _create_default_config() -> InferenceConfig:
                     },
                 },
                 "visualizer": {
-                    "class": "app.services.ai.DefaultVisualizer",
+                    "class": "app.services.inference.components.DefaultVisualizer",
                 },
                 "alarm_triggers": [
                     {
@@ -203,7 +222,7 @@ def _create_default_config() -> InferenceConfig:
             "CLEAN": {
                 "models": [],
                 "temporal_analyzer": {
-                    "class": "app.services.inference.temporal_analyzer.DefaultTemporalAnalyzer",
+                    "class": "app.services.inference.components.DefaultTemporalAnalyzer",
                     "config": {
                         "quality": {
                             "mode": "sliding_window",

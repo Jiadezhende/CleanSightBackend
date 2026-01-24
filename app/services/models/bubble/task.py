@@ -9,7 +9,7 @@ import numpy as np
 from typing import Dict, Any, List, Optional
 
 from app.services.infer_task import InferenceTask, InferenceResult
-from app.services.ai_models.bubble_detection import get_bubble_detector
+from app.services.models.bubble.detector import get_bubble_detector
 
 
 class BubbleDetectionTask(InferenceTask):
@@ -33,17 +33,13 @@ class BubbleDetectionTask(InferenceTask):
         """
         super().__init__(name="bubble_detection", enabled=enabled)
         
-        # 从配置读取默认值
+        # 使用默认值（通常从 stages_config.yaml 传入，这里作为后备）
         if model_path is None:
-            from app.settings import settings
-            # 尝试使用专门的气泡检测模型配置，否则使用通用 YOLO 配置
-            model_path = getattr(settings, 'bubble_model_path', settings.yolo_model_path)
-        
-        # 使用气泡检测的默认阈值
+            raise ValueError("model_path is required. Please configure it in stages_config.yaml")
         if conf_threshold is None:
-            conf_threshold = 0.25  # 气泡检测置信度阈值
+            conf_threshold = 0.5  # 默认值
         if iou_threshold is None:
-            iou_threshold = 0.45  # NMS IOU 阈值
+            iou_threshold = 0.45  # 默认值
         
         self.model_path = model_path
         self.conf_threshold = conf_threshold

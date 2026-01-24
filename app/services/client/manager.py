@@ -50,7 +50,7 @@ class ClientManager:
 
         # 默认配置参数
         self._default_rt_maxlen = 30  # 实时队列长度（约1秒@30fps）
-        self._default_ca_segment_len = 150  # CA段长度（约5秒@30fps）
+        self._default_ca_segment_len = 300  # CA段长度（约10秒@30fps）
         self._default_ca_maxlen = 2700  # CA队列最大长度（约90秒@30fps）
 
         logger.info("ClientManager 单例已初始化")

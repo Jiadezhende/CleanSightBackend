@@ -65,19 +65,6 @@ class Settings(BaseSettings):
     db_user: str = ""
     db_password: str = ""
 
-    # AI 模型配置（可通过 .env/.env.dev 覆盖）
-    yolo_model_path: str = "/opt/homebrew/runs/detect/train5/weights/best.pt"
-    yolo_conf_threshold: float = 0.8
-    yolo_iou_threshold: float = 0.45
-
-    bubble_model_path: str = "/Users/hmj/projects/CleanSightBackend/runs/bubble_detect/best.pt"
-    bubble_conf_threshold: float = 0.8
-    bubble_iou_threshold: float = 0.45
-
-    # 推理服务配置
-    alarm_batch_interval: int = 30
-    alarm_cooldown_seconds: int = 60
-
     # 其他配置
     debug: bool = False
 

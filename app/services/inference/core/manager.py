@@ -64,7 +64,7 @@ class InferenceManager:
     def __init__(
         self,
         rt_fps: int = 30,
-        ca_segment_seconds: int = 5,
+        ca_segment_seconds: int = 10,  # 改为10秒，即300帧
         db_dir: Optional[str] = None,
         ca_maxlen: int = 500,
         use_async_pipeline: bool = True,  # 是否启用异步管道
@@ -90,7 +90,7 @@ class InferenceManager:
         self._ca_maxlen = max(50, ca_maxlen)
 
         # 数据库存储目录
-        base_dir = Path(__file__).parent.parent.parent.resolve()
+        base_dir = Path(__file__).parent.parent.parent.parent.parent.resolve()
         self._db_dir = Path(db_dir) if db_dir else base_dir / "database"
         self._db_dir.mkdir(parents=True, exist_ok=True)
 
@@ -159,6 +159,8 @@ class InferenceManager:
         # 持久化队列与线程（HLS 段写盘，存储了不同客户端的HLS待落盘）
         self._persist_queue: "queue.Queue" = queue.Queue()
         self._persist_thread: Optional[threading.Thread] = None
+        self._segment_check_thread: Optional[threading.Thread] = None  # 队列分段检查线程
+        self._segment_check_interval: float = 1.0  # 检查间隔（秒）
 
         # 告警相关（独立队列，不与HLS混合）
         self._alarm_queue: "queue.Queue" = queue.Queue()  # 告警持久化队列（独立）
@@ -495,57 +497,130 @@ class InferenceManager:
 
     # ========== HLS 段落盘逻辑（保留原有实现） ==========
 
+    def _flush_segment_if_needed(self, client_id: str, client_queues: ClientQueues):
+        """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。
+
+        检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作。
+
+        策略：ca_raw 和 ca_processed 独立落盘（因为积累速度不同）
+        """
+        seg_len = client_queues.ca_segment_len
+        ca_raw_len = len(client_queues.ca_raw)
+        ca_processed_len = len(client_queues.ca_processed)
+
+        # 调试日志：显示队列状态
+        if ca_raw_len >= seg_len or ca_processed_len >= seg_len:
+            print(f"[SegmentCheck] client={client_id}: ca_raw={ca_raw_len}/{seg_len}, ca_processed={ca_processed_len}/{seg_len}")
+
+        # 1. 检查 ca_raw 是否需要落盘（独立）
+        if ca_raw_len >= seg_len:
+            raw_len = min(ca_raw_len, seg_len)
+            print(f"[SegmentCheck] Enqueueing RAW segment persist job for client: {client_id}, len={raw_len}")
+            self._enqueue_raw_segment_job(client_id, client_queues, raw_len)
+
+        # 2. 检查 ca_processed 是否需要落盘（独立）
+        if ca_processed_len >= seg_len:
+            processed_len = min(ca_processed_len, seg_len)
+            print(f"[SegmentCheck] Enqueueing PROCESSED segment persist job for client: {client_id}, len={processed_len}")
+            self._enqueue_processed_segment_job(client_id, client_queues, processed_len)
+
+    def _segment_check_loop(self):
+        """周期性检查所有客户端队列，触发分段落盘。"""
+        print("[SegmentCheck] Segment check thread started")
+        while not self._stop_event.is_set():
+            try:
+                # 获取所有客户端
+                clients = client_manager.get_all_clients()
+
+                # 检查每个客户端是否需要分段落盘
+                for client_id, cq in clients.items():
+                    try:
+                        self._flush_segment_if_needed(client_id, cq)
+                    except Exception as e:
+                        print(f"[SegmentCheck] Error checking client {client_id}: {e}")
+
+                # 等待下一次检查
+                time.sleep(self._segment_check_interval)
+            except Exception as e:
+                print(f"[SegmentCheck] Segment check loop error: {e}")
+
+        print("[SegmentCheck] Segment check thread stopped")
+
     def _flush_all_remaining_segments(
         self, client_id: str, client_queues: ClientQueues
     ) -> None:
-        """在任务/客户端结束时，将剩余缓存全部落盘"""
+        """在任务/客户端结束时，将剩余缓存全部落盘（独立处理raw和processed）"""
         try:
             seg_len = client_queues.ca_segment_len
-            # 1. 先处理所有完整段
-            while client_queues.has_enough_for_segment(seg_len):
-                self._enqueue_segment_job(client_id, client_queues, seg_len)
 
-            # 2. 再处理最后不足一个段长的残余
+            # 1. 处理 ca_raw 队列的所有剩余帧（分批落盘）
+            while len(client_queues.ca_raw) >= seg_len:
+                self._enqueue_raw_segment_job(client_id, client_queues, seg_len)
+
+            # 处理 ca_raw 的残余（不足一个段长）
             remaining_raw = len(client_queues.ca_raw)
-            remaining_processed = len(client_queues.ca_processed)
-            final_len = min(remaining_raw, remaining_processed)
+            if remaining_raw > 0:
+                self._enqueue_raw_segment_job(client_id, client_queues, remaining_raw)
 
-            if final_len > 0:
-                self._enqueue_segment_job(client_id, client_queues, final_len)
+            # 2. 处理 ca_processed 队列的所有剩余帧（分批落盘）
+            while len(client_queues.ca_processed) >= seg_len:
+                self._enqueue_processed_segment_job(client_id, client_queues, seg_len)
+
+            # 处理 ca_processed 的残余（不足一个段长）
+            remaining_processed = len(client_queues.ca_processed)
+            if remaining_processed > 0:
+                self._enqueue_processed_segment_job(client_id, client_queues, remaining_processed)
+
         except Exception as e:
             print(f"_flush_all_remaining_segments error for {client_id}: {e}")
 
-    def _enqueue_segment_job(
+    def _enqueue_raw_segment_job(
         self, client_id: str, client_queues: ClientQueues, seg_len: int
     ) -> None:
-        """HLS segment落盘任务入队"""
-        # 构造目录信息
+        """仅落盘 raw 帧（独立落盘）"""
         task_id = client_queues.get_task_id()
-        # TODO: 需要根据当前客户端的任务和stage来组织目录结构，目前只有task_id
         hls_dir = self._db_dir / client_id / str(task_id)
         hls_dir.mkdir(parents=True, exist_ok=True)
 
-        # 从 client_queues 中弹出对应帧
         raw_frames_data: List[FrameData] = client_queues.pop_n_ca_raw(seg_len)
-        processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(
-            seg_len
-        )
-
-        if not raw_frames_data or not processed_frames_data:
+        if not raw_frames_data:
             return
 
         try:
             self._persist_queue.put(
                 {
-                    "type": "segment",
+                    "type": "raw_segment",
                     "client_id": client_id,
                     "target_dir": hls_dir,
                     "raw_frames": raw_frames_data,
+                }
+            )
+        except Exception as e:
+            print(f"Failed to enqueue raw segment persist job for {client_id}: {e}")
+
+    def _enqueue_processed_segment_job(
+        self, client_id: str, client_queues: ClientQueues, seg_len: int
+    ) -> None:
+        """仅落盘 processed 帧（独立落盘）"""
+        task_id = client_queues.get_task_id()
+        hls_dir = self._db_dir / client_id / str(task_id)
+        hls_dir.mkdir(parents=True, exist_ok=True)
+
+        processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(seg_len)
+        if not processed_frames_data:
+            return
+
+        try:
+            self._persist_queue.put(
+                {
+                    "type": "processed_segment",
+                    "client_id": client_id,
+                    "target_dir": hls_dir,
                     "processed_frames": processed_frames_data,
                 }
             )
         except Exception as e:
-            print(f"Failed to enqueue segment persist job for {client_id}: {e}")
+            print(f"Failed to enqueue processed segment persist job for {client_id}: {e}")
 
     def _persistent_worker(self):
         """persistanc 消费线程：处理写盘 HLS 段与告警上报/落库等耗时操作，job结构见 enqueue 部分"""
@@ -562,18 +637,24 @@ class InferenceManager:
                     continue
 
                 jtype = job.get("type")
-                if jtype == "segment":
-                    print("[Persistent worker] Processing segment job")
+                if jtype == "raw_segment":
+                    print("[Persistent worker] Processing raw segment job")
                     try:
                         client_id = job.get("client_id")
                         target_dir = job.get("target_dir")
                         raw_frames = job.get("raw_frames", [])
-                        processed_frames = job.get("processed_frames", [])
-                        self._do_persist_segment(
-                            client_id, target_dir, raw_frames, processed_frames
-                        )   # TODO: task_id不需要？
+                        self._do_persist_raw_segment(client_id, target_dir, raw_frames)
                     except Exception as e:
-                        print(f"Persistent worker segment job failed: {e}")
+                        print(f"Persistent worker raw segment job failed: {e}")
+                elif jtype == "processed_segment":
+                    print("[Persistent worker] Processing processed segment job")
+                    try:
+                        client_id = job.get("client_id")
+                        target_dir = job.get("target_dir")
+                        processed_frames = job.get("processed_frames", [])
+                        self._do_persist_processed_segment(client_id, target_dir, processed_frames)
+                    except Exception as e:
+                        print(f"Persistent worker processed segment job failed: {e}")
                 elif jtype == "alarm":
                     print("[Persistent worker] Processing alarm job")
                     try:
@@ -589,25 +670,22 @@ class InferenceManager:
 
         print("Persistent worker stopped")
 
-    def _do_persist_segment(
+    def _do_persist_raw_segment(
         self,
         client_id: str,
         hls_dir: Path,
         raw_frames_data: List[FrameData],
-        processed_frames_data: List[FrameData],
     ):
-        """实际在持久化线程中执行的写盘与上报逻辑"""
-        # 安全检查：确保参数有效
+        """落盘原始视频段（独立）"""
         if hls_dir is None:
-            print(f"_do_persist_segment error: hls_dir is None for client {client_id}")
+            print(f"_do_persist_raw_segment error: hls_dir is None for client {client_id}")
             return
-        if not raw_frames_data or not processed_frames_data:
-            print(f"_do_persist_segment error: empty frames for client {client_id}")
+        if not raw_frames_data:
+            print(f"_do_persist_raw_segment error: empty frames for client {client_id}")
             return
 
         try:
-            start_ts = processed_frames_data[0].timestamp
-            end_ts = processed_frames_data[-1].timestamp
+            start_ts = raw_frames_data[0].timestamp
 
             # 生成原始视频段
             raw_segment_path = hls_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
@@ -617,6 +695,38 @@ class InferenceManager:
             for fd in raw_frames_data:
                 out_raw.write(fd.frame)
             out_raw.release()
+
+            # 更新播放列表
+            raw_playlist_path = hls_dir / "raw_playlist.m3u8"
+            segment_duration = len(raw_frames_data) / 30.0
+            if not raw_playlist_path.exists():
+                with raw_playlist_path.open("w") as f:
+                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+            with raw_playlist_path.open("a") as f:
+                f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                f.write(f"{raw_segment_path.name}\n")
+
+            print(f"[Persistent worker] Raw segment persisted: {client_id}, frames={len(raw_frames_data)}")
+
+        except Exception as e:
+            print(f"_do_persist_raw_segment error: {e}")
+
+    def _do_persist_processed_segment(
+        self,
+        client_id: str,
+        hls_dir: Path,
+        processed_frames_data: List[FrameData],
+    ):
+        """落盘处理后视频段和keypoints JSON（独立）"""
+        if hls_dir is None:
+            print(f"_do_persist_processed_segment error: hls_dir is None for client {client_id}")
+            return
+        if not processed_frames_data:
+            print(f"_do_persist_processed_segment error: empty frames for client {client_id}")
+            return
+
+        try:
+            start_ts = processed_frames_data[0].timestamp
 
             # 生成处理后视频段
             segment_path = hls_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
@@ -646,15 +756,6 @@ class InferenceManager:
                 json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
 
             # 更新播放列表
-            raw_playlist_path = hls_dir / "raw_playlist.m3u8"
-            segment_duration = len(raw_frames_data) / 30.0
-            if not raw_playlist_path.exists():
-                with raw_playlist_path.open("w") as f:
-                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
-            with raw_playlist_path.open("a") as f:
-                f.write(f"#EXTINF:{segment_duration:.3f},\n")
-                f.write(f"{raw_segment_path.name}\n")
-
             playlist_path = hls_dir / "processed_playlist.m3u8"
             segment_duration = len(processed_frames_data) / 30.0
             if not playlist_path.exists():
@@ -664,10 +765,10 @@ class InferenceManager:
                 f.write(f"#EXTINF:{segment_duration:.3f},\n")
                 f.write(f"{segment_path.name}\n")
 
-            print(f"[Persistent worker] Segment persisted: {client_id}")
+            print(f"[Persistent worker] Processed segment persisted: {client_id}, frames={len(processed_frames_data)}")
 
         except Exception as e:
-            print(f"_do_persist_segment error: {e}")
+            print(f"_do_persist_processed_segment error: {e}")
 
     # ========== 告警处理逻辑（独立于HLS） ==========
 
@@ -1091,6 +1192,13 @@ class InferenceManager:
             )
             self._persist_thread.start()
 
+        # 3.5. 启动分段检查线程（周期性检查队列并触发落盘）
+        if self._segment_check_thread is None or not self._segment_check_thread.is_alive():
+            self._segment_check_thread = threading.Thread(
+                target=self._segment_check_loop, daemon=True, name="SegmentCheckThread"
+            )
+            self._segment_check_thread.start()
+
         # 4. 启动告警批量flush线程
         if self._alarm_flush_thread is None or not self._alarm_flush_thread.is_alive():
             self._alarm_flush_thread = threading.Thread(
@@ -1135,6 +1243,13 @@ class InferenceManager:
         if self._persist_thread is not None:
             try:
                 self._persist_thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+        # 3.5. 停止分段检查线程
+        if self._segment_check_thread is not None:
+            try:
+                self._segment_check_thread.join(timeout=2.0)
             except Exception:
                 pass
 

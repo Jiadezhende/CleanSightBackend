@@ -9,7 +9,7 @@ import numpy as np
 from typing import Dict, Any, List, Optional
 
 from app.services.infer_task import InferenceTask, InferenceResult
-from app.services.ai_models.yolo_detection import get_detector
+from app.services.models.bending.detector import get_detector
 
 
 class EndoscopeBendingDetectionTask(InferenceTask):
@@ -33,16 +33,14 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         """
         super().__init__(name="endoscope_bending_detection", enabled=enabled)
         
-        # 从配置读取默认值
-        if model_path is None or conf_threshold is None or iou_threshold is None:
-            from app.settings import settings
-            if model_path is None:
-                model_path = settings.yolo_model_path
-            if conf_threshold is None:
-                conf_threshold = settings.yolo_conf_threshold
-            if iou_threshold is None:
-                iou_threshold = settings.yolo_iou_threshold
-        
+        # 使用默认值（通常从 stages_config.yaml 传入，这里作为后备）
+        if model_path is None:
+            raise ValueError("model_path is required. Please configure it in stages_config.yaml")
+        if conf_threshold is None:
+            conf_threshold = 0.6  # 默认值
+        if iou_threshold is None:
+            iou_threshold = 0.45  # 默认值
+
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold

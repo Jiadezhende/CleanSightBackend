@@ -7,24 +7,24 @@ stages:
     # 模型列表（按顺序执行）
     models:
       - name: bubble_detection
-        class: app.services.ai_models.bubble_task.BubbleDetectionTask
+        class: app.services.models.bubble.BubbleDetectionTask
         params:
-          model_path: ${BUBBLE_MODEL_PATH:./weights/bubble.pt}
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.5
           iou_threshold: 0.45
           enabled: true
 
       - name: bending_detection
-        class: app.services.ai_models.yolo_task.EndoscopeBendingDetectionTask
+        class: app.services.models.bending.EndoscopeBendingDetectionTask
         params:
-          model_path: ${YOLO_MODEL_PATH:./weights/yolo.pt}
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.6
           iou_threshold: 0.45
           enabled: true
 
     # 时序分析器配置
     temporal_analyzer:
-      class: app.services.inference.temporal_analyzer.DefaultTemporalAnalyzer
+      class: app.services.inference.components.DefaultTemporalAnalyzer
       config:
         bubble:
           mode: consecutive          # 连续帧模式
@@ -37,7 +37,7 @@ stages:
 
     # 可视化器配置
     visualizer:
-      class: app.services.ai.DefaultVisualizer
+      class: app.services.inference.components.DefaultVisualizer
 
     # 告警触发条件
     alarm_triggers:
@@ -64,7 +64,7 @@ stages:
 
     # 时序分析器配置
     temporal_analyzer:
-      class: app.services.inference.temporal_analyzer.DefaultTemporalAnalyzer
+      class: app.services.inference.components.DefaultTemporalAnalyzer
       config:
         quality:
           mode: sliding_window

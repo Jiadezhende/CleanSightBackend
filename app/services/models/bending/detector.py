@@ -21,9 +21,8 @@ class EndoscopeBendingDetector:
             model_path: YOLO 模型文件路径，如果为 None 则从配置读取
         """
         if model_path is None:
-            from app.settings import settings
-            model_path = settings.yolo_model_path
-            
+            raise ValueError("model_path is required for EndoscopeBendingDetector")
+
         self.model_path = model_path
         self.model = None
         self.class_names = {}

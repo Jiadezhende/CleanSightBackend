@@ -126,22 +126,25 @@ def _create_default_stage_configs() -> Dict[str, Dict[str, Any]]:
 
     完全解耦版本：直接使用 InferenceTask，不依赖 pipeline_base。
     """
-    from app.services.ai_models.bubble_task import BubbleDetectionTask
-    from app.services.ai_models.yolo_task import EndoscopeBendingDetectionTask
-    from app.settings import settings
+    from app.services.models.bubble import BubbleDetectionTask
+    from app.services.models.bending import EndoscopeBendingDetectionTask
+    import os
+
+    # 从环境变量获取模型路径，如果未设置则使用默认值
+    model_base_path = os.environ.get("CLEANSIGHT_MODEL_PATH", "./app/data")
 
     # 创建模型实例（基于 InferenceTask）
     bubble_task = BubbleDetectionTask(
-        model_path=getattr(settings, "bubble_model_path", settings.yolo_model_path),
-        conf_threshold=getattr(settings, "bubble_conf_threshold", 0.25),
-        iou_threshold=getattr(settings, "bubble_iou_threshold", 0.45),
+        model_path=f"{model_base_path}/bubble-best.pt",
+        conf_threshold=0.5,
+        iou_threshold=0.45,
         enabled=True,
     )
 
     bending_task = EndoscopeBendingDetectionTask(
-        model_path=settings.yolo_model_path,
-        conf_threshold=settings.yolo_conf_threshold,
-        iou_threshold=settings.yolo_iou_threshold,
+        model_path=f"{model_base_path}/bend-best.pt",
+        conf_threshold=0.6,
+        iou_threshold=0.45,
         enabled=True,
     )
 
