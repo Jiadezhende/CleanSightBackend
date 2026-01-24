@@ -96,22 +96,34 @@ class StreamService:
         with self.lock:
             dec = self.decoders.pop(client_id, None)
             if not dec:
+                logger.warning("stop_stream called but client=%s not found", client_id)
                 return
-            logger.info("stopping stream client=%s", client_id)
+
+            logger.info("stopping stream client=%s (frames_received=%s, frames_dropped=%s)",
+                       client_id, dec.frames_received, dec.frames_dropped)
+
+            # 注销 selector
             if self.sel is not None and dec.proc and dec.proc.stdout:
                 try:
-                    self.sel.unregister(dec.proc.stdout.fileno())
-                except Exception:
-                    pass
+                    fd = dec.proc.stdout.fileno()
+                    self.sel.unregister(fd)
+                    logger.debug("unregistered selector fd=%s for client=%s", fd, client_id)
+                except Exception as e:
+                    logger.warning("failed to unregister selector for client=%s: %s", client_id, e)
+
+            # 停止 decoder（终止 FFmpeg 进程）
             dec.stop()
             self.metrics.pop(client_id, None)
 
-            # TODO: 清理 ClientQueues（可选：保留用于查询历史）
+            # 清理 ClientQueues
             if client_manager is not None:
-                # cleanup=False 保留队列数据，cleanup=True 清空队列
-                client_manager.remove_client(client_id, cleanup=True)
+                try:
+                    client_manager.remove_client(client_id, cleanup=True)
+                    logger.info("cleaned up client queues for client=%s", client_id)
+                except Exception as e:
+                    logger.error("failed to clean up client queues for client=%s: %s", client_id, e)
 
-            logger.info("stream stopped client=%s", client_id)
+            logger.info("stream stopped and cleaned up client=%s", client_id)
 
     def has_stream(self, client_id: str) -> bool:
         with self.lock:

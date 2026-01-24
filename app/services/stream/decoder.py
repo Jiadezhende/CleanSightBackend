@@ -132,16 +132,23 @@ class FFmpegDecoder:
                         pass  # fd已经注销或失效
 
             if self.proc is None:
+                self.logger.debug("decoder already stopped")
                 return
+
             try:
+                pid = getattr(self.proc, 'pid', None)
                 if self.proc.poll() is None:
-                    self.logger.info("terminating ffmpeg pid=%s", getattr(self.proc, 'pid', None))
+                    self.logger.info("terminating ffmpeg pid=%s", pid)
                     self.proc.terminate()
                     try:
                         self.proc.wait(timeout=wait)
+                        self.logger.info("ffmpeg pid=%s exited gracefully", pid)
                     except Exception:
-                        self.logger.warning("ffmpeg did not exit gracefully, killing pid=%s", getattr(self.proc, 'pid', None))
+                        self.logger.warning("ffmpeg pid=%s did not exit gracefully, killing", pid)
                         self.proc.kill()
+                else:
+                    self.logger.debug("ffmpeg pid=%s already exited", pid)
+
                 try:
                     if self.proc.stdout:
                         self.proc.stdout.close()
@@ -152,11 +159,13 @@ class FFmpegDecoder:
                         self.proc.stderr.close()
                 except Exception:
                     pass
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.error("error while stopping ffmpeg: %s", e)
             finally:
                 self.proc = None
-                self.logger.info("decoder stopped")
+                self.logger.info("decoder stopped (total frames: received=%s, dropped=%s, raw=%s, ready=%s)",
+                               self.frames_received, self.frames_dropped,
+                               self.frames_written_to_raw, self.frames_written_to_ready)
 
     def is_alive(self) -> bool:
         with self.lock:
@@ -216,8 +225,21 @@ class FFmpegDecoder:
             self.logger.warning("stream ended or crashed, not restarting")
             return
 
-        # 限制重启频率：避免频繁重试
         now = time.time()
+
+        # 检查总的无活动时间（从最后一次成功接收帧算起）
+        inactive_duration = now - self.last_frame_time
+        inactivity_timeout = settings.stream_inactivity_timeout
+
+        if inactive_duration > inactivity_timeout:
+            self.logger.warning(
+                "stream inactive for %.1fs (timeout=%ds), stopping restart attempts",
+                inactive_duration, inactivity_timeout
+            )
+            # 超时后停止重启，让 StreamService 的 check_inactive_streams() 来清理
+            return
+
+        # 限制重启频率：避免频繁重试
         time_since_last_restart = now - self.last_restart_time
         restart_interval = settings.stream_restart_interval
 
@@ -228,7 +250,8 @@ class FFmpegDecoder:
 
         self.restart_count += 1
         self.last_restart_time = now
-        self.logger.info("attempting restart %s/%s", self.restart_count, self.max_restarts)
+        self.logger.info("attempting restart %s/%s (inactive=%.1fs)",
+                        self.restart_count, self.max_restarts, inactive_duration)
         self.stop(wait=1.0)
         time.sleep(3)  # 等待3秒再重启
         self.start()
