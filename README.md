@@ -53,6 +53,58 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
 - **CA-ProcessedQueue**: 目标检测后的处理帧（含关键点），用于生成 HLS 段以及JSON数据
 - **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送给前端展示
 
+### 独立持久化与帧率控制
+
+系统采用独立持久化策略和解耦的帧率控制机制，以优化性能和资源利用：
+
+#### 独立持久化
+
+- **CA-RawQueue 与 CA-ProcessedQueue 独立落盘**：两个队列以不同速率积累数据并独立触发持久化
+  - `CA-RawQueue` 以视频源帧率（通常 30fps）积累原始帧
+  - `CA-ProcessedQueue` 以推理流水线吞吐率（约 15fps）积累处理后的帧
+  - 每个队列独立检查，达到阈值（默认 300 帧，约 10 秒）时自动触发落盘
+  - 持久化操作异步执行，不阻塞实时推理和视频流
+
+#### 帧率控制策略
+
+系统采用统一的 `inference_fps` 参数控制推理、可视化和处理视频输出：
+
+1. **推理帧率** (`inference_fps`)
+   - 控制每秒送入推理流水线的帧数（默认 20fps）
+   - 通过降频策略减少计算负载，同时保持检测准确性
+   - 配置位置：`settings.inference_fps`
+   - **影响范围**：
+     - 推理采样频率
+     - 可视化输出频率
+     - 处理视频（processed）的帧率
+
+2. **原始视频帧率**
+   - 原始视频（raw）保持视频源帧率（通常 30fps）
+   - 完整记录清洗过程，不受推理降频影响
+
+3. **实时显示策略**
+   - 使用 `RT-ProcessedQueue`（1 秒循环缓冲区）实现流畅的实时显示
+   - 可视化时使用**最新原始帧 + 最近的推理结果**进行渲染
+   - 显示帧率跟随推理帧率
+
+#### 设计优势
+
+- **内存优化**：推理降频减少队列积压，避免内存溢出
+- **计算优化**：减少不必要的推理计算，提升系统并发能力
+- **灵活配置**：根据硬件性能和业务需求独立调节推理频率和视频质量
+- **持久化解耦**：两个队列独立落盘，避免因速率差异导致的阻塞
+
+#### 相关配置参数
+
+- `inference_fps`: 推理帧率（默认 20fps）- 统一控制推理、可视化和处理视频的帧率
+- `ca_segment_seconds`: 视频段时长（默认 10 秒）
+- `ca_segment_len`: 视频段帧数阈值（取决于视频源帧率，默认 300 帧）
+
+**注意**：
+- 原始视频（raw）保持30fps，完整记录过程
+- 处理视频（processed）使用 `inference_fps` 作为帧率
+- 调整 `inference_fps` 可以在性能和质量之间权衡
+
 ### RTSP 服务
 
 独立运行，使用 mediamtx 提供视频流中转功能。配置文件位于 [mediamtx_v1.15.4](mediamtx_v1.15.4) (for Windows Local Test), [mediamtx_v1.15.5_linux_amd64](mediamtx_v1.15.5_linux_amd64)(for Linux Remote Test)。
@@ -60,6 +112,8 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
 更详细的并发考量，请参考文档：[RTSP 多流处理(Coming Soon)](docs/RTSP_MULTI_STREAM.md)
 
 ### AI 推理架构
+
+TODO: 更新 AI 推理架构设计
 
 系统采用可扩展的推理流水线注册架构，在流水线中支持多种 AI 模型并行或串行执行：
 
@@ -72,7 +126,7 @@ RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → C
 
 详细说明请参考文档：
 
-- [推理流水线设计](docs/PIPELINE_BASE.md)
+- [推理与后处理架构设计](docs/INFERENCE_SERVICE_ARCHITECTURE.md)
 - [流水线切换逻辑(Coming soon)]()
 - [推理任务注册设计(Coming soon)]()
 
@@ -88,11 +142,34 @@ python -m venv .venv
 
 # 安装依赖（可能需要镜像源）
 pip install -r requirements.txt
+
+# 测试彩色日志（可选）
+python test_colorlog.py
 ```
 
 ***另外，确保安装 ffmpeg 可执行文件，并将其路径添加到系统 PATH 中，用于解码 RTSP 流***
 
 参考 [.env.example](.env.example) 创建 `.env.dev` (开发) 和 `.env` (生产) 配置文件。主要需设定数据库地址、密码，以及模型参数文件路径。
+
+### 日志配置
+
+系统使用彩色日志输出，提供清晰易读的日志信息：
+
+```bash
+# 控制日志级别（默认: INFO）
+export LOG_LEVEL=DEBUG  # Linux/Mac
+set LOG_LEVEL=DEBUG     # Windows
+
+# 可选值: DEBUG, INFO, WARNING, ERROR, CRITICAL
+```
+
+**日志特性**:
+
+- ✅ 彩色输出（不同级别使用不同颜色）
+- ✅ 时间戳（HH:MM:SS格式）
+- ✅ 组件标识（明确日志来源）
+
+详细说明请参考: [日志系统使用指南](docs/LOGGING_GUIDE.md)
 
 **启动**：
 使用 [start_prod.ps1](start_prod.ps1) (Windows) 或 [start_prod.sh](start_prod.sh) (Linux) 启动，通过修改CLEANSIGHT_PROD切换环境

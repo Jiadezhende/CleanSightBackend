@@ -18,5 +18,5 @@ if ($env:CLEANSIGHT_PROD -eq '1') {
     Write-Host "Development mode enabled" -ForegroundColor Green
 }
 
-# Start service
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# Start service with colored logging
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-config logging_config.json

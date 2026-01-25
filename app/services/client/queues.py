@@ -1,15 +1,16 @@
 """
-容器，管理每个客户端的队列。提供客户端数据存取接口。
+客户端队列管理
 """
 
 from collections import deque
 from typing import Deque, Optional, List, Tuple
 import time
-import numpy as np
 import threading
+import numpy as np
 
 from app.models.frame import FrameData
 from app.models.task import Task as CleaningTask
+from .state import ClientState
 
 
 class ClientQueues:
@@ -19,12 +20,12 @@ class ClientQueues:
     - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段（设置最大长度防止溢出）
     - CA-ProcessedQueue: 推理后的处理帧（含关键点），用于生成处理后 HLS 段（设置最大长度防止溢出）
     - RT-ProcessedQueue: 实时推理结果（含关键点），用于 WebSocket 推送（约1秒缓存）
-    
+
     内存保护：
     - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
     - 默认 CA 队列最大长度为 2700 帧，约 90 秒的视频缓存（30fps）
     - RT 队列长度约为 1 秒的帧数，用于实时推送
-    
+
     新增功能（优化版）：
     - 支持帧率降频控制（inference_fps）
     - 支持统一 resize 尺寸配置
@@ -32,33 +33,34 @@ class ClientQueues:
     """
 
     def __init__(
-        self, 
+        self,
         client_id: str = "",
-        rt_maxlen: int = 30, 
-        ca_segment_len: int = 150, 
+        rt_maxlen: int = 30,
+        ca_segment_len: int = 150,
         ca_maxlen: int = 2700,
         resize_width: int = 640,
         resize_height: int = 480,
-        inference_fps: int = 15
+        inference_fps: int = 15,
+        initial_stage: str = "LEAK"
     ):
         # 客户端标识
         self.client_id = client_id
-        
+
         # 尺寸配置
         self.resize_width = resize_width
         self.resize_height = resize_height
-        
+
         # 推理帧率配置
         self.inference_fps = inference_fps
         self.last_inference_timestamp: float = 0.0
-        
+
         # 线程锁（保护时间戳更新和最新帧访问）
         self._lock = threading.Lock()
-        
+
         # 最新原始帧缓存（用于异步聚合可视化）
         self.latest_raw_frame: Optional[np.ndarray] = None
-        self.latest_raw_timestamp: float = 0.0
-        
+        self.latest_raw_timestamp: float = time.time()  # 初始化为创建时间，支持启动失败检测
+
         # CA-ReadyQueue: 等待推理的原始帧（设置最大长度限制防止溢出）
         self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
         # CA-RawQueue: 原始帧副本，用于落盘生成原始视频（设置最大长度限制）
@@ -72,11 +74,14 @@ class ClientQueues:
         self.task: Optional[CleaningTask] = None  # 关联的清洗任务
         self.rtmp_url: Optional[str] = None  # RTMP 流地址
 
+        # 业务状态管理（新增）
+        self.state = ClientState(client_id=client_id, initial_stage=initial_stage)
+
     # --- 封装操作方法，减少外部直接操作队列 ---
     def append_ca_ready(self, frame_data: FrameData) -> bool:
         """
         添加帧到待推理队列（保留兼容旧代码）
-        
+
         Returns:
             True 表示成功，False 表示队列已满
         """
@@ -85,15 +90,15 @@ class ClientQueues:
             return True
         except Exception:
             return False
-    
+
     def append_ca_ready_with_throttle(self, frame_data: FrameData) -> bool:
         """
         添加帧到待推理队列（带帧率限制）
         用于拉流时降频写入，避免频繁推理
-        
+
         Args:
             frame_data: 帧数据
-        
+
         Returns:
             True 表示写入成功，False 表示跳过（帧率限制或队列满）
         """
@@ -101,15 +106,15 @@ class ClientQueues:
             # 帧率控制：间隔 = 1.0 / inference_fps
             current_time = time.time()
             interval = 1.0 / self.inference_fps
-            
+
             if current_time - self.last_inference_timestamp < interval:
                 return False  # 跳过，不写入
-            
+
             # 检查队列是否满（maxlen 可能为 None）
             max_len = self.ca_ready.maxlen
             if max_len is not None and len(self.ca_ready) >= max_len:
                 return False  # 队列满，丢弃
-            
+
             self.ca_ready.append(frame_data)
             self.last_inference_timestamp = current_time
             return True
@@ -117,7 +122,7 @@ class ClientQueues:
     def append_ca_raw(self, frame_data: FrameData) -> bool:
         """
         添加原始帧到落盘队列，同时更新最新原始帧缓存
-        
+
         Returns:
             True 表示成功，False 表示队列已满
         """
@@ -144,16 +149,29 @@ class ClientQueues:
         if self.rt_processed:
             return self.rt_processed[-1]
         return self.latest_processed
-    
+
     def get_latest_raw_frame(self) -> Optional[Tuple[np.ndarray, float]]:
         """安全获取最新原始帧及其时间戳。
-        
+
         Returns:
             (frame, timestamp) 或 None（如果没有帧）
         """
         with self._lock:
             if self.latest_raw_frame is not None:
                 return (self.latest_raw_frame.copy(), self.latest_raw_timestamp)
+            return None
+
+    def get_latest_frame(self) -> Optional[np.ndarray]:
+        """获取最新原始帧（用于可视化）。
+
+        由于推理降帧，可视化需要使用最新的原始帧而非推理时的旧帧。
+
+        Returns:
+            最新原始帧（np.ndarray）或 None（如果没有帧）
+        """
+        with self._lock:
+            if self.latest_raw_frame is not None:
+                return self.latest_raw_frame.copy()
             return None
 
     def get_task_id(self) -> Optional[int]:
@@ -167,11 +185,11 @@ class ClientQueues:
             "rt_processed": len(self.rt_processed),
             "rtmp_url": self.rtmp_url,
         }
-    
+
     def get_queue_depths(self) -> dict:
         """
         获取队列深度统计（新增方法，与 to_status_dict 类似但更语义化）
-        
+
         Returns:
             包含各队列长度的字典
         """

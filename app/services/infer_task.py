@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import numpy as np
-from app.services.ai_models import motion, detection
 import cv2
 
 """
@@ -79,8 +78,10 @@ class DetectionTask(InferenceTask):
     def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
         """执行检测推理"""
         try:
+            # 延迟导入避免循环依赖
+            from app.services.models.base import detect_keypoints
             # 调用检测模型
-            processed_frame, keypoints = detection.detect_keypoints(frame)
+            processed_frame, keypoints = detect_keypoints(frame)
             return {
                 "success": True,
                 "processed_frame": processed_frame,  # 用于可视化，不会序列化
@@ -113,22 +114,25 @@ class MotionTask(InferenceTask):
     def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
         """执行动作分析"""
         try:
+            # 延迟导入避免循环依赖
+            from app.services.models.base import analyze_motion
+
             # 获取检测结果
             detection_result = context.get("results", {}).get("detection", {})
             keypoints = detection_result.get("keypoints", {})
-            
+
             # 获取任务对象
             task = context.get("task")
-            
+
             if not task or not keypoints:
                 return {
                     "success": False,
                     "error": "Missing task or keypoints",
                     "actions": {}
                 }
-            
+
             # 调用动作分析模型
-            actions = motion.analyze_motion(keypoints, task)
+            actions = analyze_motion(keypoints, task)
             
             return {
                 "success": True,

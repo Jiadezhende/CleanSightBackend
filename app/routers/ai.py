@@ -100,11 +100,11 @@ async def websocket_video_endpoint(websocket: WebSocket):
         print(f"WebSocket 未捕获异常 (client_id={client_id}): {e}")
         traceback.print_exc()
     finally:
-        # 客户端断开时尝试清理缓存（尽量容错）
-        try:
-            ai.remove_client(client_id)
-        except Exception:
-            pass
+        # # 客户端断开时尝试清理缓存（尽量容错）
+        # try:
+        #     ai.remove_client(client_id)
+        # except Exception:
+        #     pass
         client_info = getattr(websocket, 'client', None)
         print(f"WebSocket 连接已关闭 (client_id={client_id}): {client_info}")
 
