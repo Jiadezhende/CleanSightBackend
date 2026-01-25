@@ -14,6 +14,7 @@ StageAwareDispatcher → InferWorker → TemporalWorkerPool → VisualizationWor
 
 import base64
 import json
+import logging
 import queue
 import threading
 import time
@@ -23,6 +24,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from app.database import engine
 from app.models.frame import FrameData, ProcessedFrame
@@ -379,13 +382,13 @@ class InferenceManager:
         阶段2: 从 ClientManager 移除并刷新推理服务
         阶段3: 正在处理的批次完成后会被自动丢弃
         """
-        print(f"[InferenceManager] remove_client called for {client_id}")
+        logger.debug(f"[InferenceManager] Removing client: {client_id}")
 
         if not client_manager.has_client(client_id):
-            print(f"[InferenceManager] Client {client_id} not found in ClientManager, already removed or never added")
+            logger.debug(f"[InferenceManager] Client not found (already removed): {client_id}")
             return
 
-        print(f"[InferenceManager] 开始优雅停止客户端: {client_id}")
+        logger.info(f"[InferenceManager] Cleaning up client: {client_id}")
 
         # 阶段1: 落盘剩余缓存（保存已有的处理结果）
         cq = client_manager.get_client(client_id)
@@ -393,22 +396,22 @@ class InferenceManager:
             try:
                 self._flush_all_remaining_segments(client_id, cq)
             except Exception as e:
-                print(f"[InferenceManager] 落盘失败: {client_id}, {e}")
+                logger.warning(f"[InferenceManager] Failed to flush segments: {client_id} - {e}")
 
         # 阶段2: 从 ClientManager 移除
         try:
             client_manager.remove_client(client_id)
         except Exception as e:
-            print(f"[InferenceManager] 移除客户端失败: {client_id}, {e}")
+            logger.error(f"[InferenceManager] Failed to remove from ClientManager: {client_id} - {e}")
 
         # 阶段3: 刷新推理服务列表（此后推理完成的帧会被丢弃）
         if self._model_worker_service is not None:
             try:
                 self._model_worker_service.refresh_client_queues()
             except Exception as e:
-                print(f"[InferenceManager] 刷新推理服务失败: {e}")
+                logger.error(f"[InferenceManager] Failed to refresh worker service: {e}")
 
-        print(f"[InferenceManager] 客户端已完全清理: {client_id}")
+        logger.info(f"[InferenceManager] Client cleanup complete: {client_id}")
 
     def status(self) -> Dict[str, Any]:
         """获取所有客户端及其队列状态"""

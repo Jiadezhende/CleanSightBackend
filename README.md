@@ -142,11 +142,34 @@ python -m venv .venv
 
 # 安装依赖（可能需要镜像源）
 pip install -r requirements.txt
+
+# 测试彩色日志（可选）
+python test_colorlog.py
 ```
 
 ***另外，确保安装 ffmpeg 可执行文件，并将其路径添加到系统 PATH 中，用于解码 RTSP 流***
 
 参考 [.env.example](.env.example) 创建 `.env.dev` (开发) 和 `.env` (生产) 配置文件。主要需设定数据库地址、密码，以及模型参数文件路径。
+
+### 日志配置
+
+系统使用彩色日志输出，提供清晰易读的日志信息：
+
+```bash
+# 控制日志级别（默认: INFO）
+export LOG_LEVEL=DEBUG  # Linux/Mac
+set LOG_LEVEL=DEBUG     # Windows
+
+# 可选值: DEBUG, INFO, WARNING, ERROR, CRITICAL
+```
+
+**日志特性**:
+
+- ✅ 彩色输出（不同级别使用不同颜色）
+- ✅ 时间戳（HH:MM:SS格式）
+- ✅ 组件标识（明确日志来源）
+
+详细说明请参考: [日志系统使用指南](docs/LOGGING_GUIDE.md)
 
 **启动**：
 使用 [start_prod.ps1](start_prod.ps1) (Windows) 或 [start_prod.sh](start_prod.sh) (Linux) 启动，通过修改CLEANSIGHT_PROD切换环境

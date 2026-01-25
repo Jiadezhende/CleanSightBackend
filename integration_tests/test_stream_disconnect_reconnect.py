@@ -41,7 +41,7 @@ class DisconnectReconnectTest:
             self.video_path = video_path
 
         # 初始化控制器
-        self.api = APIClient(base_url="http://localhost:8000")
+        self.api = APIClient(base_url="http://117.50.241.174:8000")
         self.db = DatabaseHelper()
         self.ffmpeg = None
 
@@ -63,18 +63,19 @@ class DisconnectReconnectTest:
             print("\n[3/7] 启动后端任务...")
             self._start_task()
 
-            # 4. 第一次推流（15秒）
-            print("\n[4/7] 开始第一次推流（15秒）...")
+            # 4. 第一次推流（10秒）
+            print("\n[4/7] 开始第一次推流（10秒）...")
             self._start_ffmpeg()
-            time.sleep(3)  # 等待推流建立
+            print("⏱️  等待推流建立（5秒，远程网络需要更长时间）...")
+            time.sleep(5)  # 远程推流需要更长时间
 
             # 启动 RTSP 捕获
             print("📡 启动 RTSP 捕获...")
             self._start_rtsp_capture()
 
             # 推流 15 秒
-            print("⏱️  推流中... (15秒)")
-            time.sleep(15)
+            print("⏱️  推流中... (10秒)")
+            time.sleep(10)
 
             # 5. 中断推流（10秒）
             print("\n[5/7] ⚠️  中断推流（10秒）...")
@@ -87,9 +88,9 @@ class DisconnectReconnectTest:
             self._start_ffmpeg()
             time.sleep(3)  # 等待推流建立
 
-            # 再推流 15 秒
-            print("⏱️  推流中... (15秒)")
-            time.sleep(15)
+            # 再推流 10 秒
+            print("⏱️  推流中... (10秒)")
+            time.sleep(10)
 
             # 7. 结束测试
             print("\n[7/7] ✅ 测试完成，清理资源...")
@@ -137,7 +138,8 @@ class DisconnectReconnectTest:
             raise Exception("❌ 无法从数据库获取 task.source_ip")
 
         # 生成 RTSP URL
-        self.rtsp_url = f"rtsp://localhost:8004/live/{self.client_id}"
+        self.rtsp_url = f"rtsp://117.50.241.174:8004/live/{self.client_id}"
+        self.pull_url=f"rtsp://localhost:8004/live/{self.client_id}"
         print(f"✅ RTSP URL: {self.rtsp_url}")
 
     def _start_task(self):
@@ -166,10 +168,10 @@ class DisconnectReconnectTest:
 
     def _start_rtsp_capture(self):
         """启动 RTSP 捕获"""
-        result = self.api.start_rtsp_capture(self.client_id, self.rtsp_url, 30)
+        result = self.api.start_rtsp_capture(self.client_id, self.pull_url, 30)
         if "error" in result:
             raise Exception(f"启动 RTSP 捕获失败: {result['error']}")
-        print(f"✅ RTSP 捕获已启动")
+        print(f"✅ RTSP 捕获已启动（后端拉流: {self.pull_url}）")
 
     def _cleanup(self):
         """清理资源"""

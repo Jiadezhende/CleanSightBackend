@@ -57,15 +57,13 @@ class CleanupService:
             "errors": []
         }
 
-        logger.info(f"[CleanupService] Cleaning up {client_id} (reason: {reason})")
+        logger.info(f"[CleanupService] Cleaning up client: {client_id} (reason: {reason})")
 
-        # 诊断：检查ClientManager状态
+        # 诊断信息（DEBUG级别）
         if self._client_manager:
             has_client = self._client_manager.has_client(client_id)
-            logger.info(f"[CleanupService] ClientManager.has_client({client_id}) = {has_client}")
-            if has_client:
-                all_clients = self._client_manager.get_all_clients()
-                logger.info(f"[CleanupService] Total clients in ClientManager: {len(all_clients)}")
+            client_count = len(self._client_manager.get_all_clients())
+            logger.debug(f"[CleanupService] ClientManager state: has_client={has_client}, total={client_count}")
         else:
             logger.warning(f"[CleanupService] ClientManager is None")
 
@@ -73,31 +71,30 @@ class CleanupService:
         try:
             self._stream_service.stop_stream(client_id)
             result["decoder_cleaned"] = True
-            logger.info(f"[CleanupService] ✓ Decoder cleaned up for {client_id}")
+            logger.info(f"[CleanupService] Decoder cleaned: {client_id}")
         except Exception as e:
             error_msg = f"decoder: {e}"
             result["errors"].append(error_msg)
-            logger.warning(f"[CleanupService] ✗ Decoder cleanup failed for {client_id}: {e}")
+            logger.warning(f"[CleanupService] Decoder cleanup failed: {client_id} - {e}")
 
         # 步骤2：清理InferenceManager（会自动清理ClientManager）
         try:
             if self._inference_manager:
-                logger.debug(f"[CleanupService] Calling InferenceManager.remove_client for {client_id}")
                 self._inference_manager.remove_client(client_id)
                 result["inference_cleaned"] = True
-                logger.info(f"[CleanupService] ✓ Inference resources cleaned up for {client_id}")
+                logger.info(f"[CleanupService] Inference cleaned: {client_id}")
             else:
-                logger.warning(f"[CleanupService] InferenceManager is None, skipping inference cleanup for {client_id}")
+                logger.warning(f"[CleanupService] InferenceManager is None")
         except Exception as e:
             error_msg = f"inference: {e}"
             result["errors"].append(error_msg)
-            logger.warning(f"[CleanupService] ✗ Inference cleanup failed for {client_id}: {e}")
+            logger.warning(f"[CleanupService] Inference cleanup failed: {client_id} - {e}")
 
         # 记录清理完成
         if result["errors"]:
-            logger.warning(f"[CleanupService] Cleanup complete for {client_id} with errors: {result['errors']}")
+            logger.warning(f"[CleanupService] Cleanup complete with errors: {client_id} - {result['errors']}")
         else:
-            logger.info(f"[CleanupService] Cleanup complete for {client_id} (success)")
+            logger.info(f"[CleanupService] Cleanup complete: {client_id}")
 
         return result
 

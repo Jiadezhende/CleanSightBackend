@@ -116,7 +116,7 @@ class StreamService:
             if not dec:
                 return
 
-            logger.info("stopping stream client=%s", client_id)
+            logger.info(f"[StreamService] Stopping stream: {client_id}")
 
             # 从selector中注销（必须在锁内）
             if self.sel is not None and dec.proc and dec.proc.stdout:
@@ -133,9 +133,9 @@ class StreamService:
             def stop_decoder_async():
                 try:
                     dec.stop()  # 可能阻塞2秒+，在后台线程执行
-                    logger.info("decoder process stopped for %s", client_id)
+                    logger.debug(f"[StreamService] FFmpeg process stopped: {client_id}")
                 except Exception as e:
-                    logger.error("Failed to stop decoder for %s: %s", client_id, e)
+                    logger.error(f"[StreamService] Failed to stop FFmpeg: {client_id} - {e}")
 
             stop_thread = threading.Thread(
                 target=stop_decoder_async,
@@ -148,7 +148,7 @@ class StreamService:
         if client_manager is not None:
             client_manager.remove_client(client_id, cleanup=True)
 
-        logger.info("stream stopped client=%s", client_id)
+        logger.info(f"[StreamService] Stream stopped: {client_id}")
 
     def _cleanup_dead_decoder_unsafe(self, client_id: str):
         """内部清理方法（必须持有锁）
@@ -167,7 +167,7 @@ class StreamService:
             except Exception:
                 pass
         self.metrics.pop(client_id, None)
-        logger.info(f"Dead decoder cleaned up: {client_id}")
+        logger.debug(f"[StreamService] Dead decoder cleaned: {client_id}")
 
     def has_stream(self, client_id: str) -> bool:
         with self.lock:
@@ -217,24 +217,27 @@ class StreamService:
         with self.lock:
             old_dec = self.decoders.get(client_id)
 
-        if old_dec and old_dec.is_alive():
-            # 在后台线程中停止旧decoder，不等待完成
-            # 这样restart_stream可以快速返回，让健康监控线程继续执行
-            def stop_decoder_async():
-                try:
-                    logger.debug(f"[restart_stream] Stopping old decoder for {client_id}")
-                    old_dec.stop()  # 可能阻塞几秒，但在后台线程中执行
-                    logger.debug(f"[restart_stream] Old decoder stopped for {client_id}")
-                except Exception as e:
-                    logger.error(f"Failed to stop old decoder for {client_id}: {e}")
+        if old_dec:
+            if old_dec.is_alive():
+                # 在后台线程中停止旧decoder，不等待完成
+                # 这样restart_stream可以快速返回，让健康监控线程继续执行
+                def stop_decoder_async():
+                    try:
+                        logger.debug(f"[StreamService] Stopping old decoder: {client_id}")
+                        old_dec.stop()  # 可能阻塞几秒，但在后台线程中执行
+                        logger.debug(f"[StreamService] Old decoder stopped: {client_id}")
+                    except Exception as e:
+                        logger.error(f"[StreamService] Failed to stop old decoder: {client_id} - {e}")
 
-            stop_thread = threading.Thread(
-                target=stop_decoder_async,
-                daemon=True,
-                name=f"stop-decoder-{client_id}"
-            )
-            stop_thread.start()
-            logger.debug(f"[restart_stream] Started background thread to stop old decoder for {client_id}")
+                stop_thread = threading.Thread(
+                    target=stop_decoder_async,
+                    daemon=True,
+                    name=f"stop-decoder-{client_id}"
+                )
+                stop_thread.start()
+                logger.debug(f"[StreamService] Async stopping old decoder: {client_id}")
+            else:
+                logger.debug(f"[StreamService] Old decoder already dead: {client_id}")
 
         # 2. 清理旧记录并创建新decoder（在锁内执行）
         with self.lock:

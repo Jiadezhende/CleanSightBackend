@@ -110,16 +110,63 @@ def restart_stream(self, client_id: str, stream_url: str, fps: int, protocol: st
 
 修复后的重连日志：
 ```
-01:14:49 - RECONNECT MODE: 172.16.77.220
-01:14:52 - RECONNECT ATTEMPT 1/6: 172.16.77.220
-01:14:52 - Started background thread to stop old decoder
-01:14:57 - RECONNECT ATTEMPT 2/6: 172.16.77.220  ← ✅ 第2次重连成功触发
-01:15:02 - RECONNECT ATTEMPT 3/6: 172.16.77.220
-01:15:07 - RECONNECT ATTEMPT 4/6: 172.16.77.220
-01:15:12 - RECONNECT ATTEMPT 5/6: 172.16.77.220
-01:15:17 - RECONNECT ATTEMPT 6/6: 172.16.77.220
-01:15:22 - RECONNECT FAILED: max attempts reached
+10:25:08 - RECONNECT ATTEMPT 1/6: 172.16.77.220
+10:25:08 - Dead decoder cleaned up: 172.16.77.220       ← 旧decoder已死，直接清理
+10:25:08 - ffmpeg started pid=72320
+10:25:08 - Stream restarted for 172.16.77.220
+10:25:14 - RECONNECT ATTEMPT 2/6: 172.16.77.220         ← ✅ 第2次重连成功触发
+10:25:14 - Dead decoder cleaned up: 172.16.77.220
+10:25:14 - ffmpeg started pid=33564
+10:25:14 - Stream restarted for 172.16.77.220
+10:25:20 - RECONNECT ATTEMPT 3/6: 172.16.77.220
+10:25:26 - RECONNECT ATTEMPT 4/6: 172.16.77.220
+10:25:32 - RECONNECT ATTEMPT 5/6: 172.16.77.220
+10:25:38 - RECONNECT ATTEMPT 6/6: 172.16.77.220
+10:25:44 - RECONNECT FAILED: max attempts reached
 ```
+
+### 为什么看不到异步停止的日志？
+
+**观察**：在重连过程中，没有看到 `Started background thread to stop old decoder` 或 `Old decoder stopped` 日志。
+
+**原因**：当MediaMTX关闭时，FFmpeg无法连接到RTSP服务器，进程会**自动快速退出**（几百毫秒内）：
+
+```python
+# restart_stream() 执行流程
+old_dec = self.decoders.get(client_id)
+
+if old_dec:
+    if old_dec.is_alive():  # ← MediaMTX关闭时，FFmpeg已退出，返回False
+        # 异步停止分支（不会执行）
+        ...
+    else:
+        logger.debug("Old decoder already dead, skipping stop")  # ← 实际走这个分支
+
+# 继续清理和创建新decoder
+self._cleanup_dead_decoder_unsafe(client_id)  # 输出：Dead decoder cleaned up
+```
+
+**时间线**：
+```
+T+0s    MediaMTX关闭
+T+0.3s  FFmpeg连接失败，进程退出
+T+3s    健康监控检测到断流
+T+5s    第1次重连尝试
+        └─> old_dec.is_alive() = False（FFmpeg已退出5秒）
+        └─> 跳过异步停止，直接清理
+T+10s   第2次重连尝试（同上）
+...
+```
+
+**验证**：最终清理时，decoder仍然活着，可以看到异步停止日志：
+```
+10:46:19 - [StreamService] Stopping stream: 172.16.77.220
+10:46:19 - [FFmpegDecoder] decoder stopped                    ← decoder.stop()内部日志
+10:46:19 - [StreamService] FFmpeg process stopped: 172.16.77.220  ← 异步线程完成（DEBUG级别）
+10:46:19 - [StreamService] Stream stopped: 172.16.77.220
+```
+
+**结论**：这是**正常行为**，异步停止机制工作正常，只是在大多数重连场景下，旧decoder已自然退出，无需主动停止。
 
 ---
 
@@ -238,18 +285,16 @@ def stop_stream(self, client_id: str):
 
 修复后的清理日志：
 ```
-01:20:45 - [CleanupService] Cleaning up 172.16.77.220
-01:20:45 - [CleanupService] ClientManager.has_client(172.16.77.220) = True
-01:20:45 - [CleanupService] Total clients: 1
-01:20:45 - stopping stream client=172.16.77.220
-01:20:45 - terminating ffmpeg pid=108234
-01:20:45 - stream stopped client=172.16.77.220  ← ✅ 立即输出
-01:20:45 - [CleanupService] ✓ Decoder cleaned up
-01:20:45 - [InferenceManager] remove_client called for 172.16.77.220
-01:20:45 - [InferenceManager] 开始优雅停止客户端: 172.16.77.220
-01:20:45 - [InferenceManager] 客户端已完全清理: 172.16.77.220
-01:20:45 - [CleanupService] ✓ Inference resources cleaned up
-[ModelWorkerService] 客户端列表已刷新: 0 个客户端  ← ✅ 正确清理
+10:46:19 - [CleanupService] Cleaning up client: 172.16.77.220 (reason: api_stop)
+10:46:19 - [StreamService] Stopping stream: 172.16.77.220
+10:46:19 - [FFmpegDecoder] decoder stopped
+10:46:19 - [StreamService] Stream stopped: 172.16.77.220        ← ✅ 立即输出（不等待FFmpeg）
+10:46:19 - [CleanupService] Decoder cleaned: 172.16.77.220
+10:46:19 - [InferenceManager] Cleaning up client: 172.16.77.220
+10:46:19 - [InferenceManager] Client cleanup complete: 172.16.77.220
+10:46:19 - [CleanupService] Inference cleaned: 172.16.77.220
+10:46:19 - [CleanupService] Cleanup complete: 172.16.77.220
+[ModelWorkerService] 客户端列表已更新: 1 → 0 (-1)           ← ✅ 正确清理
 ```
 
 ---
@@ -264,21 +309,27 @@ def stop_stream(self, client_id: str):
 
 **修改内容**:
 ```python
+import logging
+logger = logging.getLogger(__name__)
+
 def remove_client(self, client_id: str) -> None:
-    print(f"[InferenceManager] remove_client called for {client_id}")  # ← 新增
+    logger.debug(f"[InferenceManager] Removing client: {client_id}")  # ← DEBUG级别
 
     if not client_manager.has_client(client_id):
-        print(f"[InferenceManager] Client {client_id} not found in ClientManager, already removed or never added")  # ← 新增
+        logger.debug(f"[InferenceManager] Client not found (already removed): {client_id}")  # ← DEBUG级别
         return
 
-    print(f"[InferenceManager] 开始优雅停止客户端: {client_id}")
+    logger.info(f"[InferenceManager] Cleaning up client: {client_id}")
     # ... 执行清理
+    logger.info(f"[InferenceManager] Client cleanup complete: {client_id}")
 ```
 
-**作用**:
-- 明确显示方法被调用
-- 区分"客户端不存在"和"清理失败"两种情况
-- 帮助诊断清理流程的执行状态
+**改进**:
+
+- ✅ 使用logger替代print（统一日志系统）
+- ✅ 合理的日志级别（DEBUG用于诊断，INFO用于关键流程）
+- ✅ 简洁清晰的消息格式
+- ✅ 明确标注组件来源 `[InferenceManager]`
 
 ### CleanupService日志增强
 

@@ -43,7 +43,7 @@ class ReconnectTimeoutTest:
             self.video_path = video_path
 
         # 初始化控制器
-        self.api = APIClient(base_url="http://localhost:8000")
+        self.api = APIClient(base_url="http://117.50.241.174:8000")
         self.db = DatabaseHelper()
         self.ffmpeg = None
 
@@ -162,8 +162,10 @@ class ReconnectTimeoutTest:
             raise Exception("❌ 无法从数据库获取 task.source_ip")
 
         # 生成 RTSP URL
-        self.rtsp_url = f"rtsp://localhost:8004/live/{self.client_id}"
-        print(f"✅ RTSP URL: {self.rtsp_url}")
+        self.rtsp_url = f"rtsp://117.50.241.174:8004/live/{self.client_id}"
+        self.pull_url = f"rtsp://localhost:8004/live/{self.client_id}"
+        print(f"✅ 推流URL: {self.rtsp_url}")
+        print(f"✅ 拉流URL: {self.pull_url}")
 
     def _start_task(self):
         """启动任务"""
