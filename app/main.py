@@ -1,7 +1,16 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+import logging
+import os
 
 from app.routers import ai, inspection, task
+
+# 注意：日志配置由 uvicorn 的 --log-config 参数管理
+# 参见: logging_config.json
+# 这里只设置日志级别（从环境变量读取）
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+numeric_level = getattr(logging, log_level, logging.INFO)
+logging.root.setLevel(numeric_level)
 
 
 @asynccontextmanager

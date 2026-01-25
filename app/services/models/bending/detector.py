@@ -21,9 +21,8 @@ class EndoscopeBendingDetector:
             model_path: YOLO 模型文件路径，如果为 None 则从配置读取
         """
         if model_path is None:
-            from app.settings import settings
-            model_path = settings.yolo_model_path
-            
+            raise ValueError("model_path is required for EndoscopeBendingDetector")
+
         self.model_path = model_path
         self.model = None
         self.class_names = {}
@@ -114,7 +113,25 @@ class EndoscopeBendingDetector:
                     # 假设模型训练时"bent"或"bending"表示弯折
                     if "bent" in class_name.lower() or "bending" in class_name.lower():
                         bending_detected = True
-        
+        # 如果没有任何真实检测结果，为了调试可视化管线，添加一个默认调试框
+        # 注意：不修改 bending_detected，避免影响业务逻辑
+        if not detections:
+            try:
+                h, w = frame.shape[:2]
+                # 弯折模型调试框放在左上角区域，以区别于气泡模型的中心调试框
+                x1, y1 = w // 10, h // 10
+                x2, y2 = w // 3, h // 3
+                debug_det = {
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "confidence": 0.0,
+                    "class_id": -1,
+                    # 专门用于区分弯折检测模型的调试框
+                    "class_name": "bending_debug_box",
+                }
+                detections.append(debug_det)
+            except Exception:
+                pass
+
         return detections, bending_detected
 
     def detect_batch(
@@ -138,13 +155,27 @@ class EndoscopeBendingDetector:
 
         out = []
         if not results:
-            # 返回空结果对应每帧
-            for _ in frames:
-                out.append(([], False))
+            # 返回每帧一个默认调试框，便于确认管线是否在运行
+            for frame in frames:
+                try:
+                    h, w = frame.shape[:2]
+                    # 弯折模型调试框：左上角
+                    x1, y1 = w // 10, h // 10
+                    x2, y2 = w // 3, h // 3
+                    debug_det = {
+                        "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                        "confidence": 0.0,
+                        "class_id": -1,
+                        # 专门用于区分弯折检测模型的调试框
+                        "class_name": "bending_debug_box",
+                    }
+                    out.append(([debug_det], False))
+                except Exception:
+                    out.append(([], False))
             return out
 
         # results 与输入 frames 一一对应
-        for result in results:
+        for result, frame in zip(results, frames):
             detections = []
             bending_detected = False
             if result is not None and result.boxes is not None and len(result.boxes) > 0:
@@ -163,6 +194,23 @@ class EndoscopeBendingDetector:
                     detections.append(detection)
                     if "bent" in class_name.lower() or "bending" in class_name.lower():
                         bending_detected = True
+            # 若本帧无任何真实检测结果时，也添加一个默认调试框
+            if not detections:
+                try:
+                    h, w = frame.shape[:2]
+                    # 弯折模型调试框：左上角
+                    x1, y1 = w // 10, h // 10
+                    x2, y2 = w // 3, h // 3
+                    debug_det = {
+                        "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                        "confidence": 0.0,
+                        "class_id": -1,
+                        # 专门用于区分弯折检测模型的调试框
+                        "class_name": "bending_debug_box",
+                    }
+                    detections.append(debug_det)
+                except Exception:
+                    pass
             out.append((detections, bending_detected))
 
         return out

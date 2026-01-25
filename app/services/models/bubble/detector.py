@@ -21,14 +21,16 @@ class BubbleDetector:
             model_path: YOLO 模型文件路径，如果为 None 则从配置读取
         """
         if model_path is None:
-            from app.settings import settings
-            # 使用专门的气泡检测模型路径配置
-            model_path = getattr(settings, 'bubble_model_path', settings.yolo_model_path)
-            
+            raise ValueError("model_path is required for BubbleDetector")
+
         self.model_path = model_path
         self.model = None
         self.class_names = {}
         self._load_model()
+
+        # 简单的 ANSI 颜色码（在支持 ANSI 的终端中生效）
+        self._log_color_yellow = "\033[33m"
+        self._log_color_reset = "\033[0m"
     
     def _load_model(self):
         """加载 YOLO 模型"""
@@ -113,7 +115,24 @@ class BubbleDetector:
                         "class_name": class_name,
                     }
                     detections.append(detection)
-        
+        # 如果没有任何真实检测结果，为了调试可视化管线，添加一个默认调试框
+        # 注意：这里不修改 bubble_detected / bubble_count，避免影响业务逻辑
+        if not detections:
+            try:
+                h, w = frame.shape[:2]
+                x1, y1 = w // 4, h // 4
+                x2, y2 = 3 * w // 4, 3 * h // 4
+                debug_det = {
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "confidence": 0.0,
+                    "class_id": -1,
+                    # 专门用于区分气泡模型的调试框
+                    "class_name": "bubble_debug_box",
+                }
+                detections.append(debug_det)
+            except Exception:
+                pass
+
         return detections, bubble_detected, bubble_count
 
     def detect_batch(
@@ -135,11 +154,25 @@ class BubbleDetector:
 
         out = []
         if not results:
-            for _ in frames:
-                out.append(([], False, 0))
+            for frame in frames:
+                # 无结果时仍然添加默认Debug框，便于确认管线是否工作
+                try:
+                    h, w = frame.shape[:2]
+                    x1, y1 = w // 4, h // 4
+                    x2, y2 = 3 * w // 4, 3 * h // 4
+                    debug_det = {
+                        "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                        "confidence": 0.0,
+                        "class_id": -1,
+                        # 专门用于区分气泡模型的调试框
+                        "class_name": "bubble_debug_box",
+                    }
+                    out.append(([debug_det], False, 0))
+                except Exception:
+                    out.append(([], False, 0))
             return out
 
-        for result in results:
+        for result, frame in zip(results, frames):
             detections = []
             bubble_detected = False
             bubble_count = 0
@@ -159,6 +192,28 @@ class BubbleDetector:
                         "class_name": class_name,
                     }
                     detections.append(detection)
+                    # 带颜色的调试输出（黄色），便于在日志中快速识别，有检测框时才会输出
+                    try:
+                        print(f"{self._log_color_yellow}[Raw Detection]: {detection}{self._log_color_reset}")
+                    except Exception:
+                        # 极端情况下（如终端不支持 ANSI），退回普通打印
+                        print(f"[Raw Detection]: {detection}")
+            # 若本帧没有任何真实检测结果，追加一个默认调试框，方便确认模型/管线已运行
+            if not detections:
+                try:
+                    h, w = frame.shape[:2]
+                    x1, y1 = w // 4, h // 4
+                    x2, y2 = 3 * w // 4, 3 * h // 4
+                    debug_det = {
+                        "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                        "confidence": 0.0,
+                        "class_id": -1,
+                        # 专门用于区分气泡模型的调试框
+                        "class_name": "bubble_debug_box",
+                    }
+                    detections.append(debug_det)
+                except Exception:
+                    pass
             out.append((detections, bubble_detected, bubble_count))
 
         return out

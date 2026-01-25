@@ -65,25 +65,16 @@ class Settings(BaseSettings):
     db_user: str = ""
     db_password: str = ""
 
-    # AI 模型配置（可通过 .env/.env.dev 覆盖）
-    yolo_model_path: str = "/opt/homebrew/runs/detect/train5/weights/best.pt"
-    yolo_conf_threshold: float = 0.8
-    yolo_iou_threshold: float = 0.45
-
-    bubble_model_path: str = "/Users/hmj/projects/CleanSightBackend/runs/bubble_detect/best.pt"
-    bubble_conf_threshold: float = 0.8
-    bubble_iou_threshold: float = 0.45
-
-    # 推理服务配置
-    alarm_batch_interval: int = 30
-    alarm_cooldown_seconds: int = 60
-
     # 其他配置
     debug: bool = False
 
-    # file_path 插入接口（用于把 HLS 段信息发送到无代码平台）
+    # file_path 插入接口（用于把 HLS 段信息发送到无代码平台） TODO: 上报HLS信息
     # 如果为空，则默认使用当前服务的 /api/file_path_insert
     file_path_insert_url: str = ""
+
+    # 推理与视频配置
+    inference_fps: int = 20  # 推理采样频率（同时控制可视化和视频输出帧率）
+    ca_segment_seconds: int = 10  # 视频段时长（秒）
 
     @property
     def database_url(self) -> str:

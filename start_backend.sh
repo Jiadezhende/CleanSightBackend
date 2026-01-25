@@ -20,5 +20,5 @@ else
     echo "Development mode enabled"
 fi
 
-# Start service
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Start service with colored logging
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-config logging_config.json
