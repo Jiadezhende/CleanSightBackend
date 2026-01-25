@@ -997,7 +997,8 @@ class InferenceManager:
         """
         import urllib.request
 
-        url = getattr(settings, 'alarm_report_url', "http://116.204.65.72:8881/gdmp/v1/api/nt/alarm_report")
+        # 直接从 settings 读取告警URL（必需配置）
+        url = settings.alarm_report_url
         payload = {
             "task_id": task_id if task_id is not None else 0,
             "step_id": step_id if step_id is not None else 0,

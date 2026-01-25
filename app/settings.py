@@ -5,37 +5,37 @@ from pydantic import model_validator
 
 
 def _load_env_files():
-    """按优先级加载环境文件：
-    - 若环境变量 `CLEANSIGHT_ENV_FILE` 指定路径，则加载该文件（优先）
-    - 若环境变量 `CLEANSIGHT_PROD=1`，则加载 `.env` 作为生产环境配置
-    - 否则默认加载 `.env.dev` 作为开发环境配置
+    """根据 CLEANSIGHT_ENV 环境变量加载对应的配置文件
+
+    - CLEANSIGHT_ENV=dev  → 加载 .env.dev（默认）
+    - CLEANSIGHT_ENV=test → 加载 .env.test
+    - CLEANSIGHT_ENV=prod → 加载 .env
+
     该函数会把键值对注入到 `os.environ`，以便 Pydantic 从环境读取。
     """
     base = Path(__file__).parent.parent
-    env_file_override = os.environ.get('CLEANSIGHT_ENV_FILE')
-    prod_mode = os.environ.get('CLEANSIGHT_PROD', '').lower() in ('1', 'true', 'yes')
-    # 记录是否加载了 .env.dev（供后续校验逻辑判断是否为开发模式）
+    env = os.environ.get('CLEANSIGHT_ENV', 'dev').lower()
+
+    # 根据环境变量确定配置文件
+    env_files = {
+        'dev': '.env.dev',
+        'test': '.env.test',
+        'prod': '.env'
+    }
+
+    env_file_name = env_files.get(env, '.env.dev')
+    env_path = base / env_file_name
+
+    # 记录是否为开发模式（供后续校验逻辑判断）
     global _LOADED_DEV
-    _LOADED_DEV = False
+    _LOADED_DEV = (env == 'dev')
 
-    candidates = []
-    if env_file_override:
-        # 指定文件优先使用（单个文件）
-        candidates.append(Path(env_file_override))
-        _LOADED_DEV = False  # 自定义文件，不视为 dev 模式
-    elif prod_mode:
-        # 生产模式：只加载 .env
-        prod_path = base / '.env'
-        if prod_path.exists():
-            candidates.append(prod_path)
-        _LOADED_DEV = False
-    else:
-        # 开发模式（默认）：只加载 .env.dev
-        dev_path = base / '.env.dev'
-        if dev_path.exists():
-            candidates.append(dev_path)
-            _LOADED_DEV = True
+    # 加载环境文件
+    if not env_path.exists():
+        print(f"[Settings] Warning: Environment file '{env_file_name}' not found")
+        return
 
+    candidates = [env_path]
     for p in candidates:
         try:
             p = Path(p)
@@ -58,19 +58,21 @@ def _load_env_files():
 
 
 class Settings(BaseSettings):
-    # 数据库配置 - 使用环境变量以确保安全
-    db_host: str = ""
-    db_port: int = 0
-    db_name: str = ""
-    db_user: str = ""
-    db_password: str = ""
+    # 数据库配置 - 无默认值，必须从环境变量读取
+    db_host: str
+    db_port: int
+    db_name: str
+    db_user: str
+    db_password: str
 
     # 其他配置
     debug: bool = False
 
-    # file_path 插入接口（用于把 HLS 段信息发送到无代码平台） TODO: 上报HLS信息
-    # 如果为空，则默认使用当前服务的 /api/file_path_insert
-    file_path_insert_url: str = ""
+    # file_path 插入接口（用于把 HLS 段信息发送到无代码平台）- 必需配置
+    file_path_insert_url: str
+
+    # 告警上报URL（必需配置）
+    alarm_report_url: str
 
     # 推理与视频配置
     inference_fps: int = 20  # 推理采样频率（同时控制可视化和视频输出帧率）
@@ -82,19 +84,53 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def check_required_fields(self):
-        """如果关键数据库字段缺失：
-        - 当设置 `CLEANSIGHT_STRICT=1` 时，抛出异常（适用于生产环境）。
-        - 否则仅打印警告以便本地开发继续运行（若加载了 `.env.dev` 则视为开发环境）。
+        """验证必需配置是否完整
+
+        - 严格模式（CLEANSIGHT_STRICT=1）：缺失配置时抛出异常，阻止启动
+        - 开发模式（CLEANSIGHT_STRICT=0）：只警告，允许继续运行
         """
-        strict = os.environ.get('CLEANSIGHT_STRICT', '') == '1'
-        missing_db = (not self.db_host or self.db_port == 0 or not self.db_name or not self.db_user or not self.db_password)
-        if missing_db:
-            msg = "数据库配置字段未设置或无效，请检查环境变量或 .env 文件"
-            # 如果开启严格模式并且不是加载的 dev 配置，则直接抛错
-            if strict and not globals().get('_LOADED_DEV', False):
-                raise ValueError(msg)
+        strict = os.environ.get('CLEANSIGHT_STRICT', '0') == '1'
+        is_dev = globals().get('_LOADED_DEV', False)
+
+        # 检查必需配置
+        missing_fields = []
+
+        # 数据库配置
+        if not self.db_host:
+            missing_fields.append('CLEANSIGHT_DB_HOST')
+        if not self.db_port or self.db_port == 0:
+            missing_fields.append('CLEANSIGHT_DB_PORT')
+        if not self.db_name:
+            missing_fields.append('CLEANSIGHT_DB_NAME')
+        if not self.db_user:
+            missing_fields.append('CLEANSIGHT_DB_USER')
+        if not self.db_password:
+            missing_fields.append('CLEANSIGHT_DB_PASSWORD')
+
+        # 外部接口URL配置
+        if not self.file_path_insert_url:
+            missing_fields.append('CLEANSIGHT_FILE_PATH_INSERT_URL')
+        if not self.alarm_report_url:
+            missing_fields.append('CLEANSIGHT_ALARM_REPORT_URL')
+
+        if missing_fields:
+            msg = f"缺少必需配置: {', '.join(missing_fields)}"
+
+            if strict and not is_dev:
+                # 生产模式且开启严格检查：抛出异常
+                raise ValueError(
+                    f"[配置错误] {msg}\n"
+                    f"请检查环境变量或 .env 文件\n"
+                    f"参考 .env.example 文件查看所需配置"
+                )
             else:
-                print(f"[Settings] Warning: {msg}")
+                # 开发模式或未开启严格检查：只警告
+                print(f"\n{'='*60}")
+                print(f"[Settings] ⚠️  警告: {msg}")
+                print(f"[Settings] 当前为开发模式，允许继续运行")
+                print(f"[Settings] 部分功能（如数据库操作）可能不可用")
+                print(f"{'='*60}\n")
+
         return self
 
     model_config = SettingsConfigDict(
