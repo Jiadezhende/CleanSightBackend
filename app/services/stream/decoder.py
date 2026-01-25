@@ -256,9 +256,6 @@ class FFmpegDecoder:
                     # 3.2 写入推理队列（降频）
                     if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
                         self.frames_written_to_ready += 1
-                else:
-                    # 兼容旧模式：调用 ai.submit_frame
-                    ai.submit_frame(self.client_id, std)
 
                 self.frames_received += 1
 
