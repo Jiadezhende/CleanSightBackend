@@ -7,12 +7,13 @@ Persistence模块
 """
 
 from .manager import PersistenceManager
-from .config import PersistenceConfig
+from .config import PersistenceConfig, get_persistence_config
 from .models import HLSPersistenceTask, AlarmPersistenceTask, PersistenceMetrics
 
 __all__ = [
     'PersistenceManager',
     'PersistenceConfig',
+    'get_persistence_config',
     'HLSPersistenceTask',
     'AlarmPersistenceTask',
     'PersistenceMetrics',

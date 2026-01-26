@@ -159,8 +159,9 @@ class InferenceManager:
         # ========== 持久化管理器（新架构） ==========
         from app.services.persistence import PersistenceManager, PersistenceConfig
 
-        persist_config = PersistenceConfig.from_settings()
-        persist_config.storage_base_dir = self._db_dir
+        # 加载配置并覆盖storage路径
+        persist_config = PersistenceConfig.from_yaml()
+        persist_config.storage.base_dir = str(self._db_dir)
         self.persistence_manager = PersistenceManager(config=persist_config)
 
         # 持久化线程（仅用于段检查）
@@ -181,7 +182,7 @@ class InferenceManager:
         if self._stage_configs is None:
             try:
                 # 尝试从配置文件加载（优先）
-                from app.services.inference.config_loader import load_stage_config
+                from app.services.inference.config import load_stage_config
                 from app.services.inference.components.component_factory import ComponentFactory
 
                 config = load_stage_config()
@@ -217,7 +218,7 @@ class InferenceManager:
         """创建时序分析器配置（优先从配置文件加载）"""
         try:
             # 尝试从配置文件加载时序分析器配置
-            from app.services.inference.config_loader import load_stage_config
+            from app.services.inference.config import load_stage_config
 
             config = load_stage_config()
             temporal_config = {}

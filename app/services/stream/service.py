@@ -21,11 +21,15 @@ except ImportError:
 
 # 导入配置加载器
 try:
-    from app.services.inference.config_loader import load_stage_config
+    from app.services.inference.config import load_stage_config
+    from app.services.stream.config import get_stream_config
+
     _inference_config = load_stage_config()
+    _stream_config = get_stream_config()
 except Exception as e:
-    logger.warning(f"Failed to load inference config: {e}, using defaults")
+    logger.warning(f"Failed to load configs: {e}, using defaults")
     _inference_config = None
+    _stream_config = None
 
 
 class StreamService:
@@ -35,6 +39,10 @@ class StreamService:
         self.lock = threading.Lock()
         self.metrics = {}
         self._stop_event = threading.Event()
+
+        # 配置引用
+        self.config = _stream_config
+
         # start selector polling thread on POSIX so stdout is consumed
         self._selector_thread: Optional[threading.Thread] = None
         if self.sel is not None:

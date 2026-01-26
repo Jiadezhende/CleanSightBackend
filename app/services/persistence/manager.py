@@ -33,9 +33,13 @@ class PersistenceManager:
         """初始化持久化管理器
 
         Args:
-            config: 持久化配置（如未提供则使用默认配置）
+            config: 持久化配置（如未提供则使用单例配置）
         """
-        self.config = config or PersistenceConfig.from_settings()
+        if config is None:
+            from app.services.persistence.config import get_persistence_config
+            self.config = get_persistence_config()
+        else:
+            self.config = config
 
         # 停止事件
         self._stop_event = threading.Event()
