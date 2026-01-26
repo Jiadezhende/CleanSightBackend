@@ -25,7 +25,7 @@ _inference_config = load_stage_config()
 manager = InferenceManager(
     use_async_pipeline=True,
     rt_fps=_inference_config.raw_fps,
-    ca_segment_seconds=_inference_config.ca_segment_seconds,
+    ca_segment_seconds=int(_inference_config.ca_segment_len / _inference_config.raw_fps),  # 帧数转换为秒数
 )
 
 

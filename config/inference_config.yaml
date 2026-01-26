@@ -83,7 +83,6 @@ global:
   # 批处理参数
   batch_size: 4                   # 推理批量大小
   inference_decimation: 2         # 推理降帧率（1=不降帧，2=每2帧推理1次）
-  visualization_decimation: 1     # 可视化帧率（1=全帧率，2=每2帧可视化1次）
 
   # 队列参数（client模块会读取）
   rt_maxlen: 30                   # 实时队列长度（帧数）

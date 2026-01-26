@@ -64,7 +64,10 @@ class InferenceConfig:
         self.inference_fps: int = self.global_config.get("inference_fps", 20)
         self.rt_maxlen: int = self.global_config.get("rt_maxlen", 30)
         self.ca_maxlen: int = self.global_config.get("ca_maxlen", 600)
-        self.ca_segment_seconds: int = self.global_config.get("ca_segment_seconds", 10)
+        self.ca_segment_len: int = self.global_config.get("ca_segment_len", 300)  # 帧数
+        # 兼容旧的 ca_segment_seconds 配置（废弃，优先使用 ca_segment_len）
+        if "ca_segment_seconds" in self.global_config and "ca_segment_len" not in self.global_config:
+            self.ca_segment_len = int(self.global_config["ca_segment_seconds"] * self.raw_fps)
 
     def get_stage_config(self, stage_name: str) -> Optional[StageConfig]:
         """获取指定 Stage 的配置"""

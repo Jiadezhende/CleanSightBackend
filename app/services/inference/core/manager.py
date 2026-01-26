@@ -195,7 +195,7 @@ class InferenceManager:
                     if models:  # 只添加有模型的 stage
                         stage_configs[stage_name] = {
                             "models": models,
-                            "batch_size": 4,  # 默认batch size
+                            "batch_size": config.batch_size,  # 从配置文件读取
                         }
 
                 if stage_configs:

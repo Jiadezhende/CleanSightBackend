@@ -11,4 +11,3 @@ frame:
 state:
   # 业务状态配置
   initial_stage: "LEAK"      # 初始检测阶段
-  heartbeat_timeout: 30      # 心跳超时（秒）

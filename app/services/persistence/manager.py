@@ -67,6 +67,8 @@ class PersistenceManager:
             num_workers=self.config.alarm_workers,
             batch_interval=self.config.alarm_batch_interval,
             cooldown_seconds=self.config.alarm_cooldown_seconds,
+            retry_times=self.config.alarm_retry_times,
+            retry_backoff=self.config.alarm_retry_backoff,
         )
 
         # 监控指标

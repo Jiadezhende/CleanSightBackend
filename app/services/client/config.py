@@ -97,7 +97,7 @@ class ClientConfig:
             # 从inference config读取共享参数
             self._rt_maxlen = inference_config.rt_maxlen
             self._ca_maxlen = inference_config.ca_maxlen
-            self._ca_segment_len = int(inference_config.ca_segment_seconds * inference_config.raw_fps)
+            self._ca_segment_len = inference_config.ca_segment_len  # 直接使用帧数
             self._inference_fps = inference_config.inference_fps
 
             logger.debug("✓ 已从inference_config.yaml读取共享参数: rt=%d, ca=%d, segment=%d, fps=%d",

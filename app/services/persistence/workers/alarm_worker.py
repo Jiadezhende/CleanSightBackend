@@ -134,7 +134,9 @@ class AlarmWorkerPool:
         input_queue: Queue,  # 原始告警队列
         num_workers: int = 1,
         batch_interval: int = 30,
-        cooldown_seconds: int = 60
+        cooldown_seconds: int = 60,
+        retry_times: int = 3,
+        retry_backoff: float = 1.0
     ):
         self.input_queue = input_queue
         self.num_workers = num_workers
@@ -147,8 +149,8 @@ class AlarmWorkerPool:
         self.strategy = AlarmPersistenceStrategy(
             batch_interval=batch_interval,
             cooldown_seconds=cooldown_seconds,
-            retry_times=3,
-            retry_backoff=1.0
+            retry_times=retry_times,
+            retry_backoff=retry_backoff
         )
 
         # 创建批量刷新线程
