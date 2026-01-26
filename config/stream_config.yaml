@@ -16,8 +16,8 @@ health_monitor:
   # 健康监控配置
   check_interval: 5.0        # 检查间隔（秒）
   heartbeat_timeout: 10.0    # 心跳超时（秒）
-  restart_delay: 2.0         # 重启延迟（秒）
-  max_restart_attempts: 3    # 最大重启次数
+  restart_delay: 3.0         # 重启延迟（秒）
+  max_restart_attempts: 5    # 最大重启次数
   restart_window: 60.0       # 重启窗口（秒）
 
 cleanup:
