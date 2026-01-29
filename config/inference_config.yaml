@@ -1,0 +1,94 @@
+# 推理服务阶段配置文件
+# 定义各个 Stage 的模型、时序分析器、可视化器和告警触发条件
+
+stages:
+  # ==================== LEAK 阶段（泄漏检测） ====================
+  LEAK:
+    # 模型列表（按顺序执行）
+    models:
+      - name: bubble_detection
+        class: app.services.models.bubble.BubbleDetectionTask
+        params:
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
+          conf_threshold: 0.5
+          iou_threshold: 0.45
+          enabled: true
+
+      - name: bending_detection
+        class: app.services.models.bending.EndoscopeBendingDetectionTask
+        params:
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
+          conf_threshold: 0.6
+          iou_threshold: 0.45
+          enabled: true
+
+    # 时序分析器配置
+    temporal_analyzer:
+      class: app.services.inference.components.DefaultTemporalAnalyzer
+      config:
+        bubble:
+          mode: consecutive          # 连续帧模式
+          threshold: 3               # 连续3帧才触发
+
+        bending:
+          mode: sliding_window       # 滑动窗口模式
+          window_seconds: 2.0        # 2秒窗口
+          ratio: 0.7                 # 70%比例才触发
+
+    # 可视化器配置
+    visualizer:
+      class: app.services.inference.components.DefaultVisualizer
+
+    # 告警触发条件
+    alarm_triggers:
+      - condition: bubble_detected == True
+        alarm_type: 流程违规
+        alarm_level: high
+        alarm_message: 检测到气泡异常
+
+      - condition: bending_detected == True
+        alarm_type: 流程违规
+        alarm_level: high
+        alarm_message: 检测到内镜弯折异常
+
+  # ==================== CLEAN 阶段（清洁检测） ====================
+  CLEAN:
+    # 模型列表
+    models:
+      # 未来可添加清洁质量检测模型
+      # - name: quality_detection
+      #   class: app.services.ai_models.quality_task.QualityDetectionTask
+      #   params:
+      #     model_path: ${QUALITY_MODEL_PATH:./weights/quality.pt}
+      #     enabled: true
+
+    # 时序分析器配置
+    temporal_analyzer:
+      class: app.services.inference.components.DefaultTemporalAnalyzer
+      config:
+        quality:
+          mode: sliding_window
+          window_seconds: 2.0
+          ratio: 0.8
+
+    # 告警触发条件
+    alarm_triggers: []
+
+# ==================== 全局配置（所有模块共享） ====================
+global:
+  # 视频处理参数（所有模块共享）
+  raw_fps: 30                     # 原始视频帧率（persistence, stream模块会读取）
+  inference_fps: 20               # 推理/输出帧率（persistence, client模块会读取）
+
+  # 批处理参数
+  batch_size: 4                   # 推理批量大小
+  inference_decimation: 2         # 推理降帧率（1=不降帧，2=每2帧推理1次）
+
+  # 队列参数（client模块会读取）
+  rt_maxlen: 30                   # 实时队列长度（帧数）
+  ca_maxlen: 2700                 # CA队列最大长度（帧数，约90秒@30fps）
+  ca_segment_len: 300             # HLS段长度（帧数，约10秒@30fps）
+
+  # 注意：
+  # - persistence和client模块会直接读取这些参数，保证全局一致性
+  # - 修改这些参数会影响所有相关模块

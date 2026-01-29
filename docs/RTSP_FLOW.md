@@ -94,5 +94,3 @@ Invoke-RestMethod -Method Post -Uri "http://36.103.203.206:8000/ai/terminate_tas
 3) 装载任务：GET `/ai/load_task/1`
 4) 启动拉流：POST `/inspection/start_rtsp_stream`（带 `client_id` 与 `rtsp_url`）
 5) 可选：用 WebSocket 订阅 `/ai/video?client_id=172.16.77.221` 显示可视化
-
-如需我把此文档再扩展为带图的 README 或直接生成 PowerShell 测试脚本，请回复要使用的 `task_id`、MediaMTX host:port，以及希望的 `client_id` 示例。

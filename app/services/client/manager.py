@@ -12,9 +12,12 @@ from typing import Dict, Optional
 import logging
 
 from .queues import ClientQueues
-from app.settings import settings
+from .config import get_client_config
 
 logger = logging.getLogger("app.services.client.manager")
+
+# 加载客户端配置（单例）
+_client_config = get_client_config()
 
 
 class ClientManager:
@@ -49,11 +52,11 @@ class ClientManager:
         self._clients: Dict[str, ClientQueues] = {}
         self._clients_lock = threading.Lock()
 
-        # 默认配置参数（从 settings 加载）
-        self._default_rt_maxlen = 30  # 实时队列长度（约1秒@30fps）
-        self._default_ca_segment_len = 300  # CA段长度（约10秒@30fps）
-        self._default_ca_maxlen = 2700  # CA队列最大长度（约90秒@30fps）
-        self._default_inference_fps = settings.inference_fps  # 推理采样频率
+        # 默认配置参数（从client配置加载）
+        self._default_rt_maxlen = _client_config.rt_maxlen  # 实时队列长度
+        self._default_ca_segment_len = _client_config.ca_segment_len  # CA段长度
+        self._default_ca_maxlen = _client_config.ca_maxlen  # CA队列最大长度
+        self._default_inference_fps = _client_config.inference_fps  # 推理采样频率
 
         logger.info("ClientManager 单例已初始化")
 

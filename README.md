@@ -1,567 +1,475 @@
-# CleanSightBackend
+# CleanSight 后端
 
-CleanSight 是一个用于长海医院内镜清洗过程 AI 检测的后端系统。它确保每个清洗步骤都正确执行，从而提高患者安全性和合规性。
+CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同时存储近期的检测数据，可以追溯。它确保每个人工清洗步骤都正确执行，从而保证患者安全。
 
-## 功能简介
+## 核心服务
 
-- **实时视频流处理**: 捕获视频，使用 AI 模型处理，并通过 WebSocket 推送结果。
-- **三服务架构**: 解耦视频流收发、AI 推理和 Client数据管理，优化性能。
-- **多任务并行推理**: 支持多种 AI 模型并行执行（关键点检测、动作分析、内镜弯折检测等）。
-- **可扩展架构**: 基于任务注册表的设计，便于添加新的检测任务。
-- **RTMP 流处理**: 从 RTMP 流以固定帧率提取视频帧，支持实时监控。
-- **AI 推理**: 关键点检测 + 动作分析，实时评估清洗过程。
-- **实时推送**: 通过 WebSocket 推送处理后的视频帧和推理结果。
-- **视频追溯**: 自动生成 HLS 视频段和关键点 JSON，支持任务回放。
-- **多客户端支持**: 同时处理多个 RTMP 流，每个客户端独立队列管理。
+CleanSight 包含以下核心服务：
+
+- **多路视频流接收与读取** - 支持 RTSP/RTMP 多路并发流处理
+- **并行推理** - 不同清洗阶段使用不同模型组，支持 CUDA Stream 并行
+- **监控视频落盘** - HLS 视频段自动生成和归档
+- **告警信息上报** - 批量去重和实时上报告警
+- **实时推理画面展示** - WebSocket 实时推送处理后的视频帧
+
+各服务之间具有良好的隔离，架构设计请见 [整体架构文档](docs/ARCHITECTURE_OVERVIEW.md)。
+
+---
 
 ## 项目结构
 
-`app/`: 主应用代码，包括 API 路由和 WebSocket 处理程序。
-
-- `models/`: 包含用于请求和响应验证的 Pydantic 数据结构。
-- `routers/`: API 路由定义。
-  - `ai.py`: AI 推理服务路由
-  - `inspection.py`: 视频流服务路由
-  - `task.py`: 消洗任务管理路由
-- `services/`: 业务逻辑和 AI 模型集成。
-  - `ai.py`: 推理管理器和任务架构
-  - `ai_models/`: AI 模型实现
-    - `bubble_detection.py`: 气泡检测器
-    - `bubble_task.py`: 气泡检测任务
-    - `yolo_detection.py`: 内镜弯折检测器
-    - `yolo_task.py`: 内镜弯折检测任务
-  - `client.py`: 客户端缓存结构实现
-  - `infer_task.py`: 推理任务基类
-  - `pipeline_base.py`: 推理流水线基类实现
-  - `task.py`: 任务管理和视频追溯
-- `test/`: 测试客户端代码，用于上传视频帧和显示推理结果。
-- `integration_tests/`: 集成测试与端到端/远程测试脚本（用于验证完整管道）。
-- `docs/`: 核心设计文档
-
-## 架构说明
-
-```text
-RTMP 流 → 帧捕获线程 → CA-ReadyQueue → CA-RawQueue & AI 推理 → CA-ProcessedQueue + RT-ProcessedQueue
-                                                       ↓                    ↓
-                                               HLS 段 + JSON          WebSocket 推送
+```
+app/
+├── data/                    # 存储推理模型参数
+│   ├── bubble-best.pt       # 气泡检测模型（6.2MB）
+│   └── bend-best.pt         # 弯折检测模型（22.5MB）
+├── models/                  # 常用数据模型
+│   ├── frame.py             # 帧数据结构
+│   ├── task.py              # 任务模型
+│   └── status_messages.py   # 状态消息
+├── routers/                 # 前端接口（见 [API 文档](docs/API_ENDPOINTS.md)）
+│   ├── ai.py                # AI 推理服务路由
+│   ├── inspection.py        # 视频流控制路由
+│   └── task.py              # 任务管理路由
+└── services/                # 各服务模块
+    ├── stream/              # 视频流处理服务（FFmpeg 解码、健康监控）
+    ├── inference/           # 推理服务（模型推理、时序分析、可视化）
+    ├── persistence/         # 持久化服务（HLS 落盘、告警上报）
+    ├── client/              # 客户端管理（队列管理、状态管理）
+    └── models/              # AI 模型实现（YOLO 检测、时序分析）
 ```
 
-### Client数据管理：三队列设计
+各服务的详细架构请见对应文档：
 
-- **CA-ReadyQueue**: 从 RTMP 流提取的原始帧，等待 AI 推理，AI服务启动后才会开始捕获
-- **CA-RawQueue**: 等待落盘的原始视频
-- **CA-ProcessedQueue**: 目标检测后的处理帧（含关键点），用于生成 HLS 段以及JSON数据
-- **RT-ProcessedQueue**: 实时推理结果（约 1 秒缓存），用于 WebSocket 推送给前端展示
+- [流处理服务](docs/ARCHITECTURE_OVERVIEW.md#1-streamservice---视频流处理服务)
+- [推理服务](docs/INFERENCE_SERVICE_ARCHITECTURE.md)
+- [持久化服务](docs/PERSISTENCE.md)
 
-### 独立持久化与帧率控制
+---
 
-系统采用独立持久化策略和解耦的帧率控制机制，以优化性能和资源利用：
+## 项目配置
 
-#### 独立持久化
+### 硬件要求
 
-- **CA-RawQueue 与 CA-ProcessedQueue 独立落盘**：两个队列以不同速率积累数据并独立触发持久化
-  - `CA-RawQueue` 以视频源帧率（通常 30fps）积累原始帧
-  - `CA-ProcessedQueue` 以推理流水线吞吐率（约 15fps）积累处理后的帧
-  - 每个队列独立检查，达到阈值（默认 300 帧，约 10 秒）时自动触发落盘
-  - 持久化操作异步执行，不阻塞实时推理和视频流
+- **GPU**: RTX 4090（推荐）或其他 CUDA 兼容 GPU
+- **CPU**: 支持降级到 CPU 模式（性能较低）
+- **内存**: 至少 16GB RAM
 
-#### 帧率控制策略
+### 系统兼容性
 
-系统采用统一的 `inference_fps` 参数控制推理、可视化和处理视频输出：
+- ✅ Windows 10/11
+- ✅ Ubuntu 20.04+
+- ✅ Docker 容器化部署
 
-1. **推理帧率** (`inference_fps`)
-   - 控制每秒送入推理流水线的帧数（默认 20fps）
-   - 通过降频策略减少计算负载，同时保持检测准确性
-   - 配置位置：`settings.inference_fps`
-   - **影响范围**：
-     - 推理采样频率
-     - 可视化输出频率
-     - 处理视频（processed）的帧率
+### 环境部署
 
-2. **原始视频帧率**
-   - 原始视频（raw）保持视频源帧率（通常 30fps）
-   - 完整记录清洗过程，不受推理降频影响
+详细部署步骤请见 [部署指南](docs/DEPLOYMENT_GUIDE.md)，包括：
 
-3. **实时显示策略**
-   - 使用 `RT-ProcessedQueue`（1 秒循环缓冲区）实现流畅的实时显示
-   - 可视化时使用**最新原始帧 + 最近的推理结果**进行渲染
-   - 显示帧率跟随推理帧率
+1. **虚拟环境创建**: Python 3.10+
+2. **FFmpeg 安装**: 用于视频解码（必需）
+3. **MediaMTX 配置**: 端口 1935（RTMP）、8004（RTSP）
+4. **依赖安装**:
+   - 生产环境：`opencv-python-headless`（无 GUI）
+   - 开发环境：`opencv-python`（支持可视化）
 
-#### 设计优势
+### 配置文件
 
-- **内存优化**：推理降频减少队列积压，避免内存溢出
-- **计算优化**：减少不必要的推理计算，提升系统并发能力
-- **灵活配置**：根据硬件性能和业务需求独立调节推理频率和视频质量
-- **持久化解耦**：两个队列独立落盘，避免因速率差异导致的阻塞
+- **环境变量**: `.env`、`.env.dev`、`.env.test`
+- **推理配置**: `config/inference_config.yaml`
+- **持久化配置**: `config/persistence_config.yaml`
+- **流处理配置**: `config/stream_config.yaml`
 
-#### 相关配置参数
+配置说明请见 [配置指南](docs/CONFIGURATION_GUIDE.md)。
 
-- `inference_fps`: 推理帧率（默认 20fps）- 统一控制推理、可视化和处理视频的帧率
-- `ca_segment_seconds`: 视频段时长（默认 10 秒）
-- `ca_segment_len`: 视频段帧数阈值（取决于视频源帧率，默认 300 帧）
+---
 
-**注意**：
-- 原始视频（raw）保持30fps，完整记录过程
-- 处理视频（processed）使用 `inference_fps` 作为帧率
-- 调整 `inference_fps` 可以在性能和质量之间权衡
+## Quick Start
 
-### RTSP 服务
+完整的启动流程和接口调用示例请见 [快速开始指南](docs/QUICK_START.md)。
 
-独立运行，使用 mediamtx 提供视频流中转功能。配置文件位于 [mediamtx_v1.15.4](mediamtx_v1.15.4) (for Windows Local Test), [mediamtx_v1.15.5_linux_amd64](mediamtx_v1.15.5_linux_amd64)(for Linux Remote Test)。
-
-更详细的并发考量，请参考文档：[RTSP 多流处理(Coming Soon)](docs/RTSP_MULTI_STREAM.md)
-
-### AI 推理架构
-
-TODO: 更新 AI 推理架构设计
-
-系统采用可扩展的推理流水线注册架构，在流水线中支持多种 AI 模型并行或串行执行：
-
-将不同推理任务封装为独立的 `InferenceTask` 类，并通过 `SubTaskPipeline` 进行组合和调度。一个`SubTaskPipeline`可以分为以下两个阶段：
-
-- **关键点检测/目标检测**: 检测内窥镜清洗过程中的关键点
-- **时序动作分析**: 分析弯曲、浸泡等清洗动作
-
-最后由`TaskPipeline`进行结果聚合和任务状态管理。
-
-详细说明请参考文档：
-
-- [推理与后处理架构设计](docs/INFERENCE_SERVICE_ARCHITECTURE.md)
-- [流水线切换逻辑(Coming soon)]()
-- [推理任务注册设计(Coming soon)]()
-
-## Quick Start for app
-
-### 环境配置
-
-```powershell
-# 创建虚拟环境并激活，使用python3.10+
-python -m venv .venv
-# source .venv/bin/activate # Linux/Mac
-.\.venv\Scripts\activate # Windows
-
-# 安装依赖（可能需要镜像源）
-pip install -r requirements.txt
-
-# 测试彩色日志（可选）
-python test_colorlog.py
-```
-
-***另外，确保安装 ffmpeg 可执行文件，并将其路径添加到系统 PATH 中，用于解码 RTSP 流***
-
-参考 [.env.example](.env.example) 创建 `.env.dev` (开发) 和 `.env` (生产) 配置文件。主要需设定数据库地址、密码，以及模型参数文件路径。
-
-### 日志配置
-
-系统使用彩色日志输出，提供清晰易读的日志信息：
+### 1. 启动服务
 
 ```bash
-# 控制日志级别（默认: INFO）
-export LOG_LEVEL=DEBUG  # Linux/Mac
-set LOG_LEVEL=DEBUG     # Windows
+# 启动 MediaMTX（终端 1）
+cd mediamtx_v1.15.4
+./mediamtx.exe    # Windows
+# 或 ./mediamtx  # Linux
 
-# 可选值: DEBUG, INFO, WARNING, ERROR, CRITICAL
+# 启动后端 API（终端 2）
+.\start_backend.ps1 dev   # Windows
+# 或 ./start_backend.sh dev  # Linux
 ```
 
-**日志特性**:
-
-- ✅ 彩色输出（不同级别使用不同颜色）
-- ✅ 时间戳（HH:MM:SS格式）
-- ✅ 组件标识（明确日志来源）
-
-详细说明请参考: [日志系统使用指南](docs/LOGGING_GUIDE.md)
-
-**启动**：
-使用 [start_prod.ps1](start_prod.ps1) (Windows) 或 [start_prod.sh](start_prod.sh) (Linux) 启动，通过修改CLEANSIGHT_PROD切换环境
-
-- 开发环境(CLEANSIGHT_PROD=0)：加载 `.env.dev`
-- 生产环境(CLEANSIGHT_PROD=1)：加载 `.env`
-
-**手动启动生产环境**:
-
-```powershell
-# Windows
-.\.venv\Scripts\activate
-$env:CLEANSIGHT_PROD = '1'
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# Linux/Mac
-source .venv/bin/activate
-export CLEANSIGHT_PROD=1
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-### Docker Compose 本地开发环境（开发中）
-
-Docker 化的双服务开发栈（Postgres + MediaMTX）已经编排在 [docker-compose.yml](docker-compose.yml)。
-
-- **启动**：第一次运行会拉取镜像并构建上述服务镜像。
-
-  ```powershell
-  # docker构建服务并启动
-  docker compose up --build
-  # 本地启动后端
-  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-  ```
-
-  启动完成后：
-  - API: <http://localhost:8000/docs>
-  - Postgres: `postgresql://cleansight:cleansight@localhost:5432/cleansight`
-  - MediaMTX: `rtmp://localhost:1935/live/<stream>`、`rtsp://localhost:8004/<path>`
-
-- **组件说明**
-  - `db`：`postgres:15-alpine`，持久化卷 `postgres_data` 保存数据文件。
-  - `mediamtx`：使用官方 `bluenviron/mediamtx:1.15.4` 镜像，并挂载 [mediamtx_v1.15.4/mediamtx.yml](mediamtx_v1.15.4/mediamtx.yml) 作为配置，可直接在宿主机修改后 `docker compose restart mediamtx` 生效。
-  - **（开发中）** 完全采用python代码访问数据库，而非使用脚本。
-
-- **常用命令**
-  - 停止并移除资源：`docker compose down -v`
-  - 查看应用日志：`docker compose logs -f app`
-  - 进入数据库：`docker compose exec db psql -U cleansight -d cleansight`
-
-> 提示：如果需要变更数据库凭据或端口，可直接编辑 [docker-compose.yml](docker-compose.yml)，同时更新 `app` 服务的 `CLEANSIGHT_*` 变量即可。
-
-## Quick Start for mediamtx
-
-本项目使用 MediaMTX ，用于 RTSP 流的中转和分发。
-
-根据运行平台，`cd`到对应目录`mediamtx_*/`，运行 MediaMTX 可执行文件即可。
-
-## 测试
-
-### 本地完整管道测试
+### 2. 运行测试
 
 ```bash
-# 运行完整的本地管道测试（需要本地MediaMTX和后端服务）
-# rtsp
-python integration_tests/local_full_pipeline_rtsp.py -duration 30 --task_id 1
+# 本地完整测试（30秒）
+python integration_tests/local_full_pipeline_rtsp.py --duration 30
+
+# 远程服务器测试
+python integration_tests/remote_full_pipeline_rtsp.py --server 117.50.241.174 --duration 60
+
+# 并发压力测试（10 个并发任务）
+python integration_tests/stress_test.py --max-tasks 10 --duration 60
 ```
 
-### 远程服务器测试
+### 3. 接口调用流程
 
-用于测试部署在远程服务器上的CleanSight服务：
+1. **加载任务**: `GET /ai/load_task/{task_id}`
+2. **启动流**: `POST /inspection/start_rtsp_stream`
+3. **接收推理结果**: WebSocket `/ai/video?client_id={client_id}`
+4. **监控任务状态**: WebSocket `/task/status/{client_id}`
+5. **停止流**: `POST /inspection/stop_rtsp_stream`
+
+详细 API 文档请见 [API 端点文档](docs/API_ENDPOINTS.md)。
+
+### 返回数据结构
+
+- **ProcessedFrame**: 处理后的视频帧（Base64 编码）
+- **TaskStatusResponse**: 任务状态（阶段、检测结果、告警）
+- **InferenceResult**: 推理结果（检测框、关键点、置信度）
+
+数据结构详情请见 [快速开始指南](docs/QUICK_START.md#返回数据结构)。
+
+---
+
+## 整体架构
+
+CleanSight 采用**三服务解耦架构**，通过异步队列协作：
+
+```mermaid
+graph LR
+    A[RTSP 流] --> B[StreamService]
+    B --> C[ClientQueues]
+    C --> D[InferenceManager]
+    D --> E[PersistenceManager]
+    D --> F[WebSocket 推送]
+    E --> G[HLS 视频段]
+    E --> H[告警上报]
+```
+
+### 数据流
+
+```
+RTSP 流 (30fps)
+    ↓ [FFmpeg 解码]
+ca_ready (20fps) ← 推理队列
+ca_raw (30fps)   ← 原始视频队列
+    ↓ [AI 推理 + 时序分析 + 可视化]
+ca_processed (20fps) ← HLS 落盘
+rt_processed (20fps) ← WebSocket 推送
+```
+
+### 异步队列设计
+
+- **ca_ready**: 待推理队列（降帧后 20fps）
+- **ca_raw**: 原始视频队列（30fps 完整记录）
+- **ca_processed**: 处理后队列（用于 HLS 视频段生成）
+- **rt_processed**: 实时队列（1 秒缓存，WebSocket 推送）
+
+### 多线程池协作
+
+- **推理线程池**: 每个 Stage 一个推理线程（CUDA Stream 并行）
+- **时序分析线程池**: 2-4 个线程处理时序逻辑
+- **可视化线程池**: 4-8 个线程绘制检测框
+- **持久化线程池**: HLS Worker（2 个）+ 告警 Worker（1 个）
+
+详细架构设计请见 [整体架构文档](docs/ARCHITECTURE_OVERVIEW.md)。
+
+---
+
+## 异常处理
+
+### 断线重连
+
+CleanSight 实现了智能断线重连机制：
+
+- **心跳检测**: 每 5 秒检查一次，10 秒无帧判定为断流
+- **自动重连**: 最多尝试 5 次，每次间隔 3 秒
+- **重连成功条件**: 连续 10 秒收到帧
+
+配置参数：
+
+```yaml
+health_monitor:
+  check_interval: 5.0
+  heartbeat_timeout: 10.0
+  max_restart_attempts: 5
+```
+
+### Timeout 清理
+
+- **孤儿流检测**: 30 秒检查一次，90 秒超时清理
+- **资源清理**: 自动清理 FFmpeg 进程、推理队列、客户端状态
+
+详细机制请见 [异常处理文档](docs/EXCEPTION_HANDLING.md)。
+
+---
+
+## 可扩展的模型与业务接口
+
+CleanSight 支持配置驱动的多阶段推理流水线，针对不同清洗阶段使用不同模型组。
+
+### 已实现的推理流水线
+
+#### LEAK 阶段（泄漏检测）
+
+- **模型组**:
+  - bubble_detection（气泡检测，YOLO）
+  - bending_detection（内镜弯折检测，YOLO）
+- **ClientState 维护**: 使用 `temporal_history` 跟踪 2 秒窗口内的检测结果
+- **时序分析逻辑**:
+  - 气泡：consecutive 模式（连续 3 帧触发）
+  - 弯折：sliding_window 模式（2 秒窗口 70% 比例触发）
+- **告警触发**: 检测到气泡或弯折时上报告警
+
+#### CLEAN 阶段（清洁检测）
+
+- **模型组**: 当前为空（可扩展）
+- **时序分析**: 支持自定义规则
+- **告警触发**: 可配置告警条件
+
+### 开发新流水线
+
+详细开发指南请见 [推理流水线开发文档](docs/PIPELINES.md)，包括：
+
+1. 创建 `InferenceTask` 子类
+2. 配置 `inference_config.yaml`
+3. 实现时序分析逻辑
+4. 定义告警触发条件
+
+---
+
+## 测试方法
+
+### 单元测试
 
 ```bash
-python integration_tests/remote_full_pipeline_rtsp.py --duration 120 --task_id 1 --server 36.103.203.206
+# 运行所有测试
+pytest
+
+# 运行特定模块测试
+pytest app/services/inference/tests/
+
+# 带覆盖率报告
+pytest --cov=app --cov-report=html
 ```
 
-### 参数说明
+### 集成测试
 
-- `--task_id`: 要测试的任务 ID（默认: 0）
-- `--client_id`: 客户端标识符，最好是和任务的source_id一致
-- `--duration`: 测试时长秒数（默认: 30）
-- `--video_path`: 测试视频路径（默认: test/test_video.mp4）
-- `--no-window`: 禁用可视化窗口
-- `--server`: 远程服务器地址
+#### 本地测试
 
-远程测试功能：
+```bash
+# 完整流程测试（30秒）
+python integration_tests/local_full_pipeline_rtsp.py --task_id 1 --duration 30
 
-- 向远程服务器推送RTSP视频流
-- 加载远程任务 (task_id=1)
-- 实时接收AI推理结果和状态更新
-- 本地可视化显示远程处理结果
-- 自动化测试报告
+# 无窗口模式测试
+python integration_tests/local_full_pipeline_rtsp.py --task_id 1 --duration 30 --no-window
+```
 
-详细使用说明见：[RTSP测试流说明](docs/RTSP_FLOW.md)
+#### 远程测试
+
+```bash
+# 远程服务器测试
+python integration_tests/remote_full_pipeline_rtsp.py \
+    --task_id 1 \
+    --duration 60 \
+    --server 117.50.241.174
+
+# 自定义视频测试
+python integration_tests/remote_full_pipeline_rtsp.py \
+    --task_id 1 \
+    --video_path path/to/video.mp4 \
+    --server 117.50.241.174
+```
+
+#### 压力测试
+
+```bash
+# 并发压力测试（10个任务）
+python integration_tests/stress_test.py --max-tasks 10 --duration 60
+
+# 清理残留进程
+python integration_tests/cleanup_processes.py
+```
+
+#### 断线重连测试
+
+```bash
+# 测试自动重连（15秒推流 → 10秒断流 → 15秒恢复）
+python integration_tests/test_reconnect_success.py --task_id 1
+
+# 测试流断开与重连
+python integration_tests/test_stream_disconnect_reconnect.py --task_id 1
+
+# 测试超时清理
+python integration_tests/test_reconnect_timeout.py --task_id 1
+```
+
+详细测试说明请见 [快速开始指南](docs/QUICK_START.md#测试方法)。
+
+---
 
 ## API 文档
 
-运行后，访问 <http://localhost:8000/docs> 查看交互式 HTTP API 文档。
+运行后端服务后，访问以下地址查看交互式 API 文档：
 
-### HTTP API 接口
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
 
-#### 路由 `/ai`
+### 主要 API 端点
 
-##### 1. 查询 AI 服务状态
+#### AI 推理服务 (`/ai`)
 
-- **URL**: `GET /ai/status`
-- **描述**: 获取所有客户端的队列状态和AI服务运行信息
-- **响应**:
+- `GET /ai/status` - 查询 AI 服务状态
+- `GET /ai/load_task/{task_id}` - 加载清洗任务
+- `POST /ai/terminate_task/{client_id}` - 终止任务
+- `WebSocket /ai/video` - 实时推理结果流
 
-  ```json
-  {
-    "clients": 2,
-    "queues": {
-      "camera_001": {
-        "ca_raw": 15,
-        "ca_processed": 120,
-        "rt_processed": 30,
-        "rtmp_url": "rtmp://192.168.1.100:1935/live/endoscope"
-      }
-    }
-  }
-  ```
+#### 视频流服务 (`/inspection`)
 
-##### 2. 加载任务
+- `POST /inspection/start_rtsp_stream` - 启动 RTSP 流捕获
+- `POST /inspection/stop_rtsp_stream` - 停止 RTSP 流捕获
 
-- **URL**: `GET /ai/load_task/{task_id}`
-- **描述**: 从数据库加载任务，为指定task_id的任务在AI服务中创建任务对象
-- **路径参数**:
-  - `task_id` (int): 任务唯一标识符
-- **响应**:
+#### 任务管理 (`/task`)
 
-  ```json
-  {
-    "task_id": 0,
-    "status": "running",
-    "cleaning_stage": "1",
-    "bending": false,
-    "bubble_detected": false,
-    "fully_submerged": false,
-    "updated_at": "2024-01-01T12:00:00"
-  }
-  ```
+- `WebSocket /task/status/{client_id}` - 任务状态实时更新
+- `GET /task/traceback/{task_id}/segments` - 获取视频段列表
+- `GET /task/traceback/{task_id}/playlist` - 获取 M3U8 播放列表
+- `GET /task/{task_id}/alarms` - 获取告警记录
 
-##### 3. 终止任务
+详细 API 文档请见 [API 端点文档](docs/API_ENDPOINTS.md)。
 
-- **URL**: `POST /ai/terminate_task/{client_id}`
-- **描述**: 终止指定的清洗任务，清理所有AI服务资源
-- **路径参数**:
-  - `client_id` (str): 客户端唯一标识符
-- **响应**:
+---
 
-  ```json
-  {
-    "status": "success",
-    "message": "Task terminated for client camera_001"
-  }
-  ```
+## 故障排查
 
-#### 路由 `/inspection`
+### 常见问题
 
-##### 1. 启动 RTMP 流捕获
+#### 1. FFmpeg 未找到
 
-- **URL**: `POST /inspection/start_rtmp_stream`
-- **描述**: 启动RTMP流捕获，以固定帧率提取视频帧
-- **请求体**:
+**错误信息**: `FileNotFoundError: ffmpeg not found`
 
-  ```json
-  {
-    "client_id": "camera_001",
-    "rtmp_url": "rtmp://localhost:1935/live/endoscope",
-    "fps": 30
-  }
-  ```
-
-- **响应**:
-
-  ```json
-  {
-    "status": "success",
-    "message": "RTMP 流捕获已启动 for camera_001"
-  }
-  ```
-
-##### 2. 停止 RTMP 流捕获
-
-- **URL**: `POST /inspection/stop_rtmp_stream?client_id={client_id}`
-- **描述**: 停止指定客户端的RTMP流捕获
-- **查询参数**:
-  - `client_id` (str): 客户端唯一标识符
-- **响应**:
-
-  ```json
-  {
-    "status": "success",
-    "message": "RTMP 流捕获已停止 for camera_001"
-  }
-  ```
-
-##### 3. 启动 RTSP 流捕获
-
-- **URL**: `POST /inspection/start_rtsp_stream`
-- **描述**: 启动 RTSP 流捕获；请求体包含 `client_id`, `rtsp_url`, `fps`。
-- **请求体示例**:
-
-  ```json
-  {
-    "client_id": "camera_001",
-    "rtsp_url": "rtsp://localhost:8004/live/stream",
-    "fps": 30
-  }
-  ```
-
-- **响应示例**:
-
-  ```json
-  {
-    "status": "success",
-    "message": "RTSP 流捕获已启动 for camera_001"
-  }
-  ```
-
-##### 4. 停止 RTSP 流捕获
-
-- **URL**: `POST /inspection/stop_rtsp_stream?client_id={client_id}`
-- **描述**: 停止指定客户端的 RTSP 流捕获。
-- **查询参数**:
-  - `client_id` (str): 客户端唯一标识符
-- **响应示例**:
-
-  ```json
-  {
-    "status": "success",
-    "message": "RTSP 流捕获已停止 for camera_001"
-  }
-  ```
-
-#### 路由 `/task`
-
-##### 1. 获取任务视频段信息
-
-- **URL**: `GET /task/traceback/{task_id}/segments`
-- **描述**: 获取任务的所有HLS视频段路径和关键点JSON路径
-- **路径参数**:
-  - `task_id` (int): 任务ID
-- **查询参数**:
-  - `video_type` (str, 可选): 视频类型 ("raw" 或 "processed", 默认 "processed")
-- **响应**:
-
-  ```json
-  {
-    "task_id": 0,
-    "video_type": "processed",
-    "total_segments": 5,
-    "playlist_path": "/data/task_0/processed_playlist.m3u8",
-    "segments": [
-      {
-        "segment_id": 1,
-        "segment_path": "/data/task_0/processed_segment_1735689600000.mp4",
-        "start_time": "2024-01-01T12:00:00",
-        "end_time": "2024-01-01T12:00:10",
-        "client_id": "camera_001",
-        "keypoints_path": "/data/task_0/keypoints_1735689600000.json"
-      }
-    ]
-  }
-  ```
-
-##### 2. 获取任务播放列表
-
-- **URL**: `GET /task/traceback/{task_id}/playlist`
-- **描述**: 获取任务的HLS播放列表文件(.m3u8)
-- **路径参数**:
-  - `task_id` (int): 任务ID
-- **查询参数**:
-  - `video_type` (str, 可选): 视频类型 ("raw" 或 "processed", 默认 "processed")
-- **响应**: M3U8播放列表文件
-
-##### 3. 流式传输视频段
-
-- **URL**: `GET /task/traceback/{task_id}/video/{segment_id}`
-- **描述**: 流式传输指定的视频段
-- **路径参数**:
-  - `task_id` (int): 任务ID
-  - `segment_id` (int): 段ID
-- **响应**: MP4视频文件流
-
-##### 4. 获取关键点数据
-
-- **URL**: `GET /task/traceback/{task_id}/keypoints/{segment_id}`
-- **描述**: 获取指定视频段的关键点JSON数据
-- **路径参数**:
-  - `task_id` (int): 任务ID
-  - `segment_id` (int): 段ID
-- **响应**: 关键点JSON数据
-
-##### 5. 获取所有关键点数据
-
-- **URL**: `GET /task/traceback/{task_id}/all_keypoints`
-- **描述**: 获取任务的所有关键点数据（合并所有段）
-- **路径参数**:
-  - `task_id` (int): 任务ID
-- **响应**:
-
-  ```json
-  {
-    "task_id": 0,
-    "total_frames": 900,
-    "keypoints": [
-      {
-        "frame_id": 1,
-        "timestamp": 1735689600000,
-        "keypoints": [...],
-        "confidence": 0.95
-      }
-    ]
-  }
-  ```
-
-##### 6. 获取任务告警记录
-
-- **URL**: `GET /task/{task_id}/alarms`
-- **描述**: 查询本地数据库中 `alarm_record` 表为指定 `task_id` 保存的所有告警记录，按 `created_at` 降序返回。适用于回溯某任务的所有异常事件与上报历史。
-- **路径参数**:
-  - `task_id` (int): 任务ID
-- **响应示例**:
-
-```json
-{
-  "task_id": 1,
-  "total": 2,
-  "alarms": [
-    {
-      "id": 123,
-      "task_id": 1,
-      "step_id": "0",
-      "alarm_type": "流程违规",
-      "alarm_level": "high",
-      "alarm_message": "检测到未按规范操作：操作员未佩戴手套",
-      "alarm_time": "2025-12-08T20:30:15",
-      "detection_result": {"detected_objects": ["person","glove"], "confidence": 0.95},
-      "camera_ip": "192.168.1.64",
-      "reader_ip": "172.16.77.221",
-      "created_at": "2025-12-08T20:30:20"
-    }
-  ]
-}
-```
-
-**cURL 示例**:
+**解决方法**:
 
 ```bash
-curl -X GET "http://localhost:8000/task/1/alarms"
+# Windows（使用 Chocolatey）
+choco install ffmpeg
+
+# Ubuntu/Debian
+sudo apt-get install ffmpeg
+
+# macOS
+brew install ffmpeg
 ```
 
-注意：当前实现会在运行时尝试创建并写入 `alarm_record` 表（针对 PostgreSQL）。若使用其他数据库，请确保表结构兼容或采用 ORM/migration 管理表结构。
+验证安装：`ffmpeg -version`
 
-### WebSocket 接口文档
+#### 2. 数据库连接失败
 
-#### 1. 实时视频流结果推送
+**错误信息**: `Connection refused` 或 `OperationalError`
 
-- **URL**: `ws://localhost:8000/ai/video?client_id={client_id}`
-- **描述**: 实时接收 AI 处理后的视频帧（含关键点标注）
-- **连接参数**:
-  - `client_id` (必需): 客户端唯一标识符
-- **数据格式**: Base64 编码的 JPEG 图像
+**解决方法**:
 
-  ```javascript
-  // 接收示例
-  data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ...
-  ```
+1. 检查 `.env` 文件中的数据库配置
+2. 确认数据库服务正在运行
+3. 验证网络连接和防火墙设置
 
-#### 2. 任务状态实时更新
+#### 3. GPU 不可用
 
-- **URL**: `ws://localhost:8000/task/status/{client_id}`
-- **描述**: 实时接收任务状态更新
-- **路径参数**:
-  - `client_id` (必需): 客户端唯一标识符
-- **数据格式**: JSON
+**错误信息**: `CUDA not available`
 
-  ```json
-  // 有活跃任务时
-  {
-    "task_id": "task_123",
-    "status": "active",
-    "cleaning_stage": 1,
-    "bending_count": 5,
-    "bubble_detected": false,
-    "fully_submerged": true,
-    "updated_at": "2024-01-01T12:00:00"
-  }
+**解决方法**:
 
-  // 无活跃任务时
-  {
-    "status": "no_active_task"
-  }
-  ```
+1. 检查 NVIDIA 驱动安装：`nvidia-smi`
+2. 验证 PyTorch CUDA 支持:
+   ```python
+   import torch
+   print(torch.cuda.is_available())
+   print(torch.cuda.get_device_name(0))
+   ```
+3. 系统会自动降级到 CPU 模式（性能较低）
+
+#### 4. 推流连接超时
+
+**错误信息**: `Connection timeout` 或 `Stream not found`
+
+**解决方法**:
+
+1. 确认 MediaMTX 服务正在运行
+2. 检查推流 URL 格式：`rtsp://localhost:8004/live/<stream_name>`
+3. 查看 MediaMTX 日志：检查端口占用和权限问题
+4. 防火墙设置：确保端口 1935（RTMP）和 8004（RTSP）开放
+
+#### 5. WebSocket 断开连接
+
+**错误信息**: `WebSocket connection closed`
+
+**解决方法**:
+
+1. 检查网络稳定性
+2. 增加 WebSocket 超时时间（在客户端配置）
+3. 查看后端日志中的异常信息
+
+### 日志查看
+
+查看详细日志以诊断问题：
+
+```bash
+# 设置日志级别为 DEBUG
+export LOG_LEVEL=DEBUG  # Linux/Mac
+set LOG_LEVEL=DEBUG     # Windows
+
+# 查看特定服务日志
+# 日志会按模块区分颜色和前缀，便于定位问题
+```
+
+### 更多帮助
+
+如果遇到其他问题，请查看：
+
+- [配置指南](docs/CONFIGURATION_GUIDE.md)
+- [部署指南](docs/DEPLOYMENT_GUIDE.md)
+- [异常处理文档](docs/EXCEPTION_HANDLING.md)
+- GitHub Issues：提交新问题或查看已知问题
+
+---
+
+## 许可证
+
+本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+
+---
+
+## 贡献指南
+
+欢迎贡献代码、报告问题或提出改进建议！
+
+### 贡献流程
+
+1. Fork 本仓库
+2. 创建特性分支：`git checkout -b feature/your-feature`
+3. 提交更改：`git commit -m "Add your feature"`
+4. 推送到分支：`git push origin feature/your-feature`
+5. 创建 Pull Request
+
+### 代码规范
+
+- 遵循 PEP 8 Python 代码规范
+- 添加必要的注释和文档字符串
+- 确保所有测试通过：`pytest`
+- 更新相关文档
+
+### 文档贡献
+
+- 技术文档位于 `docs/` 目录
+- 使用 Markdown 格式
+- 包含清晰的示例和图表
+
+---
+
+## 致谢
+
+感谢所有贡献者和使用 CleanSight 的医疗机构！
+
+**最后更新**: 2026-01-30
