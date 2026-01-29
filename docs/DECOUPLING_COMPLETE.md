@@ -108,7 +108,7 @@ stage_configs = {
 | `app/services/inference/worker_pool.py` | ✅ 已更新 | 使用 InferenceTask |
 | `app/services/inference/factory.py` | ✅ 已更新 | 不再导入 leak_test |
 | `app/services/inference/service.py` | ✅ 已更新 | 支持新配置格式 |
-| `app/services/inference/config_loader.py` | ✅ 新建 | 配置加载器 |
+| `app/services/inference/config.py` | ✅ 新建 | 配置加载器 |
 | `app/services/inference/component_factory.py` | ✅ 新建 | 组件工厂 |
 | `app/config/stages_config.yaml` | ✅ 新建 | 示例配置文件 |
 
@@ -164,7 +164,7 @@ python main.py
 - [x] 移除 `factory.py` 对 `leak_test.py` 的导入
 - [x] 更新 `factory.py` 的默认配置（使用 InferenceTask）
 - [x] 更新 `service.py` 支持新的 `models` 配置格式
-- [x] 创建配置加载器（`config_loader.py`）
+- [x] 创建配置加载器（`config.py`）
 - [x] 创建组件工厂（`component_factory.py`）
 - [x] 创建示例配置文件（`stages_config.yaml`）
 - [x] 告警系统独立化（独立队列+线程）

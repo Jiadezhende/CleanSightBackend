@@ -21,11 +21,18 @@ except ImportError:
 
 # 导入配置加载器
 try:
-    from app.services.inference.config_loader import load_stage_config
+    from app.services.inference.config import load_stage_config
+    from app.services.stream.config import get_stream_config
+    from app.services.client.config import get_client_config
+
     _inference_config = load_stage_config()
+    _stream_config = get_stream_config()
+    _client_config = get_client_config()
 except Exception as e:
-    logger.warning(f"Failed to load inference config: {e}, using defaults")
+    logger.warning(f"Failed to load configs: {e}, using defaults")
     _inference_config = None
+    _stream_config = None
+    _client_config = None
 
 
 class StreamService:
@@ -35,6 +42,10 @@ class StreamService:
         self.lock = threading.Lock()
         self.metrics = {}
         self._stop_event = threading.Event()
+
+        # 配置引用
+        self.config = _stream_config
+
         # start selector polling thread on POSIX so stdout is consumed
         self._selector_thread: Optional[threading.Thread] = None
         if self.sel is not None:
@@ -67,18 +78,27 @@ class StreamService:
             # 创建或获取 ClientQueues（通过 ClientManager）
             client_queues = None
             if client_manager is not None:
-                # 从配置文件读取推理FPS（base_fps=30, decimation=2 → 15fps）
+                # 从配置文件读取推理FPS
                 inference_fps = _inference_config.get_inference_fps(30) if _inference_config else 15
+
+                # 从配置文件读取帧和队列参数
+                resize_width = _client_config.frame.resize_width if _client_config else 640
+                resize_height = _client_config.frame.resize_height if _client_config else 480
+                ca_maxlen = _inference_config.ca_maxlen if _inference_config else 600
+                ca_segment_len = _inference_config.ca_segment_len if _inference_config else 150
 
                 client_queues = client_manager.get_client(
                     client_id,
-                    resize_width=640,
-                    resize_height=480,
+                    resize_width=resize_width,
+                    resize_height=resize_height,
                     inference_fps=inference_fps,
-                    ca_maxlen=600,  # 20秒缓冲
-                    ca_segment_len=150  # 5秒段
+                    ca_maxlen=ca_maxlen,
+                    ca_segment_len=ca_segment_len
                 )
-                logger.info("ClientQueues created for client=%s (inference_fps=%d)", client_id, inference_fps)
+                logger.info(
+                    "ClientQueues created for client=%s (inference_fps=%d, ca_maxlen=%d, ca_segment_len=%d)",
+                    client_id, inference_fps, ca_maxlen, ca_segment_len
+                )
 
             protocol_opts = []
             if protocol == 'RTSP':
@@ -93,7 +113,7 @@ class StreamService:
                 manager=self,
                 client_id=client_id,
                 stream_url=stream_url,
-                fps=fps,
+                decoder_config=self.config.decoder if self.config else None,
                 protocol_opts=protocol_opts,
                 client_queues=client_queues  # 传入 ClientQueues
             )
@@ -173,6 +193,15 @@ class StreamService:
         with self.lock:
             dec = self.decoders.get(client_id)
             return dec is not None and dec.is_alive()
+
+    def get_all_client_ids(self) -> set:
+        """获取所有活跃的客户端ID（有decoder的）
+
+        Returns:
+            客户端ID的集合
+        """
+        with self.lock:
+            return set(self.decoders.keys())
 
     def get_stream_info(self, client_id: str) -> Optional[Dict[str, Any]]:
         """获取流配置信息（用于重连）
@@ -267,7 +296,7 @@ class StreamService:
                     manager=self,
                     client_id=client_id,
                     stream_url=stream_url,
-                    fps=fps,
+                    decoder_config=self.config.decoder if self.config else None,
                     protocol_opts=protocol_opts,
                     client_queues=client_queues
                 )
@@ -301,23 +330,28 @@ class StreamService:
             from app.services.stream.cleanup import CleanupService, init_cleanup_service
             from app.services import ai  # AI服务模块
 
-            # 初始化清理服务（使用ai.manager作为InferenceManager实例）
+            # 初始化清理服务（使用ai.manager作为InferenceManager实例，传入配置）
             init_cleanup_service(
                 stream_service=self,
                 client_manager=client_manager,
-                inference_manager=ai.manager
+                inference_manager=ai.manager,
+                cleanup_config=self.config.cleanup if self.config else None
             )
 
             # 导入全局cleanup_service
             from app.services.stream.cleanup import cleanup_service
             self.cleanup_service = cleanup_service
 
-            # 初始化健康监控（传入stream_service以支持自动重连）
+            # 启动清理服务的后台线程
+            self.cleanup_service.start()
+            logger.info("[StreamService] Cleanup service background thread started")
+
+            # 初始化健康监控（传入stream_service以支持自动重连，传入配置）
             self.health_monitor = StreamHealthMonitor(
                 client_manager=client_manager,
                 cleanup_service=self.cleanup_service,
                 stream_service=self,
-                check_interval=3.0
+                health_config=self.config.health_monitor if self.config else None
             )
 
             # 启动监控线程
