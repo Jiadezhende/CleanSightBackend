@@ -128,18 +128,10 @@ def _create_default_stage_configs() -> Dict[str, Dict[str, Any]]:
     """
     from app.services.models.bubble import BubbleDetectionTask
     from app.services.models.bending import EndoscopeBendingDetectionTask
-    from app.services.inference.config import load_stage_config
     import os
 
     # 从环境变量获取模型路径，如果未设置则使用默认值
     model_base_path = os.environ.get("CLEANSIGHT_MODEL_PATH", "./app/data")
-
-    # 从配置文件读取 batch_size
-    try:
-        inference_config = load_stage_config()
-        batch_size = inference_config.batch_size if inference_config else 4
-    except Exception:
-        batch_size = 4
 
     # 创建模型实例（基于 InferenceTask）
     bubble_task = BubbleDetectionTask(
@@ -160,12 +152,12 @@ def _create_default_stage_configs() -> Dict[str, Dict[str, Any]]:
     stage_configs = {
         "LEAK": {
             "models": [bubble_task, bending_task],  # 直接传入 InferenceTask 实例
-            "batch_size": batch_size,  # 从配置文件读取
+            "batch_size": 4,
         },
         # 可以添加更多 stage
         # "CLEAN": {
         #     "models": [...],
-        #     "batch_size": batch_size,
+        #     "batch_size": 6,
         # },
     }
 

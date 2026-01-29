@@ -157,7 +157,7 @@ stages:
 然后在代码中加载：
 
 ```python
-from app.services.inference.config import load_stage_config
+from app.services.inference.config_loader import load_stage_config
 from app.services.inference.component_factory import ComponentFactory
 
 # 加载配置
@@ -468,7 +468,7 @@ result = analyzer.analyze("bubble", {"detected": True}, timestamp=time.time())
 print(result)
 
 # 3. 查看配置
-from app.services.inference.config import load_stage_config
+from app.services.inference.config_loader import load_stage_config
 
 config = load_stage_config()
 print(config.get_stage_config("LEAK"))

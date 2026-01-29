@@ -15,17 +15,13 @@ import numpy as np
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.inference.core.manager import InferenceManager
-from app.services.inference.config import load_stage_config
-
-# ========== 加载推理配置 ==========
-_inference_config = load_stage_config()
+from app.settings import settings
 
 # ========== 模块级单例（兼容旧代码） ==========
 
 manager = InferenceManager(
     use_async_pipeline=True,
-    rt_fps=_inference_config.raw_fps,
-    ca_segment_seconds=int(_inference_config.ca_segment_len / _inference_config.raw_fps),  # 帧数转换为秒数
+    ca_segment_seconds=settings.ca_segment_seconds,
 )
 
 
@@ -37,6 +33,16 @@ def start():
 def stop():
     """停止推理服务"""
     manager.stop()
+
+
+def submit_frame(client_id: str, frame: np.ndarray):
+    """从 RTMP 流提交帧到 CA-ReadyQueue"""
+    manager.submit_frame(client_id, frame)
+
+
+def set_rtmp_url(client_id: str, rtmp_url: str):
+    """设置客户端的 RTMP 流地址"""
+    manager.set_rtmp_url(client_id, rtmp_url)
 
 
 def set_stream_url(client_id: str, stream_url: str):

@@ -55,11 +55,6 @@
             "handlers": ["console"],
             "level": "INFO",
             "propagate": false
-        },
-        "watchfiles": {
-            "handlers": ["console"],
-            "level": "WARNING",
-            "propagate": false
         }
     },
     "root": {

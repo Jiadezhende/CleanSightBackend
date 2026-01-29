@@ -38,7 +38,7 @@ from .models import (
 )
 
 # 配置加载器
-from .config import load_stage_config, StageConfig
+from .config_loader import load_stage_config, StageConfig
 
 __all__ = [
     # 核心

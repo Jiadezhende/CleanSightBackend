@@ -13,7 +13,6 @@ import cv2
 
 from app.services import ai
 from app.models.frame import FrameData
-from app.services.stream.config import DecoderConfig
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -23,30 +22,31 @@ except ImportError:
 
 # 配置常量
 FFMPEG_BIN = os.environ.get("FFMPEG_PATH", "ffmpeg")
+DEFAULT_WIDTH = 640
+DEFAULT_HEIGHT = 480
 DEFAULT_CHANNELS = 3
+CHUNK_READ = 32768
+
+# 背压阈值：推理队列容量的百分比（不是固定值）
+# 当 CA-Ready-Queue 达到容量的 90% 时开始丢帧
+PER_STREAM_MAX_PENDING_RATIO = 0.90  # 90% 容量
 
 
 class FFmpegDecoder:
-    def __init__(self, manager, client_id: str, stream_url: str, decoder_config: Optional[DecoderConfig] = None, protocol_opts=None, client_queues=None):
+    def __init__(self, manager, client_id: str, stream_url: str, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT, fps=30, pix_fmt="bgr24", protocol_opts=None, client_queues=None):
         self.manager = manager
         self.client_id = client_id
         self.stream_url = stream_url
-
-        # 使用配置对象（如果未提供则使用默认配置）
-        self.config = decoder_config or DecoderConfig()
-        self.width = self.config.default_width
-        self.height = self.config.default_height
-        self.fps = self.config.default_fps
-        self.pix_fmt = self.config.pix_fmt
-        self.chunk_read_size = self.config.chunk_read_size
-        self.backpressure_ratio = self.config.backpressure_ratio
-
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.pix_fmt = pix_fmt
         self.protocol_opts = protocol_opts or []
 
         # 新增：客户端队列实例（用于直接写入队列）
         self.client_queues = client_queues
 
-        self.frame_size = self.width * self.height * DEFAULT_CHANNELS
+        self.frame_size = width * height * DEFAULT_CHANNELS
         self.buffer = bytearray()
         self.proc: Optional[subprocess.Popen] = None
         self._stop_event = threading.Event()
@@ -162,7 +162,7 @@ class FFmpegDecoder:
             return
         try:
             while not self._stop_event.is_set():
-                chunk = self.proc.stdout.read(self.chunk_read_size)
+                chunk = self.proc.stdout.read(CHUNK_READ)
                 if not chunk:
                     break
                 self.buffer.extend(chunk)
@@ -178,7 +178,7 @@ class FFmpegDecoder:
         if self.proc is None or self.proc.stdout is None:
             return
         try:
-            chunk = self.proc.stdout.read(self.chunk_read_size)
+            chunk = self.proc.stdout.read(CHUNK_READ)
             if not chunk:
                 # Stream ended - no auto-restart, managed by StreamHealthMonitor
                 self.logger.debug("stream ended")
@@ -205,7 +205,7 @@ class FFmpegDecoder:
             return False  # 无限队列，不丢帧
 
         ratio = pending_count / float(queue_capacity)
-        return ratio >= self.backpressure_ratio
+        return ratio >= PER_STREAM_MAX_PENDING_RATIO
 
     def _process_frames(self):
         """
@@ -256,6 +256,9 @@ class FFmpegDecoder:
                     # 3.2 写入推理队列（降频）
                     if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
                         self.frames_written_to_ready += 1
+                else:
+                    # 兼容旧模式：调用 ai.submit_frame
+                    ai.submit_frame(self.client_id, std)
 
                 self.frames_received += 1
 

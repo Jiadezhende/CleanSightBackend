@@ -13,6 +13,7 @@ StageAwareDispatcher → InferWorker → TemporalWorkerPool → VisualizationWor
 """
 
 import base64
+import json
 import logging
 import queue
 import threading
@@ -26,6 +27,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+from app.database import engine
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
@@ -44,6 +46,7 @@ from app.services.inference.workers.visualization import (
     VisualizationWorkerPool,
 )
 from app.services.inference.workers.writeback import WriteBackWorkerPool
+from app.settings import settings
 
 class InferenceManager:
     """推理管理器 - 新架构实现
@@ -156,17 +159,21 @@ class InferenceManager:
                 num_worker_threads=2,
             )
 
-        # ========== 持久化管理器（新架构） ==========
-        from app.services.persistence import PersistenceManager, PersistenceConfig
-
-        # 加载配置并覆盖storage路径
-        persist_config = PersistenceConfig.from_yaml()
-        persist_config.storage.base_dir = str(self._db_dir)
-        self.persistence_manager = PersistenceManager(config=persist_config)
-
-        # 持久化线程（仅用于段检查）
-        self._segment_check_thread: Optional[threading.Thread] = None
+        # 持久化队列与线程（HLS 段写盘，存储了不同客户端的HLS待落盘）
+        self._persist_queue: "queue.Queue" = queue.Queue()
+        self._persist_thread: Optional[threading.Thread] = None
+        self._segment_check_thread: Optional[threading.Thread] = None  # 队列分段检查线程
         self._segment_check_interval: float = 1.0  # 检查间隔（秒）
+
+        # 告警相关（独立队列，不与HLS混合）
+        self._alarm_queue: "queue.Queue" = queue.Queue()  # 告警持久化队列（独立）
+        self._alarm_persist_thread: Optional[threading.Thread] = None  # 告警持久化线程
+        self._alarm_lock = threading.Lock()
+        self._pending_alarms: Dict[str, Dict[str, Any]] = {}  # 待处理告警（去重用）
+        self._recent_alarms: Dict[str, float] = {}  # 最近上报的告警（冷却用）
+        self._alarm_batch_interval = getattr(settings, "alarm_batch_interval", 30)
+        self._alarm_cooldown_seconds = getattr(settings, "alarm_cooldown_seconds", 60)
+        self._alarm_flush_thread: Optional[threading.Thread] = None  # 告警批量flush线程
 
         # 预编码缓存（避免重复编码同一帧）
         self._encoded_cache: Dict[str, Dict[str, Any]] = {}
@@ -182,7 +189,7 @@ class InferenceManager:
         if self._stage_configs is None:
             try:
                 # 尝试从配置文件加载（优先）
-                from app.services.inference.config import load_stage_config
+                from app.services.inference.config_loader import load_stage_config
                 from app.services.inference.components.component_factory import ComponentFactory
 
                 config = load_stage_config()
@@ -195,7 +202,7 @@ class InferenceManager:
                     if models:  # 只添加有模型的 stage
                         stage_configs[stage_name] = {
                             "models": models,
-                            "batch_size": config.batch_size,  # 从配置文件读取
+                            "batch_size": 4,  # 默认batch size
                         }
 
                 if stage_configs:
@@ -218,7 +225,7 @@ class InferenceManager:
         """创建时序分析器配置（优先从配置文件加载）"""
         try:
             # 尝试从配置文件加载时序分析器配置
-            from app.services.inference.config import load_stage_config
+            from app.services.inference.config_loader import load_stage_config
 
             config = load_stage_config()
             temporal_config = {}
@@ -299,6 +306,25 @@ class InferenceManager:
         return service
 
     # ========== 公共 API（保持与旧代码兼容） ==========
+
+    def submit_frame(self, client_id: str, frame: np.ndarray) -> None:
+        """提交原始帧到 CA-ReadyQueue（拉流层调用）"""
+        now = time.time()
+        frame_data = FrameData(timestamp=now, frame=frame)
+
+        cq = client_manager.get_client(
+            client_id,
+            rt_maxlen=self._rt_maxlen,
+            ca_segment_len=self._ca_segment_len,
+            ca_maxlen=self._ca_maxlen,
+        )
+        cq.append_ca_ready(frame_data)
+
+    def set_rtmp_url(self, client_id: str, rtmp_url: str) -> None:
+        """设置客户端的 RTMP 流地址"""
+        cq = client_manager.get_client(client_id)
+        cq.rtmp_url = rtmp_url
+
     def set_stream_url(self, client_id: str, stream_url: str) -> None:
         """设置客户端的通用流地址（RTMP/RTSP）"""
         cq = client_manager.get_client(client_id)
@@ -557,50 +583,219 @@ class InferenceManager:
     def _enqueue_raw_segment_job(
         self, client_id: str, client_queues: ClientQueues, seg_len: int
     ) -> None:
-        """仅落盘 raw 帧（使用新的PersistenceManager）"""
+        """仅落盘 raw 帧（独立落盘）"""
         task_id = client_queues.get_task_id()
-        if task_id is None:
-            print(f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping raw segment persist")
-            return
+        hls_dir = self._db_dir / client_id / str(task_id)
+        hls_dir.mkdir(parents=True, exist_ok=True)
 
         raw_frames_data: List[FrameData] = client_queues.pop_n_ca_raw(seg_len)
         if not raw_frames_data:
             return
 
-        # 使用新的persistence_manager
-        self.persistence_manager.persist_hls_segment(
-            client_id=client_id,
-            task_id=task_id,
-            segment_type="raw",
-            frames=raw_frames_data
-        )
+        try:
+            self._persist_queue.put(
+                {
+                    "type": "raw_segment",
+                    "client_id": client_id,
+                    "target_dir": hls_dir,
+                    "raw_frames": raw_frames_data,
+                }
+            )
+        except Exception as e:
+            print(f"Failed to enqueue raw segment persist job for {client_id}: {e}")
 
     def _enqueue_processed_segment_job(
         self, client_id: str, client_queues: ClientQueues, seg_len: int
     ) -> None:
-        """仅落盘 processed 帧（使用新的PersistenceManager）"""
+        """仅落盘 processed 帧（独立落盘）"""
         task_id = client_queues.get_task_id()
-        if task_id is None:
-            print(f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping processed segment persist")
-            return
+        hls_dir = self._db_dir / client_id / str(task_id)
+        hls_dir.mkdir(parents=True, exist_ok=True)
 
         processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(seg_len)
         if not processed_frames_data:
             return
 
-        # 使用新的persistence_manager
-        self.persistence_manager.persist_hls_segment(
-            client_id=client_id,
-            task_id=task_id,
-            segment_type="processed",
-            frames=processed_frames_data
-        )
+        try:
+            self._persist_queue.put(
+                {
+                    "type": "processed_segment",
+                    "client_id": client_id,
+                    "target_dir": hls_dir,
+                    "processed_frames": processed_frames_data,
+                }
+            )
+        except Exception as e:
+            print(f"Failed to enqueue processed segment persist job for {client_id}: {e}")
 
+    def _persistent_worker(self):
+        """persistanc 消费线程：处理写盘 HLS 段与告警上报/落库等耗时操作，job结构见 enqueue 部分"""
+        print("Persistent worker started")
+        while not self._stop_event.is_set():
+            try:
+                job = None
+                try:
+                    job = self._persist_queue.get(timeout=1.0)
+                except Exception:
+                    job = None
+
+                if job is None:
+                    continue
+
+                jtype = job.get("type")
+                if jtype == "raw_segment":
+                    print("[Persistent worker] Processing raw segment job")
+                    try:
+                        client_id = job.get("client_id")
+                        target_dir = job.get("target_dir")
+                        raw_frames = job.get("raw_frames", [])
+                        self._do_persist_raw_segment(client_id, target_dir, raw_frames)
+                    except Exception as e:
+                        print(f"Persistent worker raw segment job failed: {e}")
+                elif jtype == "processed_segment":
+                    print("[Persistent worker] Processing processed segment job")
+                    try:
+                        client_id = job.get("client_id")
+                        target_dir = job.get("target_dir")
+                        processed_frames = job.get("processed_frames", [])
+                        self._do_persist_processed_segment(client_id, target_dir, processed_frames)
+                    except Exception as e:
+                        print(f"Persistent worker processed segment job failed: {e}")
+                elif jtype == "alarm":
+                    print("[Persistent worker] Processing alarm job")
+                    try:
+                        alarm = job.get("alarm")
+                        self._handle_alarm_now(alarm)
+                    except Exception as e:
+                        print(f"Persistent worker alarm job failed: {e}")
+                else:
+                    print(f"Persistent worker unknown job type: {jtype}")
+
+            except Exception as e:
+                print(f"Persistent worker loop error: {e}")
+
+        print("Persistent worker stopped")
+
+    def _do_persist_raw_segment(
+        self,
+        client_id: str,
+        hls_dir: Path,
+        raw_frames_data: List[FrameData],
+    ):
+        """落盘原始视频段（独立）"""
+        if hls_dir is None:
+            print(f"_do_persist_raw_segment error: hls_dir is None for client {client_id}")
+            return
+        if not raw_frames_data:
+            print(f"_do_persist_raw_segment error: empty frames for client {client_id}")
+            return
+
+        try:
+            start_ts = raw_frames_data[0].timestamp
+
+            # 生成原始视频段（使用原始视频源帧率30fps）
+            raw_segment_path = hls_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
+            height, width = raw_frames_data[0].frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore
+            raw_fps = 30.0  # 原始视频保持30fps
+            out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, raw_fps, (width, height))
+            for fd in raw_frames_data:
+                out_raw.write(fd.frame)
+            out_raw.release()
+
+            # 更新播放列表（使用实际时间戳计算时长，而非帧数/fps）
+            raw_playlist_path = hls_dir / "raw_playlist.m3u8"
+            # 使用第一帧和最后一帧的实际时间戳差值
+            if len(raw_frames_data) > 1:
+                actual_duration = raw_frames_data[-1].timestamp - raw_frames_data[0].timestamp
+                # 加上最后一帧的持续时间（1/fps）
+                segment_duration = actual_duration + (1.0 / raw_fps)
+            else:
+                segment_duration = 1.0 / raw_fps
+
+            if not raw_playlist_path.exists():
+                with raw_playlist_path.open("w") as f:
+                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+            with raw_playlist_path.open("a") as f:
+                f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                f.write(f"{raw_segment_path.name}\n")
+
+            print(f"[Persistent worker] Raw segment persisted: {client_id}, frames={len(raw_frames_data)}, actual_duration={segment_duration:.3f}s, fps={raw_fps}")
+
+        except Exception as e:
+            print(f"_do_persist_raw_segment error: {e}")
+
+    def _do_persist_processed_segment(
+        self,
+        client_id: str,
+        hls_dir: Path,
+        processed_frames_data: List[FrameData],
+    ):
+        """落盘处理后视频段和keypoints JSON（独立）"""
+        if hls_dir is None:
+            print(f"_do_persist_processed_segment error: hls_dir is None for client {client_id}")
+            return
+        if not processed_frames_data:
+            print(f"_do_persist_processed_segment error: empty frames for client {client_id}")
+            return
+
+        try:
+            start_ts = processed_frames_data[0].timestamp
+
+            # 生成处理后视频段（使用推理帧率）
+            segment_path = hls_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
+            height, width = processed_frames_data[0].frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore
+            processed_fps = float(settings.inference_fps)
+            out_processed = cv2.VideoWriter(
+                str(segment_path), fourcc, processed_fps, (width, height)
+            )
+            for fd in processed_frames_data:
+                out_processed.write(fd.frame)
+            out_processed.release()
+
+            # 写 keypoints JSON
+            keypoints_path = hls_dir / f"keypoints_{int(start_ts * 1e6)}.json"
+            keypoints_list = []
+            for fd in processed_frames_data:
+                kp = fd.keypoints if hasattr(fd, "keypoints") else None
+                ir = fd.inference_result if hasattr(fd, "inference_result") else None
+                keypoints_list.append(
+                    {
+                        "timestamp": fd.timestamp,
+                        "keypoints": self._make_json_serializable(kp),
+                        "inference_result": self._make_json_serializable(ir),
+                    }
+                )
+            with keypoints_path.open("w", encoding="utf-8") as f:
+                json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
+
+            # 更新播放列表（使用实际时间戳计算时长，而非帧数/fps）
+            playlist_path = hls_dir / "processed_playlist.m3u8"
+            # 使用第一帧和最后一帧的实际时间戳差值
+            if len(processed_frames_data) > 1:
+                actual_duration = processed_frames_data[-1].timestamp - processed_frames_data[0].timestamp
+                # 加上最后一帧的持续时间（1/fps）
+                segment_duration = actual_duration + (1.0 / processed_fps)
+            else:
+                segment_duration = 1.0 / processed_fps
+
+            if not playlist_path.exists():
+                with playlist_path.open("w") as f:
+                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+            with playlist_path.open("a") as f:
+                f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                f.write(f"{segment_path.name}\n")
+
+            print(f"[Persistent worker] Processed segment persisted: {client_id}, frames={len(processed_frames_data)}, actual_duration={segment_duration:.3f}s, fps={processed_fps}")
+
+        except Exception as e:
+            print(f"_do_persist_processed_segment error: {e}")
 
     # ========== 告警处理逻辑（独立于HLS） ==========
 
     def enqueue_alarm(self, alarm_info: Dict[str, Any]):
-        """将告警信息入队，使用新的PersistenceManager处理。
+        """将告警信息入队，交由批量去重线程处理。
 
         外部调用接口（Pipeline、时序分析等模块可调用此方法触发告警）
 
@@ -613,8 +808,376 @@ class InferenceManager:
                 - alarm_type: 告警类型（可选）
                 - alarm_message: 告警消息（可选）
         """
-        # 直接委托给persistence_manager
-        self.persistence_manager.persist_alarm(alarm_info)
+        try:
+            key = f"{alarm_info.get('task_id')}_{alarm_info.get('step_id')}"
+            with self._alarm_lock:
+                if key not in self._pending_alarms:
+                    self._pending_alarms[key] = {
+                        'count': 1,
+                        'first_seen': time.time(),
+                        'last_seen': time.time(),
+                        'alarm_info': alarm_info
+                    }
+                else:
+                    self._pending_alarms[key]['count'] += 1
+                    self._pending_alarms[key]['last_seen'] = time.time()
+        except Exception as e:
+            print(f"[AlarmManager] enqueue_alarm error: {e}")
+
+    def _flush_pending_alarms(self):
+        """检查并上报待处理的告警（去重/批量逻辑）。
+
+        策略：
+        - 每次 flush 遍历 pending_alarms
+        - 如果最近已上报且处于冷却期（_alarm_cooldown_seconds），则保留在 pending
+        - 否则将该告警聚合（添加 count/first_seen/last_seen）并提交到告警队列
+        """
+        now = time.time()
+        to_send = []
+        with self._alarm_lock:
+            keys = list(self._pending_alarms.keys())
+            for key in keys:
+                item = self._pending_alarms.get(key)
+                if not item:
+                    continue
+                last_sent = self._recent_alarms.get(key)
+                if last_sent and (now - last_sent) < self._alarm_cooldown_seconds:
+                    # 仍在冷却期，跳过（保留在 pending）
+                    continue
+                # 准备发送：构建聚合告警信息
+                agg = dict(item['alarm_info']) if item.get('alarm_info') else {}
+                agg['alarm_count'] = item.get('count', 1)
+                agg['first_seen'] = datetime.fromtimestamp(item.get('first_seen')).strftime("%Y-%m-%d %H:%M:%S")  # type: ignore
+                agg['last_seen'] = datetime.fromtimestamp(item.get('last_seen')).strftime("%Y-%m-%d %H:%M:%S")  # type: ignore
+                to_send.append((key, agg))
+                # 更新最近上报时间并移除 pending
+                self._recent_alarms[key] = now
+                del self._pending_alarms[key]
+
+        # 在锁外发送，避免阻塞其他操作
+        for key, agg_alarm in to_send:
+            try:
+                # 将告警入独立的告警持久化队列
+                self._alarm_queue.put(agg_alarm)
+                print(f"[AlarmManager] 告警已入队: {key}, count={agg_alarm.get('alarm_count')}")
+            except Exception as e:
+                print(f"[AlarmManager] Failed to enqueue aggregated alarm for {key}: {e}")
+
+    def _alarm_flush_loop(self):
+        """后台线程，周期性 flush pending alarms。"""
+        print("[AlarmManager] Alarm flush thread started")
+        while not self._stop_event.is_set():
+            try:
+                time.sleep(self._alarm_batch_interval)
+                self._flush_pending_alarms()
+            except Exception as e:
+                print(f"[AlarmManager] Alarm flush loop error: {e}")
+        # 在退出前再 flush 一次（尝试上报剩余告警）
+        try:
+            self._flush_pending_alarms()
+        except Exception as e:
+            print(f"[AlarmManager] Final alarm flush error: {e}")
+        print("[AlarmManager] Alarm flush thread stopped")
+
+    def _alarm_persist_worker(self):
+        """告警持久化线程：处理告警上报与数据库记录（独立于HLS）"""
+        print("[AlarmManager] Alarm persist worker started")
+        while not self._stop_event.is_set():
+            try:
+                alarm = None
+                try:
+                    alarm = self._alarm_queue.get(timeout=1.0)
+                except Exception:
+                    alarm = None
+
+                if alarm is None:
+                    continue
+
+                # 执行告警上报与数据库记录
+                try:
+                    self._handle_alarm_now(alarm)
+                except Exception as e:
+                    print(f"[AlarmManager] Alarm persist worker failed: {e}")
+
+            except Exception as e:
+                print(f"[AlarmManager] Alarm persist worker loop error: {e}")
+
+        print("[AlarmManager] Alarm persist worker stopped")
+
+    def _handle_alarm_now(self, alarm_info: Dict[str, Any]):
+        """实际执行告警上报与写库的函数（在告警持久化线程中调用）。
+
+        参考原有 ai_backup 中的实现。
+        """
+        try:
+            task_id = alarm_info.get('task_id')
+            step_id = alarm_info.get('step_id')
+            client_id = alarm_info.get('client_id')
+
+            # 若 task_id/step_id 缺失，可尝试从 client queue 补全
+            if (task_id is None or step_id is None) and client_id:
+                try:
+                    cq = client_manager.get_client(str(client_id))
+                    if cq:
+                        print(f"[AlarmManager] found client queue for {client_id}, task={cq.task}")
+                    else:
+                        print(f"[AlarmManager] no client queue found for {client_id}")
+                    if cq and cq.task:
+                        if task_id is None:
+                            task_id = getattr(cq.task, 'task_id', None)
+                        if step_id is None:
+                            step_id = getattr(cq.task, 'current_step', None)
+                except Exception as e:
+                    print(f"[AlarmManager] Failed to fill task_id/step_id from client queues: {e}")
+
+            print(f"[AlarmManager] final task_id={task_id}, step_id={step_id}, client_id={client_id}")
+            detection_result = alarm_info.get('detection_result')
+
+            alarm_type = alarm_info.get('alarm_type', '流程违规' if detection_result else '推理异常')
+            alarm_level = alarm_info.get('alarm_level', 'high')
+            alarm_message = alarm_info.get('alarm_message', 'AI推理检测到异常' if detection_result else 'AI推理异常')
+
+            # 调用远端告警上报（仅在 task_id 和 step_id 可用时上报）
+            try:
+                alarm_count = alarm_info.get('alarm_count') if isinstance(alarm_info, dict) else None
+                first_seen = alarm_info.get('first_seen') if isinstance(alarm_info, dict) else None
+                last_seen = alarm_info.get('last_seen') if isinstance(alarm_info, dict) else None
+                if task_id and step_id:
+                    self._send_alarm_report(
+                        task_id=task_id,
+                        step_id=step_id,
+                        alarm_type=alarm_type,
+                        alarm_level=alarm_level,
+                        alarm_message=alarm_message,
+                        detection_result=detection_result,
+                        camera_ip=None,
+                        reader_ip=None,
+                        alarm_count=alarm_count,
+                        first_seen=first_seen,
+                        last_seen=last_seen
+                    )
+                else:
+                    print(f"[AlarmManager] Skipping remote alarm report: missing task_id or step_id (task_id={task_id}, step_id={step_id})")
+            except Exception as e:
+                print(f"[AlarmManager] Remote alarm report failed: {e}")
+
+            # 写入本地数据库表 alarm_record（如果不存在则先创建）
+            try:
+                self._record_alarm_db(
+                    task_id=task_id,
+                    step_id=step_id,
+                    alarm_type=alarm_type,
+                    alarm_level=alarm_level,
+                    alarm_message=alarm_message,
+                    detection_result=detection_result
+                )
+            except Exception as e:
+                print(f"[AlarmManager] Local DB alarm record failed: {e}")
+
+        except Exception as e:
+            print(f"[AlarmManager] _handle_alarm_now exception: {e}")
+
+    def _send_alarm_report(
+        self,
+        task_id: int,
+        step_id: int,
+        alarm_type: str,
+        alarm_level: str,
+        alarm_message: str,
+        detection_result: Optional[Dict] = None,
+        camera_ip: Optional[str] = None,
+        reader_ip: Optional[str] = None,
+        alarm_count: Optional[int] = None,
+        first_seen: Optional[str] = None,
+        last_seen: Optional[str] = None
+    ) -> Optional[bool]:
+        """按照外部接口文档上报告警（同步调用，故需在后台线程使用）。
+
+        增强：支持重试与可选的聚合字段（alarm_count, first_seen, last_seen）。
+        """
+        import urllib.request
+
+        # 直接从 settings 读取告警URL（必需配置）
+        url = settings.alarm_report_url
+        payload = {
+            "task_id": task_id if task_id is not None else 0,
+            "step_id": step_id if step_id is not None else 0,
+            "alarm_type": alarm_type,
+            "alarm_level": alarm_level,
+            "alarm_message": alarm_message,
+            "alarm_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        if detection_result is not None:
+            payload['detection_result'] = detection_result
+        if camera_ip:
+            payload['camera_ip'] = camera_ip
+        if reader_ip:
+            payload['reader_ip'] = reader_ip
+        # 聚合字段（可选）
+        if alarm_count is not None:
+            payload['alarm_count'] = int(alarm_count)
+        if first_seen:
+            payload['first_seen'] = first_seen
+        if last_seen:
+            payload['last_seen'] = last_seen
+
+        data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'User-Agent': 'AI-Backend/1.0'
+        }
+
+        # 重试逻辑
+        max_retries = 3
+        backoff = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp_text = resp.read().decode('utf-8')
+                    try:
+                        j = json.loads(resp_text)
+                        if j.get('code') == 0:
+                            print(f"[AlarmManager] Alarm reported successfully: task_id={task_id}")
+                            return True
+                        else:
+                            print(f"[AlarmManager] Alarm report returned non-zero code: {j}")
+                            return False
+                    except Exception:
+                        print(f"[AlarmManager] Alarm report response (non-json): {resp_text}")
+                        return False
+            except Exception as e:
+                print(f"[AlarmManager] Attempt {attempt} failed to send alarm report: {e}")
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                else:
+                    return False
+        return False
+
+    def _record_alarm_db(
+        self,
+        task_id: Optional[int],
+        step_id: Optional[Any],
+        alarm_type: str,
+        alarm_level: str,
+        alarm_message: str,
+        detection_result: Optional[Dict] = None,
+        camera_ip: Optional[str] = None,
+        reader_ip: Optional[str] = None
+    ) -> None:
+        """在数据库中创建表 `clean_alarm`（若不存在）并插入一条告警记录。
+
+        使用最新字段属性：
+        - alarm_id (SERIAL PRIMARY KEY)
+        - task_id INTEGER
+        - step_id INTEGER
+        - alarm_type TEXT
+        - message TEXT
+        - severity TEXT
+        - resolved BOOLEAN
+        - resolved_by INTEGER
+        - detected_at BIGINT
+        - resolved_at BIGINT
+        """
+        from sqlalchemy import text
+
+        try:
+            create_sql = '''
+            CREATE TABLE IF NOT EXISTS clean_alarm (
+                alarm_id SERIAL PRIMARY KEY,
+                task_id INTEGER,
+                step_id INTEGER,
+                alarm_type TEXT,
+                message TEXT,
+                severity TEXT,
+                resolved BOOLEAN DEFAULT FALSE,
+                resolved_by INTEGER,
+                detected_at BIGINT,
+                resolved_at BIGINT,
+                created_at TIMESTAMP DEFAULT now()
+            )
+            '''
+            with engine.begin() as conn:
+                conn.execute(text(create_sql))
+                insert_sql = '''
+                INSERT INTO clean_alarm (task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at)
+                VALUES (:task_id, :step_id, :alarm_type, :message, :severity, :resolved, :resolved_by, :detected_at, :resolved_at)
+                '''
+                params = {
+                    'task_id': int(task_id) if task_id is not None else None,
+                    'step_id': int(step_id) if step_id is not None and str(step_id).isdigit() else None,
+                    'alarm_type': alarm_type,
+                    'message': alarm_message,
+                    'severity': alarm_level,
+                    'resolved': False,
+                    'resolved_by': None,
+                    'detected_at': int(time.time()),
+                    'resolved_at': None
+                }
+                conn.execute(text(insert_sql), params)
+                print(f"[AlarmManager] Alarm recorded to DB: task_id={task_id}, type={alarm_type}")
+        except Exception as e:
+            print(f"[AlarmManager] _record_alarm_db error: {e}")
+            # 尝试回退：根据实际表结构动态构建 INSERT（保留原有的健壮性逻辑）
+            try:
+                with engine.connect() as conn2:
+                    info_sql = text("SELECT column_name, column_default, is_nullable FROM information_schema.columns WHERE table_name = 'clean_alarm'")
+                    res = conn2.execute(info_sql).fetchall()
+                    print("[AlarmManager] clean_alarm table columns:")
+                    cols = {}
+                    for row in res:
+                        print(row)
+                        cols[row[0]] = {
+                            'default': row[1],
+                            'nullable': row[2]
+                        }
+
+                    # 只插入目标参数中存在于表中的列
+                    candidate_params = {
+                        'task_id': int(task_id) if task_id is not None else None,
+                        'step_id': int(step_id) if step_id is not None and str(step_id).isdigit() else None,
+                        'alarm_type': alarm_type,
+                        'message': alarm_message,
+                        'severity': alarm_level,
+                        'resolved': False,
+                        'resolved_by': None,
+                        'detected_at': int(time.time()),
+                        'resolved_at': None
+                    }
+
+                    insert_cols = []
+                    insert_vals = {}
+                    for k, v in candidate_params.items():
+                        if k in cols:
+                            insert_cols.append(k)
+                            insert_vals[k] = v
+
+                    # 对于表中非空且没有默认值的列，如果未提供则尝试生成合理的占位值
+                    for col_name, meta in cols.items():
+                        if col_name not in insert_cols and meta.get('nullable') == 'NO' and not meta.get('default'):
+                            if 'id' in col_name or col_name.endswith('_id'):
+                                insert_cols.append(col_name)
+                                insert_vals[col_name] = int(time.time() * 1000)
+                            elif col_name in ('resolved',):
+                                insert_cols.append(col_name)
+                                insert_vals[col_name] = False
+                            else:
+                                insert_cols.append(col_name)
+                                insert_vals[col_name] = ''
+
+                    if not insert_cols:
+                        print("[AlarmManager] 没有可用于回退插入的列，跳过 clean_alarm 回退插入")
+                    else:
+                        cols_sql = ", ".join(insert_cols)
+                        vals_sql = ", ".join([f":{c}" for c in insert_cols])
+                        fallback_sql = f"INSERT INTO clean_alarm ({cols_sql}) VALUES ({vals_sql})"
+                        print(f"[AlarmManager] 尝试回退插入 clean_alarm，使用列: {insert_cols}")
+                        conn2.execute(text(fallback_sql), insert_vals)
+                        print("[AlarmManager] 回退插入 clean_alarm 成功")
+            except Exception as e2:
+                print(f"[AlarmManager] Failed to fetch clean_alarm schema info or fallback insert failed: {e2}")
 
     # ========== 刷新客户端列表 ==========
 
@@ -645,17 +1208,35 @@ class InferenceManager:
             self.visualization_pool.start()
             self.writeback_pool.start()
 
-        # 3. 启动分段检查线程（周期性检查队列并触发落盘）
+        # 3. 启动持久化线程（HLS段落盘）
+        if self._persist_thread is None or not self._persist_thread.is_alive():
+            self._persist_thread = threading.Thread(
+                target=self._persistent_worker, daemon=True, name="PersistThread"
+            )
+            self._persist_thread.start()
+
+        # 3.5. 启动分段检查线程（周期性检查队列并触发落盘）
         if self._segment_check_thread is None or not self._segment_check_thread.is_alive():
             self._segment_check_thread = threading.Thread(
                 target=self._segment_check_loop, daemon=True, name="SegmentCheckThread"
             )
             self._segment_check_thread.start()
 
-        # 4. 启动持久化管理器（新架构）
-        self.persistence_manager.start()
+        # 4. 启动告警批量flush线程
+        if self._alarm_flush_thread is None or not self._alarm_flush_thread.is_alive():
+            self._alarm_flush_thread = threading.Thread(
+                target=self._alarm_flush_loop, daemon=True, name="AlarmFlushThread"
+            )
+            self._alarm_flush_thread.start()
 
-        # 5. 启动客户端刷新线程
+        # 5. 启动告警持久化线程（告警上报与落库）
+        if self._alarm_persist_thread is None or not self._alarm_persist_thread.is_alive():
+            self._alarm_persist_thread = threading.Thread(
+                target=self._alarm_persist_worker, daemon=True, name="AlarmPersistThread"
+            )
+            self._alarm_persist_thread.start()
+
+        # 6. 启动客户端刷新线程
         if self._refresh_thread is None or not self._refresh_thread.is_alive():
             self._refresh_thread = threading.Thread(
                 target=self._client_refresh_loop, daemon=True, name="ClientRefreshThread"
@@ -681,17 +1262,35 @@ class InferenceManager:
             self.visualization_pool.stop()
             self.writeback_pool.stop()
 
-        # 3. 停止持久化管理器（新架构）
-        self.persistence_manager.stop(timeout=10.0)
+        # 3. 停止持久化线程（HLS段落盘）
+        if self._persist_thread is not None:
+            try:
+                self._persist_thread.join(timeout=2.0)
+            except Exception:
+                pass
 
-        # 4. 停止分段检查线程
+        # 3.5. 停止分段检查线程
         if self._segment_check_thread is not None:
             try:
                 self._segment_check_thread.join(timeout=2.0)
             except Exception:
                 pass
 
-        # 5. 停止客户端刷新线程
+        # 4. 停止告警批量flush线程
+        if self._alarm_flush_thread is not None:
+            try:
+                self._alarm_flush_thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+        # 5. 停止告警持久化线程
+        if self._alarm_persist_thread is not None:
+            try:
+                self._alarm_persist_thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+        # 6. 停止客户端刷新线程
         if self._refresh_thread is not None:
             try:
                 self._refresh_thread.join(timeout=2.0)

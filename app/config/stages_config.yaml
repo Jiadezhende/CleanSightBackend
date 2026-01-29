@@ -74,21 +74,19 @@ stages:
     # 告警触发条件
     alarm_triggers: []
 
-# ==================== 全局配置（所有模块共享） ====================
+# ==================== 全局配置 ====================
 global:
-  # 视频处理参数（所有模块共享）
-  raw_fps: 30                     # 原始视频帧率（persistence, stream模块会读取）
-  inference_fps: 20               # 推理/输出帧率（persistence, client模块会读取）
+  # 推理批量大小
+  batch_size: 4
 
-  # 批处理参数
-  batch_size: 4                   # 推理批量大小
-  inference_decimation: 2         # 推理降帧率（1=不降帧，2=每2帧推理1次）
+  # 推理降帧率（1=不降帧，2=每2帧推理1次）
+  inference_decimation: 2
 
-  # 队列参数（client模块会读取）
-  rt_maxlen: 30                   # 实时队列长度（帧数）
-  ca_maxlen: 2700                 # CA队列最大长度（帧数，约90秒@30fps）
-  ca_segment_len: 300             # HLS段长度（帧数，约10秒@30fps）
+  # 可视化帧率（1=全帧率，2=每2帧可视化1次）
+  visualization_decimation: 1
 
-  # 注意：
-  # - persistence和client模块会直接读取这些参数，保证全局一致性
-  # - 修改这些参数会影响所有相关模块
+  # 告警配置
+  alarm:
+    batch_interval: 30        # 批量上报间隔（秒）
+    cooldown_seconds: 60      # 告警冷却时间（秒）
+    report_url: ${ALARM_REPORT_URL:http://116.204.65.72:8881/gdmp/v1/api/nt/alarm_report}

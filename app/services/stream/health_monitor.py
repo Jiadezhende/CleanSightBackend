@@ -10,8 +10,6 @@ import logging
 from typing import Optional, Dict
 from dataclasses import dataclass
 
-from app.services.stream.config import HealthMonitorConfig
-
 logger = logging.getLogger(__name__)
 
 
@@ -37,34 +35,30 @@ class StreamHealthMonitor:
     - 自动重连：检测到断流后周期性尝试重连
     """
 
-    def __init__(self, client_manager, cleanup_service, stream_service, health_config: Optional[HealthMonitorConfig] = None):
+    def __init__(self, client_manager, cleanup_service, stream_service, check_interval=3.0):
         """初始化健康监控器
 
         Args:
             client_manager: ClientManager实例，用于获取所有客户端
             cleanup_service: CleanupService实例，用于清理超时客户端
             stream_service: StreamService实例，用于重启流
-            health_config: 健康监控配置对象（如果未提供则使用默认配置）
+            check_interval: 检查间隔（秒），默认3秒
         """
         self._client_manager = client_manager
         self._cleanup_service = cleanup_service
         self._stream_service = stream_service
+        self._check_interval = check_interval
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # 使用配置对象
-        self.config = health_config or HealthMonitorConfig()
-        self._check_interval = self.config.check_interval
+        # 超时阈值（秒）
+        self.suspect_timeout = 5.0  # 5秒警告，进入重连模式
+        self.cleanup_timeout = 30.0  # 30秒（6次重连失败后）清理
 
-        # 超时阈值（从配置读取）
-        self.suspect_timeout = self.config.heartbeat_timeout
-        # cleanup_timeout = heartbeat_timeout + (restart_delay * max_restart_attempts)
-        self.cleanup_timeout = self.config.heartbeat_timeout + (self.config.restart_delay * self.config.max_restart_attempts)
-
-        # 重连参数（从配置读取）
-        self.reconnect_interval = self.config.restart_delay
-        self.max_reconnect_attempts = self.config.max_restart_attempts
-        self.reconnect_success_threshold = self.config.heartbeat_timeout
+        # 重连参数
+        self.reconnect_interval = 5.0  # 5秒尝试一次
+        self.max_reconnect_attempts = 6  # 最多6次
+        self.reconnect_success_threshold = 5.0  # 5秒内有新帧视为成功
 
         # 重连状态跟踪
         self._reconnecting_clients: Dict[str, ReconnectState] = {}

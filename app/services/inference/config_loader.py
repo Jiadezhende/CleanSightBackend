@@ -4,7 +4,7 @@
 实现配置驱动的架构，解耦具体实现与配置。
 
 使用方式：
-    from app.services.inference.config import load_stage_config
+    from app.services.inference.config_loader import load_stage_config
 
     config = load_stage_config("stages_config.yaml")
     # 或使用默认配置
@@ -12,16 +12,10 @@
 """
 
 import os
-import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-
-logger = logging.getLogger(__name__)
-
-# 全局配置缓存（单例模式）
-_global_inference_config: Optional['InferenceConfig'] = None
 
 
 class StageConfig:
@@ -58,16 +52,6 @@ class InferenceConfig:
         self.inference_decimation: int = self.global_config.get("inference_decimation", 2)
         self.visualization_decimation: int = self.global_config.get("visualization_decimation", 1)
         self.alarm_config: Dict[str, Any] = self.global_config.get("alarm", {})
-
-        # 从global配置提取参数（新增）
-        self.raw_fps: int = self.global_config.get("raw_fps", 30)
-        self.inference_fps: int = self.global_config.get("inference_fps", 20)
-        self.rt_maxlen: int = self.global_config.get("rt_maxlen", 30)
-        self.ca_maxlen: int = self.global_config.get("ca_maxlen", 600)
-        self.ca_segment_len: int = self.global_config.get("ca_segment_len", 300)  # 帧数
-        # 兼容旧的 ca_segment_seconds 配置（废弃，优先使用 ca_segment_len）
-        if "ca_segment_seconds" in self.global_config and "ca_segment_len" not in self.global_config:
-            self.ca_segment_len = int(self.global_config["ca_segment_seconds"] * self.raw_fps)
 
     def get_stage_config(self, stage_name: str) -> Optional[StageConfig]:
         """获取指定 Stage 的配置"""
@@ -128,13 +112,12 @@ def _expand_env_vars(config: Any) -> Any:
         return config
 
 
-def load_stage_config(config_path: Optional[str] = None, force_reload: bool = False) -> InferenceConfig:
-    """加载 Stage 配置文件（单例模式）
+def load_stage_config(config_path: Optional[str] = None) -> InferenceConfig:
+    """加载 Stage 配置文件
 
     Args:
         config_path: 配置文件路径（支持 YAML/JSON）
                      如果为 None，则使用默认配置
-        force_reload: 是否强制重新加载（默认使用缓存）
 
     Returns:
         InferenceConfig 对象
@@ -143,23 +126,17 @@ def load_stage_config(config_path: Optional[str] = None, force_reload: bool = Fa
         FileNotFoundError: 配置文件不存在
         ValueError: 配置文件格式错误
     """
-    global _global_inference_config
-
-    # 使用缓存（单例模式）
-    if not force_reload and _global_inference_config is not None:
-        logger.debug("使用缓存的inference配置")
-        return _global_inference_config
-
     if config_path is None:
-        # 默认配置路径（外部config目录）
-        base_dir = Path(__file__).parent.parent.parent.parent.resolve()
-        config_path = base_dir / "config" / "inference_config.yaml"
+        # 默认配置路径
+        config_path = str(
+            Path(__file__).parent.parent.parent / "config" / "stages_config.yaml"
+        )
 
     config_file = Path(config_path)
 
     # 如果配置文件不存在，返回默认配置
     if not config_file.exists():
-        logger.warning("配置文件不存在: %s，使用默认配置", config_path)
+        print(f"[ConfigLoader] 配置文件不存在: {config_path}，使用默认配置")
         return _create_default_config()
 
     # 加载配置文件
@@ -177,34 +154,12 @@ def load_stage_config(config_path: Optional[str] = None, force_reload: bool = Fa
         # 展开环境变量
         config_dict = _expand_env_vars(config_dict)
 
-        logger.info("✓ 已加载inference配置: %s", config_path)
-        inference_config = InferenceConfig(config_dict)
-
-        # 输出配置日志
-        _log_loaded_config(inference_config)
-
-        # 缓存配置（单例）
-        _global_inference_config = inference_config
-        return inference_config
+        print(f"[ConfigLoader] 成功加载配置文件: {config_path}")
+        return InferenceConfig(config_dict)
 
     except Exception as e:
-        logger.error("✗ 加载配置文件失败: %s，使用默认配置", e)
-        default_config = _create_default_config()
-        _global_inference_config = default_config
-        return default_config
-
-
-def _log_loaded_config(config: 'InferenceConfig'):
-    """输出加载的配置（启动时显示）"""
-    logger.info("========== Inference配置 ==========")
-    logger.info("Stage数量: %d", len(config.list_stages()))
-    logger.info("FPS配置: raw_fps=%.1f, inference_fps=%d", config.raw_fps, config.inference_fps)
-    logger.info("队列配置: rt_maxlen=%d, ca_maxlen=%d", config.rt_maxlen, config.ca_maxlen)
-    logger.info("批处理: batch_size=%d, decimation=%d", config.batch_size, config.inference_decimation)
-    logger.info("📌 此文件为所有模块共享参数的单一数据源")
-    logger.info("=====================================")
-
-
+        print(f"[ConfigLoader] 加载配置文件失败: {e}，使用默认配置")
+        return _create_default_config()
 
 
 def _create_default_config() -> InferenceConfig:

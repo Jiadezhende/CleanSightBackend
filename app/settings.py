@@ -74,8 +74,9 @@ class Settings(BaseSettings):
     # 告警上报URL（必需配置）
     alarm_report_url: str
 
-    # 注意: 推理与视频配置已迁移到 inference_config.yaml 和 persistence_config.yaml
-    # inference_fps 和 ca_segment_seconds 不再从 settings 读取
+    # 推理与视频配置
+    inference_fps: int = 20  # 推理采样频率（同时控制可视化和视频输出帧率）
+    ca_segment_seconds: int = 10  # 视频段时长（秒）
 
     @property
     def database_url(self) -> str:

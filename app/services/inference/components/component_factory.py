@@ -15,12 +15,9 @@
 """
 
 import importlib
-import logging
 from typing import Any, Dict, List, Optional
 
-from app.services.inference.config import InferenceConfig, StageConfig
-
-logger = logging.getLogger(__name__)
+from app.services.inference.config_loader import InferenceConfig, StageConfig
 
 
 class ComponentFactory:
@@ -45,7 +42,7 @@ class ComponentFactory:
         """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config:
-            logger.warning("Stage '%s' 配置不存在", stage_name)
+            print(f"[ComponentFactory] Stage '{stage_name}' 配置不存在")
             return []
 
         models = []
@@ -53,9 +50,9 @@ class ComponentFactory:
             try:
                 model = self._instantiate_from_config(model_cfg)
                 models.append(model)
-                logger.info("✓ 成功创建模型: %s", model_cfg['name'])
+                print(f"[ComponentFactory] 成功创建模型: {model_cfg['name']}")
             except Exception as e:
-                logger.error("✗ 创建模型失败 %s: %s", model_cfg['name'], e)
+                print(f"[ComponentFactory] 创建模型失败 {model_cfg['name']}: {e}")
 
         return models
 
@@ -70,15 +67,15 @@ class ComponentFactory:
         """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config or not stage_config.temporal_analyzer:
-            logger.debug("Stage '%s' 无时序分析器配置", stage_name)
+            print(f"[ComponentFactory] Stage '{stage_name}' 无时序分析器配置")
             return None
 
         try:
             analyzer = self._instantiate_from_config(stage_config.temporal_analyzer)
-            logger.info("✓ 成功创建时序分析器: %s", stage_name)
+            print(f"[ComponentFactory] 成功创建时序分析器: {stage_name}")
             return analyzer
         except Exception as e:
-            logger.error("✗ 创建时序分析器失败 %s: %s", stage_name, e)
+            print(f"[ComponentFactory] 创建时序分析器失败 {stage_name}: {e}")
             return None
 
     def create_visualizer_for_stage(self, stage_name: str) -> Optional[Any]:
@@ -92,15 +89,15 @@ class ComponentFactory:
         """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config or not stage_config.visualizer:
-            logger.debug("Stage '%s' 无可视化器配置", stage_name)
+            print(f"[ComponentFactory] Stage '{stage_name}' 无可视化器配置")
             return None
 
         try:
             visualizer = self._instantiate_from_config(stage_config.visualizer)
-            logger.info("✓ 成功创建可视化器: %s", stage_name)
+            print(f"[ComponentFactory] 成功创建可视化器: {stage_name}")
             return visualizer
         except Exception as e:
-            logger.error("✗ 创建可视化器失败 %s: %s", stage_name, e)
+            print(f"[ComponentFactory] 创建可视化器失败 {stage_name}: {e}")
             return None
 
     def get_alarm_triggers_for_stage(self, stage_name: str) -> List[Dict[str, Any]]:
@@ -197,7 +194,7 @@ def create_components_from_config(
             "CLEAN": {...}
         }
     """
-    from app.services.inference.config import load_stage_config
+    from app.services.inference.config_loader import load_stage_config
 
     config = load_stage_config(config_path)
     factory = ComponentFactory(config)
