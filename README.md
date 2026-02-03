@@ -271,16 +271,10 @@ python integration_tests/local_full_pipeline_rtsp.py --task_id 1 --duration 30 -
 
 ```bash
 # 远程服务器测试
-python integration_tests/remote_full_pipeline_rtsp.py \
-    --task_id 1 \
-    --duration 60 \
-    --server 117.50.241.174
+python integration_tests/remote_full_pipeline_rtsp.py --task_id 1 --duration 60 --server 117.50.46.236
 
 # 自定义视频测试
-python integration_tests/remote_full_pipeline_rtsp.py \
-    --task_id 1 \
-    --video_path path/to/video.mp4 \
-    --server 117.50.241.174
+python integration_tests/remote_full_pipeline_rtsp.py --task_id 1 --video_path path/to/video.mp4 --server 117.50.46.236
 ```
 
 #### 压力测试
