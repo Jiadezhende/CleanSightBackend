@@ -120,7 +120,7 @@ class ModelWorkerService:
         )
 
     def start(self):
-        """启动服务：Dispatcher + 推理线程"""
+        """启动服务：Dispatcher + 推理线程 + 模型预热"""
         self.dispatcher.start()
 
         # 为每个 stage 启动一个推理线程
@@ -136,6 +136,26 @@ class ModelWorkerService:
 
         print(f"[ModelWorkerService] 已启动 {len(self._worker_threads)} 个推理线程")
 
+        # ========== 模型预热 ==========
+        print("[ModelWorkerService] 开始预热所有模型...")
+        warmup_start = time.time()
+
+        for stage, worker_pool in self.worker_pools.items():
+            # 获取该stage的批大小
+            batch_size = self.stage_configs[stage].get("batch_size", self.max_batch_per_stage)
+
+            # 执行预热
+            try:
+                worker_pool.warmup(batch_size=batch_size)
+            except Exception as e:
+                print(f"[ModelWorkerService] {stage} 预热失败: {e}")
+
+        warmup_elapsed = time.time() - warmup_start
+        print(
+            f"[ModelWorkerService] 所有模型预热完成！"
+            f"总耗时={warmup_elapsed*1000:.1f}ms"
+        )
+
     def stop(self):
         """停止服务"""
         self._stop_event.set()
@@ -148,7 +168,7 @@ class ModelWorkerService:
         print("[ModelWorkerService] 已停止")
 
     def _inference_loop(self, stage: str):
-        """推理循环：消费指定 stage 的批量请求。"""
+        """推理循环：消费指定 stage 的批量请求（支持自适应超时）。"""
         worker_pool = self.worker_pools[stage]
         batch_size = self.stage_configs[stage].get(
             "batch_size", self.max_batch_per_stage
@@ -156,8 +176,22 @@ class ModelWorkerService:
 
         while not self._stop_event.is_set():
             try:
-                # 从 Dispatcher 获取该 stage 的 batch
-                batch = self.dispatcher.get_batch_for_stage(stage, max_size=batch_size)
+                # 获取队列深度（用于自适应超时）
+                with self.dispatcher._lock:
+                    queue_depth = len(self.dispatcher._stage_queues.get(stage, []))
+
+                # 自适应超时：针对小并发优化（<10客户端），避免过度等待增加延迟
+                if queue_depth >= batch_size * 2:
+                    timeout_ms = 1.0  # 队列充足，立即触发
+                elif queue_depth >= batch_size:
+                    timeout_ms = 2.0  # 队列适中，短暂等待
+                else:
+                    timeout_ms = 3.0  # 队列不足，稍微等待（避免过度等待）
+
+                # 从 Dispatcher 获取该 stage 的 batch（带超时）
+                batch = self.dispatcher.get_batch_for_stage(
+                    stage, max_size=batch_size, timeout_ms=timeout_ms
+                )
 
                 if not batch:
                     # 没有请求，短暂休眠
@@ -172,12 +206,13 @@ class ModelWorkerService:
                 # 回写结果到 ClientQueues
                 self._write_back_results(results)
 
-                # 调试日志
+                # 调试日志（增加队列深度信息）
                 if len(batch) > 0:
                     fps = len(batch) / elapsed if elapsed > 0 else 0
                     print(
-                        f"[InferWorker-{stage}] 完成 batch_size={len(batch)}, "
-                        f"耗时={elapsed*1000:.1f}ms, 吞吐={fps:.1f}fps"
+                        f"[InferWorker-{stage}] batch={len(batch)}/{batch_size}, "
+                        f"time={elapsed*1000:.1f}ms, fps={fps:.1f}, "
+                        f"queue_depth={queue_depth}, timeout={timeout_ms:.1f}ms"
                     )
 
             except Exception as e:

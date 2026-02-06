@@ -149,25 +149,50 @@ class StageAwareDispatcher:
         return "LEAK"
 
     def get_batch_for_stage(
-        self, stage: str, max_size: int = None
+        self, stage: str, max_size: int = None, timeout_ms: float = 3.0
     ) -> List[InferenceRequest]:
-        """获取指定 stage 的一个 batch。
+        """获取指定 stage 的一个 batch（支持超时等待）。
+
+        策略：
+        1. 立即检查队列，如果有 max_size 个数据，立即返回
+        2. 否则，等待 timeout_ms，期间持续检查
+        3. 超时后，返回当前已有的数据（可能不满）
 
         Args:
             stage: Stage 名称（LEAK/CLEAN/etc.）
             max_size: 最大 batch 大小，默认使用 self.max_batch_per_stage
+            timeout_ms: 超时时间（毫秒），默认 3ms（针对小并发优化）
 
         Returns:
             InferenceRequest 列表（可能为空）
         """
+        import time
+
         if max_size is None:
             max_size = self.max_batch_per_stage
 
         batch: List[InferenceRequest] = []
-        with self._lock:
-            queue = self._stage_queues[stage]
-            for _ in range(min(max_size, len(queue))):
-                batch.append(queue.popleft())
+        start_time = time.time()
+
+        while len(batch) < max_size:
+            with self._lock:
+                queue = self._stage_queues[stage]
+                # 取出当前可用的数据
+                available = min(max_size - len(batch), len(queue))
+                for _ in range(available):
+                    batch.append(queue.popleft())
+
+            # 批次已满，立即返回
+            if len(batch) >= max_size:
+                break
+
+            # 检查超时
+            elapsed_ms = (time.time() - start_time) * 1000
+            if elapsed_ms >= timeout_ms:
+                break
+
+            # 短暂休眠，避免空转
+            time.sleep(0.001)  # 1ms
 
         return batch
 

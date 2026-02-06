@@ -197,3 +197,50 @@ class MultiModelWorkerPool:
                     merged[i][model.name] = {"success": False, "error": str(e)}
 
         return merged
+
+    def warmup(self, batch_size: int = 1) -> None:
+        """模型预热：执行dummy推理以消除冷启动延迟。
+
+        Args:
+            batch_size: 预热批次大小，默认1（建议与实际batch_size一致）
+
+        工作原理：
+        1. 生成dummy输入（与真实输入shape一致）
+        2. 执行一次完整的并行推理流程
+        3. 触发模型加载、CUDA内核编译、显存分配
+        4. 丢弃预热结果
+        """
+        import time
+
+        print(f"[MultiModelWorkerPool-{self.stage}] 开始模型预热...")
+
+        # 生成dummy输入（640x480 BGR图像）
+        dummy_frames = [
+            np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(batch_size)
+        ]
+        dummy_contexts = [{} for _ in range(batch_size)]
+
+        start_time = time.time()
+
+        try:
+            # 执行一次完整推理（触发模型加载和CUDA初始化）
+            if self.use_cuda_stream:
+                results = self._infer_batch_parallel_cuda(dummy_frames, dummy_contexts)
+            else:
+                results = self._infer_batch_sequential(dummy_frames, dummy_contexts)
+
+            elapsed = time.time() - start_time
+
+            print(
+                f"[MultiModelWorkerPool-{self.stage}] 预热完成！"
+                f"耗时={elapsed*1000:.1f}ms, 模型数={len(self.models)}"
+            )
+
+            # 清理显存缓存（可选，避免预热占用过多显存）
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        except Exception as e:
+            print(f"[MultiModelWorkerPool-{self.stage}] 预热失败: {e}")
+            import traceback
+            traceback.print_exc()
