@@ -357,22 +357,21 @@ async def get_task_alarms(task_id: int):
                 " FROM clean_alarm WHERE task_id = :task_id ORDER BY created_at DESC"
             )
             res = conn.execute(sql, {"task_id": int(task_id)})
-            rows = res.fetchall()
+            rows = res.mappings().all()  # 使用 mappings() 获取字典形式的结果
 
         alarms = []
         for r in rows:
             alarms.append({
-                "alarm_id": r['alarm_id'] if 'alarm_id' in r.keys() else r[0],
-                "task_id": r['task_id'] if 'task_id' in r.keys() else r[1],
-                "step_id": r['step_id'] if 'step_id' in r.keys() else r[2],
-                "alarm_type": r['alarm_type'] if 'alarm_type' in r.keys() else r[3],
-                "message": r['message'] if 'message' in r.keys() else r[4],
-                "severity": r['severity'] if 'severity' in r.keys() else r[5],
-                "resolved": bool(r['resolved']) if 'resolved' in r.keys() else bool(r[6]) if len(r) > 6 else False,
-                "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else (r[7] if len(r) > 7 else None),
-                "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else (int(r[8]) if len(r) > 8 and r[8] is not None else None),
-                "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else (int(r[9]) if len(r) > 9 and r[9] is not None else None),
-                "created_at": r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else (r[10] if len(r) > 10 else None) # TODO: this attribute is out of date
+                "alarm_id": r['alarm_id'] if 'alarm_id' in r.keys() else None,
+                "task_id": r['task_id'] if 'task_id' in r.keys() else None,
+                "step_id": r['step_id'] if 'step_id' in r.keys() else None,
+                "alarm_type": r['alarm_type'] if 'alarm_type' in r.keys() else None,
+                "message": r['message'] if 'message' in r.keys() else None,
+                "severity": r['severity'] if 'severity' in r.keys() else None,
+                "resolved": bool(r['resolved']) if 'resolved' in r.keys() else False,
+                "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else None,
+                "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else None,
+                "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else None,
             })
 
         return {
