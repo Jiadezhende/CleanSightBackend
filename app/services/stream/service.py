@@ -65,9 +65,7 @@ class StreamService:
             self._selector_thread = threading.Thread(target=self._selector_loop, daemon=True, name="stream_service_selector")
             self._selector_thread.start()
 
-        # 健康监控（懒加载）
-        self.health_monitor = None
-        self.cleanup_service = None
+        # 注意：健康监控和清理服务现在都是全局服务，在应用启动时初始化，不再由 StreamService 管理
 
     @log_call(level=logging.INFO, log_args=True)
     def start_stream(self, client_id: str, stream_url: str, fps: int = 30, protocol: str = 'RTMP'):
@@ -87,8 +85,7 @@ class StreamService:
             StreamConnectionError: 流连接失败
             FFmpegError: FFmpeg 启动失败
         """
-        # 第一次启动流时，启动健康监控（懒加载）
-        self._ensure_health_monitor()
+        # 注意：健康监控和清理服务现在都是全局服务，由应用启动时初始化
 
         # 通过 GuardedExecutor 调用业务逻辑（边界层 2）
         return self.executor.execute(
@@ -373,11 +370,17 @@ class StreamService:
     @log_call(level=logging.INFO, log_args=True)
     def restart_stream(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
         """
-        服务层方法：重启流（调用框架边界层）
+        服务层方法：重启流（不使用 GuardedExecutor）
 
-        与start_stream的区别：
-        - 不创建新的ClientQueues（保留现有队列）
-        - 只重启FFmpegDecoder
+        职责边界：
+        - GuardedExecutor 仅用于 start_stream()（用户发起，可以等待）
+        - restart_stream() 不使用 GuardedExecutor（自动重连，不能阻塞）
+        - 健康监控器负责重试逻辑（在自己的时间间隔内）
+
+        与 start_stream 的区别：
+        - 不创建新的 ClientQueues（保留现有队列）
+        - 只重启 FFmpegDecoder
+        - 失败时返回 False（不重试，不阻塞）
 
         Args:
             client_id: 客户端ID
@@ -386,13 +389,24 @@ class StreamService:
             protocol: 协议（RTSP/RTMP）
 
         Returns:
-            True表示重启成功，False表示失败
+            True 表示重启成功，False 表示失败
+
+        异常处理：
+            - 捕获所有异常，记录日志，返回 False
+            - 不向上传播异常（避免阻塞健康监控线程）
         """
-        # 使用 GuardedExecutor 处理重启逻辑（框架边界层）
-        return self.executor.execute(
-            func=lambda: self._restart_stream_impl(client_id, stream_url, fps, protocol),
-            policy_name='stream'  # 固定延迟 3 秒，最多 5 次
-        )
+        try:
+            # 直接调用实现，不使用 GuardedExecutor
+            self._restart_stream_impl(client_id, stream_url, fps, protocol)
+            return True
+
+        except Exception as e:
+            # 记录异常，返回 False（健康监控器会在下一个周期重试）
+            logger.warning(
+                f"[StreamService] restart_stream failed: {client_id}, "
+                f"error={str(e)[:100]}, health monitor will retry in next check cycle"
+            )
+            return False
 
     def _restart_stream_impl(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
         """
@@ -454,50 +468,6 @@ class StreamService:
 
             logger.info(f"[{client_id}] Stream restarted successfully")
             return True
-
-    def _ensure_health_monitor(self):
-        """
-        业务代码：确保健康监控已启动（纯净）
-
-        第一次启动流时初始化并启动健康监控。
-
-        Raises:
-            Exception: 初始化失败时抛出异常（由调用者处理）
-        """
-        if self.health_monitor is not None:
-            return  # 已启动
-
-        from app.services.stream.health_monitor import StreamHealthMonitor
-        from app.services.stream.cleanup import init_cleanup_service
-        from app.services import ai  # AI服务模块
-
-        # 初始化清理服务（使用ai.manager作为InferenceManager实例，传入配置）
-        init_cleanup_service(
-            stream_service=self,
-            client_manager=client_manager,
-            inference_manager=ai.manager,
-            cleanup_config=self.config.cleanup if self.config else None
-        )
-
-        # 导入全局cleanup_service
-        from app.services.stream.cleanup import cleanup_service
-        self.cleanup_service = cleanup_service
-
-        # 启动清理服务的后台线程
-        self.cleanup_service.start()
-        logger.info("[StreamService] Cleanup service background thread started")
-
-        # 初始化健康监控（传入stream_service以支持自动重连，传入配置）
-        self.health_monitor = StreamHealthMonitor(
-            client_manager=client_manager,
-            cleanup_service=self.cleanup_service,
-            stream_service=self,
-            health_config=self.config.health_monitor if self.config else None
-        )
-
-        # 启动监控线程
-        self.health_monitor.start()
-        logger.info("[StreamService] Health monitor started")
 
     def get_pending_count(self, client_id: str) -> int:
         """
@@ -614,15 +584,9 @@ class StreamService:
         """
         logger.info("Shutting down StreamService...")
 
-        # 停止健康监控
-        if self.health_monitor:
-            try:
-                self.health_monitor.stop()
-                logger.info("Health monitor stopped")
-            except Exception as e:
-                logger.error(f"Error stopping health monitor: {e}")
+        # 注意：健康监控现在是全局服务，由应用生命周期管理，不在这里停止
 
-        # 停止所有流
+        # 停止所有流（只清理解码器，不清理 ClientManager）
         with self.lock:
             client_ids = list(self.decoders.keys())
 
@@ -631,16 +595,6 @@ class StreamService:
                 self.stop_stream(client_id)
             except Exception as e:
                 logger.error(f"Error stopping stream {client_id}: {e}")
-
-        # 清空所有客户端队列
-        if client_manager is not None:
-            try:
-                clear_results = client_manager.clear_all()
-                failed_count = sum(1 for r in clear_results if not r["success"])
-                if failed_count > 0:
-                    logger.warning(f"Failed to clean {failed_count}/{len(clear_results)} clients")
-            except Exception as e:
-                logger.error(f"Error clearing client manager: {e}")
 
         logger.info("StreamService shutdown complete")
 

@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 
-from app.routers import ai, inspection, task
+from app.routers import ai, inspection, task, api, health
 from app.utils import (
     AppError,
     StreamConnectionError,
@@ -50,9 +50,12 @@ async def lifespan(app: FastAPI):
     print(f"调试模式: {settings.debug}")
     print("=" * 60 + "\n")
 
-    # AI服务的生命周期由ai路由器管理
-    async with ai.lifespan():
-        yield
+    # 按照服务模块启动生命周期管理
+    # 1. 健康监控服务（依赖 client_manager, stream_service, inference_manager）
+    # 2. AI 推理服务
+    async with health.lifespan():
+        async with ai.lifespan():
+            yield
 
 
 app = FastAPI(
@@ -63,6 +66,8 @@ app = FastAPI(
 )
 
 # 注册路由器
+app.include_router(api.router)  # 统一API（优先注册）
+app.include_router(health.router)  # 健康监控
 app.include_router(ai.router)
 app.include_router(inspection.router)
 app.include_router(task.router)

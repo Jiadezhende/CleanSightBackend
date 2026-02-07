@@ -14,12 +14,17 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 
 @asynccontextmanager
 async def lifespan():
-    """AI服务生命周期管理：启动/停止推理管理器"""
+    """AI服务生命周期管理：启动推理管理器"""
+    # 启动 AI 推理服务
     ai.start()
+    print("✅ AI 推理服务已启动")
+
     try:
         yield
     finally:
+        # 停止 AI 推理服务
         ai.stop()
+        print("✅ AI 推理服务已停止")
 
 
 @router.websocket("/video")
@@ -118,6 +123,10 @@ async def load_task(task_id: int):
     """
     加载任务，为指定 task_id 的任务在 AI 服务中创建任务对象。
     从数据库读取任务信息，使用 source_ip 作为 client_id。
+
+    ⚠️ 过渡接口：建议使用 POST /api/start 代替
+
+    注意：此接口只加载任务，不启动流。需要单独调用 /inspection/start_rtsp_stream
     """
     db = None
     db_task = None  # 初始化变量，避免 UnboundLocalError
@@ -179,15 +188,17 @@ async def load_task(task_id: int):
 @router.post("/terminate_task/{client_id}")
 async def terminate_task(client_id: str):
     """
-    终止任务，清理指定 client_id 的所有 AI 服务资源（队列、任务对象等）。
+    终止任务，清理指定 client_id 的推理资源。
 
-    业务代码（纯净）：让异常向上传播到边界层 3（FastAPI全局处理器）
+    ⚠️ 过渡接口：建议使用 POST /api/terminate 代替
+
+    注意：此接口只清理推理资源（落盘数据），不停止流解码器，不清理 ClientManager
+    完整清理请使用 POST /api/terminate
 
     Args:
         client_id: 客户端 ID（通常是 source_ip）
     """
-    # 清理 AI 服务中的客户端资源
-    # 如果内部有清理失败，会抛出具体的异常（由边界层 3 处理）
+    # 只清理推理资源（落盘残余数据）
     ai.remove_client(client_id)
     return {"status": "success", "message": f"Task terminated for client {client_id}"}
 

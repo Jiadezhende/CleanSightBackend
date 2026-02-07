@@ -329,10 +329,38 @@ class APIClient:
             return {"error": str(e)}
     
     def terminate_task(self, client_id: str) -> Dict[str, Any]:
-        """终止任务（通过 client_id）"""
+        """终止任务（通过 client_id）- 旧接口，仅清理推理资源"""
         url = f"{self.base_url}/ai/terminate_task/{client_id}"
         try:
             response = requests.post(url, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+    def unified_start(self, task_id: int, rtsp_url: str, fps: int = 30) -> Dict[str, Any]:
+        """统一启动接口（推荐）- 合并 load_task + start_rtsp_stream"""
+        url = f"{self.base_url}/api/start"
+        payload = {
+            "task_id": task_id,
+            "rtsp_url": rtsp_url,
+            "fps": fps
+        }
+
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+    def unified_terminate(self, client_id: str) -> Dict[str, Any]:
+        """统一终止接口（推荐）- 完整清理：解码器 + 推理 + ClientManager"""
+        url = f"{self.base_url}/api/terminate"
+        params = {"client_id": client_id}
+
+        try:
+            response = requests.post(url, params=params, timeout=10)
             response.raise_for_status()
             return response.json()
         except Exception as e:

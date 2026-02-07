@@ -309,46 +309,38 @@ class InferenceManager:
         return processed_frame
 
     def remove_client(self, client_id: str) -> None:
-        """优雅地移除客户端（三阶段停止）
+        """移除客户端的推理资源（不清理 ClientManager）
 
-        阶段1: 落盘已有的处理结果
-        阶段2: 从 ClientManager 移除并刷新推理服务
-        阶段3: 正在处理的批次完成后会被自动丢弃
+        职责：
+        - 落盘残余缓存数据（保存已有的处理结果）
+        - 刷新推理服务，移除过时的批次
+        - 不负责清理 ClientManager（由 API 层或其他调用方负责）
+
+        阶段1: 落盘残余缓存
+        阶段2: 刷新推理服务
         """
-        logger.info(f"[InferenceManager] Removing client: {client_id}")
+        logger.info(f"[InferenceManager] Removing inference resources: {client_id}")
 
-        if not client_manager.has_client(client_id):
-            logger.warning(f"[InferenceManager] Client not found (already removed): {client_id}")
-            return
-
-        logger.info(f"[InferenceManager] Cleaning up client: {client_id}")
-
-        # 阶段1: 落盘剩余缓存（保存已有的处理结果）
-        cq = client_manager.get_client(client_id)
+        # 阶段1: 落盘残余缓存（保存已有的处理结果）
+        cq = client_manager.get_client(client_id) if client_manager.has_client(client_id) else None
         if cq:
             try:
                 self._flush_all_remaining_segments(client_id, cq)
+                logger.info(f"[InferenceManager] Segments flushed: {client_id}")
             except Exception as e:
                 logger.warning(f"[InferenceManager] Failed to flush segments: {client_id} - {e}")
+        else:
+            logger.warning(f"[InferenceManager] Client not found in ClientManager, skipping flush: {client_id}")
 
-        # 阶段2: 从 ClientManager 移除
-        try:
-            removal_result = client_manager.remove_client(client_id)
-            if not removal_result["removed"]:
-                logger.warning(f"[InferenceManager] Client not found in ClientManager: {client_id}")
-            elif removal_result["error"]:
-                logger.warning(f"[InferenceManager] ClientManager cleanup failed: {client_id} - {removal_result['error']}")
-        except Exception as e:
-            logger.error(f"[InferenceManager] Failed to remove from ClientManager: {client_id} - {e}")
-
-        # 阶段3: 刷新推理服务列表（此后推理完成的帧会被丢弃）
+        # 阶段2: 刷新推理服务（移除过时的批次）
         if self._model_worker_service is not None:
             try:
                 self._model_worker_service.refresh_client_queues()
+                logger.info(f"[InferenceManager] Worker service refreshed: {client_id}")
             except Exception as e:
                 logger.error(f"[InferenceManager] Failed to refresh worker service: {e}")
 
-        logger.info(f"[InferenceManager] Client cleanup complete: {client_id}")
+        logger.info(f"[InferenceManager] Inference resources removed: {client_id}")
 
     def status(self) -> Dict[str, Any]:
         """获取所有客户端及其队列状态"""
