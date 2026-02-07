@@ -247,7 +247,7 @@ class StreamService:
         注意：
         - decoder 进程的停止是异步的（避免阻塞）
         - selector 注销在锁内完成
-        - ClientManager 清理在主线程执行
+        - ClientManager 由 InferenceManager 统一清理
 
         Args:
             client_id: 客户端ID
@@ -271,10 +271,6 @@ class StreamService:
         # 2. 异步停止decoder进程（避免阻塞）
         if dec:
             self._stop_decoder_async(dec, client_id)
-
-        # 3. 清理ClientManager（快速操作，在主线程执行）
-        if client_manager is not None:
-            client_manager.remove_client(client_id, cleanup=True)
 
         logger.info(f"[{client_id}] Stream stopped")
 
@@ -639,7 +635,10 @@ class StreamService:
         # 清空所有客户端队列
         if client_manager is not None:
             try:
-                client_manager.clear_all()
+                clear_results = client_manager.clear_all()
+                failed_count = sum(1 for r in clear_results if not r["success"])
+                if failed_count > 0:
+                    logger.warning(f"Failed to clean {failed_count}/{len(clear_results)} clients")
             except Exception as e:
                 logger.error(f"Error clearing client manager: {e}")
 

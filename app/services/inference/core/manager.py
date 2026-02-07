@@ -315,10 +315,10 @@ class InferenceManager:
         阶段2: 从 ClientManager 移除并刷新推理服务
         阶段3: 正在处理的批次完成后会被自动丢弃
         """
-        logger.debug(f"[InferenceManager] Removing client: {client_id}")
+        logger.info(f"[InferenceManager] Removing client: {client_id}")
 
         if not client_manager.has_client(client_id):
-            logger.debug(f"[InferenceManager] Client not found (already removed): {client_id}")
+            logger.warning(f"[InferenceManager] Client not found (already removed): {client_id}")
             return
 
         logger.info(f"[InferenceManager] Cleaning up client: {client_id}")
@@ -333,7 +333,11 @@ class InferenceManager:
 
         # 阶段2: 从 ClientManager 移除
         try:
-            client_manager.remove_client(client_id)
+            removal_result = client_manager.remove_client(client_id)
+            if not removal_result["removed"]:
+                logger.warning(f"[InferenceManager] Client not found in ClientManager: {client_id}")
+            elif removal_result["error"]:
+                logger.warning(f"[InferenceManager] ClientManager cleanup failed: {client_id} - {removal_result['error']}")
         except Exception as e:
             logger.error(f"[InferenceManager] Failed to remove from ClientManager: {client_id} - {e}")
 
