@@ -259,42 +259,18 @@ class InferenceManager:
             },
         }
 
-    def _create_async_model_worker_service(self) -> ModelWorkerService:
+    def _create_async_model_worker_service(self):
         """创建异步模式的推理服务（将结果投递到时序队列）"""
-        # 创建服务（延迟初始化配置）
-        service = create_model_worker_service_from_manager(
+        from app.services.inference.core.service import AsyncModelWorkerService
+
+        # 使用继承实现，替代动态方法替换
+        service = AsyncModelWorkerService(
+            temporal_queue=self.temporal_queue,
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
             use_cuda_stream=True,
             num_worker_threads=2,
         )
-
-        # 覆写结果回写方法，将结果投递到时序队列
-        original_write_back = service._write_back_results
-
-        def async_write_back(results: List[InferenceResult]):
-            """异步回写：将结果投递到时序队列，而非直接写入 ClientQueues"""
-            for res in results:
-                try:
-                    if not client_manager.has_client(res.client_id):
-                        continue
-
-                    # 保存原始帧（供可视化使用）
-                    cq = client_manager.get_client(res.client_id)
-                    if cq:
-                        latest_frame = cq.get_latest_frame()
-                        if latest_frame is not None:
-                            res.frame = latest_frame  # 保存最新帧
-
-                    # 投递到时序分析队列
-                    self.temporal_queue.put(res, timeout=0.1)
-                except queue.Full:
-                    print(f"[InferenceManager] 时序队列已满，丢弃结果: {res.client_id}")
-                except Exception as e:
-                    print(f"[InferenceManager] 投递时序队列异常: {e}")
-
-        # 替换回写方法
-        service._write_back_results = async_write_back  # type: ignore
 
         return service
 

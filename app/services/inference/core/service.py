@@ -372,3 +372,58 @@ class ModelWorkerService:
             )
         else:
             print(f"[ModelWorkerService] 客户端列表已刷新: {new_count} 个客户端")
+
+
+class AsyncModelWorkerService(ModelWorkerService):
+    """异步模式的推理服务（投递到时序队列）
+
+    相比父类 ModelWorkerService 的变化：
+    - 覆写 _write_back_results：将推理结果投递到时序队列，而非直接写入 ClientQueues
+    - 支持异步管道架构（TemporalWorker → VisualizationWorker → WriteBackWorker）
+
+    使用场景：
+    - 推理服务作为异步管道的第一阶段
+    - 需要时序分析、可视化、持久化等后续处理
+    """
+
+    def __init__(self, temporal_queue, **kwargs):
+        """初始化异步推理服务
+
+        Args:
+            temporal_queue: 时序队列（queue.Queue），用于投递推理结果
+            **kwargs: 传递给父类的其他参数
+        """
+        super().__init__(**kwargs)
+        self.temporal_queue = temporal_queue
+        print(f"[AsyncModelWorkerService] 初始化完成（异步模式）")
+
+    def _write_back_results(self, results: List[InferenceResult]):
+        """覆写：将推理结果投递到时序队列（而非直接写入 ClientQueues）
+
+        异常处理：
+        - 客户端已移除 → 抛出 FrameDrop
+        - 队列已满 → 抛出 PersistenceError（retryable=True）
+        """
+        from app.utils.exceptions import FrameDrop, PersistenceError
+
+        for res in results:
+            # 检查客户端是否存在（可能在推理过程中被移除）
+            if not self._client_manager.has_client(res.client_id):
+                # 构建 FrameDrop 参数（frame_index 可能不存在）
+                frame_idx = getattr(res, 'frame_index', None)
+                raise FrameDrop(
+                    client_id=res.client_id,
+                    frame_index=frame_idx,  # type: ignore
+                    reason="client_removed"
+                )
+
+            # 投递到时序队列
+            try:
+                self.temporal_queue.put(res, timeout=0.1)
+            except Exception:  # queue.Full
+                raise PersistenceError(
+                    message=f"Temporal queue full for {res.client_id}",
+                    client_id=res.client_id,
+                    operation="temporal_queue_put",
+                    retryable=True
+                )

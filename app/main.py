@@ -155,7 +155,7 @@ async def database_error_handler(request: Request, exc: DatabaseError):
         content={
             "error": "Database unavailable",
             "detail": str(exc),
-            "retry_able": exc.retry_able,
+            "retryable": exc.retryable,
         }
     )
 
@@ -211,7 +211,7 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
         content={
             "error": "Persistence failed",
             "detail": str(exc),
-            "retry_able": exc.retry_able,
+            "retryable": exc.retryable,
         }
     )
 
@@ -239,7 +239,7 @@ async def cleansight_exception_handler(request: Request, exc: AppError):
         content={
             "error": "Internal error",
             "detail": str(exc),
-            "retry_able": exc.retry_able,
+            "retryable": exc.retryable,
         }
     )
 

@@ -41,15 +41,6 @@ class AppError(Exception):
         if 'fatal' in kwargs:
             self.fatal = kwargs['fatal']
 
-        # 兼容旧的 retry_able 参数名
-        if 'retry_able' in kwargs:
-            self.retryable = kwargs['retry_able']
-
-    @property
-    def retry_able(self):
-        """兼容性属性：映射到 retryable"""
-        return self.retryable
-
     def __str__(self):
         """字符串表示"""
         parts = [self.message]

@@ -20,13 +20,6 @@ _capture_threads: Dict[str, threading.Thread] = {}
 _stop_events: Dict[str, threading.Event] = {}
 
 
-class RTMPStreamConfig(BaseModel):
-    """RTMP 流配置"""
-    client_id: str
-    rtmp_url: str
-    fps: int = 30  # 固定帧率
-
-
 class RTSPStreamConfig(BaseModel):
     """RTSP 流配置"""
     client_id: str
@@ -36,29 +29,6 @@ class RTSPStreamConfig(BaseModel):
 
 
 # 旧的 _stream_capture_worker 已移至 app.services.stream_service
-
-@router.post("/start_rtmp_stream")
-async def start_rtmp_stream(config: RTMPStreamConfig):
-    """
-    启动 RTMP 流捕获。
-    
-    POST /inspection/start_rtmp_stream
-    Body: {"client_id": "xxx", "rtmp_url": "rtmp://localhost:1935/live/stream", "fps": 30}
-    """
-    # RTMP 已弃用；保留接口签名以兼容旧客户端，但返回 410 指示迁移
-    raise HTTPException(status_code=410, detail="RTMP 接口已弃用，请改用 RTSP（/inspection/start_rtsp_stream）")
-
-
-@router.post("/stop_rtmp_stream")
-async def stop_rtmp_stream(client_id: str = Query(..., description="客户端ID")):
-    """
-    停止 RTMP 流捕获。
-    
-    POST /inspection/stop_rtmp_stream?client_id=xxx
-    """
-    # RTMP 停止接口已弃用；保留路由以兼容旧客户端，但返回 410 指示迁移
-    raise HTTPException(status_code=410, detail="RTMP 接口已弃用，请改用 RTSP（/inspection/stop_rtsp_stream）")
-
 
 @router.post("/start_rtsp_stream")
 async def start_rtsp_stream(config: RTSPStreamConfig):
