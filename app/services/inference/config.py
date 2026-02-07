@@ -163,16 +163,21 @@ def load_stage_config(config_path: Optional[Path] = None, force_reload: bool = F
     try:
         with open(config_file, "r", encoding="utf-8") as f:
             if config_file.suffix in [".yaml", ".yml"]:
-                config_dict = yaml.safe_load(f)
+                loaded_data = yaml.safe_load(f)
             elif config_file.suffix == ".json":
                 import json
 
-                config_dict = json.load(f)
+                loaded_data = json.load(f)
             else:
                 raise ValueError(f"不支持的配置文件格式: {config_file.suffix}")
 
+        # 类型检查：确保加载的是字典
+        if not isinstance(loaded_data, dict):
+            logger.warning("配置格式错误(非字典): %s，使用默认配置", config_path)
+            return _create_default_config()
+
         # 展开环境变量
-        config_dict = _expand_env_vars(config_dict)
+        config_dict = _expand_env_vars(loaded_data)
 
         logger.info("✓ 已加载inference配置: %s", config_path)
         inference_config = InferenceConfig(config_dict)

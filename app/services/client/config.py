@@ -35,7 +35,7 @@ class ClientConfig:
     state: StateConfig
 
     @classmethod
-    def from_yaml(cls, config_path: Optional[str] = None) -> 'ClientConfig':
+    def from_yaml(cls, config_path: Optional[Path] = None) -> 'ClientConfig':
         """从YAML配置文件加载
 
         Args:
@@ -59,9 +59,18 @@ class ClientConfig:
         else:
             try:
                 with open(config_file, 'r', encoding='utf-8') as f:
-                    config_dict = yaml.safe_load(f) or {}
-                logger.info("✓ 已加载client配置: %s", config_path)
-                config = cls.from_dict(config_dict)
+                    loaded_data = yaml.safe_load(f)
+
+                # 类型检查：确保加载的是字典
+                if not isinstance(loaded_data, dict):
+                    logger.warning("✗ 配置格式错误(非字典): %s，使用默认配置", config_path)
+                    config = cls(
+                        frame=FrameConfig(),
+                        state=StateConfig()
+                    )
+                else:
+                    logger.info("✓ 已加载client配置: %s", config_path)
+                    config = cls.from_dict(loaded_data)
             except Exception as e:
                 logger.error("✗ 加载配置文件失败: %s，使用默认配置", e)
                 config = cls(

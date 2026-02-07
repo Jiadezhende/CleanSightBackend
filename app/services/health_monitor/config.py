@@ -26,7 +26,7 @@ class HealthMonitorConfig:
     orphan_timeout: float = 30.0
 
     @classmethod
-    def from_yaml(cls, config_path: Optional[str] = None) -> 'HealthMonitorConfig':
+    def from_yaml(cls, config_path: Optional[Path] = None) -> 'HealthMonitorConfig':
         """从 YAML 加载配置"""
         if config_path is None:
             # 使用 Path 对象确保路径正确解析
@@ -45,6 +45,13 @@ class HealthMonitorConfig:
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
                 config_data = yaml.safe_load(f)
+
+            # 类型检查：确保加载的是字典
+            if not isinstance(config_data, dict):
+                logger.warning(
+                    f"[HealthMonitorConfig] Invalid config format (not a dict), using defaults"
+                )
+                return cls()
 
             monitor_config = config_data.get('monitor', {})
 

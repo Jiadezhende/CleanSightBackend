@@ -120,15 +120,13 @@ async def get_monitor_config():
         "config": {
             "check_interval": config.check_interval,
             "heartbeat_timeout": config.heartbeat_timeout,
-            "restart_delay": config.restart_delay,
-            "max_restart_attempts": config.max_restart_attempts,
+            "reconnect_interval": config.reconnect_interval,
+            "max_reconnect_attempts": config.max_reconnect_attempts,
             "orphan_timeout": config.orphan_timeout,
         },
         "derived": {
             "suspect_timeout": _health_monitor.suspect_timeout,
             "cleanup_timeout": _health_monitor.cleanup_timeout,
-            "reconnect_interval": _health_monitor.reconnect_interval,
-            "max_reconnect_attempts": _health_monitor.max_reconnect_attempts,
         }
     }
 
