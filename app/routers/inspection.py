@@ -20,13 +20,6 @@ _capture_threads: Dict[str, threading.Thread] = {}
 _stop_events: Dict[str, threading.Event] = {}
 
 
-class RTMPStreamConfig(BaseModel):
-    """RTMP 流配置"""
-    client_id: str
-    rtmp_url: str
-    fps: int = 30  # 固定帧率
-
-
 class RTSPStreamConfig(BaseModel):
     """RTSP 流配置"""
     client_id: str
@@ -37,43 +30,25 @@ class RTSPStreamConfig(BaseModel):
 
 # 旧的 _stream_capture_worker 已移至 app.services.stream_service
 
-@router.post("/start_rtmp_stream")
-async def start_rtmp_stream(config: RTMPStreamConfig):
-    """
-    启动 RTMP 流捕获。
-    
-    POST /inspection/start_rtmp_stream
-    Body: {"client_id": "xxx", "rtmp_url": "rtmp://localhost:1935/live/stream", "fps": 30}
-    """
-    # RTMP 已弃用；保留接口签名以兼容旧客户端，但返回 410 指示迁移
-    raise HTTPException(status_code=410, detail="RTMP 接口已弃用，请改用 RTSP（/inspection/start_rtsp_stream）")
-
-
-@router.post("/stop_rtmp_stream")
-async def stop_rtmp_stream(client_id: str = Query(..., description="客户端ID")):
-    """
-    停止 RTMP 流捕获。
-    
-    POST /inspection/stop_rtmp_stream?client_id=xxx
-    """
-    # RTMP 停止接口已弃用；保留路由以兼容旧客户端，但返回 410 指示迁移
-    raise HTTPException(status_code=410, detail="RTMP 接口已弃用，请改用 RTSP（/inspection/stop_rtsp_stream）")
-
-
 @router.post("/start_rtsp_stream")
 async def start_rtsp_stream(config: RTSPStreamConfig):
     """
-    启动 RTSP 流捕获。
-    
+    启动 RTSP 流捕获（业务代码：纯净）
+
+    异常处理：让异常向上传播到边界层 3（FastAPI全局处理器）
+    - StreamConnectionError: 流连接失败（503）
+    - FFmpegError: FFmpeg 启动失败（500）
+
     POST /inspection/start_rtsp_stream
     Body: {"client_id": "xxx", "rtsp_url": "rtsp://localhost:8554/live/stream", "fps": 30}
     """
     client_id = config.client_id
     ai.set_stream_url(client_id, config.rtsp_url)
-    try:
-        stream_service.start_stream(client_id=client_id, stream_url=config.rtsp_url, fps=config.fps, protocol='RTSP')
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"failed to start stream: {e}")
+
+    # 启动流（可能抛出 StreamConnectionError 或 FFmpegError）
+    # 这些异常将被 FastAPI 全局处理器捕获（边界层 3）
+    stream_service.start_stream(client_id=client_id, stream_url=config.rtsp_url, fps=config.fps, protocol='RTSP')
+
     return {"status": "success", "message": f"RTSP 流捕获已启动 for {client_id}"}
 
 

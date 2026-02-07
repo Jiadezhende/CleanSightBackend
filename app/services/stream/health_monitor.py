@@ -104,81 +104,100 @@ class StreamHealthMonitor:
         logger.info("[StreamHealthMonitor] Stopped (stats: %s)", self._stats)
 
     def _monitor_loop(self):
-        """监控循环：定期检查所有客户端"""
+        """
+        监控线程入口（边界层 1）
+
+        职责：
+        1. 持续检查所有客户端健康状态
+        2. 捕获所有异常，防止线程崩溃
+        3. 记录错误日志
+        """
         logger.info("[StreamHealthMonitor] Monitor loop started")
 
-        while not self._stop_event.is_set():
-            try:
-                # 获取所有客户端
-                clients = self._client_manager.get_all_clients()
-                current_time = time.time()
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    # 业务逻辑：检查所有客户端
+                    self._check_all_clients()
 
-                # 统计
-                self._stats["checks"] += 1
+                    # 等待下一次检查
+                    self._stop_event.wait(timeout=self._check_interval)
 
-                # 日志：显示检查状态
-                if clients:
-                    reconnecting_count = len(self._reconnecting_clients)
-                    logger.debug(
-                        f"[StreamHealthMonitor] Checking {len(clients)} clients "
-                        f"({reconnecting_count} in reconnect mode)"
+                except Exception as e:
+                    # 边界层 1 捕获异常
+                    logger.error(
+                        f"[BoundaryLayer1] Error in monitor loop: {e}",
+                        exc_info=True
                     )
+                    # 出错后短暂等待，避免疯狂重试
+                    time.sleep(1.0)
 
-                # 检查每个客户端
-                for client_id, cq in clients.items():
-                    self._check_client_health(client_id, cq, current_time)
+        finally:
+            logger.info("[StreamHealthMonitor] Monitor loop exited")
 
-                # 等待下一次检查
-                self._stop_event.wait(timeout=self._check_interval)
+    def _check_all_clients(self):
+        """
+        业务代码：检查所有客户端（纯净）
 
-            except Exception as e:
-                logger.error(f"[StreamHealthMonitor] Error in monitor loop: {e}", exc_info=True)
-                # 出错后短暂等待，避免疯狂重试
-                time.sleep(1.0)
+        此方法包含业务逻辑，不捕获异常（由边界层 1 处理）
+        """
+        # 获取所有客户端
+        clients = self._client_manager.get_all_clients()
+        current_time = time.time()
 
-        logger.info("[StreamHealthMonitor] Monitor loop exited")
+        # 统计
+        self._stats["checks"] += 1
+
+        # 日志：显示检查状态
+        if clients:
+            reconnecting_count = len(self._reconnecting_clients)
+            logger.debug(
+                f"[StreamHealthMonitor] Checking {len(clients)} clients "
+                f"({reconnecting_count} in reconnect mode)"
+            )
+
+        # 检查每个客户端
+        for client_id, cq in clients.items():
+            self._check_client_health(client_id, cq, current_time)
 
     def _check_client_health(self, client_id: str, cq, current_time: float):
-        """检查单个客户端健康状态（支持自动重连）
+        """
+        业务代码：检查单个客户端健康状态（纯净，只抛异常）
 
         Args:
             client_id: 客户端ID
             cq: ClientQueues实例
             current_time: 当前时间戳
         """
-        try:
-            # 1. 检查是否在重连模式
-            if client_id in self._reconnecting_clients:
-                self._handle_reconnecting_client(client_id, cq, current_time)
-                return
+        # 1. 检查是否在重连模式
+        if client_id in self._reconnecting_clients:
+            self._handle_reconnecting_client(client_id, cq, current_time)
+            return
 
-            # 2. 正常监控逻辑
-            last_frame_time = cq.latest_raw_timestamp
+        # 2. 正常监控逻辑
+        last_frame_time = cq.latest_raw_timestamp
 
-            # 防御性检查：如果 timestamp 异常为 0，跳过
-            # 注：latest_raw_timestamp 现在初始化为创建时间，所以正常情况下不会为 0
-            if last_frame_time == 0:
-                logger.warning(f"[StreamHealthMonitor] WARN: {client_id} has zero timestamp (unexpected)")
-                return
+        # 防御性检查：如果 timestamp 异常为 0，跳过
+        # 注：latest_raw_timestamp 现在初始化为创建时间，所以正常情况下不会为 0
+        if last_frame_time == 0:
+            logger.warning(f"[StreamHealthMonitor] WARN: {client_id} has zero timestamp (unexpected)")
+            return
 
-            # 计算距离最后一帧的时间
-            time_since_last_frame = current_time - last_frame_time
+        # 计算距离最后一帧的时间
+        time_since_last_frame = current_time - last_frame_time
 
-            # 3. 进入重连模式（5秒无新帧，且未超过30秒）
-            if time_since_last_frame >= self.suspect_timeout and time_since_last_frame < self.cleanup_timeout:
-                if client_id not in self._reconnecting_clients:
-                    self._enter_reconnect_mode(client_id, cq, last_frame_time)
+        # 3. 进入重连模式（5秒无新帧，且未超过30秒）
+        if time_since_last_frame >= self.suspect_timeout and time_since_last_frame < self.cleanup_timeout:
+            if client_id not in self._reconnecting_clients:
+                self._enter_reconnect_mode(client_id, cq, last_frame_time)
 
-            # 4. 超过30秒，放弃重连，清理资源
-            elif time_since_last_frame >= self.cleanup_timeout:
-                logger.warning(
-                    f"[StreamHealthMonitor] TIMEOUT: {client_id}, "
-                    f"no frames for {time_since_last_frame:.1f}s, giving up reconnect"
-                )
-                self._exit_reconnect_mode(client_id, cleanup=True)
-
-        except Exception as e:
-            logger.error(f"[StreamHealthMonitor] Error checking {client_id}: {e}", exc_info=True)
+        # 4. 超过30秒，放弃重连，清理资源
+        elif time_since_last_frame >= self.cleanup_timeout:
+            logger.warning(
+                f"[StreamHealthMonitor] TIMEOUT: {client_id}, "
+                f"no frames for {time_since_last_frame:.1f}s, giving up reconnect"
+            )
+            self._exit_reconnect_mode(client_id, cleanup=True)
 
     def _enter_reconnect_mode(self, client_id: str, cq, last_frame_time: float):
         """进入重连模式"""
@@ -249,22 +268,22 @@ class StreamHealthMonitor:
         self._stats["reconnects"] += 1
 
         # 调用StreamService重启decoder
-        try:
-            success = self._stream_service.restart_stream(
-                client_id=client_id,
-                stream_url=state.stream_url,
-                fps=state.fps,
-                protocol=state.protocol
-            )
+        # 注意：restart_stream() 内部使用 GuardedExecutor（边界层 2），会自动处理重试
+        # 如果 restart_stream() 抛出异常，会被 _monitor_loop 的边界层 1 捕获
+        success = self._stream_service.restart_stream(
+            client_id=client_id,
+            stream_url=state.stream_url,
+            fps=state.fps,
+            protocol=state.protocol
+        )
 
-            if not success:
-                logger.warning(f"[StreamHealthMonitor] Reconnect attempt {state.attempt_count} failed to restart decoder for {client_id}, will retry in {self.reconnect_interval}s")
-                # 不要return，继续保持在重连模式，等待下一次尝试
-            else:
-                logger.debug(f"[StreamHealthMonitor] Decoder restarted for {client_id}, waiting for frames...")
-        except Exception as e:
-            logger.error(f"[StreamHealthMonitor] Exception during restart_stream for {client_id}: {e}, will retry in {self.reconnect_interval}s", exc_info=True)
-            # 不要return，继续保持在重连模式，等待下一次尝试
+        if success:
+            logger.debug(f"[StreamHealthMonitor] Decoder restarted for {client_id}, waiting for frames...")
+        else:
+            logger.warning(
+                f"[StreamHealthMonitor] Reconnect attempt {state.attempt_count} failed for {client_id}, "
+                f"will retry in {self.reconnect_interval}s"
+            )
 
         # 在下一次检查周期判断是否有新帧到达（无论本次成功与否）
 

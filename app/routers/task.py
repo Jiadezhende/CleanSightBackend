@@ -346,10 +346,18 @@ async def get_all_keypoints(task_id: int):
 @router.get("/{task_id}/alarms")
 async def get_task_alarms(task_id: int):
     """
-    获取指定任务的所有告警记录（clean_alarm 表）。
+    获取指定任务的所有告警记录（clean_alarm 表）
+
+    业务代码（纯净）：让数据库异常向上传播到边界层 3（FastAPI全局处理器）
+
+    Raises:
+        DatabaseError: 数据库查询失败（由边界层 3 转换为 503）
 
     返回最新字段集合：alarm_id, task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at
     """
+    from app.utils.exceptions import DatabaseError
+    from sqlalchemy.exc import SQLAlchemyError
+
     try:
         with engine.connect() as conn:
             sql = text(
@@ -358,31 +366,30 @@ async def get_task_alarms(task_id: int):
             )
             res = conn.execute(sql, {"task_id": int(task_id)})
             rows = res.mappings().all()  # 使用 mappings() 获取字典形式的结果
+    except SQLAlchemyError as e:
+        raise DatabaseError(
+            message=f"Failed to fetch alarms for task {task_id}",
+            retryable=True,
+            query=f"SELECT ... FROM clean_alarm WHERE task_id = {task_id}"
+        ) from e
 
-        alarms = []
-        for r in rows:
-            alarms.append({
-                "alarm_id": r['alarm_id'] if 'alarm_id' in r.keys() else None,
-                "task_id": r['task_id'] if 'task_id' in r.keys() else None,
-                "step_id": r['step_id'] if 'step_id' in r.keys() else None,
-                "alarm_type": r['alarm_type'] if 'alarm_type' in r.keys() else None,
-                "message": r['message'] if 'message' in r.keys() else None,
-                "severity": r['severity'] if 'severity' in r.keys() else None,
-                "resolved": bool(r['resolved']) if 'resolved' in r.keys() else False,
-                "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else None,
-                "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else None,
-                "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else None,
-            })
+    alarms = []
+    for r in rows:
+        alarms.append({
+            "alarm_id": r['alarm_id'] if 'alarm_id' in r.keys() else None,
+            "task_id": r['task_id'] if 'task_id' in r.keys() else None,
+            "step_id": r['step_id'] if 'step_id' in r.keys() else None,
+            "alarm_type": r['alarm_type'] if 'alarm_type' in r.keys() else None,
+            "message": r['message'] if 'message' in r.keys() else None,
+            "severity": r['severity'] if 'severity' in r.keys() else None,
+            "resolved": bool(r['resolved']) if 'resolved' in r.keys() else False,
+            "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else None,
+            "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else None,
+            "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else None,
+        })
 
-        return {
-            "task_id": task_id,
-            "total": len(alarms),
-            "alarms": alarms
-        }
-    except Exception as e:
-        print(f"Failed to fetch alarms for task {task_id}: {e}")
-        return {
-            "task_id": task_id,
-            "total": 0,
-            "alarms": []
-        }
+    return {
+        "task_id": task_id,
+        "total": len(alarms),
+        "alarms": alarms
+    }

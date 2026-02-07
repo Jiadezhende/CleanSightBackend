@@ -42,6 +42,7 @@ class ModelWorkerService:
 
     def __init__(
         self,
+        temporal_queue,  # 时序队列（必需参数）
         client_queues_map: Optional[Dict[str, ClientQueues]] = None,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
@@ -51,6 +52,7 @@ class ModelWorkerService:
     ):
         """
         Args:
+            temporal_queue: 时序队列（queue.Queue），用于投递推理结果（异步架构）
             client_queues_map: {client_id: ClientQueues}，如果为 None 则从 client_manager 获取
             stage_configs: Stage 配置（完全解耦版本，使用 InferenceTask）
                 {
@@ -68,6 +70,9 @@ class ModelWorkerService:
             num_worker_threads: 推理线程数
             client_manager_instance: ClientManager 实例（可选，用于动态获取客户端）
         """
+        # 保存时序队列（异步架构）
+        self.temporal_queue = temporal_queue
+
         # 保存 ClientManager 实例（用于动态客户端管理）
         self._client_manager = client_manager_instance or client_manager
 
@@ -95,10 +100,8 @@ class ModelWorkerService:
         # 为每个 stage 创建 MultiModelWorkerPool
         self.worker_pools: Dict[str, MultiModelWorkerPool] = {}
         for stage, cfg in self.stage_configs.items():
-            # 支持新旧两种配置格式：
-            # - 新格式：models (InferenceTask 列表)
-            # - 旧格式：subtasks (SubtaskPipeline 列表，向后兼容)
-            models = cfg.get("models", cfg.get("subtasks", []))
+            # 使用 InferenceTask 列表
+            models = cfg.get("models", [])
             if models:
                 self.worker_pools[stage] = MultiModelWorkerPool(
                     stage=stage,
@@ -216,53 +219,50 @@ class ModelWorkerService:
                     )
 
             except Exception as e:
-                print(f"[InferWorker-{stage}] 异常: {e}")
+                # 边界层 1: Worker.run() 异常捕获
+                from app.utils.exceptions import FrameDrop
                 import traceback
 
+                # FrameDrop: 安静丢弃（不打印完整 traceback）
+                if isinstance(e, FrameDrop):
+                    print(f"[InferWorker-{stage}] Frame dropped: {e.client_id} - {e.reason}")
+                    continue  # 继续处理下一批
+
+                # 其他异常：打印完整 traceback
+                print(f"[InferWorker-{stage}] 异常: {e}")
                 traceback.print_exc()
                 time.sleep(0.1)
 
     def _write_back_results(self, results: List[InferenceResult]):
-        """将推理结果回写到 ClientQueues，并更新 ClientState。
+        """将推理结果投递到时序队列（异步架构）
 
-        容错设计：
-        - 推理完成时客户端可能已被清理（连接断开、任务完成等）
-        - 使用 get() 安全检查，客户端不存在时跳过回写
-        - 不会因为客户端清理而导致推理服务崩溃
+        异常处理：
+        - 客户端已移除 → 抛出 FrameDrop
+        - 队列已满 → 抛出 PersistenceError（retryable=True）
         """
-        dropped_count = 0
+        from app.utils.exceptions import FrameDrop, PersistenceError
+
         for res in results:
-            # 安全检查：客户端可能在推理过程中被清理
-            cq = self.client_queues_map.get(res.client_id)
-            if cq is None:
-                # 客户端已被清理，丢弃此结果
-                dropped_count += 1
-                continue
-
-            # 更新 ClientState（业务状态）
-            if hasattr(cq, "state") and cq.state is not None:
-                self._update_client_state(cq.state, res)
-
-            # TODO: 实现可视化逻辑
-            # 需要调用对应 task 的 visualize 方法，在帧上绘制检测结果
-            # 参考：app/services/task_pipeline/leak/leak_test.py 中的可视化实现
-            annotated_frame = self._visualize_result(res, cq)
-
-            # 如果有可视化后的帧，则写入队列
-            if annotated_frame is not None:
-                frame_data = FrameData(
-                    timestamp=res.timestamp,
-                    frame=annotated_frame,
-                    inference_result=res.result,
+            # 检查客户端是否存在（可能在推理过程中被移除）
+            if not self._client_manager.has_client(res.client_id):
+                # 构建 FrameDrop 参数（frame_index 可能不存在）
+                frame_idx = getattr(res, 'frame_index', None)
+                raise FrameDrop(
+                    client_id=res.client_id,
+                    frame_index=frame_idx,  # type: ignore
+                    reason="client_removed"
                 )
 
-                # 写入队列
-                cq.append_ca_processed(frame_data)
-                cq.append_rt_processed(frame_data)
-
-        # 日志：如果有结果被丢弃，记录一下
-        if dropped_count > 0:
-            print(f"[InferWorker] 丢弃了 {dropped_count} 个无效结果（客户端已删除）")
+            # 投递到时序队列
+            try:
+                self.temporal_queue.put(res, timeout=0.1)
+            except Exception:  # queue.Full
+                raise PersistenceError(
+                    message=f"Temporal queue full for {res.client_id}",
+                    client_id=res.client_id,
+                    operation="temporal_queue_put",
+                    retryable=True
+                )
 
     def _update_client_state(self, state: ClientState, result: InferenceResult):
         """更新客户端业务状态（可由子类覆写）。

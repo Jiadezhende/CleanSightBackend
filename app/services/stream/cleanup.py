@@ -51,8 +51,8 @@ class CleanupService:
         """清理客户端资源（尽力而为，永不抛异常）
 
         执行步骤：
-        1. 清理StreamService中的解码器（停止ffmpeg进程）
-        2. 清理InferenceManager（包括ClientManager清理）
+        1. 清理InferenceManager（落盘残余数据，清理ClientManager）
+        2. 清理StreamService中的解码器（停止ffmpeg进程）
 
         Args:
             client_id: 客户端ID
@@ -84,17 +84,7 @@ class CleanupService:
         else:
             logger.warning(f"[CleanupService] ClientManager is None")
 
-        # 步骤1：清理StreamService中的解码器
-        try:
-            self._stream_service.stop_stream(client_id)
-            result["decoder_cleaned"] = True
-            logger.info(f"[CleanupService] Decoder cleaned: {client_id}")
-        except Exception as e:
-            error_msg = f"decoder: {e}"
-            result["errors"].append(error_msg)
-            logger.warning(f"[CleanupService] Decoder cleanup failed: {client_id} - {e}")
-
-        # 步骤2：清理InferenceManager（会自动清理ClientManager）
+        # 步骤1：清理InferenceManager（优先落盘数据，然后清理ClientManager）
         try:
             if self._inference_manager:
                 self._inference_manager.remove_client(client_id)
@@ -106,6 +96,16 @@ class CleanupService:
             error_msg = f"inference: {e}"
             result["errors"].append(error_msg)
             logger.warning(f"[CleanupService] Inference cleanup failed: {client_id} - {e}")
+
+        # 步骤2：清理StreamService中的解码器
+        try:
+            self._stream_service.stop_stream(client_id)
+            result["decoder_cleaned"] = True
+            logger.info(f"[CleanupService] Decoder cleaned: {client_id}")
+        except Exception as e:
+            error_msg = f"decoder: {e}"
+            result["errors"].append(error_msg)
+            logger.warning(f"[CleanupService] Decoder cleanup failed: {client_id} - {e}")
 
         # 记录清理完成
         if result["errors"]:

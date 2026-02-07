@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
-from app.services.inference.core.factory import create_model_worker_service_from_manager
 from app.services.inference.models import (
     InferenceResult,
     TemporalAnalysisPackage,
@@ -67,7 +66,6 @@ class InferenceManager:
         ca_segment_seconds: int = 10,  # 改为10秒，即300帧
         db_dir: Optional[str] = None,
         ca_maxlen: int = 500,
-        use_async_pipeline: bool = True,  # 是否启用异步管道
         temporal_threads: int = 2,
         visualization_threads: int = 4,
         writeback_threads: int = 2,
@@ -79,7 +77,6 @@ class InferenceManager:
             ca_segment_seconds: CA 段长度（秒）
             db_dir: 数据库存储目录
             ca_maxlen: CA 队列最大长度
-            use_async_pipeline: 是否启用异步管道（新架构）
             temporal_threads: 时序分析线程数
             visualization_threads: 可视化线程数
             writeback_threads: 写回线程数
@@ -94,9 +91,6 @@ class InferenceManager:
         self._db_dir = Path(db_dir) if db_dir else base_dir / "database"
         self._db_dir.mkdir(parents=True, exist_ok=True)
 
-        # 异步管道开关
-        self.use_async_pipeline = use_async_pipeline
-
         # 停止事件
         self._stop_event = threading.Event()
 
@@ -106,55 +100,44 @@ class InferenceManager:
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
         self._model_worker_service: Optional[ModelWorkerService] = None
 
-        if use_async_pipeline:
-            # ========== 异步管道模式 ==========
-            print("[InferenceManager] 启用异步管道架构")
+        # ========== 异步管道架构 ==========
+        print("[InferenceManager] 启用异步管道架构")
 
-            # 创建队列（负责各个worker池的通信）
-            self.temporal_queue: "queue.Queue[InferenceResult]" = queue.Queue(maxsize=256)
-            self.visualization_queue: "queue.Queue[TemporalAnalysisPackage]" = queue.Queue(maxsize=256)
-            self.writeback_queue: "queue.Queue[WriteBackData]" = queue.Queue(maxsize=256)
+        # 创建队列（负责各个worker池的通信）
+        self.temporal_queue: "queue.Queue[InferenceResult]" = queue.Queue(maxsize=256)
+        self.visualization_queue: "queue.Queue[TemporalAnalysisPackage]" = queue.Queue(maxsize=256)
+        self.writeback_queue: "queue.Queue[WriteBackData]" = queue.Queue(maxsize=256)
 
-            # 创建时序分析器
-            temporal_config = self._create_temporal_config()
-            self.temporal_analyzer = DefaultTemporalAnalyzer(config=temporal_config)
+        # 创建时序分析器
+        temporal_config = self._create_temporal_config()
+        self.temporal_analyzer = DefaultTemporalAnalyzer(config=temporal_config)
 
-            # 创建可视化器
-            self.visualizer = DefaultVisualizer()
+        # 创建可视化器
+        self.visualizer = DefaultVisualizer()
 
-            # 创建 Worker 池（各池管理自己的 stop_event）
-            self.temporal_pool = TemporalWorkerPool(
-                input_queue=self.temporal_queue,
-                output_queue=self.visualization_queue,
-                analyzer=self.temporal_analyzer,
-                num_workers=temporal_threads,
-            )
+        # 创建 Worker 池（各池管理自己的 stop_event）
+        self.temporal_pool = TemporalWorkerPool(
+            input_queue=self.temporal_queue,
+            output_queue=self.visualization_queue,
+            analyzer=self.temporal_analyzer,
+            num_workers=temporal_threads,
+        )
 
-            self.visualization_pool = VisualizationWorkerPool(
-                input_queue=self.visualization_queue,
-                output_queue=self.writeback_queue,
-                visualizer=self.visualizer,
-                num_workers=visualization_threads,
-            )
+        self.visualization_pool = VisualizationWorkerPool(
+            input_queue=self.visualization_queue,
+            output_queue=self.writeback_queue,
+            visualizer=self.visualizer,
+            num_workers=visualization_threads,
+        )
 
-            self.writeback_pool = WriteBackWorkerPool(
-                input_queue=self.writeback_queue,
-                num_workers=writeback_threads,
-                enable_db_write=False,  # 可选：是否写入数据库
-            )
+        self.writeback_pool = WriteBackWorkerPool(
+            input_queue=self.writeback_queue,
+            num_workers=writeback_threads,
+            enable_db_write=False,  # 可选：是否写入数据库
+        )
 
-            # 自定义推理服务（将结果投递到时序队列）
-            self._model_worker_service = self._create_async_model_worker_service()
-
-        else:
-            # ========== 同步模式（兼容旧代码） ==========
-            print("[InferenceManager] 使用同步模式（兼容旧代码）")
-            self._model_worker_service = create_model_worker_service_from_manager(
-                stage_configs=self._get_stage_configs(),
-                max_batch_per_stage=8,
-                use_cuda_stream=True,
-                num_worker_threads=2,
-            )
+        # 自定义推理服务（将结果投递到时序队列）
+        self._model_worker_service = self._create_async_model_worker_service()
 
         # ========== 持久化管理器（新架构） ==========
         from app.services.persistence import PersistenceManager, PersistenceConfig
@@ -259,42 +242,18 @@ class InferenceManager:
             },
         }
 
-    def _create_async_model_worker_service(self) -> ModelWorkerService:
+    def _create_async_model_worker_service(self):
         """创建异步模式的推理服务（将结果投递到时序队列）"""
-        # 创建服务（延迟初始化配置）
-        service = create_model_worker_service_from_manager(
+        from app.services.inference.core.service import ModelWorkerService
+
+        # ModelWorkerService 现在直接支持异步模式
+        service = ModelWorkerService(
+            temporal_queue=self.temporal_queue,
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
             use_cuda_stream=True,
             num_worker_threads=2,
         )
-
-        # 覆写结果回写方法，将结果投递到时序队列
-        original_write_back = service._write_back_results
-
-        def async_write_back(results: List[InferenceResult]):
-            """异步回写：将结果投递到时序队列，而非直接写入 ClientQueues"""
-            for res in results:
-                try:
-                    if not client_manager.has_client(res.client_id):
-                        continue
-
-                    # 保存原始帧（供可视化使用）
-                    cq = client_manager.get_client(res.client_id)
-                    if cq:
-                        latest_frame = cq.get_latest_frame()
-                        if latest_frame is not None:
-                            res.frame = latest_frame  # 保存最新帧
-
-                    # 投递到时序分析队列
-                    self.temporal_queue.put(res, timeout=0.1)
-                except queue.Full:
-                    print(f"[InferenceManager] 时序队列已满，丢弃结果: {res.client_id}")
-                except Exception as e:
-                    print(f"[InferenceManager] 投递时序队列异常: {e}")
-
-        # 替换回写方法
-        service._write_back_results = async_write_back  # type: ignore
 
         return service
 
@@ -356,10 +315,10 @@ class InferenceManager:
         阶段2: 从 ClientManager 移除并刷新推理服务
         阶段3: 正在处理的批次完成后会被自动丢弃
         """
-        logger.debug(f"[InferenceManager] Removing client: {client_id}")
+        logger.info(f"[InferenceManager] Removing client: {client_id}")
 
         if not client_manager.has_client(client_id):
-            logger.debug(f"[InferenceManager] Client not found (already removed): {client_id}")
+            logger.warning(f"[InferenceManager] Client not found (already removed): {client_id}")
             return
 
         logger.info(f"[InferenceManager] Cleaning up client: {client_id}")
@@ -374,7 +333,11 @@ class InferenceManager:
 
         # 阶段2: 从 ClientManager 移除
         try:
-            client_manager.remove_client(client_id)
+            removal_result = client_manager.remove_client(client_id)
+            if not removal_result["removed"]:
+                logger.warning(f"[InferenceManager] Client not found in ClientManager: {client_id}")
+            elif removal_result["error"]:
+                logger.warning(f"[InferenceManager] ClientManager cleanup failed: {client_id} - {removal_result['error']}")
         except Exception as e:
             logger.error(f"[InferenceManager] Failed to remove from ClientManager: {client_id} - {e}")
 
@@ -639,11 +602,10 @@ class InferenceManager:
         if self._model_worker_service:
             self._model_worker_service.start()
 
-        # 2. 启动异步管道（如果启用）
-        if self.use_async_pipeline:
-            self.temporal_pool.start()
-            self.visualization_pool.start()
-            self.writeback_pool.start()
+        # 2. 启动异步管道
+        self.temporal_pool.start()
+        self.visualization_pool.start()
+        self.writeback_pool.start()
 
         # 3. 启动分段检查线程（周期性检查队列并触发落盘）
         if self._segment_check_thread is None or not self._segment_check_thread.is_alive():
@@ -675,11 +637,10 @@ class InferenceManager:
         if self._model_worker_service:
             self._model_worker_service.stop()
 
-        # 2. 停止异步管道（如果启用）
-        if self.use_async_pipeline:
-            self.temporal_pool.stop()
-            self.visualization_pool.stop()
-            self.writeback_pool.stop()
+        # 2. 停止异步管道
+        self.temporal_pool.stop()
+        self.visualization_pool.stop()
+        self.writeback_pool.stop()
 
         # 3. 停止持久化管理器（新架构）
         self.persistence_manager.stop(timeout=10.0)

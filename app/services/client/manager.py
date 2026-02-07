@@ -8,7 +8,7 @@
 """
 
 import threading
-from typing import Dict, Optional
+from typing import Dict, Optional, Any, List
 import logging
 
 from .queues import ClientQueues
@@ -119,7 +119,7 @@ class ClientManager:
         with self._clients_lock:
             return client_id in self._clients
 
-    def remove_client(self, client_id: str, cleanup: bool = True) -> bool:
+    def remove_client(self, client_id: str, cleanup: bool = True) -> Dict[str, Any]:
         """
         注销客户端，可选清理资源
 
@@ -128,24 +128,40 @@ class ClientManager:
             cleanup: 是否清理队列资源（清空所有队列）
 
         Returns:
-            True 如果成功移除，False 如果客户端不存在
+            清理结果字典，包含以下字段：
+            - client_id: 客户端标识
+            - removed: 是否成功移除
+            - cleaned: 是否成功清理队列（仅当 cleanup=True 时有效）
+            - error: 错误信息（如果有）
         """
+        result = {
+            "client_id": client_id,
+            "removed": False,
+            "cleaned": False,
+            "error": None
+        }
+
         with self._clients_lock:
             client_queues = self._clients.pop(client_id, None)
 
             if client_queues is None:
+                result["error"] = "client_not_found"
                 logger.warning(f"尝试移除不存在的客户端: {client_id}")
-                return False
+                return result
+
+            result["removed"] = True
 
             if cleanup:
                 try:
                     client_queues.clear()
+                    result["cleaned"] = True
                     logger.info(f"客户端队列已清理: {client_id}")
                 except Exception as e:
+                    result["error"] = str(e)
                     logger.error(f"清理客户端队列失败 {client_id}: {e}")
 
             logger.info(f"客户端已移除: {client_id}")
-            return True
+            return result
 
     def get_all_clients(self) -> Dict[str, ClientQueues]:
         """
@@ -175,19 +191,39 @@ class ClientManager:
         with self._clients_lock:
             return len(self._clients)
 
-    def clear_all(self) -> None:
+    def clear_all(self) -> List[Dict[str, Any]]:
         """
         清空所有客户端资源（用于服务关闭时的全局清理）
+
+        Returns:
+            每个客户端的清理结果列表，每项包含：
+            - client_id: 客户端标识
+            - success: 是否清理成功
+            - error: 错误信息（如果清理失败）
         """
+        results = []
+
         with self._clients_lock:
             for client_id, client_queues in list(self._clients.items()):
                 try:
                     client_queues.clear()
+                    results.append({
+                        "client_id": client_id,
+                        "success": True,
+                        "error": None
+                    })
                 except Exception as e:
+                    results.append({
+                        "client_id": client_id,
+                        "success": False,
+                        "error": str(e)
+                    })
                     logger.error(f"清理客户端 {client_id} 失败: {e}")
 
             self._clients.clear()
-            logger.info("所有客户端资源已清理")
+            logger.info(f"所有客户端资源已清理 (总数: {len(results)})")
+
+        return results
 
     def get_status_summary(self) -> Dict:
         """
