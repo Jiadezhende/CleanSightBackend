@@ -5,10 +5,10 @@ CleanSight 工具模块基于**边界层异常处理架构**，专为并发 <15 
 ## 核心原则
 
 1. **业务代码保持纯净**：只抛异常，不捕获异常
-2. **框架边界层处理重试**：使用 RetryExecutor 统一管理重试逻辑
+2. **框架边界层处理重试**：使用 GuardedExecutor 统一管理重试逻辑
 3. **异常捕获在 4 个边界层**：
    - 边界层 1: Worker.run() - 防止线程崩溃
-   - 边界层 2: RetryExecutor - 统一重试逻辑
+   - 边界层 2: GuardedExecutor - 统一重试逻辑
    - 边界层 3: FastAPI 全局处理器 - HTTP 异常转换
    - 边界层 4: main() - 顶层 Fail-Fast
 
@@ -27,9 +27,9 @@ from app.utils import (
     ModelInferenceError,
     PersistenceError,
     # 框架边界层（推荐使用）
-    RetryExecutor,
+    GuardedExecutor,
     CircuitBreaker,
-    RetryExecutorWithCircuitBreaker,
+    GuardedExecutorWithCircuitBreaker,
     # 日志装饰器
     log_call,
     timing,
@@ -67,7 +67,7 @@ raise PersistenceError("HLS write failed", operation="hls_write")
 
 ---
 
-### 2. RetryExecutor（框架边界层）
+### 2. GuardedExecutor（框架边界层）
 
 **职责**：在框架层统一处理重试逻辑，业务代码保持纯净
 
@@ -81,12 +81,12 @@ raise PersistenceError("HLS write failed", operation="hls_write")
 **示例**：
 
 ```python
-from app.utils import RetryExecutor, StreamConnectionError
+from app.utils import GuardedExecutor, StreamConnectionError
 
 class StreamService:
     def __init__(self):
         # 创建执行器（框架边界层）
-        self.executor = RetryExecutor()
+        self.executor = GuardedExecutor()
 
     def start_stream(self, url: str):
         """服务层方法（调用框架边界层）"""
@@ -104,7 +104,7 @@ class StreamService:
 
 **关键点**：
 - ✅ 业务代码 `_connect()` 完全纯净，只抛异常
-- ✅ 重试逻辑在框架边界层 `RetryExecutor.execute()` 统一管理
+- ✅ 重试逻辑在框架边界层 `GuardedExecutor.execute()` 统一管理
 - ✅ 控制流清晰，易于调试
 
 ---
@@ -143,19 +143,19 @@ class DatabaseService:
 
 ---
 
-### 4. RetryExecutorWithCircuitBreaker（组合）
+### 4. GuardedExecutorWithCircuitBreaker（组合）
 
 **职责**：组合重试 + 熔断器，适用于数据库和外部 API
 
 **示例**：
 
 ```python
-from app.utils import RetryExecutorWithCircuitBreaker, DatabaseError
+from app.utils import GuardedExecutorWithCircuitBreaker, DatabaseError
 
 class DatabaseService:
     def __init__(self):
         # 创建组合执行器（重试 + 熔断器）
-        self.executor = RetryExecutorWithCircuitBreaker(
+        self.executor = GuardedExecutorWithCircuitBreaker(
             policy_name='database',  # 指数退避，最多 3 次
             breaker_name='database',
             max_failures=5,
@@ -239,11 +239,11 @@ def infer_batch(frames):
 ### 示例 1: StreamService（流服务）
 
 ```python
-from app.utils import RetryExecutor, StreamConnectionError, log_call
+from app.utils import GuardedExecutor, StreamConnectionError, log_call
 
 class StreamService:
     def __init__(self):
-        self.executor = RetryExecutor()
+        self.executor = GuardedExecutor()
 
     @log_call(level=logging.INFO)
     def start_stream(self, url: str):
@@ -263,12 +263,12 @@ class StreamService:
 ### 示例 2: DatabaseService（数据库服务）
 
 ```python
-from app.utils import RetryExecutorWithCircuitBreaker, DatabaseError, log_call
+from app.utils import GuardedExecutorWithCircuitBreaker, DatabaseError, log_call
 
 class DatabaseService:
     def __init__(self):
         # 创建执行器（重试 + 熔断器）
-        self.executor = RetryExecutorWithCircuitBreaker(
+        self.executor = GuardedExecutorWithCircuitBreaker(
             policy_name='database',
             breaker_name='database',
             max_failures=5,
@@ -382,7 +382,7 @@ async def database_error_handler(request: Request, exc: DatabaseError):
 
 以下装饰器已废弃，请使用框架边界层代替：
 
-- ❌ `@retry` → ✅ 使用 `RetryExecutor`
+- ❌ `@retry` → ✅ 使用 `GuardedExecutor`
 - ❌ `@circuit_breaker` → ✅ 使用 `CircuitBreaker`
 
 **为什么废弃**：
@@ -399,7 +399,7 @@ def connect_stream(url: str):
     # ... 连接逻辑
 
 # ✅ 新方案（框架边界层）
-executor = RetryExecutor()
+executor = GuardedExecutor()
 
 def connect_stream(url: str):
     """业务代码（纯净，只抛异常）"""
@@ -436,7 +436,7 @@ DEBUG_MODE=false        # 跳过高频装饰器
 
 - **业务代码纯净**: 只抛异常，不捕获异常
 - **框架边界层**: 统一处理重试和熔断器
-- **4 个边界层**: Worker.run(), RetryExecutor, FastAPI handlers, main()
+- **4 个边界层**: Worker.run(), GuardedExecutor, FastAPI handlers, main()
 - **零配置**: 参数硬编码，不需要额外配置文件
 - **性能友好**: 高频操作条件激活（DEBUG 模式）
 - **实用优先**: 避免过度设计，适用于并发 <15 的小规模系统
@@ -447,16 +447,16 @@ DEBUG_MODE=false        # 跳过高频装饰器
 
 ### Q1: 为什么不使用 @retry 装饰器？
 
-**A**: 装饰器会污染业务代码，违背边界层异常处理原则。使用 `RetryExecutor` 可以让业务代码保持纯净，重试逻辑在框架边界层统一管理。
+**A**: 装饰器会污染业务代码，违背边界层异常处理原则。使用 `GuardedExecutor` 可以让业务代码保持纯净，重试逻辑在框架边界层统一管理。
 
 ### Q2: 如何自定义重试策略？
 
-**A**: 创建自定义 `RetryPolicy` 并传递给 `RetryExecutor`：
+**A**: 创建自定义 `ExecutionPolicy` 并传递给 `GuardedExecutor`：
 
 ```python
-from app.utils import RetryExecutor, RetryPolicy
+from app.utils import GuardedExecutor, ExecutionPolicy
 
-custom_policy = RetryPolicy(
+custom_policy = ExecutionPolicy(
     max_attempts=10,
     delay=5.0,
     backoff=True,
@@ -464,13 +464,13 @@ custom_policy = RetryPolicy(
     max_delay=120.0
 )
 
-executor = RetryExecutor(custom_policies={'custom': custom_policy})
+executor = GuardedExecutor(custom_policies={'custom': custom_policy})
 executor.execute(func=my_func, policy_name='custom')
 ```
 
 ### Q3: 熔断器何时使用？
 
-**A**: 仅用于数据库连接和外部 API，其他场景用 `RetryExecutor` 即可。
+**A**: 仅用于数据库连接和外部 API，其他场景用 `GuardedExecutor` 即可。
 
 ### Q4: 业务代码可以使用 try/except 吗？
 
@@ -483,4 +483,4 @@ executor.execute(func=my_func, policy_name='custom')
 - [边界层异常处理示例](app/utils/BOUNDARY_LAYER_EXAMPLES.md) - 完整示例和最佳实践
 - [实施计划](C:\Users\31399\.claude\plans\boundary-layer-exception-handling.md) - 架构设计和迁移步骤
 - [异常类文档](app/utils/exceptions.py) - 5 个核心异常类
-- [执行器文档](app/utils/executor.py) - RetryExecutor 和 CircuitBreaker 实现
+- [执行器文档](app/utils/executor.py) - GuardedExecutor 和 CircuitBreaker 实现

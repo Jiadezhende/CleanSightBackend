@@ -216,9 +216,17 @@ class ModelWorkerService:
                     )
 
             except Exception as e:
-                print(f"[InferWorker-{stage}] 异常: {e}")
+                # 边界层 1: Worker.run() 异常捕获
+                from app.utils.exceptions import FrameDrop
                 import traceback
 
+                # FrameDrop: 安静丢弃（不打印完整 traceback）
+                if isinstance(e, FrameDrop):
+                    print(f"[InferWorker-{stage}] Frame dropped: {e.client_id} - {e.reason}")
+                    continue  # 继续处理下一批
+
+                # 其他异常：打印完整 traceback
+                print(f"[InferWorker-{stage}] 异常: {e}")
                 traceback.print_exc()
                 time.sleep(0.1)
 

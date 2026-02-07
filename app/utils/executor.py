@@ -1,24 +1,43 @@
 """
 CleanSight 重试执行器（框架边界层）
 
-设计原则：
+设计原则（基于《实时 AI 视觉检测项目异常处理规范》）：
 - 边界层捕获异常，业务代码保持纯净
 - 集中管理重试策略，避免分散在业务代码中
 - 框架层统一处理，业务层只抛出异常
+- 显式化 Action 决策（DROP/RETRY/FATAL）
 """
 
 import time
 import logging
+from enum import Enum
 from typing import Callable, Any, Optional, Dict
 from dataclasses import dataclass
 
-from .exceptions import CleanSightException, is_retryable_error
+from .exceptions import (
+    AppError,
+    ModelInferenceError,
+    FrameDrop,
+)
 
 logger = logging.getLogger(__name__)
 
 
+class Action(Enum):
+    """异常处理动作枚举
+
+    用于 Executor 决策显式化：
+    - DROP: 丢弃，继续执行（用于 FrameDrop）
+    - RETRY: 重试当前操作
+    - FATAL: 致命错误，向上传播
+    """
+    DROP = "drop"       # 丢弃，继续执行（用于 FrameDrop）
+    RETRY = "retry"     # 重试当前操作
+    FATAL = "fatal"     # 致命错误，向上传播
+
+
 @dataclass
-class RetryPolicy:
+class ExecutionPolicy:
     """重试策略配置"""
     max_attempts: int = 3
     delay: float = 1.0
@@ -27,7 +46,7 @@ class RetryPolicy:
     max_delay: float = 60.0
 
 
-class RetryExecutor:
+class GuardedExecutor:
     """
     重试执行器（框架边界层）
 
@@ -44,7 +63,7 @@ class RetryExecutor:
             # ... FFmpeg 启动逻辑
 
         # 服务层调用（框架边界层处理重试）
-        executor = RetryExecutor()
+        executor = GuardedExecutor()
         executor.execute(
             func=lambda: self.start_ffmpeg(url),
             policy_name='stream'
@@ -52,16 +71,16 @@ class RetryExecutor:
     """
 
     # 预定义策略（硬编码，零配置）
-    POLICIES: Dict[str, RetryPolicy] = {
+    POLICIES: Dict[str, ExecutionPolicy] = {
         # 流操作：固定延迟 3 秒，最多 5 次
-        'stream': RetryPolicy(
+        'stream': ExecutionPolicy(
             max_attempts=5,
             delay=3.0,
             backoff=False
         ),
 
         # 数据库操作：指数退避，最多 3 次
-        'database': RetryPolicy(
+        'database': ExecutionPolicy(
             max_attempts=3,
             delay=1.0,
             backoff=True,
@@ -70,7 +89,7 @@ class RetryExecutor:
         ),
 
         # 外部 API：指数退避，最多 3 次
-        'external_api': RetryPolicy(
+        'external_api': ExecutionPolicy(
             max_attempts=3,
             delay=2.0,
             backoff=True,
@@ -79,14 +98,14 @@ class RetryExecutor:
         ),
 
         # 模型推理：固定延迟 1 秒，最多 2 次
-        'inference': RetryPolicy(
+        'inference': ExecutionPolicy(
             max_attempts=2,
             delay=1.0,
             backoff=False
         ),
 
         # 持久化操作：指数退避，最多 3 次
-        'persistence': RetryPolicy(
+        'persistence': ExecutionPolicy(
             max_attempts=3,
             delay=1.0,
             backoff=True,
@@ -95,7 +114,7 @@ class RetryExecutor:
         ),
     }
 
-    def __init__(self, custom_policies: Optional[Dict[str, RetryPolicy]] = None):
+    def __init__(self, custom_policies: Optional[Dict[str, ExecutionPolicy]] = None):
         """
         初始化执行器
 
@@ -115,16 +134,22 @@ class RetryExecutor:
         """
         执行带重试的操作（框架边界层）
 
+        基于《实时 AI 视觉检测项目异常处理规范》：
+        - 根据异常类型和 Policy 决策处理动作（DROP/RETRY/FATAL）
+        - FrameDrop 异常走 DROP 路径，返回 None
+        - 强制记录 metrics（成功/失败）
+
         Args:
             func: 要执行的函数（无参数，使用 lambda 或闭包传递参数）
             policy_name: 策略名称（'stream', 'database', 'external_api', etc.）
             on_retry: 重试回调函数 (attempt, exception) -> None
 
         Returns:
-            函数执行结果
+            函数执行结果，或 None（FrameDrop 时）
 
         Raises:
-            最后一次尝试的异常
+            AppError: 致命错误或重试耗尽
+            Exception: 未知异常
 
         示例：
             # 业务代码（纯净）
@@ -143,56 +168,172 @@ class RetryExecutor:
         if not policy:
             raise ValueError(f"Unknown policy: {policy_name}")
 
-        current_delay = policy.delay
+        attempts = 0
 
-        for attempt in range(1, policy.max_attempts + 1):
+        while attempts < policy.max_attempts:
             try:
                 # 执行业务逻辑（可能抛出异常）
-                return func()
+                result = func()
+
+                # 成功：记录 metrics
+                self._record_success(policy_name, attempts)
+                return result
+
+            except AppError as e:
+                attempts += 1
+
+                # 决策动作
+                action = self._decide_action(e, policy, attempts)
+
+                # 记录 metrics（强制）
+                self._record_exception(policy_name, e, action, attempts)
+
+                if action == Action.DROP:
+                    # 安静丢弃（FrameDrop）
+                    logger.debug(f"[GuardedExecutor] Dropped: {e}")
+                    return None
+
+                elif action == Action.RETRY:
+                    # 重试前日志
+                    delay = self._calculate_delay(policy, attempts)
+                    logger.warning(
+                        f"[GuardedExecutor] Retry {attempts}/{policy.max_attempts} "
+                        f"after {delay:.2f}s (policy={policy_name}, error={str(e)[:100]})"
+                    )
+
+                    # 调用回调
+                    if on_retry:
+                        on_retry(attempts, e)
+
+                    # 等待后重试
+                    time.sleep(delay)
+                    continue
+
+                elif action == Action.FATAL:
+                    # 致命错误，向上传播
+                    logger.error(
+                        f"[GuardedExecutor] Fatal error (policy={policy_name}): {e}",
+                        exc_info=True
+                    )
+                    raise
 
             except Exception as e:
-                # 检查是否可重试
-                retryable = is_retryable_error(e)
-
-                # 最后一次尝试，直接抛出
-                if attempt == policy.max_attempts:
-                    logger.error(
-                        f"[RetryExecutor] Failed after {policy.max_attempts} attempts "
-                        f"(policy={policy_name}): {e}",
-                        exc_info=True
-                    )
-                    raise
-
-                # 不可重试的异常，直接抛出
-                if not retryable:
-                    logger.error(
-                        f"[RetryExecutor] Non-retryable exception "
-                        f"(policy={policy_name}): {e}",
-                        exc_info=True
-                    )
-                    raise
-
-                # 计算延迟
-                if policy.backoff:
-                    actual_delay = min(
-                        policy.delay * (policy.backoff_factor ** (attempt - 1)),
-                        policy.max_delay
-                    )
-                else:
-                    actual_delay = policy.delay
-
-                # 记录重试日志
-                logger.warning(
-                    f"[RetryExecutor] Retry {attempt}/{policy.max_attempts} "
-                    f"after {actual_delay:.2f}s (policy={policy_name}, error={str(e)[:100]})"
+                # 未知异常 -> 致命
+                logger.critical(
+                    f"[GuardedExecutor] Unhandled exception (policy={policy_name}): {e}",
+                    exc_info=True
                 )
+                self._record_exception(policy_name, e, Action.FATAL, attempts)
+                raise
 
-                # 调用回调
-                if on_retry:
-                    on_retry(attempt, e)
+        # 重试耗尽 -> 致命
+        logger.error(f"[GuardedExecutor] Max attempts reached for {policy_name}")
+        raise
 
-                # 等待后重试
-                time.sleep(actual_delay)
+    def _decide_action(self, exc: AppError, policy: ExecutionPolicy, attempts: int) -> Action:
+        """
+        决策处理动作（核心决策逻辑）
+
+        基于《实时 AI 视觉检测项目异常处理规范》：
+        - FrameDrop -> DROP（安静丢弃）
+        - fatal=True -> FATAL（致命错误）
+        - retryable=True 且未超过次数 -> RETRY（重试）
+        - 其他 -> FATAL（向上传播）
+
+        Args:
+            exc: AppError 异常实例
+            policy: 重试策略
+            attempts: 当前尝试次数
+
+        Returns:
+            Action: 处理动作（DROP/RETRY/FATAL）
+        """
+        # 1. FrameDrop -> DROP
+        if isinstance(exc, FrameDrop):
+            return Action.DROP
+
+        # 2. fatal=True -> FATAL
+        if exc.fatal:
+            return Action.FATAL
+
+        # 3. retryable=True 且未超过次数 -> RETRY
+        if exc.retryable and attempts < policy.max_attempts:
+            return Action.RETRY
+
+        # 4. 其他 -> FATAL
+        return Action.FATAL
+
+    def _calculate_delay(self, policy: ExecutionPolicy, attempts: int) -> float:
+        """
+        计算重试延迟
+
+        Args:
+            policy: 重试策略
+            attempts: 当前尝试次数
+
+        Returns:
+            float: 延迟时间（秒）
+        """
+        if policy.backoff:
+            # 指数退避
+            delay = min(
+                policy.delay * (policy.backoff_factor ** (attempts - 1)),
+                policy.max_delay
+            )
+        else:
+            # 固定延迟
+            delay = policy.delay
+        return delay
+
+    def _record_success(self, policy_name: str, attempts: int):
+        """
+        记录成功 metrics
+
+        Args:
+            policy_name: 策略名称
+            attempts: 尝试次数
+        """
+        # 如果有重试，记录到 metrics
+        if attempts > 0:
+            from app.utils.metrics import retry_total
+            retry_total.labels(
+                operation=policy_name,
+                error_type="recovered"
+            ).inc()
+
+    def _record_exception(self, policy_name: str, exc: Exception, action: Action, attempts: int):
+        """
+        记录异常 metrics
+
+        Args:
+            policy_name: 策略名称
+            exc: 异常实例
+            action: 处理动作
+            attempts: 尝试次数
+        """
+        from app.utils.metrics import retry_total, frame_drop_total, gpu_oom_total
+
+        exc_type = type(exc).__name__
+
+        # 1. 通用重试计数（所有异常）
+        if action in (Action.RETRY, Action.FATAL):
+            retry_total.labels(
+                operation=policy_name,
+                error_type=exc_type
+            ).inc()
+
+        # 2. FrameDrop 专用计数
+        if isinstance(exc, FrameDrop):
+            frame_drop_total.labels(
+                client_id=exc.client_id or "unknown",
+                reason=exc.reason or "unknown"
+            ).inc()
+
+        # 3. GPU OOM 专用计数
+        if isinstance(exc, ModelInferenceError) and exc.is_cuda_error:
+            gpu_oom_total.labels(
+                model=exc.model_name or "unknown"
+            ).inc()
 
 
 class CircuitBreaker:
@@ -313,7 +454,7 @@ class RetryExecutorWithCircuitBreaker:
     """
     带熔断器的重试执行器（框架边界层）
 
-    组合 RetryExecutor 和 CircuitBreaker，适用于数据库和外部 API
+    组合 GuardedExecutor 和 CircuitBreaker，适用于数据库和外部 API
 
     使用示例：
         # 创建执行器
@@ -351,7 +492,7 @@ class RetryExecutorWithCircuitBreaker:
             max_failures: 熔断器失败阈值
             reset_timeout: 熔断器重置超时
         """
-        self.retry_executor = RetryExecutor()
+        self.retry_executor = GuardedExecutor()
         self.circuit_breaker = CircuitBreaker(
             name=breaker_name,
             max_failures=max_failures,

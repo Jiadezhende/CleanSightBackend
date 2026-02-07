@@ -3,7 +3,7 @@
 
 验证 4 个边界层是否正确捕获异常：
 1. Worker.run() - 线程入口（边界层 1）
-2. RetryExecutor - 框架边界层（边界层 2）
+2. GuardedExecutor - 框架边界层（边界层 2）
 3. FastAPI 全局处理器 - HTTP 边界层（边界层 3）
 4. main() - 顶层 Fail-Fast（边界层 4）
 """
@@ -20,18 +20,18 @@ from app.utils import (
     DatabaseError,
     ModelInferenceError,
     PersistenceError,
-    RetryExecutor,
+    GuardedExecutor,
     CircuitBreaker,
 )
 
 
 # ============================================================================
-# 边界层 2 测试: RetryExecutor
+# 边界层 2 测试: GuardedExecutor
 # ============================================================================
 
 def test_retry_executor_success():
-    """测试 RetryExecutor 成功执行"""
-    executor = RetryExecutor()
+    """测试 GuardedExecutor 成功执行"""
+    executor = GuardedExecutor()
 
     # 模拟成功的函数
     def successful_func():
@@ -46,8 +46,8 @@ def test_retry_executor_success():
 
 
 def test_retry_executor_retry_then_success():
-    """测试 RetryExecutor 重试后成功"""
-    executor = RetryExecutor()
+    """测试 GuardedExecutor 重试后成功"""
+    executor = GuardedExecutor()
     attempts = [0]
 
     # 模拟第一次失败，第二次成功
@@ -67,8 +67,8 @@ def test_retry_executor_retry_then_success():
 
 
 def test_retry_executor_max_attempts_reached():
-    """测试 RetryExecutor 达到最大重试次数"""
-    executor = RetryExecutor()
+    """测试 GuardedExecutor 达到最大重试次数"""
+    executor = GuardedExecutor()
 
     # 模拟总是失败的函数
     def always_fail():
@@ -82,8 +82,8 @@ def test_retry_executor_max_attempts_reached():
 
 
 def test_retry_executor_non_retryable_error():
-    """测试 RetryExecutor 不重试不可重试的异常"""
-    executor = RetryExecutor()
+    """测试 GuardedExecutor 不重试不可重试的异常"""
+    executor = GuardedExecutor()
 
     # 模拟不可重试的异常（FFmpegError 默认 retry_able=False）
     def non_retryable_func():
@@ -277,15 +277,15 @@ def test_worker_boundary_layer():
 
 def test_integration_retry_with_circuit_breaker():
     """
-    集成测试：RetryExecutor + CircuitBreaker
+    集成测试：GuardedExecutor + CircuitBreaker
 
     验证：
     1. 重试逻辑正确
     2. 熔断器正确打开/关闭
     """
-    from app.utils import RetryExecutorWithCircuitBreaker
+    from app.utils import GuardedExecutorWithCircuitBreaker
 
-    executor = RetryExecutorWithCircuitBreaker(
+    executor = GuardedExecutorWithCircuitBreaker(
         policy_name='database',
         breaker_name='test_integration',
         max_failures=3,

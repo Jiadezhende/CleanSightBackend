@@ -63,17 +63,22 @@ async def stop_rtmp_stream(client_id: str = Query(..., description="客户端ID"
 @router.post("/start_rtsp_stream")
 async def start_rtsp_stream(config: RTSPStreamConfig):
     """
-    启动 RTSP 流捕获。
-    
+    启动 RTSP 流捕获（业务代码：纯净）
+
+    异常处理：让异常向上传播到边界层 3（FastAPI全局处理器）
+    - StreamConnectionError: 流连接失败（503）
+    - FFmpegError: FFmpeg 启动失败（500）
+
     POST /inspection/start_rtsp_stream
     Body: {"client_id": "xxx", "rtsp_url": "rtsp://localhost:8554/live/stream", "fps": 30}
     """
     client_id = config.client_id
     ai.set_stream_url(client_id, config.rtsp_url)
-    try:
-        stream_service.start_stream(client_id=client_id, stream_url=config.rtsp_url, fps=config.fps, protocol='RTSP')
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"failed to start stream: {e}")
+
+    # 启动流（可能抛出 StreamConnectionError 或 FFmpegError）
+    # 这些异常将被 FastAPI 全局处理器捕获（边界层 3）
+    stream_service.start_stream(client_id=client_id, stream_url=config.rtsp_url, fps=config.fps, protocol='RTSP')
+
     return {"status": "success", "message": f"RTSP 流捕获已启动 for {client_id}"}
 
 

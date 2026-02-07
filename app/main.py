@@ -1,19 +1,20 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import logging
 import os
 import sys
 
 from app.routers import ai, inspection, task
 from app.utils import (
-    CleanSightException,
+    AppError,
     StreamConnectionError,
     FFmpegError,
     DatabaseError,
     ModelInferenceError,
     PersistenceError,
 )
+from app.utils.metrics import get_metrics
 
 # 注意：日志配置由 uvicorn 的 --log-config 参数管理
 # 参见: logging_config.json
@@ -215,13 +216,13 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
     )
 
 
-@app.exception_handler(CleanSightException)
-async def cleansight_exception_handler(request: Request, exc: CleanSightException):
+@app.exception_handler(AppError)
+async def cleansight_exception_handler(request: Request, exc: AppError):
     """
     CleanSight 通用异常处理器（边界层 3）
 
     职责：
-    1. 捕获所有 CleanSightException 异常（未被具体处理器捕获的）
+    1. 捕获所有 AppError 异常（未被具体处理器捕获的）
     2. 记录错误日志
     3. 转换为 HTTP 500 状态码（Internal Server Error）
     """
@@ -275,6 +276,28 @@ async def generic_exception_handler(request: Request, exc: Exception):
 @app.get("/")
 async def root():
     return {"message": "Welcome to CleanSight Backend"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """
+    Prometheus metrics 端点
+
+    返回所有 metrics（文本格式），供 Prometheus 服务器抓取
+
+    用途：
+        - Prometheus 配置：scrape_configs.static_configs.targets = ["localhost:8000/metrics"]
+        - Grafana 可视化
+        - 告警规则
+
+    Metrics 包括：
+        - infer_latency_ms: 推理延迟（Histogram）
+        - infer_failure_total: 推理失败计数
+        - frame_drop_total: 帧丢弃计数
+        - gpu_oom_total: GPU OOM 计数
+        - retry_total: 重试计数
+    """
+    return Response(content=get_metrics(), media_type="text/plain")
 
 
 # ============================================================================

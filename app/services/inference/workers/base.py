@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
+import time
 
 import numpy as np
 
 from app.services.inference.models import InferenceRequest, InferenceResult
 from app.services.infer_task import InferenceTask
+from app.utils.metrics import infer_latency_ms, infer_failure_total
 
 # 可选：CUDA 支持
 try:
@@ -145,14 +147,33 @@ class MultiModelWorkerPool:
                 continue
 
             with torch.cuda.stream(cuda_stream):
+                start_time = time.time()
                 try:
                     # 调用 InferenceTask.infer_batch
                     batch_res = model.infer_batch(frames, contexts)
                     async_results.append((model.name, batch_res))
+
+                    # 记录推理延迟（成功）
+                    elapsed_ms = (time.time() - start_time) * 1000
+                    for ctx in contexts:
+                        infer_latency_ms.labels(
+                            client_id=ctx.get("client_id", "unknown"),
+                            model=model.name
+                        ).observe(elapsed_ms / len(frames))  # 平均每帧延迟
+
                 except Exception as e:
                     print(
                         f"[MultiModelWorkerPool] {model.name} infer_batch error: {e}"
                     )
+
+                    # 记录推理失败
+                    for ctx in contexts:
+                        infer_failure_total.labels(
+                            client_id=ctx.get("client_id", "unknown"),
+                            model=model.name,
+                            error_type=type(e).__name__
+                        ).inc()
+
                     # 返回失败结果
                     n = len(frames)
                     failed = [{"success": False, "error": str(e)} for _ in range(n)]
@@ -184,6 +205,7 @@ class MultiModelWorkerPool:
             if not model.enabled:
                 continue
 
+            start_time = time.time()
             try:
                 # 调用 InferenceTask.infer_batch
                 batch_res = model.infer_batch(frames, contexts)
@@ -191,8 +213,26 @@ class MultiModelWorkerPool:
                     merged[i][model.name] = batch_res[i]
                     # 更新 context，供后续依赖的模型使用
                     contexts[i]["results"][model.name] = batch_res[i]
+
+                # 记录推理延迟（成功）
+                elapsed_ms = (time.time() - start_time) * 1000
+                for ctx in contexts:
+                    infer_latency_ms.labels(
+                        client_id=ctx.get("client_id", "unknown"),
+                        model=model.name
+                    ).observe(elapsed_ms / n)  # 平均每帧延迟
+
             except Exception as e:
                 print(f"[MultiModelWorkerPool] {model.name} infer_batch error: {e}")
+
+                # 记录推理失败
+                for ctx in contexts:
+                    infer_failure_total.labels(
+                        client_id=ctx.get("client_id", "unknown"),
+                        model=model.name,
+                        error_type=type(e).__name__
+                    ).inc()
+
                 for i in range(n):
                     merged[i][model.name] = {"success": False, "error": str(e)}
 

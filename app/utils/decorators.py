@@ -7,8 +7,8 @@ CleanSight 装饰器工具集（仅用于日志）
 
 边界层异常处理原则：
 - 业务代码保持纯净，只抛异常，不捕获异常
-- 重试逻辑在 RetryExecutor 框架层统一管理
-- 异常捕获在 4 个边界层：Worker.run(), RetryExecutor, FastAPI handlers, main()
+- 重试逻辑在 GuardedExecutor 框架层统一管理
+- 异常捕获在 4 个边界层：Worker.run(), GuardedExecutor, FastAPI handlers, main()
 
 设计原则：
 - 实用优先，避免过度设计

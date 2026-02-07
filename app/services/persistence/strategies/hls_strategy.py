@@ -44,7 +44,8 @@ class HLSPersistenceStrategy:
         segment_type: str,
         frames: List[FrameData]
     ) -> bool:
-        """持久化视频段
+        """
+        持久化视频段（业务代码：纯净）
 
         Args:
             client_id: 客户端ID
@@ -54,139 +55,194 @@ class HLSPersistenceStrategy:
 
         Returns:
             是否成功
+
+        Raises:
+            PersistenceError: 持久化失败
+            ValueError: 未知的segment类型
         """
+        from app.utils.exceptions import PersistenceError
+
+        # 创建目标目录
+        target_dir = self.db_dir / client_id / str(task_id)
         try:
-            # 创建目标目录
-            target_dir = self.db_dir / client_id / str(task_id)
             target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise PersistenceError(
+                message=f"Failed to create directory: {target_dir}",
+                client_id=client_id,
+                operation="hls_mkdir",
+                retryable=True
+            ) from e
 
-            if segment_type == "raw":
-                return self._persist_raw_segment(target_dir, frames, client_id)
-            elif segment_type == "processed":
-                return self._persist_processed_segment(target_dir, frames, client_id)
-            else:
-                logger.error("未知的segment类型: %s", segment_type)
-                return False
-
-        except Exception as e:
-            logger.error("持久化失败: %s", e, exc_info=True)
-            return False
+        if segment_type == "raw":
+            return self._persist_raw_segment(target_dir, frames, client_id)
+        elif segment_type == "processed":
+            return self._persist_processed_segment(target_dir, frames, client_id)
+        else:
+            raise ValueError(f"Unknown segment type: {segment_type}")
 
     def _persist_raw_segment(self, target_dir: Path, frames: List[FrameData], client_id: str) -> bool:
-        """持久化原始视频段（从InferenceManager._do_persist_raw_segment迁移）"""
+        """
+        持久化原始视频段（业务代码：纯净）
+
+        Raises:
+            PersistenceError: 持久化失败（IOError, cv2.error等）
+        """
+        from app.utils.exceptions import PersistenceError
+
         if not frames:
             logger.warning("Raw segment为空: %s", target_dir)
             return False
 
-        try:
-            start_ts = frames[0].timestamp
+        start_ts = frames[0].timestamp
 
-            # 1. 生成原始视频段（使用原始视频源帧率30fps）
-            raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
-            height, width = frames[0].frame.shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        # 1. 生成原始视频段（使用原始视频源帧率30fps）
+        raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
+        height, width = frames[0].frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+        try:
             out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, self.raw_fps, (width, height))
             for fd in frames:
                 out_raw.write(fd.frame)
             out_raw.release()
+        except (IOError, cv2.error) as e:
+            raise PersistenceError(
+                message=f"Failed to write raw video segment: {raw_segment_path}",
+                client_id=client_id,
+                operation="hls_write_raw",
+                retryable=True
+            ) from e
 
-            # 2. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
-            if len(frames) > 1:
-                actual_duration = frames[-1].timestamp - frames[0].timestamp
-                segment_duration = actual_duration + (1.0 / self.raw_fps)
-            else:
-                segment_duration = 1.0 / self.raw_fps
+        # 2. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
+        if len(frames) > 1:
+            actual_duration = frames[-1].timestamp - frames[0].timestamp
+            segment_duration = actual_duration + (1.0 / self.raw_fps)
+        else:
+            segment_duration = 1.0 / self.raw_fps
 
-            # 3. 更新播放列表
-            raw_playlist_path = target_dir / "raw_playlist.m3u8"
+        # 3. 更新播放列表
+        raw_playlist_path = target_dir / "raw_playlist.m3u8"
+        try:
             if not raw_playlist_path.exists():
                 with raw_playlist_path.open("w") as f:
                     f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
             with raw_playlist_path.open("a") as f:
                 f.write(f"#EXTINF:{segment_duration:.3f},\n")
                 f.write(f"{raw_segment_path.name}\n")
+        except IOError as e:
+            raise PersistenceError(
+                message=f"Failed to update raw playlist: {raw_playlist_path}",
+                client_id=client_id,
+                operation="hls_update_playlist",
+                retryable=True
+            ) from e
 
-            # 4. 更新metadata.json
-            self._update_metadata(
-                target_dir,
-                segment_type="raw",
-                segment_count_delta=1,
-                duration_delta=segment_duration,
-                timestamp=start_ts
-            )
+        # 4. 更新metadata.json
+        self._update_metadata(
+            target_dir,
+            segment_type="raw",
+            segment_count_delta=1,
+            duration_delta=segment_duration,
+            timestamp=start_ts
+        )
 
-            logger.info("Raw segment已持久化: %s, frames=%d, duration=%.3fs", client_id, len(frames), segment_duration)
-            return True
-
-        except Exception as e:
-            logger.error("Raw segment持久化错误: %s", e, exc_info=True)
-            return False
+        logger.info("Raw segment已持久化: %s, frames=%d, duration=%.3fs", client_id, len(frames), segment_duration)
+        return True
 
     def _persist_processed_segment(self, target_dir: Path, frames: List[FrameData], client_id: str) -> bool:
-        """持久化处理后视频段和keypoints JSON（从InferenceManager._do_persist_processed_segment迁移）"""
+        """
+        持久化处理后视频段和keypoints JSON（业务代码：纯净）
+
+        Raises:
+            PersistenceError: 持久化失败（IOError, cv2.error等）
+        """
+        from app.utils.exceptions import PersistenceError
+
         if not frames:
             logger.warning("Processed segment为空: %s", target_dir)
             return False
 
-        try:
-            start_ts = frames[0].timestamp
+        start_ts = frames[0].timestamp
 
-            # 1. 生成处理后视频段（使用推理帧率）
-            segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
-            height, width = frames[0].frame.shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        # 1. 生成处理后视频段（使用推理帧率）
+        segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
+        height, width = frames[0].frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+        try:
             out_processed = cv2.VideoWriter(
                 str(segment_path), fourcc, self.processed_fps, (width, height)
             )
             for fd in frames:
                 out_processed.write(fd.frame)
             out_processed.release()
+        except (IOError, cv2.error) as e:
+            raise PersistenceError(
+                message=f"Failed to write processed video segment: {segment_path}",
+                client_id=client_id,
+                operation="hls_write_processed",
+                retryable=True
+            ) from e
 
-            # 2. 写keypoints JSON
-            keypoints_path = target_dir / f"keypoints_{int(start_ts * 1e6)}.json"
-            keypoints_list = []
-            for fd in frames:
-                kp = fd.keypoints if hasattr(fd, "keypoints") else None
-                ir = fd.inference_result if hasattr(fd, "inference_result") else None
-                keypoints_list.append({
-                    "timestamp": fd.timestamp,
-                    "keypoints": self._make_serializable(kp),
-                    "inference_result": self._make_serializable(ir),
-                })
+        # 2. 写keypoints JSON
+        keypoints_path = target_dir / f"keypoints_{int(start_ts * 1e6)}.json"
+        keypoints_list = []
+        for fd in frames:
+            kp = fd.keypoints if hasattr(fd, "keypoints") else None
+            ir = fd.inference_result if hasattr(fd, "inference_result") else None
+            keypoints_list.append({
+                "timestamp": fd.timestamp,
+                "keypoints": self._make_serializable(kp),
+                "inference_result": self._make_serializable(ir),
+            })
+
+        try:
             with keypoints_path.open("w", encoding="utf-8") as f:
                 json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
+        except IOError as e:
+            raise PersistenceError(
+                message=f"Failed to write keypoints JSON: {keypoints_path}",
+                client_id=client_id,
+                operation="hls_write_keypoints",
+                retryable=True
+            ) from e
 
-            # 3. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
-            if len(frames) > 1:
-                actual_duration = frames[-1].timestamp - frames[0].timestamp
-                segment_duration = actual_duration + (1.0 / self.processed_fps)
-            else:
-                segment_duration = 1.0 / self.processed_fps
+        # 3. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
+        if len(frames) > 1:
+            actual_duration = frames[-1].timestamp - frames[0].timestamp
+            segment_duration = actual_duration + (1.0 / self.processed_fps)
+        else:
+            segment_duration = 1.0 / self.processed_fps
 
-            # 4. 更新播放列表
-            playlist_path = target_dir / "processed_playlist.m3u8"
+        # 4. 更新播放列表
+        playlist_path = target_dir / "processed_playlist.m3u8"
+        try:
             if not playlist_path.exists():
                 with playlist_path.open("w") as f:
                     f.write("#EXTM3U8\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
             with playlist_path.open("a") as f:
                 f.write(f"#EXTINF:{segment_duration:.3f},\n")
                 f.write(f"{segment_path.name}\n")
+        except IOError as e:
+            raise PersistenceError(
+                message=f"Failed to update processed playlist: {playlist_path}",
+                client_id=client_id,
+                operation="hls_update_playlist",
+                retryable=True
+            ) from e
 
-            # 5. 更新metadata.json
-            self._update_metadata(
-                target_dir,
-                segment_type="processed",
-                segment_count_delta=1,
-                duration_delta=segment_duration,
-                timestamp=start_ts
-            )
+        # 5. 更新metadata.json
+        self._update_metadata(
+            target_dir,
+            segment_type="processed",
+            segment_count_delta=1,
+            duration_delta=segment_duration,
+            timestamp=start_ts
+        )
 
-            logger.info("Processed segment已持久化: %s, frames=%d, duration=%.3fs", client_id, len(frames), segment_duration)
-            return True
-
-        except Exception as e:
-            logger.error("Processed segment持久化错误: %s", e, exc_info=True)
-            return False
+        logger.info("Processed segment已持久化: %s, frames=%d, duration=%.3fs", client_id, len(frames), segment_duration)
+        return True
 
     def _update_metadata(
         self,

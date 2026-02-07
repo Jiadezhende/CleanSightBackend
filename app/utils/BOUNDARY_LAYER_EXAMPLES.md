@@ -6,7 +6,7 @@
 
 1. **业务代码保持纯净**：只抛异常，不捕获异常
 2. **边界层统一捕获**：在 4 个边界层统一处理异常
-3. **框架层处理重试**：使用 RetryExecutor 在框架层实现重试逻辑
+3. **框架层处理重试**：使用 GuardedExecutor 在框架层实现重试逻辑
 
 ---
 
@@ -37,12 +37,12 @@ class StreamService:
 ### ✅ 正确做法（边界层异常处理）
 
 ```python
-from app.utils import RetryExecutor, StreamConnectionError, log_call
+from app.utils import GuardedExecutor, StreamConnectionError, log_call
 
 class StreamService:
     def __init__(self):
         # 创建执行器（框架边界层）
-        self.executor = RetryExecutor()
+        self.executor = GuardedExecutor()
 
     @log_call(level=logging.INFO)  # ✅ 日志装饰器
     def start_stream(self, url: str):
@@ -93,7 +93,7 @@ class StreamService:
 
 **优势**:
 - 业务代码 `_start_ffmpeg()` 完全纯净，只抛异常
-- 重试逻辑在框架边界层统一管理 (`RetryExecutor`)
+- 重试逻辑在框架边界层统一管理 (`GuardedExecutor`)
 - 控制流清晰，易于调试
 
 ---
@@ -128,12 +128,12 @@ def get_task(task_id: int):
 ### ✅ 正确做法（边界层 + 熔断器）
 
 ```python
-from app.utils import RetryExecutorWithCircuitBreaker, DatabaseError, log_call
+from app.utils import GuardedExecutorWithCircuitBreaker, DatabaseError, log_call
 
 class DatabaseService:
     def __init__(self):
         # 创建执行器（重试 + 熔断器）
-        self.executor = RetryExecutorWithCircuitBreaker(
+        self.executor = GuardedExecutorWithCircuitBreaker(
             policy_name='database',  # 指数退避，最多 3 次
             breaker_name='database',
             max_failures=5,
@@ -326,7 +326,7 @@ async def load_task(task_id: int):
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from app.utils import (
-    CleanSightException,
+    AppError,
     StreamConnectionError,
     DatabaseError,
     ModelInferenceError,
@@ -383,8 +383,8 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
         }
     )
 
-@app.exception_handler(CleanSightException)
-async def cleansight_exception_handler(request: Request, exc: CleanSightException):
+@app.exception_handler(AppError)
+async def cleansight_exception_handler(request: Request, exc: AppError):
     """CleanSight 通用异常处理器（边界层 3）"""
     logger.error(
         f"CleanSight exception: {exc}",
@@ -482,7 +482,7 @@ if __name__ == "__main__":
 | 边界层 | 位置 | 职责 |
 |--------|------|------|
 | **边界层 1** | Worker.run() | 防止线程崩溃 |
-| **边界层 2** | RetryExecutor | 统一重试逻辑 |
+| **边界层 2** | GuardedExecutor | 统一重试逻辑 |
 | **边界层 3** | FastAPI 全局处理器 | HTTP 异常转换 |
 | **边界层 4** | main() | 顶层 Fail-Fast |
 
@@ -495,7 +495,7 @@ if __name__ == "__main__":
 
 ### 框架边界层准则
 
-1. **RetryExecutor**: 统一重试策略
+1. **GuardedExecutor**: 统一重试策略
 2. **CircuitBreaker**: 保护下游服务
 3. **全局异常处理器**: 统一 HTTP 错误响应
 4. **Worker.run()**: 防止线程崩溃
@@ -505,7 +505,7 @@ if __name__ == "__main__":
 
 ## 参考
 
-- [app/utils/executor.py](app/utils/executor.py): RetryExecutor、CircuitBreaker 实现
+- [app/utils/executor.py](app/utils/executor.py): GuardedExecutor、CircuitBreaker 实现
 - [app/utils/exceptions.py](app/utils/exceptions.py): 自定义异常类
 - [app/utils/decorators.py](app/utils/decorators.py): 日志装饰器
 - [边界层异常处理架构文档](C:\Users\31399\.claude\plans\boundary-layer-exception-handling.md)

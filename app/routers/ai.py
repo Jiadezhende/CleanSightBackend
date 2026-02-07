@@ -122,73 +122,74 @@ async def load_task(task_id: int):
     db = None
     db_task = None  # 初始化变量，避免 UnboundLocalError
     
+    from app.utils.exceptions import DatabaseError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    db = None
     try:
         db = next(get_db())
         try:
             db_task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
-            if db_task is None:
-                raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-            
-            # 使用 source_ip 作为 client_id（转换为 str 类型）
-            client_id = str(db_task.source_ip)
-            if not client_id or client_id == "None":
-                raise HTTPException(status_code=400, detail="Task source_ip is empty")
-            
-            # 构造内存中的任务对象
-            task = Task(
-                task_id=task_id,
-                current_step=str(db_task.current_step),
-                status="running",
-                updated_at=int(time.time()),
-                fully_submerged=False,
-                bending=False,
-                bubble_detected=False
-            )
+        except SQLAlchemyError as e:
+            raise DatabaseError(
+                message=f"Failed to query task {task_id}",
+                retryable=True,
+                query=f"SELECT * FROM task WHERE task_id = {task_id}"
+            ) from e
 
-            print(f"为 client_id={client_id} 加载任务 {task}")
+        if db_task is None:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
-            # 为客户端设置任务
-            success = ai.set_task(client_id, task)
-            if not success:
-                raise HTTPException(status_code=500, detail="Failed to set task for client")
+        # 使用 source_ip 作为 client_id（转换为 str 类型）
+        client_id = str(db_task.source_ip)
+        if not client_id or client_id == "None":
+            raise HTTPException(status_code=400, detail="Task source_ip is empty")
 
-            return TaskStatusResponse(
-                task_id=task.task_id,
-                status=task.status,
-                cleaning_stage=task.current_step,
-                bending=task.bending,
-                bubble_detected=task.bubble_detected,
-                fully_submerged=task.fully_submerged,
-                updated_at=datetime.fromtimestamp(task.updated_at).isoformat()
-            )
-        finally:
-            if db:
-                db.close()
-    except HTTPException:
-        # HTTPException 直接抛出，不打印 db_task（可能未定义）
-        raise
-    except Exception as e:
-        # 捕获所有其他异常，包括数据库连接错误
-        error_detail = f"Failed to load task {task_id}: {str(e)}"
-        if db_task:
-            error_detail += f" (DB Task: {db_task})"
-        print(f"[ERROR] {error_detail}")
-        raise HTTPException(status_code=500, detail=error_detail)
+        # 构造内存中的任务对象
+        task = Task(
+            task_id=task_id,
+            current_step=str(db_task.current_step),
+            status="running",
+            updated_at=int(time.time()),
+            fully_submerged=False,
+            bending=False,
+            bubble_detected=False
+        )
+
+        print(f"为 client_id={client_id} 加载任务 {task}")
+
+        # 为客户端设置任务
+        success = ai.set_task(client_id, task)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to set task for client")
+
+        return TaskStatusResponse(
+            task_id=task.task_id,
+            status=task.status,
+            cleaning_stage=task.current_step,
+            bending=task.bending,
+            bubble_detected=task.bubble_detected,
+            fully_submerged=task.fully_submerged,
+            updated_at=datetime.fromtimestamp(task.updated_at).isoformat()
+        )
+    finally:
+        if db:
+            db.close()
     
 @router.post("/terminate_task/{client_id}")
 async def terminate_task(client_id: str):
     """
     终止任务，清理指定 client_id 的所有 AI 服务资源（队列、任务对象等）。
-    
+
+    业务代码（纯净）：让异常向上传播到边界层 3（FastAPI全局处理器）
+
     Args:
         client_id: 客户端 ID（通常是 source_ip）
     """
-    try:
-        # 清理 AI 服务中的客户端资源
-        ai.remove_client(client_id)
-        return {"status": "success", "message": f"Task terminated for client {client_id}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
+    # 清理 AI 服务中的客户端资源
+    # 如果内部有清理失败，会抛出具体的异常（由边界层 3 处理）
+    ai.remove_client(client_id)
+    return {"status": "success", "message": f"Task terminated for client {client_id}"}
 
 
 def start_background_threads():
