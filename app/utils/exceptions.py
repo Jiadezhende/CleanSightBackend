@@ -8,6 +8,8 @@ CleanSight 自定义异常层次结构
 - 6个核心异常类（AppError + 5个服务异常 + FrameDrop）
 """
 
+from typing import Optional
+
 
 class AppError(Exception):
     """应用异常基类
@@ -23,7 +25,11 @@ class AppError(Exception):
     retryable: bool = False  # 类属性：默认不可重试
     fatal: bool = False      # 类属性：默认不致命
 
-    def __init__(self, message: str, client_id: str = None, **kwargs):
+    # 实例属性类型注解
+    message: str
+    client_id: Optional[str]
+
+    def __init__(self, message: str, client_id: Optional[str] = None, **kwargs):
         """初始化异常
 
         Args:
@@ -77,7 +83,11 @@ class FrameDrop(AppError):
     retryable = False  # 帧已丢失，无需重试
     fatal = False      # 不影响系统运行
 
-    def __init__(self, client_id: str, frame_index: int = None, reason: str = None):
+    # 实例属性类型注解
+    frame_index: Optional[int]
+    reason: Optional[str]
+
+    def __init__(self, client_id: str, frame_index: Optional[int] = None, reason: Optional[str] = None):
         """初始化帧丢弃异常
 
         Args:
@@ -113,7 +123,11 @@ class StreamConnectionError(AppError):
     retryable = True   # 网络瞬时故障，可重试
     fatal = False      # 单路流失败不影响系统
 
-    def __init__(self, url: str, client_id: str = None, details: str = None):
+    # 实例属性类型注解
+    url: str
+    details: Optional[str]
+
+    def __init__(self, url: str, client_id: Optional[str] = None, details: Optional[str] = None):
         """初始化流连接错误
 
         Args:
@@ -144,7 +158,11 @@ class FFmpegError(AppError):
     retryable = False  # 编码格式不支持，无法重试
     fatal = True       # 解码器崩溃，需要重启流
 
-    def __init__(self, message: str, client_id: str = None, exit_code: int = None, stderr: str = None):
+    # 实例属性类型注解
+    exit_code: Optional[int]
+    stderr: Optional[str]
+
+    def __init__(self, message: str, client_id: Optional[str] = None, exit_code: Optional[int] = None, stderr: Optional[str] = None):
         """初始化 FFmpeg 错误
 
         Args:
@@ -176,7 +194,10 @@ class DatabaseError(AppError):
     retryable = True   # 连接池耗尽，可重试
     fatal = False      # 数据库故障不影响推理主流程
 
-    def __init__(self, message: str, client_id: str = None, retryable: bool = None, query: str = None):
+    # 实例属性类型注解
+    query: Optional[str]
+
+    def __init__(self, message: str, client_id: Optional[str] = None, retryable: Optional[bool] = None, query: Optional[str] = None):
         """初始化数据库错误
 
         Args:
@@ -207,8 +228,12 @@ class ModelInferenceError(AppError):
     retryable = False  # CUDA OOM 等，重试无用
     fatal = False      # 单路失败不影响其他路
 
-    def __init__(self, message: str, client_id: str = None, model_name: str = None,
-                 retryable: bool = None, is_cuda_error: bool = False):
+    # 实例属性类型注解
+    model_name: Optional[str]
+    is_cuda_error: bool
+
+    def __init__(self, message: str, client_id: Optional[str] = None, model_name: Optional[str] = None,
+                 retryable: Optional[bool] = None, is_cuda_error: bool = False):
         """初始化模型推理错误
 
         Args:
@@ -244,8 +269,11 @@ class PersistenceError(AppError):
     retryable = True   # 磁盘临时满，可重试
     fatal = False      # 持久化失败不影响推理主流程
 
-    def __init__(self, message: str, client_id: str = None, operation: str = None,
-                 retryable: bool = None):
+    # 实例属性类型注解
+    operation: Optional[str]
+
+    def __init__(self, message: str, client_id: Optional[str] = None, operation: Optional[str] = None,
+                 retryable: Optional[bool] = None):
         """初始化持久化错误
 
         Args:
@@ -296,14 +324,14 @@ def is_fatal_error(exception: Exception) -> bool:
     return False
 
 
-def get_client_id_from_exception(exception: Exception) -> str:
+def get_client_id_from_exception(exception: Exception) -> Optional[str]:
     """从异常中提取 client_id
 
     Args:
         exception: 异常对象
 
     Returns:
-        str: client_id，如果不存在则返回 None
+        Optional[str]: client_id，如果不存在则返回 None
     """
     if isinstance(exception, AppError):
         return exception.client_id
