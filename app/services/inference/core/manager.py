@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
-from app.services.inference.core.factory import create_model_worker_service_from_manager
 from app.services.inference.models import (
     InferenceResult,
     TemporalAnalysisPackage,
@@ -67,7 +66,6 @@ class InferenceManager:
         ca_segment_seconds: int = 10,  # 改为10秒，即300帧
         db_dir: Optional[str] = None,
         ca_maxlen: int = 500,
-        use_async_pipeline: bool = True,  # 是否启用异步管道
         temporal_threads: int = 2,
         visualization_threads: int = 4,
         writeback_threads: int = 2,
@@ -79,7 +77,6 @@ class InferenceManager:
             ca_segment_seconds: CA 段长度（秒）
             db_dir: 数据库存储目录
             ca_maxlen: CA 队列最大长度
-            use_async_pipeline: 是否启用异步管道（新架构）
             temporal_threads: 时序分析线程数
             visualization_threads: 可视化线程数
             writeback_threads: 写回线程数
@@ -94,9 +91,6 @@ class InferenceManager:
         self._db_dir = Path(db_dir) if db_dir else base_dir / "database"
         self._db_dir.mkdir(parents=True, exist_ok=True)
 
-        # 异步管道开关
-        self.use_async_pipeline = use_async_pipeline
-
         # 停止事件
         self._stop_event = threading.Event()
 
@@ -106,55 +100,44 @@ class InferenceManager:
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
         self._model_worker_service: Optional[ModelWorkerService] = None
 
-        if use_async_pipeline:
-            # ========== 异步管道模式 ==========
-            print("[InferenceManager] 启用异步管道架构")
+        # ========== 异步管道架构 ==========
+        print("[InferenceManager] 启用异步管道架构")
 
-            # 创建队列（负责各个worker池的通信）
-            self.temporal_queue: "queue.Queue[InferenceResult]" = queue.Queue(maxsize=256)
-            self.visualization_queue: "queue.Queue[TemporalAnalysisPackage]" = queue.Queue(maxsize=256)
-            self.writeback_queue: "queue.Queue[WriteBackData]" = queue.Queue(maxsize=256)
+        # 创建队列（负责各个worker池的通信）
+        self.temporal_queue: "queue.Queue[InferenceResult]" = queue.Queue(maxsize=256)
+        self.visualization_queue: "queue.Queue[TemporalAnalysisPackage]" = queue.Queue(maxsize=256)
+        self.writeback_queue: "queue.Queue[WriteBackData]" = queue.Queue(maxsize=256)
 
-            # 创建时序分析器
-            temporal_config = self._create_temporal_config()
-            self.temporal_analyzer = DefaultTemporalAnalyzer(config=temporal_config)
+        # 创建时序分析器
+        temporal_config = self._create_temporal_config()
+        self.temporal_analyzer = DefaultTemporalAnalyzer(config=temporal_config)
 
-            # 创建可视化器
-            self.visualizer = DefaultVisualizer()
+        # 创建可视化器
+        self.visualizer = DefaultVisualizer()
 
-            # 创建 Worker 池（各池管理自己的 stop_event）
-            self.temporal_pool = TemporalWorkerPool(
-                input_queue=self.temporal_queue,
-                output_queue=self.visualization_queue,
-                analyzer=self.temporal_analyzer,
-                num_workers=temporal_threads,
-            )
+        # 创建 Worker 池（各池管理自己的 stop_event）
+        self.temporal_pool = TemporalWorkerPool(
+            input_queue=self.temporal_queue,
+            output_queue=self.visualization_queue,
+            analyzer=self.temporal_analyzer,
+            num_workers=temporal_threads,
+        )
 
-            self.visualization_pool = VisualizationWorkerPool(
-                input_queue=self.visualization_queue,
-                output_queue=self.writeback_queue,
-                visualizer=self.visualizer,
-                num_workers=visualization_threads,
-            )
+        self.visualization_pool = VisualizationWorkerPool(
+            input_queue=self.visualization_queue,
+            output_queue=self.writeback_queue,
+            visualizer=self.visualizer,
+            num_workers=visualization_threads,
+        )
 
-            self.writeback_pool = WriteBackWorkerPool(
-                input_queue=self.writeback_queue,
-                num_workers=writeback_threads,
-                enable_db_write=False,  # 可选：是否写入数据库
-            )
+        self.writeback_pool = WriteBackWorkerPool(
+            input_queue=self.writeback_queue,
+            num_workers=writeback_threads,
+            enable_db_write=False,  # 可选：是否写入数据库
+        )
 
-            # 自定义推理服务（将结果投递到时序队列）
-            self._model_worker_service = self._create_async_model_worker_service()
-
-        else:
-            # ========== 同步模式（兼容旧代码） ==========
-            print("[InferenceManager] 使用同步模式（兼容旧代码）")
-            self._model_worker_service = create_model_worker_service_from_manager(
-                stage_configs=self._get_stage_configs(),
-                max_batch_per_stage=8,
-                use_cuda_stream=True,
-                num_worker_threads=2,
-            )
+        # 自定义推理服务（将结果投递到时序队列）
+        self._model_worker_service = self._create_async_model_worker_service()
 
         # ========== 持久化管理器（新架构） ==========
         from app.services.persistence import PersistenceManager, PersistenceConfig
@@ -261,10 +244,10 @@ class InferenceManager:
 
     def _create_async_model_worker_service(self):
         """创建异步模式的推理服务（将结果投递到时序队列）"""
-        from app.services.inference.core.service import AsyncModelWorkerService
+        from app.services.inference.core.service import ModelWorkerService
 
-        # 使用继承实现，替代动态方法替换
-        service = AsyncModelWorkerService(
+        # ModelWorkerService 现在直接支持异步模式
+        service = ModelWorkerService(
             temporal_queue=self.temporal_queue,
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
@@ -615,11 +598,10 @@ class InferenceManager:
         if self._model_worker_service:
             self._model_worker_service.start()
 
-        # 2. 启动异步管道（如果启用）
-        if self.use_async_pipeline:
-            self.temporal_pool.start()
-            self.visualization_pool.start()
-            self.writeback_pool.start()
+        # 2. 启动异步管道
+        self.temporal_pool.start()
+        self.visualization_pool.start()
+        self.writeback_pool.start()
 
         # 3. 启动分段检查线程（周期性检查队列并触发落盘）
         if self._segment_check_thread is None or not self._segment_check_thread.is_alive():
@@ -651,11 +633,10 @@ class InferenceManager:
         if self._model_worker_service:
             self._model_worker_service.stop()
 
-        # 2. 停止异步管道（如果启用）
-        if self.use_async_pipeline:
-            self.temporal_pool.stop()
-            self.visualization_pool.stop()
-            self.writeback_pool.stop()
+        # 2. 停止异步管道
+        self.temporal_pool.stop()
+        self.visualization_pool.stop()
+        self.writeback_pool.stop()
 
         # 3. 停止持久化管理器（新架构）
         self.persistence_manager.stop(timeout=10.0)

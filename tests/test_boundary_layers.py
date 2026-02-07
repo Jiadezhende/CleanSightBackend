@@ -85,7 +85,7 @@ def test_retry_executor_non_retryable_error():
     """测试 GuardedExecutor 不重试不可重试的异常"""
     executor = GuardedExecutor()
 
-    # 模拟不可重试的异常（FFmpegError 默认 retry_able=False）
+    # 模拟不可重试的异常（FFmpegError 默认 retryable=False）
     def non_retryable_func():
         raise FFmpegError("FFmpeg not found", exit_code=1)
 
@@ -116,7 +116,7 @@ def test_circuit_breaker_opens_after_failures():
     breaker = CircuitBreaker(name='test', max_failures=3, reset_timeout=60.0)
 
     def always_fail():
-        raise DatabaseError("Connection failed", retry_able=True)
+        raise DatabaseError("Connection failed", retryable=True)
 
     # 前 3 次失败，熔断器打开
     for i in range(3):
@@ -166,13 +166,13 @@ def test_database_error_handler(client):
 
     @app.get(f"/test/database_error_{route_id}")
     async def test_database_error():
-        raise DatabaseError("Connection timeout", retry_able=True)
+        raise DatabaseError("Connection timeout", retryable=True)
 
     response = client.get(f"/test/database_error_{route_id}")
 
     assert response.status_code == 503
     assert response.json()["error"] == "Database unavailable"
-    assert response.json()["retry_able"] is True
+    assert response.json()["retryable"] is True
 
 
 def test_ffmpeg_error_handler(client):
@@ -283,9 +283,9 @@ def test_integration_retry_with_circuit_breaker():
     1. 重试逻辑正确
     2. 熔断器正确打开/关闭
     """
-    from app.utils import GuardedExecutorWithCircuitBreaker
+    from app.utils import RetryExecutorWithCircuitBreaker
 
-    executor = GuardedExecutorWithCircuitBreaker(
+    executor = RetryExecutorWithCircuitBreaker(
         policy_name='database',
         breaker_name='test_integration',
         max_failures=3,
@@ -298,7 +298,7 @@ def test_integration_retry_with_circuit_breaker():
         """模拟不稳定的函数：前 2 次失败，第 3 次成功"""
         attempts[0] += 1
         if attempts[0] < 3:
-            raise DatabaseError("Connection failed", retry_able=True)
+            raise DatabaseError("Connection failed", retryable=True)
         return "success"
 
     # 第一次调用：重试 2 次后成功

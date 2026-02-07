@@ -65,9 +65,6 @@ class InferenceConfig:
         self.rt_maxlen: int = self.global_config.get("rt_maxlen", 30)
         self.ca_maxlen: int = self.global_config.get("ca_maxlen", 600)
         self.ca_segment_len: int = self.global_config.get("ca_segment_len", 300)  # 帧数
-        # 兼容旧的 ca_segment_seconds 配置（废弃，优先使用 ca_segment_len）
-        if "ca_segment_seconds" in self.global_config and "ca_segment_len" not in self.global_config:
-            self.ca_segment_len = int(self.global_config["ca_segment_seconds"] * self.raw_fps)
 
     def get_stage_config(self, stage_name: str) -> Optional[StageConfig]:
         """获取指定 Stage 的配置"""
@@ -128,7 +125,7 @@ def _expand_env_vars(config: Any) -> Any:
         return config
 
 
-def load_stage_config(config_path: Optional[str] = None, force_reload: bool = False) -> InferenceConfig:
+def load_stage_config(config_path: Optional[Path] = None, force_reload: bool = False) -> InferenceConfig:
     """加载 Stage 配置文件（单例模式）
 
     Args:
@@ -337,6 +334,12 @@ if __name__ == "__main__":
     # 遍历所有 Stage
     for stage_name in config.list_stages():
         stage_config = config.get_stage_config(stage_name)
+
+        # 防御性编程：检查配置是否存在
+        if stage_config is None:
+            print(f"\nStage: {stage_name} - 配置缺失，跳过")
+            continue
+
         print(f"\nStage: {stage_name}")
         print(f"  Models: {len(stage_config.models)}")
         for model_cfg in stage_config.models:

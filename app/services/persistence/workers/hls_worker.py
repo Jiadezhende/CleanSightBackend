@@ -66,7 +66,7 @@ class HLSWorkerPool:
         self,
         input_queue: Queue,
         num_workers: int = 2,
-        db_dir: Path = None,
+        db_dir: Path | None = None,
         segment_duration: int = 10,
         raw_fps: float = 30.0,
         processed_fps: float = 20.0

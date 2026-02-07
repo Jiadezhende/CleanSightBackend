@@ -221,7 +221,8 @@ def test_metrics_retry():
     """测试 retry_total metric"""
     executor = GuardedExecutor()
 
-    operation = "test_operation"
+    # 修复：operation 应该是 policy_name（'stream'）
+    operation = "stream"  # policy_name
     error_type = "StreamConnectionError"
     metric_key = (operation, error_type)
 
