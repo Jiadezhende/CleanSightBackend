@@ -5,7 +5,7 @@
 """
 from contextlib import asynccontextmanager
 from fastapi import APIRouter
-from app.services.health_monitor import GlobalHealthMonitor
+from app.services.health_monitor import GlobalHealthMonitor, get_health_monitor_config
 from app.services.client.manager import client_manager
 from app.services.stream import stream_service
 from app.services import ai
@@ -42,11 +42,15 @@ async def lifespan():
     """全局健康监控服务生命周期管理"""
     global _health_monitor
 
-    # 创建并启动健康监控
+    # 加载健康监控配置
+    health_config = get_health_monitor_config()
+
+    # 创建并启动健康监控（传入配置）
     _health_monitor = GlobalHealthMonitor(
         client_manager=client_manager,
         stream_service=stream_service,
-        inference_manager=ai.manager
+        inference_manager=ai.manager,
+        config=health_config
     )
     _health_monitor.start()
     print("✅ 全局健康监控已启动")
@@ -126,4 +130,48 @@ async def get_monitor_config():
             "reconnect_interval": _health_monitor.reconnect_interval,
             "max_reconnect_attempts": _health_monitor.max_reconnect_attempts,
         }
+    }
+
+
+@router.get("/status")
+async def get_system_status():
+    """
+    获取系统整体状态
+
+    职责边界：
+    - 健康监控负责系统级别的状态汇总
+    - 整合来自多个模块的信息（ClientManager、StreamService、InferenceManager）
+    - 提供统一的系统状态视图
+    - 替代 /ai/status 端点（推荐使用此端点）
+
+    返回系统状态信息：
+    - clients: 客户端统计
+      - total: 总客户端数（有队列的）
+      - active_streams: 活跃流数量（有解码器的）
+      - reconnecting: 重连中的客户端数量
+      - orphans: 孤儿流数量（有队列但无解码器）
+    - queues: 各客户端的队列状态详情
+      - raw_queue_size: 原始帧队列大小
+      - ready_queue_size: 就绪帧队列大小
+      - latest_timestamp: 最新帧时间戳
+    - monitor_stats: 监控统计信息
+      - checks: 检查次数
+      - suspects: 检测到的可疑断流次数
+      - cleanups: 完整清理次数
+      - reconnects: 重连尝试次数
+      - reconnect_successes: 重连成功次数
+      - orphans_detected: 孤儿流检测次数
+
+    GET /health/status
+    """
+    if _health_monitor is None:
+        return {
+            "status": "not_initialized",
+            "message": "Health monitor not initialized"
+        }
+
+    system_status = _health_monitor.get_system_status()
+    return {
+        "status": "running",
+        **system_status
     }

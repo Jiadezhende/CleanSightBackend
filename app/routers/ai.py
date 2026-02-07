@@ -115,7 +115,16 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
 @router.get("/status")
 async def get_ai_status():
-    """获取AI服务状态，返回详细的队列信息"""
+    """
+    获取AI服务状态，返回详细的队列信息
+
+    ⚠️ 过渡接口：建议使用 GET /health/status 代替
+
+    职责边界变更：
+    - 系统状态查询应该由 GlobalHealthMonitor 负责
+    - 此端点保留用于向后兼容，未来版本将移除
+    - 新应用请使用 /health/status 获取更完整的系统状态
+    """
     return ai.status()
 
 @router.get("/load_task/{task_id}")

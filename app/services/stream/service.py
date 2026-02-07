@@ -516,7 +516,7 @@ class StreamService:
         if self.sel is None:
             return
         events = self.sel.select(timeout=timeout)
-        for key, _ in events:
+        for key, _ in events: # type: ignore
             dec: FFmpegDecoder = key.data
             # 业务逻辑：调用解码器读取数据
             # 注意：on_stdout_ready() 内部已经处理了异常（返回 False）

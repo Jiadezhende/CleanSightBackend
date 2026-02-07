@@ -17,38 +17,11 @@ import time
 import threading
 import logging
 from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
+
+from app.services.health_monitor.config import HealthMonitorConfig
+from app.services.health_monitor.types import ReconnectState
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ReconnectState:
-    """重连状态"""
-    client_id: str
-    stream_url: str
-    fps: int
-    protocol: str
-    attempt_count: int
-    last_attempt_time: float
-    last_frame_time_before_disconnect: float
-
-
-class HealthMonitorConfig:
-    """健康监控配置"""
-    def __init__(
-        self,
-        check_interval: float = 1.0,
-        heartbeat_timeout: float = 5.0,
-        restart_delay: float = 5.0,
-        max_restart_attempts: int = 5,
-        orphan_timeout: float = 30.0
-    ):
-        self.check_interval = check_interval
-        self.heartbeat_timeout = heartbeat_timeout
-        self.restart_delay = restart_delay
-        self.max_restart_attempts = max_restart_attempts
-        self.orphan_timeout = orphan_timeout  # 孤儿流超时时间
 
 
 class GlobalHealthMonitor:
@@ -81,14 +54,18 @@ class GlobalHealthMonitor:
         self.config = config or HealthMonitorConfig()
         self._check_interval = self.config.check_interval
         self.suspect_timeout = self.config.heartbeat_timeout
+
+        # 使用新的配置参数名 reconnect_interval（旧名 restart_delay）
+        self.reconnect_interval = self.config.reconnect_interval
+        self.max_reconnect_attempts = self.config.max_reconnect_attempts
+
+        # 计算派生超时值
         self.cleanup_timeout = self.config.heartbeat_timeout + (
-            self.config.restart_delay * self.config.max_restart_attempts
+            self.config.reconnect_interval * self.config.max_reconnect_attempts
         )
         self.orphan_timeout = self.config.orphan_timeout
 
-        # 重连参数
-        self.reconnect_interval = self.config.restart_delay
-        self.max_reconnect_attempts = self.config.max_restart_attempts
+        # 重连成功判定阈值（与心跳超时一致）
         self.reconnect_success_threshold = self.config.heartbeat_timeout
 
         # 线程控制
@@ -486,4 +463,73 @@ class GlobalHealthMonitor:
             **self._stats,
             "reconnecting_count": len(self._reconnecting_clients),
             "reconnecting_clients": list(self._reconnecting_clients.keys())
+        }
+
+    def get_system_status(self) -> Dict[str, Any]:
+        """获取系统整体状态（包含所有客户端及其队列状态）
+
+        职责边界：
+        - 健康监控负责系统级别的状态汇总
+        - 整合来自多个模块的信息（ClientManager、StreamService、InferenceManager）
+        - 提供统一的系统状态视图
+
+        Returns:
+            系统状态字典：
+            {
+                "clients": {
+                    "total": int,
+                    "active_streams": int,
+                    "reconnecting": int,
+                    "orphans": int
+                },
+                "queues": {
+                    "client_id": {
+                        "raw_queue_size": int,
+                        "ready_queue_size": int,
+                        "latest_timestamp": float,
+                        ...
+                    }
+                },
+                "monitor_stats": {
+                    "checks": int,
+                    "suspects": int,
+                    "cleanups": int,
+                    ...
+                }
+            }
+        """
+        # 获取所有客户端队列
+        all_clients = self._client_manager.get_all_clients()
+
+        # 获取活跃的解码器
+        active_decoders = set(self._stream_service.get_all_client_ids())
+
+        # 统计客户端类型
+        total_clients = len(all_clients)
+        active_streams = len(active_decoders)
+        reconnecting = len(self._reconnecting_clients)
+
+        # 孤儿流数量 = 有队列但无解码器的客户端
+        orphans = total_clients - active_streams - reconnecting
+        orphans = max(0, orphans)  # 确保不为负数
+
+        # 构建队列状态字典
+        queue_stats = {}
+        for client_id, cq in all_clients.items():
+            queue_stats[client_id] = cq.to_status_dict()
+
+        # 返回完整的系统状态
+        return {
+            "clients": {
+                "total": total_clients,
+                "active_streams": active_streams,
+                "reconnecting": reconnecting,
+                "orphans": orphans
+            },
+            "queues": queue_stats,
+            "monitor_stats": {
+                **self._stats,
+                "reconnecting_count": reconnecting,
+                "reconnecting_clients": list(self._reconnecting_clients.keys())
+            }
         }
