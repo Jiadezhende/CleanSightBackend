@@ -24,6 +24,8 @@ from .exceptions import (
     DatabaseError,
     ModelInferenceError,
     PersistenceError,
+    NotFoundError,
+    ValidationError,
     is_retryable_error,
     is_fatal_error,
     get_client_id_from_exception,
@@ -53,7 +55,7 @@ from .context import (
 )
 
 __all__ = [
-    # Exceptions (基类 + 核心异常 + 工具函数)
+    # Exceptions (基类 + 核心异常 + HTTP业务异常 + 工具函数)
     "AppError",
     "FrameDrop",
     "StreamConnectionError",
@@ -61,6 +63,8 @@ __all__ = [
     "DatabaseError",
     "ModelInferenceError",
     "PersistenceError",
+    "NotFoundError",
+    "ValidationError",
     "is_retryable_error",
     "is_fatal_error",
     "get_client_id_from_exception",

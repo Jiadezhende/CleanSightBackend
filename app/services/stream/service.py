@@ -12,6 +12,7 @@ import threading
 import selectors
 from typing import Optional, Dict, Any
 import logging
+from fastapi import HTTPException
 
 from .decoder import FFmpegDecoder
 from app.utils import (
@@ -119,11 +120,11 @@ class StreamService:
                     logger.warning(f"[{client_id}] Removing dead decoder before restart")
                     self._cleanup_dead_decoder_unsafe(client_id)
                 else:
-                    # 解码器还活着，不能重复启动
-                    raise StreamConnectionError(
-                        url=stream_url,
-                        client_id=client_id,
-                        details="Stream already started"
+                    # 解码器还活着，无法重复启动（可能URL不同）
+                    logger.warning(f"[{client_id}] Stream already running, cannot start with different URL")
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Stream already running for client {client_id}. Stop it first to change stream URL."
                     )
 
             logger.info(f"[{client_id}] Starting stream: protocol={protocol}, url={stream_url}")

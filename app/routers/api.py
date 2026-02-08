@@ -21,7 +21,7 @@ from app.services import ai
 from app.services.stream import stream_service
 from app.services.client.manager import client_manager
 from app.routers.health import get_health_monitor
-from app.utils.exceptions import DatabaseError
+from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError, AppError
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
@@ -70,10 +70,18 @@ async def start(req: StartRequest):
             ) from e
 
         if not db_task:
-            raise HTTPException(status_code=404, detail=f"Task {req.task_id} not found")
+            raise NotFoundError(
+                message=f"Task {req.task_id} not found",
+                resource_type="Task",
+                resource_id=str(req.task_id)
+            )
 
         if not db_task.source_ip:
-            raise HTTPException(status_code=400, detail="Task source_ip is required")
+            raise ValidationError(
+                message="Task source_ip is required",
+                field="source_ip",
+                value=None
+            )
 
         client_id = str(db_task.source_ip)
         logger.info(f"[start] Starting task {req.task_id} for client {client_id}")
@@ -103,7 +111,10 @@ async def start(req: StartRequest):
 
         success = ai.set_task(client_id, task)
         if not success:
-            raise HTTPException(status_code=500, detail="Failed to set task for client")
+            raise AppError(
+                message=f"Failed to set task for client {client_id}",
+                client_id=client_id
+            )
 
         logger.info(f"[start] Task set successfully: {client_id} -> task_id={req.task_id}")
 
@@ -126,11 +137,6 @@ async def start(req: StartRequest):
             "message": f"Task {req.task_id} started for client {client_id}"
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[start] Failed to start: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if db:
             db.close()

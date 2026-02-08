@@ -336,3 +336,73 @@ def get_client_id_from_exception(exception: Exception) -> Optional[str]:
     if isinstance(exception, AppError):
         return exception.client_id
     return None
+
+
+# ============================================================================
+# HTTP 业务异常（用于 API 路由层）
+# ============================================================================
+
+class NotFoundError(AppError):
+    """资源不存在异常（404）
+
+    用于：
+    - 任务不存在
+    - 视频段不存在
+    - 播放列表不存在
+    - 其他资源查询失败
+
+    特点：retryable=False, fatal=False（资源不存在，重试无意义）
+    """
+
+    retryable = False  # 资源不存在，重试无意义
+    fatal = False      # 不影响系统运行
+
+    # 实例属性类型注解
+    resource_type: Optional[str]
+    resource_id: Optional[str]
+
+    def __init__(self, message: str, resource_type: Optional[str] = None,
+                 resource_id: Optional[str] = None):
+        """初始化资源不存在异常
+
+        Args:
+            message: 错误消息
+            resource_type: 资源类型（如 "Task", "Segment", "Playlist"）
+            resource_id: 资源ID（如 task_id, segment_id）
+        """
+        super().__init__(message)
+        self.resource_type = resource_type
+        self.resource_id = resource_id
+
+
+class ValidationError(AppError):
+    """参数验证失败异常（400）
+
+    用于：
+    - source_ip 为空
+    - rtsp_url 格式错误
+    - 参数范围错误
+    - 必填字段缺失
+
+    特点：retryable=False, fatal=False（客户端错误，重试无意义）
+    """
+
+    retryable = False  # 客户端错误，重试无意义
+    fatal = False      # 不影响系统运行
+
+    # 实例属性类型注解
+    field: Optional[str]
+    value: Optional[str]
+
+    def __init__(self, message: str, field: Optional[str] = None,
+                 value: Optional[str] = None):
+        """初始化参数验证失败异常
+
+        Args:
+            message: 错误消息
+            field: 验证失败的字段名（如 "source_ip", "rtsp_url"）
+            value: 验证失败的值
+        """
+        super().__init__(message)
+        self.field = field
+        self.value = value

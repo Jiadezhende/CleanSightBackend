@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Sequence
 import time
 
@@ -19,13 +20,15 @@ from app.services.inference.models import InferenceRequest, InferenceResult
 from app.services.infer_task import InferenceTask
 from app.utils.metrics import infer_latency_ms, infer_failure_total
 
+logger = logging.getLogger(__name__)
+
 # 可选：CUDA 支持
 try:
     import torch
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    print("[MultiModelWorkerPool] torch not available, CUDA Stream disabled")
+    logger.warning("torch not available, CUDA Stream disabled")
 
 
 class MultiModelWorkerPool:
@@ -63,9 +66,9 @@ class MultiModelWorkerPool:
         else:
             self.cuda_streams = [None] * len(self.models)
 
-        print(
-            f"[MultiModelWorkerPool] 初始化 stage={stage}, models={len(self.models)}, "
-            f"CUDA Stream={'enabled' if self.use_cuda_stream else 'disabled'}"
+        logger.info(
+            f"MultiModelWorkerPool initialized: stage={stage}, models={len(self.models)}, "
+            f"CUDA_stream={'enabled' if self.use_cuda_stream else 'disabled'}"
         )
 
     def infer_batch(self, batch: List[InferenceRequest]) -> List[InferenceResult]:
@@ -162,8 +165,11 @@ class MultiModelWorkerPool:
                         ).observe(elapsed_ms / len(frames))  # 平均每帧延迟
 
                 except Exception as e:
-                    print(
-                        f"[MultiModelWorkerPool] {model.name} infer_batch error: {e}"
+                    # 业务逻辑层不应该捕获异常 - 让异常传播到Boundary Layer 1
+                    # 但为了兼容性和防止单个模型失败影响其他模型，这里保留异常捕获
+                    logger.error(
+                        f"Model {model.name} inference failed: {e}",
+                        exc_info=True
                     )
 
                     # 记录推理失败
@@ -252,7 +258,7 @@ class MultiModelWorkerPool:
         """
         import time
 
-        print(f"[MultiModelWorkerPool-{self.stage}] 开始模型预热...")
+        logger.info(f"Starting model warmup for stage {self.stage}...")
 
         # 生成dummy输入（640x480 BGR图像）
         dummy_frames = [
@@ -271,9 +277,9 @@ class MultiModelWorkerPool:
 
             elapsed = time.time() - start_time
 
-            print(
-                f"[MultiModelWorkerPool-{self.stage}] 预热完成！"
-                f"耗时={elapsed*1000:.1f}ms, 模型数={len(self.models)}"
+            logger.info(
+                f"Model warmup completed for stage {self.stage}: "
+                f"elapsed={elapsed*1000:.1f}ms, models={len(self.models)}"
             )
 
             # 清理显存缓存（可选，避免预热占用过多显存）
@@ -281,6 +287,4 @@ class MultiModelWorkerPool:
                 torch.cuda.empty_cache()
 
         except Exception as e:
-            print(f"[MultiModelWorkerPool-{self.stage}] 预热失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Model warmup failed for stage {self.stage}: {e}", exc_info=True)

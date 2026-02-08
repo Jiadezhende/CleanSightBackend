@@ -13,6 +13,8 @@ from app.utils import (
     DatabaseError,
     ModelInferenceError,
     PersistenceError,
+    NotFoundError,
+    ValidationError,
 )
 from app.utils.metrics import get_metrics
 
@@ -217,6 +219,63 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
             "error": "Persistence failed",
             "detail": str(exc),
             "retryable": exc.retryable,
+        }
+    )
+
+
+@app.exception_handler(NotFoundError)
+async def not_found_error_handler(request: Request, exc: NotFoundError):
+    """
+    资源不存在处理器（边界层 3）
+
+    职责：
+    1. 捕获所有 NotFoundError 异常
+    2. 记录警告日志（404 通常不是严重错误）
+    3. 转换为 HTTP 404 状态码（Not Found）
+    """
+    logger.warning(
+        f"[BoundaryLayer3] Resource not found: {exc}",
+        extra={
+            "resource_type": exc.resource_type,
+            "resource_id": exc.resource_id,
+            "url": str(request.url),
+        }
+    )
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "Resource not found",
+            "detail": str(exc),
+            "resource_type": exc.resource_type,
+            "resource_id": exc.resource_id,
+        }
+    )
+
+
+@app.exception_handler(ValidationError)
+async def validation_error_handler(request: Request, exc: ValidationError):
+    """
+    参数验证失败处理器（边界层 3）
+
+    职责：
+    1. 捕获所有 ValidationError 异常
+    2. 记录警告日志（客户端错误，不记录 exc_info）
+    3. 转换为 HTTP 400 状态码（Bad Request）
+    """
+    logger.warning(
+        f"[BoundaryLayer3] Validation error: {exc}",
+        extra={
+            "field": exc.field,
+            "value": exc.value,
+            "url": str(request.url),
+        }
+    )
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "Validation error",
+            "detail": str(exc),
+            "field": exc.field,
         }
     )
 

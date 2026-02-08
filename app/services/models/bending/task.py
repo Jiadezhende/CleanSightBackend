@@ -4,12 +4,16 @@
 使用 YOLO 模型检测内镜是否弯折，并更新清洗任务的弯折计数
 """
 
+import logging
 import cv2
 import numpy as np
 from typing import Dict, Any, List, Optional
 
 from app.services.infer_task import InferenceTask, InferenceResult
 from app.services.models.bending.detector import get_detector
+from app.utils.exceptions import ModelInferenceError
+
+logger = logging.getLogger(__name__)
 
 
 class EndoscopeBendingDetectionTask(InferenceTask):
@@ -55,10 +59,13 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             try:
                 self.detector = get_detector(self.model_path)
                 self._model_loaded = True
-                print(f"内镜弯折检测模型已加载: {self.model_path}")
+                logger.info(f"Bending detection model loaded: {self.model_path}")
             except Exception as e:
-                print(f"内镜弯折检测模型加载失败: {e}")
-                raise
+                logger.error(f"Failed to load bending detection model: {e}", exc_info=True)
+                raise ModelInferenceError(
+                    message=f"Failed to load bending detection model: {str(e)}",
+                    model_name="yolov8_bending"
+                ) from e
     
     def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
         """
@@ -89,8 +96,8 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             if bending_detected and task:
                 # 更新任务的弯折计数
                 task.bending_count += 1
-                print(f"检测到内镜弯折！任务 {task.task_id} 弯折计数: {task.bending_count}")
-            
+                logger.info(f"Bending detected! Task {task.task_id} count: {task.bending_count}")
+
             return {
                 "success": True,
                 "bending_detected": bending_detected,
@@ -98,19 +105,26 @@ class EndoscopeBendingDetectionTask(InferenceTask):
                 "detection_count": len(detections),
                 "bending_count": task.bending_count if task else 0
             }
-            
+
+        except RuntimeError as e:
+            # YOLO RuntimeError → ModelInferenceError
+            error_msg = str(e).lower()
+            is_cuda = "out of memory" in error_msg or "cuda" in error_msg
+
+            raise ModelInferenceError(
+                message=str(e),
+                model_name="yolov8_bending",
+                client_id=context.get("client_id") if context else None,
+                is_cuda_error=is_cuda
+            ) from e
+
         except Exception as e:
-            print(f"内镜弯折检测错误: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                "success": False,
-                "error": str(e),
-                "bending_detected": False,
-                "detections": [],
-                "detection_count": 0,
-                "bending_count": 0
-            }
+            # 其他未预期的异常 → ModelInferenceError
+            raise ModelInferenceError(
+                message=f"Unexpected error in bending detection: {str(e)}",
+                model_name="yolov8_bending",
+                client_id=context.get("client_id") if context else None
+            ) from e
 
     def infer_batch(self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]) -> List[InferenceResult]:
         """利用 detector 的批量接口进行推理，返回每帧的结果列表。"""

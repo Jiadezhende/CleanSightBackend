@@ -12,10 +12,12 @@ from app.database import get_db
 from app.database import engine
 from sqlalchemy import text
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
 router = APIRouter(prefix="/task", tags=["task"])
+logger = logging.getLogger(__name__)
 
 @router.websocket("/status/{client_id}")
 async def websocket_task_status(websocket: WebSocket, client_id: str):
@@ -60,13 +62,13 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
             await asyncio.sleep(1)
 
     except WebSocketDisconnect:
-        print(f"WebSocket 任务状态连接已关闭: {client_id}")
+        logger.info(f"[WebSocket-TaskStatus] 连接已关闭: client_id={client_id}")
     except Exception as e:
-        print(f"WebSocket 任务状态错误 for {client_id}: {e}")
+        logger.error(f"[WebSocket-TaskStatus] 异常: client_id={client_id}", exc_info=True)
         try:
             await websocket.close()
-        except:
-            pass
+        except Exception:
+            logger.warning(f"[WebSocket-TaskStatus] 关闭WebSocket时异常: client_id={client_id}")
 
 
 @router.get("/traceback/{task_id}/segments")

@@ -14,6 +14,7 @@ import cv2
 from app.services import ai
 from app.models.frame import FrameData
 from app.services.stream.config import DecoderConfig
+from app.utils.exceptions import FFmpegError
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -88,7 +89,10 @@ class FFmpegDecoder:
                 self.logger.info("ffmpeg started pid=%s", getattr(self.proc, 'pid', None))
             except FileNotFoundError:
                 self.logger.exception("ffmpeg binary not found")
-                raise RuntimeError(f"FFmpeg not found: {FFMPEG_BIN}")
+                raise FFmpegError(
+                    message=f"FFmpeg binary not found: {FFMPEG_BIN}",
+                    client_id=self.client_id
+                )
 
             # set non-blocking on POSIX
             if os.name != "nt":
@@ -98,6 +102,18 @@ class FFmpegDecoder:
                 except Exception:
                     pass
 
+            # 快速检查进程是否立即崩溃
+            time.sleep(0.1)  # 给进程一点启动时间
+            if self.proc.poll() is not None:
+                # 进程已经退出
+                exit_code = self.proc.returncode
+                self.logger.error(f"FFmpeg process exited immediately with code {exit_code}")
+                raise FFmpegError(
+                    message=f"FFmpeg process failed to start",
+                    client_id=self.client_id,
+                    exit_code=exit_code
+                )
+
             self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True, name=f"stderr-{self.client_id}")
             self._stderr_thread.start()
 
@@ -106,6 +122,7 @@ class FFmpegDecoder:
                 self._reader_thread.start()
 
             self.logger.debug("decoder start complete")
+
     def stop(self, wait: float = 2.0):
         with self.lock:
             self._stop_event.set()
