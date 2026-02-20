@@ -108,7 +108,7 @@ class HLSWorkerPool:
 
     def stop(self, timeout: float = 10.0):
         """停止Worker池"""
-        logger.info("停止HLS Worker池")
+        logger.debug("停止HLS Worker池")
         self.stop_event.set()
 
         for thread in self.threads:

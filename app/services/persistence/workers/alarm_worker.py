@@ -134,7 +134,7 @@ class AlarmFlushThread:
         except Exception as e:
             logger.error("最终刷新失败: %s", e, exc_info=True)
 
-        logger.info("告警批量刷新线程已停止")
+        logger.debug("告警批量刷新线程已停止")
 
 
 class AlarmWorkerPool:
@@ -204,7 +204,7 @@ class AlarmWorkerPool:
 
     def stop(self, timeout: float = 10.0):
         """停止Worker池"""
-        logger.info("停止告警Worker池")
+        logger.debug("停止告警Worker池")
         self.stop_event.set()
 
         # 等待批量刷新线程

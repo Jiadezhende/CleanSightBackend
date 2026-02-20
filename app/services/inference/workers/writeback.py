@@ -147,4 +147,4 @@ class WriteBackWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        logger.info("[WriteBackWorkerPool] Stopped")
+        logger.debug("[WriteBackWorkerPool] Stopped")

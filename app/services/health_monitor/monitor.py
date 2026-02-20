@@ -119,15 +119,13 @@ class GlobalHealthMonitor:
         """停止监控线程"""
         if self._thread is None or not self._thread.is_alive():
             return
-
-        logger.info("[GlobalHealthMonitor] Stopping...")
+        
         self._stop_event.set()
         self._thread.join(timeout=5.0)
         logger.info("[GlobalHealthMonitor] Stopped")
 
     def _monitor_loop(self):
         """监控循环"""
-        logger.info("[GlobalHealthMonitor] Monitor loop started")
 
         while not self._stop_event.is_set():
             try:
@@ -139,8 +137,6 @@ class GlobalHealthMonitor:
                     f"[GlobalHealthMonitor] Error in monitor loop: {e}", exc_info=True
                 )
                 time.sleep(1.0)
-
-        logger.info("[GlobalHealthMonitor] Monitor loop exited")
 
     def _check_all_clients(self):
         """检查所有客户端的健康状态（含孤儿流检测和孤儿解码器检测）"""

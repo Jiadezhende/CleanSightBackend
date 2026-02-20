@@ -84,7 +84,7 @@ async def lifespan():
             stats = _health_monitor.get_stats()
             _health_monitor.stop()
             logger.info(
-                "[GlobalHealthMonitor] Stopped | checks=%d, cleanups=%d, reconnects=%d",
+                "[GlobalHealthMonitor] checks=%d, cleanups=%d, reconnects=%d",
                 stats["checks"],
                 stats["cleanups"],
                 stats["reconnects"],

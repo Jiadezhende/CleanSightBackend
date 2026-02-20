@@ -226,7 +226,7 @@ class ModelWorkerService:
                 # 调试日志（增加队列深度信息）
                 if len(batch) > 0:
                     fps = len(batch) / elapsed if elapsed > 0 else 0
-                    logger.info(
+                    logger.debug(
                         f"[Worker-{stage}] Batch processed: "
                         f"size={len(batch)}/{batch_size}, "
                         f"time={elapsed*1000:.1f}ms, fps={fps:.1f}, "
@@ -234,8 +234,8 @@ class ModelWorkerService:
                     )
 
             except FrameDrop as e:
-                # 边界层 1: FrameDrop - 静默丢弃（DEBUG级别，无traceback）
-                logger.debug(
+                # 边界层 1: FrameDrop - 静默丢弃（warning级别）
+                logger.warning(
                     f"[BoundaryLayer1][Worker-{stage}] Frame dropped: "
                     f"client={e.client_id}, reason={e.reason}"
                 )
@@ -360,36 +360,3 @@ class ModelWorkerService:
         # 默认实现：返回 None（无可视化）
         # 子类可以覆写这个方法，或者在外部注入可视化函数
         return None
-
-    def refresh_client_queues(self):
-        """刷新客户端队列映射（已优化为实时同步，保留向后兼容）。
-
-        ✅ **架构改进**：
-        - Dispatcher 现在直接引用 ClientManager，客户端变化自动同步
-        - 新客户端加入立即生效，无需手动刷新
-        - 此方法保留仅为向后兼容和日志统计
-
-        历史行为：
-        - 旧版本需要定期调用此方法刷新客户端列表（5秒延迟）
-        - 新版本无需手动调用，客户端变化实时生效
-
-        迁移指南：
-        - 现有调用此方法的代码可以安全保留（无副作用）
-        - 新代码无需调用此方法
-        - 定期刷新线程可以移除（可选）
-        """
-        # 更新本地快照（仅用于日志统计）
-        new_map = self._client_manager.get_all_clients()
-        old_count = len(self.client_queues_map)
-        new_count = len(new_map)
-
-        self.client_queues_map = new_map
-        # 注意：Dispatcher 不再需要更新（已直接引用 ClientManager）
-
-        if new_count != old_count:
-            logger.info(
-                f"[RealTimeSync] Client count changed: "
-                f"{old_count} → {new_count} ({new_count - old_count:+d})"
-            )
-        else:
-            logger.debug(f"[RealTimeSync] Client count unchanged: {new_count}")

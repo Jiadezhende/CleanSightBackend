@@ -138,12 +138,12 @@ class VisualizationWorker:
                 self.output_queue.put(write_back_data)
 
             except Exception as e:
-                print(f"[VisualizationWorker-{self.worker_id}] 异常: {e}")
+                logger.error(f"[VisualizationWorker-{self.worker_id}] 异常: {e}")
                 import traceback
 
                 traceback.print_exc()
 
-        print(f"[VisualizationWorker-{self.worker_id}] 已停止")
+        logger.debug(f"[VisualizationWorker-{self.worker_id}] 已停止")
 
     def visualize_with_cached_result(
         self, client_id: str, current_frame: np.ndarray
@@ -225,4 +225,4 @@ class VisualizationWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        logger.info("[VisualizationWorkerPool] Stopped")
+        logger.debug("[VisualizationWorkerPool] Stopped")

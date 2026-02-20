@@ -20,7 +20,6 @@ from .core import (
     InferenceManager,
     ModelWorkerService,
     StageAwareDispatcher,
-    create_model_worker_service_from_manager,
 )
 
 # 数据模型
@@ -45,7 +44,6 @@ __all__ = [
     "InferenceManager",
     "ModelWorkerService",
     "StageAwareDispatcher",
-    "create_model_worker_service_from_manager",
     # Worker 池
     "MultiModelWorkerPool",
     "TemporalWorkerPool",

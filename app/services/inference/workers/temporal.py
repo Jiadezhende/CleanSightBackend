@@ -105,7 +105,7 @@ class TemporalWorker:
 
                 traceback.print_exc()
 
-        print(f"[TemporalWorker-{self.worker_id}] 已停止")
+        logger.debug(f"[TemporalWorker-{self.worker_id}] 已停止")
 
     def _create_frontend_message(
         self,
@@ -220,4 +220,4 @@ class TemporalWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        logger.info("[TemporalWorkerPool] Stopped")
+        logger.debug("[TemporalWorkerPool] Stopped")

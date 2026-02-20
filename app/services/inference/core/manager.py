@@ -201,21 +201,18 @@ class InferenceManager:
                         )
                     self._stage_configs = stage_configs
                 else:
-                    # 配置文件中没有可用的 stage，使用默认配置
-                    logger.warning("[InferenceManager] No stages in config, using defaults")
-                    from app.services.inference.core.factory import (
-                        _create_default_stage_configs,
+                    # 配置文件中没有可用的 stage，抛出错误
+                    raise ValueError(
+                        "No valid stages found in configuration file. "
+                        "Please ensure inference_config.yaml contains at least one stage with valid models."
                     )
-
-                    self._stage_configs = _create_default_stage_configs()
             except Exception as e:
-                # 加载配置失败，回退到默认配置
-                logger.error("[InferenceManager] Failed to load config: %s, using defaults", e)
-                from app.services.inference.core.factory import (
-                    _create_default_stage_configs,
-                )
-
-                self._stage_configs = _create_default_stage_configs()
+                # 加载配置失败，抛出错误
+                logger.error("[InferenceManager] Failed to load config: %s", e)
+                raise RuntimeError(
+                    f"Failed to load inference configuration: {e}. "
+                    "Please check inference_config.yaml and ensure it is properly configured."
+                ) from e
 
         return self._stage_configs
 
@@ -339,7 +336,7 @@ class InferenceManager:
         """
         logger.info(f"[InferenceManager] Removing inference resources: {client_id}")
 
-        # 阶段1: 落盘残余缓存（保存已有的处理结果）
+        # 落盘残余缓存（保存已有的处理结果）
         cq = (
             client_manager.get_client(client_id)
             if client_manager.has_client(client_id)
@@ -348,26 +345,15 @@ class InferenceManager:
         if cq:
             try:
                 self._flush_all_remaining_segments(client_id, cq)
-                logger.info(f"[InferenceManager] Segments flushed: {client_id}")
+                logger.info(f"[InferenceManager] Segments WroteBack: {client_id}")
             except Exception as e:
                 logger.warning(
-                    f"[InferenceManager] Failed to flush segments: {client_id} - {e}"
+                    f"[InferenceManager] Failed to write back segments: {client_id} - {e}"
                 )
         else:
             logger.warning(
-                f"[InferenceManager] Client not found in ClientManager, skipping flush: {client_id}"
+                f"[InferenceManager] Client not found in ClientManager, skipping writeback: {client_id}"
             )
-
-        # 阶段2: 刷新推理服务（冗余操作，保留向后兼容）
-        # 注意：Dispatcher 现在实时同步客户端，此步骤技术上已非必需
-        if self._model_worker_service is not None:
-            try:
-                self._model_worker_service.refresh_client_queues()
-                logger.info(f"[InferenceManager] Worker service refreshed (redundant): {client_id}")
-            except Exception as e:
-                logger.error(
-                    f"[InferenceManager] Failed to refresh worker service: {e}"
-                )
 
         logger.info(f"[InferenceManager] Inference resources removed: {client_id}")
 
@@ -488,7 +474,7 @@ class InferenceManager:
             except Exception as e:
                 logger.error(f"[SegmentCheck] Segment check loop error: {e}")
 
-        logger.info("[SegmentCheck] Segment check thread stopped")
+        logger.debug("[SegmentCheck] Segment check thread stopped")
 
     def _flush_all_remaining_segments(
         self, client_id: str, client_queues: ClientQueues
@@ -587,25 +573,6 @@ class InferenceManager:
         # 直接委托给persistence_manager
         self.persistence_manager.persist_alarm(alarm_info)
 
-    # ========== 刷新客户端列表 ==========
-
-    def _client_refresh_loop(self):
-        """定期刷新客户端列表（保留作为冗余检查）
-        
-        注意：
-        - Dispatcher 已改为直接引用 ClientManager，客户端变化实时同步
-        - 此线程保留仅作为冗余检查和日志统计
-        - 可在后续验证稳定后移除
-        """
-        logger.info("[InferenceManager] Client refresh thread started (redundant check mode)")
-        while not self._stop_event.is_set():
-            try:
-                if self._model_worker_service:
-                    self._model_worker_service.refresh_client_queues()
-                time.sleep(5)  # 每 5 秒刷新一次
-            except Exception as e:
-                logger.error("[InferenceManager] Client refresh error: %s", e, exc_info=True)
-
     # ========== 启动/停止 ==========
 
     def start(self):
@@ -634,21 +601,10 @@ class InferenceManager:
         # 4. 启动持久化管理器（新架构）
         self.persistence_manager.start()
 
-        # 5. 启动客户端刷新线程（可选，冗余检查）
-        # 注意：Dispatcher 已改为实时同步，此线程保留仅作统计和兜底
-        if self._refresh_thread is None or not self._refresh_thread.is_alive():
-            self._refresh_thread = threading.Thread(
-                target=self._client_refresh_loop,
-                daemon=True,
-                name="ClientRefreshThread",
-            )
-            self._refresh_thread.start()
-
         logger.info("[InferenceManager] Started")
 
     def stop(self):
         """停止推理管理器"""
-        logger.info("[InferenceManager] Stopping...")
 
         # 设置停止事件
         self._stop_event.set()

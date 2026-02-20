@@ -233,7 +233,7 @@ class EndoscopeBendingDetector:
 _detector_instance = None
 
 
-def get_detector(model_path: str = None) -> EndoscopeBendingDetector:
+def get_detector(model_path: str = None) -> EndoscopeBendingDetector: # type: ignore
     """
     获取内镜弯折检测器单例
 

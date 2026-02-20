@@ -291,9 +291,9 @@ class FFmpegDecoder:
                 # 判断是否应该丢帧
                 if self._should_drop_frame(pending_count, queue_capacity):
                     self.frames_dropped += 1
-                    # 仅在每100帧打印一次（避免日志洪水）
+                    # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
                     if self.frames_dropped % 100 == 0:
-                        self.logger.warning(
+                        self.logger.debug(
                             "[BACKPRESSURE] dropping frame (pending=%s/%s, dropped=%s)",
                             pending_count,
                             queue_capacity,

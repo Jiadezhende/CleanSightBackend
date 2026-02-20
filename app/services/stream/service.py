@@ -71,7 +71,7 @@ class StreamService:
 
         # 注意：健康监控和清理服务现在都是全局服务，在应用启动时初始化，不再由 StreamService 管理
 
-    @log_call(level=logging.INFO, log_args=True)
+    @log_call(level=logging.INFO, log_args=False)
     def start_stream(
         self, client_id: str, stream_url: str, fps: int = 30, protocol: str = "RTMP"
     ):
@@ -537,9 +537,9 @@ class StreamService:
         ready_depth = depths.get("ca_ready", 0)
         raw_depth = depths.get("ca_raw", 0)
 
-        # 定期打印队列状态（每100帧打印一次）
+        # 定期打印队列状态（每300帧打印一次，约10秒）
         decoder = self.decoders.get(client_id)
-        if decoder and decoder.frames_received % 100 == 0:
+        if decoder and decoder.frames_received % 300 == 0:
             logger.info(
                 f"[BACKPRESSURE] client={client_id}: ca_ready={ready_depth}/{client_queues.get_ca_ready_capacity()}, ca_raw={raw_depth}/{client_queues.get_ca_raw_capacity()}"
             )

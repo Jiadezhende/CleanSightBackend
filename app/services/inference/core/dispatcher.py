@@ -162,7 +162,7 @@ class StageAwareDispatcher:
         return "LEAK"
 
     def get_batch_for_stage(
-        self, stage: str, max_size: int = None, timeout_ms: float = 3.0
+        self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore
     ) -> List[InferenceRequest]:
         """获取指定 stage 的一个 batch（支持超时等待）。
 
