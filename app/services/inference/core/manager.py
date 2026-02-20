@@ -283,7 +283,7 @@ class InferenceManager:
     def set_stream_url(self, client_id: str, stream_url: str) -> None:
         """设置客户端的通用流地址（RTMP/RTSP）"""
         cq = client_manager.get_client(client_id)
-        cq.rtmp_url = stream_url
+        cq.stream_url = stream_url
 
     def get_result(
         self, client_id: str, as_model: bool = False
@@ -446,8 +446,8 @@ class InferenceManager:
         策略：ca_raw 和 ca_processed 独立落盘（因为积累速度不同）
         """
         seg_len = client_queues.ca_segment_len
-        ca_raw_len = len(client_queues.ca_raw)
-        ca_processed_len = len(client_queues.ca_processed)
+        ca_raw_len = client_queues.get_ca_raw_length()
+        ca_processed_len = client_queues.get_ca_processed_length()
 
         # 调试日志：显示队列状态
         if ca_raw_len >= seg_len or ca_processed_len >= seg_len:
@@ -502,20 +502,20 @@ class InferenceManager:
             seg_len = client_queues.ca_segment_len
 
             # 1. 处理 ca_raw 队列的所有剩余帧（分批落盘）
-            while len(client_queues.ca_raw) >= seg_len:
+            while client_queues.get_ca_raw_length() >= seg_len:
                 self._enqueue_raw_segment_job(client_id, client_queues, seg_len)
 
             # 处理 ca_raw 的残余（不足一个段长）
-            remaining_raw = len(client_queues.ca_raw)
+            remaining_raw = client_queues.get_ca_raw_length()
             if remaining_raw > 0:
                 self._enqueue_raw_segment_job(client_id, client_queues, remaining_raw)
 
             # 2. 处理 ca_processed 队列的所有剩余帧（分批落盘）
-            while len(client_queues.ca_processed) >= seg_len:
+            while client_queues.get_ca_processed_length() >= seg_len:
                 self._enqueue_processed_segment_job(client_id, client_queues, seg_len)
 
             # 处理 ca_processed 的残余（不足一个段长）
-            remaining_processed = len(client_queues.ca_processed)
+            remaining_processed = client_queues.get_ca_processed_length()
             if remaining_processed > 0:
                 self._enqueue_processed_segment_job(
                     client_id, client_queues, remaining_processed

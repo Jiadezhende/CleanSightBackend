@@ -5,7 +5,7 @@
 import threading
 import time
 from collections import deque
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, List, Optional
 
 import numpy as np
 
@@ -76,25 +76,12 @@ class ClientQueues:
         self.ca_segment_len = ca_segment_len
         self.latest_processed: Optional[FrameData] = None  # 快速访问最新处理帧
         self.task: Optional[CleaningTask] = None  # 关联的清洗任务
-        self.rtmp_url: Optional[str] = None  # RTMP 流地址
+        self.stream_url: Optional[str] = None  # RTMP 流地址
 
         # 业务状态管理（新增）
         self.state = ClientState(client_id=client_id, initial_stage=initial_stage)
 
     # --- 封装操作方法，减少外部直接操作队列 ---
-    def append_ca_ready(self, frame_data: FrameData) -> bool:
-        """
-        添加帧到待推理队列（保留兼容旧代码）
-
-        Returns:
-            True 表示成功，False 表示队列已满
-        """
-        try:
-            self.ca_ready.append(frame_data)
-            return True
-        except Exception:
-            return False
-
     def append_ca_ready_with_throttle(self, frame_data: FrameData) -> bool:
         """
         添加帧到待推理队列（带帧率限制）
@@ -154,17 +141,6 @@ class ClientQueues:
             return self.rt_processed[-1]
         return self.latest_processed
 
-    def get_latest_raw_frame(self) -> Optional[Tuple[np.ndarray, float]]:
-        """安全获取最新原始帧及其时间戳。
-
-        Returns:
-            (frame, timestamp) 或 None（如果没有帧）
-        """
-        with self._lock:
-            if self.latest_raw_frame is not None:
-                return (self.latest_raw_frame.copy(), self.latest_raw_timestamp)
-            return None
-
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """获取最新原始帧（用于可视化）。
 
@@ -187,7 +163,7 @@ class ClientQueues:
             "ca_raw": len(self.ca_raw),
             "ca_processed": len(self.ca_processed),
             "rt_processed": len(self.rt_processed),
-            "rtmp_url": self.rtmp_url,
+            "rtmp_url": self.stream_url,
         }
 
     def get_queue_depths(self) -> dict:
@@ -204,8 +180,37 @@ class ClientQueues:
             "rt_processed": len(self.rt_processed),
         }
 
-    def has_enough_for_segment(self, seg_len: int) -> bool:
-        return len(self.ca_raw) >= seg_len and len(self.ca_processed) >= seg_len
+    def get_ca_ready_capacity(self) -> int:
+        """获取 ca_ready 队列的最大容量
+
+        Returns:
+            队列最大长度，如果未设置则返回 0
+        """
+        return self.ca_ready.maxlen or 0
+
+    def get_ca_raw_capacity(self) -> int:
+        """获取 ca_raw 队列的最大容量
+
+        Returns:
+            队列最大长度，如果未设置则返回 0
+        """
+        return self.ca_raw.maxlen or 0
+
+    def get_ca_raw_length(self) -> int:
+        """获取 ca_raw 队列的当前长度
+
+        Returns:
+            队列当前帧数
+        """
+        return len(self.ca_raw)
+
+    def get_ca_processed_length(self) -> int:
+        """获取 ca_processed 队列的当前长度
+
+        Returns:
+            队列当前帧数
+        """
+        return len(self.ca_processed)
 
     def pop_n_ca_raw(self, n: int) -> List[FrameData]:
         out: List[FrameData] = []
@@ -229,16 +234,15 @@ class ClientQueues:
         self.rt_processed.clear()
         self.latest_processed = None
         self.task = None
-        self.rtmp_url = None
+        self.stream_url = None
 
     def pop_ca_ready(self) -> Optional[FrameData]:
+        """从推理队列弹出一帧（FIFO）
+        
+        Returns:
+            FrameData 或 None（队列为空）
+        """
         return self.ca_ready.popleft() if self.ca_ready else None
-
-    def pop_n_ca_ready(self, n: int) -> List[FrameData]:
-        out: List[FrameData] = []
-        for _ in range(min(n, len(self.ca_ready))):
-            out.append(self.ca_ready.popleft())
-        return out
 
     def set_task(self, task: Optional[CleaningTask]) -> None:
         self.task = task

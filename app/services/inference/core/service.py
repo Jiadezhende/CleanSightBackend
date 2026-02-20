@@ -351,7 +351,7 @@ class ModelWorkerService:
 
         TODO: 实现完整的可视化流程
         需要：
-        1. 从 cq.get_latest_raw_frame() 获取原始帧
+        1. 从 cq.get_latest_frame() 获取最新原始帧
         2. 调用各 subtask 的 task.visualize() 方法绘制检测框/标注
         3. 添加文字信息（stage、timestamp、fps 等）
         4. 返回可视化后的帧

@@ -117,13 +117,10 @@ class StageAwareDispatcher:
         clients = self._client_manager.get_all_clients()
         for client_id, cq in clients.items():
             # 从 ca_ready 队列取一帧（FIFO，保证公平）
-            if not cq.ca_ready:
-                continue
-
-            try:
-                frame_data = cq.ca_ready.popleft()
-            except IndexError:
-                # 并发场景：其他线程已取走帧
+            # 使用封装方法，避免直接访问内部队列
+            frame_data = cq.pop_ca_ready()
+            if frame_data is None:
+                # 队列为空或并发场景下被其他线程取走
                 continue
 
             # 获取该客户端当前的 stage

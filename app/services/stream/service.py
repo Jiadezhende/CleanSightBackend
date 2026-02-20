@@ -541,7 +541,7 @@ class StreamService:
         decoder = self.decoders.get(client_id)
         if decoder and decoder.frames_received % 100 == 0:
             logger.info(
-                f"[BACKPRESSURE] client={client_id}: ca_ready={ready_depth}/{client_queues.ca_ready.maxlen}, ca_raw={raw_depth}/{client_queues.ca_raw.maxlen}"
+                f"[BACKPRESSURE] client={client_id}: ca_ready={ready_depth}/{client_queues.get_ca_ready_capacity()}, ca_raw={raw_depth}/{client_queues.get_ca_raw_capacity()}"
             )
 
         return ready_depth  # 返回推理队列深度

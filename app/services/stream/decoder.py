@@ -286,7 +286,7 @@ class FFmpegDecoder:
                 # 获取队列容量
                 queue_capacity = 0
                 if self.client_queues is not None:
-                    queue_capacity = self.client_queues.ca_ready.maxlen or 0
+                    queue_capacity = self.client_queues.get_ca_ready_capacity()
 
                 # 判断是否应该丢帧
                 if self._should_drop_frame(pending_count, queue_capacity):
