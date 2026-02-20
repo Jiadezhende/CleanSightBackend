@@ -174,6 +174,7 @@ class DatabaseService:
 ```
 
 **优势**:
+
 - 业务代码 `_query_task()` 完全纯净
 - 重试 + 熔断器在框架边界层统一管理
 - 连续失败 5 次后自动打开熔断器，保护数据库
@@ -203,6 +204,7 @@ class InferenceWorker(Thread):
 ```
 
 **问题**:
+
 - Worker 入口没有异常捕获，线程可能崩溃
 - 业务代码混杂异常处理
 

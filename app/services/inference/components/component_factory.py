@@ -53,9 +53,9 @@ class ComponentFactory:
             try:
                 model = self._instantiate_from_config(model_cfg)
                 models.append(model)
-                logger.info("✓ 成功创建模型: %s", model_cfg['name'])
+                logger.info("✓ 成功创建模型: %s", model_cfg["name"])
             except Exception as e:
-                logger.error("✗ 创建模型失败 %s: %s", model_cfg['name'], e)
+                logger.error("✗ 创建模型失败 %s: %s", model_cfg["name"], e)
 
         return models
 

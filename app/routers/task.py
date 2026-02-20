@@ -3,31 +3,35 @@
 包括初始化、终止任务等功能
 """
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
-from app.services import ai
-from app.models.frame import HLSSegment
-from app.models.status_messages import get_task_status_response, get_no_task_response
-from app.database import get_db
-from app.database import engine
-from sqlalchemy import text
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy import text
+
+from app.database import engine, get_db
+from app.models.frame import HLSSegment
+from app.models.status_messages import get_no_task_response, get_task_status_response
+from app.services import ai
+
 router = APIRouter(prefix="/task", tags=["task"])
+logger = logging.getLogger(__name__)
+
 
 @router.websocket("/status/{client_id}")
 async def websocket_task_status(websocket: WebSocket, client_id: str):
     """
     实时更新任务状态的WebSocket接口
-    
+
     返回格式化的状态信息，包含：
     - 任务状态（运行中/暂停/完成等）和对应的显示文本
     - 当前清洗步骤和步骤名称
     - 异常检测结果（弯折、漏气、浸没）
     - 前端可直接显示的消息列表
-    
+
     Args:
         client_id: 客户端ID（也可以理解为摄像机ip/source_id）
     """
@@ -46,8 +50,10 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
                     bending=current_task.bending,
                     bubble_detected=current_task.bubble_detected,
                     fully_submerged=current_task.fully_submerged,
-                    bending_count=getattr(current_task, 'bending_count', 0),
-                    updated_at=datetime.fromtimestamp(current_task.updated_at).isoformat()
+                    bending_count=getattr(current_task, "bending_count", 0),
+                    updated_at=datetime.fromtimestamp(
+                        current_task.updated_at
+                    ).isoformat(),
                 )
                 await websocket.send_text(json.dumps(status_data, ensure_ascii=False))
             else:
@@ -57,89 +63,99 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
 
             # 每秒更新一次状态
             import asyncio
+
             await asyncio.sleep(1)
 
     except WebSocketDisconnect:
-        print(f"WebSocket 任务状态连接已关闭: {client_id}")
+        logger.info(f"[WebSocket-TaskStatus] 连接已关闭: client_id={client_id}")
     except Exception as e:
-        print(f"WebSocket 任务状态错误 for {client_id}: {e}")
+        logger.error(
+            f"[WebSocket-TaskStatus] 异常: client_id={client_id}", exc_info=True
+        )
         try:
             await websocket.close()
-        except:
-            pass
+        except Exception:
+            logger.warning(
+                f"[WebSocket-TaskStatus] 关闭WebSocket时异常: client_id={client_id}"
+            )
 
 
 @router.get("/traceback/{task_id}/segments")
 async def get_task_segments(task_id: int, video_type: str = "processed"):
     """
     获取任务的所有 HLS 视频段路径和关键点 JSON 路径
-    
+
     Args:
         task_id: 任务 ID
         video_type: 视频类型 ("raw" 原始视频 或 "processed" 处理后视频)
-    
+
     Returns:
         包含所有段信息的 JSON，包括视频路径、关键点路径、时间戳等
     """
     db = next(get_db())
     try:
         # 查询该任务的所有 HLS 段，按时间排序
-        segments = db.query(HLSSegment).filter(
-            HLSSegment.task_id == task_id
-        ).order_by(HLSSegment.start_ts).all()
-        
+        segments = (
+            db.query(HLSSegment)
+            .filter(HLSSegment.task_id == task_id)
+            .order_by(HLSSegment.start_ts)
+            .all()
+        )
+
         if not segments:
-            raise HTTPException(status_code=404, detail=f"未找到任务 {task_id} 的视频段")
-        
+            raise HTTPException(
+                status_code=404, detail=f"未找到任务 {task_id} 的视频段"
+            )
+
         # 根据视频类型过滤
         filtered_segments = []
         for seg in segments:
             segment_path = str(seg.segment_path)  # type: ignore
-            
+
             # 判断是否为目标类型的视频
             if video_type == "raw" and "raw_segment" in segment_path:
                 filtered_segments.append(seg)
             elif video_type == "processed" and "processed_segment" in segment_path:
                 filtered_segments.append(seg)
-        
+
         if not filtered_segments:
             raise HTTPException(
-                status_code=404, 
-                detail=f"未找到任务 {task_id} 的 {video_type} 类型视频段"
+                status_code=404,
+                detail=f"未找到任务 {task_id} 的 {video_type} 类型视频段",
             )
-        
+
         # 构建返回数据
         result = {
             "task_id": task_id,
             "video_type": video_type,
             "total_segments": len(filtered_segments),
             "playlist_path": str(filtered_segments[0].playlist_path),  # type: ignore
-            "segments": []
+            "segments": [],
         }
-        
+
         for seg in filtered_segments:
             segment_info = {
                 "segment_id": seg.id,  # type: ignore
                 "segment_path": str(seg.segment_path),  # type: ignore
                 "start_time": int(seg.start_ts) if seg.start_ts is not None else None,  # type: ignore
                 "end_time": int(seg.end_ts) if seg.end_ts is not None else None,  # type: ignore
-                "client_id": str(seg.client_id)  # type: ignore
+                "client_id": str(seg.client_id),  # type: ignore
             }
-            
+
             # 添加对应的关键点 JSON 路径（如果是处理后的视频）
             if video_type == "processed":
                 segment_path = Path(seg.segment_path)  # type: ignore
                 # 推断关键点文件路径
                 timestamp = segment_path.stem.replace("processed_segment_", "")
                 keypoints_path = segment_path.parent / f"keypoints_{timestamp}.json"
-                
+
                 if keypoints_path.exists():
                     segment_info["keypoints_path"] = str(keypoints_path)
-            
+
             result["segments"].append(segment_info)
-        
+
         return result
-        
+
     finally:
         db.close()
 
@@ -148,44 +164,48 @@ async def get_task_segments(task_id: int, video_type: str = "processed"):
 async def get_task_playlist(task_id: int, video_type: str = "processed"):
     """
     获取任务的 HLS 播放列表文件 (.m3u8)
-    
+
     Args:
         task_id: 任务 ID
         video_type: 视频类型 ("raw" 或 "processed")
-    
+
     Returns:
         M3U8 播放列表文件
     """
     db = next(get_db())
     try:
         # 查询第一个段以获取播放列表路径
-        segment = db.query(HLSSegment).filter(
-            HLSSegment.task_id == task_id
-        ).order_by(HLSSegment.start_ts).first()
-        
+        segment = (
+            db.query(HLSSegment)
+            .filter(HLSSegment.task_id == task_id)
+            .order_by(HLSSegment.start_ts)
+            .first()
+        )
+
         if not segment:
-            raise HTTPException(status_code=404, detail=f"未找到任务 {task_id} 的视频段")
-        
+            raise HTTPException(
+                status_code=404, detail=f"未找到任务 {task_id} 的视频段"
+            )
+
         playlist_path = Path(segment.playlist_path)  # type: ignore
-        
+
         # 根据视频类型选择正确的播放列表
         if video_type == "raw":
             playlist_path = playlist_path.parent / "raw_playlist.m3u8"
         else:
             playlist_path = playlist_path.parent / "processed_playlist.m3u8"
-        
+
         if not playlist_path.exists():
             raise HTTPException(
-                status_code=404, 
-                detail=f"播放列表文件不存在: {playlist_path}"
+                status_code=404, detail=f"播放列表文件不存在: {playlist_path}"
             )
-        
+
         return FileResponse(
             path=str(playlist_path),
             media_type="application/vnd.apple.mpegurl",
-            filename=f"task_{task_id}_{video_type}.m3u8"
+            filename=f"task_{task_id}_{video_type}.m3u8",
         )
-        
+
     finally:
         db.close()
 
@@ -194,42 +214,39 @@ async def get_task_playlist(task_id: int, video_type: str = "processed"):
 async def stream_video_segment(task_id: int, segment_id: int):
     """
     流式传输指定的视频段
-    
+
     Args:
         task_id: 任务 ID
         segment_id: 段 ID
-    
+
     Returns:
         视频文件流
     """
     db = next(get_db())
     try:
         # 查询段记录
-        segment = db.query(HLSSegment).filter(
-            HLSSegment._id == segment_id,
-            HLSSegment.task_id == task_id
-        ).first()
-        
+        segment = (
+            db.query(HLSSegment)
+            .filter(HLSSegment._id == segment_id, HLSSegment.task_id == task_id)
+            .first()
+        )
+
         if not segment:
             raise HTTPException(
-                status_code=404, 
-                detail=f"未找到段 {segment_id} (任务 {task_id})"
+                status_code=404, detail=f"未找到段 {segment_id} (任务 {task_id})"
             )
-        
+
         segment_path = Path(segment.segment_path)  # type: ignore
-        
+
         if not segment_path.exists():
             raise HTTPException(
-                status_code=404, 
-                detail=f"视频文件不存在: {segment_path}"
+                status_code=404, detail=f"视频文件不存在: {segment_path}"
             )
-        
+
         return FileResponse(
-            path=str(segment_path),
-            media_type="video/mp4",
-            filename=segment_path.name
+            path=str(segment_path), media_type="video/mp4", filename=segment_path.name
         )
-        
+
     finally:
         db.close()
 
@@ -238,52 +255,50 @@ async def stream_video_segment(task_id: int, segment_id: int):
 async def get_keypoints_data(task_id: int, segment_id: int):
     """
     获取指定视频段的关键点 JSON 数据
-    
+
     Args:
         task_id: 任务 ID
         segment_id: 段 ID
-    
+
     Returns:
         关键点 JSON 数据
     """
     db = next(get_db())
     try:
         # 查询段记录
-        segment = db.query(HLSSegment).filter(
-            HLSSegment._id == segment_id,
-            HLSSegment.task_id == task_id
-        ).first()
-        
+        segment = (
+            db.query(HLSSegment)
+            .filter(HLSSegment._id == segment_id, HLSSegment.task_id == task_id)
+            .first()
+        )
+
         if not segment:
             raise HTTPException(
-                status_code=404, 
-                detail=f"未找到段 {segment_id} (任务 {task_id})"
+                status_code=404, detail=f"未找到段 {segment_id} (任务 {task_id})"
             )
-        
+
         segment_path = Path(segment.segment_path)  # type: ignore
-        
+
         # 推断关键点文件路径
         if "processed_segment" in segment_path.name:
             timestamp = segment_path.stem.replace("processed_segment_", "")
             keypoints_path = segment_path.parent / f"keypoints_{timestamp}.json"
-            
+
             if not keypoints_path.exists():
                 raise HTTPException(
-                    status_code=404, 
-                    detail=f"关键点文件不存在: {keypoints_path}"
+                    status_code=404, detail=f"关键点文件不存在: {keypoints_path}"
                 )
-            
+
             # 读取并返回 JSON 数据
-            with keypoints_path.open('r', encoding='utf-8') as f:
+            with keypoints_path.open("r", encoding="utf-8") as f:
                 keypoints_data = json.load(f)
-            
+
             return JSONResponse(content=keypoints_data)
         else:
             raise HTTPException(
-                status_code=400, 
-                detail="原始视频段没有关键点数据，请使用处理后的视频段"
+                status_code=400, detail="原始视频段没有关键点数据，请使用处理后的视频段"
             )
-        
+
     finally:
         db.close()
 
@@ -292,53 +307,57 @@ async def get_keypoints_data(task_id: int, segment_id: int):
 async def get_all_keypoints(task_id: int):
     """
     获取任务的所有关键点数据（合并所有段的关键点）
-    
+
     Args:
         task_id: 任务 ID
-    
+
     Returns:
         所有关键点数据的列表
     """
     db = next(get_db())
     try:
         # 查询该任务的所有处理后视频段
-        segments = db.query(HLSSegment).filter(
-            HLSSegment.task_id == task_id
-        ).order_by(HLSSegment.start_ts).all()
-        
+        segments = (
+            db.query(HLSSegment)
+            .filter(HLSSegment.task_id == task_id)
+            .order_by(HLSSegment.start_ts)
+            .all()
+        )
+
         if not segments:
-            raise HTTPException(status_code=404, detail=f"未找到任务 {task_id} 的视频段")
-        
+            raise HTTPException(
+                status_code=404, detail=f"未找到任务 {task_id} 的视频段"
+            )
+
         all_keypoints = []
-        
+
         for seg in segments:
             segment_path = Path(seg.segment_path)  # type: ignore
-            
+
             # 只处理处理后的视频段
             if "processed_segment" not in segment_path.name:
                 continue
-            
+
             # 读取关键点文件
             timestamp = segment_path.stem.replace("processed_segment_", "")
             keypoints_path = segment_path.parent / f"keypoints_{timestamp}.json"
-            
+
             if keypoints_path.exists():
-                with keypoints_path.open('r', encoding='utf-8') as f:
+                with keypoints_path.open("r", encoding="utf-8") as f:
                     segment_keypoints = json.load(f)
                     all_keypoints.extend(segment_keypoints)
-        
+
         if not all_keypoints:
             raise HTTPException(
-                status_code=404, 
-                detail=f"未找到任务 {task_id} 的关键点数据"
+                status_code=404, detail=f"未找到任务 {task_id} 的关键点数据"
             )
-        
+
         return {
             "task_id": task_id,
             "total_frames": len(all_keypoints),
-            "keypoints": all_keypoints
+            "keypoints": all_keypoints,
         }
-        
+
     finally:
         db.close()
 
@@ -355,8 +374,9 @@ async def get_task_alarms(task_id: int):
 
     返回最新字段集合：alarm_id, task_id, step_id, alarm_type, message, severity, resolved, resolved_by, detected_at, resolved_at
     """
-    from app.utils.exceptions import DatabaseError
     from sqlalchemy.exc import SQLAlchemyError
+
+    from app.utils.exceptions import DatabaseError
 
     try:
         with engine.connect() as conn:
@@ -370,26 +390,32 @@ async def get_task_alarms(task_id: int):
         raise DatabaseError(
             message=f"Failed to fetch alarms for task {task_id}",
             retryable=True,
-            query=f"SELECT ... FROM clean_alarm WHERE task_id = {task_id}"
+            query=f"SELECT ... FROM clean_alarm WHERE task_id = {task_id}",
         ) from e
 
     alarms = []
     for r in rows:
-        alarms.append({
-            "alarm_id": r['alarm_id'] if 'alarm_id' in r.keys() else None,
-            "task_id": r['task_id'] if 'task_id' in r.keys() else None,
-            "step_id": r['step_id'] if 'step_id' in r.keys() else None,
-            "alarm_type": r['alarm_type'] if 'alarm_type' in r.keys() else None,
-            "message": r['message'] if 'message' in r.keys() else None,
-            "severity": r['severity'] if 'severity' in r.keys() else None,
-            "resolved": bool(r['resolved']) if 'resolved' in r.keys() else False,
-            "resolved_by": r['resolved_by'] if 'resolved_by' in r.keys() else None,
-            "detected_at": (int(r['detected_at']) if r['detected_at'] is not None else None) if 'detected_at' in r.keys() else None,
-            "resolved_at": (int(r['resolved_at']) if r['resolved_at'] is not None else None) if 'resolved_at' in r.keys() else None,
-        })
+        alarms.append(
+            {
+                "alarm_id": r["alarm_id"] if "alarm_id" in r.keys() else None,
+                "task_id": r["task_id"] if "task_id" in r.keys() else None,
+                "step_id": r["step_id"] if "step_id" in r.keys() else None,
+                "alarm_type": r["alarm_type"] if "alarm_type" in r.keys() else None,
+                "message": r["message"] if "message" in r.keys() else None,
+                "severity": r["severity"] if "severity" in r.keys() else None,
+                "resolved": bool(r["resolved"]) if "resolved" in r.keys() else False,
+                "resolved_by": r["resolved_by"] if "resolved_by" in r.keys() else None,
+                "detected_at": (
+                    (int(r["detected_at"]) if r["detected_at"] is not None else None)
+                    if "detected_at" in r.keys()
+                    else None
+                ),
+                "resolved_at": (
+                    (int(r["resolved_at"]) if r["resolved_at"] is not None else None)
+                    if "resolved_at" in r.keys()
+                    else None
+                ),
+            }
+        )
 
-    return {
-        "task_id": task_id,
-        "total": len(alarms),
-        "alarms": alarms
-    }
+    return {"task_id": task_id, "total": len(alarms), "alarms": alarms}

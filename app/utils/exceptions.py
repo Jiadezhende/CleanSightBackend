@@ -23,7 +23,7 @@ class AppError(Exception):
     """
 
     retryable: bool = False  # 类属性：默认不可重试
-    fatal: bool = False      # 类属性：默认不致命
+    fatal: bool = False  # 类属性：默认不致命
 
     # 实例属性类型注解
     message: str
@@ -42,10 +42,10 @@ class AppError(Exception):
         self.client_id = client_id
 
         # 允许实例级别覆盖类属性
-        if 'retryable' in kwargs:
-            self.retryable = kwargs['retryable']
-        if 'fatal' in kwargs:
-            self.fatal = kwargs['fatal']
+        if "retryable" in kwargs:
+            self.retryable = kwargs["retryable"]
+        if "fatal" in kwargs:
+            self.fatal = kwargs["fatal"]
 
     def __str__(self):
         """字符串表示"""
@@ -62,6 +62,7 @@ class AppError(Exception):
 # ============================================================================
 # 帧丢弃异常（实时推理专用）
 # ============================================================================
+
 
 class FrameDrop(AppError):
     """当前帧无效，允许安静丢弃
@@ -81,13 +82,18 @@ class FrameDrop(AppError):
     """
 
     retryable = False  # 帧已丢失，无需重试
-    fatal = False      # 不影响系统运行
+    fatal = False  # 不影响系统运行
 
     # 实例属性类型注解
     frame_index: Optional[int]
     reason: Optional[str]
 
-    def __init__(self, client_id: str, frame_index: Optional[int] = None, reason: Optional[str] = None):
+    def __init__(
+        self,
+        client_id: str,
+        frame_index: Optional[int] = None,
+        reason: Optional[str] = None,
+    ):
         """初始化帧丢弃异常
 
         Args:
@@ -109,6 +115,7 @@ class FrameDrop(AppError):
 # 服务级别异常（5个核心异常）
 # ============================================================================
 
+
 class StreamConnectionError(AppError):
     """RTSP/RTMP 流连接失败
 
@@ -120,14 +127,16 @@ class StreamConnectionError(AppError):
     特点：retryable=True, fatal=False（网络瞬时故障，可重试）
     """
 
-    retryable = True   # 网络瞬时故障，可重试
-    fatal = False      # 单路流失败不影响系统
+    retryable = True  # 网络瞬时故障，可重试
+    fatal = False  # 单路流失败不影响系统
 
     # 实例属性类型注解
     url: str
     details: Optional[str]
 
-    def __init__(self, url: str, client_id: Optional[str] = None, details: Optional[str] = None):
+    def __init__(
+        self, url: str, client_id: Optional[str] = None, details: Optional[str] = None
+    ):
         """初始化流连接错误
 
         Args:
@@ -156,13 +165,19 @@ class FFmpegError(AppError):
     """
 
     retryable = False  # 编码格式不支持，无法重试
-    fatal = True       # 解码器崩溃，需要重启流
+    fatal = True  # 解码器崩溃，需要重启流
 
     # 实例属性类型注解
     exit_code: Optional[int]
     stderr: Optional[str]
 
-    def __init__(self, message: str, client_id: Optional[str] = None, exit_code: Optional[int] = None, stderr: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        client_id: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        stderr: Optional[str] = None,
+    ):
         """初始化 FFmpeg 错误
 
         Args:
@@ -191,13 +206,19 @@ class DatabaseError(AppError):
     特点：retryable=True, fatal=False（连接池耗尽，可重试）
     """
 
-    retryable = True   # 连接池耗尽，可重试
-    fatal = False      # 数据库故障不影响推理主流程
+    retryable = True  # 连接池耗尽，可重试
+    fatal = False  # 数据库故障不影响推理主流程
 
     # 实例属性类型注解
     query: Optional[str]
 
-    def __init__(self, message: str, client_id: Optional[str] = None, retryable: Optional[bool] = None, query: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        client_id: Optional[str] = None,
+        retryable: Optional[bool] = None,
+        query: Optional[str] = None,
+    ):
         """初始化数据库错误
 
         Args:
@@ -208,7 +229,7 @@ class DatabaseError(AppError):
         """
         kwargs = {}
         if retryable is not None:
-            kwargs['retryable'] = retryable
+            kwargs["retryable"] = retryable
         super().__init__(f"Database error: {message}", client_id=client_id, **kwargs)
         self.query = query
 
@@ -226,14 +247,20 @@ class ModelInferenceError(AppError):
     """
 
     retryable = False  # CUDA OOM 等，重试无用
-    fatal = False      # 单路失败不影响其他路
+    fatal = False  # 单路失败不影响其他路
 
     # 实例属性类型注解
     model_name: Optional[str]
     is_cuda_error: bool
 
-    def __init__(self, message: str, client_id: Optional[str] = None, model_name: Optional[str] = None,
-                 retryable: Optional[bool] = None, is_cuda_error: bool = False):
+    def __init__(
+        self,
+        message: str,
+        client_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        retryable: Optional[bool] = None,
+        is_cuda_error: bool = False,
+    ):
         """初始化模型推理错误
 
         Args:
@@ -248,7 +275,7 @@ class ModelInferenceError(AppError):
             full_message += f" (model={model_name})"
         kwargs = {}
         if retryable is not None:
-            kwargs['retryable'] = retryable
+            kwargs["retryable"] = retryable
         super().__init__(full_message, client_id=client_id, **kwargs)
         self.model_name = model_name
         self.is_cuda_error = is_cuda_error
@@ -266,14 +293,19 @@ class PersistenceError(AppError):
     特点：retryable=True, fatal=False（磁盘临时满，可重试）
     """
 
-    retryable = True   # 磁盘临时满，可重试
-    fatal = False      # 持久化失败不影响推理主流程
+    retryable = True  # 磁盘临时满，可重试
+    fatal = False  # 持久化失败不影响推理主流程
 
     # 实例属性类型注解
     operation: Optional[str]
 
-    def __init__(self, message: str, client_id: Optional[str] = None, operation: Optional[str] = None,
-                 retryable: Optional[bool] = None):
+    def __init__(
+        self,
+        message: str,
+        client_id: Optional[str] = None,
+        operation: Optional[str] = None,
+        retryable: Optional[bool] = None,
+    ):
         """初始化持久化错误
 
         Args:
@@ -287,7 +319,7 @@ class PersistenceError(AppError):
             full_message += f" (operation={operation})"
         kwargs = {}
         if retryable is not None:
-            kwargs['retryable'] = retryable
+            kwargs["retryable"] = retryable
         super().__init__(full_message, client_id=client_id, **kwargs)
         self.operation = operation
 
@@ -295,6 +327,7 @@ class PersistenceError(AppError):
 # ============================================================================
 # 工具函数
 # ============================================================================
+
 
 def is_retryable_error(exception: Exception) -> bool:
     """检查异常是否可重试
@@ -336,3 +369,117 @@ def get_client_id_from_exception(exception: Exception) -> Optional[str]:
     if isinstance(exception, AppError):
         return exception.client_id
     return None
+
+
+# ============================================================================
+# HTTP 业务异常（用于 API 路由层）
+# ============================================================================
+
+
+class NotFoundError(AppError):
+    """资源不存在异常（404）
+
+    用于：
+    - 任务不存在
+    - 视频段不存在
+    - 播放列表不存在
+    - 其他资源查询失败
+
+    特点：retryable=False, fatal=False（资源不存在，重试无意义）
+    """
+
+    retryable = False  # 资源不存在，重试无意义
+    fatal = False  # 不影响系统运行
+
+    # 实例属性类型注解
+    resource_type: Optional[str]
+    resource_id: Optional[str]
+
+    def __init__(
+        self,
+        message: str,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+    ):
+        """初始化资源不存在异常
+
+        Args:
+            message: 错误消息
+            resource_type: 资源类型（如 "Task", "Segment", "Playlist"）
+            resource_id: 资源ID（如 task_id, segment_id）
+        """
+        super().__init__(message)
+        self.resource_type = resource_type
+        self.resource_id = resource_id
+
+
+class ValidationError(AppError):
+    """参数验证失败异常（400）
+
+    用于：
+    - source_ip 为空
+    - rtsp_url 格式错误
+    - 参数范围错误
+    - 必填字段缺失
+
+    特点：retryable=False, fatal=False（客户端错误，重试无意义）
+    """
+
+    retryable = False  # 客户端错误，重试无意义
+    fatal = False  # 不影响系统运行
+
+    # 实例属性类型注解
+    field: Optional[str]
+    value: Optional[str]
+
+    def __init__(
+        self, message: str, field: Optional[str] = None, value: Optional[str] = None
+    ):
+        """初始化参数验证失败异常
+
+        Args:
+            message: 错误消息
+            field: 验证失败的字段名（如 "source_ip", "rtsp_url"）
+            value: 验证失败的值
+        """
+        super().__init__(message)
+        self.field = field
+        self.value = value
+
+
+class ConflictError(AppError):
+    """资源冲突异常（409）
+
+    用于：
+    - 流已经在运行，无法重复启动
+    - 任务已存在，无法重复创建
+    - 资源状态冲突（如试图停止未启动的流）
+
+    特点：retryable=False, fatal=False（客户端错误，需要先停止现有资源）
+    """
+
+    retryable = False  # 客户端错误，需要先停止现有资源
+    fatal = False  # 不影响系统运行
+
+    # 实例属性类型注解
+    resource_type: Optional[str]
+    resource_id: Optional[str]
+
+    def __init__(
+        self,
+        message: str,
+        client_id: Optional[str] = None,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+    ):
+        """初始化资源冲突异常
+
+        Args:
+            message: 错误消息
+            client_id: 客户端ID
+            resource_type: 资源类型（如 "Stream", "Task"）
+            resource_id: 资源ID
+        """
+        super().__init__(message, client_id=client_id)
+        self.resource_type = resource_type
+        self.resource_id = resource_id

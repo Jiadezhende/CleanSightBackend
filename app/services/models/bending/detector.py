@@ -4,19 +4,23 @@ YOLO 内镜弯折检测服务
 使用 YOLOv8 模型检测内镜是否弯折
 """
 
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import cv2
 import numpy as np
-from typing import Dict, Any, List, Tuple, Optional
-from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class EndoscopeBendingDetector:
     """内镜弯折检测器"""
-    
+
     def __init__(self, model_path: Optional[str] = None):
         """
         初始化内镜弯折检测器
-        
+
         Args:
             model_path: YOLO 模型文件路径，如果为 None 则从配置读取
         """
@@ -27,88 +31,91 @@ class EndoscopeBendingDetector:
         self.model = None
         self.class_names = {}
         self._load_model()
-    
+
     def _load_model(self):
         """加载 YOLO 模型"""
         try:
             from ultralytics import YOLO
-            
+
             model_path = Path(self.model_path)
             if not model_path.exists():
                 raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
-            
-            print(f"正在加载内镜弯折检测模型: {self.model_path}")
+
+            logger.debug("[BendingDetector] Loading model: %s", self.model_path)
             self.model = YOLO(self.model_path)
-            
+
             # 获取类别名称
-            if hasattr(self.model, 'names'):
+            if hasattr(self.model, "names"):
                 self.class_names = self.model.names
-            
-            print(f"模型加载成功，类别数量: {len(self.class_names)}")
-            print(f"检测类别: {self.class_names}")
-            
+
+            logger.info("[BendingDetector] Model loaded: %s | classes=%d", 
+                       self.model_path, len(self.class_names))
+            logger.debug("[BendingDetector] Class names: %s", self.class_names)
+
         except ImportError:
-            print("错误: 未安装 ultralytics 库，请运行: pip install ultralytics")
+            logger.error("[BendingDetector] ✖ ultralytics library not installed")
             raise
         except Exception as e:
-            print(f"模型加载失败: {e}")
+            logger.error("[BendingDetector] ✖ Model loading failed: %s", e, exc_info=True)
             raise
-    
+
     def detect(
-        self, 
+        self,
         frame: np.ndarray,
         conf_threshold: float = 0.25,
-        iou_threshold: float = 0.45
+        iou_threshold: float = 0.45,
     ) -> Tuple[List[Dict[str, Any]], bool]:
         """
         检测内镜是否弯折（仅返回检测结果，不绘制）
-        
+
         Args:
             frame: 输入图像
             conf_threshold: 置信度阈值
             iou_threshold: IOU 阈值
-            
+
         Returns:
             (检测结果列表, 是否检测到弯折)
         """
         if self.model is None:
             raise RuntimeError("模型未加载")
-        
+
         # 执行推理
         results = self.model.predict(
-            frame,
-            conf=conf_threshold,
-            iou=iou_threshold,
-            verbose=False
+            frame, conf=conf_threshold, iou=iou_threshold, verbose=False
         )
-        
+
         # 解析结果
         detections = []
         bending_detected = False
-        
+
         if results and len(results) > 0:
             result = results[0]
-            
+
             # 获取检测框
             if result.boxes is not None and len(result.boxes) > 0:
                 boxes = result.boxes.cpu().numpy()
-                
+
                 for box in boxes:
                     # 提取信息
                     xyxy = box.xyxy[0]  # [x1, y1, x2, y2]
                     conf = float(box.conf[0])
                     cls = int(box.cls[0])
                     class_name = self.class_names.get(cls, f"class_{cls}")
-                    
+
                     # 构建检测结果
                     detection = {
-                        "bbox": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
+                        "bbox": [
+                            int(xyxy[0]),
+                            int(xyxy[1]),
+                            int(xyxy[2]),
+                            int(xyxy[3]),
+                        ],
                         "confidence": conf,
                         "class_id": cls,
                         "class_name": class_name,
                     }
                     detections.append(detection)
-                    
+
                     # 检查是否为弯折类别（根据您的模型类别定义）
                     # 假设模型训练时"bent"或"bending"表示弯折
                     if "bent" in class_name.lower() or "bending" in class_name.lower():
@@ -138,7 +145,7 @@ class EndoscopeBendingDetector:
         self,
         frames: List[np.ndarray],
         conf_threshold: float = 0.25,
-        iou_threshold: float = 0.45
+        iou_threshold: float = 0.45,
     ) -> List[Tuple[List[Dict[str, Any]], bool]]:
         """对一批图像执行检测，返回每帧的 (detections, bending_detected)。
         使用 ultralytics 的 batch 支持以减少 GPU 调用开销。
@@ -147,10 +154,7 @@ class EndoscopeBendingDetector:
             raise RuntimeError("模型未加载")
 
         results = self.model.predict(
-            frames,
-            conf=conf_threshold,
-            iou=iou_threshold,
-            verbose=False
+            frames, conf=conf_threshold, iou=iou_threshold, verbose=False
         )
 
         out = []
@@ -178,7 +182,11 @@ class EndoscopeBendingDetector:
         for result, frame in zip(results, frames):
             detections = []
             bending_detected = False
-            if result is not None and result.boxes is not None and len(result.boxes) > 0:
+            if (
+                result is not None
+                and result.boxes is not None
+                and len(result.boxes) > 0
+            ):
                 boxes = result.boxes.cpu().numpy()
                 for box in boxes:
                     xyxy = box.xyxy[0]
@@ -186,7 +194,12 @@ class EndoscopeBendingDetector:
                     cls = int(box.cls[0])
                     class_name = self.class_names.get(cls, f"class_{cls}")
                     detection = {
-                        "bbox": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
+                        "bbox": [
+                            int(xyxy[0]),
+                            int(xyxy[1]),
+                            int(xyxy[2]),
+                            int(xyxy[3]),
+                        ],
                         "confidence": conf,
                         "class_id": cls,
                         "class_name": class_name,
@@ -220,19 +233,19 @@ class EndoscopeBendingDetector:
 _detector_instance = None
 
 
-def get_detector(model_path: str = None) -> EndoscopeBendingDetector:
+def get_detector(model_path: str = None) -> EndoscopeBendingDetector: # type: ignore
     """
     获取内镜弯折检测器单例
-    
+
     Args:
         model_path: 模型路径（可选，如果为 None 则从配置读取）
-        
+
     Returns:
         EndoscopeBendingDetector 实例
     """
     global _detector_instance
-    
+
     if _detector_instance is None:
         _detector_instance = EndoscopeBendingDetector(model_path)
-    
+
     return _detector_instance

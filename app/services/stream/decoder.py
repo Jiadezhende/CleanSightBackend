@@ -2,18 +2,20 @@
 FFmpeg 解码器 - 负责从 RTMP/RTSP 流解码视频帧
 """
 
+import logging
 import os
 import subprocess
 import threading
 import time
 from typing import Optional
-import logging
-import numpy as np
-import cv2
 
-from app.services import ai
+import cv2
+import numpy as np
+
 from app.models.frame import FrameData
+from app.services import ai
 from app.services.stream.config import DecoderConfig
+from app.utils.exceptions import FFmpegError
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -27,7 +29,15 @@ DEFAULT_CHANNELS = 3
 
 
 class FFmpegDecoder:
-    def __init__(self, manager, client_id: str, stream_url: str, decoder_config: Optional[DecoderConfig] = None, protocol_opts=None, client_queues=None):
+    def __init__(
+        self,
+        manager,
+        client_id: str,
+        stream_url: str,
+        decoder_config: Optional[DecoderConfig] = None,
+        protocol_opts=None,
+        client_queues=None,
+    ):
         self.manager = manager
         self.client_id = client_id
         self.stream_url = stream_url
@@ -59,18 +69,26 @@ class FFmpegDecoder:
         self.frames_dropped = 0
         self.frames_written_to_raw = 0  # 新增：写入 CA-Raw-Queue 的帧数
         self.frames_written_to_ready = 0  # 新增：写入 CA-Ready-Queue 的帧数
-        self.logger = logging.getLogger(f"app.services.stream.decoder.FFmpegDecoder.{self.client_id}")
+        self.logger = logging.getLogger(
+            f"app.services.stream.decoder.FFmpegDecoder.{self.client_id}"
+        )
 
     def _build_cmd(self):
         cmd = [FFMPEG_BIN]
         cmd += self.protocol_opts
         cmd += [
-            "-i", self.stream_url,
-            "-map", "0:v:0",
-            "-vsync", "drop",
-            "-vf", f"scale={self.width}:{self.height},fps={self.fps}",
-            "-pix_fmt", self.pix_fmt,
-            "-f", "rawvideo",
+            "-i",
+            self.stream_url,
+            "-map",
+            "0:v:0",
+            "-vsync",
+            "drop",
+            "-vf",
+            f"scale={self.width}:{self.height},fps={self.fps}",
+            "-pix_fmt",
+            self.pix_fmt,
+            "-f",
+            "rawvideo",
             "pipe:1",
         ]
         return cmd
@@ -84,11 +102,18 @@ class FFmpegDecoder:
             cmd = self._build_cmd()
             try:
                 self.logger.info("starting ffmpeg: %s", " ".join(cmd))
-                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-                self.logger.info("ffmpeg started pid=%s", getattr(self.proc, 'pid', None))
+                self.proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
+                )
+                self.logger.info(
+                    "ffmpeg started pid=%s", getattr(self.proc, "pid", None)
+                )
             except FileNotFoundError:
                 self.logger.exception("ffmpeg binary not found")
-                raise RuntimeError(f"FFmpeg not found: {FFMPEG_BIN}")
+                raise FFmpegError(
+                    message=f"FFmpeg binary not found: {FFMPEG_BIN}",
+                    client_id=self.client_id,
+                )
 
             # set non-blocking on POSIX
             if os.name != "nt":
@@ -98,14 +123,37 @@ class FFmpegDecoder:
                 except Exception:
                     pass
 
-            self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True, name=f"stderr-{self.client_id}")
+            # 快速检查进程是否立即崩溃
+            time.sleep(0.1)  # 给进程一点启动时间
+            if self.proc.poll() is not None:
+                # 进程已经退出
+                exit_code = self.proc.returncode
+                self.logger.error(
+                    f"FFmpeg process exited immediately with code {exit_code}"
+                )
+                raise FFmpegError(
+                    message=f"FFmpeg process failed to start",
+                    client_id=self.client_id,
+                    exit_code=exit_code,
+                )
+
+            self._stderr_thread = threading.Thread(
+                target=self._read_stderr_loop,
+                daemon=True,
+                name=f"stderr-{self.client_id}",
+            )
             self._stderr_thread.start()
 
             if os.name == "nt":
-                self._reader_thread = threading.Thread(target=self._windows_reader_loop, daemon=True, name=f"reader-{self.client_id}")
+                self._reader_thread = threading.Thread(
+                    target=self._windows_reader_loop,
+                    daemon=True,
+                    name=f"reader-{self.client_id}",
+                )
                 self._reader_thread.start()
 
             self.logger.debug("decoder start complete")
+
     def stop(self, wait: float = 2.0):
         with self.lock:
             self._stop_event.set()
@@ -113,12 +161,17 @@ class FFmpegDecoder:
                 return
             try:
                 if self.proc.poll() is None:
-                    self.logger.info("terminating ffmpeg pid=%s", getattr(self.proc, 'pid', None))
+                    self.logger.info(
+                        "terminating ffmpeg pid=%s", getattr(self.proc, "pid", None)
+                    )
                     self.proc.terminate()
                     try:
                         self.proc.wait(timeout=wait)
                     except Exception:
-                        self.logger.warning("ffmpeg did not exit gracefully, killing pid=%s", getattr(self.proc, 'pid', None))
+                        self.logger.warning(
+                            "ffmpeg did not exit gracefully, killing pid=%s",
+                            getattr(self.proc, "pid", None),
+                        )
                         self.proc.kill()
                 try:
                     if self.proc.stdout:
@@ -144,11 +197,11 @@ class FFmpegDecoder:
         if self.proc is None or self.proc.stderr is None:
             return
         try:
-            for line in iter(self.proc.stderr.readline, b''):
+            for line in iter(self.proc.stderr.readline, b""):
                 if self._stop_event.is_set():
                     break
                 try:
-                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    line_str = line.decode("utf-8", errors="ignore").strip()
                     if line_str:
                         self.logger.debug("ffmpeg stderr: %s", line_str)
                 except Exception:
@@ -219,8 +272,8 @@ class FFmpegDecoder:
            - CA-Ready-Queue: 原始帧（用于推理）
         """
         while len(self.buffer) >= self.frame_size:
-            frame_bytes = bytes(self.buffer[:self.frame_size])
-            del self.buffer[:self.frame_size]
+            frame_bytes = bytes(self.buffer[: self.frame_size])
+            del self.buffer[: self.frame_size]
 
             try:
                 # 1. 解析帧
@@ -233,15 +286,19 @@ class FFmpegDecoder:
                 # 获取队列容量
                 queue_capacity = 0
                 if self.client_queues is not None:
-                    queue_capacity = self.client_queues.ca_ready.maxlen or 0
+                    queue_capacity = self.client_queues.get_ca_ready_capacity()
 
                 # 判断是否应该丢帧
                 if self._should_drop_frame(pending_count, queue_capacity):
                     self.frames_dropped += 1
-                    # 仅在每100帧打印一次（避免日志洪水）
+                    # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
                     if self.frames_dropped % 100 == 0:
-                        self.logger.warning("[BACKPRESSURE] dropping frame (pending=%s/%s, dropped=%s)",
-                                          pending_count, queue_capacity, self.frames_dropped)
+                        self.logger.debug(
+                            "[BACKPRESSURE] dropping frame (pending=%s/%s, dropped=%s)",
+                            pending_count,
+                            queue_capacity,
+                            self.frames_dropped,
+                        )
                     continue  # 跳过此帧，不写入任何队列
 
                 # 3. 写入队列（如果 client_queues 可用）
@@ -261,9 +318,13 @@ class FFmpegDecoder:
 
                 # log every N frames to observe liveness
                 if self.frames_received % 300 == 0:
-                    self.logger.info("received %s frames (raw=%s, ready=%s, dropped=%s)",
-                                    self.frames_received, self.frames_written_to_raw,
-                                    self.frames_written_to_ready, self.frames_dropped)
+                    self.logger.info(
+                        "received %s frames (raw=%s, ready=%s, dropped=%s)",
+                        self.frames_received,
+                        self.frames_written_to_raw,
+                        self.frames_written_to_ready,
+                        self.frames_dropped,
+                    )
             except Exception:
                 self.frames_dropped += 1
                 self.logger.exception("error processing frame bytes")

@@ -8,14 +8,15 @@ HLS持久化策略
 - metadata.json更新
 """
 
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-import cv2
 import json
-import time
 import logging
-import numpy as np
+import time
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import cv2
+import numpy as np
 
 from app.models.frame import FrameData
 
@@ -30,7 +31,7 @@ class HLSPersistenceStrategy:
         db_dir: Path,
         raw_fps: float = 30.0,
         processed_fps: float = 20.0,
-        enable_db_write: bool = False
+        enable_db_write: bool = False,
     ):
         self.db_dir = db_dir
         self.raw_fps = raw_fps
@@ -38,11 +39,7 @@ class HLSPersistenceStrategy:
         self.enable_db_write = enable_db_write
 
     def persist_segment(
-        self,
-        client_id: str,
-        task_id: int,
-        segment_type: str,
-        frames: List[FrameData]
+        self, client_id: str, task_id: int, segment_type: str, frames: List[FrameData]
     ) -> bool:
         """
         持久化视频段（业务代码：纯净）
@@ -71,7 +68,7 @@ class HLSPersistenceStrategy:
                 message=f"Failed to create directory: {target_dir}",
                 client_id=client_id,
                 operation="hls_mkdir",
-                retryable=True
+                retryable=True,
             ) from e
 
         if segment_type == "raw":
@@ -81,7 +78,9 @@ class HLSPersistenceStrategy:
         else:
             raise ValueError(f"Unknown segment type: {segment_type}")
 
-    def _persist_raw_segment(self, target_dir: Path, frames: List[FrameData], client_id: str) -> bool:
+    def _persist_raw_segment(
+        self, target_dir: Path, frames: List[FrameData], client_id: str
+    ) -> bool:
         """
         持久化原始视频段（业务代码：纯净）
 
@@ -102,7 +101,9 @@ class HLSPersistenceStrategy:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
         try:
-            out_raw = cv2.VideoWriter(str(raw_segment_path), fourcc, self.raw_fps, (width, height))
+            out_raw = cv2.VideoWriter(
+                str(raw_segment_path), fourcc, self.raw_fps, (width, height)
+            )
             for fd in frames:
                 out_raw.write(fd.frame)
             out_raw.release()
@@ -111,7 +112,7 @@ class HLSPersistenceStrategy:
                 message=f"Failed to write raw video segment: {raw_segment_path}",
                 client_id=client_id,
                 operation="hls_write_raw",
-                retryable=True
+                retryable=True,
             ) from e
 
         # 2. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
@@ -135,7 +136,7 @@ class HLSPersistenceStrategy:
                 message=f"Failed to update raw playlist: {raw_playlist_path}",
                 client_id=client_id,
                 operation="hls_update_playlist",
-                retryable=True
+                retryable=True,
             ) from e
 
         # 4. 更新metadata.json
@@ -144,13 +145,20 @@ class HLSPersistenceStrategy:
             segment_type="raw",
             segment_count_delta=1,
             duration_delta=segment_duration,
-            timestamp=start_ts
+            timestamp=start_ts,
         )
 
-        logger.info("Raw segment已持久化: %s, frames=%d, duration=%.3fs", client_id, len(frames), segment_duration)
+        logger.info(
+            "Raw segment已持久化: %s, frames=%d, duration=%.3fs",
+            client_id,
+            len(frames),
+            segment_duration,
+        )
         return True
 
-    def _persist_processed_segment(self, target_dir: Path, frames: List[FrameData], client_id: str) -> bool:
+    def _persist_processed_segment(
+        self, target_dir: Path, frames: List[FrameData], client_id: str
+    ) -> bool:
         """
         持久化处理后视频段和keypoints JSON（业务代码：纯净）
 
@@ -182,7 +190,7 @@ class HLSPersistenceStrategy:
                 message=f"Failed to write processed video segment: {segment_path}",
                 client_id=client_id,
                 operation="hls_write_processed",
-                retryable=True
+                retryable=True,
             ) from e
 
         # 2. 写keypoints JSON
@@ -191,11 +199,13 @@ class HLSPersistenceStrategy:
         for fd in frames:
             kp = fd.keypoints if hasattr(fd, "keypoints") else None
             ir = fd.inference_result if hasattr(fd, "inference_result") else None
-            keypoints_list.append({
-                "timestamp": fd.timestamp,
-                "keypoints": self._make_serializable(kp),
-                "inference_result": self._make_serializable(ir),
-            })
+            keypoints_list.append(
+                {
+                    "timestamp": fd.timestamp,
+                    "keypoints": self._make_serializable(kp),
+                    "inference_result": self._make_serializable(ir),
+                }
+            )
 
         try:
             with keypoints_path.open("w", encoding="utf-8") as f:
@@ -205,7 +215,7 @@ class HLSPersistenceStrategy:
                 message=f"Failed to write keypoints JSON: {keypoints_path}",
                 client_id=client_id,
                 operation="hls_write_keypoints",
-                retryable=True
+                retryable=True,
             ) from e
 
         # 3. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
@@ -229,7 +239,7 @@ class HLSPersistenceStrategy:
                 message=f"Failed to update processed playlist: {playlist_path}",
                 client_id=client_id,
                 operation="hls_update_playlist",
-                retryable=True
+                retryable=True,
             ) from e
 
         # 5. 更新metadata.json
@@ -238,10 +248,15 @@ class HLSPersistenceStrategy:
             segment_type="processed",
             segment_count_delta=1,
             duration_delta=segment_duration,
-            timestamp=start_ts
+            timestamp=start_ts,
         )
 
-        logger.info("Processed segment已持久化: %s, frames=%d, duration=%.3fs", client_id, len(frames), segment_duration)
+        logger.info(
+            "Processed segment已持久化: %s, frames=%d, duration=%.3fs",
+            client_id,
+            len(frames),
+            segment_duration,
+        )
         return True
 
     def _update_metadata(
@@ -250,7 +265,7 @@ class HLSPersistenceStrategy:
         segment_type: str,
         segment_count_delta: int,
         duration_delta: float,
-        timestamp: float
+        timestamp: float,
     ):
         """更新任务元信息文件（metadata.json）"""
         metadata_path = target_dir / "metadata.json"
@@ -271,16 +286,16 @@ class HLSPersistenceStrategy:
                     "count": 0,
                     "total_duration": 0.0,
                     "first_timestamp": None,
-                    "last_timestamp": None
+                    "last_timestamp": None,
                 },
                 "processed_segments": {
                     "count": 0,
                     "total_duration": 0.0,
                     "first_timestamp": None,
-                    "last_timestamp": None
+                    "last_timestamp": None,
                 },
                 "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
+                "updated_at": datetime.now().isoformat(),
             }
 
         # 更新统计信息

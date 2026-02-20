@@ -4,13 +4,14 @@ HLS持久化Worker池
 负责并行处理HLS持久化任务
 """
 
-import threading
 import logging
-from queue import Empty, Queue
+import threading
 from pathlib import Path
+from queue import Empty, Queue
 
 from app.services.persistence.models import HLSPersistenceTask
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
+from app.utils import GuardedExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +24,17 @@ class HLSWorker:
         input_queue: Queue,
         strategy: HLSPersistenceStrategy,
         stop_event: threading.Event,
-        worker_id: int = 0
+        worker_id: int = 0,
     ):
         self.input_queue = input_queue
         self.strategy = strategy
         self.stop_event = stop_event
         self.worker_id = worker_id
+        self.executor = GuardedExecutor()  # 用于重试逻辑
 
     def run(self):
         """工作循环"""
-        logger.info("HLSWorker-%d 已启动", self.worker_id)
+        logger.debug("[HLSWorker-%d] Started", self.worker_id)
 
         while not self.stop_event.is_set():
             try:
@@ -42,21 +44,27 @@ class HLSWorker:
                 except Empty:
                     continue
 
-                # 执行持久化
+                # 执行持久化（使用GuardedExecutor处理重试）
                 try:
-                    self.strategy.persist_segment(
-                        client_id=task.client_id,
-                        task_id=task.task_id,
-                        segment_type=task.segment_type,
-                        frames=task.frames
+                    self.executor.execute(
+                        func=lambda: self.strategy.persist_segment(
+                            client_id=task.client_id,
+                            task_id=task.task_id,
+                            segment_type=task.segment_type,
+                            frames=task.frames,
+                        ),
+                        policy_name="persistence",
                     )
                 except Exception as e:
-                    logger.error("HLSWorker-%d 持久化失败: %s", self.worker_id, e, exc_info=True)
+                    # GuardedExecutor重试后仍失败，记录错误
+                    logger.error(
+                        "[HLSWorker-%d] Persistence failed after retries: %s", self.worker_id, e, exc_info=True
+                    )
 
             except Exception as e:
-                logger.error("HLSWorker-%d 异常: %s", self.worker_id, e, exc_info=True)
+                logger.error("[HLSWorker-%d] Exception: %s", self.worker_id, e, exc_info=True)
 
-        logger.info("HLSWorker-%d 已停止", self.worker_id)
+        logger.debug("[HLSWorker-%d] Stopped", self.worker_id)
 
 
 class HLSWorkerPool:
@@ -69,7 +77,7 @@ class HLSWorkerPool:
         db_dir: Path | None = None,
         segment_duration: int = 10,
         raw_fps: float = 30.0,
-        processed_fps: float = 20.0
+        processed_fps: float = 20.0,
     ):
         self.input_queue = input_queue
         self.num_workers = num_workers
@@ -80,7 +88,7 @@ class HLSWorkerPool:
             db_dir=db_dir or Path("database"),
             raw_fps=raw_fps,
             processed_fps=processed_fps,
-            enable_db_write=False  # 不写入file_path表
+            enable_db_write=False,  # 不写入file_path表
         )
 
         # 创建Worker
@@ -89,14 +97,14 @@ class HLSWorkerPool:
 
     def start(self):
         """启动Worker池"""
-        logger.info("启动 %d 个HLS Worker", self.num_workers)
+        logger.info("[HLSWorkerPool] Starting %d workers", self.num_workers)
 
         for i in range(self.num_workers):
             worker = HLSWorker(
                 input_queue=self.input_queue,
                 strategy=self.strategy,
                 stop_event=self.stop_event,
-                worker_id=i
+                worker_id=i,
             )
             thread = threading.Thread(target=worker.run, daemon=True)
 
@@ -106,7 +114,7 @@ class HLSWorkerPool:
 
     def stop(self, timeout: float = 10.0):
         """停止Worker池"""
-        logger.info("停止HLS Worker池")
+        logger.debug("停止HLS Worker池")
         self.stop_event.set()
 
         for thread in self.threads:

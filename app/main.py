@@ -1,18 +1,22 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
-from app.routers import ai, inspection, task
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+
+from app.routers import ai, api, health, inspection, task
 from app.utils import (
     AppError,
-    StreamConnectionError,
-    FFmpegError,
+    ConflictError,
     DatabaseError,
+    FFmpegError,
     ModelInferenceError,
+    NotFoundError,
     PersistenceError,
+    StreamConnectionError,
+    ValidationError,
 )
 from app.utils.metrics import get_metrics
 
@@ -30,29 +34,33 @@ async def lifespan(app: FastAPI):
     # 显示启动配置信息
     from app.settings import settings
 
-    print("\n" + "=" * 60)
-    print("CleanSight Backend 配置检查")
-    print("=" * 60)
+    logger.info("[CleanSight] Starting backend...")
+    logger.info("=" * 60)
+    logger.info("CleanSight Backend 配置检查")
+    logger.info("=" * 60)
 
     # 显示当前环境
-    env = os.environ.get('CLEANSIGHT_ENV', 'dev')
+    env = os.environ.get("CLEANSIGHT_ENV", "dev")
     env_names = {
-        'dev': '开发环境 (.env.dev)',
-        'test': '测试环境 (.env.test)',
-        'prod': '生产环境 (.env)'
+        "dev": "开发环境 (.env.dev)",
+        "test": "测试环境 (.env.test)",
+        "prod": "生产环境 (.env)",
     }
-    env_display = env_names.get(env, f'未知环境 ({env})')
-    print(f"环境: {env_display}")
+    env_display = env_names.get(env, f"未知环境 ({env})")
+    logger.info("[CleanSight] Environment: %s", env_display)
 
     # 显示关键配置
-    print(f"数据库: {settings.db_host}:{settings.db_port}/{settings.db_name}")
-    print(f"严格模式: {os.environ.get('CLEANSIGHT_STRICT', '0') == '1'}")
-    print(f"调试模式: {settings.debug}")
-    print("=" * 60 + "\n")
+    logger.info("[CleanSight] Database: %s:%s/%s", settings.db_host, settings.db_port, settings.db_name)
+    logger.info("[CleanSight] Strict mode: %s | Debug: %s", 
+                os.environ.get('CLEANSIGHT_STRICT', '0') == '1', settings.debug)
+    logger.info("=" * 60)
 
-    # AI服务的生命周期由ai路由器管理
-    async with ai.lifespan():
-        yield
+    # 按照服务模块启动生命周期管理
+    # 1. 健康监控服务（依赖 client_manager, stream_service, inference_manager）
+    # 2. AI 推理服务
+    async with health.lifespan():
+        async with ai.lifespan():
+            yield
 
 
 app = FastAPI(
@@ -63,6 +71,8 @@ app = FastAPI(
 )
 
 # 注册路由器
+app.include_router(api.router)  # 统一API（优先注册）
+app.include_router(health.router)  # 健康监控
 app.include_router(ai.router)
 app.include_router(inspection.router)
 app.include_router(task.router)
@@ -92,7 +102,7 @@ async def stream_error_handler(request: Request, exc: StreamConnectionError):
             "client_id": exc.client_id,
             "url": str(request.url),
             "method": request.method,
-        }
+        },
     )
     return JSONResponse(
         status_code=503,
@@ -100,7 +110,7 @@ async def stream_error_handler(request: Request, exc: StreamConnectionError):
             "error": "Stream unavailable",
             "detail": str(exc),
             "client_id": exc.client_id,
-        }
+        },
     )
 
 
@@ -120,7 +130,7 @@ async def ffmpeg_error_handler(request: Request, exc: FFmpegError):
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
-        }
+        },
     )
     return JSONResponse(
         status_code=500,
@@ -128,7 +138,7 @@ async def ffmpeg_error_handler(request: Request, exc: FFmpegError):
             "error": "FFmpeg error",
             "detail": str(exc),
             "client_id": exc.client_id,
-        }
+        },
     )
 
 
@@ -148,7 +158,7 @@ async def database_error_handler(request: Request, exc: DatabaseError):
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
-        }
+        },
     )
     return JSONResponse(
         status_code=503,
@@ -156,7 +166,7 @@ async def database_error_handler(request: Request, exc: DatabaseError):
             "error": "Database unavailable",
             "detail": str(exc),
             "retryable": exc.retryable,
-        }
+        },
     )
 
 
@@ -176,7 +186,7 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
-        }
+        },
     )
     return JSONResponse(
         status_code=500,
@@ -184,7 +194,7 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
             "error": "Inference failed",
             "detail": str(exc),
             "client_id": exc.client_id,
-        }
+        },
     )
 
 
@@ -204,7 +214,7 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
-        }
+        },
     )
     return JSONResponse(
         status_code=500,
@@ -212,7 +222,95 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
             "error": "Persistence failed",
             "detail": str(exc),
             "retryable": exc.retryable,
-        }
+        },
+    )
+
+
+@app.exception_handler(NotFoundError)
+async def not_found_error_handler(request: Request, exc: NotFoundError):
+    """
+    资源不存在处理器（边界层 3）
+
+    职责：
+    1. 捕获所有 NotFoundError 异常
+    2. 记录警告日志（404 通常不是严重错误）
+    3. 转换为 HTTP 404 状态码（Not Found）
+    """
+    logger.warning(
+        f"[BoundaryLayer3] Resource not found: {exc}",
+        extra={
+            "resource_type": exc.resource_type,
+            "resource_id": exc.resource_id,
+            "url": str(request.url),
+        },
+    )
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "Resource not found",
+            "detail": str(exc),
+            "resource_type": exc.resource_type,
+            "resource_id": exc.resource_id,
+        },
+    )
+
+
+@app.exception_handler(ValidationError)
+async def validation_error_handler(request: Request, exc: ValidationError):
+    """
+    参数验证失败处理器（边界层 3）
+
+    职责：
+    1. 捕获所有 ValidationError 异常
+    2. 记录警告日志（客户端错误，不记录 exc_info）
+    3. 转换为 HTTP 400 状态码（Bad Request）
+    """
+    logger.warning(
+        f"[BoundaryLayer3] Validation error: {exc}",
+        extra={
+            "field": exc.field,
+            "value": exc.value,
+            "url": str(request.url),
+        },
+    )
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "Validation error",
+            "detail": str(exc),
+            "field": exc.field,
+        },
+    )
+
+
+@app.exception_handler(ConflictError)
+async def conflict_error_handler(request: Request, exc: ConflictError):
+    """
+    资源冲突处理器（边界层 3）
+
+    职责：
+    1. 捕获所有 ConflictError 异常
+    2. 记录警告日志（客户端错误，不记录 exc_info）
+    3. 转换为 HTTP 409 状态码（Conflict）
+    """
+    logger.warning(
+        f"[BoundaryLayer3] Resource conflict: {exc}",
+        extra={
+            "client_id": exc.client_id,
+            "resource_type": exc.resource_type,
+            "resource_id": exc.resource_id,
+            "url": str(request.url),
+        },
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": "Resource conflict",
+            "detail": str(exc),
+            "client_id": exc.client_id,
+            "resource_type": exc.resource_type,
+            "resource_id": exc.resource_id,
+        },
     )
 
 
@@ -232,7 +330,7 @@ async def cleansight_exception_handler(request: Request, exc: AppError):
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
-        }
+        },
     )
     return JSONResponse(
         status_code=500,
@@ -240,7 +338,7 @@ async def cleansight_exception_handler(request: Request, exc: AppError):
             "error": "Internal error",
             "detail": str(exc),
             "retryable": exc.retryable,
-        }
+        },
     )
 
 
@@ -262,14 +360,14 @@ async def generic_exception_handler(request: Request, exc: Exception):
             "url": str(request.url),
             "method": request.method,
             "exception_type": type(exc).__name__,
-        }
+        },
     )
     return JSONResponse(
         status_code=500,
         content={
             "error": "Internal server error",
             "detail": "An unexpected error occurred. Please contact support if the issue persists.",
-        }
+        },
     )
 
 
@@ -303,6 +401,7 @@ async def metrics():
 # ============================================================================
 # 边界层 4: 顶层 Fail-Fast
 # ============================================================================
+
 
 def main():
     """
@@ -349,10 +448,8 @@ def main():
     except Exception as e:
         # 顶层边界捕获所有未处理异常
         logger.critical(
-            "=" * 60 + "\n" +
-            f"[BoundaryLayer4] Fatal error in main: {e}\n" +
-            "=" * 60,
-            exc_info=True
+            "=" * 60 + "\n" + f"[BoundaryLayer4] Fatal error in main: {e}\n" + "=" * 60,
+            exc_info=True,
         )
         # Fail-Fast: 记录日志后退出
         sys.exit(1)

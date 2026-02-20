@@ -8,30 +8,31 @@ CleanSight 异常处理集成测试
 4. Action 决策正确（DROP/RETRY/FATAL）
 """
 
-import pytest
 import time
 from unittest.mock import Mock, patch
 
+import pytest
+
 from app.utils.exceptions import (
-    FrameDrop,
-    StreamConnectionError,
-    FFmpegError,
     DatabaseError,
+    FFmpegError,
+    FrameDrop,
     ModelInferenceError,
     PersistenceError,
+    StreamConnectionError,
 )
-from app.utils.executor import GuardedExecutor, Action, ExecutionPolicy
+from app.utils.executor import Action, ExecutionPolicy, GuardedExecutor
 from app.utils.metrics import (
     frame_drop_total,
-    retry_total,
-    infer_failure_total,
     gpu_oom_total,
+    infer_failure_total,
+    retry_total,
 )
-
 
 # ============================================================================
 # Phase 5 Test 1: FrameDrop 测试
 # ============================================================================
+
 
 def test_frame_drop_is_silent():
     """
@@ -45,11 +46,7 @@ def test_frame_drop_is_silent():
     executor = GuardedExecutor()
 
     def drop_frame():
-        raise FrameDrop(
-            client_id="test_client",
-            frame_index=42,
-            reason="decode_failed"
-        )
+        raise FrameDrop(client_id="test_client", frame_index=42, reason="decode_failed")
 
     # 执行前获取 metric 值
     metric_key = ("test_client", "decode_failed")
@@ -58,17 +55,16 @@ def test_frame_drop_is_silent():
         before_count = frame_drop_total._metrics[metric_key]._value.get()
 
     # 执行（应该返回 None，不抛异常）
-    result = executor.execute(
-        func=drop_frame,
-        policy_name='inference'
-    )
+    result = executor.execute(func=drop_frame, policy_name="inference")
 
     # 验证
     assert result is None, "FrameDrop should return None"
 
     # 验证 metrics（丢帧计数增加）
     after_count = frame_drop_total._metrics[metric_key]._value.get()
-    assert after_count == before_count + 1, f"frame_drop_total should increase (before={before_count}, after={after_count})"
+    assert (
+        after_count == before_count + 1
+    ), f"frame_drop_total should increase (before={before_count}, after={after_count})"
 
 
 def test_frame_drop_with_different_reasons():
@@ -78,16 +74,11 @@ def test_frame_drop_with_different_reasons():
     reasons = ["decode_failed", "client_removed", "quality_check_failed", "timeout"]
 
     for reason in reasons:
-        def drop_frame_with_reason():
-            raise FrameDrop(
-                client_id=f"client_{reason}",
-                reason=reason
-            )
 
-        result = executor.execute(
-            func=drop_frame_with_reason,
-            policy_name='inference'
-        )
+        def drop_frame_with_reason():
+            raise FrameDrop(client_id=f"client_{reason}", reason=reason)
+
+        result = executor.execute(func=drop_frame_with_reason, policy_name="inference")
 
         assert result is None, f"FrameDrop with reason '{reason}' should return None"
 
@@ -95,6 +86,7 @@ def test_frame_drop_with_different_reasons():
 # ============================================================================
 # Phase 5 Test 2: 单帧失败不影响其他路
 # ============================================================================
+
 
 def test_single_stream_failure_doesnt_affect_others():
     """
@@ -117,18 +109,14 @@ def test_single_stream_failure_doesnt_affect_others():
     def infer_frame(client_id):
         """模拟推理：client_5 失败，其他成功"""
         if client_id == "client_5":
-            raise FrameDrop(
-                client_id=client_id,
-                reason="quality_check_failed"
-            )
+            raise FrameDrop(client_id=client_id, reason="quality_check_failed")
         return {"result": "success", "client_id": client_id}
 
     # 并发推理（模拟）
     results = []
     for client_id in clients:
         result = executor.execute(
-            func=lambda cid=client_id: infer_frame(cid),
-            policy_name='inference'
+            func=lambda cid=client_id: infer_frame(cid), policy_name="inference"
         )
         results.append(result)
 
@@ -144,6 +132,7 @@ def test_single_stream_failure_doesnt_affect_others():
 # ============================================================================
 # Phase 5 Test 3: Action 决策测试
 # ============================================================================
+
 
 def test_action_decision_drop():
     """测试 Action.DROP 决策（FrameDrop）"""
@@ -194,6 +183,7 @@ def test_action_decision_retry_exhausted():
 # Phase 5 Test 4: Metrics 验证
 # ============================================================================
 
+
 def test_metrics_frame_drop():
     """测试 frame_drop_total metric"""
     executor = GuardedExecutor()
@@ -210,7 +200,7 @@ def test_metrics_frame_drop():
     def drop_frame():
         raise FrameDrop(client_id=client_id, reason=reason)
 
-    executor.execute(func=drop_frame, policy_name='inference')
+    executor.execute(func=drop_frame, policy_name="inference")
 
     # 验证 metric 增加
     after_count = frame_drop_total._metrics[metric_key]._value.get()
@@ -240,13 +230,15 @@ def test_metrics_retry():
             raise StreamConnectionError(url="rtsp://test")
         return "success"
 
-    result = executor.execute(func=failing_func, policy_name='stream')
+    result = executor.execute(func=failing_func, policy_name="stream")
 
     # 验证：成功返回，且 retry_total 增加
     assert result == "success", "Should succeed after retries"
     after_count = retry_total._metrics[metric_key]._value.get()
     # 应该重试了 2 次（第 3 次成功）
-    assert after_count >= before_count + 2, f"retry_total should increase (before={before_count}, after={after_count})"
+    assert (
+        after_count >= before_count + 2
+    ), f"retry_total should increase (before={before_count}, after={after_count})"
 
 
 def test_metrics_gpu_oom():
@@ -263,13 +255,11 @@ def test_metrics_gpu_oom():
 
     def oom_func():
         raise ModelInferenceError(
-            message="CUDA out of memory",
-            model_name=model_name,
-            is_cuda_error=True
+            message="CUDA out of memory", model_name=model_name, is_cuda_error=True
         )
 
     with pytest.raises(ModelInferenceError):
-        executor.execute(func=oom_func, policy_name='inference')
+        executor.execute(func=oom_func, policy_name="inference")
 
     # 验证 metric 增加
     after_count = gpu_oom_total._metrics[metric_key]._value.get()
@@ -280,6 +270,7 @@ def test_metrics_gpu_oom():
 # Phase 5 Test 5: GuardedExecutor 集成测试
 # ============================================================================
 
+
 def test_retry_executor_success():
     """测试 GuardedExecutor 成功执行"""
     executor = GuardedExecutor()
@@ -287,10 +278,7 @@ def test_retry_executor_success():
     def success_func():
         return {"result": "success"}
 
-    result = executor.execute(
-        func=success_func,
-        policy_name='database'
-    )
+    result = executor.execute(func=success_func, policy_name="database")
 
     assert result == {"result": "success"}
 
@@ -308,10 +296,7 @@ def test_retry_executor_retryable_error():
             raise DatabaseError("Connection timeout", retryable=True)
         return "success"
 
-    result = executor.execute(
-        func=retryable_func,
-        policy_name='database'  # 最多 3 次
-    )
+    result = executor.execute(func=retryable_func, policy_name="database")  # 最多 3 次
 
     assert result == "success"
     assert attempt_count == 3, "Should retry twice before succeeding"
@@ -325,10 +310,7 @@ def test_retry_executor_non_retryable_error():
         raise FFmpegError("FFmpeg not found", exit_code=1)  # fatal=True
 
     with pytest.raises(FFmpegError):
-        executor.execute(
-            func=non_retryable_func,
-            policy_name='stream'
-        )
+        executor.execute(func=non_retryable_func, policy_name="stream")
 
 
 def test_retry_executor_max_attempts():
@@ -343,18 +325,18 @@ def test_retry_executor_max_attempts():
         raise DatabaseError("Always fail", retryable=True)
 
     with pytest.raises(DatabaseError):
-        executor.execute(
-            func=always_fail,
-            policy_name='database'  # 最多 3 次
-        )
+        executor.execute(func=always_fail, policy_name="database")  # 最多 3 次
 
     # 验证：尝试了 3 次
-    assert attempt_count == 3, f"Should attempt max_attempts times (actual: {attempt_count})"
+    assert (
+        attempt_count == 3
+    ), f"Should attempt max_attempts times (actual: {attempt_count})"
 
 
 # ============================================================================
 # Phase 5 Test 6: 延迟计算测试
 # ============================================================================
+
 
 def test_calculate_delay_fixed():
     """测试固定延迟策略"""
@@ -374,10 +356,7 @@ def test_calculate_delay_exponential_backoff():
     """测试指数退避策略"""
     executor = GuardedExecutor()
     policy = ExecutionPolicy(
-        delay=1.0,
-        backoff=True,
-        backoff_factor=2.0,
-        max_delay=10.0
+        delay=1.0, backoff=True, backoff_factor=2.0, max_delay=10.0
     )
 
     delay1 = executor._calculate_delay(policy, attempts=1)
@@ -396,10 +375,7 @@ def test_calculate_delay_exponential_backoff_max():
     """测试指数退避达到上限"""
     executor = GuardedExecutor()
     policy = ExecutionPolicy(
-        delay=1.0,
-        backoff=True,
-        backoff_factor=2.0,
-        max_delay=5.0  # 限制最大延迟
+        delay=1.0, backoff=True, backoff_factor=2.0, max_delay=5.0  # 限制最大延迟
     )
 
     delay5 = executor._calculate_delay(policy, attempts=5)
@@ -413,6 +389,7 @@ def test_calculate_delay_exponential_backoff_max():
 # ============================================================================
 # Phase 5 Test 7: 端到端场景测试
 # ============================================================================
+
 
 def test_end_to_end_inference_with_frame_drop():
     """
@@ -436,17 +413,14 @@ def test_end_to_end_inference_with_frame_drop():
         """模拟单帧推理"""
         if frame_id == "frame_2":
             raise FrameDrop(
-                client_id="inference_test",
-                frame_index=2,
-                reason="decode_failed"
+                client_id="inference_test", frame_index=2, reason="decode_failed"
             )
         return {"frame": frame_id, "result": "OK"}
 
     results = []
     for frame in frames:
         result = executor.execute(
-            func=lambda f=frame: infer_single_frame(f),
-            policy_name='inference'
+            func=lambda f=frame: infer_single_frame(f), policy_name="inference"
         )
         results.append(result)
 
@@ -484,14 +458,11 @@ def test_end_to_end_persistence_retry():
                 message="Disk full",
                 client_id="persist_test",
                 operation="hls_write",
-                retryable=True
+                retryable=True,
             )
         return "segment_saved"
 
-    result = executor.execute(
-        func=persist_segment,
-        policy_name='persistence'
-    )
+    result = executor.execute(func=persist_segment, policy_name="persistence")
 
     assert result == "segment_saved"
     assert attempt_count == 2, "Should retry once"

@@ -7,7 +7,7 @@ CleanSight Prometheus Metrics（可观测性）
 - 用于 Grafana 可视化和告警
 """
 
-from prometheus_client import Counter, Histogram, CollectorRegistry, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Histogram, generate_latest
 
 # 使用默认 registry（与 FastAPI 集成）
 # 如果需要自定义 registry，可以传入 registry=custom_registry
@@ -17,10 +17,10 @@ from prometheus_client import Counter, Histogram, CollectorRegistry, generate_la
 # ============================================================================
 
 infer_latency_ms = Histogram(
-    'infer_latency_ms',
-    'Inference latency in milliseconds',
-    ['client_id', 'model'],
-    buckets=[10, 25, 50, 100, 250, 500, 1000, 2500, 5000]
+    "infer_latency_ms",
+    "Inference latency in milliseconds",
+    ["client_id", "model"],
+    buckets=[10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 )
 """
 推理延迟直方图
@@ -47,9 +47,9 @@ infer_latency_ms = Histogram(
 # ============================================================================
 
 infer_failure_total = Counter(
-    'infer_failure_total',
-    'Total inference failures',
-    ['client_id', 'model', 'error_type']
+    "infer_failure_total",
+    "Total inference failures",
+    ["client_id", "model", "error_type"],
 )
 """
 推理失败总数
@@ -82,9 +82,7 @@ infer_failure_total = Counter(
 # ============================================================================
 
 frame_drop_total = Counter(
-    'frame_drop_total',
-    'Total frames dropped',
-    ['client_id', 'reason']
+    "frame_drop_total", "Total frames dropped", ["client_id", "reason"]
 )
 """
 帧丢弃总数（FrameDrop 专用）
@@ -112,11 +110,7 @@ frame_drop_total = Counter(
 # 4. GPU OOM 计数（Counter）
 # ============================================================================
 
-gpu_oom_total = Counter(
-    'gpu_oom_total',
-    'Total GPU out-of-memory errors',
-    ['model']
-)
+gpu_oom_total = Counter("gpu_oom_total", "Total GPU out-of-memory errors", ["model"])
 """
 GPU 内存不足错误总数
 
@@ -143,9 +137,7 @@ GPU 内存不足错误总数
 # ============================================================================
 
 retry_total = Counter(
-    'retry_total',
-    'Total retry attempts',
-    ['operation', 'error_type']
+    "retry_total", "Total retry attempts", ["operation", "error_type"]
 )
 """
 重试总数（所有操作）
@@ -174,6 +166,7 @@ retry_total = Counter(
 # ============================================================================
 # 工具函数
 # ============================================================================
+
 
 def get_metrics() -> bytes:
     """

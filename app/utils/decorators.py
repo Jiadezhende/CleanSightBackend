@@ -18,8 +18,8 @@ CleanSight 装饰器工具集（仅用于日志）
 
 import functools
 import logging
-import time
 import os
+import time
 from typing import Callable, Optional
 
 # 从环境变量读取调试模式
@@ -29,12 +29,13 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 # 1. 日志装饰器
 # ============================================================================
 
+
 def log_call(
     level: int = logging.INFO,
     log_args: bool = False,  # 是否记录参数（默认关闭，避免记录大对象）
     log_result: bool = False,  # 是否记录返回值
     log_exceptions: bool = True,  # 是否记录异常
-    skip_in_production: bool = False  # 生产环境是否跳过（用于高频操作）
+    skip_in_production: bool = False,  # 生产环境是否跳过（用于高频操作）
 ):
     """自动进入/退出日志装饰器
 
@@ -55,6 +56,7 @@ def log_call(
         def infer_batch(frames):
             ...
     """
+
     def decorator(func: Callable):
         logger = logging.getLogger(func.__module__)
 
@@ -108,6 +110,7 @@ def log_call(
                 raise
 
         return wrapper
+
     return decorator
 
 
@@ -115,10 +118,11 @@ def log_call(
 # 2. 性能计时装饰器
 # ============================================================================
 
+
 def timing(
     threshold_ms: Optional[float] = None,  # 警告阈值（毫秒）
     warn_on_slow: bool = True,  # 超过阈值时是否发出警告
-    log_always: bool = False  # 是否总是记录（默认仅在超过阈值时记录）
+    log_always: bool = False,  # 是否总是记录（默认仅在超过阈值时记录）
 ):
     """性能计时装饰器
 
@@ -132,6 +136,7 @@ def timing(
         def infer_batch(frames):
             ...
     """
+
     def decorator(func: Callable):
         logger = logging.getLogger(func.__module__)
 
@@ -162,14 +167,14 @@ def timing(
                     logger.debug(timing_msg)
 
         return wrapper
+
     return decorator
-
-
 
 
 # ============================================================================
 # 工具函数
 # ============================================================================
+
 
 def _extract_client_id(args: tuple, kwargs: dict) -> Optional[str]:
     """从函数参数中提取 client_id
@@ -211,11 +216,13 @@ def _sanitize_args(args: tuple, kwargs: dict) -> dict:
     Returns:
         dict: 清洗后的参数字典
     """
+
     def sanitize_value(v):
         """清洗单个值"""
         # NumPy 数组
         try:
             import numpy as np
+
             if isinstance(v, np.ndarray):
                 return f"<ndarray shape={v.shape} dtype={v.dtype}>"
         except ImportError:

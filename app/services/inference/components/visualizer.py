@@ -74,7 +74,9 @@ class DefaultVisualizer(Visualizer):
         for box in boxes:
             if isinstance(box, (list, tuple)) and len(box) >= 4:
                 x1, y1, x2, y2 = map(int, box[:4])
-                color = (0, 0, 255) if detected else (0, 255, 0)  # 红色=检测到，绿色=未检测到
+                color = (
+                    (0, 0, 255) if detected else (0, 255, 0)
+                )  # 红色=检测到，绿色=未检测到
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
         # 绘制标签
@@ -100,7 +102,9 @@ class DefaultVisualizer(Visualizer):
         for box in boxes:
             if isinstance(box, (list, tuple)) and len(box) >= 4:
                 x1, y1, x2, y2 = map(int, box[:4])
-                color = (255, 0, 0) if detected else (0, 255, 0)  # 蓝色=检测到，绿色=未检测到
+                color = (
+                    (255, 0, 0) if detected else (0, 255, 0)
+                )  # 蓝色=检测到，绿色=未检测到
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
         # 绘制标签

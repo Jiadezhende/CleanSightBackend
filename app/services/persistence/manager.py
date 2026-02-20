@@ -8,20 +8,20 @@
 - 监控持久化队列和性能指标
 """
 
-from typing import Dict, Any, Optional, List
-import threading
-import queue
 import logging
+import queue
+import threading
+from typing import Any, Dict, List, Optional
 
-from app.services.persistence.config import PersistenceConfig
-from app.services.persistence.workers.hls_worker import HLSWorkerPool
-from app.services.persistence.workers.alarm_worker import AlarmWorkerPool
-from app.services.persistence.models import (
-    HLSPersistenceTask,
-    AlarmPersistenceTask,
-    PersistenceMetrics
-)
 from app.models.frame import FrameData
+from app.services.persistence.config import PersistenceConfig
+from app.services.persistence.models import (
+    AlarmPersistenceTask,
+    HLSPersistenceTask,
+    PersistenceMetrics,
+)
+from app.services.persistence.workers.alarm_worker import AlarmWorkerPool
+from app.services.persistence.workers.hls_worker import HLSWorkerPool
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class PersistenceManager:
         """
         if config is None:
             from app.services.persistence.config import get_persistence_config
+
             self.config = get_persistence_config()
         else:
             self.config = config
@@ -67,8 +68,6 @@ class PersistenceManager:
             num_workers=self.config.alarm_workers,
             batch_interval=self.config.alarm_batch_interval,
             cooldown_seconds=self.config.alarm_cooldown_seconds,
-            retry_times=self.config.alarm_retry_times,
-            retry_backoff=self.config.alarm_retry_backoff,
         )
 
         # 监控指标
@@ -114,7 +113,7 @@ class PersistenceManager:
                 client_id=client_id,
                 task_id=task_id,
                 segment_type=segment_type,
-                frames=frames
+                frames=frames,
             )
             self.hls_queue.put(task, timeout=1.0)
             self.metrics.hls_enqueued += 1

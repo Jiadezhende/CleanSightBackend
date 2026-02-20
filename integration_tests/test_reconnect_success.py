@@ -12,19 +12,16 @@
 - 第1-2次重连尝试成功
 - 推理服务无缝恢复
 """
+
+import argparse
 import sys
 import time
-import argparse
 from pathlib import Path
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from integration_tests.utils import (
-    FFmpegController,
-    DatabaseHelper,
-    APIClient,
-)
+from integration_tests.utils import APIClient, DatabaseHelper, FFmpegController
 
 
 class ReconnectSuccessTest:
@@ -117,6 +114,7 @@ class ReconnectSuccessTest:
         except Exception as e:
             print(f"\n❌ 测试失败: {e}")
             import traceback
+
             traceback.print_exc()
         finally:
             self._cleanup()
@@ -152,7 +150,7 @@ class ReconnectSuccessTest:
 
         # 获取 client_id
         task = self.db.get_task(self.task_id)
-        if task and getattr(task, 'source_ip', None):
+        if task and getattr(task, "source_ip", None):
             self.client_id = str(task.source_ip)
             print(f"✅ Client ID: {self.client_id}")
         else:
@@ -183,9 +181,7 @@ class ReconnectSuccessTest:
         """启动 FFmpeg 推流"""
         if self.ffmpeg is None:
             self.ffmpeg = FFmpegController(
-                self.video_path,
-                self.push_rtsp_url,
-                protocol="rtsp"
+                self.video_path, self.push_rtsp_url, protocol="rtsp"
             )
 
         if not self.ffmpeg.start():
@@ -224,23 +220,18 @@ class ReconnectSuccessTest:
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="推流断开重连成功测试")
-    parser.add_argument(
-        "--task_id",
-        type=int,
-        default=1,
-        help="任务 ID（默认: 1）"
-    )
+    parser.add_argument("--task_id", type=int, default=1, help="任务 ID（默认: 1）")
     parser.add_argument(
         "--video_path",
         type=str,
         default=None,
-        help="测试视频路径（默认: test/test_video.mp4）"
+        help="测试视频路径（默认: test/test_video.mp4）",
     )
     parser.add_argument(
         "--server",
         type=str,
         default="localhost",
-        help="服务器地址（默认: localhost，远程示例: 117.50.241.174）"
+        help="服务器地址（默认: localhost，远程示例: 117.50.241.174）",
     )
 
     args = parser.parse_args()

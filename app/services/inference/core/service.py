@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,9 +22,18 @@ from app.models.frame import FrameData
 from app.services.inference.core.dispatcher import StageAwareDispatcher
 from app.services.inference.models import InferenceResult
 from app.services.inference.workers.base import MultiModelWorkerPool
+from app.utils.exceptions import (
+    AppError,
+    FrameDrop,
+    ModelInferenceError,
+    PersistenceError,
+)
+from app.utils.metrics import gpu_oom_total
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from app.services.client import ClientQueues, ClientState, ClientManager
+    from app.services.client import ClientManager, ClientQueues, ClientState
 
 # 避免循环导入，延迟导入
 from app.services.client import client_manager
@@ -91,10 +101,10 @@ class ModelWorkerService:
         self.max_batch_per_stage = max_batch_per_stage
         self.use_cuda_stream = use_cuda_stream
 
-        # 创建 Dispatcher
+        # 创建 Dispatcher（直接引用 ClientManager）
         self.dispatcher = StageAwareDispatcher(
-            client_queues_map=self.client_queues_map,
             max_batch_per_stage=max_batch_per_stage,
+            client_manager_instance=self._client_manager,
         )
 
         # 为每个 stage 创建 MultiModelWorkerPool
@@ -116,9 +126,9 @@ class ModelWorkerService:
         self._stop_event = threading.Event()
         self._worker_threads: List[threading.Thread] = []
 
-        print(
-            f"[ModelWorkerService] 初始化完成: stages={list(self.worker_pools.keys())}, "
-            f"CUDA Stream={'enabled' if use_cuda_stream else 'disabled'}, "
+        logger.info(
+            f"ModelWorkerService initialized: stages={list(self.worker_pools.keys())}, "
+            f"CUDA_stream={'enabled' if use_cuda_stream else 'disabled'}, "
             f"clients={len(self.client_queues_map)}"
         )
 
@@ -137,26 +147,30 @@ class ModelWorkerService:
             thread.start()
             self._worker_threads.append(thread)
 
-        print(f"[ModelWorkerService] 已启动 {len(self._worker_threads)} 个推理线程")
+        logger.info(f"Started {len(self._worker_threads)} inference worker threads")
 
         # ========== 模型预热 ==========
-        print("[ModelWorkerService] 开始预热所有模型...")
+        logger.info("Starting model warmup for all stages...")
         warmup_start = time.time()
 
         for stage, worker_pool in self.worker_pools.items():
             # 获取该stage的批大小
-            batch_size = self.stage_configs[stage].get("batch_size", self.max_batch_per_stage)
+            batch_size = self.stage_configs[stage].get(
+                "batch_size", self.max_batch_per_stage
+            )
 
             # 执行预热
             try:
                 worker_pool.warmup(batch_size=batch_size)
             except Exception as e:
-                print(f"[ModelWorkerService] {stage} 预热失败: {e}")
+                logger.error(
+                    f"Model warmup failed for stage {stage}: {e}", exc_info=True
+                )
 
         warmup_elapsed = time.time() - warmup_start
-        print(
-            f"[ModelWorkerService] 所有模型预热完成！"
-            f"总耗时={warmup_elapsed*1000:.1f}ms"
+        logger.info(
+            f"Model warmup completed for all stages: "
+            f"elapsed={warmup_elapsed*1000:.1f}ms"
         )
 
     def stop(self):
@@ -168,7 +182,7 @@ class ModelWorkerService:
         for thread in self._worker_threads:
             thread.join(timeout=2.0)
 
-        print("[ModelWorkerService] 已停止")
+        logger.info("ModelWorkerService stopped")
 
     def _inference_loop(self, stage: str):
         """推理循环：消费指定 stage 的批量请求（支持自适应超时）。"""
@@ -212,26 +226,59 @@ class ModelWorkerService:
                 # 调试日志（增加队列深度信息）
                 if len(batch) > 0:
                     fps = len(batch) / elapsed if elapsed > 0 else 0
-                    print(
-                        f"[InferWorker-{stage}] batch={len(batch)}/{batch_size}, "
+                    logger.debug(
+                        f"[Worker-{stage}] Batch processed: "
+                        f"size={len(batch)}/{batch_size}, "
                         f"time={elapsed*1000:.1f}ms, fps={fps:.1f}, "
                         f"queue_depth={queue_depth}, timeout={timeout_ms:.1f}ms"
                     )
 
-            except Exception as e:
-                # 边界层 1: Worker.run() 异常捕获
-                from app.utils.exceptions import FrameDrop
-                import traceback
+            except FrameDrop as e:
+                # 边界层 1: FrameDrop - 静默丢弃（warning级别）
+                logger.warning(
+                    f"[BoundaryLayer1][Worker-{stage}] Frame dropped: "
+                    f"client={e.client_id}, reason={e.reason}"
+                )
+                continue  # 继续处理下一批
 
-                # FrameDrop: 安静丢弃（不打印完整 traceback）
-                if isinstance(e, FrameDrop):
-                    print(f"[InferWorker-{stage}] Frame dropped: {e.client_id} - {e.reason}")
-                    continue  # 继续处理下一批
-
-                # 其他异常：打印完整 traceback
-                print(f"[InferWorker-{stage}] 异常: {e}")
-                traceback.print_exc()
+            except ModelInferenceError as e:
+                # 边界层 1: 模型推理错误 - ERROR级别，记录上下文
+                logger.error(
+                    f"[BoundaryLayer1][Worker-{stage}] Model inference failed: {e}",
+                    exc_info=True,
+                    extra={
+                        "client_id": e.client_id,
+                        "model_name": e.model_name,
+                        "is_cuda_error": e.is_cuda_error,
+                    },
+                )
+                # 记录GPU OOM指标
+                if e.is_cuda_error:
+                    gpu_oom_total.labels(
+                        model=getattr(e, "model_name", "unknown")
+                    ).inc()
+                # 继续处理下一批
                 time.sleep(0.1)
+                continue
+
+            except AppError as e:
+                # 边界层 1: 其他应用异常 - ERROR级别
+                logger.error(
+                    f"[BoundaryLayer1][Worker-{stage}] Application error: {e}",
+                    exc_info=True,
+                    extra={"client_id": getattr(e, "client_id", None)},
+                )
+                time.sleep(0.1)
+                continue
+
+            except Exception as e:
+                # 边界层 1: 未预期的异常 - CRITICAL级别
+                logger.critical(
+                    f"[BoundaryLayer1][Worker-{stage}] Unexpected error: {e}",
+                    exc_info=True,
+                )
+                time.sleep(0.5)
+                continue
 
     def _write_back_results(self, results: List[InferenceResult]):
         """将推理结果投递到时序队列（异步架构）
@@ -246,22 +293,22 @@ class ModelWorkerService:
             # 检查客户端是否存在（可能在推理过程中被移除）
             if not self._client_manager.has_client(res.client_id):
                 # 构建 FrameDrop 参数（frame_index 可能不存在）
-                frame_idx = getattr(res, 'frame_index', None)
+                frame_idx = getattr(res, "frame_index", None)
                 raise FrameDrop(
                     client_id=res.client_id,
                     frame_index=frame_idx,  # type: ignore
-                    reason="client_removed"
+                    reason="client_removed",
                 )
 
             # 投递到时序队列
             try:
                 self.temporal_queue.put(res, timeout=0.1)
-            except Exception:  # queue.Full
-                raise PersistenceError(
-                    message=f"Temporal queue full for {res.client_id}",
+            except Exception:  # queue.Full or asyncio.TimeoutError
+                # 实时推理场景：队列满时丢弃当前帧，继续处理下一帧
+                raise FrameDrop(
                     client_id=res.client_id,
-                    operation="temporal_queue_put",
-                    retryable=True
+                    frame_index=getattr(res, "frame_index", None),
+                    reason="queue_timeout",
                 )
 
     def _update_client_state(self, state: ClientState, result: InferenceResult):
@@ -304,7 +351,7 @@ class ModelWorkerService:
 
         TODO: 实现完整的可视化流程
         需要：
-        1. 从 cq.get_latest_raw_frame() 获取原始帧
+        1. 从 cq.get_latest_frame() 获取最新原始帧
         2. 调用各 subtask 的 task.visualize() 方法绘制检测框/标注
         3. 添加文字信息（stage、timestamp、fps 等）
         4. 返回可视化后的帧
@@ -313,54 +360,3 @@ class ModelWorkerService:
         # 默认实现：返回 None（无可视化）
         # 子类可以覆写这个方法，或者在外部注入可视化函数
         return None
-
-    def refresh_client_queues(self):
-        """刷新客户端队列映射（从 ClientManager 获取最新）。
-
-        适用场景：
-        - 新客户端通过 RTSP/WebSocket 连接加入
-        - 客户端任务完成或断开连接被清理
-        - 定期同步（推荐每 5-10 秒调用一次）
-
-        注意：
-        - 客户端是动态创建和清理的，初始化时获取的是快照
-        - 新客户端加入后，必须调用此方法才能被推理服务识别
-        - 客户端离开后，推理服务会自动跳过（安全检查）
-
-        使用示例：
-        ```python
-        # 方式 1: 定期刷新（推荐）
-        import threading
-        import time
-
-        def refresh_loop():
-            while True:
-                service.refresh_client_queues()
-                time.sleep(5)
-
-        threading.Thread(target=refresh_loop, daemon=True).start()
-
-        # 方式 2: 事件驱动刷新
-        def on_client_added(client_id):
-            service.refresh_client_queues()
-
-        def on_client_removed(client_id):
-            service.refresh_client_queues()
-        ```
-        """
-        new_map = self._client_manager.get_all_clients()
-
-        # 统计变化
-        old_count = len(self.client_queues_map)
-        new_count = len(new_map)
-
-        self.client_queues_map = new_map
-        self.dispatcher.client_queues_map = new_map
-
-        if new_count != old_count:
-            print(
-                f"[ModelWorkerService] 客户端列表已更新: "
-                f"{old_count} → {new_count} ({new_count - old_count:+d})"
-            )
-        else:
-            print(f"[ModelWorkerService] 客户端列表已刷新: {new_count} 个客户端")

@@ -9,20 +9,17 @@
 
 不包含复杂的验证逻辑，仅模拟断开重连场景
 """
+
+import asyncio
 import sys
 import time
-import asyncio
 from pathlib import Path
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from integration_tests.utils import (
-    FFmpegController,
-    DatabaseHelper,
-    APIClient,
-)
 from integration_tests.client_viewer import InferenceViewer
+from integration_tests.utils import APIClient, DatabaseHelper, FFmpegController
 
 
 class DisconnectReconnectTest:
@@ -100,6 +97,7 @@ class DisconnectReconnectTest:
         except Exception as e:
             print(f"\n❌ 测试失败: {e}")
             import traceback
+
             traceback.print_exc()
         finally:
             self._cleanup()
@@ -131,7 +129,7 @@ class DisconnectReconnectTest:
 
         # 获取 client_id
         task = self.db.get_task(self.task_id)
-        if task and getattr(task, 'source_ip', None):
+        if task and getattr(task, "source_ip", None):
             self.client_id = str(task.source_ip)
             print(f"✅ Client ID: {self.client_id}")
         else:
@@ -139,7 +137,7 @@ class DisconnectReconnectTest:
 
         # 生成 RTSP URL
         self.rtsp_url = f"rtsp://117.50.241.174:8004/live/{self.client_id}"
-        self.pull_url=f"rtsp://localhost:8004/live/{self.client_id}"
+        self.pull_url = f"rtsp://localhost:8004/live/{self.client_id}"
         print(f"✅ RTSP URL: {self.rtsp_url}")
 
     def _start_task(self):
@@ -153,9 +151,7 @@ class DisconnectReconnectTest:
         """启动 FFmpeg 推流"""
         if self.ffmpeg is None:
             self.ffmpeg = FFmpegController(
-                self.video_path,
-                self.rtsp_url,
-                protocol="rtsp"
+                self.video_path, self.rtsp_url, protocol="rtsp"
             )
 
         if not self.ffmpeg.start():
@@ -196,25 +192,17 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="推流断开重连测试")
-    parser.add_argument(
-        "--task_id",
-        type=int,
-        default=1,
-        help="任务 ID（默认: 1）"
-    )
+    parser.add_argument("--task_id", type=int, default=1, help="任务 ID（默认: 1）")
     parser.add_argument(
         "--video_path",
         type=str,
         default=None,
-        help="测试视频路径（默认: test/test_video.mp4）"
+        help="测试视频路径（默认: test/test_video.mp4）",
     )
 
     args = parser.parse_args()
 
-    test = DisconnectReconnectTest(
-        task_id=args.task_id,
-        video_path=args.video_path
-    )
+    test = DisconnectReconnectTest(task_id=args.task_id, video_path=args.video_path)
 
     test.run()
 

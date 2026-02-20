@@ -2,9 +2,9 @@
 推理组件模块
 """
 
-from .visualizer import DefaultVisualizer
-from .temporal_analyzer import TemporalAnalyzer, DefaultTemporalAnalyzer
 from .component_factory import ComponentFactory
+from .temporal_analyzer import DefaultTemporalAnalyzer, TemporalAnalyzer
+from .visualizer import DefaultVisualizer
 
 __all__ = [
     "DefaultVisualizer",

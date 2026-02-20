@@ -115,11 +115,21 @@ python integration_tests/stress_test.py --max-tasks 10 --duration 60
 
 ### 3. 接口调用流程
 
-1. **加载任务**: `GET /ai/load_task/{task_id}`
-2. **启动流**: `POST /inspection/start_rtsp_stream`
+**推荐使用统一 API（简化版）**：
+
+1. **启动任务和流**: `POST /api/start` （合并了 load_task + start_rtsp_stream）
+2. **接收推理结果**: WebSocket `/ai/video?client_id={client_id}`
+3. **监控任务状态**: WebSocket `/task/status/{client_id}`
+4. **终止任务**: `POST /api/terminate` （完整清理所有资源）
+
+**传统方式（过渡期保留）**：
+
+1. **加载任务**: `GET /ai/load_task/{task_id}` （⚠️ 将弃用）
+2. **启动流**: `POST /inspection/start_rtsp_stream` （⚠️ 将弃用）
 3. **接收推理结果**: WebSocket `/ai/video?client_id={client_id}`
 4. **监控任务状态**: WebSocket `/task/status/{client_id}`
-5. **停止流**: `POST /inspection/stop_rtsp_stream`
+5. **停止流**: `POST /inspection/stop_rtsp_stream` （⚠️ 将弃用）
+6. **终止任务**: `POST /ai/terminate_task/{client_id}` （⚠️ 将弃用）
 
 详细 API 文档请见 [API 端点文档](docs/API_ENDPOINTS.md)。
 
@@ -356,24 +366,40 @@ python integration_tests/test_reconnect_timeout.py --task_id 1
 
 ### 主要 API 端点
 
-#### AI 推理服务 (`/ai`)
+#### 统一 API (`/api`) - **推荐使用**
 
-- `GET /ai/status` - 查询 AI 服务状态
-- `GET /ai/load_task/{task_id}` - 加载清洗任务
-- `POST /ai/terminate_task/{client_id}` - 终止任务
+- `POST /api/start` - 启动任务和流（合并接口）
+- `POST /api/terminate` - 终止任务并清理资源（统一清理）
+
+#### 健康监控 (`/health`)
+
+- `GET /health/status` - 获取系统整体状态
+- `GET /health/monitor/stats` - 获取健康监控统计
+- `GET /health/monitor/config` - 获取健康监控配置
+
+#### 实时数据流 (WebSocket)
+
 - `WebSocket /ai/video` - 实时推理结果流
-
-#### 视频流服务 (`/inspection`)
-
-- `POST /inspection/start_rtsp_stream` - 启动 RTSP 流捕获
-- `POST /inspection/stop_rtsp_stream` - 停止 RTSP 流捕获
-
-#### 任务管理 (`/task`)
-
 - `WebSocket /task/status/{client_id}` - 任务状态实时更新
+
+#### 历史数据查询 (`/task`)
+
 - `GET /task/traceback/{task_id}/segments` - 获取视频段列表
 - `GET /task/traceback/{task_id}/playlist` - 获取 M3U8 播放列表
 - `GET /task/{task_id}/alarms` - 获取告警记录
+
+#### 过渡期保留接口（⚠️ 将在未来版本移除）
+
+**AI 推理服务** (`/ai`):
+
+- `GET /ai/status` - 查询 AI 服务状态（请使用 `GET /health/status`）
+- `GET /ai/load_task/{task_id}` - 加载清洗任务（请使用 `POST /api/start`）
+- `POST /ai/terminate_task/{client_id}` - 终止任务（请使用 `POST /api/terminate`）
+
+**视频流服务** (`/inspection`):
+
+- `POST /inspection/start_rtsp_stream` - 启动 RTSP 流（请使用 `POST /api/start`）
+- `POST /inspection/stop_rtsp_stream` - 停止 RTSP 流（请使用 `POST /api/terminate`）
 
 详细 API 文档请见 [API 端点文档](docs/API_ENDPOINTS.md)。
 
@@ -509,4 +535,4 @@ set LOG_LEVEL=DEBUG     # Windows
 
 感谢所有贡献者和使用 CleanSight 的医疗机构！
 
-**最后更新**: 2026-01-30
+**最后更新**: 2026-02-08

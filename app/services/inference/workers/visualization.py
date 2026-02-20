@@ -1,4 +1,4 @@
-"""可视化工作线程池。
+"""visualization.py - 可视化工作线程池。
 
 职责：
 - 从可视化队列消费时序分析后的数据包
@@ -8,6 +8,7 @@
 - 投递到写回队列
 """
 
+import logging
 import threading
 from queue import Empty, Queue
 from typing import Any, Dict, Optional, Tuple
@@ -20,6 +21,8 @@ from app.services.inference.models import (
     TemporalAnalysisResult,
     WriteBackData,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Visualizer:
@@ -77,11 +80,13 @@ class VisualizationWorker:
         self.worker_id = worker_id
 
         # 缓存每个客户端的最新检测结果（用于降帧补偿）
-        self.latest_results: Dict[str, Tuple[Dict[str, Any], Optional[TemporalAnalysisResult]]] = {}
+        self.latest_results: Dict[
+            str, Tuple[Dict[str, Any], Optional[TemporalAnalysisResult]]
+        ] = {}
 
     def run(self):
         """工作循环。"""
-        print(f"[VisualizationWorker-{self.worker_id}] 已启动")
+        logger.debug("[VisualizationWorker-%d] Started", self.worker_id)
 
         while not self.stop_event.is_set():
             try:
@@ -133,12 +138,12 @@ class VisualizationWorker:
                 self.output_queue.put(write_back_data)
 
             except Exception as e:
-                print(f"[VisualizationWorker-{self.worker_id}] 异常: {e}")
+                logger.error(f"[VisualizationWorker-{self.worker_id}] 异常: {e}")
                 import traceback
 
                 traceback.print_exc()
 
-        print(f"[VisualizationWorker-{self.worker_id}] 已停止")
+        logger.debug(f"[VisualizationWorker-{self.worker_id}] 已停止")
 
     def visualize_with_cached_result(
         self, client_id: str, current_frame: np.ndarray
@@ -211,7 +216,7 @@ class VisualizationWorkerPool:
             thread.start()
             self._workers.append(thread)
 
-        print(f"[VisualizationWorkerPool] 已启动 {self.num_workers} 个线程")
+        logger.info("[VisualizationWorkerPool] Started %d workers", self.num_workers)
 
     def stop(self):
         """停止线程池。"""
@@ -220,4 +225,4 @@ class VisualizationWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        print(f"[VisualizationWorkerPool] 已停止")
+        logger.debug("[VisualizationWorkerPool] Stopped")
