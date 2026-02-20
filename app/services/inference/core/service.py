@@ -101,10 +101,10 @@ class ModelWorkerService:
         self.max_batch_per_stage = max_batch_per_stage
         self.use_cuda_stream = use_cuda_stream
 
-        # 创建 Dispatcher
+        # 创建 Dispatcher（直接引用 ClientManager）
         self.dispatcher = StageAwareDispatcher(
-            client_queues_map=self.client_queues_map,
             max_batch_per_stage=max_batch_per_stage,
+            client_manager_instance=self._client_manager,
         )
 
         # 为每个 stage 创建 MultiModelWorkerPool
@@ -362,52 +362,34 @@ class ModelWorkerService:
         return None
 
     def refresh_client_queues(self):
-        """刷新客户端队列映射（从 ClientManager 获取最新）。
+        """刷新客户端队列映射（已优化为实时同步，保留向后兼容）。
 
-        适用场景：
-        - 新客户端通过 RTSP/WebSocket 连接加入
-        - 客户端任务完成或断开连接被清理
-        - 定期同步（推荐每 5-10 秒调用一次）
+        ✅ **架构改进**：
+        - Dispatcher 现在直接引用 ClientManager，客户端变化自动同步
+        - 新客户端加入立即生效，无需手动刷新
+        - 此方法保留仅为向后兼容和日志统计
 
-        注意：
-        - 客户端是动态创建和清理的，初始化时获取的是快照
-        - 新客户端加入后，必须调用此方法才能被推理服务识别
-        - 客户端离开后，推理服务会自动跳过（安全检查）
+        历史行为：
+        - 旧版本需要定期调用此方法刷新客户端列表（5秒延迟）
+        - 新版本无需手动调用，客户端变化实时生效
 
-        使用示例：
-        ```python
-        # 方式 1: 定期刷新（推荐）
-        import threading
-        import time
-
-        def refresh_loop():
-            while True:
-                service.refresh_client_queues()
-                time.sleep(5)
-
-        threading.Thread(target=refresh_loop, daemon=True).start()
-
-        # 方式 2: 事件驱动刷新
-        def on_client_added(client_id):
-            service.refresh_client_queues()
-
-        def on_client_removed(client_id):
-            service.refresh_client_queues()
-        ```
+        迁移指南：
+        - 现有调用此方法的代码可以安全保留（无副作用）
+        - 新代码无需调用此方法
+        - 定期刷新线程可以移除（可选）
         """
+        # 更新本地快照（仅用于日志统计）
         new_map = self._client_manager.get_all_clients()
-
-        # 统计变化
         old_count = len(self.client_queues_map)
         new_count = len(new_map)
 
         self.client_queues_map = new_map
-        self.dispatcher.client_queues_map = new_map
+        # 注意：Dispatcher 不再需要更新（已直接引用 ClientManager）
 
         if new_count != old_count:
             logger.info(
-                f"Client list updated: "
+                f"[RealTimeSync] Client count changed: "
                 f"{old_count} → {new_count} ({new_count - old_count:+d})"
             )
         else:
-            logger.debug(f"Client list refreshed: {new_count} clients")
+            logger.debug(f"[RealTimeSync] Client count unchanged: {new_count}")

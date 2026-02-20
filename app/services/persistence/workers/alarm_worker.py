@@ -35,7 +35,7 @@ class AlarmWorker:
 
     def run(self):
         """工作循环"""
-        logger.info("AlarmWorker-%d 已启动", self.worker_id)
+        logger.debug("[AlarmWorker-%d] Started", self.worker_id)
 
         while not self.stop_event.is_set():
             try:
@@ -50,7 +50,7 @@ class AlarmWorker:
                     self.strategy.report_alarm(alarm_dict)
                 except Exception as e:
                     logger.error(
-                        "AlarmWorker-%d 告警上报失败: %s",
+                        "[AlarmWorker-%d] Report failed: %s",
                         self.worker_id,
                         e,
                         exc_info=True,
@@ -58,10 +58,10 @@ class AlarmWorker:
 
             except Exception as e:
                 logger.error(
-                    "AlarmWorker-%d 异常: %s", self.worker_id, e, exc_info=True
+                    "[AlarmWorker-%d] Exception: %s", self.worker_id, e, exc_info=True
                 )
 
-        logger.info("AlarmWorker-%d 已停止", self.worker_id)
+        logger.debug("[AlarmWorker-%d] Stopped", self.worker_id)
 
 
 class AlarmFlushThread:
@@ -83,7 +83,7 @@ class AlarmFlushThread:
 
     def run(self):
         """批量刷新循环"""
-        logger.info("告警批量刷新线程已启动")
+        logger.debug("[AlarmFlushThread] Started")
 
         while not self.stop_event.is_set():
             try:

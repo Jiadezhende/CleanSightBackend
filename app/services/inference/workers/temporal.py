@@ -1,4 +1,4 @@
-"""时序分析工作线程池。
+"""temporal.py - 时序分析工作线程池。
 
 职责：
 - 从推理队列消费推理结果
@@ -8,6 +8,7 @@
 - 投递到可视化队列
 """
 
+import logging
 import threading
 from queue import Empty, Queue
 from typing import Any, Dict
@@ -20,6 +21,8 @@ from app.services.inference.models import (
     TemporalAnalysisPackage,
     TemporalAnalysisResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TemporalWorker:
@@ -50,7 +53,7 @@ class TemporalWorker:
 
     def run(self):
         """工作循环。"""
-        print(f"[TemporalWorker-{self.worker_id}] 已启动")
+        logger.debug("[TemporalWorker-%d] Started", self.worker_id)
 
         while not self.stop_event.is_set():
             try:
@@ -97,7 +100,7 @@ class TemporalWorker:
                 self.output_queue.put(data_package)
 
             except Exception as e:
-                print(f"[TemporalWorker-{self.worker_id}] 异常: {e}")
+                logger.error("[TemporalWorker-%d] Exception: %s", self.worker_id, e, exc_info=True)
                 import traceback
 
                 traceback.print_exc()
@@ -208,7 +211,7 @@ class TemporalWorkerPool:
             thread.start()
             self._workers.append(thread)
 
-        print(f"[TemporalWorkerPool] 已启动 {self.num_workers} 个线程")
+        logger.info("[TemporalWorkerPool] Started %d workers", self.num_workers)
 
     def stop(self):
         """停止线程池。"""
@@ -217,4 +220,4 @@ class TemporalWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        print(f"[TemporalWorkerPool] 已停止")
+        logger.info("[TemporalWorkerPool] Stopped")

@@ -32,7 +32,7 @@ class HLSWorker:
 
     def run(self):
         """工作循环"""
-        logger.info("HLSWorker-%d 已启动", self.worker_id)
+        logger.debug("[HLSWorker-%d] Started", self.worker_id)
 
         while not self.stop_event.is_set():
             try:
@@ -52,13 +52,13 @@ class HLSWorker:
                     )
                 except Exception as e:
                     logger.error(
-                        "HLSWorker-%d 持久化失败: %s", self.worker_id, e, exc_info=True
+                        "[HLSWorker-%d] Persistence failed: %s", self.worker_id, e, exc_info=True
                     )
 
             except Exception as e:
-                logger.error("HLSWorker-%d 异常: %s", self.worker_id, e, exc_info=True)
+                logger.error("[HLSWorker-%d] Exception: %s", self.worker_id, e, exc_info=True)
 
-        logger.info("HLSWorker-%d 已停止", self.worker_id)
+        logger.debug("[HLSWorker-%d] Stopped", self.worker_id)
 
 
 class HLSWorkerPool:
@@ -91,7 +91,7 @@ class HLSWorkerPool:
 
     def start(self):
         """启动Worker池"""
-        logger.info("启动 %d 个HLS Worker", self.num_workers)
+        logger.info("[HLSWorkerPool] Starting %d workers", self.num_workers)
 
         for i in range(self.num_workers):
             worker = HLSWorker(

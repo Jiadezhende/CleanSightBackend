@@ -6,12 +6,15 @@
 - 写入数据库（可选，记录推理历史）
 """
 
+import logging
 import threading
 from queue import Empty, Queue
 
 from app.models.frame import FrameData
 from app.services.client import client_manager
 from app.services.inference.models import WriteBackData
+
+logger = logging.getLogger(__name__)
 
 
 class WriteBackWorker:
@@ -39,7 +42,7 @@ class WriteBackWorker:
 
     def run(self):
         """工作循环。"""
-        print(f"[WriteBackWorker-{self.worker_id}] 已启动")
+        logger.debug("[WriteBackWorker-%d] Started", self.worker_id)
 
         while not self.stop_event.is_set():
             try:
@@ -74,12 +77,9 @@ class WriteBackWorker:
                     self._write_to_database(data)
 
             except Exception as e:
-                print(f"[WriteBackWorker-{self.worker_id}] 异常: {e}")
-                import traceback
+                logger.error("[WriteBackWorker-%d] Exception: %s", self.worker_id, e, exc_info=True)
 
-                traceback.print_exc()
-
-        print(f"[WriteBackWorker-{self.worker_id}] 已停止")
+        logger.debug("[WriteBackWorker-%d] Stopped", self.worker_id)
 
     def _write_to_database(self, data: WriteBackData):
         """写入数据库（记录推理历史）。
@@ -138,7 +138,7 @@ class WriteBackWorkerPool:
             thread.start()
             self._workers.append(thread)
 
-        print(f"[WriteBackWorkerPool] 已启动 {self.num_workers} 个线程")
+        logger.info("[WriteBackWorkerPool] Started %d workers", self.num_workers)
 
     def stop(self):
         """停止线程池。"""
@@ -147,4 +147,4 @@ class WriteBackWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        print(f"[WriteBackWorkerPool] 已停止")
+        logger.info("[WriteBackWorkerPool] Stopped")

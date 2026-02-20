@@ -207,31 +207,33 @@ class PersistenceConfig:
 
     def _log_loaded_config(self):
         """输出加载的配置（启动时显示）"""
-        logger.info("========== Persistence配置 ==========")
-        logger.info("存储: base_dir=%s", self.storage.base_dir)
-        logger.info(
-            "HLS: workers=%d, queue=%d, raw_fps=%.1f, processed_fps=%.1f",
-            self.hls.workers,
-            self.hls.queue_size,
-            self.raw_fps,
-            self.processed_fps,
-        )
-        logger.info(
-            "告警: workers=%d, queue=%d, batch=%ds, cooldown=%ds",
-            self.alarm.workers,
-            self.alarm.queue_size,
-            self.alarm.batch_interval,
-            self.alarm.cooldown_seconds,
-        )
-        logger.info(
-            "清理: enabled=%s, days=%d",
-            self.storage.enable_cleanup,
-            self.storage.cleanup_days,
-        )
-        logger.info(
-            "📌 fps参数来源: inference_config.yaml (global.raw_fps, global.inference_fps)"
-        )
-        logger.info("=====================================")
+        # DEBUG级别显示详细配置
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("========== Persistence配置 ==========")
+            logger.debug("存储: base_dir=%s", self.storage.base_dir)
+            logger.debug(
+                "HLS: workers=%d, queue=%d, raw_fps=%.1f, processed_fps=%.1f",
+                self.hls.workers,
+                self.hls.queue_size,
+                self.raw_fps,
+                self.processed_fps,
+            )
+            logger.debug(
+                "告警: workers=%d, queue=%d, batch=%ds, cooldown=%ds",
+                self.alarm.workers,
+                self.alarm.queue_size,
+                self.alarm.batch_interval,
+                self.alarm.cooldown_seconds,
+            )
+            logger.debug(
+                "清理: enabled=%s, days=%d",
+                self.storage.enable_cleanup,
+                self.storage.cleanup_days,
+            )
+            logger.debug(
+                "📌 fps参数来源: inference_config.yaml (global.raw_fps, global.inference_fps)"
+            )
+            logger.debug("=====================================")
 
     def _validate_config(self):
         """配置验证和冲突检测"""

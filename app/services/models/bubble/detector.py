@@ -4,11 +4,14 @@ YOLO 气泡检测服务
 使用 YOLOv8 模型检测内镜清洗过程中的气泡
 """
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class BubbleDetector:
@@ -42,21 +45,22 @@ class BubbleDetector:
             if not model_path.exists():
                 raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
 
-            print(f"正在加载气泡检测模型: {self.model_path}")
+            logger.debug("[BubbleDetector] Loading model: %s", self.model_path)
             self.model = YOLO(self.model_path)
 
             # 获取类别名称
             if hasattr(self.model, "names"):
                 self.class_names = self.model.names
 
-            print(f"模型加载成功，类别数量: {len(self.class_names)}")
-            print(f"检测类别: {self.class_names}")
+            logger.info("[BubbleDetector] Model loaded: %s | classes=%d", 
+                       self.model_path, len(self.class_names))
+            logger.debug("[BubbleDetector] Class names: %s", self.class_names)
 
         except ImportError:
-            print("错误: 未安装 ultralytics 库，请运行: pip install ultralytics")
+            logger.error("[BubbleDetector] ✖ ultralytics library not installed")
             raise
         except Exception as e:
-            print(f"模型加载失败: {e}")
+            logger.error("[BubbleDetector] ✖ Model loading failed: %s", e, exc_info=True)
             raise
 
     def detect(

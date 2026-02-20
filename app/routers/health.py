@@ -61,14 +61,20 @@ async def lifespan():
     _health_monitor.start()
 
     logger.info(
-        "全局健康监控已启动 | check_interval=%.1fs, heartbeat_timeout=%.1fs, "
-        "reconnect_interval=%.1fs, max_reconnect_attempts=%d, orphan_timeout=%.1fs",
+        "[GlobalHealthMonitor] Started | interval=%.1fs, timeout=%.1fs",
         health_config.check_interval,
         health_config.heartbeat_timeout,
-        health_config.reconnect_interval,
-        health_config.max_reconnect_attempts,
-        health_config.orphan_timeout,
     )
+    
+    # DEBUG级别显示详细配置
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[GlobalHealthMonitor] Config: reconnect_interval=%.1fs, "
+            "max_reconnect_attempts=%d, orphan_timeout=%.1fs",
+            health_config.reconnect_interval,
+            health_config.max_reconnect_attempts,
+            health_config.orphan_timeout,
+        )
 
     try:
         yield
@@ -78,15 +84,19 @@ async def lifespan():
             stats = _health_monitor.get_stats()
             _health_monitor.stop()
             logger.info(
-                "全局健康监控已停止 | 运行统计: checks=%d, suspects=%d, cleanups=%d, "
-                "reconnects=%d, reconnect_successes=%d, orphans_detected=%d",
+                "[GlobalHealthMonitor] Stopped | checks=%d, cleanups=%d, reconnects=%d",
                 stats["checks"],
-                stats["suspects"],
                 stats["cleanups"],
                 stats["reconnects"],
-                stats["reconnect_successes"],
-                stats["orphans_detected"],
             )
+            # DEBUG级别显示详细统计
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[GlobalHealthMonitor] Full stats: suspects=%d, reconnect_successes=%d, orphans=%d",
+                    stats["suspects"],
+                    stats["reconnect_successes"],
+                    stats["orphans_detected"],
+                )
 
 
 @router.get("/monitor/stats")

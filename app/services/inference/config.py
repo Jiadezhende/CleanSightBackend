@@ -205,21 +205,32 @@ def load_stage_config(
 
 def _log_loaded_config(config: "InferenceConfig"):
     """输出加载的配置（启动时显示）"""
-    logger.info("========== Inference配置 ==========")
-    logger.info("Stage数量: %d", len(config.list_stages()))
+    # INFO级别显示关键参数汇总
     logger.info(
-        "FPS配置: raw_fps=%.1f, inference_fps=%d", config.raw_fps, config.inference_fps
-    )
-    logger.info(
-        "队列配置: rt_maxlen=%d, ca_maxlen=%d", config.rt_maxlen, config.ca_maxlen
-    )
-    logger.info(
-        "批处理: batch_size=%d, decimation=%d",
+        "[InferenceConfig] Loaded | stages=%d (defined), fps=%.1f/%d, batch=%d",
+        len(config.list_stages()),
+        config.raw_fps,
+        config.inference_fps,
         config.batch_size,
-        config.inference_decimation,
     )
-    logger.info("📌 此文件为所有模块共享参数的单一数据源")
-    logger.info("=====================================")
+    
+    # DEBUG级别显示详细配置
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("========== Inference配置 ==========")
+        logger.debug("Stage数量: %d", len(config.list_stages()))
+        logger.debug(
+            "FPS配置: raw_fps=%.1f, inference_fps=%d", config.raw_fps, config.inference_fps
+        )
+        logger.debug(
+            "队列配置: rt_maxlen=%d, ca_maxlen=%d", config.rt_maxlen, config.ca_maxlen
+        )
+        logger.debug(
+            "批处理: batch_size=%d, decimation=%d",
+            config.batch_size,
+            config.inference_decimation,
+        )
+        logger.debug("📌 此文件为所有模块共享参数的单一数据源")
+        logger.debug("=====================================")
 
 
 def _create_default_config() -> InferenceConfig:

@@ -60,7 +60,7 @@ class ClientManager:
         self._default_ca_maxlen = self._config.ca_maxlen  # CA队列最大长度
         self._default_inference_fps = self._config.inference_fps  # 推理采样频率
 
-        logger.info("ClientManager 已初始化")
+        logger.info("[ClientManager] Initialized")
 
     def get_client(self, client_id: str, **kwargs) -> ClientQueues:
         """
@@ -119,7 +119,7 @@ class ClientManager:
             with self._clients_lock:
                 self._clients[client_id] = client_queues
 
-            logger.info(f"创建新客户端队列: {client_id}")
+            logger.info(f"Create New Client: {client_id}")
             return client_queues
 
     def has_client(self, client_id: str) -> bool:

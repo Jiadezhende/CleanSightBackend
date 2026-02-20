@@ -100,7 +100,7 @@ class InferenceManager:
         self._model_worker_service: Optional[ModelWorkerService] = None
 
         # ========== 异步管道架构 ==========
-        print("[InferenceManager] 启用异步管道架构")
+        logger.debug("[InferenceManager] Initializing async pipeline architecture")
 
         # 创建队列（负责各个worker池的通信）
         self.temporal_queue: "queue.Queue[InferenceResult]" = queue.Queue(maxsize=256)
@@ -159,7 +159,7 @@ class InferenceManager:
         # 客户端刷新线程（定期同步客户端列表）
         self._refresh_thread: Optional[threading.Thread] = None
 
-        print("[InferenceManager] 初始化完成")
+        logger.debug("[InferenceManager] Initialization completed")
 
     def _get_stage_configs(self) -> Dict[str, Dict[str, Any]]:
         """延迟初始化 stage 配置（优先从配置文件加载）"""
@@ -176,6 +176,7 @@ class InferenceManager:
 
                 # 为每个 stage 创建模型实例
                 stage_configs = {}
+                skipped_stages = []
                 for stage_name in config.list_stages():
                     models = factory.create_models_for_stage(stage_name)
                     if models:  # 只添加有模型的 stage
@@ -183,15 +184,25 @@ class InferenceManager:
                             "models": models,
                             "batch_size": config.batch_size,  # 从配置文件读取
                         }
+                    else:
+                        skipped_stages.append(stage_name)
 
                 if stage_configs:
-                    print(
-                        f"[InferenceManager] 从配置文件加载 {len(stage_configs)} 个 stage"
+                    logger.info(
+                        "[InferenceManager] Loaded %d stages (active): %s", 
+                        len(stage_configs), 
+                        list(stage_configs.keys())
                     )
+                    if skipped_stages:
+                        logger.info(
+                            "[InferenceManager] Skipped %d stages (no models): %s",
+                            len(skipped_stages),
+                            skipped_stages
+                        )
                     self._stage_configs = stage_configs
                 else:
                     # 配置文件中没有可用的 stage，使用默认配置
-                    print("[InferenceManager] 配置文件中没有可用 stage，使用默认配置")
+                    logger.warning("[InferenceManager] No stages in config, using defaults")
                     from app.services.inference.core.factory import (
                         _create_default_stage_configs,
                     )
@@ -199,7 +210,7 @@ class InferenceManager:
                     self._stage_configs = _create_default_stage_configs()
             except Exception as e:
                 # 加载配置失败，回退到默认配置
-                print(f"[InferenceManager] 加载配置文件失败: {e}，使用默认配置")
+                logger.error("[InferenceManager] Failed to load config: %s, using defaults", e)
                 from app.services.inference.core.factory import (
                     _create_default_stage_configs,
                 )
@@ -226,10 +237,10 @@ class InferenceManager:
                         temporal_config[stage_name] = analyzer_cfg
 
             if temporal_config:
-                print(f"[InferenceManager] 从配置文件加载时序分析器配置")
+                logger.debug("[InferenceManager] Loaded temporal analyzer config from file")
                 return temporal_config
         except Exception as e:
-            print(f"[InferenceManager] 加载时序配置失败: {e}，使用默认配置")
+            logger.debug("[InferenceManager] Failed to load temporal config: %s, using defaults", e)
 
         # 默认配置（回退）
         return {
@@ -351,11 +362,12 @@ class InferenceManager:
                 f"[InferenceManager] Client not found in ClientManager, skipping flush: {client_id}"
             )
 
-        # 阶段2: 刷新推理服务（移除过时的批次）
+        # 阶段2: 刷新推理服务（冗余操作，保留向后兼容）
+        # 注意：Dispatcher 现在实时同步客户端，此步骤技术上已非必需
         if self._model_worker_service is not None:
             try:
                 self._model_worker_service.refresh_client_queues()
-                logger.info(f"[InferenceManager] Worker service refreshed: {client_id}")
+                logger.info(f"[InferenceManager] Worker service refreshed (redundant): {client_id}")
             except Exception as e:
                 logger.error(
                     f"[InferenceManager] Failed to refresh worker service: {e}"
@@ -373,37 +385,12 @@ class InferenceManager:
         """为客户端设置任务"""
         cq = client_manager.get_client(client_id)
         cq.set_task(task)
-        print(f"任务已设置 for client {client_id}: {task}")
         return True
 
     def get_task(self, client_id: str) -> Optional[CleaningTask]:
         """获取客户端的任务"""
         cq = client_manager.get_client(client_id)
         return cq.get_task() if cq else None
-
-    def terminate_task_by_id(self, client_id: str) -> bool:
-        """终止指定客户端的任务，清理所有队列和资源"""
-        cq = client_manager.get_client(client_id)
-        if cq is None:
-            return False
-
-        # 落盘剩余缓存
-        try:
-            self._flush_all_remaining_segments(client_id, cq)
-        except Exception as e:
-            print(f"终止任务 {client_id} 时落盘失败: {e}")
-
-        # 清理队列
-        cq.clear()
-
-        # 从 ClientManager 移除
-        try:
-            client_manager.remove_client(client_id)
-        except Exception:
-            pass
-
-        print(f"任务已终止，客户端 {client_id} 的所有队列和资源已清理")
-        return True
 
     # ========== 内部辅助方法 ==========
 
@@ -464,29 +451,30 @@ class InferenceManager:
 
         # 调试日志：显示队列状态
         if ca_raw_len >= seg_len or ca_processed_len >= seg_len:
-            print(
-                f"[SegmentCheck] client={client_id}: ca_raw={ca_raw_len}/{seg_len}, ca_processed={ca_processed_len}/{seg_len}"
+            logger.debug(
+                "[SegmentCheck] client=%s: ca_raw=%d/%d, ca_processed=%d/%d",
+                client_id, ca_raw_len, seg_len, ca_processed_len, seg_len
             )
 
         # 1. 检查 ca_raw 是否需要落盘（独立）
         if ca_raw_len >= seg_len:
-            raw_len = min(ca_raw_len, seg_len)
-            print(
-                f"[SegmentCheck] Enqueueing RAW segment persist job for client: {client_id}, len={raw_len}"
+            logger.info(
+                "[SegmentCheck] Enqueueing RAW segment persist job for client: %s, len=%d",
+                client_id, seg_len
             )
-            self._enqueue_raw_segment_job(client_id, client_queues, raw_len)
+            self._enqueue_raw_segment_job(client_id, client_queues, seg_len)
 
         # 2. 检查 ca_processed 是否需要落盘（独立）
         if ca_processed_len >= seg_len:
-            processed_len = min(ca_processed_len, seg_len)
-            print(
-                f"[SegmentCheck] Enqueueing PROCESSED segment persist job for client: {client_id}, len={processed_len}"
+            logger.info(
+                "[SegmentCheck] Enqueueing PROCESSED segment persist job for client: %s, len=%d",
+                client_id, seg_len
             )
-            self._enqueue_processed_segment_job(client_id, client_queues, processed_len)
+            self._enqueue_processed_segment_job(client_id, client_queues, seg_len)
 
     def _segment_check_loop(self):
         """周期性检查所有客户端队列，触发分段落盘。"""
-        print("[SegmentCheck] Segment check thread started")
+        logger.info("[SegmentCheck] Segment check thread started")
         while not self._stop_event.is_set():
             try:
                 # 获取所有客户端
@@ -497,14 +485,14 @@ class InferenceManager:
                     try:
                         self._flush_segment_if_needed(client_id, cq)
                     except Exception as e:
-                        print(f"[SegmentCheck] Error checking client {client_id}: {e}")
+                        logger.error(f"[SegmentCheck] Error checking client {client_id}: {e}")
 
                 # 等待下一次检查
                 time.sleep(self._segment_check_interval)
             except Exception as e:
-                print(f"[SegmentCheck] Segment check loop error: {e}")
+                logger.error(f"[SegmentCheck] Segment check loop error: {e}")
 
-        print("[SegmentCheck] Segment check thread stopped")
+        logger.info("[SegmentCheck] Segment check thread stopped")
 
     def _flush_all_remaining_segments(
         self, client_id: str, client_queues: ClientQueues
@@ -534,7 +522,7 @@ class InferenceManager:
                 )
 
         except Exception as e:
-            print(f"_flush_all_remaining_segments error for {client_id}: {e}")
+            logger.error(f"_flush_all_remaining_segments error for {client_id}: {e}")
 
     def _enqueue_raw_segment_job(
         self, client_id: str, client_queues: ClientQueues, seg_len: int
@@ -606,21 +594,27 @@ class InferenceManager:
     # ========== 刷新客户端列表 ==========
 
     def _client_refresh_loop(self):
-        """定期刷新客户端列表（从 ClientManager 同步）"""
-        print("[InferenceManager] Client refresh thread started")
+        """定期刷新客户端列表（保留作为冗余检查）
+        
+        注意：
+        - Dispatcher 已改为直接引用 ClientManager，客户端变化实时同步
+        - 此线程保留仅作为冗余检查和日志统计
+        - 可在后续验证稳定后移除
+        """
+        logger.info("[InferenceManager] Client refresh thread started (redundant check mode)")
         while not self._stop_event.is_set():
             try:
                 if self._model_worker_service:
                     self._model_worker_service.refresh_client_queues()
                 time.sleep(5)  # 每 5 秒刷新一次
             except Exception as e:
-                print(f"[InferenceManager] Client refresh error: {e}")
+                logger.error("[InferenceManager] Client refresh error: %s", e, exc_info=True)
 
     # ========== 启动/停止 ==========
 
     def start(self):
         """启动推理管理器"""
-        print("[InferenceManager] 启动中...")
+        logger.info("[InferenceManager] 启动中...")
 
         # 1. 启动推理服务
         if self._model_worker_service:
@@ -644,7 +638,8 @@ class InferenceManager:
         # 4. 启动持久化管理器（新架构）
         self.persistence_manager.start()
 
-        # 5. 启动客户端刷新线程
+        # 5. 启动客户端刷新线程（可选，冗余检查）
+        # 注意：Dispatcher 已改为实时同步，此线程保留仅作统计和兜底
         if self._refresh_thread is None or not self._refresh_thread.is_alive():
             self._refresh_thread = threading.Thread(
                 target=self._client_refresh_loop,
@@ -653,11 +648,11 @@ class InferenceManager:
             )
             self._refresh_thread.start()
 
-        print("[InferenceManager] 已启动")
+        logger.info("[InferenceManager] Started")
 
     def stop(self):
         """停止推理管理器"""
-        print("[InferenceManager] 停止中...")
+        logger.info("[InferenceManager] Stopping...")
 
         # 设置停止事件
         self._stop_event.set()
@@ -688,4 +683,4 @@ class InferenceManager:
             except Exception:
                 pass
 
-        print("[InferenceManager] 已停止")
+        logger.info("[InferenceManager] Stopped")

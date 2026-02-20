@@ -34,9 +34,10 @@ async def lifespan(app: FastAPI):
     # 显示启动配置信息
     from app.settings import settings
 
-    print("\n" + "=" * 60)
-    print("CleanSight Backend 配置检查")
-    print("=" * 60)
+    logger.info("[CleanSight] Starting backend...")
+    logger.info("=" * 60)
+    logger.info("CleanSight Backend 配置检查")
+    logger.info("=" * 60)
 
     # 显示当前环境
     env = os.environ.get("CLEANSIGHT_ENV", "dev")
@@ -46,13 +47,13 @@ async def lifespan(app: FastAPI):
         "prod": "生产环境 (.env)",
     }
     env_display = env_names.get(env, f"未知环境 ({env})")
-    print(f"环境: {env_display}")
+    logger.info("[CleanSight] Environment: %s", env_display)
 
     # 显示关键配置
-    print(f"数据库: {settings.db_host}:{settings.db_port}/{settings.db_name}")
-    print(f"严格模式: {os.environ.get('CLEANSIGHT_STRICT', '0') == '1'}")
-    print(f"调试模式: {settings.debug}")
-    print("=" * 60 + "\n")
+    logger.info("[CleanSight] Database: %s:%s/%s", settings.db_host, settings.db_port, settings.db_name)
+    logger.info("[CleanSight] Strict mode: %s | Debug: %s", 
+                os.environ.get('CLEANSIGHT_STRICT', '0') == '1', settings.debug)
+    logger.info("=" * 60)
 
     # 按照服务模块启动生命周期管理
     # 1. 健康监控服务（依赖 client_manager, stream_service, inference_manager）

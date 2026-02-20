@@ -144,26 +144,28 @@ class ClientConfig:
 
     def _log_loaded_config(self):
         """输出加载的配置"""
-        logger.info("========== Client配置 ==========")
-        logger.info(
-            "队列: rt=%d, ca=%d, segment=%d",
-            self.rt_maxlen,
-            self.ca_maxlen,
-            self.ca_segment_len,
-        )
-        logger.info(
-            "帧处理: %dx%d, inference_fps=%d",
-            self.frame.resize_width,
-            self.frame.resize_height,
-            self.inference_fps,
-        )
-        logger.info(
-            "状态: stage=%s, timeout=%ds",
-            self.state.initial_stage,
-            self.state.heartbeat_timeout,
-        )
-        logger.info("📌 队列/fps参数来源: inference_config.yaml (global.*)")
-        logger.info("==================================")
+        # DEBUG级别显示详细配置
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("========== Client配置 ==========")
+            logger.debug(
+                "队列: rt=%d, ca=%d, segment=%d",
+                self.rt_maxlen,
+                self.ca_maxlen,
+                self.ca_segment_len,
+            )
+            logger.debug(
+                "帧处理: %dx%d, inference_fps=%d",
+                self.frame.resize_width,
+                self.frame.resize_height,
+                self.inference_fps,
+            )
+            logger.debug(
+                "状态: stage=%s, timeout=%ds",
+                self.state.initial_stage,
+                self.state.heartbeat_timeout,
+            )
+            logger.debug("📌 队列/fps参数来源: inference_config.yaml (global.*)")
+            logger.debug("==================================")
 
     def _validate_config(self):
         """配置验证"""
@@ -205,9 +207,9 @@ class ClientConfig:
 
         # 输出警告
         if warnings:
-            logger.warning("========== 配置问题检测 ==========")
+            logger.warning("[ClientConfig] Configuration warnings detected:")
             for warning in warnings:
-                logger.warning(warning)
+                logger.warning("[ClientConfig] %s", warning)
             logger.warning("===================================")
 
 

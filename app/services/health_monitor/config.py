@@ -65,14 +65,29 @@ class HealthMonitorConfig:
                 orphan_timeout=monitor_config.get("orphan_timeout", 30.0),
             )
 
+            # INFO级别显示简洁信息
             logger.info(
-                f"[HealthMonitorConfig] Loaded from {config_file}:\n"
-                f"  check_interval: {config.check_interval}s\n"
-                f"  heartbeat_timeout: {config.heartbeat_timeout}s\n"
-                f"  reconnect_interval: {config.reconnect_interval}s\n"
-                f"  max_reconnect_attempts: {config.max_reconnect_attempts}\n"
-                f"  orphan_timeout: {config.orphan_timeout}s"
+                "[HealthMonitorConfig] Loaded | interval=%.1fs, timeout=%.1fs",
+                config.check_interval,
+                config.heartbeat_timeout,
             )
+            
+            # DEBUG级别显示详细配置
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[HealthMonitorConfig] Config from %s:"
+                    "  check_interval: %.1fs"
+                    "  heartbeat_timeout: %.1fs"
+                    "  reconnect_interval: %.1fs"
+                    "  max_reconnect_attempts: %d"
+                    "  orphan_timeout: %.1fs",
+                    config_file,
+                    config.check_interval,
+                    config.heartbeat_timeout,
+                    config.reconnect_interval,
+                    config.max_reconnect_attempts,
+                    config.orphan_timeout,
+                )
 
             return config
 

@@ -17,17 +17,17 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan():
-    """AI服务生命周期管理：启动推理管理器"""
+    """简单AI服务生命周期管理：启动推理管理器"""
     # 启动 AI 推理服务
     ai.start()
-    logger.info("AI推理服务已启动")
+    logger.info("[AIRouter] Inference service started")
 
     try:
         yield
     finally:
         # 停止 AI 推理服务
         ai.stop()
-        logger.info("AI推理服务已停止")
+        logger.info("[AIRouter] Inference service stopped")
 
 
 @router.websocket("/video")

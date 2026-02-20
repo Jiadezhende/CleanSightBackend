@@ -83,15 +83,17 @@ class StreamConfig:
 
     def _log_loaded_config(self):
         """输出加载的配置"""
-        logger.info("========== Stream配置 ==========")
-        logger.info(
-            "解码器: %dx%d@%dfps, backpressure=%.2f",
-            self.decoder.default_width,
-            self.decoder.default_height,
-            self.decoder.default_fps,
-            self.decoder.backpressure_ratio,
-        )
-        logger.info("==================================")
+        # DEBUG级别显示详细配置
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("========== Stream配置 ==========")
+            logger.debug(
+                "解码器: %dx%d@%dfps, backpressure=%.2f",
+                self.decoder.default_width,
+                self.decoder.default_height,
+                self.decoder.default_fps,
+                self.decoder.backpressure_ratio,
+            )
+            logger.debug("==================================")
 
 
 # 全局单例（延迟加载）

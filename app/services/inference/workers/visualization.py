@@ -1,4 +1,4 @@
-"""可视化工作线程池。
+"""visualization.py - 可视化工作线程池。
 
 职责：
 - 从可视化队列消费时序分析后的数据包
@@ -8,6 +8,7 @@
 - 投递到写回队列
 """
 
+import logging
 import threading
 from queue import Empty, Queue
 from typing import Any, Dict, Optional, Tuple
@@ -20,6 +21,8 @@ from app.services.inference.models import (
     TemporalAnalysisResult,
     WriteBackData,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Visualizer:
@@ -83,7 +86,7 @@ class VisualizationWorker:
 
     def run(self):
         """工作循环。"""
-        print(f"[VisualizationWorker-{self.worker_id}] 已启动")
+        logger.debug("[VisualizationWorker-%d] Started", self.worker_id)
 
         while not self.stop_event.is_set():
             try:
@@ -213,7 +216,7 @@ class VisualizationWorkerPool:
             thread.start()
             self._workers.append(thread)
 
-        print(f"[VisualizationWorkerPool] 已启动 {self.num_workers} 个线程")
+        logger.info("[VisualizationWorkerPool] Started %d workers", self.num_workers)
 
     def stop(self):
         """停止线程池。"""
@@ -222,4 +225,4 @@ class VisualizationWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        print(f"[VisualizationWorkerPool] 已停止")
+        logger.info("[VisualizationWorkerPool] Stopped")
