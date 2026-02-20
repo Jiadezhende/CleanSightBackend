@@ -40,7 +40,6 @@ async def start_rtsp_stream(config: RTSPStreamConfig):
     Body: {"client_id": "xxx", "rtsp_url": "rtsp://localhost:8554/live/stream", "fps": 30}
     """
     client_id = config.client_id
-    ai.set_stream_url(client_id, config.rtsp_url)
 
     # 启动流（可能抛出 StreamConnectionError 或 FFmpegError）
     # 这些异常将被 FastAPI 全局处理器捕获（边界层 3）

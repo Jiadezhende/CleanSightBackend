@@ -76,7 +76,6 @@ class ClientQueues:
         self.ca_segment_len = ca_segment_len
         self.latest_processed: Optional[FrameData] = None  # 快速访问最新处理帧
         self.task: Optional[CleaningTask] = None  # 关联的清洗任务
-        self.stream_url: Optional[str] = None  # RTMP 流地址
 
         # 业务状态管理（新增）
         self.state = ClientState(client_id=client_id, initial_stage=initial_stage)
@@ -163,7 +162,6 @@ class ClientQueues:
             "ca_raw": len(self.ca_raw),
             "ca_processed": len(self.ca_processed),
             "rt_processed": len(self.rt_processed),
-            "rtmp_url": self.stream_url,
         }
 
     def get_queue_depths(self) -> dict:
@@ -234,7 +232,6 @@ class ClientQueues:
         self.rt_processed.clear()
         self.latest_processed = None
         self.task = None
-        self.stream_url = None
 
     def pop_ca_ready(self) -> Optional[FrameData]:
         """从推理队列弹出一帧（FIFO）

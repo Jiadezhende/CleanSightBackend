@@ -126,7 +126,6 @@ async def start(req: StartRequest):
         )
 
         # 4. 启动流
-        ai.set_stream_url(client_id, req.rtsp_url)
         stream_service.start_stream(
             client_id=client_id, stream_url=req.rtsp_url, fps=req.fps, protocol="RTSP"
         )

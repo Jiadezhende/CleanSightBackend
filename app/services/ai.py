@@ -40,11 +40,6 @@ def stop():
     manager.stop()
 
 
-def set_stream_url(client_id: str, stream_url: str):
-    """设置客户端的通用流地址（RTMP/RTSP）"""
-    manager.set_stream_url(client_id, stream_url)
-
-
 def get_result(client_id: str, as_model: bool = False):
     """获取推理结果"""
     return manager.get_result(client_id, as_model=as_model)

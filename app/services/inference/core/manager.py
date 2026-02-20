@@ -280,10 +280,6 @@ class InferenceManager:
         return service
 
     # ========== 公共 API（保持与旧代码兼容） ==========
-    def set_stream_url(self, client_id: str, stream_url: str) -> None:
-        """设置客户端的通用流地址（RTMP/RTSP）"""
-        cq = client_manager.get_client(client_id)
-        cq.stream_url = stream_url
 
     def get_result(
         self, client_id: str, as_model: bool = False
