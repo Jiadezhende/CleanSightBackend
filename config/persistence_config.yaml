@@ -22,5 +22,5 @@ alarm:
   queue_size: 200                 # 告警队列最大长度
   batch_interval: 30              # 批量上报间隔（秒）
   cooldown_seconds: 60            # 告警冷却期（秒）
-  retry_times: 3                  # 上报重试次数
-  retry_backoff: 1.0              # 重试退避时间（秒）
+  
+  # 注意：告警上报重试由 GuardedExecutor 统一处理（persistence策略：3次，指数退避）

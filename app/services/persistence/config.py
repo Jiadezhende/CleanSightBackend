@@ -32,8 +32,6 @@ class AlarmConfig:
     queue_size: int = 200
     batch_interval: int = 30
     cooldown_seconds: int = 60
-    retry_times: int = 3
-    retry_backoff: float = 1.0
 
 
 @dataclass
@@ -149,14 +147,6 @@ class PersistenceConfig:
     @property
     def alarm_cooldown_seconds(self) -> int:
         return self.alarm.cooldown_seconds
-
-    @property
-    def alarm_retry_times(self) -> int:
-        return self.alarm.retry_times
-
-    @property
-    def alarm_retry_backoff(self) -> float:
-        return self.alarm.retry_backoff
 
     @property
     def enable_db_write(self) -> bool:

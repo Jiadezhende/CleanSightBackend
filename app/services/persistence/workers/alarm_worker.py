@@ -14,6 +14,7 @@ from queue import Empty, Queue
 
 from app.services.persistence.models import AlarmPersistenceTask
 from app.services.persistence.strategies.alarm_strategy import AlarmPersistenceStrategy
+from app.utils import GuardedExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class AlarmWorker:
         self.strategy = strategy
         self.stop_event = stop_event
         self.worker_id = worker_id
+        self.executor = GuardedExecutor()  # 用于重试逻辑
 
     def run(self):
         """工作循环"""
@@ -45,12 +47,16 @@ class AlarmWorker:
                 except Empty:
                     continue
 
-                # 上报告警
+                # 上报告警（使用GuardedExecutor处理重试）
                 try:
-                    self.strategy.report_alarm(alarm_dict)
+                    self.executor.execute(
+                        func=lambda: self.strategy.report_alarm(alarm_dict),
+                        policy_name="persistence",
+                    )
                 except Exception as e:
+                    # GuardedExecutor重试后仍失败，记录错误
                     logger.error(
-                        "[AlarmWorker-%d] Report failed: %s",
+                        "[AlarmWorker-%d] Report failed after retries: %s",
                         self.worker_id,
                         e,
                         exc_info=True,
@@ -146,8 +152,6 @@ class AlarmWorkerPool:
         num_workers: int = 1,
         batch_interval: int = 30,
         cooldown_seconds: int = 60,
-        retry_times: int = 3,
-        retry_backoff: float = 1.0,
     ):
         self.input_queue = input_queue
         self.num_workers = num_workers
@@ -156,12 +160,10 @@ class AlarmWorkerPool:
         # 聚合后的告警队列（内部队列）
         self.aggregated_queue: Queue = Queue()
 
-        # 创建持久化策略
+        # 创建持久化策略（重试由GuardedExecutor处理）
         self.strategy = AlarmPersistenceStrategy(
             batch_interval=batch_interval,
             cooldown_seconds=cooldown_seconds,
-            retry_times=retry_times,
-            retry_backoff=retry_backoff,
         )
 
         # 创建批量刷新线程

@@ -11,6 +11,7 @@ from queue import Empty, Queue
 
 from app.services.persistence.models import HLSPersistenceTask
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
+from app.utils import GuardedExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class HLSWorker:
         self.strategy = strategy
         self.stop_event = stop_event
         self.worker_id = worker_id
+        self.executor = GuardedExecutor()  # 用于重试逻辑
 
     def run(self):
         """工作循环"""
@@ -42,17 +44,21 @@ class HLSWorker:
                 except Empty:
                     continue
 
-                # 执行持久化
+                # 执行持久化（使用GuardedExecutor处理重试）
                 try:
-                    self.strategy.persist_segment(
-                        client_id=task.client_id,
-                        task_id=task.task_id,
-                        segment_type=task.segment_type,
-                        frames=task.frames,
+                    self.executor.execute(
+                        func=lambda: self.strategy.persist_segment(
+                            client_id=task.client_id,
+                            task_id=task.task_id,
+                            segment_type=task.segment_type,
+                            frames=task.frames,
+                        ),
+                        policy_name="persistence",
                     )
                 except Exception as e:
+                    # GuardedExecutor重试后仍失败，记录错误
                     logger.error(
-                        "[HLSWorker-%d] Persistence failed: %s", self.worker_id, e, exc_info=True
+                        "[HLSWorker-%d] Persistence failed after retries: %s", self.worker_id, e, exc_info=True
                     )
 
             except Exception as e:
