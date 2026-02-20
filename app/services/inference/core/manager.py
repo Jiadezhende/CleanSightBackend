@@ -122,6 +122,7 @@ class InferenceManager:
             output_queue=self.visualization_queue,
             analyzer=self.temporal_analyzer,
             num_workers=temporal_threads,
+            stage_configs=None,  # 将在 start() 后设置
         )
 
         self.visualization_pool = VisualizationWorkerPool(
@@ -129,6 +130,8 @@ class InferenceManager:
             output_queue=self.writeback_queue,
             visualizer=self.visualizer,
             num_workers=visualization_threads,
+            stage_configs=None,  # 将在 start() 后设置
+            use_fixed_visualizer=False,  # 默认禁用，可通过配置启用
         )
 
         self.writeback_pool = WriteBackWorkerPool(
@@ -582,6 +585,13 @@ class InferenceManager:
         # 1. 启动推理服务
         if self._model_worker_service:
             self._model_worker_service.start()
+
+        # 1.5 设置异步管道的 stage_configs（新架构）
+        if hasattr(self, '_model_worker_service') and self._model_worker_service:
+            stage_configs = self._get_stage_configs()
+            self.temporal_pool.stage_configs = stage_configs
+            self.visualization_pool.stage_configs = stage_configs
+            # self.visualization_pool.use_fixed_visualizer = True  # 可选：启用固定渲染器
 
         # 2. 启动异步管道
         self.temporal_pool.start()

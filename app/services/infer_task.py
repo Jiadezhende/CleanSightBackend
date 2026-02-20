@@ -1,49 +1,175 @@
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+"""推理任务基类
 
-import cv2
+Task-Centric 架构：每个 InferenceTask 负责完整的推理流程
+- 检测 (infer)
+- 时序分析 (analyze_temporal)
+- 可视化数据准备 (prepare_visualization_data)
+- 告警评估 (evaluate_alarms)
+"""
+
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
 import numpy as np
 
-"""
-推理任务基类及具体任务实现
-"""
+if TYPE_CHECKING:
+    from app.services.inference.data_models import TaskInferenceResult
 
-# Type aliases for better readability
-InferenceResult = Dict[str, Any]  # 推理结果类型
+# 向后兼容的类型别名
+InferenceResult = Dict[str, Any]  # 推理结果类型（将逐步迁移到 DetectionOutput）
 
 
 class InferenceTask(ABC):
-    """推理任务基类，所有推理任务都应继承此类。
-
-    每个任务都是独立的，可以并行执行。
+    """推理任务基类
+    
+    新架构设计：
+    1. Task 内部组装检测策略（DetectionStrategy）和输出适配器（OutputAdapter）
+    2. 检测输出统一为 DetectionOutput 格式
+    3. 时序分析逻辑下沉到每个 Task（analyze_temporal）
+    4. 可视化数据由 Task 准备（prepare_visualization_data），渲染由固定渲染器完成
+    5. 告警评估逻辑在 Task 内部（evaluate_alarms）
+    
+    子类只需实现 4 个核心方法：
+    - infer(): 执行检测
+    - analyze_temporal(): 时序分析
+    - prepare_visualization_data(): 准备可视化数据
+    - evaluate_alarms(): 评估告警（可选）
     """
 
     def __init__(self, name: str, enabled: bool = True):
         """
         Args:
-            name: 任务名称
+            name: 任务名称（如 "bubble", "bending"）
             enabled: 是否启用此任务
         """
         self.name = name
         self.enabled = enabled
 
-    @abstractmethod
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
-        """执行推理任务。
+    # ====== 核心抽象方法 ======
 
+    @abstractmethod
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> 'DetectionOutput':
+        """执行检测推理
+        
+        新架构：返回标准化的 DetectionOutput 对象（而非Dict）
+        
         Args:
-            frame: 输入帧
-            context: 上下文信息，包含其他任务的结果、任务对象等
+            frame: 输入图像
+            context: 上下文信息（包含 task、client_id 等）
 
         Returns:
-            推理结果字典
+            DetectionOutput: 标准化检测输出
         """
         pass
 
     @abstractmethod
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """在帧上可视化推理结果。
+    def analyze_temporal(
+        self, 
+        state: 'ClientState',
+        output: 'DetectionOutput', 
+        timestamp: float
+    ) -> 'TemporalResult':
+        """时序分析
+        
+        每个 Task 实现自己的时序逻辑（连续帧、滑动窗口、累计计数等）
+        
+        Args:
+            state: 客户端状态（用于存储计数器、历史数据）
+            output: 检测输出
+            timestamp: 当前时间戳
 
+        Returns:
+            TemporalResult: 时序分析结果
+        """
+        pass
+    
+    @abstractmethod
+    def prepare_visualization_data(
+        self, 
+        output: 'DetectionOutput', 
+        temporal: 'TemporalResult'
+    ) -> 'VisualizationData':
+        """准备可视化数据
+        
+        Task 提供可视化数据（检测框、标签、状态栏文本等），
+        由固定渲染器负责绘制
+        
+        Args:
+            output: 检测输出
+            temporal: 时序分析结果
+
+        Returns:
+            VisualizationData: 可视化数据
+        """
+        pass
+
+    def evaluate_alarms(
+        self, 
+        temporal: 'TemporalResult',
+        context: Dict[str, Any]
+    ) -> List['AlarmInfo']:
+        """评估告警条件
+        
+        基于时序分析结果，判断是否需要触发告警
+        
+        Args:
+            temporal: 时序分析结果
+            context: 上下文信息（包含 client_id、stage 等）
+
+        Returns:
+            AlarmInfo 列表（空列表表示无告警）
+        """
+        # 默认实现：不触发告警（子类可选覆盖）
+        return []
+
+    # ====== 批量推理支持 ======
+
+    def infer_batch(
+        self, 
+        frames: List[np.ndarray], 
+        contexts: List[Dict[str, Any]]
+    ) -> List['TaskInferenceResult']:
+        """批量推理
+        
+        默认实现：逐帧调用 infer() 并包装为 TaskInferenceResult 格式
+        子类可覆盖以利用模型的批量接口（如 YOLO 的 batch predict）
+        
+        Args:
+            frames: 输入图像列表
+            contexts: 上下文信息列表
+
+        Returns:
+            List[TaskInferenceResult]: 推理结果列表，每个元素为:
+            {
+                "detection_output": DetectionOutput,
+                "success": bool,
+                ...其他业务字段
+            }
+        """
+        results = []
+        for frame, ctx in zip(frames, contexts):
+            try:
+                output = self.infer(frame, ctx)
+                results.append({
+                    "detection_output": output,
+                    "success": True
+                })
+            except Exception as e:
+                results.append({
+                    "success": False,
+                    "error": str(e)
+                })
+        return results
+
+    # ====== 向后兼容接口 ======
+    
+    @abstractmethod
+    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
+        """可视化推理结果（向后兼容接口）
+        
+        注意：新架构中，此方法将被 prepare_visualization_data() + 固定渲染器替代
+        目前保留以支持旧代码
+        
         Args:
             frame: 输入帧
             result: 推理结果
@@ -53,141 +179,25 @@ class InferenceTask(ABC):
         """
         pass
 
-    def infer_batch(
-        self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[InferenceResult]:
-        """可选的批量推理接口，默认逐帧串行调用 `infer`。
-
-        子类可覆盖以利用模型的 batch 接口（例如 YOLO 的 list-of-images 输入）。
-        """
-        results: List[InferenceResult] = []
-        for f, ctx in zip(frames, contexts):
-            results.append(self.infer(f, ctx))
-        return results
+    # ====== 辅助方法 ======
 
     def requires_context(self) -> List[str]:
-        """返回此任务依赖的其他任务名称列表。
-
+        """声明依赖的上下文
+        
         Returns:
-            依赖的任务名称列表，空列表表示无依赖
+            依赖的任务名称列表（空列表表示无依赖）
         """
         return []
 
 
-class DetectionTask(InferenceTask):
-    """关键点检测任务"""
-
-    def __init__(self):
-        super().__init__(name="detection", enabled=True)
-
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
-        """执行检测推理"""
-        try:
-            # 延迟导入避免循环依赖
-            from app.services.models.base import detect_keypoints
-
-            # 调用检测模型
-            processed_frame, keypoints = detect_keypoints(frame)
-            return {
-                "success": True,
-                "processed_frame": processed_frame,  # 用于可视化，不会序列化
-                "keypoints": keypoints,
-            }
-        except Exception as e:
-            print(f"Detection task error: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "processed_frame": frame.copy(),  # 用于可视化，不会序列化
-                "keypoints": {},
-            }
-
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """可视化检测结果（检测模型已经画好了框）"""
-        return result.get("processed_frame", frame)
-
-
-class MotionTask(InferenceTask):
-    """动作分析任务（依赖检测结果）"""
-
-    def __init__(self):
-        super().__init__(name="motion", enabled=True)
-
-    def requires_context(self) -> List[str]:
-        """依赖检测任务的结果"""
-        return ["detection"]
-
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
-        """执行动作分析"""
-        try:
-            # 延迟导入避免循环依赖
-            from app.services.models.base import analyze_motion
-
-            # 获取检测结果
-            detection_result = context.get("results", {}).get("detection", {})
-            keypoints = detection_result.get("keypoints", {})
-
-            # 获取任务对象
-            task = context.get("task")
-
-            if not task or not keypoints:
-                return {
-                    "success": False,
-                    "error": "Missing task or keypoints",
-                    "actions": {},
-                }
-
-            # 调用动作分析模型
-            actions = analyze_motion(keypoints, task)
-
-            return {"success": True, "actions": actions}
-        except Exception as e:
-            print(f"Motion task error: {e}")
-            return {"success": False, "error": str(e), "actions": {}}
-
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """可视化动作分析结果"""
-        if not result.get("success"):
-            return frame
-
-        result_frame = frame.copy()
-        actions = result.get("actions", {})
-        y_offset = 100  # 避免与检测结果重叠
-
-        if actions.get("bending_detected"):
-            cv2.putText(
-                result_frame,
-                "Bending Detected!",
-                (10, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 255),
-                2,
-            )
-            y_offset += 25
-
-        if actions.get("bubble_detected"):
-            cv2.putText(
-                result_frame,
-                "Bubble Detected!",
-                (10, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 0),
-                2,
-            )
-            y_offset += 25
-
-        status = actions.get("submersion_status", "unknown")
-        if status != "unknown":
-            cv2.putText(
-                result_frame,
-                f"Status: {status}",
-                (10, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-            )
-
-        return result_frame
+# 为了避免循环导入，使用字符串类型注解
+# 实际类型在 app.services.inference.data_models 中定义
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from app.services.inference.data_models import (
+        DetectionOutput, 
+        TemporalResult, 
+        VisualizationData,
+        AlarmInfo
+    )
+    from app.services.client.state import ClientState

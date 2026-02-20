@@ -11,7 +11,7 @@
 import logging
 import threading
 from queue import Empty, Queue
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -63,21 +63,34 @@ class VisualizationWorker:
         visualizer: Visualizer,
         stop_event: threading.Event,
         worker_id: int = 0,
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 新增：Stage 配置
+        use_fixed_visualizer: bool = False,  # 新增：是否使用固定渲染器
     ):
         """初始化可视化工作线程。
 
         Args:
             input_queue: 时序分析数据包队列
             output_queue: 写回数据包队列
-            visualizer: 可视化器
+            visualizer: 可视化器（向后兼容）
             stop_event: 停止事件
             worker_id: 工作线程ID（用于调试）
+            stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
+            use_fixed_visualizer: 是否使用新的固定可视化渲染器
         """
         self.input_queue = input_queue
         self.output_queue = output_queue
-        self.visualizer = visualizer
+        self.visualizer = visualizer  # 保留用于向后兼容
         self.stop_event = stop_event
         self.worker_id = worker_id
+        self.stage_configs = stage_configs or {}
+        self.use_fixed_visualizer = use_fixed_visualizer
+
+        # 固定可视化渲染器（新架构）
+        if use_fixed_visualizer:
+            from app.services.inference.components import FixedVisualizer
+            self.fixed_visualizer = FixedVisualizer()
+        else:
+            self.fixed_visualizer = None
 
         # 缓存每个客户端的最新检测结果（用于降帧补偿）
         self.latest_results: Dict[
@@ -115,13 +128,19 @@ class VisualizationWorker:
                     # 如果没有更新的帧，使用推理时的帧
                     latest_frame = package.raw_frame
 
-                # 4. 使用最新的检测结果进行可视化
-                annotated_frame = self.visualizer.visualize(
-                    frame=latest_frame,  # 使用最新帧
-                    inference_result=package.inference_result,
-                    stage=package.stage,
-                    temporal_result=package.temporal_result,
-                )
+                # 4. 可视化：使用新架构或回退到旧逻辑
+                if self.use_fixed_visualizer and self.fixed_visualizer:
+                    annotated_frame = self._visualize_with_fixed_renderer(
+                        latest_frame, package
+                    )
+                else:
+                    # 回退到旧的可视化器
+                    annotated_frame = self.visualizer.visualize(
+                        frame=latest_frame,
+                        inference_result=package.inference_result,
+                        stage=package.stage,
+                        temporal_result=package.temporal_result,
+                    )
 
                 # 5. 组装完整数据包
                 write_back_data = WriteBackData(
@@ -138,12 +157,93 @@ class VisualizationWorker:
                 self.output_queue.put(write_back_data)
 
             except Exception as e:
-                logger.error(f"[VisualizationWorker-{self.worker_id}] 异常: {e}")
-                import traceback
-
-                traceback.print_exc()
+                logger.error(f"[VisualizationWorker-{self.worker_id}] 异常: {e}", exc_info=True)
 
         logger.debug(f"[VisualizationWorker-{self.worker_id}] 已停止")
+
+    def _visualize_with_fixed_renderer(
+        self, frame: np.ndarray, package: TemporalAnalysisPackage
+    ) -> np.ndarray:
+        """使用新的固定渲染器进行可视化
+        
+        Args:
+            frame: 原始帧
+            package: 时序分析数据包
+            
+        Returns:
+            可视化后的帧
+        """
+        try:
+            # 获取当前 stage 的 tasks
+            stage_cfg = self.stage_configs.get(package.stage, {})
+            tasks = stage_cfg.get("models", [])
+            
+            if not tasks:
+                # 无 tasks，回退到旧逻辑
+                return self.visualizer.visualize(
+                    frame=frame,
+                    inference_result=package.inference_result,
+                    stage=package.stage,
+                    temporal_result=package.temporal_result,
+                )
+            
+            # 导入 VisualizationData（避免循环导入）
+            from app.services.inference.data_models import VisualizationData
+            
+            vis_data_list: List[VisualizationData] = []
+            temporal_events: List[str] = []
+            
+            # 处理每个 task
+            for task in tasks:
+                task_result = package.inference_result.get(task.name, {})
+                
+                # 检查是否有新的 detection_output
+                if "detection_output" not in task_result:
+                    continue  # 跳过没有使用新架构的 task
+                
+                detection_output = task_result["detection_output"]
+                
+                # 获取对应的时序结果（需要重新计算，或从 package 中提取）
+                # 简化处理：使用空的 TemporalResult
+                from app.services.inference.data_models import TemporalResult
+                
+                # 这里应该调用 Task 的 analyze_temporal()，但由于已经在 TemporalWorker 中处理过了
+                # 我们可以从 package.temporal_result.events 中提取信息
+                # 为了简化，这里创建一个简单的 TemporalResult
+                temporal_res = TemporalResult(
+                    detected=len(detection_output.detections) > 0,
+                    event_triggered=package.temporal_result.step_completed if package.temporal_result else False,
+                    event_message=None,
+                    counters={},
+                )
+                
+                # 调用 Task 的 prepare_visualization_data()
+                vis_data = task.prepare_visualization_data(detection_output, temporal_res)
+                vis_data_list.append(vis_data)
+            
+            # 提取时序事件
+            if package.temporal_result and package.temporal_result.events:
+                temporal_events = package.temporal_result.events
+            
+            # 使用固定渲染器渲染
+            annotated_frame = self.fixed_visualizer.render(
+                frame=frame.copy(),
+                vis_data_list=vis_data_list,
+                stage=package.stage,
+                temporal_events=temporal_events,
+            )
+            
+            return annotated_frame
+            
+        except Exception as e:
+            logger.error(f"[VisualizationWorker] Fixed renderer failed: {e}, fallback to old visualizer", exc_info=True)
+            # 回退到旧逻辑
+            return self.visualizer.visualize(
+                frame=frame,
+                inference_result=package.inference_result,
+                stage=package.stage,
+                temporal_result=package.temporal_result,
+            )
 
     def visualize_with_cached_result(
         self, client_id: str, current_frame: np.ndarray
@@ -180,19 +280,25 @@ class VisualizationWorkerPool:
         output_queue: Queue,
         visualizer: Visualizer,
         num_workers: int = 4,
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 新增：Stage 配置
+        use_fixed_visualizer: bool = False,  # 新增：是否使用固定渲染器
     ):
         """初始化可视化线程池。
 
         Args:
             input_queue: 时序分析数据包队列
             output_queue: 写回数据包队列
-            visualizer: 可视化器
+            visualizer: 可视化器（向后兼容）
             num_workers: 工作线程数量
+            stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
+            use_fixed_visualizer: 是否使用新的固定可视化渲染器
         """
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.visualizer = visualizer
         self.num_workers = num_workers
+        self.stage_configs = stage_configs or {}
+        self.use_fixed_visualizer = use_fixed_visualizer
 
         self._stop_event = threading.Event()
         self._workers: list[threading.Thread] = []
@@ -206,6 +312,8 @@ class VisualizationWorkerPool:
                 visualizer=self.visualizer,
                 stop_event=self._stop_event,
                 worker_id=i,
+                stage_configs=self.stage_configs,  # 传递 stage_configs
+                use_fixed_visualizer=self.use_fixed_visualizer,  # 传递 use_fixed_visualizer
             )
 
             thread = threading.Thread(

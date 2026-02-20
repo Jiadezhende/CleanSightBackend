@@ -1,13 +1,53 @@
-"""推理请求和结果的数据模型。"""
+"""推理请求和结果的数据模型（客户端/Stage 级别）
+
+本模块定义 **客户端级别** 和 **Stage 级别** 的数据模型，用于：
+- 队列通信：在 Worker 之间传递数据包
+- 汇总多个 Task 的结果
+- 跨阶段的状态传递
+
+数据模型层次：
+- data_models.py: Task 级别 - 单个检测任务的数据结构（DetectionOutput, TemporalResult 等）
+- 本模块（models.py）: 客户端/Stage 级别 - 汇总多个 Task 的结果，传递给下游队列
+
+核心数据流：
+    InferenceRequest (客户端请求)
+      ↓
+    InferenceResult (汇总多个 Task 的推理结果)
+      → result: Dict[str, TaskInferenceResult]  # 多个 Task 的结果
+      ↓
+    TemporalAnalysisResult (客户端的时序分析结果)
+      ↓
+    TemporalAnalysisPackage (传递给可视化线程)
+      ↓
+    WriteBackData (最终写回给客户端)
+
+层次示例：
+    # Task 级别（data_models.py）
+    bubble_result: TaskInferenceResult = {"detection_output": ..., "success": True}
+    
+    # 客户端级别（本模块）
+    inference_result = InferenceResult(
+        client_id="client_001",
+        stage="LEAK",
+        result={
+            "bubble_detection": bubble_result,  # ← Task 级别数据
+            "bending_detection": bending_result  # ← Task 级别数据
+        }
+    )
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import numpy as np
 
 from app.models.frame import FrameData
+
+# 避免循环导入，运行时不导入 TaskInferenceResult
+if TYPE_CHECKING:
+    from app.services.inference.data_models import TaskInferenceResult
 
 
 @dataclass
@@ -37,7 +77,45 @@ class InferenceResult:
         client_id: 客户端标识
         timestamp: 时间戳
         stage: 当前阶段
-        result: 子任务推理结果字典 {subtask_name: result_dict}
+        result: 各 Task 的推理结果字典
+                
+                类型: Dict[str, TaskInferenceResult]
+                
+                结构说明:
+                {
+                    task_name: {
+                        "detection_output": DetectionOutput,  # 标准化检测输出
+                        "success": bool,                      # 推理是否成功
+                        "error": str (可选),                 # 错误信息
+                        
+                        # 向后兼容字段（可选）：
+                        "bubble_detected": bool,
+                        "bubble_count": int,
+                        "bending_detected": bool,
+                        ...
+                    }
+                }
+                
+                示例:
+                {
+                    "bubble_detection": {
+                        "detection_output": DetectionOutput(
+                            detections=[Detection(...), ...],
+                            metadata={"model": "yolov8"},
+                            timestamp=1234567890.123
+                        ),
+                        "success": True,
+                        "bubble_detected": True,
+                        "bubble_count": 5
+                    },
+                    "bending_detection": {
+                        "detection_output": DetectionOutput(...),
+                        "success": True,
+                        "bending_detected": False,
+                        "detection_count": 0
+                    }
+                }
+                
         annotated_frame: 可视化后的帧（可选）
         frame: 推理时使用的原始帧（用于可视化）
     """
@@ -45,7 +123,7 @@ class InferenceResult:
     client_id: str
     timestamp: float
     stage: str
-    result: Dict[str, Any]  # subtask_results
+    result: Dict[str, "TaskInferenceResult"]  # 类型更清晰！使用字符串避免循环导入
     annotated_frame: Optional[np.ndarray] = None
     frame: Optional[np.ndarray] = None  # 新增：推理时的原始帧
 

@@ -11,7 +11,9 @@
 import logging
 import threading
 from queue import Empty, Queue
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+import numpy as np
 
 from app.services.client import client_manager
 from app.services.inference.components.temporal_analyzer import TemporalAnalyzer
@@ -35,21 +37,24 @@ class TemporalWorker:
         analyzer: TemporalAnalyzer,
         stop_event: threading.Event,
         worker_id: int = 0,
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 新增：Stage 配置
     ):
         """初始化时序分析工作线程。
 
         Args:
             input_queue: 推理结果队列
             output_queue: 可视化数据包队列
-            analyzer: 时序分析器
+            analyzer: 时序分析器（向后兼容）
             stop_event: 停止事件
             worker_id: 工作线程ID（用于调试）
+            stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
         self.input_queue = input_queue
         self.output_queue = output_queue
-        self.analyzer = analyzer
+        self.analyzer = analyzer  # 保留用于向后兼容
         self.stop_event = stop_event
         self.worker_id = worker_id
+        self.stage_configs = stage_configs or {}
 
     def run(self):
         """工作循环。"""
@@ -58,6 +63,13 @@ class TemporalWorker:
         while not self.stop_event.is_set():
             try:
                 # 1. 从队列获取推理结果（超时0.1秒）
+                # result.result 的类型：Dict[str, TaskInferenceResult]
+                #   其中 TaskInferenceResult = {
+                #       "detection_output": DetectionOutput,
+                #       "success": bool,
+                #       "error": str (可选),
+                #       ...向后兼容字段
+                #   }
                 try:
                     result: InferenceResult = self.input_queue.get(timeout=0.1)
                 except Empty:
@@ -71,17 +83,25 @@ class TemporalWorker:
                 if cq is None:
                     continue
 
-                # 3. 执行时序分析
-                temporal_result = self.analyzer.analyze(
-                    state=cq.state,
-                    result=result,
-                    current_timestamp=result.timestamp,
-                )
+                # 3. 使用新架构：调用每个 Task 的 analyze_temporal() 和 evaluate_alarms()
+                temporal_result, all_alarms = self._process_with_tasks(result, cq.state)
+
+                # 如果无法使用新架构（没有 detection_output），回退到旧逻辑
+                if temporal_result is None:
+                    # 使用旧的 analyzer（向后兼容）
+                    temporal_result = self.analyzer.analyze(
+                        state=cq.state,
+                        result=result,
+                        current_timestamp=result.timestamp,
+                    )
+                    all_alarms = []
 
                 # 4. 生成前端消息
-                frontend_msg = self._create_frontend_message(result, temporal_result)
+                frontend_msg = self._create_frontend_message(result, temporal_result, all_alarms)
 
                 # 5. 组装数据包
+                frame_to_use = result.frame if result.frame is not None else cq.get_latest_frame()
+                
                 data_package = TemporalAnalysisPackage(
                     client_id=result.client_id,
                     timestamp=result.timestamp,
@@ -89,11 +109,7 @@ class TemporalWorker:
                     inference_result=result.result,
                     temporal_result=temporal_result,
                     frontend_message=frontend_msg,
-                    raw_frame=(
-                        result.frame
-                        if result.frame is not None
-                        else cq.get_latest_frame()
-                    ),
+                    raw_frame=frame_to_use if frame_to_use is not None else np.zeros((480, 640, 3), dtype=np.uint8),
                 )
 
                 # 6. 投递到可视化队列
@@ -107,16 +123,97 @@ class TemporalWorker:
 
         logger.debug(f"[TemporalWorker-{self.worker_id}] 已停止")
 
+    def _process_with_tasks(self, result: InferenceResult, state) -> tuple:
+        """使用新架构处理时序分析
+        
+        Args:
+            result: 推理结果
+            state: 客户端状态
+            
+        Returns:
+            (TemporalAnalysisResult, List[AlarmInfo]) 或 (None, []) 如果无法使用新架构
+        """
+        try:
+            # 获取当前 stage 的 tasks
+            stage_cfg = self.stage_configs.get(result.stage, {})
+            tasks = stage_cfg.get("models", [])
+            
+            if not tasks:
+                return None, []  # 无 tasks，回退到旧逻辑
+            
+            # 导入 TemporalResult 和 AlarmInfo（避免循环导入）
+            from app.services.inference.data_models import TemporalResult, AlarmInfo
+            
+            all_events = []
+            all_alarms = []
+            step_completed = False
+            
+            # 处理每个 task
+            for task in tasks:
+                task_result = result.result.get(task.name, {})
+                
+                # 检查是否有新的 detection_output
+                # task_result 的类型：TaskInferenceResult = {
+                #   "detection_output": DetectionOutput,
+                #   "success": bool,
+                #   ...
+                # }
+                if "detection_output" not in task_result:
+                    continue  # 跳过没有使用新架构的 task
+                
+                detection_output = task_result["detection_output"]
+                
+                # 调用 Task 的 analyze_temporal()
+                temporal_res: TemporalResult = task.analyze_temporal(
+                    state, detection_output, result.timestamp
+                )
+                
+                # 收集事件
+                if temporal_res.event_message:
+                    all_events.append(temporal_res.event_message)
+                
+                # 调用 Task 的 evaluate_alarms()
+                context = {
+                    "client_id": result.client_id,
+                    "stage": result.stage,
+                    "task_name": task.name,
+                }
+                alarms = task.evaluate_alarms(temporal_res, context)
+                all_alarms.extend(alarms)
+                
+                # 检查步骤完成
+                if temporal_res.event_triggered:
+                    step_completed = True
+            
+            # 构造 TemporalAnalysisResult（此处是整合了各个task的时序分析结果向后兼容）
+            temporal_result = TemporalAnalysisResult(
+                client_id=result.client_id,
+                timestamp=result.timestamp,
+                stage_changed=False,
+                new_stage=None,
+                step_completed=step_completed,
+                events=all_events,
+                state_snapshot={},  # 简化处理
+            )
+            
+            return temporal_result, all_alarms
+            
+        except Exception as e:
+            logger.error(f"[TemporalWorker] Failed to process with tasks: {e}", exc_info=True)
+            return None, []  # 回退到旧逻辑
+
     def _create_frontend_message(
         self,
         result: InferenceResult,
         temporal: TemporalAnalysisResult,
+        alarms: Optional[list] = None,
     ) -> FrontendMessage:
         """生成前端消息。
 
         Args:
             result: 推理结果
             temporal: 时序分析结果
+            alarms: 告警列表（新架构）
 
         Returns:
             前端消息
@@ -127,12 +224,24 @@ class TemporalWorker:
 
         for subtask_name, subtask_res in result.result.items():
             if isinstance(subtask_res, dict):
-                detected_key = f"{subtask_name}_detected"
-                detections[subtask_name] = subtask_res.get(detected_key, False)
-                confidences[subtask_name] = subtask_res.get("confidence", 0.0)
+                # 新架构：从 detection_output 提取
+                if "detection_output" in subtask_res:
+                    detection_output = subtask_res["detection_output"]
+                    detections[subtask_name] = len(detection_output.detections) > 0
+                    # 计算平均置信度
+                    if detection_output.detections:
+                        avg_conf = sum(d.confidence for d in detection_output.detections) / len(detection_output.detections)
+                        confidences[subtask_name] = avg_conf
+                    else:
+                        confidences[subtask_name] = 0.0
+                else:
+                    # 向后兼容：旧格式
+                    detected_key = f"{subtask_name}_detected"
+                    detections[subtask_name] = subtask_res.get(detected_key, False)
+                    confidences[subtask_name] = subtask_res.get("confidence", 0.0)
 
-        # 生成状态消息
-        status_msg = self._generate_status_message(temporal)
+        # 生成状态消息（包含告警信息）
+        status_msg = self._generate_status_message(temporal, alarms or [])
 
         return FrontendMessage(
             client_id=result.client_id,
@@ -148,15 +257,22 @@ class TemporalWorker:
             },
         )
 
-    def _generate_status_message(self, temporal: TemporalAnalysisResult) -> str:
+    def _generate_status_message(self, temporal: TemporalAnalysisResult, alarms: list) -> str:
         """生成状态消息。
 
         Args:
             temporal: 时序分析结果
+            alarms: 告警列表
 
         Returns:
             状态消息字符串
         """
+        # 优先显示告警
+        if alarms:
+            alarm_msgs = [alarm.message for alarm in alarms]
+            return "⚠️ " + "; ".join(alarm_msgs)
+        
+        # 显示事件
         if temporal.events:
             # 有事件，显示最近的事件
             return "; ".join(temporal.events)
@@ -175,19 +291,22 @@ class TemporalWorkerPool:
         output_queue: Queue,
         analyzer: TemporalAnalyzer,
         num_workers: int = 2,
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 新增：Stage 配置
     ):
         """初始化时序分析线程池。
 
         Args:
             input_queue: 推理结果队列
             output_queue: 可视化数据包队列
-            analyzer: 时序分析器
+            analyzer: 时序分析器（向后兼容）
             num_workers: 工作线程数量
+            stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.analyzer = analyzer
         self.num_workers = num_workers
+        self.stage_configs = stage_configs or {}
 
         self._stop_event = threading.Event()
         self._workers: list[threading.Thread] = []
@@ -201,6 +320,7 @@ class TemporalWorkerPool:
                 analyzer=self.analyzer,
                 stop_event=self._stop_event,
                 worker_id=i,
+                stage_configs=self.stage_configs,  # 传递 stage_configs
             )
 
             thread = threading.Thread(

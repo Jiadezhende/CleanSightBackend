@@ -1,123 +1,112 @@
-"""
-气泡检测任务
+"""气泡检测任务（重构版）
 
-使用 YOLO 模型检测内镜清洗过程中的气泡，并更新清洗任务的气泡计数
+使用新架构：
+1. 检测策略（YOLOStrategy）+ 输出适配器（YOLOAdapter）
+2. 时序分析逻辑内置（连续3帧检测）
+3. 可视化数据准备（供固定渲染器使用）
+4. 告警评估逻辑（连续3帧触发告警）
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
 
 from app.services.infer_task import InferenceResult, InferenceTask
-from app.services.models.bubble.detector import get_bubble_detector
+from app.services.inference.data_models import (
+    AlarmInfo,
+    Detection,
+    DetectionOutput,    TaskInferenceResult,    TemporalResult,
+    VisualizationData,
+    VisItem,
+    VisualizationType,
+)
+from app.services.models.base import YOLOStrategy, YOLOAdapter
 from app.utils.exceptions import ModelInferenceError
 
 logger = logging.getLogger(__name__)
 
 
 class BubbleDetectionTask(InferenceTask):
-    """气泡检测任务"""
+    """气泡检测任务（新架构）
+    
+    时序逻辑：连续3帧检测到气泡才触发事件
+    告警逻辑：触发事件时上报告警
+    """
 
     def __init__(
         self,
-        model_path: Optional[str] = None,
-        conf_threshold: Optional[float] = None,
-        iou_threshold: Optional[float] = None,
+        model_path: str,
+        conf_threshold: float = 0.5,
+        iou_threshold: float = 0.45,
         enabled: bool = True,
     ):
-        """
-        初始化气泡检测任务
+        """初始化气泡检测任务
 
         Args:
-            model_path: YOLO 模型路径，如果为 None 则从配置读取
-            conf_threshold: 置信度阈值 (0.0-1.0)，如果为 None 则使用默认值 0.25
-            iou_threshold: IOU 阈值 (0.0-1.0)，如果为 None 则使用默认值 0.45
+            model_path: YOLO 模型路径
+            conf_threshold: 置信度阈值 (0.0-1.0)
+            iou_threshold: IOU 阈值 (0.0-1.0)
             enabled: 是否启用此任务
         """
-        super().__init__(name="bubble_detection", enabled=enabled)
+        super().__init__(name="bubble", enabled=enabled)
 
-        # 使用默认值（通常从 stages_config.yaml 传入，这里作为后备）
-        if model_path is None:
-            raise ValueError(
-                "model_path is required. Please configure it in stages_config.yaml"
-            )
-        if conf_threshold is None:
-            conf_threshold = 0.5  # 默认值
-        if iou_threshold is None:
-            iou_threshold = 0.45  # 默认值
+        if not model_path:
+            raise ValueError("model_path is required for BubbleDetectionTask")
 
+        # 配置参数
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
-        self.detector = None
 
-        # 延迟加载模型（在第一次推理时加载）
+        # 内部组装策略和适配器
+        self.strategy = YOLOStrategy()
+        self.adapter = YOLOAdapter()
+        
+        # 延迟加载模型
         self._model_loaded = False
 
     def _ensure_model_loaded(self):
         """确保模型已加载"""
         if not self._model_loaded:
             try:
-                self.detector = get_bubble_detector(self.model_path)
+                self.strategy.load_model(self.model_path)
                 self._model_loaded = True
-                logger.info(f"Bubble detection model loaded: {self.model_path}")
+                logger.info(f"[BubbleTask] Model loaded: {self.model_path}")
             except Exception as e:
-                logger.error(
-                    f"Failed to load bubble detection model: {e}", exc_info=True
-                )
+                logger.error(f"[BubbleTask] Model loading failed: {e}", exc_info=True)
                 raise ModelInferenceError(
                     message=f"Failed to load bubble detection model: {str(e)}",
                     model_name="yolov8_bubble",
                 ) from e
 
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> InferenceResult:
-        """
-        执行气泡检测
+    # ====== 1. 检测 ======
 
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
+        """执行气泡检测
+        
         Args:
             frame: 输入图像
-            context: 上下文信息，包含清洗任务对象
-
+            context: 上下文（包含 task、client_id 等）
+            
         Returns:
-            检测结果，包含是否检测到气泡、检测框、气泡数量等信息
+            DetectionOutput: 标准化检测输出
         """
         try:
             # 确保模型已加载
             self._ensure_model_loaded()
 
-            # 执行检测（仅获取检测结果，不绘制）
-            detections, bubble_detected, bubble_count = self.detector.detect(
-                frame,
-                conf_threshold=self.conf_threshold,
-                iou_threshold=self.iou_threshold,
+            # 执行检测
+            raw_output = self.strategy.detect(
+                frame, conf=self.conf_threshold, iou=self.iou_threshold
             )
 
-            # 获取清洗任务对象
-            task = context.get("task")
+            # 适配输出
+            detection_output = self.adapter.adapt(raw_output, frame, time.time())
 
-            # 如果检测到气泡且有任务对象，更新气泡计数
-            # 注意：这里可以根据业务需求决定是累计总气泡数还是记录帧数
-            if bubble_detected and task:
-                # 这里假设任务对象有 bubble_count 属性
-                # 如果没有，需要在 Task 模型中添加此字段
-                if not hasattr(task, "bubble_count"):
-                    task.bubble_count = 0
-                task.bubble_count += bubble_count
-                logger.info(
-                    f"Detected {bubble_count} bubbles! Task {task.task_id} total: {task.bubble_count}"
-                )
-
-            return {
-                "success": True,
-                "bubble_detected": bubble_detected,
-                "detections": detections,
-                "bubble_count": bubble_count,
-                "total_bubble_count": (
-                    task.bubble_count if task and hasattr(task, "bubble_count") else 0
-                ),
-            }
+            return detection_output
 
         except RuntimeError as e:
             # YOLO RuntimeError → ModelInferenceError
@@ -127,110 +116,239 @@ class BubbleDetectionTask(InferenceTask):
             raise ModelInferenceError(
                 message=str(e),
                 model_name="yolov8_bubble",
-                client_id=context.get("client_id") if context else None,
+                client_id=context.get("client_id"),
                 is_cuda_error=is_cuda,
             ) from e
 
         except Exception as e:
-            # 其他未预期的异常 → ModelInferenceError
             raise ModelInferenceError(
                 message=f"Unexpected error in bubble detection: {str(e)}",
                 model_name="yolov8_bubble",
-                client_id=context.get("client_id") if context else None,
+                client_id=context.get("client_id"),
             ) from e
 
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[InferenceResult]:
-        """使用 detector 的批量接口进行气泡批量检测，返回每帧结果列表。"""
+    ) -> List[TaskInferenceResult]:
+        """批量气泡检测
+        
+        利用 YOLO 的批量推理接口提升性能
+        
+        Returns:
+            TaskInferenceResult 列表
+        """
         try:
             self._ensure_model_loaded()
-            batch_results = self.detector.detect_batch(
-                frames,
-                conf_threshold=self.conf_threshold,
-                iou_threshold=self.iou_threshold,
-            )
-            out: List[InferenceResult] = []
-            for (detections, bubble_detected, bubble_count), ctx in zip(
-                batch_results, contexts
-            ):
-                task = ctx.get("task")
-                if bubble_detected and task:
-                    if not hasattr(task, "bubble_count"):
-                        task.bubble_count = 0
-                    task.bubble_count += bubble_count
-                out.append(
-                    {
-                        "success": True,
-                        "bubble_detected": bubble_detected,
-                        "detections": detections,
-                        "bubble_count": bubble_count,
-                        "total_bubble_count": (
-                            task.bubble_count
-                            if task and hasattr(task, "bubble_count")
-                            else 0
-                        ),
-                    }
-                )
-            return out
-        except Exception as e:
-            print(f"气泡批量检测错误: {e}")
-            import traceback
 
-            traceback.print_exc()
-            return [self.infer(f, c) for f, c in zip(frames, contexts)]
+            # 批量检测
+            raw_outputs = self.strategy.detect_batch(
+                frames, conf=self.conf_threshold, iou=self.iou_threshold
+            )
+
+            # 批量适配
+            timestamp = time.time()
+            detection_outputs = [
+                self.adapter.adapt(out, frame, timestamp)
+                for out, frame in zip(raw_outputs, frames)
+            ]
+
+            # 包装为字典格式（保持向后兼容）
+            return [
+                {
+                    "detection_output": output,
+                    "bubble_detected": len(output.detections) > 0,
+                    "bubble_count": len(output.detections),
+                    "success": True,
+                }
+                for output in detection_outputs
+            ]
+
+        except Exception as e:
+            logger.error(f"[BubbleTask] Batch inference failed: {e}, fallback to single", exc_info=True)
+            # 降级到单帧处理
+            results = []
+            for f,c in zip(frames, contexts):
+                try:
+                    output = self.infer(f, c)
+                    results.append({
+                        "detection_output": output,
+                        "bubble_detected": len(output.detections) > 0,
+                        "bubble_count": len(output.detections),
+                        "success": True,
+                    })
+                except Exception as err:
+                    results.append({"success": False, "error": str(err)})
+            return results
+
+    # ====== 2. 时序分析 ======
+
+    def analyze_temporal(
+        self, state, output: DetectionOutput, timestamp: float
+    ) -> TemporalResult:
+        """气泡时序分析：连续3帧检测到才触发事件
+        
+        Args:
+            state: ClientState 实例
+            output: 检测输出
+            timestamp: 时间戳
+            
+        Returns:
+            TemporalResult: 时序分析结果
+        """
+        # 检测结果
+        bubble_count = len(output.detections)
+        detected = bubble_count > 0
+
+        # 更新连续检测计数
+        if detected:
+            consecutive = state.increment_counter("bubble_consecutive")
+        else:
+            state.reset_counter("bubble_consecutive")
+            consecutive = 0
+
+        # 累计总数
+        if detected:
+            total = state.increment_counter("bubble_total", delta=bubble_count)
+        else:
+            total = state.get_counter("bubble_total", 0)
+
+        # 事件触发：连续3帧
+        event_triggered = consecutive >= 3
+        event_message = (
+            f"连续{consecutive}帧检测到气泡" if event_triggered else None
+        )
+
+        return TemporalResult(
+            detected=detected,
+            event_triggered=event_triggered,
+            event_message=event_message,
+            counters={
+                "bubble_count": bubble_count,
+                "consecutive_frames": consecutive,
+                "total_bubbles": total,
+            },
+        )
+
+    # ====== 3. 可视化数据准备 ======
+
+    def prepare_visualization_data(
+        self, output: DetectionOutput, temporal: TemporalResult
+    ) -> VisualizationData:
+        """准备气泡可视化数据
+        
+        Args:
+            output: 检测输出
+            temporal: 时序分析结果
+            
+        Returns:
+            VisualizationData: 可视化数据
+        """
+        # 准备检测框可视化项
+        items = []
+        for det in output.detections:
+            # 颜色：检测到气泡用黄色，调试框用洋红色
+            if det.class_name == "bubble_debug_box":
+                color = (255, 0, 255)  # 洋红色（调试框）
+            else:
+                color = (0, 255, 255)  # 黄色（正常气泡）
+
+            items.append(
+                VisItem(
+                    bbox=det.bbox,
+                    label=f"{det.class_name} {det.confidence:.2f}",
+                    confidence=det.confidence,
+                    color=color,
+                )
+            )
+
+        # 状态栏
+        bubble_count = temporal.counters.get("bubble_count", 0)
+        total = temporal.counters.get("total_bubbles", 0)
+
+        if temporal.detected:
+            status_text = f"Bubbles: {bubble_count} (Total: {total})"
+            # 气泡数超过5个时用橙色警告
+            status_color = (0, 165, 255) if bubble_count > 5 else (0, 255, 255)
+        else:
+            status_text = f"No Bubbles (Total: {total})"
+            status_color = (0, 255, 0)  # 绿色
+
+        return VisualizationData(
+            type=VisualizationType.BBOX,
+            items=items,
+            status_text=status_text,
+            status_color=status_color,
+            status_position="top-right",
+        )
+
+    # ====== 4. 告警评估 ======
+
+    def evaluate_alarms(
+        self, temporal: TemporalResult, context: Dict[str, Any]
+    ) -> List[AlarmInfo]:
+        """评估气泡告警
+        
+        触发条件：连续3帧检测到气泡
+        """
+        alarms = []
+
+        if temporal.event_triggered:
+            alarms.append(
+                AlarmInfo(
+                    alarm_type="流程违规",
+                    alarm_level="high",
+                    alarm_message="检测到气泡异常（连续3帧）",
+                    metadata={
+                        "consecutive_frames": temporal.counters.get("consecutive_frames", 0),
+                        "bubble_count": temporal.counters.get("bubble_count", 0),
+                    },
+                )
+            )
+
+        return alarms
+
+    # ====== 向后兼容接口 ======
 
     def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """
-        可视化气泡检测结果（在此处绘制检测框和状态信息）
-
-        Args:
-            frame: 输入图像
-            result: 检测结果
-
-        Returns:
-            可视化后的图像
+        """可视化气泡检测结果（向后兼容接口）
+        
+        注意：新架构使用 prepare_visualization_data() + 固定渲染器
+        此方法保留以支持旧代码
         """
         if not result.get("success"):
             return frame
 
         result_frame = frame.copy()
-
-        # 获取检测结果
         detections = result.get("detections", [])
         bubble_detected = result.get("bubble_detected", False)
         bubble_count = result.get("bubble_count", 0)
         total_bubble_count = result.get("total_bubble_count", 0)
 
-        # 颜色定义（BGR格式）
-        BUBBLE_COLOR = (0, 255, 255)  # 正常气泡检测框：黄色
-        DEBUG_BUBBLE_COLOR = (255, 0, 255)  # 调试框：洋红色，便于与弯折区分
-        NORMAL_COLOR = (0, 255, 0)  # 绿色
-        WARNING_COLOR = (0, 165, 255)  # 橙色
-        TEXT_BG_COLOR = (0, 0, 0)  # 黑色
+        # 颜色
+        BUBBLE_COLOR = (0, 255, 255)
+        DEBUG_BUBBLE_COLOR = (255, 0, 255)
+        NORMAL_COLOR = (0, 255, 0)
+        WARNING_COLOR = (0, 165, 255)
+        TEXT_BG_COLOR = (0, 0, 0)
 
-        # 绘制所有检测框
+        # 绘制检测框
         for detection in detections:
             x1, y1, x2, y2 = detection["bbox"]
             conf = detection["confidence"]
             class_name = detection["class_name"]
 
-            # 调试框单独使用 DEBUG_BUBBLE_COLOR
             box_color = (
                 DEBUG_BUBBLE_COLOR if class_name == "bubble_debug_box" else BUBBLE_COLOR
             )
 
-            # 绘制边界框
             cv2.rectangle(result_frame, (x1, y1), (x2, y2), box_color, 2)
 
-            # 绘制标签
             label = f"{class_name} {conf:.2f}"
             (label_w, label_h), baseline = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
             )
             label_y = max(y1 - 10, label_h + 5)
 
-            # 标签背景（带 padding）
             cv2.rectangle(
                 result_frame,
                 (x1, label_y - label_h - 5),
@@ -239,7 +357,6 @@ class BubbleDetectionTask(InferenceTask):
                 -1,
             )
 
-            # 标签文字（黑色更清晰）
             cv2.putText(
                 result_frame,
                 label,
@@ -248,10 +365,10 @@ class BubbleDetectionTask(InferenceTask):
                 0.5,
                 TEXT_BG_COLOR,
                 1,
-                cv2.LINE_AA,  # 抗锯齿
+                cv2.LINE_AA,
             )
 
-        # 在右上角显示气泡状态（简化信息）
+        # 状态栏
         if bubble_detected:
             status_text = f"Bubbles: {bubble_count} (Total: {total_bubble_count})"
             status_color = WARNING_COLOR if bubble_count > 5 else BUBBLE_COLOR
@@ -259,35 +376,22 @@ class BubbleDetectionTask(InferenceTask):
             status_text = f"No Bubbles (Total: {total_bubble_count})"
             status_color = NORMAL_COLOR
 
-        # 绘制状态栏（右上角，使用高效方法）
-        self._draw_status_bar(
-            result_frame, status_text, status_color, position="top-right"
-        )
+        self._draw_status_bar(result_frame, status_text, status_color, "top-right")
 
         return result_frame
 
     def _draw_status_bar(
         self, frame: np.ndarray, text: str, color: tuple, position: str = "top-right"
     ):
-        """
-        绘制状态栏的辅助方法
-
-        Args:
-            frame: 图像帧
-            text: 状态文本
-            color: 文本颜色
-            position: 位置 ("top-right", "top-left", "bottom-left", "bottom-right")
-        """
+        """绘制状态栏（辅助方法）"""
         height, width = frame.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.6
         thickness = 2
         padding = 10
 
-        # 获取文本尺寸
         (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
 
-        # 根据位置计算坐标
         if position == "top-right":
             x = width - text_w - padding
             y = padding + text_h
@@ -301,7 +405,6 @@ class BubbleDetectionTask(InferenceTask):
             x = padding
             y = height - padding
 
-        # 绘制背景矩形（不透明，性能更好）
         bg_padding = 5
         cv2.rectangle(
             frame,
@@ -311,28 +414,18 @@ class BubbleDetectionTask(InferenceTask):
             -1,
         )
 
-        # 绘制文本
-        cv2.putText(
-            frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA
-        )
+        cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
 
-    def requires_context(self) -> List[str]:
-        """气泡检测是独立任务，不依赖其他任务"""
-        return []
+    # ====== 辅助方法 ======
 
-    def set_thresholds(self, conf_threshold: float = None, iou_threshold: float = None):
-        """
-        动态调整检测阈值
-
-        Args:
-            conf_threshold: 置信度阈值
-            iou_threshold: IOU 阈值
-        """
+    def set_thresholds(self, conf_threshold: Optional[float] = None, iou_threshold: Optional[float] = None):
+        """动态调整检测阈值"""
         if conf_threshold is not None:
             self.conf_threshold = max(0.0, min(1.0, conf_threshold))
         if iou_threshold is not None:
             self.iou_threshold = max(0.0, min(1.0, iou_threshold))
 
-        print(
-            f"气泡检测阈值已更新: conf={self.conf_threshold}, iou={self.iou_threshold}"
+        logger.info(
+            f"[BubbleTask] Thresholds updated: conf={self.conf_threshold}, iou={self.iou_threshold}"
         )
+

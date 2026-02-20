@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 from app.services.infer_task import InferenceTask
+from app.services.inference.data_models import TaskInferenceResult
 from app.services.inference.models import InferenceRequest, InferenceResult
 from app.utils.metrics import infer_failure_total, infer_latency_ms
 
@@ -80,6 +81,18 @@ class MultiModelWorkerPool:
 
         Returns:
             推理结果列表
+            
+        数据流说明：
+            1. 提取 frames 和 contexts
+            2. 调用各 model.infer_batch() → List[TaskInferenceResult]
+            3. 组装为 InferenceResult
+               InferenceResult.result = {
+                   task_name: TaskInferenceResult = {
+                       "detection_output": DetectionOutput,
+                       "success": bool,
+                       ...
+                   }
+               }
         """
         if not batch:
             return []
@@ -115,6 +128,7 @@ class MultiModelWorkerPool:
             model_results = self._infer_batch_sequential(frames, contexts)
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
+        # model_results[i] = {task_name: TaskInferenceResult}
         results: List[InferenceResult] = []
         for i, req in enumerate(batch):
             per_frame_results = model_results[i] if i < len(model_results) else {}
@@ -135,19 +149,23 @@ class MultiModelWorkerPool:
         self,
         frames: List[np.ndarray],
         contexts: List[Dict[str, Any]],
-    ) -> List[Dict[str, Dict[str, Any]]]:
+    ) -> List[Dict[str, TaskInferenceResult]]:
         """CUDA Stream 并行推理。
 
         核心思路：
         - 为每个模型启动异步推理（使用独立 CUDA Stream）
         - 使用 torch.cuda.synchronize() 等待所有 stream 完成
         - 合并结果
+        
+        返回值说明：
+            List[Dict[str, TaskInferenceResult]]
+            即：List[{task_name: {"detection_output": DetectionOutput, "success": bool, ...}}]
         """
         if not TORCH_AVAILABLE:
             return self._infer_batch_sequential(frames, contexts)
 
         # 启动异步推理
-        async_results: List[tuple[str, List[Dict[str, Any]]]] = []
+        async_results: List[tuple[str, List[TaskInferenceResult]]] = []
 
         for model, cuda_stream in zip(self.models, self.cuda_streams):
             if not model.enabled:
@@ -156,7 +174,7 @@ class MultiModelWorkerPool:
             with torch.cuda.stream(cuda_stream):
                 start_time = time.time()
                 try:
-                    # 调用 InferenceTask.infer_batch
+                    # 调用 InferenceTask.infer_batch （已经返回 TaskInferenceResult 格式）
                     batch_res = model.infer_batch(frames, contexts)
                     async_results.append((model.name, batch_res))
 
@@ -186,7 +204,10 @@ class MultiModelWorkerPool:
 
                     # 返回失败结果
                     n = len(frames)
-                    failed = [{"success": False, "error": str(e)} for _ in range(n)]
+                    failed: List[TaskInferenceResult] = [
+                        {"success": False, "error": str(e)}
+                        for _ in range(n)
+                    ]
                     async_results.append((model.name, failed))
 
         # 同步所有 CUDA Stream
@@ -194,7 +215,7 @@ class MultiModelWorkerPool:
 
         # 合并结果：将每个模型的结果按帧索引组织
         n = len(frames)
-        merged: List[Dict[str, Dict[str, Any]]] = [{} for _ in range(n)]
+        merged: List[Dict[str, TaskInferenceResult]] = [{} for _ in range(n)]
 
         for model_name, batch_res in async_results:
             for i in range(min(len(batch_res), n)):
@@ -206,10 +227,10 @@ class MultiModelWorkerPool:
         self,
         frames: List[np.ndarray],
         contexts: List[Dict[str, Any]],
-    ) -> List[Dict[str, Dict[str, Any]]]:
+    ) -> List[Dict[str, TaskInferenceResult]]:
         """顺序推理（不使用 CUDA Stream）。"""
         n = len(frames)
-        merged: List[Dict[str, Dict[str, Any]]] = [{} for _ in range(n)]
+        merged: List[Dict[str, TaskInferenceResult]] = [{} for _ in range(n)]
 
         for model in self.models:
             if not model.enabled:
@@ -217,7 +238,7 @@ class MultiModelWorkerPool:
 
             start_time = time.time()
             try:
-                # 调用 InferenceTask.infer_batch
+                # 调用 InferenceTask.infer_batch （已经返回 TaskInferenceResult 格式）
                 batch_res = model.infer_batch(frames, contexts)
                 for i in range(min(len(batch_res), n)):
                     merged[i][model.name] = batch_res[i]

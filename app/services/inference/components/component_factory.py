@@ -198,8 +198,9 @@ def create_components_from_config(
         }
     """
     from app.services.inference.config import load_stage_config
+    from pathlib import Path
 
-    config = load_stage_config(config_path)
+    config = load_stage_config(Path(config_path) if config_path else None)
     factory = ComponentFactory(config)
 
     components = {}
