@@ -251,11 +251,7 @@ class PersistenceConfig:
         if self.alarm.workers < 1:
             warnings.append(f"❌ 告警Worker数量必须>=1")
 
-        # 4. 检查重试配置合理性
-        if self.alarm.retry_times > 5:
-            warnings.append(
-                f"⚠️  告警重试次数过多: {self.alarm.retry_times}，建议2-3次"
-            )
+        # 注意：告警重试配置由 GuardedExecutor 统一处理，无需在此验证
 
         # 输出警告
         if warnings:
