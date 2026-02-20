@@ -4,10 +4,10 @@ HLS持久化Worker池
 负责并行处理HLS持久化任务
 """
 
-import threading
 import logging
-from queue import Empty, Queue
+import threading
 from pathlib import Path
+from queue import Empty, Queue
 
 from app.services.persistence.models import HLSPersistenceTask
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
@@ -23,7 +23,7 @@ class HLSWorker:
         input_queue: Queue,
         strategy: HLSPersistenceStrategy,
         stop_event: threading.Event,
-        worker_id: int = 0
+        worker_id: int = 0,
     ):
         self.input_queue = input_queue
         self.strategy = strategy
@@ -48,10 +48,12 @@ class HLSWorker:
                         client_id=task.client_id,
                         task_id=task.task_id,
                         segment_type=task.segment_type,
-                        frames=task.frames
+                        frames=task.frames,
                     )
                 except Exception as e:
-                    logger.error("HLSWorker-%d 持久化失败: %s", self.worker_id, e, exc_info=True)
+                    logger.error(
+                        "HLSWorker-%d 持久化失败: %s", self.worker_id, e, exc_info=True
+                    )
 
             except Exception as e:
                 logger.error("HLSWorker-%d 异常: %s", self.worker_id, e, exc_info=True)
@@ -69,7 +71,7 @@ class HLSWorkerPool:
         db_dir: Path | None = None,
         segment_duration: int = 10,
         raw_fps: float = 30.0,
-        processed_fps: float = 20.0
+        processed_fps: float = 20.0,
     ):
         self.input_queue = input_queue
         self.num_workers = num_workers
@@ -80,7 +82,7 @@ class HLSWorkerPool:
             db_dir=db_dir or Path("database"),
             raw_fps=raw_fps,
             processed_fps=processed_fps,
-            enable_db_write=False  # 不写入file_path表
+            enable_db_write=False,  # 不写入file_path表
         )
 
         # 创建Worker
@@ -96,7 +98,7 @@ class HLSWorkerPool:
                 input_queue=self.input_queue,
                 strategy=self.strategy,
                 stop_event=self.stop_event,
-                worker_id=i
+                worker_id=i,
             )
             thread = threading.Thread(target=worker.run, daemon=True)
 

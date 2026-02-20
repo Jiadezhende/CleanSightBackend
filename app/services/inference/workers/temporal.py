@@ -13,13 +13,13 @@ from queue import Empty, Queue
 from typing import Any, Dict
 
 from app.services.client import client_manager
+from app.services.inference.components.temporal_analyzer import TemporalAnalyzer
 from app.services.inference.models import (
     FrontendMessage,
     InferenceResult,
     TemporalAnalysisPackage,
     TemporalAnalysisResult,
 )
-from app.services.inference.components.temporal_analyzer import TemporalAnalyzer
 
 
 class TemporalWorker:
@@ -86,7 +86,11 @@ class TemporalWorker:
                     inference_result=result.result,
                     temporal_result=temporal_result,
                     frontend_message=frontend_msg,
-                    raw_frame=result.frame if result.frame is not None else cq.get_latest_frame(),
+                    raw_frame=(
+                        result.frame
+                        if result.frame is not None
+                        else cq.get_latest_frame()
+                    ),
                 )
 
                 # 6. 投递到可视化队列

@@ -2,13 +2,16 @@
 清理后台推流进程的脚本
 用于清理stress_test.py启动的残留进程
 """
+
+import logging
 import subprocess
 import sys
-import psutil
-import logging
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+import psutil
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
+
 
 def find_and_kill_test_processes():
     """查找并终止测试相关的进程"""
@@ -16,26 +19,26 @@ def find_and_kill_test_processes():
 
     # 需要查找的进程关键字
     keywords = [
-        'remote_full_pipeline_rtsp.py',
-        'stress_test.py',
-        'ffmpeg',
+        "remote_full_pipeline_rtsp.py",
+        "stress_test.py",
+        "ffmpeg",
     ]
 
     logger.info("正在查找测试相关进程...")
 
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
             # 获取进程信息
-            pid = proc.info['pid']
-            name = proc.info['name']
-            cmdline = proc.info['cmdline']
+            pid = proc.info["pid"]
+            name = proc.info["name"]
+            cmdline = proc.info["cmdline"]
 
             # 跳过当前脚本进程
-            if cmdline and 'cleanup_processes.py' in ' '.join(cmdline):
+            if cmdline and "cleanup_processes.py" in " ".join(cmdline):
                 continue
 
             # 检查是否匹配关键字
-            cmdline_str = ' '.join(cmdline) if cmdline else ''
+            cmdline_str = " ".join(cmdline) if cmdline else ""
             should_kill = False
 
             for keyword in keywords:
@@ -67,6 +70,7 @@ def find_and_kill_test_processes():
 
     return killed_count
 
+
 def main():
     logger.info("=" * 60)
     logger.info("清理后台推流进程")
@@ -87,6 +91,7 @@ def main():
     except Exception as e:
         logger.error(f"\n❌ 清理失败: {e}", exc_info=True)
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

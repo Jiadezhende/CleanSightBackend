@@ -16,23 +16,18 @@
 8. 清理 FFmpeg
 9. 生成测试报告
 """
-import asyncio
+
 import argparse
-import time
+import asyncio
 import sys
+import time
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, Any
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from integration_tests.utils import (
-    FFmpegController,
-    DatabaseHelper,
-    APIClient,
-)
 from integration_tests.client_viewer import InferenceViewer
+from integration_tests.utils import APIClient, DatabaseHelper, FFmpegController
 
 
 class UnifiedAPILocalTest:
@@ -43,7 +38,7 @@ class UnifiedAPILocalTest:
         task_id: int = 1,
         duration: int = 30,
         video_path: str = None,
-        show_window: bool = True
+        show_window: bool = True,
     ):
         self.task_id = task_id
         self.client_id = None
@@ -71,7 +66,9 @@ class UnifiedAPILocalTest:
     def run(self):
         """运行完整测试"""
         print("=" * 70)
-        print(f"🚀 本地集成测试（统一 API） - 任务 {self.task_id} - 时长 {self.duration}s")
+        print(
+            f"🚀 本地集成测试（统一 API） - 任务 {self.task_id} - 时长 {self.duration}s"
+        )
         print("=" * 70)
 
         try:
@@ -94,6 +91,7 @@ class UnifiedAPILocalTest:
         except Exception as e:
             print(f"\n❌ 测试失败: {e}")
             import traceback
+
             traceback.print_exc()
             self.errors.append(str(e))
             return False
@@ -124,7 +122,7 @@ class UnifiedAPILocalTest:
             task = self.db.get_task(self.task_id)
             print(f"  ✅ 创建测试任务: task_id={self.task_id}")
 
-        if task and getattr(task, 'source_ip', None):
+        if task and getattr(task, "source_ip", None):
             self.client_id = str(task.source_ip)
         else:
             raise Exception("无法从数据库获取 task.source_ip")
@@ -143,7 +141,9 @@ class UnifiedAPILocalTest:
             raise Exception("FFmpeg 推流启动失败")
 
         print(f"  ✅ FFmpeg 推流已启动")
-        print(f"     进程 PID: {self.ffmpeg.process.pid if self.ffmpeg.process else 'N/A'}")
+        print(
+            f"     进程 PID: {self.ffmpeg.process.pid if self.ffmpeg.process else 'N/A'}"
+        )
 
     def _unified_start(self):
         """使用新统一 API 启动"""
@@ -154,9 +154,7 @@ class UnifiedAPILocalTest:
         self.start_time = time.time()
 
         result = self.api.unified_start(
-            task_id=self.task_id,
-            rtsp_url=self.rtsp_url,
-            fps=30
+            task_id=self.task_id, rtsp_url=self.rtsp_url, fps=30
         )
 
         if "error" in result:
@@ -178,9 +176,7 @@ class UnifiedAPILocalTest:
         print(f"\n🎥 启动推理结果监控 ({self.duration}s)...")
 
         viewer = InferenceViewer(
-            self.client_id,
-            show_window=self.show_window,
-            base_port="localhost:8000"
+            self.client_id, show_window=self.show_window, base_port="localhost:8000"
         )
 
         await viewer.connect_and_display(self.duration)
@@ -207,13 +203,19 @@ class UnifiedAPILocalTest:
                 if result.get("cleanup_details"):
                     details = result["cleanup_details"]
                     print(f"\n  📝 清理详情:")
-                    print(f"     解码器停止: {'✓' if details.get('decoder_stopped') else '✗'}")
-                    print(f"     数据落盘: {'✓' if details.get('data_flushed') else '✗'}")
-                    print(f"     ClientManager清理: {'✓' if details.get('client_cleaned') else '✗'}")
+                    print(
+                        f"     解码器停止: {'✓' if details.get('decoder_stopped') else '✗'}"
+                    )
+                    print(
+                        f"     数据落盘: {'✓' if details.get('data_flushed') else '✗'}"
+                    )
+                    print(
+                        f"     ClientManager清理: {'✓' if details.get('client_cleaned') else '✗'}"
+                    )
 
-                    if details.get('errors'):
+                    if details.get("errors"):
                         print(f"     ⚠️ 错误: {details['errors']}")
-                        self.errors.extend(details['errors'])
+                        self.errors.extend(details["errors"])
 
         # 停止 FFmpeg
         if self.ffmpeg:
@@ -249,7 +251,9 @@ class UnifiedAPILocalTest:
 def main():
     parser = argparse.ArgumentParser(description="本地集成测试 - 统一 API")
     parser.add_argument("--task_id", type=int, default=1, help="任务 ID（默认: 1）")
-    parser.add_argument("--duration", type=int, default=30, help="测试时长（秒，默认: 30）")
+    parser.add_argument(
+        "--duration", type=int, default=30, help="测试时长（秒，默认: 30）"
+    )
     parser.add_argument("--video_path", type=str, default=None, help="测试视频路径")
     parser.add_argument("--no-window", action="store_true", help="禁用可视化窗口")
 
@@ -259,7 +263,7 @@ def main():
         task_id=args.task_id,
         duration=args.duration,
         video_path=args.video_path,
-        show_window=not args.no_window
+        show_window=not args.no_window,
     )
 
     success = test.run()

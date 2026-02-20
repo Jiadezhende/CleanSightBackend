@@ -8,17 +8,18 @@
 - 数据库记录
 """
 
-from typing import Dict, Any, Optional, List, Tuple
-import threading
-import time
 import json
 import logging
+import threading
+import time
 import urllib.request
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-from app.settings import settings
-from app.database import engine
 from sqlalchemy import text
+
+from app.database import engine
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class AlarmPersistenceStrategy:
         batch_interval: int = 30,
         cooldown_seconds: int = 60,
         retry_times: int = 3,
-        retry_backoff: float = 1.0
+        retry_backoff: float = 1.0,
     ):
         self.batch_interval = batch_interval
         self.cooldown_seconds = cooldown_seconds
@@ -40,7 +41,9 @@ class AlarmPersistenceStrategy:
 
         # 批量去重
         self._lock = threading.Lock()
-        self._pending: Dict[str, Dict[str, Any]] = {}  # key -> {count, first_seen, last_seen, alarm_info}
+        self._pending: Dict[str, Dict[str, Any]] = (
+            {}
+        )  # key -> {count, first_seen, last_seen, alarm_info}
         self._recent: Dict[str, float] = {}  # key -> last_report_time
 
     def should_report(self, task_key: str) -> bool:
@@ -57,14 +60,14 @@ class AlarmPersistenceStrategy:
         with self._lock:
             if task_key not in self._pending:
                 self._pending[task_key] = {
-                    'count': 1,
-                    'first_seen': time.time(),
-                    'last_seen': time.time(),
-                    'alarm_info': alarm_info
+                    "count": 1,
+                    "first_seen": time.time(),
+                    "last_seen": time.time(),
+                    "alarm_info": alarm_info,
                 }
             else:
-                self._pending[task_key]['count'] += 1
-                self._pending[task_key]['last_seen'] = time.time()
+                self._pending[task_key]["count"] += 1
+                self._pending[task_key]["last_seen"] = time.time()
 
     def flush_pending_alarms(self) -> List[Tuple[str, Dict[str, Any]]]:
         """刷新待处理告警（返回需要上报的告警列表）"""
@@ -84,13 +87,13 @@ class AlarmPersistenceStrategy:
                     continue
 
                 # 构建聚合告警
-                agg_alarm = dict(item['alarm_info'])
-                agg_alarm['alarm_count'] = item.get('count', 1)
-                agg_alarm['first_seen'] = datetime.fromtimestamp(
-                    item.get('first_seen')
+                agg_alarm = dict(item["alarm_info"])
+                agg_alarm["alarm_count"] = item.get("count", 1)
+                agg_alarm["first_seen"] = datetime.fromtimestamp(
+                    item.get("first_seen")
                 ).strftime("%Y-%m-%d %H:%M:%S")
-                agg_alarm['last_seen'] = datetime.fromtimestamp(
-                    item.get('last_seen')
+                agg_alarm["last_seen"] = datetime.fromtimestamp(
+                    item.get("last_seen")
                 ).strftime("%Y-%m-%d %H:%M:%S")
 
                 to_report.append((key, agg_alarm))
@@ -123,48 +126,50 @@ class AlarmPersistenceStrategy:
 
     def _should_send_http(self, alarm_info: Dict[str, Any]) -> bool:
         """检查是否需要HTTP上报（需要task_id和step_id）"""
-        return alarm_info.get('task_id') and alarm_info.get('step_id')
+        return alarm_info.get("task_id") and alarm_info.get("step_id")
 
     def _send_alarm_http(self, alarm_info: Dict[str, Any]) -> bool:
         """HTTP上报告警（带重试，从InferenceManager._send_alarm_report迁移）"""
         url = settings.alarm_report_url
 
         payload = {
-            "task_id": alarm_info.get('task_id', 0),
-            "step_id": alarm_info.get('step_id', 0),
-            "alarm_type": alarm_info.get('alarm_type', '流程违规'),
-            "alarm_level": alarm_info.get('alarm_level', 'high'),
-            "alarm_message": alarm_info.get('alarm_message', 'AI推理检测到异常'),
-            "alarm_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "task_id": alarm_info.get("task_id", 0),
+            "step_id": alarm_info.get("step_id", 0),
+            "alarm_type": alarm_info.get("alarm_type", "流程违规"),
+            "alarm_level": alarm_info.get("alarm_level", "high"),
+            "alarm_message": alarm_info.get("alarm_message", "AI推理检测到异常"),
+            "alarm_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         # 可选字段
-        if alarm_info.get('detection_result'):
-            payload['detection_result'] = alarm_info['detection_result']
-        if alarm_info.get('alarm_count'):
-            payload['alarm_count'] = int(alarm_info['alarm_count'])
-        if alarm_info.get('first_seen'):
-            payload['first_seen'] = alarm_info['first_seen']
-        if alarm_info.get('last_seen'):
-            payload['last_seen'] = alarm_info['last_seen']
+        if alarm_info.get("detection_result"):
+            payload["detection_result"] = alarm_info["detection_result"]
+        if alarm_info.get("alarm_count"):
+            payload["alarm_count"] = int(alarm_info["alarm_count"])
+        if alarm_info.get("first_seen"):
+            payload["first_seen"] = alarm_info["first_seen"]
+        if alarm_info.get("last_seen"):
+            payload["last_seen"] = alarm_info["last_seen"]
 
-        data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
-            'Content-Type': 'application/json; charset=utf-8',
-            'User-Agent': 'CleanSight-Backend/1.0'
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "CleanSight-Backend/1.0",
         }
 
         # 重试逻辑
         backoff = self.retry_backoff
         for attempt in range(1, self.retry_times + 1):
             try:
-                req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+                req = urllib.request.Request(
+                    url, data=data, headers=headers, method="POST"
+                )
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    resp_text = resp.read().decode('utf-8')
+                    resp_text = resp.read().decode("utf-8")
                     try:
                         j = json.loads(resp_text)
-                        if j.get('code') == 0:
-                            logger.info("告警上报成功: task_id=%s", payload['task_id'])
+                        if j.get("code") == 0:
+                            logger.info("告警上报成功: task_id=%s", payload["task_id"])
                             return True
                         else:
                             logger.warning("告警上报返回错误: %s", j)
@@ -185,7 +190,7 @@ class AlarmPersistenceStrategy:
 
     def _record_alarm_db(self, alarm_info: Dict[str, Any]):
         """记录告警到数据库（从InferenceManager._record_alarm_db迁移）"""
-        create_sql = '''
+        create_sql = """
         CREATE TABLE IF NOT EXISTS clean_alarm (
             alarm_id SERIAL PRIMARY KEY,
             task_id INTEGER,
@@ -202,31 +207,35 @@ class AlarmPersistenceStrategy:
             first_seen BIGINT,
             last_seen BIGINT
         )
-        '''
+        """
 
         with engine.begin() as conn:
             conn.execute(text(create_sql))
 
-            insert_sql = '''
+            insert_sql = """
             INSERT INTO clean_alarm
             (task_id, step_id, alarm_type, message, severity, detected_at, alarm_count, first_seen, last_seen)
             VALUES (:task_id, :step_id, :alarm_type, :message, :severity, :detected_at, :alarm_count, :first_seen, :last_seen)
-            '''
+            """
 
             params = {
-                'task_id': alarm_info.get('task_id'),
-                'step_id': alarm_info.get('step_id'),
-                'alarm_type': alarm_info.get('alarm_type', '流程违规'),
-                'message': alarm_info.get('alarm_message', 'AI推理检测到异常'),
-                'severity': alarm_info.get('alarm_level', 'high'),
-                'detected_at': int(time.time()),
-                'alarm_count': alarm_info.get('alarm_count', 1),
-                'first_seen': self._parse_timestamp(alarm_info.get('first_seen')),
-                'last_seen': self._parse_timestamp(alarm_info.get('last_seen')),
+                "task_id": alarm_info.get("task_id"),
+                "step_id": alarm_info.get("step_id"),
+                "alarm_type": alarm_info.get("alarm_type", "流程违规"),
+                "message": alarm_info.get("alarm_message", "AI推理检测到异常"),
+                "severity": alarm_info.get("alarm_level", "high"),
+                "detected_at": int(time.time()),
+                "alarm_count": alarm_info.get("alarm_count", 1),
+                "first_seen": self._parse_timestamp(alarm_info.get("first_seen")),
+                "last_seen": self._parse_timestamp(alarm_info.get("last_seen")),
             }
 
             conn.execute(text(insert_sql), params)
-            logger.info("告警记录到数据库: task_id=%s, alarm_count=%s", params['task_id'], params['alarm_count'])
+            logger.info(
+                "告警记录到数据库: task_id=%s, alarm_count=%s",
+                params["task_id"],
+                params["alarm_count"],
+            )
 
     def _parse_timestamp(self, ts_str: Optional[str]) -> Optional[int]:
         """解析时间戳字符串"""

@@ -77,7 +77,9 @@ class VisualizationWorker:
         self.worker_id = worker_id
 
         # 缓存每个客户端的最新检测结果（用于降帧补偿）
-        self.latest_results: Dict[str, Tuple[Dict[str, Any], Optional[TemporalAnalysisResult]]] = {}
+        self.latest_results: Dict[
+            str, Tuple[Dict[str, Any], Optional[TemporalAnalysisResult]]
+        ] = {}
 
     def run(self):
         """工作循环。"""

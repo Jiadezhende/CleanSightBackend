@@ -10,19 +10,21 @@
 - 协调 InferenceManager 和 StreamService
 - 负责 ClientManager 的清理
 """
+
 import logging
 import time
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
 from app.models.task import DBTask, Task
-from app.services import ai
-from app.services.stream import stream_service
-from app.services.client.manager import client_manager
 from app.routers.health import get_health_monitor
-from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError, AppError
-from sqlalchemy.exc import SQLAlchemyError
+from app.services import ai
+from app.services.client.manager import client_manager
+from app.services.stream import stream_service
+from app.utils.exceptions import AppError, DatabaseError, NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ router = APIRouter(prefix="/api", tags=["unified"])
 
 class StartRequest(BaseModel):
     """启动请求"""
+
     task_id: int
     rtsp_url: str
     fps: int = 30
@@ -66,21 +69,19 @@ async def start(req: StartRequest):
             raise DatabaseError(
                 message=f"Failed to query task {req.task_id}",
                 retryable=True,
-                query=f"SELECT * FROM task WHERE task_id = {req.task_id}"
+                query=f"SELECT * FROM task WHERE task_id = {req.task_id}",
             ) from e
 
         if not db_task:
             raise NotFoundError(
                 message=f"Task {req.task_id} not found",
                 resource_type="Task",
-                resource_id=str(req.task_id)
+                resource_id=str(req.task_id),
             )
 
         if not db_task.source_ip:
             raise ValidationError(
-                message="Task source_ip is required",
-                field="source_ip",
-                value=None
+                message="Task source_ip is required", field="source_ip", value=None
             )
 
         client_id = str(db_task.source_ip)
@@ -93,10 +94,14 @@ async def start(req: StartRequest):
 
             if old_task_id is not None and old_task_id != req.task_id:
                 # 跨任务切换：清理旧数据
-                logger.info(f"[start] Task changed for {client_id}: {old_task_id} → {req.task_id}, clearing old data")
+                logger.info(
+                    f"[start] Task changed for {client_id}: {old_task_id} → {req.task_id}, clearing old data"
+                )
                 removal_result = client_manager.remove_client(client_id, cleanup=True)
                 if removal_result["error"]:
-                    logger.warning(f"[start] Failed to clean old client data: {removal_result['error']}")
+                    logger.warning(
+                        f"[start] Failed to clean old client data: {removal_result['error']}"
+                    )
 
         # 3. 设置新任务
         task = Task(
@@ -106,25 +111,24 @@ async def start(req: StartRequest):
             updated_at=int(time.time()),
             fully_submerged=False,
             bending=False,
-            bubble_detected=False
+            bubble_detected=False,
         )
 
         success = ai.set_task(client_id, task)
         if not success:
             raise AppError(
                 message=f"Failed to set task for client {client_id}",
-                client_id=client_id
+                client_id=client_id,
             )
 
-        logger.info(f"[start] Task set successfully: {client_id} -> task_id={req.task_id}")
+        logger.info(
+            f"[start] Task set successfully: {client_id} -> task_id={req.task_id}"
+        )
 
         # 4. 启动流
         ai.set_stream_url(client_id, req.rtsp_url)
         stream_service.start_stream(
-            client_id=client_id,
-            stream_url=req.rtsp_url,
-            fps=req.fps,
-            protocol='RTSP'
+            client_id=client_id, stream_url=req.rtsp_url, fps=req.fps, protocol="RTSP"
         )
 
         logger.info(f"[start] Stream started successfully: {client_id}")
@@ -134,7 +138,7 @@ async def start(req: StartRequest):
             "client_id": client_id,
             "task_id": req.task_id,
             "rtsp_url": req.rtsp_url,
-            "message": f"Task {req.task_id} started for client {client_id}"
+            "message": f"Task {req.task_id} started for client {client_id}",
         }
 
     finally:
@@ -173,18 +177,21 @@ async def terminate(client_id: str):
     monitor = get_health_monitor()
     if monitor:
         result = monitor.cleanup_client(
-            client_id=client_id,
-            reason="API termination request"
+            client_id=client_id, reason="API termination request"
         )
     else:
         # Fallback: 健康监控未初始化，执行手动清理
-        logger.warning("[terminate] Health monitor not initialized, using fallback cleanup")
+        logger.warning(
+            "[terminate] Health monitor not initialized, using fallback cleanup"
+        )
         result = _manual_cleanup_fallback(client_id)
 
     # 调整返回格式以匹配原有 API
     if result["errors"]:
         result["status"] = "partial_success"
-        logger.warning(f"[terminate] Completed with errors: {client_id} - {result['errors']}")
+        logger.warning(
+            f"[terminate] Completed with errors: {client_id} - {result['errors']}"
+        )
     else:
         result["status"] = "success"
         logger.info(f"[terminate] Terminated successfully: {client_id}")
@@ -206,7 +213,7 @@ def _manual_cleanup_fallback(client_id: str):
         "decoder_stopped": False,
         "data_flushed": False,
         "client_cleaned": False,
-        "errors": []
+        "errors": [],
     }
 
     # 1. 停止解码器
@@ -238,6 +245,8 @@ def _manual_cleanup_fallback(client_id: str):
             logger.info(f"[terminate_fallback] ClientManager cleaned: {client_id}")
     except Exception as e:
         result["errors"].append(f"client_manager: {e}")
-        logger.error(f"[terminate_fallback] Failed to clean ClientManager: {client_id} - {e}")
+        logger.error(
+            f"[terminate_fallback] Failed to clean ClientManager: {client_id} - {e}"
+        )
 
     return result

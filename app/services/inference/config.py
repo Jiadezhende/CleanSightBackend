@@ -11,8 +11,8 @@
     config = load_stage_config()
 """
 
-import os
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,7 +21,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # 全局配置缓存（单例模式）
-_global_inference_config: Optional['InferenceConfig'] = None
+_global_inference_config: Optional["InferenceConfig"] = None
 
 
 class StageConfig:
@@ -36,9 +36,9 @@ class StageConfig:
         )
         self.visualizer: Optional[Dict[str, Any]] = config_dict.get("visualizer")
         # 确保即使 alarm_triggers 为 None 也转换为空列表
-        self.alarm_triggers: List[Dict[str, Any]] = config_dict.get(
-            "alarm_triggers"
-        ) or []
+        self.alarm_triggers: List[Dict[str, Any]] = (
+            config_dict.get("alarm_triggers") or []
+        )
 
     def __repr__(self):
         return f"StageConfig(stage={self.stage_name}, models={len(self.models)})"
@@ -55,8 +55,12 @@ class InferenceConfig:
         # 全局配置
         self.global_config: Dict[str, Any] = config_dict.get("global", {})
         self.batch_size: int = self.global_config.get("batch_size", 4)
-        self.inference_decimation: int = self.global_config.get("inference_decimation", 2)
-        self.visualization_decimation: int = self.global_config.get("visualization_decimation", 1)
+        self.inference_decimation: int = self.global_config.get(
+            "inference_decimation", 2
+        )
+        self.visualization_decimation: int = self.global_config.get(
+            "visualization_decimation", 1
+        )
         self.alarm_config: Dict[str, Any] = self.global_config.get("alarm", {})
 
         # 从global配置提取参数（新增）
@@ -108,7 +112,8 @@ def _expand_env_vars(config: Any) -> Any:
     elif isinstance(config, str):
         # 使用正则表达式匹配所有 ${VAR_NAME} 或 ${VAR_NAME:default} 模式
         import re
-        pattern = r'\$\{([^}]+)\}'
+
+        pattern = r"\$\{([^}]+)\}"
 
         def replace_var(match):
             var_expr = match.group(1)
@@ -125,7 +130,9 @@ def _expand_env_vars(config: Any) -> Any:
         return config
 
 
-def load_stage_config(config_path: Optional[Path] = None, force_reload: bool = False) -> InferenceConfig:
+def load_stage_config(
+    config_path: Optional[Path] = None, force_reload: bool = False
+) -> InferenceConfig:
     """加载 Stage 配置文件（单例模式）
 
     Args:
@@ -196,17 +203,23 @@ def load_stage_config(config_path: Optional[Path] = None, force_reload: bool = F
         return default_config
 
 
-def _log_loaded_config(config: 'InferenceConfig'):
+def _log_loaded_config(config: "InferenceConfig"):
     """输出加载的配置（启动时显示）"""
     logger.info("========== Inference配置 ==========")
     logger.info("Stage数量: %d", len(config.list_stages()))
-    logger.info("FPS配置: raw_fps=%.1f, inference_fps=%d", config.raw_fps, config.inference_fps)
-    logger.info("队列配置: rt_maxlen=%d, ca_maxlen=%d", config.rt_maxlen, config.ca_maxlen)
-    logger.info("批处理: batch_size=%d, decimation=%d", config.batch_size, config.inference_decimation)
+    logger.info(
+        "FPS配置: raw_fps=%.1f, inference_fps=%d", config.raw_fps, config.inference_fps
+    )
+    logger.info(
+        "队列配置: rt_maxlen=%d, ca_maxlen=%d", config.rt_maxlen, config.ca_maxlen
+    )
+    logger.info(
+        "批处理: batch_size=%d, decimation=%d",
+        config.batch_size,
+        config.inference_decimation,
+    )
     logger.info("📌 此文件为所有模块共享参数的单一数据源")
     logger.info("=====================================")
-
-
 
 
 def _create_default_config() -> InferenceConfig:
@@ -351,6 +364,4 @@ if __name__ == "__main__":
             print(f"    - {model_cfg['name']}: {model_cfg['class']}")
 
         if stage_config.temporal_analyzer:
-            print(
-                f"  Temporal Analyzer: {stage_config.temporal_analyzer.get('class')}"
-            )
+            print(f"  Temporal Analyzer: {stage_config.temporal_analyzer.get('class')}")

@@ -4,11 +4,12 @@
 支持从YAML文件加载配置，提供默认值
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 import yaml
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HLSConfig:
     """HLS持久化配置"""
+
     workers: int = 2
     queue_size: int = 100
     segment_duration: int = 10
@@ -25,6 +27,7 @@ class HLSConfig:
 @dataclass
 class AlarmConfig:
     """告警持久化配置"""
+
     workers: int = 1
     queue_size: int = 200
     batch_interval: int = 30
@@ -36,6 +39,7 @@ class AlarmConfig:
 @dataclass
 class StorageConfig:
     """存储配置"""
+
     base_dir: str = "./database"
     enable_db_write: bool = False
     enable_cleanup: bool = False
@@ -45,12 +49,13 @@ class StorageConfig:
 @dataclass
 class PersistenceConfig:
     """持久化配置（统一入口）"""
+
     storage: StorageConfig = field(default_factory=StorageConfig)
     hls: HLSConfig = field(default_factory=HLSConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
 
     @classmethod
-    def from_yaml(cls, config_path: Optional[str] = None) -> 'PersistenceConfig':
+    def from_yaml(cls, config_path: Optional[str] = None) -> "PersistenceConfig":
         """从YAML配置文件加载
 
         Args:
@@ -71,7 +76,7 @@ class PersistenceConfig:
             config = cls()
         else:
             try:
-                with open(config_file, 'r', encoding='utf-8') as f:
+                with open(config_file, "r", encoding="utf-8") as f:
                     config_dict = yaml.safe_load(f) or {}
                 logger.info("✓ 已加载persistence配置: %s", config_path)
                 config = cls.from_dict(config_dict)
@@ -89,7 +94,7 @@ class PersistenceConfig:
         return config
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> 'PersistenceConfig':
+    def from_dict(cls, config_dict: Dict[str, Any]) -> "PersistenceConfig":
         """从字典构造配置对象
 
         Args:
@@ -98,9 +103,9 @@ class PersistenceConfig:
         Returns:
             PersistenceConfig实例
         """
-        storage = StorageConfig(**config_dict.get('storage', {}))
-        hls = HLSConfig(**config_dict.get('hls', {}))
-        alarm = AlarmConfig(**config_dict.get('alarm', {}))
+        storage = StorageConfig(**config_dict.get("storage", {}))
+        hls = HLSConfig(**config_dict.get("hls", {}))
+        alarm = AlarmConfig(**config_dict.get("alarm", {}))
         return cls(storage=storage, hls=hls, alarm=alarm)
 
     @property
@@ -172,14 +177,18 @@ class PersistenceConfig:
         """
         try:
             from app.services.inference.config import load_stage_config
+
             inference_config = load_stage_config()
 
             # 从inference config读取共享参数
             self._raw_fps = inference_config.raw_fps
             self._processed_fps = inference_config.inference_fps
 
-            logger.debug("✓ 已从inference_config.yaml读取共享参数: raw_fps=%.1f, inference_fps=%d",
-                        self._raw_fps, self._processed_fps)
+            logger.debug(
+                "✓ 已从inference_config.yaml读取共享参数: raw_fps=%.1f, inference_fps=%d",
+                self._raw_fps,
+                self._processed_fps,
+            )
         except Exception as e:
             # 如果无法加载inference配置，使用默认值
             logger.warning("✗ 无法从inference配置读取共享参数，使用默认值: %s", e)
@@ -189,27 +198,40 @@ class PersistenceConfig:
     @property
     def raw_fps(self) -> float:
         """原始视频帧率（从inference config读取）"""
-        return getattr(self, '_raw_fps', 30.0)
+        return getattr(self, "_raw_fps", 30.0)
 
     @property
     def processed_fps(self) -> float:
         """处理后视频帧率（从inference config读取）"""
-        return getattr(self, '_processed_fps', 20.0)
+        return getattr(self, "_processed_fps", 20.0)
 
     def _log_loaded_config(self):
         """输出加载的配置（启动时显示）"""
         logger.info("========== Persistence配置 ==========")
         logger.info("存储: base_dir=%s", self.storage.base_dir)
-        logger.info("HLS: workers=%d, queue=%d, raw_fps=%.1f, processed_fps=%.1f",
-                   self.hls.workers, self.hls.queue_size,
-                   self.raw_fps, self.processed_fps)
-        logger.info("告警: workers=%d, queue=%d, batch=%ds, cooldown=%ds",
-                   self.alarm.workers, self.alarm.queue_size,
-                   self.alarm.batch_interval, self.alarm.cooldown_seconds)
-        logger.info("清理: enabled=%s, days=%d",
-                   self.storage.enable_cleanup, self.storage.cleanup_days)
-        logger.info("📌 fps参数来源: inference_config.yaml (global.raw_fps, global.inference_fps)")
-        logger.info("=====================================") 
+        logger.info(
+            "HLS: workers=%d, queue=%d, raw_fps=%.1f, processed_fps=%.1f",
+            self.hls.workers,
+            self.hls.queue_size,
+            self.raw_fps,
+            self.processed_fps,
+        )
+        logger.info(
+            "告警: workers=%d, queue=%d, batch=%ds, cooldown=%ds",
+            self.alarm.workers,
+            self.alarm.queue_size,
+            self.alarm.batch_interval,
+            self.alarm.cooldown_seconds,
+        )
+        logger.info(
+            "清理: enabled=%s, days=%d",
+            self.storage.enable_cleanup,
+            self.storage.cleanup_days,
+        )
+        logger.info(
+            "📌 fps参数来源: inference_config.yaml (global.raw_fps, global.inference_fps)"
+        )
+        logger.info("=====================================")
 
     def _validate_config(self):
         """配置验证和冲突检测"""
@@ -220,14 +242,10 @@ class PersistenceConfig:
 
         # 2. 检查队列容量合理性
         if self.hls.queue_size < 100:
-            warnings.append(
-                f"⚠️  HLS队列容量过小: {self.hls.queue_size}，建议>=256"
-            )
+            warnings.append(f"⚠️  HLS队列容量过小: {self.hls.queue_size}，建议>=256")
 
         if self.alarm.queue_size < 64:
-            warnings.append(
-                f"⚠️  告警队列容量过小: {self.alarm.queue_size}，建议>=128"
-            )
+            warnings.append(f"⚠️  告警队列容量过小: {self.alarm.queue_size}，建议>=128")
 
         # 3. 检查Worker数量合理性
         if self.hls.workers > 4:

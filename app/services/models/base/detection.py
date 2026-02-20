@@ -5,8 +5,9 @@ This is a no-inference, structure-only default model for testing zero-load scena
 It returns the frame unchanged with minimal metadata.
 """
 
+from typing import Any, Dict, Tuple
+
 import numpy as np
-from typing import Dict, Any, Tuple
 
 
 class DetectionModel:

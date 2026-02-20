@@ -3,12 +3,18 @@
 
 提供全局健康监控服务的生命周期管理和状态查询接口
 """
+
+import logging
 from contextlib import asynccontextmanager
+
 from fastapi import APIRouter
-from app.services.health_monitor import GlobalHealthMonitor, get_health_monitor_config
-from app.services.client.manager import client_manager
-from app.services.stream import stream_service
+
 from app.services import ai
+from app.services.client.manager import client_manager
+from app.services.health_monitor import GlobalHealthMonitor, get_health_monitor_config
+from app.services.stream import stream_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -50,48 +56,68 @@ async def lifespan():
         client_manager=client_manager,
         stream_service=stream_service,
         inference_manager=ai.manager,
-        config=health_config
+        config=health_config,
     )
     _health_monitor.start()
-    print("✅ 全局健康监控已启动")
+
+    logger.info(
+        "全局健康监控已启动 | check_interval=%.1fs, heartbeat_timeout=%.1fs, "
+        "reconnect_interval=%.1fs, max_reconnect_attempts=%d, orphan_timeout=%.1fs",
+        health_config.check_interval,
+        health_config.heartbeat_timeout,
+        health_config.reconnect_interval,
+        health_config.max_reconnect_attempts,
+        health_config.orphan_timeout,
+    )
 
     try:
         yield
     finally:
         # 停止健康监控
         if _health_monitor:
+            stats = _health_monitor.get_stats()
             _health_monitor.stop()
-            print("✅ 全局健康监控已停止")
+            logger.info(
+                "全局健康监控已停止 | 运行统计: checks=%d, suspects=%d, cleanups=%d, "
+                "reconnects=%d, reconnect_successes=%d, orphans_detected=%d",
+                stats["checks"],
+                stats["suspects"],
+                stats["cleanups"],
+                stats["reconnects"],
+                stats["reconnect_successes"],
+                stats["orphans_detected"],
+            )
 
 
 @router.get("/monitor/stats")
 async def get_monitor_stats():
     """
-    获取健康监控统计信息
+    获取健康监控统计信息（累计统计）
 
-    返回监控循环的统计数据：
-    - checks: 检查次数
-    - suspects: 检测到的可疑断流次数
-    - cleanups: 完整清理次数
-    - reconnects: 重连尝试次数
-    - reconnect_successes: 重连成功次数
-    - orphans_detected: 孤儿流检测次数
-    - reconnecting_count: 当前重连中的客户端数量
-    - reconnecting_clients: 当前重连中的客户端ID列表
+    返回监控循环的累计统计数据（自启动以来的总计）：
+    - checks: 监控循环执行次数
+    - suspects: 进入重连模式的客户端总数
+    - cleanups: 执行完整清理的总次数
+    - reconnects: 重连尝试的总次数（包括所有客户端的所有尝试）
+    - reconnect_successes: 重连成功的总次数
+    - orphans_detected: 检测到孤儿（孤儿流 + 孤儿解码器）的总次数
+    - reconnecting_count: 当前重连中的客户端数量（实时快照）
+    - reconnecting_clients: 当前重连中的客户端ID列表（实时快照）
+
+    注意：
+    - 前 6 项为累计统计，持续增长
+    - 后 2 项为实时快照，反映当前状态
 
     GET /health/monitor/stats
     """
     if _health_monitor is None:
         return {
             "status": "not_initialized",
-            "message": "Health monitor not initialized"
+            "message": "Health monitor not initialized",
         }
 
     stats = _health_monitor.get_stats()
-    return {
-        "status": "running",
-        **stats
-    }
+    return {"status": "running", **stats}
 
 
 @router.get("/monitor/config")
@@ -111,7 +137,7 @@ async def get_monitor_config():
     if _health_monitor is None:
         return {
             "status": "not_initialized",
-            "message": "Health monitor not initialized"
+            "message": "Health monitor not initialized",
         }
 
     config = _health_monitor.config
@@ -127,14 +153,14 @@ async def get_monitor_config():
         "derived": {
             "suspect_timeout": _health_monitor.suspect_timeout,
             "cleanup_timeout": _health_monitor.cleanup_timeout,
-        }
+        },
     }
 
 
 @router.get("/status")
 async def get_system_status():
     """
-    获取系统整体状态
+    获取系统整体状态（实时快照）
 
     职责边界：
     - 健康监控负责系统级别的状态汇总
@@ -143,33 +169,42 @@ async def get_system_status():
     - 替代 /ai/status 端点（推荐使用此端点）
 
     返回系统状态信息：
-    - clients: 客户端统计
-      - total: 总客户端数（有队列的）
-      - active_streams: 活跃流数量（有解码器的）
+    - clients: 客户端实时统计（来自最近一次监控检查的快照）
+      - total_clients: 总客户端数（有队列的客户端）
+      - active_streams: 活跃流数量（有解码器且不在重连中的客户端）
       - reconnecting: 重连中的客户端数量
-      - orphans: 孤儿流数量（有队列但无解码器）
-    - queues: 各客户端的队列状态详情
+      - orphan_streams: 孤儿流数量（有队列但无解码器且不在重连中）
+      - orphan_decoders: 孤儿解码器数量（有解码器但无队列且不在重连中）
+
+      注意：各分类互斥，total_clients = active_streams + reconnecting + orphan_streams
+
+    - queues: 各客户端的队列状态详情（字典，key 为 client_id）
       - raw_queue_size: 原始帧队列大小
       - ready_queue_size: 就绪帧队列大小
       - latest_timestamp: 最新帧时间戳
-    - monitor_stats: 监控统计信息
-      - checks: 检查次数
-      - suspects: 检测到的可疑断流次数
-      - cleanups: 完整清理次数
-      - reconnects: 重连尝试次数
-      - reconnect_successes: 重连成功次数
-      - orphans_detected: 孤儿流检测次数
+      - ... (更多队列状态信息)
+
+    - monitor_stats: 监控累计统计信息（自启动以来的总计）
+      - checks: 监控循环执行次数
+      - suspects: 进入重连模式的客户端总数
+      - cleanups: 执行完整清理的总次数
+      - reconnects: 重连尝试的总次数
+      - reconnect_successes: 重连成功的总次数
+      - orphans_detected: 检测到孤儿的总次数
+      - reconnecting_clients: 当前重连中的客户端ID列表
+
+    性能特性：
+    - 客户端统计为缓存数据（每 check_interval 更新一次，默认 5 秒）
+    - 队列状态为实时查询（调用时获取）
+    - 延迟 < 1ms（无重计算开销）
 
     GET /health/status
     """
     if _health_monitor is None:
         return {
             "status": "not_initialized",
-            "message": "Health monitor not initialized"
+            "message": "Health monitor not initialized",
         }
 
     system_status = _health_monitor.get_system_status()
-    return {
-        "status": "running",
-        **system_status
-    }
+    return {"status": "running", **system_status}

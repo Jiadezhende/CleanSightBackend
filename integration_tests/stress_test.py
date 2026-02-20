@@ -15,27 +15,28 @@
 
     进程清理脚本：python integration_tests/cleanup_processes.py
 """
-import os
-import sys
-import subprocess
+
 import argparse
+import logging
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
-from multiprocessing import Process, Queue
-import logging
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from sqlalchemy import func
+
 from app.database import get_db
 from app.models.task import DBTask
-from sqlalchemy import func
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [%(process)d] - %(levelname)s - %(message)s'
+    format="%(asctime)s - [%(process)d] - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -80,8 +81,7 @@ class StressTestCoordinator:
             # 使用子查询找出每个source_ip的最小task_id
             subquery = (
                 db.query(
-                    DBTask.source_ip,
-                    func.min(DBTask.task_id).label('min_task_id')
+                    DBTask.source_ip, func.min(DBTask.task_id).label("min_task_id")
                 )
                 .group_by(DBTask.source_ip)
                 .subquery()
@@ -92,8 +92,8 @@ class StressTestCoordinator:
                 db.query(DBTask)
                 .join(
                     subquery,
-                    (DBTask.source_ip == subquery.c.source_ip) &
-                    (DBTask.task_id == subquery.c.min_task_id)
+                    (DBTask.source_ip == subquery.c.source_ip)
+                    & (DBTask.task_id == subquery.c.min_task_id),
                 )
                 .limit(self.max_tasks)
                 .all()
@@ -113,7 +113,9 @@ class StressTestCoordinator:
         finally:
             db.close()
 
-    def start_test_process(self, task_id: int, show_window: bool = False) -> subprocess.Popen:
+    def start_test_process(
+        self, task_id: int, show_window: bool = False
+    ) -> subprocess.Popen:
         """启动单个测试进程
 
         Args:
@@ -127,10 +129,14 @@ class StressTestCoordinator:
         cmd = [
             sys.executable,
             str(Path(__file__).parent / "remote_full_pipeline_rtsp.py"),
-            "--task_id", str(task_id),
-            "--duration", str(self.duration),
-            "--server", self.server,
-            "--video_path", self.video_path,
+            "--task_id",
+            str(task_id),
+            "--duration",
+            str(self.duration),
+            "--server",
+            self.server,
+            "--video_path",
+            self.video_path,
         ]
 
         # 只有第一个进程不添加--no-window
@@ -143,12 +149,14 @@ class StressTestCoordinator:
             log_dir = Path(__file__).parent / "logs"
             log_dir.mkdir(exist_ok=True)
 
-            log_file_path = log_dir / f"stress_test_task_{task_id}_{int(time.time())}.log"
-            log_file = open(log_file_path, 'w', encoding='utf-8')
+            log_file_path = (
+                log_dir / f"stress_test_task_{task_id}_{int(time.time())}.log"
+            )
+            log_file = open(log_file_path, "w", encoding="utf-8")
 
             # 设置环境变量，确保子进程使用UTF-8编码
             env = os.environ.copy()
-            env['PYTHONIOENCODING'] = 'utf-8'
+            env["PYTHONIOENCODING"] = "utf-8"
 
             # 不使用CREATE_NEW_CONSOLE，将输出重定向到日志文件
             process = subprocess.Popen(
@@ -160,11 +168,13 @@ class StressTestCoordinator:
             )
 
             status = "带可视化窗口" if show_window else "无窗口模式"
-            logger.info(f"启动测试进程 - Task ID: {task_id}, PID: {process.pid} ({status})")
+            logger.info(
+                f"启动测试进程 - Task ID: {task_id}, PID: {process.pid} ({status})"
+            )
             logger.info(f"  日志文件: {log_file_path}")
 
             # 保存日志文件引用和路径
-            if not hasattr(self, 'log_files'):
+            if not hasattr(self, "log_files"):
                 self.log_files = []
                 self.log_paths = []
             self.log_files.append(log_file)
@@ -203,7 +213,7 @@ class StressTestCoordinator:
         try:
             for idx, (task_id, _) in enumerate(test_tasks):
                 # 只有第一个进程显示窗口
-                show_window = (idx == 0)
+                show_window = idx == 0
 
                 process = self.start_test_process(task_id, show_window)
                 if process:
@@ -255,13 +265,17 @@ class StressTestCoordinator:
                     # 进程已结束
                     if process.returncode == 0:
                         if idx not in failed_indices:
-                            logger.info(f"✅ Task {self.task_ids[idx]} (PID: {process.pid}) 完成")
+                            logger.info(
+                                f"✅ Task {self.task_ids[idx]} (PID: {process.pid}) 完成"
+                            )
                             completed_count += 1
                             failed_indices.add(idx)  # 标记已处理
                     else:
                         if idx not in failed_indices:
-                            logger.error(f"❌ Task {self.task_ids[idx]} (PID: {process.pid}) 失败 (退出码: {process.returncode})")
-                            if hasattr(self, 'log_paths') and idx < len(self.log_paths):
+                            logger.error(
+                                f"❌ Task {self.task_ids[idx]} (PID: {process.pid}) 失败 (退出码: {process.returncode})"
+                            )
+                            if hasattr(self, "log_paths") and idx < len(self.log_paths):
                                 logger.error(f"   查看日志: {self.log_paths[idx]}")
                             failed_count += 1
                             failed_indices.add(idx)  # 标记已处理
@@ -277,7 +291,9 @@ class StressTestCoordinator:
 
             # 显示运行状态
             elapsed = int(time.time() - start_time)
-            logger.info(f"[{elapsed}s] 运行中: {running_count}, 已完成: {completed_count}, 失败: {len(failed_indices) - completed_count}")
+            logger.info(
+                f"[{elapsed}s] 运行中: {running_count}, 已完成: {completed_count}, 失败: {len(failed_indices) - completed_count}"
+            )
 
             # 等待一段时间再检查
             time.sleep(10)
@@ -309,7 +325,9 @@ class StressTestCoordinator:
             if process and process.poll() is None:
                 try:
                     task_id = self.task_ids[idx] if idx < len(self.task_ids) else "未知"
-                    logger.warning(f"强制终止进程 - Task ID: {task_id}, PID: {process.pid}")
+                    logger.warning(
+                        f"强制终止进程 - Task ID: {task_id}, PID: {process.pid}"
+                    )
                     process.kill()
                     try:
                         process.wait(timeout=3)
@@ -319,7 +337,7 @@ class StressTestCoordinator:
                     logger.error(f"强制终止失败 - 错误: {e}")
 
         # 关闭日志文件
-        if hasattr(self, 'log_files'):
+        if hasattr(self, "log_files"):
             for log_file in self.log_files:
                 try:
                     log_file.close()
@@ -329,7 +347,7 @@ class StressTestCoordinator:
         logger.info("清理完成")
 
         # 打印日志文件位置
-        if hasattr(self, 'log_paths'):
+        if hasattr(self, "log_paths"):
             logger.info("\n查看详细日志:")
             for log_path in self.log_paths:
                 logger.info(f"  - {log_path}")
@@ -338,28 +356,22 @@ class StressTestCoordinator:
 def main():
     parser = argparse.ArgumentParser(description="CleanSight 压力测试脚本")
     parser.add_argument(
-        "--duration",
-        type=int,
-        default=60,
-        help="测试时长（秒，默认: 60）"
+        "--duration", type=int, default=60, help="测试时长（秒，默认: 60）"
     )
     parser.add_argument(
         "--server",
         type=str,
         default="117.50.241.174",
-        help="远程服务器地址（默认: 117.50.241.174）"
+        help="远程服务器地址（默认: 117.50.241.174）",
     )
     parser.add_argument(
-        "--max-tasks",
-        type=int,
-        default=10,
-        help="最大并发任务数（默认: 10）"
+        "--max-tasks", type=int, default=10, help="最大并发任务数（默认: 10）"
     )
     parser.add_argument(
         "--video-path",
         type=str,
         default=None,
-        help="测试视频路径（默认: test/test_video.mp4）"
+        help="测试视频路径（默认: test/test_video.mp4）",
     )
 
     args = parser.parse_args()

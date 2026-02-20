@@ -16,20 +16,22 @@
     # 指定运行时长
     python visualize_inference.py --client_id rtsp.test.1 --duration 60
 """
-import asyncio
+
 import argparse
+import asyncio
 import base64
+from datetime import datetime, timedelta
+
 import cv2
 import numpy as np
 import websockets
-from datetime import datetime, timedelta
 
 
 class InferenceVisualizer:
     """推理结果可视化器"""
 
     def __init__(self, server_url: str, client_id: str, show_window: bool = True):
-        self.server_url = server_url.rstrip('/')
+        self.server_url = server_url.rstrip("/")
         self.client_id = client_id
         self.show_window = show_window
         self.window_name = f"推理结果 - {client_id}"
@@ -94,9 +96,9 @@ class InferenceVisualizer:
         self.last_second_frames += 1
 
         # 处理 Base64 图像
-        if message.startswith('data:image') and self.show_window:
+        if message.startswith("data:image") and self.show_window:
             try:
-                base64_data = message.split(',')[1]
+                base64_data = message.split(",")[1]
                 img_data = base64.b64decode(base64_data)
                 img_array = np.frombuffer(img_data, dtype=np.uint8)
                 frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
@@ -104,7 +106,7 @@ class InferenceVisualizer:
                 if frame is not None:
                     cv2.imshow(self.window_name, frame)
                     key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'):
+                    if key == ord("q"):
                         print("\n👋 用户退出")
                         return False
 
@@ -131,8 +133,10 @@ class InferenceVisualizer:
         # 格式化运行时间
         elapsed_str = str(timedelta(seconds=int(elapsed)))
 
-        print(f"📊 运行时间: {elapsed_str} | 总帧数: {self.frame_count:5d} | "
-              f"瞬时FPS: {instant_fps:5.1f} | 平均FPS: {avg_fps:5.1f}")
+        print(
+            f"📊 运行时间: {elapsed_str} | 总帧数: {self.frame_count:5d} | "
+            f"瞬时FPS: {instant_fps:5.1f} | 平均FPS: {avg_fps:5.1f}"
+        )
 
         # 重置计数器
         self.last_second_frames = 0
@@ -172,43 +176,33 @@ def main():
 
   # 运行 60 秒后自动退出
   %(prog)s --client_id rtsp.test.1 --duration 60
-        """
+        """,
     )
 
     parser.add_argument(
         "--server",
         type=str,
         default="localhost:8000",
-        help="后端服务器地址 (默认: localhost:8000)"
+        help="后端服务器地址 (默认: localhost:8000)",
     )
 
-    parser.add_argument(
-        "--client_id",
-        type=str,
-        required=True,
-        help="客户端 ID (必需)"
-    )
+    parser.add_argument("--client_id", type=str, required=True, help="客户端 ID (必需)")
 
     parser.add_argument(
-        "--duration",
-        type=int,
-        default=None,
-        help="运行时长(秒)，不指定则持续运行"
+        "--duration", type=int, default=None, help="运行时长(秒)，不指定则持续运行"
     )
 
     parser.add_argument(
         "--no-window",
         action="store_true",
-        help="不显示可视化窗口，仅在控制台显示统计信息"
+        help="不显示可视化窗口，仅在控制台显示统计信息",
     )
 
     args = parser.parse_args()
 
     # 创建可视化器
     visualizer = InferenceVisualizer(
-        server_url=args.server,
-        client_id=args.client_id,
-        show_window=not args.no_window
+        server_url=args.server, client_id=args.client_id, show_window=not args.no_window
     )
 
     # 运行

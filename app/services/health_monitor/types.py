@@ -6,6 +6,7 @@ from dataclasses import dataclass
 @dataclass
 class ReconnectState:
     """重连状态"""
+
     client_id: str
     stream_url: str
     fps: int

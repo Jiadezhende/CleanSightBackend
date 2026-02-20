@@ -15,22 +15,20 @@
 6. 使用统一 API 终止
 7. 生成测试报告
 """
-import asyncio
+
 import argparse
-import time
+import asyncio
 import sys
-from pathlib import Path
+import time
 from datetime import datetime
-from typing import Dict, Any
+from pathlib import Path
+from typing import Any, Dict
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from integration_tests.utils import (
-    DatabaseHelper,
-    APIClient,
-)
 from integration_tests.client_viewer import InferenceViewer
+from integration_tests.utils import APIClient, DatabaseHelper
 
 
 class UnifiedAPIRemoteTest:
@@ -41,7 +39,7 @@ class UnifiedAPIRemoteTest:
         task_id: int = 1,
         rtsp_url: str = None,
         duration: int = 60,
-        base_url: str = "http://localhost:8000"
+        base_url: str = "http://localhost:8000",
     ):
         self.task_id = task_id
         self.rtsp_url = rtsp_url
@@ -86,6 +84,7 @@ class UnifiedAPIRemoteTest:
         except Exception as e:
             print(f"\n❌ 测试失败: {e}")
             import traceback
+
             traceback.print_exc()
             self.errors.append(str(e))
             return False
@@ -119,7 +118,7 @@ class UnifiedAPIRemoteTest:
         else:
             print(f"  ✅ 任务已存在: task_id={self.task_id}")
 
-        if task and getattr(task, 'source_ip', None):
+        if task and getattr(task, "source_ip", None):
             self.client_id = str(task.source_ip)
         else:
             raise Exception("无法从数据库获取 task.source_ip")
@@ -139,9 +138,7 @@ class UnifiedAPIRemoteTest:
         self.start_time = time.time()
 
         result = self.api.unified_start(
-            task_id=self.task_id,
-            rtsp_url=self.rtsp_url,
-            fps=30
+            task_id=self.task_id, rtsp_url=self.rtsp_url, fps=30
         )
 
         if "error" in result:
@@ -172,7 +169,7 @@ class UnifiedAPIRemoteTest:
         viewer = InferenceViewer(
             self.client_id,
             show_window=False,  # 远程模式不显示窗口
-            base_port=self.base_url.replace("http://", "").replace("https://", "")
+            base_port=self.base_url.replace("http://", "").replace("https://", ""),
         )
 
         try:
@@ -184,7 +181,7 @@ class UnifiedAPIRemoteTest:
             await viewer.connect_and_display(self.duration)
 
             # 获取统计信息
-            self.frames_received = getattr(viewer, 'frames_received', 0)
+            self.frames_received = getattr(viewer, "frames_received", 0)
 
             print(f"\n  ✅ 监控完成")
             print(f"     接收帧数: {self.frames_received}")
@@ -216,13 +213,19 @@ class UnifiedAPIRemoteTest:
                 if result.get("cleanup_details"):
                     details = result["cleanup_details"]
                     print(f"\n  📝 清理详情:")
-                    print(f"     解码器停止: {'✓' if details.get('decoder_stopped') else '✗'}")
-                    print(f"     数据落盘: {'✓' if details.get('data_flushed') else '✗'}")
-                    print(f"     ClientManager清理: {'✓' if details.get('client_cleaned') else '✗'}")
+                    print(
+                        f"     解码器停止: {'✓' if details.get('decoder_stopped') else '✗'}"
+                    )
+                    print(
+                        f"     数据落盘: {'✓' if details.get('data_flushed') else '✗'}"
+                    )
+                    print(
+                        f"     ClientManager清理: {'✓' if details.get('client_cleaned') else '✗'}"
+                    )
 
-                    if details.get('errors'):
+                    if details.get("errors"):
                         print(f"     ⚠️ 清理错误: {details['errors']}")
-                        self.errors.extend(details['errors'])
+                        self.errors.extend(details["errors"])
                     else:
                         print(f"     ✓ 无错误")
 
@@ -280,13 +283,19 @@ def main():
 
   # 指定远程后端地址
   python remote_unified_api_test.py --task_id 2 --rtsp_url rtsp://... --base_url http://192.168.1.100:8000 --duration 120
-        """
+        """,
     )
     parser.add_argument("--task_id", type=int, required=True, help="任务 ID")
     parser.add_argument("--rtsp_url", type=str, required=True, help="RTSP 流地址")
-    parser.add_argument("--duration", type=int, default=60, help="测试时长（秒，默认: 60）")
-    parser.add_argument("--base_url", type=str, default="http://localhost:8000",
-                        help="后端 API 地址（默认: http://localhost:8000）")
+    parser.add_argument(
+        "--duration", type=int, default=60, help="测试时长（秒，默认: 60）"
+    )
+    parser.add_argument(
+        "--base_url",
+        type=str,
+        default="http://localhost:8000",
+        help="后端 API 地址（默认: http://localhost:8000）",
+    )
 
     args = parser.parse_args()
 
@@ -294,7 +303,7 @@ def main():
         task_id=args.task_id,
         rtsp_url=args.rtsp_url,
         duration=args.duration,
-        base_url=args.base_url
+        base_url=args.base_url,
     )
 
     success = test.run()

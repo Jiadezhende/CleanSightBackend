@@ -7,11 +7,12 @@
 - 单例模式，全局共享配置
 """
 
-import yaml
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HealthMonitorConfig:
     """健康监控配置"""
+
     check_interval: float = 1.0
     heartbeat_timeout: float = 5.0
     reconnect_interval: float = 5.0
@@ -26,7 +28,7 @@ class HealthMonitorConfig:
     orphan_timeout: float = 30.0
 
     @classmethod
-    def from_yaml(cls, config_path: Optional[Path] = None) -> 'HealthMonitorConfig':
+    def from_yaml(cls, config_path: Optional[Path] = None) -> "HealthMonitorConfig":
         """从 YAML 加载配置"""
         if config_path is None:
             # 使用 Path 对象确保路径正确解析
@@ -43,7 +45,7 @@ class HealthMonitorConfig:
             return cls()
 
         try:
-            with open(config_file, 'r', encoding='utf-8') as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 config_data = yaml.safe_load(f)
 
             # 类型检查：确保加载的是字典
@@ -53,14 +55,14 @@ class HealthMonitorConfig:
                 )
                 return cls()
 
-            monitor_config = config_data.get('monitor', {})
+            monitor_config = config_data.get("monitor", {})
 
             config = cls(
-                check_interval=monitor_config.get('check_interval', 1.0),
-                heartbeat_timeout=monitor_config.get('heartbeat_timeout', 5.0),
-                reconnect_interval=monitor_config.get('reconnect_interval', 5.0),
-                max_reconnect_attempts=monitor_config.get('max_reconnect_attempts', 5),
-                orphan_timeout=monitor_config.get('orphan_timeout', 30.0)
+                check_interval=monitor_config.get("check_interval", 1.0),
+                heartbeat_timeout=monitor_config.get("heartbeat_timeout", 5.0),
+                reconnect_interval=monitor_config.get("reconnect_interval", 5.0),
+                max_reconnect_attempts=monitor_config.get("max_reconnect_attempts", 5),
+                orphan_timeout=monitor_config.get("orphan_timeout", 30.0),
             )
 
             logger.info(

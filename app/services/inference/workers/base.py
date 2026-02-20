@@ -11,20 +11,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence
 import time
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from app.services.inference.models import InferenceRequest, InferenceResult
 from app.services.infer_task import InferenceTask
-from app.utils.metrics import infer_latency_ms, infer_failure_total
+from app.services.inference.models import InferenceRequest, InferenceResult
+from app.utils.metrics import infer_failure_total, infer_latency_ms
 
 logger = logging.getLogger(__name__)
 
 # 可选：CUDA 支持
 try:
     import torch
+
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
@@ -91,8 +92,11 @@ class MultiModelWorkerPool:
         for req in batch:
             # 尝试从 frame_data 获取 task 信息（如果可用）
             task_obj = None
-            if hasattr(req.frame_data, 'inference_result') and req.frame_data.inference_result:
-                task_obj = req.frame_data.inference_result.get('task')
+            if (
+                hasattr(req.frame_data, "inference_result")
+                and req.frame_data.inference_result
+            ):
+                task_obj = req.frame_data.inference_result.get("task")
 
             ctx = {
                 "client_id": req.client_id,
@@ -160,16 +164,16 @@ class MultiModelWorkerPool:
                     elapsed_ms = (time.time() - start_time) * 1000
                     for ctx in contexts:
                         infer_latency_ms.labels(
-                            client_id=ctx.get("client_id", "unknown"),
-                            model=model.name
-                        ).observe(elapsed_ms / len(frames))  # 平均每帧延迟
+                            client_id=ctx.get("client_id", "unknown"), model=model.name
+                        ).observe(
+                            elapsed_ms / len(frames)
+                        )  # 平均每帧延迟
 
                 except Exception as e:
                     # 业务逻辑层不应该捕获异常 - 让异常传播到Boundary Layer 1
                     # 但为了兼容性和防止单个模型失败影响其他模型，这里保留异常捕获
                     logger.error(
-                        f"Model {model.name} inference failed: {e}",
-                        exc_info=True
+                        f"Model {model.name} inference failed: {e}", exc_info=True
                     )
 
                     # 记录推理失败
@@ -177,7 +181,7 @@ class MultiModelWorkerPool:
                         infer_failure_total.labels(
                             client_id=ctx.get("client_id", "unknown"),
                             model=model.name,
-                            error_type=type(e).__name__
+                            error_type=type(e).__name__,
                         ).inc()
 
                     # 返回失败结果
@@ -224,9 +228,10 @@ class MultiModelWorkerPool:
                 elapsed_ms = (time.time() - start_time) * 1000
                 for ctx in contexts:
                     infer_latency_ms.labels(
-                        client_id=ctx.get("client_id", "unknown"),
-                        model=model.name
-                    ).observe(elapsed_ms / n)  # 平均每帧延迟
+                        client_id=ctx.get("client_id", "unknown"), model=model.name
+                    ).observe(
+                        elapsed_ms / n
+                    )  # 平均每帧延迟
 
             except Exception as e:
                 print(f"[MultiModelWorkerPool] {model.name} infer_batch error: {e}")
@@ -236,7 +241,7 @@ class MultiModelWorkerPool:
                     infer_failure_total.labels(
                         client_id=ctx.get("client_id", "unknown"),
                         model=model.name,
-                        error_type=type(e).__name__
+                        error_type=type(e).__name__,
                     ).inc()
 
                 for i in range(n):
@@ -287,4 +292,6 @@ class MultiModelWorkerPool:
                 torch.cuda.empty_cache()
 
         except Exception as e:
-            logger.error(f"Model warmup failed for stage {self.stage}: {e}", exc_info=True)
+            logger.error(
+                f"Model warmup failed for stage {self.stage}: {e}", exc_info=True
+            )

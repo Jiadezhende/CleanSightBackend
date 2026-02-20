@@ -2,14 +2,16 @@
 客户端队列管理
 """
 
-from collections import deque
-from typing import Deque, Optional, List, Tuple
-import time
 import threading
+import time
+from collections import deque
+from typing import Deque, List, Optional, Tuple
+
 import numpy as np
 
 from app.models.frame import FrameData
 from app.models.task import Task as CleaningTask
+
 from .state import ClientState
 
 
@@ -41,7 +43,7 @@ class ClientQueues:
         resize_width: int = 640,
         resize_height: int = 480,
         inference_fps: int = 15,
-        initial_stage: str = "LEAK"
+        initial_stage: str = "LEAK",
     ):
         # 客户端标识
         self.client_id = client_id
@@ -59,7 +61,9 @@ class ClientQueues:
 
         # 最新原始帧缓存（用于异步聚合可视化）
         self.latest_raw_frame: Optional[np.ndarray] = None
-        self.latest_raw_timestamp: float = time.time()  # 初始化为创建时间，支持启动失败检测
+        self.latest_raw_timestamp: float = (
+            time.time()
+        )  # 初始化为创建时间，支持启动失败检测
 
         # CA-ReadyQueue: 等待推理的原始帧（设置最大长度限制防止溢出）
         self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)

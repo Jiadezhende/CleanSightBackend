@@ -8,13 +8,13 @@ AI 模型模块
 """
 
 # 基础模型
-from .base import detect_keypoints, analyze_motion
-
-# 气泡检测
-from .bubble import BubbleDetector, BubbleDetectionTask
+from .base import analyze_motion, detect_keypoints
 
 # 弯折检测
-from .bending import EndoscopeBendingDetector, EndoscopeBendingDetectionTask
+from .bending import EndoscopeBendingDetectionTask, EndoscopeBendingDetector
+
+# 气泡检测
+from .bubble import BubbleDetectionTask, BubbleDetector
 
 __all__ = [
     # 基础

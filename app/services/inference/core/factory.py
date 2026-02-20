@@ -81,7 +81,7 @@ def create_model_worker_service_from_manager(
 
 
 def create_model_worker_service_example(
-    client_queues_map: Dict[str, Any]
+    client_queues_map: Dict[str, Any],
 ) -> ModelWorkerService:
     """示例：手动提供 client_queues_map 创建 ModelWorkerService。
 
@@ -126,10 +126,11 @@ def _create_default_stage_configs() -> Dict[str, Dict[str, Any]]:
 
     完全解耦版本：直接使用 InferenceTask，不依赖 pipeline_base。
     """
-    from app.services.models.bubble import BubbleDetectionTask
-    from app.services.models.bending import EndoscopeBendingDetectionTask
-    from app.services.inference.config import load_stage_config
     import os
+
+    from app.services.inference.config import load_stage_config
+    from app.services.models.bending import EndoscopeBendingDetectionTask
+    from app.services.models.bubble import BubbleDetectionTask
 
     # 从环境变量获取模型路径，如果未设置则使用默认值
     model_base_path = os.environ.get("CLEANSIGHT_MODEL_PATH", "./app/data")

@@ -29,20 +29,19 @@ logger = logging.getLogger(__name__)
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
+from app.services.inference.components.temporal_analyzer import DefaultTemporalAnalyzer
+from app.services.inference.components.visualizer import DefaultVisualizer
+from app.services.inference.core.service import ModelWorkerService
 from app.services.inference.models import (
     InferenceResult,
     TemporalAnalysisPackage,
     TemporalAnalysisResult,
     WriteBackData,
 )
-from app.services.inference.core.service import ModelWorkerService
-from app.services.inference.components.temporal_analyzer import DefaultTemporalAnalyzer
 from app.services.inference.workers.temporal import TemporalWorkerPool
-from app.services.inference.components.visualizer import DefaultVisualizer
-from app.services.inference.workers.visualization import (
-    VisualizationWorkerPool,
-)
+from app.services.inference.workers.visualization import VisualizationWorkerPool
 from app.services.inference.workers.writeback import WriteBackWorkerPool
+
 
 class InferenceManager:
     """推理管理器 - 新架构实现
@@ -105,7 +104,9 @@ class InferenceManager:
 
         # 创建队列（负责各个worker池的通信）
         self.temporal_queue: "queue.Queue[InferenceResult]" = queue.Queue(maxsize=256)
-        self.visualization_queue: "queue.Queue[TemporalAnalysisPackage]" = queue.Queue(maxsize=256)
+        self.visualization_queue: "queue.Queue[TemporalAnalysisPackage]" = queue.Queue(
+            maxsize=256
+        )
         self.writeback_queue: "queue.Queue[WriteBackData]" = queue.Queue(maxsize=256)
 
         # 创建时序分析器
@@ -140,7 +141,7 @@ class InferenceManager:
         self._model_worker_service = self._create_async_model_worker_service()
 
         # ========== 持久化管理器（新架构） ==========
-        from app.services.persistence import PersistenceManager, PersistenceConfig
+        from app.services.persistence import PersistenceConfig, PersistenceManager
 
         # 加载配置并覆盖storage路径
         persist_config = PersistenceConfig.from_yaml()
@@ -165,8 +166,10 @@ class InferenceManager:
         if self._stage_configs is None:
             try:
                 # 尝试从配置文件加载（优先）
+                from app.services.inference.components.component_factory import (
+                    ComponentFactory,
+                )
                 from app.services.inference.config import load_stage_config
-                from app.services.inference.components.component_factory import ComponentFactory
 
                 config = load_stage_config()
                 factory = ComponentFactory(config)
@@ -182,17 +185,25 @@ class InferenceManager:
                         }
 
                 if stage_configs:
-                    print(f"[InferenceManager] 从配置文件加载 {len(stage_configs)} 个 stage")
+                    print(
+                        f"[InferenceManager] 从配置文件加载 {len(stage_configs)} 个 stage"
+                    )
                     self._stage_configs = stage_configs
                 else:
                     # 配置文件中没有可用的 stage，使用默认配置
                     print("[InferenceManager] 配置文件中没有可用 stage，使用默认配置")
-                    from app.services.inference.core.factory import _create_default_stage_configs
+                    from app.services.inference.core.factory import (
+                        _create_default_stage_configs,
+                    )
+
                     self._stage_configs = _create_default_stage_configs()
             except Exception as e:
                 # 加载配置失败，回退到默认配置
                 print(f"[InferenceManager] 加载配置文件失败: {e}，使用默认配置")
-                from app.services.inference.core.factory import _create_default_stage_configs
+                from app.services.inference.core.factory import (
+                    _create_default_stage_configs,
+                )
+
                 self._stage_configs = _create_default_stage_configs()
 
         return self._stage_configs
@@ -322,15 +333,23 @@ class InferenceManager:
         logger.info(f"[InferenceManager] Removing inference resources: {client_id}")
 
         # 阶段1: 落盘残余缓存（保存已有的处理结果）
-        cq = client_manager.get_client(client_id) if client_manager.has_client(client_id) else None
+        cq = (
+            client_manager.get_client(client_id)
+            if client_manager.has_client(client_id)
+            else None
+        )
         if cq:
             try:
                 self._flush_all_remaining_segments(client_id, cq)
                 logger.info(f"[InferenceManager] Segments flushed: {client_id}")
             except Exception as e:
-                logger.warning(f"[InferenceManager] Failed to flush segments: {client_id} - {e}")
+                logger.warning(
+                    f"[InferenceManager] Failed to flush segments: {client_id} - {e}"
+                )
         else:
-            logger.warning(f"[InferenceManager] Client not found in ClientManager, skipping flush: {client_id}")
+            logger.warning(
+                f"[InferenceManager] Client not found in ClientManager, skipping flush: {client_id}"
+            )
 
         # 阶段2: 刷新推理服务（移除过时的批次）
         if self._model_worker_service is not None:
@@ -338,16 +357,16 @@ class InferenceManager:
                 self._model_worker_service.refresh_client_queues()
                 logger.info(f"[InferenceManager] Worker service refreshed: {client_id}")
             except Exception as e:
-                logger.error(f"[InferenceManager] Failed to refresh worker service: {e}")
+                logger.error(
+                    f"[InferenceManager] Failed to refresh worker service: {e}"
+                )
 
         logger.info(f"[InferenceManager] Inference resources removed: {client_id}")
 
     def status(self) -> Dict[str, Any]:
         """获取所有客户端及其队列状态"""
         clients = client_manager.get_all_clients()
-        stats = {
-            client_id: cq.to_status_dict() for client_id, cq in clients.items()
-        }
+        stats = {client_id: cq.to_status_dict() for client_id, cq in clients.items()}
         return {"clients": len(clients), "queues": stats}
 
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
@@ -445,18 +464,24 @@ class InferenceManager:
 
         # 调试日志：显示队列状态
         if ca_raw_len >= seg_len or ca_processed_len >= seg_len:
-            print(f"[SegmentCheck] client={client_id}: ca_raw={ca_raw_len}/{seg_len}, ca_processed={ca_processed_len}/{seg_len}")
+            print(
+                f"[SegmentCheck] client={client_id}: ca_raw={ca_raw_len}/{seg_len}, ca_processed={ca_processed_len}/{seg_len}"
+            )
 
         # 1. 检查 ca_raw 是否需要落盘（独立）
         if ca_raw_len >= seg_len:
             raw_len = min(ca_raw_len, seg_len)
-            print(f"[SegmentCheck] Enqueueing RAW segment persist job for client: {client_id}, len={raw_len}")
+            print(
+                f"[SegmentCheck] Enqueueing RAW segment persist job for client: {client_id}, len={raw_len}"
+            )
             self._enqueue_raw_segment_job(client_id, client_queues, raw_len)
 
         # 2. 检查 ca_processed 是否需要落盘（独立）
         if ca_processed_len >= seg_len:
             processed_len = min(ca_processed_len, seg_len)
-            print(f"[SegmentCheck] Enqueueing PROCESSED segment persist job for client: {client_id}, len={processed_len}")
+            print(
+                f"[SegmentCheck] Enqueueing PROCESSED segment persist job for client: {client_id}, len={processed_len}"
+            )
             self._enqueue_processed_segment_job(client_id, client_queues, processed_len)
 
     def _segment_check_loop(self):
@@ -504,7 +529,9 @@ class InferenceManager:
             # 处理 ca_processed 的残余（不足一个段长）
             remaining_processed = len(client_queues.ca_processed)
             if remaining_processed > 0:
-                self._enqueue_processed_segment_job(client_id, client_queues, remaining_processed)
+                self._enqueue_processed_segment_job(
+                    client_id, client_queues, remaining_processed
+                )
 
         except Exception as e:
             print(f"_flush_all_remaining_segments error for {client_id}: {e}")
@@ -515,7 +542,9 @@ class InferenceManager:
         """仅落盘 raw 帧（使用新的PersistenceManager）"""
         task_id = client_queues.get_task_id()
         if task_id is None:
-            print(f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping raw segment persist")
+            print(
+                f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping raw segment persist"
+            )
             return
 
         raw_frames_data: List[FrameData] = client_queues.pop_n_ca_raw(seg_len)
@@ -527,7 +556,7 @@ class InferenceManager:
             client_id=client_id,
             task_id=task_id,
             segment_type="raw",
-            frames=raw_frames_data
+            frames=raw_frames_data,
         )
 
     def _enqueue_processed_segment_job(
@@ -536,10 +565,14 @@ class InferenceManager:
         """仅落盘 processed 帧（使用新的PersistenceManager）"""
         task_id = client_queues.get_task_id()
         if task_id is None:
-            print(f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping processed segment persist")
+            print(
+                f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping processed segment persist"
+            )
             return
 
-        processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(seg_len)
+        processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(
+            seg_len
+        )
         if not processed_frames_data:
             return
 
@@ -548,9 +581,8 @@ class InferenceManager:
             client_id=client_id,
             task_id=task_id,
             segment_type="processed",
-            frames=processed_frames_data
+            frames=processed_frames_data,
         )
-
 
     # ========== 告警处理逻辑（独立于HLS） ==========
 
@@ -600,7 +632,10 @@ class InferenceManager:
         self.writeback_pool.start()
 
         # 3. 启动分段检查线程（周期性检查队列并触发落盘）
-        if self._segment_check_thread is None or not self._segment_check_thread.is_alive():
+        if (
+            self._segment_check_thread is None
+            or not self._segment_check_thread.is_alive()
+        ):
             self._segment_check_thread = threading.Thread(
                 target=self._segment_check_loop, daemon=True, name="SegmentCheckThread"
             )
@@ -612,7 +647,9 @@ class InferenceManager:
         # 5. 启动客户端刷新线程
         if self._refresh_thread is None or not self._refresh_thread.is_alive():
             self._refresh_thread = threading.Thread(
-                target=self._client_refresh_loop, daemon=True, name="ClientRefreshThread"
+                target=self._client_refresh_loop,
+                daemon=True,
+                name="ClientRefreshThread",
             )
             self._refresh_thread.start()
 
@@ -652,4 +689,3 @@ class InferenceManager:
                 pass
 
         print("[InferenceManager] 已停止")
-

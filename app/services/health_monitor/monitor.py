@@ -13,10 +13,11 @@
 - 孤儿流检测（定期清理无 Decoder 的客户端）
 - 完整清理（协调多个模块，类似 API 层）
 """
-import time
-import threading
+
 import logging
-from typing import Optional, Dict, Any, List
+import threading
+import time
+from typing import Any, Dict, List, Optional
 
 from app.services.health_monitor.config import HealthMonitorConfig
 from app.services.health_monitor.types import ReconnectState
@@ -36,7 +37,7 @@ class GlobalHealthMonitor:
         client_manager,
         stream_service,
         inference_manager,
-        config: Optional[HealthMonitorConfig] = None
+        config: Optional[HealthMonitorConfig] = None,
     ):
         """初始化全局健康监控
 
@@ -78,14 +79,23 @@ class GlobalHealthMonitor:
         # 孤儿流跟踪（记录最后活跃时间）
         self._last_activity: Dict[str, float] = {}
 
-        # 统计
+        # 累计统计（生命周期内的总计）
         self._stats = {
             "checks": 0,
             "suspects": 0,
             "cleanups": 0,
             "reconnects": 0,
             "reconnect_successes": 0,
-            "orphans_detected": 0
+            "orphans_detected": 0,
+        }
+
+        # 实时客户端状态统计（每轮检查更新）
+        self._client_stats = {
+            "total_clients": 0,
+            "active_streams": 0,
+            "reconnecting": 0,
+            "orphan_streams": 0,
+            "orphan_decoders": 0,
         }
 
     def start(self):
@@ -96,15 +106,13 @@ class GlobalHealthMonitor:
 
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._monitor_loop,
-            daemon=True,
-            name="GlobalHealthMonitor"
+            target=self._monitor_loop, daemon=True, name="GlobalHealthMonitor"
         )
         self._thread.start()
         logger.info(
             "[GlobalHealthMonitor] Started (check_interval=%.1fs, timeout=%.1fs)",
             self._check_interval,
-            self.suspect_timeout
+            self.suspect_timeout,
         )
 
     def stop(self):
@@ -127,22 +135,40 @@ class GlobalHealthMonitor:
                 self._stats["checks"] += 1
                 self._stop_event.wait(timeout=self._check_interval)
             except Exception as e:
-                logger.error(f"[GlobalHealthMonitor] Error in monitor loop: {e}", exc_info=True)
+                logger.error(
+                    f"[GlobalHealthMonitor] Error in monitor loop: {e}", exc_info=True
+                )
                 time.sleep(1.0)
 
         logger.info("[GlobalHealthMonitor] Monitor loop exited")
 
     def _check_all_clients(self):
-        """检查所有客户端的健康状态（含孤儿流检测）"""
+        """检查所有客户端的健康状态（含孤儿流检测和孤儿解码器检测）"""
         current_time = time.time()
         all_clients = self._client_manager.get_all_clients()
 
         # 获取所有活跃的解码器
         active_decoders = set(self._stream_service.get_all_client_ids())
+        reconnecting_set = set(self._reconnecting_clients.keys())
 
-        # 统计
-        self._stats["checks"] += 1
+        # 集中统计所有客户端状态（确保分类互斥）
+        self._client_stats = {
+            "total_clients": len(all_clients),
+            "active_streams": len(active_decoders - reconnecting_set),
+            "reconnecting": len(reconnecting_set),
+            "orphan_streams": sum(
+                1
+                for cid in all_clients
+                if cid not in active_decoders and cid not in reconnecting_set
+            ),
+            "orphan_decoders": sum(
+                1
+                for cid in active_decoders
+                if cid not in all_clients and cid not in reconnecting_set
+            ),
+        }
 
+        # 第一轮：检查有队列的客户端
         for client_id, cq in all_clients.items():
             # 1. 检查是否在重连模式
             if client_id in self._reconnecting_clients:
@@ -158,13 +184,18 @@ class GlobalHealthMonitor:
 
                 # 防御性检查：如果 timestamp 异常为 0，跳过
                 if last_frame_time == 0:
-                    logger.warning(f"[GlobalHealthMonitor] WARN: {client_id} has zero timestamp (unexpected)")
+                    logger.warning(
+                        f"[GlobalHealthMonitor] WARN: {client_id} has zero timestamp (unexpected)"
+                    )
                     continue
 
                 idle_time = current_time - last_frame_time
 
                 # 进入重连模式（suspect_timeout ~ cleanup_timeout 之间）
-                if idle_time >= self.suspect_timeout and idle_time < self.cleanup_timeout:
+                if (
+                    idle_time >= self.suspect_timeout
+                    and idle_time < self.cleanup_timeout
+                ):
                     self._enter_reconnect_mode(client_id, last_frame_time)
 
                 # 超过 cleanup_timeout，放弃重连，执行清理
@@ -175,32 +206,41 @@ class GlobalHealthMonitor:
                     )
                     self._exit_reconnect_mode(client_id, cleanup=True)
             else:
-                # 无解码器：检查是否为孤儿流
+                # 无解码器：检查是否为孤儿流（有队列但无解码器）
                 self._handle_potential_orphan(client_id, cq, current_time)
+
+        # 第二轮：检查孤儿解码器（有解码器但无队列）
+        orphan_decoders = active_decoders - set(all_clients.keys())
+        for client_id in orphan_decoders:
+            # 跳过重连中的客户端（它们可能暂时没有队列）
+            if client_id not in self._reconnecting_clients:
+                self._handle_orphan_decoder(client_id)
 
     def _enter_reconnect_mode(self, client_id: str, last_frame_time: float):
         """进入重连模式"""
         # 从 StreamService 获取流配置
         stream_info = self._stream_service.get_stream_info(client_id)
         if not stream_info:
-            logger.debug(f"[GlobalHealthMonitor] Cannot enter reconnect mode: no stream info for {client_id} (decoder may not be ready yet)")
+            logger.debug(
+                f"[GlobalHealthMonitor] Cannot enter reconnect mode: no stream info for {client_id} (decoder may not be ready yet)"
+            )
             return
 
         self._reconnecting_clients[client_id] = ReconnectState(
             client_id=client_id,
-            stream_url=stream_info['url'],
-            fps=stream_info['fps'],
-            protocol=stream_info['protocol'],
+            stream_url=stream_info["url"],
+            fps=stream_info["fps"],
+            protocol=stream_info["protocol"],
             attempt_count=0,
             last_attempt_time=0,  # 初始为 0，表示还未尝试
-            last_frame_time_before_disconnect=last_frame_time  # 记录断流前的最后帧时间
+            last_frame_time_before_disconnect=last_frame_time,  # 记录断流前的最后帧时间
         )
 
         logger.warning(
             f"[GlobalHealthMonitor] RECONNECT MODE: {client_id}, "
             f"will retry every {self.reconnect_interval}s (max {self.max_reconnect_attempts} times)"
         )
-        self._stats["suspects"] += 1
+        self._stats["suspects"] += 1  # 累计统计：进入重连模式的次数
 
     def _handle_reconnecting_client(self, client_id: str, cq, current_time: float):
         """处理重连中的客户端"""
@@ -216,7 +256,7 @@ class GlobalHealthMonitor:
                     f"[GlobalHealthMonitor] RECONNECT SUCCESS: {client_id}, "
                     f"new frames detected (attempt {state.attempt_count})"
                 )
-                self._stats["reconnect_successes"] += 1
+                self._stats["reconnect_successes"] += 1  # 累计统计：重连成功的次数
                 self._exit_reconnect_mode(client_id, cleanup=False)
                 return
 
@@ -250,7 +290,7 @@ class GlobalHealthMonitor:
             f"[GlobalHealthMonitor] RECONNECT ATTEMPT {state.attempt_count}/{self.max_reconnect_attempts}: "
             f"{client_id}"
         )
-        self._stats["reconnects"] += 1
+        self._stats["reconnects"] += 1  # 累计统计：重连尝试的总次数
 
         # 调用 StreamService 重启 decoder
         # 职责边界：健康监控器自己管理重试逻辑，不依赖 GuardedExecutor
@@ -258,11 +298,13 @@ class GlobalHealthMonitor:
             client_id=client_id,
             stream_url=state.stream_url,
             fps=state.fps,
-            protocol=state.protocol
+            protocol=state.protocol,
         )
 
         if success:
-            logger.debug(f"[GlobalHealthMonitor] Decoder restarted for {client_id}, waiting for frames...")
+            logger.debug(
+                f"[GlobalHealthMonitor] Decoder restarted for {client_id}, waiting for frames..."
+            )
         else:
             # 重试将在下一个检查周期自动触发（由 reconnect_interval 控制）
             logger.warning(
@@ -284,15 +326,11 @@ class GlobalHealthMonitor:
 
         if cleanup:
             # 重连失败，执行完整清理（类似 /api/terminate）
-            self._stats["cleanups"] += 1
+            self._stats["cleanups"] += 1  # 累计统计：清理操作的次数
             self._cleanup_failed_client(client_id)
 
     def cleanup_client(
-        self,
-        client_id: str,
-        reason: str,
-        *,
-        skip_decoder: bool = False
+        self, client_id: str, reason: str, *, skip_decoder: bool = False
     ) -> Dict[str, Any]:
         """清理协调器（唯一的清理入口点）
 
@@ -332,7 +370,7 @@ class GlobalHealthMonitor:
             "decoder_stopped": False,
             "data_flushed": False,
             "client_cleaned": False,
-            "errors": []
+            "errors": [],
         }
 
         logger.info(
@@ -349,7 +387,9 @@ class GlobalHealthMonitor:
                     logger.info(f"[GlobalHealthMonitor] Decoder stopped: {client_id}")
             except Exception as e:
                 result["errors"].append(f"decoder: {e}")
-                logger.error(f"[GlobalHealthMonitor] Failed to stop decoder: {client_id} - {e}")
+                logger.error(
+                    f"[GlobalHealthMonitor] Failed to stop decoder: {client_id} - {e}"
+                )
 
         # 步骤 2: 落盘残余数据（总是尝试）
         try:
@@ -358,19 +398,27 @@ class GlobalHealthMonitor:
             logger.info(f"[GlobalHealthMonitor] Data flushed: {client_id}")
         except Exception as e:
             result["errors"].append(f"flush: {e}")
-            logger.error(f"[GlobalHealthMonitor] Failed to flush data: {client_id} - {e}")
+            logger.error(
+                f"[GlobalHealthMonitor] Failed to flush data: {client_id} - {e}"
+            )
 
         # 步骤 3: 清理 ClientManager（总是尝试）
         try:
             if self._client_manager.has_client(client_id):
-                removal_result = self._client_manager.remove_client(client_id, cleanup=True)
+                removal_result = self._client_manager.remove_client(
+                    client_id, cleanup=True
+                )
                 result["client_cleaned"] = removal_result["removed"]
                 if removal_result["error"]:
-                    result["errors"].append(f"client_manager: {removal_result['error']}")
+                    result["errors"].append(
+                        f"client_manager: {removal_result['error']}"
+                    )
                 logger.info(f"[GlobalHealthMonitor] ClientManager cleaned: {client_id}")
         except Exception as e:
             result["errors"].append(f"client_manager: {e}")
-            logger.error(f"[GlobalHealthMonitor] Failed to clean ClientManager: {client_id} - {e}")
+            logger.error(
+                f"[GlobalHealthMonitor] Failed to clean ClientManager: {client_id} - {e}"
+            )
 
         if result["errors"]:
             logger.warning(
@@ -378,7 +426,9 @@ class GlobalHealthMonitor:
                 f"Errors: {result['errors']}"
             )
         else:
-            logger.info(f"[GlobalHealthMonitor] Cleanup completed successfully: {client_id}")
+            logger.info(
+                f"[GlobalHealthMonitor] Cleanup completed successfully: {client_id}"
+            )
 
         return result
 
@@ -398,7 +448,7 @@ class GlobalHealthMonitor:
         # 委托给统一的清理方法
         result = self.cleanup_client(
             client_id=client_id,
-            reason=f"Reconnect failed after {self.max_reconnect_attempts} attempts"
+            reason=f"Reconnect failed after {self.max_reconnect_attempts} attempts",
         )
 
         if result["errors"]:
@@ -440,29 +490,61 @@ class GlobalHealthMonitor:
                 f"[GlobalHealthMonitor] ORPHAN STREAM detected: {client_id}, "
                 f"idle for {idle_time:.1f}s (no decoder), cleaning up"
             )
-            self._stats["orphans_detected"] += 1
+            self._stats["orphans_detected"] += 1  # 累计统计：检测到孤儿的总次数
 
             # 委托给统一的清理方法（跳过解码器）
             result = self.cleanup_client(
                 client_id=client_id,
                 reason=f"Orphan stream (idle for {idle_time:.1f}s)",
-                skip_decoder=True  # 孤儿流没有解码器
+                skip_decoder=True,  # 孤儿流没有解码器
             )
 
             # 清理活跃时间记录
             self._last_activity.pop(client_id, None)
 
             if result["errors"]:
-                logger.error(f"[GlobalHealthMonitor] Orphan cleanup with errors: {client_id} - {result['errors']}")
+                logger.error(
+                    f"[GlobalHealthMonitor] Orphan cleanup with errors: {client_id} - {result['errors']}"
+                )
             else:
-                logger.info(f"[GlobalHealthMonitor] Orphan cleanup completed: {client_id}")
+                logger.info(
+                    f"[GlobalHealthMonitor] Orphan cleanup completed: {client_id}"
+                )
+
+    def _handle_orphan_decoder(self, client_id: str):
+        """处理孤儿解码器（有 Decoder 但没有 ClientQueues）
+
+        职责边界：
+        - 检测孤儿解码器（有 Decoder 但无 ClientQueues）
+        - 立即停止无用的解码器
+
+        Args:
+            client_id: 客户端ID
+        """
+        logger.warning(
+            f"[GlobalHealthMonitor] ORPHAN DECODER detected: {client_id}, "
+            f"decoder running but no client queue found, stopping decoder"
+        )
+        self._stats["orphans_detected"] += 1  # 累计统计：检测到孤儿的总次数
+
+        # 只停止解码器（因为没有队列，无需清理其他资源）
+        try:
+            if self._stream_service.has_stream(client_id):
+                self._stream_service.stop_stream(client_id)
+                logger.info(
+                    f"[GlobalHealthMonitor] Orphan decoder stopped: {client_id}"
+                )
+        except Exception as e:
+            logger.error(
+                f"[GlobalHealthMonitor] Failed to stop orphan decoder: {client_id} - {e}"
+            )
 
     def get_stats(self):
         """获取监控统计信息"""
         return {
             **self._stats,
             "reconnecting_count": len(self._reconnecting_clients),
-            "reconnecting_clients": list(self._reconnecting_clients.keys())
+            "reconnecting_clients": list(self._reconnecting_clients.keys()),
         }
 
     def get_system_status(self) -> Dict[str, Any]:
@@ -480,15 +562,8 @@ class GlobalHealthMonitor:
                     "total": int,
                     "active_streams": int,
                     "reconnecting": int,
-                    "orphans": int
-                },
-                "queues": {
-                    "client_id": {
-                        "raw_queue_size": int,
-                        "ready_queue_size": int,
-                        "latest_timestamp": float,
-                        ...
-                    }
+                    "orphan_streams": int,
+                    "orphan_decoders": int
                 },
                 "monitor_stats": {
                     "checks": int,
@@ -498,38 +573,12 @@ class GlobalHealthMonitor:
                 }
             }
         """
-        # 获取所有客户端队列
-        all_clients = self._client_manager.get_all_clients()
 
-        # 获取活跃的解码器
-        active_decoders = set(self._stream_service.get_all_client_ids())
-
-        # 统计客户端类型
-        total_clients = len(all_clients)
-        active_streams = len(active_decoders)
-        reconnecting = len(self._reconnecting_clients)
-
-        # 孤儿流数量 = 有队列但无解码器的客户端
-        orphans = total_clients - active_streams - reconnecting
-        orphans = max(0, orphans)  # 确保不为负数
-
-        # 构建队列状态字典
-        queue_stats = {}
-        for client_id, cq in all_clients.items():
-            queue_stats[client_id] = cq.to_status_dict()
-
-        # 返回完整的系统状态
+        # 返回完整的系统状态（使用 _check_all_clients 中统计的实时数据）
         return {
-            "clients": {
-                "total": total_clients,
-                "active_streams": active_streams,
-                "reconnecting": reconnecting,
-                "orphans": orphans
-            },
-            "queues": queue_stats,
+            "clients": self._client_stats,
             "monitor_stats": {
                 **self._stats,
-                "reconnecting_count": reconnecting,
-                "reconnecting_clients": list(self._reconnecting_clients.keys())
-            }
+                "reconnecting_clients": list(self._reconnecting_clients.keys()),
+            },
         }

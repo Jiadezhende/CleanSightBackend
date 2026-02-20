@@ -22,13 +22,18 @@ from app.models.frame import FrameData
 from app.services.inference.core.dispatcher import StageAwareDispatcher
 from app.services.inference.models import InferenceResult
 from app.services.inference.workers.base import MultiModelWorkerPool
-from app.utils.exceptions import FrameDrop, ModelInferenceError, AppError, PersistenceError
+from app.utils.exceptions import (
+    AppError,
+    FrameDrop,
+    ModelInferenceError,
+    PersistenceError,
+)
 from app.utils.metrics import gpu_oom_total
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from app.services.client import ClientQueues, ClientState, ClientManager
+    from app.services.client import ClientManager, ClientQueues, ClientState
 
 # 避免循环导入，延迟导入
 from app.services.client import client_manager
@@ -150,13 +155,17 @@ class ModelWorkerService:
 
         for stage, worker_pool in self.worker_pools.items():
             # 获取该stage的批大小
-            batch_size = self.stage_configs[stage].get("batch_size", self.max_batch_per_stage)
+            batch_size = self.stage_configs[stage].get(
+                "batch_size", self.max_batch_per_stage
+            )
 
             # 执行预热
             try:
                 worker_pool.warmup(batch_size=batch_size)
             except Exception as e:
-                logger.error(f"Model warmup failed for stage {stage}: {e}", exc_info=True)
+                logger.error(
+                    f"Model warmup failed for stage {stage}: {e}", exc_info=True
+                )
 
         warmup_elapsed = time.time() - warmup_start
         logger.info(
@@ -240,12 +249,14 @@ class ModelWorkerService:
                     extra={
                         "client_id": e.client_id,
                         "model_name": e.model_name,
-                        "is_cuda_error": e.is_cuda_error
-                    }
+                        "is_cuda_error": e.is_cuda_error,
+                    },
                 )
                 # 记录GPU OOM指标
                 if e.is_cuda_error:
-                    gpu_oom_total.labels(model=getattr(e, 'model_name', 'unknown')).inc()
+                    gpu_oom_total.labels(
+                        model=getattr(e, "model_name", "unknown")
+                    ).inc()
                 # 继续处理下一批
                 time.sleep(0.1)
                 continue
@@ -255,7 +266,7 @@ class ModelWorkerService:
                 logger.error(
                     f"[BoundaryLayer1][Worker-{stage}] Application error: {e}",
                     exc_info=True,
-                    extra={"client_id": getattr(e, 'client_id', None)}
+                    extra={"client_id": getattr(e, "client_id", None)},
                 )
                 time.sleep(0.1)
                 continue
@@ -264,7 +275,7 @@ class ModelWorkerService:
                 # 边界层 1: 未预期的异常 - CRITICAL级别
                 logger.critical(
                     f"[BoundaryLayer1][Worker-{stage}] Unexpected error: {e}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 time.sleep(0.5)
                 continue
@@ -282,11 +293,11 @@ class ModelWorkerService:
             # 检查客户端是否存在（可能在推理过程中被移除）
             if not self._client_manager.has_client(res.client_id):
                 # 构建 FrameDrop 参数（frame_index 可能不存在）
-                frame_idx = getattr(res, 'frame_index', None)
+                frame_idx = getattr(res, "frame_index", None)
                 raise FrameDrop(
                     client_id=res.client_id,
                     frame_index=frame_idx,  # type: ignore
-                    reason="client_removed"
+                    reason="client_removed",
                 )
 
             # 投递到时序队列
@@ -296,8 +307,8 @@ class ModelWorkerService:
                 # 实时推理场景：队列满时丢弃当前帧，继续处理下一帧
                 raise FrameDrop(
                     client_id=res.client_id,
-                    frame_index=getattr(res, 'frame_index', None),
-                    reason="queue_timeout"
+                    frame_index=getattr(res, "frame_index", None),
+                    reason="queue_timeout",
                 )
 
     def _update_client_state(self, state: ClientState, result: InferenceResult):

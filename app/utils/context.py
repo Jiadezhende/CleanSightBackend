@@ -12,7 +12,6 @@ CleanSight 简单上下文管理（基于 threading.local）
 import threading
 from typing import Optional
 
-
 # 线程本地存储
 _context = threading.local()
 
@@ -102,6 +101,7 @@ def clear_context():
 # ============================================================================
 # 上下文管理器（推荐使用）
 # ============================================================================
+
 
 class ClientContext:
     """客户端上下文管理器

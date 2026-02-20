@@ -1,9 +1,11 @@
+import logging
+
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
+
+from app.routers.health import get_health_monitor
 from app.services import ai
 from app.services.stream import stream_service
-from app.routers.health import get_health_monitor
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -12,11 +14,14 @@ router = APIRouter(prefix="/inspection", tags=["inspection"])
 
 class RTSPStreamConfig(BaseModel):
     """RTSP 流配置"""
+
     client_id: str
     rtsp_url: str
     fps: int = 30  # 固定帧率
 
+
 # 旧的 _stream_capture_worker 已移至 app.services.stream_service
+
 
 @router.post("/start_rtsp_stream")
 async def start_rtsp_stream(config: RTSPStreamConfig):
@@ -39,7 +44,9 @@ async def start_rtsp_stream(config: RTSPStreamConfig):
 
     # 启动流（可能抛出 StreamConnectionError 或 FFmpegError）
     # 这些异常将被 FastAPI 全局处理器捕获（边界层 3）
-    stream_service.start_stream(client_id=client_id, stream_url=config.rtsp_url, fps=config.fps, protocol='RTSP')
+    stream_service.start_stream(
+        client_id=client_id, stream_url=config.rtsp_url, fps=config.fps, protocol="RTSP"
+    )
 
     return {"status": "success", "message": f"RTSP 流捕获已启动 for {client_id}"}
 
@@ -69,25 +76,28 @@ async def stop_rtsp_stream(client_id: str = Query(..., description="客户端ID"
     monitor = get_health_monitor()
     if monitor:
         result = monitor.cleanup_client(
-            client_id=client_id,
-            reason="RTSP stream stop request"
+            client_id=client_id, reason="RTSP stream stop request"
         )
     else:
         # Fallback: 健康监控未初始化，执行手动清理
-        logger.warning("[stop_rtsp_stream] Health monitor not initialized, using fallback cleanup")
+        logger.warning(
+            "[stop_rtsp_stream] Health monitor not initialized, using fallback cleanup"
+        )
         result = _manual_cleanup_fallback(client_id)
 
     # 调整返回格式以匹配原有 API
     if result["errors"]:
         status = "partial_success"
-        logger.warning(f"[stop_rtsp_stream] Completed with errors: {client_id} - {result['errors']}")
+        logger.warning(
+            f"[stop_rtsp_stream] Completed with errors: {client_id} - {result['errors']}"
+        )
     else:
         status = "success"
 
     return {
         "status": status,
         "message": f"RTSP 流捕获已停止 for {client_id}",
-        "cleanup_details": result
+        "cleanup_details": result,
     }
 
 
@@ -107,7 +117,7 @@ def _manual_cleanup_fallback(client_id: str):
         "decoder_stopped": False,
         "data_flushed": False,
         "client_cleaned": False,
-        "errors": []
+        "errors": [],
     }
 
     # 1. 停止解码器
@@ -118,7 +128,9 @@ def _manual_cleanup_fallback(client_id: str):
             logger.info(f"[stop_rtsp_stream_fallback] Decoder stopped: {client_id}")
     except Exception as e:
         result["errors"].append(f"decoder: {e}")
-        logger.error(f"[stop_rtsp_stream_fallback] Failed to stop decoder: {client_id} - {e}")
+        logger.error(
+            f"[stop_rtsp_stream_fallback] Failed to stop decoder: {client_id} - {e}"
+        )
 
     # 2. 落盘残余数据
     try:
@@ -127,7 +139,9 @@ def _manual_cleanup_fallback(client_id: str):
         logger.info(f"[stop_rtsp_stream_fallback] Data flushed: {client_id}")
     except Exception as e:
         result["errors"].append(f"flush: {e}")
-        logger.error(f"[stop_rtsp_stream_fallback] Failed to flush data: {client_id} - {e}")
+        logger.error(
+            f"[stop_rtsp_stream_fallback] Failed to flush data: {client_id} - {e}"
+        )
 
     # 3. 清理 ClientManager
     try:
@@ -136,9 +150,13 @@ def _manual_cleanup_fallback(client_id: str):
             result["client_cleaned"] = removal_result["removed"]
             if removal_result["error"]:
                 result["errors"].append(f"client_manager: {removal_result['error']}")
-            logger.info(f"[stop_rtsp_stream_fallback] ClientManager cleaned: {client_id}")
+            logger.info(
+                f"[stop_rtsp_stream_fallback] ClientManager cleaned: {client_id}"
+            )
     except Exception as e:
         result["errors"].append(f"client_manager: {e}")
-        logger.error(f"[stop_rtsp_stream_fallback] Failed to clean ClientManager: {client_id} - {e}")
+        logger.error(
+            f"[stop_rtsp_stream_fallback] Failed to clean ClientManager: {client_id} - {e}"
+        )
 
     return result

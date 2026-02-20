@@ -8,26 +8,27 @@
 4. main() - 顶层 Fail-Fast（边界层 4）
 """
 
+import time
+from threading import Thread
+
 import pytest
 from fastapi.testclient import TestClient
-from threading import Thread
-import time
 
 from app.main import app
 from app.utils import (
-    StreamConnectionError,
-    FFmpegError,
+    CircuitBreaker,
     DatabaseError,
+    FFmpegError,
+    GuardedExecutor,
     ModelInferenceError,
     PersistenceError,
-    GuardedExecutor,
-    CircuitBreaker,
+    StreamConnectionError,
 )
-
 
 # ============================================================================
 # 边界层 2 测试: GuardedExecutor
 # ============================================================================
+
 
 def test_retry_executor_success():
     """测试 GuardedExecutor 成功执行"""
@@ -37,10 +38,7 @@ def test_retry_executor_success():
     def successful_func():
         return "success"
 
-    result = executor.execute(
-        func=successful_func,
-        policy_name='stream'
-    )
+    result = executor.execute(func=successful_func, policy_name="stream")
 
     assert result == "success"
 
@@ -57,10 +55,7 @@ def test_retry_executor_retry_then_success():
             raise StreamConnectionError(url="rtsp://test", client_id="test_client")
         return "success"
 
-    result = executor.execute(
-        func=retry_func,
-        policy_name='stream'
-    )
+    result = executor.execute(func=retry_func, policy_name="stream")
 
     assert result == "success"
     assert attempts[0] == 2  # 第一次失败，第二次成功
@@ -75,10 +70,7 @@ def test_retry_executor_max_attempts_reached():
         raise StreamConnectionError(url="rtsp://test", client_id="test_client")
 
     with pytest.raises(StreamConnectionError):
-        executor.execute(
-            func=always_fail,
-            policy_name='stream'  # 最多 5 次
-        )
+        executor.execute(func=always_fail, policy_name="stream")  # 最多 5 次
 
 
 def test_retry_executor_non_retryable_error():
@@ -90,19 +82,17 @@ def test_retry_executor_non_retryable_error():
         raise FFmpegError("FFmpeg not found", exit_code=1)
 
     with pytest.raises(FFmpegError):
-        executor.execute(
-            func=non_retryable_func,
-            policy_name='stream'
-        )
+        executor.execute(func=non_retryable_func, policy_name="stream")
 
 
 # ============================================================================
 # 边界层 2 测试: CircuitBreaker
 # ============================================================================
 
+
 def test_circuit_breaker_success():
     """测试 CircuitBreaker 成功执行"""
-    breaker = CircuitBreaker(name='test', max_failures=3, reset_timeout=60.0)
+    breaker = CircuitBreaker(name="test", max_failures=3, reset_timeout=60.0)
 
     def successful_func():
         return "success"
@@ -113,7 +103,7 @@ def test_circuit_breaker_success():
 
 def test_circuit_breaker_opens_after_failures():
     """测试 CircuitBreaker 在连续失败后打开"""
-    breaker = CircuitBreaker(name='test', max_failures=3, reset_timeout=60.0)
+    breaker = CircuitBreaker(name="test", max_failures=3, reset_timeout=60.0)
 
     def always_fail():
         raise DatabaseError("Connection failed", retryable=True)
@@ -135,6 +125,7 @@ def test_circuit_breaker_opens_after_failures():
 # 边界层 3 测试: FastAPI 全局异常处理器
 # ============================================================================
 
+
 @pytest.fixture
 def client():
     """创建 FastAPI 测试客户端"""
@@ -146,6 +137,7 @@ def test_stream_error_handler(client):
     """测试 StreamConnectionError 全局处理器"""
     # 使用唯一的路由名称避免冲突
     import uuid
+
     route_id = uuid.uuid4().hex[:8]
 
     @app.get(f"/test/stream_error_{route_id}")
@@ -162,6 +154,7 @@ def test_stream_error_handler(client):
 def test_database_error_handler(client):
     """测试 DatabaseError 全局处理器"""
     import uuid
+
     route_id = uuid.uuid4().hex[:8]
 
     @app.get(f"/test/database_error_{route_id}")
@@ -178,6 +171,7 @@ def test_database_error_handler(client):
 def test_ffmpeg_error_handler(client):
     """测试 FFmpegError 全局处理器"""
     import uuid
+
     route_id = uuid.uuid4().hex[:8]
 
     @app.get(f"/test/ffmpeg_error_{route_id}")
@@ -193,6 +187,7 @@ def test_ffmpeg_error_handler(client):
 def test_inference_error_handler(client):
     """测试 ModelInferenceError 全局处理器"""
     import uuid
+
     route_id = uuid.uuid4().hex[:8]
 
     @app.get(f"/test/inference_error_{route_id}")
@@ -208,6 +203,7 @@ def test_inference_error_handler(client):
 def test_persistence_error_handler(client):
     """测试 PersistenceError 全局处理器"""
     import uuid
+
     route_id = uuid.uuid4().hex[:8]
 
     @app.get(f"/test/persistence_error_{route_id}")
@@ -224,6 +220,7 @@ def test_generic_exception_handler(client):
     """测试兜底异常处理器"""
     # 使用唯一的路由名称避免冲突
     import uuid
+
     route_id = uuid.uuid4().hex[:8]
 
     @app.get(f"/test/generic_error_{route_id}")
@@ -240,6 +237,7 @@ def test_generic_exception_handler(client):
 # ============================================================================
 # 边界层 1 测试: Worker.run()
 # ============================================================================
+
 
 def test_worker_boundary_layer():
     """
@@ -275,6 +273,7 @@ def test_worker_boundary_layer():
 # 集成测试
 # ============================================================================
 
+
 def test_integration_retry_with_circuit_breaker():
     """
     集成测试：GuardedExecutor + CircuitBreaker
@@ -286,10 +285,10 @@ def test_integration_retry_with_circuit_breaker():
     from app.utils import RetryExecutorWithCircuitBreaker
 
     executor = RetryExecutorWithCircuitBreaker(
-        policy_name='database',
-        breaker_name='test_integration',
+        policy_name="database",
+        breaker_name="test_integration",
         max_failures=3,
-        reset_timeout=60.0
+        reset_timeout=60.0,
     )
 
     attempts = [0]

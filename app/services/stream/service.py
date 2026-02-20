@@ -7,20 +7,21 @@
 - 异常分类：StreamConnectionError, FFmpegError
 """
 
-import os
-import threading
-import selectors
-from typing import Optional, Dict, Any
 import logging
-from fastapi import HTTPException
+import os
+import selectors
+import threading
+from typing import Any, Dict, Optional
 
-from .decoder import FFmpegDecoder
 from app.utils import (
+    ConflictError,
+    FFmpegError,
     GuardedExecutor,
     StreamConnectionError,
-    FFmpegError,
     log_call,
 )
+
+from .decoder import FFmpegDecoder
 
 logger = logging.getLogger("app.services.stream.service")
 
@@ -32,9 +33,9 @@ except ImportError:
 
 # 导入配置加载器
 try:
+    from app.services.client.config import get_client_config
     from app.services.inference.config import load_stage_config
     from app.services.stream.config import get_stream_config
-    from app.services.client.config import get_client_config
 
     _inference_config = load_stage_config()
     _stream_config = get_stream_config()
@@ -49,7 +50,7 @@ except Exception as e:
 class StreamService:
     def __init__(self):
         self.decoders: Dict[str, FFmpegDecoder] = {}
-        self.sel = selectors.DefaultSelector() if os.name != 'nt' else None
+        self.sel = selectors.DefaultSelector() if os.name != "nt" else None
         self.lock = threading.Lock()
         self.metrics = {}
         self._stop_event = threading.Event()
@@ -63,13 +64,17 @@ class StreamService:
         # start selector polling thread on POSIX so stdout is consumed
         self._selector_thread: Optional[threading.Thread] = None
         if self.sel is not None:
-            self._selector_thread = threading.Thread(target=self._selector_loop, daemon=True, name="stream_service_selector")
+            self._selector_thread = threading.Thread(
+                target=self._selector_loop, daemon=True, name="stream_service_selector"
+            )
             self._selector_thread.start()
 
         # 注意：健康监控和清理服务现在都是全局服务，在应用启动时初始化，不再由 StreamService 管理
 
     @log_call(level=logging.INFO, log_args=True)
-    def start_stream(self, client_id: str, stream_url: str, fps: int = 30, protocol: str = 'RTMP'):
+    def start_stream(
+        self, client_id: str, stream_url: str, fps: int = 30, protocol: str = "RTMP"
+    ):
         """
         服务层方法（调用框架边界层）
 
@@ -91,10 +96,12 @@ class StreamService:
         # 通过 GuardedExecutor 调用业务逻辑（边界层 2）
         return self.executor.execute(
             func=lambda: self._start_stream_impl(client_id, stream_url, fps, protocol),
-            policy_name='stream'  # 固定延迟 3 秒，最多 5 次
+            policy_name="stream",  # 固定延迟 3 秒，最多 5 次
         )
 
-    def _start_stream_impl(self, client_id: str, stream_url: str, fps: int, protocol: str):
+    def _start_stream_impl(
+        self, client_id: str, stream_url: str, fps: int, protocol: str
+    ):
         """
         业务代码（纯净，只抛异常）
 
@@ -117,17 +124,25 @@ class StreamService:
 
                 # 如果解码器已死，先清理
                 if not existing.is_alive():
-                    logger.warning(f"[{client_id}] Removing dead decoder before restart")
+                    logger.warning(
+                        f"[{client_id}] Removing dead decoder before restart"
+                    )
                     self._cleanup_dead_decoder_unsafe(client_id)
                 else:
                     # 解码器还活着，无法重复启动（可能URL不同）
-                    logger.warning(f"[{client_id}] Stream already running, cannot start with different URL")
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Stream already running for client {client_id}. Stop it first to change stream URL."
+                    logger.warning(
+                        f"[{client_id}] Stream already running, cannot start with different URL"
+                    )
+                    raise ConflictError(
+                        message=f"Stream already running for client {client_id}. Stop it first to change stream URL.",
+                        client_id=client_id,
+                        resource_type="Stream",
+                        resource_id=client_id,
                     )
 
-            logger.info(f"[{client_id}] Starting stream: protocol={protocol}, url={stream_url}")
+            logger.info(
+                f"[{client_id}] Starting stream: protocol={protocol}, url={stream_url}"
+            )
 
             # 创建或获取 ClientQueues
             client_queues = self._get_or_create_client_queues(client_id)
@@ -142,7 +157,7 @@ class StreamService:
                 stream_url=stream_url,
                 decoder_config=self.config.decoder if self.config else None,
                 protocol_opts=protocol_opts,
-                client_queues=client_queues
+                client_queues=client_queues,
             )
 
             # 启动解码器（可能抛出 FFmpegError）
@@ -150,9 +165,15 @@ class StreamService:
 
             # 保存解码器
             self.decoders[client_id] = dec
-            self.metrics[client_id] = {"frames_received": 0, "frames_dropped": 0, "restarts": 0}
+            self.metrics[client_id] = {
+                "frames_received": 0,
+                "frames_dropped": 0,
+                "restarts": 0,
+            }
 
-            logger.info(f"[{client_id}] Stream started successfully (pid={getattr(dec.proc, 'pid', None)})")
+            logger.info(
+                f"[{client_id}] Stream started successfully (pid={getattr(dec.proc, 'pid', None)})"
+            )
 
             # 注册到 selector（POSIX 系统）
             if self.sel is not None and dec.proc and dec.proc.stdout:
@@ -172,7 +193,9 @@ class StreamService:
             return None
 
         # 从配置文件读取推理FPS
-        inference_fps = _inference_config.get_inference_fps(30) if _inference_config else 15
+        inference_fps = (
+            _inference_config.get_inference_fps(30) if _inference_config else 15
+        )
 
         # 从配置文件读取帧和队列参数
         resize_width = _client_config.frame.resize_width if _client_config else 640
@@ -186,7 +209,7 @@ class StreamService:
             resize_height=resize_height,
             inference_fps=inference_fps,
             ca_maxlen=ca_maxlen,
-            ca_segment_len=ca_segment_len
+            ca_segment_len=ca_segment_len,
         )
 
         logger.info(
@@ -206,13 +229,18 @@ class StreamService:
         Returns:
             协议选项列表
         """
-        if protocol == 'RTSP':
+        if protocol == "RTSP":
             return [
-                "-rtsp_transport", "udp",
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-analyzeduration", "1000000",
-                "-probesize", "1000000",
+                "-rtsp_transport",
+                "udp",
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
+                "-analyzeduration",
+                "1000000",
+                "-probesize",
+                "1000000",
             ]
         return []
 
@@ -230,12 +258,14 @@ class StreamService:
             raise StreamConnectionError(
                 url=decoder.stream_url,
                 client_id=decoder.client_id,
-                details="Cannot register to selector: process or stdout is None"
+                details="Cannot register to selector: process or stdout is None",
             )
 
         # 注册到 selector（self.sel 已经在调用前检查过不为 None）
         if self.sel is not None:
-            self.sel.register(decoder.proc.stdout.fileno(), selectors.EVENT_READ, data=decoder)
+            self.sel.register(
+                decoder.proc.stdout.fileno(), selectors.EVENT_READ, data=decoder
+            )
 
     @log_call(level=logging.INFO)
     def stop_stream(self, client_id: str):
@@ -291,6 +321,7 @@ class StreamService:
             decoder: FFmpegDecoder 实例
             client_id: 客户端ID
         """
+
         def stop_decoder_worker():
             """
             Worker 线程（边界层 1）
@@ -307,13 +338,11 @@ class StreamService:
                 # 边界层 1 捕获异常
                 logger.error(
                     f"[BoundaryLayer1] Failed to stop FFmpeg for {client_id}: {e}",
-                    exc_info=True
+                    exc_info=True,
                 )
 
         stop_thread = threading.Thread(
-            target=stop_decoder_worker,
-            daemon=True,
-            name=f"stop-decoder-{client_id}"
+            target=stop_decoder_worker, daemon=True, name=f"stop-decoder-{client_id}"
         )
         stop_thread.start()
 
@@ -358,18 +387,18 @@ class StreamService:
                 return None
 
             # 判断协议类型
-            protocol = 'RTMP'
-            if dec.protocol_opts and any('rtsp' in str(opt).lower() for opt in dec.protocol_opts):
-                protocol = 'RTSP'
+            protocol = "RTMP"
+            if dec.protocol_opts and any(
+                "rtsp" in str(opt).lower() for opt in dec.protocol_opts
+            ):
+                protocol = "RTSP"
 
-            return {
-                'url': dec.stream_url,
-                'fps': dec.fps,
-                'protocol': protocol
-            }
+            return {"url": dec.stream_url, "fps": dec.fps, "protocol": protocol}
 
     @log_call(level=logging.INFO, log_args=True)
-    def restart_stream(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
+    def restart_stream(
+        self, client_id: str, stream_url: str, fps: int, protocol: str
+    ) -> bool:
         """
         服务层方法：重启流（不使用 GuardedExecutor）
 
@@ -409,7 +438,9 @@ class StreamService:
             )
             return False
 
-    def _restart_stream_impl(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
+    def _restart_stream_impl(
+        self, client_id: str, stream_url: str, fps: int, protocol: str
+    ) -> bool:
         """
         业务代码：重启流实现（纯净，只抛异常）
 
@@ -444,7 +475,7 @@ class StreamService:
                 raise StreamConnectionError(
                     url=stream_url,
                     client_id=client_id,
-                    details="Cannot restart stream: no ClientQueues"
+                    details="Cannot restart stream: no ClientQueues",
                 )
 
             client_queues = client_manager.get_client(client_id)
@@ -458,7 +489,7 @@ class StreamService:
                 stream_url=stream_url,
                 decoder_config=self.config.decoder if self.config else None,
                 protocol_opts=protocol_opts,
-                client_queues=client_queues
+                client_queues=client_queues,
             )
 
             self.decoders[client_id] = dec
@@ -479,7 +510,9 @@ class StreamService:
               CA-Ready-Queue 用于推理，如果满了说明推理跟不上，需要丢帧
         """
         if client_manager is None:
-            logger.warning("[BACKPRESSURE] client_manager is None, import may have failed")
+            logger.warning(
+                "[BACKPRESSURE] client_manager is None, import may have failed"
+            )
             return 0
 
         # 先检查客户端是否存在
@@ -488,12 +521,16 @@ class StreamService:
 
         client_queues = client_manager.get_client(client_id)
         if client_queues is None:
-            logger.warning(f"[BACKPRESSURE] client_queues is None for client_id={client_id}")
+            logger.warning(
+                f"[BACKPRESSURE] client_queues is None for client_id={client_id}"
+            )
             return 0
 
         depths = client_queues.get_queue_depths()
         if not depths:
-            logger.warning(f"[BACKPRESSURE] get_queue_depths returned empty for client_id={client_id}")
+            logger.warning(
+                f"[BACKPRESSURE] get_queue_depths returned empty for client_id={client_id}"
+            )
             return 0
 
         # 关键修改：检查 CA-Ready-Queue（推理队列）深度
@@ -503,7 +540,9 @@ class StreamService:
         # 定期打印队列状态（每100帧打印一次）
         decoder = self.decoders.get(client_id)
         if decoder and decoder.frames_received % 100 == 0:
-            logger.info(f"[BACKPRESSURE] client={client_id}: ca_ready={ready_depth}/{client_queues.ca_ready.maxlen}, ca_raw={raw_depth}/{client_queues.ca_raw.maxlen}")
+            logger.info(
+                f"[BACKPRESSURE] client={client_id}: ca_ready={ready_depth}/{client_queues.ca_ready.maxlen}, ca_raw={raw_depth}/{client_queues.ca_raw.maxlen}"
+            )
 
         return ready_depth  # 返回推理队列深度
 
@@ -517,7 +556,7 @@ class StreamService:
         if self.sel is None:
             return
         events = self.sel.select(timeout=timeout)
-        for key, _ in events: # type: ignore
+        for key, _ in events:  # type: ignore
             dec: FFmpegDecoder = key.data
             # 业务逻辑：调用解码器读取数据
             # 注意：on_stdout_ready() 内部已经处理了异常（返回 False）
@@ -543,8 +582,7 @@ class StreamService:
                 except Exception as e:
                     # 边界层 1 捕获异常（防止线程崩溃）
                     logger.error(
-                        f"[BoundaryLayer1] Error in selector loop: {e}",
-                        exc_info=True
+                        f"[BoundaryLayer1] Error in selector loop: {e}", exc_info=True
                     )
 
         finally:

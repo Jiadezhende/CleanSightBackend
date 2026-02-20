@@ -64,9 +64,13 @@ class StageAwareDispatcher:
             return
 
         self._stop_event.clear()
-        self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
+        self._dispatch_thread = threading.Thread(
+            target=self._dispatch_loop, daemon=True
+        )
         self._dispatch_thread.start()
-        print(f"[StageAwareDispatcher] 已启动 (interval={self.fetch_interval*1000:.1f}ms)")
+        print(
+            f"[StageAwareDispatcher] 已启动 (interval={self.fetch_interval*1000:.1f}ms)"
+        )
 
     def stop(self):
         """停止调度线程"""

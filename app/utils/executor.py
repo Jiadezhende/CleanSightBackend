@@ -8,17 +8,13 @@ CleanSight 重试执行器（框架边界层）
 - 显式化 Action 决策（DROP/RETRY/FATAL）
 """
 
-import time
 import logging
-from enum import Enum
-from typing import Callable, Any, Optional, Dict
+import time
 from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, Dict, Optional
 
-from .exceptions import (
-    AppError,
-    ModelInferenceError,
-    FrameDrop,
-)
+from .exceptions import AppError, FrameDrop, ModelInferenceError
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +27,16 @@ class Action(Enum):
     - RETRY: 重试当前操作
     - FATAL: 致命错误，向上传播
     """
-    DROP = "drop"       # 丢弃，继续执行（用于 FrameDrop）
-    RETRY = "retry"     # 重试当前操作
-    FATAL = "fatal"     # 致命错误，向上传播
+
+    DROP = "drop"  # 丢弃，继续执行（用于 FrameDrop）
+    RETRY = "retry"  # 重试当前操作
+    FATAL = "fatal"  # 致命错误，向上传播
 
 
 @dataclass
 class ExecutionPolicy:
     """重试策略配置"""
+
     max_attempts: int = 3
     delay: float = 1.0
     backoff: bool = False
@@ -73,44 +71,20 @@ class GuardedExecutor:
     # 预定义策略（硬编码，零配置）
     POLICIES: Dict[str, ExecutionPolicy] = {
         # 流操作：固定延迟 3 秒，最多 5 次
-        'stream': ExecutionPolicy(
-            max_attempts=5,
-            delay=3.0,
-            backoff=False
-        ),
-
+        "stream": ExecutionPolicy(max_attempts=5, delay=3.0, backoff=False),
         # 数据库操作：指数退避，最多 3 次
-        'database': ExecutionPolicy(
-            max_attempts=3,
-            delay=1.0,
-            backoff=True,
-            backoff_factor=2.0,
-            max_delay=60.0
+        "database": ExecutionPolicy(
+            max_attempts=3, delay=1.0, backoff=True, backoff_factor=2.0, max_delay=60.0
         ),
-
         # 外部 API：指数退避，最多 3 次
-        'external_api': ExecutionPolicy(
-            max_attempts=3,
-            delay=2.0,
-            backoff=True,
-            backoff_factor=2.0,
-            max_delay=60.0
+        "external_api": ExecutionPolicy(
+            max_attempts=3, delay=2.0, backoff=True, backoff_factor=2.0, max_delay=60.0
         ),
-
         # 模型推理：固定延迟 1 秒，最多 2 次
-        'inference': ExecutionPolicy(
-            max_attempts=2,
-            delay=1.0,
-            backoff=False
-        ),
-
+        "inference": ExecutionPolicy(max_attempts=2, delay=1.0, backoff=False),
         # 持久化操作：指数退避，最多 3 次
-        'persistence': ExecutionPolicy(
-            max_attempts=3,
-            delay=1.0,
-            backoff=True,
-            backoff_factor=2.0,
-            max_delay=30.0
+        "persistence": ExecutionPolicy(
+            max_attempts=3, delay=1.0, backoff=True, backoff_factor=2.0, max_delay=30.0
         ),
     }
 
@@ -128,8 +102,8 @@ class GuardedExecutor:
     def execute(
         self,
         func: Callable[[], Any],
-        policy_name: str = 'database',
-        on_retry: Optional[Callable[[int, Exception], None]] = None
+        policy_name: str = "database",
+        on_retry: Optional[Callable[[int, Exception], None]] = None,
     ) -> Any:
         """
         执行带重试的操作（框架边界层）
@@ -213,7 +187,7 @@ class GuardedExecutor:
                     # 致命错误，向上传播
                     logger.error(
                         f"[GuardedExecutor] Fatal error (policy={policy_name}): {e}",
-                        exc_info=True
+                        exc_info=True,
                     )
                     raise
 
@@ -221,7 +195,7 @@ class GuardedExecutor:
                 # 未知异常 -> 致命
                 logger.critical(
                     f"[GuardedExecutor] Unhandled exception (policy={policy_name}): {e}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 self._record_exception(policy_name, e, Action.FATAL, attempts)
                 raise
@@ -230,7 +204,9 @@ class GuardedExecutor:
         logger.error(f"[GuardedExecutor] Max attempts reached for {policy_name}")
         raise
 
-    def _decide_action(self, exc: AppError, policy: ExecutionPolicy, attempts: int) -> Action:
+    def _decide_action(
+        self, exc: AppError, policy: ExecutionPolicy, attempts: int
+    ) -> Action:
         """
         决策处理动作（核心决策逻辑）
 
@@ -278,7 +254,7 @@ class GuardedExecutor:
             # 指数退避
             delay = min(
                 policy.delay * (policy.backoff_factor ** (attempts - 1)),
-                policy.max_delay
+                policy.max_delay,
             )
         else:
             # 固定延迟
@@ -296,12 +272,12 @@ class GuardedExecutor:
         # 如果有重试，记录到 metrics
         if attempts > 0:
             from app.utils.metrics import retry_total
-            retry_total.labels(
-                operation=policy_name,
-                error_type="recovered"
-            ).inc()
 
-    def _record_exception(self, policy_name: str, exc: Exception, action: Action, attempts: int):
+            retry_total.labels(operation=policy_name, error_type="recovered").inc()
+
+    def _record_exception(
+        self, policy_name: str, exc: Exception, action: Action, attempts: int
+    ):
         """
         记录异常 metrics
 
@@ -311,29 +287,23 @@ class GuardedExecutor:
             action: 处理动作
             attempts: 尝试次数
         """
-        from app.utils.metrics import retry_total, frame_drop_total, gpu_oom_total
+        from app.utils.metrics import frame_drop_total, gpu_oom_total, retry_total
 
         exc_type = type(exc).__name__
 
         # 1. 通用重试计数（所有异常）
         if action in (Action.RETRY, Action.FATAL):
-            retry_total.labels(
-                operation=policy_name,
-                error_type=exc_type
-            ).inc()
+            retry_total.labels(operation=policy_name, error_type=exc_type).inc()
 
         # 2. FrameDrop 专用计数
         if isinstance(exc, FrameDrop):
             frame_drop_total.labels(
-                client_id=exc.client_id or "unknown",
-                reason=exc.reason or "unknown"
+                client_id=exc.client_id or "unknown", reason=exc.reason or "unknown"
             ).inc()
 
         # 3. GPU OOM 专用计数
         if isinstance(exc, ModelInferenceError) and exc.is_cuda_error:
-            gpu_oom_total.labels(
-                model=exc.model_name or "unknown"
-            ).inc()
+            gpu_oom_total.labels(model=exc.model_name or "unknown").inc()
 
 
 class CircuitBreaker:
@@ -364,12 +334,7 @@ class CircuitBreaker:
         db_breaker.call(lambda: query_task(task_id))
     """
 
-    def __init__(
-        self,
-        name: str,
-        max_failures: int = 5,
-        reset_timeout: float = 60.0
-    ):
+    def __init__(self, name: str, max_failures: int = 5, reset_timeout: float = 60.0):
         """
         初始化熔断器
 
@@ -424,7 +389,9 @@ class CircuitBreaker:
 
             # 成功，重置失败计数
             if self.failure_count > 0:
-                logger.info(f"[CircuitBreaker] {self.name} success, reset failure count")
+                logger.info(
+                    f"[CircuitBreaker] {self.name} success, reset failure count"
+                )
             self.failure_count = 0
 
             return result
@@ -478,10 +445,10 @@ class RetryExecutorWithCircuitBreaker:
 
     def __init__(
         self,
-        policy_name: str = 'database',
-        breaker_name: str = 'default',
+        policy_name: str = "database",
+        breaker_name: str = "default",
         max_failures: int = 5,
-        reset_timeout: float = 60.0
+        reset_timeout: float = 60.0,
     ):
         """
         初始化执行器
@@ -494,16 +461,14 @@ class RetryExecutorWithCircuitBreaker:
         """
         self.retry_executor = GuardedExecutor()
         self.circuit_breaker = CircuitBreaker(
-            name=breaker_name,
-            max_failures=max_failures,
-            reset_timeout=reset_timeout
+            name=breaker_name, max_failures=max_failures, reset_timeout=reset_timeout
         )
         self.policy_name = policy_name
 
     def execute(
         self,
         func: Callable[[], Any],
-        on_retry: Optional[Callable[[int, Exception], None]] = None
+        on_retry: Optional[Callable[[int, Exception], None]] = None,
     ) -> Any:
         """
         执行带重试和熔断器的操作
@@ -521,8 +486,6 @@ class RetryExecutorWithCircuitBreaker:
         # 先检查熔断器，再执行重试
         return self.circuit_breaker.call(
             lambda: self.retry_executor.execute(
-                func=func,
-                policy_name=self.policy_name,
-                on_retry=on_retry
+                func=func, policy_name=self.policy_name, on_retry=on_retry
             )
         )
