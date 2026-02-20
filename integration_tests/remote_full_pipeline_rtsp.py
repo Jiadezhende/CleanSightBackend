@@ -80,7 +80,7 @@ class IntegrationTest:
             self._check_prerequisites()
             self._prepare_test_task()
             self._start_ffmpeg()
-            time.sleep(5)  # 等待推流稳定
+            # time.sleep(5)  # 等待推流稳定
             self._start_task()
             self._start_rtsp_capture()
             asyncio.run(self._run_inference_test())
