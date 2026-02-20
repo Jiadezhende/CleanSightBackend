@@ -138,8 +138,8 @@ async def get_monitor_config():
     返回监控配置参数：
     - check_interval: 检查间隔（秒）
     - heartbeat_timeout: 心跳超时（秒）
-    - restart_delay: 重连延迟（秒）
-    - max_restart_attempts: 最大重连次数
+    - reconnect_interval: 重连间隔（秒）
+    - max_reconnect_attempts: 最大重连次数
     - orphan_timeout: 孤儿流超时（秒）
 
     GET /health/monitor/config
