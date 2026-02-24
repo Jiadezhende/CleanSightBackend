@@ -1,6 +1,6 @@
-"""推理服务标准数据模型（InferenceTask 级别）
+"""推理服务标准数据模型（InferenceWorkflow 级别）
 
-本模块定义 **单个 InferenceTask** 的数据结构，用于：
+本模块定义 **单个 InferenceWorkflow** 的数据结构，用于：
 - 标准化不同检测模型的输出格式
 - 定义 Task 的推理、时序分析、可视化、告警评估的数据契约
 
@@ -10,27 +10,29 @@
 
 数据结构：
 - Detection: 单个检测对象（bbox, confidence, class_name）
-- DetectionOutput: 检测输出（标准化格式，包含 detections 列表）
-- TaskInferenceResult: Task 推理结果（单个 Task 的完整输出）
+- DetectionOutput: 检测输出（标准化格式，包含 detections 列表、success 状态等）
 - TemporalResult: Task 的时序分析结果
 - VisualizationData: Task 的可视化数据
 - AlarmInfo: Task 的告警信息
 
 使用示例：
     # Task 级别：单个 BubbleDetectionTask 的输出
-    task_result: TaskInferenceResult = {
-        "detection_output": DetectionOutput(detections=[...], ...),
-        "success": True,
-        "bubble_detected": True
-    }
+    task_result: DetectionOutput = DetectionOutput(
+        detections=[...],
+        metadata={},
+        timestamp=time.time(),
+        success=True,
+        bubble_detected=True,
+        bubble_count=5
+    )
     
     # 客户端级别：InferenceResult 汇总多个 Task
     inference_result = InferenceResult(
         client_id="client_001",
         stage="LEAK",
         result={
-            "bubble_detection": task_result1,  # Task 级别
-            "bending_detection": task_result2   # Task 级别
+            "bubble_detection": task_result1,  # DetectionOutput
+            "bending_detection": task_result2   # DetectionOutput
         }
     )
 """
@@ -60,58 +62,29 @@ class Detection:
 class DetectionOutput:
     """检测输出（适配器统一输出）
     
-    所有检测策略的输出经过适配器转换为此标准格式
+    所有检测策略的输出经过适配器转换为此标准格式。
+    此类同时作为推理结果的最终输出格式。
     """
     detections: List[Detection]          # 检测结果列表
     metadata: Dict[str, Any]             # 元数据（如模型名称、推理时间等）
     timestamp: float                     # 时间戳
-
-
-class TaskInferenceResult(TypedDict, total=False):
-    """单个 Task 的推理结果（标准格式）
-    
-    这是 InferenceResult.result[task_name] 的类型定义。
-    
-    必需字段：
-        detection_output: DetectionOutput - 标准化检测输出
-        success: bool - 推理是否成功
-    
-    可选字段：
-        error: str - 错误信息（失败时提供）
-        
-        向后兼容字段（Task 可以添加自定义字段，但建议逐步迁移到 detection_output）：
-        - bubble_detected: bool
-        - bubble_count: int
-        - bending_detected: bool
-        - detection_count: int
-        等等...
-    
-    示例：
-        {
-            "detection_output": DetectionOutput(detections=[...], ...),
-            "success": True,
-            "bubble_detected": True,  # 向后兼容字段
-            "bubble_count": 5
-        }
-    """
-    detection_output: DetectionOutput    # 标准化检测输出（必需）
-    success: bool                        # 推理是否成功（必需）
-    error: str                          # 错误信息（可选）
+    success: bool = True                 # 推理是否成功
+    error: Optional[str] = None          # 错误信息（失败时提供）
     
     # 向后兼容字段（气泡检测）
-    bubble_detected: bool
-    bubble_count: int
+    bubble_detected: Optional[bool] = None
+    bubble_count: Optional[int] = None
     
     # 向后兼容字段（弯折检测）
-    bending_detected: bool
-    detection_count: int
+    bending_detected: Optional[bool] = None
+    detection_count: Optional[int] = None
 
 
 @dataclass
 class TemporalResult:
     """时序分析结果
     
-    每个 InferenceTask 的 analyze_temporal() 方法返回此结果
+    每个 InferenceWorkflow 的 analyze_temporal() 方法返回此结果
     """
     detected: bool                       # 当前帧是否检测到目标
     event_triggered: bool                # 是否触发时序事件（如连续3帧）
@@ -124,7 +97,7 @@ class TemporalResult:
 class VisualizationData:
     """可视化数据
     
-    每个 InferenceTask 的 prepare_visualization_data() 方法返回此数据
+    每个 InferenceWorkflow 的 prepare_visualization_data() 方法返回此数据
     供固定渲染器使用
     """
     type: str                            # 可视化类型: "bbox", "mask", "heatmap", "keypoint"
@@ -158,7 +131,7 @@ class VisItem:
 class AlarmInfo:
     """告警信息
     
-    每个 InferenceTask 的 evaluate_alarms() 方法返回告警列表
+    每个 InferenceWorkflow 的 evaluate_alarms() 方法返回告警列表
     """
     alarm_type: str                      # 告警类型（如"流程违规"）
     alarm_level: str                     # 告警级别: "low", "medium", "high", "critical"

@@ -11,27 +11,26 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-import cv2
 import numpy as np
 
-from app.services.infer_task import InferenceResult, InferenceTask
+from app.services.inference.workflows.infer_workflow import InferenceWorkflow
 from app.services.inference.data_models import (
     AlarmInfo,
-    Detection,
-    DetectionOutput,    TaskInferenceResult,    TemporalResult,
+    DetectionOutput,
+    TemporalResult,
     VisualizationData,
     VisItem,
     VisualizationType,
 )
-from app.services.models.base import YOLOStrategy, YOLOAdapter
+from app.services.inference.workflows.base import YOLODetector, YOLOAdapter
 from app.utils.exceptions import ModelInferenceError
 
 logger = logging.getLogger(__name__)
 
 
-class BubbleDetectionTask(InferenceTask):
+class BubbleDetectionTask(InferenceWorkflow):
     """气泡检测任务（新架构）
-    
+
     时序逻辑：连续3帧检测到气泡才触发事件
     告警逻辑：触发事件时上报告警
     """
@@ -62,9 +61,9 @@ class BubbleDetectionTask(InferenceTask):
         self.iou_threshold = iou_threshold
 
         # 内部组装策略和适配器
-        self.strategy = YOLOStrategy()
+        self.strategy = YOLODetector()
         self.adapter = YOLOAdapter()
-        
+
         # 延迟加载模型
         self._model_loaded = False
 
@@ -86,11 +85,11 @@ class BubbleDetectionTask(InferenceTask):
 
     def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
         """执行气泡检测
-        
+
         Args:
             frame: 输入图像
             context: 上下文（包含 task、client_id 等）
-            
+
         Returns:
             DetectionOutput: 标准化检测输出
         """
@@ -129,13 +128,13 @@ class BubbleDetectionTask(InferenceTask):
 
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[TaskInferenceResult]:
+    ) -> List[DetectionOutput]:
         """批量气泡检测
-        
+
         利用 YOLO 的批量推理接口提升性能
-        
+
         Returns:
-            TaskInferenceResult 列表
+            DetectionOutput 列表
         """
         try:
             self._ensure_model_loaded()
@@ -152,22 +151,19 @@ class BubbleDetectionTask(InferenceTask):
                 for out, frame in zip(raw_outputs, frames)
             ]
 
-            # 包装为字典格式（保持向后兼容）
-            return [
-                {
-                    "detection_output": output,
-                    "bubble_detected": len(output.detections) > 0,
-                    "bubble_count": len(output.detections),
-                    "success": True,
-                }
-                for output in detection_outputs
-            ]
+            # 设置业务字段（直接修改 DetectionOutput 对象）
+            for output in detection_outputs:
+                output.success = True
+                output.bubble_detected = len(output.detections) > 0
+                output.bubble_count = len(output.detections)
+
+            return detection_outputs
 
         except Exception as e:
             logger.error(f"[BubbleTask] Batch inference failed: {e}, fallback to single", exc_info=True)
             # 降级到单帧处理
             results = []
-            for f,c in zip(frames, contexts):
+            for f, c in zip(frames, contexts):
                 try:
                     output = self.infer(f, c)
                     results.append({
@@ -186,12 +182,12 @@ class BubbleDetectionTask(InferenceTask):
         self, state, output: DetectionOutput, timestamp: float
     ) -> TemporalResult:
         """气泡时序分析：连续3帧检测到才触发事件
-        
+
         Args:
             state: ClientState 实例
             output: 检测输出
             timestamp: 时间戳
-            
+
         Returns:
             TemporalResult: 时序分析结果
         """
@@ -235,11 +231,11 @@ class BubbleDetectionTask(InferenceTask):
         self, output: DetectionOutput, temporal: TemporalResult
     ) -> VisualizationData:
         """准备气泡可视化数据
-        
+
         Args:
             output: 检测输出
             temporal: 时序分析结果
-            
+
         Returns:
             VisualizationData: 可视化数据
         """
@@ -287,7 +283,7 @@ class BubbleDetectionTask(InferenceTask):
         self, temporal: TemporalResult, context: Dict[str, Any]
     ) -> List[AlarmInfo]:
         """评估气泡告警
-        
+
         触发条件：连续3帧检测到气泡
         """
         alarms = []
@@ -307,115 +303,6 @@ class BubbleDetectionTask(InferenceTask):
 
         return alarms
 
-    # ====== 向后兼容接口 ======
-
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """可视化气泡检测结果（向后兼容接口）
-        
-        注意：新架构使用 prepare_visualization_data() + 固定渲染器
-        此方法保留以支持旧代码
-        """
-        if not result.get("success"):
-            return frame
-
-        result_frame = frame.copy()
-        detections = result.get("detections", [])
-        bubble_detected = result.get("bubble_detected", False)
-        bubble_count = result.get("bubble_count", 0)
-        total_bubble_count = result.get("total_bubble_count", 0)
-
-        # 颜色
-        BUBBLE_COLOR = (0, 255, 255)
-        DEBUG_BUBBLE_COLOR = (255, 0, 255)
-        NORMAL_COLOR = (0, 255, 0)
-        WARNING_COLOR = (0, 165, 255)
-        TEXT_BG_COLOR = (0, 0, 0)
-
-        # 绘制检测框
-        for detection in detections:
-            x1, y1, x2, y2 = detection["bbox"]
-            conf = detection["confidence"]
-            class_name = detection["class_name"]
-
-            box_color = (
-                DEBUG_BUBBLE_COLOR if class_name == "bubble_debug_box" else BUBBLE_COLOR
-            )
-
-            cv2.rectangle(result_frame, (x1, y1), (x2, y2), box_color, 2)
-
-            label = f"{class_name} {conf:.2f}"
-            (label_w, label_h), baseline = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-            )
-            label_y = max(y1 - 10, label_h + 5)
-
-            cv2.rectangle(
-                result_frame,
-                (x1, label_y - label_h - 5),
-                (x1 + label_w + 6, label_y + 2),
-                box_color,
-                -1,
-            )
-
-            cv2.putText(
-                result_frame,
-                label,
-                (x1 + 3, label_y - 3),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                TEXT_BG_COLOR,
-                1,
-                cv2.LINE_AA,
-            )
-
-        # 状态栏
-        if bubble_detected:
-            status_text = f"Bubbles: {bubble_count} (Total: {total_bubble_count})"
-            status_color = WARNING_COLOR if bubble_count > 5 else BUBBLE_COLOR
-        else:
-            status_text = f"No Bubbles (Total: {total_bubble_count})"
-            status_color = NORMAL_COLOR
-
-        self._draw_status_bar(result_frame, status_text, status_color, "top-right")
-
-        return result_frame
-
-    def _draw_status_bar(
-        self, frame: np.ndarray, text: str, color: tuple, position: str = "top-right"
-    ):
-        """绘制状态栏（辅助方法）"""
-        height, width = frame.shape[:2]
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        thickness = 2
-        padding = 10
-
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-
-        if position == "top-right":
-            x = width - text_w - padding
-            y = padding + text_h
-        elif position == "top-left":
-            x = padding
-            y = padding + text_h
-        elif position == "bottom-right":
-            x = width - text_w - padding
-            y = height - padding
-        else:  # bottom-left
-            x = padding
-            y = height - padding
-
-        bg_padding = 5
-        cv2.rectangle(
-            frame,
-            (x - bg_padding, y - text_h - bg_padding),
-            (x + text_w + bg_padding, y + bg_padding),
-            (0, 0, 0),
-            -1,
-        )
-
-        cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
-
     # ====== 辅助方法 ======
 
     def set_thresholds(self, conf_threshold: Optional[float] = None, iou_threshold: Optional[float] = None):
@@ -428,4 +315,3 @@ class BubbleDetectionTask(InferenceTask):
         logger.info(
             f"[BubbleTask] Thresholds updated: conf={self.conf_threshold}, iou={self.iou_threshold}"
         )
-

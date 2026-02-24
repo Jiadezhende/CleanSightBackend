@@ -14,11 +14,12 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 from app.models.frame import FrameData
+from app.services.client import ClientManager, ClientQueues, ClientState, client_manager
 from app.services.inference.core.dispatcher import StageAwareDispatcher
 from app.services.inference.models import InferenceResult
 from app.services.inference.workers.base import MultiModelWorkerPool
@@ -31,12 +32,6 @@ from app.utils.exceptions import (
 from app.utils.metrics import gpu_oom_total
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from app.services.client import ClientManager, ClientQueues, ClientState
-
-# 避免循环导入，延迟导入
-from app.services.client import client_manager
 
 
 class ModelWorkerService:
@@ -64,14 +59,14 @@ class ModelWorkerService:
         Args:
             temporal_queue: 时序队列（queue.Queue），用于投递推理结果（异步架构）
             client_queues_map: {client_id: ClientQueues}，如果为 None 则从 client_manager 获取
-            stage_configs: Stage 配置（完全解耦版本，使用 InferenceTask）
+            stage_configs: Stage 配置（完全解耦版本，使用 InferenceWorkflow）
                 {
                     "LEAK": {
-                        "models": [bubble_task, bending_task],  # InferenceTask 实例列表
+                        "models": [bubble_task, bending_task],  # InferenceWorkflow 实例列表
                         "batch_size": 4,
                     },
                     "CLEAN": {
-                        "models": [quality_task],  # InferenceTask 实例列表
+                        "models": [quality_task],  # InferenceWorkflow 实例列表
                         "batch_size": 6,
                     },
                 }
@@ -110,7 +105,7 @@ class ModelWorkerService:
         # 为每个 stage 创建 MultiModelWorkerPool
         self.worker_pools: Dict[str, MultiModelWorkerPool] = {}
         for stage, cfg in self.stage_configs.items():
-            # 使用 InferenceTask 列表
+            # 使用 InferenceWorkflow 列表
             models = cfg.get("models", [])
             if models:
                 self.worker_pools[stage] = MultiModelWorkerPool(

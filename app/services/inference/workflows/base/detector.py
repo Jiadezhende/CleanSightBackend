@@ -14,12 +14,14 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-class DetectionStrategy(ABC):
+class Detector(ABC):
     """检测策略抽象基类
-    
+
     封装不同检测框架的模型加载和推理逻辑
     """
-    
+
+    model: Optional[Any]
+
     @abstractmethod
     def load_model(self, model_path: str, **kwargs) -> None:
         """加载模型
@@ -61,7 +63,7 @@ class DetectionStrategy(ABC):
         return hasattr(self, 'model') and self.model is not None
 
 
-class YOLOStrategy(DetectionStrategy):
+class YOLODetector(Detector):
     """YOLO 检测策略（基于 ultralytics）
     
     支持 YOLOv8、YOLOv10 等 ultralytics 框架的模型
@@ -138,7 +140,7 @@ class YOLOStrategy(DetectionStrategy):
         return results
 
 
-class TransformerStrategy(DetectionStrategy):
+class TransformerDetector(Detector):
     """Transformer 检测策略（预留）
     
     未来可支持 DETR、DINO 等基于 Transformer 的检测模型
@@ -166,12 +168,12 @@ class StrategyFactory:
     """策略工厂 - 根据类型创建策略实例"""
     
     _strategies = {
-        "yolo": YOLOStrategy,
-        "transformer": TransformerStrategy,
+        "yolo": YOLODetector,
+        "transformer": TransformerDetector,
     }
     
     @classmethod
-    def create(cls, strategy_type: str) -> DetectionStrategy:
+    def create(cls, strategy_type: str) -> Detector:
         """创建策略实例
         
         Args:

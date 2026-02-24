@@ -7,7 +7,7 @@ stages:
     # 模型列表（按顺序执行）
     models:
       - name: bubble_detection
-        class: app.services.models.bubble.BubbleDetectionTask
+        class: app.services.inference.workflows.bubble.BubbleDetectionTask
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.5
@@ -15,7 +15,7 @@ stages:
           enabled: true
 
       - name: bending_detection
-        class: app.services.models.bending.EndoscopeBendingDetectionTask
+        class: app.services.inference.workflows.bending.EndoscopeBendingDetectionTask
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.6

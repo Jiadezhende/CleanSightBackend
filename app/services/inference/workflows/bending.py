@@ -11,27 +11,27 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-import cv2
 import numpy as np
 
-from app.services.infer_task import InferenceResult, InferenceTask
+from app.services.inference.workflows.infer_workflow import InferenceWorkflow
 from app.services.inference.data_models import (
     AlarmInfo,
     Detection,
-    DetectionOutput,    TaskInferenceResult,    TemporalResult,
+    DetectionOutput,
+    TemporalResult,
     VisualizationData,
     VisItem,
     VisualizationType,
 )
-from app.services.models.base import YOLOStrategy, YOLOAdapter
+from app.services.inference.workflows.base import YOLODetector, YOLOAdapter
 from app.utils.exceptions import ModelInferenceError
 
 logger = logging.getLogger(__name__)
 
 
-class EndoscopeBendingDetectionTask(InferenceTask):
+class EndoscopeBendingDetectionTask(InferenceWorkflow):
     """内镜弯折检测任务（新架构）
-    
+
     时序逻辑：滑动窗口2秒，70%比例触发事件
     告警逻辑：触发事件时上报告警
     """
@@ -66,9 +66,9 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         self.trigger_ratio = 0.7   # 70%比例
 
         # 内部组装策略和适配器
-        self.strategy = YOLOStrategy()
+        self.strategy = YOLODetector()
         self.adapter = YOLOAdapter()
-        
+
         # 延迟加载模型
         self._model_loaded = False
 
@@ -90,11 +90,11 @@ class EndoscopeBendingDetectionTask(InferenceTask):
 
     def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
         """执行弯折检测
-        
+
         Args:
             frame: 输入图像
             context: 上下文（包含 task、client_id 等）
-            
+
         Returns:
             DetectionOutput: 标准化检测输出
         """
@@ -133,13 +133,13 @@ class EndoscopeBendingDetectionTask(InferenceTask):
 
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[TaskInferenceResult]:
+    ) -> List[DetectionOutput]:
         """批量弯折检测
-        
+
         利用 YOLO 的批量推理接口提升性能
-        
+
         Returns:
-            TaskInferenceResult 列表
+            DetectionOutput 列表
         """
         try:
             self._ensure_model_loaded()
@@ -156,17 +156,13 @@ class EndoscopeBendingDetectionTask(InferenceTask):
                 for out, frame in zip(raw_outputs, frames)
             ]
 
-            # 包装为 TaskInferenceResult 格式（保持向后兼容）
-            results: List[TaskInferenceResult] = [
-                {
-                    "detection_output": output,
-                    "bending_detected": any("bent" in d.class_name.lower() for d in output.detections),
-                    "detection_count": len(output.detections),
-                    "success": True,
-                }
-                for output in detection_outputs
-            ]
-            return results
+            # 设置业务字段（直接修改 DetectionOutput 对象）
+            for output in detection_outputs:
+                output.success = True
+                output.bending_detected = any("bent" in d.class_name.lower() for d in output.detections)
+                output.detection_count = len(output.detections)
+
+            return detection_outputs
 
         except Exception as e:
             logger.error(f"[BendingTask] Batch inference failed: {e}, fallback to single", exc_info=True)
@@ -175,14 +171,18 @@ class EndoscopeBendingDetectionTask(InferenceTask):
             for f, c in zip(frames, contexts):
                 try:
                     output = self.infer(f, c)
-                    results.append({
-                        "detection_output": output,
-                        "bending_detected": any("bent" in d.class_name.lower() for d in output.detections),
-                        "detection_count": len(output.detections),
-                        "success": True,
-                    })
+                    output.success = True
+                    output.bending_detected = any("bent" in d.class_name.lower() for d in output.detections)
+                    output.detection_count = len(output.detections)
+                    results.append(output)
                 except Exception as err:
-                    results.append({"success": False, "error": str(err)})
+                    results.append(DetectionOutput(
+                        detections=[],
+                        metadata={"error": str(err)},
+                        timestamp=time.time(),
+                        success=False,
+                        error=str(err)
+                    ))
             return results
 
     # ====== 2. 时序分析 ======
@@ -191,12 +191,12 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         self, state, output: DetectionOutput, timestamp: float
     ) -> TemporalResult:
         """弯折时序分析：滑动窗口2秒，70%比例触发事件
-        
+
         Args:
             state: ClientState 实例
             output: 检测输出
             timestamp: 时间戳
-            
+
         Returns:
             TemporalResult: 时序分析结果
         """
@@ -246,11 +246,11 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         self, output: DetectionOutput, temporal: TemporalResult
     ) -> VisualizationData:
         """准备弯折可视化数据
-        
+
         Args:
             output: 检测输出
             temporal: 时序分析结果
-            
+
         Returns:
             VisualizationData: 可视化数据
         """
@@ -259,7 +259,7 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         for det in output.detections:
             # 判断是否为弯折类别
             is_bending = "bent" in det.class_name.lower() or "bending" in det.class_name.lower()
-            
+
             # 颜色：弯折用红色，正常用绿色，调试框用洋红色
             if det.class_name == "bending_debug_box":
                 color = (255, 0, 255)  # 洋红色（调试框）
@@ -301,7 +301,7 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         self, temporal: TemporalResult, context: Dict[str, Any]
     ) -> List[AlarmInfo]:
         """评估弯折告警
-        
+
         触发条件：滑动窗口内70%检测到弯折
         """
         alarms = []
@@ -321,118 +321,6 @@ class EndoscopeBendingDetectionTask(InferenceTask):
 
         return alarms
 
-    # ====== 向后兼容接口 ======
-
-    def visualize(self, frame: np.ndarray, result: InferenceResult) -> np.ndarray:
-        """可视化弯折检测结果（向后兼容接口）
-        
-        注意：新架构使用 prepare_visualization_data() + 固定渲染器
-        此方法保留以支持旧代码
-        """
-        if not result.get("success"):
-            return frame
-
-        result_frame = frame.copy()
-        detections = result.get("detections", [])
-        bending_detected = result.get("bending_detected", False)
-        bending_count = result.get("bending_count", 0)
-
-        # 颜色
-        BENDING_COLOR = (0, 0, 255)
-        NORMAL_COLOR = (0, 255, 0)
-        DEBUG_BENDING_COLOR = (255, 0, 255)
-        TEXT_BG_COLOR = (0, 0, 0)
-        TEXT_COLOR = (255, 255, 255)
-
-        # 绘制检测框
-        for detection in detections:
-            x1, y1, x2, y2 = detection["bbox"]
-            conf = detection["confidence"]
-            class_name = detection["class_name"]
-
-            if class_name == "bending_debug_box":
-                box_color = DEBUG_BENDING_COLOR
-            else:
-                is_bending = (
-                    "bent" in class_name.lower() or "bending" in class_name.lower()
-                )
-                box_color = BENDING_COLOR if is_bending else NORMAL_COLOR
-
-            cv2.rectangle(result_frame, (x1, y1), (x2, y2), box_color, 2)
-
-            label = f"{class_name} {conf:.2f}"
-            (label_w, label_h), baseline = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-            )
-            label_y = max(y1 - 10, label_h + 5)
-
-            cv2.rectangle(
-                result_frame,
-                (x1, label_y - label_h - 5),
-                (x1 + label_w + 6, label_y + 2),
-                box_color,
-                -1,
-            )
-
-            cv2.putText(
-                result_frame,
-                label,
-                (x1 + 3, label_y - 3),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                TEXT_COLOR,
-                1,
-                cv2.LINE_AA,
-            )
-
-        # 状态栏
-        if bending_detected:
-            status_text = f"BENDING! Count: {bending_count}"
-            status_color = BENDING_COLOR
-        else:
-            status_text = f"Normal (Count: {bending_count})"
-            status_color = NORMAL_COLOR
-
-        self._draw_status_bar(result_frame, status_text, status_color, "top-left")
-
-        return result_frame
-
-    def _draw_status_bar(
-        self, frame: np.ndarray, text: str, color: tuple, position: str = "top-left"
-    ):
-        """绘制状态栏（辅助方法）"""
-        height, width = frame.shape[:2]
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        thickness = 2
-        padding = 10
-
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-
-        if position == "top-right":
-            x = width - text_w - padding
-            y = padding + text_h
-        elif position == "top-left":
-            x = padding
-            y = padding + text_h
-        elif position == "bottom-right":
-            x = width - text_w - padding
-            y = height - padding
-        else:  # bottom-left
-            x = padding
-            y = height - padding
-
-        bg_padding = 5
-        cv2.rectangle(
-            frame,
-            (x - bg_padding, y - text_h - bg_padding),
-            (x + text_w + bg_padding, y + bg_padding),
-            (0, 0, 0),
-            -1,
-        )
-
-        cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
-
     # ====== 辅助方法 ======
 
     def set_thresholds(self, conf_threshold: Optional[float] = None, iou_threshold: Optional[float] = None):
@@ -445,4 +333,3 @@ class EndoscopeBendingDetectionTask(InferenceTask):
         logger.info(
             f"[BendingTask] Thresholds updated: conf={self.conf_threshold}, iou={self.iou_threshold}"
         )
-

@@ -11,17 +11,12 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict, deque
-from typing import TYPE_CHECKING, Deque, Dict, List, Optional
+from typing import Deque, Dict, List, Optional
 
+from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.models import InferenceRequest
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from app.services.client import ClientManager, ClientQueues
-
-# 延迟导入避免循环依赖
-from app.services.client import client_manager
 
 
 class StageAwareDispatcher:

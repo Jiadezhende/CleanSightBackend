@@ -13,7 +13,7 @@
     InferenceRequest (客户端请求)
       ↓
     InferenceResult (汇总多个 Task 的推理结果)
-      → result: Dict[str, TaskInferenceResult]  # 多个 Task 的结果
+      → result: Dict[str, DetectionOutput]  # 多个 Task 的结果
       ↓
     TemporalAnalysisResult (客户端的时序分析结果)
       ↓
@@ -23,15 +23,15 @@
 
 层次示例：
     # Task 级别（data_models.py）
-    bubble_result: TaskInferenceResult = {"detection_output": ..., "success": True}
+    bubble_result: DetectionOutput = DetectionOutput(detections=[...], success=True, bubble_detected=True)
     
     # 客户端级别（本模块）
     inference_result = InferenceResult(
         client_id="client_001",
         stage="LEAK",
         result={
-            "bubble_detection": bubble_result,  # ← Task 级别数据
-            "bending_detection": bending_result  # ← Task 级别数据
+            "bubble_detection": bubble_result,  # ← Task 级别数据 (DetectionOutput)
+            "bending_detection": bending_result  # ← Task 级别数据 (DetectionOutput)
         }
     )
 """
@@ -39,15 +39,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 
 from app.models.frame import FrameData
-
-# 避免循环导入，运行时不导入 TaskInferenceResult
-if TYPE_CHECKING:
-    from app.services.inference.data_models import TaskInferenceResult
+from app.services.inference.data_models import DetectionOutput
 
 
 @dataclass
@@ -79,41 +76,43 @@ class InferenceResult:
         stage: 当前阶段
         result: 各 Task 的推理结果字典
                 
-                类型: Dict[str, TaskInferenceResult]
+                类型: Dict[str, DetectionOutput]
                 
                 结构说明:
                 {
-                    task_name: {
-                        "detection_output": DetectionOutput,  # 标准化检测输出
-                        "success": bool,                      # 推理是否成功
-                        "error": str (可选),                 # 错误信息
+                    task_name: DetectionOutput(
+                        detections=[...],                     # 检测结果列表
+                        metadata={...},                       # 元数据
+                        timestamp=1234567890.123,            # 时间戳
+                        success=True,                        # 推理是否成功
+                        error=None,                          # 错误信息（可选）
                         
                         # 向后兼容字段（可选）：
-                        "bubble_detected": bool,
-                        "bubble_count": int,
-                        "bending_detected": bool,
+                        bubble_detected=True,
+                        bubble_count=5,
+                        bending_detected=False,
                         ...
-                    }
+                    )
                 }
                 
                 示例:
                 {
-                    "bubble_detection": {
-                        "detection_output": DetectionOutput(
-                            detections=[Detection(...), ...],
-                            metadata={"model": "yolov8"},
-                            timestamp=1234567890.123
-                        ),
-                        "success": True,
-                        "bubble_detected": True,
-                        "bubble_count": 5
-                    },
-                    "bending_detection": {
-                        "detection_output": DetectionOutput(...),
-                        "success": True,
-                        "bending_detected": False,
-                        "detection_count": 0
-                    }
+                    "bubble_detection": DetectionOutput(
+                        detections=[Detection(...), ...],
+                        metadata={"model": "yolov8"},
+                        timestamp=1234567890.123,
+                        success=True,
+                        bubble_detected=True,
+                        bubble_count=5
+                    ),
+                    "bending_detection": DetectionOutput(
+                        detections=[],
+                        metadata={"model": "yolov8"},
+                        timestamp=1234567890.123,
+                        success=True,
+                        bending_detected=False,
+                        detection_count=0
+                    )
                 }
                 
         annotated_frame: 可视化后的帧（可选）
@@ -123,7 +122,7 @@ class InferenceResult:
     client_id: str
     timestamp: float
     stage: str
-    result: Dict[str, "TaskInferenceResult"]  # 类型更清晰！使用字符串避免循环导入
+    result: Dict[str, "DetectionOutput"]  # 类型更清晰！使用字符串避免循环导入
     annotated_frame: Optional[np.ndarray] = None
     frame: Optional[np.ndarray] = None  # 新增：推理时的原始帧
 

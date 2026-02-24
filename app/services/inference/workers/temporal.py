@@ -63,13 +63,8 @@ class TemporalWorker:
         while not self.stop_event.is_set():
             try:
                 # 1. 从队列获取推理结果（超时0.1秒）
-                # result.result 的类型：Dict[str, TaskInferenceResult]
-                #   其中 TaskInferenceResult = {
-                #       "detection_output": DetectionOutput,
-                #       "success": bool,
-                #       "error": str (可选),
-                #       ...向后兼容字段
-                #   }
+                # result.result 的类型：Dict[str, DetectionOutput]
+                #   其中每个 DetectionOutput 包含检测结果和业务字段
                 try:
                     result: InferenceResult = self.input_queue.get(timeout=0.1)
                 except Empty:
@@ -150,18 +145,14 @@ class TemporalWorker:
             
             # 处理每个 task
             for task in tasks:
-                task_result = result.result.get(task.name, {})
+                task_result = result.result.get(task.name)
                 
-                # 检查是否有新的 detection_output
-                # task_result 的类型：TaskInferenceResult = {
-                #   "detection_output": DetectionOutput,
-                #   "success": bool,
-                #   ...
-                # }
-                if "detection_output" not in task_result:
-                    continue  # 跳过没有使用新架构的 task
+                # 检查是否有 task 结果（现在是 DetectionOutput 对象）
+                if task_result is None:
+                    continue  # 跳过没有结果的 task
                 
-                detection_output = task_result["detection_output"]
+                # task_result 现在是 DetectionOutput 对象
+                detection_output = task_result
                 
                 # 调用 Task 的 analyze_temporal()
                 temporal_res: TemporalResult = task.analyze_temporal(

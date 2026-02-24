@@ -1,7 +1,7 @@
 """
 推理服务模块
 
-提供统一的推理、时序分析、可视化和持久化接口
+提供统一的推理、时序分析、可视化和持久化接口，以及具体检测任务实现
 """
 
 # 组件
@@ -14,6 +14,13 @@ from .components import (
 
 # 配置加载器
 from .config import StageConfig, load_stage_config
+
+# 推理工作流 & 检测任务
+from .workflows import (
+    InferenceWorkflow,
+    EndoscopeBendingDetectionTask,
+    BubbleDetectionTask,
+)
 
 # 核心模块
 from .core import (
@@ -40,6 +47,11 @@ from .workers import (
 )
 
 __all__ = [
+    # 推理工作流基类
+    "InferenceWorkflow",
+    # 检测任务
+    "EndoscopeBendingDetectionTask",
+    "BubbleDetectionTask",
     # 核心
     "InferenceManager",
     "ModelWorkerService",
