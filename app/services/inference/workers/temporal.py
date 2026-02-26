@@ -16,7 +16,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from app.services.client import client_manager
-from app.services.inference.components.temporal_analyzer import TemporalAnalyzer
 from app.services.inference.data_models import DetectionOutput
 from app.services.inference.models import (
     FrontendMessage,
@@ -35,24 +34,21 @@ class TemporalWorker:
         self,
         input_queue: Queue,  # 输入：推理结果
         output_queue: Queue,  # 输出：时序分析后的数据包
-        analyzer: TemporalAnalyzer,
         stop_event: threading.Event,
         worker_id: int = 0,
-        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 新增：Stage 配置
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """初始化时序分析工作线程。
 
         Args:
             input_queue: 推理结果队列
             output_queue: 可视化数据包队列
-            analyzer: 时序分析器（向后兼容）
             stop_event: 停止事件
             worker_id: 工作线程ID（用于调试）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
         self.input_queue = input_queue
         self.output_queue = output_queue
-        self.analyzer = analyzer  # 保留用于向后兼容
         self.stop_event = stop_event
         self.worker_id = worker_id
         self.stage_configs = stage_configs or {}
@@ -79,16 +75,19 @@ class TemporalWorker:
                 if cq is None:
                     continue
 
-                # 3. 使用新架构：调用每个 Task 的 analyze_temporal() 和 evaluate_alarms()
+                # 3. 调用每个 Task 的 analyze_temporal() 和 evaluate_alarms()
                 temporal_result, all_alarms = self._process_with_tasks(result, cq.state)
 
-                # 如果无法使用新架构（没有 detection_output），回退到旧逻辑
                 if temporal_result is None:
-                    # 使用旧的 analyzer（向后兼容）
-                    temporal_result = self.analyzer.analyze(
-                        state=cq.state,
-                        result=result,
-                        current_timestamp=result.timestamp,
+                    # stage_configs 尚未加载（启动前）或该 stage 无 tasks，生成空结果
+                    temporal_result = TemporalAnalysisResult(
+                        client_id=result.client_id,
+                        timestamp=result.timestamp,
+                        stage_changed=False,
+                        new_stage=None,
+                        step_completed=False,
+                        events=[],
+                        state_snapshot={},
                     )
                     all_alarms = []
 
@@ -273,22 +272,19 @@ class TemporalWorkerPool:
         self,
         input_queue: Queue,
         output_queue: Queue,
-        analyzer: TemporalAnalyzer,
         num_workers: int = 2,
-        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 新增：Stage 配置
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """初始化时序分析线程池。
 
         Args:
             input_queue: 推理结果队列
             output_queue: 可视化数据包队列
-            analyzer: 时序分析器（向后兼容）
             num_workers: 工作线程数量
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
         self.input_queue = input_queue
         self.output_queue = output_queue
-        self.analyzer = analyzer
         self.num_workers = num_workers
         self.stage_configs = stage_configs or {}
 
@@ -301,10 +297,9 @@ class TemporalWorkerPool:
             worker = TemporalWorker(
                 input_queue=self.input_queue,
                 output_queue=self.output_queue,
-                analyzer=self.analyzer,
                 stop_event=self._stop_event,
                 worker_id=i,
-                stage_configs=self.stage_configs,  # 传递 stage_configs
+                stage_configs=self.stage_configs,
             )
 
             thread = threading.Thread(

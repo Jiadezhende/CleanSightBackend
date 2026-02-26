@@ -4,13 +4,8 @@
 提供统一的推理、时序分析、可视化和持久化接口，以及具体检测任务实现
 """
 
-# 组件
-from .components import (
-    ComponentFactory,
-    DefaultTemporalAnalyzer,
-    DefaultVisualizer,
-    TemporalAnalyzer,
-)
+# Stage 工厂
+from .stage_factory import StageFactory
 
 # 配置加载器
 from .config import StageConfig, load_stage_config
@@ -61,11 +56,8 @@ __all__ = [
     "TemporalWorkerPool",
     "VisualizationWorkerPool",
     "WriteBackWorkerPool",
-    # 组件
-    "DefaultVisualizer",
-    "TemporalAnalyzer",
-    "DefaultTemporalAnalyzer",
-    "ComponentFactory",
+    # Stage 工厂
+    "StageFactory",
     # 数据模型
     "InferenceResult",
     "TemporalAnalysisResult",
