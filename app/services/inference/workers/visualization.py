@@ -10,10 +10,20 @@
 
 import logging
 import threading
+from datetime import datetime
 from queue import Empty, Queue
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
+
+from app.services.inference.data_models import (
+    DetectionOutput,
+    TemporalResult,
+    VisualizationData,
+    VisItem,
+    VisualizationType,
+)
 
 from app.services.client import client_manager
 from app.services.inference.models import (
@@ -86,15 +96,11 @@ class VisualizationWorker:
         self.use_fixed_visualizer = use_fixed_visualizer
 
         # 固定可视化渲染器（新架构）
-        if use_fixed_visualizer:
-            from app.services.inference.components import FixedVisualizer
-            self.fixed_visualizer = FixedVisualizer()
-        else:
-            self.fixed_visualizer = None
+        self.fixed_visualizer = FixedVisualizer() if use_fixed_visualizer else None
 
         # 缓存每个客户端的最新检测结果（用于降帧补偿）
         self.latest_results: Dict[
-            str, Tuple[Dict[str, Any], Optional[TemporalAnalysisResult]]
+            str, Tuple[str, Dict[str, Any], Optional[TemporalAnalysisResult]]
         ] = {}
 
     def run(self):
@@ -111,6 +117,7 @@ class VisualizationWorker:
 
                 # 2. 更新该客户端的最新检测结果
                 self.latest_results[package.client_id] = (
+                    package.stage,
                     package.inference_result,
                     package.temporal_result,
                 )
@@ -187,37 +194,22 @@ class VisualizationWorker:
                     temporal_result=package.temporal_result,
                 )
             
-            # 导入 VisualizationData（避免循环导入）
-            from app.services.inference.data_models import VisualizationData
-            
             vis_data_list: List[VisualizationData] = []
             temporal_events: List[str] = []
-            
-            # 处理每个 task
+
             for task in tasks:
-                task_result = package.inference_result.get(task.name, {})
-                
-                # 检查是否有新的 detection_output
-                if "detection_output" not in task_result:
-                    continue  # 跳过没有使用新架构的 task
-                
-                detection_output = task_result["detection_output"]
-                
-                # 获取对应的时序结果（需要重新计算，或从 package 中提取）
-                # 简化处理：使用空的 TemporalResult
-                from app.services.inference.data_models import TemporalResult
-                
-                # 这里应该调用 Task 的 analyze_temporal()，但由于已经在 TemporalWorker 中处理过了
-                # 我们可以从 package.temporal_result.events 中提取信息
-                # 为了简化，这里创建一个简单的 TemporalResult
+                detection_output = package.inference_result.get(task.name)
+
+                if not isinstance(detection_output, DetectionOutput):
+                    continue
+
                 temporal_res = TemporalResult(
                     detected=len(detection_output.detections) > 0,
                     event_triggered=package.temporal_result.step_completed if package.temporal_result else False,
                     event_message=None,
                     counters={},
                 )
-                
-                # 调用 Task 的 prepare_visualization_data()
+
                 vis_data = task.prepare_visualization_data(detection_output, temporal_res)
                 vis_data_list.append(vis_data)
             
@@ -260,13 +252,13 @@ class VisualizationWorker:
         if client_id not in self.latest_results:
             return None
 
-        inference_result, temporal_result = self.latest_results[client_id]
+        stage, inference_result, temporal_result = self.latest_results[client_id]
 
         # 使用缓存的检测结果绘制当前帧
         return self.visualizer.visualize(
             frame=current_frame,
             inference_result=inference_result,
-            stage=temporal_result.stage if temporal_result else "UNKNOWN",
+            stage=stage,
             temporal_result=temporal_result,
         )
 
@@ -334,3 +326,169 @@ class VisualizationWorkerPool:
             thread.join(timeout=2.0)
 
         logger.debug("[VisualizationWorkerPool] Stopped")
+
+
+class FixedVisualizer:
+    """固定可视化渲染器
+
+    根据 Task 提供的 VisualizationData 渲染视频帧，无需针对每个任务编写可视化代码。
+    支持多种可视化类型：BBox、Segmentation、Keypoint
+    """
+
+    def render(
+        self,
+        frame: np.ndarray,
+        vis_data_list: List["VisualizationData"],
+        stage: str,
+        temporal_events: Optional[List[str]] = None,
+    ) -> np.ndarray:
+        """渲染所有Task的可视化数据
+
+        Args:
+            frame: 原始帧
+            vis_data_list: Task提供的可视化数据列表
+            stage: 当前阶段（如"LEAK"）
+            temporal_events: 时序事件列表（如["连续3帧检测到气泡"]）
+
+        Returns:
+            可视化后的帧
+        """
+        if frame is None:
+            return frame
+
+        annotated = frame.copy()
+
+        for vis_data in vis_data_list:
+            if vis_data.type == VisualizationType.BBOX:
+                self._draw_bboxes(annotated, vis_data.items)
+            elif vis_data.type == VisualizationType.MASK:
+                self._draw_masks(annotated, vis_data.items)
+            elif vis_data.type == VisualizationType.KEYPOINT:
+                self._draw_keypoints(annotated, vis_data.items)
+
+            self._draw_status_bar(
+                annotated,
+                vis_data.status_text,
+                vis_data.status_color,
+                vis_data.status_position,
+            )
+
+        self._draw_global_info(annotated, stage, temporal_events)
+        return annotated
+
+    def _draw_bboxes(self, frame: np.ndarray, items: List["VisItem"]):
+        for item in items:
+            if item.bbox is None:
+                continue
+            x1, y1, x2, y2 = item.bbox
+            cv2.rectangle(frame, (x1, y1), (x2, y2), item.color, 2)
+            if item.label:
+                (label_w, label_h), _ = cv2.getTextSize(
+                    item.label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                )
+                label_y = max(y1 - 10, label_h + 5)
+                cv2.rectangle(
+                    frame,
+                    (x1, label_y - label_h - 5),
+                    (x1 + label_w + 6, label_y + 2),
+                    item.color,
+                    -1,
+                )
+                cv2.putText(
+                    frame, item.label, (x1 + 3, label_y - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA,
+                )
+
+    def _draw_masks(self, frame: np.ndarray, items: List["VisItem"]):
+        for item in items:
+            if item.mask is None:
+                continue
+            colored_mask = np.zeros_like(frame, dtype=np.uint8)
+            colored_mask[item.mask > 0] = item.color
+            frame[:] = cv2.addWeighted(frame, 0.5, colored_mask, 0.5, 0)
+            contours, _ = cv2.findContours(
+                item.mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(frame, contours, -1, item.color, 2)
+            if contours and item.label:
+                x, y, _, _ = cv2.boundingRect(contours[0])
+                cv2.putText(
+                    frame, item.label, (x, y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, item.color, 1, cv2.LINE_AA,
+                )
+
+    def _draw_keypoints(self, frame: np.ndarray, items: List["VisItem"]):
+        for item in items:
+            if item.keypoints is None:
+                continue
+            for kp in item.keypoints:
+                if isinstance(kp, (list, tuple)) and len(kp) >= 2:
+                    x, y = int(kp[0]), int(kp[1])
+                    cv2.circle(frame, (x, y), 5, item.color, -1)
+                    cv2.circle(frame, (x, y), 6, (255, 255, 255), 1)
+            if len(item.keypoints) > 1:
+                for i in range(len(item.keypoints) - 1):
+                    kp1, kp2 = item.keypoints[i], item.keypoints[i + 1]
+                    if (isinstance(kp1, (list, tuple)) and len(kp1) >= 2
+                            and isinstance(kp2, (list, tuple)) and len(kp2) >= 2):
+                        cv2.line(
+                            frame,
+                            (int(kp1[0]), int(kp1[1])),
+                            (int(kp2[0]), int(kp2[1])),
+                            item.color, 2,
+                        )
+
+    def _draw_status_bar(
+        self,
+        frame: np.ndarray,
+        text: str,
+        color: tuple,
+        position: str = "top-right",
+    ):
+        height, width = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale, thickness, padding = 0.6, 2, 10
+        (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
+        if position == "top-right":
+            x, y = width - text_w - padding, padding + text_h
+        elif position == "top-left":
+            x, y = padding, padding + text_h
+        elif position == "bottom-right":
+            x, y = width - text_w - padding, height - padding
+        else:  # bottom-left
+            x, y = padding, height - padding
+        bg = 5
+        cv2.rectangle(frame, (x - bg, y - text_h - bg), (x + text_w + bg, y + bg), (0, 0, 0), -1)
+        cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+
+    def _draw_global_info(
+        self,
+        frame: np.ndarray,
+        stage: str,
+        temporal_events: Optional[List[str]] = None,
+    ):
+        height, width = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale, thickness = 0.6, 2
+        white = (255, 255, 255)
+        cv2.putText(
+            frame, f"Stage: {stage}", (10, height - 60),
+            font, font_scale, white, thickness, cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), (10, height - 30),
+            font, font_scale, white, thickness, cv2.LINE_AA,
+        )
+        if temporal_events:
+            events_text = " | ".join(temporal_events[:2])
+            (event_w, event_h), _ = cv2.getTextSize(events_text, font, font_scale, thickness)
+            cv2.rectangle(
+                frame,
+                (width - event_w - 20, height - event_h - 20),
+                (width - 10, height - 10),
+                (0, 0, 0), -1,
+            )
+            cv2.putText(
+                frame, events_text, (width - event_w - 15, height - 15),
+                font, font_scale, (0, 165, 255), thickness, cv2.LINE_AA,
+            )

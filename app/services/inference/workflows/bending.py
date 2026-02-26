@@ -1,36 +1,26 @@
-"""内镜弯折检测任务（重构版）
-
-使用新架构：
-1. 检测策略（YOLOStrategy）+ 输出适配器（YOLOAdapter）
-2. 时序分析逻辑内置（滑动窗口2秒，70%比例触发）
-3. 可视化数据准备（供固定渲染器使用）
-4. 告警评估逻辑（滑动窗口触发告警）
-"""
+"""内镜弯折检测任务"""
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 
-from app.services.inference.workflows.infer_workflow import InferenceWorkflow
+from app.services.inference.workflows.infer_workflow import YOLOWorkflow
 from app.services.inference.data_models import (
     AlarmInfo,
-    Detection,
     DetectionOutput,
     TemporalResult,
     VisualizationData,
     VisItem,
     VisualizationType,
 )
-from app.services.inference.workflows.base import YOLODetector, YOLOAdapter
-from app.utils.exceptions import ModelInferenceError
 
 logger = logging.getLogger(__name__)
 
 
-class EndoscopeBendingDetectionTask(InferenceWorkflow):
-    """内镜弯折检测任务（新架构）
+class EndoscopeBendingDetectionTask(YOLOWorkflow):
+    """内镜弯折检测任务
 
     时序逻辑：滑动窗口2秒，70%比例触发事件
     告警逻辑：触发事件时上报告警
@@ -43,136 +33,40 @@ class EndoscopeBendingDetectionTask(InferenceWorkflow):
         iou_threshold: float = 0.45,
         enabled: bool = True,
     ):
-        """初始化内镜弯折检测任务
+        super().__init__(
+            name="bending",
+            model_path=model_path,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+            enabled=enabled,
+        )
+        self.window_seconds = 2.0
+        self.trigger_ratio = 0.7
 
-        Args:
-            model_path: YOLO 模型路径
-            conf_threshold: 置信度阈值 (0.0-1.0)
-            iou_threshold: IOU 阈值 (0.0-1.0)
-            enabled: 是否启用此任务
-        """
-        super().__init__(name="bending", enabled=enabled)
-
-        if not model_path:
-            raise ValueError("model_path is required for EndoscopeBendingDetectionTask")
-
-        # 配置参数
-        self.model_path = model_path
-        self.conf_threshold = conf_threshold
-        self.iou_threshold = iou_threshold
-
-        # 滑动窗口配置
-        self.window_seconds = 2.0  # 2秒窗口
-        self.trigger_ratio = 0.7   # 70%比例
-
-        # 内部组装策略和适配器
-        self.strategy = YOLODetector()
-        self.adapter = YOLOAdapter()
-
-        # 延迟加载模型
-        self._model_loaded = False
-
-    def _ensure_model_loaded(self):
-        """确保模型已加载"""
-        if not self._model_loaded:
-            try:
-                self.strategy.load_model(self.model_path)
-                self._model_loaded = True
-                logger.info(f"[BendingTask] Model loaded: {self.model_path}")
-            except Exception as e:
-                logger.error(f"[BendingTask] Model loading failed: {e}", exc_info=True)
-                raise ModelInferenceError(
-                    message=f"Failed to load bending detection model: {str(e)}",
-                    model_name="yolov8_bending",
-                ) from e
-
-    # ====== 1. 检测 ======
-
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
-        """执行弯折检测
-
-        Args:
-            frame: 输入图像
-            context: 上下文（包含 task、client_id 等）
-
-        Returns:
-            DetectionOutput: 标准化检测输出
-        """
-        try:
-            # 确保模型已加载
-            self._ensure_model_loaded()
-
-            # 执行检测
-            raw_output = self.strategy.detect(
-                frame, conf=self.conf_threshold, iou=self.iou_threshold
-            )
-
-            # 适配输出
-            detection_output = self.adapter.adapt(raw_output, frame, time.time())
-
-            return detection_output
-
-        except RuntimeError as e:
-            # YOLO RuntimeError → ModelInferenceError
-            error_msg = str(e).lower()
-            is_cuda = "out of memory" in error_msg or "cuda" in error_msg
-
-            raise ModelInferenceError(
-                message=str(e),
-                model_name="yolov8_bending",
-                client_id=context.get("client_id"),
-                is_cuda_error=is_cuda,
-            ) from e
-
-        except Exception as e:
-            raise ModelInferenceError(
-                message=f"Unexpected error in bending detection: {str(e)}",
-                model_name="yolov8_bending",
-                client_id=context.get("client_id"),
-            ) from e
+    # ====== 1. 检测（覆盖 infer_batch 以添加业务字段）======
 
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
     ) -> List[DetectionOutput]:
-        """批量弯折检测
-
-        利用 YOLO 的批量推理接口提升性能
-
-        Returns:
-            DetectionOutput 列表
-        """
+        """批量弯折检测，利用 YOLO 批量推理接口"""
         try:
-            self._ensure_model_loaded()
-
-            # 批量检测
-            raw_outputs = self.strategy.detect_batch(
-                frames, conf=self.conf_threshold, iou=self.iou_threshold
-            )
-
-            # 批量适配
-            timestamp = time.time()
-            detection_outputs = [
-                self.adapter.adapt(out, frame, timestamp)
-                for out, frame in zip(raw_outputs, frames)
-            ]
-
-            # 设置业务字段（直接修改 DetectionOutput 对象）
-            for output in detection_outputs:
+            outputs = self._run_yolo_batch(frames)
+            for output in outputs:
                 output.success = True
-                output.bending_detected = any("bent" in d.class_name.lower() for d in output.detections)
+                output.bending_detected = any(
+                    "bent" in d.class_name.lower() for d in output.detections
+                )
                 output.detection_count = len(output.detections)
-
-            return detection_outputs
-
+            return outputs
         except Exception as e:
             logger.error(f"[BendingTask] Batch inference failed: {e}, fallback to single", exc_info=True)
-            # 降级到单帧处理
             results = []
             for f, c in zip(frames, contexts):
                 try:
                     output = self.infer(f, c)
-                    output.success = True
-                    output.bending_detected = any("bent" in d.class_name.lower() for d in output.detections)
+                    output.bending_detected = any(
+                        "bent" in d.class_name.lower() for d in output.detections
+                    )
                     output.detection_count = len(output.detections)
                     results.append(output)
                 except Exception as err:
@@ -181,7 +75,7 @@ class EndoscopeBendingDetectionTask(InferenceWorkflow):
                         metadata={"error": str(err)},
                         timestamp=time.time(),
                         success=False,
-                        error=str(err)
+                        error=str(err),
                     ))
             return results
 
@@ -190,23 +84,12 @@ class EndoscopeBendingDetectionTask(InferenceWorkflow):
     def analyze_temporal(
         self, state, output: DetectionOutput, timestamp: float
     ) -> TemporalResult:
-        """弯折时序分析：滑动窗口2秒，70%比例触发事件
-
-        Args:
-            state: ClientState 实例
-            output: 检测输出
-            timestamp: 时间戳
-
-        Returns:
-            TemporalResult: 时序分析结果
-        """
-        # 判断是否检测到弯折（检查类名中是否包含 "bent" 或 "bending"）
+        """弯折时序分析：滑动窗口2秒，70%比例触发事件"""
         bending_detected = any(
             "bent" in det.class_name.lower() or "bending" in det.class_name.lower()
             for det in output.detections
         )
 
-        # 使用滑动窗口
         state.push_temporal_history(
             "bending_window", bending_detected, timestamp, window_seconds=self.window_seconds
         )
@@ -214,20 +97,15 @@ class EndoscopeBendingDetectionTask(InferenceWorkflow):
             "bending_window", timestamp, self.window_seconds
         )
 
-        # 计算窗口内检测比例
         detected_ratio = sum(window_values) / len(window_values) if window_values else 0
         event_triggered = detected_ratio >= self.trigger_ratio
 
-        # 增量计数（仅当检测到时）
         if bending_detected:
             count = state.increment_counter("bending_total")
         else:
             count = state.get_counter("bending_total", 0)
 
-        # 生成事件消息
-        event_message = (
-            f"滑动窗口内{detected_ratio:.0%}检测到弯折" if event_triggered else None
-        )
+        event_message = f"滑动窗口内{detected_ratio:.0%}检测到弯折" if event_triggered else None
 
         return TemporalResult(
             detected=bending_detected,
@@ -245,22 +123,11 @@ class EndoscopeBendingDetectionTask(InferenceWorkflow):
     def prepare_visualization_data(
         self, output: DetectionOutput, temporal: TemporalResult
     ) -> VisualizationData:
-        """准备弯折可视化数据
-
-        Args:
-            output: 检测输出
-            temporal: 时序分析结果
-
-        Returns:
-            VisualizationData: 可视化数据
-        """
-        # 准备检测框可视化项
+        """准备弯折可视化数据"""
         items = []
         for det in output.detections:
-            # 判断是否为弯折类别
             is_bending = "bent" in det.class_name.lower() or "bending" in det.class_name.lower()
 
-            # 颜色：弯折用红色，正常用绿色，调试框用洋红色
             if det.class_name == "bending_debug_box":
                 color = (255, 0, 255)  # 洋红色（调试框）
             elif is_bending:
@@ -268,31 +135,28 @@ class EndoscopeBendingDetectionTask(InferenceWorkflow):
             else:
                 color = (0, 255, 0)    # 绿色（正常）
 
-            items.append(
-                VisItem(
-                    bbox=det.bbox,
-                    label=f"{det.class_name} {det.confidence:.2f}",
-                    confidence=det.confidence,
-                    color=color,
-                )
-            )
+            items.append(VisItem(
+                bbox=det.bbox,
+                label=f"{det.class_name} {det.confidence:.2f}",
+                confidence=det.confidence,
+                color=color,
+            ))
 
-        # 状态栏
         count = temporal.counters.get("bending_count", 0)
 
         if temporal.detected:
             status_text = f"BENDING! Count: {count}"
-            status_color = (0, 0, 255)  # 红色
+            status_color = (0, 0, 255)
         else:
             status_text = f"Normal (Count: {count})"
-            status_color = (0, 255, 0)  # 绿色
+            status_color = (0, 255, 0)
 
         return VisualizationData(
             type=VisualizationType.BBOX,
             items=items,
             status_text=status_text,
             status_color=status_color,
-            status_position="top-left",  # 左上角，与气泡区分
+            status_position="top-left",
         )
 
     # ====== 4. 告警评估 ======
@@ -300,36 +164,15 @@ class EndoscopeBendingDetectionTask(InferenceWorkflow):
     def evaluate_alarms(
         self, temporal: TemporalResult, context: Dict[str, Any]
     ) -> List[AlarmInfo]:
-        """评估弯折告警
-
-        触发条件：滑动窗口内70%检测到弯折
-        """
-        alarms = []
-
-        if temporal.event_triggered:
-            alarms.append(
-                AlarmInfo(
-                    alarm_type="流程违规",
-                    alarm_level="high",
-                    alarm_message="检测到内镜弯折异常（滑动窗口触发）",
-                    metadata={
-                        "window_ratio": temporal.counters.get("window_ratio", 0),
-                        "bending_count": temporal.counters.get("bending_count", 0),
-                    },
-                )
-            )
-
-        return alarms
-
-    # ====== 辅助方法 ======
-
-    def set_thresholds(self, conf_threshold: Optional[float] = None, iou_threshold: Optional[float] = None):
-        """动态调整检测阈值"""
-        if conf_threshold is not None:
-            self.conf_threshold = max(0.0, min(1.0, conf_threshold))
-        if iou_threshold is not None:
-            self.iou_threshold = max(0.0, min(1.0, iou_threshold))
-
-        logger.info(
-            f"[BendingTask] Thresholds updated: conf={self.conf_threshold}, iou={self.iou_threshold}"
-        )
+        """评估弯折告警：滑动窗口内70%触发"""
+        if not temporal.event_triggered:
+            return []
+        return [AlarmInfo(
+            alarm_type="流程违规",
+            alarm_level="high",
+            alarm_message="检测到内镜弯折异常（滑动窗口触发）",
+            metadata={
+                "window_ratio": temporal.counters.get("window_ratio", 0),
+                "bending_count": temporal.counters.get("bending_count", 0),
+            },
+        )]

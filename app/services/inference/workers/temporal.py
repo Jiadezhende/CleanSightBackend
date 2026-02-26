@@ -17,6 +17,7 @@ import numpy as np
 
 from app.services.client import client_manager
 from app.services.inference.components.temporal_analyzer import TemporalAnalyzer
+from app.services.inference.data_models import DetectionOutput
 from app.services.inference.models import (
     FrontendMessage,
     InferenceResult,
@@ -214,22 +215,14 @@ class TemporalWorker:
         confidences: Dict[str, float] = {}
 
         for subtask_name, subtask_res in result.result.items():
-            if isinstance(subtask_res, dict):
-                # 新架构：从 detection_output 提取
-                if "detection_output" in subtask_res:
-                    detection_output = subtask_res["detection_output"]
-                    detections[subtask_name] = len(detection_output.detections) > 0
-                    # 计算平均置信度
-                    if detection_output.detections:
-                        avg_conf = sum(d.confidence for d in detection_output.detections) / len(detection_output.detections)
-                        confidences[subtask_name] = avg_conf
-                    else:
-                        confidences[subtask_name] = 0.0
+            if isinstance(subtask_res, DetectionOutput):
+                detections[subtask_name] = len(subtask_res.detections) > 0
+                if subtask_res.detections:
+                    confidences[subtask_name] = sum(
+                        d.confidence for d in subtask_res.detections
+                    ) / len(subtask_res.detections)
                 else:
-                    # 向后兼容：旧格式
-                    detected_key = f"{subtask_name}_detected"
-                    detections[subtask_name] = subtask_res.get(detected_key, False)
-                    confidences[subtask_name] = subtask_res.get("confidence", 0.0)
+                    confidences[subtask_name] = 0.0
 
         # 生成状态消息（包含告警信息）
         status_msg = self._generate_status_message(temporal, alarms or [])
@@ -260,7 +253,7 @@ class TemporalWorker:
         """
         # 优先显示告警
         if alarms:
-            alarm_msgs = [alarm.message for alarm in alarms]
+            alarm_msgs = [alarm.alarm_message for alarm in alarms]
             return "⚠️ " + "; ".join(alarm_msgs)
         
         # 显示事件
