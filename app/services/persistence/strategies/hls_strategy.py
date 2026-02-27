@@ -10,6 +10,7 @@ HLS持久化策略
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ import cv2
 import numpy as np
 
 from app.models.frame import FrameData
+from app.utils.exceptions import PersistenceError
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,16 @@ class HLSPersistenceStrategy:
         self.raw_fps = raw_fps
         self.processed_fps = processed_fps
         self.enable_db_write = enable_db_write
+        # 按 target_dir 路径索引的细粒度锁，序列化同一任务目录下的 playlist/metadata 写操作
+        self._dir_locks: Dict[str, threading.Lock] = {}
+        self._dir_locks_guard = threading.Lock()
+
+    def _get_dir_lock(self, target_dir: Path) -> threading.Lock:
+        key = str(target_dir)
+        with self._dir_locks_guard:
+            if key not in self._dir_locks:
+                self._dir_locks[key] = threading.Lock()
+            return self._dir_locks[key]
 
     def persist_segment(
         self, client_id: str, task_id: int, segment_type: str, frames: List[FrameData]
@@ -57,8 +69,6 @@ class HLSPersistenceStrategy:
             PersistenceError: 持久化失败
             ValueError: 未知的segment类型
         """
-        from app.utils.exceptions import PersistenceError
-
         # 创建目标目录
         target_dir = self.db_dir / client_id / str(task_id)
         try:
@@ -87,8 +97,6 @@ class HLSPersistenceStrategy:
         Raises:
             PersistenceError: 持久化失败（IOError, cv2.error等）
         """
-        from app.utils.exceptions import PersistenceError
-
         if not frames:
             logger.warning("Raw segment为空: %s", target_dir)
             return False
@@ -98,7 +106,7 @@ class HLSPersistenceStrategy:
         # 1. 生成原始视频段（使用原始视频源帧率30fps）
         raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
         try:
             out_raw = cv2.VideoWriter(
@@ -122,31 +130,31 @@ class HLSPersistenceStrategy:
         else:
             segment_duration = 1.0 / self.raw_fps
 
-        # 3. 更新播放列表
+        # 3 & 4. 持锁更新播放列表和 metadata（防止并发写入竞态）
         raw_playlist_path = target_dir / "raw_playlist.m3u8"
-        try:
-            if not raw_playlist_path.exists():
-                with raw_playlist_path.open("w") as f:
-                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
-            with raw_playlist_path.open("a") as f:
-                f.write(f"#EXTINF:{segment_duration:.3f},\n")
-                f.write(f"{raw_segment_path.name}\n")
-        except IOError as e:
-            raise PersistenceError(
-                message=f"Failed to update raw playlist: {raw_playlist_path}",
-                client_id=client_id,
-                operation="hls_update_playlist",
-                retryable=True,
-            ) from e
+        with self._get_dir_lock(target_dir):
+            try:
+                if not raw_playlist_path.exists():
+                    with raw_playlist_path.open("w") as f:
+                        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+                with raw_playlist_path.open("a") as f:
+                    f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                    f.write(f"{raw_segment_path.name}\n")
+            except IOError as e:
+                raise PersistenceError(
+                    message=f"Failed to update raw playlist: {raw_playlist_path}",
+                    client_id=client_id,
+                    operation="hls_update_playlist",
+                    retryable=True,
+                ) from e
 
-        # 4. 更新metadata.json
-        self._update_metadata(
-            target_dir,
-            segment_type="raw",
-            segment_count_delta=1,
-            duration_delta=segment_duration,
-            timestamp=start_ts,
-        )
+            self._update_metadata(
+                target_dir,
+                segment_type="raw",
+                segment_count_delta=1,
+                duration_delta=segment_duration,
+                timestamp=start_ts,
+            )
 
         logger.info(
             "Raw segment已持久化: %s, frames=%d, duration=%.3fs",
@@ -165,8 +173,6 @@ class HLSPersistenceStrategy:
         Raises:
             PersistenceError: 持久化失败（IOError, cv2.error等）
         """
-        from app.utils.exceptions import PersistenceError
-
         if not frames:
             logger.warning("Processed segment为空: %s", target_dir)
             return False
@@ -176,7 +182,7 @@ class HLSPersistenceStrategy:
         # 1. 生成处理后视频段（使用推理帧率）
         segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
         try:
             out_processed = cv2.VideoWriter(
@@ -225,31 +231,31 @@ class HLSPersistenceStrategy:
         else:
             segment_duration = 1.0 / self.processed_fps
 
-        # 4. 更新播放列表
+        # 4 & 5. 持锁更新播放列表和 metadata（防止并发写入竞态）
         playlist_path = target_dir / "processed_playlist.m3u8"
-        try:
-            if not playlist_path.exists():
-                with playlist_path.open("w") as f:
-                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
-            with playlist_path.open("a") as f:
-                f.write(f"#EXTINF:{segment_duration:.3f},\n")
-                f.write(f"{segment_path.name}\n")
-        except IOError as e:
-            raise PersistenceError(
-                message=f"Failed to update processed playlist: {playlist_path}",
-                client_id=client_id,
-                operation="hls_update_playlist",
-                retryable=True,
-            ) from e
+        with self._get_dir_lock(target_dir):
+            try:
+                if not playlist_path.exists():
+                    with playlist_path.open("w") as f:
+                        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+                with playlist_path.open("a") as f:
+                    f.write(f"#EXTINF:{segment_duration:.3f},\n")
+                    f.write(f"{segment_path.name}\n")
+            except IOError as e:
+                raise PersistenceError(
+                    message=f"Failed to update processed playlist: {playlist_path}",
+                    client_id=client_id,
+                    operation="hls_update_playlist",
+                    retryable=True,
+                ) from e
 
-        # 5. 更新metadata.json
-        self._update_metadata(
-            target_dir,
-            segment_type="processed",
-            segment_count_delta=1,
-            duration_delta=segment_duration,
-            timestamp=start_ts,
-        )
+            self._update_metadata(
+                target_dir,
+                segment_type="processed",
+                segment_count_delta=1,
+                duration_delta=segment_duration,
+                timestamp=start_ts,
+            )
 
         logger.info(
             "Processed segment已持久化: %s, frames=%d, duration=%.3fs",
@@ -267,7 +273,7 @@ class HLSPersistenceStrategy:
         duration_delta: float,
         timestamp: float,
     ):
-        """更新任务元信息文件（metadata.json）"""
+        """更新任务元信息文件（metadata.json）—— 调用方须持有该目录的锁"""
         metadata_path = target_dir / "metadata.json"
 
         # 读取现有metadata
@@ -331,7 +337,17 @@ class HLSPersistenceStrategy:
             # numpy 数组转为列表（如果是小数组）
             if obj.size < 100:
                 return obj.tolist()
-            return None
+            logger.warning(
+                "Dropping large numpy array during keypoints serialization: shape=%s dtype=%s size=%d",
+                obj.shape,
+                obj.dtype,
+                obj.size,
+            )
+            raise PersistenceError(
+                message=f"numpy array too large to serialize (shape={obj.shape}, size={obj.size}); keypoints data discarded",
+                operation="hls_serialize_keypoints",
+                retryable=False,
+            )
         elif isinstance(obj, (np.integer, np.floating)):
             return obj.item()
         elif isinstance(obj, (str, int, float, bool)):
