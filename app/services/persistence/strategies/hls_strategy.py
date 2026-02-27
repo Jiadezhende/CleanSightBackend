@@ -230,7 +230,7 @@ class HLSPersistenceStrategy:
         try:
             if not playlist_path.exists():
                 with playlist_path.open("w") as f:
-                    f.write("#EXTM3U8\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+                    f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
             with playlist_path.open("a") as f:
                 f.write(f"#EXTINF:{segment_duration:.3f},\n")
                 f.write(f"{segment_path.name}\n")
