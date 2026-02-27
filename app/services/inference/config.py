@@ -13,6 +13,7 @@
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -111,11 +112,9 @@ def _expand_env_vars(config: Any) -> Any:
         return [_expand_env_vars(item) for item in config]
     elif isinstance(config, str):
         # 使用正则表达式匹配所有 ${VAR_NAME} 或 ${VAR_NAME:default} 模式
-        import re
-
         pattern = r"\$\{([^}]+)\}"
 
-        def replace_var(match):
+        def replace_var(match: re.Match[str]) -> str:
             var_expr = match.group(1)
             if ":" in var_expr:
                 var_name, default = var_expr.split(":", 1)

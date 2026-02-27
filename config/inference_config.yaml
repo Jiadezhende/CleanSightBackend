@@ -1,13 +1,24 @@
-# 推理服务阶段配置文件
-# 定义各个 Stage 的模型、时序分析器、可视化器和告警触发条件
+# 推理服务阶段配置文件（简化版 - 新架构）
+# 
+# 新架构说明：
+# 1. 时序分析逻辑已下沉到每个 InferenceTask 的 analyze_temporal() 方法
+# 2. 可视化使用固定渲染器（FixedVisualizer），Task 只需提供 VisualizationData
+# 3. 告警评估在 Task 的 evaluate_alarms() 方法中实现
+# 4. YAML 配置只需声明 Task 列表和参数，无需配置 temporal_analyzer 和 visualizer
+#
+# 开发者只需：
+# 1. 创建 InferenceTask 子类
+# 2. 实现 4 个核心方法（infer, analyze_temporal, prepare_visualization_data, evaluate_alarms）
+# 3. 在 YAML 中声明 Task
 
 stages:
   # ==================== LEAK 阶段（泄漏检测） ====================
   LEAK:
     # 模型列表（按顺序执行）
+    # 每个 Task 自带时序分析、可视化、告警逻辑
     models:
       - name: bubble_detection
-        class: app.services.models.bubble.BubbleDetectionTask
+        class: app.services.inference.workflows.bubble.BubbleDetectionTask
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.5
@@ -15,64 +26,31 @@ stages:
           enabled: true
 
       - name: bending_detection
-        class: app.services.models.bending.EndoscopeBendingDetectionTask
+        class: app.services.inference.workflows.bending.EndoscopeBendingDetectionTask
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.6
           iou_threshold: 0.45
           enabled: true
 
-    # 时序分析器配置
-    temporal_analyzer:
-      class: app.services.inference.components.DefaultTemporalAnalyzer
-      config:
-        bubble:
-          mode: consecutive          # 连续帧模式
-          threshold: 3               # 连续3帧才触发
-
-        bending:
-          mode: sliding_window       # 滑动窗口模式
-          window_seconds: 2.0        # 2秒窗口
-          ratio: 0.7                 # 70%比例才触发
-
-    # 可视化器配置
-    visualizer:
-      class: app.services.inference.components.DefaultVisualizer
-
-    # 告警触发条件
-    alarm_triggers:
-      - condition: bubble_detected == True
-        alarm_type: 流程违规
-        alarm_level: high
-        alarm_message: 检测到气泡异常
-
-      - condition: bending_detected == True
-        alarm_type: 流程违规
-        alarm_level: high
-        alarm_message: 检测到内镜弯折异常
+    # 以下配置在新架构中已不需要（保留用于向后兼容）
+    # temporal_analyzer:
+    #   class: app.services.inference.components.DefaultTemporalAnalyzer
+    #   config: ...
+    # visualizer:
+    #   class: app.services.inference.components.DefaultVisualizer
+    # alarm_triggers: ...
 
   # ==================== CLEAN 阶段（清洁检测） ====================
   CLEAN:
-    # 模型列表
     models:
-      # 未来可添加清洁质量检测模型
+      # 示例：未来添加的清洁质量检测模型
       # - name: quality_detection
-      #   class: app.services.ai_models.quality_task.QualityDetectionTask
+      #   class: app.services.models.quality.QualityDetectionTask
       #   params:
       #     model_path: ${QUALITY_MODEL_PATH:./weights/quality.pt}
       #     enabled: true
-
-    # 时序分析器配置
-    temporal_analyzer:
-      class: app.services.inference.components.DefaultTemporalAnalyzer
-      config:
-        quality:
-          mode: sliding_window
-          window_seconds: 2.0
-          ratio: 0.8
-
-    # 告警触发条件
-    alarm_triggers: []
+      #     confidence_threshold: 0.7
 
 # ==================== 全局配置（所有模块共享） ====================
 global:
@@ -88,6 +66,11 @@ global:
   rt_maxlen: 30                   # 实时队列长度（帧数）
   ca_maxlen: 2700                 # CA队列最大长度（帧数，约90秒@30fps）
   ca_segment_len: 300             # HLS段长度（帧数，约10秒@30fps）
+
+  # 可视化参数（新架构）
+  visualization:
+    enabled: true                 # 是否启用可视化
+    use_fixed_visualizer: false   # 是否使用新的固定渲染器（设为 true 启用）
 
   # 注意：
   # - persistence和client模块会直接读取这些参数，保证全局一致性

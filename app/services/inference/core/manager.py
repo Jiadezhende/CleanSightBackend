@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
-from app.services.inference.components.temporal_analyzer import DefaultTemporalAnalyzer
-from app.services.inference.components.visualizer import DefaultVisualizer
 from app.services.inference.core.service import ModelWorkerService
 from app.services.inference.models import (
     InferenceResult,
@@ -109,26 +107,19 @@ class InferenceManager:
         )
         self.writeback_queue: "queue.Queue[WriteBackData]" = queue.Queue(maxsize=256)
 
-        # 创建时序分析器
-        temporal_config = self._create_temporal_config()
-        self.temporal_analyzer = DefaultTemporalAnalyzer(config=temporal_config)
-
-        # 创建可视化器
-        self.visualizer = DefaultVisualizer()
-
         # 创建 Worker 池（各池管理自己的 stop_event）
         self.temporal_pool = TemporalWorkerPool(
             input_queue=self.temporal_queue,
             output_queue=self.visualization_queue,
-            analyzer=self.temporal_analyzer,
             num_workers=temporal_threads,
+            stage_configs=None,  # 将在 start() 后设置
         )
 
         self.visualization_pool = VisualizationWorkerPool(
             input_queue=self.visualization_queue,
             output_queue=self.writeback_queue,
-            visualizer=self.visualizer,
             num_workers=visualization_threads,
+            stage_configs=None,  # 将在 start() 后设置
         )
 
         self.writeback_pool = WriteBackWorkerPool(
@@ -166,13 +157,11 @@ class InferenceManager:
         if self._stage_configs is None:
             try:
                 # 尝试从配置文件加载（优先）
-                from app.services.inference.components.component_factory import (
-                    ComponentFactory,
-                )
+                from app.services.inference.stage_factory import StageFactory
                 from app.services.inference.config import load_stage_config
 
                 config = load_stage_config()
-                factory = ComponentFactory(config)
+                factory = StageFactory(config)
 
                 # 为每个 stage 创建模型实例
                 stage_configs = {}
@@ -215,51 +204,6 @@ class InferenceManager:
                 ) from e
 
         return self._stage_configs
-
-    def _create_temporal_config(self) -> Dict[str, Dict[str, Any]]:
-        """创建时序分析器配置（优先从配置文件加载）"""
-        try:
-            # 尝试从配置文件加载时序分析器配置
-            from app.services.inference.config import load_stage_config
-
-            config = load_stage_config()
-            temporal_config = {}
-
-            for stage_name in config.list_stages():
-                stage_cfg = config.get_stage_config(stage_name)
-                if stage_cfg and stage_cfg.temporal_analyzer:
-                    # 提取时序分析器的配置
-                    analyzer_cfg = stage_cfg.temporal_analyzer.get("config", {})
-                    if analyzer_cfg:
-                        temporal_config[stage_name] = analyzer_cfg
-
-            if temporal_config:
-                logger.debug("[InferenceManager] Loaded temporal analyzer config from file")
-                return temporal_config
-        except Exception as e:
-            logger.debug("[InferenceManager] Failed to load temporal config: %s, using defaults", e)
-
-        # 默认配置（回退）
-        return {
-            "LEAK": {
-                "bubble": {
-                    "mode": "consecutive",
-                    "threshold": 3,  # 连续3帧
-                },
-                "bending": {
-                    "mode": "sliding_window",
-                    "window_seconds": 2.0,  # 2秒窗口
-                    "ratio": 0.7,  # 70%比例
-                },
-            },
-            "CLEAN": {
-                "quality": {
-                    "mode": "sliding_window",
-                    "window_seconds": 2.0,
-                    "ratio": 0.8,  # 80%比例
-                },
-            },
-        }
 
     def _create_async_model_worker_service(self):
         """创建异步模式的推理服务（将结果投递到时序队列）"""
@@ -582,6 +526,12 @@ class InferenceManager:
         # 1. 启动推理服务
         if self._model_worker_service:
             self._model_worker_service.start()
+
+        # 1.5 设置异步管道的 stage_configs（新架构）
+        if hasattr(self, '_model_worker_service') and self._model_worker_service:
+            stage_configs = self._get_stage_configs()
+            self.temporal_pool.stage_configs = stage_configs
+            self.visualization_pool.stage_configs = stage_configs
 
         # 2. 启动异步管道
         self.temporal_pool.start()
