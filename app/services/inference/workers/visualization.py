@@ -101,6 +101,11 @@ class VisualizationWorker:
                     self.worker_id, client_id, e, exc_info=True,
                 )
 
+        # 自清理：移除已不在 ClientManager 中的客户端去重记录（防止内存泄漏）
+        stale_ids = self._last_rendered_ts.keys() - all_clients.keys()
+        for stale_id in stale_ids:
+            del self._last_rendered_ts[stale_id]
+
     def _process_client(self, client_id: str, cq) -> None:
         """处理单个客户端的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）

@@ -257,6 +257,10 @@ class InferenceManager:
                 f"[InferenceManager] Client not found in ClientManager, skipping writeback: {client_id}"
             )
 
+        # 清理预编码缓存（防止内存泄漏）
+        with self._encoded_cache_lock:
+            self._encoded_cache.pop(client_id, None)
+
         logger.info(f"[InferenceManager] Inference resources removed: {client_id}")
 
     def status(self) -> Dict[str, Any]:
