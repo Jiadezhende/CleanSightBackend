@@ -20,7 +20,7 @@ class FrameConfig:
 
     resize_width: int = 640  # Resize宽度
     resize_height: int = 480  # Resize高度
-    # 注意：inference_fps, rt_maxlen, ca_maxlen, ca_segment_len 从 inference_config.yaml 读取
+    # 注意：inference_fps, ca_maxlen, ca_segment_len 从 inference_config.yaml 读取
 
 
 @dataclass
@@ -102,14 +102,12 @@ class ClientConfig:
             inference_config = load_stage_config()
 
             # 从inference config读取共享参数
-            self._rt_maxlen = inference_config.rt_maxlen
             self._ca_maxlen = inference_config.ca_maxlen
             self._ca_segment_len = inference_config.ca_segment_len  # 直接使用帧数
             self._inference_fps = inference_config.inference_fps
 
             logger.debug(
-                "✓ 已从inference_config.yaml读取共享参数: rt=%d, ca=%d, segment=%d, fps=%d",
-                self._rt_maxlen,
+                "✓ 已从inference_config.yaml读取共享参数: ca=%d, segment=%d, fps=%d",
                 self._ca_maxlen,
                 self._ca_segment_len,
                 self._inference_fps,
@@ -117,15 +115,9 @@ class ClientConfig:
         except Exception as e:
             # 如果无法加载inference配置，使用默认值
             logger.warning("✗ 无法从inference配置读取共享参数，使用默认值: %s", e)
-            self._rt_maxlen = 30
             self._ca_maxlen = 2700
             self._ca_segment_len = 300
             self._inference_fps = 20
-
-    @property
-    def rt_maxlen(self) -> int:
-        """RT队列最大长度（从inference config读取）"""
-        return getattr(self, "_rt_maxlen", 30)
 
     @property
     def ca_maxlen(self) -> int:
@@ -148,8 +140,7 @@ class ClientConfig:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("========== Client配置 ==========")
             logger.debug(
-                "队列: rt=%d, ca=%d, segment=%d",
-                self.rt_maxlen,
+                "队列: ca=%d, segment=%d",
                 self.ca_maxlen,
                 self.ca_segment_len,
             )
@@ -175,11 +166,6 @@ class ClientConfig:
         if self.ca_maxlen < 300:
             warnings.append(
                 f"⚠️  CA队列容量过小: {self.ca_maxlen}，建议>=2700（90秒缓存）"
-            )
-
-        if self.rt_maxlen < 10:
-            warnings.append(
-                f"⚠️  RT队列容量过小: {self.rt_maxlen}，建议>=30（1秒缓存）"
             )
 
         # 检查ca_segment_len是否合理
