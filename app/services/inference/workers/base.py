@@ -140,8 +140,6 @@ class MultiModelWorkerPool:
                 timestamp=req.timestamp,
                 stage=req.stage,
                 result=per_frame_results,
-                annotated_frame=None,  # 先不做可视化，留给后处理
-                frame=req.frame,  # 保存原始帧供可视化使用
             )
             results.append(result)
 

@@ -4,8 +4,7 @@
 - 管理 StageAwareDispatcher（取帧分组）
 - 为每个 stage 创建 MultiModelWorkerPool
 - 启动推理线程，消费各 stage 的批量请求
-- 将结果回写到 ClientQueues
-- 更新 ClientState（业务状态管理）
+- 将 DetectionOutput 同步到 ClientQueues.slide_window
 """
 
 from __future__ import annotations
@@ -16,10 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
-import numpy as np
-
-from app.models.frame import FrameData
-from app.services.client import ClientManager, ClientQueues, ClientState, client_manager
+from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.core.dispatcher import StageAwareDispatcher
 from app.services.inference.models import InferenceResult
 from app.services.inference.workers.base import MultiModelWorkerPool
@@ -27,7 +23,6 @@ from app.utils.exceptions import (
     AppError,
     FrameDrop,
     ModelInferenceError,
-    PersistenceError,
 )
 from app.utils.metrics import gpu_oom_total
 
@@ -41,13 +36,11 @@ class ModelWorkerService:
     - 管理 StageAwareDispatcher（取帧分组）
     - 为每个 stage 创建 MultiModelWorkerPool
     - 启动推理线程，消费各 stage 的批量请求
-    - 将结果回写到 ClientQueues
-    - 更新 ClientState（业务状态管理）
+    - 将 DetectionOutput 同步到 ClientQueues.slide_window
     """
 
     def __init__(
         self,
-        temporal_queue,  # 时序队列（必需参数）
         client_queues_map: Optional[Dict[str, ClientQueues]] = None,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
@@ -57,7 +50,6 @@ class ModelWorkerService:
     ):
         """
         Args:
-            temporal_queue: 时序队列（queue.Queue），用于投递推理结果（异步架构）
             client_queues_map: {client_id: ClientQueues}，如果为 None 则从 client_manager 获取
             stage_configs: Stage 配置（完全解耦版本，使用 InferenceWorkflow）
                 {
@@ -75,8 +67,6 @@ class ModelWorkerService:
             num_worker_threads: 推理线程数
             client_manager_instance: ClientManager 实例（可选，用于动态获取客户端）
         """
-        # 保存时序队列（异步架构）
-        self.temporal_queue = temporal_queue
 
         # 保存 ClientManager 实例（用于动态客户端管理）
         self._client_manager = client_manager_instance or client_manager
@@ -276,82 +266,27 @@ class ModelWorkerService:
                 continue
 
     def _write_back_results(self, results: List[InferenceResult]):
-        """将推理结果投递到时序队列（异步架构）
+        """将推理结果双写到 ClientQueues。
+
+        双写策略：
+        - slide_window（per-task 拆分）：供 TemporalWorker 历史窗口分析
+        - latest_inference（原子快照）：供 VisualizationWorker 直接读取，保证同帧一致性
 
         异常处理：
         - 客户端已移除 → 抛出 FrameDrop
-        - 队列已满 → 抛出 PersistenceError（retryable=True）
         """
-        from app.utils.exceptions import FrameDrop, PersistenceError
-
         for res in results:
-            # 检查客户端是否存在（可能在推理过程中被移除）
             if not self._client_manager.has_client(res.client_id):
-                # 构建 FrameDrop 参数（frame_index 可能不存在）
-                frame_idx = getattr(res, "frame_index", None)
-                raise FrameDrop(
-                    client_id=res.client_id,
-                    frame_index=frame_idx,  # type: ignore
-                    reason="client_removed",
-                )
-
-            # 投递到时序队列
-            try:
-                self.temporal_queue.put(res, timeout=0.1)
-            except Exception:  # queue.Full or asyncio.TimeoutError
-                # 实时推理场景：队列满时丢弃当前帧，继续处理下一帧
                 raise FrameDrop(
                     client_id=res.client_id,
                     frame_index=getattr(res, "frame_index", None),
-                    reason="queue_timeout",
+                    reason="client_removed",
                 )
 
-    def _update_client_state(self, state: ClientState, result: InferenceResult):
-        """更新客户端业务状态（可由子类覆写）。
+            cq = self._client_manager.get_client(res.client_id)
+            # Path 1: per-task slide_window（temporal 需要历史窗口）
+            for task_name, detection_output in res.result.items():
+                cq.push_detection(task_name, detection_output)
+            # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
+            cq.set_latest_inference(res)
 
-        Args:
-            state: 客户端状态
-            result: 推理结果
-
-        示例逻辑：
-        - 检测到气泡 → 递增连续气泡计数
-        - 连续气泡达到阈值 → 标记步骤完成
-        """
-        # 示例：处理 LEAK stage 的气泡检测
-        if result.stage == "LEAK":
-            bubble_res = result.result.get("bubble", {})
-            if isinstance(bubble_res, dict) and bubble_res.get("bubble_detected"):
-                # 递增连续气泡计数
-                count = state.increment_counter("continuous_bubble")
-                # 达到阈值则标记完成
-                if count >= 3:  # 阈值可配置
-                    state.mark_step_completed()
-            else:
-                # 未检测到气泡，重置计数
-                state.reset_counter("continuous_bubble")
-
-    def _visualize_result(
-        self,
-        result: InferenceResult,
-        cq: ClientQueues,
-    ) -> Optional[np.ndarray]:
-        """可视化推理结果（可由子类或外部覆写）。
-
-        Args:
-            result: 推理结果
-            cq: 客户端队列
-
-        Returns:
-            可视化后的帧（如果有），否则返回 None
-
-        TODO: 实现完整的可视化流程
-        需要：
-        1. 从 cq.get_latest_frame() 获取最新原始帧
-        2. 调用各 subtask 的 task.visualize() 方法绘制检测框/标注
-        3. 添加文字信息（stage、timestamp、fps 等）
-        4. 返回可视化后的帧
-        参考：LeakBubblePipelineService._annotate_frame() 的实现
-        """
-        # 默认实现：返回 None（无可视化）
-        # 子类可以覆写这个方法，或者在外部注入可视化函数
-        return None

@@ -21,7 +21,6 @@ from app.services.inference.data_models import (
     AlarmInfo,
     Detection,
     DetectionOutput,
-    TemporalResult,
     VisualizationData,
 )
 
@@ -74,21 +73,18 @@ class InferenceWorkflow(ABC):
     @abstractmethod
     def analyze_temporal(
         self,
-        state: ClientState,
-        output: DetectionOutput,
-        timestamp: float
-    ) -> TemporalResult:
-        """时序分析
+        window: List[DetectionOutput],
+    ) -> List[str]:
+        """时序分析（基于滑动窗口）
 
-        每个 InferenceWorkflow 实现自己的时序逻辑（连续帧、滑动窗口、累计计数等）
+        纯粹分析窗口数据，返回触发的事件列表。
+        窗口数据由 ClientQueues.slide_window 提供，约 5 秒的历史 DetectionOutput。
 
         Args:
-            state: 客户端状态（用于存储计数器、历史数据）
-            output: 检测输出
-            timestamp: 当前时间戳
+            window: 滑动窗口快照 [DetectionOutput, ...]，按时间升序
 
         Returns:
-            TemporalResult: 时序分析结果
+            触发的事件描述列表（如 ["连续3帧检测到气泡"]），无事件时返回空列表
         """
         pass
 
@@ -96,16 +92,14 @@ class InferenceWorkflow(ABC):
     def prepare_visualization_data(
         self,
         output: DetectionOutput,
-        temporal: TemporalResult
     ) -> VisualizationData:
         """准备可视化数据
 
-        Task 提供可视化数据（检测框、标签、状态栏文本等），
-        由固定渲染器负责绘制
+        基于检测输出准备可视化数据（检测框、标签、状态栏文本等），
+        由固定渲染器负责绘制。
 
         Args:
             output: 检测输出
-            temporal: 时序分析结果
 
         Returns:
             VisualizationData: 可视化数据
@@ -114,16 +108,16 @@ class InferenceWorkflow(ABC):
 
     def evaluate_alarms(
         self,
-        temporal: TemporalResult,
-        context: Dict[str, Any]
+        window: List[DetectionOutput],
+        state: ClientState,
     ) -> List[AlarmInfo]:
-        """评估告警条件
+        """评估告警条件并更新 ClientState
 
-        基于时序分析结果，判断是否需要触发告警
+        基于滑动窗口数据评估告警条件，同时更新 state 中的检测指标计数器。
 
         Args:
-            temporal: 时序分析结果
-            context: 上下文信息（包含 client_id、stage 等）
+            window: 滑动窗口快照
+            state: 客户端状态（用于管理检测指标计数器）
 
         Returns:
             AlarmInfo 列表（空列表表示无告警）

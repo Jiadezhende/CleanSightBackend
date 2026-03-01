@@ -10,7 +10,6 @@ from app.services.inference.workflows.infer_workflow import YOLOWorkflow
 from app.services.inference.data_models import (
     AlarmInfo,
     DetectionOutput,
-    TemporalResult,
     VisualizationData,
     VisItem,
     VisualizationType,
@@ -76,41 +75,28 @@ class BubbleDetectionTask(YOLOWorkflow):
     # ====== 2. 时序分析 ======
 
     def analyze_temporal(
-        self, state, output: DetectionOutput, timestamp: float
-    ) -> TemporalResult:
-        """气泡时序分析：连续3帧检测到才触发事件"""
-        bubble_count = len(output.detections)
-        detected = bubble_count > 0
+        self, window: List[DetectionOutput]
+    ) -> List[str]:
+        """气泡时序分析：基于滑动窗口末尾连续检测帧数触发事件"""
+        if not window:
+            return []
 
-        if detected:
-            consecutive = state.increment_counter("bubble_consecutive")
-        else:
-            state.reset_counter("bubble_consecutive")
-            consecutive = 0
+        # 从窗口尾部计算连续检测帧数
+        consecutive = 0
+        for output in reversed(window):
+            if len(output.detections) > 0:
+                consecutive += 1
+            else:
+                break
 
-        if detected:
-            total = state.increment_counter("bubble_total", delta=bubble_count)
-        else:
-            total = state.get_counter("bubble_total", 0)
-
-        event_triggered = consecutive >= 3
-        event_message = f"连续{consecutive}帧检测到气泡" if event_triggered else None
-
-        return TemporalResult(
-            detected=detected,
-            event_triggered=event_triggered,
-            event_message=event_message,
-            counters={
-                "bubble_count": bubble_count,
-                "consecutive_frames": consecutive,
-                "total_bubbles": total,
-            },
-        )
+        if consecutive >= 3:
+            return [f"连续{consecutive}帧检测到气泡"]
+        return []
 
     # ====== 3. 可视化数据准备 ======
 
     def prepare_visualization_data(
-        self, output: DetectionOutput, temporal: TemporalResult
+        self, output: DetectionOutput,
     ) -> VisualizationData:
         """准备气泡可视化数据"""
         items = []
@@ -127,14 +113,14 @@ class BubbleDetectionTask(YOLOWorkflow):
                 color=color,
             ))
 
-        bubble_count = temporal.counters.get("bubble_count", 0)
-        total = temporal.counters.get("total_bubbles", 0)
+        bubble_count = len(output.detections)
+        detected = bubble_count > 0
 
-        if temporal.detected:
-            status_text = f"Bubbles: {bubble_count} (Total: {total})"
+        if detected:
+            status_text = f"Bubbles: {bubble_count}"
             status_color = (0, 165, 255) if bubble_count > 5 else (0, 255, 255)
         else:
-            status_text = f"No Bubbles (Total: {total})"
+            status_text = "No Bubbles"
             status_color = (0, 255, 0)
 
         return VisualizationData(
@@ -148,17 +134,35 @@ class BubbleDetectionTask(YOLOWorkflow):
     # ====== 4. 告警评估 ======
 
     def evaluate_alarms(
-        self, temporal: TemporalResult, context: Dict[str, Any]
+        self, window: List[DetectionOutput], state,
     ) -> List[AlarmInfo]:
-        """评估气泡告警：连续3帧触发"""
-        if not temporal.event_triggered:
+        """评估气泡告警：连续3帧触发，更新 ClientState 告警计数"""
+        if not window:
             return []
+
+        # 从窗口尾部计算连续检测帧数
+        consecutive = 0
+        for output in reversed(window):
+            if len(output.detections) > 0:
+                consecutive += 1
+            else:
+                break
+
+        # 更新检测指标计数器
+        latest = window[-1]
+        if len(latest.detections) > 0:
+            state.increment_counter("bubble_total", delta=len(latest.detections))
+
+        if consecutive < 3:
+            return []
+
+        state.increment_counter("bubble_alarm_count")
         return [AlarmInfo(
             alarm_type="流程违规",
             alarm_level="high",
             alarm_message="检测到气泡异常（连续3帧）",
             metadata={
-                "consecutive_frames": temporal.counters.get("consecutive_frames", 0),
-                "bubble_count": temporal.counters.get("bubble_count", 0),
+                "consecutive_frames": consecutive,
+                "bubble_count": len(latest.detections),
             },
         )]

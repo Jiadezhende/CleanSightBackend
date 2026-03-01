@@ -1,271 +1,244 @@
-"""visualization.py - 可视化工作线程池。
+"""visualization.py - 可视化工作线程池（定时拉取架构）。
 
 职责：
-- 从可视化队列消费时序分析后的数据包
-- 取当前客户端的最新帧（原始帧流）
+- 按固定间隔（tick_interval）轮询所有活跃客户端
+- 从 ClientQueues 主动拉取三要素：
+  - cq.get_latest_inference()  → 原子推理快照（所有 task 同帧一致）
+  - cq.get_latest_frame()      → 最新原始帧
+  - cq.get_latest_temporal()   → 最新时序事件
 - 绘制检测框、标注、文字信息到最新帧上
-- 若没有新的检测结果，继续沿用上一次的检测结果
-- 投递到写回队列
+- 写回 ClientQueues（ca_processed + _latest_rendered）
 """
 
 import logging
 import threading
+import time
 from datetime import datetime
-from queue import Empty, Queue
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
 
 from app.services.inference.data_models import (
     DetectionOutput,
-    TemporalResult,
     VisualizationData,
     VisItem,
     VisualizationType,
 )
 
+from app.models.frame import FrameData
 from app.services.client import client_manager
-from app.services.inference.models import (
-    TemporalAnalysisPackage,
-    TemporalAnalysisResult,
-    WriteBackData,
-)
+from app.services.inference.models import InferenceResult
 
 logger = logging.getLogger(__name__)
 
 
-
 class VisualizationWorker:
-    """可视化工作线程。"""
+    """可视化工作线程（定时拉取模式）。
+
+    独立于 TemporalWorker，按自己的节奏（tick_interval）遍历所有活跃客户端，
+    从 ClientQueues 拉取原子推理快照 + 最新帧 + 时序事件，渲染后写回。
+    """
 
     def __init__(
         self,
-        input_queue: Queue,  # 输入：时序分析后的数据包
-        output_queue: Queue,  # 输出：完整数据包（含可视化帧）
         stop_event: threading.Event,
+        tick_interval: float = 1.0 / 15,  # ~15 FPS
         worker_id: int = 0,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """初始化可视化工作线程。
 
         Args:
-            input_queue: 时序分析数据包队列
-            output_queue: 写回数据包队列
             stop_event: 停止事件
+            tick_interval: 拉取间隔（秒），默认 ~15 FPS
             worker_id: 工作线程ID（用于调试）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
-        self.input_queue = input_queue
-        self.output_queue = output_queue
         self.stop_event = stop_event
+        self.tick_interval = tick_interval
         self.worker_id = worker_id
         self.stage_configs = stage_configs or {}
         self.fixed_visualizer = FixedVisualizer()
 
-        # 缓存每个客户端的最新检测结果（用于降帧补偿）
-        self.latest_results: Dict[
-            str, Tuple[str, Dict[str, Any], Optional[TemporalAnalysisResult]]
-        ] = {}
+        # 去重：记录每个客户端上次渲染的推理时间戳，避免重复渲染同一帧
+        self._last_rendered_ts: Dict[str, float] = {}
 
     def run(self):
-        """工作循环。"""
-        logger.debug("[VisualizationWorker-%d] Started", self.worker_id)
+        """工作循环：固定间隔轮询所有客户端。"""
+        logger.debug(
+            "[VisualizationWorker-%d] Started (tick=%.3fs, ~%.0f FPS)",
+            self.worker_id, self.tick_interval, 1.0 / self.tick_interval,
+        )
 
         while not self.stop_event.is_set():
+            tick_start = time.time()
             try:
-                # 1. 从队列获取数据包（包含推理结果）
-                try:
-                    package: TemporalAnalysisPackage = self.input_queue.get(timeout=0.1)
-                except Empty:
-                    continue
-
-                # 2. 更新该客户端的最新检测结果
-                self.latest_results[package.client_id] = (
-                    package.stage,
-                    package.inference_result,
-                    package.temporal_result,
-                )
-
-                # 3. 获取客户端的最新原始帧
-                if not client_manager.has_client(package.client_id):
-                    continue
-
-                cq = client_manager.get_client(package.client_id)
-                if cq is None:
-                    continue
-
-                latest_frame = cq.get_latest_frame()  # 取当前最新帧
-                if latest_frame is None:
-                    # 如果没有更新的帧，使用推理时的帧
-                    latest_frame = package.raw_frame
-
-                # 4. 可视化
-                annotated_frame = self._visualize_with_fixed_renderer(
-                    latest_frame, package
-                )
-
-                # 5. 组装完整数据包
-                write_back_data = WriteBackData(
-                    client_id=package.client_id,
-                    timestamp=package.timestamp,  # 保持推理时间戳
-                    stage=package.stage,
-                    processed_frame=annotated_frame,
-                    inference_result=package.inference_result,
-                    frontend_message=package.frontend_message,
-                    temporal_result=package.temporal_result,
-                )
-
-                # 6. 投递到写回队列
-                self.output_queue.put(write_back_data)
-
+                self._tick()
             except Exception as e:
-                logger.error(f"[VisualizationWorker-{self.worker_id}] 异常: {e}", exc_info=True)
+                logger.error(
+                    "[VisualizationWorker-%d] Tick exception: %s",
+                    self.worker_id, e, exc_info=True,
+                )
 
-        logger.debug(f"[VisualizationWorker-{self.worker_id}] 已停止")
+            # 睡眠至下一个 tick
+            elapsed = time.time() - tick_start
+            sleep_time = max(0, self.tick_interval - elapsed)
+            if sleep_time > 0:
+                self.stop_event.wait(sleep_time)
 
-    def _visualize_with_fixed_renderer(
-        self, frame: np.ndarray, package: TemporalAnalysisPackage
+        logger.debug("[VisualizationWorker-%d] Stopped", self.worker_id)
+
+    def _tick(self):
+        """一次轮询：遍历所有活跃客户端执行可视化。"""
+        all_clients = client_manager.get_all_clients()
+        for client_id, cq in all_clients.items():
+            try:
+                self._process_client(client_id, cq)
+            except Exception as e:
+                logger.error(
+                    "[VisualizationWorker-%d] Error processing client %s: %s",
+                    self.worker_id, client_id, e, exc_info=True,
+                )
+
+    def _process_client(self, client_id: str, cq) -> None:
+        """处理单个客户端的可视化。"""
+        # 1. 原子读取推理快照（所有 task 同帧一致）
+        inference: Optional[InferenceResult] = cq.get_latest_inference()
+        if inference is None:
+            return
+
+        # 2. 去重：跳过已渲染过的同一推理结果
+        last_ts = self._last_rendered_ts.get(client_id, 0.0)
+        if inference.timestamp <= last_ts:
+            return
+
+        # 3. 获取最新原始帧
+        frame = cq.get_latest_frame()
+        if frame is None:
+            return
+
+        # 4. 获取最新时序事件
+        events = cq.get_latest_temporal()
+
+        # 5. 渲染
+        stage = inference.stage
+        annotated_frame = self._render(frame, stage, inference.result, events)
+
+        # 6. 写回
+        frame_data = FrameData(
+            timestamp=inference.timestamp,
+            frame=annotated_frame,
+            inference_result=inference.result,
+        )
+        cq.append_ca_processed(frame_data)
+        cq.set_latest_rendered(frame_data)
+
+        # 7. 更新去重时间戳
+        self._last_rendered_ts[client_id] = inference.timestamp
+
+    def _render(
+        self,
+        frame: np.ndarray,
+        stage: str,
+        detection_results: Dict[str, DetectionOutput],
+        events: List[str],
     ) -> np.ndarray:
-        """使用新的固定渲染器进行可视化
-        
+        """使用固定渲染器进行可视化。
+
         Args:
             frame: 原始帧
-            package: 时序分析数据包
-            
-        Returns:
-            可视化后的帧
+            stage: 当前阶段
+            detection_results: 推理结果 {task_name: DetectionOutput}（同帧原子快照）
+            events: 时序事件列表
         """
         try:
-            # 获取当前 stage 的 tasks
-            stage_cfg = self.stage_configs.get(package.stage, {})
+            # 获取当前 stage 的 tasks（用于调用 prepare_visualization_data）
+            stage_cfg = self.stage_configs.get(stage, {})
             tasks = stage_cfg.get("models", [])
-            
+
             if not tasks:
                 return frame.copy()
-            
+
             vis_data_list: List[VisualizationData] = []
-            temporal_events: List[str] = []
 
             for task in tasks:
-                detection_output = package.inference_result.get(task.name)
+                detection_output = detection_results.get(task.name)
 
                 if not isinstance(detection_output, DetectionOutput):
                     continue
 
-                temporal_res = TemporalResult(
-                    detected=len(detection_output.detections) > 0,
-                    event_triggered=package.temporal_result.step_completed if package.temporal_result else False,
-                    event_message=None,
-                    counters={},
-                )
-
-                vis_data = task.prepare_visualization_data(detection_output, temporal_res)
+                vis_data = task.prepare_visualization_data(detection_output)
                 vis_data_list.append(vis_data)
-            
-            # 提取时序事件
-            if package.temporal_result and package.temporal_result.events:
-                temporal_events = package.temporal_result.events
-            
+
             # 使用固定渲染器渲染
             annotated_frame = self.fixed_visualizer.render(
                 frame=frame.copy(),
                 vis_data_list=vis_data_list,
-                stage=package.stage,
-                temporal_events=temporal_events,
+                stage=stage,
+                temporal_events=events,
             )
-            
+
             return annotated_frame
-            
+
         except Exception as e:
-            logger.error(f"[VisualizationWorker] Fixed renderer failed: {e}", exc_info=True)
+            logger.error("[VisualizationWorker] Render failed: %s", e, exc_info=True)
             return frame.copy()
-
-    def visualize_with_cached_result(
-        self, client_id: str, current_frame: np.ndarray
-    ) -> Optional[np.ndarray]:
-        """使用缓存的检测结果可视化当前帧（用于未推理的中间帧）。
-
-        Args:
-            client_id: 客户端ID
-            current_frame: 当前最新帧
-
-        Returns:
-            可视化后的帧，若无缓存结果则返回None
-        """
-        if client_id not in self.latest_results:
-            return None
-
-        stage, inference_result, temporal_result = self.latest_results[client_id]
-
-        # 用缓存结果创建一个临时 package 并渲染
-        from app.services.inference.models import TemporalAnalysisPackage
-        import numpy as np
-        mock_pkg = TemporalAnalysisPackage(
-            client_id=client_id,
-            timestamp=0.0,
-            stage=stage,
-            inference_result=inference_result,
-            temporal_result=temporal_result,
-            frontend_message=None,
-            raw_frame=current_frame,
-        )
-        return self._visualize_with_fixed_renderer(current_frame, mock_pkg)
 
 
 class VisualizationWorkerPool:
-    """可视化线程池。"""
+    """可视化线程池（定时拉取模式，单线程）。
+
+    单线程理由：单帧渲染 ~5ms，15 FPS × 10 clients = 50ms/67ms，单线程足够。
+    单线程避免了多线程竞争同一客户端的问题。
+    """
 
     def __init__(
         self,
-        input_queue: Queue,
-        output_queue: Queue,
-        num_workers: int = 4,
+        target_fps: float = 15,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """初始化可视化线程池。
 
         Args:
-            input_queue: 时序分析数据包队列
-            output_queue: 写回数据包队列
-            num_workers: 工作线程数量
+            target_fps: 目标可视化帧率（默认 15 FPS）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
-        self.input_queue = input_queue
-        self.output_queue = output_queue
-        self.num_workers = num_workers
+        self.target_fps = target_fps
         self.stage_configs = stage_configs or {}
 
         self._stop_event = threading.Event()
-        self._workers: list[threading.Thread] = []
+        self._worker_thread: Optional[threading.Thread] = None
 
     def start(self):
-        """启动线程池。"""
-        for i in range(self.num_workers):
-            worker = VisualizationWorker(
-                input_queue=self.input_queue,
-                output_queue=self.output_queue,
-                stop_event=self._stop_event,
-                worker_id=i,
-                stage_configs=self.stage_configs,
-            )
+        """启动工作线程。"""
+        tick_interval = 1.0 / self.target_fps
 
-            thread = threading.Thread(
-                target=worker.run,
-                daemon=True,
-                name=f"VisualizationWorker-{i}",
-            )
-            thread.start()
-            self._workers.append(thread)
+        worker = VisualizationWorker(
+            stop_event=self._stop_event,
+            tick_interval=tick_interval,
+            worker_id=0,
+            stage_configs=self.stage_configs,
+        )
 
-        logger.info("[VisualizationWorkerPool] Started %d workers", self.num_workers)
+        self._worker_thread = threading.Thread(
+            target=worker.run,
+            daemon=True,
+            name="VisualizationWorker-0",
+        )
+        self._worker_thread.start()
+
+        logger.info(
+            "[VisualizationWorkerPool] Started (target_fps=%.0f, tick=%.3fs)",
+            self.target_fps, tick_interval,
+        )
 
     def stop(self):
-        """停止线程池。"""
+        """停止工作线程。"""
         self._stop_event.set()
 
-        for thread in self._workers:
-            thread.join(timeout=2.0)
+        if self._worker_thread is not None:
+            self._worker_thread.join(timeout=2.0)
 
         logger.debug("[VisualizationWorkerPool] Stopped")
 

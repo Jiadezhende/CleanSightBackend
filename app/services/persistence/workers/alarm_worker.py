@@ -103,7 +103,7 @@ class AlarmFlushThread:
                         # 转换为字典
                         alarm_dict = {
                             "task_id": task.task_id,
-                            "step_id": task.step_id,
+                            "stage": task.stage,
                             "client_id": task.client_id,
                             "alarm_type": task.alarm_type,
                             "alarm_level": task.alarm_level,

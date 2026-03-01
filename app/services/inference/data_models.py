@@ -2,7 +2,7 @@
 
 本模块定义 **单个 InferenceWorkflow** 的数据结构，用于：
 - 标准化不同检测模型的输出格式
-- 定义 Task 的推理、时序分析、可视化、告警评估的数据契约
+- 定义 Task 的推理、可视化、告警评估的数据契约
 
 数据模型层次：
 - 本模块（data_models.py）: Task 级别 - 单个检测任务的数据结构
@@ -11,34 +11,12 @@
 数据结构：
 - Detection: 单个检测对象（bbox, confidence, class_name）
 - DetectionOutput: 检测输出（标准化格式，包含 detections 列表、success 状态等）
-- TemporalResult: Task 的时序分析结果
 - VisualizationData: Task 的可视化数据
 - AlarmInfo: Task 的告警信息
-
-使用示例：
-    # Task 级别：单个 BubbleDetectionTask 的输出
-    task_result: DetectionOutput = DetectionOutput(
-        detections=[...],
-        metadata={},
-        timestamp=time.time(),
-        success=True,
-        bubble_detected=True,
-        bubble_count=5
-    )
-    
-    # 客户端级别：InferenceResult 汇总多个 Task
-    inference_result = InferenceResult(
-        client_id="client_001",
-        stage="LEAK",
-        result={
-            "bubble_detection": task_result1,  # DetectionOutput
-            "bending_detection": task_result2   # DetectionOutput
-        }
-    )
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -79,18 +57,6 @@ class DetectionOutput:
     bending_detected: Optional[bool] = None
     detection_count: Optional[int] = None
 
-
-@dataclass
-class TemporalResult:
-    """时序分析结果
-    
-    每个 InferenceWorkflow 的 analyze_temporal() 方法返回此结果
-    """
-    detected: bool                       # 当前帧是否检测到目标
-    event_triggered: bool                # 是否触发时序事件（如连续3帧）
-    event_message: Optional[str]         # 事件描述（如"连续3帧检测到气泡"）
-    counters: Dict[str, Any] = field(default_factory=dict)  # 计数器（支持int/float，如 bubble_count、consecutive_frames、window_ratio）
-    metadata: Dict[str, Any] = field(default_factory=dict)  # 其他元数据
 
 
 @dataclass

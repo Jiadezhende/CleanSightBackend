@@ -82,10 +82,10 @@ class AlarmPersistenceStrategy:
                 agg_alarm = dict(item["alarm_info"])
                 agg_alarm["alarm_count"] = item.get("count", 1)
                 agg_alarm["first_seen"] = datetime.fromtimestamp(
-                    item.get("first_seen")
+                    item.get("first_seen") # type: ignore
                 ).strftime("%Y-%m-%d %H:%M:%S")
                 agg_alarm["last_seen"] = datetime.fromtimestamp(
-                    item.get("last_seen")
+                    item.get("last_seen") # type: ignore
                 ).strftime("%Y-%m-%d %H:%M:%S")
 
                 to_report.append((key, agg_alarm))
@@ -118,8 +118,8 @@ class AlarmPersistenceStrategy:
                 )
 
     def _should_send_http(self, alarm_info: Dict[str, Any]) -> bool:
-        """检查是否需要HTTP上报（需要task_id和step_id）"""
-        return alarm_info.get("task_id") and alarm_info.get("step_id")
+        """检查是否需要HTTP上报（需要task_id和stage）"""
+        return alarm_info.get("task_id") and alarm_info.get("stage") # type: ignore
 
     def _send_alarm_http(self, alarm_info: Dict[str, Any]) -> bool:
         """HTTP上报告警到外部数据库（单次尝试，重试由GuardedExecutor处理）"""
@@ -127,7 +127,7 @@ class AlarmPersistenceStrategy:
 
         payload = {
             "task_id": alarm_info.get("task_id", 0),
-            "step_id": alarm_info.get("step_id", 0),
+            "step_id": alarm_info.get("stage", ""),
             "alarm_type": alarm_info.get("alarm_type", "流程违规"),
             "alarm_level": alarm_info.get("alarm_level", "high"),
             "alarm_message": alarm_info.get("alarm_message", "AI推理检测到异常"),
