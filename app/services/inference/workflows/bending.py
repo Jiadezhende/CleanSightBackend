@@ -2,10 +2,11 @@
 
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
+from app.services.client.state import ClientState
 from app.services.inference.workflows.infer_workflow import YOLOWorkflow
 from app.services.inference.data_models import (
     AlarmInfo,
@@ -78,16 +79,16 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
                     ))
             return results
 
-    # ====== 2. 时序分析 ======
+    # ====== 2. 时序分析（含边沿去抖 + 告警评估） ======
 
     def analyze_temporal(
-        self, window: List[DetectionOutput]
-    ) -> List[str]:
-        """弯折时序分析：基于滑动窗口内 window_seconds (2s) 子窗口，70% 比例触发事件"""
+        self, window: List[DetectionOutput], state: ClientState,
+    ) -> Tuple[List[str], List[AlarmInfo]]:
+        """弯折时序分析：滑动窗口2s内70%比例触发事件，边沿触发告警"""
         if not window:
-            return []
+            return [], []
 
-        # 取 slide_window 中最近 window_seconds (2s) 的子窗口
+        # ① 计算时序特征（只做一次）
         latest_ts = window[-1].timestamp
         cutoff = latest_ts - self.window_seconds
         recent = [out for out in window if out.timestamp >= cutoff]
@@ -102,9 +103,41 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
 
         detected_ratio = sum(bending_flags) / len(bending_flags) if bending_flags else 0.0
 
-        if detected_ratio >= self.trigger_ratio:
-            return [f"滑动窗口内{detected_ratio:.0%}检测到弯折"]
-        return []
+        # ② 更新检测指标计数器
+        latest = window[-1]
+        bending_now = any(
+            "bent" in d.class_name.lower() or "bending" in d.class_name.lower()
+            for d in latest.detections
+        )
+        if bending_now:
+            state.increment_counter("bending_total")
+
+        # ③ 事件列表（前端展示）
+        is_triggered = detected_ratio >= self.trigger_ratio
+        events = [f"滑动窗口内{detected_ratio:.0%}检测到弯折"] if is_triggered else []
+
+        # ④ 边沿触发：只在 0→1 跳变时投递告警
+        alarms: List[AlarmInfo] = []
+        was_alarming = state.get_counter("bending_alarming", 0) > 0
+
+        if is_triggered and not was_alarming:
+            # rising edge → 发出告警
+            state.increment_counter("bending_alarming")
+            state.increment_counter("bending_alarm_count")
+            alarms.append(AlarmInfo(
+                alarm_type="流程违规",
+                alarm_level="high",
+                alarm_message="检测到内镜弯折异常（滑动窗口触发）",
+                metadata={
+                    "window_ratio": detected_ratio,
+                    "bending_count": state.get_counter("bending_total", 0),
+                },
+            ))
+        elif not is_triggered and was_alarming:
+            # falling edge → 复位，下次可重新触发
+            state.reset_counter("bending_alarming")
+
+        return events, alarms
 
     # ====== 3. 可视化数据准备 ======
 
@@ -149,50 +182,3 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
             status_color=status_color,
             status_position="top-left",
         )
-
-    # ====== 4. 告警评估 ======
-
-    def evaluate_alarms(
-        self, window: List[DetectionOutput], state,
-    ) -> List[AlarmInfo]:
-        """评估弯折告警：滑动窗口内70%触发，更新 ClientState 告警计数"""
-        if not window:
-            return []
-
-        # 取最近 window_seconds 子窗口
-        latest_ts = window[-1].timestamp
-        cutoff = latest_ts - self.window_seconds
-        recent = [out for out in window if out.timestamp >= cutoff]
-
-        bending_flags = [
-            any(
-                "bent" in d.class_name.lower() or "bending" in d.class_name.lower()
-                for d in out.detections
-            )
-            for out in recent
-        ]
-
-        detected_ratio = sum(bending_flags) / len(bending_flags) if bending_flags else 0.0
-
-        # 更新检测指标计数器
-        latest = window[-1]
-        bending_now = any(
-            "bent" in d.class_name.lower() or "bending" in d.class_name.lower()
-            for d in latest.detections
-        )
-        if bending_now:
-            state.increment_counter("bending_total")
-
-        if detected_ratio < self.trigger_ratio:
-            return []
-
-        state.increment_counter("bending_alarm_count")
-        return [AlarmInfo(
-            alarm_type="流程违规",
-            alarm_level="high",
-            alarm_message="检测到内镜弯折异常（滑动窗口触发）",
-            metadata={
-                "window_ratio": detected_ratio,
-                "bending_count": state.get_counter("bending_total", 0),
-            },
-        )]

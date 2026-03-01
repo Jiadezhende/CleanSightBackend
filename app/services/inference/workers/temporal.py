@@ -84,12 +84,9 @@ class TemporalWorker:
             if not window:
                 continue
 
-            # 时序分析：纯窗口分析，返回事件列表
-            events = task.analyze_temporal(window)
+            # 时序分析（含边沿去抖 + 告警评估），单一调用
+            events, alarms = task.analyze_temporal(window, cq.state)
             all_events.extend(events)
-
-            # 告警评估：基于窗口 + state 计数器管理
-            alarms = task.evaluate_alarms(window, cq.state)
             all_alarms.extend(alarms)
 
         # 更新 cq.latest_temporal（仅事件列表）

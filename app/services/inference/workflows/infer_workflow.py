@@ -2,9 +2,8 @@
 
 Task-Centric 架构：每个 InferenceWorkflow 负责完整的推理流程
 - 检测 (infer)
-- 时序分析 (analyze_temporal)
+- 时序分析 (analyze_temporal)：含边沿去抖 + 告警评估
 - 可视化数据准备 (prepare_visualization_data)
-- 告警评估 (evaluate_alarms)
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -33,15 +32,13 @@ class InferenceWorkflow(ABC):
     新架构设计：
     1. Task 内部组装检测策略（DetectionStrategy）和输出适配器（OutputAdapter）
     2. 检测输出统一为 DetectionOutput 格式
-    3. 时序分析逻辑下沉到每个 Task（analyze_temporal）
+    3. 时序分析 + 告警评估合并为 analyze_temporal()，含边沿去抖
     4. 可视化数据由 Task 准备（prepare_visualization_data），渲染由固定渲染器完成
-    5. 告警评估逻辑在 Task 内部（evaluate_alarms）
 
-    子类只需实现 4 个核心方法：
+    子类只需实现 3 个核心方法：
     - infer(): 执行检测
-    - analyze_temporal(): 时序分析
+    - analyze_temporal(): 时序分析 + 告警评估（边沿触发）
     - prepare_visualization_data(): 准备可视化数据
-    - evaluate_alarms(): 评估告警（可选）
     """
 
     def __init__(self, name: str, enabled: bool = True):
@@ -74,17 +71,22 @@ class InferenceWorkflow(ABC):
     def analyze_temporal(
         self,
         window: List[DetectionOutput],
-    ) -> List[str]:
-        """时序分析（基于滑动窗口）
+        state: ClientState,
+    ) -> Tuple[List[str], List[AlarmInfo]]:
+        """时序分析完整管道（含边沿去抖 + 告警评估）
 
-        纯粹分析窗口数据，返回触发的事件列表。
-        窗口数据由 ClientQueues.slide_window 提供，约 5 秒的历史 DetectionOutput。
+        流程：
+        1. 分析窗口数据，计算时序特征（连续帧 / 比例）
+        2. 生成事件列表（前端展示）
+        3. 更新 state 计数器 + 边沿去抖
+        4. 仅在 rising-edge 时产出 AlarmInfo
 
         Args:
             window: 滑动窗口快照 [DetectionOutput, ...]，按时间升序
+            state: 客户端状态（用于计数器管理和边沿触发标记）
 
         Returns:
-            触发的事件描述列表（如 ["连续3帧检测到气泡"]），无事件时返回空列表
+            (events, alarms) — events 给前端展示，alarms 给 persistence
         """
         pass
 
@@ -105,25 +107,6 @@ class InferenceWorkflow(ABC):
             VisualizationData: 可视化数据
         """
         pass
-
-    def evaluate_alarms(
-        self,
-        window: List[DetectionOutput],
-        state: ClientState,
-    ) -> List[AlarmInfo]:
-        """评估告警条件并更新 ClientState
-
-        基于滑动窗口数据评估告警条件，同时更新 state 中的检测指标计数器。
-
-        Args:
-            window: 滑动窗口快照
-            state: 客户端状态（用于管理检测指标计数器）
-
-        Returns:
-            AlarmInfo 列表（空列表表示无告警）
-        """
-        # 默认实现：不触发告警（子类可选覆盖）
-        return []
 
     # ====== 批量推理支持 ======
 
@@ -184,7 +167,6 @@ class YOLOWorkflow(InferenceWorkflow):
     子类只需实现：
     - analyze_temporal()
     - prepare_visualization_data()
-    - evaluate_alarms()（可选）
 
     如有自定义输出格式（如带 mask 的分割模型），可 override _adapt_output()。
     """

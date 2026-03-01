@@ -97,7 +97,7 @@ class VisItem:
 class AlarmInfo:
     """告警信息
     
-    每个 InferenceWorkflow 的 evaluate_alarms() 方法返回告警列表
+    由 InferenceWorkflow.analyze_temporal() 在边沿触发时产出
     """
     alarm_type: str                      # 告警类型（如"流程违规"）
     alarm_level: str                     # 告警级别: "low", "medium", "high", "critical"
