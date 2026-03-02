@@ -5,8 +5,9 @@
 storage:
   base_dir: ./database            # 存储根目录（相对于项目根目录）
   enable_db_write: false          # 是否写入数据库file_path表
-  # enable_cleanup: false         # [未使用] 是否启用自动清理 - 该配置已加载但代码中未实际使用
-  # cleanup_days: 7               # [未使用] 保留天数 - 该配置已加载但代码中未实际使用
+  enable_cleanup: true            # 是否启用自动清理（设为 true 以启用 TTL 清理）
+  cleanup_days: 15                 # 保留天数：status=completed 且超过此天数的任务目录将被删除
+  cleanup_interval_seconds: 3600  # 清理扫描间隔（秒），默认每小时一次
 
 # HLS持久化配置
 hls:

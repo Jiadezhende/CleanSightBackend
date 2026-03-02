@@ -1,0 +1,93 @@
+"""
+存储 TTL 清理 Worker
+
+职责：
+- 后台 daemon 线程，定期扫描 database/{client_id}/{task_id}/metadata.json
+- 删除 status=completed 且 updated_at 超过 cleanup_days 天的任务目录
+"""
+
+import json
+import logging
+import shutil
+import threading
+from datetime import datetime, timedelta
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class StorageCleanupWorker:
+    """后台 TTL 清理 Worker"""
+
+    def __init__(
+        self,
+        db_dir: Path,
+        cleanup_days: int,
+        interval_seconds: int = 3600,
+    ):
+        self.db_dir = db_dir
+        self.cleanup_days = cleanup_days
+        self.interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="StorageCleanup"
+        )
+        self._thread.start()
+        logger.info(
+            "[StorageCleanup] Started, interval=%ds, retention=%dd",
+            self.interval_seconds,
+            self.cleanup_days,
+        )
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        # 首次等待一个 interval，避免启动时立即扫描
+        while not self._stop_event.wait(timeout=self.interval_seconds):
+            self._scan_and_clean()
+
+    def _scan_and_clean(self) -> int:
+        """扫描并删除过期任务目录，返回删除数量。
+
+        判定依据：metadata.json 中 updated_at 超过 cleanup_days 天。
+        活跃任务每 ~10s 更新一次 updated_at，永远不会被误删。
+        """
+        cutoff = datetime.now() - timedelta(days=self.cleanup_days)
+        deleted = 0
+
+        for metadata_path in self.db_dir.glob("*/*/metadata.json"):
+            task_dir = metadata_path.parent
+            try:
+                with metadata_path.open("r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (IOError, json.JSONDecodeError) as e:
+                logger.debug("[StorageCleanup] Skip unreadable metadata %s: %s", metadata_path, e)
+                continue
+
+            updated_at_str = meta.get("updated_at", "")
+            try:
+                updated_at = datetime.fromisoformat(updated_at_str)
+            except ValueError:
+                logger.debug("[StorageCleanup] Skip invalid updated_at in %s", metadata_path)
+                continue
+
+            if updated_at >= cutoff:
+                continue
+
+            try:
+                shutil.rmtree(task_dir)
+                deleted += 1
+                logger.info("[StorageCleanup] Deleted task dir: %s", task_dir)
+            except OSError as e:
+                logger.warning("[StorageCleanup] Failed to delete %s: %s", task_dir, e)
+
+        if deleted:
+            logger.info("[StorageCleanup] Scan complete: deleted %d task(s)", deleted)
+
+        return deleted
