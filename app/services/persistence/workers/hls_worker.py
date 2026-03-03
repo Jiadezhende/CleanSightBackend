@@ -120,6 +120,6 @@ class HLSWorkerPool:
         for thread in self.threads:
             thread.join(timeout=timeout)
 
-    def flush_client(self, client_id: str):
-        """刷新特定客户端的数据（预留接口）"""
+    def flush_client(self, _client_id: str):
+        """预留接口：客户端断连时调用"""
         pass

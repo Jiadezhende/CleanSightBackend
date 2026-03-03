@@ -21,6 +21,7 @@ from app.services.persistence.models import (
     PersistenceMetrics,
 )
 from app.services.persistence.workers.alarm_worker import AlarmWorkerPool
+from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
 from app.services.persistence.workers.hls_worker import HLSWorkerPool
 
 logger = logging.getLogger(__name__)
@@ -73,11 +74,22 @@ class PersistenceManager:
         # 监控指标
         self.metrics = PersistenceMetrics()
 
+        # 存储清理 Worker（按配置条件创建）
+        self._cleanup_worker: StorageCleanupWorker | None = None
+        if self.config.enable_cleanup:
+            self._cleanup_worker = StorageCleanupWorker(
+                db_dir=self.config.storage_base_dir,
+                cleanup_days=self.config.cleanup_days,
+                interval_seconds=self.config.cleanup_interval_seconds,
+            )
+
     def start(self):
         """启动持久化服务"""
         logger.info("启动持久化服务")
         self.hls_pool.start()
         self.alarm_pool.start()
+        if self._cleanup_worker:
+            self._cleanup_worker.start()
 
     def stop(self, timeout: float = 10.0):
         """停止持久化服务（优雅关闭）"""
@@ -87,6 +99,8 @@ class PersistenceManager:
         # 停止Worker池（会等待队列清空）
         self.hls_pool.stop(timeout=timeout)
         self.alarm_pool.stop(timeout=timeout)
+        if self._cleanup_worker:
+            self._cleanup_worker.stop(timeout=5.0)
 
     # ========== HLS持久化API ==========
 

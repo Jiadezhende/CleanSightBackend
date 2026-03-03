@@ -19,14 +19,13 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 infer_latency_ms = Histogram(
     "infer_latency_ms",
     "Inference latency in milliseconds",
-    ["client_id", "model"],
+    ["model"],
     buckets=[10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 )
 """
 推理延迟直方图
 
 标签：
-- client_id: 客户端ID
 - model: 模型名称（如 'yolov8n'）
 
 用途：
@@ -38,7 +37,7 @@ infer_latency_ms = Histogram(
     start = time.time()
     results = model.infer(frames)
     elapsed_ms = (time.time() - start) * 1000
-    infer_latency_ms.labels(client_id='client_1', model='yolov8n').observe(elapsed_ms)
+    infer_latency_ms.labels(model='yolov8n').observe(elapsed_ms)
 """
 
 
@@ -49,13 +48,12 @@ infer_latency_ms = Histogram(
 infer_failure_total = Counter(
     "infer_failure_total",
     "Total inference failures",
-    ["client_id", "model", "error_type"],
+    ["model", "error_type"],
 )
 """
 推理失败总数
 
 标签：
-- client_id: 客户端ID
 - model: 模型名称
 - error_type: 异常类型（如 'ModelInferenceError', 'FrameDrop'）
 
@@ -69,7 +67,6 @@ infer_failure_total = Counter(
         results = model.infer(frames)
     except ModelInferenceError as e:
         infer_failure_total.labels(
-            client_id=e.client_id,
             model='yolov8n',
             error_type='ModelInferenceError'
         ).inc()
@@ -82,13 +79,12 @@ infer_failure_total = Counter(
 # ============================================================================
 
 frame_drop_total = Counter(
-    "frame_drop_total", "Total frames dropped", ["client_id", "reason"]
+    "frame_drop_total", "Total frames dropped", ["reason"]
 )
 """
 帧丢弃总数（FrameDrop 专用）
 
 标签：
-- client_id: 客户端ID
 - reason: 丢弃原因（如 'decode_failed', 'client_removed', 'quality_check_failed'）
 
 用途：
@@ -98,10 +94,7 @@ frame_drop_total = Counter(
 
 示例：
     if frame is None:
-        frame_drop_total.labels(
-            client_id='client_1',
-            reason='decode_failed'
-        ).inc()
+        frame_drop_total.labels(reason='decode_failed').inc()
         raise FrameDrop(client_id='client_1', reason='decode_failed')
 """
 

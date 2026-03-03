@@ -374,6 +374,10 @@ class GlobalHealthMonitor:
             f"skip_decoder={skip_decoder}"
         )
 
+        # 步骤 0: 清理监控器自身的客户端状态（防止内存泄漏）
+        self._reconnecting_clients.pop(client_id, None)
+        self._last_activity.pop(client_id, None)
+
         # 步骤 1: 停止解码器（除非跳过）
         if not skip_decoder:
             try:
