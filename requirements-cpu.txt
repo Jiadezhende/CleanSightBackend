@@ -1,4 +1,7 @@
-# ========== Core AI / CUDA ==========
+# CPU-only 版本：PyTorch 从 CPU wheel 源安装，体积更小
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# ========== Core AI (CPU only) ==========
 torch==2.8.0
 torchvision==0.23.0
 ultralytics~=8.3.200

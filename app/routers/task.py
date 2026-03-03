@@ -36,9 +36,13 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
     Args:
         client_id: 客户端ID（也可以理解为摄像机ip/source_id）
     """
+    import asyncio
+
     await websocket.accept()
+    shutdown_event: asyncio.Event = websocket.app.state.shutdown_event
+
     try:
-        while True:
+        while not shutdown_event.is_set():
             # 获取当前任务状态
             current_task = ai.get_task(client_id)
 
@@ -62,23 +66,24 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
                 no_task_data = get_no_task_response()
                 await websocket.send_text(json.dumps(no_task_data, ensure_ascii=False))
 
-            # 每秒更新一次状态
-            import asyncio
-
-            await asyncio.sleep(1)
+            # 每秒更新一次状态，同时响应 shutdown
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=1.0)
+                break  # shutdown triggered
+            except asyncio.TimeoutError:
+                pass
 
     except WebSocketDisconnect:
         logger.info(f"[WebSocket-TaskStatus] 连接已关闭: client_id={client_id}")
-    except Exception as e:
+    except Exception:
         logger.error(
             f"[WebSocket-TaskStatus] 异常: client_id={client_id}", exc_info=True
         )
+    finally:
         try:
             await websocket.close()
         except Exception:
-            logger.warning(
-                f"[WebSocket-TaskStatus] 关闭WebSocket时异常: client_id={client_id}"
-            )
+            pass
 
 
 @router.get("/traceback/{task_id}/segments")
