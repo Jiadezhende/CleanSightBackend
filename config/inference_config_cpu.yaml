@@ -1,0 +1,33 @@
+# CPU 轻量版推理配置
+# 仅使用 MockDetectionTask（纯 numpy，无需 torch/ultralytics）
+# 用法：复制为 config/inference_config.yaml 替换原配置
+
+stages:
+  # ==================== LEAK 阶段（Mock 检测） ====================
+  LEAK:
+    models:
+      - name: mock_detection
+        class: app.services.inference.workflows.mock.MockDetectionTask
+        params:
+          brightness_threshold: 100.0
+          consecutive_trigger: 3
+          enabled: true
+
+  # ==================== CLEAN 阶段 ====================
+  CLEAN:
+    models: []
+
+# ==================== 全局配置（与 GPU 版保持一致） ====================
+global:
+  raw_fps: 30
+  inference_fps: 20
+
+  batch_size: 4
+  inference_decimation: 2
+
+  ca_maxlen: 2700
+  ca_segment_len: 300
+
+  visualization:
+    enabled: true
+    use_fixed_visualizer: false
