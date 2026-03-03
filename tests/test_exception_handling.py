@@ -190,7 +190,7 @@ def test_metrics_frame_drop():
 
     client_id = "metrics_test_client"
     reason = "metrics_test_reason"
-    metric_key = (client_id, reason)
+    metric_key = (reason,)
 
     # 记录前的值
     before_count = 0
