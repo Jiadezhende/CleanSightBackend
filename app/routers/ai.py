@@ -55,8 +55,10 @@ async def websocket_video_endpoint(websocket: WebSocket):
     frames_sent = 0
     last_log_time = time.time()
 
+    shutdown_event: asyncio.Event = websocket.app.state.shutdown_event
+
     try:
-        while True:
+        while not shutdown_event.is_set():
             processed_frame: ProcessedFrame = ai.get_result(client_id, as_model=True)  # type: ignore
 
             if processed_frame is None:
@@ -124,11 +126,10 @@ async def websocket_video_endpoint(websocket: WebSocket):
         # 捕获并记录未预期异常，便于诊断
         logger.error(f"[WebSocket] 未捕获异常: client_id={client_id}", exc_info=True)
     finally:
-        # # 客户端断开时尝试清理缓存（尽量容错）
-        # try:
-        #     ai.remove_client(client_id)
-        # except Exception:
-        #     pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
         logger.info(f"[WebSocket] 连接已关闭: client_id={client_id}")
 
 

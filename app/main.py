@@ -1,9 +1,11 @@
+import asyncio
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app.routers import ai, api, health, inspection, task
@@ -55,6 +57,10 @@ async def lifespan(app: FastAPI):
                 os.environ.get('CLEANSIGHT_STRICT', '0') == '1', settings.debug)
     logger.info("=" * 60)
 
+    # shutdown event：供 WebSocket handler 感知服务器关闭
+    shutdown_event = asyncio.Event()
+    app.state.shutdown_event = shutdown_event
+
     # 按照服务模块启动生命周期管理
     # 1. 健康监控服务（依赖 client_manager, stream_service, inference_manager）
     # 2. AI 推理服务
@@ -62,12 +68,22 @@ async def lifespan(app: FastAPI):
         async with ai.lifespan():
             yield
 
+    # lifespan 退出时通知所有 WebSocket 主动断开
+    shutdown_event.set()
+
 
 app = FastAPI(
     title="CleanSight Backend",
     description="AI-powered inspection of the endoscope cleaning process at Changhai Hospital",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 # 注册路由器
