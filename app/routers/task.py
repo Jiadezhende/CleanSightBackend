@@ -16,6 +16,7 @@ from app.database import engine, get_db
 from app.models.frame import HLSSegment
 from app.models.status_messages import get_no_task_response, get_task_status_response
 from app.services import ai
+from app.services.client.manager import client_manager
 
 router = APIRouter(prefix="/task", tags=["task"])
 logger = logging.getLogger(__name__)
@@ -419,3 +420,21 @@ async def get_task_alarms(task_id: int):
         )
 
     return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
+
+
+@router.get("/message/{client_id}")
+async def get_client_frontend_message(client_id: str):
+    """
+    获取指定客户端的前端实时消息（内存快照）
+
+    包含：当前状态、时序事件、各任务检测结果、最近5条内存告警。
+    适合前端轮询（建议 1~2 Hz），用于告警提示等实时展示场景。
+
+    与 GET /task/{task_id}/alarms 的区别：
+    - 本接口：实时内存数据，按 client_id 查询
+    - alarms 接口：持久化数据库历史记录，按 task_id 查询
+    """
+    if not client_manager.has_client(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
+    cq = client_manager.get_client(client_id)
+    return cq.get_frontend_message()
