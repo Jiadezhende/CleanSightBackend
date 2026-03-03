@@ -14,5 +14,8 @@ pip install -r requirements-cpu.txt
 echo "Removing opencv-python (non-headless, conflicts with headless)..."
 pip uninstall opencv-python -y 2>/dev/null || true
 
+echo "Ensuring opencv-python-headless is installed..."
+pip install "opencv-python-headless<4.12.0"
+
 echo "Done. Installed opencv:"
 pip show opencv-python-headless | grep -E "Name:|Version:"
