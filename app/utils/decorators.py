@@ -18,12 +18,22 @@ CleanSight 装饰器工具集（仅用于日志）
 
 import functools
 import logging
-import os
 import time
 from typing import Callable, Optional
 
-# 从环境变量读取调试模式
-DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+_DEBUG_MODE_CACHED = None
+
+
+def _is_debug_mode() -> bool:
+    """从 settings.debug 懒加载调试模式（带缓存）"""
+    global _DEBUG_MODE_CACHED
+    if _DEBUG_MODE_CACHED is None:
+        try:
+            from app.settings import settings
+            _DEBUG_MODE_CACHED = settings.debug
+        except Exception:
+            _DEBUG_MODE_CACHED = False
+    return _DEBUG_MODE_CACHED
 
 # ============================================================================
 # 1. 日志装饰器
@@ -61,7 +71,7 @@ def log_call(
         logger = logging.getLogger(func.__module__)
 
         # 生产环境跳过装饰器
-        if skip_in_production and not DEBUG_MODE:
+        if skip_in_production and not _is_debug_mode():
             return func
 
         @functools.wraps(func)
