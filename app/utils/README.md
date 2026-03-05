@@ -202,7 +202,7 @@ def process_frame(client_id: str, frame: np.ndarray):
 ```python
 @log_call(skip_in_production=True)
 def infer_batch(frames):
-    # 生产环境（DEBUG_MODE=false）自动跳过日志
+    # 生产环境（CLEANSIGHT_DEBUG=false）自动跳过日志
     pass
 ```
 
@@ -420,14 +420,12 @@ executor.execute(
 
 ```bash
 # .env.dev (开发环境)
-LOG_LEVEL=DEBUG
-LOG_FORMAT=text         # 使用 colorlog
-DEBUG_MODE=true         # 启用所有装饰器
+CLEANSIGHT_LOG_LEVEL=DEBUG
+CLEANSIGHT_DEBUG=true         # 启用所有装饰器
 
-# .env.prod (生产环境)
-LOG_LEVEL=INFO
-LOG_FORMAT=json         # 结构化日志
-DEBUG_MODE=false        # 跳过高频装饰器
+# .env (生产环境)
+CLEANSIGHT_LOG_LEVEL=INFO
+CLEANSIGHT_DEBUG=false        # 跳过高频装饰器
 ```
 
 ---

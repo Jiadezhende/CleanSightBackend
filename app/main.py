@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import sys
 from contextlib import asynccontextmanager
 
@@ -22,19 +21,14 @@ from app.utils import (
 )
 from app.utils.metrics import get_metrics
 
-# 注意：日志配置由 uvicorn 的 --log-config 参数管理
-# 参见: logging_config.json
-# 这里只设置日志级别（从环境变量读取）
-log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-numeric_level = getattr(logging, log_level, logging.INFO)
-logging.root.setLevel(numeric_level)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # 显示启动配置信息
     from app.settings import settings
+
+    # 设置日志级别（从 CLEANSIGHT_LOG_LEVEL 读取）
+    numeric_level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    logging.root.setLevel(numeric_level)
 
     logger.info("[CleanSight] Starting backend...")
     logger.info("=" * 60)
@@ -42,19 +36,17 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
 
     # 显示当前环境
-    env = os.environ.get("CLEANSIGHT_ENV", "dev")
     env_names = {
         "dev": "开发环境 (.env.dev)",
         "test": "测试环境 (.env.test)",
         "prod": "生产环境 (.env)",
     }
-    env_display = env_names.get(env, f"未知环境 ({env})")
+    env_display = env_names.get(settings.env, f"未知环境 ({settings.env})")
     logger.info("[CleanSight] Environment: %s", env_display)
 
     # 显示关键配置
     logger.info("[CleanSight] Database: %s:%s/%s", settings.db_host, settings.db_port, settings.db_name)
-    logger.info("[CleanSight] Strict mode: %s | Debug: %s", 
-                os.environ.get('CLEANSIGHT_STRICT', '0') == '1', settings.debug)
+    logger.info("[CleanSight] Strict mode: %s | Debug: %s", settings.strict, settings.debug)
     logger.info("=" * 60)
 
     # shutdown event：供 WebSocket handler 感知服务器关闭
@@ -439,19 +431,16 @@ def main():
         # 启动 FastAPI 应用
         import uvicorn
 
-        # 从环境变量读取配置
-        host = os.environ.get("HOST", "0.0.0.0")
-        port = int(os.environ.get("PORT", "8000"))
-        log_config = os.environ.get("LOG_CONFIG", "logging_config.json")
+        from app.settings import settings
 
-        logger.info(f"Listening on {host}:{port}")
-        logger.info(f"Log config: {log_config}")
+        logger.info(f"Listening on {settings.host}:{settings.port}")
+        logger.info(f"Log config: {settings.log_config}")
 
         uvicorn.run(
             "app.main:app",
-            host=host,
-            port=port,
-            log_config=log_config,
+            host=settings.host,
+            port=settings.port,
+            log_config=settings.log_config,
             reload=False,  # 生产环境禁用热重载
         )
 

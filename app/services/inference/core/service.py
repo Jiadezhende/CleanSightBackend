@@ -111,9 +111,13 @@ class ModelWorkerService:
         self._stop_event = threading.Event()
         self._worker_threads: List[threading.Thread] = []
 
+        # 取实际生效的 CUDA stream 状态（由 WorkerPool 根据硬件判断）
+        actual_cuda = any(
+            pool.use_cuda_stream for pool in self.worker_pools.values()
+        )
         logger.info(
             f"ModelWorkerService initialized: stages={list(self.worker_pools.keys())}, "
-            f"CUDA_stream={'enabled' if use_cuda_stream else 'disabled'}, "
+            f"CUDA_stream={'enabled' if actual_cuda else 'disabled'}, "
             f"clients={len(self.client_queues_map)}"
         )
 

@@ -233,8 +233,8 @@ def _log_loaded_config(config: "InferenceConfig"):
 
 def _create_default_config() -> InferenceConfig:
     """创建默认配置（用于向后兼容）"""
-    # 从环境变量获取模型路径，如果未设置则使用默认值
-    model_base_path = os.environ.get("CLEANSIGHT_MODEL_PATH", "./app/data")
+    from app.settings import settings
+    model_base_path = settings.model_path
 
     default_config = {
         "stages": {
