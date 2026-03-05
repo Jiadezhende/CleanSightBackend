@@ -286,7 +286,6 @@ class HLSPersistenceStrategy:
                 "client_id": target_dir.parent.name,
                 "start_time": int(timestamp),
                 "end_time": None,
-                "status": "running",
                 "raw_segments": {
                     "count": 0,
                     "total_duration": 0.0,

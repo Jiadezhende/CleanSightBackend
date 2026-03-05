@@ -3,7 +3,8 @@
 
 职责：
 - 后台 daemon 线程，定期扫描 database/{client_id}/{task_id}/metadata.json
-- 删除 status=completed 且 updated_at 超过 cleanup_days 天的任务目录
+- 删除 updated_at 超过 cleanup_days 天的任务目录
+- 活跃任务每 ~10s 更新一次 updated_at，不会被误删
 """
 
 import json
