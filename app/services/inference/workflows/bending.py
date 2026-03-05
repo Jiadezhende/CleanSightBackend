@@ -54,7 +54,7 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
             for output in outputs:
                 output.success = True
                 output.bending_detected = any(
-                    "bent" in d.class_name.lower() for d in output.detections
+                    "bending" in d.class_name.lower() for d in output.detections
                 )
                 output.detection_count = len(output.detections)
             return outputs
@@ -95,7 +95,7 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
 
         bending_flags = [
             any(
-                "bent" in d.class_name.lower() or "bending" in d.class_name.lower()
+                "bending" in d.class_name.lower()
                 for d in out.detections
             )
             for out in recent
@@ -106,7 +106,7 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
         # ② 更新检测指标计数器
         latest = window[-1]
         bending_now = any(
-            "bent" in d.class_name.lower() or "bending" in d.class_name.lower()
+            "bending" in d.class_name.lower()
             for d in latest.detections
         )
         if bending_now:
@@ -164,7 +164,7 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
             ))
 
         bending_now = any(
-            "bent" in d.class_name.lower() or "bending" in d.class_name.lower()
+            "bending" in d.class_name.lower()
             for d in output.detections
         )
 
