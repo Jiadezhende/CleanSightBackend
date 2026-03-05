@@ -24,7 +24,8 @@ except ImportError:
     client_manager = None  # 兼容旧版本
 
 # 配置常量
-FFMPEG_BIN = os.environ.get("FFMPEG_PATH", "ffmpeg")
+from app.settings import settings
+FFMPEG_BIN = settings.ffmpeg_path
 DEFAULT_CHANNELS = 3
 
 

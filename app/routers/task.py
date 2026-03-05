@@ -16,6 +16,7 @@ from app.database import engine, get_db
 from app.models.frame import HLSSegment
 from app.models.status_messages import get_no_task_response, get_task_status_response
 from app.services import ai
+from app.services.client.manager import client_manager
 
 router = APIRouter(prefix="/task", tags=["task"])
 logger = logging.getLogger(__name__)
@@ -35,9 +36,13 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
     Args:
         client_id: 客户端ID（也可以理解为摄像机ip/source_id）
     """
+    import asyncio
+
     await websocket.accept()
+    shutdown_event: asyncio.Event = websocket.app.state.shutdown_event
+
     try:
-        while True:
+        while not shutdown_event.is_set():
             # 获取当前任务状态
             current_task = ai.get_task(client_id)
 
@@ -61,23 +66,24 @@ async def websocket_task_status(websocket: WebSocket, client_id: str):
                 no_task_data = get_no_task_response()
                 await websocket.send_text(json.dumps(no_task_data, ensure_ascii=False))
 
-            # 每秒更新一次状态
-            import asyncio
-
-            await asyncio.sleep(1)
+            # 每秒更新一次状态，同时响应 shutdown
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=1.0)
+                break  # shutdown triggered
+            except asyncio.TimeoutError:
+                pass
 
     except WebSocketDisconnect:
         logger.info(f"[WebSocket-TaskStatus] 连接已关闭: client_id={client_id}")
-    except Exception as e:
+    except Exception:
         logger.error(
             f"[WebSocket-TaskStatus] 异常: client_id={client_id}", exc_info=True
         )
+    finally:
         try:
             await websocket.close()
         except Exception:
-            logger.warning(
-                f"[WebSocket-TaskStatus] 关闭WebSocket时异常: client_id={client_id}"
-            )
+            pass
 
 
 @router.get("/traceback/{task_id}/segments")
@@ -419,3 +425,21 @@ async def get_task_alarms(task_id: int):
         )
 
     return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
+
+
+@router.get("/message/{client_id}")
+async def get_client_frontend_message(client_id: str):
+    """
+    获取指定客户端的前端实时消息（内存快照）
+
+    包含：当前状态、时序事件、各任务检测结果、最近5条内存告警。
+    适合前端轮询（建议 1~2 Hz），用于告警提示等实时展示场景。
+
+    与 GET /task/{task_id}/alarms 的区别：
+    - 本接口：实时内存数据，按 client_id 查询
+    - alarms 接口：持久化数据库历史记录，按 task_id 查询
+    """
+    if not client_manager.has_client(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
+    cq = client_manager.get_client(client_id)
+    return cq.get_frontend_message()

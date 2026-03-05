@@ -67,7 +67,6 @@ class InferenceConfig:
         # 从global配置提取参数（新增）
         self.raw_fps: int = self.global_config.get("raw_fps", 30)
         self.inference_fps: int = self.global_config.get("inference_fps", 20)
-        self.rt_maxlen: int = self.global_config.get("rt_maxlen", 30)
         self.ca_maxlen: int = self.global_config.get("ca_maxlen", 600)
         self.ca_segment_len: int = self.global_config.get("ca_segment_len", 300)  # 帧数
 
@@ -221,7 +220,7 @@ def _log_loaded_config(config: "InferenceConfig"):
             "FPS配置: raw_fps=%.1f, inference_fps=%d", config.raw_fps, config.inference_fps
         )
         logger.debug(
-            "队列配置: rt_maxlen=%d, ca_maxlen=%d", config.rt_maxlen, config.ca_maxlen
+            "队列配置: ca_maxlen=%d", config.ca_maxlen
         )
         logger.debug(
             "批处理: batch_size=%d, decimation=%d",
@@ -234,8 +233,8 @@ def _log_loaded_config(config: "InferenceConfig"):
 
 def _create_default_config() -> InferenceConfig:
     """创建默认配置（用于向后兼容）"""
-    # 从环境变量获取模型路径，如果未设置则使用默认值
-    model_base_path = os.environ.get("CLEANSIGHT_MODEL_PATH", "./app/data")
+    from app.settings import settings
+    model_base_path = settings.model_path
 
     default_config = {
         "stages": {

@@ -297,9 +297,7 @@ class GuardedExecutor:
 
         # 2. FrameDrop 专用计数
         if isinstance(exc, FrameDrop):
-            frame_drop_total.labels(
-                client_id=exc.client_id or "unknown", reason=exc.reason or "unknown"
-            ).inc()
+            frame_drop_total.labels(reason=exc.reason or "unknown").inc()
 
         # 3. GPU OOM 专用计数
         if isinstance(exc, ModelInferenceError) and exc.is_cuda_error:

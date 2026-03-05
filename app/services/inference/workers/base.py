@@ -140,8 +140,6 @@ class MultiModelWorkerPool:
                 timestamp=req.timestamp,
                 stage=req.stage,
                 result=per_frame_results,
-                annotated_frame=None,  # 先不做可视化，留给后处理
-                frame=req.frame,  # 保存原始帧供可视化使用
             )
             results.append(result)
 
@@ -182,12 +180,9 @@ class MultiModelWorkerPool:
 
                     # 记录推理延迟（成功）
                     elapsed_ms = (time.time() - start_time) * 1000
-                    for ctx in contexts:
-                        infer_latency_ms.labels(
-                            client_id=ctx.get("client_id", "unknown"), model=model.name
-                        ).observe(
-                            elapsed_ms / len(frames)
-                        )  # 平均每帧延迟
+                    infer_latency_ms.labels(model=model.name).observe(
+                        elapsed_ms / len(frames)
+                    )  # 平均每帧延迟
 
                 except Exception as e:
                     # 业务逻辑层不应该捕获异常 - 让异常传播到Boundary Layer 1
@@ -197,12 +192,10 @@ class MultiModelWorkerPool:
                     )
 
                     # 记录推理失败
-                    for ctx in contexts:
-                        infer_failure_total.labels(
-                            client_id=ctx.get("client_id", "unknown"),
-                            model=model.name,
-                            error_type=type(e).__name__,
-                        ).inc()
+                    infer_failure_total.labels(
+                        model=model.name,
+                        error_type=type(e).__name__,
+                    ).inc()
 
                     # 返回失败结果
                     n = len(frames)
@@ -255,23 +248,18 @@ class MultiModelWorkerPool:
 
                 # 记录推理延迟（成功）
                 elapsed_ms = (time.time() - start_time) * 1000
-                for ctx in contexts:
-                    infer_latency_ms.labels(
-                        client_id=ctx.get("client_id", "unknown"), model=model.name
-                    ).observe(
-                        elapsed_ms / n
-                    )  # 平均每帧延迟
+                infer_latency_ms.labels(model=model.name).observe(
+                    elapsed_ms / n
+                )  # 平均每帧延迟
 
             except Exception as e:
                 print(f"[MultiModelWorkerPool] {model.name} infer_batch error: {e}")
 
                 # 记录推理失败
-                for ctx in contexts:
-                    infer_failure_total.labels(
-                        client_id=ctx.get("client_id", "unknown"),
-                        model=model.name,
-                        error_type=type(e).__name__,
-                    ).inc()
+                infer_failure_total.labels(
+                    model=model.name,
+                    error_type=type(e).__name__,
+                ).inc()
 
                 for i in range(n):
                     merged[i][model.name] = DetectionOutput(

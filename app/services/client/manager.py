@@ -55,7 +55,6 @@ class ClientManager:
         )  # 每个客户端独立锁
 
         # 默认配置参数（从配置加载）
-        self._default_rt_maxlen = self._config.rt_maxlen  # 实时队列长度
         self._default_ca_segment_len = self._config.ca_segment_len  # CA段长度
         self._default_ca_maxlen = self._config.ca_maxlen  # CA队列最大长度
         self._default_inference_fps = self._config.inference_fps  # 推理采样频率
@@ -77,7 +76,6 @@ class ClientManager:
                 - resize_width: int (默认 640)
                 - resize_height: int (默认 480)
                 - inference_fps: int (默认 10)
-                - rt_maxlen: int (默认 30)
                 - ca_segment_len: int (默认 150)
                 - ca_maxlen: int (默认 2700)
 
@@ -95,7 +93,6 @@ class ClientManager:
                 return self._clients[client_id]
 
             # 使用默认参数或传入参数创建
-            rt_maxlen = kwargs.get("rt_maxlen", self._default_rt_maxlen)
             ca_segment_len = kwargs.get("ca_segment_len", self._default_ca_segment_len)
             ca_maxlen = kwargs.get("ca_maxlen", self._default_ca_maxlen)
             inference_fps = kwargs.get("inference_fps", self._default_inference_fps)
@@ -103,7 +100,6 @@ class ClientManager:
             # 创建新的 ClientQueues 实例
             client_queues = ClientQueues(
                 client_id=client_id,
-                rt_maxlen=rt_maxlen,
                 ca_segment_len=ca_segment_len,
                 ca_maxlen=ca_maxlen,
                 inference_fps=inference_fps,
@@ -211,7 +207,7 @@ class ClientManager:
         2. 遍历读取各客户端状态时无全局锁（并行读取）
 
         Returns:
-            格式：{client_id: {ca_ready: N, ca_raw: N, ca_processed: N, rt_processed: N}}
+            格式：{client_id: {ca_ready: N, ca_raw: N, ca_processed: N, has_rendered: bool}}
         """
         # 短暂全局锁：获取客户端ID快照
         with self._clients_lock:

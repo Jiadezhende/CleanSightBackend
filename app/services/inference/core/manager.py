@@ -1,25 +1,23 @@
 """推理管理器 - 核心实现
 
-基于推理服务架构改进方案（INFERENCE_SERVICE_IMPROVEMENT_PLAN.md）的完整实现。
-
 架构特点：
-1. 推理与可视化解耦：推理线程只负责推理，可视化异步执行
+1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
 2. 时序分析独立：时序逻辑从推理线程中分离，支持复杂时序算法
-3. 降帧可视化补偿：可视化使用最新原始帧 + 缓存的检测结果
-4. 异步管道架构：推理 → 时序分析 → 可视化 → 写回，完全异步
+3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
+4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_inference（最新快照）
 
 数据流：
-StageAwareDispatcher → InferWorker → TemporalWorkerPool → VisualizationWorkerPool → WriteBackWorkerPool
+InferenceLoop → cq.push_detection() + cq.set_latest_inference()  [双写]
+TemporalWorker (1Hz)  → cq.get_slide_window() → analyze → cq.set_latest_temporal()
+VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal() → render → cq
 """
 
 import base64
 import logging
-import queue
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import cv2
 import numpy as np
@@ -30,31 +28,19 @@ from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.core.service import ModelWorkerService
-from app.services.inference.models import (
-    InferenceResult,
-    TemporalAnalysisPackage,
-    TemporalAnalysisResult,
-    WriteBackData,
-)
 from app.services.inference.workers.temporal import TemporalWorkerPool
 from app.services.inference.workers.visualization import VisualizationWorkerPool
-from app.services.inference.workers.writeback import WriteBackWorkerPool
 
 
 class InferenceManager:
-    """推理管理器 - 新架构实现
+    """推理管理器
 
-    集成：
-    - ModelWorkerService（推理服务）
-    - TemporalWorkerPool（时序分析）
-    - VisualizationWorkerPool（可视化）
-    - WriteBackWorkerPool（写回）
+    集成三个独立时钟的 Worker 池：
+    - ModelWorkerService（推理，~30 FPS）
+    - TemporalWorkerPool（时序分析，1 Hz）
+    - VisualizationWorkerPool（可视化，~15 FPS）
 
-    特性：
-    - 使用 ClientManager 统一管理客户端队列
-    - 异步管道架构，推理、时序、可视化、写回完全解耦
-    - 支持降帧推理 + 全帧率可视化
-    - 保留原有 API 接口，无缝替换
+    三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。
     """
 
     def __init__(
@@ -63,9 +49,6 @@ class InferenceManager:
         ca_segment_seconds: int = 10,  # 改为10秒，即300帧
         db_dir: Optional[str] = None,
         ca_maxlen: int = 500,
-        temporal_threads: int = 2,
-        visualization_threads: int = 4,
-        writeback_threads: int = 2,
     ):
         """初始化推理管理器。
 
@@ -74,12 +57,8 @@ class InferenceManager:
             ca_segment_seconds: CA 段长度（秒）
             db_dir: 数据库存储目录
             ca_maxlen: CA 队列最大长度
-            temporal_threads: 时序分析线程数
-            visualization_threads: 可视化线程数
-            writeback_threads: 写回线程数
         """
         # 队列参数
-        self._rt_maxlen = max(5, int(rt_fps))
         self._ca_segment_len = max(10, int(rt_fps * ca_segment_seconds))
         self._ca_maxlen = max(50, ca_maxlen)
 
@@ -97,51 +76,32 @@ class InferenceManager:
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
         self._model_worker_service: Optional[ModelWorkerService] = None
 
-        # ========== 异步管道架构 ==========
-        logger.debug("[InferenceManager] Initializing async pipeline architecture")
+        # ========== 三池独立架构（无队列串联） ==========
+        logger.debug("[InferenceManager] Initializing independent worker pools")
 
-        # 创建队列（负责各个worker池的通信）
-        self.temporal_queue: "queue.Queue[InferenceResult]" = queue.Queue(maxsize=256)
-        self.visualization_queue: "queue.Queue[TemporalAnalysisPackage]" = queue.Queue(
-            maxsize=256
-        )
-        self.writeback_queue: "queue.Queue[WriteBackData]" = queue.Queue(maxsize=256)
-
-        # 创建 Worker 池（各池管理自己的 stop_event）
+        # TemporalWorkerPool: 定时轮询模式，独立时钟
         self.temporal_pool = TemporalWorkerPool(
-            input_queue=self.temporal_queue,
-            output_queue=self.visualization_queue,
-            num_workers=temporal_threads,
+            num_workers=1,  # 单线程轮询足够，时序分析无 GPU 开销
             stage_configs=None,  # 将在 start() 后设置
+            tick_interval=1.0,
         )
 
+        # VisualizationWorkerPool: 定时拉取模式，独立时钟
         self.visualization_pool = VisualizationWorkerPool(
-            input_queue=self.visualization_queue,
-            output_queue=self.writeback_queue,
-            num_workers=visualization_threads,
+            target_fps=15,
             stage_configs=None,  # 将在 start() 后设置
         )
 
-        self.writeback_pool = WriteBackWorkerPool(
-            input_queue=self.writeback_queue,
-            num_workers=writeback_threads,
-            enable_db_write=False,  # 可选：是否写入数据库
-        )
-
-        # 自定义推理服务（将结果投递到时序队列）
+        # 推理服务（结果同步进 ClientQueues.slide_window，不再投递到队列）
         self._model_worker_service = self._create_async_model_worker_service()
 
-        # ========== 持久化管理器（新架构） ==========
-        from app.services.persistence import PersistenceConfig, PersistenceManager
+        # ========== 持久化管理器（全局单例，与 client_manager 模式一致） ==========
+        from app.services.persistence import persistence_manager as _persistence_manager
 
-        # 加载配置并覆盖storage路径
-        persist_config = PersistenceConfig.from_yaml()
-        persist_config.storage.base_dir = str(self._db_dir)
-        self.persistence_manager = PersistenceManager(config=persist_config)
-
-        # 持久化线程（仅用于段检查）
-        self._segment_check_thread: Optional[threading.Thread] = None
-        self._segment_check_interval: float = 1.0  # 检查间隔（秒）
+        # 将 db_dir 覆盖应用到持久化配置和已创建的 HLS 策略（防止退化为 yaml 默认值）
+        _persistence_manager.config.storage.base_dir = str(self._db_dir)
+        _persistence_manager.hls_pool.strategy.db_dir = self._db_dir
+        self.persistence_manager = _persistence_manager
 
         # 预编码缓存（避免重复编码同一帧）
         self._encoded_cache: Dict[str, Dict[str, Any]] = {}
@@ -206,12 +166,10 @@ class InferenceManager:
         return self._stage_configs
 
     def _create_async_model_worker_service(self):
-        """创建异步模式的推理服务（将结果投递到时序队列）"""
+        """创建推理服务（结果同步进 ClientQueues.slide_window）"""
         from app.services.inference.core.service import ModelWorkerService
 
-        # ModelWorkerService 现在直接支持异步模式
         service = ModelWorkerService(
-            temporal_queue=self.temporal_queue,
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
             use_cuda_stream=True,
@@ -299,6 +257,10 @@ class InferenceManager:
                 f"[InferenceManager] Client not found in ClientManager, skipping writeback: {client_id}"
             )
 
+        # 清理预编码缓存（防止内存泄漏）
+        with self._encoded_cache_lock:
+            self._encoded_cache.pop(client_id, None)
+
         logger.info(f"[InferenceManager] Inference resources removed: {client_id}")
 
     def status(self) -> Dict[str, Any]:
@@ -362,141 +324,54 @@ class InferenceManager:
         else:
             return obj
 
-    # ========== HLS 段落盘逻辑（保留原有实现） ==========
-
-    def _flush_segment_if_needed(self, client_id: str, client_queues: ClientQueues):
-        """当队列达到阈值时，生成原始和处理后的 HLS 视频段及关键点 JSON。
-
-        检查阈值并将待写盘数据放入持久化队列，由持久化线程执行实际写盘/上报/落库工作。
-
-        策略：ca_raw 和 ca_processed 独立落盘（因为积累速度不同）
-        """
-        seg_len = client_queues.ca_segment_len
-        ca_raw_len = client_queues.get_ca_raw_length()
-        ca_processed_len = client_queues.get_ca_processed_length()
-
-        # 调试日志：显示队列状态
-        if ca_raw_len >= seg_len or ca_processed_len >= seg_len:
-            logger.debug(
-                "[SegmentCheck] client=%s: ca_raw=%d/%d, ca_processed=%d/%d",
-                client_id, ca_raw_len, seg_len, ca_processed_len, seg_len
-            )
-
-        # 1. 检查 ca_raw 是否需要落盘（独立）
-        if ca_raw_len >= seg_len:
-            logger.info(
-                "[SegmentCheck] Enqueueing RAW segment persist job for client: %s, len=%d",
-                client_id, seg_len
-            )
-            self._enqueue_raw_segment_job(client_id, client_queues, seg_len)
-
-        # 2. 检查 ca_processed 是否需要落盘（独立）
-        if ca_processed_len >= seg_len:
-            logger.info(
-                "[SegmentCheck] Enqueueing PROCESSED segment persist job for client: %s, len=%d",
-                client_id, seg_len
-            )
-            self._enqueue_processed_segment_job(client_id, client_queues, seg_len)
-
-    def _segment_check_loop(self):
-        """周期性检查所有客户端队列，触发分段落盘。"""
-        logger.info("[SegmentCheck] Segment check thread started")
-        while not self._stop_event.is_set():
-            try:
-                # 获取所有客户端
-                clients = client_manager.get_all_clients()
-
-                # 检查每个客户端是否需要分段落盘
-                for client_id, cq in clients.items():
-                    try:
-                        self._flush_segment_if_needed(client_id, cq)
-                    except Exception as e:
-                        logger.error(f"[SegmentCheck] Error checking client {client_id}: {e}")
-
-                # 等待下一次检查
-                time.sleep(self._segment_check_interval)
-            except Exception as e:
-                logger.error(f"[SegmentCheck] Segment check loop error: {e}")
-
-        logger.debug("[SegmentCheck] Segment check thread stopped")
+    # ========== HLS 段落盘逻辑 ==========
 
     def _flush_all_remaining_segments(
         self, client_id: str, client_queues: ClientQueues
     ) -> None:
-        """在任务/客户端结束时，将剩余缓存全部落盘（独立处理raw和processed）"""
+        """在任务/客户端结束时，将剩余缓存全部落盘。
+
+        使用 drain 方法原子排空队列，避免与 append_ca_raw/processed 的并发竞态。
+        """
         try:
+            task_id = client_queues.get_task_id()
+            if task_id is None:
+                logger.warning(
+                    "[InferenceManager] task_id is None for %s, skipping flush",
+                    client_id,
+                )
+                return
+
             seg_len = client_queues.ca_segment_len
 
-            # 1. 处理 ca_raw 队列的所有剩余帧（分批落盘）
-            while client_queues.get_ca_raw_length() >= seg_len:
-                self._enqueue_raw_segment_job(client_id, client_queues, seg_len)
+            # 原子排空（线程安全，排空后 append 不会再触发自动落盘）
+            raw_frames = client_queues.drain_ca_raw()
+            processed_frames = client_queues.drain_ca_processed()
 
-            # 处理 ca_raw 的残余（不足一个段长）
-            remaining_raw = client_queues.get_ca_raw_length()
-            if remaining_raw > 0:
-                self._enqueue_raw_segment_job(client_id, client_queues, remaining_raw)
+            # 分段落盘 raw
+            for i in range(0, len(raw_frames), seg_len):
+                chunk = raw_frames[i : i + seg_len]
+                if chunk:
+                    self.persistence_manager.persist_hls_segment(
+                        client_id=client_id,
+                        task_id=task_id,
+                        segment_type="raw",
+                        frames=chunk,
+                    )
 
-            # 2. 处理 ca_processed 队列的所有剩余帧（分批落盘）
-            while client_queues.get_ca_processed_length() >= seg_len:
-                self._enqueue_processed_segment_job(client_id, client_queues, seg_len)
-
-            # 处理 ca_processed 的残余（不足一个段长）
-            remaining_processed = client_queues.get_ca_processed_length()
-            if remaining_processed > 0:
-                self._enqueue_processed_segment_job(
-                    client_id, client_queues, remaining_processed
-                )
+            # 分段落盘 processed
+            for i in range(0, len(processed_frames), seg_len):
+                chunk = processed_frames[i : i + seg_len]
+                if chunk:
+                    self.persistence_manager.persist_hls_segment(
+                        client_id=client_id,
+                        task_id=task_id,
+                        segment_type="processed",
+                        frames=chunk,
+                    )
 
         except Exception as e:
             logger.error(f"_flush_all_remaining_segments error for {client_id}: {e}")
-
-    def _enqueue_raw_segment_job(
-        self, client_id: str, client_queues: ClientQueues, seg_len: int
-    ) -> None:
-        """仅落盘 raw 帧（使用新的PersistenceManager）"""
-        task_id = client_queues.get_task_id()
-        if task_id is None:
-            print(
-                f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping raw segment persist"
-            )
-            return
-
-        raw_frames_data: List[FrameData] = client_queues.pop_n_ca_raw(seg_len)
-        if not raw_frames_data:
-            return
-
-        # 使用新的persistence_manager
-        self.persistence_manager.persist_hls_segment(
-            client_id=client_id,
-            task_id=task_id,
-            segment_type="raw",
-            frames=raw_frames_data,
-        )
-
-    def _enqueue_processed_segment_job(
-        self, client_id: str, client_queues: ClientQueues, seg_len: int
-    ) -> None:
-        """仅落盘 processed 帧（使用新的PersistenceManager）"""
-        task_id = client_queues.get_task_id()
-        if task_id is None:
-            print(
-                f"[InferenceManager] Warning: task_id is None for client {client_id}, skipping processed segment persist"
-            )
-            return
-
-        processed_frames_data: List[FrameData] = client_queues.pop_n_ca_processed(
-            seg_len
-        )
-        if not processed_frames_data:
-            return
-
-        # 使用新的persistence_manager
-        self.persistence_manager.persist_hls_segment(
-            client_id=client_id,
-            task_id=task_id,
-            segment_type="processed",
-            frames=processed_frames_data,
-        )
 
     # ========== 告警处理逻辑（独立于HLS） ==========
 
@@ -508,7 +383,7 @@ class InferenceManager:
         Args:
             alarm_info: 告警信息字典，应包含:
                 - task_id: 任务ID
-                - step_id: 步骤ID
+                - stage: 阶段名称
                 - client_id: 客户端ID
                 - detection_result: 检测结果（可选）
                 - alarm_type: 告警类型（可选）
@@ -536,19 +411,8 @@ class InferenceManager:
         # 2. 启动异步管道
         self.temporal_pool.start()
         self.visualization_pool.start()
-        self.writeback_pool.start()
 
-        # 3. 启动分段检查线程（周期性检查队列并触发落盘）
-        if (
-            self._segment_check_thread is None
-            or not self._segment_check_thread.is_alive()
-        ):
-            self._segment_check_thread = threading.Thread(
-                target=self._segment_check_loop, daemon=True, name="SegmentCheckThread"
-            )
-            self._segment_check_thread.start()
-
-        # 4. 启动持久化管理器（新架构）
+        # 3. 启动持久化管理器（新架构）
         self.persistence_manager.start()
 
         logger.info("[InferenceManager] Started")
@@ -566,19 +430,11 @@ class InferenceManager:
         # 2. 停止异步管道
         self.temporal_pool.stop()
         self.visualization_pool.stop()
-        self.writeback_pool.stop()
 
         # 3. 停止持久化管理器（新架构）
         self.persistence_manager.stop(timeout=10.0)
 
-        # 4. 停止分段检查线程
-        if self._segment_check_thread is not None:
-            try:
-                self._segment_check_thread.join(timeout=2.0)
-            except Exception:
-                pass
-
-        # 5. 停止客户端刷新线程
+        # 4. 停止客户端刷新线程
         if self._refresh_thread is not None:
             try:
                 self._refresh_thread.join(timeout=2.0)

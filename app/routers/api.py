@@ -79,12 +79,13 @@ async def start(req: StartRequest):
                 resource_id=str(req.task_id),
             )
 
-        if not db_task.source_ip:
+        source_ip: str | None = db_task.source_ip  # type: ignore[assignment]
+        if not source_ip:
             raise ValidationError(
                 message="Task source_ip is required", field="source_ip", value=None
             )
 
-        client_id = str(db_task.source_ip)
+        client_id = source_ip
         logger.info(f"[start] Starting task {req.task_id} for client {client_id}")
 
         # 2. 检测跨任务切换，清理旧数据

@@ -42,6 +42,7 @@ class StorageConfig:
     enable_db_write: bool = False
     enable_cleanup: bool = False
     cleanup_days: int = 7
+    cleanup_interval_seconds: int = 3600
 
 
 @dataclass
@@ -159,6 +160,10 @@ class PersistenceConfig:
     @property
     def cleanup_days(self) -> int:
         return self.storage.cleanup_days
+
+    @property
+    def cleanup_interval_seconds(self) -> int:
+        return self.storage.cleanup_interval_seconds
 
     def _load_shared_params_from_inference(self):
         """从inference配置加载共享参数（fps等）

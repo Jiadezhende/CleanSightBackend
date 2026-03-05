@@ -63,7 +63,6 @@ global:
   inference_decimation: 2         # 推理降帧率（1=不降帧，2=每2帧推理1次）
 
   # 队列参数（client模块会读取）
-  rt_maxlen: 30                   # 实时队列长度（帧数）
   ca_maxlen: 2700                 # CA队列最大长度（帧数，约90秒@30fps）
   ca_segment_len: 300             # HLS段长度（帧数，约10秒@30fps）
 

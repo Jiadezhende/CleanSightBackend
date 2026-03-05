@@ -7,10 +7,12 @@
 from .infer_workflow import InferenceWorkflow, YOLOWorkflow
 from .bending import EndoscopeBendingDetectionTask
 from .bubble import BubbleDetectionTask
+from .mock import MockDetectionTask
 
 __all__ = [
     "InferenceWorkflow",
     "YOLOWorkflow",
     "EndoscopeBendingDetectionTask",
     "BubbleDetectionTask",
+    "MockDetectionTask",
 ]

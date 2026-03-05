@@ -2,9 +2,8 @@
 
 Task-Centric 架构：每个 InferenceWorkflow 负责完整的推理流程
 - 检测 (infer)
-- 时序分析 (analyze_temporal)
+- 时序分析 (analyze_temporal)：含边沿去抖 + 告警评估
 - 可视化数据准备 (prepare_visualization_data)
-- 告警评估 (evaluate_alarms)
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -21,7 +20,6 @@ from app.services.inference.data_models import (
     AlarmInfo,
     Detection,
     DetectionOutput,
-    TemporalResult,
     VisualizationData,
 )
 
@@ -34,15 +32,13 @@ class InferenceWorkflow(ABC):
     新架构设计：
     1. Task 内部组装检测策略（DetectionStrategy）和输出适配器（OutputAdapter）
     2. 检测输出统一为 DetectionOutput 格式
-    3. 时序分析逻辑下沉到每个 Task（analyze_temporal）
+    3. 时序分析 + 告警评估合并为 analyze_temporal()，含边沿去抖
     4. 可视化数据由 Task 准备（prepare_visualization_data），渲染由固定渲染器完成
-    5. 告警评估逻辑在 Task 内部（evaluate_alarms）
 
-    子类只需实现 4 个核心方法：
+    子类只需实现 3 个核心方法：
     - infer(): 执行检测
-    - analyze_temporal(): 时序分析
+    - analyze_temporal(): 时序分析 + 告警评估（边沿触发）
     - prepare_visualization_data(): 准备可视化数据
-    - evaluate_alarms(): 评估告警（可选）
     """
 
     def __init__(self, name: str, enabled: bool = True):
@@ -74,21 +70,23 @@ class InferenceWorkflow(ABC):
     @abstractmethod
     def analyze_temporal(
         self,
+        window: List[DetectionOutput],
         state: ClientState,
-        output: DetectionOutput,
-        timestamp: float
-    ) -> TemporalResult:
-        """时序分析
+    ) -> Tuple[List[str], List[AlarmInfo]]:
+        """时序分析完整管道（含边沿去抖 + 告警评估）
 
-        每个 InferenceWorkflow 实现自己的时序逻辑（连续帧、滑动窗口、累计计数等）
+        流程：
+        1. 分析窗口数据，计算时序特征（连续帧 / 比例）
+        2. 生成事件列表（前端展示）
+        3. 更新 state 计数器 + 边沿去抖
+        4. 仅在 rising-edge 时产出 AlarmInfo
 
         Args:
-            state: 客户端状态（用于存储计数器、历史数据）
-            output: 检测输出
-            timestamp: 当前时间戳
+            window: 滑动窗口快照 [DetectionOutput, ...]，按时间升序
+            state: 客户端状态（用于计数器管理和边沿触发标记）
 
         Returns:
-            TemporalResult: 时序分析结果
+            (events, alarms) — events 给前端展示，alarms 给 persistence
         """
         pass
 
@@ -96,40 +94,19 @@ class InferenceWorkflow(ABC):
     def prepare_visualization_data(
         self,
         output: DetectionOutput,
-        temporal: TemporalResult
     ) -> VisualizationData:
         """准备可视化数据
 
-        Task 提供可视化数据（检测框、标签、状态栏文本等），
-        由固定渲染器负责绘制
+        基于检测输出准备可视化数据（检测框、标签、状态栏文本等），
+        由固定渲染器负责绘制。
 
         Args:
             output: 检测输出
-            temporal: 时序分析结果
 
         Returns:
             VisualizationData: 可视化数据
         """
         pass
-
-    def evaluate_alarms(
-        self,
-        temporal: TemporalResult,
-        context: Dict[str, Any]
-    ) -> List[AlarmInfo]:
-        """评估告警条件
-
-        基于时序分析结果，判断是否需要触发告警
-
-        Args:
-            temporal: 时序分析结果
-            context: 上下文信息（包含 client_id、stage 等）
-
-        Returns:
-            AlarmInfo 列表（空列表表示无告警）
-        """
-        # 默认实现：不触发告警（子类可选覆盖）
-        return []
 
     # ====== 批量推理支持 ======
 
@@ -190,7 +167,6 @@ class YOLOWorkflow(InferenceWorkflow):
     子类只需实现：
     - analyze_temporal()
     - prepare_visualization_data()
-    - evaluate_alarms()（可选）
 
     如有自定义输出格式（如带 mask 的分割模型），可 override _adapt_output()。
     """
