@@ -114,7 +114,7 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
 
         # ③ 事件列表（前端展示）
         is_triggered = detected_ratio >= self.trigger_ratio
-        events = [f"滑动窗口内{detected_ratio:.0%}检测到弯折"] if is_triggered else []
+        events = [f"Bending detected in {detected_ratio:.0%} of sliding window"] if is_triggered else []
 
         # ④ 边沿触发：只在 0→1 跳变时投递告警
         alarms: List[AlarmInfo] = []
@@ -125,9 +125,9 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
             state.increment_counter("bending_alarming")
             state.increment_counter("bending_alarm_count")
             alarms.append(AlarmInfo(
-                alarm_type="流程违规",
+                alarm_type="process_violation",
                 alarm_level="high",
-                alarm_message="检测到内镜弯折异常（滑动窗口触发）",
+                alarm_message="Endoscope bending anomaly detected (sliding window triggered)",
                 metadata={
                     "window_ratio": detected_ratio,
                     "bending_count": state.get_counter("bending_total", 0),

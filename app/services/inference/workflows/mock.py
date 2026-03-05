@@ -149,7 +149,7 @@ class MockDetectionTask(InferenceWorkflow):
 
         # ③ 判断是否触发事件
         is_triggered = consecutive >= self.consecutive_trigger
-        events = [f"连续{consecutive}帧检测到 mock_object"] if is_triggered else []
+        events = [f"mock_object detected in {consecutive} consecutive frames"] if is_triggered else []
 
         # ④ 边沿触发：只在 0→1 跳变时投递告警
         alarms: List[AlarmInfo] = []
@@ -159,9 +159,9 @@ class MockDetectionTask(InferenceWorkflow):
             state.increment_counter("mock_alarming")
             state.increment_counter("mock_alarm_count")
             alarms.append(AlarmInfo(
-                alarm_type="Mock告警",
+                alarm_type="mock_alarm",
                 alarm_level="low",
-                alarm_message=f"Mock检测触发（连续{consecutive}帧）",
+                alarm_message=f"Mock detection triggered ({consecutive} consecutive frames)",
                 metadata={
                     "consecutive_frames": consecutive,
                     "brightness": latest.metadata.get("mean_brightness"),

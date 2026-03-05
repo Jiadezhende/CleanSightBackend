@@ -108,9 +108,9 @@ class BubbleDetectionTask(YOLOWorkflow):
             state.increment_counter("bubble_alarming")
             state.increment_counter("bubble_alarm_count")
             alarms.append(AlarmInfo(
-                alarm_type="流程违规",
+                alarm_type="process_violation",
                 alarm_level="high",
-                alarm_message="检测到气泡异常（连续3帧）",
+                alarm_message="Bubble anomaly detected (3 consecutive frames)",
                 metadata={
                     "consecutive_frames": consecutive,
                     "bubble_count": len(latest.detections),
