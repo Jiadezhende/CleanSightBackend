@@ -171,7 +171,16 @@ class GlobalHealthMonitor:
                 self._handle_reconnecting_client(client_id, cq, current_time)
                 continue
 
-            # 2. 检查是否有活跃的解码器
+            # 2. 检查任务运行时长是否超过最大限制
+            if self.config.task_max_duration > 0:
+                task_started_at = getattr(cq, "task_started_at", 0.0)
+                if task_started_at > 0:
+                    task_age = current_time - task_started_at
+                    if task_age >= self.config.task_max_duration:
+                        self._handle_task_timeout(client_id, cq, task_age)
+                        continue
+
+            # 3. 检查是否有活跃的解码器
             has_decoder = client_id in active_decoders
 
             if has_decoder:
@@ -462,6 +471,58 @@ class GlobalHealthMonitor:
                 f"[GlobalHealthMonitor] Full cleanup completed: {client_id}\n"
                 f"Action: Call /api/start to restart the stream."
             )
+
+    def _handle_task_timeout(self, client_id: str, cq, task_age: float):
+        """处理任务超时：触发 critical 告警后执行完整清理。
+
+        Args:
+            client_id: 客户端ID
+            cq: ClientQueues 实例
+            task_age: 任务已运行时长（秒）
+        """
+        from app.services.inference.models import AlarmRecord
+        from app.services.persistence import persistence_manager
+
+        task_id = cq.get_task_id()
+        hours = task_age / 3600
+        max_hours = self.config.task_max_duration / 3600
+        alarm_message = (
+            f"任务超时：已运行 {hours:.1f} 小时，超过最大时长 {max_hours:.1f} 小时，即将强制终止"
+        )
+
+        logger.error(
+            "[GlobalHealthMonitor] TASK TIMEOUT: client=%s, task_id=%s, "
+            "running=%.1fh, max=%.1fh",
+            client_id, task_id, hours, max_hours,
+        )
+
+        # 持久化告警
+        persistence_manager.persist_alarm({
+            "task_id": task_id,
+            "stage": None,
+            "client_id": client_id,
+            "alarm_type": "任务超时",
+            "alarm_level": "critical",
+            "alarm_message": alarm_message,
+            "detection_result": {
+                "task_age_seconds": task_age,
+                "max_duration_seconds": self.config.task_max_duration,
+            },
+        })
+
+        # 写入内存告警日志（供前端实时展示）
+        cq.append_alarm_record(AlarmRecord(
+            alarm_type="任务超时",
+            alarm_level="critical",
+            alarm_message=alarm_message,
+            metadata={
+                "task_age_seconds": task_age,
+                "max_duration_seconds": self.config.task_max_duration,
+            },
+        ))
+
+        self._stats["cleanups"] += 1
+        self.cleanup_client(client_id, reason=f"Task timeout ({task_age:.0f}s)")
 
     def _handle_potential_orphan(self, client_id: str, cq, current_time: float):
         """处理潜在的孤儿流（有 ClientQueues 但没有 Decoder）

@@ -337,6 +337,7 @@ class ClientQueues:
 
     def set_task(self, task: Optional[CleaningTask]) -> None:
         self.task = task
+        self.task_started_at: float = time.time() if task is not None else 0.0
 
     def get_task(self) -> Optional[CleaningTask]:
         return self.task

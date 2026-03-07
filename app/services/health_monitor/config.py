@@ -26,6 +26,7 @@ class HealthMonitorConfig:
     reconnect_interval: float = 5.0
     max_reconnect_attempts: int = 5
     orphan_timeout: float = 30.0
+    task_max_duration: float = 7200.0  # 任务最大运行时长（秒），0 表示不限制
 
     @classmethod
     def from_yaml(cls, config_path: Optional[Path] = None) -> "HealthMonitorConfig":
@@ -63,6 +64,7 @@ class HealthMonitorConfig:
                 reconnect_interval=monitor_config.get("reconnect_interval", 5.0),
                 max_reconnect_attempts=monitor_config.get("max_reconnect_attempts", 5),
                 orphan_timeout=monitor_config.get("orphan_timeout", 30.0),
+                task_max_duration=monitor_config.get("task_max_duration", 7200.0),
             )
 
             # INFO级别显示简洁信息
