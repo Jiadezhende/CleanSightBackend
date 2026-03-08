@@ -133,9 +133,14 @@ class AlarmPersistenceStrategy:
         url = settings.alarm_report_url
 
         stage = alarm_info.get("stage", "")
+        step_id = self.STAGE_TO_STEP_ID.get(stage)
+        if step_id is None:
+            logger.error("未知的 stage '%s'，跳过告警上报", stage)
+            return False
+
         payload = {
             "task_id": alarm_info.get("task_id", 0),
-            "step_id": self.STAGE_TO_STEP_ID.get(stage, 0),
+            "step_id": step_id,
             "alarm_type": alarm_info.get("alarm_type", "流程违规"),
             "alarm_level": alarm_info.get("alarm_level", "high"),
             "alarm_message": alarm_info.get("alarm_message", "AI推理检测到异常"),
