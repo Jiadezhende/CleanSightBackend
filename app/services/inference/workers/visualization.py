@@ -16,8 +16,11 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import subprocess
+
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from app.services.inference.data_models import (
     DetectionOutput,
@@ -255,6 +258,113 @@ class FixedVisualizer:
     支持多种可视化类型：BBox、Segmentation、Keypoint
     """
 
+    # 类级别缓存字体，避免重复加载
+    _font_cache: Dict[int, Any] = {}
+
+    @classmethod
+    def _get_font(cls, size: int = 20) -> ImageFont.FreeTypeFont:
+        """获取支持中文的粗体字体（带缓存），兼容 Windows / Ubuntu。"""
+        if size not in cls._font_cache:
+            # 优先粗体，再回退常规体（Windows + Ubuntu 常见路径）
+            font_paths = [
+                # Windows
+                "C:/Windows/Fonts/msyhbd.ttc",     # 微软雅黑 Bold
+                "C:/Windows/Fonts/msyh.ttc",       # 微软雅黑
+                "C:/Windows/Fonts/simsun.ttc",     # 宋体
+                # Ubuntu / Debian (fonts-noto-cjk)
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                # Ubuntu (fonts-wqy-zenhei / fonts-wqy-microhei)
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                # Ubuntu (fonts-droid-fallback)
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            ]
+            for fp in font_paths:
+                try:
+                    cls._font_cache[size] = ImageFont.truetype(fp, size)
+                    break
+                except (IOError, OSError):
+                    continue
+            else:
+                # 兜底：用 fc-match 动态查找（仅 Linux）
+                cls._font_cache[size] = cls._fc_match_font(size)
+        return cls._font_cache[size]
+
+    @classmethod
+    def _fc_match_font(cls, size: int) -> Any:
+        """Linux 兜底：通过 fc-match 查找系统中文字体。"""
+        try:
+            result = subprocess.run(
+                ["fc-match", "-f", "%{file}", ":lang=zh"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return ImageFont.truetype(result.stdout.strip(), size)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+        logger.warning("[FixedVisualizer] 未找到中文字体，中文可能无法正常显示")
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _put_text(
+        frame: np.ndarray,
+        text: str,
+        org: tuple,
+        font_size: int,
+        color: tuple,
+        anchor: str = "lt",
+    ) -> None:
+        """使用 PIL 在帧上绘制文本（支持中文）。
+
+        Args:
+            frame: BGR numpy 数组（原地修改）
+            text: 要绘制的文本
+            org: 锚点坐标 (x, y)
+            font_size: 字体大小（像素）
+            color: BGR 颜色元组
+            anchor: PIL 文本锚点，如 "lt"(左上), "mt"(水平居中-顶), "mm"(完全居中)
+        """
+        pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        font = FixedVisualizer._get_font(font_size)
+        # PIL 使用 RGB，cv2 使用 BGR
+        rgb_color = (color[2], color[1], color[0])
+        draw.text(org, text, font=font, fill=rgb_color, anchor=anchor)
+        frame[:] = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+    @staticmethod
+    def _get_text_size(text: str, font_size: int) -> tuple:
+        """获取文本渲染尺寸 (width, height)。"""
+        font = FixedVisualizer._get_font(font_size)
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    @staticmethod
+    def _draw_rounded_rect(
+        frame: np.ndarray,
+        pt1: tuple,
+        pt2: tuple,
+        color: tuple,
+        radius: int = 6,
+        alpha: float = 0.7,
+    ) -> None:
+        """绘制半透明圆角矩形背景。"""
+        x1, y1 = pt1
+        x2, y2 = pt2
+        overlay = frame.copy()
+        # 填充主体矩形 + 四角圆形实现圆角效果
+        cv2.rectangle(overlay, (x1 + radius, y1), (x2 - radius, y2), color, -1)
+        cv2.rectangle(overlay, (x1, y1 + radius), (x2, y2 - radius), color, -1)
+        for cx, cy in [(x1 + radius, y1 + radius), (x2 - radius, y1 + radius),
+                       (x1 + radius, y2 - radius), (x2 - radius, y2 - radius)]:
+            cv2.circle(overlay, (cx, cy), radius, color, -1)
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, dst=frame)
+
     def render(
         self,
         frame: np.ndarray,
@@ -297,26 +407,31 @@ class FixedVisualizer:
         return annotated
 
     def _draw_bboxes(self, frame: np.ndarray, items: List["VisItem"]):
+        FONT_SIZE = 16
+        PAD = 4
         for item in items:
             if item.bbox is None:
                 continue
             x1, y1, x2, y2 = item.bbox
             cv2.rectangle(frame, (x1, y1), (x2, y2), item.color, 2)
             if item.label:
-                (label_w, label_h), _ = cv2.getTextSize(
-                    item.label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-                )
-                label_y = max(y1 - 10, label_h + 5)
-                cv2.rectangle(
+                label_w, label_h = self._get_text_size(item.label, FONT_SIZE)
+                # 标签背景紧贴检测框顶部上方，水平居中于检测框
+                box_cx = (x1 + x2) // 2
+                bg_w = label_w + PAD * 2
+                bg_h = label_h + PAD * 2
+                bg_top = max(y1 - bg_h - 2, 0)
+                bg_left = max(box_cx - bg_w // 2, 0)
+                self._draw_rounded_rect(
                     frame,
-                    (x1, label_y - label_h - 5),
-                    (x1 + label_w + 6, label_y + 2),
-                    item.color,
-                    -1,
+                    (bg_left, bg_top),
+                    (bg_left + bg_w, bg_top + bg_h),
+                    item.color, radius=4, alpha=0.85,
                 )
-                cv2.putText(
-                    frame, item.label, (x1 + 3, label_y - 3),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA,
+                self._put_text(
+                    frame, item.label,
+                    (bg_left + bg_w // 2, bg_top + bg_h // 2),
+                    FONT_SIZE, (255, 255, 255), anchor="mm",
                 )
 
     def _draw_masks(self, frame: np.ndarray, items: List["VisItem"]):
@@ -331,10 +446,10 @@ class FixedVisualizer:
             )
             cv2.drawContours(frame, contours, -1, item.color, 2)
             if contours and item.label:
-                x, y, _, _ = cv2.boundingRect(contours[0])
-                cv2.putText(
-                    frame, item.label, (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, item.color, 1, cv2.LINE_AA,
+                x, y, w, _ = cv2.boundingRect(contours[0])
+                self._put_text(
+                    frame, item.label, (x + w // 2, y - 10),
+                    16, item.color, anchor="mb",
                 )
 
     def _draw_keypoints(self, frame: np.ndarray, items: List["VisItem"]):
@@ -365,21 +480,30 @@ class FixedVisualizer:
         color: tuple,
         position: str = "top-right",
     ):
+        FONT_SIZE = 20
         height, width = frame.shape[:2]
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale, thickness, padding = 0.6, 2, 10
-        (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
+        padding = 12
+        text_w, text_h = self._get_text_size(text, FONT_SIZE)
+        bg_w = text_w + padding * 2
+        bg_h = text_h + padding * 2
         if position == "top-right":
-            x, y = width - text_w - padding, padding + text_h
+            bg_left, bg_top = width - bg_w - 8, 8
         elif position == "top-left":
-            x, y = padding, padding + text_h
+            bg_left, bg_top = 8, 8
         elif position == "bottom-right":
-            x, y = width - text_w - padding, height - padding
+            bg_left, bg_top = width - bg_w - 8, height - bg_h - 8
         else:  # bottom-left
-            x, y = padding, height - padding
-        bg = 5
-        cv2.rectangle(frame, (x - bg, y - text_h - bg), (x + text_w + bg, y + bg), (0, 0, 0), -1)
-        cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+            bg_left, bg_top = 8, height - bg_h - 8
+        self._draw_rounded_rect(
+            frame, (bg_left, bg_top), (bg_left + bg_w, bg_top + bg_h),
+            (0, 0, 0), radius=8, alpha=0.6,
+        )
+        # 文字居中
+        self._put_text(
+            frame, text,
+            (bg_left + bg_w // 2, bg_top + bg_h // 2),
+            FONT_SIZE, color, anchor="mm",
+        )
 
     def _draw_global_info(
         self,
@@ -387,28 +511,40 @@ class FixedVisualizer:
         stage: str,
         temporal_events: Optional[List[str]] = None,
     ):
+        FONT_SIZE = 18
         height, width = frame.shape[:2]
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale, thickness = 0.6, 2
-        white = (255, 255, 255)
-        cv2.putText(
-            frame, f"Stage: {stage}", (10, height - 60),
-            font, font_scale, white, thickness, cv2.LINE_AA,
+        padding = 10
+
+        # 左下角信息栏：Stage + 时间
+        info_line = f"Stage: {stage}  |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        info_w, info_h = self._get_text_size(info_line, FONT_SIZE)
+        bg_w = info_w + padding * 2
+        bg_h = info_h + padding * 2
+        bg_top = height - bg_h - 8
+        self._draw_rounded_rect(
+            frame, (8, bg_top), (8 + bg_w, bg_top + bg_h),
+            (0, 0, 0), radius=8, alpha=0.6,
         )
-        cv2.putText(
-            frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), (10, height - 30),
-            font, font_scale, white, thickness, cv2.LINE_AA,
+        self._put_text(
+            frame, info_line,
+            (8 + bg_w // 2, bg_top + bg_h // 2),
+            FONT_SIZE, (255, 255, 255), anchor="mm",
         )
+
+        # 右下角事件栏
         if temporal_events:
             events_text = " | ".join(temporal_events[:2])
-            (event_w, event_h), _ = cv2.getTextSize(events_text, font, font_scale, thickness)
-            cv2.rectangle(
-                frame,
-                (width - event_w - 20, height - event_h - 20),
-                (width - 10, height - 10),
-                (0, 0, 0), -1,
+            event_w, event_h = self._get_text_size(events_text, FONT_SIZE)
+            ebg_w = event_w + padding * 2
+            ebg_h = event_h + padding * 2
+            ebg_top = height - ebg_h - 8
+            ebg_left = width - ebg_w - 8
+            self._draw_rounded_rect(
+                frame, (ebg_left, ebg_top), (ebg_left + ebg_w, ebg_top + ebg_h),
+                (0, 0, 0), radius=8, alpha=0.6,
             )
-            cv2.putText(
-                frame, events_text, (width - event_w - 15, height - 15),
-                font, font_scale, (0, 165, 255), thickness, cv2.LINE_AA,
+            self._put_text(
+                frame, events_text,
+                (ebg_left + ebg_w // 2, ebg_top + ebg_h // 2),
+                FONT_SIZE, (0, 165, 255), anchor="mm",
             )
