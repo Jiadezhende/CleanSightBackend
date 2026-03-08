@@ -187,13 +187,18 @@ class DatabaseHelper:
 
     @staticmethod
     def create_test_task(task_id: int = 0, source_ip: str = "test") -> bool:
-        """创建测试任务（如果不存在）"""
+        """创建测试任务（如果不存在）
+
+        Returns:
+            True  — 新创建了任务
+            False — 任务已存在或创建失败
+        """
         db = next(get_db())
         try:
             existing = db.query(DBTask).filter(DBTask.task_id == task_id).first()
             if existing:
                 print(f"✅ 任务 {task_id} 已存在")
-                return True
+                return False
 
             now_ts = int(time.time())
             new_task = DBTask(
