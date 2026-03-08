@@ -311,30 +311,21 @@ class FixedVisualizer:
         return ImageFont.load_default()
 
     @staticmethod
-    def _put_text(
-        frame: np.ndarray,
-        text: str,
-        org: tuple,
-        font_size: int,
-        color: tuple,
-        anchor: str = "lt",
-    ) -> None:
-        """使用 PIL 在帧上绘制文本（支持中文）。
+    def _flush_texts(frame: np.ndarray, text_cmds: list) -> None:
+        """批量绘制所有文本，仅做一次 BGR↔PIL 转换。
 
         Args:
             frame: BGR numpy 数组（原地修改）
-            text: 要绘制的文本
-            org: 锚点坐标 (x, y)
-            font_size: 字体大小（像素）
-            color: BGR 颜色元组
-            anchor: PIL 文本锚点，如 "lt"(左上), "mt"(水平居中-顶), "mm"(完全居中)
+            text_cmds: [(org, text, font_size, bgr_color, anchor), ...]
         """
+        if not text_cmds:
+            return
         pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil_img)
-        font = FixedVisualizer._get_font(font_size)
-        # PIL 使用 RGB，cv2 使用 BGR
-        rgb_color = (color[2], color[1], color[0])
-        draw.text(org, text, font=font, fill=rgb_color, anchor=anchor)
+        for org, text, font_size, color, anchor in text_cmds:
+            font = FixedVisualizer._get_font(font_size)
+            rgb_color = (color[2], color[1], color[0])
+            draw.text(org, text, font=font, fill=rgb_color, anchor=anchor)
         frame[:] = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
     @staticmethod
@@ -387,12 +378,14 @@ class FixedVisualizer:
             return frame
 
         annotated = frame.copy()
+        # 文本指令收集器：所有 _draw_* 方法往这里追加，最后统一 flush
+        text_cmds: list = []
 
         for vis_data in vis_data_list:
             if vis_data.type == VisualizationType.BBOX:
-                self._draw_bboxes(annotated, vis_data.items)
+                self._draw_bboxes(annotated, vis_data.items, text_cmds)
             elif vis_data.type == VisualizationType.MASK:
-                self._draw_masks(annotated, vis_data.items)
+                self._draw_masks(annotated, vis_data.items, text_cmds)
             elif vis_data.type == VisualizationType.KEYPOINT:
                 self._draw_keypoints(annotated, vis_data.items)
 
@@ -401,12 +394,16 @@ class FixedVisualizer:
                 vis_data.status_text,
                 vis_data.status_color,
                 vis_data.status_position,
+                text_cmds,
             )
 
-        self._draw_global_info(annotated, stage, temporal_events)
+        self._draw_global_info(annotated, stage, temporal_events, text_cmds)
+
+        # 一次性 BGR→PIL→BGR 绘制所有文本
+        self._flush_texts(annotated, text_cmds)
         return annotated
 
-    def _draw_bboxes(self, frame: np.ndarray, items: List["VisItem"]):
+    def _draw_bboxes(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
         FONT_SIZE = 16
         PAD = 4
         for item in items:
@@ -416,7 +413,6 @@ class FixedVisualizer:
             cv2.rectangle(frame, (x1, y1), (x2, y2), item.color, 2)
             if item.label:
                 label_w, label_h = self._get_text_size(item.label, FONT_SIZE)
-                # 标签背景紧贴检测框顶部上方，水平居中于检测框
                 box_cx = (x1 + x2) // 2
                 bg_w = label_w + PAD * 2
                 bg_h = label_h + PAD * 2
@@ -428,13 +424,12 @@ class FixedVisualizer:
                     (bg_left + bg_w, bg_top + bg_h),
                     item.color, radius=4, alpha=0.85,
                 )
-                self._put_text(
-                    frame, item.label,
+                text_cmds.append((
                     (bg_left + bg_w // 2, bg_top + bg_h // 2),
-                    FONT_SIZE, (255, 255, 255), anchor="mm",
-                )
+                    item.label, FONT_SIZE, (255, 255, 255), "mm",
+                ))
 
-    def _draw_masks(self, frame: np.ndarray, items: List["VisItem"]):
+    def _draw_masks(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
         for item in items:
             if item.mask is None:
                 continue
@@ -447,10 +442,10 @@ class FixedVisualizer:
             cv2.drawContours(frame, contours, -1, item.color, 2)
             if contours and item.label:
                 x, y, w, _ = cv2.boundingRect(contours[0])
-                self._put_text(
-                    frame, item.label, (x + w // 2, y - 10),
-                    16, item.color, anchor="mb",
-                )
+                text_cmds.append((
+                    (x + w // 2, y - 10),
+                    item.label, 16, item.color, "mb",
+                ))
 
     def _draw_keypoints(self, frame: np.ndarray, items: List["VisItem"]):
         for item in items:
@@ -479,6 +474,7 @@ class FixedVisualizer:
         text: str,
         color: tuple,
         position: str = "top-right",
+        text_cmds: Optional[list] = None,
     ):
         FONT_SIZE = 20
         height, width = frame.shape[:2]
@@ -498,18 +494,18 @@ class FixedVisualizer:
             frame, (bg_left, bg_top), (bg_left + bg_w, bg_top + bg_h),
             (0, 0, 0), radius=8, alpha=0.6,
         )
-        # 文字居中
-        self._put_text(
-            frame, text,
-            (bg_left + bg_w // 2, bg_top + bg_h // 2),
-            FONT_SIZE, color, anchor="mm",
-        )
+        if text_cmds is not None:
+            text_cmds.append((
+                (bg_left + bg_w // 2, bg_top + bg_h // 2),
+                text, FONT_SIZE, color, "mm",
+            ))
 
     def _draw_global_info(
         self,
         frame: np.ndarray,
         stage: str,
         temporal_events: Optional[List[str]] = None,
+        text_cmds: Optional[list] = None,
     ):
         FONT_SIZE = 18
         height, width = frame.shape[:2]
@@ -525,11 +521,11 @@ class FixedVisualizer:
             frame, (8, bg_top), (8 + bg_w, bg_top + bg_h),
             (0, 0, 0), radius=8, alpha=0.6,
         )
-        self._put_text(
-            frame, info_line,
-            (8 + bg_w // 2, bg_top + bg_h // 2),
-            FONT_SIZE, (255, 255, 255), anchor="mm",
-        )
+        if text_cmds is not None:
+            text_cmds.append((
+                (8 + bg_w // 2, bg_top + bg_h // 2),
+                info_line, FONT_SIZE, (255, 255, 255), "mm",
+            ))
 
         # 右下角事件栏
         if temporal_events:
@@ -543,8 +539,8 @@ class FixedVisualizer:
                 frame, (ebg_left, ebg_top), (ebg_left + ebg_w, ebg_top + ebg_h),
                 (0, 0, 0), radius=8, alpha=0.6,
             )
-            self._put_text(
-                frame, events_text,
-                (ebg_left + ebg_w // 2, ebg_top + ebg_h // 2),
-                FONT_SIZE, (0, 165, 255), anchor="mm",
-            )
+            if text_cmds is not None:
+                text_cmds.append((
+                    (ebg_left + ebg_w // 2, ebg_top + ebg_h // 2),
+                    events_text, FONT_SIZE, (0, 165, 255), "mm",
+                ))
