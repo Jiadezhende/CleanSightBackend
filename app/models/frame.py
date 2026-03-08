@@ -65,16 +65,16 @@ from app.database import Base
 
 
 class HLSSegment(Base):
+    """file_path 表 ORM（无代码平台托管，_id 是平台主键 varchar）"""
+
     __tablename__ = "file_path"
 
-    _id = Column(Integer, primary_key=True, autoincrement=True)
+    _id = Column(String, primary_key=True)  # 平台主键 (varchar)
+    id = Column(BigInteger, nullable=False, index=True)  # 业务数字 ID
     client_id = Column(String, index=True)
-    task_id = Column(Integer, index=True)  # 匹配 DBTask.task_id (str)
-    segment_path = Column(
-        String
-    )  # 文件系统路径，如 /database/client_1/task_123/hls/segment_001.mp4
-    playlist_path = Column(String)  # M3U8 文件路径
-    # 使用 UNIX 时间戳（BIGINT）存储，避免时区/类型不匹配
+    task_id = Column(BigInteger, index=True)
+    segment_path = Column(String)
+    playlist_path = Column(String)
     start_ts = Column(BigInteger)
     end_ts = Column(BigInteger)
     created_at = Column(BigInteger, default=lambda: int(time.time()))

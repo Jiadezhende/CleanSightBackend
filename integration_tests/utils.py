@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -185,16 +187,23 @@ class DatabaseHelper:
 
     @staticmethod
     def create_test_task(task_id: int = 0, source_ip: str = "test") -> bool:
-        """创建测试任务（如果不存在）"""
+        """创建测试任务（如果不存在）
+
+        Returns:
+            True  — 新创建了任务
+            False — 任务已存在或创建失败
+        """
         db = next(get_db())
         try:
             existing = db.query(DBTask).filter(DBTask.task_id == task_id).first()
             if existing:
                 print(f"✅ 任务 {task_id} 已存在")
-                return True
+                return False
 
             now_ts = int(time.time())
             new_task = DBTask(
+                _id=uuid.uuid4().hex,  # 平台主键
+                cls_id="691dd1a8279461135967c843",  # 平台 class 标识 (clean_task)
                 task_id=task_id,
                 source_ip=source_ip,
                 current_step="0",
@@ -237,17 +246,41 @@ class DatabaseHelper:
 
     @staticmethod
     def cleanup_test_task(task_id: int):
-        """清理测试任务（可选）"""
+        """清理测试任务"""
         db = next(get_db())
         try:
-            db.execute(text(f"DELETE FROM task WHERE task_id = {task_id}"))
+            deleted = (
+                db.query(DBTask).filter(DBTask.task_id == task_id).delete()
+            )
             db.commit()
-            print(f"✅ 清理测试任务 {task_id}")
+            if deleted:
+                print(f"✅ 清理测试任务 {task_id}")
+            else:
+                print(f"⚠️ 测试任务 {task_id} 不存在，无需清理")
         except Exception as e:
             db.rollback()
             print(f"⚠️ 清理测试任务失败: {e}")
         finally:
             db.close()
+
+    @staticmethod
+    @contextmanager
+    def test_task(task_id: int = 0, source_ip: str = "test"):
+        """上下文管理器：创建测试任务，退出时自动清理
+
+        用法::
+
+            with DatabaseHelper.test_task(task_id=99) as tid:
+                # 测试逻辑...
+                pass
+            # 退出 with 块后自动删除该任务
+        """
+        created = DatabaseHelper.create_test_task(task_id, source_ip)
+        try:
+            yield task_id
+        finally:
+            if created:
+                DatabaseHelper.cleanup_test_task(task_id)
 
 
 class APIClient:

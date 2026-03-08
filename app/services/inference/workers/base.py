@@ -103,23 +103,7 @@ class MultiModelWorkerPool:
         frames = [req.frame for req in batch]
 
         # 构造上下文（每帧一个）
-        contexts = []
-        for req in batch:
-            # 尝试从 frame_data 获取 task 信息（如果可用）
-            task_obj = None
-            if (
-                hasattr(req.frame_data, "inference_result")
-                and req.frame_data.inference_result
-            ):
-                task_obj = req.frame_data.inference_result.get("task")
-
-            ctx = {
-                "client_id": req.client_id,
-                "stage": req.stage,
-                "task": task_obj,  # 可能为 None
-                "results": {},  # 存储各模型的结果
-            }
-            contexts.append(ctx)
+        contexts = [{"client_id": req.client_id} for req in batch]
 
         # 并行执行所有模型的 infer_batch
         if self.use_cuda_stream:
@@ -243,8 +227,6 @@ class MultiModelWorkerPool:
                 batch_res = model.infer_batch(frames, contexts)
                 for i in range(min(len(batch_res), n)):
                     merged[i][model.name] = batch_res[i]
-                    # 更新 context，供后续依赖的模型使用
-                    contexts[i]["results"][model.name] = batch_res[i]
 
                 # 记录推理延迟（成功）
                 elapsed_ms = (time.time() - start_time) * 1000
