@@ -121,13 +121,21 @@ class AlarmPersistenceStrategy:
         """检查是否需要HTTP上报（需要task_id和stage）"""
         return alarm_info.get("task_id") and alarm_info.get("stage") # type: ignore
 
+    # FIXME: 硬编码的 stage → step_id 映射，应从 clean_step 表动态查询
+    #        当前 clean_step 表为空，暂用硬编码过渡
+    STAGE_TO_STEP_ID: Dict[str, int] = {
+        "LEAK": 1,
+        "CLEAN": 2,
+    }
+
     def _send_alarm_http(self, alarm_info: Dict[str, Any]) -> bool:
         """HTTP上报告警到外部数据库（单次尝试，重试由GuardedExecutor处理）"""
         url = settings.alarm_report_url
 
+        stage = alarm_info.get("stage", "")
         payload = {
             "task_id": alarm_info.get("task_id", 0),
-            "step_id": alarm_info.get("stage", ""),
+            "step_id": self.STAGE_TO_STEP_ID.get(stage, 0),
             "alarm_type": alarm_info.get("alarm_type", "流程违规"),
             "alarm_level": alarm_info.get("alarm_level", "high"),
             "alarm_message": alarm_info.get("alarm_message", "AI推理检测到异常"),
