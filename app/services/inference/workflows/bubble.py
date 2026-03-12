@@ -1,0 +1,161 @@
+"""气泡检测任务"""
+
+import logging
+import time
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+
+from app.services.client.state import ClientState
+from app.services.inference.workflows.infer_workflow import YOLOWorkflow
+from app.services.inference.data_models import (
+    AlarmInfo,
+    DetectionOutput,
+    VisualizationData,
+    VisItem,
+    VisualizationType,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class BubbleDetectionTask(YOLOWorkflow):
+    """气泡检测任务
+
+    时序逻辑：连续3帧检测到气泡才触发事件
+    告警逻辑：触发事件时上报告警
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        conf_threshold: float = 0.5,
+        iou_threshold: float = 0.45,
+        enabled: bool = True,
+    ):
+        super().__init__(
+            name="bubble",
+            model_path=model_path,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+            enabled=enabled,
+        )
+
+    # ====== 1. 检测（覆盖 infer_batch 以添加业务字段）======
+
+    def infer_batch(
+        self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
+    ) -> List[DetectionOutput]:
+        """批量气泡检测，利用 YOLO 批量推理接口"""
+        try:
+            outputs = self._run_yolo_batch(frames)
+            for output in outputs:
+                output.success = True
+                output.bubble_detected = len(output.detections) > 0
+                output.bubble_count = len(output.detections)
+            return outputs
+        except Exception as e:
+            logger.error(f"[BubbleTask] Batch inference failed: {e}, fallback to single", exc_info=True)
+            results = []
+            for f, c in zip(frames, contexts):
+                try:
+                    output = self.infer(f, c)
+                    output.bubble_detected = len(output.detections) > 0
+                    output.bubble_count = len(output.detections)
+                    results.append(output)
+                except Exception as err:
+                    results.append(DetectionOutput(
+                        detections=[],
+                        metadata={"error": str(err)},
+                        timestamp=time.time(),
+                        success=False,
+                        error=str(err),
+                    ))
+            return results
+
+    # ====== 2. 时序分析（含边沿去抖 + 告警评估） ======
+
+    def analyze_temporal(
+        self, window: List[DetectionOutput], state: ClientState,
+    ) -> Tuple[List[str], List[AlarmInfo]]:
+        """气泡时序分析：连续3帧触发事件，边沿触发告警"""
+        if not window:
+            return [], []
+
+        # ① 计算时序特征（只做一次）
+        consecutive = 0
+        for output in reversed(window):
+            if len(output.detections) > 0:
+                consecutive += 1
+            else:
+                break
+
+        # ② 更新检测指标计数器
+        latest = window[-1]
+        if len(latest.detections) > 0:
+            state.increment_counter("bubble_total", delta=len(latest.detections))
+
+        # ③ 事件列表（前端展示）
+        is_triggered = consecutive >= 3
+        events = [f"连续{consecutive}帧检测到气泡"] if is_triggered else []
+
+        # ④ 边沿触发：只在 0→1 跳变时投递告警
+        alarms: List[AlarmInfo] = []
+        was_alarming = state.get_counter("bubble_alarming", 0) > 0
+
+        if is_triggered and not was_alarming:
+            # rising edge → 发出告警
+            state.increment_counter("bubble_alarming")
+            state.increment_counter("bubble_alarm_count")
+            alarms.append(AlarmInfo(
+                alarm_type="process_violation",
+                alarm_level="high",
+                alarm_message="Bubble anomaly detected (3 consecutive frames)",
+                metadata={
+                    "consecutive_frames": consecutive,
+                    "bubble_count": len(latest.detections),
+                },
+            ))
+        elif not is_triggered and was_alarming:
+            # falling edge → 复位，下次可重新触发
+            state.reset_counter("bubble_alarming")
+
+        return events, alarms
+
+    # ====== 3. 可视化数据准备 ======
+
+    def prepare_visualization_data(
+        self, output: DetectionOutput,
+    ) -> VisualizationData:
+        """准备气泡可视化数据"""
+        items = []
+        for det in output.detections:
+            if det.class_name == "bubble_debug_box":
+                color = (255, 0, 255)  # 洋红色（调试框）
+            else:
+                color = (0, 255, 255)  # 黄色（正常气泡）
+
+            items.append(VisItem(
+                bbox=det.bbox,
+                label=f"{det.class_name} {det.confidence:.2f}",
+                confidence=det.confidence,
+                color=color,
+            ))
+
+        bubble_count = len(output.detections)
+        detected = bubble_count > 0
+
+        if detected:
+            status_text = f"Bubbles: {bubble_count}"
+            status_color = (0, 165, 255) if bubble_count > 5 else (0, 255, 255)
+        else:
+            status_text = "No Bubbles"
+            status_color = (0, 255, 0)
+
+        return VisualizationData(
+            type=VisualizationType.BBOX,
+            items=items,
+            status_text=status_text,
+            status_color=status_color,
+            status_position="top-right",
+        )

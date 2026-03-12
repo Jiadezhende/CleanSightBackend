@@ -8,38 +8,44 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import defaultdict, deque
-from typing import TYPE_CHECKING, Deque, Dict, List, Optional
+from typing import Deque, Dict, List, Optional
 
+from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.models import InferenceRequest
 
-if TYPE_CHECKING:
-    from app.services.client import ClientQueues
+logger = logging.getLogger(__name__)
 
 
 class StageAwareDispatcher:
-    """Stage感知的帧调度器。
+    """Stage感知的帧调度器（直接引用 ClientManager）。
 
     职责：
     - 轮询所有客户端的 ca_ready 队列
     - 按 stage 分组批量取帧
     - 保证流间公平（Round-Robin）
+    
+    改进点：
+    - 直接引用全局 ClientManager，实时获取客户端列表
+    - 无需手动刷新，自动同步客户端变化
+    - 新客户端加入或离开无延迟
     """
 
     def __init__(
         self,
-        client_queues_map: Dict[str, ClientQueues],
         max_batch_per_stage: int = 8,
         fetch_interval: float = 0.01,  # 10ms 轮询间隔
+        client_manager_instance: Optional["ClientManager"] = None,
     ):
         """
         Args:
-            client_queues_map: {client_id: ClientQueues}
             max_batch_per_stage: 每个 stage 最大 batch 大小
             fetch_interval: 轮询间隔（秒）
+            client_manager_instance: ClientManager 实例（可选，用于依赖注入测试）
         """
-        self.client_queues_map = client_queues_map
+        self._client_manager = client_manager_instance or client_manager
         self.max_batch_per_stage = max_batch_per_stage
         self.fetch_interval = fetch_interval
 
@@ -64,16 +70,20 @@ class StageAwareDispatcher:
             return
 
         self._stop_event.clear()
-        self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
+        self._dispatch_thread = threading.Thread(
+            target=self._dispatch_loop, daemon=True
+        )
         self._dispatch_thread.start()
-        print(f"[StageAwareDispatcher] 已启动 (interval={self.fetch_interval*1000:.1f}ms)")
+        logger.debug(
+            "[StageAwareDispatcher] Started | interval=%.1fms", self.fetch_interval*1000
+        )
 
     def stop(self):
         """停止调度线程"""
         self._stop_event.set()
         if self._dispatch_thread is not None:
             self._dispatch_thread.join(timeout=2.0)
-        print("[StageAwareDispatcher] 已停止")
+        logger.debug("[StageAwareDispatcher] Stopped")
 
     def _dispatch_loop(self):
         """调度循环：轮询所有客户端，按 stage 分组入队"""
@@ -93,21 +103,19 @@ class StageAwareDispatcher:
         """一轮调度：轮询所有客户端，取帧并按 stage 分组。
 
         容错设计：
-        - 使用 list() 创建客户端字典的快照，避免迭代时字典被修改
-        - 客户端动态添加/移除不会导致迭代异常
+        - 动态从 ClientManager 获取最新客户端列表（实时同步）
+        - 客户端动态添加/移除自动生效，无延迟
         - 队列为空时跳过，不影响其他客户端
         """
-        # 重要：使用 list() 创建快照，防止迭代时客户端字典被修改
-        # 场景：客户端在推理过程中被动态添加或移除
-        for client_id, cq in list(self.client_queues_map.items()):
+        # 动态获取客户端列表（实时同步，无需刷新）
+        # ClientManager.get_all_clients() 返回字典副本，迭代安全
+        clients = self._client_manager.get_all_clients()
+        for client_id, cq in clients.items():
             # 从 ca_ready 队列取一帧（FIFO，保证公平）
-            if not cq.ca_ready:
-                continue
-
-            try:
-                frame_data = cq.ca_ready.popleft()
-            except IndexError:
-                # 并发场景：其他线程已取走帧
+            # 使用封装方法，避免直接访问内部队列
+            frame_data = cq.pop_ca_ready()
+            if frame_data is None:
+                # 队列为空或并发场景下被其他线程取走
                 continue
 
             # 获取该客户端当前的 stage
@@ -149,25 +157,50 @@ class StageAwareDispatcher:
         return "LEAK"
 
     def get_batch_for_stage(
-        self, stage: str, max_size: int = None
+        self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore
     ) -> List[InferenceRequest]:
-        """获取指定 stage 的一个 batch。
+        """获取指定 stage 的一个 batch（支持超时等待）。
+
+        策略：
+        1. 立即检查队列，如果有 max_size 个数据，立即返回
+        2. 否则，等待 timeout_ms，期间持续检查
+        3. 超时后，返回当前已有的数据（可能不满）
 
         Args:
             stage: Stage 名称（LEAK/CLEAN/etc.）
             max_size: 最大 batch 大小，默认使用 self.max_batch_per_stage
+            timeout_ms: 超时时间（毫秒），默认 3ms（针对小并发优化）
 
         Returns:
             InferenceRequest 列表（可能为空）
         """
+        import time
+
         if max_size is None:
             max_size = self.max_batch_per_stage
 
         batch: List[InferenceRequest] = []
-        with self._lock:
-            queue = self._stage_queues[stage]
-            for _ in range(min(max_size, len(queue))):
-                batch.append(queue.popleft())
+        start_time = time.time()
+
+        while len(batch) < max_size:
+            with self._lock:
+                queue = self._stage_queues[stage]
+                # 取出当前可用的数据
+                available = min(max_size - len(batch), len(queue))
+                for _ in range(available):
+                    batch.append(queue.popleft())
+
+            # 批次已满，立即返回
+            if len(batch) >= max_size:
+                break
+
+            # 检查超时
+            elapsed_ms = (time.time() - start_time) * 1000
+            if elapsed_ms >= timeout_ms:
+                break
+
+            # 短暂休眠，避免空转
+            time.sleep(0.001)  # 1ms
 
         return batch
 

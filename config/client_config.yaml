@@ -1,6 +1,6 @@
 # 客户端队列配置
 # 用于管理每个客户端的帧缓冲队列
-# 注意：队列长度（rt_maxlen, ca_maxlen, ca_segment_len）和推理帧率（inference_fps）
+# 注意：队列长度（ca_maxlen, ca_segment_len）和推理帧率（inference_fps）
 #       统一从 inference_config.yaml 中读取
 
 frame:

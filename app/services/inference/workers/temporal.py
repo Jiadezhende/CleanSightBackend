@@ -1,186 +1,142 @@
-"""时序分析工作线程池。
+"""temporal.py - 时序分析工作线程池（定时轮询架构）。
 
 职责：
-- 从推理队列消费推理结果
-- 执行时序分析逻辑
-- 更新 ClientState
-- 生成前端消息
-- 投递到可视化队列
+- 按固定间隔（tick_interval）轮询所有活跃客户端
+- 读取 ClientQueues.slide_window 执行时序分析
+- 更新 ClientQueues.latest_temporal（events 列表）
+- 产出告警 → persistence + ClientQueues.alarm_log
 """
 
+import logging
 import threading
-from queue import Empty, Queue
-from typing import Any, Dict
+import time
+from typing import Any, Dict, List, Optional
 
 from app.services.client import client_manager
-from app.services.inference.models import (
-    FrontendMessage,
-    InferenceResult,
-    TemporalAnalysisPackage,
-    TemporalAnalysisResult,
-)
-from app.services.inference.components.temporal_analyzer import TemporalAnalyzer
+from app.services.inference.models import AlarmRecord
+
+logger = logging.getLogger(__name__)
 
 
 class TemporalWorker:
-    """时序分析工作线程。"""
+    """时序分析工作线程（定时轮询模式）。
+
+    独立于上游 InferenceLoop，按 tick_interval 遍历所有活跃客户端，
+    读取各自的 slide_window 执行时序分析。
+    """
 
     def __init__(
         self,
-        input_queue: Queue,  # 输入：推理结果
-        output_queue: Queue,  # 输出：时序分析后的数据包
-        analyzer: TemporalAnalyzer,
         stop_event: threading.Event,
         worker_id: int = 0,
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        tick_interval: float = 1.0,
     ):
-        """初始化时序分析工作线程。
-
-        Args:
-            input_queue: 推理结果队列
-            output_queue: 可视化数据包队列
-            analyzer: 时序分析器
-            stop_event: 停止事件
-            worker_id: 工作线程ID（用于调试）
-        """
-        self.input_queue = input_queue
-        self.output_queue = output_queue
-        self.analyzer = analyzer
         self.stop_event = stop_event
         self.worker_id = worker_id
+        self.stage_configs = stage_configs or {}
+        self.tick_interval = tick_interval
 
     def run(self):
-        """工作循环。"""
-        print(f"[TemporalWorker-{self.worker_id}] 已启动")
+        """工作循环：固定间隔轮询所有客户端。"""
+        logger.debug("[TemporalWorker-%d] Started (tick=%.1fs)", self.worker_id, self.tick_interval)
 
         while not self.stop_event.is_set():
+            tick_start = time.time()
             try:
-                # 1. 从队列获取推理结果（超时0.1秒）
-                try:
-                    result: InferenceResult = self.input_queue.get(timeout=0.1)
-                except Empty:
-                    continue
-
-                # 2. 获取客户端状态
-                if not client_manager.has_client(result.client_id):
-                    continue
-
-                cq = client_manager.get_client(result.client_id)
-                if cq is None:
-                    continue
-
-                # 3. 执行时序分析
-                temporal_result = self.analyzer.analyze(
-                    state=cq.state,
-                    result=result,
-                    current_timestamp=result.timestamp,
-                )
-
-                # 4. 生成前端消息
-                frontend_msg = self._create_frontend_message(result, temporal_result)
-
-                # 5. 组装数据包
-                data_package = TemporalAnalysisPackage(
-                    client_id=result.client_id,
-                    timestamp=result.timestamp,
-                    stage=result.stage,
-                    inference_result=result.result,
-                    temporal_result=temporal_result,
-                    frontend_message=frontend_msg,
-                    raw_frame=result.frame if result.frame is not None else cq.get_latest_frame(),
-                )
-
-                # 6. 投递到可视化队列
-                self.output_queue.put(data_package)
-
+                self._tick()
             except Exception as e:
-                print(f"[TemporalWorker-{self.worker_id}] 异常: {e}")
-                import traceback
+                logger.error("[TemporalWorker-%d] Tick exception: %s", self.worker_id, e, exc_info=True)
 
-                traceback.print_exc()
+            # 睡眠至下一个 tick
+            elapsed = time.time() - tick_start
+            sleep_time = max(0, self.tick_interval - elapsed)
+            if sleep_time > 0:
+                self.stop_event.wait(sleep_time)
 
-        print(f"[TemporalWorker-{self.worker_id}] 已停止")
+        logger.debug("[TemporalWorker-%d] Stopped", self.worker_id)
 
-    def _create_frontend_message(
-        self,
-        result: InferenceResult,
-        temporal: TemporalAnalysisResult,
-    ) -> FrontendMessage:
-        """生成前端消息。
+    def _tick(self):
+        """一次轮询：遍历所有活跃客户端执行时序分析。"""
+        all_clients = client_manager.get_all_clients()
+        for client_id, cq in all_clients.items():
+            try:
+                self._process_client(client_id, cq)
+            except Exception as e:
+                logger.error(
+                    "[TemporalWorker-%d] Error processing client %s: %s",
+                    self.worker_id, client_id, e, exc_info=True,
+                )
 
-        Args:
-            result: 推理结果
-            temporal: 时序分析结果
+    def _process_client(self, client_id: str, cq) -> None:
+        """处理单个客户端的时序分析。"""
+        stage = cq.state.get_stage()
+        stage_cfg = self.stage_configs.get(stage, {})
+        tasks = stage_cfg.get("models", [])
+        if not tasks:
+            return
 
-        Returns:
-            前端消息
-        """
-        # 提取检测结果
-        detections: Dict[str, bool] = {}
-        confidences: Dict[str, float] = {}
+        all_events: List[str] = []
+        all_alarms = []
 
-        for subtask_name, subtask_res in result.result.items():
-            if isinstance(subtask_res, dict):
-                detected_key = f"{subtask_name}_detected"
-                detections[subtask_name] = subtask_res.get(detected_key, False)
-                confidences[subtask_name] = subtask_res.get("confidence", 0.0)
+        for task in tasks:
+            window = cq.get_slide_window(task.name)
+            if not window:
+                continue
 
-        # 生成状态消息
-        status_msg = self._generate_status_message(temporal)
+            # 时序分析（含边沿去抖 + 告警评估），单一调用
+            events, alarms = task.analyze_temporal(window, cq.state)
+            all_events.extend(events)
+            all_alarms.extend(alarms)
 
-        return FrontendMessage(
-            client_id=result.client_id,
-            timestamp=result.timestamp,
-            stage=result.stage,
-            detections=detections,
-            confidences=confidences,
-            status_message=status_msg,
-            progress={
-                "current_step": result.stage,
-                "completed": temporal.step_completed,
-                "events": temporal.events,
-            },
-        )
+        # 更新 cq.latest_temporal（仅事件列表）
+        cq.set_latest_temporal(all_events)
 
-    def _generate_status_message(self, temporal: TemporalAnalysisResult) -> str:
-        """生成状态消息。
+        # 告警 → persistence + alarm_log
+        if all_alarms:
+            self._persist_and_log_alarms(all_alarms, cq, client_id, stage)
 
-        Args:
-            temporal: 时序分析结果
+    def _persist_and_log_alarms(
+        self, alarms: list, cq, client_id: str, stage: str
+    ) -> None:
+        """将告警入队 persistence + 写入 cq.alarm_log。"""
+        from app.services.persistence import persistence_manager
 
-        Returns:
-            状态消息字符串
-        """
-        if temporal.events:
-            # 有事件，显示最近的事件
-            return "; ".join(temporal.events)
-        elif temporal.step_completed:
-            return "步骤已完成"
-        else:
-            return "正在检测..."
+        task_id = cq.get_task_id()
+        for alarm in alarms:
+            # 持久化上报
+            persistence_manager.persist_alarm({
+                "task_id": task_id,
+                "stage": stage,
+                "client_id": client_id,
+                "alarm_type": alarm.alarm_type,
+                "alarm_level": alarm.alarm_level,
+                "alarm_message": alarm.alarm_message,
+                "detection_result": alarm.metadata if alarm.metadata else None,
+            })
+
+            # 内存告警日志
+            record = AlarmRecord(
+                alarm_type=alarm.alarm_type,
+                alarm_level=alarm.alarm_level,
+                alarm_message=alarm.alarm_message,
+                metadata=alarm.metadata or {},
+            )
+            cq.append_alarm_record(record)
 
 
 class TemporalWorkerPool:
-    """时序分析线程池。"""
+    """时序分析线程池（定时轮询模式）。"""
 
     def __init__(
         self,
-        input_queue: Queue,
-        output_queue: Queue,
-        analyzer: TemporalAnalyzer,
-        num_workers: int = 2,
+        num_workers: int = 1,
+        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        tick_interval: float = 1.0,
     ):
-        """初始化时序分析线程池。
-
-        Args:
-            input_queue: 推理结果队列
-            output_queue: 可视化数据包队列
-            analyzer: 时序分析器
-            num_workers: 工作线程数量
-        """
-        self.input_queue = input_queue
-        self.output_queue = output_queue
-        self.analyzer = analyzer
         self.num_workers = num_workers
+        self.stage_configs = stage_configs or {}
+        self.tick_interval = tick_interval
 
         self._stop_event = threading.Event()
         self._workers: list[threading.Thread] = []
@@ -189,11 +145,10 @@ class TemporalWorkerPool:
         """启动线程池。"""
         for i in range(self.num_workers):
             worker = TemporalWorker(
-                input_queue=self.input_queue,
-                output_queue=self.output_queue,
-                analyzer=self.analyzer,
                 stop_event=self._stop_event,
                 worker_id=i,
+                stage_configs=self.stage_configs,
+                tick_interval=self.tick_interval,
             )
 
             thread = threading.Thread(
@@ -204,7 +159,10 @@ class TemporalWorkerPool:
             thread.start()
             self._workers.append(thread)
 
-        print(f"[TemporalWorkerPool] 已启动 {self.num_workers} 个线程")
+        logger.info(
+            "[TemporalWorkerPool] Started %d workers (tick=%.1fs)",
+            self.num_workers, self.tick_interval,
+        )
 
     def stop(self):
         """停止线程池。"""
@@ -213,4 +171,4 @@ class TemporalWorkerPool:
         for thread in self._workers:
             thread.join(timeout=2.0)
 
-        print(f"[TemporalWorkerPool] 已停止")
+        logger.debug("[TemporalWorkerPool] Stopped")

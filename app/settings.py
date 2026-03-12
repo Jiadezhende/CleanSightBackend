@@ -1,7 +1,8 @@
 import os
 from pathlib import Path
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _load_env_files():
@@ -14,21 +15,17 @@ def _load_env_files():
     该函数会把键值对注入到 `os.environ`，以便 Pydantic 从环境读取。
     """
     base = Path(__file__).parent.parent
-    env = os.environ.get('CLEANSIGHT_ENV', 'dev').lower()
+    env = os.environ.get("CLEANSIGHT_ENV", "dev").lower()
 
     # 根据环境变量确定配置文件
-    env_files = {
-        'dev': '.env.dev',
-        'test': '.env.test',
-        'prod': '.env'
-    }
+    env_files = {"dev": ".env.dev", "test": ".env.test", "prod": ".env"}
 
-    env_file_name = env_files.get(env, '.env.dev')
+    env_file_name = env_files.get(env, ".env.dev")
     env_path = base / env_file_name
 
     # 记录是否为开发模式（供后续校验逻辑判断）
     global _LOADED_DEV
-    _LOADED_DEV = (env == 'dev')
+    _LOADED_DEV = env == "dev"
 
     # 加载环境文件
     if not env_path.exists():
@@ -41,14 +38,14 @@ def _load_env_files():
             p = Path(p)
             if not p.exists():
                 continue
-            with p.open('r', encoding='utf-8') as fh:
+            with p.open("r", encoding="utf-8") as fh:
                 for line in fh:
                     line = line.strip()
-                    if not line or line.startswith('#'):
+                    if not line or line.startswith("#"):
                         continue
-                    if '=' not in line:
+                    if "=" not in line:
                         continue
-                    k, v = line.split('=', 1)
+                    k, v = line.split("=", 1)
                     k = k.strip()
                     v = v.strip().strip('"').strip("'")
                     os.environ[k] = v
@@ -65,57 +62,71 @@ class Settings(BaseSettings):
     db_user: str
     db_password: str
 
-    # 其他配置
+    # 应用配置
     debug: bool = False
+    strict: bool = False
 
-    # file_path 插入接口（用于把 HLS 段信息发送到无代码平台）- 必需配置
+    # 外部接口URL（必需配置）
     file_path_insert_url: str
-
-    # 告警上报URL（必需配置）
     alarm_report_url: str
 
-    # 注意: 推理与视频配置已迁移到 inference_config.yaml 和 persistence_config.yaml
-    # inference_fps 和 ca_segment_seconds 不再从 settings 读取
+    # 服务器配置
+    host: str = "0.0.0.0"
+    port: int = 8000
+
+    # 日志配置
+    log_level: str = "INFO"
+    log_config: str = "logging_config.json"
+
+    # 外部工具
+    ffmpeg_path: str = "ffmpeg"
+
+    # 模型路径
+    model_path: str = "./app/data"
+
+    @property
+    def env(self) -> str:
+        """当前环境（dev/test/prod），由启动脚本通过 CLEANSIGHT_ENV 设定"""
+        return os.environ.get("CLEANSIGHT_ENV", "dev").lower()
 
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def check_required_fields(self):
         """验证必需配置是否完整
 
         - 严格模式（CLEANSIGHT_STRICT=1）：缺失配置时抛出异常，阻止启动
         - 开发模式（CLEANSIGHT_STRICT=0）：只警告，允许继续运行
         """
-        strict = os.environ.get('CLEANSIGHT_STRICT', '0') == '1'
-        is_dev = globals().get('_LOADED_DEV', False)
+        is_dev = globals().get("_LOADED_DEV", False)
 
         # 检查必需配置
         missing_fields = []
 
         # 数据库配置
         if not self.db_host:
-            missing_fields.append('CLEANSIGHT_DB_HOST')
+            missing_fields.append("CLEANSIGHT_DB_HOST")
         if not self.db_port or self.db_port == 0:
-            missing_fields.append('CLEANSIGHT_DB_PORT')
+            missing_fields.append("CLEANSIGHT_DB_PORT")
         if not self.db_name:
-            missing_fields.append('CLEANSIGHT_DB_NAME')
+            missing_fields.append("CLEANSIGHT_DB_NAME")
         if not self.db_user:
-            missing_fields.append('CLEANSIGHT_DB_USER')
+            missing_fields.append("CLEANSIGHT_DB_USER")
         if not self.db_password:
-            missing_fields.append('CLEANSIGHT_DB_PASSWORD')
+            missing_fields.append("CLEANSIGHT_DB_PASSWORD")
 
         # 外部接口URL配置
         if not self.file_path_insert_url:
-            missing_fields.append('CLEANSIGHT_FILE_PATH_INSERT_URL')
+            missing_fields.append("CLEANSIGHT_FILE_PATH_INSERT_URL")
         if not self.alarm_report_url:
-            missing_fields.append('CLEANSIGHT_ALARM_REPORT_URL')
+            missing_fields.append("CLEANSIGHT_ALARM_REPORT_URL")
 
         if missing_fields:
             msg = f"缺少必需配置: {', '.join(missing_fields)}"
 
-            if strict and not is_dev:
+            if self.strict and not is_dev:
                 # 生产模式且开启严格检查：抛出异常
                 raise ValueError(
                     f"[配置错误] {msg}\n"

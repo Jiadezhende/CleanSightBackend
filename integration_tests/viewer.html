@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>CleanSight 推理结果查看器</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 16px; }
+    h2 { margin-bottom: 12px; font-size: 1.1em; color: #8af; }
+    .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+    input {
+      background: #222; color: #eee; border: 1px solid #444;
+      padding: 5px 8px; font-family: monospace; width: 220px;
+    }
+    button {
+      padding: 5px 14px; cursor: pointer; background: #333;
+      color: #eee; border: 1px solid #555; font-family: monospace;
+    }
+    button:hover { background: #444; }
+    #connStatus { color: #aaa; font-size: 0.85em; margin: 6px 0 4px; }
+    #stats      { color: #8f8; font-size: 0.85em; margin-bottom: 8px; }
+    canvas      { display: block; border: 1px solid #333; background: #000; max-width: 100%; }
+
+    /* 两列面板布局 */
+    .panels { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+    .panel {
+      flex: 1; min-width: 260px; background: #1a1a1a; border: 1px solid #333; padding: 8px;
+      font-size: 0.78em;
+    }
+    .panel-title { color: #8af; margin-bottom: 6px; font-size: 0.9em; }
+
+    /* task/message 面板 */
+    .msg-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
+    .msg-label { color: #888; }
+    .msg-val   { color: #eee; text-align: right; max-width: 60%; word-break: break-all; }
+    .tag {
+      display: inline-block; padding: 1px 6px; border-radius: 2px;
+      font-size: 0.85em; margin-right: 3px;
+    }
+    .tag-ok      { background: #1a3a1a; color: #8f8; border: 1px solid #3a6a3a; }
+    .tag-warn    { background: #3a2a00; color: #fa0; border: 1px solid #6a5000; }
+    .tag-alarm   { background: #3a0000; color: #f66; border: 1px solid #6a2020; }
+    .tag-neutral { background: #222; color: #aaa; border: 1px solid #444; }
+
+    /* temporal events */
+    .events-list { color: #aaa; max-height: 80px; overflow-y: auto; }
+    .events-list div { border-bottom: 1px solid #222; padding: 1px 0; }
+
+    /* recent alarms */
+    .alarm-item { border-bottom: 1px solid #222; padding: 2px 0; }
+    .alarm-item .al-type { color: #fa0; }
+    .alarm-item .al-msg  { color: #ccc; }
+    .alarm-item .al-ts   { color: #666; font-size: 0.85em; }
+
+    /* health 面板 */
+    .health-content { color: #aaa; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>CleanSight 推理结果查看器</h2>
+
+  <div class="controls">
+    <span>Server:</span>
+    <input id="server" value="localhost:8000" placeholder="host:port">
+    <span>Client ID:</span>
+    <input id="clientId" value="" placeholder="client_id">
+    <button onclick="connectAll()">连接</button>
+    <button onclick="disconnectAll()">断开</button>
+  </div>
+
+  <div id="connStatus">未连接</div>
+  <div id="stats">帧数: 0 | FPS: 0</div>
+
+  <canvas id="canvas" width="640" height="480"></canvas>
+
+  <div class="panels">
+
+    <!-- 任务识别消息面板 (GET /task/message/{client_id}) -->
+    <div class="panel">
+      <div class="panel-title">任务识别状态 <span style="color:#555;font-size:0.85em">/task/message (1s)</span></div>
+
+      <div class="msg-row">
+        <span class="msg-label">Stage</span>
+        <span class="msg-val" id="msgStage">—</span>
+      </div>
+      <div class="msg-row">
+        <span class="msg-label">检测结果</span>
+        <span class="msg-val" id="msgDetections">—</span>
+      </div>
+      <div class="msg-row">
+        <span class="msg-label">置信度</span>
+        <span class="msg-val" id="msgConfs">—</span>
+      </div>
+
+      <div style="margin-top:6px;margin-bottom:2px;color:#888;">时序事件</div>
+      <div class="events-list" id="msgEvents">—</div>
+
+      <div style="margin-top:6px;margin-bottom:2px;color:#888;">近期告警 (最多5条)</div>
+      <div id="msgAlarms">—</div>
+    </div>
+
+    <!-- 系统健康面板 (GET /health/status) -->
+    <div class="panel">
+      <div class="panel-title">系统健康 <span style="color:#555;font-size:0.85em">/health/status (2s)</span></div>
+      <div class="health-content" id="healthContent">—</div>
+    </div>
+
+  </div>
+
+  <script>
+    let ws = null;
+    let frameCount = 0, lastTime = Date.now(), lastCount = 0;
+    let healthTimer = null, msgTimer = null;
+
+    // 从 URL query params 读取初始值
+    const params = new URLSearchParams(location.search);
+    if (params.get('server'))    document.getElementById('server').value   = params.get('server');
+    if (params.get('client_id')) document.getElementById('clientId').value = params.get('client_id');
+
+    // 若 query params 齐全，自动连接
+    if (params.get('client_id') && params.get('server')) connectAll();
+
+    // ---------------------------------------------------------------
+    // 连接 / 断开
+    // ---------------------------------------------------------------
+    function connectAll() {
+      const server   = document.getElementById('server').value.trim();
+      const clientId = document.getElementById('clientId').value.trim();
+      if (!clientId) { alert('请输入 client_id'); return; }
+      disconnectAll();
+
+      // 1. 视频 WebSocket
+      const wsUrl = `ws://${server}/ai/video?client_id=${encodeURIComponent(clientId)}`;
+      document.getElementById('connStatus').textContent = `连接中: ${wsUrl}`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        document.getElementById('connStatus').textContent = `已连接: ${wsUrl}`;
+        startPolling(server, clientId);
+      };
+      ws.onclose = (e) => {
+        document.getElementById('connStatus').textContent = `已断开 (code=${e.code})`;
+        stopPolling();
+      };
+      ws.onerror = () => {
+        document.getElementById('connStatus').textContent = `连接错误，请检查服务器和 client_id`;
+        stopPolling();
+      };
+      ws.onmessage = (evt) => {
+        frameCount++;
+        if (evt.data.startsWith('data:image')) {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.getElementById('canvas');
+            if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+              canvas.width  = img.naturalWidth  || 640;
+              canvas.height = img.naturalHeight || 480;
+            }
+            canvas.getContext('2d').drawImage(img, 0, 0);
+          };
+          img.src = evt.data;
+        }
+        const now = Date.now();
+        if (now - lastTime >= 1000) {
+          const fps = ((frameCount - lastCount) / (now - lastTime) * 1000).toFixed(1);
+          document.getElementById('stats').textContent = `帧数: ${frameCount} | 瞬时FPS: ${fps}`;
+          lastTime = now; lastCount = frameCount;
+        }
+      };
+    }
+
+    function disconnectAll() {
+      if (ws) { ws.close(); ws = null; }
+      stopPolling();
+    }
+
+    // ---------------------------------------------------------------
+    // 轮询控制
+    // ---------------------------------------------------------------
+    function startPolling(server, clientId) {
+      stopPolling();
+      fetchMsg(server, clientId);
+      msgTimer = setInterval(() => fetchMsg(server, clientId), 1000);
+      fetchHealth(server);
+      healthTimer = setInterval(() => fetchHealth(server), 2000);
+    }
+
+    function stopPolling() {
+      if (msgTimer)    { clearInterval(msgTimer);    msgTimer    = null; }
+      if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+    }
+
+    // ---------------------------------------------------------------
+    // GET /task/message/{client_id}
+    // ---------------------------------------------------------------
+    function fetchMsg(server, clientId) {
+      fetch(`http://${server}/task/message/${encodeURIComponent(clientId)}`)
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then(data => renderMsg(data))
+        .catch(e => {
+          document.getElementById('msgStage').textContent = `错误: ${e.message}`;
+        });
+    }
+
+    function renderMsg(data) {
+      // Stage
+      document.getElementById('msgStage').textContent = data.stage ?? '—';
+
+      // Detections → colored tags
+      const dets = data.detections || {};
+      const detEl = document.getElementById('msgDetections');
+      if (Object.keys(dets).length === 0) {
+        detEl.textContent = '—';
+      } else {
+        detEl.innerHTML = Object.entries(dets).map(([k, v]) => {
+          const cls = v ? 'tag-alarm' : 'tag-ok';
+          const lbl = v ? '✓' : '✗';
+          return `<span class="tag ${cls}">${k}: ${lbl}</span>`;
+        }).join('');
+      }
+
+      // Confidences
+      const confs = data.confidences || {};
+      const confEl = document.getElementById('msgConfs');
+      if (Object.keys(confs).length === 0) {
+        confEl.textContent = '—';
+      } else {
+        confEl.textContent = Object.entries(confs)
+          .map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`)
+          .join('  ');
+      }
+
+      // Temporal events
+      const eventsEl = document.getElementById('msgEvents');
+      const events = data.temporal?.events ?? [];
+      if (events.length === 0) {
+        eventsEl.innerHTML = '<div style="color:#555">暂无时序事件</div>';
+      } else {
+        eventsEl.innerHTML = events.map(e => `<div>${e}</div>`).join('');
+      }
+
+      // Recent alarms
+      const alarmsEl = document.getElementById('msgAlarms');
+      const alarms = data.recent_alarms ?? [];
+      if (alarms.length === 0) {
+        alarmsEl.innerHTML = '<div style="color:#555">暂无告警</div>';
+      } else {
+        alarmsEl.innerHTML = alarms.slice().reverse().map(a => {
+          const ts = a.timestamp ? new Date(a.timestamp * 1000).toLocaleTimeString() : '—';
+          const lvlCls = a.alarm_level === 'ERROR' ? 'tag-alarm' : 'tag-warn';
+          return `<div class="alarm-item">
+            <span class="tag ${lvlCls}">${a.alarm_level ?? '?'}</span>
+            <span class="al-type">[${a.alarm_type ?? '?'}]</span>
+            <span class="al-msg"> ${a.alarm_message ?? ''}</span>
+            <span class="al-ts"> ${ts}</span>
+          </div>`;
+        }).join('');
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // GET /health/status
+    // ---------------------------------------------------------------
+    function fetchHealth(server) {
+      fetch(`http://${server}/health/status`)
+        .then(r => r.json())
+        .then(data => {
+          const clients = data.clients || {};
+          const stats   = data.monitor_stats || {};
+          const lines = [
+            `总客户端: ${clients.total_clients ?? '?'}  活跃流: ${clients.active_streams ?? '?'}  重连中: ${clients.reconnecting ?? '?'}`,
+            `孤儿流: ${clients.orphan_streams ?? '?'}  孤儿解码器: ${clients.orphan_decoders ?? '?'}`,
+            `重连客户端: ${JSON.stringify(stats.reconnecting_clients ?? [])}`,
+            `累计清理: ${stats.cleanups ?? '?'}  重连成功: ${stats.reconnect_successes ?? '?'}`,
+          ];
+          document.getElementById('healthContent').textContent = lines.join('\n');
+        })
+        .catch(e => {
+          document.getElementById('healthContent').textContent = `获取失败: ${e.message}`;
+        });
+    }
+  </script>
+</body>
+</html>

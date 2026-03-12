@@ -115,11 +115,21 @@ python integration_tests/stress_test.py --max-tasks 10 --duration 60
 
 ### 3. 接口调用流程
 
-1. **加载任务**: `GET /ai/load_task/{task_id}`
-2. **启动流**: `POST /inspection/start_rtsp_stream`
+**推荐使用统一 API（简化版）**：
+
+1. **启动任务和流**: `POST /api/start` （合并了 load_task + start_rtsp_stream）
+2. **接收推理结果**: WebSocket `/ai/video?client_id={client_id}`
+3. **监控任务状态**: WebSocket `/task/status/{client_id}`
+4. **终止任务**: `POST /api/terminate` （完整清理所有资源）
+
+**传统方式（过渡期保留）**：
+
+1. **加载任务**: `GET /ai/load_task/{task_id}` （⚠️ 将弃用）
+2. **启动流**: `POST /inspection/start_rtsp_stream` （⚠️ 将弃用）
 3. **接收推理结果**: WebSocket `/ai/video?client_id={client_id}`
 4. **监控任务状态**: WebSocket `/task/status/{client_id}`
-5. **停止流**: `POST /inspection/stop_rtsp_stream`
+5. **停止流**: `POST /inspection/stop_rtsp_stream` （⚠️ 将弃用）
+6. **终止任务**: `POST /ai/terminate_task/{client_id}` （⚠️ 将弃用）
 
 详细 API 文档请见 [API 端点文档](docs/API_ENDPOINTS.md)。
 
@@ -178,31 +188,74 @@ rt_processed (20fps) ← WebSocket 推送
 
 ---
 
-## 异常处理
+## 异常处理与边界层设计
+
+CleanSight 实现了**四层边界异常处理架构**，确保系统稳定性和可观测性：
+
+### 核心设计原则
+
+- **业务代码保持纯净**: 只抛出异常，不捕获异常
+- **框架边界层统一处理**: 使用 `GuardedExecutor` 集中管理重试逻辑
+- **异常即协议**: 6 个核心自定义异常类型（`AppError` + 5 个服务异常 + `FrameDrop`）
+- **显式化决策**: DROP（丢弃）/ RETRY（重试）/ FATAL（致命）
+
+### 四层边界架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 4: main() - 顶层 Fail-Fast                              │
+│   捕获所有未处理异常，记录 CRITICAL 日志，优雅退出              │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 3: FastAPI Handlers - HTTP 边界                         │
+│   转换异常为 HTTP 状态码（503/500），返回 JSON 错误响应         │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 2: GuardedExecutor - 框架边界层                         │
+│   自动重试（5 种策略）、记录 metrics、决策 Action               │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 1: Worker.run() - Worker 边界                           │
+│   捕获 Worker 线程异常，防止线程崩溃                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 异常类型
+
+| 异常类型                  | retryable | fatal | 应用场景                           |
+| ------------------------- | --------- | ----- | ---------------------------------- |
+| `FrameDrop`               | ❌        | ❌    | 单帧失败（安静丢弃，返回 None）    |
+| `StreamConnectionError`   | ✅        | ❌    | 流连接超时（网络瞬时故障）         |
+| `FFmpegError`             | ❌        | ✅    | 解码器崩溃（需重启流）             |
+| `DatabaseError`           | ✅        | ❌    | 数据库连接池耗尽（可重试）         |
+| `ModelInferenceError`     | ❌        | ❌    | CUDA OOM（重试无用，不影响其他路） |
+| `PersistenceError`        | ✅        | ❌    | HLS 写入失败（磁盘临时满）         |
+
+### 自动重试策略
+
+- **Stream**: 固定延迟 3 秒，最多 5 次（网络波动）
+- **Database**: 指数退避（1s → 2s → 4s），最多 3 次（连接池恢复）
+- **Persistence**: 指数退避，最多 3 次（磁盘空间释放）
+- **Inference**: 固定延迟 1 秒，最多 2 次（快速失败）
 
 ### 断线重连
 
-CleanSight 实现了智能断线重连机制：
-
 - **心跳检测**: 每 5 秒检查一次，10 秒无帧判定为断流
 - **自动重连**: 最多尝试 5 次，每次间隔 3 秒
-- **重连成功条件**: 连续 10 秒收到帧
+- **资源清理**: 孤儿流检测（90 秒超时自动清理）
 
-配置参数：
+### 可观测性
 
-```yaml
-health_monitor:
-  check_interval: 5.0
-  heartbeat_timeout: 10.0
-  max_restart_attempts: 5
-```
+通过 Prometheus Metrics 监控异常情况：
 
-### Timeout 清理
+- `retry_total{operation, error_type}` - 重试计数
+- `frame_drop_total{client_id, reason}` - 丢帧计数
+- `gpu_oom_total{model}` - GPU OOM 计数
 
-- **孤儿流检测**: 30 秒检查一次，90 秒超时清理
-- **资源清理**: 自动清理 FFmpeg 进程、推理队列、客户端状态
-
-详细机制请见 [异常处理文档](docs/EXCEPTION_HANDLING.md)。
+详细设计请见 [边界层设计文档](docs/BOUNDARY_LAYER_DESIGN.md) 和 [异常处理实现](docs/EXCEPTION_HANDLING.md)。
 
 ---
 
@@ -313,24 +366,40 @@ python integration_tests/test_reconnect_timeout.py --task_id 1
 
 ### 主要 API 端点
 
-#### AI 推理服务 (`/ai`)
+#### 统一 API (`/api`) - **推荐使用**
 
-- `GET /ai/status` - 查询 AI 服务状态
-- `GET /ai/load_task/{task_id}` - 加载清洗任务
-- `POST /ai/terminate_task/{client_id}` - 终止任务
+- `POST /api/start` - 启动任务和流（合并接口）
+- `POST /api/terminate` - 终止任务并清理资源（统一清理）
+
+#### 健康监控 (`/health`)
+
+- `GET /health/status` - 获取系统整体状态
+- `GET /health/monitor/stats` - 获取健康监控统计
+- `GET /health/monitor/config` - 获取健康监控配置
+
+#### 实时数据流 (WebSocket)
+
 - `WebSocket /ai/video` - 实时推理结果流
-
-#### 视频流服务 (`/inspection`)
-
-- `POST /inspection/start_rtsp_stream` - 启动 RTSP 流捕获
-- `POST /inspection/stop_rtsp_stream` - 停止 RTSP 流捕获
-
-#### 任务管理 (`/task`)
-
 - `WebSocket /task/status/{client_id}` - 任务状态实时更新
+
+#### 历史数据查询 (`/task`)
+
 - `GET /task/traceback/{task_id}/segments` - 获取视频段列表
 - `GET /task/traceback/{task_id}/playlist` - 获取 M3U8 播放列表
 - `GET /task/{task_id}/alarms` - 获取告警记录
+
+#### 过渡期保留接口（⚠️ 将在未来版本移除）
+
+**AI 推理服务** (`/ai`):
+
+- `GET /ai/status` - 查询 AI 服务状态（请使用 `GET /health/status`）
+- `GET /ai/load_task/{task_id}` - 加载清洗任务（请使用 `POST /api/start`）
+- `POST /ai/terminate_task/{client_id}` - 终止任务（请使用 `POST /api/terminate`）
+
+**视频流服务** (`/inspection`):
+
+- `POST /inspection/start_rtsp_stream` - 启动 RTSP 流（请使用 `POST /api/start`）
+- `POST /inspection/stop_rtsp_stream` - 停止 RTSP 流（请使用 `POST /api/terminate`）
 
 详细 API 文档请见 [API 端点文档](docs/API_ENDPOINTS.md)。
 
@@ -466,4 +535,4 @@ set LOG_LEVEL=DEBUG     # Windows
 
 感谢所有贡献者和使用 CleanSight 的医疗机构！
 
-**最后更新**: 2026-01-30
+**最后更新**: 2026-02-08

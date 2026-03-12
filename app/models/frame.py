@@ -6,21 +6,24 @@ numpy arrays for performance, converting to Base64 only when persisting or
 returning to clients.
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
-from datetime import datetime
-import numpy as np
-from dataclasses import dataclass
 import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from pydantic import BaseModel, Field
 
 
 @dataclass
 class FrameData:
     """轻量级帧数据类，用于内存队列传递（避免 Base64 编码开销）"""
+
     timestamp: float  # Unix timestamp
     frame: np.ndarray  # 原始或处理后的帧（numpy 数组）
     keypoints: Optional[Dict[str, Any]] = None  # 关键点检测结果（仅 ProcessedQueue）
     inference_result: Optional[Dict[str, Any]] = None  # 完整推理结果
+
 
 class BaseFrame(BaseModel):
     task_id: Optional[int] = None
@@ -28,7 +31,7 @@ class BaseFrame(BaseModel):
     raw_timestamp: Optional[datetime] = None  # 原始视频帧写入时间戳
     width: Optional[int] = None
     height: Optional[int] = None
-    metadata: Optional[Dict[str, Any]] = None   # Additional data (optional)
+    metadata: Optional[Dict[str, Any]] = None  # Additional data (optional)
 
 
 class RawFrame(BaseFrame):
@@ -39,6 +42,7 @@ class ProcessedFrame(BaseFrame):
     """
     处理后帧数据，包含Base64编码的处理后图像及推理结果
     """
+
     processed_frame_b64: str  # Base64 encoded processed (annotated) frame
     inference_result: Optional[Dict[str, Any]] = None  # detection / analysis output
 
@@ -47,24 +51,30 @@ class FrameSegment(BaseModel):
     """
     多帧数据段，包含客户端ID、任务ID、时间段
     """
+
     client_id: str
     task_id: Optional[int] = None
     segment_start_ts: datetime
     segment_end_ts: datetime
 
+
 # SQLAlchemy models for database storage
-from sqlalchemy import Column, String, Integer, BigInteger
+from sqlalchemy import BigInteger, Column, Integer, String
+
 from app.database import Base
 
+
 class HLSSegment(Base):
+    """file_path 表 ORM（无代码平台托管，_id 是平台主键 varchar）"""
+
     __tablename__ = "file_path"
 
-    _id = Column(Integer, primary_key=True, autoincrement=True)
+    _id = Column(String, primary_key=True)  # 平台主键 (varchar)
+    id = Column(BigInteger, nullable=False, index=True)  # 业务数字 ID
     client_id = Column(String, index=True)
-    task_id = Column(Integer, index=True)  # 匹配 DBTask.task_id (str)
-    segment_path = Column(String)  # 文件系统路径，如 /database/client_1/task_123/hls/segment_001.mp4
-    playlist_path = Column(String)  # M3U8 文件路径
-    # 使用 UNIX 时间戳（BIGINT）存储，避免时区/类型不匹配
+    task_id = Column(BigInteger, index=True)
+    segment_path = Column(String)
+    playlist_path = Column(String)
     start_ts = Column(BigInteger)
     end_ts = Column(BigInteger)
     created_at = Column(BigInteger, default=lambda: int(time.time()))

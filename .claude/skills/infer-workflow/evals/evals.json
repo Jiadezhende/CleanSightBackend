@@ -1,0 +1,23 @@
+{
+  "skill_name": "infer-workflow",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我新建一个污点检测的 workflow，模型路径是 models/stain.pt，置信度阈值 0.6，连续4帧触发告警，告警级别 high。",
+      "expected_output": "生成完整的 StainDetectionTask 类，继承 YOLOWorkflow，实现 analyze_temporal 四步骤（含边沿触发模板）、prepare_visualization_data，并提示在 __init__.py 中注册。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "按 workflow 规范实现一个无模型的帧率监控任务：每帧记录时间戳，当滑动窗口3秒内平均帧率低于5fps时触发告警。",
+      "expected_output": "生成继承 InferenceWorkflow 的 FpsMonitorTask，infer() 用纯 numpy/time 实现，analyze_temporal 使用滑动窗口比例模式，正确实现边沿触发，无任何 YOLO/torch 依赖。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我想给 CleanSightBackend 增加一个内镜液体渗漏检测（LeakDetection），用 YOLO 模型，需要滑动窗口2秒内60%比例触发，同时检测框要用蓝色显示。",
+      "expected_output": "生成 LeakDetectionTask 继承 YOLOWorkflow，analyze_temporal 使用滑动窗口比例模式（window_seconds=2.0，trigger_ratio=0.6），prepare_visualization_data 中 VisItem color=(255,0,0)（BGR蓝色），包含完整边沿触发逻辑。",
+      "files": []
+    }
+  ]
+}

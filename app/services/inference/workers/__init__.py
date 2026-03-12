@@ -3,9 +3,8 @@ Worker 池模块
 """
 
 from .base import MultiModelWorkerPool
-from .temporal import TemporalWorkerPool, TemporalWorker
-from .visualization import VisualizationWorkerPool, VisualizationWorker, Visualizer
-from .writeback import WriteBackWorkerPool, WriteBackWorker
+from .temporal import TemporalWorker, TemporalWorkerPool
+from .visualization import FixedVisualizer, VisualizationWorker, VisualizationWorkerPool
 
 __all__ = [
     "MultiModelWorkerPool",
@@ -13,7 +12,5 @@ __all__ = [
     "TemporalWorker",
     "VisualizationWorkerPool",
     "VisualizationWorker",
-    "Visualizer",
-    "WriteBackWorkerPool",
-    "WriteBackWorker",
+    "FixedVisualizer",
 ]

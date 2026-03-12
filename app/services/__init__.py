@@ -5,7 +5,4 @@ from . import ai
 try:
     from .client import client_manager
 except ImportError:
-    try:
-        from .client_manager import client_manager
-    except ImportError:
-        client_manager = None
+    client_manager = None

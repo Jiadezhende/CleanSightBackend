@@ -14,8 +14,8 @@ import numpy as np
 
 from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
-from app.services.inference.core.manager import InferenceManager
 from app.services.inference.config import load_stage_config
+from app.services.inference.core.manager import InferenceManager
 
 # ========== 加载推理配置 ==========
 _inference_config = load_stage_config()
@@ -23,9 +23,10 @@ _inference_config = load_stage_config()
 # ========== 模块级单例（兼容旧代码） ==========
 
 manager = InferenceManager(
-    use_async_pipeline=True,
     rt_fps=_inference_config.raw_fps,
-    ca_segment_seconds=int(_inference_config.ca_segment_len / _inference_config.raw_fps),  # 帧数转换为秒数
+    ca_segment_seconds=int(
+        _inference_config.ca_segment_len / _inference_config.raw_fps
+    ),  # 帧数转换为秒数
 )
 
 
@@ -37,11 +38,6 @@ def start():
 def stop():
     """停止推理服务"""
     manager.stop()
-
-
-def set_stream_url(client_id: str, stream_url: str):
-    """设置客户端的通用流地址（RTMP/RTSP）"""
-    manager.set_stream_url(client_id, stream_url)
 
 
 def get_result(client_id: str, as_model: bool = False):

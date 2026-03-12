@@ -6,15 +6,20 @@ Persistence模块
 2. 批量告警信息上报
 """
 
-from .manager import PersistenceManager
 from .config import PersistenceConfig, get_persistence_config
-from .models import HLSPersistenceTask, AlarmPersistenceTask, PersistenceMetrics
+from .manager import PersistenceManager
+from .models import AlarmPersistenceTask, HLSPersistenceTask, PersistenceMetrics
+
+# 全局单例，与 client_manager 保持一致的使用模式
+# 生命周期由 InferenceManager 管理（调用 .start() / .stop()）
+persistence_manager: PersistenceManager = PersistenceManager()
 
 __all__ = [
-    'PersistenceManager',
-    'PersistenceConfig',
-    'get_persistence_config',
-    'HLSPersistenceTask',
-    'AlarmPersistenceTask',
-    'PersistenceMetrics',
+    "PersistenceManager",
+    "PersistenceConfig",
+    "get_persistence_config",
+    "HLSPersistenceTask",
+    "AlarmPersistenceTask",
+    "PersistenceMetrics",
+    "persistence_manager",
 ]

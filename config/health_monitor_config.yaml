@@ -1,0 +1,10 @@
+# 全局健康监控配置
+# GlobalHealthMonitor 是独立的全局服务，配置也应该独立
+
+monitor:
+  check_interval: 1.0        # 监控检查间隔（秒）
+  heartbeat_timeout: 5.0     # 心跳超时（秒）- 超过此时间无帧则判定为可疑
+  reconnect_interval: 5.0    # 重连间隔（秒）- 每次重连尝试之间的等待时间
+  max_reconnect_attempts: 5  # 最大重连尝试次数
+  orphan_timeout: 30.0       # 孤儿流超时（秒）- 有队列但无解码器的客户端清理超时
+  task_max_duration: 5400.0  # 任务最大运行时长（秒）- 超时后触发告警并强制终止，0 表示不限制
