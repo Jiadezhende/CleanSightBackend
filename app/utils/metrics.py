@@ -7,7 +7,7 @@ CleanSight Prometheus Metrics（可观测性）
 - 用于 Grafana 可视化和告警
 """
 
-from prometheus_client import CollectorRegistry, Counter, Histogram, generate_latest
+from prometheus_client import Counter, Histogram, generate_latest
 
 # 使用默认 registry（与 FastAPI 集成）
 # 如果需要自定义 registry，可以传入 registry=custom_registry
