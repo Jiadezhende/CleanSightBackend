@@ -49,9 +49,13 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
     ) -> List[DetectionOutput]:
         """批量弯折检测，利用 YOLO 批量推理接口"""
+        first=True
         try:
             outputs = self._run_yolo_batch(frames)
             for output in outputs:
+                if first:
+                    logger.info(f"[BendingTask] First inference output: {output}")
+                    first=False
                 output.success = True
                 output.bending_detected = any(
                     "bending" in d.class_name.lower() for d in output.detections
@@ -65,7 +69,7 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
                 try:
                     output = self.infer(f, c)
                     output.bending_detected = any(
-                        "bent" in d.class_name.lower() for d in output.detections
+                        "bending" in d.class_name.lower() for d in output.detections
                     )
                     output.detection_count = len(output.detections)
                     results.append(output)
@@ -147,7 +151,7 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
         """准备弯折可视化数据"""
         items = []
         for det in output.detections:
-            is_bending = "bent" in det.class_name.lower() or "bending" in det.class_name.lower()
+            is_bending = "bending" in det.class_name.lower()
 
             if det.class_name == "bending_debug_box":
                 color = (255, 0, 255)  # 洋红色（调试框）
