@@ -421,6 +421,55 @@ async def get_task_alarms(task_id: int):
         db.close()
 
 
+@router.websocket("/msg/{client_id}")
+async def websocket_client_message(websocket: WebSocket, client_id: str):
+    """
+    WebSocket 实时推送前端消息（每秒一次）
+
+    推送内容与 GET /task/message/{client_id} 相同：
+    检测结果、置信度、时序事件、最近5条内存告警。
+
+    Args:
+        client_id: 客户端ID（摄像机 source_ip）
+    """
+    import asyncio
+
+    await websocket.accept()
+    shutdown_event: asyncio.Event = websocket.app.state.shutdown_event
+
+    try:
+        while not shutdown_event.is_set():
+            if not client_manager.has_client(client_id):
+                await websocket.send_text(
+                    json.dumps({"error": f"Client '{client_id}' not found"}, ensure_ascii=False)
+                )
+            else:
+                cq = client_manager.get_client(client_id)
+                msg = cq.get_frontend_message()
+                payload = {
+                    "stage": msg.get("stage"),
+                    "detections": msg.get("detections", {}),
+                    "recent_alarms": msg.get("recent_alarms", []),
+                }
+                await websocket.send_text(json.dumps(payload, ensure_ascii=False))
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=1.0)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    except WebSocketDisconnect:
+        logger.info(f"[WebSocket-Msg] 连接已关闭: client_id={client_id}")
+    except Exception:
+        logger.error(f"[WebSocket-Msg] 异常: client_id={client_id}", exc_info=True)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @router.get("/message/{client_id}")
 async def get_client_frontend_message(client_id: str):
     """
