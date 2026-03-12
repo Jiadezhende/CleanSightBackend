@@ -51,7 +51,12 @@ class StorageCleanupWorker:
     def _run(self) -> None:
         # 首次等待一个 interval，避免启动时立即扫描
         while not self._stop_event.wait(timeout=self.interval_seconds):
-            self._scan_and_clean()
+            try:
+                self._scan_and_clean()
+            except Exception:
+                # L1 边界层：捕获扫描中一切未预期异常，记录后继续下一轮
+                # 不使用 GuardedExecutor（L2），因为此处需要的是线程存活而非立即重试
+                logger.exception("[StorageCleanup] Unexpected error during scan, will retry next interval")
 
     def _scan_and_clean(self) -> int:
         """扫描并删除过期任务目录，返回删除数量。
@@ -71,10 +76,10 @@ class StorageCleanupWorker:
                 logger.debug("[StorageCleanup] Skip unreadable metadata %s: %s", metadata_path, e)
                 continue
 
-            updated_at_str = meta.get("updated_at", "")
+            raw = meta.get("updated_at", "")
             try:
-                updated_at = datetime.fromisoformat(updated_at_str)
-            except ValueError:
+                updated_at = datetime.fromisoformat(str(raw))
+            except (ValueError, TypeError):
                 logger.debug("[StorageCleanup] Skip invalid updated_at in %s", metadata_path)
                 continue
 

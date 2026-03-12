@@ -189,10 +189,11 @@ def timing(
 def _extract_client_id(args: tuple, kwargs: dict) -> Optional[str]:
     """从函数参数中提取 client_id
 
-    尝试从以下位置提取：
+    尝试从以下位置提取（优先级从高到低）：
     1. kwargs 中的 "client_id" 参数
     2. args[0] 如果是字符串（通常第一个参数是 client_id）
     3. 对象的 self.client_id 属性
+    4. 线程上下文（context.get_client_id()）
 
     Args:
         args: 位置参数
@@ -213,7 +214,9 @@ def _extract_client_id(args: tuple, kwargs: dict) -> Optional[str]:
     if args and hasattr(args[0], "client_id"):
         return getattr(args[0], "client_id", None)
 
-    return None
+    # 回退到线程上下文
+    from app.utils.context import get_client_id
+    return get_client_id()
 
 
 def _sanitize_args(args: tuple, kwargs: dict) -> dict:
