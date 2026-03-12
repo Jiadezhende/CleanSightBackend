@@ -142,4 +142,9 @@ http://localhost:8000/docs
 
 **新建检测 Workflow**：使用 `/infer-workflow` skill，自动按规范生成代码框架。
 
+### Workflow 实现注意事项
+
+- `class_name` 直接取自模型 `result.names`，不做归一化，匹配字符串必须与模型训练类别名严格一致
+- `infer_batch` 覆写时，batch 路径与 fallback 单帧路径的业务字段赋值逻辑必须保持一致
+
 **查看数据库 Schema**：使用 `/schema-inspect` skill，自动对比 ORM 与实际表结构。
