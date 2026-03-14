@@ -1,0 +1,13 @@
+[sqlserver]
+server   = localhost
+database = HospitalDB
+username = sa
+password = your_password
+driver   = ODBC Driver 17 for SQL Server
+
+[sftp]
+host       = your-business-server.com
+port       = 22
+username   = sync_user
+key_file   = hospital_sync_key
+remote_dir = /opt/hospital_sync/data/pending

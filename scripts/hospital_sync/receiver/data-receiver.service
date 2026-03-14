@@ -1,0 +1,13 @@
+[Unit]
+Description=CleanSight Data Receiver
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hospital_sync
+ExecStart=/root/miniconda3/bin/python /opt/hospital_sync/data_receiver.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
