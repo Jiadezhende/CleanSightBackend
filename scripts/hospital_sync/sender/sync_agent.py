@@ -19,7 +19,8 @@ from pathlib import Path
 import paramiko
 import pyodbc
 
-BASE_DIR = Path(__file__).parent
+# PyInstaller --onefile 时 __file__ 指向临时解压目录；用 sys.executable 定位 .exe 所在目录
+BASE_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 PROGRESS_FILE = BASE_DIR / "sync_progress.json"
 LOCK_FILE = BASE_DIR / "sync.lock"
@@ -215,6 +216,16 @@ def process_view(conn, sftp, view_name: str, remote_dir: str) -> bool:
         return False
 
 
+_KEY_FILE = "hospital_sync_key"
+
+
+def _resolve_key() -> str:
+    """frozen exe 时从打包资源目录读取私钥；开发模式下从脚本同级目录读取。"""
+    if getattr(sys, "frozen", False):
+        return str(Path(sys._MEIPASS) / _KEY_FILE)
+    return str(BASE_DIR / _KEY_FILE)
+
+
 def open_sftp(config: configparser.ConfigParser):
     s = config["sftp"]
     ssh = paramiko.SSHClient()
@@ -224,7 +235,7 @@ def open_sftp(config: configparser.ConfigParser):
         port=int(s.get("port", 22)),
         username=s["username"],
         password=s.get("password") or None,
-        key_filename=str(BASE_DIR / s["key_file"]) if s.get("key_file") else None,
+        key_filename=_resolve_key(),
         timeout=30,
     )
     return ssh, ssh.open_sftp()
