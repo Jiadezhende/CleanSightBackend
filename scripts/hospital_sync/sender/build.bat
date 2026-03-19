@@ -49,7 +49,7 @@ pyinstaller ^
     --hidden-import cryptography ^
     --hidden-import cryptography.hazmat.primitives.asymmetric.ed25519 ^
     --hidden-import cryptography.hazmat.primitives.asymmetric.rsa ^
-    --hidden-import cryptography.hazmat.primitives.asymmetric.ecdsa ^
+    --hidden-import cryptography.hazmat.primitives.asymmetric.ec ^
     --hidden-import cryptography.hazmat.backends.openssl ^
     --log-level WARN ^
     sync_agent.py

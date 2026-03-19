@@ -89,15 +89,20 @@ def try_enable_snapshot(conn) -> bool:
     return snapshot_on
 
 
-def get_all_views(conn) -> list[str]:
+def get_all_views(conn, config: configparser.ConfigParser) -> list[str]:
+    ls = config["linked_server"]
     cursor = conn.cursor()
-    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS ORDER BY TABLE_NAME")
+    cursor.execute(
+        f"SELECT TABLE_NAME FROM [{ls['name']}].[{ls['database']}].INFORMATION_SCHEMA.VIEWS "
+        f"WHERE TABLE_SCHEMA = 'dbo' ORDER BY TABLE_NAME"
+    )
     return [row[0] for row in cursor.fetchall()]
 
 
-def export_view_to_csv(conn, view_name: str, csv_path: Path):
+def export_view_to_csv(conn, view_name: str, csv_path: Path, config: configparser.ConfigParser):
+    ls = config["linked_server"]
     cursor = conn.cursor()
-    cursor.execute(f"SELECT * FROM [{view_name}]")
+    cursor.execute(f"SELECT * FROM [{ls['name']}].[{ls['database']}].[dbo].[{view_name}]")
     columns = [desc[0] for desc in cursor.description]
 
     total = 0
@@ -195,13 +200,13 @@ def save_progress(progress: dict):
 
 # ─── 主流程 ────────────────────────────────────────────────────────────────────
 
-def process_view(conn, sftp, view_name: str, remote_dir: str) -> bool:
+def process_view(conn, sftp, view_name: str, remote_dir: str, config: configparser.ConfigParser) -> bool:
     csv_path = TEMP_DIR / f"{view_name}.csv"
     gz_path = TEMP_DIR / f"{view_name}.csv.gz"
     remote_path = f"{remote_dir}/{view_name}.csv.gz"
 
     try:
-        export_view_to_csv(conn, view_name, csv_path)
+        export_view_to_csv(conn, view_name, csv_path, config)
         compress_file(csv_path, gz_path)
         csv_path.unlink()
 
@@ -284,8 +289,8 @@ def main():
         f.unlink(missing_ok=True)
 
     conn = get_db_connection(config)
-    use_snapshot = try_enable_snapshot(conn)
-    views = get_all_views(conn)
+    use_snapshot = False  # linked server views 不兼容 snapshot isolation，低频同步无需快照
+    views = get_all_views(conn, config)
     logging.info(f"found {len(views)} views in SQL Server")
 
     progress = load_progress()
@@ -301,7 +306,7 @@ def main():
             continue
 
         logging.info(f">>> {view_name}")
-        ok = process_view(conn, sftp, view_name, remote_dir)
+        ok = process_view(conn, sftp, view_name, remote_dir, config)
         if ok:
             progress["done"].append(view_name)
             save_progress(progress)
@@ -314,7 +319,7 @@ def main():
         still_failed = []
         for view_name in failed:
             logging.info(f">>> retry {view_name}")
-            ok = process_view(conn, sftp, view_name, remote_dir)
+            ok = process_view(conn, sftp, view_name, remote_dir, config)
             if ok:
                 progress["done"].append(view_name)
                 save_progress(progress)

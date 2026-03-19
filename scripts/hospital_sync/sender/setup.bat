@@ -124,6 +124,10 @@ echo username = !DB_USER!
 echo password = !DB_PASS!
 echo driver   = !DB_DRIVER!
 echo.
+echo [linked_server]
+echo name     = NJXX
+echo database = THIS4
+echo.
 echo [sftp]
 echo host       = 116.204.65.72
 echo port       = 22
