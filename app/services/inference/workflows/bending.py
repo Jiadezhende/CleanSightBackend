@@ -49,13 +49,9 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
     ) -> List[DetectionOutput]:
         """批量弯折检测，利用 YOLO 批量推理接口"""
-        first=True
         try:
             outputs = self._run_yolo_batch(frames)
             for output in outputs:
-                if first:
-                    logger.info(f"[BendingTask] First inference output: {output}")
-                    first=False
                 output.success = True
                 output.bending_detected = any(
                     "bending" in d.class_name.lower() for d in output.detections
