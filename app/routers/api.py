@@ -11,8 +11,10 @@
 - 负责 ClientManager 的清理
 """
 
+import asyncio
 import logging
 import time
+from typing import Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -30,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["unified"])
 
+# per-client 锁：保证同一 client_id 的 start/terminate 操作串行执行
+_client_locks: Dict[str, asyncio.Lock] = {}
+_client_locks_guard = asyncio.Lock()
+
+
+async def _get_client_lock(client_id: str) -> asyncio.Lock:
+    """获取指定 client_id 的异步锁（懒创建）"""
+    async with _client_locks_guard:
+        if client_id not in _client_locks:
+            _client_locks[client_id] = asyncio.Lock()
+        return _client_locks[client_id]
+
 
 class StartRequest(BaseModel):
     """启动请求"""
@@ -45,10 +59,8 @@ async def start(req: StartRequest):
     统一的启动接口（合并 load_task + start_rtsp_stream）
 
     流程：
-    1. 从数据库加载任务
-    2. 检测跨任务切换，清理旧数据
-    3. 设置新任务
-    4. 启动流
+    1. 从数据库加载任务（锁外执行，无并发风险）
+    2. 加锁后：幂等检查 / 跨任务切换清理 / 设置新任务 / 启动流
 
     Args:
         req: 包含 task_id, rtsp_url, fps 的启动请求
@@ -61,7 +73,7 @@ async def start(req: StartRequest):
     """
     db = None
     try:
-        # 1. 从数据库加载任务
+        # ── Phase 1: DB 查询 + 校验（锁外，无并发风险）──
         db = next(get_db())
         try:
             db_task = db.query(DBTask).filter(DBTask.task_id == req.task_id).first()
@@ -69,7 +81,7 @@ async def start(req: StartRequest):
             raise DatabaseError(
                 message=f"Failed to query task {req.task_id}",
                 retryable=True,
-                query=f"SELECT * FROM task WHERE task_id = {req.task_id}",
+                query="task_lookup_by_id",
             ) from e
 
         if not db_task:
@@ -88,58 +100,88 @@ async def start(req: StartRequest):
         client_id = source_ip
         logger.info(f"[start] Starting task {req.task_id} for client {client_id}")
 
-        # 2. 检测跨任务切换，清理旧数据
-        if client_manager.has_client(client_id):
-            cq = client_manager.get_client(client_id)
-            old_task_id = cq.get_task_id()
+        # ── Phase 2: 加锁，保护 client_id 相关的所有状态变更 ──
+        lock = await _get_client_lock(client_id)
+        async with lock:
+            # 2a. 幂等检查 + 跨任务切换
+            if client_manager.has_client(client_id):
+                cq = client_manager.get_client(client_id)
+                old_task_id = cq.get_task_id()
 
-            if old_task_id is not None and old_task_id != req.task_id:
-                # 跨任务切换：清理旧数据
-                logger.info(
-                    f"[start] Task changed for {client_id}: {old_task_id} → {req.task_id}, clearing old data"
-                )
-                removal_result = client_manager.remove_client(client_id, cleanup=True)
-                if removal_result["error"]:
-                    logger.warning(
-                        f"[start] Failed to clean old client data: {removal_result['error']}"
+                if old_task_id == req.task_id and stream_service.has_stream(client_id):
+                    # 同一任务重复 start → 幂等返回
+                    logger.info(
+                        f"[start] Task {req.task_id} already running for {client_id}, "
+                        f"idempotent return"
                     )
+                    return {
+                        "status": "success",
+                        "client_id": client_id,
+                        "task_id": req.task_id,
+                        "rtsp_url": req.rtsp_url,
+                        "message": f"Task {req.task_id} already running (idempotent)",
+                    }
 
-        # 3. 设置新任务
-        task = Task(
-            task_id=req.task_id,
-            current_step=str(db_task.current_step),
-            status="running",
-            updated_at=int(time.time()),
-            fully_submerged=False,
-            bending=False,
-            bubble_detected=False,
-        )
+                if old_task_id is not None and old_task_id != req.task_id:
+                    # 跨任务切换：完整 3 步清理（停流→落盘→清 ClientManager）
+                    logger.info(
+                        f"[start] Task changed for {client_id}: {old_task_id} → {req.task_id}, "
+                        f"performing full cleanup before starting new task"
+                    )
+                    monitor = get_health_monitor()
+                    if monitor:
+                        cleanup_result = monitor.cleanup_client(
+                            client_id=client_id,
+                            reason=f"task_switch:{old_task_id}->{req.task_id}",
+                        )
+                    else:
+                        cleanup_result = _manual_cleanup_fallback(client_id)
 
-        success = ai.set_task(client_id, task)
-        if not success:
-            raise AppError(
-                message=f"Failed to set task for client {client_id}",
-                client_id=client_id,
+                    if cleanup_result.get("errors"):
+                        logger.warning(
+                            f"[start] Cleanup during task switch had errors: "
+                            f"{cleanup_result['errors']}"
+                        )
+
+            # 2b. 设置新任务
+            task = Task(
+                task_id=req.task_id,
+                current_step=str(db_task.current_step),
+                status="running",
+                updated_at=int(time.time()),
+                fully_submerged=False,
+                bending=False,
+                bubble_detected=False,
             )
 
-        logger.info(
-            f"[start] Task set successfully: {client_id} -> task_id={req.task_id}"
-        )
+            success = ai.set_task(client_id, task)
+            if not success:
+                raise AppError(
+                    message=f"Failed to set task for client {client_id}",
+                    client_id=client_id,
+                )
 
-        # 4. 启动流
-        stream_service.start_stream(
-            client_id=client_id, stream_url=req.rtsp_url, fps=req.fps, protocol="RTSP"
-        )
+            logger.info(
+                f"[start] Task set successfully: {client_id} -> task_id={req.task_id}"
+            )
 
-        logger.info(f"[start] Stream started successfully: {client_id}")
+            # 2c. 启动流
+            stream_service.start_stream(
+                client_id=client_id,
+                stream_url=req.rtsp_url,
+                fps=req.fps,
+                protocol="RTSP",
+            )
 
-        return {
-            "status": "success",
-            "client_id": client_id,
-            "task_id": req.task_id,
-            "rtsp_url": req.rtsp_url,
-            "message": f"Task {req.task_id} started for client {client_id}",
-        }
+            logger.info(f"[start] Stream started successfully: {client_id}")
+
+            return {
+                "status": "success",
+                "client_id": client_id,
+                "task_id": req.task_id,
+                "rtsp_url": req.rtsp_url,
+                "message": f"Task {req.task_id} started for client {client_id}",
+            }
 
     finally:
         if db:
@@ -170,33 +212,36 @@ async def terminate(client_id: str):
     注意：
         - 采用"尽力而为"策略，即使某步骤失败也会继续执行后续步骤
         - 永不抛出异常，总是返回结果
+        - 与 start() 共用 per-client 锁，防止并发竞态
     """
-    logger.info(f"[terminate] Terminating client: {client_id}")
+    lock = await _get_client_lock(client_id)
+    async with lock:
+        logger.info(f"[terminate] Terminating client: {client_id}")
 
-    # 路由清理到健康监控（统一入口）
-    monitor = get_health_monitor()
-    if monitor:
-        result = monitor.cleanup_client(
-            client_id=client_id, reason="API termination request"
-        )
-    else:
-        # Fallback: 健康监控未初始化，执行手动清理
-        logger.warning(
-            "[terminate] Health monitor not initialized, using fallback cleanup"
-        )
-        result = _manual_cleanup_fallback(client_id)
+        # 路由清理到健康监控（统一入口）
+        monitor = get_health_monitor()
+        if monitor:
+            result = monitor.cleanup_client(
+                client_id=client_id, reason="API termination request"
+            )
+        else:
+            # Fallback: 健康监控未初始化，执行手动清理
+            logger.warning(
+                "[terminate] Health monitor not initialized, using fallback cleanup"
+            )
+            result = _manual_cleanup_fallback(client_id)
 
-    # 调整返回格式以匹配原有 API
-    if result["errors"]:
-        result["status"] = "partial_success"
-        logger.warning(
-            f"[terminate] Completed with errors: {client_id} - {result['errors']}"
-        )
-    else:
-        result["status"] = "success"
-        logger.info(f"[terminate] Terminated successfully: {client_id}")
+        # 调整返回格式以匹配原有 API
+        if result["errors"]:
+            result["status"] = "partial_success"
+            logger.warning(
+                f"[terminate] Completed with errors: {client_id} - {result['errors']}"
+            )
+        else:
+            result["status"] = "success"
+            logger.info(f"[terminate] Terminated successfully: {client_id}")
 
-    return result
+        return result
 
 
 def _manual_cleanup_fallback(client_id: str):
