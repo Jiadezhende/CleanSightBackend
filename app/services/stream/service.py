@@ -612,7 +612,7 @@ class StreamService:
             self.sel.close()
             logger.debug("[StreamService] Selector closed")
         except Exception as e:
-            logger.error(f"[StreamService] Error cleaning up selector: {e}")
+            logger.error("[StreamService] Error cleaning up selector: %s", e, exc_info=True)
 
     def shutdown(self):
         """
@@ -635,7 +635,7 @@ class StreamService:
             try:
                 self.stop_stream(client_id)
             except Exception as e:
-                logger.error(f"Error stopping stream {client_id}: {e}")
+                logger.error("Error stopping stream %s: %s", client_id, e, exc_info=True)
 
         logger.info("StreamService shutdown complete")
 

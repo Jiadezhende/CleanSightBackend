@@ -29,7 +29,7 @@ class StageFactory:
                 detectors.append(detector)
                 logger.info("✓ 成功创建 Detector: %s", model_cfg["name"])
             except Exception as e:
-                logger.error("✗ 创建 Detector 失败 %s: %s", model_cfg["name"], e)
+                logger.error("✗ 创建 Detector 失败 %s: %s", model_cfg["name"], e, exc_info=True)
 
         return detectors
 
@@ -69,7 +69,7 @@ class StageFactory:
                 )
             except Exception as e:
                 logger.error(
-                    "✗ 注册 TemporalAnalyzer 失败 %s: %s", model_cfg.get("name", "?"), e
+                    "✗ 注册 TemporalAnalyzer 失败 %s: %s", model_cfg.get("name", "?"), e, exc_info=True
                 )
 
         return specs

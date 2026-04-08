@@ -140,7 +140,7 @@ class InferenceManager:
                         "Please ensure inference_config.yaml contains at least one stage with valid models."
                     )
             except Exception as e:
-                logger.error("[InferenceManager] Failed to load config: %s", e)
+                logger.error("[InferenceManager] Failed to load config: %s", e, exc_info=True)
                 raise RuntimeError(
                     f"Failed to load inference configuration: {e}. "
                     "Please check inference_config.yaml and ensure it is properly configured."
@@ -415,7 +415,7 @@ class InferenceManager:
                     )
 
         except Exception as e:
-            logger.error("_flush_all_remaining_segments error for %s: %s", client_id, e)
+            logger.error("_flush_all_remaining_segments error for %s: %s", client_id, e, exc_info=True)
 
     def enqueue_alarm(self, alarm_info: Dict[str, Any]):
         self.persistence_manager.persist_alarm(alarm_info)

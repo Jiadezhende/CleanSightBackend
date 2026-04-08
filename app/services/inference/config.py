@@ -195,7 +195,7 @@ def load_stage_config(
         return inference_config
 
     except Exception as e:
-        logger.error("✗ 加载配置文件失败: %s，使用默认配置", e)
+        logger.error("✗ 加载配置文件失败: %s，使用默认配置", e, exc_info=True)
         default_config = _create_default_config()
         _global_inference_config = default_config
         return default_config

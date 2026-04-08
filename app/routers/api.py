@@ -269,7 +269,7 @@ def _manual_cleanup_fallback(client_id: str):
             logger.info(f"[terminate_fallback] Decoder stopped: {client_id}")
     except Exception as e:
         result["errors"].append(f"decoder: {e}")
-        logger.error(f"[terminate_fallback] Failed to stop decoder: {client_id} - {e}")
+        logger.error("[terminate_fallback] Failed to stop decoder: %s - %s", client_id, e, exc_info=True)
 
     # 2. 落盘残余数据
     try:
@@ -278,7 +278,7 @@ def _manual_cleanup_fallback(client_id: str):
         logger.info(f"[terminate_fallback] Data flushed: {client_id}")
     except Exception as e:
         result["errors"].append(f"flush: {e}")
-        logger.error(f"[terminate_fallback] Failed to flush data: {client_id} - {e}")
+        logger.error("[terminate_fallback] Failed to flush data: %s - %s", client_id, e, exc_info=True)
 
     # 3. 清理 ClientManager
     try:
@@ -290,8 +290,6 @@ def _manual_cleanup_fallback(client_id: str):
             logger.info(f"[terminate_fallback] ClientManager cleaned: {client_id}")
     except Exception as e:
         result["errors"].append(f"client_manager: {e}")
-        logger.error(
-            f"[terminate_fallback] Failed to clean ClientManager: {client_id} - {e}"
-        )
+        logger.error("[terminate_fallback] Failed to clean ClientManager: %s - %s", client_id, e, exc_info=True)
 
     return result

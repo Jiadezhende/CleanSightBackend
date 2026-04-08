@@ -235,7 +235,7 @@ class MultiModelWorkerPool:
                 )  # 平均每帧延迟
 
             except Exception as e:
-                print(f"[MultiModelWorkerPool] {model.name} infer_batch error: {e}")
+                logger.error("[MultiModelWorkerPool] %s infer_batch error: %s", model.name, e, exc_info=True)
 
                 # 记录推理失败
                 infer_failure_total.labels(

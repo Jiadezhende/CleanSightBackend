@@ -125,6 +125,6 @@ class ClientTemporalActor:
             except Exception as e:
                 logger.error(
                     "[TemporalActor-%s] finalize() failed for analyzer %s: %s",
-                    self._client_id, analyzer.name, e,
+                    self._client_id, analyzer.name, e, exc_info=True,
                 )
         return alarms
