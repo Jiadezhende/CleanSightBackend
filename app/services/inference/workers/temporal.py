@@ -17,6 +17,7 @@ from typing import List
 from app.services.inference.data_models import AlarmInfo
 from app.services.inference.models import AlarmRecord
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,8 @@ class ClientTemporalActor:
 
         self._stop_event = threading.Event()
         self._thread = threading.Thread(
-            target=self._run,
+            target=guarded_run,
+            args=(self._run, self._stop_event, f"TemporalActor-{client_id}"),
             daemon=True,
             name=f"TemporalActor-{client_id}",
         )

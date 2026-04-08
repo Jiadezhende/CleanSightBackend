@@ -15,6 +15,7 @@ from queue import Empty, Queue
 from app.services.persistence.models import AlarmPersistenceTask
 from app.services.persistence.strategies.alarm_strategy import AlarmPersistenceStrategy
 from app.utils import GuardedExecutor
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,9 @@ class AlarmWorkerPool:
 
         # 启动批量刷新线程
         self.flush_thread = threading.Thread(
-            target=self.flush_thread_worker.run, daemon=True
+            target=guarded_run,
+            args=(self.flush_thread_worker.run, self.stop_event, "AlarmFlushThread"),
+            daemon=True,
         )
         self.flush_thread.start()
 
@@ -198,7 +201,11 @@ class AlarmWorkerPool:
                 stop_event=self.stop_event,
                 worker_id=i,
             )
-            thread = threading.Thread(target=worker.run, daemon=True)
+            thread = threading.Thread(
+                target=guarded_run,
+                args=(worker.run, self.stop_event, f"AlarmWorker-{i}"),
+                daemon=True,
+            )
 
             self.workers.append(worker)
             self.threads.append(thread)

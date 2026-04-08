@@ -577,7 +577,7 @@ class GlobalHealthMonitor:
 
         职责边界：
         - 检测孤儿解码器（有 Decoder 但无 ClientQueues）
-        - 立即停止无用的解码器
+        - 立即停止并移除无用的解码器
 
         Args:
             client_id: 客户端ID
@@ -586,15 +586,15 @@ class GlobalHealthMonitor:
             f"[GlobalHealthMonitor] ORPHAN DECODER detected: {client_id}, "
             f"decoder running but no client queue found, stopping decoder"
         )
-        self._stats["orphans_detected"] += 1  # 累计统计：检测到孤儿的总次数
+        self._stats["orphans_detected"] += 1
 
-        # 只停止解码器（因为没有队列，无需清理其他资源）
+        # 无条件调用 stop_stream()：即使进程已死（is_alive=False），
+        # 仍需从 decoders 字典中移除条目，否则下一轮检查会重复检测到孤儿。
         try:
-            if self._stream_service.has_stream(client_id):
-                self._stream_service.stop_stream(client_id)
-                logger.info(
-                    f"[GlobalHealthMonitor] Orphan decoder stopped: {client_id}"
-                )
+            self._stream_service.stop_stream(client_id)
+            logger.info(
+                f"[GlobalHealthMonitor] Orphan decoder stopped: {client_id}"
+            )
         except Exception as e:
             logger.error(
                 f"[GlobalHealthMonitor] Failed to stop orphan decoder: {client_id} - {e}"

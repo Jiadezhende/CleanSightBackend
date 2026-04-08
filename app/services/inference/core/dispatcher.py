@@ -15,6 +15,7 @@ from typing import Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.models import InferenceRequest
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,9 @@ class StageAwareDispatcher:
 
         self._stop_event.clear()
         self._dispatch_thread = threading.Thread(
-            target=self._dispatch_loop, daemon=True
+            target=guarded_run,
+            args=(self._dispatch_loop, self._stop_event, "StageAwareDispatcher"),
+            daemon=True,
         )
         self._dispatch_thread.start()
         logger.debug(
@@ -91,10 +94,7 @@ class StageAwareDispatcher:
             try:
                 self._fetch_and_dispatch_round()
             except Exception as e:
-                print(f"[StageAwareDispatcher] 异常: {e}")
-                import traceback
-
-                traceback.print_exc()
+                logger.error("[StageAwareDispatcher] Dispatch error: %s", e, exc_info=True)
 
             # 使用 Event.wait 可及时响应 stop 信号
             self._stop_event.wait(self.fetch_interval)

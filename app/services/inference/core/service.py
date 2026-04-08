@@ -25,6 +25,7 @@ from app.utils.exceptions import (
     ModelInferenceError,
 )
 from app.utils.metrics import gpu_oom_total
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +128,10 @@ class ModelWorkerService:
 
         # 为每个 stage 启动一个推理线程
         for stage in self.worker_pools.keys():
+            from functools import partial
             thread = threading.Thread(
-                target=self._inference_loop,
-                args=(stage,),
+                target=guarded_run,
+                args=(partial(self._inference_loop, stage), self._stop_event, f"InferWorker-{stage}"),
                 daemon=True,
                 name=f"InferWorker-{stage}",
             )
