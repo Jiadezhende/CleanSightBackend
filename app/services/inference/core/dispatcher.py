@@ -137,24 +137,8 @@ class StageAwareDispatcher:
                 self._stats["by_stage"][stage] += 1
 
     def _get_client_stage(self, client_id: str, cq: ClientQueues) -> str:
-        """获取客户端当前所处的 stage。
-
-        优先从 ClientState 读取，否则从 task 推断。
-        """
-        # 优先从 ClientState 读取（新架构）
-        if hasattr(cq, "state") and cq.state is not None:
-            return cq.state.get_stage()
-
-        # 兼容旧架构：从 task 的 current_step 推断 stage
-        if cq.task is not None:
-            step = getattr(cq.task, "current_step", None)
-            if step == "leak_test":
-                return "LEAK"
-            elif step == "cleaning":
-                return "CLEAN"
-
-        # 默认 stage
-        return "LEAK"
+        """获取客户端当前所处的 stage。"""
+        return cq.get_stage()
 
     def get_batch_for_stage(
         self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore

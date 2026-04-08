@@ -1,174 +1,128 @@
-"""temporal.py - 时序分析工作线程池（定时轮询架构）。
+"""temporal.py - per-client 时序分析 Actor。
+
+每个活跃 client 对应一个 ClientTemporalActor 实例，拥有独立线程。
+actor 由 InferenceManager 在 set_task() 时创建，在 remove_client() 时停止。
 
 职责：
-- 按固定间隔（tick_interval）轮询所有活跃客户端
-- 读取 ClientQueues.slide_window 执行时序分析
-- 更新 ClientQueues.latest_temporal（events 列表）
+- 持有该 client 所有 TemporalAnalyzer 实例（每 Analyzer 自带 self._sm）
+- 按固定间隔（tick_interval）执行时序分析
 - 产出告警 → persistence + ClientQueues.alarm_log
+- 在 finalize_and_stop() 时收集结算告警
 """
 
 import logging
 import threading
-import time
-from typing import Any, Dict, List, Optional
+from typing import List
 
-from app.services.client import client_manager
+from app.services.inference.data_models import AlarmInfo
 from app.services.inference.models import AlarmRecord
+from app.services.inference.workflows.analyzer import TemporalAnalyzer
 
 logger = logging.getLogger(__name__)
 
 
-class TemporalWorker:
-    """时序分析工作线程（定时轮询模式）。
+class ClientTemporalActor:
+    """per-client 时序分析 actor。
 
-    独立于上游 InferenceLoop，按 tick_interval 遍历所有活跃客户端，
-    读取各自的 slide_window 执行时序分析。
+    每个 client 独立一个实例，故障互不影响。
+    状态机（_sm）封装在各 TemporalAnalyzer 内部，actor 不持有外部 sm 字典。
     """
 
     def __init__(
         self,
-        stop_event: threading.Event,
-        worker_id: int = 0,
-        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        client_id: str,
+        cq,                              # ClientQueues
+        stage: str,
+        analyzers: List[TemporalAnalyzer],
         tick_interval: float = 1.0,
     ):
-        self.stop_event = stop_event
-        self.worker_id = worker_id
-        self.stage_configs = stage_configs or {}
-        self.tick_interval = tick_interval
+        self._client_id = client_id
+        self._cq = cq
+        self._stage = stage
+        self._analyzers = analyzers
+        self._tick_interval = tick_interval
 
-    def run(self):
-        """工作循环：固定间隔轮询所有客户端。"""
-        logger.debug("[TemporalWorker-%d] Started (tick=%.1fs)", self.worker_id, self.tick_interval)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"TemporalActor-{client_id}",
+        )
 
-        while not self.stop_event.is_set():
-            tick_start = time.time()
+    def start(self) -> None:
+        self._thread.start()
+        logger.debug("[TemporalActor-%s] Started (tick=%.1fs)", self._client_id, self._tick_interval)
+
+    def finalize_and_stop(self) -> List[AlarmInfo]:
+        """停止 actor 线程，然后收集结算告警。
+
+        调用方须确保在 remove_client() 流程中先调用此方法，
+        再清理 ClientQueues，保证 _sm 读取时无并发写入。
+        """
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+        return self._collect_settlement_alarms()
+
+    # ──────────────────────────────────────────
+    # 内部实现
+    # ──────────────────────────────────────────
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._tick_interval):
             try:
                 self._tick()
             except Exception as e:
-                logger.error("[TemporalWorker-%d] Tick exception: %s", self.worker_id, e, exc_info=True)
-
-            # 睡眠至下一个 tick
-            elapsed = time.time() - tick_start
-            sleep_time = max(0, self.tick_interval - elapsed)
-            if sleep_time > 0:
-                self.stop_event.wait(sleep_time)
-
-        logger.debug("[TemporalWorker-%d] Stopped", self.worker_id)
-
-    def _tick(self):
-        """一次轮询：遍历所有活跃客户端执行时序分析。"""
-        all_clients = client_manager.get_all_clients()
-        for client_id, cq in all_clients.items():
-            try:
-                self._process_client(client_id, cq)
-            except Exception as e:
                 logger.error(
-                    "[TemporalWorker-%d] Error processing client %s: %s",
-                    self.worker_id, client_id, e, exc_info=True,
+                    "[TemporalActor-%s] Tick error: %s", self._client_id, e, exc_info=True
                 )
+        logger.debug("[TemporalActor-%s] Stopped", self._client_id)
 
-    def _process_client(self, client_id: str, cq) -> None:
-        """处理单个客户端的时序分析。"""
-        stage = cq.state.get_stage()
-        stage_cfg = self.stage_configs.get(stage, {})
-        tasks = stage_cfg.get("models", [])
-        if not tasks:
-            return
-
+    def _tick(self) -> None:
         all_events: List[str] = []
-        all_alarms = []
+        all_alarms: List[AlarmInfo] = []
 
-        for task in tasks:
-            window = cq.get_slide_window(task.name)
+        for analyzer in self._analyzers:
+            window = self._cq.get_slide_window(analyzer.name)
             if not window:
                 continue
-
-            # 时序分析（含边沿去抖 + 告警评估），单一调用
-            events, alarms = task.analyze_temporal(window, cq.state)
+            events, alarms = analyzer.analyze_temporal(window)
             all_events.extend(events)
             all_alarms.extend(alarms)
 
-        # 更新 cq.latest_temporal（仅事件列表）
-        cq.set_latest_temporal(all_events)
+        self._cq.set_latest_temporal(all_events)
 
-        # 告警 → persistence + alarm_log
         if all_alarms:
-            self._persist_and_log_alarms(all_alarms, cq, client_id, stage)
+            self._persist_alarms(all_alarms)
 
-    def _persist_and_log_alarms(
-        self, alarms: list, cq, client_id: str, stage: str
-    ) -> None:
-        """将告警入队 persistence + 写入 cq.alarm_log。"""
+    def _persist_alarms(self, alarms: List[AlarmInfo]) -> None:
         from app.services.persistence import persistence_manager
 
-        task_id = cq.get_task_id()
+        task_id = self._cq.get_task_id()
         for alarm in alarms:
-            # 持久化上报
             persistence_manager.persist_alarm({
                 "task_id": task_id,
-                "stage": stage,
-                "client_id": client_id,
+                "stage": self._stage,
+                "client_id": self._client_id,
                 "alarm_type": alarm.alarm_type,
                 "alarm_level": alarm.alarm_level,
                 "alarm_message": alarm.alarm_message,
                 "detection_result": alarm.metadata if alarm.metadata else None,
             })
-
-            # 内存告警日志
-            record = AlarmRecord(
+            self._cq.append_alarm_record(AlarmRecord(
                 alarm_type=alarm.alarm_type,
                 alarm_level=alarm.alarm_level,
                 alarm_message=alarm.alarm_message,
                 metadata=alarm.metadata or {},
-            )
-            cq.append_alarm_record(record)
+            ))
 
-
-class TemporalWorkerPool:
-    """时序分析线程池（定时轮询模式）。"""
-
-    def __init__(
-        self,
-        num_workers: int = 1,
-        stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
-        tick_interval: float = 1.0,
-    ):
-        self.num_workers = num_workers
-        self.stage_configs = stage_configs or {}
-        self.tick_interval = tick_interval
-
-        self._stop_event = threading.Event()
-        self._workers: list[threading.Thread] = []
-
-    def start(self):
-        """启动线程池。"""
-        for i in range(self.num_workers):
-            worker = TemporalWorker(
-                stop_event=self._stop_event,
-                worker_id=i,
-                stage_configs=self.stage_configs,
-                tick_interval=self.tick_interval,
-            )
-
-            thread = threading.Thread(
-                target=worker.run,
-                daemon=True,
-                name=f"TemporalWorker-{i}",
-            )
-            thread.start()
-            self._workers.append(thread)
-
-        logger.info(
-            "[TemporalWorkerPool] Started %d workers (tick=%.1fs)",
-            self.num_workers, self.tick_interval,
-        )
-
-    def stop(self):
-        """停止线程池。"""
-        self._stop_event.set()
-
-        for thread in self._workers:
-            thread.join(timeout=2.0)
-
-        logger.debug("[TemporalWorkerPool] Stopped")
+    def _collect_settlement_alarms(self) -> List[AlarmInfo]:
+        alarms: List[AlarmInfo] = []
+        for analyzer in self._analyzers:
+            try:
+                alarms.extend(analyzer.finalize())
+            except Exception as e:
+                logger.error(
+                    "[TemporalActor-%s] finalize() failed for analyzer %s: %s",
+                    self._client_id, analyzer.name, e,
+                )
+        return alarms

@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from app.services.inference.workflows import InferenceWorkflow
+from app.services.inference.workflows import Detector
 from app.services.inference.data_models import DetectionOutput
 from app.services.inference.models import InferenceRequest, InferenceResult
 from app.utils.metrics import infer_failure_total, infer_latency_ms
@@ -45,7 +45,7 @@ class MultiModelWorkerPool:
     def __init__(
         self,
         stage: str,
-        models: Sequence[InferenceWorkflow],
+        models: Sequence[Detector],
         use_cuda_stream: bool = True,
     ):
         """
