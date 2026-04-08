@@ -23,6 +23,7 @@ from app.services.inference.workflows.detector import Detector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.data_models import (
     AlarmInfo,
+    AlarmType,
     Detection,
     DetectionOutput,
     VisualizationData,
@@ -168,7 +169,7 @@ class MockAnalyzer(TemporalAnalyzer):
             self._sm["alarming"] = True
             self._sm["alarm_count"] += 1
             alarms.append(AlarmInfo(
-                alarm_type="mock_alarm",
+                alarm_type=AlarmType.MOCK,
                 alarm_level="low",
                 alarm_message=f"Mock detection triggered ({consecutive} consecutive frames)",
                 metadata={

@@ -27,9 +27,9 @@ class StageFactory:
             try:
                 detector = _instantiate_from_config(model_cfg)
                 detectors.append(detector)
-                logger.info("✓ 成功创建 Detector: %s", model_cfg["name"])
+                logger.info("✓ 成功创建 Detector: %s", model_cfg.get("name", "?"))
             except Exception as e:
-                logger.error("✗ 创建 Detector 失败 %s: %s", model_cfg["name"], e, exc_info=True)
+                logger.error("✗ 创建 Detector 失败 %s: %s", model_cfg.get("name", "?"), e, exc_info=True)
 
         return detectors
 
@@ -65,7 +65,7 @@ class StageFactory:
                 kwargs = model_cfg.get("analyzer_params") or {}
                 specs.append((cls, kwargs))
                 logger.info(
-                    "✓ 注册 TemporalAnalyzer spec: %s", model_cfg["name"]
+                    "✓ 注册 TemporalAnalyzer spec: %s", model_cfg.get("name", "?")
                 )
             except Exception as e:
                 logger.error(

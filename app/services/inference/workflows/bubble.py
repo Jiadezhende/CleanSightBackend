@@ -22,6 +22,7 @@ from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.data_models import (
     AlarmInfo,
+    AlarmType,
     DetectionOutput,
     VisualizationData,
     VisItem,
@@ -237,7 +238,7 @@ class BirthRateAnalyzer(TemporalAnalyzer):
         if is_triggered and not self._sm["alarming"]:
             self._sm["alarming"] = True
             alarms.append(AlarmInfo(
-                alarm_type="process_violation",
+                alarm_type=AlarmType.PROCESS_VIOLATION,
                 alarm_level="high",
                 alarm_message=f"持续产生新气泡（birth_rate={birth_rate:.2f}），疑似漏气",
                 metadata={"birth_rate": birth_rate, "threshold": self.birth_rate_threshold},

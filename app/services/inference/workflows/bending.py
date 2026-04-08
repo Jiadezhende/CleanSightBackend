@@ -21,6 +21,7 @@ from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.data_models import (
     AlarmInfo,
+    AlarmType,
     DetectionOutput,
     VisualizationData,
     VisItem,
@@ -204,7 +205,7 @@ class DebounceAnalyzer(TemporalAnalyzer):
         bend_actions = self._sm["bend_actions"]
         if bend_actions < self.required_bend_actions:
             return [AlarmInfo(
-                alarm_type="process_violation",
+                alarm_type=AlarmType.PROCESS_VIOLATION,
                 alarm_level="warning",
                 alarm_message=(
                     f"弯曲动作不足：完成 {bend_actions} 次，"

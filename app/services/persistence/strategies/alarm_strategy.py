@@ -15,6 +15,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
+from app.services.inference.data_models import AlarmType
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ class AlarmPersistenceStrategy:
         payload = {
             "task_id": alarm_info.get("task_id", 0),
             "step_id": step_id,
-            "alarm_type": alarm_info.get("alarm_type", "流程违规"),
+            "alarm_type": alarm_info.get("alarm_type", AlarmType.PROCESS_VIOLATION),
             "alarm_level": alarm_info.get("alarm_level", "high"),
             "alarm_message": alarm_info.get("alarm_message", "AI推理检测到异常"),
             "alarm_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

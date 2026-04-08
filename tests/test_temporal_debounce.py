@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from app.services.inference.data_models import Detection, DetectionOutput
+from app.services.inference.data_models import AlarmType, Detection, DetectionOutput
 
 
 # ========== Fixtures ==========
@@ -78,7 +78,7 @@ class TestBubbleEdgeTrigger:
         window = make_window([5, 5, 5])
         events, alarms = analyzer.analyze_temporal(window)
         assert len(alarms) == 1
-        assert alarms[0].alarm_type == "process_violation"
+        assert alarms[0].alarm_type == AlarmType.PROCESS_VIOLATION
         assert analyzer._sm["alarming"] is True
 
     def test_sustained_no_repeat_alarm(self, analyzer):

@@ -479,6 +479,7 @@ class GlobalHealthMonitor:
             cq: ClientQueues 实例
             task_age: 任务已运行时长（秒）
         """
+        from app.services.inference.data_models import AlarmType
         from app.services.inference.models import AlarmRecord
         from app.services.persistence import persistence_manager
 
@@ -500,7 +501,7 @@ class GlobalHealthMonitor:
             "task_id": task_id,
             "stage": None,
             "client_id": client_id,
-            "alarm_type": "任务超时",
+            "alarm_type": AlarmType.TASK_TIMEOUT,
             "alarm_level": "critical",
             "alarm_message": alarm_message,
             "detection_result": {
@@ -511,7 +512,7 @@ class GlobalHealthMonitor:
 
         # 写入内存告警日志（供前端实时展示）
         cq.append_alarm_record(AlarmRecord(
-            alarm_type="任务超时",
+            alarm_type=AlarmType.TASK_TIMEOUT,
             alarm_level="critical",
             alarm_message=alarm_message,
             metadata={

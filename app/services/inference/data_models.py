@@ -16,6 +16,7 @@
 """
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -93,13 +94,20 @@ class VisItem:
     extra: Dict[str, Any] = field(default_factory=dict)  # 扩展数据
 
 
+class AlarmType(str, Enum):
+    """告警类型枚举 — value 为外部持久化使用的中文字符串"""
+    PROCESS_VIOLATION = "流程违规"
+    TASK_TIMEOUT = "任务超时"
+    MOCK = "mock_alarm"                  # 仅测试用
+
+
 @dataclass
 class AlarmInfo:
     """告警信息
-    
+
     由 InferenceWorkflow.analyze_temporal() 在边沿触发时产出
     """
-    alarm_type: str                      # 告警类型（如"流程违规"）
+    alarm_type: AlarmType                # 告警类型
     alarm_level: str                     # 告警级别: "low", "medium", "high", "critical"
     alarm_message: str                   # 告警消息
     metadata: Dict[str, Any] = field(default_factory=dict)  # 额外元数据

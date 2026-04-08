@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from app.models.frame import FrameData
+from app.services.inference.data_models import AlarmType
 
 
 @dataclass
@@ -54,7 +55,7 @@ class AlarmPersistenceTask:
             task_id=data.get("task_id"),
             stage=data.get("stage"),
             client_id=data.get("client_id"),
-            alarm_type=data.get("alarm_type", "流程违规"),
+            alarm_type=data.get("alarm_type", AlarmType.PROCESS_VIOLATION),
             alarm_level=data.get("alarm_level", "high"),
             alarm_message=data.get("alarm_message", "AI推理检测到异常"),
             detection_result=data.get("detection_result"),
