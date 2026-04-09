@@ -306,82 +306,10 @@ class APIClient:
     def check_health(self) -> bool:
         """检查 API 是否可用"""
         try:
-            response = requests.get(f"{self.base_url}/ai/status", timeout=2)
+            response = requests.get(f"{self.base_url}/health/status", timeout=2)
             return response.status_code == 200
         except Exception:
             return False
-
-    def start_rtmp_capture(
-        self, client_id: str, rtmp_url: str, fps: int = 30
-    ) -> Dict[str, Any]:
-        """启动 RTMP 捕获"""
-        url = f"{self.base_url}/inspection/start_rtmp_stream"
-        payload = {"client_id": client_id, "rtmp_url": rtmp_url, "fps": fps}
-
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
-
-    def stop_rtmp_capture(self, client_id: str) -> Dict[str, Any]:
-        """停止 RTMP 捕获"""
-        url = f"{self.base_url}/inspection/stop_rtmp_stream?client_id={client_id}"
-        try:
-            response = requests.post(url, timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
-
-    def start_rtsp_capture(
-        self, client_id: str, rtsp_url: str, fps: int = 30
-    ) -> Dict[str, Any]:
-        """启动 RTSP 捕获"""
-        url = f"{self.base_url}/inspection/start_rtsp_stream"
-        payload = {"client_id": client_id, "rtsp_url": rtsp_url, "fps": fps}
-
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
-
-    def stop_rtsp_capture(self, client_id: str) -> Dict[str, Any]:
-        """停止 RTSP 捕获"""
-        url = f"{self.base_url}/inspection/stop_rtsp_stream?client_id={client_id}"
-        try:
-            response = requests.post(url, timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
-
-    def start_task(self, task_id: int) -> Dict[str, Any]:
-        """加载任务到 AI 服务"""
-        url = f"{self.base_url}/ai/load_task/{task_id}"
-        try:
-            response = requests.get(url, timeout=10)
-            print(f"加载任务响应: {response.text}")
-            response.raise_for_status()
-            try:
-                return response.json()
-            except Exception:
-                return {"text": response.text}
-        except Exception as e:
-            return {"error": str(e)}
-
-    def terminate_task(self, client_id: str) -> Dict[str, Any]:
-        """终止任务（通过 client_id）- 旧接口，仅清理推理资源"""
-        url = f"{self.base_url}/ai/terminate_task/{client_id}"
-        try:
-            response = requests.post(url, timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
 
     def unified_start(
         self, task_id: int, rtsp_url: str, fps: int = 30
@@ -408,17 +336,6 @@ class APIClient:
             return response.json()
         except Exception as e:
             return {"error": str(e)}
-
-    def get_ai_status(self) -> Dict[str, Any]:
-        """获取 AI 服务状态"""
-        url = f"{self.base_url}/ai/status"
-        try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
-
 
 def check_hls_files(client_id: str, task_id: int) -> Dict[str, Any]:
     """检查 HLS 文件是否生成"""

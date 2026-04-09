@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from app.routers import ai, api, health, inspection, task
+from app.routers import ai, api, health, task
 from app.utils import (
     AppError,
     ConflictError,
@@ -70,6 +70,9 @@ app = FastAPI(
     description="AI-powered inspection of the endoscope cleaning process at Changhai Hospital",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
@@ -83,7 +86,6 @@ app.add_middleware(
 app.include_router(api.router)  # 统一API（优先注册）
 app.include_router(health.router)  # 健康监控
 app.include_router(ai.router)
-app.include_router(inspection.router)
 app.include_router(task.router)
 
 
