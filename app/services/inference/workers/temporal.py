@@ -55,6 +55,10 @@ class ClientTemporalActor:
         self._thread.start()
         logger.debug("[TemporalActor-%s] Started (tick=%.1fs)", self._client_id, self._tick_interval)
 
+    def signal_stop(self) -> None:
+        """向 actor 线程发送停止信号（非阻塞）。"""
+        self._stop_event.set()
+
     def finalize_and_stop(self) -> List[AlarmInfo]:
         """停止 actor 线程，然后收集结算告警。
 

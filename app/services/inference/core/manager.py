@@ -443,12 +443,26 @@ class InferenceManager:
             self._model_worker_service.stop()
 
         # 停止所有 actor，等待线程退出后再停止下游服务
-        actors = list(self._actors.values())
-        for actor in actors:
-            actor._stop_event.set()
-        for actor in actors:
-            actor._thread.join(timeout=2.0)
+        actors = list(self._actors.items())   # [(client_id, actor), ...]
         self._actors.clear()
+
+        # Phase 1: 并行发出停止信号（非阻塞）
+        for _, actor in actors:
+            actor.signal_stop()
+
+        # Phase 2: 逐个 join，收集并持久化结算告警
+        for client_id, actor in actors:
+            try:
+                settlement = actor.finalize_and_stop()
+                if settlement:
+                    cq = client_manager.get_client(client_id)
+                    if cq:
+                        self._persist_settlement_alarms(client_id, cq, settlement)
+            except Exception as e:
+                logger.warning(
+                    "[InferenceManager] Settlement alarms on stop failed for %s: %s",
+                    client_id, e,
+                )
 
         self.visualization_pool.stop()
         self.persistence_manager.stop(timeout=10.0)

@@ -44,7 +44,7 @@
             "stream": "ext://sys.stdout"
         },
         "file_info": {
-            "class": "logging.handlers.TimedRotatingFileHandler",
+            "class": "concurrent_log_handler.ConcurrentTimedRotatingFileHandler",
             "formatter": "file",
             "filename": "logs/cleansight-info.log",
             "when": "midnight",
@@ -54,7 +54,7 @@
             "level": "INFO"
         },
         "file_warning": {
-            "class": "logging.handlers.TimedRotatingFileHandler",
+            "class": "concurrent_log_handler.ConcurrentTimedRotatingFileHandler",
             "formatter": "file",
             "filename": "logs/cleansight-warning.log",
             "when": "midnight",
@@ -64,7 +64,7 @@
             "level": "WARNING"
         },
         "file_error": {
-            "class": "logging.handlers.TimedRotatingFileHandler",
+            "class": "concurrent_log_handler.ConcurrentTimedRotatingFileHandler",
             "formatter": "file",
             "filename": "logs/cleansight-error.log",
             "when": "midnight",
