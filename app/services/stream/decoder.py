@@ -127,13 +127,23 @@ class FFmpegDecoder:
             # 快速检查进程是否立即崩溃
             time.sleep(0.1)  # 给进程一点启动时间
             if self.proc.poll() is not None:
-                # 进程已经退出
                 exit_code = self.proc.returncode
+                # 读取 stderr 以获取详细错误信息
+                stderr_output = ""
+                try:
+                    if self.proc.stderr:
+                        raw = self.proc.stderr.read()
+                        if raw:
+                            stderr_output = raw.decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    pass
                 self.logger.error(
-                    f"FFmpeg process exited immediately with code {exit_code}"
+                    "FFmpeg process exited immediately with code %d\nstderr: %s",
+                    exit_code,
+                    stderr_output or "<empty>",
                 )
                 raise FFmpegError(
-                    message=f"FFmpeg process failed to start",
+                    message=f"FFmpeg process failed to start (exit_code={exit_code})",
                     client_id=self.client_id,
                     exit_code=exit_code,
                 )
