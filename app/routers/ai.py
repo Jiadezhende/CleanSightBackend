@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models.frame import ProcessedFrame
 from app.models.task import DBTask, Task, TaskStatusResponse
 from app.services import ai
+from app.services.stream import stream_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 logger = logging.getLogger(__name__)
@@ -25,9 +26,12 @@ async def lifespan():
     try:
         yield
     finally:
-        # 停止 AI 推理服务
+        # 停止 AI 推理服务（含结算告警落盘）
         ai.stop()
         logger.info("[AIRouter] Inference service stopped")
+        # 推理停止后再终止流解码器（保证 in-flight 帧处理完毕）
+        stream_service.shutdown()
+        logger.info("[AIRouter] Stream service stopped")
 
 
 @router.websocket("/video")

@@ -206,9 +206,11 @@ class FFmpegDecoder:
                     if line_str:
                         self.logger.debug("ffmpeg stderr: %s", line_str)
                 except Exception:
-                    pass
+                    pass  # 单行解码失败可忽略
+        except ValueError:
+            pass  # pipe closed during stop() — expected on reconnect/shutdown
         except Exception:
-            pass
+            self.logger.error("stderr reader loop crashed", exc_info=True)
 
     def _windows_reader_loop(self):
         """On Windows use a separate thread to read stdout (blocking)."""

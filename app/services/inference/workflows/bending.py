@@ -1,4 +1,15 @@
-"""内镜弯折检测任务"""
+"""弯折检测：BendingDetector + DebounceAnalyzer
+
+BendingDetector（推理线程）：
+    YOLO11n-det 检测内镜先端状态（straight / bent）。
+    无状态，多 Client 共享同一实例。
+
+DebounceAnalyzer（时序线程）：
+    5 帧去抖状态机，统计 STRAIGHT→BENT 转换次数（bend_actions）。
+    实时阶段只产出 events（进度 overlay），不上报告警。
+    任务 terminate 时：bend_actions < required → 产出 warning 结算告警。
+    有状态，每个 Client 独立实例化。
+"""
 
 import logging
 import time
@@ -6,10 +17,11 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from app.services.client.state import ClientState
-from app.services.inference.workflows.infer_workflow import YOLOWorkflow
+from app.services.inference.workflows.detector import YOLODetector
+from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.data_models import (
     AlarmInfo,
+    AlarmType,
     DetectionOutput,
     VisualizationData,
     VisItem,
@@ -19,12 +31,10 @@ from app.services.inference.data_models import (
 logger = logging.getLogger(__name__)
 
 
-class EndoscopeBendingDetectionTask(YOLOWorkflow):
-    """内镜弯折检测任务
+# ====== 推理线程：Detector ======
 
-    时序逻辑：滑动窗口2秒，70%比例触发事件
-    告警逻辑：触发事件时上报告警
-    """
+class BendingDetector(YOLODetector):
+    """内镜弯折检测器（YOLO11n-det）。无状态，多 Client 共享。"""
 
     def __init__(
         self,
@@ -40,32 +50,27 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
             iou_threshold=iou_threshold,
             enabled=enabled,
         )
-        self.window_seconds = 2.0
-        self.trigger_ratio = 0.7
-
-    # ====== 1. 检测（覆盖 infer_batch 以添加业务字段）======
 
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
     ) -> List[DetectionOutput]:
-        """批量弯折检测，利用 YOLO 批量推理接口"""
         try:
             outputs = self._run_yolo_batch(frames)
             for output in outputs:
                 output.success = True
                 output.bending_detected = any(
-                    "bending" in d.class_name.lower() for d in output.detections
+                    d.class_name == "bent" for d in output.detections
                 )
                 output.detection_count = len(output.detections)
             return outputs
         except Exception as e:
-            logger.error(f"[BendingTask] Batch inference failed: {e}, fallback to single", exc_info=True)
+            logger.error("[BendingDetector] Batch inference failed, fallback: %s", e, exc_info=True)
             results = []
             for f, c in zip(frames, contexts):
                 try:
                     output = self.infer(f, c)
                     output.bending_detected = any(
-                        "bending" in d.class_name.lower() for d in output.detections
+                        d.class_name == "bent" for d in output.detections
                     )
                     output.detection_count = len(output.detections)
                     results.append(output)
@@ -79,82 +84,15 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
                     ))
             return results
 
-    # ====== 2. 时序分析（含边沿去抖 + 告警评估） ======
-
-    def analyze_temporal(
-        self, window: List[DetectionOutput], state: ClientState,
-    ) -> Tuple[List[str], List[AlarmInfo]]:
-        """弯折时序分析：滑动窗口2s内70%比例触发事件，边沿触发告警"""
-        if not window:
-            return [], []
-
-        # ① 计算时序特征（只做一次）
-        latest_ts = window[-1].timestamp
-        cutoff = latest_ts - self.window_seconds
-        recent = [out for out in window if out.timestamp >= cutoff]
-
-        bending_flags = [
-            any(
-                "bending" in d.class_name.lower()
-                for d in out.detections
-            )
-            for out in recent
-        ]
-
-        detected_ratio = sum(bending_flags) / len(bending_flags) if bending_flags else 0.0
-
-        # ② 更新检测指标计数器
-        latest = window[-1]
-        bending_now = any(
-            "bending" in d.class_name.lower()
-            for d in latest.detections
-        )
-        if bending_now:
-            state.increment_counter("bending_total")
-
-        # ③ 事件列表（前端展示）
-        is_triggered = detected_ratio >= self.trigger_ratio
-        events = [f"Bending detected in {detected_ratio:.0%} of sliding window"] if is_triggered else []
-
-        # ④ 边沿触发：只在 0→1 跳变时投递告警
-        alarms: List[AlarmInfo] = []
-        was_alarming = state.get_counter("bending_alarming", 0) > 0
-
-        if is_triggered and not was_alarming:
-            # rising edge → 发出告警
-            state.increment_counter("bending_alarming")
-            state.increment_counter("bending_alarm_count")
-            alarms.append(AlarmInfo(
-                alarm_type="process_violation",
-                alarm_level="high",
-                alarm_message="Endoscope bending anomaly detected (sliding window triggered)",
-                metadata={
-                    "window_ratio": detected_ratio,
-                    "bending_count": state.get_counter("bending_total", 0),
-                },
-            ))
-        elif not is_triggered and was_alarming:
-            # falling edge → 复位，下次可重新触发
-            state.reset_counter("bending_alarming")
-
-        return events, alarms
-
-    # ====== 3. 可视化数据准备 ======
-
-    def prepare_visualization_data(
-        self, output: DetectionOutput,
-    ) -> VisualizationData:
-        """准备弯折可视化数据"""
+    def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
         items = []
         for det in output.detections:
-            is_bending = "bending" in det.class_name.lower()
-
             if det.class_name == "bending_debug_box":
-                color = (255, 0, 255)  # 洋红色（调试框）
-            elif is_bending:
-                color = (0, 0, 255)    # 红色（弯折）
+                color = (255, 0, 255)
+            elif det.class_name == "bent":
+                color = (0, 0, 255)
             else:
-                color = (0, 255, 0)    # 绿色（正常）
+                color = (0, 255, 0)
 
             items.append(VisItem(
                 bbox=det.bbox,
@@ -163,16 +101,12 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
                 color=color,
             ))
 
-        bending_now = any(
-            "bending" in d.class_name.lower()
-            for d in output.detections
-        )
-
-        if bending_now:
-            status_text = "BENDING!"
+        is_bent = any(d.class_name == "bent" for d in output.detections)
+        if is_bent:
+            status_text = "BENT"
             status_color = (0, 0, 255)
         else:
-            status_text = "Normal"
+            status_text = "STRAIGHT"
             status_color = (0, 255, 0)
 
         return VisualizationData(
@@ -182,3 +116,104 @@ class EndoscopeBendingDetectionTask(YOLOWorkflow):
             status_color=status_color,
             status_position="top-left",
         )
+
+
+# ====== 时序线程：TemporalAnalyzer ======
+
+class DebounceAnalyzer(TemporalAnalyzer):
+    """弯折去抖时序分析器。有状态，每个 Client 独立实例化。
+
+    状态机（self._sm）：
+        state: "STRAIGHT" | "BENT"
+        consec_bent: 连续检测到 bent 的帧数
+        consec_straight: 连续未检测到 bent 的帧数
+        bend_actions: STRAIGHT→BENT 完成次数（累计）
+        last_ts: 游标，已处理到的最新帧 timestamp
+    """
+
+    def __init__(
+        self,
+        debounce_frames: int = 5,
+        required_bend_actions: int = 4,
+    ):
+        super().__init__(name="bending")
+        self.debounce_frames = debounce_frames
+        self.required_bend_actions = required_bend_actions
+        self._sm = {
+            "state": "STRAIGHT",
+            "consec_bent": 0,
+            "consec_straight": 0,
+            "bend_actions": 0,
+            "last_ts": 0.0,
+        }
+
+    def analyze_temporal(
+        self, window: List[DetectionOutput],
+    ) -> Tuple[List[str], List[AlarmInfo]]:
+        if not window:
+            return [], []
+        self._advance(window)
+        bend_actions = self._sm["bend_actions"]
+        return self._evaluate(bend_actions)
+
+    def _advance(self, window: List[DetectionOutput]) -> None:
+        """游标推进：仅处理上次 tick 之后的新帧，逐帧驱动状态机。"""
+        last_ts = self._sm["last_ts"]
+        new_frames = [f for f in window if f.timestamp > last_ts]
+        if not new_frames:
+            return
+
+        for frame in new_frames:
+            has_bent = any(d.class_name == "bent" for d in frame.detections)
+
+            if self._sm["state"] == "STRAIGHT":
+                if has_bent:
+                    self._sm["consec_bent"] += 1
+                    self._sm["consec_straight"] = 0
+                    if self._sm["consec_bent"] >= self.debounce_frames:
+                        self._sm["state"] = "BENT"
+                        self._sm["bend_actions"] += 1
+                        self._sm["consec_bent"] = 0
+                        logger.debug(
+                            "[bending] STRAIGHT→BENT (total=%d)", self._sm["bend_actions"]
+                        )
+                else:
+                    self._sm["consec_bent"] = 0
+
+            elif self._sm["state"] == "BENT":
+                if not has_bent:
+                    self._sm["consec_straight"] += 1
+                    self._sm["consec_bent"] = 0
+                    if self._sm["consec_straight"] >= self.debounce_frames:
+                        self._sm["state"] = "STRAIGHT"
+                        self._sm["consec_straight"] = 0
+                        logger.debug("[bending] BENT→STRAIGHT")
+                else:
+                    self._sm["consec_straight"] = 0
+
+        self._sm["last_ts"] = new_frames[-1].timestamp
+
+    def _evaluate(self, bend_actions: int) -> Tuple[List[str], List[AlarmInfo]]:
+        events = (
+            [f"弯曲动作 {bend_actions}/{self.required_bend_actions}"]
+            if bend_actions > 0 else []
+        )
+        return events, []  # 实时阶段不上报告警
+
+    def finalize(self) -> List[AlarmInfo]:
+        """结算：弯曲次数不足时上报 warning。"""
+        bend_actions = self._sm["bend_actions"]
+        if bend_actions < self.required_bend_actions:
+            return [AlarmInfo(
+                alarm_type=AlarmType.PROCESS_VIOLATION,
+                alarm_level="warning",
+                alarm_message=(
+                    f"弯曲动作不足：完成 {bend_actions} 次，"
+                    f"要求 {self.required_bend_actions} 次"
+                ),
+                metadata={
+                    "bend_actions": bend_actions,
+                    "required": self.required_bend_actions,
+                },
+            )]
+        return []

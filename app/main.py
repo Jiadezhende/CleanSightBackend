@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 
@@ -104,7 +105,7 @@ async def stream_error_handler(request: Request, exc: StreamConnectionError):
     3. 转换为 HTTP 503 状态码（Service Unavailable）
     """
     logger.error(
-        f"[BoundaryLayer3] Stream connection error: {exc}",
+        "[BoundaryLayer3] Stream connection error: %s", exc,
         exc_info=True,
         extra={
             "client_id": exc.client_id,
@@ -133,7 +134,7 @@ async def ffmpeg_error_handler(request: Request, exc: FFmpegError):
     3. 转换为 HTTP 500 状态码（Internal Server Error）
     """
     logger.error(
-        f"[BoundaryLayer3] FFmpeg error: {exc}",
+        "[BoundaryLayer3] FFmpeg error: %s", exc,
         exc_info=True,
         extra={
             "client_id": exc.client_id,
@@ -161,7 +162,7 @@ async def database_error_handler(request: Request, exc: DatabaseError):
     3. 转换为 HTTP 503 状态码（Service Unavailable）
     """
     logger.error(
-        f"[BoundaryLayer3] Database error: {exc}",
+        "[BoundaryLayer3] Database error: %s", exc,
         exc_info=True,
         extra={
             "client_id": exc.client_id,
@@ -189,7 +190,7 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
     3. 转换为 HTTP 500 状态码（Internal Server Error）
     """
     logger.error(
-        f"[BoundaryLayer3] Model inference error: {exc}",
+        "[BoundaryLayer3] Model inference error: %s", exc,
         exc_info=True,
         extra={
             "client_id": exc.client_id,
@@ -217,7 +218,7 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
     3. 转换为 HTTP 500 状态码（Internal Server Error）
     """
     logger.error(
-        f"[BoundaryLayer3] Persistence error: {exc}",
+        "[BoundaryLayer3] Persistence error: %s", exc,
         exc_info=True,
         extra={
             "client_id": exc.client_id,
@@ -245,7 +246,7 @@ async def not_found_error_handler(request: Request, exc: NotFoundError):
     3. 转换为 HTTP 404 状态码（Not Found）
     """
     logger.warning(
-        f"[BoundaryLayer3] Resource not found: {exc}",
+        "[BoundaryLayer3] Resource not found: %s", exc,
         extra={
             "resource_type": exc.resource_type,
             "resource_id": exc.resource_id,
@@ -274,7 +275,7 @@ async def validation_error_handler(request: Request, exc: ValidationError):
     3. 转换为 HTTP 400 状态码（Bad Request）
     """
     logger.warning(
-        f"[BoundaryLayer3] Validation error: {exc}",
+        "[BoundaryLayer3] Validation error: %s", exc,
         extra={
             "field": exc.field,
             "value": exc.value,
@@ -302,7 +303,7 @@ async def conflict_error_handler(request: Request, exc: ConflictError):
     3. 转换为 HTTP 409 状态码（Conflict）
     """
     logger.warning(
-        f"[BoundaryLayer3] Resource conflict: {exc}",
+        "[BoundaryLayer3] Resource conflict: %s", exc,
         extra={
             "client_id": exc.client_id,
             "resource_type": exc.resource_type,
@@ -333,7 +334,7 @@ async def cleansight_exception_handler(request: Request, exc: AppError):
     3. 转换为 HTTP 500 状态码（Internal Server Error）
     """
     logger.error(
-        f"[BoundaryLayer3] CleanSight exception: {exc}",
+        "[BoundaryLayer3] CleanSight exception: %s", exc,
         exc_info=True,
         extra={
             "client_id": exc.client_id,
@@ -362,7 +363,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
     4. 防止敏感信息泄露（不返回完整异常信息）
     """
     logger.error(
-        f"[BoundaryLayer3] Uncaught exception: {exc}",
+        "[BoundaryLayer3] Uncaught exception: %s", exc,
         exc_info=True,
         extra={
             "url": str(request.url),
@@ -433,8 +434,11 @@ def main():
 
         from app.settings import settings
 
-        logger.info(f"Listening on {settings.host}:{settings.port}")
-        logger.info(f"Log config: {settings.log_config}")
+        # 确保日志目录存在（TimedRotatingFileHandler 需要）
+        os.makedirs("logs", exist_ok=True)
+
+        logger.info("Listening on %s:%s", settings.host, settings.port)
+        logger.info("Log config: %s", settings.log_config)
 
         uvicorn.run(
             "app.main:app",
@@ -453,7 +457,7 @@ def main():
     except Exception as e:
         # 顶层边界捕获所有未处理异常
         logger.critical(
-            "=" * 60 + "\n" + f"[BoundaryLayer4] Fatal error in main: {e}\n" + "=" * 60,
+            "[BoundaryLayer4] Fatal error in main: %s", e,
             exc_info=True,
         )
         # Fail-Fast: 记录日志后退出

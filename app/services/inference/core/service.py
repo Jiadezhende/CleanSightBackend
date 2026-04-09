@@ -25,6 +25,7 @@ from app.utils.exceptions import (
     ModelInferenceError,
 )
 from app.utils.metrics import gpu_oom_total
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +128,10 @@ class ModelWorkerService:
 
         # 为每个 stage 启动一个推理线程
         for stage in self.worker_pools.keys():
+            from functools import partial
             thread = threading.Thread(
-                target=self._inference_loop,
-                args=(stage,),
+                target=guarded_run,
+                args=(partial(self._inference_loop, stage), self._stop_event, f"InferWorker-{stage}"),
                 daemon=True,
                 name=f"InferWorker-{stage}",
             )
@@ -213,27 +215,25 @@ class ModelWorkerService:
                 self._write_back_results(results)
 
                 # 调试日志（增加队列深度信息）
-                if len(batch) > 0:
+                if len(batch) > 0 and logger.isEnabledFor(logging.DEBUG):
                     fps = len(batch) / elapsed if elapsed > 0 else 0
                     logger.debug(
-                        f"[Worker-{stage}] Batch processed: "
-                        f"size={len(batch)}/{batch_size}, "
-                        f"time={elapsed*1000:.1f}ms, fps={fps:.1f}, "
-                        f"queue_depth={queue_depth}, timeout={timeout_ms:.1f}ms"
+                        "[Worker-%s] Batch processed: size=%d/%d, time=%.1fms, fps=%.1f, queue_depth=%d, timeout=%.1fms",
+                        stage, len(batch), batch_size, elapsed*1000, fps, queue_depth, timeout_ms
                     )
 
             except FrameDrop as e:
                 # 边界层 1: FrameDrop - 静默丢弃（warning级别）
                 logger.warning(
-                    f"[BoundaryLayer1][Worker-{stage}] Frame dropped: "
-                    f"client={e.client_id}, reason={e.reason}"
+                    "[BoundaryLayer1][Worker-%s] Frame dropped: client=%s, reason=%s",
+                    stage, e.client_id, e.reason
                 )
                 continue  # 继续处理下一批
 
             except ModelInferenceError as e:
                 # 边界层 1: 模型推理错误 - ERROR级别，记录上下文
                 logger.error(
-                    f"[BoundaryLayer1][Worker-{stage}] Model inference failed: {e}",
+                    "[BoundaryLayer1][Worker-%s] Model inference failed: %s", stage, e,
                     exc_info=True,
                     extra={
                         "client_id": e.client_id,
@@ -253,7 +253,7 @@ class ModelWorkerService:
             except AppError as e:
                 # 边界层 1: 其他应用异常 - ERROR级别
                 logger.error(
-                    f"[BoundaryLayer1][Worker-{stage}] Application error: {e}",
+                    "[BoundaryLayer1][Worker-%s] Application error: %s", stage, e,
                     exc_info=True,
                     extra={"client_id": getattr(e, "client_id", None)},
                 )
@@ -263,7 +263,7 @@ class ModelWorkerService:
             except Exception as e:
                 # 边界层 1: 未预期的异常 - CRITICAL级别
                 logger.critical(
-                    f"[BoundaryLayer1][Worker-{stage}] Unexpected error: {e}",
+                    "[BoundaryLayer1][Worker-%s] Unexpected error: %s", stage, e,
                     exc_info=True,
                 )
                 time.sleep(0.5)

@@ -1,18 +1,27 @@
 """
 推理工作流子模块
 
-包含工作流基类、检测器基础组件和具体检测任务实现
+Detector（无状态，推理线程 + 可视化线程）：
+    BubbleDetector, BendingDetector, MockDetector
+
+TemporalAnalyzer（有状态，时序线程，每 Client 独立实例）：
+    BirthRateAnalyzer, DebounceAnalyzer, MockAnalyzer
 """
 
-from .infer_workflow import InferenceWorkflow, YOLOWorkflow
-from .bending import EndoscopeBendingDetectionTask
-from .bubble import BubbleDetectionTask
-from .mock import MockDetectionTask
+from .detector import Detector, YOLODetector
+from .analyzer import TemporalAnalyzer
+from .bubble import BubbleDetector, BirthRateAnalyzer
+from .bending import BendingDetector, DebounceAnalyzer
+from .mock import MockDetector, MockAnalyzer
 
 __all__ = [
-    "InferenceWorkflow",
-    "YOLOWorkflow",
-    "EndoscopeBendingDetectionTask",
-    "BubbleDetectionTask",
-    "MockDetectionTask",
+    "Detector",
+    "YOLODetector",
+    "TemporalAnalyzer",
+    "BubbleDetector",
+    "BirthRateAnalyzer",
+    "BendingDetector",
+    "DebounceAnalyzer",
+    "MockDetector",
+    "MockAnalyzer",
 ]

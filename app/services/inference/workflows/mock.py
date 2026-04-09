@@ -1,20 +1,14 @@
-"""Mock 检测任务 —— 无荷载 CPU 试运行示例
+"""Mock 检测：MockDetector + MockAnalyzer
 
-用途：
-    在没有真实模型权重的 CPU 服务器上验证整条推理链路：
-    InferenceWorkflow → MultiModelWorkerPool → 时序分析 → 可视化
+用于无真实模型权重的 CPU 服务器验证推理链路。
 
-实现原理：
-    不依赖 YOLO / torch / ultralytics。
-    直接继承 InferenceWorkflow 基类，用纯 numpy 图像亮度启发式
-    模拟检测结果，完整走通三个核心接口：
-    1. infer()                    —— 返回合成 DetectionOutput
-    2. analyze_temporal()         —— 连续帧边沿触发告警（与 bubble 相同模式）
-    3. prepare_visualization_data()—— 生成状态栏覆盖层
+MockDetector（推理线程）：
+    纯 numpy 亮度启发式检测，无 YOLO 依赖。
+    无状态，多 Client 共享。
 
-替换为真实模型时：
-    改为继承 YOLOWorkflow，删除 infer() / infer_batch() 覆盖，
-    其余 analyze_temporal / prepare_visualization_data 保持不变。
+MockAnalyzer（时序线程）：
+    连续 N 帧检测到目标 → 边沿触发告警。
+    有状态，每个 Client 独立实例化。
 """
 
 from __future__ import annotations
@@ -25,10 +19,11 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from app.services.client.state import ClientState
-from app.services.inference.workflows.infer_workflow import InferenceWorkflow
+from app.services.inference.workflows.detector import Detector
+from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.data_models import (
     AlarmInfo,
+    AlarmType,
     Detection,
     DetectionOutput,
     VisualizationData,
@@ -38,60 +33,37 @@ from app.services.inference.data_models import (
 
 logger = logging.getLogger(__name__)
 
-# 模拟检测的虚拟类别
 _MOCK_CLASS_ID = 0
 _MOCK_CLASS_NAME = "mock_object"
 
 
-class MockDetectionTask(InferenceWorkflow):
-    """无荷载 Mock 检测任务，用于 CPU 服务器试运行。
+# ====== 推理线程：Detector ======
 
-    检测逻辑（纯 numpy，无模型）：
-        取帧中心 1/4 区域的灰度均值。
-        均值 < brightness_threshold → 视为"检测到目标"（模拟暗区异常）。
-        置信度 = 1.0 - mean/255（均值越低，置信度越高）。
+class MockDetector(Detector):
+    """Mock 检测器（纯 numpy，无模型）。无状态，多 Client 共享。
 
-    时序逻辑：
-        连续 consecutive_trigger 帧检测到目标 → 触发事件，边沿上报告警。
+    取帧中心 1/4 区域灰度均值，均值 < brightness_threshold 视为检测到目标。
     """
 
     def __init__(
         self,
         brightness_threshold: float = 100.0,
-        consecutive_trigger: int = 3,
         enabled: bool = True,
     ):
-        """
-        Args:
-            brightness_threshold: 中心区域灰度均值阈值。低于此值视为检测到目标。
-            consecutive_trigger:  连续检测到目标的帧数阈值，达到后触发事件。
-            enabled:              是否启用此任务。
-        """
         super().__init__(name="mock", enabled=enabled)
         self.brightness_threshold = brightness_threshold
-        self.consecutive_trigger = consecutive_trigger
-
-    # ====== 1. 检测（纯 numpy，无模型） ======
 
     def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
-        """单帧检测：基于中心区域亮度启发式生成合成检测结果。"""
         timestamp = time.time()
-
-        # 取中心 1/4 区域
         h, w = frame.shape[:2]
         cy1, cy2 = h // 4, 3 * h // 4
         cx1, cx2 = w // 4, 3 * w // 4
         center_crop = frame[cy1:cy2, cx1:cx2]
 
-        # 计算灰度均值
-        if center_crop.ndim == 3:
-            gray = np.mean(center_crop, axis=2)
-        else:
-            gray = center_crop.astype(float)
+        gray = np.mean(center_crop, axis=2) if center_crop.ndim == 3 else center_crop.astype(float)
         mean_brightness = float(np.mean(gray))
 
         detections: List[Detection] = []
-
         if mean_brightness < self.brightness_threshold:
             confidence = 1.0 - mean_brightness / 255.0
             detections.append(Detection(
@@ -116,75 +88,15 @@ class MockDetectionTask(InferenceWorkflow):
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
     ) -> List[DetectionOutput]:
-        """批量检测：逐帧调用 infer()（无 GPU，顺序执行）。"""
-        results = []
-        for frame, ctx in zip(frames, contexts):
-            output = self.infer(frame, ctx)
-            results.append(output)
-        return results
+        return [self.infer(frame, ctx) for frame, ctx in zip(frames, contexts)]
 
-    # ====== 2. 时序分析（连续帧边沿触发，与 bubble 相同模式） ======
-
-    def analyze_temporal(
-        self,
-        window: List[DetectionOutput],
-        state: ClientState,
-    ) -> Tuple[List[str], List[AlarmInfo]]:
-        """时序分析：连续 N 帧检测到目标 → 边沿触发告警。"""
-        if not window:
-            return [], []
-
-        # ① 计算时序特征：从最新帧往前统计连续检测到目标的帧数
-        consecutive = 0
-        for output in reversed(window):
-            if len(output.detections) > 0:
-                consecutive += 1
-            else:
-                break
-
-        # ② 更新累计计数器
-        latest = window[-1]
-        if len(latest.detections) > 0:
-            state.increment_counter("mock_total", delta=len(latest.detections))
-
-        # ③ 判断是否触发事件
-        is_triggered = consecutive >= self.consecutive_trigger
-        events = [f"mock_object detected in {consecutive} consecutive frames"] if is_triggered else []
-
-        # ④ 边沿触发：只在 0→1 跳变时投递告警
-        alarms: List[AlarmInfo] = []
-        was_alarming = state.get_counter("mock_alarming", 0) > 0
-
-        if is_triggered and not was_alarming:
-            state.increment_counter("mock_alarming")
-            state.increment_counter("mock_alarm_count")
-            alarms.append(AlarmInfo(
-                alarm_type="mock_alarm",
-                alarm_level="low",
-                alarm_message=f"Mock detection triggered ({consecutive} consecutive frames)",
-                metadata={
-                    "consecutive_frames": consecutive,
-                    "brightness": latest.metadata.get("mean_brightness"),
-                },
-            ))
-        elif not is_triggered and was_alarming:
-            # 下降沿：复位，允许下次重新触发
-            state.reset_counter("mock_alarming")
-
-        return events, alarms
-
-    # ====== 3. 可视化数据准备 ======
-
-    def prepare_visualization_data(
-        self, output: DetectionOutput,
-    ) -> VisualizationData:
-        """准备可视化数据：绘制检测框 + 状态栏。"""
+    def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
         items = [
             VisItem(
                 bbox=det.bbox,
                 label=f"[MOCK] {det.confidence:.2f}",
                 confidence=det.confidence,
-                color=(255, 128, 0),   # 橙色，便于与真实检测框区分
+                color=(255, 128, 0),
             )
             for det in output.detections
         ]
@@ -194,10 +106,10 @@ class MockDetectionTask(InferenceWorkflow):
 
         if detected:
             status_text = f"[MOCK] Detected (lum={brightness})"
-            status_color = (0, 128, 255)   # 橙色
+            status_color = (0, 128, 255)
         else:
             status_text = f"[MOCK] Clear (lum={brightness})"
-            status_color = (0, 200, 0)     # 绿色
+            status_color = (0, 200, 0)
 
         return VisualizationData(
             type=VisualizationType.BBOX,
@@ -206,3 +118,66 @@ class MockDetectionTask(InferenceWorkflow):
             status_color=status_color,
             status_position="top-left",
         )
+
+
+# ====== 时序线程：TemporalAnalyzer ======
+
+class MockAnalyzer(TemporalAnalyzer):
+    """Mock 时序分析器。有状态，每个 Client 独立实例化。
+
+    状态机（self._sm）：
+        alarming: 上升沿锁存
+        total: 累计检测到的目标数
+        alarm_count: 累计告警次数
+    """
+
+    def __init__(self, consecutive_trigger: int = 3):
+        super().__init__(name="mock")
+        self.consecutive_trigger = consecutive_trigger
+        self._sm = {
+            "alarming": False,
+            "total": 0,
+            "alarm_count": 0,
+        }
+
+    def analyze_temporal(
+        self, window: List[DetectionOutput],
+    ) -> Tuple[List[str], List[AlarmInfo]]:
+        if not window:
+            return [], []
+
+        # 从最新帧往前统计连续检测到目标的帧数
+        consecutive = 0
+        for output in reversed(window):
+            if len(output.detections) > 0:
+                consecutive += 1
+            else:
+                break
+
+        latest = window[-1]
+        if len(latest.detections) > 0:
+            self._sm["total"] += len(latest.detections)
+
+        is_triggered = consecutive >= self.consecutive_trigger
+        events = (
+            [f"mock_object detected in {consecutive} consecutive frames"]
+            if is_triggered else []
+        )
+        alarms: List[AlarmInfo] = []
+
+        if is_triggered and not self._sm["alarming"]:
+            self._sm["alarming"] = True
+            self._sm["alarm_count"] += 1
+            alarms.append(AlarmInfo(
+                alarm_type=AlarmType.MOCK,
+                alarm_level="low",
+                alarm_message=f"Mock detection triggered ({consecutive} consecutive frames)",
+                metadata={
+                    "consecutive_frames": consecutive,
+                    "brightness": latest.metadata.get("mean_brightness"),
+                },
+            ))
+        elif not is_triggered and self._sm["alarming"]:
+            self._sm["alarming"] = False
+
+        return events, alarms

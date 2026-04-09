@@ -80,7 +80,7 @@ class PersistenceConfig:
                 logger.info("✓ 已加载persistence配置: %s", config_path)
                 config = cls.from_dict(config_dict)
             except Exception as e:
-                logger.error("✗ 加载配置文件失败: %s，使用默认配置", e)
+                logger.error("✗ 加载配置文件失败: %s，使用默认配置", e, exc_info=True)
                 config = cls()
 
         # 从inference config读取共享参数（fps）

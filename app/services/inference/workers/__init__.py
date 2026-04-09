@@ -3,13 +3,12 @@ Worker 池模块
 """
 
 from .base import MultiModelWorkerPool
-from .temporal import TemporalWorker, TemporalWorkerPool
+from .temporal import ClientTemporalActor
 from .visualization import FixedVisualizer, VisualizationWorker, VisualizationWorkerPool
 
 __all__ = [
     "MultiModelWorkerPool",
-    "TemporalWorkerPool",
-    "TemporalWorker",
+    "ClientTemporalActor",
     "VisualizationWorkerPool",
     "VisualizationWorker",
     "FixedVisualizer",

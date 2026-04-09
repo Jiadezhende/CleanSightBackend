@@ -1,15 +1,15 @@
-# 推理服务阶段配置文件（简化版 - 新架构）
-# 
-# 新架构说明：
-# 1. 时序分析逻辑已下沉到每个 InferenceTask 的 analyze_temporal() 方法
-# 2. 可视化使用固定渲染器（FixedVisualizer），Task 只需提供 VisualizationData
-# 3. 告警评估在 Task 的 evaluate_alarms() 方法中实现
-# 4. YAML 配置只需声明 Task 列表和参数，无需配置 temporal_analyzer 和 visualizer
+# 推理服务阶段配置文件（Detector + TemporalAnalyzer 架构）
+#
+# 架构说明：
+# 1. 每个检测任务拆分为 Detector（无状态推理）+ TemporalAnalyzer（有状态时序分析）
+# 2. Detector 多 Client 共享同一实例，TemporalAnalyzer 每 Client 独立实例化
+# 3. 可视化使用固定渲染器（FixedVisualizer），Detector 只需提供 VisualizationData
+# 4. YAML 中声明 class/params（Detector）和 analyzer_class/analyzer_params（TemporalAnalyzer）
 #
 # 开发者只需：
-# 1. 创建 InferenceTask 子类
-# 2. 实现 4 个核心方法（infer, analyze_temporal, prepare_visualization_data, evaluate_alarms）
-# 3. 在 YAML 中声明 Task
+# 1. 创建 Detector 子类（实现 infer + prepare_visualization_data）
+# 2. 创建 TemporalAnalyzer 子类（实现 analyze_temporal，可选 override finalize）
+# 3. 在 YAML 中声明两者的 class 和 params
 
 stages:
   # ==================== LEAK 阶段（泄漏检测） ====================
@@ -18,20 +18,28 @@ stages:
     # 每个 Task 自带时序分析、可视化、告警逻辑
     models:
       - name: bubble_detection
-        class: app.services.inference.workflows.bubble.BubbleDetectionTask
+        class: app.services.inference.workflows.bubble.BubbleDetector
+        analyzer_class: app.services.inference.workflows.bubble.BirthRateAnalyzer
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
-          conf_threshold: 0.5
+          conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
+        analyzer_params:
+          birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
+          window_seconds: 3.0          # 滑动窗口时长（秒）
 
       - name: bending_detection
-        class: app.services.inference.workflows.bending.EndoscopeBendingDetectionTask
+        class: app.services.inference.workflows.bending.BendingDetector
+        analyzer_class: app.services.inference.workflows.bending.DebounceAnalyzer
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
-          conf_threshold: 0.6
+          conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
+        analyzer_params:
+          debounce_frames: 5           # 状态切换去抖帧数
+          required_bend_actions: 4     # 合格所需最少弯曲次数
 
     # 以下配置在新架构中已不需要（保留用于向后兼容）
     # temporal_analyzer:

@@ -121,7 +121,7 @@ def analyze_temporal(
         state.increment_counter("xxx_alarming")
         state.increment_counter("xxx_alarm_count")
         alarms.append(AlarmInfo(
-            alarm_type="流程违规",
+            alarm_type=AlarmType.PROCESS_VIOLATION,
             alarm_level="high",                    # low / medium / high / critical
             alarm_message="检测到 xxx 异常",
             metadata={"consecutive_frames": consecutive},
@@ -260,7 +260,7 @@ Detection(bbox=[x1, y1, x2, y2], confidence=0.9, class_id=0, class_name="bubble"
 DetectionOutput(detections=[...], metadata={...}, timestamp=time.time(), success=True)
 
 # 告警（analyze_temporal 在上升沿产出）
-AlarmInfo(alarm_type="流程违规", alarm_level="high", alarm_message="...", metadata={...})
+AlarmInfo(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="high", alarm_message="...", metadata={...})
 
 # 可视化数据（prepare_visualization_data 返回值）
 VisualizationData(type=VisualizationType.BBOX, items=[...],

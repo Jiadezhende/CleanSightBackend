@@ -5,6 +5,10 @@
         "default": {
             "format": "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
             "datefmt": "%H:%M:%S"
+        },
+        "file": {
+            "format": "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
         }
     },
     "handlers": {
@@ -12,27 +16,57 @@
             "class": "logging.StreamHandler",
             "formatter": "default",
             "stream": "ext://sys.stdout"
+        },
+        "file_info": {
+            "class": "logging.handlers.TimedRotatingFileHandler",
+            "formatter": "file",
+            "filename": "logs/cleansight-info.log",
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 7,
+            "encoding": "utf-8",
+            "level": "INFO"
+        },
+        "file_warning": {
+            "class": "logging.handlers.TimedRotatingFileHandler",
+            "formatter": "file",
+            "filename": "logs/cleansight-warning.log",
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 7,
+            "encoding": "utf-8",
+            "level": "WARNING"
+        },
+        "file_error": {
+            "class": "logging.handlers.TimedRotatingFileHandler",
+            "formatter": "file",
+            "filename": "logs/cleansight-error.log",
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 7,
+            "encoding": "utf-8",
+            "level": "ERROR"
         }
     },
     "loggers": {
         "uvicorn": {
-            "handlers": ["console"],
+            "handlers": ["console", "file_info", "file_warning", "file_error"],
             "level": "INFO",
             "propagate": false
         },
         "uvicorn.error": {
-            "handlers": ["console"],
+            "handlers": ["console", "file_info", "file_warning", "file_error"],
             "level": "INFO",
             "propagate": false
         },
         "uvicorn.access": {
-            "handlers": ["console"],
+            "handlers": ["console", "file_info", "file_warning", "file_error"],
             "level": "INFO",
             "propagate": false
         }
     },
     "root": {
-        "handlers": ["console"],
+        "handlers": ["console", "file_info", "file_warning", "file_error"],
         "level": "INFO"
     }
 }

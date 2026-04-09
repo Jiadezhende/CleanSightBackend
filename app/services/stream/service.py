@@ -612,11 +612,10 @@ class StreamService:
             self.sel.close()
             logger.debug("[StreamService] Selector closed")
         except Exception as e:
-            logger.error(f"[StreamService] Error cleaning up selector: {e}")
+            logger.error("[StreamService] Error cleaning up selector: %s", e, exc_info=True)
 
     def shutdown(self):
-        """
-        关闭服务，释放所有资源（清理代码）
+        """优雅关闭服务，同步等待所有 FFmpeg 解码器退出。
 
         注意：此方法包含 try/except 块是合理的，因为：
         1. 这是清理代码，需要尽可能完成所有步骤
@@ -625,17 +624,21 @@ class StreamService:
         """
         logger.info("Shutting down StreamService...")
 
-        # 注意：健康监控现在是全局服务，由应用生命周期管理，不在这里停止
-
-        # 停止所有流（只清理解码器，不清理 ClientManager）
+        # 原子地取走所有解码器，防止并发 stop_stream() 重复操作
         with self.lock:
-            client_ids = list(self.decoders.keys())
+            decoders = list(self.decoders.items())
+            self.decoders.clear()
 
-        for client_id in client_ids:
+        # 同步逐个停止，确保 FFmpeg 子进程在进程退出前被清理
+        for client_id, decoder in decoders:
             try:
-                self.stop_stream(client_id)
+                decoder.stop()
+                logger.debug("[StreamService] Decoder stopped: %s", client_id)
             except Exception as e:
-                logger.error(f"Error stopping stream {client_id}: {e}")
+                logger.error(
+                    "[StreamService] Error stopping decoder %s: %s",
+                    client_id, e, exc_info=True,
+                )
 
         logger.info("StreamService shutdown complete")
 
