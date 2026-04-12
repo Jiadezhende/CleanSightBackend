@@ -12,6 +12,7 @@ import os
 import selectors
 import threading
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse, urlunparse
 
 from app.utils import (
     ConflictError,
@@ -24,6 +25,32 @@ from app.utils import (
 from .decoder import FFmpegDecoder
 
 logger = logging.getLogger("app.services.stream.service")
+
+
+def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
+    """
+    将流 URL 中的代理端口替换为 MediaMTX 内部端口，使后端拉流绕过 RTSPProxy。
+
+    仅当 URL 端口与 proxy_port 完全匹配时才重写，不匹配则原样返回。
+    支持带 userinfo（rtsp://user:pass@host:port/path）的 URL。
+    """
+    parsed = urlparse(url)
+    if parsed.port != proxy_port:
+        return url
+
+    # Windows 上 localhost 可能解析为 ::1（IPv6），但 MediaMTX 只绑 127.0.0.1（IPv4）
+    host = parsed.hostname or ""
+    if host.lower() == "localhost":
+        host = "127.0.0.1"
+    new_netloc = f"{host}:{internal_port}"
+    if parsed.username:
+        creds = parsed.username
+        if parsed.password:
+            creds += f":{parsed.password}"
+        new_netloc = f"{creds}@{new_netloc}"
+
+    return urlunparse(parsed._replace(netloc=new_netloc))
+
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -143,6 +170,17 @@ class StreamService:
             logger.info(
                 f"[{client_id}] Starting stream: protocol={protocol}, url={stream_url}"
             )
+
+            # 内部拉流直连 MediaMTX，绕过 RTSPProxy
+            from app.settings import settings
+            rewritten = _rewrite_rtsp_url(
+                stream_url,
+                settings.mediamtx_proxy_port,
+                settings.mediamtx_internal_port,
+            )
+            if rewritten != stream_url:
+                logger.info(f"[{client_id}] Rewrote stream URL: {stream_url} → {rewritten}")
+                stream_url = rewritten
 
             # 创建或获取 ClientQueues
             client_queues = self._get_or_create_client_queues(client_id)
@@ -458,15 +496,24 @@ class StreamService:
         Raises:
             StreamConnectionError: 重启失败
         """
-        # 1. 停止旧的decoder（异步执行，避免阻塞健康监控线程）
+        # 1. 停止旧的decoder（同步 kill，确保旧进程在新进程启动前彻底退出）
+        # 背景：健康监控每 5s 重连一次，若旧进程仍在运行，新旧进程同时连接
+        # MediaMTX 同一路径（18004），与 Phase-2 push 的 ANNOUNCE 形成竞争，
+        # 导致 MediaMTX 路径建立被延迟。短超时 kill 可将竞争窗口控制在 <100ms。
         old_dec = None
         with self.lock:
             old_dec = self.decoders.get(client_id)
 
         if old_dec and old_dec.is_alive():
-            # 异步停止旧decoder
+            # 先强制 kill 旧 FFmpeg 进程（非阻塞，Windows TerminateProcess 立即返回），
+            # 消除旧进程与新进程/Phase-2 push 在 MediaMTX 同路径上的连接竞争。
+            # 随后异步 stop 负责关闭 pipe、等待 reader 线程退出等资源清理。
+            try:
+                if old_dec.proc and old_dec.proc.poll() is None:
+                    old_dec.proc.kill()
+            except Exception as e:
+                logger.debug(f"[{client_id}] kill old decoder failed: {e}")
             self._stop_decoder_async(old_dec, client_id)
-            logger.debug(f"[{client_id}] Async stopping old decoder for restart")
 
         # 2. 清理旧记录并创建新decoder（在锁内执行）
         with self.lock:

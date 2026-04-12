@@ -84,6 +84,27 @@ class Settings(BaseSettings):
     # 模型路径
     model_path: str = "./app/data"
 
+    # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
+    mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
+    mediamtx_internal_port: int = 18004  # MediaMTX 实际监听端口
+
+    # Gateway / 安全
+    gateway_enabled: bool = True
+    gateway_allowed_ips: str = ""       # 逗号分隔白名单，空=不限制
+    gateway_rate_limit: int = 60        # 每窗口最大请求数
+    gateway_rate_window: int = 60       # 窗口大小（秒）
+    gateway_health_rate_limit: int = 300  # /health/status 宽松限制
+    gateway_scan_threshold: int = 10    # 触发封禁的 404/405 次数
+    gateway_scan_window: int = 300      # 错误计数窗口（秒）
+    gateway_ban_duration: int = 3600    # 封禁时长（秒）
+
+    @property
+    def allowed_ips_set(self) -> frozenset:
+        """解析 gateway_allowed_ips 为 frozenset，空字符串返回空集合（不限制）"""
+        if not self.gateway_allowed_ips.strip():
+            return frozenset()
+        return frozenset(ip.strip() for ip in self.gateway_allowed_ips.split(",") if ip.strip())
+
     @property
     def env(self) -> str:
         """当前环境（dev/test/prod），由启动脚本通过 CLEANSIGHT_ENV 设定"""

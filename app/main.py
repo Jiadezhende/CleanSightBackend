@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app.routers import ai, api, health, task
@@ -65,6 +67,7 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
 
+
 app = FastAPI(
     title="CleanSight Backend",
     description="AI-powered inspection of the endoscope cleaning process at Changhai Hospital",
@@ -81,6 +84,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+# Gateway 注册在 CORS 之后 → Starlette 逆序包装 → Gateway 最先执行
+app.add_middleware(GatewayMiddleware)
 
 # 注册路由器
 app.include_router(api.router)  # 统一API（优先注册）
@@ -380,11 +385,6 @@ async def generic_exception_handler(request: Request, exc: Exception):
             "detail": "An unexpected error occurred. Please contact support if the issue persists.",
         },
     )
-
-
-@app.get("/")
-async def root():
-    return {"message": "Welcome to CleanSight Backend"}
 
 
 @app.get("/metrics")
