@@ -254,7 +254,7 @@ rtspTransports: [udp, multicast, tcp]
 # Available values are "no", "strict", "optional".
 rtspEncryption: "no"
 # Address of the TCP/RTSP listener. This is needed only when encryption is "no" or "optional".
-rtspAddress: 0.0.0.0:8004
+rtspAddress: 127.0.0.1:18004
 # Address of the TCP/TLS/RTSPS listener. This is needed only when encryption is "strict" or "optional".
 rtspsAddress: 0.0.0.0:8322
 # Address of the UDP/RTP listener. This is needed only when "udp" is in rtspTransports.
