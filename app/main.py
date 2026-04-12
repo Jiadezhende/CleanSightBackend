@@ -61,10 +61,12 @@ async def lifespan(app: FastAPI):
     # 2. AI 推理服务
     async with health.lifespan():
         async with ai.lifespan():
-            yield
-
-    # lifespan 退出时通知所有 WebSocket 主动断开
-    shutdown_event.set()
+            try:
+                yield
+            finally:
+                # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                shutdown_event.set()
 
 
 

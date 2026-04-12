@@ -23,12 +23,18 @@ async def lifespan():
     try:
         yield
     finally:
-        # 停止 AI 推理服务（含结算告警落盘）
-        ai.stop()
-        logger.info("[AIRouter] Inference service stopped")
-        # 推理停止后再终止流解码器（保证 in-flight 帧处理完毕）
-        stream_service.shutdown()
-        logger.info("[AIRouter] Stream service stopped")
+        # lifespan finally 执行时 uvicorn 已 cancel 所有 WebSocket 任务，
+        # 事件循环无其他等待方，直接同步调用即可。
+        try:
+            ai.stop()
+            logger.info("[AIRouter] Inference service stopped")
+        except Exception:
+            logger.exception("[AIRouter] Error stopping inference service")
+        try:
+            stream_service.shutdown()
+            logger.info("[AIRouter] Stream service stopped")
+        except Exception:
+            logger.exception("[AIRouter] Error shutting down stream service")
 
 
 @router.websocket("/video")
@@ -58,8 +64,23 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     shutdown_event: asyncio.Event = websocket.app.state.shutdown_event
 
+    # 后台接收任务：监听 CLOSE 帧或客户端断开。
+    # 当 uvicorn 优雅关闭时它会向 WebSocket 发送 CLOSE 帧，
+    # receive() 将返回 {"type": "websocket.disconnect"}，使本任务结束。
+    # 这样即使 shutdown_event 尚未置位，主循环也能及时退出。
+    async def _recv_until_disconnect():
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    return
+        except Exception:
+            return
+
+    disconnect_task = asyncio.create_task(_recv_until_disconnect())
+
     try:
-        while not shutdown_event.is_set():
+        while not shutdown_event.is_set() and not disconnect_task.done():
             processed_frame: ProcessedFrame = ai.get_result(client_id, as_model=True)  # type: ignore
 
             if processed_frame is None:
@@ -123,10 +144,19 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 )
                 break
 
+    except asyncio.CancelledError:
+        # uvicorn 超时后强制取消任务时触发（6s 优雅关闭超时）
+        # 不重新抛出：handler 正常返回，避免 uvicorn 记录 "Exception in ASGI application"
+        logger.info(f"[WebSocket] 任务被取消（服务关闭）: client_id={client_id}")
     except Exception:
         # 捕获并记录未预期异常，便于诊断
         logger.error(f"[WebSocket] 未捕获异常: client_id={client_id}", exc_info=True)
     finally:
+        disconnect_task.cancel()
+        try:
+            await asyncio.wait_for(disconnect_task, timeout=1.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
         try:
             await websocket.close()
         except Exception:
