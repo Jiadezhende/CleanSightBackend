@@ -198,16 +198,23 @@ class StreamService:
                 client_queues=client_queues,
             )
 
-            # 启动解码器（可能抛出 FFmpegError）
-            dec.start()
-
-            # 保存解码器
+            # 先注册解码器，再启动——健康监控可感知启动失败并触发重连
             self.decoders[client_id] = dec
             self.metrics[client_id] = {
                 "frames_received": 0,
                 "frames_dropped": 0,
                 "restarts": 0,
             }
+
+            try:
+                dec.start()
+            except Exception:
+                # start() 失败（如推流端尚未就绪），decoder 已注册，
+                # 健康监控会在下一个心跳检测到 is_alive=False 并进入重连模式
+                logger.warning(
+                    f"[{client_id}] Initial start failed, health monitor will retry"
+                )
+                raise
 
             logger.info(
                 f"[{client_id}] Stream started successfully (pid={getattr(dec.proc, 'pid', None)})"
