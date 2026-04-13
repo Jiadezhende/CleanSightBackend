@@ -291,31 +291,32 @@ class FFmpegDecoder:
                 if self.client_queues is not None:
                     queue_capacity = self.client_queues.get_ca_ready_capacity()
 
-                # 判断是否应该丢帧
-                if self._should_drop_frame(pending_count, queue_capacity):
+                # 判断是否应该丢帧（仅针对推理队列）
+                drop_inference = self._should_drop_frame(pending_count, queue_capacity)
+                if drop_inference:
                     self.frames_dropped += 1
                     # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
                     if self.frames_dropped % 100 == 0:
                         self.logger.debug(
-                            "[BACKPRESSURE] dropping frame (pending=%s/%s, dropped=%s)",
+                            "[BACKPRESSURE] dropping inference frame (pending=%s/%s, dropped=%s)",
                             pending_count,
                             queue_capacity,
                             self.frames_dropped,
                         )
-                    continue  # 跳过此帧，不写入任何队列
 
                 # 3. 写入队列（如果 client_queues 可用）
                 if self.client_queues is not None:
                     now = time.time()
                     frame_data_obj = FrameData(timestamp=now, frame=std)
 
-                    # 3.1 写入原始队列（全帧率，用于落盘）
+                    # 3.1 写入原始队列（全帧率，用于落盘；背压时也写入，保证 HLS 录制完整）
                     if self.client_queues.append_ca_raw(frame_data_obj):
                         self.frames_written_to_raw += 1
 
-                    # 3.2 写入推理队列（降频）
-                    if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
-                        self.frames_written_to_ready += 1
+                    # 3.2 写入推理队列（降频；背压时跳过）
+                    if not drop_inference:
+                        if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
+                            self.frames_written_to_ready += 1
 
                 self.frames_received += 1
 
