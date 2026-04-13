@@ -445,7 +445,7 @@ class StreamService:
 
             return {"url": dec.stream_url, "fps": dec.fps, "protocol": protocol}
 
-    @log_call(level=logging.INFO, log_args=True)
+    @log_call(level=logging.INFO, log_args=False)
     def restart_stream(
         self, client_id: str, stream_url: str, fps: int, protocol: str
     ) -> bool:
