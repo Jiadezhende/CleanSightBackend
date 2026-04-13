@@ -40,5 +40,8 @@ switch ($env.ToLower()) {
 
 Write-Host ""
 
+# 确保日志目录存在（log-config 在应用代码前加载，需提前创建）
+if (-not (Test-Path "logs")) { New-Item -ItemType Directory -Path "logs" | Out-Null }
+
 # 启动服务
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-config logging_config.json

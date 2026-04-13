@@ -165,7 +165,7 @@ class FFmpegDecoder:
                     "FFmpeg exited (code=%s): %s", exit_code, last_line or "(no output)"
                 )
                 raise FFmpegError(
-                    message=f"FFmpeg process failed to start",
+                    message=f"FFmpeg process failed to start (exit_code={exit_code})",
                     client_id=self.client_id,
                     exit_code=exit_code,
                 )
