@@ -98,6 +98,9 @@ class RateLimitStore:
         self._ban_window = ban_window
         self._violations: dict[str, deque] = {}
         self._lock = threading.Lock()
+        threading.Thread(
+            target=self._cleanup_loop, daemon=True, name="RateLimitStore-cleanup"
+        ).start()
 
     def is_allowed(self, ip: str) -> bool:
         with self._lock:
@@ -141,6 +144,24 @@ class RateLimitStore:
             return True
         return False
 
+    def _cleanup_loop(self) -> None:
+        while True:
+            time.sleep(self._window)
+            self._sweep()
+
+    def _sweep(self) -> None:
+        """驱逐所有窗口内已无活跃记录的 IP key，防止字典无限增长。"""
+        now = time.monotonic()
+        with self._lock:
+            cutoff_b = now - self._window
+            cutoff_v = now - self._ban_window
+            stale_b = [ip for ip, dq in self._buckets.items() if not dq or dq[-1] < cutoff_b]
+            for ip in stale_b:
+                del self._buckets[ip]
+            stale_v = [ip for ip, dq in self._violations.items() if not dq or dq[-1] < cutoff_v]
+            for ip in stale_v:
+                del self._violations[ip]
+
 
 # ============================================================================
 # Store: 反扫描检测
@@ -170,6 +191,9 @@ class AntiScanStore:
         self._whitelist = whitelist_store
         self._errors: dict[str, deque] = {}
         self._lock = threading.Lock()
+        threading.Thread(
+            target=self._cleanup_loop, daemon=True, name="AntiScanStore-cleanup"
+        ).start()
 
     def record_error(self, ip: str, status_code: int) -> None:
         if status_code not in self._TRACKED_CODES:
@@ -200,6 +224,20 @@ class AntiScanStore:
                 "[Gateway] Scan detected from %s (%d errors in %ds), banned",
                 ip, self._threshold, self._window,
             )
+
+    def _cleanup_loop(self) -> None:
+        while True:
+            time.sleep(self._window)
+            self._sweep()
+
+    def _sweep(self) -> None:
+        """驱逐所有窗口内已无活跃记录的 IP key，防止字典无限增长。"""
+        now = time.monotonic()
+        with self._lock:
+            cutoff = now - self._window
+            stale = [ip for ip, dq in self._errors.items() if not dq or dq[-1] < cutoff]
+            for ip in stale:
+                del self._errors[ip]
 
 
 # ============================================================================

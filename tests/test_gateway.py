@@ -121,6 +121,28 @@ class TestRateLimitStore:
         assert not store.is_allowed("3.3.3.3")
         assert store.is_allowed("4.4.4.4")  # 另一个 IP 不受影响
 
+    def test_sweep_evicts_stale_buckets(self):
+        store = RateLimitStore(limit=5, window=60)
+        store.is_allowed("1.2.3.4")
+        assert "1.2.3.4" in store._buckets
+        # 模拟时间快进超过 window，使 bucket 中的时间戳过期
+        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+            store._sweep()
+        assert "1.2.3.4" not in store._buckets
+
+    def test_sweep_evicts_stale_violations(self):
+        whitelist = IPWhitelistStore(allowed=frozenset(), ban_duration=3600)
+        store = RateLimitStore(
+            limit=1, window=60,
+            ban_store=whitelist, ban_threshold=5, ban_window=60,
+        )
+        store.is_allowed("1.2.3.4")  # 消耗配额
+        store.is_allowed("1.2.3.4")  # 触发超限，写入 _violations
+        assert "1.2.3.4" in store._violations
+        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+            store._sweep()
+        assert "1.2.3.4" not in store._violations
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: AntiScanStore
@@ -163,6 +185,17 @@ class TestAntiScanStore:
         for _ in range(4):
             antiscan.record_error("10.0.0.2", 404)
         assert whitelist.is_allowed("10.0.0.2")
+
+    def test_sweep_evicts_stale_errors(self):
+        whitelist, antiscan = self._make_stores(threshold=10, window=60)
+        # 触发 3 次 404（不达封禁阈值，key 保留在 _errors 中）
+        for _ in range(3):
+            antiscan.record_error("10.0.0.3", 404)
+        assert "10.0.0.3" in antiscan._errors
+        # 模拟时间快进超过 window，使 error 时间戳过期
+        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+            antiscan._sweep()
+        assert "10.0.0.3" not in antiscan._errors
 
 
 # ---------------------------------------------------------------------------
