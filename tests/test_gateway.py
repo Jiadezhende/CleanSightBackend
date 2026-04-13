@@ -24,7 +24,10 @@ def _make_settings(**overrides):
     s.allowed_ips_set = frozenset()   # 默认不限制
     s.gateway_rate_limit = 60
     s.gateway_rate_window = 60
-    s.gateway_health_rate_limit = 300
+    s.gateway_rate_ban_threshold = 5  # 速率超限违规 5 次触发封禁
+    s.gateway_rate_ban_window = 60
+    s.gateway_relaxed_prefixes = "/health,/task/message"
+    s.gateway_relaxed_rate_limit = 600
     s.gateway_scan_threshold = 10
     s.gateway_scan_window = 300
     s.gateway_ban_duration = 3600
@@ -42,7 +45,8 @@ def _reset_gateway():
         middleware._initialized = False
         middleware._whitelist = None
         middleware._ratelimit = None
-        middleware._health_ratelimit = None
+        middleware._relaxed_ratelimit = None
+        middleware._relaxed_prefixes = ()
         middleware._antiscan = None
     yield
 
@@ -130,6 +134,7 @@ class TestAntiScanStore:
         return whitelist, antiscan
 
     def test_404_triggers_ban_on_threshold(self):
+        # 路径枚举扫描：大量 404 达到阈值后触发封禁
         whitelist, antiscan = self._make_stores(threshold=3)
         for _ in range(3):
             antiscan.record_error("6.6.6.6", 404)
@@ -215,19 +220,37 @@ class TestGatewayMiddlewareHTTP:
         assert resp.status_code == 429
         assert resp.json()["error"] == "Too Many Requests"
 
-    async def test_health_path_uses_relaxed_limit(self):
+    async def test_relaxed_prefix_uses_relaxed_limit(self):
         gw = _find_gateway_middleware()
         assert gw is not None
 
-        # rate_limit=2（普通路径很紧），health_rate_limit=100（宽松）
-        _init_gw(gw, _make_settings(gateway_rate_limit=2, gateway_health_rate_limit=100))
+        # rate_limit=2（普通路径很紧），relaxed_rate_limit=100（宽松）
+        _init_gw(gw, _make_settings(gateway_rate_limit=2, gateway_relaxed_rate_limit=100))
         async with await self._client("127.0.0.1") as client:
             for _ in range(5):
                 resp = await client.get("/health/status")
-        # /health/status 用宽松桶，不应该 429
+        # /health/status 匹配 /health 前缀，走宽松 bucket，不应 429
         assert resp.status_code != 429
 
-    async def test_scan_triggers_ban(self):
+    async def test_task_message_uses_relaxed_limit(self):
+        """任务结束后前端持续轮询 /task/message，不应触发限流或封禁"""
+        gw = _find_gateway_middleware()
+        assert gw is not None
+
+        _init_gw(gw, _make_settings(
+            gateway_rate_limit=2,         # 普通路径很紧
+            gateway_relaxed_rate_limit=100,
+            gateway_scan_threshold=1000,  # 防干扰
+        ))
+        async with await self._client("127.0.0.1") as client:
+            for _ in range(10):
+                resp = await client.get("/task/message/test-client")
+        # /task/message/* 走宽松 bucket，不应 429，也不封禁
+        assert resp.status_code != 429
+        assert resp.status_code != 403
+
+    async def test_405_scan_triggers_ban(self):
+        """405（方法枚举）达到阈值后触发封禁"""
         gw = _find_gateway_middleware()
         assert gw is not None
 
@@ -238,11 +261,55 @@ class TestGatewayMiddlewareHTTP:
             gateway_rate_limit=1000,
         ))
         async with await self._client("127.0.0.1") as client:
-            # 触发 3 次 404，达到反扫描阈值
+            # GET /api/start → 405（该路由只接受 POST），触发 3 次反扫描计数
+            for _ in range(3):
+                await client.get("/api/start")
+            # IP 已封禁，下一次请求应返回 403
+            resp = await client.get("/health/status")
+        assert resp.status_code == 403
+
+    async def test_404_scan_triggers_ban(self):
+        """路径枚举扫描：大量 404 达到阈值后触发封禁"""
+        gw = _find_gateway_middleware()
+        assert gw is not None
+
+        _init_gw(gw, _make_settings(
+            gateway_scan_threshold=3,
+            gateway_scan_window=60,
+            gateway_ban_duration=3600,
+            gateway_rate_limit=1000,
+        ))
+        async with await self._client("127.0.0.1") as client:
+            # 模拟路径枚举：访问 3 个不存在的路径
             for _ in range(3):
                 await client.get("/nonexistent_path_xyz")
             # IP 已封禁，下一次请求应返回 403
             resp = await client.get("/health/status")
+        assert resp.status_code == 403
+
+    async def test_rate_limit_ban_escalation(self):
+        """速率超限持续违规达到阈值后触发封禁"""
+        gw = _find_gateway_middleware()
+        assert gw is not None
+
+        _init_gw(gw, _make_settings(
+            gateway_rate_limit=2,
+            gateway_rate_window=60,
+            gateway_rate_ban_threshold=3,   # 违规 3 次触发封禁
+            gateway_rate_ban_window=60,
+            gateway_scan_threshold=1000,    # 防止 405 干扰
+        ))
+        # 使用 /metrics（普通路径走 _ratelimit，有封禁升级）
+        # /health/status 走 _health_ratelimit，没有封禁升级
+        async with await self._client("127.0.0.1") as client:
+            # 消耗配额（2 次正常）
+            for _ in range(2):
+                await client.get("/metrics")
+            # 连续超限 3 次 → 触发封禁
+            for _ in range(3):
+                await client.get("/metrics")
+            # IP 已封禁，返回 403（不再是 429）
+            resp = await client.get("/metrics")
         assert resp.status_code == 403
 
 
@@ -260,10 +327,16 @@ def _init_gw(gw: GatewayMiddleware, mock_settings) -> None:
     gw._ratelimit = RateLimitStore(
         limit=mock_settings.gateway_rate_limit,
         window=mock_settings.gateway_rate_window,
+        ban_store=gw._whitelist,
+        ban_threshold=mock_settings.gateway_rate_ban_threshold,
+        ban_window=mock_settings.gateway_rate_ban_window,
     )
-    gw._health_ratelimit = RateLimitStore(
-        limit=mock_settings.gateway_health_rate_limit,
+    gw._relaxed_ratelimit = RateLimitStore(
+        limit=mock_settings.gateway_relaxed_rate_limit,
         window=mock_settings.gateway_rate_window,
+    )
+    gw._relaxed_prefixes = tuple(
+        p.strip() for p in mock_settings.gateway_relaxed_prefixes.split(",") if p.strip()
     )
     gw._antiscan = AntiScanStore(
         threshold=mock_settings.gateway_scan_threshold,
