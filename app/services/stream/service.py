@@ -357,8 +357,11 @@ class StreamService:
             decoder: FFmpegDecoder 实例
         """
         if self.sel is not None and decoder.proc and decoder.proc.stdout:
-            # 注销可能失败（例如已经注销过），不影响整体流程
-            self.sel.unregister(decoder.proc.stdout.fileno())
+            try:
+                self.sel.unregister(decoder.proc.stdout.fileno())
+            except KeyError:
+                # 已经注销过，或 start() 失败导致从未注册，均属正常
+                pass
 
     def _stop_decoder_async(self, decoder: FFmpegDecoder, client_id: str):
         """
