@@ -155,7 +155,7 @@ class FFmpegDecoder:
                 )
                 self.logger.debug("FFmpeg stderr:\n%s", stderr_output)
                 if is_transient:
-                    self.logger.warning("FFmpeg: stream not available — %s", last_line)
+                    self.logger.debug("FFmpeg: stream not available — %s", last_line)
                     raise StreamConnectionError(
                         url=self.stream_url,
                         client_id=self.client_id,
