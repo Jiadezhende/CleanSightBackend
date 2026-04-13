@@ -41,7 +41,7 @@ AUTO_CLEANUP_TIMEOUT = 45
 # 断流重连成功场景: gap 必须 < max_attempts×interval = 25s
 RECONNECT_GAP = 10
 # Scenario 6: 推流延迟默认值（秒）—— 必须 < 重连窗口 25s
-DELAYED_STREAM_DEFAULT = 8
+DELAYED_STREAM_DEFAULT = 3
 # Scenario 6: 等待重连成功的最大轮询时长（秒）
 RECONNECT_SUCCESS_TIMEOUT = 45
 
