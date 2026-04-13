@@ -1,13 +1,25 @@
 # StreamService 异常流转与边界层架构
 
+> **版本**: 2.0
+> **日期**: 2026-04-13
+
 ## 概述
 
 本文档详细说明 CleanSight Backend 中 StreamService 模块的异常来源、流转路径以及 4 个边界层的捕获职责。
 
 **核心原则**：
+
 - 业务代码保持纯净：只抛异常，不捕获异常
-- 重试逻辑在框架边界层（RetryExecutor）统一管理
+- 可由上层异步监控接管重连的路径（如 `start_stream`）**不再**走 RetryExecutor，首次失败即返回、不阻塞调用方
+- 其他需要同步重试的路径仍由 RetryExecutor（`GuardedExecutor`）统一管理
 - 异常捕获在 4 个边界层：Worker.run(), RetryExecutor, FastAPI handlers, main()
+
+## v2.0 变更摘要（2026-04-13）
+
+- **`start_stream` 去 RetryExecutor**：取消包装，首次 `decoder.start()` 失败仅记 WARNING 并 return，decoder 仍留在 `self.decoders` 中，由 `StreamHealthMonitor` 异步接管重连。消除双重重试导致的日志与行为不确定。
+- **`restart_stream` 从未经过 RetryExecutor**：由健康监控周期性调度，单次失败返回 False，监控下一周期会再试。本节 3.2 中对应段落仅保留作为"业务代码抛异常示例"。
+- **`StreamConnectionError` 语义收敛**：可重试（瞬态网络/推流端未就绪），日志级别 WARNING；`FFmpegError` 为致命（二进制错误/启动崩溃），日志级别 ERROR。详见 [STREAM_RECONNECT_IMPLEMENTATION.md](STREAM_RECONNECT_IMPLEMENTATION.md)。
+- **边界层 3 日志噪声降低**：移除 `exc_info=True` 与流 URL 打印，异常摘要已包含在 msg 中。
 
 ---
 
@@ -206,52 +218,53 @@ def _monitor_loop(self):
 
 ### 3.2 边界层 2：RetryExecutor - 框架边界层
 
-**职责**：统一管理重试逻辑，业务代码保持纯净
+**职责**：统一管理重试逻辑，业务代码保持纯净。
 
-#### 实现位置
+> **2026-04 更新**：`start_stream` **已不再走 RetryExecutor**。见本节下文的 "`start_stream` 非重试示例"。StreamService 中 RetryExecutor 的典型用例目前仅剩少数路径，保留本节的原因是它仍是其他 Service（DB/推理）继续使用的框架。
 
-##### (1) StreamService.start_stream()
+#### `start_stream` 非重试示例（v2.0 现状）
 
 ```python
-@log_call(level=logging.INFO, log_args=True)
-def start_stream(self, client_id: str, stream_url: str, fps: int = 30, protocol: str = 'RTMP'):
-    """服务层方法（调用框架边界层）"""
-    self._ensure_health_monitor()
-    return self.executor.execute(
-        func=lambda: self._start_stream_impl(client_id, stream_url, fps, protocol),
-        policy_name='stream'  # 固定延迟 3 秒，最多 5 次
-    )
+@log_call(level=logging.INFO, log_args=False)
+def start_stream(self, client_id: str, stream_url: str, fps: int = 30, protocol: str = "RTMP"):
+    """注册解码器并尝试首次启动。
+    decoder 注册成功后立即返回，不等待流连接结果。
+    首次 start() 若失败，健康监控会在下一个心跳周期发起重连。
+    """
+    self._start_stream_impl(client_id, stream_url, fps, protocol)
 
-def _start_stream_impl(self, client_id: str, stream_url: str, fps: int, protocol: str):
-    """业务代码（纯净，只抛异常）"""
+def _start_stream_impl(self, client_id, stream_url, fps, protocol):
     with self.lock:
-        if client_id in self.decoders:
-            existing = self.decoders[client_id]
-            if not existing.is_alive():
-                logger.warning(f"[{client_id}] Removing dead decoder before restart")
-                self._cleanup_dead_decoder_unsafe(client_id)
-            else:
-                # 业务逻辑：抛出异常（不捕获）
-                raise StreamConnectionError(
-                    url=stream_url,
-                    client_id=client_id,
-                    details="Stream already started"
-                )
-        # ... 其他业务逻辑
+        # ... 前置检查、URL 重写、创建 decoder ...
+
+        # 先注册，再启动——健康监控可感知启动失败并触发重连
+        self.decoders[client_id] = dec
+        try:
+            dec.start()
+        except Exception as e:
+            logger.warning(f"[{client_id}] Initial start failed: {e}")
+            return  # 不抛异常，不重试，让健康监控接管
 ```
 
-**位置**: [app/services/stream/service.py:142-220](../app/services/stream/service.py#L142-L220)
+**位置**: [app/services/stream/service.py:97-213](../app/services/stream/service.py#L97-L213)
 
-##### (2) StreamService.restart_stream()
+**为什么去掉 RetryExecutor**：原先 `start_stream()` 外层的 15s 指数退避与 `StreamHealthMonitor` 的 5s 周期重连形成双重机制，出现过"调用方被阻塞 ~40s 后返回失败，但健康监控已连上"的矛盾状态。现在调用方立刻返回 200，流的最终可用性交给健康监控保证。
+
+##### `restart_stream()` - 不使用 RetryExecutor（由健康监控调度）
 
 ```python
-@log_call(level=logging.INFO, log_args=True)
+@log_call(level=logging.INFO, log_args=False)
 def restart_stream(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
-    """服务层方法：重启流（调用框架边界层）"""
-    return self.executor.execute(
-        func=lambda: self._restart_stream_impl(client_id, stream_url, fps, protocol),
-        policy_name='stream'  # 固定延迟 3 秒，最多 5 次
-    )
+    """服务层方法：重启流（不使用 GuardedExecutor）
+
+    健康监控器按固定间隔调用，单次失败返回 False，下一周期再试。
+    """
+    try:
+        self._restart_stream_impl(client_id, stream_url, fps, protocol)
+        return True
+    except Exception as e:
+        logger.warning(f"[StreamService] restart_stream failed: {client_id}, error={str(e)[:100]}")
+        return False
 
 def _restart_stream_impl(self, client_id: str, stream_url: str, fps: int, protocol: str) -> bool:
     """业务代码：重启流实现（纯净，只抛异常）"""

@@ -27,7 +27,8 @@ app/
 ├── models/            # Pydantic API 模型 + SQLAlchemy ORM 模型
 ├── routers/           # HTTP/WS 路由层
 ├── services/          # 核心业务服务（见下方详细说明）
-└── utils/             # 框架工具（异常、重试、指标、上下文）
+└── utils/             # 框架工具（异常、重试、指标、上下文、网关中间件）
+mediamtx_gateway/      # RTSP TCP 代理网关（独立进程，详见 docs/API_GATEWAY.md）
 config/                # YAML 配置（各 Service 参数）
 docs/                  # 架构文档
 tests/                 # 单元 & 组件测试
@@ -43,17 +44,19 @@ integration_tests/     # 端到端集成测试
 | 文件 | 路由前缀 | 职责 |
 |------|---------|------|
 | `api.py` | `/api` | 统一入口：`POST /api/start`、`POST /api/terminate` |
-| `ai.py` | `/ai` | 推理服务：任务加载、WebSocket 推流 `/ai/video` |
-| `inspection.py` | `/inspection` | 流控制：启停 RTSP 流（旧接口，逐步废弃） |
+| `ai.py` | `/ai` | 推理服务：WebSocket 推流 `/ai/video` |
 | `task.py` | `/task` | 任务历史：溯源记录、告警查询 |
 | `health.py` | `/health` | 健康检查：系统状态、Prometheus 指标 |
+
+所有 HTTP/WS 请求先经过 `GatewayMiddleware`（[app/utils/gateway.py](app/utils/gateway.py)）做 IP 白名单、速率限制与反扫描检查，详见 [docs/API_GATEWAY.md](docs/API_GATEWAY.md)。`/docs` `/redoc` `/openapi.json` 已永久关闭。
 
 ### `app/services/` — 三大核心服务
 
 **1. `stream/` — 视频流服务**
 - 职责：FFmpeg 解码 RTSP/RTMP，向推理队列分发帧
 - 关键类：`FFmpegDecoder`（子进程包装）、`StreamHealthMonitor`（5s 心跳、最多重试 5 次）
-- 背压策略：队列 > 90% 时主动丢帧
+- 背压策略：队列 > 90% 时仅丢 `ca_ready`（推理），`ca_raw`（HLS 录制）继续写入
+- 重连：`start_stream()` 失败后 decoder 仍留在 `decoders` 字典中，由 `StreamHealthMonitor` 异步接管重连（不再经 `GuardedExecutor` 重试，消除双重机制）
 
 **2. `inference/` — 推理引擎**
 - 职责：多阶段 AI 推理 → 时序分析 → 可视化标注
@@ -74,7 +77,8 @@ integration_tests/     # 端到端集成测试
 | 文件 | 职责 |
 |------|------|
 | `exceptions.py` | 6 种自定义异常（retryable/fatal 标记） |
-| `executor.py` | `GuardedExecutor` — 统一重试框架（边界层 2） |
+| `executor.py` | `GuardedExecutor` — 统一重试框架（边界层 2；部分路径如 `start_stream` 已下线重试，改由上层异步监控接管） |
+| `gateway.py` | `GatewayMiddleware` — ASGI 安全中间件（IP 白名单 / 速率限制 / 反扫描） |
 | `decorators.py` | 日志装饰器 |
 | `metrics.py` | Prometheus 指标导出 |
 | `context.py` | 线程本地上下文（client_id、task_id） |
@@ -136,9 +140,11 @@ pytest tests/
 # 运行集成测试（需真实 RTSP 流）
 python integration_tests/local_full_pipeline_rtsp.py
 
-# 查看 API 文档
-http://localhost:8000/docs
+# 启动 RTSP TCP 代理网关（可选，对外部署使用）
+python -m mediamtx_gateway.main
 ```
+
+> 生产环境已永久关闭 `/docs`、`/redoc`、`/openapi.json`。接口清单见 [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md)。
 
 **新建检测 Workflow**：使用 `/infer-workflow` skill，自动按规范生成代码框架。
 

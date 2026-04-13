@@ -1,8 +1,62 @@
 # 推流断线重连与超时清理功能实现文档
 
-> **版本**: 2.0
-> **日期**: 2026-01-25
+> **版本**: 3.0
+> **日期**: 2026-04-13
 > **状态**: ✅ 已完成并测试
+
+---
+
+## v3.0 变更摘要（2026-04-13）
+
+v2.0 已经把 FFmpegDecoder.auto_restart 合并到 StreamHealthMonitor。v3.0 进一步解决"初始启动失败 → 健康监控无法接管"以及"start_stream 与健康监控双重重试"两个问题：
+
+### 1. decoder 先注册再 start（`start_stream` 流程改写）
+
+**文件**：[app/services/stream/service.py](../app/services/stream/service.py) (`_start_stream_impl`, L118-213)
+
+**问题**：v2.0 中 `decoder.start()` 成功后才写入 `self.decoders[client_id]`。首次 start 失败时 decoder 未注册，健康监控轮询到这个 client 时 `has_decoder=False`，走的是**孤儿 ClientQueues 清理路径**，而不是重连路径。表现为："推流还没起来时调了一次 /api/start，之后推流起来了，但系统始终不自动连上"。
+
+**修复**：先写入 `self.decoders[client_id] = dec`，再 `dec.start()`。start 失败时 decoder 留在字典中（`is_alive()` 为 False），健康监控会把它当作普通 idle decoder 进入 v2.0 的标准重连流程（5s × 最多 5 次）。
+
+### 2. 移除 start_stream 的 GuardedExecutor 重试
+
+**问题**：v2.0 的 `start_stream()` 外层包了 `GuardedExecutor`，按 15s 指数退避重试数次；同时 StreamHealthMonitor 自己也按 5s 周期重连。两套机制同时跑会出现：调用方 HTTP 请求被阻塞 ~40s → 返回失败，但此时健康监控已经重连成功——日志和 metrics 都会有双份计数。
+
+**修复**：`start_stream()` 首次 `start()` 失败直接返回（只记 WARNING，不抛异常），完全交由健康监控接管。调用方立刻拿到 200，流的最终可用性交由健康监控保证。
+
+### 3. selector KeyError 修复（重连失败时的级联问题）
+
+**文件**：[app/services/stream/service.py:339-351](../app/services/stream/service.py#L339-L351)、[app/services/health_monitor/monitor.py](../app/services/health_monitor/monitor.py)
+
+**问题**：当初始 `start()` 失败时 decoder 从未注册到 selector。健康监控触发 cleanup_client 时会调 `self.sel.unregister(fd)`，抛 `KeyError`，后续 stop_stream 中断。留下一个"僵尸"decoder 在 `self.decoders` 中，下一轮健康监控再次触发 KeyError。
+
+**修复**：
+
+- `_unregister_from_selector` 用 `try/except KeyError: pass` 包住，兼容"已注销"与"从未注册"两种情况。
+- 健康监控的 cleanup 路径不再用 `has_stream()` 守卫，即使 decoder `is_alive()=False`（死解码器）也调 `stop_stream` 做完整清理。
+
+### 4. 瞬态错误 vs 真实崩溃的区分
+
+**文件**：[app/services/stream/decoder.py](../app/services/stream/decoder.py) L127-171
+
+**问题**：v2.0 中 decoder 任何启动失败都抛同一种异常，日志级别都是 WARNING，运维无法快速区分"推流端暂时不在"（正常）和"FFmpeg 二进制损坏"（严重）。
+
+**修复**：FFmpeg 启动 0.1s 内立即退出时同步读取 stderr，关键词匹配：
+
+- `404` / `not found` / `connection refused` / `timed out` / `no route to host` / `network unreachable` → 抛 `StreamConnectionError`（可重试，WARNING）
+- 其他 → 抛 `FFmpegError`（致命，ERROR + exit_code）
+
+`StreamConnectionError` 已在 `app/main.py` 异常 handler 与 service 层统一降为 WARNING，减少非异常场景的日志噪声。
+
+### 5. 背压时 ca_raw 保留
+
+**文件**：[app/services/stream/decoder.py](../app/services/stream/decoder.py) L305-316、[app/services/client/queues.py](../app/services/client/queues.py) L70
+
+**问题**：v2.0 背压逻辑在 `get_pending_count` 返回 ≥ 阈值时整帧丢弃，`ca_raw`（HLS 录制）也一起被丢，导致推理积压时录像严重缺帧。
+
+**修复**：背压只跳过 `ca_ready`（推理队列），`ca_raw` 继续写入。新增 `frames_dropped_raw` 计数器追踪 `ca_raw` deque 溢出丢帧，使静默行为可观测。
+
+---
 
 ## 核心问题总结
 
