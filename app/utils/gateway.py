@@ -298,7 +298,7 @@ class GatewayMiddleware:
         # 1. IP 白名单 / 封禁检查
         if not self._whitelist.is_allowed(ip):  # type: ignore[union-attr]
             logger.warning("[Gateway] Blocked: %s %s", ip, path)
-            await self._send_error(send, 403, "Forbidden", "IP not allowed")
+            await self._send_reject(scope_type, send, 403, "Forbidden", "IP not allowed")
             return
 
         # 2. 速率限制
@@ -307,7 +307,7 @@ class GatewayMiddleware:
         rate_store = self._relaxed_ratelimit if is_relaxed else self._ratelimit  # type: ignore[union-attr]
         if not rate_store.is_allowed(ip):
             logger.warning("[Gateway] Rate limited: %s %s", ip, path)
-            await self._send_error(send, 429, "Too Many Requests", "Rate limit exceeded")
+            await self._send_reject(scope_type, send, 429, "Too Many Requests", "Rate limit exceeded")
             return
 
         # 3. WebSocket 升级直接透传（路由层自行处理鉴权）
@@ -353,8 +353,18 @@ class GatewayMiddleware:
         return "unknown"
 
     @staticmethod
-    async def _send_error(send, status: int, error: str, detail: str) -> None:
-        """发送 JSON 错误响应（适用于 HTTP 请求和 WebSocket 握手拒绝）"""
+    async def _send_reject(
+        scope_type: str, send, status: int, error: str, detail: str,
+    ) -> None:
+        # HTTP 走 JSON body，WebSocket 握手阶段用 websocket.close（policy violation = 1008）
+        # 在未 accept 的连接上发送 websocket.close 是 ASGI 合法操作。
+        if scope_type == "websocket":
+            await GatewayMiddleware._send_ws_close(send, detail)
+        else:
+            await GatewayMiddleware._send_http_error(send, status, error, detail)
+
+    @staticmethod
+    async def _send_http_error(send, status: int, error: str, detail: str) -> None:
         body = json.dumps({"error": error, "detail": detail}).encode()
         await send({
             "type": "http.response.start",
@@ -368,4 +378,12 @@ class GatewayMiddleware:
             "type": "http.response.body",
             "body": body,
             "more_body": False,
+        })
+
+    @staticmethod
+    async def _send_ws_close(send, reason: str) -> None:
+        await send({
+            "type": "websocket.close",
+            "code": 1008,
+            "reason": reason,
         })

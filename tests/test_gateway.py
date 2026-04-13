@@ -314,6 +314,76 @@ class TestGatewayMiddlewareHTTP:
 
 
 # ---------------------------------------------------------------------------
+# WebSocket 拒绝路径：直接构造 ASGI scope，断言消息序列
+# ---------------------------------------------------------------------------
+
+
+async def _noop_app(scope, receive, send):
+    """下游 app 占位：WS 测试不应触达此处，HTTP 测试也不会"""
+    return
+
+
+def _ws_scope(client_ip: str = "5.5.5.5", path: str = "/ai/video") -> dict:
+    return {
+        "type": "websocket",
+        "path": path,
+        "headers": [],
+        "client": (client_ip, 12345),
+    }
+
+
+async def _collect_send():
+    """返回 (send_callable, messages_list)"""
+    messages: list[dict] = []
+
+    async def send(message):
+        messages.append(message)
+
+    return send, messages
+
+
+@pytest.mark.asyncio
+class TestGatewayMiddlewareWebSocket:
+    async def _receive(self):
+        return {"type": "websocket.connect"}
+
+    async def test_blocked_ip_sends_websocket_close(self):
+        gw = GatewayMiddleware(_noop_app)
+        _init_gw(gw, _make_settings(allowed_ips_set=frozenset({"10.0.0.1"})))
+
+        send, messages = await _collect_send()
+        await gw(_ws_scope(client_ip="5.5.5.5"), self._receive, send)
+
+        assert len(messages) == 1
+        assert messages[0]["type"] == "websocket.close"
+        assert messages[0]["code"] == 1008
+        assert messages[0].get("reason") == "IP not allowed"
+        # 不应有任何 http.response.* 消息
+        assert not any(m["type"].startswith("http.response") for m in messages)
+
+    async def test_rate_limited_sends_websocket_close(self):
+        gw = GatewayMiddleware(_noop_app)
+        _init_gw(gw, _make_settings(
+            gateway_rate_limit=1,
+            gateway_rate_window=60,
+            gateway_scan_threshold=1000,
+            gateway_rate_ban_threshold=1000,  # 避免触发封禁，仅测试限流拒绝
+        ))
+
+        # 预先把 rate bucket 塞满，直接命中超限分支
+        gw._ratelimit.is_allowed("127.0.0.1")
+
+        send, messages = await _collect_send()
+        await gw(_ws_scope(client_ip="127.0.0.1"), self._receive, send)
+
+        assert len(messages) == 1
+        assert messages[0]["type"] == "websocket.close"
+        assert messages[0]["code"] == 1008
+        assert messages[0].get("reason") == "Rate limit exceeded"
+        assert not any(m["type"].startswith("http.response") for m in messages)
+
+
+# ---------------------------------------------------------------------------
 # 辅助：手动初始化 GatewayMiddleware（用于测试）
 # ---------------------------------------------------------------------------
 
