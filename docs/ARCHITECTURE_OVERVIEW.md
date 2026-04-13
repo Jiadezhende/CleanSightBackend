@@ -5,6 +5,7 @@
 ## 目录
 
 - [架构概述](#架构概述)
+- [API Gateway 安全层](#api-gateway-安全层)
 - [三服务解耦架构](#三服务解耦架构)
 - [数据流与帧率控制](#数据流与帧率控制)
 - [ClientQueues 队列系统](#clientqueues-队列系统)
@@ -28,7 +29,12 @@ CleanSight 采用**三服务解耦架构**（Decoupled Three-Service Architectur
 
 ```mermaid
 graph TB
-    A[RTSP/RTMP 流源] --> B[StreamService]
+    CLIENT[外部客户端] --> GW_RTSP[mediamtx_gateway<br/>RTSP TCP 代理 :8004]
+    CLIENT --> GW_HTTP[GatewayMiddleware<br/>HTTP/WS 中间件]
+    GW_RTSP --> MTX[MediaMTX 127.0.0.1:18004]
+    MTX --> A[RTSP/RTMP 流源]
+    GW_HTTP --> ROUTERS[FastAPI 路由]
+    A --> B[StreamService]
     B --> C[ClientQueues]
     C --> D[InferenceManager]
     C --> E[PersistenceManager]
@@ -36,10 +42,31 @@ graph TB
     E --> G[HLS 视频段]
     E --> H[告警上报]
 
+    style GW_RTSP fill:#fff4d6
+    style GW_HTTP fill:#fff4d6
     style B fill:#e1f5ff
     style D fill:#ffe1f5
     style E fill:#f5ffe1
 ```
+
+---
+
+## API Gateway 安全层
+
+自 2026-04-13 起，CleanSight 在 RTSP 与 HTTP/WS 两条入口前均加了一层安全网关：
+
+| 层 | 代码位置 | 职责 |
+| --- | --- | --- |
+| RTSP TCP 代理 | [mediamtx_gateway/](../mediamtx_gateway/) （独立进程） | IP 白名单 + 连接速率限制，代理到 `127.0.0.1:18004` 的 MediaMTX |
+| HTTP/WS 中间件 | [app/utils/gateway.py](../app/utils/gateway.py) `GatewayMiddleware` | IP 白名单 + 滑动窗口速率限制 + 反扫描封禁 |
+
+关键设计点：
+
+- **宽松路径**：`/health`、`/task/message` 等高频轮询接口走独立高配额 bucket，不计入封禁升级和扫描检测（避免误封正常业务）。
+- **速率超限升级封禁**：窗口内持续超限违规达到阈值后，IP 会被加入动态封禁表，时长 `gateway_ban_duration`。
+- **文档接口关闭**：`/docs`、`/redoc`、`/openapi.json` 已永久下线。
+
+完整配置、部署拓扑、故障排查见 [API_GATEWAY.md](API_GATEWAY.md)。
 
 ---
 
@@ -65,13 +92,17 @@ graph TB
 ```yaml
 decoder:
   default_fps: 30
-  backpressure_ratio: 0.90    # 队列90%满时丢帧
+  backpressure_ratio: 0.90    # 推理队列 ca_ready 90% 满时丢帧；ca_raw 不受影响
 
 health_monitor:
   check_interval: 5.0
   heartbeat_timeout: 10.0
   max_restart_attempts: 5
 ```
+
+**背压策略（2026-04 起更新）**：背压触发时 decoder 只跳过 `ca_ready`（推理链路），`ca_raw`（HLS 录制链路）继续写入，以保证推理积压不会影响到完整录像落盘。`ClientQueues.frames_dropped_raw` 计数器单独追踪 `ca_raw` deque 溢出丢帧。
+
+**重连策略（2026-04 起更新）**：`start_stream()` 先把 `FFmpegDecoder` 注册进 `decoders` 字典，再调 `start()`。若 `start()` 失败，decoder 仍留在字典中（处于 idle 状态），由 `StreamHealthMonitor` 按周期轮询接管重连（5s × 最多 5 次）。`start_stream()` 本身已不再经 `GuardedExecutor` 重试，消除了"调用方等重试"与"健康监控独立重连"两套机制并行的问题。详见 [STREAM_RECONNECT_IMPLEMENTATION.md](STREAM_RECONNECT_IMPLEMENTATION.md)。
 
 ### 2. InferenceManager - AI 推理服务
 
@@ -344,7 +375,7 @@ if detection_count >= 3:
 ### 1. 内存保护
 
 - 所有队列设置 maxlen，自动丢弃旧帧
-- 背压控制：队列满 90% 时主动丢帧
+- 背压控制：`ca_ready` 满 90% 时主动丢推理帧，`ca_raw` 继续写入（保证录制不受影响）
 
 ### 2. CUDA Stream 并行
 
@@ -371,6 +402,7 @@ if detection_count >= 3:
 
 ## 相关文档
 
+- [API Gateway 安全层](API_GATEWAY.md) - 两层安全网关部署与配置
 - [推理服务架构](INFERENCE_SERVICE_ARCHITECTURE.md) - 推理服务详细设计
 - [配置驱动架构](CONFIG_DRIVEN_ARCHITECTURE.md) - 配置文件说明
 - [持久化策略](PERSISTENCE.md) - HLS 和告警持久化
@@ -379,4 +411,4 @@ if detection_count >= 3:
 
 ---
 
-**最后更新**: 2026-01-30
+**最后更新**: 2026-04-13

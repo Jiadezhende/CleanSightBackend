@@ -3,8 +3,13 @@ API Gateway 中间件
 
 提供三层防护：
 1. IP 白名单 + 动态封禁
-2. 滑动窗口速率限制（per-IP）
-3. 反扫描检测（404/405 计数，触发自动封禁）
+2. 滑动窗口速率限制（per-IP）；持续超限自动封禁
+3. 反扫描检测（405 计数，触发自动封禁）
+
+封禁触发条件：
+  - 404/405（路径枚举 + 方法枚举扫描）：窗口内达到 scan_threshold 次 → 封禁
+  - 速率持续超限：窗口内超限违规达到 rate_ban_threshold 次 → 封禁
+  - 单次 404/405 不封禁；threshold 参数决定容忍边界
 
 实现为原始 ASGI 中间件（非 BaseHTTPMiddleware），避免 WebSocket 升级时的 body buffering 问题。
 所有 Store 使用纯 Python + threading.Lock，无外部依赖。
@@ -70,15 +75,28 @@ class IPWhitelistStore:
 
 class RateLimitStore:
     """
-    per-IP 滑动窗口速率限制。
+    per-IP 滑动窗口速率限制，支持持续超限升级封禁。
 
-    使用 deque 存储请求时间戳，左弹出 O(1)，不超限则追加当前时间。
+    - 单次超限 → 返回 False（调用方返回 429）
+    - ban_window 内违规次数 >= ban_threshold → 触发 ban_store.ban(ip)
+    - ban_threshold=0 或 ban_store=None 时禁用封禁升级
     """
 
-    def __init__(self, limit: int, window: int) -> None:
+    def __init__(
+        self,
+        limit: int,
+        window: int,
+        ban_store: "IPWhitelistStore | None" = None,
+        ban_threshold: int = 0,
+        ban_window: int = 60,
+    ) -> None:
         self._limit = limit
         self._window = window
         self._buckets: dict[str, deque] = {}
+        self._ban_store = ban_store
+        self._ban_threshold = ban_threshold
+        self._ban_window = ban_window
+        self._violations: dict[str, deque] = {}
         self._lock = threading.Lock()
 
     def is_allowed(self, ip: str) -> bool:
@@ -92,10 +110,36 @@ class RateLimitStore:
                 bucket.popleft()
 
             if len(bucket) >= self._limit:
-                return False
+                should_ban = self._track_violation_locked(ip, now)
+            else:
+                bucket.append(now)
+                return True
 
-            bucket.append(now)
+        # 锁已释放，安全调用 ban（ban_store 有自己的锁）
+        if should_ban:
+            self._ban_store.ban(ip)  # type: ignore[union-attr]
+            logger.warning(
+                "[Gateway] Rate-limit ban: %s (%d violations in %ds)",
+                ip, self._ban_threshold, self._ban_window,
+            )
+        return False
+
+    def _track_violation_locked(self, ip: str, now: float) -> bool:
+        """在锁内调用，记录超限违规，返回是否应触发封禁。"""
+        if not self._ban_store or self._ban_threshold <= 0:
+            return False
+
+        vbucket = self._violations.setdefault(ip, deque())
+        cutoff = now - self._ban_window
+        while vbucket and vbucket[0] < cutoff:
+            vbucket.popleft()
+
+        vbucket.append(now)
+
+        if len(vbucket) >= self._ban_threshold:
+            self._violations.pop(ip, None)  # 重置计数，ban 后从零开始
             return True
+        return False
 
 
 # ============================================================================
@@ -105,8 +149,12 @@ class RateLimitStore:
 
 class AntiScanStore:
     """
-    追踪每个 IP 的 404/405 错误数量。
+    追踪每个 IP 的 404/405 错误数量（路径枚举 + 方法枚举扫描检测）。
     窗口内错误数达到 threshold 时，调用 whitelist_store.ban(ip)。
+
+    404 必须追踪：扫描器的典型手法就是批量探测路径（/admin.asp、/index.php 等），
+    均返回 404。threshold 决定了容忍边界——偶发的客户端配置错误（1-2 次）不会
+    触发封禁，而短时间大量 404 则是扫描特征。
     """
 
     _TRACKED_CODES = frozenset({404, 405})
@@ -166,10 +214,12 @@ class GatewayMiddleware:
     注册方式（app/main.py）：
         app.add_middleware(GatewayMiddleware)
     Starlette 逆序包装，最后注册的最先执行，因此注册在 CORSMiddleware 之后即可。
-    """
 
-    # 不计入反扫描、使用宽松速率桶的路径
-    _HEALTH_PATH = "/health/status"
+    宽松路径（relaxed paths）：
+      匹配 gateway_relaxed_prefixes 前缀的路径使用宽松速率 bucket，且不计入
+      反扫描检测和封禁升级。用于高频轮询接口（/health/、/task/message/ 等），
+      避免正常业务调用被误封。
+    """
 
     def __init__(self, app) -> None:
         self._app = app
@@ -178,7 +228,8 @@ class GatewayMiddleware:
 
         self._whitelist: IPWhitelistStore | None = None
         self._ratelimit: RateLimitStore | None = None
-        self._health_ratelimit: RateLimitStore | None = None
+        self._relaxed_ratelimit: RateLimitStore | None = None
+        self._relaxed_prefixes: tuple[str, ...] = ()
         self._antiscan: AntiScanStore | None = None
 
     # ------------------------------------------------------------------
@@ -200,10 +251,17 @@ class GatewayMiddleware:
             self._ratelimit = RateLimitStore(
                 limit=s.gateway_rate_limit,
                 window=s.gateway_rate_window,
+                ban_store=self._whitelist,
+                ban_threshold=s.gateway_rate_ban_threshold,
+                ban_window=s.gateway_rate_ban_window,
             )
-            self._health_ratelimit = RateLimitStore(
-                limit=s.gateway_health_rate_limit,
+            # 宽松路径：高频轮询接口，不做封禁升级（误伤正常业务调用）
+            self._relaxed_ratelimit = RateLimitStore(
+                limit=s.gateway_relaxed_rate_limit,
                 window=s.gateway_rate_window,
+            )
+            self._relaxed_prefixes = tuple(
+                p.strip() for p in s.gateway_relaxed_prefixes.split(",") if p.strip()
             )
             self._antiscan = AntiScanStore(
                 threshold=s.gateway_scan_threshold,
@@ -234,6 +292,9 @@ class GatewayMiddleware:
         ip = self._extract_ip(scope)
         path = scope.get("path", "")
 
+        # 判断是否为宽松路径（高频轮询接口）
+        is_relaxed = any(path.startswith(prefix) for prefix in self._relaxed_prefixes)
+
         # 1. IP 白名单 / 封禁检查
         if not self._whitelist.is_allowed(ip):  # type: ignore[union-attr]
             logger.warning("[Gateway] Blocked: %s %s", ip, path)
@@ -241,12 +302,10 @@ class GatewayMiddleware:
             return
 
         # 2. 速率限制
-        rate_store = (
-            self._health_ratelimit
-            if path == self._HEALTH_PATH
-            else self._ratelimit
-        )
-        if not rate_store.is_allowed(ip):  # type: ignore[union-attr]
+        # 宽松路径：独立 bucket，高限额，不做封禁升级
+        # 普通路径：标准限额，持续超限升级封禁
+        rate_store = self._relaxed_ratelimit if is_relaxed else self._ratelimit  # type: ignore[union-attr]
+        if not rate_store.is_allowed(ip):
             logger.warning("[Gateway] Rate limited: %s %s", ip, path)
             await self._send_error(send, 429, "Too Many Requests", "Rate limit exceeded")
             return
@@ -266,8 +325,8 @@ class GatewayMiddleware:
 
         await self._app(scope, receive, intercepting_send)
 
-        # /health/status 不计入反扫描
-        if path != self._HEALTH_PATH:
+        # 宽松路径不计入反扫描（高频轮询产生的 404 不是扫描特征）
+        if not is_relaxed:
             self._antiscan.record_error(ip, response_status[0])  # type: ignore[union-attr]
 
     # ------------------------------------------------------------------

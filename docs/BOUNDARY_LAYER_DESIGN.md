@@ -1,8 +1,10 @@
 # CleanSight 边界层异常处理设计
 
-**设计日期**: 2026-02
-**版本**: 1.0
+**设计日期**: 2026-02（v1.0）/ 2026-04-13 更新（v1.1）
+**版本**: 1.1
 **适用范围**: 实时 AI 视觉检测系统（10 路并发视频流 @ 30fps）
+
+> **v1.1 变更**：部分业务路径（如 `StreamService.start_stream`）选择**退出 Layer 2**，首次失败直接返回、不重试，改由上层异步监控（如 `StreamHealthMonitor`）接管重连。Layer 2 不再强制覆盖所有同步业务调用。详见下文 [Layer 2 适用范围](#layer-2-适用范围与退出路径)。
 
 ---
 
@@ -102,6 +104,28 @@ AppError (基类)
 ---
 
 ## 四、GuardedExecutor 重试策略
+
+### Layer 2 适用范围与退出路径
+
+**适用**：以下路径仍由 `GuardedExecutor` 统一重试——
+
+- 数据库操作（DatabaseError，指数退避）
+- 告警上报 / HLS 持久化（PersistenceError）
+- 外部 API 调用（external_api 策略）
+- 推理批次（ModelInferenceError，快速失败）
+
+**已退出（由异步监控接管）**：
+
+- `StreamService.start_stream()`：2026-04 起不再包 `executor.execute`。首次 `decoder.start()` 失败时：
+  1. 日志记 WARNING；
+  2. decoder 留在 `self.decoders` 字典中（v3 版重连前置注册）；
+  3. `StreamHealthMonitor` 在下一周期检测到 `is_alive=False` 并按 5s × 最多 5 次发起异步重连。
+- `StreamService.restart_stream()`：由健康监控周期调度，单次失败返回 False，下一周期再试——同样不经 RetryExecutor。
+
+**判定原则**：
+
+- 若调用方是同步 HTTP 请求且没有上层补救机制 → 走 Layer 2（有限重试后抛给 Layer 3）。
+- 若调用方期望立即返回、且已有后台监控/调度器能周期性重试 → 退出 Layer 2，避免双重重试。
 
 ### 4.1 预定义策略
 

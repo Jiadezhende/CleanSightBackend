@@ -388,12 +388,14 @@ class GlobalHealthMonitor:
         self._last_activity.pop(client_id, None)
 
         # 步骤 1: 停止解码器（除非跳过）
+        # 注意：不用 has_stream() 守卫——has_stream 对死解码器返回 False，
+        # 但死解码器仍留在 decoders 字典中。stop_stream 内部已处理"无 decoder"的情况，
+        # 直接调用可同时清理死解码器，避免后续被误判为孤儿解码器。
         if not skip_decoder:
             try:
-                if self._stream_service.has_stream(client_id):
-                    self._stream_service.stop_stream(client_id)
-                    result["decoder_stopped"] = True
-                    logger.info(f"[GlobalHealthMonitor] Decoder stopped: {client_id}")
+                self._stream_service.stop_stream(client_id)
+                result["decoder_stopped"] = True
+                logger.info(f"[GlobalHealthMonitor] Decoder stopped: {client_id}")
             except Exception as e:
                 result["errors"].append(f"decoder: {e}")
                 logger.error(

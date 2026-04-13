@@ -59,41 +59,42 @@ python integration_tests/local_full_pipeline_rtsp.py --task_id 1 --duration 30
 import requests
 import websocket
 
-# 1. 加载任务
-response = requests.get("http://localhost:8000/ai/load_task/1")
-print(response.json())
-
-# 2. 启动 RTSP 流
+# 1. 一步启动：加载任务 + 启动流（统一接口）
 data = {
-    "client_id": "rtsp.test.1",
+    "task_id": 1,
     "rtsp_url": "rtsp://localhost:8004/live/rtsp.test.1",
     "fps": 30
 }
-response = requests.post("http://localhost:8000/inspection/start_rtsp_stream", json=data)
-print(response.json())
+response = requests.post("http://localhost:8000/api/start", json=data)
+print(response.json())  # {"status":"success", "client_id":"rtsp.test.1", ...}
+client_id = response.json()["client_id"]
 
-# 3. 连接 WebSocket 接收推理结果
+# 2. 连接 WebSocket 接收推理结果
 ws = websocket.WebSocket()
-ws.connect("ws://localhost:8000/ai/video?client_id=rtsp.test.1")
+ws.connect(f"ws://localhost:8000/ai/video?client_id={client_id}")
 
 while True:
     frame_data = ws.recv()  # Base64 编码的 JPEG 帧
-    # 处理frame_data...
+    # 处理 frame_data...
 
-# 4. 停止流
-requests.post("http://localhost:8000/inspection/stop_rtsp_stream?client_id=rtsp.test.1")
+# 3. 终止任务（完整清理：解码器 + 推理 + ClientManager）
+requests.post(f"http://localhost:8000/api/terminate?client_id={client_id}")
 ```
 
 ### 主要 API 端点
 
 | 端点 | 方法 | 功能 |
-|------|------|------|
-| `/ai/status` | GET | 查询 AI 服务状态 |
-| `/ai/load_task/{task_id}` | GET | 加载清洗任务 |
-| `/inspection/start_rtsp_stream` | POST | 启动 RTSP 流 |
-| `/inspection/stop_rtsp_stream` | POST | 停止 RTSP 流 |
+| --- | --- | --- |
+| `/api/start` | POST | 统一启动（加载任务 + 拉流） |
+| `/api/terminate` | POST | 统一终止（完整清理） |
 | `/ai/video` | WebSocket | 实时推理结果流 |
 | `/task/status/{client_id}` | WebSocket | 任务状态更新 |
+| `/task/message/{client_id}` | GET / WebSocket (`/task/msg/`) | 前端实时消息（告警/检测） |
+| `/task/{task_id}/alarms` | GET | 告警历史查询 |
+| `/health/status` | GET | 系统整体状态（替代 `/ai/status`） |
+| `/health/monitor/stats` | GET | 健康监控统计 |
+
+> 所有 HTTP/WS 请求先经 `GatewayMiddleware`（IP 白名单 / 速率限制 / 反扫描），详见 [API_GATEWAY.md](API_GATEWAY.md)。对外 RTSP 端口 8004 也由 `mediamtx_gateway` 代理。
 
 详细 API 文档见 [API 端点文档](API_ENDPOINTS.md)。
 

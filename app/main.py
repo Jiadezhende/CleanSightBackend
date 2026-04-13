@@ -113,9 +113,8 @@ async def stream_error_handler(request: Request, exc: StreamConnectionError):
     2. 记录错误日志（包含完整上下文）
     3. 转换为 HTTP 503 状态码（Service Unavailable）
     """
-    logger.error(
+    logger.warning(
         "[BoundaryLayer3] Stream connection error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -144,7 +143,6 @@ async def ffmpeg_error_handler(request: Request, exc: FFmpegError):
     """
     logger.error(
         "[BoundaryLayer3] FFmpeg error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -172,7 +170,6 @@ async def database_error_handler(request: Request, exc: DatabaseError):
     """
     logger.error(
         "[BoundaryLayer3] Database error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -200,7 +197,6 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
     """
     logger.error(
         "[BoundaryLayer3] Model inference error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -228,7 +224,6 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
     """
     logger.error(
         "[BoundaryLayer3] Persistence error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -344,7 +339,6 @@ async def cleansight_exception_handler(request: Request, exc: AppError):
     """
     logger.error(
         "[BoundaryLayer3] CleanSight exception: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),

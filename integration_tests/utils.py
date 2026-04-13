@@ -40,10 +40,11 @@ class FFmpegController:
 
     def _find_ffmpeg(self) -> str:
         """查找 ffmpeg 可执行文件"""
-        # 优先使用 Chocolatey 安装的版本
-        choco_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
-        if os.path.exists(choco_path):
-            return choco_path
+        # Windows: 优先使用 Chocolatey 安装的版本
+        if os.name == "nt":
+            choco_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
+            if os.path.exists(choco_path):
+                return choco_path
 
         # 尝试系统 PATH
         try:

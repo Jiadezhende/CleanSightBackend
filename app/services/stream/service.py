@@ -17,7 +17,6 @@ from urllib.parse import urlparse, urlunparse
 from app.utils import (
     ConflictError,
     FFmpegError,
-    GuardedExecutor,
     StreamConnectionError,
     log_call,
 )
@@ -85,9 +84,6 @@ class StreamService:
         # 配置引用
         self.config = _stream_config
 
-        # 创建 GuardedExecutor（框架边界层）
-        self.executor = GuardedExecutor()
-
         # start selector polling thread on POSIX so stdout is consumed
         self._selector_thread: Optional[threading.Thread] = None
         if self.sel is not None:
@@ -103,10 +99,10 @@ class StreamService:
         self, client_id: str, stream_url: str, fps: int = 30, protocol: str = "RTMP"
     ):
         """
-        服务层方法（调用框架边界层）
+        注册解码器并尝试首次启动。
 
-        通过 GuardedExecutor 执行流启动，自动处理重试逻辑。
-        重试策略：固定延迟 3 秒，最多 5 次。
+        decoder 注册成功后立即返回，不等待流连接结果。
+        首次 start() 若失败，健康监控会在下一个心跳周期发起重连。
 
         Args:
             client_id: 客户端ID
@@ -115,16 +111,9 @@ class StreamService:
             protocol: 协议（RTSP/RTMP）
 
         Raises:
-            StreamConnectionError: 流连接失败
-            FFmpegError: FFmpeg 启动失败
+            ConflictError: 该 client_id 已有存活的流
         """
-        # 注意：健康监控和清理服务现在都是全局服务，由应用启动时初始化
-
-        # 通过 GuardedExecutor 调用业务逻辑（边界层 2）
-        return self.executor.execute(
-            func=lambda: self._start_stream_impl(client_id, stream_url, fps, protocol),
-            policy_name="stream",  # 固定延迟 3 秒，最多 5 次
-        )
+        self._start_stream_impl(client_id, stream_url, fps, protocol)
 
     def _start_stream_impl(
         self, client_id: str, stream_url: str, fps: int, protocol: str
@@ -198,16 +187,21 @@ class StreamService:
                 client_queues=client_queues,
             )
 
-            # 启动解码器（可能抛出 FFmpegError）
-            dec.start()
-
-            # 保存解码器
+            # 先注册解码器，再启动——健康监控可感知启动失败并触发重连
             self.decoders[client_id] = dec
             self.metrics[client_id] = {
                 "frames_received": 0,
                 "frames_dropped": 0,
                 "restarts": 0,
             }
+
+            try:
+                dec.start()
+            except Exception as e:
+                # start() 失败（如推流端尚未就绪），decoder 已注册，
+                # 健康监控会在下一个心跳检测到 is_alive=False 并进入重连模式
+                logger.warning(f"[{client_id}] Initial start failed: {e}")
+                return
 
             logger.info(
                 f"[{client_id}] Stream started successfully (pid={getattr(dec.proc, 'pid', None)})"
@@ -350,8 +344,11 @@ class StreamService:
             decoder: FFmpegDecoder 实例
         """
         if self.sel is not None and decoder.proc and decoder.proc.stdout:
-            # 注销可能失败（例如已经注销过），不影响整体流程
-            self.sel.unregister(decoder.proc.stdout.fileno())
+            try:
+                self.sel.unregister(decoder.proc.stdout.fileno())
+            except KeyError:
+                # 已经注销过，或 start() 失败导致从未注册，均属正常
+                pass
 
     def _stop_decoder_async(self, decoder: FFmpegDecoder, client_id: str):
         """
@@ -435,7 +432,7 @@ class StreamService:
 
             return {"url": dec.stream_url, "fps": dec.fps, "protocol": protocol}
 
-    @log_call(level=logging.INFO, log_args=True)
+    @log_call(level=logging.INFO, log_args=False)
     def restart_stream(
         self, client_id: str, stream_url: str, fps: int, protocol: str
     ) -> bool:
