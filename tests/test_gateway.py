@@ -53,6 +53,9 @@ def _reset_gateway():
 
 def _find_gateway_middleware() -> GatewayMiddleware | None:
     """遍历 Starlette 中间件栈，找到 GatewayMiddleware 实例"""
+    # middleware_stack 在首次请求前为 None，需手动触发构建
+    if app.middleware_stack is None:
+        app.middleware_stack = app.build_middleware_stack()
     current = app.middleware_stack
     while current is not None:
         if isinstance(current, GatewayMiddleware):
