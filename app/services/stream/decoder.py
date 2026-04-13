@@ -15,7 +15,7 @@ import numpy as np
 from app.models.frame import FrameData
 from app.services import ai
 from app.services.stream.config import DecoderConfig
-from app.utils.exceptions import FFmpegError
+from app.utils.exceptions import FFmpegError, StreamConnectionError
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -127,10 +127,42 @@ class FFmpegDecoder:
             # 快速检查进程是否立即崩溃
             time.sleep(0.1)  # 给进程一点启动时间
             if self.proc.poll() is not None:
-                # 进程已经退出
+                # 进程已经退出 — 此时 stderr 管道已关闭，可安全同步读取
                 exit_code = self.proc.returncode
+                try:
+                    stderr_output = (
+                        self.proc.stderr.read().decode("utf-8", errors="ignore").strip()
+                        if self.proc.stderr
+                        else ""
+                    )
+                except Exception:
+                    stderr_output = ""
+                # 区分"流暂不可用"（可重试）与"FFmpeg 真实崩溃"（致命）
+                _TRANSIENT_MARKERS = (
+                    "404",
+                    "not found",
+                    "connection refused",
+                    "connection timed out",
+                    "no route to host",
+                    "network unreachable",
+                )
+                is_transient = any(
+                    m in stderr_output.lower() for m in _TRANSIENT_MARKERS
+                )
+                # 最后一行非空行作为摘要，完整 stderr 降至 DEBUG
+                last_line = next(
+                    (l for l in reversed(stderr_output.splitlines()) if l.strip()), ""
+                )
+                self.logger.debug("FFmpeg stderr:\n%s", stderr_output)
+                if is_transient:
+                    self.logger.warning("FFmpeg: stream not available — %s", last_line)
+                    raise StreamConnectionError(
+                        url=self.stream_url,
+                        client_id=self.client_id,
+                        details=last_line or None,
+                    )
                 self.logger.error(
-                    f"FFmpeg process exited immediately with code {exit_code}"
+                    "FFmpeg exited (code=%s): %s", exit_code, last_line or "(no output)"
                 )
                 raise FFmpegError(
                     message=f"FFmpeg process failed to start",
