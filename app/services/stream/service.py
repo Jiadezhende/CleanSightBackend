@@ -41,7 +41,9 @@ def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
     host = parsed.hostname or ""
     if host.lower() == "localhost":
         host = "127.0.0.1"
-    new_netloc = f"{host}:{internal_port}"
+    # IPv6 literal 在 URL authority 中需用方括号包裹，如 [::1]:port
+    host_in_netloc = f"[{host}]" if ":" in host else host
+    new_netloc = f"{host_in_netloc}:{internal_port}"
     if parsed.username:
         creds = parsed.username
         if parsed.password:

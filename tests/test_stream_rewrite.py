@@ -19,6 +19,9 @@ INTERNAL = 18004
     ("rtsp://user:pass@127.0.0.1:8004/cam", "rtsp://user:pass@127.0.0.1:18004/cam"),
     # Windows 上 localhost 解析为 ::1（IPv6），重写时强制转为 127.0.0.1
     ("rtsp://localhost:8004/live/test",     "rtsp://127.0.0.1:18004/live/test"),
+    # 显式 IPv6 literal → netloc 需保留方括号
+    ("rtsp://[::1]:8004/live/x",             "rtsp://[::1]:18004/live/x"),
+    ("rtsp://[::1]:554/live/x",              "rtsp://[::1]:554/live/x"),
     # 端口不匹配 → 原样返回
     ("rtsp://127.0.0.1:554/cam1",           "rtsp://127.0.0.1:554/cam1"),
     ("rtsp://camera.local:9000/stream",     "rtsp://camera.local:9000/stream"),
