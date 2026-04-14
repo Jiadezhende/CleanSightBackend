@@ -7,21 +7,25 @@ stages:
   LEAK:
     models:
       - name: mock_detection
-        class: app.services.inference.workflows.mock.MockDetectionTask
+        class: app.services.inference.workflows.mock.MockDetector
         params:
           brightness_threshold: 100.0
-          consecutive_trigger: 3
           enabled: true
+        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
+        analyzer_params:
+          consecutive_trigger: 3
 
   # ==================== CLEAN 阶段 ====================
   CLEAN:
     models:
       - name: mock_detection
-        class: app.services.inference.workflows.mock.MockDetectionTask
+        class: app.services.inference.workflows.mock.MockDetector
         params:
           brightness_threshold: 100.0
-          consecutive_trigger: 3
           enabled: true
+        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
+        analyzer_params:
+          consecutive_trigger: 3
 
 # ==================== 全局配置（与 GPU 版保持一致） ====================
 global:
