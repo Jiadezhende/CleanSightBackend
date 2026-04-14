@@ -21,7 +21,7 @@
     --fps         <int>                默认 30
     --no-window                        禁用 OpenCV 可视化窗口
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
-    --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 8s）
+    --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
 """
 
 import argparse

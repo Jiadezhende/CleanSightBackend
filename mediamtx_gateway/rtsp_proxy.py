@@ -74,9 +74,10 @@ class RTSPProxy:
             "0.0.0.0",
             self._listen_port,
         )
+        actual_port = self._server.sockets[0].getsockname()[1]
         logger.info(
             "[RTSPProxy] Listening on :%d → 127.0.0.1:%d",
-            self._listen_port,
+            actual_port,
             self._target_port,
         )
 
