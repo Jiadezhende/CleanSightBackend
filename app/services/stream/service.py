@@ -37,13 +37,9 @@ def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
     if parsed.port != proxy_port:
         return url
 
-    # Windows 上 localhost 可能解析为 ::1（IPv6），但 MediaMTX 只绑 127.0.0.1（IPv4）
-    host = parsed.hostname or ""
-    if host.lower() == "localhost":
-        host = "127.0.0.1"
-    # IPv6 literal 在 URL authority 中需用方括号包裹，如 [::1]:port
-    host_in_netloc = f"[{host}]" if ":" in host else host
-    new_netloc = f"{host_in_netloc}:{internal_port}"
+    # 端口匹配说明目标是本机 MediaMTX，统一改写为 127.0.0.1
+    # （覆盖 localhost / 外网 IP / 任意 host，避免流量绕道外网网卡被 iptables 拦截）
+    new_netloc = f"127.0.0.1:{internal_port}"
     if parsed.username:
         creds = parsed.username
         if parsed.password:

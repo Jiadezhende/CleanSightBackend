@@ -54,15 +54,13 @@ RECONNECT_SUCCESS_TIMEOUT = 45
 def build_urls(server: str, client_id: str) -> tuple:
     """
     返回 (push_url, pull_url)。
-    push_url: FFmpeg 推流目标（用服务器 IP，远程时为服务器公网地址）
-    pull_url: /api/start 传的 RTSP 地址（后端始终从自己的 localhost 拉流）
+    push_url == pull_url：推流目标即后端拉流地址，后端内部会 rewrite 为 127.0.0.1。
     """
     # Windows 上 localhost 可能解析为 ::1（IPv6），但 RTSPProxy 只监听 IPv4。
     # 本地推流强制用 127.0.0.1；远程推流保留原始 server 地址。
     push_host = "127.0.0.1" if server in ("localhost", "127.0.0.1") else server
     push_url = f"rtsp://{push_host}:8004/live/{client_id}"
-    pull_url = f"rtsp://localhost:8004/live/{client_id}"
-    return push_url, pull_url
+    return push_url, push_url
 
 
 @contextmanager
