@@ -1,6 +1,6 @@
 # RTSP 全流程调用说明（CleanSightBackend）
 
-> **版本**: 2.1（2026-04-14 更新）
+> **版本**: 2.2（2026-04-16 更新）
 
 ## 概述
 
@@ -30,7 +30,7 @@
 ```
 
 - **对外**：MediaMTX 的 RTSP 端口 8004 由 [mediamtx_gateway](../mediamtx_gateway/) 反代，原始 MediaMTX 只监听 `127.0.0.1:18004`。
-- **后端拉流**：`start_stream()` 中的 `_rewrite_rtsp_url()` 会自动把 URL 中的 8004 端口重写为 18004，绕过代理直连 MediaMTX（避免自我 IP 被代理误封）。
+- **后端拉流**：`start_stream()` 中的 `_rewrite_rtsp_url()` 会自动把端口 8004 重写为 18004，并将 host **统一替换为 `127.0.0.1`**（无论客户端传入的是 `localhost`、外网 IP 还是其他地址），确保 FFmpeg 始终走 loopback 直连 MediaMTX，不经过外网网卡。
 - **Gateway 部署**：生产建议 `mediamtx_bin` 留空让 MediaMTX 由 systemd/容器独立管理；开发可填写 bin 路径由 Gateway 守护。详见 [API_GATEWAY.md](API_GATEWAY.md)。
 
 ## 流路径命名约定（隐式耦合说明）
@@ -174,7 +174,7 @@ ffmpeg -an -re -stream_loop -1 -i test_video.mp4 \
 - **推流端被网关封禁**：查看后端日志 `[RTSPProxy] Blocked ... <ip>`；调整 `mediamtx_gateway/config.ini` 的 `allowed_ips`、`rate_limit`，或等待 `ban_duration`（默认 3600s）过期。
 - **后端拉流失败**：查看 FFmpeg stderr（decoder 已按瞬态 vs 真实崩溃分类打日志）；确认 rtsp_url 的端口与 `CLEANSIGHT_MEDIAMTX_PROXY_PORT` 一致（默认 8004）。
 - **`/api/start` 返回 409**：`client_id` 已有存活流，先调 `/api/terminate`。
-- **IPv6 / localhost 问题**：Windows 下 `localhost` 可能解析为 `::1`，MediaMTX 只绑 127.0.0.1；代码已在 URL 重写时自动把 `localhost` 替换为 `127.0.0.1`，外部调用端仍建议使用 IPv4 地址。
+- **host 被重写为 127.0.0.1**：`_rewrite_rtsp_url()` 在端口匹配时会将任意 host（`localhost`、外网 IP 等）统一改写为 `127.0.0.1`。这是预期行为——后端拉流目标始终是本机 MediaMTX，走 loopback 可绕过云服务器 iptables 对 UDP 高位端口的拦截。`/api/start` 的 `rtsp_url` 传外网 IP 或 localhost 均可，rewrite 会统一处理。
 
 ## 相关文档
 
