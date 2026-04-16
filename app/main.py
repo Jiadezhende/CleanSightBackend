@@ -6,9 +6,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from app.routers import ai, api, health, inspection, task
+from app.routers import ai, api, health, task
 from app.utils import (
     AppError,
     ConflictError,
@@ -59,10 +61,13 @@ async def lifespan(app: FastAPI):
     # 2. AI 推理服务
     async with health.lifespan():
         async with ai.lifespan():
-            yield
+            try:
+                yield
+            finally:
+                # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                shutdown_event.set()
 
-    # lifespan 退出时通知所有 WebSocket 主动断开
-    shutdown_event.set()
 
 
 app = FastAPI(
@@ -70,6 +75,9 @@ app = FastAPI(
     description="AI-powered inspection of the endoscope cleaning process at Changhai Hospital",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
@@ -78,12 +86,13 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+# Gateway 注册在 CORS 之后 → Starlette 逆序包装 → Gateway 最先执行
+app.add_middleware(GatewayMiddleware)
 
 # 注册路由器
 app.include_router(api.router)  # 统一API（优先注册）
 app.include_router(health.router)  # 健康监控
 app.include_router(ai.router)
-app.include_router(inspection.router)
 app.include_router(task.router)
 
 
@@ -104,9 +113,8 @@ async def stream_error_handler(request: Request, exc: StreamConnectionError):
     2. 记录错误日志（包含完整上下文）
     3. 转换为 HTTP 503 状态码（Service Unavailable）
     """
-    logger.error(
+    logger.warning(
         "[BoundaryLayer3] Stream connection error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -135,7 +143,6 @@ async def ffmpeg_error_handler(request: Request, exc: FFmpegError):
     """
     logger.error(
         "[BoundaryLayer3] FFmpeg error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -163,7 +170,6 @@ async def database_error_handler(request: Request, exc: DatabaseError):
     """
     logger.error(
         "[BoundaryLayer3] Database error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -191,7 +197,6 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
     """
     logger.error(
         "[BoundaryLayer3] Model inference error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -219,7 +224,6 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
     """
     logger.error(
         "[BoundaryLayer3] Persistence error: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -335,7 +339,6 @@ async def cleansight_exception_handler(request: Request, exc: AppError):
     """
     logger.error(
         "[BoundaryLayer3] CleanSight exception: %s", exc,
-        exc_info=True,
         extra={
             "client_id": exc.client_id,
             "url": str(request.url),
@@ -378,11 +381,6 @@ async def generic_exception_handler(request: Request, exc: Exception):
             "detail": "An unexpected error occurred. Please contact support if the issue persists.",
         },
     )
-
-
-@app.get("/")
-async def root():
-    return {"message": "Welcome to CleanSight Backend"}
 
 
 @app.get("/metrics")

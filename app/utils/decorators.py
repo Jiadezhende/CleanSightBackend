@@ -115,7 +115,7 @@ def log_call(
                     if client_id:
                         error_msg += f", client_id={client_id}"
                     error_msg += f", error={str(e)[:200]})"
-                    logger.error(error_msg, exc_info=True)
+                    logger.error(error_msg)
 
                 raise
 

@@ -2,13 +2,10 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.database import get_db
 from app.models.frame import ProcessedFrame
-from app.models.task import DBTask, Task, TaskStatusResponse
 from app.services import ai
 from app.services.stream import stream_service
 
@@ -26,12 +23,18 @@ async def lifespan():
     try:
         yield
     finally:
-        # 停止 AI 推理服务（含结算告警落盘）
-        ai.stop()
-        logger.info("[AIRouter] Inference service stopped")
-        # 推理停止后再终止流解码器（保证 in-flight 帧处理完毕）
-        stream_service.shutdown()
-        logger.info("[AIRouter] Stream service stopped")
+        # lifespan finally 执行时 uvicorn 已 cancel 所有 WebSocket 任务，
+        # 事件循环无其他等待方，直接同步调用即可。
+        try:
+            ai.stop()
+            logger.info("[AIRouter] Inference service stopped")
+        except Exception:
+            logger.exception("[AIRouter] Error stopping inference service")
+        try:
+            stream_service.shutdown()
+            logger.info("[AIRouter] Stream service stopped")
+        except Exception:
+            logger.exception("[AIRouter] Error shutting down stream service")
 
 
 @router.websocket("/video")
@@ -61,8 +64,23 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     shutdown_event: asyncio.Event = websocket.app.state.shutdown_event
 
+    # 后台接收任务：监听 CLOSE 帧或客户端断开。
+    # 当 uvicorn 优雅关闭时它会向 WebSocket 发送 CLOSE 帧，
+    # receive() 将返回 {"type": "websocket.disconnect"}，使本任务结束。
+    # 这样即使 shutdown_event 尚未置位，主循环也能及时退出。
+    async def _recv_until_disconnect():
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    return
+        except Exception:
+            return
+
+    disconnect_task = asyncio.create_task(_recv_until_disconnect())
+
     try:
-        while not shutdown_event.is_set():
+        while not shutdown_event.is_set() and not disconnect_task.done():
             processed_frame: ProcessedFrame = ai.get_result(client_id, as_model=True)  # type: ignore
 
             if processed_frame is None:
@@ -126,10 +144,19 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 )
                 break
 
-    except Exception as e:
+    except asyncio.CancelledError:
+        # uvicorn 超时后强制取消任务时触发（6s 优雅关闭超时）
+        # 不重新抛出：handler 正常返回，避免 uvicorn 记录 "Exception in ASGI application"
+        logger.info(f"[WebSocket] 任务被取消（服务关闭）: client_id={client_id}")
+    except Exception:
         # 捕获并记录未预期异常，便于诊断
         logger.error(f"[WebSocket] 未捕获异常: client_id={client_id}", exc_info=True)
     finally:
+        disconnect_task.cancel()
+        try:
+            await asyncio.wait_for(disconnect_task, timeout=1.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
         try:
             await websocket.close()
         except Exception:
@@ -137,109 +164,3 @@ async def websocket_video_endpoint(websocket: WebSocket):
         logger.info(f"[WebSocket] 连接已关闭: client_id={client_id}")
 
 
-@router.get("/status")
-async def get_ai_status():
-    """
-    获取AI服务状态，返回详细的队列信息
-
-    ⚠️ 过渡接口：建议使用 GET /health/status 代替
-
-    职责边界变更：
-    - 系统状态查询应该由 GlobalHealthMonitor 负责
-    - 此端点保留用于向后兼容，未来版本将移除
-    - 新应用请使用 /health/status 获取更完整的系统状态
-    """
-    return ai.status()
-
-
-@router.get("/load_task/{task_id}")
-async def load_task(task_id: int):
-    """
-    加载任务，为指定 task_id 的任务在 AI 服务中创建任务对象。
-    从数据库读取任务信息，使用 source_ip 作为 client_id。
-
-    ⚠️ 过渡接口：建议使用 POST /api/start 代替
-
-    注意：此接口只加载任务，不启动流。需要单独调用 /inspection/start_rtsp_stream
-    """
-    db = None
-    db_task = None  # 初始化变量，避免 UnboundLocalError
-
-    from sqlalchemy.exc import SQLAlchemyError
-
-    from app.utils.exceptions import DatabaseError
-
-    db = None
-    try:
-        db = next(get_db())
-        try:
-            db_task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message=f"Failed to query task {task_id}",
-                retryable=True,
-                query=f"SELECT * FROM task WHERE task_id = {task_id}",
-            ) from e
-
-        if db_task is None:
-            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-        # 使用 source_ip 作为 client_id（转换为 str 类型）
-        client_id = str(db_task.source_ip)
-        if not client_id or client_id == "None":
-            raise HTTPException(status_code=400, detail="Task source_ip is empty")
-
-        # 构造内存中的任务对象
-        task = Task(
-            task_id=task_id,
-            current_step=str(db_task.current_step),
-            status="running",
-            updated_at=int(time.time()),
-            fully_submerged=False,
-            bending=False,
-            bubble_detected=False,
-        )
-
-        logger.debug(f"[load_task] 为 client_id={client_id} 加载任务 {task.task_id}")
-
-        # 为客户端设置任务
-        success = ai.set_task(client_id, task)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to set task for client")
-
-        return TaskStatusResponse(
-            task_id=task.task_id,
-            status=task.status,
-            cleaning_stage=task.current_step,
-            bending=task.bending,
-            bubble_detected=task.bubble_detected,
-            fully_submerged=task.fully_submerged,
-            updated_at=datetime.fromtimestamp(task.updated_at).isoformat(),
-        )
-    finally:
-        if db:
-            db.close()
-
-
-@router.post("/terminate_task/{client_id}")
-async def terminate_task(client_id: str):
-    """
-    终止任务，清理指定 client_id 的推理资源。
-
-    ⚠️ 过渡接口：建议使用 POST /api/terminate 代替
-
-    注意：此接口只清理推理资源（落盘数据），不停止流解码器，不清理 ClientManager
-    完整清理请使用 POST /api/terminate
-
-    Args:
-        client_id: 客户端 ID（通常是 source_ip）
-    """
-    # 只清理推理资源（落盘残余数据）
-    ai.remove_client(client_id)
-    return {"status": "success", "message": f"Task terminated for client {client_id}"}
-
-
-def start_background_threads():
-    # 启动由 ai 管理器负责的推理线程
-    ai.start()
-    print("AI后台线程已启动（多客户端推理管理器）")

@@ -1,8 +1,8 @@
 """
-单客户端集成测试 - 覆盖5种使用场景
+单客户端集成测试 - 覆盖6种使用场景
 
 用法:
-    python integration_tests/test_single_client.py --scenario <1-5> --task_id <id> [options]
+    python integration_tests/test_single_client.py --scenario <1-6> --task_id <id> [options]
 
 场景:
     1 - 正常流程:   推流 → start → 等待 → terminate
@@ -10,9 +10,10 @@
     3 - 断流重连(失败): 推流 → start → 断流 → 等待自动清理
     4 - 仅推流:     推流，不调用任何 API
     5 - 仅 start:   调 start 但不推流(no-stream) 或 不调 terminate(no-terminate)
+    6 - 延迟推流:   先调 start（流未就绪），N秒后推流，验证健康监控自动重连（Bug 2）
 
 参数:
-    --scenario    {1,2,3,4,5}         必填
+    --scenario    {1,2,3,4,5,6}       必填
     --server      <host>               默认 localhost
     --task_id     <int>                必填
     --duration    <seconds>            默认 60
@@ -20,6 +21,7 @@
     --fps         <int>                默认 30
     --no-window                        禁用 OpenCV 可视化窗口
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
+    --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
 """
 
 import argparse
@@ -38,6 +40,10 @@ from integration_tests.utils import APIClient, DatabaseHelper, FFmpegController
 AUTO_CLEANUP_TIMEOUT = 45
 # 断流重连成功场景: gap 必须 < max_attempts×interval = 25s
 RECONNECT_GAP = 10
+# Scenario 6: 推流延迟默认值（秒）—— 必须 < 重连窗口 25s
+DELAYED_STREAM_DEFAULT = 10
+# Scenario 6: 等待重连成功的最大轮询时长（秒）
+RECONNECT_SUCCESS_TIMEOUT = 45
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +57,10 @@ def build_urls(server: str, client_id: str) -> tuple:
     push_url: FFmpeg 推流目标（用服务器 IP，远程时为服务器公网地址）
     pull_url: /api/start 传的 RTSP 地址（后端始终从自己的 localhost 拉流）
     """
-    push_url = f"rtsp://{server}:8004/live/{client_id}"
+    # Windows 上 localhost 可能解析为 ::1（IPv6），但 RTSPProxy 只监听 IPv4。
+    # 本地推流强制用 127.0.0.1；远程推流保留原始 server 地址。
+    push_host = "127.0.0.1" if server in ("localhost", "127.0.0.1") else server
+    push_url = f"rtsp://{push_host}:8004/live/{client_id}"
     pull_url = f"rtsp://localhost:8004/live/{client_id}"
     return push_url, pull_url
 
@@ -119,6 +128,47 @@ def poll_until_cleaned(api: APIClient, client_id: str, timeout: int = AUTO_CLEAN
             return True
         time.sleep(3)
     print(f"超时: {client_id} 在 {timeout}s 内未被自动清理")
+    return False
+
+
+def poll_until_reconnected(api: APIClient, client_id: str, timeout: int = RECONNECT_SUCCESS_TIMEOUT) -> bool:
+    """
+    轮询 GET /health/status，等待 client_id 重连成功：
+      - 出现在 queues 中（ClientQueues 存在）
+      - 不再出现在 reconnecting_clients 中（连接已稳定）
+
+    分两个阶段打印状态，便于观察状态机转换：
+      阶段一：等待进入重连模式（reconnecting_clients 出现 client_id）
+      阶段二：等待退出重连模式（连接稳定）
+
+    返回 True 表示重连成功，False 表示超时。
+    """
+    deadline = time.time() + timeout
+    print(f"  等待重连成功（最多 {timeout}s）：client_id={client_id}")
+    entered_reconnect = False
+
+    while time.time() < deadline:
+        status = api._make_request("GET", "/health/status")
+        queues = status.get("queues", {})
+        reconnecting = status.get("monitor_stats", {}).get("reconnecting_clients", [])
+        remaining = int(deadline - time.time())
+
+        in_queues = client_id in queues
+        in_reconnecting = client_id in reconnecting
+
+        if in_reconnecting and not entered_reconnect:
+            entered_reconnect = True
+            print(f"  [{remaining}s 剩余] 已进入重连模式（符合预期，等待流就绪）")
+        elif in_queues and not in_reconnecting:
+            label = "重连成功" if entered_reconnect else "连接建立（流已就绪，未经过重连模式）"
+            print(f"  [{remaining}s 剩余] {label}")
+            return True
+        else:
+            mode = "重连中" if in_reconnecting else ("已在队列" if in_queues else "未见于健康状态")
+            print(f"  [{remaining}s 剩余] {mode}，等待稳定...")
+
+        time.sleep(2)
+
     return False
 
 
@@ -427,6 +477,118 @@ def _scenario5_no_terminate(args):
 
 
 # ---------------------------------------------------------------------------
+# Scenario 6: 延迟推流 — Bug 2 重连验证
+# ---------------------------------------------------------------------------
+
+
+def run_scenario_6(args):
+    """
+    推流晚于拉流启动：先调 /api/start（无流），N 秒后推流，验证健康监控自动重连。
+
+    复现场景：
+      1. 调 /api/start → FFmpeg 拉流失败（流未就绪）→ API 返回错误
+      2. 等待 --stream-delay 秒（默认 8s）后启动 FFmpeg 推流
+      3. 健康监控检测到 dead decoder → 进入重连模式 → 触发 restart_stream
+      4. 重连成功后运行片刻，最后调 terminate
+
+    Bug 2 验证点：
+      - 修复前：decoder 未注册 → 健康监控走 orphan 路径 → 永不重连
+      - 修复后：decoder 先注册 → idle_time > 5s → 进入重连模式 → 自动建立连接
+
+    后端日志关键字：
+      'Initial start failed, health monitor will retry'
+      'RECONNECT MODE' → 'restart_stream' → 'Stream restarted successfully'
+
+    参数说明：
+      --stream-delay  推流延迟秒数，必须 < 25s（重连窗口 = max_attempts × interval）
+      --duration      重连成功后的稳定观察时长
+    """
+    stream_delay = getattr(args, "stream_delay", DELAYED_STREAM_DEFAULT)
+
+    print("\n" + "=" * 60)
+    print("Scenario 6: 延迟推流 — 初始拉流失败后健康监控自动重连")
+    print(f"  推流延迟: {stream_delay}s（须 < 重连窗口 25s）")
+    print(f"  重连成功超时: {RECONNECT_SUCCESS_TIMEOUT}s")
+    print("=" * 60)
+
+    is_remote = args.server not in ("localhost", "127.0.0.1")
+    api = APIClient(f"http://{args.server}:8000")
+    check_prerequisites(api, args.video_path)
+
+    with managed_task(args.task_id) as client_id:
+        push_url, pull_url = build_urls(args.server, client_id)
+        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+
+        try:
+            # ----------------------------------------------------------------
+            # Step 1: 先调 /api/start（此时无流，预期失败或成功均可）
+            # ----------------------------------------------------------------
+            print(f"\n[Step 1] 调用 /api/start（流尚未就绪）")
+            print(f"  pull_url={pull_url}")
+            result = api.unified_start(args.task_id, pull_url, args.fps)
+
+            if "error" in result:
+                print(f"  [预期] /api/start 返回错误（流不可达）")
+                print(f"  错误摘要: {str(result.get('error', ''))[:100]}")
+                print(f"  → 修复验证：decoder 已注册，健康监控将在约 5s 后进入重连模式")
+            else:
+                print(f"  /api/start 意外成功（流在调用瞬间已就绪），测试仍继续")
+                print(f"  响应: {result}")
+
+            # ----------------------------------------------------------------
+            # Step 2: 等待推流延迟（模拟推流端稍后启动）
+            # ----------------------------------------------------------------
+            print(f"\n[Step 2] 等待 {stream_delay}s（模拟推流端准备中）...")
+            time.sleep(stream_delay)
+
+            # ----------------------------------------------------------------
+            # Step 3: 启动推流
+            # ----------------------------------------------------------------
+            print(f"\n[Step 3] 启动推流: {push_url}")
+            stream_stabilize(ffmpeg, is_remote)
+            print(f"  推流已就绪，健康监控将检测到流并触发 restart_stream")
+
+            # ----------------------------------------------------------------
+            # Step 4: 等待健康监控重连成功
+            # ----------------------------------------------------------------
+            print(f"\n[Step 4] 轮询健康状态，等待重连成功...")
+            reconnected = poll_until_reconnected(api, client_id, timeout=RECONNECT_SUCCESS_TIMEOUT)
+
+            if reconnected:
+                print(f"\n[PASS] 健康监控自动重连成功（无需再次调 /api/start）")
+
+                # 稳定运行片刻，确认连接质量
+                stable_secs = min(args.duration, 15)
+                print(f"\n[Step 5] 稳定观察 {stable_secs}s...")
+                if not args.no_window:
+                    viewer = InferenceViewer(
+                        client_id, show_window=True, base_port=f"{args.server}:8000"
+                    )
+                    asyncio.run(viewer.connect_and_display(stable_secs))
+                else:
+                    print_viewer_url(args.server, client_id)
+                    time.sleep(stable_secs)
+            else:
+                print(f"\n[FAIL] {RECONNECT_SUCCESS_TIMEOUT}s 内未检测到重连成功")
+                print(f"  排查步骤:")
+                print(f"  1. 检查后端日志是否有 'Initial start failed, health monitor will retry'")
+                print(f"     → 有: 修复生效，可能重连窗口不够（增大 --stream-delay 或减小延迟）")
+                print(f"     → 无: Bug 2 修复未生效，请重新检查 service.py 注册顺序")
+                print(f"  2. 检查后端日志是否有 'orphan' 相关日志")
+                print(f"     → 有: decoder 未注册，健康监控走了 orphan 路径（旧 bug 行为）")
+
+        finally:
+            print(f"\n[Cleanup] 调用 /api/terminate...")
+            term_result = api.unified_terminate(client_id)
+            print(f"terminate 结果: {term_result.get('status', term_result)}")
+            ffmpeg.stop()
+
+    print("\nScenario 6 完成")
+    print("  后端日志验证路径:")
+    print("  'Initial start failed' → 'RECONNECT MODE' → 'restart_stream' → 'Stream restarted successfully'")
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -443,9 +605,10 @@ def main():
   4  仅推流:          推流 duration 秒，不调任何 API
   5  仅 start:        --mode no-stream: start 但不推流
                        --mode no-terminate: start 但不 terminate
+  6  延迟推流:        先 start（无流，预期失败）→ N秒后推流 → 验证自动重连 (Bug 2)
         """,
     )
-    parser.add_argument("--scenario", type=int, required=True, choices=[1, 2, 3, 4, 5], help="测试场景编号")
+    parser.add_argument("--scenario", type=int, required=True, choices=[1, 2, 3, 4, 5, 6], help="测试场景编号")
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
     parser.add_argument("--task_id", type=int, required=True, help="任务 ID")
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
@@ -458,6 +621,13 @@ def main():
         default="no-stream",
         help="Scenario 5 子模式（默认: no-stream）",
     )
+    parser.add_argument(
+        "--stream-delay",
+        type=int,
+        default=DELAYED_STREAM_DEFAULT,
+        dest="stream_delay",
+        help=f"Scenario 6：推流延迟秒数，须 < 25s（默认: {DELAYED_STREAM_DEFAULT}s）",
+    )
     args = parser.parse_args()
 
     if args.video_path is None:
@@ -469,6 +639,7 @@ def main():
         3: run_scenario_3,
         4: run_scenario_4,
         5: run_scenario_5,
+        6: run_scenario_6,
     }
 
     try:

@@ -67,6 +67,7 @@ class ClientQueues:
         self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
         # CA-RawQueue: 原始帧副本，用于落盘生成原始视频（设置最大长度限制）
         self.ca_raw: Deque[FrameData] = deque(maxlen=ca_maxlen)
+        self.frames_dropped_raw: int = 0  # ca_raw 因 deque 溢出被淘汰的帧数（可观测）
         # CA-ProcessedQueue: 处理后的帧，用于生成 HLS（设置最大长度限制）
         self.ca_processed: Deque[FrameData] = deque(maxlen=ca_maxlen)
         self.ca_segment_len = ca_segment_len
@@ -141,6 +142,8 @@ class ClientQueues:
             frames_to_persist = None
             task_id = None
             with self._lock:
+                if self.ca_raw.maxlen is not None and len(self.ca_raw) >= self.ca_raw.maxlen:
+                    self.frames_dropped_raw += 1
                 self.ca_raw.append(frame_data)
                 self.latest_raw_frame = frame_data.frame
                 self.latest_raw_timestamp = frame_data.timestamp

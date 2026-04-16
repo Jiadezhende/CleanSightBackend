@@ -9,16 +9,18 @@ CleanSight 后端提供 RESTful API 和 WebSocket 接口，用于管理内镜清
 ### 基础信息
 
 - **基础URL**: `http://localhost:8000` (开发环境)
-- **API文档**: `http://localhost:8000/docs` (Swagger UI)
 - **协议**: HTTP/1.1 和 WebSocket
+- **API 文档端点**: `/docs`、`/redoc`、`/openapi.json` 已**永久关闭**，接口清单以本文档为准
+- **安全网关**: 所有 HTTP/WS 请求先经 `GatewayMiddleware`（IP 白名单 / 速率限制 / 反扫描），详见 [API_GATEWAY.md](API_GATEWAY.md)
 
-### 版本说明
+### 接口分区（2026-04 起）
 
-**当前版本为过渡版本**，对部分 API 功能进行了合并和重构：
+- `/api/*` —— 统一启动/终止（主入口）
+- `/ai/video` —— AI 推理 WebSocket
+- `/task/*` —— 任务状态 / 告警 / 视频回溯
+- `/health/*` —— 健康监控（Gateway 宽松路径，可高频轮询）
 
-- **推荐使用**: `/api` 统一接口和 `/health` 健康监控接口
-- **过渡保留**: `/ai` 和 `/inspection` 的部分接口仍可用，但标记为 **⚠️ 过渡接口**
-- **未来计划**: 过渡接口将在后续版本中移除，请尽快迁移到新接口
+**已下线的接口**（本文档不再描述）：`/inspection/*`、`/ai/status`、`/ai/load_task`、`/ai/terminate_task`。功能已合并进 `/api/start` 与 `/api/terminate`。
 
 ---
 
@@ -628,174 +630,11 @@ curl -X GET "http://localhost:8000/health/monitor/config"
 
 ---
 
-## 三、AI 推理服务 (`/ai`) - **⚠️ 过渡接口**
+## 三、AI 推理服务 (`/ai`)
 
-AI 推理服务负责管理视频流的实时分析、任务加载和推理结果推送。
+AI 推理服务对外仅保留 WebSocket `/ai/video`，用于向前端实时推送处理后的视频帧。任务加载、终止、状态查询等功能已合并到 `/api/*` 与 `/health/*`。
 
-**注意**: 本节中的部分接口已标记为 **⚠️ 过渡接口**，建议迁移到统一 API (`/api`) 和健康监控 API (`/health`)。
-
-### 3.1 获取 AI 服务状态 - **⚠️ 过渡接口**
-
-- **URL**: `GET /ai/status`
-- **描述**: 查询 AI 服务当前状态，返回详细的队列信息和运行状态。
-- **⚠️ 迁移建议**: 请使用 `GET /health/status` 获取更完整的系统状态
-
-#### 请求参数
-
-无
-
-#### 成功响应示例 (200 OK)
-
-```json
-{
-  "队列信息": "详细的 AI 服务队列状态"
-}
-```
-
-#### cURL 示例
-
-```bash
-curl -X GET "http://localhost:8000/ai/status"
-```
-
-#### 注意事项
-
-- 此接口用于监控和调试 AI 服务状态
-- 返回的队列信息包括各客户端的队列长度、处理速度等
-
----
-
-### 3.2 加载任务 - **⚠️ 过渡接口**
-
-- **URL**: `GET /ai/load_task/{task_id}`
-- **描述**: 从数据库加载指定任务，在 AI 服务中创建任务对象，为任务初始化推理管道和状态跟踪。
-- **⚠️ 迁移建议**: 请使用 `POST /api/start` 统一启动接口（自动加载任务并启动流）
-
-#### 路径参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| task_id | integer | 是 | 任务ID，必须在 clean_task 表中存在 |
-
-#### 成功响应示例 (200 OK)
-
-```json
-{
-  "task_id": 1,
-  "status": "running",
-  "cleaning_stage": "0",
-  "bending": false,
-  "bubble_detected": false,
-  "fully_submerged": false,
-  "updated_at": "2025-12-08T20:30:00"
-}
-```
-
-**字段说明**:
-- `task_id`: 任务ID
-- `status`: 任务状态（running, paused, completed, cancelled）
-- `cleaning_stage`: 当前清洗阶段（0-7）
-- `bending`: 是否检测到内镜弯折
-- `bubble_detected`: 是否检测到气泡（漏气）
-- `fully_submerged`: 是否完全浸没
-- `updated_at`: 最后更新时间（ISO 8601格式）
-
-#### 错误响应
-
-**404 Not Found** - 任务不存在
-```json
-{
-  "error": "Resource not found",
-  "detail": "Task 1 not found",
-  "resource_type": "Task",
-  "resource_id": "1"
-}
-```
-
-**400 Bad Request** - source_ip 为空
-```json
-{
-  "error": "Validation error",
-  "detail": "Task source_ip is empty",
-  "field": "source_ip"
-}
-```
-
-**500 Internal Server Error** - 任务加载失败
-```json
-{
-  "error": "Internal error",
-  "detail": "Failed to set task for client",
-  "retryable": false
-}
-```
-
-**503 Service Unavailable** - 数据库不可用
-```json
-{
-  "error": "Database unavailable",
-  "detail": "Database error: Failed to query task 1",
-  "retryable": true
-}
-```
-
-#### cURL 示例
-
-```bash
-# 加载任务 ID 为 1 的任务
-curl -X GET "http://localhost:8000/ai/load_task/1"
-```
-
-#### 注意事项
-
-- 加载任务前，确保任务已在数据库 `clean_task` 表中创建
-- `source_ip` 字段不能为空，系统使用它作为 `client_id`
-- 同一 `client_id` 重复加载任务会覆盖之前的任务对象
-- 任务加载成功后，需要调用 `/inspection/start_rtsp_stream` 启动视频流
-
----
-
-### 3.3 终止任务 - **⚠️ 过渡接口**
-
-- **URL**: `POST /ai/terminate_task/{client_id}`
-- **描述**: 清理指定客户端的所有 AI 服务资源（队列、任务对象等）。
-- **⚠️ 迁移建议**: 请使用 `POST /api/terminate` 统一终止接口（执行完整清理）
-- **⚠️ 注意**: 此接口只清理推理资源，不停止流解码器，不清理 ClientManager
-
-#### 路径参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| client_id | string | 是 | 客户端ID（通常是 source_ip） |
-
-#### 成功响应示例 (200 OK)
-
-```json
-{
-  "status": "success",
-  "message": "Task terminated for client 192.168.1.100"
-}
-```
-
-#### 错误响应
-
-**注意**: 此接口采用"尽力而为"策略，通常不会抛出异常。如果部分步骤失败，会在 `errors` 字段中返回错误信息，但仍返回 200 状态码。
-
-#### cURL 示例
-
-```bash
-# 终止 client_id 为 192.168.1.100 的任务
-curl -X POST "http://localhost:8000/ai/terminate_task/192.168.1.100"
-```
-
-#### 注意事项
-
-- 终止任务会清理所有相关的队列和内存资源
-- 建议在停止视频流后调用此接口进行完整清理
-
----
-
-### 3.4 实时推理结果流（WebSocket）
+### 3.1 实时推理结果流（WebSocket）
 
 - **URL**: `ws://<host>/ai/video?client_id=<client_id>`
 - **描述**: 通过 WebSocket 实时推送 AI 处理后的视频帧（Base64 编码的 JPEG 图像）。
@@ -894,136 +733,18 @@ ws.run_forever()
 
 #### 注意事项
 
-- 必须先调用 `/ai/load_task/{task_id}` 加载任务
-- 必须先调用 `/inspection/start_rtsp_stream` 启动视频流
+- 必须先通过 `POST /api/start` 启动任务与流
 - WebSocket 会自动处理帧率控制和去重
-- 客户端断开连接时，服务器会自动清理资源
+- 服务端内置 `_recv_until_disconnect` 监听 CLOSE 帧，客户端断开后自动清理
+- 服务端 lifespan 关闭时通过 `shutdown_event` 与 CLOSE 帧双重保证及时退出（见 [EXCEPTION_FLOW_StreamService.md](EXCEPTION_FLOW_StreamService.md)）
 
 ---
 
-## 四、视频流管理 (`/inspection`) - **⚠️ 过渡接口**
-
-视频流管理服务负责启动和停止 RTSP 视频流的捕获和解码。
-
-**注意**: 本节中的接口已标记为 **⚠️ 过渡接口**，建议迁移到统一 API (`/api`)。
-
-### 4.1 启动 RTSP 流 - **⚠️ 过渡接口**
-
-- **URL**: `POST /inspection/start_rtsp_stream`
-- **描述**: 启动 RTSP 流捕获和 AI 推理。
-- **⚠️ 迁移建议**: 请使用 `POST /api/start` 统一启动接口（自动加载任务并启动流）
-- **⚠️ 注意**: 此接口只启动流，不加载任务，需要单独调用 `/ai/load_task`
-
-#### 请求体
-
-```json
-{
-  "client_id": "192.168.1.100",
-  "rtsp_url": "rtsp://localhost:8554/live/stream",
-  "fps": 30
-}
-```
-
-**字段说明**:
-- `client_id` (string, 必填): 客户端ID，通常为摄像机 IP 或任务的 source_ip
-- `rtsp_url` (string, 必填): RTSP 流地址
-- `fps` (integer, 可选): 目标帧率，默认 30
-
-#### 成功响应示例 (200 OK)
-
-```json
-{
-  "status": "success",
-  "message": "RTSP 流捕获已启动 for 192.168.1.100"
-}
-```
-
-#### 错误响应
-
-**503 Service Unavailable** - RTSP 连接失败
-```json
-{
-  "error": "Stream unavailable",
-  "detail": "Stream connection failed: rtsp://localhost:8554/live/stream - Connection timeout",
-  "client_id": "192.168.1.100"
-}
-```
-
-**500 Internal Server Error** - FFmpeg 启动失败
-```json
-{
-  "error": "FFmpeg error",
-  "detail": "FFmpeg error: Failed to launch FFmpeg (exit_code=1)",
-  "client_id": "192.168.1.100"
-}
-```
-
-#### cURL 示例
-
-```bash
-curl -X POST "http://localhost:8000/inspection/start_rtsp_stream" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "192.168.1.100",
-    "rtsp_url": "rtsp://localhost:8554/live/stream",
-    "fps": 30
-  }'
-```
-
-#### 注意事项
-
-- 确保 MediaMTX 服务正在运行（端口 8554）
-- 确保已调用 `/ai/load_task/{task_id}` 加载任务
-- `client_id` 应与任务的 `source_ip` 一致
-- 流启动后，可通过 WebSocket `/ai/video` 接收推理结果
-
----
-
-### 4.2 停止 RTSP 流 - **⚠️ 过渡接口**
-
-- **URL**: `POST /inspection/stop_rtsp_stream?client_id=<client_id>`
-- **描述**: 停止 RTSP 流捕获，采用尽力清理模式，即使解码器异常也会清理所有相关资源。
-- **⚠️ 迁移建议**: 请使用 `POST /api/terminate` 统一终止接口（执行完整清理）
-
-#### 查询参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| client_id | string | 是 | 客户端ID |
-
-#### 成功响应示例 (200 OK)
-
-```json
-{
-  "status": "success",
-  "message": "RTSP 流捕获已停止 for 192.168.1.100",
-  "cleanup_details": {
-    "stream_stopped": true,
-    "ai_cleaned": true,
-    "queues_cleared": true
-  }
-}
-```
-
-#### cURL 示例
-
-```bash
-curl -X POST "http://localhost:8000/inspection/stop_rtsp_stream?client_id=192.168.1.100"
-```
-
-#### 注意事项
-
-- 采用尽力清理模式，永不失败
-- 即使流已经断开或解码器已死，也会清理相关资源
-- 建议在停止流后调用 `/ai/terminate_task/{client_id}` 进行完整清理
-
----
-
-## 五、任务管理 (`/task`)
+## 四、任务管理 (`/task`)
 
 任务管理服务提供任务状态监控和历史视频回溯功能。
 
-### 5.1 任务状态实时更新（WebSocket）
+### 4.1 任务状态实时更新（WebSocket）
 
 - **URL**: `ws://<host>/task/status/{client_id}`
 - **描述**: 每秒推送一次任务状态信息，包括清洗阶段、检测结果和告警信息。
@@ -1109,7 +830,7 @@ ws.onmessage = (event) => {
 
 ---
 
-### 5.2 获取任务视频段列表
+### 4.2 获取任务视频段列表
 
 - **URL**: `GET /task/traceback/{task_id}/segments?video_type=<type>`
 - **描述**: 获取任务的所有 HLS 视频段路径和关键点 JSON 路径。
@@ -1199,7 +920,7 @@ curl -X GET "http://localhost:8000/task/traceback/123/segments?video_type=raw"
 
 ---
 
-### 5.3 获取任务播放列表
+### 4.3 获取任务播放列表
 
 - **URL**: `GET /task/traceback/{task_id}/playlist?video_type=<type>`
 - **描述**: 获取任务的 HLS 播放列表文件（.m3u8），可直接用于视频播放器。
@@ -1270,7 +991,7 @@ curl -X GET "http://localhost:8000/task/traceback/123/playlist?video_type=proces
 
 ---
 
-### 5.4 获取告警记录
+### 4.4 获取告警记录
 
 - **URL**: `GET /task/{task_id}/alarms`
 - **描述**: 查询数据库 `clean_alarm` 表中为指定 `task_id` 保存的所有告警记录，按 `created_at` 降序返回。用于任务回溯与告警审计。
@@ -1345,6 +1066,30 @@ curl -X GET "http://localhost:8000/task/1/alarms"
 
 ---
 
+### 4.5 前端实时消息（HTTP 快照 + WebSocket 推送）
+
+- **URL（HTTP）**: `GET /task/message/{client_id}` —— 返回内存快照（检测结果、时序事件、最近 5 条内存告警）
+- **URL（WebSocket）**: `ws://<host>/task/msg/{client_id}` —— 每秒推送一次相同结构的消息
+- **用途**: 前端实时告警提示；HTTP 适合轮询（1~2 Hz），WebSocket 适合长连接
+
+> `/task/message/*` 属于 Gateway **宽松路径**（默认 `gateway_relaxed_prefixes="/health,/task/message"`），高频轮询不会触发升级封禁。详见 [API_GATEWAY.md](API_GATEWAY.md)。
+
+**响应结构**：
+
+```json
+{
+  "stage": "1",
+  "detections": { "bubble": true, "bending": false },
+  "recent_alarms": [
+    { "alarm_type": "bubble_detected", "severity": "high", "message": "..." }
+  ]
+}
+```
+
+**404**：`client_id` 未在 ClientManager 中注册（未通过 `/api/start` 启动）。
+
+---
+
 ## 附录
 
 ### A. 清洗阶段编码
@@ -1374,7 +1119,7 @@ curl -X GET "http://localhost:8000/task/1/alarms"
 
 ### C. 完整使用流程示例
 
-#### 方式一：使用统一 API（推荐）
+#### 统一 API 完整流程
 
 ```python
 import requests
@@ -1426,61 +1171,6 @@ alarms = response.json()
 print(f"告警记录: {alarms['total']} 条")
 ```
 
-#### 方式二：使用传统 API（过渡期保留）
-
-```python
-import requests
-import websocket
-import json
-
-# 1. 加载任务（⚠️ 将弃用）
-task_id = 1
-response = requests.get(f"http://localhost:8000/ai/load_task/{task_id}")
-print(f"任务加载: {response.json()}")
-
-# 2. 启动 RTSP 流（⚠️ 将弃用）
-client_id = "192.168.1.100"
-rtsp_config = {
-    "client_id": client_id,
-    "rtsp_url": "rtsp://localhost:8554/live/stream",
-    "fps": 30
-}
-response = requests.post("http://localhost:8000/inspection/start_rtsp_stream", json=rtsp_config)
-print(f"流启动: {response.json()}")
-
-# 3. 连接 WebSocket 接收推理结果
-def on_video_message(ws, message):
-    print(f"收到视频帧: {len(message)} bytes")
-
-video_ws = websocket.WebSocketApp(
-    f"ws://localhost:8000/ai/video?client_id={client_id}",
-    on_message=on_video_message
-)
-
-# 4. 连接 WebSocket 监控任务状态
-def on_status_message(ws, message):
-    status = json.loads(message)
-    print(f"任务状态: {status}")
-
-status_ws = websocket.WebSocketApp(
-    f"ws://localhost:8000/task/status/{client_id}",
-    on_message=on_status_message
-)
-
-# 5. 任务完成后停止流（⚠️ 将弃用）
-response = requests.post(f"http://localhost:8000/inspection/stop_rtsp_stream?client_id={client_id}")
-print(f"流停止: {response.json()}")
-
-# 6. 终止任务并清理资源（⚠️ 将弃用，且不完整）
-response = requests.post(f"http://localhost:8000/ai/terminate_task/{client_id}")
-print(f"任务终止: {response.json()}")
-
-# 7. 查询告警记录
-response = requests.get(f"http://localhost:8000/task/{task_id}/alarms")
-alarms = response.json()
-print(f"告警记录: {alarms['total']} 条")
-```
-
 ---
 
-**最后更新**: 2026-02-08
+**最后更新**: 2026-04-13

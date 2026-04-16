@@ -314,8 +314,12 @@ cd mediamtx_v1.15.4  # Windows
 
 访问以下地址验证服务：
 
-- **API 文档**: http://localhost:8000/docs
-- **健康检查**: http://localhost:8000/ai/status
+- **健康检查**: <http://localhost:8000/health/status>
+- **监控统计**: <http://localhost:8000/health/monitor/stats>
+- **Prometheus 指标**: <http://localhost:8000/metrics>
+
+> `/docs` `/redoc` `/openapi.json` 已永久关闭；接口清单以 [API_ENDPOINTS.md](API_ENDPOINTS.md) 为准。
+> 若对外部署，RTSP 流量必须经 `mediamtx_gateway`（8004 → 127.0.0.1:18004），详见 [API_GATEWAY.md](API_GATEWAY.md)。
 
 ---
 
