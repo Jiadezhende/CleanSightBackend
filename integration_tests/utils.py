@@ -207,7 +207,7 @@ class DatabaseHelper:
                 cls_id="691dd1a8279461135967c843",  # 平台 class 标识 (clean_task)
                 task_id=task_id,
                 source_ip=source_ip,
-                current_step="0",
+                current_step="测漏",
                 status="paused",
                 updated_time=now_ts,
                 start_time=0,
