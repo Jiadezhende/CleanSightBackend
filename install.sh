@@ -24,7 +24,11 @@ source .venv/bin/activate
 
 PIP_MIRROR="-i https://pypi.tuna.tsinghua.edu.cn/simple"
 
-echo "Installing dependencies..."
+# torch 必须从 PyTorch 官方源安装，清华镜像只有捆绑 CUDA 的版本（额外 2-4 GB）
+echo "Installing PyTorch cu128 (uses system CUDA, no bundled libraries)..."
+pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+
+echo "Installing remaining dependencies..."
 pip install -r requirements.txt $PIP_MIRROR
 
 # ultralytics 会拉入 opencv-python，卸载它时会连带删除 cv2 模块文件，
