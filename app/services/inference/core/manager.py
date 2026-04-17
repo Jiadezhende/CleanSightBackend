@@ -202,12 +202,26 @@ class InferenceManager:
 
         return processed_frame
 
+    _STEP_TO_STAGE: Dict[str, str] = {
+        "测漏": "LEAK",
+        "清洗": "CLEAN",
+    }
+
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
         """为客户端设置任务，并创建对应的 ClientTemporalActor。"""
         cq = client_manager.get_client(client_id)
         if cq is None:
             return False
         cq.set_task(task)
+
+        if task is not None:
+            stage = self._STEP_TO_STAGE.get(task.current_step, "MOCK")
+            if stage == "MOCK":
+                logger.warning(
+                    "[InferenceManager] 未知的 current_step '%s'，路由到 MOCK stage",
+                    task.current_step,
+                )
+            cq.set_stage(stage)
 
         # 停止旧 actor（任务切换时），等待线程退出并收集结算告警
         old_actor = self._actors.pop(client_id, None)

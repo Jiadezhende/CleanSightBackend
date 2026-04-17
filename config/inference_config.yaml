@@ -60,6 +60,10 @@ stages:
       #     enabled: true
       #     confidence_threshold: 0.7
 
+  # ==================== MOCK 阶段（未知 current_step 的 fallback） ====================
+  MOCK:
+    models: []   # 无模型，帧直接透传，不产生告警
+
 # ==================== 全局配置（所有模块共享） ====================
 global:
   # 视频处理参数（所有模块共享）
