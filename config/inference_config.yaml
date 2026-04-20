@@ -49,29 +49,29 @@ stages:
     #   class: app.services.inference.components.DefaultVisualizer
     # alarm_triggers: ...
 
-  # ==================== CLEAN 阶段（清洁检测） ====================
+  # ==================== CLEAN 阶段（清洁检测，暂无模型，纯透传） ====================
   CLEAN:
     models:
       - name: mock_detection
         class: app.services.inference.workflows.mock.MockDetector
         params:
-          brightness_threshold: 100.0
+          brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
         analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
         analyzer_params:
-          consecutive_trigger: 3
+          consecutive_trigger: 999    # 实际上永不满足，禁止告警
 
-  # ==================== MOCK 阶段（未知 current_step 的 fallback） ====================
+  # ==================== MOCK 阶段（未知 current_step 的 fallback，纯透传） ====================
   MOCK:
     models:
       - name: mock_detection
         class: app.services.inference.workflows.mock.MockDetector
         params:
-          brightness_threshold: 100.0
+          brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
         analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
         analyzer_params:
-          consecutive_trigger: 3
+          consecutive_trigger: 999    # 实际上永不满足，禁止告警
 
 # ==================== 全局配置（所有模块共享） ====================
 global:
