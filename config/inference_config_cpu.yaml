@@ -15,7 +15,7 @@ stages:
         analyzer_params:
           consecutive_trigger: 3
 
-  # ==================== CLEAN 阶段 ====================
+  # ==================== CLEAN 阶段（清洁检测，暂无模型，MockDetector 透传） ====================
   CLEAN:
     models:
       - name: mock_detection

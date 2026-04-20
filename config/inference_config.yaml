@@ -52,13 +52,14 @@ stages:
   # ==================== CLEAN 阶段（清洁检测） ====================
   CLEAN:
     models:
-      # 示例：未来添加的清洁质量检测模型
-      # - name: quality_detection
-      #   class: app.services.models.quality.QualityDetectionTask
-      #   params:
-      #     model_path: ${QUALITY_MODEL_PATH:./weights/quality.pt}
-      #     enabled: true
-      #     confidence_threshold: 0.7
+      - name: mock_detection
+        class: app.services.inference.workflows.mock.MockDetector
+        params:
+          brightness_threshold: 100.0
+          enabled: true
+        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
+        analyzer_params:
+          consecutive_trigger: 3
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback） ====================
   MOCK:
