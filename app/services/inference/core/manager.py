@@ -203,8 +203,8 @@ class InferenceManager:
         return processed_frame
 
     _STEP_TO_STAGE: Dict[str, str] = {
-        "测漏": "LEAK",
-        "清洗": "CLEAN",
+        "1": "LEAK",
+        "2": "CLEAN",
     }
 
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:

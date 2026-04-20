@@ -62,7 +62,15 @@ stages:
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback） ====================
   MOCK:
-    models: []   # 无模型，帧直接透传，不产生告警
+    models:
+      - name: mock_detection
+        class: app.services.inference.workflows.mock.MockDetector
+        params:
+          brightness_threshold: 100.0
+          enabled: true
+        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
+        analyzer_params:
+          consecutive_trigger: 3
 
 # ==================== 全局配置（所有模块共享） ====================
 global:

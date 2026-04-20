@@ -187,7 +187,7 @@ class DatabaseHelper:
             db.close()
 
     @staticmethod
-    def create_test_task(task_id: int = 0, source_ip: str = "test") -> bool:
+    def create_test_task(task_id: int = 0, source_ip: str = "test", current_step: str = "1") -> bool:
         """创建测试任务（如果不存在）
 
         Returns:
@@ -207,7 +207,7 @@ class DatabaseHelper:
                 cls_id="691dd1a8279461135967c843",  # 平台 class 标识 (clean_task)
                 task_id=task_id,
                 source_ip=source_ip,
-                current_step="测漏",
+                current_step=current_step,
                 status="paused",
                 updated_time=now_ts,
                 start_time=0,
@@ -266,7 +266,7 @@ class DatabaseHelper:
 
     @staticmethod
     @contextmanager
-    def test_task(task_id: int = 0, source_ip: str = "test"):
+    def test_task(task_id: int = 0, source_ip: str = "test", current_step: str = "1"):
         """上下文管理器：创建测试任务，退出时自动清理
 
         用法::
@@ -276,7 +276,7 @@ class DatabaseHelper:
                 pass
             # 退出 with 块后自动删除该任务
         """
-        created = DatabaseHelper.create_test_task(task_id, source_ip)
+        created = DatabaseHelper.create_test_task(task_id, source_ip, current_step=current_step)
         try:
             yield task_id
         finally:

@@ -25,9 +25,9 @@ def _make_task(step: str) -> Task:
 
 
 @pytest.mark.parametrize("step,expected_stage", [
-    ("测漏", "LEAK"),
-    ("清洗", "CLEAN"),
-    ("未知阶段", "MOCK"),
+    ("1", "LEAK"),
+    ("2", "CLEAN"),
+    ("测漏", "MOCK"),
     ("", "MOCK"),
 ])
 def test_set_task_routes_stage(manager, step, expected_stage):

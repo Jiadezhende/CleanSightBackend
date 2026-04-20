@@ -2,7 +2,7 @@
 单客户端集成测试 - 覆盖6种使用场景
 
 用法:
-    python integration_tests/test_single_client.py --scenario <1-6> --task_id <id> [options]
+    python integration_tests/test_single_client.py --scenario <1-7> --task_id <id> [options]
 
 场景:
     1 - 正常流程:   推流 → start → 等待 → terminate
@@ -11,6 +11,7 @@
     4 - 仅推流:     推流，不调用任何 API
     5 - 仅 start:   调 start 但不推流(no-stream) 或 不调 terminate(no-terminate)
     6 - 延迟推流:   先调 start（流未就绪），N秒后推流，验证健康监控自动重连（Bug 2）
+    7 - MOCK阶段:   无效 current_step → MOCK fallback，验证帧透传不黑屏
 
 参数:
     --scenario    {1,2,3,4,5,6}       必填
@@ -64,7 +65,7 @@ def build_urls(server: str, client_id: str) -> tuple:
 
 
 @contextmanager
-def managed_task(task_id: int):
+def managed_task(task_id: int, current_step: str = "1"):
     """确保任务存在于数据库，退出时自动清理自己创建的任务。
 
     Yields:
@@ -75,8 +76,8 @@ def managed_task(task_id: int):
     created = False
     if not task:
         source_ip = f"test.s{task_id}"
-        print(f"任务 {task_id} 不存在，创建新任务 (source_ip={source_ip})")
-        db.create_test_task(task_id, source_ip=source_ip)
+        print(f"任务 {task_id} 不存在，创建新任务 (source_ip={source_ip}, current_step={current_step})")
+        db.create_test_task(task_id, source_ip=source_ip, current_step=current_step)
         task = db.get_task(task_id)
         created = True
     client_id = str(task.source_ip)
@@ -587,6 +588,65 @@ def run_scenario_6(args):
 
 
 # ---------------------------------------------------------------------------
+# Scenario 7: 无效 current_step → MOCK 阶段透传
+# ---------------------------------------------------------------------------
+
+
+def run_scenario_7(args):
+    """
+    使用无效 current_step 启动任务，验证 MOCK 阶段 fallback 不黑屏。
+
+    验证点：
+      - current_step="未知阶段" 路由到 MOCK stage
+      - WebSocket 能正常收到视频帧（不黑屏）
+      - terminate 正常清理资源
+
+    后端日志关键字：
+      'Routing client ... to stage MOCK'
+      InferWorker-MOCK 线程正常运行
+    """
+    print("\n" + "=" * 60)
+    print("Scenario 7: 无效 current_step → MOCK 阶段透传（验证不黑屏）")
+    print(f"  current_step = '未知阶段' → 预期路由到 MOCK stage")
+    print("=" * 60)
+
+    is_remote = args.server not in ("localhost", "127.0.0.1")
+    api = APIClient(f"http://{args.server}:8000")
+    check_prerequisites(api, args.video_path)
+
+    with managed_task(args.task_id, current_step="未知阶段") as client_id:
+        push_url, pull_url = build_urls(args.server, client_id)
+
+        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+        try:
+            stream_stabilize(ffmpeg, is_remote)
+
+            print(f"\n调用 /api/start (task_id={args.task_id}, current_step=未知阶段)")
+            result = api.unified_start(args.task_id, pull_url, args.fps)
+            if "error" in result:
+                raise RuntimeError(f"/api/start 失败: {result['error']}")
+            print(f"/api/start 成功: {result}")
+            print(f"  → 检查后端日志确认已路由到 MOCK stage")
+
+            if not args.no_window:
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                asyncio.run(viewer.connect_and_display(args.duration))
+            else:
+                print_viewer_url(args.server, client_id)
+                print(f"运行中（无窗口，{args.duration}s）...")
+                time.sleep(args.duration)
+
+        finally:
+            print("\n调用 /api/terminate...")
+            result = api.unified_terminate(client_id)
+            print(f"terminate 结果: {result.get('status', result)}")
+            ffmpeg.stop()
+
+    print("\nScenario 7 完成")
+    print("  验证: 后端日志应有 MOCK stage 路由，WebSocket 帧正常推送（无黑屏）")
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -604,9 +664,10 @@ def main():
   5  仅 start:        --mode no-stream: start 但不推流
                        --mode no-terminate: start 但不 terminate
   6  延迟推流:        先 start（无流，预期失败）→ N秒后推流 → 验证自动重连 (Bug 2)
+  7  MOCK阶段:        无效 current_step → MOCK fallback → 验证帧透传不黑屏
         """,
     )
-    parser.add_argument("--scenario", type=int, required=True, choices=[1, 2, 3, 4, 5, 6], help="测试场景编号")
+    parser.add_argument("--scenario", type=int, required=True, choices=[1, 2, 3, 4, 5, 6, 7], help="测试场景编号")
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
     parser.add_argument("--task_id", type=int, required=True, help="任务 ID")
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
@@ -638,6 +699,7 @@ def main():
         4: run_scenario_4,
         5: run_scenario_5,
         6: run_scenario_6,
+        7: run_scenario_7,
     }
 
     try:
