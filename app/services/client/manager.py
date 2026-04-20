@@ -178,7 +178,7 @@ class ClientManager:
                     logger.info(f"客户端队列已清理: {client_id}")
                 except Exception as e:
                     result["error"] = str(e)
-                    logger.error(f"清理客户端队列失败 {client_id}: {e}")
+                    logger.error("清理客户端队列失败 %s: %s", client_id, e, exc_info=True)
 
             logger.info(f"客户端已移除: {client_id}")
 

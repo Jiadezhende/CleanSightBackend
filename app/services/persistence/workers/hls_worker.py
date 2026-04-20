@@ -12,6 +12,7 @@ from queue import Empty, Queue
 from app.services.persistence.models import HLSPersistenceTask
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
 from app.utils import GuardedExecutor
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,11 @@ class HLSWorkerPool:
                 stop_event=self.stop_event,
                 worker_id=i,
             )
-            thread = threading.Thread(target=worker.run, daemon=True)
+            thread = threading.Thread(
+                target=guarded_run,
+                args=(worker.run, self.stop_event, f"HLSWorker-{i}"),
+                daemon=True,
+            )
 
             self.workers.append(worker)
             self.threads.append(thread)

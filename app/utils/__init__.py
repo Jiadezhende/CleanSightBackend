@@ -48,6 +48,7 @@ from .executor import (
     GuardedExecutor,
     RetryExecutorWithCircuitBreaker,
 )
+from .worker_guard import guarded_run
 
 __all__ = [
     # Exceptions (基类 + 核心异常 + HTTP业务异常 + 工具函数)
@@ -71,6 +72,8 @@ __all__ = [
     "CircuitBreaker",
     "RetryExecutorWithCircuitBreaker",
     "ExecutionPolicy",
+    # Worker guard (线程级自愈)
+    "guarded_run",
     # Context
     "set_client_id",
     "get_client_id",

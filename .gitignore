@@ -1,3 +1,6 @@
+# SSH private keys
+scripts/hospital_sync/sender/hospital_sync_key
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -146,6 +149,7 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
 # Temporary files
 *.tmp

@@ -15,7 +15,7 @@ import numpy as np
 from app.models.frame import FrameData
 from app.services import ai
 from app.services.stream.config import DecoderConfig
-from app.utils.exceptions import FFmpegError
+from app.utils.exceptions import FFmpegError, StreamConnectionError
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -127,13 +127,45 @@ class FFmpegDecoder:
             # 快速检查进程是否立即崩溃
             time.sleep(0.1)  # 给进程一点启动时间
             if self.proc.poll() is not None:
-                # 进程已经退出
+                # 进程已经退出 — 此时 stderr 管道已关闭，可安全同步读取
                 exit_code = self.proc.returncode
+                try:
+                    stderr_output = (
+                        self.proc.stderr.read().decode("utf-8", errors="ignore").strip()
+                        if self.proc.stderr
+                        else ""
+                    )
+                except Exception:
+                    stderr_output = ""
+                # 区分"流暂不可用"（可重试）与"FFmpeg 真实崩溃"（致命）
+                _TRANSIENT_MARKERS = (
+                    "404",
+                    "not found",
+                    "connection refused",
+                    "connection timed out",
+                    "no route to host",
+                    "network unreachable",
+                )
+                is_transient = any(
+                    m in stderr_output.lower() for m in _TRANSIENT_MARKERS
+                )
+                # 最后一行非空行作为摘要，完整 stderr 降至 DEBUG
+                last_line = next(
+                    (l for l in reversed(stderr_output.splitlines()) if l.strip()), ""
+                )
+                self.logger.debug("FFmpeg stderr:\n%s", stderr_output)
+                if is_transient:
+                    self.logger.debug("FFmpeg: stream not available — %s", last_line)
+                    raise StreamConnectionError(
+                        url=self.stream_url,
+                        client_id=self.client_id,
+                        details=last_line or None,
+                    )
                 self.logger.error(
-                    f"FFmpeg process exited immediately with code {exit_code}"
+                    "FFmpeg exited (code=%s): %s", exit_code, last_line or "(no output)"
                 )
                 raise FFmpegError(
-                    message=f"FFmpeg process failed to start",
+                    message=f"FFmpeg process failed to start (exit_code={exit_code})",
                     client_id=self.client_id,
                     exit_code=exit_code,
                 )
@@ -206,9 +238,11 @@ class FFmpegDecoder:
                     if line_str:
                         self.logger.debug("ffmpeg stderr: %s", line_str)
                 except Exception:
-                    pass
+                    pass  # 单行解码失败可忽略
+        except ValueError:
+            pass  # pipe closed during stop() — expected on reconnect/shutdown
         except Exception:
-            pass
+            self.logger.error("stderr reader loop crashed", exc_info=True)
 
     def _windows_reader_loop(self):
         """On Windows use a separate thread to read stdout (blocking)."""
@@ -289,31 +323,32 @@ class FFmpegDecoder:
                 if self.client_queues is not None:
                     queue_capacity = self.client_queues.get_ca_ready_capacity()
 
-                # 判断是否应该丢帧
-                if self._should_drop_frame(pending_count, queue_capacity):
+                # 判断是否应该丢帧（仅针对推理队列）
+                drop_inference = self._should_drop_frame(pending_count, queue_capacity)
+                if drop_inference:
                     self.frames_dropped += 1
                     # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
                     if self.frames_dropped % 100 == 0:
                         self.logger.debug(
-                            "[BACKPRESSURE] dropping frame (pending=%s/%s, dropped=%s)",
+                            "[BACKPRESSURE] dropping inference frame (pending=%s/%s, dropped=%s)",
                             pending_count,
                             queue_capacity,
                             self.frames_dropped,
                         )
-                    continue  # 跳过此帧，不写入任何队列
 
                 # 3. 写入队列（如果 client_queues 可用）
                 if self.client_queues is not None:
                     now = time.time()
                     frame_data_obj = FrameData(timestamp=now, frame=std)
 
-                    # 3.1 写入原始队列（全帧率，用于落盘）
+                    # 3.1 写入原始队列（全帧率，用于落盘；背压时也写入，保证 HLS 录制完整）
                     if self.client_queues.append_ca_raw(frame_data_obj):
                         self.frames_written_to_raw += 1
 
-                    # 3.2 写入推理队列（降频）
-                    if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
-                        self.frames_written_to_ready += 1
+                    # 3.2 写入推理队列（降频；背压时跳过）
+                    if not drop_inference:
+                        if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
+                            self.frames_written_to_ready += 1
 
                 self.frames_received += 1
 

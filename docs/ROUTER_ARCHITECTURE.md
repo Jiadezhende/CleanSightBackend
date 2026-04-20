@@ -2,17 +2,18 @@
 
 ## 概述
 
-本项目按照**服务模块**划分路由，每个路由文件负责对应服务的生命周期管理和 API 接口。
+本项目按照**服务模块**划分路由，每个路由文件负责对应服务的生命周期管理和 API 接口。所有 HTTP/WS 请求在进入路由层前会先经过 `GatewayMiddleware`（[app/utils/gateway.py](../app/utils/gateway.py)）做 IP 白名单、速率限制与反扫描检查，详见 [API_GATEWAY.md](API_GATEWAY.md)。
 
 ## 路由划分原则
 
 | 路由文件 | 服务模块 | 职责 | Lifespan 管理 |
-|---------|---------|------|--------------|
+| --- | --- | --- | --- |
 | **health.py** | GlobalHealthMonitor | 流健康监控 + 孤儿流检测 + 自动重连 | ✅ 是 |
-| **ai.py** | InferenceManager | AI 推理管道管理 + WebSocket 推理结果推送 | ✅ 是 |
-| **inspection.py** | StreamService | 流捕获 + 解码器管理 | ❌ 否 |
+| **ai.py** | InferenceManager | WebSocket 推理结果推送 `/ai/video` | ✅ 是 |
 | **task.py** | Database | 任务 CRUD 操作 | ❌ 否 |
-| **api.py** | 多模块协调 | 统一的启动/终止 API（协调多个模块） | ❌ 否 |
+| **api.py** | 多模块协调 | 统一启动/终止 API（协调 Stream + Inference + ClientManager） | ❌ 否 |
+
+> **2026-04 变更**：原 `inspection.py` 路由已整体下线，其流启停功能合并到 `/api/start` 与 `/api/terminate`；`ai.py` 中的 `/ai/load_task` `/ai/terminate_task` `/ai/status` 等过渡接口同步移除，`/ai/video` WebSocket 保留。`/docs` `/redoc` `/openapi.json` 已永久关闭。
 
 ## 生命周期管理顺序
 
@@ -107,41 +108,17 @@ async def lifespan():
 **职责：**
 - 管理 InferenceManager 的生命周期
 - WebSocket 推理结果推送
-- 任务加载和终止（过渡接口，建议使用 /api/start 和 /api/terminate）
 
 **主要接口：**
 
 ```bash
-# WebSocket 推理结果推送
+# WebSocket 推理结果推送（唯一对外接口）
 WS /ai/video?client_id=xxx
-
-# 加载任务（过渡接口）
-GET /ai/load_task/{task_id}
-
-# 终止任务（过渡接口）
-POST /ai/terminate_task/{client_id}
 ```
 
-### 3. inspection.py - 流捕获路由
+> WebSocket handler 内置 `_recv_until_disconnect()` 后台任务，监听客户端 CLOSE 帧以配合 lifespan 优雅关闭，避免 Ctrl-C 时与 shutdown_event 形成环等待。详见 [EXCEPTION_FLOW_StreamService.md](EXCEPTION_FLOW_StreamService.md)。
 
-**职责：**
-- 启动/停止流捕获和解码
-- 提供流状态查询
-
-**主要接口：**
-
-```bash
-# 启动 RTSP 流捕获（过渡接口）
-POST /inspection/start_rtsp_stream
-
-# 停止 RTSP 流捕获（过渡接口，已改为完整清理）
-POST /inspection/stop_rtsp_stream?client_id=xxx
-
-# 停止流（通用接口）
-POST /inspection/stop_stream?client_id=xxx
-```
-
-### 4. task.py - 任务管理路由
+### 3. task.py - 任务管理路由
 
 **职责：**
 - 任务 CRUD 操作
@@ -166,7 +143,7 @@ PUT /task/{task_id}
 DELETE /task/{task_id}
 ```
 
-### 5. api.py - 统一 API 路由（推荐）
+### 4. api.py - 统一 API 路由（主入口）
 
 **职责：**
 - 提供统一的启动和终止接口
@@ -195,10 +172,9 @@ POST /api/terminate?client_id=xxx
 每个路由文件对应一个服务模块，职责单一：
 
 - ✅ `health.py` → `GlobalHealthMonitor`
-- ✅ `ai.py` → `InferenceManager`
-- ✅ `inspection.py` → `StreamService`
+- ✅ `ai.py` → `InferenceManager`（WebSocket 结果推送）
 - ✅ `task.py` → `Database`
-- ✅ `api.py` → 多模块协调
+- ✅ `api.py` → 多模块协调（Stream + Inference + ClientManager）
 
 ### 2. 生命周期独立管理
 
@@ -239,36 +215,12 @@ async def lifespan():
 
 用户可以根据功能类别快速找到对应接口：
 
-- `/health/*` - 健康监控相关
-- `/ai/*` - AI 推理相关
-- `/inspection/*` - 流捕获相关
-- `/task/*` - 任务管理相关
-- `/api/*` - 统一 API（推荐使用）
+- `/api/*` - 统一 API（主入口，`/api/start` 与 `/api/terminate`）
+- `/ai/video` - AI 推理 WebSocket
+- `/task/*` - 任务管理 / 溯源查询
+- `/health/*` - 健康监控
 
-## 迁移建议
-
-### 从旧接口迁移到新接口
-
-**启动流程：**
-
-```python
-# ❌ 旧方式（两步）
-api.start_task(task_id=1)
-api.start_rtsp_capture(client_id, rtsp_url, fps=30)
-
-# ✅ 新方式（一步）
-api.unified_start(task_id=1, rtsp_url="rtsp://...", fps=30)
-```
-
-**终止流程：**
-
-```python
-# ❌ 旧方式（不完整清理）
-api.stop_rtsp_capture(client_id)
-
-# ✅ 新方式（完整清理）
-api.unified_terminate(client_id)
-```
+## 运维与调用
 
 ### 监控健康状态
 
@@ -287,21 +239,23 @@ print(f"孤儿流检测: {stats['orphans_detected']}")
 ```
 app/
 ├── routers/
-│   ├── health.py      # 健康监控路由（新增）
-│   ├── ai.py          # AI 推理路由（简化 lifespan）
-│   ├── inspection.py  # 流捕获路由
+│   ├── health.py      # 健康监控路由
+│   ├── ai.py          # AI 推理 WebSocket 路由
 │   ├── task.py        # 任务管理路由
-│   └── api.py         # 统一 API 路由（新增）
+│   └── api.py         # 统一 API 路由（主入口）
 ├── services/
-│   ├── health_monitor.py      # GlobalHealthMonitor（移除全局变量）
+│   ├── health_monitor/        # GlobalHealthMonitor
 │   ├── inference/             # InferenceManager
 │   ├── stream/                # StreamService
 │   └── client/                # ClientManager
-└── main.py            # 应用入口（组合所有 lifespan）
+├── utils/
+│   └── gateway.py     # GatewayMiddleware（ASGI 安全层）
+└── main.py            # 应用入口（组合所有 lifespan + 挂载 Gateway）
 ```
 
 ## 相关文档
 
-- [API_MIGRATION_GUIDE.md](API_MIGRATION_GUIDE.md) - API 迁移指南
-- [CLEANUP_SIMPLIFICATION.md](CLEANUP_SIMPLIFICATION.md) - 清理服务简化说明
+- [API_GATEWAY.md](API_GATEWAY.md) - API Gateway 安全层
+- [API_ENDPOINTS.md](API_ENDPOINTS.md) - 当前全部接口清单
+- [API_MIGRATION_GUIDE.md](API_MIGRATION_GUIDE.md) - API 迁移指南（历史）
 - [HEALTH_MONITOR_REFACTOR.md](HEALTH_MONITOR_REFACTOR.md) - 健康监控重构说明

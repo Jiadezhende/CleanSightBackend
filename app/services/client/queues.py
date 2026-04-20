@@ -15,8 +15,6 @@ from app.models.frame import FrameData
 from app.models.task import Task as CleaningTask
 from app.services.inference.data_models import DetectionOutput
 
-from .state import ClientState
-
 if TYPE_CHECKING:
     from app.services.inference.models import AlarmRecord, InferenceResult
 
@@ -69,6 +67,7 @@ class ClientQueues:
         self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
         # CA-RawQueue: 原始帧副本，用于落盘生成原始视频（设置最大长度限制）
         self.ca_raw: Deque[FrameData] = deque(maxlen=ca_maxlen)
+        self.frames_dropped_raw: int = 0  # ca_raw 因 deque 溢出被淘汰的帧数（可观测）
         # CA-ProcessedQueue: 处理后的帧，用于生成 HLS（设置最大长度限制）
         self.ca_processed: Deque[FrameData] = deque(maxlen=ca_maxlen)
         self.ca_segment_len = ca_segment_len
@@ -82,8 +81,9 @@ class ClientQueues:
         self._latest_inference: Optional[InferenceResult] = None
         self._inference_lock = threading.Lock()
 
-        # 业务状态管理（新增）
-        self.state = ClientState(client_id=client_id, initial_stage=initial_stage)
+        # 当前处理阶段（LEAK / CLEAN / 等）
+        self._stage: str = initial_stage
+        self._stage_lock = threading.Lock()
 
         # 分段落盘：写满一段时直接调用 persistence_manager（延迟 import 避免加载顺序问题）
 
@@ -142,6 +142,8 @@ class ClientQueues:
             frames_to_persist = None
             task_id = None
             with self._lock:
+                if self.ca_raw.maxlen is not None and len(self.ca_raw) >= self.ca_raw.maxlen:
+                    self.frames_dropped_raw += 1
                 self.ca_raw.append(frame_data)
                 self.latest_raw_frame = frame_data.frame
                 self.latest_raw_timestamp = frame_data.timestamp
@@ -183,8 +185,8 @@ class ClientQueues:
                 frames=frames_to_persist,
             )
 
-    def set_latest_rendered(self, frame_data: FrameData) -> None:
-        """更新最新渲染帧（由 VisualizationWorker 调用）。"""
+    def set_latest_rendered(self, frame_data: Optional[FrameData]) -> None:
+        """更新最新渲染帧（由 VisualizationWorker 调用）。传 None 表示清空。"""
         with self._rendered_lock:
             self._latest_rendered = frame_data
 
@@ -342,6 +344,18 @@ class ClientQueues:
     def get_task(self) -> Optional[CleaningTask]:
         return self.task
 
+    # --- 阶段管理 ---
+
+    def get_stage(self) -> str:
+        """获取当前处理阶段。"""
+        with self._stage_lock:
+            return self._stage
+
+    def set_stage(self, stage: str) -> None:
+        """设置当前处理阶段。"""
+        with self._stage_lock:
+            self._stage = stage
+
     # --- slide_window 操作 ---
 
     def push_detection(self, task_name: str, output: DetectionOutput) -> None:
@@ -404,8 +418,8 @@ class ClientQueues:
     # --- 前端消息打包 ---
 
     def get_frontend_message(self) -> Dict[str, Any]:
-        """打包 ClientState + latest_temporal + 检测状态 + 告警，供前端读取。"""
-        state_dict = self.state.to_dict()
+        """打包阶段 + latest_temporal + 检测状态 + 告警，供前端读取。"""
+        stage = self.get_stage()
         events = self.get_latest_temporal()
         recent_alarms = self.get_recent_alarms(n=5)
 
@@ -427,8 +441,7 @@ class ClientQueues:
 
         return {
             "client_id": self.client_id,
-            "stage": state_dict.get("stage"),
-            "state": state_dict,
+            "stage": stage,
             "temporal": {
                 "events": events,
             } if events else None,

@@ -116,7 +116,7 @@ class ClientContext:
         # 退出 with 语句后自动清理上下文
     """
 
-    def __init__(self, client_id: str = None, task_id: int = None):
+    def __init__(self, client_id: str = None, task_id: int = None): # type: ignore
         """初始化上下文管理器
 
         Args:

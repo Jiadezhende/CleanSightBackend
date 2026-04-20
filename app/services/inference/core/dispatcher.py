@@ -15,6 +15,7 @@ from typing import Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.models import InferenceRequest
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,9 @@ class StageAwareDispatcher:
 
         self._stop_event.clear()
         self._dispatch_thread = threading.Thread(
-            target=self._dispatch_loop, daemon=True
+            target=guarded_run,
+            args=(self._dispatch_loop, self._stop_event, "StageAwareDispatcher"),
+            daemon=True,
         )
         self._dispatch_thread.start()
         logger.debug(
@@ -91,10 +94,7 @@ class StageAwareDispatcher:
             try:
                 self._fetch_and_dispatch_round()
             except Exception as e:
-                print(f"[StageAwareDispatcher] 异常: {e}")
-                import traceback
-
-                traceback.print_exc()
+                logger.error("[StageAwareDispatcher] Dispatch error: %s", e, exc_info=True)
 
             # 使用 Event.wait 可及时响应 stop 信号
             self._stop_event.wait(self.fetch_interval)
@@ -137,24 +137,8 @@ class StageAwareDispatcher:
                 self._stats["by_stage"][stage] += 1
 
     def _get_client_stage(self, client_id: str, cq: ClientQueues) -> str:
-        """获取客户端当前所处的 stage。
-
-        优先从 ClientState 读取，否则从 task 推断。
-        """
-        # 优先从 ClientState 读取（新架构）
-        if hasattr(cq, "state") and cq.state is not None:
-            return cq.state.get_stage()
-
-        # 兼容旧架构：从 task 的 current_step 推断 stage
-        if cq.task is not None:
-            step = getattr(cq.task, "current_step", None)
-            if step == "leak_test":
-                return "LEAK"
-            elif step == "cleaning":
-                return "CLEAN"
-
-        # 默认 stage
-        return "LEAK"
+        """获取客户端当前所处的 stage。"""
+        return cq.get_stage()
 
     def get_batch_for_stage(
         self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore

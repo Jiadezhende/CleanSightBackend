@@ -1,0 +1,16 @@
+[sqlserver]
+server   = 10.168.x.x
+database = master
+username = sa
+password = your_password
+driver   = ODBC Driver 17 for SQL Server
+
+[linked_server]
+name     = NJXX
+database = THIS4
+
+[sftp]
+host       = your-business-server.com
+port       = 22
+username   = root
+remote_dir = /opt/hospital_sync/data/pending

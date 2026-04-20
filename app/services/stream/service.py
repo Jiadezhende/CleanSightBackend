@@ -12,11 +12,11 @@ import os
 import selectors
 import threading
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse, urlunparse
 
 from app.utils import (
     ConflictError,
     FFmpegError,
-    GuardedExecutor,
     StreamConnectionError,
     log_call,
 )
@@ -24,6 +24,30 @@ from app.utils import (
 from .decoder import FFmpegDecoder
 
 logger = logging.getLogger("app.services.stream.service")
+
+
+def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
+    """
+    将流 URL 中的代理端口替换为 MediaMTX 内部端口，使后端拉流绕过 RTSPProxy。
+
+    仅当 URL 端口与 proxy_port 完全匹配时才重写，不匹配则原样返回。
+    支持带 userinfo（rtsp://user:pass@host:port/path）的 URL。
+    """
+    parsed = urlparse(url)
+    if parsed.port != proxy_port:
+        return url
+
+    # 端口匹配说明目标是本机 MediaMTX，统一改写为 127.0.0.1
+    # （覆盖 localhost / 外网 IP / 任意 host，避免流量绕道外网网卡被 iptables 拦截）
+    new_netloc = f"127.0.0.1:{internal_port}"
+    if parsed.username:
+        creds = parsed.username
+        if parsed.password:
+            creds += f":{parsed.password}"
+        new_netloc = f"{creds}@{new_netloc}"
+
+    return urlunparse(parsed._replace(netloc=new_netloc))
+
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -58,9 +82,6 @@ class StreamService:
         # 配置引用
         self.config = _stream_config
 
-        # 创建 GuardedExecutor（框架边界层）
-        self.executor = GuardedExecutor()
-
         # start selector polling thread on POSIX so stdout is consumed
         self._selector_thread: Optional[threading.Thread] = None
         if self.sel is not None:
@@ -76,10 +97,10 @@ class StreamService:
         self, client_id: str, stream_url: str, fps: int = 30, protocol: str = "RTMP"
     ):
         """
-        服务层方法（调用框架边界层）
+        注册解码器并尝试首次启动。
 
-        通过 GuardedExecutor 执行流启动，自动处理重试逻辑。
-        重试策略：固定延迟 3 秒，最多 5 次。
+        decoder 注册成功后立即返回，不等待流连接结果。
+        首次 start() 若失败，健康监控会在下一个心跳周期发起重连。
 
         Args:
             client_id: 客户端ID
@@ -88,16 +109,9 @@ class StreamService:
             protocol: 协议（RTSP/RTMP）
 
         Raises:
-            StreamConnectionError: 流连接失败
-            FFmpegError: FFmpeg 启动失败
+            ConflictError: 该 client_id 已有存活的流
         """
-        # 注意：健康监控和清理服务现在都是全局服务，由应用启动时初始化
-
-        # 通过 GuardedExecutor 调用业务逻辑（边界层 2）
-        return self.executor.execute(
-            func=lambda: self._start_stream_impl(client_id, stream_url, fps, protocol),
-            policy_name="stream",  # 固定延迟 3 秒，最多 5 次
-        )
+        self._start_stream_impl(client_id, stream_url, fps, protocol)
 
     def _start_stream_impl(
         self, client_id: str, stream_url: str, fps: int, protocol: str
@@ -144,6 +158,17 @@ class StreamService:
                 f"[{client_id}] Starting stream: protocol={protocol}, url={stream_url}"
             )
 
+            # 内部拉流直连 MediaMTX，绕过 RTSPProxy
+            from app.settings import settings
+            rewritten = _rewrite_rtsp_url(
+                stream_url,
+                settings.mediamtx_proxy_port,
+                settings.mediamtx_internal_port,
+            )
+            if rewritten != stream_url:
+                logger.info(f"[{client_id}] Rewrote stream URL: {stream_url} → {rewritten}")
+                stream_url = rewritten
+
             # 创建或获取 ClientQueues
             client_queues = self._get_or_create_client_queues(client_id)
 
@@ -160,16 +185,21 @@ class StreamService:
                 client_queues=client_queues,
             )
 
-            # 启动解码器（可能抛出 FFmpegError）
-            dec.start()
-
-            # 保存解码器
+            # 先注册解码器，再启动——健康监控可感知启动失败并触发重连
             self.decoders[client_id] = dec
             self.metrics[client_id] = {
                 "frames_received": 0,
                 "frames_dropped": 0,
                 "restarts": 0,
             }
+
+            try:
+                dec.start()
+            except Exception as e:
+                # start() 失败（如推流端尚未就绪），decoder 已注册，
+                # 健康监控会在下一个心跳检测到 is_alive=False 并进入重连模式
+                logger.warning(f"[{client_id}] Initial start failed: {e}")
+                return
 
             logger.info(
                 f"[{client_id}] Stream started successfully (pid={getattr(dec.proc, 'pid', None)})"
@@ -312,8 +342,11 @@ class StreamService:
             decoder: FFmpegDecoder 实例
         """
         if self.sel is not None and decoder.proc and decoder.proc.stdout:
-            # 注销可能失败（例如已经注销过），不影响整体流程
-            self.sel.unregister(decoder.proc.stdout.fileno())
+            try:
+                self.sel.unregister(decoder.proc.stdout.fileno())
+            except KeyError:
+                # 已经注销过，或 start() 失败导致从未注册，均属正常
+                pass
 
     def _stop_decoder_async(self, decoder: FFmpegDecoder, client_id: str):
         """
@@ -397,7 +430,7 @@ class StreamService:
 
             return {"url": dec.stream_url, "fps": dec.fps, "protocol": protocol}
 
-    @log_call(level=logging.INFO, log_args=True)
+    @log_call(level=logging.INFO, log_args=False)
     def restart_stream(
         self, client_id: str, stream_url: str, fps: int, protocol: str
     ) -> bool:
@@ -458,15 +491,24 @@ class StreamService:
         Raises:
             StreamConnectionError: 重启失败
         """
-        # 1. 停止旧的decoder（异步执行，避免阻塞健康监控线程）
+        # 1. 停止旧的decoder（同步 kill，确保旧进程在新进程启动前彻底退出）
+        # 背景：健康监控每 5s 重连一次，若旧进程仍在运行，新旧进程同时连接
+        # MediaMTX 同一路径（18004），与 Phase-2 push 的 ANNOUNCE 形成竞争，
+        # 导致 MediaMTX 路径建立被延迟。短超时 kill 可将竞争窗口控制在 <100ms。
         old_dec = None
         with self.lock:
             old_dec = self.decoders.get(client_id)
 
         if old_dec and old_dec.is_alive():
-            # 异步停止旧decoder
+            # 先强制 kill 旧 FFmpeg 进程（非阻塞，Windows TerminateProcess 立即返回），
+            # 消除旧进程与新进程/Phase-2 push 在 MediaMTX 同路径上的连接竞争。
+            # 随后异步 stop 负责关闭 pipe、等待 reader 线程退出等资源清理。
+            try:
+                if old_dec.proc and old_dec.proc.poll() is None:
+                    old_dec.proc.kill()
+            except Exception as e:
+                logger.debug(f"[{client_id}] kill old decoder failed: {e}")
             self._stop_decoder_async(old_dec, client_id)
-            logger.debug(f"[{client_id}] Async stopping old decoder for restart")
 
         # 2. 清理旧记录并创建新decoder（在锁内执行）
         with self.lock:
@@ -612,11 +654,10 @@ class StreamService:
             self.sel.close()
             logger.debug("[StreamService] Selector closed")
         except Exception as e:
-            logger.error(f"[StreamService] Error cleaning up selector: {e}")
+            logger.error("[StreamService] Error cleaning up selector: %s", e, exc_info=True)
 
     def shutdown(self):
-        """
-        关闭服务，释放所有资源（清理代码）
+        """优雅关闭服务，同步等待所有 FFmpeg 解码器退出。
 
         注意：此方法包含 try/except 块是合理的，因为：
         1. 这是清理代码，需要尽可能完成所有步骤
@@ -625,17 +666,21 @@ class StreamService:
         """
         logger.info("Shutting down StreamService...")
 
-        # 注意：健康监控现在是全局服务，由应用生命周期管理，不在这里停止
-
-        # 停止所有流（只清理解码器，不清理 ClientManager）
+        # 原子地取走所有解码器，防止并发 stop_stream() 重复操作
         with self.lock:
-            client_ids = list(self.decoders.keys())
+            decoders = list(self.decoders.items())
+            self.decoders.clear()
 
-        for client_id in client_ids:
+        # 同步逐个停止，确保 FFmpeg 子进程在进程退出前被清理
+        for client_id, decoder in decoders:
             try:
-                self.stop_stream(client_id)
+                decoder.stop()
+                logger.debug("[StreamService] Decoder stopped: %s", client_id)
             except Exception as e:
-                logger.error(f"Error stopping stream {client_id}: {e}")
+                logger.error(
+                    "[StreamService] Error stopping decoder %s: %s",
+                    client_id, e, exc_info=True,
+                )
 
         logger.info("StreamService shutdown complete")
 

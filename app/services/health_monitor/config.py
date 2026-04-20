@@ -94,9 +94,7 @@ class HealthMonitorConfig:
             return config
 
         except Exception as e:
-            logger.error(
-                f"[HealthMonitorConfig] Failed to load config: {e}, using defaults"
-            )
+            logger.error("[HealthMonitorConfig] Failed to load config: %s, using defaults", e, exc_info=True)
             return cls()
 
 

@@ -32,6 +32,7 @@ from app.services.inference.data_models import (
 from app.models.frame import FrameData
 from app.services.client import client_manager
 from app.services.inference.models import InferenceResult
+from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +231,8 @@ class VisualizationWorkerPool:
         )
 
         self._worker_thread = threading.Thread(
-            target=worker.run,
+            target=guarded_run,
+            args=(worker.run, self._stop_event, "VisualizationWorker-0"),
             daemon=True,
             name="VisualizationWorker-0",
         )
