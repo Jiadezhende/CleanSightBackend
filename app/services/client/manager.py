@@ -10,7 +10,7 @@
 import logging
 import threading
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .config import get_client_config
 from .queues import ClientQueues
@@ -53,6 +53,10 @@ class ClientManager:
         self._client_locks: Dict[str, threading.RLock] = defaultdict(
             threading.RLock
         )  # 每个客户端独立锁
+
+        # task_id 双向索引（由 _clients_lock 保护）
+        self._task_to_client: Dict[int, str] = {}   # task_id → client_id
+        self._client_to_task: Dict[str, int] = {}   # client_id → current task_id
 
         # 默认配置参数（从配置加载）
         self._default_ca_segment_len = self._config.ca_segment_len  # CA段长度
@@ -133,6 +137,23 @@ class ClientManager:
         """
         return client_id in self._clients
 
+    def bind_task(self, client_id: str, task_id: int) -> None:
+        """注册 task_id ↔ client_id 双向映射，自动淘汰同一 client 的旧任务绑定。"""
+        with self._clients_lock:
+            old_task = self._client_to_task.pop(client_id, None)
+            if old_task is not None:
+                self._task_to_client.pop(old_task, None)
+            self._task_to_client[task_id] = client_id
+            self._client_to_task[client_id] = task_id
+
+    def get_client_by_task_id(self, task_id: int) -> Optional[ClientQueues]:
+        """按 task_id 直接查 ClientQueues，无需经过 DB。"""
+        with self._clients_lock:
+            client_id = self._task_to_client.get(task_id)
+            if client_id is None:
+                return None
+            return self._clients.get(client_id)
+
     def remove_client(self, client_id: str, cleanup: bool = True) -> Dict[str, Any]:
         """
         注销客户端，可选清理资源（客户端级别锁优化）
@@ -161,6 +182,10 @@ class ClientManager:
 
         with self._client_locks[client_id]:  # 客户端级别锁
             with self._clients_lock:  # 短暂全局锁：只用于字典操作
+                old_task = self._client_to_task.pop(client_id, None)
+                if old_task is not None:
+                    self._task_to_client.pop(old_task, None)
+
                 client_queues = self._clients.pop(client_id, None)
 
                 if client_queues is None:

@@ -215,6 +215,7 @@ class InferenceManager:
         cq.set_task(task)
 
         if task is not None:
+            client_manager.bind_task(client_id, task.task_id)
             stage = self._STEP_TO_STAGE.get(task.current_step, "MOCK")
             if stage == "MOCK":
                 logger.warning(

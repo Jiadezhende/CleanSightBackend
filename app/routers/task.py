@@ -13,7 +13,6 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.database import get_db
 from app.models.frame import HLSSegment
-from app.models.task import DBTask
 from app.models.status_messages import get_no_task_response, get_task_status_response
 from app.services import ai
 from app.services.client.manager import client_manager
@@ -371,13 +370,17 @@ async def get_all_keypoints(task_id: int):
 @router.get("/{task_id}/alarms")
 async def get_task_alarms(task_id: int):
     """
-    获取指定任务的所有告警记录（clean_alarm 表）
+    获取指定任务的所有告警记录。
 
-    使用 DBAlarm ORM 模型查询，字段与实际数据库 schema 对齐。
+    活跃任务直接读内存（_alarm_log），已完成任务回查 clean_alarm 表。
 
     Raises:
         DatabaseError: 数据库查询失败（由边界层 3 转换为 503）
     """
+    cq = client_manager.get_client_by_task_id(task_id)
+    if cq is not None and cq.get_task_id() == task_id:
+        return _build_memory_alarm_response(task_id, cq)
+
     from sqlalchemy.exc import SQLAlchemyError
 
     from app.models.task import DBAlarm
@@ -471,6 +474,29 @@ async def websocket_client_message(websocket: WebSocket, client_id: str):
             pass
 
 
+def _build_memory_alarm_response(task_id: int, cq) -> dict:
+    records = cq.get_recent_alarms(n=100)
+    task = cq.get_task()
+    step_id = int(task.current_step) if task and task.current_step else None
+    alarms = [
+        {
+            "alarm_id": r.seq,
+            "task_id": task_id,
+            "step_id": step_id,
+            "step_name": None,
+            "alarm_type": r.alarm_type,
+            "severity": r.alarm_level,
+            "message": r.alarm_message,
+            "resolved": False,
+            "resolved_by": None,
+            "detected_at": int(r.timestamp),
+            "resolved_at": None,
+        }
+        for r in records
+    ]
+    return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
+
+
 def _empty_alarm_payload(task_id: int) -> dict:
     from app.services.inference.data_models import get_task_metric_map
     _empty = {"active": False, "hit_count": 0, "max_conf": 0.0}
@@ -496,24 +522,8 @@ async def get_client_frontend_message(
     if since_seq < 0:
         raise HTTPException(status_code=400, detail="since_seq must be >= 0")
 
-    db = next(get_db())
-    try:
-        db_task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
-    finally:
-        db.close()
-
-    if not db_task:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
-
-    client_id = db_task.source_ip  # type: ignore[assignment]
-    if not client_id:
-        return _empty_alarm_payload(task_id)
-
-    if not client_manager.has_client(client_id):
-        return _empty_alarm_payload(task_id)
-
-    cq = client_manager.get_client(client_id)
-    if cq.get_task_id() != task_id:
+    cq = client_manager.get_client_by_task_id(task_id)
+    if cq is None:
         return _empty_alarm_payload(task_id)
 
     return cq.get_task_alarm_message(task_id=task_id, since_seq=since_seq)
