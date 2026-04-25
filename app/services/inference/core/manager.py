@@ -367,17 +367,24 @@ class InferenceManager:
         self, client_id: str, cq: ClientQueues, alarms: List[AlarmInfo]
     ) -> None:
         """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
-        from app.services.inference.models import AlarmRecord
+        from app.services.inference.models import AlarmRecord, infer_alarm_metric
 
         stage = cq.get_stage()
         task_id = cq.get_task_id()
 
         for alarm in alarms:
+            metric = infer_alarm_metric(
+                alarm_type=alarm.alarm_type,
+                alarm_message=alarm.alarm_message,
+                metadata=alarm.metadata or {},
+            )
             self.persistence_manager.persist_alarm({
                 "task_id": task_id,
                 "stage": stage,
                 "client_id": client_id,
                 "alarm_type": alarm.alarm_type,
+                "alarm_metric": metric,
+                "alarm_mode": "SETTLEMENT",
                 "alarm_level": alarm.alarm_level,
                 "alarm_message": alarm.alarm_message,
                 "detection_result": alarm.metadata if alarm.metadata else None,
@@ -386,6 +393,9 @@ class InferenceManager:
                 alarm_type=alarm.alarm_type,
                 alarm_level=alarm.alarm_level,
                 alarm_message=alarm.alarm_message,
+                mode="SETTLEMENT",
+                metric=metric,
+                stage=stage,
                 metadata=alarm.metadata or {},
             ))
             logger.info(
@@ -447,6 +457,12 @@ class InferenceManager:
 
         self.visualization_pool.start()
         self.persistence_manager.start()
+
+        # 初始化全局 task_name → AlarmMetric 映射（由 YAML model name 驱动）
+        from app.services.inference.stage_factory import StageFactory
+        from app.services.inference.config import load_stage_config
+        from app.services.inference.data_models import _set_task_metric_map
+        _set_task_metric_map(StageFactory(load_stage_config()).build_task_metric_map())
 
         logger.info("[InferenceManager] Started")
 

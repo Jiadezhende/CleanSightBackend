@@ -17,7 +17,7 @@ stages:
     # 模型列表（按顺序执行）
     # 每个 Task 自带时序分析、可视化、告警逻辑
     models:
-      - name: bubble_detection
+      - name: bubble
         class: app.services.inference.workflows.bubble.BubbleDetector
         analyzer_class: app.services.inference.workflows.bubble.BirthRateAnalyzer
         params:
@@ -29,7 +29,8 @@ stages:
           birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
           window_seconds: 3.0          # 滑动窗口时长（秒）
 
-      - name: bending_detection
+      - name: bending
+        realtime: false              # 结算告警，不纳入 signals_10s 滑动窗口
         class: app.services.inference.workflows.bending.BendingDetector
         analyzer_class: app.services.inference.workflows.bending.DebounceAnalyzer
         params:

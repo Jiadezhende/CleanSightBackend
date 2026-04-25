@@ -14,8 +14,8 @@ import logging
 import threading
 from typing import List
 
-from app.services.inference.data_models import AlarmInfo
-from app.services.inference.models import AlarmRecord
+from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmInfo
+from app.services.inference.models import AlarmRecord, infer_alarm_metric
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.utils.worker_guard import guarded_run
 
@@ -103,13 +103,23 @@ class ClientTemporalActor:
     def _persist_alarms(self, alarms: List[AlarmInfo]) -> None:
         from app.services.persistence import persistence_manager
 
+        task = self._cq.get_task()
         task_id = self._cq.get_task_id()
+        step_id = int(task.current_step) if task and task.current_step else None
         for alarm in alarms:
+            metric = infer_alarm_metric(
+                alarm_type=alarm.alarm_type,
+                alarm_message=alarm.alarm_message,
+                metadata=alarm.metadata or {},
+            )
             persistence_manager.persist_alarm({
                 "task_id": task_id,
                 "stage": self._stage,
+                "step_id": step_id,
                 "client_id": self._client_id,
                 "alarm_type": alarm.alarm_type,
+                "alarm_metric": metric,
+                "alarm_mode": ALARM_MODE_REALTIME,
                 "alarm_level": alarm.alarm_level,
                 "alarm_message": alarm.alarm_message,
                 "detection_result": alarm.metadata if alarm.metadata else None,
@@ -118,6 +128,9 @@ class ClientTemporalActor:
                 alarm_type=alarm.alarm_type,
                 alarm_level=alarm.alarm_level,
                 alarm_message=alarm.alarm_message,
+                mode=ALARM_MODE_REALTIME,
+                metric=metric,
+                stage=self._stage,
                 metadata=alarm.metadata or {},
             ))
 

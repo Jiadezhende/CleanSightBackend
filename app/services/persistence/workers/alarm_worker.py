@@ -102,15 +102,7 @@ class AlarmFlushThread:
                         task_key = task.get_key()
 
                         # 转换为字典
-                        alarm_dict = {
-                            "task_id": task.task_id,
-                            "stage": task.stage,
-                            "client_id": task.client_id,
-                            "alarm_type": task.alarm_type,
-                            "alarm_level": task.alarm_level,
-                            "alarm_message": task.alarm_message,
-                            "detection_result": task.detection_result,
-                        }
+                        alarm_dict = task.to_dict()
 
                         # 聚合
                         self.strategy.aggregate_alarm(task_key, alarm_dict)

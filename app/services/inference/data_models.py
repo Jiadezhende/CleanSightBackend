@@ -101,6 +101,41 @@ class AlarmType(str, Enum):
     MOCK = "mock_alarm"                  # 仅测试用
 
 
+class AlarmMetric(str, Enum):
+    """告警指标枚举 — value 为前端展示与持久化使用的字符串"""
+    BUBBLE = "BUBBLE"
+    BENDING = "BENDING"
+    TASK_TIMEOUT = "TASK_TIMEOUT"
+    UNKNOWN = "UNKNOWN"
+
+
+# 告警模式常量
+ALARM_MODE_REALTIME = "REALTIME"
+ALARM_MODE_SETTLEMENT = "SETTLEMENT"
+
+# YAML model name → AlarmMetric 映射，由 InferenceManager.start() 初始化
+# 通过 get_task_metric_map() 访问，不要直接读取此变量
+_TASK_METRIC_MAP: Dict[str, AlarmMetric] = {}
+
+
+def _set_task_metric_map(mapping: Dict[str, AlarmMetric]) -> None:
+    """由 InferenceManager.start() 调用一次，初始化映射。"""
+    global _TASK_METRIC_MAP
+    _TASK_METRIC_MAP.update(mapping)
+
+
+def get_task_metric_map() -> Dict[str, AlarmMetric]:
+    """返回 task_name → AlarmMetric 映射（由 YAML model name 驱动）。
+
+    若映射尚未初始化（如单元测试场景），自动从 YAML 懒加载一次。
+    """
+    if not _TASK_METRIC_MAP:
+        from app.services.inference.stage_factory import StageFactory
+        from app.services.inference.config import load_stage_config
+        _set_task_metric_map(StageFactory(load_stage_config()).build_task_metric_map())
+    return _TASK_METRIC_MAP
+
+
 @dataclass
 class AlarmInfo:
     """告警信息
