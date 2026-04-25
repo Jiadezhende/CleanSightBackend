@@ -177,12 +177,16 @@
         alarmEl.innerHTML = alarms.slice().reverse().map(a => {
           const ts = a.timestamp ? new Date(a.timestamp * 1000).toLocaleTimeString() : '—';
           const lvlCls = a.alarm_level === 'ERROR' ? 'level-error' : 'level-warn';
+          const metricBadge = a.metric ? `<span style="background:#eef2ff;color:#4c84ff;border-radius:3px;padding:1px 6px;font-size:0.8em;margin-left:4px">${a.metric}</span>` : '';
+          const modeBadge = a.mode ? `<span style="color:#bbb;font-size:0.8em;margin-left:4px">${a.mode}</span>` : '';
+          const countBadge = a.count > 1 ? `<span style="color:#aaa;font-size:0.8em"> ×${a.count}</span>` : '';
           return `<div class="alarm-item">
             <div class="alarm-header">
               <span class="${lvlCls}">${a.alarm_level ?? '?'}</span>
               <span class="alarm-type">${a.alarm_type ?? ''}</span>
+              ${metricBadge}${modeBadge}
             </div>
-            <div class="alarm-msg">${a.alarm_message ?? ''}</div>
+            <div class="alarm-msg">${a.alarm_message ?? ''}${countBadge}</div>
             <div class="alarm-ts">${ts}</div>
           </div>`;
         }).join('');
