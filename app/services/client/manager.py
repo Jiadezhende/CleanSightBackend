@@ -31,11 +31,20 @@ class ClientManager:
     - 集中监控队列状态
     - 统一资源清理
 
-    改进点：
-    - 移除单例强制，允许测试时创建多个实例
-    - 细粒度锁：客户端级别锁 + 全局管理锁分离，减少锁竞争
-    - 快速路径优化：已存在客户端的访问无需全局锁
-    - 支持配置注入，便于单元测试
+    锁层级（Lock Hierarchy）：
+      L_client = _client_locks[client_id]   threading.RLock，per-client
+      L_global = _clients_lock              threading.RLock，全局注册表
+
+    获取顺序始终为 L_client → L_global（当两者同时持有时）。
+    此顺序与通常的"自顶向下"相反，原因：
+    - L_client 是 get-or-create 的大临界区，防止同一 client 被重复创建
+    - L_global 仅做短暂 dict 变更，嵌套在 L_client 内部
+    - 没有任何代码路径先持 L_global 再持 L_client，因此不存在死锁风险
+
+    仅持 L_global（不持 L_client）的路径：
+      bind_task / get_client_by_task_id / get_all_clients / get_all_queue_depths / clear_all 快照段
+    无锁路径（依赖 CPython GIL 原子性，见 get_client 注释）：
+      has_client / get_client_count / get_client 快速路径
     """
 
     def __init__(self, config=None):
@@ -86,7 +95,12 @@ class ClientManager:
         Returns:
             ClientQueues 实例
         """
-        # 快速路径：客户端已存在，无需全局锁（减少 90% 的锁竞争）
+        # 快速路径：CPython GIL 保证 dict.__contains__ 和 dict.__getitem__ 各自原子。
+        # 接受的 TOCTOU：并发 remove_client() 可能在 check 之后、return 之前删除该条目，
+        # 返回一个已被 clear() 的 ClientQueues。接受此风险，原因：
+        #   1. remove_client() 仅在流关闭时调用，不在推理热路径
+        #   2. 所有快速路径调用方在使用返回值前均检查 None 槽位，可容忍 stale 引用
+        #   3. 对每次帧写入加全局锁成本不可接受
         if client_id in self._clients:
             return self._clients[client_id]
 
@@ -287,23 +301,28 @@ class ClientManager:
         """
         获取整体状态摘要（用于监控和调试）
 
-        Returns:
-            包含客户端数量、队列深度等信息的字典
+        加锁策略：仅在持锁期间做 O(n) dict 快照，遍历和 per-client 调用在锁外执行，
+        避免全局锁持有时间随客户端数量线性增长。
         """
         with self._clients_lock:
-            total_frames = 0
-            clients_status = {}
+            snapshot = dict(self._clients)
 
-            for client_id, client_queues in self._clients.items():
-                depths = client_queues.get_queue_depths()
-                clients_status[client_id] = depths
-                total_frames += sum(depths.values())
+        total_frames = 0
+        clients_status = {}
+        for client_id, client_queues in snapshot.items():
+            depths = client_queues.get_queue_depths()
+            clients_status[client_id] = depths
+            total_frames += (
+                depths.get("ca_ready", 0)
+                + depths.get("ca_raw", 0)
+                + depths.get("ca_processed", 0)
+            )
 
-            return {
-                "client_count": len(self._clients),
-                "total_queued_frames": total_frames,
-                "clients": clients_status,
-            }
+        return {
+            "client_count": len(snapshot),
+            "total_queued_frames": total_frames,
+            "clients": clients_status,
+        }
 
 
 # 全局单例实例

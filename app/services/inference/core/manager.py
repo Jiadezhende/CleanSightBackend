@@ -15,6 +15,7 @@ VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() +
 import base64
 import logging
 import threading
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -65,6 +66,9 @@ class InferenceManager:
         # stage 配置（延迟初始化）
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
         self._model_worker_service: Optional[ModelWorkerService] = None
+
+        # per-client 生命周期事务锁（set_task / remove_client 互斥）
+        self._client_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
 
         # per-client ClientTemporalActor 注册表
         self._actors: Dict[str, ClientTemporalActor] = {}
@@ -208,10 +212,35 @@ class InferenceManager:
     }
 
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
-        """为客户端设置任务，并创建对应的 ClientTemporalActor。"""
+        """为客户端设置任务，并创建对应的 ClientTemporalActor。
+
+        调用顺序：先停旧 Actor（settlement 在旧 task 上下文写入），再切换字段，再清缓存。
+        这样可保证 settlement 告警正确归属旧任务，不会落入已清空的新任务 alarm_log。
+        整个流程在 _client_locks[client_id] 下执行，与 remove_client 互斥。
+        """
+        with self._client_locks[client_id]:
+            return self._set_task_locked(client_id, task)
+
+    def _set_task_locked(self, client_id: str, task: Optional[CleaningTask]) -> bool:
+        """set_task 的加锁实现，调用方须已持有 _client_locks[client_id]。"""
         cq = client_manager.get_client(client_id)
         if cq is None:
             return False
+
+        # 1. 先停旧 Actor：settlement 写入发生时 cq.task 仍为旧值，归属正确
+        old_actor = self._actors.pop(client_id, None)
+        if old_actor is not None:
+            try:
+                settlement = old_actor.finalize_and_stop()
+                if settlement and cq:
+                    self._persist_settlement_alarms(client_id, cq, settlement)
+            except Exception as e:
+                logger.warning(
+                    "[InferenceManager] Settlement alarms on task switch failed for %s: %s",
+                    client_id, e,
+                )
+
+        # 2. 切换字段（纯赋值，线程安全）
         cq.set_task(task)
 
         if task is not None:
@@ -224,18 +253,8 @@ class InferenceManager:
                 )
             cq.set_stage(stage)
 
-        # 停止旧 actor（任务切换时），等待线程退出并收集结算告警
-        old_actor = self._actors.pop(client_id, None)
-        if old_actor is not None:
-            try:
-                settlement = old_actor.finalize_and_stop()
-                if settlement and cq:
-                    self._persist_settlement_alarms(client_id, cq, settlement)
-            except Exception as e:
-                logger.warning(
-                    "[InferenceManager] Settlement alarms on task switch failed for %s: %s",
-                    client_id, e,
-                )
+        # 3. 旧 Actor 已停，安全清空任务级缓存
+        cq.clear_task_caches()
 
         # 按 Client 独立实例化 TemporalAnalyzer
         stage = cq.get_stage()
@@ -274,7 +293,14 @@ class InferenceManager:
         1. 通过 actor.finalize_and_stop() 收集结算告警并持久化
         2. 落盘残余 HLS 段
         3. 清理编码缓存
+
+        整个流程在 _client_locks[client_id] 下执行，与 set_task 互斥。
         """
+        with self._client_locks[client_id]:
+            self._remove_client_locked(client_id)
+
+    def _remove_client_locked(self, client_id: str) -> None:
+        """remove_client 的加锁实现，调用方须已持有 _client_locks[client_id]。"""
         logger.info("[InferenceManager] Removing inference resources: %s", client_id)
 
         cq = (

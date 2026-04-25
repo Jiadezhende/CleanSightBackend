@@ -103,13 +103,19 @@ async def start(req: StartRequest):
         # ── Phase 2: 加锁，保护 client_id 相关的所有状态变更 ──
         lock = await _get_client_lock(client_id)
         async with lock:
-            # 2a. 幂等检查 + 跨任务切换
+            # 2a. 幂等检查 + 清理已有客户端
             if client_manager.has_client(client_id):
                 cq = client_manager.get_client(client_id)
+                old_task = cq.get_task()
                 old_task_id = cq.get_task_id()
 
-                if old_task_id == req.task_id and stream_service.has_stream(client_id):
-                    # 同一任务重复 start → 幂等返回
+                # 完全相同（task_id、step、URL 均未变）才幂等返回，否则一律全量重建
+                if (
+                    old_task_id == req.task_id
+                    and old_task is not None
+                    and old_task.current_step == str(db_task.current_step)
+                    and (stream_service.get_stream_info(client_id) or {}).get("url") == req.rtsp_url
+                ):
                     logger.info(
                         f"[start] Task {req.task_id} already running for {client_id}, "
                         f"idempotent return"
@@ -122,26 +128,25 @@ async def start(req: StartRequest):
                         "message": f"Task {req.task_id} already running (idempotent)",
                     }
 
-                if old_task_id is not None and old_task_id != req.task_id:
-                    # 跨任务切换：完整 3 步清理（停流→落盘→清 ClientManager）
-                    logger.info(
-                        f"[start] Task changed for {client_id}: {old_task_id} → {req.task_id}, "
-                        f"performing full cleanup before starting new task"
+                # 任何字段变化（task_id / step / URL）→ 停止旧客户端，全量重建
+                logger.info(
+                    f"[start] Client {client_id} exists (task={old_task_id}), "
+                    f"performing full cleanup before restart"
+                )
+                monitor = get_health_monitor()
+                if monitor:
+                    cleanup_result = monitor.cleanup_client(
+                        client_id=client_id,
+                        reason=f"restart:{old_task_id}->{req.task_id}",
                     )
-                    monitor = get_health_monitor()
-                    if monitor:
-                        cleanup_result = monitor.cleanup_client(
-                            client_id=client_id,
-                            reason=f"task_switch:{old_task_id}->{req.task_id}",
-                        )
-                    else:
-                        cleanup_result = _manual_cleanup_fallback(client_id)
+                else:
+                    cleanup_result = _manual_cleanup_fallback(client_id)
 
-                    if cleanup_result.get("errors"):
-                        logger.warning(
-                            f"[start] Cleanup during task switch had errors: "
-                            f"{cleanup_result['errors']}"
-                        )
+                if cleanup_result.get("errors"):
+                    logger.warning(
+                        f"[start] Cleanup before restart had errors: "
+                        f"{cleanup_result['errors']}"
+                    )
 
             # 2b. 设置新任务
             task = Task(

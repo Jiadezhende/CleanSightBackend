@@ -226,6 +226,26 @@ class DatabaseHelper:
             db.close()
 
     @staticmethod
+    def update_task_step(task_id: int, new_step: str) -> bool:
+        """更新任务 current_step（模拟任务阶段推进）"""
+        db = next(get_db())
+        try:
+            task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
+            if not task:
+                return False
+            task.current_step = new_step  # type: ignore
+            task.updated_time = int(time.time())  # type: ignore
+            db.commit()
+            print(f"✅ 任务 {task_id} current_step → {new_step}")
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"❌ 更新 current_step 失败: {e}")
+            return False
+        finally:
+            db.close()
+
+    @staticmethod
     def update_task_status(task_id: int, status: str) -> bool:
         """更新任务状态"""
         db = next(get_db())
