@@ -370,7 +370,9 @@ class InferenceManager:
         from app.services.inference.models import AlarmRecord, infer_alarm_metric
 
         stage = cq.get_stage()
+        task = cq.get_task()
         task_id = cq.get_task_id()
+        step_id = int(task.current_step) if task and task.current_step else None
 
         for alarm in alarms:
             metric = infer_alarm_metric(
@@ -381,6 +383,7 @@ class InferenceManager:
             self.persistence_manager.persist_alarm({
                 "task_id": task_id,
                 "stage": stage,
+                "step_id": step_id,
                 "client_id": client_id,
                 "alarm_type": alarm.alarm_type,
                 "alarm_metric": metric,
