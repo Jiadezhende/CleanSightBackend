@@ -112,6 +112,8 @@ class ClientTemporalActor:
                 alarm_message=alarm.alarm_message,
                 metadata=alarm.metadata or {},
             )
+            if not self._cq.try_pass_alarm_gate(task_id, metric, ALARM_MODE_REALTIME):
+                continue
             persistence_manager.persist_alarm({
                 "task_id": task_id,
                 "stage": self._stage,

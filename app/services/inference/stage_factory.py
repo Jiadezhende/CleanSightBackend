@@ -93,7 +93,10 @@ class StageFactory:
                 try:
                     mapping[name] = AlarmMetric(name.upper())
                 except ValueError:
-                    pass
+                    logger.warning(
+                        "[StageFactory] model '%s' has no AlarmMetric mapping, excluded from signals_10s",
+                        name,
+                    )
         return mapping
 
 

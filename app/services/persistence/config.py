@@ -30,8 +30,6 @@ class AlarmConfig:
 
     workers: int = 1
     queue_size: int = 200
-    batch_interval: int = 30
-    cooldown_seconds: int = 60
 
 
 @dataclass
@@ -142,14 +140,6 @@ class PersistenceConfig:
         return self.alarm.queue_size
 
     @property
-    def alarm_batch_interval(self) -> int:
-        return self.alarm.batch_interval
-
-    @property
-    def alarm_cooldown_seconds(self) -> int:
-        return self.alarm.cooldown_seconds
-
-    @property
     def enable_db_write(self) -> bool:
         return self.storage.enable_db_write
 
@@ -214,11 +204,9 @@ class PersistenceConfig:
                 self.processed_fps,
             )
             logger.debug(
-                "告警: workers=%d, queue=%d, batch=%ds, cooldown=%ds",
+                "告警: workers=%d, queue=%d",
                 self.alarm.workers,
                 self.alarm.queue_size,
-                self.alarm.batch_interval,
-                self.alarm.cooldown_seconds,
             )
             logger.debug(
                 "清理: enabled=%s, days=%d",

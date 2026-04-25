@@ -121,6 +121,7 @@ _TASK_METRIC_MAP: Dict[str, AlarmMetric] = {}
 def _set_task_metric_map(mapping: Dict[str, AlarmMetric]) -> None:
     """由 InferenceManager.start() 调用一次，初始化映射。"""
     global _TASK_METRIC_MAP
+    _TASK_METRIC_MAP.clear()
     _TASK_METRIC_MAP.update(mapping)
 
 

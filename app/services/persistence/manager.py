@@ -67,8 +67,6 @@ class PersistenceManager:
         self.alarm_pool = AlarmWorkerPool(
             input_queue=self.alarm_queue,
             num_workers=self.config.alarm_workers,
-            batch_interval=self.config.alarm_batch_interval,
-            cooldown_seconds=self.config.alarm_cooldown_seconds,
         )
 
         # 监控指标

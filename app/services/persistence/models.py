@@ -46,11 +46,6 @@ class AlarmPersistenceTask:
     detection_result: Optional[Dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
 
-    # 聚合字段（由告警处理器填充）
-    alarm_count: Optional[int] = None
-    first_seen: Optional[str] = None
-    last_seen: Optional[str] = None
-
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AlarmPersistenceTask":
         """从字典创建告警任务"""
@@ -67,10 +62,6 @@ class AlarmPersistenceTask:
             detection_result=data.get("detection_result"),
             timestamp=time.time(),
         )
-
-    def get_key(self) -> str:
-        """生成去重键（用于批量去重）"""
-        return f"{self.task_id}_{self.alarm_metric}"
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，供告警上报使用。"""

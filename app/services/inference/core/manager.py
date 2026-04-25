@@ -28,7 +28,7 @@ from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.core.service import ModelWorkerService
-from app.services.inference.data_models import AlarmInfo
+from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmInfo, AlarmMetric
 from app.services.inference.workers.temporal import ClientTemporalActor
 from app.services.inference.workers.visualization import VisualizationWorkerPool
 
@@ -380,6 +380,8 @@ class InferenceManager:
                 alarm_message=alarm.alarm_message,
                 metadata=alarm.metadata or {},
             )
+            if not cq.try_pass_alarm_gate(task_id, metric, "SETTLEMENT"):
+                continue
             self.persistence_manager.persist_alarm({
                 "task_id": task_id,
                 "stage": stage,
@@ -445,6 +447,15 @@ class InferenceManager:
             logger.error("_flush_all_remaining_segments error for %s: %s", client_id, e, exc_info=True)
 
     def enqueue_alarm(self, alarm_info: Dict[str, Any]):
+        from app.services.client import client_manager
+        client_id = alarm_info.get("client_id")
+        cq = client_manager.get_client(client_id) if client_id else None
+        if cq is not None:
+            task_id = alarm_info.get("task_id")
+            metric = alarm_info.get("alarm_metric", AlarmMetric.UNKNOWN)
+            mode = alarm_info.get("alarm_mode", ALARM_MODE_REALTIME)
+            if not cq.try_pass_alarm_gate(task_id, metric, mode):
+                return
         self.persistence_manager.persist_alarm(alarm_info)
 
     # ========== 启动/停止 ==========

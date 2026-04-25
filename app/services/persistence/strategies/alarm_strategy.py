@@ -2,18 +2,14 @@
 告警持久化策略
 
 负责：
-- 告警批量去重
-- 冷却期管理
 - HTTP上报到外部数据库
 """
 
 import json
 import logging
-import threading
-import time
 import urllib.request
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 from app.services.inference.data_models import AlarmType
 from app.settings import settings
@@ -22,92 +18,21 @@ logger = logging.getLogger(__name__)
 
 
 class AlarmPersistenceStrategy:
-    """告警持久化策略"""
+    """告警持久化策略（无状态）。去重由 ClientQueues.try_pass_alarm_gate 统一控制。"""
 
-    def __init__(
-        self,
-        batch_interval: int = 30,
-        cooldown_seconds: int = 60,
-    ):
-        self.batch_interval = batch_interval
-        self.cooldown_seconds = cooldown_seconds
-
-        # 批量去重
-        self._lock = threading.Lock()
-        self._pending: Dict[str, Dict[str, Any]] = (
-            {}
-        )  # key -> {count, first_seen, last_seen, alarm_info}
-        self._recent: Dict[str, float] = {}  # key -> last_report_time
-
-    def should_report(self, task_key: str) -> bool:
-        """检查是否应该上报（冷却期检查）"""
-        with self._lock:
-            last_report = self._recent.get(task_key)
-            if last_report is None:
-                return True
-
-            return (time.time() - last_report) >= self.cooldown_seconds
-
-    def aggregate_alarm(self, task_key: str, alarm_info: Dict[str, Any]):
-        """聚合告警（批量去重）"""
-        with self._lock:
-            if task_key not in self._pending:
-                self._pending[task_key] = {
-                    "count": 1,
-                    "first_seen": time.time(),
-                    "last_seen": time.time(),
-                    "alarm_info": alarm_info,
-                }
-            else:
-                self._pending[task_key]["count"] += 1
-                self._pending[task_key]["last_seen"] = time.time()
-
-    def flush_pending_alarms(self) -> List[Tuple[str, Dict[str, Any]]]:
-        """刷新待处理告警（返回需要上报的告警列表）"""
-        now = time.time()
-        to_report = []
-
-        with self._lock:
-            keys = list(self._pending.keys())
-            for key in keys:
-                item = self._pending.get(key)
-                if not item:
-                    continue
-
-                # 检查冷却期
-                last_sent = self._recent.get(key)
-                if last_sent and (now - last_sent) < self.cooldown_seconds:
-                    continue
-
-                # 构建聚合告警
-                agg_alarm = dict(item["alarm_info"])
-                agg_alarm["alarm_count"] = item.get("count", 1)
-                agg_alarm["first_seen"] = datetime.fromtimestamp(
-                    item.get("first_seen") # type: ignore
-                ).strftime("%Y-%m-%d %H:%M:%S")
-                agg_alarm["last_seen"] = datetime.fromtimestamp(
-                    item.get("last_seen") # type: ignore
-                ).strftime("%Y-%m-%d %H:%M:%S")
-
-                to_report.append((key, agg_alarm))
-
-                # 更新最近上报时间并移除pending
-                self._recent[key] = now
-                del self._pending[key]
-
-        return to_report
+    def __init__(self):
+        pass
 
     def report_alarm(self, alarm_info: Dict[str, Any]):
         """上报告警到外部数据库（通过HTTP API）
-        
+
         Raises:
             PersistenceError: HTTP上报失败
         """
         from app.utils.exceptions import PersistenceError
-        
+
         client_id = alarm_info.get("client_id", "unknown")
 
-        # HTTP上报到外部数据库
         if self._should_send_http(alarm_info):
             http_success = self._send_alarm_http(alarm_info)
             if not http_success:
@@ -140,15 +65,8 @@ class AlarmPersistenceStrategy:
             "alarm_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        # 可选字段
         if alarm_info.get("detection_result"):
             payload["detection_result"] = alarm_info["detection_result"]
-        if alarm_info.get("alarm_count"):
-            payload["alarm_count"] = int(alarm_info["alarm_count"])
-        if alarm_info.get("first_seen"):
-            payload["first_seen"] = alarm_info["first_seen"]
-        if alarm_info.get("last_seen"):
-            payload["last_seen"] = alarm_info["last_seen"]
 
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
@@ -176,4 +94,3 @@ class AlarmPersistenceStrategy:
         except Exception as e:
             logger.warning("告警上报失败: %s", e)
             return False
-
