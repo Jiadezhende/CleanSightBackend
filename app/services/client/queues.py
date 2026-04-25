@@ -13,7 +13,7 @@ import numpy as np
 
 from app.models.frame import FrameData
 from app.models.task import Task as CleaningTask
-from app.services.inference.data_models import DetectionOutput
+from app.services.inference.data_models import DetectionOutput, get_task_metric_map
 
 if TYPE_CHECKING:
     from app.services.inference.models import AlarmRecord, InferenceResult
@@ -90,7 +90,7 @@ class ClientQueues:
         # --- Temporal 解耦：slide_window + latest_temporal + alarm_log ---
         # 滑动窗口：per-task 的 DetectionOutput 环形缓冲，约 5s（利用 DetectionOutput.timestamp）
         self._slide_window: Dict[str, Deque[DetectionOutput]] = {}
-        self._slide_window_seconds: float = 5.0
+        self._slide_window_seconds: float = 10.0
         self._slide_window_lock = threading.Lock()
 
         # 最新时序事件列表（由 TemporalWorker 写入，前端读取）
@@ -99,6 +99,9 @@ class ClientQueues:
 
         # 告警日志：最近 N 条告警记录（内存环形缓冲区，供前端展示）
         self._alarm_log: Deque[AlarmRecord] = deque(maxlen=100)
+        self._alarm_seq: int = 0
+        self._alarm_dedup_window_seconds: float = 5.0
+        self._alarm_latest_by_key: Dict[str, AlarmRecord] = {}
         self._alarm_log_lock = threading.Lock()
 
     # --- 封装操作方法，减少外部直接操作队列 ---
@@ -338,8 +341,21 @@ class ClientQueues:
         return self.ca_ready.popleft() if self.ca_ready else None
 
     def set_task(self, task: Optional[CleaningTask]) -> None:
+        old_task_id = self.get_task_id()
         self.task = task
         self.task_started_at: float = time.time() if task is not None else 0.0
+        new_task_id = self.get_task_id()
+
+        # Task changed => reset task-scoped realtime caches.
+        if old_task_id != new_task_id:
+            with self._slide_window_lock:
+                self._slide_window.clear()
+            with self._temporal_lock:
+                self._latest_temporal = []
+            with self._alarm_log_lock:
+                self._alarm_log.clear()
+                self._alarm_seq = 0
+                self._alarm_latest_by_key.clear()
 
     def get_task(self) -> Optional[CleaningTask]:
         return self.task
@@ -407,13 +423,96 @@ class ClientQueues:
     def append_alarm_record(self, record: AlarmRecord) -> None:
         """追加告警到内存环形日志。"""
         with self._alarm_log_lock:
-            self._alarm_log.append(record)
+            task_id = self.get_task_id()
+            dedup_key = f"{task_id}:{record.metric}"
+            existing = self._alarm_latest_by_key.get(dedup_key)
+
+            if (
+                existing is not None
+                and (record.timestamp - existing.timestamp) <= self._alarm_dedup_window_seconds
+            ):
+                existing.count += 1
+                existing.timestamp = record.timestamp
+                existing.alarm_message = record.alarm_message
+                if record.metadata:
+                    existing.metadata = record.metadata
+            else:
+                self._alarm_seq += 1
+                record.seq = self._alarm_seq
+                record.count = max(1, int(record.count))
+                self._alarm_log.append(record)
+                self._alarm_latest_by_key[dedup_key] = record
+
+            # cleanup stale dedup references after deque eviction
+            alive_ids = {id(item) for item in self._alarm_log}
+            stale_keys = [
+                k
+                for k, v in self._alarm_latest_by_key.items()
+                if id(v) not in alive_ids
+            ]
+            for stale in stale_keys:
+                self._alarm_latest_by_key.pop(stale, None)
 
     def get_recent_alarms(self, n: int = 10) -> List[AlarmRecord]:
         """返回最近 n 条告警记录（最新在后）。"""
         with self._alarm_log_lock:
             items = list(self._alarm_log)
         return items[-n:]
+
+    def get_alarm_increment(self, since_seq: int = 0) -> List[AlarmRecord]:
+        """Return alarms with seq > since_seq."""
+        with self._alarm_log_lock:
+            items = [a for a in self._alarm_log if a.seq > since_seq]
+        return items
+
+    def get_alarm_max_seq(self) -> int:
+        with self._alarm_log_lock:
+            return self._alarm_seq
+
+    def get_signals_10s(self) -> Dict[str, Dict[str, Any]]:
+        task_metric_map = get_task_metric_map()
+        _empty: Dict[str, Any] = {"active": False, "hit_count": 0, "max_conf": 0.0}
+        summary: Dict[str, Dict[str, Any]] = {
+            m.value: dict(_empty) for m in task_metric_map.values()
+        }
+        with self._slide_window_lock:
+            for task_name, window in self._slide_window.items():
+                metric = task_metric_map.get(task_name)
+                if metric is None:
+                    continue
+                hit_count = 0
+                max_conf = 0.0
+                for output in window:
+                    if output.detections:
+                        hit_count += 1
+                        frame_max_conf = max(d.confidence for d in output.detections)
+                        max_conf = max(max_conf, frame_max_conf)
+                summary[metric.value] = {
+                    "active": hit_count > 0,
+                    "hit_count": hit_count,
+                    "max_conf": round(float(max_conf), 4),
+                }
+        return summary
+
+    def get_task_alarm_message(self, task_id: int, since_seq: int = 0) -> Dict[str, Any]:
+        alarms = self.get_alarm_increment(since_seq=since_seq)
+        return {
+            "task_id": task_id,
+            "max_seq": self.get_alarm_max_seq(),
+            "signals_10s": self.get_signals_10s(),
+            "alarms": [
+                {
+                    "seq": a.seq,
+                    "mode": a.mode,
+                    "metric": a.metric,
+                    "level": a.alarm_level,
+                    "message": a.alarm_message,
+                    "count": a.count,
+                    "ts": int(a.timestamp),
+                }
+                for a in alarms
+            ],
+        }
 
     # --- 前端消息打包 ---
 
@@ -453,6 +552,9 @@ class ClientQueues:
                     "alarm_level": a.alarm_level,
                     "alarm_message": a.alarm_message,
                     "timestamp": a.timestamp,
+                    "mode": a.mode,
+                    "metric": a.metric,
+                    "count": a.count,
                 }
                 for a in recent_alarms
             ],

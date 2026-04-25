@@ -8,11 +8,12 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.database import get_db
 from app.models.frame import HLSSegment
+from app.models.task import DBTask
 from app.models.status_messages import get_no_task_response, get_task_status_response
 from app.services import ai
 from app.services.client.manager import client_manager
@@ -426,7 +427,7 @@ async def websocket_client_message(websocket: WebSocket, client_id: str):
     """
     WebSocket 实时推送前端消息（每秒一次）
 
-    推送内容与 GET /task/message/{client_id} 相同：
+    推送内容与 GET /task/message/{task_id} 对齐（仅字段子集）：
     检测结果、置信度、时序事件、最近5条内存告警。
 
     Args:
@@ -470,19 +471,49 @@ async def websocket_client_message(websocket: WebSocket, client_id: str):
             pass
 
 
-@router.get("/message/{client_id}")
-async def get_client_frontend_message(client_id: str):
+def _empty_alarm_payload(task_id: int) -> dict:
+    from app.services.inference.data_models import get_task_metric_map
+    _empty = {"active": False, "hit_count": 0, "max_conf": 0.0}
+    signals = {m.value: dict(_empty) for m in get_task_metric_map().values()}
+    return {"task_id": task_id, "max_seq": 0, "signals_10s": signals, "alarms": []}
+
+
+@router.get("/message/{task_id}")
+async def get_client_frontend_message(
+    task_id: int,
+    since_seq: int = Query(default=0),
+):
     """
-    获取指定客户端的前端实时消息（内存快照）
+    获取指定 task 的前端实时告警消息（按 seq 增量）
 
     包含：当前状态、时序事件、各任务检测结果、最近5条内存告警。
     适合前端轮询（建议 1~2 Hz），用于告警提示等实时展示场景。
 
     与 GET /task/{task_id}/alarms 的区别：
-    - 本接口：实时内存数据，按 client_id 查询
-    - alarms 接口：持久化数据库历史记录，按 task_id 查询
+    - 本接口：实时内存增量数据，按 task_id 查询
+    - alarms 接口：持久化数据库历史记录
     """
+    if since_seq < 0:
+        raise HTTPException(status_code=400, detail="since_seq must be >= 0")
+
+    db = next(get_db())
+    try:
+        db_task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
+    finally:
+        db.close()
+
+    if not db_task:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    client_id = db_task.source_ip  # type: ignore[assignment]
+    if not client_id:
+        return _empty_alarm_payload(task_id)
+
     if not client_manager.has_client(client_id):
-        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
+        return _empty_alarm_payload(task_id)
+
     cq = client_manager.get_client(client_id)
-    return cq.get_frontend_message()
+    if cq.get_task_id() != task_id:
+        return _empty_alarm_payload(task_id)
+
+    return cq.get_task_alarm_message(task_id=task_id, since_seq=since_seq)
