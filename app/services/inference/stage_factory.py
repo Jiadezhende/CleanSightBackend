@@ -5,6 +5,7 @@ import logging
 from typing import Any, Dict, List, Tuple, Type
 
 from app.services.inference.config import InferenceConfig
+from app.services.inference.data_models import AlarmMetric
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,9 @@ class StageFactory:
 
             try:
                 cls = _import_class(analyzer_class_path)
-                kwargs = model_cfg.get("analyzer_params") or {}
+                kwargs = dict(model_cfg.get("analyzer_params") or {})
+                # 将 YAML model name 注入为 analyzer runtime name（slide_window key 的唯一来源）
+                kwargs.setdefault("name", model_cfg.get("name", ""))
                 specs.append((cls, kwargs))
                 logger.info(
                     "✓ 注册 TemporalAnalyzer spec: %s", model_cfg.get("name", "?")
@@ -73,6 +76,28 @@ class StageFactory:
                 )
 
         return specs
+
+    def build_task_metric_map(self) -> Dict[str, AlarmMetric]:
+        """从 YAML model name 构建 task_name → AlarmMetric 映射（唯一定义处）。
+
+        仅包含 realtime: true（默认）的模型，即有实时滑动窗口信号的指标。
+        realtime: false 的模型（如 bending）只产结算告警，不纳入 signals_10s。
+        无法映射到 AlarmMetric 的 model（如 mock_detection）直接跳过。
+        """
+        mapping: Dict[str, AlarmMetric] = {}
+        for stage_cfg in self.config.stages.values():
+            for model_cfg in stage_cfg.models:
+                if not model_cfg.get("realtime", True):
+                    continue
+                name = model_cfg.get("name", "")
+                try:
+                    mapping[name] = AlarmMetric(name.upper())
+                except ValueError:
+                    logger.warning(
+                        "[StageFactory] model '%s' has no AlarmMetric mapping, excluded from signals_10s",
+                        name,
+                    )
+        return mapping
 
 
 def _import_class(class_path: str) -> Type:

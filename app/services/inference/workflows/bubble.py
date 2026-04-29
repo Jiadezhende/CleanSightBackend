@@ -167,8 +167,9 @@ class BirthRateAnalyzer(TemporalAnalyzer):
         self,
         birth_rate_threshold: float = 0.5,
         window_seconds: float = 3.0,
+        name: str = "bubble",
     ):
-        super().__init__(name="bubble")
+        super().__init__(name=name)
         self.birth_rate_threshold = birth_rate_threshold
         self.window_seconds = window_seconds
         self._sm = {

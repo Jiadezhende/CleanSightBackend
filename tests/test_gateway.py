@@ -280,7 +280,7 @@ class TestGatewayMiddlewareHTTP:
         ))
         async with await self._client("127.0.0.1") as client:
             for _ in range(10):
-                resp = await client.get("/task/message/test-client")
+                resp = await client.get("/task/message/123")
         # /task/message/* 走宽松 bucket，不应 429，也不封禁
         assert resp.status_code != 429
         assert resp.status_code != 403

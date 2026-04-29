@@ -63,7 +63,9 @@
     <span>Server:</span>
     <input id="server" value="localhost:8000" placeholder="host:port">
     <span>Client ID:</span>
-    <input id="clientId" value="" placeholder="client_id">
+    <input id="clientId" value="" placeholder="client_id (视频流)">
+    <span>Task ID:</span>
+    <input id="taskId" value="" placeholder="task_id (告警轮询)" style="width:160px">
     <button onclick="connectAll()">连接</button>
     <button onclick="disconnectAll()">断开</button>
   </div>
@@ -75,28 +77,20 @@
 
   <div class="panels">
 
-    <!-- 任务识别消息面板 (GET /task/message/{client_id}) -->
+    <!-- 告警信号面板 (GET /task/message/{task_id}?since_seq=) -->
     <div class="panel">
-      <div class="panel-title">任务识别状态 <span style="color:#555;font-size:0.85em">/task/message (1s)</span></div>
+      <div class="panel-title">告警信号 <span style="color:#555;font-size:0.85em">/task/message/{task_id}?since_seq=N (1s)</span></div>
 
       <div class="msg-row">
-        <span class="msg-label">Stage</span>
-        <span class="msg-val" id="msgStage">—</span>
-      </div>
-      <div class="msg-row">
-        <span class="msg-label">检测结果</span>
-        <span class="msg-val" id="msgDetections">—</span>
-      </div>
-      <div class="msg-row">
-        <span class="msg-label">置信度</span>
-        <span class="msg-val" id="msgConfs">—</span>
+        <span class="msg-label">max_seq</span>
+        <span class="msg-val" id="msgMaxSeq">—</span>
       </div>
 
-      <div style="margin-top:6px;margin-bottom:2px;color:#888;">时序事件</div>
-      <div class="events-list" id="msgEvents">—</div>
+      <div style="margin-top:6px;margin-bottom:2px;color:#888;">10s 滑窗信号 (signals_10s)</div>
+      <div id="msgSignals">—</div>
 
-      <div style="margin-top:6px;margin-bottom:2px;color:#888;">近期告警 (最多5条)</div>
-      <div id="msgAlarms">—</div>
+      <div style="margin-top:6px;margin-bottom:2px;color:#888;">增量告警 (alarms, 累计)</div>
+      <div id="msgAlarms" style="max-height:140px;overflow-y:auto;">—</div>
     </div>
 
     <!-- 系统健康面板 (GET /health/status) -->
@@ -111,11 +105,14 @@
     let ws = null;
     let frameCount = 0, lastTime = Date.now(), lastCount = 0;
     let healthTimer = null, msgTimer = null;
+    let sinceSeq = 0;           // 增量游标，每次响应后用 max_seq 推进
+    let accAlarms = [];         // 本次连接累计的告警（最多 50 条）
 
     // 从 URL query params 读取初始值
     const params = new URLSearchParams(location.search);
     if (params.get('server'))    document.getElementById('server').value   = params.get('server');
     if (params.get('client_id')) document.getElementById('clientId').value = params.get('client_id');
+    if (params.get('task_id'))   document.getElementById('taskId').value   = params.get('task_id');
 
     // 若 query params 齐全，自动连接
     if (params.get('client_id') && params.get('server')) connectAll();
@@ -126,8 +123,11 @@
     function connectAll() {
       const server   = document.getElementById('server').value.trim();
       const clientId = document.getElementById('clientId').value.trim();
+      const taskId   = document.getElementById('taskId').value.trim();
       if (!clientId) { alert('请输入 client_id'); return; }
       disconnectAll();
+      sinceSeq = 0;
+      accAlarms = [];
 
       // 1. 视频 WebSocket
       const wsUrl = `ws://${server}/ai/video?client_id=${encodeURIComponent(clientId)}`;
@@ -136,7 +136,7 @@
 
       ws.onopen = () => {
         document.getElementById('connStatus').textContent = `已连接: ${wsUrl}`;
-        startPolling(server, clientId);
+        startPolling(server, taskId);
       };
       ws.onclose = (e) => {
         document.getElementById('connStatus').textContent = `已断开 (code=${e.code})`;
@@ -177,10 +177,12 @@
     // ---------------------------------------------------------------
     // 轮询控制
     // ---------------------------------------------------------------
-    function startPolling(server, clientId) {
+    function startPolling(server, taskId) {
       stopPolling();
-      fetchMsg(server, clientId);
-      msgTimer = setInterval(() => fetchMsg(server, clientId), 1000);
+      if (taskId) {
+        fetchMsg(server, taskId);
+        msgTimer = setInterval(() => fetchMsg(server, taskId), 1000);
+      }
       fetchHealth(server);
       healthTimer = setInterval(() => fetchHealth(server), 2000);
     }
@@ -191,70 +193,65 @@
     }
 
     // ---------------------------------------------------------------
-    // GET /task/message/{client_id}
+    // GET /task/message/{task_id}?since_seq=N
+    // 响应格式: { task_id, max_seq, signals_10s, alarms }
     // ---------------------------------------------------------------
-    function fetchMsg(server, clientId) {
-      fetch(`http://${server}/task/message/${encodeURIComponent(clientId)}`)
+    function fetchMsg(server, taskId) {
+      fetch(`http://${server}/task/message/${encodeURIComponent(taskId)}?since_seq=${sinceSeq}`)
         .then(r => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         })
         .then(data => renderMsg(data))
         .catch(e => {
-          document.getElementById('msgStage').textContent = `错误: ${e.message}`;
+          document.getElementById('msgMaxSeq').textContent = `错误: ${e.message}`;
         });
     }
 
     function renderMsg(data) {
-      // Stage
-      document.getElementById('msgStage').textContent = data.stage ?? '—';
+      // 推进增量游标
+      if (typeof data.max_seq === 'number') sinceSeq = data.max_seq;
+      document.getElementById('msgMaxSeq').textContent = sinceSeq;
 
-      // Detections → colored tags
-      const dets = data.detections || {};
-      const detEl = document.getElementById('msgDetections');
-      if (Object.keys(dets).length === 0) {
-        detEl.textContent = '—';
+      // signals_10s: 每个指标的 10s 滑窗统计
+      const signals = data.signals_10s || {};
+      const sigEl = document.getElementById('msgSignals');
+      const sigKeys = Object.keys(signals);
+      if (sigKeys.length === 0) {
+        sigEl.innerHTML = '<span style="color:#555">无信号数据（task_id 未找到或无推理）</span>';
       } else {
-        detEl.innerHTML = Object.entries(dets).map(([k, v]) => {
-          const cls = v ? 'tag-alarm' : 'tag-ok';
-          const lbl = v ? '✓' : '✗';
-          return `<span class="tag ${cls}">${k}: ${lbl}</span>`;
+        sigEl.innerHTML = sigKeys.map(metric => {
+          const s = signals[metric];
+          const cls = s.active ? 'tag-alarm' : 'tag-ok';
+          const lbl = s.active ? '触发' : '正常';
+          return `<div class="msg-row">
+            <span class="tag ${cls}">${metric}</span>
+            <span class="msg-val" style="color:#aaa">
+              ${lbl} | ${s.hit_count} 帧 | max ${(s.max_conf * 100).toFixed(1)}%
+            </span>
+          </div>`;
         }).join('');
       }
 
-      // Confidences
-      const confs = data.confidences || {};
-      const confEl = document.getElementById('msgConfs');
-      if (Object.keys(confs).length === 0) {
-        confEl.textContent = '—';
-      } else {
-        confEl.textContent = Object.entries(confs)
-          .map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`)
-          .join('  ');
+      // 增量告警：追加到本次连接累计列表（上限 50 条）
+      const newAlarms = data.alarms ?? [];
+      if (newAlarms.length > 0) {
+        accAlarms.push(...newAlarms);
+        if (accAlarms.length > 50) accAlarms = accAlarms.slice(-50);
       }
-
-      // Temporal events
-      const eventsEl = document.getElementById('msgEvents');
-      const events = data.temporal?.events ?? [];
-      if (events.length === 0) {
-        eventsEl.innerHTML = '<div style="color:#555">暂无时序事件</div>';
-      } else {
-        eventsEl.innerHTML = events.map(e => `<div>${e}</div>`).join('');
-      }
-
-      // Recent alarms
       const alarmsEl = document.getElementById('msgAlarms');
-      const alarms = data.recent_alarms ?? [];
-      if (alarms.length === 0) {
-        alarmsEl.innerHTML = '<div style="color:#555">暂无告警</div>';
+      if (accAlarms.length === 0) {
+        alarmsEl.innerHTML = '<div style="color:#555">暂无增量告警</div>';
       } else {
-        alarmsEl.innerHTML = alarms.slice().reverse().map(a => {
-          const ts = a.timestamp ? new Date(a.timestamp * 1000).toLocaleTimeString() : '—';
-          const lvlCls = a.alarm_level === 'ERROR' ? 'tag-alarm' : 'tag-warn';
+        alarmsEl.innerHTML = accAlarms.slice().reverse().map(a => {
+          const ts = a.ts ? new Date(a.ts * 1000).toLocaleTimeString() : '—';
+          const lvlCls = (a.level === 'critical' || a.level === 'high') ? 'tag-alarm' : 'tag-warn';
           return `<div class="alarm-item">
-            <span class="tag ${lvlCls}">${a.alarm_level ?? '?'}</span>
-            <span class="al-type">[${a.alarm_type ?? '?'}]</span>
-            <span class="al-msg"> ${a.alarm_message ?? ''}</span>
+            <span class="tag ${lvlCls}">#${a.seq ?? '?'} ${a.level ?? '?'}</span>
+            <span class="al-type">[${a.metric ?? '?'}]</span>
+            <span style="color:#888;font-size:0.85em"> ${a.mode ?? ''}</span>
+            <span class="al-msg"> ${a.message ?? ''}</span>
+            ${a.count > 1 ? `<span style="color:#666;font-size:0.8em"> ×${a.count}</span>` : ''}
             <span class="al-ts"> ${ts}</span>
           </div>`;
         }).join('');

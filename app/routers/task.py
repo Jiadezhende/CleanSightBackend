@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.database import get_db
@@ -370,13 +370,17 @@ async def get_all_keypoints(task_id: int):
 @router.get("/{task_id}/alarms")
 async def get_task_alarms(task_id: int):
     """
-    获取指定任务的所有告警记录（clean_alarm 表）
+    获取指定任务的所有告警记录。
 
-    使用 DBAlarm ORM 模型查询，字段与实际数据库 schema 对齐。
+    活跃任务直接读内存（_alarm_log），已完成任务回查 clean_alarm 表。
 
     Raises:
         DatabaseError: 数据库查询失败（由边界层 3 转换为 503）
     """
+    cq = client_manager.get_client_by_task_id(task_id)
+    if cq is not None and cq.get_task_id() == task_id:
+        return _build_memory_alarm_response(task_id, cq)
+
     from sqlalchemy.exc import SQLAlchemyError
 
     from app.models.task import DBAlarm
@@ -426,7 +430,7 @@ async def websocket_client_message(websocket: WebSocket, client_id: str):
     """
     WebSocket 实时推送前端消息（每秒一次）
 
-    推送内容与 GET /task/message/{client_id} 相同：
+    推送内容与 GET /task/message/{task_id} 对齐（仅字段子集）：
     检测结果、置信度、时序事件、最近5条内存告警。
 
     Args:
@@ -470,19 +474,56 @@ async def websocket_client_message(websocket: WebSocket, client_id: str):
             pass
 
 
-@router.get("/message/{client_id}")
-async def get_client_frontend_message(client_id: str):
+def _build_memory_alarm_response(task_id: int, cq) -> dict:
+    records = cq.get_recent_alarms(n=100)
+    task = cq.get_task()
+    step_id = int(task.current_step) if task and task.current_step else None
+    alarms = [
+        {
+            "alarm_id": r.seq,
+            "task_id": task_id,
+            "step_id": step_id,
+            "step_name": None,
+            "alarm_type": r.alarm_type,
+            "severity": r.alarm_level,
+            "message": r.alarm_message,
+            "resolved": False,
+            "resolved_by": None,
+            "detected_at": int(r.timestamp),
+            "resolved_at": None,
+        }
+        for r in records
+    ]
+    return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
+
+
+def _empty_alarm_payload(task_id: int) -> dict:
+    from app.services.inference.data_models import get_task_metric_map
+    _empty = {"active": False, "hit_count": 0, "max_conf": 0.0}
+    signals = {m.value: dict(_empty) for m in get_task_metric_map().values()}
+    return {"task_id": task_id, "max_seq": 0, "signals_10s": signals, "alarms": []}
+
+
+@router.get("/message/{task_id}")
+async def get_client_frontend_message(
+    task_id: int,
+    since_seq: int = Query(default=0),
+):
     """
-    获取指定客户端的前端实时消息（内存快照）
+    获取指定 task 的前端实时告警消息（按 seq 增量）
 
     包含：当前状态、时序事件、各任务检测结果、最近5条内存告警。
     适合前端轮询（建议 1~2 Hz），用于告警提示等实时展示场景。
 
     与 GET /task/{task_id}/alarms 的区别：
-    - 本接口：实时内存数据，按 client_id 查询
-    - alarms 接口：持久化数据库历史记录，按 task_id 查询
+    - 本接口：实时内存增量数据，按 task_id 查询
+    - alarms 接口：持久化数据库历史记录
     """
-    if not client_manager.has_client(client_id):
-        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
-    cq = client_manager.get_client(client_id)
-    return cq.get_frontend_message()
+    if since_seq < 0:
+        raise HTTPException(status_code=400, detail="since_seq must be >= 0")
+
+    cq = client_manager.get_client_by_task_id(task_id)
+    if cq is None:
+        return _empty_alarm_payload(task_id)
+
+    return cq.get_task_alarm_message(task_id=task_id, since_seq=since_seq)
