@@ -1,0 +1,448 @@
+"""
+追溯 API（`/traceback/*`）
+
+提供告警证据回溯、任务 VOD 回放、任务时间轴打点三个核心接口。
+
+数据底座：
+- task_id → client_id：查 clean_task.source_ip（locator）
+- 段定位：文件名 ts_us 二分查找（segment_finder）
+- 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
+"""
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.database import get_db
+from app.models.task import DBAlarm
+from app.services.traceback import MediaToken, SegmentFinder, resolve_client_id
+from app.services.traceback.segment_finder import SegmentRef, get_default_base_dir
+from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
+
+router = APIRouter(prefix="/traceback", tags=["traceback"])
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 工具：detected_at 单位归一化
+# ---------------------------------------------------------------------------
+
+
+def _to_ms(detected_at: Optional[int]) -> int:
+    """把 detected_at 归一到毫秒。
+
+    - 平台若以秒（10 位整数）存入，乘 1000
+    - 已是毫秒（13 位）原样返回
+    - 微秒（16 位）则除以 1000
+    """
+    if detected_at is None:
+        raise ValidationError("alarm.detected_at is null", field="detected_at")
+    v = int(detected_at)
+    if v <= 0:
+        raise ValidationError(
+            "alarm.detected_at must be positive", field="detected_at", value=str(v)
+        )
+    if v < 10**11:        # 秒级
+        return v * 1000
+    if v < 10**14:        # 毫秒级
+        return v
+    return v // 1000      # 微秒级或更高
+
+
+def _segment_to_url(req: Request, finder: SegmentFinder, seg: SegmentRef) -> Dict[str, Any]:
+    """把段引用打包为前端可消费结构（带 token 化 URL）"""
+    token = MediaToken.default().sign(
+        client_id=seg.client_id,
+        task_id=seg.task_id,
+        filename=seg.filename,
+        kind="segment",
+    )
+    base = str(req.base_url).rstrip("/")
+    return {
+        "url": f"{base}/media/segment/{token}",
+        "filename": seg.filename,
+        "ts_us": seg.ts_us,
+        "ts_ms": seg.ts_ms,
+        "is_trigger": seg.is_trigger,
+    }
+
+
+def _keypoints_url(req: Request, client_id: str, task_id: int, filename: str) -> str:
+    token = MediaToken.default().sign(
+        client_id=client_id,
+        task_id=task_id,
+        filename=filename,
+        kind="keypoints",
+    )
+    base = str(req.base_url).rstrip("/")
+    return f"{base}/media/keypoints/{token}"
+
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+
+
+def _fetch_alarm(alarm_id: int) -> Dict[str, Any]:
+    """按 alarm_id 拉一条告警；不存在则 NotFoundError → 404"""
+    db = next(get_db())
+    try:
+        try:
+            row = db.query(DBAlarm).filter(DBAlarm.alarm_id == int(alarm_id)).first()
+        except SQLAlchemyError as e:
+            raise DatabaseError(
+                message=f"Failed to fetch alarm {alarm_id}",
+                retryable=True,
+                query=f"SELECT ... FROM clean_alarm WHERE alarm_id = {alarm_id}",
+            ) from e
+
+        if row is None:
+            raise NotFoundError(
+                f"Alarm {alarm_id} not found",
+                resource_type="Alarm",
+                resource_id=str(alarm_id),
+            )
+
+        return {
+            "alarm_id": int(row.alarm_id),
+            "task_id": int(row.task_id),
+            "step_id": int(row.step_id) if row.step_id is not None else None,  # type: ignore[arg-type]
+            "step_name": row.step_name,
+            "alarm_type": row.alarm_type,
+            "severity": row.severity,
+            "message": row.message,
+            "detected_at": int(row.detected_at) if row.detected_at is not None else None,  # type: ignore[arg-type]
+            "resolved": bool(row.resolved) if row.resolved is not None else False,
+            "resolved_by": row.resolved_by,
+            "resolved_at": int(row.resolved_at) if row.resolved_at is not None else None,  # type: ignore[arg-type]
+        }
+    finally:
+        db.close()
+
+
+def _fetch_task_alarms(task_id: int) -> List[Dict[str, Any]]:
+    """按 task_id 拉全部告警（用于 timeline）"""
+    db = next(get_db())
+    try:
+        try:
+            rows = (
+                db.query(DBAlarm)
+                .filter(DBAlarm.task_id == int(task_id))
+                .order_by(DBAlarm.detected_at.asc())
+                .all()
+            )
+        except SQLAlchemyError as e:
+            raise DatabaseError(
+                message=f"Failed to fetch alarms for task {task_id}",
+                retryable=True,
+            ) from e
+
+        return [
+            {
+                "alarm_id": int(r.alarm_id),
+                "alarm_type": r.alarm_type,
+                "severity": r.severity,
+                "message": r.message,
+                "step_id": int(r.step_id) if r.step_id is not None else None,  # type: ignore[arg-type]
+                "step_name": r.step_name,
+                "detected_at": int(r.detected_at) if r.detected_at is not None else None,  # type: ignore[arg-type]
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 接口 1: 告警证据
+# ---------------------------------------------------------------------------
+
+
+@router.get("/alarm/{alarm_id}/evidence")
+async def get_alarm_evidence(
+    request: Request,
+    alarm_id: int,
+    n_before: int = Query(default=-1, ge=-1, le=20, description="触发段前上下文段数 (-1 用配置默认值)"),
+    n_after: int = Query(default=-1, ge=-1, le=20, description="触发段后上下文段数 (-1 用配置默认值)"),
+):
+    """单条告警的双轨视频证据 + 推理 keypoints。
+
+    返回：
+        {
+          "alarm": {...},
+          "raw_clips":       [{"url", "filename", "ts_us", "ts_ms", "is_trigger"}],
+          "processed_clips": [...],
+          "keypoints_url": "...",   # 触发段对应的 keypoints JSON token URL（可能 null）
+          "detection": [...]         # 触发段的 keypoints JSON 内容（如果文件存在）
+        }
+    """
+    from app.settings import settings as s
+
+    if n_before < 0:
+        n_before = s.traceback_context_before
+    if n_after < 0:
+        n_after = s.traceback_context_after
+
+    alarm = _fetch_alarm(alarm_id)
+    task_id = alarm["task_id"]
+    detected_ms = _to_ms(alarm["detected_at"])
+
+    client_id = resolve_client_id(task_id)
+    if client_id is None:
+        raise NotFoundError(
+            f"Task {task_id} (referenced by alarm {alarm_id}) has no source_ip",
+            resource_type="Task",
+            resource_id=str(task_id),
+        )
+
+    finder = SegmentFinder(get_default_base_dir())
+
+    raw_segs = finder.find(client_id, task_id, detected_ms, "raw", n_before, n_after)
+    processed_segs = finder.find(
+        client_id, task_id, detected_ms, "processed", n_before, n_after
+    )
+
+    if not raw_segs and not processed_segs:
+        # 告警存在但视频段都不在了（已清理 / 还未落盘）
+        logger.warning(
+            "[Traceback] No segments found for alarm_id=%s task_id=%s client_id=%s detected_ms=%s",
+            alarm_id, task_id, client_id, detected_ms,
+        )
+
+    # 提取 processed 触发段对应的 keypoints
+    keypoints_url: Optional[str] = None
+    detection: Optional[Any] = None
+    trigger = next((s for s in processed_segs if s.is_trigger), None)
+    if trigger is not None and trigger.keypoints_filename:
+        kp_path = finder.task_dir(client_id, task_id) / trigger.keypoints_filename
+        if kp_path.exists():
+            keypoints_url = _keypoints_url(
+                request, client_id, task_id, trigger.keypoints_filename
+            )
+            try:
+                with kp_path.open("r", encoding="utf-8") as f:
+                    detection = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning("[Traceback] Failed to read keypoints %s: %s", kp_path, e)
+
+    return {
+        "alarm": alarm,
+        "client_id": client_id,
+        "raw_clips": [_segment_to_url(request, finder, s) for s in raw_segs],
+        "processed_clips": [_segment_to_url(request, finder, s) for s in processed_segs],
+        "keypoints_url": keypoints_url,
+        "detection": detection,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 接口 2: 任务 VOD playlist
+# ---------------------------------------------------------------------------
+
+
+def _parse_existing_playlist(playlist_path: Path) -> Dict[str, float]:
+    """解析现有 LIVE m3u8，提取 filename → duration 映射。
+
+    格式约定：每个段对应一行 `#EXTINF:<dur>,` 紧接一行 `<filename>`。
+    返回字典；解析失败或文件不存在返回空字典。
+    """
+    if not playlist_path.exists():
+        return {}
+    durations: Dict[str, float] = {}
+    try:
+        with playlist_path.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        logger.warning("[Traceback] Failed to read playlist %s: %s", playlist_path, e)
+        return {}
+
+    pending_dur: Optional[float] = None
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("#EXTINF:"):
+            try:
+                # "#EXTINF:1.234,"
+                dur_str = line[len("#EXTINF:") :].rstrip(",").strip()
+                pending_dur = float(dur_str)
+            except ValueError:
+                pending_dur = None
+        elif line and not line.startswith("#"):
+            if pending_dur is not None:
+                durations[line] = pending_dur
+            pending_dur = None
+    return durations
+
+
+def _estimate_durations(
+    segs: List[SegmentRef], default_duration: float
+) -> Dict[str, float]:
+    """从 ts_us 间隔估算每段时长（最后一段用 default_duration）。"""
+    durations: Dict[str, float] = {}
+    for i, s in enumerate(segs):
+        if i + 1 < len(segs):
+            dur = (segs[i + 1].ts_us - s.ts_us) / 1_000_000.0
+            if dur <= 0:
+                dur = default_duration
+        else:
+            dur = default_duration
+        durations[s.filename] = dur
+    return durations
+
+
+@router.get(
+    "/task/{task_id}/playlist.m3u8",
+    response_class=PlainTextResponse,
+    responses={
+        200: {
+            "content": {"application/vnd.apple.mpegurl": {}},
+            "description": "Generated VOD m3u8",
+        }
+    },
+)
+async def get_task_playlist(
+    request: Request,
+    task_id: int,
+    track: str = Query(default="processed", pattern="^(raw|processed)$"),
+):
+    """任务完整回放 VOD m3u8（动态生成，带 #EXT-X-ENDLIST）。
+
+    相比直接 serve 落盘 LIVE playlist：
+    - 保证 VOD 完整性（即使任务未封档）
+    - URL 走 token 化 /media/segment/*，不暴露文件系统路径
+    """
+    client_id = resolve_client_id(task_id)
+    if client_id is None:
+        raise NotFoundError(
+            f"Task {task_id} not found", resource_type="Task", resource_id=str(task_id)
+        )
+
+    finder = SegmentFinder(get_default_base_dir())
+    segs = finder.list_segments(client_id, task_id, track)
+    if not segs:
+        raise NotFoundError(
+            f"No {track} segments for task {task_id}",
+            resource_type="Segments",
+            resource_id=f"task={task_id},track={track}",
+        )
+
+    # 从落盘 playlist 取精确时长，缺失项用 ts_us 间隔估算
+    playlist_path = finder.task_dir(client_id, task_id) / f"{track}_playlist.m3u8"
+    real_durations = _parse_existing_playlist(playlist_path)
+
+    # 默认时长：取持久化配置的 segment_duration（默认 10s）
+    try:
+        from app.services.persistence.config import get_persistence_config
+        default_dur = float(get_persistence_config().hls.segment_duration)
+    except Exception:
+        default_dur = 10.0
+
+    estimated = _estimate_durations(segs, default_dur)
+
+    target_duration = max(
+        int(round(max(real_durations.values(), default=default_dur))),
+        int(round(max(estimated.values(), default=default_dur))),
+        1,
+    )
+
+    base_url = str(request.base_url).rstrip("/")
+    lines: List[str] = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+    ]
+    for s in segs:
+        dur = real_durations.get(s.filename, estimated.get(s.filename, default_dur))
+        token = MediaToken.default().sign(
+            client_id=s.client_id,
+            task_id=s.task_id,
+            filename=s.filename,
+            kind="segment",
+        )
+        lines.append(f"#EXTINF:{dur:.3f},")
+        lines.append(f"{base_url}/media/segment/{token}")
+    lines.append("#EXT-X-ENDLIST")
+    body = "\n".join(lines) + "\n"
+
+    return PlainTextResponse(
+        content=body,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 接口 3: 任务时间轴打点
+# ---------------------------------------------------------------------------
+
+
+def _task_duration_ms(finder: SegmentFinder, client_id: str, task_id: int) -> Tuple[int, int, int]:
+    """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。"""
+    raw_segs = finder.list_segments(client_id, task_id, "raw")
+    proc_segs = finder.list_segments(client_id, task_id, "processed")
+    all_ts = [s.ts_us for s in (raw_segs + proc_segs)]
+    if not all_ts:
+        return 0, 0, 0
+    start_us = min(all_ts)
+    end_us = max(all_ts)
+    return start_us // 1000, end_us // 1000, max(0, (end_us - start_us) // 1000)
+
+
+@router.get("/task/{task_id}/timeline")
+async def get_task_timeline(task_id: int):
+    """任务时间轴打点（前端在视频进度条上叠加告警标记）。
+
+    返回：
+        {
+          "task_id": ...,
+          "client_id": ...,
+          "start_ms": ...,
+          "end_ms": ...,
+          "duration_ms": ...,
+          "events": [
+             {"ts_ms": ..., "type": "alarm", "alarm_id": ..., "severity": ..., "alarm_type": ..., "message": ...}
+          ]
+        }
+    """
+    client_id = resolve_client_id(task_id)
+    if client_id is None:
+        raise NotFoundError(
+            f"Task {task_id} not found", resource_type="Task", resource_id=str(task_id)
+        )
+
+    finder = SegmentFinder(get_default_base_dir())
+    start_ms, end_ms, duration_ms = _task_duration_ms(finder, client_id, task_id)
+
+    events: List[Dict[str, Any]] = []
+    for a in _fetch_task_alarms(task_id):
+        if a["detected_at"] is None:
+            continue
+        events.append(
+            {
+                "ts_ms": _to_ms(a["detected_at"]),
+                "type": "alarm",
+                "alarm_id": a["alarm_id"],
+                "alarm_type": a["alarm_type"],
+                "severity": a["severity"],
+                "step_id": a["step_id"],
+                "step_name": a["step_name"],
+                "message": a["message"],
+            }
+        )
+
+    events.sort(key=lambda e: e["ts_ms"])
+
+    return {
+        "task_id": task_id,
+        "client_id": client_id,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "duration_ms": duration_ms,
+        "events": events,
+    }

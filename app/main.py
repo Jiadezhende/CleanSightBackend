@@ -6,11 +6,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from app.routers import ai, api, health, task
+from app.routers import admin, ai, api, health, media, task, traceback as traceback_router
 from app.utils import (
     AppError,
     ConflictError,
@@ -94,6 +95,10 @@ app.include_router(api.router)  # 统一API（优先注册）
 app.include_router(health.router)  # 健康监控
 app.include_router(ai.router)
 app.include_router(task.router)
+app.include_router(traceback_router.router)  # 追溯 API（/traceback/*）
+app.include_router(media.router)  # 媒体访问层（/media/*，token 化鉴权）
+app.include_router(admin.router)  # 运维 Admin API（/admin/*）
+app.mount("/admin/ui", StaticFiles(directory="app/static/admin", html=True), name="admin-ui")
 
 
 # ============================================================================
