@@ -1,3 +1,5 @@
+<!-- markdownlint-configure-file {"MD060": false} -->
+
 # CleanSight API 端点文档
 
 本文档详细说明了 CleanSight 后端提供的所有 API 接口，包括请求格式、参数说明、响应示例和使用方法。
@@ -13,12 +15,14 @@ CleanSight 后端提供 RESTful API 和 WebSocket 接口，用于管理内镜清
 - **API 文档端点**: `/docs`、`/redoc`、`/openapi.json` 已**永久关闭**，接口清单以本文档为准
 - **安全网关**: 所有 HTTP/WS 请求先经 `GatewayMiddleware`（IP 白名单 / 速率限制 / 反扫描），详见 [API_GATEWAY.md](API_GATEWAY.md)
 
-### 接口分区（2026-04 起）
+### 接口分区（2026-05 起）
 
 - `/api/*` —— 统一启动/终止（主入口）
 - `/ai/video` —— AI 推理 WebSocket
-- `/task/*` —— 任务状态 / 告警 / 视频回溯
+- `/task/*` —— 任务状态 / 告警
 - `/health/*` —— 健康监控（Gateway 宽松路径，可高频轮询）
+- `/traceback/*` —— 视频追溯（告警证据 / VOD 回放 / 时间轴打点）
+- `/media/*` —— 媒体访问层（token 化 HLS 段 / keypoints JSON，由追溯接口签发）
 
 **已下线的接口**（本文档不再描述）：`/inspection/*`、`/ai/status`、`/ai/load_task`、`/ai/terminate_task`。功能已合并进 `/api/start` 与 `/api/terminate`。
 
@@ -830,171 +834,10 @@ ws.onmessage = (event) => {
 
 ---
 
-### 4.2 获取任务视频段列表
-
-- **URL**: `GET /task/traceback/{task_id}/segments?video_type=<type>`
-- **描述**: 获取任务的所有 HLS 视频段路径和关键点 JSON 路径。
-
-#### 路径参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| task_id | integer | 是 | 任务ID |
-
-#### 查询参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| video_type | string | 否 | "raw" 或 "processed"（默认 "processed"） |
-
-#### 成功响应示例 (200 OK)
-
-```json
-{
-  "task_id": 123,
-  "video_type": "processed",
-  "total_segments": 10,
-  "playlist_path": "/path/to/playlist.m3u8",
-  "segments": [
-    {
-      "segment_id": 1,
-      "segment_path": "/path/to/processed_segment_1706599200.mp4",
-      "start_time": 1706599200,
-      "end_time": 1706599210,
-      "client_id": "192.168.1.100",
-      "keypoints_path": "/path/to/keypoints_1706599200.json"
-    }
-  ]
-}
-```
-
-**字段说明**:
-- `task_id`: 任务ID
-- `video_type`: 视频类型（raw=原始视频, processed=处理后视频）
-- `total_segments`: 视频段总数
-- `playlist_path`: M3U8 播放列表路径
-- `segments`: 视频段列表
-  - `segment_id`: 段ID（用于获取视频文件）
-  - `segment_path`: 视频文件路径
-  - `start_time`: 开始时间（Unix 时间戳）
-  - `end_time`: 结束时间（Unix 时间戳）
-  - `client_id`: 客户端ID
-  - `keypoints_path`: 关键点数据文件路径（仅 processed 类型）
-
-#### 错误响应
-
-**404 Not Found** - 未找到视频段
-```json
-{
-  "error": "Resource not found",
-  "detail": "未找到任务 123 的视频段",
-  "resource_type": "Segment",
-  "resource_id": "123"
-}
-```
-
-**503 Service Unavailable** - 数据库不可用
-```json
-{
-  "error": "Database unavailable",
-  "detail": "Database error: Failed to query segments for task 123",
-  "retryable": true
-}
-```
-
-#### cURL 示例
-
-```bash
-# 获取处理后的视频段
-curl -X GET "http://localhost:8000/task/traceback/123/segments?video_type=processed"
-
-# 获取原始视频段
-curl -X GET "http://localhost:8000/task/traceback/123/segments?video_type=raw"
-```
-
-#### 注意事项
-
-- `processed` 类型包含 AI 标注和关键点数据
-- `raw` 类型是未经处理的原始视频
-- 返回的视频段按时间顺序排列
-
----
-
-### 4.3 获取任务播放列表
-
-- **URL**: `GET /task/traceback/{task_id}/playlist?video_type=<type>`
-- **描述**: 获取任务的 HLS 播放列表文件（.m3u8），可直接用于视频播放器。
-
-#### 路径参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| task_id | integer | 是 | 任务ID |
-
-#### 查询参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| video_type | string | 否 | "raw" 或 "processed"（默认 "processed"） |
-
-#### 成功响应
-
-返回 M3U8 播放列表文件（Content-Type: `application/vnd.apple.mpegurl`）
-
-#### 错误响应
-
-**404 Not Found** - 播放列表不存在
-```json
-{
-  "error": "Resource not found",
-  "detail": "未找到任务 123 的视频段",
-  "resource_type": "Playlist",
-  "resource_id": "123"
-}
-```
-
-#### cURL 示例
-
-```bash
-# 下载播放列表
-curl -X GET "http://localhost:8000/task/traceback/123/playlist?video_type=processed" \
-  -o task_123_processed.m3u8
-```
-
-#### HTML5 播放器示例
-
-```html
-<video id="player" controls width="640" height="480"></video>
-
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-<script>
-  const video = document.getElementById('player');
-  const task_id = 123;
-  const playlistUrl = `http://localhost:8000/task/traceback/${task_id}/playlist?video_type=processed`;
-
-  if (Hls.isSupported()) {
-    const hls = new Hls();
-    hls.loadSource(playlistUrl);
-    hls.attachMedia(video);
-  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    // Safari 原生支持
-    video.src = playlistUrl;
-  }
-</script>
-```
-
-#### 注意事项
-
-- 返回的 M3U8 文件可直接用于 HLS 播放器
-- 支持 hls.js、video.js 等主流播放器
-- Safari 浏览器原生支持 HLS 播放
-
----
-
-### 4.4 获取告警记录
+### 4.2 获取告警记录
 
 - **URL**: `GET /task/{task_id}/alarms`
-- **描述**: 查询数据库 `clean_alarm` 表中为指定 `task_id` 保存的所有告警记录，按 `created_at` 降序返回。用于任务回溯与告警审计。
+- **描述**: 始终查询数据库 `clean_alarm` 表（告警由 AlarmWorker 实时异步写入，秒级延迟），按 `created_at` 降序返回。用于任务回溯与告警审计。
 
 #### 路径参数
 
@@ -1066,27 +909,193 @@ curl -X GET "http://localhost:8000/task/1/alarms"
 
 ---
 
-### 4.5 前端实时消息（HTTP 快照 + WebSocket 推送）
+### 4.3 前端实时消息（HTTP 轮询）
 
-- **URL（HTTP）**: `GET /task/message/{client_id}` —— 返回内存快照（检测结果、时序事件、最近 5 条内存告警）
-- **URL（WebSocket）**: `ws://<host>/task/msg/{client_id}` —— 每秒推送一次相同结构的消息
-- **用途**: 前端实时告警提示；HTTP 适合轮询（1~2 Hz），WebSocket 适合长连接
+- **URL**: `GET /task/message/{task_id}?since_seq=<seq>`
+- **用途**: 前端实时告警提示，按 seq 增量拉取（建议 1~2 Hz）。返回内存快照：检测结果、时序事件、最近 5 条内存告警。
 
 > `/task/message/*` 属于 Gateway **宽松路径**（默认 `gateway_relaxed_prefixes="/health,/task/message"`），高频轮询不会触发升级封禁。详见 [API_GATEWAY.md](API_GATEWAY.md)。
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| task_id | integer | — | 任务 ID（路径参数）|
+| since_seq | integer | 0 | 上次返回的 max_seq，用于增量更新 |
 
 **响应结构**：
 
 ```json
 {
-  "stage": "1",
-  "detections": { "bubble": true, "bending": false },
-  "recent_alarms": [
-    { "alarm_type": "bubble_detected", "severity": "high", "message": "..." }
+  "task_id": 1,
+  "max_seq": 5,
+  "signals_10s": { "bubble": { "active": true, "hit_count": 3, "max_conf": 0.92 } },
+  "alarms": [
+    { "seq": 5, "alarm_type": "bubble_detected", "severity": "high", "message": "..." }
   ]
 }
 ```
 
-**404**：`client_id` 未在 ClientManager 中注册（未通过 `/api/start` 启动）。
+**任务不活跃时**（task_id 无对应活跃客户端）返回 `max_seq: 0`、空 `alarms`。
+
+---
+
+## 五、视频追溯（`/traceback`）
+
+视频追溯服务提供基于文件系统的告警证据回溯、任务 VOD 回放与时间轴打点。
+详细设计见 [TRACEBACK_API.md](TRACEBACK_API.md)。
+
+### 5.1 告警证据回溯
+
+- **URL**: `GET /traceback/alarm/{alarm_id}/evidence`
+- **描述**: 拉一条告警的原始 + 处理后双轨视频片段与推理 keypoints，用于误报验证。
+
+#### 路径参数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| alarm_id | integer | 告警 ID |
+
+#### 查询参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| n_before | integer | 1 | 触发段前上下文段数 |
+| n_after | integer | 2 | 触发段后上下文段数 |
+
+#### 成功响应示例 (200 OK)
+
+```json
+{
+  "alarm": { "alarm_id": 42, "task_id": 100, "severity": "high", "detected_at": 1700000022000 },
+  "client_id": "192.168.1.10",
+  "raw_clips":       [{ "url": "http://host/media/segment/<token>", "ts_us": 1700000020000000, "is_trigger": true }],
+  "processed_clips": [{ "url": "http://host/media/segment/<token>", "ts_us": 1700000020000000, "is_trigger": true }],
+  "keypoints_url": "http://host/media/keypoints/<token>",
+  "detection": [{ "timestamp": 1700000020.0, "keypoints": {}, "inference_result": {} }]
+}
+```
+
+#### 错误响应
+
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 告警不存在 / 任务无 source_ip |
+| 503 | 数据库不可用 |
+
+---
+
+### 5.2 任务完整回放 Playlist
+
+- **URL**: `GET /traceback/task/{task_id}/playlist.m3u8?track=processed`
+- **描述**: 动态生成任务全程 VOD m3u8，带 `#EXT-X-ENDLIST`，前端 hls.js 直接消费。
+
+#### 路径参数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| task_id | integer | 任务 ID |
+
+#### 查询参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| track | string | processed | `raw` 或 `processed` |
+
+#### 成功响应 (200 OK)
+
+`Content-Type: application/vnd.apple.mpegurl`，VOD m3u8 文件。
+
+```javascript
+// hls.js 接入示例
+const hls = new Hls();
+hls.loadSource(`/traceback/task/${taskId}/playlist.m3u8?track=processed`);
+hls.attachMedia(document.getElementById('player'));
+```
+
+#### 错误响应
+
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 任务不存在 / 无可用段 |
+| 422 | track 参数非法 |
+
+---
+
+### 5.3 任务时间轴打点
+
+- **URL**: `GET /traceback/task/{task_id}/timeline`
+- **描述**: 返回任务时间范围与告警事件列表，供前端在进度条上叠加标记。
+
+#### 成功响应示例 (200 OK)
+
+```json
+{
+  "task_id": 100,
+  "client_id": "192.168.1.10",
+  "start_ms": 1700000000000,
+  "end_ms": 1700002400000,
+  "duration_ms": 2400000,
+  "events": [
+    {
+      "ts_ms": 1700000022000,
+      "type": "alarm",
+      "alarm_id": 42,
+      "alarm_type": "bubble_detected",
+      "severity": "high"
+    }
+  ]
+}
+```
+
+#### 错误响应
+
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 任务不存在 |
+
+---
+
+## 六、媒体访问层（`/media`）
+
+媒体访问层是前后端物理隔离的关键：所有 MP4 段和 keypoints JSON 均通过 token 化 URL 返回，
+不暴露文件系统路径。Token 由 `/traceback/*` 接口签发，前端只需跟随返回的 URL 即可。
+
+### 6.1 流式返回 MP4 段
+
+- **URL**: `GET /media/segment/{token}`
+- **描述**: 返回单个 MP4 视频段。Token 由 `/traceback/alarm/{id}/evidence` 或 `/traceback/task/{id}/playlist.m3u8` 签发。
+
+#### 成功响应 (200 OK)
+
+`Content-Type: video/mp4`，MP4 文件流（hls.js 自动拉取，无需手动调用）。
+
+#### 错误响应
+
+| 状态码 | 场景 |
+|--------|------|
+| 403 | token 无效 / 签名不符 / 已过期 |
+| 404 | 文件不存在（已清理） |
+
+---
+
+### 6.2 返回 Keypoints JSON
+
+- **URL**: `GET /media/keypoints/{token}`
+- **描述**: 返回单个 keypoints JSON 文件。Token 由 `/traceback/alarm/{id}/evidence` 签发（`keypoints_url` 字段）。
+
+#### 成功响应 (200 OK)
+
+```json
+[
+  { "timestamp": 1700000020.5, "keypoints": {}, "inference_result": {} }
+]
+```
+
+#### 错误响应
+
+| 状态码 | 场景 |
+|--------|------|
+| 403 | token 无效 / 已过期 |
+| 404 | 文件不存在 |
 
 ---
 
@@ -1173,4 +1182,4 @@ print(f"告警记录: {alarms['total']} 条")
 
 ---
 
-**最后更新**: 2026-04-13
+**最后更新**: 2026-05-04
