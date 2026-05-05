@@ -413,6 +413,60 @@
       </el-tab-pane>
 
     </el-tabs>
+
+    <!-- ===== 告警证据弹窗 ===== -->
+    <el-dialog v-model="evidenceVisible" title="告警证据" width="900px"
+               :close-on-click-modal="false" destroy-on-close>
+      <div v-if="evidenceLoading" style="text-align:center;padding:40px">加载中...</div>
+      <div v-else-if="evidenceError" style="color:#ef4444;padding:20px">
+        加载失败：{{ evidenceError }}
+      </div>
+      <div v-else-if="evidence">
+        <div class="card" style="margin-bottom:12px">
+          <div>
+            <b>告警 #{{ evidence.alarm.alarm_id }}</b>
+            · {{ evidence.alarm.alarm_type }}
+            · <el-tag :type="severityType(evidence.alarm.severity)" size="small">{{ evidence.alarm.severity }}</el-tag>
+            · 步骤：{{ evidence.alarm.step_name || '—' }}
+          </div>
+          <div style="margin-top:6px;color:#6b7280">{{ evidence.alarm.message }}</div>
+          <div style="margin-top:6px;font-size:12px;color:#9ca3af">
+            客户端：{{ evidence.client_id }} · 检测时间：{{ formatTs(evidence.alarm.detected_at) }}
+          </div>
+        </div>
+
+        <el-alert v-if="!evidence.raw_clips?.length && !evidence.processed_clips?.length"
+                  type="warning" :closable="false" style="margin-bottom:12px"
+                  title="未找到该告警对应的视频段"
+                  description="可能原因：① 视频段还未落盘（HLS 默认 10s 一段）；② 段已被清理；③ 持久化 base_dir 与读取路径不一致（生产环境检查 cwd）。">
+        </el-alert>
+
+        <el-radio-group v-if="evidence.raw_clips?.length || evidence.processed_clips?.length"
+                        v-model="evidenceTrack" size="small" style="margin-bottom:10px">
+          <el-radio-button label="processed" :disabled="!evidence.processed_clips?.length">处理后</el-radio-button>
+          <el-radio-button label="raw" :disabled="!evidence.raw_clips?.length">原始</el-radio-button>
+        </el-radio-group>
+
+        <video v-if="currentEvidenceClip" :src="currentEvidenceClip.url" controls autoplay
+               style="width:100%;max-height:480px;background:#000"
+               @error="evidenceError = '视频加载失败（可能 codec 不兼容或 token 过期）'"></video>
+
+        <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+          <el-button v-for="(c, i) in currentEvidenceClips" :key="c.filename"
+                     :type="i === evidenceClipIdx ? 'primary' : (c.is_trigger ? 'danger' : 'default')"
+                     size="small" @click="evidenceClipIdx = i">
+            {{ formatTs(c.ts_ms) }}{{ c.is_trigger ? ' ★' : '' }}
+          </el-button>
+        </div>
+
+        <div v-if="evidence.detection" style="margin-top:14px">
+          <el-button size="small" @click="showKeypoints = !showKeypoints">
+            {{ showKeypoints ? '隐藏' : '查看' }} Keypoints JSON
+          </el-button>
+          <pre v-if="showKeypoints" class="raw-metrics" style="margin-top:8px;max-height:240px">{{ JSON.stringify(evidence.detection, null, 2) }}</pre>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </div>
 
@@ -619,8 +673,49 @@ createApp({
       return 'info';
     }
 
-    function viewEvidence(alarm_id) {
-      window.open(apiBase.value + '/traceback/alarm/' + alarm_id + '/evidence', '_blank');
+    // ─── 告警证据弹窗 ───
+    const evidenceVisible = ref(false);
+    const evidenceLoading = ref(false);
+    const evidenceError = ref('');
+    const evidence = ref(null);
+    const evidenceTrack = ref('processed');
+    const evidenceClipIdx = ref(0);
+    const showKeypoints = ref(false);
+
+    const currentEvidenceClips = computed(() =>
+      evidence.value ? (evidence.value[evidenceTrack.value + '_clips'] || []) : []
+    );
+    const currentEvidenceClip = computed(() =>
+      currentEvidenceClips.value[evidenceClipIdx.value] || null
+    );
+
+    watch(evidenceTrack, (t) => {
+      const clips = evidence.value?.[t + '_clips'] || [];
+      const i = clips.findIndex(c => c.is_trigger);
+      evidenceClipIdx.value = i >= 0 ? i : 0;
+    });
+
+    async function viewEvidence(alarm_id) {
+      evidenceVisible.value = true;
+      evidenceLoading.value = true;
+      evidenceError.value = '';
+      evidence.value = null;
+      showKeypoints.value = false;
+      try {
+        const r = await fetch(api('/traceback/alarm/' + alarm_id + '/evidence'));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        evidence.value = d;
+        evidenceTrack.value = d.processed_clips?.length ? 'processed'
+                            : (d.raw_clips?.length ? 'raw' : 'processed');
+        const clips = d[evidenceTrack.value + '_clips'] || [];
+        const triggerIdx = clips.findIndex(c => c.is_trigger);
+        evidenceClipIdx.value = triggerIdx >= 0 ? triggerIdx : 0;
+      } catch (e) {
+        evidenceError.value = String(e);
+      } finally {
+        evidenceLoading.value = false;
+      }
     }
 
     // ─── 延迟测试 ───
@@ -730,6 +825,9 @@ createApp({
       metricsJson, rawMetrics, showRaw, latencyChartRef, latencyHistory,
       fetchMetrics, formatDict,
       alarmFilter, alarmRows, fetchAlarms, formatTs, severityType, viewEvidence,
+      evidenceVisible, evidenceLoading, evidenceError, evidence,
+      evidenceTrack, evidenceClipIdx, showKeypoints,
+      currentEvidenceClips, currentEvidenceClip,
       ltConfig, ltRunning, ltResults, ltStats, distChartRef,
       runLatencyTest, resetLatencyTest,
     };
