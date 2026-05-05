@@ -76,6 +76,7 @@ class AlarmPersistenceTask:
             "alarm_level": self.alarm_level,
             "alarm_message": self.alarm_message,
             "detection_result": self.detection_result,
+            "detected_at": self.timestamp,
         }
 
 

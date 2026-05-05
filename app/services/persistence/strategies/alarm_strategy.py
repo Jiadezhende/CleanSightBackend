@@ -63,7 +63,9 @@ class AlarmPersistenceStrategy:
             "alarm_type": alarm_info.get("alarm_type", AlarmType.PROCESS_VIOLATION),
             "alarm_level": alarm_info.get("alarm_level", "high"),
             "alarm_message": alarm_info.get("alarm_message", "AI推理检测到异常"),
-            "alarm_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "alarm_time": datetime.fromtimestamp(
+                alarm_info.get("detected_at") or datetime.now().timestamp()
+            ).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         if alarm_info.get("detection_result"):
