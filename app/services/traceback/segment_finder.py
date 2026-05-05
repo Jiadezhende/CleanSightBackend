@@ -210,24 +210,16 @@ class SegmentFinder:
 
 
 def get_default_base_dir() -> Path:
-    """取持久化默认 base_dir（与 hls_strategy 写入路径一致）。
+    """取持久化默认 base_dir（与 hls_strategy 写入路径同源）。
 
-    解析顺序：
-    1. persistence_config.yaml → storage.base_dir
-    2. 回退到 <project_root>/database
+    实现委托 PersistenceConfig.storage_base_dir，保证读写两侧对相对路径
+    的解析逻辑完全一致（相对路径都以项目根为基）。
     """
     try:
         from app.services.persistence.config import get_persistence_config
 
-        cfg = get_persistence_config()
-        base_dir_str = cfg.storage.base_dir
+        return get_persistence_config().storage_base_dir
     except Exception:
         logger.warning("Failed to load persistence config; falling back to <project>/database")
-        base_dir_str = "./database"
-
-    base_dir = Path(base_dir_str)
-    if not base_dir.is_absolute():
-        # 与 inference/core/manager.py 一致：相对路径基于项目根
         project_root = Path(__file__).parent.parent.parent.parent.resolve()
-        base_dir = (project_root / base_dir).resolve()
-    return base_dir
+        return (project_root / "database").resolve()

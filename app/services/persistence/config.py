@@ -107,8 +107,16 @@ class PersistenceConfig:
 
     @property
     def storage_base_dir(self) -> Path:
-        """存储根目录（向后兼容属性）"""
-        return Path(self.storage.base_dir)
+        """存储根目录（绝对路径）。
+
+        相对路径以项目根为基（与 segment_finder.get_default_base_dir 对齐），
+        避免读写两侧因进程 cwd 不同而分叉到不同目录。
+        """
+        p = Path(self.storage.base_dir)
+        if p.is_absolute():
+            return p.resolve()
+        project_root = Path(__file__).parent.parent.parent.parent.resolve()
+        return (project_root / p).resolve()
 
     # 向后兼容属性
     @property
