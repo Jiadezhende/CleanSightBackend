@@ -59,6 +59,7 @@ class AlarmPersistenceStrategy:
         payload = {
             "task_id": alarm_info.get("task_id", 0),
             "step_id": step_id,
+            "step_name": alarm_info.get("stage", ""),
             "alarm_type": alarm_info.get("alarm_type", AlarmType.PROCESS_VIOLATION),
             "alarm_level": alarm_info.get("alarm_level", "high"),
             "alarm_message": alarm_info.get("alarm_message", "AI推理检测到异常"),

@@ -318,20 +318,20 @@
         <div v-if="!alarmFilter.task_id" style="color:#9ca3af;padding:24px;text-align:center">
           请输入 task_id 后点击查询（活跃任务实时告警在"实时监控"标签查看）
         </div>
-        <el-table v-else :data="alarmRows" size="small" stripe border>
-          <el-table-column prop="alarm_id" label="告警ID" width="80" />
-          <el-table-column prop="step_name" label="步骤" width="80" show-overflow-tooltip />
-          <el-table-column prop="alarm_type" label="类型" width="100" />
+        <el-table v-else :data="alarmRows" size="small" stripe border style="width:100%">
+          <el-table-column prop="alarm_id" label="告警ID" width="80"></el-table-column>
+          <el-table-column prop="step_name" label="步骤" width="80" show-overflow-tooltip></el-table-column>
+          <el-table-column prop="alarm_type" label="类型" width="100"></el-table-column>
           <el-table-column label="级别" width="80">
             <template #default="{ row }">
               <el-tag :type="severityType(row.severity)" size="small">{{ row.severity }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="message" label="消息" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="message" label="消息" min-width="180" show-overflow-tooltip></el-table-column>
           <el-table-column label="检测时间" width="150">
             <template #default="{ row }">{{ formatTs(row.detected_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="80" fixed="right">
+          <el-table-column label="操作" width="80">
             <template #default="{ row }">
               <el-button v-if="row.alarm_id > 0" size="small" @click="viewEvidence(row.alarm_id)">证据</el-button>
               <span v-else style="color:#d1d5db;font-size:12px">—</span>
@@ -596,7 +596,6 @@ createApp({
     // ─── 告警列表（复用 /task/{task_id}/alarms，双源路由：活跃→内存，完成→DB）───
     const alarmFilter = reactive({ task_id: '' });
     const alarmRows = ref([]);
-
     async function fetchAlarms() {
       if (!alarmFilter.task_id) return;
       try {
