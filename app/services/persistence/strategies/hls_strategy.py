@@ -50,14 +50,14 @@ class HLSPersistenceStrategy:
             return self._dir_locks[key]
 
     def persist_segment(
-        self, client_id: str, task_id: int, segment_type: str, frames: List[FrameData]
+        self, task_id: int, step_id: int, segment_type: str, frames: List[FrameData]
     ) -> bool:
         """
         持久化视频段（业务代码：纯净）
 
         Args:
-            client_id: 客户端ID
             task_id: 任务ID
+            step_id: 洗消步骤ID（来自 clean_task.current_step 转 int）
             segment_type: "raw" or "processed"
             frames: 帧数据列表
 
@@ -68,27 +68,27 @@ class HLSPersistenceStrategy:
             PersistenceError: 持久化失败
             ValueError: 未知的segment类型
         """
-        # 创建目标目录
-        target_dir = self.db_dir / client_id / str(task_id)
+        # 创建目标目录：{base_dir}/{task_id}/{step_id}/
+        # 不再使用 client_id（source_ip），因为 step 切洗消台时该字段会被业务侧覆写
+        target_dir = self.db_dir / str(task_id) / str(step_id)
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise PersistenceError(
                 message=f"Failed to create directory: {target_dir}",
-                client_id=client_id,
                 operation="hls_mkdir",
                 retryable=True,
             ) from e
 
         if segment_type == "raw":
-            return self._persist_raw_segment(target_dir, frames, client_id)
+            return self._persist_raw_segment(target_dir, frames, task_id, step_id)
         elif segment_type == "processed":
-            return self._persist_processed_segment(target_dir, frames, client_id)
+            return self._persist_processed_segment(target_dir, frames, task_id, step_id)
         else:
             raise ValueError(f"Unknown segment type: {segment_type}")
 
     def _persist_raw_segment(
-        self, target_dir: Path, frames: List[FrameData], client_id: str
+        self, target_dir: Path, frames: List[FrameData], task_id: int, step_id: int
     ) -> bool:
         """
         持久化原始视频段（业务代码：纯净）
@@ -117,7 +117,6 @@ class HLSPersistenceStrategy:
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write raw video segment: {raw_segment_path}",
-                client_id=client_id,
                 operation="hls_write_raw",
                 retryable=True,
             ) from e
@@ -142,13 +141,14 @@ class HLSPersistenceStrategy:
             except IOError as e:
                 raise PersistenceError(
                     message=f"Failed to update raw playlist: {raw_playlist_path}",
-                    client_id=client_id,
                     operation="hls_update_playlist",
                     retryable=True,
                 ) from e
 
             self._update_metadata(
                 target_dir,
+                task_id=task_id,
+                step_id=step_id,
                 segment_type="raw",
                 segment_count_delta=1,
                 duration_delta=segment_duration,
@@ -156,15 +156,16 @@ class HLSPersistenceStrategy:
             )
 
         logger.info(
-            "Raw segment已持久化: %s, frames=%d, duration=%.3fs",
-            client_id,
+            "Raw segment已持久化: task_id=%s step_id=%s frames=%d duration=%.3fs",
+            task_id,
+            step_id,
             len(frames),
             segment_duration,
         )
         return True
 
     def _persist_processed_segment(
-        self, target_dir: Path, frames: List[FrameData], client_id: str
+        self, target_dir: Path, frames: List[FrameData], task_id: int, step_id: int
     ) -> bool:
         """
         持久化处理后视频段和keypoints JSON（业务代码：纯净）
@@ -193,7 +194,6 @@ class HLSPersistenceStrategy:
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write processed video segment: {segment_path}",
-                client_id=client_id,
                 operation="hls_write_processed",
                 retryable=True,
             ) from e
@@ -218,7 +218,6 @@ class HLSPersistenceStrategy:
         except IOError as e:
             raise PersistenceError(
                 message=f"Failed to write keypoints JSON: {keypoints_path}",
-                client_id=client_id,
                 operation="hls_write_keypoints",
                 retryable=True,
             ) from e
@@ -243,13 +242,14 @@ class HLSPersistenceStrategy:
             except IOError as e:
                 raise PersistenceError(
                     message=f"Failed to update processed playlist: {playlist_path}",
-                    client_id=client_id,
                     operation="hls_update_playlist",
                     retryable=True,
                 ) from e
 
             self._update_metadata(
                 target_dir,
+                task_id=task_id,
+                step_id=step_id,
                 segment_type="processed",
                 segment_count_delta=1,
                 duration_delta=segment_duration,
@@ -257,8 +257,9 @@ class HLSPersistenceStrategy:
             )
 
         logger.info(
-            "Processed segment已持久化: %s, frames=%d, duration=%.3fs",
-            client_id,
+            "Processed segment已持久化: task_id=%s step_id=%s frames=%d duration=%.3fs",
+            task_id,
+            step_id,
             len(frames),
             segment_duration,
         )
@@ -267,6 +268,8 @@ class HLSPersistenceStrategy:
     def _update_metadata(
         self,
         target_dir: Path,
+        task_id: int,
+        step_id: int,
         segment_type: str,
         segment_count_delta: int,
         duration_delta: float,
@@ -282,8 +285,8 @@ class HLSPersistenceStrategy:
         else:
             # 初始化metadata
             metadata = {
-                "task_id": int(target_dir.name),
-                "client_id": target_dir.parent.name,
+                "task_id": task_id,
+                "step_id": step_id,
                 "start_time": int(timestamp),
                 "end_time": None,
                 "raw_segments": {

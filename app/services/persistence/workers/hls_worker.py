@@ -49,8 +49,8 @@ class HLSWorker:
                 try:
                     self.executor.execute(
                         func=lambda: self.strategy.persist_segment(
-                            client_id=task.client_id,
                             task_id=task.task_id,
+                            step_id=task.step_id,
                             segment_type=task.segment_type,
                             frames=task.frames,
                         ),

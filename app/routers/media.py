@@ -24,7 +24,7 @@ router = APIRouter(prefix="/media", tags=["media"])
 logger = logging.getLogger(__name__)
 
 
-def _resolve_media_path(client_id: str, task_id: int, filename: str) -> Path:
+def _resolve_media_path(task_id: int, step_id: int, filename: str) -> Path:
     """根据 token 已校验的字段拼出绝对路径，并防止 path traversal。
 
     Raises:
@@ -36,15 +36,15 @@ def _resolve_media_path(client_id: str, task_id: int, filename: str) -> Path:
 
     base = get_default_base_dir()
     finder = SegmentFinder(base)
-    candidate = (finder.task_dir(client_id, task_id) / filename).resolve()
+    candidate = (finder.task_dir(task_id, step_id) / filename).resolve()
 
     # path traversal 防御：解析后的路径必须在 base_dir 内
     try:
         candidate.relative_to(base)
     except ValueError:
         logger.warning(
-            "[Media] Path traversal denied: client_id=%s task_id=%s filename=%s",
-            client_id, task_id, filename,
+            "[Media] Path traversal denied: task_id=%s step_id=%s filename=%s",
+            task_id, step_id, filename,
         )
         raise HTTPException(status_code=400, detail="Invalid path")
 
@@ -65,7 +65,7 @@ async def get_segment(token: str = PathParam(..., description="media segment tok
     if not payload.filename.endswith(".mp4"):
         raise HTTPException(status_code=400, detail="Token does not point to a segment")
 
-    path = _resolve_media_path(payload.client_id, payload.task_id, payload.filename)
+    path = _resolve_media_path(payload.task_id, payload.step_id, payload.filename)
     return FileResponse(
         path=str(path),
         media_type="video/mp4",
@@ -86,7 +86,7 @@ async def get_keypoints(token: str = PathParam(..., description="media keypoints
     if not payload.filename.endswith(".json"):
         raise HTTPException(status_code=400, detail="Token does not point to keypoints")
 
-    path = _resolve_media_path(payload.client_id, payload.task_id, payload.filename)
+    path = _resolve_media_path(payload.task_id, payload.step_id, payload.filename)
     return FileResponse(
         path=str(path),
         media_type="application/json",

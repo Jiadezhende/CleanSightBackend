@@ -148,6 +148,16 @@ class ClientQueues:
         self.last_inference_timestamp = current_time
         return True
 
+    @staticmethod
+    def _resolve_step_id(task: Optional[CleaningTask]) -> Optional[int]:
+        """从 task.current_step 解析 step_id；非法返回 None（拒绝落盘）。"""
+        if task is None or task.current_step is None:
+            return None
+        try:
+            return int(task.current_step)
+        except (TypeError, ValueError):
+            return None
+
     def append_ca_raw(self, frame_data: FrameData) -> bool:
         """
         添加原始帧到落盘队列，同时更新最新原始帧缓存。
@@ -170,10 +180,18 @@ class ClientQueues:
                     frames_to_persist = self.pop_n_ca_raw(self.ca_segment_len)
 
             if frames_to_persist is not None and _task is not None:
+                step_id = self._resolve_step_id(_task)
+                if step_id is None:
+                    import logging
+                    logging.getLogger(__name__).error(
+                        "[append_ca_raw] invalid current_step=%r, skip persistence (task_id=%s)",
+                        _task.current_step, _task.task_id,
+                    )
+                    return False
                 from app.services.persistence import persistence_manager
                 persistence_manager.persist_hls_segment(
-                    client_id=self.client_id,
                     task_id=_task.task_id,
+                    step_id=step_id,
                     segment_type="raw",
                     frames=frames_to_persist,
                 )
@@ -197,10 +215,18 @@ class ClientQueues:
                 frames_to_persist = self.pop_n_ca_processed(self.ca_segment_len)
 
         if frames_to_persist is not None and _task is not None:
+            step_id = self._resolve_step_id(_task)
+            if step_id is None:
+                import logging
+                logging.getLogger(__name__).error(
+                    "[append_ca_processed] invalid current_step=%r, skip persistence (task_id=%s)",
+                    _task.current_step, _task.task_id,
+                )
+                return
             from app.services.persistence import persistence_manager
             persistence_manager.persist_hls_segment(
-                client_id=self.client_id,
                 task_id=_task.task_id,
+                step_id=step_id,
                 segment_type="processed",
                 frames=frames_to_persist,
             )

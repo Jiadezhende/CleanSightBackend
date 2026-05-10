@@ -2,7 +2,7 @@
 媒体访问 token：HMAC-SHA256 + 短 TTL 签名
 
 设计目标：
-- /media/{kind}/{token} 路由不暴露文件系统路径，token 编码 client_id/task_id/filename/expiry
+- /media/{kind}/{token} 路由不暴露文件系统路径，token 编码 task_id/step_id/filename/expiry
 - 默认 TTL 300s，避免被无限期分发
 - 不引入外部缓存：服务端仅做 HMAC 校验，无 token 黑名单
 - secret 来自 settings.media_token_secret；为空时启动一次后随机生成进程内临时 secret，
@@ -10,7 +10,7 @@
 
 Token 结构：
     payload_b64.signature_b64
-    payload = JSON({"c": client_id, "t": task_id, "f": filename, "k": kind, "e": expiry_epoch})
+    payload = JSON({"t": task_id, "s": step_id, "f": filename, "k": kind, "e": expiry_epoch})
     signature = HMAC-SHA256(secret, payload_bytes)
 """
 
@@ -40,8 +40,8 @@ class MediaTokenError(Exception):
 class MediaTokenPayload:
     """已校验通过的 token 载荷"""
 
-    client_id: str
     task_id: int
+    step_id: int
     filename: str
     kind: str
     expiry: int
@@ -113,8 +113,8 @@ class MediaToken:
 
     def sign(
         self,
-        client_id: str,
         task_id: int,
+        step_id: int,
         filename: str,
         kind: MediaKind,
         ttl: Optional[int] = None,
@@ -123,8 +123,8 @@ class MediaToken:
         """签发 token。
 
         Args:
-            client_id: 客户端 id（即 source_ip）
             task_id: 任务 id
+            step_id: 洗消步骤 id（来自 clean_task.current_step 转 int）
             filename: 媒体文件名（不含路径，如 "processed_segment_1700000000000000.mp4"）
             kind: "segment" 或 "keypoints"
             ttl: 有效期（秒），默认取构造时的 default_ttl
@@ -135,8 +135,8 @@ class MediaToken:
         """
         if kind not in _VALID_KINDS:
             raise ValueError(f"Invalid kind: {kind!r}, expected one of {_VALID_KINDS}")
-        if not client_id or not filename:
-            raise ValueError("client_id and filename must be non-empty")
+        if not filename:
+            raise ValueError("filename must be non-empty")
         if "/" in filename or "\\" in filename or filename in (".", ".."):
             raise ValueError(f"Invalid filename (path traversal denied): {filename!r}")
 
@@ -148,8 +148,8 @@ class MediaToken:
         expiry = current + effective_ttl
 
         payload = {
-            "c": client_id,
             "t": int(task_id),
+            "s": int(step_id),
             "f": filename,
             "k": kind,
             "e": expiry,
@@ -196,7 +196,7 @@ class MediaToken:
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise MediaTokenError(f"Payload decode failed: {e}") from e
 
-        for k in ("c", "t", "f", "k", "e"):
+        for k in ("t", "s", "f", "k", "e"):
             if k not in payload:
                 raise MediaTokenError(f"Missing field: {k}")
 
@@ -208,8 +208,8 @@ class MediaToken:
             raise MediaTokenError(f"Kind mismatch: expected {kind}, got {payload['k']}")
 
         return MediaTokenPayload(
-            client_id=str(payload["c"]),
             task_id=int(payload["t"]),
+            step_id=int(payload["s"]),
             filename=str(payload["f"]),
             kind=str(payload["k"]),
             expiry=int(payload["e"]),

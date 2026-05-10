@@ -4,9 +4,14 @@
 提供告警证据回溯、任务 VOD 回放、任务时间轴打点三个核心接口。
 
 数据底座：
-- task_id → client_id：查 clean_task.source_ip（locator）
+- task_id + step_id → 落盘目录：`{base_dir}/{task_id}/{step_id}/`
 - 段定位：文件名 ts_us 二分查找（segment_finder）
 - 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
+
+设计要点：
+- 不再依赖 clean_task.source_ip —— 该字段会被业务侧覆写，无法作为可靠输入
+- evidence 接口直接用 alarm 自带的 (task_id, step_id) 定位
+- playlist/timeline 接口必填 step_id query 参数，仅返回该 step 的数据
 """
 
 import json
@@ -20,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
 from app.models.task import DBAlarm
-from app.services.traceback import MediaToken, SegmentFinder, resolve_client_id
+from app.services.traceback import MediaToken, SegmentFinder
 from app.services.traceback.segment_finder import SegmentRef, get_default_base_dir
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
@@ -57,8 +62,8 @@ def _to_ms(detected_at: Optional[int]) -> int:
 def _segment_to_url(req: Request, finder: SegmentFinder, seg: SegmentRef) -> Dict[str, Any]:
     """把段引用打包为前端可消费结构（带 token 化 URL）"""
     token = MediaToken.default().sign(
-        client_id=seg.client_id,
         task_id=seg.task_id,
+        step_id=seg.step_id,
         filename=seg.filename,
         kind="segment",
     )
@@ -72,10 +77,10 @@ def _segment_to_url(req: Request, finder: SegmentFinder, seg: SegmentRef) -> Dic
     }
 
 
-def _keypoints_url(req: Request, client_id: str, task_id: int, filename: str) -> str:
+def _keypoints_url(req: Request, task_id: int, step_id: int, filename: str) -> str:
     token = MediaToken.default().sign(
-        client_id=client_id,
         task_id=task_id,
+        step_id=step_id,
         filename=filename,
         kind="keypoints",
     )
@@ -125,17 +130,18 @@ def _fetch_alarm(alarm_id: int) -> Dict[str, Any]:
         db.close()
 
 
-def _fetch_task_alarms(task_id: int) -> List[Dict[str, Any]]:
-    """按 task_id 拉全部告警（用于 timeline）"""
+def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """按 task_id [+step_id] 拉告警列表（用于 timeline）。
+
+    step_id 不为 None 时仅返回该 step 的告警。
+    """
     db = next(get_db())
     try:
         try:
-            rows = (
-                db.query(DBAlarm)
-                .filter(DBAlarm.task_id == int(task_id))
-                .order_by(DBAlarm.detected_at.asc())
-                .all()
-            )
+            q = db.query(DBAlarm).filter(DBAlarm.task_id == int(task_id))
+            if step_id is not None:
+                q = q.filter(DBAlarm.step_id == int(step_id))
+            rows = q.order_by(DBAlarm.detected_at.asc()).all()
         except SQLAlchemyError as e:
             raise DatabaseError(
                 message=f"Failed to fetch alarms for task {task_id}",
@@ -172,6 +178,8 @@ async def get_alarm_evidence(
 ):
     """单条告警的双轨视频证据 + 推理 keypoints。
 
+    通过 alarm 表自带的 (task_id, step_id) 直接定位文件，无需查 clean_task.source_ip。
+
     返回：
         {
           "alarm": {...},
@@ -190,28 +198,27 @@ async def get_alarm_evidence(
 
     alarm = _fetch_alarm(alarm_id)
     task_id = alarm["task_id"]
-    detected_ms = _to_ms(alarm["detected_at"])
-
-    client_id = resolve_client_id(task_id)
-    if client_id is None:
+    step_id = alarm["step_id"]
+    if step_id is None:
         raise NotFoundError(
-            f"Task {task_id} (referenced by alarm {alarm_id}) has no source_ip",
-            resource_type="Task",
-            resource_id=str(task_id),
+            f"Alarm {alarm_id} has no step_id, cannot locate evidence",
+            resource_type="Alarm",
+            resource_id=str(alarm_id),
         )
+    detected_ms = _to_ms(alarm["detected_at"])
 
     finder = SegmentFinder(get_default_base_dir())
 
-    raw_segs = finder.find(client_id, task_id, detected_ms, "raw", n_before, n_after)
+    raw_segs = finder.find(task_id, step_id, detected_ms, "raw", n_before, n_after)
     processed_segs = finder.find(
-        client_id, task_id, detected_ms, "processed", n_before, n_after
+        task_id, step_id, detected_ms, "processed", n_before, n_after
     )
 
     if not raw_segs and not processed_segs:
         # 告警存在但视频段都不在了（已清理 / 还未落盘）
         logger.warning(
-            "[Traceback] No segments found for alarm_id=%s task_id=%s client_id=%s detected_ms=%s",
-            alarm_id, task_id, client_id, detected_ms,
+            "[Traceback] No segments found for alarm_id=%s task_id=%s step_id=%s detected_ms=%s",
+            alarm_id, task_id, step_id, detected_ms,
         )
 
     # 提取 processed 触发段对应的 keypoints
@@ -219,10 +226,10 @@ async def get_alarm_evidence(
     detection: Optional[Any] = None
     trigger = next((s for s in processed_segs if s.is_trigger), None)
     if trigger is not None and trigger.keypoints_filename:
-        kp_path = finder.task_dir(client_id, task_id) / trigger.keypoints_filename
+        kp_path = finder.task_dir(task_id, step_id) / trigger.keypoints_filename
         if kp_path.exists():
             keypoints_url = _keypoints_url(
-                request, client_id, task_id, trigger.keypoints_filename
+                request, task_id, step_id, trigger.keypoints_filename
             )
             try:
                 with kp_path.open("r", encoding="utf-8") as f:
@@ -232,7 +239,8 @@ async def get_alarm_evidence(
 
     return {
         "alarm": alarm,
-        "client_id": client_id,
+        "task_id": task_id,
+        "step_id": step_id,
         "raw_clips": [_segment_to_url(request, finder, s) for s in raw_segs],
         "processed_clips": [_segment_to_url(request, finder, s) for s in processed_segs],
         "keypoints_url": keypoints_url,
@@ -307,31 +315,28 @@ def _estimate_durations(
 async def get_task_playlist(
     request: Request,
     task_id: int,
+    step_id: int = Query(..., description="洗消步骤 id（必填，仅返回该 step 的回放）"),
     track: str = Query(default="processed", pattern="^(raw|processed)$"),
 ):
-    """任务完整回放 VOD m3u8（动态生成，带 #EXT-X-ENDLIST）。
+    """单个洗消步骤的完整回放 VOD m3u8（动态生成，带 #EXT-X-ENDLIST）。
+
+    仅返回 (task_id, step_id) 对应目录下的段。任务级跨 step 聚合本期不支持。
 
     相比直接 serve 落盘 LIVE playlist：
     - 保证 VOD 完整性（即使任务未封档）
     - URL 走 token 化 /media/segment/*，不暴露文件系统路径
     """
-    client_id = resolve_client_id(task_id)
-    if client_id is None:
-        raise NotFoundError(
-            f"Task {task_id} not found", resource_type="Task", resource_id=str(task_id)
-        )
-
     finder = SegmentFinder(get_default_base_dir())
-    segs = finder.list_segments(client_id, task_id, track)
+    segs = finder.list_segments(task_id, step_id, track)
     if not segs:
         raise NotFoundError(
-            f"No {track} segments for task {task_id}",
+            f"No {track} segments for task {task_id} step {step_id}",
             resource_type="Segments",
-            resource_id=f"task={task_id},track={track}",
+            resource_id=f"task={task_id},step={step_id},track={track}",
         )
 
     # 从落盘 playlist 取精确时长，缺失项用 ts_us 间隔估算
-    playlist_path = finder.task_dir(client_id, task_id) / f"{track}_playlist.m3u8"
+    playlist_path = finder.task_dir(task_id, step_id) / f"{track}_playlist.m3u8"
     real_durations = _parse_existing_playlist(playlist_path)
 
     # 默认时长：取持久化配置的 segment_duration（默认 10s）
@@ -360,8 +365,8 @@ async def get_task_playlist(
     for s in segs:
         dur = real_durations.get(s.filename, estimated.get(s.filename, default_dur))
         token = MediaToken.default().sign(
-            client_id=s.client_id,
             task_id=s.task_id,
+            step_id=s.step_id,
             filename=s.filename,
             kind="segment",
         )
@@ -382,10 +387,12 @@ async def get_task_playlist(
 # ---------------------------------------------------------------------------
 
 
-def _task_duration_ms(finder: SegmentFinder, client_id: str, task_id: int) -> Tuple[int, int, int]:
+def _step_duration_ms(
+    finder: SegmentFinder, task_id: int, step_id: int
+) -> Tuple[int, int, int]:
     """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。"""
-    raw_segs = finder.list_segments(client_id, task_id, "raw")
-    proc_segs = finder.list_segments(client_id, task_id, "processed")
+    raw_segs = finder.list_segments(task_id, step_id, "raw")
+    proc_segs = finder.list_segments(task_id, step_id, "processed")
     all_ts = [s.ts_us for s in (raw_segs + proc_segs)]
     if not all_ts:
         return 0, 0, 0
@@ -395,13 +402,18 @@ def _task_duration_ms(finder: SegmentFinder, client_id: str, task_id: int) -> Tu
 
 
 @router.get("/task/{task_id}/timeline")
-async def get_task_timeline(task_id: int):
-    """任务时间轴打点（前端在视频进度条上叠加告警标记）。
+async def get_task_timeline(
+    task_id: int,
+    step_id: int = Query(..., description="洗消步骤 id（必填，仅返回该 step 的事件）"),
+):
+    """单个洗消步骤的时间轴打点（前端在视频进度条上叠加告警标记）。
+
+    仅扫 `{task_id}/{step_id}/` 目录的段、仅取该 step 的告警事件。
 
     返回：
         {
           "task_id": ...,
-          "client_id": ...,
+          "step_id": ...,
           "start_ms": ...,
           "end_ms": ...,
           "duration_ms": ...,
@@ -410,17 +422,11 @@ async def get_task_timeline(task_id: int):
           ]
         }
     """
-    client_id = resolve_client_id(task_id)
-    if client_id is None:
-        raise NotFoundError(
-            f"Task {task_id} not found", resource_type="Task", resource_id=str(task_id)
-        )
-
     finder = SegmentFinder(get_default_base_dir())
-    start_ms, end_ms, duration_ms = _task_duration_ms(finder, client_id, task_id)
+    start_ms, end_ms, duration_ms = _step_duration_ms(finder, task_id, step_id)
 
     events: List[Dict[str, Any]] = []
-    for a in _fetch_task_alarms(task_id):
+    for a in _fetch_task_alarms(task_id, step_id=step_id):
         if a["detected_at"] is None:
             continue
         events.append(
@@ -440,7 +446,7 @@ async def get_task_timeline(task_id: int):
 
     return {
         "task_id": task_id,
-        "client_id": client_id,
+        "step_id": step_id,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "duration_ms": duration_ms,
