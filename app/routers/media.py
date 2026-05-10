@@ -69,8 +69,10 @@ async def get_segment(token: str = PathParam(..., description="media segment tok
     return FileResponse(
         path=str(path),
         media_type="video/mp4",
-        filename=payload.filename,
-        headers={"Cache-Control": "private, max-age=60"},
+        headers={
+            "Cache-Control": "private, max-age=60",
+            "Content-Disposition": "inline",
+        },
     )
 
 
@@ -90,6 +92,8 @@ async def get_keypoints(token: str = PathParam(..., description="media keypoints
     return FileResponse(
         path=str(path),
         media_type="application/json",
-        filename=payload.filename,
-        headers={"Cache-Control": "private, max-age=60"},
+        headers={
+            "Cache-Control": "private, max-age=60",
+            "Content-Disposition": "inline",
+        },
     )
