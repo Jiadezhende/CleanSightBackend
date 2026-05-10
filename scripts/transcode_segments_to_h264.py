@@ -83,6 +83,7 @@ def _transcode(ffmpeg_bin: str, path: Path) -> bool:
         "-pix_fmt", "yuv420p",
         "-an",
         "-movflags", "+faststart",
+        "-f", "mp4",
         str(tmp_path),
     ]
     try:

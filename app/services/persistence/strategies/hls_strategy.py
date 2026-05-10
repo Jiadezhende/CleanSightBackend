@@ -10,6 +10,8 @@ HLS持久化策略
 
 import json
 import logging
+import os
+import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,7 @@ import cv2
 import numpy as np
 
 from app.models.frame import FrameData
+from app.settings import settings
 from app.utils.exceptions import PersistenceError
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,59 @@ class HLSPersistenceStrategy:
             if key not in self._dir_locks:
                 self._dir_locks[key] = threading.Lock()
             return self._dir_locks[key]
+
+    @staticmethod
+    def _transcode_to_browser_mp4(path: Path) -> None:
+        """将 cv2 写出的 mp4v 段转码为浏览器兼容的 H.264 + faststart。
+
+        cv2.VideoWriter 用 mp4v (MPEG-4 Part 2) 写出的文件浏览器 <video> 标签
+        无法稳定播放，且 moov atom 在文件尾部。本函数原地替换为 H.264 + faststart。
+
+        失败时保留原文件并打 warning，不抛异常 —— 主流程的可用性优先于浏览器可播放性。
+        """
+        tmp_path = path.with_suffix(path.suffix + ".transcode.tmp")
+        cmd = [
+            settings.ffmpeg_path,
+            "-y",
+            "-loglevel", "error",
+            "-i", str(path),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-an",
+            "-movflags", "+faststart",
+            "-f", "mp4",
+            str(tmp_path),
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning(
+                "[HLS] ffmpeg transcode skipped (%s): %s — keeping mp4v file",
+                type(e).__name__, path,
+            )
+            tmp_path.unlink(missing_ok=True)
+            return
+
+        if result.returncode != 0 or not tmp_path.exists():
+            logger.warning(
+                "[HLS] ffmpeg transcode failed (rc=%s): %s\nstderr: %s",
+                result.returncode, path, result.stderr.strip(),
+            )
+            tmp_path.unlink(missing_ok=True)
+            return
+
+        try:
+            os.replace(tmp_path, path)
+        except OSError as e:
+            logger.warning("[HLS] failed to replace transcoded file %s: %s", path, e)
+            tmp_path.unlink(missing_ok=True)
 
     def persist_segment(
         self, task_id: int, step_id: int, segment_type: str, frames: List[FrameData]
@@ -120,6 +176,8 @@ class HLSPersistenceStrategy:
                 operation="hls_write_raw",
                 retryable=True,
             ) from e
+
+        self._transcode_to_browser_mp4(raw_segment_path)
 
         # 2. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
         if len(frames) > 1:
@@ -197,6 +255,8 @@ class HLSPersistenceStrategy:
                 operation="hls_write_processed",
                 retryable=True,
             ) from e
+
+        self._transcode_to_browser_mp4(segment_path)
 
         # 2. 写keypoints JSON
         keypoints_path = target_dir / f"keypoints_{int(start_ts * 1e6)}.json"
