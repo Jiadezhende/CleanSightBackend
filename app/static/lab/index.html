@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CleanSight 送标工作台</title>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f2f5; }
+    .header {
+      background: #001529; color: #fff; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 48px;
+    }
+    .header-title { font-size: 16px; font-weight: 600; letter-spacing: 1px; }
+    .header-right { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+    .refresh-info { font-size: 11px; color: #9ca3af; }
+    .main { padding: 16px 24px; }
+    .card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+    .card-title { font-size: 14px; font-weight: 600; color: #1f2937; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .form-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .form-row .field-label { font-size: 12px; color: #6b7280; }
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    .badge-ok { color: #10b981; background: #d1fae5; }
+    .badge-err { color: #ef4444; background: #fee2e2; }
+    .badge-warn { color: #f59e0b; background: #fef3c7; }
+    .badge-mute { color: #6b7280; background: #f3f4f6; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot-ok { background: #10b981; }
+    .dot-err { background: #ef4444; }
+    .dot-mute { background: #9ca3af; }
+    .health-line { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 12px; color: #6b7280; margin-top: 10px; }
+    .player-layout { display: grid; grid-template-columns: 1fr 320px; gap: 16px; }
+    .video-wrap { background: #000; border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 16/9; display: flex; align-items: center; justify-content: center; }
+    .video-wrap video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+    .video-placeholder { color: #9ca3af; text-align: center; padding: 40px; font-size: 13px; }
+    .timeline-wrap { margin-top: 8px; background: #fafafa; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
+    .timeline-label { font-size: 11px; color: #6b7280; margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .timeline-strip { position: relative; height: 36px; background: #f3f4f6; border-radius: 4px; overflow: hidden; }
+    .tl-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: #ef4444; cursor: pointer; }
+    .tl-marker:hover { background: #b91c1c; box-shadow: 0 0 0 1px #fff inset; width: 4px; }
+    .tl-clip { position: absolute; top: 6px; bottom: 6px; background: rgba(59,130,246,.35); border: 1px solid #3b82f6; border-radius: 3px; pointer-events: none; }
+    .tl-pending { position: absolute; top: 6px; bottom: 6px; background: rgba(245,158,11,.30); border: 1px dashed #f59e0b; border-radius: 3px; pointer-events: none; }
+    .tl-cursor { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; box-shadow: 0 0 4px rgba(0,0,0,.6); pointer-events: none; }
+    .player-side { display: flex; flex-direction: column; gap: 10px; }
+    .side-item { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
+    .side-key { font-size: 11px; color: #9ca3af; text-transform: uppercase; letter-spacing: .5px; }
+    .side-val { font-size: 14px; font-weight: 600; color: #111827; margin-top: 2px; font-family: monospace; }
+    .mark-btns { display: flex; gap: 8px; margin-top: 4px; }
+    .mark-btns .el-button { flex: 1; }
+    .clip-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .clip-toolbar-stats { font-size: 12px; color: #6b7280; }
+    .clip-toolbar-stats .err { color: #ef4444; font-weight: 600; }
+    .clip-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .clip-table th { background: #f9fafb; text-align: left; padding: 8px 12px; font-weight: 600; color: #6b7280; border-bottom: 2px solid #e5e7eb; font-size: 11px; text-transform: uppercase; }
+    .clip-table td { padding: 6px 12px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+    .clip-table tr:hover td { background: #f9fafb; }
+    .clip-table td.mono { font-family: monospace; }
+    .submit-bar { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+    .submit-bar .hint { font-size: 12px; color: #ef4444; }
+    .result-card .err-row td { background: #fef2f2; }
+    .result-job-dir { margin-top: 10px; padding: 10px 12px; background: #fffbeb; border: 1px solid #fcd34d; border-radius: 6px; font-size: 12px; color: #92400e; }
+    .result-job-dir code { font-family: monospace; background: #fde68a; padding: 1px 6px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <div class="header">
+    <div class="header-title">&#9673; CleanSight 送标工作台</div>
+    <div class="header-right">
+      <span class="refresh-info">后端: {{ apiBase }}</span>
+      <el-button size="small" @click="showSettings = true" type="primary" plain>设置</el-button>
+    </div>
+  </div>
+
+  <el-dialog v-model="showSettings" title="后端连接设置" width="420px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+      <span style="flex-shrink:0;font-size:13px;color:#374151">Backend URL</span>
+      <el-input v-model="pendingApiBase" placeholder="http://192.168.1.100:8000" style="flex:1" />
+    </div>
+    <template #footer>
+      <el-button @click="showSettings = false">取消</el-button>
+      <el-button type="primary" @click="applySettings">应用</el-button>
+    </template>
+  </el-dialog>
+
+  <div class="main">
+    <!-- 步骤选择 -->
+    <div class="card">
+      <div class="card-title">① 选择步骤</div>
+      <div class="form-row">
+        <span class="field-label">task_id</span>
+        <el-input-number v-model="form.task_id" :min="1" :controls="false" style="width:120px" />
+        <span class="field-label">step_id</span>
+        <el-input-number v-model="form.step_id" :min="1" :controls="false" style="width:100px" />
+        <span class="field-label">project_id <small style="color:#9ca3af">(可选)</small></span>
+        <el-input-number v-model="form.project_id" :min="1" :controls="false" placeholder="使用默认" style="width:120px" />
+        <el-button type="primary" :loading="loading.load" @click="loadStep">加载</el-button>
+        <el-button v-if="loaded" @click="reset">重置</el-button>
+      </div>
+
+      <div class="health-line">
+        <span>LS：</span>
+        <span class="badge" :class="health.configured ? 'badge-ok' : 'badge-err'">
+          <span class="dot" :class="health.configured ? 'dot-ok' : 'dot-err'"></span>
+          {{ health.configured ? '已配置' : '未配置' }}
+        </span>
+        <span v-if="health.configured" class="badge" :class="health.reachable ? 'badge-ok' : 'badge-err'">
+          <span class="dot" :class="health.reachable ? 'dot-ok' : 'dot-err'"></span>
+          {{ health.reachable ? '可达' : '不可达' }}
+        </span>
+        <span v-if="health.label_studio_url">url: <code>{{ health.label_studio_url }}</code></span>
+        <span v-if="health.default_project_id">默认 pid: <b>{{ health.default_project_id }}</b></span>
+        <span v-if="health.error" style="color:#ef4444">err: {{ health.error }}</span>
+      </div>
+    </div>
+
+    <!-- 视频 + 时间轴 -->
+    <div v-if="loaded" class="card">
+      <div class="card-title">
+        ② 播放 raw 视频并打点
+        <span style="font-weight:400;color:#9ca3af;font-size:12px;margin-left:8px">
+          时长 {{ formatDuration(timeline.duration_ms) }} · {{ timeline.events.length }} 个告警
+        </span>
+      </div>
+      <div class="player-layout">
+        <div>
+          <div class="video-wrap">
+            <video ref="videoEl" controls preload="metadata"></video>
+          </div>
+          <div class="timeline-wrap">
+            <div class="timeline-label">
+              <span>{{ formatAbsTime(timeline.start_ms) }}</span>
+              <span style="color:#374151">时间轴（红=告警，蓝=已选，橙虚=待加入，白=播放头）</span>
+              <span>{{ formatAbsTime(timeline.end_ms) }}</span>
+            </div>
+            <div class="timeline-strip" ref="stripEl" @click="seekFromStrip">
+              <div v-for="c in clips" :key="'c'+c._key" class="tl-clip"
+                   :style="rangeStyle(c.start_ms, c.end_ms)"></div>
+              <div v-if="pending.start_ms !== null && pending.end_ms !== null && pending.end_ms > pending.start_ms"
+                   class="tl-pending"
+                   :style="rangeStyle(pending.start_ms, pending.end_ms)"></div>
+              <div v-for="ev in timeline.events" :key="ev.alarm_id" class="tl-marker"
+                   :style="markerStyle(ev.ts_ms)"
+                   :title="alarmTooltip(ev)"
+                   @click.stop="seekToMs(ev.ts_ms)"></div>
+              <div class="tl-cursor" :style="cursorStyle"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="player-side">
+          <div class="side-item">
+            <div class="side-key">当前播放</div>
+            <div class="side-val">{{ formatAbsTime(currentAbsMs) }}</div>
+            <div style="font-size:11px;color:#9ca3af;margin-top:2px">abs_ms = {{ currentAbsMs }}</div>
+          </div>
+          <div class="side-item">
+            <div class="side-key">待加入区间</div>
+            <div class="side-val">
+              <span :style="pending.start_ms === null ? 'color:#9ca3af' : ''">
+                {{ pending.start_ms !== null ? formatAbsTime(pending.start_ms) : '— 未设 —' }}
+              </span>
+              <span style="color:#9ca3af"> → </span>
+              <span :style="pending.end_ms === null ? 'color:#9ca3af' : ''">
+                {{ pending.end_ms !== null ? formatAbsTime(pending.end_ms) : '— 未设 —' }}
+              </span>
+            </div>
+            <div style="font-size:12px;color:#6b7280;margin-top:4px">
+              时长：<b>{{ pendingDurationLabel }}</b>
+            </div>
+            <div class="mark-btns">
+              <el-button size="small" @click="markStart">设为起点</el-button>
+              <el-button size="small" @click="markEnd">设为终点</el-button>
+            </div>
+            <div class="mark-btns">
+              <el-button size="small" type="primary" :disabled="!pendingValid" @click="addClip">加入列表</el-button>
+              <el-button size="small" @click="clearPending">清空待选</el-button>
+            </div>
+            <div v-if="pendingError" style="font-size:11px;color:#ef4444;margin-top:6px">{{ pendingError }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 已选片段 -->
+    <div v-if="loaded" class="card">
+      <div class="card-title">③ 已选片段</div>
+      <div class="clip-toolbar">
+        <div class="clip-toolbar-stats">
+          <b>{{ clips.length }}</b> 段（上限 {{ MAX_CLIPS }}） ·
+          总时长 <b>{{ formatDuration(totalDurationMs) }}</b>（上限 {{ formatDuration(MAX_TOTAL_MS) }}） ·
+          单段上限 {{ formatDuration(MAX_CLIP_MS) }}
+          <span v-if="validation.error" class="err">　❌ {{ validation.error }}</span>
+        </div>
+        <el-button v-if="clips.length" size="small" plain type="danger" @click="clearAll">清空</el-button>
+      </div>
+
+      <table class="clip-table">
+        <thead>
+          <tr>
+            <th style="width:36px">#</th>
+            <th>start_ms</th>
+            <th>end_ms</th>
+            <th style="width:80px">时长</th>
+            <th>label（≤64）</th>
+            <th style="width:160px">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(c, i) in clips" :key="c._key" :class="c._overlap ? 'err-row' : ''">
+            <td>{{ i + 1 }}</td>
+            <td class="mono">{{ c.start_ms }}<div style="font-size:11px;color:#9ca3af">{{ formatAbsTime(c.start_ms) }}</div></td>
+            <td class="mono">{{ c.end_ms }}<div style="font-size:11px;color:#9ca3af">{{ formatAbsTime(c.end_ms) }}</div></td>
+            <td class="mono">{{ formatDuration(c.end_ms - c.start_ms) }}</td>
+            <td>
+              <el-input v-model="c.label" size="small" placeholder="（可选）" maxlength="64" />
+            </td>
+            <td>
+              <el-button size="small" @click="seekToMs(c.start_ms)">跳转</el-button>
+              <el-button size="small" type="danger" plain @click="removeClip(i)">删除</el-button>
+            </td>
+          </tr>
+          <tr v-if="!clips.length">
+            <td colspan="6" style="text-align:center;color:#9ca3af;padding:20px 0">
+              暂无已选段，使用上方[设为起点 / 设为终点 → 加入列表]添加
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="submit-bar">
+        <el-button type="primary" size="large"
+                   :loading="loading.submit"
+                   :disabled="!canSubmit"
+                   @click="submitClips">
+          提交送标（{{ clips.length }} 段）
+        </el-button>
+        <span v-if="!canSubmit && !loading.submit && clips.length"
+              class="hint">{{ validation.error || '请先解决校验错误' }}</span>
+        <span v-if="loading.submit" class="hint" style="color:#6b7280">
+          ffmpeg + LS 上传同步执行，可能耗时数十秒…
+        </span>
+      </div>
+    </div>
+
+    <!-- 提交结果 -->
+    <div v-if="result" class="card result-card">
+      <div class="card-title">
+        ④ 提交结果
+        <span class="badge" :class="result.failure_count === 0 ? 'badge-ok' : 'badge-warn'" style="margin-left:8px">
+          {{ result.success_count }} / {{ result.total }} 成功
+        </span>
+      </div>
+      <table class="clip-table">
+        <thead>
+          <tr>
+            <th style="width:36px">#</th>
+            <th>start_ms</th>
+            <th>end_ms</th>
+            <th style="width:80px">时长</th>
+            <th style="width:80px">状态</th>
+            <th>LS task_id</th>
+            <th>error_code / error</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(r, i) in result.clips" :key="i" :class="r.success ? '' : 'err-row'">
+            <td>{{ i + 1 }}</td>
+            <td class="mono">{{ r.start_ms }}</td>
+            <td class="mono">{{ r.end_ms }}</td>
+            <td class="mono">{{ r.duration_ms ? formatDuration(r.duration_ms) : '—' }}</td>
+            <td>
+              <span class="badge" :class="r.success ? 'badge-ok' : 'badge-err'">
+                {{ r.success ? '✅' : '❌' }}
+              </span>
+            </td>
+            <td class="mono">{{ r.label_studio_task_id || '—' }}</td>
+            <td>
+              <span v-if="r.error_code" style="color:#ef4444;font-weight:600">{{ r.error_code }}</span>
+              <div v-if="r.error" style="font-size:11px;color:#6b7280;margin-top:2px">{{ r.error }}</div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-if="result.job_dir" class="result-job-dir">
+        ⚠️ 部分段失败，临时 mp4 已保留于 <code>{{ result.job_dir }}</code>。<br />
+        可手动 <code>curl -F file=@clip_xxx.mp4 -H "Authorization: Token $LS_TOKEN" $LS_URL/api/projects/{{ result.project_id }}/import</code> 重传，<br />
+        或修复 LS 后直接重新点[提交送标]（段是幂等的，相同 start_ms/end_ms 会重新生成）。
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script>
+const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } = Vue;
+const { ElMessage, ElMessageBox } = ElementPlus;
+
+// 与后端 settings.lab_export_max_* 对齐；改后端默认值时同步改这里。
+const MAX_CLIP_MS  = 300_000;     // 5 min
+const MAX_TOTAL_MS = 1_800_000;   // 30 min
+const MAX_CLIPS    = 20;
+
+createApp({
+  setup() {
+    const apiBase = ref(localStorage.getItem('labApiBase') || window.location.origin);
+    const pendingApiBase = ref(apiBase.value);
+    const showSettings = ref(false);
+    function applySettings() {
+      apiBase.value = pendingApiBase.value.replace(/\/$/, '');
+      localStorage.setItem('labApiBase', apiBase.value);
+      showSettings.value = false;
+      fetchHealth();
+    }
+    function api(path) { return apiBase.value + path; }
+
+    // 表单
+    const form = reactive({ task_id: null, step_id: null, project_id: null });
+    const loading = reactive({ load: false, submit: false });
+    const loaded = ref(false);
+
+    // 健康
+    const health = reactive({ configured: false, reachable: false, error: null, label_studio_url: null, default_project_id: 0 });
+    async function fetchHealth() {
+      try {
+        const r = await fetch(api('/lab/health'));
+        const d = await r.json();
+        Object.assign(health, d);
+      } catch (e) {
+        Object.assign(health, { configured: false, reachable: false, error: String(e), label_studio_url: null });
+      }
+    }
+
+    // 时间轴 + 视频
+    const timeline = reactive({ start_ms: 0, end_ms: 0, duration_ms: 0, events: [] });
+    const videoEl = ref(null);
+    const stripEl = ref(null);
+    let hls = null;
+
+    const currentTimeSec = ref(0);
+    const currentAbsMs = computed(() =>
+      timeline.start_ms + Math.round(currentTimeSec.value * 1000)
+    );
+
+    function attachVideo() {
+      const v = videoEl.value;
+      if (!v) return;
+      v.addEventListener('timeupdate', () => { currentTimeSec.value = v.currentTime; });
+      v.addEventListener('seeked',     () => { currentTimeSec.value = v.currentTime; });
+      const m3u8 = api(`/traceback/task/${form.task_id}/playlist.m3u8?step_id=${form.step_id}&track=raw`);
+      if (hls) { hls.destroy(); hls = null; }
+      if (v.canPlayType('application/vnd.apple.mpegurl')) {
+        v.src = m3u8;
+      } else if (window.Hls && Hls.isSupported()) {
+        hls = new Hls();
+        hls.loadSource(m3u8);
+        hls.attachMedia(v);
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (data.fatal) ElMessage.error('视频加载失败: ' + (data.details || data.type));
+        });
+      } else {
+        ElMessage.error('当前浏览器不支持 HLS 播放');
+      }
+    }
+
+    function detachVideo() {
+      if (hls) { hls.destroy(); hls = null; }
+      if (videoEl.value) { videoEl.value.removeAttribute('src'); videoEl.value.load?.(); }
+    }
+
+    async function loadStep() {
+      if (!form.task_id || !form.step_id) {
+        ElMessage.warning('请填写 task_id 和 step_id');
+        return;
+      }
+      loading.load = true;
+      try {
+        await fetchHealth();
+        const r = await fetch(api(`/traceback/task/${form.task_id}/timeline?step_id=${form.step_id}`));
+        if (!r.ok) {
+          const txt = await r.text();
+          throw new Error(`timeline ${r.status}: ${txt.slice(0, 200)}`);
+        }
+        const d = await r.json();
+        if (!d.duration_ms) {
+          ElMessage.warning('该 step 没有 raw 段，请先确认录制是否完成');
+          return;
+        }
+        Object.assign(timeline, { start_ms: d.start_ms, end_ms: d.end_ms, duration_ms: d.duration_ms, events: d.events || [] });
+        loaded.value = true;
+        result.value = null;
+        clips.value = [];
+        clearPending();
+        await nextTick();
+        attachVideo();
+      } catch (e) {
+        ElMessage.error('加载失败: ' + e.message);
+      } finally {
+        loading.load = false;
+      }
+    }
+
+    function reset() {
+      detachVideo();
+      loaded.value = false;
+      clips.value = [];
+      clearPending();
+      result.value = null;
+      Object.assign(timeline, { start_ms: 0, end_ms: 0, duration_ms: 0, events: [] });
+    }
+
+    // 时间轴定位
+    function rangeStyle(startMs, endMs) {
+      const left = ((startMs - timeline.start_ms) / timeline.duration_ms) * 100;
+      const width = ((endMs - startMs) / timeline.duration_ms) * 100;
+      return { left: `${Math.max(0, left)}%`, width: `${Math.max(0.2, width)}%` };
+    }
+    function markerStyle(tsMs) {
+      const left = ((tsMs - timeline.start_ms) / timeline.duration_ms) * 100;
+      return { left: `calc(${Math.max(0, Math.min(100, left))}% - 1px)` };
+    }
+    const cursorStyle = computed(() => {
+      if (!timeline.duration_ms) return { left: '0%' };
+      const p = ((currentAbsMs.value - timeline.start_ms) / timeline.duration_ms) * 100;
+      return { left: `calc(${Math.max(0, Math.min(100, p))}% - 1px)` };
+    });
+    function alarmTooltip(ev) {
+      return `[${ev.severity || '?'}] ${ev.alarm_type || ''}\n${ev.message || ''}\n@${formatAbsTime(ev.ts_ms)}`;
+    }
+    function seekToMs(absMs) {
+      if (!videoEl.value || !timeline.duration_ms) return;
+      const sec = Math.max(0, (absMs - timeline.start_ms) / 1000);
+      videoEl.value.currentTime = sec;
+    }
+    function seekFromStrip(e) {
+      const rect = stripEl.value.getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / rect.width;
+      seekToMs(timeline.start_ms + pct * timeline.duration_ms);
+    }
+
+    // 待选段
+    const pending = reactive({ start_ms: null, end_ms: null });
+    function markStart() { pending.start_ms = currentAbsMs.value; }
+    function markEnd()   { pending.end_ms   = currentAbsMs.value; }
+    function clearPending() { pending.start_ms = null; pending.end_ms = null; }
+
+    const pendingValid = computed(() => !!pendingError.value === false && pending.start_ms !== null && pending.end_ms !== null);
+    const pendingError = computed(() => {
+      if (pending.start_ms === null || pending.end_ms === null) return '';
+      if (pending.end_ms <= pending.start_ms) return '终点必须晚于起点';
+      const dur = pending.end_ms - pending.start_ms;
+      if (dur > MAX_CLIP_MS) return `单段超过上限 ${formatDuration(MAX_CLIP_MS)}`;
+      // 重叠预判
+      for (const c of clips.value) {
+        if (pending.start_ms < c.end_ms && pending.end_ms > c.start_ms) return `与已有段 [${c.start_ms},${c.end_ms}] 重叠`;
+      }
+      return '';
+    });
+    const pendingDurationLabel = computed(() => {
+      if (pending.start_ms === null || pending.end_ms === null) return '—';
+      const d = pending.end_ms - pending.start_ms;
+      return d > 0 ? formatDuration(d) : '—';
+    });
+
+    // 已选段
+    let clipKeySeq = 0;
+    const clips = ref([]);
+    function addClip() {
+      if (!pendingValid.value) return;
+      if (clips.value.length >= MAX_CLIPS) {
+        ElMessage.warning(`段数已达上限 ${MAX_CLIPS}`);
+        return;
+      }
+      clips.value.push({
+        _key: ++clipKeySeq,
+        start_ms: pending.start_ms,
+        end_ms: pending.end_ms,
+        label: '',
+        _overlap: false,
+      });
+      clips.value.sort((a, b) => a.start_ms - b.start_ms);
+      clearPending();
+    }
+    function removeClip(i) { clips.value.splice(i, 1); }
+    async function clearAll() {
+      try { await ElMessageBox.confirm('清空全部已选段？', '确认', { type: 'warning' }); }
+      catch { return; }
+      clips.value = [];
+    }
+
+    // 总校验（包含重叠 / 总时长 / 数量）
+    const totalDurationMs = computed(() => clips.value.reduce((s, c) => s + (c.end_ms - c.start_ms), 0));
+    const validation = computed(() => {
+      if (clips.value.length === 0) return { ok: false, error: '至少添加 1 段' };
+      if (clips.value.length > MAX_CLIPS) return { ok: false, error: `段数 ${clips.value.length} > ${MAX_CLIPS}` };
+      const sorted = [...clips.value].sort((a, b) => a.start_ms - b.start_ms);
+      for (let i = 0; i < sorted.length; i++) {
+        const c = sorted[i];
+        if (c.end_ms <= c.start_ms) return { ok: false, error: `第 ${i + 1} 段 end_ms <= start_ms` };
+        if ((c.end_ms - c.start_ms) > MAX_CLIP_MS) return { ok: false, error: `第 ${i + 1} 段超过 ${formatDuration(MAX_CLIP_MS)}` };
+        if (i > 0 && c.start_ms < sorted[i - 1].end_ms) return { ok: false, error: `第 ${i + 1} 段与上一段重叠` };
+      }
+      if (totalDurationMs.value > MAX_TOTAL_MS) return { ok: false, error: `总时长 ${formatDuration(totalDurationMs.value)} > ${formatDuration(MAX_TOTAL_MS)}` };
+      return { ok: true, error: '' };
+    });
+    // 同步给 row 高亮（仅重叠红条）
+    watch(clips, (arr) => {
+      const sorted = [...arr].sort((a, b) => a.start_ms - b.start_ms);
+      arr.forEach(c => { c._overlap = false; });
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i].start_ms < sorted[i - 1].end_ms) {
+          sorted[i]._overlap = true;
+          sorted[i - 1]._overlap = true;
+        }
+      }
+    }, { deep: true });
+
+    const canSubmit = computed(() =>
+      validation.value.ok && health.configured && health.reachable && !loading.submit
+    );
+
+    // 提交
+    const result = ref(null);
+    async function submitClips() {
+      if (!canSubmit.value) return;
+      loading.submit = true;
+      result.value = null;
+      try {
+        const body = {
+          task_id: form.task_id,
+          step_id: form.step_id,
+          clips: clips.value.map(c => ({
+            start_ms: c.start_ms,
+            end_ms: c.end_ms,
+            label: c.label?.trim() || null,
+          })),
+          keep_artifacts_on_failure: true,
+        };
+        if (form.project_id) body.project_id = form.project_id;
+
+        const r = await fetch(api('/lab/submit'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const msg = d?.detail?.detail || d?.detail?.error || d?.detail || `HTTP ${r.status}`;
+          ElMessage.error('提交失败: ' + (typeof msg === 'string' ? msg : JSON.stringify(msg)));
+          return;
+        }
+        result.value = d;
+        if (d.failure_count === 0) ElMessage.success(`全部 ${d.success_count} 段送标成功`);
+        else ElMessage.warning(`${d.success_count}/${d.total} 段成功，${d.failure_count} 段失败`);
+      } catch (e) {
+        ElMessage.error('网络异常: ' + e.message);
+      } finally {
+        loading.submit = false;
+      }
+    }
+
+    // 格式化
+    function formatAbsTime(ms) {
+      if (!ms) return '—';
+      const d = new Date(ms);
+      const pad = (n, w = 2) => String(n).padStart(w, '0');
+      return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+    }
+    function formatDuration(ms) {
+      if (!ms || ms < 0) return '—';
+      if (ms < 1000) return `${ms} ms`;
+      const s = ms / 1000;
+      if (s < 60) return `${s.toFixed(1)} s`;
+      const m = Math.floor(s / 60), rs = (s - m * 60).toFixed(1);
+      return `${m} m ${rs} s`;
+    }
+
+    onMounted(fetchHealth);
+    onBeforeUnmount(detachVideo);
+
+    return {
+      apiBase, pendingApiBase, showSettings, applySettings,
+      form, loading, loaded, health,
+      timeline, videoEl, stripEl, currentAbsMs,
+      rangeStyle, markerStyle, cursorStyle, alarmTooltip,
+      seekToMs, seekFromStrip,
+      pending, pendingValid, pendingError, pendingDurationLabel,
+      markStart, markEnd, clearPending, addClip,
+      clips, totalDurationMs, validation, canSubmit,
+      removeClip, clearAll,
+      result, submitClips,
+      loadStep, reset,
+      formatAbsTime, formatDuration,
+      MAX_CLIP_MS, MAX_TOTAL_MS, MAX_CLIPS,
+    };
+  },
+}).use(ElementPlus).mount('#app');
+</script>
+</body>
+</html>

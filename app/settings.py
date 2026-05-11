@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     traceback_context_before: int = 1        # 告警证据：触发段之前的上下文段数
     traceback_context_after: int = 2         # 告警证据：触发段之后的上下文段数
 
+    # Lab / Label Studio 视频段导出
+    label_studio_url: str = ""                # LS 服务器 base URL，如 http://10.176.122.22:8080
+    label_studio_token: str = ""              # LS 个人 API token（Authorization: Token <...>）
+    label_studio_default_project_id: int = 0  # 默认 project_id；0 表示未配置（请求需显式传 project_id）
+    lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage.base_dir}/.lab_exports
+    lab_export_ffmpeg_preset: str = "veryfast"
+    lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
+    lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
+    lab_export_max_clips_per_submit: int = 20
+
     @property
     def allowed_ips_set(self) -> frozenset:
         """解析 gateway_allowed_ips 为 frozenset，空字符串返回空集合（不限制）"""
