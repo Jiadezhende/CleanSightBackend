@@ -327,7 +327,7 @@ createApp({
     const health = reactive({ configured: false, reachable: false, error: null, label_studio_url: null, default_project_id: 0 });
     async function fetchHealth() {
       try {
-        const r = await fetch(api('/lab/health'));
+        const r = await fetch(api('/lab-f3m8/health'));
         const d = await r.json();
         Object.assign(health, d);
       } catch (e) {
@@ -542,7 +542,7 @@ createApp({
         };
         if (form.project_id) body.project_id = form.project_id;
 
-        const r = await fetch(api('/lab/submit'), {
+        const r = await fetch(api('/lab-f3m8/submit'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),

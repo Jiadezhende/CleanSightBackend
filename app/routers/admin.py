@@ -1,6 +1,6 @@
 """
 运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针
-路由前缀：/admin
+路由前缀：/admin-f3m8（路径混淆，防自动扫描器命中）
 告警查询直接使用 GET /task/{task_id}/alarms（已有双源路由实现）
 """
 
@@ -13,7 +13,7 @@ from app.services.client.manager import client_manager
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(prefix="/admin-f3m8", tags=["admin"])
 
 
 # ---------------------------------------------------------------------------

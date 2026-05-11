@@ -1,5 +1,5 @@
 """
-Lab API（`/lab/*`）
+Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 
 让操作员在一个 step 的 raw 整段视频上选 N 段不重叠的 [start_ms, end_ms]，
 后端剪出对应的 mp4 并提交到 Label Studio 创建标注任务。
@@ -38,7 +38,7 @@ from app.services.lab import (
 from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
 from app.utils.exceptions import NotFoundError, ValidationError
 
-router = APIRouter(prefix="/lab", tags=["lab"])
+router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
 logger = logging.getLogger(__name__)
 
 

@@ -97,10 +97,10 @@ app.include_router(ai.router)
 app.include_router(task.router)
 app.include_router(traceback_router.router)  # 追溯 API（/traceback/*）
 app.include_router(media.router)  # 媒体访问层（/media/*，token 化鉴权）
-app.include_router(lab.router)  # Lab 导出 & Label Studio 送标（/lab/*）
-app.include_router(admin.router)  # 运维 Admin API（/admin/*）
-app.mount("/admin/ui", StaticFiles(directory="app/static/admin", html=True), name="admin-ui")
-app.mount("/lab/ui", StaticFiles(directory="app/static/lab", html=True), name="lab-ui")
+app.include_router(lab.router)  # Lab 导出 & Label Studio 送标（/lab-f3m8/*）
+app.include_router(admin.router)  # 运维 Admin API（/admin-f3m8/*）
+app.mount("/admin-f3m8/ui", StaticFiles(directory="app/static/admin", html=True), name="admin-ui")
+app.mount("/lab-f3m8/ui", StaticFiles(directory="app/static/lab", html=True), name="lab-ui")
 
 
 # ============================================================================

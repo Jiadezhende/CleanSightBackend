@@ -65,7 +65,6 @@
     .tag-running { color: #10b981; background: #d1fae5; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
     .tag-paused  { color: #6b7280; background: #f3f4f6; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
     .tag-idle    { color: #9ca3af; background: #f9fafb; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
-    .settings-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
     .el-tab-pane { padding-top: 4px; }
     .refresh-info { font-size: 11px; color: #9ca3af; }
     .sparkline { display: inline-block; vertical-align: middle; }
@@ -80,21 +79,8 @@
     <div class="header-title">&#9673; CleanSight 运维面板</div>
     <div class="header-right">
       <span class="refresh-info">后端: {{ apiBase }}</span>
-      <el-button size="small" @click="showSettings = true" type="primary" plain>设置</el-button>
     </div>
   </div>
-
-  <!-- Settings Dialog -->
-  <el-dialog v-model="showSettings" title="后端连接设置" width="420px">
-    <div class="settings-row">
-      <span style="flex-shrink:0;font-size:13px;color:#374151">Backend URL</span>
-      <el-input v-model="pendingApiBase" placeholder="http://192.168.1.100:8000" style="flex:1" />
-    </div>
-    <template #footer>
-      <el-button @click="showSettings = false">取消</el-button>
-      <el-button type="primary" @click="applySettings">应用并刷新</el-button>
-    </template>
-  </el-dialog>
 
   <div class="main">
     <el-tabs v-model="activeTab" type="card">
@@ -348,9 +334,9 @@
             <div>
               <div style="font-size:12px;color:#6b7280;margin-bottom:4px">端点</div>
               <el-select v-model="ltConfig.endpoint" style="width:220px">
-                <el-option label="/admin/ping" value="/admin/ping" />
+                <el-option label="/admin-f3m8/ping" value="/admin-f3m8/ping" />
                 <el-option label="/health/status" value="/health/status" />
-                <el-option label="/admin/overview" value="/admin/overview" />
+                <el-option label="/admin-f3m8/overview" value="/admin-f3m8/overview" />
                 <el-option label="/metrics" value="/metrics" />
                 <el-option label="自定义..." value="__custom__" />
               </el-select>
@@ -478,20 +464,12 @@ const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextT
 
 createApp({
   setup() {
-    // ─── 设置 ───
-    const apiBase = ref(localStorage.getItem('adminApiBase') || window.location.origin);
-    const pendingApiBase = ref(apiBase.value);
-    const showSettings = ref(false);
+    // ─── 后端地址 ───
+    // 固定使用当前页面的 origin，不再支持前端配置
+    const apiBase = window.location.origin;
 
-    function applySettings() {
-      apiBase.value = pendingApiBase.value.replace(/\/$/, '');
-      localStorage.setItem('adminApiBase', apiBase.value);
-      showSettings.value = false;
-      fetchAll();
-    }
-
-    function api(path) { return apiBase.value + path; }
-    function wsApi(path) { return apiBase.value.replace(/^http/, 'ws') + path; }
+    function api(path) { return apiBase + path; }
+    function wsApi(path) { return apiBase.replace(/^http/, 'ws') + path; }
 
     // ─── Tab ───
     const activeTab = ref('overview');
@@ -504,7 +482,7 @@ createApp({
 
     async function fetchOverview() {
       try {
-        const r = await fetch(api('/admin/overview'));
+        const r = await fetch(api('/admin-f3m8/overview'));
         const d = await r.json();
         Object.assign(overview, d);
         overviewTime.value = new Date(d.timestamp * 1000).toLocaleTimeString();
@@ -596,7 +574,7 @@ createApp({
     async function fetchMetrics() {
       try {
         const [mj, rm] = await Promise.all([
-          fetch(api('/admin/metrics/json')).then(r => r.json()),
+          fetch(api('/admin-f3m8/metrics/json')).then(r => r.json()),
           fetch(api('/metrics')).then(r => r.text()),
         ]);
         Object.assign(metricsJson, mj);
@@ -719,7 +697,7 @@ createApp({
     }
 
     // ─── 延迟测试 ───
-    const ltConfig = reactive({ endpoint: '/admin/ping', custom: '', total: 100, concurrency: 5 });
+    const ltConfig = reactive({ endpoint: '/admin-f3m8/ping', custom: '', total: 100, concurrency: 5 });
     const ltRunning = ref(false);
     const ltResults = reactive({ latencies: [], errors: 0 });
     const distChartRef = ref(null);
@@ -817,7 +795,7 @@ createApp({
     });
 
     return {
-      apiBase, pendingApiBase, showSettings, applySettings,
+      apiBase,
       activeTab,
       overview, overviewTime, health, barStyle, statusTag,
       selectedClient, liveFrame, liveConnected, liveClientInfo, liveFps, liveAlarms,
