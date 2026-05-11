@@ -335,8 +335,24 @@ async def get_task_playlist(
             resource_id=f"task={task_id},step={step_id},track={track}",
         )
 
+    # HLS fMP4 段需要 init segment 作为 codec init。每 step 一份共享。
+    task_dir = finder.task_dir(task_id, step_id)
+    init_path = task_dir / "init.mp4"
+    if not init_path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "HLS init segment missing",
+                "detail": (
+                    f"init.mp4 not found for task {task_id} step {step_id}. "
+                    "Historical segments must be migrated via "
+                    "scripts/transcode_segments_to_h264.py before HLS playback."
+                ),
+            },
+        )
+
     # 从落盘 playlist 取精确时长，缺失项用 ts_us 间隔估算
-    playlist_path = finder.task_dir(task_id, step_id) / f"{track}_playlist.m3u8"
+    playlist_path = task_dir / f"{track}_playlist.m3u8"
     real_durations = _parse_existing_playlist(playlist_path)
 
     # 默认时长：取持久化配置的 segment_duration（默认 10s）
@@ -355,12 +371,22 @@ async def get_task_playlist(
     )
 
     base_url = str(request.base_url).rstrip("/")
+
+    # init segment token：固定指向该 step 的 init.mp4
+    init_token = MediaToken.default().sign(
+        task_id=task_id,
+        step_id=step_id,
+        filename="init.mp4",
+        kind="init",
+    )
+
     lines: List[str] = [
         "#EXTM3U",
-        "#EXT-X-VERSION:3",
+        "#EXT-X-VERSION:7",
         "#EXT-X-PLAYLIST-TYPE:VOD",
         f"#EXT-X-TARGETDURATION:{target_duration}",
         "#EXT-X-MEDIA-SEQUENCE:0",
+        f'#EXT-X-MAP:URI="{base_url}/media/init/{init_token}"',
     ]
     for s in segs:
         dur = real_durations.get(s.filename, estimated.get(s.filename, default_dur))

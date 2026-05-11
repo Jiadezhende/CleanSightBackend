@@ -5,7 +5,8 @@
 URL 不暴露文件系统路径，避免越权枚举。
 
 路由：
-    GET /media/segment/{token}    流式返回 MP4 段
+    GET /media/segment/{token}    流式返回 MP4 段（fMP4 fragment）
+    GET /media/init/{token}       返回 HLS fMP4 init segment（step 级共享）
     GET /media/keypoints/{token}  返回 keypoints JSON
 
 Token 校验由 MediaToken（HMAC-SHA256 + 短 TTL）完成。
@@ -71,6 +72,29 @@ async def get_segment(token: str = PathParam(..., description="media segment tok
         media_type="video/mp4",
         headers={
             "Cache-Control": "private, max-age=60",
+            "Content-Disposition": "inline",
+        },
+    )
+
+
+@router.get("/init/{token}")
+async def get_init(token: str = PathParam(..., description="media init segment token")):
+    """返回 HLS fMP4 init segment（每 step 一份共享）。"""
+    try:
+        payload = MediaToken.default().verify(token, kind="init")
+    except MediaTokenError as e:
+        logger.info("[Media] Init token rejected: %s", e)
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    if payload.filename != "init.mp4":
+        raise HTTPException(status_code=400, detail="Token does not point to init segment")
+
+    path = _resolve_media_path(payload.task_id, payload.step_id, payload.filename)
+    return FileResponse(
+        path=str(path),
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": "private, max-age=3600",
             "Content-Disposition": "inline",
         },
     )

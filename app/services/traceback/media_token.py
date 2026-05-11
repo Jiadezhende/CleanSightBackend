@@ -28,8 +28,8 @@ from typing import Literal, Optional
 logger = logging.getLogger(__name__)
 
 
-MediaKind = Literal["segment", "keypoints"]
-_VALID_KINDS = ("segment", "keypoints")
+MediaKind = Literal["segment", "keypoints", "init"]
+_VALID_KINDS = ("segment", "keypoints", "init")
 
 
 class MediaTokenError(Exception):

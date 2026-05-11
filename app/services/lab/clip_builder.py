@@ -7,7 +7,12 @@ ClipBuilder — 从 raw 段拼接出 ms 精度的 mp4 clip。
 实现思路：
 1. 复用 SegmentFinder.list_segments(track='raw') 拿到该 step 的全部 raw 段（按 ts_us 升序）
 2. 过滤出与 [start_ms, end_ms] 时间区间重叠的段
-3. 用 ffmpeg concat demuxer 拼接 + -ss/-to 精确裁剪（重编码 libx264，关键帧无关）
+3. 在 step 目录写一个临时 m3u8（EXT-X-MAP 引 init.mp4 + 选中段列表），喂给 ffmpeg HLS demuxer
+4. 输出端用 -ss/-to 精确裁剪（重编码 libx264，关键帧无关）
+
+为什么不用 `-f concat`：raw 段是 fMP4 fragment（无 moov），concat demuxer 单独 demux 时
+找不到 codec init 会失败。HLS demuxer 通过 EXT-X-MAP 先吃 init.mp4 再串 fragment，能正确
+还原拼接流。
 
 依赖：ffmpeg 在 PATH 上（settings.ffmpeg_path 可覆写）
 """
@@ -18,7 +23,6 @@ import logging
 import secrets
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -260,7 +264,7 @@ class ClipBuilder:
     def _run_ffmpeg(
         self, spec: ClipSpec, segs: List[SegmentRef], output_path: Path
     ) -> None:
-        """跑一次 ffmpeg concat + 精确裁剪。"""
+        """跑一次 ffmpeg HLS 拼接 + 精确裁剪。"""
         # offset 是相对于「拼接后流」的起点（即第一段的 ts_us）
         first_seg_ts_us = segs[0].ts_us
         offset_us = spec.start_ms * 1000 - first_seg_ts_us
@@ -274,22 +278,37 @@ class ClipBuilder:
         duration_s = spec.duration_ms / 1000.0
         end_s = offset_s + duration_s
 
-        # 写 concat list（沿用 scripts/video_export/concat_and_upload.py 的转义方式）
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8",
-            dir=str(output_path.parent),
-        ) as tmp:
-            for s in segs:
-                abs_path = s.path.resolve()
-                escaped = str(abs_path).replace("'", "'\\''")
-                tmp.write(f"file '{escaped}'\n")
-            concat_list = Path(tmp.name)
+        step_dir = segs[0].path.parent
+        init_path = step_dir / "init.mp4"
+        if not init_path.exists():
+            raise ClipBuildError(
+                f"init.mp4 missing in step dir: {step_dir} "
+                f"(fMP4 fragment 段需要 EXT-X-MAP 才能解码)"
+            )
+
+        # 临时 m3u8 落在 step 目录，让 EXT-X-MAP/EXTINF 的相对 URI 能解析到 init.mp4 与各段
+        nonce = secrets.token_hex(4)
+        tmp_m3u8 = step_dir / f".clip_{nonce}.m3u8"
+        ext_inf_s = self._default_seg_dur_us / 1_000_000.0
+
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:7",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+            f"#EXT-X-TARGETDURATION:{int(ext_inf_s) + 1}",
+            '#EXT-X-MAP:URI="init.mp4"',
+        ]
+        for s in segs:
+            lines.append(f"#EXTINF:{ext_inf_s:.3f},")
+            lines.append(s.path.name)
+        lines.append("#EXT-X-ENDLIST")
+        tmp_m3u8.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         cmd = [
             self._ffmpeg,
             "-y", "-loglevel", "error",
-            "-f", "concat", "-safe", "0",
-            "-i", str(concat_list),
+            "-allowed_extensions", "ALL",
+            "-i", str(tmp_m3u8),
             "-ss", f"{offset_s:.3f}",
             "-to", f"{end_s:.3f}",
             "-c:v", "libx264",
@@ -321,4 +340,4 @@ class ClipBuilder:
                 f"ffmpeg binary not found: {self._ffmpeg}"
             ) from e
         finally:
-            concat_list.unlink(missing_ok=True)
+            tmp_m3u8.unlink(missing_ok=True)

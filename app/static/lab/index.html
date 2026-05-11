@@ -20,6 +20,13 @@
     .card-title { font-size: 14px; font-weight: 600; color: #1f2937; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
     .form-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .form-row .field-label { font-size: 12px; color: #6b7280; }
+    .plain-input {
+      height: 32px; padding: 0 11px; border: 1px solid #dcdfe6; border-radius: 4px;
+      font-size: 14px; outline: none; box-sizing: border-box; color: #303133;
+      transition: border-color .2s;
+    }
+    .plain-input:focus { border-color: #409eff; }
+    .plain-input::placeholder { color: #a8abb2; }
     .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; }
     .badge-ok { color: #10b981; background: #d1fae5; }
     .badge-err { color: #ef4444; background: #fee2e2; }
@@ -78,12 +85,12 @@
     <div class="card">
       <div class="card-title">① 选择步骤</div>
       <div class="form-row">
-        <span class="field-label">task_id</span>
-        <el-input-number v-model="form.task_id" :min="1" :controls="false" style="width:120px" />
-        <span class="field-label">step_id</span>
-        <el-input-number v-model="form.step_id" :min="1" :controls="false" style="width:100px" />
-        <span class="field-label">project_id <small style="color:#9ca3af">(可选)</small></span>
-        <el-input-number v-model="form.project_id" :min="1" :controls="false" placeholder="使用默认" style="width:120px" />
+        <label class="field-label">task_id</label>
+        <input v-model.number="form.task_id" placeholder="必填" class="plain-input" style="width:160px" />
+        <label class="field-label">step_id</label>
+        <input v-model.number="form.step_id" placeholder="必填" class="plain-input" style="width:120px" />
+        <label class="field-label">project_id <small style="color:#9ca3af">(可选)</small></label>
+        <input v-model.number="form.project_id" placeholder="使用默认" class="plain-input" style="width:140px" />
         <el-button type="primary" :loading="loading.load" @click="loadStep">加载</el-button>
         <el-button v-if="loaded" @click="reset">重置</el-button>
       </div>
@@ -333,17 +340,18 @@ createApp({
       v.addEventListener('seeked',     () => { currentTimeSec.value = v.currentTime; });
       const m3u8 = api(`/traceback/task/${form.task_id}/playlist.m3u8?step_id=${form.step_id}&track=raw`);
       if (hls) { hls.destroy(); hls = null; }
-      if (v.canPlayType('application/vnd.apple.mpegurl')) {
-        v.src = m3u8;
-      } else if (window.Hls && Hls.isSupported()) {
+      if (window.Hls && Hls.isSupported()) {
         hls = new Hls();
         hls.loadSource(m3u8);
         hls.attachMedia(v);
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data.fatal) ElMessage.error('视频加载失败: ' + (data.details || data.type));
         });
+      } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+        // 仅 Safari / iOS 原生 HLS 时走这里
+        v.src = m3u8;
       } else {
-        ElMessage.error('当前浏览器不支持 HLS 播放');
+        ElMessage.error('当前浏览器不支持 HLS 播放（hls.js 未加载，可能 CDN 被墙）');
       }
     }
 

@@ -53,15 +53,34 @@ class HLSPersistenceStrategy:
             return self._dir_locks[key]
 
     @staticmethod
-    def _transcode_to_browser_mp4(path: Path) -> None:
-        """将 cv2 写出的 mp4v 段转码为浏览器兼容的 H.264 + faststart。
+    def _transcode_to_fmp4_segment(path: Path) -> None:
+        """将 cv2 写出的 mp4v 段转码为 HLS-ready fMP4 fragment，并写入 step 级 init.mp4。
 
-        cv2.VideoWriter 用 mp4v (MPEG-4 Part 2) 写出的文件浏览器 <video> 标签
-        无法稳定播放，且 moov atom 在文件尾部。本函数原地替换为 H.264 + faststart。
+        Pipeline：cv2 mp4v → ffmpeg HLS muxer → init.mp4（首段）+ fMP4 fragment（原地替换）。
 
-        失败时保留原文件并打 warning，不抛异常 —— 主流程的可用性优先于浏览器可播放性。
+        - 普通 MP4（moov+mdat 整体）无法被 hls.js 在 m3u8 中作为段播放，会 fragParsingError
+        - 改用 `-hls_segment_type fmp4` 让 ffmpeg 产出 init segment（ftyp+moov）+
+          fragment（ftyp+moof+mdat），符合 HLS 协议要求
+        - init.mp4 每 step 一份共享：首次写入时落盘到 step 目录，已存在则丢弃产出物
+          （同 step 同摄像头、同编码参数，SPS/PPS 一致，可安全复用）
+
+        失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
-        tmp_path = path.with_suffix(path.suffix + ".transcode.tmp")
+        target_dir = path.parent
+        init_path = target_dir / "init.mp4"
+
+        stem = path.stem
+        tmp_init = target_dir / f".{stem}.tmp_init.mp4"
+        tmp_segment = target_dir / f".{stem}.tmp_seg.mp4"
+        tmp_playlist = target_dir / f".{stem}.tmp.m3u8"
+
+        def _cleanup_tmp() -> None:
+            for p in (tmp_init, tmp_segment, tmp_playlist):
+                p.unlink(missing_ok=True)
+
+        # 预清理可能残留的同名临时文件
+        _cleanup_tmp()
+
         cmd = [
             settings.ffmpeg_path,
             "-y",
@@ -72,9 +91,14 @@ class HLSPersistenceStrategy:
             "-crf", "23",
             "-pix_fmt", "yuv420p",
             "-an",
-            "-movflags", "+faststart",
-            "-f", "mp4",
-            str(tmp_path),
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", tmp_init.name,
+            "-hls_segment_filename", str(tmp_segment),
+            "-hls_time", "99999",
+            "-hls_list_size", "0",
+            "-hls_flags", "temp_file",
+            "-f", "hls",
+            str(tmp_playlist),
         ]
         try:
             result = subprocess.run(
@@ -85,25 +109,42 @@ class HLSPersistenceStrategy:
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.warning(
-                "[HLS] ffmpeg transcode skipped (%s): %s — keeping mp4v file",
+                "[HLS] ffmpeg fmp4 transcode skipped (%s): %s — keeping mp4v file",
                 type(e).__name__, path,
             )
-            tmp_path.unlink(missing_ok=True)
+            _cleanup_tmp()
             return
 
-        if result.returncode != 0 or not tmp_path.exists():
+        if result.returncode != 0 or not tmp_segment.exists():
             logger.warning(
-                "[HLS] ffmpeg transcode failed (rc=%s): %s\nstderr: %s",
+                "[HLS] ffmpeg fmp4 transcode failed (rc=%s): %s\nstderr: %s",
                 result.returncode, path, result.stderr.strip(),
             )
-            tmp_path.unlink(missing_ok=True)
+            _cleanup_tmp()
             return
 
+        # init.mp4 落盘：仅当 step 目录尚无 init 时
+        if tmp_init.exists():
+            if not init_path.exists():
+                try:
+                    os.replace(tmp_init, init_path)
+                except OSError as e:
+                    logger.warning(
+                        "[HLS] failed to install init.mp4 %s: %s", init_path, e
+                    )
+                    tmp_init.unlink(missing_ok=True)
+            else:
+                tmp_init.unlink(missing_ok=True)
+
+        # fragment 原地替换原 mp4v 段文件
         try:
-            os.replace(tmp_path, path)
+            os.replace(tmp_segment, path)
         except OSError as e:
-            logger.warning("[HLS] failed to replace transcoded file %s: %s", path, e)
-            tmp_path.unlink(missing_ok=True)
+            logger.warning("[HLS] failed to replace segment %s: %s", path, e)
+            tmp_segment.unlink(missing_ok=True)
+
+        # 临时 playlist 不再需要（由 persist_segment 自己维护）
+        tmp_playlist.unlink(missing_ok=True)
 
     def persist_segment(
         self, task_id: int, step_id: int, segment_type: str, frames: List[FrameData]
@@ -177,7 +218,7 @@ class HLSPersistenceStrategy:
                 retryable=True,
             ) from e
 
-        self._transcode_to_browser_mp4(raw_segment_path)
+        self._transcode_to_fmp4_segment(raw_segment_path)
 
         # 2. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
         if len(frames) > 1:
@@ -192,7 +233,12 @@ class HLSPersistenceStrategy:
             try:
                 if not raw_playlist_path.exists():
                     with raw_playlist_path.open("w") as f:
-                        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+                        f.write(
+                            "#EXTM3U\n"
+                            "#EXT-X-VERSION:7\n"
+                            "#EXT-X-TARGETDURATION:10\n"
+                            '#EXT-X-MAP:URI="init.mp4"\n'
+                        )
                 with raw_playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n")
                     f.write(f"{raw_segment_path.name}\n")
@@ -256,7 +302,7 @@ class HLSPersistenceStrategy:
                 retryable=True,
             ) from e
 
-        self._transcode_to_browser_mp4(segment_path)
+        self._transcode_to_fmp4_segment(segment_path)
 
         # 2. 写keypoints JSON
         keypoints_path = target_dir / f"keypoints_{int(start_ts * 1e6)}.json"
@@ -295,7 +341,12 @@ class HLSPersistenceStrategy:
             try:
                 if not playlist_path.exists():
                     with playlist_path.open("w") as f:
-                        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n")
+                        f.write(
+                            "#EXTM3U\n"
+                            "#EXT-X-VERSION:7\n"
+                            "#EXT-X-TARGETDURATION:10\n"
+                            '#EXT-X-MAP:URI="init.mp4"\n'
+                        )
                 with playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n")
                     f.write(f"{segment_path.name}\n")

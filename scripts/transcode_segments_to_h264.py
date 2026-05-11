@@ -1,20 +1,24 @@
 """
-批量转码历史 mp4 段为 H.264 + faststart（浏览器兼容）
+批量升级历史 mp4 段为 HLS-ready fMP4 + 生成 step 级 init.mp4 + 重写 playlist 头
 
-背景：早期版本用 cv2.VideoWriter + fourcc("mp4v") 写出的 MPEG-4 Part 2 段，
-浏览器 <video> 标签无法稳定播放，且 moov atom 在文件尾部。新版写入侧已自动
-转码，但历史落盘文件仍是 mp4v。本脚本就地转换指定 task_id 下所有 mp4。
+背景：
+- 早期段是 cv2 mp4v（MPEG-4 Part 2），后来升级为 H.264 普通 MP4 + faststart
+- 当前 hls.js 走 m3u8 播放时报 fragParsingError —— HLS 要求 MP4 段必须是 fragmented MP4
+- 本脚本把任意历史 mp4（mp4v / h264 普通 MP4）就地升级为 fMP4，并按 step 写一份共享
+  init.mp4，最后重写 m3u8 头（升 VERSION:7 + 插入 #EXT-X-MAP）
 
 策略：
-- 串行处理（避免占满 CPU），用 ffprobe 探测 codec_name 跳过已是 h264 的文件
-- 转出到 .transcode.tmp 后原子替换原文件
-- 单文件失败仅 WARN 并继续，不中断批次
+- 按 step 目录维度迁移（外层 task_id，内层 step_id）
+- 同 step 内所有段共享一份 init.mp4：第一个段产出时落盘，后续段产出的 init 丢弃
+- 幂等：step 目录已存在 init.mp4 且 playlist 已含 #EXT-X-MAP 则跳过（除非 --force）
+- 单段失败仅 WARN 并继续，不中断批次
 
 用法：
     python -m scripts.transcode_segments_to_h264 1778293239052
     python -m scripts.transcode_segments_to_h264 1778293239052 1778293240000
     python -m scripts.transcode_segments_to_h264 --base-dir /data/db 1778293239052
     python -m scripts.transcode_segments_to_h264 --dry-run 1778293239052
+    python -m scripts.transcode_segments_to_h264 --force 1778293239052
 """
 
 from __future__ import annotations
@@ -22,10 +26,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger("transcode_segments")
 
@@ -48,101 +53,284 @@ def _resolve_ffmpeg() -> str:
         return "ffmpeg"
 
 
-def _probe_codec(ffprobe_bin: str, path: Path) -> Optional[str]:
-    """返回 video stream 的 codec_name；ffprobe 失败返回 None。"""
-    cmd = [
-        ffprobe_bin,
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=codec_name",
-        "-of", "default=nw=1:nk=1",
-        str(path),
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        logger.warning("ffprobe failed (%s): %s", type(e).__name__, path)
-        return None
-    if result.returncode != 0:
-        logger.warning("ffprobe rc=%s: %s\nstderr: %s", result.returncode, path, result.stderr.strip())
-        return None
-    return result.stdout.strip() or None
+def _transcode_segment_to_fmp4(
+    ffmpeg_bin: str,
+    segment_path: Path,
+    init_path: Path,
+    capture_init: bool,
+) -> bool:
+    """就地把一个段升级为 fMP4，必要时同时产出 init.mp4。
 
+    - capture_init=True 且 init_path 不存在时，把 ffmpeg 产出的 init 移到 init_path
+    - 其它情况下产出的 init 一概丢弃
 
-def _transcode(ffmpeg_bin: str, path: Path) -> bool:
-    """就地转码为 H.264 + faststart。成功返回 True。"""
-    tmp_path = path.with_suffix(path.suffix + ".transcode.tmp")
+    返回 True 表示段已替换为 fMP4。
+    """
+    target_dir = segment_path.parent
+    stem = segment_path.stem
+    tmp_init = target_dir / f".{stem}.tmp_init.mp4"
+    tmp_segment = target_dir / f".{stem}.tmp_seg.mp4"
+    tmp_playlist = target_dir / f".{stem}.tmp.m3u8"
+
+    def _cleanup() -> None:
+        for p in (tmp_init, tmp_segment, tmp_playlist):
+            p.unlink(missing_ok=True)
+
+    _cleanup()
+
     cmd = [
         ffmpeg_bin,
         "-y",
         "-loglevel", "error",
-        "-i", str(path),
+        "-i", str(segment_path),
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-an",
-        "-movflags", "+faststart",
-        "-f", "mp4",
-        str(tmp_path),
+        "-hls_segment_type", "fmp4",
+        "-hls_fmp4_init_filename", tmp_init.name,
+        "-hls_segment_filename", str(tmp_segment),
+        "-hls_time", "99999",
+        "-hls_list_size", "0",
+        "-hls_flags", "temp_file",
+        "-f", "hls",
+        str(tmp_playlist),
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        logger.warning("ffmpeg failed (%s): %s", type(e).__name__, path)
-        tmp_path.unlink(missing_ok=True)
+        logger.warning("ffmpeg failed (%s): %s", type(e).__name__, segment_path)
+        _cleanup()
         return False
 
-    if result.returncode != 0 or not tmp_path.exists():
-        logger.warning("ffmpeg rc=%s: %s\nstderr: %s", result.returncode, path, result.stderr.strip())
-        tmp_path.unlink(missing_ok=True)
+    if result.returncode != 0 or not tmp_segment.exists():
+        logger.warning(
+            "ffmpeg rc=%s: %s\nstderr: %s",
+            result.returncode, segment_path, result.stderr.strip(),
+        )
+        _cleanup()
         return False
 
+    # init.mp4 落盘：仅当 capture_init 且尚未存在
+    if tmp_init.exists():
+        if capture_init and not init_path.exists():
+            try:
+                os.replace(tmp_init, init_path)
+            except OSError as e:
+                logger.warning("install init.mp4 failed %s: %s", init_path, e)
+                tmp_init.unlink(missing_ok=True)
+        else:
+            tmp_init.unlink(missing_ok=True)
+
+    # 段原地替换
+    try:
+        os.replace(tmp_segment, segment_path)
+    except OSError as e:
+        logger.warning("replace segment failed %s: %s", segment_path, e)
+        tmp_segment.unlink(missing_ok=True)
+        return False
+
+    tmp_playlist.unlink(missing_ok=True)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Playlist 重写
+# ---------------------------------------------------------------------------
+
+
+_EXTINF_PATTERN = re.compile(r"^#EXTINF:([0-9.]+),?$")
+
+
+def _parse_playlist_entries(path: Path) -> List[Tuple[float, str]]:
+    """从旧 m3u8 解析出 [(duration, filename), ...]，按文件出现顺序。"""
+    entries: List[Tuple[float, str]] = []
+    if not path.exists():
+        return entries
+
+    current_dur: Optional[float] = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        m = _EXTINF_PATTERN.match(s)
+        if m:
+            try:
+                current_dur = float(m.group(1))
+            except ValueError:
+                current_dur = None
+            continue
+        if s.startswith("#"):
+            continue
+        # 资源行
+        if current_dur is not None:
+            entries.append((current_dur, s))
+            current_dur = None
+    return entries
+
+
+def _playlist_already_fmp4(path: Path) -> bool:
+    if not path.exists():
+        return False
+    head = path.read_text(encoding="utf-8")[:1024]
+    return "#EXT-X-MAP:" in head and "#EXT-X-VERSION:7" in head
+
+
+def _rewrite_playlist_header(path: Path, target_duration: int = 10) -> bool:
+    """把旧 VERSION:3 头部重写为 VERSION:7 + EXT-X-MAP。保留所有 EXTINF + 段文件名。"""
+    entries = _parse_playlist_entries(path)
+    if not entries:
+        logger.warning("playlist 空或解析失败，跳过重写: %s", path)
+        return False
+
+    tmp_path = path.with_suffix(path.suffix + ".rewrite.tmp")
+    lines: List[str] = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:7",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
+        '#EXT-X-MAP:URI="init.mp4"',
+    ]
+    for dur, fname in entries:
+        lines.append(f"#EXTINF:{dur:.3f},")
+        lines.append(fname)
+    tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
         os.replace(tmp_path, path)
     except OSError as e:
-        logger.warning("replace failed %s: %s", path, e)
+        logger.warning("rewrite playlist replace failed %s: %s", path, e)
         tmp_path.unlink(missing_ok=True)
         return False
     return True
 
 
-def _collect_mp4s(task_dir: Path) -> List[Path]:
-    """递归收集 task_dir 下所有 .mp4 文件（排除转码临时文件）。"""
+# ---------------------------------------------------------------------------
+# 目录遍历 & 主流程
+# ---------------------------------------------------------------------------
+
+
+def _is_step_dir(d: Path) -> bool:
+    """step 目录的判定：名字是数字 + 含 *_segment_*.mp4 或 *_playlist.m3u8。"""
+    if not d.is_dir():
+        return False
+    if not d.name.isdigit():
+        return False
+    has_segment = any(d.glob("*_segment_*.mp4"))
+    has_playlist = any(d.glob("*_playlist.m3u8"))
+    return has_segment or has_playlist
+
+
+def _collect_segments(step_dir: Path) -> List[Path]:
     return sorted(
-        p for p in task_dir.rglob("*.mp4")
-        if not p.name.endswith(".transcode.tmp")
+        p for p in step_dir.glob("*_segment_*.mp4")
+        if not p.name.startswith(".") and not p.name.endswith(".transcode.tmp")
     )
 
 
+def _migrate_step(
+    step_dir: Path,
+    ffmpeg_bin: str,
+    base_dir: Path,
+    dry_run: bool,
+    force: bool,
+) -> Tuple[int, int, int]:
+    """迁移一个 step 目录。返回 (converted, failed, skipped_segments)。"""
+    init_path = step_dir / "init.mp4"
+    raw_playlist = step_dir / "raw_playlist.m3u8"
+    proc_playlist = step_dir / "processed_playlist.m3u8"
+
+    already_migrated = (
+        init_path.exists()
+        and (not raw_playlist.exists() or _playlist_already_fmp4(raw_playlist))
+        and (not proc_playlist.exists() or _playlist_already_fmp4(proc_playlist))
+    )
+    if already_migrated and not force:
+        logger.info("[skip migrated] %s", step_dir.relative_to(base_dir))
+        segments = _collect_segments(step_dir)
+        return (0, 0, len(segments))
+
+    segments = _collect_segments(step_dir)
+    if not segments:
+        logger.info("[no segments] %s", step_dir.relative_to(base_dir))
+        return (0, 0, 0)
+
+    logger.info(
+        "[migrating step] %s (%d segments)",
+        step_dir.relative_to(base_dir), len(segments),
+    )
+
+    if dry_run:
+        for seg in segments:
+            logger.info("[dry-run] would transcode %s", seg.relative_to(base_dir))
+        if not init_path.exists():
+            logger.info("[dry-run] would create %s", init_path.relative_to(base_dir))
+        for pl in (raw_playlist, proc_playlist):
+            if pl.exists() and not _playlist_already_fmp4(pl):
+                logger.info("[dry-run] would rewrite header %s", pl.relative_to(base_dir))
+        return (0, 0, 0)
+
+    # init 没产出过就让第一个段去捕获
+    init_already = init_path.exists()
+    converted = 0
+    failed = 0
+    for seg in segments:
+        capture_init = not init_already
+        if _transcode_segment_to_fmp4(ffmpeg_bin, seg, init_path, capture_init):
+            converted += 1
+            if capture_init and init_path.exists():
+                init_already = True
+        else:
+            failed += 1
+
+    # 重写 playlist 头部
+    for pl in (raw_playlist, proc_playlist):
+        if pl.exists() and not _playlist_already_fmp4(pl):
+            ok = _rewrite_playlist_header(pl)
+            logger.info(
+                "[playlist %s] %s",
+                "rewritten" if ok else "rewrite-failed",
+                pl.relative_to(base_dir),
+            )
+
+    return (converted, failed, 0)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("task_ids", nargs="+", help="一个或多个 task_id（数字）")
     parser.add_argument("--base-dir", default=None, help="持久化 base_dir（默认读 persistence_config）")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不实际转码")
+    parser.add_argument("--force", action="store_true", help="忽略已迁移标志，强制重转")
     parser.add_argument("--ffmpeg", default=None, help="ffmpeg 二进制路径（默认读 settings.ffmpeg_path）")
-    parser.add_argument("--ffprobe", default="ffprobe", help="ffprobe 二进制路径（默认 PATH 中的 ffprobe）")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    )
 
     base_dir = _resolve_base_dir(args.base_dir)
     ffmpeg_bin = args.ffmpeg or _resolve_ffmpeg()
-    ffprobe_bin = args.ffprobe
 
     if not base_dir.is_dir():
         logger.error("base_dir 不存在或不是目录: %s", base_dir)
         return 2
 
     logger.info("base_dir = %s", base_dir)
-    logger.info("ffmpeg = %s, ffprobe = %s", ffmpeg_bin, ffprobe_bin)
+    logger.info("ffmpeg = %s", ffmpeg_bin)
     logger.info("task_ids = %s", args.task_ids)
+    if args.force:
+        logger.info("--force 已开启：忽略已迁移标志")
+    if args.dry_run:
+        logger.info("--dry-run 已开启：只打印计划")
 
-    total = 0
-    skipped_h264 = 0
-    converted = 0
-    failed = 0
+    total_converted = 0
+    total_failed = 0
+    total_skipped = 0
     missing_tasks: List[str] = []
+    migrated_steps = 0
+    skipped_steps = 0
 
     for tid in args.task_ids:
         task_dir = base_dir / tid
@@ -151,35 +339,32 @@ def main() -> int:
             missing_tasks.append(tid)
             continue
 
-        mp4s = _collect_mp4s(task_dir)
-        logger.info("[task %s] 发现 %d 个 mp4 文件", tid, len(mp4s))
-        for path in mp4s:
-            total += 1
-            codec = _probe_codec(ffprobe_bin, path)
-            if codec == "h264":
-                skipped_h264 += 1
-                logger.info("[skip h264] %s", path.relative_to(base_dir))
-                continue
-            if codec is None:
-                logger.warning("[probe fail] %s — 仍尝试转码", path.relative_to(base_dir))
+        step_dirs = sorted(d for d in task_dir.iterdir() if _is_step_dir(d))
+        if not step_dirs:
+            logger.info("[task %s] 无 step 子目录", tid)
+            continue
 
-            if args.dry_run:
-                logger.info("[dry-run] would transcode (%s) %s", codec or "?", path.relative_to(base_dir))
-                continue
-
-            logger.info("[transcode %s -> h264] %s", codec or "?", path.relative_to(base_dir))
-            if _transcode(ffmpeg_bin, path):
-                converted += 1
-            else:
-                failed += 1
+        logger.info("[task %s] 发现 %d 个 step 目录", tid, len(step_dirs))
+        for sd in step_dirs:
+            converted, failed, skipped = _migrate_step(
+                sd, ffmpeg_bin, base_dir, args.dry_run, args.force,
+            )
+            total_converted += converted
+            total_failed += failed
+            total_skipped += skipped
+            if converted or failed:
+                migrated_steps += 1
+            elif skipped:
+                skipped_steps += 1
 
     logger.info(
-        "完成：总数=%d 已是h264=%d 已转码=%d 失败=%d 缺失task=%d",
-        total, skipped_h264, converted, failed, len(missing_tasks),
+        "完成：转码段=%d 失败段=%d 跳过段=%d 已迁移step=%d 跳过step=%d 缺失task=%d",
+        total_converted, total_failed, total_skipped,
+        migrated_steps, skipped_steps, len(missing_tasks),
     )
     if missing_tasks:
         logger.info("缺失 task_ids: %s", missing_tasks)
-    return 0 if failed == 0 else 1
+    return 0 if total_failed == 0 else 1
 
 
 if __name__ == "__main__":
