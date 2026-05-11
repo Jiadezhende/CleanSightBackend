@@ -71,7 +71,10 @@ class HLSPersistenceStrategy:
 
         stem = path.stem
         tmp_init = target_dir / f".{stem}.tmp_init.mp4"
-        tmp_segment = target_dir / f".{stem}.tmp_seg.mp4"
+        # ffmpeg HLS muxer 要求 -hls_segment_filename 必须含 %d 模板（即便只有 1 段），
+        # 否则报 "Invalid segment filename template"。pin -start_number 0 让产物固定为 _0.mp4
+        tmp_segment_template = target_dir / f".{stem}.tmp_seg_%d.mp4"
+        tmp_segment = target_dir / f".{stem}.tmp_seg_0.mp4"
         tmp_playlist = target_dir / f".{stem}.tmp.m3u8"
 
         def _cleanup_tmp() -> None:
@@ -93,7 +96,8 @@ class HLSPersistenceStrategy:
             "-an",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", tmp_init.name,
-            "-hls_segment_filename", str(tmp_segment),
+            "-hls_segment_filename", str(tmp_segment_template),
+            "-start_number", "0",
             "-hls_time", "99999",
             "-hls_list_size", "0",
             "-hls_flags", "temp_file",

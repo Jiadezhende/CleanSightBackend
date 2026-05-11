@@ -69,7 +69,10 @@ def _transcode_segment_to_fmp4(
     target_dir = segment_path.parent
     stem = segment_path.stem
     tmp_init = target_dir / f".{stem}.tmp_init.mp4"
-    tmp_segment = target_dir / f".{stem}.tmp_seg.mp4"
+    # ffmpeg HLS muxer 强制 -hls_segment_filename 含 %d 模板（即便单段），
+    # 否则报 "Invalid segment filename template"。pin -start_number 0 让产物固定为 _0.mp4
+    tmp_segment_template = target_dir / f".{stem}.tmp_seg_%d.mp4"
+    tmp_segment = target_dir / f".{stem}.tmp_seg_0.mp4"
     tmp_playlist = target_dir / f".{stem}.tmp.m3u8"
 
     def _cleanup() -> None:
@@ -90,7 +93,8 @@ def _transcode_segment_to_fmp4(
         "-an",
         "-hls_segment_type", "fmp4",
         "-hls_fmp4_init_filename", tmp_init.name,
-        "-hls_segment_filename", str(tmp_segment),
+        "-hls_segment_filename", str(tmp_segment_template),
+        "-start_number", "0",
         "-hls_time", "99999",
         "-hls_list_size", "0",
         "-hls_flags", "temp_file",
