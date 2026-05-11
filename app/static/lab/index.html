@@ -70,20 +70,8 @@
     <div class="header-title">&#9673; CleanSight 送标工作台</div>
     <div class="header-right">
       <span class="refresh-info">后端: {{ apiBase }}</span>
-      <el-button size="small" @click="showSettings = true" type="primary" plain>设置</el-button>
     </div>
   </div>
-
-  <el-dialog v-model="showSettings" title="后端连接设置" width="420px">
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
-      <span style="flex-shrink:0;font-size:13px;color:#374151">Backend URL</span>
-      <el-input v-model="pendingApiBase" placeholder="http://192.168.1.100:8000" style="flex:1" />
-    </div>
-    <template #footer>
-      <el-button @click="showSettings = false">取消</el-button>
-      <el-button type="primary" @click="applySettings">应用</el-button>
-    </template>
-  </el-dialog>
 
   <div class="main">
     <!-- 步骤选择 -->
@@ -307,16 +295,8 @@ const MAX_CLIPS    = 20;
 
 createApp({
   setup() {
-    const apiBase = ref(localStorage.getItem('labApiBase') || window.location.origin);
-    const pendingApiBase = ref(apiBase.value);
-    const showSettings = ref(false);
-    function applySettings() {
-      apiBase.value = pendingApiBase.value.replace(/\/$/, '');
-      localStorage.setItem('labApiBase', apiBase.value);
-      showSettings.value = false;
-      fetchHealth();
-    }
-    function api(path) { return apiBase.value + path; }
+    const apiBase = window.location.origin;
+    function api(path) { return apiBase + path; }
 
     // 表单
     const form = reactive({ task_id: null, step_id: null, project_id: null });
@@ -520,7 +500,7 @@ createApp({
     }, { deep: true });
 
     const canSubmit = computed(() =>
-      validation.value.ok && health.configured && health.reachable && !loading.submit
+      validation.value.ok && !loading.submit
     );
 
     // 提交
@@ -530,6 +510,16 @@ createApp({
       loading.submit = true;
       result.value = null;
       try {
+        // 提交时再确认 LS 状态：避免一开始就阻塞选段/打点流程
+        await fetchHealth();
+        if (!health.configured) {
+          ElMessage.error('Label Studio 未配置：请设置后端环境变量 CLEANSIGHT_LABEL_STUDIO_URL / TOKEN');
+          return;
+        }
+        if (!health.reachable) {
+          ElMessage.error('Label Studio 不可达' + (health.error ? '：' + health.error : ''));
+          return;
+        }
         const body = {
           task_id: form.task_id,
           step_id: form.step_id,
@@ -583,7 +573,7 @@ createApp({
     onBeforeUnmount(detachVideo);
 
     return {
-      apiBase, pendingApiBase, showSettings, applySettings,
+      apiBase,
       form, loading, loaded, health,
       timeline, videoEl, stripEl, currentAbsMs,
       rangeStyle, markerStyle, cursorStyle, alarmTooltip,
