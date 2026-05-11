@@ -31,12 +31,18 @@ from app.services.traceback.media_token import MediaToken
 # ---------------------------------------------------------------------------
 
 
-def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_kp=True):
-    """造一个任务-步骤的 raw + processed 段 + keypoints + playlist 文件"""
+def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_kp=True, write_init=True):
+    """造一个任务-步骤的 raw + processed 段 + keypoints + playlist + init.mp4 文件"""
     d = base_dir / str(task_id) / str(step_id)
     d.mkdir(parents=True, exist_ok=True)
-    raw_pl_lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:10"]
-    proc_pl_lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:10"]
+    raw_pl_lines = [
+        "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
+        '#EXT-X-MAP:URI="init.mp4"',
+    ]
+    proc_pl_lines = [
+        "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
+        '#EXT-X-MAP:URI="init.mp4"',
+    ]
     for ts_us in ts_us_list:
         (d / f"raw_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
         (d / f"processed_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
@@ -50,6 +56,8 @@ def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_kp=
             )
     (d / "raw_playlist.m3u8").write_text("\n".join(raw_pl_lines) + "\n")
     (d / "processed_playlist.m3u8").write_text("\n".join(proc_pl_lines) + "\n")
+    if write_init:
+        (d / "init.mp4").write_bytes(b"\x00" * 8)
     return d
 
 
@@ -243,12 +251,31 @@ async def test_playlist_vod_generation(client, media_root):
 
     body = resp.text
     assert body.startswith("#EXTM3U")
+    assert "#EXT-X-VERSION:7" in body
     assert "#EXT-X-PLAYLIST-TYPE:VOD" in body
     assert "#EXT-X-ENDLIST" in body
 
-    # 应包含 3 条 #EXTINF 和 3 条 token URL
+    # fMP4 必备：EXT-X-MAP 指向 /media/init/{token}
+    assert "#EXT-X-MAP:URI=" in body
+    assert "/media/init/" in body
+
+    # 应包含 3 条 #EXTINF 和 3 条 segment token URL
     assert body.count("#EXTINF:") == 3
     assert body.count("/media/segment/") == 3
+
+
+@pytest.mark.asyncio
+async def test_playlist_503_when_init_missing(client, media_root):
+    """历史段未迁移（init.mp4 不存在）时 playlist 端点应返回 503 提示运行迁移脚本。"""
+    _seed_task(media_root, task_id=42, step_id=1,
+               ts_us_list=[1_000_000], write_init=False)
+
+    resp = await client.get("/traceback/task/42/playlist.m3u8?step_id=1&track=raw")
+    assert resp.status_code == 503
+    detail = resp.json().get("detail", {})
+    assert isinstance(detail, dict)
+    assert "init" in detail.get("error", "").lower()
+    assert "transcode_segments_to_h264" in detail.get("detail", "")
 
 
 @pytest.mark.asyncio
@@ -436,3 +463,58 @@ async def test_media_keypoints_wrong_extension_rejected(client, media_root):
     )
     resp = await client.get(f"/media/keypoints/{token}")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /media/init/{token}
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_media_init_with_valid_token(client, media_root):
+    d = _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    expected = (d / "init.mp4").read_bytes()
+
+    token = MediaToken.default().sign(
+        task_id=10, step_id=1, filename="init.mp4", kind="init",
+    )
+    resp = await client.get(f"/media/init/{token}")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "video/mp4"
+    assert resp.content == expected
+
+
+@pytest.mark.asyncio
+async def test_media_init_kind_mismatch_rejected(client, media_root):
+    """segment kind 的 token 不能从 /media/init 拿数据。"""
+    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    token = MediaToken.default().sign(
+        10, 1, "init.mp4", kind="segment",
+    )
+    resp = await client.get(f"/media/init/{token}")
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_media_init_wrong_filename_rejected(client, media_root):
+    """init kind 的 token 必须指向 init.mp4，不能借此读其它 mp4 段。"""
+    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    token = MediaToken.default().sign(
+        10, 1, "processed_segment_1000000.mp4", kind="init",
+    )
+    resp = await client.get(f"/media/init/{token}")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_media_init_missing_file_returns_404(client, media_root):
+    """init.mp4 不存在时返回 404。"""
+    _seed_task(
+        media_root, task_id=11, step_id=1,
+        ts_us_list=[1_000_000], write_init=False,
+    )
+    token = MediaToken.default().sign(
+        11, 1, "init.mp4", kind="init",
+    )
+    resp = await client.get(f"/media/init/{token}")
+    assert resp.status_code == 404

@@ -44,6 +44,19 @@ class TestMediaTokenSignVerify:
         assert payload.kind == "keypoints"
         assert payload.step_id == 2
 
+    def test_sign_and_verify_init(self):
+        token = self.mt.sign(
+            task_id=42, step_id=7, filename="init.mp4", kind="init"
+        )
+        payload = self.mt.verify(token, kind="init")
+        assert payload.kind == "init"
+        assert payload.task_id == 42
+        assert payload.step_id == 7
+        assert payload.filename == "init.mp4"
+        # 防止 init token 被当 segment token 用
+        with pytest.raises(MediaTokenError, match="Kind mismatch"):
+            self.mt.verify(token, kind="segment")
+
     def test_kind_mismatch_rejected(self):
         token = self.mt.sign(1, 1, "f.mp4", kind="segment")
         with pytest.raises(MediaTokenError, match="Kind mismatch"):
