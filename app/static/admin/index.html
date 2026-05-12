@@ -433,14 +433,13 @@
           <el-radio-button label="raw" :disabled="!evidence.raw_clips?.length">原始</el-radio-button>
         </el-radio-group>
 
-        <video v-if="currentEvidenceClip" :src="currentEvidenceClip.url" controls autoplay
-               style="width:100%;max-height:480px;background:#000"
-               @error="evidenceError = '视频加载失败（可能 codec 不兼容或 token 过期）'"></video>
+        <video v-if="currentEvidenceClips.length" ref="evidenceVideoEl" controls autoplay
+               style="width:100%;max-height:480px;background:#000"></video>
 
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
           <el-button v-for="(c, i) in currentEvidenceClips" :key="c.filename"
                      :type="i === evidenceClipIdx ? 'primary' : (c.is_trigger ? 'danger' : 'default')"
-                     size="small" @click="evidenceClipIdx = i">
+                     size="small" @click="seekToClip(i)">
             {{ formatTs(c.ts_ms) }}{{ c.is_trigger ? ' ★' : '' }}
           </el-button>
         </div>
@@ -459,6 +458,7 @@
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
 <script src="https://unpkg.com/chart.js@4/dist/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
 
@@ -659,18 +659,75 @@ createApp({
     const evidenceTrack = ref('processed');
     const evidenceClipIdx = ref(0);
     const showKeypoints = ref(false);
+    const evidenceVideoEl = ref(null);
+    let evidenceHls = null;
 
     const currentEvidenceClips = computed(() =>
       evidence.value ? (evidence.value[evidenceTrack.value + '_clips'] || []) : []
     );
-    const currentEvidenceClip = computed(() =>
-      currentEvidenceClips.value[evidenceClipIdx.value] || null
-    );
 
-    watch(evidenceTrack, (t) => {
-      const clips = evidence.value?.[t + '_clips'] || [];
-      const i = clips.findIndex(c => c.is_trigger);
-      evidenceClipIdx.value = i >= 0 ? i : 0;
+    // clip 在 playlist 内的相对时间（秒）— 段连续，ts_ms 差值即累计时间
+    function clipOffsetSec(i) {
+      const clips = currentEvidenceClips.value;
+      if (!clips.length || i <= 0) return 0;
+      return Math.max(0, (clips[i].ts_ms - clips[0].ts_ms) / 1000);
+    }
+
+    function destroyEvidenceHls() {
+      if (evidenceHls) { evidenceHls.destroy(); evidenceHls = null; }
+      const v = evidenceVideoEl.value;
+      if (v) { v.removeAttribute('src'); v.load?.(); }
+    }
+
+    async function loadEvidencePlaylist() {
+      const alarmId = evidence.value?.alarm?.alarm_id;
+      const track = evidenceTrack.value;
+      if (!alarmId || !currentEvidenceClips.value.length) return;
+      await nextTick();
+      const v = evidenceVideoEl.value;
+      if (!v) return;
+      destroyEvidenceHls();
+      const url = api('/traceback/alarm/' + alarmId + '/playlist.m3u8?track=' + track);
+      const seekTo = clipOffsetSec(evidenceClipIdx.value);
+      const doSeek = () => {
+        if (seekTo > 0) { try { v.currentTime = seekTo; } catch {} }
+      };
+      if (window.Hls && Hls.isSupported()) {
+        evidenceHls = new Hls();
+        evidenceHls.loadSource(url);
+        evidenceHls.attachMedia(v);
+        evidenceHls.on(Hls.Events.MANIFEST_PARSED, doSeek);
+        evidenceHls.on(Hls.Events.ERROR, (_, data) => {
+          if (data.fatal) {
+            evidenceError.value = '视频加载失败: ' + (data.details || data.type);
+          }
+        });
+      } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+        v.src = url;
+        v.addEventListener('loadedmetadata', doSeek, { once: true });
+      } else {
+        evidenceError.value = '当前浏览器不支持 HLS 播放（hls.js 未加载，可能 CDN 被墙）';
+      }
+    }
+
+    function seekToClip(i) {
+      evidenceClipIdx.value = i;
+      const v = evidenceVideoEl.value;
+      if (!v) return;
+      const t = clipOffsetSec(i);
+      try { v.currentTime = t; v.play?.(); } catch {}
+    }
+
+    // track 切到另一轨：重置到触发段并重载 playlist
+    watch(evidenceTrack, async () => {
+      const clips = currentEvidenceClips.value;
+      const idx = clips.findIndex(c => c.is_trigger);
+      evidenceClipIdx.value = idx >= 0 ? idx : 0;
+      await loadEvidencePlaylist();
+    });
+
+    watch(evidenceVisible, (v) => {
+      if (!v) destroyEvidenceHls();
     });
 
     async function viewEvidence(alarm_id) {
@@ -679,16 +736,26 @@ createApp({
       evidenceError.value = '';
       evidence.value = null;
       showKeypoints.value = false;
+      destroyEvidenceHls();
       try {
         const r = await fetch(api('/traceback/alarm/' + alarm_id + '/evidence'));
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const d = await r.json();
         evidence.value = d;
-        evidenceTrack.value = d.processed_clips?.length ? 'processed'
-                            : (d.raw_clips?.length ? 'raw' : 'processed');
-        const clips = d[evidenceTrack.value + '_clips'] || [];
+        const nextTrack = d.processed_clips?.length ? 'processed'
+                       : (d.raw_clips?.length ? 'raw' : 'processed');
+        const clips = d[nextTrack + '_clips'] || [];
         const triggerIdx = clips.findIndex(c => c.is_trigger);
-        evidenceClipIdx.value = triggerIdx >= 0 ? triggerIdx : 0;
+        const newIdx = triggerIdx >= 0 ? triggerIdx : 0;
+        if (evidenceTrack.value === nextTrack) {
+          // track 未变 → watch 不会触发，手动 reload
+          evidenceClipIdx.value = newIdx;
+          if (clips.length) await loadEvidencePlaylist();
+        } else {
+          // 先把 idx 同步好，再切 track；watch 里会再次校准 idx 到 trigger
+          evidenceClipIdx.value = newIdx;
+          evidenceTrack.value = nextTrack;
+        }
       } catch (e) {
         evidenceError.value = String(e);
       } finally {
@@ -805,7 +872,7 @@ createApp({
       alarmFilter, alarmRows, fetchAlarms, formatTs, severityType, viewEvidence,
       evidenceVisible, evidenceLoading, evidenceError, evidence,
       evidenceTrack, evidenceClipIdx, showKeypoints,
-      currentEvidenceClips, currentEvidenceClip,
+      currentEvidenceClips, evidenceVideoEl, seekToClip,
       ltConfig, ltRunning, ltResults, ltStats, distChartRef,
       runLatencyTest, resetLatencyTest,
     };

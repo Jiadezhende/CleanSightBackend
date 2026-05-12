@@ -302,6 +302,76 @@ def _estimate_durations(
     return durations
 
 
+def _build_vod_playlist(
+    request: Request,
+    finder: SegmentFinder,
+    task_id: int,
+    step_id: int,
+    track: str,
+    segs: List[SegmentRef],
+) -> str:
+    """构造 VOD m3u8 文本体。供 task 全量回放与 evidence 上下文回放复用。
+
+    - 要求 segs 已经按时序排序、非空
+    - 调用方负责处理 segs 为空时的 404
+    - init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
+    """
+    task_dir = finder.task_dir(task_id, step_id)
+    init_path = task_dir / "init.mp4"
+    if not init_path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "HLS init segment missing",
+                "detail": (
+                    f"init.mp4 not found for task {task_id} step {step_id}. "
+                    "Historical segments must be migrated via "
+                    "scripts/transcode_segments_to_h264.py before HLS playback."
+                ),
+            },
+        )
+
+    playlist_path = task_dir / f"{track}_playlist.m3u8"
+    real_durations = _parse_existing_playlist(playlist_path)
+
+    try:
+        from app.services.persistence.config import get_persistence_config
+        default_dur = float(get_persistence_config().hls.segment_duration)
+    except Exception:
+        default_dur = 10.0
+
+    estimated = _estimate_durations(segs, default_dur)
+
+    target_duration = max(
+        int(round(max(real_durations.values(), default=default_dur))),
+        int(round(max(estimated.values(), default=default_dur))),
+        1,
+    )
+
+    base_url = str(request.base_url).rstrip("/")
+    init_token = MediaToken.default().sign(
+        task_id=task_id, step_id=step_id, filename="init.mp4", kind="init",
+    )
+
+    lines: List[str] = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:7",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        f'#EXT-X-MAP:URI="{base_url}/media/init/{init_token}"',
+    ]
+    for s in segs:
+        dur = real_durations.get(s.filename, estimated.get(s.filename, default_dur))
+        token = MediaToken.default().sign(
+            task_id=s.task_id, step_id=s.step_id, filename=s.filename, kind="segment",
+        )
+        lines.append(f"#EXTINF:{dur:.3f},")
+        lines.append(f"{base_url}/media/segment/{token}")
+    lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
+
+
 @router.get(
     "/task/{task_id}/playlist.m3u8",
     response_class=PlainTextResponse,
@@ -335,72 +405,64 @@ async def get_task_playlist(
             resource_id=f"task={task_id},step={step_id},track={track}",
         )
 
-    # HLS fMP4 段需要 init segment 作为 codec init。每 step 一份共享。
-    task_dir = finder.task_dir(task_id, step_id)
-    init_path = task_dir / "init.mp4"
-    if not init_path.exists():
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "HLS init segment missing",
-                "detail": (
-                    f"init.mp4 not found for task {task_id} step {step_id}. "
-                    "Historical segments must be migrated via "
-                    "scripts/transcode_segments_to_h264.py before HLS playback."
-                ),
-            },
-        )
-
-    # 从落盘 playlist 取精确时长，缺失项用 ts_us 间隔估算
-    playlist_path = task_dir / f"{track}_playlist.m3u8"
-    real_durations = _parse_existing_playlist(playlist_path)
-
-    # 默认时长：取持久化配置的 segment_duration（默认 10s）
-    try:
-        from app.services.persistence.config import get_persistence_config
-        default_dur = float(get_persistence_config().hls.segment_duration)
-    except Exception:
-        default_dur = 10.0
-
-    estimated = _estimate_durations(segs, default_dur)
-
-    target_duration = max(
-        int(round(max(real_durations.values(), default=default_dur))),
-        int(round(max(estimated.values(), default=default_dur))),
-        1,
+    body = _build_vod_playlist(request, finder, task_id, step_id, track, segs)
+    return PlainTextResponse(
+        content=body,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"},
     )
 
-    base_url = str(request.base_url).rstrip("/")
 
-    # init segment token：固定指向该 step 的 init.mp4
-    init_token = MediaToken.default().sign(
-        task_id=task_id,
-        step_id=step_id,
-        filename="init.mp4",
-        kind="init",
-    )
+@router.get(
+    "/alarm/{alarm_id}/playlist.m3u8",
+    response_class=PlainTextResponse,
+    responses={
+        200: {
+            "content": {"application/vnd.apple.mpegurl": {}},
+            "description": "Evidence VOD m3u8 (trigger ± context)",
+        }
+    },
+)
+async def get_alarm_evidence_playlist(
+    request: Request,
+    alarm_id: int,
+    track: str = Query(default="processed", pattern="^(raw|processed)$"),
+    n_before: int = Query(default=-1, ge=-1, le=20),
+    n_after: int = Query(default=-1, ge=-1, le=20),
+):
+    """单条告警证据回放的 VOD m3u8（trigger 段 + 前后上下文）。
 
-    lines: List[str] = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:7",
-        "#EXT-X-PLAYLIST-TYPE:VOD",
-        f"#EXT-X-TARGETDURATION:{target_duration}",
-        "#EXT-X-MEDIA-SEQUENCE:0",
-        f'#EXT-X-MAP:URI="{base_url}/media/init/{init_token}"',
-    ]
-    for s in segs:
-        dur = real_durations.get(s.filename, estimated.get(s.filename, default_dur))
-        token = MediaToken.default().sign(
-            task_id=s.task_id,
-            step_id=s.step_id,
-            filename=s.filename,
-            kind="segment",
+    fMP4 段必须经 m3u8 + init segment 拼装才能由浏览器原生解码，因此 admin/lab
+    端的「告警证据」播放走该接口而非裸 /media/segment/{token}。
+    """
+    from app.settings import settings as s
+
+    if n_before < 0:
+        n_before = s.traceback_context_before
+    if n_after < 0:
+        n_after = s.traceback_context_after
+
+    alarm = _fetch_alarm(alarm_id)
+    task_id = alarm["task_id"]
+    step_id = alarm["step_id"]
+    if step_id is None:
+        raise NotFoundError(
+            f"Alarm {alarm_id} has no step_id, cannot locate evidence",
+            resource_type="Alarm",
+            resource_id=str(alarm_id),
         )
-        lines.append(f"#EXTINF:{dur:.3f},")
-        lines.append(f"{base_url}/media/segment/{token}")
-    lines.append("#EXT-X-ENDLIST")
-    body = "\n".join(lines) + "\n"
+    detected_ms = _to_ms(alarm["detected_at"])
 
+    finder = SegmentFinder(get_default_base_dir())
+    segs = finder.find(task_id, step_id, detected_ms, track, n_before, n_after)
+    if not segs:
+        raise NotFoundError(
+            f"No {track} segments around alarm {alarm_id}",
+            resource_type="Segments",
+            resource_id=f"alarm={alarm_id},track={track}",
+        )
+
+    body = _build_vod_playlist(request, finder, task_id, step_id, track, segs)
     return PlainTextResponse(
         content=body,
         media_type="application/vnd.apple.mpegurl",
