@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     gateway_rate_window: int = 60            # 速率窗口大小（秒）
     gateway_rate_ban_threshold: int = 5      # 速率超限违规次数阈值（达到后封禁，0=不封禁）
     gateway_rate_ban_window: int = 60        # 速率超限违规计数窗口（秒）
-    gateway_relaxed_prefixes: str = "/health,/task/message,/admin-f3m8,/metrics"  # 宽松路径前缀（逗号分隔）
+    gateway_relaxed_prefixes: str = "/health,/task/message,/admin-f3m8,/metrics,/media"  # 宽松路径前缀（逗号分隔）
     gateway_relaxed_rate_limit: int = 600    # 宽松路径每窗口最大请求数
     gateway_scan_threshold: int = 10         # 触发封禁的 404/405 次数（路径/方法枚举扫描）
     gateway_scan_window: int = 300           # 扫描计数窗口（秒）
