@@ -53,6 +53,32 @@ def _resolve_ffmpeg() -> str:
         return "ffmpeg"
 
 
+_SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
+
+
+def _ts_offset_seconds(segment_path: Path) -> float:
+    """计算当前段相对该 step+track 首段的偏移（秒）。
+
+    与 hls_strategy._ts_offset_seconds 同语义：每个段独立转码，输入 PTS 从 0 起，不补
+    偏移则所有 fragment 的 tfdt 都是 0，hls.js VOD 连续播放会卡在段尾。
+    """
+    m = _SEGMENT_FNAME_RE.match(segment_path.name)
+    if not m:
+        return 0.0
+    track, current_ts = m.group(1), int(m.group(2))
+    min_ts = current_ts
+    try:
+        for entry in segment_path.parent.iterdir():
+            em = _SEGMENT_FNAME_RE.match(entry.name)
+            if em and em.group(1) == track:
+                ts = int(em.group(2))
+                if ts < min_ts:
+                    min_ts = ts
+    except OSError:
+        return 0.0
+    return max(0.0, (current_ts - min_ts) / 1_000_000.0)
+
+
 def _transcode_segment_to_fmp4(
     ffmpeg_bin: str,
     segment_path: Path,
@@ -63,6 +89,7 @@ def _transcode_segment_to_fmp4(
 
     - capture_init=True 且 init_path 不存在时，把 ffmpeg 产出的 init 移到 init_path
     - 其它情况下产出的 init 一概丢弃
+    - 用 -output_ts_offset 把各段 PTS 起点累计起来，保证 hls.js 连续播放不停在段尾
 
     返回 True 表示段已替换为 fMP4。
     """
@@ -74,6 +101,7 @@ def _transcode_segment_to_fmp4(
     tmp_segment_template = target_dir / f".{stem}.tmp_seg_%d.mp4"
     tmp_segment = target_dir / f".{stem}.tmp_seg_0.mp4"
     tmp_playlist = target_dir / f".{stem}.tmp.m3u8"
+    ts_offset = _ts_offset_seconds(segment_path)
 
     def _cleanup() -> None:
         for p in (tmp_init, tmp_segment, tmp_playlist):
@@ -91,6 +119,7 @@ def _transcode_segment_to_fmp4(
         "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-an",
+        "-output_ts_offset", f"{ts_offset:.6f}",
         "-hls_segment_type", "fmp4",
         "-hls_fmp4_init_filename", tmp_init.name,
         "-hls_segment_filename", str(tmp_segment_template),

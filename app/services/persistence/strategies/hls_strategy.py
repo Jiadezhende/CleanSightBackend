@@ -11,6 +11,7 @@ HLS持久化策略
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 from datetime import datetime
@@ -52,8 +53,38 @@ class HLSPersistenceStrategy:
                 self._dir_locks[key] = threading.Lock()
             return self._dir_locks[key]
 
-    @staticmethod
-    def _transcode_to_fmp4_segment(path: Path) -> None:
+    # 段文件名格式：{track}_segment_{ts_us}.mp4
+    _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
+
+    @classmethod
+    def _ts_offset_seconds(cls, path: Path) -> float:
+        """计算当前段相对该 step+track 首段的时间偏移（秒）。
+
+        每个段都由独立的 ffmpeg 进程转码，输入 mp4v 自身从 PTS=0 开始；不补偏移的话
+        所有 fMP4 fragment 的 tfdt 都是 0，hls.js 在 VOD 单线连续播放时会停在第一段
+        末尾不前进（必须手动 seek 才能恢复）。
+
+        本函数从同目录下 `{track}_segment_*.mp4` 取最早 ts_us，与当前段做差，得到累计
+        偏移；首段为 0。返回值传给 ffmpeg `-output_ts_offset` 即可让 tfdt 累计。
+        """
+        m = cls._SEGMENT_FNAME_RE.match(path.name)
+        if not m:
+            return 0.0
+        track, current_ts = m.group(1), int(m.group(2))
+        min_ts = current_ts
+        try:
+            for entry in path.parent.iterdir():
+                em = cls._SEGMENT_FNAME_RE.match(entry.name)
+                if em and em.group(1) == track:
+                    ts = int(em.group(2))
+                    if ts < min_ts:
+                        min_ts = ts
+        except OSError:
+            return 0.0
+        return max(0.0, (current_ts - min_ts) / 1_000_000.0)
+
+    @classmethod
+    def _transcode_to_fmp4_segment(cls, path: Path) -> None:
         """将 cv2 写出的 mp4v 段转码为 HLS-ready fMP4 fragment，并写入 step 级 init.mp4。
 
         Pipeline：cv2 mp4v → ffmpeg HLS muxer → init.mp4（首段）+ fMP4 fragment（原地替换）。
@@ -63,11 +94,14 @@ class HLSPersistenceStrategy:
           fragment（ftyp+moof+mdat），符合 HLS 协议要求
         - init.mp4 每 step 一份共享：首次写入时落盘到 step 目录，已存在则丢弃产出物
           （同 step 同摄像头、同编码参数，SPS/PPS 一致，可安全复用）
+        - 各 fragment 的 tfdt 必须累计：用 `-output_ts_offset` 把当前段的 PTS 起点平移到
+          (current_ts_us - first_ts_us) 秒，保证 hls.js 连续播放不停在段尾
 
         失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
         target_dir = path.parent
         init_path = target_dir / "init.mp4"
+        ts_offset = cls._ts_offset_seconds(path)
 
         stem = path.stem
         tmp_init = target_dir / f".{stem}.tmp_init.mp4"
@@ -94,6 +128,7 @@ class HLSPersistenceStrategy:
             "-crf", "23",
             "-pix_fmt", "yuv420p",
             "-an",
+            "-output_ts_offset", f"{ts_offset:.6f}",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", tmp_init.name,
             "-hls_segment_filename", str(tmp_segment_template),
