@@ -2,7 +2,7 @@
 
 # 视频追溯 API 文档
 
-> **最后更新**: 2026-05-11
+> **最后更新**: 2026-05-12
 >
 > 本文描述的是**基于 (task_id, step_id) 文件系统**的追溯实现（2026-05 重构）。
 >
@@ -10,7 +10,11 @@
 > 完全解耦 `source_ip`。原因：洗消任务跨 step 执行时业务侧会覆写 `clean_task.source_ip`，
 > 原架构通过 source_ip 反查 client_id 永远只能定位一半数据。`/traceback/*` 不再读 source_ip。
 >
-> 旧接口 `/task/traceback/{id}/segments|playlist|video|keypoints` 已废弃（详见末尾废弃说明）。
+> **2026-05-12 fMP4 改造（破坏性）**：MP4 段落盘格式从「普通 MP4（moov+mdat）」改为「HLS fMP4 fragment（styp+moof+mdat）」+ 每 step 共享一份 `init.mp4`。
+>
+> - 前端影响：playlist 头部升级到 `#EXT-X-VERSION:7` 并包含 `#EXT-X-MAP:URI="..."` 一行（指向新增的 `/media/init/{token}`）。`hls.js` 1.0+ 自动处理，无需改前端代码。
+> - 历史段必须经迁移脚本升级才能播放，未迁移的 step 调 playlist 端点会拿到 **503**（详见末尾「历史数据迁移」）。
+> - **告警证据回放**：`evidence` JSON 中的 `*_clips[].url` 仍是单段 fragment URL（无 init），原生 `<video>` 无法直接播放。新增 [`/traceback/alarm/{id}/playlist.m3u8`](#2-告警证据回放-playlist按-alarm_id-生成-vod-m3u8) 端点专供证据回放使用，admin/lab 均通过 `hls.js` 加载它。
 
 ---
 
@@ -44,7 +48,8 @@ HLS 写入时已按规则命名落盘（step 维度隔离）：
   │       返回带 token 的媒体 URL
   │
   └── GET /media/{kind}/{token} ← 媒体访问层（HMAC token 鉴权）
-          流式返回 MP4 / JSON
+          kind ∈ {segment, init, keypoints}
+          流式返回 fMP4 / MP4 / JSON
 ```
 
 前后端物理隔离：所有媒体文件经 HTTP 路由返回，不依赖共享文件系统，不暴露文件路径。
@@ -55,18 +60,19 @@ HLS 写入时已按规则命名落盘（step 维度隔离）：
 token = base64url(payload_json) + "." + base64url(HMAC-SHA256(secret, payload_json))
 
 payload = {
-  "t": task_id,                  # 任务 id
-  "s": step_id,                  # 洗消步骤 id（替代了旧字段 "c" client_id）
-  "f": filename,                 # 文件名（不含路径）
-  "k": "segment" | "keypoints",  # 资源类型
-  "e": expiry_epoch              # 过期时间（Unix 秒）
+  "t": task_id,                          # 任务 id
+  "s": step_id,                          # 洗消步骤 id（替代了旧字段 "c" client_id）
+  "f": filename,                         # 文件名（不含路径）
+  "k": "segment" | "init" | "keypoints", # 资源类型
+  "e": expiry_epoch                      # 过期时间（Unix 秒）
 }
 ```
 
 - Secret 来自 `CLEANSIGHT_MEDIA_TOKEN_SECRET` 环境变量；未配置时生成随机临时 secret（重启失效）
 - 默认 TTL：300s（可通过 `CLEANSIGHT_MEDIA_TOKEN_TTL` 调整）
 - URL 中不含原始文件路径，防止越权枚举
-- payload 校验同时绑定 `kind`，segment token 不能被当 keypoints token 使用，反之亦然
+- payload 校验同时绑定 `kind`，三种 kind 之间不可互换（如 segment token 不能当 init token 使用）
+- `init` kind 是 2026-05-12 fMP4 改造新增，专用于 `init.mp4`（HLS fMP4 codec init segment，每 step 共享一份）
 
 ---
 
@@ -174,7 +180,58 @@ GET /traceback/alarm/{alarm_id}/evidence?n_before=1&n_after=2
 
 ---
 
-### 2. 任务+步骤完整回放 VOD Playlist（按 task_id+step_id 查整段洗消视频）
+### 2. 告警证据回放 Playlist（按 alarm_id 生成 VOD m3u8）
+
+```http
+GET /traceback/alarm/{alarm_id}/playlist.m3u8?track=processed&n_before=1&n_after=2
+```
+
+用途：单条告警证据弹窗的视频回放。返回 trigger 段 + 前后上下文段的 VOD m3u8（含 `#EXT-X-MAP`），可直接被 `hls.js` 消费。
+
+`evidence` 接口返回的 `*_clips[].url` 是裸 fragment（无 `ftyp+moov` codec init），浏览器原生 `<video>` 无法播放；admin/lab 端的告警证据视频均通过该端点拼接 init + 上下文段。
+
+#### 路径参数
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| alarm_id | integer | 告警 ID（来自 `clean_alarm.alarm_id`） |
+
+#### 查询参数
+
+| 参数 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| track | string | processed | `raw` 或 `processed` |
+| n_before | integer | -1 | 触发段前上下文段数（0-20）；`-1` 取 `CLEANSIGHT_TRACEBACK_CONTEXT_BEFORE` |
+| n_after | integer | -1 | 触发段后上下文段数（0-20）；`-1` 取 `CLEANSIGHT_TRACEBACK_CONTEXT_AFTER` |
+
+#### 成功响应（200 OK）
+
+`Content-Type: application/vnd.apple.mpegurl`，VOD m3u8 文本，结构与 [`/traceback/task/{task_id}/playlist.m3u8`](#3-任务步骤完整回放-vod-playlist按-task_idstep_id-查整段洗消视频) 相同，仅包含 `[trigger - n_before, trigger + n_after]` 范围内的段。
+
+`#EXT-X-MAP` 指向同 step 共享的 `init.mp4`，`hls.js` 自动先拉 init。
+
+时长生成优先级、是否复用落盘 EXTINF、token 化 URL 与 task playlist 端点一致。
+
+#### 前端 seek 锚点换算
+
+evidence JSON 中每个 clip 的 `ts_ms` 与 playlist 中 `#EXTINF` 累计时间在帧时间轴上对齐（同源段连续编码）。前端切换 clip 时使用：
+
+```javascript
+const seekSec = (clips[i].ts_ms - clips[0].ts_ms) / 1000;
+video.currentTime = seekSec;
+```
+
+#### 错误响应
+
+| 状态码 | 场景 |
+| --- | --- |
+| 404 | 告警不存在 / 告警 `step_id IS NULL` / 该 alarm 周围找不到段 |
+| 422 | 参数非法（`track` 非 raw/processed，`n_before/n_after` 不在 [-1, 20]） |
+| 503 | step 目录段存在但 `init.mp4` 缺失（历史段未迁移） |
+
+---
+
+### 3. 任务+步骤完整回放 VOD Playlist（按 task_id+step_id 查整段洗消视频）
 
 ```http
 GET /traceback/task/{task_id}/playlist.m3u8?step_id=2&track=processed
@@ -202,16 +259,20 @@ GET /traceback/task/{task_id}/playlist.m3u8?step_id=2&track=processed
 
 ```m3u8
 #EXTM3U
-#EXT-X-VERSION:3
+#EXT-X-VERSION:7
 #EXT-X-PLAYLIST-TYPE:VOD
 #EXT-X-TARGETDURATION:10
 #EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-MAP:URI="http://host/media/init/<init_token>"
 #EXTINF:10.000,
 http://host/media/segment/<token>
 #EXTINF:10.000,
 http://host/media/segment/<token>
 #EXT-X-ENDLIST
 ```
+
+> `#EXT-X-MAP` 行是 fMP4 必备 —— 段是 fragment（无 moov），需要 init.mp4 提供 codec init。
+> `hls.js` 1.0+ 自动识别并先拉 init，前端无需特殊处理。
 
 时长生成优先级：
 1. 落盘的 `{track}_playlist.m3u8`（LIVE 格式,无 `#EXT-X-ENDLIST`）中的精确 EXTINF
@@ -226,6 +287,7 @@ http://host/media/segment/<token>
 | --- | --- |
 | 404 | `(task_id, step_id, track)` 没有任何段 |
 | 422 | 缺 `step_id` 参数 / `track` 非法（必须是 `raw` 或 `processed`） |
+| 503 | step 目录段存在但 `init.mp4` 缺失（历史段未跑迁移脚本，详见末尾「历史数据迁移」）。响应 body：`{"error": "HLS init segment missing", "detail": "..."}` |
 
 #### 前端播放示例
 
@@ -246,7 +308,7 @@ if (Hls.isSupported()) {
 
 ---
 
-### 3. 任务+步骤时间轴打点
+### 4. 任务+步骤时间轴打点
 
 ```http
 GET /traceback/task/{task_id}/timeline?step_id=2
@@ -311,7 +373,7 @@ GET /traceback/task/{task_id}/timeline?step_id=2
 
 ---
 
-### 4. 媒体访问——MP4 段
+### 5. 媒体访问——MP4 段
 
 ```http
 GET /media/segment/{token}
@@ -338,7 +400,37 @@ Cache-Control: private, max-age=60
 
 ---
 
-### 5. 媒体访问——Keypoints JSON
+### 6. 媒体访问——HLS fMP4 init segment
+
+```http
+GET /media/init/{token}
+```
+
+用途：返回 HLS fMP4 init segment（每 step 共享一份，包含 ftyp + moov 与 codec init）。
+URL 由 playlist 端点在 `#EXT-X-MAP` 行内自动签发，**前端不应自行构造**。`hls.js` 解析 m3u8 后会自动 GET 这个 URL，开发者无需关心调用时机。
+
+#### 成功响应（200 OK）
+
+`Content-Type: video/mp4`，init segment 文件流。响应头：
+
+```http
+Content-Disposition: inline
+Cache-Control: private, max-age=3600
+```
+
+> init.mp4 在一个 step 的整个生命周期内不变，故 `max-age` 为 1 小时（远长于普通 segment 的 60s），减少重复拉取。
+
+#### 错误响应
+
+| 状态码 | 场景 |
+| --- | --- |
+| 400 | token 指向的 filename 不是 `init.mp4` |
+| 403 | token 无效 / 签名不符 / 已过期 / kind 不匹配 |
+| 404 | `init.mp4` 不存在（历史段未迁移；通常 playlist 端点会先返回 503 拦住） |
+
+---
+
+### 7. 媒体访问——Keypoints JSON
 
 ```http
 GET /media/keypoints/{token}
@@ -385,7 +477,11 @@ GET /media/keypoints/{token}
 
 ## 历史数据迁移
 
-step 维度落盘是 2026-05 的破坏性变更。已有旧目录 `{base_dir}/{client_id}/{task_id}/` 的部署需要迁移：
+部署里同时存在两类历史数据需要分别处理：
+
+### A. step 维度落盘迁移（2026-05 重构）
+
+旧目录 `{base_dir}/{client_id}/{task_id}/` 重整为 `{base_dir}/{task_id}/{step_id}/`：
 
 ```bash
 # 预览
@@ -397,32 +493,73 @@ python scripts/migrate_legacy_runs.py --merge
 
 脚本从旧目录的 `metadata.json` 推断 `step_id` 后,把文件移到新路径 `{base_dir}/{task_id}/{step_id}/`。
 
+### B. fMP4 + init segment 升级（2026-05-12）
+
+旧段是普通 MP4（mp4v 或 H.264 + faststart），无法被 `hls.js` 在 m3u8 中作为段播放（会触发 `fragParsingError`）。**playlist 端点检测到 step 目录无 `init.mp4` 时直接返回 503**，前端会拿不到回放。需要把历史段就地升级为 fMP4 fragment 并补出 step 级 `init.mp4`：
+
+```bash
+# 预览：列出待迁移的 step 目录与段数
+python -m scripts.transcode_segments_to_h264 --dry-run <task_id> [<task_id>...]
+
+# 实际迁移
+python -m scripts.transcode_segments_to_h264 <task_id> [<task_id>...]
+
+# 强制重转（已迁移过也再跑一遍，慎用）
+python -m scripts.transcode_segments_to_h264 --force <task_id>
+```
+
+脚本对每个 step 目录：
+
+1. 把每个 `*_segment_*.mp4` 重转为 fMP4 fragment（原地替换，文件名不变）
+2. 第一个段产出时同时落盘 step 级 `init.mp4`（含 codec init），后续段产出的 init 丢弃
+3. 重写 `*_playlist.m3u8` 头部为 `#EXT-X-VERSION:7` + `#EXT-X-MAP:URI="init.mp4"`
+4. 幂等：含 init.mp4 + V7 头的 step 默认跳过（除非 `--force`）
+
+迁移完成后，原 503 的 playlist 请求可正常返回。
+
 ---
 
 ## 前端集成示例
 
-### 告警证据双轨对比
+### 告警证据双轨对比（推荐：evidence playlist + seek）
+
+> ⚠️ 旧版示例「手拼 m3u8 喂给 hls.js」与「裸 `<video src="…/media/segment/{token}">`」在 fMP4 改造后**均不可用** ——
+> evidence 响应中的 `*_clips[].url` 是 fragment URL，不含 `#EXT-X-MAP`/`ftyp+moov`，
+> 直接当 mp4 播会触发 `MEDIA_ERR_SRC_NOT_SUPPORTED`，
+> 拼成 V3 m3u8 会触发 hls.js 的 `fragParsingError`。
+> 推荐改为：用 `/traceback/alarm/{id}/playlist.m3u8` 拿到上下文 VOD m3u8，定位到触发段后 `seek`。
 
 ```javascript
 async function loadEvidence(alarmId) {
-  const data = await fetch(`/traceback/alarm/${alarmId}/evidence`).then(r => r.json());
+  const ev = await fetch(`/traceback/alarm/${alarmId}/evidence`).then(r => r.json());
 
   for (const track of ['raw', 'processed']) {
-    const clips = data[`${track}_clips`];
-    const items = clips.map(c => `#EXTINF:10.000,\n${c.url}`).join('\n');
-    const m3u8 = [
-      '#EXTM3U', '#EXT-X-VERSION:3',
-      '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-TARGETDURATION:10',
-      items, '#EXT-X-ENDLIST',
-    ].join('\n');
+    const clips = ev[`${track}_clips`] || [];
+    if (!clips.length) continue;
 
-    const blob = new Blob([m3u8], { type: 'application/vnd.apple.mpegurl' });
+    const playlistUrl = `/traceback/alarm/${alarmId}/playlist.m3u8?track=${track}`;
+    const video = document.getElementById(`${track}-video`);
     const hls = new Hls();
-    hls.loadSource(URL.createObjectURL(blob));
-    hls.attachMedia(document.getElementById(`${track}-video`));
+    hls.loadSource(playlistUrl);
+    hls.attachMedia(video);
+
+    // 触发段相对 playlist 起点的偏移 = (trigger.ts_ms - clips[0].ts_ms) / 1000
+    const triggerIdx = clips.findIndex(c => c.is_trigger);
+    const seekSec = triggerIdx > 0
+      ? (clips[triggerIdx].ts_ms - clips[0].ts_ms) / 1000
+      : 0;
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      if (seekSec > 0) video.currentTime = seekSec;
+      video.play();
+    });
   }
+
+  // detection / keypoints_url 仍可独立使用
+  console.log('keypoints:', ev.detection);
 }
 ```
+
+切换其他上下文段时同样按 `(clips[i].ts_ms - clips[0].ts_ms) / 1000` 计算偏移并 `video.currentTime = …`，无需重建 hls 实例。
 
 ### 单步骤完整回放 + 进度条告警打点
 
@@ -452,23 +589,3 @@ async function jumpFromAlarm(alarmId) {
   return loadStep(ev.task_id, ev.step_id);
 }
 ```
-
----
-
-## 废弃说明
-
-以下接口**已废弃**,依赖 `HLSSegment` 表（`enable_db_write=False` 硬编码）,实际查询永远返回空结果,将在后续版本移除：
-
-| 废弃接口 | 替代接口 |
-| --- | --- |
-| `GET /task/traceback/{id}/segments` | `GET /traceback/task/{id}/playlist.m3u8?step_id=...` |
-| `GET /task/traceback/{id}/playlist` | `GET /traceback/task/{id}/playlist.m3u8?step_id=...` |
-| `GET /task/traceback/{id}/video/{seg_id}` | `GET /media/segment/{token}` |
-| `GET /task/traceback/{id}/keypoints/{seg_id}` | `GET /media/keypoints/{token}` |
-| `GET /task/traceback/{id}/all_keypoints` | 多次调用 `GET /media/keypoints/{token}` |
-
-同时,本次重构中也**移除**了旧版 `/traceback/*` 的以下行为：
-
-- `traceback.locator.resolve_client_id`（查 `clean_task.source_ip`）—— 已删除
-- evidence 响应中的 `client_id` 字段 —— 已删除
-- `playlist.m3u8` / `timeline` 不再支持「跨 step 聚合」—— 必填 `step_id`,一次只看一个步骤

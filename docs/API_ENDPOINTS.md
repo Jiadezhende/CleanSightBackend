@@ -983,7 +983,36 @@ curl -X GET "http://localhost:8000/task/1/alarms"
 
 ---
 
-### 5.2 任务完整回放 Playlist
+### 5.2 告警证据回放 Playlist
+
+- **URL**: `GET /traceback/alarm/{alarm_id}/playlist.m3u8?track=processed&n_before=1&n_after=2`
+- **描述**: 单条告警证据的 VOD m3u8（trigger ± 上下文段），含 `#EXT-X-MAP` init segment 引用。`5.1` 返回的 `*_clips[].url` 是裸 fMP4 fragment，原生 `<video>` 无法播放，证据回放必须走该端点 + `hls.js`。详细字段见 [TRACEBACK_API.md](TRACEBACK_API.md#2-告警证据回放-playlist按-alarm_id-生成-vod-m3u8)。
+
+#### 查询参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| track | string | processed | `raw` 或 `processed` |
+| n_before | integer | -1 | 触发段前上下文段数（0-20），`-1` 用配置默认 |
+| n_after | integer | -1 | 触发段后上下文段数（0-20），`-1` 用配置默认 |
+
+#### 前端 seek（同一 hls 实例切上下文段）
+
+```javascript
+// clip 在 playlist 内的偏移 = (clips[i].ts_ms - clips[0].ts_ms) / 1000
+video.currentTime = (clips[i].ts_ms - clips[0].ts_ms) / 1000;
+```
+
+#### 错误响应
+
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 告警不存在 / 该 alarm 周围无段 |
+| 503 | step 目录 `init.mp4` 缺失（历史段未迁移） |
+
+---
+
+### 5.3 任务完整回放 Playlist
 
 - **URL**: `GET /traceback/task/{task_id}/playlist.m3u8?track=processed`
 - **描述**: 动态生成任务全程 VOD m3u8，带 `#EXT-X-ENDLIST`，前端 hls.js 直接消费。
@@ -1020,7 +1049,7 @@ hls.attachMedia(document.getElementById('player'));
 
 ---
 
-### 5.3 任务时间轴打点
+### 5.4 任务时间轴打点
 
 - **URL**: `GET /traceback/task/{task_id}/timeline`
 - **描述**: 返回任务时间范围与告警事件列表，供前端在进度条上叠加标记。
@@ -1062,7 +1091,7 @@ hls.attachMedia(document.getElementById('player'));
 ### 6.1 流式返回 MP4 段
 
 - **URL**: `GET /media/segment/{token}`
-- **描述**: 返回单个 MP4 视频段。Token 由 `/traceback/alarm/{id}/evidence` 或 `/traceback/task/{id}/playlist.m3u8` 签发。
+- **描述**: 返回单个 MP4 视频段。Token 由 `/traceback/alarm/{id}/evidence`、`/traceback/alarm/{id}/playlist.m3u8` 或 `/traceback/task/{id}/playlist.m3u8` 签发。
 
 #### 成功响应 (200 OK)
 
