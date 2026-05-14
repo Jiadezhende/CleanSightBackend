@@ -63,31 +63,102 @@ def _resolve_ffprobe(ffmpeg_bin: str) -> str:
     return "ffprobe"
 
 
-def _probe_duration(ffprobe_bin: str, path: Path) -> Optional[float]:
-    """用 ffprobe 读取媒体时长（秒）。失败返回 None。"""
-    try:
-        result = subprocess.run(
-            [
-                ffprobe_bin, "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        logger.warning("ffprobe failed (%s): %s", type(e).__name__, path)
-        return None
-    if result.returncode != 0:
-        logger.warning(
-            "ffprobe rc=%s: %s\nstderr: %s",
-            result.returncode, path, result.stderr.strip(),
-        )
-        return None
-    try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return None
+def _probe_duration(
+    ffprobe_bin: str,
+    path: Path,
+    init_path: Optional[Path] = None,
+) -> Tuple[Optional[float], float, bool]:
+    """用 ffprobe 读取媒体时长。返回 (content_duration, input_start_time, is_already_fmp4)。
+
+    - content_duration: 该段的真实媒体时长（秒），用于写 EXTINF + 累计 ts_offset
+    - input_start_time: 输入文件的首 PTS（秒）。对已迁移的 fMP4 fragment 等于旧的 tfdt
+      （来自上次 transcode 的 -output_ts_offset 残留）；对裸 mp4v / 普通 H.264 MP4 ≈ 0。
+      transcode 时必须用 `effective_offset = desired_offset - input_start_time` 才能把
+      输出 tfdt 钉到 desired_offset —— 否则 ffmpeg 的 -output_ts_offset 会**累加**到
+      input PTS 之上，把已有的脏 tfdt 滚进新输出，hls.js 看到的位置就和 playlist 对不上。
+    - is_already_fmp4: True 表示直接探测失败、拼 init+fragment 后成功 —— transcode 时
+      要走拼接输入 + `-c:v copy`（无损 remux）
+
+    - 直接探测成功 → 返回 (dur, start_time, False)
+    - 拼接成功 → 返回 (dur, start_time, True)
+    - 都失败 → 返回 (None, 0.0, False)
+    """
+    def _run(target: Path) -> Tuple[int, Optional[float], float, str]:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe_bin, "-v", "error",
+                    "-show_entries", "format=duration,start_time",
+                    "-of", "default=noprint_wrappers=1",
+                    str(target),
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            return (-1, None, 0.0, f"{type(e).__name__}: {e}")
+        if result.returncode != 0:
+            return (result.returncode, None, 0.0, result.stderr.strip())
+
+        # 解析 key=value 形式输出
+        raw_duration: Optional[float] = None
+        start_time = 0.0
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = val.strip()
+            if val in ("N/A", ""):
+                continue
+            try:
+                if key.strip() == "duration":
+                    raw_duration = float(val)
+                elif key.strip() == "start_time":
+                    start_time = float(val)
+            except ValueError:
+                continue
+
+        if raw_duration is None:
+            return (0, None, 0.0, f"missing duration: {result.stdout!r}")
+
+        # init+fragment 拼接后，ffprobe 把 format.duration 当作 max-PTS（含 tfdt 偏移），
+        # 不是 fragment 自身的内容时长。减掉 start_time（= 首样本 PTS = tfdt）才是真实
+        # 媒体时长。对普通无偏移 MP4，start_time≈0，运算等价于原 duration。
+        content_duration = raw_duration - start_time
+
+        # Sanity：极端情况下 ffprobe 可能直接报内容时长（不算偏移），此时 content_duration
+        # 会变成大负数；回退到 raw_duration。0..3600s 视为合理。
+        if 0 < content_duration <= 3600:
+            return (0, content_duration, start_time, "")
+        if 0 < raw_duration <= 3600:
+            # 这种回退路径下 raw_duration 已是内容时长，input_start_time 视为 0
+            return (0, raw_duration, 0.0, "")
+        return (0, None, 0.0, f"implausible: raw={raw_duration} start={start_time}")
+
+    rc, dur, start_time, err = _run(path)
+    if dur is not None:
+        return (dur, start_time, False)
+
+    # 回退：fMP4 fragment 必须拼上 init 才能解析
+    if init_path and init_path.exists():
+        tmp = path.with_name(f".{path.stem}.probe.tmp.mp4")
+        try:
+            with tmp.open("wb") as out:
+                out.write(init_path.read_bytes())
+                out.write(path.read_bytes())
+            _rc2, dur2, start_time2, err2 = _run(tmp)
+            if dur2 is not None:
+                return (dur2, start_time2, True)
+            logger.warning(
+                "ffprobe via concat failed: %s\n  direct stderr: %s\n  concat stderr: %s",
+                path, err, err2,
+            )
+        except OSError as e:
+            logger.warning("probe concat IO failed %s: %s", path, e)
+        finally:
+            tmp.unlink(missing_ok=True)
+    else:
+        logger.warning("ffprobe rc=%s: %s\nstderr: %s", rc, path, err)
+    return (None, 0.0, False)
 
 
 _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
@@ -99,6 +170,8 @@ def _transcode_segment_to_fmp4(
     init_path: Path,
     capture_init: bool,
     ts_offset: float,
+    is_already_fmp4: bool = False,
+    input_start_time: float = 0.0,
 ) -> bool:
     """就地把一个段升级为 fMP4，必要时同时产出 init.mp4。
 
@@ -106,6 +179,13 @@ def _transcode_segment_to_fmp4(
     - 其它情况下产出的 init 一概丢弃
     - ts_offset 由调用方按累计 EXTINF 算好（与 hls_strategy._ts_offset_seconds 同语义），
       让各 fragment 的 tfdt 累计 = playlist 时间线 = fragment 媒体时长
+    - input_start_time 是输入文件的首 PTS（来自 _probe_duration）。`-output_ts_offset` 是
+      "加在输入 PTS 之上"语义，要让输出 tfdt 等于 ts_offset 必须用
+      `effective_offset = ts_offset - input_start_time`。否则旧的 tfdt 残留会被滚进新输出。
+    - is_already_fmp4=True 时（--force 重跑已迁移目录）：
+      * 输入改为 init+fragment 拼接后的临时文件（fMP4 fragment 单文件无 moov 无法被
+        ffmpeg 直接读取）
+      * codec 改为 `-c:v copy` —— 已经是 H.264，仅 remux 应用新 tfdt 即可，无须再编码
 
     返回 True 表示段已替换为 fMP4。
     """
@@ -117,26 +197,64 @@ def _transcode_segment_to_fmp4(
     tmp_segment_template = target_dir / f".{stem}.tmp_seg_%d.mp4"
     tmp_segment = target_dir / f".{stem}.tmp_seg_0.mp4"
     tmp_playlist = target_dir / f".{stem}.tmp.m3u8"
+    tmp_input: Optional[Path] = None  # 拼接 init+fragment 的临时输入文件
 
     def _cleanup() -> None:
         for p in (tmp_init, tmp_segment, tmp_playlist):
             p.unlink(missing_ok=True)
+        if tmp_input is not None:
+            tmp_input.unlink(missing_ok=True)
 
     _cleanup()
+
+    # 确定 ffmpeg 输入路径
+    input_path = segment_path
+    if is_already_fmp4:
+        if not init_path.exists():
+            logger.warning(
+                "is_already_fmp4 but init.mp4 missing, cannot transcode: %s",
+                segment_path,
+            )
+            return False
+        tmp_input = target_dir / f".{stem}.tmp_input.mp4"
+        try:
+            with tmp_input.open("wb") as out:
+                out.write(init_path.read_bytes())
+                out.write(segment_path.read_bytes())
+        except OSError as e:
+            logger.warning("concat input failed %s: %s", segment_path, e)
+            _cleanup()
+            return False
+        input_path = tmp_input
 
     cmd = [
         ffmpeg_bin,
         "-y",
         "-loglevel", "error",
-        "-i", str(segment_path),
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
+        "-i", str(input_path),
+    ]
+    if is_already_fmp4:
+        # 已是 H.264，仅 remux 应用新 tfdt offset，无质量损失
+        cmd += ["-c:v", "copy"]
+    else:
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+        ]
+    # ffmpeg -output_ts_offset 是 "加" 不是 "钉" 语义：
+    #   output_pts = input_pts + offset
+    # 我们希望 output_tfdt(= first output_pts) = ts_offset。input 首 PTS = input_start_time，
+    # 所以 offset 必须等于 ts_offset - input_start_time。对新鲜 mp4v 输入此式 ≈ ts_offset。
+    effective_offset = ts_offset - input_start_time
+    cmd += [
         "-an",
-        "-output_ts_offset", f"{ts_offset:.6f}",
+        "-output_ts_offset", f"{effective_offset:.6f}",
         "-hls_segment_type", "fmp4",
-        "-hls_fmp4_init_filename", tmp_init.name,
+        # 必须用绝对路径：ffmpeg 8.x 的 HLS muxer 把此处的 basename 解析到进程 cwd
+        # 而不是 playlist 输出目录。详见 hls_strategy.py 同名注释。
+        "-hls_fmp4_init_filename", str(tmp_init),
         "-hls_segment_filename", str(tmp_segment_template),
         "-start_number", "0",
         "-hls_time", "99999",
@@ -177,9 +295,13 @@ def _transcode_segment_to_fmp4(
     except OSError as e:
         logger.warning("replace segment failed %s: %s", segment_path, e)
         tmp_segment.unlink(missing_ok=True)
+        if tmp_input is not None:
+            tmp_input.unlink(missing_ok=True)
         return False
 
     tmp_playlist.unlink(missing_ok=True)
+    if tmp_input is not None:
+        tmp_input.unlink(missing_ok=True)
     return True
 
 
@@ -365,7 +487,10 @@ def _migrate_step(
     for track_name, track_segs in (("raw", raw_segs), ("processed", proc_segs)):
         cumulative = 0.0
         for seg in track_segs:
-            dur = _probe_duration(ffprobe_bin, seg)
+            # 传入 init_path 让 --force 重跑场景能拼接探测 fMP4 fragment
+            dur, input_start_time, is_already_fmp4 = _probe_duration(
+                ffprobe_bin, seg, init_path,
+            )
             if dur is None or dur <= 0:
                 logger.warning(
                     "[probe failed] %s — 跳过该段（不更新 cumulative，不写 duration）",
@@ -376,6 +501,8 @@ def _migrate_step(
             capture_init = not init_already
             ok = _transcode_segment_to_fmp4(
                 ffmpeg_bin, seg, init_path, capture_init, cumulative,
+                is_already_fmp4=is_already_fmp4,
+                input_start_time=input_start_time,
             )
             if ok:
                 converted += 1

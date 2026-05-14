@@ -151,7 +151,10 @@ class HLSPersistenceStrategy:
             "-an",
             "-output_ts_offset", f"{ts_offset:.6f}",
             "-hls_segment_type", "fmp4",
-            "-hls_fmp4_init_filename", tmp_init.name,
+            # 必须用绝对路径：ffmpeg 8.x 的 HLS muxer 把此处的 basename 解析到进程 cwd
+            # 而不是 playlist 输出目录，导致 init 写到错误位置 + 段目录无 init.mp4 +
+            # Python 端 tmp_init.exists() 查不到 + 静默跳过 init 安装 + 原 mp4v 被覆盖丢失
+            "-hls_fmp4_init_filename", str(tmp_init),
             "-hls_segment_filename", str(tmp_segment_template),
             "-start_number", "0",
             "-hls_time", "99999",
