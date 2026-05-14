@@ -30,7 +30,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("transcode_segments")
 
@@ -53,30 +53,44 @@ def _resolve_ffmpeg() -> str:
         return "ffmpeg"
 
 
-_SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
+def _resolve_ffprobe(ffmpeg_bin: str) -> str:
+    """从 ffmpeg 路径推断匹配的 ffprobe 路径，找不到则回退到 PATH 里的 ffprobe。"""
+    p = Path(ffmpeg_bin)
+    if p.is_file():
+        candidate = p.with_name(p.name.replace("ffmpeg", "ffprobe"))
+        if candidate.exists():
+            return str(candidate)
+    return "ffprobe"
 
 
-def _ts_offset_seconds(segment_path: Path) -> float:
-    """计算当前段相对该 step+track 首段的偏移（秒）。
-
-    与 hls_strategy._ts_offset_seconds 同语义：每个段独立转码，输入 PTS 从 0 起，不补
-    偏移则所有 fragment 的 tfdt 都是 0，hls.js VOD 连续播放会卡在段尾。
-    """
-    m = _SEGMENT_FNAME_RE.match(segment_path.name)
-    if not m:
-        return 0.0
-    track, current_ts = m.group(1), int(m.group(2))
-    min_ts = current_ts
+def _probe_duration(ffprobe_bin: str, path: Path) -> Optional[float]:
+    """用 ffprobe 读取媒体时长（秒）。失败返回 None。"""
     try:
-        for entry in segment_path.parent.iterdir():
-            em = _SEGMENT_FNAME_RE.match(entry.name)
-            if em and em.group(1) == track:
-                ts = int(em.group(2))
-                if ts < min_ts:
-                    min_ts = ts
-    except OSError:
-        return 0.0
-    return max(0.0, (current_ts - min_ts) / 1_000_000.0)
+        result = subprocess.run(
+            [
+                ffprobe_bin, "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning("ffprobe failed (%s): %s", type(e).__name__, path)
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            "ffprobe rc=%s: %s\nstderr: %s",
+            result.returncode, path, result.stderr.strip(),
+        )
+        return None
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+_SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
 
 
 def _transcode_segment_to_fmp4(
@@ -84,12 +98,14 @@ def _transcode_segment_to_fmp4(
     segment_path: Path,
     init_path: Path,
     capture_init: bool,
+    ts_offset: float,
 ) -> bool:
     """就地把一个段升级为 fMP4，必要时同时产出 init.mp4。
 
     - capture_init=True 且 init_path 不存在时，把 ffmpeg 产出的 init 移到 init_path
     - 其它情况下产出的 init 一概丢弃
-    - 用 -output_ts_offset 把各段 PTS 起点累计起来，保证 hls.js 连续播放不停在段尾
+    - ts_offset 由调用方按累计 EXTINF 算好（与 hls_strategy._ts_offset_seconds 同语义），
+      让各 fragment 的 tfdt 累计 = playlist 时间线 = fragment 媒体时长
 
     返回 True 表示段已替换为 fMP4。
     """
@@ -101,7 +117,6 @@ def _transcode_segment_to_fmp4(
     tmp_segment_template = target_dir / f".{stem}.tmp_seg_%d.mp4"
     tmp_segment = target_dir / f".{stem}.tmp_seg_0.mp4"
     tmp_playlist = target_dir / f".{stem}.tmp.m3u8"
-    ts_offset = _ts_offset_seconds(segment_path)
 
     def _cleanup() -> None:
         for p in (tmp_init, tmp_segment, tmp_playlist):
@@ -210,12 +225,31 @@ def _playlist_already_fmp4(path: Path) -> bool:
     return "#EXT-X-MAP:" in head and "#EXT-X-VERSION:7" in head
 
 
-def _rewrite_playlist_header(path: Path, target_duration: int = 10) -> bool:
-    """把旧 VERSION:3 头部重写为 VERSION:7 + EXT-X-MAP。保留所有 EXTINF + 段文件名。"""
+def _rewrite_playlist_header(
+    path: Path,
+    durations: Optional[Dict[str, float]] = None,
+) -> bool:
+    """把旧头部重写为 VERSION:7 + EXT-X-MAP，并以 durations 覆盖 EXTINF。
+
+    - durations: 文件名 → 探测出的实际媒体时长（秒）。命中则覆盖原 EXTINF；
+      未命中则保留原 EXTINF（兼容部分段 ffprobe 失败的场景）
+    - EXTINF 必须与 fragment 媒体时长一致，否则 hls.js 段尾会卡 / 总时长会缩水
+    - TARGETDURATION = ceil(max(EXTINF))，与 hls_strategy 写新段时一致
+    """
     entries = _parse_playlist_entries(path)
     if not entries:
         logger.warning("playlist 空或解析失败，跳过重写: %s", path)
         return False
+
+    durations = durations or {}
+    new_entries: List[Tuple[float, str]] = []
+    for old_dur, fname in entries:
+        new_entries.append((durations.get(fname, old_dur), fname))
+
+    target_duration = max(
+        int(round(max((d for d, _ in new_entries), default=10.0))),
+        1,
+    )
 
     tmp_path = path.with_suffix(path.suffix + ".rewrite.tmp")
     lines: List[str] = [
@@ -224,7 +258,7 @@ def _rewrite_playlist_header(path: Path, target_duration: int = 10) -> bool:
         f"#EXT-X-TARGETDURATION:{target_duration}",
         '#EXT-X-MAP:URI="init.mp4"',
     ]
-    for dur, fname in entries:
+    for dur, fname in new_entries:
         lines.append(f"#EXTINF:{dur:.3f},")
         lines.append(fname)
     tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -260,14 +294,28 @@ def _collect_segments(step_dir: Path) -> List[Path]:
     )
 
 
+def _track_of(seg: Path) -> Optional[str]:
+    m = _SEGMENT_FNAME_RE.match(seg.name)
+    return m.group(1) if m else None
+
+
 def _migrate_step(
     step_dir: Path,
     ffmpeg_bin: str,
+    ffprobe_bin: str,
     base_dir: Path,
     dry_run: bool,
     force: bool,
 ) -> Tuple[int, int, int]:
-    """迁移一个 step 目录。返回 (converted, failed, skipped_segments)。"""
+    """迁移一个 step 目录。返回 (converted, failed, skipped_segments)。
+
+    新策略（与 hls_strategy 写新段路径一致）：
+    - 按 track 分组，按 ts_us 排序逐段转码
+    - 转码前先 ffprobe 探测输入媒体时长 = 该段未来的 EXTINF
+    - ts_offset 取该 track 已转好的累计 duration（即累计 EXTINF）
+    - 转码完成后把探测出的 duration 累加到 cumulative
+    - 最后用 durations 表覆盖 playlist 的 EXTINF —— 三套时间线对齐
+    """
     init_path = step_dir / "init.mp4"
     raw_playlist = step_dir / "raw_playlist.m3u8"
     proc_playlist = step_dir / "processed_playlist.m3u8"
@@ -277,6 +325,8 @@ def _migrate_step(
         and (not raw_playlist.exists() or _playlist_already_fmp4(raw_playlist))
         and (not proc_playlist.exists() or _playlist_already_fmp4(proc_playlist))
     )
+    # 即使 fMP4 头部已存在，--force 仍要重转 + 重算 EXTINF —— 老脚本可能用 wall-clock
+    # 公式生成过 EXTINF，需要刷新到 fragment 媒体时长。
     if already_migrated and not force:
         logger.info("[skip migrated] %s", step_dir.relative_to(base_dir))
         segments = _collect_segments(step_dir)
@@ -298,27 +348,51 @@ def _migrate_step(
         if not init_path.exists():
             logger.info("[dry-run] would create %s", init_path.relative_to(base_dir))
         for pl in (raw_playlist, proc_playlist):
-            if pl.exists() and not _playlist_already_fmp4(pl):
-                logger.info("[dry-run] would rewrite header %s", pl.relative_to(base_dir))
+            if pl.exists():
+                logger.info("[dry-run] would rewrite header+EXTINF %s", pl.relative_to(base_dir))
         return (0, 0, 0)
+
+    # 按 track 分组（_collect_segments 已经 sorted，但 raw / processed 是穿插的）
+    raw_segs = [s for s in segments if _track_of(s) == "raw"]
+    proc_segs = [s for s in segments if _track_of(s) == "processed"]
 
     # init 没产出过就让第一个段去捕获
     init_already = init_path.exists()
     converted = 0
     failed = 0
-    for seg in segments:
-        capture_init = not init_already
-        if _transcode_segment_to_fmp4(ffmpeg_bin, seg, init_path, capture_init):
-            converted += 1
-            if capture_init and init_path.exists():
-                init_already = True
-        else:
-            failed += 1
+    durations_by_track: Dict[str, Dict[str, float]] = {"raw": {}, "processed": {}}
 
-    # 重写 playlist 头部
-    for pl in (raw_playlist, proc_playlist):
-        if pl.exists() and not _playlist_already_fmp4(pl):
-            ok = _rewrite_playlist_header(pl)
+    for track_name, track_segs in (("raw", raw_segs), ("processed", proc_segs)):
+        cumulative = 0.0
+        for seg in track_segs:
+            dur = _probe_duration(ffprobe_bin, seg)
+            if dur is None or dur <= 0:
+                logger.warning(
+                    "[probe failed] %s — 跳过该段（不更新 cumulative，不写 duration）",
+                    seg.relative_to(base_dir),
+                )
+                failed += 1
+                continue
+            capture_init = not init_already
+            ok = _transcode_segment_to_fmp4(
+                ffmpeg_bin, seg, init_path, capture_init, cumulative,
+            )
+            if ok:
+                converted += 1
+                durations_by_track[track_name][seg.name] = dur
+                cumulative += dur
+                if capture_init and init_path.exists():
+                    init_already = True
+            else:
+                failed += 1
+
+    # 重写 playlist：无条件覆盖 EXTINF（新公式 = 探测出的 fragment 媒体时长）
+    for pl, durations in (
+        (raw_playlist, durations_by_track["raw"]),
+        (proc_playlist, durations_by_track["processed"]),
+    ):
+        if pl.exists():
+            ok = _rewrite_playlist_header(pl, durations=durations)
             logger.info(
                 "[playlist %s] %s",
                 "rewritten" if ok else "rewrite-failed",
@@ -337,6 +411,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不实际转码")
     parser.add_argument("--force", action="store_true", help="忽略已迁移标志，强制重转")
     parser.add_argument("--ffmpeg", default=None, help="ffmpeg 二进制路径（默认读 settings.ffmpeg_path）")
+    parser.add_argument("--ffprobe", default=None, help="ffprobe 二进制路径（默认从 ffmpeg 路径推断）")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -345,6 +420,7 @@ def main() -> int:
 
     base_dir = _resolve_base_dir(args.base_dir)
     ffmpeg_bin = args.ffmpeg or _resolve_ffmpeg()
+    ffprobe_bin = args.ffprobe or _resolve_ffprobe(ffmpeg_bin)
 
     if not base_dir.is_dir():
         logger.error("base_dir 不存在或不是目录: %s", base_dir)
@@ -352,6 +428,7 @@ def main() -> int:
 
     logger.info("base_dir = %s", base_dir)
     logger.info("ffmpeg = %s", ffmpeg_bin)
+    logger.info("ffprobe = %s", ffprobe_bin)
     logger.info("task_ids = %s", args.task_ids)
     if args.force:
         logger.info("--force 已开启：忽略已迁移标志")
@@ -380,7 +457,7 @@ def main() -> int:
         logger.info("[task %s] 发现 %d 个 step 目录", tid, len(step_dirs))
         for sd in step_dirs:
             converted, failed, skipped = _migrate_step(
-                sd, ffmpeg_bin, base_dir, args.dry_run, args.force,
+                sd, ffmpeg_bin, ffprobe_bin, base_dir, args.dry_run, args.force,
             )
             total_converted += converted
             total_failed += failed
