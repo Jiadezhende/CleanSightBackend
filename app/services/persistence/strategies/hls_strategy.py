@@ -55,6 +55,7 @@ class HLSPersistenceStrategy:
 
     # 段文件名格式：{track}_segment_{ts_us}.mp4
     _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
+    _EXTINF_RE = re.compile(r"^#EXTINF:([0-9.]+),?$")
 
     @classmethod
     def _ts_offset_seconds(cls, path: Path) -> float:
@@ -64,24 +65,42 @@ class HLSPersistenceStrategy:
         所有 fMP4 fragment 的 tfdt 都是 0，hls.js 在 VOD 单线连续播放时会停在第一段
         末尾不前进（必须手动 seek 才能恢复）。
 
-        本函数从同目录下 `{track}_segment_*.mp4` 取最早 ts_us，与当前段做差，得到累计
-        偏移；首段为 0。返回值传给 ffmpeg `-output_ts_offset` 即可让 tfdt 累计。
+        本函数读取同目录下 `{track}_playlist.m3u8` 中**当前段以前**所有 #EXTINF 求和。
+        EXTINF 公式是 len(frames)/fps —— 与 cv2.VideoWriter 写出的 fMP4 fragment 媒体
+        时长完全一致。这样保证三套时间线对齐：
+            tfdt(N) = Σ EXTINF(0..N-1) = fragment 在 MSE 中的实际起点
+
+        本函数在 `_persist_*_segment` 把当前段 append 到 playlist 之前调用，所以
+        playlist 此刻只含 0..N-1 段，求和即得本段的 tfdt 起点。首段读不到任何条目，
+        返回 0.0。
+
+        ⚠ 不要回退到「文件名 ts_us 差」的算法 —— 那是 wall-clock 抖动值，与 fragment
+        媒体时长不一致，会重新引入 hls.js 段尾停摆 / 总时长缩水 bug。
         """
         m = cls._SEGMENT_FNAME_RE.match(path.name)
         if not m:
             return 0.0
-        track, current_ts = m.group(1), int(m.group(2))
-        min_ts = current_ts
-        try:
-            for entry in path.parent.iterdir():
-                em = cls._SEGMENT_FNAME_RE.match(entry.name)
-                if em and em.group(1) == track:
-                    ts = int(em.group(2))
-                    if ts < min_ts:
-                        min_ts = ts
-        except OSError:
+        track = m.group(1)
+        playlist_path = path.parent / f"{track}_playlist.m3u8"
+        if not playlist_path.exists():
             return 0.0
-        return max(0.0, (current_ts - min_ts) / 1_000_000.0)
+        total = 0.0
+        try:
+            with playlist_path.open("r", encoding="utf-8") as f:
+                for raw in f:
+                    em = cls._EXTINF_RE.match(raw.strip())
+                    if em:
+                        try:
+                            total += float(em.group(1))
+                        except ValueError:
+                            continue
+        except OSError as e:
+            logger.warning(
+                "[HLS] read playlist for ts_offset failed (%s): %s — using 0",
+                e, playlist_path,
+            )
+            return 0.0
+        return max(0.0, total)
 
     @classmethod
     def _transcode_to_fmp4_segment(cls, path: Path) -> None:
@@ -95,7 +114,9 @@ class HLSPersistenceStrategy:
         - init.mp4 每 step 一份共享：首次写入时落盘到 step 目录，已存在则丢弃产出物
           （同 step 同摄像头、同编码参数，SPS/PPS 一致，可安全复用）
         - 各 fragment 的 tfdt 必须累计：用 `-output_ts_offset` 把当前段的 PTS 起点平移到
-          (current_ts_us - first_ts_us) 秒，保证 hls.js 连续播放不停在段尾
+          已写入 playlist 的累计 EXTINF（即 Σ len(frames_prev)/fps）。EXTINF 公式与
+          fragment 媒体时长保持一致（见 `_persist_*_segment` 的 segment_duration），
+          三套时间线对齐 —— hls.js 连续播放不停在段尾、总时长也不会缩水
 
         失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
@@ -259,12 +280,11 @@ class HLSPersistenceStrategy:
 
         self._transcode_to_fmp4_segment(raw_segment_path)
 
-        # 2. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
-        if len(frames) > 1:
-            actual_duration = frames[-1].timestamp - frames[0].timestamp
-            segment_duration = actual_duration + (1.0 / self.raw_fps)
-        else:
-            segment_duration = 1.0 / self.raw_fps
+        # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
+        # cv2.VideoWriter 用固定 fps 写 N 帧 → 输出 mp4v 媒体时长 = N/fps，
+        # ffmpeg 转码到 fMP4 保持该时长。EXTINF 用 wall-clock 帧时间戳差会引入抖动，
+        # 与 fragment 实际时长偏差 0.5+ 秒 → hls.js 段尾 MSE 缓冲洞 → 卡死 + 总时长缩水。
+        segment_duration = len(frames) / self.raw_fps
 
         # 3 & 4. 持锁更新播放列表和 metadata（防止并发写入竞态）
         raw_playlist_path = target_dir / "raw_playlist.m3u8"
@@ -367,12 +387,9 @@ class HLSPersistenceStrategy:
                 retryable=True,
             ) from e
 
-        # 3. 计算视频段时长（使用实际时间戳计算时长，而非帧数/fps）
-        if len(frames) > 1:
-            actual_duration = frames[-1].timestamp - frames[0].timestamp
-            segment_duration = actual_duration + (1.0 / self.processed_fps)
-        else:
-            segment_duration = 1.0 / self.processed_fps
+        # 3. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
+        # 详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致 hls.js 段尾停摆。
+        segment_duration = len(frames) / self.processed_fps
 
         # 4 & 5. 持锁更新播放列表和 metadata（防止并发写入竞态）
         playlist_path = target_dir / "processed_playlist.m3u8"
