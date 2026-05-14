@@ -286,22 +286,6 @@ def _parse_existing_playlist(playlist_path: Path) -> Dict[str, float]:
     return durations
 
 
-def _estimate_durations(
-    segs: List[SegmentRef], default_duration: float
-) -> Dict[str, float]:
-    """从 ts_us 间隔估算每段时长（最后一段用 default_duration）。"""
-    durations: Dict[str, float] = {}
-    for i, s in enumerate(segs):
-        if i + 1 < len(segs):
-            dur = (segs[i + 1].ts_us - s.ts_us) / 1_000_000.0
-            if dur <= 0:
-                dur = default_duration
-        else:
-            dur = default_duration
-        durations[s.filename] = dur
-    return durations
-
-
 def _build_vod_playlist(
     request: Request,
     finder: SegmentFinder,
@@ -315,6 +299,7 @@ def _build_vod_playlist(
     - 要求 segs 已经按时序排序、非空
     - 调用方负责处理 segs 为空时的 404
     - init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
+    - segs 经 playlist 过滤后为空（全部为在途段）→ 抛 404
     """
     task_dir = finder.task_dir(task_id, step_id)
     init_path = task_dir / "init.mp4"
@@ -340,11 +325,15 @@ def _build_vod_playlist(
     except Exception:
         default_dur = 10.0
 
-    estimated = _estimate_durations(segs, default_dur)
+    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF。不在 playlist 中的段视为
+    # 在途段（mp4v 已落但 transcode+append 未完成），过滤掉——避免回放出现
+    # 与 fmp4 tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
+    segs = [s for s in segs if s.filename in real_durations]
+    if not segs:
+        raise HTTPException(status_code=404, detail="No playable segments yet")
 
     target_duration = max(
         int(round(max(real_durations.values(), default=default_dur))),
-        int(round(max(estimated.values(), default=default_dur))),
         1,
     )
 
@@ -362,7 +351,7 @@ def _build_vod_playlist(
         f'#EXT-X-MAP:URI="{base_url}/media/init/{init_token}"',
     ]
     for s in segs:
-        dur = real_durations.get(s.filename, estimated.get(s.filename, default_dur))
+        dur = real_durations[s.filename]
         token = MediaToken.default().sign(
             task_id=s.task_id, step_id=s.step_id, filename=s.filename, kind="segment",
         )

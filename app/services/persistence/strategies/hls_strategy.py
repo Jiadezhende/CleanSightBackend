@@ -278,15 +278,14 @@ class HLSPersistenceStrategy:
                 retryable=True,
             ) from e
 
-        self._transcode_to_fmp4_segment(raw_segment_path)
-
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
         # cv2.VideoWriter 用固定 fps 写 N 帧 → 输出 mp4v 媒体时长 = N/fps，
         # ffmpeg 转码到 fMP4 保持该时长。EXTINF 用 wall-clock 帧时间戳差会引入抖动，
         # 与 fragment 实际时长偏差 0.5+ 秒 → hls.js 段尾 MSE 缓冲洞 → 卡死 + 总时长缩水。
         segment_duration = len(frames) / self.raw_fps
 
-        # 3 & 4. 持锁更新播放列表和 metadata（防止并发写入竞态）
+        # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
+        # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
         raw_playlist_path = target_dir / "raw_playlist.m3u8"
         with self._get_dir_lock(target_dir):
             try:
@@ -298,9 +297,9 @@ class HLSPersistenceStrategy:
                             "#EXT-X-TARGETDURATION:10\n"
                             '#EXT-X-MAP:URI="init.mp4"\n'
                         )
+                self._transcode_to_fmp4_segment(raw_segment_path)
                 with raw_playlist_path.open("a") as f:
-                    f.write(f"#EXTINF:{segment_duration:.3f},\n")
-                    f.write(f"{raw_segment_path.name}\n")
+                    f.write(f"#EXTINF:{segment_duration:.3f},\n{raw_segment_path.name}\n")
             except IOError as e:
                 raise PersistenceError(
                     message=f"Failed to update raw playlist: {raw_playlist_path}",
@@ -361,8 +360,6 @@ class HLSPersistenceStrategy:
                 retryable=True,
             ) from e
 
-        self._transcode_to_fmp4_segment(segment_path)
-
         # 2. 写keypoints JSON
         keypoints_path = target_dir / f"keypoints_{int(start_ts * 1e6)}.json"
         keypoints_list = []
@@ -391,7 +388,8 @@ class HLSPersistenceStrategy:
         # 详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致 hls.js 段尾停摆。
         segment_duration = len(frames) / self.processed_fps
 
-        # 4 & 5. 持锁更新播放列表和 metadata（防止并发写入竞态）
+        # 4 & 5. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
+        # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
         playlist_path = target_dir / "processed_playlist.m3u8"
         with self._get_dir_lock(target_dir):
             try:
@@ -403,9 +401,9 @@ class HLSPersistenceStrategy:
                             "#EXT-X-TARGETDURATION:10\n"
                             '#EXT-X-MAP:URI="init.mp4"\n'
                         )
+                self._transcode_to_fmp4_segment(segment_path)
                 with playlist_path.open("a") as f:
-                    f.write(f"#EXTINF:{segment_duration:.3f},\n")
-                    f.write(f"{segment_path.name}\n")
+                    f.write(f"#EXTINF:{segment_duration:.3f},\n{segment_path.name}\n")
             except IOError as e:
                 raise PersistenceError(
                     message=f"Failed to update processed playlist: {playlist_path}",
