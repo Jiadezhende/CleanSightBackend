@@ -446,6 +446,15 @@ class InferenceManager:
                 )
                 return
 
+            task = client_queues.get_task()
+            step_id = ClientQueues._resolve_step_id(task)
+            if step_id is None:
+                logger.error(
+                    "[InferenceManager] invalid current_step for client=%s task_id=%s, skip flush",
+                    client_id, task_id,
+                )
+                return
+
             seg_len = client_queues.ca_segment_len
             raw_frames = client_queues.drain_ca_raw()
             processed_frames = client_queues.drain_ca_processed()
@@ -454,8 +463,8 @@ class InferenceManager:
                 chunk = raw_frames[i : i + seg_len]
                 if chunk:
                     self.persistence_manager.persist_hls_segment(
-                        client_id=client_id,
                         task_id=task_id,
+                        step_id=step_id,
                         segment_type="raw",
                         frames=chunk,
                     )
@@ -464,8 +473,8 @@ class InferenceManager:
                 chunk = processed_frames[i : i + seg_len]
                 if chunk:
                     self.persistence_manager.persist_hls_segment(
-                        client_id=client_id,
                         task_id=task_id,
+                        step_id=step_id,
                         segment_type="processed",
                         frames=chunk,
                     )

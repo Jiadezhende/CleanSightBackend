@@ -2,9 +2,10 @@
 存储 TTL 清理 Worker
 
 职责：
-- 后台 daemon 线程，定期扫描 database/{client_id}/{task_id}/metadata.json
-- 删除 updated_at 超过 cleanup_days 天的任务目录
-- 活跃任务每 ~10s 更新一次 updated_at，不会被误删
+- 后台 daemon 线程，定期扫描 database/{task_id}/{step_id}/metadata.json
+- 删除 updated_at 超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度）
+- 顺手清空被全部 step 抽走后留下的空 task_id 目录
+- 活跃 step 每 ~10s 更新一次 updated_at，不会被误删
 """
 
 import json
@@ -59,16 +60,16 @@ class StorageCleanupWorker:
                 logger.exception("[StorageCleanup] Unexpected error during scan, will retry next interval")
 
     def _scan_and_clean(self) -> int:
-        """扫描并删除过期任务目录，返回删除数量。
+        """扫描并删除过期 step 目录 + 清空 task_id 父目录，返回删除的 step 数量。
 
         判定依据：metadata.json 中 updated_at 超过 cleanup_days 天。
-        活跃任务每 ~10s 更新一次 updated_at，永远不会被误删。
+        活跃 step 每 ~10s 更新一次 updated_at，永远不会被误删。
         """
         cutoff = datetime.now() - timedelta(days=self.cleanup_days)
         deleted = 0
 
         for metadata_path in self.db_dir.glob("*/*/metadata.json"):
-            task_dir = metadata_path.parent
+            step_dir = metadata_path.parent
             try:
                 with metadata_path.open("r", encoding="utf-8") as f:
                     meta = json.load(f)
@@ -87,13 +88,33 @@ class StorageCleanupWorker:
                 continue
 
             try:
-                shutil.rmtree(task_dir)
+                shutil.rmtree(step_dir)
                 deleted += 1
-                logger.info("[StorageCleanup] Deleted task dir: %s", task_dir)
+                logger.info("[StorageCleanup] Deleted step dir: %s", step_dir)
             except OSError as e:
-                logger.warning("[StorageCleanup] Failed to delete %s: %s", task_dir, e)
+                logger.warning("[StorageCleanup] Failed to delete %s: %s", step_dir, e)
 
-        if deleted:
-            logger.info("[StorageCleanup] Scan complete: deleted %d task(s)", deleted)
+        # 顺手清理被掏空的 task_id 父目录（仅删空目录，rmdir 对非空目录会安全失败）
+        empty_tasks = 0
+        for task_dir in self.db_dir.iterdir():
+            if not task_dir.is_dir():
+                continue
+            try:
+                next(task_dir.iterdir())
+            except StopIteration:
+                try:
+                    task_dir.rmdir()
+                    empty_tasks += 1
+                    logger.info("[StorageCleanup] Removed empty task dir: %s", task_dir)
+                except OSError as e:
+                    logger.debug("[StorageCleanup] Skip non-removable empty task dir %s: %s", task_dir, e)
+            except OSError as e:
+                logger.debug("[StorageCleanup] Skip unreadable task dir %s: %s", task_dir, e)
+
+        if deleted or empty_tasks:
+            logger.info(
+                "[StorageCleanup] Scan complete: deleted %d step(s), %d empty task dir(s)",
+                deleted, empty_tasks,
+            )
 
         return deleted

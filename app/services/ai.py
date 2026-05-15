@@ -60,10 +60,6 @@ def set_task(client_id: str, task: Optional[CleaningTask]) -> bool:
     return manager.set_task(client_id, task)
 
 
-def get_task(client_id: str) -> Optional[CleaningTask]:
-    """获取客户端的任务"""
-    return manager.get_task(client_id)
-
 
 def report_alarm(alarm_info: Dict[str, Any]):
     """上报告警信息（外部调用接口）

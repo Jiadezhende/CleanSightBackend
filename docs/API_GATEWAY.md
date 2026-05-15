@@ -202,7 +202,7 @@ ASGI scope
 | `gateway_rate_window` | `60` | 速率窗口（秒），**普通 & 宽松共用** |
 | `gateway_rate_ban_threshold` | `5` | 持续超限违规次数达到后封禁，`0` = 关闭升级 |
 | `gateway_rate_ban_window` | `60` | 违规计数窗口（秒） |
-| `gateway_relaxed_prefixes` | `/health,/task/message` | 宽松路径前缀（逗号分隔） |
+| `gateway_relaxed_prefixes` | `/health,/task/message,/admin-f3m8,/metrics,/media` | 宽松路径前缀（逗号分隔） |
 | `gateway_relaxed_rate_limit` | `600` | 宽松路径窗口内最大请求数 |
 | `gateway_scan_threshold` | `10` | 窗口内 404/405 次数达到后封禁 |
 | `gateway_scan_window` | `300` | 反扫描计数窗口（秒） |

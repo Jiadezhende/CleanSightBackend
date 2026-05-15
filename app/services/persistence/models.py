@@ -14,10 +14,13 @@ from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmMetric,
 
 @dataclass
 class HLSPersistenceTask:
-    """HLS视频段持久化任务"""
+    """HLS视频段持久化任务
 
-    client_id: str
+    存储分区键为 (task_id, step_id)，与运行时 client_id（即 source_ip）解耦。
+    """
+
     task_id: int
+    step_id: int
     segment_type: str  # "raw" or "processed"
     frames: List[FrameData]
     timestamp: float = field(default_factory=time.time)
@@ -76,6 +79,7 @@ class AlarmPersistenceTask:
             "alarm_level": self.alarm_level,
             "alarm_message": self.alarm_message,
             "detection_result": self.detection_result,
+            "detected_at": self.timestamp,
         }
 
 
