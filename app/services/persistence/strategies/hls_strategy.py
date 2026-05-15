@@ -277,6 +277,9 @@ class HLSPersistenceStrategy:
           fragment（ftyp+moof+mdat），符合 HLS 协议要求
         - init.mp4 每 step 一份共享：首次写入时落盘到 step 目录 + 缓存 timescale 到
           `.hls_timescale`，已存在则丢弃产出物（同 step 同摄像头、同编码参数，SPS/PPS 一致）
+        - ffmpeg 子进程 cwd=target_dir + 输出全 basename：ffmpeg 4.x/8.x 对
+          `-hls_fmp4_init_filename` 的绝对路径解析行为相反（4.x 拼到 playlist 目录前，
+          8.x 拼到进程 cwd），只有「cwd=输出目录 + basename」在两个版本上都对
         - 各 fragment 的 tfdt 必须累计 = 已写入 playlist 的累计 EXTINF（即 Σ len(frames_prev)/fps）。
           但 ffmpeg 8.x HLS muxer + fmp4 在 `-start_number 0` 下会把 tfdt 强制清零，
           `-output_ts_offset` 被丢弃。这里改成转码完直接 hex-patch tfdt baseMediaDecodeTime
@@ -304,11 +307,19 @@ class HLSPersistenceStrategy:
         # 预清理可能残留的同名临时文件
         _cleanup_tmp()
 
+        # 路径策略：ffmpeg 子进程 cwd=target_dir，所有输出文件全部传 basename。
+        # 历史踩坑：
+        #   - ffmpeg 8.x (Windows) 把 `-hls_fmp4_init_filename` 的 basename 解析到
+        #     进程 cwd，传绝对路径才对
+        #   - ffmpeg 4.x (Ubuntu 22.04) 把绝对路径**当相对路径**拼到 playlist 目录前，
+        #     得到 `/dir/foo/dir/foo/.init.mp4` 这种荒诞路径 → ENOENT
+        # 两版行为正好相反，唯一兼容写法就是 cwd=target_dir + basename：两边都拼到
+        # target_dir。详见 docs/HLS_TIMELINE_PITFALL.md。
         cmd = [
             settings.ffmpeg_path,
             "-y",
             "-loglevel", "error",
-            "-i", str(path),
+            "-i", str(path),  # 输入保留绝对路径，与 cwd 无关
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "23",
@@ -317,17 +328,14 @@ class HLSPersistenceStrategy:
             # tfdt 偏移不在这里靠 -output_ts_offset 实现（ffmpeg 8.x HLS muxer + fmp4
             # 在 -start_number 0 下会清零 tfdt）—— 改成 transcode 完后 hex-patch tfdt box。
             "-hls_segment_type", "fmp4",
-            # 必须用绝对路径：ffmpeg 8.x 的 HLS muxer 把此处的 basename 解析到进程 cwd
-            # 而不是 playlist 输出目录，导致 init 写到错误位置 + 段目录无 init.mp4 +
-            # Python 端 tmp_init.exists() 查不到 + 静默跳过 init 安装 + 原 mp4v 被覆盖丢失
-            "-hls_fmp4_init_filename", str(tmp_init),
-            "-hls_segment_filename", str(tmp_segment_template),
+            "-hls_fmp4_init_filename", tmp_init.name,
+            "-hls_segment_filename", tmp_segment_template.name,
             "-start_number", "0",
             "-hls_time", "99999",
             "-hls_list_size", "0",
             "-hls_flags", "temp_file",
             "-f", "hls",
-            str(tmp_playlist),
+            tmp_playlist.name,
         ]
         try:
             result = subprocess.run(
@@ -335,6 +343,7 @@ class HLSPersistenceStrategy:
                 capture_output=True,
                 text=True,
                 timeout=120,
+                cwd=str(target_dir),
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.warning(

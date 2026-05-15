@@ -173,9 +173,64 @@ db/1/1 这三段是 commit `18f43c2` 之后录的（同日凌晨），但 tfdt �
 
 ---
 
+## Bug C：ffmpeg 4.x 和 8.x 对 `-hls_fmp4_init_filename` 路径解析行为相反
+
+> **现象上报**：本地 Windows 跑没事；部署到 Ubuntu 22.04 后 lab 页面提示 `manifestLoadError`，后端日志每段转码都 fail，stderr 是 `Failed to open segment '/path/.init.mp4'` + `No such file or directory`，playlist 端点因 init.mp4 不存在统一返回 503
+
+### 同样的命令，两个版本相反的"解释"
+
+服务器 ffmpeg 4.4.2 手工跑相同命令，关键日志：
+
+```
+[hls @ ...] Opening '/home/ubuntu/.../database/1778816485014/2//home/ubuntu/.../database/1778816485014/2/.test_init.mp4' for writing
+[hls @ ...] Failed to open segment '/home/.../2/.test_init.mp4'
+```
+
+`/home/.../2/` 出现两次 —— ffmpeg 4.x 把 `-hls_fmp4_init_filename` 收到的**绝对路径**当作相对 playlist 目录的相对路径，拼接出 `<playlist_dir><absolute_init_path>` 这种荒诞路径 → ENOENT。
+
+而 commit `18f43c2` 当初把这里改成绝对路径，是因为 **ffmpeg 8.x (Windows)** 行为正相反：传 basename 会解析到 ffmpeg 进程的 cwd（而不是 playlist 目录），导致 init.mp4 落到错误位置 + 段目录没 init.mp4 + Python `tmp_init.exists()` 查不到 + 静默跳过 init 安装。
+
+| ffmpeg 版本 | 传绝对路径 | 传 basename |
+|---|---|---|
+| 4.4.2 Ubuntu | ❌ 拼到 playlist 目录前 | ✅ 解析到 playlist 目录 |
+| 8.0.1 Windows | ✅ 直接用 | ❌ 解析到 cwd |
+
+两个版本各对一半，没有「一种写法两版都对」的方案。试过 `-hls_segment_filename` 也一样，同源解析逻辑。
+
+### 修法
+
+子进程 `cwd=target_dir` + 三个输出路径全部传 basename：
+
+```python
+cmd = [
+    ffmpeg, "-y", "-i", str(path),  # 输入保留绝对路径，与 cwd 无关
+    ..., "-hls_segment_type", "fmp4",
+    "-hls_fmp4_init_filename", tmp_init.name,         # basename
+    "-hls_segment_filename", tmp_segment_template.name,  # basename
+    "-f", "hls", tmp_playlist.name,                    # basename
+]
+subprocess.run(cmd, ..., cwd=str(target_dir))
+```
+
+- ffmpeg 4.x：basename → 拼 playlist 目录 = target_dir ✓
+- ffmpeg 8.x：basename → 拼 cwd = target_dir ✓
+
+Python 端的 `tmp_init.exists()` / `os.replace(...)` 等仍用绝对 Path 对象，不受影响。
+
+### 经验外溢
+
+「在本地能跑，部署就挂」这类问题，**几乎都是某个外部工具的版本/平台差异**。Python 代码本身大概率没问题，去看子进程、共享库、系统调用的实际行为差异：
+
+- 把出错的命令**原封不动手工跑一遍**（关键！本案两小时的猜测在 30 秒手工复现下立刻定位）
+- 看 ffmpeg / 其他工具的**详细日志**（`-loglevel debug` 之类），尤其是它"自己声明的"路径解析结果（Linux 服务器那条 `Opening '...//...'` 日志直接暴露了拼路径 bug）
+- 不要相信生产环境跟本地"差不多" —— 一个 ffmpeg 主版本号差异就能让一段被 review 过、测试过、commit 过的代码完全失效
+
+---
+
 ## 经验
 
 1. **commit message 说「修复了 X」≠ X 真的修了** —— 拿真实产物验。看 m3u8 文件、解 fmp4 box，别只看 ffmpeg 进程退出码 0
 2. **三个时长不一致时，每个数字单独看都自洽** —— 必须对照根因（媒体数据本身、playlist 元数据、播放器渲染）逐层 reconcile
 3. **ffmpeg HLS muxer + fmp4 的 tfdt 不可外部注入** —— 8.x 实测如此。需要 tfdt 累计偏移就 hex-patch，别再试 ffmpeg flag 组合
 4. **ISO BMFF box 解析不需要第三方库** —— `struct.unpack('>I', ...)` + 递归就够用，比引入 `pymp4` / `mp4parser` 之类轻量
+5. **跨平台调外部进程，cwd + basename 比绝对路径稳** —— 至少对 ffmpeg HLS muxer 是这样。绝对路径会暴露版本间的路径拼接策略差异
