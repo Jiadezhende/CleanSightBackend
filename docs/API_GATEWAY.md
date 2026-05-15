@@ -162,13 +162,16 @@ ASGI scope
 提取 IP（优先 X-Forwarded-For，回退 scope.client[0]）
    │
    ▼
-是否为宽松路径？（path.startswith(prefix) for prefix in gateway_relaxed_prefixes）
+路径分类：bypass > relaxed > normal（path.startswith 前缀匹配）
    │
    ▼
 1) whitelist.is_allowed(ip) → 否则 403
-2) 速率检查：宽松路径用独立高配额 bucket，普通路径用标准 bucket → 否则 429
+2) 速率检查：
+   - bypass 路径：完全跳过
+   - 宽松路径：独立高配额 bucket
+   - 普通路径：标准 bucket → 否则 429
 3) WebSocket → 直接透传，不包装响应（路由层自行鉴权）
-4) HTTP → 包装 send 拦截响应 status，非宽松路径时 antiscan.record_error()
+4) HTTP → 包装 send 拦截响应 status，仅普通路径时 antiscan.record_error()
 ```
 
 ### 宽松路径机制（关键设计点）
@@ -183,6 +186,18 @@ ASGI scope
 - **不触发** 速率超限升级封禁（`_relaxed_ratelimit` 构造时未传 `ban_store`）
 
 匹配使用 `str.startswith()` 前缀匹配，因此 `/health` 覆盖 `/health/monitor/stats` 等子路径。
+
+### 绕过路径机制（bypass）
+
+某些路由自带强鉴权（如 `/media/*` 走 HMAC-SHA256 token + 短 TTL），破不了 token 的流量发不进来，再叠加速率限制只会误伤合法 HLS 高频段请求。
+
+`gateway_bypass_prefixes`（默认 `/media`）匹配的路径：
+
+- **完全跳过** 速率限制（既不消耗普通 bucket，也不消耗宽松 bucket）
+- **不计入** 反扫描计数
+- 仅保留 IP 白名单/封禁检查
+
+**前提**：bypass 前缀下的所有路由必须自行做强鉴权，否则等同于裸暴露。新增 bypass 路径前先确认这一点。
 
 ### IP 提取策略
 
@@ -202,8 +217,9 @@ ASGI scope
 | `gateway_rate_window` | `60` | 速率窗口（秒），**普通 & 宽松共用** |
 | `gateway_rate_ban_threshold` | `5` | 持续超限违规次数达到后封禁，`0` = 关闭升级 |
 | `gateway_rate_ban_window` | `60` | 违规计数窗口（秒） |
-| `gateway_relaxed_prefixes` | `/health,/task/message,/admin-f3m8,/metrics,/media` | 宽松路径前缀（逗号分隔） |
+| `gateway_relaxed_prefixes` | `/health,/task/message,/admin-f3m8,/metrics` | 宽松路径前缀（逗号分隔） |
 | `gateway_relaxed_rate_limit` | `600` | 宽松路径窗口内最大请求数 |
+| `gateway_bypass_prefixes` | `/media` | 完全绕过速率限制+反扫描的前缀（仅靠路由层 token 鉴权） |
 | `gateway_scan_threshold` | `10` | 窗口内 404/405 次数达到后封禁 |
 | `gateway_scan_window` | `300` | 反扫描计数窗口（秒） |
 | `gateway_ban_duration` | `3600` | 封禁时长（秒），白名单被动封禁 + 速率升级封禁 + 反扫描封禁共用 |

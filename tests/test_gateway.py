@@ -28,6 +28,7 @@ def _make_settings(**overrides):
     s.gateway_rate_ban_window = 60
     s.gateway_relaxed_prefixes = "/health,/task/message"
     s.gateway_relaxed_rate_limit = 600
+    s.gateway_bypass_prefixes = "/media"
     s.gateway_scan_threshold = 10
     s.gateway_scan_window = 300
     s.gateway_ban_duration = 3600
@@ -47,6 +48,7 @@ def _reset_gateway():
         middleware._ratelimit = None
         middleware._relaxed_ratelimit = None
         middleware._relaxed_prefixes = ()
+        middleware._bypass_prefixes = ()
         middleware._antiscan = None
     yield
 
@@ -285,6 +287,43 @@ class TestGatewayMiddlewareHTTP:
         assert resp.status_code != 429
         assert resp.status_code != 403
 
+    async def test_bypass_prefix_skips_rate_limit(self):
+        """bypass 前缀（如 /media）完全跳过速率限制，token 鉴权由路由层负责"""
+        gw = _find_gateway_middleware()
+        assert gw is not None
+
+        _init_gw(gw, _make_settings(
+            gateway_rate_limit=1,           # 普通路径极紧
+            gateway_relaxed_rate_limit=1,   # 宽松也极紧
+            gateway_bypass_prefixes="/media",
+            gateway_scan_threshold=1000,
+        ))
+        async with await self._client("127.0.0.1") as client:
+            # /media/segment/<bad-token> 会被路由层 403，但中间件不应限流
+            for _ in range(20):
+                resp = await client.get("/media/segment/fake")
+        assert resp.status_code != 429
+
+    async def test_bypass_prefix_skips_antiscan(self):
+        """bypass 前缀的 404 不计入反扫描计数，避免合法 token 流量误触发封禁"""
+        gw = _find_gateway_middleware()
+        assert gw is not None
+
+        _init_gw(gw, _make_settings(
+            gateway_scan_threshold=3,
+            gateway_scan_window=60,
+            gateway_ban_duration=3600,
+            gateway_rate_limit=1000,
+            gateway_bypass_prefixes="/media",
+        ))
+        async with await self._client("127.0.0.1") as client:
+            # /media/* 的 404/403 应该不计入反扫描
+            for _ in range(5):
+                await client.get("/media/segment/invalid_token")
+            # 仍能正常访问
+            resp = await client.get("/health/status")
+        assert resp.status_code != 403
+
     async def test_405_scan_triggers_ban(self):
         """405（方法枚举）达到阈值后触发封禁"""
         gw = _find_gateway_middleware()
@@ -443,6 +482,9 @@ def _init_gw(gw: GatewayMiddleware, mock_settings) -> None:
     )
     gw._relaxed_prefixes = tuple(
         p.strip() for p in mock_settings.gateway_relaxed_prefixes.split(",") if p.strip()
+    )
+    gw._bypass_prefixes = tuple(
+        p.strip() for p in mock_settings.gateway_bypass_prefixes.split(",") if p.strip()
     )
     gw._antiscan = AntiScanStore(
         threshold=mock_settings.gateway_scan_threshold,

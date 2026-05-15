@@ -914,7 +914,7 @@ curl -X GET "http://localhost:8000/task/1/alarms"
 - **URL**: `GET /task/message/{task_id}?since_seq=<seq>`
 - **用途**: 前端实时告警提示，按 seq 增量拉取（建议 1~2 Hz）。返回内存快照：检测结果、时序事件、最近 5 条内存告警。
 
-> `/task/message/*` 属于 Gateway **宽松路径**（默认 `gateway_relaxed_prefixes="/health,/task/message,/admin-f3m8,/metrics,/media"`），高频轮询不会触发升级封禁。详见 [API_GATEWAY.md](API_GATEWAY.md)。
+> `/task/message/*` 属于 Gateway **宽松路径**（默认 `gateway_relaxed_prefixes="/health,/task/message,/admin-f3m8,/metrics"`），高频轮询不会触发升级封禁。`/media/*` 自带 token 鉴权，已改为 **bypass 路径**（`gateway_bypass_prefixes="/media"`），完全跳过速率限制。详见 [API_GATEWAY.md](API_GATEWAY.md)。
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
