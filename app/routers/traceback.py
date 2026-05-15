@@ -467,14 +467,34 @@ async def get_alarm_evidence_playlist(
 def _step_duration_ms(
     finder: SegmentFinder, task_id: int, step_id: int
 ) -> Tuple[int, int, int]:
-    """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。"""
-    raw_segs = finder.list_segments(task_id, step_id, "raw")
-    proc_segs = finder.list_segments(task_id, step_id, "processed")
-    all_ts = [s.ts_us for s in (raw_segs + proc_segs)]
-    if not all_ts:
+    """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。
+
+    end_ms 必须取 max(seg.ts + EXTINF)，而不是 max(seg.ts) —— 后者会漏掉最后一段
+    自身长度。EXTINF 是 hls.js / fragment 媒体时长的同源真值，对齐到它才能保证
+    lab 页面顶部"时长 / 进度条右端"和 <video>.duration 一致。
+
+    在途段（mp4v 已落、transcode+append 未完成）在 playlist 里查不到 EXTINF，
+    跳过 —— 与 `_build_vod_playlist` 的过滤策略保持一致。raw / processed 双轨都
+    纳入，取并集的最早起点和最晚终点。
+    """
+    task_dir = finder.task_dir(task_id, step_id)
+    start_us: Optional[int] = None
+    end_us: Optional[int] = None
+    for track in ("raw", "processed"):
+        durations = _parse_existing_playlist(task_dir / f"{track}_playlist.m3u8")
+        if not durations:
+            continue
+        for s in finder.list_segments(task_id, step_id, track):
+            dur = durations.get(s.filename)
+            if dur is None:
+                continue
+            seg_end_us = s.ts_us + int(round(dur * 1_000_000))
+            if start_us is None or s.ts_us < start_us:
+                start_us = s.ts_us
+            if end_us is None or seg_end_us > end_us:
+                end_us = seg_end_us
+    if start_us is None or end_us is None:
         return 0, 0, 0
-    start_us = min(all_ts)
-    end_us = max(all_ts)
     return start_us // 1000, end_us // 1000, max(0, (end_us - start_us) // 1000)
 
 

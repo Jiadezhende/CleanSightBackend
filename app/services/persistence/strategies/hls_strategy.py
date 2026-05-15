@@ -12,11 +12,12 @@ import json
 import logging
 import os
 import re
+import struct
 import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -56,6 +57,10 @@ class HLSPersistenceStrategy:
     # 段文件名格式：{track}_segment_{ts_us}.mp4
     _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
     _EXTINF_RE = re.compile(r"^#EXTINF:([0-9.]+),?$")
+
+    # ISO/IEC 14496-12 box 容器集合：递归扫描 box 树时只下钻这些类型，
+    # 其余 box（含 tfdt、mdhd）按 leaf 处理。
+    _BOX_CONTAINERS = frozenset({b"moov", b"trak", b"mdia", b"moof", b"traf", b"mvex"})
 
     @classmethod
     def _ts_offset_seconds(cls, path: Path) -> float:
@@ -103,20 +108,180 @@ class HLSPersistenceStrategy:
         return max(0.0, total)
 
     @classmethod
+    def _iter_boxes(cls, data: bytes, start: int, end: int):
+        """遍历 [start, end) 范围内的 ISO BMFF box，逐个 yield (type, body_start, body_end)。
+
+        遇到 `cls._BOX_CONTAINERS` 中的容器盒返回容器本身的位置，调用方自行决定
+        是否再次 `_iter_boxes` 下钻。截断或 size 异常时停止。
+        """
+        i = start
+        while i + 8 <= end:
+            size = struct.unpack(">I", data[i : i + 4])[0]
+            typ = data[i + 4 : i + 8]
+            header = 8
+            if size == 1:
+                if i + 16 > end:
+                    return
+                size = struct.unpack(">Q", data[i + 8 : i + 16])[0]
+                header = 16
+            elif size == 0:
+                size = end - i  # extends to container end
+            if size < header or i + size > end:
+                return
+            yield typ, i + header, i + size
+            i += size
+
+    @classmethod
+    def _find_box_path(
+        cls, data: bytes, start: int, end: int, path: Tuple[bytes, ...]
+    ) -> Optional[Tuple[int, int]]:
+        """按 box 类型路径定位最里层 box，返回其 body 范围；找不到返回 None。
+
+        path 形如 (b'moov', b'trak', b'mdia', b'mdhd')。中间节点必须是容器；
+        最后一段是 leaf（不再下钻）。
+        """
+        if not path:
+            return start, end
+        head, *rest = path
+        for typ, body_start, body_end in cls._iter_boxes(data, start, end):
+            if typ != head:
+                continue
+            if not rest:
+                return body_start, body_end
+            if typ in cls._BOX_CONTAINERS:
+                found = cls._find_box_path(data, body_start, body_end, tuple(rest))
+                if found is not None:
+                    return found
+        return None
+
+    @classmethod
+    def _read_timescale_from_init(cls, init_path: Path) -> Optional[int]:
+        """从 init.mp4 的 moov/trak/mdia/mdhd 读 timescale（赫兹）。
+
+        失败返回 None。fMP4 init segment 中仅有一个视频 trak，定位 path 固定。
+        """
+        try:
+            data = init_path.read_bytes()
+        except OSError as e:
+            logger.warning("[HLS] read init.mp4 failed (%s): %s", e, init_path)
+            return None
+        located = cls._find_box_path(
+            data, 0, len(data), (b"moov", b"trak", b"mdia", b"mdhd")
+        )
+        if located is None:
+            logger.warning("[HLS] mdhd not found in init.mp4: %s", init_path)
+            return None
+        body_start, body_end = located
+        # mdhd 结构：version(1) flags(3) 之后，version 0/1 决定 creation/modification/timescale/duration 宽度
+        if body_end - body_start < 4:
+            return None
+        version = data[body_start]
+        if version == 1:
+            ts_off = body_start + 4 + 8 + 8  # creation(8) + modification(8)
+            if body_end - body_start < 4 + 8 + 8 + 4:
+                return None
+        else:
+            ts_off = body_start + 4 + 4 + 4  # creation(4) + modification(4)
+            if body_end - body_start < 4 + 4 + 4 + 4:
+                return None
+        return struct.unpack(">I", data[ts_off : ts_off + 4])[0]
+
+    @classmethod
+    def _get_or_cache_timescale(cls, target_dir: Path) -> Optional[int]:
+        """读取 step dir 的 timescale；优先用 `.hls_timescale` 缓存文件，否则解析 init.mp4 并写缓存。
+
+        缓存文件单行十进制整数。解析失败 / init.mp4 缺失返回 None。
+        """
+        cache_path = target_dir / ".hls_timescale"
+        if cache_path.exists():
+            try:
+                txt = cache_path.read_text(encoding="utf-8").strip()
+                if txt.isdigit():
+                    return int(txt)
+            except OSError:
+                pass
+        init_path = target_dir / "init.mp4"
+        if not init_path.exists():
+            return None
+        ts = cls._read_timescale_from_init(init_path)
+        if ts is None or ts <= 0:
+            return None
+        try:
+            cache_path.write_text(str(ts), encoding="utf-8")
+        except OSError as e:
+            logger.warning("[HLS] write timescale cache failed (%s): %s", e, cache_path)
+        return ts
+
+    @classmethod
+    def _patch_fragment_tfdt(cls, fragment_path: Path, base_media_decode_time: int) -> bool:
+        """把 fmp4 fragment 的 moof/traf/tfdt.baseMediaDecodeTime 改写成指定值（单位=timescale tick）。
+
+        ffmpeg 8.x 的 HLS muxer 在 `-start_number 0` + fmp4 模式下会强制把 tfdt 清零，
+        `-output_ts_offset` / `-itsoffset+-copyts` / `-muxdelay` 均无效。改成转码完直接
+        hex-patch tfdt box 是稳妥做法 —— fmp4 box 结构固定，size 不变，纯 metadata 改写。
+
+        约定 tfdt 为 version 1（64-bit），ffmpeg HLS muxer 在 fmp4 输出时一律按 v1 写。
+        遇到 v0 / 找不到 tfdt 打 warning 并返回 False，不抛。
+        """
+        try:
+            data = bytearray(fragment_path.read_bytes())
+        except OSError as e:
+            logger.warning("[HLS] read fragment failed (%s): %s", e, fragment_path)
+            return False
+        moof = cls._find_box_path(bytes(data), 0, len(data), (b"moof",))
+        if moof is None:
+            logger.warning("[HLS] moof not found in %s — tfdt patch skipped", fragment_path)
+            return False
+        traf = cls._find_box_path(bytes(data), moof[0], moof[1], (b"traf",))
+        if traf is None:
+            logger.warning("[HLS] traf not found in %s — tfdt patch skipped", fragment_path)
+            return False
+        tfdt = cls._find_box_path(bytes(data), traf[0], traf[1], (b"tfdt",))
+        if tfdt is None:
+            logger.warning("[HLS] tfdt not found in %s — tfdt patch skipped", fragment_path)
+            return False
+        body_start, body_end = tfdt
+        if body_end - body_start < 4:
+            return False
+        version = data[body_start]
+        if version == 1:
+            if body_end - body_start < 4 + 8:
+                return False
+            struct.pack_into(">Q", data, body_start + 4, base_media_decode_time)
+        else:
+            if body_end - body_start < 4 + 4:
+                return False
+            if base_media_decode_time > 0xFFFFFFFF:
+                logger.warning(
+                    "[HLS] tfdt v0 overflow (%d > 2^32) in %s",
+                    base_media_decode_time, fragment_path,
+                )
+                return False
+            struct.pack_into(">I", data, body_start + 4, base_media_decode_time)
+        try:
+            fragment_path.write_bytes(bytes(data))
+        except OSError as e:
+            logger.warning("[HLS] write patched fragment failed (%s): %s", e, fragment_path)
+            return False
+        return True
+
+    @classmethod
     def _transcode_to_fmp4_segment(cls, path: Path) -> None:
         """将 cv2 写出的 mp4v 段转码为 HLS-ready fMP4 fragment，并写入 step 级 init.mp4。
 
-        Pipeline：cv2 mp4v → ffmpeg HLS muxer → init.mp4（首段）+ fMP4 fragment（原地替换）。
+        Pipeline：cv2 mp4v → ffmpeg HLS muxer → init.mp4（首段）+ fMP4 fragment（原地替换）
+        → hex-patch tfdt.baseMediaDecodeTime 写入累计偏移。
 
         - 普通 MP4（moov+mdat 整体）无法被 hls.js 在 m3u8 中作为段播放，会 fragParsingError
         - 改用 `-hls_segment_type fmp4` 让 ffmpeg 产出 init segment（ftyp+moov）+
           fragment（ftyp+moof+mdat），符合 HLS 协议要求
-        - init.mp4 每 step 一份共享：首次写入时落盘到 step 目录，已存在则丢弃产出物
-          （同 step 同摄像头、同编码参数，SPS/PPS 一致，可安全复用）
-        - 各 fragment 的 tfdt 必须累计：用 `-output_ts_offset` 把当前段的 PTS 起点平移到
-          已写入 playlist 的累计 EXTINF（即 Σ len(frames_prev)/fps）。EXTINF 公式与
-          fragment 媒体时长保持一致（见 `_persist_*_segment` 的 segment_duration），
-          三套时间线对齐 —— hls.js 连续播放不停在段尾、总时长也不会缩水
+        - init.mp4 每 step 一份共享：首次写入时落盘到 step 目录 + 缓存 timescale 到
+          `.hls_timescale`，已存在则丢弃产出物（同 step 同摄像头、同编码参数，SPS/PPS 一致）
+        - 各 fragment 的 tfdt 必须累计 = 已写入 playlist 的累计 EXTINF（即 Σ len(frames_prev)/fps）。
+          但 ffmpeg 8.x HLS muxer + fmp4 在 `-start_number 0` 下会把 tfdt 强制清零，
+          `-output_ts_offset` 被丢弃。这里改成转码完直接 hex-patch tfdt baseMediaDecodeTime
+          字段。三套时间线（EXTINF / tfdt / fragment 媒体时长）对齐到同一真值 ——
+          hls.js 连续播放不卡段尾、总时长不缩水
 
         失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
@@ -149,7 +314,8 @@ class HLSPersistenceStrategy:
             "-crf", "23",
             "-pix_fmt", "yuv420p",
             "-an",
-            "-output_ts_offset", f"{ts_offset:.6f}",
+            # tfdt 偏移不在这里靠 -output_ts_offset 实现（ffmpeg 8.x HLS muxer + fmp4
+            # 在 -start_number 0 下会清零 tfdt）—— 改成 transcode 完后 hex-patch tfdt box。
             "-hls_segment_type", "fmp4",
             # 必须用绝对路径：ffmpeg 8.x 的 HLS muxer 把此处的 basename 解析到进程 cwd
             # 而不是 playlist 输出目录，导致 init 写到错误位置 + 段目录无 init.mp4 +
@@ -200,14 +366,28 @@ class HLSPersistenceStrategy:
                 tmp_init.unlink(missing_ok=True)
 
         # fragment 原地替换原 mp4v 段文件
+        replaced = False
         try:
             os.replace(tmp_segment, path)
+            replaced = True
         except OSError as e:
             logger.warning("[HLS] failed to replace segment %s: %s", path, e)
             tmp_segment.unlink(missing_ok=True)
 
         # 临时 playlist 不再需要（由 persist_segment 自己维护）
         tmp_playlist.unlink(missing_ok=True)
+
+        # hex-patch tfdt：把累计 EXTINF（秒）→ timescale tick 写进 fragment 的 moof/traf/tfdt
+        # 没有 init.mp4 / timescale 读不到 → 跳过 patch，不影响首段（offset=0 本就正确）
+        if replaced and ts_offset > 0.0:
+            timescale = cls._get_or_cache_timescale(target_dir)
+            if timescale and timescale > 0:
+                cls._patch_fragment_tfdt(path, int(round(ts_offset * timescale)))
+            else:
+                logger.warning(
+                    "[HLS] timescale unavailable, tfdt patch skipped for %s (playback may stall)",
+                    path,
+                )
 
     def persist_segment(
         self, task_id: int, step_id: int, segment_type: str, frames: List[FrameData]

@@ -350,9 +350,11 @@ async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
     body = resp.json()
     assert body["task_id"] == 3
     assert body["step_id"] == 1
-    assert body["start_ms"] == 1_000  # 1s
-    assert body["end_ms"] == 21_000   # 21s
-    assert body["duration_ms"] == 20_000
+    assert body["start_ms"] == 1_000  # 1s（首段起点 ts_us=1_000_000）
+    # end_ms = 末段起点 + EXTINF。_seed_task 给每段 EXTINF=10s，末段 ts=21s → end=31s。
+    # 不能用「最大 ts_us」当 end，否则漏算最后一段自身长度，跟 hls.js 实播总时长对不上。
+    assert body["end_ms"] == 31_000   # 21s + 10s EXTINF
+    assert body["duration_ms"] == 30_000
 
     assert len(body["events"]) == 2
     # 应按 ts_ms 升序
