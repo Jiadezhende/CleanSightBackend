@@ -112,7 +112,7 @@ class LabelStudioClient:
         req = Request(
             url,
             headers={
-                "Authorization": f"Token {self._token}",
+                "Authorization": f"Bearer {self._token}",
                 "User-Agent": "CleanSightBackend/lab",
             },
             method="GET",
@@ -155,7 +155,7 @@ class LabelStudioClient:
             url,
             data=body,
             headers={
-                "Authorization": f"Token {self._token}",
+                "Authorization": f"Bearer {self._token}",
                 "Content-Type": content_type,
                 "User-Agent": "CleanSightBackend/lab",
                 "Accept": "application/json",

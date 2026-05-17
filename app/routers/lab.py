@@ -35,6 +35,7 @@ from app.services.lab import (
     ClipSpec,
     LabelStudioClient,
 )
+from app.services.lab import runtime_config
 from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
 from app.utils.exceptions import NotFoundError, ValidationError
 
@@ -96,6 +97,20 @@ class LabHealthResponse(BaseModel):
     error: Optional[str] = None
     label_studio_url: Optional[str] = None
     default_project_id: int
+
+
+class LabConfigResponse(BaseModel):
+    label_studio_url: str
+    default_project_id: int
+    token_configured: bool          # token 是否已配置（不返回明文）
+    source: str                     # "file"（页面改过）| "env"（回退环境变量）
+
+
+class LabConfigUpdateRequest(BaseModel):
+    label_studio_url: str = Field(
+        "", description="LS base URL；空表示未配置，非空须以 http:// 或 https:// 开头"
+    )
+    default_project_id: int = Field(0, ge=0, description="默认 project_id；0 表示无默认值")
 
 
 # ---------------------------------------------------------------------------
@@ -181,11 +196,15 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
     from app.settings import settings as s
 
     # ---- LS 配置检查（503）----
-    if not s.label_studio_url or not s.label_studio_token:
+    ls_url = runtime_config.get_url()
+    ls_token = runtime_config.get_token()
+    if not ls_url or not ls_token:
         raise _ls_not_configured()
 
     # ---- 入参校验（400）----
-    project_id = _resolve_project_id(req.project_id, s.label_studio_default_project_id)
+    project_id = _resolve_project_id(
+        req.project_id, runtime_config.get_default_project_id()
+    )
     ordered_clips = _validate_clips(
         req.clips,
         max_clips=s.lab_export_max_clips_per_submit,
@@ -212,8 +231,8 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
         max_duration_ms=s.lab_export_max_clip_ms,
     )
     ls = LabelStudioClient(
-        base_url=s.label_studio_url,
-        token=s.label_studio_token,
+        base_url=ls_url,
+        token=ls_token,
     )
 
     # 实际工作放到线程池里：ffmpeg/urlopen 都是阻塞调用
@@ -323,20 +342,22 @@ async def lab_health() -> LabHealthResponse:
 
     不抛异常：未配置时 configured=False，可达性判断时 reachable=False + error。
     """
-    from app.settings import settings as s
+    ls_url = runtime_config.get_url()
+    ls_token = runtime_config.get_token()
+    default_pid = runtime_config.get_default_project_id()
 
-    if not s.label_studio_url or not s.label_studio_token:
+    if not ls_url or not ls_token:
         return LabHealthResponse(
             configured=False,
             reachable=False,
-            error="CLEANSIGHT_LABEL_STUDIO_URL / TOKEN not set",
-            label_studio_url=s.label_studio_url or None,
-            default_project_id=s.label_studio_default_project_id,
+            error="Label Studio url / token 未配置（url 可在送标页面设置，token 需后端 env）",
+            label_studio_url=ls_url or None,
+            default_project_id=default_pid,
         )
 
     def _ping() -> tuple[bool, Optional[str]]:
         try:
-            cli = LabelStudioClient(s.label_studio_url, s.label_studio_token, timeout=10)
+            cli = LabelStudioClient(ls_url, ls_token, timeout=10)
             return cli.ping()
         except Exception as e:  # noqa: BLE001
             return False, f"{type(e).__name__}: {e}"
@@ -346,9 +367,36 @@ async def lab_health() -> LabHealthResponse:
         configured=True,
         reachable=reachable,
         error=err,
-        label_studio_url=s.label_studio_url,
-        default_project_id=s.label_studio_default_project_id,
+        label_studio_url=ls_url,
+        default_project_id=default_pid,
     )
+
+
+# ---------------------------------------------------------------------------
+# 接口 3: LS 连接配置（url / default_project_id，页面可改，持久化）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/config", response_model=LabConfigResponse)
+async def get_lab_config() -> LabConfigResponse:
+    """读取当前 LS 连接配置。不做网络探测（探测见 /health）。
+
+    不返回 token 明文，只返回 token_configured 表示 env 里是否已配置。
+    """
+    return LabConfigResponse(**runtime_config.snapshot())
+
+
+@router.put("/config", response_model=LabConfigResponse)
+async def update_lab_config(req: LabConfigUpdateRequest) -> LabConfigResponse:
+    """更新 LS url 与 default_project_id，持久化到文件，重启后保留。
+
+    token 不在此处管理（仅 env）。校验失败抛 400。
+    """
+    try:
+        snap = runtime_config.update(req.label_studio_url, req.default_project_id)
+    except ValueError as e:
+        raise ValidationError(str(e), field="label_studio_url")
+    return LabConfigResponse(**snap)
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +415,7 @@ def _ls_not_configured() -> Exception:
         status_code=503,
         detail={
             "error": "Label Studio not configured",
-            "detail": "Set CLEANSIGHT_LABEL_STUDIO_URL and CLEANSIGHT_LABEL_STUDIO_TOKEN",
+            "detail": "url 可在送标页面「LS 设置」填写；token 须在后端 env 设置 "
+            "CLEANSIGHT_LABEL_STUDIO_TOKEN",
         },
     )

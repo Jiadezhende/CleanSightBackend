@@ -108,8 +108,37 @@
         <span v-if="health.label_studio_url">url: <code>{{ health.label_studio_url }}</code></span>
         <span v-if="health.default_project_id">默认 pid: <b>{{ health.default_project_id }}</b></span>
         <span v-if="health.error" style="color:#ef4444">err: {{ health.error }}</span>
+        <el-button size="small" plain @click="openConfigDialog" style="margin-left:auto">⚙ LS 设置</el-button>
       </div>
     </div>
+
+    <!-- LS 连接设置弹窗 -->
+    <el-dialog v-model="configDialog.visible" title="Label Studio 连接设置" width="480px">
+      <div class="form-row" style="margin-bottom:14px">
+        <label class="field-label" style="width:96px">LS URL</label>
+        <input v-model="configDialog.url" placeholder="http://主机:8080"
+               class="plain-input" style="flex:1" />
+      </div>
+      <div class="form-row" style="margin-bottom:14px">
+        <label class="field-label" style="width:96px">默认 project_id</label>
+        <input v-model.number="configDialog.default_project_id" placeholder="0 = 无默认"
+               class="plain-input" style="width:160px" />
+      </div>
+      <div class="form-row" style="margin-bottom:6px">
+        <label class="field-label" style="width:96px">token</label>
+        <span class="badge" :class="configDialog.token_configured ? 'badge-ok' : 'badge-err'">
+          {{ configDialog.token_configured ? '已配置' : '未配置' }}
+        </span>
+        <span v-if="configDialog.source" class="badge badge-mute">来源：{{ configDialog.source === 'file' ? '页面配置' : '环境变量' }}</span>
+      </div>
+      <div style="font-size:11px;color:#9ca3af;padding-left:108px">
+        token 仅能在后端 env（<code>CLEANSIGHT_LABEL_STUDIO_TOKEN</code>）设置，不经页面流转。
+      </div>
+      <template #footer>
+        <el-button @click="configDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="loading.config" @click="saveConfig">保存</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 视频 + 时间轴 -->
     <div v-if="loaded" class="card">
@@ -307,7 +336,7 @@ createApp({
 
     // 表单
     const form = reactive({ task_id: null, step_id: null, project_id: null });
-    const loading = reactive({ load: false, submit: false });
+    const loading = reactive({ load: false, submit: false, config: false });
     const loaded = ref(false);
 
     // 健康
@@ -319,6 +348,51 @@ createApp({
         Object.assign(health, d);
       } catch (e) {
         Object.assign(health, { configured: false, reachable: false, error: String(e), label_studio_url: null });
+      }
+    }
+
+    // LS 连接设置（url + default_project_id 可改并持久化；token 仅 env）
+    const configDialog = reactive({
+      visible: false, url: '', default_project_id: 0, token_configured: false, source: 'env',
+    });
+    async function openConfigDialog() {
+      try {
+        const r = await fetch(api('/lab-f3m8/config'));
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        configDialog.url = d.label_studio_url || '';
+        configDialog.default_project_id = d.default_project_id || 0;
+        configDialog.token_configured = !!d.token_configured;
+        configDialog.source = d.source || 'env';
+        configDialog.visible = true;
+      } catch (e) {
+        ElMessage.error('读取 LS 配置失败: ' + e.message);
+      }
+    }
+    async function saveConfig() {
+      loading.config = true;
+      try {
+        const r = await fetch(api('/lab-f3m8/config'), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label_studio_url: (configDialog.url || '').trim(),
+            default_project_id: Number(configDialog.default_project_id) || 0,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const msg = d?.detail?.detail || d?.detail?.error || d?.detail || `HTTP ${r.status}`;
+          ElMessage.error('保存失败: ' + (typeof msg === 'string' ? msg : JSON.stringify(msg)));
+          return;
+        }
+        ElMessage.success('LS 配置已保存');
+        configDialog.visible = false;
+        await fetchHealth();
+      } catch (e) {
+        ElMessage.error('网络异常: ' + e.message);
+      } finally {
+        loading.config = false;
       }
     }
 
@@ -521,7 +595,7 @@ createApp({
         // 提交时再确认 LS 状态：避免一开始就阻塞选段/打点流程
         await fetchHealth();
         if (!health.configured) {
-          ElMessage.error('Label Studio 未配置：请设置后端环境变量 CLEANSIGHT_LABEL_STUDIO_URL / TOKEN');
+          ElMessage.error('Label Studio 未配置：点[⚙ LS 设置]填写 url，token 需在后端 env 设置');
           return;
         }
         if (!health.reachable) {
@@ -583,6 +657,7 @@ createApp({
     return {
       apiBase,
       form, loading, loaded, health,
+      configDialog, openConfigDialog, saveConfig,
       timeline, videoEl, stripEl, currentAbsMs,
       rangeStyle, markerStyle, cursorStyle, alarmTooltip,
       seekToMs, seekFromStrip,

@@ -110,7 +110,7 @@ class Settings(BaseSettings):
 
     # Lab / Label Studio 视频段导出
     label_studio_url: str = ""                # LS 服务器 base URL，如 http://10.176.122.22:8080
-    label_studio_token: str = ""              # LS 个人 API token（Authorization: Token <...>）
+    label_studio_token: str = ""              # LS 新版 Personal Access Token（JWT，Authorization: Bearer <...>）
     label_studio_default_project_id: int = 0  # 默认 project_id；0 表示未配置（请求需显式传 project_id）
     lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage.base_dir}/.lab_exports
     lab_export_ffmpeg_preset: str = "veryfast"

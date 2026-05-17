@@ -178,21 +178,58 @@ GET /lab/health
 }
 ```
 
-LS 未配置时：
+LS 未配置时 `configured=false`，`error` 提示 url 可在送标页面设置、token 需后端 env。
+
+---
+
+### 3. LS 连接配置（url / default_project_id 运行时可改）
+
+`label_studio_url` 与 `default_project_id` 可在送标页面修改并持久化，**改完即时生效、重启后保留，无需重启后端**。
+持久化文件：`{storage.base_dir}/lab_runtime_config.json`（已 gitignore）。
+解析优先级：文件存在 → 用文件值；否则回退到 env 默认值。
+
+`token` 不在此管理：恒来自 env（`CLEANSIGHT_LABEL_STUDIO_TOKEN`），页面不可见、不可改。
+
+#### 读取当前配置
+
+```http
+GET /lab-f3m8/config
+```
+
+不做网络探测（探测见 `/health`）。响应（200）：
 
 ```json
 {
-  "configured": false,
-  "reachable": false,
-  "error": "CLEANSIGHT_LABEL_STUDIO_URL / TOKEN not set",
-  "label_studio_url": null,
-  "default_project_id": 0
+  "label_studio_url": "http://10.176.122.22:8080",
+  "default_project_id": 7,
+  "token_configured": true,
+  "source": "file"
 }
 ```
+
+- `token_configured`：env 里 token 是否已配置（**不返回明文**）
+- `source`：`file`（页面改过并持久化）| `env`（仍是环境变量默认值）
+
+#### 更新配置
+
+```http
+PUT /lab-f3m8/config
+Content-Type: application/json
+
+{ "label_studio_url": "http://10.176.122.22:8080", "default_project_id": 7 }
+```
+
+- `label_studio_url`：为空表示「未配置」；非空须以 `http://` 或 `https://` 开头，否则 400
+- `default_project_id`：`>= 0`，0 表示无默认值
+- 成功返回更新后的配置（同 `GET /config` 响应体）
 
 ---
 
 ## 配置项（环境变量）
+
+> `LABEL_STUDIO_URL` 与 `LABEL_STUDIO_DEFAULT_PROJECT_ID` 现在是**回退默认值**：
+> 一旦通过 `PUT /lab-f3m8/config`（或送标页面「⚙ LS 设置」）改过，运行时配置文件优先于环境变量。
+> `LABEL_STUDIO_TOKEN` 仍只能通过环境变量配置。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
