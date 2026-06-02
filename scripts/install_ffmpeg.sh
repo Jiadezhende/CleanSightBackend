@@ -15,7 +15,7 @@
 # 跑 `sudo bash scripts/install_ffmpeg.sh /opt ~/ffmpeg-n7.1.4-linux64-gpl-7.1.tar.xz`。
 # 脚本会自动跳过下载步骤，直接走 SHA256 校验 → 解压 → 切 symlink。
 #
-# 跑完后把这行写进 .env / .env.prod：
+# 跑完后把这行写进生产配置文件 .env（CLEANSIGHT_ENV=prod 加载的就是它；dev 用 .env.dev）：
 #   CLEANSIGHT_FFMPEG_PATH=/opt/ffmpeg-static/bin/ffmpeg
 #
 # 幂等：重复跑只会无操作（已安装且版本一致时直接退出）。
@@ -26,19 +26,26 @@ set -euo pipefail
 # 配置区：升级 ffmpeg 时只改这三行
 # ─────────────────────────────────────────────────────────────────────
 
-# BtbN release tag，从 https://github.com/BtbN/FFmpeg-Builds/releases 挑
-# 不要用 "latest" 滚动 tag —— 那会违背钉版本的初衷
-FFMPEG_BUILD_TAG="n7.1.4"
+# BtbN release tag。⚠️ BtbN 不按 patch 版本发 tag（不存在 "n7.1.4" 这个 tag/资产），只有两类：
+#   - latest        滚动，内容会变，不可钉
+#   - autobuild-日期  不可变快照 —— 要钉版就用这个
+# 7.1.4 的构建藏在某个日期快照里（资产名是 ffmpeg-n7.1.4-<n>-g<commit>-...）。
+# 找法：releases 页搜含 "ffmpeg-n7.1.4" 的 autobuild release，取其 tag。
+# ⚠️ 旧 autobuild 会被 BtbN 定期清理 → 届时此 URL 会 404。长期可靠做法见脚本头：
+#    首次下好 tarball 留存，之后用离线参数安装，不再依赖 BtbN 保留期。
+FFMPEG_BUILD_TAG="autobuild-2026-06-01-15-02"
 
-# 资产文件名。ffmpeg-nX.Y.Z-linux64-gpl-7.1.tar.xz：
-#   - nX.Y.Z 是 ffmpeg release 版本
+# 资产文件名。ffmpeg-nX.Y.Z-<n>-g<commit>-linux64-gpl-7.1.tar.xz：
+#   - nX.Y.Z-<n>-g<commit> = ffmpeg 版本 + 距该 tag 的提交数 + 构建 commit（本资产即 7.1.4）
 #   - linux64 = amd64 Linux
 #   - gpl 含 libx264 / libx265（HLS 编码必需）
 #   - 末尾 -7.1 是 BtbN 构建基础设施版本号，跟 ffmpeg 版本无关
-FFMPEG_ASSET="ffmpeg-n7.1.4-linux64-gpl-7.1.tar.xz"
+FFMPEG_ASSET="ffmpeg-n7.1.4-7-gadcf20da26-linux64-gpl-7.1.tar.xz"
 
-# 对应资产的 SHA256，BtbN release 页面 asset 下方写着
-FFMPEG_SHA256="0d4044064f3b1ebdd74050cfcf77a7c8529b8a228620e24914c1f20619dc53ac"
+# 对应资产的 SHA256。BtbN 不提供 .sha256 旁文件，需自行算：
+#   下好 tarball 后跑 `sha256sum <asset>`，把结果填到这里。
+#   留空 → 脚本跳过校验（首次试装可接受，生产环境务必填上）。
+FFMPEG_SHA256=""
 
 # ─────────────────────────────────────────────────────────────────────
 
@@ -74,9 +81,11 @@ if [[ -n "${PROVIDED_TARBALL}" ]]; then
     [[ -f "${PROVIDED_TARBALL}" ]] || error "指定的 tarball 不存在：${PROVIDED_TARBALL}"
     OFFLINE_MODE=1
 else
-    # 自动在常见位置找已下载好的 tarball（项目根、~、/tmp）
+    # 自动在常见位置找已下载好的 tarball（离线物料区 vendor/、项目根、~、/tmp）
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     for candidate in \
+        "$(pwd)/vendor/ffmpeg/${FFMPEG_ASSET}" \
+        "${SCRIPT_DIR}/../vendor/ffmpeg/${FFMPEG_ASSET}" \
         "$(pwd)/${FFMPEG_ASSET}" \
         "${SCRIPT_DIR}/${FFMPEG_ASSET}" \
         "${SCRIPT_DIR}/../${FFMPEG_ASSET}" \
@@ -142,14 +151,21 @@ info "tarball 就绪：$(numfmt --to=iec "${SIZE_BYTES}")"
 
 # ─────────────────────────────────────────────────────────────────────
 # 校验 SHA256
+#   优先用脚本顶部钉的 FFMPEG_SHA256；为空则回退到离线物料旁的
+#   <tarball>.sha256 sidecar（build.sh 下载时自动生成），命中即强制校验。
 # ─────────────────────────────────────────────────────────────────────
-if [[ -n "${FFMPEG_SHA256}" ]]; then
+EXPECTED_SHA256="${FFMPEG_SHA256}"
+if [[ -z "${EXPECTED_SHA256}" && "${OFFLINE_MODE:-0}" -eq 1 && -f "${PROVIDED_TARBALL}.sha256" ]]; then
+    EXPECTED_SHA256="$(awk '{print $1}' "${PROVIDED_TARBALL}.sha256")"
+    info "用物料旁 sidecar 的 SHA256：${PROVIDED_TARBALL}.sha256"
+fi
+if [[ -n "${EXPECTED_SHA256}" ]]; then
     info "校验 SHA256..."
-    echo "${FFMPEG_SHA256}  ${FFMPEG_ASSET}" | sha256sum -c - \
+    echo "${EXPECTED_SHA256}  ${FFMPEG_ASSET}" | sha256sum -c - \
         || error "SHA256 不匹配，下载产物可能被篡改或损坏"
     info "SHA256 OK"
 else
-    warn "未配置 FFMPEG_SHA256，跳过校验（首次试装可以接受，生产环境强烈建议填上）"
+    warn "无可用 SHA256（脚本未钉且无 sidecar），跳过校验（首次试装可接受，生产环境强烈建议补上）"
 fi
 
 # ─────────────────────────────────────────────────────────────────────
@@ -184,7 +200,7 @@ info "安装完成"
 echo "  路径：${INSTALL_LINK}/bin/ffmpeg -> ${INSTALL_VERSIONED}/bin/ffmpeg"
 echo "  版本：$("${INSTALL_LINK}/bin/ffmpeg" -version | head -1)"
 echo
-echo "下一步：把下面这行加进 backend 的 .env / .env.prod（已存在则替换）："
-echo "  FFMPEG_PATH=${INSTALL_LINK}/bin/ffmpeg"
+echo "下一步：把下面这行加进 backend 的生产配置 .env（CLEANSIGHT_ENV=prod 加载的就是它，已存在则替换）："
+echo "  CLEANSIGHT_FFMPEG_PATH=${INSTALL_LINK}/bin/ffmpeg"
 echo
 echo "回滚：rm ${INSTALL_LINK} && ln -s <旧版本目录> ${INSTALL_LINK}"

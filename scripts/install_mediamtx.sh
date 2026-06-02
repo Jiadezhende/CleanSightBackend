@@ -35,25 +35,45 @@ if [ -x "${DIR}/${BIN}" ]; then
     exit 0
 fi
 
-echo "下载 MediaMTX ${VERSION}(${ASSET})..."
-curl -fL "${URL}" -o "/tmp/${ASSET}"
+# 离线物料优先:vendor/mediamtx/ 里已备好就直接用,不联网(build_bundle.sh 的产物)
+if [ -f "vendor/mediamtx/${ASSET}" ]; then
+    SRC="vendor/mediamtx/${ASSET}"
+    echo "用本地物料 ${SRC}(离线,跳过下载)"
+else
+    SRC="/tmp/${ASSET}"
+    echo "下载 MediaMTX ${VERSION}(${ASSET})..."
+    curl -fL "${URL}" -o "${SRC}"
+fi
+
+# 校验 SHA256:vendor/ 物料旁若有 build_bundle.sh 生成的 sidecar,强制比对
+if [ -f "${SRC}.sha256" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo "校验 SHA256..."
+        echo "$(awk '{print $1}' "${SRC}.sha256")  ${SRC}" | sha256sum -c - \
+            || { echo "SHA256 不匹配,物料可能损坏或被篡改" >&2; exit 1; }
+        echo "SHA256 OK"
+    else
+        echo "无 sha256sum,跳过 SHA256 校验" >&2
+    fi
+fi
 
 # 只取二进制,不覆盖项目里定制过的 mediamtx.yml / LICENSE
 case "${ASSET}" in
     *.tar.gz)
-        tar xzf "/tmp/${ASSET}" -C "${DIR}" "${BIN}"
+        tar xzf "${SRC}" -C "${DIR}" "${BIN}"
         ;;
     *.zip)
         # Git Bash 默认不带 unzip,缺了就用 Python(项目本来就依赖)兜底
         if command -v unzip >/dev/null 2>&1; then
-            unzip -o "/tmp/${ASSET}" "${BIN}" -d "${DIR}"
+            unzip -o "${SRC}" "${BIN}" -d "${DIR}"
         else
             python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2], sys.argv[3])" \
-                "/tmp/${ASSET}" "${BIN}" "${DIR}"
+                "${SRC}" "${BIN}" "${DIR}"
         fi
         ;;
 esac
 chmod +x "${DIR}/${BIN}"
-rm -f "/tmp/${ASSET}"
+# 只删下载到 /tmp 的临时文件,别删 vendor/ 里的物料
+[ "${SRC}" = "/tmp/${ASSET}" ] && rm -f "${SRC}"
 
 echo "完成:$(${DIR}/${BIN} --version 2>&1 | head -1)"
