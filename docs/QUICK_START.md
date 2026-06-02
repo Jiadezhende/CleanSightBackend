@@ -14,13 +14,16 @@
 
 ### 1. 启动 MediaMTX（终端 1）
 
+> MediaMTX 二进制不随 git 分发,首次需先获取:Linux/Git Bash 跑 `bash scripts/install_mediamtx.sh`
+> 自动按系统下载到 `mediamtx/`,详见 [部署指南](DEPLOYMENT_GUIDE.md#5-安装-mediamtx)。
+
 ```bash
 # Windows
-cd mediamtx_v1.15.4
+cd mediamtx
 .\mediamtx.exe
 
 # Linux
-cd mediamtx_v1.15.5_linux_amd64
+cd mediamtx
 ./mediamtx
 ```
 

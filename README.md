@@ -89,11 +89,15 @@ app/
 
 ### 1. 启动服务
 
+> MediaMTX 二进制不随 git 分发,首次需先获取:Linux/Git Bash 跑 `bash scripts/install_mediamtx.sh`
+> 自动按系统下载到 `mediamtx/`。纯部署机可用浅克隆加速:
+> `git clone --depth 1 <repo-url>`(跳过历史)。详见 [部署指南](docs/DEPLOYMENT_GUIDE.md)。
+
 ```bash
 # 启动 MediaMTX（终端 1）
-cd mediamtx_v1.15.4
+cd mediamtx
 ./mediamtx.exe    # Windows
-# 或 ./mediamtx  # Linux
+# 或 ./mediamtx    # Linux
 
 # 启动后端 API（终端 2）
 .\start_backend.ps1 dev   # Windows

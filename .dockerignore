@@ -15,8 +15,8 @@ runs/
 logs/
 database/
 *.ipynb
-mediamtx_v1.15.4/*.log
-mediamtx_v1.15.5_linux_amd64/
+# MediaMTX 由 docker-compose 用官方镜像独立运行,后端镜像不需要任何 mediamtx 文件
+mediamtx/
 client/
 integration_tests/
 scripts/

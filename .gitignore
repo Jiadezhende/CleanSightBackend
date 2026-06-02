@@ -156,3 +156,8 @@ logs/
 *.temp
 app/models/best.pt
 app/models/bubble-best.pt
+
+# 第三方 MediaMTX 可执行文件(用 scripts/install_mediamtx.sh 下载,不进 git)
+# 同目录的 mediamtx.yml / LICENSE 仍随仓库走
+mediamtx/mediamtx
+mediamtx/mediamtx.exe

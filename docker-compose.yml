@@ -25,7 +25,7 @@ services:
     environment:
       MTX_CONF: /mediamtx.yml
     volumes:
-      - ./mediamtx_v1.15.4/mediamtx.yml:/mediamtx.yml:ro
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
     ports:
       - "1935:1935"      # RTMP
       - "1936:1936"      # RTMPS

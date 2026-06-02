@@ -134,22 +134,29 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 MediaMTX 用于 RTSP/RTMP 流中转。
 
-#### Windows
+> MediaMTX 二进制是第三方文件,**不随 git 仓库分发**(避免 .git 膨胀、clone 变慢)。
+> 仓库里只保留 `mediamtx/mediamtx.yml` 和 `mediamtx/LICENSE`,可执行文件需按下方步骤获取。
 
-1. 下载: [MediaMTX v1.15.4](https://github.com/bluenviron/mediamtx/releases)
-2. 解压到 `mediamtx_v1.15.4/`
-3. 运行: `mediamtx.exe`
-
-#### Linux
+#### 脚本下载(推荐,Linux 与 Windows Git Bash 通用)
 
 ```bash
-# 下载并解压
-wget https://github.com/bluenviron/mediamtx/releases/download/v1.15.5/mediamtx_v1.15.5_linux_amd64.tar.gz
-tar -xzf mediamtx_v1.15.5_linux_amd64.tar.gz -C mediamtx_v1.15.5_linux_amd64
+# 按系统自动下载二进制到 mediamtx/(幂等,已存在则跳过)
+bash scripts/install_mediamtx.sh
 
 # 运行
-cd mediamtx_v1.15.5_linux_amd64
-./mediamtx
+cd mediamtx
+./mediamtx       # Linux
+# 或 ./mediamtx.exe   # Windows
+```
+
+#### 内网不通外网(离线)
+
+本地下好对应平台压缩包,scp 到机器,手动解压出二进制放进 `mediamtx/`:
+
+```bash
+# Linux
+tar xzf mediamtx_v1.15.5_linux_amd64.tar.gz -C mediamtx mediamtx
+# Windows(PowerShell):从 zip 里取出 mediamtx.exe 放进 mediamtx\
 ```
 
 **端口配置**:
@@ -303,10 +310,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 在另一个终端：
 
 ```bash
-cd mediamtx_v1.15.4  # Windows
-# 或 cd mediamtx_v1.15.5_linux_amd64  # Linux
-
-./mediamtx  # Linux
+cd mediamtx
+./mediamtx       # Linux
 # 或 .\mediamtx.exe  # Windows
 ```
 
