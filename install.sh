@@ -5,7 +5,7 @@
 #   ffmpeg / mediamtx → 校验 vendor/ 里的钉版包后部署到位
 #
 # 前置：已把 wheelhouse/ 与 vendor/ rsync 到本目录（缺则报错）。版本/URL 全在 deploy.conf。
-# 用法: ./install.sh   （写 /opt 需 sudo，脚本内部按需提权）
+# 用法: ./install.sh   （全程在项目目录内安装，免 sudo）
 
 set -euo pipefail
 
@@ -20,8 +20,6 @@ python3 -c 'import sys; sys.exit(0 if (3,10) <= sys.version_info < (3,14) else 1
     || { echo "ERROR: 需要 Python 3.10–3.13（当前 $(python3 -V)）" >&2; exit 1; }
 [ -f wheelhouse/SHA256SUMS ] || { echo "ERROR: 缺 wheelhouse/（先在构建机 ./build.sh 再 rsync 过来）" >&2; exit 1; }
 [ -d vendor ]                || { echo "ERROR: 缺 vendor/（先在构建机 ./build.sh 再 rsync 过来）" >&2; exit 1; }
-[ "$EUID" -eq 0 ] || command -v sudo >/dev/null \
-    || { echo "ERROR: 部署 ${FFMPEG_PREFIX} 需 root 或 sudo" >&2; exit 1; }
 
 # 校验 vendor 物料：deploy.conf 钉了就强制比对，没钉则告警跳过。
 verify_sha() {  # $1=文件 $2=期望值
@@ -58,19 +56,18 @@ pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
 pip install -i "$PYPI_INDEX_URL" --find-links wheelhouse --no-deps --force-reinstall "opencv-python-headless<4.12.0"
 pip install -i "$PYPI_INDEX_URL" --find-links wheelhouse "numpy==1.26.4"
 
-# ── [2] ffmpeg → FFMPEG_PREFIX ──
+# ── [2] ffmpeg → 项目内 .ffmpeg/（与 mediamtx 同为项目内二进制，免 sudo）──
 # 必须钉版：ffmpeg 4.x/8.x 对 -hls_fmp4_init_filename 解析差异巨大，见 docs/HLS_TIMELINE_PITFALL.md。
 ff_asset="vendor/ffmpeg/$(basename "$FFMPEG_URL")"
-echo "[2/3] ffmpeg → ${FFMPEG_PREFIX}"
+echo "[2/3] ffmpeg → .ffmpeg/"
 verify_sha "$ff_asset" "$FFMPEG_SHA256"
 xz -t "$ff_asset" || { echo "ERROR: ffmpeg 压缩包损坏" >&2; exit 1; }
 ff_tmp="$(mktemp -d)"; trap 'rm -rf "$ff_tmp"' EXIT
 tar xf "$ff_asset" -C "$ff_tmp"
 ff_inner="$(find "$ff_tmp" -maxdepth 1 -type d -name 'ffmpeg-*' | head -1)"
 [ -x "$ff_inner/bin/ffmpeg" ] || { echo "ERROR: 解压结构异常，找不到 bin/ffmpeg" >&2; exit 1; }
-SUDO=""; [ "$EUID" -eq 0 ] || SUDO="sudo"
-$SUDO rm -rf "$FFMPEG_PREFIX"
-$SUDO mv "$ff_inner" "$FFMPEG_PREFIX"
+rm -rf .ffmpeg
+mv "$ff_inner" .ffmpeg
 
 # ── [3] mediamtx → MEDIAMTX_DIR（只取二进制，保留 mediamtx.yml / LICENSE）──
 mtx_asset="vendor/mediamtx/$(basename "$MEDIAMTX_URL")"
@@ -84,7 +81,9 @@ chmod +x "${MEDIAMTX_DIR}/mediamtx"
 # headless 共存、以及 numpy 被顶到 2.x（撞 torch ABI）最容易暴露的入口。
 echo ""
 echo "验证安装..."
-python - <<'PY' || { echo "ERROR: Python 依赖自检失败" >&2; exit 1; }
+# YOLO_CONFIG_DIR 锁死项目内 .ultralytics（与 app/settings.py 一致），令安装期验证也不踩 /tmp 回退。
+mkdir -p .ultralytics
+YOLO_CONFIG_DIR="$PWD/.ultralytics" python - <<'PY' || { echo "ERROR: Python 依赖自检失败" >&2; exit 1; }
 import torch, numpy, cv2, ultralytics
 from ultralytics import YOLO  # 触发 ultralytics 完整导入图（含 cv2）
 assert torch.cuda.is_available(), "CUDA 不可用"
@@ -92,11 +91,10 @@ assert numpy.__version__.startswith("1.26"), f"numpy 被顶到 {numpy.__version_
 print(f"torch {torch.__version__} | numpy {numpy.__version__} | cv2 {cv2.__version__} "
       f"| ultralytics {ultralytics.__version__} | CUDA OK")
 PY
-"${FFMPEG_PREFIX}/bin/ffmpeg" -version | head -1
+".ffmpeg/bin/ffmpeg" -version | head -1
 "${MEDIAMTX_DIR}/mediamtx" --version
 
 echo ""
 echo "─────────────────────────────────────────────────────────────"
-echo "安装完成。最后一步：在生产 .env 写入 ffmpeg 钉版路径"
-echo "  CLEANSIGHT_FFMPEG_PATH=${FFMPEG_PREFIX}/bin/ffmpeg"
+echo "安装完成。ffmpeg 钉版已部署到项目内 .ffmpeg/，后端启动自动探测，无需配置 .env。"
 echo "─────────────────────────────────────────────────────────────"

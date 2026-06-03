@@ -78,8 +78,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_config: str = "logging_config.json"
 
-    # 外部工具
-    ffmpeg_path: str = "ffmpeg"
+    # 外部工具（ffmpeg_path 留空 = 自动探测：优先钉版静态包，否则用 PATH 上的 ffmpeg）
+    ffmpeg_path: str = ""
 
     # 模型路径
     model_path: str = "./app/data"
@@ -184,6 +184,22 @@ class Settings(BaseSettings):
 
         return self
 
+    @model_validator(mode="after")
+    def _resolve_ffmpeg_path(self):
+        """ffmpeg_path 为空时自动探测，消除「install 装到固定位置却要人手抄进 .env」的部署负担：
+
+        - 优先 install.sh 部署到项目内 .ffmpeg/ 的钉版静态包（HLS fmp4 行为正确，
+          见 docs/HLS_TIMELINE_PITFALL.md）；与 mediamtx 同为项目内 vendored 二进制。
+        - 否则回退 PATH 上的 ffmpeg（开发机，如 Mac/homebrew）。
+        - 显式设了 CLEANSIGHT_FFMPEG_PATH 则尊重之、不探测（逃生口）。
+
+        探测路径与 install.sh 各自从「项目根」推导 .ffmpeg/bin/ffmpeg，无共享绝对路径耦合。
+        """
+        if not self.ffmpeg_path:
+            pinned = str(Path(__file__).parent.parent / ".ffmpeg" / "bin" / "ffmpeg")
+            self.ffmpeg_path = pinned if os.path.exists(pinned) else "ffmpeg"
+        return self
+
     model_config = SettingsConfigDict(
         env_prefix="CLEANSIGHT_",
         env_nested_delimiter="__",
@@ -195,3 +211,9 @@ class Settings(BaseSettings):
 # 在实例化 Settings 前，先把 .env/.env.dev 加载到环境中
 _load_env_files()
 settings = Settings()
+
+# YOLO_CONFIG_DIR 是 ultralytics 的全局变量；系统级设置会劫持同机其他模型任务。
+# 故仅在本进程内锁死为项目内 .ultralytics（由安装位置自动得出、必然可写），不外溢、不可配。
+_yolo_cfg_dir = str(Path(__file__).parent.parent / ".ultralytics")
+os.makedirs(_yolo_cfg_dir, exist_ok=True)
+os.environ["YOLO_CONFIG_DIR"] = _yolo_cfg_dir
