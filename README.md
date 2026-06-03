@@ -59,7 +59,6 @@ app/
 
 - ✅ Windows 10/11
 - ✅ Ubuntu 20.04+
-- ✅ Docker 容器化部署
 
 ### 环境部署
 
@@ -89,8 +88,8 @@ app/
 
 ### 1. 启动服务
 
-> MediaMTX 二进制不随 git 分发,首次需先获取:Linux/Git Bash 跑 `bash scripts/install_mediamtx.sh`
-> 自动按系统下载到 `mediamtx/`。纯部署机可用浅克隆加速:
+> MediaMTX 二进制不随 git 分发,首次需先获取:Linux 部署机由 `./install.sh` 从 `vendor/mediamtx/`
+> 解出到 `mediamtx/`(物料由构建机 `./build.sh` 备好)。Windows/手动获取见 [部署指南](docs/DEPLOYMENT_GUIDE.md)。纯部署机可用浅克隆加速:
 > `git clone --depth 1 <repo-url>`(跳过历史)。详见 [部署指南](docs/DEPLOYMENT_GUIDE.md)。
 
 ```bash

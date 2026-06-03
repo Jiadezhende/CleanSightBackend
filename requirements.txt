@@ -1,7 +1,6 @@
-# 注：uv 工作流以 pyproject.toml + uv.lock 为依赖源（见 install-uv.sh / 部署需求.md）；
-#     本文件与 pyproject.toml 暂并存，供 install.sh 使用，改依赖时请同步两处。
-#     torch / torchvision 不在此列——它们是核心静态物料，版本钉在 deploy.conf，
-#     由 build.sh 下进 wheelhouse、install.sh 离线装。
+# 本文件是唯一依赖源，供 install.sh 使用。
+# torch / torchvision 不在此列——它们是核心静态物料，版本钉在 deploy.conf，
+# 由 build.sh 下进 wheelhouse、install.sh 离线装。
 
 # ========== Core AI / CUDA ==========
 # torch / torchvision 见 deploy.conf（TORCH_PKGS）

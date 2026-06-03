@@ -9,7 +9,6 @@
 - [环境准备](#环境准备)
 - [配置文件](#配置文件)
 - [启动服务](#启动服务)
-- [Docker 部署](#docker-部署)
 
 ---
 
@@ -137,19 +136,19 @@ MediaMTX 用于 RTSP/RTMP 流中转。
 > MediaMTX 二进制是第三方文件,**不随 git 仓库分发**(避免 .git 膨胀、clone 变慢)。
 > 仓库里只保留 `mediamtx/mediamtx.yml` 和 `mediamtx/LICENSE`,可执行文件需按下方步骤获取。
 
-#### 脚本下载(推荐,Linux 与 Windows Git Bash 通用)
+#### 随 install.sh 自动部署(推荐,Linux 部署机)
+
+物料由构建机 `./build.sh` 下进 `vendor/mediamtx/`(钉版 + SHA256),`./install.sh` 会校验后
+把二进制解出到 `mediamtx/`(保留 `mediamtx.yml` / `LICENSE`)。版本/URL 在 `deploy.conf`。
 
 ```bash
-# 按系统自动下载二进制到 mediamtx/(幂等,已存在则跳过)
-bash scripts/install_mediamtx.sh
-
 # 运行
 cd mediamtx
 ./mediamtx       # Linux
 # 或 ./mediamtx.exe   # Windows
 ```
 
-#### 内网不通外网(离线)
+#### 内网不通外网 / Windows(手动)
 
 本地下好对应平台压缩包,scp 到机器,手动解压出二进制放进 `mediamtx/`:
 
@@ -325,42 +324,6 @@ cd mediamtx
 
 > `/docs` `/redoc` `/openapi.json` 已永久关闭；接口清单以 [API_ENDPOINTS.md](API_ENDPOINTS.md) 为准。
 > 若对外部署，RTSP 流量必须经 `mediamtx_gateway`（8004 → 127.0.0.1:18004），详见 [API_GATEWAY.md](API_GATEWAY.md)。
-
----
-
-## Docker 部署
-
-### 使用 Docker Compose
-
-```bash
-# 构建并启动
-docker compose up --build
-
-# 后台运行
-docker compose up -d
-
-# 停止服务
-docker compose down
-```
-
-### 服务访问地址
-
-- **API**: http://localhost:8000
-- **PostgreSQL**: postgresql://cleansight:cleansight@localhost:5432/cleansight
-- **RTMP**: rtmp://localhost:1935/live/<stream>
-- **RTSP**: rtsp://localhost:8004/<path>
-- **HLS**: http://localhost:8888/
-
-### 查看日志
-
-```bash
-# 查看所有服务日志
-docker compose logs -f
-
-# 查看特定服务
-docker compose logs -f app
-docker compose logs -f mediamtx
-```
 
 ---
 

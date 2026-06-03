@@ -44,7 +44,7 @@ GATEWAY_* 环境变量 > mediamtx_gateway/config.ini > 默认值
 
 ## MediaMTX 与后端拉流
 
-`docker-compose.yml` 中 MediaMTX 对外暴露 RTMP、RTSP、HLS、WebRTC 等端口。
+MediaMTX 对外暴露 RTMP、RTSP、HLS、WebRTC 等端口（端口配置见 `mediamtx/mediamtx.yml`）。
 
 主后端拉 RTSP 时，若请求 URL 端口等于 `mediamtx_proxy_port`，`StreamService` 会把 URL 改写到 `127.0.0.1:{mediamtx_internal_port}`，绕过 RTSPProxy。
 
@@ -54,7 +54,7 @@ GATEWAY_* 环境变量 > mediamtx_gateway/config.ini > 默认值
 - `app/settings.py`
 - `mediamtx_gateway/main.py`
 - `mediamtx_gateway/rtsp_proxy.py`
-- `docker-compose.yml`
+- `mediamtx/mediamtx.yml`
 - `tests/test_gateway.py`
 - `tests/test_mediamtx_gateway.py`
 
