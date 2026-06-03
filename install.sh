@@ -39,9 +39,9 @@ if [ "$OFFLINE" = 1 ]; then
     # 离线：torch 与其余依赖统一从本地 wheelhouse 装
     pip install $SRC torch==2.8.0 torchvision==0.23.0
 else
-    # 联网：torch 必须从 PyTorch cu128 源（清华只有捆绑 CUDA 的变体，额外 2-4GB）；
-    #       cu128 wheel 自带整套 CUDA runtime，只向系统借驱动。
-    pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+    # 联网：torch 从南京大学 cu128 镜像（与 build.sh 同源，国内快；清华只有捆绑 CUDA
+    #       的变体，额外 2-4GB）；cu128 wheel 自带整套 CUDA runtime，只向系统借驱动。
+    pip install torch==2.8.0 torchvision==0.23.0 --index-url https://mirror.nju.edu.cn/pytorch/whl/cu128
 fi
 pip install $SRC -r requirements.txt
 
