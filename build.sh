@@ -25,6 +25,24 @@ done
 
 mkdir -p wheelhouse vendor/ffmpeg vendor/mediamtx
 
+# 断点续传 + 重试下载：下到 .part，仅在完整后落终名。
+# 这样中断留下的半包不会被下方 [ -f ] 跳过逻辑误判为“已下好”。
+# 网络抖动（GitHub 连接被 RST，curl exit 56）下可安全重跑，逐块续传。
+fetch() {  # $1=url $2=终名
+    local url="$1" dest="$2" part="${2}.part" tries=5 i
+    for i in $(seq 1 "$tries"); do
+        if curl -fL --progress-bar --retry 3 --retry-delay 2 --retry-all-errors \
+                -C - -o "$part" "$url"; then
+            mv -f "$part" "$dest"
+            return 0
+        fi
+        echo "      下载中断（第 $i/$tries 次），3s 后续传…" >&2
+        sleep 3
+    done
+    echo "ERROR: 多次重试后仍失败：$url" >&2
+    return 1
+}
+
 # 校验/记录二进制 SHA256：conf 里钉了就强制比对，没钉就打印让人回填。
 check_sha() {  # $1=文件 $2=deploy.conf 里的期望值
     local actual; actual="$(sha256sum "$1" | awk '{print $1}')"
@@ -52,7 +70,7 @@ echo "[2/3] ffmpeg → vendor/ffmpeg/${ff_asset}"
 if [ -f "vendor/ffmpeg/${ff_asset}" ]; then
     echo "      已存在，跳过下载"
 else
-    curl -fL --progress-bar -o "vendor/ffmpeg/${ff_asset}" "$FFMPEG_URL"
+    fetch "$FFMPEG_URL" "vendor/ffmpeg/${ff_asset}"
 fi
 check_sha "vendor/ffmpeg/${ff_asset}" "$FFMPEG_SHA256"
 
@@ -62,7 +80,7 @@ echo "[3/3] mediamtx → vendor/mediamtx/${mtx_asset}"
 if [ -f "vendor/mediamtx/${mtx_asset}" ]; then
     echo "      已存在，跳过下载"
 else
-    curl -fL --progress-bar -o "vendor/mediamtx/${mtx_asset}" "$MEDIAMTX_URL"
+    fetch "$MEDIAMTX_URL" "vendor/mediamtx/${mtx_asset}"
 fi
 check_sha "vendor/mediamtx/${mtx_asset}" "$MEDIAMTX_SHA256"
 
