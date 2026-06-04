@@ -188,16 +188,22 @@ class Settings(BaseSettings):
     def _resolve_ffmpeg_path(self):
         """ffmpeg_path 为空时自动探测，消除「install 装到固定位置却要人手抄进 .env」的部署负担：
 
-        - 优先 install.sh 部署到项目内 .ffmpeg/ 的钉版静态包（HLS fmp4 行为正确，
+        - 优先 install.sh/install.ps1 部署到项目内 .ffmpeg/ 的钉版静态包（HLS fmp4 行为正确，
           见 docs/HLS_TIMELINE_PITFALL.md）；与 mediamtx 同为项目内 vendored 二进制。
-        - 否则回退 PATH 上的 ffmpeg（开发机，如 Mac/homebrew）。
+          Linux/Mac 二进制名为 ffmpeg，Windows 为 ffmpeg.exe，两者都探测。
+        - 否则回退 PATH 上的 ffmpeg（开发机，如 Mac/homebrew、Windows/choco）。
         - 显式设了 CLEANSIGHT_FFMPEG_PATH 则尊重之、不探测（逃生口）。
 
-        探测路径与 install.sh 各自从「项目根」推导 .ffmpeg/bin/ffmpeg，无共享绝对路径耦合。
+        探测路径与 install 脚本各自从「项目根」推导 .ffmpeg/bin/，无共享绝对路径耦合。
         """
         if not self.ffmpeg_path:
-            pinned = str(Path(__file__).parent.parent / ".ffmpeg" / "bin" / "ffmpeg")
-            self.ffmpeg_path = pinned if os.path.exists(pinned) else "ffmpeg"
+            bin_dir = Path(__file__).parent.parent / ".ffmpeg" / "bin"
+            self.ffmpeg_path = "ffmpeg"  # 默认回退 PATH
+            for name in ("ffmpeg", "ffmpeg.exe"):
+                candidate = bin_dir / name
+                if candidate.exists():
+                    self.ffmpeg_path = str(candidate)
+                    break
         return self
 
     model_config = SettingsConfigDict(

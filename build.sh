@@ -65,7 +65,7 @@ fi
 echo "      已写 wheelhouse/SHA256SUMS（$(wc -l < wheelhouse/SHA256SUMS) 个 wheel）"
 
 # ── [2] ffmpeg → vendor/ffmpeg/ ──
-ff_asset="$(basename "$FFMPEG_URL")"
+ff_asset="ffmpeg-linux-x64.tar.xz"
 echo "[2/3] ffmpeg → vendor/ffmpeg/${ff_asset}"
 if [ -f "vendor/ffmpeg/${ff_asset}" ]; then
     echo "      已存在，跳过下载"
@@ -75,7 +75,7 @@ fi
 check_sha "vendor/ffmpeg/${ff_asset}" "$FFMPEG_SHA256"
 
 # ── [3] mediamtx → vendor/mediamtx/ ──
-mtx_asset="$(basename "$MEDIAMTX_URL")"
+mtx_asset="mediamtx-linux-x64.tar.gz"
 echo "[3/3] mediamtx → vendor/mediamtx/${mtx_asset}"
 if [ -f "vendor/mediamtx/${mtx_asset}" ]; then
     echo "      已存在，跳过下载"
