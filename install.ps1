@@ -1,17 +1,18 @@
-# Windows GPU 开发机一键安装（原生 PowerShell，在线安装）
+# Windows GPU 开发机一键安装（原生 PowerShell）
 #
-# 对标 install.sh，但面向 Windows GPU 开发机、走在线安装：
-#   torch/torchvision → 从 cu128 索引在线拉（不依赖 build.sh 的 wheelhouse 离线物料）
+# 对标 install.sh，面向 Windows GPU 开发机：
+#   torch/torchvision → 从 cu128 索引在线拉
 #   其余 Python 依赖   → 从清华源在线拉
-#   ffmpeg            → 在线下 BtbN win64 静态包，解到项目内 .ffmpeg\（失败回退 PATH）
-#   mediamtx          → 开发不需要（RTSP 对外网关），略；需要时手动装
+#   ffmpeg / mediamtx → BASE_URL 非空则从源机离线拉，空则从 deploy.conf 内在线 *_WIN_URL 拉；
+#                       解压部署到项目内 .ffmpeg\ 与 mediamtx\。一处明确来源、无 PATH fallback、失败即报。
 #
-# 物料版本/URL 全在 deploy.conf（与 Linux 共享单一事实源，本脚本正则解析其中的 bash 变量）。
-# 开发便利向：不做离线物料 SHA 强校验、不做服务化。生产请用 Linux build.sh + install.sh。
+# 钉板版本/URL 在 deploy.conf（与 Linux 共享单一事实源，本脚本正则解析其中的 bash 变量）；
+# 在线镜像写死本脚本。开发便利向：Windows 物料不做 SHA 强校验、不做服务化。生产请用 Linux build.sh + install.sh。
 #
 # 用法（在项目根目录）：
 #   Set-ExecutionPolicy -Scope Process Bypass -Force
-#   .\install.ps1
+#   .\install.ps1                                        # 在线装（torch/ffmpeg/mediamtx 走公网）
+#   $env:BASE_URL="http://<源机IP>:8080"; .\install.ps1  # 离线装（从源机 HTTP 拉）
 # 装完启动：.\start_backend.ps1 dev
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,24 @@ Set-Location -Path $PSScriptRoot
 
 function Assert-LastExit($msg) {
     if ($LASTEXITCODE -ne 0) { Write-Error $msg }
+}
+
+# 下载并解压一个 zip 到临时目录，返回临时目录路径（调用方负责取用 + 清理）。
+# 无 fallback：下载/解压失败时（$ErrorActionPreference=Stop）直接抛出中止。
+function Expand-RemoteZip($url, $tag) {
+    $zip = Join-Path $env:TEMP "cleansight-$tag.zip"
+    $tmp = Join-Path $env:TEMP "cleansight-$tag-extract"
+    $old = $ProgressPreference; $ProgressPreference = "SilentlyContinue"   # 大幅加速 Invoke-WebRequest
+    try {
+        Write-Host "      下载 $url ..."
+        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+        if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+    } finally {
+        $ProgressPreference = $old
+        if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
+    }
+    return $tmp
 }
 
 # ── 解析 deploy.conf（纯 bash 变量：KEY="value"）──
@@ -32,15 +51,21 @@ function Read-DeployConf {
     return $conf
 }
 $conf = Read-DeployConf
-$TORCH_INDEX_URL   = $conf["TORCH_INDEX_URL"]
-$TORCH_PKGS        = $conf["TORCH_PKGS"]
-$PYPI_INDEX_URL    = $conf["PYPI_INDEX_URL"]
-$FFMPEG_WIN_URL    = $conf["FFMPEG_WIN_URL"]
-# 可选：指向离线分发源（留空 = 从 FFMPEG_WIN_URL 在线拉；填 = 从该目录基址拉，与 Linux FFMPEG_SRC_URL 同规则）
-$FFMPEG_WIN_SRC_URL = if ($env:FFMPEG_WIN_SRC_URL) { $env:FFMPEG_WIN_SRC_URL } else { $conf["FFMPEG_WIN_SRC_URL"] }
-foreach ($kv in @{ TORCH_INDEX_URL = $TORCH_INDEX_URL; TORCH_PKGS = $TORCH_PKGS; PYPI_INDEX_URL = $PYPI_INDEX_URL; FFMPEG_WIN_URL = $FFMPEG_WIN_URL }.GetEnumerator()) {
+$TORCH_PKGS       = $conf["TORCH_PKGS"]
+$FFMPEG_WIN_URL   = $conf["FFMPEG_WIN_URL"]
+$MEDIAMTX_WIN_URL = $conf["MEDIAMTX_WIN_URL"]
+foreach ($kv in @{ TORCH_PKGS = $TORCH_PKGS; FFMPEG_WIN_URL = $FFMPEG_WIN_URL; MEDIAMTX_WIN_URL = $MEDIAMTX_WIN_URL }.GetEnumerator()) {
     if ([string]::IsNullOrWhiteSpace($kv.Value)) { Write-Error "deploy.conf 缺少 $($kv.Key)" }
 }
+
+# 在线镜像写死在脚本里（非「钉板物料」，不入 deploy.conf；与 install.sh 一致）。
+$TORCH_INDEX_URL = "https://mirror.nju.edu.cn/pytorch/whl/cu128"
+$PYPI_INDEX_URL  = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+# 源机物料基址：非空 → ffmpeg/mediamtx 从源机离线拉；空 → 用上面在线 *_WIN_URL。
+# deploy.conf 里是 ${BASE_URL:-} 的 bash 占位、对 PS 无意义，故只认 env 或 conf 中已填的字面量。
+$cb = $conf["BASE_URL"]; if ($cb -match '^\$\{') { $cb = '' }
+$BASE_URL = if ($env:BASE_URL) { $env:BASE_URL } else { $cb }
 
 # ── 执行前环境检查 ──
 if ($env:OS -ne "Windows_NT") { Write-Error "仅支持 Windows（Linux 请用 ./install.sh）" }
@@ -69,8 +94,8 @@ if (-not (Test-Path ".\.venv\Scripts\Activate.ps1")) {
 python -m pip install --upgrade pip
 Assert-LastExit "升级 pip 失败"
 
-# ── [1/2] Python 依赖：torch（cu128 在线）+ 其余（清华源）──
-Write-Host "[1/2] Python 依赖" -ForegroundColor Green
+# ── [1/3] Python 依赖：torch（cu128 在线）+ 其余（清华源）──
+Write-Host "[1/3] Python 依赖" -ForegroundColor Green
 Write-Host "      torch 闭包（cu128 在线，$TORCH_INDEX_URL）..."
 pip install ($TORCH_PKGS -split '\s+') --index-url $TORCH_INDEX_URL
 Assert-LastExit "torch 安装失败（若 cu128 索引无 win_amd64 wheel，可改用官方源 https://download.pytorch.org/whl/cu128）"
@@ -88,45 +113,36 @@ Assert-LastExit "opencv-python-headless 安装失败"
 pip install -i $PYPI_INDEX_URL "numpy==1.26.4"
 Assert-LastExit "numpy 复位失败"
 
-# ── [2/2] ffmpeg → 项目内 .ffmpeg\（离线源 > 在线，失败回退 PATH）──
-# 来源规则：FFMPEG_WIN_SRC_URL 非空 → 从该目录基址拼接文件名拉取（离线分发源）；空 → 从 FFMPEG_WIN_URL 在线拉。
-Write-Host "[2/2] ffmpeg -> .ffmpeg\" -ForegroundColor Green
-$ffAssetName = "ffmpeg-win-x64.zip"
-$ffResolvedUrl = if ($FFMPEG_WIN_SRC_URL) {
-    "$($FFMPEG_WIN_SRC_URL.TrimEnd('/'))/$ffAssetName"
-} else {
-    $FFMPEG_WIN_URL
-}
-$ffZip = Join-Path $env:TEMP "cleansight-ffmpeg-win64.zip"
-$ffTmp = Join-Path $env:TEMP "cleansight-ffmpeg-extract"
-$ffOk = $false
-$oldProgress = $ProgressPreference
-$ProgressPreference = "SilentlyContinue"   # 大幅加速 Invoke-WebRequest
+# ── [2/3] ffmpeg → 项目内 .ffmpeg\（BASE_URL 离线优先，无 fallback，失败即报）──
+# 必须钉版：ffmpeg 4.x/8.x 对 -hls_fmp4_init_filename 解析差异巨大，见 docs/HLS_TIMELINE_PITFALL.md。
+Write-Host "[2/3] ffmpeg -> .ffmpeg\" -ForegroundColor Green
+$ffUrl = if ($BASE_URL) { "$($BASE_URL.TrimEnd('/'))/vendor/ffmpeg/ffmpeg-win-x64.zip" } else { $FFMPEG_WIN_URL }
+$ffTmp = Expand-RemoteZip $ffUrl "ffmpeg-win64"
 try {
-    Write-Host "      下载 $ffResolvedUrl ..."
-    Invoke-WebRequest -Uri $ffResolvedUrl -OutFile $ffZip -UseBasicParsing
-    if (Test-Path $ffTmp) { Remove-Item $ffTmp -Recurse -Force }
-    Expand-Archive -Path $ffZip -DestinationPath $ffTmp -Force
     $inner = Get-ChildItem -Path $ffTmp -Directory | Where-Object { $_.Name -like "ffmpeg-*" } | Select-Object -First 1
     if (-not $inner -or -not (Test-Path (Join-Path $inner.FullName "bin\ffmpeg.exe"))) {
-        throw "解压结构异常，找不到 bin\ffmpeg.exe"
+        throw "ffmpeg 解压结构异常，找不到 bin\ffmpeg.exe（来源 $ffUrl）"
     }
     if (Test-Path ".\.ffmpeg") { Remove-Item ".\.ffmpeg" -Recurse -Force }
     Move-Item $inner.FullName ".\.ffmpeg"
-    $ffOk = $true
     Write-Host "      ffmpeg 已部署到 .ffmpeg\bin\ffmpeg.exe（后端启动自动探测）"
-} catch {
-    Write-Warning "ffmpeg 下载/解压失败：$($_.Exception.Message)"
-    if ($FFMPEG_WIN_SRC_URL) {
-        Write-Warning "离线源 $FFMPEG_WIN_SRC_URL 不通。确认源机 cleansight-dist 已按部署窗口 start。"
-    } else {
-        Write-Warning "URL 可能已失效。可配置 `$env:FFMPEG_WIN_SRC_URL=http://<源机IP>:8080/vendor/ffmpeg/ 改用离线源。"
-    }
-    Write-Warning "回退方案：把 ffmpeg.exe 放进 PATH（或 'choco install ffmpeg'），后端会自动探测，无需改 .env。"
 } finally {
-    $ProgressPreference = $oldProgress
-    if (Test-Path $ffZip) { Remove-Item $ffZip -Force -ErrorAction SilentlyContinue }
     if (Test-Path $ffTmp) { Remove-Item $ffTmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# ── [3/3] mediamtx → 项目内 mediamtx\（BASE_URL 离线优先，无 fallback；保留 git 跟踪的 mediamtx.yml/LICENSE）──
+Write-Host "[3/3] mediamtx -> mediamtx\" -ForegroundColor Green
+$mtxUrl = if ($BASE_URL) { "$($BASE_URL.TrimEnd('/'))/vendor/mediamtx/mediamtx-win-x64.zip" } else { $MEDIAMTX_WIN_URL }
+$mtxTmp = Expand-RemoteZip $mtxUrl "mediamtx-win64"
+try {
+    # mediamtx win zip 为扁平结构（根含 mediamtx.exe / mediamtx.yml / LICENSE），只取 exe，不覆盖仓库 yml。
+    $exe = Get-ChildItem -Path $mtxTmp -Recurse -Filter "mediamtx.exe" | Select-Object -First 1
+    if (-not $exe) { throw "mediamtx 解压结构异常，找不到 mediamtx.exe（来源 $mtxUrl）" }
+    New-Item -ItemType Directory -Force -Path ".\mediamtx" | Out-Null
+    Copy-Item $exe.FullName ".\mediamtx\mediamtx.exe" -Force
+    Write-Host "      mediamtx 已部署到 mediamtx\mediamtx.exe（同目录 mediamtx.yml 保留）"
+} finally {
+    if (Test-Path $mtxTmp) { Remove-Item $mtxTmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 # ── .env.dev 便利生成（首次安装）──
@@ -152,11 +168,12 @@ print(f"torch {torch.__version__} | numpy {numpy.__version__} | cv2 {cv2.__versi
 '@
 python -c $verify
 Assert-LastExit "Python 依赖自检失败"
-if ($ffOk) { & ".\.ffmpeg\bin\ffmpeg.exe" -version | Select-Object -First 1 }
+& ".\.ffmpeg\bin\ffmpeg.exe" -version | Select-Object -First 1
+& ".\mediamtx\mediamtx.exe" --version
 
 Write-Host ""
 Write-Host "─────────────────────────────────────────────────────────────" -ForegroundColor Green
 Write-Host "安装完成。启动：.\start_backend.ps1 dev" -ForegroundColor Green
-if ($ffOk) { Write-Host "ffmpeg 已部署到项目内 .ffmpeg\，后端自动探测，无需配置 .env。" -ForegroundColor Green }
-Write-Host "提示：需要本地 PostgreSQL（在 .env.dev 配置连接）；RTSP 对外网关 mediamtx 开发可省。" -ForegroundColor Green
+Write-Host "ffmpeg 已部署到 .ffmpeg\（后端自动探测）；mediamtx 已部署到 mediamtx\mediamtx.exe。" -ForegroundColor Green
+Write-Host "提示：需要本地 PostgreSQL（在 .env.dev 配置连接）；RTSP 对外网关按需经 GATEWAY_MEDIAMTX_BIN 指向 mediamtx\mediamtx.exe。" -ForegroundColor Green
 Write-Host "─────────────────────────────────────────────────────────────" -ForegroundColor Green
