@@ -14,7 +14,7 @@ ClipBuilder — 从 raw 段拼接出 ms 精度的 mp4 clip。
 找不到 codec init 会失败。HLS demuxer 通过 EXT-X-MAP 先吃 init.mp4 再串 fragment，能正确
 还原拼接流。
 
-依赖：ffmpeg 在 PATH 上（settings.ffmpeg_path 可覆写）
+依赖：ffmpeg 由 settings.ffmpeg_path 提供（项目自包含 .ffmpeg/bin/，见 app/settings.py）
 """
 
 from __future__ import annotations

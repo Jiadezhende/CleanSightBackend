@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_config: str = "logging_config.json"
 
-    # 外部工具（ffmpeg_path 留空 = 自动探测：优先钉版静态包，否则用 PATH 上的 ffmpeg）
+    # 外部工具（ffmpeg_path 留空 = 用项目自包含的 .ffmpeg/bin/ffmpeg，不回退 PATH）
     ffmpeg_path: str = ""
 
     # 模型路径
@@ -186,24 +186,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_ffmpeg_path(self):
-        """ffmpeg_path 为空时自动探测，消除「install 装到固定位置却要人手抄进 .env」的部署负担：
+        """ffmpeg_path 为空时指向项目自包含的钉版静态包，消除「install 装到固定位置却要人手抄进 .env」的负担：
 
-        - 优先 install.sh/install.ps1 部署到项目内 .ffmpeg/ 的钉版静态包（HLS fmp4 行为正确，
-          见 docs/HLS_TIMELINE_PITFALL.md）；与 mediamtx 同为项目内 vendored 二进制。
-          Linux/Mac 二进制名为 ffmpeg，Windows 为 ffmpeg.exe，两者都探测。
-        - 否则回退 PATH 上的 ffmpeg（开发机，如 Mac/homebrew、Windows/choco）。
-        - 显式设了 CLEANSIGHT_FFMPEG_PATH 则尊重之、不探测（逃生口）。
+        - 项目自包含第三方服务：ffmpeg 与 mediamtx 同为项目内 vendored 二进制，唯一来源是
+          项目根下的 .ffmpeg/bin/（install.sh/install.ps1 部署；Linux 名 ffmpeg，Windows 名 ffmpeg.exe）。
+          钉版保证 HLS fmp4 行为正确，见 docs/HLS_TIMELINE_PITFALL.md。
+        - 不回退 PATH：一处明确来源、失败即报（缺料时由 FFmpegDecoder 抛 FFmpegError，
+          报出确切路径，提示先跑 install 脚本）。
+        - 显式设了 CLEANSIGHT_FFMPEG_PATH 则尊重之（逃生口，如 Mac 开发机指向 homebrew ffmpeg）。
 
-        探测路径与 install 脚本各自从「项目根」推导 .ffmpeg/bin/，无共享绝对路径耦合。
+        路径与 install 脚本各自从「项目根」推导 .ffmpeg/bin/，无共享绝对路径耦合。
         """
         if not self.ffmpeg_path:
-            bin_dir = Path(__file__).parent.parent / ".ffmpeg" / "bin"
-            self.ffmpeg_path = "ffmpeg"  # 默认回退 PATH
-            for name in ("ffmpeg", "ffmpeg.exe"):
-                candidate = bin_dir / name
-                if candidate.exists():
-                    self.ffmpeg_path = str(candidate)
-                    break
+            bin_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+            self.ffmpeg_path = str(
+                Path(__file__).parent.parent / ".ffmpeg" / "bin" / bin_name
+            )
         return self
 
     model_config = SettingsConfigDict(
