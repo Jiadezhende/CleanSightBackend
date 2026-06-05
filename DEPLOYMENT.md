@@ -30,7 +30,7 @@ Linux 安装入口是：
 
 - 操作系统：Linux
 - 架构：x86_64
-- Python：3.10 到 3.13
+- Python：必须为 3.10（生产统一版本；`wheelhouse/` 按 3.10 打 cp 标签，须精确匹配，`install.sh` 会强校验）
 - 需要可创建虚拟环境：`python3 -m venv`
 - 本机需要有 NVIDIA 驱动，`torch.cuda.is_available()` 必须为真；不要求系统额外安装 CUDA toolkit
 - 如果从源机拉物料，需要有 `curl`
@@ -62,6 +62,7 @@ Windows 安装策略与生产不同：
 - ffmpeg / MediaMTX 使用 Windows 钉版包。
 - 如果配置了 `BASE_URL`，ffmpeg / MediaMTX 从源机拉取；否则从 `deploy.conf` 中的 Windows URL 在线下载。
 - Windows 包不做 SHA 强校验，定位是开发便利，不作为生产标准。
+- Python 支持 3.10–3.13（开发宽松；`torch` 在线安装，按本机版本自动选 wheel，不依赖 `wheelhouse/`）。
 
 离线拉取源机物料时：
 
@@ -196,7 +197,7 @@ GATEWAY_MEDIAMTX_BIN=mediamtx/mediamtx python -m mediamtx_gateway.main
 ./build.sh
 ```
 
-脚本要求运行在 Linux x86_64，并且本机有 `python3`、`pip`、`curl`、`sha256sum`。
+脚本要求运行在 Linux x86_64，Python 必须为 3.10（与生产一致——`wheelhouse/` 据此打 cp 标签，`build.sh` 会强校验），并且本机有 `python3`、`pip`、`curl`、`sha256sum`。
 
 它不是每次部署都要运行的脚本。一般只在以下情况运行：
 

@@ -72,6 +72,7 @@ if ($env:OS -ne "Windows_NT") { Write-Error "仅支持 Windows（Linux 请用 ./
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Write-Error "缺少 python（需 3.10–3.13，并加入 PATH）"
 }
+# 开发机宽松：3.10–3.13 均可（torch 在线按本机版本自动选 wheel）。生产请统一 Python 3.10（见 install.sh）。
 & python -c "import sys; sys.exit(0 if (3,10) <= sys.version_info[:2] < (3,14) else 1)"
 if ($LASTEXITCODE -ne 0) {
     $pv = (& python -V) 2>&1
@@ -168,8 +169,14 @@ print(f"torch {torch.__version__} | numpy {numpy.__version__} | cv2 {cv2.__versi
 '@
 python -c $verify
 Assert-LastExit "Python 依赖自检失败"
-& ".\.ffmpeg\bin\ffmpeg.exe" -version | Select-Object -First 1
+# 原生 exe 的非零退出不受 $ErrorActionPreference=Stop 约束，必须显式 Assert-LastExit，
+# 否则损坏/架构不符但仍能启动的二进制会让脚本照常打印「安装完成」。先跑完再取首行，
+# 避免 `| Select -First 1` 提前关闭管道导致退出码不可靠。
+$ffOut = & ".\.ffmpeg\bin\ffmpeg.exe" -version
+Assert-LastExit "ffmpeg 自检失败（.ffmpeg\bin\ffmpeg.exe 不可执行，或与平台/架构不匹配）"
+$ffOut | Select-Object -First 1
 & ".\mediamtx\mediamtx.exe" --version
+Assert-LastExit "mediamtx 自检失败（mediamtx\mediamtx.exe 不可执行，或与平台/架构不匹配）"
 
 Write-Host ""
 Write-Host "─────────────────────────────────────────────────────────────" -ForegroundColor Green
