@@ -120,7 +120,7 @@ class ClipBuilder:
     def __init__(
         self,
         finder: Optional[SegmentFinder] = None,
-        ffmpeg_bin: str = "ffmpeg",
+        ffmpeg_bin: Optional[str] = None,
         temp_root: Optional[Path] = None,
         preset: str = "veryfast",
         max_duration_ms: int = 300_000,
@@ -130,7 +130,8 @@ class ClipBuilder:
         """
         Args:
             finder: 段定位器；不传则用 get_default_base_dir() 构造
-            ffmpeg_bin: ffmpeg 可执行文件路径（默认 PATH 上的 "ffmpeg"）
+            ffmpeg_bin: ffmpeg 可执行文件路径；默认 None = 用项目自包含的 settings.ffmpeg_path
+                （.ffmpeg/bin/，不回退 PATH），与后端 / 集成测试同源。显式传参可覆写。
             temp_root: 临时输出根目录；不传则用 {base_dir}/.lab_exports
             preset: libx264 preset
             max_duration_ms: 单段时长上限（兜底防御；上层路由也会拒绝）
@@ -138,6 +139,11 @@ class ClipBuilder:
             default_segment_duration_s: 段时长 fallback（用于估计 last seg 是否覆盖 end_ms）
         """
         self._finder = finder or SegmentFinder(get_default_base_dir())
+        # 默认走项目自包含的钉版 ffmpeg（settings.ffmpeg_path → .ffmpeg/bin/），不回退 PATH；
+        # 显式传参仍可覆写（如测试 / 逃生口）。
+        if ffmpeg_bin is None:
+            from app.settings import settings
+            ffmpeg_bin = settings.ffmpeg_path
         self._ffmpeg = ffmpeg_bin
         self._preset = preset
         self._max_duration_ms = int(max_duration_ms)
