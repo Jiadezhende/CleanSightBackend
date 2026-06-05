@@ -89,7 +89,7 @@ app/
 ### 1. 启动服务
 
 > MediaMTX 二进制不随 git 分发,首次需先获取:Linux 部署机由 `./install.sh` 从 `vendor/mediamtx/`
-> 解出到 `mediamtx/`(物料由构建机 `./build.sh` 备好)。Windows/手动获取见 [部署指南](DEPLOYMENT.md)。纯部署机可用浅克隆加速:
+> 解出到 `mediamtx/`(物料由构建机 `./build.sh` 备好)。Windows 开发机/手动获取见 [开发指南](DEVELOPMENT.md)。纯部署机可用浅克隆加速:
 > `git clone --depth 1 <repo-url>`(跳过历史)。详见 [部署指南](DEPLOYMENT.md)。
 
 ```bash

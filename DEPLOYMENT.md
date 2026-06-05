@@ -18,6 +18,56 @@
 
 ## 安装侧
 
+### 安装前必须确认的变量
+
+安装脚本真正依赖的部署变量集中在 `deploy.conf`。生产安装前先确认这些变量，再执行 `install.sh`。
+
+> 先决条件：目标机 `python3` 命令必须解析到 Python 3.10。`install.sh` 检的是 `python3 -V`（不是旁装的 `python3.10`），多 Python 环境下需确保 PATH 上的 `python3` 就是 3.10。这是生产硬约束——`wheelhouse/` 按 cp310 打标签，版本不符 `install.sh` 启动即退出。安装后 `.venv` 已绑定该 3.10，激活后用 `python` 即可。
+
+生产安装前重点确认：
+
+```bash
+# 物料源机地址。空值表示使用项目本地 wheelhouse/ 与 vendor/。
+BASE_URL="${BASE_URL:-}"
+
+# 核心 Python 重包。
+TORCH_PKGS="torch==2.8.0 torchvision==0.23.0"
+
+# Linux 生产钉版二进制及 SHA。
+FFMPEG_URL="..."
+FFMPEG_SHA256="..."
+MEDIAMTX_URL="..."
+MEDIAMTX_SHA256="..."
+```
+
+`BASE_URL` 有两种用法：
+
+```bash
+# 推荐：不改 deploy.conf，安装时临时指定。
+BASE_URL=http://<源机IP>:<分发端口> ./install.sh
+
+# 或者：把 deploy.conf 中的 BASE_URL 改成固定源机地址。
+BASE_URL="http://<源机IP>:<分发端口>"
+```
+
+当前源机的实际地址是：
+
+```bash
+BASE_URL=http://49.234.120.241:8088 ./install.sh
+```
+
+如果 `BASE_URL` 为空，目标机本地必须已经存在：
+
+```text
+wheelhouse/SHA256SUMS
+vendor/ffmpeg/ffmpeg-linux-x64.tar.xz
+vendor/mediamtx/mediamtx-linux-x64.tar.gz
+```
+
+也就是说，要么配置 `BASE_URL` 从源机拉取，要么先把 `wheelhouse/` 和 `vendor/` 同步到项目目录。
+
+> Windows 开发机的安装、`FFMPEG_WIN_URL` / `MEDIAMTX_WIN_URL` 等开发环境变量见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
 ### Linux 生产安装
 
 Linux 安装入口是：
@@ -45,85 +95,6 @@ Linux 安装入口是：
 5. 校验并部署 ffmpeg 到 `.ffmpeg/`。
 6. 校验并部署 MediaMTX 到 `mediamtx/`。
 7. 执行安装后自检：`torch`、`numpy`、`cv2`、`ultralytics`、CUDA、ffmpeg、MediaMTX。
-
-### Windows 开发安装
-
-Windows 安装入口是原生 PowerShell：
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force
-.\install.ps1
-```
-
-Windows 安装策略与生产不同：
-
-- `torch` / `torchvision` 从 cu128 PyTorch 镜像在线安装。
-- 轻量依赖从清华 PyPI 镜像在线安装。
-- ffmpeg / MediaMTX 使用 Windows 钉版包。
-- 如果配置了 `BASE_URL`，ffmpeg / MediaMTX 从源机拉取；否则从 `deploy.conf` 中的 Windows URL 在线下载。
-- Windows 包不做 SHA 强校验，定位是开发便利，不作为生产标准。
-- Python 支持 3.10–3.13（开发宽松；`torch` 在线安装，按本机版本自动选 wheel，不依赖 `wheelhouse/`）。
-
-离线拉取源机物料时：
-
-```powershell
-$env:BASE_URL="http://<源机IP>:<分发端口>"
-.\install.ps1
-```
-
-当前 `label-studio` 源机已补齐 `vendor/mediamtx/mediamtx-win-x64.zip`，Windows 开发机可以使用该源机的 `BASE_URL` 拉取 ffmpeg / MediaMTX 物料。
-
-### 安装前必须确认的变量
-
-安装脚本真正依赖的部署变量集中在 `deploy.conf`。
-
-生产安装前重点确认：
-
-```bash
-# 物料源机地址。空值表示使用项目本地 wheelhouse/ 与 vendor/。
-BASE_URL="${BASE_URL:-}"
-
-# 核心 Python 重包。
-TORCH_PKGS="torch==2.8.0 torchvision==0.23.0"
-
-# Linux 生产钉版二进制及 SHA。
-FFMPEG_URL="..."
-FFMPEG_SHA256="..."
-MEDIAMTX_URL="..."
-MEDIAMTX_SHA256="..."
-
-# Windows 开发机二进制来源。
-FFMPEG_WIN_URL="..."
-MEDIAMTX_WIN_URL="..."
-```
-
-`BASE_URL` 有两种用法：
-
-```bash
-# 推荐：不改 deploy.conf，安装时临时指定。
-BASE_URL=http://<源机IP>:<分发端口> ./install.sh
-
-# 或者：把 deploy.conf 中的 BASE_URL 改成固定源机地址。
-BASE_URL="http://<源机IP>:<分发端口>"
-```
-
-当前 `label-studio` 源机的实际地址是：
-
-```bash
-BASE_URL=http://49.234.120.241:8088 ./install.sh
-```
-
-不要照抄旧文档中的 `8080`。这台机器的 `8080` 已被 Label Studio 占用，物料分发服务使用 `8088`。
-
-如果 `BASE_URL` 为空，目标机本地必须已经存在：
-
-```text
-wheelhouse/SHA256SUMS
-vendor/ffmpeg/ffmpeg-linux-x64.tar.xz
-vendor/mediamtx/mediamtx-linux-x64.tar.gz
-```
-
-也就是说，要么配置 `BASE_URL` 从源机拉取，要么先把 `wheelhouse/` 和 `vendor/` 同步到项目目录。
 
 ### 应用启动前必须配置的运行时变量
 
@@ -164,8 +135,6 @@ CLEANSIGHT_MODEL_PATH=...
 CLEANSIGHT_GATEWAY_ALLOWED_IPS=...
 ```
 
-通常不要配置 `CLEANSIGHT_FFMPEG_PATH`。默认留空时，应用会使用项目内 `.ffmpeg/bin/ffmpeg`，避免误用系统 ffmpeg。
-
 ### 安装后的自包含路径
 
 安装完成后，关键第三方依赖都在项目目录内：
@@ -179,13 +148,7 @@ mediamtx/mediamtx.yml
 
 MediaMTX 的配置文件 `mediamtx/mediamtx.yml` 随仓库维护，安装脚本只更新二进制，不覆盖配置和 LICENSE。
 
-如果使用独立 RTSP Gateway 托管 MediaMTX，Linux 可在启动 gateway 前设置：
-
-```bash
-GATEWAY_MEDIAMTX_BIN=mediamtx/mediamtx python -m mediamtx_gateway.main
-```
-
-也可以把 `mediamtx_gateway/config.ini` 中的 `mediamtx_bin` 改为 Linux 路径。不要指向系统安装的 MediaMTX。
+应用默认使用项目内的 `.ffmpeg/bin/ffmpeg`，独立 RTSP Gateway 也通过 `mediamtx_gateway/config.ini` 的 `mediamtx_bin = auto` 默认选用项目内的 `mediamtx/mediamtx`，均无需额外配置。不要指向系统安装的 ffmpeg 或 MediaMTX。
 
 ## 物料供给侧
 
