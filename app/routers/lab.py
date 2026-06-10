@@ -23,10 +23,14 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.database import get_db
+from app.models.task import DBTask
 from app.services.lab import (
     ClipBuilder,
     ClipBuildError,
@@ -37,7 +41,7 @@ from app.services.lab import (
 )
 from app.services.lab import runtime_config
 from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
-from app.utils.exceptions import NotFoundError, ValidationError
+from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
 logger = logging.getLogger(__name__)
@@ -113,9 +117,75 @@ class LabConfigUpdateRequest(BaseModel):
     default_project_id: int = Field(0, ge=0, description="默认 project_id；0 表示无默认值")
 
 
+class LabTaskItem(BaseModel):
+    task_id: int
+    source_ip: Optional[str] = None
+    current_step: Optional[str] = None
+    step_id: Optional[int] = None
+    status: Optional[str] = None
+    updated_time: Optional[int] = None
+    start_time: Optional[int] = None
+    end_time: Optional[int] = None
+    raw_steps: List[int] = Field(default_factory=list)
+    has_raw_segments: bool = False
+    has_current_step_raw: bool = False
+
+
+class LabTaskListResponse(BaseModel):
+    total: int
+    tasks: List[LabTaskItem]
+
+
 # ---------------------------------------------------------------------------
 # 校验工具
 # ---------------------------------------------------------------------------
+
+
+def _optional_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _list_raw_steps(finder: SegmentFinder, task_id: int) -> List[int]:
+    task_root = finder.base_dir / str(task_id)
+    if not task_root.exists() or not task_root.is_dir():
+        return []
+
+    steps: List[int] = []
+    for entry in task_root.iterdir():
+        if not entry.is_dir():
+            continue
+        step_id = _optional_int(entry.name)
+        if step_id is None:
+            continue
+        if finder.list_segments(task_id, step_id, "raw"):
+            steps.append(step_id)
+    return sorted(steps)
+
+
+def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
+    task_id = int(row.task_id)
+    step_id = _optional_int(row.current_step)
+    raw_steps = _list_raw_steps(finder, task_id)
+    has_current_step_raw = step_id is not None and step_id in raw_steps
+
+    return LabTaskItem(
+        task_id=task_id,
+        source_ip=row.source_ip,
+        current_step=str(row.current_step) if row.current_step is not None else None,
+        step_id=step_id,
+        status=row.status,
+        updated_time=_optional_int(row.updated_time),
+        start_time=_optional_int(row.start_time),
+        end_time=_optional_int(row.end_time),
+        raw_steps=raw_steps,
+        has_raw_segments=bool(raw_steps),
+        has_current_step_raw=has_current_step_raw,
+    )
 
 
 def _validate_clips(
@@ -180,6 +250,57 @@ def _resolve_project_id(req_project_id: Optional[int], default_pid: int) -> int:
             field="project_id",
         )
     return int(pid)
+
+
+# ---------------------------------------------------------------------------
+# 接口 0: 任务列表
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tasks", response_model=LabTaskListResponse)
+async def list_lab_tasks(
+    q: Optional[str] = Query(default=None, max_length=64),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> LabTaskListResponse:
+    """List clean_task rows for the lab page."""
+    db = next(get_db())
+    try:
+        try:
+            query = db.query(DBTask)
+            needle = (q or "").strip()
+            if needle:
+                filters = [
+                    DBTask.source_ip.ilike(f"%{needle}%"),
+                    DBTask.status.ilike(f"%{needle}%"),
+                ]
+                task_id = _optional_int(needle)
+                if task_id is not None:
+                    filters.append(DBTask.task_id == task_id)
+                query = query.filter(or_(*filters))
+
+            total = query.count()
+            rows = (
+                query
+                .order_by(DBTask.updated_time.desc(), DBTask.task_id.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+        except SQLAlchemyError as e:
+            raise DatabaseError(
+                message="Failed to list lab tasks",
+                retryable=True,
+                query="SELECT ... FROM clean_task",
+            ) from e
+
+        finder = SegmentFinder(get_default_base_dir())
+        return LabTaskListResponse(
+            total=int(total),
+            tasks=[_task_row_to_item(row, finder) for row in rows],
+        )
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------

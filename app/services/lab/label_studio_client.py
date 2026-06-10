@@ -205,8 +205,11 @@ class LabelStudioClient:
                 error_code="ls_bad_response",
             )
 
+        # 成功判定：能解析出 task id 最好；否则只要官方响应表明 task 已创建
+        # （{"task_count": N, "file_upload_ids": [...], "import": <job_id>}，
+        # 这种形状不含 task_ids / 单个 id，但 task 确已创建）也算成功。
         task_id = _extract_first_task_id(payload)
-        if task_id is None:
+        if task_id is None and not _import_created_task(payload):
             return LabelStudioTaskResult(
                 success=False,
                 task_id=None,
@@ -214,9 +217,18 @@ class LabelStudioClient:
                 error_code="ls_bad_response",
             )
 
+        if task_id is None:
+            logger.info(
+                "LS import created task without task_ids "
+                "(task_count=%s, file_upload_ids=%s, import_job=%s); treating as success",
+                payload.get("task_count") if isinstance(payload, dict) else None,
+                payload.get("file_upload_ids") if isinstance(payload, dict) else None,
+                payload.get("import") if isinstance(payload, dict) else None,
+            )
+
         return LabelStudioTaskResult(
             success=True,
-            task_id=task_id,
+            task_id=task_id,  # 无 task_ids 的响应形状下为 None，无法回填
             error=None,
             error_code=None,
         )
@@ -252,3 +264,25 @@ def _extract_first_task_id(payload) -> Optional[int]:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _import_created_task(payload) -> bool:
+    """判断 LS /import 响应是否表示「至少创建了一个 task」。
+
+    官方 /api/projects/{id}/import 响应形状（无 task_ids）：
+      {"task_count": 1, "file_upload_ids": [1], "import": 1,
+       "annotation_count": 0, "predictions_count": 0,
+       "could_be_tasks_list": true, "data_columns": [...], "found_formats": [...]}
+
+    以 task_count 为准：>=1 即创建成功；==0 即失败（文件可能上传了但未成 task）。
+    仅当响应缺失 task_count 时，才退而用 file_upload_ids 兜底。
+    """
+    if not isinstance(payload, dict):
+        return False
+    if "task_count" in payload:
+        try:
+            return int(payload["task_count"]) >= 1
+        except (TypeError, ValueError):
+            return False
+    uploads = payload.get("file_upload_ids")
+    return isinstance(uploads, list) and len(uploads) > 0
