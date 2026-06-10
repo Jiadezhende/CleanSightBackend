@@ -156,3 +156,7 @@ logs/
 *.temp
 app/models/best.pt
 app/models/bubble-best.pt
+
+.agents/
+.venv312/
+command.txt
