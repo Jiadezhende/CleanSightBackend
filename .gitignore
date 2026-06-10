@@ -160,3 +160,5 @@ app/models/bubble-best.pt
 .agents/
 .venv312/
 command.txt
+start_backend.ps1
+AGENTS.md
