@@ -111,7 +111,7 @@ celerybeat.pid
 .env
 .env.dev
 .env.test
-.venv
+.venv*/
 env/
 venv/
 ENV/
@@ -158,7 +158,6 @@ app/models/best.pt
 app/models/bubble-best.pt
 
 .agents/
-.venv312/
+.claude/
 command.txt
-start_backend.ps1
 AGENTS.md
