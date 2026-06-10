@@ -37,6 +37,8 @@ logging.basicConfig(
 logger = logging.getLogger("mediamtx_gateway")
 
 _CONFIG_PATH = Path(__file__).parent / "config.ini"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_MEDIAMTX_DIR = _PROJECT_ROOT / "mediamtx"
 _MAX_RESTARTS = 5
 
 
@@ -63,6 +65,27 @@ def _load_config() -> dict:
     }
 
 
+def _resolve_path(value: str) -> str:
+    """相对路径按项目根目录解析为绝对路径，绝对路径原样返回（不依赖 CWD）。"""
+    p = Path(value)
+    return str(p if p.is_absolute() else _PROJECT_ROOT / p)
+
+
+def _resolve_mediamtx_bin(configured: str) -> str:
+    """解析 MediaMTX 可执行文件路径。
+
+      - ""      → 纯代理模式（不管理 MediaMTX），原样返回空串
+      - "auto"  → 按当前平台选择 mediamtx/mediamtx(.exe)
+      - 其它    → 视为路径（相对项目根目录或绝对路径）
+    """
+    if not configured:
+        return ""
+    if configured.strip().lower() == "auto":
+        name = "mediamtx.exe" if os.name == "nt" else "mediamtx"
+        return str(_MEDIAMTX_DIR / name)
+    return _resolve_path(configured)
+
+
 async def _run_mediamtx(
     bin_path: str,
     config_path: str,
@@ -82,6 +105,15 @@ async def _run_mediamtx(
             logger.warning("[MediaMTX] Restarting in %ds (%d/%d)...", delay, restarts, _MAX_RESTARTS)
             await asyncio.sleep(delay)
 
+        # POSIX：确保二进制具有可执行权限（仓库内置/解压出的二进制可能缺 +x 位）
+        if os.name != "nt":
+            try:
+                mode = os.stat(bin_path).st_mode
+                if not (mode & 0o111):
+                    os.chmod(bin_path, mode | 0o111)
+            except OSError:
+                pass  # 交由下方 create_subprocess_exec 统一报错
+
         logger.info("[MediaMTX] Starting: %s %s", bin_path, config_path)
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -91,6 +123,13 @@ async def _run_mediamtx(
             )
         except FileNotFoundError:
             logger.critical("[MediaMTX] Binary not found: %s", bin_path)
+            stop_event.set()
+            return
+        except OSError as e:
+            logger.critical(
+                "[MediaMTX] Failed to launch %s: %s（二进制可能与当前平台/架构不匹配）",
+                bin_path, e,
+            )
             stop_event.set()
             return
 
@@ -161,9 +200,11 @@ async def _main() -> None:
 
     await proxy.start()
 
-    if conf["mediamtx_bin"]:
+    mediamtx_bin = _resolve_mediamtx_bin(conf["mediamtx_bin"])
+
+    if mediamtx_bin:
         # 管理 MediaMTX 生命周期
-        await _run_mediamtx(conf["mediamtx_bin"], conf["mediamtx_config"], stop_event)
+        await _run_mediamtx(mediamtx_bin, _resolve_path(conf["mediamtx_config"]), stop_event)
     else:
         # 纯代理模式：MediaMTX 由外部管理，只运行 TCP 代理
         logger.info("[Gateway] Proxy-only mode (mediamtx_bin not set)")

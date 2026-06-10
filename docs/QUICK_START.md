@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- 已完成 [部署指南](DEPLOYMENT_GUIDE.md) 中的环境配置
+- 已完成 [部署指南](../DEPLOYMENT.md) 中的环境配置
 - FFmpeg 已安装并在 PATH 中
 - MediaMTX 已下载并可执行
 
@@ -14,13 +14,16 @@
 
 ### 1. 启动 MediaMTX（终端 1）
 
+> MediaMTX 二进制不随 git 分发,首次需先获取:Linux 部署机由 `./install.sh` 从 `vendor/mediamtx/`
+> 解出到 `mediamtx/`,详见 [部署指南](../DEPLOYMENT.md#linux-生产安装)。
+
 ```bash
 # Windows
-cd mediamtx_v1.15.4
+cd mediamtx
 .\mediamtx.exe
 
 # Linux
-cd mediamtx_v1.15.5_linux_amd64
+cd mediamtx
 ./mediamtx
 ```
 
@@ -193,7 +196,7 @@ python integration_tests/test_reconnect_timeout.py --task_id 1
 
 ## 相关文档
 
-- [部署指南](DEPLOYMENT_GUIDE.md) - 环境配置
+- [部署指南](../DEPLOYMENT.md) - 环境配置
 - [API 端点文档](API_ENDPOINTS.md) - 详细 API 说明
 - [RTSP 流程说明](RTSP_FLOW.md) - RTSP 流处理细节
 

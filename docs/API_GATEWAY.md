@@ -230,7 +230,7 @@ ASGI scope
 
 ## MediaMTX 端口收敛
 
-**文件**：[mediamtx_v1.15.4/mediamtx.yml](../mediamtx_v1.15.4/mediamtx.yml) / [mediamtx_v1.15.5_linux_amd64/mediamtx.yml](../mediamtx_v1.15.5_linux_amd64/mediamtx.yml)
+**文件**：[mediamtx/mediamtx.yml](../mediamtx/mediamtx.yml)
 
 - **RTSP**：`rtspAddress` 改为 `127.0.0.1:18004`（只绑本机回环，必须经 RTSPProxy）
 - **RTMP / HLS / WebRTC / SRT**：均关闭（`rtmp: no`、`hls: no`、`webrtc: no`、`srt: no`）

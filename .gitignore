@@ -26,6 +26,8 @@ parts/
 sdist/
 var/
 wheels/
+wheelhouse/
+vendor/
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
@@ -161,3 +163,13 @@ app/models/bubble-best.pt
 .claude/
 command.txt
 AGENTS.md
+# 第三方 MediaMTX 可执行文件(用 scripts/install_mediamtx.sh 下载,不进 git)
+# 同目录的 mediamtx.yml / LICENSE 仍随仓库走
+mediamtx/mediamtx
+mediamtx/mediamtx.exe
+
+# ultralytics 进程级配置目录(由 app/settings.py 锁死到项目内,运行时生成)
+.ultralytics/
+
+# 钉版 ffmpeg 静态包(install.sh 部署到项目内,不进 git)
+.ffmpeg/

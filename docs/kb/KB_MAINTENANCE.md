@@ -7,7 +7,7 @@
 ## 可信来源顺序
 
 1. 当前代码：`app/`、`mediamtx_gateway/`、`scripts/`。
-2. 当前配置：`config/*.yaml`、`.env.example`、`docker-compose.yml`、启动脚本。
+2. 当前配置：`config/*.yaml`、`.env.example`、`mediamtx/mediamtx.yml`、启动脚本。
 3. 当前测试：`tests/`、`integration_tests/`。
 4. 旧 `docs/`：只能作为待核验线索，必须在代码或测试中找到依据后才能写入本知识库。
 

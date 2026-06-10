@@ -41,24 +41,23 @@ class FFmpegController:
         self.ffmpeg_path = self._find_ffmpeg()
 
     def _find_ffmpeg(self) -> str:
-        """查找 ffmpeg 可执行文件"""
-        # Windows: 优先使用 Chocolatey 安装的版本
-        if os.name == "nt":
-            choco_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
-            if os.path.exists(choco_path):
-                return choco_path
+        """使用项目自包含的 ffmpeg（与后端同源 settings.ffmpeg_path，install 脚本部署到 .ffmpeg/bin/）。
 
-        # 尝试系统 PATH
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-version"], capture_output=True, timeout=2
+        不再走系统 PATH / Chocolatey：统一用项目内钉版二进制，避免测试与生产 ffmpeg 版本漂移。
+        可用 CLEANSIGHT_FFMPEG_PATH 覆写（逃生口，如裸名走 PATH）。
+        """
+        from app.settings import settings
+
+        ffmpeg = settings.ffmpeg_path
+        # 显式路径（含分隔符）必须存在；裸名（PATH 逃生口）交给系统解析
+        has_sep = os.sep in ffmpeg or bool(os.altsep and os.altsep in ffmpeg)
+        if has_sep and not Path(ffmpeg).exists():
+            raise FileNotFoundError(
+                f"未找到项目内 ffmpeg: {ffmpeg}\n"
+                f"请先运行 install.sh / install.ps1 部署 .ffmpeg/，"
+                f"或设置 CLEANSIGHT_FFMPEG_PATH 指向可用 ffmpeg"
             )
-            if result.returncode == 0:
-                return "ffmpeg"
-        except:
-            pass
-
-        raise FileNotFoundError("未找到 ffmpeg，请确保已安装")
+        return ffmpeg
 
     def start(self) -> bool:
         """启动 ffmpeg 推流"""
