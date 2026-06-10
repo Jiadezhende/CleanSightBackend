@@ -21,7 +21,7 @@ CleanSight Backend 是一个 FastAPI 主进程加若干外部组件的实时视�
 
 ## 外部组件
 
-- MediaMTX：接收或转发 RTSP/RTMP 流，`docker-compose.yml` 暴露 1935、8004 等端口。
+- MediaMTX：接收或转发 RTSP/RTMP 流，`mediamtx/mediamtx.yml` 配置 1935、8004 等端口。
 - FFmpeg：后端通过子进程读取流并解码 rawvideo。
 - Postgres：应用 ORM 使用 SQLAlchemy 连接，模型映射 `clean_task`、`clean_alarm`。
 - 外部告警接口：`settings.alarm_report_url`。
@@ -48,6 +48,5 @@ GatewayMiddleware 注册在 CORS 之后。Starlette 逆序包装，因此 Gatewa
 - `app/routers/__init__.py`
 - `app/services/ai.py`
 - `app/database.py`
-- `docker-compose.yml`
 - `mediamtx_gateway/main.py`
 

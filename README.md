@@ -59,13 +59,12 @@ app/
 
 - ✅ Windows 10/11
 - ✅ Ubuntu 20.04+
-- ✅ Docker 容器化部署
 
 ### 环境部署
 
-详细部署步骤请见 [部署指南](docs/DEPLOYMENT_GUIDE.md)，包括：
+详细部署步骤请见 [部署指南](DEPLOYMENT.md)，包括：
 
-1. **虚拟环境创建**: Python 3.10+
+1. **虚拟环境创建**: 生产统一 Python 3.10；开发 3.10–3.13
 2. **FFmpeg 安装**: 用于视频解码（必需）
 3. **MediaMTX 配置**: 端口 1935（RTMP）、8004（RTSP）
 4. **依赖安装**:
@@ -89,11 +88,15 @@ app/
 
 ### 1. 启动服务
 
+> MediaMTX 二进制不随 git 分发,首次需先获取:Linux 部署机由 `./install.sh` 从 `vendor/mediamtx/`
+> 解出到 `mediamtx/`(物料由构建机 `./build.sh` 备好)。Windows 开发机/手动获取见 [开发指南](DEVELOPMENT.md)。纯部署机可用浅克隆加速:
+> `git clone --depth 1 <repo-url>`(跳过历史)。详见 [部署指南](DEPLOYMENT.md)。
+
 ```bash
 # 启动 MediaMTX（终端 1）
-cd mediamtx_v1.15.4
+cd mediamtx
 ./mediamtx.exe    # Windows
-# 或 ./mediamtx  # Linux
+# 或 ./mediamtx    # Linux
 
 # 启动后端 API（终端 2）
 .\start_backend.ps1 dev   # Windows
@@ -492,7 +495,7 @@ set LOG_LEVEL=DEBUG     # Windows
 如果遇到其他问题，请查看：
 
 - [配置指南](docs/CONFIGURATION_GUIDE.md)
-- [部署指南](docs/DEPLOYMENT_GUIDE.md)
+- [部署指南](DEPLOYMENT.md)
 - [异常处理文档](docs/EXCEPTION_HANDLING.md)
 - GitHub Issues：提交新问题或查看已知问题
 

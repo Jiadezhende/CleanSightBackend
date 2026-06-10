@@ -10,7 +10,6 @@ AI 视觉巡检后端系统，基于 FastAPI + YOLOv8，提供实时 RTSP 流推
 ./start_backend.sh dev          # Linux（加载 .env.dev）
 .\start_backend.ps1 dev         # Windows
 python -m app.main              # 直接运行
-docker-compose up               # Docker
 ```
 
 入口：[app/main.py](app/main.py) → FastAPI lifespan 依次启动各 Service 单例。
