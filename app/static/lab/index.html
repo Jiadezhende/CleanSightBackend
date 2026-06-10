@@ -40,8 +40,9 @@
     .task-panel { margin-top: 12px; border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; background: #fff; }
     .task-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
     .task-total { font-size: 12px; color: #6b7280; white-space: nowrap; }
+    .task-scroll { max-height: 360px; overflow-y: auto; }
     .task-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
-    .task-table th { background: #fff; color: #6b7280; font-weight: 600; text-align: left; padding: 8px 10px; border-bottom: 1px solid #e5e7eb; }
+    .task-table th { position: sticky; top: 0; z-index: 1; background: #fff; color: #6b7280; font-weight: 600; text-align: left; padding: 8px 10px; border-bottom: 1px solid #e5e7eb; }
     .task-table td { padding: 7px 10px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .task-table tr:last-child td { border-bottom: 0; }
     .task-table tbody tr { cursor: pointer; }
@@ -121,6 +122,7 @@
           <span class="task-total">共 {{ taskList.total }} 条</span>
         </div>
 
+        <div class="task-scroll" ref="taskScrollEl" @scroll="onTaskScroll">
         <table class="task-table">
           <thead>
             <tr>
@@ -156,8 +158,15 @@
             <tr v-if="!taskList.items.length">
               <td colspan="7" class="task-empty">{{ loading.tasks ? '加载中…' : '暂无任务' }}</td>
             </tr>
+            <tr v-else-if="loading.tasksMore">
+              <td colspan="7" class="task-empty">加载更多…</td>
+            </tr>
+            <tr v-else-if="!taskList.hasMore">
+              <td colspan="7" class="task-empty">已加载全部 {{ taskList.items.length }} 条</td>
+            </tr>
           </tbody>
         </table>
+        </div>
       </div>
 
       <div class="health-line">
@@ -401,7 +410,7 @@ createApp({
 
     // 表单
     const form = reactive({ task_id: null, step_id: null, project_id: null });
-    const loading = reactive({ load: false, submit: false, config: false, tasks: false });
+    const loading = reactive({ load: false, submit: false, config: false, tasks: false, tasksMore: false });
     const loaded = ref(false);
 
     // 健康
@@ -416,29 +425,60 @@ createApp({
       }
     }
 
-    // 任务列表
+    // 任务列表（滚动到底部追加加载）
+    const TASK_PAGE_SIZE = 50;
     const taskQuery = ref('');
-    const taskList = reactive({ total: 0, items: [] });
+    const taskList = reactive({ total: 0, items: [], hasMore: false });
+    const taskScrollEl = ref(null);
+
+    // 拉取一页；offset=0 时替换列表，否则追加
+    async function fetchTaskPage(offset) {
+      const params = new URLSearchParams({ limit: String(TASK_PAGE_SIZE), offset: String(offset) });
+      const q = (taskQuery.value || '').trim();
+      if (q) params.set('q', q);
+      const r = await fetch(api(`/lab-f3m8/tasks?${params.toString()}`));
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = d?.detail?.detail || d?.detail?.error || d?.detail || `HTTP ${r.status}`;
+        throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+      }
+      const items = Array.isArray(d.tasks) ? d.tasks : [];
+      taskList.total = Number(d.total) || 0;
+      if (offset === 0) taskList.items = items;
+      else taskList.items.push(...items);
+      taskList.hasMore = taskList.items.length < taskList.total && items.length > 0;
+    }
+
+    // 刷新 / 搜索：从头加载
     async function fetchTasks() {
       loading.tasks = true;
       try {
-        const params = new URLSearchParams({ limit: '50' });
-        const q = (taskQuery.value || '').trim();
-        if (q) params.set('q', q);
-        const r = await fetch(api(`/lab-f3m8/tasks?${params.toString()}`));
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          const msg = d?.detail?.detail || d?.detail?.error || d?.detail || `HTTP ${r.status}`;
-          ElMessage.error('任务列表读取失败: ' + (typeof msg === 'string' ? msg : JSON.stringify(msg)));
-          return;
-        }
-        taskList.total = Number(d.total) || 0;
-        taskList.items = Array.isArray(d.tasks) ? d.tasks : [];
+        await fetchTaskPage(0);
+        if (taskScrollEl.value) taskScrollEl.value.scrollTop = 0;
       } catch (e) {
-        ElMessage.error('任务列表网络异常: ' + e.message);
+        ElMessage.error('任务列表读取失败: ' + e.message);
       } finally {
         loading.tasks = false;
       }
+    }
+
+    // 追加下一页
+    async function loadMoreTasks() {
+      if (loading.tasks || loading.tasksMore || !taskList.hasMore) return;
+      loading.tasksMore = true;
+      try {
+        await fetchTaskPage(taskList.items.length);
+      } catch (e) {
+        ElMessage.error('加载更多失败: ' + e.message);
+      } finally {
+        loading.tasksMore = false;
+      }
+    }
+
+    // 滚动到底部附近（距底 < 48px）时触发追加
+    function onTaskScroll(e) {
+      const el = e.target;
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) loadMoreTasks();
     }
     function selectTask(t) {
       const nextTaskId = Number(t.task_id);
@@ -769,7 +809,7 @@ createApp({
     return {
       apiBase,
       form, loading, loaded, health,
-      taskQuery, taskList, fetchTasks, selectTask,
+      taskQuery, taskList, taskScrollEl, fetchTasks, onTaskScroll, selectTask,
       configDialog, openConfigDialog, saveConfig,
       timeline, videoEl, stripEl, currentAbsMs,
       rangeStyle, markerStyle, cursorStyle, alarmTooltip,
