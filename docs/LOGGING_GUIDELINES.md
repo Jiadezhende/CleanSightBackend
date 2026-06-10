@@ -299,7 +299,7 @@ logger.info("[StreamDecoder] Disconnected | frames_received=%d, dropped=%d", tot
 $env:LOG_LEVEL="DEBUG"; ./start_backend.ps1 dev
 ```
 
-### 4.2 生产环境（.env.prod）
+### 4.2 生产环境（.env）
 
 **默认配置**：
 - 日志级别：`WARNING`

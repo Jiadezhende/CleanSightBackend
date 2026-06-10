@@ -1,6 +1,9 @@
+# 本文件是唯一依赖源，供 install.sh 使用。
+# torch / torchvision 不在此列——它们是核心静态物料，版本钉在 deploy.conf，
+# 由 build.sh 下进 wheelhouse、install.sh 离线装。
+
 # ========== Core AI / CUDA ==========
-torch==2.8.0
-torchvision==0.23.0
+# torch / torchvision 见 deploy.conf（TORCH_PKGS）
 ultralytics~=8.3.200
 lap>=0.5.12
 
