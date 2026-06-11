@@ -15,6 +15,7 @@ VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() +
 import base64
 import logging
 import threading
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -28,7 +29,7 @@ from app.models.frame import FrameData, ProcessedFrame
 from app.models.task import Task as CleaningTask
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.core.service import ModelWorkerService
-from app.services.inference.data_models import AlarmInfo
+from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmInfo, AlarmMetric
 from app.services.inference.workers.temporal import ClientTemporalActor
 from app.services.inference.workers.visualization import VisualizationWorkerPool
 
@@ -65,6 +66,9 @@ class InferenceManager:
         # stage 配置（延迟初始化）
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
         self._model_worker_service: Optional[ModelWorkerService] = None
+
+        # per-client 生命周期事务锁（set_task / remove_client 互斥）
+        self._client_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
 
         # per-client ClientTemporalActor 注册表
         self._actors: Dict[str, ClientTemporalActor] = {}
@@ -208,22 +212,22 @@ class InferenceManager:
     }
 
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
-        """为客户端设置任务，并创建对应的 ClientTemporalActor。"""
+        """为客户端设置任务，并创建对应的 ClientTemporalActor。
+
+        调用顺序：先停旧 Actor（settlement 在旧 task 上下文写入），再切换字段，再清缓存。
+        这样可保证 settlement 告警正确归属旧任务，不会落入已清空的新任务 alarm_log。
+        整个流程在 _client_locks[client_id] 下执行，与 remove_client 互斥。
+        """
+        with self._client_locks[client_id]:
+            return self._set_task_locked(client_id, task)
+
+    def _set_task_locked(self, client_id: str, task: Optional[CleaningTask]) -> bool:
+        """set_task 的加锁实现，调用方须已持有 _client_locks[client_id]。"""
         cq = client_manager.get_client(client_id)
         if cq is None:
             return False
-        cq.set_task(task)
 
-        if task is not None:
-            stage = self._STEP_TO_STAGE.get(task.current_step, "MOCK")
-            if stage == "MOCK":
-                logger.warning(
-                    "[InferenceManager] 未知的 current_step '%s'，路由到 MOCK stage",
-                    task.current_step,
-                )
-            cq.set_stage(stage)
-
-        # 停止旧 actor（任务切换时），等待线程退出并收集结算告警
+        # 1. 先停旧 Actor：settlement 写入发生时 cq.task 仍为旧值，归属正确
         old_actor = self._actors.pop(client_id, None)
         if old_actor is not None:
             try:
@@ -235,6 +239,22 @@ class InferenceManager:
                     "[InferenceManager] Settlement alarms on task switch failed for %s: %s",
                     client_id, e,
                 )
+
+        # 2. 切换字段（纯赋值，线程安全）
+        cq.set_task(task)
+
+        if task is not None:
+            client_manager.bind_task(client_id, task.task_id)
+            stage = self._STEP_TO_STAGE.get(task.current_step, "MOCK")
+            if stage == "MOCK":
+                logger.warning(
+                    "[InferenceManager] 未知的 current_step '%s'，路由到 MOCK stage",
+                    task.current_step,
+                )
+            cq.set_stage(stage)
+
+        # 3. 旧 Actor 已停，安全清空任务级缓存
+        cq.clear_task_caches()
 
         # 按 Client 独立实例化 TemporalAnalyzer
         stage = cq.get_stage()
@@ -273,7 +293,14 @@ class InferenceManager:
         1. 通过 actor.finalize_and_stop() 收集结算告警并持久化
         2. 落盘残余 HLS 段
         3. 清理编码缓存
+
+        整个流程在 _client_locks[client_id] 下执行，与 set_task 互斥。
         """
+        with self._client_locks[client_id]:
+            self._remove_client_locked(client_id)
+
+    def _remove_client_locked(self, client_id: str) -> None:
+        """remove_client 的加锁实现，调用方须已持有 _client_locks[client_id]。"""
         logger.info("[InferenceManager] Removing inference resources: %s", client_id)
 
         cq = (
@@ -367,17 +394,29 @@ class InferenceManager:
         self, client_id: str, cq: ClientQueues, alarms: List[AlarmInfo]
     ) -> None:
         """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
-        from app.services.inference.models import AlarmRecord
+        from app.services.inference.models import AlarmRecord, infer_alarm_metric
 
         stage = cq.get_stage()
+        task = cq.get_task()
         task_id = cq.get_task_id()
+        step_id = int(task.current_step) if task and task.current_step else None
 
         for alarm in alarms:
+            metric = infer_alarm_metric(
+                alarm_type=alarm.alarm_type,
+                alarm_message=alarm.alarm_message,
+                metadata=alarm.metadata or {},
+            )
+            if not cq.try_pass_alarm_gate(task_id, metric, "SETTLEMENT"):
+                continue
             self.persistence_manager.persist_alarm({
                 "task_id": task_id,
                 "stage": stage,
+                "step_id": step_id,
                 "client_id": client_id,
                 "alarm_type": alarm.alarm_type,
+                "alarm_metric": metric,
+                "alarm_mode": "SETTLEMENT",
                 "alarm_level": alarm.alarm_level,
                 "alarm_message": alarm.alarm_message,
                 "detection_result": alarm.metadata if alarm.metadata else None,
@@ -386,6 +425,9 @@ class InferenceManager:
                 alarm_type=alarm.alarm_type,
                 alarm_level=alarm.alarm_level,
                 alarm_message=alarm.alarm_message,
+                mode="SETTLEMENT",
+                metric=metric,
+                stage=stage,
                 metadata=alarm.metadata or {},
             ))
             logger.info(
@@ -404,6 +446,15 @@ class InferenceManager:
                 )
                 return
 
+            task = client_queues.get_task()
+            step_id = ClientQueues._resolve_step_id(task)
+            if step_id is None:
+                logger.error(
+                    "[InferenceManager] invalid current_step for client=%s task_id=%s, skip flush",
+                    client_id, task_id,
+                )
+                return
+
             seg_len = client_queues.ca_segment_len
             raw_frames = client_queues.drain_ca_raw()
             processed_frames = client_queues.drain_ca_processed()
@@ -412,8 +463,8 @@ class InferenceManager:
                 chunk = raw_frames[i : i + seg_len]
                 if chunk:
                     self.persistence_manager.persist_hls_segment(
-                        client_id=client_id,
                         task_id=task_id,
+                        step_id=step_id,
                         segment_type="raw",
                         frames=chunk,
                     )
@@ -422,8 +473,8 @@ class InferenceManager:
                 chunk = processed_frames[i : i + seg_len]
                 if chunk:
                     self.persistence_manager.persist_hls_segment(
-                        client_id=client_id,
                         task_id=task_id,
+                        step_id=step_id,
                         segment_type="processed",
                         frames=chunk,
                     )
@@ -432,6 +483,15 @@ class InferenceManager:
             logger.error("_flush_all_remaining_segments error for %s: %s", client_id, e, exc_info=True)
 
     def enqueue_alarm(self, alarm_info: Dict[str, Any]):
+        from app.services.client import client_manager
+        client_id = alarm_info.get("client_id")
+        cq = client_manager.get_client(client_id) if client_id else None
+        if cq is not None:
+            task_id = alarm_info.get("task_id")
+            metric = alarm_info.get("alarm_metric", AlarmMetric.UNKNOWN)
+            mode = alarm_info.get("alarm_mode", ALARM_MODE_REALTIME)
+            if not cq.try_pass_alarm_gate(task_id, metric, mode):
+                return
         self.persistence_manager.persist_alarm(alarm_info)
 
     # ========== 启动/停止 ==========
@@ -447,6 +507,12 @@ class InferenceManager:
 
         self.visualization_pool.start()
         self.persistence_manager.start()
+
+        # 初始化全局 task_name → AlarmMetric 映射（由 YAML model name 驱动）
+        from app.services.inference.stage_factory import StageFactory
+        from app.services.inference.config import load_stage_config
+        from app.services.inference.data_models import _set_task_metric_map
+        _set_task_metric_map(StageFactory(load_stage_config()).build_task_metric_map())
 
         logger.info("[InferenceManager] Started")
 

@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CleanSight 运维面板</title>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f2f5; }
+    .header {
+      background: #001529; color: #fff; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 48px;
+    }
+    .header-title { font-size: 16px; font-weight: 600; letter-spacing: 1px; }
+    .header-right { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+    .main { padding: 16px 24px; }
+    .card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+    .card-title { font-size: 14px; font-weight: 600; color: #1f2937; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+    .stat-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+    .stat-box { background: #fff; border-radius: 8px; padding: 16px 20px; flex: 1; min-width: 140px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+    .stat-label { font-size: 12px; color: #6b7280; }
+    .stat-value { font-size: 28px; font-weight: 700; color: #111827; margin-top: 4px; }
+    .stat-sub { font-size: 11px; color: #9ca3af; margin-top: 2px; }
+    .client-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+    .client-card { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; }
+    .client-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    .client-id { font-weight: 600; font-size: 13px; color: #374151; font-family: monospace; }
+    .queue-bars { display: flex; flex-direction: column; gap: 4px; }
+    .queue-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .queue-label { width: 90px; color: #6b7280; flex-shrink: 0; }
+    .queue-bar-wrap { flex: 1; background: #e5e7eb; border-radius: 4px; height: 8px; overflow: hidden; }
+    .queue-bar { height: 100%; border-radius: 4px; transition: width .3s; }
+    .bar-ready { background: #3b82f6; }
+    .bar-raw { background: #f59e0b; }
+    .bar-proc { background: #10b981; }
+    .queue-num { width: 36px; text-align: right; color: #374151; font-family: monospace; }
+    .live-layout { display: grid; grid-template-columns: 1fr 340px; gap: 16px; }
+    .video-box { background: #000; border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; }
+    .video-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .video-placeholder { color: #6b7280; text-align: center; padding: 40px; }
+    .fps-badge { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,.55); color: #4ade80; font-family: monospace; font-size: 13px; padding: 2px 8px; border-radius: 4px; }
+    .status-panel { display: flex; flex-direction: column; gap: 10px; }
+    .status-item { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
+    .status-key { font-size: 11px; color: #9ca3af; text-transform: uppercase; letter-spacing: .5px; }
+    .status-val { font-size: 15px; font-weight: 600; color: #111827; margin-top: 2px; }
+    .alarm-scroll { max-height: 200px; overflow-y: auto; }
+    .alarm-item { padding: 6px 8px; border-bottom: 1px solid #f3f4f6; font-size: 12px; display: flex; gap: 8px; align-items: flex-start; }
+    .alarm-level { flex-shrink: 0; font-weight: 600; }
+    .level-high { color: #ef4444; }
+    .level-medium { color: #f59e0b; }
+    .level-low { color: #6b7280; }
+    .metric-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .metric-table th { background: #f9fafb; text-align: left; padding: 8px 12px; font-weight: 600; color: #6b7280; border-bottom: 2px solid #e5e7eb; font-size: 11px; text-transform: uppercase; }
+    .metric-table td { padding: 8px 12px; border-bottom: 1px solid #f3f4f6; }
+    .metric-table tr:hover td { background: #f9fafb; }
+    .latency-chart-wrap { height: 260px; }
+    .raw-metrics { font-family: monospace; font-size: 11px; color: #374151; white-space: pre; overflow: auto; max-height: 320px; background: #f9fafb; padding: 12px; border-radius: 6px; }
+    .test-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 16px; }
+    .test-stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+    .test-stat { background: #f9fafb; border-radius: 6px; padding: 12px; text-align: center; }
+    .test-stat-v { font-size: 22px; font-weight: 700; color: #111827; }
+    .test-stat-k { font-size: 11px; color: #9ca3af; margin-top: 2px; }
+    .dist-chart-wrap { height: 200px; }
+    .tag-running { color: #10b981; background: #d1fae5; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .tag-paused  { color: #6b7280; background: #f3f4f6; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .tag-idle    { color: #9ca3af; background: #f9fafb; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .el-tab-pane { padding-top: 4px; }
+    .refresh-info { font-size: 11px; color: #9ca3af; }
+    .sparkline { display: inline-block; vertical-align: middle; }
+    canvas.sparkline { margin-left: 4px; }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-title">&#9673; CleanSight 运维面板</div>
+    <div class="header-right">
+      <span class="refresh-info">后端: {{ apiBase }}</span>
+    </div>
+  </div>
+
+  <div class="main">
+    <el-tabs v-model="activeTab" type="card">
+
+      <!-- ===== Tab 1: 总览 ===== -->
+      <el-tab-pane label="总览" name="overview">
+        <div class="stat-row">
+          <div class="stat-box">
+            <div class="stat-label">活跃客户端</div>
+            <div class="stat-value">{{ overview.active_clients }}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">总队列帧</div>
+            <div class="stat-value">{{ overview.total_queued_frames }}</div>
+            <div class="stat-sub">ca_ready + ca_raw + ca_processed</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">最近更新</div>
+            <div class="stat-value" style="font-size:16px">{{ overviewTime }}</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            客户端状态
+            <span class="refresh-info">3s 自动刷新</span>
+          </div>
+          <div v-if="overview.clients.length === 0" style="color:#9ca3af;padding:20px 0;text-align:center">
+            暂无活跃客户端
+          </div>
+          <div v-else class="client-grid">
+            <div class="client-card" v-for="c in overview.clients" :key="c.client_id">
+              <div class="client-header">
+                <span class="client-id">{{ c.client_id }}</span>
+                <span :class="statusTag(c.task_status)">{{ c.task_status || 'idle' }}</span>
+              </div>
+              <div style="font-size:12px;color:#6b7280;margin-bottom:8px">
+                task_id: <b>{{ c.task_id ?? '—' }}</b>
+                &nbsp;|&nbsp; step: <b>{{ c.current_step ?? '—' }}</b>
+              </div>
+              <div class="queue-bars">
+                <div class="queue-row">
+                  <span class="queue-label">ca_ready</span>
+                  <div class="queue-bar-wrap">
+                    <div class="queue-bar bar-ready" :style="barStyle(c.queue_depths.ca_ready)"></div>
+                  </div>
+                  <span class="queue-num">{{ c.queue_depths.ca_ready }}</span>
+                </div>
+                <div class="queue-row">
+                  <span class="queue-label">ca_raw</span>
+                  <div class="queue-bar-wrap">
+                    <div class="queue-bar bar-raw" :style="barStyle(c.queue_depths.ca_raw)"></div>
+                  </div>
+                  <span class="queue-num">{{ c.queue_depths.ca_raw }}</span>
+                </div>
+                <div class="queue-row">
+                  <span class="queue-label">ca_processed</span>
+                  <div class="queue-bar-wrap">
+                    <div class="queue-bar bar-proc" :style="barStyle(c.queue_depths.ca_processed)"></div>
+                  </div>
+                  <span class="queue-num">{{ c.queue_depths.ca_processed }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Health summary -->
+        <div class="card" v-if="health.clients">
+          <div class="card-title">系统健康</div>
+          <el-descriptions :column="3" border size="small">
+            <el-descriptions-item label="总客户端">{{ health.clients?.total_clients ?? '—' }}</el-descriptions-item>
+            <el-descriptions-item label="活跃流">{{ health.clients?.active_streams ?? '—' }}</el-descriptions-item>
+            <el-descriptions-item label="重连中">{{ health.clients?.reconnecting ?? '—' }}</el-descriptions-item>
+            <el-descriptions-item label="孤儿流">{{ health.clients?.orphan_streams ?? '—' }}</el-descriptions-item>
+            <el-descriptions-item label="检测轮数">{{ health.monitor_stats?.checks ?? '—' }}</el-descriptions-item>
+            <el-descriptions-item label="重连成功">{{ health.monitor_stats?.reconnect_successes ?? '—' }}</el-descriptions-item>
+          </el-descriptions>
+        </div>
+      </el-tab-pane>
+
+      <!-- ===== Tab 2: 实时监控 ===== -->
+      <el-tab-pane label="实时监控" name="live">
+        <div style="display:flex;gap:12px;align-items:center;margin-bottom:16px">
+          <el-select v-model="selectedClient" placeholder="选择客户端" style="width:220px" @change="onClientChange">
+            <el-option v-for="c in overview.clients" :key="c.client_id" :label="c.client_id" :value="c.client_id" />
+          </el-select>
+          <el-button v-if="selectedClient && !liveConnected" type="primary" @click="startLive">连接</el-button>
+          <el-button v-if="liveConnected" type="danger" @click="stopLive">断开</el-button>
+          <el-tag v-if="liveConnected" type="success" size="small">直播中</el-tag>
+          <el-tag v-else type="info" size="small">未连接</el-tag>
+        </div>
+        <div class="live-layout">
+          <div>
+            <div class="video-box">
+              <img v-if="liveFrame" :src="liveFrame" alt="live" />
+              <div v-else class="video-placeholder">
+                <div style="font-size:40px;margin-bottom:12px">&#128247;</div>
+                <div>{{ selectedClient ? '点击"连接"开始实时画面' : '请先选择客户端' }}</div>
+              </div>
+              <div class="fps-badge" v-if="liveConnected">{{ liveFps }} fps</div>
+            </div>
+          </div>
+          <div class="status-panel">
+            <div class="status-item">
+              <div class="status-key">任务 ID</div>
+              <div class="status-val">{{ liveClientInfo?.task_id ?? '—' }}</div>
+            </div>
+            <div class="status-item">
+              <div class="status-key">任务状态</div>
+              <div class="status-val">{{ liveClientInfo?.task_status ?? '—' }}</div>
+            </div>
+            <div class="status-item">
+              <div class="status-key">当前阶段</div>
+              <div class="status-val">{{ liveClientInfo?.current_step ?? '—' }}</div>
+            </div>
+            <div class="status-item">
+              <div class="status-key">实时告警</div>
+              <div class="alarm-scroll" style="margin-top:6px">
+                <div class="alarm-item" v-for="a in liveAlarms" :key="a.seq">
+                  <span :class="'alarm-level level-' + (a.level || 'low')">{{ a.level?.toUpperCase() }}</span>
+                  <span style="font-size:11px;flex:1">{{ a.message }}</span>
+                  <span style="font-size:10px;color:#9ca3af;flex-shrink:0">{{ formatTs(a.ts) }}</span>
+                </div>
+                <div v-if="!liveAlarms.length" style="font-size:12px;color:#9ca3af;padding:8px 0">
+                  暂无告警
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <!-- ===== Tab 3: 指标监控 ===== -->
+      <el-tab-pane label="指标监控" name="metrics">
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
+          <el-button size="small" @click="fetchMetrics">立即刷新</el-button>
+          <span class="refresh-info">5s 自动刷新 | 最近 {{ latencyHistory.length }} 个采样点</span>
+        </div>
+
+        <!-- 推理延迟趋势 -->
+        <div class="card">
+          <div class="card-title">推理延迟趋势（ms）</div>
+          <div class="latency-chart-wrap">
+            <canvas ref="latencyChartRef"></canvas>
+          </div>
+        </div>
+
+        <!-- 核心计数器 -->
+        <div class="card">
+          <div class="card-title">核心计数器</div>
+          <table class="metric-table">
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>值</th>
+                <th>明细</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>推理失败</td>
+                <td>{{ metricsJson.infer_failure_total?.total ?? 0 }}</td>
+                <td>{{ formatDict(metricsJson.infer_failure_total?.by_type) }}</td>
+              </tr>
+              <tr>
+                <td>帧丢弃</td>
+                <td>{{ metricsJson.frame_drop_total?.total ?? 0 }}</td>
+                <td>{{ formatDict(metricsJson.frame_drop_total?.by_reason) }}</td>
+              </tr>
+              <tr>
+                <td>GPU OOM</td>
+                <td>{{ metricsJson.gpu_oom_total ?? 0 }}</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td>重试</td>
+                <td>{{ metricsJson.retry_total?.total ?? 0 }}</td>
+                <td>{{ formatDict(metricsJson.retry_total?.by_operation) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 推理延迟分位数（各模型） -->
+        <div class="card" v-if="Object.keys(metricsJson.infer_latency_ms || {}).length">
+          <div class="card-title">推理延迟分位数</div>
+          <table class="metric-table">
+            <thead>
+              <tr><th>模型</th><th>P50 (ms)</th><th>P95 (ms)</th><th>P99 (ms)</th><th>总调用</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(v, model) in (metricsJson.infer_latency_ms || {})" :key="model">
+                <td>{{ model }}</td>
+                <td>{{ v.p50 }}</td>
+                <td>{{ v.p95 }}</td>
+                <td>{{ v.p99 }}</td>
+                <td>{{ v.total_count }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 原始 Prometheus 文本 -->
+        <div class="card">
+          <div class="card-title" style="cursor:pointer" @click="showRaw = !showRaw">
+            原始 Prometheus 文本 {{ showRaw ? '▲' : '▼' }}
+          </div>
+          <div class="raw-metrics" v-if="showRaw">{{ rawMetrics }}</div>
+        </div>
+      </el-tab-pane>
+
+      <!-- ===== Tab 4: 告警列表 ===== -->
+      <el-tab-pane label="告警列表" name="alarms">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px">
+          <el-input v-model="alarmFilter.task_id" placeholder="输入 task_id（必填）" style="width:200px" clearable
+            @keyup.enter="fetchAlarms" />
+          <el-button @click="fetchAlarms" type="primary" size="small" :disabled="!alarmFilter.task_id">查询</el-button>
+          <span class="refresh-info">共 {{ alarmRows.length }} 条</span>
+        </div>
+        <div v-if="!alarmFilter.task_id" style="color:#9ca3af;padding:24px;text-align:center">
+          请输入 task_id 后点击查询（活跃任务实时告警在"实时监控"标签查看）
+        </div>
+        <el-table v-else :data="alarmRows" size="small" stripe border style="width:100%">
+          <el-table-column prop="alarm_id" label="告警ID" width="80"></el-table-column>
+          <el-table-column prop="step_name" label="步骤" width="80" show-overflow-tooltip></el-table-column>
+          <el-table-column prop="alarm_type" label="类型" width="100"></el-table-column>
+          <el-table-column label="级别" width="80">
+            <template #default="{ row }">
+              <el-tag :type="severityType(row.severity)" size="small">{{ row.severity }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="message" label="消息" min-width="180" show-overflow-tooltip></el-table-column>
+          <el-table-column label="检测时间" width="150">
+            <template #default="{ row }">{{ formatTs(row.detected_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="80">
+            <template #default="{ row }">
+              <el-button v-if="row.alarm_id > 0" size="small" @click="viewEvidence(row.alarm_id)">证据</el-button>
+              <span v-else style="color:#d1d5db;font-size:12px">—</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- ===== Tab 5: 延迟测试 ===== -->
+      <el-tab-pane label="延迟测试" name="latency">
+        <div class="card">
+          <div class="card-title">测试配置</div>
+          <div class="test-controls">
+            <div>
+              <div style="font-size:12px;color:#6b7280;margin-bottom:4px">端点</div>
+              <el-select v-model="ltConfig.endpoint" style="width:220px">
+                <el-option label="/admin-f3m8/ping" value="/admin-f3m8/ping" />
+                <el-option label="/health/status" value="/health/status" />
+                <el-option label="/admin-f3m8/overview" value="/admin-f3m8/overview" />
+                <el-option label="/metrics" value="/metrics" />
+                <el-option label="自定义..." value="__custom__" />
+              </el-select>
+            </div>
+            <div v-if="ltConfig.endpoint === '__custom__'">
+              <div style="font-size:12px;color:#6b7280;margin-bottom:4px">自定义路径</div>
+              <el-input v-model="ltConfig.custom" placeholder="/your/path" style="width:200px" />
+            </div>
+            <div>
+              <div style="font-size:12px;color:#6b7280;margin-bottom:4px">请求总数</div>
+              <el-input-number v-model="ltConfig.total" :min="1" :max="500" :step="10" />
+            </div>
+            <div>
+              <div style="font-size:12px;color:#6b7280;margin-bottom:4px">并发数</div>
+              <el-input-number v-model="ltConfig.concurrency" :min="1" :max="20" />
+            </div>
+            <el-button type="primary" :loading="ltRunning" @click="runLatencyTest">
+              {{ ltRunning ? '测试中...' : '开始测试' }}
+            </el-button>
+            <el-button @click="resetLatencyTest" :disabled="ltRunning">重置</el-button>
+          </div>
+
+          <div v-if="ltResults.latencies.length">
+            <div class="test-stat-grid">
+              <div class="test-stat">
+                <div class="test-stat-v">{{ ltStats.min }} ms</div>
+                <div class="test-stat-k">最小</div>
+              </div>
+              <div class="test-stat">
+                <div class="test-stat-v">{{ ltStats.avg }} ms</div>
+                <div class="test-stat-k">平均</div>
+              </div>
+              <div class="test-stat">
+                <div class="test-stat-v">{{ ltStats.max }} ms</div>
+                <div class="test-stat-k">最大</div>
+              </div>
+              <div class="test-stat">
+                <div class="test-stat-v">{{ ltStats.p50 }} ms</div>
+                <div class="test-stat-k">P50</div>
+              </div>
+              <div class="test-stat">
+                <div class="test-stat-v">{{ ltStats.p95 }} ms</div>
+                <div class="test-stat-k">P95</div>
+              </div>
+              <div class="test-stat">
+                <div class="test-stat-v" :style="{ color: ltResults.errors > 0 ? '#ef4444' : '' }">
+                  {{ ltResults.errors }}
+                </div>
+                <div class="test-stat-k">错误</div>
+              </div>
+            </div>
+            <div class="dist-chart-wrap">
+              <canvas ref="distChartRef"></canvas>
+            </div>
+          </div>
+          <div v-else style="color:#9ca3af;padding:20px;text-align:center">
+            配置参数后点击「开始测试」
+          </div>
+        </div>
+      </el-tab-pane>
+
+    </el-tabs>
+
+    <!-- ===== 告警证据弹窗 ===== -->
+    <el-dialog v-model="evidenceVisible" title="告警证据" width="900px"
+               :close-on-click-modal="false" destroy-on-close>
+      <div v-if="evidenceLoading" style="text-align:center;padding:40px">加载中...</div>
+      <div v-else-if="evidenceError" style="color:#ef4444;padding:20px">
+        加载失败：{{ evidenceError }}
+      </div>
+      <div v-else-if="evidence">
+        <div class="card" style="margin-bottom:12px">
+          <div>
+            <b>告警 #{{ evidence.alarm.alarm_id }}</b>
+            · {{ evidence.alarm.alarm_type }}
+            · <el-tag :type="severityType(evidence.alarm.severity)" size="small">{{ evidence.alarm.severity }}</el-tag>
+            · 步骤：{{ evidence.alarm.step_name || '—' }}
+          </div>
+          <div style="margin-top:6px;color:#6b7280">{{ evidence.alarm.message }}</div>
+          <div style="margin-top:6px;font-size:12px;color:#9ca3af">
+            客户端：{{ evidence.client_id }} · 检测时间：{{ formatTs(evidence.alarm.detected_at) }}
+          </div>
+        </div>
+
+        <el-alert v-if="!evidence.raw_clips?.length && !evidence.processed_clips?.length"
+                  type="warning" :closable="false" style="margin-bottom:12px"
+                  title="未找到该告警对应的视频段"
+                  description="可能原因：① 视频段还未落盘（HLS 默认 10s 一段）；② 段已被清理；③ 持久化 base_dir 与读取路径不一致（生产环境检查 cwd）。">
+        </el-alert>
+
+        <el-radio-group v-if="evidence.raw_clips?.length || evidence.processed_clips?.length"
+                        v-model="evidenceTrack" size="small" style="margin-bottom:10px"
+                        @change="onTrackChange">
+          <el-radio-button label="processed" :disabled="!evidence.processed_clips?.length">处理后</el-radio-button>
+          <el-radio-button label="raw" :disabled="!evidence.raw_clips?.length">原始</el-radio-button>
+        </el-radio-group>
+
+        <video v-if="currentEvidenceClips.length" ref="evidenceVideoEl" controls autoplay
+               style="width:100%;max-height:480px;background:#000"></video>
+
+        <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+          <el-button v-for="(c, i) in currentEvidenceClips" :key="c.filename"
+                     :type="i === evidenceClipIdx ? 'primary' : (c.is_trigger ? 'danger' : 'default')"
+                     size="small" @click="seekToClip(i)">
+            {{ formatTs(c.ts_ms) }}{{ c.is_trigger ? ' ★' : '' }}
+          </el-button>
+        </div>
+
+        <div v-if="evidence.detection" style="margin-top:14px">
+          <el-button size="small" @click="showKeypoints = !showKeypoints">
+            {{ showKeypoints ? '隐藏' : '查看' }} Keypoints JSON
+          </el-button>
+          <pre v-if="showKeypoints" class="raw-metrics" style="margin-top:8px;max-height:240px">{{ JSON.stringify(evidence.detection, null, 2) }}</pre>
+        </div>
+      </div>
+    </el-dialog>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+<script src="https://unpkg.com/chart.js@4/dist/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script>
+const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
+
+createApp({
+  setup() {
+    // ─── 后端地址 ───
+    // 固定使用当前页面的 origin，不再支持前端配置
+    const apiBase = window.location.origin;
+
+    function api(path) { return apiBase + path; }
+    function wsApi(path) { return apiBase.replace(/^http/, 'ws') + path; }
+
+    // ─── Tab ───
+    const activeTab = ref('overview');
+
+    // ─── 总览 ───
+    const overview = reactive({ active_clients: 0, total_queued_frames: 0, clients: [] });
+    const overviewTime = ref('—');
+    const health = reactive({});
+    let overviewTimer = null;
+
+    async function fetchOverview() {
+      try {
+        const r = await fetch(api('/admin-f3m8/overview'));
+        const d = await r.json();
+        Object.assign(overview, d);
+        overviewTime.value = new Date(d.timestamp * 1000).toLocaleTimeString();
+      } catch {}
+    }
+
+    async function fetchHealth() {
+      try {
+        const r = await fetch(api('/health/status'));
+        const d = await r.json();
+        Object.assign(health, d);
+      } catch {}
+    }
+
+    function barStyle(n) {
+      const pct = Math.min(100, (n / 300) * 100);
+      return { width: pct + '%' };
+    }
+
+    function statusTag(s) {
+      if (s === 'running') return 'tag-running';
+      if (s === 'paused') return 'tag-paused';
+      return 'tag-idle';
+    }
+
+    // ─── 实时监控 ───
+    const selectedClient = ref('');
+    const liveFrame = ref(null);
+    const liveConnected = ref(false);
+    const liveFps = ref(0);
+    const liveAlarms = ref([]);
+    let videoWs = null;
+    let fpsFrameCount = 0, fpsTimer = null;
+    let alarmPollTimer = null, liveSeq = 0;
+
+    // 从已有的 overview 轮询数据中取当前客户端信息，无需额外请求
+    const liveClientInfo = computed(() =>
+      overview.clients.find(c => c.client_id === selectedClient.value) ?? null
+    );
+
+    function onClientChange() {
+      if (liveConnected.value) stopLive();
+    }
+
+    function startLive() {
+      if (!selectedClient.value) return;
+      liveAlarms.value = [];
+      liveSeq = 0;
+      // 视频 WS
+      videoWs = new WebSocket(wsApi('/ai/video?client_id=' + encodeURIComponent(selectedClient.value)));
+      videoWs.onmessage = (e) => { liveFrame.value = e.data; fpsFrameCount++; };
+      videoWs.onclose = () => { if (liveConnected.value) stopLive(); };
+      liveConnected.value = true;
+      fpsTimer = setInterval(() => { liveFps.value = fpsFrameCount; fpsFrameCount = 0; }, 1000);
+      // 告警增量轮询（/task/message/{task_id}，1s 间隔）
+      alarmPollTimer = setInterval(async () => {
+        const taskId = liveClientInfo.value?.task_id;
+        if (!taskId) return;
+        try {
+          const d = await fetch(api('/task/message/' + taskId + '?since_seq=' + liveSeq)).then(r => r.json());
+          if (d.alarms?.length) {
+            liveAlarms.value = [...d.alarms.reverse(), ...liveAlarms.value].slice(0, 50);
+            liveSeq = d.max_seq;
+          }
+        } catch {}
+      }, 1000);
+    }
+
+    function stopLive() {
+      videoWs?.close(); videoWs = null;
+      if (alarmPollTimer) { clearInterval(alarmPollTimer); alarmPollTimer = null; }
+      liveConnected.value = false;
+      liveFrame.value = null;
+      liveFps.value = 0;
+      liveAlarms.value = [];
+      liveSeq = 0;
+    }
+
+    // ─── 指标监控 ───
+    const metricsJson = reactive({});
+    const rawMetrics = ref('');
+    const showRaw = ref(false);
+    const latencyChartRef = ref(null);
+    let latencyChart = null;
+    // history: [{ts, p50, p95, p99}]
+    const latencyHistory = ref([]);
+    let metricsTimer = null;
+
+    async function fetchMetrics() {
+      try {
+        const [mj, rm] = await Promise.all([
+          fetch(api('/admin-f3m8/metrics/json')).then(r => r.json()),
+          fetch(api('/metrics')).then(r => r.text()),
+        ]);
+        Object.assign(metricsJson, mj);
+        rawMetrics.value = rm;
+
+        // 聚合延迟分位数（all models average）
+        const latData = mj.infer_latency_ms || {};
+        const models = Object.values(latData);
+        if (models.length > 0) {
+          const avg = (key) => models.reduce((s, m) => s + (m[key] || 0), 0) / models.length;
+          latencyHistory.value.push({ ts: new Date().toLocaleTimeString(), p50: avg('p50'), p95: avg('p95'), p99: avg('p99') });
+          if (latencyHistory.value.length > 20) latencyHistory.value.shift();
+          updateLatencyChart();
+        }
+      } catch {}
+    }
+
+    function updateLatencyChart() {
+      if (!latencyChartRef.value) return;
+      const labels = latencyHistory.value.map(x => x.ts);
+      const p50 = latencyHistory.value.map(x => x.p50);
+      const p95 = latencyHistory.value.map(x => x.p95);
+      const p99 = latencyHistory.value.map(x => x.p99);
+      if (!latencyChart) {
+        latencyChart = new Chart(latencyChartRef.value, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              { label: 'P50', data: p50, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.08)', tension: .3, pointRadius: 2 },
+              { label: 'P95', data: p95, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.08)', tension: .3, pointRadius: 2 },
+              { label: 'P99', data: p99, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,.08)', tension: .3, pointRadius: 2 },
+            ],
+          },
+          options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, title: { display: true, text: 'ms' } } }, plugins: { legend: { position: 'top' } } },
+        });
+      } else {
+        latencyChart.data.labels = labels;
+        latencyChart.data.datasets[0].data = p50;
+        latencyChart.data.datasets[1].data = p95;
+        latencyChart.data.datasets[2].data = p99;
+        latencyChart.update('none');
+      }
+    }
+
+    function formatDict(obj) {
+      if (!obj) return '—';
+      return Object.entries(obj).map(([k, v]) => `${k}:${v}`).join(', ');
+    }
+
+    // ─── 告警列表（复用 /task/{task_id}/alarms，双源路由：活跃→内存，完成→DB）───
+    const alarmFilter = reactive({ task_id: '' });
+    const alarmRows = ref([]);
+    async function fetchAlarms() {
+      if (!alarmFilter.task_id) return;
+      try {
+        const d = await fetch(api('/task/' + alarmFilter.task_id + '/alarms')).then(r => r.json());
+        alarmRows.value = d.alarms || [];
+      } catch {}
+    }
+
+    function formatTs(ts) {
+      if (!ts) return '—';
+      // 支持秒/毫秒/微秒
+      let ms = ts;
+      if (ts > 1e12) ms = ts > 1e15 ? ts / 1000 : ts;
+      else ms = ts * 1000;
+      return new Date(ms).toLocaleString();
+    }
+
+    function severityType(s) {
+      if (s === 'high' || s === 'critical') return 'danger';
+      if (s === 'medium') return 'warning';
+      return 'info';
+    }
+
+    // ─── 告警证据弹窗 ───
+    const evidenceVisible = ref(false);
+    const evidenceLoading = ref(false);
+    const evidenceError = ref('');
+    const evidence = ref(null);
+    const evidenceTrack = ref('processed');
+    const evidenceClipIdx = ref(0);
+    const showKeypoints = ref(false);
+    const evidenceVideoEl = ref(null);
+    let evidenceHls = null;
+
+    const currentEvidenceClips = computed(() =>
+      evidence.value ? (evidence.value[evidenceTrack.value + '_clips'] || []) : []
+    );
+
+    // clip 在 playlist 内的相对时间（秒）— 段连续，ts_ms 差值即累计时间
+    function clipOffsetSec(i) {
+      const clips = currentEvidenceClips.value;
+      if (!clips.length || i <= 0) return 0;
+      return Math.max(0, (clips[i].ts_ms - clips[0].ts_ms) / 1000);
+    }
+
+    function destroyEvidenceHls() {
+      if (evidenceHls) { evidenceHls.destroy(); evidenceHls = null; }
+      const v = evidenceVideoEl.value;
+      if (v) { v.removeAttribute('src'); v.load?.(); }
+    }
+
+    // 唯一加载入口：销毁旧 hls → 拉 evidence playlist → seek 到当前 clip。
+    // 调用前必须保证 <video> 已渲染到 DOM（evidenceLoading=false 且 evidence 非空）。
+    async function loadEvidencePlaylist() {
+      const alarmId = evidence.value?.alarm?.alarm_id;
+      const track = evidenceTrack.value;
+      const clips = currentEvidenceClips.value;
+      if (!alarmId || !clips.length) return;
+      destroyEvidenceHls();
+      await nextTick();
+      const v = evidenceVideoEl.value;
+      if (!v) {
+        evidenceError.value = '内部错误：<video> 元素未挂载';
+        return;
+      }
+      const url = api('/traceback/alarm/' + alarmId + '/playlist.m3u8?track=' + track);
+      const seekTo = clipOffsetSec(evidenceClipIdx.value);
+      const doSeek = () => {
+        if (seekTo > 0) { try { v.currentTime = seekTo; } catch {} }
+      };
+      if (window.Hls && Hls.isSupported()) {
+        evidenceHls = new Hls();
+        evidenceHls.loadSource(url);
+        evidenceHls.attachMedia(v);
+        evidenceHls.on(Hls.Events.MANIFEST_PARSED, doSeek);
+        evidenceHls.on(Hls.Events.ERROR, (_, data) => {
+          if (data.fatal) {
+            evidenceError.value = '视频加载失败: ' + (data.details || data.type);
+          }
+        });
+      } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+        v.src = url;
+        v.addEventListener('loadedmetadata', doSeek, { once: true });
+      } else {
+        evidenceError.value = '当前浏览器不支持 HLS 播放（hls.js 未加载，可能 CDN 被墙）';
+      }
+    }
+
+    function seekToClip(i) {
+      evidenceClipIdx.value = i;
+      const v = evidenceVideoEl.value;
+      if (!v) return;
+      const t = clipOffsetSec(i);
+      try { v.currentTime = t; v.play?.(); } catch {}
+    }
+
+    // 用户切换 track 单选 → 重置 idx 并重载 playlist
+    async function onTrackChange() {
+      const clips = currentEvidenceClips.value;
+      const idx = clips.findIndex(c => c.is_trigger);
+      evidenceClipIdx.value = idx >= 0 ? idx : 0;
+      await loadEvidencePlaylist();
+    }
+
+    watch(evidenceVisible, (v) => {
+      if (!v) destroyEvidenceHls();
+    });
+
+    async function viewEvidence(alarm_id) {
+      evidenceVisible.value = true;
+      evidenceLoading.value = true;
+      evidenceError.value = '';
+      evidence.value = null;
+      showKeypoints.value = false;
+      destroyEvidenceHls();
+      try {
+        const r = await fetch(api('/traceback/alarm/' + alarm_id + '/evidence'));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const nextTrack = d.processed_clips?.length ? 'processed'
+                       : (d.raw_clips?.length ? 'raw' : 'processed');
+        const clips = d[nextTrack + '_clips'] || [];
+        const triggerIdx = clips.findIndex(c => c.is_trigger);
+        evidenceTrack.value = nextTrack;
+        evidenceClipIdx.value = triggerIdx >= 0 ? triggerIdx : 0;
+        evidence.value = d;
+      } catch (e) {
+        evidenceError.value = String(e);
+        return;
+      } finally {
+        evidenceLoading.value = false;
+      }
+      await loadEvidencePlaylist();
+    }
+
+    // ─── 延迟测试 ───
+    const ltConfig = reactive({ endpoint: '/admin-f3m8/ping', custom: '', total: 100, concurrency: 5 });
+    const ltRunning = ref(false);
+    const ltResults = reactive({ latencies: [], errors: 0 });
+    const distChartRef = ref(null);
+    let distChart = null;
+
+    const ltStats = computed(() => {
+      const lats = [...ltResults.latencies].sort((a, b) => a - b);
+      if (!lats.length) return { min: 0, max: 0, avg: 0, p50: 0, p95: 0 };
+      const pct = (q) => lats[Math.floor(q * lats.length)] ?? lats[lats.length - 1];
+      return {
+        min: lats[0].toFixed(1),
+        max: lats[lats.length - 1].toFixed(1),
+        avg: (lats.reduce((s, v) => s + v, 0) / lats.length).toFixed(1),
+        p50: pct(0.5).toFixed(1),
+        p95: pct(0.95).toFixed(1),
+      };
+    });
+
+    async function runLatencyTest() {
+      const path = ltConfig.endpoint === '__custom__' ? ltConfig.custom : ltConfig.endpoint;
+      if (!path) return;
+      ltRunning.value = true;
+      ltResults.latencies = [];
+      ltResults.errors = 0;
+
+      const target = api(path);
+      const total = ltConfig.total;
+      const conc = ltConfig.concurrency;
+      let done = 0;
+
+      async function one() {
+        const t0 = performance.now();
+        try {
+          await fetch(target, { cache: 'no-store' });
+          ltResults.latencies.push(performance.now() - t0);
+        } catch {
+          ltResults.errors++;
+        }
+        done++;
+      }
+
+      // 批次并发
+      while (done < total) {
+        const batch = Math.min(conc, total - done);
+        await Promise.all(Array.from({ length: batch }, one));
+      }
+
+      ltRunning.value = false;
+      await nextTick();
+      updateDistChart();
+    }
+
+    function resetLatencyTest() {
+      ltResults.latencies = [];
+      ltResults.errors = 0;
+      if (distChart) { distChart.destroy(); distChart = null; }
+    }
+
+    function updateDistChart() {
+      if (!distChartRef.value || !ltResults.latencies.length) return;
+      // 构建直方图 bins
+      const lats = ltResults.latencies;
+      const min = Math.min(...lats), max = Math.max(...lats);
+      const bins = 20;
+      const step = (max - min) / bins || 1;
+      const counts = Array(bins).fill(0);
+      lats.forEach(v => { const i = Math.min(bins - 1, Math.floor((v - min) / step)); counts[i]++; });
+      const labels = Array.from({ length: bins }, (_, i) => (min + i * step).toFixed(0) + 'ms');
+      if (distChart) { distChart.destroy(); distChart = null; }
+      distChart = new Chart(distChartRef.value, {
+        type: 'bar',
+        data: { labels, datasets: [{ label: '请求数', data: counts, backgroundColor: 'rgba(59,130,246,.6)', borderColor: '#3b82f6', borderWidth: 1 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { title: { display: true, text: '请求数' }, beginAtZero: true } } },
+      });
+    }
+
+    // ─── 全局轮询 ───
+    async function fetchAll() {
+      await Promise.allSettled([fetchOverview(), fetchHealth()]);
+    }
+
+    onMounted(() => {
+      fetchAll();
+      fetchMetrics();
+      overviewTimer = setInterval(fetchAll, 3000);
+      metricsTimer = setInterval(fetchMetrics, 5000);
+    });
+
+    onUnmounted(() => {
+      clearInterval(overviewTimer);
+      clearInterval(metricsTimer);
+      stopLive();
+      latencyChart?.destroy();
+      distChart?.destroy();
+    });
+
+    return {
+      apiBase,
+      activeTab,
+      overview, overviewTime, health, barStyle, statusTag,
+      selectedClient, liveFrame, liveConnected, liveClientInfo, liveFps, liveAlarms,
+      onClientChange, startLive, stopLive,
+      metricsJson, rawMetrics, showRaw, latencyChartRef, latencyHistory,
+      fetchMetrics, formatDict,
+      alarmFilter, alarmRows, fetchAlarms, formatTs, severityType, viewEvidence,
+      evidenceVisible, evidenceLoading, evidenceError, evidence,
+      evidenceTrack, evidenceClipIdx, showKeypoints,
+      currentEvidenceClips, evidenceVideoEl, seekToClip, onTrackChange,
+      ltConfig, ltRunning, ltResults, ltStats, distChartRef,
+      runLatencyTest, resetLatencyTest,
+    };
+  },
+}).use(ElementPlus).mount('#app');
+</script>
+</body>
+</html>

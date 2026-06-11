@@ -131,8 +131,8 @@ class MockAnalyzer(TemporalAnalyzer):
         alarm_count: 累计告警次数
     """
 
-    def __init__(self, consecutive_trigger: int = 3):
-        super().__init__(name="mock")
+    def __init__(self, consecutive_trigger: int = 3, name: str = "mock"):
+        super().__init__(name=name)
         self.consecutive_trigger = consecutive_trigger
         self._sm = {
             "alarming": False,

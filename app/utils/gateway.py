@@ -257,6 +257,11 @@ class GatewayMiddleware:
       匹配 gateway_relaxed_prefixes 前缀的路径使用宽松速率 bucket，且不计入
       反扫描检测和封禁升级。用于高频轮询接口（/health/、/task/message/ 等），
       避免正常业务调用被误封。
+
+    绕过路径（bypass paths）：
+      匹配 gateway_bypass_prefixes 前缀的路径**完全跳过**速率限制与反扫描计数，
+      仅保留 IP 白名单/封禁检查。用于自带强鉴权的路由（如 /media/* 的 HMAC token），
+      避免合法 HLS 高频段请求被打爆。
     """
 
     def __init__(self, app) -> None:
@@ -268,6 +273,7 @@ class GatewayMiddleware:
         self._ratelimit: RateLimitStore | None = None
         self._relaxed_ratelimit: RateLimitStore | None = None
         self._relaxed_prefixes: tuple[str, ...] = ()
+        self._bypass_prefixes: tuple[str, ...] = ()
         self._antiscan: AntiScanStore | None = None
 
     # ------------------------------------------------------------------
@@ -301,6 +307,9 @@ class GatewayMiddleware:
             self._relaxed_prefixes = tuple(
                 p.strip() for p in s.gateway_relaxed_prefixes.split(",") if p.strip()
             )
+            self._bypass_prefixes = tuple(
+                p.strip() for p in s.gateway_bypass_prefixes.split(",") if p.strip()
+            )
             self._antiscan = AntiScanStore(
                 threshold=s.gateway_scan_threshold,
                 window=s.gateway_scan_window,
@@ -330,23 +339,28 @@ class GatewayMiddleware:
         ip = self._extract_ip(scope)
         path = scope.get("path", "")
 
-        # 判断是否为宽松路径（高频轮询接口）
-        is_relaxed = any(path.startswith(prefix) for prefix in self._relaxed_prefixes)
+        # 判断路径分类：bypass > relaxed > normal
+        is_bypass = any(path.startswith(prefix) for prefix in self._bypass_prefixes)
+        is_relaxed = (not is_bypass) and any(
+            path.startswith(prefix) for prefix in self._relaxed_prefixes
+        )
 
-        # 1. IP 白名单 / 封禁检查
+        # 1. IP 白名单 / 封禁检查（所有路径都做，bypass 也不例外）
         if not self._whitelist.is_allowed(ip):  # type: ignore[union-attr]
             logger.warning("[Gateway] Blocked: %s %s", ip, path)
             await self._send_reject(scope_type, send, 403, "Forbidden", "IP not allowed")
             return
 
         # 2. 速率限制
+        # bypass 路径：完全跳过（依赖路由层 token 鉴权）
         # 宽松路径：独立 bucket，高限额，不做封禁升级
         # 普通路径：标准限额，持续超限升级封禁
-        rate_store = self._relaxed_ratelimit if is_relaxed else self._ratelimit  # type: ignore[union-attr]
-        if not rate_store.is_allowed(ip):
-            logger.warning("[Gateway] Rate limited: %s %s", ip, path)
-            await self._send_reject(scope_type, send, 429, "Too Many Requests", "Rate limit exceeded")
-            return
+        if not is_bypass:
+            rate_store = self._relaxed_ratelimit if is_relaxed else self._ratelimit  # type: ignore[union-attr]
+            if not rate_store.is_allowed(ip):
+                logger.warning("[Gateway] Rate limited: %s %s", ip, path)
+                await self._send_reject(scope_type, send, 429, "Too Many Requests", "Rate limit exceeded")
+                return
 
         # 3. WebSocket 升级直接透传（路由层自行处理鉴权）
         if scope_type == "websocket":
@@ -363,8 +377,8 @@ class GatewayMiddleware:
 
         await self._app(scope, receive, intercepting_send)
 
-        # 宽松路径不计入反扫描（高频轮询产生的 404 不是扫描特征）
-        if not is_relaxed:
+        # 宽松/bypass 路径不计入反扫描
+        if not is_relaxed and not is_bypass:
             self._antiscan.record_error(ip, response_status[0])  # type: ignore[union-attr]
 
     # ------------------------------------------------------------------

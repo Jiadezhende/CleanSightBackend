@@ -135,8 +135,9 @@ class DebounceAnalyzer(TemporalAnalyzer):
         self,
         debounce_frames: int = 5,
         required_bend_actions: int = 4,
+        name: str = "bending",
     ):
-        super().__init__(name="bending")
+        super().__init__(name=name)
         self.debounce_frames = debounce_frames
         self.required_bend_actions = required_bend_actions
         self._sm = {
@@ -212,6 +213,7 @@ class DebounceAnalyzer(TemporalAnalyzer):
                     f"要求 {self.required_bend_actions} 次"
                 ),
                 metadata={
+                    "metric": self.name,
                     "bend_actions": bend_actions,
                     "required": self.required_bend_actions,
                 },

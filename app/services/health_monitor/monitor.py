@@ -474,54 +474,16 @@ class GlobalHealthMonitor:
             )
 
     def _handle_task_timeout(self, client_id: str, cq, task_age: float):
-        """处理任务超时：触发 critical 告警后执行完整清理。
-
-        Args:
-            client_id: 客户端ID
-            cq: ClientQueues 实例
-            task_age: 任务已运行时长（秒）
-        """
-        from app.services.inference.data_models import AlarmType
-        from app.services.inference.models import AlarmRecord
-        from app.services.persistence import persistence_manager
-
+        """处理任务超时：仅执行运维治理动作，不产出业务告警。"""
         task_id = cq.get_task_id()
         hours = task_age / 3600
         max_hours = self.config.task_max_duration / 3600
-        alarm_message = (
-            f"任务超时：已运行 {hours:.1f} 小时，超过最大时长 {max_hours:.1f} 小时，即将强制终止"
-        )
 
         logger.error(
             "[GlobalHealthMonitor] TASK TIMEOUT: client=%s, task_id=%s, "
             "running=%.1fh, max=%.1fh",
             client_id, task_id, hours, max_hours,
         )
-
-        # 持久化告警
-        persistence_manager.persist_alarm({
-            "task_id": task_id,
-            "stage": None,
-            "client_id": client_id,
-            "alarm_type": AlarmType.TASK_TIMEOUT,
-            "alarm_level": "critical",
-            "alarm_message": alarm_message,
-            "detection_result": {
-                "task_age_seconds": task_age,
-                "max_duration_seconds": self.config.task_max_duration,
-            },
-        })
-
-        # 写入内存告警日志（供前端实时展示）
-        cq.append_alarm_record(AlarmRecord(
-            alarm_type=AlarmType.TASK_TIMEOUT,
-            alarm_level="critical",
-            alarm_message=alarm_message,
-            metadata={
-                "task_age_seconds": task_age,
-                "max_duration_seconds": self.config.task_max_duration,
-            },
-        ))
 
         self._stats["cleanups"] += 1
         self.cleanup_client(client_id, reason=f"Task timeout ({task_age:.0f}s)")

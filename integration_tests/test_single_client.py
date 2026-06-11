@@ -705,6 +705,121 @@ def run_scenario_8(args):
 
 
 # ---------------------------------------------------------------------------
+# Scenario 9: current_step 切换（1→2）— 验证二次 start 触发全量重建
+# ---------------------------------------------------------------------------
+
+
+def run_scenario_9(args):
+    """
+    同一任务先以 current_step=1（LEAK）启动，运行一段时间后将 DB 中 current_step 改为 2，
+    再次调用 /api/start，验证：
+      1. 第二次 start 不会幂等返回（step 变化触发全量重建）
+      2. 后端切换到 CLEAN stage（stage 字段由 InferenceManager 根据 current_step 路由）
+      3. 流保持连续推送，两次 start 都成功
+
+    验证点（后端日志关键字）：
+      第一次：InferWorker-LEAK 线程正常运行
+      第二次：'performing full cleanup before restart'
+              InferWorker-CLEAN 线程正常运行
+    """
+    print("\n" + "=" * 60)
+    print("Scenario 9: current_step 切换（LEAK → CLEAN）")
+    print("  第一次 start: current_step=1 → LEAK stage")
+    print("  DB 更新 current_step → 2")
+    print("  第二次 start: 相同 task_id → 应触发全量重建 → CLEAN stage")
+    print("=" * 60)
+
+    phase1 = max(15, int(args.duration * 0.4))
+    phase2 = max(15, args.duration - phase1)
+    is_remote = args.server not in ("localhost", "127.0.0.1")
+    api = APIClient(f"http://{args.server}:8000")
+    check_prerequisites(api, args.video_path)
+
+    with managed_task(args.task_id, current_step="1") as client_id:
+        push_url, pull_url = build_urls(args.server, client_id)
+
+        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+        try:
+            # ── Phase 1: LEAK 阶段 ──────────────────────────────────────────
+            stream_stabilize(ffmpeg, is_remote)
+
+            print(f"\n[Step 1] /api/start（current_step=1，预期 LEAK stage）")
+            result1 = api.unified_start(args.task_id, pull_url, args.fps)
+            if "error" in result1:
+                raise RuntimeError(f"第一次 /api/start 失败: {result1['error']}")
+            print(f"  响应: {result1}")
+
+            # 确认进入 LEAK stage
+            status = api._make_request("GET", "/health/status")
+            client_stage = (
+                status.get("queues", {})
+                      .get(client_id, {})
+                      .get("stage", "unknown")
+            )
+            print(f"  当前 stage = {client_stage!r}（预期 LEAK）")
+
+            print(f"\n[Step 2] LEAK 阶段运行 {phase1}s...")
+            if not args.no_window:
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                asyncio.run(viewer.connect_and_display(phase1))
+            else:
+                print_viewer_url(args.server, client_id)
+                time.sleep(phase1)
+
+            # ── 切换 current_step ───────────────────────────────────────────
+            print(f"\n[Step 3] 更新 DB: current_step 1 → 2")
+            ok = DatabaseHelper.update_task_step(args.task_id, "2")
+            if not ok:
+                raise RuntimeError("更新 current_step 失败，请检查 DB 连接")
+
+            # ── Phase 2: 二次 start，预期全量重建为 CLEAN ───────────────────
+            print(f"\n[Step 4] /api/start（current_step 已变为 2，预期触发全量重建）")
+            result2 = api.unified_start(args.task_id, pull_url, args.fps)
+            if "error" in result2:
+                raise RuntimeError(f"第二次 /api/start 失败: {result2['error']}")
+            print(f"  响应: {result2}")
+
+            # 验证不是幂等返回
+            is_idempotent = "idempotent" in result2.get("message", "")
+            if is_idempotent:
+                print("  [FAIL] 第二次 start 返回了幂等响应，stage 未切换")
+            else:
+                print("  [PASS] 第二次 start 触发了全量重建（非幂等）")
+
+            # 确认切换到 CLEAN stage
+            time.sleep(2)  # 等待 actor 启动
+            status2 = api._make_request("GET", "/health/status")
+            client_stage2 = (
+                status2.get("queues", {})
+                       .get(client_id, {})
+                       .get("stage", "unknown")
+            )
+            print(f"  当前 stage = {client_stage2!r}（预期 CLEAN）")
+            if client_stage2 == "CLEAN":
+                print("  [PASS] stage 已切换为 CLEAN")
+            else:
+                print(f"  [WARN] stage = {client_stage2!r}，非预期的 CLEAN，请检查路由配置")
+
+            print(f"\n[Step 5] CLEAN 阶段运行 {phase2}s...")
+            if not args.no_window:
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                asyncio.run(viewer.connect_and_display(phase2))
+            else:
+                time.sleep(phase2)
+
+        finally:
+            print("\n[Cleanup] 调用 /api/terminate...")
+            result = api.unified_terminate(client_id)
+            print(f"terminate 结果: {result.get('status', result)}")
+            ffmpeg.stop()
+
+    print("\nScenario 9 完成")
+    print("  预期日志路径:")
+    print("  第一次: InferWorker-LEAK 启动")
+    print("  第二次: 'performing full cleanup before restart' → InferWorker-CLEAN 启动")
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -724,9 +839,10 @@ def main():
   6  延迟推流:        先 start（无流，预期失败）→ N秒后推流 → 验证自动重连 (Bug 2)
   7  CLEAN阶段:       current_step=2 → CLEAN stage → 验证帧透传不黑屏
   8  MOCK阶段:        无效 current_step → MOCK fallback → 验证帧透传不黑屏
+  9  阶段切换:        start(step=1/LEAK) → DB改step=2 → start again → 全量重建 → CLEAN stage
         """,
     )
-    parser.add_argument("--scenario", type=int, required=True, choices=[1, 2, 3, 4, 5, 6, 7, 8], help="测试场景编号")
+    parser.add_argument("--scenario", type=int, required=True, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9], help="测试场景编号")
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
     parser.add_argument("--task_id", type=int, required=True, help="任务 ID")
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
@@ -760,6 +876,7 @@ def main():
         6: run_scenario_6,
         7: run_scenario_7,
         8: run_scenario_8,
+        9: run_scenario_9,
     }
 
     try:

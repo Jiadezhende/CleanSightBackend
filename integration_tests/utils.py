@@ -4,7 +4,9 @@
 提供数据库操作、ffmpeg 控制、WebSocket 连接等工具函数
 """
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -12,7 +14,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -23,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import text
 
 from app.database import get_db
-from app.models.task import DBTask
+from app.models.task import DBAlarm, DBTask
 
 
 class FFmpegController:
@@ -39,24 +41,23 @@ class FFmpegController:
         self.ffmpeg_path = self._find_ffmpeg()
 
     def _find_ffmpeg(self) -> str:
-        """查找 ffmpeg 可执行文件"""
-        # Windows: 优先使用 Chocolatey 安装的版本
-        if os.name == "nt":
-            choco_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
-            if os.path.exists(choco_path):
-                return choco_path
+        """使用项目自包含的 ffmpeg（与后端同源 settings.ffmpeg_path，install 脚本部署到 .ffmpeg/bin/）。
 
-        # 尝试系统 PATH
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-version"], capture_output=True, timeout=2
+        不再走系统 PATH / Chocolatey：统一用项目内钉版二进制，避免测试与生产 ffmpeg 版本漂移。
+        可用 CLEANSIGHT_FFMPEG_PATH 覆写（逃生口，如裸名走 PATH）。
+        """
+        from app.settings import settings
+
+        ffmpeg = settings.ffmpeg_path
+        # 显式路径（含分隔符）必须存在；裸名（PATH 逃生口）交给系统解析
+        has_sep = os.sep in ffmpeg or bool(os.altsep and os.altsep in ffmpeg)
+        if has_sep and not Path(ffmpeg).exists():
+            raise FileNotFoundError(
+                f"未找到项目内 ffmpeg: {ffmpeg}\n"
+                f"请先运行 install.sh / install.ps1 部署 .ffmpeg/，"
+                f"或设置 CLEANSIGHT_FFMPEG_PATH 指向可用 ffmpeg"
             )
-            if result.returncode == 0:
-                return "ffmpeg"
-        except:
-            pass
-
-        raise FileNotFoundError("未找到 ffmpeg，请确保已安装")
+        return ffmpeg
 
     def start(self) -> bool:
         """启动 ffmpeg 推流"""
@@ -203,14 +204,14 @@ class DatabaseHelper:
 
             now_ts = int(time.time())
             new_task = DBTask(
-                _id=uuid.uuid4().hex,  # 平台主键
-                cls_id="691dd1a8279461135967c843",  # 平台 class 标识 (clean_task)
+                _id=uuid.uuid4().hex,
+                cls_id="691dd1a8279461135967c843",
                 task_id=task_id,
                 source_ip=source_ip,
                 current_step=current_step,
                 status="paused",
                 updated_time=now_ts,
-                start_time=0,
+                start_time=now_ts,
                 end_time=0,
             )
 
@@ -226,6 +227,26 @@ class DatabaseHelper:
             db.close()
 
     @staticmethod
+    def update_task_step(task_id: int, new_step: str) -> bool:
+        """更新任务 current_step（模拟任务阶段推进）"""
+        db = next(get_db())
+        try:
+            task = db.query(DBTask).filter(DBTask.task_id == task_id).first()
+            if not task:
+                return False
+            task.current_step = new_step  # type: ignore
+            task.updated_time = int(time.time())  # type: ignore
+            db.commit()
+            print(f"✅ 任务 {task_id} current_step → {new_step}")
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"❌ 更新 current_step 失败: {e}")
+            return False
+        finally:
+            db.close()
+
+    @staticmethod
     def update_task_status(task_id: int, status: str) -> bool:
         """更新任务状态"""
         db = next(get_db())
@@ -235,7 +256,7 @@ class DatabaseHelper:
                 return False
 
             task.status = status  # type: ignore
-            task.updated_at = int(time.time())  # type: ignore
+            task.updated_time = int(time.time())  # type: ignore
             db.commit()
             return True
         except Exception as e:
@@ -261,6 +282,86 @@ class DatabaseHelper:
         except Exception as e:
             db.rollback()
             print(f"⚠️ 清理测试任务失败: {e}")
+        finally:
+            db.close()
+
+    @staticmethod
+    def create_test_alarm(
+        alarm_id: int,
+        task_id: int,
+        detected_at_ms: int,
+        alarm_type: str = "bubble",
+        severity: str = "high",
+        message: str = "test alarm",
+        step_id: int = 1,
+        step_name: str = "测漏",
+    ) -> bool:
+        """创建测试告警记录。使用原生 SQL 以填写平台必填字段 cls_id。
+
+        Returns:
+            True  — 新创建了告警
+            False — 告警已存在或创建失败
+        """
+        db = next(get_db())
+        try:
+            existing = db.query(DBAlarm).filter(DBAlarm.alarm_id == alarm_id).first()
+            if existing:
+                print(f"✅ 告警 {alarm_id} 已存在")
+                return False
+
+            now_ts = int(time.time())
+            db.execute(
+                text("""
+                    INSERT INTO clean_alarm
+                        (_id, cls_id, alarm_id, task_id, step_id, step_name,
+                         alarm_type, severity, message, detected_at,
+                         resolved, resolved_by, resolved_at, create_time)
+                    VALUES
+                        (:_id, :cls_id, :alarm_id, :task_id, :step_id, :step_name,
+                         :alarm_type, :severity, :message, :detected_at,
+                         :resolved, :resolved_by, :resolved_at, :create_time)
+                """),
+                {
+                    "_id": uuid.uuid4().hex,
+                    "cls_id": "691e1d83279461135967c890",
+                    "alarm_id": alarm_id,
+                    "task_id": task_id,
+                    "step_id": step_id,
+                    "step_name": step_name,
+                    "alarm_type": alarm_type,
+                    "severity": severity,
+                    "message": message,
+                    "detected_at": detected_at_ms,
+                    "resolved": False,
+                    "resolved_by": None,
+                    "resolved_at": None,
+                    "create_time": now_ts,
+                },
+            )
+            db.commit()
+            print(f"✅ 创建测试告警 {alarm_id} (task_id={task_id}, detected_at={detected_at_ms}ms)")
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"❌ 创建测试告警失败: {e}")
+            return False
+        finally:
+            db.close()
+
+    @staticmethod
+    def cleanup_test_alarms_for_task(task_id: int):
+        """删除指定任务下的全部告警记录。"""
+        db = next(get_db())
+        try:
+            deleted = db.query(DBAlarm).filter(DBAlarm.task_id == task_id).delete()
+            db.commit()
+            if deleted:
+                print(f"✅ 清理 task {task_id} 的 {deleted} 条测试告警")
+            else:
+                print(f"⚠️  task {task_id} 没有告警记录，无需清理")
+        except Exception as e:
+            db.rollback()
+            print(f"⚠️  清理测试告警失败: {e}")
         finally:
             db.close()
 
@@ -337,6 +438,64 @@ class APIClient:
             return response.json()
         except Exception as e:
             return {"error": str(e)}
+
+def seed_hls_segments(
+    task_id: int,
+    step_id: int,
+    ts_us_list: List[int],
+    base_dir: Optional[Path] = None,
+    segment_duration: float = 10.0,
+) -> Path:
+    """在 base_dir/{task_id}/{step_id}/ 下创建假 HLS 段文件，供追溯接口测试使用。
+
+    每个 ts_us 会生成：
+      - raw_segment_{ts_us}.mp4        （16 字节哑文件）
+      - processed_segment_{ts_us}.mp4  （16 字节哑文件）
+      - keypoints_{ts_us}.json         （含 1 帧检测结果）
+    另外生成 raw_playlist.m3u8 和 processed_playlist.m3u8（实时播放列表格式，无 EXT-X-ENDLIST）。
+
+    Returns:
+        task_dir Path，调用方在 finally 中用 shutil.rmtree 清理整个目录。
+    """
+    if base_dir is None:
+        try:
+            from app.services.traceback.segment_finder import get_default_base_dir
+            base_dir = get_default_base_dir()
+        except Exception:
+            project_root = Path(__file__).parent.parent.resolve()
+            base_dir = (project_root / "database").resolve()
+
+    task_dir = Path(base_dir) / str(task_id) / str(step_id)
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    for ts_us in ts_us_list:
+        (task_dir / f"raw_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
+        (task_dir / f"processed_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
+        ts_s = ts_us / 1_000_000.0
+        kp_data = [{"timestamp": ts_s, "keypoints": [0.5, 0.3]}]
+        (task_dir / f"keypoints_{ts_us}.json").write_text(
+            json.dumps(kp_data), encoding="utf-8"
+        )
+
+    def _make_playlist(track: str) -> str:
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            f"#EXT-X-TARGETDURATION:{int(segment_duration)}",
+        ]
+        for ts_us in ts_us_list:
+            lines.append(f"#EXTINF:{segment_duration:.3f},")
+            lines.append(f"{track}_segment_{ts_us}.mp4")
+        return "\n".join(lines) + "\n"
+
+    (task_dir / "raw_playlist.m3u8").write_text(_make_playlist("raw"), encoding="utf-8")
+    (task_dir / "processed_playlist.m3u8").write_text(
+        _make_playlist("processed"), encoding="utf-8"
+    )
+
+    print(f"✅ 创建测试 HLS 段: {task_dir} ({len(ts_us_list)} 段/轨道)")
+    return task_dir
+
 
 def check_hls_files(client_id: str, task_id: int) -> Dict[str, Any]:
     """检查 HLS 文件是否生成"""

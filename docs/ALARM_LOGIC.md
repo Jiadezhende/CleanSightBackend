@@ -1,130 +1,157 @@
-# 告警去重与批量上报逻辑说明
+# 告警数据流说明
 
-本文档说明 `app/services/ai.py` 中报警（alarm）去重与批量上报的设计、数据结构、运行流程以及可配置项与测试方法，便于开发、排查与扩展。
-
-**作者**: 清洁视觉后端 (代码实现位于 `app/services/ai.py`)
-
-## 目标
-
-- 避免对同一类告警在短时间内高频重复上报，减轻远端告警平台与运维告警噪声。
-- 将短时间内重复的告警按任务/步骤聚合后批量上报，并记录出现次数与时间范围。
-- 保持原有的远端上报与本地数据库记录能力（即最终仍调用原 `_handle_alarm` 完成上报与落库）。
-
-## 主要数据结构
-
-- `_pending_alarms: Dict[str, Dict]`
-  - key: 默认为 `"{task_id}_{step_id}"`（可定制）。
-  - value: 包括字段 `count`, `first_seen`, `last_seen`, `alarm_info`。
-  - 用途：在内存中聚合同一 key 的告警事件。
-
-- `_recent_alarms: Dict[str, float]`
-  - key 同上。
-  - value: 上一次成功上报（或提交）该 key 的时间戳。
-  - 用途：实现冷却窗口（cooldown），防止频繁重复上报。
-
-- `_alarm_lock: threading.Lock`
-  - 用于保护以上两个字典的并发安全。
-
-- `_alarm_thread`
-  - 后台线程，周期性触发一次 flush（即把 pending 中合适的告警上报）。
-
-- 配置参数（可通过 `app.config.settings` 设置）：
-  - `alarm_batch_interval`：批量上报间隔 (秒)。默认 30s。
-  - `alarm_cooldown_seconds`：去重冷却时长 (秒)。默认 60s。
-
-## 触发与聚合流程
-
-1. 推理模块在 `_execute_inference_pipeline` 中检测到异常（如下）：
-   - 任一子任务返回 `success == False`；或
-   - `motion` 类任务返回指示异常的 `actions`（如 bending_detected、bubble_detected、submersion_status 非正常值）。
-
-2. 生成基础 `alarm_info` 字典：包含 `task_id`, `step_id`, `detection_result` 等。代码示例：
-
-   {
-     "task_id": 1,
-     "step_id": 0,
-     "detection_result": { ... }
-   }
-
-3. 将该 `alarm_info` 传入 `manager._enqueue_alarm(alarm_info)`：
-   - 计算聚合 key（默认 `"{task_id}_{step_id}"`）。
-   - 若该 key 不存在于 `_pending_alarms`，则创建包含 `count=1, first_seen=now, last_seen=now, alarm_info` 的条目。
-   - 若已存在，则 `count += 1` 并更新 `last_seen`。
-   - 此步骤非常轻量，仅在内存中更新字典（受 `_alarm_lock` 保护），不会阻塞推理主循环。
-
-## 周期性 Flush（上报）逻辑
-
-- 后台线程 `_alarm_flush_loop` 每隔 `alarm_batch_interval` 秒运行一次：
-  1. 遍历 `_pending_alarms` 的 key 列表。
-  2. 对于每个 pending 条目，检查 `_recent_alarms`：
-     - 如果该 key 在 `_recent_alarms` 且现在距离上次上报时间小于 `alarm_cooldown_seconds`，则跳过（保持在 pending 中）。
-     - 否则，把 pending 条目聚合为 `agg_alarm`，添加聚合字段 `alarm_count`, `first_seen`, `last_seen`（时间字符串），并将该条目从 `_pending_alarms` 中移除，同时更新 `_recent_alarms[key] = now`。
-  3. 将每个 `agg_alarm` 提交给线程池去调用 `_handle_alarm(agg_alarm)`，由原有逻辑完成远端上报 `_send_alarm_report` 与本地 DB 写入 `_record_alarm_db`。
-
-- 设计要点：实际的网络与 DB 写入发生在线程池线程中（不阻塞 flush loop 或推理主循环）。
-
-## 聚合告警字段（发送前会加入）
-
-聚合后的 `agg_alarm` 至少包含：
-- 原始的 `alarm_info` 内容（task_id, step_id, detection_result 等）
-- `alarm_count`: 在聚合窗口内出现的次数（int）
-- `first_seen`: 第一次出现时间（YYYY-MM-DD HH:MM:SS）
-- `last_seen`: 最后一次出现时间（YYYY-MM-DD HH:MM:SS）
-
-建议：如果需要让外部平台收到聚合信息，可将上述 `alarm_count/first_seen/last_seen` 一并加入 `_send_alarm_report` 请求体（当前实现会把 `detection_result` 传给外部，`agg` 字段可按需添加）。
-
-## 去重/冷却策略的可调节点
-
-- `key` 的粒度：当前使用 `task_id` + `step_id`，意味着同一任务步骤内的不同异常会被合并。
-  - 若希望按异常类型去重，可把 key 扩展为 `f"{task_id}_{step_id}_{alarm_type}"` 或基于 `detection_result` 计算哈希（示例：对 `detection_result` 的关键字段进行 JSON 序列化并取 SHA1）。
-- `alarm_batch_interval`（批量间隔）：决定上报延迟与聚合窗口大小。
-- `alarm_cooldown_seconds`（冷却）：决定同一 key 多久内不会重复上报。
-
-## 紧急告警绕过（可选扩展）
-
-- 对于 `alarm_level == 'critical'` 的事件，可以实现立即上报而不经过队列/冷却逻辑。
-- 该改动建议在 `_enqueue_alarm` 或 `_execute_inference_pipeline` 中判断 `alarm_info` 的 `alarm_level` 字段并直接走 `_executor.submit(self._handle_alarm, alarm_info)`。
-
-## 数据持久化与平台上报
-
-- 远端上报：`_send_alarm_report` 调用配置在 `AI后端接口文档.md` 中的 URL（示例 `http://116.204.65.72:8881/gdmp/v1/api/nt/alarm_report`），请求头包含 `User-Agent: AI-Backend/1.0`。
-- 本地落库：`_record_alarm_db` 会在数据库中创建 `alarm_record` 表（若不存在）并插入一条记录。当前实现使用 PostgreSQL 专用字段 `JSONB` 与 `SERIAL`。
-  - 注意：若你使用的是非 PostgreSQL 数据库，需要把 DDL/语法调整为目标数据库兼容形式，或使用 SQLAlchemy ORM model + migration 管理表结构。
-
-## 如何测试与排查
-
-1. 单元/集成测试（模拟）：
-   - 在 Python REPL 或测试脚本中导入 `app.services.ai` 的 `manager`，构造不同 `alarm_info` 并调用 `manager._enqueue_alarm(alarm_info)` 多次，观察日志（或通过调试断点）在下一次 flush 后是否发送聚合告警。
-
-   示例（快速脚本片段）：
-
-   ```python
-   from app.services import ai
-   ai.manager._enqueue_alarm({"task_id":1, "step_id":0, "detection_result":{"foo":1}})
-   ai.manager._enqueue_alarm({"task_id":1, "step_id":0, "detection_result":{"foo":1}})
-   # 等待 > alarm_batch_interval 秒，查看后端日志是否只有一次上报，且 payload 包含 alarm_count=2
-   ```
-
-2. 端到端测试：
-   - 触发真实或合成的视频输入导致推理检测到异常，观察后台日志（`Alarm flush thread started`、`Alarm reported successfully` 等），并检查远端平台是否收到请求以及本地 `alarm_record` 是否写入。
-
-3. 排查常见问题：
-   - 如果不见上报，确认 `_alarm_thread` 是否在运行（查看启动日志或 `ps`）；确认 `alarm_batch_interval` 未被设为过大。
-   - 如果多次重复上报，检查 `key` 的粒度是否过粗，或 `alarm_cooldown_seconds` 设置过小。
-   - 如果 DB 写入失败，检查 `engine` 的配置（`settings.database_url`）、数据库类型（是否 PostgreSQL）以及异常日志。
-
-## 可扩展方向（建议）
-
-- 使用更稳健的去重 key（包含 `alarm_type` 或对 `detection_result` 做哈希），以避免不同异常被误合并。
-- 将 `alarm_record` 表结构迁移到 ORM model + Alembic migration，避免运行时 DDL。
-- 支持把聚合字段 `alarm_count/first_seen/last_seen` 作为标准字段上报给外部平台；并在外部平台上展示聚合历史。
-- 在高并发场景下，考虑把 `_pending_alarms` 持久化到轻量级本地缓存（如 Redis），以支持多进程或重启不中断的去重窗口。
+本文档说明告警从产生到消费的完整路径，包括前端实时推送与后台数据库上报两条分支、
+任务结束时的结算落盘逻辑，以及门控去重机制。
 
 ---
 
-如需，我可以：
-- 把聚合字段加入对外上报的请求体（在 `_send_alarm_report` 中加入 `alarm_count/first_seen/last_seen`）；
-- 把告警 key 改为基于 `alarm_type` 或 `detection_result` 的哈希实现更精细的去重；
-- 编写并运行一个小脚本，演示入队、合并与上报的完整流程（并打印请求体）。
+## 1. 架构概述
 
-选择其中一项我就直接实现并演示。
+告警采用**双写架构**：每条通过门控的告警同时写入两个目的地，互不阻塞。
+
+```text
+推理线程（1Hz 时序分析）
+  └─ AlarmInfo（alarm_type / alarm_level / alarm_message / metadata）
+       │
+       ▼
+  try_pass_alarm_gate()  ← 5 秒冷却，key = task_id:metric:mode
+       │ 通过
+       ├─► append_alarm_record()  →  _alarm_log（内存环形缓冲）  ← 分支A：前端实时
+       └─► persist_alarm()        →  alarm_queue（异步队列）      ← 分支B：后台上报
+```
+
+任务结束时（SETTLEMENT 阶段）产生的结算告警走相同路径，仅 `mode` 字段标记为 `"SETTLEMENT"`。
+
+---
+
+## 2. 告警门控（Alarm Gate）
+
+**位置**：`app/services/client/queues.py:try_pass_alarm_gate()`
+
+| 属性 | 值 |
+| --- | --- |
+| 冷却窗口 | 5 秒 |
+| 去重 key | `f"{task_id}:{metric}:{mode}"` |
+| 通过条件 | 该 key 上次通过时间距现在 > 5s |
+| 失败行为 | 丢弃本次告警，不写入任何目的地 |
+
+key 示例：`"123:BUBBLE:REALTIME"`、`"123:BENDING:SETTLEMENT"`
+
+同一 task_id 下，REALTIME 与 SETTLEMENT 各有独立冷却计数，互不影响。
+
+---
+
+## 3. 分支 A：前端实时路径
+
+```text
+append_alarm_record(AlarmRecord)
+  └─► ClientQueues._alarm_log
+        ├─ 环形缓冲，maxlen = 100
+        ├─ 写入时自增 _alarm_seq，赋值给 record.seq
+        │
+        ├─► GET /task/message/{task_id}?since_seq=<n>   （轮询，增量消费）
+        └─► WS  /task/msg/{client_id}                   （1Hz 推送，最近5条）
+```
+
+**AlarmRecord 字段**（内存层）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `seq` | int | 单任务内递增序号，由写入时自动赋值 |
+| `alarm_type` | str | `"流程违规"` / `"任务超时"` |
+| `alarm_level` | str | `low` / `medium` / `high` / `critical` / `warning` |
+| `alarm_message` | str | 人可读告警描述 |
+| `mode` | str | `REALTIME` 或 `SETTLEMENT` |
+| `metric` | str | `BUBBLE` / `BENDING` / `TASK_TIMEOUT` / `UNKNOWN` |
+| `stage` | str | `LEAK` 或 `CLEAN` |
+| `timestamp` | float | Unix 时间戳（秒） |
+| `metadata` | dict | 额外检测指标（如 `birth_rate`、`bend_actions`） |
+
+---
+
+## 4. 分支 B：后台上报路径
+
+```text
+persistence_manager.persist_alarm(alarm_dict)
+  └─► alarm_queue（内存异步队列）
+        └─► AlarmWorkerPool
+              └─► AlarmWorker._process()
+                    └─► GuardedExecutor（最多 3 次重试）
+                          └─► AlarmPersistenceStrategy._send_alarm_http()
+                                └─► HTTP POST settings.alarm_report_url
+```
+
+**上报条件**：`alarm_dict` 中 `task_id` 非空且 `step_id` 不为 None；否则跳过 HTTP 发送（不报错）。
+
+**HTTP 请求格式**（`alarm_strategy.py:_send_alarm_http()`）：
+
+```http
+POST <alarm_report_url>
+Content-Type: application/json; charset=utf-8
+User-Agent: CleanSight-Backend/1.0
+
+{
+  "task_id": 123,
+  "step_id": 2,
+  "alarm_type": "流程违规",
+  "alarm_level": "high",
+  "alarm_message": "持续产生新气泡（birth_rate=0.85），疑似漏气",
+  "alarm_time": "2026-04-26 14:30:00",
+  "detection_result": {"birth_rate": 0.85, "threshold": 0.5}
+}
+```
+
+`detection_result` 仅在 `alarm_dict["detection_result"]` 有值时携带。
+
+**平台响应**（成功）：
+
+```json
+{"code": 0}
+```
+
+---
+
+## 5. 任务结束结算（SETTLEMENT）
+
+**触发时机**：
+
+| 触发点 | 场景 |
+| --- | --- |
+| `InferenceManager.set_task()` | 任务切换（当前阶段结束，新阶段开始） |
+| `InferenceManager.remove_client()` | 客户端断开 / `POST /api/terminate` |
+
+**调用链**：
+
+```text
+set_task() / remove_client()
+  └─ old_actor.finalize_and_stop()
+        └─ analyzer.finalize()  →  List[AlarmInfo]  （各子分析器 override）
+              └─ _persist_settlement_alarms()
+                    ├─ try_pass_alarm_gate(metric, mode="SETTLEMENT")  ← 同样走门控
+                    ├─ persistence_manager.persist_alarm(...)          ← 后台上报
+                    └─ cq.append_alarm_record(AlarmRecord(mode="SETTLEMENT", ...))
+```
+
+结算告警与实时告警在两条路径中的处理逻辑完全相同，区别仅在于 `mode="SETTLEMENT"`，
+前端可据此区分弹窗样式（结算摘要 vs 实时警告）。
+
+**示例**：`DebounceAnalyzer.finalize()` 在弯曲次数不足时产生：
+
+```text
+alarm_type:    "流程违规"
+alarm_level:   "warning"
+alarm_message: "弯曲动作不足：完成 1 次，要求 3 次"
+mode:          "SETTLEMENT"
+metric:        "BENDING"
+```
+
+---
+
+## 6. 枚举参考
+
+| 枚举 | 当前值 | 说明 |
+| --- | --- | --- |
+| `AlarmType` | `"流程违规"` / `"任务超时"` | HTTP 上报与 alarm_type 字段用中文 value |
+| `AlarmMetric` | `BUBBLE` / `BENDING` / `TASK_TIMEOUT` / `UNKNOWN` | 门控 key 与 API 响应 metric 字段 |
+| `AlarmMode` | `REALTIME` / `SETTLEMENT` | 推理阶段实时产生 vs 任务结束结算 |
+| `alarm_level` | `low` / `medium` / `high` / `critical` / `warning` | `warning` 仅出现在结算告警 |

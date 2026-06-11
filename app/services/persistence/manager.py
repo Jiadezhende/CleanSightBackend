@@ -67,8 +67,6 @@ class PersistenceManager:
         self.alarm_pool = AlarmWorkerPool(
             input_queue=self.alarm_queue,
             num_workers=self.config.alarm_workers,
-            batch_interval=self.config.alarm_batch_interval,
-            cooldown_seconds=self.config.alarm_cooldown_seconds,
         )
 
         # 监控指标
@@ -106,16 +104,16 @@ class PersistenceManager:
 
     def persist_hls_segment(
         self,
-        client_id: str,
         task_id: int,
+        step_id: int,
         segment_type: str,  # "raw" or "processed"
         frames: List[FrameData],
     ) -> bool:
         """持久化HLS视频段
 
         Args:
-            client_id: 客户端ID
             task_id: 任务ID
+            step_id: 洗消步骤ID（来自 clean_task.current_step 转 int）
             segment_type: 段类型（raw/processed）
             frames: 帧数据列表
 
@@ -124,8 +122,8 @@ class PersistenceManager:
         """
         try:
             task = HLSPersistenceTask(
-                client_id=client_id,
                 task_id=task_id,
+                step_id=step_id,
                 segment_type=segment_type,
                 frames=frames,
             )
@@ -134,7 +132,9 @@ class PersistenceManager:
             return True
         except queue.Full:
             self.metrics.hls_queue_full += 1
-            logger.warning("HLS队列已满，丢弃任务: %s", client_id)
+            logger.warning(
+                "HLS队列已满，丢弃任务: task_id=%s step_id=%s", task_id, step_id
+            )
             return False
         except Exception as e:
             self.metrics.hls_errors += 1

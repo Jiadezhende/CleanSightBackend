@@ -90,9 +90,13 @@ async def test_concurrent_start_same_task_idempotent():
         patch("app.routers.api.stream_service") as mock_stream,
         patch("app.routers.api.client_manager") as mock_cm,
     ):
+        mock_task = MagicMock()
+        mock_task.current_step = "0"
+        mock_cq.get_task.return_value = mock_task
         mock_ai.set_task.return_value = True
         mock_stream.start_stream.side_effect = track_start_stream
         mock_stream.has_stream.return_value = True
+        mock_stream.get_stream_info.return_value = {"url": "rtsp://test/stream"}
         mock_cm.has_client.side_effect = has_client_side_effect
         mock_cm.get_client.return_value = mock_cq
 
@@ -156,7 +160,7 @@ async def test_task_switch_triggers_full_cleanup():
         # 验证触发了完整清理（而不是只 remove_client）
         mock_monitor.cleanup_client.assert_called_once()
         call_kwargs = mock_monitor.cleanup_client.call_args
-        assert "task_switch" in call_kwargs.kwargs.get(
+        assert "restart" in call_kwargs.kwargs.get(
             "reason", call_kwargs[1].get("reason", "")
         )
 
