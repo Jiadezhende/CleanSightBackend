@@ -67,7 +67,6 @@ class Settings(BaseSettings):
     strict: bool = False
 
     # 外部接口URL（必需配置）
-    file_path_insert_url: str
     alarm_report_url: str
 
     # 服务器配置
@@ -159,8 +158,6 @@ class Settings(BaseSettings):
             missing_fields.append("CLEANSIGHT_DB_PASSWORD")
 
         # 外部接口URL配置
-        if not self.file_path_insert_url:
-            missing_fields.append("CLEANSIGHT_FILE_PATH_INSERT_URL")
         if not self.alarm_report_url:
             missing_fields.append("CLEANSIGHT_ALARM_REPORT_URL")
 
