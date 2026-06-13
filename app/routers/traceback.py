@@ -507,6 +507,9 @@ async def get_task_timeline(
 
     仅扫 `{task_id}/{step_id}/` 目录的段、仅取该 step 的告警事件。
 
+    告警事件来自 DB；DB 不可用时退化为空 events（仍返回段时长），不 503，
+    DB 恢复后自动恢复告警标记。
+
     返回：
         {
           "task_id": ...,
@@ -522,8 +525,18 @@ async def get_task_timeline(
     finder = SegmentFinder(get_default_base_dir())
     start_ms, end_ms, duration_ms = _step_duration_ms(finder, task_id, step_id)
 
+    # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
+    # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。
     events: List[Dict[str, Any]] = []
-    for a in _fetch_task_alarms(task_id, step_id=step_id):
+    try:
+        alarms = _fetch_task_alarms(task_id, step_id=step_id)
+    except DatabaseError:
+        logger.warning(
+            "[Timeline] DB 不可用，task=%s step=%s 退化为无告警时间轴", task_id, step_id
+        )
+        alarms = []
+
+    for a in alarms:
         if a["detected_at"] is None:
             continue
         events.append(
