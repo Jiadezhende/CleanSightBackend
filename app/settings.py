@@ -116,6 +116,7 @@ class Settings(BaseSettings):
     lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
     lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
     lab_export_max_clips_per_submit: int = 20
+    lab_export_gap_tolerance_ms: int = 2000   # 相邻段间隔相对 step 实测节奏的允许超出量；>此值判为真录制停顿（源断流/重连）
 
     @property
     def allowed_ips_set(self) -> frozenset:

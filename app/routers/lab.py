@@ -425,6 +425,7 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
         temp_root=temp_root,
         preset=s.lab_export_ffmpeg_preset,
         max_duration_ms=s.lab_export_max_clip_ms,
+        gap_tolerance_ms=s.lab_export_gap_tolerance_ms,
     )
     ls = LabelStudioClient(
         base_url=ls_url,
