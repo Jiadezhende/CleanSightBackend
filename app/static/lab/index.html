@@ -199,6 +199,16 @@
                class="plain-input" style="width:160px" />
       </div>
       <div class="form-row" style="margin-bottom:6px">
+        <label class="field-label" style="width:96px">任务来源</label>
+        <el-radio-group v-model="configDialog.task_source" size="small">
+          <el-radio-button label="db">按数据库</el-radio-button>
+          <el-radio-button label="storage">按实际存储</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div style="font-size:11px;color:#9ca3af;padding-left:108px;margin-bottom:10px">
+        数据库不可用（业务服务器故障）时切到「按实际存储」，直接列出磁盘上有录制的任务。
+      </div>
+      <div class="form-row" style="margin-bottom:6px">
         <label class="field-label" style="width:96px">token</label>
         <span class="badge" :class="configDialog.token_configured ? 'badge-ok' : 'badge-err'">
           {{ configDialog.token_configured ? '已配置' : '未配置' }}
@@ -492,7 +502,7 @@ createApp({
 
     // LS 连接设置（url + default_project_id 可改并持久化；token 仅 env）
     const configDialog = reactive({
-      visible: false, url: '', default_project_id: 0, token_configured: false, source: 'env',
+      visible: false, url: '', default_project_id: 0, task_source: 'db', token_configured: false, source: 'env',
     });
     async function openConfigDialog() {
       try {
@@ -501,6 +511,7 @@ createApp({
         const d = await r.json();
         configDialog.url = d.label_studio_url || '';
         configDialog.default_project_id = d.default_project_id || 0;
+        configDialog.task_source = d.task_source || 'db';
         configDialog.token_configured = !!d.token_configured;
         configDialog.source = d.source || 'env';
         configDialog.visible = true;
@@ -517,6 +528,7 @@ createApp({
           body: JSON.stringify({
             label_studio_url: (configDialog.url || '').trim(),
             default_project_id: Number(configDialog.default_project_id) || 0,
+            task_source: configDialog.task_source || 'db',
           }),
         });
         const d = await r.json().catch(() => ({}));
@@ -528,6 +540,8 @@ createApp({
         ElMessage.success('LS 配置已保存');
         configDialog.visible = false;
         await fetchHealth();
+        // 任务来源可能已切换，重新加载任务列表
+        await fetchTasks();
       } catch (e) {
         ElMessage.error('网络异常: ' + e.message);
       } finally {
