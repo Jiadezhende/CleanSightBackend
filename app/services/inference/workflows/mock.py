@@ -126,6 +126,8 @@ class MockAnalyzer(TemporalAnalyzer):
     """Mock 时序分析器。有状态，每个 Client 独立实例化。
 
     状态机（self._sm）：
+        last_ts: 游标，已处理到的最新帧 timestamp（跨 tick 跳过重复帧）
+        consecutive: 连续命中帧计数（跨 tick 累积，命中 +1，未命中归 0）
         alarming: 上升沿锁存
         total: 累计检测到的目标数
         alarm_count: 累计告警次数
@@ -135,6 +137,8 @@ class MockAnalyzer(TemporalAnalyzer):
         super().__init__(name=name)
         self.consecutive_trigger = consecutive_trigger
         self._sm = {
+            "last_ts": 0.0,
+            "consecutive": 0,
             "alarming": False,
             "total": 0,
             "alarm_count": 0,
@@ -146,17 +150,22 @@ class MockAnalyzer(TemporalAnalyzer):
         if not window:
             return [], []
 
-        # 从最新帧往前统计连续检测到目标的帧数
-        consecutive = 0
-        for output in reversed(window):
+        # 游标推进：仅处理上次 tick 之后的新帧。
+        # slide_window 是非破坏性快照，连续 tick 大量重叠；
+        # 若每 tick 重扫整窗会把同一帧重复计数，故用 last_ts 跳过已处理帧。
+        last_ts = self._sm["last_ts"]
+        new_frames = [f for f in window if f.timestamp > last_ts]
+        for output in new_frames:
             if len(output.detections) > 0:
-                consecutive += 1
+                self._sm["consecutive"] += 1
+                self._sm["total"] += len(output.detections)
             else:
-                break
+                self._sm["consecutive"] = 0
+        if new_frames:
+            self._sm["last_ts"] = new_frames[-1].timestamp
 
+        consecutive = self._sm["consecutive"]
         latest = window[-1]
-        if len(latest.detections) > 0:
-            self._sm["total"] += len(latest.detections)
 
         is_triggered = consecutive >= self.consecutive_trigger
         events = (

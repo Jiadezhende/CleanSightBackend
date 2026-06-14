@@ -81,7 +81,10 @@ else
         "$sums_tmp/SHA256SUMS" > "$sums_tmp/torch-reqs.txt"
     [ -s "$sums_tmp/torch-reqs.txt" ] \
         || { echo "ERROR: 源机 wheelhouse/SHA256SUMS 为空或无法解析" >&2; rm -rf "$sums_tmp"; exit 1; }
-    pip install --no-index --find-links "$torch_links" --no-cache-dir \
+    # 明文 HTTP 的 find-links 默认被 pip 视为不可信主机而忽略（叠加 --no-index 会导致找不到任何 wheel），
+    # 按 BASE_URL 的 host 显式放行；HTTPS 源机走不到这里（也无需放行）。
+    base_host="$(printf '%s' "$BASE_URL" | sed -E 's#^[a-z]+://([^:/]+).*#\1#')"
+    pip install --no-index --find-links "$torch_links" --trusted-host "$base_host" --no-cache-dir \
         --require-hashes -r "$sums_tmp/torch-reqs.txt"
     rm -rf "$sums_tmp"
 fi
