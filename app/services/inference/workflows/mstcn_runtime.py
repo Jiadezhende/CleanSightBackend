@@ -151,6 +151,19 @@ class MSTCNRuntime:
         if not self.model_path.exists():
             raise FileNotFoundError(f"MS-TCN model not found: {self.model_path}")
 
+        logger.info(
+            "[MSTCNRuntime] Loading checkpoint=%s mapping=%s feature_dim=%s device=%s",
+            self.model_path,
+            self.mapping_path,
+            self.feature_dim,
+            self.device,
+        )
+        print(
+            "[MSTCNRuntime] Loading checkpoint="
+            f"{self.model_path} mapping={self.mapping_path} "
+            f"feature_dim={self.feature_dim} device={self.device}",
+            flush=True,
+        )
         self.model = MSTCN2Model(
             num_layers_pg=num_layers_pg,
             num_layers_r=num_layers_r,
@@ -168,6 +181,11 @@ class MSTCNRuntime:
             self.model_path,
             self.id_to_label,
             self.device,
+        )
+        print(
+            f"[MSTCNRuntime] Loaded model={self.model_path} "
+            f"classes={self.id_to_label} device={self.device}",
+            flush=True,
         )
 
     def predict(self, features: np.ndarray) -> Dict[str, Any]:
