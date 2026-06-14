@@ -1,5 +1,7 @@
 # API 迁移指南
 
+> **迁移日期**: 2026-06-14
+>
 > **状态**: 📦 **历史文档** — 本文档记录从旧 `/inspection/*` + `/ai/load_task` 风格向 `/api/start` / `/api/terminate` 的迁移逻辑。自 2026-04 起，旧接口已整体下线（`inspection.py` 路由不再存在），本文仅供历史参考。当前接口清单请查阅 [API_ENDPOINTS.md](API_ENDPOINTS.md)。
 
 ## 概述
