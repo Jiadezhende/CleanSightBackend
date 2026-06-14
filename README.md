@@ -95,12 +95,11 @@ app/
 ```bash
 # 启动 MediaMTX（终端 1）
 cd mediamtx
-./mediamtx.exe    # Windows
-# 或 ./mediamtx    # Linux
+./mediamtx    # Linux
+
 
 # 启动后端 API（终端 2）
-.\start_backend.ps1 dev   # Windows
-# 或 ./start_backend.sh dev  # Linux
+bash ./start_backend.sh dev  # Linux
 ```
 
 ### 2. 运行测试

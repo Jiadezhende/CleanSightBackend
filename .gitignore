@@ -169,3 +169,7 @@ mediamtx/mediamtx.exe
 
 # 钉版 ffmpeg 静态包(install.sh 部署到项目内,不进 git)
 .ffmpeg/
+._*
+MS-TCN2/
+endoscope/
+weights/

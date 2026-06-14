@@ -63,7 +63,7 @@ mediamtx/mediamtx.yml
 ## 启动开发后端
 
 ```powershell
-.\start_backend.ps1 dev    # 加载 .env.dev
+bash .\start_backend.ps1 dev    # 加载 .env.dev
 ```
 
 运行时变量（数据库、外部接口、网关等）与生产共用同一套键名，开发环境写在 `.env.dev`；完整清单见 [DEPLOYMENT.md](DEPLOYMENT.md) 的「应用启动前必须配置的运行时变量」。

@@ -88,7 +88,8 @@ class ClientTemporalActor:
         all_alarms: List[AlarmInfo] = []
 
         for analyzer in self._analyzers:
-            window = self._cq.get_slide_window(analyzer.name)
+            source_name = getattr(analyzer, "source_task_name", analyzer.name)
+            window = self._cq.get_slide_window(source_name)
             if not window:
                 continue
             events, alarms = analyzer.analyze_temporal(window)

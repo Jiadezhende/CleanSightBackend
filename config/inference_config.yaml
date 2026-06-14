@@ -50,17 +50,28 @@ stages:
     #   class: app.services.inference.components.DefaultVisualizer
     # alarm_triggers: ...
 
-  # ==================== CLEAN 阶段（清洁检测，暂无模型，纯透传） ====================
+  # ==================== CLEAN 阶段（清洁动作阶段识别） ====================
   CLEAN:
     models:
-      - name: mock_detection
-        class: app.services.inference.workflows.mock.MockDetector
+      - name: clean_tool
+        realtime: false              # 阶段事件输出，不纳入 signals_10s 告警指标
+        class: app.services.inference.workflows.clean_tool.CleanToolDetector
+        analyzer_class: app.services.inference.workflows.mstcn_phase.MSTCNPhaseAnalyzer
         params:
-          brightness_threshold: 0.0   # 永不触发检测，纯透传
+          model_path: ./weights/best.pt
+          conf_threshold: 0.25
+          iou_threshold: 0.45
           enabled: true
-        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
         analyzer_params:
-          consecutive_trigger: 999    # 实际上永不满足，禁止告警
+          name: mstcn_phase
+          source_task_name: clean_tool
+          model_path: ./MS-TCN2/models/Endo_Project/split_1/epoch-50.model
+          mapping_path: ./MS-TCN2/data/Endo_Project/mapping.txt
+          feature_dim: 20
+          min_frames: 30
+          max_frames: 300
+          image_width: 640
+          image_height: 480
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback，纯透传） ====================
   MOCK:

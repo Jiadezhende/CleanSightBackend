@@ -4,19 +4,25 @@
     {
       "id": 1,
       "prompt": "帮我新建一个污点检测的 workflow，模型路径是 models/stain.pt，置信度阈值 0.6，连续4帧触发告警，告警级别 high。",
-      "expected_output": "生成完整的 StainDetectionTask 类，继承 YOLOWorkflow，实现 analyze_temporal 四步骤（含边沿触发模板）、prepare_visualization_data，并提示在 __init__.py 中注册。",
+      "expected_output": "生成双组件：StainDetector（继承 YOLODetector，name=\"stain\"，优先 override infer_batch 含批量路径+逐帧 fallback 且业务字段逻辑一致，实现 prepare_visualization_data）+ StainAnalyzer（继承 TemporalAnalyzer，同名 stain，__init__ 初始化 self._sm 含 last_ts/alarming，analyze_temporal 用连续帧计数+上升沿锁存产实时告警 AlarmType.PROCESS_VIOLATION/level=high）。并给出 inference_config.yaml 中 class+analyzer_class+params+analyzer_params 的声明，以及 workflows/__init__.py 的注册。不应再出现 InferenceWorkflow/YOLOWorkflow 或 analyze_temporal 的 state 参数。",
       "files": []
     },
     {
       "id": 2,
       "prompt": "按 workflow 规范实现一个无模型的帧率监控任务：每帧记录时间戳，当滑动窗口3秒内平均帧率低于5fps时触发告警。",
-      "expected_output": "生成继承 InferenceWorkflow 的 FpsMonitorTask，infer() 用纯 numpy/time 实现，analyze_temporal 使用滑动窗口比例模式，正确实现边沿触发，无任何 YOLO/torch 依赖。",
+      "expected_output": "生成 FpsMonitorDetector（直接继承 Detector，实现 infer 用纯 numpy/time，无 YOLO/torch/ultralytics 依赖）+ FpsMonitorAnalyzer（继承 TemporalAnalyzer，self._sm 维护时间戳窗口，analyze_temporal 计算窗口内平均 fps，<5 时上升沿触发实时告警，含锁存防重复）。同名绑定一致，给出 YAML 声明与 __init__.py 注册。",
       "files": []
     },
     {
       "id": 3,
       "prompt": "我想给 CleanSightBackend 增加一个内镜液体渗漏检测（LeakDetection），用 YOLO 模型，需要滑动窗口2秒内60%比例触发，同时检测框要用蓝色显示。",
-      "expected_output": "生成 LeakDetectionTask 继承 YOLOWorkflow，analyze_temporal 使用滑动窗口比例模式（window_seconds=2.0，trigger_ratio=0.6），prepare_visualization_data 中 VisItem color=(255,0,0)（BGR蓝色），包含完整边沿触发逻辑。",
+      "expected_output": "生成 LeakDetector（继承 YOLODetector，prepare_visualization_data 中 VisItem color=(255,0,0) BGR 蓝色）+ LeakAnalyzer（继承 TemporalAnalyzer，self._sm 含 last_ts/alarming，analyze_temporal 用滑动窗口比例模式 window_seconds=2.0/trigger_ratio=0.6，命中率≥60%上升沿触发实时告警）。Detector 与 Analyzer 同名，给出 YAML class/analyzer_class/params/analyzer_params 声明与注册。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "新增一个动作计数的结算检测：任务进行中只在画面上显示已完成次数，不报警；任务结束时如果完成次数少于要求次数，再上报一个 warning 告警。",
+      "expected_output": "生成结算式 Analyzer：analyze_temporal 累加 self._sm 中的动作计数并只返回 events（alarms 恒为空，实时阶段不报警），override finalize() 在 count < required 时返回 AlarmInfo(level=\"warning\")、达标返回 []。配套 Detector 正常实现 infer_batch/prepare_visualization_data。YAML 中该任务标 realtime: false。应体现实时告警 vs 结算告警的区别（finalize 路径）。",
       "files": []
     }
   ]

@@ -85,6 +85,7 @@ class StageFactory:
         无法映射到 AlarmMetric 的 model（如 mock_detection）直接跳过。
         """
         mapping: Dict[str, AlarmMetric] = {}
+        warned_unmapped_names = set()
         for stage_cfg in self.config.stages.values():
             for model_cfg in stage_cfg.models:
                 if not model_cfg.get("realtime", True):
@@ -93,10 +94,12 @@ class StageFactory:
                 try:
                     mapping[name] = AlarmMetric(name.upper())
                 except ValueError:
-                    logger.warning(
-                        "[StageFactory] model '%s' has no AlarmMetric mapping, excluded from signals_10s",
-                        name,
-                    )
+                    if name not in warned_unmapped_names:
+                        warned_unmapped_names.add(name)
+                        logger.warning(
+                            "[StageFactory] model '%s' has no AlarmMetric mapping, excluded from signals_10s",
+                            name,
+                        )
         return mapping
 
 
