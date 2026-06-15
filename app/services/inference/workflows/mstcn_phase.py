@@ -50,23 +50,6 @@ class MSTCNPhaseAnalyzer(TemporalAnalyzer):
         self.image_size: Tuple[int, int] = (image_width, image_height)
         self.class_order = tuple(class_order)
         self.class_aliases = dict(class_aliases or {})
-        logger.info(
-            "[MSTCNPhaseAnalyzer] Initializing name=%s source_task_name=%s "
-            "model_path=%s mapping_path=%s min_frames=%s max_frames=%s",
-            name,
-            source_task_name,
-            model_path,
-            mapping_path,
-            min_frames,
-            max_frames,
-        )
-        print(
-            "[MSTCNPhaseAnalyzer] Initializing "
-            f"name={name} source_task_name={source_task_name} "
-            f"model_path={model_path} mapping_path={mapping_path} "
-            f"min_frames={min_frames} max_frames={max_frames}",
-            flush=True,
-        )
         self.runtime = MSTCNRuntime(
             model_path=model_path,
             mapping_path=mapping_path,
@@ -116,20 +99,6 @@ class MSTCNPhaseAnalyzer(TemporalAnalyzer):
         self._sm["last_confidence"] = float(result["confidence"])
         self._sm["last_window_ts"] = latest_ts
         self._sm["last_sequence_len"] = len(result["labels"])
-        logger.info(
-            "[MSTCNPhaseAnalyzer] Predicted phase=%s confidence=%.3f frames=%s latest_ts=%.3f",
-            self._sm["last_label"],
-            self._sm["last_confidence"],
-            len(buffer),
-            latest_ts,
-        )
-        print(
-            "[MSTCNPhaseAnalyzer] Predicted "
-            f"phase={self._sm['last_label']} "
-            f"confidence={self._sm['last_confidence']:.3f} "
-            f"frames={len(buffer)} latest_ts={latest_ts:.3f}",
-            flush=True,
-        )
         return self._format_event(), []
 
     def _advance_buffer(self, window: List[DetectionOutput]) -> List[DetectionOutput]:
