@@ -1,19 +1,16 @@
 import argparse
 import asyncio
 import base64
+import json
 from datetime import datetime, timedelta
 
-try:
-    import cv2
-except ModuleNotFoundError:
-    cv2 = None
+import cv2
+import numpy as np
+import websockets
 
 
 class InferenceViewer:
     def __init__(self, client_id, show_window=True, base_port="localhost:8000"):
-        if show_window and cv2 is None:
-            raise RuntimeError("OpenCV (cv2) is required when show_window=True")
-
         self.client_id = client_id
         self.frame_count = 0
         self.start_time = None
@@ -24,8 +21,6 @@ class InferenceViewer:
         self.base_port = base_port
 
     async def connect_and_display(self, duration_seconds=None):
-        import websockets
-
         ws_url = f"ws://{self.base_port}/ai/video?client_id={self.client_id}"
         print(f"🔗 连接到 WebSocket: {ws_url}")
 
@@ -61,8 +56,6 @@ class InferenceViewer:
         # 处理Base64图像
         if message.startswith("data:image") and self.show_window:
             try:
-                import numpy as np
-
                 base64_data = message.split(",")[1]
                 img_data = base64.b64decode(base64_data)
                 img_array = np.frombuffer(img_data, dtype=np.uint8)
