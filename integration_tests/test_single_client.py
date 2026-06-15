@@ -47,6 +47,11 @@ DELAYED_STREAM_DEFAULT = 10
 # Scenario 6: 等待重连成功的最大轮询时长（秒）
 RECONNECT_SUCCESS_TIMEOUT = 45
 
+# 服务端口（由 main() 根据 --api-port / --rtsp-port 覆写）。
+# 默认值对应标准部署；测试环境可能做了端口偏移（如 8100/8104）。
+API_PORT = 8000   # 后端 HTTP/WS API 端口
+RTSP_PORT = 8004  # RTSPProxy 对外推流端口
+
 
 # ---------------------------------------------------------------------------
 # 共享帮助函数
@@ -61,7 +66,7 @@ def build_urls(server: str, client_id: str) -> tuple:
     # Windows 上 localhost 可能解析为 ::1（IPv6），但 RTSPProxy 只监听 IPv4。
     # 本地推流强制用 127.0.0.1；远程推流保留原始 server 地址。
     push_host = "127.0.0.1" if server in ("localhost", "127.0.0.1") else server
-    push_url = f"rtsp://{push_host}:8004/live/{client_id}"
+    push_url = f"rtsp://{push_host}:{RTSP_PORT}/live/{client_id}"
     return push_url, push_url
 
 
@@ -176,9 +181,9 @@ def print_viewer_url(server: str, client_id: str):
     """打印浏览器查看器 URL（--no-window 模式的替代方案）。"""
     viewer_path = Path(__file__).parent / "viewer.html"
     print(f"\n如需在浏览器中查看推理结果，请打开:")
-    print(f"  file:///{viewer_path}?client_id={client_id}&server={server}:8000")
+    print(f"  file:///{viewer_path}?client_id={client_id}&server={server}:{API_PORT}")
     print(f"  或运行: python -m http.server 8080")
-    print(f"  然后访问: http://localhost:8080/integration_tests/viewer.html?client_id={client_id}&server={server}:8000\n")
+    print(f"  然后访问: http://localhost:8080/integration_tests/viewer.html?client_id={client_id}&server={server}:{API_PORT}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +201,7 @@ def run_scenario_1(args):
     print("=" * 60)
 
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id) as client_id:
@@ -216,7 +221,7 @@ def run_scenario_1(args):
 
             # 3. 运行 duration 秒
             if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
                 asyncio.run(viewer.connect_and_display(args.duration))
             else:
                 print_viewer_url(args.server, client_id)
@@ -251,7 +256,7 @@ def run_scenario_2(args):
 
     phase1 = max(15, int(args.duration * 0.35))
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id) as client_id:
@@ -286,7 +291,7 @@ def run_scenario_2(args):
             print(f"\nPhase 2: 继续运行 {remaining}s...")
 
             if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
                 asyncio.run(viewer.connect_and_display(remaining))
             else:
                 print_viewer_url(args.server, client_id)
@@ -320,7 +325,7 @@ def run_scenario_3(args):
 
     phase1 = max(15, int(args.duration * 0.25))
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id) as client_id:
@@ -414,7 +419,7 @@ def _scenario5_no_stream(args):
     print(f"  预期约 30s 后自动清理")
     print("=" * 60)
 
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id) as client_id:
@@ -450,7 +455,7 @@ def _scenario5_no_terminate(args):
     print("=" * 60)
 
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id) as client_id:
@@ -512,7 +517,7 @@ def run_scenario_6(args):
     print("=" * 60)
 
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id) as client_id:
@@ -611,7 +616,7 @@ def run_scenario_7(args):
     print("=" * 60)
 
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id, current_step="2") as client_id:
@@ -628,7 +633,7 @@ def run_scenario_7(args):
             print(f"/api/start 成功: {result}")
 
             if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
                 asyncio.run(viewer.connect_and_display(args.duration))
             else:
                 print_viewer_url(args.server, client_id)
@@ -669,7 +674,7 @@ def run_scenario_8(args):
     print("=" * 60)
 
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id, current_step="未知阶段") as client_id:
@@ -687,7 +692,7 @@ def run_scenario_8(args):
             print(f"  → 检查后端日志确认已路由到 MOCK stage")
 
             if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
                 asyncio.run(viewer.connect_and_display(args.duration))
             else:
                 print_viewer_url(args.server, client_id)
@@ -732,7 +737,7 @@ def run_scenario_9(args):
     phase1 = max(15, int(args.duration * 0.4))
     phase2 = max(15, args.duration - phase1)
     is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(f"http://{args.server}:{API_PORT}")
     check_prerequisites(api, args.video_path)
 
     with managed_task(args.task_id, current_step="1") as client_id:
@@ -760,7 +765,7 @@ def run_scenario_9(args):
 
             print(f"\n[Step 2] LEAK 阶段运行 {phase1}s...")
             if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
                 asyncio.run(viewer.connect_and_display(phase1))
             else:
                 print_viewer_url(args.server, client_id)
@@ -802,7 +807,7 @@ def run_scenario_9(args):
 
             print(f"\n[Step 5] CLEAN 阶段运行 {phase2}s...")
             if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:8000")
+                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
                 asyncio.run(viewer.connect_and_display(phase2))
             else:
                 time.sleep(phase2)
