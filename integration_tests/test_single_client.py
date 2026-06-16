@@ -24,6 +24,12 @@
     --no-window                        禁用 OpenCV 可视化窗口
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
     --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
+    --current-step <step>              任务阶段(1=LEAK/2=CLEAN/其它=MOCK)，覆盖场景默认
+
+维度说明:
+    --scenario     决定「怎么跑」（生命周期：正常/断流/延迟/不 terminate…）
+    --current-step 决定「跑什么」（任务阶段 → 推理 workflow）
+    两者正交，可自由组合，例如 --scenario 2 --current-step 2 = CLEAN 阶段断流重连。
 """
 
 import argparse
@@ -32,6 +38,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -47,10 +54,10 @@ DELAYED_STREAM_DEFAULT = 10
 # Scenario 6: 等待重连成功的最大轮询时长（秒）
 RECONNECT_SUCCESS_TIMEOUT = 45
 
-# 服务端口（由 main() 根据 --api-port / --rtsp-port 覆写）。
-# 默认值对应标准部署；测试环境可能做了端口偏移（如 8100/8104）。
-API_PORT = 8000   # 后端 HTTP/WS API 端口
-RTSP_PORT = 8004  # RTSPProxy 对外推流端口
+# 服务端口默认值（唯一来源，仅作 argparse 默认；运行期端口随 args 传递）。
+# 对应标准部署；测试环境可能做了端口偏移（如 8100/8104），用 --api-port / --rtsp-port 指定。
+DEFAULT_API_PORT = 8000   # 后端 HTTP/WS API 端口
+DEFAULT_RTSP_PORT = 8004  # RTSPProxy 对外推流端口
 
 
 # ---------------------------------------------------------------------------
@@ -58,15 +65,20 @@ RTSP_PORT = 8004  # RTSPProxy 对外推流端口
 # ---------------------------------------------------------------------------
 
 
-def build_urls(server: str, client_id: str) -> tuple:
+def is_local(server: str) -> bool:
+    """server 是否为本机地址（决定推流 host 与推流稳定等待时长）。"""
+    return server in ("localhost", "127.0.0.1")
+
+
+def build_urls(server: str, client_id: str, rtsp_port: int) -> tuple:
     """
     返回 (push_url, pull_url)。
     push_url == pull_url：推流目标即后端拉流地址，后端内部会 rewrite 为 127.0.0.1。
     """
     # Windows 上 localhost 可能解析为 ::1（IPv6），但 RTSPProxy 只监听 IPv4。
     # 本地推流强制用 127.0.0.1；远程推流保留原始 server 地址。
-    push_host = "127.0.0.1" if server in ("localhost", "127.0.0.1") else server
-    push_url = f"rtsp://{push_host}:{RTSP_PORT}/live/{client_id}"
+    push_host = "127.0.0.1" if is_local(server) else server
+    push_url = f"rtsp://{push_host}:{rtsp_port}/live/{client_id}"
     return push_url, push_url
 
 
@@ -86,6 +98,20 @@ def managed_task(task_id: int, current_step: str = "1"):
         db.create_test_task(task_id, source_ip=source_ip, current_step=current_step)
         task = db.get_task(task_id)
         created = True
+    else:
+        # 复用已存在任务时，DB 里的 current_step 才是后端实际路由依据。
+        # 若与本次请求不一致，过去会被静默忽略 → 「以为测 CLEAN，实际跑 LEAK」。
+        # 这里 fail-fast，不擅自改写可能是真实任务的 current_step。
+        existing_step = str(task.current_step)
+        if existing_step != current_step:
+            raise SystemExit(
+                f"任务 {task_id} 已存在且 current_step={existing_step!r}，与本次请求的 "
+                f"{current_step!r} 不一致。\n"
+                f"为避免测错阶段，请二选一：\n"
+                f"  1) 换一个未占用的 --task_id（测试会自建并在结束时自动清理）；\n"
+                f"  2) 加 --current-step {existing_step} 显式复用现有任务的阶段。"
+            )
+        print(f"复用已存在任务 {task_id} (current_step={existing_step})")
     client_id = str(task.source_ip)
     print(f"client_id: {client_id}")
     try:
@@ -106,6 +132,57 @@ def check_prerequisites(api: APIClient, video_path: str):
     print(f"测试视频: {video_path}")
 
 
+@contextmanager
+def scenario_setup(args, *, current_step="1", need_stream=True, check_health=True):
+    """统一的 scenario 初始化脚手架。
+
+    依次完成：构造 APIClient → 前置检查 → 准备任务（managed_task）→ 构造推流 URL
+    与 FFmpegController，并以 SimpleNamespace 暴露给 scenario 使用。
+
+    Args:
+        current_step: 场景默认阶段值；命令行 --current-step 若指定则优先覆盖。
+        need_stream:  是否需要 FFmpegController（仅 start 不推流的场景设为 False）。
+        check_health: True 走完整前置检查；False 仅校验视频存在（不依赖后端）。
+
+    Yields:
+        SimpleNamespace(api, client_id, push_url, pull_url, ffmpeg, is_remote, current_step)
+    """
+    # --current-step 覆盖场景默认值（决定路由到哪个推理 workflow）
+    step = args.current_step if args.current_step is not None else current_step
+
+    api = APIClient(f"http://{args.server}:{args.api_port}")
+    if check_health:
+        check_prerequisites(api, args.video_path)
+    elif not Path(args.video_path).exists():
+        raise SystemExit(f"测试视频不存在: {args.video_path}")
+
+    with managed_task(args.task_id, step) as client_id:
+        push_url, pull_url = build_urls(args.server, client_id, args.rtsp_port)
+        ffmpeg = (
+            FFmpegController(args.video_path, push_url, protocol="rtsp")
+            if need_stream
+            else None
+        )
+        yield SimpleNamespace(
+            api=api,
+            client_id=client_id,
+            push_url=push_url,
+            pull_url=pull_url,
+            ffmpeg=ffmpeg,
+            is_remote=not is_local(args.server),
+            current_step=step,
+        )
+
+
+def section(title: str, *extra: str):
+    """打印场景分隔标题（含可选的缩进说明行）。"""
+    print("\n" + "=" * 60)
+    print(title)
+    for line in extra:
+        print(f"  {line}")
+    print("=" * 60)
+
+
 def stream_stabilize(ffmpeg: FFmpegController, is_remote: bool):
     """启动 FFmpeg 推流并等待稳定。"""
     if not ffmpeg.start():
@@ -113,6 +190,38 @@ def stream_stabilize(ffmpeg: FFmpegController, is_remote: bool):
     wait = 5 if is_remote else 3
     print(f"等待推流稳定 ({wait}s)...")
     time.sleep(wait)
+
+
+def do_start(api: APIClient, args, pull_url: str, *, label: str = ""):
+    """调用 /api/start，失败时抛 RuntimeError，成功时打印响应并返回结果。"""
+    print(f"\n调用 /api/start ({label or f'task_id={args.task_id}'})")
+    result = api.unified_start(args.task_id, pull_url, args.fps)
+    if "error" in result:
+        raise RuntimeError(f"/api/start 失败: {result['error']}")
+    print(f"/api/start 成功: {result}")
+    return result
+
+
+def watch_or_sleep(args, client_id: str, duration: int):
+    """有窗口则用 InferenceViewer 实时展示，无窗口则打印查看器 URL 并 sleep。"""
+    if not args.no_window:
+        viewer = InferenceViewer(
+            client_id, show_window=True, base_port=f"{args.server}:{args.api_port}"
+        )
+        asyncio.run(viewer.connect_and_display(duration))
+    else:
+        print_viewer_url(args.server, client_id, args.api_port)
+        print(f"运行中（无窗口，{duration}s）...")
+        time.sleep(duration)
+
+
+def do_terminate(api: APIClient, client_id: str, ffmpeg: FFmpegController = None):
+    """调用 /api/terminate，并在提供 ffmpeg 时一并停止推流。"""
+    print("\n调用 /api/terminate...")
+    result = api.unified_terminate(client_id)
+    print(f"terminate 结果: {result.get('status', result)}")
+    if ffmpeg:
+        ffmpeg.stop()
 
 
 def poll_until_cleaned(api: APIClient, client_id: str, timeout: int = AUTO_CLEANUP_TIMEOUT) -> bool:
@@ -177,13 +286,45 @@ def poll_until_reconnected(api: APIClient, client_id: str, timeout: int = RECONN
     return False
 
 
-def print_viewer_url(server: str, client_id: str):
+def print_viewer_url(server: str, client_id: str, api_port: int):
     """打印浏览器查看器 URL（--no-window 模式的替代方案）。"""
     viewer_path = Path(__file__).parent / "viewer.html"
     print(f"\n如需在浏览器中查看推理结果，请打开:")
-    print(f"  file:///{viewer_path}?client_id={client_id}&server={server}:{API_PORT}")
+    print(f"  file:///{viewer_path}?client_id={client_id}&server={server}:{api_port}")
     print(f"  或运行: python -m http.server 8080")
-    print(f"  然后访问: http://localhost:8080/integration_tests/viewer.html?client_id={client_id}&server={server}:{API_PORT}\n")
+    print(f"  然后访问: http://localhost:8080/integration_tests/viewer.html?client_id={client_id}&server={server}:{api_port}\n")
+
+
+# ---------------------------------------------------------------------------
+# 标准生命周期：推流 → start → 观察 duration → terminate
+# Scenario 1/7/8 共用，仅 current_step 与提示文案不同
+# ---------------------------------------------------------------------------
+
+
+def _run_simple_lifecycle(args, *, name, subtitle, current_step_default, extra=(), tail=()):
+    """推流 → start → 观察 duration → terminate 的标准生命周期。
+
+    Args:
+        name:                 场景名（如 "Scenario 1"），用于标题与完成提示。
+        subtitle:             标题副标题。
+        current_step_default: 场景默认 current_step；--current-step 可覆盖。
+        extra:                标题下的缩进说明行。
+        tail:                 完成后追加打印的提示行（如日志关键字）。
+    """
+    section(f"{name}: {subtitle}", *extra)
+
+    with scenario_setup(args, current_step=current_step_default) as ctx:
+        try:
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
+            do_start(ctx.api, args, ctx.pull_url,
+                     label=f"task_id={args.task_id}, current_step={ctx.current_step}")
+            watch_or_sleep(args, ctx.client_id, args.duration)
+        finally:
+            do_terminate(ctx.api, ctx.client_id, ctx.ffmpeg)
+
+    print(f"\n{name} 完成")
+    for line in tail:
+        print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -192,50 +333,17 @@ def print_viewer_url(server: str, client_id: str):
 
 
 def run_scenario_1(args):
-    """
-    正常使用流程：推流 → start → 等待 duration → terminate。
+    """正常使用流程：推流 → start → 等待 duration → terminate。
+
     验证: 完整的推理可视化、后端正常响应、terminate 成功清理资源。
+    current_step 默认 1（LEAK），可用 --current-step 指定任意阶段。
     """
-    print("\n" + "=" * 60)
-    print("Scenario 1: 正常流程")
-    print("=" * 60)
-
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
-
-    with managed_task(args.task_id) as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
-        try:
-            # 1. 推流
-            stream_stabilize(ffmpeg, is_remote)
-
-            # 2. start
-            print(f"\n调用 /api/start (task_id={args.task_id}, pull_url={pull_url})")
-            result = api.unified_start(args.task_id, pull_url, args.fps)
-            if "error" in result:
-                raise RuntimeError(f"/api/start 失败: {result['error']}")
-            print(f"/api/start 成功: {result}")
-
-            # 3. 运行 duration 秒
-            if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
-                asyncio.run(viewer.connect_and_display(args.duration))
-            else:
-                print_viewer_url(args.server, client_id)
-                print(f"运行中（无窗口，{args.duration}s）...")
-                time.sleep(args.duration)
-
-        finally:
-            # 4. terminate
-            print("\n调用 /api/terminate...")
-            result = api.unified_terminate(client_id)
-            print(f"terminate 结果: {result.get('status', result)}")
-            ffmpeg.stop()
-
-    print("\nScenario 1 完成")
+    _run_simple_lifecycle(
+        args,
+        name="Scenario 1",
+        subtitle="正常流程",
+        current_step_default="1",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,59 +357,35 @@ def run_scenario_2(args):
     验证: 后端自动重连成功，无需重新调 /api/start。
     duration 建议 >= 50s（phase1≥15s + gap10s + phase2≥15s + 5s稳定）。
     """
-    print("\n" + "=" * 60)
-    print("Scenario 2: 断流重连成功")
-    print(f"  phase1 = max(15, duration*0.35), gap = {RECONNECT_GAP}s")
-    print("=" * 60)
-
     phase1 = max(15, int(args.duration * 0.35))
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
+    section("Scenario 2: 断流重连成功",
+            f"phase1 = max(15, duration*0.35), gap = {RECONNECT_GAP}s")
 
-    with managed_task(args.task_id) as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+    with scenario_setup(args) as ctx:
         try:
             # Phase 1: 推流并 start
-            stream_stabilize(ffmpeg, is_remote)
-
-            print(f"\n调用 /api/start (task_id={args.task_id})")
-            result = api.unified_start(args.task_id, pull_url, args.fps)
-            if "error" in result:
-                raise RuntimeError(f"/api/start 失败: {result['error']}")
-            print(f"/api/start 成功: {result}")
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
+            do_start(ctx.api, args, ctx.pull_url)
 
             print(f"\nPhase 1: 推流 {phase1}s...")
             time.sleep(phase1)
 
             # 断流
             print(f"\n断流（停止 FFmpeg）...")
-            ffmpeg.stop()
+            ctx.ffmpeg.stop()
             print(f"等待 {RECONNECT_GAP}s（后端将进入重连模式）...")
             time.sleep(RECONNECT_GAP)
 
             # Phase 2: 重新推流（后端自动重连，无需重调 start）
             print(f"\n重新推流（后端自动重连，无需重调 start）...")
-            ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
-            stream_stabilize(ffmpeg, is_remote)
+            ctx.ffmpeg = FFmpegController(args.video_path, ctx.push_url, protocol="rtsp")
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
 
             remaining = max(args.duration - phase1 - RECONNECT_GAP, 10)
             print(f"\nPhase 2: 继续运行 {remaining}s...")
-
-            if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
-                asyncio.run(viewer.connect_and_display(remaining))
-            else:
-                print_viewer_url(args.server, client_id)
-                time.sleep(remaining)
-
+            watch_or_sleep(args, ctx.client_id, remaining)
         finally:
-            print("\n调用 /api/terminate...")
-            result = api.unified_terminate(client_id)
-            print(f"terminate 结果: {result.get('status', result)}")
-            ffmpeg.stop()
+            do_terminate(ctx.api, ctx.client_id, ctx.ffmpeg)
 
     print("\nScenario 2 完成")
 
@@ -317,42 +401,27 @@ def run_scenario_3(args):
     不调用 /api/terminate，通过轮询 /health/status 确认自动清理。
     预期约 30s 后清理完成（heartbeat 5s + 5次重连×5s = 30s）。
     """
-    print("\n" + "=" * 60)
-    print("Scenario 3: 断流重连失败（自动清理）")
-    print(f"  phase1 = max(15, duration*0.25)，然后永久断流")
-    print(f"  预期 ~30s 后自动清理（不调 terminate）")
-    print("=" * 60)
-
     phase1 = max(15, int(args.duration * 0.25))
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
+    section("Scenario 3: 断流重连失败（自动清理）",
+            "phase1 = max(15, duration*0.25)，然后永久断流",
+            "预期 ~30s 后自动清理（不调 terminate）")
 
-    with managed_task(args.task_id) as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+    with scenario_setup(args) as ctx:
         try:
-            stream_stabilize(ffmpeg, is_remote)
-
-            print(f"\n调用 /api/start (task_id={args.task_id})")
-            result = api.unified_start(args.task_id, pull_url, args.fps)
-            if "error" in result:
-                raise RuntimeError(f"/api/start 失败: {result['error']}")
-            print(f"/api/start 成功: {result}")
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
+            do_start(ctx.api, args, ctx.pull_url)
 
             print(f"\n推流 {phase1}s...")
             time.sleep(phase1)
 
             print(f"\n永久断流（停止 FFmpeg，不再恢复）...")
-            ffmpeg.stop()
-
+            ctx.ffmpeg.stop()
         except Exception:
-            ffmpeg.stop()
+            ctx.ffmpeg.stop()
             raise
 
         # 观察自动清理（不在 finally 中调 terminate）
-        cleaned = poll_until_cleaned(api, client_id)
+        cleaned = poll_until_cleaned(ctx.api, ctx.client_id)
         if cleaned:
             print("\nPASS: 后端已自动清理资源")
         else:
@@ -372,24 +441,15 @@ def run_scenario_4(args):
     仅推流到 MediaMTX，不调用任何后端 API。
     验证: MediaMTX 能正常接收流，后端不受未知流影响。
     """
-    print("\n" + "=" * 60)
-    print("Scenario 4: 仅推流（不调用后端 API）")
-    print("=" * 60)
+    section("Scenario 4: 仅推流（不调用后端 API）")
 
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    if not Path(args.video_path).exists():
-        raise SystemExit(f"测试视频不存在: {args.video_path}")
-
-    with managed_task(args.task_id) as client_id:
-        push_url, _ = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+    with scenario_setup(args, check_health=False) as ctx:
         try:
-            stream_stabilize(ffmpeg, is_remote)
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
             print(f"\n推流中（{args.duration}s），后端未启动推理...")
             time.sleep(args.duration)
         finally:
-            ffmpeg.stop()
+            ctx.ffmpeg.stop()
 
     print("\nScenario 4 完成")
 
@@ -400,8 +460,7 @@ def run_scenario_4(args):
 
 
 def run_scenario_5(args):
-    mode = getattr(args, "mode", "no-stream")
-    if mode == "no-terminate":
+    if args.mode == "no-terminate":
         _scenario5_no_terminate(args)
     else:
         _scenario5_no_stream(args)
@@ -413,20 +472,13 @@ def _scenario5_no_stream(args):
     后端会启动解码器但收不到帧，心跳超时后自动清理。
     不调 terminate，通过轮询确认自动清理。
     """
-    print("\n" + "=" * 60)
-    print("Scenario 5a: 仅 start，不推流（忘记推流）")
-    print(f"  /api/start 后端通常会成功（FFmpeg进程启动但拉不到流）")
-    print(f"  预期约 30s 后自动清理")
-    print("=" * 60)
+    section("Scenario 5a: 仅 start，不推流（忘记推流）",
+            "/api/start 后端通常会成功（FFmpeg进程启动但拉不到流）",
+            "预期约 30s 后自动清理")
 
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
-
-    with managed_task(args.task_id) as client_id:
-        _, pull_url = build_urls(args.server, client_id)
-
-        print(f"\n调用 /api/start (无人推流, pull_url={pull_url})")
-        result = api.unified_start(args.task_id, pull_url, args.fps)
+    with scenario_setup(args, need_stream=False) as ctx:
+        print(f"\n调用 /api/start (无人推流, pull_url={ctx.pull_url})")
+        result = ctx.api.unified_start(args.task_id, ctx.pull_url, args.fps)
 
         if "error" in result:
             print(f"\n/api/start 返回错误（也是有效的测试结果）: {result['error']}")
@@ -434,12 +486,12 @@ def _scenario5_no_stream(args):
         else:
             print(f"/api/start 成功: {result}")
             print("\n（无流推送，等待心跳超时触发自动清理）")
-            cleaned = poll_until_cleaned(api, client_id)
+            cleaned = poll_until_cleaned(ctx.api, ctx.client_id)
             if cleaned:
                 print("\nPASS: 后端已自动清理孤儿 session")
             else:
                 print("\nWARN: 未确认自动清理，手动 terminate...")
-                api.unified_terminate(client_id)
+                ctx.api.unified_terminate(ctx.client_id)
 
     print("\nScenario 5a 完成")
 
@@ -449,33 +501,19 @@ def _scenario5_no_terminate(args):
     正常推流和 start，但测试结束时不调 terminate，模拟"忘记停止"。
     FFmpeg 停止后后端应能通过孤儿检测自动清理。
     """
-    print("\n" + "=" * 60)
-    print("Scenario 5b: 推流 + start，但不 terminate（忘记停止）")
-    print(f"  测试结束后检查后端日志确认孤儿检测")
-    print("=" * 60)
+    section("Scenario 5b: 推流 + start，但不 terminate（忘记停止）",
+            "测试结束后检查后端日志确认孤儿检测")
 
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
-
-    with managed_task(args.task_id) as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+    with scenario_setup(args) as ctx:
         try:
-            stream_stabilize(ffmpeg, is_remote)
-
-            print(f"\n调用 /api/start (task_id={args.task_id})")
-            result = api.unified_start(args.task_id, pull_url, args.fps)
-            if "error" in result:
-                raise RuntimeError(f"/api/start 失败: {result['error']}")
-            print(f"/api/start 成功: {result}")
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
+            do_start(ctx.api, args, ctx.pull_url)
 
             print(f"\n运行 {args.duration}s，结束后不调 terminate...")
             time.sleep(args.duration)
             # 不调 /api/terminate
         finally:
-            ffmpeg.stop()  # FFmpeg 停止，后端将进入重连/孤儿检测
+            ctx.ffmpeg.stop()  # FFmpeg 停止，后端将进入重连/孤儿检测
 
     print("\nScenario 5b 完成")
     print("  请检查后端日志确认孤儿检测和自动清理流程")
@@ -508,29 +546,19 @@ def run_scenario_6(args):
       --stream-delay  推流延迟秒数，必须 < 25s（重连窗口 = max_attempts × interval）
       --duration      重连成功后的稳定观察时长
     """
-    stream_delay = getattr(args, "stream_delay", DELAYED_STREAM_DEFAULT)
+    stream_delay = args.stream_delay
+    section("Scenario 6: 延迟推流 — 初始拉流失败后健康监控自动重连",
+            f"推流延迟: {stream_delay}s（须 < 重连窗口 25s）",
+            f"重连成功超时: {RECONNECT_SUCCESS_TIMEOUT}s")
 
-    print("\n" + "=" * 60)
-    print("Scenario 6: 延迟推流 — 初始拉流失败后健康监控自动重连")
-    print(f"  推流延迟: {stream_delay}s（须 < 重连窗口 25s）")
-    print(f"  重连成功超时: {RECONNECT_SUCCESS_TIMEOUT}s")
-    print("=" * 60)
-
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
-
-    with managed_task(args.task_id) as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
-
+    with scenario_setup(args) as ctx:
         try:
             # ----------------------------------------------------------------
             # Step 1: 先调 /api/start（此时无流，预期失败或成功均可）
             # ----------------------------------------------------------------
             print(f"\n[Step 1] 调用 /api/start（流尚未就绪）")
-            print(f"  pull_url={pull_url}")
-            result = api.unified_start(args.task_id, pull_url, args.fps)
+            print(f"  pull_url={ctx.pull_url}")
+            result = ctx.api.unified_start(args.task_id, ctx.pull_url, args.fps)
 
             if "error" in result:
                 print(f"  [预期] /api/start 返回错误（流不可达）")
@@ -549,15 +577,15 @@ def run_scenario_6(args):
             # ----------------------------------------------------------------
             # Step 3: 启动推流
             # ----------------------------------------------------------------
-            print(f"\n[Step 3] 启动推流: {push_url}")
-            stream_stabilize(ffmpeg, is_remote)
+            print(f"\n[Step 3] 启动推流: {ctx.push_url}")
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
             print(f"  推流已就绪，健康监控将检测到流并触发 restart_stream")
 
             # ----------------------------------------------------------------
             # Step 4: 等待健康监控重连成功
             # ----------------------------------------------------------------
             print(f"\n[Step 4] 轮询健康状态，等待重连成功...")
-            reconnected = poll_until_reconnected(api, client_id, timeout=RECONNECT_SUCCESS_TIMEOUT)
+            reconnected = poll_until_reconnected(ctx.api, ctx.client_id, timeout=RECONNECT_SUCCESS_TIMEOUT)
 
             if reconnected:
                 print(f"\n[PASS] 健康监控自动重连成功（无需再次调 /api/start）")
@@ -565,14 +593,7 @@ def run_scenario_6(args):
                 # 稳定运行片刻，确认连接质量
                 stable_secs = min(args.duration, 15)
                 print(f"\n[Step 5] 稳定观察 {stable_secs}s...")
-                if not args.no_window:
-                    viewer = InferenceViewer(
-                        client_id, show_window=True, base_port=f"{args.server}:8000"
-                    )
-                    asyncio.run(viewer.connect_and_display(stable_secs))
-                else:
-                    print_viewer_url(args.server, client_id)
-                    time.sleep(stable_secs)
+                watch_or_sleep(args, ctx.client_id, stable_secs)
             else:
                 print(f"\n[FAIL] {RECONNECT_SUCCESS_TIMEOUT}s 内未检测到重连成功")
                 print(f"  排查步骤:")
@@ -583,10 +604,8 @@ def run_scenario_6(args):
                 print(f"     → 有: decoder 未注册，健康监控走了 orphan 路径（旧 bug 行为）")
 
         finally:
-            print(f"\n[Cleanup] 调用 /api/terminate...")
-            term_result = api.unified_terminate(client_id)
-            print(f"terminate 结果: {term_result.get('status', term_result)}")
-            ffmpeg.stop()
+            print(f"\n[Cleanup]", end=" ")
+            do_terminate(ctx.api, ctx.client_id, ctx.ffmpeg)
 
     print("\nScenario 6 完成")
     print("  后端日志验证路径:")
@@ -599,55 +618,19 @@ def run_scenario_6(args):
 
 
 def run_scenario_7(args):
+    """current_step=2 → CLEAN 阶段透传（验证不黑屏）。
+
+    本质是「标准生命周期 + current_step=2」的预设别名，等价于
+    `--scenario 1 --current-step 2`。--current-step 可进一步覆盖。
     """
-    使用 current_step="2" 启动任务，验证 CLEAN 阶段帧透传不黑屏。
-
-    验证点：
-      - current_step="2" 路由到 CLEAN stage
-      - WebSocket 能正常收到视频帧（不黑屏）
-      - terminate 正常清理资源
-
-    后端日志关键字：
-      InferWorker-CLEAN 线程正常运行
-    """
-    print("\n" + "=" * 60)
-    print("Scenario 7: current_step=2 → CLEAN 阶段透传（验证不黑屏）")
-    print(f"  current_step = '2' → 预期路由到 CLEAN stage")
-    print("=" * 60)
-
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
-
-    with managed_task(args.task_id, current_step="2") as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
-        try:
-            stream_stabilize(ffmpeg, is_remote)
-
-            print(f"\n调用 /api/start (task_id={args.task_id}, current_step=2)")
-            result = api.unified_start(args.task_id, pull_url, args.fps)
-            if "error" in result:
-                raise RuntimeError(f"/api/start 失败: {result['error']}")
-            print(f"/api/start 成功: {result}")
-
-            if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
-                asyncio.run(viewer.connect_and_display(args.duration))
-            else:
-                print_viewer_url(args.server, client_id)
-                print(f"运行中（无窗口，{args.duration}s）...")
-                time.sleep(args.duration)
-
-        finally:
-            print("\n调用 /api/terminate...")
-            result = api.unified_terminate(client_id)
-            print(f"terminate 结果: {result.get('status', result)}")
-            ffmpeg.stop()
-
-    print("\nScenario 7 完成")
-    print("  验证: InferWorker-CLEAN 正常运行，WebSocket 帧正常推送（无黑屏）")
+    _run_simple_lifecycle(
+        args,
+        name="Scenario 7",
+        subtitle="current_step=2 → CLEAN 阶段透传（验证不黑屏）",
+        current_step_default="2",
+        extra=("current_step = '2' → 预期路由到 CLEAN stage",),
+        tail=("  验证: InferWorker-CLEAN 正常运行，WebSocket 帧正常推送（无黑屏）",),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -656,57 +639,19 @@ def run_scenario_7(args):
 
 
 def run_scenario_8(args):
+    """无效 current_step → MOCK 阶段 fallback（验证不黑屏）。
+
+    本质是「标准生命周期 + 无效 current_step」的预设别名，等价于
+    `--scenario 1 --current-step 未知阶段`。--current-step 可进一步覆盖。
     """
-    使用无效 current_step 启动任务，验证 MOCK 阶段 fallback 不黑屏。
-
-    验证点：
-      - current_step="未知阶段" 路由到 MOCK stage
-      - WebSocket 能正常收到视频帧（不黑屏）
-      - terminate 正常清理资源
-
-    后端日志关键字：
-      '未知的 current_step，路由到 MOCK stage'
-      InferWorker-MOCK 线程正常运行
-    """
-    print("\n" + "=" * 60)
-    print("Scenario 8: 无效 current_step → MOCK 阶段透传（验证不黑屏）")
-    print(f"  current_step = '未知阶段' → 预期路由到 MOCK stage")
-    print("=" * 60)
-
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
-
-    with managed_task(args.task_id, current_step="未知阶段") as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
-        try:
-            stream_stabilize(ffmpeg, is_remote)
-
-            print(f"\n调用 /api/start (task_id={args.task_id}, current_step=未知阶段)")
-            result = api.unified_start(args.task_id, pull_url, args.fps)
-            if "error" in result:
-                raise RuntimeError(f"/api/start 失败: {result['error']}")
-            print(f"/api/start 成功: {result}")
-            print(f"  → 检查后端日志确认已路由到 MOCK stage")
-
-            if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
-                asyncio.run(viewer.connect_and_display(args.duration))
-            else:
-                print_viewer_url(args.server, client_id)
-                print(f"运行中（无窗口，{args.duration}s）...")
-                time.sleep(args.duration)
-
-        finally:
-            print("\n调用 /api/terminate...")
-            result = api.unified_terminate(client_id)
-            print(f"terminate 结果: {result.get('status', result)}")
-            ffmpeg.stop()
-
-    print("\nScenario 8 完成")
-    print("  验证: 后端日志应有 MOCK stage 路由，WebSocket 帧正常推送（无黑屏）")
+    _run_simple_lifecycle(
+        args,
+        name="Scenario 8",
+        subtitle="无效 current_step → MOCK 阶段透传（验证不黑屏）",
+        current_step_default="未知阶段",
+        extra=("current_step = '未知阶段' → 预期路由到 MOCK stage",),
+        tail=("  验证: 后端日志应有 MOCK stage 路由，WebSocket 帧正常推送（无黑屏）",),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -727,49 +672,35 @@ def run_scenario_9(args):
       第二次：'performing full cleanup before restart'
               InferWorker-CLEAN 线程正常运行
     """
-    print("\n" + "=" * 60)
-    print("Scenario 9: current_step 切换（LEAK → CLEAN）")
-    print("  第一次 start: current_step=1 → LEAK stage")
-    print("  DB 更新 current_step → 2")
-    print("  第二次 start: 相同 task_id → 应触发全量重建 → CLEAN stage")
-    print("=" * 60)
-
     phase1 = max(15, int(args.duration * 0.4))
     phase2 = max(15, args.duration - phase1)
-    is_remote = args.server not in ("localhost", "127.0.0.1")
-    api = APIClient(f"http://{args.server}:{API_PORT}")
-    check_prerequisites(api, args.video_path)
+    section("Scenario 9: current_step 切换（LEAK → CLEAN）",
+            "第一次 start: current_step=1 → LEAK stage",
+            "DB 更新 current_step → 2",
+            "第二次 start: 相同 task_id → 应触发全量重建 → CLEAN stage")
 
-    with managed_task(args.task_id, current_step="1") as client_id:
-        push_url, pull_url = build_urls(args.server, client_id)
-
-        ffmpeg = FFmpegController(args.video_path, push_url, protocol="rtsp")
+    with scenario_setup(args, current_step="1") as ctx:
         try:
             # ── Phase 1: LEAK 阶段 ──────────────────────────────────────────
-            stream_stabilize(ffmpeg, is_remote)
+            stream_stabilize(ctx.ffmpeg, ctx.is_remote)
 
             print(f"\n[Step 1] /api/start（current_step=1，预期 LEAK stage）")
-            result1 = api.unified_start(args.task_id, pull_url, args.fps)
+            result1 = ctx.api.unified_start(args.task_id, ctx.pull_url, args.fps)
             if "error" in result1:
                 raise RuntimeError(f"第一次 /api/start 失败: {result1['error']}")
             print(f"  响应: {result1}")
 
             # 确认进入 LEAK stage
-            status = api._make_request("GET", "/health/status")
+            status = ctx.api._make_request("GET", "/health/status")
             client_stage = (
                 status.get("queues", {})
-                      .get(client_id, {})
+                      .get(ctx.client_id, {})
                       .get("stage", "unknown")
             )
             print(f"  当前 stage = {client_stage!r}（预期 LEAK）")
 
             print(f"\n[Step 2] LEAK 阶段运行 {phase1}s...")
-            if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
-                asyncio.run(viewer.connect_and_display(phase1))
-            else:
-                print_viewer_url(args.server, client_id)
-                time.sleep(phase1)
+            watch_or_sleep(args, ctx.client_id, phase1)
 
             # ── 切换 current_step ───────────────────────────────────────────
             print(f"\n[Step 3] 更新 DB: current_step 1 → 2")
@@ -779,7 +710,7 @@ def run_scenario_9(args):
 
             # ── Phase 2: 二次 start，预期全量重建为 CLEAN ───────────────────
             print(f"\n[Step 4] /api/start（current_step 已变为 2，预期触发全量重建）")
-            result2 = api.unified_start(args.task_id, pull_url, args.fps)
+            result2 = ctx.api.unified_start(args.task_id, ctx.pull_url, args.fps)
             if "error" in result2:
                 raise RuntimeError(f"第二次 /api/start 失败: {result2['error']}")
             print(f"  响应: {result2}")
@@ -793,10 +724,10 @@ def run_scenario_9(args):
 
             # 确认切换到 CLEAN stage
             time.sleep(2)  # 等待 actor 启动
-            status2 = api._make_request("GET", "/health/status")
+            status2 = ctx.api._make_request("GET", "/health/status")
             client_stage2 = (
                 status2.get("queues", {})
-                       .get(client_id, {})
+                       .get(ctx.client_id, {})
                        .get("stage", "unknown")
             )
             print(f"  当前 stage = {client_stage2!r}（预期 CLEAN）")
@@ -806,17 +737,10 @@ def run_scenario_9(args):
                 print(f"  [WARN] stage = {client_stage2!r}，非预期的 CLEAN，请检查路由配置")
 
             print(f"\n[Step 5] CLEAN 阶段运行 {phase2}s...")
-            if not args.no_window:
-                viewer = InferenceViewer(client_id, show_window=True, base_port=f"{args.server}:{API_PORT}")
-                asyncio.run(viewer.connect_and_display(phase2))
-            else:
-                time.sleep(phase2)
-
+            watch_or_sleep(args, ctx.client_id, phase2)
         finally:
-            print("\n[Cleanup] 调用 /api/terminate...")
-            result = api.unified_terminate(client_id)
-            print(f"terminate 结果: {result.get('status', result)}")
-            ffmpeg.stop()
+            print("\n[Cleanup]", end=" ")
+            do_terminate(ctx.api, ctx.client_id, ctx.ffmpeg)
 
     print("\nScenario 9 完成")
     print("  预期日志路径:")
@@ -842,14 +766,27 @@ def main():
   5  仅 start:        --mode no-stream: start 但不推流
                        --mode no-terminate: start 但不 terminate
   6  延迟推流:        先 start（无流，预期失败）→ N秒后推流 → 验证自动重连 (Bug 2)
-  7  CLEAN阶段:       current_step=2 → CLEAN stage → 验证帧透传不黑屏
-  8  MOCK阶段:        无效 current_step → MOCK fallback → 验证帧透传不黑屏
+  7  CLEAN阶段:       别名 = scenario 1 + current_step=2 → CLEAN stage（验证不黑屏）
+  8  MOCK阶段:        别名 = scenario 1 + 无效 current_step → MOCK fallback（验证不黑屏）
   9  阶段切换:        start(step=1/LEAK) → DB改step=2 → start again → 全量重建 → CLEAN stage
+
+提示: --current-step 可覆盖任意场景的默认阶段，
+      例如 --scenario 2 --current-step 2 测「CLEAN 阶段 + 断流重连」。
         """,
     )
     parser.add_argument("--scenario", type=int, required=True, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9], help="测试场景编号")
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
+    parser.add_argument("--api-port", type=int, default=DEFAULT_API_PORT, dest="api_port", help=f"后端 API 端口（默认: {DEFAULT_API_PORT}）")
+    parser.add_argument("--rtsp-port", type=int, default=DEFAULT_RTSP_PORT, dest="rtsp_port", help=f"RTSPProxy 推流端口（默认: {DEFAULT_RTSP_PORT}）")
     parser.add_argument("--task_id", type=int, required=True, help="任务 ID")
+    parser.add_argument(
+        "--current-step",
+        default=None,
+        dest="current_step",
+        help="任务 current_step（决定推理 workflow：1=LEAK / 2=CLEAN / 其它=MOCK）。"
+             "默认随场景（1-6→1，7→2，8→MOCK）；显式指定可覆盖场景默认，"
+             "实现「任意阶段 × 任意生命周期」自由组合。",
+    )
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
     parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
@@ -871,6 +808,8 @@ def main():
 
     if args.video_path is None:
         args.video_path = str(Path(__file__).parent.parent / "test" / "test_video.mp4")
+
+    # 端口随 args 透传（args.api_port / args.rtsp_port），不再使用模块级全局
 
     dispatch = {
         1: run_scenario_1,
