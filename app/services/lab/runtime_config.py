@@ -28,8 +28,10 @@ _loaded = False
 _url: str = ""
 _default_project_id: int = 0
 _source: str = "env"  # "file" | "env"
+_task_source: str = "db"  # "db" | "storage" —— 任务列表数据来源
 
 _CONFIG_FILENAME = "lab_runtime_config.json"
+_VALID_TASK_SOURCES = ("db", "storage")
 
 
 def _config_path() -> Path:
@@ -41,7 +43,7 @@ def _config_path() -> Path:
 
 def _ensure_loaded() -> None:
     """首次访问时惰性加载：文件优先，否则回退 env。调用方需已持有 _LOCK。"""
-    global _loaded, _url, _default_project_id, _source
+    global _loaded, _url, _default_project_id, _source, _task_source
     if _loaded:
         return
 
@@ -53,6 +55,8 @@ def _ensure_loaded() -> None:
             data = json.loads(path.read_text(encoding="utf-8"))
             _url = str(data.get("label_studio_url", "") or "")
             _default_project_id = int(data.get("default_project_id", 0) or 0)
+            ts = str(data.get("task_source", "db") or "db")
+            _task_source = ts if ts in _VALID_TASK_SOURCES else "db"
             _source = "file"
         except (OSError, ValueError, TypeError) as e:
             logger.warning(
@@ -60,10 +64,12 @@ def _ensure_loaded() -> None:
             )
             _url = settings.label_studio_url
             _default_project_id = settings.label_studio_default_project_id
+            _task_source = "db"
             _source = "env"
     else:
         _url = settings.label_studio_url
         _default_project_id = settings.label_studio_default_project_id
+        _task_source = "db"
         _source = "env"
 
     _loaded = True
@@ -90,6 +96,13 @@ def get_token() -> str:
     return settings.label_studio_token
 
 
+def get_task_source() -> str:
+    """任务列表数据来源（"db" | "storage"），文件值优先，默认 "db"。"""
+    with _LOCK:
+        _ensure_loaded()
+        return _task_source
+
+
 def snapshot() -> dict:
     """供 GET /config 用的配置快照，不含 token 明文。"""
     with _LOCK:
@@ -97,17 +110,23 @@ def snapshot() -> dict:
         return {
             "label_studio_url": _url,
             "default_project_id": _default_project_id,
+            "task_source": _task_source,
             "token_configured": bool(get_token()),
             "source": _source,
         }
 
 
-def update(label_studio_url: str, default_project_id: int) -> dict:
-    """校验并持久化 url + default_project_id，更新内存。
+def update(
+    label_studio_url: str,
+    default_project_id: int,
+    task_source: Optional[str] = None,
+) -> dict:
+    """校验并持久化 url + default_project_id + task_source，更新内存。
 
     Args:
         label_studio_url: 为空表示「未配置」；非空必须以 http:// 或 https:// 开头
         default_project_id: >= 0；0 表示无默认值
+        task_source: "db" | "storage"；None 表示保持当前值（只改其他字段时不冲掉模式）
 
     Returns:
         更新后的 snapshot()
@@ -121,11 +140,21 @@ def update(label_studio_url: str, default_project_id: int) -> dict:
     pid = int(default_project_id)
     if pid < 0:
         raise ValueError("default_project_id 不能为负")
+    if task_source is not None and task_source not in _VALID_TASK_SOURCES:
+        raise ValueError(f"task_source 必须是 {_VALID_TASK_SOURCES} 之一")
 
-    global _loaded, _url, _default_project_id, _source
+    global _loaded, _url, _default_project_id, _source, _task_source
     with _LOCK:
+        # task_source 为 None 时保持当前值（先确保已加载，取现值）
+        _ensure_loaded()
+        new_task_source = task_source if task_source is not None else _task_source
+
         path = _config_path()
-        payload = {"label_studio_url": url, "default_project_id": pid}
+        payload = {
+            "label_studio_url": url,
+            "default_project_id": pid,
+            "task_source": new_task_source,
+        }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(
@@ -135,14 +164,17 @@ def update(label_studio_url: str, default_project_id: int) -> dict:
 
         _url = url
         _default_project_id = pid
+        _task_source = new_task_source
         _source = "file"
         _loaded = True
         logger.info(
-            "[Lab] LS 运行时配置已更新: url=%s default_project_id=%d", url, pid
+            "[Lab] LS 运行时配置已更新: url=%s default_project_id=%d task_source=%s",
+            url, pid, new_task_source,
         )
         return {
             "label_studio_url": _url,
             "default_project_id": _default_project_id,
+            "task_source": _task_source,
             "token_configured": bool(get_token()),
             "source": _source,
         }

@@ -135,8 +135,10 @@ class ClipBuilder:
             temp_root: 临时输出根目录；不传则用 {base_dir}/.lab_exports
             preset: libx264 preset
             max_duration_ms: 单段时长上限（兜底防御；上层路由也会拒绝）
-            gap_tolerance_ms: 相邻段时间戳间隔容忍上限（超过则视为段间空隙）
-            default_segment_duration_s: 段时长 fallback（用于估计 last seg 是否覆盖 end_ms）
+            gap_tolerance_ms: 相邻段间隔相对 step 实测节奏（中位数）的允许超出量；
+                超过才判为真实录制停顿（见 _validate_continuity）。不再是绝对间隔上限。
+            default_segment_duration_s: 段时长 fallback（估计 last seg 是否覆盖 end_ms；
+                以及 step 段数 <2 无法估节奏时的兜底基准）
         """
         self._finder = finder or SegmentFinder(get_default_base_dir())
         # 默认走项目自包含的钉版 ffmpeg（settings.ffmpeg_path → .ffmpeg/bin/），不回退 PATH；
@@ -254,17 +256,36 @@ class ClipBuilder:
         return overlapping
 
     def _validate_continuity(self, segs: List[SegmentRef]) -> None:
-        """相邻段 ts_us 间隔不能超过 default_seg_dur_us + gap_tolerance_ms。"""
+        """检测选中窗口内是否跨越真实录制停顿（源断流/重连导致的内容跳变）。
+
+        基准不能用「假定 10s」：切段按固定帧数（300）、EXTINF=帧数/raw_fps 是
+        假定 fps 推算的恒定 10.000s，而文件名 ts_us 是实测墙钟。真实采集达不到
+        raw_fps 时，相邻段墙钟间隔会系统性 > 10s（fps 漂移），并非内容缺口。
+
+        因此基准取「该 step 全量段相邻间隔的中位数」（实测节奏，对偶发停顿稳健），
+        只有间隔相对该节奏超出 gap_tolerance_ms 才判为真停顿。
+        """
         if len(segs) < 2:
             return
-        max_gap_us = self._default_seg_dur_us + self._gap_tolerance_ms * 1000
+        # 用整个 step 的 raw 段估稳健基准，避免选中窗口太短/含洞时基准失真
+        all_segs = self._finder.list_segments(
+            segs[0].task_id, segs[0].step_id, "raw"
+        )
+        diffs = sorted(
+            all_segs[i + 1].ts_us - all_segs[i].ts_us
+            for i in range(len(all_segs) - 1)
+        )
+        baseline_us = diffs[len(diffs) // 2] if diffs else self._default_seg_dur_us
+        tol_us = self._gap_tolerance_ms * 1000
         for i in range(len(segs) - 1):
-            gap_us = segs[i + 1].ts_us - segs[i].ts_us
-            if gap_us > max_gap_us:
+            excess_us = (segs[i + 1].ts_us - segs[i].ts_us) - baseline_us
+            if excess_us > tol_us:
                 raise ClipRangeGapError(
-                    f"Gap {gap_us / 1_000_000:.2f}s between segments "
-                    f"{segs[i].filename} and {segs[i + 1].filename} "
-                    f"exceeds tolerance ({max_gap_us / 1_000_000:.2f}s)"
+                    f"Recording gap: segments {segs[i].filename} / "
+                    f"{segs[i + 1].filename} spacing exceeds step rhythm by "
+                    f"{excess_us / 1_000_000:.2f}s "
+                    f"(baseline {baseline_us / 1_000_000:.2f}s, "
+                    f"tolerance {tol_us / 1_000_000:.2f}s)"
                 )
 
     def _run_ffmpeg(

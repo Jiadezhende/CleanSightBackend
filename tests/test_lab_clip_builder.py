@@ -21,6 +21,7 @@ import pytest
 from app.services.lab.clip_builder import (
     ClipBuildError,
     ClipBuilder,
+    ClipRangeGapError,
     ClipSpec,
 )
 from app.services.traceback.segment_finder import SegmentRef
@@ -235,3 +236,82 @@ class TestRunFfmpegFailFast:
         with pytest.raises(ClipBuildError, match="ffmpeg failed"):
             _builder(tmp_path)._run_ffmpeg(spec, segs, step_dir / "out.mp4")
         assert not captured["m3u8_path"].exists(), "ffmpeg 失败时也必须清理临时 m3u8"
+
+
+# ---------------------------------------------------------------------------
+# 连续性判据：基准取 step 实测节奏（中位数间隔），吸收 fps 漂移、只拒真停顿
+# ---------------------------------------------------------------------------
+
+
+def _ts_from_spacings(spacings_s: List[float]) -> List[int]:
+    """由相邻间隔（秒）构造一串 ts_us，起点取一个固定墙钟。"""
+    ts0 = 1_700_000_000_000_000
+    ts = [ts0]
+    for s in spacings_s:
+        ts.append(ts[-1] + int(round(s * 1_000_000)))
+    return ts
+
+
+def _continuity_builder(
+    tmp_path: Path, step_ts_us: List[int], gap_tolerance_ms: int = 2000
+) -> ClipBuilder:
+    """构造 builder，其 finder.list_segments 返回整个 step 的段（用于估节奏基准）。"""
+    finder = MagicMock()
+    finder.base_dir = tmp_path
+    finder.list_segments.return_value = _make_seg_refs(tmp_path, step_ts_us)
+    return ClipBuilder(
+        finder=finder,
+        temp_root=tmp_path / ".lab_exports",
+        gap_tolerance_ms=gap_tolerance_ms,
+    )
+
+
+class TestValidateContinuity:
+    def test_systematic_fps_drift_passes(self, tmp_path):
+        """回归：每段墙钟间隔都 >10s（真实 fps<30 的系统漂移）→ 基准≈实测 → 全通过。
+
+        旧逻辑用固定 10.5s 上限会逐段误拒。
+        """
+        step_ts = _ts_from_spacings([10.6, 10.83, 10.7, 10.9, 10.6])
+        builder = _continuity_builder(tmp_path, step_ts)
+        segs = _make_seg_refs(tmp_path, step_ts)  # 整窗送裁
+        builder._validate_continuity(segs)  # 不抛即通过
+
+    def test_occasional_slowdown_within_tolerance_passes(self, tmp_path):
+        """偶发某段变慢（10.83 vs 基准≈10.1）→ excess≈0.7s < 2s → 通过。"""
+        step_ts = _ts_from_spacings([10.0, 10.1, 10.83, 10.0])
+        builder = _continuity_builder(tmp_path, step_ts)
+        builder._validate_continuity(_make_seg_refs(tmp_path, step_ts))
+
+    def test_genuine_stall_still_rejects(self, tmp_path):
+        """真停顿：一段间隔 16s、基准≈10s → excess≈6s > 2s → 仍拒，且消息报真实超出量。"""
+        step_ts = _ts_from_spacings([10.0, 10.0, 16.0, 10.0])
+        builder = _continuity_builder(tmp_path, step_ts)
+        with pytest.raises(ClipRangeGapError, match=r"exceeds step rhythm by 6\.0\ds"):
+            builder._validate_continuity(_make_seg_refs(tmp_path, step_ts))
+
+    def test_single_selected_segment_no_raise(self, tmp_path):
+        """选中窗口仅 1 段 → 无相邻对 → 提前返回不抛。"""
+        step_ts = _ts_from_spacings([10.0, 10.0])
+        builder = _continuity_builder(tmp_path, step_ts)
+        one = _make_seg_refs(tmp_path, step_ts[:1])
+        builder._validate_continuity(one)
+
+    def test_two_segment_step_never_rejects(self, tmp_path):
+        """整个 step 只有 2 段（仅 1 个间隔样本）→ 基准=该间隔 → excess=0 → 即便间隔很大也不拒。
+
+        无法从单一样本区分漂移与停顿，按「不误拒」处理。
+        """
+        step_ts = _ts_from_spacings([30.0])  # 唯一间隔 30s
+        builder = _continuity_builder(tmp_path, step_ts)
+        builder._validate_continuity(_make_seg_refs(tmp_path, step_ts))
+
+    def test_tolerance_is_configurable(self, tmp_path):
+        """同一组段：紧容差判停顿、松容差放行。"""
+        step_ts = _ts_from_spacings([10.0, 10.0, 11.2, 10.0])  # 11.2 vs 基准 10.0 → excess 1.2s
+        segs = _make_seg_refs(tmp_path, step_ts)
+
+        with pytest.raises(ClipRangeGapError):
+            _continuity_builder(tmp_path, step_ts, gap_tolerance_ms=500)._validate_continuity(segs)
+
+        _continuity_builder(tmp_path, step_ts, gap_tolerance_ms=2000)._validate_continuity(segs)

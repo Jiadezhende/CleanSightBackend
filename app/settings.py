@@ -67,7 +67,6 @@ class Settings(BaseSettings):
     strict: bool = False
 
     # 外部接口URL（必需配置）
-    file_path_insert_url: str
     alarm_report_url: str
 
     # 服务器配置
@@ -117,6 +116,7 @@ class Settings(BaseSettings):
     lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
     lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
     lab_export_max_clips_per_submit: int = 20
+    lab_export_gap_tolerance_ms: int = 2000   # 相邻段间隔相对 step 实测节奏的允许超出量；>此值判为真录制停顿（源断流/重连）
 
     @property
     def allowed_ips_set(self) -> frozenset:
@@ -159,8 +159,6 @@ class Settings(BaseSettings):
             missing_fields.append("CLEANSIGHT_DB_PASSWORD")
 
         # 外部接口URL配置
-        if not self.file_path_insert_url:
-            missing_fields.append("CLEANSIGHT_FILE_PATH_INSERT_URL")
         if not self.alarm_report_url:
             missing_fields.append("CLEANSIGHT_ALARM_REPORT_URL")
 
