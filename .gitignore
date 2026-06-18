@@ -28,6 +28,10 @@ var/
 wheels/
 wheelhouse/
 vendor/
+# 例外：前端静态库（Vue/Element Plus/Chart.js/hls.js）随代码进版本控制，
+# 部署机靠 git archive 取码，必须跟踪；根 vendor/（ffmpeg/mediamtx 二进制）仍忽略
+!app/static/**/vendor/
+!app/static/**/vendor/**
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
