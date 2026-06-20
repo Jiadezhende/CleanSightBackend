@@ -1,13 +1,15 @@
 # 代码模板
 
-四种任务形态各一份骨架。先用 SKILL.md 的"选模板"决策表定位，再来抄对应模板。所有签名照抄基类不要改。
+四种任务形态各一份骨架，每份都含 **Detector(L1) + TemporalAnalyzer(L3) + Judge(L4)** 三件套。先用 SKILL.md 的"选模板"决策表定位，再来抄对应模板。**所有签名照抄基类不要改，三个类的 `name` 必须一致。**
 
 - [模板 A — YOLO 检测任务（最常见，实时告警）](#模板-a)
 - [模板 B — 无模型纯算法任务](#模板-b)
 - [模板 C — 结算式告警任务](#模板-c)
-- [模板 D — 长窗口 / 低频序列模型](#模板-d)
+- [模板 D — 在线轻量因果序列模型](#模板-d)
 
 字段与告警语义见 [data-models.md](data-models.md)，YAML 装配见 [yaml-config.md](yaml-config.md)。
+
+> 核心分层：**Analyzer 只产 `EventFact`（量事实），Judge 消费事实出 `(events, alarms)`（下判断）**。阈值/required 归 Judge，不进 `EventFact.meta`。
 
 ---
 
@@ -24,21 +26,22 @@ import numpy as np
 
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
+from app.services.inference.workflows.judge import Judge
 from app.services.inference.data_models import (
-    AlarmInfo, AlarmType, DetectionOutput,
+    AlarmInfo, AlarmType, DetectionOutput, EventFact,
     VisualizationData, VisItem, VisualizationType,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# ====== 推理线程：Detector（无状态，多 Client 共享） ======
+# ====== L1 推理线程：Detector（无状态，多 Client 共享） ======
 
 class XxxDetector(YOLODetector):
     def __init__(self, model_path: str, conf_threshold: float = 0.5,
                  iou_threshold: float = 0.45, enabled: bool = True):
         super().__init__(
-            name="xxx",                 # ← 必须与 XxxAnalyzer.name 一致
+            name="xxx",                 # ← 必须与 XxxAnalyzer / XxxJudge.name 一致
             model_path=model_path,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
@@ -88,25 +91,23 @@ class XxxDetector(YOLODetector):
         )
 
 
-# ====== 时序线程：TemporalAnalyzer（有状态，每 Client 独立实例） ======
+# ====== L3 时序线程：TemporalAnalyzer（有状态，只产 EventFact） ======
 
 class XxxAnalyzer(TemporalAnalyzer):
-    def __init__(self, consecutive_trigger: int = 3, name: str = "xxx"):
-        super().__init__(name=name)            # ← 与 XxxDetector.name 一致
-        self.consecutive_trigger = consecutive_trigger
+    def __init__(self, name: str = "xxx"):
+        super().__init__(name=name)            # ← 与 Detector / Judge.name 一致
         self._sm = {
             "last_ts": 0.0,        # 游标：已处理到的最新帧 timestamp
             "consecutive": 0,      # 连续命中帧计数（跨 tick 累积，命中 +1，未命中归 0）
-            "alarming": False,     # 上升沿锁存
         }
 
-    def analyze_temporal(self, window: List[DetectionOutput]) -> Tuple[List[str], List[AlarmInfo]]:
-        if not window:
-            return [], []
+    def trans(self, frames: List[DetectionOutput]) -> List[DetectionOutput]:
+        return frames                          # 简单任务直接透传；复杂任务在此做特征聚合
 
-        # ① 游标推进：只处理上次 tick 之后的新帧，避免同一帧跨 tick 重复计数（见 SKILL.md §游标）
+    def infer(self, feats: List[DetectionOutput]) -> int:
+        # 游标推进：只处理上次 tick 之后的新帧，避免同一帧跨 tick 重复计数（见 SKILL.md §游标）
         last_ts = self._sm["last_ts"]
-        new_frames = [f for f in window if f.timestamp > last_ts]
+        new_frames = [f for f in feats if f.timestamp > last_ts]
         for output in new_frames:
             if len(output.detections) > 0:
                 self._sm["consecutive"] += 1
@@ -114,15 +115,33 @@ class XxxAnalyzer(TemporalAnalyzer):
                 self._sm["consecutive"] = 0
         if new_frames:
             self._sm["last_ts"] = new_frames[-1].timestamp
+        return self._sm["consecutive"]         # 返回测得指标，不判告警
 
-        # ② 算指标
-        consecutive = self._sm["consecutive"]
+    def post_process(self, raw: int, ts: float) -> List[EventFact]:
+        return [EventFact(source=self.name, signal="consecutive", value=raw, ts=ts)]
+
+
+# ====== L4 时序线程：Judge（有状态，消费事实出告警） ======
+
+class XxxJudge(Judge):
+    def __init__(self, consecutive_trigger: int = 3, name: str = "xxx"):
+        super().__init__(name=name)            # ← 与 Detector / Analyzer.name 一致
+        self.consecutive_trigger = consecutive_trigger   # 阈值归 Judge
+        self._sm = {"alarming": False}         # 上升沿锁存
+
+    def step(self, facts: List[EventFact]) -> Tuple[List[str], List[AlarmInfo]]:
+        if not facts:
+            return [], []
+        frame = self._frame(facts)             # {signal: fact} 快照
+        f = frame.get("consecutive")
+        if f is None:
+            return [], []
+        consecutive = f.value
+
         is_triggered = consecutive >= self.consecutive_trigger
-
-        # ③ events（给前端 overlay）
         events = [f"xxx in {consecutive} consecutive frames"] if is_triggered else []
 
-        # ④ 实时告警：上升沿触发，下降沿复位
+        # 实时告警：上升沿触发，下降沿复位
         alarms: List[AlarmInfo] = []
         if is_triggered and not self._sm["alarming"]:
             self._sm["alarming"] = True
@@ -161,103 +180,119 @@ class XxxDetector(Detector):
         )
 
     # infer_batch 可不 override（基类默认逐帧）；prepare_visualization_data 同模板 A
-    # Analyzer 同模板 A
+    # Analyzer / Judge 同模板 A
 ```
 
 ---
 
 ## 模板 C
 
-**结算式告警任务**。实时阶段只产 events、**不报警**，任务结束时一次性裁决。参考 [bending.py](../../../../app/services/inference/workflows/bending.py)。
+**结算式告警任务**。实时阶段只产 events、**不报警**，任务结束时一次性裁决。参考 [bending.py](../../../../app/services/inference/workflows/bending.py)。要点：Analyzer 照常产 `EventFact`（如累计 count），**Judge 的 `step()` 只产 events 不产告警，把判定放进 `finalize()`**。
 
 ```python
+# ── L3 Analyzer：产累计计数事实 ──
 class XxxAnalyzer(TemporalAnalyzer):
+    def __init__(self, name: str = "xxx"):
+        super().__init__(name=name)
+        self._sm = {"last_ts": 0.0, "action_count": 0}
+
+    def trans(self, frames: List[DetectionOutput]) -> List[DetectionOutput]:
+        return frames
+
+    def infer(self, feats: List[DetectionOutput]) -> int:
+        # ... 推进游标、按状态机累加 self._sm["action_count"] ...
+        return self._sm["action_count"]
+
+    def post_process(self, raw: int, ts: float) -> List[EventFact]:
+        return [EventFact(source=self.name, signal="count", value=raw, ts=ts)]
+
+
+# ── L4 Judge：实时只显进度，结束才裁决 ──
+class XxxJudge(Judge):
     def __init__(self, required_actions: int = 4, name: str = "xxx"):
         super().__init__(name=name)
         self.required_actions = required_actions
-        self._sm = {"last_ts": 0.0, "action_count": 0}
+        self._sm = {"action_count": 0}      # 缓存最新计数供 finalize 用
 
-    def analyze_temporal(self, window: List[DetectionOutput]) -> Tuple[List[str], List[AlarmInfo]]:
-        if not window:
+    def step(self, facts: List[EventFact]) -> Tuple[List[str], List[AlarmInfo]]:
+        if not facts:
             return [], []
-        # ... 推进游标、累加 self._sm["action_count"] ...
-        events = [f"动作 {self._sm['action_count']}/{self.required_actions}"]
-        return events, []          # 实时阶段不上报告警
+        cnt = self._frame(facts).get("count")
+        if cnt is not None:
+            self._sm["action_count"] = cnt.value
+        n = self._sm["action_count"]
+        events = [f"动作 {n}/{self.required_actions}"] if n > 0 else []
+        return events, []                   # 实时阶段不上报告警
 
     def finalize(self) -> List[AlarmInfo]:
-        if self._sm["action_count"] < self.required_actions:
+        n = self._sm["action_count"]
+        if n < self.required_actions:
             return [AlarmInfo(
                 alarm_type=AlarmType.PROCESS_VIOLATION,
                 alarm_level="warning",
-                alarm_message=f"动作不足：{self._sm['action_count']}/{self.required_actions}",
-                metadata={"metric": self.name, "count": self._sm["action_count"]},
+                alarm_message=f"动作不足：{n}/{self.required_actions}",
+                metadata={"metric": self.name, "count": n, "required": self.required_actions},
             )]
         return []
 ```
+
+> YAML 记得加 `realtime: false`（纯结算告警，不纳入 signals_10s）。
 
 ---
 
 ## 模板 D
 
-**长窗口 / 低频序列模型**（动作分割、行为识别、时序定位）。
+**在线轻量因果序列模型**（analyzer 内嵌轻量 TCN/GRU 等）。
 
-**适用场景**：模型不是逐帧独立判断，而是需要一段较长上下文（如 **30s**）才能有效推理，且**推理频率不需要高**。
+**适用场景**：纯逻辑状态机算不出指标，需要一个**小的因果序列模型**吃一段窗口做前向。模型在 analyzer 的 `infer()` 里直接加载与调用，**不建任何额外基础设施**（详见 SKILL.md §`infer()` 两条路径·路径②）。
 
-**四条设计要点**（核心是"指标自管窗口"规则的实战，见 SKILL.md §游标）：
-
-1. **拆成 主干 + 时序头**：per-frame backbone 放 **Detector**（无状态、多 Client 共享、`MultiModelWorkerPool` 自动组批），30s 时序头放 **Analyzer**（有状态、per-client）。Detector 把每帧特征塞进 `output.metadata["embedding"]`，**只缓存紧凑特征，不缓存原始帧**（30s 原始帧 = 几十 MB/client）。
-2. **30s 窗口在 Analyzer 内部自管，绝不调全局 `_slide_window_seconds`**：Actor 固定 1Hz tick 排空 10s 全局缓冲，余量 10 倍，游标一帧不丢；Analyzer 在 `self._sm` 里自攒 30s 环形缓冲即可。调全局缓冲会拖累所有任务内存并破坏 `signals_10s` 语义。
-3. **两层节流，互相独立**：① 主干抽帧频率用全局 `inference_decimation` / 低 `inference_fps`（动作分割 1–3fps 通常够）；② 时序头**在 analyzer 内部用计时器自节流**——每 tick 只做"游标推进 + 追加特征"（廉价），每 K 秒才真正跑一次重模型（昂贵），两次之间复用上次分割结果。这样 tick 频率（1Hz）与分割频率（每 K 秒）解耦。
-4. **warm-up 守卫**：缓冲不足 30s（任务刚开始）时只产"预热中"event，不分割、不告警。
+**设计要点**：
+1. **模型直接进 analyzer**：`__init__` 里 `torch.jit.load(model_path).eval()`（实测 ~5ms，set_task 路径无感），每 client 各一份、不共享、无需锁。**不建 registry / 基类 / 不转 onnx**——2-3 客户端 / 1Hz 下全是过度设计。
+2. ⚠️ **滑窗长度 ≥ 模型感受域**：`infer()` 吃的窗口必须够长，否则模型看不到足够历史、恒输出无意义结果。不足时直接不前向。
+3. **窗口/特征自管**：与纯逻辑分析器一样用游标推进，特征缓冲在 `self._sm` 自管，按 `window_seconds` 裁剪，绝不调全局 `_slide_window_seconds`。
+4. **告警仍归 Judge**：analyzer 把模型输出解码成 `EventFact`，Judge 照常 `step()`/`finalize()`。
 
 ```python
-class ActionSegDetector(YOLODetector):          # 主干是 YOLO 系则继承 YOLODetector，否则继承 Detector
-    def infer_batch(self, frames, contexts):
-        outputs = self._run_backbone_batch(frames)
-        for o, emb in zip(outputs, embs):
-            o.metadata["embedding"] = emb       # 紧凑特征塞 metadata，不缓存原始帧
-        return outputs
+import torch
 
-
-class ActionSegAnalyzer(TemporalAnalyzer):
-    def __init__(self, window_seconds=30.0, seg_interval=5.0, name="action_seg"):
+class XxxAnalyzer(TemporalAnalyzer):
+    def __init__(self, model_path: str, receptive_field: int = 300,
+                 window_seconds: float = 10.0, name: str = "xxx"):
         super().__init__(name=name)
-        self.window_seconds = window_seconds    # ← 指标窗口，自管，与全局 slide_window 无关
-        self.seg_interval = seg_interval
-        self._sm = {
-            "last_ts": 0.0,                     # 游标
-            "feat_buf": [],                     # [(ts, embedding)] 自管 30s 环形缓冲
-            "last_seg_ts": 0.0,                 # 时序头节流计时器
-            "last_segments": [],                # 两次推理之间复用
-            "alarming": False,
-        }
+        m = torch.jit.load(model_path, map_location="cpu"); m.eval()
+        self._model = m
+        self.receptive_field = receptive_field      # 模型感受域（帧）
+        self.window_seconds = window_seconds        # 指标窗口，自管
+        self._sm = {"last_ts": 0.0, "feat_buf": []} # [(ts, feat_vec)] 自管缓冲
 
-    def analyze_temporal(self, window):
-        if not window:
-            return [], []
-
-        # ① 游标推进：只取新帧，追加特征，按 window_seconds 裁剪（廉价，每 tick 都做）
+    def trans(self, frames: List[DetectionOutput]) -> np.ndarray:
+        # 游标推进：只取新帧，追加紧凑特征，按 window_seconds 裁剪（廉价，每 tick 都做）
         last_ts = self._sm["last_ts"]
-        for f in (x for x in window if x.timestamp > last_ts):
-            self._sm["feat_buf"].append((f.timestamp, f.metadata.get("embedding")))
+        for f in (x for x in frames if x.timestamp > last_ts):
+            self._sm["feat_buf"].append((f.timestamp, self._to_feat(f)))
             self._sm["last_ts"] = f.timestamp
-        cutoff = window[-1].timestamp - self.window_seconds
-        self._sm["feat_buf"] = [(t, e) for t, e in self._sm["feat_buf"] if t >= cutoff]
+        cutoff = frames[-1].timestamp - self.window_seconds
+        self._sm["feat_buf"] = [(t, v) for t, v in self._sm["feat_buf"] if t >= cutoff]
+        return np.asarray([v for _, v in self._sm["feat_buf"]], dtype="float32")  # (T, C)
 
-        # ② warm-up 守卫：不够 window_seconds 不分割
-        buf = self._sm["feat_buf"]
-        span = buf[-1][0] - buf[0][0] if len(buf) >= 2 else 0.0
-        if span < self.window_seconds:
-            return [f"segmenting warmup {span:.0f}/{self.window_seconds:.0f}s"], []
+    def infer(self, feats: np.ndarray):
+        if len(feats) < self.receptive_field:       # ⚠️ 窗口不足感受域：不前向
+            return None
+        with torch.no_grad():
+            logits = self._model(torch.from_numpy(feats)[None])   # (1, T, K)
+        return logits[0, -1].numpy()                # 取最后一帧的 logits（因果）
 
-        # ③ 节流：每 seg_interval 秒才跑一次重模型（昂贵）
-        now = window[-1].timestamp
-        if now - self._sm["last_seg_ts"] >= self.seg_interval:
-            self._sm["last_segments"] = self._run_seg_head(buf)
-            self._sm["last_seg_ts"] = now
+    def post_process(self, raw, ts: float) -> List[EventFact]:
+        if raw is None:
+            return []
+        cls = int(raw.argmax())
+        return [EventFact(source=self.name, signal="phase", value=cls, ts=ts,
+                          conf=float(raw.max()))]
 
-        # ④ 基于分割结果产 events / 告警（实时上升沿 或 留到 finalize 结算）
-        return self._evaluate(self._sm["last_segments"])
+    def _to_feat(self, output: DetectionOutput) -> np.ndarray:
+        ...                                         # DetectionOutput → 紧凑特征向量
 ```
 
-> **两个岔路按需选**：① 模型可拆 backbone+head（推荐，省内存）vs 整体吃原始帧（Detector 退化为降采样取帧，内存重，强降分辨率）；② 告警实时（违规动作段上升沿）vs 结算（任务结束核对动作序列完整性，`realtime: false` + `finalize()`，动作分割多偏此类）。
+> 配套 Judge 按告警模式选模板 A（实时）或 C（结算）的 Judge 写法。
+>
+> **越界提示**：重模型全序列分割（MS-TCN 类，感受域 ≈2047 帧 ≫ 在线窗口、需大量未来帧）**不适用本模板**——那是离线链路职责，离线 worker 读 FeatureStore 全序列推理，不在本 skill 在线范围。
