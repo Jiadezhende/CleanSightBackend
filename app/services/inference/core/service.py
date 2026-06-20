@@ -48,6 +48,7 @@ class ModelWorkerService:
         use_cuda_stream: bool = True,
         num_worker_threads: int = 2,  # 每个 stage 一个推理线程
         client_manager_instance: Optional[ClientManager] = None,
+        feature_store: Optional[Any] = None,
     ):
         """
         Args:
@@ -71,6 +72,9 @@ class ModelWorkerService:
 
         # 保存 ClientManager 实例（用于动态客户端管理）
         self._client_manager = client_manager_instance or client_manager
+
+        # L2 特征落盘（常开；离线链路硬需求）。由 InferenceManager 注入并管理生命周期
+        self._feature_store = feature_store
 
         # 客户端队列映射（可能动态更新）
         if client_queues_map is None:
@@ -293,4 +297,7 @@ class ModelWorkerService:
                 cq.push_detection(task_name, detection_output)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
             cq.set_latest_inference(res)
+            # L2 特征落盘（常开）：实时与离线链路都消费，best-effort 不影响主链路
+            if self._feature_store is not None:
+                self._feature_store.append(cq.get_task_id(), res)
 

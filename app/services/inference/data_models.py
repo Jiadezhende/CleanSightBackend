@@ -15,6 +15,7 @@
 - AlarmInfo: Task 的告警信息
 """
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -147,6 +148,99 @@ class AlarmInfo:
     alarm_level: str                     # 告警级别: "low", "medium", "high", "critical"
     alarm_message: str                   # 告警消息
     metadata: Dict[str, Any] = field(default_factory=dict)  # 额外元数据
+
+
+# ==================== 事实契约（L3 时序分析层产出）====================
+#
+# 时序分析层只产「事实」，规则层（Judge）消费事实出告警。两类事实分开建模：
+# - EventFact（打点）：实时滑窗产出的瞬时事实 = 某信号在 ts 的当前电平
+# - SegmentFact（分段）：离线全序列产出的动作分割结果，timeline = List[SegmentFact]
+#
+# 二者均带 to_json/from_json，落 FactLedger（JSONL，带 type 判别字段）。
+# 阈值/required 不进 fact.meta —— 那些归 Judge 持有。
+
+_FACT_EVENT = "event"
+_FACT_SEGMENT = "segment"
+
+
+@dataclass
+class EventFact:
+    """打点：实时滑窗产出的瞬时事实 = 某信号在 ts 的当前电平。
+
+    signal 是信号名（多信号靠不同名字区分，不是类型枚举判别字段）；
+    同一 Analyzer 一个 tick 可产出多条 EventFact（不同 signal）。
+    """
+    source: str                          # 来源检测点，如 "bubble"/"bending"
+    signal: str                          # 信号名，如 "birth_rate"/"state"/"count"
+    value: Any                           # 该信号在 ts 的当前值
+    ts: float = field(default_factory=time.time)
+    conf: float = 1.0
+    meta: Dict[str, Any] = field(default_factory=dict)  # 仅放伴随观测量，不放阈值/required
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "type": _FACT_EVENT,
+            "source": self.source,
+            "signal": self.signal,
+            "value": self.value,
+            "ts": self.ts,
+            "conf": self.conf,
+            "meta": self.meta,
+        }
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "EventFact":
+        return cls(
+            source=d["source"],
+            signal=d["signal"],
+            value=d["value"],
+            ts=d.get("ts", 0.0),
+            conf=d.get("conf", 1.0),
+            meta=d.get("meta") or {},
+        )
+
+
+@dataclass
+class SegmentFact:
+    """分段：离线全序列产出的动作分割结果（timeline 的一个元素）。"""
+    source: str                          # 来源检测点
+    label: str                           # 动作标签，如 long_brushing
+    start: float                         # 分段起始时间
+    end: float                           # 分段结束时间
+    conf: float = 1.0
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "type": _FACT_SEGMENT,
+            "source": self.source,
+            "label": self.label,
+            "start": self.start,
+            "end": self.end,
+            "conf": self.conf,
+            "meta": self.meta,
+        }
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "SegmentFact":
+        return cls(
+            source=d["source"],
+            label=d["label"],
+            start=d["start"],
+            end=d["end"],
+            conf=d.get("conf", 1.0),
+            meta=d.get("meta") or {},
+        )
+
+
+def fact_from_json(d: Dict[str, Any]):
+    """从 ledger JSON 行还原 Fact，按 type 判别字段分派。"""
+    t = d.get("type")
+    if t == _FACT_EVENT:
+        return EventFact.from_json(d)
+    if t == _FACT_SEGMENT:
+        return SegmentFact.from_json(d)
+    raise ValueError(f"未知 fact type: {t!r}")
 
 
 # 可视化类型枚举（供参考）

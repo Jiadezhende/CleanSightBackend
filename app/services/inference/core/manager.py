@@ -78,6 +78,12 @@ class InferenceManager:
             stage_configs=None,
         )
 
+        # L2 特征落盘 + 事实账本（常开，与 HLS 同款 task-dir）。
+        # FeatureStore 注入推理服务，由推理写回处追加；FactLedger 供时序层（Phase 1）写事实。
+        from app.services.inference.store import FactLedger, FeatureStore
+        self.feature_store = FeatureStore(self._db_dir)
+        self.fact_ledger = FactLedger(self._db_dir)
+
         self._model_worker_service = self._create_async_model_worker_service()
 
         from app.services.persistence import persistence_manager as _persistence_manager
@@ -160,6 +166,7 @@ class InferenceManager:
             max_batch_per_stage=8,
             use_cuda_stream=True,
             num_worker_threads=2,
+            feature_store=self.feature_store,
         )
 
     # ========== 公共 API ==========
@@ -334,6 +341,15 @@ class InferenceManager:
             except Exception as e:
                 logger.warning(
                     "[InferenceManager] Failed to write back segments: %s - %s", client_id, e
+                )
+            # 落盘基座 flush/close（best-effort，task_id 仍可解析）
+            try:
+                task_id = cq.get_task_id()
+                self.feature_store.close(task_id)
+                self.fact_ledger.close(task_id)
+            except Exception as e:
+                logger.warning(
+                    "[InferenceManager] Failed to close feature/fact store: %s - %s", client_id, e
                 )
         else:
             logger.warning(
