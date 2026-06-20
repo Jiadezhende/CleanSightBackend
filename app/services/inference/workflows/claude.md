@@ -26,12 +26,26 @@ flowchart TD
 
 ---
 
+## 分层（L1 检测 / L3 时序分析 / L4 规则）
+
+每个检测点拆为三件套，配对依据 `name` 一致：
+
+| 层 | 基类 | 职责 | 状态机 |
+| -- | ---- | ---- | ------ |
+| L1 | `Detector` / `YOLODetector` | 单帧检测，bbox=特征。无状态，多 Client 共享 | 无 |
+| L3 | `TemporalAnalyzer` | **只产事实**：`run(window, online)` 串 `trans→infer→post_process`，产 `EventFact`（实时打点）/ `SegmentFact`（离线分段，预留） | 测量状态机 `self._sm`（tracker/计数/去抖游标） |
+| L4 | `Judge` | **消费事实出告警**：`step(facts)` 上升沿锁存、`finalize()` 结算。阈值/required 内置于 Judge | 决策状态机 `self._sm`（alarming 等） |
+
+> L4 `step` 入口先建 tick 内快照 `frame = {f.signal: f for f in facts}` 再按信号名访问（同一 Analyzer 一 tick 可产多信号，如 bending 出 `state`+`count`）。阈值/required 不进 `fact.meta`，归 Judge。
+
+事实经 `ClientTemporalActor` 追加进 `FactLedger`（`{task_id}.facts.jsonl`）；特征由推理写回处常开落盘到 `FeatureStore`（`{task_id}.features.jsonl`），离线链路经 `Analyzer.load()` 回读。
+
 ## 两种告警模式
 
 | 模式 | 触发时机 | 来源方法 | 去向 |
 | ------ | --------- | --------- | ------ |
-| 实时告警 | TemporalWorker 1Hz 轮询，条件满足时上升沿触发 | `analyze_temporal()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
-| 结算告警 | 任务 terminate 时调用一次 | `finalize()` | 同上，由 `InferenceManager._emit_settlement_alarms()` 驱动 |
+| 实时告警 | TemporalWorker 1Hz 轮询，`analyzer.run()` 产事实 → `judge.step()` 上升沿触发 | `Judge.step()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
+| 结算告警 | 任务 terminate 时调用一次 | `Judge.finalize()` | 同上，由 `ClientTemporalActor.finalize_and_stop()` 收集、`InferenceManager._persist_settlement_alarms()` 驱动 |
 
 > **UI 通知**：`events`（字符串列表）经 VisualizationWorker 渲染为视频帧 overlay，通过 WebSocket 实时推送给前端。`AlarmInfo` 只走持久化，不直接推给前端。
 

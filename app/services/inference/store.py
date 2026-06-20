@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
 from app.services.inference.data_models import (
+    Detection,
     DetectionOutput,
     EventFact,
     SegmentFact,
@@ -51,6 +52,16 @@ def _serialize_detection(det) -> Dict[str, Any]:
         "cls_id": int(det.class_id),
         "cls": det.class_name,
     }
+
+
+def _deserialize_detection(d: Dict[str, Any]) -> Detection:
+    """特征 dict → Detection（mask/keypoints 未落盘，回读为 None）。"""
+    return Detection(
+        bbox=d["bbox"],
+        confidence=d["conf"],
+        class_id=d["cls_id"],
+        class_name=d["cls"],
+    )
 
 
 class _JsonlBuffer:
@@ -137,6 +148,40 @@ class FeatureStore(_JsonlBuffer):
             logger.warning("[FeatureStore] 特征序列化失败 task=%s: %s", task_id, e)
             return
         self._enqueue(task_id, [line])
+
+    def load(self, task_id: Any, source: str) -> List[DetectionOutput]:
+        """离线回读：把某 source（检测点/模型名）的全序列特征还原为 DetectionOutput 列表。
+
+        供离线链路 TemporalAnalyzer.load() 使用。先 flush 缓冲再读，缺失文件返回空。
+        注：mask/keypoints/metadata 未落盘，回读的 DetectionOutput.metadata 为空。
+
+        Args:
+            task_id: 任务 id
+            source: 检测点名（= Detector/Analyzer.name），对应每帧 features[source]
+        """
+        self.flush(task_id)
+        path = self._path(task_id)
+        if not path.exists():
+            return []
+        outputs: List[DetectionOutput] = []
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    dets = (rec.get("features") or {}).get(source)
+                    if dets is None:
+                        continue
+                    outputs.append(DetectionOutput(
+                        detections=[_deserialize_detection(d) for d in dets],
+                        metadata={},
+                        timestamp=rec.get("ts", 0.0),
+                    ))
+        except Exception as e:
+            logger.warning("[FeatureStore] 回读失败 %s: %s", path, e)
+        return outputs
 
 
 class FactLedger(_JsonlBuffer):
