@@ -185,9 +185,7 @@ class BubbleAnalyzer(TemporalAnalyzer):
         self._advance(feats)
         return self._compute_metric()
 
-    def post_process(self, raw: float, ts: float, online: bool) -> List[EventFact]:
-        if not online:
-            raise NotImplementedError("bubble 离线分段产出待 Phase 2 实现")
+    def post_process(self, raw: float, ts: float) -> List[EventFact]:
         return [EventFact(source=self.name, signal="birth_rate", value=raw, ts=ts)]
 
     def _advance(self, window: List[DetectionOutput]) -> None:

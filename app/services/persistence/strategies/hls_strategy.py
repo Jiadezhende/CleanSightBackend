@@ -553,16 +553,16 @@ class HLSPersistenceStrategy:
             ) from e
 
         # 2. 写keypoints JSON
+        # detection 已单源落盘到 FeatureStore（features.jsonl，按帧 ts 对齐），
+        # 此处不再转储 inference_result，避免重复落盘。
         keypoints_path = target_dir / f"keypoints_{int(start_ts * 1e6)}.json"
         keypoints_list = []
         for fd in frames:
             kp = fd.keypoints if hasattr(fd, "keypoints") else None
-            ir = fd.inference_result if hasattr(fd, "inference_result") else None
             keypoints_list.append(
                 {
                     "timestamp": fd.timestamp,
                     "keypoints": self._make_serializable(kp),
-                    "inference_result": self._make_serializable(ir),
                 }
             )
 

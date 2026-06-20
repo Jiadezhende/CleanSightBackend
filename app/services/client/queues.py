@@ -272,6 +272,10 @@ class ClientQueues:
         with self._task_lock:
             return self.task.task_id if self.task else None
 
+    def get_step_id(self) -> Optional[int]:
+        """解析当前 step_id（落盘目录键，与 HLS 同源）。非法/未绑定返回 None。"""
+        return self._resolve_step_id(self.get_task())
+
     def to_status_dict(self) -> dict:
         return {
             "ca_ready": len(self.ca_ready),

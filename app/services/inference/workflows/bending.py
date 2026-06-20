@@ -155,9 +155,7 @@ class BendingAnalyzer(TemporalAnalyzer):
         self._advance(feats)
         return {"state": self._sm["state"], "count": self._sm["bend_actions"]}
 
-    def post_process(self, raw: Dict[str, Any], ts: float, online: bool) -> List[EventFact]:
-        if not online:
-            raise NotImplementedError("bending 离线分段产出待 Phase 2 实现")
+    def post_process(self, raw: Dict[str, Any], ts: float) -> List[EventFact]:
         return [
             EventFact(source=self.name, signal="state", value=raw["state"], ts=ts),
             EventFact(source=self.name, signal="count", value=raw["count"], ts=ts),

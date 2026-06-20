@@ -168,9 +168,7 @@ class MockAnalyzer(TemporalAnalyzer):
             "brightness": feats[-1].metadata.get("mean_brightness"),
         }
 
-    def post_process(self, raw: Dict[str, Any], ts: float, online: bool) -> List[EventFact]:
-        if not online:
-            raise NotImplementedError("mock 离线分段产出待 Phase 2 实现")
+    def post_process(self, raw: Dict[str, Any], ts: float) -> List[EventFact]:
         return [EventFact(
             source=self.name,
             signal="consecutive",

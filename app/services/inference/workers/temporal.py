@@ -6,7 +6,8 @@ actor 由 InferenceManager 在 set_task() 时创建，在 remove_client() 时停
 职责：
 - 持有该 client 所有 (TemporalAnalyzer, Judge) 配对（每 Analyzer/Judge 自带 self._sm）
 - 按固定间隔（tick_interval）执行：analyzer.run 产事实 → judge.step 出告警
-- 事实追加进 FactLedger；告警 → persistence + ClientQueues.alarm_log
+- 告警 → persistence + ClientQueues.alarm_log；事实仅进程内值传递，不落盘
+  （事实落盘是 offline 链路职责，由 FeatureStore 特征 + 后续离线 worker 承担）
 - 在 finalize_and_stop() 时收集 judge 结算告警
 """
 
@@ -36,14 +37,12 @@ class ClientTemporalActor:
         cq,                              # ClientQueues
         stage: str,
         pairs: List[Tuple[TemporalAnalyzer, Optional[Judge]]],
-        ledger=None,                     # FactLedger（可选）
         tick_interval: float = 1.0,
     ):
         self._client_id = client_id
         self._cq = cq
         self._stage = stage
         self._pairs = pairs
-        self._ledger = ledger
         self._tick_interval = tick_interval
 
         self._stop_event = threading.Event()
@@ -89,16 +88,14 @@ class ClientTemporalActor:
     def _tick(self) -> None:
         all_events: List[str] = []
         all_alarms: List[AlarmInfo] = []
-        all_facts: list = []
 
         for analyzer, judge in self._pairs:
             window = self._cq.get_slide_window(analyzer.name)
             if not window:
                 continue
-            facts = analyzer.run(window, online=True)  # L3：只产事实
+            facts = analyzer.run(window)                # L3：只产事实（EventFact）
             if not facts:
                 continue
-            all_facts.extend(facts)
             if judge is not None:                       # L4：消费事实出告警
                 events, alarms = judge.step(facts)
                 all_events.extend(events)
@@ -108,10 +105,6 @@ class ClientTemporalActor:
 
         if all_alarms:
             self._persist_alarms(all_alarms)
-
-        # 事实落账本（best-effort，离线链路回读）
-        if all_facts and self._ledger is not None:
-            self._ledger.append(self._cq.get_task_id(), all_facts)
 
     def _persist_alarms(self, alarms: List[AlarmInfo]) -> None:
         from app.services.persistence import persistence_manager

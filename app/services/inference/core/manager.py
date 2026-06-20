@@ -78,8 +78,9 @@ class InferenceManager:
             stage_configs=None,
         )
 
-        # L2 特征落盘 + 事实账本（常开，与 HLS 同款 task-dir）。
-        # FeatureStore 注入推理服务，由推理写回处追加；FactLedger 供时序层（Phase 1）写事实。
+        # L2 特征落盘 + 事实账本（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
+        # FeatureStore 注入推理服务，由推理写回处按帧追加。
+        # FactLedger 为 offline 链路预置：online 链路不再写，待离线 worker 接入后写 SegmentFact。
         from app.services.inference.store import FactLedger, FeatureStore
         self.feature_store = FeatureStore(self._db_dir)
         self.fact_ledger = FactLedger(self._db_dir)
@@ -279,7 +280,6 @@ class InferenceManager:
                 cq=cq,
                 stage=stage,
                 pairs=pairs,
-                ledger=self.fact_ledger,
             )
             actor.start()
             self._actors[client_id] = actor
@@ -347,11 +347,13 @@ class InferenceManager:
                 logger.warning(
                     "[InferenceManager] Failed to write back segments: %s - %s", client_id, e
                 )
-            # 落盘基座 flush/close（best-effort，task_id 仍可解析）
+            # 落盘基座 flush/close（best-effort；此时 cq 仍在，(task_id, step_id) 可解析）
             try:
                 task_id = cq.get_task_id()
-                self.feature_store.close(task_id)
-                self.fact_ledger.close(task_id)
+                step_id = cq.get_step_id()
+                if task_id is not None and step_id is not None:
+                    self.feature_store.close(task_id, step_id)
+                    self.fact_ledger.close(task_id, step_id)
             except Exception as e:
                 logger.warning(
                     "[InferenceManager] Failed to close feature/fact store: %s - %s", client_id, e

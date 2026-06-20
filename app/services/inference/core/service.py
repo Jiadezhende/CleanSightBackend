@@ -297,7 +297,11 @@ class ModelWorkerService:
                 cq.push_detection(task_name, detection_output)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
             cq.set_latest_inference(res)
-            # L2 特征落盘（常开）：实时与离线链路都消费，best-effort 不影响主链路
+            # L2 特征落盘（常开）：offline 链路硬需求，best-effort 不影响主链路。
+            # 目录键 (task_id, step_id) 与 HLS 同款；任一为 None 则跳过（拒落，同 HLS 口径）。
             if self._feature_store is not None:
-                self._feature_store.append(cq.get_task_id(), res)
+                task_id = cq.get_task_id()
+                step_id = cq.get_step_id()
+                if task_id is not None and step_id is not None:
+                    self._feature_store.append(task_id, step_id, res)
 

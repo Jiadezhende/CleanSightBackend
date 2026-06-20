@@ -33,12 +33,12 @@ flowchart TD
 | 层 | 基类 | 职责 | 状态机 |
 | -- | ---- | ---- | ------ |
 | L1 | `Detector` / `YOLODetector` | 单帧检测，bbox=特征。无状态，多 Client 共享 | 无 |
-| L3 | `TemporalAnalyzer` | **只产事实**：`run(window, online)` 串 `trans→infer→post_process`，产 `EventFact`（实时打点）/ `SegmentFact`（离线分段，预留） | 测量状态机 `self._sm`（tracker/计数/去抖游标） |
+| L3 | `TemporalAnalyzer` | **只产事实**：`run(window)` 串 `trans→infer→post_process`，产 `EventFact`（实时打点）。纯实时；离线分段（`SegmentFact`）已分离，待离线 worker 接入时另立 `OfflineAnalyzer` | 测量状态机 `self._sm`（tracker/计数/去抖游标） |
 | L4 | `Judge` | **消费事实出告警**：`step(facts)` 上升沿锁存、`finalize()` 结算。阈值/required 内置于 Judge | 决策状态机 `self._sm`（alarming 等） |
 
 > L4 `step` 入口先建 tick 内快照 `frame = {f.signal: f for f in facts}` 再按信号名访问（同一 Analyzer 一 tick 可产多信号，如 bending 出 `state`+`count`）。阈值/required 不进 `fact.meta`，归 Judge。
 
-事实经 `ClientTemporalActor` 追加进 `FactLedger`（`{task_id}.facts.jsonl`）；特征由推理写回处常开落盘到 `FeatureStore`（`{task_id}.features.jsonl`），离线链路经 `Analyzer.load()` 回读。
+特征由推理写回处常开落盘到 `FeatureStore`（`{task_id}/{step_id}/features.jsonl`，与 HLS 同款工作目录，按帧 `ts` 对齐）。实时链路**不落盘事实**（EventFact 仅进程内值传递给 Judge）；`FactLedger`（`{task_id}/{step_id}/facts.jsonl`）为 offline 预置，待离线 worker 接入后写 `SegmentFact`。
 
 ## 两种告警模式
 
