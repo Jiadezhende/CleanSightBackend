@@ -49,7 +49,8 @@ def test_frame_drop_is_silent():
         raise FrameDrop(client_id="test_client", frame_index=42, reason="decode_failed")
 
     # 执行前获取 metric 值
-    metric_key = ("test_client", "decode_failed")
+    # frame_drop_total 仅按 reason 打标签（不含 client_id），故 key 为单元素元组
+    metric_key = ("decode_failed",)
     before_count = 0
     if metric_key in frame_drop_total._metrics:
         before_count = frame_drop_total._metrics[metric_key]._value.get()
