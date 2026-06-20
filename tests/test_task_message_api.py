@@ -1,32 +1,9 @@
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-
-
-class _FakeQuery:
-    def __init__(self, row):
-        self._row = row
-
-    def filter(self, *_args, **_kwargs):
-        return self
-
-    def first(self):
-        return self._row
-
-
-class _FakeDB:
-    def __init__(self, row):
-        self._row = row
-
-    def query(self, *_args, **_kwargs):
-        return _FakeQuery(self._row)
-
-    def close(self):
-        return None
 
 
 @pytest.mark.asyncio
@@ -38,25 +15,20 @@ async def test_task_message_since_seq_validation():
 
 
 @pytest.mark.asyncio
-async def test_task_message_task_not_found(monkeypatch):
+async def test_task_message_task_not_in_memory_returns_empty(monkeypatch):
+    """
+    task_id 在内存中查不到（任务已结束 / 从未存在）时返回 200 + 空 payload，
+    而非 404。
+
+    原因：本接口供前端 1~2 Hz 轮询，若对查不到的 task_id 返回 404，前端轮询一个
+    刚结束的任务会持续打出 404，被网关反扫描机制（gateway.py，404/405 累计触发
+    自动封禁）误判为路径枚举扫描而封禁 IP。统一返回空 payload 即可避开该机制。
+    代价：调用方无法区分"任务已结束"与"task_id 非法"，这是刻意取舍。
+    """
     from app.routers import task as task_router
-
-    monkeypatch.setattr(task_router, "get_db", lambda: iter([_FakeDB(row=None)]))
-    transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/task/message/1")
-    assert resp.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_task_message_task_exists_but_not_running(monkeypatch):
-    from app.routers import task as task_router
-
-    row = SimpleNamespace(task_id=1, source_ip="client-1")
-    monkeypatch.setattr(task_router, "get_db", lambda: iter([_FakeDB(row=row)]))
 
     fake_manager = MagicMock()
-    fake_manager.has_client.return_value = False
+    fake_manager.get_client_by_task_id.return_value = None
     monkeypatch.setattr(task_router, "client_manager", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
@@ -74,11 +46,7 @@ async def test_task_message_task_exists_but_not_running(monkeypatch):
 async def test_task_message_running_returns_increment(monkeypatch):
     from app.routers import task as task_router
 
-    row = SimpleNamespace(task_id=1, source_ip="client-1")
-    monkeypatch.setattr(task_router, "get_db", lambda: iter([_FakeDB(row=row)]))
-
     cq = MagicMock()
-    cq.get_task_id.return_value = 1
     cq.get_task_alarm_message.return_value = {
         "task_id": 1,
         "max_seq": 2,
@@ -101,8 +69,7 @@ async def test_task_message_running_returns_increment(monkeypatch):
     }
 
     fake_manager = MagicMock()
-    fake_manager.has_client.return_value = True
-    fake_manager.get_client.return_value = cq
+    fake_manager.get_client_by_task_id.return_value = cq
     monkeypatch.setattr(task_router, "client_manager", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
@@ -113,4 +80,5 @@ async def test_task_message_running_returns_increment(monkeypatch):
     payload = resp.json()
     assert payload["max_seq"] == 2
     assert payload["alarms"][0]["seq"] == 2
+    fake_manager.get_client_by_task_id.assert_called_once_with(1)
     cq.get_task_alarm_message.assert_called_once_with(task_id=1, since_seq=1)
