@@ -8,7 +8,7 @@
 
 数据流：
 InferenceLoop → cq.push_detection() + cq.set_latest_inference()  [双写]
-TemporalActor (1Hz)  → cq.get_slide_window() → analyzer.analyze_temporal() → cq.set_latest_temporal()
+TemporalActor (1Hz)  → cq.get_slide_window() → analyzer.run() → judge.step() → cq.set_latest_temporal()
 VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal() → render → cq
 """
 
@@ -105,7 +105,7 @@ class InferenceManager:
         {
             "LEAK": {
                 "models": [BubbleDetector, BendingDetector],   # List[Detector]，共享
-                "analyzer_specs": [(BirthRateAnalyzer, {...}), ...],  # 按 Client 实例化
+                "workflow_specs": [(BubbleAnalyzer, {...}, BubbleJudge, {...}), ...],  # 按 Client 实例化
                 "batch_size": 4,
             }
         }
@@ -122,12 +122,12 @@ class InferenceManager:
                 skipped_stages = []
                 for stage_name in config.list_stages():
                     detectors = factory.create_detectors_for_stage(stage_name)
-                    analyzer_specs = factory.create_analyzer_specs_for_stage(stage_name)
+                    workflow_specs = factory.create_workflow_specs_for_stage(stage_name)
 
                     if detectors:
                         stage_configs[stage_name] = {
                             "models": detectors,
-                            "analyzer_specs": analyzer_specs,
+                            "workflow_specs": workflow_specs,
                             "batch_size": config.batch_size,
                         }
                     else:
@@ -263,28 +263,33 @@ class InferenceManager:
         # 3. 旧 Actor 已停，安全清空任务级缓存
         cq.clear_task_caches()
 
-        # 按 Client 独立实例化 TemporalAnalyzer
+        # 按 Client 独立实例化 (Analyzer, Judge) 配对
         stage = cq.get_stage()
         stage_cfg = self._get_stage_configs().get(stage, {})
-        specs: List[Tuple[Type, Dict]] = stage_cfg.get("analyzer_specs", [])
+        specs = stage_cfg.get("workflow_specs", [])
 
         if specs:
-            analyzers = [cls(**kwargs) for cls, kwargs in specs]
+            pairs = []
+            for a_cls, a_kwargs, j_cls, j_kwargs in specs:
+                analyzer = a_cls(**a_kwargs)
+                judge = j_cls(**j_kwargs) if j_cls else None
+                pairs.append((analyzer, judge))
             actor = ClientTemporalActor(
                 client_id=client_id,
                 cq=cq,
                 stage=stage,
-                analyzers=analyzers,
+                pairs=pairs,
+                ledger=self.fact_ledger,
             )
             actor.start()
             self._actors[client_id] = actor
             logger.info(
-                "[InferenceManager] TemporalActor created for %s (stage=%s, analyzers=%d)",
-                client_id, stage, len(analyzers),
+                "[InferenceManager] TemporalActor created for %s (stage=%s, pairs=%d)",
+                client_id, stage, len(pairs),
             )
         else:
             logger.debug(
-                "[InferenceManager] No analyzer specs for stage %s, skipping TemporalActor",
+                "[InferenceManager] No workflow specs for stage %s, skipping TemporalActor",
                 stage,
             )
 

@@ -1,14 +1,17 @@
-"""弯折检测：BendingDetector + DebounceAnalyzer
+"""弯折检测：BendingDetector + BendingAnalyzer（L3 产事实）+ BendingJudge（L4 出告警）
 
 BendingDetector（推理线程）：
     YOLO11n-det 检测内镜先端状态（straight / bent）。
     无状态，多 Client 共享同一实例。
 
-DebounceAnalyzer（时序线程）：
+BendingAnalyzer（时序线程，L3）：
     5 帧去抖状态机，统计 STRAIGHT→BENT 转换次数（bend_actions）。
-    实时阶段只产出 events（进度 overlay），不上报告警。
+    只产 EventFact("bending","state",...) + EventFact("bending","count",bend_actions)，不判定。
+    有状态（state/consec_*/bend_actions/last_ts），每个 Client 独立实例化。
+
+BendingJudge（时序线程，L4）：
+    持 required 次数。实时阶段只产 events（进度 overlay），不上报告警。
     任务 terminate 时：bend_actions < required → 产出 warning 结算告警。
-    有状态，每个 Client 独立实例化。
 """
 
 import logging
@@ -19,10 +22,12 @@ import numpy as np
 
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
+from app.services.inference.workflows.judge import Judge
 from app.services.inference.data_models import (
     AlarmInfo,
     AlarmType,
     DetectionOutput,
+    EventFact,
     VisualizationData,
     VisItem,
     VisualizationType,
@@ -118,28 +123,23 @@ class BendingDetector(YOLODetector):
         )
 
 
-# ====== 时序线程：TemporalAnalyzer ======
+# ====== 时序线程 L3：TemporalAnalyzer（只产事实）======
 
-class DebounceAnalyzer(TemporalAnalyzer):
-    """弯折去抖时序分析器。有状态，每个 Client 独立实例化。
+class BendingAnalyzer(TemporalAnalyzer):
+    """弯折去抖时序分析器（L3）。有状态，每个 Client 独立实例化。
 
-    状态机（self._sm）：
+    测量状态机（self._sm）：
         state: "STRAIGHT" | "BENT"
         consec_bent: 连续检测到 bent 的帧数
         consec_straight: 连续未检测到 bent 的帧数
         bend_actions: STRAIGHT→BENT 完成次数（累计）
         last_ts: 游标，已处理到的最新帧 timestamp
+    产出：EventFact("bending","state",state) + EventFact("bending","count",bend_actions)。
     """
 
-    def __init__(
-        self,
-        debounce_frames: int = 5,
-        required_bend_actions: int = 4,
-        name: str = "bending",
-    ):
+    def __init__(self, debounce_frames: int = 5, name: str = "bending"):
         super().__init__(name=name)
         self.debounce_frames = debounce_frames
-        self.required_bend_actions = required_bend_actions
         self._sm = {
             "state": "STRAIGHT",
             "consec_bent": 0,
@@ -148,14 +148,20 @@ class DebounceAnalyzer(TemporalAnalyzer):
             "last_ts": 0.0,
         }
 
-    def analyze_temporal(
-        self, window: List[DetectionOutput],
-    ) -> Tuple[List[str], List[AlarmInfo]]:
-        if not window:
-            return [], []
-        self._advance(window)
-        bend_actions = self._sm["bend_actions"]
-        return self._evaluate(bend_actions)
+    def trans(self, frames: List[DetectionOutput]) -> List[DetectionOutput]:
+        return frames
+
+    def infer(self, feats: List[DetectionOutput]) -> Dict[str, Any]:
+        self._advance(feats)
+        return {"state": self._sm["state"], "count": self._sm["bend_actions"]}
+
+    def post_process(self, raw: Dict[str, Any], ts: float, online: bool) -> List[EventFact]:
+        if not online:
+            raise NotImplementedError("bending 离线分段产出待 Phase 2 实现")
+        return [
+            EventFact(source=self.name, signal="state", value=raw["state"], ts=ts),
+            EventFact(source=self.name, signal="count", value=raw["count"], ts=ts),
+        ]
 
     def _advance(self, window: List[DetectionOutput]) -> None:
         """游标推进：仅处理上次 tick 之后的新帧，逐帧驱动状态机。"""
@@ -194,7 +200,29 @@ class DebounceAnalyzer(TemporalAnalyzer):
 
         self._sm["last_ts"] = new_frames[-1].timestamp
 
-    def _evaluate(self, bend_actions: int) -> Tuple[List[str], List[AlarmInfo]]:
+# ====== 时序线程 L4：Judge（消费事实出告警）======
+
+class BendingJudge(Judge):
+    """弯折合格判定（L4）。持 required 次数。
+
+    决策状态机（self._sm）：
+        bend_actions: 最近一次 tick 看到的累计弯曲次数（由 count 事实更新；结算时比较）
+    实时阶段只产 events（进度 overlay），不上报告警；terminate 时不足则 warning。
+    """
+
+    def __init__(self, required_bend_actions: int = 4, name: str = "bending"):
+        super().__init__(name=name)
+        self.required_bend_actions = required_bend_actions
+        self._sm = {"bend_actions": 0}
+
+    def step(self, facts: List[EventFact]) -> Tuple[List[str], List[AlarmInfo]]:
+        if not facts:
+            return [], []
+        frame = self._frame(facts)
+        cnt = frame.get("count")
+        if cnt is not None:
+            self._sm["bend_actions"] = cnt.value
+        bend_actions = self._sm["bend_actions"]
         events = (
             [f"弯曲动作 {bend_actions}/{self.required_bend_actions}"]
             if bend_actions > 0 else []

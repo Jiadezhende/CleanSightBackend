@@ -1,14 +1,16 @@
-"""气泡检测：BubbleDetector + BirthRateAnalyzer
+"""气泡检测：BubbleDetector + BubbleAnalyzer（L3 产事实）+ BubbleJudge（L4 出告警）
 
 BubbleDetector（推理线程）：
     YOLO11n-seg 检测气泡实例，输出 DetectionOutput。
     无状态，多 Client 共享同一实例。
 
-BirthRateAnalyzer（时序线程）：
+BubbleAnalyzer（时序线程，L3）：
     ByteTrack 跨帧追踪，统计新气泡出生率（birth_rate）。
-    birth_rate = sum(新气泡数) / 窗口帧数
-    birth_rate > threshold → 漏气报警（上升沿触发）。
-    有状态，每个 Client 独立实例化。
+    birth_rate = sum(新气泡数) / 窗口帧数。只产 EventFact("bubble","birth_rate",rate)，不判定。
+    有状态（tracker/seen_ids/last_ts/new_count_history），每个 Client 独立实例化。
+
+BubbleJudge（时序线程，L4）：
+    持 birth_rate 阈值，birth_rate > threshold → 漏气报警（上升沿触发锁存）。
 """
 
 import logging
@@ -20,10 +22,12 @@ import numpy as np
 
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
+from app.services.inference.workflows.judge import Judge
 from app.services.inference.data_models import (
     AlarmInfo,
     AlarmType,
     DetectionOutput,
+    EventFact,
     VisualizationData,
     VisItem,
     VisualizationType,
@@ -150,44 +154,41 @@ class BubbleDetector(YOLODetector):
         )
 
 
-# ====== 时序线程：TemporalAnalyzer ======
+# ====== 时序线程 L3：TemporalAnalyzer（只产事实）======
 
-class BirthRateAnalyzer(TemporalAnalyzer):
-    """气泡出生率时序分析器。有状态，每个 Client 独立实例化。
+class BubbleAnalyzer(TemporalAnalyzer):
+    """气泡出生率时序分析器（L3）。有状态，每个 Client 独立实例化。
 
-    状态机（self._sm）：
+    测量状态机（self._sm）：
         tracker: BYTETracker 实例（惰性初始化）
         seen_ids: 已确认过的 track_id 集合（永不清空）
         last_ts: 游标，已处理到的最新帧 timestamp
         new_count_history: [(timestamp, new_bubble_count), ...] 滑动窗口
-        alarming: 上升沿锁存
+    产出：EventFact("bubble", "birth_rate", rate)，裸值不带阈值（阈值归 BubbleJudge）。
     """
 
-    def __init__(
-        self,
-        birth_rate_threshold: float = 0.5,
-        window_seconds: float = 3.0,
-        name: str = "bubble",
-    ):
+    def __init__(self, window_seconds: float = 3.0, name: str = "bubble"):
         super().__init__(name=name)
-        self.birth_rate_threshold = birth_rate_threshold
         self.window_seconds = window_seconds
         self._sm = {
             "tracker": None,
             "seen_ids": set(),
             "last_ts": 0.0,
             "new_count_history": [],
-            "alarming": False,
         }
 
-    def analyze_temporal(
-        self, window: List[DetectionOutput],
-    ) -> Tuple[List[str], List[AlarmInfo]]:
-        if not window:
-            return [], []
-        self._advance(window)
-        birth_rate = self._compute_metric()
-        return self._evaluate_alarm(birth_rate)
+    def trans(self, frames: List[DetectionOutput]) -> List[DetectionOutput]:
+        # 上游聚合特征即逐帧 bbox，时序模型直接消费，无需变换。
+        return frames
+
+    def infer(self, feats: List[DetectionOutput]) -> float:
+        self._advance(feats)
+        return self._compute_metric()
+
+    def post_process(self, raw: float, ts: float, online: bool) -> List[EventFact]:
+        if not online:
+            raise NotImplementedError("bubble 离线分段产出待 Phase 2 实现")
+        return [EventFact(source=self.name, signal="birth_rate", value=raw, ts=ts)]
 
     def _advance(self, window: List[DetectionOutput]) -> None:
         """游标推进：仅处理上次 tick 之后的新帧，驱动 ByteTrack 并记录 new_count。"""
@@ -226,9 +227,26 @@ class BirthRateAnalyzer(TemporalAnalyzer):
             return 0.0
         return sum(n for _, n in history) / len(history)
 
-    def _evaluate_alarm(
-        self, birth_rate: float
-    ) -> Tuple[List[str], List[AlarmInfo]]:
+
+# ====== 时序线程 L4：Judge（消费事实出告警）======
+
+class BubbleJudge(Judge):
+    """气泡漏气判定（L4）。持 birth_rate 阈值，上升沿触发锁存。"""
+
+    def __init__(self, birth_rate_threshold: float = 0.5, name: str = "bubble"):
+        super().__init__(name=name)
+        self.birth_rate_threshold = birth_rate_threshold
+        self._sm = {"alarming": False}
+
+    def step(self, facts: List[EventFact]) -> Tuple[List[str], List[AlarmInfo]]:
+        if not facts:
+            return [], []
+        frame = self._frame(facts)
+        f = frame.get("birth_rate")
+        if f is None:
+            return [], []
+        birth_rate = f.value
+
         is_triggered = birth_rate > self.birth_rate_threshold
         events = (
             [f"bubble_birth_rate={birth_rate:.2f} (>{self.birth_rate_threshold})"]

@@ -19,20 +19,23 @@ stages:
     models:
       - name: bubble
         class: app.services.inference.workflows.bubble.BubbleDetector
-        analyzer_class: app.services.inference.workflows.bubble.BirthRateAnalyzer
+        analyzer_class: app.services.inference.workflows.bubble.BubbleAnalyzer
+        judge_class: app.services.inference.workflows.bubble.BubbleJudge
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
         analyzer_params:
-          birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
           window_seconds: 3.0          # 滑动窗口时长（秒）
+        judge_params:
+          birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
 
       - name: bending
         realtime: false              # 结算告警，不纳入 signals_10s 滑动窗口
         class: app.services.inference.workflows.bending.BendingDetector
-        analyzer_class: app.services.inference.workflows.bending.DebounceAnalyzer
+        analyzer_class: app.services.inference.workflows.bending.BendingAnalyzer
+        judge_class: app.services.inference.workflows.bending.BendingJudge
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.1
@@ -40,6 +43,7 @@ stages:
           enabled: true
         analyzer_params:
           debounce_frames: 5           # 状态切换去抖帧数
+        judge_params:
           required_bend_actions: 4     # 合格所需最少弯曲次数
 
     # 以下配置在新架构中已不需要（保留用于向后兼容）
@@ -59,7 +63,8 @@ stages:
           brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
         analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
-        analyzer_params:
+        judge_class: app.services.inference.workflows.mock.MockJudge
+        judge_params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback，纯透传） ====================
@@ -71,7 +76,8 @@ stages:
           brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
         analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
-        analyzer_params:
+        judge_class: app.services.inference.workflows.mock.MockJudge
+        judge_params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
 
 # ==================== 全局配置（所有模块共享） ====================

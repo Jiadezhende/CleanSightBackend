@@ -34,45 +34,57 @@ class StageFactory:
 
         return detectors
 
-    def create_analyzer_specs_for_stage(
+    def create_workflow_specs_for_stage(
         self, stage_name: str
-    ) -> List[Tuple[Type, Dict[str, Any]]]:
-        """为指定 Stage 返回 TemporalAnalyzer 的 (class, kwargs) 实例化规格。
+    ) -> List[Tuple[Type, Dict[str, Any], Any, Dict[str, Any]]]:
+        """为指定 Stage 返回 (Analyzer, Judge) 配对的实例化规格。
 
-        调用方（set_task）用这些 spec 按 Client 创建独立实例：
-            analyzers = [cls(**kwargs) for cls, kwargs in specs]
+        调用方（set_task）用这些 spec 按 Client 创建独立实例对：
+            for a_cls, a_kw, j_cls, j_kw in specs:
+                analyzer = a_cls(**a_kw)
+                judge = j_cls(**j_kw) if j_cls else None
 
         Returns:
-            List of (AnalyzerClass, constructor_kwargs) tuples.
-            如果某个 model 条目没有 analyzer_class 字段，则跳过。
+            List of (AnalyzerClass, analyzer_kwargs, JudgeClass|None, judge_kwargs) tuples.
+            没有 analyzer_class 的 model 条目跳过；没有 judge_class 的 judge 部分置 None。
+            YAML model name 注入为 analyzer/judge 的 runtime name（slide_window key 与配对依据）。
         """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config:
             logger.warning("Stage '%s' 配置不存在", stage_name)
             return []
 
-        specs: List[Tuple[Type, Dict[str, Any]]] = []
+        specs: List[Tuple[Type, Dict[str, Any], Any, Dict[str, Any]]] = []
         for model_cfg in stage_config.models:
             analyzer_class_path = model_cfg.get("analyzer_class")
             if not analyzer_class_path:
                 logger.debug(
-                    "model '%s' 无 analyzer_class，跳过 TemporalAnalyzer 创建",
+                    "model '%s' 无 analyzer_class，跳过 (Analyzer, Judge) 创建",
                     model_cfg.get("name", "?"),
                 )
                 continue
 
+            name = model_cfg.get("name", "")
             try:
-                cls = _import_class(analyzer_class_path)
-                kwargs = dict(model_cfg.get("analyzer_params") or {})
-                # 将 YAML model name 注入为 analyzer runtime name（slide_window key 的唯一来源）
-                kwargs.setdefault("name", model_cfg.get("name", ""))
-                specs.append((cls, kwargs))
-                logger.info(
-                    "✓ 注册 TemporalAnalyzer spec: %s", model_cfg.get("name", "?")
-                )
+                a_cls = _import_class(analyzer_class_path)
+                a_kwargs = dict(model_cfg.get("analyzer_params") or {})
+                a_kwargs.setdefault("name", name)
+
+                j_cls = None
+                j_kwargs: Dict[str, Any] = {}
+                judge_class_path = model_cfg.get("judge_class")
+                if judge_class_path:
+                    j_cls = _import_class(judge_class_path)
+                    j_kwargs = dict(model_cfg.get("judge_params") or {})
+                    j_kwargs.setdefault("name", name)
+                else:
+                    logger.debug("model '%s' 无 judge_class，仅产事实不出告警", name)
+
+                specs.append((a_cls, a_kwargs, j_cls, j_kwargs))
+                logger.info("✓ 注册 (Analyzer, Judge) spec: %s", name)
             except Exception as e:
                 logger.error(
-                    "✗ 注册 TemporalAnalyzer 失败 %s: %s", model_cfg.get("name", "?"), e, exc_info=True
+                    "✗ 注册 (Analyzer, Judge) 失败 %s: %s", name, e, exc_info=True
                 )
 
         return specs

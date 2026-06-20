@@ -1,4 +1,4 @@
-"""Mock 检测：MockDetector + MockAnalyzer
+"""Mock 检测：MockDetector + MockAnalyzer（L3 产事实）+ MockJudge（L4 出告警）
 
 用于无真实模型权重的 CPU 服务器验证推理链路。
 
@@ -6,9 +6,12 @@ MockDetector（推理线程）：
     纯 numpy 亮度启发式检测，无 YOLO 依赖。
     无状态，多 Client 共享。
 
-MockAnalyzer（时序线程）：
-    连续 N 帧检测到目标 → 边沿触发告警。
+MockAnalyzer（时序线程，L3）：
+    统计连续命中帧数（consecutive），只产 EventFact("mock","consecutive",n)，不判定。
     有状态，每个 Client 独立实例化。
+
+MockJudge（时序线程，L4）：
+    持 consecutive_trigger，连续 N 帧命中 → 边沿触发告警（上升沿锁存）。
 """
 
 from __future__ import annotations
@@ -21,11 +24,13 @@ import numpy as np
 
 from app.services.inference.workflows.detector import Detector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
+from app.services.inference.workflows.judge import Judge
 from app.services.inference.data_models import (
     AlarmInfo,
     AlarmType,
     Detection,
     DetectionOutput,
+    EventFact,
     VisualizationData,
     VisItem,
     VisualizationType,
@@ -120,41 +125,35 @@ class MockDetector(Detector):
         )
 
 
-# ====== 时序线程：TemporalAnalyzer ======
+# ====== 时序线程 L3：TemporalAnalyzer（只产事实）======
 
 class MockAnalyzer(TemporalAnalyzer):
-    """Mock 时序分析器。有状态，每个 Client 独立实例化。
+    """Mock 时序分析器（L3）。有状态，每个 Client 独立实例化。
 
-    状态机（self._sm）：
+    测量状态机（self._sm）：
         last_ts: 游标，已处理到的最新帧 timestamp（跨 tick 跳过重复帧）
         consecutive: 连续命中帧计数（跨 tick 累积，命中 +1，未命中归 0）
-        alarming: 上升沿锁存
         total: 累计检测到的目标数
-        alarm_count: 累计告警次数
+    产出：EventFact("mock","consecutive",n, meta={"brightness":...})。
     """
 
-    def __init__(self, consecutive_trigger: int = 3, name: str = "mock"):
+    def __init__(self, name: str = "mock"):
         super().__init__(name=name)
-        self.consecutive_trigger = consecutive_trigger
         self._sm = {
             "last_ts": 0.0,
             "consecutive": 0,
-            "alarming": False,
             "total": 0,
-            "alarm_count": 0,
         }
 
-    def analyze_temporal(
-        self, window: List[DetectionOutput],
-    ) -> Tuple[List[str], List[AlarmInfo]]:
-        if not window:
-            return [], []
+    def trans(self, frames: List[DetectionOutput]) -> List[DetectionOutput]:
+        return frames
 
+    def infer(self, feats: List[DetectionOutput]) -> Dict[str, Any]:
         # 游标推进：仅处理上次 tick 之后的新帧。
         # slide_window 是非破坏性快照，连续 tick 大量重叠；
         # 若每 tick 重扫整窗会把同一帧重复计数，故用 last_ts 跳过已处理帧。
         last_ts = self._sm["last_ts"]
-        new_frames = [f for f in window if f.timestamp > last_ts]
+        new_frames = [f for f in feats if f.timestamp > last_ts]
         for output in new_frames:
             if len(output.detections) > 0:
                 self._sm["consecutive"] += 1
@@ -164,8 +163,46 @@ class MockAnalyzer(TemporalAnalyzer):
         if new_frames:
             self._sm["last_ts"] = new_frames[-1].timestamp
 
-        consecutive = self._sm["consecutive"]
-        latest = window[-1]
+        return {
+            "consecutive": self._sm["consecutive"],
+            "brightness": feats[-1].metadata.get("mean_brightness"),
+        }
+
+    def post_process(self, raw: Dict[str, Any], ts: float, online: bool) -> List[EventFact]:
+        if not online:
+            raise NotImplementedError("mock 离线分段产出待 Phase 2 实现")
+        return [EventFact(
+            source=self.name,
+            signal="consecutive",
+            value=raw["consecutive"],
+            ts=ts,
+            meta={"brightness": raw["brightness"]},
+        )]
+
+
+# ====== 时序线程 L4：Judge（消费事实出告警）======
+
+class MockJudge(Judge):
+    """Mock 判定（L4）。持 consecutive_trigger，连续命中达阈值上升沿触发。
+
+    决策状态机（self._sm）：
+        alarming: 上升沿锁存
+        alarm_count: 累计告警次数
+    """
+
+    def __init__(self, consecutive_trigger: int = 3, name: str = "mock"):
+        super().__init__(name=name)
+        self.consecutive_trigger = consecutive_trigger
+        self._sm = {"alarming": False, "alarm_count": 0}
+
+    def step(self, facts: List[EventFact]) -> Tuple[List[str], List[AlarmInfo]]:
+        if not facts:
+            return [], []
+        frame = self._frame(facts)
+        f = frame.get("consecutive")
+        if f is None:
+            return [], []
+        consecutive = f.value
 
         is_triggered = consecutive >= self.consecutive_trigger
         events = (
@@ -183,7 +220,7 @@ class MockAnalyzer(TemporalAnalyzer):
                 alarm_message=f"Mock detection triggered ({consecutive} consecutive frames)",
                 metadata={
                     "consecutive_frames": consecutive,
-                    "brightness": latest.metadata.get("mean_brightness"),
+                    "brightness": f.meta.get("brightness"),
                 },
             ))
         elif not is_triggered and self._sm["alarming"]:
