@@ -276,6 +276,14 @@ class ClientQueues:
         """解析当前 step_id（落盘目录键，与 HLS 同源）。非法/未绑定返回 None。"""
         return self._resolve_step_id(self.get_task())
 
+    def step_id_of(self, task: Optional[CleaningTask]) -> Optional[int]:
+        """从已快照的 task 解析 step_id（与 get_step_id 同口径）。
+
+        供调用方先 get_task() 取一次、再派生 task_id/step_id，避免两次独立读
+        之间发生 set_task 导致 (task_id, step_id) 键错配。
+        """
+        return self._resolve_step_id(task)
+
     def to_status_dict(self) -> dict:
         return {
             "ca_ready": len(self.ca_ready),

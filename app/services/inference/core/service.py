@@ -281,15 +281,16 @@ class ModelWorkerService:
         - latest_inference（原子快照）：供 VisualizationWorker 直接读取，保证同帧一致性
 
         异常处理：
-        - 客户端已移除 → 抛出 FrameDrop
+        - 单条结果对应的客户端已移除 → 跳过该条（per-result），不中断整批。
+          一个 batch 跨多客户端填充，某客户端断连不得殃及同批其他在线客户端的写回。
         """
         for res in results:
             if not self._client_manager.has_client(res.client_id):
-                raise FrameDrop(
-                    client_id=res.client_id,
-                    frame_index=getattr(res, "frame_index", None),
-                    reason="client_removed",
+                # 该客户端已移除：仅跳过此条，继续处理同批其他客户端
+                logger.debug(
+                    "[Worker] Skip write-back for removed client=%s", res.client_id
                 )
+                continue
 
             cq = self._client_manager.get_client(res.client_id)
             # Path 1: per-task slide_window（temporal 需要历史窗口）
@@ -299,9 +300,11 @@ class ModelWorkerService:
             cq.set_latest_inference(res)
             # L2 特征落盘（常开）：offline 链路硬需求，best-effort 不影响主链路。
             # 目录键 (task_id, step_id) 与 HLS 同款；任一为 None 则跳过（拒落，同 HLS 口径）。
+            # task 取一次再派生 task_id/step_id，避免两次独立读之间 set_task 造成键错配。
             if self._feature_store is not None:
-                task_id = cq.get_task_id()
-                step_id = cq.get_step_id()
+                task = cq.get_task()
+                task_id = task.task_id if task else None
+                step_id = cq.step_id_of(task)
                 if task_id is not None and step_id is not None:
                     self._feature_store.append(task_id, step_id, res)
 

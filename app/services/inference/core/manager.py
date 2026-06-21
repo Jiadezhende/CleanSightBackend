@@ -567,6 +567,15 @@ class InferenceManager:
                     client_id, e,
                 )
 
+        # 落盘基座全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，
+        # 残余缓冲（每 (task,step) 最多 batch_size-1 行）需在此 best-effort 落盘，
+        # 否则 offline 链路读到的特征尾部会被静默截断。
+        try:
+            self.feature_store.flush()
+            self.fact_ledger.flush()
+        except Exception as e:
+            logger.warning("[InferenceManager] flush feature/fact store on stop failed: %s", e)
+
         self.visualization_pool.stop()
         self.persistence_manager.stop(timeout=10.0)
 

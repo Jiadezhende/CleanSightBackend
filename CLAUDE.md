@@ -69,7 +69,7 @@ integration_tests/     # 端到端集成测试
 ### `app/services/client/` — 客户端状态管理
 - `ClientManager`：全局单例，管理所有在线客户端
 - `ClientState`：每客户端状态（task_id、时序历史、告警列表）
-- `ClientQueues`：4 条异步队列（`ca_ready` / `ca_raw` / `ca_processed` / `rt_processed`）
+- `ClientQueues`：3 条帧缓冲（`ca_ready` 无锁 SPSC deque 推理 / `ca_raw` 录制 / `ca_processed` HLS）+ `_latest_rendered` 渲染快照（实时推送，前端轮询，非队列）
 
 ### `app/utils/` — 基础设施
 
@@ -89,11 +89,17 @@ integration_tests/     # 端到端集成测试
 ```
 RTSP (30fps)
   ↓ [FFmpegDecoder]
-ca_ready (推理)  ca_raw (完整录制)
-  ↓ [AI推理 → 时序分析 → 可视化]
-ca_processed → [HLS分段 + 告警上报]
-rt_processed → [WebSocket 实时推送]
+ca_ready (推理，无锁 SPSC deque)   ca_raw (完整录制)
+  ↓ [L1 检测 → L2 特征聚合/落盘 → L3 时序产事实 → L4 规则出告警 → 可视化]
+ca_processed → [HLS 分段 + 告警上报]
+_latest_rendered 快照 → [WebSocket 实时推送（前端 ~10ms 轮询，非后端 push）]
 ```
+
+> 层间通信机制各异（队列 / 共享缓冲 / 直接调用 / 落盘文件），online/offline 已彻底分离，
+> 完整链路核实见 [docs/update/20260620_LAYERED_INFER_DATAFLOW.md](docs/update/20260620_LAYERED_INFER_DATAFLOW.md)。
+>
+> 注：旧文档曾列 `rt_processed` 队列承载实时推送 —— **全仓不存在**；实时推送实为
+> `_latest_rendered` 快照 + 前端轮询。`ca_ready` 为无锁 SPSC deque（decoder 单产/dispatcher 单消），非异步队列。
 
 ---
 
