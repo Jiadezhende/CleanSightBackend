@@ -54,18 +54,33 @@ stages:
     #   class: app.services.inference.components.DefaultVisualizer
     # alarm_triggers: ...
 
-  # ==================== CLEAN 阶段（清洁检测，暂无模型，纯透传） ====================
+  # ==================== CLEAN 阶段（清洁检测：按尺寸分两组，仅检测画框） ====================
+  # 时序/告警复用 mock 透传（consecutive_trigger 设大值即永不告警），只叠检测框。
   CLEAN:
     models:
-      - name: mock_detection
-        class: app.services.inference.workflows.mock.MockDetector
-        params:
-          brightness_threshold: 0.0   # 永不触发检测，纯透传
-          enabled: true
+      - name: clean_large       # 大目标组：手 / scope_control_body / scope_mid_section
+        class: app.services.inference.workflows.clean.CleanLargeDetector
         analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
         judge_class: app.services.inference.workflows.mock.MockJudge
+        params:
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-large-best.pt
+          conf_threshold: 0.25
+          iou_threshold: 0.45
+          enabled: true
         judge_params:
-          consecutive_trigger: 999    # 实际上永不满足，禁止告警
+          consecutive_trigger: 999    # 永不满足，仅检测画框不告警
+
+      - name: clean_small       # 小目标组：syringe / air_gun / scope_distal_end
+        class: app.services.inference.workflows.clean.CleanSmallDetector
+        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
+        judge_class: app.services.inference.workflows.mock.MockJudge
+        params:
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-small-best.pt
+          conf_threshold: 0.25
+          iou_threshold: 0.45
+          enabled: true
+        judge_params:
+          consecutive_trigger: 999    # 永不满足，仅检测画框不告警
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback，纯透传） ====================
   MOCK:
