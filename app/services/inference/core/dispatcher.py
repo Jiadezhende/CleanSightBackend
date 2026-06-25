@@ -188,6 +188,14 @@ class StageAwareDispatcher:
 
         return batch
 
+    def queue_depth(self, stage: str) -> int:
+        """获取指定 stage 的当前队列深度（线程安全）。
+
+        供推理循环计算自适应超时使用，避免外部直接访问内部锁与队列。
+        """
+        with self._lock:
+            return len(self._stage_queues.get(stage, ()))
+
     def get_stage_queue_depths(self) -> Dict[str, int]:
         """获取各 stage 队列深度（调试用）"""
         with self._lock:

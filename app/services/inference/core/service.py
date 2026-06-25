@@ -189,8 +189,7 @@ class ModelWorkerService:
         while not self._stop_event.is_set():
             try:
                 # 获取队列深度（用于自适应超时）
-                with self.dispatcher._lock:
-                    queue_depth = len(self.dispatcher._stage_queues.get(stage, []))
+                queue_depth = self.dispatcher.queue_depth(stage)
 
                 # 自适应超时：针对小并发优化（<10客户端），避免过度等待增加延迟
                 if queue_depth >= batch_size * 2:
