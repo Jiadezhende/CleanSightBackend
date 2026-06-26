@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
@@ -46,7 +45,6 @@ class ModelWorkerService:
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
         use_cuda_stream: bool = True,
-        num_worker_threads: int = 2,  # 每个 stage 一个推理线程
         client_manager_instance: Optional[ClientManager] = None,
         feature_store: Optional[Any] = None,
     ):
@@ -66,7 +64,6 @@ class ModelWorkerService:
                 }
             max_batch_per_stage: 每个 stage 最大 batch 大小
             use_cuda_stream: 是否使用 CUDA Stream 并行
-            num_worker_threads: 推理线程数
             client_manager_instance: ClientManager 实例（可选，用于动态获取客户端）
         """
 
@@ -109,10 +106,6 @@ class ModelWorkerService:
                     use_cuda_stream=use_cuda_stream,
                 )
 
-        # 推理线程池
-        self.executor = ThreadPoolExecutor(
-            max_workers=num_worker_threads, thread_name_prefix="InferWorker"
-        )
         self._stop_event = threading.Event()
         self._worker_threads: List[threading.Thread] = []
 
@@ -172,10 +165,16 @@ class ModelWorkerService:
         """停止服务"""
         self._stop_event.set()
         self.dispatcher.stop()
-        self.executor.shutdown(wait=True)
 
         for thread in self._worker_threads:
             thread.join(timeout=2.0)
+            # infer_batch(CUDA 同步)是唯一不可中断窗口：wedge 时 join 超时、线程被 daemon 强杀。
+            # 无法根治，仅在此留诊断痕迹（关键 flush 已在 InferenceManager.stop 控制线程完成，硬杀不丢数据）。
+            if thread.is_alive():
+                logger.warning(
+                    "[ModelWorkerService] %s 未在 2s 内退出（疑似卡在 infer_batch/CUDA），将被 daemon 强杀",
+                    thread.name,
+                )
 
         logger.info("ModelWorkerService stopped")
 

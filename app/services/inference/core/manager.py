@@ -15,7 +15,6 @@ VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() +
 import base64
 import logging
 import threading
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -67,8 +66,11 @@ class InferenceManager:
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
         self._model_worker_service: Optional[ModelWorkerService] = None
 
-        # per-client 生命周期事务锁（set_task / remove_client 互斥）
-        self._client_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+        # 客户端生命周期事务锁（set_task / remove_client 互斥）。
+        # 这是控制面锁，只串行稀疏的启/切/停转换（每会话几次、毫秒级），不在帧推理热路径上；
+        # 故用单把 manager 级锁，而非 per-client 锁——后者会引入锁字典的内存泄漏与回收 race，
+        # 且为几乎不存在的"跨 client 同刻启停"并行度买单。详见 docs/update/20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md。
+        self._client_lifecycle_lock = threading.Lock()
 
         # per-client ClientTemporalActor 注册表
         self._actors: Dict[str, ClientTemporalActor] = {}
@@ -94,8 +96,6 @@ class InferenceManager:
 
         self._encoded_cache: Dict[str, Dict[str, Any]] = {}
         self._encoded_cache_lock = threading.Lock()
-
-        self._refresh_thread: Optional[threading.Thread] = None
 
         logger.debug("[InferenceManager] Initialization completed")
 
@@ -166,7 +166,6 @@ class InferenceManager:
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
             use_cuda_stream=True,
-            num_worker_threads=2,
             feature_store=self.feature_store,
         )
 
@@ -224,13 +223,13 @@ class InferenceManager:
 
         调用顺序：先停旧 Actor（settlement 在旧 task 上下文写入），再切换字段，再清缓存。
         这样可保证 settlement 告警正确归属旧任务，不会落入已清空的新任务 alarm_log。
-        整个流程在 _client_locks[client_id] 下执行，与 remove_client 互斥。
+        整个流程在 _client_lifecycle_lock 下执行，与 remove_client 互斥。
         """
-        with self._client_locks[client_id]:
+        with self._client_lifecycle_lock:
             return self._set_task_locked(client_id, task)
 
     def _set_task_locked(self, client_id: str, task: Optional[CleaningTask]) -> bool:
-        """set_task 的加锁实现，调用方须已持有 _client_locks[client_id]。"""
+        """set_task 的加锁实现，调用方须已持有 _client_lifecycle_lock。"""
         cq = client_manager.get_client(client_id)
         if cq is None:
             return False
@@ -306,13 +305,13 @@ class InferenceManager:
         2. 落盘残余 HLS 段
         3. 清理编码缓存
 
-        整个流程在 _client_locks[client_id] 下执行，与 set_task 互斥。
+        整个流程在 _client_lifecycle_lock 下执行，与 set_task 互斥。
         """
-        with self._client_locks[client_id]:
+        with self._client_lifecycle_lock:
             self._remove_client_locked(client_id)
 
     def _remove_client_locked(self, client_id: str) -> None:
-        """remove_client 的加锁实现，调用方须已持有 _client_locks[client_id]。"""
+        """remove_client 的加锁实现，调用方须已持有 _client_lifecycle_lock。"""
         logger.info("[InferenceManager] Removing inference resources: %s", client_id)
 
         cq = (
@@ -578,11 +577,5 @@ class InferenceManager:
 
         self.visualization_pool.stop()
         self.persistence_manager.stop(timeout=10.0)
-
-        if self._refresh_thread is not None:
-            try:
-                self._refresh_thread.join(timeout=2.0)
-            except Exception:
-                pass
 
         logger.info("[InferenceManager] Stopped")
