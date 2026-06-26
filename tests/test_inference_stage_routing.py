@@ -1,5 +1,4 @@
 import threading
-from collections import defaultdict
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -12,7 +11,7 @@ from app.services.inference.core.manager import InferenceManager
 def manager():
     m = InferenceManager.__new__(InferenceManager)
     m._actors = {}
-    m._client_locks = defaultdict(threading.Lock)
+    m._client_lifecycle_lock = threading.Lock()
     return m
 
 
