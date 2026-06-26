@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # 模型路径
     model_path: str = "./app/data"
 
+    # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
+    # persistence / inference / traceback 三方都读 settings.storage_base_dir，
+    # 不再各自重算或互相 push（消除跨服务穿透）。
+    storage_dir: str = "./database"
+
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
     mediamtx_internal_port: int = 18004  # MediaMTX 实际监听端口
@@ -111,7 +116,7 @@ class Settings(BaseSettings):
     label_studio_url: str = ""                # LS 服务器 base URL，如 http://10.176.122.22:8080
     label_studio_token: str = ""              # LS Legacy Token（Authorization: Token <...>）
     label_studio_default_project_id: int = 0  # 默认 project_id；0 表示未配置（请求需显式传 project_id）
-    lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage.base_dir}/.lab_exports
+    lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage_base_dir}/.lab_exports
     lab_export_ffmpeg_preset: str = "veryfast"
     lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
     lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
@@ -133,6 +138,18 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+
+    @property
+    def storage_base_dir(self) -> Path:
+        """持久化存储根目录（绝对路径，单一真源）。
+
+        相对路径以项目根为基，避免读写两侧因进程 cwd 不同而分叉到不同目录。
+        persistence / inference / traceback 三方都读此值。
+        """
+        p = Path(self.storage_dir)
+        if p.is_absolute():
+            return p.resolve()
+        return (Path(__file__).parent.parent / p).resolve()
 
     @model_validator(mode="after")
     def check_required_fields(self):

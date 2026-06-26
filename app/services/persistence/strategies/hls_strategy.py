@@ -37,12 +37,10 @@ class HLSPersistenceStrategy:
         db_dir: Path,
         raw_fps: float = 30.0,
         processed_fps: float = 20.0,
-        enable_db_write: bool = False,
     ):
         self.db_dir = db_dir
         self.raw_fps = raw_fps
         self.processed_fps = processed_fps
-        self.enable_db_write = enable_db_write
         # 按 target_dir 路径索引的细粒度锁，序列化同一任务目录下的 playlist/metadata 写操作
         self._dir_locks: Dict[str, threading.Lock] = {}
         self._dir_locks_guard = threading.Lock()

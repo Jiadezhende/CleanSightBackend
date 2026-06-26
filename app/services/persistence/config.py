@@ -34,10 +34,12 @@ class AlarmConfig:
 
 @dataclass
 class StorageConfig:
-    """存储配置"""
+    """存储配置
 
-    base_dir: str = "./database"
-    enable_db_write: bool = False
+    注意：base_dir 已上移到 settings.storage_base_dir（单一真源），不在此定义；
+    此处仅保留持久化自有职责的参数（清理策略）。
+    """
+
     enable_cleanup: bool = False
     cleanup_days: int = 7
     cleanup_interval_seconds: int = 3600
@@ -100,23 +102,27 @@ class PersistenceConfig:
         Returns:
             PersistenceConfig实例
         """
-        storage = StorageConfig(**config_dict.get("storage", {}))
+        # 仅取已知字段，防御性兼容仍残留 base_dir 的旧 yaml（静默忽略而非崩）
+        storage_raw = config_dict.get("storage", {})
+        storage_kwargs = {
+            k: v for k, v in storage_raw.items()
+            if k in StorageConfig.__dataclass_fields__
+        }
+        storage = StorageConfig(**storage_kwargs)
         hls = HLSConfig(**config_dict.get("hls", {}))
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
         return cls(storage=storage, hls=hls, alarm=alarm)
 
     @property
     def storage_base_dir(self) -> Path:
-        """存储根目录（绝对路径）。
+        """存储根目录（绝对路径）——委托 settings 单一真源。
 
-        相对路径以项目根为基（与 segment_finder.get_default_base_dir 对齐），
-        避免读写两侧因进程 cwd 不同而分叉到不同目录。
+        历史上各服务各自解析此路径，现统一收敛到 settings.storage_base_dir，
+        persistence / inference / traceback 三方同源，消除分叉与跨服务 push。
         """
-        p = Path(self.storage.base_dir)
-        if p.is_absolute():
-            return p.resolve()
-        project_root = Path(__file__).parent.parent.parent.parent.resolve()
-        return (project_root / p).resolve()
+        from app.settings import settings
+
+        return settings.storage_base_dir
 
     # 向后兼容属性
     @property
@@ -146,10 +152,6 @@ class PersistenceConfig:
     @property
     def alarm_queue_size(self) -> int:
         return self.alarm.queue_size
-
-    @property
-    def enable_db_write(self) -> bool:
-        return self.storage.enable_db_write
 
     @property
     def enable_cleanup(self) -> bool:
@@ -203,7 +205,7 @@ class PersistenceConfig:
         # DEBUG级别显示详细配置
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("========== Persistence配置 ==========")
-            logger.debug("存储: base_dir=%s", self.storage.base_dir)
+            logger.debug("存储: base_dir=%s", self.storage_base_dir)
             logger.debug(
                 "HLS: workers=%d, queue=%d, raw_fps=%.1f, processed_fps=%.1f",
                 self.hls.workers,

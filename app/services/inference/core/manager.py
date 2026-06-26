@@ -55,9 +55,10 @@ class InferenceManager:
         self._ca_segment_len = max(10, int(rt_fps * ca_segment_seconds))
         self._ca_maxlen = max(50, ca_maxlen)
 
-        # 数据库存储目录
-        base_dir = Path(__file__).parent.parent.parent.parent.parent.resolve()
-        self._db_dir = Path(db_dir) if db_dir else base_dir / "database"
+        # 持久化存储根目录：默认读 settings 单一真源（与 persistence/traceback 同源），
+        # 仅显式传 db_dir 时覆盖（测试/特殊场景）。不再 __file__ 自数层级重算。
+        from app.settings import settings
+        self._db_dir = Path(db_dir) if db_dir else settings.storage_base_dir
         self._db_dir.mkdir(parents=True, exist_ok=True)
 
         self._stop_event = threading.Event()
@@ -89,9 +90,9 @@ class InferenceManager:
 
         self._model_worker_service = self._create_async_model_worker_service()
 
+        # persistence 自己从 settings.storage_base_dir 读存储根（与此处 _db_dir 同源），
+        # 不再反向 push db_dir 进其私有 hls_pool.strategy —— 消除跨服务穿透。
         from app.services.persistence import persistence_manager as _persistence_manager
-        _persistence_manager.config.storage.base_dir = str(self._db_dir)
-        _persistence_manager.hls_pool.strategy.db_dir = self._db_dir
         self.persistence_manager = _persistence_manager
 
         self._encoded_cache: Dict[str, Dict[str, Any]] = {}
