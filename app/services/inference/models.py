@@ -33,7 +33,7 @@ from app.services.inference.data_models import (
 
 
 @dataclass
-class InferenceRequest:
+class DetectionTask:
     """推理请求：帧 + 元数据。"""
 
     client_id: str

@@ -18,7 +18,7 @@ import numpy as np
 
 from app.services.inference.workflows import Detector
 from app.services.inference.data_models import FrameDetections
-from app.services.inference.models import InferenceRequest, FrameInference
+from app.services.inference.models import DetectionTask, FrameInference
 from app.utils.metrics import infer_failure_total, infer_latency_ms
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class MultiModelWorkerPool:
             f"CUDA_stream={'enabled' if self.use_cuda_stream else 'disabled'}"
         )
 
-    def infer_batch(self, batch: List[InferenceRequest]) -> List[FrameInference]:
+    def infer_batch(self, batch: List[DetectionTask]) -> List[FrameInference]:
         """批量推理：多个模型并行执行。
 
         Args:
