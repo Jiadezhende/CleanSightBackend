@@ -1,6 +1,6 @@
 # 基础装配层解耦：存储根单一真源 + 消除跨服务穿透
 
-> **变更状态**：进行中（2026-06-27）　<!-- 当前已完成审计与方案定稿，代码改造分批落地中 -->
+> **变更状态**：已完成（2026-06-27）　<!-- 两批改造均已落地并通过验证：全量 pytest 206 passed -->
 > **知识库**：待沉淀
 >
 > 相关：[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)（分层数据流核实）、[20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md](20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md)（上一轮生命周期审计）。
@@ -103,7 +103,7 @@ file_path 表早已不写。核查发现整条开关链 gate 不到任何代码�
 |------|--------|----|---------|
 | `storage_base_dir` | `settings`（单源） | persistence(HLS/cleanup)、inference(FeatureStore/FactLedger/db_dir)、traceback | 来源收敛，运行时路径不变 |
 
-## 第二批改动方案（P2 + P3，进行中）
+## 第二批改动方案（P2 + P3，已完成）
 
 > 与第一批同支 `refact/infra`，单独成一次提交。
 
