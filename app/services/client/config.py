@@ -20,7 +20,7 @@ class FrameConfig:
 
     resize_width: int = 640  # Resize宽度
     resize_height: int = 480  # Resize高度
-    # 注意：inference_fps, ca_maxlen, ca_segment_len 从 inference_config.yaml 读取
+    # 注意：inference_fps, ca_maxlen, ca_segment_len 从 app/settings.py 读取（单一真源）
 
 
 @dataclass
@@ -76,9 +76,6 @@ class ClientConfig:
                 logger.error("✗ 加载配置文件失败: %s，使用默认配置", e, exc_info=True)
                 config = cls(frame=FrameConfig(), state=StateConfig())
 
-        # 从inference config读取共享参数
-        config._load_shared_params_from_inference()
-
         # 输出配置日志和验证
         config._log_loaded_config()
         config._validate_config()
@@ -92,48 +89,23 @@ class ClientConfig:
         state = StateConfig(**config_dict.get("state", {}))
         return cls(frame=frame, state=state)
 
-    def _load_shared_params_from_inference(self):
-        """从inference配置加载共享参数（队列、帧率等）
-
-        所有跨模块共享的参数统一在 inference_config.yaml 的 global 部分定义
-        """
-        try:
-            from app.services.inference.config import load_stage_config
-
-            inference_config = load_stage_config()
-
-            # 从inference config读取共享参数
-            self._ca_maxlen = inference_config.ca_maxlen
-            self._ca_segment_len = inference_config.ca_segment_len  # 直接使用帧数
-            self._inference_fps = inference_config.inference_fps
-
-            logger.debug(
-                "✓ 已从inference_config.yaml读取共享参数: ca=%d, segment=%d, fps=%d",
-                self._ca_maxlen,
-                self._ca_segment_len,
-                self._inference_fps,
-            )
-        except Exception as e:
-            # 如果无法加载inference配置，使用默认值
-            logger.warning("✗ 无法从inference配置读取共享参数，使用默认值: %s", e)
-            self._ca_maxlen = 2700
-            self._ca_segment_len = 300
-            self._inference_fps = 20
-
     @property
     def ca_maxlen(self) -> int:
-        """CA队列最大长度（从inference config读取）"""
-        return getattr(self, "_ca_maxlen", 2700)
+        """CA队列最大长度（从 settings 单一真源读取）"""
+        from app.settings import settings
+        return settings.ca_maxlen
 
     @property
     def ca_segment_len(self) -> int:
-        """HLS段长度（从inference config读取）"""
-        return getattr(self, "_ca_segment_len", 300)
+        """HLS段长度（帧数，从 settings 单一真源读取）"""
+        from app.settings import settings
+        return settings.ca_segment_len
 
     @property
     def inference_fps(self) -> int:
-        """推理帧率（从inference config读取）"""
-        return getattr(self, "_inference_fps", 20)
+        """推理帧率（从 settings 单一真源读取）"""
+        from app.settings import settings
+        return settings.inference_fps
 
     def _log_loaded_config(self):
         """输出加载的配置"""
@@ -155,7 +127,7 @@ class ClientConfig:
                 "状态: timeout=%ds",
                 self.state.heartbeat_timeout,
             )
-            logger.debug("📌 队列/fps参数来源: inference_config.yaml (global.*)")
+            logger.debug("📌 队列/fps参数来源: app/settings.py (单一真源)")
             logger.debug("==================================")
 
     def _validate_config(self):

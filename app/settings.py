@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     # 不再各自重算或互相 push（消除跨服务穿透）。
     storage_dir: str = "./database"
 
+    # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
+    # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
+    raw_fps: int = 30          # 原始视频帧率
+    inference_fps: int = 20    # 推理/输出帧率（HLS processed 打标、client 限流共用）
+    ca_maxlen: int = 2700      # CA 队列最大长度（帧数）
+    ca_segment_len: int = 300  # HLS 段长度（帧数）
+
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
     mediamtx_internal_port: int = 18004  # MediaMTX 实际监听端口

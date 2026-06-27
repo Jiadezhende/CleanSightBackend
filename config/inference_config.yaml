@@ -94,25 +94,7 @@ stages:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
     offline: {}
 
-# ==================== 全局配置（所有模块共享） ====================
-global:
-  # 视频处理参数（所有模块共享）
-  raw_fps: 30                     # 原始视频帧率（persistence, stream模块会读取）
-  inference_fps: 20               # 推理/输出帧率（persistence, client模块会读取）
-
-  # 批处理参数
-  batch_size: 4                   # 推理批量大小
-  inference_decimation: 2         # 推理降帧率（1=不降帧，2=每2帧推理1次）
-
-  # 队列参数（client模块会读取）
-  ca_maxlen: 2700                 # CA队列最大长度（帧数，约90秒@30fps）
-  ca_segment_len: 300             # HLS段长度（帧数，约10秒@30fps）
-
-  # 可视化参数（新架构）
-  visualization:
-    enabled: true                 # 是否启用可视化
-    use_fixed_visualizer: false   # 是否使用新的固定渲染器（设为 true 启用）
-
-  # 注意：
-  # - persistence和client模块会直接读取这些参数，保证全局一致性
-  # - 修改这些参数会影响所有相关模块
+# ==================== 推理自有参数 ====================
+# 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到
+#       app/settings.py 作单一真源，此处不再保留——避免其它模块反向钻进推理配置读共享参数。
+batch_size: 4                     # 推理批量大小（推理模块自有）

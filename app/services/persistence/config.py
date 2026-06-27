@@ -83,9 +83,6 @@ class PersistenceConfig:
                 logger.error("✗ 加载配置文件失败: %s，使用默认配置", e, exc_info=True)
                 config = cls()
 
-        # 从inference config读取共享参数（fps）
-        config._load_shared_params_from_inference()
-
         # 输出配置日志和验证
         config._log_loaded_config()
         config._validate_config()
@@ -165,40 +162,17 @@ class PersistenceConfig:
     def cleanup_interval_seconds(self) -> int:
         return self.storage.cleanup_interval_seconds
 
-    def _load_shared_params_from_inference(self):
-        """从inference配置加载共享参数（fps等）
-
-        所有跨模块共享的参数统一在 inference_config.yaml 的 global 部分定义
-        """
-        try:
-            from app.services.inference.config import load_stage_config
-
-            inference_config = load_stage_config()
-
-            # 从inference config读取共享参数
-            self._raw_fps = inference_config.raw_fps
-            self._processed_fps = inference_config.inference_fps
-
-            logger.debug(
-                "✓ 已从inference_config.yaml读取共享参数: raw_fps=%.1f, inference_fps=%d",
-                self._raw_fps,
-                self._processed_fps,
-            )
-        except Exception as e:
-            # 如果无法加载inference配置，使用默认值
-            logger.warning("✗ 无法从inference配置读取共享参数，使用默认值: %s", e)
-            self._raw_fps = 30.0
-            self._processed_fps = 20.0
-
     @property
     def raw_fps(self) -> float:
-        """原始视频帧率（从inference config读取）"""
-        return getattr(self, "_raw_fps", 30.0)
+        """原始视频帧率（从 settings 单一真源读取）"""
+        from app.settings import settings
+        return float(settings.raw_fps)
 
     @property
     def processed_fps(self) -> float:
-        """处理后视频帧率（从inference config读取）"""
-        return getattr(self, "_processed_fps", 20.0)
+        """处理后视频帧率（从 settings 单一真源读取 inference_fps）"""
+        from app.settings import settings
+        return float(settings.inference_fps)
 
     def _log_loaded_config(self):
         """输出加载的配置（启动时显示）"""
@@ -224,7 +198,7 @@ class PersistenceConfig:
                 self.storage.cleanup_days,
             )
             logger.debug(
-                "📌 fps参数来源: inference_config.yaml (global.raw_fps, global.inference_fps)"
+                "📌 fps参数来源: app/settings.py (raw_fps, inference_fps，单一真源)"
             )
             logger.debug("=====================================")
 

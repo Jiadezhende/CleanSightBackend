@@ -9,10 +9,10 @@ returning to clients.
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 @dataclass
@@ -33,10 +33,6 @@ class BaseFrame(BaseModel):
     metadata: Optional[Dict[str, Any]] = None  # Additional data (optional)
 
 
-class RawFrame(BaseFrame):
-    raw_frame_b64: str  # Base64 encoded original frame
-
-
 class ProcessedFrame(BaseFrame):
     """
     处理后帧数据，包含Base64编码的处理后图像及推理结果
@@ -44,17 +40,6 @@ class ProcessedFrame(BaseFrame):
 
     processed_frame_b64: str  # Base64 encoded processed (annotated) frame
     inference_result: Optional[Dict[str, Any]] = None  # detection / analysis output
-
-
-class FrameSegment(BaseModel):
-    """
-    多帧数据段，包含客户端ID、任务ID、时间段
-    """
-
-    client_id: str
-    task_id: Optional[int] = None
-    segment_start_ts: datetime
-    segment_end_ts: datetime
 
 
 # SQLAlchemy models for database storage

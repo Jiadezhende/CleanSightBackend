@@ -1,27 +1,18 @@
 from pydantic import BaseModel
-from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, String, Text
 
 from app.database import Base
 
 
 class Task(BaseModel):
-    """
-    该模型仅用于推理过程中的任务状态跟踪，不用于数据库存储。
+    """推理过程中的任务状态跟踪，不用于数据库存储。
+
+    检测/告警状态全部走 operator → alarm 管道，不再挂在 Task 上。
     """
 
-    # 对应数据库表的字段
     task_id: int
-    current_step: str  # 清洗阶段，目前只有测漏
+    current_step: str  # 清洗阶段主键(step_id)，用于 stage 路由与落盘
     status: str = "paused"  # 任务状态: running, completed, cancelled, paused
-    updated_at: int  # 最后更新时间，Unix timestamp
-
-    # 通用指标
-    fully_submerged: bool  # 是否完全浸没
-
-    # 以下为测漏指标
-    bending: bool  # 内镜弯曲
-    bubble_detected: bool  # 气泡检测 (持续监测)
-    bending_count: int = 0  # 弯折计数
 
 
 # NOTE: 无代码平台托管表，_id 是平台主键(varchar)，业务主键是 task_id
@@ -62,13 +53,3 @@ class DBAlarm(Base):
 class TaskTracebackRequest(BaseModel):
     task_id: int
     video_type: str = "processed"  # "raw" 或 "processed"
-
-
-class TaskStatusResponse(BaseModel):
-    task_id: int
-    status: str
-    cleaning_stage: str  # current_step现在是str
-    bending: bool
-    bubble_detected: bool
-    fully_submerged: bool
-    updated_at: str

@@ -6,9 +6,7 @@
 使用方式：
     from app.services.inference.config import load_stage_config
 
-    config = load_stage_config("stages_config.yaml")
-    # 或使用默认配置
-    config = load_stage_config()
+    config = load_stage_config()  # 默认读 config/inference_config.yaml
 """
 
 import logging
@@ -54,22 +52,8 @@ class InferenceConfig:
         for stage_name, stage_config in config_dict.get("stages", {}).items():
             self.stages[stage_name] = StageConfig(stage_name, stage_config)
 
-        # 全局配置
-        self.global_config: Dict[str, Any] = config_dict.get("global", {})
-        self.batch_size: int = self.global_config.get("batch_size", 4)
-        self.inference_decimation: int = self.global_config.get(
-            "inference_decimation", 2
-        )
-        self.visualization_decimation: int = self.global_config.get(
-            "visualization_decimation", 1
-        )
-        self.alarm_config: Dict[str, Any] = self.global_config.get("alarm", {})
-
-        # 从global配置提取参数（新增）
-        self.raw_fps: int = self.global_config.get("raw_fps", 30)
-        self.inference_fps: int = self.global_config.get("inference_fps", 20)
-        self.ca_maxlen: int = self.global_config.get("ca_maxlen", 600)
-        self.ca_segment_len: int = self.global_config.get("ca_segment_len", 300)  # 帧数
+        # 推理自有参数（跨模块共享参数已上浮 settings，见 app/settings.py）
+        self.batch_size: int = config_dict.get("batch_size", 4)
 
     def get_stage_config(self, stage_name: str) -> Optional[StageConfig]:
         """获取指定 Stage 的配置"""
@@ -79,19 +63,8 @@ class InferenceConfig:
         """列出所有 Stage 名称"""
         return list(self.stages.keys())
 
-    def get_inference_fps(self, base_fps: int = 30) -> int:
-        """根据降频配置计算实际推理FPS
-
-        Args:
-            base_fps: 原始视频帧率（默认30fps）
-
-        Returns:
-            实际推理帧率
-        """
-        return base_fps // self.inference_decimation
-
     def __repr__(self):
-        return f"InferenceConfig(stages={list(self.stages.keys())}, batch_size={self.batch_size}, inference_decimation={self.inference_decimation})"
+        return f"InferenceConfig(stages={list(self.stages.keys())}, batch_size={self.batch_size})"
 
 
 def _expand_env_vars(config: Any) -> Any:
@@ -206,29 +179,17 @@ def _log_loaded_config(config: "InferenceConfig"):
     """输出加载的配置（启动时显示）"""
     # INFO级别显示关键参数汇总
     logger.info(
-        "[InferenceConfig] Loaded | stages=%d (defined), fps=%.1f/%d, batch=%d",
+        "[InferenceConfig] Loaded | stages=%d (defined), batch=%d",
         len(config.list_stages()),
-        config.raw_fps,
-        config.inference_fps,
         config.batch_size,
     )
-    
+
     # DEBUG级别显示详细配置
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("========== Inference配置 ==========")
         logger.debug("Stage数量: %d", len(config.list_stages()))
-        logger.debug(
-            "FPS配置: raw_fps=%.1f, inference_fps=%d", config.raw_fps, config.inference_fps
-        )
-        logger.debug(
-            "队列配置: ca_maxlen=%d", config.ca_maxlen
-        )
-        logger.debug(
-            "批处理: batch_size=%d, decimation=%d",
-            config.batch_size,
-            config.inference_decimation,
-        )
-        logger.debug("📌 此文件为所有模块共享参数的单一数据源")
+        logger.debug("批处理: batch_size=%d", config.batch_size)
+        logger.debug("📌 跨模块共享参数（fps/队列）见 app/settings.py")
         logger.debug("=====================================")
 
 

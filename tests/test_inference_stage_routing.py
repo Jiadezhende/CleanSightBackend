@@ -20,10 +20,6 @@ def _make_task(step: str) -> Task:
         task_id=1,
         current_step=step,
         status="running",
-        updated_at=0,
-        fully_submerged=False,
-        bending=False,
-        bubble_detected=False,
     )
 
 

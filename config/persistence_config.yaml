@@ -15,7 +15,7 @@ hls:
   queue_size: 100                 # HLS队列最大长度
   segment_duration: 10            # 视频段时长（秒）
 
-  # 注意：帧率参数（raw_fps, processed_fps）从 inference_config.yaml 中读取
+  # 注意：帧率参数（raw_fps, processed_fps←inference_fps）从 app/settings.py 读取（单一真源）
 
 # 告警持久化配置
 alarm:

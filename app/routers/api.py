@@ -13,7 +13,6 @@
 
 import asyncio
 import logging
-import time
 from typing import Dict
 
 from fastapi import APIRouter, HTTPException
@@ -153,10 +152,6 @@ async def start(req: StartRequest):
                 task_id=req.task_id,
                 current_step=str(db_task.current_step),
                 status="running",
-                updated_at=int(time.time()),
-                fully_submerged=False,
-                bending=False,
-                bubble_detected=False,
             )
 
             success = ai.set_task(client_id, task)
