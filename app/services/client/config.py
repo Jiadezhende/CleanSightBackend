@@ -27,7 +27,8 @@ class FrameConfig:
 class StateConfig:
     """状态配置"""
 
-    initial_stage: str = "LEAK"  # 初始检测阶段
+    # 注意：初始 stage 不在此配置——未分配任务的客户端默认 MOCK 透传，
+    # 由 ClientQueues(initial_stage="MOCK") 硬编码兜底，无可配语义。
     heartbeat_timeout: int = 30  # 心跳超时（秒）
 
 
@@ -151,8 +152,7 @@ class ClientConfig:
                 self.inference_fps,
             )
             logger.debug(
-                "状态: stage=%s, timeout=%ds",
-                self.state.initial_stage,
+                "状态: timeout=%ds",
                 self.state.heartbeat_timeout,
             )
             logger.debug("📌 队列/fps参数来源: inference_config.yaml (global.*)")

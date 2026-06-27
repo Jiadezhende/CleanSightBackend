@@ -12,8 +12,10 @@
 # 3. 在 YAML 中声明两者的 class 和 params
 
 stages:
-  # ==================== LEAK 阶段（泄漏检测） ====================
-  LEAK:
+  # 主键 = step_id（task.current_step，字符串）；alias = 可读名（写告警 step_name + 可视化叠字）
+  # ==================== step "1" / LEAK 阶段（泄漏检测） ====================
+  "1":
+    alias: LEAK
     # 模型列表（按顺序执行）
     # 每个 Task 自带时序分析、可视化、告警逻辑
     models:
@@ -54,9 +56,10 @@ stages:
     #   class: app.services.inference.components.DefaultVisualizer
     # alarm_triggers: ...
 
-  # ==================== CLEAN 阶段（清洁检测：按尺寸分两组，仅检测画框） ====================
+  # ==================== step "2" / CLEAN 阶段（清洁检测：按尺寸分两组，仅检测画框） ====================
   # 时序/告警复用 mock 透传（consecutive_trigger 设大值即永不告警），只叠检测框。
-  CLEAN:
+  "2":
+    alias: CLEAN
     models:
       - name: clean_large       # 大目标组：手 / scope_control_body / scope_mid_section
         class: app.services.inference.workflows.clean.CleanLargeDetector
@@ -82,8 +85,9 @@ stages:
         judge_params:
           consecutive_trigger: 999    # 永不满足，仅检测画框不告警
 
-  # ==================== MOCK 阶段（未知 current_step 的 fallback，纯透传） ====================
+  # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================
   MOCK:
+    alias: MOCK
     models:
       - name: mock_detection
         class: app.services.inference.workflows.mock.MockDetector

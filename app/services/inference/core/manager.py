@@ -49,11 +49,9 @@ class InferenceManager:
         rt_fps: int = 30,
         ca_segment_seconds: int = 10,
         db_dir: Optional[str] = None,
-        ca_maxlen: int = 500,
     ):
         # 队列参数
         self._ca_segment_len = max(10, int(rt_fps * ca_segment_seconds))
-        self._ca_maxlen = max(50, ca_maxlen)
 
         # 持久化存储根目录：默认读 settings 单一真源（与 persistence/traceback 同源），
         # 仅显式传 db_dir 时覆盖（测试/特殊场景）。不再 __file__ 自数层级重算。
@@ -214,11 +212,6 @@ class InferenceManager:
 
         return processed_frame
 
-    _STEP_TO_STAGE: Dict[str, str] = {
-        "1": "LEAK",
-        "2": "CLEAN",
-    }
-
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
         """为客户端设置任务，并创建对应的 ClientTemporalActor。
 
@@ -253,7 +246,10 @@ class InferenceManager:
 
         if task is not None:
             client_manager.bind_task(client_id, task.task_id)
-            stage = self._STEP_TO_STAGE.get(task.current_step, "MOCK")
+            # 主键 = step_id：current_step 直接作 stage 主键，恒等路由，无映射表。
+            # 未知/未配的 step 回退 MOCK 透传。
+            stage_configs = self._get_stage_configs()
+            stage = task.current_step if task.current_step in stage_configs else "MOCK"
             if stage == "MOCK":
                 logger.warning(
                     "[InferenceManager] 未知的 current_step '%s'，路由到 MOCK stage",
@@ -418,8 +414,10 @@ class InferenceManager:
     ) -> None:
         """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
         from app.services.inference.models import AlarmRecord, infer_alarm_metric
+        from app.services.inference.data_models import get_stage_alias
 
-        stage = cq.get_stage()
+        # 可读性出口：告警 step_name/stage 用别名（主键是 step_id，对人不可读）
+        stage = get_stage_alias(cq.get_stage())
         task = cq.get_task()
         task_id = cq.get_task_id()
         step_id = int(task.current_step) if task and task.current_step else None
@@ -531,11 +529,15 @@ class InferenceManager:
         self.visualization_pool.start()
         self.persistence_manager.start()
 
-        # 初始化全局 task_name → AlarmMetric 映射（由 YAML model name 驱动）
+        # 初始化全局映射（均由 YAML 驱动）：
+        #   task_name → AlarmMetric（实时信号指标）
+        #   stage 主键(step_id) → alias（写告警 step_name + 可视化叠字）
         from app.services.inference.stage_factory import StageFactory
         from app.services.inference.config import load_stage_config
-        from app.services.inference.data_models import _set_task_metric_map
-        _set_task_metric_map(StageFactory(load_stage_config()).build_task_metric_map())
+        from app.services.inference.data_models import _set_task_metric_map, _set_stage_alias_map
+        _factory = StageFactory(load_stage_config())
+        _set_task_metric_map(_factory.build_task_metric_map())
+        _set_stage_alias_map(_factory.build_stage_alias_map())
 
         logger.info("[InferenceManager] Started")
 

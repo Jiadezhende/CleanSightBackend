@@ -15,7 +15,7 @@ import logging
 import threading
 from typing import List, Optional, Tuple
 
-from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmInfo
+from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmInfo, get_stage_alias
 from app.services.inference.models import AlarmRecord, infer_alarm_metric
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.workflows.judge import Judge
@@ -112,6 +112,8 @@ class ClientTemporalActor:
         task = self._cq.get_task()
         task_id = self._cq.get_task_id()
         step_id = int(task.current_step) if task and task.current_step else None
+        # 可读性出口：告警 step_name/stage 用别名（self._stage 是 step_id 主键）
+        stage_name = get_stage_alias(self._stage)
         for alarm in alarms:
             metric = infer_alarm_metric(
                 alarm_type=alarm.alarm_type,
@@ -122,7 +124,7 @@ class ClientTemporalActor:
                 continue
             persistence_manager.persist_alarm({
                 "task_id": task_id,
-                "stage": self._stage,
+                "stage": stage_name,
                 "step_id": step_id,
                 "client_id": self._client_id,
                 "alarm_type": alarm.alarm_type,
@@ -138,7 +140,7 @@ class ClientTemporalActor:
                 alarm_message=alarm.alarm_message,
                 mode=ALARM_MODE_REALTIME,
                 metric=metric,
-                stage=self._stage,
+                stage=stage_name,
                 metadata=alarm.metadata or {},
             ))
 

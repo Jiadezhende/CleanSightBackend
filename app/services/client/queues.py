@@ -58,7 +58,9 @@ class ClientQueues:
         resize_width: int = 640,
         resize_height: int = 480,
         inference_fps: int = 15,
-        initial_stage: str = "LEAK",
+        # 默认 MOCK：未分配任务的客户端走透传，不跑真实检测/告警。
+        # 真实 stage 由 InferenceManager.set_task 按 step_id 赋值。
+        initial_stage: str = "MOCK",
     ):
         # 客户端标识
         self.client_id = client_id

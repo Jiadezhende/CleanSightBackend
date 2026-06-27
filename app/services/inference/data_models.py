@@ -23,6 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
+# ==================== 检测契约（L1 检测层产出）====================
+#
+# 检测器（Detector.infer）产出标准化检测结果，并经 prepare_visualization_data
+# 转出渲染数据。两者同属感知层，是对下游（时序分析 / 可视化）的输入契约。
+# - Detection / DetectionOutput：检测结果标准格式
+# - VisualizationData / VisItem / VisualizationType：固定渲染器的输入数据
+
+
 @dataclass
 class Detection:
     """单个检测结果（标准格式）
@@ -95,6 +103,22 @@ class VisItem:
     extra: Dict[str, Any] = field(default_factory=dict)  # 扩展数据
 
 
+class VisualizationType:
+    """可视化类型常量（VisualizationData.type 取值）"""
+    BBOX = "bbox"              # 检测框
+    MASK = "mask"              # 分割掩码
+    HEATMAP = "heatmap"        # 热力图
+    KEYPOINT = "keypoint"      # 关键点
+
+
+# ==================== 告警契约（L4 规则层产出）====================
+#
+# 规则层（Judge.step / finalize）消费事实后产出告警。
+# - AlarmType / AlarmMetric / ALARM_MODE_*：告警分类与模式常量
+# - _TASK_METRIC_MAP / _STAGE_ALIAS_MAP：YAML 驱动的可读性映射（启动时灌入）
+# - AlarmInfo：单次告警的数据载体
+
+
 class AlarmType(str, Enum):
     """告警类型枚举 — value 为外部持久化使用的中文字符串"""
     PROCESS_VIOLATION = "流程违规"
@@ -136,6 +160,30 @@ def get_task_metric_map() -> Dict[str, AlarmMetric]:
         from app.services.inference.config import load_stage_config
         _set_task_metric_map(StageFactory(load_stage_config()).build_task_metric_map())
     return _TASK_METRIC_MAP
+
+
+# stage 主键(step_id) → alias 映射，由 InferenceManager.start() 初始化
+# alias 仅用于可读性出口（写告警 step_name + 可视化叠字）；功能性标识一律用主键
+_STAGE_ALIAS_MAP: Dict[str, str] = {}
+
+
+def _set_stage_alias_map(mapping: Dict[str, str]) -> None:
+    """由 InferenceManager.start() 调用一次，初始化 stage→alias 映射。"""
+    global _STAGE_ALIAS_MAP
+    _STAGE_ALIAS_MAP.clear()
+    _STAGE_ALIAS_MAP.update(mapping)
+
+
+def get_stage_alias(stage_key: str) -> str:
+    """返回 stage 主键对应的可读别名；未命中回退主键本身。
+
+    若映射尚未初始化（如单元测试场景），自动从 YAML 懒加载一次。
+    """
+    if not _STAGE_ALIAS_MAP:
+        from app.services.inference.stage_factory import StageFactory
+        from app.services.inference.config import load_stage_config
+        _set_stage_alias_map(StageFactory(load_stage_config()).build_stage_alias_map())
+    return _STAGE_ALIAS_MAP.get(stage_key, stage_key)
 
 
 @dataclass
@@ -241,12 +289,3 @@ def fact_from_json(d: Dict[str, Any]):
     if t == _FACT_SEGMENT:
         return SegmentFact.from_json(d)
     raise ValueError(f"未知 fact type: {t!r}")
-
-
-# 可视化类型枚举（供参考）
-class VisualizationType:
-    """可视化类型常量"""
-    BBOX = "bbox"              # 检测框
-    MASK = "mask"              # 分割掩码
-    HEATMAP = "heatmap"        # 热力图
-    KEYPOINT = "keypoint"      # 关键点

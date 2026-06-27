@@ -8,6 +8,5 @@ frame:
   resize_width: 640          # 统一resize宽度
   resize_height: 480         # 统一resize高度
 
-state:
-  # 业务状态配置
-  initial_stage: "LEAK"      # 初始检测阶段
+# 注：初始 stage 不在此配置——未分配任务的客户端默认 MOCK 透传（ClientQueues 硬编码兜底）。
+#     心跳超时等状态参数走 StateConfig 默认值，需要时再在此添加 state: 段。

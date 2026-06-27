@@ -27,6 +27,7 @@ from app.services.inference.data_models import (
     VisualizationData,
     VisItem,
     VisualizationType,
+    get_stage_alias,
 )
 
 from app.models.frame import FrameData
@@ -180,11 +181,11 @@ class VisualizationWorker:
                 vis_data = task.prepare_visualization_data(detection_output)
                 vis_data_list.append(vis_data)
 
-            # 使用固定渲染器渲染
+            # 使用固定渲染器渲染。stage 主键是 step_id，叠字需可读别名。
             annotated_frame = self.fixed_visualizer.render(
                 frame=frame.copy(),
                 vis_data_list=vis_data_list,
-                stage=stage,
+                stage=get_stage_alias(stage),
                 temporal_events=events,
             )
 

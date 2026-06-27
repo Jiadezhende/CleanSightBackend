@@ -111,6 +111,14 @@ class StageFactory:
                     )
         return mapping
 
+    def build_stage_alias_map(self) -> Dict[str, str]:
+        """构建 stage 主键(step_id) → alias 映射（唯一定义处）。
+
+        alias 仅用于可读性出口（写告警 step_name + 可视化叠字）；功能性标识一律用主键。
+        缺省 alias 的 stage 回退主键本身（见 StageConfig.alias）。
+        """
+        return {name: cfg.alias for name, cfg in self.config.stages.items()}
+
 
 def _import_class(class_path: str) -> Type:
     """根据完整类路径导入并返回类对象。"""

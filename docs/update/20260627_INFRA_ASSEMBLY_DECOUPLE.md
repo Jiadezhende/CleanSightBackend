@@ -17,8 +17,12 @@
 |------|------|------|---------|
 | P1 | `InferenceManager` 伸手改 `persistence_manager` 私有 `hls_pool.strategy.db_dir`；且只补了 strategy，**漏补 `_cleanup_worker.db_dir`** | 重构静默炸 / 清理线程扫错目录（潜在） | 本批修复 |
 | P1' | `InferenceManager._db_dir` 用 `__file__` 自数 5 层重算存储根，又把结果 push 给 persistence——既重算又反向写，责任方向颠倒 | 双源易漂 | 本批修复 |
-| P2 | `_STEP_TO_STAGE = {"1":"LEAK","2":"CLEAN"}` 写死在核心类，泄了 workflow 层的「配置驱动」 | 新增阶段必改源码 | 待办（下一批） |
-| P3 | `InferenceManager(ca_maxlen=500)` 是**死参数**：设了从不读，真正队列长度由 `client/config.py ← inference_config.yaml(2700)` 决定。同一语义三个默认值（500 死 / 2700 / 2700） | 误导性死参数冒充配置入口 | 待办（下一批，直接删参数） |
+| P2 | `_STEP_TO_STAGE = {"1":"LEAK","2":"CLEAN"}` 写死在核心类，泄了 workflow 层的「配置驱动」 | 新增阶段必改源码 | 第二批落地（见下） |
+| P3 | `InferenceManager(ca_maxlen=500)` 是**死参数**：设了从不读，真正队列长度由 `client/config.py ← inference_config.yaml(ca_maxlen)` 决定 | 误导性死参数冒充配置入口 | 第二批落地（见下） |
+
+> **P3 澄清**：审计原文把"600 vs 500 静默降级"当成一个 bug，实为**两个不同的 `ca_maxlen` 被混淆**：
+> `InferenceConfig.ca_maxlen`（[config.py](../../app/services/inference/config.py) 默认 600，**真实生效**，经 `client/config.py` 驱动队列长度，yaml 实配 2700）
+> 与 `InferenceManager.ca_maxlen`（默认 500，**死参数**，赋值后从不读）。不存在"降级"，只有一个该删的死参数。
 
 ## 改动详情
 
@@ -99,20 +103,83 @@ file_path 表早已不写。核查发现整条开关链 gate 不到任何代码�
 |------|--------|----|---------|
 | `storage_base_dir` | `settings`（单源） | persistence(HLS/cleanup)、inference(FeatureStore/FactLedger/db_dir)、traceback | 来源收敛，运行时路径不变 |
 
-## 后续计划
+## 第二批改动方案（P2 + P3，进行中）
 
-1. **P2**：`_STEP_TO_STAGE` 外移进 `inference_config.yaml`，与 stage 配置驱动体系对齐。
-2. **P3**：删除 `InferenceManager` 的死参数 `ca_maxlen`（含 `ai.py` 构造处一并清理）。
+> 与第一批同支 `refact/infra`，单独成一次提交。
+
+### 8. P2 — stage 主键改用 step_id，`alias` 承载可读名（消除 `_STEP_TO_STAGE` 映射）
+
+**设计决策（取代"映射外移"方案）**：不再维护任何 `step → stage` 映射，而是让 stage 的**主键直接是 step_id**，
+路由退化为恒等；人类可读名（"LEAK"）下沉为每个 stage 的 `alias` 字段。
+
+| 维度 | 取值 | 用途 |
+|------|------|------|
+| **主键**（yaml key / `cq.set_stage` / stage_configs key / 路由 / 分发 / 持久化） | `step_id`（`"1"`/`"2"`/`"MOCK"`） | 一切功能性标识，**零转化直接用** |
+| **alias**（yaml 内字段） | `"LEAK"`/`"CLEAN"`/`"MOCK"` | **仅可读性**：写告警 `step_name` + 可视化叠字 |
+
+> 关键原则（用户定调）：功能性 id 全程用 step_id，不做多余转化；alias 不落任何状态（ClientQueues **不**存第二份），
+> 是 config 的纯函数，只在可读性出口按需查一次。沿用既有 `data_models._set_task_metric_map` 的全局 map 先例。
+
+#### `stage` 消费点分类（决定每处用主键还是 alias）
+
+| 消费点 | 用途 | 用 |
+|--------|------|----|
+| dispatcher / manager:268 / visualization:166（`stage_configs.get(stage)`） | 配置查找、分发 | 主键 |
+| temporal 实时告警（`persist_alarm`+`AlarmRecord`，×2） | 写告警 | **alias** |
+| manager `_persist_settlement_alarms` | 写告警 | **alias** |
+| `FixedVisualizer.render` → `_draw_global_info(stage)` | 帧上叠字 | **alias** |
+| `ClientQueues.get_frontend_message` | — | **死代码（无调用方）**，不处理 |
+
+#### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `config/inference_config.yaml` | `stages:` 主键 `LEAK→"1"`、`CLEAN→"2"`（`MOCK` 保留）；每 stage 加 `alias: LEAK/CLEAN/MOCK` |
+| `config/client_config.yaml` | **删** `state.initial_stage`（死配置：读了只打日志，从未传进 `create_client`） |
+| `app/services/client/config.py` | **删** `state.initial_stage` 字段 + 引用它的 debug 日志行 |
+| `app/services/client/queues.py` | `initial_stage` 默认值 `"LEAK"` → `"MOCK"`（**行为修正**：taskless 客户端从"跑 LEAK 检测"改为 MOCK 透传） |
+| `app/services/inference/config.py` | `StageConfig` 解析 `self.alias = cfg.get("alias", stage_name)` |
+| `app/services/inference/stage_factory.py` | 新增 `build_stage_alias_map() -> {step_id: alias}` |
+| `app/services/inference/data_models.py` | 仿 `task_metric_map` 加 `_set_stage_alias_map` / `get_stage_alias(key)`（未命中回退 key 本身） |
+| `app/services/inference/core/manager.py` | 删类常量 `_STEP_TO_STAGE`；`set_task` 改恒等路由 `stage = current_step if current_step in stage_configs else "MOCK"`；`start()` 处灌 alias map（紧邻 `_set_task_metric_map`） |
+| `app/services/inference/workers/temporal.py` | 告警两处 `self._stage` → `get_stage_alias(self._stage)` |
+| `app/services/inference/workers/visualization.py` | 传 `get_stage_alias(stage)` 给 `fixed_visualizer.render` 显示（配置查找仍用主键 `stage`） |
+
+> 注：MOCK 仍是未知 step 的兜底键，`alias: MOCK`；其余功能性 dict 的键随 yaml 主键自动翻成 `"1"/"2"`，
+> 因为 `_get_stage_configs()` 由 `config.list_stages()` 派生，无需逐处改硬编码字面量（代码里 `"LEAK"`/`"CLEAN"` 仅存于 docstring 示例）。
+
+### 9. P3 — 删除 `InferenceManager` 死参数 `ca_maxlen`
+
+`InferenceManager.__init__(ca_maxlen=500)` 设 `self._ca_maxlen` 后全包再无读取（grep 证实），
+且 [`ai.py`](../../app/services/ai.py) 构造时根本没传它。真实队列长度由 `client/config.py ← inference_config.yaml`
+决定，与此参数无关。
+
+| 文件 | 改动 |
+|------|------|
+| `app/services/inference/core/manager.py` | 删 `__init__` 的 `ca_maxlen` 形参与 `self._ca_maxlen = max(50, ca_maxlen)` 行 |
+| `app/services/ai.py` | 构造处确认无 `ca_maxlen` 传参（本就没有），无需改动 |
+
+> 保留 `InferenceConfig.ca_maxlen`（真实生效，勿删）。仅删 InferenceManager 上的同名死参数。
 
 ## 验证
+
+### 第一批（存储根 + enable_db_write）
 
 | 项 | 结果 |
 |----|------|
 | 三源一致性 smoke（settings / persistence / traceback 解析到同一绝对路径） | ✅ `<root>/database`，三方相等 |
-| `InferenceManager` 模块导入（已无反向 push） | ✅ |
-| `test_traceback_segment_finder.py`（解析逻辑改测 settings 层） | 16 passed |
+| 自定义根贯穿 persistence 全部消费者（strategy + cleanup） | ✅ |
+| `enable_db_write` 死链清除（grep 归零） | ✅ |
+
+### 第二批（P2 stage 主键 + P3 死参）
+
+| 项 | 结果 |
+|----|------|
+| stage 主键 smoke：`list_stages() == ['1','2','MOCK']`，alias map `{1:LEAK,2:CLEAN,MOCK:MOCK}`，未知键回退自身 | ✅ |
+| 恒等路由单测（`test_inference_stage_routing`：已配 step→恒等、未配→MOCK） | ✅ 5 passed |
+| taskless 默认 MOCK 透传 + `clear()` 重置 + 别名解析 smoke | ✅ |
+| `_STEP_TO_STAGE` / `initial_stage`(配置) / `InferenceManager.ca_maxlen` 残留 grep | ✅ 归零 |
 | 全量 `pytest tests/` | **206 passed** |
 
-> 顺带修复：[`tests/test_inference_stage_routing.py`](../../tests/test_inference_stage_routing.py) 的 fixture 仍用旧字段名
-> `_client_locks`（已于上一轮 [生命周期审计](20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md) 单锁化为 `_client_lifecycle_lock`），
-> 属预存失败（与本改动无关，stash 本改动后仍 fail 已验证），一并对齐。
+> 行为变更（有意）：未分配任务的客户端默认 stage 由 `LEAK` → `MOCK`，从"跑泄漏检测"改为纯透传。
+> 死配置清理：`client_config.yaml: state.initial_stage` 此前只被读取打印、从未传入 `create_client`，一并删除。

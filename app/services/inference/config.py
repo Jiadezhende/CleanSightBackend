@@ -30,6 +30,8 @@ class StageConfig:
 
     def __init__(self, stage_name: str, config_dict: Dict[str, Any]):
         self.stage_name = stage_name
+        # 可读别名（写告警 step_name + 可视化叠字）；缺省回退主键本身
+        self.alias: str = config_dict.get("alias") or stage_name
         # 确保即使 models 为 None 也转换为空列表
         self.models: List[Dict[str, Any]] = config_dict.get("models") or []
         self.temporal_analyzer: Optional[Dict[str, Any]] = config_dict.get(
