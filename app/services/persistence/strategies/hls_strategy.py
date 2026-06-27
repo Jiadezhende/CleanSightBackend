@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 
-from app.models.frame import Frame
+from app.domain.frame import Frame
 from app.settings import settings
 from app.utils.exceptions import PersistenceError
 

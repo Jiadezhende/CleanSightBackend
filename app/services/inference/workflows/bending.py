@@ -17,15 +17,9 @@ from typing import Dict, List, Tuple
 
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.operator import Operator
-from app.services.inference.data_models import (
-    Alarm,
-    AlarmMetric,
-    AlarmType,
-    FrameDetections,
-    RenderSpec,
-    RenderItem,
-    RenderType,
-)
+from app.domain.alarm import Alarm, AlarmMetric, AlarmType
+from app.domain.detection import FrameDetections
+from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 

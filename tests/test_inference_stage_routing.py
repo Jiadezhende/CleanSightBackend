@@ -3,7 +3,7 @@ import threading
 import pytest
 from unittest.mock import MagicMock, patch
 
-from app.models.task import CleaningTask
+from app.domain.task import CleaningTask
 from app.services.inference.core.manager import InferenceManager
 
 

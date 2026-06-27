@@ -23,8 +23,9 @@ app/
 ├── main.py            # FastAPI 入口，lifespan 管理服务启停
 ├── settings.py        # 全局配置（Pydantic Settings，读 .env）
 ├── database.py        # SQLAlchemy 连接池（PostgreSQL）
-├── models/            # Pydantic API 模型 + SQLAlchemy ORM 模型
-├── routers/           # HTTP/WS 路由层
+├── domain/            # 跨服务共享契约（纯 dataclass：frame/detection/render/alarm/task）
+├── models.py          # SQLAlchemy ORM（DBTask/DBAlarm）；API DTO 跟各自 router 走
+├── routers/           # HTTP/WS 路由层（请求/响应 DTO 在此就地定义）
 ├── services/          # 核心业务服务（见下方详细说明）
 └── utils/             # 框架工具（异常、重试、指标、上下文、网关中间件）
 mediamtx_gateway/      # RTSP TCP 代理网关（独立进程，详见 docs/API_GATEWAY.md）
@@ -132,7 +133,7 @@ _latest_rendered 快照 → [WebSocket 实时推送（前端 ~10ms 轮询，非�
 
 - PostgreSQL，连接池：5 基础 / 15 最大
 - 主表：`clean_task`（任务记录）、`clean_alarm`（告警记录）
-- ORM 模型：[app/models/task.py](app/models/task.py)
+- ORM 模型：[app/models.py](app/models.py)
 
 ---
 

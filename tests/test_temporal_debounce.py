@@ -13,14 +13,15 @@ import time
 
 import pytest
 
-from app.services.inference.data_models import AlarmType, Detection, FrameDetections
+from app.domain.alarm import AlarmType
+from app.domain.detection import Detection, FrameDetections
 
 
 # ========== Fixtures ==========
 
 
 def make_detection_output(n_detections: int = 0, class_name: str = "bubble") -> FrameDetections:
-    """构造 DetectionOutput，指定检测数量"""
+    """构造 FrameDetections，指定检测数量"""
     detections = [
         Detection(
             bbox=[0, 0, 100, 100],

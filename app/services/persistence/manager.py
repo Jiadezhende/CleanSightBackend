@@ -13,7 +13,7 @@ import queue
 import threading
 from typing import Any, Dict, List, Optional
 
-from app.models.frame import Frame
+from app.domain.frame import Frame
 from app.services.persistence.config import PersistenceConfig
 from app.services.persistence.models import (
     AlarmPersistenceTask,

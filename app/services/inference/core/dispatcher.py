@@ -53,7 +53,7 @@ class StageAwareDispatcher:
         self._stop_event = threading.Event()
         self._dispatch_thread: Optional[threading.Thread] = None
 
-        # Stage分组队列：{stage: deque[InferenceRequest]}
+        # Stage分组队列：{stage: deque[DetectionTask]}
         self._stage_queues: Dict[str, Deque[DetectionTask]] = defaultdict(
             lambda: deque(maxlen=256)
         )
@@ -124,10 +124,9 @@ class StageAwareDispatcher:
             # 构造推理请求
             req = DetectionTask(
                 client_id=client_id,
-                frame=frame_data.frame,
-                timestamp=frame_data.timestamp,
                 stage=stage,
-                frame_data=frame_data,
+                timestamp=frame_data.timestamp,
+                frame=frame_data.frame,
             )
 
             # 按 stage 分组入队
@@ -156,7 +155,7 @@ class StageAwareDispatcher:
             timeout_ms: 超时时间（毫秒），默认 3ms（针对小并发优化）
 
         Returns:
-            InferenceRequest 列表（可能为空）
+            DetectionTask 列表（可能为空）
         """
         import time
 

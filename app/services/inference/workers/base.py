@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 from app.services.inference.workflows import Detector
-from app.services.inference.data_models import FrameDetections
+from app.domain.detection import FrameDetections
 from app.services.inference.models import DetectionTask, FrameInference
 from app.utils.metrics import infer_failure_total, infer_latency_ms
 
@@ -84,10 +84,10 @@ class MultiModelWorkerPool:
             
         数据流说明：
             1. 提取 frames 和 contexts
-            2. 调用各 model.infer_batch() → List[DetectionOutput]
-            3. 组装为 InferenceResult
-               InferenceResult.result = {
-                   task_name: DetectionOutput(  # 检测输出对象
+            2. 调用各 model.infer_batch() → List[FrameDetections]
+            3. 组装为 FrameInference
+               FrameInference.detections = {
+                   task_name: FrameDetections(  # 检测输出对象
                        detections=[...],
                        metadata={...},
                        timestamp=...,
@@ -114,16 +114,16 @@ class MultiModelWorkerPool:
             model_results = self._infer_batch_sequential(frames, contexts)
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
-        # model_results[i] = {task_name: DetectionOutput}
+        # model_results[i] = {task_name: FrameDetections}
         results: List[FrameInference] = []
         for i, req in enumerate(batch):
             per_frame_results = model_results[i] if i < len(model_results) else {}
 
             result = FrameInference(
                 client_id=req.client_id,
-                timestamp=req.timestamp,
                 stage=req.stage,
-                result=per_frame_results,
+                timestamp=req.timestamp,
+                detections=per_frame_results,
             )
             results.append(result)
 
@@ -142,8 +142,8 @@ class MultiModelWorkerPool:
         - 合并结果
         
         返回值说明：
-            List[Dict[str, DetectionOutput]]
-            即：List[{task_name: DetectionOutput(...)}]
+            List[Dict[str, FrameDetections]]
+            即：List[{task_name: FrameDetections(...)}]
         """
         if not TORCH_AVAILABLE:
             return self._infer_batch_sequential(frames, contexts)
@@ -158,7 +158,7 @@ class MultiModelWorkerPool:
             with torch.cuda.stream(cuda_stream):
                 start_time = time.time()
                 try:
-                    # 调用 InferenceWorkflow.infer_batch （已经返回 DetectionOutput 格式）
+                    # 调用 InferenceWorkflow.infer_batch （已经返回 FrameDetections 格式）
                     batch_res = model.infer_batch(frames, contexts)
                     async_results.append((model.name, batch_res))
 
@@ -223,7 +223,7 @@ class MultiModelWorkerPool:
 
             start_time = time.time()
             try:
-                # 调用 InferenceTask.infer_batch （已经返回 DetectionOutput 格式）
+                # 调用 InferenceTask.infer_batch （已经返回 FrameDetections 格式）
                 batch_res = model.infer_batch(frames, contexts)
                 for i in range(min(len(batch_res), n)):
                     merged[i][model.name] = batch_res[i]

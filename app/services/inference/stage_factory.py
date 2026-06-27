@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Tuple, Type
 
 from app.services.inference.config import InferenceConfig
-from app.services.inference.data_models import AlarmMetric
+from app.domain.alarm import AlarmMetric
 
 logger = logging.getLogger(__name__)
 

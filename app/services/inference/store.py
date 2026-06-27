@@ -10,7 +10,7 @@ L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特
 见 `hls_strategy._persist_*_segment`），随 step 目录被 cleanup TTL 连带回收。
 两者均为 manager 持有的单例：构造时绑定 base_dir，remove_client 时 close(task_id, step_id)。
 
-帧对齐契约：每条记录的 `ts` = 该帧的 `InferenceResult.timestamp`（= 帧捕获 ts，见
+帧对齐契约：每条记录的 `ts` = 该帧的 `FrameInference.timestamp`（= 帧捕获 ts，见
 `workers/base.py` 构造），与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，
 故 feature 行可按 `ts` 精确对上同帧的 HLS 证据片段与 keypoints。
 """
@@ -25,13 +25,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
-from app.services.inference.data_models import (
-    Detection,
-    FrameDetections,
-    EventFact,
-    SegmentFact,
-    fact_from_json,
-)
+from app.domain.detection import Detection, FrameDetections
+from app.services.inference.models import EventFact, SegmentFact, fact_from_json
 
 logger = logging.getLogger(__name__)
 
@@ -149,14 +144,14 @@ class FeatureStore(_JsonlBuffer):
         Args:
             task_id: 任务 id（落盘目录键）
             step_id: 洗消步骤 id（落盘目录键，与 HLS 同款 `{task_id}/{step_id}/`）
-            res: InferenceResult（duck-typed：.timestamp + .result[task_name]→DetectionOutput）
+            res: FrameInference（duck-typed：.timestamp + .result[task_name]→FrameDetections）
         """
         if task_id is None or step_id is None:
             return
         try:
             features = {
                 task_name: [_serialize_detection(d) for d in out.detections]
-                for task_name, out in res.result.items()
+                for task_name, out in res.detections.items()
             }
             # ts = 帧捕获 ts（res.timestamp），供离线/证据按帧对齐，详见模块 docstring
             record = {"ts": res.timestamp, "features": features}
@@ -167,10 +162,10 @@ class FeatureStore(_JsonlBuffer):
         self._enqueue(task_id, step_id, [line])
 
     def load(self, task_id: Any, step_id: Any, source: str) -> List[FrameDetections]:
-        """离线回读：把某 source（检测点/模型名）的全序列特征还原为 DetectionOutput 列表。
+        """离线回读：把某 source（检测点/模型名）的全序列特征还原为 FrameDetections 列表。
 
         供离线链路使用（offline 预置）。先 flush 缓冲再读，缺失文件返回空。
-        注：mask/keypoints/metadata 未落盘，回读的 DetectionOutput.metadata 为空。
+        注：mask/keypoints/metadata 未落盘，回读的 FrameDetections.metadata 为空。
 
         Args:
             task_id: 任务 id

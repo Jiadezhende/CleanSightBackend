@@ -12,12 +12,14 @@ from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 
-from app.models.frame import Frame
-from app.models.task import CleaningTask as CleaningTask
-from app.services.inference.data_models import FrameDetections, get_task_metric_map
+from app.domain.alarm import Alarm
+from app.domain.detection import FrameDetections
+from app.domain.frame import Frame
+from app.domain.task import CleaningTask
+from app.services.inference.naming import get_task_metric_map
 
 if TYPE_CHECKING:
-    from app.services.inference.models import AlarmRecord, FrameInference
+    from app.services.inference.models import FrameInference
 
 
 class ClientQueues:
@@ -124,7 +126,7 @@ class ClientQueues:
         self._latest_temporal: List[str] = []
 
         # 告警日志（由 _alarm_lock 保护）
-        self._alarm_log: Deque[AlarmRecord] = deque(maxlen=100)
+        self._alarm_log: Deque[Alarm] = deque(maxlen=100)
         self._alarm_seq: int = 0
 
         # 告警 gate（由 _alarm_lock 保护，与 _alarm_log 合并）
@@ -419,7 +421,7 @@ class ClientQueues:
             self._stream_windows = dict(windows)
 
     def push_detection(self, task_name: str, output: FrameDetections) -> None:
-        """将 DetectionOutput 追加到 per-stream 滑动窗口，按感受野自动淘汰过期条目。"""
+        """将 FrameDetections 追加到 per-stream 滑动窗口，按感受野自动淘汰过期条目。"""
         with self._slide_window_lock:
             if task_name not in self._slide_window:
                 self._slide_window[task_name] = deque()
@@ -473,20 +475,20 @@ class ClientQueues:
             self._alarm_gate[gate_key] = now
             return True
 
-    def append_alarm_record(self, record: AlarmRecord) -> None:
+    def append_alarm_record(self, record: Alarm) -> None:
         """直接追加告警到内存环形日志；调用方须先通过 try_pass_alarm_gate。"""
         with self._alarm_lock:
             self._alarm_seq += 1
             record.seq = self._alarm_seq
             self._alarm_log.append(record)
 
-    def get_recent_alarms(self, n: int = 10) -> List[AlarmRecord]:
+    def get_recent_alarms(self, n: int = 10) -> List[Alarm]:
         """返回最近 n 条告警记录（最新在后）。"""
         with self._alarm_lock:
             items = list(self._alarm_log)
         return items[-n:]
 
-    def get_alarm_increment(self, since_seq: int = 0) -> List[AlarmRecord]:
+    def get_alarm_increment(self, since_seq: int = 0) -> List[Alarm]:
         """Return alarms with seq > since_seq."""
         with self._alarm_lock:
             items = [a for a in self._alarm_log if a.seq > since_seq]

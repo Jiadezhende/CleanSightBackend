@@ -8,8 +8,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from app.models.frame import Frame
-from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmMetric, AlarmType
+from app.domain.alarm import ALARM_MODE_REALTIME, AlarmMetric, AlarmType
+from app.domain.frame import Frame
 
 
 @dataclass

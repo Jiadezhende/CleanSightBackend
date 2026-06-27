@@ -14,12 +14,8 @@ detector.name = 该 detector 产出的流名（决定 slide_window key 与 Opera
 from __future__ import annotations
 
 from app.services.inference.workflows.detector import YOLODetector
-from app.services.inference.data_models import (
-    FrameDetections,
-    RenderSpec,
-    RenderItem,
-    RenderType,
-)
+from app.domain.detection import FrameDetections
+from app.domain.render import RenderItem, RenderSpec, RenderType
 
 # 固定调色板，按 class_id 取色（BGR）
 _PALETTE = [

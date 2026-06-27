@@ -1,18 +1,11 @@
-from pydantic import BaseModel
+"""SQLAlchemy ORM（DB 行映射，DB schema 单一真源）。
+
+只放 ORM；运行时契约见 app/domain，API DTO 跟各自 router 走。
+"""
+
 from sqlalchemy import BigInteger, Boolean, Column, String, Text
 
 from app.database import Base
-
-
-class CleaningTask(BaseModel):
-    """推理过程中的任务状态跟踪，不用于数据库存储。
-
-    检测/告警状态全部走 operator → alarm 管道，不再挂在 Task 上。
-    """
-
-    task_id: int
-    current_step: str  # 清洗阶段主键(step_id)，用于 stage 路由与落盘
-    status: str = "paused"  # 任务状态: running, completed, cancelled, paused
 
 
 # NOTE: 无代码平台托管表，_id 是平台主键(varchar)，业务主键是 task_id
@@ -31,7 +24,7 @@ class DBTask(Base):
 
 
 class DBAlarm(Base):
-    """告警表 ORM（只映射业务字段，忽略平台 hidden 字段）"""
+    """告警表 ORM（只映射业务字段，忽略平台 hidden 字段）。"""
 
     __tablename__ = "clean_alarm"
 
@@ -48,8 +41,3 @@ class DBAlarm(Base):
     resolved_by = Column(BigInteger)
     resolved_at = Column(BigInteger)
     create_time = Column(BigInteger)  # 平台创建时间，用于排序
-
-
-class TaskTracebackRequest(BaseModel):
-    task_id: int
-    video_type: str = "processed"  # "raw" 或 "processed"

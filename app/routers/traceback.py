@@ -23,7 +23,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBAlarm
+from app.models import DBAlarm
 from app.services.traceback import MediaToken, SegmentFinder
 from app.services.traceback.segment_finder import SegmentRef, get_default_base_dir
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError

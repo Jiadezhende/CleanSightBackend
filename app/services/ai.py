@@ -12,8 +12,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from app.models.frame import Frame, ProcessedFrame
-from app.models.task import CleaningTask as CleaningTask
+from app.domain.task import CleaningTask
 from app.services.inference.core.manager import InferenceManager
 from app.settings import settings
 
@@ -38,9 +37,9 @@ def stop():
     manager.stop()
 
 
-def get_result(client_id: str, as_model: bool = False):
-    """获取推理结果"""
-    return manager.get_result(client_id, as_model=as_model)
+def get_result(client_id: str):
+    """获取最新推理帧（domain Frame）；WS 编码在 routers/ai.py 边界完成。"""
+    return manager.get_result(client_id)
 
 
 def remove_client(client_id: str):

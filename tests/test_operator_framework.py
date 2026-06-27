@@ -8,7 +8,8 @@ import pytest
 
 from app.services.client.queues import ClientQueues
 from app.services.inference.config import load_stage_config
-from app.services.inference.data_models import Alarm, AlarmType, Detection, FrameDetections
+from app.domain.alarm import Alarm, AlarmType
+from app.domain.detection import Detection, FrameDetections
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.workflows.operator import Operator
 

@@ -12,23 +12,18 @@ TemporalActor (1Hz)  → cq.get_slide_window() → operator.analyze() → operat
 VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal() → render → cq
 """
 
-import base64
 import logging
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-import cv2
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
-from app.models.frame import Frame, ProcessedFrame
-from app.models.task import CleaningTask as CleaningTask
+from app.domain.alarm import ALARM_MODE_REALTIME, Alarm, AlarmMetric
+from app.domain.frame import Frame
+from app.domain.task import CleaningTask
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.core.service import ModelWorkerService
-from app.services.inference.data_models import ALARM_MODE_REALTIME, Alarm, AlarmMetric
 from app.services.inference.workers.temporal import ClientTemporalActor
 from app.services.inference.workers.visualization import VisualizationWorkerPool
 
@@ -94,9 +89,6 @@ class InferenceManager:
         # 不再反向 push db_dir 进其私有 hls_pool.strategy —— 消除跨服务穿透。
         from app.services.persistence import persistence_manager as _persistence_manager
         self.persistence_manager = _persistence_manager
-
-        self._encoded_cache: Dict[str, Dict[str, Any]] = {}
-        self._encoded_cache_lock = threading.Lock()
 
         logger.debug("[InferenceManager] Initialization completed")
 
@@ -172,47 +164,18 @@ class InferenceManager:
 
     # ========== 公共 API ==========
 
-    def get_result(
-        self, client_id: str, as_model: bool = False
-    ) -> Union[None, Frame, ProcessedFrame]:
-        """返回最新处理帧（从 RT-ProcessedQueue）"""
+    def get_result(self, client_id: str) -> Optional[Frame]:
+        """返回最新处理帧（domain Frame）。
+
+        编码为 WS 载荷（JPEG base64）是边界职责，在 routers/ai.py 完成；
+        core 服务只交付 domain 对象。
+        """
         if not client_manager.has_client(client_id):
             return None
-
         cq = client_manager.get_client(client_id)
         if not cq:
             return None
-
-        frame_data = cq.get_latest_result()
-        if frame_data is None:
-            return None
-
-        if not as_model:
-            return frame_data
-
-        with self._encoded_cache_lock:
-            cached = self._encoded_cache.get(client_id)
-            if cached and cached["timestamp"] == frame_data.timestamp:
-                task_id = cq.get_task_id()
-                return ProcessedFrame(
-                    task_id=task_id,
-                    client_id=client_id,
-                    raw_timestamp=datetime.fromtimestamp(frame_data.timestamp),
-                    processed_frame_b64=cached["b64"],
-                    inference_result=cached["inference_result"],
-                )
-
-        task_id = cq.get_task_id()
-        processed_frame = self._create_processed_frame(frame_data, task_id, client_id)
-
-        with self._encoded_cache_lock:
-            self._encoded_cache[client_id] = {
-                "timestamp": frame_data.timestamp,
-                "b64": processed_frame.processed_frame_b64,
-                "inference_result": processed_frame.inference_result,
-            }
-
-        return processed_frame
+        return cq.get_latest_result()
 
     def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
         """为客户端设置任务，并创建对应的 ClientTemporalActor。
@@ -368,9 +331,6 @@ class InferenceManager:
                 client_id,
             )
 
-        with self._encoded_cache_lock:
-            self._encoded_cache.pop(client_id, None)
-
         logger.info("[InferenceManager] Inference resources removed: %s", client_id)
 
     def status(self) -> Dict[str, Any]:
@@ -380,48 +340,11 @@ class InferenceManager:
 
     # ========== 内部辅助方法 ==========
 
-    def _create_processed_frame(
-        self, frame_data: Frame, task_id: Optional[int], client_id: str
-    ) -> ProcessedFrame:
-        _, buf = cv2.imencode(".jpg", frame_data.frame)
-        b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
-
-        inference_result = self._make_json_serializable(
-            frame_data.inference_result or {}
-        )
-
-        return ProcessedFrame(
-            task_id=task_id,
-            client_id=client_id,
-            raw_timestamp=datetime.fromtimestamp(frame_data.timestamp),
-            processed_frame_b64=b64,
-            inference_result=inference_result,
-        )
-
-    def _make_json_serializable(self, obj: Any) -> Any:
-        if isinstance(obj, dict):
-            result = {}
-            for key, value in obj.items():
-                if key in ("annotated_frame", "processed_frame", "frame"):
-                    continue
-                result[key] = self._make_json_serializable(value)
-            return result
-        elif isinstance(obj, (list, tuple)):
-            return [self._make_json_serializable(item) for item in obj]
-        elif isinstance(obj, np.ndarray):
-            if obj.size < 100:
-                return obj.tolist()
-            return None
-        elif isinstance(obj, (np.integer, np.floating)):
-            return obj.item()
-        else:
-            return obj
-
     def _persist_settlement_alarms(
         self, client_id: str, cq: ClientQueues, alarms: List[Alarm]
     ) -> None:
         """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
-        from app.services.inference.data_models import get_stage_alias
+        from app.services.inference.naming import get_stage_alias
         from app.services.inference.workflows.alarm_sink import persist_alarms
 
         # 可读性出口：告警 step_name/stage 用别名（主键是 step_id，对人不可读）
@@ -513,7 +436,7 @@ class InferenceManager:
         #   stage 主键(step_id) → alias（写告警 step_name + 可视化叠字）
         from app.services.inference.stage_factory import StageFactory
         from app.services.inference.config import load_stage_config
-        from app.services.inference.data_models import _set_task_metric_map, _set_stage_alias_map
+        from app.services.inference.naming import _set_task_metric_map, _set_stage_alias_map
         _factory = StageFactory(load_stage_config())
         _set_task_metric_map(_factory.build_task_metric_map())
         _set_stage_alias_map(_factory.build_stage_alias_map())

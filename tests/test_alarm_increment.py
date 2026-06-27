@@ -6,12 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.client.queues import ClientQueues
-from app.services.inference.data_models import ALARM_MODE_REALTIME, Detection, FrameDetections
-from app.services.inference.models import AlarmRecord
+from app.domain.alarm import ALARM_MODE_REALTIME, Alarm
+from app.domain.detection import Detection, FrameDetections
 
 
-def _make_record(metric="BUBBLE", mode="REALTIME", stage="LEAK") -> AlarmRecord:
-    return AlarmRecord(
+def _make_record(metric="BUBBLE", mode="REALTIME", stage="LEAK") -> Alarm:
+    return Alarm(
         alarm_type="流程违规",
         alarm_level="high",
         alarm_message="test alarm",

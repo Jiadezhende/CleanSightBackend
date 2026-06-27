@@ -16,11 +16,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from app.services.inference.data_models import (
-    Detection,
-    FrameDetections,
-    RenderSpec,
-)
+from app.domain.detection import Detection, FrameDetections
+from app.domain.render import RenderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +26,7 @@ class Detector(ABC):
     """无状态推理检测器基类。
 
     职责：
-    - 执行单帧或批量 GPU 推理，输出标准化 DetectionOutput
+    - 执行单帧或批量 GPU 推理，输出标准化 FrameDetections
     - 准备可视化数据（检测框、标签、状态栏文本等）
 
     不持有任何 per-client 状态。同一实例被所有 client 共享。
@@ -49,7 +46,7 @@ class Detector(ABC):
             context: 请求上下文（含 client_id 等）
 
         Returns:
-            DetectionOutput：标准化检测输出
+            FrameDetections：标准化检测输出
         """
 
     @abstractmethod
@@ -60,7 +57,7 @@ class Detector(ABC):
             output: infer()/infer_batch() 的输出
 
         Returns:
-            VisualizationData：供 FixedVisualizer 渲染
+            RenderSpec：供 FixedVisualizer 渲染
         """
 
     def infer_batch(
@@ -145,7 +142,7 @@ class YOLODetector(Detector):
     def _adapt_output(
         self, raw_output: Any, frame: np.ndarray, timestamp: float
     ) -> FrameDetections:
-        """将 YOLO Results 转换为 DetectionOutput。
+        """将 YOLO Results 转换为 FrameDetections。
 
         子类可 override 以支持自定义输出格式（如分割 mask、关键点等）。
         """

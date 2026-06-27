@@ -22,14 +22,15 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
-from app.services.inference.data_models import Alarm, FrameDetections
+from app.domain.alarm import Alarm
+from app.domain.detection import FrameDetections
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class AlignedFrame:
-    """多流按 ts 对齐后的一帧：同一 ts 下各订阅流的 DetectionOutput。"""
+    """多流按 ts 对齐后的一帧：同一 ts 下各订阅流的 FrameDetections。"""
 
     ts: float
     by_source: Dict[str, FrameDetections]
@@ -78,7 +79,7 @@ class Operator(ABC):
     ) -> List[AlignedFrame]:
         """多流按 ts 对齐（inner-join：仅保留所有订阅流都到齐的 ts）。
 
-        依赖不变式：同帧多流的 ts 完全相等（来自同一 InferenceResult.timestamp），
+        依赖不变式：同帧多流的 ts 完全相等（来自同一 FrameInference.timestamp），
         故可用 ts 做精确 key。缺帧/错帧的 ts 被丢弃（latest-wins 等策略留子类 override）。
         """
         clipped = {s: self._clip(windows.get(s, [])) for s in self.subscribes}

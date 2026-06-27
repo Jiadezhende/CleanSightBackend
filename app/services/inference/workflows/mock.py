@@ -21,15 +21,9 @@ import numpy as np
 
 from app.services.inference.workflows.detector import Detector
 from app.services.inference.workflows.operator import Operator
-from app.services.inference.data_models import (
-    Alarm,
-    AlarmType,
-    Detection,
-    FrameDetections,
-    RenderSpec,
-    RenderItem,
-    RenderType,
-)
+from app.domain.alarm import Alarm, AlarmType
+from app.domain.detection import Detection, FrameDetections
+from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from app.models.frame import Frame
+from app.domain.frame import Frame
 from app.services import ai
 from app.services.stream.config import DecoderConfig
 from app.utils.exceptions import FFmpegError, StreamConnectionError

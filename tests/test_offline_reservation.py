@@ -3,18 +3,14 @@
 online/offline 已彻底分离：实时链路只产 EventFact、不落盘事实；
 FeatureStore（特征）与 FactLedger（事实，offline 预置）按 (task_id, step_id) 落盘，
 与 HLS 同款工作目录。本测试守住这两个落盘基座的 round-trip 契约：
-- FeatureStore.append/load(task_id, step_id, ...)：常开落盘的特征可按 source 回读为 DetectionOutput 全序列
+- FeatureStore.append/load(task_id, step_id, ...)：常开落盘的特征可按 source 回读为 FrameDetections 全序列
 - FactLedger：EventFact / SegmentFact 混合落盘与按 type 判别回读（offline 数据契约）
 """
 
 import tempfile
 
-from app.services.inference.data_models import (
-    Detection,
-    FrameDetections,
-    EventFact,
-    SegmentFact,
-)
+from app.domain.detection import Detection, FrameDetections
+from app.services.inference.models import EventFact, SegmentFact
 from app.services.inference.models import FrameInference
 from app.services.inference.store import FactLedger, FeatureStore
 
@@ -28,9 +24,9 @@ def _make_result(ts: float, bubble_n: int, bending_n: int) -> FrameInference:
 
     return FrameInference(
         client_id="c1",
-        timestamp=ts,
         stage="LEAK",
-        result={
+        timestamp=ts,
+        detections={
             "bubble": FrameDetections(detections=dets(bubble_n, "bubble"), metadata={}, timestamp=ts),
             "bending": FrameDetections(detections=dets(bending_n, "bent"), metadata={}, timestamp=ts),
         },
@@ -38,7 +34,7 @@ def _make_result(ts: float, bubble_n: int, bending_n: int) -> FrameInference:
 
 
 def test_feature_store_load_roundtrip():
-    """落盘的多模型特征可按 (task, step) + source 回读为 DetectionOutput 全序列。"""
+    """落盘的多模型特征可按 (task, step) + source 回读为 FrameDetections 全序列。"""
     d = tempfile.mkdtemp()
     fs = FeatureStore(d, batch_size=2)
     fs.append(7, 1, _make_result(1.0, bubble_n=2, bending_n=0))

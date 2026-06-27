@@ -4,7 +4,7 @@
 - 管理 StageAwareDispatcher（取帧分组）
 - 为每个 stage 创建 MultiModelWorkerPool
 - 启动推理线程，消费各 stage 的批量请求
-- 将 DetectionOutput 同步到 ClientQueues.slide_window
+- 将 FrameDetections 同步到 ClientQueues.slide_window
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class ModelWorkerService:
     - 管理 StageAwareDispatcher（取帧分组）
     - 为每个 stage 创建 MultiModelWorkerPool
     - 启动推理线程，消费各 stage 的批量请求
-    - 将 DetectionOutput 同步到 ClientQueues.slide_window
+    - 将 FrameDetections 同步到 ClientQueues.slide_window
     """
 
     def __init__(
@@ -292,7 +292,7 @@ class ModelWorkerService:
 
             cq = self._client_manager.get_client(res.client_id)
             # Path 1: per-task slide_window（temporal 需要历史窗口）
-            for task_name, detection_output in res.result.items():
+            for task_name, detection_output in res.detections.items():
                 cq.push_detection(task_name, detection_output)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
             cq.set_latest_inference(res)

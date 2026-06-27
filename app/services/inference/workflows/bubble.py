@@ -1,7 +1,7 @@
 """气泡检测：BubbleDetector（流源）+ BubbleOperator（流算子，analyze+judge 合一）
 
 BubbleDetector（推理线程）：
-    YOLO11n-seg 检测气泡实例，输出 DetectionOutput。
+    YOLO11n-seg 检测气泡实例，输出 FrameDetections。
     无状态，多 Client 共享同一实例，产出 "bubble" 流。
 
 BubbleOperator（时序线程，流算子）：
@@ -19,15 +19,9 @@ import numpy as np
 
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.operator import Operator
-from app.services.inference.data_models import (
-    Alarm,
-    AlarmMetric,
-    AlarmType,
-    FrameDetections,
-    RenderSpec,
-    RenderItem,
-    RenderType,
-)
+from app.domain.alarm import Alarm, AlarmMetric, AlarmType
+from app.domain.detection import FrameDetections
+from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 

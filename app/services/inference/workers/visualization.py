@@ -22,15 +22,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.inference.data_models import (
-    FrameDetections,
-    RenderSpec,
-    RenderItem,
-    RenderType,
-    get_stage_alias,
-)
-
-from app.models.frame import Frame
+from app.domain.detection import FrameDetections
+from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.domain.frame import Frame
+from app.services.inference.naming import get_stage_alias
 from app.services.client import client_manager
 from app.services.inference.models import FrameInference
 from app.utils.worker_guard import guarded_run
@@ -133,13 +128,13 @@ class VisualizationWorker:
 
         # 5. 渲染
         stage = inference.stage
-        annotated_frame = self._render(frame, stage, inference.result, events)
+        annotated_frame = self._render(frame, stage, inference.detections, events)
 
         # 6. 写回
         frame_data = Frame(
             timestamp=inference.timestamp,
             frame=annotated_frame,
-            inference_result=inference.result,
+            inference_result=inference.detections,
         )
         cq.append_ca_processed(frame_data)
         cq.set_latest_rendered(frame_data)
@@ -159,7 +154,7 @@ class VisualizationWorker:
         Args:
             frame: 原始帧
             stage: 当前阶段
-            detection_results: 推理结果 {task_name: DetectionOutput}（同帧原子快照）
+            detection_results: 推理结果 {task_name: FrameDetections}（同帧原子快照）
             events: 时序事件列表
         """
         try:
@@ -259,7 +254,7 @@ class VisualizationWorkerPool:
 class FixedVisualizer:
     """固定可视化渲染器
 
-    根据 Task 提供的 VisualizationData 渲染视频帧，无需针对每个任务编写可视化代码。
+    根据 Task 提供的 RenderSpec 渲染视频帧，无需针对每个任务编写可视化代码。
     支持多种可视化类型：BBox、Segmentation、Keypoint
     """
 

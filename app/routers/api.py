@@ -20,7 +20,8 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBTask, CleaningTask
+from app.domain.task import CleaningTask
+from app.models import DBTask
 from app.routers.health import get_health_monitor
 from app.services import ai
 from app.services.client.manager import client_manager

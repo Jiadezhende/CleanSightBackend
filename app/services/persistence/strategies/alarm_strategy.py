@@ -11,7 +11,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict
 
-from app.services.inference.data_models import AlarmType
+from app.domain.alarm import AlarmType
 from app.settings import settings
 
 logger = logging.getLogger(__name__)

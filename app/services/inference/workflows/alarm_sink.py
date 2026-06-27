@@ -12,8 +12,7 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from app.services.inference.data_models import Alarm
-from app.services.inference.models import AlarmRecord
+from app.domain.alarm import Alarm
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +51,11 @@ def persist_alarms(
             "alarm_message": alarm.alarm_message,
             "detection_result": alarm.metadata if alarm.metadata else None,
         })
-        cq.append_alarm_record(AlarmRecord(
-            alarm_type=alarm.alarm_type,
-            alarm_level=alarm.alarm_level,
-            alarm_message=alarm.alarm_message,
-            mode=mode,
-            metric=metric,
-            stage=stage_name,
-            metadata=alarm.metadata or {},
-        ))
+        # Alarm 已并入 AlarmRecord：给产出方的同一份告警补落库字段后入环形缓冲
+        # （seq 由 append_alarm_record 赋）。
+        alarm.mode = mode
+        alarm.stage = stage_name
+        cq.append_alarm_record(alarm)
         if log_each:
             logger.info(
                 "[alarm_sink] %s alarm for %s: %s", mode, client_id, alarm.alarm_message
