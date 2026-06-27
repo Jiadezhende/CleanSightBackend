@@ -4,10 +4,10 @@
     CleanLargeDetector —— clean-large-best.pt（手 / scope_control_body / scope_mid_section）
     CleanSmallDetector —— clean-small-best.pt（syringe / air_gun / scope_distal_end）
 
-只在画面叠检测框，不产时序事实、不上报告警——时序/告警在 config 里复用 mock 的
-MockAnalyzer/MockJudge 透传（Judge consecutive_trigger 设大值即永不告警）。
+只在画面叠检测框，不产时序事实、不上报告警——CLEAN stage 的 rules 为空，
+不建 Operator/Actor，仅由 detector 的 prepare_visualization_data 提供检测框可视化。
 
-detector.name 必须与 config 的 model name 一致（决定 slide_window key 与 analyzer 配对），
+detector.name = 该 detector 产出的流名（决定 slide_window key 与 Operator.subscribes 订阅），
 故各类硬编码 name（同 BubbleDetector/BendingDetector 的写法）。
 """
 

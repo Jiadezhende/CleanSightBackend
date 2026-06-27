@@ -1,6 +1,6 @@
 """推理服务配置加载器
 
-负责从配置文件中加载 Stage → Model → TemporalAnalyzer 的绑定关系，
+负责从配置文件中加载 Stage → detectors(流源) / rules(流算子) 的绑定关系，
 实现配置驱动的架构，解耦具体实现与配置。
 
 使用方式：
@@ -26,18 +26,24 @@ _global_inference_config: Optional["InferenceConfig"] = None
 
 
 class StageConfig:
-    """单个 Stage 的配置"""
+    """单个 Stage 的配置（流处理框架：detectors 流源 / rules 流算子 / offline 占位）"""
 
     def __init__(self, stage_name: str, config_dict: Dict[str, Any]):
         self.stage_name = stage_name
         # 可读别名（写告警 step_name + 可视化叠字）；缺省回退主键本身
         self.alias: str = config_dict.get("alias") or stage_name
-        # 每个 model 条目自带 class/params + analyzer_class/judge_class/realtime；
-        # 确保即使 models 为 None 也转换为空列表
-        self.models: List[Dict[str, Any]] = config_dict.get("models") or []
+        # 流源：detector 条目（name/class/params），产出按 name 索引的流
+        self.detectors: List[Dict[str, Any]] = config_dict.get("detectors") or []
+        # 流算子：rule 条目（name/subscribes/class/params/realtime），一条规则一个 Operator
+        self.rules: List[Dict[str, Any]] = config_dict.get("rules") or []
+        # 离线段（segmenter）占位，本次不实现
+        self.offline: Dict[str, Any] = config_dict.get("offline") or {}
 
     def __repr__(self):
-        return f"StageConfig(stage={self.stage_name}, models={len(self.models)})"
+        return (
+            f"StageConfig(stage={self.stage_name}, "
+            f"detectors={len(self.detectors)}, rules={len(self.rules)})"
+        )
 
 
 class InferenceConfig:
@@ -242,8 +248,8 @@ if __name__ == "__main__":
             continue
 
         print(f"\nStage: {stage_name} (alias={stage_config.alias})")
-        print(f"  Models: {len(stage_config.models)}")
-        for model_cfg in stage_config.models:
-            print(f"    - {model_cfg['name']}: {model_cfg['class']}")
-            if model_cfg.get('analyzer_class'):
-                print(f"        analyzer: {model_cfg['analyzer_class']}")
+        print(f"  Detectors: {len(stage_config.detectors)}, Rules: {len(stage_config.rules)}")
+        for det_cfg in stage_config.detectors:
+            print(f"    - detector {det_cfg['name']}: {det_cfg['class']}")
+        for rule_cfg in stage_config.rules:
+            print(f"    - rule {rule_cfg['name']} subscribes={rule_cfg.get('subscribes')}: {rule_cfg['class']}")

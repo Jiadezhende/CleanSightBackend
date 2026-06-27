@@ -1,4 +1,4 @@
-"""Stage 工厂 - 根据配置为每个 Stage 创建 Detector 和 TemporalAnalyzer 实例"""
+"""Stage 工厂 - 流处理框架：为每个 Stage 创建流源 Detector 和流算子 Operator。"""
 
 import importlib
 import logging
@@ -11,104 +11,92 @@ logger = logging.getLogger(__name__)
 
 
 class StageFactory:
-    """根据 InferenceConfig 为指定 Stage 实例化所有 Detector 和 TemporalAnalyzer。"""
+    """根据 InferenceConfig 为指定 Stage 实例化所有 Detector 和 Operator。"""
 
     def __init__(self, config: InferenceConfig):
         self.config = config
 
     def create_detectors_for_stage(self, stage_name: str) -> List[Any]:
-        """为指定 Stage 创建所有 Detector 实例（共享，推理线程 + 可视化线程）。"""
+        """为指定 Stage 创建所有 Detector 实例（流源，共享，推理线程 + 可视化线程）。"""
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config:
             logger.warning("Stage '%s' 配置不存在", stage_name)
             return []
 
         detectors = []
-        for model_cfg in stage_config.models:
+        for det_cfg in stage_config.detectors:
             try:
-                detector = _instantiate_from_config(model_cfg)
+                detector = _instantiate_from_config(det_cfg)
                 detectors.append(detector)
-                logger.info("✓ 成功创建 Detector: %s", model_cfg.get("name", "?"))
+                logger.info("✓ 成功创建 Detector: %s", det_cfg.get("name", "?"))
             except Exception as e:
-                logger.error("✗ 创建 Detector 失败 %s: %s", model_cfg.get("name", "?"), e, exc_info=True)
+                logger.error("✗ 创建 Detector 失败 %s: %s", det_cfg.get("name", "?"), e, exc_info=True)
 
         return detectors
 
-    def create_workflow_specs_for_stage(
+    def create_operators_for_stage(
         self, stage_name: str
-    ) -> List[Tuple[Type, Dict[str, Any], Any, Dict[str, Any]]]:
-        """为指定 Stage 返回 (Analyzer, Judge) 配对的实例化规格。
+    ) -> List[Tuple[Type, Dict[str, Any]]]:
+        """为指定 Stage 返回流算子 Operator 的实例化规格（每条规则一个）。
 
-        调用方（set_task）用这些 spec 按 Client 创建独立实例对：
-            for a_cls, a_kw, j_cls, j_kw in specs:
-                analyzer = a_cls(**a_kw)
-                judge = j_cls(**j_kw) if j_cls else None
+        调用方（set_task）用这些 spec 按 Client 创建独立实例：
+            for cls, kwargs in specs:
+                operator = cls(**kwargs)   # kwargs 含 name/subscribes/params
 
         Returns:
-            List of (AnalyzerClass, analyzer_kwargs, JudgeClass|None, judge_kwargs) tuples.
-            没有 analyzer_class 的 model 条目跳过；没有 judge_class 的 judge 部分置 None。
-            YAML model name 注入为 analyzer/judge 的 runtime name（slide_window key 与配对依据）。
+            List of (OperatorClass, kwargs) tuples。
+            rule.subscribes 显式必填（输入流名 = detector.name）；缺失则 fail-fast 跳过该规则。
+            rule.name 注入为算子自身/输出身份，subscribes 注入为输入流清单。
         """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config:
             logger.warning("Stage '%s' 配置不存在", stage_name)
             return []
 
-        specs: List[Tuple[Type, Dict[str, Any], Any, Dict[str, Any]]] = []
-        for model_cfg in stage_config.models:
-            analyzer_class_path = model_cfg.get("analyzer_class")
-            if not analyzer_class_path:
-                logger.debug(
-                    "model '%s' 无 analyzer_class，跳过 (Analyzer, Judge) 创建",
-                    model_cfg.get("name", "?"),
-                )
+        specs: List[Tuple[Type, Dict[str, Any]]] = []
+        for rule_cfg in stage_config.rules:
+            name = rule_cfg.get("name", "")
+            class_path = rule_cfg.get("class")
+            if not class_path:
+                logger.error("✗ rule '%s' 缺少 class 字段，跳过", name)
                 continue
-
-            name = model_cfg.get("name", "")
+            subscribes = rule_cfg.get("subscribes")
+            if not subscribes:
+                logger.error("✗ rule '%s' 必须显式声明 subscribes（输入流），跳过", name)
+                continue
             try:
-                a_cls = _import_class(analyzer_class_path)
-                a_kwargs = dict(model_cfg.get("analyzer_params") or {})
-                a_kwargs.setdefault("name", name)
-
-                j_cls = None
-                j_kwargs: Dict[str, Any] = {}
-                judge_class_path = model_cfg.get("judge_class")
-                if judge_class_path:
-                    j_cls = _import_class(judge_class_path)
-                    j_kwargs = dict(model_cfg.get("judge_params") or {})
-                    j_kwargs.setdefault("name", name)
-                else:
-                    logger.debug("model '%s' 无 judge_class，仅产事实不出告警", name)
-
-                specs.append((a_cls, a_kwargs, j_cls, j_kwargs))
-                logger.info("✓ 注册 (Analyzer, Judge) spec: %s", name)
+                cls = _import_class(class_path)
+                kwargs = dict(rule_cfg.get("params") or {})
+                kwargs.setdefault("name", name)
+                kwargs["subscribes"] = list(subscribes)
+                specs.append((cls, kwargs))
+                logger.info("✓ 注册 Operator spec: %s (subscribes=%s)", name, subscribes)
             except Exception as e:
-                logger.error(
-                    "✗ 注册 (Analyzer, Judge) 失败 %s: %s", name, e, exc_info=True
-                )
+                logger.error("✗ 注册 Operator 失败 %s: %s", name, e, exc_info=True)
 
         return specs
 
     def build_task_metric_map(self) -> Dict[str, AlarmMetric]:
-        """从 YAML model name 构建 task_name → AlarmMetric 映射（唯一定义处）。
+        """构建 stream_name(detector.name) → AlarmMetric 映射（signals_10s 唯一定义处）。
 
-        仅包含 realtime: true（默认）的模型，即有实时滑动窗口信号的指标。
-        realtime: false 的模型（如 bending）只产结算告警，不纳入 signals_10s。
-        无法映射到 AlarmMetric 的 model（如 mock_detection）直接跳过。
+        key 必须是 detector.name（= slide_window key），由 realtime:true 规则的 subscribes 取得。
+        realtime: false 的规则（如 bending_check）只产结算告警，不纳入 signals_10s。
+        无法映射到 AlarmMetric 的流名直接跳过。
         """
         mapping: Dict[str, AlarmMetric] = {}
         for stage_cfg in self.config.stages.values():
-            for model_cfg in stage_cfg.models:
-                if not model_cfg.get("realtime", True):
+            for rule_cfg in stage_cfg.rules:
+                if not rule_cfg.get("realtime", True):
                     continue
-                name = model_cfg.get("name", "")
-                try:
-                    mapping[name] = AlarmMetric(name.upper())
-                except ValueError:
-                    logger.warning(
-                        "[StageFactory] model '%s' has no AlarmMetric mapping, excluded from signals_10s",
-                        name,
-                    )
+                for stream_name in rule_cfg.get("subscribes") or []:
+                    try:
+                        mapping[stream_name] = AlarmMetric(stream_name.upper())
+                    except ValueError:
+                        logger.warning(
+                            "[StageFactory] stream '%s' has no AlarmMetric mapping, "
+                            "excluded from signals_10s",
+                            stream_name,
+                        )
         return mapping
 
     def build_stage_alias_map(self) -> Dict[str, str]:

@@ -1,103 +1,98 @@
-# 推理服务阶段配置文件（Detector + TemporalAnalyzer 架构）
+# 推理服务阶段配置文件（流处理框架：流源 Detector + 流算子 Operator）
 #
 # 架构说明：
-# 1. 每个检测任务拆分为 Detector（无状态推理）+ TemporalAnalyzer（有状态时序分析）
-# 2. Detector 多 Client 共享同一实例，TemporalAnalyzer 每 Client 独立实例化
-# 3. 可视化使用固定渲染器（FixedVisualizer），Detector 只需提供 VisualizationData
-# 4. YAML 中声明 class/params（Detector）和 analyzer_class/analyzer_params（TemporalAnalyzer）
+# 1. detectors[]：流源（分组粒度），无状态多 Client 共享；name = 该 detector 产出的流名
+# 2. rules[]：流算子（规则粒度），每 Client 独立；subscribes 订阅输入流名，
+#    class = 合并 analyze(推进状态)+judge(出告警) 的 Operator，params.window_seconds = 感受野
+# 3. offline：离线段（stage 粒度）占位，本次未实现
+# 4. 可视化使用固定渲染器（FixedVisualizer），Detector 只需提供 VisualizationData
 #
 # 开发者只需：
-# 1. 创建 Detector 子类（实现 infer + prepare_visualization_data）
-# 2. 创建 TemporalAnalyzer 子类（实现 analyze_temporal，可选 override finalize）
-# 3. 在 YAML 中声明两者的 class 和 params
+# 1. 创建 Detector 子类（实现 infer + prepare_visualization_data），detectors[] 加一行
+# 2. 创建 Operator 子类（实现 analyze + judge，可选 override finalize），rules[] 加一行并声明 subscribes
 
 stages:
   # 主键 = step_id（task.current_step，字符串）；alias = 可读名（写告警 step_name + 可视化叠字）
+  #
+  # 流处理框架，每个 stage 三段：
+  #   detectors[] —— 流源（分组粒度）：name = 该 detector 产出的流名（slide_window key）
+  #   rules[]     —— 流算子（规则粒度）：subscribes 订阅输入流名，class = 合并 analyze+judge 的 Operator
+  #   offline     —— 离线段（stage 粒度）占位，本次未实现
+  #
   # ==================== step "1" / LEAK 阶段（泄漏检测） ====================
   "1":
     alias: LEAK
-    # 模型列表（按顺序执行）
-    # 每个 Task 自带时序分析、可视化、告警逻辑
-    models:
+    detectors:
       - name: bubble
         class: app.services.inference.workflows.bubble.BubbleDetector
-        analyzer_class: app.services.inference.workflows.bubble.BubbleAnalyzer
-        judge_class: app.services.inference.workflows.bubble.BubbleJudge
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
-        analyzer_params:
-          window_seconds: 3.0          # 滑动窗口时长（秒）
-        judge_params:
-          birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
-
       - name: bending
-        realtime: false              # 结算告警，不纳入 signals_10s 滑动窗口
         class: app.services.inference.workflows.bending.BendingDetector
-        analyzer_class: app.services.inference.workflows.bending.BendingAnalyzer
-        judge_class: app.services.inference.workflows.bending.BendingJudge
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
-        analyzer_params:
+    rules:
+      - name: bubble_leak
+        subscribes: [bubble]
+        realtime: true               # 实时信号，纳入 signals_10s
+        class: app.services.inference.workflows.bubble.BubbleOperator
+        params:
+          window_seconds: 3.0          # 感受野（秒）= 出生率滑窗时长
+          birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
+      - name: bending_check
+        subscribes: [bending]
+        realtime: false              # 结算告警，不纳入 signals_10s
+        class: app.services.inference.workflows.bending.BendingOperator
+        params:
           debounce_frames: 5           # 状态切换去抖帧数
-        judge_params:
           required_bend_actions: 4     # 合格所需最少弯曲次数
-
-    # 以下配置在新架构中已不需要（保留用于向后兼容）
-    # temporal_analyzer:
-    #   class: app.services.inference.components.DefaultTemporalAnalyzer
-    #   config: ...
-    # visualizer:
-    #   class: app.services.inference.components.DefaultVisualizer
-    # alarm_triggers: ...
+    offline: {}                      # 预留，本次未实现
 
   # ==================== step "2" / CLEAN 阶段（清洁检测：按尺寸分两组，仅检测画框） ====================
-  # 时序/告警复用 mock 透传（consecutive_trigger 设大值即永不告警），只叠检测框。
+  # rules 为空 → 不建 Operator/Actor，仅由 detector 提供检测框可视化。
   "2":
     alias: CLEAN
-    models:
+    detectors:
       - name: clean_large       # 大目标组：手 / scope_control_body / scope_mid_section
         class: app.services.inference.workflows.clean.CleanLargeDetector
-        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
-        judge_class: app.services.inference.workflows.mock.MockJudge
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-large-best.pt
           conf_threshold: 0.25
           iou_threshold: 0.45
           enabled: true
-        judge_params:
-          consecutive_trigger: 999    # 永不满足，仅检测画框不告警
-
       - name: clean_small       # 小目标组：syringe / air_gun / scope_distal_end
         class: app.services.inference.workflows.clean.CleanSmallDetector
-        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
-        judge_class: app.services.inference.workflows.mock.MockJudge
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-small-best.pt
           conf_threshold: 0.25
           iou_threshold: 0.45
           enabled: true
-        judge_params:
-          consecutive_trigger: 999    # 永不满足，仅检测画框不告警
+    rules: []
+    offline: {}                      # 预留：离线动作分割模型（stage 粒度）将挂这里
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================
   MOCK:
     alias: MOCK
-    models:
-      - name: mock_detection
+    detectors:
+      - name: mock
         class: app.services.inference.workflows.mock.MockDetector
         params:
           brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
-        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
-        judge_class: app.services.inference.workflows.mock.MockJudge
-        judge_params:
+    rules:
+      - name: mock_passthrough
+        subscribes: [mock]
+        realtime: true
+        class: app.services.inference.workflows.mock.MockOperator
+        params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
+    offline: {}
 
 # ==================== 全局配置（所有模块共享） ====================
 global:

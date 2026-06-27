@@ -1,33 +1,29 @@
-"""气泡检测：BubbleDetector + BubbleAnalyzer（L3 产事实）+ BubbleJudge（L4 出告警）
+"""气泡检测：BubbleDetector（流源）+ BubbleOperator（流算子，analyze+judge 合一）
 
 BubbleDetector（推理线程）：
     YOLO11n-seg 检测气泡实例，输出 DetectionOutput。
-    无状态，多 Client 共享同一实例。
+    无状态，多 Client 共享同一实例，产出 "bubble" 流。
 
-BubbleAnalyzer（时序线程，L3）：
-    ByteTrack 跨帧追踪，统计新气泡出生率（birth_rate）。
-    birth_rate = sum(新气泡数) / 窗口帧数。只产 EventFact("bubble","birth_rate",rate)，不判定。
-    有状态（tracker/seen_ids/last_ts/new_count_history），每个 Client 独立实例化。
-
-BubbleJudge（时序线程，L4）：
-    持 birth_rate 阈值，birth_rate > threshold → 漏气报警（上升沿触发锁存）。
+BubbleOperator（时序线程，流算子）：
+    订阅 "bubble" 流。analyze：ByteTrack 跨帧追踪，统计新气泡出生率
+    birth_rate = sum(新气泡数) / 窗口帧数，写入共享 _sm。
+    judge：birth_rate > threshold → 漏气报警（上升沿触发锁存）。
+    有状态（tracker/seen_ids/last_ts/new_count_history/birth_rate/alarming），每 Client 独立。
 """
 
 import logging
 from types import SimpleNamespace
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
 from app.services.inference.workflows.detector import YOLODetector
-from app.services.inference.workflows.analyzer import TemporalAnalyzer
-from app.services.inference.workflows.judge import Judge
+from app.services.inference.workflows.operator import Operator
 from app.services.inference.data_models import (
     AlarmInfo,
     AlarmMetric,
     AlarmType,
     DetectionOutput,
-    EventFact,
     VisualizationData,
     VisItem,
     VisualizationType,
@@ -125,39 +121,71 @@ class BubbleDetector(YOLODetector):
         )
 
 
-# ====== 时序线程 L3：TemporalAnalyzer（只产事实）======
+# ====== 时序线程：Operator（analyze 推进状态 + judge 出告警，共享 _sm）======
 
-class BubbleAnalyzer(TemporalAnalyzer):
-    """气泡出生率时序分析器（L3）。有状态，每个 Client 独立实例化。
+class BubbleOperator(Operator):
+    """气泡漏气流算子。订阅 "bubble" 流，analyze 算 birth_rate、judge 上升沿告警。
 
-    测量状态机（self._sm）：
+    共享状态机（self._sm）：
         tracker: BYTETracker 实例（惰性初始化）
         seen_ids: 已确认过的 track_id 集合（永不清空）
         last_ts: 游标，已处理到的最新帧 timestamp
-        new_count_history: [(timestamp, new_bubble_count), ...] 滑动窗口
-    产出：EventFact("bubble", "birth_rate", rate)，裸值不带阈值（阈值归 BubbleJudge）。
+        new_count_history: [(timestamp, new_bubble_count), ...] 感受野内
+        birth_rate: analyze 写、judge 读（最近一次出生率）
+        alarming: judge 上升沿锁存
     """
 
-    def __init__(self, window_seconds: float = 3.0, name: str = "bubble"):
-        super().__init__(name=name)
-        self.window_seconds = window_seconds
+    def __init__(
+        self,
+        name: str = "bubble",
+        subscribes: List[str] = None,
+        window_seconds: float = 3.0,
+        birth_rate_threshold: float = 0.5,
+    ):
+        super().__init__(
+            name=name,
+            subscribes=subscribes or ["bubble"],
+            window_seconds=window_seconds,
+        )
+        self.birth_rate_threshold = birth_rate_threshold
         self._sm = {
             "tracker": None,
             "seen_ids": set(),
             "last_ts": 0.0,
             "new_count_history": [],
+            "birth_rate": 0.0,
+            "alarming": False,
         }
 
-    def trans(self, frames: List[DetectionOutput]) -> List[DetectionOutput]:
-        # 上游聚合特征即逐帧 bbox，时序模型直接消费，无需变换。
-        return frames
+    def analyze(self, windows: Dict[str, List[DetectionOutput]]) -> None:
+        window = self.primary_window(windows)
+        if not window:
+            return
+        self._advance(window)
+        self._sm["birth_rate"] = self._compute_metric()
 
-    def infer(self, feats: List[DetectionOutput]) -> float:
-        self._advance(feats)
-        return self._compute_metric()
+    def judge(self) -> Tuple[List[str], List[AlarmInfo]]:
+        birth_rate = self._sm["birth_rate"]
+        is_triggered = birth_rate > self.birth_rate_threshold
+        events = (
+            [f"bubble_birth_rate={birth_rate:.2f} (>{self.birth_rate_threshold})"]
+            if is_triggered else []
+        )
+        alarms: List[AlarmInfo] = []
 
-    def post_process(self, raw: float, ts: float) -> List[EventFact]:
-        return [EventFact(source=self.name, signal="birth_rate", value=raw, ts=ts)]
+        if is_triggered and not self._sm["alarming"]:
+            self._sm["alarming"] = True
+            alarms.append(AlarmInfo(
+                alarm_type=AlarmType.PROCESS_VIOLATION,
+                alarm_level="high",
+                alarm_message=f"持续产生新气泡（birth_rate={birth_rate:.2f}），疑似漏气",
+                metric=AlarmMetric.BUBBLE,
+                metadata={"birth_rate": birth_rate, "threshold": self.birth_rate_threshold},
+            ))
+        elif not is_triggered and self._sm["alarming"]:
+            self._sm["alarming"] = False
+
+        return events, alarms
 
     def _advance(self, window: List[DetectionOutput]) -> None:
         """游标推进：仅处理上次 tick 之后的新帧，驱动 ByteTrack 并记录 new_count。"""
@@ -195,44 +223,3 @@ class BubbleAnalyzer(TemporalAnalyzer):
         if not history:
             return 0.0
         return sum(n for _, n in history) / len(history)
-
-
-# ====== 时序线程 L4：Judge（消费事实出告警）======
-
-class BubbleJudge(Judge):
-    """气泡漏气判定（L4）。持 birth_rate 阈值，上升沿触发锁存。"""
-
-    def __init__(self, birth_rate_threshold: float = 0.5, name: str = "bubble"):
-        super().__init__(name=name)
-        self.birth_rate_threshold = birth_rate_threshold
-        self._sm = {"alarming": False}
-
-    def step(self, facts: List[EventFact]) -> Tuple[List[str], List[AlarmInfo]]:
-        if not facts:
-            return [], []
-        frame = self._frame(facts)
-        f = frame.get("birth_rate")
-        if f is None:
-            return [], []
-        birth_rate = f.value
-
-        is_triggered = birth_rate > self.birth_rate_threshold
-        events = (
-            [f"bubble_birth_rate={birth_rate:.2f} (>{self.birth_rate_threshold})"]
-            if is_triggered else []
-        )
-        alarms: List[AlarmInfo] = []
-
-        if is_triggered and not self._sm["alarming"]:
-            self._sm["alarming"] = True
-            alarms.append(AlarmInfo(
-                alarm_type=AlarmType.PROCESS_VIOLATION,
-                alarm_level="high",
-                alarm_message=f"持续产生新气泡（birth_rate={birth_rate:.2f}），疑似漏气",
-                metric=AlarmMetric.BUBBLE,
-                metadata={"birth_rate": birth_rate, "threshold": self.birth_rate_threshold},
-            ))
-        elif not is_triggered and self._sm["alarming"]:
-            self._sm["alarming"] = False
-
-        return events, alarms

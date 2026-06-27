@@ -10,21 +10,17 @@ from .stage_factory import StageFactory
 # 配置加载器
 from .config import StageConfig, load_stage_config
 
-# 推理工作流 & 检测器 / 分析器 / 规则
+# 推理工作流 & 流源 Detector / 流算子 Operator
 from .workflows import (
     Detector,
     YOLODetector,
-    TemporalAnalyzer,
-    Judge,
+    Operator,
     BubbleDetector,
-    BubbleAnalyzer,
-    BubbleJudge,
+    BubbleOperator,
     BendingDetector,
-    BendingAnalyzer,
-    BendingJudge,
+    BendingOperator,
     MockDetector,
-    MockAnalyzer,
-    MockJudge,
+    MockOperator,
 )
 
 # 核心模块
@@ -50,20 +46,15 @@ __all__ = [
     # 推理基类
     "Detector",
     "YOLODetector",
-    "TemporalAnalyzer",
-    "Judge",
-    # 检测器
+    "Operator",
+    # 流源 Detector
     "BubbleDetector",
     "BendingDetector",
     "MockDetector",
-    # 时序分析器（L3 只产事实）
-    "BubbleAnalyzer",
-    "BendingAnalyzer",
-    "MockAnalyzer",
-    # 规则（L4 出告警）
-    "BubbleJudge",
-    "BendingJudge",
-    "MockJudge",
+    # 流算子 Operator（analyze 推进状态 + judge 出告警）
+    "BubbleOperator",
+    "BendingOperator",
+    "MockOperator",
     # 核心
     "InferenceManager",
     "ModelWorkerService",

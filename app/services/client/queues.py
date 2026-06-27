@@ -112,9 +112,13 @@ class ClientQueues:
         # 当前处理阶段（由 _frontend_lock 保护）
         self._stage: str = initial_stage
 
-        # 滑动窗口：per-task 检测环形缓冲（由 _slide_window_lock 保护）
+        # 滑动窗口：per-stream(detector.name) 检测环形缓冲（由 _slide_window_lock 保护）
         self._slide_window: Dict[str, Deque[DetectionOutput]] = {}
+        # 缓冲保留时长底线（保证 signals_10s 仍见 10s）；感受野只向上扩展，不缩短。
         self._slide_window_seconds: float = 10.0
+        # per-stream 感受野覆盖：{流名: 订阅该流的算子最大 window_seconds}，由 set_stream_windows 配置。
+        # 实际保留时长 = max(底线, 该流感受野)。
+        self._stream_windows: Dict[str, float] = {}
 
         # 最新时序事件列表（由 _frontend_lock 保护，与 _stage 合并）
         self._latest_temporal: List[str] = []
@@ -405,14 +409,26 @@ class ClientQueues:
 
     # --- slide_window 操作 ---
 
+    def set_stream_windows(self, windows: Dict[str, float]) -> None:
+        """配置 per-stream 感受野（{流名: 最大 window_seconds}），整体替换。
+
+        由 InferenceManager.set_task() 在算子实例化后调用：缓冲保留时长取
+        max(底线 10s, 该流感受野)，故感受野只向上扩展，signals_10s 的 10s 不受影响。
+        """
+        with self._slide_window_lock:
+            self._stream_windows = dict(windows)
+
     def push_detection(self, task_name: str, output: DetectionOutput) -> None:
-        """将 DetectionOutput 追加到 per-task 滑动窗口，自动淘汰过期条目。"""
+        """将 DetectionOutput 追加到 per-stream 滑动窗口，按感受野自动淘汰过期条目。"""
         with self._slide_window_lock:
             if task_name not in self._slide_window:
                 self._slide_window[task_name] = deque()
             window = self._slide_window[task_name]
             window.append(output)
-            cutoff = output.timestamp - self._slide_window_seconds
+            retain = max(
+                self._slide_window_seconds, self._stream_windows.get(task_name, 0.0)
+            )
+            cutoff = output.timestamp - retain
             while window and window[0].timestamp < cutoff:
                 window.popleft()
 

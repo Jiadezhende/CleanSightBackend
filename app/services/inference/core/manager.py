@@ -2,13 +2,13 @@
 
 架构特点：
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
-2. 时序分析独立：ClientTemporalActor 持有 TemporalAnalyzer 实例（per-client），1Hz tick
+2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），1Hz tick
 3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
 4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_inference（最新快照）
 
 数据流：
 InferenceLoop → cq.push_detection() + cq.set_latest_inference()  [双写]
-TemporalActor (1Hz)  → cq.get_slide_window() → analyzer.run() → judge.step() → cq.set_latest_temporal()
+TemporalActor (1Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
 VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal() → render → cq
 """
 
@@ -103,9 +103,9 @@ class InferenceManager:
 
         返回结构：
         {
-            "LEAK": {
-                "models": [BubbleDetector, BendingDetector],   # List[Detector]，共享
-                "workflow_specs": [(BubbleAnalyzer, {...}, BubbleJudge, {...}), ...],  # 按 Client 实例化
+            "1": {
+                "models": [BubbleDetector, BendingDetector],   # List[Detector]（流源），共享
+                "operator_specs": [(BubbleOperator, {...}), ...],  # 流算子，按 Client 实例化
                 "batch_size": 4,
             }
         }
@@ -122,12 +122,12 @@ class InferenceManager:
                 skipped_stages = []
                 for stage_name in config.list_stages():
                     detectors = factory.create_detectors_for_stage(stage_name)
-                    workflow_specs = factory.create_workflow_specs_for_stage(stage_name)
+                    operator_specs = factory.create_operators_for_stage(stage_name)
 
                     if detectors:
                         stage_configs[stage_name] = {
                             "models": detectors,
-                            "workflow_specs": workflow_specs,
+                            "operator_specs": operator_specs,
                             "batch_size": config.batch_size,
                         }
                     else:
@@ -260,32 +260,38 @@ class InferenceManager:
         # 3. 旧 Actor 已停，安全清空任务级缓存
         cq.clear_task_caches()
 
-        # 按 Client 独立实例化 (Analyzer, Judge) 配对
+        # 按 Client 独立实例化流算子 Operator
         stage = cq.get_stage()
         stage_cfg = self._get_stage_configs().get(stage, {})
-        specs = stage_cfg.get("workflow_specs", [])
+        specs = stage_cfg.get("operator_specs", [])
 
         if specs:
-            pairs = []
-            for a_cls, a_kwargs, j_cls, j_kwargs in specs:
-                analyzer = a_cls(**a_kwargs)
-                judge = j_cls(**j_kwargs) if j_cls else None
-                pairs.append((analyzer, judge))
+            operators = [cls(**kwargs) for cls, kwargs in specs]
+            # 按感受野配置每条流的缓冲长度：max(底线, 订阅该流的算子最大 window_seconds)。
+            # 算子在 analyze 内自行 _clip 到各自感受野；底线保证 signals_10s 仍见 10s。
+            stream_windows: Dict[str, float] = {}
+            for op in operators:
+                for src in op.subscribes:
+                    stream_windows[src] = max(
+                        stream_windows.get(src, 0.0), op.window_seconds
+                    )
+            cq.set_stream_windows(stream_windows)
+
             actor = ClientTemporalActor(
                 client_id=client_id,
                 cq=cq,
                 stage=stage,
-                pairs=pairs,
+                operators=operators,
             )
             actor.start()
             self._actors[client_id] = actor
             logger.info(
-                "[InferenceManager] TemporalActor created for %s (stage=%s, pairs=%d)",
-                client_id, stage, len(pairs),
+                "[InferenceManager] TemporalActor created for %s (stage=%s, operators=%d)",
+                client_id, stage, len(operators),
             )
         else:
             logger.debug(
-                "[InferenceManager] No workflow specs for stage %s, skipping TemporalActor",
+                "[InferenceManager] No operator specs for stage %s, skipping TemporalActor",
                 stage,
             )
 

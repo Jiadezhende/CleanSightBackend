@@ -26,26 +26,27 @@ flowchart TD
 
 ---
 
-## 分层（L1 检测 / L3 时序分析 / L4 规则）
+## 流处理框架（流源 Detector / 流算子 Operator）
 
-每个检测点拆为三件套，配对依据 `name` 一致：
+每个 stage 拆 `detectors[]`（流源，分组粒度）+ `rules[]`（流算子，规则粒度）：
 
-| 层 | 基类 | 职责 | 状态机 |
+| 角色 | 基类 | 职责 | 状态机 |
 | -- | ---- | ---- | ------ |
-| L1 | `Detector` / `YOLODetector` | 单帧检测，bbox=特征。无状态，多 Client 共享 | 无 |
-| L3 | `TemporalAnalyzer` | **只产事实**：`run(window)` 串 `trans→infer→post_process`，产 `EventFact`（实时打点）。纯实时；离线分段（`SegmentFact`）已分离，待离线 worker 接入时另立 `OfflineAnalyzer` | 测量状态机 `self._sm`（tracker/计数/去抖游标） |
-| L4 | `Judge` | **消费事实出告警**：`step(facts)` 上升沿锁存、`finalize()` 结算。阈值/required 内置于 Judge | 决策状态机 `self._sm`（alarming 等） |
+| 流源 | `Detector` / `YOLODetector` | 单帧检测，bbox=特征。无状态，多 Client 共享；`name` = 该 detector 产出的流名（slide_window key） | 无 |
+| 流算子 | `Operator` | 合并 analyze+judge，单 `_sm`：`analyze(windows)` 按 `subscribes` 收订阅流、`_clip` 到 `window_seconds` 感受野、推进 `_sm`；`judge()` 读 `_sm` 出 (overlay 文案, 告警)；`finalize()` 结算。一个 Operator = 一条规则，每 Client 独立 | 共享状态机 `self._sm`（测量 + 决策同一份） |
 
-> L4 `step` 入口先建 tick 内快照 `frame = {f.signal: f for f in facts}` 再按信号名访问（同一 Analyzer 一 tick 可产多信号，如 bending 出 `state`+`count`）。阈值/required 不进 `fact.meta`，归 Judge。
+> `name`（算子自身/输出身份）与 `subscribes`（输入流清单，显式必填）正交：算子名 ≠ 流名。
+> 多订阅算子用基类 `_zip_by_ts` 按 ts inner-join 对齐多流（同帧 ts 精确相等）。
+> 阈值/required 归算子自身字段；`AlarmInfo.metric` 由算子显式填，不依赖 name。
 
-特征由推理写回处常开落盘到 `FeatureStore`（`{task_id}/{step_id}/features.jsonl`，与 HLS 同款工作目录，按帧 `ts` 对齐）。实时链路**不落盘事实**（EventFact 仅进程内值传递给 Judge）；`FactLedger`（`{task_id}/{step_id}/facts.jsonl`）为 offline 预置，待离线 worker 接入后写 `SegmentFact`。
+特征由推理写回处常开落盘到 `FeatureStore`（`{task_id}/{step_id}/features.jsonl`，与 HLS 同款工作目录，按帧 `ts` 对齐）。实时链路**不落盘事实**（已无 EventFact 对象间传输，状态共享于 `_sm`）；`FactLedger`（`{task_id}/{step_id}/facts.jsonl`）为 offline 预置，待离线 segmenter 接入后写 `SegmentFact`。
 
 ## 两种告警模式
 
 | 模式 | 触发时机 | 来源方法 | 去向 |
 | ------ | --------- | --------- | ------ |
-| 实时告警 | TemporalWorker 1Hz 轮询，`analyzer.run()` 产事实 → `judge.step()` 上升沿触发 | `Judge.step()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
-| 结算告警 | 任务 terminate 时调用一次 | `Judge.finalize()` | 同上，由 `ClientTemporalActor.finalize_and_stop()` 收集、`InferenceManager._persist_settlement_alarms()` 驱动 |
+| 实时告警 | TemporalActor 1Hz 轮询，`operator.analyze()` 推进状态 → `operator.judge()` 上升沿触发 | `Operator.judge()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
+| 结算告警 | 任务 terminate 时调用一次 | `Operator.finalize()` | 同上，由 `ClientTemporalActor.finalize_and_stop()` 收集、`InferenceManager._persist_settlement_alarms()` 驱动 |
 
 > **UI 通知**：`events`（字符串列表）经 VisualizationWorker 渲染为视频帧 overlay，通过 WebSocket 实时推送给前端。`AlarmInfo` 只走持久化，不直接推给前端。
 
