@@ -17,8 +17,8 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 from app.services.inference.workflows import Detector
-from app.services.inference.data_models import DetectionOutput
-from app.services.inference.models import InferenceRequest, InferenceResult
+from app.services.inference.data_models import FrameDetections
+from app.services.inference.models import InferenceRequest, FrameInference
 from app.utils.metrics import infer_failure_total, infer_latency_ms
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class MultiModelWorkerPool:
             f"CUDA_stream={'enabled' if self.use_cuda_stream else 'disabled'}"
         )
 
-    def infer_batch(self, batch: List[InferenceRequest]) -> List[InferenceResult]:
+    def infer_batch(self, batch: List[InferenceRequest]) -> List[FrameInference]:
         """批量推理：多个模型并行执行。
 
         Args:
@@ -115,11 +115,11 @@ class MultiModelWorkerPool:
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
         # model_results[i] = {task_name: DetectionOutput}
-        results: List[InferenceResult] = []
+        results: List[FrameInference] = []
         for i, req in enumerate(batch):
             per_frame_results = model_results[i] if i < len(model_results) else {}
 
-            result = InferenceResult(
+            result = FrameInference(
                 client_id=req.client_id,
                 timestamp=req.timestamp,
                 stage=req.stage,
@@ -133,7 +133,7 @@ class MultiModelWorkerPool:
         self,
         frames: List[np.ndarray],
         contexts: List[Dict[str, Any]],
-    ) -> List[Dict[str, DetectionOutput]]:
+    ) -> List[Dict[str, FrameDetections]]:
         """CUDA Stream 并行推理。
 
         核心思路：
@@ -149,7 +149,7 @@ class MultiModelWorkerPool:
             return self._infer_batch_sequential(frames, contexts)
 
         # 启动异步推理
-        async_results: List[tuple[str, List[DetectionOutput]]] = []
+        async_results: List[tuple[str, List[FrameDetections]]] = []
 
         for model, cuda_stream in zip(self.models, self.cuda_streams):
             if not model.enabled:
@@ -183,8 +183,8 @@ class MultiModelWorkerPool:
 
                     # 返回失败结果
                     n = len(frames)
-                    failed: List[DetectionOutput] = [
-                        DetectionOutput(
+                    failed: List[FrameDetections] = [
+                        FrameDetections(
                             detections=[],
                             metadata={"error": str(e)},
                             timestamp=time.time(),
@@ -200,7 +200,7 @@ class MultiModelWorkerPool:
 
         # 合并结果：将每个模型的结果按帧索引组织
         n = len(frames)
-        merged: List[Dict[str, DetectionOutput]] = [{} for _ in range(n)]
+        merged: List[Dict[str, FrameDetections]] = [{} for _ in range(n)]
 
         for model_name, batch_res in async_results:
             for i in range(min(len(batch_res), n)):
@@ -212,10 +212,10 @@ class MultiModelWorkerPool:
         self,
         frames: List[np.ndarray],
         contexts: List[Dict[str, Any]],
-    ) -> List[Dict[str, DetectionOutput]]:
+    ) -> List[Dict[str, FrameDetections]]:
         """顺序推理（不使用 CUDA Stream）。"""
         n = len(frames)
-        merged: List[Dict[str, DetectionOutput]] = [{} for _ in range(n)]
+        merged: List[Dict[str, FrameDetections]] = [{} for _ in range(n)]
 
         for model in self.models:
             if not model.enabled:
@@ -244,7 +244,7 @@ class MultiModelWorkerPool:
                 ).inc()
 
                 for i in range(n):
-                    merged[i][model.name] = DetectionOutput(
+                    merged[i][model.name] = FrameDetections(
                         detections=[],
                         metadata={"error": str(e)},
                         timestamp=time.time(),

@@ -18,13 +18,13 @@ from typing import Dict, List, Tuple
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.operator import Operator
 from app.services.inference.data_models import (
-    AlarmInfo,
+    Alarm,
     AlarmMetric,
     AlarmType,
-    DetectionOutput,
-    VisualizationData,
-    VisItem,
-    VisualizationType,
+    FrameDetections,
+    RenderSpec,
+    RenderItem,
+    RenderType,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ class BendingDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
+    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
         items = []
         for det in output.detections:
             if det.class_name == "bending_debug_box":
@@ -60,7 +60,7 @@ class BendingDetector(YOLODetector):
             else:
                 color = (0, 255, 0)
 
-            items.append(VisItem(
+            items.append(RenderItem(
                 bbox=det.bbox,
                 label=f"{det.class_name} {det.confidence:.2f}",
                 confidence=det.confidence,
@@ -75,8 +75,8 @@ class BendingDetector(YOLODetector):
             status_text = "STRAIGHT"
             status_color = (0, 255, 0)
 
-        return VisualizationData(
-            type=VisualizationType.BBOX,
+        return RenderSpec(
+            type=RenderType.BBOX,
             items=items,
             status_text=status_text,
             status_color=status_color,
@@ -121,13 +121,13 @@ class BendingOperator(Operator):
             "last_ts": 0.0,
         }
 
-    def analyze(self, windows: Dict[str, List[DetectionOutput]]) -> None:
+    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
         window = self.primary_window(windows)
         if not window:
             return
         self._advance(window)
 
-    def judge(self) -> Tuple[List[str], List[AlarmInfo]]:
+    def judge(self) -> Tuple[List[str], List[Alarm]]:
         bend_actions = self._sm["bend_actions"]
         events = (
             [f"弯曲动作 {bend_actions}/{self.required_bend_actions}"]
@@ -135,11 +135,11 @@ class BendingOperator(Operator):
         )
         return events, []  # 实时阶段不上报告警
 
-    def finalize(self) -> List[AlarmInfo]:
+    def finalize(self) -> List[Alarm]:
         """结算：弯曲次数不足时上报 warning。"""
         bend_actions = self._sm["bend_actions"]
         if bend_actions < self.required_bend_actions:
-            return [AlarmInfo(
+            return [Alarm(
                 alarm_type=AlarmType.PROCESS_VIOLATION,
                 alarm_level="warning",
                 alarm_message=(
@@ -154,7 +154,7 @@ class BendingOperator(Operator):
             )]
         return []
 
-    def _advance(self, window: List[DetectionOutput]) -> None:
+    def _advance(self, window: List[FrameDetections]) -> None:
         """游标推进：仅处理上次 tick 之后的新帧，逐帧驱动状态机。"""
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in window if f.timestamp > last_ts]

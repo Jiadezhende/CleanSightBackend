@@ -13,7 +13,7 @@ import queue
 import threading
 from typing import Any, Dict, List, Optional
 
-from app.models.frame import FrameData
+from app.models.frame import Frame
 from app.services.persistence.config import PersistenceConfig
 from app.services.persistence.models import (
     AlarmPersistenceTask,
@@ -107,7 +107,7 @@ class PersistenceManager:
         task_id: int,
         step_id: int,
         segment_type: str,  # "raw" or "processed"
-        frames: List[FrameData],
+        frames: List[Frame],
     ) -> bool:
         """持久化HLS视频段
 

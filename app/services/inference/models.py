@@ -24,11 +24,11 @@ from typing import Any, Dict
 
 import numpy as np
 
-from app.models.frame import FrameData
+from app.models.frame import Frame
 from app.services.inference.data_models import (
     ALARM_MODE_REALTIME,
     AlarmMetric,
-    DetectionOutput,
+    FrameDetections,
 )
 
 
@@ -40,11 +40,11 @@ class InferenceRequest:
     frame: np.ndarray
     timestamp: float
     stage: str
-    frame_data: FrameData
+    frame_data: Frame
 
 
 @dataclass
-class InferenceResult:
+class FrameInference:
     """推理结果：汇总多个 Task 的检测输出。
 
     专门用于传递第一步目标检测后的聚合结果。
@@ -54,7 +54,7 @@ class InferenceResult:
     client_id: str
     timestamp: float
     stage: str
-    result: Dict[str, "DetectionOutput"]
+    result: Dict[str, "FrameDetections"]
 
 
 @dataclass

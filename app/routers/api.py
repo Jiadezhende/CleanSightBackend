@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBTask, Task
+from app.models.task import DBTask, CleaningTask
 from app.routers.health import get_health_monitor
 from app.services import ai
 from app.services.client.manager import client_manager
@@ -148,7 +148,7 @@ async def start(req: StartRequest):
                     )
 
             # 2b. 设置新任务
-            task = Task(
+            task = CleaningTask(
                 task_id=req.task_id,
                 current_step=str(db_task.current_step),
                 status="running",

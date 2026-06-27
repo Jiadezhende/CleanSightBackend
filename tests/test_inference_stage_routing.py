@@ -3,7 +3,7 @@ import threading
 import pytest
 from unittest.mock import MagicMock, patch
 
-from app.models.task import Task
+from app.models.task import CleaningTask
 from app.services.inference.core.manager import InferenceManager
 
 
@@ -15,8 +15,8 @@ def manager():
     return m
 
 
-def _make_task(step: str) -> Task:
-    return Task(
+def _make_task(step: str) -> CleaningTask:
+    return CleaningTask(
         task_id=1,
         current_step=step,
         status="running",

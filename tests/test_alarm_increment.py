@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.client.queues import ClientQueues
-from app.services.inference.data_models import ALARM_MODE_REALTIME, Detection, DetectionOutput
+from app.services.inference.data_models import ALARM_MODE_REALTIME, Detection, FrameDetections
 from app.services.inference.models import AlarmRecord
 
 
@@ -142,7 +142,7 @@ def test_signals_10s_summary():
     )
     cq.push_detection(
         "bubble",
-        DetectionOutput(
+        FrameDetections(
             detections=[bubble_detection], metadata={}, timestamp=10.0, success=True
         ),
     )

@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.core.dispatcher import StageAwareDispatcher
-from app.services.inference.models import InferenceResult
+from app.services.inference.models import FrameInference
 from app.services.inference.workers.base import MultiModelWorkerPool
 from app.utils.exceptions import (
     AppError,
@@ -271,7 +271,7 @@ class ModelWorkerService:
                 time.sleep(0.5)
                 continue
 
-    def _write_back_results(self, results: List[InferenceResult]):
+    def _write_back_results(self, results: List[FrameInference]):
         """将推理结果双写到 ClientQueues。
 
         双写策略：

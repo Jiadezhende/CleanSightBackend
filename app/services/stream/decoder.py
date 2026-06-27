@@ -12,7 +12,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from app.models.frame import FrameData
+from app.models.frame import Frame
 from app.services import ai
 from app.services.stream.config import DecoderConfig
 from app.utils.exceptions import FFmpegError, StreamConnectionError
@@ -343,7 +343,7 @@ class FFmpegDecoder:
                 # 3. 写入队列（如果 client_queues 可用）
                 if self.client_queues is not None:
                     now = time.time()
-                    frame_data_obj = FrameData(timestamp=now, frame=std)
+                    frame_data_obj = Frame(timestamp=now, frame=std)
 
                     # 3.1 写入原始队列（全帧率，用于落盘；背压时也写入，保证 HLS 录制完整）
                     if self.client_queues.append_ca_raw(frame_data_obj):

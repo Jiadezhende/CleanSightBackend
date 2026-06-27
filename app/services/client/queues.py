@@ -12,12 +12,12 @@ from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 
-from app.models.frame import FrameData
-from app.models.task import Task as CleaningTask
-from app.services.inference.data_models import DetectionOutput, get_task_metric_map
+from app.models.frame import Frame
+from app.models.task import CleaningTask as CleaningTask
+from app.services.inference.data_models import FrameDetections, get_task_metric_map
 
 if TYPE_CHECKING:
-    from app.services.inference.models import AlarmRecord, InferenceResult
+    from app.services.inference.models import AlarmRecord, FrameInference
 
 
 class ClientQueues:
@@ -95,25 +95,25 @@ class ClientQueues:
         )  # 初始化为创建时间，支持启动失败检测
 
         # CA-ReadyQueue：无锁 SPSC deque（单生产者 decoder / 单消费者 dispatcher）
-        self.ca_ready: Deque[FrameData] = deque(maxlen=ca_maxlen)
+        self.ca_ready: Deque[Frame] = deque(maxlen=ca_maxlen)
         # CA-RawQueue（由 _raw_lock 保护）
-        self.ca_raw: Deque[FrameData] = deque(maxlen=ca_maxlen)
+        self.ca_raw: Deque[Frame] = deque(maxlen=ca_maxlen)
         self.frames_dropped_raw: int = 0
         # CA-ProcessedQueue（由 _viz_lock 保护）
-        self.ca_processed: Deque[FrameData] = deque(maxlen=ca_maxlen)
+        self.ca_processed: Deque[Frame] = deque(maxlen=ca_maxlen)
         self.ca_segment_len = ca_segment_len
 
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
-        self._latest_rendered: Optional[FrameData] = None
+        self._latest_rendered: Optional[Frame] = None
 
         # 最新推理结果原子快照（由 _inference_lock 保护）
-        self._latest_inference: Optional[InferenceResult] = None
+        self._latest_inference: Optional[FrameInference] = None
 
         # 当前处理阶段（由 _frontend_lock 保护）
         self._stage: str = initial_stage
 
         # 滑动窗口：per-stream(detector.name) 检测环形缓冲（由 _slide_window_lock 保护）
-        self._slide_window: Dict[str, Deque[DetectionOutput]] = {}
+        self._slide_window: Dict[str, Deque[FrameDetections]] = {}
         # 缓冲保留时长底线（保证 signals_10s 仍见 10s）；感受野只向上扩展，不缩短。
         self._slide_window_seconds: float = 10.0
         # per-stream 感受野覆盖：{流名: 订阅该流的算子最大 window_seconds}，由 set_stream_windows 配置。
@@ -133,7 +133,7 @@ class ClientQueues:
 
     # --- 封装操作方法 ---
 
-    def append_ca_ready_with_throttle(self, frame_data: FrameData) -> bool:
+    def append_ca_ready_with_throttle(self, frame_data: Frame) -> bool:
         """
         添加帧到待推理队列（带帧率限制）。
 
@@ -164,7 +164,7 @@ class ClientQueues:
         except (TypeError, ValueError):
             return None
 
-    def append_ca_raw(self, frame_data: FrameData) -> bool:
+    def append_ca_raw(self, frame_data: Frame) -> bool:
         """
         添加原始帧到落盘队列，同时更新最新原始帧缓存。
         若积累帧数达到 ca_segment_len 且已绑定任务，直接触发持久化。
@@ -205,7 +205,7 @@ class ClientQueues:
         except Exception:
             return False
 
-    def append_ca_processed(self, frame_data: FrameData) -> None:
+    def append_ca_processed(self, frame_data: Frame) -> None:
         """
         添加处理帧到落盘队列。
         若积累帧数达到 ca_segment_len 且已绑定任务，直接触发持久化。
@@ -237,28 +237,28 @@ class ClientQueues:
                 frames=frames_to_persist,
             )
 
-    def set_latest_rendered(self, frame_data: Optional[FrameData]) -> None:
+    def set_latest_rendered(self, frame_data: Optional[Frame]) -> None:
         """更新最新渲染帧（由 VisualizationWorker 调用）。传 None 表示清空。"""
         with self._viz_lock:
             self._latest_rendered = frame_data
 
-    def get_latest_rendered(self) -> Optional[FrameData]:
+    def get_latest_rendered(self) -> Optional[Frame]:
         """获取最新渲染帧（由 WebSocket 前端推流调用）。"""
         with self._viz_lock:
             return self._latest_rendered
 
-    def get_latest_result(self) -> Optional[FrameData]:
+    def get_latest_result(self) -> Optional[Frame]:
         """返回最新的实时渲染结果。"""
         return self.get_latest_rendered()
 
     # --- latest_inference 操作（原子推理快照）---
 
-    def set_latest_inference(self, result: "InferenceResult") -> None:
+    def set_latest_inference(self, result: "FrameInference") -> None:
         """原子写入最新推理结果（由 InferenceLoop 调用）。"""
         with self._inference_lock:
             self._latest_inference = result
 
-    def get_latest_inference(self) -> Optional["InferenceResult"]:
+    def get_latest_inference(self) -> Optional["FrameInference"]:
         """原子读取最新推理结果（由 VisualizationWorker 调用）。"""
         with self._inference_lock:
             return self._latest_inference
@@ -318,28 +318,28 @@ class ClientQueues:
     def get_ca_processed_length(self) -> int:
         return len(self.ca_processed)
 
-    def drain_ca_raw(self) -> List[FrameData]:
+    def drain_ca_raw(self) -> List[Frame]:
         """原子排空 ca_raw 队列（线程安全，供 flush 使用）"""
         with self._raw_lock:
             frames = list(self.ca_raw)
             self.ca_raw.clear()
             return frames
 
-    def drain_ca_processed(self) -> List[FrameData]:
+    def drain_ca_processed(self) -> List[Frame]:
         """原子排空 ca_processed 队列（线程安全，供 flush 使用）"""
         with self._viz_lock:
             frames = list(self.ca_processed)
             self.ca_processed.clear()
             return frames
 
-    def pop_n_ca_raw(self, n: int) -> List[FrameData]:
-        out: List[FrameData] = []
+    def pop_n_ca_raw(self, n: int) -> List[Frame]:
+        out: List[Frame] = []
         for _ in range(min(n, len(self.ca_raw))):
             out.append(self.ca_raw.popleft())
         return out
 
-    def pop_n_ca_processed(self, n: int) -> List[FrameData]:
-        out: List[FrameData] = []
+    def pop_n_ca_processed(self, n: int) -> List[Frame]:
+        out: List[Frame] = []
         for _ in range(min(n, len(self.ca_processed))):
             out.append(self.ca_processed.popleft())
         return out
@@ -370,7 +370,7 @@ class ClientQueues:
             self._alarm_seq = 0
             self._alarm_gate.clear()
 
-    def pop_ca_ready(self) -> Optional[FrameData]:
+    def pop_ca_ready(self) -> Optional[Frame]:
         """从推理队列弹出一帧（FIFO，无锁 SPSC）"""
         return self.ca_ready.popleft() if self.ca_ready else None
 
@@ -418,7 +418,7 @@ class ClientQueues:
         with self._slide_window_lock:
             self._stream_windows = dict(windows)
 
-    def push_detection(self, task_name: str, output: DetectionOutput) -> None:
+    def push_detection(self, task_name: str, output: FrameDetections) -> None:
         """将 DetectionOutput 追加到 per-stream 滑动窗口，按感受野自动淘汰过期条目。"""
         with self._slide_window_lock:
             if task_name not in self._slide_window:
@@ -432,7 +432,7 @@ class ClientQueues:
             while window and window[0].timestamp < cutoff:
                 window.popleft()
 
-    def get_slide_window(self, task_name: str) -> List[DetectionOutput]:
+    def get_slide_window(self, task_name: str) -> List[FrameDetections]:
         """返回指定 task 滑动窗口的快照副本（线程安全）。"""
         with self._slide_window_lock:
             window = self._slide_window.get(task_name)
@@ -440,7 +440,7 @@ class ClientQueues:
                 return []
             return list(window)
 
-    def get_slide_window_latest(self, task_name: str) -> Optional[DetectionOutput]:
+    def get_slide_window_latest(self, task_name: str) -> Optional[FrameDetections]:
         """返回指定 task 滑动窗口的最新条目。"""
         with self._slide_window_lock:
             window = self._slide_window.get(task_name)

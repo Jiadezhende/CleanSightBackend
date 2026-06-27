@@ -18,8 +18,8 @@ import numpy as np
 
 from app.services.inference.data_models import (
     Detection,
-    DetectionOutput,
-    VisualizationData,
+    FrameDetections,
+    RenderSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class Detector(ABC):
         self.enabled = enabled
 
     @abstractmethod
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> FrameDetections:
         """单帧推理。
 
         Args:
@@ -53,7 +53,7 @@ class Detector(ABC):
         """
 
     @abstractmethod
-    def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
+    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
         """根据检测输出准备可视化数据。
 
         Args:
@@ -67,7 +67,7 @@ class Detector(ABC):
         self,
         frames: List[np.ndarray],
         contexts: List[Dict[str, Any]],
-    ) -> List[DetectionOutput]:
+    ) -> List[FrameDetections]:
         """批量推理。默认实现：逐帧调用 infer()。
 
         子类可 override 以利用模型的原生 batch 接口加速（如 YOLO batch predict）。
@@ -79,7 +79,7 @@ class Detector(ABC):
                 output.success = True
                 results.append(output)
             except Exception as e:
-                results.append(DetectionOutput(
+                results.append(FrameDetections(
                     detections=[],
                     metadata={"error": str(e)},
                     timestamp=time.time(),
@@ -144,7 +144,7 @@ class YOLODetector(Detector):
 
     def _adapt_output(
         self, raw_output: Any, frame: np.ndarray, timestamp: float
-    ) -> DetectionOutput:
+    ) -> FrameDetections:
         """将 YOLO Results 转换为 DetectionOutput。
 
         子类可 override 以支持自定义输出格式（如分割 mask、关键点等）。
@@ -168,13 +168,13 @@ class YOLODetector(Detector):
         except Exception as e:
             logger.error("[%s] Output adaptation failed: %s", self.name, e, exc_info=True)
 
-        return DetectionOutput(
+        return FrameDetections(
             detections=detections,
             metadata={"model": "yolo", "frame_shape": frame.shape},
             timestamp=timestamp,
         )
 
-    def _run_yolo(self, frame: np.ndarray) -> DetectionOutput:
+    def _run_yolo(self, frame: np.ndarray) -> FrameDetections:
         """单帧 YOLO 推理。"""
         self._ensure_model_loaded()
         raw = self._model.predict(
@@ -182,7 +182,7 @@ class YOLODetector(Detector):
         )
         return self._adapt_output(raw, frame, time.time())
 
-    def _run_yolo_batch(self, frames: List[np.ndarray]) -> List[DetectionOutput]:
+    def _run_yolo_batch(self, frames: List[np.ndarray]) -> List[FrameDetections]:
         """批量 YOLO 推理。"""
         self._ensure_model_loaded()
         raw_list = self._model.predict(
@@ -193,7 +193,7 @@ class YOLODetector(Detector):
 
     # ── 核心方法实现 ────────────────────────────────────────
 
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> FrameDetections:
         from app.utils.exceptions import ModelInferenceError
         try:
             return self._run_yolo(frame)
@@ -214,7 +214,7 @@ class YOLODetector(Detector):
 
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[DetectionOutput]:
+    ) -> List[FrameDetections]:
         """批量 YOLO 推理，降级时回退到逐帧 infer()。"""
         try:
             outputs = self._run_yolo_batch(frames)

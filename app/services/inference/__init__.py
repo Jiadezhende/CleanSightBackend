@@ -32,7 +32,7 @@ from .core import (
 
 # 数据模型
 from .models import (
-    InferenceResult,
+    FrameInference,
 )
 
 # Worker 池
@@ -66,7 +66,7 @@ __all__ = [
     # Stage 工厂
     "StageFactory",
     # 数据模型
-    "InferenceResult",
+    "FrameInference",
     # 配置
     "load_stage_config",
     "StageConfig",

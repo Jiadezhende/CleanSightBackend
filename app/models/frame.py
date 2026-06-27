@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 
 @dataclass
-class FrameData:
+class Frame:
     """轻量级帧数据类，用于内存队列传递（避免 Base64 编码开销）"""
 
     timestamp: float  # Unix timestamp

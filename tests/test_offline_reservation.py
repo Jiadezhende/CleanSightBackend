@@ -11,28 +11,28 @@ import tempfile
 
 from app.services.inference.data_models import (
     Detection,
-    DetectionOutput,
+    FrameDetections,
     EventFact,
     SegmentFact,
 )
-from app.services.inference.models import InferenceResult
+from app.services.inference.models import FrameInference
 from app.services.inference.store import FactLedger, FeatureStore
 
 
-def _make_result(ts: float, bubble_n: int, bending_n: int) -> InferenceResult:
+def _make_result(ts: float, bubble_n: int, bending_n: int) -> FrameInference:
     def dets(n, cls):
         return [
             Detection(bbox=[0, 0, 10, 10], confidence=0.9, class_id=0, class_name=cls)
             for _ in range(n)
         ]
 
-    return InferenceResult(
+    return FrameInference(
         client_id="c1",
         timestamp=ts,
         stage="LEAK",
         result={
-            "bubble": DetectionOutput(detections=dets(bubble_n, "bubble"), metadata={}, timestamp=ts),
-            "bending": DetectionOutput(detections=dets(bending_n, "bent"), metadata={}, timestamp=ts),
+            "bubble": FrameDetections(detections=dets(bubble_n, "bubble"), metadata={}, timestamp=ts),
+            "bending": FrameDetections(detections=dets(bending_n, "bent"), metadata={}, timestamp=ts),
         },
     )
 

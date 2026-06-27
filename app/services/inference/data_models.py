@@ -28,7 +28,7 @@ import numpy as np
 # 检测器（Detector.infer）产出标准化检测结果，并经 prepare_visualization_data
 # 转出渲染数据。两者同属感知层，是对下游（时序分析 / 可视化）的输入契约。
 # - Detection / DetectionOutput：检测结果标准格式
-# - VisualizationData / VisItem / VisualizationType：固定渲染器的输入数据
+# - RenderSpec / RenderItem / RenderType：固定渲染器的输入数据
 
 
 @dataclass
@@ -47,7 +47,7 @@ class Detection:
 
 
 @dataclass
-class DetectionOutput:
+class FrameDetections:
     """检测输出（适配器统一输出）
     
     所有检测策略的输出经过适配器转换为此标准格式。
@@ -62,24 +62,24 @@ class DetectionOutput:
 
 
 @dataclass
-class VisualizationData:
+class RenderSpec:
     """可视化数据
     
     每个 InferenceWorkflow 的 prepare_visualization_data() 方法返回此数据
     供固定渲染器使用
     """
     type: str                            # 可视化类型: "bbox", "mask", "heatmap", "keypoint"
-    items: List['VisItem']               # 可视化项列表
+    items: List['RenderItem']               # 可视化项列表
     status_text: str                     # 状态栏文本
     status_color: Tuple[int, int, int]   # 状态栏颜色 (B, G, R)
     status_position: str = "top-right"   # 状态栏位置: "top-left", "top-right", "bottom-left", "bottom-right"
 
 
 @dataclass
-class VisItem:
+class RenderItem:
     """单个可视化项
     
-    根据 VisualizationData.type 的不同，需要提供不同的字段：
+    根据 RenderSpec.type 的不同，需要提供不同的字段：
     - bbox 类型: 需要 bbox 字段
     - mask 类型: 需要 mask 字段
     - heatmap 类型: 需要 heatmap 字段
@@ -95,8 +95,8 @@ class VisItem:
     extra: Dict[str, Any] = field(default_factory=dict)  # 扩展数据
 
 
-class VisualizationType:
-    """可视化类型常量（VisualizationData.type 取值）"""
+class RenderType:
+    """可视化类型常量（RenderSpec.type 取值）"""
     BBOX = "bbox"              # 检测框
     MASK = "mask"              # 分割掩码
     HEATMAP = "heatmap"        # 热力图
@@ -179,7 +179,7 @@ def get_stage_alias(stage_key: str) -> str:
 
 
 @dataclass
-class AlarmInfo:
+class Alarm:
     """告警信息
 
     由 Judge.step()（实时上升沿）/ Judge.finalize()（结算）产出。

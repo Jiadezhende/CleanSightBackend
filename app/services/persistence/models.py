@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from app.models.frame import FrameData
+from app.models.frame import Frame
 from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmMetric, AlarmType
 
 
@@ -22,7 +22,7 @@ class HLSPersistenceTask:
     task_id: int
     step_id: int
     segment_type: str  # "raw" or "processed"
-    frames: List[FrameData]
+    frames: List[Frame]
     timestamp: float = field(default_factory=time.time)
 
     def __post_init__(self):

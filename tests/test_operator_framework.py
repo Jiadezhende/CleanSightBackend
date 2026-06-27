@@ -8,14 +8,14 @@ import pytest
 
 from app.services.client.queues import ClientQueues
 from app.services.inference.config import load_stage_config
-from app.services.inference.data_models import AlarmInfo, AlarmType, Detection, DetectionOutput
+from app.services.inference.data_models import Alarm, AlarmType, Detection, FrameDetections
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.workflows.operator import Operator
 
 
-def _out(ts: float, n: int = 1) -> DetectionOutput:
+def _out(ts: float, n: int = 1) -> FrameDetections:
     dets = [Detection(bbox=[0, 0, 1, 1], confidence=0.9, class_id=0, class_name="x") for _ in range(n)]
-    return DetectionOutput(detections=dets, metadata={}, timestamp=ts)
+    return FrameDetections(detections=dets, metadata={}, timestamp=ts)
 
 
 class _NoopOperator(Operator):
@@ -129,7 +129,7 @@ class _GoodOperator(Operator):
         self._sm["ran"] = True
 
     def judge(self):
-        return ["good"], [AlarmInfo(alarm_type=AlarmType.MOCK, alarm_level="low", alarm_message="ok")]
+        return ["good"], [Alarm(alarm_type=AlarmType.MOCK, alarm_level="low", alarm_message="ok")]
 
 
 def test_per_operator_isolation():
@@ -137,7 +137,7 @@ def test_per_operator_isolation():
 
     cq = MagicMock()
     cq.get_slide_window.return_value = [_out(1.0)]
-    captured: List[AlarmInfo] = []
+    captured: List[Alarm] = []
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)
     good = _GoodOperator(name="good", subscribes=["s"], window_seconds=3.0)

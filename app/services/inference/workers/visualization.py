@@ -23,16 +23,16 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from app.services.inference.data_models import (
-    DetectionOutput,
-    VisualizationData,
-    VisItem,
-    VisualizationType,
+    FrameDetections,
+    RenderSpec,
+    RenderItem,
+    RenderType,
     get_stage_alias,
 )
 
-from app.models.frame import FrameData
+from app.models.frame import Frame
 from app.services.client import client_manager
-from app.services.inference.models import InferenceResult
+from app.services.inference.models import FrameInference
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ class VisualizationWorker:
     def _process_client(self, client_id: str, cq) -> None:
         """处理单个客户端的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[InferenceResult] = cq.get_latest_inference()
+        inference: Optional[FrameInference] = cq.get_latest_inference()
         if inference is None:
             return
 
@@ -136,7 +136,7 @@ class VisualizationWorker:
         annotated_frame = self._render(frame, stage, inference.result, events)
 
         # 6. 写回
-        frame_data = FrameData(
+        frame_data = Frame(
             timestamp=inference.timestamp,
             frame=annotated_frame,
             inference_result=inference.result,
@@ -151,7 +151,7 @@ class VisualizationWorker:
         self,
         frame: np.ndarray,
         stage: str,
-        detection_results: Dict[str, DetectionOutput],
+        detection_results: Dict[str, FrameDetections],
         events: List[str],
     ) -> np.ndarray:
         """使用固定渲染器进行可视化。
@@ -170,12 +170,12 @@ class VisualizationWorker:
             if not tasks:
                 return frame.copy()
 
-            vis_data_list: List[VisualizationData] = []
+            vis_data_list: List[RenderSpec] = []
 
             for task in tasks:
                 detection_output = detection_results.get(task.name)
 
-                if not isinstance(detection_output, DetectionOutput):
+                if not isinstance(detection_output, FrameDetections):
                     continue
 
                 vis_data = task.prepare_visualization_data(detection_output)
@@ -364,7 +364,7 @@ class FixedVisualizer:
     def render(
         self,
         frame: np.ndarray,
-        vis_data_list: List["VisualizationData"],
+        vis_data_list: List["RenderSpec"],
         stage: str,
         temporal_events: Optional[List[str]] = None,
     ) -> np.ndarray:
@@ -387,11 +387,11 @@ class FixedVisualizer:
         text_cmds: list = []
 
         for vis_data in vis_data_list:
-            if vis_data.type == VisualizationType.BBOX:
+            if vis_data.type == RenderType.BBOX:
                 self._draw_bboxes(annotated, vis_data.items, text_cmds)
-            elif vis_data.type == VisualizationType.MASK:
+            elif vis_data.type == RenderType.MASK:
                 self._draw_masks(annotated, vis_data.items, text_cmds)
-            elif vis_data.type == VisualizationType.KEYPOINT:
+            elif vis_data.type == RenderType.KEYPOINT:
                 self._draw_keypoints(annotated, vis_data.items)
 
             self._draw_status_bar(
@@ -408,7 +408,7 @@ class FixedVisualizer:
         self._flush_texts(annotated, text_cmds)
         return annotated
 
-    def _draw_bboxes(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
+    def _draw_bboxes(self, frame: np.ndarray, items: List["RenderItem"], text_cmds: list):
         FONT_SIZE = 16
         PAD = 4
         for item in items:
@@ -434,7 +434,7 @@ class FixedVisualizer:
                     item.label, FONT_SIZE, (255, 255, 255), "mm",
                 ))
 
-    def _draw_masks(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
+    def _draw_masks(self, frame: np.ndarray, items: List["RenderItem"], text_cmds: list):
         for item in items:
             if item.mask is None:
                 continue
@@ -452,7 +452,7 @@ class FixedVisualizer:
                     item.label, 16, item.color, "mb",
                 ))
 
-    def _draw_keypoints(self, frame: np.ndarray, items: List["VisItem"]):
+    def _draw_keypoints(self, frame: np.ndarray, items: List["RenderItem"]):
         for item in items:
             if item.keypoints is None:
                 continue

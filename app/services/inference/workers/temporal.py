@@ -15,7 +15,7 @@ import logging
 import threading
 from typing import List
 
-from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmInfo, get_stage_alias
+from app.services.inference.data_models import ALARM_MODE_REALTIME, Alarm, get_stage_alias
 from app.services.inference.workflows.alarm_sink import persist_alarms
 from app.services.inference.workflows.operator import Operator
 from app.utils.worker_guard import guarded_run
@@ -60,7 +60,7 @@ class ClientTemporalActor:
         """向 actor 线程发送停止信号（非阻塞）。"""
         self._stop_event.set()
 
-    def finalize_and_stop(self) -> List[AlarmInfo]:
+    def finalize_and_stop(self) -> List[Alarm]:
         """停止 actor 线程，然后收集结算告警。
 
         调用方须确保在 remove_client() 流程中先调用此方法，
@@ -86,7 +86,7 @@ class ClientTemporalActor:
 
     def _tick(self) -> None:
         all_events: List[str] = []
-        all_alarms: List[AlarmInfo] = []
+        all_alarms: List[Alarm] = []
 
         for op in self._operators:
             try:
@@ -111,7 +111,7 @@ class ClientTemporalActor:
         if all_alarms:
             self._persist_alarms(all_alarms)
 
-    def _persist_alarms(self, alarms: List[AlarmInfo]) -> None:
+    def _persist_alarms(self, alarms: List[Alarm]) -> None:
         from app.services.persistence import persistence_manager
 
         # 可读性出口：告警 step_name/stage 用别名（self._stage 是 step_id 主键）
@@ -124,8 +124,8 @@ class ClientTemporalActor:
             persistence_manager=persistence_manager,
         )
 
-    def _collect_settlement_alarms(self) -> List[AlarmInfo]:
-        alarms: List[AlarmInfo] = []
+    def _collect_settlement_alarms(self) -> List[Alarm]:
+        alarms: List[Alarm] = []
         for op in self._operators:
             try:
                 alarms.extend(op.finalize())

@@ -4,7 +4,7 @@ from sqlalchemy import BigInteger, Boolean, Column, String, Text
 from app.database import Base
 
 
-class Task(BaseModel):
+class CleaningTask(BaseModel):
     """推理过程中的任务状态跟踪，不用于数据库存储。
 
     检测/告警状态全部走 operator → alarm 管道，不再挂在 Task 上。

@@ -22,13 +22,13 @@ import numpy as np
 from app.services.inference.workflows.detector import Detector
 from app.services.inference.workflows.operator import Operator
 from app.services.inference.data_models import (
-    AlarmInfo,
+    Alarm,
     AlarmType,
     Detection,
-    DetectionOutput,
-    VisualizationData,
-    VisItem,
-    VisualizationType,
+    FrameDetections,
+    RenderSpec,
+    RenderItem,
+    RenderType,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ class MockDetector(Detector):
         super().__init__(name="mock", enabled=enabled)
         self.brightness_threshold = brightness_threshold
 
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> DetectionOutput:
+    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> FrameDetections:
         timestamp = time.time()
         h, w = frame.shape[:2]
         cy1, cy2 = h // 4, 3 * h // 4
@@ -74,7 +74,7 @@ class MockDetector(Detector):
                 extra={"mean_brightness": round(mean_brightness, 2)},
             ))
 
-        return DetectionOutput(
+        return FrameDetections(
             detections=detections,
             metadata={
                 "model": "mock_brightness",
@@ -87,12 +87,12 @@ class MockDetector(Detector):
 
     def infer_batch(
         self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[DetectionOutput]:
+    ) -> List[FrameDetections]:
         return [self.infer(frame, ctx) for frame, ctx in zip(frames, contexts)]
 
-    def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
+    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
         items = [
-            VisItem(
+            RenderItem(
                 bbox=det.bbox,
                 label=f"[MOCK] {det.confidence:.2f}",
                 confidence=det.confidence,
@@ -111,8 +111,8 @@ class MockDetector(Detector):
             status_text = f"[MOCK] Clear (lum={brightness})"
             status_color = (0, 200, 0)
 
-        return VisualizationData(
-            type=VisualizationType.BBOX,
+        return RenderSpec(
+            type=RenderType.BBOX,
             items=items,
             status_text=status_text,
             status_color=status_color,
@@ -156,7 +156,7 @@ class MockOperator(Operator):
             "alarm_count": 0,
         }
 
-    def analyze(self, windows: Dict[str, List[DetectionOutput]]) -> None:
+    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
         window = self.primary_window(windows)
         if not window:
             return
@@ -174,19 +174,19 @@ class MockOperator(Operator):
             self._sm["last_ts"] = new_frames[-1].timestamp
         self._sm["brightness"] = window[-1].metadata.get("mean_brightness")
 
-    def judge(self) -> Tuple[List[str], List[AlarmInfo]]:
+    def judge(self) -> Tuple[List[str], List[Alarm]]:
         consecutive = self._sm["consecutive"]
         is_triggered = consecutive >= self.consecutive_trigger
         events = (
             [f"mock_object detected in {consecutive} consecutive frames"]
             if is_triggered else []
         )
-        alarms: List[AlarmInfo] = []
+        alarms: List[Alarm] = []
 
         if is_triggered and not self._sm["alarming"]:
             self._sm["alarming"] = True
             self._sm["alarm_count"] += 1
-            alarms.append(AlarmInfo(
+            alarms.append(Alarm(
                 alarm_type=AlarmType.MOCK,
                 alarm_level="low",
                 alarm_message=f"Mock detection triggered ({consecutive} consecutive frames)",

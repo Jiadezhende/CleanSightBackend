@@ -27,7 +27,7 @@ import numpy as np
 
 from app.services.inference.data_models import (
     Detection,
-    DetectionOutput,
+    FrameDetections,
     EventFact,
     SegmentFact,
     fact_from_json,
@@ -166,7 +166,7 @@ class FeatureStore(_JsonlBuffer):
             return
         self._enqueue(task_id, step_id, [line])
 
-    def load(self, task_id: Any, step_id: Any, source: str) -> List[DetectionOutput]:
+    def load(self, task_id: Any, step_id: Any, source: str) -> List[FrameDetections]:
         """离线回读：把某 source（检测点/模型名）的全序列特征还原为 DetectionOutput 列表。
 
         供离线链路使用（offline 预置）。先 flush 缓冲再读，缺失文件返回空。
@@ -181,7 +181,7 @@ class FeatureStore(_JsonlBuffer):
         path = self._path(task_id, step_id)
         if not path.exists():
             return []
-        outputs: List[DetectionOutput] = []
+        outputs: List[FrameDetections] = []
         try:
             with path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -192,7 +192,7 @@ class FeatureStore(_JsonlBuffer):
                     dets = (rec.get("features") or {}).get(source)
                     if dets is None:
                         continue
-                    outputs.append(DetectionOutput(
+                    outputs.append(FrameDetections(
                         detections=[_deserialize_detection(d) for d in dets],
                         metadata={},
                         timestamp=rec.get("ts", 0.0),

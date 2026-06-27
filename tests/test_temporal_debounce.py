@@ -13,13 +13,13 @@ import time
 
 import pytest
 
-from app.services.inference.data_models import AlarmType, Detection, DetectionOutput
+from app.services.inference.data_models import AlarmType, Detection, FrameDetections
 
 
 # ========== Fixtures ==========
 
 
-def make_detection_output(n_detections: int = 0, class_name: str = "bubble") -> DetectionOutput:
+def make_detection_output(n_detections: int = 0, class_name: str = "bubble") -> FrameDetections:
     """构造 DetectionOutput，指定检测数量"""
     detections = [
         Detection(
@@ -30,14 +30,14 @@ def make_detection_output(n_detections: int = 0, class_name: str = "bubble") -> 
         )
         for _ in range(n_detections)
     ]
-    return DetectionOutput(
+    return FrameDetections(
         detections=detections,
         metadata={"model": "test"},
         timestamp=time.time(),
     )
 
 
-def make_window(pattern: list[int], class_name: str = "bubble") -> list[DetectionOutput]:
+def make_window(pattern: list[int], class_name: str = "bubble") -> list[FrameDetections]:
     """按模式构造滑动窗口
 
     pattern: e.g. [0, 0, 1, 1, 1] — 每个值表示该帧的检测数量
@@ -127,7 +127,7 @@ class TestBendingDebounce:
 
         return BendingOperator(debounce_frames=3, required_bend_actions=4)
 
-    def _make_bending_window(self, flags: list[bool]) -> list[DetectionOutput]:
+    def _make_bending_window(self, flags: list[bool]) -> list[FrameDetections]:
         """构造弯折窗口，flags 中 True 表示该帧有 bent 检测"""
         base_ts = time.time() - len(flags) * 0.1
         window = []

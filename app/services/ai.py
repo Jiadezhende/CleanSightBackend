@@ -12,8 +12,8 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from app.models.frame import FrameData, ProcessedFrame
-from app.models.task import Task as CleaningTask
+from app.models.frame import Frame, ProcessedFrame
+from app.models.task import CleaningTask as CleaningTask
 from app.services.inference.core.manager import InferenceManager
 from app.settings import settings
 

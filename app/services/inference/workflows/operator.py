@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
-from app.services.inference.data_models import AlarmInfo, DetectionOutput
+from app.services.inference.data_models import Alarm, FrameDetections
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class AlignedFrame:
     """多流按 ts 对齐后的一帧：同一 ts 下各订阅流的 DetectionOutput。"""
 
     ts: float
-    by_source: Dict[str, DetectionOutput]
+    by_source: Dict[str, FrameDetections]
 
 
 class Operator(ABC):
@@ -48,19 +48,19 @@ class Operator(ABC):
 
     # ── 两接口（共享 self._sm）────────────────────────────────
     @abstractmethod
-    def analyze(self, windows: Dict[str, List[DetectionOutput]]) -> None:
+    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
         """消费订阅流、推进 self._sm。windows: {流名: 该流滑窗快照(按 ts 升序)}。"""
 
     @abstractmethod
-    def judge(self) -> Tuple[List[str], List[AlarmInfo]]:
+    def judge(self) -> Tuple[List[str], List[Alarm]]:
         """读 self._sm 出 (overlay 文案, 实时告警)。"""
 
-    def finalize(self) -> List[AlarmInfo]:
+    def finalize(self) -> List[Alarm]:
         """结算：任务 terminate 时调用一次，产出结算告警。默认返空。"""
         return []
 
     # ── 基类工具 ─────────────────────────────────────────────
-    def _clip(self, window: List[DetectionOutput]) -> List[DetectionOutput]:
+    def _clip(self, window: List[FrameDetections]) -> List[FrameDetections]:
         """把流裁到本算子感受野（保留 ts >= latest - window_seconds）。"""
         if not window:
             return []
@@ -68,13 +68,13 @@ class Operator(ABC):
         return [d for d in window if d.timestamp >= cutoff]
 
     def primary_window(
-        self, windows: Dict[str, List[DetectionOutput]]
-    ) -> List[DetectionOutput]:
+        self, windows: Dict[str, List[FrameDetections]]
+    ) -> List[FrameDetections]:
         """单订阅便捷：取首个订阅流并裁到感受野。"""
         return self._clip(windows.get(self.subscribes[0], []))
 
     def _zip_by_ts(
-        self, windows: Dict[str, List[DetectionOutput]]
+        self, windows: Dict[str, List[FrameDetections]]
     ) -> List[AlignedFrame]:
         """多流按 ts 对齐（inner-join：仅保留所有订阅流都到齐的 ts）。
 

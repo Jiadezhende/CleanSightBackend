@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 
-from app.models.frame import FrameData
+from app.models.frame import Frame
 from app.settings import settings
 from app.utils.exceptions import PersistenceError
 
@@ -396,7 +396,7 @@ class HLSPersistenceStrategy:
                 )
 
     def persist_segment(
-        self, task_id: int, step_id: int, segment_type: str, frames: List[FrameData]
+        self, task_id: int, step_id: int, segment_type: str, frames: List[Frame]
     ) -> bool:
         """
         持久化视频段（业务代码：纯净）
@@ -434,7 +434,7 @@ class HLSPersistenceStrategy:
             raise ValueError(f"Unknown segment type: {segment_type}")
 
     def _persist_raw_segment(
-        self, target_dir: Path, frames: List[FrameData], task_id: int, step_id: int
+        self, target_dir: Path, frames: List[Frame], task_id: int, step_id: int
     ) -> bool:
         """
         持久化原始视频段（业务代码：纯净）
@@ -516,7 +516,7 @@ class HLSPersistenceStrategy:
         return True
 
     def _persist_processed_segment(
-        self, target_dir: Path, frames: List[FrameData], task_id: int, step_id: int
+        self, target_dir: Path, frames: List[Frame], task_id: int, step_id: int
     ) -> bool:
         """
         持久化处理后视频段（业务代码：纯净）。

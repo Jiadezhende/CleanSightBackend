@@ -15,10 +15,10 @@ from __future__ import annotations
 
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.data_models import (
-    DetectionOutput,
-    VisualizationData,
-    VisItem,
-    VisualizationType,
+    FrameDetections,
+    RenderSpec,
+    RenderItem,
+    RenderType,
 )
 
 # 固定调色板，按 class_id 取色（BGR）
@@ -32,9 +32,9 @@ _PALETTE = [
 ]
 
 
-def _bbox_items(output: DetectionOutput):
+def _bbox_items(output: FrameDetections):
     return [
-        VisItem(
+        RenderItem(
             bbox=det.bbox,
             label=f"{det.class_name} {det.confidence:.2f}",
             confidence=det.confidence,
@@ -62,10 +62,10 @@ class CleanLargeDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
+    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
         items = _bbox_items(output)
-        return VisualizationData(
-            type=VisualizationType.BBOX,
+        return RenderSpec(
+            type=RenderType.BBOX,
             items=items,
             status_text=f"Large: {len(items)}" if items else "Large: -",
             status_color=(0, 255, 0),
@@ -91,10 +91,10 @@ class CleanSmallDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
+    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
         items = _bbox_items(output)
-        return VisualizationData(
-            type=VisualizationType.BBOX,
+        return RenderSpec(
+            type=RenderType.BBOX,
             items=items,
             status_text=f"Small: {len(items)}" if items else "Small: -",
             status_color=(0, 255, 255),

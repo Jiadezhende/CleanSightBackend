@@ -12,14 +12,14 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from app.services.inference.data_models import AlarmInfo
+from app.services.inference.data_models import Alarm
 from app.services.inference.models import AlarmRecord
 
 logger = logging.getLogger(__name__)
 
 
 def persist_alarms(
-    alarms: List[AlarmInfo],
+    alarms: List[Alarm],
     *,
     cq,                       # ClientQueues
     client_id: str,

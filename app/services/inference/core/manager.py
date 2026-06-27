@@ -24,11 +24,11 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-from app.models.frame import FrameData, ProcessedFrame
-from app.models.task import Task as CleaningTask
+from app.models.frame import Frame, ProcessedFrame
+from app.models.task import CleaningTask as CleaningTask
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.core.service import ModelWorkerService
-from app.services.inference.data_models import ALARM_MODE_REALTIME, AlarmInfo, AlarmMetric
+from app.services.inference.data_models import ALARM_MODE_REALTIME, Alarm, AlarmMetric
 from app.services.inference.workers.temporal import ClientTemporalActor
 from app.services.inference.workers.visualization import VisualizationWorkerPool
 
@@ -174,7 +174,7 @@ class InferenceManager:
 
     def get_result(
         self, client_id: str, as_model: bool = False
-    ) -> Union[None, FrameData, ProcessedFrame]:
+    ) -> Union[None, Frame, ProcessedFrame]:
         """返回最新处理帧（从 RT-ProcessedQueue）"""
         if not client_manager.has_client(client_id):
             return None
@@ -381,7 +381,7 @@ class InferenceManager:
     # ========== 内部辅助方法 ==========
 
     def _create_processed_frame(
-        self, frame_data: FrameData, task_id: Optional[int], client_id: str
+        self, frame_data: Frame, task_id: Optional[int], client_id: str
     ) -> ProcessedFrame:
         _, buf = cv2.imencode(".jpg", frame_data.frame)
         b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
@@ -418,7 +418,7 @@ class InferenceManager:
             return obj
 
     def _persist_settlement_alarms(
-        self, client_id: str, cq: ClientQueues, alarms: List[AlarmInfo]
+        self, client_id: str, cq: ClientQueues, alarms: List[Alarm]
     ) -> None:
         """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
         from app.services.inference.data_models import get_stage_alias
