@@ -74,8 +74,10 @@ class InferenceManager:
         # per-client ClientTemporalActor 注册表
         self._actors: Dict[str, ClientTemporalActor] = {}
 
+        # 可视化拉取率 = settings.inference_fps（单一真源）：与推理限流、HLS processed
+        # 打标三处对齐，避免 processed 段实际产出率 ≠ 打标率导致回放偏快。
         self.visualization_pool = VisualizationWorkerPool(
-            target_fps=15,
+            target_fps=settings.inference_fps,
             stage_configs=None,
         )
 

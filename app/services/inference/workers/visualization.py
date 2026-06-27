@@ -48,7 +48,7 @@ class VisualizationWorker:
     def __init__(
         self,
         stop_event: threading.Event,
-        tick_interval: float = 1.0 / 15,  # ~15 FPS
+        tick_interval: float = 1.0 / 20,  # 兜底 ~20 FPS；实际由 pool 按 settings.inference_fps 注入
         worker_id: int = 0,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
@@ -56,7 +56,7 @@ class VisualizationWorker:
 
         Args:
             stop_event: 停止事件
-            tick_interval: 拉取间隔（秒），默认 ~15 FPS
+            tick_interval: 拉取间隔（秒），由 pool 按 settings.inference_fps 注入
             worker_id: 工作线程ID（用于调试）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
@@ -199,19 +199,21 @@ class VisualizationWorker:
 class VisualizationWorkerPool:
     """可视化线程池（定时拉取模式，单线程）。
 
-    单线程理由：单帧渲染 ~5ms，15 FPS × 10 clients = 50ms/67ms，单线程足够。
+    单线程理由：单帧渲染 ~5ms，@20FPS 时 tick 预算 50ms，约可覆盖 10 clients；
     单线程避免了多线程竞争同一客户端的问题。
+    实际 target_fps 由调用方注入 settings.inference_fps（与推理限流、HLS processed
+    打标对齐），默认值仅作脱离装配时的兜底。
     """
 
     def __init__(
         self,
-        target_fps: float = 15,
+        target_fps: float = 20,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """初始化可视化线程池。
 
         Args:
-            target_fps: 目标可视化帧率（默认 15 FPS）
+            target_fps: 目标可视化帧率（装配时由 settings.inference_fps 注入）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
         self.target_fps = target_fps
