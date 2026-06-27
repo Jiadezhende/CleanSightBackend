@@ -227,9 +227,13 @@
     <!-- 视频 + 时间轴 -->
     <div v-if="loaded" class="card">
       <div class="card-title">
-        ② 播放 raw 视频并打点
+        ② 播放视频并打点
+        <el-radio-group :model-value="track" size="small" @change="switchTrack" style="margin-left:12px">
+          <el-radio-button label="raw">raw 原始</el-radio-button>
+          <el-radio-button label="processed">processed 标注</el-radio-button>
+        </el-radio-group>
         <span style="font-weight:400;color:#9ca3af;font-size:12px;margin-left:8px">
-          时长 {{ formatDuration(timeline.duration_ms) }} · {{ timeline.events.length }} 个告警
+          时长 {{ formatDuration(timeline.duration_ms) }} · {{ timeline.events.length }} 个告警 · 送标裁 raw
         </span>
       </div>
       <div class="player-layout">
@@ -279,13 +283,14 @@
               时长：<b>{{ pendingDurationLabel }}</b>
             </div>
             <div class="mark-btns">
-              <el-button size="small" @click="markStart">设为起点</el-button>
-              <el-button size="small" @click="markEnd">设为终点</el-button>
+              <el-button size="small" :disabled="track !== 'raw'" @click="markStart">设为起点</el-button>
+              <el-button size="small" :disabled="track !== 'raw'" @click="markEnd">设为终点</el-button>
             </div>
             <div class="mark-btns">
-              <el-button size="small" type="primary" :disabled="!pendingValid" @click="addClip">加入列表</el-button>
+              <el-button size="small" type="primary" :disabled="track !== 'raw' || !pendingValid" @click="addClip">加入列表</el-button>
               <el-button size="small" @click="clearPending">清空待选</el-button>
             </div>
+            <div v-if="track !== 'raw'" style="font-size:11px;color:#f59e0b;margin-top:6px">processed 为参考轨，打点请切回 raw</div>
             <div v-if="pendingError" style="font-size:11px;color:#ef4444;margin-top:6px">{{ pendingError }}</div>
           </div>
         </div>
@@ -553,38 +558,76 @@ createApp({
     const timeline = reactive({ start_ms: 0, end_ms: 0, duration_ms: 0, events: [] });
     const videoEl = ref(null);
     const stripEl = ref(null);
+    const track = ref('raw');          // 当前查看的轨道：raw（送标源）/ processed（参考）
     let hls = null;
+    let videoListenersBound = false;   // timeupdate/seeked 只绑一次（切轨复用同一 <video> 节点）
 
     const currentTimeSec = ref(0);
     const currentAbsMs = computed(() =>
       timeline.start_ms + Math.round(currentTimeSec.value * 1000)
     );
 
-    function attachVideo() {
-      const v = videoEl.value;
-      if (!v) return;
+    function bindVideoListeners(v) {
+      if (videoListenersBound) return;
       v.addEventListener('timeupdate', () => { currentTimeSec.value = v.currentTime; });
       v.addEventListener('seeked',     () => { currentTimeSec.value = v.currentTime; });
-      const m3u8 = api(`/traceback/task/${form.task_id}/playlist.m3u8?step_id=${form.step_id}&track=raw`);
+      videoListenersBound = true;
+    }
+
+    // seekSec/resumePlay 用于切轨保位：换源后停在同一时刻并维持播放态
+    function attachVideo(seekSec = null, resumePlay = false) {
+      const v = videoEl.value;
+      if (!v) return;
+      bindVideoListeners(v);
+      const m3u8 = api(`/traceback/task/${form.task_id}/playlist.m3u8?step_id=${form.step_id}&track=${track.value}`);
       if (hls) { hls.destroy(); hls = null; }
+      const afterReady = () => {
+        if (seekSec != null && isFinite(seekSec)) { try { v.currentTime = seekSec; } catch (e) {} }
+        if (resumePlay) v.play?.().catch(() => {});
+      };
       if (window.Hls && Hls.isSupported()) {
         hls = new Hls();
         hls.loadSource(m3u8);
         hls.attachMedia(v);
+        hls.on(Hls.Events.MANIFEST_PARSED, afterReady);
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data.fatal) ElMessage.error('视频加载失败: ' + (data.details || data.type));
         });
       } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
         // 仅 Safari / iOS 原生 HLS 时走这里
         v.src = m3u8;
+        v.addEventListener('loadedmetadata', afterReady, { once: true });
       } else {
         ElMessage.error('当前浏览器不支持 HLS 播放（hls.js 未加载，可能 CDN 被墙）');
       }
     }
 
+    // 切换查看轨道（raw <-> processed）。processed 仅供参考查看，不改打点/送标。
+    async function switchTrack(next) {
+      if (next === track.value || !loaded.value) return;
+      const v = videoEl.value;
+      const savedTime = v ? v.currentTime : 0;
+      const wasPlaying = v ? !v.paused : false;
+      if (next === 'processed') {
+        // 预检：某些 step 只有 raw 段，processed playlist 命中 404/503
+        try {
+          const url = api(`/traceback/task/${form.task_id}/playlist.m3u8?step_id=${form.step_id}&track=processed`);
+          const r = await fetch(url);
+          if (!r.ok) { ElMessage.warning('该步骤无 processed 轨，保持 raw'); return; }
+        } catch (e) {
+          ElMessage.error('processed 轨探测失败: ' + e.message);
+          return;
+        }
+      }
+      track.value = next;
+      await nextTick();
+      attachVideo(savedTime, wasPlaying);
+    }
+
     function detachVideo() {
       if (hls) { hls.destroy(); hls = null; }
       if (videoEl.value) { videoEl.value.removeAttribute('src'); videoEl.value.load?.(); }
+      videoListenersBound = false;   // <video> 节点随 v-if 销毁，下次加载是新节点
     }
 
     async function loadStep() {
@@ -622,6 +665,7 @@ createApp({
     function reset() {
       detachVideo();
       loaded.value = false;
+      track.value = 'raw';
       clips.value = [];
       clearPending();
       result.value = null;
@@ -825,7 +869,7 @@ createApp({
       form, loading, loaded, health,
       taskQuery, taskList, taskScrollEl, fetchTasks, onTaskScroll, selectTask,
       configDialog, openConfigDialog, saveConfig,
-      timeline, videoEl, stripEl, currentAbsMs,
+      timeline, videoEl, stripEl, currentAbsMs, track, switchTrack,
       rangeStyle, markerStyle, cursorStyle, alarmTooltip,
       seekToMs, seekFromStrip,
       pending, pendingValid, pendingError, pendingDurationLabel,
