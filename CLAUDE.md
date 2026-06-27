@@ -156,6 +156,6 @@ python -m mediamtx_gateway.main
 ### Workflow 实现注意事项
 
 - `class_name` 直接取自模型 `result.names`，不做归一化，匹配字符串必须与模型训练类别名严格一致
-- `infer_batch` 覆写时，batch 路径与 fallback 单帧路径的业务字段赋值逻辑必须保持一致
+- `DetectionOutput` 是统一检测契约，不要为单个检测点往里加领域字段（如 `xxx_detected/xxx_count`）；派生量放 `Detection.extra` 或 `metadata`，时序统计交给 L3 Analyzer
 
 **查看数据库 Schema**：使用 `/schema-inspect` skill，自动对比 ORM 与实际表结构。

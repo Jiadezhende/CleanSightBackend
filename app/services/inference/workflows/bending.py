@@ -15,16 +15,14 @@ BendingJudge（时序线程，L4）：
 """
 
 import logging
-import time
 from typing import Any, Dict, List, Tuple
-
-import numpy as np
 
 from app.services.inference.workflows.detector import YOLODetector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.workflows.judge import Judge
 from app.services.inference.data_models import (
     AlarmInfo,
+    AlarmMetric,
     AlarmType,
     DetectionOutput,
     EventFact,
@@ -55,39 +53,6 @@ class BendingDetector(YOLODetector):
             iou_threshold=iou_threshold,
             enabled=enabled,
         )
-
-    def infer_batch(
-        self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[DetectionOutput]:
-        try:
-            outputs = self._run_yolo_batch(frames)
-            for output in outputs:
-                output.success = True
-                output.bending_detected = any(
-                    d.class_name == "bent" for d in output.detections
-                )
-                output.detection_count = len(output.detections)
-            return outputs
-        except Exception as e:
-            logger.error("[BendingDetector] Batch inference failed, fallback: %s", e, exc_info=True)
-            results = []
-            for f, c in zip(frames, contexts):
-                try:
-                    output = self.infer(f, c)
-                    output.bending_detected = any(
-                        d.class_name == "bent" for d in output.detections
-                    )
-                    output.detection_count = len(output.detections)
-                    results.append(output)
-                except Exception as err:
-                    results.append(DetectionOutput(
-                        detections=[],
-                        metadata={"error": str(err)},
-                        timestamp=time.time(),
-                        success=False,
-                        error=str(err),
-                    ))
-            return results
 
     def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
         items = []
@@ -238,8 +203,8 @@ class BendingJudge(Judge):
                     f"弯曲动作不足：完成 {bend_actions} 次，"
                     f"要求 {self.required_bend_actions} 次"
                 ),
+                metric=AlarmMetric.BENDING,
                 metadata={
-                    "metric": self.name,
                     "bend_actions": bend_actions,
                     "required": self.required_bend_actions,
                 },

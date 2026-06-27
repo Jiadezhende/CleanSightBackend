@@ -58,14 +58,6 @@ class DetectionOutput:
     timestamp: float                     # 时间戳
     success: bool = True                 # 推理是否成功
     error: Optional[str] = None          # 错误信息（失败时提供）
-    
-    # 向后兼容字段（气泡检测）
-    bubble_detected: Optional[bool] = None
-    bubble_count: Optional[int] = None
-    
-    # 向后兼容字段（弯折检测）
-    bending_detected: Optional[bool] = None
-    detection_count: Optional[int] = None
 
 
 
@@ -190,11 +182,14 @@ def get_stage_alias(stage_key: str) -> str:
 class AlarmInfo:
     """告警信息
 
-    由 InferenceWorkflow.analyze_temporal() 在边沿触发时产出
+    由 Judge.step()（实时上升沿）/ Judge.finalize()（结算）产出。
+    metric 由产出方（Judge）显式填入——它本就知道自己代表哪个指标，
+    下游持久化直接读 alarm.metric，不再靠文案反推。
     """
     alarm_type: AlarmType                # 告警类型
     alarm_level: str                     # 告警级别: "low", "medium", "high", "critical"
     alarm_message: str                   # 告警消息
+    metric: AlarmMetric = AlarmMetric.UNKNOWN  # 路由指标，产出方显式填
     metadata: Dict[str, Any] = field(default_factory=dict)  # 额外元数据
 
 

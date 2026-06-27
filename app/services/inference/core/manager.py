@@ -413,48 +413,19 @@ class InferenceManager:
         self, client_id: str, cq: ClientQueues, alarms: List[AlarmInfo]
     ) -> None:
         """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
-        from app.services.inference.models import AlarmRecord, infer_alarm_metric
         from app.services.inference.data_models import get_stage_alias
+        from app.services.inference.workflows.alarm_sink import persist_alarms
 
         # 可读性出口：告警 step_name/stage 用别名（主键是 step_id，对人不可读）
-        stage = get_stage_alias(cq.get_stage())
-        task = cq.get_task()
-        task_id = cq.get_task_id()
-        step_id = int(task.current_step) if task and task.current_step else None
-
-        for alarm in alarms:
-            metric = infer_alarm_metric(
-                alarm_type=alarm.alarm_type,
-                alarm_message=alarm.alarm_message,
-                metadata=alarm.metadata or {},
-            )
-            if not cq.try_pass_alarm_gate(task_id, metric, "SETTLEMENT"):
-                continue
-            self.persistence_manager.persist_alarm({
-                "task_id": task_id,
-                "stage": stage,
-                "step_id": step_id,
-                "client_id": client_id,
-                "alarm_type": alarm.alarm_type,
-                "alarm_metric": metric,
-                "alarm_mode": "SETTLEMENT",
-                "alarm_level": alarm.alarm_level,
-                "alarm_message": alarm.alarm_message,
-                "detection_result": alarm.metadata if alarm.metadata else None,
-            })
-            cq.append_alarm_record(AlarmRecord(
-                alarm_type=alarm.alarm_type,
-                alarm_level=alarm.alarm_level,
-                alarm_message=alarm.alarm_message,
-                mode="SETTLEMENT",
-                metric=metric,
-                stage=stage,
-                metadata=alarm.metadata or {},
-            ))
-            logger.info(
-                "[InferenceManager] Settlement alarm for %s: %s",
-                client_id, alarm.alarm_message,
-            )
+        persist_alarms(
+            alarms,
+            cq=cq,
+            client_id=client_id,
+            stage_name=get_stage_alias(cq.get_stage()),
+            mode="SETTLEMENT",
+            persistence_manager=self.persistence_manager,
+            log_each=True,
+        )
 
     def _flush_all_remaining_segments(
         self, client_id: str, client_queues: ClientQueues

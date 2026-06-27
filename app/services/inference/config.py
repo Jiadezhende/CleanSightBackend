@@ -32,16 +32,9 @@ class StageConfig:
         self.stage_name = stage_name
         # 可读别名（写告警 step_name + 可视化叠字）；缺省回退主键本身
         self.alias: str = config_dict.get("alias") or stage_name
+        # 每个 model 条目自带 class/params + analyzer_class/judge_class/realtime；
         # 确保即使 models 为 None 也转换为空列表
         self.models: List[Dict[str, Any]] = config_dict.get("models") or []
-        self.temporal_analyzer: Optional[Dict[str, Any]] = config_dict.get(
-            "temporal_analyzer"
-        )
-        self.visualizer: Optional[Dict[str, Any]] = config_dict.get("visualizer")
-        # 确保即使 alarm_triggers 为 None 也转换为空列表
-        self.alarm_triggers: List[Dict[str, Any]] = (
-            config_dict.get("alarm_triggers") or []
-        )
 
     def __repr__(self):
         return f"StageConfig(stage={self.stage_name}, models={len(self.models)})"
@@ -161,12 +154,15 @@ def load_stage_config(
 
     config_file = Path(config_path)
 
-    # 如果配置文件不存在，返回默认配置
+    # inference_config.yaml 是必备配置(单一真源)，缺失即 fail-fast，
+    # 不再用代码内默认兜底——那只会用一份必然漂移的副本掩盖部署缺陷。
     if not config_file.exists():
-        logger.warning("配置文件不存在: %s，使用默认配置", config_path)
-        return _create_default_config()
+        raise FileNotFoundError(
+            f"推理配置文件不存在: {config_path}。"
+            "inference_config.yaml 为必备单一真源，请检查部署。"
+        )
 
-    # 加载配置文件
+    # 加载配置文件（任何解析/格式错误均向上抛，由上层 fail-fast）
     try:
         with open(config_file, "r", encoding="utf-8") as f:
             if config_file.suffix in [".yaml", ".yml"]:
@@ -180,8 +176,7 @@ def load_stage_config(
 
         # 类型检查：确保加载的是字典
         if not isinstance(loaded_data, dict):
-            logger.warning("配置格式错误(非字典): %s，使用默认配置", config_path)
-            return _create_default_config()
+            raise ValueError(f"推理配置格式错误(顶层非字典): {config_path}")
 
         # 展开环境变量
         config_dict = _expand_env_vars(loaded_data)
@@ -197,10 +192,8 @@ def load_stage_config(
         return inference_config
 
     except Exception as e:
-        logger.error("✗ 加载配置文件失败: %s，使用默认配置", e, exc_info=True)
-        default_config = _create_default_config()
-        _global_inference_config = default_config
-        return default_config
+        logger.error("✗ 加载推理配置失败: %s", e, exc_info=True)
+        raise
 
 
 def _log_loaded_config(config: "InferenceConfig"):
@@ -233,127 +226,6 @@ def _log_loaded_config(config: "InferenceConfig"):
         logger.debug("=====================================")
 
 
-def _create_default_config() -> InferenceConfig:
-    """创建默认配置（用于向后兼容）"""
-    from app.settings import settings
-    model_base_path = settings.model_path
-
-    default_config = {
-        "stages": {
-            "LEAK": {
-                "models": [
-                    {
-                        "name": "bubble_detection",
-                        "class": "app.services.models.bubble.BubbleDetectionTask",
-                        "params": {
-                            "model_path": f"{model_base_path}/bubble-best.pt",
-                            "conf_threshold": 0.5,
-                            "iou_threshold": 0.45,
-                            "enabled": True,
-                        },
-                    },
-                    {
-                        "name": "bending_detection",
-                        "class": "app.services.models.bending.EndoscopeBendingDetectionTask",
-                        "params": {
-                            "model_path": f"{model_base_path}/bend-best.pt",
-                            "conf_threshold": 0.6,
-                            "iou_threshold": 0.45,
-                            "enabled": True,
-                        },
-                    },
-                ],
-                "temporal_analyzer": {
-                    "class": "app.services.inference.components.DefaultTemporalAnalyzer",
-                    "config": {
-                        "bubble": {"mode": "consecutive", "threshold": 3},
-                        "bending": {
-                            "mode": "sliding_window",
-                            "window_seconds": 2.0,
-                            "ratio": 0.7,
-                        },
-                    },
-                },
-                "visualizer": {
-                    "class": "app.services.inference.components.DefaultVisualizer",
-                },
-                "alarm_triggers": [
-                    {
-                        "condition": "bubble_detected == True",
-                        "alarm_type": "流程违规",
-                        "alarm_message": "检测到气泡",
-                    },
-                    {
-                        "condition": "bending_detected == True",
-                        "alarm_type": "流程违规",
-                        "alarm_message": "检测到内镜弯折",
-                    },
-                ],
-            },
-            "CLEAN": {
-                "models": [],
-                "temporal_analyzer": {
-                    "class": "app.services.inference.components.DefaultTemporalAnalyzer",
-                    "config": {
-                        "quality": {
-                            "mode": "sliding_window",
-                            "window_seconds": 2.0,
-                            "ratio": 0.8,
-                        }
-                    },
-                },
-            },
-        }
-    }
-
-    return InferenceConfig(default_config)
-
-
-def instantiate_from_config(config: Dict[str, Any]) -> Any:
-    """根据配置字典实例化对象
-
-    配置格式：
-        {
-            "class": "module.path.ClassName",
-            "params": {...}  # 可选
-        }
-
-    Args:
-        config: 配置字典
-
-    Returns:
-        实例化的对象
-
-    Raises:
-        ImportError: 模块导入失败
-        AttributeError: 类不存在
-    """
-    class_path = config.get("class")
-    if not class_path:
-        raise ValueError("配置中缺少 'class' 字段")
-
-    # 解析模块和类名
-    parts = class_path.rsplit(".", 1)
-    if len(parts) != 2:
-        raise ValueError(f"无效的类路径: {class_path}")
-
-    module_path, class_name = parts
-
-    # 动态导入模块
-    import importlib
-
-    module = importlib.import_module(module_path)
-    cls = getattr(module, class_name)
-
-    # 实例化对象
-    params = config.get("params", {})
-    if "config" in config and "params" not in config:
-        # 兼容 temporal_analyzer 的配置格式
-        params = {"config": config["config"]}
-
-    return cls(**params)
-
-
 # 示例用法
 if __name__ == "__main__":
     # 加载配置
@@ -369,10 +241,9 @@ if __name__ == "__main__":
             print(f"\nStage: {stage_name} - 配置缺失，跳过")
             continue
 
-        print(f"\nStage: {stage_name}")
+        print(f"\nStage: {stage_name} (alias={stage_config.alias})")
         print(f"  Models: {len(stage_config.models)}")
         for model_cfg in stage_config.models:
             print(f"    - {model_cfg['name']}: {model_cfg['class']}")
-
-        if stage_config.temporal_analyzer:
-            print(f"  Temporal Analyzer: {stage_config.temporal_analyzer.get('class')}")
+            if model_cfg.get('analyzer_class'):
+                print(f"        analyzer: {model_cfg['analyzer_class']}")

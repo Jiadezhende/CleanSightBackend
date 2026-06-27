@@ -6,7 +6,8 @@ L4 规则层消费 L3 产出的事实（EventFact / SegmentFact），产生告�
 职责边界：
 - 阈值 / required 等判定参数归 Judge 自身字段（不进 fact.meta）。
 - 决策状态（上升沿锁存 alarming、结算比较）是 Judge 内部成员 self._sm。
-- 告警消息文本由 Judge 拼装，须与迁移前一字不差（守 infer_alarm_metric 闸门）。
+- 告警的路由指标(metric)由 Judge 在构造 AlarmInfo 时显式填(它本就知道自己代表哪个指标)；
+  告警消息文本仅供展示，可自由改，不参与路由。
 
 消费形态（本轮 P0）：
 - 一 Judge 配一 Analyzer，step(facts) 直接读本 analyzer 当 tick 的 List[EventFact]。

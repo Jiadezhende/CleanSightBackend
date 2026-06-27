@@ -14,9 +14,8 @@ BubbleJudge（时序线程，L4）：
 """
 
 import logging
-import time
 from types import SimpleNamespace
-from typing import Any, Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
@@ -25,6 +24,7 @@ from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.workflows.judge import Judge
 from app.services.inference.data_models import (
     AlarmInfo,
+    AlarmMetric,
     AlarmType,
     DetectionOutput,
     EventFact,
@@ -96,35 +96,6 @@ class BubbleDetector(YOLODetector):
             iou_threshold=iou_threshold,
             enabled=enabled,
         )
-
-    def infer_batch(
-        self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
-    ) -> List[DetectionOutput]:
-        try:
-            outputs = self._run_yolo_batch(frames)
-            for output in outputs:
-                output.success = True
-                output.bubble_detected = len(output.detections) > 0
-                output.bubble_count = len(output.detections)
-            return outputs
-        except Exception as e:
-            logger.error("[BubbleDetector] Batch inference failed, fallback: %s", e, exc_info=True)
-            results = []
-            for f, c in zip(frames, contexts):
-                try:
-                    output = self.infer(f, c)
-                    output.bubble_detected = len(output.detections) > 0
-                    output.bubble_count = len(output.detections)
-                    results.append(output)
-                except Exception as err:
-                    results.append(DetectionOutput(
-                        detections=[],
-                        metadata={"error": str(err)},
-                        timestamp=time.time(),
-                        success=False,
-                        error=str(err),
-                    ))
-            return results
 
     def prepare_visualization_data(self, output: DetectionOutput) -> VisualizationData:
         items = []
@@ -258,6 +229,7 @@ class BubbleJudge(Judge):
                 alarm_type=AlarmType.PROCESS_VIOLATION,
                 alarm_level="high",
                 alarm_message=f"持续产生新气泡（birth_rate={birth_rate:.2f}），疑似漏气",
+                metric=AlarmMetric.BUBBLE,
                 metadata={"birth_rate": birth_rate, "threshold": self.birth_rate_threshold},
             ))
         elif not is_triggered and self._sm["alarming"]:

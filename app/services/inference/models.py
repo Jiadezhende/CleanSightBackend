@@ -28,7 +28,6 @@ from app.models.frame import FrameData
 from app.services.inference.data_models import (
     ALARM_MODE_REALTIME,
     AlarmMetric,
-    AlarmType,
     DetectionOutput,
 )
 
@@ -80,26 +79,3 @@ class AlarmRecord:
     count: int = 1
     timestamp: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-def infer_alarm_metric(
-    alarm_type: str,
-    alarm_message: str,
-    metadata: Dict[str, Any],
-) -> AlarmMetric:
-    """Infer metric for frontend alarms. Prefer explicit metadata["metric"] when present."""
-    explicit = str(metadata.get("metric", "")).upper().strip()
-    if explicit:
-        try:
-            return AlarmMetric(explicit)
-        except ValueError:
-            pass
-
-    text = f"{alarm_message} {' '.join(metadata.keys())}".lower()
-    if "birth_rate" in text or "bubble" in text or "气泡" in text:
-        return AlarmMetric.BUBBLE
-    if "bend" in text or "弯曲" in text or "bent" in text:
-        return AlarmMetric.BENDING
-    if str(alarm_type) == str(AlarmType.TASK_TIMEOUT):
-        return AlarmMetric.TASK_TIMEOUT
-    return AlarmMetric.UNKNOWN
