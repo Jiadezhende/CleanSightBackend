@@ -27,10 +27,6 @@ def _touch_segment(task_dir: Path, track: str, ts_us: int) -> None:
     (task_dir / f"{track}_segment_{ts_us}.mp4").write_bytes(b"")
 
 
-def _touch_keypoints(task_dir: Path, ts_us: int) -> None:
-    (task_dir / f"keypoints_{ts_us}.json").write_text("[]")
-
-
 class TestListSegments:
     def test_returns_empty_when_dir_missing(self, tmp_path):
         finder = SegmentFinder(tmp_path)
@@ -48,7 +44,6 @@ class TestListSegments:
         assert [s.ts_us for s in segs] == [1000, 2000, 3000]
         assert all(s.track == "processed" for s in segs)
         assert all(s.task_id == 100 and s.step_id == 1 for s in segs)
-        assert segs[0].keypoints_filename == "keypoints_1000.json"
 
     def test_filters_by_track(self, tmp_path):
         d = _make_task_dir(tmp_path, 1, 2)
@@ -61,9 +56,6 @@ class TestListSegments:
         proc = finder.list_segments(1, 2, "processed")
         assert {s.ts_us for s in raw} == {100, 200}
         assert {s.ts_us for s in proc} == {100}
-
-        # raw track 没有 keypoints
-        assert all(s.keypoints_filename is None for s in raw)
 
     def test_step_id_isolation(self, tmp_path):
         """同一 task 的不同 step 互不干扰。"""
@@ -83,7 +75,7 @@ class TestListSegments:
         _touch_segment(d, "processed", 100)
         (d / "metadata.json").write_text("{}")
         (d / "raw_playlist.m3u8").write_text("")
-        (d / "keypoints_100.json").write_text("[]")
+        (d / "stray.json").write_text("[]")
         (d / "garbage.mp4").write_bytes(b"")
         finder = SegmentFinder(tmp_path)
 

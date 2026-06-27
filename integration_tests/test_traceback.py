@@ -17,7 +17,6 @@
     T2  GET /traceback/task/{task_id}/playlist.m3u8  — VOD 播放列表
     T3  GET /traceback/task/{task_id}/timeline  — 时间轴打点
     T4  跟进 T1 中 raw_clips[trigger].url  — 媒体段可达
-    T5  跟进 T1 中 keypoints_url  — keypoints JSON 可达
 """
 
 import argparse
@@ -172,11 +171,6 @@ def test_evidence(ctx: Dict[str, Any]) -> bool:
     processed_clips = data.get("processed_clips", [])
     ok &= _assert(len(raw_clips) > 0, f"raw_clips 非空 (len={len(raw_clips)})")
     ok &= _assert(len(processed_clips) > 0, f"processed_clips 非空 (len={len(processed_clips)})")
-    ok &= _assert(
-        data.get("keypoints_url") is not None,
-        "keypoints_url 不为 null",
-        str(data.get("keypoints_url")),
-    )
 
     # 确认有 is_trigger=True 的段
     trigger_raw = [c for c in raw_clips if c.get("is_trigger")]
@@ -268,36 +262,6 @@ def test_media_segment(ctx: Dict[str, Any]) -> bool:
     return ok
 
 
-def test_keypoints(ctx: Dict[str, Any]) -> bool:
-    """T5: 跟进 T1 的 keypoints_url 请求 keypoints JSON"""
-    evidence = ctx.get("_evidence")
-    if not evidence:
-        print("\nT5 keypoints  →  跳过（T1 未成功）")
-        return False
-
-    url = evidence.get("keypoints_url")
-    if not url:
-        print("\nT5 keypoints  →  跳过（keypoints_url 为 null）")
-        return False
-
-    print(f"\nT5 keypoints →  {url[:80]}...")
-
-    resp = _get(url)
-    ok = True
-    ok &= _assert(resp.status_code == 200, f"HTTP 200 (got {resp.status_code})")
-    if resp.status_code != 200:
-        print(f"     响应体: {resp.text[:200]}")
-        return False
-
-    try:
-        kp = resp.json()
-        ok &= _assert(isinstance(kp, list), f"响应为 JSON array (type={type(kp).__name__})")
-    except Exception as e:
-        ok &= _assert(False, f"响应可解析为 JSON ({e})")
-
-    return ok
-
-
 # ---------------------------------------------------------------------------
 # 主测试流程
 # ---------------------------------------------------------------------------
@@ -322,7 +286,6 @@ def run_traceback_test(args) -> bool:
         results["T2 playlist  "] = test_playlist(ctx)
         results["T3 timeline  "] = test_timeline(ctx)
         results["T4 media_seg "] = test_media_segment(ctx)
-        results["T5 keypoints "] = test_keypoints(ctx)
 
     print("\n" + "=" * 60)
     print("测试结果汇总:")

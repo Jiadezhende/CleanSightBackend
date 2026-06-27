@@ -21,7 +21,6 @@ class FrameData:
 
     timestamp: float  # Unix timestamp
     frame: np.ndarray  # 原始或处理后的帧（numpy 数组）
-    keypoints: Optional[Dict[str, Any]] = None  # 关键点检测结果（仅 ProcessedQueue）
     inference_result: Optional[Dict[str, Any]] = None  # 完整推理结果
 
 
