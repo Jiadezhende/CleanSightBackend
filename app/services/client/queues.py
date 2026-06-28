@@ -464,23 +464,28 @@ class ClientQueues:
 
     # --- alarm_log 操作 ---
 
-    def try_pass_alarm_gate(self, task_id: Optional[int], metric: str, mode: str) -> bool:
-        """固定冷却窗口限流（5s）：True = 通过，False = 丢弃。"""
-        gate_key = f"{task_id}:{metric}:{mode}"
+    def append_alarm_record_with_gate(
+        self, task_id: Optional[int], alarm: Alarm, mode: str
+    ) -> bool:
+        """闸门去重 + 入环形日志，单 _alarm_lock 内原子完成。
+
+        True = 已记录（赋 seq 并入日志），False = 被冷却窗口（5s）拦截、未记录。
+        闸门按 (task_id, alarm.metric, mode) 限流；通过后才赋 seq、append。
+
+        task_id 须由调用方在锁外先 get_task_id() 取好传入，不在持 _alarm_lock 时
+        反向获取 _task_lock（违反全清顺序，死锁风险）。
+        """
+        gate_key = f"{task_id}:{alarm.metric}:{mode}"
         now = time.time()
         with self._alarm_lock:
             last = self._alarm_gate.get(gate_key)
             if last is not None and (now - last) < self._alarm_gate_window:
                 return False
             self._alarm_gate[gate_key] = now
-            return True
-
-    def append_alarm_record(self, record: Alarm) -> None:
-        """直接追加告警到内存环形日志；调用方须先通过 try_pass_alarm_gate。"""
-        with self._alarm_lock:
             self._alarm_seq += 1
-            record.seq = self._alarm_seq
-            self._alarm_log.append(record)
+            alarm.seq = self._alarm_seq
+            self._alarm_log.append(alarm)
+            return True
 
     def get_recent_alarms(self, n: int = 10) -> List[Alarm]:
         """返回最近 n 条告警记录（最新在后）。"""

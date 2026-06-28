@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 logger = logging.getLogger(__name__)
 
-from app.domain.alarm import ALARM_MODE_REALTIME, Alarm, AlarmMetric
+from app.domain.alarm import Alarm
 from app.domain.frame import Frame
 from app.domain.task import CleaningTask
 from app.services.client import ClientQueues, client_manager
@@ -404,18 +404,6 @@ class InferenceManager:
 
         except Exception as e:
             logger.error("_flush_all_remaining_segments error for %s: %s", client_id, e, exc_info=True)
-
-    def enqueue_alarm(self, alarm_info: Dict[str, Any]):
-        from app.services.client import client_manager
-        client_id = alarm_info.get("client_id")
-        cq = client_manager.get_client(client_id) if client_id else None
-        if cq is not None:
-            task_id = alarm_info.get("task_id")
-            metric = alarm_info.get("alarm_metric", AlarmMetric.UNKNOWN)
-            mode = alarm_info.get("alarm_mode", ALARM_MODE_REALTIME)
-            if not cq.try_pass_alarm_gate(task_id, metric, mode):
-                return
-        self.persistence_manager.persist_alarm(alarm_info)
 
     # ========== 启动/停止 ==========
 

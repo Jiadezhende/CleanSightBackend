@@ -8,7 +8,7 @@
 - 持久化逻辑 → inference.persistence (待提取)
 """
 
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import numpy as np
 
@@ -58,28 +58,3 @@ def set_task(client_id: str, task: Optional[CleaningTask]) -> bool:
 
 
 
-def report_alarm(alarm_info: Dict[str, Any]):
-    """上报告警信息（外部调用接口）
-
-    Args:
-        alarm_info: 告警信息字典，应包含:
-            - task_id: 任务ID
-            - step_id: 步骤ID
-            - client_id: 客户端ID
-            - detection_result: 检测结果（可选）
-            - alarm_type: 告警类型（可选，默认根据detection_result判断）
-            - alarm_level: 告警级别（可选，默认'high'）
-            - alarm_message: 告警消息（可选，默认根据detection_result生成）
-
-    示例:
-        >>> from app.services import ai
-        >>> ai.report_alarm({
-        ...     'task_id': 123,
-        ...     'step_id': 1,
-        ...     'client_id': 'client_001',
-        ...     'alarm_type': '流程违规',
-        ...     'alarm_message': '检测到气泡',
-        ...     'detection_result': {'bubble_detected': True}
-        ... })
-    """
-    manager.enqueue_alarm(alarm_info)

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class AlarmPersistenceStrategy:
-    """告警持久化策略（无状态）。去重由 ClientQueues.try_pass_alarm_gate 统一控制。"""
+    """告警持久化策略（无状态）。去重由 ClientQueues.append_alarm_record_with_gate 统一控制。"""
 
     def __init__(self):
         pass
