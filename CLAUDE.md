@@ -23,8 +23,9 @@ app/
 ├── main.py            # FastAPI 入口，lifespan 管理服务启停
 ├── settings.py        # 全局配置（Pydantic Settings，读 .env）
 ├── database.py        # SQLAlchemy 连接池（PostgreSQL）
-├── models/            # Pydantic API 模型 + SQLAlchemy ORM 模型
-├── routers/           # HTTP/WS 路由层
+├── domain/            # 跨服务共享契约（纯 dataclass：frame/detection/render/alarm/task）
+├── models.py          # SQLAlchemy ORM（DBTask/DBAlarm）；API DTO 跟各自 router 走
+├── routers/           # HTTP/WS 路由层（请求/响应 DTO 在此就地定义）
 ├── services/          # 核心业务服务（见下方详细说明）
 └── utils/             # 框架工具（异常、重试、指标、上下文、网关中间件）
 mediamtx_gateway/      # RTSP TCP 代理网关（独立进程，详见 docs/API_GATEWAY.md）
@@ -69,7 +70,7 @@ integration_tests/     # 端到端集成测试
 ### `app/services/client/` — 客户端状态管理
 - `ClientManager`：全局单例，管理所有在线客户端
 - `ClientState`：每客户端状态（task_id、时序历史、告警列表）
-- `ClientQueues`：4 条异步队列（`ca_ready` / `ca_raw` / `ca_processed` / `rt_processed`）
+- `ClientQueues`：3 条帧缓冲（`ca_ready` 无锁 SPSC deque 推理 / `ca_raw` 录制 / `ca_processed` HLS）+ `_latest_rendered` 渲染快照（实时推送，前端轮询，非队列）
 
 ### `app/utils/` — 基础设施
 
@@ -89,11 +90,17 @@ integration_tests/     # 端到端集成测试
 ```
 RTSP (30fps)
   ↓ [FFmpegDecoder]
-ca_ready (推理)  ca_raw (完整录制)
-  ↓ [AI推理 → 时序分析 → 可视化]
-ca_processed → [HLS分段 + 告警上报]
-rt_processed → [WebSocket 实时推送]
+ca_ready (推理，无锁 SPSC deque)   ca_raw (完整录制)
+  ↓ [L1 检测 → L2 特征聚合/落盘 → L3 时序产事实 → L4 规则出告警 → 可视化]
+ca_processed → [HLS 分段 + 告警上报]
+_latest_rendered 快照 → [WebSocket 实时推送（前端 ~10ms 轮询，非后端 push）]
 ```
+
+> 层间通信机制各异（队列 / 共享缓冲 / 直接调用 / 落盘文件），online/offline 已彻底分离，
+> 完整链路核实见 [docs/update/20260620_LAYERED_INFER_DATAFLOW.md](docs/update/20260620_LAYERED_INFER_DATAFLOW.md)。
+>
+> 注：旧文档曾列 `rt_processed` 队列承载实时推送 —— **全仓不存在**；实时推送实为
+> `_latest_rendered` 快照 + 前端轮询。`ca_ready` 为无锁 SPSC deque（decoder 单产/dispatcher 单消），非异步队列。
 
 ---
 
@@ -126,7 +133,7 @@ rt_processed → [WebSocket 实时推送]
 
 - PostgreSQL，连接池：5 基础 / 15 最大
 - 主表：`clean_task`（任务记录）、`clean_alarm`（告警记录）
-- ORM 模型：[app/models/task.py](app/models/task.py)
+- ORM 模型：[app/models.py](app/models.py)
 
 ---
 
@@ -150,6 +157,6 @@ python -m mediamtx_gateway.main
 ### Workflow 实现注意事项
 
 - `class_name` 直接取自模型 `result.names`，不做归一化，匹配字符串必须与模型训练类别名严格一致
-- `infer_batch` 覆写时，batch 路径与 fallback 单帧路径的业务字段赋值逻辑必须保持一致
+- `DetectionOutput` 是统一检测契约，不要为单个检测点往里加领域字段（如 `xxx_detected/xxx_count`）；派生量放 `Detection.extra` 或 `metadata`，时序统计交给 L3 Analyzer
 
 **查看数据库 Schema**：使用 `/schema-inspect` skill，自动对比 ORM 与实际表结构。

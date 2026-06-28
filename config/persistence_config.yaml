@@ -2,9 +2,9 @@
 # 包含存储、HLS视频持久化、告警持久化相关的业务参数
 
 # 存储配置
+# 注意：存储根目录 base_dir 已上移到 settings（env: CLEANSIGHT_STORAGE_DIR，默认 ./database），
+#       为全仓单一真源；此处仅保留持久化自有的写库开关与清理策略。
 storage:
-  base_dir: ./database            # 存储根目录（相对于项目根目录）
-  enable_db_write: false          # 是否写入数据库file_path表
   enable_cleanup: true            # 是否启用自动清理（设为 true 以启用 TTL 清理）
   cleanup_days: 15                 # 保留天数：status=completed 且超过此天数的任务目录将被删除
   cleanup_interval_seconds: 3600  # 清理扫描间隔（秒），默认每小时一次
@@ -15,7 +15,7 @@ hls:
   queue_size: 100                 # HLS队列最大长度
   segment_duration: 10            # 视频段时长（秒）
 
-  # 注意：帧率参数（raw_fps, processed_fps）从 inference_config.yaml 中读取
+  # 注意：帧率参数（raw_fps, processed_fps←inference_fps）从 app/settings.py 读取（单一真源）
 
 # 告警持久化配置
 alarm:

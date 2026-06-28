@@ -1,11 +1,12 @@
 import asyncio
+import base64
 import logging
 import time
 from contextlib import asynccontextmanager
 
+import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.models.frame import ProcessedFrame
 from app.services import ai
 from app.services.stream import stream_service
 
@@ -81,18 +82,14 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while not shutdown_event.is_set() and not disconnect_task.done():
-            processed_frame: ProcessedFrame = ai.get_result(client_id, as_model=True)  # type: ignore
+            frame = ai.get_result(client_id)  # domain Frame or None
 
-            if processed_frame is None:
+            if frame is None:
                 await asyncio.sleep(0.01)  # 减少轮询间隔
                 continue
 
-            # 去重：检查时间戳，避免重复发送同一帧
-            current_timestamp = (
-                processed_frame.raw_timestamp.timestamp()
-                if processed_frame.raw_timestamp
-                else time.time()
-            )
+            # 去重：在编码前按帧时间戳判重，避免重复编码同一帧
+            current_timestamp = frame.timestamp
             if current_timestamp <= last_sent_timestamp:
                 await asyncio.sleep(0.01)
                 continue
@@ -105,11 +102,11 @@ async def websocket_video_endpoint(websocket: WebSocket):
                     await asyncio.sleep(frame_interval - time_since_last)
                     current_time = time.time()  # 更新时间
 
-            # 使用模型中的 Base64 编码图像
+            # 边界编码：domain Frame → JPEG base64 data URL（仅此一处，内联）
             try:
-                data_url = (
-                    f"data:image/jpeg;base64,{processed_frame.processed_frame_b64}"
-                )
+                _, buf = cv2.imencode(".jpg", frame.frame)
+                b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+                data_url = f"data:image/jpeg;base64,{b64}"
                 await websocket.send_text(data_url)
 
                 # 更新发送记录

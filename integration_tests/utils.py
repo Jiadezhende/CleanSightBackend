@@ -4,7 +4,6 @@
 提供数据库操作、ffmpeg 控制、WebSocket 连接等工具函数
 """
 
-import json
 import os
 import shutil
 import subprocess
@@ -25,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import text
 
 from app.database import get_db
-from app.models.task import DBAlarm, DBTask
+from app.models import DBAlarm, DBTask
 
 
 class FFmpegController:
@@ -451,7 +450,6 @@ def seed_hls_segments(
     每个 ts_us 会生成：
       - raw_segment_{ts_us}.mp4        （16 字节哑文件）
       - processed_segment_{ts_us}.mp4  （16 字节哑文件）
-      - keypoints_{ts_us}.json         （含 1 帧检测结果）
     另外生成 raw_playlist.m3u8 和 processed_playlist.m3u8（实时播放列表格式，无 EXT-X-ENDLIST）。
 
     Returns:
@@ -471,11 +469,6 @@ def seed_hls_segments(
     for ts_us in ts_us_list:
         (task_dir / f"raw_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
         (task_dir / f"processed_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
-        ts_s = ts_us / 1_000_000.0
-        kp_data = [{"timestamp": ts_s, "keypoints": [0.5, 0.3]}]
-        (task_dir / f"keypoints_{ts_us}.json").write_text(
-            json.dumps(kp_data), encoding="utf-8"
-        )
 
     def _make_playlist(track: str) -> str:
         lines = [
@@ -515,15 +508,12 @@ def check_hls_files(client_id: str, task_id: int) -> Dict[str, Any]:
         "exists": task_dir.exists(),
         "path": str(task_dir),
         "segments": [],
-        "keypoints": [],
         "playlists": [],
     }
 
     if task_dir.exists():
         # 查找视频段
         result["segments"] = [str(f) for f in task_dir.glob("*_segment_*.mp4")]
-        # 查找关键点文件
-        result["keypoints"] = [str(f) for f in task_dir.glob("keypoints_*.json")]
         # 查找播放列表
         result["playlists"] = [str(f) for f in task_dir.glob("*.m3u8")]
 

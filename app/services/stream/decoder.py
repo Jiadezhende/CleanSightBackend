@@ -12,7 +12,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from app.models.frame import FrameData
+from app.domain.frame import Frame
 from app.services import ai
 from app.services.stream.config import DecoderConfig
 from app.utils.exceptions import FFmpegError, StreamConnectionError
@@ -194,18 +194,22 @@ class FFmpegDecoder:
                 return
             try:
                 if self.proc.poll() is None:
+                    # 直接 SIGKILL，不走 terminate→wait 优雅等待。依据：
+                    # 1) 此 ffmpeg 仅解码到 pipe（不写文件），强杀无产物损坏风险；
+                    # 2) RTSP 对端是自有 mediamtx_gateway，对断连(RST)会超时回收会话，不需优雅 TEARDOWN；
+                    # 3) 拆流多在流已不健康时发生，此时 ffmpeg 卡在死 socket 读上、收不到 SIGTERM，
+                    #    优雅等待只会白耗满 wait 秒（实测 ~2s）后照样 kill。
                     self.logger.info(
-                        "terminating ffmpeg pid=%s", getattr(self.proc, "pid", None)
+                        "killing ffmpeg pid=%s", getattr(self.proc, "pid", None)
                     )
-                    self.proc.terminate()
+                    self.proc.kill()
                     try:
-                        self.proc.wait(timeout=wait)
+                        self.proc.wait(timeout=wait)  # reap 防僵尸；SIGKILL 必达，通常 ~ms 返回
                     except Exception:
                         self.logger.warning(
-                            "ffmpeg did not exit gracefully, killing pid=%s",
-                            getattr(self.proc, "pid", None),
+                            "ffmpeg pid=%s not reaped within %ss after SIGKILL",
+                            getattr(self.proc, "pid", None), wait,
                         )
-                        self.proc.kill()
                 try:
                     if self.proc.stdout:
                         self.proc.stdout.close()
@@ -339,7 +343,7 @@ class FFmpegDecoder:
                 # 3. 写入队列（如果 client_queues 可用）
                 if self.client_queues is not None:
                     now = time.time()
-                    frame_data_obj = FrameData(timestamp=now, frame=std)
+                    frame_data_obj = Frame(timestamp=now, frame=std)
 
                     # 3.1 写入原始队列（全帧率，用于落盘；背压时也写入，保证 HLS 录制完整）
                     if self.client_queues.append_ca_raw(frame_data_obj):

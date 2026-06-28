@@ -36,14 +36,6 @@ class TestMediaTokenSignVerify:
         assert payload.kind == "segment"
         assert payload.expiry > int(time.time())
 
-    def test_sign_and_verify_keypoints(self):
-        token = self.mt.sign(
-            task_id=1, step_id=2, filename="keypoints_123.json", kind="keypoints"
-        )
-        payload = self.mt.verify(token, kind="keypoints")
-        assert payload.kind == "keypoints"
-        assert payload.step_id == 2
-
     def test_sign_and_verify_init(self):
         token = self.mt.sign(
             task_id=42, step_id=7, filename="init.mp4", kind="init"
@@ -60,7 +52,7 @@ class TestMediaTokenSignVerify:
     def test_kind_mismatch_rejected(self):
         token = self.mt.sign(1, 1, "f.mp4", kind="segment")
         with pytest.raises(MediaTokenError, match="Kind mismatch"):
-            self.mt.verify(token, kind="keypoints")
+            self.mt.verify(token, kind="init")
 
     def test_kind_none_skips_check(self):
         token = self.mt.sign(1, 1, "f.mp4", kind="segment")

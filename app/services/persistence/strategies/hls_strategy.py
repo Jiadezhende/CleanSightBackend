@@ -17,12 +17,11 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
-import numpy as np
 
-from app.models.frame import FrameData
+from app.domain.frame import Frame
 from app.settings import settings
 from app.utils.exceptions import PersistenceError
 
@@ -37,12 +36,10 @@ class HLSPersistenceStrategy:
         db_dir: Path,
         raw_fps: float = 30.0,
         processed_fps: float = 20.0,
-        enable_db_write: bool = False,
     ):
         self.db_dir = db_dir
         self.raw_fps = raw_fps
         self.processed_fps = processed_fps
-        self.enable_db_write = enable_db_write
         # 按 target_dir 路径索引的细粒度锁，序列化同一任务目录下的 playlist/metadata 写操作
         self._dir_locks: Dict[str, threading.Lock] = {}
         self._dir_locks_guard = threading.Lock()
@@ -399,7 +396,7 @@ class HLSPersistenceStrategy:
                 )
 
     def persist_segment(
-        self, task_id: int, step_id: int, segment_type: str, frames: List[FrameData]
+        self, task_id: int, step_id: int, segment_type: str, frames: List[Frame]
     ) -> bool:
         """
         持久化视频段（业务代码：纯净）
@@ -437,7 +434,7 @@ class HLSPersistenceStrategy:
             raise ValueError(f"Unknown segment type: {segment_type}")
 
     def _persist_raw_segment(
-        self, target_dir: Path, frames: List[FrameData], task_id: int, step_id: int
+        self, target_dir: Path, frames: List[Frame], task_id: int, step_id: int
     ) -> bool:
         """
         持久化原始视频段（业务代码：纯净）
@@ -519,10 +516,13 @@ class HLSPersistenceStrategy:
         return True
 
     def _persist_processed_segment(
-        self, target_dir: Path, frames: List[FrameData], task_id: int, step_id: int
+        self, target_dir: Path, frames: List[Frame], task_id: int, step_id: int
     ) -> bool:
         """
-        持久化处理后视频段和keypoints JSON（业务代码：纯净）
+        持久化处理后视频段（业务代码：纯净）。
+
+        detection 已单源落盘到 FeatureStore（features.jsonl，按帧 ts 对齐），
+        此处只写视频段，不再转储任何推理结果，避免重复落盘。
 
         Raises:
             PersistenceError: 持久化失败（IOError, cv2.error等）
@@ -552,35 +552,11 @@ class HLSPersistenceStrategy:
                 retryable=True,
             ) from e
 
-        # 2. 写keypoints JSON
-        keypoints_path = target_dir / f"keypoints_{int(start_ts * 1e6)}.json"
-        keypoints_list = []
-        for fd in frames:
-            kp = fd.keypoints if hasattr(fd, "keypoints") else None
-            ir = fd.inference_result if hasattr(fd, "inference_result") else None
-            keypoints_list.append(
-                {
-                    "timestamp": fd.timestamp,
-                    "keypoints": self._make_serializable(kp),
-                    "inference_result": self._make_serializable(ir),
-                }
-            )
-
-        try:
-            with keypoints_path.open("w", encoding="utf-8") as f:
-                json.dump(keypoints_list, f, ensure_ascii=False, indent=2)
-        except IOError as e:
-            raise PersistenceError(
-                message=f"Failed to write keypoints JSON: {keypoints_path}",
-                operation="hls_write_keypoints",
-                retryable=True,
-            ) from e
-
-        # 3. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
+        # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
         # 详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致 hls.js 段尾停摆。
         segment_duration = len(frames) / self.processed_fps
 
-        # 4 & 5. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
+        # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
         playlist_path = target_dir / "processed_playlist.m3u8"
         with self._get_dir_lock(target_dir):
@@ -676,39 +652,3 @@ class HLSPersistenceStrategy:
         # 写回文件
         with metadata_path.open("w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-    def _make_serializable(self, obj: Any) -> Any:
-        """递归过滤对象，移除不可JSON序列化的内容（从InferenceManager._make_json_serializable迁移）"""
-        if obj is None:
-            return None
-        if isinstance(obj, dict):
-            result = {}
-            for key, value in obj.items():
-                # 跳过已知的不可序列化字段
-                if key in ("annotated_frame", "processed_frame", "frame"):
-                    continue
-                result[key] = self._make_serializable(value)
-            return result
-        elif isinstance(obj, (list, tuple)):
-            return [self._make_serializable(item) for item in obj]
-        elif isinstance(obj, np.ndarray):
-            # numpy 数组转为列表（如果是小数组）
-            if obj.size < 100:
-                return obj.tolist()
-            logger.warning(
-                "Dropping large numpy array during keypoints serialization: shape=%s dtype=%s size=%d",
-                obj.shape,
-                obj.dtype,
-                obj.size,
-            )
-            raise PersistenceError(
-                message=f"numpy array too large to serialize (shape={obj.shape}, size={obj.size}); keypoints data discarded",
-                operation="hls_serialize_keypoints",
-                retryable=False,
-            )
-        elif isinstance(obj, (np.integer, np.floating)):
-            return obj.item()
-        elif isinstance(obj, (str, int, float, bool)):
-            return obj
-        else:
-            return str(obj)

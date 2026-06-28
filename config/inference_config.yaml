@@ -1,98 +1,100 @@
-# 推理服务阶段配置文件（Detector + TemporalAnalyzer 架构）
+# 推理服务阶段配置文件（流处理框架：流源 Detector + 流算子 Operator）
 #
 # 架构说明：
-# 1. 每个检测任务拆分为 Detector（无状态推理）+ TemporalAnalyzer（有状态时序分析）
-# 2. Detector 多 Client 共享同一实例，TemporalAnalyzer 每 Client 独立实例化
-# 3. 可视化使用固定渲染器（FixedVisualizer），Detector 只需提供 VisualizationData
-# 4. YAML 中声明 class/params（Detector）和 analyzer_class/analyzer_params（TemporalAnalyzer）
+# 1. detectors[]：流源（分组粒度），无状态多 Client 共享；name = 该 detector 产出的流名
+# 2. rules[]：流算子（规则粒度），每 Client 独立；subscribes 订阅输入流名，
+#    class = 合并 analyze(推进状态)+judge(出告警) 的 Operator，params.window_seconds = 感受野
+# 3. offline：离线段（stage 粒度）占位，本次未实现
+# 4. 可视化使用固定渲染器（FixedVisualizer），Detector 只需提供 VisualizationData
 #
 # 开发者只需：
-# 1. 创建 Detector 子类（实现 infer + prepare_visualization_data）
-# 2. 创建 TemporalAnalyzer 子类（实现 analyze_temporal，可选 override finalize）
-# 3. 在 YAML 中声明两者的 class 和 params
+# 1. 创建 Detector 子类（实现 infer + prepare_visualization_data），detectors[] 加一行
+# 2. 创建 Operator 子类（实现 analyze + judge，可选 override finalize），rules[] 加一行并声明 subscribes
 
 stages:
-  # ==================== LEAK 阶段（泄漏检测） ====================
-  LEAK:
-    # 模型列表（按顺序执行）
-    # 每个 Task 自带时序分析、可视化、告警逻辑
-    models:
+  # 主键 = step_id（task.current_step，字符串）；alias = 可读名（写告警 step_name + 可视化叠字）
+  #
+  # 流处理框架，每个 stage 三段：
+  #   detectors[] —— 流源（分组粒度）：name = 该 detector 产出的流名（slide_window key）
+  #   rules[]     —— 流算子（规则粒度）：subscribes 订阅输入流名，class = 合并 analyze+judge 的 Operator
+  #   offline     —— 离线段（stage 粒度）占位，本次未实现
+  #
+  # ==================== step "1" / LEAK 阶段（泄漏检测） ====================
+  "1":
+    alias: LEAK
+    detectors:
       - name: bubble
         class: app.services.inference.workflows.bubble.BubbleDetector
-        analyzer_class: app.services.inference.workflows.bubble.BirthRateAnalyzer
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
-        analyzer_params:
-          birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
-          window_seconds: 3.0          # 滑动窗口时长（秒）
-
       - name: bending
-        realtime: false              # 结算告警，不纳入 signals_10s 滑动窗口
         class: app.services.inference.workflows.bending.BendingDetector
-        analyzer_class: app.services.inference.workflows.bending.DebounceAnalyzer
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
-        analyzer_params:
+    rules:
+      - name: bubble_leak
+        subscribes: [bubble]
+        realtime: true               # 实时信号，纳入 signals_10s
+        class: app.services.inference.workflows.bubble.BubbleOperator
+        params:
+          window_seconds: 3.0          # 感受野（秒）= 出生率滑窗时长
+          birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
+      - name: bending_check
+        subscribes: [bending]
+        realtime: false              # 结算告警，不纳入 signals_10s
+        class: app.services.inference.workflows.bending.BendingOperator
+        params:
           debounce_frames: 5           # 状态切换去抖帧数
           required_bend_actions: 4     # 合格所需最少弯曲次数
+    offline: {}                      # 预留，本次未实现
 
-    # 以下配置在新架构中已不需要（保留用于向后兼容）
-    # temporal_analyzer:
-    #   class: app.services.inference.components.DefaultTemporalAnalyzer
-    #   config: ...
-    # visualizer:
-    #   class: app.services.inference.components.DefaultVisualizer
-    # alarm_triggers: ...
-
-  # ==================== CLEAN 阶段（清洁检测，暂无模型，纯透传） ====================
-  CLEAN:
-    models:
-      - name: mock_detection
-        class: app.services.inference.workflows.mock.MockDetector
+  # ==================== step "2" / CLEAN 阶段（清洁检测：按尺寸分两组，仅检测画框） ====================
+  # rules 为空 → 不建 Operator/Actor，仅由 detector 提供检测框可视化。
+  "2":
+    alias: CLEAN
+    detectors:
+      - name: clean_large       # 大目标组：手 / scope_control_body / scope_mid_section
+        class: app.services.inference.workflows.clean.CleanLargeDetector
         params:
-          brightness_threshold: 0.0   # 永不触发检测，纯透传
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-large-best.pt
+          conf_threshold: 0.25
+          iou_threshold: 0.45
           enabled: true
-        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
-        analyzer_params:
-          consecutive_trigger: 999    # 实际上永不满足，禁止告警
+      - name: clean_small       # 小目标组：syringe / air_gun / scope_distal_end
+        class: app.services.inference.workflows.clean.CleanSmallDetector
+        params:
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-small-best.pt
+          conf_threshold: 0.25
+          iou_threshold: 0.45
+          enabled: true
+    rules: []
+    offline: {}                      # 预留：离线动作分割模型（stage 粒度）将挂这里
 
-  # ==================== MOCK 阶段（未知 current_step 的 fallback，纯透传） ====================
+  # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================
   MOCK:
-    models:
-      - name: mock_detection
+    alias: MOCK
+    detectors:
+      - name: mock
         class: app.services.inference.workflows.mock.MockDetector
         params:
           brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
-        analyzer_class: app.services.inference.workflows.mock.MockAnalyzer
-        analyzer_params:
+    rules:
+      - name: mock_passthrough
+        subscribes: [mock]
+        realtime: true
+        class: app.services.inference.workflows.mock.MockOperator
+        params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
+    offline: {}
 
-# ==================== 全局配置（所有模块共享） ====================
-global:
-  # 视频处理参数（所有模块共享）
-  raw_fps: 30                     # 原始视频帧率（persistence, stream模块会读取）
-  inference_fps: 20               # 推理/输出帧率（persistence, client模块会读取）
-
-  # 批处理参数
-  batch_size: 4                   # 推理批量大小
-  inference_decimation: 2         # 推理降帧率（1=不降帧，2=每2帧推理1次）
-
-  # 队列参数（client模块会读取）
-  ca_maxlen: 2700                 # CA队列最大长度（帧数，约90秒@30fps）
-  ca_segment_len: 300             # HLS段长度（帧数，约10秒@30fps）
-
-  # 可视化参数（新架构）
-  visualization:
-    enabled: true                 # 是否启用可视化
-    use_fixed_visualizer: false   # 是否使用新的固定渲染器（设为 true 启用）
-
-  # 注意：
-  # - persistence和client模块会直接读取这些参数，保证全局一致性
-  # - 修改这些参数会影响所有相关模块
+# ==================== 推理自有参数 ====================
+# 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到
+#       app/settings.py 作单一真源，此处不再保留——避免其它模块反向钻进推理配置读共享参数。
+batch_size: 4                     # 推理批量大小（推理模块自有）

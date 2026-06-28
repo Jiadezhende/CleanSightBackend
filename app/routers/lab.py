@@ -30,7 +30,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBTask
+from app.models import DBTask
 from app.services.lab import (
     ClipBuilder,
     ClipBuildError,

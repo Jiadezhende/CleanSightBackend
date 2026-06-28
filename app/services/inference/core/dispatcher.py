@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 from typing import Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
-from app.services.inference.models import InferenceRequest
+from app.services.inference.models import DetectionTask
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -53,8 +53,8 @@ class StageAwareDispatcher:
         self._stop_event = threading.Event()
         self._dispatch_thread: Optional[threading.Thread] = None
 
-        # Stage分组队列：{stage: deque[InferenceRequest]}
-        self._stage_queues: Dict[str, Deque[InferenceRequest]] = defaultdict(
+        # Stage分组队列：{stage: deque[DetectionTask]}
+        self._stage_queues: Dict[str, Deque[DetectionTask]] = defaultdict(
             lambda: deque(maxlen=256)
         )
         self._lock = threading.Lock()
@@ -122,12 +122,11 @@ class StageAwareDispatcher:
             stage = self._get_client_stage(client_id, cq)
 
             # 构造推理请求
-            req = InferenceRequest(
+            req = DetectionTask(
                 client_id=client_id,
-                frame=frame_data.frame,
-                timestamp=frame_data.timestamp,
                 stage=stage,
-                frame_data=frame_data,
+                timestamp=frame_data.timestamp,
+                frame=frame_data.frame,
             )
 
             # 按 stage 分组入队
@@ -142,7 +141,7 @@ class StageAwareDispatcher:
 
     def get_batch_for_stage(
         self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore
-    ) -> List[InferenceRequest]:
+    ) -> List[DetectionTask]:
         """获取指定 stage 的一个 batch（支持超时等待）。
 
         策略：
@@ -156,14 +155,14 @@ class StageAwareDispatcher:
             timeout_ms: 超时时间（毫秒），默认 3ms（针对小并发优化）
 
         Returns:
-            InferenceRequest 列表（可能为空）
+            DetectionTask 列表（可能为空）
         """
         import time
 
         if max_size is None:
             max_size = self.max_batch_per_stage
 
-        batch: List[InferenceRequest] = []
+        batch: List[DetectionTask] = []
         start_time = time.time()
 
         while len(batch) < max_size:
@@ -187,6 +186,14 @@ class StageAwareDispatcher:
             time.sleep(0.001)  # 1ms
 
         return batch
+
+    def queue_depth(self, stage: str) -> int:
+        """获取指定 stage 的当前队列深度（线程安全）。
+
+        供推理循环计算自适应超时使用，避免外部直接访问内部锁与队列。
+        """
+        with self._lock:
+            return len(self._stage_queues.get(stage, ()))
 
     def get_stage_queue_depths(self) -> Dict[str, int]:
         """获取各 stage 队列深度（调试用）"""

@@ -22,16 +22,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.inference.data_models import (
-    DetectionOutput,
-    VisualizationData,
-    VisItem,
-    VisualizationType,
-)
-
-from app.models.frame import FrameData
+from app.domain.detection import FrameDetections
+from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.domain.frame import Frame
+from app.services.inference.naming import get_stage_alias
 from app.services.client import client_manager
-from app.services.inference.models import InferenceResult
+from app.services.inference.models import FrameInference
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -47,7 +43,7 @@ class VisualizationWorker:
     def __init__(
         self,
         stop_event: threading.Event,
-        tick_interval: float = 1.0 / 15,  # ~15 FPS
+        tick_interval: float = 1.0 / 20,  # 兜底 ~20 FPS；实际由 pool 按 settings.inference_fps 注入
         worker_id: int = 0,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
@@ -55,7 +51,7 @@ class VisualizationWorker:
 
         Args:
             stop_event: 停止事件
-            tick_interval: 拉取间隔（秒），默认 ~15 FPS
+            tick_interval: 拉取间隔（秒），由 pool 按 settings.inference_fps 注入
             worker_id: 工作线程ID（用于调试）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
@@ -113,7 +109,7 @@ class VisualizationWorker:
     def _process_client(self, client_id: str, cq) -> None:
         """处理单个客户端的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[InferenceResult] = cq.get_latest_inference()
+        inference: Optional[FrameInference] = cq.get_latest_inference()
         if inference is None:
             return
 
@@ -132,13 +128,13 @@ class VisualizationWorker:
 
         # 5. 渲染
         stage = inference.stage
-        annotated_frame = self._render(frame, stage, inference.result, events)
+        annotated_frame = self._render(frame, stage, inference.detections, events)
 
         # 6. 写回
-        frame_data = FrameData(
+        frame_data = Frame(
             timestamp=inference.timestamp,
             frame=annotated_frame,
-            inference_result=inference.result,
+            inference_result=inference.detections,
         )
         cq.append_ca_processed(frame_data)
         cq.set_latest_rendered(frame_data)
@@ -150,7 +146,7 @@ class VisualizationWorker:
         self,
         frame: np.ndarray,
         stage: str,
-        detection_results: Dict[str, DetectionOutput],
+        detection_results: Dict[str, FrameDetections],
         events: List[str],
     ) -> np.ndarray:
         """使用固定渲染器进行可视化。
@@ -158,7 +154,7 @@ class VisualizationWorker:
         Args:
             frame: 原始帧
             stage: 当前阶段
-            detection_results: 推理结果 {task_name: DetectionOutput}（同帧原子快照）
+            detection_results: 推理结果 {task_name: FrameDetections}（同帧原子快照）
             events: 时序事件列表
         """
         try:
@@ -169,22 +165,22 @@ class VisualizationWorker:
             if not tasks:
                 return frame.copy()
 
-            vis_data_list: List[VisualizationData] = []
+            vis_data_list: List[RenderSpec] = []
 
             for task in tasks:
                 detection_output = detection_results.get(task.name)
 
-                if not isinstance(detection_output, DetectionOutput):
+                if not isinstance(detection_output, FrameDetections):
                     continue
 
                 vis_data = task.prepare_visualization_data(detection_output)
                 vis_data_list.append(vis_data)
 
-            # 使用固定渲染器渲染
+            # 使用固定渲染器渲染。stage 主键是 step_id，叠字需可读别名。
             annotated_frame = self.fixed_visualizer.render(
                 frame=frame.copy(),
                 vis_data_list=vis_data_list,
-                stage=stage,
+                stage=get_stage_alias(stage),
                 temporal_events=events,
             )
 
@@ -198,19 +194,21 @@ class VisualizationWorker:
 class VisualizationWorkerPool:
     """可视化线程池（定时拉取模式，单线程）。
 
-    单线程理由：单帧渲染 ~5ms，15 FPS × 10 clients = 50ms/67ms，单线程足够。
+    单线程理由：单帧渲染 ~5ms，@20FPS 时 tick 预算 50ms，约可覆盖 10 clients；
     单线程避免了多线程竞争同一客户端的问题。
+    实际 target_fps 由调用方注入 settings.inference_fps（与推理限流、HLS processed
+    打标对齐），默认值仅作脱离装配时的兜底。
     """
 
     def __init__(
         self,
-        target_fps: float = 15,
+        target_fps: float = 20,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """初始化可视化线程池。
 
         Args:
-            target_fps: 目标可视化帧率（默认 15 FPS）
+            target_fps: 目标可视化帧率（装配时由 settings.inference_fps 注入）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
         self.target_fps = target_fps
@@ -256,7 +254,7 @@ class VisualizationWorkerPool:
 class FixedVisualizer:
     """固定可视化渲染器
 
-    根据 Task 提供的 VisualizationData 渲染视频帧，无需针对每个任务编写可视化代码。
+    根据 Task 提供的 RenderSpec 渲染视频帧，无需针对每个任务编写可视化代码。
     支持多种可视化类型：BBox、Segmentation、Keypoint
     """
 
@@ -361,7 +359,7 @@ class FixedVisualizer:
     def render(
         self,
         frame: np.ndarray,
-        vis_data_list: List["VisualizationData"],
+        vis_data_list: List["RenderSpec"],
         stage: str,
         temporal_events: Optional[List[str]] = None,
     ) -> np.ndarray:
@@ -384,11 +382,11 @@ class FixedVisualizer:
         text_cmds: list = []
 
         for vis_data in vis_data_list:
-            if vis_data.type == VisualizationType.BBOX:
+            if vis_data.type == RenderType.BBOX:
                 self._draw_bboxes(annotated, vis_data.items, text_cmds)
-            elif vis_data.type == VisualizationType.MASK:
+            elif vis_data.type == RenderType.MASK:
                 self._draw_masks(annotated, vis_data.items, text_cmds)
-            elif vis_data.type == VisualizationType.KEYPOINT:
+            elif vis_data.type == RenderType.KEYPOINT:
                 self._draw_keypoints(annotated, vis_data.items)
 
             self._draw_status_bar(
@@ -405,7 +403,7 @@ class FixedVisualizer:
         self._flush_texts(annotated, text_cmds)
         return annotated
 
-    def _draw_bboxes(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
+    def _draw_bboxes(self, frame: np.ndarray, items: List["RenderItem"], text_cmds: list):
         FONT_SIZE = 16
         PAD = 4
         for item in items:
@@ -431,7 +429,7 @@ class FixedVisualizer:
                     item.label, FONT_SIZE, (255, 255, 255), "mm",
                 ))
 
-    def _draw_masks(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
+    def _draw_masks(self, frame: np.ndarray, items: List["RenderItem"], text_cmds: list):
         for item in items:
             if item.mask is None:
                 continue
@@ -449,7 +447,7 @@ class FixedVisualizer:
                     item.label, 16, item.color, "mb",
                 ))
 
-    def _draw_keypoints(self, frame: np.ndarray, items: List["VisItem"]):
+    def _draw_keypoints(self, frame: np.ndarray, items: List["RenderItem"]):
         for item in items:
             if item.keypoints is None:
                 continue

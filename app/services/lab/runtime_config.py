@@ -6,7 +6,7 @@
 token 不在此管理：恒等于 `settings.label_studio_token`（env），页面不可见、不可改，
 密钥不经页面流转。
 
-持久化文件：{storage.base_dir}/lab_runtime_config.json（database/ 已 gitignore）。
+持久化文件：{settings.storage_base_dir}/lab_runtime_config.json（database/ 已 gitignore）。
 解析优先级：文件存在 → 用文件值；否则回退到 settings(env) 默认值。
 
 并发：submit 在 threadpool 里多线程跑，读写都过 _LOCK。

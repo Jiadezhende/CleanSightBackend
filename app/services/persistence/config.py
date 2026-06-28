@@ -34,10 +34,12 @@ class AlarmConfig:
 
 @dataclass
 class StorageConfig:
-    """存储配置"""
+    """存储配置
 
-    base_dir: str = "./database"
-    enable_db_write: bool = False
+    注意：base_dir 已上移到 settings.storage_base_dir（单一真源），不在此定义；
+    此处仅保留持久化自有职责的参数（清理策略）。
+    """
+
     enable_cleanup: bool = False
     cleanup_days: int = 7
     cleanup_interval_seconds: int = 3600
@@ -81,9 +83,6 @@ class PersistenceConfig:
                 logger.error("✗ 加载配置文件失败: %s，使用默认配置", e, exc_info=True)
                 config = cls()
 
-        # 从inference config读取共享参数（fps）
-        config._load_shared_params_from_inference()
-
         # 输出配置日志和验证
         config._log_loaded_config()
         config._validate_config()
@@ -100,23 +99,27 @@ class PersistenceConfig:
         Returns:
             PersistenceConfig实例
         """
-        storage = StorageConfig(**config_dict.get("storage", {}))
+        # 仅取已知字段，防御性兼容仍残留 base_dir 的旧 yaml（静默忽略而非崩）
+        storage_raw = config_dict.get("storage", {})
+        storage_kwargs = {
+            k: v for k, v in storage_raw.items()
+            if k in StorageConfig.__dataclass_fields__
+        }
+        storage = StorageConfig(**storage_kwargs)
         hls = HLSConfig(**config_dict.get("hls", {}))
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
         return cls(storage=storage, hls=hls, alarm=alarm)
 
     @property
     def storage_base_dir(self) -> Path:
-        """存储根目录（绝对路径）。
+        """存储根目录（绝对路径）——委托 settings 单一真源。
 
-        相对路径以项目根为基（与 segment_finder.get_default_base_dir 对齐），
-        避免读写两侧因进程 cwd 不同而分叉到不同目录。
+        历史上各服务各自解析此路径，现统一收敛到 settings.storage_base_dir，
+        persistence / inference / traceback 三方同源，消除分叉与跨服务 push。
         """
-        p = Path(self.storage.base_dir)
-        if p.is_absolute():
-            return p.resolve()
-        project_root = Path(__file__).parent.parent.parent.parent.resolve()
-        return (project_root / p).resolve()
+        from app.settings import settings
+
+        return settings.storage_base_dir
 
     # 向后兼容属性
     @property
@@ -148,10 +151,6 @@ class PersistenceConfig:
         return self.alarm.queue_size
 
     @property
-    def enable_db_write(self) -> bool:
-        return self.storage.enable_db_write
-
-    @property
     def enable_cleanup(self) -> bool:
         return self.storage.enable_cleanup
 
@@ -163,47 +162,24 @@ class PersistenceConfig:
     def cleanup_interval_seconds(self) -> int:
         return self.storage.cleanup_interval_seconds
 
-    def _load_shared_params_from_inference(self):
-        """从inference配置加载共享参数（fps等）
-
-        所有跨模块共享的参数统一在 inference_config.yaml 的 global 部分定义
-        """
-        try:
-            from app.services.inference.config import load_stage_config
-
-            inference_config = load_stage_config()
-
-            # 从inference config读取共享参数
-            self._raw_fps = inference_config.raw_fps
-            self._processed_fps = inference_config.inference_fps
-
-            logger.debug(
-                "✓ 已从inference_config.yaml读取共享参数: raw_fps=%.1f, inference_fps=%d",
-                self._raw_fps,
-                self._processed_fps,
-            )
-        except Exception as e:
-            # 如果无法加载inference配置，使用默认值
-            logger.warning("✗ 无法从inference配置读取共享参数，使用默认值: %s", e)
-            self._raw_fps = 30.0
-            self._processed_fps = 20.0
-
     @property
     def raw_fps(self) -> float:
-        """原始视频帧率（从inference config读取）"""
-        return getattr(self, "_raw_fps", 30.0)
+        """原始视频帧率（从 settings 单一真源读取）"""
+        from app.settings import settings
+        return float(settings.raw_fps)
 
     @property
     def processed_fps(self) -> float:
-        """处理后视频帧率（从inference config读取）"""
-        return getattr(self, "_processed_fps", 20.0)
+        """处理后视频帧率（从 settings 单一真源读取 inference_fps）"""
+        from app.settings import settings
+        return float(settings.inference_fps)
 
     def _log_loaded_config(self):
         """输出加载的配置（启动时显示）"""
         # DEBUG级别显示详细配置
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("========== Persistence配置 ==========")
-            logger.debug("存储: base_dir=%s", self.storage.base_dir)
+            logger.debug("存储: base_dir=%s", self.storage_base_dir)
             logger.debug(
                 "HLS: workers=%d, queue=%d, raw_fps=%.1f, processed_fps=%.1f",
                 self.hls.workers,
@@ -222,7 +198,7 @@ class PersistenceConfig:
                 self.storage.cleanup_days,
             )
             logger.debug(
-                "📌 fps参数来源: inference_config.yaml (global.raw_fps, global.inference_fps)"
+                "📌 fps参数来源: app/settings.py (raw_fps, inference_fps，单一真源)"
             )
             logger.debug("=====================================")
 

@@ -14,7 +14,6 @@
 - playlist/timeline 接口必填 step_id query 参数，仅返回该 step 的数据
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,7 +23,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBAlarm
+from app.models import DBAlarm
 from app.services.traceback import MediaToken, SegmentFinder
 from app.services.traceback.segment_finder import SegmentRef, get_default_base_dir
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
@@ -75,17 +74,6 @@ def _segment_to_url(req: Request, finder: SegmentFinder, seg: SegmentRef) -> Dic
         "ts_ms": seg.ts_ms,
         "is_trigger": seg.is_trigger,
     }
-
-
-def _keypoints_url(req: Request, task_id: int, step_id: int, filename: str) -> str:
-    token = MediaToken.default().sign(
-        task_id=task_id,
-        step_id=step_id,
-        filename=filename,
-        kind="keypoints",
-    )
-    base = str(req.base_url).rstrip("/")
-    return f"{base}/media/keypoints/{token}"
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +164,7 @@ async def get_alarm_evidence(
     n_before: int = Query(default=-1, ge=-1, le=20, description="触发段前上下文段数 (-1 用配置默认值)"),
     n_after: int = Query(default=-1, ge=-1, le=20, description="触发段后上下文段数 (-1 用配置默认值)"),
 ):
-    """单条告警的双轨视频证据 + 推理 keypoints。
+    """单条告警的双轨视频证据。
 
     通过 alarm 表自带的 (task_id, step_id) 直接定位文件，无需查 clean_task.source_ip。
 
@@ -185,8 +173,6 @@ async def get_alarm_evidence(
           "alarm": {...},
           "raw_clips":       [{"url", "filename", "ts_us", "ts_ms", "is_trigger"}],
           "processed_clips": [...],
-          "keypoints_url": "...",   # 触发段对应的 keypoints JSON token URL（可能 null）
-          "detection": [...]         # 触发段的 keypoints JSON 内容（如果文件存在）
         }
     """
     from app.settings import settings as s
@@ -221,30 +207,12 @@ async def get_alarm_evidence(
             alarm_id, task_id, step_id, detected_ms,
         )
 
-    # 提取 processed 触发段对应的 keypoints
-    keypoints_url: Optional[str] = None
-    detection: Optional[Any] = None
-    trigger = next((s for s in processed_segs if s.is_trigger), None)
-    if trigger is not None and trigger.keypoints_filename:
-        kp_path = finder.task_dir(task_id, step_id) / trigger.keypoints_filename
-        if kp_path.exists():
-            keypoints_url = _keypoints_url(
-                request, task_id, step_id, trigger.keypoints_filename
-            )
-            try:
-                with kp_path.open("r", encoding="utf-8") as f:
-                    detection = json.load(f)
-            except (OSError, json.JSONDecodeError) as e:
-                logger.warning("[Traceback] Failed to read keypoints %s: %s", kp_path, e)
-
     return {
         "alarm": alarm,
         "task_id": task_id,
         "step_id": step_id,
         "raw_clips": [_segment_to_url(request, finder, s) for s in raw_segs],
         "processed_clips": [_segment_to_url(request, finder, s) for s in processed_segs],
-        "keypoints_url": keypoints_url,
-        "detection": detection,
     }
 
 

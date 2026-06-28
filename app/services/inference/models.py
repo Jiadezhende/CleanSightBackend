@@ -1,19 +1,14 @@
-"""推理请求和结果的数据模型（客户端/Stage 级别）
+"""推理管线内部数据结构（传输对象 + 离线预留事实契约）。
 
-数据模型层次：
-- data_models.py: Task 级别 - 单个检测任务的数据结构（DetectionOutput 等）
-- 本模块（models.py）: 客户端/Stage 级别 - 汇总多个 Task 的结果
+两段，性质不同但同属"inference 私有数据形状"，故统一收此：
 
-核心数据流（双写 + 原子快照）：
-    InferenceRequest (客户端请求)
-      ↓
-    InferenceResult (汇总多个 Task 的推理结果)
-      → result: Dict[str, DetectionOutput]
-      ├─ cq.push_detection()      → slide_window（供 TemporalWorker 历史分析）
-      └─ cq.set_latest_inference() → _latest_inference（供 VisualizationWorker 原子读取）
+1. 传输对象（online 热路径，内存流转，无序列化）：
+   - DetectionTask（入）：对某 client/stage 的某帧做检测，由 dispatcher 构造、按 stage 入队。
+   - FrameInference（出）：一帧多检测器聚合，detections[detector_name] = FrameDetections。
+2. 离线预留事实契约（见下方分节）：online 不产不消费。
 
-    TemporalWorker (1Hz)  → cq.set_latest_temporal(events)
-    VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal()
+均为进程内 dataclass（非 wire DTO），不背 Pydantic 校验。跨服务共享契约（FrameDetections）
+来自 app.domain；告警契约见 app.domain.alarm。
 """
 
 from __future__ import annotations
@@ -24,82 +19,125 @@ from typing import Any, Dict
 
 import numpy as np
 
-from app.models.frame import FrameData
-from app.services.inference.data_models import (
-    ALARM_MODE_REALTIME,
-    AlarmMetric,
-    AlarmType,
-    DetectionOutput,
-)
+from app.domain.detection import FrameDetections
+
+
+# ==================== 传输对象（online 热路径）====================
 
 
 @dataclass
-class InferenceRequest:
-    """推理请求：帧 + 元数据。"""
+class DetectionTask:
+    """推理请求（队列作业）：对某 client/stage 的某帧做检测。"""
 
     client_id: str
+    stage: str
+    timestamp: float
     frame: np.ndarray
-    timestamp: float
-    stage: str
-    frame_data: FrameData
 
 
 @dataclass
-class InferenceResult:
-    """推理结果：汇总多个 Task 的检测输出。
+class FrameInference:
+    """推理结果：一帧多检测器聚合（detections[detector_name] = FrameDetections）。
 
-    专门用于传递第一步目标检测后的聚合结果。
-    result 字典的每个 value 是单个 Task 的 DetectionOutput。
+    timestamp 为帧捕获 ts，供 VisualizationWorker 按帧去重（同帧只渲染一次）。
     """
 
     client_id: str
-    timestamp: float
     stage: str
-    result: Dict[str, "DetectionOutput"]
+    timestamp: float
+    detections: Dict[str, FrameDetections]
+
+
+# ==================== 离线预留事实契约（L3 时序分析层产出）====================
+#
+# online 链路不产不消费事实（状态共享于 Operator._sm）。本段为离线 segmenter 预置，
+# 由 FactLedger（store.py）落盘/回读。两类事实分开建模：
+# - EventFact（打点）：实时滑窗产出的瞬时事实 = 某信号在 ts 的当前电平
+# - SegmentFact（分段）：离线全序列产出的动作分割结果，timeline = List[SegmentFact]
+# 二者均带 to_json/from_json，落 FactLedger（JSONL，带 type 判别字段）。
+# 阈值/required 不进 fact.meta —— 那些归 Judge 持有。
+
+_FACT_EVENT = "event"
+_FACT_SEGMENT = "segment"
 
 
 @dataclass
-class AlarmRecord:
-    """告警记录：存储在 ClientQueues.alarm_log（内存环形缓冲区）。
+class EventFact:
+    """打点：实时滑窗产出的瞬时事实 = 某信号在 ts 的当前电平。
 
-    Attributes:
-        alarm_type: 告警类型（如 "流程违规"）
-        alarm_level: 告警级别（low/medium/high/critical）
-        alarm_message: 告警消息
-        timestamp: 告警产生时间
-        metadata: 附加信息（如检测计数、窗口比例等）
+    signal 是信号名（多信号靠不同名字区分，不是类型枚举判别字段）；
+    同一 Analyzer 一个 tick 可产出多条 EventFact（不同 signal）。
     """
 
-    alarm_type: str
-    alarm_level: str
-    alarm_message: str
-    mode: str = ALARM_MODE_REALTIME
-    metric: str = AlarmMetric.UNKNOWN
-    stage: str = ""
-    seq: int = 0
-    count: int = 1
-    timestamp: float = field(default_factory=time.time)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    source: str  # 来源检测点，如 "bubble"/"bending"
+    signal: str  # 信号名，如 "birth_rate"/"state"/"count"
+    value: Any  # 该信号在 ts 的当前值
+    ts: float = field(default_factory=time.time)
+    conf: float = 1.0
+    meta: Dict[str, Any] = field(default_factory=dict)  # 仅放伴随观测量，不放阈值/required
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "type": _FACT_EVENT,
+            "source": self.source,
+            "signal": self.signal,
+            "value": self.value,
+            "ts": self.ts,
+            "conf": self.conf,
+            "meta": self.meta,
+        }
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "EventFact":
+        return cls(
+            source=d["source"],
+            signal=d["signal"],
+            value=d["value"],
+            ts=d.get("ts", 0.0),
+            conf=d.get("conf", 1.0),
+            meta=d.get("meta") or {},
+        )
 
 
-def infer_alarm_metric(
-    alarm_type: str,
-    alarm_message: str,
-    metadata: Dict[str, Any],
-) -> AlarmMetric:
-    """Infer metric for frontend alarms. Prefer explicit metadata["metric"] when present."""
-    explicit = str(metadata.get("metric", "")).upper().strip()
-    if explicit:
-        try:
-            return AlarmMetric(explicit)
-        except ValueError:
-            pass
+@dataclass
+class SegmentFact:
+    """分段：离线全序列产出的动作分割结果（timeline 的一个元素）。"""
 
-    text = f"{alarm_message} {' '.join(metadata.keys())}".lower()
-    if "birth_rate" in text or "bubble" in text or "气泡" in text:
-        return AlarmMetric.BUBBLE
-    if "bend" in text or "弯曲" in text or "bent" in text:
-        return AlarmMetric.BENDING
-    if str(alarm_type) == str(AlarmType.TASK_TIMEOUT):
-        return AlarmMetric.TASK_TIMEOUT
-    return AlarmMetric.UNKNOWN
+    source: str  # 来源检测点
+    label: str  # 动作标签，如 long_brushing
+    start: float  # 分段起始时间
+    end: float  # 分段结束时间
+    conf: float = 1.0
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "type": _FACT_SEGMENT,
+            "source": self.source,
+            "label": self.label,
+            "start": self.start,
+            "end": self.end,
+            "conf": self.conf,
+            "meta": self.meta,
+        }
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "SegmentFact":
+        return cls(
+            source=d["source"],
+            label=d["label"],
+            start=d["start"],
+            end=d["end"],
+            conf=d.get("conf", 1.0),
+            meta=d.get("meta") or {},
+        )
+
+
+def fact_from_json(d: Dict[str, Any]):
+    """从 ledger JSON 行还原 Fact，按 type 判别字段分派。"""
+    t = d.get("type")
+    if t == _FACT_EVENT:
+        return EventFact.from_json(d)
+    if t == _FACT_SEGMENT:
+        return SegmentFact.from_json(d)
+    raise ValueError(f"未知 fact type: {t!r}")
