@@ -103,6 +103,7 @@ class ClientQueues:
         self.frames_dropped_raw: int = 0
         # CA-ProcessedQueue（由 _viz_lock 保护）
         self.ca_processed: Deque[Frame] = deque(maxlen=ca_maxlen)
+        self.frames_dropped_processed: int = 0
         self.ca_segment_len = ca_segment_len
 
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
@@ -218,6 +219,11 @@ class ClientQueues:
 
         frames_to_persist = None
         with self._viz_lock:
+            if (
+                self.ca_processed.maxlen is not None
+                and len(self.ca_processed) >= self.ca_processed.maxlen
+            ):
+                self.frames_dropped_processed += 1
             self.ca_processed.append(frame_data)
             if _task is not None and len(self.ca_processed) >= self.ca_segment_len:
                 frames_to_persist = self.pop_n_ca_processed(self.ca_segment_len)
@@ -313,6 +319,9 @@ class ClientQueues:
 
     def get_ca_raw_capacity(self) -> int:
         return self.ca_raw.maxlen or 0
+
+    def get_ca_processed_capacity(self) -> int:
+        return self.ca_processed.maxlen or 0
 
     def get_ca_raw_length(self) -> int:
         return len(self.ca_raw)
