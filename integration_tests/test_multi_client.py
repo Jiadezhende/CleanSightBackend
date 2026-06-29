@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import func
 
 from app.database import get_db
-from app.models.task import DBTask
+from app.models import DBTask
 
 
 def get_test_tasks(max_tasks: int) -> list:

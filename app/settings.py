@@ -67,7 +67,6 @@ class Settings(BaseSettings):
     strict: bool = False
 
     # 外部接口URL（必需配置）
-    file_path_insert_url: str
     alarm_report_url: str
 
     # 服务器配置
@@ -83,6 +82,19 @@ class Settings(BaseSettings):
 
     # 模型路径
     model_path: str = "./app/data"
+
+    # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
+    # persistence / inference / traceback 三方都读 settings.storage_base_dir，
+    # 不再各自重算或互相 push（消除跨服务穿透）。
+    storage_dir: str = "./database"
+
+    # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
+    # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
+    raw_fps: int = 30          # 原始视频帧率
+    inference_fps: int = 15    # 推理/输出帧率（HLS processed 打标、client 限流共用）；取 30 的整除值，
+                               # 最小间隔门可干净放行"每隔一帧"（30→20 是算法天花板，本就到不了）
+    ca_maxlen: int = 2700      # CA 队列最大长度（帧数）
+    ca_segment_len: int = 300  # HLS 段长度（帧数）
 
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
@@ -112,11 +124,12 @@ class Settings(BaseSettings):
     label_studio_url: str = ""                # LS 服务器 base URL，如 http://10.176.122.22:8080
     label_studio_token: str = ""              # LS Legacy Token（Authorization: Token <...>）
     label_studio_default_project_id: int = 0  # 默认 project_id；0 表示未配置（请求需显式传 project_id）
-    lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage.base_dir}/.lab_exports
+    lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage_base_dir}/.lab_exports
     lab_export_ffmpeg_preset: str = "veryfast"
     lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
     lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
     lab_export_max_clips_per_submit: int = 20
+    lab_export_gap_tolerance_ms: int = 2000   # 相邻段间隔相对 step 实测节奏的允许超出量；>此值判为真录制停顿（源断流/重连）
 
     @property
     def allowed_ips_set(self) -> frozenset:
@@ -133,6 +146,18 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+
+    @property
+    def storage_base_dir(self) -> Path:
+        """持久化存储根目录（绝对路径，单一真源）。
+
+        相对路径以项目根为基，避免读写两侧因进程 cwd 不同而分叉到不同目录。
+        persistence / inference / traceback 三方都读此值。
+        """
+        p = Path(self.storage_dir)
+        if p.is_absolute():
+            return p.resolve()
+        return (Path(__file__).parent.parent / p).resolve()
 
     @model_validator(mode="after")
     def check_required_fields(self):
@@ -159,8 +184,6 @@ class Settings(BaseSettings):
             missing_fields.append("CLEANSIGHT_DB_PASSWORD")
 
         # 外部接口URL配置
-        if not self.file_path_insert_url:
-            missing_fields.append("CLEANSIGHT_FILE_PATH_INSERT_URL")
         if not self.alarm_report_url:
             missing_fields.append("CLEANSIGHT_ALARM_REPORT_URL")
 

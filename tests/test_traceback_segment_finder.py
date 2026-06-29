@@ -27,10 +27,6 @@ def _touch_segment(task_dir: Path, track: str, ts_us: int) -> None:
     (task_dir / f"{track}_segment_{ts_us}.mp4").write_bytes(b"")
 
 
-def _touch_keypoints(task_dir: Path, ts_us: int) -> None:
-    (task_dir / f"keypoints_{ts_us}.json").write_text("[]")
-
-
 class TestListSegments:
     def test_returns_empty_when_dir_missing(self, tmp_path):
         finder = SegmentFinder(tmp_path)
@@ -48,7 +44,6 @@ class TestListSegments:
         assert [s.ts_us for s in segs] == [1000, 2000, 3000]
         assert all(s.track == "processed" for s in segs)
         assert all(s.task_id == 100 and s.step_id == 1 for s in segs)
-        assert segs[0].keypoints_filename == "keypoints_1000.json"
 
     def test_filters_by_track(self, tmp_path):
         d = _make_task_dir(tmp_path, 1, 2)
@@ -61,9 +56,6 @@ class TestListSegments:
         proc = finder.list_segments(1, 2, "processed")
         assert {s.ts_us for s in raw} == {100, 200}
         assert {s.ts_us for s in proc} == {100}
-
-        # raw track 没有 keypoints
-        assert all(s.keypoints_filename is None for s in raw)
 
     def test_step_id_isolation(self, tmp_path):
         """同一 task 的不同 step 互不干扰。"""
@@ -83,7 +75,7 @@ class TestListSegments:
         _touch_segment(d, "processed", 100)
         (d / "metadata.json").write_text("{}")
         (d / "raw_playlist.m3u8").write_text("")
-        (d / "keypoints_100.json").write_text("[]")
+        (d / "stray.json").write_text("[]")
         (d / "garbage.mp4").write_bytes(b"")
         finder = SegmentFinder(tmp_path)
 
@@ -169,34 +161,33 @@ class TestSegmentRef:
 
 
 class TestBaseDirResolution:
-    """读写两侧都应解析到相同的绝对路径，与进程 cwd 无关。"""
+    """存储根目录由 settings.storage_base_dir 单一真源解析；persistence / traceback
+    两侧都委托它，应解析到相同的绝对路径，与进程 cwd 无关。"""
 
     def test_relative_base_dir_resolves_to_project_root_regardless_of_cwd(
         self, tmp_path, monkeypatch
     ):
-        from app.services.persistence.config import PersistenceConfig, StorageConfig
+        from app.settings import settings
+        from app.services.persistence.config import get_persistence_config
         from app.services.traceback.segment_finder import get_default_base_dir
 
-        cfg = PersistenceConfig(storage=StorageConfig(base_dir="./database"))
-        write_path = cfg.storage_base_dir
+        monkeypatch.setattr(settings, "storage_dir", "./database")
+        write_path = settings.storage_base_dir
         assert write_path.is_absolute()
         assert write_path.name == "database"
 
-        # 切到完全无关的 cwd，写入端解析的绝对路径必须保持不变
+        # 切到完全无关的 cwd，解析的绝对路径必须保持不变（以项目根为基，非 cwd）
         monkeypatch.chdir(tmp_path)
-        assert cfg.storage_base_dir == write_path
+        assert settings.storage_base_dir == write_path
+        assert tmp_path not in write_path.parents
 
-        # 读取端（segment_finder.get_default_base_dir）走的也是同一份配置，
-        # 在 cwd 已被切到 tmp_path 的条件下，仍应返回 project_root 下的绝对路径
-        read_path = get_default_base_dir()
-        assert read_path.is_absolute()
-        # tmp_path 不可能等于 project_root，所以读出来的路径不会以 tmp_path 开头
-        assert tmp_path not in read_path.parents
-        assert read_path != tmp_path / "database"
+        # persistence（写入端）与 traceback（读取端）都委托同一真源
+        assert get_persistence_config().storage_base_dir == write_path
+        assert get_default_base_dir() == write_path
 
-    def test_absolute_base_dir_is_returned_as_is(self, tmp_path):
-        from app.services.persistence.config import PersistenceConfig, StorageConfig
+    def test_absolute_base_dir_is_returned_as_is(self, tmp_path, monkeypatch):
+        from app.settings import settings
 
         abs_dir = tmp_path / "custom" / "store"
-        cfg = PersistenceConfig(storage=StorageConfig(base_dir=str(abs_dir)))
-        assert cfg.storage_base_dir == abs_dir.resolve()
+        monkeypatch.setattr(settings, "storage_dir", str(abs_dir))
+        assert settings.storage_base_dir == abs_dir.resolve()

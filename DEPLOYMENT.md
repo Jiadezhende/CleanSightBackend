@@ -100,12 +100,24 @@ Linux 安装入口是：
 
 数据库、外部接口、网关等变量不是安装变量；它们不影响 `install.sh` 的依赖安装，但会影响后端启动和业务功能。
 
-生产环境使用 `.env`，开发环境使用 `.env.dev`，测试环境使用 `.env.test`。启动脚本通过 `CLEANSIGHT_ENV` 选择配置文件：
+生产环境使用 `.env`，开发环境使用 `.env.dev`，测试环境使用 `.env.test`。启动脚本通过 `CLEANSIGHT_ENV` 选择配置文件，并一条命令同时拉起 RTSP 网关（含 MediaMTX）与后端：
 
 ```bash
-./start_backend.sh prod   # 加载 .env
+./start_backend.sh prod   # 加载 .env，网关+MediaMTX+后端一起起
+./start_backend.sh test   # 加载 .env.test
 ./start_backend.sh dev    # 加载 .env.dev
 ```
+
+**端口由启动脚本按环境自动分配，不写进 `.env*`。** `.env*` 只放业务参数（DB / 外部接口 URL / 密钥 / 网关 IP 白名单）。基准端口（dev/prod）与 test 偏移如下：
+
+| 用途 | dev / prod | test（+100） |
+|------|-----------|--------------|
+| 后端 HTTP/WS | 8000 | 8100 |
+| 网关对外 RTSP | 8004 | 8104 |
+| MediaMTX RTSP（内部） | 18004 | 18104 |
+| MediaMTX RTP / RTCP（UDP，内部） | 8002 / 8003 | 8102 / 8103 |
+
+**test 与 prod 同机共存**：二者端口整体错开 100，可同时 `./start_backend.sh prod` 与 `./start_backend.sh test`，互不抢占。dev 与 prod 同端口（分属不同机器，不冲突）。
 
 生产启动前至少应填写：
 
@@ -384,7 +396,7 @@ rsync -av vendor/ <target>:/path/to/CleanSightBackend/vendor/
 5. 在目标机配置 `.env` 中的生产运行时变量。
 6. 在目标机运行 `BASE_URL=http://49.234.120.241:8088 ./install.sh`，或替换为实际源机地址。
 7. 确认安装脚本末尾的 CUDA、ffmpeg、MediaMTX 自检通过。
-8. 启动后端和必要的 MediaMTX Gateway 进程。
+8. 运行 `./start_backend.sh prod` 一并启动网关、MediaMTX 与后端（端口按环境自动分配）。
 9. 在虚拟环境中跑一遍 `test_single_client`，完成端到端验证。
 10. 部署窗口结束后停止公网分发服务。
 
@@ -408,8 +420,8 @@ python integration_tests/test_single_client.py --scenario 1 --task_id <任务ID>
 
 验证前确认：
 
-- 后端服务已启动，`http://<目标机IP>:8000/health` 可访问。
-- MediaMTX Gateway 已启动，RTSP 对外端口 `8004` 可访问。
+- 后端服务已启动，`http://<目标机IP>:8000/health` 可访问（test 环境为 `8100`）。
+- MediaMTX Gateway 已启动，RTSP 对外端口 `8004` 可访问（test 环境为 `8104`）。
 - 测试视频存在，默认路径是 `test/test_video.mp4`；如不在默认路径，用 `--video_path <路径>` 指定。
 - `<任务ID>` 在数据库中可用；脚本在找不到任务时会尝试创建测试任务，因此数据库配置也必须可写。
 

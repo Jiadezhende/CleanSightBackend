@@ -28,8 +28,8 @@ from typing import Literal, Optional
 logger = logging.getLogger(__name__)
 
 
-MediaKind = Literal["segment", "keypoints", "init"]
-_VALID_KINDS = ("segment", "keypoints", "init")
+MediaKind = Literal["segment", "init"]
+_VALID_KINDS = ("segment", "init")
 
 
 class MediaTokenError(Exception):
@@ -126,7 +126,7 @@ class MediaToken:
             task_id: 任务 id
             step_id: 洗消步骤 id（来自 clean_task.current_step 转 int）
             filename: 媒体文件名（不含路径，如 "processed_segment_1700000000000000.mp4"）
-            kind: "segment" 或 "keypoints"
+            kind: "segment" 或 "init"
             ttl: 有效期（秒），默认取构造时的 default_ttl
             now: 当前时间（epoch 秒，用于测试注入）
 
@@ -171,7 +171,7 @@ class MediaToken:
         Args:
             token: 由 sign() 签发的字符串
             kind: 如果提供，校验 token 的 kind 字段必须匹配（防止 segment token 被
-                  当 keypoints token 用，反之亦然）
+                  当 init token 用，反之亦然）
             now: 当前时间（epoch 秒，测试注入）
 
         Raises:

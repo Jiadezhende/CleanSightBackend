@@ -89,7 +89,6 @@ class HLSWorkerPool:
             db_dir=db_dir or Path("database"),
             raw_fps=raw_fps,
             processed_fps=processed_fps,
-            enable_db_write=False,  # 不写入file_path表
         )
 
         # 创建Worker

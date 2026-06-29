@@ -5,7 +5,8 @@ Bug 2 回归测试：初始拉流失败后的重连机制
   当 start_stream() 在流未就绪时被调用，FFmpeg 启动失败（exit_code≠0）。
   修复前：decoder 注册在 start() 之后，start() 失败 → decoder 不进 self.decoders
           → 健康监控 has_decoder=False → 走 orphan 清理路径 → 不重连。
-  修复后：decoder 先注册，再 start()，start() 失败后 decoder 仍在 self.decoders
+  修复后：decoder 先注册，再 start()，start() 失败后 _start_stream_impl 吞掉异常并
+          返回（不再向上抛 FFmpegError），decoder 仍在 self.decoders
           → 健康监控 has_decoder=True → 检测到 idle → 进入重连模式 → 自动重试。
 
 测试覆盖：
@@ -102,7 +103,7 @@ class TestDecoderRegistration:
             yield MockDecoder
 
     def test_decoder_registered_after_ffmpeg_error(self):
-        """start() 抛出 FFmpegError 后，decoder 必须仍在 self.decoders 中"""
+        """start() 失败后 _start_stream_impl 吞掉异常返回，decoder 必须仍在 self.decoders 中"""
         error = FFmpegError(
             message="FFmpeg process failed to start",
             client_id=self.client_id,
@@ -123,10 +124,10 @@ class TestDecoderRegistration:
             mock_dec.protocol_opts = []
             mock_dec.start.side_effect = error
 
-            with pytest.raises(FFmpegError):
-                self.service._start_stream_impl(
-                    self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
-                )
+            # start() 失败不再向上抛异常，由健康监控接管重连
+            self.service._start_stream_impl(
+                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+            )
 
         # 核心断言：decoder 必须在 dict 中（修复的关键）
         assert self.client_id in self.service.decoders, (
@@ -154,10 +155,9 @@ class TestDecoderRegistration:
             mock_dec.protocol_opts = ["-rtsp_transport", "udp"]  # RTSP 协议选项
             mock_dec.start.side_effect = error
 
-            with pytest.raises(FFmpegError):
-                self.service._start_stream_impl(
-                    self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
-                )
+            self.service._start_stream_impl(
+                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+            )
 
         info = self.service.get_stream_info(self.client_id)
         assert info is not None, "get_stream_info() 应返回流信息供健康监控重连"
@@ -184,10 +184,9 @@ class TestDecoderRegistration:
             mock_dec.protocol_opts = []
             mock_dec.start.side_effect = error
 
-            with pytest.raises(FFmpegError):
-                self.service._start_stream_impl(
-                    self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
-                )
+            self.service._start_stream_impl(
+                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+            )
 
         assert self.client_id in self.service.metrics
 

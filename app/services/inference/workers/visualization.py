@@ -13,6 +13,7 @@
 import logging
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -22,16 +23,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.inference.data_models import (
-    DetectionOutput,
-    VisualizationData,
-    VisItem,
-    VisualizationType,
-)
-
-from app.models.frame import FrameData
+from app.domain.detection import FrameDetections
+from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.domain.frame import Frame
+from app.services.inference.naming import get_stage_alias
 from app.services.client import client_manager
-from app.services.inference.models import InferenceResult
+from app.services.inference.models import FrameInference
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -47,7 +44,7 @@ class VisualizationWorker:
     def __init__(
         self,
         stop_event: threading.Event,
-        tick_interval: float = 1.0 / 15,  # ~15 FPS
+        tick_interval: float = 1.0 / 20,  # 兜底 ~20 FPS；实际由 pool 按 settings.inference_fps 注入
         worker_id: int = 0,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
@@ -55,7 +52,7 @@ class VisualizationWorker:
 
         Args:
             stop_event: 停止事件
-            tick_interval: 拉取间隔（秒），默认 ~15 FPS
+            tick_interval: 拉取间隔（秒），由 pool 按 settings.inference_fps 注入
             worker_id: 工作线程ID（用于调试）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
@@ -68,6 +65,17 @@ class VisualizationWorker:
         # 去重：记录每个客户端上次渲染的推理时间戳，避免重复渲染同一帧
         self._last_rendered_ts: Dict[str, float] = {}
 
+        # 吞吐量观测（[VIZ_THROUGHPUT]）：每 ~10s 评估一次，仅在产出明显低于目标
+        # 时才打印，平稳时静默以免刷屏。目的：定位 processed 成帧率不足是
+        # "上游供帧慢"(supply-bound) 还是"单帧渲染慢"(render-bound)。
+        self._win_start: float = 0.0          # 当前统计窗起点（首轮 run 内用 time.time 初始化）
+        self._eval_interval: float = 10.0     # 评估窗长（秒）
+        self._stat_rendered: Dict[str, int] = defaultdict(int)  # 实际渲染（=新推理结果）帧数
+        self._stat_stale: Dict[str, int] = defaultdict(int)     # 有推理但无新结果而空转的 tick 数
+        self._render_time_sum: float = 0.0    # 渲染耗时累计（秒）
+        self._render_time_max: float = 0.0    # 单帧渲染耗时峰值（秒）
+        self._render_calls: int = 0           # 渲染调用次数
+
     def run(self):
         """工作循环：固定间隔轮询所有客户端。"""
         logger.debug(
@@ -77,6 +85,8 @@ class VisualizationWorker:
 
         while not self.stop_event.is_set():
             tick_start = time.time()
+            if self._win_start == 0.0:
+                self._win_start = tick_start
             try:
                 self._tick()
             except Exception as e:
@@ -84,6 +94,12 @@ class VisualizationWorker:
                     "[VisualizationWorker-%d] Tick exception: %s",
                     self.worker_id, e, exc_info=True,
                 )
+
+            # 吞吐量评估：到点（~10s）则算一次，仅有压力时打印
+            window = tick_start - self._win_start
+            if window >= self._eval_interval:
+                self._log_throughput_snapshot(window)
+                self._reset_throughput_window(tick_start)
 
             # 睡眠至下一个 tick
             elapsed = time.time() - tick_start
@@ -113,13 +129,15 @@ class VisualizationWorker:
     def _process_client(self, client_id: str, cq) -> None:
         """处理单个客户端的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[InferenceResult] = cq.get_latest_inference()
+        inference: Optional[FrameInference] = cq.get_latest_inference()
         if inference is None:
             return
 
         # 2. 去重：跳过已渲染过的同一推理结果
         last_ts = self._last_rendered_ts.get(client_id, 0.0)
         if inference.timestamp <= last_ts:
+            # 有推理快照但无新结果 → tick 空转。占比高即"上游供帧慢"的直接信号。
+            self._stat_stale[client_id] += 1
             return
 
         # 3. 获取最新原始帧
@@ -130,27 +148,34 @@ class VisualizationWorker:
         # 4. 获取最新时序事件
         events = cq.get_latest_temporal()
 
-        # 5. 渲染
+        # 5. 渲染（计时，用于判定是否 render-bound）
         stage = inference.stage
-        annotated_frame = self._render(frame, stage, inference.result, events)
+        t0 = time.perf_counter()
+        annotated_frame = self._render(frame, stage, inference.detections, events)
+        dt = time.perf_counter() - t0
+        self._render_time_sum += dt
+        self._render_calls += 1
+        if dt > self._render_time_max:
+            self._render_time_max = dt
 
         # 6. 写回
-        frame_data = FrameData(
+        frame_data = Frame(
             timestamp=inference.timestamp,
             frame=annotated_frame,
-            inference_result=inference.result,
+            inference_result=inference.detections,
         )
         cq.append_ca_processed(frame_data)
         cq.set_latest_rendered(frame_data)
 
-        # 7. 更新去重时间戳
+        # 7. 更新去重时间戳 + 计成帧数（实际渲染帧数 = processed 真实成帧率）
         self._last_rendered_ts[client_id] = inference.timestamp
+        self._stat_rendered[client_id] += 1
 
     def _render(
         self,
         frame: np.ndarray,
         stage: str,
-        detection_results: Dict[str, DetectionOutput],
+        detection_results: Dict[str, FrameDetections],
         events: List[str],
     ) -> np.ndarray:
         """使用固定渲染器进行可视化。
@@ -158,7 +183,7 @@ class VisualizationWorker:
         Args:
             frame: 原始帧
             stage: 当前阶段
-            detection_results: 推理结果 {task_name: DetectionOutput}（同帧原子快照）
+            detection_results: 推理结果 {task_name: FrameDetections}（同帧原子快照）
             events: 时序事件列表
         """
         try:
@@ -169,22 +194,24 @@ class VisualizationWorker:
             if not tasks:
                 return frame.copy()
 
-            vis_data_list: List[VisualizationData] = []
+            vis_data_list: List[RenderSpec] = []
 
             for task in tasks:
                 detection_output = detection_results.get(task.name)
 
-                if not isinstance(detection_output, DetectionOutput):
+                if not isinstance(detection_output, FrameDetections):
                     continue
 
                 vis_data = task.prepare_visualization_data(detection_output)
                 vis_data_list.append(vis_data)
 
-            # 使用固定渲染器渲染
+            # 使用固定渲染器渲染。stage 主键是 step_id，叠字需可读别名。
+            # 注：render() 内部即 `annotated = frame.copy()`，此处无需再 copy，
+            # 否则一帧两次整帧拷贝。render() 全程只改副本、不动入参，传原帧安全。
             annotated_frame = self.fixed_visualizer.render(
-                frame=frame.copy(),
+                frame=frame,
                 vis_data_list=vis_data_list,
-                stage=stage,
+                stage=get_stage_alias(stage),
                 temporal_events=events,
             )
 
@@ -194,23 +221,84 @@ class VisualizationWorker:
             logger.error("[VisualizationWorker] Render failed: %s", e, exc_info=True)
             return frame.copy()
 
+    def _reset_throughput_window(self, now: float) -> None:
+        """重置吞吐量统计窗。"""
+        self._win_start = now
+        self._stat_rendered.clear()
+        self._stat_stale.clear()
+        self._render_time_sum = 0.0
+        self._render_time_max = 0.0
+        self._render_calls = 0
+
+    def _log_throughput_snapshot(self, window: float) -> None:
+        """有压力时打一条 [VIZ_THROUGHPUT]：各客户端产出 fps / 空转占比 + 渲染耗时。
+
+        与 [INFER_PRESSURE]（量"积压/丢帧"）正交——本行量"速率亏空"：processed 成帧率
+        是否低于目标，并据渲染耗时是否逼近 tick 预算，自动判定瓶颈侧：
+        - render-bound：单帧渲染峰值 ≥ tick 预算 → 渲染慢拖住产出；
+        - supply-bound：渲染很快但产出仍低 + 空转占比高 → 上游（throttle/推理）供帧慢。
+
+        **仅在有客户端产出明显低于目标、或渲染逼近预算时才打**，平稳时静默以免刷屏。
+        日志失败绝不影响渲染热路径——整体 try/except 包裹。
+        """
+        try:
+            if window <= 0:
+                return
+            target = 1.0 / self.tick_interval if self.tick_interval > 0 else 0.0
+            budget_ms = self.tick_interval * 1000.0
+            avg_ms = (self._render_time_sum / self._render_calls * 1000.0) if self._render_calls else 0.0
+            max_ms = self._render_time_max * 1000.0
+            render_bound = max_ms >= budget_ms and self._render_calls > 0
+
+            pressured = render_bound
+            parts: List[str] = []
+            # 期望窗内最多 tick 数（供判定"是否真有推理流"，过滤近空闲流的误报）
+            expected_ticks = target * window
+            for cid in sorted(set(self._stat_rendered) | set(self._stat_stale)):
+                rendered = self._stat_rendered.get(cid, 0)
+                stale = self._stat_stale.get(cid, 0)
+                out_fps = rendered / window
+                total = rendered + stale
+                stale_pct = (stale / total * 100.0) if total else 0.0
+                tag = ""
+                # 有实际推理流（tick 数足够）且产出 < 目标 80% → 该客户端有压力
+                if total >= expected_ticks * 0.3 and out_fps < target * 0.8:
+                    pressured = True
+                    tag = " (render-bound)" if render_bound else " (supply-bound)"
+                parts.append(
+                    f"{cid} out={out_fps:.1f}fps stale={stale_pct:.0f}%{tag}"
+                )
+
+            if not pressured:
+                return  # 平稳，静默
+
+            logger.info(
+                "[VIZ_THROUGHPUT] target=%.0ffps render=%.1fms(max %.1fms, budget %.0fms) || %s",
+                target, avg_ms, max_ms, budget_ms,
+                " | ".join(parts) if parts else "(none)",
+            )
+        except Exception as e:
+            logger.debug("[VisualizationWorker] throughput snapshot failed: %s", e)
+
 
 class VisualizationWorkerPool:
     """可视化线程池（定时拉取模式，单线程）。
 
-    单线程理由：单帧渲染 ~5ms，15 FPS × 10 clients = 50ms/67ms，单线程足够。
+    单线程理由：单帧渲染 ~5ms，@20FPS 时 tick 预算 50ms，约可覆盖 10 clients；
     单线程避免了多线程竞争同一客户端的问题。
+    实际 target_fps 由调用方注入 settings.inference_fps（与推理限流、HLS processed
+    打标对齐），默认值仅作脱离装配时的兜底。
     """
 
     def __init__(
         self,
-        target_fps: float = 15,
+        target_fps: float = 20,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """初始化可视化线程池。
 
         Args:
-            target_fps: 目标可视化帧率（默认 15 FPS）
+            target_fps: 目标可视化帧率（装配时由 settings.inference_fps 注入）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
         """
         self.target_fps = target_fps
@@ -256,7 +344,7 @@ class VisualizationWorkerPool:
 class FixedVisualizer:
     """固定可视化渲染器
 
-    根据 Task 提供的 VisualizationData 渲染视频帧，无需针对每个任务编写可视化代码。
+    根据 Task 提供的 RenderSpec 渲染视频帧，无需针对每个任务编写可视化代码。
     支持多种可视化类型：BBox、Segmentation、Keypoint
     """
 
@@ -346,22 +434,35 @@ class FixedVisualizer:
         radius: int = 6,
         alpha: float = 0.7,
     ) -> None:
-        """绘制半透明圆角矩形背景。"""
+        """绘制半透明圆角矩形背景（仅在矩形包围盒 ROI 上拷贝/混合）。
+
+        行为等价于"整帧 copy + 整帧 addWeighted"：矩形外 overlay==frame，addWeighted
+        还原原像素（纯浪费算力）。改只在 ROI 上操作，单帧多框时削掉渲染尾延迟尖峰。
+        """
         x1, y1 = pt1
         x2, y2 = pt2
-        overlay = frame.copy()
-        # 填充主体矩形 + 四角圆形实现圆角效果
-        cv2.rectangle(overlay, (x1 + radius, y1), (x2 - radius, y2), color, -1)
-        cv2.rectangle(overlay, (x1, y1 + radius), (x2, y2 - radius), color, -1)
+        h, w = frame.shape[:2]
+        # clip 包围盒到帧边界；空 ROI 直接返回。cv2.rectangle/circle 端点闭区间，
+        # 形状覆盖像素 x1..x2、y1..y2（含端点），故 slice 上界取 x2+1 / y2+1。
+        rx1, ry1 = max(0, x1), max(0, y1)
+        rx2, ry2 = min(w, x2 + 1), min(h, y2 + 1)
+        if rx2 <= rx1 or ry2 <= ry1:
+            return
+        roi = frame[ry1:ry2, rx1:rx2]
+        overlay = roi.copy()
+        # 形状坐标平移到 ROI 局部坐标系（减去 ROI 原点）；越界部分由 cv2 自动裁剪
+        ox, oy = rx1, ry1
+        cv2.rectangle(overlay, (x1 + radius - ox, y1 - oy), (x2 - radius - ox, y2 - oy), color, -1)
+        cv2.rectangle(overlay, (x1 - ox, y1 + radius - oy), (x2 - ox, y2 - radius - oy), color, -1)
         for cx, cy in [(x1 + radius, y1 + radius), (x2 - radius, y1 + radius),
                        (x1 + radius, y2 - radius), (x2 - radius, y2 - radius)]:
-            cv2.circle(overlay, (cx, cy), radius, color, -1)
-        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, dst=frame)
+            cv2.circle(overlay, (cx - ox, cy - oy), radius, color, -1)
+        cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, dst=roi)
 
     def render(
         self,
         frame: np.ndarray,
-        vis_data_list: List["VisualizationData"],
+        vis_data_list: List["RenderSpec"],
         stage: str,
         temporal_events: Optional[List[str]] = None,
     ) -> np.ndarray:
@@ -384,11 +485,11 @@ class FixedVisualizer:
         text_cmds: list = []
 
         for vis_data in vis_data_list:
-            if vis_data.type == VisualizationType.BBOX:
+            if vis_data.type == RenderType.BBOX:
                 self._draw_bboxes(annotated, vis_data.items, text_cmds)
-            elif vis_data.type == VisualizationType.MASK:
+            elif vis_data.type == RenderType.MASK:
                 self._draw_masks(annotated, vis_data.items, text_cmds)
-            elif vis_data.type == VisualizationType.KEYPOINT:
+            elif vis_data.type == RenderType.KEYPOINT:
                 self._draw_keypoints(annotated, vis_data.items)
 
             self._draw_status_bar(
@@ -405,7 +506,7 @@ class FixedVisualizer:
         self._flush_texts(annotated, text_cmds)
         return annotated
 
-    def _draw_bboxes(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
+    def _draw_bboxes(self, frame: np.ndarray, items: List["RenderItem"], text_cmds: list):
         FONT_SIZE = 16
         PAD = 4
         for item in items:
@@ -431,25 +532,35 @@ class FixedVisualizer:
                     item.label, FONT_SIZE, (255, 255, 255), "mm",
                 ))
 
-    def _draw_masks(self, frame: np.ndarray, items: List["VisItem"], text_cmds: list):
+    def _draw_masks(self, frame: np.ndarray, items: List["RenderItem"], text_cmds: list):
         for item in items:
             if item.mask is None:
                 continue
-            colored_mask = np.zeros_like(frame, dtype=np.uint8)
-            colored_mask[item.mask > 0] = item.color
-            frame[:] = cv2.addWeighted(frame, 0.5, colored_mask, 0.5, 0)
+            mask_u8 = item.mask.astype(np.uint8)
             contours, _ = cv2.findContours(
-                item.mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
+            if not contours:
+                continue
+            # 仅在 mask 包围盒 ROI 上着色混合，且只染 mask 像素本身——避免整帧 alpha 混合
+            # 的尾延迟尖峰，同时修掉旧实现"对 mask 外区域也按 0.5 压暗整帧"的副作用。
+            mx, my, mw, mh = cv2.boundingRect(mask_u8)
+            roi = frame[my:my + mh, mx:mx + mw]
+            mask_roi = mask_u8[my:my + mh, mx:mx + mw] > 0
+            if mask_roi.any():
+                colored = np.empty_like(roi)
+                colored[:] = item.color
+                blended = cv2.addWeighted(roi, 0.5, colored, 0.5, 0)
+                roi[mask_roi] = blended[mask_roi]
             cv2.drawContours(frame, contours, -1, item.color, 2)
-            if contours and item.label:
+            if item.label:
                 x, y, w, _ = cv2.boundingRect(contours[0])
                 text_cmds.append((
                     (x + w // 2, y - 10),
                     item.label, 16, item.color, "mb",
                 ))
 
-    def _draw_keypoints(self, frame: np.ndarray, items: List["VisItem"]):
+    def _draw_keypoints(self, frame: np.ndarray, items: List["RenderItem"]):
         for item in items:
             if item.keypoints is None:
                 continue

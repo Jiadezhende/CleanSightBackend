@@ -2,11 +2,9 @@
 HLS 段定位
 
 利用文件名 `{track}_segment_{ts_us}.mp4` 中的微秒时间戳 ts_us 二分定位。
-keypoints JSON 同样按 `keypoints_{ts_us}.json` 命名，与 processed 段一一对应。
 
 依赖落盘约定：
     {base_dir}/{task_id}/{step_id}/{raw|processed}_segment_{ts_us}.mp4
-    {base_dir}/{task_id}/{step_id}/keypoints_{ts_us}.json
 """
 
 import bisect
@@ -14,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +32,6 @@ class SegmentRef:
         filename: 段文件名（如 "processed_segment_1700000000000000.mp4"）
         ts_us: 段开始时间戳（微秒）
         path: 段文件绝对路径
-        keypoints_filename: 对应 keypoints JSON 文件名（仅 processed 有效，raw 为 None）
         is_trigger: 是否为告警触发段（仅在 evidence 上下文中有意义）
     """
 
@@ -44,7 +41,6 @@ class SegmentRef:
     filename: str
     ts_us: int
     path: Path
-    keypoints_filename: Optional[str] = None
     is_trigger: bool = False
 
     @property
@@ -67,7 +63,7 @@ class SegmentFinder:
     def __init__(self, base_dir: Path):
         """
         Args:
-            base_dir: 持久化存储根目录（对应 persistence_config.storage.base_dir）
+            base_dir: 持久化存储根目录（对应 settings.storage_base_dir）
         """
         self._base_dir = Path(base_dir).resolve()
 
@@ -118,10 +114,6 @@ class SegmentFinder:
                 logger.warning("Skipping segment with invalid ts_us: %s", entry.name)
                 continue
 
-            keypoints_filename = (
-                f"keypoints_{ts_us}.json" if track == "processed" else None
-            )
-
             refs.append(
                 SegmentRef(
                     task_id=task_id,
@@ -130,7 +122,6 @@ class SegmentFinder:
                     filename=entry.name,
                     ts_us=ts_us,
                     path=entry,
-                    keypoints_filename=keypoints_filename,
                 )
             )
 
@@ -198,28 +189,18 @@ class SegmentFinder:
                     filename=s.filename,
                     ts_us=s.ts_us,
                     path=s.path,
-                    keypoints_filename=s.keypoints_filename,
                     is_trigger=(i == trigger_idx),
                 )
             )
         return result
 
-    def keypoints_path(self, task_id: int, step_id: int, ts_us: int) -> Path:
-        """根据 ts_us 计算 keypoints JSON 绝对路径（不校验是否存在）"""
-        return self.task_dir(task_id, step_id) / f"keypoints_{ts_us}.json"
-
 
 def get_default_base_dir() -> Path:
     """取持久化默认 base_dir（与 hls_strategy 写入路径同源）。
 
-    实现委托 PersistenceConfig.storage_base_dir，保证读写两侧对相对路径
+    直读 settings.storage_base_dir 单一真源，保证读写两侧对相对路径
     的解析逻辑完全一致（相对路径都以项目根为基）。
     """
-    try:
-        from app.services.persistence.config import get_persistence_config
+    from app.settings import settings
 
-        return get_persistence_config().storage_base_dir
-    except Exception:
-        logger.warning("Failed to load persistence config; falling back to <project>/database")
-        project_root = Path(__file__).parent.parent.parent.parent.resolve()
-        return (project_root / "database").resolve()
+    return settings.storage_base_dir

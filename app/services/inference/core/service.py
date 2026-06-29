@@ -4,7 +4,7 @@
 - 管理 StageAwareDispatcher（取帧分组）
 - 为每个 stage 创建 MultiModelWorkerPool
 - 启动推理线程，消费各 stage 的批量请求
-- 将 DetectionOutput 同步到 ClientQueues.slide_window
+- 将 FrameDetections 同步到 ClientQueues.slide_window
 """
 
 from __future__ import annotations
@@ -12,12 +12,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.core.dispatcher import StageAwareDispatcher
-from app.services.inference.models import InferenceResult
+from app.services.inference.models import FrameInference
 from app.services.inference.workers.base import MultiModelWorkerPool
 from app.utils.exceptions import (
     AppError,
@@ -37,7 +36,7 @@ class ModelWorkerService:
     - 管理 StageAwareDispatcher（取帧分组）
     - 为每个 stage 创建 MultiModelWorkerPool
     - 启动推理线程，消费各 stage 的批量请求
-    - 将 DetectionOutput 同步到 ClientQueues.slide_window
+    - 将 FrameDetections 同步到 ClientQueues.slide_window
     """
 
     def __init__(
@@ -46,8 +45,8 @@ class ModelWorkerService:
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
         use_cuda_stream: bool = True,
-        num_worker_threads: int = 2,  # 每个 stage 一个推理线程
         client_manager_instance: Optional[ClientManager] = None,
+        feature_store: Optional[Any] = None,
     ):
         """
         Args:
@@ -65,12 +64,14 @@ class ModelWorkerService:
                 }
             max_batch_per_stage: 每个 stage 最大 batch 大小
             use_cuda_stream: 是否使用 CUDA Stream 并行
-            num_worker_threads: 推理线程数
             client_manager_instance: ClientManager 实例（可选，用于动态获取客户端）
         """
 
         # 保存 ClientManager 实例（用于动态客户端管理）
         self._client_manager = client_manager_instance or client_manager
+
+        # L2 特征落盘（常开；离线链路硬需求）。由 InferenceManager 注入并管理生命周期
+        self._feature_store = feature_store
 
         # 客户端队列映射（可能动态更新）
         if client_queues_map is None:
@@ -105,10 +106,6 @@ class ModelWorkerService:
                     use_cuda_stream=use_cuda_stream,
                 )
 
-        # 推理线程池
-        self.executor = ThreadPoolExecutor(
-            max_workers=num_worker_threads, thread_name_prefix="InferWorker"
-        )
         self._stop_event = threading.Event()
         self._worker_threads: List[threading.Thread] = []
 
@@ -168,10 +165,16 @@ class ModelWorkerService:
         """停止服务"""
         self._stop_event.set()
         self.dispatcher.stop()
-        self.executor.shutdown(wait=True)
 
         for thread in self._worker_threads:
             thread.join(timeout=2.0)
+            # infer_batch(CUDA 同步)是唯一不可中断窗口：wedge 时 join 超时、线程被 daemon 强杀。
+            # 无法根治，仅在此留诊断痕迹（关键 flush 已在 InferenceManager.stop 控制线程完成，硬杀不丢数据）。
+            if thread.is_alive():
+                logger.warning(
+                    "[ModelWorkerService] %s 未在 2s 内退出（疑似卡在 infer_batch/CUDA），将被 daemon 强杀",
+                    thread.name,
+                )
 
         logger.info("ModelWorkerService stopped")
 
@@ -185,8 +188,7 @@ class ModelWorkerService:
         while not self._stop_event.is_set():
             try:
                 # 获取队列深度（用于自适应超时）
-                with self.dispatcher._lock:
-                    queue_depth = len(self.dispatcher._stage_queues.get(stage, []))
+                queue_depth = self.dispatcher.queue_depth(stage)
 
                 # 自适应超时：针对小并发优化（<10客户端），避免过度等待增加延迟
                 if queue_depth >= batch_size * 2:
@@ -269,7 +271,7 @@ class ModelWorkerService:
                 time.sleep(0.5)
                 continue
 
-    def _write_back_results(self, results: List[InferenceResult]):
+    def _write_back_results(self, results: List[FrameInference]):
         """将推理结果双写到 ClientQueues。
 
         双写策略：
@@ -277,20 +279,30 @@ class ModelWorkerService:
         - latest_inference（原子快照）：供 VisualizationWorker 直接读取，保证同帧一致性
 
         异常处理：
-        - 客户端已移除 → 抛出 FrameDrop
+        - 单条结果对应的客户端已移除 → 跳过该条（per-result），不中断整批。
+          一个 batch 跨多客户端填充，某客户端断连不得殃及同批其他在线客户端的写回。
         """
         for res in results:
             if not self._client_manager.has_client(res.client_id):
-                raise FrameDrop(
-                    client_id=res.client_id,
-                    frame_index=getattr(res, "frame_index", None),
-                    reason="client_removed",
+                # 该客户端已移除：仅跳过此条，继续处理同批其他客户端
+                logger.debug(
+                    "[Worker] Skip write-back for removed client=%s", res.client_id
                 )
+                continue
 
             cq = self._client_manager.get_client(res.client_id)
             # Path 1: per-task slide_window（temporal 需要历史窗口）
-            for task_name, detection_output in res.result.items():
+            for task_name, detection_output in res.detections.items():
                 cq.push_detection(task_name, detection_output)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
             cq.set_latest_inference(res)
+            # L2 特征落盘（常开）：offline 链路硬需求，best-effort 不影响主链路。
+            # 目录键 (task_id, step_id) 与 HLS 同款；任一为 None 则跳过（拒落，同 HLS 口径）。
+            # task 取一次再派生 task_id/step_id，避免两次独立读之间 set_task 造成键错配。
+            if self._feature_store is not None:
+                task = cq.get_task()
+                task_id = task.task_id if task else None
+                step_id = cq.step_id_of(task)
+                if task_id is not None and step_id is not None:
+                    self._feature_store.append(task_id, step_id, res)
 

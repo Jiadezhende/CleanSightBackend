@@ -1,27 +1,28 @@
 """
-推理工作流子模块
+推理工作流子模块（流处理框架：流源 Detector / 流算子 Operator）
 
-Detector（无状态，推理线程 + 可视化线程）：
-    BubbleDetector, BendingDetector, MockDetector
+Detector（流源，无状态，推理线程 + 可视化线程）：
+    BubbleDetector, BendingDetector, MockDetector, CleanLargeDetector, CleanSmallDetector
 
-TemporalAnalyzer（有状态，时序线程，每 Client 独立实例）：
-    BirthRateAnalyzer, DebounceAnalyzer, MockAnalyzer
+Operator（流算子，有状态，时序线程，每 Client 独立实例，analyze 推进状态 + judge 出告警）：
+    BubbleOperator, BendingOperator, MockOperator
 """
 
 from .detector import Detector, YOLODetector
-from .analyzer import TemporalAnalyzer
-from .bubble import BubbleDetector, BirthRateAnalyzer
-from .bending import BendingDetector, DebounceAnalyzer
-from .mock import MockDetector, MockAnalyzer
+from .operator import Operator, AlignedFrame
+from .bubble import BubbleDetector, BubbleOperator
+from .bending import BendingDetector, BendingOperator
+from .mock import MockDetector, MockOperator
 
 __all__ = [
     "Detector",
     "YOLODetector",
-    "TemporalAnalyzer",
+    "Operator",
+    "AlignedFrame",
     "BubbleDetector",
-    "BirthRateAnalyzer",
+    "BubbleOperator",
     "BendingDetector",
-    "DebounceAnalyzer",
+    "BendingOperator",
     "MockDetector",
-    "MockAnalyzer",
+    "MockOperator",
 ]

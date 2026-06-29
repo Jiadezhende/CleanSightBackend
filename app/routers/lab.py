@@ -30,7 +30,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBTask
+from app.models import DBTask
 from app.services.lab import (
     ClipBuilder,
     ClipBuildError,
@@ -106,6 +106,7 @@ class LabHealthResponse(BaseModel):
 class LabConfigResponse(BaseModel):
     label_studio_url: str
     default_project_id: int
+    task_source: str                # "db"（按数据库）| "storage"（按实际存储）
     token_configured: bool          # token 是否已配置（不返回明文）
     source: str                     # "file"（页面改过）| "env"（回退环境变量）
 
@@ -115,6 +116,10 @@ class LabConfigUpdateRequest(BaseModel):
         "", description="LS base URL；空表示未配置，非空须以 http:// 或 https:// 开头"
     )
     default_project_id: int = Field(0, ge=0, description="默认 project_id；0 表示无默认值")
+    task_source: Optional[str] = Field(
+        None,
+        description='任务列表数据来源 "db" | "storage"；不传表示不修改（DB 挂了可切 storage）',
+    )
 
 
 class LabTaskItem(BaseModel):
@@ -186,6 +191,66 @@ def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
         has_raw_segments=bool(raw_steps),
         has_current_step_raw=has_current_step_raw,
     )
+
+
+def _storage_task_to_item(
+    finder: SegmentFinder, task_id: int, raw_steps: List[int]
+) -> LabTaskItem:
+    """从文件系统信息构造 LabTaskItem（存储模式）。
+
+    DB 才有的字段（source_ip/status/current_step）无从得知：
+    - source_ip=None, status="unknown", step_id/current_step 留空（不推断）
+    - updated_time/start_time 从各 raw step 的段时间戳（ts_ms）推导，用于排序与展示
+    """
+    ts_list: List[int] = []
+    for step_id in raw_steps:
+        ts_list.extend(seg.ts_ms for seg in finder.list_segments(task_id, step_id, "raw"))
+
+    return LabTaskItem(
+        task_id=task_id,
+        source_ip=None,
+        current_step=None,
+        step_id=None,
+        status="unknown",
+        updated_time=max(ts_list) if ts_list else None,
+        start_time=min(ts_list) if ts_list else None,
+        end_time=None,
+        raw_steps=raw_steps,
+        has_raw_segments=True,
+        has_current_step_raw=False,
+    )
+
+
+def _list_storage_tasks(
+    finder: SegmentFinder, q: Optional[str], limit: int, offset: int
+) -> tuple[int, List[LabTaskItem]]:
+    """直接枚举存储目录列任务，完全不碰 DB（DB 挂了也能工作）。
+
+    只收磁盘上有 raw 段的 task（无 raw 段对送标无意义）。
+    q 非空时按 str(task_id) 子串过滤（存储模式下 ip/status 不可知）。
+    排序 updated_time desc, task_id desc，再 offset/limit 切片。
+    """
+    base_dir = finder.base_dir
+    needle = (q or "").strip()
+
+    items: List[LabTaskItem] = []
+    if base_dir.exists() and base_dir.is_dir():
+        for entry in base_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            task_id = _optional_int(entry.name)  # 跳过 .lab_exports 等非数字目录
+            if task_id is None:
+                continue
+            if needle and needle not in str(task_id):
+                continue
+            raw_steps = _list_raw_steps(finder, task_id)
+            if not raw_steps:
+                continue
+            items.append(_storage_task_to_item(finder, task_id, raw_steps))
+
+    items.sort(key=lambda it: (it.updated_time or 0, it.task_id), reverse=True)
+    total = len(items)
+    return total, items[offset : offset + limit]
 
 
 def _validate_clips(
@@ -263,7 +328,18 @@ async def list_lab_tasks(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> LabTaskListResponse:
-    """List clean_task rows for the lab page."""
+    """列出送标页面的任务。
+
+    数据来源由运行时开关 task_source 决定（GET/PUT /lab-f3m8/config）：
+    - "db"（默认）：查 clean_task 表 + 文件系统补 raw 段信息（原行为）
+    - "storage"：直接枚举存储目录，不碰 DB（业务库挂了时的兜底）
+    """
+    finder = SegmentFinder(get_default_base_dir())
+
+    if runtime_config.get_task_source() == "storage":
+        total, tasks = _list_storage_tasks(finder, q, limit, offset)
+        return LabTaskListResponse(total=total, tasks=tasks)
+
     db = next(get_db())
     try:
         try:
@@ -294,7 +370,6 @@ async def list_lab_tasks(
                 query="SELECT ... FROM clean_task",
             ) from e
 
-        finder = SegmentFinder(get_default_base_dir())
         return LabTaskListResponse(
             total=int(total),
             tasks=[_task_row_to_item(row, finder) for row in rows],
@@ -350,6 +425,7 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
         temp_root=temp_root,
         preset=s.lab_export_ffmpeg_preset,
         max_duration_ms=s.lab_export_max_clip_ms,
+        gap_tolerance_ms=s.lab_export_gap_tolerance_ms,
     )
     ls = LabelStudioClient(
         base_url=ls_url,
@@ -514,7 +590,9 @@ async def update_lab_config(req: LabConfigUpdateRequest) -> LabConfigResponse:
     token 不在此处管理（仅 env）。校验失败抛 400。
     """
     try:
-        snap = runtime_config.update(req.label_studio_url, req.default_project_id)
+        snap = runtime_config.update(
+            req.label_studio_url, req.default_project_id, req.task_source
+        )
     except ValueError as e:
         raise ValidationError(str(e), field="label_studio_url")
     return LabConfigResponse(**snap)

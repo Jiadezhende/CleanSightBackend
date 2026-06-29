@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBAlarm
+from app.models import DBAlarm
 from app.services.client.manager import client_manager
 from app.utils.exceptions import DatabaseError
 
@@ -67,7 +67,7 @@ async def get_task_alarms(task_id: int):
 
 
 def _empty_alarm_payload(task_id: int) -> dict:
-    from app.services.inference.data_models import get_task_metric_map
+    from app.services.inference.naming import get_task_metric_map
     _empty = {"active": False, "hit_count": 0, "max_conf": 0.0}
     signals = {m.value: dict(_empty) for m in get_task_metric_map().values()}
     return {"task_id": task_id, "max_seq": 0, "signals_10s": signals, "alarms": []}

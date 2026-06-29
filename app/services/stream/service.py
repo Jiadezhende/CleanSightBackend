@@ -58,15 +58,12 @@ except ImportError:
 # 导入配置加载器
 try:
     from app.services.client.config import get_client_config
-    from app.services.inference.config import load_stage_config
     from app.services.stream.config import get_stream_config
 
-    _inference_config = load_stage_config()
     _stream_config = get_stream_config()
     _client_config = get_client_config()
 except Exception as e:
     logger.warning(f"Failed to load configs: {e}, using defaults")
-    _inference_config = None
     _stream_config = None
     _client_config = None
 
@@ -222,16 +219,16 @@ class StreamService:
         if client_manager is None:
             return None
 
-        # 从配置文件读取推理FPS
-        inference_fps = (
-            _inference_config.get_inference_fps(30) if _inference_config else 15
-        )
+        # 帧率/队列参数走 settings 单一真源（见 app/settings.py）
+        from app.settings import settings
 
-        # 从配置文件读取帧和队列参数
+        inference_fps = settings.inference_fps
+
+        # 从配置文件读取帧参数（resize 属 client 配置）
         resize_width = _client_config.frame.resize_width if _client_config else 640
         resize_height = _client_config.frame.resize_height if _client_config else 480
-        ca_maxlen = _inference_config.ca_maxlen if _inference_config else 600
-        ca_segment_len = _inference_config.ca_segment_len if _inference_config else 150
+        ca_maxlen = settings.ca_maxlen
+        ca_segment_len = settings.ca_segment_len
 
         client_queues = client_manager.get_client(
             client_id,

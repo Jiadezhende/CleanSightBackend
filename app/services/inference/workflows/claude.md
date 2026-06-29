@@ -26,12 +26,27 @@ flowchart TD
 
 ---
 
+## 流处理框架（流源 Detector / 流算子 Operator）
+
+每个 stage 拆 `detectors[]`（流源，分组粒度）+ `rules[]`（流算子，规则粒度）：
+
+| 角色 | 基类 | 职责 | 状态机 |
+| -- | ---- | ---- | ------ |
+| 流源 | `Detector` / `YOLODetector` | 单帧检测，bbox=特征。无状态，多 Client 共享；`name` = 该 detector 产出的流名（slide_window key） | 无 |
+| 流算子 | `Operator` | 合并 analyze+judge，单 `_sm`：`analyze(windows)` 按 `subscribes` 收订阅流、`_clip` 到 `window_seconds` 感受野、推进 `_sm`；`judge()` 读 `_sm` 出 (overlay 文案, 告警)；`finalize()` 结算。一个 Operator = 一条规则，每 Client 独立 | 共享状态机 `self._sm`（测量 + 决策同一份） |
+
+> `name`（算子自身/输出身份）与 `subscribes`（输入流清单，显式必填）正交：算子名 ≠ 流名。
+> 多订阅算子用基类 `_zip_by_ts` 按 ts inner-join 对齐多流（同帧 ts 精确相等）。
+> 阈值/required 归算子自身字段；`AlarmInfo.metric` 由算子显式填，不依赖 name。
+
+特征由推理写回处常开落盘到 `FeatureStore`（`{task_id}/{step_id}/features.jsonl`，与 HLS 同款工作目录，按帧 `ts` 对齐）。实时链路**不落盘事实**（已无 EventFact 对象间传输，状态共享于 `_sm`）；`FactLedger`（`{task_id}/{step_id}/facts.jsonl`）为 offline 预置，待离线 segmenter 接入后写 `SegmentFact`。
+
 ## 两种告警模式
 
 | 模式 | 触发时机 | 来源方法 | 去向 |
 | ------ | --------- | --------- | ------ |
-| 实时告警 | TemporalWorker 1Hz 轮询，条件满足时上升沿触发 | `analyze_temporal()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
-| 结算告警 | 任务 terminate 时调用一次 | `finalize()` | 同上，由 `InferenceManager._emit_settlement_alarms()` 驱动 |
+| 实时告警 | TemporalActor 1Hz 轮询，`operator.analyze()` 推进状态 → `operator.judge()` 上升沿触发 | `Operator.judge()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
+| 结算告警 | 任务 terminate 时调用一次 | `Operator.finalize()` | 同上，由 `ClientTemporalActor.finalize_and_stop()` 收集、`InferenceManager._persist_settlement_alarms()` 驱动 |
 
 > **UI 通知**：`events`（字符串列表）经 VisualizationWorker 渲染为视频帧 overlay，通过 WebSocket 实时推送给前端。`AlarmInfo` 只走持久化，不直接推给前端。
 

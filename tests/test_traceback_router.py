@@ -2,18 +2,16 @@
 追溯路由（/traceback/*, /media/*）端到端测试
 
 覆盖：
-- /traceback/alarm/{id}/evidence：返回双轨 URL + keypoints，按 alarm.step_id 定位
+- /traceback/alarm/{id}/evidence：返回双轨 URL，按 alarm.step_id 定位
 - /traceback/task/{id}/playlist.m3u8：必填 step_id，动态 VOD 生成
 - /traceback/task/{id}/timeline：必填 step_id，仅返回该 step 的事件
 - /media/segment/{token}：合法 token 下载，伪造 token 拒绝
-- /media/keypoints/{token}：合法 token 拉 JSON
 - detected_at 单位归一（秒 / 毫秒 / 微秒）
 - 路径穿越防御
 
 落盘约定：{base_dir}/{task_id}/{step_id}/
 """
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -31,8 +29,8 @@ from app.services.traceback.media_token import MediaToken
 # ---------------------------------------------------------------------------
 
 
-def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_kp=True, write_init=True):
-    """造一个任务-步骤的 raw + processed 段 + keypoints + playlist + init.mp4 文件"""
+def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_init=True):
+    """造一个任务-步骤的 raw + processed 段 + playlist + init.mp4 文件"""
     d = base_dir / str(task_id) / str(step_id)
     d.mkdir(parents=True, exist_ok=True)
     raw_pl_lines = [
@@ -50,10 +48,6 @@ def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_kp=
         raw_pl_lines.append(f"raw_segment_{ts_us}.mp4")
         proc_pl_lines.append("#EXTINF:10.000,")
         proc_pl_lines.append(f"processed_segment_{ts_us}.mp4")
-        if write_kp:
-            (d / f"keypoints_{ts_us}.json").write_text(
-                json.dumps([{"timestamp": ts_us / 1e6, "keypoints": [1, 2, 3]}])
-            )
     (d / "raw_playlist.m3u8").write_text("\n".join(raw_pl_lines) + "\n")
     (d / "processed_playlist.m3u8").write_text("\n".join(proc_pl_lines) + "\n")
     if write_init:
@@ -155,11 +149,6 @@ async def test_evidence_happy_path(client, media_root, monkeypatch):
     # 每个 URL 含 token
     for clip in body["raw_clips"] + body["processed_clips"]:
         assert "/media/segment/" in clip["url"]
-
-    # keypoints
-    assert body["keypoints_url"] is not None
-    assert body["detection"] is not None
-    assert isinstance(body["detection"], list)
 
 
 @pytest.mark.asyncio
@@ -387,7 +376,7 @@ async def test_timeline_empty_for_unknown_task(client, media_root, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# /media/segment/{token} & /media/keypoints/{token}
+# /media/segment/{token}
 # ---------------------------------------------------------------------------
 
 
@@ -425,9 +414,9 @@ async def test_media_segment_wrong_secret_rejected(client, media_root, monkeypat
 @pytest.mark.asyncio
 async def test_media_segment_kind_mismatch_rejected(client, media_root):
     _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
-    # 用 keypoints kind 签发，但访问 segment 路由
+    # 用 init kind 签发，但访问 segment 路由
     token = MediaToken.default().sign(
-        10, 1, "keypoints_1000000.json", kind="keypoints"
+        10, 1, "init.mp4", kind="init"
     )
     resp = await client.get(f"/media/segment/{token}")
     assert resp.status_code == 403
@@ -441,30 +430,6 @@ async def test_media_segment_missing_file_returns_404(client, media_root):
     )
     resp = await client.get(f"/media/segment/{token}")
     assert resp.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_media_keypoints_with_valid_token(client, media_root):
-    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
-    token = MediaToken.default().sign(
-        10, 1, "keypoints_1000000.json", kind="keypoints"
-    )
-    resp = await client.get(f"/media/keypoints/{token}")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert isinstance(body, list)
-    assert body[0]["keypoints"] == [1, 2, 3]
-
-
-@pytest.mark.asyncio
-async def test_media_keypoints_wrong_extension_rejected(client, media_root):
-    # 签发 keypoints kind，但 filename 是 mp4
-    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
-    token = MediaToken.default().sign(
-        10, 1, "processed_segment_1000000.mp4", kind="keypoints"
-    )
-    resp = await client.get(f"/media/keypoints/{token}")
-    assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------

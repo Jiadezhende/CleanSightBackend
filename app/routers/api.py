@@ -13,7 +13,6 @@
 
 import asyncio
 import logging
-import time
 from typing import Dict
 
 from fastapi import APIRouter, HTTPException
@@ -21,7 +20,8 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models.task import DBTask, Task
+from app.domain.task import CleaningTask
+from app.models import DBTask
 from app.routers.health import get_health_monitor
 from app.services import ai
 from app.services.client.manager import client_manager
@@ -149,14 +149,10 @@ async def start(req: StartRequest):
                     )
 
             # 2b. 设置新任务
-            task = Task(
+            task = CleaningTask(
                 task_id=req.task_id,
                 current_step=str(db_task.current_step),
                 status="running",
-                updated_at=int(time.time()),
-                fully_submerged=False,
-                bending=False,
-                bubble_detected=False,
             )
 
             success = ai.set_task(client_id, task)
