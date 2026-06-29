@@ -44,6 +44,21 @@ class HLSPersistenceStrategy:
         self._dir_locks: Dict[str, threading.Lock] = {}
         self._dir_locks_guard = threading.Lock()
 
+    @staticmethod
+    def _effective_fps(frames: List[Frame], fallback: float) -> float:
+        """由帧时间戳跨度反推有效编码 fps：`(N-1) / (ts_last - ts_first)`。
+
+        VideoWriter 与 EXTINF 须用同一个返回值，回放才对齐墙钟。span<=0 / 单帧 / 反推值落在
+        合理带 [1, 60] 外（重复或乱序时间戳致 span 异常）时回退标称 `fallback`。
+        """
+        if len(frames) > 1:
+            span = frames[-1].timestamp - frames[0].timestamp
+            if span > 0:
+                eff_fps = (len(frames) - 1) / span
+                if 1.0 <= eff_fps <= 60.0:
+                    return eff_fps
+        return fallback
+
     def _get_dir_lock(self, target_dir: Path) -> threading.Lock:
         key = str(target_dir)
         with self._dir_locks_guard:
@@ -533,14 +548,21 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
-        # 1. 生成处理后视频段（使用推理帧率）
+        # 0. 按本段帧时间戳跨度反推有效 fps：processed 实际成帧率随 throttle / 渲染尖峰
+        # 在窗口间漂移（~11-15fps），固定 processed_fps 编码会按 20/真实率 倍快放，且
+        # 逐段速率不同 → 段间忽快忽慢的抖动。逐段各取自身 eff_fps，VideoWriter 与 EXTINF
+        # 同源 → 每段播成 1.0x，对齐墙钟、抖动消失。详见
+        # docs/update/20260629_PROCESSED_PLAYBACK_RATE_PROPOSAL.md。
+        eff_fps = self._effective_fps(frames, self.processed_fps)
+
+        # 1. 生成处理后视频段（使用实测有效帧率 eff_fps）
         segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
         try:
             out_processed = cv2.VideoWriter(
-                str(segment_path), fourcc, self.processed_fps, (width, height)
+                str(segment_path), fourcc, eff_fps, (width, height)
             )
             for fd in frames:
                 out_processed.write(fd.frame)
@@ -552,9 +574,10 @@ class HLSPersistenceStrategy:
                 retryable=True,
             ) from e
 
-        # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
-        # 详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致 hls.js 段尾停摆。
-        segment_duration = len(frames) / self.processed_fps
+        # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致，故与 VideoWriter
+        # 用同一个 eff_fps。详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致
+        # hls.js 段尾停摆。
+        segment_duration = len(frames) / eff_fps
 
         # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。

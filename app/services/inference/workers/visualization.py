@@ -434,17 +434,30 @@ class FixedVisualizer:
         radius: int = 6,
         alpha: float = 0.7,
     ) -> None:
-        """绘制半透明圆角矩形背景。"""
+        """绘制半透明圆角矩形背景（仅在矩形包围盒 ROI 上拷贝/混合）。
+
+        行为等价于"整帧 copy + 整帧 addWeighted"：矩形外 overlay==frame，addWeighted
+        还原原像素（纯浪费算力）。改只在 ROI 上操作，单帧多框时削掉渲染尾延迟尖峰。
+        """
         x1, y1 = pt1
         x2, y2 = pt2
-        overlay = frame.copy()
-        # 填充主体矩形 + 四角圆形实现圆角效果
-        cv2.rectangle(overlay, (x1 + radius, y1), (x2 - radius, y2), color, -1)
-        cv2.rectangle(overlay, (x1, y1 + radius), (x2, y2 - radius), color, -1)
+        h, w = frame.shape[:2]
+        # clip 包围盒到帧边界；空 ROI 直接返回。cv2.rectangle/circle 端点闭区间，
+        # 形状覆盖像素 x1..x2、y1..y2（含端点），故 slice 上界取 x2+1 / y2+1。
+        rx1, ry1 = max(0, x1), max(0, y1)
+        rx2, ry2 = min(w, x2 + 1), min(h, y2 + 1)
+        if rx2 <= rx1 or ry2 <= ry1:
+            return
+        roi = frame[ry1:ry2, rx1:rx2]
+        overlay = roi.copy()
+        # 形状坐标平移到 ROI 局部坐标系（减去 ROI 原点）；越界部分由 cv2 自动裁剪
+        ox, oy = rx1, ry1
+        cv2.rectangle(overlay, (x1 + radius - ox, y1 - oy), (x2 - radius - ox, y2 - oy), color, -1)
+        cv2.rectangle(overlay, (x1 - ox, y1 + radius - oy), (x2 - ox, y2 - radius - oy), color, -1)
         for cx, cy in [(x1 + radius, y1 + radius), (x2 - radius, y1 + radius),
                        (x1 + radius, y2 - radius), (x2 - radius, y2 - radius)]:
-            cv2.circle(overlay, (cx, cy), radius, color, -1)
-        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, dst=frame)
+            cv2.circle(overlay, (cx - ox, cy - oy), radius, color, -1)
+        cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, dst=roi)
 
     def render(
         self,
@@ -523,14 +536,24 @@ class FixedVisualizer:
         for item in items:
             if item.mask is None:
                 continue
-            colored_mask = np.zeros_like(frame, dtype=np.uint8)
-            colored_mask[item.mask > 0] = item.color
-            frame[:] = cv2.addWeighted(frame, 0.5, colored_mask, 0.5, 0)
+            mask_u8 = item.mask.astype(np.uint8)
             contours, _ = cv2.findContours(
-                item.mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
+            if not contours:
+                continue
+            # 仅在 mask 包围盒 ROI 上着色混合，且只染 mask 像素本身——避免整帧 alpha 混合
+            # 的尾延迟尖峰，同时修掉旧实现"对 mask 外区域也按 0.5 压暗整帧"的副作用。
+            mx, my, mw, mh = cv2.boundingRect(mask_u8)
+            roi = frame[my:my + mh, mx:mx + mw]
+            mask_roi = mask_u8[my:my + mh, mx:mx + mw] > 0
+            if mask_roi.any():
+                colored = np.empty_like(roi)
+                colored[:] = item.color
+                blended = cv2.addWeighted(roi, 0.5, colored, 0.5, 0)
+                roi[mask_roi] = blended[mask_roi]
             cv2.drawContours(frame, contours, -1, item.color, 2)
-            if contours and item.label:
+            if item.label:
                 x, y, w, _ = cv2.boundingRect(contours[0])
                 text_cmds.append((
                     (x + w // 2, y - 10),

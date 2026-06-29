@@ -146,7 +146,11 @@ class ClientQueues:
         current_time = time.time()
         interval = 1.0 / self.inference_fps
 
-        if current_time - self.last_inference_timestamp < interval:
+        # 0.9×interval 容差：从 30fps 源按"每隔一帧"放行时，相邻保留帧的 wall-clock 间隔
+        # ≈2 个源帧间隔（66.7ms@15fps），但解码线程调度抖动会让它偶发略小于 interval 而
+        # 被拒，把真实率压到 ~14。留 10% 余量锁死目标率；被丢的中间帧间隔仅 ~33ms，远小于
+        # 0.9×interval，不会被误放成 30fps。
+        if current_time - self.last_inference_timestamp < interval * 0.9:
             return False
 
         max_len = self.ca_ready.maxlen

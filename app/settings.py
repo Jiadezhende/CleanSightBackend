@@ -91,7 +91,8 @@ class Settings(BaseSettings):
     # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
     # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
     raw_fps: int = 30          # 原始视频帧率
-    inference_fps: int = 20    # 推理/输出帧率（HLS processed 打标、client 限流共用）
+    inference_fps: int = 15    # 推理/输出帧率（HLS processed 打标、client 限流共用）；取 30 的整除值，
+                               # 最小间隔门可干净放行"每隔一帧"（30→20 是算法天花板，本就到不了）
     ca_maxlen: int = 2700      # CA 队列最大长度（帧数）
     ca_segment_len: int = 300  # HLS 段长度（帧数）
 
