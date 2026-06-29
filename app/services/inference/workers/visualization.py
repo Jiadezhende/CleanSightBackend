@@ -13,6 +13,7 @@
 import logging
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -64,6 +65,17 @@ class VisualizationWorker:
         # 去重：记录每个客户端上次渲染的推理时间戳，避免重复渲染同一帧
         self._last_rendered_ts: Dict[str, float] = {}
 
+        # 吞吐量观测（[VIZ_THROUGHPUT]）：每 ~10s 评估一次，仅在产出明显低于目标
+        # 时才打印，平稳时静默以免刷屏。目的：定位 processed 成帧率不足是
+        # "上游供帧慢"(supply-bound) 还是"单帧渲染慢"(render-bound)。
+        self._win_start: float = 0.0          # 当前统计窗起点（首轮 run 内用 time.time 初始化）
+        self._eval_interval: float = 10.0     # 评估窗长（秒）
+        self._stat_rendered: Dict[str, int] = defaultdict(int)  # 实际渲染（=新推理结果）帧数
+        self._stat_stale: Dict[str, int] = defaultdict(int)     # 有推理但无新结果而空转的 tick 数
+        self._render_time_sum: float = 0.0    # 渲染耗时累计（秒）
+        self._render_time_max: float = 0.0    # 单帧渲染耗时峰值（秒）
+        self._render_calls: int = 0           # 渲染调用次数
+
     def run(self):
         """工作循环：固定间隔轮询所有客户端。"""
         logger.debug(
@@ -73,6 +85,8 @@ class VisualizationWorker:
 
         while not self.stop_event.is_set():
             tick_start = time.time()
+            if self._win_start == 0.0:
+                self._win_start = tick_start
             try:
                 self._tick()
             except Exception as e:
@@ -80,6 +94,12 @@ class VisualizationWorker:
                     "[VisualizationWorker-%d] Tick exception: %s",
                     self.worker_id, e, exc_info=True,
                 )
+
+            # 吞吐量评估：到点（~10s）则算一次，仅有压力时打印
+            window = tick_start - self._win_start
+            if window >= self._eval_interval:
+                self._log_throughput_snapshot(window)
+                self._reset_throughput_window(tick_start)
 
             # 睡眠至下一个 tick
             elapsed = time.time() - tick_start
@@ -116,6 +136,8 @@ class VisualizationWorker:
         # 2. 去重：跳过已渲染过的同一推理结果
         last_ts = self._last_rendered_ts.get(client_id, 0.0)
         if inference.timestamp <= last_ts:
+            # 有推理快照但无新结果 → tick 空转。占比高即"上游供帧慢"的直接信号。
+            self._stat_stale[client_id] += 1
             return
 
         # 3. 获取最新原始帧
@@ -126,9 +148,15 @@ class VisualizationWorker:
         # 4. 获取最新时序事件
         events = cq.get_latest_temporal()
 
-        # 5. 渲染
+        # 5. 渲染（计时，用于判定是否 render-bound）
         stage = inference.stage
+        t0 = time.perf_counter()
         annotated_frame = self._render(frame, stage, inference.detections, events)
+        dt = time.perf_counter() - t0
+        self._render_time_sum += dt
+        self._render_calls += 1
+        if dt > self._render_time_max:
+            self._render_time_max = dt
 
         # 6. 写回
         frame_data = Frame(
@@ -139,8 +167,9 @@ class VisualizationWorker:
         cq.append_ca_processed(frame_data)
         cq.set_latest_rendered(frame_data)
 
-        # 7. 更新去重时间戳
+        # 7. 更新去重时间戳 + 计成帧数（实际渲染帧数 = processed 真实成帧率）
         self._last_rendered_ts[client_id] = inference.timestamp
+        self._stat_rendered[client_id] += 1
 
     def _render(
         self,
@@ -177,8 +206,10 @@ class VisualizationWorker:
                 vis_data_list.append(vis_data)
 
             # 使用固定渲染器渲染。stage 主键是 step_id，叠字需可读别名。
+            # 注：render() 内部即 `annotated = frame.copy()`，此处无需再 copy，
+            # 否则一帧两次整帧拷贝。render() 全程只改副本、不动入参，传原帧安全。
             annotated_frame = self.fixed_visualizer.render(
-                frame=frame.copy(),
+                frame=frame,
                 vis_data_list=vis_data_list,
                 stage=get_stage_alias(stage),
                 temporal_events=events,
@@ -189,6 +220,65 @@ class VisualizationWorker:
         except Exception as e:
             logger.error("[VisualizationWorker] Render failed: %s", e, exc_info=True)
             return frame.copy()
+
+    def _reset_throughput_window(self, now: float) -> None:
+        """重置吞吐量统计窗。"""
+        self._win_start = now
+        self._stat_rendered.clear()
+        self._stat_stale.clear()
+        self._render_time_sum = 0.0
+        self._render_time_max = 0.0
+        self._render_calls = 0
+
+    def _log_throughput_snapshot(self, window: float) -> None:
+        """有压力时打一条 [VIZ_THROUGHPUT]：各客户端产出 fps / 空转占比 + 渲染耗时。
+
+        与 [INFER_PRESSURE]（量"积压/丢帧"）正交——本行量"速率亏空"：processed 成帧率
+        是否低于目标，并据渲染耗时是否逼近 tick 预算，自动判定瓶颈侧：
+        - render-bound：单帧渲染峰值 ≥ tick 预算 → 渲染慢拖住产出；
+        - supply-bound：渲染很快但产出仍低 + 空转占比高 → 上游（throttle/推理）供帧慢。
+
+        **仅在有客户端产出明显低于目标、或渲染逼近预算时才打**，平稳时静默以免刷屏。
+        日志失败绝不影响渲染热路径——整体 try/except 包裹。
+        """
+        try:
+            if window <= 0:
+                return
+            target = 1.0 / self.tick_interval if self.tick_interval > 0 else 0.0
+            budget_ms = self.tick_interval * 1000.0
+            avg_ms = (self._render_time_sum / self._render_calls * 1000.0) if self._render_calls else 0.0
+            max_ms = self._render_time_max * 1000.0
+            render_bound = max_ms >= budget_ms and self._render_calls > 0
+
+            pressured = render_bound
+            parts: List[str] = []
+            # 期望窗内最多 tick 数（供判定"是否真有推理流"，过滤近空闲流的误报）
+            expected_ticks = target * window
+            for cid in sorted(set(self._stat_rendered) | set(self._stat_stale)):
+                rendered = self._stat_rendered.get(cid, 0)
+                stale = self._stat_stale.get(cid, 0)
+                out_fps = rendered / window
+                total = rendered + stale
+                stale_pct = (stale / total * 100.0) if total else 0.0
+                tag = ""
+                # 有实际推理流（tick 数足够）且产出 < 目标 80% → 该客户端有压力
+                if total >= expected_ticks * 0.3 and out_fps < target * 0.8:
+                    pressured = True
+                    tag = " (render-bound)" if render_bound else " (supply-bound)"
+                parts.append(
+                    f"{cid} out={out_fps:.1f}fps stale={stale_pct:.0f}%{tag}"
+                )
+
+            if not pressured:
+                return  # 平稳，静默
+
+            logger.info(
+                "[VIZ_THROUGHPUT] target=%.0ffps render=%.1fms(max %.1fms, budget %.0fms) || %s",
+                target, avg_ms, max_ms, budget_ms,
+                " | ".join(parts) if parts else "(none)",
+            )
+        except Exception as e:
+            logger.debug("[VisualizationWorker] throughput snapshot failed: %s", e)
 
 
 class VisualizationWorkerPool:
