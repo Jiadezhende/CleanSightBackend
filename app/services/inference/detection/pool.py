@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from app.services.inference.workflows import Detector
+from app.services.inference.detection.detector import Detector
 from app.domain.detection import FrameDetections
 from app.services.inference.models import DetectionTask, FrameInference
 from app.utils.metrics import infer_failure_total, infer_latency_ms

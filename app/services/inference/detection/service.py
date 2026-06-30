@@ -15,9 +15,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
-from app.services.inference.core.dispatcher import StageAwareDispatcher
+from app.services.inference.detection.dispatcher import StageAwareDispatcher
 from app.services.inference.models import FrameInference
-from app.services.inference.workers.base import MultiModelWorkerPool
+from app.services.inference.detection.pool import MultiModelWorkerPool
 from app.utils.exceptions import (
     AppError,
     FrameDrop,

@@ -23,9 +23,9 @@ from app.domain.alarm import Alarm
 from app.domain.frame import Frame
 from app.domain.task import CleaningTask
 from app.services.client import ClientQueues, client_manager
-from app.services.inference.core.service import ModelWorkerService
-from app.services.inference.workers.temporal import ClientTemporalActor
-from app.services.inference.workers.visualization import VisualizationWorkerPool
+from app.services.inference.detection.service import ModelWorkerService
+from app.services.inference.temporal.actor import ClientTemporalActor
+from app.services.inference.visualization.pool import VisualizationWorkerPool
 
 
 class InferenceManager:
@@ -79,7 +79,7 @@ class InferenceManager:
         # L2 特征落盘 + 事实账本（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
         # FeatureStore 注入推理服务，由推理写回处按帧追加。
         # FactLedger 为 offline 链路预置：online 链路不再写，待离线 worker 接入后写 SegmentFact。
-        from app.services.inference.store import FactLedger, FeatureStore
+        from app.services.inference.feature.store import FactLedger, FeatureStore
         self.feature_store = FeatureStore(self._db_dir)
         self.fact_ledger = FactLedger(self._db_dir)
 
@@ -153,7 +153,7 @@ class InferenceManager:
         return self._stage_configs
 
     def _create_async_model_worker_service(self):
-        from app.services.inference.core.service import ModelWorkerService
+        from app.services.inference.detection.service import ModelWorkerService
 
         return ModelWorkerService(
             stage_configs=self._get_stage_configs(),
@@ -345,7 +345,7 @@ class InferenceManager:
     ) -> None:
         """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
         from app.services.inference.naming import get_stage_alias
-        from app.services.inference.workflows.alarm_sink import persist_alarms
+        from app.services.inference.temporal.alarm_sink import persist_alarms
 
         # 可读性出口：告警 step_name/stage 用别名（主键是 step_id，对人不可读）
         persist_alarms(

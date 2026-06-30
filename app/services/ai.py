@@ -3,8 +3,8 @@
 基于推理服务架构改进方案（INFERENCE_SERVICE_IMPROVEMENT_PLAN.md）的完整实现。
 
 本模块提供统一的对外接口，内部实现已重构到 inference 子模块：
-- InferenceManager → inference.core.manager
-- DefaultVisualizer → inference.components.visualizer
+- InferenceManager → inference.manager（经包根 re-export）
+- 可视化 → inference.visualization
 - 持久化逻辑 → inference.persistence (待提取)
 """
 
@@ -13,7 +13,7 @@ from typing import Optional
 import numpy as np
 
 from app.domain.task import CleaningTask
-from app.services.inference.core.manager import InferenceManager
+from app.services.inference import InferenceManager
 from app.settings import settings
 
 # ========== 模块级单例（兼容旧代码） ==========

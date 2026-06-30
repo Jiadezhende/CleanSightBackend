@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from app.domain.frame import Frame
 from app.services.client.queues import ClientQueues
-from app.services.inference.core.dispatcher import StageAwareDispatcher
+from app.services.inference.detection.dispatcher import StageAwareDispatcher
 
 
 def _frame() -> Frame:
@@ -71,7 +71,7 @@ def test_pressure_snapshot_silent_when_calm():
     cm.get_all_clients.return_value = {}
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
-    with patch("app.services.inference.core.dispatcher.logger") as log:
+    with patch("app.services.inference.detection.dispatcher.logger") as log:
         dispatcher._log_pressure_snapshot()
 
     log.info.assert_not_called()
@@ -84,7 +84,7 @@ def test_pressure_snapshot_logs_on_drop():
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
     dispatcher._stage_drops["CLEAN"] = 5  # 自上次报告以来新增丢帧
 
-    with patch("app.services.inference.core.dispatcher.logger") as log:
+    with patch("app.services.inference.detection.dispatcher.logger") as log:
         dispatcher._log_pressure_snapshot()
 
     log.info.assert_called_once()

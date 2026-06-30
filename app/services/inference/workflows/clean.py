@@ -13,7 +13,7 @@ detector.name = 该 detector 产出的流名（决定 slide_window key 与 Opera
 
 from __future__ import annotations
 
-from app.services.inference.workflows.detector import YOLODetector
+from app.services.inference.detection.detector import YOLODetector
 from app.domain.detection import FrameDetections
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
