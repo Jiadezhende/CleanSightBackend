@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from app.services.inference.workers.visualization import FixedVisualizer
+from app.services.inference.visualization.visualizer import FixedVisualizer
 
 
 def _reference_full_frame(frame, pt1, pt2, color, radius, alpha):

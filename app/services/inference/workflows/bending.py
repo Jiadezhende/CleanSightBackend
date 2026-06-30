@@ -15,8 +15,8 @@ BendingOperator（时序线程，流算子）：
 import logging
 from typing import Dict, List, Tuple
 
-from app.services.inference.workflows.detector import YOLODetector
-from app.services.inference.workflows.operator import Operator
+from app.services.inference.detection.detector import YOLODetector
+from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
 from app.domain.detection import FrameDetections
 from app.domain.render import RenderItem, RenderSpec, RenderType

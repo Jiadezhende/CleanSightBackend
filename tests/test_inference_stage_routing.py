@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from app.domain.task import CleaningTask
-from app.services.inference.core.manager import InferenceManager
+from app.services.inference.manager import InferenceManager
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ _STAGE_CONFIGS = {"1": {}, "2": {}, "MOCK": {}}
 ])
 def test_set_task_routes_stage(manager, step, expected_stage):
     cq = MagicMock()
-    with patch("app.services.inference.core.manager.client_manager") as cm, \
+    with patch("app.services.inference.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
         cm.get_client.return_value = cq
         manager.set_task("client_1", _make_task(step))
@@ -45,7 +45,7 @@ def test_set_task_routes_stage(manager, step, expected_stage):
 
 def test_set_task_none_skips_stage(manager):
     cq = MagicMock()
-    with patch("app.services.inference.core.manager.client_manager") as cm, \
+    with patch("app.services.inference.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
         cm.get_client.return_value = cq
         manager.set_task("client_1", None)

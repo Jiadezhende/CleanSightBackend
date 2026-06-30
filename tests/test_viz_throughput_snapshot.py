@@ -9,7 +9,7 @@
 import threading
 from unittest.mock import patch
 
-from app.services.inference.workers.visualization import VisualizationWorker
+from app.services.inference.visualization.worker import VisualizationWorker
 
 
 def _worker(target_fps: float = 20.0) -> VisualizationWorker:
@@ -30,7 +30,7 @@ def test_snapshot_silent_when_healthy():
     w._render_time_sum = 200 * 0.002  # 平均 2ms
     w._render_time_max = 0.004        # 峰值 4ms ≪ 50ms 预算
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()
@@ -47,7 +47,7 @@ def test_snapshot_logs_supply_bound():
     w._render_time_sum = 100 * 0.002  # 平均 2ms，渲染清白
     w._render_time_max = 0.005        # 峰值 5ms ≪ 50ms 预算
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -69,7 +69,7 @@ def test_snapshot_logs_render_bound():
     w._render_time_sum = 90 * 0.045   # 平均 45ms
     w._render_time_max = 0.060        # 峰值 60ms ≥ 50ms 预算
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -90,7 +90,7 @@ def test_snapshot_silent_when_idle_stream():
     w._render_time_sum = 5 * 0.002
     w._render_time_max = 0.004
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()

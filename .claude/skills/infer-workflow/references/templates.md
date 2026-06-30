@@ -17,7 +17,7 @@ import logging, time
 from typing import Any, Dict, List, Tuple
 import numpy as np
 
-from app.services.inference.workflows.detector import YOLODetector
+from app.services.inference.detection.detector import YOLODetector
 from app.services.inference.workflows.analyzer import TemporalAnalyzer
 from app.services.inference.workflows.judge import Judge
 from app.services.inference.data_models import (
@@ -121,7 +121,7 @@ class XxxJudge(Judge):
 无模型纯算法：Detector 继承 `Detector` 实现 `infer`，其余同模板 A。参考 [mock.py](../../../../app/services/inference/workflows/mock.py)。
 
 ```python
-from app.services.inference.workflows.detector import Detector
+from app.services.inference.detection.detector import Detector
 
 class XxxDetector(Detector):
     def __init__(self, enabled: bool = True):

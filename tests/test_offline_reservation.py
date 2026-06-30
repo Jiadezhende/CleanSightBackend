@@ -12,7 +12,7 @@ import tempfile
 from app.domain.detection import Detection, FrameDetections
 from app.services.inference.models import EventFact, SegmentFact
 from app.services.inference.models import FrameInference
-from app.services.inference.store import FactLedger, FeatureStore
+from app.services.inference.feature.store import FactLedger, FeatureStore
 
 
 def _make_result(ts: float, bubble_n: int, bending_n: int) -> FrameInference:

@@ -19,8 +19,8 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from app.services.inference.workflows.detector import Detector
-from app.services.inference.workflows.operator import Operator
+from app.services.inference.detection.detector import Detector
+from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmType
 from app.domain.detection import Detection, FrameDetections
 from app.domain.render import RenderItem, RenderSpec, RenderType

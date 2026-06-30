@@ -11,7 +11,7 @@ from app.services.inference.config import load_stage_config
 from app.domain.alarm import Alarm, AlarmType
 from app.domain.detection import Detection, FrameDetections
 from app.services.inference.stage_factory import StageFactory
-from app.services.inference.workflows.operator import Operator
+from app.services.inference.temporal.operator import Operator
 
 
 def _out(ts: float, n: int = 1) -> FrameDetections:
@@ -134,7 +134,7 @@ class _GoodOperator(Operator):
 
 
 def test_per_operator_isolation():
-    from app.services.inference.workers.temporal import ClientTemporalActor
+    from app.services.inference.temporal.actor import ClientTemporalActor
 
     cq = MagicMock()
     cq.get_slide_window.return_value = [_out(1.0)]
