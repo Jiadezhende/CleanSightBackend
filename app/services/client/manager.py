@@ -71,6 +71,7 @@ class ClientManager:
         self._default_ca_segment_len = self._config.ca_segment_len  # CA段长度
         self._default_ca_maxlen = self._config.ca_maxlen  # CA队列最大长度
         self._default_inference_fps = self._config.inference_fps  # 推理采样频率
+        self._default_raw_fps = self._config.raw_fps  # 原始/解码帧率（抽帧降采样率分母）
 
         logger.info("[ClientManager] Initialized")
 
@@ -114,6 +115,7 @@ class ClientManager:
             ca_segment_len = kwargs.get("ca_segment_len", self._default_ca_segment_len)
             ca_maxlen = kwargs.get("ca_maxlen", self._default_ca_maxlen)
             inference_fps = kwargs.get("inference_fps", self._default_inference_fps)
+            raw_fps = kwargs.get("raw_fps", self._default_raw_fps)
 
             # 创建新的 ClientQueues 实例
             client_queues = ClientQueues(
@@ -121,6 +123,7 @@ class ClientManager:
                 ca_segment_len=ca_segment_len,
                 ca_maxlen=ca_maxlen,
                 inference_fps=inference_fps,
+                raw_fps=raw_fps,
             )
 
             # 设置可选参数

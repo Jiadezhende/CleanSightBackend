@@ -223,6 +223,7 @@ class StreamService:
         from app.settings import settings
 
         inference_fps = settings.inference_fps
+        raw_fps = settings.raw_fps
 
         # 从配置文件读取帧参数（resize 属 client 配置）
         resize_width = _client_config.frame.resize_width if _client_config else 640
@@ -235,12 +236,13 @@ class StreamService:
             resize_width=resize_width,
             resize_height=resize_height,
             inference_fps=inference_fps,
+            raw_fps=raw_fps,
             ca_maxlen=ca_maxlen,
             ca_segment_len=ca_segment_len,
         )
 
         logger.info(
-            f"[{client_id}] ClientQueues created (inference_fps={inference_fps}, "
+            f"[{client_id}] ClientQueues created (raw_fps={raw_fps}, inference_fps={inference_fps}, "
             f"ca_maxlen={ca_maxlen}, ca_segment_len={ca_segment_len})"
         )
 

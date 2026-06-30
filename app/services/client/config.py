@@ -107,6 +107,12 @@ class ClientConfig:
         from app.settings import settings
         return settings.inference_fps
 
+    @property
+    def raw_fps(self) -> int:
+        """原始/解码帧率（从 settings 单一真源读取；抽帧降采样率 = inference_fps/raw_fps）"""
+        from app.settings import settings
+        return settings.raw_fps
+
     def _log_loaded_config(self):
         """输出加载的配置"""
         # DEBUG级别显示详细配置

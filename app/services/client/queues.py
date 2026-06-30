@@ -60,6 +60,7 @@ class ClientQueues:
         resize_width: int = 640,
         resize_height: int = 480,
         inference_fps: int = 15,
+        raw_fps: int = 30,
         # 默认 MOCK：未分配任务的客户端走透传，不跑真实检测/告警。
         # 真实 stage 由 InferenceManager.set_task 按 step_id 赋值。
         initial_stage: str = "MOCK",
@@ -71,10 +72,12 @@ class ClientQueues:
         self.resize_width = resize_width
         self.resize_height = resize_height
 
-        # 推理帧率配置
+        # 帧率配置（降采样率 = inference_fps / raw_fps）
         self.inference_fps = inference_fps
-        # 限流时间戳：仅由 decoder 线程读写（append_ca_ready_with_throttle 内部），无并发，不加锁
-        self.last_inference_timestamp: float = 0.0
+        self.raw_fps = raw_fps
+        # 抽帧相位累加器（Bresenham 均匀抽帧）：仅由 decoder 线程读写
+        # （append_ca_ready_with_throttle 内部），无并发，不加锁
+        self._decimate_phase: int = 0
 
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
         self._task_lock = threading.Lock()       # self.task + self.task_started_at
@@ -138,27 +141,29 @@ class ClientQueues:
 
     def append_ca_ready_with_throttle(self, frame_data: Frame) -> bool:
         """
-        添加帧到待推理队列（带帧率限制）。
+        添加帧到待推理队列（Bresenham 相位累加器均匀抽帧 + 背压）。
+
+        输入为 ffmpeg 规范化后的 CFR raw_fps 流，按 raw_fps→inference_fps 做均匀抽帧：
+        每个输入帧累加 inference_fps，跨过 raw_fps 阈值时放行一帧。长期保留率精确
+        = inference_fps/raw_fps（支持非整除比，如 30→20 取 keep-keep-drop），不依赖
+        wall-clock —— 消除解码线程调度抖动导致的真实率漂移（旧墙钟门把 15 漏成 ~12）。
 
         ca_ready 为无锁 SPSC deque，decoder 是唯一写入方，dispatcher 是唯一消费方。
-        last_inference_timestamp 仅由本方法（decoder 线程）读写，无并发，不加锁。
+        _decimate_phase 仅由本方法（decoder 线程）读写，无并发，不加锁。
         """
-        current_time = time.time()
-        interval = 1.0 / self.inference_fps
-
-        # 0.9×interval 容差：从 30fps 源按"每隔一帧"放行时，相邻保留帧的 wall-clock 间隔
-        # ≈2 个源帧间隔（66.7ms@15fps），但解码线程调度抖动会让它偶发略小于 interval 而
-        # 被拒，把真实率压到 ~14。留 10% 余量锁死目标率；被丢的中间帧间隔仅 ~33ms，远小于
-        # 0.9×interval，不会被误放成 30fps。
-        if current_time - self.last_inference_timestamp < interval * 0.9:
+        # 1. 相位累加器选帧：相位每输入帧推进一次（累加器正确性的不变式），
+        #    跨过 raw_fps 阈值才放行。
+        self._decimate_phase += self.inference_fps
+        if self._decimate_phase < self.raw_fps:
             return False
+        self._decimate_phase -= self.raw_fps
 
+        # 2. 背压：仅对选中帧生效——推理队列满则丢（过载语义同旧）。
         max_len = self.ca_ready.maxlen
         if max_len is not None and len(self.ca_ready) >= max_len:
             return False
 
         self.ca_ready.append(frame_data)
-        self.last_inference_timestamp = current_time
         return True
 
     @staticmethod
