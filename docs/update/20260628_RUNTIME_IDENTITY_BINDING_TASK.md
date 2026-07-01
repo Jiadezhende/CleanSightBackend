@@ -1,7 +1,7 @@
 # 运行身份与绑定关系建模任务：厘清 client / task / step / run
 
-> **变更状态**：T1/T2 已落地、T3 编排已落地（2026-07-02）　<!-- 契约已拍板；本文件是落地路线的契约 hub -->
-> **知识库**：待 T3 收尾（`stop_run` 内 DRAINING 置位 + HM 路径 `remove_if` fence）后沉淀
+> **变更状态**：T1/T2/T3 已落地（T3 含收尾，2026-07-02）　<!-- 契约已拍板；本文件是落地路线的契约 hub -->
+> **知识库**：T3 收尾（`stop_run` 内 DRAINING 置位 + HM 路径对象身份 fence）已落地，可沉淀
 >
 > 落地现状见文末 [§落地现状（2026-07-02）](#落地现状2026-07-02)。
 >
@@ -124,7 +124,7 @@ _teardown_run(task_id, expected=cq):   # api 控制面，持 per-task threading 
 |---|------|------|------|----|------|
 | T1 | CQ per-run 不可变化（构造注入身份，下线原地复用） | CQ 生命周期 | — | L | ✅ 已落地 |
 | T2 | CQ 状态机 ACTIVE/DRAINING/CLOSED + 写入门 + close() 释放重数据 | CQ 生命周期 | T1 | L | ✅ 已落地（纯 queues.py，门由单测覆盖） |
-| T3 | `stop_run` 单一出口 + per-client `lock_for` 锁 + 合并两份重复 + HealthMonitor 自动结束 | CQ 生命周期 | T2 | M/L | 🟡 编排已落地；**收尾** = `stop_run` 内 DRAINING 置位 + HM 路径 `remove_if` fence |
+| T3 | `stop_run` 单一出口 + per-client `lock_for` 锁 + 合并两份重复 + HealthMonitor 自动结束 | CQ 生命周期 | T2 | M/L | ✅ 已落地（编排 + 收尾：DRAINING 置位 + HM 对象身份 fence） |
 | T4 | 写回句柄化（dispatcher 捕获 CQ 句柄，写回不反查，ModelWorker 去 CQ） | 换键与路由 | T2 | M | ⬜ 未开始 |
 | T5 | 换键 `client_id→task_id`，ClientManager 降级 RunRegistry，Q2 结构化（bind_task/双向索引已由 COW 重构提前删除） | 换键与路由 | T3, T4 | L | ⬜ 未开始 |
 | T6 | 边界 wire（WS/terminate 改 task_id，撤垫片，import 审计）需前端协调 | 换键与路由 | T5 | M | ⬜ 未开始 |
@@ -152,12 +152,11 @@ T3 与 T4 都只依赖 T2、可并行；T5 需两者到位。合计约 **12–18
 - `close()` 释放 payload 留身份小壳；`clear()` → `close()` 别名（ClientManager teardown 零改动获内存回收 + CLOSED 门）。
 - **本批未接生产 DRAINING**：门由单测覆盖。`stop_run` 现走 `remove`（=`clear`=`close`），故 **CLOSED 门在生产已生效**（拆除后旧 CQ 转 CLOSED，持旧句柄者迟到写被拒）；**DRAINING 态尚未在生产触发** → 见 T3 收尾。
 
-**T3 — 编排单一出口（🟡 编排已落地）+ 收尾项**
-- 已落地：`RunController.start_run`/`stop_run` 对称固定顺序、`client_manager.lock_for(client_id)` per-client RLock 共用（api 经 `asyncio.to_thread`、HM 直调、同线程可重入）、api `/start`·`/terminate` 委托、`HealthMonitor.cleanup_client` → `stop_run`。仍 client_id 键（换 task_id 键留 T5）。
-- **收尾项（未做）**：
-  1. `stop_run` step 0 调 `cq.to_draining()` —— 让 T2 的 DRAINING 门在生产链路真正触发（拆除期停生产者写、放行 settlement + HLS flush）。
-  2. HM 路径对象身份 fence —— `ReconnectState` 在 `_enter_reconnect_mode` 捕获 cq_A；`stop_run` 增 `expected_cq` 形参、step 3 用 `client_manager.remove_if(client_id, expected_cq)`；用户 `start`/`terminate` 仍走普通 `remove`（同锁内决策+执行，无需 fence）。
-- 验证：`pytest tests/` **242 passed**（229 基线 + 5 T1 + 8 T2），`import app.main` 无循环导入。
+**T3 — 编排单一出口 + 收尾（✅ 已落地）**
+- 编排：`RunController.start_run`/`stop_run` 对称固定顺序、`client_manager.lock_for(client_id)` per-client RLock 共用（api 经 `asyncio.to_thread`、HM 直调、同线程可重入）、api `/start`·`/terminate` 委托、`HealthMonitor.cleanup_client` → `stop_run`。仍 client_id 键（换 task_id 键留 T5）。
+- 收尾 1 — **DRAINING 置位**：`stop_run` step 0b 调 `cq.to_draining()`（在停 decoder/落盘之前），让 T2 的 DRAINING 门在生产链路真正触发——拆除期停生产者写（decoder 抽帧/结果写回/tick 被门拒），放行 settlement 告警 + HLS flush。CLOSED 由 step 3 `remove(cleanup=True)`→`clear()`→`close()` 兜底。
+- 收尾 2 — **HM 路径对象身份 fence**：`ReconnectState` 增 `cq` 字段，`_enter_reconnect_mode(client_id, last_frame_time, cq)` 捕获 cq_A；`_handle_reconnecting_client` 每 tick 比对当前槽位 cq，异即弃本次重连；`_exit_reconnect_mode` 从 state 取 cq_A 透传 → `_cleanup_failed_client`/`cleanup_client`（新增 `expected`）→ `stop_run(expected=cq_A)`。`stop_run` step 0 核对 `registry[client_id] is expected`，不符则整段放弃（`skipped=True`），step 3 用 `remove_if(client_id, expected)`；task-timeout / orphan 路径亦传 `expected=cq`。用户 `start`/`terminate` 不传 `expected`（同锁内决策+执行，无 ABA，走普通 `remove`）。
+- 验证：`pytest tests/` **247 passed**（242 基线 + 3 teardown fence + 2 reconnect fence），`import app.main` 无循环导入。新增 `tests/test_teardown_identity_fence.py`、`tests/test_reconnect_on_initial_failure.py::TestReconnectIdentityFence`。
 
 ---
 

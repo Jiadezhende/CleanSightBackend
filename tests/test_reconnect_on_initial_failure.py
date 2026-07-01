@@ -348,5 +348,46 @@ class TestFullReconnectScenario:
         )
 
 
+class TestReconnectIdentityFence:
+    """T3 收尾：进入重连捕获 cq_A；槽位被 /start 换成新 run 时，重连按对象身份放弃。"""
+
+    def _stale_cq(self, seconds_ago: float = 10.0) -> MagicMock:
+        cq = MagicMock()
+        cq.latest_raw_timestamp = time.time() - seconds_ago
+        cq.task_started_at = 0.0
+        return cq
+
+    def test_reconnect_captures_cq_on_entry(self):
+        """进入重连时把当前槽位 cq 存进 ReconnectState.cq（fence 基准）。"""
+        client_id = "fence_capture"
+        cq_a = self._stale_cq()
+        monitor = _make_monitor(client_id, cq_a, active_decoder_ids={client_id})
+
+        monitor._check_all_clients()
+
+        assert monitor._reconnecting_clients[client_id].cq is cq_a
+
+    def test_reconnect_abandoned_when_slot_replaced(self):
+        """次轮槽位已换成新 cq_B → 放弃本次重连，不误动新 run。"""
+        client_id = "fence_swap"
+        cq_a = self._stale_cq()
+        monitor = _make_monitor(client_id, cq_a, active_decoder_ids={client_id})
+
+        # Round 1：进入重连，捕获 cq_A
+        monitor._check_all_clients()
+        assert client_id in monitor._reconnecting_clients
+
+        # 模拟 /start 抢占重启：槽位换成全新 cq_B
+        cq_b = self._stale_cq()
+        monitor._client_manager.snapshot.return_value = {client_id: cq_b}
+
+        # Round 2：当前 cq(cq_B) 非捕获的 cq_A → 放弃重连，且不再对新 run 发起 restart
+        monitor._stream_service.restart_stream.reset_mock()
+        monitor._check_all_clients()
+
+        assert client_id not in monitor._reconnecting_clients
+        monitor._stream_service.restart_stream.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

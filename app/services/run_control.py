@@ -11,10 +11,11 @@
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.domain.task import CleaningTask
 from app.services.client.manager import client_manager
+from app.services.client.queues import ClientQueues
 from app.services.inference.instance import inference_manager
 from app.services.stream import stream_service
 from app.utils.exceptions import AppError
@@ -93,13 +94,23 @@ class RunController:
             }
 
     def stop_run(
-        self, client_id: str, reason: str, *, skip_decoder: bool = False
+        self,
+        client_id: str,
+        reason: str,
+        *,
+        skip_decoder: bool = False,
+        expected: Optional[ClientQueues] = None,
     ) -> Dict[str, Any]:
-        """拆除一次 run：停 decoder → 落盘残余（settlement/HLS/feature close）→ 清 registry。
+        """拆除一次 run：封闸(DRAINING) → 停 decoder → 落盘残余（settlement/HLS/feature close）→ 清 registry。
 
         全程持 `lock_for(client_id)`（唯一锁获取点；start_run 重入亦经此）。
         尽力而为：每步独立 try，单步失败不中断后续；永不抛出。
         `skip_decoder=True` 用于孤儿流（decoder 已不存在）。
+
+        `expected`（仅 HealthMonitor 自动结束路径传）：对象身份 fence。HM 在 monitor 线程
+        「先决策后拿锁」，决策→拿锁之间槽位可能被 `/start` 重启换成新 CQ。若当前槽位已非
+        当初捕获的 `expected`，整段拆除放弃（不停新 run 的 decoder、不清其数据），防误删健康新 run。
+        api 控制面（start/terminate）持锁内决策+执行、无 ABA，故不传 expected。
         """
         with client_manager.lock_for(client_id):
             result: Dict[str, Any] = {
@@ -110,6 +121,23 @@ class RunController:
                 "client_cleaned": False,
                 "errors": [],
             }
+
+            cq = client_manager.get(client_id)
+
+            # 0. 对象身份 fence：拆除前先核对槽位仍是当初决策捕获的 cq——不是则整段放弃，
+            #    避免误停/误清「同键新实例」（被 /start 抢占重启后装入的新 run）。
+            if expected is not None and cq is not expected:
+                logger.info(
+                    "[RunController] stop_run(reason=%r) skipped by identity fence: %s "
+                    "(slot replaced by newer run)", reason, client_id,
+                )
+                result["skipped"] = True
+                return result
+
+            # 0b. 封闸：ACTIVE→DRAINING，封生产者写（decoder 抽帧 / 结果写回 / tick）。
+            #     迟到写落到本 CQ 被门拒、不串台到后续新 run；settlement 告警 + HLS flush 仍放行。
+            if cq is not None:
+                cq.to_draining()
 
             # 1. 停 decoder（owner=StreamService）
             if not skip_decoder:
@@ -132,9 +160,13 @@ class RunController:
                     "[RunController] flush data failed: %s - %s", client_id, e, exc_info=True
                 )
 
-            # 3. 清 registry（owner=ClientManager）
+            # 3. 清 registry（owner=ClientManager）：cleanup=True 内含 cq.close()（置 CLOSED + 释放 payload）。
+            #    expected 提供 → 对象身份核对删除（remove_if）；否则普通 remove。
             try:
-                if client_manager.has_client(client_id):
+                if expected is not None:
+                    removed = client_manager.remove_if(client_id, expected, cleanup=True)
+                    result["client_cleaned"] = removed
+                elif client_manager.has_client(client_id):
                     removal = client_manager.remove(client_id, cleanup=True)
                     result["client_cleaned"] = removal["removed"]
                     if removal["error"]:

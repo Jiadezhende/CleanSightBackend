@@ -201,7 +201,7 @@ class GlobalHealthMonitor:
                     idle_time >= self.suspect_timeout
                     and idle_time < self.cleanup_timeout
                 ):
-                    self._enter_reconnect_mode(client_id, last_frame_time)
+                    self._enter_reconnect_mode(client_id, last_frame_time, cq)
 
                 # 超过 cleanup_timeout，放弃重连，执行清理
                 elif idle_time >= self.cleanup_timeout:
@@ -221,8 +221,8 @@ class GlobalHealthMonitor:
             if client_id not in self._reconnecting_clients:
                 self._handle_orphan_decoder(client_id)
 
-    def _enter_reconnect_mode(self, client_id: str, last_frame_time: float):
-        """进入重连模式"""
+    def _enter_reconnect_mode(self, client_id: str, last_frame_time: float, cq):
+        """进入重连模式（捕获当前槽位 cq 作对象身份 fence 基准）"""
         # 从 StreamService 获取流配置
         stream_info = self._stream_service.get_stream_info(client_id)
         if not stream_info:
@@ -239,6 +239,7 @@ class GlobalHealthMonitor:
             attempt_count=0,
             last_attempt_time=0,  # 初始为 0，表示还未尝试
             last_frame_time_before_disconnect=last_frame_time,  # 记录断流前的最后帧时间
+            cq=cq,  # 捕获进入重连时的 CQ，作为拆除时的对象身份核对基准
         )
 
         logger.warning(
@@ -250,6 +251,16 @@ class GlobalHealthMonitor:
     def _handle_reconnecting_client(self, client_id: str, cq, current_time: float):
         """处理重连中的客户端"""
         state = self._reconnecting_clients[client_id]
+
+        # 对象身份 fence：当前槽位 cq 已非进入重连时捕获的 cq_A（被 /start 重启换槽），
+        # 说明本次重连针对的 run 已被新 run 取代——放弃本次重连，绝不误动新 run。
+        if state.cq is not None and cq is not state.cq:
+            logger.info(
+                "[GlobalHealthMonitor] Reconnect abandoned (slot replaced by newer run): %s",
+                client_id,
+            )
+            del self._reconnecting_clients[client_id]
+            return
 
         # 检查是否有新帧（重连成功）
         new_frame_time = cq.latest_raw_timestamp
@@ -326,16 +337,23 @@ class GlobalHealthMonitor:
             client_id: 客户端ID
             cleanup: 是否执行完整清理
         """
-        if client_id in self._reconnecting_clients:
-            del self._reconnecting_clients[client_id]
+        # 捕获进入重连时的 cq_A（在删除 state 前取），作为拆除时的对象身份核对基准。
+        state = self._reconnecting_clients.pop(client_id, None)
 
         if cleanup:
             # 重连失败，执行完整清理（类似 /api/terminate）
             self._stats["cleanups"] += 1  # 累计统计：清理操作的次数
-            self._cleanup_failed_client(client_id)
+            self._cleanup_failed_client(
+                client_id, expected=state.cq if state else None
+            )
 
     def cleanup_client(
-        self, client_id: str, reason: str, *, skip_decoder: bool = False
+        self,
+        client_id: str,
+        reason: str,
+        *,
+        skip_decoder: bool = False,
+        expected=None,
     ) -> Dict[str, Any]:
         """清理协调器（唯一的清理入口点）
 
@@ -348,6 +366,8 @@ class GlobalHealthMonitor:
             client_id: 客户端ID
             reason: 清理原因（用于日志和调试）
             skip_decoder: 是否跳过解码器清理（孤儿流使用）
+            expected: 决策时捕获的 CQ 对象（对象身份 fence 基准）。HM 自动结束路径传入，
+                stop_run 核对当前槽位仍是它才拆除，防过期决策误删被 /start 换上的新 run。
 
         Returns:
             清理结果字典：
@@ -378,17 +398,21 @@ class GlobalHealthMonitor:
         self._reconnecting_clients.pop(client_id, None)
         self._last_activity.pop(client_id, None)
 
-        # 步骤 1-3: 委托给 RunController（唯一拆除实现：停 decoder → 落盘 → 清 registry）
+        # 步骤 1-3: 委托给 RunController（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
         from app.services.run_control import run_controller
 
-        return run_controller.stop_run(client_id, reason, skip_decoder=skip_decoder)
+        return run_controller.stop_run(
+            client_id, reason, skip_decoder=skip_decoder, expected=expected
+        )
 
-    def _cleanup_failed_client(self, client_id: str):
+    def _cleanup_failed_client(self, client_id: str, expected=None):
         """清理重连失败的客户端（委托给 cleanup_client）
 
         职责边界：
         - 此方法只是 cleanup_client() 的包装器
         - 实际清理逻辑集中在 cleanup_client() 中
+
+        `expected`：进入重连时捕获的 cq_A，透传给 stop_run 作对象身份 fence。
         """
         logger.error(
             "[GlobalHealthMonitor] STREAM CONNECTION FAILED: %s | "
@@ -400,6 +424,7 @@ class GlobalHealthMonitor:
         result = self.cleanup_client(
             client_id=client_id,
             reason=f"Reconnect failed after {self.max_reconnect_attempts} attempts",
+            expected=expected,
         )
 
         if result["errors"]:
@@ -426,7 +451,10 @@ class GlobalHealthMonitor:
         )
 
         self._stats["cleanups"] += 1
-        self.cleanup_client(client_id, reason=f"Task timeout ({task_age:.0f}s)")
+        # cq 即本轮 snapshot 迭代所持的槽位对象，传作对象身份 fence 基准。
+        self.cleanup_client(
+            client_id, reason=f"Task timeout ({task_age:.0f}s)", expected=cq
+        )
 
     def _handle_potential_orphan(self, client_id: str, cq, current_time: float):
         """处理潜在的孤儿流（有 ClientQueues 但没有 Decoder）
@@ -457,11 +485,12 @@ class GlobalHealthMonitor:
             )
             self._stats["orphans_detected"] += 1  # 累计统计：检测到孤儿的总次数
 
-            # 委托给统一的清理方法（跳过解码器）
+            # 委托给统一的清理方法（跳过解码器）；cq 传作对象身份 fence 基准。
             result = self.cleanup_client(
                 client_id=client_id,
                 reason=f"Orphan stream (idle for {idle_time:.1f}s)",
                 skip_decoder=True,  # 孤儿流没有解码器
+                expected=cq,
             )
 
             # 清理活跃时间记录
