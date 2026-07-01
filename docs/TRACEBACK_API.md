@@ -2,7 +2,7 @@
 
 # 视频追溯 API 文档
 
-> **最后更新**: 2026-05-12
+> **最后更新**: 2026-07-01
 >
 > 本文描述的是**基于 (task_id, step_id) 文件系统**的追溯实现（2026-05 重构）。
 >
@@ -26,7 +26,6 @@ HLS 写入时已按规则命名落盘（step 维度隔离）：
 
 ```text
 {base_dir}/{task_id}/{step_id}/{raw|processed}_segment_{ts_us}.mp4
-{base_dir}/{task_id}/{step_id}/keypoints_{ts_us}.json
 {base_dir}/{task_id}/{step_id}/{raw|processed}_playlist.m3u8   # LIVE 原始 playlist
 ```
 
@@ -34,7 +33,6 @@ HLS 写入时已按规则命名落盘（step 维度隔离）：
 
 - 告警证据：直接用 `clean_alarm.(task_id, step_id)` 进入对应目录
 - 时间点 → 段：按文件名 ts_us 升序二分查找
-- keypoints JSON 与 processed 段一一对应（ts_us 相同）
 
 > `client_id`（运行时 = source_ip）仅作为 `ClientManager` 区分并发推理流的内存 key 保留，
 > **不再出现在追溯链路**。任何依赖 task_id → source_ip 反查的旧逻辑都已下线。
@@ -48,8 +46,8 @@ HLS 写入时已按规则命名落盘（step 维度隔离）：
   │       返回带 token 的媒体 URL
   │
   └── GET /media/{kind}/{token} ← 媒体访问层（HMAC token 鉴权）
-          kind ∈ {segment, init, keypoints}
-          流式返回 fMP4 / MP4 / JSON
+          kind ∈ {segment, init}
+          流式返回 fMP4 / MP4
 ```
 
 前后端物理隔离：所有媒体文件经 HTTP 路由返回，不依赖共享文件系统，不暴露文件路径。
@@ -63,7 +61,7 @@ payload = {
   "t": task_id,                          # 任务 id
   "s": step_id,                          # 洗消步骤 id（替代了旧字段 "c" client_id）
   "f": filename,                         # 文件名（不含路径）
-  "k": "segment" | "init" | "keypoints", # 资源类型
+  "k": "segment" | "init",               # 资源类型
   "e": expiry_epoch                      # 过期时间（Unix 秒）
 }
 ```
@@ -71,7 +69,7 @@ payload = {
 - Secret 来自 `CLEANSIGHT_MEDIA_TOKEN_SECRET` 环境变量；未配置时生成随机临时 secret（重启失效）
 - 默认 TTL：300s（可通过 `CLEANSIGHT_MEDIA_TOKEN_TTL` 调整）
 - URL 中不含原始文件路径，防止越权枚举
-- payload 校验同时绑定 `kind`，三种 kind 之间不可互换（如 segment token 不能当 init token 使用）
+- payload 校验同时绑定 `kind`，两种 kind 之间不可互换（如 segment token 不能当 init token 使用）
 - `init` kind 是 2026-05-12 fMP4 改造新增，专用于 `init.mp4`（HLS fMP4 codec init segment，每 step 共享一份）
 
 ---
@@ -147,15 +145,7 @@ GET /traceback/alarm/{alarm_id}/evidence?n_before=1&n_after=2
       "is_trigger": true
     }
   ],
-  "processed_clips": [],
-  "keypoints_url": "http://host/media/keypoints/<token>",
-  "detection": [
-    {
-      "timestamp": 1700000020.0,
-      "keypoints": {},
-      "inference_result": {}
-    }
-  ]
+  "processed_clips": []
 }
 ```
 
@@ -165,10 +155,8 @@ GET /traceback/alarm/{alarm_id}/evidence?n_before=1&n_after=2
 | --- | --- |
 | `task_id` / `step_id` | 顶层冗余出来,方便前端拼后续 `/traceback/task/.../playlist.m3u8?step_id=...` |
 | `raw_clips` / `processed_clips` | 双轨片段列表,`is_trigger=true` 标记实际触发告警的段 |
-| `keypoints_url` | 触发段对应的 keypoints JSON token URL（文件不存在时为 null） |
-| `detection` | 触发段 keypoints JSON 内容（文件不存在时为 null） |
 
-> 上一版响应中的 `client_id` 字段已**移除**。
+> 上一版响应中的 `client_id` 字段已**移除**。keypoints 回溯能力（旧 `keypoints_url` / `detection` 字段）已废弃，响应中不再返回。
 
 #### 错误响应
 
@@ -430,38 +418,6 @@ Cache-Control: private, max-age=3600
 
 ---
 
-### 7. 媒体访问——Keypoints JSON
-
-```http
-GET /media/keypoints/{token}
-```
-
-用途：返回单个 keypoints JSON 文件,由 `/traceback/alarm/{id}/evidence` 签发。
-
-#### 成功响应（200 OK）
-
-```json
-[
-  {
-    "timestamp": 1700000020.5,
-    "keypoints": {},
-    "inference_result": {}
-  }
-]
-```
-
-响应头同 segment：`Content-Disposition: inline` + `Cache-Control: private, max-age=60`。
-
-#### 错误响应
-
-| 状态码 | 场景 |
-| --- | --- |
-| 400 | filename 包含路径分隔符 / token 指向的不是 `.json` |
-| 403 | token 无效 / 已过期 / kind 不匹配 |
-| 404 | 文件不存在 |
-
----
-
 ## 配置参数
 
 | 环境变量 | 默认值 | 说明 |
@@ -553,9 +509,6 @@ async function loadEvidence(alarmId) {
       video.play();
     });
   }
-
-  // detection / keypoints_url 仍可独立使用
-  console.log('keypoints:', ev.detection);
 }
 ```
 
