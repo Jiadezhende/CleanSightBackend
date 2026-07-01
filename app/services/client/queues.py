@@ -16,7 +16,6 @@ from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetections
 from app.domain.frame import Frame
 from app.domain.task import CleaningTask
-from app.services.inference.naming import get_task_metric_map
 
 if TYPE_CHECKING:
     from app.services.inference.models import FrameInference
@@ -522,6 +521,9 @@ class ClientQueues:
             return self._alarm_seq
 
     def get_signals_10s(self) -> Dict[str, Dict[str, Any]]:
+        # 懒 import 破除 client ↔ inference 模块级环（naming 是 inference 运行时状态）
+        from app.services.inference.naming import get_task_metric_map
+
         task_metric_map = get_task_metric_map()
         _empty: Dict[str, Any] = {"active": False, "hit_count": 0, "max_conf": 0.0}
         summary: Dict[str, Dict[str, Any]] = {

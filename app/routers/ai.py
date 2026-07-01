@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.services import ai
+from app.services.inference.instance import inference_manager
 from app.services.stream import stream_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 async def lifespan():
     """简单AI服务生命周期管理：启动推理管理器"""
     # 启动 AI 推理服务
-    ai.start()
+    inference_manager.start()
     logger.info("[AIRouter] Inference service started")
 
     try:
@@ -27,7 +27,7 @@ async def lifespan():
         # lifespan finally 执行时 uvicorn 已 cancel 所有 WebSocket 任务，
         # 事件循环无其他等待方，直接同步调用即可。
         try:
-            ai.stop()
+            inference_manager.stop()
             logger.info("[AIRouter] Inference service stopped")
         except Exception:
             logger.exception("[AIRouter] Error stopping inference service")
@@ -82,7 +82,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while not shutdown_event.is_set() and not disconnect_task.done():
-            frame = ai.get_result(client_id)  # domain Frame or None
+            frame = inference_manager.get_result(client_id)  # domain Frame or None
 
             if frame is None:
                 await asyncio.sleep(0.01)  # 减少轮询间隔

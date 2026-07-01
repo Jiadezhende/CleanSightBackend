@@ -86,14 +86,14 @@ async def test_concurrent_start_same_task_idempotent():
 
     with (
         patch("app.routers.api.get_db", side_effect=fresh_db),
-        patch("app.routers.api.ai") as mock_ai,
+        patch("app.routers.api.inference_manager") as mock_inference,
         patch("app.routers.api.stream_service") as mock_stream,
         patch("app.routers.api.client_manager") as mock_cm,
     ):
         mock_task = MagicMock()
         mock_task.current_step = "0"
         mock_cq.get_task.return_value = mock_task
-        mock_ai.set_task.return_value = True
+        mock_inference.set_task.return_value = True
         mock_stream.start_stream.side_effect = track_start_stream
         mock_stream.has_stream.return_value = True
         mock_stream.get_stream_info.return_value = {"url": "rtsp://test/stream"}
@@ -139,12 +139,12 @@ async def test_task_switch_triggers_full_cleanup():
 
     with (
         patch("app.routers.api.get_db", return_value=iter([mock_session])),
-        patch("app.routers.api.ai") as mock_ai,
+        patch("app.routers.api.inference_manager") as mock_inference,
         patch("app.routers.api.stream_service") as mock_stream,
         patch("app.routers.api.client_manager") as mock_cm,
         patch("app.routers.api.get_health_monitor", return_value=mock_monitor),
     ):
-        mock_ai.set_task.return_value = True
+        mock_inference.set_task.return_value = True
         mock_cm.has_client.return_value = True
         mock_cm.get_client.return_value = mock_cq
 
@@ -165,7 +165,7 @@ async def test_task_switch_triggers_full_cleanup():
         )
 
         # 验证设置了新任务并启动了流
-        mock_ai.set_task.assert_called_once()
+        mock_inference.set_task.assert_called_once()
         mock_stream.start_stream.assert_called_once()
 
 
@@ -201,12 +201,12 @@ async def test_start_and_terminate_serialized():
 
     with (
         patch("app.routers.api.get_db", return_value=iter([mock_session])),
-        patch("app.routers.api.ai") as mock_ai,
+        patch("app.routers.api.inference_manager") as mock_inference,
         patch("app.routers.api.stream_service") as mock_stream,
         patch("app.routers.api.client_manager") as mock_cm,
         patch("app.routers.api.get_health_monitor", return_value=mock_monitor),
     ):
-        mock_ai.set_task.return_value = True
+        mock_inference.set_task.return_value = True
         mock_stream.start_stream.side_effect = slow_start_stream
         mock_stream.has_stream.return_value = False
         mock_cm.has_client.return_value = False
@@ -263,11 +263,11 @@ async def test_different_clients_not_blocked():
 
     with (
         patch("app.routers.api.get_db", side_effect=mock_get_db),
-        patch("app.routers.api.ai") as mock_ai,
+        patch("app.routers.api.inference_manager") as mock_inference,
         patch("app.routers.api.stream_service") as mock_stream,
         patch("app.routers.api.client_manager") as mock_cm,
     ):
-        mock_ai.set_task.return_value = True
+        mock_inference.set_task.return_value = True
         mock_cm.has_client.return_value = False
 
         transport = ASGITransport(app=app)

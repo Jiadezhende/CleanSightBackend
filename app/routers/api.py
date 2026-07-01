@@ -23,8 +23,9 @@ from app.database import get_db
 from app.domain.task import CleaningTask
 from app.models import DBTask
 from app.routers.health import get_health_monitor
-from app.services import ai
 from app.services.client.manager import client_manager
+from app.services.inference.instance import inference_manager
+from app.services.run_control import run_controller
 from app.services.stream import stream_service
 from app.utils.exceptions import AppError, DatabaseError, NotFoundError, ValidationError
 
@@ -140,7 +141,9 @@ async def start(req: StartRequest):
                         reason=f"restart:{old_task_id}->{req.task_id}",
                     )
                 else:
-                    cleanup_result = _manual_cleanup_fallback(client_id)
+                    cleanup_result = run_controller.stop_run(
+                        client_id, reason=f"restart:{old_task_id}->{req.task_id}"
+                    )
 
                 if cleanup_result.get("errors"):
                     logger.warning(
@@ -155,7 +158,7 @@ async def start(req: StartRequest):
                 status="running",
             )
 
-            success = ai.set_task(client_id, task)
+            success = inference_manager.set_task(client_id, task)
             if not success:
                 raise AppError(
                     message=f"Failed to set task for client {client_id}",
@@ -226,11 +229,13 @@ async def terminate(client_id: str):
                 client_id=client_id, reason="API termination request"
             )
         else:
-            # Fallback: 健康监控未初始化，执行手动清理
+            # Fallback: 健康监控未初始化，直接走 RunController（拆除唯一实现）
             logger.warning(
-                "[terminate] Health monitor not initialized, using fallback cleanup"
+                "[terminate] Health monitor not initialized, calling RunController directly"
             )
-            result = _manual_cleanup_fallback(client_id)
+            result = run_controller.stop_run(
+                client_id, reason="API termination request"
+            )
 
         # 调整返回格式以匹配原有 API
         if result["errors"]:
@@ -243,54 +248,3 @@ async def terminate(client_id: str):
             logger.info(f"[terminate] Terminated successfully: {client_id}")
 
         return result
-
-
-def _manual_cleanup_fallback(client_id: str):
-    """Fallback cleanup when health monitor not available
-
-    职责边界：
-    - 仅在健康监控未初始化时使用
-    - 执行与 cleanup_client() 相同的 3 步清理
-    - 生产环境不应触发此路径（说明初始化有问题）
-    """
-    result = {
-        "client_id": client_id,
-        "reason": "API termination (fallback)",
-        "decoder_stopped": False,
-        "data_flushed": False,
-        "client_cleaned": False,
-        "errors": [],
-    }
-
-    # 1. 停止解码器
-    try:
-        if stream_service.has_stream(client_id):
-            stream_service.stop_stream(client_id)
-            result["decoder_stopped"] = True
-            logger.info(f"[terminate_fallback] Decoder stopped: {client_id}")
-    except Exception as e:
-        result["errors"].append(f"decoder: {e}")
-        logger.error("[terminate_fallback] Failed to stop decoder: %s - %s", client_id, e, exc_info=True)
-
-    # 2. 落盘残余数据
-    try:
-        ai.remove_client(client_id)
-        result["data_flushed"] = True
-        logger.info(f"[terminate_fallback] Data flushed: {client_id}")
-    except Exception as e:
-        result["errors"].append(f"flush: {e}")
-        logger.error("[terminate_fallback] Failed to flush data: %s - %s", client_id, e, exc_info=True)
-
-    # 3. 清理 ClientManager
-    try:
-        if client_manager.has_client(client_id):
-            removal_result = client_manager.remove_client(client_id, cleanup=True)
-            result["client_cleaned"] = removal_result["removed"]
-            if removal_result["error"]:
-                result["errors"].append(f"client_manager: {removal_result['error']}")
-            logger.info(f"[terminate_fallback] ClientManager cleaned: {client_id}")
-    except Exception as e:
-        result["errors"].append(f"client_manager: {e}")
-        logger.error("[terminate_fallback] Failed to clean ClientManager: %s - %s", client_id, e, exc_info=True)
-
-    return result

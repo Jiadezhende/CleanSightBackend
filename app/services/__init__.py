@@ -1,5 +1,4 @@
 # services package
-from . import ai
 
 # 导出 ClientManager 单例
 try:

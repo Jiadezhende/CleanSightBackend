@@ -369,79 +369,19 @@ class GlobalHealthMonitor:
             - 永不抛出异常
             - 返回详细的每步状态
         """
-        result = {
-            "client_id": client_id,
-            "reason": reason,
-            "decoder_stopped": False,
-            "data_flushed": False,
-            "client_cleaned": False,
-            "errors": [],
-        }
-
         logger.info(
             "[GlobalHealthMonitor] cleanup_client: %s, reason='%s', skip_decoder=%s",
             client_id, reason, skip_decoder
         )
 
-        # 步骤 0: 清理监控器自身的客户端状态（防止内存泄漏）
+        # 步骤 0: 清理监控器自身的客户端状态（HealthMonitor 专属，防内存泄漏）
         self._reconnecting_clients.pop(client_id, None)
         self._last_activity.pop(client_id, None)
 
-        # 步骤 1: 停止解码器（除非跳过）
-        # 注意：不用 has_stream() 守卫——has_stream 对死解码器返回 False，
-        # 但死解码器仍留在 decoders 字典中。stop_stream 内部已处理"无 decoder"的情况，
-        # 直接调用可同时清理死解码器，避免后续被误判为孤儿解码器。
-        if not skip_decoder:
-            try:
-                self._stream_service.stop_stream(client_id)
-                result["decoder_stopped"] = True
-                logger.info(f"[GlobalHealthMonitor] Decoder stopped: {client_id}")
-            except Exception as e:
-                result["errors"].append(f"decoder: {e}")
-                logger.error(
-                    "[GlobalHealthMonitor] Failed to stop decoder: %s - %s", client_id, e, exc_info=True
-                )
+        # 步骤 1-3: 委托给 RunController（唯一拆除实现：停 decoder → 落盘 → 清 registry）
+        from app.services.run_control import run_controller
 
-        # 步骤 2: 落盘残余数据（总是尝试）
-        try:
-            self._inference_manager.remove_client(client_id)
-            result["data_flushed"] = True
-            logger.info(f"[GlobalHealthMonitor] Data flushed: {client_id}")
-        except Exception as e:
-            result["errors"].append(f"flush: {e}")
-            logger.error(
-                "[GlobalHealthMonitor] Failed to flush data: %s - %s", client_id, e, exc_info=True
-            )
-
-        # 步骤 3: 清理 ClientManager（总是尝试）
-        try:
-            if self._client_manager.has_client(client_id):
-                removal_result = self._client_manager.remove_client(
-                    client_id, cleanup=True
-                )
-                result["client_cleaned"] = removal_result["removed"]
-                if removal_result["error"]:
-                    result["errors"].append(
-                        f"client_manager: {removal_result['error']}"
-                    )
-                logger.info(f"[GlobalHealthMonitor] ClientManager cleaned: {client_id}")
-        except Exception as e:
-            result["errors"].append(f"client_manager: {e}")
-            logger.error(
-                "[GlobalHealthMonitor] Failed to clean ClientManager: %s - %s", client_id, e, exc_info=True
-            )
-
-        if result["errors"]:
-            logger.warning(
-                f"[GlobalHealthMonitor] Cleanup completed with errors: {client_id}\n"
-                f"Errors: {result['errors']}"
-            )
-        else:
-            logger.info(
-                f"[GlobalHealthMonitor] Cleanup completed successfully: {client_id}"
-            )
-
-        return result
+        return run_controller.stop_run(client_id, reason, skip_decoder=skip_decoder)
 
     def _cleanup_failed_client(self, client_id: str):
         """清理重连失败的客户端（委托给 cleanup_client）
