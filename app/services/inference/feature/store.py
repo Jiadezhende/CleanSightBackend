@@ -131,6 +131,23 @@ class _JsonlBuffer:
         """任务结束：flush 该 (task, step) 缓冲并丢弃 buffer 槽。"""
         self.flush(task_id, step_id)
 
+    def open_fresh(self, task_id: Any, step_id: Any) -> None:
+        """新 run 起始：丢弃该 (task, step) 缓冲槽并删除已落盘文件（重启 = supersede）。
+
+        追加写模式下，同 (task, step) 重启会新旧混写；一次 run 起始截断该分区，
+        保证读到的永远是本 run 的完整、干净序列。best-effort：删除失败不阻断起流。
+        """
+        if task_id is None or step_id is None:
+            return
+        with self._lock:
+            self._buffers.pop(self._key(task_id, step_id), None)
+        path = self._path(task_id, step_id)
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception as e:  # best-effort：截断失败不影响主链路
+            logger.warning("[%s] open_fresh 截断失败 %s: %s", type(self).__name__, path, e)
+
 
 class FeatureStore(_JsonlBuffer):
     """多模型 bbox 特征 per-task 落盘（常开）。"""

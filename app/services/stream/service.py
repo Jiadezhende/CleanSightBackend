@@ -166,8 +166,8 @@ class StreamService:
                 logger.info(f"[{client_id}] Rewrote stream URL: {stream_url} → {rewritten}")
                 stream_url = rewritten
 
-            # 创建或获取 ClientQueues
-            client_queues = self._get_or_create_client_queues(client_id)
+            # 获取 ClientQueues（只取不建：由 set_task 在起流前建好换槽）
+            client_queues = self._get_client_queues(client_id)
 
             # 构建协议选项
             protocol_opts = self._build_protocol_opts(protocol)
@@ -206,47 +206,22 @@ class StreamService:
             if self.sel is not None and dec.proc and dec.proc.stdout:
                 self._register_to_selector(dec)
 
-    def _get_or_create_client_queues(self, client_id: str):
-        """
-        业务代码：获取或创建客户端队列（纯净，只抛异常）
+    def _get_client_queues(self, client_id: str):
+        """获取该 client 的 ClientQueues（**只取不建**）。
 
-        Args:
-            client_id: 客户端ID
-
-        Returns:
-            ClientQueues 实例，如果 client_manager 不可用则返回 None
+        CQ 由 RunController.start_run → InferenceManager.set_task 在起流**之前**建好并换槽
+        （一 CQ == 一 run，身份不可变）；起流阶段只取。缺失说明调用序错（未先 set_task），
+        返回 None 由上层容错（decoder 空跑）。
         """
         if client_manager is None:
             return None
-
-        # 帧率/队列参数走 settings 单一真源（见 app/settings.py）
-        from app.settings import settings
-
-        inference_fps = settings.inference_fps
-        raw_fps = settings.raw_fps
-
-        # 从配置文件读取帧参数（resize 属 client 配置）
-        resize_width = _client_config.frame.resize_width if _client_config else 640
-        resize_height = _client_config.frame.resize_height if _client_config else 480
-        ca_maxlen = settings.ca_maxlen
-        ca_segment_len = settings.ca_segment_len
-
-        client_queues = client_manager.get_or_create(
-            client_id,
-            resize_width=resize_width,
-            resize_height=resize_height,
-            inference_fps=inference_fps,
-            raw_fps=raw_fps,
-            ca_maxlen=ca_maxlen,
-            ca_segment_len=ca_segment_len,
-        )
-
-        logger.info(
-            f"[{client_id}] ClientQueues created (raw_fps={raw_fps}, inference_fps={inference_fps}, "
-            f"ca_maxlen={ca_maxlen}, ca_segment_len={ca_segment_len})"
-        )
-
-        return client_queues
+        cq = client_manager.get(client_id)
+        if cq is None:
+            logger.error(
+                "[%s] ClientQueues 不存在（start_stream 早于 set_task？），decoder 将空跑",
+                client_id,
+            )
+        return cq
 
     def _build_protocol_opts(self, protocol: str) -> list:
         """

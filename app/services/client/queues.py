@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import enum
 import threading
 import time
 from collections import deque
@@ -21,6 +22,23 @@ if TYPE_CHECKING:
     from app.services.inference.models import FrameInference
 
 
+class RunState(enum.Enum):
+    """一次 run（一个 CQ）的生命周期状态，单调推进 ACTIVE→DRAINING→CLOSED。
+
+    - ACTIVE：正常运行，所有写放行。
+    - DRAINING：拆除中，停生产者写（decoder/结果写回/tick），仅放行 settlement 告警 + HLS flush。
+    - CLOSED：payload 已释放，一切写被拒；身份小壳仍可读（供 fence/日志）。
+
+    门控在写入**时刻**判 state（非 dispatch 时刻）：迟到写落到 DRAINING/CLOSED 的旧 CQ 被拒，
+    不串台到新 run。状态读免锁（枚举原子读 + 单调）；`_state_lock` 仅串行/幂等转换本身，
+    绝不与 7 把 payload 锁互嵌——无新锁环。
+    """
+
+    ACTIVE = "ACTIVE"
+    DRAINING = "DRAINING"
+    CLOSED = "CLOSED"
+
+
 class ClientQueues:
     """
     架构说明：
@@ -35,12 +53,12 @@ class ClientQueues:
     - 默认 CA 队列最大长度为 2700 帧，约 90 秒的视频缓存（30fps）
 
     锁清单（Lock Inventory）：
-      _task_lock        Lock   self.task + self.task_started_at（读多写少共享资源）
+      _task_lock        Lock   （历史）保留于全清顺序；task/task_id/step_id/stage 现为不可变身份，读免锁
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
       _raw_lock         Lock   ca_raw + latest_raw_frame + latest_raw_timestamp
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
       _inference_lock   Lock   _latest_inference（原子推理快照槽）
-      _frontend_lock    Lock   _stage + _latest_temporal（前端状态，合并低频写）
+      _frontend_lock    Lock   _latest_temporal（前端时序事件，低频写）
       _slide_window_lock Lock  _slide_window dict（推理每帧写入，最高竞争锁）
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
 
@@ -60,9 +78,12 @@ class ClientQueues:
         resize_height: int = 480,
         inference_fps: int = 15,
         raw_fps: int = 30,
-        # 默认 MOCK：未分配任务的客户端走透传，不跑真实检测/告警。
-        # 真实 stage 由 InferenceManager.set_task 按 step_id 赋值。
-        initial_stage: str = "MOCK",
+        *,
+        # 不可变运行身份（构造注入，一次 CQ == 一次 run，终生不变）。
+        # task=None 供纯队列/算子单测裸建（身份 getter 返回 None）；生产由
+        # InferenceManager 传入已建 CleaningTask，stage 由 step_id 经配置解析一次。
+        task: Optional[CleaningTask] = None,
+        stage: str = "MOCK",
     ):
         # 客户端标识
         self.client_id = client_id
@@ -83,14 +104,23 @@ class ClientQueues:
         self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
         self._viz_lock = threading.Lock()        # ca_processed + _latest_rendered
         self._inference_lock = threading.Lock()  # _latest_inference
-        self._frontend_lock = threading.Lock()   # _stage + _latest_temporal
+        self._frontend_lock = threading.Lock()   # _latest_temporal
         self._slide_window_lock = threading.Lock()
         self._alarm_lock = threading.Lock()      # _alarm_log + _alarm_seq + _alarm_gate
 
-        # 任务绑定（由 _task_lock 保护）
-        self.task: Optional[CleaningTask] = None
-        self.task_started_at: float = 0.0
-        self._initial_stage = initial_stage  # 供 clear() 重置
+        # 运行状态机（概念上的 0 号锁，单独取，不与上面 7 把 payload 锁互嵌）
+        self._state: RunState = RunState.ACTIVE
+        self._state_lock = threading.Lock()
+
+        # 不可变运行身份：一次构造定死，getter 直接读、无锁——CQ 经 client_manager COW
+        # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
+        # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
+        self.task: Optional[CleaningTask] = task
+        self.task_id: Optional[int] = task.task_id if task is not None else None
+        self.step_id: Optional[int] = self._resolve_step_id(task)
+        self.source_ip: str = client_id
+        self.stage: str = stage
+        self.task_started_at: float = time.time() if task is not None else 0.0
 
         # 最新原始帧缓存（由 _raw_lock 保护）
         self.latest_raw_frame: Optional[np.ndarray] = None
@@ -113,9 +143,6 @@ class ClientQueues:
 
         # 最新推理结果原子快照（由 _inference_lock 保护）
         self._latest_inference: Optional[FrameInference] = None
-
-        # 当前处理阶段（由 _frontend_lock 保护）
-        self._stage: str = initial_stage
 
         # 滑动窗口：per-stream(detector.name) 检测环形缓冲（由 _slide_window_lock 保护）
         self._slide_window: Dict[str, Deque[FrameDetections]] = {}
@@ -150,6 +177,10 @@ class ClientQueues:
         ca_ready 为无锁 SPSC deque，decoder 是唯一写入方，dispatcher 是唯一消费方。
         _decimate_phase 仅由本方法（decoder 线程）读写，无并发，不加锁。
         """
+        # 写门：非 ACTIVE（拆除中/已关）拒写——在推进相位累加器之前拒，避免 late 帧扰动抽帧节奏。
+        if self._state is not RunState.ACTIVE:
+            return False
+
         # 1. 相位累加器选帧：相位每输入帧推进一次（累加器正确性的不变式），
         #    跨过 raw_fps 阈值才放行。
         self._decimate_phase += self.inference_fps
@@ -182,6 +213,9 @@ class ClientQueues:
 
         self.task 在进入 _raw_lock 前快照，避免 _raw_lock 与 _task_lock 嵌套。
         """
+        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——HLS 残余由 _flush_all_remaining_segments 收尾）
+        if self._state is not RunState.ACTIVE:
+            return False
         try:
             # 快照 task（在 frame lock 外，两锁永不嵌套）
             _task = self.get_task()
@@ -197,7 +231,7 @@ class ClientQueues:
                     frames_to_persist = self.pop_n_ca_raw(self.ca_segment_len)
 
             if frames_to_persist is not None and _task is not None:
-                step_id = self._resolve_step_id(_task)
+                step_id = self.step_id
                 if step_id is None:
                     import logging
                     logging.getLogger(__name__).error(
@@ -223,6 +257,9 @@ class ClientQueues:
 
         self.task 在进入 _viz_lock 前快照，避免 _viz_lock 与 _task_lock 嵌套。
         """
+        # 写门：非 ACTIVE 拒写
+        if self._state is not RunState.ACTIVE:
+            return
         _task = self.get_task()
 
         frames_to_persist = None
@@ -237,7 +274,7 @@ class ClientQueues:
                 frames_to_persist = self.pop_n_ca_processed(self.ca_segment_len)
 
         if frames_to_persist is not None and _task is not None:
-            step_id = self._resolve_step_id(_task)
+            step_id = self.step_id
             if step_id is None:
                 import logging
                 logging.getLogger(__name__).error(
@@ -254,7 +291,12 @@ class ClientQueues:
             )
 
     def set_latest_rendered(self, frame_data: Optional[Frame]) -> None:
-        """更新最新渲染帧（由 VisualizationWorker 调用）。传 None 表示清空。"""
+        """更新最新渲染帧（由 VisualizationWorker 调用）。传 None 表示清空。
+
+        写门：非 ACTIVE 拒**非空**写；清空(None)放行——拆除期允许清掉前端残帧。
+        """
+        if frame_data is not None and self._state is not RunState.ACTIVE:
+            return
         with self._viz_lock:
             self._latest_rendered = frame_data
 
@@ -270,7 +312,12 @@ class ClientQueues:
     # --- latest_inference 操作（原子推理快照）---
 
     def set_latest_inference(self, result: "FrameInference") -> None:
-        """原子写入最新推理结果（由 InferenceLoop 调用）。"""
+        """原子写入最新推理结果（由 InferenceLoop 调用）。
+
+        写门：非 ACTIVE 拒——迟到推理结果落到旧 CQ 被拒，不串台。
+        """
+        if self._state is not RunState.ACTIVE:
+            return
         with self._inference_lock:
             self._latest_inference = result
 
@@ -287,24 +334,18 @@ class ClientQueues:
             return None
 
     def get_task(self) -> Optional[CleaningTask]:
-        with self._task_lock:
-            return self.task
+        return self.task  # 不可变身份，免锁
 
     def get_task_id(self) -> Optional[int]:
-        with self._task_lock:
-            return self.task.task_id if self.task else None
+        return self.task_id  # 不可变身份，免锁
 
     def get_step_id(self) -> Optional[int]:
-        """解析当前 step_id（落盘目录键，与 HLS 同源）。非法/未绑定返回 None。"""
-        return self._resolve_step_id(self.get_task())
+        """当前 step_id（落盘目录键，与 HLS 同源）；未绑定/非法返回 None。"""
+        return self.step_id
 
     def step_id_of(self, task: Optional[CleaningTask]) -> Optional[int]:
-        """从已快照的 task 解析 step_id（与 get_step_id 同口径）。
-
-        供调用方先 get_task() 取一次、再派生 task_id/step_id，避免两次独立读
-        之间发生 set_task 导致 (task_id, step_id) 键错配。
-        """
-        return self._resolve_step_id(task)
+        """本 run 的 step_id（不可变，忽略入参）。保留签名以兼容既有调用方。"""
+        return self.step_id
 
     def to_status_dict(self) -> dict:
         return {
@@ -363,8 +404,45 @@ class ClientQueues:
             out.append(self.ca_processed.popleft())
         return out
 
+    # --- 运行状态机 ---
+
+    def get_state(self) -> RunState:
+        """当前运行状态（免锁：枚举原子读 + 单调推进）。"""
+        return self._state
+
+    def is_active(self) -> bool:
+        return self._state is RunState.ACTIVE
+
+    def to_draining(self) -> bool:
+        """ACTIVE→DRAINING（幂等、单调）。返回本次是否发生转换。
+
+        拆除入口调用：封生产者写，仍放行 settlement 告警 + HLS flush。
+        """
+        with self._state_lock:
+            if self._state is RunState.ACTIVE:
+                self._state = RunState.DRAINING
+                return True
+            return False
+
+    def close(self) -> None:
+        """置 CLOSED（幂等）并释放重数据 payload，保留不可变身份小壳。
+
+        CLOSED 后一切写被拒、读返空；身份（task/step/stage/source_ip）仍可读供 fence/日志。
+        """
+        with self._state_lock:
+            self._state = RunState.CLOSED
+        self._release_payload()
+
     def clear(self) -> None:
-        """原子清除所有队列和缓存（按全清顺序持所有锁）。"""
+        """兼容入口：等价 `close()`（供 ClientManager.remove/remove_if/clear_all 调用）。"""
+        self.close()
+
+    def _release_payload(self) -> None:
+        """原子释放所有队列和重数据缓存（按全清顺序持 7 把 payload 锁）。
+
+        身份（task/task_id/step_id/source_ip/stage）不可变，不在此重置——仅释放
+        payload（帧/滑窗/告警/快照）回收内存（尤其大块 numpy 帧）。
+        """
         locks = [
             self._task_lock, self._raw_lock, self._viz_lock,
             self._inference_lock, self._frontend_lock,
@@ -378,11 +456,8 @@ class ClientQueues:
             self.ca_processed.clear()
             self.latest_raw_frame = None
             self.latest_raw_timestamp = time.time()
-            self.task = None
-            self.task_started_at = 0.0
             self._latest_rendered = None
             self._latest_inference = None
-            self._stage = self._initial_stage
             self._latest_temporal = []
             self._slide_window.clear()
             self._alarm_log.clear()
@@ -393,52 +468,30 @@ class ClientQueues:
         """从推理队列弹出一帧（FIFO，无锁 SPSC）"""
         return self.ca_ready.popleft() if self.ca_ready else None
 
-    def set_task(self, task: Optional[CleaningTask]) -> None:
-        """线程安全的纯字段赋值。不含缓存清理逻辑，清理由 clear_task_caches() 负责。"""
-        with self._task_lock:
-            self.task = task
-            self.task_started_at = time.time() if task is not None else 0.0
-
-    def clear_task_caches(self) -> None:
-        """清空任务级别实时分析缓存（slide_window / temporal / alarm）。
-
-        调用方须确保旧 TemporalActor 已通过 finalize_and_stop() 停止，
-        避免旧 Actor 的 settlement 写入落入已清空的缓存。
-        """
-        with self._slide_window_lock:
-            self._slide_window.clear()
-        with self._frontend_lock:
-            self._latest_temporal = []
-        with self._alarm_lock:
-            self._alarm_log.clear()
-            self._alarm_seq = 0
-            self._alarm_gate.clear()
-
-    # --- 阶段管理 ---
+    # --- 阶段（不可变身份，构造注入）---
 
     def get_stage(self) -> str:
-        """获取当前处理阶段。"""
-        with self._frontend_lock:
-            return self._stage
-
-    def set_stage(self, stage: str) -> None:
-        """设置当前处理阶段。"""
-        with self._frontend_lock:
-            self._stage = stage
+        """当前处理阶段（不可变，免锁）。"""
+        return self.stage
 
     # --- slide_window 操作 ---
 
     def set_stream_windows(self, windows: Dict[str, float]) -> None:
         """配置 per-stream 感受野（{流名: 最大 window_seconds}），整体替换。
 
-        由 InferenceManager.set_task() 在算子实例化后调用：缓冲保留时长取
+        由 InferenceManager 在算子实例化后调用：缓冲保留时长取
         max(底线 10s, 该流感受野)，故感受野只向上扩展，signals_10s 的 10s 不受影响。
         """
         with self._slide_window_lock:
             self._stream_windows = dict(windows)
 
     def push_detection(self, task_name: str, output: FrameDetections) -> None:
-        """将 FrameDetections 追加到 per-stream 滑动窗口，按感受野自动淘汰过期条目。"""
+        """将 FrameDetections 追加到 per-stream 滑动窗口，按感受野自动淘汰过期条目。
+
+        写门：非 ACTIVE 拒——迟到检测写回落到旧 CQ 被拒。
+        """
+        if self._state is not RunState.ACTIVE:
+            return
         with self._slide_window_lock:
             if task_name not in self._slide_window:
                 self._slide_window[task_name] = deque()
@@ -470,7 +523,12 @@ class ClientQueues:
     # --- latest_temporal 操作 ---
 
     def set_latest_temporal(self, events: List[str]) -> None:
-        """覆写最新时序事件列表（由 TemporalWorker 调用）。"""
+        """覆写最新时序事件列表（由 TemporalWorker 调用）。
+
+        写门：非 ACTIVE 拒**非空**写；清空([])放行——拆除期允许清掉前端残留事件。
+        """
+        if events and self._state is not RunState.ACTIVE:
+            return
         with self._frontend_lock:
             self._latest_temporal = events
 
@@ -491,7 +549,12 @@ class ClientQueues:
 
         task_id 须由调用方在锁外先 get_task_id() 取好传入，不在持 _alarm_lock 时
         反向获取 _task_lock（违反全清顺序，死锁风险）。
+
+        写门（非对称）：仅 CLOSED 拒——ACTIVE 与 DRAINING 均放行，保证拆除期（DRAINING）
+        的 settlement 结算告警仍能入账。
         """
+        if self._state is RunState.CLOSED:
+            return False
         gate_key = f"{task_id}:{alarm.metric}:{mode}"
         now = time.time()
         with self._alarm_lock:

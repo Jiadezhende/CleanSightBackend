@@ -31,7 +31,7 @@ class ClientManager:
 
     读接口（无锁）：`get`(只读按键) / `has_client` / `snapshot`(零拷贝只读视图)
       / `get_client_by_task_id`(扫描) / `get_all_queue_depths` / `get_client_count` / `get_status_summary`。
-    写接口（`_wlock` + COW 换引用）：`get_or_create` / `remove` / `remove_if` / `clear_all`。
+    写接口（`_wlock` + COW 换引用）：`get_or_create` / `set`(换槽) / `remove` / `remove_if` / `clear_all`。
     """
 
     def __init__(self, config=None):
@@ -46,6 +46,12 @@ class ClientManager:
         self._runs: Dict[str, ClientQueues] = {}
         self._wlock = threading.Lock()  # 只串行「写」（create / remove），不阻塞读
 
+        # per-client 任务级生命周期锁（RLock）：护一次 start/teardown 事务，供 RunController
+        # / api / HealthMonitor 共用串行化同 client 的启停。与 _wlock 是两把不同的锁：
+        # _wlock 全局极短护换引用；_task_locks[cid] per-client 长持护跨服务事务。
+        self._task_locks: Dict[str, threading.RLock] = {}
+        self._task_locks_guard = threading.Lock()
+
         # 默认构造参数（从配置加载）
         self._default_ca_segment_len = self._config.ca_segment_len
         self._default_ca_maxlen = self._config.ca_maxlen
@@ -53,6 +59,21 @@ class ClientManager:
         self._default_raw_fps = self._config.raw_fps
 
         logger.info("[ClientManager] Initialized")
+
+    # ── 任务级锁（per-client 生命周期事务锁）────────────────────
+
+    def lock_for(self, client_id: str) -> threading.RLock:
+        """返回该 client_id 的生命周期 RLock（get-or-create）。
+
+        供 RunController.start_run / stop_run 及 HealthMonitor 共用，串行化同一 client 的
+        启停事务。RLock：同线程可重入（start_run 持锁内再调 stop_run 不自死锁）。
+        """
+        with self._task_locks_guard:
+            lk = self._task_locks.get(client_id)
+            if lk is None:
+                lk = threading.RLock()
+                self._task_locks[client_id] = lk
+            return lk
 
     # ── 读接口（无锁）───────────────────────────────────────────
 
@@ -146,6 +167,19 @@ class ClientManager:
 
             logger.info(f"Create New Client: {client_id}")
             return cq
+
+    def set(self, client_id: str, cq: ClientQueues) -> None:
+        """原子装入/替换 client_id 槽位为一个已建好的（不可变身份）CQ。
+
+        供 `RunController.start_run` 路径：每次 run 建**新** CQ 后整体换槽（不在旧 CQ 上原地改）。
+        `_wlock` 下 COW 换引用发布，读者原子读引用即看到全新对象——观察不到半建态。
+        旧槽引用被丢弃，其 decoder/actor 持到释放后 GC。
+        """
+        with self._wlock:
+            new = dict(self._runs)
+            new[client_id] = cq
+            self._runs = new
+        logger.info(f"[ClientManager] set run: {client_id}")
 
     def remove(self, client_id: str, cleanup: bool = True) -> Dict[str, Any]:
         """注销客户端，可选清理其队列资源。

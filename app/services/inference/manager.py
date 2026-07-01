@@ -177,55 +177,69 @@ class InferenceManager:
             return None
         return cq.get_latest_result()
 
-    def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
-        """为客户端设置任务，并创建对应的 ClientTemporalActor。
+    def _resolve_stage(self, current_step: Any) -> str:
+        """step_id 主键直接作 stage（恒等路由，无映射表）；未知/未配回退 MOCK 透传。"""
+        step_key = str(current_step)
+        if step_key in self._get_stage_configs():
+            return step_key
+        logger.warning(
+            "[InferenceManager] 未知的 current_step '%s'，路由到 MOCK stage", current_step
+        )
+        return "MOCK"
 
-        调用顺序：先停旧 Actor（settlement 在旧 task 上下文写入），再切换字段，再清缓存。
-        这样可保证 settlement 告警正确归属旧任务，不会落入已清空的新任务 alarm_log。
-        整个流程在 _client_lifecycle_lock 下执行，与 remove_client 互斥。
+    def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
+        """建立一次 run：构造不可变身份的**新** CQ + ClientTemporalActor，整体换槽。
+
+        一 CQ == 一 run：不在旧 CQ 上原地改身份，而是建新 CQ 换 registry 槽位。
+        旧 run 的 actor 先 finalize（settlement 落到旧 CQ，其不可变身份即旧 run，归属天然正确），
+        故不再需要"先停旧 actor 再切字段"的排序不变式。
+        全程在 _client_lifecycle_lock 下，与 remove_client 互斥。
+        task=None：仅停旧 actor、不建新 run（历史语义，生产链路不再走）。
         """
         with self._client_lifecycle_lock:
             return self._set_task_locked(client_id, task)
 
     def _set_task_locked(self, client_id: str, task: Optional[CleaningTask]) -> bool:
         """set_task 的加锁实现，调用方须已持有 _client_lifecycle_lock。"""
-        cq = client_manager.get_or_create(client_id)
-        if cq is None:
-            return False
-
-        # 1. 先停旧 Actor：settlement 写入发生时 cq.task 仍为旧值，归属正确
+        # 1. 停旧 actor：settlement 落到旧 CQ（其不可变身份即旧 run，归属正确）。
+        #    重启路径下 RunController 已先 stop_run 拆掉旧 run，此处多为 no-op（防御保留）。
+        old_cq = client_manager.get(client_id)
         old_actor = self._actors.pop(client_id, None)
         if old_actor is not None:
             try:
                 settlement = old_actor.finalize_and_stop()
-                if settlement and cq:
-                    self._persist_settlement_alarms(client_id, cq, settlement)
+                if settlement and old_cq is not None:
+                    self._persist_settlement_alarms(client_id, old_cq, settlement)
             except Exception as e:
                 logger.warning(
                     "[InferenceManager] Settlement alarms on task switch failed for %s: %s",
                     client_id, e,
                 )
 
-        # 2. 切换字段（纯赋值，线程安全）
-        cq.set_task(task)
+        if task is None:
+            return True  # 历史语义：清任务 = 无新 run，不建 CQ/actor
 
-        if task is not None:
-            # 主键 = step_id：current_step 直接作 stage 主键，恒等路由，无映射表。
-            # 未知/未配的 step 回退 MOCK 透传。
-            stage_configs = self._get_stage_configs()
-            stage = task.current_step if task.current_step in stage_configs else "MOCK"
-            if stage == "MOCK":
+        # 2. 解析 stage（step_id 主键，未配回退 MOCK）
+        stage = self._resolve_stage(task.current_step)
+
+        # 3. 建**新**不可变 CQ，整体换槽（配置走单一出口，早于起流，消除 dead-kwargs）
+        from app.services.client.config import get_client_config
+        new_cq = ClientQueues(
+            client_id, task=task, stage=stage, **get_client_config().cq_kwargs()
+        )
+        client_manager.set(client_id, new_cq)
+
+        # 4. 新 run 起始截断存储分区（重启 supersede，避免同 (task,step) 新旧混写）
+        if new_cq.step_id is not None:
+            try:
+                self.feature_store.open_fresh(task.task_id, new_cq.step_id)
+                self.fact_ledger.open_fresh(task.task_id, new_cq.step_id)
+            except Exception as e:
                 logger.warning(
-                    "[InferenceManager] 未知的 current_step '%s'，路由到 MOCK stage",
-                    task.current_step,
+                    "[InferenceManager] open_fresh storage failed for %s: %s", client_id, e
                 )
-            cq.set_stage(stage)
 
-        # 3. 旧 Actor 已停，安全清空任务级缓存
-        cq.clear_task_caches()
-
-        # 按 Client 独立实例化流算子 Operator
-        stage = cq.get_stage()
+        # 5. 按 stage 实例化流算子 Operator + actor（绑定新 CQ）
         stage_cfg = self._get_stage_configs().get(stage, {})
         specs = stage_cfg.get("operator_specs", [])
 
@@ -239,11 +253,11 @@ class InferenceManager:
                     stream_windows[src] = max(
                         stream_windows.get(src, 0.0), op.window_seconds
                     )
-            cq.set_stream_windows(stream_windows)
+            new_cq.set_stream_windows(stream_windows)
 
             actor = ClientTemporalActor(
                 client_id=client_id,
-                cq=cq,
+                cq=new_cq,
                 stage=stage,
                 operators=operators,
             )
@@ -368,8 +382,7 @@ class InferenceManager:
                 )
                 return
 
-            task = client_queues.get_task()
-            step_id = ClientQueues._resolve_step_id(task)
+            step_id = client_queues.get_step_id()
             if step_id is None:
                 logger.error(
                     "[InferenceManager] invalid current_step for client=%s task_id=%s, skip flush",

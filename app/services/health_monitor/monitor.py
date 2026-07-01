@@ -494,8 +494,10 @@ class GlobalHealthMonitor:
 
         # 无条件调用 stop_stream()：即使进程已死（is_alive=False），
         # 仍需从 decoders 字典中移除条目，否则下一轮检查会重复检测到孤儿。
+        # 绕过 stop_run（无 CQ），故显式持 lock_for 防与并发 start 撞。
         try:
-            self._stream_service.stop_stream(client_id)
+            with self._client_manager.lock_for(client_id):
+                self._stream_service.stop_stream(client_id)
             logger.info(
                 f"[GlobalHealthMonitor] Orphan decoder stopped: {client_id}"
             )

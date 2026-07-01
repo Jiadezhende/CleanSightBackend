@@ -88,7 +88,7 @@ class TestDecoderRegistration:
         """调用 _start_stream_impl，mock FFmpegDecoder.start() 的行为"""
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 
@@ -112,7 +112,7 @@ class TestDecoderRegistration:
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 
@@ -143,7 +143,7 @@ class TestDecoderRegistration:
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 
@@ -172,7 +172,7 @@ class TestDecoderRegistration:
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 

@@ -25,9 +25,10 @@ def _make_record(metric="BUBBLE", mode="REALTIME", stage="LEAK") -> Alarm:
 
 
 def _cq_with_task() -> ClientQueues:
-    cq = ClientQueues(client_id="c1")
-    cq.set_task(SimpleNamespace(task_id=1))
-    return cq
+    # 身份不可变：task 构造注入（一 CQ == 一 run）
+    return ClientQueues(
+        client_id="c1", task=SimpleNamespace(task_id=1, current_step="1")
+    )
 
 
 # --- gate 测试（经 append_alarm_record_with_gate 返回值验证）---
@@ -86,19 +87,18 @@ def test_gate_different_metric_independent():
 
 
 def test_gate_reset_on_task_change():
-    """set_task 切换任务后 gate 清空，同 key 重新允许通过。"""
-    cq = ClientQueues(client_id="c1")
+    """新 run = 新 CQ = fresh gate（一 CQ 一 run，身份不可变）：换 task 建新 CQ，同 key 重新允许。"""
     t0 = 1000.0
-    cq.set_task(SimpleNamespace(task_id=1))
+    cq1 = ClientQueues(client_id="c1", task=SimpleNamespace(task_id=1, current_step="1"))
     with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(1, _make_record(), "REALTIME") is True
+        assert cq1.append_alarm_record_with_gate(1, _make_record(), "REALTIME") is True
     with patch("time.time", return_value=t0 + 1.0):
-        assert cq.append_alarm_record_with_gate(1, _make_record(), "REALTIME") is False  # 仍在窗口内
+        assert cq1.append_alarm_record_with_gate(1, _make_record(), "REALTIME") is False  # 仍在窗口内
 
-    # 切换到新任务 → gate 清空
-    cq.set_task(SimpleNamespace(task_id=2))
+    # 切换任务 = 建**新** CQ（新 run），gate 天然为空
+    cq2 = ClientQueues(client_id="c1", task=SimpleNamespace(task_id=2, current_step="1"))
     with patch("time.time", return_value=t0 + 1.0):
-        assert cq.append_alarm_record_with_gate(2, _make_record(), "REALTIME") is True
+        assert cq2.append_alarm_record_with_gate(2, _make_record(), "REALTIME") is True
 
 
 # --- 入日志 / seq 测试 ---
