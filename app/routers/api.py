@@ -106,7 +106,7 @@ async def start(req: StartRequest):
         async with lock:
             # 2a. 幂等检查 + 清理已有客户端
             if client_manager.has_client(client_id):
-                cq = client_manager.get_client(client_id)
+                cq = client_manager.get(client_id)
                 old_task = cq.get_task()
                 old_task_id = cq.get_task_id()
 

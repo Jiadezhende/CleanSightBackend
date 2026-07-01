@@ -149,7 +149,7 @@ def _quantile(sorted_buckets: list, q: float, total: float) -> float:
 @router.get("/overview")
 def get_overview():
     """聚合仪表盘：活跃客户端、队列深度。前端每 3s 轮询。"""
-    all_clients = client_manager.get_all_clients()
+    all_clients = client_manager.snapshot()
     clients_info = [_client_info(cid, q) for cid, q in all_clients.items()]
     total_queued = sum(
         d["queue_depths"].get("ca_ready", 0)
@@ -168,7 +168,7 @@ def get_overview():
 @router.get("/clients")
 def get_clients():
     """活跃客户端列表（轻量），供前端下拉框使用。"""
-    all_clients = client_manager.get_all_clients()
+    all_clients = client_manager.snapshot()
     return [_client_info(cid, q) for cid, q in all_clients.items()]
 
 
@@ -177,7 +177,7 @@ def get_client_alarms(client_id: str, n: int = Query(20, ge=1, le=100)):
     """从内存告警日志读取该客户端最近 n 条告警（不走 DB）。"""
     if not client_manager.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
-    cq = client_manager.get_client(client_id)
+    cq = client_manager.get(client_id)
     alarms = cq.get_recent_alarms(n=n)
     return {
         "client_id": client_id,

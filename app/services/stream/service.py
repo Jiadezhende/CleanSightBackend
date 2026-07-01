@@ -231,7 +231,7 @@ class StreamService:
         ca_maxlen = settings.ca_maxlen
         ca_segment_len = settings.ca_segment_len
 
-        client_queues = client_manager.get_client(
+        client_queues = client_manager.get_or_create(
             client_id,
             resize_width=resize_width,
             resize_height=resize_height,
@@ -521,7 +521,7 @@ class StreamService:
                     details="Cannot restart stream: no ClientQueues",
                 )
 
-            client_queues = client_manager.get_client(client_id)
+            client_queues = client_manager.get(client_id)
 
             # 4. 创建新的decoder
             protocol_opts = self._build_protocol_opts(protocol)
@@ -562,7 +562,7 @@ class StreamService:
         if not client_manager.has_client(client_id):
             return 0
 
-        client_queues = client_manager.get_client(client_id)
+        client_queues = client_manager.get(client_id)
         if client_queues is None:
             logger.warning(
                 f"[BACKPRESSURE] client_queues is None for client_id={client_id}"

@@ -40,7 +40,7 @@ def _make_monitor(client_id: str, mock_cq, active_decoder_ids: set) -> GlobalHea
         active_decoder_ids: 模拟 stream_service.get_all_client_ids() 的返回值
     """
     mock_cm = MagicMock()
-    mock_cm.get_all_clients.return_value = {client_id: mock_cq}
+    mock_cm.snapshot.return_value = {client_id: mock_cq}
 
     mock_ss = MagicMock()
     mock_ss.get_all_client_ids.return_value = active_decoder_ids

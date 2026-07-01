@@ -76,7 +76,7 @@ class ModelWorkerService:
         # 客户端队列映射（可能动态更新）
         if client_queues_map is None:
             # 从 ClientManager 获取
-            self.client_queues_map = self._client_manager.get_all_clients()
+            self.client_queues_map = self._client_manager.snapshot()
         else:
             self.client_queues_map = client_queues_map
 
@@ -290,7 +290,7 @@ class ModelWorkerService:
                 )
                 continue
 
-            cq = self._client_manager.get_client(res.client_id)
+            cq = self._client_manager.get(res.client_id)
             # Path 1: per-task slide_window（temporal 需要历史窗口）
             for task_name, detection_output in res.detections.items():
                 cq.push_detection(task_name, detection_output)

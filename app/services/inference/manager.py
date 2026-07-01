@@ -172,7 +172,7 @@ class InferenceManager:
         """
         if not client_manager.has_client(client_id):
             return None
-        cq = client_manager.get_client(client_id)
+        cq = client_manager.get(client_id)
         if not cq:
             return None
         return cq.get_latest_result()
@@ -189,7 +189,7 @@ class InferenceManager:
 
     def _set_task_locked(self, client_id: str, task: Optional[CleaningTask]) -> bool:
         """set_task 的加锁实现，调用方须已持有 _client_lifecycle_lock。"""
-        cq = client_manager.get_client(client_id)
+        cq = client_manager.get_or_create(client_id)
         if cq is None:
             return False
 
@@ -210,7 +210,6 @@ class InferenceManager:
         cq.set_task(task)
 
         if task is not None:
-            client_manager.bind_task(client_id, task.task_id)
             # 主键 = step_id：current_step 直接作 stage 主键，恒等路由，无映射表。
             # 未知/未配的 step 回退 MOCK 透传。
             stage_configs = self._get_stage_configs()
@@ -263,7 +262,7 @@ class InferenceManager:
         return True
 
     def get_task(self, client_id: str) -> Optional[CleaningTask]:
-        cq = client_manager.get_client(client_id)
+        cq = client_manager.get(client_id)
         return cq.get_task() if cq else None
 
     def remove_client(self, client_id: str) -> None:
@@ -283,7 +282,7 @@ class InferenceManager:
         logger.info("[InferenceManager] Removing inference resources: %s", client_id)
 
         cq = (
-            client_manager.get_client(client_id)
+            client_manager.get(client_id)
             if client_manager.has_client(client_id)
             else None
         )
@@ -334,7 +333,7 @@ class InferenceManager:
         logger.info("[InferenceManager] Inference resources removed: %s", client_id)
 
     def status(self) -> Dict[str, Any]:
-        clients = client_manager.get_all_clients()
+        clients = client_manager.snapshot()
         stats = {client_id: cq.to_status_dict() for client_id, cq in clients.items()}
         return {"clients": len(clients), "queues": stats}
 
@@ -450,7 +449,7 @@ class InferenceManager:
             try:
                 settlement = actor.finalize_and_stop()
                 if settlement:
-                    cq = client_manager.get_client(client_id)
+                    cq = client_manager.get(client_id)
                     if cq:
                         self._persist_settlement_alarms(client_id, cq, settlement)
             except Exception as e:

@@ -108,7 +108,7 @@ class VisualizationWorker:
 
     def _tick(self):
         """一次轮询：遍历所有活跃客户端执行可视化。"""
-        all_clients = client_manager.get_all_clients()
+        all_clients = client_manager.snapshot()
         for client_id, cq in all_clients.items():
             try:
                 self._process_client(client_id, cq)

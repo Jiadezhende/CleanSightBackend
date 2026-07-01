@@ -98,7 +98,7 @@ async def test_concurrent_start_same_task_idempotent():
         mock_stream.has_stream.return_value = True
         mock_stream.get_stream_info.return_value = {"url": "rtsp://test/stream"}
         mock_cm.has_client.side_effect = has_client_side_effect
-        mock_cm.get_client.return_value = mock_cq
+        mock_cm.get.return_value = mock_cq
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -146,7 +146,7 @@ async def test_task_switch_triggers_full_cleanup():
     ):
         mock_inference.set_task.return_value = True
         mock_cm.has_client.return_value = True
-        mock_cm.get_client.return_value = mock_cq
+        mock_cm.get.return_value = mock_cq
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:

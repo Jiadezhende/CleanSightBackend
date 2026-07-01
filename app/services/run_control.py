@@ -65,7 +65,7 @@ class RunController:
         # 3. 清 registry（owner=ClientManager）
         try:
             if client_manager.has_client(client_id):
-                removal = client_manager.remove_client(client_id, cleanup=True)
+                removal = client_manager.remove(client_id, cleanup=True)
                 result["client_cleaned"] = removal["removed"]
                 if removal["error"]:
                     result["errors"].append(f"client_manager: {removal['error']}")

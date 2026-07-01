@@ -141,7 +141,7 @@ class GlobalHealthMonitor:
     def _check_all_clients(self):
         """检查所有客户端的健康状态（含孤儿流检测和孤儿解码器检测）"""
         current_time = time.time()
-        all_clients = self._client_manager.get_all_clients()
+        all_clients = self._client_manager.snapshot()
 
         # 获取所有活跃的解码器
         active_decoders = set(self._stream_service.get_all_client_ids())

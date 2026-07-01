@@ -124,8 +124,8 @@ class StageAwareDispatcher:
         - 队列为空时跳过，不影响其他客户端
         """
         # 动态获取客户端列表（实时同步，无需刷新）
-        # ClientManager.get_all_clients() 返回字典副本，迭代安全
-        clients = self._client_manager.get_all_clients()
+        # ClientManager.snapshot() 返回字典副本，迭代安全
+        clients = self._client_manager.snapshot()
         for client_id, cq in clients.items():
             # 从 ca_ready 队列取一帧（FIFO，保证公平）
             # 使用封装方法，避免直接访问内部队列
@@ -260,7 +260,7 @@ class StageAwareDispatcher:
             # client 段：ca_processed 深度/容量/累计丢帧(delta)
             client_parts: List[str] = []
             processed_drops: Dict[str, int] = {}
-            for client_id, cq in self._client_manager.get_all_clients().items():
+            for client_id, cq in self._client_manager.snapshot().items():
                 cum = cq.frames_dropped_processed
                 processed_drops[client_id] = cum
                 delta = cum - self._last_logged_processed_drops.get(client_id, 0)

@@ -38,7 +38,7 @@ def test_set_task_routes_stage(manager, step, expected_stage):
     cq = MagicMock()
     with patch("app.services.inference.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
-        cm.get_client.return_value = cq
+        cm.get_or_create.return_value = cq
         manager.set_task("client_1", _make_task(step))
     cq.set_stage.assert_called_once_with(expected_stage)
 
@@ -47,6 +47,6 @@ def test_set_task_none_skips_stage(manager):
     cq = MagicMock()
     with patch("app.services.inference.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
-        cm.get_client.return_value = cq
+        cm.get_or_create.return_value = cq
         manager.set_task("client_1", None)
     cq.set_stage.assert_not_called()
