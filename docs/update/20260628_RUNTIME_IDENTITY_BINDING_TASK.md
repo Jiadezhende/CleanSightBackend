@@ -1,7 +1,7 @@
 # 运行身份与绑定关系建模任务：厘清 client / task / step / run
 
-> **变更状态**：T1/T2/T3 已落地（T3 含收尾，2026-07-02）　<!-- 契约已拍板；本文件是落地路线的契约 hub -->
-> **知识库**：T3 收尾（`stop_run` 内 DRAINING 置位 + HM 路径对象身份 fence）已落地，可沉淀
+> **变更状态**：T1/T2/T3/T4 已落地（2026-07-02）　<!-- 契约已拍板；本文件是落地路线的契约 hub -->
+> **知识库**：T4 写回句柄化（dispatcher 捕获 CQ 句柄，写回 res.cq 不反查）+ FeatureStore 归属校验（store 内以 cq 对象引用为 owner，锁下串行 set/check/落盘，闭合 supersede TOCTOU）已落地，可沉淀
 >
 > 落地现状见文末 [§落地现状（2026-07-02）](#落地现状2026-07-02)。
 >
@@ -125,7 +125,7 @@ _teardown_run(task_id, expected=cq):   # api 控制面，持 per-task threading 
 | T1 | CQ per-run 不可变化（构造注入身份，下线原地复用） | CQ 生命周期 | — | L | ✅ 已落地 |
 | T2 | CQ 状态机 ACTIVE/DRAINING/CLOSED + 写入门 + close() 释放重数据 | CQ 生命周期 | T1 | L | ✅ 已落地（纯 queues.py，门由单测覆盖） |
 | T3 | `stop_run` 单一出口 + per-client `lock_for` 锁 + 合并两份重复 + HealthMonitor 自动结束 | CQ 生命周期 | T2 | M/L | ✅ 已落地（编排 + 收尾：DRAINING 置位 + HM 对象身份 fence） |
-| T4 | 写回句柄化（dispatcher 捕获 CQ 句柄，写回不反查，ModelWorker 去 CQ） | 换键与路由 | T2 | M | ⬜ 未开始 |
+| T4 | 写回句柄化（dispatcher 捕获 CQ 句柄，写回不反查，ModelWorker 去 CQ） | 换键与路由 | T2 | M | ✅ 已落地（2026-07-02，见 [§T4 评审](#t4-评审2026-07-02)） |
 | T5 | 换键 `client_id→task_id`，ClientManager 降级 RunRegistry，Q2 结构化（bind_task/双向索引已由 COW 重构提前删除） | 换键与路由 | T3, T4 | L | ⬜ 未开始 |
 | T6 | 边界 wire（WS/terminate 改 task_id，撤垫片，import 审计）需前端协调 | 换键与路由 | T5 | M | ⬜ 未开始 |
 
@@ -142,7 +142,7 @@ T3 与 T4 都只依赖 T2、可并行；T5 需两者到位。合计约 **12–18
 
 **T1 — CQ per-run 不可变（✅ 已落地）**
 - `ClientQueues` 构造注入不可变 `(task_id, step_id, source_ip, stage)`；删 `set_task`/`set_stage`/`clear_task_caches`；身份 getter 免锁直读；`append_ca_*` 读 `self.step_id`；`clear()` 只释放 payload、不重置身份。保留 `task=None` 供纯队列单测裸建。
-- `InferenceManager.set_task` 建**新** CQ → `ClientManager.set(client_id, cq)` 换槽 → `FeatureStore/FactLedger.open_fresh` 截断分区（重启 supersede）→ 绑 actor。旧 run settlement 落到捕获的 `old_cq`（**排序不变式消解**，「actor 固化身份」并入 T1）。
+- `InferenceManager.set_task` 建**新** CQ → `ClientManager.set(client_id, cq)` 换槽 → `FeatureStore.open_fresh` 截断分区（重启 supersede）→ 绑 actor。旧 run settlement 落到捕获的 `old_cq`（**排序不变式消解**，「actor 固化身份」并入 T1）。（注：FactLedger 是离线异步写，生命周期归离线 runner，已从在线 manager 摘除，不再随 set_task open_fresh。）
 - 配置单一出口 `ClientConfig.cq_kwargs()`（修 dead-kwargs 潜伏 bug）；`StreamService._get_client_queues` 只取不建。
 - 文件：`app/services/client/{queues,manager,config}.py`、`app/services/inference/manager.py`、`app/services/inference/feature/store.py`、`app/services/stream/service.py`。
 
@@ -159,6 +159,18 @@ T3 与 T4 都只依赖 T2、可并行；T5 需两者到位。合计约 **12–18
 - 验证：`pytest tests/` **247 passed**（242 基线 + 3 teardown fence + 2 reconnect fence），`import app.main` 无循环导入。新增 `tests/test_teardown_identity_fence.py`、`tests/test_reconnect_on_initial_failure.py::TestReconnectIdentityFence`。
 
 ---
+
+## T4 评审（2026-07-02，✅ 已落地）
+
+对 T4「写回句柄化」的落地前评审 + 落地记录，条款见 [换键与路由 §T4](20260628_CLIENT_ROUTING_BOUNDARY_TASK.md#t4--写回句柄化modelworker-去-cq)。落地：`DetectionTask`/`FrameInference` 加 `cq` 句柄字段（dispatcher 捕获、pool 透传）；`_write_back_results` 改写 `res.cq` + `is_active()` 统一门 + `frame_drop_total(reason="stale_run")` 计数，删 `has_client`/`get(res.client_id)` 反查与 `client_queues_map` 字段；`pytest tests/` **251 passed**（247+4），新增 `tests/test_writeback_handle_fence.py`。评审要点：
+
+**1. 消息不携带身份，携带 `client_id`——反查是唯一缺陷点。** 热路径 `DetectionTask`/`FrameInference` 只带 `client_id: str`；CQ 仅在组件栈上瞬态持有。危险区间 = **dispatch（弃 cq）→ `infer_batch`（数十 ms）→ write-back（按 client_id 反查）**：期间换槽则 `get(client_id)` 命中新 run 的 cq，旧结果串台。修法即定稿 line 77——写回拎捕获的 CQ 句柄，绝不反查；旧句柄经 T2 状态机门自然被挡。
+
+**2. stage 随 cq 派生。** 捕获 cq 后 `DetectionTask.stage` 从 `cq.get_stage()` 取一次同行，消除 stage 与 cq 身份漂移；`dispatcher` 里对 cq 的 `get_stage()` 不再是"取完即弃"的孤读。
+
+**3. FeatureStore 腿需 store 内归属校验（`is_active()` 不够）。** `push_detection`/`set_latest_inference` 经 T2 已内建 ACTIVE 门；但 `feature_store.append` 外部落盘不受 cq 门约束，且**贴 `is_active()` 也挡不住**——check 到真正落盘之间状态会漂移，`open_fresh`（新 run）能挤进窗口截断分区，迟到帧落进新 run 文件 = 串台。根因不对称：CQ 两腿迟到写落**旧 cq payload**（per-run 丢弃，无害），feature 腿写 **`(task_id, step_id)` 文件**（restart-supersede 跨 run 共享，有害）。修法：在 `_JsonlBuffer` 内以 **owner = cq 对象引用** 做归属校验——`open_fresh(owner=new_cq)` 设、`_enqueue(owner)` 校（不符即拒），且 owner set/check 与所有文件写/unlink **全在 store `_lock` 下串行**（把原锁外 `_write` 收进锁内），彻底无 TOCTOU。写回 `append(owner=cq)`、`close(owner=cq)` 按身份核对清 owner。顶层 `is_active()` 保留做常态早退+计数，与 store 内归属校验互补。已落地：`pytest tests/` **255 passed**（+4），新增 `tests/test_feature_store_owner_fence.py`。
+
+**4. InferenceManager 职责越界（超出 T4，记账留 T3/T5 收敛）。** 按四角色表 InferenceManager 应仅为推理三池（ModelWorker/VizPool/Actor）的 **Component owner**，但当前 `set_task`/`remove_client` 越界做了 run 编排 + 持久化：建 CQ 换 registry 槽、`open_fresh`/`close` 存储分区、`_flush_all_remaining_segments` 直调 `persistence_manager.persist_hls_segment`、`_persist_settlement_alarms` 落告警。收敛方向——建 CQ/换槽/open_fresh 上移 `RunController.start_run`，HLS flush/feature close/告警落盘由 `_teardown_run` 单一出口按序调各 owner，InferenceManager 退化为「停 actor + 交出 settlement 列表」，`_client_lifecycle_lock`、`persistence_manager` 引用、`_flush_all_remaining_segments` 随之从其身上摘除。此项不属 T4 范围，随 T5 换键一并落——落地细化（owner 归位表 + 告警别名前烧「Persistence 不反向 import inference.naming」+ 摘除清单）见 [换键与路由 §T5 收敛细化](20260628_CLIENT_ROUTING_BOUNDARY_TASK.md#t5-收敛细化inferencemanager-职责归位--告警别名前烧)。
 
 ## 完成判据
 

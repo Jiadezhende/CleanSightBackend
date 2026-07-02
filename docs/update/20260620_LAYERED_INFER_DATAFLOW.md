@@ -44,7 +44,7 @@ ClientTemporalActor._tick()  (1Hz，100% 实时)
                                                   ──→ 离线 Judge → timeline，SegmentFact 写入 FactLedger({task}/{step}/facts.jsonl)
       注：离线是任务结束后的批处理，输入是 FeatureStore(特征)，与实时 ClientTemporalActor 零共享——
           不共享 analyzer 代码（实时 TemporalAnalyzer 已删 online/load/SegmentFact，离线另立 OfflineAnalyzer），只共享数据契约(DetectionOutput / Fact schema / FeatureStore 格式)。
-          FactLedger 为 offline 专用账本——实时链路不写；类与 manager 持有已就位、待离线 worker 接入。
+          FactLedger 为 offline 专用账本——实时链路不写；**离线异步写、生命周期归离线 runner**，已从在线 manager 摘除（不由 set_task/stop 同步调度），类/契约休眠预留、待离线 worker 接入时自行 new+驱动。
 
 VisualizationWorker._process_client()  (独立线程)
       │  读 ④get_latest_inference + get_latest_frame + ⑧get_latest_temporal → overlay 渲染
@@ -84,7 +84,7 @@ VisualizationWorker._process_client()  (独立线程)
 
 > **online/offline 彻底分离，不共享时序行为。** 实时 `TemporalAnalyzer` 已收窄为 `run(window)->List[EventFact]`，删去了 `online` 参数 / `attach_feature_store` / `load` / `SegmentFact`。离线分段(`SegmentFact`)将由**另立的 `OfflineAnalyzer`**(任务结束后批处理 `run(sequence)`)承担，与实时只共享数据契约、不共享 trans/infer/post_process。基类暂不改名，待离线 worker 接入时再 rename。
 
-> **实时链路不落盘事实；FactLedger 是 offline 专用账本。** `ClientTemporalActor._tick` 已删去 `FactLedger.append`——实时产出的 EventFact 经 `judge.step` 即变成告警(走 ⑨ 持久化)，事实本身判完即弃。`FactLedger` 类与 manager 持有保留，供日后离线 worker 写 `SegmentFact`(timeline)。
+> **实时链路不落盘事实；FactLedger 是 offline 专用账本。** `ClientTemporalActor._tick` 已删去 `FactLedger.append`——实时产出的 EventFact 经 `judge.step` 即变成告警(走 ⑨ 持久化)，事实本身判完即弃。`FactLedger` 类/契约休眠保留，但**已从在线 manager 摘除**（离线异步写不由在线 set_task/stop 调度），供日后离线 runner 自行 new+驱动写 `SegmentFact`(timeline)。
 
 > **detection 单源 + 按帧 ts 对齐。** detection 只落 `FeatureStore`(features.jsonl)；HLS keypoints JSON 不再转储 `inference_result`(仅留 `{timestamp, keypoints}`)。每条特征记录的 `ts = res.timestamp = 帧捕获 ts`，与 HLS 段/keypoints 落盘所用的 `fd.timestamp` 同源同值，故离线/证据可按 `ts` 精确把特征行对回同帧。
 

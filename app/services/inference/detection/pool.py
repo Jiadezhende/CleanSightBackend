@@ -124,6 +124,7 @@ class MultiModelWorkerPool:
                 stage=req.stage,
                 timestamp=req.timestamp,
                 detections=per_frame_results,
+                cq=req.cq,  # 透传捕获句柄，写回凭它投递
             )
             results.append(result)
 

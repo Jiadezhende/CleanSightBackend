@@ -137,12 +137,14 @@ class StageAwareDispatcher:
             # 获取该客户端当前的 stage
             stage = self._get_client_stage(client_id, cq)
 
-            # 构造推理请求
+            # 构造推理请求：捕获该 CQ 句柄随请求同行，写回凭它投递、不反查
+            # （cq 即当前 snapshot 迭代出的对象，与 pop_ca_ready()/get_stage() 同源）。
             req = DetectionTask(
                 client_id=client_id,
                 stage=stage,
                 timestamp=frame_data.timestamp,
                 frame=frame_data.frame,
+                cq=cq,
             )
 
             # 按 stage 分组入队

@@ -5,7 +5,7 @@
 
 分层（按处理流程）：
     detection/     目标检测层 (L1)：Detector 抽象 + dispatcher/pool/service
-    feature/       feature_store 层 (L2)：FeatureStore/FactLedger
+    feature/       feature_store 层 (L2)：FeatureStore（在线写）/ FactLedger（离线预留，休眠）
     temporal/      时序分析层 (L3/L4)：Operator 抽象 + actor/alarm_sink
     visualization/ 可视化层：worker/pool/visualizer
     offline/       离线段（预留占位）

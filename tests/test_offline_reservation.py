@@ -30,6 +30,7 @@ def _make_result(ts: float, bubble_n: int, bending_n: int) -> FrameInference:
             "bubble": FrameDetections(detections=dets(bubble_n, "bubble"), metadata={}, timestamp=ts),
             "bending": FrameDetections(detections=dets(bending_n, "bent"), metadata={}, timestamp=ts),
         },
+        cq=None,  # 本测试直连 FeatureStore.append，只读 .detections/.timestamp，不碰 .cq
     )
 
 

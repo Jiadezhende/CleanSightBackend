@@ -76,12 +76,13 @@ class InferenceManager:
             stage_configs=None,
         )
 
-        # L2 特征落盘 + 事实账本（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
-        # FeatureStore 注入推理服务，由推理写回处按帧追加。
-        # FactLedger 为 offline 链路预置：online 链路不再写，待离线 worker 接入后写 SegmentFact。
-        from app.services.inference.feature.store import FactLedger, FeatureStore
+        # L2 特征落盘（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
+        # FeatureStore 注入推理服务，由推理写回处按帧追加，生命周期随在线 run（open_fresh/close/flush）。
+        # 注：FactLedger（事实账本）是**离线异步写**的 store，生命周期归离线 runner，不由在线 manager
+        # 调度——故此处不持有、不 open_fresh/close/flush。待离线流水线建起时由其自行 new + 驱动
+        # （同一 storage_base_dir）。类/契约见 feature/store.py，休眠预留。
+        from app.services.inference.feature.store import FeatureStore
         self.feature_store = FeatureStore(self._db_dir)
-        self.fact_ledger = FactLedger(self._db_dir)
 
         self._model_worker_service = self._create_async_model_worker_service()
 
@@ -232,8 +233,7 @@ class InferenceManager:
         # 4. 新 run 起始截断存储分区（重启 supersede，避免同 (task,step) 新旧混写）
         if new_cq.step_id is not None:
             try:
-                self.feature_store.open_fresh(task.task_id, new_cq.step_id)
-                self.fact_ledger.open_fresh(task.task_id, new_cq.step_id)
+                self.feature_store.open_fresh(task.task_id, new_cq.step_id, owner=new_cq)
             except Exception as e:
                 logger.warning(
                     "[InferenceManager] open_fresh storage failed for %s: %s", client_id, e
@@ -327,16 +327,15 @@ class InferenceManager:
                 logger.warning(
                     "[InferenceManager] Failed to write back segments: %s - %s", client_id, e
                 )
-            # 落盘基座 flush/close（best-effort；此时 cq 仍在，(task_id, step_id) 可解析）
+            # FeatureStore flush/close（best-effort；此时 cq 仍在，(task_id, step_id) 可解析）
             try:
                 task_id = cq.get_task_id()
                 step_id = cq.get_step_id()
                 if task_id is not None and step_id is not None:
-                    self.feature_store.close(task_id, step_id)
-                    self.fact_ledger.close(task_id, step_id)
+                    self.feature_store.close(task_id, step_id, owner=cq)
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] Failed to close feature/fact store: %s - %s", client_id, e
+                    "[InferenceManager] Failed to close feature store: %s - %s", client_id, e
                 )
         else:
             logger.warning(
@@ -471,14 +470,13 @@ class InferenceManager:
                     client_id, e,
                 )
 
-        # 落盘基座全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，
+        # FeatureStore 全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，
         # 残余缓冲（每 (task,step) 最多 batch_size-1 行）需在此 best-effort 落盘，
         # 否则 offline 链路读到的特征尾部会被静默截断。
         try:
             self.feature_store.flush()
-            self.fact_ledger.flush()
         except Exception as e:
-            logger.warning("[InferenceManager] flush feature/fact store on stop failed: %s", e)
+            logger.warning("[InferenceManager] flush feature store on stop failed: %s", e)
 
         self.visualization_pool.stop()
         self.persistence_manager.stop(timeout=10.0)

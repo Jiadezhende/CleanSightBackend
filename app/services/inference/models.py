@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 
 import numpy as np
 
 from app.domain.detection import FrameDetections
+
+if TYPE_CHECKING:
+    from app.services.client import ClientQueues
 
 
 # ==================== 传输对象（online 热路径）====================
@@ -27,12 +30,18 @@ from app.domain.detection import FrameDetections
 
 @dataclass
 class DetectionTask:
-    """推理请求（队列作业）：对某 client/stage 的某帧做检测。"""
+    """推理请求（队列作业）：对某 client/stage 的某帧做检测。
+
+    cq 为 dispatcher 在 pop 帧时捕获的 per-run CQ 句柄，随 batch 透传到 FrameInference，
+    供写回凭它投递而**不按 client_id 反查**（消除 dispatch→infer→write-back 期间换槽的跨 run 串台）。
+    client_id 降为被动/诊断字段，与句柄并存过渡（换 task_id 键在 T5）。
+    """
 
     client_id: str
     stage: str
     timestamp: float
     frame: np.ndarray
+    cq: "ClientQueues"
 
 
 @dataclass
@@ -40,12 +49,16 @@ class FrameInference:
     """推理结果：一帧多检测器聚合（detections[detector_name] = FrameDetections）。
 
     timestamp 为帧捕获 ts，供 VisualizationWorker 按帧去重（同帧只渲染一次）。
+    cq 为从对应 DetectionTask 透传的捕获句柄，写回只写它、不反查；旧句柄经 CQ 状态机
+    （DRAINING/CLOSED）被挡，碰不到新 run。注：set_latest_inference 把本对象存进 cq 后形成
+    cq→_latest_inference→cq 自引用环，benign（GC 处理循环，close() 释放 payload 时断开）。
     """
 
     client_id: str
     stage: str
     timestamp: float
     detections: Dict[str, FrameDetections]
+    cq: "ClientQueues"
 
 
 # ==================== 离线预留事实契约（L3 时序分析层产出）====================
