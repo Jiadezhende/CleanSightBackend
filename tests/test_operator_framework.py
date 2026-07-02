@@ -150,6 +150,8 @@ def test_per_operator_isolation():
     # bad 抛异常被隔离，good 仍正常出告警
     assert good._sm.get("ran") is True
     assert len(captured) == 1
+    # 别名前烧：告警 .stage 在产出处（_tick）即被烧成 actor 构造期解析的别名，早于 _persist_alarms
+    assert captured[0].stage == actor._stage_alias
     cq.set_latest_temporal.assert_called_once()
     assert cq.set_latest_temporal.call_args[0][0] == ["good"]
 

@@ -41,15 +41,17 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
 
     seen_state = {}
 
-    def capture_state(client_id):
-        # 落盘时刻 CQ 必须已 DRAINING（生产者写已封、settlement 仍放行）
+    def capture_state(client_id, cq_arg):
+        # 停 workflow 时刻 CQ 必须已 DRAINING（生产者写已封、settlement 仍放行）
         seen_state["at_flush"] = cq.get_state()
+        return []  # 无 settlement
 
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.persistence_manager"),
     ):
-        mock_inf.remove_client.side_effect = capture_state
+        mock_inf.stop_workflow.side_effect = capture_state
         result = run_controller.stop_run(cid, reason="test")
 
     assert seen_state["at_flush"] is RunState.DRAINING
@@ -70,11 +72,12 @@ def test_stop_run_expected_hit_tears_down(_clean_registry):
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.persistence_manager"),
     ):
         result = run_controller.stop_run(cid, reason="hm", expected=cq)
 
     mock_stream.stop_stream.assert_called_once_with(cid)
-    mock_inf.remove_client.assert_called_once_with(cid)
+    mock_inf.stop_workflow.assert_called_once_with(cid, cq)
     assert cq.get_state() is RunState.CLOSED
     assert not client_manager.has_client(cid)
     assert result.get("skipped") is not True
@@ -91,6 +94,7 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.persistence_manager") as mock_persist,
     ):
         # HM 过期决策：拿着旧 cq 来拆，但槽位已换新
         result = run_controller.stop_run(cid, reason="hm-stale", expected=cq_old)
@@ -98,7 +102,8 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
     assert result["skipped"] is True
     # 新 run 毫发无伤：未停 decoder、未落盘、仍在表、仍 ACTIVE
     mock_stream.stop_stream.assert_not_called()
-    mock_inf.remove_client.assert_not_called()
+    mock_inf.stop_workflow.assert_not_called()
+    mock_persist.flush_residual_segments.assert_not_called()
     assert client_manager.get(cid) is cq_new
     assert cq_new.get_state() is RunState.ACTIVE
 

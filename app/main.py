@@ -12,6 +12,7 @@ from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app.routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
+from app.services import persistence
 from app.utils import (
     AppError,
     ConflictError,
@@ -57,17 +58,20 @@ async def lifespan(app: FastAPI):
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
 
-    # 按照服务模块启动生命周期管理
+    # 按照服务模块启动生命周期管理（起序 = 嵌套顺序，停序 = 逆序）：
     # 1. 健康监控服务（依赖 client_manager, stream_service, inference_manager）
-    # 2. AI 推理服务
+    # 2. 持久化服务（平级服务，须先于 inference 起、后于 inference 停，
+    #    以承接 inference.stop() 的结算告警 + HLS 残段 flush 后再抽干队列）
+    # 3. AI 推理服务
     async with health.lifespan():
-        async with ai.lifespan():
-            try:
-                yield
-            finally:
-                # yield 返回时立即通知 WebSocket 退出，不等待后续清理
-                # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
-                shutdown_event.set()
+        async with persistence.lifespan():
+            async with ai.lifespan():
+                try:
+                    yield
+                finally:
+                    # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                    # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                    shutdown_event.set()
 
 
 

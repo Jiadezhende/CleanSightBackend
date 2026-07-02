@@ -13,10 +13,12 @@
 import logging
 from typing import Any, Dict, Optional
 
+from app.domain.alarm import ALARM_MODE_SETTLEMENT
 from app.domain.task import CleaningTask
 from app.services.client.manager import client_manager
 from app.services.client.queues import ClientQueues
 from app.services.inference.instance import inference_manager
+from app.services.persistence import persistence_manager
 from app.services.stream import stream_service
 from app.utils.exceptions import AppError
 
@@ -71,13 +73,13 @@ class RunController:
                     )
                     self.stop_run(client_id, reason=f"restart:{old_task_id}->{task_id}")
 
-            # 2b. set_task（建 CQ + Actor）
+            # 2b. start_workflow（建 CQ + open_fresh + Actor）
             task = CleaningTask(task_id=task_id, current_step=current_step, status="running")
-            if not inference_manager.set_task(client_id, task):
+            if not inference_manager.start_workflow(client_id, task):
                 raise AppError(
-                    message=f"Failed to set task for client {client_id}", client_id=client_id
+                    message=f"Failed to start workflow for client {client_id}", client_id=client_id
                 )
-            logger.info("[RunController] task set: %s -> task_id=%s", client_id, task_id)
+            logger.info("[RunController] workflow started: %s -> task_id=%s", client_id, task_id)
 
             # 2c. 起流
             stream_service.start_stream(
@@ -150,9 +152,26 @@ class RunController:
                         "[RunController] stop decoder failed: %s - %s", client_id, e, exc_info=True
                     )
 
-            # 2. 落盘残余数据（owner=InferenceManager：settlement + HLS flush + feature/fact close）
+            # 2. 落盘残余数据（按 owner 归位，inference 一把拆、persistence 两个独立 sink）：
+            #    ① inference 停 workflow（停 actor + 关 feature 分区）交出 settlement；
+            #    ② persistence 落 settlement 告警（别名已由 actor 烧进 alarm.stage）；
+            #    ③ 清前端槽 + persistence 落 HLS 残段。
+            #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
+            #    （→cq.close 释放帧）——本 try 早于下方清理。
             try:
-                inference_manager.remove_client(client_id)
+                settlement = inference_manager.stop_workflow(client_id, cq)  # Inference owner
+                if settlement and cq is not None:
+                    persistence_manager.persist_alarms(
+                        settlement,
+                        cq=cq,
+                        client_id=client_id,
+                        mode=ALARM_MODE_SETTLEMENT,
+                        log_each=True,
+                    )
+                if cq is not None:
+                    cq.set_latest_temporal([])   # 提前清前端槽，防 WS 读到结束后残留
+                    cq.set_latest_rendered(None)
+                    persistence_manager.flush_residual_segments(cq)         # Persistence owner
                 result["data_flushed"] = True
             except Exception as e:
                 result["errors"].append(f"flush: {e}")

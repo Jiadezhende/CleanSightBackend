@@ -17,7 +17,6 @@ from typing import List
 
 from app.domain.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.naming import get_stage_alias
-from app.services.inference.temporal.alarm_sink import persist_alarms
 from app.services.inference.temporal.operator import Operator
 from app.utils.worker_guard import guarded_run
 
@@ -42,6 +41,9 @@ class ClientTemporalActor:
         self._client_id = client_id
         self._cq = cq
         self._stage = stage
+        # 别名前烧：stage 对本 run 不可变，构造期解析一次；产出告警即烧进 alarm.stage，
+        # 下游持久化直接读 alarm.stage、不反向 import inference.naming。这是全仓唯一告警路径 alias 解析点。
+        self._stage_alias = get_stage_alias(stage)
         self._operators = operators
         self._tick_interval = tick_interval
 
@@ -110,19 +112,19 @@ class ClientTemporalActor:
         self._cq.set_latest_temporal(all_events)
 
         if all_alarms:
+            for a in all_alarms:
+                a.stage = self._stage_alias  # 别名前烧
             self._persist_alarms(all_alarms)
 
     def _persist_alarms(self, alarms: List[Alarm]) -> None:
         from app.services.persistence import persistence_manager
 
-        # 可读性出口：告警 step_name/stage 用别名（self._stage 是 step_id 主键）
-        persist_alarms(
+        # 用 persistence sink 落库（别名已烧进 alarm.stage）
+        persistence_manager.persist_alarms(
             alarms,
             cq=self._cq,
             client_id=self._client_id,
-            stage_name=get_stage_alias(self._stage),
             mode=ALARM_MODE_REALTIME,
-            persistence_manager=persistence_manager,
         )
 
     def _collect_settlement_alarms(self) -> List[Alarm]:
@@ -135,4 +137,6 @@ class ClientTemporalActor:
                     "[TemporalActor-%s] finalize() failed for operator %s: %s",
                     self._client_id, op.name, e, exc_info=True,
                 )
+        for a in alarms:
+            a.stage = self._stage_alias  # 别名前烧：结算告警离开 inference 前 .stage 即可读别名
         return alarms

@@ -141,6 +141,41 @@ class PersistenceManager:
             logger.error("HLS入队失败: %s", e, exc_info=True)
             return False
 
+    def flush_residual_segments(self, cq) -> None:
+        """拆除期落盘 CQ 残余帧：drain raw/processed → 按 ca_segment_len 切段 → 逐段入队。
+
+        task_id/step_id 由 cq 派生（缺失早退）。须在 cq.close() 释放帧之前调（RunController 保证）。
+        （原 InferenceManager._flush_all_remaining_segments 迁入——切段是持久化领域知识。）
+        """
+        task_id = cq.get_task_id()
+        if task_id is None:
+            logger.warning("[persistence] flush_residual_segments: task_id is None, skip")
+            return
+        step_id = cq.get_step_id()
+        if step_id is None:
+            logger.error(
+                "[persistence] flush_residual_segments: step_id is None (task_id=%s), skip", task_id
+            )
+            return
+
+        seg_len = cq.ca_segment_len
+        raw_frames = cq.drain_ca_raw()
+        processed_frames = cq.drain_ca_processed()
+
+        for i in range(0, len(raw_frames), seg_len):
+            chunk = raw_frames[i : i + seg_len]
+            if chunk:
+                self.persist_hls_segment(
+                    task_id=task_id, step_id=step_id, segment_type="raw", frames=chunk
+                )
+
+        for i in range(0, len(processed_frames), seg_len):
+            chunk = processed_frames[i : i + seg_len]
+            if chunk:
+                self.persist_hls_segment(
+                    task_id=task_id, step_id=step_id, segment_type="processed", frames=chunk
+                )
+
     # ========== 告警持久化API ==========
 
     def persist_alarm(self, alarm_info: Dict[str, Any]) -> bool:
@@ -165,6 +200,48 @@ class PersistenceManager:
             self.metrics.alarm_errors += 1
             logger.error("告警入队失败: %s", e, exc_info=True)
             return False
+
+    def persist_alarms(
+        self,
+        alarms: List,
+        *,
+        cq,
+        client_id: str,
+        mode: str,
+        log_each: bool = False,
+    ) -> None:
+        """把一批告警过闸门后落库 + 记入内存环形缓冲（实时/结算共用一条映射）。
+
+        别名已由产出方（temporal actor）烧进 alarm.stage，此处直接读、不反向 import inference.naming；
+        metric 直接读 alarm.metric（产出方已填）；task_id/step_id 由 cq 派生。
+        顺序先内存后外部：内存日志供前端实时轮询，外部库本就 30s 批次。
+        （原 inference/temporal/alarm_sink.persist_alarms 迁入——告警落库是持久化领域。）
+        """
+        task_id = cq.get_task_id()
+        task = cq.get_task()
+        step_id = int(task.current_step) if task and task.current_step else None
+
+        for alarm in alarms:
+            # 给产出方的同一份告警补 mode，再过闸门+入环形缓冲（seq 由其赋；stage 已烧）。
+            alarm.mode = mode
+            if not cq.append_alarm_record_with_gate(task_id, alarm, mode):
+                continue
+            self.persist_alarm({
+                "task_id": task_id,
+                "stage": alarm.stage,
+                "step_id": step_id,
+                "client_id": client_id,
+                "alarm_type": alarm.alarm_type,
+                "alarm_metric": alarm.metric,
+                "alarm_mode": mode,
+                "alarm_level": alarm.alarm_level,
+                "alarm_message": alarm.alarm_message,
+                "detection_result": alarm.metadata if alarm.metadata else None,
+            })
+            if log_each:
+                logger.info(
+                    "[persistence] %s alarm for %s: %s", mode, client_id, alarm.alarm_message
+                )
 
     # ========== 监控API ==========
 

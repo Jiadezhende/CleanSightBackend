@@ -85,10 +85,11 @@ async def test_concurrent_start_same_task_idempotent():
         patch("app.routers.api.get_db", side_effect=fresh_db),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
+        patch("app.services.run_control.persistence_manager"),
         patch.object(client_manager, "has_client", side_effect=has_client_side_effect),
         patch.object(client_manager, "get", return_value=mock_cq),
     ):
-        mock_inference.set_task.return_value = True
+        mock_inference.start_workflow.return_value = True
         mock_stream.start_stream.side_effect = track_start_stream
         mock_stream.get_stream_info.return_value = {"url": "rtsp://test/stream"}
 
@@ -125,13 +126,14 @@ async def test_task_switch_triggers_full_cleanup():
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
+        patch("app.services.run_control.persistence_manager"),
         patch.object(client_manager, "has_client", return_value=True),
         patch.object(client_manager, "get", return_value=mock_cq),
         patch.object(
             client_manager, "remove", return_value={"removed": True, "error": None}
         ),
     ):
-        mock_inference.set_task.return_value = True
+        mock_inference.start_workflow.return_value = True
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -144,9 +146,9 @@ async def test_task_switch_triggers_full_cleanup():
 
         # 重启清理（stop_run）：停旧流 + 落盘旧数据
         mock_stream.stop_stream.assert_called_once()
-        mock_inference.remove_client.assert_called_once()
+        mock_inference.stop_workflow.assert_called_once()
         # 建新任务 + 起新流
-        mock_inference.set_task.assert_called_once()
+        mock_inference.start_workflow.assert_called_once()
         mock_stream.start_stream.assert_called_once()
 
 
@@ -164,12 +166,13 @@ async def test_start_and_terminate_serialized():
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
+        patch("app.services.run_control.persistence_manager"),
         patch.object(client_manager, "has_client", return_value=False),
         patch.object(
             client_manager, "remove", return_value={"removed": True, "error": None}
         ),
     ):
-        mock_inference.set_task.return_value = True
+        mock_inference.start_workflow.return_value = True
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -216,9 +219,10 @@ async def test_different_clients_not_blocked():
         patch("app.routers.api.get_db", side_effect=mock_get_db),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
+        patch("app.services.run_control.persistence_manager"),
         patch.object(client_manager, "has_client", return_value=False),
     ):
-        mock_inference.set_task.return_value = True
+        mock_inference.start_workflow.return_value = True
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -243,6 +247,7 @@ async def test_terminate_uses_lock():
     with (
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
+        patch("app.services.run_control.persistence_manager"),
         patch.object(client_manager, "has_client", return_value=True),
         patch.object(
             client_manager, "remove", return_value={"removed": True, "error": None}
@@ -253,7 +258,7 @@ async def test_terminate_uses_lock():
             r = await ac.post("/api/terminate", params={"client_id": "10.0.0.1"})
 
         assert r.status_code == 200
-        mock_inference.remove_client.assert_called_once_with("10.0.0.1")
+        mock_inference.stop_workflow.assert_called_once_with("10.0.0.1", None)
 
     # 验证真实的 per-client 锁已被创建
     assert "10.0.0.1" in client_manager._task_locks

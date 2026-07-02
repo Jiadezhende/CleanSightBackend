@@ -76,7 +76,16 @@
 
 ### T5 收敛细化：InferenceManager 职责归位 + 告警别名前烧
 
-> 承接 [RUNTIME_IDENTITY_BINDING §T4 评审 4](20260628_RUNTIME_IDENTITY_BINDING_TASK.md#t4-评审2026-07-02)「InferenceManager 职责越界」的记账，随 T5 换键一并落。
+> 承接 [RUNTIME_IDENTITY_BINDING §T4 评审 4](20260628_RUNTIME_IDENTITY_BINDING_TASK.md#t4-评审2026-07-02)「InferenceManager 职责越界」的记账。
+>
+> **落地现状（2026-07-03，`refact/lifespan`）**：teardown 归位 + persistence 生命周期上移**已提前落地**（不依赖换键）：
+> - 别名前烧：`ClientTemporalActor.__init__` 解析一次 `_stage_alias`，`_tick`/`_collect_settlement_alarms` 产出即烧进 `alarm.stage`；
+> - `persist_alarms`/`flush_residual_segments` 迁入 `PersistenceManager`（删 `inference/temporal/alarm_sink.py`），persistence 包零 inference import；
+> - InferenceManager 单一 per-run 口 `start_workflow`/`stop_workflow`（原 `set_task`/`remove_client`），删 `_persist_settlement_alarms`/`_flush_all_remaining_segments`/`_client_lifecycle_lock`/`persistence_manager` 引用；
+> - `RunController.stop_run` 按序调 `stop_workflow`→`persist_alarms`→`flush_residual_segments`；
+> - persistence 生命周期上移 `persistence.lifespan()`，`main.py` 嵌套 health→persistence→ai（起序）/ 逆序停。
+>
+> **仍随 T5**：CQ 构造/换槽上移 RunController（`start_workflow` 暂仍建 CQ）、client_id→task_id 换键、start 侧收敛为对称 `start_workflow(cq)`。
 
 **病灶复述**：按四角色表 InferenceManager 应仅为推理三池的 **Component owner**（拥有 actor / feature_store 的 start/stop），但当前 [`remove_client`](../../app/services/inference/manager.py) 在替 **持久化** 做腹语——`_flush_all_remaining_segments` 自己 drain CQ、按 `seg_len` 切段、逐块调 `persist_hls_segment`；`_persist_settlement_alarms` 自己 `get_stage_alias` 再调 alarm sink。这些是持久化的领域知识（分段机制、告警 upsert），不该长在推理身上。收敛不是把 persist 调用平移进 RunController，而是**把 teardown-persist 操作还给各真 owner，RunController 只排序**。
 
