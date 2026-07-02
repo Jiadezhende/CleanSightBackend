@@ -54,3 +54,17 @@ def test_start_workflow_none_skips_run(manager):
 
     CQ.assert_not_called()
     cm.set.assert_not_called()
+
+
+def test_real_manager_init_invariants_and_stop_workflow_smoke():
+    """真实构造 InferenceManager，守卫 __init__ 必设属性 + stop_workflow 空跑。
+
+    其余测试均 mock/__new__ 绕过真构造，无法发现 __init__ 漏设属性（如 _actors）——
+    本用例真构造一次兜底（权重仍惰性、无线程）。
+    """
+    m = InferenceManager()
+    assert m._actors == {}                          # 漏设 → stop_workflow 会 AttributeError
+    assert not hasattr(m, "persistence_manager")    # 已摘除持久化引用
+    assert not hasattr(m, "_client_lifecycle_lock")  # 互斥上移 RunController.lock_for
+    # 未知 client：无 actor、cq=None → 返回空 settlement、不抛
+    assert m.stop_workflow("no-such-client", None) == []

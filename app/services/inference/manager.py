@@ -63,6 +63,7 @@ class InferenceManager:
         # per-client ClientTemporalActor 注册表。
         # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(client_id) per-client 锁承接
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
+        self._actors: Dict[str, ClientTemporalActor] = {}
 
         # 可视化拉取率 = settings.inference_fps（单一真源）：与推理限流、HLS processed
         # 打标三处对齐，避免 processed 段实际产出率 ≠ 打标率导致回放偏快。
