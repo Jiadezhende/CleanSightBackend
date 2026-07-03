@@ -8,7 +8,7 @@ from typing import Any
 class ReconnectState:
     """重连状态"""
 
-    client_id: str
+    client_id: int   # 运行键 = task_id（名沿用 client_id 作诊断标签）
     stream_url: str
     fps: int
     protocol: str

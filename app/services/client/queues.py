@@ -113,7 +113,7 @@ class ClientQueues:
         # 不可变运行身份：一次构造定死，getter 直接读、无锁——CQ 经 client_manager COW
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
-        # 注：无 client_id 字段——路由键由 run_key 属性（str(task_id)）派生；source_ip 为被动来源字段。
+        # 注：无 client_id 字段——注册表路由键即 self.task_id(int)；source_ip 为被动来源字段。
         self.task_id: Optional[int] = task_id
         self.current_step: Optional[str] = current_step
         self.status: str = status
@@ -205,11 +205,6 @@ class ClientQueues:
             return int(current_step)
         except (TypeError, ValueError):
             return None
-
-    @property
-    def run_key(self) -> str:
-        """注册表路由键 = str(task_id)（正直出口，免锁）；未绑定 task 返回空串。"""
-        return str(self.task_id) if self.task_id is not None else ""
 
     def append_ca_raw(self, frame_data: Frame) -> bool:
         """

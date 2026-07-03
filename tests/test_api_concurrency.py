@@ -116,7 +116,7 @@ async def test_concurrent_start_same_task_idempotent():
 
 @pytest.mark.asyncio
 async def test_same_task_url_change_triggers_restart():
-    """同 task_id（同 run_key 槽位）改 URL → 先 stop_run 拆旧、再建新（重启语义）。
+    """同 task_id（同 int 键槽位）改 URL → 先 stop_run 拆旧、再建新（重启语义）。
 
     换键后运行键 = str(task_id)：抢占/重启只在**同 task_id**改 step/url 时发生；
     不同 task_id 走不同槽位、天然并发（见 test_different_clients_not_blocked）。
@@ -172,7 +172,7 @@ async def test_start_and_terminate_serialized():
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
 
     mock_cq = MagicMock()
-    mock_cq.run_key = "1"
+    mock_cq.task_id = 1
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
@@ -261,9 +261,9 @@ async def test_different_clients_not_blocked():
 
 @pytest.mark.asyncio
 async def test_terminate_uses_lock():
-    """terminate（wire=source_ip）经垫片解析 run → stop_run 持 lock_for(run_key)、stop_workflow(cq)。"""
+    """terminate（wire=source_ip）经垫片解析 run → stop_run 持 lock_for(task_id)、stop_workflow(cq)。"""
     mock_cq = MagicMock()
-    mock_cq.run_key = "1"
+    mock_cq.task_id = 1
 
     with (
         patch("app.services.run_control.inference_manager") as mock_inference,
@@ -284,8 +284,8 @@ async def test_terminate_uses_lock():
         assert r.status_code == 200
         mock_inference.stop_workflow.assert_called_once_with(mock_cq)
 
-    # 验证真实的 per-run 锁已按 run_key 创建
-    assert "1" in client_manager._task_locks
+    # 验证真实的 per-task 锁已按 int task_id 创建
+    assert 1 in client_manager._task_locks
 
 
 if __name__ == "__main__":

@@ -142,7 +142,7 @@ def test_per_operator_isolation():
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)
     good = _GoodOperator(name="good", subscribes=["s"], window_seconds=3.0)
-    actor = ClientTemporalActor(run_key="c", cq=cq, stage="MOCK", operators=[bad, good])
+    actor = ClientTemporalActor(task_id=1, cq=cq, stage="MOCK", operators=[bad, good])
     actor._persist_alarms = lambda alarms: captured.extend(alarms)
 
     actor._tick()

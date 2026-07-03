@@ -73,11 +73,11 @@ class GlobalHealthMonitor:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # 重连状态
-        self._reconnecting_clients: Dict[str, ReconnectState] = {}
+        # 重连状态（键 = task_id）
+        self._reconnecting_clients: Dict[int, ReconnectState] = {}
 
-        # 孤儿流跟踪（记录最后活跃时间）
-        self._last_activity: Dict[str, float] = {}
+        # 孤儿流跟踪（键 = task_id，记录最后活跃时间）
+        self._last_activity: Dict[int, float] = {}
 
         # 累计统计（生命周期内的总计）
         self._stats = {

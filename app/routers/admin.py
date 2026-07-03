@@ -20,10 +20,10 @@ router = APIRouter(prefix="/admin-f3m8", tags=["admin"])
 # 内部工具函数
 # ---------------------------------------------------------------------------
 
-def _client_info(client_id: str, client_queues) -> dict:
+def _client_info(client_id: int, client_queues) -> dict:
     depths = client_queues.get_queue_depths()
     return {
-        "client_id": client_id,  # 注册表键 = run_key(str(task_id))
+        "client_id": client_id,  # 注册表键 = task_id(int)
         "task_id": client_queues.get_task_id(),
         "task_status": client_queues.status,
         "current_step": client_queues.current_step,
@@ -169,7 +169,7 @@ def get_clients():
 
 
 @router.get("/clients/{client_id}/alarms")
-def get_client_alarms(client_id: str, n: int = Query(20, ge=1, le=100)):
+def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
     """从内存告警日志读取该客户端最近 n 条告警（不走 DB）。"""
     if not client_manager.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}

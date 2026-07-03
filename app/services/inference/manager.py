@@ -62,7 +62,7 @@ class InferenceManager:
         # per-client ClientTemporalActor 注册表。
         # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(client_id) per-client 锁承接
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
-        self._actors: Dict[str, ClientTemporalActor] = {}
+        self._actors: Dict[int, ClientTemporalActor] = {}
 
         # 可视化拉取率 = settings.inference_fps（单一真源）：与推理限流、HLS processed
         # 打标三处对齐，避免 processed 段实际产出率 ≠ 打标率导致回放偏快。
@@ -187,20 +187,20 @@ class InferenceManager:
         """起该 run 的推理 workflow：换槽注册 CQ、open_fresh 特征分区、建并启 actor。
 
         入参是 RunController 已建好的不可变身份 CQ（一 CQ == 一 run）。调用方已持
-        lock_for(cq.run_key)，与 stop_workflow 互斥；重启路径下 RunController 先 stop_workflow
+        lock_for(cq.task_id)，与 stop_workflow 互斥；重启路径下 RunController 先 stop_workflow
         拆旧，故此处 _actors 槽已空。stage 由 cq 派生（构造时经 resolve_stage 定死）。
         """
-        run_key = cq.run_key
+        task_id = cq.task_id
         # 防御：残留旧 actor（正常路径 stop_workflow 已 pop，不应命中）——信号停、丢弃、不结算。
-        stale = self._actors.pop(run_key, None)
+        stale = self._actors.pop(task_id, None)
         if stale is not None:
             logger.warning(
-                "[InferenceManager] stale actor for %s at start_workflow; dropping", run_key
+                "[InferenceManager] stale actor for task=%s at start_workflow; dropping", task_id
             )
             stale.signal_stop()
 
         # 1. 换槽注册（COW 发布新 CQ）
-        client_manager.set(run_key, cq)
+        client_manager.set(task_id, cq)
 
         # 2. 新 run 起始截断存储分区（重启 supersede，避免同 (task,step) 新旧混写）
         if cq.step_id is not None:
@@ -208,7 +208,7 @@ class InferenceManager:
                 self.feature_store.open_fresh(cq.task_id, cq.step_id, owner=cq)
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] open_fresh storage failed for %s: %s", run_key, e
+                    "[InferenceManager] open_fresh storage failed for task=%s: %s", task_id, e
                 )
 
         # 3. 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
@@ -229,16 +229,16 @@ class InferenceManager:
             cq.set_stream_windows(stream_windows)
 
             actor = ClientTemporalActor(
-                run_key=run_key,
+                task_id=task_id,
                 cq=cq,
                 stage=stage,
                 operators=operators,
             )
             actor.start()
-            self._actors[run_key] = actor
+            self._actors[task_id] = actor
             logger.info(
-                "[InferenceManager] TemporalActor created for %s (stage=%s, operators=%d)",
-                run_key, stage, len(operators),
+                "[InferenceManager] TemporalActor created for task=%s (stage=%s, operators=%d)",
+                task_id, stage, len(operators),
             )
         else:
             logger.debug(
@@ -253,34 +253,33 @@ class InferenceManager:
 
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
         交给 RunController 转 PersistenceManager；HLS flush / 告警落库均归 persistence owner，
-        前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持 lock_for(cq.run_key)，
+        前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持 lock_for(cq.task_id)，
         与 start_workflow 互斥。无 actor 返 []；feature close best-effort；别名已由 actor 烧进 alarm.stage。
         """
-        run_key = cq.run_key
-        logger.info("[InferenceManager] Stopping workflow: %s", run_key)
+        task_id = cq.task_id
+        logger.info("[InferenceManager] Stopping workflow: task=%s", task_id)
 
         settlement: List[Alarm] = []
-        actor = self._actors.pop(run_key, None)
+        actor = self._actors.pop(task_id, None)
         if actor is not None:
             try:
                 settlement = actor.finalize_and_stop()
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] finalize actor failed for %s: %s", run_key, e
+                    "[InferenceManager] finalize actor failed for task=%s: %s", task_id, e
                 )
 
         # 关闭本 run 的 FeatureStore 分区（inference 自有组件；best-effort，此时 cq 仍在）
         try:
-            task_id = cq.get_task_id()
             step_id = cq.get_step_id()
             if task_id is not None and step_id is not None:
                 self.feature_store.close(task_id, step_id, owner=cq)
         except Exception as e:
             logger.warning(
-                "[InferenceManager] Failed to close feature store: %s - %s", run_key, e
+                "[InferenceManager] Failed to close feature store: task=%s - %s", task_id, e
             )
 
-        logger.info("[InferenceManager] Workflow stopped: %s", run_key)
+        logger.info("[InferenceManager] Workflow stopped: task=%s", task_id)
         return settlement
 
     def status(self) -> Dict[str, Any]:

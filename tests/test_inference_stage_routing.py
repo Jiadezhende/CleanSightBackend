@@ -29,23 +29,22 @@ def test_resolve_stage_routes(manager, step, expected_stage):
         assert manager.resolve_stage(step) == expected_stage
 
 
-def _fake_cq(run_key="1", stage="1", step_id=None):
+def _fake_cq(task_id=1, stage="1", step_id=None):
     cq = MagicMock()
-    cq.run_key = run_key
+    cq.task_id = task_id
     cq.get_stage.return_value = stage
     cq.step_id = step_id
-    cq.task_id = int(run_key)
     return cq
 
 
 def test_start_workflow_sets_slot(manager):
     # start_workflow(cq)：换槽注册该 CQ（不再自建 CQ）。无 operator_specs → 不建 actor。
-    cq = _fake_cq(run_key="7", stage="MOCK", step_id=None)
+    cq = _fake_cq(task_id=7, stage="MOCK", step_id=None)
     with patch("app.services.inference.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
         assert manager.start_workflow(cq) is True
 
-    cm.set.assert_called_once_with("7", cq)   # 按 run_key 换槽
+    cm.set.assert_called_once_with(7, cq)   # 按 int task_id 换槽
 
 
 def test_real_manager_init_invariants_and_stop_workflow_smoke():
@@ -60,7 +59,6 @@ def test_real_manager_init_invariants_and_stop_workflow_smoke():
     assert not hasattr(m, "_client_lifecycle_lock")  # 互斥上移 RunController.lock_for
     # 无 actor、feature close 空跑 → 返回空 settlement、不抛
     cq = MagicMock()
-    cq.run_key = "no-such-run"
-    cq.get_task_id.return_value = None
+    cq.task_id = 999
     cq.get_step_id.return_value = None
     assert m.stop_workflow(cq) == []

@@ -70,7 +70,7 @@ except Exception as e:
 
 class StreamService:
     def __init__(self):
-        self.decoders: Dict[str, FFmpegDecoder] = {}
+        self.decoders: Dict[int, FFmpegDecoder] = {}
         self.sel = selectors.DefaultSelector() if os.name != "nt" else None
         self.lock = threading.Lock()
         self.metrics = {}
@@ -91,7 +91,7 @@ class StreamService:
 
     @log_call(level=logging.INFO, log_args=False)
     def start_stream(
-        self, client_id: str, stream_url: str, fps: int = 30, protocol: str = "RTMP"
+        self, client_id: int, stream_url: str, fps: int = 30, protocol: str = "RTMP"
     ):
         """
         注册解码器并尝试首次启动。
@@ -111,7 +111,7 @@ class StreamService:
         self._start_stream_impl(client_id, stream_url, fps, protocol)
 
     def _start_stream_impl(
-        self, client_id: str, stream_url: str, fps: int, protocol: str
+        self, client_id: int, stream_url: str, fps: int, protocol: str
     ):
         """
         业务代码（纯净，只抛异常）
@@ -206,7 +206,7 @@ class StreamService:
             if self.sel is not None and dec.proc and dec.proc.stdout:
                 self._register_to_selector(dec)
 
-    def _get_client_queues(self, client_id: str):
+    def _get_client_queues(self, client_id: int):
         """获取该 client 的 ClientQueues（**只取不建**）。
 
         CQ 由 RunController.start_run → InferenceManager.start_workflow 在起流**之前**建好并换槽
@@ -274,7 +274,7 @@ class StreamService:
             )
 
     @log_call(level=logging.INFO)
-    def stop_stream(self, client_id: str):
+    def stop_stream(self, client_id: int):
         """
         停止流解码（业务代码，纯净）
 
@@ -322,7 +322,7 @@ class StreamService:
                 # 已经注销过，或 start() 失败导致从未注册，均属正常
                 pass
 
-    def _stop_decoder_async(self, decoder: FFmpegDecoder, client_id: str):
+    def _stop_decoder_async(self, decoder: FFmpegDecoder, client_id: int):
         """
         业务代码：异步停止解码器（避免阻塞）
 
@@ -355,7 +355,7 @@ class StreamService:
         )
         stop_thread.start()
 
-    def _cleanup_dead_decoder_unsafe(self, client_id: str):
+    def _cleanup_dead_decoder_unsafe(self, client_id: int):
         """
         业务代码：清理已死亡的解码器（纯净）
 
@@ -370,21 +370,21 @@ class StreamService:
         self.metrics.pop(client_id, None)
         logger.debug(f"[{client_id}] Dead decoder cleaned")
 
-    def has_stream(self, client_id: str) -> bool:
+    def has_stream(self, client_id: int) -> bool:
         with self.lock:
             dec = self.decoders.get(client_id)
             return dec is not None and dec.is_alive()
 
     def get_all_client_ids(self) -> set:
-        """获取所有活跃的客户端ID（有decoder的）
+        """获取所有活跃 run 的键（有 decoder 的 task_id 集合）。
 
         Returns:
-            客户端ID的集合
+            task_id(int) 的集合
         """
         with self.lock:
             return set(self.decoders.keys())
 
-    def get_stream_info(self, client_id: str) -> Optional[Dict[str, Any]]:
+    def get_stream_info(self, client_id: int) -> Optional[Dict[str, Any]]:
         """获取流配置信息（用于重连）
 
         Returns:
@@ -406,7 +406,7 @@ class StreamService:
 
     @log_call(level=logging.INFO, log_args=False)
     def restart_stream(
-        self, client_id: str, stream_url: str, fps: int, protocol: str
+        self, client_id: int, stream_url: str, fps: int, protocol: str
     ) -> bool:
         """
         服务层方法：重启流（不使用 GuardedExecutor）
@@ -448,7 +448,7 @@ class StreamService:
             return False
 
     def _restart_stream_impl(
-        self, client_id: str, stream_url: str, fps: int, protocol: str
+        self, client_id: int, stream_url: str, fps: int, protocol: str
     ) -> bool:
         """
         业务代码：重启流实现（纯净，只抛异常）
@@ -519,7 +519,7 @@ class StreamService:
             logger.info(f"[{client_id}] Stream restarted successfully")
             return True
 
-    def get_pending_count(self, client_id: str) -> int:
+    def get_pending_count(self, client_id: int) -> int:
         """
         获取指定客户端的 CA-Ready-Queue 深度（用于背压控制）
 

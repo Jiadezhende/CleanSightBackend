@@ -32,7 +32,7 @@ class FFmpegDecoder:
     def __init__(
         self,
         manager,
-        client_id: str,
+        client_id: int,   # 运行键 = task_id；此处作日志/诊断标签（名沿用 client_id）
         stream_url: str,
         decoder_config: Optional[DecoderConfig] = None,
         protocol_opts=None,

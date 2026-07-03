@@ -89,7 +89,7 @@ async def start(req: StartRequest):
 async def terminate(client_id: str):
     """统一终止（wire 不变，`client_id` 参数即 source_ip）。
 
-    边界垫片：source_ip → 当前 run（匹配首个）→ `RunController.stop_run(run_key)`。
+    边界垫片：source_ip → 当前 run（匹配首个）→ `RunController.stop_run(task_id)`。
     查不到 run（已停/从未起）→ success no-op（对齐运行时 client_not_found 语义）。
     """
     logger.info(f"[terminate] Terminating by source_ip: {client_id}")
@@ -100,16 +100,16 @@ async def terminate(client_id: str):
         return {"status": "success", "client_id": client_id, "message": "no active run"}
 
     result = await asyncio.to_thread(
-        run_controller.stop_run, cq.run_key, "API termination request"
+        run_controller.stop_run, cq.task_id, "API termination request"
     )
 
     if result["errors"]:
         result["status"] = "partial_success"
         logger.warning(
-            f"[terminate] Completed with errors: {cq.run_key} - {result['errors']}"
+            f"[terminate] Completed with errors: task={cq.task_id} - {result['errors']}"
         )
     else:
         result["status"] = "success"
-        logger.info(f"[terminate] Terminated successfully: run={cq.run_key}")
+        logger.info(f"[terminate] Terminated successfully: task={cq.task_id}")
 
     return result

@@ -59,8 +59,8 @@ class VisualizationWorker:
         self.stage_configs = stage_configs or {}
         self.fixed_visualizer = FixedVisualizer()
 
-        # 去重：记录每个客户端上次渲染的推理时间戳，避免重复渲染同一帧
-        self._last_rendered_ts: Dict[str, float] = {}
+        # 去重：记录每个 run(键=task_id) 上次渲染的推理时间戳，避免重复渲染同一帧
+        self._last_rendered_ts: Dict[int, float] = {}
 
         # 吞吐量观测（[VIZ_THROUGHPUT]）：每 ~10s 评估一次，仅在产出明显低于目标
         # 时才打印，平稳时静默以免刷屏。目的：定位 processed 成帧率不足是
