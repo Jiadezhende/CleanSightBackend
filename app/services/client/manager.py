@@ -29,9 +29,13 @@ _client_config = get_client_config()
 class ClientManager:
     """客户端队列注册表（COW 中台，支持依赖注入）。
 
+    键 = `run_key`（== `str(task_id)`，由 RunController 决定并传入）；CQ 由 RunController 建好后
+    `set` 换槽，本类只做哑存储、不建 CQ。
+
     读接口（无锁）：`get`(只读按键) / `has_client` / `snapshot`(零拷贝只读视图)
-      / `get_client_by_task_id`(扫描) / `get_all_queue_depths` / `get_client_count` / `get_status_summary`。
-    写接口（`_wlock` + COW 换引用）：`get_or_create` / `set`(换槽) / `remove` / `remove_if` / `clear_all`。
+      / `get_client_by_task_id`(扫描) / `find_by_source_ip`(扫描,匹配首个)
+      / `get_all_queue_depths` / `get_client_count` / `get_status_summary`。
+    写接口（`_wlock` + COW 换引用）：`set`(换槽) / `remove` / `remove_if` / `clear_all`。
     """
 
     def __init__(self, config=None):
@@ -51,12 +55,6 @@ class ClientManager:
         # _wlock 全局极短护换引用；_task_locks[cid] per-client 长持护跨服务事务。
         self._task_locks: Dict[str, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
-
-        # 默认构造参数（从配置加载）
-        self._default_ca_segment_len = self._config.ca_segment_len
-        self._default_ca_maxlen = self._config.ca_maxlen
-        self._default_inference_fps = self._config.inference_fps
-        self._default_raw_fps = self._config.raw_fps
 
         logger.info("[ClientManager] Initialized")
 
@@ -89,6 +87,18 @@ class ClientManager:
         """按 task_id 查 ClientQueues（扫描当前快照，无双向索引）。"""
         for cq in self._runs.values():  # 原子读引用后迭代不可变快照
             if cq.get_task_id() == task_id:
+                return cq
+        return None
+
+    def find_by_source_ip(self, source_ip: str) -> Optional[ClientQueues]:
+        """按 source_ip 查 ClientQueues（扫描当前快照，**匹配首个**命中）。
+
+        边界垫片用：前端 `/terminate`、WS `/ai/video` 仍以 `?client_id=<source_ip>` 调用，
+        由此把 source_ip 解析回当前 run。同 source_ip 并发多 run 时命中扫描到的第一个
+        （业务不保证 source_ip 唯一，故取首个即可）。
+        """
+        for cq in self._runs.values():  # 原子读引用后迭代不可变快照
+            if cq.source_ip == source_ip:
                 return cq
         return None
 
@@ -128,45 +138,6 @@ class ClientManager:
         }
 
     # ── 写接口（_wlock + COW）──────────────────────────────────
-
-    def get_or_create(self, client_id: str, **kwargs) -> ClientQueues:
-        """获取或创建指定客户端的队列管理器。
-
-        快速路径无锁（原子读引用 + dict.get）；需创建时走 `_wlock` + 双重检查 + COW 换引用。
-        接受的 TOCTOU：并发 `remove()` 可能返回一个刚被 `clear()` 的 CQ；调用方在使用前
-        均检查 None 槽位、可容忍 stale 引用（remove 仅在流关闭时发生，不在推理热路径）。
-
-        Args:
-            client_id: 客户端唯一标识。
-            **kwargs: 创建参数（resize_width/height、inference_fps、raw_fps、ca_maxlen、ca_segment_len）。
-        """
-        cq = self._runs.get(client_id)  # 原子读引用 + dict.get，无锁
-        if cq is not None:
-            return cq
-
-        with self._wlock:
-            cq = self._runs.get(client_id)  # 双重检查（另一线程可能已创建）
-            if cq is not None:
-                return cq
-
-            cq = ClientQueues(
-                client_id=client_id,
-                ca_segment_len=kwargs.get("ca_segment_len", self._default_ca_segment_len),
-                ca_maxlen=kwargs.get("ca_maxlen", self._default_ca_maxlen),
-                inference_fps=kwargs.get("inference_fps", self._default_inference_fps),
-                raw_fps=kwargs.get("raw_fps", self._default_raw_fps),
-            )
-            if "resize_width" in kwargs:
-                cq.resize_width = kwargs["resize_width"]
-            if "resize_height" in kwargs:
-                cq.resize_height = kwargs["resize_height"]
-
-            new = dict(self._runs)  # COW：复制 → 改 → 原子换引用
-            new[client_id] = cq
-            self._runs = new
-
-            logger.info(f"Create New Client: {client_id}")
-            return cq
 
     def set(self, client_id: str, cq: ClientQueues) -> None:
         """原子装入/替换 client_id 槽位为一个已建好的（不可变身份）CQ。

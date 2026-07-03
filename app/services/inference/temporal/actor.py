@@ -32,13 +32,13 @@ class ClientTemporalActor:
 
     def __init__(
         self,
-        client_id: str,
+        run_key: str,
         cq,                              # ClientQueues
         stage: str,
         operators: List[Operator],
         tick_interval: float = 1.0,
     ):
-        self._client_id = client_id
+        self._run_key = run_key
         self._cq = cq
         self._stage = stage
         # 别名前烧：stage 对本 run 不可变，构造期解析一次；产出告警即烧进 alarm.stage，
@@ -50,14 +50,14 @@ class ClientTemporalActor:
         self._stop_event = threading.Event()
         self._thread = threading.Thread(
             target=guarded_run,
-            args=(self._run, self._stop_event, f"TemporalActor-{client_id}"),
+            args=(self._run, self._stop_event, f"TemporalActor-{run_key}"),
             daemon=True,
-            name=f"TemporalActor-{client_id}",
+            name=f"TemporalActor-{run_key}",
         )
 
     def start(self) -> None:
         self._thread.start()
-        logger.debug("[TemporalActor-%s] Started (tick=%.1fs)", self._client_id, self._tick_interval)
+        logger.debug("[TemporalActor-%s] Started (tick=%.1fs)", self._run_key, self._tick_interval)
 
     def signal_stop(self) -> None:
         """向 actor 线程发送停止信号（非阻塞）。"""
@@ -83,9 +83,9 @@ class ClientTemporalActor:
                 self._tick()
             except Exception as e:
                 logger.error(
-                    "[TemporalActor-%s] Tick error: %s", self._client_id, e, exc_info=True
+                    "[TemporalActor-%s] Tick error: %s", self._run_key, e, exc_info=True
                 )
-        logger.debug("[TemporalActor-%s] Stopped", self._client_id)
+        logger.debug("[TemporalActor-%s] Stopped", self._run_key)
 
     def _tick(self) -> None:
         all_events: List[str] = []
@@ -105,7 +105,7 @@ class ClientTemporalActor:
                 # per-operator 隔离：单个算子异常不影响同 tick 其余算子
                 logger.error(
                     "[TemporalActor-%s] operator '%s' tick error: %s",
-                    self._client_id, op.name, e, exc_info=True,
+                    self._run_key, op.name, e, exc_info=True,
                 )
                 continue
 
@@ -123,7 +123,7 @@ class ClientTemporalActor:
         persistence_manager.persist_alarms(
             alarms,
             cq=self._cq,
-            client_id=self._client_id,
+            client_id=self._run_key,
             mode=ALARM_MODE_REALTIME,
         )
 
@@ -135,7 +135,7 @@ class ClientTemporalActor:
             except Exception as e:
                 logger.error(
                     "[TemporalActor-%s] finalize() failed for operator %s: %s",
-                    self._client_id, op.name, e, exc_info=True,
+                    self._run_key, op.name, e, exc_info=True,
                 )
         for a in alarms:
             a.stage = self._stage_alias  # 别名前烧：结算告警离开 inference 前 .stage 即可读别名

@@ -218,8 +218,7 @@ class PersistenceManager:
         （原 inference/temporal/alarm_sink.persist_alarms 迁入——告警落库是持久化领域。）
         """
         task_id = cq.get_task_id()
-        task = cq.get_task()
-        step_id = int(task.current_step) if task and task.current_step else None
+        step_id = cq.get_step_id()
 
         for alarm in alarms:
             # 给产出方的同一份告警补 mode，再过闸门+入环形缓冲（seq 由其赋；stage 已烧）。

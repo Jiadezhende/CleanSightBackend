@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.services.client import client_manager
 from app.services.inference.instance import inference_manager
 from app.services.stream import stream_service
 
@@ -41,15 +42,17 @@ async def lifespan():
 @router.websocket("/video")
 async def websocket_video_endpoint(websocket: WebSocket):
     """
-    WebSocket端点：/ai/video?client_id=xxx
-    - 要求客户端在连接时通过查询参数 `client_id` 指定自身 ID
-    - 服务器持续向该 client_id 推送最新推理结果（Base64 JPEG）
+    WebSocket端点：/ai/video?client_id=xxx（wire 不变，`client_id` 参数即 source_ip）
+    - 客户端连接时通过查询参数 `client_id`（source_ip）指定流来源
+    - 边界垫片每轮 source_ip → 当前 run（匹配首个），持续推送其最新渲染结果（Base64 JPEG）；
+      run 重启/切换（同 source_ip 换 run）时自动跟随当前 run
     """
-    # 获取 client_id
-    client_id = websocket.query_params.get("client_id")
-    if not client_id:
+    # 获取 source_ip（历史参数名 client_id，wire 不变）
+    source_ip = websocket.query_params.get("client_id")
+    if not source_ip:
         await websocket.close(code=1008)
         return
+    client_id = source_ip  # 日志沿用旧名
 
     await websocket.accept()
     logger.info(
@@ -82,7 +85,9 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while not shutdown_event.is_set() and not disconnect_task.done():
-            frame = inference_manager.get_result(client_id)  # domain Frame or None
+            # 每轮按 source_ip 解析当前 run（匹配首个）→ 读其最新渲染帧；run 切换自动跟随
+            cq = client_manager.find_by_source_ip(source_ip)
+            frame = cq.get_latest_result() if cq is not None else None
 
             if frame is None:
                 await asyncio.sleep(0.01)  # 减少轮询间隔

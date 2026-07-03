@@ -6,7 +6,6 @@
    整段放弃，绝不误停/误清健康新 run。
 """
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,10 +15,9 @@ from app.services.client.queues import ClientQueues, RunState
 from app.services.run_control import run_controller
 
 
-def _cq(client_id="10.9.9.9", task_id=1, step="1"):
+def _cq(source_ip="10.9.9.9", task_id=1, step="1"):
     return ClientQueues(
-        client_id, task=SimpleNamespace(task_id=task_id, current_step=step, status="running"),
-        stage=step,
+        task_id=task_id, current_step=step, source_ip=source_ip, stage=step,
     )
 
 
@@ -41,7 +39,7 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
 
     seen_state = {}
 
-    def capture_state(client_id, cq_arg):
+    def capture_state(cq_arg):
         # 停 workflow 时刻 CQ 必须已 DRAINING（生产者写已封、settlement 仍放行）
         seen_state["at_flush"] = cq.get_state()
         return []  # 无 settlement
@@ -77,7 +75,7 @@ def test_stop_run_expected_hit_tears_down(_clean_registry):
         result = run_controller.stop_run(cid, reason="hm", expected=cq)
 
     mock_stream.stop_stream.assert_called_once_with(cid)
-    mock_inf.stop_workflow.assert_called_once_with(cid, cq)
+    mock_inf.stop_workflow.assert_called_once_with(cq)
     assert cq.get_state() is RunState.CLOSED
     assert not client_manager.has_client(cid)
     assert result.get("skipped") is not True

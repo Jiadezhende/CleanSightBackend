@@ -96,7 +96,7 @@ def test_subscribes_required():
 
 
 def test_stream_buffer_floor_10s():
-    cq = ClientQueues(client_id="c")
+    cq = ClientQueues()
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
         cq.push_detection("x", _out(t))
     # 未配感受野 → 底线 10s：cutoff=20-10=10 → 保留 10,15,20
@@ -105,7 +105,7 @@ def test_stream_buffer_floor_10s():
 
 
 def test_stream_buffer_extends_with_receptive_field():
-    cq = ClientQueues(client_id="c")
+    cq = ClientQueues()
     cq.set_stream_windows({"x": 30.0})  # 感受野 30s > 底线
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
         cq.push_detection("x", _out(t))
@@ -142,7 +142,7 @@ def test_per_operator_isolation():
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)
     good = _GoodOperator(name="good", subscribes=["s"], window_seconds=3.0)
-    actor = ClientTemporalActor(client_id="c", cq=cq, stage="MOCK", operators=[bad, good])
+    actor = ClientTemporalActor(run_key="c", cq=cq, stage="MOCK", operators=[bad, good])
     actor._persist_alarms = lambda alarms: captured.extend(alarms)
 
     actor._tick()

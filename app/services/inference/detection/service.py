@@ -298,9 +298,8 @@ class ModelWorkerService:
             # owner=cq：feature_store 无状态门，靠 store 内归属校验挡「顶层 is_active()
             # 通过后中途 supersede」的迟到写（分区键跨 run 共享，比 is_active() 更本质）。
             if self._feature_store is not None:
-                task = cq.get_task()
-                task_id = task.task_id if task else None
-                step_id = cq.step_id_of(task)
+                task_id = cq.get_task_id()
+                step_id = cq.get_step_id()
                 if task_id is not None and step_id is not None:
                     self._feature_store.append(task_id, step_id, res, owner=cq)
 

@@ -16,7 +16,6 @@ import numpy as np
 from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetections
 from app.domain.frame import Frame
-from app.domain.task import CleaningTask
 
 if TYPE_CHECKING:
     from app.services.inference.models import FrameInference
@@ -66,12 +65,11 @@ class ClientQueues:
       _task_lock → _raw_lock → _viz_lock → _inference_lock
       → _frontend_lock → _slide_window_lock → _alarm_lock
 
-    热路径读 self.task 模式：进入 frame lock 前先调 get_task() 快照，两把锁永不嵌套。
+    身份（task_id/step_id/current_step/source_ip/stage）为构造定死的不可变 primitive，热路径免锁直读。
     """
 
     def __init__(
         self,
-        client_id: str = "",
         ca_segment_len: int = 150,
         ca_maxlen: int = 2700,
         resize_width: int = 640,
@@ -79,15 +77,15 @@ class ClientQueues:
         inference_fps: int = 15,
         raw_fps: int = 30,
         *,
-        # 不可变运行身份（构造注入，一次 CQ == 一次 run，终生不变）。
-        # task=None 供纯队列/算子单测裸建（身份 getter 返回 None）；生产由
-        # InferenceManager 传入已建 CleaningTask，stage 由 step_id 经配置解析一次。
-        task: Optional[CleaningTask] = None,
+        # 不可变运行身份（primitives 直注，一次 CQ == 一次 run，终生不变）。
+        # 全默认 None/"" 供纯队列/算子单测裸建（身份 getter 返回 None）；生产由
+        # RunController 传入 task_id/current_step，stage 由 step_id 经配置解析一次。
+        task_id: Optional[int] = None,
+        current_step: Optional[str] = None,
+        status: str = "running",
+        source_ip: str = "",
         stage: str = "MOCK",
     ):
-        # 客户端标识
-        self.client_id = client_id
-
         # 尺寸配置
         self.resize_width = resize_width
         self.resize_height = resize_height
@@ -100,7 +98,7 @@ class ClientQueues:
         self._decimate_phase: int = 0
 
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
-        self._task_lock = threading.Lock()       # self.task + self.task_started_at
+        self._task_lock = threading.Lock()       # (历史)保留于全清顺序；身份已不可变、读免锁
         self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
         self._viz_lock = threading.Lock()        # ca_processed + _latest_rendered
         self._inference_lock = threading.Lock()  # _latest_inference
@@ -115,12 +113,14 @@ class ClientQueues:
         # 不可变运行身份：一次构造定死，getter 直接读、无锁——CQ 经 client_manager COW
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
-        self.task: Optional[CleaningTask] = task
-        self.task_id: Optional[int] = task.task_id if task is not None else None
-        self.step_id: Optional[int] = self._resolve_step_id(task)
-        self.source_ip: str = client_id
+        # 注：无 client_id 字段——路由键由 run_key 属性（str(task_id)）派生；source_ip 为被动来源字段。
+        self.task_id: Optional[int] = task_id
+        self.current_step: Optional[str] = current_step
+        self.status: str = status
+        self.step_id: Optional[int] = self._resolve_step_id(current_step)
+        self.source_ip: str = source_ip
         self.stage: str = stage
-        self.task_started_at: float = time.time() if task is not None else 0.0
+        self.task_started_at: float = time.time() if task_id is not None else 0.0
 
         # 最新原始帧缓存（由 _raw_lock 保护）
         self.latest_raw_frame: Optional[np.ndarray] = None
@@ -197,28 +197,33 @@ class ClientQueues:
         return True
 
     @staticmethod
-    def _resolve_step_id(task: Optional[CleaningTask]) -> Optional[int]:
-        """从 task.current_step 解析 step_id；非法返回 None（拒绝落盘）。"""
-        if task is None or task.current_step is None:
+    def _resolve_step_id(current_step: Optional[str]) -> Optional[int]:
+        """从 current_step 解析 step_id；非法返回 None（拒绝落盘）。"""
+        if current_step is None:
             return None
         try:
-            return int(task.current_step)
+            return int(current_step)
         except (TypeError, ValueError):
             return None
+
+    @property
+    def run_key(self) -> str:
+        """注册表路由键 = str(task_id)（正直出口，免锁）；未绑定 task 返回空串。"""
+        return str(self.task_id) if self.task_id is not None else ""
 
     def append_ca_raw(self, frame_data: Frame) -> bool:
         """
         添加原始帧到落盘队列，同时更新最新原始帧缓存。
         若积累帧数达到 ca_segment_len 且已绑定任务，直接触发持久化。
 
-        self.task 在进入 _raw_lock 前快照，避免 _raw_lock 与 _task_lock 嵌套。
+        身份 task_id/step_id 为不可变 primitive，免锁直读，不与 _raw_lock 嵌套。
         """
         # 写门：非 ACTIVE 拒写（拆除中 raw 也停——HLS 残余由 _flush_all_remaining_segments 收尾）
         if self._state is not RunState.ACTIVE:
             return False
         try:
-            # 快照 task（在 frame lock 外，两锁永不嵌套）
-            _task = self.get_task()
+            # 身份不可变，免锁直读（task_id/step_id/current_step 均为构造定死字段）
+            task_id = self.task_id
 
             frames_to_persist = None
             with self._raw_lock:
@@ -227,21 +232,21 @@ class ClientQueues:
                 self.ca_raw.append(frame_data)
                 self.latest_raw_frame = frame_data.frame
                 self.latest_raw_timestamp = frame_data.timestamp
-                if _task is not None and len(self.ca_raw) >= self.ca_segment_len:
+                if task_id is not None and len(self.ca_raw) >= self.ca_segment_len:
                     frames_to_persist = self.pop_n_ca_raw(self.ca_segment_len)
 
-            if frames_to_persist is not None and _task is not None:
+            if frames_to_persist is not None and task_id is not None:
                 step_id = self.step_id
                 if step_id is None:
                     import logging
                     logging.getLogger(__name__).error(
                         "[append_ca_raw] invalid current_step=%r, skip persistence (task_id=%s)",
-                        _task.current_step, _task.task_id,
+                        self.current_step, task_id,
                     )
                     return False
                 from app.services.persistence import persistence_manager
                 persistence_manager.persist_hls_segment(
-                    task_id=_task.task_id,
+                    task_id=task_id,
                     step_id=step_id,
                     segment_type="raw",
                     frames=frames_to_persist,
@@ -255,12 +260,12 @@ class ClientQueues:
         添加处理帧到落盘队列。
         若积累帧数达到 ca_segment_len 且已绑定任务，直接触发持久化。
 
-        self.task 在进入 _viz_lock 前快照，避免 _viz_lock 与 _task_lock 嵌套。
+        身份 task_id/step_id 为不可变 primitive，免锁直读，不与 _viz_lock 嵌套。
         """
         # 写门：非 ACTIVE 拒写
         if self._state is not RunState.ACTIVE:
             return
-        _task = self.get_task()
+        task_id = self.task_id  # 身份不可变，免锁直读
 
         frames_to_persist = None
         with self._viz_lock:
@@ -270,21 +275,21 @@ class ClientQueues:
             ):
                 self.frames_dropped_processed += 1
             self.ca_processed.append(frame_data)
-            if _task is not None and len(self.ca_processed) >= self.ca_segment_len:
+            if task_id is not None and len(self.ca_processed) >= self.ca_segment_len:
                 frames_to_persist = self.pop_n_ca_processed(self.ca_segment_len)
 
-        if frames_to_persist is not None and _task is not None:
+        if frames_to_persist is not None and task_id is not None:
             step_id = self.step_id
             if step_id is None:
                 import logging
                 logging.getLogger(__name__).error(
                     "[append_ca_processed] invalid current_step=%r, skip persistence (task_id=%s)",
-                    _task.current_step, _task.task_id,
+                    self.current_step, task_id,
                 )
                 return
             from app.services.persistence import persistence_manager
             persistence_manager.persist_hls_segment(
-                task_id=_task.task_id,
+                task_id=task_id,
                 step_id=step_id,
                 segment_type="processed",
                 frames=frames_to_persist,
@@ -333,18 +338,11 @@ class ClientQueues:
                 return self.latest_raw_frame.copy()
             return None
 
-    def get_task(self) -> Optional[CleaningTask]:
-        return self.task  # 不可变身份，免锁
-
     def get_task_id(self) -> Optional[int]:
         return self.task_id  # 不可变身份，免锁
 
     def get_step_id(self) -> Optional[int]:
         """当前 step_id（落盘目录键，与 HLS 同源）；未绑定/非法返回 None。"""
-        return self.step_id
-
-    def step_id_of(self, task: Optional[CleaningTask]) -> Optional[int]:
-        """本 run 的 step_id（不可变，忽略入参）。保留签名以兼容既有调用方。"""
         return self.step_id
 
     def to_status_dict(self) -> dict:
@@ -659,7 +657,7 @@ class ClientQueues:
                     latest_confidences[task_name] = avg_conf
 
         return {
-            "client_id": self.client_id,
+            "client_id": self.source_ip,  # wire 兼容：该字段历史含义即 source_ip
             "stage": stage,
             "temporal": {
                 "events": events,

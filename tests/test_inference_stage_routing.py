@@ -1,7 +1,7 @@
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.domain.task import CleaningTask
 from app.services.inference.manager import InferenceManager
 
 
@@ -10,14 +10,6 @@ def manager():
     m = InferenceManager.__new__(InferenceManager)
     m._actors = {}
     return m
-
-
-def _make_task(step: str) -> CleaningTask:
-    return CleaningTask(
-        task_id=1,
-        current_step=step,
-        status="running",
-    )
 
 
 # 主键 = step_id：current_step 直接作 stage 主键（恒等路由），未配的 step 回退 MOCK。
@@ -31,29 +23,29 @@ _STAGE_CONFIGS = {"1": {}, "2": {}, "MOCK": {}}
     ("测漏", "MOCK"),  # 未配 step → 兜底 MOCK
     ("", "MOCK"),      # 空 step → 兜底 MOCK
 ])
-def test_start_workflow_routes_stage(manager, step, expected_stage):
-    # 身份不可变：start_workflow 建**新** CQ（stage 构造注入）并换槽。断言构造时的 stage kwarg。
+def test_resolve_stage_routes(manager, step, expected_stage):
+    # stage 解析上移为公有 resolve_stage（供 RunController 建 CQ 前调用）。
+    with patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
+        assert manager.resolve_stage(step) == expected_stage
+
+
+def _fake_cq(run_key="1", stage="1", step_id=None):
+    cq = MagicMock()
+    cq.run_key = run_key
+    cq.get_stage.return_value = stage
+    cq.step_id = step_id
+    cq.task_id = int(run_key)
+    return cq
+
+
+def test_start_workflow_sets_slot(manager):
+    # start_workflow(cq)：换槽注册该 CQ（不再自建 CQ）。无 operator_specs → 不建 actor。
+    cq = _fake_cq(run_key="7", stage="MOCK", step_id=None)
     with patch("app.services.inference.manager.client_manager") as cm, \
-         patch("app.services.inference.manager.ClientQueues") as CQ, \
-         patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS), \
-         patch("app.services.client.config.get_client_config") as gcc:
-        gcc.return_value.cq_kwargs.return_value = {}
-        CQ.return_value.step_id = None        # 跳过 open_fresh
-        manager.start_workflow("client_1", _make_task(step))
-
-    assert CQ.call_args.kwargs["stage"] == expected_stage
-    cm.set.assert_called_once()               # 新 CQ 换槽
-
-
-def test_start_workflow_none_skips_run(manager):
-    # task=None：不建 CQ、不换槽（历史语义）。
-    with patch("app.services.inference.manager.client_manager") as cm, \
-         patch("app.services.inference.manager.ClientQueues") as CQ, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
-        manager.start_workflow("client_1", None)
+        assert manager.start_workflow(cq) is True
 
-    CQ.assert_not_called()
-    cm.set.assert_not_called()
+    cm.set.assert_called_once_with("7", cq)   # 按 run_key 换槽
 
 
 def test_real_manager_init_invariants_and_stop_workflow_smoke():
@@ -66,5 +58,9 @@ def test_real_manager_init_invariants_and_stop_workflow_smoke():
     assert m._actors == {}                          # 漏设 → stop_workflow 会 AttributeError
     assert not hasattr(m, "persistence_manager")    # 已摘除持久化引用
     assert not hasattr(m, "_client_lifecycle_lock")  # 互斥上移 RunController.lock_for
-    # 未知 client：无 actor、cq=None → 返回空 settlement、不抛
-    assert m.stop_workflow("no-such-client", None) == []
+    # 无 actor、feature close 空跑 → 返回空 settlement、不抛
+    cq = MagicMock()
+    cq.run_key = "no-such-run"
+    cq.get_task_id.return_value = None
+    cq.get_step_id.return_value = None
+    assert m.stop_workflow(cq) == []

@@ -21,16 +21,12 @@ router = APIRouter(prefix="/admin-f3m8", tags=["admin"])
 # ---------------------------------------------------------------------------
 
 def _client_info(client_id: str, client_queues) -> dict:
-    task = client_queues.get_task()
     depths = client_queues.get_queue_depths()
-    task_id = task.task_id if task else None
-    task_status = task.status if task else None
-    current_step = task.current_step if task else None
     return {
-        "client_id": client_id,
-        "task_id": task_id,
-        "task_status": task_status,
-        "current_step": current_step,
+        "client_id": client_id,  # 注册表键 = run_key(str(task_id))
+        "task_id": client_queues.get_task_id(),
+        "task_status": client_queues.status,
+        "current_step": client_queues.current_step,
         "queue_depths": depths,
     }
 

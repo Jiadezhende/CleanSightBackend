@@ -6,17 +6,11 @@
 2. 同一 batch 内，stale run 被挡不殃及同批 ACTIVE run 的正常写回（跨 run 隔离）。
 """
 
-from types import SimpleNamespace
-
 from app.domain.detection import Detection, FrameDetections
 from app.services.client.queues import ClientQueues
 from app.services.inference.detection.service import ModelWorkerService
 from app.services.inference.models import FrameInference
 from app.utils.metrics import frame_drop_total
-
-
-def _task(task_id: int, step: str):
-    return SimpleNamespace(task_id=task_id, current_step=step, status="running")
 
 
 def _result(cq: ClientQueues, ts: float = 1.0) -> FrameInference:
@@ -56,7 +50,7 @@ def _stale_drops() -> float:
 def test_active_run_write_back_lands():
     fs = _SpyFeatureStore()
     svc = _bare_service(fs)
-    cq = ClientQueues("ipA", task=_task(1, "3"), stage="3")
+    cq = ClientQueues(task_id=1, current_step="3", source_ip="ipA", stage="3")
 
     res = _result(cq)
     svc._write_back_results([res])
@@ -69,7 +63,7 @@ def test_active_run_write_back_lands():
 def test_draining_run_write_back_blocked_and_counted():
     fs = _SpyFeatureStore()
     svc = _bare_service(fs)
-    cq = ClientQueues("ipB", task=_task(2, "3"), stage="3")
+    cq = ClientQueues(task_id=2, current_step="3", source_ip="ipB", stage="3")
     cq.to_draining()  # 拆除封闸
 
     before = _stale_drops()
@@ -84,7 +78,7 @@ def test_draining_run_write_back_blocked_and_counted():
 def test_closed_run_write_back_blocked():
     fs = _SpyFeatureStore()
     svc = _bare_service(fs)
-    cq = ClientQueues("ipC", task=_task(3, "3"), stage="3")
+    cq = ClientQueues(task_id=3, current_step="3", source_ip="ipC", stage="3")
     cq.close()  # CLOSED 释放 payload
 
     before = _stale_drops()
@@ -99,8 +93,8 @@ def test_stale_and_active_in_same_batch_isolated():
     """同 batch 混跑：stale run 被挡，ACTIVE run 照常写回（不互殃）。"""
     fs = _SpyFeatureStore()
     svc = _bare_service(fs)
-    cq_stale = ClientQueues("ipS", task=_task(10, "3"), stage="3")
-    cq_active = ClientQueues("ipA", task=_task(11, "3"), stage="3")
+    cq_stale = ClientQueues(task_id=10, current_step="3", source_ip="ipS", stage="3")
+    cq_active = ClientQueues(task_id=11, current_step="3", source_ip="ipA", stage="3")
     cq_stale.to_draining()
 
     res_stale = _result(cq_stale)

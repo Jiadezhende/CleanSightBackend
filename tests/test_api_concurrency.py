@@ -70,9 +70,7 @@ async def test_concurrent_start_same_task_idempotent():
     call_count = {"has_client": 0}
     mock_cq = MagicMock()
     mock_cq.get_task_id.return_value = 1
-    mock_task = MagicMock()
-    mock_task.current_step = "0"
-    mock_cq.get_task.return_value = mock_task
+    mock_cq.current_step = "0"  # 幂等比对读 old_cq.current_step
 
     def has_client_side_effect(cid):
         call_count["has_client"] += 1
@@ -86,10 +84,12 @@ async def test_concurrent_start_same_task_idempotent():
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "has_client", side_effect=has_client_side_effect),
         patch.object(client_manager, "get", return_value=mock_cq),
     ):
         mock_inference.start_workflow.return_value = True
+        mock_inference.resolve_stage.return_value = "0"
         mock_stream.start_stream.side_effect = track_start_stream
         mock_stream.get_stream_info.return_value = {"url": "rtsp://test/stream"}
 
@@ -115,18 +115,24 @@ async def test_concurrent_start_same_task_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_task_switch_triggers_full_cleanup():
-    """client 正跑 task 1，收到 start task 2 → 先 stop_run 拆旧、再建新。"""
-    db_task = _make_db_task(task_id=2, source_ip="10.0.0.1")
+async def test_same_task_url_change_triggers_restart():
+    """同 task_id（同 run_key 槽位）改 URL → 先 stop_run 拆旧、再建新（重启语义）。
+
+    换键后运行键 = str(task_id)：抢占/重启只在**同 task_id**改 step/url 时发生；
+    不同 task_id 走不同槽位、天然并发（见 test_different_clients_not_blocked）。
+    """
+    db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
 
     mock_cq = MagicMock()
-    mock_cq.get_task_id.return_value = 1  # 旧任务 ID（≠2 → 非幂等）
+    mock_cq.get_task_id.return_value = 1
+    mock_cq.current_step = "0"  # step 同，但下方 URL 不同 → 非幂等，触发重启
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "has_client", return_value=True),
         patch.object(client_manager, "get", return_value=mock_cq),
         patch.object(
@@ -134,12 +140,15 @@ async def test_task_switch_triggers_full_cleanup():
         ),
     ):
         mock_inference.start_workflow.return_value = True
+        mock_inference.resolve_stage.return_value = "0"
+        # 旧流 URL 与新请求不同 → 非幂等
+        mock_stream.get_stream_info.return_value = {"url": "rtsp://old/stream"}
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             r = await ac.post(
                 "/api/start",
-                json={"task_id": 2, "rtsp_url": "rtsp://test/stream", "fps": 30},
+                json={"task_id": 1, "rtsp_url": "rtsp://new/stream", "fps": 30},
             )
 
         assert r.status_code == 200
@@ -159,20 +168,27 @@ async def test_task_switch_triggers_full_cleanup():
 
 @pytest.mark.asyncio
 async def test_start_and_terminate_serialized():
-    """同 client 的 start 与 terminate 并发：经 lock_for 串行，均正常完成。"""
+    """同一 run（task_id=1）的 start 与 terminate 并发：经 lock_for 串行，均正常完成。"""
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
+
+    mock_cq = MagicMock()
+    mock_cq.run_key = "1"
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "has_client", return_value=False),
+        patch.object(client_manager, "get", return_value=mock_cq),
+        patch.object(client_manager, "find_by_source_ip", return_value=mock_cq),
         patch.object(
             client_manager, "remove", return_value={"removed": True, "error": None}
         ),
     ):
         mock_inference.start_workflow.return_value = True
+        mock_inference.resolve_stage.return_value = "0"
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -220,9 +236,11 @@ async def test_different_clients_not_blocked():
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "has_client", return_value=False),
     ):
         mock_inference.start_workflow.return_value = True
+        mock_inference.resolve_stage.return_value = "0"
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -243,25 +261,31 @@ async def test_different_clients_not_blocked():
 
 @pytest.mark.asyncio
 async def test_terminate_uses_lock():
-    """terminate 经 RunController.stop_run 获取 client_manager.lock_for。"""
+    """terminate（wire=source_ip）经垫片解析 run → stop_run 持 lock_for(run_key)、stop_workflow(cq)。"""
+    mock_cq = MagicMock()
+    mock_cq.run_key = "1"
+
     with (
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.persistence_manager"),
+        patch.object(client_manager, "find_by_source_ip", return_value=mock_cq),
+        patch.object(client_manager, "get", return_value=mock_cq),
         patch.object(client_manager, "has_client", return_value=True),
         patch.object(
             client_manager, "remove", return_value={"removed": True, "error": None}
         ),
     ):
+        mock_inference.stop_workflow.return_value = []
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             r = await ac.post("/api/terminate", params={"client_id": "10.0.0.1"})
 
         assert r.status_code == 200
-        mock_inference.stop_workflow.assert_called_once_with("10.0.0.1", None)
+        mock_inference.stop_workflow.assert_called_once_with(mock_cq)
 
-    # 验证真实的 per-client 锁已被创建
-    assert "10.0.0.1" in client_manager._task_locks
+    # 验证真实的 per-run 锁已按 run_key 创建
+    assert "1" in client_manager._task_locks
 
 
 if __name__ == "__main__":
