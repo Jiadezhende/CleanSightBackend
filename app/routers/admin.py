@@ -25,6 +25,7 @@ def _client_info(client_id: int, client_queues) -> dict:
     return {
         "client_id": client_id,  # 注册表键 = task_id(int)
         "task_id": client_queues.get_task_id(),
+        "source_ip": client_queues.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
         "task_status": client_queues.status,
         "current_step": client_queues.current_step,
         "queue_depths": depths,

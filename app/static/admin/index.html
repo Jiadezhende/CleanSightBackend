@@ -462,6 +462,7 @@
 <script src="/admin-f3m8/ui/vendor/hls.js"></script>
 <script>
 const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
+const { ElMessage } = ElementPlus;
 
 createApp({
   setup() {
@@ -530,10 +531,13 @@ createApp({
 
     function startLive() {
       if (!selectedClient.value) return;
+      // /ai/video 按 source_ip 路由（注册表键已改 task_id，二者分离）；无 source_ip 无法连流
+      const sourceIp = liveClientInfo.value?.source_ip;
+      if (!sourceIp) { ElMessage.warning('该任务无 source_ip，无法连接实时画面'); return; }
       liveAlarms.value = [];
       liveSeq = 0;
-      // 视频 WS
-      videoWs = new WebSocket(wsApi('/ai/video?client_id=' + encodeURIComponent(selectedClient.value)));
+      // 视频 WS（wire 不变：?client_id 参数即 source_ip）
+      videoWs = new WebSocket(wsApi('/ai/video?client_id=' + encodeURIComponent(sourceIp)));
       videoWs.onmessage = (e) => { liveFrame.value = e.data; fpsFrameCount++; };
       videoWs.onclose = () => { if (liveConnected.value) stopLive(); };
       liveConnected.value = true;
