@@ -91,7 +91,7 @@ async def get_client_frontend_message(
     if since_seq < 0:
         raise HTTPException(status_code=400, detail="since_seq must be >= 0")
 
-    cq = client_manager.get_client_by_task_id(task_id)
+    cq = client_manager.get(task_id)  # 键即 task_id，O(1) 直取
     if cq is None:
         return _empty_alarm_payload(task_id)
 

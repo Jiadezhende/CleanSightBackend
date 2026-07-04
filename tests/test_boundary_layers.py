@@ -52,7 +52,7 @@ def test_retry_executor_retry_then_success():
     def retry_func():
         attempts[0] += 1
         if attempts[0] < 2:
-            raise StreamConnectionError(url="rtsp://test", client_id="test_client")
+            raise StreamConnectionError(url="rtsp://test", source_ip="test_client")
         return "success"
 
     result = executor.execute(func=retry_func, policy_name="stream")
@@ -67,7 +67,7 @@ def test_retry_executor_max_attempts_reached():
 
     # 模拟总是失败的函数
     def always_fail():
-        raise StreamConnectionError(url="rtsp://test", client_id="test_client")
+        raise StreamConnectionError(url="rtsp://test", source_ip="test_client")
 
     with pytest.raises(StreamConnectionError):
         executor.execute(func=always_fail, policy_name="stream")  # 最多 5 次
@@ -142,7 +142,7 @@ def test_stream_error_handler(client):
 
     @app.get(f"/test/stream_error_{route_id}")
     async def test_stream_error():
-        raise StreamConnectionError(url="rtsp://test", client_id="test_client")
+        raise StreamConnectionError(url="rtsp://test", source_ip="test_client")
 
     response = client.get(f"/test/stream_error_{route_id}")
 

@@ -46,7 +46,7 @@ def test_frame_drop_is_silent():
     executor = GuardedExecutor()
 
     def drop_frame():
-        raise FrameDrop(client_id="test_client", frame_index=42, reason="decode_failed")
+        raise FrameDrop(source_ip="test_client", frame_index=42, reason="decode_failed")
 
     # 执行前获取 metric 值
     # frame_drop_total 仅按 reason 打标签（不含 client_id），故 key 为单元素元组
@@ -77,7 +77,7 @@ def test_frame_drop_with_different_reasons():
     for reason in reasons:
 
         def drop_frame_with_reason():
-            raise FrameDrop(client_id=f"client_{reason}", reason=reason)
+            raise FrameDrop(source_ip=f"client_{reason}", reason=reason)
 
         result = executor.execute(func=drop_frame_with_reason, policy_name="inference")
 
@@ -110,7 +110,7 @@ def test_single_stream_failure_doesnt_affect_others():
     def infer_frame(client_id):
         """模拟推理：client_5 失败，其他成功"""
         if client_id == "client_5":
-            raise FrameDrop(client_id=client_id, reason="quality_check_failed")
+            raise FrameDrop(source_ip=client_id, reason="quality_check_failed")
         return {"result": "success", "client_id": client_id}
 
     # 并发推理（模拟）
@@ -140,7 +140,7 @@ def test_action_decision_drop():
     executor = GuardedExecutor()
     policy = ExecutionPolicy(max_attempts=3)
 
-    exc = FrameDrop(client_id="test", reason="test")
+    exc = FrameDrop(source_ip="test", reason="test")
     action = executor._decide_action(exc, policy, attempts=1)
 
     assert action == Action.DROP, "FrameDrop should result in Action.DROP"
@@ -199,7 +199,7 @@ def test_metrics_frame_drop():
         before_count = frame_drop_total._metrics[metric_key]._value.get()
 
     def drop_frame():
-        raise FrameDrop(client_id=client_id, reason=reason)
+        raise FrameDrop(source_ip=client_id, reason=reason)
 
     executor.execute(func=drop_frame, policy_name="inference")
 
@@ -414,7 +414,7 @@ def test_end_to_end_inference_with_frame_drop():
         """模拟单帧推理"""
         if frame_id == "frame_2":
             raise FrameDrop(
-                client_id="inference_test", frame_index=2, reason="decode_failed"
+                source_ip="inference_test", frame_index=2, reason="decode_failed"
             )
         return {"frame": frame_id, "result": "OK"}
 
@@ -457,7 +457,7 @@ def test_end_to_end_persistence_retry():
         if attempt_count == 1:
             raise PersistenceError(
                 message="Disk full",
-                client_id="persist_test",
+                source_ip="persist_test",
                 operation="hls_write",
                 retryable=True,
             )

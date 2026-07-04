@@ -134,11 +134,9 @@ class StageAwareDispatcher:
                 # 队列为空或并发场景下被其他线程取走
                 continue
 
-            # 获取该 run 当前的 stage
-            stage = self._get_client_stage(task_id, cq)
-
             # 构造推理请求：捕获该 CQ 句柄随请求同行，写回凭它投递、不反查
-            # （cq 即当前 snapshot 迭代出的对象，与 pop_ca_ready()/get_stage() 同源）。
+            # （cq 即当前 snapshot 迭代出的对象，与 pop_ca_ready() 同源）。
+            stage = cq.stage  # 不可变身份，直读
             req = DetectionTask(
                 task_id=task_id,
                 stage=stage,
@@ -156,10 +154,6 @@ class StageAwareDispatcher:
                 q.append(req)
                 self._stats["total_dispatched"] += 1
                 self._stats["by_stage"][stage] += 1
-
-    def _get_client_stage(self, task_id: int, cq: ClientQueues) -> str:
-        """获取该 run 当前所处的 stage。"""
-        return cq.get_stage()
 
     def get_batch_for_stage(
         self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore

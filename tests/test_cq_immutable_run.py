@@ -8,9 +8,9 @@ from app.services.inference.feature.store import FeatureStore
 
 def test_cq_identity_immutable_and_reuse_machinery_gone():
     cq = ClientQueues(task_id=7, current_step="3", source_ip="ip1", stage="3")
-    assert cq.get_task_id() == 7
-    assert cq.get_step_id() == 3
-    assert cq.get_stage() == "3"
+    assert cq.task_id == 7
+    assert cq.step_id == 3
+    assert cq.stage == "3"
     assert cq.source_ip == "ip1"
 
     # 复用机器 + str 副本 + 撒谎字段均已删除（一 CQ == 一 run，键即 int task_id）
@@ -20,22 +20,22 @@ def test_cq_identity_immutable_and_reuse_machinery_gone():
     # clear() 只释放 payload，不重置不可变身份
     cq.push_detection("x", FrameDetections(detections=[], metadata={}, timestamp=1.0))
     cq.clear()
-    assert cq.get_task_id() == 7
-    assert cq.get_step_id() == 3
-    assert cq.get_stage() == "3"
+    assert cq.task_id == 7
+    assert cq.step_id == 3
+    assert cq.stage == "3"
 
 
 def test_step_id_none_for_unparseable_step():
     cq = ClientQueues(task_id=1, current_step="测漏", source_ip="ip")
-    assert cq.get_step_id() is None
-    assert cq.get_task_id() == 1
+    assert cq.step_id is None
+    assert cq.task_id == 1
 
 
 def test_bare_cq_has_no_identity():
     cq = ClientQueues()  # 纯队列单测形态（无身份）
-    assert cq.get_task_id() is None
-    assert cq.get_step_id() is None
-    assert cq.get_stage() == "MOCK"
+    assert cq.task_id is None
+    assert cq.step_id is None
+    assert cq.stage == "MOCK"
 
 
 def test_client_manager_set_replaces_slot_with_new_object():

@@ -106,7 +106,7 @@ class TestDecoderRegistration:
         """start() 失败后 _start_stream_impl 吞掉异常返回，decoder 必须仍在 self.decoders 中"""
         error = FFmpegError(
             message="FFmpeg process failed to start",
-            client_id=self.client_id,
+            source_ip=self.client_id,
             exit_code=1,
         )
 
@@ -138,7 +138,7 @@ class TestDecoderRegistration:
     def test_get_stream_info_available_after_failed_start(self):
         """start() 失败后，get_stream_info() 必须返回流信息（供健康监控重连用）"""
         error = FFmpegError(
-            message="stream not available", client_id=self.client_id, exit_code=1
+            message="stream not available", source_ip=self.client_id, exit_code=1
         )
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
@@ -167,7 +167,7 @@ class TestDecoderRegistration:
     def test_metrics_registered_after_failed_start(self):
         """start() 失败后，self.metrics 中也应有记录"""
         error = FFmpegError(
-            message="stream not available", client_id=self.client_id, exit_code=1
+            message="stream not available", source_ip=self.client_id, exit_code=1
         )
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \

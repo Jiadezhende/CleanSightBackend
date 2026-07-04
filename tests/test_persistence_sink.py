@@ -24,7 +24,7 @@ def test_persist_alarms_reads_baked_stage():
     pm.persist_alarm = lambda d: captured.append(d) or True
 
     cq = MagicMock()
-    cq.get_task_id.return_value = 7
+    cq.task_id = 7
     cq.get_task.return_value = SimpleNamespace(current_step="1")
     cq.append_alarm_record_with_gate.return_value = True  # 过闸
 
@@ -48,7 +48,7 @@ def test_persist_alarms_gate_reject_skips_persist():
     pm.persist_alarm = lambda d: captured.append(d) or True
 
     cq = MagicMock()
-    cq.get_task_id.return_value = 7
+    cq.task_id = 7
     cq.get_task.return_value = SimpleNamespace(current_step="1")
     cq.append_alarm_record_with_gate.return_value = False  # 冷却窗口拦截
 
@@ -64,8 +64,8 @@ def test_flush_residual_segments_chunks_by_seg_len():
     pm.persist_hls_segment = lambda **kw: calls.append(kw) or True
 
     cq = MagicMock()
-    cq.get_task_id.return_value = 7
-    cq.get_step_id.return_value = 1
+    cq.task_id = 7
+    cq.step_id = 1
     cq.ca_segment_len = 10
     cq.drain_ca_raw.return_value = list(range(25))       # 25 → 3 段 (10,10,5)
     cq.drain_ca_processed.return_value = list(range(10))  # 10 → 1 段
@@ -85,7 +85,7 @@ def test_flush_residual_segments_missing_keys_early_return():
     pm.persist_hls_segment = MagicMock()
 
     cq = MagicMock()
-    cq.get_task_id.return_value = None  # 无 task_id → 早退
+    cq.task_id = None  # 无 task_id → 早退
     pm.flush_residual_segments(cq)
 
     pm.persist_hls_segment.assert_not_called()

@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 logger = logging.getLogger(__name__)
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
-from app.domain.frame import Frame
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.detection.service import ModelWorkerService
 from app.services.inference.temporal.actor import ClientTemporalActor
@@ -157,19 +156,6 @@ class InferenceManager:
 
     # ========== 公共 API ==========
 
-    def get_result(self, task_id: int) -> Optional[Frame]:
-        """返回最新处理帧（domain Frame）。
-
-        编码为 WS 载荷（JPEG base64）是边界职责，在 routers/ai.py 完成；
-        core 服务只交付 domain 对象。
-        """
-        if not client_manager.has_client(task_id):
-            return None
-        cq = client_manager.get(task_id)
-        if not cq:
-            return None
-        return cq.get_latest_result()
-
     def resolve_stage(self, current_step: Any) -> str:
         """step_id 主键直接作 stage（恒等路由，无映射表）；未知/未配回退 MOCK 透传。
 
@@ -212,7 +198,7 @@ class InferenceManager:
                 )
 
         # 3. 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
-        stage = cq.get_stage()
+        stage = cq.stage
         stage_cfg = self._get_stage_configs().get(stage, {})
         specs = stage_cfg.get("operator_specs", [])
 
@@ -271,7 +257,7 @@ class InferenceManager:
 
         # 关闭本 run 的 FeatureStore 分区（inference 自有组件；best-effort，此时 cq 仍在）
         try:
-            step_id = cq.get_step_id()
+            step_id = cq.step_id
             if task_id is not None and step_id is not None:
                 self.feature_store.close(task_id, step_id, owner=cq)
         except Exception as e:

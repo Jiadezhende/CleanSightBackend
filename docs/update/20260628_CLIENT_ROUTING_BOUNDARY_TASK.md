@@ -60,11 +60,19 @@
 **ship-green**：句柄与 client_id 并存过渡，写回改用句柄；仍 client_id 键。
 **验收**：重启同 `(task,step)` 时 late result 不落新 CQ（含 FeatureStore 分区不串台）；ModelWorkerService 无 ClientManager/CQ-map 依赖；`DetectionTask.stage` 与其 cq 身份始终一致。
 
-## T5 — 换键 client_id → task_id（ClientManager 降级 RunRegistry）
+## T5 — 换键 client_id → task_id（ClientManager 降级 RunRegistry）　✅ 已落地（2026-07-04）
 
 **依赖**：T3、T4　**量**：L（2–4d）　**风险**：中（call site 多、改测试最多）
 
-范围：
+> 落地记录见 [20260704_RUNKEY_TASKID_LANDING.md](20260704_RUNKEY_TASKID_LANDING.md)。要点：
+> 运行键 `source_ip(str) → run_key(str(task_id)) → task_id(int)` 两跳收敛为 **int 单键**（`run_key` 中间态已删，消 str/int 双身份）；
+> `ClientManager._runs`/`_task_locks`/`InferenceManager._actors`/`StreamService.decoders`/`HealthMonitor` 全 int 键；
+> **`get_client_by_task_id` 已删**（键即 task_id，调用方直接 `get(task_id)` O(1)）；`get_or_create`/`get_result` 死代码清除；
+> `CleaningTask` VO 删除，身份 primitives 直挂 CQ；CQ 构造上移 `RunController`，收敛为对称 `start_workflow(cq)`/`stop_workflow(cq)`；
+> 内部命名 `client_id→task_id`，诊断/异常字段升级为 `task_id+step_id+source_ip`（响应体 `client_id` wire 键不变、值=source_ip）；
+> 边界 `source_ip→run` 垫片（`find_by_source_ip`，匹配首个）保住 wire。`pytest tests/` 264 passed。
+
+范围（原计划，均已落地）：
 
 - [`ClientManager`](../../app/services/client/manager.py) → **RunRegistry**：`_clients` 键 `str→int(task_id)`；`get_client` 拆 `find_run(task_id)`（只查）与 `create_run(...)`（仅 start_run）；**删 `bind_task` / `_task_to_client` / `_client_to_task`**；
 - **Q2 结构化**：`registry[task_id]` 单槽位天然「一 task 一 run」，删扫描/索引；`get_client_by_task_id` 变直接取值；

@@ -144,10 +144,12 @@ class StreamService:
                     logger.warning(
                         f"[{task_id}] Stream already running, cannot start with different URL"
                     )
-                    _sip = existing.client_queues.source_ip if existing.client_queues else None
+                    _cq = existing.client_queues
                     raise ConflictError(
                         message=f"Stream already running for task {task_id}. Stop it first to change stream URL.",
-                        client_id=_sip,   # 诊断字段（错误响应），语义=source_ip
+                        task_id=task_id,
+                        step_id=_cq.step_id if _cq else None,
+                        source_ip=_cq.source_ip if _cq else None,
                         resource_type="Stream",
                         resource_id=str(task_id),
                     )
@@ -262,10 +264,12 @@ class StreamService:
             StreamConnectionError: 注册失败
         """
         if decoder.proc is None or decoder.proc.stdout is None:
-            _sip = decoder.client_queues.source_ip if decoder.client_queues else None
+            _cq = decoder.client_queues
             raise StreamConnectionError(
                 url=decoder.stream_url,
-                client_id=_sip,   # 诊断字段，语义=source_ip
+                task_id=decoder.task_id,
+                step_id=_cq.step_id if _cq else None,
+                source_ip=_cq.source_ip if _cq else None,
                 details="Cannot register to selector: process or stdout is None",
             )
 
@@ -494,7 +498,7 @@ class StreamService:
             if client_manager is None or not client_manager.has_client(task_id):
                 raise StreamConnectionError(
                     url=stream_url,
-                    client_id=None,   # 诊断字段，语义=source_ip；此刻无 cq 故 None
+                    task_id=task_id,   # 此刻无 cq，step_id/source_ip 缺省 None
                     details="Cannot restart stream: no ClientQueues",
                 )
 

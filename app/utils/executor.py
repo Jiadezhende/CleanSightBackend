@@ -57,7 +57,7 @@ class GuardedExecutor:
         # 业务代码（纯净，只抛异常）
         def start_ffmpeg(url: str):
             if not self._validate_url(url):
-                raise StreamConnectionError(url=url, client_id=self.client_id)
+                raise StreamConnectionError(url=url, task_id=self.task_id)
             # ... FFmpeg 启动逻辑
 
         # 服务层调用（框架边界层处理重试）

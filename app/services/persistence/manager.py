@@ -147,11 +147,11 @@ class PersistenceManager:
         task_id/step_id 由 cq 派生（缺失早退）。须在 cq.close() 释放帧之前调（RunController 保证）。
         （原 InferenceManager._flush_all_remaining_segments 迁入——切段是持久化领域知识。）
         """
-        task_id = cq.get_task_id()
+        task_id = cq.task_id
         if task_id is None:
             logger.warning("[persistence] flush_residual_segments: task_id is None, skip")
             return
-        step_id = cq.get_step_id()
+        step_id = cq.step_id
         if step_id is None:
             logger.error(
                 "[persistence] flush_residual_segments: step_id is None (task_id=%s), skip", task_id
@@ -217,8 +217,8 @@ class PersistenceManager:
         顺序先内存后外部：内存日志供前端实时轮询，外部库本就 30s 批次。
         （原 inference/temporal/alarm_sink.persist_alarms 迁入——告警落库是持久化领域。）
         """
-        task_id = cq.get_task_id()
-        step_id = cq.get_step_id()
+        task_id = cq.task_id
+        step_id = cq.step_id
 
         for alarm in alarms:
             # 给产出方的同一份告警补 mode，再过闸门+入环形缓冲（seq 由其赋；stage 已烧）。

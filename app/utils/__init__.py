@@ -38,7 +38,6 @@ from .exceptions import (
     PersistenceError,
     StreamConnectionError,
     ValidationError,
-    get_client_id_from_exception,
     is_fatal_error,
     is_retryable_error,
 )
@@ -63,7 +62,6 @@ __all__ = [
     "ValidationError",
     "is_retryable_error",
     "is_fatal_error",
-    "get_client_id_from_exception",
     # Decorators (仅用于日志)
     "log_call",
     "timing",

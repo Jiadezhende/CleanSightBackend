@@ -106,9 +106,9 @@ def test_close_releases_payload_keeps_identity():
     assert cq.get_recent_alarms() == []
     assert cq.get_latest_inference() is None
     # 身份小壳保留（供 fence/日志）
-    assert cq.get_task_id() == 1
-    assert cq.get_step_id() == 1
-    assert cq.get_stage() == "1"
+    assert cq.task_id == 1
+    assert cq.step_id == 1
+    assert cq.stage == "1"
 
 
 def test_clear_is_close_alias():

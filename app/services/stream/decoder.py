@@ -93,6 +93,15 @@ class FFmpegDecoder:
         ]
         return cmd
 
+    def _err_identity(self) -> dict:
+        """异常身份三元组：task_id（路由）+ step_id/source_ip（从 cq 派生，None 守卫）。"""
+        cq = self.client_queues
+        return {
+            "task_id": self.task_id,
+            "step_id": cq.step_id if cq else None,
+            "source_ip": cq.source_ip if cq else None,
+        }
+
     def start(self):
         with self.lock:
             if self.proc is not None and self.proc.poll() is None:
@@ -112,7 +121,7 @@ class FFmpegDecoder:
                 self.logger.exception("ffmpeg binary not found")
                 raise FFmpegError(
                     message=f"FFmpeg binary not found: {FFMPEG_BIN}",
-                    client_id=(self.client_queues.source_ip if self.client_queues else None),
+                    **self._err_identity(),
                 )
 
             # set non-blocking on POSIX
@@ -157,7 +166,7 @@ class FFmpegDecoder:
                     self.logger.debug("FFmpeg: stream not available — %s", last_line)
                     raise StreamConnectionError(
                         url=self.stream_url,
-                        client_id=(self.client_queues.source_ip if self.client_queues else None),
+                        **self._err_identity(),
                         details=last_line or None,
                     )
                 self.logger.error(
@@ -165,7 +174,7 @@ class FFmpegDecoder:
                 )
                 raise FFmpegError(
                     message=f"FFmpeg process failed to start (exit_code={exit_code})",
-                    client_id=(self.client_queues.source_ip if self.client_queues else None),
+                    **self._err_identity(),
                     exit_code=exit_code,
                 )
 

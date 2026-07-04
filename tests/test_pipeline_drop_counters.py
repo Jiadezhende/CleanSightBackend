@@ -28,7 +28,7 @@ def test_stage_queue_drop_counted_when_full():
     cm.snapshot.return_value = {"c1": cq}
 
     # 预填满该 stage 队列到 maxlen
-    stage = cq.get_stage()
+    stage = cq.stage
     q = dispatcher._stage_queues[stage]
     for _ in range(q.maxlen):
         q.append(MagicMock())
@@ -49,7 +49,7 @@ def test_stage_queue_no_drop_when_not_full():
 
     dispatcher._fetch_and_dispatch_round()
 
-    assert dispatcher.get_stage_drops().get(cq.get_stage(), 0) == 0
+    assert dispatcher.get_stage_drops().get(cq.stage, 0) == 0
 
 
 def test_ca_processed_drop_counted_on_overflow():

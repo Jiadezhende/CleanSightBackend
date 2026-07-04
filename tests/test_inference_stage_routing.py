@@ -32,7 +32,7 @@ def test_resolve_stage_routes(manager, step, expected_stage):
 def _fake_cq(task_id=1, stage="1", step_id=None):
     cq = MagicMock()
     cq.task_id = task_id
-    cq.get_stage.return_value = stage
+    cq.stage = stage
     cq.step_id = step_id
     return cq
 
@@ -60,5 +60,5 @@ def test_real_manager_init_invariants_and_stop_workflow_smoke():
     # 无 actor、feature close 空跑 → 返回空 settlement、不抛
     cq = MagicMock()
     cq.task_id = 999
-    cq.get_step_id.return_value = None
+    cq.step_id = None
     assert m.stop_workflow(cq) == []

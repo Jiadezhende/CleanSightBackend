@@ -28,7 +28,7 @@ async def test_task_message_task_not_in_memory_returns_empty(monkeypatch):
     from app.routers import task as task_router
 
     fake_manager = MagicMock()
-    fake_manager.get_client_by_task_id.return_value = None
+    fake_manager.get.return_value = None
     monkeypatch.setattr(task_router, "client_manager", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
@@ -69,7 +69,7 @@ async def test_task_message_running_returns_increment(monkeypatch):
     }
 
     fake_manager = MagicMock()
-    fake_manager.get_client_by_task_id.return_value = cq
+    fake_manager.get.return_value = cq
     monkeypatch.setattr(task_router, "client_manager", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
@@ -80,5 +80,5 @@ async def test_task_message_running_returns_increment(monkeypatch):
     payload = resp.json()
     assert payload["max_seq"] == 2
     assert payload["alarms"][0]["seq"] == 2
-    fake_manager.get_client_by_task_id.assert_called_once_with(1)
+    fake_manager.get.assert_called_once_with(1)
     cq.get_task_alarm_message.assert_called_once_with(task_id=1, since_seq=1)

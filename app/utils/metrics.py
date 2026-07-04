@@ -95,7 +95,7 @@ frame_drop_total = Counter(
 示例：
     if frame is None:
         frame_drop_total.labels(reason='decode_failed').inc()
-        raise FrameDrop(client_id='client_1', reason='decode_failed')
+        raise FrameDrop(task_id=1, reason='decode_failed')
 """
 
 

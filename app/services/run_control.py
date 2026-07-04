@@ -81,7 +81,10 @@ class RunController:
             # 2c. start_workflow（换槽注册 + open_fresh + Actor）
             if not inference_manager.start_workflow(cq):
                 raise AppError(
-                    message=f"Failed to start workflow for task {task_id}", client_id=source_ip
+                    message=f"Failed to start workflow for task {task_id}",
+                    task_id=task_id,
+                    step_id=cq.step_id,
+                    source_ip=source_ip,
                 )
             logger.info("[RunController] workflow started: task_id=%s", task_id)
 

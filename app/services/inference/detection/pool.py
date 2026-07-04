@@ -102,9 +102,14 @@ class MultiModelWorkerPool:
         n = len(batch)
         frames = [req.frame for req in batch]
 
-        # 构造错误上下文（每帧一个）：client_id 为诊断字段，语义=source_ip（从捕获的 cq 取）
+        # 构造错误上下文（每帧一个）：从捕获的 cq 派生运行坐标（task_id/step_id）+ source_ip（辅助）
         contexts = [
-            {"client_id": req.cq.source_ip if req.cq else None} for req in batch
+            {
+                "task_id": req.task_id,
+                "step_id": req.cq.step_id if req.cq else None,
+                "source_ip": req.cq.source_ip if req.cq else None,
+            }
+            for req in batch
         ]
 
         # 并行执行所有模型的 infer_batch

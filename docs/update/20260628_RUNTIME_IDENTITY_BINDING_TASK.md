@@ -1,7 +1,7 @@
 # 运行身份与绑定关系建模任务：厘清 client / task / step / run
 
-> **变更状态**：T1/T2/T3/T4 已落地（2026-07-02）　<!-- 契约已拍板；本文件是落地路线的契约 hub -->
-> **知识库**：T4 写回句柄化（dispatcher 捕获 CQ 句柄，写回 res.cq 不反查）+ FeatureStore 归属校验（store 内以 cq 对象引用为 owner，锁下串行 set/check/落盘，闭合 supersede TOCTOU）已落地，可沉淀
+> **变更状态**：T1–T5 已落地（2026-07-04）；T6（对外 wire）暂缓待前端　<!-- 契约已拍板；本文件是落地路线的契约 hub -->
+> **知识库**：T5 换键落地——运行键收敛为 int `task_id` 单键（`run_key` 中间态已删），`CleaningTask` VO 删除、身份 primitives 直挂 CQ，CQ 构造上移 RunController（`start_workflow(cq)`），诊断/异常字段升级 `task_id+step_id+source_ip`、对外 wire 保 source_ip 不变（`find_by_source_ip` 垫片）。详见 [20260704_RUNKEY_TASKID_LANDING.md](20260704_RUNKEY_TASKID_LANDING.md)
 >
 > 落地现状见文末 [§落地现状（2026-07-02）](#落地现状2026-07-02)。
 >
@@ -126,8 +126,8 @@ _teardown_run(task_id, expected=cq):   # api 控制面，持 per-task threading 
 | T2 | CQ 状态机 ACTIVE/DRAINING/CLOSED + 写入门 + close() 释放重数据 | CQ 生命周期 | T1 | L | ✅ 已落地（纯 queues.py，门由单测覆盖） |
 | T3 | `stop_run` 单一出口 + per-client `lock_for` 锁 + 合并两份重复 + HealthMonitor 自动结束 | CQ 生命周期 | T2 | M/L | ✅ 已落地（编排 + 收尾：DRAINING 置位 + HM 对象身份 fence） |
 | T4 | 写回句柄化（dispatcher 捕获 CQ 句柄，写回不反查，ModelWorker 去 CQ） | 换键与路由 | T2 | M | ✅ 已落地（2026-07-02，见 [§T4 评审](#t4-评审2026-07-02)） |
-| T5 | 换键 `client_id→task_id`，ClientManager 降级 RunRegistry，Q2 结构化（bind_task/双向索引已由 COW 重构提前删除） | 换键与路由 | T3, T4 | L | ⬜ 未开始 |
-| T6 | 边界 wire（WS/terminate 改 task_id，撤垫片，import 审计）需前端协调 | 换键与路由 | T5 | M | ⬜ 未开始 |
+| T5 | 换键 `client_id→task_id`，ClientManager 降级 RunRegistry，Q2 结构化（bind_task/双向索引已由 COW 重构提前删除） | 换键与路由 | T3, T4 | L | ✅ 已落地（2026-07-04，见 [20260704_RUNKEY_TASKID_LANDING.md](20260704_RUNKEY_TASKID_LANDING.md)） |
+| T6 | 边界 wire（WS/terminate 改 task_id，撤垫片，import 审计）需前端协调 | 换键与路由 | T5 | M | ⏸ 暂缓（wire 保 source_ip 不变，靠 `find_by_source_ip` 垫片；待前端协调后迁移） |
 
 依赖图：
 

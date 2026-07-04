@@ -69,7 +69,7 @@ async def test_concurrent_start_same_task_idempotent():
 
     call_count = {"has_client": 0}
     mock_cq = MagicMock()
-    mock_cq.get_task_id.return_value = 1
+    mock_cq.task_id = 1
     mock_cq.current_step = "0"  # 幂等比对读 old_cq.current_step
 
     def has_client_side_effect(cid):
@@ -124,7 +124,7 @@ async def test_same_task_url_change_triggers_restart():
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
 
     mock_cq = MagicMock()
-    mock_cq.get_task_id.return_value = 1
+    mock_cq.task_id = 1
     mock_cq.current_step = "0"  # step 同，但下方 URL 不同 → 非幂等，触发重启
 
     with (

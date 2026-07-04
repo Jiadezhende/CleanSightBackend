@@ -32,9 +32,8 @@ class ClientManager:
     键 = **`task_id`(int)**（由 RunController 决定并传入）；CQ 由 RunController 建好后
     `set` 换槽，本类只做哑存储、不建 CQ。
 
-    读接口（无锁）：`get`(只读按键) / `has_client` / `snapshot`(零拷贝只读视图)
-      / `get_client_by_task_id`(直取,同 get) / `find_by_source_ip`(扫描,匹配首个)
-      / `get_all_queue_depths` / `get_client_count` / `get_status_summary`。
+    读接口（无锁）：`get`(按 task_id 直取,O(1)) / `has_client` / `snapshot`(零拷贝只读视图)
+      / `find_by_source_ip`(扫描,匹配首个) / `get_all_queue_depths` / `get_client_count` / `get_status_summary`。
     写接口（`_wlock` + COW 换引用）：`set`(换槽) / `remove` / `remove_if` / `clear_all`。
     """
 
@@ -82,10 +81,6 @@ class ClientManager:
     def has_client(self, task_id: int) -> bool:
         """检查该 task 是否有活跃 run（无锁）。"""
         return task_id in self._runs
-
-    def get_client_by_task_id(self, task_id: int) -> Optional[ClientQueues]:
-        """按 task_id 直取 ClientQueues（键即 task_id，O(1)；等价 get）。"""
-        return self._runs.get(task_id)
 
     def find_by_source_ip(self, source_ip: str) -> Optional[ClientQueues]:
         """按 source_ip 查 ClientQueues（扫描当前快照，**匹配首个**命中）。

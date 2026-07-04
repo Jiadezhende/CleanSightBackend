@@ -440,7 +440,7 @@ class GlobalHealthMonitor:
 
     def _handle_task_timeout(self, task_id: int, cq, task_age: float):
         """处理任务超时：仅执行运维治理动作，不产出业务告警。"""
-        task_id = cq.get_task_id()
+        task_id = cq.task_id
         hours = task_age / 3600
         max_hours = self.config.task_max_duration / 3600
 

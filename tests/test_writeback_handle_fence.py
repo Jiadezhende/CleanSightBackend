@@ -21,7 +21,7 @@ def _result(cq: ClientQueues, ts: float = 1.0) -> FrameInference:
     )
     return FrameInference(
         task_id=cq.task_id,
-        stage=cq.get_stage(),
+        stage=cq.stage,
         timestamp=ts,
         detections={"bubble": dets},
         cq=cq,

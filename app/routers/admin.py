@@ -24,7 +24,7 @@ def _client_info(client_id: int, client_queues) -> dict:
     depths = client_queues.get_queue_depths()
     return {
         "client_id": client_id,  # 注册表键 = task_id(int)
-        "task_id": client_queues.get_task_id(),
+        "task_id": client_queues.task_id,
         "source_ip": client_queues.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
         "task_status": client_queues.status,
         "current_step": client_queues.current_step,
@@ -145,7 +145,11 @@ def _quantile(sorted_buckets: list, q: float, total: float) -> float:
 
 @router.get("/overview")
 def get_overview():
-    """聚合仪表盘：活跃客户端、队列深度。前端每 3s 轮询。"""
+    """聚合仪表盘：活跃 run（任务）、队列深度。前端每 3s 轮询。
+
+    换键后注册表键即 task_id，一条目 = 一个活跃 run；响应键 `clients`/`client_id`
+    沿用旧名（admin 页 wire，值为 task_id），语义已是 run/任务。
+    """
     all_clients = client_manager.snapshot()
     clients_info = [_client_info(cid, q) for cid, q in all_clients.items()]
     total_queued = sum(
@@ -164,14 +168,17 @@ def get_overview():
 
 @router.get("/clients")
 def get_clients():
-    """活跃客户端列表（轻量），供前端下拉框使用。"""
+    """活跃 run（任务）列表（轻量），供前端下拉框使用。
+
+    一 run 一 CQ = `registry[task_id]`；响应/路径的 `clients`·`client_id` 为 admin 页 wire 旧名（值=task_id）。
+    """
     all_clients = client_manager.snapshot()
     return [_client_info(cid, q) for cid, q in all_clients.items()]
 
 
 @router.get("/clients/{client_id}/alarms")
 def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
-    """从内存告警日志读取该客户端最近 n 条告警（不走 DB）。"""
+    """从内存告警日志读取该 run（task_id）最近 n 条告警（不走 DB）。"""
     if not client_manager.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
     cq = client_manager.get(client_id)

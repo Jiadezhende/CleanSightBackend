@@ -333,13 +333,6 @@ class ClientQueues:
                 return self.latest_raw_frame.copy()
             return None
 
-    def get_task_id(self) -> Optional[int]:
-        return self.task_id  # 不可变身份，免锁
-
-    def get_step_id(self) -> Optional[int]:
-        """当前 step_id（落盘目录键，与 HLS 同源）；未绑定/非法返回 None。"""
-        return self.step_id
-
     def to_status_dict(self) -> dict:
         return {
             "ca_ready": len(self.ca_ready),
@@ -461,11 +454,8 @@ class ClientQueues:
         """从推理队列弹出一帧（FIFO，无锁 SPSC）"""
         return self.ca_ready.popleft() if self.ca_ready else None
 
-    # --- 阶段（不可变身份，构造注入）---
-
-    def get_stage(self) -> str:
-        """当前处理阶段（不可变，免锁）。"""
-        return self.stage
+    # 身份字段（task_id/step_id/current_step/status/source_ip/stage）均为构造定死的不可变
+    # 公有属性，直读即可——不再提供 get_* 包装（避免只覆盖一部分、直连/getter 混用的不一致）。
 
     # --- slide_window 操作 ---
 
@@ -632,7 +622,7 @@ class ClientQueues:
 
     def get_frontend_message(self) -> Dict[str, Any]:
         """打包阶段 + latest_temporal + 检测状态 + 告警，供前端读取。"""
-        stage = self.get_stage()
+        stage = self.stage
         events = self.get_latest_temporal()
         recent_alarms = self.get_recent_alarms(n=5)
 

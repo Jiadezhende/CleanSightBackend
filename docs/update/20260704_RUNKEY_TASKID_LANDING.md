@@ -31,7 +31,9 @@
 > 路由键改名后,「名叫 client_id、值却是 task_id」的语义漂移必须消除;但面向人的诊断/错误字段仍需可读的 source_ip。二者分离:
 
 - **路由键**：`StreamService`（`start/stop/restart_stream`、`_get_client_queues`、`get_all_client_ids`→**`get_all_task_ids`**）、`FFmpegDecoder`（形参/属性 `client_id`→`task_id`）、`GlobalHealthMonitor` 全链路、`DetectionTask`/`FrameInference.client_id`→`task_id`、Dispatcher/Worker 迭代变量 — 一律 `task_id`。
-- **诊断字段**（保留 `client_id` 名，值取 `cq.source_ip`）：异常 [`FFmpegError`/`StreamConnectionError`/`ConflictError`](../../app/services/stream/service.py)、[`persist_alarms(client_id=...)`](../../app/services/inference/temporal/actor.py)、[`RunController.stop_run`](../../app/services/run_control.py) 结果 dict、Pool 错误上下文 — 均改从捕获的 `cq.source_ip` 取值,不再拿路由键冒充。
+- **诊断字段**：分两步落地——
+  - 第一步（值锚定 source_ip）：`persist_alarms(client_id=...)`、[`RunController.stop_run`](../../app/services/run_control.py) 结果 dict、持久化 `AlarmRecord.client_id` 等，值改从捕获的 `cq.source_ip` 取，不再拿路由键冒充；
+  - 第二步（**异常身份升级**，2026-07-05）：[`exceptions.py`](../../app/utils/exceptions.py) 的 `AppError` 及 7 子类删 `client_id` 字段，改带 **`task_id`+`step_id`**（排障主键）+`source_ip`（辅助）；`__str__` 输出 `[task=..][step=..][source_ip=..]`；raise 现场从 cq 派生三元身份（decoder 加 `_err_identity()` 复用）；[`main.py`](../../app/main.py) handler 日志 `extra` 带三元、**响应体 `client_id` wire 键保留**（值=`exc.source_ip`）；删无调用方的 `get_client_id_from_exception`。
 
 ### 4. 边界垫片转正（source_ip → 当前 run，匹配首个）
 
@@ -76,4 +78,5 @@
 ## 后续 / 未决
 
 - 工单 T6「wire 改 `?task_id=`」**本次暂缓，未来迁移**：现阶段不动前端接口，source_ip wire 保持。迁移时在 [ai.py](../../app/routers/ai.py)/[api.py](../../app/routers/api.py) 加 `?task_id=` 并保留 source_ip 兼容期，前端切换后再撤 `find_by_source_ip` 垫片。
-- [`InferenceManager.get_result`](../../app/services/inference/manager.py) 自 ai.py 改走 `find_by_source_ip` 后已无调用方，属死代码，待独立清理。
+- ~~`InferenceManager.get_result` 死代码~~、~~`get_client_by_task_id` 冗余~~ 已清理（2026-07-05）：`get_result` 无调用方删除（连带 `Frame` import）；`get_client_by_task_id` 与 `get` 等价，调用方（[task.py](../../app/routers/task.py)）改直接 `get(task_id)` 后删除。
+- 可选：`ClientManager` → `RunRegistry` 类改名（纯 cosmetic，波及全仓 `client_manager` 单例 importer，暂未做）。
