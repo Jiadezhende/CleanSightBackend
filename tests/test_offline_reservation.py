@@ -23,7 +23,7 @@ def _make_result(ts: float, bubble_n: int, bending_n: int) -> FrameInference:
         ]
 
     return FrameInference(
-        client_id="c1",
+        task_id=1,
         stage="LEAK",
         timestamp=ts,
         detections={

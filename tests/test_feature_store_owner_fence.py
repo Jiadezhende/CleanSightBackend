@@ -18,7 +18,7 @@ def _result(ts: float, cls: str, n: int) -> FrameInference:
         for _ in range(n)
     ]
     return FrameInference(
-        client_id="c",
+        task_id=1,
         stage="3",
         timestamp=ts,
         detections={"bubble": FrameDetections(detections=dets, metadata={}, timestamp=ts)},

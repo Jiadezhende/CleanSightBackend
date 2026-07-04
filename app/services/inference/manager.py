@@ -60,7 +60,7 @@ class InferenceManager:
         self._model_worker_service: Optional[ModelWorkerService] = None
 
         # per-client ClientTemporalActor 注册表。
-        # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(client_id) per-client 锁承接
+        # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(task_id) per-task 锁承接
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
         self._actors: Dict[int, ClientTemporalActor] = {}
 
@@ -157,15 +157,15 @@ class InferenceManager:
 
     # ========== 公共 API ==========
 
-    def get_result(self, client_id: str) -> Optional[Frame]:
+    def get_result(self, task_id: int) -> Optional[Frame]:
         """返回最新处理帧（domain Frame）。
 
         编码为 WS 载荷（JPEG base64）是边界职责，在 routers/ai.py 完成；
         core 服务只交付 domain 对象。
         """
-        if not client_manager.has_client(client_id):
+        if not client_manager.has_client(task_id):
             return None
-        cq = client_manager.get(client_id)
+        cq = client_manager.get(task_id)
         if not cq:
             return None
         return cq.get_latest_result()
@@ -284,7 +284,7 @@ class InferenceManager:
 
     def status(self) -> Dict[str, Any]:
         clients = client_manager.snapshot()
-        stats = {client_id: cq.to_status_dict() for client_id, cq in clients.items()}
+        stats = {task_id: cq.to_status_dict() for task_id, cq in clients.items()}
         return {"clients": len(clients), "queues": stats}
 
     # ========== 启动/停止 ==========
@@ -333,22 +333,22 @@ class InferenceManager:
         # alarm.stage）。惰性 import 持久化单例（与 actor 实时路径同款 sink 调用）——此时 persistence
         # 仍在跑（persistence.lifespan 于 ai.lifespan 外层，停在 inference 之后）。
         from app.services.persistence import persistence_manager
-        for client_id, actor in actors:
+        for task_id, actor in actors:
             try:
                 settlement = actor.finalize_and_stop()
                 if settlement:
-                    cq = client_manager.get(client_id)
+                    cq = client_manager.get(task_id)
                     if cq:
                         persistence_manager.persist_alarms(
                             settlement,
                             cq=cq,
-                            client_id=client_id,
+                            client_id=cq.source_ip,   # 诊断字段，语义=source_ip
                             mode=ALARM_MODE_SETTLEMENT,
                         )
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] Settlement alarms on stop failed for %s: %s",
-                    client_id, e,
+                    "[InferenceManager] Settlement alarms on stop failed for task=%s: %s",
+                    task_id, e,
                 )
 
         # FeatureStore 全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，

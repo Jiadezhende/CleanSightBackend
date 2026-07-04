@@ -123,7 +123,7 @@ class ClientTemporalActor:
         persistence_manager.persist_alarms(
             alarms,
             cq=self._cq,
-            client_id=self._task_id,
+            client_id=self._cq.source_ip,   # 诊断字段，语义=source_ip
             mode=ALARM_MODE_REALTIME,
         )
 

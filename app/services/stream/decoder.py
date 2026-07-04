@@ -32,14 +32,14 @@ class FFmpegDecoder:
     def __init__(
         self,
         manager,
-        client_id: int,   # 运行键 = task_id；此处作日志/诊断标签（名沿用 client_id）
+        task_id: int,     # 运行键（路由标识）
         stream_url: str,
         decoder_config: Optional[DecoderConfig] = None,
         protocol_opts=None,
         client_queues=None,
     ):
         self.manager = manager
-        self.client_id = client_id
+        self.task_id = task_id
         self.stream_url = stream_url
 
         # 使用配置对象（如果未提供则使用默认配置）
@@ -70,7 +70,7 @@ class FFmpegDecoder:
         self.frames_written_to_raw = 0  # 新增：写入 CA-Raw-Queue 的帧数
         self.frames_written_to_ready = 0  # 新增：写入 CA-Ready-Queue 的帧数
         self.logger = logging.getLogger(
-            f"app.services.stream.decoder.FFmpegDecoder.{self.client_id}"
+            f"app.services.stream.decoder.FFmpegDecoder.{self.task_id}"
         )
 
     def _build_cmd(self):
@@ -112,7 +112,7 @@ class FFmpegDecoder:
                 self.logger.exception("ffmpeg binary not found")
                 raise FFmpegError(
                     message=f"FFmpeg binary not found: {FFMPEG_BIN}",
-                    client_id=self.client_id,
+                    client_id=(self.client_queues.source_ip if self.client_queues else None),
                 )
 
             # set non-blocking on POSIX
@@ -157,7 +157,7 @@ class FFmpegDecoder:
                     self.logger.debug("FFmpeg: stream not available — %s", last_line)
                     raise StreamConnectionError(
                         url=self.stream_url,
-                        client_id=self.client_id,
+                        client_id=(self.client_queues.source_ip if self.client_queues else None),
                         details=last_line or None,
                     )
                 self.logger.error(
@@ -165,14 +165,14 @@ class FFmpegDecoder:
                 )
                 raise FFmpegError(
                     message=f"FFmpeg process failed to start (exit_code={exit_code})",
-                    client_id=self.client_id,
+                    client_id=(self.client_queues.source_ip if self.client_queues else None),
                     exit_code=exit_code,
                 )
 
             self._stderr_thread = threading.Thread(
                 target=self._read_stderr_loop,
                 daemon=True,
-                name=f"stderr-{self.client_id}",
+                name=f"stderr-{self.task_id}",
             )
             self._stderr_thread.start()
 
@@ -180,7 +180,7 @@ class FFmpegDecoder:
                 self._reader_thread = threading.Thread(
                     target=self._windows_reader_loop,
                     daemon=True,
-                    name=f"reader-{self.client_id}",
+                    name=f"reader-{self.task_id}",
                 )
                 self._reader_thread.start()
 
@@ -319,7 +319,7 @@ class FFmpegDecoder:
                 std = arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
 
                 # 2. 背压检测（检查 CA-Ready-Queue 而非 CA-Raw-Queue）
-                pending_count = self.manager.get_pending_count(self.client_id)
+                pending_count = self.manager.get_pending_count(self.task_id)
 
                 # 获取队列容量
                 queue_capacity = 0

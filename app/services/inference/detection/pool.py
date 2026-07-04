@@ -102,8 +102,10 @@ class MultiModelWorkerPool:
         n = len(batch)
         frames = [req.frame for req in batch]
 
-        # 构造上下文（每帧一个）
-        contexts = [{"client_id": req.client_id} for req in batch]
+        # 构造错误上下文（每帧一个）：client_id 为诊断字段，语义=source_ip（从捕获的 cq 取）
+        contexts = [
+            {"client_id": req.cq.source_ip if req.cq else None} for req in batch
+        ]
 
         # 并行执行所有模型的 infer_batch
         if self.use_cuda_stream:
@@ -120,7 +122,7 @@ class MultiModelWorkerPool:
             per_frame_results = model_results[i] if i < len(model_results) else {}
 
             result = FrameInference(
-                client_id=req.client_id,
+                task_id=req.task_id,
                 stage=req.stage,
                 timestamp=req.timestamp,
                 detections=per_frame_results,

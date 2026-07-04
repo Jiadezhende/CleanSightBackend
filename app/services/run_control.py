@@ -81,13 +81,13 @@ class RunController:
             # 2c. start_workflow（换槽注册 + open_fresh + Actor）
             if not inference_manager.start_workflow(cq):
                 raise AppError(
-                    message=f"Failed to start workflow for task {task_id}", client_id=task_id
+                    message=f"Failed to start workflow for task {task_id}", client_id=source_ip
                 )
             logger.info("[RunController] workflow started: task_id=%s", task_id)
 
             # 2d. 起流（decoder 键 = task_id，与注册表一致）
             stream_service.start_stream(
-                client_id=task_id, stream_url=rtsp_url, fps=fps, protocol="RTSP"
+                task_id=task_id, stream_url=rtsp_url, fps=fps, protocol="RTSP"
             )
             logger.info("[RunController] stream started: task_id=%s", task_id)
 
@@ -119,7 +119,7 @@ class RunController:
         """
         with client_manager.lock_for(task_id):
             result: Dict[str, Any] = {
-                "client_id": task_id,   # 诊断字段（保键名兼容），值为 task_id
+                "client_id": None,   # 诊断字段（保键名兼容），语义=source_ip，取到 cq 后回填
                 "reason": reason,
                 "decoder_stopped": False,
                 "data_flushed": False,
@@ -128,6 +128,8 @@ class RunController:
             }
 
             cq = client_manager.get(task_id)
+            if cq is not None:
+                result["client_id"] = cq.source_ip
 
             # 0. 对象身份 fence：拆除前先核对槽位仍是当初决策捕获的 cq——不是则整段放弃，
             #    避免误停/误清「同键新实例」（被 /start 抢占重启后装入的新 run）。
@@ -168,7 +170,7 @@ class RunController:
                         persistence_manager.persist_alarms(
                             settlement,
                             cq=cq,
-                            client_id=task_id,
+                            client_id=cq.source_ip,   # 诊断字段，语义=source_ip
                             mode=ALARM_MODE_SETTLEMENT,
                             log_each=True,
                         )

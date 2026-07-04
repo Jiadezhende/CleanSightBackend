@@ -155,10 +155,10 @@ class ClientManager:
         `cleanup` 在换引用之后、锁外执行（不占写锁）。
 
         Returns:
-            {client_id, removed, cleaned, error}（client_id 键名沿用，值为 task_id）
+            {task_id, removed, cleaned, error}
         """
         result: Dict[str, Any] = {
-            "client_id": task_id,
+            "task_id": task_id,
             "removed": False,
             "cleaned": False,
             "error": None,
@@ -219,7 +219,7 @@ class ClientManager:
             result = self.remove(task_id, cleanup=True)
             results.append(
                 {
-                    "client_id": task_id,
+                    "task_id": task_id,
                     "success": result["removed"] and result["cleaned"],
                     "error": result.get("error"),
                 }

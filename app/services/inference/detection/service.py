@@ -282,8 +282,8 @@ class ModelWorkerService:
                 # 迟到结果：捕获的 run 已被拆除/结算（DRAINING/CLOSED），整条丢弃并计数。
                 frame_drop_total.labels(reason="stale_run").inc()
                 logger.debug(
-                    "[Worker] Skip write-back for stale run: client=%s state=%s",
-                    res.client_id, cq.get_state().name,
+                    "[Worker] Skip write-back for stale run: task=%s state=%s",
+                    res.task_id, cq.get_state().name,
                 )
                 continue
 

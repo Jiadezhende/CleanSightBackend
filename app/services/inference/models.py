@@ -33,11 +33,11 @@ class DetectionTask:
     """推理请求（队列作业）：对某 client/stage 的某帧做检测。
 
     cq 为 dispatcher 在 pop 帧时捕获的 per-run CQ 句柄，随 batch 透传到 FrameInference，
-    供写回凭它投递而**不按 client_id 反查**（消除 dispatch→infer→write-back 期间换槽的跨 run 串台）。
-    client_id 为被动/诊断字段（值 = 运行键 task_id），仅日志用；路由靠 cq 句柄。
+    供写回凭它投递而**不按键反查**（消除 dispatch→infer→write-back 期间换槽的跨 run 串台）。
+    task_id 为运行键（路由标识），随句柄同行，仅日志/诊断用；路由靠 cq 句柄。
     """
 
-    client_id: int
+    task_id: int
     stage: str
     timestamp: float
     frame: np.ndarray
@@ -54,7 +54,7 @@ class FrameInference:
     cq→_latest_inference→cq 自引用环，benign（GC 处理循环，close() 释放 payload 时断开）。
     """
 
-    client_id: int
+    task_id: int
     stage: str
     timestamp: float
     detections: Dict[str, FrameDetections]

@@ -63,7 +63,7 @@ GlobalHealthMonitor（全局单例）
 class GlobalHealthMonitor:
     def _check_all_clients(self):
         """检查所有客户端的健康状态（含孤儿流检测）"""
-        active_decoders = set(self._stream_service.get_all_client_ids())
+        active_decoders = set(self._stream_service.get_all_task_ids())
 
         for client_id, cq in all_clients.items():
             has_decoder = client_id in active_decoders

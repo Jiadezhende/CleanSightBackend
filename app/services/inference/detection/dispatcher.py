@@ -126,7 +126,7 @@ class StageAwareDispatcher:
         # 动态获取客户端列表（实时同步，无需刷新）
         # ClientManager.snapshot() 返回字典副本，迭代安全
         clients = self._client_manager.snapshot()
-        for client_id, cq in clients.items():
+        for task_id, cq in clients.items():
             # 从 ca_ready 队列取一帧（FIFO，保证公平）
             # 使用封装方法，避免直接访问内部队列
             frame_data = cq.pop_ca_ready()
@@ -134,13 +134,13 @@ class StageAwareDispatcher:
                 # 队列为空或并发场景下被其他线程取走
                 continue
 
-            # 获取该客户端当前的 stage
-            stage = self._get_client_stage(client_id, cq)
+            # 获取该 run 当前的 stage
+            stage = self._get_client_stage(task_id, cq)
 
             # 构造推理请求：捕获该 CQ 句柄随请求同行，写回凭它投递、不反查
             # （cq 即当前 snapshot 迭代出的对象，与 pop_ca_ready()/get_stage() 同源）。
             req = DetectionTask(
-                client_id=client_id,
+                task_id=task_id,
                 stage=stage,
                 timestamp=frame_data.timestamp,
                 frame=frame_data.frame,
@@ -157,8 +157,8 @@ class StageAwareDispatcher:
                 self._stats["total_dispatched"] += 1
                 self._stats["by_stage"][stage] += 1
 
-    def _get_client_stage(self, client_id: str, cq: ClientQueues) -> str:
-        """获取客户端当前所处的 stage。"""
+    def _get_client_stage(self, task_id: int, cq: ClientQueues) -> str:
+        """获取该 run 当前所处的 stage。"""
         return cq.get_stage()
 
     def get_batch_for_stage(
@@ -262,14 +262,14 @@ class StageAwareDispatcher:
             # client 段：ca_processed 深度/容量/累计丢帧(delta)
             client_parts: List[str] = []
             processed_drops: Dict[str, int] = {}
-            for client_id, cq in self._client_manager.snapshot().items():
+            for task_id, cq in self._client_manager.snapshot().items():
                 cum = cq.frames_dropped_processed
-                processed_drops[client_id] = cum
-                delta = cum - self._last_logged_processed_drops.get(client_id, 0)
+                processed_drops[task_id] = cum
+                delta = cum - self._last_logged_processed_drops.get(task_id, 0)
                 if delta > 0:
                     pressured = True
                 client_parts.append(
-                    f"{client_id} ca_processed={cq.get_ca_processed_length()}/"
+                    f"{task_id} ca_processed={cq.get_ca_processed_length()}/"
                     f"{cq.get_ca_processed_capacity()} drop={cum}(+{delta})"
                 )
 

@@ -37,13 +37,13 @@ def _make_monitor(client_id: str, mock_cq, active_decoder_ids: set) -> GlobalHea
     Args:
         client_id: 被测客户端 ID
         mock_cq: mock 的 ClientQueues（需设置 latest_raw_timestamp）
-        active_decoder_ids: 模拟 stream_service.get_all_client_ids() 的返回值
+        active_decoder_ids: 模拟 stream_service.get_all_task_ids() 的返回值
     """
     mock_cm = MagicMock()
     mock_cm.snapshot.return_value = {client_id: mock_cq}
 
     mock_ss = MagicMock()
-    mock_ss.get_all_client_ids.return_value = active_decoder_ids
+    mock_ss.get_all_task_ids.return_value = active_decoder_ids
     mock_ss.get_stream_info.return_value = {
         "url": "rtsp://127.0.0.1:8554/test",
         "fps": 30,

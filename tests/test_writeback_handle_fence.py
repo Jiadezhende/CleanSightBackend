@@ -20,7 +20,7 @@ def _result(cq: ClientQueues, ts: float = 1.0) -> FrameInference:
         timestamp=ts,
     )
     return FrameInference(
-        client_id=cq.source_ip,
+        task_id=cq.task_id,
         stage=cq.get_stage(),
         timestamp=ts,
         detections={"bubble": dets},
