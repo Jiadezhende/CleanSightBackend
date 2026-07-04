@@ -43,6 +43,10 @@ class RunController:
         `lock_for(task_id)`，与拆除互斥。幂等命中直接返回；start_workflow 失败抛 AppError。
         CQ 在此构造（编排者持有构造职责），身份含 source_ip 被动字段；stage 由 inference 解析。
         """
+        # 边界层解析：字符串 current_step（DB clean_task.current_step）→ int step_id 一次转换。
+        # DB 列恒为数字串，非数字属坏数据 → int() 抛 ValueError，走 L3 api 异常处理快速失败。
+        step_id = int(current_step)
+
         with client_manager.lock_for(task_id):
             # 2a. 幂等 / 重启清理（同 task_id 同槽位；不同 task_id 走不同键，天然并发）
             if client_manager.has_client(task_id):
@@ -50,7 +54,7 @@ class RunController:
                 if old_cq is not None:
                     cur_url = (stream_service.get_stream_info(task_id) or {}).get("url")
                     # 完全相同（step / URL 均未变）才幂等返回，否则全量重建
-                    if old_cq.current_step == current_step and cur_url == rtsp_url:
+                    if old_cq.step_id == step_id and cur_url == rtsp_url:
                         logger.info(
                             "[RunController] start_run idempotent: task=%s", task_id
                         )
@@ -63,7 +67,7 @@ class RunController:
                     # 字段变化（改 step/url）→ 停旧 run，全量重建（重入 lock_for，无害）
                     logger.info(
                         "[RunController] start_run restart: task=%s (step %s->%s)",
-                        task_id, old_cq.current_step, current_step,
+                        task_id, old_cq.step_id, step_id,
                     )
                     self.stop_run(task_id, reason=f"restart:{task_id}")
 
@@ -71,8 +75,7 @@ class RunController:
             stage = inference_manager.resolve_stage(current_step)
             cq = ClientQueues(
                 task_id=task_id,
-                current_step=current_step,
-                status="running",
+                step_id=step_id,
                 source_ip=source_ip,
                 stage=stage,
                 **get_client_config().cq_kwargs(),

@@ -11,7 +11,7 @@ from app.services.client.queues import ClientQueues, RunState
 
 
 def _cq():
-    return ClientQueues(task_id=1, current_step="1", source_ip="c1", stage="1")
+    return ClientQueues(task_id=1, step_id=1, source_ip="c1", stage="1")
 
 
 def _frame():

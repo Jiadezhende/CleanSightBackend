@@ -17,7 +17,7 @@ from app.services.run_control import run_controller
 
 def _cq(task_id=1, step="1", source_ip="10.9.9.9"):
     return ClientQueues(
-        task_id=task_id, current_step=step, source_ip=source_ip, stage=step,
+        task_id=task_id, step_id=int(step), source_ip=source_ip, stage=step,
     )
 
 

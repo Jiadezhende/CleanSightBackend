@@ -70,7 +70,7 @@ async def test_concurrent_start_same_task_idempotent():
     call_count = {"has_client": 0}
     mock_cq = MagicMock()
     mock_cq.task_id = 1
-    mock_cq.current_step = "0"  # 幂等比对读 old_cq.current_step
+    mock_cq.step_id = 0  # 幂等比对读 old_cq.step_id（= int(db.current_step)）
 
     def has_client_side_effect(cid):
         call_count["has_client"] += 1
@@ -125,7 +125,7 @@ async def test_same_task_url_change_triggers_restart():
 
     mock_cq = MagicMock()
     mock_cq.task_id = 1
-    mock_cq.current_step = "0"  # step 同，但下方 URL 不同 → 非幂等，触发重启
+    mock_cq.step_id = 0  # step 同，但下方 URL 不同 → 非幂等，触发重启
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),

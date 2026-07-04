@@ -65,7 +65,7 @@ class ClientQueues:
       _task_lock → _raw_lock → _viz_lock → _inference_lock
       → _frontend_lock → _slide_window_lock → _alarm_lock
 
-    身份（task_id/step_id/current_step/source_ip/stage）为构造定死的不可变 primitive，热路径免锁直读。
+    身份（task_id/step_id/source_ip/stage）为构造定死的不可变 primitive，热路径免锁直读。
     """
 
     def __init__(
@@ -78,11 +78,10 @@ class ClientQueues:
         raw_fps: int = 30,
         *,
         # 不可变运行身份（primitives 直注，一次 CQ == 一次 run，终生不变）。
-        # 全默认 None/"" 供纯队列/算子单测裸建（身份 getter 返回 None）；生产由
-        # RunController 传入 task_id/current_step，stage 由 step_id 经配置解析一次。
+        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入已解析好的
+        # task_id/step_id/stage（int 转换与 stage 解析都在 RunController 边界一次完成）。
         task_id: Optional[int] = None,
-        current_step: Optional[str] = None,
-        status: str = "running",
+        step_id: Optional[int] = None,
         source_ip: str = "",
         stage: str = "MOCK",
     ):
@@ -106,20 +105,23 @@ class ClientQueues:
         self._slide_window_lock = threading.Lock()
         self._alarm_lock = threading.Lock()      # _alarm_log + _alarm_seq + _alarm_gate
 
-        # 运行状态机（概念上的 0 号锁，单独取，不与上面 7 把 payload 锁互嵌）
+        # 运行状态机的锁（独立于下方 7 把 payload 锁：只串行/幂等本状态转换，
+        # 从不与任何 payload 锁互嵌，故不引入新锁环——见 RunState docstring）
         self._state: RunState = RunState.ACTIVE
         self._state_lock = threading.Lock()
 
-        # 不可变运行身份：一次构造定死，getter 直接读、无锁——CQ 经 client_manager COW
+        # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_manager COW
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
         # 注：无 client_id 字段——注册表路由键即 self.task_id(int)；source_ip 为被动来源字段。
+        # step_id 为已解析好的 int（DBAlarm.step_id/落盘目录/FeatureStore 分区键全链路 int）；
+        # 字符串来源 current_step→int 的转换在 RunController 边界一次完成，本类不再解析。
         self.task_id: Optional[int] = task_id
-        self.current_step: Optional[str] = current_step
-        self.status: str = status
-        self.step_id: Optional[int] = self._resolve_step_id(current_step)
+        self.step_id: Optional[int] = step_id
         self.source_ip: str = source_ip
         self.stage: str = stage
+        # run 起始时刻：供 GlobalHealthMonitor 的 task_max_duration 看门狗判定跑飞任务并超时拆除
+        # （monitor.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
         self.task_started_at: float = time.time() if task_id is not None else 0.0
 
         # 最新原始帧缓存（由 _raw_lock 保护）
@@ -196,16 +198,6 @@ class ClientQueues:
         self.ca_ready.append(frame_data)
         return True
 
-    @staticmethod
-    def _resolve_step_id(current_step: Optional[str]) -> Optional[int]:
-        """从 current_step 解析 step_id；非法返回 None（拒绝落盘）。"""
-        if current_step is None:
-            return None
-        try:
-            return int(current_step)
-        except (TypeError, ValueError):
-            return None
-
     def append_ca_raw(self, frame_data: Frame) -> bool:
         """
         添加原始帧到落盘队列，同时更新最新原始帧缓存。
@@ -217,7 +209,7 @@ class ClientQueues:
         if self._state is not RunState.ACTIVE:
             return False
         try:
-            # 身份不可变，免锁直读（task_id/step_id/current_step 均为构造定死字段）
+            # 身份不可变，免锁直读（task_id/step_id 均为构造定死字段）
             task_id = self.task_id
 
             frames_to_persist = None
@@ -235,8 +227,8 @@ class ClientQueues:
                 if step_id is None:
                     import logging
                     logging.getLogger(__name__).error(
-                        "[append_ca_raw] invalid current_step=%r, skip persistence (task_id=%s)",
-                        self.current_step, task_id,
+                        "[append_ca_raw] step_id is None, skip persistence (task_id=%s)",
+                        task_id,
                     )
                     return False
                 from app.services.persistence import persistence_manager
@@ -278,8 +270,8 @@ class ClientQueues:
             if step_id is None:
                 import logging
                 logging.getLogger(__name__).error(
-                    "[append_ca_processed] invalid current_step=%r, skip persistence (task_id=%s)",
-                    self.current_step, task_id,
+                    "[append_ca_processed] step_id is None, skip persistence (task_id=%s)",
+                    task_id,
                 )
                 return
             from app.services.persistence import persistence_manager
@@ -454,7 +446,7 @@ class ClientQueues:
         """从推理队列弹出一帧（FIFO，无锁 SPSC）"""
         return self.ca_ready.popleft() if self.ca_ready else None
 
-    # 身份字段（task_id/step_id/current_step/status/source_ip/stage）均为构造定死的不可变
+    # 身份字段（task_id/step_id/source_ip/stage）均为构造定死的不可变
     # 公有属性，直读即可——不再提供 get_* 包装（避免只覆盖一部分、直连/getter 混用的不一致）。
 
     # --- slide_window 操作 ---

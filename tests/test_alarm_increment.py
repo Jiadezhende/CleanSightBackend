@@ -26,7 +26,7 @@ def _make_record(metric="BUBBLE", mode="REALTIME", stage="LEAK") -> Alarm:
 
 def _cq_with_task() -> ClientQueues:
     # 身份不可变：primitives 构造注入（一 CQ == 一 run）
-    return ClientQueues(task_id=1, current_step="1", source_ip="c1")
+    return ClientQueues(task_id=1, step_id=1, source_ip="c1")
 
 
 # --- gate 测试（经 append_alarm_record_with_gate 返回值验证）---
@@ -87,14 +87,14 @@ def test_gate_different_metric_independent():
 def test_gate_reset_on_task_change():
     """新 run = 新 CQ = fresh gate（一 CQ 一 run，身份不可变）：换 task 建新 CQ，同 key 重新允许。"""
     t0 = 1000.0
-    cq1 = ClientQueues(task_id=1, current_step="1", source_ip="c1")
+    cq1 = ClientQueues(task_id=1, step_id=1, source_ip="c1")
     with patch("time.time", return_value=t0):
         assert cq1.append_alarm_record_with_gate(1, _make_record(), "REALTIME") is True
     with patch("time.time", return_value=t0 + 1.0):
         assert cq1.append_alarm_record_with_gate(1, _make_record(), "REALTIME") is False  # 仍在窗口内
 
     # 切换任务 = 建**新** CQ（新 run），gate 天然为空
-    cq2 = ClientQueues(task_id=2, current_step="1", source_ip="c1")
+    cq2 = ClientQueues(task_id=2, step_id=1, source_ip="c1")
     with patch("time.time", return_value=t0 + 1.0):
         assert cq2.append_alarm_record_with_gate(2, _make_record(), "REALTIME") is True
 

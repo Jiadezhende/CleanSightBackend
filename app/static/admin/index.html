@@ -115,11 +115,10 @@
             <div class="client-card" v-for="c in overview.clients" :key="c.client_id">
               <div class="client-header">
                 <span class="client-id">{{ c.client_id }}</span>
-                <span :class="statusTag(c.task_status)">{{ c.task_status || 'idle' }}</span>
               </div>
               <div style="font-size:12px;color:#6b7280;margin-bottom:8px">
                 task_id: <b>{{ c.task_id ?? '—' }}</b>
-                &nbsp;|&nbsp; step: <b>{{ c.current_step ?? '—' }}</b>
+                &nbsp;|&nbsp; step: <b>{{ c.step_id ?? '—' }}</b>
               </div>
               <div class="queue-bars">
                 <div class="queue-row">
@@ -190,12 +189,8 @@
               <div class="status-val">{{ liveClientInfo?.task_id ?? '—' }}</div>
             </div>
             <div class="status-item">
-              <div class="status-key">任务状态</div>
-              <div class="status-val">{{ liveClientInfo?.task_status ?? '—' }}</div>
-            </div>
-            <div class="status-item">
               <div class="status-key">当前阶段</div>
-              <div class="status-val">{{ liveClientInfo?.current_step ?? '—' }}</div>
+              <div class="status-val">{{ liveClientInfo?.step_id ?? '—' }}</div>
             </div>
             <div class="status-item">
               <div class="status-key">实时告警</div>
