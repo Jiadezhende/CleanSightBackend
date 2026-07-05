@@ -72,12 +72,13 @@ async def start(req: StartRequest):
 
         # 运行键 = str(task_id)（在 RunController 内派生）；source_ip 作被动身份字段透传。
         # 编排 + 生命周期锁在 RunController；同步持锁段丢进线程，避免阻塞事件循环。
+        # 注：req.fps 保留于前端契约（StartRequest），但后端内部不再透传——
+        # decoder 输出帧率取自 stream config，抽帧率取自 client config。
         return await asyncio.to_thread(
             run_controller.start_run,
             req.task_id,
             current_step,
             req.rtsp_url,
-            req.fps,
             source_ip,
         )
     finally:

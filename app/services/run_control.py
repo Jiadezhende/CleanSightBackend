@@ -34,7 +34,6 @@ class RunController:
         task_id: int,
         current_step: str,
         rtsp_url: str,
-        fps: int = 30,
         source_ip: str = "",
     ) -> Dict[str, Any]:
         """启动一次 run：幂等检查 / 重启清理 → 建 CQ + start_workflow → 起流。
@@ -91,10 +90,8 @@ class RunController:
                 )
             logger.info("[RunController] workflow started: task_id=%s", task_id)
 
-            # 2d. 起流（decoder 键 = task_id，与注册表一致）
-            stream_service.start_stream(
-                task_id=task_id, stream_url=rtsp_url, fps=fps, protocol="RTSP"
-            )
+            # 2d. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
+            stream_service.start_stream(task_id=task_id, stream_url=rtsp_url)
             logger.info("[RunController] stream started: task_id=%s", task_id)
 
             return {

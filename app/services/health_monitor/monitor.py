@@ -234,8 +234,6 @@ class GlobalHealthMonitor:
         self._reconnecting_clients[task_id] = ReconnectState(
             task_id=task_id,
             stream_url=stream_info["url"],
-            fps=stream_info["fps"],
-            protocol=stream_info["protocol"],
             attempt_count=0,
             last_attempt_time=0,  # 初始为 0，表示还未尝试
             last_frame_time_before_disconnect=last_frame_time,  # 记录断流前的最后帧时间
@@ -313,8 +311,6 @@ class GlobalHealthMonitor:
         success = self._stream_service.restart_stream(
             task_id=task_id,
             stream_url=state.stream_url,
-            fps=state.fps,
-            protocol=state.protocol,
         )
 
         if success:

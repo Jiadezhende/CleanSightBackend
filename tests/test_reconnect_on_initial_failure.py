@@ -46,8 +46,6 @@ def _make_monitor(client_id: str, mock_cq, active_decoder_ids: set) -> GlobalHea
     mock_ss.get_all_task_ids.return_value = active_decoder_ids
     mock_ss.get_stream_info.return_value = {
         "url": "rtsp://127.0.0.1:8554/test",
-        "fps": 30,
-        "protocol": "RTSP",
     }
     mock_ss.restart_stream.return_value = True
 
@@ -96,8 +94,6 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = []
             mock_dec.start.side_effect = start_side_effect
 
             yield MockDecoder
@@ -120,13 +116,11 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = []
             mock_dec.start.side_effect = error
 
             # start() 失败不再向上抛异常，由健康监控接管重连
             self.service._start_stream_impl(
-                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+                self.client_id, "rtsp://127.0.0.1:8554/test"
             )
 
         # 核心断言：decoder 必须在 dict 中（修复的关键）
@@ -151,18 +145,15 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = ["-rtsp_transport", "udp"]  # RTSP 协议选项
             mock_dec.start.side_effect = error
 
             self.service._start_stream_impl(
-                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+                self.client_id, "rtsp://127.0.0.1:8554/test"
             )
 
         info = self.service.get_stream_info(self.client_id)
         assert info is not None, "get_stream_info() 应返回流信息供健康监控重连"
         assert info["url"] == "rtsp://127.0.0.1:8554/test"
-        assert info["protocol"] == "RTSP"
 
     def test_metrics_registered_after_failed_start(self):
         """start() 失败后，self.metrics 中也应有记录"""
@@ -180,12 +171,10 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = []
             mock_dec.start.side_effect = error
 
             self.service._start_stream_impl(
-                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+                self.client_id, "rtsp://127.0.0.1:8554/test"
             )
 
         assert self.client_id in self.service.metrics

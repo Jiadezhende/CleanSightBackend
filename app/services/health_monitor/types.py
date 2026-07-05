@@ -10,8 +10,6 @@ class ReconnectState:
 
     task_id: int   # 运行键（路由标识）
     stream_url: str
-    fps: int
-    protocol: str
     attempt_count: int
     last_attempt_time: float
     last_frame_time_before_disconnect: float
