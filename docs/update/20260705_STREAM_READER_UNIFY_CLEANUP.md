@@ -49,7 +49,12 @@
 - [`ReconnectState`](../../app/services/health_monitor/types.py) 删 `fps`、`protocol` 字段，保留 `stream_url`。
 - `_enter_reconnect_mode` 只取 `stream_info["url"]`；`_handle_reconnecting_client` 调 `restart_stream(task_id=, stream_url=)`。
 
-### 5. 保留项（不改动）
+### 5. `app/services/stream/service.py` — client_manager 惰性导入 + 删死代码 has_stream（收尾）
+
+- **惰性导入**：删掉模块级 `try: from app.services.client import client_manager except ImportError: client_manager = None`——它会把 client 模块内部**任意真实 ImportError** 静默吞成 `None`，导致背压/队列悄然失效。改为 [`_get_client_manager()`](../../app/services/stream/service.py) 调用期导入并缓存：调用发生在运行期（起流/处理帧），各模块已初始化、无导入顺序问题；真实 `ImportError` 直接冒出。核实 `app.services.client` 不 import stream、无实际环，故惰性即可、无需 try/except。三处消费点（`_get_client_queues` / `_restart_stream_impl` / `get_pending_count`）统一改走该 accessor，相应删掉 `if client_manager is None` 死分支。
+- **删 `has_stream()`**：全仓无调用方。孤儿检测已改用 `get_all_task_ids()`（看**注册**、不看 `is_alive()`）——重连设计需保留「死掉但仍注册」的 decoder 供重连，用 `has_stream` 的存活判断反而会误清待重连 decoder，故其被有意取代。保留该方法只会诱导误用引回 bug。
+
+### 6. 保留项（不改动）
 
 - `StartRequest.fps`（前端 wire 契约）。
 - decoder `self.fps`（取自 config，用于 ffmpeg `scale=...,fps=` 输出帧率，非死参）。
