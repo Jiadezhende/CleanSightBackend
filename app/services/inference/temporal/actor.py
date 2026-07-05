@@ -1,7 +1,7 @@
 """temporal.py - per-client 时序分析 Actor（流处理框架的执行上下文）。
 
 每个活跃 client 对应一个 ClientTemporalActor 实例，拥有独立线程。
-actor 由 InferenceManager 在 set_task() 时创建，在 remove_client() 时停止。
+actor 由 InferenceManager 在 start_workflow() 时创建，在 stop_workflow() 时停止。
 
 职责：
 - 注册该 client 所有流算子 Operator（每个 Operator 自带共享状态机 self._sm）
@@ -66,7 +66,7 @@ class ClientTemporalActor:
     def finalize_and_stop(self) -> List[Alarm]:
         """停止 actor 线程，然后收集结算告警。
 
-        调用方须确保在 remove_client() 流程中先调用此方法，
+        调用方须确保在 stop_workflow() 流程中先调用此方法，
         再清理 ClientQueues，保证 _sm 读取时无并发写入。
         """
         self._stop_event.set()

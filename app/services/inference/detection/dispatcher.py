@@ -163,7 +163,7 @@ class StageAwareDispatcher:
                 frame_drop_total.labels(reason="infer_backlog").inc()
 
     def get_batch_for_stage(
-        self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore
+        self, stage: str, max_size: Optional[int] = None, timeout_ms: float = 3.0
     ) -> List[DetectionTask]:
         """获取指定 stage 的一个 batch（支持超时等待）。
 

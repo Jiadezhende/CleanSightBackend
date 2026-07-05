@@ -8,7 +8,7 @@ L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特
 
 落盘目录 `{task_id}/{step_id}/` 与 HLS 同款工作目录（`InferenceManager._db_dir` → base_dir,
 见 `hls_strategy._persist_*_segment`），随 step 目录被 cleanup TTL 连带回收。
-两者均为 manager 持有的单例：构造时绑定 base_dir，remove_client 时 close(task_id, step_id)。
+两者均为 manager 持有的单例：构造时绑定 base_dir，stop_workflow 时 close(task_id, step_id)。
 
 帧对齐契约：每条记录的 `ts` = 该帧的 `FrameInference.timestamp`（= 帧捕获 ts，见
 `workers/base.py` 构造），与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，
