@@ -19,25 +19,25 @@ def _cq_with_task():
 
 def test_gate_first_pass_allowed():
     cq = _cq_with_task()
-    assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
+    assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
 
 
 def test_gate_second_within_5s_blocked():
     cq = _cq_with_task()
     t0 = 1000.0
     with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
     with patch("time.time", return_value=t0 + 4.9):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is False
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False
 
 
 def test_gate_allowed_after_window_expires():
     cq = _cq_with_task()
     t0 = 1000.0
     with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
     with patch("time.time", return_value=t0 + 5.0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
 
 
 def test_gate_blocked_alarm_does_not_renew_window():
@@ -45,12 +45,12 @@ def test_gate_blocked_alarm_does_not_renew_window():
     cq = _cq_with_task()
     t0 = 1000.0
     with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True   # 通过，last=t0
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True   # 通过，last=t0
     with patch("time.time", return_value=t0 + 4.0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is False  # 拦截，last 仍为 t0
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False  # 拦截，last 仍为 t0
     with patch("time.time", return_value=t0 + 5.0):
         # 窗口从 t0 计，t0+5 到期；若续期应到 t0+9 才通过，验证非续期行为
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
 
 
 def test_gate_different_mode_independent():
@@ -58,16 +58,16 @@ def test_gate_different_mode_independent():
     cq = _cq_with_task()
     t0 = 1000.0
     with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "SETTLEMENT") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(), "SETTLEMENT") is True
 
 
 def test_gate_different_metric_independent():
     cq = _cq_with_task()
     t0 = 1000.0
     with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(metric="BUBBLE"), "REALTIME") is True
-        assert cq.append_alarm_record_with_gate(1, make_alarm(metric="BENDING"), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(metric="BUBBLE"), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(metric="BENDING"), "REALTIME") is True
 
 
 def test_gate_reset_on_task_change():
@@ -75,14 +75,14 @@ def test_gate_reset_on_task_change():
     t0 = 1000.0
     cq1 = make_cq(task_id=1, step_id=1, source_ip="c1")
     with patch("time.time", return_value=t0):
-        assert cq1.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
+        assert cq1.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
     with patch("time.time", return_value=t0 + 1.0):
-        assert cq1.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is False  # 仍在窗口内
+        assert cq1.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False  # 仍在窗口内
 
     # 切换任务 = 建**新** CQ（新 run），gate 天然为空
     cq2 = make_cq(task_id=2, step_id=1, source_ip="c1")
     with patch("time.time", return_value=t0 + 1.0):
-        assert cq2.append_alarm_record_with_gate(2, make_alarm(), "REALTIME") is True
+        assert cq2.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
 
 
 # --- 入日志 / seq 测试 ---
@@ -90,8 +90,8 @@ def test_gate_reset_on_task_change():
 def test_pass_assigns_incrementing_seq():
     """不同 metric 各自通过闸门，依次赋 seq。"""
     cq = _cq_with_task()
-    cq.append_alarm_record_with_gate(1, make_alarm(metric="BUBBLE"), "REALTIME")
-    cq.append_alarm_record_with_gate(1, make_alarm(metric="BENDING"), "REALTIME")
+    cq.append_alarm_record_with_gate(make_alarm(metric="BUBBLE"), "REALTIME")
+    cq.append_alarm_record_with_gate(make_alarm(metric="BENDING"), "REALTIME")
     alarms = cq.get_alarm_increment(since_seq=0)
     assert [a.seq for a in alarms] == [1, 2]
 
@@ -101,9 +101,9 @@ def test_blocked_alarm_not_recorded():
     cq = _cq_with_task()
     t0 = 1000.0
     with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is True
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
     with patch("time.time", return_value=t0 + 2.0):
-        assert cq.append_alarm_record_with_gate(1, make_alarm(), "REALTIME") is False  # blocked
+        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False  # blocked
 
     assert len(cq.get_alarm_increment(since_seq=0)) == 1
     assert cq.get_alarm_max_seq() == 1

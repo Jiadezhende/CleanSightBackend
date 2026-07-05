@@ -239,8 +239,9 @@ class PersistenceManager:
 
         for alarm in alarms:
             # 给产出方的同一份告警补 mode，再过闸门+入环形缓冲（seq 由其赋；stage 已烧）。
+            # 闸门 task_id 取自 cq 自身不可变身份，无需再传。
             alarm.mode = mode
-            if not cq.append_alarm_record_with_gate(task_id, alarm, mode):
+            if not cq.append_alarm_record_with_gate(alarm, mode):
                 continue
             self.persist_alarm({
                 "task_id": task_id,

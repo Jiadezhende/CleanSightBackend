@@ -50,9 +50,9 @@ def test_frame_and_result_writes_blocked_when_not_active():
 def test_settlement_alarm_allowed_in_draining_rejected_when_closed():
     cq = make_cq()
     cq.to_draining()
-    assert cq.append_alarm_record_with_gate(1, make_alarm(), "SETTLEMENT") is True  # DRAINING 放行
+    assert cq.append_alarm_record_with_gate(make_alarm(), "SETTLEMENT") is True  # DRAINING 放行
     cq.close()
-    assert cq.append_alarm_record_with_gate(1, make_alarm(metric="X"), "SETTLEMENT") is False  # CLOSED 拒
+    assert cq.append_alarm_record_with_gate(make_alarm(metric="X"), "SETTLEMENT") is False  # CLOSED 拒
 
 
 # --- 清空写放行（拆除期清前端残帧/事件）---

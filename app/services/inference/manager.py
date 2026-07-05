@@ -270,7 +270,7 @@ class InferenceManager:
 
     def status(self) -> Dict[str, Any]:
         clients = client_manager.snapshot()
-        stats = {task_id: cq.to_status_dict() for task_id, cq in clients.items()}
+        stats = {task_id: cq.get_queue_depths() for task_id, cq in clients.items()}
         return {"clients": len(clients), "queues": stats}
 
     # ========== 启动/停止 ==========

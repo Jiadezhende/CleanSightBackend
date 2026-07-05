@@ -95,4 +95,4 @@ async def get_client_frontend_message(
     if cq is None:
         return _empty_alarm_payload(task_id)
 
-    return cq.get_task_alarm_message(task_id=task_id, since_seq=since_seq)
+    return cq.get_task_alarm_message(since_seq=since_seq)

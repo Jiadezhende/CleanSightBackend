@@ -252,10 +252,6 @@ class ClientQueues:
         with self._viz_lock:
             return self._latest_rendered
 
-    def get_latest_result(self) -> Optional[Frame]:
-        """返回最新的实时渲染结果。"""
-        return self.get_latest_rendered()
-
     # --- latest_inference 操作（原子推理快照）---
 
     def set_latest_inference(self, result: "FrameInference") -> None:
@@ -279,14 +275,6 @@ class ClientQueues:
             if self.latest_raw_frame is not None:
                 return self.latest_raw_frame.copy()
             return None
-
-    def to_status_dict(self) -> dict:
-        return {
-            "ca_ready": len(self.ca_ready),
-            "ca_raw": len(self.ca_raw),
-            "ca_processed": len(self.ca_processed),
-            "has_rendered": self._latest_rendered is not None,
-        }
 
     def get_queue_depths(self) -> dict:
         return {
@@ -475,23 +463,19 @@ class ClientQueues:
 
     # --- alarm_log 操作 ---
 
-    def append_alarm_record_with_gate(
-        self, task_id: Optional[int], alarm: Alarm, mode: str
-    ) -> bool:
+    def append_alarm_record_with_gate(self, alarm: Alarm, mode: str) -> bool:
         """闸门去重 + 入环形日志，单 _alarm_lock 内原子完成。
 
         True = 已记录（赋 seq 并入日志），False = 被冷却窗口（5s）拦截、未记录。
-        闸门按 (task_id, alarm.metric, mode) 限流；通过后才赋 seq、append。
-
-        task_id 须由调用方在锁外先 get_task_id() 取好传入，不在持 _alarm_lock 时
-        反向获取 _task_lock（违反全清顺序，死锁风险）。
+        闸门按 (self.task_id, alarm.metric, mode) 限流；通过后才赋 seq、append。
+        task_id 取自本 CQ 不可变身份（免锁直读），无需调用方传入。
 
         写门（非对称）：仅 CLOSED 拒——ACTIVE 与 DRAINING 均放行，保证拆除期（DRAINING）
         的 settlement 结算告警仍能入账。
         """
         if self._state is RunState.CLOSED:
             return False
-        gate_key = f"{task_id}:{alarm.metric}:{mode}"
+        gate_key = f"{self.task_id}:{alarm.metric}:{mode}"
         now = time.time()
         with self._alarm_lock:
             last = self._alarm_gate.get(gate_key)
@@ -547,7 +531,8 @@ class ClientQueues:
                 }
         return summary
 
-    def get_task_alarm_message(self, task_id: int, since_seq: int = 0) -> Dict[str, Any]:
+    def get_task_alarm_message(self, since_seq: int = 0) -> Dict[str, Any]:
+        # task_id 取自本 CQ 不可变身份（注册表以 task_id 为键取到本 CQ，恒相等）。
         # alarm 列表与 max_seq 在同一把锁内读取，保证 max_seq >= max(a.seq for a in alarms)，
         # 避免客户端用推进后的 since_seq 跳过尚未返回的告警。
         # signals_10s 独立持 _slide_window_lock，两路数据本就独立，轻微时差可接受。
@@ -555,7 +540,7 @@ class ClientQueues:
             alarms = [a for a in self._alarm_log if a.seq > since_seq]
             max_seq = self._alarm_seq
         return {
-            "task_id": task_id,
+            "task_id": self.task_id,
             "max_seq": max_seq,
             "signals_10s": self.get_signals_10s(),
             "alarms": [

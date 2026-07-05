@@ -98,7 +98,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
         while not shutdown_event.is_set() and not disconnect_task.done():
             # 每轮解析当前 run（task_id 直查 / source_ip 匹配首个）→ 读其最新渲染帧
             cq = resolve()
-            frame = cq.get_latest_result() if cq is not None else None
+            frame = cq.get_latest_rendered() if cq is not None else None
 
             if frame is None:
                 await asyncio.sleep(0.01)  # 减少轮询间隔

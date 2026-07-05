@@ -81,4 +81,4 @@ async def test_task_message_running_returns_increment(monkeypatch):
     assert payload["max_seq"] == 2
     assert payload["alarms"][0]["seq"] == 2
     fake_manager.get.assert_called_once_with(1)
-    cq.get_task_alarm_message.assert_called_once_with(task_id=1, since_seq=1)
+    cq.get_task_alarm_message.assert_called_once_with(since_seq=1)
