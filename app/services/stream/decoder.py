@@ -15,6 +15,7 @@ import numpy as np
 from app.domain.frame import Frame
 from app.services.stream.config import DecoderConfig
 from app.utils.exceptions import FFmpegError, StreamConnectionError
+from app.utils.metrics import frame_drop_total
 
 # 导入 ClientManager 单例（延迟导入避免循环依赖）
 try:
@@ -339,6 +340,7 @@ class FFmpegDecoder:
                 drop_inference = self._should_drop_frame(pending_count, queue_capacity)
                 if drop_inference:
                     self.frames_dropped += 1
+                    frame_drop_total.labels(reason="ingress_backpressure").inc()
                     # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
                     if self.frames_dropped % 100 == 0:
                         self.logger.debug(
@@ -375,4 +377,5 @@ class FFmpegDecoder:
                     )
             except Exception:
                 self.frames_dropped += 1
+                frame_drop_total.labels(reason="decode_error").inc()
                 self.logger.exception("error processing frame bytes")

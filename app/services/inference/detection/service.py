@@ -18,12 +18,8 @@ from app.services.client import ClientManager, client_manager
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
 from app.services.inference.models import FrameInference
 from app.services.inference.detection.pool import MultiModelWorkerPool
-from app.utils.exceptions import (
-    AppError,
-    FrameDrop,
-    ModelInferenceError,
-)
-from app.utils.metrics import frame_drop_total, gpu_oom_total
+from app.utils.exceptions import AppError
+from app.utils.metrics import frame_drop_total
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -216,40 +212,17 @@ class ModelWorkerService:
                         stage, len(batch), batch_size, elapsed*1000, fps, queue_depth, timeout_ms
                     )
 
-            except FrameDrop as e:
-                # 边界层 1: FrameDrop - 静默丢弃（warning级别）
-                logger.warning(
-                    "[BoundaryLayer1][Worker-%s] Frame dropped: client=%s, reason=%s",
-                    stage, e.client_id, e.reason
-                )
-                continue  # 继续处理下一批
-
-            except ModelInferenceError as e:
-                # 边界层 1: 模型推理错误 - ERROR级别，记录上下文
-                logger.error(
-                    "[BoundaryLayer1][Worker-%s] Model inference failed: %s", stage, e,
-                    exc_info=True,
-                    extra={
-                        "client_id": e.client_id,
-                        "model_name": e.model_name,
-                        "is_cuda_error": e.is_cuda_error,
-                    },
-                )
-                # 记录GPU OOM指标
-                if e.is_cuda_error:
-                    gpu_oom_total.labels(
-                        model=getattr(e, "model_name", "unknown")
-                    ).inc()
-                # 继续处理下一批
-                time.sleep(0.1)
-                continue
-
+            # 注：不为模型推理异常单列 except——它在本循环内到不了：模型异常由
+            # pool.infer_batch 就地降级为 FrameDetections(success=False)（batch 跨多 run，
+            # 不能上抛炸整批）。失败可见性改由 _write_back_results 按确定 task_id 记 per-run
+            # 日志、聚合计数由 pool.infer_failure_total 承接。下面 except AppError 仅兜底
+            # 队列/写回等路径万一抛出的应用异常。
             except AppError as e:
-                # 边界层 1: 其他应用异常 - ERROR级别
+                # 边界层 1: 应用异常 - ERROR级别
                 logger.error(
                     "[BoundaryLayer1][Worker-%s] Application error: %s", stage, e,
                     exc_info=True,
-                    extra={"client_id": getattr(e, "client_id", None)},
+                    extra={"task_id": getattr(e, "task_id", None)},
                 )
                 time.sleep(0.1)
                 continue
@@ -289,6 +262,14 @@ class ModelWorkerService:
 
             # Path 1: per-task slide_window（temporal 需要历史窗口）
             for task_name, detection_output in res.detections.items():
+                # 失败可见性：pool 把模型异常降级成 success=False 的空结果，下游与「真没检到」
+                # 不可分。此处 res.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
+                # 聚合计数由 pool.infer_failure_total 承接、此处不再重复计数。
+                if not detection_output.success:
+                    logger.warning(
+                        "[Worker] inference degraded (empty result): task=%s model=%s error=%s",
+                        res.task_id, task_name, detection_output.error,
+                    )
                 cq.push_detection(task_name, detection_output)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
             cq.set_latest_inference(res)

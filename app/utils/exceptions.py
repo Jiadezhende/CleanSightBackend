@@ -5,7 +5,7 @@ CleanSight 自定义异常层次结构
 - 异常即协议：异常类型表达语义
 - retryable: 是否可重试（瞬时故障）
 - fatal: 是否致命（系统级错误，需停止服务）
-- 6个核心异常类（AppError + 5个服务异常 + FrameDrop）
+- 6个核心异常类（AppError + 5个服务异常）
 """
 
 from typing import Optional
@@ -75,62 +75,6 @@ class AppError(Exception):
         if self.fatal:
             parts.append("[FATAL]")
         return " ".join(parts)
-
-
-# ============================================================================
-# 帧丢弃异常（实时推理专用）
-# ============================================================================
-
-
-class FrameDrop(AppError):
-    """当前帧无效，允许安静丢弃
-
-    用于 30fps 实时推理场景：
-    - 单帧解码失败
-    - 单帧推理超时
-    - 单帧质量检查不通过
-    - 客户端已移除但帧仍在队列
-
-    处理策略：
-    - 记录 metrics，不打印错误日志
-    - Executor 返回 None
-    - 继续处理下一帧
-
-    特点：retryable=False, fatal=False
-    """
-
-    retryable = False  # 帧已丢失，无需重试
-    fatal = False  # 不影响系统运行
-
-    # 实例属性类型注解
-    frame_index: Optional[int]
-    reason: Optional[str]
-
-    def __init__(
-        self,
-        *,
-        task_id: Optional[int] = None,
-        step_id: Optional[int] = None,
-        source_ip: Optional[str] = None,
-        frame_index: Optional[int] = None,
-        reason: Optional[str] = None,
-    ):
-        """初始化帧丢弃异常
-
-        Args:
-            task_id / step_id: 运行坐标（可选，排障主键）
-            source_ip: 流来源（可选，辅助）
-            frame_index: 帧索引（可选）
-            reason: 丢弃原因（可选，如 "decode_failed", "client_removed"）
-        """
-        message = f"Frame dropped for task={task_id}"
-        if frame_index is not None:
-            message += f" at index {frame_index}"
-        if reason:
-            message += f": {reason}"
-        super().__init__(message, task_id=task_id, step_id=step_id, source_ip=source_ip)
-        self.frame_index = frame_index
-        self.reason = reason
 
 
 # ============================================================================

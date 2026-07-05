@@ -2,10 +2,9 @@
 CleanSight 异常处理集成测试
 
 基于《实时 AI 视觉检测项目异常处理规范》验证：
-1. FrameDrop 被安静丢弃（返回 None）
-2. 单帧失败不影响其他 9 路流
-3. Metrics 正确记录
-4. Action 决策正确（DROP/RETRY/FATAL）
+1. Metrics 正确记录（retry / gpu_oom）
+2. Action 决策正确（RETRY/FATAL）
+3. 重试/退避策略与端到端持久化重试
 """
 
 import time
@@ -16,134 +15,19 @@ import pytest
 from app.utils.exceptions import (
     DatabaseError,
     FFmpegError,
-    FrameDrop,
     ModelInferenceError,
     PersistenceError,
     StreamConnectionError,
 )
 from app.utils.executor import Action, ExecutionPolicy, GuardedExecutor
 from app.utils.metrics import (
-    frame_drop_total,
     gpu_oom_total,
-    infer_failure_total,
     retry_total,
 )
 
 # ============================================================================
-# Phase 5 Test 1: FrameDrop 测试
-# ============================================================================
-
-
-def test_frame_drop_is_silent():
-    """
-    测试 FrameDrop 被安静丢弃
-
-    验证点：
-    - FrameDrop 不抛异常
-    - 返回 None
-    - metrics 中有丢帧记录
-    """
-    executor = GuardedExecutor()
-
-    def drop_frame():
-        raise FrameDrop(source_ip="test_client", frame_index=42, reason="decode_failed")
-
-    # 执行前获取 metric 值
-    # frame_drop_total 仅按 reason 打标签（不含 client_id），故 key 为单元素元组
-    metric_key = ("decode_failed",)
-    before_count = 0
-    if metric_key in frame_drop_total._metrics:
-        before_count = frame_drop_total._metrics[metric_key]._value.get()
-
-    # 执行（应该返回 None，不抛异常）
-    result = executor.execute(func=drop_frame, policy_name="inference")
-
-    # 验证
-    assert result is None, "FrameDrop should return None"
-
-    # 验证 metrics（丢帧计数增加）
-    after_count = frame_drop_total._metrics[metric_key]._value.get()
-    assert (
-        after_count == before_count + 1
-    ), f"frame_drop_total should increase (before={before_count}, after={after_count})"
-
-
-def test_frame_drop_with_different_reasons():
-    """测试不同原因的 FrameDrop"""
-    executor = GuardedExecutor()
-
-    reasons = ["decode_failed", "client_removed", "quality_check_failed", "timeout"]
-
-    for reason in reasons:
-
-        def drop_frame_with_reason():
-            raise FrameDrop(source_ip=f"client_{reason}", reason=reason)
-
-        result = executor.execute(func=drop_frame_with_reason, policy_name="inference")
-
-        assert result is None, f"FrameDrop with reason '{reason}' should return None"
-
-
-# ============================================================================
-# Phase 5 Test 2: 单帧失败不影响其他路
-# ============================================================================
-
-
-def test_single_stream_failure_doesnt_affect_others():
-    """
-    测试单路流失败不影响其他 9 路
-
-    场景：
-    - 10 路并发推理
-    - client_5 推理失败（FrameDrop）
-    - 其他 9 路正常
-
-    验证点：
-    - client_5 返回 None
-    - 其他 9 路返回正常结果
-    """
-    executor = GuardedExecutor()
-
-    # 模拟 10 路客户端
-    clients = [f"client_{i}" for i in range(10)]
-
-    def infer_frame(client_id):
-        """模拟推理：client_5 失败，其他成功"""
-        if client_id == "client_5":
-            raise FrameDrop(source_ip=client_id, reason="quality_check_failed")
-        return {"result": "success", "client_id": client_id}
-
-    # 并发推理（模拟）
-    results = []
-    for client_id in clients:
-        result = executor.execute(
-            func=lambda cid=client_id: infer_frame(cid), policy_name="inference"
-        )
-        results.append(result)
-
-    # 验证：client_5 返回 None，其他返回正常
-    assert results[5] is None, "client_5 should return None (FrameDrop)"
-    for i, result in enumerate(results):
-        if i == 5:
-            continue
-        assert result is not None, f"client_{i} should return result"
-        assert result["client_id"] == f"client_{i}", f"client_{i} result mismatch"
-
-
-# ============================================================================
 # Phase 5 Test 3: Action 决策测试
 # ============================================================================
-
-
-def test_action_decision_drop():
-    """测试 Action.DROP 决策（FrameDrop）"""
-    executor = GuardedExecutor()
-    policy = ExecutionPolicy(max_attempts=3)
-
-    exc = FrameDrop(source_ip="test", reason="test")
-    action = executor._decide_action(exc, policy, attempts=1)
-
-    assert action == Action.DROP, "FrameDrop should result in Action.DROP"
 
 
 def test_action_decision_fatal():
@@ -183,29 +67,6 @@ def test_action_decision_retry_exhausted():
 # ============================================================================
 # Phase 5 Test 4: Metrics 验证
 # ============================================================================
-
-
-def test_metrics_frame_drop():
-    """测试 frame_drop_total metric"""
-    executor = GuardedExecutor()
-
-    client_id = "metrics_test_client"
-    reason = "metrics_test_reason"
-    metric_key = (reason,)
-
-    # 记录前的值
-    before_count = 0
-    if metric_key in frame_drop_total._metrics:
-        before_count = frame_drop_total._metrics[metric_key]._value.get()
-
-    def drop_frame():
-        raise FrameDrop(source_ip=client_id, reason=reason)
-
-    executor.execute(func=drop_frame, policy_name="inference")
-
-    # 验证 metric 增加
-    after_count = frame_drop_total._metrics[metric_key]._value.get()
-    assert after_count == before_count + 1, "frame_drop_total should increase"
 
 
 def test_metrics_retry():
@@ -390,48 +251,6 @@ def test_calculate_delay_exponential_backoff_max():
 # ============================================================================
 # Phase 5 Test 7: 端到端场景测试
 # ============================================================================
-
-
-def test_end_to_end_inference_with_frame_drop():
-    """
-    端到端测试：推理场景中的 FrameDrop
-
-    场景：
-    - 批量推理 5 帧
-    - 第 3 帧解码失败（FrameDrop）
-    - 其他 4 帧成功
-
-    验证：
-    - 第 3 帧返回 None
-    - 其他帧正常返回
-    - metrics 正确记录
-    """
-    executor = GuardedExecutor()
-
-    frames = [f"frame_{i}" for i in range(5)]
-
-    def infer_single_frame(frame_id):
-        """模拟单帧推理"""
-        if frame_id == "frame_2":
-            raise FrameDrop(
-                source_ip="inference_test", frame_index=2, reason="decode_failed"
-            )
-        return {"frame": frame_id, "result": "OK"}
-
-    results = []
-    for frame in frames:
-        result = executor.execute(
-            func=lambda f=frame: infer_single_frame(f), policy_name="inference"
-        )
-        results.append(result)
-
-    # 验证
-    assert len(results) == 5
-    assert results[0] is not None
-    assert results[1] is not None
-    assert results[2] is None, "frame_2 should be dropped (None)"
-    assert results[3] is not None
-    assert results[4] is not None
 
 
 def test_end_to_end_persistence_retry():

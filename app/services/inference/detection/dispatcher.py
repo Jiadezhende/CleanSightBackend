@@ -15,6 +15,7 @@ from typing import Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.models import DetectionTask
+from app.utils.metrics import frame_drop_total
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -146,14 +147,20 @@ class StageAwareDispatcher:
             )
 
             # 按 stage 分组入队
+            dropped = False
             with self._lock:
                 q = self._stage_queues[stage]
                 # 队列已满 → append 会静默淘汰最旧帧，先计数（对齐 ca_raw 的 frames_dropped_raw）
                 if q.maxlen is not None and len(q) >= q.maxlen:
                     self._stage_drops[stage] += 1
+                    dropped = True
                 q.append(req)
                 self._stats["total_dispatched"] += 1
                 self._stats["by_stage"][stage] += 1
+
+            # Prometheus 计数放锁外（Counter 自身线程安全，避免占用调度锁）
+            if dropped:
+                frame_drop_total.labels(reason="infer_backlog").inc()
 
     def get_batch_for_stage(
         self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore

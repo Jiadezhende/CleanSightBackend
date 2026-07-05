@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
-from .exceptions import AppError, FrameDrop, ModelInferenceError
+from .exceptions import AppError, ModelInferenceError
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +23,10 @@ class Action(Enum):
     """异常处理动作枚举
 
     用于 Executor 决策显式化：
-    - DROP: 丢弃，继续执行（用于 FrameDrop）
     - RETRY: 重试当前操作
     - FATAL: 致命错误，向上传播
     """
 
-    DROP = "drop"  # 丢弃，继续执行（用于 FrameDrop）
     RETRY = "retry"  # 重试当前操作
     FATAL = "fatal"  # 致命错误，向上传播
 
@@ -109,8 +107,7 @@ class GuardedExecutor:
         执行带重试的操作（框架边界层）
 
         基于《实时 AI 视觉检测项目异常处理规范》：
-        - 根据异常类型和 Policy 决策处理动作（DROP/RETRY/FATAL）
-        - FrameDrop 异常走 DROP 路径，返回 None
+        - 根据异常类型和 Policy 决策处理动作（RETRY/FATAL）
         - 强制记录 metrics（成功/失败）
 
         Args:
@@ -119,7 +116,7 @@ class GuardedExecutor:
             on_retry: 重试回调函数 (attempt, exception) -> None
 
         Returns:
-            函数执行结果，或 None（FrameDrop 时）
+            函数执行结果
 
         Raises:
             AppError: 致命错误或重试耗尽
@@ -162,12 +159,7 @@ class GuardedExecutor:
                 # 记录 metrics（强制）
                 self._record_exception(policy_name, e, action, attempts)
 
-                if action == Action.DROP:
-                    # 安静丢弃（FrameDrop）
-                    logger.debug(f"[GuardedExecutor] Dropped: {e}")
-                    return None
-
-                elif action == Action.RETRY:
+                if action == Action.RETRY:
                     # 重试前日志
                     delay = self._calculate_delay(policy, attempts)
                     logger.warning(
@@ -211,7 +203,6 @@ class GuardedExecutor:
         决策处理动作（核心决策逻辑）
 
         基于《实时 AI 视觉检测项目异常处理规范》：
-        - FrameDrop -> DROP（安静丢弃）
         - fatal=True -> FATAL（致命错误）
         - retryable=True 且未超过次数 -> RETRY（重试）
         - 其他 -> FATAL（向上传播）
@@ -222,21 +213,17 @@ class GuardedExecutor:
             attempts: 当前尝试次数
 
         Returns:
-            Action: 处理动作（DROP/RETRY/FATAL）
+            Action: 处理动作（RETRY/FATAL）
         """
-        # 1. FrameDrop -> DROP
-        if isinstance(exc, FrameDrop):
-            return Action.DROP
-
-        # 2. fatal=True -> FATAL
+        # 1. fatal=True -> FATAL
         if exc.fatal:
             return Action.FATAL
 
-        # 3. retryable=True 且未超过次数 -> RETRY
+        # 2. retryable=True 且未超过次数 -> RETRY
         if exc.retryable and attempts < policy.max_attempts:
             return Action.RETRY
 
-        # 4. 其他 -> FATAL
+        # 3. 其他 -> FATAL
         return Action.FATAL
 
     def _calculate_delay(self, policy: ExecutionPolicy, attempts: int) -> float:
@@ -287,7 +274,7 @@ class GuardedExecutor:
             action: 处理动作
             attempts: 尝试次数
         """
-        from app.utils.metrics import frame_drop_total, gpu_oom_total, retry_total
+        from app.utils.metrics import gpu_oom_total, retry_total
 
         exc_type = type(exc).__name__
 
@@ -295,11 +282,7 @@ class GuardedExecutor:
         if action in (Action.RETRY, Action.FATAL):
             retry_total.labels(operation=policy_name, error_type=exc_type).inc()
 
-        # 2. FrameDrop 专用计数
-        if isinstance(exc, FrameDrop):
-            frame_drop_total.labels(reason=exc.reason or "unknown").inc()
-
-        # 3. GPU OOM 专用计数
+        # 2. GPU OOM 专用计数
         if isinstance(exc, ModelInferenceError) and exc.is_cuda_error:
             gpu_oom_total.labels(model=exc.model_name or "unknown").inc()
 

@@ -55,7 +55,7 @@ infer_failure_total = Counter(
 
 标签：
 - model: 模型名称
-- error_type: 异常类型（如 'ModelInferenceError', 'FrameDrop'）
+- error_type: 异常类型（如 'ModelInferenceError'）
 
 用途：
 - 监控推理失败率
@@ -82,20 +82,21 @@ frame_drop_total = Counter(
     "frame_drop", "Total frames dropped", ["reason"]  # sample=frame_drop_total；family=frame_drop
 )
 """
-帧丢弃总数（FrameDrop 专用）
+帧丢弃总数（按成因分类的单一真源）
 
 标签：
-- reason: 丢弃原因（如 'decode_failed', 'client_removed', 'quality_check_failed'）
+- reason: 丢弃成因，在真丢帧点就地打标：
+    'ingress_backpressure'（入口背压丢推理帧）、'decode_error'（解码/解析异常帧）、
+    'infer_backlog'（推理阶段队列淘汰）、'raw_backpressure'（ca_raw 录制满）、
+    'hls_backpressure'（ca_processed HLS 满）、'stale_run'（拆除中 run 的迟到结果）
 
 用途：
-- 监控单帧失败率
-- 按丢弃原因分组
+- 监控丢帧率、按成因分组定位瓶颈（入口 / 推理 / 录制 / HLS）
 - 告警：丢帧率 > 10%
 
 示例：
-    if frame is None:
-        frame_drop_total.labels(reason='decode_failed').inc()
-        raise FrameDrop(task_id=1, reason='decode_failed')
+    if dropped:
+        frame_drop_total.labels(reason='ingress_backpressure').inc()
 """
 
 
