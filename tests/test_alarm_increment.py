@@ -109,12 +109,12 @@ def test_blocked_alarm_not_recorded():
     assert cq.get_alarm_max_seq() == 1
 
 
-# --- signals_10s 不受影响 ---
+# --- 滑窗汇总（纯访问器，按流名键；metric 映射在 router 装配层测） ---
 
-def test_signals_10s_summary():
+def test_slide_window_summary():
     cq = make_bare_cq()
     cq.push_detection("bubble", make_frame_detections(n=1, class_name="bubble", ts=10.0))
-    summary = cq.get_signals_10s()
-    assert summary["BUBBLE"]["active"] is True
-    assert summary["BUBBLE"]["hit_count"] == 1
-    assert "BENDING" not in summary
+    summary = cq.get_slide_window_summary()
+    assert summary["bubble"]["active"] is True
+    assert summary["bubble"]["hit_count"] == 1
+    assert "bending" not in summary  # 未推过的流不出现

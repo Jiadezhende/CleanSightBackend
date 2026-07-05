@@ -136,7 +136,8 @@ class ClientManager:
 
         供 `RunController.start_run` 路径：每次 run 建**新** CQ 后整体换槽（不在旧 CQ 上原地改）。
         `_wlock` 下 COW 换引用发布，读者原子读引用即看到全新对象——观察不到半建态。
-        旧槽引用被丢弃，其 decoder/actor 持到释放后 GC。
+        旧槽引用被丢弃后，仅其自身 payload（帧/缓冲）随 close/GC 释放；decoder/actor
+        **不由 CQ 持有**，由 RunController.stop_run 显式拆除，不随换槽 GC 回收。
         """
         with self._wlock:
             new = dict(self._runs)

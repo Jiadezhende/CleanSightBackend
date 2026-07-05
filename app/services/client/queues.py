@@ -9,7 +9,7 @@ import enum
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Deque, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
@@ -503,20 +503,25 @@ class ClientQueues:
         with self._alarm_lock:
             return self._alarm_seq
 
-    def get_signals_10s(self) -> Dict[str, Dict[str, Any]]:
-        # 懒 import 破除 client ↔ inference 模块级环（naming 是 inference 运行时状态）
-        from app.services.inference.naming import get_task_metric_map
+    def get_alarm_snapshot(self, since_seq: int = 0) -> Tuple[List[Alarm], int]:
+        """单 _alarm_lock 内原子返回 (seq>since_seq 的告警增量, max_seq)。
 
-        task_metric_map = get_task_metric_map()
-        _empty: Dict[str, Any] = {"active": False, "hit_count": 0, "max_conf": 0.0}
-        summary: Dict[str, Dict[str, Any]] = {
-            m.value: dict(_empty) for m in task_metric_map.values()
-        }
+        原子读保证 max_seq >= max(a.seq for a in alarms)，避免调用方用推进后的
+        since_seq 跳过尚未返回的告警。域对象 Alarm 交由调用方（router）序列化。
+        """
+        with self._alarm_lock:
+            alarms = [a for a in self._alarm_log if a.seq > since_seq]
+            return alarms, self._alarm_seq
+
+    def get_slide_window_summary(self) -> Dict[str, Dict[str, Any]]:
+        """每条流(stream_name)在其窗口内的检测汇总（线程安全，纯数据）。
+
+        {stream_name: {"active": bool, "hit_count": int, "max_conf": float}}
+        —— 只按流名聚合，不做流名→metric 映射（那是 inference 展示知识，归 router 装配）。
+        """
+        summary: Dict[str, Dict[str, Any]] = {}
         with self._slide_window_lock:
             for task_name, window in self._slide_window.items():
-                metric = task_metric_map.get(task_name)
-                if metric is None:
-                    continue
                 hit_count = 0
                 max_conf = 0.0
                 for output in window:
@@ -524,78 +529,9 @@ class ClientQueues:
                         hit_count += 1
                         frame_max_conf = max(d.confidence for d in output.detections)
                         max_conf = max(max_conf, frame_max_conf)
-                summary[metric.value] = {
+                summary[task_name] = {
                     "active": hit_count > 0,
                     "hit_count": hit_count,
                     "max_conf": round(float(max_conf), 4),
                 }
         return summary
-
-    def get_task_alarm_message(self, since_seq: int = 0) -> Dict[str, Any]:
-        # task_id 取自本 CQ 不可变身份（注册表以 task_id 为键取到本 CQ，恒相等）。
-        # alarm 列表与 max_seq 在同一把锁内读取，保证 max_seq >= max(a.seq for a in alarms)，
-        # 避免客户端用推进后的 since_seq 跳过尚未返回的告警。
-        # signals_10s 独立持 _slide_window_lock，两路数据本就独立，轻微时差可接受。
-        with self._alarm_lock:
-            alarms = [a for a in self._alarm_log if a.seq > since_seq]
-            max_seq = self._alarm_seq
-        return {
-            "task_id": self.task_id,
-            "max_seq": max_seq,
-            "signals_10s": self.get_signals_10s(),
-            "alarms": [
-                {
-                    "seq": a.seq,
-                    "mode": a.mode,
-                    "metric": a.metric,
-                    "level": a.alarm_level,
-                    "message": a.alarm_message,
-                    "ts": int(a.timestamp),
-                }
-                for a in alarms
-            ],
-        }
-
-    # --- 前端消息打包 ---
-
-    def get_frontend_message(self) -> Dict[str, Any]:
-        """打包阶段 + latest_temporal + 检测状态 + 告警，供前端读取。"""
-        stage = self.stage
-        events = self.get_latest_temporal()
-        recent_alarms = self.get_recent_alarms(n=5)
-
-        latest_detections: Dict[str, bool] = {}
-        latest_confidences: Dict[str, float] = {}
-        with self._slide_window_lock:
-            for task_name, window in self._slide_window.items():
-                if window:
-                    last_output = window[-1]
-                    latest_detections[task_name] = len(last_output.detections) > 0
-                    if last_output.detections:
-                        avg_conf = sum(
-                            d.confidence for d in last_output.detections
-                        ) / len(last_output.detections)
-                    else:
-                        avg_conf = 0.0
-                    latest_confidences[task_name] = avg_conf
-
-        return {
-            "client_id": self.source_ip,  # wire 兼容：该字段历史含义即 source_ip
-            "stage": stage,
-            "temporal": {
-                "events": events,
-            } if events else None,
-            "detections": latest_detections,
-            "confidences": latest_confidences,
-            "recent_alarms": [
-                {
-                    "alarm_type": a.alarm_type,
-                    "alarm_level": a.alarm_level,
-                    "alarm_message": a.alarm_message,
-                    "timestamp": a.timestamp,
-                    "mode": a.mode,
-                    "metric": a.metric,
-                }
-                for a in recent_alarms
-            ],
-        }

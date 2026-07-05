@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from factories import make_alarm
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
@@ -46,26 +47,17 @@ async def test_task_message_task_not_in_memory_returns_empty(monkeypatch):
 async def test_task_message_running_returns_increment(monkeypatch):
     from app.routers import task as task_router
 
+    from app.domain.alarm import AlarmMetric
+
+    # 装配层的 metric 映射用 config 单一真源（lazy YAML），此处只验端点串起装配 +
+    # 原子入口调用；alarm/max_seq 不依赖映射，signals_10s schema 由装配层单测覆盖。
+    alarm = make_alarm(metric=AlarmMetric.BUBBLE, mode="REALTIME", seq=2, timestamp=1.0)
+
     cq = MagicMock()
-    cq.get_task_alarm_message.return_value = {
-        "task_id": 1,
-        "max_seq": 2,
-        "signals_10s": {
-            "BUBBLE": {"active": True, "hit_count": 1, "max_conf": 0.8},
-            "BENDING": {"active": False, "hit_count": 0, "max_conf": 0.0},
-            "TASK_SETTLEMENT": {"active": False, "hit_count": 0, "max_conf": 0.0},
-        },
-        "alarms": [
-            {
-                "seq": 2,
-                "mode": "REALTIME",
-                "metric": "BUBBLE",
-                "level": "high",
-                "message": "bubble high",
-                "count": 1,
-                "ts": 1,
-            }
-        ],
+    cq.task_id = 1
+    cq.get_alarm_snapshot.return_value = ([alarm], 2)
+    cq.get_slide_window_summary.return_value = {
+        "bubble": {"active": True, "hit_count": 1, "max_conf": 0.8}
     }
 
     fake_manager = MagicMock()
@@ -81,4 +73,4 @@ async def test_task_message_running_returns_increment(monkeypatch):
     assert payload["max_seq"] == 2
     assert payload["alarms"][0]["seq"] == 2
     fake_manager.get.assert_called_once_with(1)
-    cq.get_task_alarm_message.assert_called_once_with(since_seq=1)
+    cq.get_alarm_snapshot.assert_called_once_with(1)
