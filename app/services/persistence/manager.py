@@ -203,48 +203,6 @@ class PersistenceManager:
             logger.error("告警入队失败: %s", e, exc_info=True)
             return False
 
-    def persist_alarms(
-        self,
-        alarms: List,
-        *,
-        cq,
-        client_id: str,
-        mode: str,
-        log_each: bool = False,
-    ) -> None:
-        """把一批告警过闸门后落库 + 记入内存环形缓冲（实时/结算共用一条映射）。
-
-        别名已由产出方（temporal actor）烧进 alarm.stage，此处直接读、不反向 import inference.naming；
-        metric 直接读 alarm.metric（产出方已填）；task_id/step_id 由 cq 派生。
-        顺序先内存后外部：内存日志供前端实时轮询，外部库本就 30s 批次。
-        （原 inference/temporal/alarm_sink.persist_alarms 迁入——告警落库是持久化领域。）
-        """
-        task_id = cq.task_id
-        step_id = cq.step_id
-
-        for alarm in alarms:
-            # 给产出方的同一份告警补 mode，再过闸门+入环形缓冲（seq 由其赋；stage 已烧）。
-            # 闸门 task_id 取自 cq 自身不可变身份，无需再传。
-            alarm.mode = mode
-            if not cq.append_alarm_record_with_gate(alarm, mode):
-                continue
-            self.persist_alarm({
-                "task_id": task_id,
-                "stage": alarm.stage,
-                "step_id": step_id,
-                "client_id": client_id,
-                "alarm_type": alarm.alarm_type,
-                "alarm_metric": alarm.metric,
-                "alarm_mode": mode,
-                "alarm_level": alarm.alarm_level,
-                "alarm_message": alarm.alarm_message,
-                "detection_result": alarm.metadata if alarm.metadata else None,
-            })
-            if log_each:
-                logger.info(
-                    "[persistence] %s alarm for %s: %s", mode, client_id, alarm.alarm_message
-                )
-
     def release_task_locks(self, task_id: int) -> None:
         """任务拆除后回收该 task 的 HLS 目录锁（防 _dir_locks 随任务数无限增长）。
 

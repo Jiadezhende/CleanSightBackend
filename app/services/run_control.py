@@ -19,6 +19,7 @@ from app.services.client.config import get_client_config
 from app.services.client.manager import client_manager
 from app.services.client.queues import ClientQueues
 from app.services.inference.instance import inference_manager
+from app.services.inference.temporal import alarm_sink
 from app.services.persistence import persistence_manager
 from app.services.stream import stream_service
 from app.utils.exceptions import AppError
@@ -170,12 +171,8 @@ class RunController:
                 if cq is not None:
                     settlement = inference_manager.stop_workflow(cq)  # Inference owner
                     if settlement:
-                        persistence_manager.persist_alarms(
-                            settlement,
-                            cq=cq,
-                            client_id=cq.source_ip,   # 诊断字段，语义=source_ip
-                            mode=ALARM_MODE_SETTLEMENT,
-                            log_each=True,
+                        alarm_sink.persist_alarms(
+                            settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT, log_each=True
                         )
                     cq.set_latest_temporal([])   # 提前清前端槽，防 WS 读到结束后残留
                     cq.set_latest_rendered(None)

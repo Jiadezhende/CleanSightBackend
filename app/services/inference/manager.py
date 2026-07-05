@@ -20,9 +20,9 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.detection.service import ModelWorkerService
+from app.services.inference.temporal import alarm_sink
 from app.services.inference.temporal.actor import ClientTemporalActor
 from app.services.inference.visualization.pool import VisualizationWorkerPool
-from app.services.persistence import persistence_manager
 
 logger = logging.getLogger(__name__)
 
@@ -325,11 +325,8 @@ class InferenceManager:
                 if settlement:
                     cq = client_manager.get(task_id)
                     if cq:
-                        persistence_manager.persist_alarms(
-                            settlement,
-                            cq=cq,
-                            client_id=cq.source_ip,   # 诊断字段，语义=source_ip
-                            mode=ALARM_MODE_SETTLEMENT,
+                        alarm_sink.persist_alarms(
+                            settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT
                         )
             except Exception as e:
                 logger.warning(
