@@ -86,18 +86,30 @@ async def start(req: StartRequest):
 
 
 @router.post("/terminate")
-async def terminate(client_id: str):
-    """统一终止（wire 不变，`client_id` 参数即 source_ip）。
+async def terminate(task_id: int | None = None, client_id: str | None = None):
+    """统一终止（双模，task_id 优先）。
 
-    边界垫片：source_ip → 当前 run（匹配首个）→ `RunController.stop_run(task_id)`。
-    查不到 run（已停/从未起）→ success no-op（对齐运行时 client_not_found 语义）。
+    - `task_id`（新，首选）→ `client_manager.get(task_id)` 直查运行键。
+    - `client_id`（旧，即 source_ip）→ `find_by_source_ip` 边界垫片扫描回当前 run。
+    两参皆缺 → ValidationError。查不到 run（已停/从未起）→ success no-op
+    （对齐运行时 client_not_found 语义）。
     """
-    logger.info(f"[terminate] Terminating by source_ip: {client_id}")
+    if task_id is not None:
+        logger.info(f"[terminate] Terminating by task_id: {task_id}")
+        cq = client_manager.get(task_id)
+        no_op_id = {"task_id": task_id}
+    elif client_id:
+        logger.info(f"[terminate] Terminating by source_ip: {client_id}")
+        cq = client_manager.find_by_source_ip(client_id)
+        no_op_id = {"client_id": client_id}
+    else:
+        raise ValidationError(
+            message="task_id or client_id required", field="task_id", value=None
+        )
 
-    cq = client_manager.find_by_source_ip(client_id)
     if cq is None:
-        logger.info(f"[terminate] No active run for source_ip={client_id}, no-op")
-        return {"status": "success", "client_id": client_id, "message": "no active run"}
+        logger.info(f"[terminate] No active run for {no_op_id}, no-op")
+        return {"status": "success", **no_op_id, "message": "no active run"}
 
     result = await asyncio.to_thread(
         run_controller.stop_run, cq.task_id, "API termination request"
