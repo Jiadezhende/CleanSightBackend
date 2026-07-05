@@ -42,7 +42,7 @@ def test_sweep_pulls_full_segments_by_seg_len():
     assert all(c["task_id"] == 1 and c["step_id"] == 1 for c in calls)
 
     # 拉取后缓冲只剩不足一段的残帧，且不再被落盘
-    assert cq.get_ca_raw_length() == 5
+    assert len(cq.ca_raw) == 5
     assert cq.get_ca_processed_length() == 2
 
 
@@ -54,7 +54,7 @@ def test_sweep_no_full_segment_persists_nothing():
     _sweeper({1: cq}, calls)._sweep()
 
     assert calls == []
-    assert cq.get_ca_raw_length() == 9  # 残帧原样留缓冲
+    assert len(cq.ca_raw) == 9  # 残帧原样留缓冲
 
 
 def test_sweep_skips_cq_without_step_id():
@@ -67,7 +67,7 @@ def test_sweep_skips_cq_without_step_id():
     _sweeper({7: cq}, calls)._sweep()
 
     assert calls == []
-    assert cq.get_ca_raw_length() == 20
+    assert len(cq.ca_raw) == 20
 
 
 def test_sweep_drains_backlog_multiple_segments():
@@ -81,4 +81,4 @@ def test_sweep_drains_backlog_multiple_segments():
     raw = [c for c in calls if c["segment_type"] == "raw"]
     assert len(raw) == 4
     assert all(len(c["frames"]) == 5 for c in raw)
-    assert cq.get_ca_raw_length() == 3
+    assert len(cq.ca_raw) == 3

@@ -271,7 +271,7 @@ class StageAwareDispatcher:
                     pressured = True
                 client_parts.append(
                     f"{task_id} ca_processed={cq.get_ca_processed_length()}/"
-                    f"{cq.get_ca_processed_capacity()} drop={cum}(+{delta})"
+                    f"{cq.ca_maxlen} drop={cum}(+{delta})"
                 )
 
             if not pressured:

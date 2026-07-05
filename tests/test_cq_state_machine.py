@@ -81,7 +81,7 @@ def test_close_releases_payload_keeps_identity():
     cq.close()
     # payload 已释放
     assert cq.get_slide_window("bubble") == []
-    assert cq.get_ca_raw_length() == 0
+    assert len(cq.ca_raw) == 0
     assert cq.get_recent_alarms() == []
     assert cq.get_latest_inference() is None
     # 身份小壳保留（供 fence/日志）

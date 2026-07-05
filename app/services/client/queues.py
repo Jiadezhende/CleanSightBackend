@@ -131,6 +131,9 @@ class ClientQueues:
             time.time()
         )  # 初始化为创建时间，支持启动失败检测
 
+        # 三条 CA 队列共用同一 maxlen（统一容量，非 per-queue）；公有属性直读，
+        # 不提供 get_*_capacity 包装（同 ca_segment_len 风格，见类 docstring 身份直读约定）。
+        self.ca_maxlen = ca_maxlen
         # CA-ReadyQueue：无锁 SPSC deque（单生产者 decoder / 单消费者 dispatcher）
         self.ca_ready: Deque[Frame] = deque(maxlen=ca_maxlen)
         # CA-RawQueue（由 _raw_lock 保护）
@@ -284,18 +287,6 @@ class ClientQueues:
             "has_rendered": self._latest_rendered is not None,
         }
 
-    def get_ca_ready_capacity(self) -> int:
-        return self.ca_ready.maxlen or 0
-
-    def get_ca_raw_capacity(self) -> int:
-        return self.ca_raw.maxlen or 0
-
-    def get_ca_processed_capacity(self) -> int:
-        return self.ca_processed.maxlen or 0
-
-    def get_ca_raw_length(self) -> int:
-        return len(self.ca_raw)
-
     def get_ca_processed_length(self) -> int:
         return len(self.ca_processed)
 
@@ -436,14 +427,6 @@ class ClientQueues:
                 return []
             return list(window)
 
-    def get_slide_window_latest(self, task_name: str) -> Optional[FrameDetections]:
-        """返回指定 task 滑动窗口的最新条目。"""
-        with self._slide_window_lock:
-            window = self._slide_window.get(task_name)
-            if not window:
-                return None
-            return window[-1]
-
     # --- latest_temporal 操作 ---
 
     def set_latest_temporal(self, events: List[str]) -> None:
@@ -492,16 +475,6 @@ class ClientQueues:
         with self._alarm_lock:
             items = list(self._alarm_log)
         return items[-n:]
-
-    def get_alarm_increment(self, since_seq: int = 0) -> List[Alarm]:
-        """Return alarms with seq > since_seq."""
-        with self._alarm_lock:
-            items = [a for a in self._alarm_log if a.seq > since_seq]
-        return items
-
-    def get_alarm_max_seq(self) -> int:
-        with self._alarm_lock:
-            return self._alarm_seq
 
     def get_alarm_snapshot(self, since_seq: int = 0) -> Tuple[List[Alarm], int]:
         """单 _alarm_lock 内原子返回 (seq>since_seq 的告警增量, max_seq)。

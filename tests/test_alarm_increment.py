@@ -92,7 +92,7 @@ def test_pass_assigns_incrementing_seq():
     cq = _cq_with_task()
     cq.append_alarm_record_with_gate(make_alarm(metric="BUBBLE"), "REALTIME")
     cq.append_alarm_record_with_gate(make_alarm(metric="BENDING"), "REALTIME")
-    alarms = cq.get_alarm_increment(since_seq=0)
+    alarms, _ = cq.get_alarm_snapshot(since_seq=0)
     assert [a.seq for a in alarms] == [1, 2]
 
 
@@ -105,8 +105,9 @@ def test_blocked_alarm_not_recorded():
     with patch("time.time", return_value=t0 + 2.0):
         assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False  # blocked
 
-    assert len(cq.get_alarm_increment(since_seq=0)) == 1
-    assert cq.get_alarm_max_seq() == 1
+    alarms, max_seq = cq.get_alarm_snapshot(since_seq=0)
+    assert len(alarms) == 1
+    assert max_seq == 1
 
 
 # --- 滑窗汇总（纯访问器，按流名键；metric 映射在 router 装配层测） ---

@@ -53,7 +53,7 @@ def test_stage_queue_no_drop_when_not_full():
 def test_ca_processed_drop_counted_on_overflow():
     """未绑定任务时 ca_processed 只进不出，超过 maxlen 的部分应被计数。"""
     cq = make_bare_cq(ca_maxlen=3)
-    assert cq.get_ca_processed_capacity() == 3
+    assert cq.ca_maxlen == 3
 
     for _ in range(5):
         cq.append_ca_processed(_frame())
