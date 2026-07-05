@@ -1,16 +1,17 @@
 # 换键与路由收敛（T4–T6）：task_id 单键 + 句柄写回
 
-> **变更状态**：实施工单（2026-07-01 修订）
-> **知识库**：待落地后沉淀
+> **变更状态**：实施工单（2026-07-01 修订）；T4–T5 已落地、T6 暂缓待前端
+> **知识库**：待沉淀
 >
-> 契约前置：[20260628_RUNTIME_IDENTITY_BINDING_TASK.md](20260628_RUNTIME_IDENTITY_BINDING_TASK.md)。
-> 序列前置：[20260628_CLIENT_QUEUES_LIFECYCLE_TASK.md](20260628_CLIENT_QUEUES_LIFECYCLE_TASK.md)（T1–T3：per-run 不可变 CQ + 状态机 + 单一拆除出口）。
+> 承接：本工单建立在前序重构「CQ per-run 不可变 + 状态机 ACTIVE/DRAINING/CLOSED + 单一拆除出口 + 对象身份 fence」之上——那批把不可变 CQ、写入门、跨 run 隔离就位，本工单在其上换键 + 句柄写回。
 
 ## 工单定位
 
-把写回改成句柄投递（不再按 client_id 反查），把运行时键从 `client_id` 翻成 `task_id`，再迁移对外 wire。承载 **T4 / T5 / T6**——strangler 末段，爆炸面最大，已被 T1–T3 的不可变 CQ + 状态机 + 对象身份 fence 兜底。
+把写回改成句柄投递（不再按 client_id 反查），把运行时键从 `client_id` 翻成 `task_id`，再迁移对外 wire。承载 **T4 / T5 / T6**——strangler 末段，爆炸面最大，已被前序不可变 CQ + 状态机 + 对象身份 fence 兜底。
 
-## 路由分类原则（取自定稿）
+> 概念：**run** = 一次活跃运行，由**一个 CQ 实例**代表、终生绑 `(task_id, step_id)`；**source_ip** = 被动字段（旧 client_id，非路由键）；判别 run 实例靠 **CQ 对象引用本身**（无 `run_epoch`）。
+
+## 路由分类原则
 
 > per-run 组件（Decoder/Actor）构造焊死单个 CQ、不反查；写回**拎捕获的 CQ 句柄**；multi-run Scheduler 动态枚举 registry；纯计算服务不接触 CQ；读当前 run 的（WS/实时告警）按 `task_id` 查。
 
@@ -64,7 +65,7 @@
 
 **依赖**：T3、T4　**量**：L（2–4d）　**风险**：中（call site 多、改测试最多）
 
-> 落地记录见 [20260704_RUNKEY_TASKID_LANDING.md](20260704_RUNKEY_TASKID_LANDING.md)。要点：
+> T5 已落地（2026-07-04），要点：
 > 运行键 `source_ip(str) → run_key(str(task_id)) → task_id(int)` 两跳收敛为 **int 单键**（`run_key` 中间态已删，消 str/int 双身份）；
 > `ClientManager._runs`/`_task_locks`/`InferenceManager._actors`/`StreamService.decoders`/`HealthMonitor` 全 int 键；
 > **`get_client_by_task_id` 已删**（键即 task_id，调用方直接 `get(task_id)` O(1)）；`get_or_create`/`get_result` 死代码清除；
@@ -84,7 +85,7 @@
 
 ### T5 收敛细化：InferenceManager 职责归位 + 告警别名前烧
 
-> 承接 [RUNTIME_IDENTITY_BINDING §T4 评审 4](20260628_RUNTIME_IDENTITY_BINDING_TASK.md#t4-评审2026-07-02)「InferenceManager 职责越界」的记账。
+> 收口 T4 评审记下的「InferenceManager 职责越界」账（病灶复述见下）。
 >
 > **落地现状（2026-07-03，`refact/lifespan`）**：teardown 归位 + persistence 生命周期上移**已提前落地**（不依赖换键）：
 > - 别名前烧：`ClientTemporalActor.__init__` 解析一次 `_stage_alias`，`_tick`/`_collect_settlement_alarms` 产出即烧进 `alarm.stage`；

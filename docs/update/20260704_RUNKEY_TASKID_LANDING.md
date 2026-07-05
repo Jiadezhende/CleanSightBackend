@@ -3,8 +3,7 @@
 > **变更状态**：生效中（2026-07-04）　<!-- 运行时全量 task_id 键已落；对外 wire 保持 source_ip 不变 -->
 > **知识库**：待沉淀
 >
-> 实施工单：[20260628_CLIENT_ROUTING_BOUNDARY_TASK.md](20260628_CLIENT_ROUTING_BOUNDARY_TASK.md)（T4–T6 计划）。
-> 契约前置：[20260628_RUNTIME_IDENTITY_BINDING_TASK.md](20260628_RUNTIME_IDENTITY_BINDING_TASK.md)、[20260628_CLIENT_QUEUES_LIFECYCLE_TASK.md](20260628_CLIENT_QUEUES_LIFECYCLE_TASK.md)（T1–T3）。
+> 承接：运行身份重构的收官落地——前序已把 CQ per-run 不可变、状态机 ACTIVE/DRAINING/CLOSED、单一拆除出口、句柄写回就位；本文记「换键 client_id→task_id」这一步的实际落地。
 
 ## 概述
 

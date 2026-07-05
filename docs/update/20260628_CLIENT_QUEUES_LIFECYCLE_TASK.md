@@ -1,23 +1,22 @@
 # CQ 生命周期与拆除编排（T1–T3）
 
-> **变更状态**：实施工单（2026-07-01 修订）
-> **知识库**：待落地后沉淀
->
-> 契约前置：[20260628_RUNTIME_IDENTITY_BINDING_TASK.md](20260628_RUNTIME_IDENTITY_BINDING_TASK.md)（定稿 + 落地路线 + 四角色）。
-> 序列后续：[20260628_CLIENT_ROUTING_BOUNDARY_TASK.md](20260628_CLIENT_ROUTING_BOUNDARY_TASK.md)（T4–T6 换键/句柄化）。
->
-> 相关：[20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md](20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md)、[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)。
+> **变更状态**：实施工单（2026-07-01 修订）；T1–T3 已落地
+> **知识库**：待沉淀
 
 ## 工单定位
 
-把 CQ 从「跨 run 复用的可变对象」改成「一 run 一实例的不可变 run 对象」，加状态机，并把散落两处的拆除逻辑收成单一编排出口。承载 **T1 / T2 / T3**。全程仍按现有 client_id 键落地（换键留 T5），三步独立可绿。
+把 CQ 从「跨 run 复用的可变对象」改成「一 run 一实例的不可变 run 对象」，加状态机，并把散落两处的拆除逻辑收成单一编排出口。承载 **T1 / T2 / T3**。全程仍按现有 client_id 键落地（换键属后续工单），三步独立可绿。
 
-## 关键前提（取自定稿）
+## 运行身份契约（本文自足）
 
-- **CQ 实例 == 一次 run == 一个 `(task_id, step_id)`**；构造注入不可变身份，不再原地复用；
-- 判别 run 实例 = **CQ 对象引用**（无 `run_epoch`）；
+概念：**task** = 业务任务（`clean_task.task_id`）；**step** = 清洗阶段（`int(current_step)`），定 stage 路由 + 存储分区；**run** = 一次活跃运行，由**一个 CQ 实例**代表，终生绑定一个 `(task_id, step_id)`、不换 step；**source_ip** = 被动字段（旧 client_id，流来源/诊断），非路由键、不承担互斥。
+
+本工单据此落三条不变式：
+
+- **CQ 实例 == 一次 run == 一个 `(task_id, step_id)`**：构造注入不可变身份，不再原地复用；
+- 判别 run 实例 = **CQ 对象引用**（不引入 `run_epoch`，也不让消息携带身份）；
 - 两道栅栏：`(task,step)`/对象身份隔离跨 run；状态机隔离同 run 拆除期；
-- 重启 = supersede（覆盖 `(task,step)` 分区）。
+- 重启 = supersede（新 run 覆盖/截断该 `(task,step)` 分区，不引入 `{task}/{step}/{run}` 存储层级）。
 
 ### 现状根因
 
