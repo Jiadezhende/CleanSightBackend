@@ -483,19 +483,22 @@ class HLSPersistenceStrategy:
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
+        out_raw = None
         try:
             out_raw = cv2.VideoWriter(
                 str(raw_segment_path), fourcc, self.raw_fps, (width, height)
             )
             for fd in frames:
                 out_raw.write(fd.frame)
-            out_raw.release()
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write raw video segment: {raw_segment_path}",
                 operation="hls_write_raw",
                 retryable=True,
             ) from e
+        finally:
+            if out_raw is not None:
+                out_raw.release()  # 异常路径也须释放原生编码器句柄
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
         # cv2.VideoWriter 用固定 fps 写 N 帧 → 输出 mp4v 媒体时长 = N/fps，
@@ -575,19 +578,22 @@ class HLSPersistenceStrategy:
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
+        out_processed = None
         try:
             out_processed = cv2.VideoWriter(
                 str(segment_path), fourcc, eff_fps, (width, height)
             )
             for fd in frames:
                 out_processed.write(fd.frame)
-            out_processed.release()
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write processed video segment: {segment_path}",
                 operation="hls_write_processed",
                 retryable=True,
             ) from e
+        finally:
+            if out_processed is not None:
+                out_processed.release()  # 异常路径也须释放原生编码器句柄
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致，故与 VideoWriter
         # 用同一个 eff_fps。详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致

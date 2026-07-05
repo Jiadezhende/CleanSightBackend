@@ -10,7 +10,6 @@
 
 import logging
 import queue
-import threading
 from typing import Any, Dict, List, Optional
 
 from app.domain.frame import Frame
@@ -18,7 +17,6 @@ from app.services.persistence.config import PersistenceConfig
 from app.services.persistence.models import (
     AlarmPersistenceTask,
     HLSPersistenceTask,
-    PersistenceMetrics,
 )
 from app.services.persistence.workers.alarm_worker import AlarmWorkerPool
 from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
@@ -44,9 +42,6 @@ class PersistenceManager:
         else:
             self.config = config
 
-        # 停止事件
-        self._stop_event = threading.Event()
-
         # 创建持久化队列
         self.hls_queue: queue.Queue[HLSPersistenceTask] = queue.Queue(
             maxsize=self.config.hls_queue_size
@@ -69,9 +64,6 @@ class PersistenceManager:
             input_queue=self.alarm_queue,
             num_workers=self.config.alarm_workers,
         )
-
-        # 监控指标
-        self.metrics = PersistenceMetrics()
 
         # 存储清理 Worker（按配置条件创建）
         self._cleanup_worker: StorageCleanupWorker | None = None
@@ -105,7 +97,6 @@ class PersistenceManager:
     def stop(self, timeout: float = 10.0):
         """停止持久化服务（优雅关闭）"""
         logger.info("停止持久化服务")
-        self._stop_event.set()
 
         # 先停 sweeper（不再拉新段），残段由 RunController 拆除时 flush；
         # 再停 Worker 池，保证 sweeper 已入队的整段仍被消费落盘。
@@ -145,16 +136,13 @@ class PersistenceManager:
                 frames=frames,
             )
             self.hls_queue.put(task, timeout=1.0)
-            self.metrics.hls_enqueued += 1
             return True
         except queue.Full:
-            self.metrics.hls_queue_full += 1
             logger.warning(
                 "HLS队列已满，丢弃任务: task_id=%s step_id=%s", task_id, step_id
             )
             return False
         except Exception as e:
-            self.metrics.hls_errors += 1
             logger.error("HLS入队失败: %s", e, exc_info=True)
             return False
 
@@ -207,14 +195,11 @@ class PersistenceManager:
         try:
             task = AlarmPersistenceTask.from_dict(alarm_info)
             self.alarm_queue.put(task, timeout=0.5)
-            self.metrics.alarm_enqueued += 1
             return True
         except queue.Full:
-            self.metrics.alarm_queue_full += 1
             logger.warning("告警队列已满")
             return False
         except Exception as e:
-            self.metrics.alarm_errors += 1
             logger.error("告警入队失败: %s", e, exc_info=True)
             return False
 
@@ -259,23 +244,6 @@ class PersistenceManager:
                 logger.info(
                     "[persistence] %s alarm for %s: %s", mode, client_id, alarm.alarm_message
                 )
-
-    # ========== 监控API ==========
-
-    def get_metrics(self) -> Dict[str, Any]:
-        """获取持久化指标"""
-        return {
-            "hls_queue_size": self.hls_queue.qsize(),
-            "alarm_queue_size": self.alarm_queue.qsize(),
-            "hls_enqueued": self.metrics.hls_enqueued,
-            "hls_completed": self.metrics.hls_completed,
-            "hls_errors": self.metrics.hls_errors,
-            "hls_queue_full": self.metrics.hls_queue_full,
-            "alarm_enqueued": self.metrics.alarm_enqueued,
-            "alarm_completed": self.metrics.alarm_completed,
-            "alarm_errors": self.metrics.alarm_errors,
-            "alarm_queue_full": self.metrics.alarm_queue_full,
-        }
 
     def release_task_locks(self, task_id: int) -> None:
         """任务拆除后回收该 task 的 HLS 目录锁（防 _dir_locks 随任务数无限增长）。

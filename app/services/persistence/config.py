@@ -122,7 +122,7 @@ class PersistenceConfig:
 
         return settings.storage_base_dir
 
-    # 向后兼容属性
+    # 扁平访问器（manager 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
     @property
     def hls_workers(self) -> int:
         return self.hls.workers
@@ -138,14 +138,6 @@ class PersistenceConfig:
     @property
     def hls_sweep_interval_seconds(self) -> float:
         return self.hls.sweep_interval_seconds
-
-    @property
-    def raw_fps(self) -> float:
-        return self.hls.raw_fps
-
-    @property
-    def processed_fps(self) -> float:
-        return self.hls.processed_fps
 
     @property
     def alarm_workers(self) -> int:
