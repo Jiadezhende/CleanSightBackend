@@ -21,6 +21,7 @@ class HLSConfig:
     workers: int = 2
     queue_size: int = 100
     segment_duration: int = 10
+    sweep_interval_seconds: float = 1.0  # HLSSegmentSweeper 扫描间隔（秒，PULL 模型）
     # 注意：raw_fps和processed_fps从inference config动态获取，不在此定义
 
 
@@ -133,6 +134,10 @@ class PersistenceConfig:
     @property
     def segment_duration(self) -> int:
         return self.hls.segment_duration
+
+    @property
+    def hls_sweep_interval_seconds(self) -> float:
+        return self.hls.sweep_interval_seconds
 
     @property
     def raw_fps(self) -> float:

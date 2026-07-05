@@ -23,6 +23,7 @@ from app.services.persistence.models import (
 from app.services.persistence.workers.alarm_worker import AlarmWorkerPool
 from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
 from app.services.persistence.workers.hls_worker import HLSWorkerPool
+from app.services.persistence.workers.segment_sweeper import HLSSegmentSweeper
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +82,23 @@ class PersistenceManager:
                 interval_seconds=self.config.cleanup_interval_seconds,
             )
 
+        # HLS 分段拉取 Worker（PULL 模型）：周期扫活跃 CQ 把攒满的整段拉走落盘。
+        # 注入 client_manager.snapshot + 本管理器的 persist_hls_segment；
+        # 依赖方向 persistence→client 单向（client 不再回指 persistence）。
+        from app.services.client.manager import client_manager
+
+        self._segment_sweeper = HLSSegmentSweeper(
+            snapshot_fn=client_manager.snapshot,
+            persist_fn=self.persist_hls_segment,
+            interval_seconds=self.config.hls_sweep_interval_seconds,
+        )
+
     def start(self):
         """启动持久化服务"""
         logger.info("启动持久化服务")
         self.hls_pool.start()
         self.alarm_pool.start()
+        self._segment_sweeper.start()
         if self._cleanup_worker:
             self._cleanup_worker.start()
 
@@ -93,6 +106,10 @@ class PersistenceManager:
         """停止持久化服务（优雅关闭）"""
         logger.info("停止持久化服务")
         self._stop_event.set()
+
+        # 先停 sweeper（不再拉新段），残段由 RunController 拆除时 flush；
+        # 再停 Worker 池，保证 sweeper 已入队的整段仍被消费落盘。
+        self._segment_sweeper.stop(timeout=5.0)
 
         # 停止Worker池（会等待队列清空）
         self.hls_pool.stop(timeout=timeout)

@@ -16,6 +16,7 @@ import numpy as np
 from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetections
 from app.domain.frame import Frame
+from app.utils.metrics import frame_drop_total
 
 if TYPE_CHECKING:
     from app.services.inference.models import FrameInference
@@ -200,87 +201,41 @@ class ClientQueues:
 
     def append_ca_raw(self, frame_data: Frame) -> bool:
         """
-        添加原始帧到落盘队列，同时更新最新原始帧缓存。
-        若积累帧数达到 ca_segment_len 且已绑定任务，直接触发持久化。
+        添加原始帧到落盘缓冲，同时更新最新原始帧缓存（纯缓冲，不触发落盘）。
 
-        身份 task_id/step_id 为不可变 primitive，免锁直读，不与 _raw_lock 嵌套。
+        分段落盘由 persistence 的 HLSSegmentSweeper 周期 take_raw_segment() 拉取，
+        本方法只管入队 + 丢帧计数 + 刷新 latest_raw_frame。返回是否入队（非 ACTIVE 拒）。
         """
-        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——HLS 残余由 _flush_all_remaining_segments 收尾）
+        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——残段由 flush_residual_segments 收尾）
         if self._state is not RunState.ACTIVE:
             return False
-        try:
-            # 身份不可变，免锁直读（task_id/step_id 均为构造定死字段）
-            task_id = self.task_id
-
-            frames_to_persist = None
-            with self._raw_lock:
-                if self.ca_raw.maxlen is not None and len(self.ca_raw) >= self.ca_raw.maxlen:
-                    self.frames_dropped_raw += 1
-                self.ca_raw.append(frame_data)
-                self.latest_raw_frame = frame_data.frame
-                self.latest_raw_timestamp = frame_data.timestamp
-                if task_id is not None and len(self.ca_raw) >= self.ca_segment_len:
-                    frames_to_persist = self.pop_n_ca_raw(self.ca_segment_len)
-
-            if frames_to_persist is not None and task_id is not None:
-                step_id = self.step_id
-                if step_id is None:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        "[append_ca_raw] step_id is None, skip persistence (task_id=%s)",
-                        task_id,
-                    )
-                    return False
-                from app.services.persistence import persistence_manager
-                persistence_manager.persist_hls_segment(
-                    task_id=task_id,
-                    step_id=step_id,
-                    segment_type="raw",
-                    frames=frames_to_persist,
-                )
-            return True
-        except Exception:
-            return False
+        with self._raw_lock:
+            if self.ca_raw.maxlen is not None and len(self.ca_raw) >= self.ca_raw.maxlen:
+                self.frames_dropped_raw += 1
+                frame_drop_total.labels(reason="raw_backpressure").inc()
+            self.ca_raw.append(frame_data)
+            self.latest_raw_frame = frame_data.frame
+            self.latest_raw_timestamp = frame_data.timestamp
+        return True
 
     def append_ca_processed(self, frame_data: Frame) -> None:
         """
-        添加处理帧到落盘队列。
-        若积累帧数达到 ca_segment_len 且已绑定任务，直接触发持久化。
+        添加处理帧到落盘缓冲（纯缓冲，不触发落盘）。
 
-        身份 task_id/step_id 为不可变 primitive，免锁直读，不与 _viz_lock 嵌套。
+        分段落盘由 persistence 的 HLSSegmentSweeper 周期 take_processed_segment() 拉取，
+        本方法只管入队 + 丢帧计数。
         """
         # 写门：非 ACTIVE 拒写
         if self._state is not RunState.ACTIVE:
             return
-        task_id = self.task_id  # 身份不可变，免锁直读
-
-        frames_to_persist = None
         with self._viz_lock:
             if (
                 self.ca_processed.maxlen is not None
                 and len(self.ca_processed) >= self.ca_processed.maxlen
             ):
                 self.frames_dropped_processed += 1
+                frame_drop_total.labels(reason="hls_backpressure").inc()
             self.ca_processed.append(frame_data)
-            if task_id is not None and len(self.ca_processed) >= self.ca_segment_len:
-                frames_to_persist = self.pop_n_ca_processed(self.ca_segment_len)
-
-        if frames_to_persist is not None and task_id is not None:
-            step_id = self.step_id
-            if step_id is None:
-                import logging
-                logging.getLogger(__name__).error(
-                    "[append_ca_processed] step_id is None, skip persistence (task_id=%s)",
-                    task_id,
-                )
-                return
-            from app.services.persistence import persistence_manager
-            persistence_manager.persist_hls_segment(
-                task_id=task_id,
-                step_id=step_id,
-                segment_type="processed",
-                frames=frames_to_persist,
-            )
 
     def set_latest_rendered(self, frame_data: Optional[Frame]) -> None:
         """更新最新渲染帧（由 VisualizationWorker 调用）。传 None 表示清空。
@@ -370,17 +325,23 @@ class ClientQueues:
             self.ca_processed.clear()
             return frames
 
-    def pop_n_ca_raw(self, n: int) -> List[Frame]:
-        out: List[Frame] = []
-        for _ in range(min(n, len(self.ca_raw))):
-            out.append(self.ca_raw.popleft())
-        return out
+    def take_raw_segment(self) -> Optional[List[Frame]]:
+        """缓冲攒满一整段(ca_segment_len 帧)则原子弹出，否则 None。
 
-    def pop_n_ca_processed(self, n: int) -> List[Frame]:
-        out: List[Frame] = []
-        for _ in range(min(n, len(self.ca_processed))):
-            out.append(self.ca_processed.popleft())
-        return out
+        供 persistence 的 HLSSegmentSweeper 周期拉取。与 append_ca_raw / drain_ca_raw /
+        _release_payload 同走 _raw_lock，互斥安全。
+        """
+        with self._raw_lock:
+            if len(self.ca_raw) < self.ca_segment_len:
+                return None
+            return [self.ca_raw.popleft() for _ in range(self.ca_segment_len)]
+
+    def take_processed_segment(self) -> Optional[List[Frame]]:
+        """缓冲攒满一整段则原子弹出，否则 None（供 HLSSegmentSweeper 周期拉取）。"""
+        with self._viz_lock:
+            if len(self.ca_processed) < self.ca_segment_len:
+                return None
+            return [self.ca_processed.popleft() for _ in range(self.ca_segment_len)]
 
     # --- 运行状态机 ---
 
