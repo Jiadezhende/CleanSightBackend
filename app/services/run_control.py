@@ -204,6 +204,14 @@ class RunController:
                     "[RunController] clean registry failed: %s - %s", task_id, e, exc_info=True
                 )
 
+            # 4. 回收该 task 的 HLS 目录锁（残段已入队、CQ 已出 registry，不会再有新段）
+            try:
+                persistence_manager.release_task_locks(task_id)
+            except Exception as e:
+                logger.debug(
+                    "[RunController] release hls locks failed: %s - %s", task_id, e
+                )
+
             if result["errors"]:
                 logger.warning(
                     "[RunController] stop_run(reason=%r) completed with errors: %s - %s",

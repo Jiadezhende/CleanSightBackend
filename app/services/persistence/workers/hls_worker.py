@@ -124,6 +124,6 @@ class HLSWorkerPool:
         for thread in self.threads:
             thread.join(timeout=timeout)
 
-    def flush_client(self, _client_id: str):
-        """预留接口：客户端断连时调用"""
-        pass
+    def release_dir_locks(self, task_id: int) -> int:
+        """回收该 task 的 HLS 目录锁（转发到 strategy），返回回收数量。"""
+        return self.strategy.release_dir_locks(task_id)

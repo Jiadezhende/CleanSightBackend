@@ -277,7 +277,9 @@ class PersistenceManager:
             "alarm_queue_full": self.metrics.alarm_queue_full,
         }
 
-    def flush_remaining(self, client_id: str):
-        """刷新客户端的所有待持久化数据（任务结束时调用）"""
-        # 通知Worker池刷新特定客户端的数据
-        self.hls_pool.flush_client(client_id)
+    def release_task_locks(self, task_id: int) -> None:
+        """任务拆除后回收该 task 的 HLS 目录锁（防 _dir_locks 随任务数无限增长）。
+
+        由 RunController.stop_run 在清 registry 之后调用——此时不会再有该 task 的新段入队。
+        """
+        self.hls_pool.release_dir_locks(task_id)

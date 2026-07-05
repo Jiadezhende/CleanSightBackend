@@ -66,6 +66,21 @@ class HLSPersistenceStrategy:
                 self._dir_locks[key] = threading.Lock()
             return self._dir_locks[key]
 
+    def release_dir_locks(self, task_id: int) -> int:
+        """回收指定 task 所有 step 目录的 dir 锁，返回回收数量（任务拆除时调用）。
+
+        锁 key 形如 `str(db_dir/task_id/step_id)`，按 task 前缀批量剔除。拆除后不会再有
+        该 task 的新段入队（CQ 已出 registry、sweeper 扫不到），残段 flush 已在此前入队；
+        极少数在途 transcode 若再取锁会经 `_get_dir_lock` 按需重建同一把、不影响串行正确性。
+        不回收则 `_dir_locks` 随 (task_id, step_id) 单调增长——长跑内存慢泄漏。
+        """
+        prefix = str(self.db_dir / str(task_id)) + os.sep
+        with self._dir_locks_guard:
+            stale = [k for k in self._dir_locks if k.startswith(prefix)]
+            for k in stale:
+                del self._dir_locks[k]
+        return len(stale)
+
     # 段文件名格式：{track}_segment_{ts_us}.mp4
     _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
     _EXTINF_RE = re.compile(r"^#EXTINF:([0-9.]+),?$")
