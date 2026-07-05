@@ -46,7 +46,7 @@ infer_latency_ms = Histogram(
 # ============================================================================
 
 infer_failure_total = Counter(
-    "infer_failure_total",
+    "infer_failure",  # prometheus 自动补 _total → sample=infer_failure_total；family=infer_failure
     "Total inference failures",
     ["model", "error_type"],
 )
@@ -79,7 +79,7 @@ infer_failure_total = Counter(
 # ============================================================================
 
 frame_drop_total = Counter(
-    "frame_drop_total", "Total frames dropped", ["reason"]
+    "frame_drop", "Total frames dropped", ["reason"]  # sample=frame_drop_total；family=frame_drop
 )
 """
 帧丢弃总数（FrameDrop 专用）
@@ -103,7 +103,7 @@ frame_drop_total = Counter(
 # 4. GPU OOM 计数（Counter）
 # ============================================================================
 
-gpu_oom_total = Counter("gpu_oom_total", "Total GPU out-of-memory errors", ["model"])
+gpu_oom_total = Counter("gpu_oom", "Total GPU out-of-memory errors", ["model"])  # sample=gpu_oom_total
 """
 GPU 内存不足错误总数
 
@@ -130,7 +130,7 @@ GPU 内存不足错误总数
 # ============================================================================
 
 retry_total = Counter(
-    "retry_total", "Total retry attempts", ["operation", "error_type"]
+    "retry", "Total retry attempts", ["operation", "error_type"]  # sample=retry_total；family=retry
 )
 """
 重试总数（所有操作）

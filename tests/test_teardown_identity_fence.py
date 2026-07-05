@@ -10,15 +10,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from factories import make_cq
 from app.services.client.manager import client_manager
-from app.services.client.queues import ClientQueues, RunState
+from app.services.client.queues import RunState
 from app.services.run_control import run_controller
-
-
-def _cq(task_id=1, step="1", source_ip="10.9.9.9"):
-    return ClientQueues(
-        task_id=task_id, step_id=int(step), source_ip=source_ip, stage=step,
-    )
 
 
 @pytest.fixture
@@ -34,7 +29,7 @@ def _clean_registry():
 
 def test_stop_run_drains_before_flush_then_closes(_clean_registry):
     tid = _clean_registry
-    cq = _cq(task_id=tid)
+    cq = make_cq(task_id=tid)
     client_manager.set(tid, cq)
 
     seen_state = {}
@@ -64,7 +59,7 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
 
 def test_stop_run_expected_hit_tears_down(_clean_registry):
     tid = _clean_registry
-    cq = _cq(task_id=tid)
+    cq = make_cq(task_id=tid)
     client_manager.set(tid, cq)
 
     with (
@@ -85,8 +80,8 @@ def test_stop_run_expected_hit_tears_down(_clean_registry):
 
 def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
     tid = _clean_registry
-    cq_old = _cq(task_id=tid)          # 同 task_id，不同对象（HM 捕获的旧实例）
-    cq_new = _cq(task_id=tid)
+    cq_old = make_cq(task_id=tid)          # 同 task_id，不同对象（HM 捕获的旧实例）
+    cq_new = make_cq(task_id=tid)
     client_manager.set(tid, cq_new)   # 槽位已是新 run（模拟 /start 抢占重启换槽）
 
     with (

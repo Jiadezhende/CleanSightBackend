@@ -4,15 +4,12 @@ eff_fps = (N-1) / (ts_last - ts_first)；VideoWriter 与 EXTINF 同源，回放�
 覆盖：正常反推、span<=0 / 单帧回退、带外（异常时间戳）回退标称。
 """
 
-import numpy as np
-
-from app.domain.frame import Frame
+from factories import make_frame
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
 
 
 def _frames(timestamps):
-    img = np.zeros((4, 4, 3), dtype=np.uint8)
-    return [Frame(timestamp=ts, frame=img) for ts in timestamps]
+    return [make_frame(ts=ts) for ts in timestamps]
 
 
 def test_effective_fps_normal():

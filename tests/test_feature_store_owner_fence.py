@@ -7,22 +7,14 @@ owner 用对象引用（run 身份 = cq 对象），owner 不符即"迟到于 su
 
 import tempfile
 
-from app.domain.detection import Detection, FrameDetections
+from factories import make_frame_detections, make_frame_inference
 from app.services.inference.feature.store import FeatureStore
-from app.services.inference.models import FrameInference
 
 
-def _result(ts: float, cls: str, n: int) -> FrameInference:
-    dets = [
-        Detection(bbox=[0, 0, 1, 1], confidence=0.9, class_id=0, class_name=cls)
-        for _ in range(n)
-    ]
-    return FrameInference(
-        task_id=1,
-        stage="3",
-        timestamp=ts,
-        detections={"bubble": FrameDetections(detections=dets, metadata={}, timestamp=ts)},
-        cq=None,
+def _result(ts: float, cls: str, n: int):
+    return make_frame_inference(
+        cq=None, task_id=1, stage="3", ts=ts,
+        detectors={"bubble": make_frame_detections(n=n, class_name=cls, ts=ts)},
     )
 
 

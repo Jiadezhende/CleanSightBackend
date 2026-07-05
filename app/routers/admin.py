@@ -67,8 +67,8 @@ def _parse_metrics_json() -> dict:
             }
         result["infer_latency_ms"] = latency_result
 
-    # 2. 推理失败 Counter
-    fail_fam = families.get("infer_failure_total")
+    # 2. 推理失败 Counter（family 名去 _total 后缀：prometheus 对 Counter 剥 _total）
+    fail_fam = families.get("infer_failure")
     if fail_fam:
         by_type: dict = {}
         total_fail = 0
@@ -80,8 +80,8 @@ def _parse_metrics_json() -> dict:
             total_fail += sample.value
         result["infer_failure_total"] = {"total": int(total_fail), "by_type": by_type}
 
-    # 3. 帧丢弃 Counter
-    drop_fam = families.get("frame_drop_total")
+    # 3. 帧丢弃 Counter（family 名去 _total）
+    drop_fam = families.get("frame_drop")
     if drop_fam:
         by_reason: dict = {}
         total_drop = 0
@@ -93,14 +93,14 @@ def _parse_metrics_json() -> dict:
             total_drop += sample.value
         result["frame_drop_total"] = {"total": int(total_drop), "by_reason": by_reason}
 
-    # 4. GPU OOM Counter
-    oom_fam = families.get("gpu_oom_total")
+    # 4. GPU OOM Counter（family 名去 _total）
+    oom_fam = families.get("gpu_oom")
     if oom_fam:
         total_oom = sum(s.value for s in oom_fam.samples if s.name.endswith("_total"))
         result["gpu_oom_total"] = int(total_oom)
 
-    # 5. 重试 Counter
-    retry_fam = families.get("retry_total")
+    # 5. 重试 Counter（family 名去 _total）
+    retry_fam = families.get("retry")
     if retry_fam:
         by_op: dict = {}
         total_retry = 0

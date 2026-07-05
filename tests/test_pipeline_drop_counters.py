@@ -5,16 +5,14 @@
 - ClientQueues.ca_processed 满（maxlen）时静默淘汰 → frames_dropped_processed
 """
 
-import numpy as np
 from unittest.mock import MagicMock, patch
 
-from app.domain.frame import Frame
-from app.services.client.queues import ClientQueues
+from factories import make_bare_cq, make_frame
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
 
 
-def _frame() -> Frame:
-    return Frame(timestamp=0.0, frame=np.zeros((2, 2, 3), dtype=np.uint8))
+def _frame():
+    return make_frame(ts=0.0, shape=(2, 2, 3))
 
 
 def test_stage_queue_drop_counted_when_full():
@@ -23,7 +21,7 @@ def test_stage_queue_drop_counted_when_full():
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
     # 客户端：ca_ready 有一帧，stage=MOCK（ClientQueues 默认 initial_stage）
-    cq = ClientQueues(ca_maxlen=10)
+    cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
     cm.snapshot.return_value = {"c1": cq}
 
@@ -43,7 +41,7 @@ def test_stage_queue_no_drop_when_not_full():
     cm = MagicMock()
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
-    cq = ClientQueues(ca_maxlen=10)
+    cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
     cm.snapshot.return_value = {"c1": cq}
 
@@ -54,7 +52,7 @@ def test_stage_queue_no_drop_when_not_full():
 
 def test_ca_processed_drop_counted_on_overflow():
     """未绑定任务时 ca_processed 只进不出，超过 maxlen 的部分应被计数。"""
-    cq = ClientQueues(ca_maxlen=3)
+    cq = make_bare_cq(ca_maxlen=3)
     assert cq.get_ca_processed_capacity() == 3
 
     for _ in range(5):

@@ -6,17 +6,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services.client.queues import ClientQueues
+from factories import make_bare_cq, make_frame_detections
 from app.services.inference.config import load_stage_config
 from app.domain.alarm import Alarm, AlarmType
-from app.domain.detection import Detection, FrameDetections
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.temporal.operator import Operator
 
 
-def _out(ts: float, n: int = 1) -> FrameDetections:
-    dets = [Detection(bbox=[0, 0, 1, 1], confidence=0.9, class_id=0, class_name="x") for _ in range(n)]
-    return FrameDetections(detections=dets, metadata={}, timestamp=ts)
+def _out(ts: float, n: int = 1):
+    return make_frame_detections(n=n, class_name="x", ts=ts)
 
 
 class _NoopOperator(Operator):
@@ -96,7 +94,7 @@ def test_subscribes_required():
 
 
 def test_stream_buffer_floor_10s():
-    cq = ClientQueues()
+    cq = make_bare_cq()
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
         cq.push_detection("x", _out(t))
     # 未配感受野 → 底线 10s：cutoff=20-10=10 → 保留 10,15,20
@@ -105,7 +103,7 @@ def test_stream_buffer_floor_10s():
 
 
 def test_stream_buffer_extends_with_receptive_field():
-    cq = ClientQueues()
+    cq = make_bare_cq()
     cq.set_stream_windows({"x": 30.0})  # 感受野 30s > 底线
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
         cq.push_detection("x", _out(t))

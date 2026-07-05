@@ -5,12 +5,12 @@
 2. find_by_source_ip 按 source_ip 匹配首个命中的 run（业务不保证 source_ip 唯一）。
 """
 
+from factories import make_cq
 from app.services.client.manager import ClientManager
-from app.services.client.queues import ClientQueues
 
 
 def test_task_id_is_the_key_and_source_ip_is_separate():
-    cq = ClientQueues(task_id=7, step_id=3, source_ip="10.0.0.1", stage="3")
+    cq = make_cq(task_id=7, step_id=3, source_ip="10.0.0.1", stage="3")
     assert cq.task_id == 7             # 路由键即 int task_id
     assert cq.source_ip == "10.0.0.1"  # 被动来源字段，与键解耦
     assert not hasattr(cq, "run_key")   # str 副本已删（消双身份）
@@ -19,8 +19,8 @@ def test_task_id_is_the_key_and_source_ip_is_separate():
 
 def test_same_source_ip_two_tasks_coexist():
     cm = ClientManager()
-    cq1 = ClientQueues(task_id=1, step_id=1, source_ip="10.0.0.9")
-    cq2 = ClientQueues(task_id=2, step_id=1, source_ip="10.0.0.9")
+    cq1 = make_cq(task_id=1, step_id=1, source_ip="10.0.0.9")
+    cq2 = make_cq(task_id=2, step_id=1, source_ip="10.0.0.9")
     cm.set(cq1.task_id, cq1)  # 槽位 1（int 键）
     cm.set(cq2.task_id, cq2)  # 槽位 2
 
@@ -32,8 +32,8 @@ def test_same_source_ip_two_tasks_coexist():
 
 def test_find_by_source_ip_matches_first_and_misses_gracefully():
     cm = ClientManager()
-    cq1 = ClientQueues(task_id=1, step_id=1, source_ip="10.0.0.9")
-    cq2 = ClientQueues(task_id=2, step_id=1, source_ip="10.0.0.9")
+    cq1 = make_cq(task_id=1, step_id=1, source_ip="10.0.0.9")
+    cq2 = make_cq(task_id=2, step_id=1, source_ip="10.0.0.9")
     cm.set(cq1.task_id, cq1)
     cm.set(cq2.task_id, cq2)
 

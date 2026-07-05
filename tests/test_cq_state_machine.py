@@ -2,45 +2,24 @@
 
 from types import SimpleNamespace
 
-import numpy as np
-
-from app.domain.alarm import Alarm
-from app.domain.detection import Detection, FrameDetections
-from app.domain.frame import Frame
-from app.services.client.queues import ClientQueues, RunState
+from factories import make_alarm, make_cq, make_frame, make_frame_detections
+from app.services.client.queues import RunState
 
 
-def _cq():
-    return ClientQueues(task_id=1, step_id=1, source_ip="c1", stage="1")
-
-
-def _frame():
-    return Frame(timestamp=1.0, frame=np.zeros((4, 4, 3), dtype=np.uint8))
-
-
-def _alarm(metric="BUBBLE", mode="REALTIME"):
-    return Alarm(
-        alarm_type="流程违规", alarm_level="high", alarm_message="x",
-        mode=mode, metric=metric, stage="LEAK",
-    )
-
-
-def _det(ts=1.0):
-    return FrameDetections(
-        detections=[Detection(bbox=[0, 0, 1, 1], confidence=0.9, class_id=0, class_name="b")],
-        metadata={}, timestamp=ts,
-    )
+# 本地薄别名：保留原用例可读性，构造逻辑收敛在 factories。
+def _det():
+    return make_frame_detections(class_name="b")
 
 
 # --- 转换：幂等、单调 ---
 
 def test_state_starts_active():
-    assert _cq().get_state() is RunState.ACTIVE
-    assert _cq().is_active() is True
+    assert make_cq().get_state() is RunState.ACTIVE
+    assert make_cq().is_active() is True
 
 
 def test_transitions_idempotent_and_monotonic():
-    cq = _cq()
+    cq = make_cq()
     assert cq.to_draining() is True          # ACTIVE→DRAINING
     assert cq.to_draining() is False         # 幂等
     assert cq.get_state() is RunState.DRAINING
@@ -54,11 +33,11 @@ def test_transitions_idempotent_and_monotonic():
 # --- 写门：生产者写在 DRAINING/CLOSED 被拒 ---
 
 def test_frame_and_result_writes_blocked_when_not_active():
-    cq = _cq()
+    cq = make_cq()
     cq.to_draining()
-    assert cq.append_ca_ready_with_throttle(_frame()) is False
-    assert cq.append_ca_raw(_frame()) is False
-    cq.append_ca_processed(_frame())
+    assert cq.append_ca_ready_with_throttle(make_frame()) is False
+    assert cq.append_ca_raw(make_frame()) is False
+    cq.append_ca_processed(make_frame())
     assert cq.get_ca_processed_length() == 0
     cq.push_detection("bubble", _det())
     assert cq.get_slide_window("bubble") == []
@@ -69,22 +48,22 @@ def test_frame_and_result_writes_blocked_when_not_active():
 # --- settlement 非对称：DRAINING 放行、CLOSED 拒 ---
 
 def test_settlement_alarm_allowed_in_draining_rejected_when_closed():
-    cq = _cq()
+    cq = make_cq()
     cq.to_draining()
-    assert cq.append_alarm_record_with_gate(1, _alarm(), "SETTLEMENT") is True  # DRAINING 放行
+    assert cq.append_alarm_record_with_gate(1, make_alarm(), "SETTLEMENT") is True  # DRAINING 放行
     cq.close()
-    assert cq.append_alarm_record_with_gate(1, _alarm(metric="X"), "SETTLEMENT") is False  # CLOSED 拒
+    assert cq.append_alarm_record_with_gate(1, make_alarm(metric="X"), "SETTLEMENT") is False  # CLOSED 拒
 
 
 # --- 清空写放行（拆除期清前端残帧/事件）---
 
 def test_clear_through_writes_allowed_when_not_active():
-    cq = _cq()
-    cq.set_latest_rendered(_frame())
+    cq = make_cq()
+    cq.set_latest_rendered(make_frame())
     cq.set_latest_temporal(["e1"])
     cq.to_draining()
     # 非空写被拒
-    cq.set_latest_rendered(_frame())
+    cq.set_latest_rendered(make_frame())
     cq.set_latest_temporal(["e2"])
     # 清空写放行
     cq.set_latest_rendered(None)
@@ -96,9 +75,9 @@ def test_clear_through_writes_allowed_when_not_active():
 # --- close 释放 payload、保留身份 ---
 
 def test_close_releases_payload_keeps_identity():
-    cq = _cq()
+    cq = make_cq()
     cq.push_detection("bubble", _det())
-    cq.append_ca_raw(_frame())
+    cq.append_ca_raw(make_frame())
     cq.close()
     # payload 已释放
     assert cq.get_slide_window("bubble") == []
@@ -113,7 +92,7 @@ def test_close_releases_payload_keeps_identity():
 
 def test_clear_is_close_alias():
     """ClientManager.remove 走 clear() → 等价 close()（置 CLOSED + 释放 payload）。"""
-    cq = _cq()
+    cq = make_cq()
     cq.clear()
     assert cq.get_state() is RunState.CLOSED
 
@@ -121,8 +100,8 @@ def test_clear_is_close_alias():
 # --- 迟到写：持旧 CQ 句柄者在 close 后写被拒（不串台到新 run） ---
 
 def test_late_write_to_closed_cq_rejected():
-    old = _cq()
+    old = make_cq()
     old.close()                              # 模拟旧 run 已拆除
-    assert old.append_ca_ready_with_throttle(_frame()) is False
+    assert old.append_ca_ready_with_throttle(make_frame()) is False
     old.push_detection("bubble", _det())
     assert old.get_slide_window("bubble") == []
