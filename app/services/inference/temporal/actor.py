@@ -18,6 +18,7 @@ from typing import List
 from app.domain.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.naming import get_stage_alias
 from app.services.inference.temporal.operator import Operator
+from app.services.persistence import persistence_manager
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -117,8 +118,6 @@ class ClientTemporalActor:
             self._persist_alarms(all_alarms)
 
     def _persist_alarms(self, alarms: List[Alarm]) -> None:
-        from app.services.persistence import persistence_manager
-
         # 用 persistence sink 落库（别名已烧进 alarm.stage）
         persistence_manager.persist_alarms(
             alarms,

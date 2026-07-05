@@ -22,6 +22,7 @@ from app.services.client import ClientQueues, client_manager
 from app.services.inference.detection.service import ModelWorkerService
 from app.services.inference.temporal.actor import ClientTemporalActor
 from app.services.inference.visualization.pool import VisualizationWorkerPool
+from app.services.persistence import persistence_manager
 
 logger = logging.getLogger(__name__)
 
@@ -316,9 +317,8 @@ class InferenceManager:
 
         # Phase 2: 逐个 join，收集结算告警并经 persistence sink 落库。
         # 进程停机路径（非 per-run 拆除）：actor 产出的 settlement 用 persistence 落库（别名已烧进
-        # alarm.stage）。惰性 import 持久化单例（与 actor 实时路径同款 sink 调用）——此时 persistence
-        # 仍在跑（persistence.lifespan 于 ai.lifespan 外层，停在 inference 之后）。
-        from app.services.persistence import persistence_manager
+        # alarm.stage，与 actor 实时路径同款 sink 调用）——此时 persistence 仍在跑
+        # （persistence.lifespan 于 ai.lifespan 外层，停在 inference 之后）。
         for task_id, actor in actors:
             try:
                 settlement = actor.finalize_and_stop()
