@@ -72,6 +72,12 @@ class ClientTemporalActor:
         """
         self._stop_event.set()
         self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
+            logger.warning(
+                "[TemporalActor-%s] tick 线程未在 2s 内退出（疑似卡在慢 analyze/persist），"
+                "跳过结算以避免 _sm 并发读写", self._task_id,
+            )
+            return []
         return self._collect_settlement_alarms()
 
     # ──────────────────────────────────────────
