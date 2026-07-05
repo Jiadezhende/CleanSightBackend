@@ -51,7 +51,7 @@
 
 ### 5. `app/services/stream/service.py` — client_manager 惰性导入 + 删死代码 has_stream（收尾）
 
-- **惰性导入**：删掉模块级 `try: from app.services.client import client_manager except ImportError: client_manager = None`——它会把 client 模块内部**任意真实 ImportError** 静默吞成 `None`，导致背压/队列悄然失效。改为 [`_get_client_manager()`](../../app/services/stream/service.py) 调用期导入并缓存：调用发生在运行期（起流/处理帧），各模块已初始化、无导入顺序问题；真实 `ImportError` 直接冒出。核实 `app.services.client` 不 import stream、无实际环，故惰性即可、无需 try/except。三处消费点（`_get_client_queues` / `_restart_stream_impl` / `get_pending_count`）统一改走该 accessor，相应删掉 `if client_manager is None` 死分支。
+- **直接顶层导入**：删掉模块级 `try: from app.services.client import client_manager except ImportError: client_manager = None`——它会把 client 模块内部**任意真实 ImportError** 静默吞成 `None`，导致背压/队列悄然失效。改为顶层 `from app.services.client.manager import client_manager`（与 [run_control.py](../../app/services/run_control.py) 一致）。核实 `client/manager.py` 顶层只 import `.config`+`.queues`、二者均不碰 stream/inference，故 `client_manager` 单例**无环**、顶层导入安全；真实 `ImportError` 在 boot 时 fail-fast 冒出，不再被吞。三处消费点（`_get_client_queues` / `_restart_stream_impl` / `get_pending_count`）直接引单例，删掉 `if client_manager is None` 死分支。（注：曾短暂用惰性 accessor 过渡，后确认无环收敛为直接导入。）
 - **删 `has_stream()`**：全仓无调用方。孤儿检测已改用 `get_all_task_ids()`（看**注册**、不看 `is_alive()`）——重连设计需保留「死掉但仍注册」的 decoder 供重连，用 `has_stream` 的存活判断反而会误清待重连 decoder，故其被有意取代。保留该方法只会诱导误用引回 bug。
 
 ### 6. 保留项（不改动）
