@@ -194,11 +194,13 @@ class FFmpegDecoder:
 
     def stop(self, wait: float = 2.0):
         reader_thread = None
+        stderr_thread = None
         with self.lock:
             self._stop_event.set()
             if self.proc is None:
                 return
             reader_thread = self._reader_thread
+            stderr_thread = self._stderr_thread
             try:
                 # 无条件 SIGKILL + wait 回收：poll 已结束的进程 wait 立即返回，
                 # 不再把僵尸留给 GC/subprocess._cleanup。直接 SIGKILL 依据：
@@ -233,15 +235,15 @@ class FFmpegDecoder:
             finally:
                 self.proc = None
                 self._reader_thread = None
+                self._stderr_thread = None
                 self.logger.info("decoder stopped")
 
-        # 锁外 join 读线程（对称回收）：管道已关，_reader_loop 会读到 EOF/异常后退出。
-        # 放锁外避免与持 self.lock 的其它路径互等；不 join 自身线程。
-        if (
-            reader_thread is not None
-            and reader_thread is not threading.current_thread()
-        ):
-            reader_thread.join(timeout=wait)
+        # 锁外 join reader + stderr 两线程（对称回收）：管道已关，两个读循环会读到
+        # EOF/异常后退出。放锁外避免与持 self.lock 的其它路径互等；不 join 自身线程。
+        current = threading.current_thread()
+        for t in (reader_thread, stderr_thread):
+            if t is not None and t is not current:
+                t.join(timeout=wait)
 
     def is_alive(self) -> bool:
         with self.lock:

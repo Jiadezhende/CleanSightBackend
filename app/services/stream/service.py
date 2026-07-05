@@ -15,6 +15,7 @@ import threading
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
+from app.settings import settings
 from app.utils import (
     ConflictError,
     StreamConnectionError,
@@ -150,7 +151,6 @@ class StreamService:
             logger.info(f"[{task_id}] Starting stream: url={stream_url}")
 
             # 内部拉流直连 MediaMTX，绕过 RTSPProxy
-            from app.settings import settings
             rewritten = _rewrite_rtsp_url(
                 stream_url,
                 settings.mediamtx_proxy_port,
