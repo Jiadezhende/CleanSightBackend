@@ -49,11 +49,22 @@ def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
     return urlunparse(parsed._replace(netloc=new_netloc))
 
 
-# 导入 ClientManager 单例（延迟导入避免循环依赖）
-try:
-    from app.services.client import client_manager
-except ImportError:
-    client_manager = None  # 兼容旧版本
+_client_manager = None
+
+
+def _get_client_manager():
+    """惰性获取 ClientManager 单例（首次调用时导入并缓存）。
+
+    不在模块级导入：改为调用时导入。调用发生在运行期（起流/处理帧），此刻各模块
+    已完成初始化，无导入顺序问题；且真实 ImportError 会在此直接冒出，不再被模块级
+    try/except 静默吞成 None（旧写法一旦 client 模块内部出错就悄然降级、背压/队列失效）。
+    """
+    global _client_manager
+    if _client_manager is None:
+        from app.services.client import client_manager
+        _client_manager = client_manager
+    return _client_manager
+
 
 # 导入配置加载器
 try:
@@ -188,9 +199,7 @@ class StreamService:
         （一 CQ == 一 run，身份不可变）；起流阶段只取。缺失说明调用序错（未先 start_workflow），
         返回 None 由上层容错（decoder 空跑）。
         """
-        if client_manager is None:
-            return None
-        cq = client_manager.get(task_id)
+        cq = _get_client_manager().get(task_id)
         if cq is None:
             logger.error(
                 "[%s] ClientQueues 不存在（start_stream 早于 set_task？），decoder 将空跑",
@@ -275,11 +284,6 @@ class StreamService:
         self.decoders.pop(task_id, None)
         self.metrics.pop(task_id, None)
         logger.debug(f"[{task_id}] Dead decoder cleaned")
-
-    def has_stream(self, task_id: int) -> bool:
-        with self.lock:
-            dec = self.decoders.get(task_id)
-            return dec is not None and dec.is_alive()
 
     def get_all_task_ids(self) -> set:
         """获取所有活跃 run 的键（有 decoder 的 task_id 集合）。
@@ -372,14 +376,15 @@ class StreamService:
             self._cleanup_dead_decoder_unsafe(task_id)
 
             # 3. 获取现有的ClientQueues（不创建新的）
-            if client_manager is None or not client_manager.has_client(task_id):
+            cm = _get_client_manager()
+            if not cm.has_client(task_id):
                 raise StreamConnectionError(
                     url=stream_url,
                     task_id=task_id,   # 此刻无 cq，step_id/source_ip 缺省 None
                     details="Cannot restart stream: no ClientQueues",
                 )
 
-            client_queues = client_manager.get(task_id)
+            client_queues = cm.get(task_id)
 
             # 4. 创建新的decoder
             dec = FFmpegDecoder(
@@ -404,17 +409,13 @@ class StreamService:
         原因：CA-Raw-Queue 用于落盘，即使满了也不应阻塞拉流
               CA-Ready-Queue 用于推理，如果满了说明推理跟不上，需要丢帧
         """
-        if client_manager is None:
-            logger.warning(
-                "[BACKPRESSURE] client_manager is None, import may have failed"
-            )
-            return 0
+        cm = _get_client_manager()
 
         # 先检查客户端是否存在
-        if not client_manager.has_client(task_id):
+        if not cm.has_client(task_id):
             return 0
 
-        client_queues = client_manager.get(task_id)
+        client_queues = cm.get(task_id)
         if client_queues is None:
             logger.warning(
                 f"[BACKPRESSURE] client_queues is None for task_id={task_id}"
