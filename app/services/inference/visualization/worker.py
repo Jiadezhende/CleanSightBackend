@@ -59,8 +59,8 @@ class VisualizationWorker:
         self.stage_configs = stage_configs or {}
         self.fixed_visualizer = FixedVisualizer()
 
-        # 去重：记录每个客户端上次渲染的推理时间戳，避免重复渲染同一帧
-        self._last_rendered_ts: Dict[str, float] = {}
+        # 去重：记录每个 run(键=task_id) 上次渲染的推理时间戳，避免重复渲染同一帧
+        self._last_rendered_ts: Dict[int, float] = {}
 
         # 吞吐量观测（[VIZ_THROUGHPUT]）：每 ~10s 评估一次，仅在产出明显低于目标
         # 时才打印，平稳时静默以免刷屏。目的：定位 processed 成帧率不足是
@@ -108,14 +108,14 @@ class VisualizationWorker:
 
     def _tick(self):
         """一次轮询：遍历所有活跃客户端执行可视化。"""
-        all_clients = client_manager.get_all_clients()
-        for client_id, cq in all_clients.items():
+        all_clients = client_manager.snapshot()
+        for task_id, cq in all_clients.items():
             try:
-                self._process_client(client_id, cq)
+                self._process_client(task_id, cq)
             except Exception as e:
                 logger.error(
-                    "[VisualizationWorker-%d] Error processing client %s: %s",
-                    self.worker_id, client_id, e, exc_info=True,
+                    "[VisualizationWorker-%d] Error processing run %s: %s",
+                    self.worker_id, task_id, e, exc_info=True,
                 )
 
         # 自清理：移除已不在 ClientManager 中的客户端去重记录（防止内存泄漏）
@@ -123,18 +123,18 @@ class VisualizationWorker:
         for stale_id in stale_ids:
             del self._last_rendered_ts[stale_id]
 
-    def _process_client(self, client_id: str, cq) -> None:
-        """处理单个客户端的可视化。"""
+    def _process_client(self, task_id: int, cq) -> None:
+        """处理单个 run 的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
         inference: Optional[FrameInference] = cq.get_latest_inference()
         if inference is None:
             return
 
         # 2. 去重：跳过已渲染过的同一推理结果
-        last_ts = self._last_rendered_ts.get(client_id, 0.0)
+        last_ts = self._last_rendered_ts.get(task_id, 0.0)
         if inference.timestamp <= last_ts:
             # 有推理快照但无新结果 → tick 空转。占比高即"上游供帧慢"的直接信号。
-            self._stat_stale[client_id] += 1
+            self._stat_stale[task_id] += 1
             return
 
         # 3. 获取最新原始帧
@@ -165,8 +165,8 @@ class VisualizationWorker:
         cq.set_latest_rendered(frame_data)
 
         # 7. 更新去重时间戳 + 计成帧数（实际渲染帧数 = processed 真实成帧率）
-        self._last_rendered_ts[client_id] = inference.timestamp
-        self._stat_rendered[client_id] += 1
+        self._last_rendered_ts[task_id] = inference.timestamp
+        self._stat_rendered[task_id] += 1
 
     def _render(
         self,

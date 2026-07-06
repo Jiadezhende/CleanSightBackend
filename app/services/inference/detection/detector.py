@@ -199,14 +199,18 @@ class YOLODetector(Detector):
             raise ModelInferenceError(
                 message=str(e),
                 model_name=self.name,
-                client_id=context.get("client_id"),
+                task_id=context.get("task_id"),
+                step_id=context.get("step_id"),
+                source_ip=context.get("source_ip"),
                 is_cuda_error="out of memory" in error_msg or "cuda" in error_msg,
             ) from e
         except Exception as e:
             raise ModelInferenceError(
                 message=f"Unexpected error in {self.name} detection: {str(e)}",
                 model_name=self.name,
-                client_id=context.get("client_id"),
+                task_id=context.get("task_id"),
+                step_id=context.get("step_id"),
+                source_ip=context.get("source_ip"),
             ) from e
 
     def infer_batch(

@@ -1,46 +1,46 @@
 """
-FFmpeg 解码器 - 负责从 RTMP/RTSP 流解码视频帧
+FFmpeg 解码器 - 负责从 RTSP 流解码视频帧
 """
 
 import logging
-import os
 import subprocess
 import threading
 import time
 from typing import Optional
 
-import cv2
 import numpy as np
 
 from app.domain.frame import Frame
-from app.services import ai
 from app.services.stream.config import DecoderConfig
-from app.utils.exceptions import FFmpegError, StreamConnectionError
-
-# 导入 ClientManager 单例（延迟导入避免循环依赖）
-try:
-    from app.services.client import client_manager
-except ImportError:
-    client_manager = None  # 兼容旧版本
-
-# 配置常量
 from app.settings import settings
-FFMPEG_BIN = settings.ffmpeg_path
+from app.utils.exceptions import FFmpegError, StreamConnectionError
+from app.utils.metrics import frame_drop_total
+
 DEFAULT_CHANNELS = 3
+
+# RTSP 输入固定选项（系统只用 RTSP）：UDP 传输 + 低延迟 + 容错解析。
+# 作为 ffmpeg 命令的固定前缀，见 _build_cmd。
+_RTSP_INPUT_OPTS = [
+    "-rtsp_transport", "udp",
+    "-fflags", "nobuffer+discardcorrupt",
+    "-flags", "low_delay",
+    "-err_detect", "ignore_err",
+    "-analyzeduration", "1000000",
+    "-probesize", "1000000",
+]
 
 
 class FFmpegDecoder:
     def __init__(
         self,
         manager,
-        client_id: str,
+        task_id: int,     # 运行键（路由标识）
         stream_url: str,
         decoder_config: Optional[DecoderConfig] = None,
-        protocol_opts=None,
         client_queues=None,
     ):
         self.manager = manager
-        self.client_id = client_id
+        self.task_id = task_id
         self.stream_url = stream_url
 
         # 使用配置对象（如果未提供则使用默认配置）
@@ -52,9 +52,7 @@ class FFmpegDecoder:
         self.chunk_read_size = self.config.chunk_read_size
         self.backpressure_ratio = self.config.backpressure_ratio
 
-        self.protocol_opts = protocol_opts or []
-
-        # 新增：客户端队列实例（用于直接写入队列）
+        # 客户端队列实例（用于直接写入队列）
         self.client_queues = client_queues
 
         self.frame_size = self.width * self.height * DEFAULT_CHANNELS
@@ -71,12 +69,12 @@ class FFmpegDecoder:
         self.frames_written_to_raw = 0  # 新增：写入 CA-Raw-Queue 的帧数
         self.frames_written_to_ready = 0  # 新增：写入 CA-Ready-Queue 的帧数
         self.logger = logging.getLogger(
-            f"app.services.stream.decoder.FFmpegDecoder.{self.client_id}"
+            f"app.services.stream.decoder.FFmpegDecoder.{self.task_id}"
         )
 
     def _build_cmd(self):
-        cmd = [FFMPEG_BIN]
-        cmd += self.protocol_opts
+        cmd = [settings.ffmpeg_path]
+        cmd += _RTSP_INPUT_OPTS
         cmd += [
             "-i",
             self.stream_url,
@@ -93,6 +91,15 @@ class FFmpegDecoder:
             "pipe:1",
         ]
         return cmd
+
+    def _err_identity(self) -> dict:
+        """异常身份三元组：task_id（路由）+ step_id/source_ip（从 cq 派生，None 守卫）。"""
+        cq = self.client_queues
+        return {
+            "task_id": self.task_id,
+            "step_id": cq.step_id if cq else None,
+            "source_ip": cq.source_ip if cq else None,
+        }
 
     def start(self):
         with self.lock:
@@ -112,23 +119,21 @@ class FFmpegDecoder:
             except FileNotFoundError:
                 self.logger.exception("ffmpeg binary not found")
                 raise FFmpegError(
-                    message=f"FFmpeg binary not found: {FFMPEG_BIN}",
-                    client_id=self.client_id,
+                    message=f"FFmpeg binary not found: {settings.ffmpeg_path}",
+                    **self._err_identity(),
                 )
-
-            # set non-blocking on POSIX
-            if os.name != "nt":
-                try:
-                    fd = self.proc.stdout.fileno()
-                    os.set_blocking(fd, False)
-                except Exception:
-                    pass
 
             # 快速检查进程是否立即崩溃
             time.sleep(0.1)  # 给进程一点启动时间
             if self.proc.poll() is not None:
-                # 进程已经退出 — 此时 stderr 管道已关闭，可安全同步读取
+                # 进程已经退出 — 此时 stderr 管道已关闭，可安全同步读取；
+                # 同步 wait() 回收僵尸（poll 已非 None，wait 立即返回），避免
+                # 秒退进程滞留为僵尸等 GC。
                 exit_code = self.proc.returncode
+                try:
+                    self.proc.wait(timeout=1.0)
+                except Exception:
+                    pass
                 try:
                     stderr_output = (
                         self.proc.stderr.read().decode("utf-8", errors="ignore").strip()
@@ -158,7 +163,7 @@ class FFmpegDecoder:
                     self.logger.debug("FFmpeg: stream not available — %s", last_line)
                     raise StreamConnectionError(
                         url=self.stream_url,
-                        client_id=self.client_id,
+                        **self._err_identity(),
                         details=last_line or None,
                     )
                 self.logger.error(
@@ -166,50 +171,55 @@ class FFmpegDecoder:
                 )
                 raise FFmpegError(
                     message=f"FFmpeg process failed to start (exit_code={exit_code})",
-                    client_id=self.client_id,
+                    **self._err_identity(),
                     exit_code=exit_code,
                 )
 
             self._stderr_thread = threading.Thread(
                 target=self._read_stderr_loop,
                 daemon=True,
-                name=f"stderr-{self.client_id}",
+                name=f"stderr-{self.task_id}",
             )
             self._stderr_thread.start()
 
-            if os.name == "nt":
-                self._reader_thread = threading.Thread(
-                    target=self._windows_reader_loop,
-                    daemon=True,
-                    name=f"reader-{self.client_id}",
-                )
-                self._reader_thread.start()
+            # decoder 自持读线程（Windows/POSIX 统一：阻塞读 stdout）
+            self._reader_thread = threading.Thread(
+                target=self._reader_loop,
+                daemon=True,
+                name=f"reader-{self.task_id}",
+            )
+            self._reader_thread.start()
 
             self.logger.debug("decoder start complete")
 
     def stop(self, wait: float = 2.0):
+        reader_thread = None
+        stderr_thread = None
         with self.lock:
             self._stop_event.set()
             if self.proc is None:
                 return
+            reader_thread = self._reader_thread
+            stderr_thread = self._stderr_thread
             try:
+                # 无条件 SIGKILL + wait 回收：poll 已结束的进程 wait 立即返回，
+                # 不再把僵尸留给 GC/subprocess._cleanup。直接 SIGKILL 依据：
+                # 1) 此 ffmpeg 仅解码到 pipe（不写文件），强杀无产物损坏风险；
+                # 2) RTSP 对端是自有 mediamtx_gateway，对断连(RST)会超时回收会话，不需优雅 TEARDOWN；
+                # 3) 拆流多在流已不健康时发生，此时 ffmpeg 卡在死 socket 读上、收不到 SIGTERM，
+                #    优雅等待只会白耗满 wait 秒（实测 ~2s）后照样 kill。
                 if self.proc.poll() is None:
-                    # 直接 SIGKILL，不走 terminate→wait 优雅等待。依据：
-                    # 1) 此 ffmpeg 仅解码到 pipe（不写文件），强杀无产物损坏风险；
-                    # 2) RTSP 对端是自有 mediamtx_gateway，对断连(RST)会超时回收会话，不需优雅 TEARDOWN；
-                    # 3) 拆流多在流已不健康时发生，此时 ffmpeg 卡在死 socket 读上、收不到 SIGTERM，
-                    #    优雅等待只会白耗满 wait 秒（实测 ~2s）后照样 kill。
                     self.logger.info(
                         "killing ffmpeg pid=%s", getattr(self.proc, "pid", None)
                     )
                     self.proc.kill()
-                    try:
-                        self.proc.wait(timeout=wait)  # reap 防僵尸；SIGKILL 必达，通常 ~ms 返回
-                    except Exception:
-                        self.logger.warning(
-                            "ffmpeg pid=%s not reaped within %ss after SIGKILL",
-                            getattr(self.proc, "pid", None), wait,
-                        )
+                try:
+                    self.proc.wait(timeout=wait)  # reap 防僵尸；SIGKILL 必达，通常 ~ms 返回
+                except Exception:
+                    self.logger.warning(
+                        "ffmpeg pid=%s not reaped within %ss after SIGKILL",
+                        getattr(self.proc, "pid", None), wait,
+                    )
                 try:
                     if self.proc.stdout:
                         self.proc.stdout.close()
@@ -224,7 +234,16 @@ class FFmpegDecoder:
                 pass
             finally:
                 self.proc = None
+                self._reader_thread = None
+                self._stderr_thread = None
                 self.logger.info("decoder stopped")
+
+        # 锁外 join reader + stderr 两线程（对称回收）：管道已关，两个读循环会读到
+        # EOF/异常后退出。放锁外避免与持 self.lock 的其它路径互等；不 join 自身线程。
+        current = threading.current_thread()
+        for t in (reader_thread, stderr_thread):
+            if t is not None and t is not current:
+                t.join(timeout=wait)
 
     def is_alive(self) -> bool:
         with self.lock:
@@ -248,39 +267,29 @@ class FFmpegDecoder:
         except Exception:
             self.logger.error("stderr reader loop crashed", exc_info=True)
 
-    def _windows_reader_loop(self):
-        """On Windows use a separate thread to read stdout (blocking)."""
-        if self.proc is None or self.proc.stdout is None:
+    def _reader_loop(self):
+        """decoder 自持读循环（Windows/POSIX 统一）：阻塞读 stdout 直到 EOF/stop。
+
+        起始处捕获 stdout 本地引用，避免 stop() 将 self.proc 置 None 造成的 TOCTOU；
+        管道被 stop() 关闭时 read 抛 ValueError（closed file）或返回 b""，均视为流结束正常退出，
+        由 StreamHealthMonitor 决定是否重连，本循环不自动重启。
+        """
+        proc = self.proc
+        if proc is None or proc.stdout is None:
             return
+        stdout = proc.stdout
         try:
             while not self._stop_event.is_set():
-                chunk = self.proc.stdout.read(self.chunk_read_size)
+                chunk = stdout.read(self.chunk_read_size)
                 if not chunk:
+                    self.logger.debug("stream ended")
                     break
                 self.buffer.extend(chunk)
                 self._process_frames()
+        except ValueError:
+            pass  # pipe closed during stop() — expected on reconnect/shutdown
         except Exception:
-            self.logger.exception("windows reader loop error")
-
-    def on_stdout_ready(self):
-        """
-        This is called on POSIX systems when stdout is ready, from selector loop.
-        We do a non-blocking read.
-        """
-        if self.proc is None or self.proc.stdout is None:
-            return
-        try:
-            chunk = self.proc.stdout.read(self.chunk_read_size)
-            if not chunk:
-                # Stream ended - no auto-restart, managed by StreamHealthMonitor
-                self.logger.debug("stream ended")
-                return
-            self.buffer.extend(chunk)
-            self._process_frames()
-        except BlockingIOError:
-            pass
-        except Exception:
-            self.logger.exception("on_stdout_ready error")
+            self.logger.exception("reader loop error")
 
     def _should_drop_frame(self, pending_count: int, queue_capacity: int) -> bool:
         """
@@ -320,17 +329,18 @@ class FFmpegDecoder:
                 std = arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
 
                 # 2. 背压检测（检查 CA-Ready-Queue 而非 CA-Raw-Queue）
-                pending_count = self.manager.get_pending_count(self.client_id)
+                pending_count = self.manager.get_pending_count(self.task_id)
 
                 # 获取队列容量
                 queue_capacity = 0
                 if self.client_queues is not None:
-                    queue_capacity = self.client_queues.get_ca_ready_capacity()
+                    queue_capacity = self.client_queues.ca_maxlen
 
                 # 判断是否应该丢帧（仅针对推理队列）
                 drop_inference = self._should_drop_frame(pending_count, queue_capacity)
                 if drop_inference:
                     self.frames_dropped += 1
+                    frame_drop_total.labels(reason="ingress_backpressure").inc()
                     # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
                     if self.frames_dropped % 100 == 0:
                         self.logger.debug(
@@ -367,4 +377,5 @@ class FFmpegDecoder:
                     )
             except Exception:
                 self.frames_dropped += 1
+                frame_drop_total.labels(reason="decode_error").inc()
                 self.logger.exception("error processing frame bytes")

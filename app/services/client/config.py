@@ -28,7 +28,7 @@ class StateConfig:
     """状态配置"""
 
     # 注意：初始 stage 不在此配置——未分配任务的客户端默认 MOCK 透传，
-    # 由 ClientQueues(initial_stage="MOCK") 硬编码兜底，无可配语义。
+    # 由 ClientQueues(stage="MOCK") 构造兜底，无可配语义。
     heartbeat_timeout: int = 30  # 心跳超时（秒）
 
 
@@ -112,6 +112,21 @@ class ClientConfig:
         """原始/解码帧率（从 settings 单一真源读取；抽帧降采样率 = inference_fps/raw_fps）"""
         from app.settings import settings
         return settings.raw_fps
+
+    def cq_kwargs(self) -> Dict[str, Any]:
+        """组装 ClientQueues 构造参数（resize 属 client 配置，fps/队列走 settings 单一真源）。
+
+        创建 CQ 的唯一配置出口：run 起始由 InferenceManager 调用（早于起流），
+        避免"裸建默认值 + 起流时 kwargs 被丢弃"的 dead-kwargs 问题。
+        """
+        return {
+            "resize_width": self.frame.resize_width,
+            "resize_height": self.frame.resize_height,
+            "inference_fps": self.inference_fps,
+            "raw_fps": self.raw_fps,
+            "ca_maxlen": self.ca_maxlen,
+            "ca_segment_len": self.ca_segment_len,
+        }
 
     def _log_loaded_config(self):
         """输出加载的配置"""

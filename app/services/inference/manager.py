@@ -17,15 +17,14 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-logger = logging.getLogger(__name__)
-
-from app.domain.alarm import Alarm
-from app.domain.frame import Frame
-from app.domain.task import CleaningTask
+from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.detection.service import ModelWorkerService
+from app.services.inference.temporal import alarm_sink
 from app.services.inference.temporal.actor import ClientTemporalActor
 from app.services.inference.visualization.pool import VisualizationWorkerPool
+
+logger = logging.getLogger(__name__)
 
 
 class InferenceManager:
@@ -60,14 +59,10 @@ class InferenceManager:
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
         self._model_worker_service: Optional[ModelWorkerService] = None
 
-        # 客户端生命周期事务锁（set_task / remove_client 互斥）。
-        # 这是控制面锁，只串行稀疏的启/切/停转换（每会话几次、毫秒级），不在帧推理热路径上；
-        # 故用单把 manager 级锁，而非 per-client 锁——后者会引入锁字典的内存泄漏与回收 race，
-        # 且为几乎不存在的"跨 client 同刻启停"并行度买单。详见 docs/update/20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md。
-        self._client_lifecycle_lock = threading.Lock()
-
-        # per-client ClientTemporalActor 注册表
-        self._actors: Dict[str, ClientTemporalActor] = {}
+        # per-client ClientTemporalActor 注册表。
+        # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(task_id) per-task 锁承接
+        # （T3 已落地），本类不再自持 _client_lifecycle_lock。
+        self._actors: Dict[int, ClientTemporalActor] = {}
 
         # 可视化拉取率 = settings.inference_fps（单一真源）：与推理限流、HLS processed
         # 打标三处对齐，避免 processed 段实际产出率 ≠ 打标率导致回放偏快。
@@ -76,20 +71,18 @@ class InferenceManager:
             stage_configs=None,
         )
 
-        # L2 特征落盘 + 事实账本（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
-        # FeatureStore 注入推理服务，由推理写回处按帧追加。
-        # FactLedger 为 offline 链路预置：online 链路不再写，待离线 worker 接入后写 SegmentFact。
-        from app.services.inference.feature.store import FactLedger, FeatureStore
+        # L2 特征落盘（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
+        # FeatureStore 注入推理服务，由推理写回处按帧追加，生命周期随在线 run（open_fresh/close/flush）。
+        # 注：FactLedger（事实账本）是**离线异步写**的 store，生命周期归离线 runner，不由在线 manager
+        # 调度——故此处不持有、不 open_fresh/close/flush。待离线流水线建起时由其自行 new + 驱动
+        # （同一 storage_base_dir）。类/契约见 feature/store.py，休眠预留。
+        from app.services.inference.feature.store import FeatureStore
         self.feature_store = FeatureStore(self._db_dir)
-        self.fact_ledger = FactLedger(self._db_dir)
 
         self._model_worker_service = self._create_async_model_worker_service()
 
-        # persistence 自己从 settings.storage_base_dir 读存储根（与此处 _db_dir 同源），
-        # 不再反向 push db_dir 进其私有 hls_pool.strategy —— 消除跨服务穿透。
-        from app.services.persistence import persistence_manager as _persistence_manager
-        self.persistence_manager = _persistence_manager
-
+        # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
+        # 告警落库/HLS flush 归 PersistenceManager，由 RunController 编排；进程停机残余结算走惰性 import。
         logger.debug("[InferenceManager] Initialization completed")
 
     def _get_stage_configs(self) -> Dict[str, Dict[str, Any]]:
@@ -164,69 +157,49 @@ class InferenceManager:
 
     # ========== 公共 API ==========
 
-    def get_result(self, client_id: str) -> Optional[Frame]:
-        """返回最新处理帧（domain Frame）。
+    def resolve_stage(self, step_id: Any) -> str:
+        """step_id 主键直接作 stage（恒等路由，无映射表）；未知/未配回退 MOCK 透传。
 
-        编码为 WS 载荷（JPEG base64）是边界职责，在 routers/ai.py 完成；
-        core 服务只交付 domain 对象。
+        公有：供 RunController 在建 CQ 前解析 stage（stage 是 CQ 不可变身份的一部分）。
         """
-        if not client_manager.has_client(client_id):
-            return None
-        cq = client_manager.get_client(client_id)
-        if not cq:
-            return None
-        return cq.get_latest_result()
+        step_key = str(step_id)
+        if step_key in self._get_stage_configs():
+            return step_key
+        logger.warning(
+            "[InferenceManager] 未知的 step_id '%s'，路由到 MOCK stage", step_id
+        )
+        return "MOCK"
 
-    def set_task(self, client_id: str, task: Optional[CleaningTask]) -> bool:
-        """为客户端设置任务，并创建对应的 ClientTemporalActor。
+    def start_workflow(self, cq: ClientQueues) -> bool:
+        """起该 run 的推理 workflow：换槽注册 CQ、open_fresh 特征分区、建并启 actor。
 
-        调用顺序：先停旧 Actor（settlement 在旧 task 上下文写入），再切换字段，再清缓存。
-        这样可保证 settlement 告警正确归属旧任务，不会落入已清空的新任务 alarm_log。
-        整个流程在 _client_lifecycle_lock 下执行，与 remove_client 互斥。
+        入参是 RunController 已建好的不可变身份 CQ（一 CQ == 一 run）。调用方已持
+        lock_for(cq.task_id)，与 stop_workflow 互斥；重启路径下 RunController 先 stop_workflow
+        拆旧，故此处 _actors 槽已空。stage 由 cq 派生（构造时经 resolve_stage 定死）。
         """
-        with self._client_lifecycle_lock:
-            return self._set_task_locked(client_id, task)
+        task_id = cq.task_id
+        # 防御：残留旧 actor（正常路径 stop_workflow 已 pop，不应命中）——信号停、丢弃、不结算。
+        stale = self._actors.pop(task_id, None)
+        if stale is not None:
+            logger.warning(
+                "[InferenceManager] stale actor for task=%s at start_workflow; dropping", task_id
+            )
+            stale.signal_stop()
 
-    def _set_task_locked(self, client_id: str, task: Optional[CleaningTask]) -> bool:
-        """set_task 的加锁实现，调用方须已持有 _client_lifecycle_lock。"""
-        cq = client_manager.get_client(client_id)
-        if cq is None:
-            return False
+        # 1. 换槽注册（COW 发布新 CQ）
+        client_manager.set(task_id, cq)
 
-        # 1. 先停旧 Actor：settlement 写入发生时 cq.task 仍为旧值，归属正确
-        old_actor = self._actors.pop(client_id, None)
-        if old_actor is not None:
+        # 2. 新 run 起始截断存储分区（重启 supersede，避免同 (task,step) 新旧混写）
+        if cq.step_id is not None:
             try:
-                settlement = old_actor.finalize_and_stop()
-                if settlement and cq:
-                    self._persist_settlement_alarms(client_id, cq, settlement)
+                self.feature_store.open_fresh(cq.task_id, cq.step_id, owner=cq)
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] Settlement alarms on task switch failed for %s: %s",
-                    client_id, e,
+                    "[InferenceManager] open_fresh storage failed for task=%s: %s", task_id, e
                 )
 
-        # 2. 切换字段（纯赋值，线程安全）
-        cq.set_task(task)
-
-        if task is not None:
-            client_manager.bind_task(client_id, task.task_id)
-            # 主键 = step_id：current_step 直接作 stage 主键，恒等路由，无映射表。
-            # 未知/未配的 step 回退 MOCK 透传。
-            stage_configs = self._get_stage_configs()
-            stage = task.current_step if task.current_step in stage_configs else "MOCK"
-            if stage == "MOCK":
-                logger.warning(
-                    "[InferenceManager] 未知的 current_step '%s'，路由到 MOCK stage",
-                    task.current_step,
-                )
-            cq.set_stage(stage)
-
-        # 3. 旧 Actor 已停，安全清空任务级缓存
-        cq.clear_task_caches()
-
-        # 按 Client 独立实例化流算子 Operator
-        stage = cq.get_stage()
+        # 3. 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
+        stage = cq.stage
         stage_cfg = self._get_stage_configs().get(stage, {})
         specs = stage_cfg.get("operator_specs", [])
 
@@ -243,16 +216,16 @@ class InferenceManager:
             cq.set_stream_windows(stream_windows)
 
             actor = ClientTemporalActor(
-                client_id=client_id,
+                task_id=task_id,
                 cq=cq,
                 stage=stage,
                 operators=operators,
             )
             actor.start()
-            self._actors[client_id] = actor
+            self._actors[task_id] = actor
             logger.info(
-                "[InferenceManager] TemporalActor created for %s (stage=%s, operators=%d)",
-                client_id, stage, len(operators),
+                "[InferenceManager] TemporalActor created for task=%s (stage=%s, operators=%d)",
+                task_id, stage, len(operators),
             )
         else:
             logger.debug(
@@ -262,148 +235,44 @@ class InferenceManager:
 
         return True
 
-    def get_task(self, client_id: str) -> Optional[CleaningTask]:
-        cq = client_manager.get_client(client_id)
-        return cq.get_task() if cq else None
+    def stop_workflow(self, cq: ClientQueues) -> List[Alarm]:
+        """停该 run 的推理 workflow：停 actor（收结算）+ 关 feature 分区，返回 settlement 列表。
 
-    def remove_client(self, client_id: str) -> None:
-        """移除客户端的推理资源。
-
-        1. 通过 actor.finalize_and_stop() 收集结算告警并持久化
-        2. 落盘残余 HLS 段
-        3. 清理编码缓存
-
-        整个流程在 _client_lifecycle_lock 下执行，与 set_task 互斥。
+        单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
+        交给 RunController 转 PersistenceManager；HLS flush / 告警落库均归 persistence owner，
+        前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持 lock_for(cq.task_id)，
+        与 start_workflow 互斥。无 actor 返 []；feature close best-effort；别名已由 actor 烧进 alarm.stage。
         """
-        with self._client_lifecycle_lock:
-            self._remove_client_locked(client_id)
+        task_id = cq.task_id
+        logger.info("[InferenceManager] Stopping workflow: task=%s", task_id)
 
-    def _remove_client_locked(self, client_id: str) -> None:
-        """remove_client 的加锁实现，调用方须已持有 _client_lifecycle_lock。"""
-        logger.info("[InferenceManager] Removing inference resources: %s", client_id)
-
-        cq = (
-            client_manager.get_client(client_id)
-            if client_manager.has_client(client_id)
-            else None
-        )
-
-        # Actor 持有正确的 _sm，finalize_and_stop() 调用 analyzer.finalize()
-        actor = self._actors.pop(client_id, None)
+        settlement: List[Alarm] = []
+        actor = self._actors.pop(task_id, None)
         if actor is not None:
             try:
-                settlement_alarms = actor.finalize_and_stop()
-                if settlement_alarms and cq:
-                    self._persist_settlement_alarms(client_id, cq, settlement_alarms)
+                settlement = actor.finalize_and_stop()
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] Settlement alarms failed for %s: %s", client_id, e
+                    "[InferenceManager] finalize actor failed for task=%s: %s", task_id, e
                 )
 
-        # Actor 停止后立即清空前端可见槽位，防止 WebSocket 读到任务结束后的残留状态。
-        # cq.clear() 会在 Step3（client_manager.remove_client）再次执行，此处只做提前清零。
-        if cq:
-            cq.set_latest_temporal([])
-            cq.set_latest_rendered(None)
-
-        if cq:
-            try:
-                self._flush_all_remaining_segments(client_id, cq)
-                logger.info("[InferenceManager] Segments WroteBack: %s", client_id)
-            except Exception as e:
-                logger.warning(
-                    "[InferenceManager] Failed to write back segments: %s - %s", client_id, e
-                )
-            # 落盘基座 flush/close（best-effort；此时 cq 仍在，(task_id, step_id) 可解析）
-            try:
-                task_id = cq.get_task_id()
-                step_id = cq.get_step_id()
-                if task_id is not None and step_id is not None:
-                    self.feature_store.close(task_id, step_id)
-                    self.fact_ledger.close(task_id, step_id)
-            except Exception as e:
-                logger.warning(
-                    "[InferenceManager] Failed to close feature/fact store: %s - %s", client_id, e
-                )
-        else:
+        # 关闭本 run 的 FeatureStore 分区（inference 自有组件；best-effort，此时 cq 仍在）
+        try:
+            step_id = cq.step_id
+            if task_id is not None and step_id is not None:
+                self.feature_store.close(task_id, step_id, owner=cq)
+        except Exception as e:
             logger.warning(
-                "[InferenceManager] Client not found in ClientManager, skipping writeback: %s",
-                client_id,
+                "[InferenceManager] Failed to close feature store: task=%s - %s", task_id, e
             )
 
-        logger.info("[InferenceManager] Inference resources removed: %s", client_id)
+        logger.info("[InferenceManager] Workflow stopped: task=%s", task_id)
+        return settlement
 
     def status(self) -> Dict[str, Any]:
-        clients = client_manager.get_all_clients()
-        stats = {client_id: cq.to_status_dict() for client_id, cq in clients.items()}
+        clients = client_manager.snapshot()
+        stats = {task_id: cq.get_queue_depths() for task_id, cq in clients.items()}
         return {"clients": len(clients), "queues": stats}
-
-    # ========== 内部辅助方法 ==========
-
-    def _persist_settlement_alarms(
-        self, client_id: str, cq: ClientQueues, alarms: List[Alarm]
-    ) -> None:
-        """持久化结算告警（由 actor.finalize_and_stop() 收集后调用）。"""
-        from app.services.inference.naming import get_stage_alias
-        from app.services.inference.temporal.alarm_sink import persist_alarms
-
-        # 可读性出口：告警 step_name/stage 用别名（主键是 step_id，对人不可读）
-        persist_alarms(
-            alarms,
-            cq=cq,
-            client_id=client_id,
-            stage_name=get_stage_alias(cq.get_stage()),
-            mode="SETTLEMENT",
-            persistence_manager=self.persistence_manager,
-            log_each=True,
-        )
-
-    def _flush_all_remaining_segments(
-        self, client_id: str, client_queues: ClientQueues
-    ) -> None:
-        try:
-            task_id = client_queues.get_task_id()
-            if task_id is None:
-                logger.warning(
-                    "[InferenceManager] task_id is None for %s, skipping flush", client_id
-                )
-                return
-
-            task = client_queues.get_task()
-            step_id = ClientQueues._resolve_step_id(task)
-            if step_id is None:
-                logger.error(
-                    "[InferenceManager] invalid current_step for client=%s task_id=%s, skip flush",
-                    client_id, task_id,
-                )
-                return
-
-            seg_len = client_queues.ca_segment_len
-            raw_frames = client_queues.drain_ca_raw()
-            processed_frames = client_queues.drain_ca_processed()
-
-            for i in range(0, len(raw_frames), seg_len):
-                chunk = raw_frames[i : i + seg_len]
-                if chunk:
-                    self.persistence_manager.persist_hls_segment(
-                        task_id=task_id,
-                        step_id=step_id,
-                        segment_type="raw",
-                        frames=chunk,
-                    )
-
-            for i in range(0, len(processed_frames), seg_len):
-                chunk = processed_frames[i : i + seg_len]
-                if chunk:
-                    self.persistence_manager.persist_hls_segment(
-                        task_id=task_id,
-                        step_id=step_id,
-                        segment_type="processed",
-                        frames=chunk,
-                    )
-
-        except Exception as e:
-            logger.error("_flush_all_remaining_segments error for %s: %s", client_id, e, exc_info=True)
 
     # ========== 启动/停止 ==========
 
@@ -417,7 +286,8 @@ class InferenceManager:
             self.visualization_pool.stage_configs = self._get_stage_configs()
 
         self.visualization_pool.start()
-        self.persistence_manager.start()
+        # 注：persistence 生命周期已上移 lifespan（persistence.lifespan 嵌套于 ai.lifespan 外层），
+        # 不再由本类驱动 start/stop——inference 不拥有平级服务的生命周期。
 
         # 初始化全局映射（均由 YAML 驱动）：
         #   task_name → AlarmMetric（实时信号指标）
@@ -445,30 +315,34 @@ class InferenceManager:
         for _, actor in actors:
             actor.signal_stop()
 
-        # Phase 2: 逐个 join，收集并持久化结算告警
-        for client_id, actor in actors:
+        # Phase 2: 逐个 join，收集结算告警并经 persistence sink 落库。
+        # 进程停机路径（非 per-run 拆除）：actor 产出的 settlement 用 persistence 落库（别名已烧进
+        # alarm.stage，与 actor 实时路径同款 sink 调用）——此时 persistence 仍在跑
+        # （persistence.lifespan 于 ai.lifespan 外层，停在 inference 之后）。
+        for task_id, actor in actors:
             try:
                 settlement = actor.finalize_and_stop()
                 if settlement:
-                    cq = client_manager.get_client(client_id)
+                    cq = client_manager.get(task_id)
                     if cq:
-                        self._persist_settlement_alarms(client_id, cq, settlement)
+                        alarm_sink.persist_alarms(
+                            settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT
+                        )
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] Settlement alarms on stop failed for %s: %s",
-                    client_id, e,
+                    "[InferenceManager] Settlement alarms on stop failed for task=%s: %s",
+                    task_id, e,
                 )
 
-        # 落盘基座全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，
+        # FeatureStore 全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，
         # 残余缓冲（每 (task,step) 最多 batch_size-1 行）需在此 best-effort 落盘，
         # 否则 offline 链路读到的特征尾部会被静默截断。
         try:
             self.feature_store.flush()
-            self.fact_ledger.flush()
         except Exception as e:
-            logger.warning("[InferenceManager] flush feature/fact store on stop failed: %s", e)
+            logger.warning("[InferenceManager] flush feature store on stop failed: %s", e)
 
         self.visualization_pool.stop()
-        self.persistence_manager.stop(timeout=10.0)
+        # 注：persistence.stop() 已上移 persistence.lifespan（停在 inference 之后，抽干队列）。
 
         logger.info("[InferenceManager] Stopped")

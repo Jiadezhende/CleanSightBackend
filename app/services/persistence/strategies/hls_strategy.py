@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import struct
 import subprocess
 import threading
@@ -65,6 +66,43 @@ class HLSPersistenceStrategy:
             if key not in self._dir_locks:
                 self._dir_locks[key] = threading.Lock()
             return self._dir_locks[key]
+
+    def release_dir_locks(self, task_id: int) -> int:
+        """回收指定 task 所有 step 目录的 dir 锁，返回回收数量（任务拆除时调用）。
+
+        锁 key 形如 `str(db_dir/task_id/step_id)`，按 task 前缀批量剔除。拆除后不会再有
+        该 task 的新段入队（CQ 已出 registry、sweeper 扫不到），残段 flush 已在此前入队；
+        极少数在途 transcode 若再取锁会经 `_get_dir_lock` 按需重建同一把、不影响串行正确性。
+        不回收则 `_dir_locks` 随 (task_id, step_id) 单调增长——长跑内存慢泄漏。
+        """
+        prefix = str(self.db_dir / str(task_id)) + os.sep
+        with self._dir_locks_guard:
+            stale = [k for k in self._dir_locks if k.startswith(prefix)]
+            for k in stale:
+                del self._dir_locks[k]
+        return len(stale)
+
+    def purge_step_dir(self, task_id: int, step_id: int) -> bool:
+        """重启 supersede：删除 `{db_dir}/{task_id}/{step_id}` 整个 step 目录，返回是否删除。
+
+        与 FeatureStore.open_fresh 对称——同 (task_id, step_id) 重启一次 run 前清空旧 HLS
+        产物（段 / *_playlist.m3u8 / metadata.json / init.mp4 / .hls_timescale 缓存），
+        否则新段带唯一时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
+        HLS 落盘全靠磁盘文件存在性驱动、无每目录内存态（playlist 首行、init.mp4、timescale
+        缓存均按 `exists()` 惰性重建），故 rmtree 后由后续首段自然重建，安全。
+        持该目录锁串行化，防极端在途 persist_segment 竞争——正常重启路径此刻已无活跃 worker
+        （stop_run 已 flush 残段 + 出 registry + release_dir_locks）。
+        """
+        target_dir = self.db_dir / str(task_id) / str(step_id)
+        if not target_dir.exists():
+            return False
+        with self._get_dir_lock(target_dir):
+            try:
+                shutil.rmtree(target_dir)
+                return True
+            except OSError as e:
+                logger.warning("[HLS] purge step dir failed %s: %s", target_dir, e)
+                return False
 
     # 段文件名格式：{track}_segment_{ts_us}.mp4
     _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
@@ -468,19 +506,22 @@ class HLSPersistenceStrategy:
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
+        out_raw = None
         try:
             out_raw = cv2.VideoWriter(
                 str(raw_segment_path), fourcc, self.raw_fps, (width, height)
             )
             for fd in frames:
                 out_raw.write(fd.frame)
-            out_raw.release()
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write raw video segment: {raw_segment_path}",
                 operation="hls_write_raw",
                 retryable=True,
             ) from e
+        finally:
+            if out_raw is not None:
+                out_raw.release()  # 异常路径也须释放原生编码器句柄
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
         # cv2.VideoWriter 用固定 fps 写 N 帧 → 输出 mp4v 媒体时长 = N/fps，
@@ -560,19 +601,22 @@ class HLSPersistenceStrategy:
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
+        out_processed = None
         try:
             out_processed = cv2.VideoWriter(
                 str(segment_path), fourcc, eff_fps, (width, height)
             )
             for fd in frames:
                 out_processed.write(fd.frame)
-            out_processed.release()
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write processed video segment: {segment_path}",
                 operation="hls_write_processed",
                 retryable=True,
             ) from e
+        finally:
+            if out_processed is not None:
+                out_processed.release()  # 异常路径也须释放原生编码器句柄
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致，故与 VideoWriter
         # 用同一个 eff_fps。详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致

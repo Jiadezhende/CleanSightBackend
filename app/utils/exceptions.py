@@ -5,7 +5,7 @@ CleanSight 自定义异常层次结构
 - 异常即协议：异常类型表达语义
 - retryable: 是否可重试（瞬时故障）
 - fatal: 是否致命（系统级错误，需停止服务）
-- 6个核心异常类（AppError + 5个服务异常 + FrameDrop）
+- 6个核心异常类（AppError + 5个服务异常）
 """
 
 from typing import Optional
@@ -15,7 +15,8 @@ class AppError(Exception):
     """应用异常基类
 
     所有自定义异常的基类，提供：
-    - client_id: 客户端标识（用于日志关联）
+    - task_id / step_id: 运行坐标（哪个 run / 哪一步出错，排障主键）
+    - source_ip: 流来源（辅助信息，也是错误响应对前端暴露的 client_id 值）
     - retryable: 是否可重试（默认False）
     - fatal: 是否致命（默认False）
 
@@ -27,19 +28,32 @@ class AppError(Exception):
 
     # 实例属性类型注解
     message: str
-    client_id: Optional[str]
+    task_id: Optional[int]
+    step_id: Optional[int]
+    source_ip: Optional[str]
 
-    def __init__(self, message: str, client_id: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        message: str,
+        *,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        source_ip: Optional[str] = None,
+        **kwargs,
+    ):
         """初始化异常
 
         Args:
             message: 错误消息
-            client_id: 客户端ID（可选）
+            task_id / step_id: 运行坐标（可选，排障主键）
+            source_ip: 流来源（可选，辅助）
             **kwargs: 可选的 retryable, fatal 覆盖
         """
         super().__init__(message)
         self.message = message
-        self.client_id = client_id
+        self.task_id = task_id
+        self.step_id = step_id
+        self.source_ip = source_ip
 
         # 允许实例级别覆盖类属性
         if "retryable" in kwargs:
@@ -50,65 +64,17 @@ class AppError(Exception):
     def __str__(self):
         """字符串表示"""
         parts = [self.message]
-        if self.client_id:
-            parts.append(f"[client_id={self.client_id}]")
+        if self.task_id is not None:
+            parts.append(f"[task={self.task_id}]")
+        if self.step_id is not None:
+            parts.append(f"[step={self.step_id}]")
+        if self.source_ip:
+            parts.append(f"[source_ip={self.source_ip}]")
         if self.retryable:
             parts.append("[retryable]")
         if self.fatal:
             parts.append("[FATAL]")
         return " ".join(parts)
-
-
-# ============================================================================
-# 帧丢弃异常（实时推理专用）
-# ============================================================================
-
-
-class FrameDrop(AppError):
-    """当前帧无效，允许安静丢弃
-
-    用于 30fps 实时推理场景：
-    - 单帧解码失败
-    - 单帧推理超时
-    - 单帧质量检查不通过
-    - 客户端已移除但帧仍在队列
-
-    处理策略：
-    - 记录 metrics，不打印错误日志
-    - Executor 返回 None
-    - 继续处理下一帧
-
-    特点：retryable=False, fatal=False
-    """
-
-    retryable = False  # 帧已丢失，无需重试
-    fatal = False  # 不影响系统运行
-
-    # 实例属性类型注解
-    frame_index: Optional[int]
-    reason: Optional[str]
-
-    def __init__(
-        self,
-        client_id: str,
-        frame_index: Optional[int] = None,
-        reason: Optional[str] = None,
-    ):
-        """初始化帧丢弃异常
-
-        Args:
-            client_id: 客户端ID（必填）
-            frame_index: 帧索引（可选）
-            reason: 丢弃原因（可选，如 "decode_failed", "client_removed"）
-        """
-        message = f"Frame dropped for {client_id}"
-        if frame_index is not None:
-            message += f" at index {frame_index}"
-        if reason:
-            message += f": {reason}"
-        super().__init__(message, client_id=client_id)
-        self.frame_index = frame_index
-        self.reason = reason
 
 
 # ============================================================================
@@ -135,19 +101,26 @@ class StreamConnectionError(AppError):
     details: Optional[str]
 
     def __init__(
-        self, url: str, client_id: Optional[str] = None, details: Optional[str] = None
+        self,
+        url: str,
+        *,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        source_ip: Optional[str] = None,
+        details: Optional[str] = None,
     ):
         """初始化流连接错误
 
         Args:
             url: 流地址
-            client_id: 客户端ID
+            task_id / step_id: 运行坐标（可选）
+            source_ip: 流来源（可选，辅助）
             details: 详细错误信息
         """
         message = f"Stream connection failed: {url}"
         if details:
             message += f" - {details}"
-        super().__init__(message, client_id=client_id)
+        super().__init__(message, task_id=task_id, step_id=step_id, source_ip=source_ip)
         self.url = url
         self.details = details
 
@@ -174,7 +147,10 @@ class FFmpegError(AppError):
     def __init__(
         self,
         message: str,
-        client_id: Optional[str] = None,
+        *,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        source_ip: Optional[str] = None,
         exit_code: Optional[int] = None,
         stderr: Optional[str] = None,
     ):
@@ -182,14 +158,15 @@ class FFmpegError(AppError):
 
         Args:
             message: 错误消息
-            client_id: 客户端ID
+            task_id / step_id: 运行坐标（可选）
+            source_ip: 流来源（可选，辅助）
             exit_code: FFmpeg 进程退出码
             stderr: FFmpeg 标准错误输出
         """
         full_message = f"FFmpeg error: {message}"
         if exit_code is not None:
             full_message += f" (exit_code={exit_code})"
-        super().__init__(full_message, client_id=client_id)
+        super().__init__(full_message, task_id=task_id, step_id=step_id, source_ip=source_ip)
         self.exit_code = exit_code
         self.stderr = stderr
 
@@ -215,7 +192,10 @@ class DatabaseError(AppError):
     def __init__(
         self,
         message: str,
-        client_id: Optional[str] = None,
+        *,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        source_ip: Optional[str] = None,
         retryable: Optional[bool] = None,
         query: Optional[str] = None,
     ):
@@ -223,14 +203,17 @@ class DatabaseError(AppError):
 
         Args:
             message: 错误消息
-            client_id: 客户端ID
+            task_id / step_id / source_ip: 运行坐标 + 辅助（可选）
             retryable: 是否可重试（可选，默认使用类属性）
             query: 失败的SQL查询（可选）
         """
         kwargs = {}
         if retryable is not None:
             kwargs["retryable"] = retryable
-        super().__init__(f"Database error: {message}", client_id=client_id, **kwargs)
+        super().__init__(
+            f"Database error: {message}",
+            task_id=task_id, step_id=step_id, source_ip=source_ip, **kwargs,
+        )
         self.query = query
 
 
@@ -256,7 +239,10 @@ class ModelInferenceError(AppError):
     def __init__(
         self,
         message: str,
-        client_id: Optional[str] = None,
+        *,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        source_ip: Optional[str] = None,
         model_name: Optional[str] = None,
         retryable: Optional[bool] = None,
         is_cuda_error: bool = False,
@@ -265,7 +251,7 @@ class ModelInferenceError(AppError):
 
         Args:
             message: 错误消息
-            client_id: 客户端ID
+            task_id / step_id / source_ip: 运行坐标 + 辅助（可选）
             model_name: 模型名称
             retryable: 是否可重试（可选，默认使用类属性）
             is_cuda_error: 是否为CUDA错误
@@ -276,7 +262,10 @@ class ModelInferenceError(AppError):
         kwargs = {}
         if retryable is not None:
             kwargs["retryable"] = retryable
-        super().__init__(full_message, client_id=client_id, **kwargs)
+        super().__init__(
+            full_message,
+            task_id=task_id, step_id=step_id, source_ip=source_ip, **kwargs,
+        )
         self.model_name = model_name
         self.is_cuda_error = is_cuda_error
 
@@ -302,7 +291,10 @@ class PersistenceError(AppError):
     def __init__(
         self,
         message: str,
-        client_id: Optional[str] = None,
+        *,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        source_ip: Optional[str] = None,
         operation: Optional[str] = None,
         retryable: Optional[bool] = None,
     ):
@@ -310,7 +302,7 @@ class PersistenceError(AppError):
 
         Args:
             message: 错误消息
-            client_id: 客户端ID
+            task_id / step_id / source_ip: 运行坐标 + 辅助（可选）
             operation: 操作类型（如 "hls_write", "alarm_report"）
             retryable: 是否可重试（可选，默认使用类属性）
         """
@@ -320,7 +312,10 @@ class PersistenceError(AppError):
         kwargs = {}
         if retryable is not None:
             kwargs["retryable"] = retryable
-        super().__init__(full_message, client_id=client_id, **kwargs)
+        super().__init__(
+            full_message,
+            task_id=task_id, step_id=step_id, source_ip=source_ip, **kwargs,
+        )
         self.operation = operation
 
 
@@ -355,20 +350,6 @@ def is_fatal_error(exception: Exception) -> bool:
     if isinstance(exception, AppError):
         return exception.fatal
     return False
-
-
-def get_client_id_from_exception(exception: Exception) -> Optional[str]:
-    """从异常中提取 client_id
-
-    Args:
-        exception: 异常对象
-
-    Returns:
-        Optional[str]: client_id，如果不存在则返回 None
-    """
-    if isinstance(exception, AppError):
-        return exception.client_id
-    return None
 
 
 # ============================================================================
@@ -468,7 +449,10 @@ class ConflictError(AppError):
     def __init__(
         self,
         message: str,
-        client_id: Optional[str] = None,
+        *,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        source_ip: Optional[str] = None,
         resource_type: Optional[str] = None,
         resource_id: Optional[str] = None,
     ):
@@ -476,10 +460,10 @@ class ConflictError(AppError):
 
         Args:
             message: 错误消息
-            client_id: 客户端ID
+            task_id / step_id / source_ip: 运行坐标 + 辅助（可选）
             resource_type: 资源类型（如 "Stream", "Task"）
             resource_id: 资源ID
         """
-        super().__init__(message, client_id=client_id)
+        super().__init__(message, task_id=task_id, step_id=step_id, source_ip=source_ip)
         self.resource_type = resource_type
         self.resource_id = resource_id

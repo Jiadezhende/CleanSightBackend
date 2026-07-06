@@ -2,7 +2,7 @@
 CleanSight 工具模块（边界层异常处理架构）
 
 包含：
-- exceptions: 自定义异常层次结构（AppError + 5 个核心异常 + FrameDrop）
+- exceptions: 自定义异常层次结构（AppError + 5 个核心异常）
 - decorators: 日志装饰器（log_call、timing）
 - executor: 框架边界层（GuardedExecutor、CircuitBreaker）
 - metrics: Prometheus 可观测性指标
@@ -32,13 +32,11 @@ from .exceptions import (
     ConflictError,
     DatabaseError,
     FFmpegError,
-    FrameDrop,
     ModelInferenceError,
     NotFoundError,
     PersistenceError,
     StreamConnectionError,
     ValidationError,
-    get_client_id_from_exception,
     is_fatal_error,
     is_retryable_error,
 )
@@ -53,7 +51,6 @@ from .worker_guard import guarded_run
 __all__ = [
     # Exceptions (基类 + 核心异常 + HTTP业务异常 + 工具函数)
     "AppError",
-    "FrameDrop",
     "StreamConnectionError",
     "FFmpegError",
     "DatabaseError",
@@ -63,7 +60,6 @@ __all__ = [
     "ValidationError",
     "is_retryable_error",
     "is_fatal_error",
-    "get_client_id_from_exception",
     # Decorators (仅用于日志)
     "log_call",
     "timing",

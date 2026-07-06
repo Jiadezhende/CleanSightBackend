@@ -8,7 +8,7 @@ L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特
 
 落盘目录 `{task_id}/{step_id}/` 与 HLS 同款工作目录（`InferenceManager._db_dir` → base_dir,
 见 `hls_strategy._persist_*_segment`），随 step 目录被 cleanup TTL 连带回收。
-两者均为 manager 持有的单例：构造时绑定 base_dir，remove_client 时 close(task_id, step_id)。
+两者均为 manager 持有的单例：构造时绑定 base_dir，stop_workflow 时 close(task_id, step_id)。
 
 帧对齐契约：每条记录的 `ts` = 该帧的 `FrameInference.timestamp`（= 帧捕获 ts，见
 `workers/base.py` 构造），与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，
@@ -78,6 +78,11 @@ class _JsonlBuffer:
         self._batch_size = max(1, int(batch_size))
         # key=f"{task_id}/{step_id}" → (task_id, step_id, lines)
         self._buffers: Dict[str, tuple] = {}
+        # key → 当前 run 的 owner（= cq 对象引用，run 身份）。open_fresh 设、_enqueue 校：
+        # 分区键 (task_id, step_id) 跨 restart-supersede 共享，非 per-run 身份；迟到写握旧 owner
+        # 时若分区已被新 run open_fresh 截断，靠此拒掉，防跨 run 串台。set/check 与所有文件
+        # 写/unlink 全在 self._lock 下串行 → 无 TOCTOU（check→落盘之间不会被 open_fresh 插入）。
+        self._owner: Dict[str, Any] = {}
         self._lock = threading.Lock()
 
     def configure(self, base_dir: Union[str, Path]) -> None:
@@ -92,21 +97,31 @@ class _JsonlBuffer:
     def _path(self, task_id: Any, step_id: Any) -> Path:
         return self._base_dir / str(task_id) / str(step_id) / f"{self._suffix}.jsonl"
 
-    def _enqueue(self, task_id: Any, step_id: Any, lines: List[str]) -> None:
+    def _enqueue(
+        self, task_id: Any, step_id: Any, lines: List[str], owner: Any = None
+    ) -> None:
+        """入队并按批落盘。owner = 本次写属的 run（cq 对象）；与当前分区 owner 不符即拒
+        （迟到于 supersede）。落盘 `_write` 收进锁内，与 open_fresh 的 unlink 互斥。"""
         if task_id is None or step_id is None or not lines:
             return
         key = self._key(task_id, step_id)
         with self._lock:
+            cur = self._owner.get(key)
+            if cur is not None and cur is not owner:
+                # 分区已被新 run open_fresh 接管：迟到写握旧 owner，拒掉防串台。
+                logger.debug(
+                    "[%s] 拒迟到写（分区已 supersede）key=%s", type(self).__name__, key
+                )
+                return
             _, _, buf = self._buffers.setdefault(key, (task_id, step_id, []))
             buf.extend(lines)
             if len(buf) >= self._batch_size:
                 _, _, drained = self._buffers.pop(key)
-                path = self._path(task_id, step_id)
-            else:
-                return
-        self._write(path, drained)
+                self._write(self._path(task_id, step_id), drained)
 
     def _write(self, path: Path, lines: List[str]) -> None:
+        """落盘一批行。**仅在持 self._lock 时调用**——与 open_fresh 的 unlink 互斥，
+        保证「迟到 drain 写」不会重建已被新 run 截断的文件。"""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
@@ -115,7 +130,9 @@ class _JsonlBuffer:
             logger.warning("[%s] 落盘失败 %s: %s", type(self).__name__, path, e)
 
     def flush(self, task_id: Optional[Any] = None, step_id: Optional[Any] = None) -> None:
-        """把缓冲写盘。task_id=None 时 flush 全部；否则 flush 指定 (task_id, step_id)。"""
+        """把缓冲写盘。task_id=None 时 flush 全部；否则 flush 指定 (task_id, step_id)。
+
+        全程持锁（含 _write），与 open_fresh 互斥，同 _enqueue 口径。"""
         with self._lock:
             if task_id is None:
                 pending = list(self._buffers.values())
@@ -123,13 +140,46 @@ class _JsonlBuffer:
             else:
                 entry = self._buffers.pop(self._key(task_id, step_id), None)
                 pending = [entry] if entry else []
-        for t_id, s_id, lines in pending:
-            if lines:
-                self._write(self._path(t_id, s_id), lines)
+            for t_id, s_id, lines in pending:
+                if lines:
+                    self._write(self._path(t_id, s_id), lines)
 
-    def close(self, task_id: Any, step_id: Any) -> None:
-        """任务结束：flush 该 (task, step) 缓冲并丢弃 buffer 槽。"""
+    def close(self, task_id: Any, step_id: Any, owner: Any = None) -> None:
+        """任务结束：flush 该 (task, step) 缓冲并丢弃 buffer 槽。
+
+        owner 传入时按身份核对清 owner 记录（释放 cq 引用、界定 _owner 增长）；仅当当前
+        owner 仍是本 run 才清——防误清已被新 run 接管的记录。与 flush 顺序取锁、不嵌套。
+        """
         self.flush(task_id, step_id)
+        if owner is not None:
+            key = self._key(task_id, step_id)
+            with self._lock:
+                if self._owner.get(key) is owner:
+                    del self._owner[key]
+
+    def open_fresh(self, task_id: Any, step_id: Any, owner: Any = None) -> None:
+        """新 run 起始：登记 owner、丢弃缓冲槽并删除已落盘文件（重启 = supersede）。
+
+        追加写模式下，同 (task, step) 重启会新旧混写；一次 run 起始截断该分区，
+        保证读到的永远是本 run 的完整、干净序列。owner = 新 run 的 cq 对象，作后续
+        _enqueue 的身份基准。登记 + pop + unlink 全在锁内，与 _enqueue 的落盘互斥
+        （迟到 drain 写要么在 unlink 前入文件随后被删、要么在 unlink 后被 owner 拒，无中间态）。
+        best-effort：删除失败不阻断起流。
+        """
+        if task_id is None or step_id is None:
+            return
+        key = self._key(task_id, step_id)
+        path = self._path(task_id, step_id)
+        with self._lock:
+            self._owner[key] = owner
+            self._buffers.pop(key, None)
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception as e:  # best-effort：截断失败不影响主链路
+                logger.warning(
+                    "[%s] open_fresh 截断失败 %s: %s", type(self).__name__, path, e
+                )
 
 
 class FeatureStore(_JsonlBuffer):
@@ -138,13 +188,14 @@ class FeatureStore(_JsonlBuffer):
     def __init__(self, base_dir: Union[str, Path], batch_size: int = 64):
         super().__init__(base_dir, suffix="features", batch_size=batch_size)
 
-    def append(self, task_id: Any, step_id: Any, res) -> None:
+    def append(self, task_id: Any, step_id: Any, res, owner: Any = None) -> None:
         """追加一帧的多模型特征。
 
         Args:
             task_id: 任务 id（落盘目录键）
             step_id: 洗消步骤 id（落盘目录键，与 HLS 同款 `{task_id}/{step_id}/`）
             res: FrameInference（duck-typed：.timestamp + .result[task_name]→FrameDetections）
+            owner: 本次写属的 run（= cq 对象）；与分区当前 owner 不符即被拒（迟到于 supersede）
         """
         if task_id is None or step_id is None:
             return
@@ -159,7 +210,7 @@ class FeatureStore(_JsonlBuffer):
         except Exception as e:  # 序列化失败 best-effort 跳过
             logger.warning("[FeatureStore] 特征序列化失败 task=%s step=%s: %s", task_id, step_id, e)
             return
-        self._enqueue(task_id, step_id, [line])
+        self._enqueue(task_id, step_id, [line], owner=owner)
 
     def load(self, task_id: Any, step_id: Any, source: str) -> List[FrameDetections]:
         """离线回读：把某 source（检测点/模型名）的全序列特征还原为 FrameDetections 列表。
@@ -203,8 +254,14 @@ class FactLedger(_JsonlBuffer):
     def __init__(self, base_dir: Union[str, Path], batch_size: int = 16):
         super().__init__(base_dir, suffix="facts", batch_size=batch_size)
 
-    def append(self, task_id: Any, step_id: Any, facts: List[Union[EventFact, SegmentFact]]) -> None:
-        """追加一批事实（offline 预置；online 链路不再写）。"""
+    def append(
+        self,
+        task_id: Any,
+        step_id: Any,
+        facts: List[Union[EventFact, SegmentFact]],
+        owner: Any = None,
+    ) -> None:
+        """追加一批事实（offline 预置；online 链路不再写）。owner 同 FeatureStore.append。"""
         if task_id is None or step_id is None or not facts:
             return
         try:
@@ -212,7 +269,7 @@ class FactLedger(_JsonlBuffer):
         except Exception as e:
             logger.warning("[FactLedger] 事实序列化失败 task=%s step=%s: %s", task_id, step_id, e)
             return
-        self._enqueue(task_id, step_id, lines)
+        self._enqueue(task_id, step_id, lines, owner=owner)
 
     def load(self, task_id: Any, step_id: Any) -> List[Union[EventFact, SegmentFact]]:
         """离线回读：还原该 (task, step) 的全部事实（缺失文件返回空）。"""

@@ -7,7 +7,7 @@
 - finalize()：任务 terminate 时结算一次。
 
 两接口共享同一 self._sm —— 不再有 EventFact 作为对象间传输、不再有双状态机同步。
-每个 Client 独立实例，不跨 Client 共享（set_task() 时新建）。
+每个 Client 独立实例，不跨 Client 共享（start_workflow() 时新建）。
 
 身份维度：
 - name      : 算子自身/输出身份（非输入）。当下仅日志/告警归属；将来算子→算子链时 = 其输出流名。

@@ -5,16 +5,14 @@
 - ClientQueues.ca_processed 满（maxlen）时静默淘汰 → frames_dropped_processed
 """
 
-import numpy as np
 from unittest.mock import MagicMock, patch
 
-from app.domain.frame import Frame
-from app.services.client.queues import ClientQueues
+from factories import make_bare_cq, make_frame
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
 
 
-def _frame() -> Frame:
-    return Frame(timestamp=0.0, frame=np.zeros((2, 2, 3), dtype=np.uint8))
+def _frame():
+    return make_frame(ts=0.0, shape=(2, 2, 3))
 
 
 def test_stage_queue_drop_counted_when_full():
@@ -23,12 +21,12 @@ def test_stage_queue_drop_counted_when_full():
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
     # 客户端：ca_ready 有一帧，stage=MOCK（ClientQueues 默认 initial_stage）
-    cq = ClientQueues(client_id="c1", ca_maxlen=10)
+    cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
-    cm.get_all_clients.return_value = {"c1": cq}
+    cm.snapshot.return_value = {"c1": cq}
 
     # 预填满该 stage 队列到 maxlen
-    stage = cq.get_stage()
+    stage = cq.stage
     q = dispatcher._stage_queues[stage]
     for _ in range(q.maxlen):
         q.append(MagicMock())
@@ -43,19 +41,19 @@ def test_stage_queue_no_drop_when_not_full():
     cm = MagicMock()
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
-    cq = ClientQueues(client_id="c1", ca_maxlen=10)
+    cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
-    cm.get_all_clients.return_value = {"c1": cq}
+    cm.snapshot.return_value = {"c1": cq}
 
     dispatcher._fetch_and_dispatch_round()
 
-    assert dispatcher.get_stage_drops().get(cq.get_stage(), 0) == 0
+    assert dispatcher.get_stage_drops().get(cq.stage, 0) == 0
 
 
 def test_ca_processed_drop_counted_on_overflow():
     """未绑定任务时 ca_processed 只进不出，超过 maxlen 的部分应被计数。"""
-    cq = ClientQueues(client_id="c1", ca_maxlen=3)
-    assert cq.get_ca_processed_capacity() == 3
+    cq = make_bare_cq(ca_maxlen=3)
+    assert cq.ca_maxlen == 3
 
     for _ in range(5):
         cq.append_ca_processed(_frame())
@@ -68,7 +66,7 @@ def test_ca_processed_drop_counted_on_overflow():
 def test_pressure_snapshot_silent_when_calm():
     """平稳（无丢帧、队列浅）时不应打印 [INFER_PRESSURE]，避免刷屏。"""
     cm = MagicMock()
-    cm.get_all_clients.return_value = {}
+    cm.snapshot.return_value = {}
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
     with patch("app.services.inference.detection.dispatcher.logger") as log:
@@ -80,7 +78,7 @@ def test_pressure_snapshot_silent_when_calm():
 def test_pressure_snapshot_logs_on_drop():
     """有新增丢帧时应打印一行 [INFER_PRESSURE]。"""
     cm = MagicMock()
-    cm.get_all_clients.return_value = {}
+    cm.snapshot.return_value = {}
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
     dispatcher._stage_drops["CLEAN"] = 5  # 自上次报告以来新增丢帧
 

@@ -1,16 +1,21 @@
 """
 客户端队列管理器单例模块
 
-提供全局统一的客户端队列管理，支持：
-- 创建和获取客户端队列实例
-- 监控所有客户端队列深度
-- 资源清理和生命周期管理
+按「读多写少」的中台形态实现：读全程无锁（原子读不可变快照引用），写极少走单锁
+copy-on-write 换引用（不阻塞读）。
+
+注册表是一本**不可变 dict**（`_runs`），由单一引用变量持有：
+- 读者原子读 `self._runs` 后直接读/迭代——它永不就地变更，故无需锁；
+- 写者在 `_wlock` 下复制一份、改完、原子换引用（`self._runs = new`）；
+- CPython 中「读引用」「换引用」均为原子操作，读者要么看旧全量、要么看新全量，永不撕裂。
+
+前提：COW 写是 O(N) 拷贝，N=并发 run 数（个位数）、写极稀，可忽略。
 """
 
 import logging
 import threading
-from collections import defaultdict
-from typing import Any, Dict, List, Optional
+import types
+from typing import Any, Dict, List, Mapping, Optional
 
 from .config import get_client_config
 from .queues import ClientQueues
@@ -22,310 +27,201 @@ _client_config = get_client_config()
 
 
 class ClientManager:
-    """
-    客户端队列管理器（支持依赖注入，非强制单例）
+    """客户端队列注册表（COW 中台，支持依赖注入）。
 
-    负责全局管理所有客户端的队列资源，实现：
-    - 按需创建 ClientQueues 实例
-    - 提供线程安全的访问接口（细粒度锁优化）
-    - 集中监控队列状态
-    - 统一资源清理
+    键 = **`task_id`(int)**（由 RunController 决定并传入）；CQ 由 RunController 建好后
+    `set` 换槽，本类只做哑存储、不建 CQ。
 
-    锁层级（Lock Hierarchy）：
-      L_client = _client_locks[client_id]   threading.RLock，per-client
-      L_global = _clients_lock              threading.RLock，全局注册表
-
-    获取顺序始终为 L_client → L_global（当两者同时持有时）。
-    此顺序与通常的"自顶向下"相反，原因：
-    - L_client 是 get-or-create 的大临界区，防止同一 client 被重复创建
-    - L_global 仅做短暂 dict 变更，嵌套在 L_client 内部
-    - 没有任何代码路径先持 L_global 再持 L_client，因此不存在死锁风险
-
-    仅持 L_global（不持 L_client）的路径：
-      bind_task / get_client_by_task_id / get_all_clients / get_all_queue_depths / clear_all 快照段
-    无锁路径（依赖 CPython GIL 原子性，见 get_client 注释）：
-      has_client / get_client_count / get_client 快速路径
+    读接口（无锁）：`get`(按 task_id 直取,O(1)) / `has_client` / `snapshot`(零拷贝只读视图)
+      / `find_by_source_ip`(扫描,匹配首个) / `get_all_queue_depths` / `get_client_count` / `get_status_summary`。
+    写接口（`_wlock` + COW 换引用）：`set`(换槽) / `remove` / `remove_if` / `clear_all`。
     """
 
     def __init__(self, config=None):
-        """
-        初始化 ClientManager
+        """初始化 ClientManager。
 
         Args:
-            config: 可选配置对象（便于测试注入 mock 配置）
+            config: 可选配置对象（便于测试注入 mock 配置）。
         """
         self._config = config or _client_config
-        self._clients: Dict[str, ClientQueues] = {}
 
-        # 细粒度锁策略
-        self._clients_lock = threading.RLock()  # 管理字典的锁（可重入锁）
-        self._client_locks: Dict[str, threading.RLock] = defaultdict(
-            threading.RLock
-        )  # 每个客户端独立锁
+        # 不可变注册表快照：task_id → ClientQueues。永不就地变更，写时整体换引用。
+        self._runs: Dict[int, ClientQueues] = {}
+        self._wlock = threading.Lock()  # 只串行「写」（create / remove），不阻塞读
 
-        # task_id 双向索引（由 _clients_lock 保护）
-        self._task_to_client: Dict[int, str] = {}   # task_id → client_id
-        self._client_to_task: Dict[str, int] = {}   # client_id → current task_id
-
-        # 默认配置参数（从配置加载）
-        self._default_ca_segment_len = self._config.ca_segment_len  # CA段长度
-        self._default_ca_maxlen = self._config.ca_maxlen  # CA队列最大长度
-        self._default_inference_fps = self._config.inference_fps  # 推理采样频率
-        self._default_raw_fps = self._config.raw_fps  # 原始/解码帧率（抽帧降采样率分母）
+        # per-task 生命周期锁（RLock）：护一次 start/teardown 事务，供 RunController
+        # / api / HealthMonitor 共用串行化同一 task 的启停。与 _wlock 是两把不同的锁：
+        # _wlock 全局极短护换引用；_task_locks[task_id] per-task 长持护跨服务事务。
+        self._task_locks: Dict[int, threading.RLock] = {}
+        self._task_locks_guard = threading.Lock()
 
         logger.info("[ClientManager] Initialized")
 
-    def get_client(self, client_id: str, **kwargs) -> ClientQueues:
+    # ── 任务级锁（per-task 生命周期事务锁）────────────────────
+
+    def lock_for(self, task_id: int) -> threading.RLock:
+        """返回该 task_id 的生命周期 RLock（get-or-create）。
+
+        供 RunController.start_run / stop_run 及 HealthMonitor 共用，串行化同一 task 的
+        启停事务。RLock：同线程可重入（start_run 持锁内再调 stop_run 不自死锁）。
         """
-        获取或创建指定客户端的队列管理器（细粒度锁优化）
+        with self._task_locks_guard:
+            lk = self._task_locks.get(task_id)
+            if lk is None:
+                lk = threading.RLock()
+                self._task_locks[task_id] = lk
+            return lk
 
-        加锁策略：
-        1. 快速路径：客户端已存在时无需全局锁，直接返回
-        2. 慢速路径：需要创建时使用客户端级别锁（减少全局锁竞争）
-        3. 双重检查：防止并发创建同一客户端
+    # ── 读接口（无锁）───────────────────────────────────────────
 
-        Args:
-            client_id: 客户端唯一标识
-            **kwargs: ClientQueues 构造参数，可选：
-                - resize_width: int (默认 640)
-                - resize_height: int (默认 480)
-                - inference_fps: int (默认 10)
-                - ca_segment_len: int (默认 150)
-                - ca_maxlen: int (默认 2700)
+    def get(self, task_id: int) -> Optional[ClientQueues]:
+        """只读按键获取 CQ；不存在返回 None（无锁，数据面用）。"""
+        return self._runs.get(task_id)
 
-        Returns:
-            ClientQueues 实例
+    def has_client(self, task_id: int) -> bool:
+        """检查该 task 是否有活跃 run（无锁）。"""
+        return task_id in self._runs
+
+    def find_by_source_ip(self, source_ip: str) -> Optional[ClientQueues]:
+        """按 source_ip 查 ClientQueues（扫描当前快照，**匹配首个**命中）。
+
+        边界垫片用：前端 `/terminate`、WS `/ai/video` 仍以 `?client_id=<source_ip>` 调用，
+        由此把 source_ip 解析回当前 run。同 source_ip 并发多 run 时命中扫描到的第一个
+        （业务不保证 source_ip 唯一，故取首个即可）。
         """
-        # 快速路径：CPython GIL 保证 dict.__contains__ 和 dict.__getitem__ 各自原子。
-        # 接受的 TOCTOU：并发 remove_client() 可能在 check 之后、return 之前删除该条目，
-        # 返回一个已被 clear() 的 ClientQueues。接受此风险，原因：
-        #   1. remove_client() 仅在流关闭时调用，不在推理热路径
-        #   2. 所有快速路径调用方在使用返回值前均检查 None 槽位，可容忍 stale 引用
-        #   3. 对每次帧写入加全局锁成本不可接受
-        if client_id in self._clients:
-            return self._clients[client_id]
+        for cq in self._runs.values():  # 原子读引用后迭代不可变快照
+            if cq.source_ip == source_ip:
+                return cq
+        return None
 
-        # 慢速路径：需要创建客户端
-        with self._client_locks[client_id]:  # 使用客户端级别锁
-            # 双重检查（另一个线程可能已创建）
-            if client_id in self._clients:
-                return self._clients[client_id]
+    def snapshot(self) -> Mapping[int, ClientQueues]:
+        """返回所有 run 的**零拷贝只读视图**（键=task_id，安全迭代，切勿修改）。"""
+        return types.MappingProxyType(self._runs)
 
-            # 使用默认参数或传入参数创建
-            ca_segment_len = kwargs.get("ca_segment_len", self._default_ca_segment_len)
-            ca_maxlen = kwargs.get("ca_maxlen", self._default_ca_maxlen)
-            inference_fps = kwargs.get("inference_fps", self._default_inference_fps)
-            raw_fps = kwargs.get("raw_fps", self._default_raw_fps)
+    def get_all_queue_depths(self) -> Dict[int, Dict[str, int]]:
+        """所有 run 的队列深度统计。
 
-            # 创建新的 ClientQueues 实例
-            client_queues = ClientQueues(
-                client_id=client_id,
-                ca_segment_len=ca_segment_len,
-                ca_maxlen=ca_maxlen,
-                inference_fps=inference_fps,
-                raw_fps=raw_fps,
-            )
-
-            # 设置可选参数
-            if "resize_width" in kwargs:
-                client_queues.resize_width = kwargs["resize_width"]
-            if "resize_height" in kwargs:
-                client_queues.resize_height = kwargs["resize_height"]
-
-            # 注册到全局字典（短暂全局锁）
-            with self._clients_lock:
-                self._clients[client_id] = client_queues
-
-            logger.info(f"Create New Client: {client_id}")
-            return client_queues
-
-    def has_client(self, client_id: str) -> bool:
+        格式：{task_id: {ca_ready, ca_raw, ca_processed, has_rendered}}
         """
-        检查客户端是否存在（无锁快速路径）
-
-        注：dict 的 __contains__ 在 CPython 中是原子操作，
-        无需加锁（仅用于快速检查）
-
-        Args:
-            client_id: 客户端标识
-
-        Returns:
-            True 如果客户端存在
-        """
-        return client_id in self._clients
-
-    def bind_task(self, client_id: str, task_id: int) -> None:
-        """注册 task_id ↔ client_id 双向映射，自动淘汰同一 client 的旧任务绑定。"""
-        with self._clients_lock:
-            old_task = self._client_to_task.pop(client_id, None)
-            if old_task is not None:
-                self._task_to_client.pop(old_task, None)
-            self._task_to_client[task_id] = client_id
-            self._client_to_task[client_id] = task_id
-
-    def get_client_by_task_id(self, task_id: int) -> Optional[ClientQueues]:
-        """按 task_id 直接查 ClientQueues，无需经过 DB。"""
-        with self._clients_lock:
-            client_id = self._task_to_client.get(task_id)
-            if client_id is None:
-                return None
-            return self._clients.get(client_id)
-
-    def remove_client(self, client_id: str, cleanup: bool = True) -> Dict[str, Any]:
-        """
-        注销客户端，可选清理资源（客户端级别锁优化）
-
-        加锁策略：
-        1. 使用客户端级别锁保护整个移除流程
-        2. 清理操作在全局锁外执行（减少锁持有时间）
-
-        Args:
-            client_id: 客户端标识
-            cleanup: 是否清理队列资源（清空所有队列）
-
-        Returns:
-            清理结果字典，包含以下字段：
-            - client_id: 客户端标识
-            - removed: 是否成功移除
-            - cleaned: 是否成功清理队列（仅当 cleanup=True 时有效）
-            - error: 错误信息（如果有）
-        """
-        result = {
-            "client_id": client_id,
-            "removed": False,
-            "cleaned": False,
-            "error": None,
-        }
-
-        with self._client_locks[client_id]:  # 客户端级别锁
-            with self._clients_lock:  # 短暂全局锁：只用于字典操作
-                old_task = self._client_to_task.pop(client_id, None)
-                if old_task is not None:
-                    self._task_to_client.pop(old_task, None)
-
-                client_queues = self._clients.pop(client_id, None)
-
-                if client_queues is None:
-                    result["error"] = "client_not_found"
-                    logger.warning(f"尝试移除不存在的客户端: {client_id}")
-                    return result
-
-                result["removed"] = True
-
-            # 清理操作在全局锁外执行（减少锁持有时间）
-            if cleanup:
-                try:
-                    client_queues.clear()
-                    result["cleaned"] = True
-                    logger.info(f"客户端队列已清理: {client_id}")
-                except Exception as e:
-                    result["error"] = str(e)
-                    logger.error("清理客户端队列失败 %s: %s", client_id, e, exc_info=True)
-
-            logger.info(f"客户端已移除: {client_id}")
-
-        # 清理锁字典（可选，防止内存泄漏）
-        if client_id in self._client_locks:
-            del self._client_locks[client_id]
-
-        return result
-
-    def get_all_clients(self) -> Dict[str, ClientQueues]:
-        """
-        获取所有客户端的队列管理器（只读副本）
-
-        Returns:
-            客户端ID到ClientQueues的映射字典
-        """
-        with self._clients_lock:
-            return dict(self._clients)
-
-    def get_all_queue_depths(self) -> Dict[str, Dict[str, int]]:
-        """
-        获取所有客户端的队列深度统计（读锁优化）
-
-        加锁策略：
-        1. 全局锁仅用于获取客户端ID列表快照
-        2. 遍历读取各客户端状态时无全局锁（并行读取）
-
-        Returns:
-            格式：{client_id: {ca_ready: N, ca_raw: N, ca_processed: N, has_rendered: bool}}
-        """
-        # 短暂全局锁：获取客户端ID快照
-        with self._clients_lock:
-            client_ids = list(self._clients.keys())
-
-        # 并行读取各客户端状态（无全局锁，减少锁竞争）
-        result = {}
-        for cid in client_ids:
-            if cid in self._clients:  # 防御性检查（可能已被删除）
-                result[cid] = self._clients[cid].get_queue_depths()
-        return result
+        runs = self._runs  # 原子读一份不可变快照
+        return {tid: cq.get_queue_depths() for tid, cq in runs.items()}
 
     def get_client_count(self) -> int:
-        """
-        获取当前管理的客户端总数（原子操作，无需锁）
-
-        注：len() 在 CPython 中是原子操作
-        """
-        return len(self._clients)
-
-    def clear_all(self) -> List[Dict[str, Any]]:
-        """
-        清空所有客户端资源（用于服务关闭时的全局清理）
-
-        加锁策略：
-        1. 先获取客户端ID列表快照
-        2. 逐个调用 remove_client（利用已有的客户端级锁）
-
-        Returns:
-            每个客户端的清理结果列表
-        """
-        # 获取客户端ID快照
-        with self._clients_lock:
-            client_ids = list(self._clients.keys())
-
-        # 逐个移除（复用 remove_client 的细粒度锁逻辑）
-        results = []
-        for client_id in client_ids:
-            result = self.remove_client(client_id, cleanup=True)
-            results.append(
-                {
-                    "client_id": client_id,
-                    "success": result["removed"] and result["cleaned"],
-                    "error": result.get("error"),
-                }
-            )
-
-        logger.info(f"所有客户端资源已清理 (总数: {len(results)})")
-        return results
+        """当前客户端总数（无锁）。"""
+        return len(self._runs)
 
     def get_status_summary(self) -> Dict:
-        """
-        获取整体状态摘要（用于监控和调试）
-
-        加锁策略：仅在持锁期间做 O(n) dict 快照，遍历和 per-client 调用在锁外执行，
-        避免全局锁持有时间随客户端数量线性增长。
-        """
-        with self._clients_lock:
-            snapshot = dict(self._clients)
-
+        """整体状态摘要（用于监控和调试）。"""
+        snapshot = self._runs  # 不可变，无需拷贝
         total_frames = 0
         clients_status = {}
-        for client_id, client_queues in snapshot.items():
-            depths = client_queues.get_queue_depths()
-            clients_status[client_id] = depths
+        for task_id, cq in snapshot.items():
+            depths = cq.get_queue_depths()
+            clients_status[task_id] = depths
             total_frames += (
                 depths.get("ca_ready", 0)
                 + depths.get("ca_raw", 0)
                 + depths.get("ca_processed", 0)
             )
-
         return {
             "client_count": len(snapshot),
             "total_queued_frames": total_frames,
             "clients": clients_status,
         }
+
+    # ── 写接口（_wlock + COW）──────────────────────────────────
+
+    def set(self, task_id: int, cq: ClientQueues) -> None:
+        """原子装入/替换 task_id 槽位为一个已建好的（不可变身份）CQ。
+
+        供 `RunController.start_run` 路径：每次 run 建**新** CQ 后整体换槽（不在旧 CQ 上原地改）。
+        `_wlock` 下 COW 换引用发布，读者原子读引用即看到全新对象——观察不到半建态。
+        旧槽引用被丢弃后，仅其自身 payload（帧/缓冲）随 close/GC 释放；decoder/actor
+        **不由 CQ 持有**，由 RunController.stop_run 显式拆除，不随换槽 GC 回收。
+        """
+        with self._wlock:
+            new = dict(self._runs)
+            new[task_id] = cq
+            self._runs = new
+        logger.info(f"[ClientManager] set run: task_id={task_id}")
+
+    def remove(self, task_id: int, cleanup: bool = True) -> Dict[str, Any]:
+        """注销该 task 的 run，可选清理其队列资源。
+
+        `cleanup` 在换引用之后、锁外执行（不占写锁）。
+
+        Returns:
+            {task_id, removed, cleaned, error}
+        """
+        result: Dict[str, Any] = {
+            "task_id": task_id,
+            "removed": False,
+            "cleaned": False,
+            "error": None,
+        }
+
+        with self._wlock:
+            cq = self._runs.get(task_id)
+            if cq is None:
+                result["error"] = "client_not_found"
+                logger.warning(f"尝试移除不存在的 run: task_id={task_id}")
+                return result
+            new = dict(self._runs)  # COW 删除
+            del new[task_id]
+            self._runs = new
+            result["removed"] = True
+
+        # 清理在锁外执行（减少写锁持有时间）
+        if cleanup:
+            try:
+                cq.clear()
+                result["cleaned"] = True
+                logger.info(f"run 队列已清理: task_id={task_id}")
+            except Exception as e:
+                result["error"] = str(e)
+                logger.error("清理 run 队列失败 task_id=%s: %s", task_id, e, exc_info=True)
+
+        logger.info(f"run 已移除: task_id={task_id}")
+        return result
+
+    def remove_if(
+        self, task_id: int, expected_cq: ClientQueues, cleanup: bool = True
+    ) -> bool:
+        """对象身份 fence 删除：仅当 `registry[task_id] is expected_cq` 才移除。
+
+        防止迟到 cleanup 误删「同键新实例」（重启/切换后装入的新 CQ）。命中即删并返回 True，
+        否则不动、返回 False。清理在锁外执行。
+        """
+        with self._wlock:
+            cur = self._runs.get(task_id)
+            if cur is not expected_cq:
+                return False
+            new = dict(self._runs)
+            del new[task_id]
+            self._runs = new
+
+        if cleanup:
+            try:
+                expected_cq.clear()
+            except Exception as e:
+                logger.error("清理 run 队列失败 task_id=%s: %s", task_id, e, exc_info=True)
+        logger.info(f"run 已移除(identity-fenced): task_id={task_id}")
+        return True
+
+    def clear_all(self) -> List[Dict[str, Any]]:
+        """清空所有 run 资源（服务关闭时的全局清理）。"""
+        results = []
+        for task_id in list(self._runs.keys()):  # 快照键列表
+            result = self.remove(task_id, cleanup=True)
+            results.append(
+                {
+                    "task_id": task_id,
+                    "success": result["removed"] and result["cleaned"],
+                    "error": result.get("error"),
+                }
+            )
+        logger.info(f"所有 run 资源已清理 (总数: {len(results)})")
+        return results
 
 
 # 全局单例实例

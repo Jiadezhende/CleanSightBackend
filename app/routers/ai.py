@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.services import ai
+from app.services.client import client_manager
+from app.services.inference.instance import inference_manager
 from app.services.stream import stream_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 async def lifespan():
     """简单AI服务生命周期管理：启动推理管理器"""
     # 启动 AI 推理服务
-    ai.start()
+    inference_manager.start()
     logger.info("[AIRouter] Inference service started")
 
     try:
@@ -27,7 +28,7 @@ async def lifespan():
         # lifespan finally 执行时 uvicorn 已 cancel 所有 WebSocket 任务，
         # 事件循环无其他等待方，直接同步调用即可。
         try:
-            ai.stop()
+            inference_manager.stop()
             logger.info("[AIRouter] Inference service stopped")
         except Exception:
             logger.exception("[AIRouter] Error stopping inference service")
@@ -41,20 +42,33 @@ async def lifespan():
 @router.websocket("/video")
 async def websocket_video_endpoint(websocket: WebSocket):
     """
-    WebSocket端点：/ai/video?client_id=xxx
-    - 要求客户端在连接时通过查询参数 `client_id` 指定自身 ID
-    - 服务器持续向该 client_id 推送最新推理结果（Base64 JPEG）
+    WebSocket端点：/ai/video?task_id=xxx（新，首选）或 ?client_id=xxx（旧，即 source_ip）
+    - `task_id`（新）→ `client_manager.get(task_id)` 锁定具体 run（不可变运行键）。
+    - `client_id`（旧，=source_ip）→ 每轮 `find_by_source_ip` 解析当前 run（匹配首个），
+      同 source_ip 换 run 时自动跟随。
+    每轮读其最新渲染结果（Base64 JPEG）持续推送。两参皆缺 → 关闭（1008）。
     """
-    # 获取 client_id
-    client_id = websocket.query_params.get("client_id")
-    if not client_id:
+    # 双模解析（task_id 优先）：构造 per-loop 解析器 + 日志标签
+    task_id_raw = websocket.query_params.get("task_id")
+    client_id = websocket.query_params.get("client_id")  # 旧参，即 source_ip
+
+    if task_id_raw is not None:
+        try:
+            task_id = int(task_id_raw)
+        except ValueError:
+            await websocket.close(code=1008)
+            return
+        resolve = lambda: client_manager.get(task_id)  # noqa: E731
+        label = f"task_id={task_id}"
+    elif client_id:
+        resolve = lambda: client_manager.find_by_source_ip(client_id)  # noqa: E731
+        label = f"client_id={client_id}"
+    else:
         await websocket.close(code=1008)
         return
 
     await websocket.accept()
-    logger.info(
-        f"[WebSocket] 连接已建立: client_id={client_id}, remote={websocket.client}"
-    )
+    logger.info(f"[WebSocket] 连接已建立: {label}, remote={websocket.client}")
 
     # 帧率控制和去重
     last_sent_timestamp = 0.0  # 上一帧的时间戳（来自帧本身）
@@ -82,7 +96,9 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while not shutdown_event.is_set() and not disconnect_task.done():
-            frame = ai.get_result(client_id)  # domain Frame or None
+            # 每轮解析当前 run（task_id 直查 / source_ip 匹配首个）→ 读其最新渲染帧
+            cq = resolve()
+            frame = cq.get_latest_rendered() if cq is not None else None
 
             if frame is None:
                 await asyncio.sleep(0.01)  # 减少轮询间隔
@@ -119,35 +135,35 @@ async def websocket_video_endpoint(websocket: WebSocket):
                     elapsed = current_time - last_log_time
                     fps = frames_sent / elapsed
                     logger.debug(
-                        f"[WebSocket] client={client_id}: 发送 {frames_sent}帧/{elapsed:.1f}秒 = {fps:.1f}fps"
+                        f"[WebSocket] {label}: 发送 {frames_sent}帧/{elapsed:.1f}秒 = {fps:.1f}fps"
                     )
                     frames_sent = 0
                     last_log_time = current_time
 
             except WebSocketDisconnect:
                 # 客户端正常断开连接
-                logger.info(f"[WebSocket] 客户端正常断开: client_id={client_id}")
+                logger.info(f"[WebSocket] 客户端正常断开: {label}")
                 break
 
             except (ConnectionResetError, BrokenPipeError):
                 # 网络连接被重置
-                logger.info(f"[WebSocket] 连接重置: client_id={client_id}")
+                logger.info(f"[WebSocket] 连接重置: {label}")
                 break
 
             except Exception:
                 # 其他未预期的发送错误
                 logger.error(
-                    f"[WebSocket] 发送异常: client_id={client_id}", exc_info=True
+                    f"[WebSocket] 发送异常: {label}", exc_info=True
                 )
                 break
 
     except asyncio.CancelledError:
         # uvicorn 超时后强制取消任务时触发（6s 优雅关闭超时）
         # 不重新抛出：handler 正常返回，避免 uvicorn 记录 "Exception in ASGI application"
-        logger.info(f"[WebSocket] 任务被取消（服务关闭）: client_id={client_id}")
+        logger.info(f"[WebSocket] 任务被取消（服务关闭）: {label}")
     except Exception:
         # 捕获并记录未预期异常，便于诊断
-        logger.error(f"[WebSocket] 未捕获异常: client_id={client_id}", exc_info=True)
+        logger.error(f"[WebSocket] 未捕获异常: {label}", exc_info=True)
     finally:
         disconnect_task.cancel()
         try:
@@ -158,6 +174,6 @@ async def websocket_video_endpoint(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
-        logger.info(f"[WebSocket] 连接已关闭: client_id={client_id}")
+        logger.info(f"[WebSocket] 连接已关闭: {label}")
 
 

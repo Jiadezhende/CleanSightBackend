@@ -6,17 +6,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services.client.queues import ClientQueues
+from factories import make_bare_cq, make_frame_detections
 from app.services.inference.config import load_stage_config
 from app.domain.alarm import Alarm, AlarmType
-from app.domain.detection import Detection, FrameDetections
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.temporal.operator import Operator
 
 
-def _out(ts: float, n: int = 1) -> FrameDetections:
-    dets = [Detection(bbox=[0, 0, 1, 1], confidence=0.9, class_id=0, class_name="x") for _ in range(n)]
-    return FrameDetections(detections=dets, metadata={}, timestamp=ts)
+def _out(ts: float, n: int = 1):
+    return make_frame_detections(n=n, class_name="x", ts=ts)
 
 
 class _NoopOperator(Operator):
@@ -96,7 +94,7 @@ def test_subscribes_required():
 
 
 def test_stream_buffer_floor_10s():
-    cq = ClientQueues(client_id="c")
+    cq = make_bare_cq()
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
         cq.push_detection("x", _out(t))
     # 未配感受野 → 底线 10s：cutoff=20-10=10 → 保留 10,15,20
@@ -105,7 +103,7 @@ def test_stream_buffer_floor_10s():
 
 
 def test_stream_buffer_extends_with_receptive_field():
-    cq = ClientQueues(client_id="c")
+    cq = make_bare_cq()
     cq.set_stream_windows({"x": 30.0})  # 感受野 30s > 底线
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
         cq.push_detection("x", _out(t))
@@ -142,7 +140,7 @@ def test_per_operator_isolation():
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)
     good = _GoodOperator(name="good", subscribes=["s"], window_seconds=3.0)
-    actor = ClientTemporalActor(client_id="c", cq=cq, stage="MOCK", operators=[bad, good])
+    actor = ClientTemporalActor(task_id=1, cq=cq, stage="MOCK", operators=[bad, good])
     actor._persist_alarms = lambda alarms: captured.extend(alarms)
 
     actor._tick()
@@ -150,6 +148,8 @@ def test_per_operator_isolation():
     # bad 抛异常被隔离，good 仍正常出告警
     assert good._sm.get("ran") is True
     assert len(captured) == 1
+    # 别名前烧：告警 .stage 在产出处（_tick）即被烧成 actor 构造期解析的别名，早于 _persist_alarms
+    assert captured[0].stage == actor._stage_alias
     cq.set_latest_temporal.assert_called_once()
     assert cq.set_latest_temporal.call_args[0][0] == ["good"]
 

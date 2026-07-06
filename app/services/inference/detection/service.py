@@ -14,16 +14,12 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from app.services.client import ClientManager, ClientQueues, client_manager
+from app.services.client import ClientManager, client_manager
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
 from app.services.inference.models import FrameInference
 from app.services.inference.detection.pool import MultiModelWorkerPool
-from app.utils.exceptions import (
-    AppError,
-    FrameDrop,
-    ModelInferenceError,
-)
-from app.utils.metrics import gpu_oom_total
+from app.utils.exceptions import AppError
+from app.utils.metrics import frame_drop_total
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -41,7 +37,6 @@ class ModelWorkerService:
 
     def __init__(
         self,
-        client_queues_map: Optional[Dict[str, ClientQueues]] = None,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
         use_cuda_stream: bool = True,
@@ -50,7 +45,6 @@ class ModelWorkerService:
     ):
         """
         Args:
-            client_queues_map: {client_id: ClientQueues}，如果为 None 则从 client_manager 获取
             stage_configs: Stage 配置（完全解耦版本，使用 InferenceWorkflow）
                 {
                     "LEAK": {
@@ -64,21 +58,16 @@ class ModelWorkerService:
                 }
             max_batch_per_stage: 每个 stage 最大 batch 大小
             use_cuda_stream: 是否使用 CUDA Stream 并行
-            client_manager_instance: ClientManager 实例（可选，用于动态获取客户端）
+            client_manager_instance: ClientManager 实例（仅用于构造 Dispatcher 枚举 registry；
+                写回不再经它反查，改走 res.cq 捕获句柄）
         """
 
-        # 保存 ClientManager 实例（用于动态客户端管理）
+        # 保存 ClientManager 实例：仅供 Dispatcher 枚举活跃 run（合法 multi-run 调度）；
+        # 写回路径已句柄化（res.cq），不再经此反查 —— 见 _write_back_results。
         self._client_manager = client_manager_instance or client_manager
 
         # L2 特征落盘（常开；离线链路硬需求）。由 InferenceManager 注入并管理生命周期
         self._feature_store = feature_store
-
-        # 客户端队列映射（可能动态更新）
-        if client_queues_map is None:
-            # 从 ClientManager 获取
-            self.client_queues_map = self._client_manager.get_all_clients()
-        else:
-            self.client_queues_map = client_queues_map
 
         # Stage 配置（必须提供）
         if stage_configs is None:
@@ -115,8 +104,7 @@ class ModelWorkerService:
         )
         logger.info(
             f"ModelWorkerService initialized: stages={list(self.worker_pools.keys())}, "
-            f"CUDA_stream={'enabled' if actual_cuda else 'disabled'}, "
-            f"clients={len(self.client_queues_map)}"
+            f"CUDA_stream={'enabled' if actual_cuda else 'disabled'}"
         )
 
     def start(self):
@@ -224,40 +212,17 @@ class ModelWorkerService:
                         stage, len(batch), batch_size, elapsed*1000, fps, queue_depth, timeout_ms
                     )
 
-            except FrameDrop as e:
-                # 边界层 1: FrameDrop - 静默丢弃（warning级别）
-                logger.warning(
-                    "[BoundaryLayer1][Worker-%s] Frame dropped: client=%s, reason=%s",
-                    stage, e.client_id, e.reason
-                )
-                continue  # 继续处理下一批
-
-            except ModelInferenceError as e:
-                # 边界层 1: 模型推理错误 - ERROR级别，记录上下文
-                logger.error(
-                    "[BoundaryLayer1][Worker-%s] Model inference failed: %s", stage, e,
-                    exc_info=True,
-                    extra={
-                        "client_id": e.client_id,
-                        "model_name": e.model_name,
-                        "is_cuda_error": e.is_cuda_error,
-                    },
-                )
-                # 记录GPU OOM指标
-                if e.is_cuda_error:
-                    gpu_oom_total.labels(
-                        model=getattr(e, "model_name", "unknown")
-                    ).inc()
-                # 继续处理下一批
-                time.sleep(0.1)
-                continue
-
+            # 注：不为模型推理异常单列 except——它在本循环内到不了：模型异常由
+            # pool.infer_batch 就地降级为 FrameDetections(success=False)（batch 跨多 run，
+            # 不能上抛炸整批）。失败可见性改由 _write_back_results 按确定 task_id 记 per-run
+            # 日志、聚合计数由 pool.infer_failure_total 承接。下面 except AppError 仅兜底
+            # 队列/写回等路径万一抛出的应用异常。
             except AppError as e:
-                # 边界层 1: 其他应用异常 - ERROR级别
+                # 边界层 1: 应用异常 - ERROR级别
                 logger.error(
                     "[BoundaryLayer1][Worker-%s] Application error: %s", stage, e,
                     exc_info=True,
-                    extra={"client_id": getattr(e, "client_id", None)},
+                    extra={"task_id": getattr(e, "task_id", None)},
                 )
                 time.sleep(0.1)
                 continue
@@ -272,37 +237,50 @@ class ModelWorkerService:
                 continue
 
     def _write_back_results(self, results: List[FrameInference]):
-        """将推理结果双写到 ClientQueues。
+        """将推理结果双写到**捕获的 CQ 句柄**（res.cq），不按 client_id 反查。
 
         双写策略：
         - slide_window（per-task 拆分）：供 TemporalWorker 历史窗口分析
         - latest_inference（原子快照）：供 VisualizationWorker 直接读取，保证同帧一致性
 
-        异常处理：
-        - 单条结果对应的客户端已移除 → 跳过该条（per-result），不中断整批。
-          一个 batch 跨多客户端填充，某客户端断连不得殃及同批其他在线客户端的写回。
+        句柄化写回：dispatcher pop 帧时捕获该 run 的 CQ 句柄随 batch 同行，此处直接写它。
+        dispatch→infer→write-back 期间若 set_task/stop_run 换槽，旧句柄已转 DRAINING/CLOSED
+        （T2 状态机），本处 is_active() 门统一挡住三写（含 FeatureStore 这条外部落盘腿——
+        push_detection/set_latest_inference 虽已内建 ACTIVE 门，但 feature_store.append 不受
+        cq 门约束），迟到结果落 stale_run 计数而**碰不到新 run**，无跨 run 串台。
         """
         for res in results:
-            if not self._client_manager.has_client(res.client_id):
-                # 该客户端已移除：仅跳过此条，继续处理同批其他客户端
+            cq = res.cq
+            if not cq.is_active():
+                # 迟到结果：捕获的 run 已被拆除/结算（DRAINING/CLOSED），整条丢弃并计数。
+                frame_drop_total.labels(reason="stale_run").inc()
                 logger.debug(
-                    "[Worker] Skip write-back for removed client=%s", res.client_id
+                    "[Worker] Skip write-back for stale run: task=%s state=%s",
+                    res.task_id, cq.get_state().name,
                 )
                 continue
 
-            cq = self._client_manager.get_client(res.client_id)
             # Path 1: per-task slide_window（temporal 需要历史窗口）
             for task_name, detection_output in res.detections.items():
+                # 失败可见性：pool 把模型异常降级成 success=False 的空结果，下游与「真没检到」
+                # 不可分。此处 res.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
+                # 聚合计数由 pool.infer_failure_total 承接、此处不再重复计数。
+                if not detection_output.success:
+                    logger.warning(
+                        "[Worker] inference degraded (empty result): task=%s model=%s error=%s",
+                        res.task_id, task_name, detection_output.error,
+                    )
                 cq.push_detection(task_name, detection_output)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
             cq.set_latest_inference(res)
             # L2 特征落盘（常开）：offline 链路硬需求，best-effort 不影响主链路。
             # 目录键 (task_id, step_id) 与 HLS 同款；任一为 None 则跳过（拒落，同 HLS 口径）。
-            # task 取一次再派生 task_id/step_id，避免两次独立读之间 set_task 造成键错配。
+            # 从同一句柄派生 task_id/step_id（消除跨 snapshot 二次读的键错配窗口）。
+            # owner=cq：feature_store 无状态门，靠 store 内归属校验挡「顶层 is_active()
+            # 通过后中途 supersede」的迟到写（分区键跨 run 共享，比 is_active() 更本质）。
             if self._feature_store is not None:
-                task = cq.get_task()
-                task_id = task.task_id if task else None
-                step_id = cq.step_id_of(task)
+                task_id = cq.task_id
+                step_id = cq.step_id
                 if task_id is not None and step_id is not None:
-                    self._feature_store.append(task_id, step_id, res)
+                    self._feature_store.append(task_id, step_id, res, owner=cq)
 

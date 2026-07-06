@@ -1,0 +1,16 @@
+# 覆盖率配置（opt-in：仅在 `pytest --cov=app` 时生效，不改默认测试行为）。
+# 用法：pytest tests/ --cov=app --cov-report=term-missing [--cov-report=html]
+[run]
+source = app
+branch = True
+omit =
+    app/main.py          ; 进程启动壳（lifespan 编排），走集成/端到端而非单测
+    */__pycache__/*
+
+[report]
+show_missing = True
+skip_covered = False
+precision = 1
+
+[html]
+directory = htmlcov

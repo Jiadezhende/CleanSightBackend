@@ -1,50 +1,46 @@
-"""告警落库公共出口 —— 实时(REALTIME)与结算(SETTLEMENT)共用一条持久化映射。
+"""告警落库 sink（inference/temporal 域）。
 
-L4 Judge 产出的 AlarmInfo 已自带 metric(产出方显式填,不靠文案反推),此处只做:
-    append_alarm_record_with_gate(闸门去重+入内存环形缓冲,原子) → persist_alarm(外部库)。
-    顺序为先内存后外部:内存日志供前端实时轮询,外部库本就 30s 批次,先记内存更实时。
+由告警产出方（TemporalActor 实时 / settlement 结算）调用：把一批告警**过闸门 +
+记入 CQ 环形缓冲 + 落库**串成一次编排。
 
-两个调用点(temporal 实时 / manager 结算)此前逐行重复,差异仅在 mode、stage 来源、
-client_id 来源、是否逐条记日志 —— 全部收进本函数的参数。
+职责划分：
+- 过闸/入队（`cq.append_alarm_record_with_gate`）—— client 领域（CQ 自有去重闸门 +
+  前端轮询的告警环形缓冲），闸门原子性归 CQ；
+- 落库（`persistence_manager.persist_alarm(dict)`）—— persistence 无状态落库。
+
+sink 只负责把两者编排到一起,不反向侵入任一方内部状态。persistence 因此不再依赖 cq。
+（原 persist_alarms 一度迁入 PersistenceManager,现按"落库≠过闸编排"归位回产出域。）
 """
-
-from __future__ import annotations
 
 import logging
 from typing import List
 
 from app.domain.alarm import Alarm
+from app.services.persistence import persistence_manager
 
 logger = logging.getLogger(__name__)
 
 
-def persist_alarms(
-    alarms: List[Alarm],
-    *,
-    cq,                       # ClientQueues
-    client_id: str,
-    stage_name: str,          # 已解析的可读别名(get_stage_alias 的结果)
-    mode: str,                # ALARM_MODE_REALTIME / "SETTLEMENT"
-    persistence_manager,
-    log_each: bool = False,
-) -> None:
-    """把一批告警过闸门后落库 + 记入内存环形缓冲。
+def persist_alarms(alarms: List[Alarm], *, cq, mode: str, log_each: bool = False) -> None:
+    """把一批告警过闸门后落库 + 记入内存环形缓冲（实时/结算共用一条映射）。
 
-    metric 直接读 alarm.metric(产出方已填);task_id/step_id 由 cq 派生。
+    别名已由产出方（temporal actor）烧进 alarm.stage，此处直接读、不反向 import inference.naming；
+    metric 直接读 alarm.metric（产出方已填）；client_id / task_id / step_id 均由 cq 派生。
+    顺序先内存后外部：内存日志供前端实时轮询，外部库本就 30s 批次。
     """
-    task_id = cq.get_task_id()
-    task = cq.get_task()
-    step_id = int(task.current_step) if task and task.current_step else None
+    task_id = cq.task_id
+    step_id = cq.step_id
+    client_id = cq.source_ip
 
     for alarm in alarms:
-        # 给产出方的同一份告警补落库字段，再过闸门+入环形缓冲（seq 由其赋）。
+        # 给产出方的同一份告警补 mode，再过闸门+入环形缓冲（seq 由其赋；stage 已烧）。
+        # 闸门 task_id 取自 cq 自身不可变身份，无需再传。
         alarm.mode = mode
-        alarm.stage = stage_name
-        if not cq.append_alarm_record_with_gate(task_id, alarm, mode):
+        if not cq.append_alarm_record_with_gate(alarm, mode):
             continue
         persistence_manager.persist_alarm({
             "task_id": task_id,
-            "stage": stage_name,
+            "stage": alarm.stage,
             "step_id": step_id,
             "client_id": client_id,
             "alarm_type": alarm.alarm_type,

@@ -13,29 +13,17 @@ import time
 
 import pytest
 
+from factories import make_frame_detections
 from app.domain.alarm import AlarmType
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import FrameDetections  # 仅用于类型注解
 
 
 # ========== Fixtures ==========
 
 
-def make_detection_output(n_detections: int = 0, class_name: str = "bubble") -> FrameDetections:
-    """构造 FrameDetections，指定检测数量"""
-    detections = [
-        Detection(
-            bbox=[0, 0, 100, 100],
-            confidence=0.9,
-            class_id=0,
-            class_name=class_name,
-        )
-        for _ in range(n_detections)
-    ]
-    return FrameDetections(
-        detections=detections,
-        metadata={"model": "test"},
-        timestamp=time.time(),
-    )
+def make_detection_output(n_detections: int = 0, class_name: str = "bubble"):
+    """构造 FrameDetections，指定检测数量（时间戳由 make_window 覆写）"""
+    return make_frame_detections(n=n_detections, class_name=class_name)
 
 
 def make_window(pattern: list[int], class_name: str = "bubble") -> list[FrameDetections]:

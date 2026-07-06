@@ -81,18 +81,3 @@ class AlarmPersistenceTask:
             "detection_result": self.detection_result,
             "detected_at": self.timestamp,
         }
-
-
-@dataclass
-class PersistenceMetrics:
-    """持久化指标"""
-
-    hls_enqueued: int = 0
-    hls_completed: int = 0
-    hls_errors: int = 0
-    hls_queue_full: int = 0
-
-    alarm_enqueued: int = 0
-    alarm_completed: int = 0
-    alarm_errors: int = 0
-    alarm_queue_full: int = 0

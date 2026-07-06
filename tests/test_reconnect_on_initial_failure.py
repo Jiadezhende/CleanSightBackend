@@ -37,17 +37,15 @@ def _make_monitor(client_id: str, mock_cq, active_decoder_ids: set) -> GlobalHea
     Args:
         client_id: 被测客户端 ID
         mock_cq: mock 的 ClientQueues（需设置 latest_raw_timestamp）
-        active_decoder_ids: 模拟 stream_service.get_all_client_ids() 的返回值
+        active_decoder_ids: 模拟 stream_service.get_all_task_ids() 的返回值
     """
     mock_cm = MagicMock()
-    mock_cm.get_all_clients.return_value = {client_id: mock_cq}
+    mock_cm.snapshot.return_value = {client_id: mock_cq}
 
     mock_ss = MagicMock()
-    mock_ss.get_all_client_ids.return_value = active_decoder_ids
+    mock_ss.get_all_task_ids.return_value = active_decoder_ids
     mock_ss.get_stream_info.return_value = {
         "url": "rtsp://127.0.0.1:8554/test",
-        "fps": 30,
-        "protocol": "RTSP",
     }
     mock_ss.restart_stream.return_value = True
 
@@ -88,7 +86,7 @@ class TestDecoderRegistration:
         """调用 _start_stream_impl，mock FFmpegDecoder.start() 的行为"""
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 
@@ -96,8 +94,6 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = []
             mock_dec.start.side_effect = start_side_effect
 
             yield MockDecoder
@@ -106,13 +102,13 @@ class TestDecoderRegistration:
         """start() 失败后 _start_stream_impl 吞掉异常返回，decoder 必须仍在 self.decoders 中"""
         error = FFmpegError(
             message="FFmpeg process failed to start",
-            client_id=self.client_id,
+            source_ip=self.client_id,
             exit_code=1,
         )
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 
@@ -120,13 +116,11 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = []
             mock_dec.start.side_effect = error
 
             # start() 失败不再向上抛异常，由健康监控接管重连
             self.service._start_stream_impl(
-                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+                self.client_id, "rtsp://127.0.0.1:8554/test"
             )
 
         # 核心断言：decoder 必须在 dict 中（修复的关键）
@@ -138,12 +132,12 @@ class TestDecoderRegistration:
     def test_get_stream_info_available_after_failed_start(self):
         """start() 失败后，get_stream_info() 必须返回流信息（供健康监控重连用）"""
         error = FFmpegError(
-            message="stream not available", client_id=self.client_id, exit_code=1
+            message="stream not available", source_ip=self.client_id, exit_code=1
         )
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 
@@ -151,28 +145,25 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = ["-rtsp_transport", "udp"]  # RTSP 协议选项
             mock_dec.start.side_effect = error
 
             self.service._start_stream_impl(
-                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+                self.client_id, "rtsp://127.0.0.1:8554/test"
             )
 
         info = self.service.get_stream_info(self.client_id)
         assert info is not None, "get_stream_info() 应返回流信息供健康监控重连"
         assert info["url"] == "rtsp://127.0.0.1:8554/test"
-        assert info["protocol"] == "RTSP"
 
     def test_metrics_registered_after_failed_start(self):
         """start() 失败后，self.metrics 中也应有记录"""
         error = FFmpegError(
-            message="stream not available", client_id=self.client_id, exit_code=1
+            message="stream not available", source_ip=self.client_id, exit_code=1
         )
 
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_or_create_client_queues", return_value=MagicMock()
+                 self.service, "_get_client_queues", return_value=MagicMock()
              ), \
              patch("app.settings.settings", self.mock_settings):
 
@@ -180,12 +171,10 @@ class TestDecoderRegistration:
             mock_dec.is_alive.return_value = False
             mock_dec.proc = None
             mock_dec.stream_url = "rtsp://127.0.0.1:8554/test"
-            mock_dec.fps = 30
-            mock_dec.protocol_opts = []
             mock_dec.start.side_effect = error
 
             self.service._start_stream_impl(
-                self.client_id, "rtsp://127.0.0.1:8554/test", 30, "RTSP"
+                self.client_id, "rtsp://127.0.0.1:8554/test"
             )
 
         assert self.client_id in self.service.metrics
@@ -346,6 +335,47 @@ class TestFullReconnectScenario:
         assert client_id not in monitor._reconnecting_clients, (
             "重连耗尽后应退出重连模式（执行 cleanup）"
         )
+
+
+class TestReconnectIdentityFence:
+    """T3 收尾：进入重连捕获 cq_A；槽位被 /start 换成新 run 时，重连按对象身份放弃。"""
+
+    def _stale_cq(self, seconds_ago: float = 10.0) -> MagicMock:
+        cq = MagicMock()
+        cq.latest_raw_timestamp = time.time() - seconds_ago
+        cq.task_started_at = 0.0
+        return cq
+
+    def test_reconnect_captures_cq_on_entry(self):
+        """进入重连时把当前槽位 cq 存进 ReconnectState.cq（fence 基准）。"""
+        client_id = "fence_capture"
+        cq_a = self._stale_cq()
+        monitor = _make_monitor(client_id, cq_a, active_decoder_ids={client_id})
+
+        monitor._check_all_clients()
+
+        assert monitor._reconnecting_clients[client_id].cq is cq_a
+
+    def test_reconnect_abandoned_when_slot_replaced(self):
+        """次轮槽位已换成新 cq_B → 放弃本次重连，不误动新 run。"""
+        client_id = "fence_swap"
+        cq_a = self._stale_cq()
+        monitor = _make_monitor(client_id, cq_a, active_decoder_ids={client_id})
+
+        # Round 1：进入重连，捕获 cq_A
+        monitor._check_all_clients()
+        assert client_id in monitor._reconnecting_clients
+
+        # 模拟 /start 抢占重启：槽位换成全新 cq_B
+        cq_b = self._stale_cq()
+        monitor._client_manager.snapshot.return_value = {client_id: cq_b}
+
+        # Round 2：当前 cq(cq_B) 非捕获的 cq_A → 放弃重连，且不再对新 run 发起 restart
+        monitor._stream_service.restart_stream.reset_mock()
+        monitor._check_all_clients()
+
+        assert client_id not in monitor._reconnecting_clients
+        monitor._stream_service.restart_stream.assert_not_called()
 
 
 if __name__ == "__main__":

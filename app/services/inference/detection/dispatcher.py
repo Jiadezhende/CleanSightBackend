@@ -15,6 +15,7 @@ from typing import Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, ClientQueues, client_manager
 from app.services.inference.models import DetectionTask
+from app.utils.metrics import frame_drop_total
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -124,9 +125,9 @@ class StageAwareDispatcher:
         - 队列为空时跳过，不影响其他客户端
         """
         # 动态获取客户端列表（实时同步，无需刷新）
-        # ClientManager.get_all_clients() 返回字典副本，迭代安全
-        clients = self._client_manager.get_all_clients()
-        for client_id, cq in clients.items():
+        # ClientManager.snapshot() 返回字典副本，迭代安全
+        clients = self._client_manager.snapshot()
+        for task_id, cq in clients.items():
             # 从 ca_ready 队列取一帧（FIFO，保证公平）
             # 使用封装方法，避免直接访问内部队列
             frame_data = cq.pop_ca_ready()
@@ -134,33 +135,35 @@ class StageAwareDispatcher:
                 # 队列为空或并发场景下被其他线程取走
                 continue
 
-            # 获取该客户端当前的 stage
-            stage = self._get_client_stage(client_id, cq)
-
-            # 构造推理请求
+            # 构造推理请求：捕获该 CQ 句柄随请求同行，写回凭它投递、不反查
+            # （cq 即当前 snapshot 迭代出的对象，与 pop_ca_ready() 同源）。
+            stage = cq.stage  # 不可变身份，直读
             req = DetectionTask(
-                client_id=client_id,
+                task_id=task_id,
                 stage=stage,
                 timestamp=frame_data.timestamp,
                 frame=frame_data.frame,
+                cq=cq,
             )
 
             # 按 stage 分组入队
+            dropped = False
             with self._lock:
                 q = self._stage_queues[stage]
                 # 队列已满 → append 会静默淘汰最旧帧，先计数（对齐 ca_raw 的 frames_dropped_raw）
                 if q.maxlen is not None and len(q) >= q.maxlen:
                     self._stage_drops[stage] += 1
+                    dropped = True
                 q.append(req)
                 self._stats["total_dispatched"] += 1
                 self._stats["by_stage"][stage] += 1
 
-    def _get_client_stage(self, client_id: str, cq: ClientQueues) -> str:
-        """获取客户端当前所处的 stage。"""
-        return cq.get_stage()
+            # Prometheus 计数放锁外（Counter 自身线程安全，避免占用调度锁）
+            if dropped:
+                frame_drop_total.labels(reason="infer_backlog").inc()
 
     def get_batch_for_stage(
-        self, stage: str, max_size: int = None, timeout_ms: float = 3.0 # type: ignore
+        self, stage: str, max_size: Optional[int] = None, timeout_ms: float = 3.0
     ) -> List[DetectionTask]:
         """获取指定 stage 的一个 batch（支持超时等待）。
 
@@ -260,15 +263,15 @@ class StageAwareDispatcher:
             # client 段：ca_processed 深度/容量/累计丢帧(delta)
             client_parts: List[str] = []
             processed_drops: Dict[str, int] = {}
-            for client_id, cq in self._client_manager.get_all_clients().items():
+            for task_id, cq in self._client_manager.snapshot().items():
                 cum = cq.frames_dropped_processed
-                processed_drops[client_id] = cum
-                delta = cum - self._last_logged_processed_drops.get(client_id, 0)
+                processed_drops[task_id] = cum
+                delta = cum - self._last_logged_processed_drops.get(task_id, 0)
                 if delta > 0:
                     pressured = True
                 client_parts.append(
-                    f"{client_id} ca_processed={cq.get_ca_processed_length()}/"
-                    f"{cq.get_ca_processed_capacity()} drop={cum}(+{delta})"
+                    f"{task_id} ca_processed={cq.get_ca_processed_length()}/"
+                    f"{cq.ca_maxlen} drop={cum}(+{delta})"
                 )
 
             if not pressured:

@@ -21,6 +21,7 @@ class HLSConfig:
     workers: int = 2
     queue_size: int = 100
     segment_duration: int = 10
+    sweep_interval_seconds: float = 1.0  # HLSSegmentSweeper 扫描间隔（秒，PULL 模型）
     # 注意：raw_fps和processed_fps从inference config动态获取，不在此定义
 
 
@@ -121,7 +122,7 @@ class PersistenceConfig:
 
         return settings.storage_base_dir
 
-    # 向后兼容属性
+    # 扁平访问器（manager 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
     @property
     def hls_workers(self) -> int:
         return self.hls.workers
@@ -135,12 +136,8 @@ class PersistenceConfig:
         return self.hls.segment_duration
 
     @property
-    def raw_fps(self) -> float:
-        return self.hls.raw_fps
-
-    @property
-    def processed_fps(self) -> float:
-        return self.hls.processed_fps
+    def hls_sweep_interval_seconds(self) -> float:
+        return self.hls.sweep_interval_seconds
 
     @property
     def alarm_workers(self) -> int:

@@ -9,26 +9,18 @@ FeatureStore（特征）与 FactLedger（事实，offline 预置）按 (task_id,
 
 import tempfile
 
-from app.domain.detection import Detection, FrameDetections
+from factories import make_frame_detections, make_frame_inference
 from app.services.inference.models import EventFact, SegmentFact
-from app.services.inference.models import FrameInference
 from app.services.inference.feature.store import FactLedger, FeatureStore
 
 
-def _make_result(ts: float, bubble_n: int, bending_n: int) -> FrameInference:
-    def dets(n, cls):
-        return [
-            Detection(bbox=[0, 0, 10, 10], confidence=0.9, class_id=0, class_name=cls)
-            for _ in range(n)
-        ]
-
-    return FrameInference(
-        client_id="c1",
-        stage="LEAK",
-        timestamp=ts,
-        detections={
-            "bubble": FrameDetections(detections=dets(bubble_n, "bubble"), metadata={}, timestamp=ts),
-            "bending": FrameDetections(detections=dets(bending_n, "bent"), metadata={}, timestamp=ts),
+def _make_result(ts: float, bubble_n: int, bending_n: int):
+    # 直连 FeatureStore.append，只读 .detections/.timestamp，不碰 .cq → cq=None
+    return make_frame_inference(
+        cq=None, task_id=1, stage="LEAK", ts=ts,
+        detectors={
+            "bubble": make_frame_detections(n=bubble_n, class_name="bubble", ts=ts),
+            "bending": make_frame_detections(n=bending_n, class_name="bent", ts=ts),
         },
     )
 
