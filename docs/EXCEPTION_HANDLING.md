@@ -99,6 +99,6 @@ decoder:
 ## 相关文档
 
 - [断线重连实现](STREAM_RECONNECT_IMPLEMENTATION.md) - 详细技术实现
-- [整体架构](ARCHITECTURE_OVERVIEW.md) - 服务架构设计
+- [整体架构](kb/ARCHITECTURE_OVERVIEW.md) - 服务架构设计
 
 **最后更新**: 2026-01-30

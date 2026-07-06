@@ -99,7 +99,7 @@ requests.post(f"http://localhost:8000/api/terminate?client_id={client_id}")
 
 > 所有 HTTP/WS 请求先经 `GatewayMiddleware`（IP 白名单 / 速率限制 / 反扫描），详见 [API_GATEWAY.md](API_GATEWAY.md)。对外 RTSP 端口 8004 也由 `mediamtx_gateway` 代理。
 
-详细 API 文档见 [API 端点文档](API_ENDPOINTS.md)。
+详细 API 文档见 [API 端点文档](kb/ARCHITECTURE_API_SURFACE.md)。
 
 ---
 
@@ -197,7 +197,7 @@ python integration_tests/test_reconnect_timeout.py --task_id 1
 ## 相关文档
 
 - [部署指南](../DEPLOYMENT.md) - 环境配置
-- [API 端点文档](API_ENDPOINTS.md) - 详细 API 说明
+- [API 端点文档](kb/ARCHITECTURE_API_SURFACE.md) - 详细 API 说明
 - [RTSP 流程说明](RTSP_FLOW.md) - RTSP 流处理细节
 
 **最后更新**: 2026-01-30

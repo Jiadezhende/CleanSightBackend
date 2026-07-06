@@ -6,7 +6,7 @@
 >
 > 用于：从一个洗消步骤的 raw 视频上截取 N 段不重叠的 mp4，逐条提交到 Label Studio 创建标注任务。
 >
-> 与 [TRACEBACK_API.md](TRACEBACK_API.md) 的关系：
+> 与 [SERVICE_TRACEBACK_MEDIA.md](kb/SERVICE_TRACEBACK_MEDIA.md) 的关系：
 >
 > - **复用** `SegmentFinder` 与落盘约定（`{base_dir}/{task_id}/{step_id}/raw_segment_{ts_us}.mp4`）
 > - **不复用** media token —— 本接口产物是「剪好的连续 mp4」，直接 push 到 LS，不走 `/media/segment/{token}`

@@ -260,4 +260,4 @@ Action: Executing full cleanup...
 - [app/services/health_monitor.py](app/services/health_monitor.py) - 全局健康监控服务
 - [app/routers/api.py](app/routers/api.py) - 统一 API（/api/start, /api/terminate）
 - [app/routers/ai.py](app/routers/ai.py) - lifespan 初始化
-- [API_MIGRATION_GUIDE.md](API_MIGRATION_GUIDE.md) - API 迁移指南
+- [API_MIGRATION_GUIDE.md](archive/completed_refactoring/API_MIGRATION_GUIDE.md) - API 迁移指南

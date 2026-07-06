@@ -329,7 +329,7 @@ logger.info("[ModuleName] message with %s", param)
 ## 📚 相关文档
 
 - [日志开发规范](docs/LOGGING_GUIDELINES.md) - 完整的日志使用指南
-- [架构文档](docs/ARCHITECTURE_OVERVIEW.md) - 系统架构说明
+- [架构文档](kb/ARCHITECTURE_OVERVIEW.md) - 系统架构说明
 - [配置指南](docs/CONFIGURATION_GUIDE.md) - 配置文件说明
 
 ---

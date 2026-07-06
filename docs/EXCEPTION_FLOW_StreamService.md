@@ -1106,7 +1106,7 @@ grep "status_code=500" logs/app.log
 ## 10. 参考文档
 
 - [边界层异常处理指南](../app/utils/README.md)
-- [StreamService 迁移计划](./MIGRATION_PLAN_StreamService.md)
+- [StreamService 迁移计划](archive/completed_refactoring/MIGRATION_PLAN_StreamService.md)
 - [异常类文档](../app/utils/exceptions.py)
 - [RetryExecutor 实现](../app/utils/executor.py)
 - [边界层测试](../tests/test_boundary_layers.py)

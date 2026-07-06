@@ -256,6 +256,6 @@ app/
 ## 相关文档
 
 - [API_GATEWAY.md](API_GATEWAY.md) - API Gateway 安全层
-- [API_ENDPOINTS.md](API_ENDPOINTS.md) - 当前全部接口清单
-- [API_MIGRATION_GUIDE.md](API_MIGRATION_GUIDE.md) - API 迁移指南（历史）
-- [HEALTH_MONITOR_REFACTOR.md](HEALTH_MONITOR_REFACTOR.md) - 健康监控重构说明
+- [ARCHITECTURE_API_SURFACE.md](kb/ARCHITECTURE_API_SURFACE.md) - 当前全部接口清单
+- [API_MIGRATION_GUIDE.md](archive/completed_refactoring/API_MIGRATION_GUIDE.md) - API 迁移指南（历史）
+- [SERVICE_HEALTH_MONITOR.md](kb/SERVICE_HEALTH_MONITOR.md) - 健康监控重构说明

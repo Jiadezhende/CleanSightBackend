@@ -427,7 +427,7 @@ executor.execute(
 
 ### 内部文档
 - [异常处理实现](EXCEPTION_HANDLING.md) - 断线重连、超时清理机制
-- [推理服务架构](INFERENCE_SERVICE_ARCHITECTURE.md) - 异步管道设计
+- [推理服务架构](kb/SERVICE_INFERENCE.md) - 异步管道设计
 - [持久化服务](PERSISTENCE.md) - HLS Worker 异常处理
 
 ### 代码实现

@@ -180,4 +180,4 @@ ffmpeg -an -re -stream_loop -1 -i test_video.mp4 \
 
 - [API_GATEWAY.md](API_GATEWAY.md) - RTSP TCP 代理 + HTTP/WS 中间件
 - [STREAM_RECONNECT_IMPLEMENTATION.md](STREAM_RECONNECT_IMPLEMENTATION.md) - 断线重连机制
-- [API_ENDPOINTS.md](API_ENDPOINTS.md) - 全部接口清单
+- [ARCHITECTURE_API_SURFACE.md](kb/ARCHITECTURE_API_SURFACE.md) - 全部接口清单

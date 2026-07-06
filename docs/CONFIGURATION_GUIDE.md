@@ -255,6 +255,6 @@ stages:
 
 ## 📚 相关文档
 
-- [配置驱动架构设计](./CONFIG_DRIVEN_ARCHITECTURE.md)
+- [配置说明](kb/SERVICE_CONFIG.md)
 - [快速开始指南](./QUICK_START.md)
 - [组件工厂使用](./CONFIG_INTEGRATION_STATUS.md)

@@ -150,7 +150,7 @@ python integration_tests/local_full_pipeline_rtsp.py
 python -m mediamtx_gateway.main
 ```
 
-> 生产环境已永久关闭 `/docs`、`/redoc`、`/openapi.json`。接口清单见 [docs/API_ENDPOINTS.md](docs/API_ENDPOINTS.md)。
+> 生产环境已永久关闭 `/docs`、`/redoc`、`/openapi.json`。接口清单见 [docs/kb/ARCHITECTURE_API_SURFACE.md](docs/kb/ARCHITECTURE_API_SURFACE.md)。
 
 **新建检测 Workflow**：使用 `/infer-workflow` skill，自动按规范生成代码框架。
 

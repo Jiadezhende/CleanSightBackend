@@ -3,7 +3,7 @@
 > **变更状态**：生效中（2026-06-28）
 > **知识库**：待沉淀
 >
-> 相关：[20260614_LAB_CLIP_TIME_MODEL.md](20260614_LAB_CLIP_TIME_MODEL.md)（lab 选段时间模型）、[../LAB_EXPORT_API.md](../LAB_EXPORT_API.md)（送标导出接口）、[../TRACEBACK_API.md](../TRACEBACK_API.md)（双轨 playlist 数据底座）。
+> 相关：[20260614_LAB_CLIP_TIME_MODEL.md](20260614_LAB_CLIP_TIME_MODEL.md)（lab 选段时间模型）、[../LAB_EXPORT_API.md](../LAB_EXPORT_API.md)（送标导出接口）、[../archive/old_architecture/TRACEBACK_API.md](../archive/old_architecture/TRACEBACK_API.md)（双轨 playlist 数据底座）。
 
 ## 概述
 

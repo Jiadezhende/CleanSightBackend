@@ -3,11 +3,11 @@
 > **变更状态**：生效中（2026-07-01）　<!-- 描述当前系统实际提供的追溯能力，非一次性代码改动 -->
 > **知识库**：待沉淀　<!-- 定期维护时沉淀进 docs/kb/SERVICE_TRACEBACK_MEDIA.md -->
 >
-> 相关：[TRACEBACK_API.md](../TRACEBACK_API.md)（对外 API 详表，已同步）、[20260627_DROP_DEAD_KEYPOINTS_LANDING.md](20260627_DROP_DEAD_KEYPOINTS_LANDING.md)（keypoints 落地下线）、[docs/kb/SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)（服务架构）。
+> 相关：[TRACEBACK_API.md](../archive/old_architecture/TRACEBACK_API.md)（对外 API 详表，已同步）、[20260627_DROP_DEAD_KEYPOINTS_LANDING.md](20260627_DROP_DEAD_KEYPOINTS_LANDING.md)（keypoints 落地下线）、[docs/kb/SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)（服务架构）。
 
 ## 概述
 
-- **背景**：keypoints（推理关键点回溯）能力已废弃，但 [TRACEBACK_API.md](../TRACEBACK_API.md) 长期残留其端点与字段描述，与代码实现不符。
+- **背景**：keypoints（推理关键点回溯）能力已废弃，但 [TRACEBACK_API.md](../archive/old_architecture/TRACEBACK_API.md) 长期残留其端点与字段描述，与代码实现不符。
 - **动作**：核对 [app/routers/traceback.py](../../app/routers/traceback.py) 与 [app/routers/media.py](../../app/routers/media.py) 全部实现，清理文档中的 keypoints 残留，并以本文快照锁定当前**真实**追溯能力，作为前端对接与后续沉淀的唯一准绳。
 - **影响面**：仅文档。运行时接口零改动。
 
