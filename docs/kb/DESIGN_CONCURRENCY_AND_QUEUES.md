@@ -98,6 +98,21 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 
 这让性能问题和故障边界更容易定位，也让新增检测点、调整持久化策略、替换外部告警接口时不必重写实时主链路。
 
+## 锁设计原则（可复用方法论）
+
+沉淀自纯 `threading` 架构，可复用于其他模块。基础方法论：**自底向上构建线程安全**——底层组件（`ClientQueues`）每个方法各自原子、不依赖调用方持外锁；上层只为「多步组合序列」加锁，不重复保护底层已安全的字段。核心思路：**按访问模式分锁，不按资源分锁**——同一业务动作总一起读写的字段归同一把锁（如 `_viz_lock` 合并 `ca_processed`+`_latest_rendered`，VizWorker 一次加锁写两者）。
+
+1. **识别 SPSC，消除不必要的锁**：单写单读且角色固定时，GIL 已保证 `deque.append/popleft` 原子（`ca_ready`：decoder 唯一写、dispatcher 唯一读，无锁）。能证明不需要锁就不加。
+2. **快照模式避免锁嵌套**：热路径读多把锁保护的字段时，先在轻锁下快照到局部变量再进重锁，两锁生命周期不重叠——同时消除 TOCTOU。
+3. **固定全清顺序防死锁**：同时持多锁（`clear()`）时死锁充要条件是不同路径乱序取锁；在类 docstring 声明唯一顺序，用 `contextlib.ExitStack` 顺序加锁、逆序释放。
+4. **关联值同临界区读**：存在不变式的两值必须一次加锁同读。例：`get_alarm_snapshot` 单 `_alarm_lock` 内返回 `(增量告警, max_seq)`，保证 `max_seq ≥ max(a.seq)`，游标不漏告警。
+5. **赋值与副作用分离**：setter 只赋值，缓存清理/事件触发等副作用拆到显式方法（合约写 docstring）。本系统更进一步——**CQ per-run 不可变**：身份构造定死、无 setter 副作用，清理走 `close()`/`_release_payload`。
+6. **状态机转换先退旧再进新**：生命周期切换严格「旧状态完整退出→再建新」。本系统由 `RunController` 保证（`to_draining`→停 decoder/actor→建新 CQ），per-run 不可变让 settlement 归属天然正确，无需「先停旧 actor 再切字段」的隐式排序。
+7. **按业务层级纵深分锁**：不同调用来源需各自锁层——api 协程经 `asyncio.to_thread` 桥出、服务层 `lock_for(task_id)` RLock 串行事务、数据层细粒度锁护读写。关键：`asyncio.Lock` 管不住独立 `threading.Thread`（HealthMonitor），故服务层 RLock 是必要纵深，非冗余。
+8. **幂等语义精确到「完全相同」**：不能只查主键。`RunController.start_run` 仅当 `step_id` 与流 URL 均不变才幂等返回，否则全量停旧重建——低频生命周期操作，全量重建的简单性优于部分更新的边界复杂度。
+
+每个有锁的类应在 docstring 维护「锁清单 + 全清顺序」（`grep` 锁名即可验证代码与文档一致），见 `ClientQueues` docstring。
+
 ## 代码来源
 
 - `app/routers/api.py`

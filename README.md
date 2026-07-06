@@ -12,7 +12,7 @@ CleanSight 包含以下核心服务：
 - **告警信息上报** - 批量去重和实时上报告警
 - **实时推理画面展示** - WebSocket 实时推送处理后的视频帧
 
-各服务之间具有良好的隔离，架构设计请见 [整体架构文档](docs/kb/ARCHITECTURE_OVERVIEW.md)。
+各服务之间具有良好的隔离，架构设计请见 [整体架构文档](docs/kb/INDEX.md)。
 
 ---
 
@@ -27,7 +27,7 @@ app/
 │   ├── frame.py             # 帧数据结构
 │   ├── task.py              # 任务模型
 │   └── status_messages.py   # 状态消息
-├── routers/                 # 前端接口（见 [API 文档](docs/kb/ARCHITECTURE_API_SURFACE.md)）
+├── routers/                 # 前端接口（见 [API 文档](docs/kb/INDEX.md)）
 │   ├── ai.py                # AI 推理服务路由
 │   ├── inspection.py        # 视频流控制路由
 │   └── task.py              # 任务管理路由
@@ -41,9 +41,9 @@ app/
 
 各服务的详细架构请见对应文档：
 
-- [流处理服务](docs/kb/SERVICE_STREAM.md)
-- [推理服务](docs/kb/SERVICE_INFERENCE.md)
-- [持久化服务](docs/PERSISTENCE.md)
+- [流处理服务](docs/kb/INDEX.md)
+- [推理服务](docs/kb/INDEX.md)
+- [持久化服务](docs/kb/INDEX.md)
 
 ---
 
@@ -78,7 +78,7 @@ app/
 - **持久化配置**: `config/persistence_config.yaml`
 - **流处理配置**: `config/stream_config.yaml`
 
-配置说明请见 [配置指南](docs/CONFIGURATION_GUIDE.md)。
+配置说明请见 [配置指南](docs/kb/INDEX.md)。
 
 ---
 
@@ -134,7 +134,7 @@ python integration_tests/stress_test.py --max-tasks 10 --duration 60
 5. **停止流**: `POST /inspection/stop_rtsp_stream` （⚠️ 将弃用）
 6. **终止任务**: `POST /ai/terminate_task/{client_id}` （⚠️ 将弃用）
 
-详细 API 文档请见 [API 端点文档](docs/kb/ARCHITECTURE_API_SURFACE.md)。
+详细 API 文档请见 [API 端点文档](docs/kb/INDEX.md)。
 
 ### 返回数据结构
 
@@ -187,7 +187,7 @@ rt_processed (20fps) ← WebSocket 推送
 - **可视化线程池**: 4-8 个线程绘制检测框
 - **持久化线程池**: HLS Worker（2 个）+ 告警 Worker（1 个）
 
-详细架构设计请见 [整体架构文档](docs/kb/ARCHITECTURE_OVERVIEW.md)。
+详细架构设计请见 [整体架构文档](docs/kb/INDEX.md)。
 
 ---
 
@@ -258,7 +258,7 @@ CleanSight 实现了**四层边界异常处理架构**，确保系统稳定性�
 - `frame_drop_total{client_id, reason}` - 丢帧计数
 - `gpu_oom_total{model}` - GPU OOM 计数
 
-详细设计请见 [边界层设计文档](docs/BOUNDARY_LAYER_DESIGN.md) 和 [异常处理实现](docs/EXCEPTION_HANDLING.md)。
+详细设计请见 [边界层设计文档](docs/kb/INDEX.md) 和 [异常处理实现](docs/kb/INDEX.md)。
 
 ---
 
@@ -287,7 +287,7 @@ CleanSight 支持配置驱动的多阶段推理流水线，针对不同清洗阶
 
 ### 开发新流水线
 
-详细开发指南请见 [推理扩展文档](docs/kb/DESIGN_EXTENDING_DETECTION.md)，包括：
+详细开发指南请见 [推理扩展文档](docs/kb/INDEX.md)，包括：
 
 1. 创建 `InferenceTask` 子类
 2. 配置 `inference_config.yaml`
@@ -404,7 +404,7 @@ python integration_tests/test_reconnect_timeout.py --task_id 1
 - `POST /inspection/start_rtsp_stream` - 启动 RTSP 流（请使用 `POST /api/start`）
 - `POST /inspection/stop_rtsp_stream` - 停止 RTSP 流（请使用 `POST /api/terminate`）
 
-详细 API 文档请见 [API 端点文档](docs/kb/ARCHITECTURE_API_SURFACE.md)。
+详细 API 文档请见 [API 端点文档](docs/kb/INDEX.md)。
 
 ---
 
@@ -494,9 +494,9 @@ set LOG_LEVEL=DEBUG     # Windows
 
 如果遇到其他问题，请查看：
 
-- [配置指南](docs/CONFIGURATION_GUIDE.md)
+- [配置指南](docs/kb/INDEX.md)
 - [部署指南](DEPLOYMENT.md)
-- [异常处理文档](docs/EXCEPTION_HANDLING.md)
+- [异常处理文档](docs/kb/INDEX.md)
 - GitHub Issues：提交新问题或查看已知问题
 
 ---
