@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import struct
 import subprocess
 import threading
@@ -80,6 +81,28 @@ class HLSPersistenceStrategy:
             for k in stale:
                 del self._dir_locks[k]
         return len(stale)
+
+    def purge_step_dir(self, task_id: int, step_id: int) -> bool:
+        """重启 supersede：删除 `{db_dir}/{task_id}/{step_id}` 整个 step 目录，返回是否删除。
+
+        与 FeatureStore.open_fresh 对称——同 (task_id, step_id) 重启一次 run 前清空旧 HLS
+        产物（段 / *_playlist.m3u8 / metadata.json / init.mp4 / .hls_timescale 缓存），
+        否则新段带唯一时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
+        HLS 落盘全靠磁盘文件存在性驱动、无每目录内存态（playlist 首行、init.mp4、timescale
+        缓存均按 `exists()` 惰性重建），故 rmtree 后由后续首段自然重建，安全。
+        持该目录锁串行化，防极端在途 persist_segment 竞争——正常重启路径此刻已无活跃 worker
+        （stop_run 已 flush 残段 + 出 registry + release_dir_locks）。
+        """
+        target_dir = self.db_dir / str(task_id) / str(step_id)
+        if not target_dir.exists():
+            return False
+        with self._get_dir_lock(target_dir):
+            try:
+                shutil.rmtree(target_dir)
+                return True
+            except OSError as e:
+                logger.warning("[HLS] purge step dir failed %s: %s", target_dir, e)
+                return False
 
     # 段文件名格式：{track}_segment_{ts_us}.mp4
     _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")

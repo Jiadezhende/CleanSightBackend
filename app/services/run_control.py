@@ -81,7 +81,14 @@ class RunController:
                 **get_client_config().cq_kwargs(),
             )
 
-            # 2c. start_workflow（换槽注册 + open_fresh + Actor）
+            # 2c. storage supersede（start 侧两个 service 钩子并排，与 stop_run 拆除侧对称）：
+            #   ① persistence.start_run —— 清空旧 HLS step 目录（无 owner，纯 rmtree）；
+            #   ② inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 截断
+            #      旧 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
+            #   均在建新 CQ 之后、无活跃 worker 写该 (task,step) 之前，全程持 lock_for(task_id)。
+            persistence_manager.start_run(cq)
+
+            # 2d. start_workflow（换槽注册 + open_fresh + Actor）
             if not inference_manager.start_workflow(cq):
                 raise AppError(
                     message=f"Failed to start workflow for task {task_id}",
@@ -91,7 +98,7 @@ class RunController:
                 )
             logger.info("[RunController] workflow started: task_id=%s", task_id)
 
-            # 2d. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
+            # 2e. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
             stream_service.start_stream(task_id=task_id, stream_url=rtsp_url)
             logger.info("[RunController] stream started: task_id=%s", task_id)
 

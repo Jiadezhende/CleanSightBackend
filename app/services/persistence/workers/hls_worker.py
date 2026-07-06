@@ -127,3 +127,7 @@ class HLSWorkerPool:
     def release_dir_locks(self, task_id: int) -> int:
         """回收该 task 的 HLS 目录锁（转发到 strategy），返回回收数量。"""
         return self.strategy.release_dir_locks(task_id)
+
+    def purge_step_dir(self, task_id: int, step_id: int) -> bool:
+        """清空该 (task_id, step_id) step 目录（转发到 strategy），返回是否删除。"""
+        return self.strategy.purge_step_dir(task_id, step_id)

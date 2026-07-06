@@ -209,3 +209,24 @@ class PersistenceManager:
         由 RunController.stop_run 在清 registry 之后调用——此时不会再有该 task 的新段入队。
         """
         self.hls_pool.release_dir_locks(task_id)
+
+    def start_run(self, cq) -> None:
+        """per-run 起始钩子（persistence owner）：清空该 (task_id, step_id) 旧 HLS step 目录。
+
+        与拆除侧 `flush_residual_segments(cq)` 对称（同以 cq 为入参、task_id/step_id 由 cq 派生），
+        由 RunController.start_run 编排：start 侧两个 service 钩子并排——inference.start_workflow
+        （含 FeatureStore.open_fresh 特征 supersede）+ persistence.start_run（HLS supersede）。
+        HLS 无 owner-fence、磁盘无状态，故整个 supersede 就是删目录（rmtree），逐段惰性重建。
+        task_id/step_id 缺失早退（与 flush_residual_segments 同口径）。best-effort，永不抛。
+        """
+        task_id = cq.task_id
+        if task_id is None:
+            logger.warning("[persistence] start_run: task_id is None, skip")
+            return
+        step_id = cq.step_id
+        if step_id is None:
+            logger.error(
+                "[persistence] start_run: step_id is None (task_id=%s), skip", task_id
+            )
+            return
+        self.hls_pool.purge_step_dir(task_id, step_id)
