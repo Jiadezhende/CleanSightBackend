@@ -1,4 +1,4 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-06
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -23,7 +23,8 @@
 
 - 修改任意知识库文件时，更新该文件顶部的 `更新时间`。
 - 批量更新时，所有被修改文件使用同一天日期。
-- 当前首版统一使用 `2026-05-24`。
+- 首版统一使用 `2026-05-24`。
+- `2026-07-06` 批：融合 `refact/key-change` 分支重构（换键 int task_id、per-run 不可变 CQ + 状态机、RunController 编排、inference 分层、HLS PULL、告警落库归位、domain 数据模型分层）；新增 `SERVICE_RUN_CONTROL.md`。未落地项（前端 wire 换键 T6、offline 消费端）以「待核验/待实现」标注。
 
 ## 内容粒度
 
@@ -36,13 +37,16 @@
 
 ```bash
 find docs/kb -maxdepth 1 -name '*.md' -print | sort
-grep -L '^> 更新时间：2026-05-24$' docs/kb/*.md
+# 列出每个文件的更新时间头，人工核对是否为最近批次日期
+grep -h '^> 更新时间：' docs/kb/*.md | sort | uniq -c
 ```
 
 ## 主要代码来源
 
 - 应用入口：`app/main.py`
 - 统一 API：`app/routers/api.py`
+- 运行编排：`app/services/run_control.py`
+- 共享契约：`app/domain/`
 - 推理服务：`app/services/inference/`
 - 流服务：`app/services/stream/`
 - 客户端状态：`app/services/client/`

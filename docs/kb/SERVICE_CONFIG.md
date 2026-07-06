@@ -1,4 +1,4 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-06
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -28,7 +28,7 @@
 
 主要配置文件：
 
-- `config/inference_config.yaml`：stage、模型、Analyzer、全局 fps、batch、队列长度。
+- `config/inference_config.yaml`：stage、detectors（流源）、rules（Operator，含 subscribes/window_seconds）、offline 占位、`batch_size`。**跨模块共享参数（raw_fps/inference_fps/ca_maxlen/ca_segment_len）已上浮 `app/settings.py` 单一真源，不再放此**。
 - `config/inference_config_cpu.yaml`：CPU/mock 环境配置。
 - `config/stream_config.yaml`：FFmpeg 解码尺寸、fps、pix_fmt、背压。
 - `config/persistence_config.yaml`：HLS queue、alarm queue、存储目录、清理策略。
@@ -65,9 +65,20 @@ MediaMTX Gateway 使用 `GATEWAY_*` 环境变量或 `mediamtx_gateway/config.ini
 
 ## 配置耦合点
 
-- persistence 和 client 会读取 inference config 中的 fps、队列长度，保证全局一致。
+- 跨模块共享参数（raw_fps/inference_fps/ca_maxlen/ca_segment_len）与 `storage_base_dir` 均以 `app/settings.py` 为**单一真源**；persistence/client/inference/traceback 都读 settings，不反向钻进彼此的 YAML。
 - HLS segment duration 与 `ca_segment_len`、raw/processed fps 有联动关系。
 - trace/media token TTL 和 secret 由 settings 管理。
+
+## 服务实例化与类型加载
+
+对象按「是否单例 + 何时构造」分四类（详见 `docs/update/20260701_SERVICE_INSTANTIATION_DESIGN.md`，部分为设计草案、**待核验**）：
+
+- **A 饿汉单例（import 时）**：`client_manager`、`stream_service`、`persistence_manager`、`run_controller`——构造廉价、无重资源。
+- **B leaf-lazy 单例（消费方显式 import）**：`inference_manager`（`instance.py`）——读 `inference_config.yaml` fail-fast，但 YOLO 权重/worker 线程等重资源仍惰性，不在 import/构造时加载。
+- **C DI 装配（assembler 点）**：`GlobalHealthMonitor` 在 `routers/health.py` 注入依赖构造。
+- **D 类型/契约（per-run/message）**：`Detector`/`Operator`/`Frame`/`FrameDetections` 等，永不单例。
+
+不变式：重资源（模型权重、worker 线程、per-run 组件）绝不在 import 或构造时创建，只在首次使用或显式 `.start()` 时；循环 import 用 point-of-use 惰性 import 打破。
 
 ## 代码来源
 

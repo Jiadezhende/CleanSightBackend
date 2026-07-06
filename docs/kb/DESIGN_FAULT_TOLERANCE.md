@@ -1,4 +1,4 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-06
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -25,10 +25,11 @@ FastAPI 全局异常处理器在 `app/main.py` 将这些异常转换为 HTTP 响
 
 推理 worker 的边界层处理：
 
-- `FrameDrop`：warning 后继续。
 - `ModelInferenceError`：error 后继续；CUDA/OOM 会记录指标。
 - `AppError`：error 后继续。
 - 未预期异常：critical 后继续。
+
+（丢帧不再走异常：vestigial `FrameDrop` 异常已退役，改由 `frame_drop_total` 指标在真实丢帧点计数——见 [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md) 背压部分。）
 
 线程入口普遍通过 `guarded_run()` 包装，避免 worker 静默死亡。
 
@@ -71,6 +72,6 @@ AI 停止流程：
 - `app/main.py`
 - `app/services/stream/decoder.py`
 - `app/services/health_monitor/monitor.py`
-- `app/services/inference/core/service.py`
+- `app/services/inference/detection/service.py`
 - `tests/test_exception_handling.py`
 

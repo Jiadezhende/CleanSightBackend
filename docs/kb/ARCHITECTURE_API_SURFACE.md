@@ -1,21 +1,21 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-06
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # API Surface
 
-本文件列出当前代码注册的主要 HTTP 和 WebSocket 接口。
+本文件列出当前代码注册的主要 HTTP 和 WebSocket 接口。对外 wire 未变；换键后内部路由键为 int `task_id`，业务端点做 **task_id/client_id 双模兼容**（前端可平滑迁移）。
 
 ## 统一任务 API
 
-- `POST /api/start`：启动任务并启动流。
-- `POST /api/terminate?client_id=...`：终止任务并清理 client。
+- `POST /api/start`：body `{task_id:int, ...}` 启动任务并起流；`source_ip` 由请求透传作被动身份。
+- `POST /api/terminate?task_id=...`（新，首选）或 `?client_id=<source_ip>`（旧，经 `find_by_source_ip` 垫片回解）：**双模，task_id 优先**。
 
 来源：`app/routers/api.py`
 
 ## 实时推理
 
-- `WebSocket /ai/video?client_id=...`：推送最新渲染 JPEG，文本消息为 data URL。
+- `WebSocket /ai/video?task_id=...`（新）或 `?client_id=<source_ip>`（旧，双模）：推送最新渲染 JPEG，文本消息为 data URL。
 
 来源：`app/routers/ai.py`
 
@@ -39,9 +39,8 @@
 
 - `GET /media/segment/{token}`
 - `GET /media/init/{token}`
-- `GET /media/keypoints/{token}`
 
-所有 URL 由 HMAC token 鉴权。
+所有 URL 由 HMAC token 鉴权。（`/media/keypoints/{token}` 已随 keypoints 死写下线。）
 
 来源：`app/routers/media.py`
 

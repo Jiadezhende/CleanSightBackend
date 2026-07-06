@@ -1,4 +1,4 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-06
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -18,9 +18,8 @@
 
 - raw segment
 - processed segment
-- keypoints JSON
 
-`find()` 根据目标 `ts_ms` 返回触发段和前后上下文。
+（keypoints JSON 死写已删，不再定位。）`find()` 根据目标 `ts_ms` 返回触发段和前后上下文。
 
 ## MediaToken
 
@@ -38,7 +37,7 @@
 
 主要能力：
 
-- 告警 evidence：返回 raw/processed clips、keypoints URL、可选 detection JSON。
+- 告警 evidence：返回 raw/processed clips、可选 detection JSON（keypoints URL 已下线）。
 - task playlist：为单个 task + step + track 生成 VOD m3u8。
 - alarm playlist：为告警上下文生成 VOD m3u8。
 - timeline：返回该 step 的视频起止和告警事件。
@@ -49,7 +48,6 @@
 
 - `/media/segment/{token}`：返回 mp4 fragment。
 - `/media/init/{token}`：返回 `init.mp4`。
-- `/media/keypoints/{token}`：返回 JSON。
 
 路径解析会拒绝 path traversal，并确保文件在 base_dir 内。
 

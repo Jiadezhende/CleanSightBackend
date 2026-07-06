@@ -1,70 +1,90 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-06
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Inference Service
 
-推理服务负责 stage 路由、模型推理、时序分析、可视化和结算告警。
+推理服务负责 stage 路由、模型推理（L1）、特征落盘（L2）、时序分析 + 判定（L3/L4）、可视化与结算告警。代码已按**处理流程分包**：`detection/ feature/ temporal/ visualization/ workflows/ offline/` + 顶层管件（`manager.py`/`instance.py`/`models.py`/`naming.py`/`stage_factory.py`/`config.py`）。
 
-## 核心组件
+## 包结构（子包 = 分层）
 
-- `InferenceManager`：生命周期和 per-client 推理资源协调。
-- `StageFactory`：从 YAML 创建 Detector 和 Analyzer specs。
-- `StageAwareDispatcher`：从所有 client 取 `ca_ready`，按 stage 分组。
-- `ModelWorkerService`：每个 stage 启动推理线程。
-- `MultiModelWorkerPool`：同一 stage 内多模型 batch 推理，可选 CUDA Stream。
-- `ClientTemporalActor`：每 client 一个时序分析 actor。
-- `VisualizationWorkerPool`：定时拉取并渲染视频帧。
+| 子包/文件 | 层 | 关键类 | 职责 |
+|-----------|----|--------|------|
+| `detection/detector.py` | L1 | `Detector`（含 `YOLODetector`） | 无状态 GPU 推理，帧→`FrameDetections` + 可视化数据；多 run 共享 |
+| `detection/dispatcher.py` | L1 | `StageAwareDispatcher` | 轮询各 run `pop_ca_ready()`，按 stage 分组，**捕获 CQ 句柄**进 `DetectionTask` |
+| `detection/pool.py` | L1 | `MultiModelWorkerPool` | 按 detector batch 推理（可选 CUDA stream），返回 `FrameInference`（携 `cq`） |
+| `detection/service.py` | L1 | `ModelWorkerService` | 管 dispatcher + worker pool；`_write_back_results` 单入口写回 |
+| `feature/store.py` | L2 | `FeatureStore` / `FactLedger` | per-`(task_id,step_id)` 落 `features.jsonl`；owner fence |
+| `temporal/operator.py` | L3/L4 | `Operator` | analyze+judge 合并，持 `_sm`，`subscribes` 显式，`window_seconds` 感受野 |
+| `temporal/actor.py` | L3/L4 | `ClientTemporalActor` | per-run ~1Hz tick，跑 operators，烧 stage 别名，收结算告警 |
+| `temporal/alarm_sink.py` | L4 | `persist_alarms()` | 过闸（CQ gate）+ 落库（persistence），实时/结算统一入口 |
+| `visualization/worker.py` | Viz | `VisualizationWorker` | 读快照渲染，写 `ca_processed` + `_latest_rendered` |
+| `visualization/visualizer.py` | Viz | `FixedVisualizer` | 按 `RenderSpec` 固定渲染 |
+| `workflows/` | 接入点 | bubble/bending/clean/mock | 具体 Detector + Operator 子类 |
+| `offline/` | 离线 | —（仅 `__init__` 占位） | **待实现**：Segmenter/Runner 读 FeatureStore→写 FactLedger |
 
-## 三池独立时钟
+## InferenceManager（生命周期编排）
 
-当前代码不是“推理 -> 时序 -> 可视化”的串行队列，而是三套独立节奏：
+`manager.py` 单例 `inference_manager`（`instance.py` 惰性构造，配置 fail-fast）。公开方法：
 
-- 推理：按 stage batch 消费。
-- 时序：每 client 约 1Hz 分析滑动窗口。
-- 可视化：单线程约 15 FPS 轮询最新快照。
+- `start()` / `stop()`：注册 dispatcher/pool + 初始化 naming 表；`stop()` 两阶段（先 `signal_stop` 全 actor，再 join 收 settlement + flush FeatureStore）。
+- `start_workflow(cq)`：注册 CQ、`FeatureStore.open_fresh`、按 stage 实例化 operators、建并起 `ClientTemporalActor`。
+- `stop_workflow(cq) → List[Alarm]`：pop actor、finalize 收结算告警、关 feature 分区，返回 settlement 告警（交 RunController 落库）。
+- `resolve_stage(step_id) → str`：**恒等路由**——`str(step_id)` 命中 stage 配置键则返回，否则告警回落 `MOCK`。stage 是 CQ 不可变身份的一部分（构造时定死）。
+- `set_stream_windows` / `status`。
 
-三者通过 ClientQueues 中的原子槽位和滑动窗口解耦。
+`start_workflow` / `stop_workflow` 的互斥由 RunController 的 `lock_for(task_id)` 承接，本类不自持 per-client 锁；`_actors: {task_id → ClientTemporalActor}`。
 
-## Detector 与 Analyzer
+## L1 写回：单入口 + 句柄化 + 状态门
 
-Detector：
+`ModelWorkerService._write_back_results(List[FrameInference])` 是 L1 唯一写回口。每条结果先判 `res.cq.is_active()`（DRAINING/CLOSED 丢弃 → `stale_run` 计数），ACTIVE 才三写：
 
-- 无 per-client 状态。
-- 多 client 共享实例。
-- 负责推理和准备可视化数据。
+1. `cq.push_detection(detector_name, FrameDetections)` → per-stream `_slide_window`（供 L3，异步缓冲解速差 30fps↔1Hz）。
+2. `cq.set_latest_inference(res)` → 原子快照（供 Viz）。
+3. `feature_store.append(task_id, step_id, res, owner=cq)` → L2 落盘（供离线）。
 
-TemporalAnalyzer：
+全程携 CQ 句柄（`res.cq`，dispatcher pop 时捕获），**无 `client_id` 反查**。
 
-- 每 client 独立实例。
-- 持有 `self._sm` 状态机。
-- 负责时序判断、实时告警和结算告警。
+## Detector / Operator 两粒度框架
 
-## 当前 stage
+- **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer(frame, ctx)`、`infer_batch`（YOLO override）、`prepare_visualization_data`。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
+- **Operator**（流算子，规则粒度，per-run 独立）：`name`、`subscribes`（**显式、必填**输入流名列表，缺则 fail-fast）、`window_seconds`；`analyze(windows)` 推进 `self._sm`、`judge() → (overlay_texts, alarms)`、`finalize() → List[Alarm]`（结算，默认空）。analyze+judge **合并**进 Operator（不再有独立 TemporalAnalyzer/Judge，不做 EventFact 跨对象传递）。
 
-`config/inference_config.yaml`：
+## L3/L4：ClientTemporalActor（~1Hz）
 
-- `LEAK`：`bubble` + `bending`
-- `CLEAN`：mock 透传
-- `MOCK`：未知 step fallback
+per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 对每个 operator：`windows = {src: cq.get_slide_window(src) for src in op.subscribes}` → `op.analyze(windows)` → `op.judge()` 收 (events, alarms)；汇总后 `cq.set_latest_temporal(events)`，`alarm_sink.persist_alarms(alarms, cq, mode=REALTIME)`。**per-operator 隔离**（单算子异常不断整 tick）。stage 别名在告警离开推理前烧进 `alarm.stage`。停机两段：`signal_stop()` → `finalize_and_stop() → List[Alarm]`（收各 operator `finalize()` 结算告警）。
 
-`InferenceManager._STEP_TO_STAGE`：
+## 告警落库：alarm_sink.persist_alarms
 
-- `"1" -> "LEAK"`
-- `"2" -> "CLEAN"`
+`persist_alarms(alarms, *, cq, mode, log_each=False)`：从 CQ 取 `task_id/step_id/source_ip`；逐条设 `alarm.mode`，`cq.append_alarm_record_with_gate(alarm, mode)` 过 5s 冷却闸 + 入环形日志，再 `persistence_manager.persist_alarm(...)` 落库。**过闸编排归推理产出域，persistence 只做无状态落库**。别名由 Actor 先烧好，sink 直读 `alarm.stage`。
 
-## 告警输出
+## online / offline 分离
 
-实时告警由 `ClientTemporalActor._persist_alarms()` 产生。结算告警由 `finalize()` 在 remove、task switch 或 stop 时收集。两者都经过 alarm gate，然后提交持久化服务。
+实时链（L1→`_slide_window`→L3 tick 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）**彻底分离**：实时不落 FactLedger，Actor 不 load 事实。当前 `offline/` 仅占位，消费端（Segmenter/Runner）**待实现**（见 `docs/update/20260628_OFFLINE_PIPELINE_PHASE1_PROPOSAL.md`）。
+
+## Stage 配置与当前阶段
+
+`config/inference_config.yaml`，每 stage 三段 `detectors[]` / `rules[]` / `offline{}`，主键 = step_id 字符串，`alias` = 可读名：
+
+- `"1"` / alias `LEAK`：detectors `bubble` + `bending`；rules `bubble_leak`（realtime）、`bending_check`（settlement）。
+- `"2"` / alias `CLEAN`：detectors `clean_large` + `clean_small`；`rules: []`（无 Operator/Actor，仅检测框可视化）。
+- `MOCK`：未知 step fallback + taskless 默认，纯透传（`mock_passthrough` 恒不触发）。
+
+跨模块共享参数（`raw_fps`/`inference_fps`/`ca_maxlen`/`ca_segment_len`）已上浮 `app/settings.py` 单一真源；本文件只留 `batch_size` 等推理自有参数。
+
+## naming.py 运行时注册表
+
+由 `InferenceManager.start()` 经 `StageFactory` 初始化（单测缺失时惰性回落 YAML）：
+
+- `_TASK_METRIC_MAP: {detector_name → AlarmMetric}`（仅 `realtime:true` 规则的流），供 signals_10s。
+- `_STAGE_ALIAS_MAP: {stage_key → alias}`（如 `"1"→"LEAK"`），落告警 `stage` 字段 + 可视化叠字。
 
 ## 代码来源
 
-- `app/services/inference/core/manager.py`
-- `app/services/inference/core/service.py`
-- `app/services/inference/core/dispatcher.py`
-- `app/services/inference/workers/base.py`
-- `app/services/inference/workers/temporal.py`
-- `app/services/inference/workers/visualization.py`
-- `app/services/inference/workflows/`
+- `app/services/inference/manager.py`、`instance.py`、`stage_factory.py`、`naming.py`、`models.py`、`config.py`
+- `app/services/inference/detection/{detector,dispatcher,pool,service}.py`
+- `app/services/inference/feature/store.py`
+- `app/services/inference/temporal/{operator,actor,alarm_sink}.py`
+- `app/services/inference/visualization/{worker,visualizer,pool}.py`
+- `app/services/inference/workflows/{bubble,bending,clean,mock}.py`
 - `config/inference_config.yaml`
-
