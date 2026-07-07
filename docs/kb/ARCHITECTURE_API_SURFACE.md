@@ -1,76 +1,40 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-07
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
-# API Surface
+# API 路由接线图
 
-本文件列出当前代码注册的主要 HTTP 和 WebSocket 接口。对外 wire 未变；换键后内部路由键为 int `task_id`，业务端点做 **task_id/client_id 双模兼容**（前端可平滑迁移）。
+本文件描述 HTTP/WS 层的**架构接线**：有哪些 router、各自前缀与归属、注册与中间件顺序、生命周期挂载。**各端点的请求/响应契约、字段语义与调用示例属对外 API 文档范围，不在本知识库维护**（本库只回答「有哪些路由、谁拥有、怎么接线」）。
 
-## 统一任务 API
+运行键为 int `task_id`；业务端点（`/api`、`/ai`）对 `task_id`（首选）与旧 `client_id`(=source_ip) 双模兼容，对外 wire 未变。
 
-- `POST /api/start`：body `{task_id:int, ...}` 启动任务并起流；`source_ip` 由请求透传作被动身份。
-- `POST /api/terminate?task_id=...`（新，首选）或 `?client_id=<source_ip>`（旧，经 `find_by_source_ip` 垫片回解）：**双模，task_id 优先**。
+## Router 归属
 
-来源：`app/routers/api.py`
+| 前缀 | router | 职责（一句） |
+|------|--------|------------|
+| `/api` | `routers/api.py` | 统一任务入口：启动/终止一次 run（桥接 `RunController`） |
+| `/ai` | `routers/ai.py` | 实时推理 WebSocket（渲染帧推送） |
+| `/task` | `routers/task.py` | 任务消息与告警历史查询 |
+| `/traceback` | `routers/traceback.py` | 告警证据 / VOD playlist / 时间轴溯源 |
+| `/media` | `routers/media.py` | HMAC token 化媒体访问（段 / init.mp4） |
+| `/health` | `routers/health.py` | 健康状态与监控统计 |
+| `/lab-f3m8` | `routers/lab.py` | 送标导出 + Label Studio（含静态 UI） |
+| `/admin-f3m8` | `routers/admin.py` | 运维 Admin（概览 / 客户端 / 指标，含静态 UI） |
 
-## 实时推理
+唯一的 WebSocket 路由是 `/ai/video`；其余均为 HTTP。`/lab-f3m8/ui`、`/admin-f3m8/ui` 为 `StaticFiles` 挂载。
 
-- `WebSocket /ai/video?task_id=...`（新）或 `?client_id=<source_ip>`（旧，双模）：推送最新渲染 JPEG，文本消息为 data URL。
+## 注册与中间件顺序
 
-来源：`app/routers/ai.py`
+`app/main.py` 按序 `include_router`：api → health → ai → task → traceback → media → lab → admin（api 优先注册）。
 
-## 任务消息
+中间件：`GatewayMiddleware` 在 CORS 之后 `add_middleware`；Starlette 逆序包装，故 **Gateway 最先执行**——所有 HTTP/WS 进路由前先过 IP 白名单 / 限流 / 反扫描。`/media` 默认走放宽策略（绕过限流与反扫描，仍查 IP 白名单与封禁），细节见 [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)。生产已永久关闭 `/docs`、`/redoc`、`/openapi.json`。
 
-- `GET /task/{task_id}/alarms`：查询数据库历史告警。
-- `GET /task/message/{task_id}?since_seq=...`：查询运行时内存增量消息。
+## 生命周期挂载
 
-来源：`app/routers/task.py`
+FastAPI `lifespan` 嵌套启动：`health.lifespan()` → `persistence.lifespan()` → `ai.lifespan()`（health 最外、ai 最内；停机逆序）。单次 run 的起停不在 lifespan，由 `RunController.start_run`/`stop_run` 编排，见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
 
-## 追溯
+## 代码来源
 
-- `GET /traceback/alarm/{alarm_id}/evidence`
-- `GET /traceback/task/{task_id}/playlist.m3u8?step_id=...&track=raw|processed`
-- `GET /traceback/alarm/{alarm_id}/playlist.m3u8?track=raw|processed`
-- `GET /traceback/task/{task_id}/timeline?step_id=...`
-
-来源：`app/routers/traceback.py`
-
-## 媒体访问
-
-- `GET /media/segment/{token}`
-- `GET /media/init/{token}`
-
-所有 URL 由 HMAC token 鉴权。（`/media/keypoints/{token}` 已随 keypoints 死写下线。）
-
-来源：`app/routers/media.py`
-
-## Lab
-
-- `POST /lab-f3m8/submit`
-- `GET /lab-f3m8/health`
-- `GET /lab-f3m8/config`
-- `PUT /lab-f3m8/config`
-- 静态 UI：`/lab-f3m8/ui`
-
-来源：`app/routers/lab.py`、`app/main.py`
-
-## Admin 与 Health
-
-- `GET /admin-f3m8/overview`
-- `GET /admin-f3m8/clients`
-- `GET /admin-f3m8/clients/{client_id}/alarms`
-- `GET /admin-f3m8/metrics/json`
-- `GET /admin-f3m8/ping`
-- 静态 UI：`/admin-f3m8/ui`
-- `GET /health/monitor/stats`
-- `GET /health/monitor/config`
-- `GET /health/status`
-
-来源：`app/routers/admin.py`、`app/routers/health.py`
-
-## Gateway 行为
-
-HTTP 与 WebSocket 进入路由前会经过 GatewayMiddleware。`/media` 默认绕过速率限制和反扫描，但仍检查 IP 白名单和封禁。
-
-来源：`app/utils/gateway.py`
-
+- `app/main.py`（注册顺序 / 中间件 / lifespan / 静态挂载）
+- `app/routers/*.py`（各 router 前缀与归属）
+- `app/utils/gateway.py`（GatewayMiddleware）

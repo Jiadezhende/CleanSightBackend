@@ -84,7 +84,7 @@ requests.post("http://localhost:8000/api/terminate", params={"task_id": 1})
 | `/health/status` | GET | 系统整体状态 |
 | `/health/monitor/stats` | GET | 健康监控统计 |
 
-> 所有 HTTP/WS 请求先经 `GatewayMiddleware`（IP 白名单 / 限流 / 反扫描）。完整端点清单见 [知识库](kb/INDEX.md)。
+> 所有 HTTP/WS 请求先经 `GatewayMiddleware`（IP 白名单 / 限流 / 反扫描；路由接线见[知识库](kb/INDEX.md)）。上表为速览，端点请求/响应契约见 docs/ 下 API 文档（如 [ALARM_API](ALARM_API.md)、[LAB_EXPORT_API](LAB_EXPORT_API.md)）。
 
 ---
 

@@ -59,7 +59,7 @@
 
 - [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)：概览 FastAPI 主进程、MediaMTX、FFmpeg、Postgres 和外部系统的组件关系。
 - [ARCHITECTURE_DATA_FLOW.md](ARCHITECTURE_DATA_FLOW.md)：追踪视频流从 RTSP 输入到推理、可视化、HLS、告警的端到端数据流。
-- [ARCHITECTURE_API_SURFACE.md](ARCHITECTURE_API_SURFACE.md)：索引当前代码注册的 HTTP 与 WebSocket 接口及其所属路由模块。
+- [ARCHITECTURE_API_SURFACE.md](ARCHITECTURE_API_SURFACE.md)：API 路由接线图——router 归属、注册与中间件顺序、生命周期挂载（端点请求/响应契约属对外 API 文档，不在本库）。
 - [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)：说明数据模型分层（domain/ORM/DTO）、`clean_task`、`clean_alarm`、HLS 文件目录、playlist、features.jsonl 和 metadata。
 
 ## 逐服务说明
