@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-07
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -62,6 +62,19 @@ MediaMTX Gateway 使用 `GATEWAY_*` 环境变量或 `mediamtx_gateway/config.ini
 - 默认 project_id
 
 来源：`app/services/lab/runtime_config.py`
+
+## 日志配置
+
+`start_backend.sh` 以 `uvicorn --log-config logging_config.json` 加载日志（`logging.config` dictConfig 格式），不在 app 代码里 `dictConfig`。`logging_config.json`：
+
+- console handler：`colorlog.ColoredFormatter` 彩色输出。
+- 文件 handler：`file_info` / `file_warning` / `file_error` 三个 `ConcurrentTimedRotatingFileHandler`，按级别分文件、时间轮转。
+- root level `INFO`，handlers = console + 三个文件。
+- `logging_config_fallback.json` 为兜底配置。
+
+日志**编码规范**（`[Module]` 前缀、`%` 惰性格式化、级别语义、热路径守卫）属贡献者约定，不在本库（见 docs/ 开发规范）。
+
+> 注：无基于 `CLEANSIGHT_ENV` 的 dev/prod 日志级别分支，也未接 `LOG_LEVEL` 环境变量覆盖（旧文档的相关说法未落地）。
 
 ## 配置耦合点
 

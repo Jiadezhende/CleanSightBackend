@@ -7,11 +7,11 @@ description: "Deploy CleanSightBackend to a local or remote Linux x86_64 GPU hos
 
 把 CleanSightBackend 部署到一台 **Linux x86_64 + NVIDIA GPU** 机器上,跑通离线安装到端到端验证。
 
-> **适用范围**：只要目标是 **Linux**，无论本地还是远程都走这一套（差别仅在「要不要传仓库 + 配免密」这几步，远程才需要）。**Windows 部署不走本 skill**，见 [DEVELOPMENT.md](DEVELOPMENT.md) 的 Windows 路径。
+> **适用范围**：只要目标是 **Linux**，无论本地还是远程都走这一套（差别仅在「要不要传仓库 + 配免密」这几步，远程才需要）。**Windows 部署不走本 skill**，见 [DEVELOPMENT.md](docs/DEVELOPMENT.md) 的 Windows 路径。
 
 ## 事实源（先读，本 skill 不取代它们）
 
-- [DEPLOYMENT.md](DEPLOYMENT.md) — 权威部署说明，变量含义、`install.sh` 内部行为以它为准。
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — 权威部署说明，变量含义、`install.sh` 内部行为以它为准。
 - [deploy.conf](deploy.conf) — 钉版物料 URL/SHA、`TORCH_PKGS`、`BASE_URL`。**所有版本只在这里改。**
 - [install.sh](install.sh) — Linux 安装入口（生产）。
 - 记忆 `offline-bundle-distribution` / `deploy-docs-stale` — 离线物料分发的设计背景。

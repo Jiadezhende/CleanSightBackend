@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- 已完成 [部署指南](../DEPLOYMENT.md) 的环境配置
+- 已完成 [部署指南](DEPLOYMENT.md) 的环境配置
 - FFmpeg 已安装并在 PATH 中
 - MediaMTX 已获取并可执行（二进制不随 git 分发，见部署指南）
 
@@ -134,5 +134,5 @@ python integration_tests/test_reconnect_timeout.py --task_id 1
 
 ## 相关文档
 
-- [部署指南](../DEPLOYMENT.md) — 环境配置
+- [部署指南](DEPLOYMENT.md) — 环境配置
 - [知识库](kb/INDEX.md) — 架构、服务内部、API 清单、配置等描述性内容的单一入口

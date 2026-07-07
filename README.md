@@ -62,7 +62,7 @@ docs/                    # 外部文档（API 契约 / 上手 / 规范）；架�
 - 环境变量：`.env` / `.env.dev` / `.env.test`（`CLEANSIGHT_` 前缀，单一真源 `app/settings.py`）
 - YAML：`config/inference_config.yaml`、`stream_config.yaml`、`persistence_config.yaml`、`client_config.yaml`、`health_monitor_config.yaml`
 
-> 完整部署步骤（Linux 生产 + Windows 开发安装）见 [部署指南](DEPLOYMENT.md)；开发规范（分支/测试/模块解耦）见 [开发指南](DEVELOPMENT.md)。
+> 完整部署步骤（Linux 生产 + Windows 开发安装）见 [部署指南](docs/DEPLOYMENT.md)；开发规范（分支/测试/模块解耦）见 [开发指南](docs/DEVELOPMENT.md)。
 
 ---
 
@@ -181,7 +181,7 @@ python integration_tests/stress_test.py --max-tasks 10 --duration 60      # 并�
 | 推流超时 / Stream not found | 确认 MediaMTX 运行、URL `rtsp://<host>:8004/live/<name>`、端口 1935/8004 开放 |
 | WebSocket 断开 | 检查网络、客户端超时、后端日志 |
 
-设 `LOG_LEVEL=DEBUG` 查看按模块着色的详细日志。更多帮助见 [知识库](docs/kb/INDEX.md) 与 [部署指南](DEPLOYMENT.md)。
+日志按模块 `[Module]` 前缀着色输出（`logging_config.json`）。更多帮助见 [知识库](docs/kb/INDEX.md) 与 [部署指南](docs/DEPLOYMENT.md)。
 
 ---
 
@@ -196,4 +196,4 @@ python integration_tests/stress_test.py --max-tasks 10 --duration 60      # 并�
 3. 描述性文档改动同步进知识库 `docs/kb/`（维护规则见 [KB_MAINTENANCE](docs/kb/KB_MAINTENANCE.md)）
 4. 推送并创建 Pull Request（base：`dev`）
 
-> 完整开发规范（分支提交、测试、模块内聚与解耦）见 [开发指南](DEVELOPMENT.md)。
+> 完整开发规范（分支提交、测试、模块内聚与解耦）见 [开发指南](docs/DEVELOPMENT.md)。
