@@ -62,7 +62,7 @@ docs/                    # 外部文档（API 契约 / 上手 / 规范）；架�
 - 环境变量：`.env` / `.env.dev` / `.env.test`（`CLEANSIGHT_` 前缀，单一真源 `app/settings.py`）
 - YAML：`config/inference_config.yaml`、`stream_config.yaml`、`persistence_config.yaml`、`client_config.yaml`、`health_monitor_config.yaml`
 
-> 完整部署步骤见 [部署指南](DEPLOYMENT.md)（生产）与 [开发指南](DEVELOPMENT.md)（Windows/手动）。
+> 完整部署步骤（Linux 生产 + Windows 开发安装）见 [部署指南](DEPLOYMENT.md)；开发规范（分支/测试/模块解耦）见 [开发指南](DEVELOPMENT.md)。
 
 ---
 
@@ -195,3 +195,5 @@ python integration_tests/stress_test.py --max-tasks 10 --duration 60      # 并�
 2. 遵循 PEP 8，激活项目 `.venv` 后 `pytest` 全绿
 3. 描述性文档改动同步进知识库 `docs/kb/`（维护规则见 [KB_MAINTENANCE](docs/kb/KB_MAINTENANCE.md)）
 4. 推送并创建 Pull Request（base：`dev`）
+
+> 完整开发规范（分支提交、测试、模块内聚与解耦）见 [开发指南](DEVELOPMENT.md)。

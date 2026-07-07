@@ -66,7 +66,15 @@ vendor/mediamtx/mediamtx-linux-x64.tar.gz
 
 也就是说，要么配置 `BASE_URL` 从源机拉取，要么先把 `wheelhouse/` 和 `vendor/` 同步到项目目录。
 
-> Windows 开发机的安装、`FFMPEG_WIN_URL` / `MEDIAMTX_WIN_URL` 等开发环境变量见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+Windows 开发机的二进制来源是另一组变量，同样集中在 `deploy.conf`：
+
+```bash
+# Windows 开发机二进制来源。
+FFMPEG_WIN_URL="..."
+MEDIAMTX_WIN_URL="..."
+```
+
+`BASE_URL` 对 Windows 同样生效：配置后 ffmpeg / MediaMTX 从源机拉取，否则从上面的 Windows URL 在线下载。Windows 安装的完整流程见下文「Windows 开发安装」。
 
 ### Linux 生产安装
 
@@ -96,6 +104,43 @@ Linux 安装入口是：
 6. 校验并部署 MediaMTX 到 `mediamtx/`。
 7. 执行安装后自检：`torch`、`numpy`、`cv2`、`ultralytics`、CUDA、ffmpeg、MediaMTX。
 
+### Windows 开发安装
+
+Windows 仅作为 GPU 开发机环境，定位是便利，不作为生产标准。安装入口是原生 PowerShell：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\install.ps1
+```
+
+Windows 安装策略与 Linux 生产不同：
+
+- `torch` / `torchvision` 从 cu128 PyTorch 镜像在线安装，按本机 Python 版本自动选 wheel，不依赖 `wheelhouse/`。
+- 轻量依赖从清华 PyPI 镜像在线安装。
+- ffmpeg / MediaMTX 使用 Windows 钉版包；如果配置了 `BASE_URL`，从源机拉取，否则从 `deploy.conf` 中的 `FFMPEG_WIN_URL` / `MEDIAMTX_WIN_URL` 在线下载。
+- Windows 包不做 SHA 强校验。
+- Python 支持 3.10–3.13（开发宽松，不像生产要求精确 3.10）。
+
+离线拉取源机物料时：
+
+```powershell
+$env:BASE_URL="http://<源机IP>:<分发端口>"
+.\install.ps1
+```
+
+当前 `label-studio` 源机已补齐 `vendor/mediamtx/mediamtx-win-x64.zip`，Windows 开发机可用该源机的 `BASE_URL` 拉取 ffmpeg / MediaMTX 物料。
+
+安装完成后，关键第三方依赖都在项目目录内（Windows 下带 `.exe` 后缀）：
+
+```text
+.venv/
+.ffmpeg/bin/ffmpeg.exe
+mediamtx/mediamtx.exe
+mediamtx/mediamtx.yml
+```
+
+应用默认使用项目内的 `.ffmpeg/bin/ffmpeg.exe`；独立 RTSP Gateway 的 `mediamtx_gateway/config.ini` 中 `mediamtx_bin = auto` 默认选用项目内的 `mediamtx/mediamtx.exe`，均无需额外配置。不要指向系统安装的 ffmpeg 或 MediaMTX。
+
 ### 应用启动前必须配置的运行时变量
 
 数据库、外部接口、网关等变量不是安装变量；它们不影响 `install.sh` 的依赖安装，但会影响后端启动和业务功能。
@@ -106,6 +151,12 @@ Linux 安装入口是：
 ./start_backend.sh prod   # 加载 .env，网关+MediaMTX+后端一起起
 ./start_backend.sh test   # 加载 .env.test
 ./start_backend.sh dev    # 加载 .env.dev
+```
+
+Windows 开发机用 PowerShell 启动脚本，运行时变量键名与生产共用，写在 `.env.dev`：
+
+```powershell
+.\start_backend.ps1 dev   # 加载 .env.dev
 ```
 
 **端口由启动脚本按环境自动分配，不写进 `.env*`。** `.env*` 只放业务参数（DB / 外部接口 URL / 密钥 / 网关 IP 白名单）。基准端口（dev/prod）与 test 偏移如下：

@@ -1,69 +1,47 @@
-# CleanSight Backend 开发环境部署
+# CleanSight Backend 开发规范
 
-本文覆盖开发环境（主要是 Windows GPU 开发机）的安装与物料拉取。生产部署、物料构建（`build.sh`）与源机分发服务见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+本文是 CleanSight Backend 的开发**约定**：分支提交流程、测试规范、模块内聚与解耦原则。
+环境安装（Linux 生产 / Windows 开发）与物料分发见 [DEPLOYMENT.md](DEPLOYMENT.md)；架构、数据流、各服务内部等描述性内容以知识库 [docs/kb/INDEX.md](docs/kb/INDEX.md) 为准。
 
-开发环境与生产的取舍：
+---
 
-- 开发机定位是便利，不作为生产标准；Windows 物料不做 SHA 强校验。
-- `torch` / `torchvision` 在线安装，按本机 Python 版本自动选 wheel，不依赖 `wheelhouse/`。
-- Python 支持 3.10–3.13（开发宽松）。
+## 1. 分支与提交流程
 
-## 安装前必须确认的变量
+- **分支**：从 `dev` 切特性分支，命名 `feature/<简述>`；Pull Request 的 base 一律是 `dev`，不直接推 `dev` / `main`。
+- **提交前自检**：
+  - 激活项目 `.venv`（别用裸 `python3` / `python3.x`）。
+  - 遵循 PEP 8。
+  - `pytest` 全绿。
+- **commit message**：`type(scope): 简述`，`type` 用 `feat` / `fix` / `docs` / `refact` / `test` / `chore`，`scope` 可选（如 `docs(kb):`、`feat(inference):`）。
+- **文档纪律**：
+  - 描述性内容（架构、数据流、服务内部、schema、API）改动**同步进 `docs/kb/`**，维护规则见 [docs/kb/KB_MAINTENANCE.md](docs/kb/KB_MAINTENANCE.md)。
+  - 每次提交的文档增量先写 `docs/update/`，定期融合进 KB，避免双源漂移。
 
-Windows 开发机二进制来源集中在 `deploy.conf`：
+---
 
-```bash
-# Windows 开发机二进制来源。
-FFMPEG_WIN_URL="..."
-MEDIAMTX_WIN_URL="..."
-```
+## 2. 测试规范
 
-如果配置了 `BASE_URL`，ffmpeg / MediaMTX 从源机拉取；否则从上面的 Windows URL 在线下载。源机地址与分发服务见 [DEPLOYMENT.md](DEPLOYMENT.md) 的「物料供给侧」。
+- **两层测试**：
+  - 单元 & 组件测试在 `tests/`，`pytest` 运行（先激活 `.venv`）。
+  - 端到端集成测试在 `integration_tests/`，需要真实 RTSP 流与可写数据库，不在 `pytest` 默认跑。
+- **测试数据构造单一真源**：
+  - `tests/factories.py` 是构造真源——纯函数、**无 pytest 依赖**，`tests/` 直接 `from factories import make_cq` 复用，`integration_tests/` 也可复用。
+  - `tests/conftest.py` 把 factories 包成 factory-as-fixture（如 `make_cq`），需要注入式书写的用例用它，与 factories 同源、不产生第二份构造逻辑。
+  - 契约一变（CQ 构造签名、`FrameInference` 加字段等）**只改 factories 一处**，不扫散点。
+- **I/O 边界故意集成-only**：子进程 ffmpeg、CUDA、WebSocket、真实 RTSP 这类外部 I/O 不硬写单测——把纯逻辑抽成 seam 单独测（如 URL 改写、去抖、时间轴计算），I/O 编排留给集成测试。
+- **不追覆盖率数字**：按 [docs/kb/TESTING_MAP.md](docs/kb/TESTING_MAP.md) 的「建议补测」补关键路径。典型：新增检测点补 Detector/Operator 单测 + YAML 加载测试；改 HLS 写入补 playlist EXTINF、在途段过滤、timeline 测试；改清理流程补结算告警归属测试。
 
-## Windows 开发安装
+---
 
-Windows 安装入口是原生 PowerShell：
+## 3. 模块内聚 + client 中台解耦
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force
-.\install.ps1
-```
+各 service（stream / inference / persistence / traceback / lab …）功能内聚，只做自己的事；**不建 service 对 service 的直接依赖**。跨服务协作靠两个中台：
 
-Windows 安装策略与生产不同：
+- **共享状态走 client 中台层**：跨服务需要读写的运行态统一放 `ClientManager`（COW 注册表，`int task_id` 键）+ `ClientQueues`（一次 run 的不可变身份 + 队列/快照），各服务只与 client 层打交道。
+  - client 层是**零跨服务依赖的 leaf**、哑存储：本身**不构造 CQ**，CQ 由 `RunController` 建好后 `set` 换槽。
+  - client 层**只吐自有词汇的原始数据**（如按流名聚合的信号）；流名 → 展示 metric 的翻译/映射**上移到 router 装配层**，不下沉进 client。
+- **跨服务起停编排走 `RunController`**：一次 run 的 start/stop/restart、per-task 锁、拆机顺序、对象身份 fence 都归 RunController，不下沉到 client 或各 service。
 
-- `torch` / `torchvision` 从 cu128 PyTorch 镜像在线安装。
-- 轻量依赖从清华 PyPI 镜像在线安装。
-- ffmpeg / MediaMTX 使用 Windows 钉版包。
-- 如果配置了 `BASE_URL`，ffmpeg / MediaMTX 从源机拉取；否则从 `deploy.conf` 中的 Windows URL 在线下载。
-- Windows 包不做 SHA 强校验，定位是开发便利，不作为生产标准。
-- Python 支持 3.10–3.13（开发宽松；`torch` 在线安装，按本机版本自动选 wheel，不依赖 `wheelhouse/`）。
+判断落点的经验法则：一段逻辑若需要"知道另一个服务"，八成放错了——要么它属于 client 层的共享状态，要么属于 RunController 的编排，要么该由 router 在装配层翻译。
 
-离线拉取源机物料时：
-
-```powershell
-$env:BASE_URL="http://<源机IP>:<分发端口>"
-.\install.ps1
-```
-
-当前 `label-studio` 源机已补齐 `vendor/mediamtx/mediamtx-win-x64.zip`，Windows 开发机可以使用该源机的 `BASE_URL` 拉取 ffmpeg / MediaMTX 物料。
-
-## 安装后的自包含路径
-
-安装完成后，关键第三方依赖都在项目目录内（Windows 下带 `.exe` 后缀）：
-
-```text
-.venv/
-.ffmpeg/bin/ffmpeg.exe
-mediamtx/mediamtx.exe
-mediamtx/mediamtx.yml
-```
-
-应用默认使用项目内的 `.ffmpeg/bin/ffmpeg.exe`；独立 RTSP Gateway 的 `mediamtx_gateway/config.ini` 中 `mediamtx_bin = auto` 默认选用项目内的 `mediamtx/mediamtx.exe`，均无需额外配置。不要指向系统安装的 ffmpeg 或 MediaMTX。
-
-## 启动开发后端
-
-```powershell
-.\start_backend.ps1 dev    # 加载 .env.dev
-```
-
-运行时变量（数据库、外部接口、网关等）与生产共用同一套键名，开发环境写在 `.env.dev`；完整清单见 [DEPLOYMENT.md](DEPLOYMENT.md) 的「应用启动前必须配置的运行时变量」。
+依据 KB：[docs/kb/SERVICE_CLIENT_STATE.md](docs/kb/SERVICE_CLIENT_STATE.md)、[docs/kb/SERVICE_RUN_CONTROL.md](docs/kb/SERVICE_RUN_CONTROL.md)。
