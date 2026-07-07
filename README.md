@@ -157,7 +157,7 @@ python integration_tests/stress_test.py --max-tasks 10 --duration 60      # 并�
 
 ## API 端点
 
-> 生产已永久关闭 `/docs`、`/redoc`、`/openapi.json`。所有 HTTP/WS 先经 `GatewayMiddleware`（IP 白名单 / 限流 / 反扫描；路由接线见[知识库](docs/kb/INDEX.md)）。下表为速览，端点请求/响应契约与用法见 docs/ 下 API 文档（如 [ALARM_API](docs/ALARM_API.md)、[LAB_EXPORT_API](docs/LAB_EXPORT_API.md)）。
+> 生产已永久关闭 `/docs`、`/redoc`、`/openapi.json`。所有 HTTP/WS 先经 `GatewayMiddleware`（IP 白名单 / 限流 / 反扫描；路由接线见[知识库](docs/kb/INDEX.md)）。下表为速览，端点请求/响应契约与用法见 [docs/api/](docs/api/README.md)（按 router 分文件）。
 
 | 分组 | 端点 |
 |------|------|
