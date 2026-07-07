@@ -2,10 +2,13 @@
 
 import importlib
 import logging
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any, Dict, List, Tuple, Type, TYPE_CHECKING
 
 from app.services.inference.config import InferenceConfig
 from app.domain.alarm import AlarmMetric
+
+if TYPE_CHECKING:
+    from app.services.inference.offline.base import OfflineSegmenter
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,68 @@ class StageFactory:
                 logger.error("✗ 注册 Operator 失败 %s: %s", name, e, exc_info=True)
 
         return specs
+
+    def create_offline_segmenter(
+        self, stage_name: str, override_class: str | None = None
+    ) -> "OfflineSegmenter | None":
+        """为指定 Stage 实例化离线分割策略（`stages.<step_id>.offline`），未启用返回 None。
+
+        offline 配置 schema（`{}` 或 `enabled:false` = 不启用该 stage 离线分段）：
+            offline:
+              enabled: true
+              name: <segmenter 身份，= SegmentFact.source>
+              subscribes: [<detector.name>, ...]   # 必须全命中同 stage detector
+              class: <OfflineSegmenter 子类全限定路径>
+              params: {...}                         # 原样传入实现类
+
+        工厂注入 `name`/`subscribes`，`params` 不得重复声明这两键。`override_class` 支撑
+        CLI `--strategy`（开发期对比不同策略），覆盖配置 `class` 但沿用同一 name/subscribes。
+        配置缺字段 / 未知 detector / 类加载失败一律 **fail-fast**（抛异常，不静默跳过）。
+
+        Args:
+            stage_name: stage 主键（= str(step_id)）
+            override_class: 可选，覆盖配置里的 class 全限定路径
+        """
+        stage_config = self.config.get_stage_config(stage_name)
+        if not stage_config:
+            raise ValueError(f"Stage '{stage_name}' 配置不存在")
+
+        offline = stage_config.offline or {}
+        if not offline or not offline.get("enabled", False):
+            return None
+
+        name = offline.get("name")
+        subscribes = offline.get("subscribes")
+        class_path = override_class or offline.get("class")
+        if not name:
+            raise ValueError(f"Stage '{stage_name}' offline 缺少 name")
+        if not subscribes:
+            raise ValueError(f"Stage '{stage_name}' offline 缺少 subscribes")
+        if not class_path:
+            raise ValueError(f"Stage '{stage_name}' offline 缺少 class")
+
+        # subscribes 必须全部命中同 stage 的 detector name
+        detector_names = {d.get("name") for d in stage_config.detectors}
+        unknown = [s for s in subscribes if s not in detector_names]
+        if unknown:
+            raise ValueError(
+                f"Stage '{stage_name}' offline subscribes 引用未知 detector: {unknown}"
+            )
+
+        params = dict(offline.get("params") or {})
+        for reserved in ("name", "subscribes"):
+            if reserved in params:
+                raise ValueError(
+                    f"Stage '{stage_name}' offline params 不得重复声明 '{reserved}'（工厂注入）"
+                )
+
+        cls = _import_class(class_path)
+        segmenter = cls(name=name, subscribes=list(subscribes), **params)
+        logger.info(
+            "✓ 创建 OfflineSegmenter: %s (class=%s, subscribes=%s)",
+            name, class_path, subscribes,
+        )
+        return segmenter
 
     def build_task_metric_map(self) -> Dict[str, AlarmMetric]:
         """构建 stream_name(detector.name) → AlarmMetric 映射（signals_10s 唯一定义处）。
