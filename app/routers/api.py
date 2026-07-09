@@ -27,11 +27,21 @@ router = APIRouter(prefix="/api", tags=["unified"])
 
 
 class StartRequest(BaseModel):
-    """启动请求"""
+    """启动请求。
+
+    注：历史字段 `fps` 已弃用——后端从不使用(解码帧率取自 stream config,
+    抽帧率取自 client config)。老前端继续带 `fps` 无害(Pydantic 默认忽略多余字段),
+    新前端只需 `{ task_id, rtsp_url }`。
+    """
 
     task_id: int
     rtsp_url: str
-    fps: int = 30
+
+
+class TerminateRequest(BaseModel):
+    """终止请求(新,首选)。body 传 `task_id`,与 start 对称。"""
+
+    task_id: int | None = None
 
 
 @router.post("/start")
@@ -72,7 +82,7 @@ async def start(req: StartRequest):
 
         # 运行键 = str(task_id)（在 RunController 内派生）；source_ip 作被动身份字段透传。
         # 编排 + 生命周期锁在 RunController；同步持锁段丢进线程，避免阻塞事件循环。
-        # 注：req.fps 保留于前端契约（StartRequest），但后端内部不再透传——
+        # 注：前端历史字段 fps 已弃用，后端不透传——
         # decoder 输出帧率取自 stream config，抽帧率取自 client config。
         return await asyncio.to_thread(
             run_controller.start_run,
@@ -87,14 +97,18 @@ async def start(req: StartRequest):
 
 
 @router.post("/terminate")
-async def terminate(task_id: int | None = None, client_id: str | None = None):
+async def terminate(
+    body: TerminateRequest | None = None,
+    client_id: str | None = None,
+):
     """统一终止（双模，task_id 优先）。
 
-    - `task_id`（新，首选）→ `client_manager.get(task_id)` 直查运行键。
-    - `client_id`（旧，即 source_ip）→ `find_by_source_ip` 边界垫片扫描回当前 run。
-    两参皆缺 → ValidationError。查不到 run（已停/从未起）→ success no-op
+    - body `{ task_id }`（新，首选）→ `client_manager.get(task_id)` 直查运行键，与 start 对称。
+    - query `?client_id=`（老，即 source_ip）→ `find_by_source_ip` 扫描回当前 run，兼容期保留。
+    两者皆缺 → ValidationError。查不到 run（已停/从未起）→ success no-op
     （对齐运行时 client_not_found 语义）。
     """
+    task_id = body.task_id if body else None
     if task_id is not None:
         logger.info(f"[terminate] Terminating by task_id: {task_id}")
         cq = client_manager.get(task_id)
