@@ -37,14 +37,15 @@ def _fake_cq(task_id=1, stage="1", step_id=None):
     return cq
 
 
-def test_start_workflow_sets_slot(manager):
-    # start_workflow(cq)：换槽注册该 CQ（不再自建 CQ）。无 operator_specs → 不建 actor。
+def test_start_workflow_no_set_no_actor(manager):
+    # start_workflow(cq) 不再碰注册表（set/remove 均归 RunController，与 stop_run 对称）。
+    # 无 operator_specs → 不建 actor。CQ 假定已由 RunController 注册。
     cq = _fake_cq(task_id=7, stage="MOCK", step_id=None)
     with patch("app.services.inference.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
         assert manager.start_workflow(cq) is True
 
-    cm.set.assert_called_once_with(7, cq)   # 按 int task_id 换槽
+    cm.set.assert_not_called()   # 注册职责已上移 RunController，本方法不再 set
 
 
 def test_real_manager_init_invariants_and_stop_workflow_smoke():
