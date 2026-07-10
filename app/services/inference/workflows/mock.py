@@ -14,8 +14,7 @@ MockOperator（时序线程，流算子）：
 from __future__ import annotations
 
 import logging
-import time
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -47,8 +46,8 @@ class MockDetector(Detector):
         super().__init__(name="mock", enabled=enabled)
         self.brightness_threshold = brightness_threshold
 
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> FrameDetections:
-        timestamp = time.time()
+    def _detect(self, frame: np.ndarray, timestamp: float) -> FrameDetections:
+        """单帧亮度启发式检测。timestamp 为帧捕获真值锚点，由 infer_batch 穿入。"""
         h, w = frame.shape[:2]
         cy1, cy2 = h // 4, 3 * h // 4
         cx1, cx2 = w // 4, 3 * w // 4
@@ -80,9 +79,11 @@ class MockDetector(Detector):
         )
 
     def infer_batch(
-        self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
+        self,
+        frames: List[np.ndarray],
+        timestamps: List[float],
     ) -> List[FrameDetections]:
-        return [self.infer(frame, ctx) for frame, ctx in zip(frames, contexts)]
+        return [self._detect(frame, ts) for frame, ts in zip(frames, timestamps)]
 
     def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
         items = [
