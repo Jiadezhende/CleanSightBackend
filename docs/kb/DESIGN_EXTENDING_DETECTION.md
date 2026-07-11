@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-11
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -11,7 +11,7 @@
 继承 `Detector`（`detection/detector.py`），YOLO 类优先继承 `YOLODetector`（复用模型惰性加载、batch predict、输出适配、CUDA 异常转换）。职责：
 
 - 设唯一 `name`——即该 detector 产出的**流名**（slide_window 的 key，Operator 用它 `subscribes`）。
-- `infer(frame, context) → FrameDetections`（或 override `infer_batch`）。
+- `infer_batch(frames, timestamps) → List[FrameDetections]`（**唯一推理入口**，无单帧 `infer()`）。`timestamps[i]` 是帧捕获真值锚点（源自 `Frame.timestamp`），实现须原样写入 `frames[i]` 对应的 `FrameDetections.timestamp`，**不得自造时间戳**——下游 `_zip_by_ts` 按同帧 ts 精确相等对齐多流，ts 不等会漏帧。YOLO 子类已在 `YOLODetector.infer_batch` 实现（整批失败逐帧返回 error 结果、仍保留各帧 ts）。
 - `prepare_visualization_data(output) → RenderSpec`（可视化用固定渲染器 `FixedVisualizer`）。
 - **不持 per-run 状态**。
 

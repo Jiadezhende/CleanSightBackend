@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-11
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -14,10 +14,11 @@
 
 1. **幂等 / 重启清理**：同 task 已有 run 时，`step_id` 与 URL 均未变才幂等返回；任一变化则 `stop_run` 停旧后全量重建。
 2. **建 CQ**：`stage = inference_manager.resolve_stage(current_step)`，构造不可变身份 CQ（含 `source_ip` 被动字段）。
-3. **storage supersede**（与 stop 侧对称的两个 service 钩子）：`persistence_manager.start_run(cq)` 清空旧 HLS step 目录（无 owner，纯 rmtree）；`inference_manager.start_workflow(cq)` 内含 `FeatureStore.open_fresh`（认领 owner + 截断旧 `features.jsonl`）。均在建新 CQ 之后、无活跃 worker 写该 `(task,step)` 之前完成。
-4. **起流**：`stream_service.start_stream(task_id, rtsp_url)`（decoder 键 = task_id；系统只用 RTSP）。
+3. **注册 CQ**：`client_manager.set(task_id, cq)`（COW 发布）。**CQ 的 set/remove 均归 RunController**，与 `stop_run` 的 `client_manager.remove` 对称（set 先、remove 后，镜像）；`start_workflow` 不再自行 set。set 后的所有 setup 步（4、5）包进一个 `try`：任一步失败即回滚注销，避免 CQ 泄漏在注册表。
+4. **storage supersede**（与 stop 侧对称的两个 service 钩子）：`persistence_manager.start_run(cq)` 清空旧 HLS step 目录（无 owner，纯 rmtree）；`inference_manager.start_workflow(cq)` 内含 `FeatureStore.open_fresh`（认领 owner + 截断旧 `features.jsonl`）。均在建并注册新 CQ 之后、无活跃 worker 写该 `(task,step)` 之前完成。
+5. **起流**：`stream_service.start_stream(task_id, rtsp_url)`（decoder 键 = task_id；系统只用 RTSP）。
 
-`start_workflow` 失败抛 `AppError`。
+**失败回滚**：4/5 任一步抛错（`start_workflow` 失败抛 `AppError`）→ `stop_run(task_id, expected=cq)` 对称回滚（尽力而为停 decoder/actor、关 feature、`client_manager.remove` 注销 CQ），再重抛。`expected=cq` 做身份 fence，防误清已被 `/start` 换上的健康新 CQ。
 
 ## stop_run(task_id, reason, *, skip_decoder, expected)
 

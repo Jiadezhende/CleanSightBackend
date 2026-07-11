@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-11
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -8,15 +8,16 @@
 
 ## 启动流程
 
-入口：`POST /api/start`（body 含 `task_id`、`rtsp_url` 等；`fps` 仅存 wire 不透传）。
+入口：`POST /api/start`（body `{ task_id, rtsp_url }`；历史字段 `fps` 已弃用——后端从不使用，老前端继续带无害，新前端可省）。
 
 1. API 层从 `clean_task` 查 `task_id`，校验存在、取 `source_ip`（被动身份字段）。
 2. 经 `asyncio.to_thread` 桥接调 `run_controller.start_run(task_id, current_step, rtsp_url, source_ip)`（把同步持锁段挪出事件循环）。
 3. `start_run` 全程持 `client_manager.lock_for(task_id)`（per-task RLock）：
    - 幂等/重启判断（见下）。
-   - 建**新** CQ（`stage = resolve_stage(current_step)`，身份不可变）。
+   - 建**新** CQ（`stage = resolve_stage(current_step)`，身份不可变）后 `client_manager.set` 注册（set/remove 均归 RunController，与 `stop_run` 对称）。
    - `persistence_manager.start_run(cq)` 清旧 HLS step 目录 + `inference_manager.start_workflow(cq)`（含 `FeatureStore.open_fresh` + 建 Actor）。
    - `stream_service.start_stream(task_id, rtsp_url)` 起解码。
+   - 注册后的 setup 步全包进 `try`：任一步失败 → `stop_run(expected=cq)` 对称回滚注销、重抛，不留泄漏 CQ。
 
 ## 幂等条件
 
@@ -24,7 +25,7 @@
 
 ## 终止流程
 
-入口：`POST /api/terminate?task_id=...`（新，首选）或 `?client_id=<source_ip>`（旧，双模）。经 `to_thread` 调 `run_controller.stop_run(task_id, reason)`。健康监控的自动结束（重连失败/孤儿/超时）经 `cleanup_client` 同样委托 `stop_run`（并传 `expected` CQ 做对象身份 fence）。
+入口：`POST /api/terminate`，双模——body `{ task_id }`（新，首选，与 start 对称）或 query `?client_id=<source_ip>`（旧，兼容期保留）。经 `to_thread` 调 `run_controller.stop_run(task_id, reason)`。健康监控的自动结束（重连失败/孤儿/超时）经 `cleanup_client` 同样委托 `stop_run`（并传 `expected` CQ 做对象身份 fence）。
 
 `stop_run` 尽力而为、永不抛出，固定顺序：封闸 `to_draining()` → 停 decoder → 落 settlement 告警（`alarm_sink.persist_alarms`）+ flush HLS 残段 → 清 registry（`cq.close()`）→ 回收目录锁。
 

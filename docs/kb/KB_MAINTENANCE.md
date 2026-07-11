@@ -24,7 +24,6 @@
 - 修改任意知识库文件时，更新该文件顶部的 `更新时间`。
 - 批量更新时，所有被修改文件使用同一天日期。
 - 首版统一使用 `2026-05-24`。
-- `2026-07-06` 批：融合 `refact/key-change` 分支重构（换键 int task_id、per-run 不可变 CQ + 状态机、RunController 编排、inference 分层、HLS PULL、告警落库归位、domain 数据模型分层）；新增 `SERVICE_RUN_CONTROL.md`。未落地项（前端 wire 换键 T6、offline 消费端）以「待核验/待实现」标注。
 
 ## 内容粒度
 

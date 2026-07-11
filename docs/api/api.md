@@ -14,7 +14,8 @@
 |------|------|------|------|
 | `task_id` | int | 是 | 业务主键（= 运行键） |
 | `rtsp_url` | str | 是 | RTSP 拉流地址 |
-| `fps` | int | 否，默认 30 | 仅前端 wire 契约，后端解码/抽帧不使用 |
+
+> 历史字段 `fps` 已弃用——后端从不使用（解码帧率取自 stream config，抽帧率取自 client config）。老前端继续带 `fps` 无害（Pydantic 默认忽略多余字段），新前端只需 `{ task_id, rtsp_url }`。
 
 后端据 `task_id` 查 `clean_task` 表取 `source_ip`、`current_step`（转 int `step_id`）。
 
@@ -39,12 +40,12 @@
 
 终止任务并完整清理（decoder + 推理 + registry + HLS 残段）。**尽力而为，永不抛异常**——总返回 200。
 
-**查询参数**（至少一个；`task_id` 优先）：
+双模标识（至少一个；`task_id` 优先）：
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `task_id` | int | 首选，O(1) 直取 |
-| `client_id` | str | 旧，= `source_ip`，扫描匹配首个 |
+| 位置 | 参数 | 类型 | 说明 |
+|------|------|------|------|
+| body `TerminateRequest` | `task_id` | int | 新，首选，O(1) 直取，与 `/api/start` body 对称 |
+| query | `client_id` | str | 旧，= `source_ip`，扫描匹配首个，兼容期保留 |
 
 **200 — 命中活跃 run**（各字段为清理阶段结果）：
 

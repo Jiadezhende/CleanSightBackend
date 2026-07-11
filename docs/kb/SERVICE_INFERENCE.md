@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-11
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -28,7 +28,7 @@
 `manager.py` 单例 `inference_manager`（`instance.py` 惰性构造，配置 fail-fast）。公开方法：
 
 - `start()` / `stop()`：注册 dispatcher/pool + 初始化 naming 表；`stop()` 两阶段（先 `signal_stop` 全 actor，再 join 收 settlement + flush FeatureStore）。
-- `start_workflow(cq)`：注册 CQ、`FeatureStore.open_fresh`、按 stage 实例化 operators、建并起 `ClientTemporalActor`。
+- `start_workflow(cq)`：`FeatureStore.open_fresh`、按 stage 实例化 operators、建并起 `ClientTemporalActor`。入参是 RunController **已注册**（`client_manager.set`）的 CQ——本方法不再碰注册表（set/remove 均归 RunController，与 `stop_run` 对称）。
 - `stop_workflow(cq) → List[Alarm]`：pop actor、finalize 收结算告警、关 feature 分区，返回 settlement 告警（交 RunController 落库）。
 - `resolve_stage(step_id) → str`：**恒等路由**——`str(step_id)` 命中 stage 配置键则返回，否则告警回落 `MOCK`。stage 是 CQ 不可变身份的一部分（构造时定死）。
 - `set_stream_windows` / `status`。
@@ -47,7 +47,7 @@
 
 ## Detector / Operator 两粒度框架
 
-- **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer(frame, ctx)`、`infer_batch`（YOLO override）、`prepare_visualization_data`。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
+- **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer_batch(frames, timestamps)`（**唯一推理入口**，无单帧 `infer()`）、`prepare_visualization_data`。`timestamps` 是帧捕获真值锚点（源自 `Frame.timestamp`，pool 从 `req.timestamp` 穿入），须原样写回 `FrameDetections.timestamp`，令每帧 `FrameDetections.timestamp == FrameInference.timestamp`，供 L3 `_zip_by_ts` 多流对齐——detector 不得自造时间戳。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
 - **Operator**（流算子，规则粒度，per-run 独立）：`name`、`subscribes`（**显式、必填**输入流名列表，缺则 fail-fast）、`window_seconds`；`analyze(windows)` 推进 `self._sm`、`judge() → (overlay_texts, alarms)`、`finalize() → List[Alarm]`（结算，默认空）。analyze+judge **合并**进 Operator（不再有独立 TemporalAnalyzer/Judge，不做 EventFact 跨对象传递）。
 
 ## L3/L4：ClientTemporalActor（~1Hz）
