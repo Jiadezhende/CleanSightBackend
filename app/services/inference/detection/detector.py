@@ -157,8 +157,13 @@ class YOLODetector(Detector):
     ) -> List[FrameDetections]:
         """批量 YOLO 推理。timestamps[i] 为帧捕获真值锚点，写入对应 FrameDetections。"""
         self._ensure_model_loaded()
+        # ultralytics 无条件 mkdir(save_dir)（即便 save=False），project/name/exist_ok
+        # 把这个空目录钉进已 gitignore 的 .ultralytics 并复用同一个，避免污染仓库根与
+        # predict/predict2… 累积（详见 app/settings.py:YOLO_RUNS_PROJECT）。
+        from app.settings import YOLO_RUNS_PROJECT
         raw_list = self._model.predict(
-            frames, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False
+            frames, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False,
+            project=YOLO_RUNS_PROJECT, name="predict", exist_ok=True,
         )
         return [
             self._adapt_output([r], frame, ts)
