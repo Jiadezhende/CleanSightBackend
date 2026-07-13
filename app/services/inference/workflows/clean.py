@@ -13,7 +13,14 @@ detector.name = 该 detector 产出的流名（决定 slide_window key 与 Opera
 
 from __future__ import annotations
 
+from typing import Dict, List, Tuple
+
+import torch
+
+from app.services.client.config import get_client_config
 from app.services.inference.detection.detector import YOLODetector
+from app.services.inference.temporal.operator import AlignedFrame, GRUOperator
+from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetections
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
@@ -96,3 +103,129 @@ class CleanSmallDetector(YOLODetector):
             status_color=(0, 255, 255),
             status_position="top-left",
         )
+
+class CleanOperator(GRUOperator):
+    def __init__(
+        self,
+        name: str,
+        subscribes: List[str],
+        window_seconds: float,
+        model_path: str,
+        actions: Dict[int, str],
+        objects: Dict[int, str],
+        hidden: int = 128,
+        num_layers: int = 3,
+    ) -> None:
+        super().__init__(
+            name=name,
+            subscribes=subscribes,
+            window_seconds=window_seconds,
+            model_path=model_path,
+            actions=actions,
+            objects=objects,
+            hidden=hidden,
+            num_layers=num_layers,
+        )
+        self.history_frames = []
+        self._sm = {
+            "last_ts": 0.0,
+            "latest_action": None,
+        }
+
+    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+        """消费订阅流、推进 self._sm。windows: {流名: 该流滑窗快照(按 ts 升序)}。"""
+        aligned_frames = self._zip_by_ts(windows)
+        if not aligned_frames:
+            return        
+        self._advance(aligned_frames)
+
+    def judge(self) -> Tuple[List[str], List[Alarm]]:
+        """读 self._sm 出 (overlay 文案, 实时告警)。"""
+        events = (
+            [f"Action: {self.get_action_name(self._sm['latest_action'])}"]
+        )
+        alarms = []
+        return events, alarms
+
+    def _advance(self, aligned_frames: List[AlignedFrame]) -> None:
+        """推进 self._sm。aligned_frames: 对齐后的窗口快照列表。
+        逐帧滑动窗口推理
+        """
+        window_size = len(aligned_frames)
+
+        last_ts = self._sm["last_ts"]
+        new_frames = [f for f in aligned_frames if f.ts > last_ts]
+        if not new_frames:
+            return
+
+        self.history_frames.extend(new_frames)
+
+        if len(self.history_frames) < window_size:
+            self._sm["last_ts"] = new_frames[-1].ts
+            return
+
+        num_new = len(new_frames)
+        start_idx = max(0, len(self.history_frames) - num_new - window_size + 1)
+
+        for i in range(num_new):
+            window_start = start_idx + i
+            window_end = window_start + window_size
+            if window_end > len(self.history_frames):
+                break
+
+            window = self.history_frames[window_start:window_end]
+            features = self._adapt_to_features(window)
+
+            if features.numel() == 0:
+                continue
+
+            predictions = self.infer(features)
+            self._sm["latest_action"] = predictions[-1]
+
+        self.history_frames = self.history_frames[-window_size:]
+        self._sm["last_ts"] = new_frames[-1].ts
+
+    def _adapt_to_features(self, aligned_frames: List[AlignedFrame]) -> torch.Tensor:
+        """将窗口快照转换为特征矩阵。
+
+        修正：先按 timestamp 对齐多流，再合并同一时刻的特征。
+        同一原始帧的多流检测结果合并到同一个 feature vector 中。
+
+        特征格式：(T, input_dim)，其中 input_dim = num_objects * 4
+        每个物体的特征向量为 (cx, cy, w, h) 归一化到 [0, 1] 范围。
+        """
+
+        if not aligned_frames:
+            return torch.tensor([])
+        
+        features = []
+        config = get_client_config()
+        height = config.frame.resize_height
+        width = config.frame.resize_width
+
+        for aligned in aligned_frames:
+            feature = [0.0] * (self.num_objects * 4)
+
+            class_features = {}
+            for stream_name, frame_detections in aligned.by_source.items():
+                for detection in frame_detections.detections:
+                    class_features.setdefault(detection.class_id, []).append(detection)
+
+            for class_id, detections in class_features.items():
+                if class_id >= self.num_objects:
+                    continue
+                best_detection = max(detections, key=lambda x: x.confidence)
+                x1, y1, x2, y2 = best_detection.bbox
+
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                w, h = x2 - x1, y2 - y1
+
+                cx, cy = cx / width, cy / height
+                w, h = w / width, h / height
+
+                base = class_id * 4
+                feature[base:base+4] = cx, cy, w, h
+
+            features.append(feature)
+
+        return torch.tensor(features, dtype=torch.float32)
