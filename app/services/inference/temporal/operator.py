@@ -18,12 +18,16 @@
 from __future__ import annotations
 
 import logging
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
+import torch
+
 from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetections
+from app.services.inference.temporal.model import GRUClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -91,3 +95,76 @@ class Operator(ABC):
             AlignedFrame(ts=ts, by_source={s: indexed[s][ts] for s in self.subscribes})
             for ts in sorted(common)
         ]
+
+
+class GRUOperator(Operator):
+    def __init__(
+        self,
+        name: str,
+        subscribes: List[str],
+        window_seconds: float,
+        model_path: str,
+        objects: Dict[int, str],
+        actions: Dict[int, str],
+        hidden: int = 128,
+        num_layers: int = 3,
+    ):
+        super().__init__(name, subscribes, window_seconds)
+        if not model_path:
+            raise ValueError(f"model_path is required for {self.__class__.__name__}")
+        self.model_path = model_path
+        self.num_objects = len(objects)
+        self.num_actions = len(actions)
+        self.hidden = hidden
+        self.num_layers = num_layers
+
+        self.objects = objects
+        self.actions = actions
+
+        self._model: torch.nn.Module = None
+        self._model_load_lock = threading.Lock()
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def get_object_name(self, class_id: int) -> str:
+        return self.objects.get(class_id, f"object_{class_id}")
+ 
+    def get_action_name(self, class_id: int) -> str:
+        return self.actions.get(class_id, f"action_{class_id}")
+
+    def _ensure_model_loaded(self) -> None:
+        """惰性加载 GRUClassifier 模型（首次推理时触发，双重检查锁保证线程安全）。"""
+        if self._model is not None:
+            return
+        with self._model_load_lock:
+            if self._model is not None:
+                return
+            try:
+                from pathlib import Path
+                if not Path(self.model_path).exists():
+                    raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
+                logger.info("[%s] Loading GRUClassifier model: %s", self.name, self.model_path)
+                self._model = GRUClassifier(
+                    input_dim=self.num_objects * 4,
+                    num_classes=self.num_actions,
+                    hidden=self.hidden,
+                    num_layers=self.num_layers,
+                )
+                self._model.load_state_dict(
+                    torch.load(self.model_path, map_location=self._device)
+                )
+                self._model.to(self._device)
+                logger.info("[%s] Model loaded successfully on %s", self.name, self._device)
+            except Exception as e:
+                logger.error("[%s] Model loading failed: %s", self.name, e, exc_info=True)
+                raise
+
+    def infer(self, features: torch.Tensor) -> List[int]:
+        """GRUClassifier 推理：返回每个时间步的预测类别。"""
+        self._ensure_model_loaded()
+        if features.dim() == 2:
+            features = features.unsqueeze(0)
+
+        features = features.to(self._device)
+        logits = self._model(features)
+
+        return logits.argmax(dim=-1).squeeze(0).tolist()
