@@ -161,6 +161,7 @@ class GRUOperator(Operator):
                     torch.load(self.model_path, map_location=self._device)
                 )
                 self._model.to(self._device)
+                self._model.eval()
                 logger.info("[%s] Model loaded successfully on %s", self.name, self._device)
             except Exception as e:
                 logger.error("[%s] Model loading failed: %s", self.name, e, exc_info=True)
@@ -173,6 +174,8 @@ class GRUOperator(Operator):
             features = features.unsqueeze(0)
 
         features = features.to(self._device)
-        logits = self._model(features)
+
+        with torch.no_grad():
+            logits = self._model(features)
 
         return logits.argmax(dim=-1).squeeze(0).tolist()
