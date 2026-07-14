@@ -141,11 +141,10 @@ class CleanOperator(TemporalOperator):
         return events, alarms
 
     def _advance(self, aligned_frames: List[AlignedFrame]) -> None:
-        """推进 self._sm。aligned_frames: 对齐后的窗口快照列表。
-        逐帧滑动窗口推理
-        """
+        """推进 self._sm。aligned_frames: 对齐后的窗口快照列表。"""
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in aligned_frames if f.ts > last_ts]
+        # 忽略新帧为空的情况
         if not new_frames:
             return
 
@@ -163,7 +162,8 @@ class CleanOperator(TemporalOperator):
         同一原始帧的多流检测结果合并到同一个 feature vector 中。
 
         特征格式：(T, input_dim)，其中 input_dim = num_objects * 6
-        每个物体的特征向量为 (nums, cx, cy, w, h, area) 归一化到 [0, 1] 范围。
+        每个物体的特征向量为 (nums, cx, cy, w, h, area) 
+        其中 `nums` 是同类别物体数量，其他特征归一化到 [0, 1] 范围。
         """
 
         if not aligned_frames:
@@ -180,10 +180,12 @@ class CleanOperator(TemporalOperator):
                     continue
                 for detection in frame.detections:
                     object_id = self._object_id(detection.class_name)
+                    # 忽略未检测到的物体
                     if detection.bbox is None:
                         continue
                     x1, y1, x2, y2 = detection.bbox
 
+                    # 确保 bbox 不超出图像边界
                     x1 = max(0, min(width, x1))
                     y1 = max(0, min(height, y1))
                     x2 = max(0, min(width, x2))
@@ -195,6 +197,7 @@ class CleanOperator(TemporalOperator):
                     w, h = x2 - x1, y2 - y1
                     area = w * h
 
+                    # 归一化特征
                     cx, cy = cx / width, cy / height
                     w, h = w / width, h / height
                     area = area / (width * height)
