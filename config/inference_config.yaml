@@ -96,8 +96,6 @@ stages:
             5: air_gun
             6: short_brush
             7: brush_tip_out
-          hidden: 256
-          num_layers: 4
     offline: {}                      # 预留：离线动作分割模型（stage 粒度）将挂这里
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================

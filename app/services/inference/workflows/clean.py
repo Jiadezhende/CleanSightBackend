@@ -113,8 +113,6 @@ class CleanOperator(GRUOperator):
         model_path: str,
         actions: Dict[int, str],
         objects: Dict[int, str],
-        hidden: int = 128,
-        num_layers: int = 3,
     ) -> None:
         super().__init__(
             name=name,
@@ -123,8 +121,6 @@ class CleanOperator(GRUOperator):
             model_path=model_path,
             actions=actions,
             objects=objects,
-            hidden=hidden,
-            num_layers=num_layers,
         )
         self.history_frames = []
         self._sm = {
