@@ -178,9 +178,20 @@ class CleanOperator(TemporalOperator):
 
             for frame in aligned.by_source.values():
                 width, height, _ = frame.metadata["frame_shape"]
+                if width <= 0 or height <= 0:
+                    continue
                 for detection in frame.detections:
                     object_id = self._object_id(detection.class_name)
+                    if detection.bbox is None:
+                        continue
                     x1, y1, x2, y2 = detection.bbox
+
+                    x1 = max(0, min(width, x1))
+                    y1 = max(0, min(height, y1))
+                    x2 = max(0, min(width, x2))
+                    y2 = max(0, min(height, y2))
+                    if x1 >= x2 or y1 >= y2:
+                        continue
 
                     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                     w, h = x2 - x1, y2 - y1
