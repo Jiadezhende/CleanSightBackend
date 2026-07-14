@@ -160,8 +160,10 @@ logs/
 # Temporary files
 *.tmp
 *.temp
-app/models/best.pt
-app/models/bubble-best.pt
+
+# 模型权重 / 测试视频等大二进制走物料分发，不入库
+app/data/*.pt
+test/*.mp4
 
 .agents/
 .claude/

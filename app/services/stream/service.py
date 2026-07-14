@@ -179,8 +179,8 @@ class StreamService:
     def _get_client_queues(self, task_id: int):
         """获取该 client 的 ClientQueues（**只取不建**）。
 
-        CQ 由 RunController.start_run → InferenceManager.start_workflow 在起流**之前**建好并换槽
-        （一 CQ == 一 run，身份不可变）；起流阶段只取。缺失说明调用序错（未先 start_workflow），
+        CQ 由 RunController.start_run 在起流**之前**建好并 client_manager.set 注册
+        （一 CQ == 一 run，身份不可变）；起流阶段只取。缺失说明调用序错（未先建 CQ），
         返回 None 由上层容错（decoder 空跑）。
         """
         cq = client_manager.get(task_id)

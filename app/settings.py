@@ -244,3 +244,8 @@ settings = Settings()
 _yolo_cfg_dir = str(Path(__file__).parent.parent / ".ultralytics")
 os.makedirs(_yolo_cfg_dir, exist_ok=True)
 os.environ["YOLO_CONFIG_DIR"] = _yolo_cfg_dir
+
+# ultralytics 的 predictor.__init__ 无条件 mkdir(save_dir)（即便 save=False），
+# 默认落在仓库根 runs/detect/，每次 warmup/推理都残留空目录。把 predict 的 project
+# 钉进上面已 gitignore 的 .ultralytics，令这些空目录不再污染仓库根。detector 引用此常量。
+YOLO_RUNS_PROJECT = str(Path(_yolo_cfg_dir) / "runs" / "detect")

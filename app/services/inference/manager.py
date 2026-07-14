@@ -171,11 +171,13 @@ class InferenceManager:
         return "MOCK"
 
     def start_workflow(self, cq: ClientQueues) -> bool:
-        """起该 run 的推理 workflow：换槽注册 CQ、open_fresh 特征分区、建并启 actor。
+        """起该 run 的推理 workflow：open_fresh 特征分区、建并启 actor。
 
-        入参是 RunController 已建好的不可变身份 CQ（一 CQ == 一 run）。调用方已持
-        lock_for(cq.task_id)，与 stop_workflow 互斥；重启路径下 RunController 先 stop_workflow
-        拆旧，故此处 _actors 槽已空。stage 由 cq 派生（构造时经 resolve_stage 定死）。
+        入参是 RunController 已建好并**已注册**（client_manager.set）的不可变身份 CQ
+        （一 CQ == 一 run）。调用方已持 lock_for(cq.task_id)，与 stop_workflow 互斥；重启路径下
+        RunController 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
+        RunController（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
+        resolve_stage 定死）。
         """
         task_id = cq.task_id
         # 防御：残留旧 actor（正常路径 stop_workflow 已 pop，不应命中）——信号停、丢弃、不结算。
@@ -186,10 +188,7 @@ class InferenceManager:
             )
             stale.signal_stop()
 
-        # 1. 换槽注册（COW 发布新 CQ）
-        client_manager.set(task_id, cq)
-
-        # 2. 新 run 起始截断存储分区（重启 supersede，避免同 (task,step) 新旧混写）
+        # 1. 新 run 起始截断存储分区（重启 supersede，避免同 (task,step) 新旧混写）
         if cq.step_id is not None:
             try:
                 self.feature_store.open_fresh(cq.task_id, cq.step_id, owner=cq)
@@ -198,7 +197,7 @@ class InferenceManager:
                     "[InferenceManager] open_fresh storage failed for task=%s: %s", task_id, e
                 )
 
-        # 3. 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
+        # 2. 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
         stage = cq.stage
         stage_cfg = self._get_stage_configs().get(stage, {})
         specs = stage_cfg.get("operator_specs", [])

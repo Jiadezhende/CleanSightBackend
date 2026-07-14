@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, List
 
 import numpy as np
 
@@ -30,7 +29,7 @@ class Detector(ABC):
     - 准备可视化数据（检测框、标签、状态栏文本等）
 
     不持有任何 per-client 状态。同一实例被所有 client 共享。
-    子类须实现 infer() 和 prepare_visualization_data()。
+    子类须实现 infer_batch() 和 prepare_visualization_data()。
     """
 
     def __init__(self, name: str, enabled: bool = True):
@@ -38,15 +37,22 @@ class Detector(ABC):
         self.enabled = enabled
 
     @abstractmethod
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> FrameDetections:
-        """单帧推理。
+    def infer_batch(
+        self,
+        frames: List[np.ndarray],
+        timestamps: List[float],
+    ) -> List[FrameDetections]:
+        """批量推理（唯一推理入口）。
 
         Args:
-            frame: BGR 图像
-            context: 请求上下文（含 client_id 等）
+            frames: BGR 图像列表
+            timestamps: 各帧的帧捕获时间戳（真值锚点，源自 Frame.timestamp）。
+                实现须把 timestamps[i] 原样写入 frames[i] 对应的
+                FrameDetections.timestamp——下游 _zip_by_ts 按此对齐多流，
+                detector 不得自造时间戳（否则同帧多流 ts 不等会漏帧）。
 
         Returns:
-            FrameDetections：标准化检测输出
+            List[FrameDetections]：与 frames 一一对应
         """
 
     @abstractmethod
@@ -54,36 +60,11 @@ class Detector(ABC):
         """根据检测输出准备可视化数据。
 
         Args:
-            output: infer()/infer_batch() 的输出
+            output: infer_batch() 的单帧输出
 
         Returns:
             RenderSpec：供 FixedVisualizer 渲染
         """
-
-    def infer_batch(
-        self,
-        frames: List[np.ndarray],
-        contexts: List[Dict[str, Any]],
-    ) -> List[FrameDetections]:
-        """批量推理。默认实现：逐帧调用 infer()。
-
-        子类可 override 以利用模型的原生 batch 接口加速（如 YOLO batch predict）。
-        """
-        results = []
-        for frame, ctx in zip(frames, contexts):
-            try:
-                output = self.infer(frame, ctx)
-                output.success = True
-                results.append(output)
-            except Exception as e:
-                results.append(FrameDetections(
-                    detections=[],
-                    metadata={"error": str(e)},
-                    timestamp=time.time(),
-                    success=False,
-                    error=str(e),
-                ))
-        return results
 
 
 # ====== YOLO 检测器基类 ======
@@ -171,63 +152,54 @@ class YOLODetector(Detector):
             timestamp=timestamp,
         )
 
-    def _run_yolo(self, frame: np.ndarray) -> FrameDetections:
-        """单帧 YOLO 推理。"""
+    def _run_yolo_batch(
+        self, frames: List[np.ndarray], timestamps: List[float]
+    ) -> List[FrameDetections]:
+        """批量 YOLO 推理。timestamps[i] 为帧捕获真值锚点，写入对应 FrameDetections。"""
         self._ensure_model_loaded()
-        raw = self._model.predict(
-            frame, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False
-        )
-        return self._adapt_output(raw, frame, time.time())
-
-    def _run_yolo_batch(self, frames: List[np.ndarray]) -> List[FrameDetections]:
-        """批量 YOLO 推理。"""
-        self._ensure_model_loaded()
+        # ultralytics 无条件 mkdir(save_dir)（即便 save=False），project/name/exist_ok
+        # 把这个空目录钉进已 gitignore 的 .ultralytics 并复用同一个，避免污染仓库根与
+        # predict/predict2… 累积（详见 app/settings.py:YOLO_RUNS_PROJECT）。
+        from app.settings import YOLO_RUNS_PROJECT
         raw_list = self._model.predict(
-            frames, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False
+            frames, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False,
+            project=YOLO_RUNS_PROJECT, name="predict", exist_ok=True,
         )
-        timestamp = time.time()
-        return [self._adapt_output([r], frame, timestamp) for r, frame in zip(raw_list, frames)]
+        return [
+            self._adapt_output([r], frame, ts)
+            for r, frame, ts in zip(raw_list, frames, timestamps)
+        ]
 
     # ── 核心方法实现 ────────────────────────────────────────
 
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> FrameDetections:
-        from app.utils.exceptions import ModelInferenceError
-        try:
-            return self._run_yolo(frame)
-        except RuntimeError as e:
-            error_msg = str(e).lower()
-            raise ModelInferenceError(
-                message=str(e),
-                model_name=self.name,
-                task_id=context.get("task_id"),
-                step_id=context.get("step_id"),
-                source_ip=context.get("source_ip"),
-                is_cuda_error="out of memory" in error_msg or "cuda" in error_msg,
-            ) from e
-        except Exception as e:
-            raise ModelInferenceError(
-                message=f"Unexpected error in {self.name} detection: {str(e)}",
-                model_name=self.name,
-                task_id=context.get("task_id"),
-                step_id=context.get("step_id"),
-                source_ip=context.get("source_ip"),
-            ) from e
-
     def infer_batch(
-        self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
+        self,
+        frames: List[np.ndarray],
+        timestamps: List[float],
     ) -> List[FrameDetections]:
-        """批量 YOLO 推理，降级时回退到逐帧 infer()。"""
+        """批量 YOLO 推理（唯一推理入口）。
+
+        整批推理失败时逐帧返回 error 结果，仍保留各帧捕获 ts（不自造时间戳）。
+        """
         try:
-            outputs = self._run_yolo_batch(frames)
+            outputs = self._run_yolo_batch(frames, timestamps)
             for output in outputs:
                 output.success = True
             return outputs
         except Exception as e:
             logger.error(
-                "[%s] Batch inference failed, fallback to single: %s",
-                self.name, e, exc_info=True,
+                "[%s] Batch inference failed: %s", self.name, e, exc_info=True,
             )
-            return super().infer_batch(frames, contexts)
+            return [
+                FrameDetections(
+                    detections=[],
+                    metadata={"error": str(e)},
+                    timestamp=ts,
+                    success=False,
+                    error=str(e),
+                )
+                for ts in timestamps
+            ]
 
     def set_thresholds(
         self,

@@ -81,26 +81,39 @@ class RunController:
                 **get_client_config().cq_kwargs(),
             )
 
-            # 2c. storage supersede（start 侧两个 service 钩子并排，与 stop_run 拆除侧对称）：
-            #   ① persistence.start_run —— 清空旧 HLS step 目录（无 owner，纯 rmtree）；
-            #   ② inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 截断
-            #      旧 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
-            #   均在建新 CQ 之后、无活跃 worker 写该 (task,step) 之前，全程持 lock_for(task_id)。
-            persistence_manager.start_run(cq)
+            # 2c. 注册 CQ（COW 发布）。CQ 的 set/remove 均归 RunController，与 stop_run 的
+            #   client_manager.remove 对称（set 先、remove 后，镜像）。set 后的所有 setup 步
+            #   包进 try：任一步失败即回滚注销，避免 CQ 泄漏在注册表。
+            client_manager.set(task_id, cq)
+            try:
+                # storage supersede（start 侧两个 service 钩子并排，与 stop_run 拆除侧对称）：
+                #   ① persistence.start_run —— 清空旧 HLS step 目录（无 owner，纯 rmtree）；
+                #   ② inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 截断
+                #      旧 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
+                #   均在建新 CQ 之后、无活跃 worker 写该 (task,step) 之前，全程持 lock_for(task_id)。
+                persistence_manager.start_run(cq)
 
-            # 2d. start_workflow（换槽注册 + open_fresh + Actor）
-            if not inference_manager.start_workflow(cq):
-                raise AppError(
-                    message=f"Failed to start workflow for task {task_id}",
-                    task_id=task_id,
-                    step_id=cq.step_id,
-                    source_ip=source_ip,
+                # 2d. start_workflow（open_fresh + Actor；CQ 已由上面 set 注册）
+                if not inference_manager.start_workflow(cq):
+                    raise AppError(
+                        message=f"Failed to start workflow for task {task_id}",
+                        task_id=task_id,
+                        step_id=cq.step_id,
+                        source_ip=source_ip,
+                    )
+                logger.info("[RunController] workflow started: task_id=%s", task_id)
+
+                # 2e. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
+                stream_service.start_stream(task_id=task_id, stream_url=rtsp_url)
+                logger.info("[RunController] stream started: task_id=%s", task_id)
+            except Exception:
+                # 任一 setup 步失败：对称回滚（stop_run 尽力而为、永不抛：停 decoder/actor、
+                # close feature、client_manager.remove 注销 CQ）；expected=cq 身份 fence 防误清。
+                logger.warning(
+                    "[RunController] start_run failed for task=%s; rolling back", task_id
                 )
-            logger.info("[RunController] workflow started: task_id=%s", task_id)
-
-            # 2e. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
-            stream_service.start_stream(task_id=task_id, stream_url=rtsp_url)
-            logger.info("[RunController] stream started: task_id=%s", task_id)
+                self.stop_run(task_id, reason=f"start_rollback:{task_id}", expected=cq)
+                raise
 
             return {
                 "status": "success",

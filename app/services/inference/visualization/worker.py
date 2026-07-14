@@ -159,7 +159,6 @@ class VisualizationWorker:
         frame_data = Frame(
             timestamp=inference.timestamp,
             frame=annotated_frame,
-            inference_result=inference.detections,
         )
         cq.append_ca_processed(frame_data)
         cq.set_latest_rendered(frame_data)

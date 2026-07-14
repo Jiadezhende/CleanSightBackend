@@ -83,7 +83,7 @@ class MultiModelWorkerPool:
             推理结果列表
             
         数据流说明：
-            1. 提取 frames 和 contexts
+            1. 提取 frames 和 timestamps
             2. 调用各 model.infer_batch() → List[FrameDetections]
             3. 组装为 FrameInference
                FrameInference.detections = {
@@ -101,24 +101,17 @@ class MultiModelWorkerPool:
 
         n = len(batch)
         frames = [req.frame for req in batch]
-
-        # 构造错误上下文（每帧一个）：从捕获的 cq 派生运行坐标（task_id/step_id）+ source_ip（辅助）
-        contexts = [
-            {
-                "task_id": req.task_id,
-                "step_id": req.cq.step_id if req.cq else None,
-                "source_ip": req.cq.source_ip if req.cq else None,
-            }
-            for req in batch
-        ]
+        # 帧捕获时间戳（真值锚点，源自 Frame.timestamp）：穿透到 detector，
+        # 令每帧 FrameDetections.timestamp == FrameInference.timestamp，供下游多流对齐
+        timestamps = [req.timestamp for req in batch]
 
         # 并行执行所有模型的 infer_batch
         if self.use_cuda_stream:
             # CUDA Stream 并行版本
-            model_results = self._infer_batch_parallel_cuda(frames, contexts)
+            model_results = self._infer_batch_parallel_cuda(frames, timestamps)
         else:
             # 顺序推理版本
-            model_results = self._infer_batch_sequential(frames, contexts)
+            model_results = self._infer_batch_sequential(frames, timestamps)
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
         # model_results[i] = {task_name: FrameDetections}
@@ -140,7 +133,7 @@ class MultiModelWorkerPool:
     def _infer_batch_parallel_cuda(
         self,
         frames: List[np.ndarray],
-        contexts: List[Dict[str, Any]],
+        timestamps: List[float],
     ) -> List[Dict[str, FrameDetections]]:
         """CUDA Stream 并行推理。
 
@@ -148,13 +141,13 @@ class MultiModelWorkerPool:
         - 为每个模型启动异步推理（使用独立 CUDA Stream）
         - 使用 torch.cuda.synchronize() 等待所有 stream 完成
         - 合并结果
-        
+
         返回值说明：
             List[Dict[str, FrameDetections]]
             即：List[{task_name: FrameDetections(...)}]
         """
         if not TORCH_AVAILABLE:
-            return self._infer_batch_sequential(frames, contexts)
+            return self._infer_batch_sequential(frames, timestamps)
 
         # 启动异步推理
         async_results: List[tuple[str, List[FrameDetections]]] = []
@@ -167,7 +160,7 @@ class MultiModelWorkerPool:
                 start_time = time.time()
                 try:
                     # 调用 InferenceWorkflow.infer_batch （已经返回 FrameDetections 格式）
-                    batch_res = model.infer_batch(frames, contexts)
+                    batch_res = model.infer_batch(frames, timestamps)
                     async_results.append((model.name, batch_res))
 
                     # 记录推理延迟（成功）
@@ -189,17 +182,16 @@ class MultiModelWorkerPool:
                         error_type=type(e).__name__,
                     ).inc()
 
-                    # 返回失败结果
-                    n = len(frames)
+                    # 返回失败结果（保留各帧捕获 ts，不自造时间戳）
                     failed: List[FrameDetections] = [
                         FrameDetections(
                             detections=[],
                             metadata={"error": str(e)},
-                            timestamp=time.time(),
+                            timestamp=ts,
                             success=False,
                             error=str(e)
                         )
-                        for _ in range(n)
+                        for ts in timestamps
                     ]
                     async_results.append((model.name, failed))
 
@@ -219,7 +211,7 @@ class MultiModelWorkerPool:
     def _infer_batch_sequential(
         self,
         frames: List[np.ndarray],
-        contexts: List[Dict[str, Any]],
+        timestamps: List[float],
     ) -> List[Dict[str, FrameDetections]]:
         """顺序推理（不使用 CUDA Stream）。"""
         n = len(frames)
@@ -232,7 +224,7 @@ class MultiModelWorkerPool:
             start_time = time.time()
             try:
                 # 调用 InferenceTask.infer_batch （已经返回 FrameDetections 格式）
-                batch_res = model.infer_batch(frames, contexts)
+                batch_res = model.infer_batch(frames, timestamps)
                 for i in range(min(len(batch_res), n)):
                     merged[i][model.name] = batch_res[i]
 
@@ -255,7 +247,7 @@ class MultiModelWorkerPool:
                     merged[i][model.name] = FrameDetections(
                         detections=[],
                         metadata={"error": str(e)},
-                        timestamp=time.time(),
+                        timestamp=timestamps[i],
                         success=False,
                         error=str(e)
                     )
@@ -282,16 +274,16 @@ class MultiModelWorkerPool:
         dummy_frames = [
             np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(batch_size)
         ]
-        dummy_contexts = [{} for _ in range(batch_size)]
+        dummy_timestamps = [0.0] * batch_size
 
         start_time = time.time()
 
         try:
             # 执行一次完整推理（触发模型加载和CUDA初始化）
             if self.use_cuda_stream:
-                results = self._infer_batch_parallel_cuda(dummy_frames, dummy_contexts)
+                results = self._infer_batch_parallel_cuda(dummy_frames, dummy_timestamps)
             else:
-                results = self._infer_batch_sequential(dummy_frames, dummy_contexts)
+                results = self._infer_batch_sequential(dummy_frames, dummy_timestamps)
 
             elapsed = time.time() - start_time
 

@@ -1,4 +1,4 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-11
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -9,12 +9,14 @@
 ## API 与并发
 
 - `tests/test_api_concurrency.py`：并发 start、任务切换、不同 client 不互阻、terminate 锁。
+- `tests/test_start_rollback.py`：`start_run` setup 步失败 → 对称回滚注销 CQ（`stop_run(expected=cq)`），无泄漏。
 - `tests/test_task_message_api.py`：实时消息接口。
 - `tests/test_alarm_increment.py`：告警 gate、seq、自增和任务切换重置。
 
 ## 推理与时序
 
-- `tests/test_inference_stage_routing.py`：`current_step` 到 stage 路由。
+- `tests/test_inference_stage_routing.py`：`current_step` 到 stage 路由；`start_workflow` 不碰注册表（不 `set`）。
+- `tests/test_pool_ts_anchor.py`：帧捕获 ts 锚点不变式——pool 穿透 `timestamps` 到 detector，各帧 `FrameDetections.timestamp` 精确等于捕获 ts（供 `_zip_by_ts` 对齐）。
 - `tests/test_temporal_debounce.py`：时序去抖逻辑。
 - `tests/test_boundary_layers.py`：边界层行为。
 - `tests/test_exception_handling.py`：异常分类和处理。

@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-11
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -34,7 +34,7 @@ RTSP (仅 RTSP)
 
 ## 推理与时序（L1→L4）
 
-`StageAwareDispatcher` 轮询各 run `ca_ready`，按 stage 分组，pop 时**捕获 CQ 句柄**进 `DetectionTask`。每 stage 独立推理线程消费 batch，返回 `FrameInference`（携 `cq`）。写回由 `ModelWorkerService._write_back_results` 单入口完成，先判 `cq.is_active()`（迟到写落到 DRAINING/CLOSED 旧 CQ 被丢弃、不串台），再三写 `_slide_window` / `_latest_inference` / `FeatureStore`。`ClientTemporalActor` per-run ~1Hz 读 `_slide_window` 跑 operators，产前端事件 + 告警。详见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)。
+`StageAwareDispatcher` 轮询各 run `ca_ready`，按 stage 分组，pop 时**捕获 CQ 句柄**进 `DetectionTask`。每 stage 独立推理线程消费 batch，返回 `FrameInference`（携 `cq`）。**帧捕获 ts 是真值锚点**：`Frame.timestamp` 由 pool（`req.timestamp`）一路穿透到 `detector.infer_batch(frames, timestamps)`，写入各帧 `FrameDetections.timestamp`，令同帧多流 ts 精确相等——下游 `_zip_by_ts` 按此内连对齐，detector 不得自造时间戳（否则交集为空漏帧）。写回由 `ModelWorkerService._write_back_results` 单入口完成，先判 `cq.is_active()`（迟到写落到 DRAINING/CLOSED 旧 CQ 被丢弃、不串台），再三写 `_slide_window` / `_latest_inference` / `FeatureStore`。`ClientTemporalActor` per-run ~1Hz 读 `_slide_window` 跑 operators，产前端事件 + 告警。详见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)。
 
 ## 可视化与前端
 
