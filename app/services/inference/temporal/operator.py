@@ -94,7 +94,7 @@ class Operator(ABC):
         ]
 
 
-class GRUOperator(Operator):
+class TemporalOperator(Operator):
     def __init__(
         self,
         name: str,
@@ -134,7 +134,7 @@ class GRUOperator(Operator):
         return self.actions.get(action_id, f"action_{action_id}")
 
     def _ensure_model_loaded(self) -> None:
-        """惰性加载 GRUClassifier 模型（首次推理时触发，双重检查锁保证线程安全）。"""
+        """惰性加载时序模型 （首次推理时触发，双重检查锁保证线程安全）。"""
         if self._model is not None:
             return
         with self._model_load_lock:
@@ -156,15 +156,13 @@ class GRUOperator(Operator):
                 raise
 
     def infer(self, features: "torch.Tensor") -> List[int]:
-        """GRUClassifier 推理：返回每个时间步的预测类别。"""
+        """时序模型推理：返回每个时间步的预测类别。"""
         import torch
         self._ensure_model_loaded()
-        if features.dim() == 2:
-            features = features.unsqueeze(0)
 
         features = features.to(self._device)
 
         with torch.no_grad():
             logits = self._model(features)
 
-        return logits.argmax(dim=-1).squeeze(0).tolist()
+        return logits
