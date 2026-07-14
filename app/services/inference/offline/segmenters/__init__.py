@@ -5,4 +5,6 @@
 YAML `offline` 段切 `class`，实现不散落到框架层（base/runner/cli）。
 """
 
-__all__: list[str] = []
+from app.services.inference.offline.segmenters.brush_rule import BrushRuleSegmenter
+
+__all__: list[str] = ["BrushRuleSegmenter"]
