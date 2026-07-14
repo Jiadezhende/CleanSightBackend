@@ -136,9 +136,7 @@ class CleanOperator(TemporalOperator):
 
     def judge(self) -> Tuple[List[str], List[Alarm]]:
         """读 self._sm 出 (overlay 文案, 实时告警)。"""
-        events = (
-            [f"Action: {self._action_name(self._sm['latest_action'])}"]
-        )
+        events = [f"Action: {self._action_name(self._sm['latest_action'])}"]
         alarms = []
         return events, alarms
 
