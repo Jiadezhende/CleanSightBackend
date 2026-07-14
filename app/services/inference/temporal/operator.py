@@ -118,18 +118,26 @@ class GRUOperator(Operator):
         self.hidden = hidden
         self.num_layers = num_layers
 
-        self.objects = objects
-        self.actions = actions
+        self.objects = objects  # id -> name
+        self.actions = actions  # id -> name
 
         self._model: torch.nn.Module = None
         self._model_load_lock = threading.Lock()
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def get_object_name(self, class_id: int) -> str:
-        return self.objects.get(class_id, f"object_{class_id}")
- 
-    def get_action_name(self, class_id: int) -> str:
-        return self.actions.get(class_id, f"action_{class_id}")
+    def _object_id(self, object_name: str) -> int:
+        id_to_name = {v: k for k, v in self.objects.items()}
+        return id_to_name.get(object_name, -1)
+    
+    def _object_name(self, object_id: int) -> str:
+        return self.objects.get(object_id, f"object_{object_id}")
+
+    def _action_id(self, action_name: str) -> int:
+        id_to_name = {v: k for k, v in self.actions.items()}
+        return id_to_name.get(action_name, -1)
+    
+    def _action_name(self, action_id: int) -> str:
+        return self.actions.get(action_id, f"action_{action_id}")
 
     def _ensure_model_loaded(self) -> None:
         """惰性加载 GRUClassifier 模型（首次推理时触发，双重检查锁保证线程安全）。"""

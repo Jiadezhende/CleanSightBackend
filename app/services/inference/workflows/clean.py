@@ -142,7 +142,7 @@ class CleanOperator(GRUOperator):
     def judge(self) -> Tuple[List[str], List[Alarm]]:
         """读 self._sm 出 (overlay 文案, 实时告警)。"""
         events = (
-            [f"Action: {self.get_action_name(self._sm['latest_action'])}"]
+            [f"Action: {self._action_name(self._sm['latest_action'])}"]
         )
         alarms = []
         return events, alarms
@@ -209,7 +209,8 @@ class CleanOperator(GRUOperator):
             class_features = {}
             for stream_name, frame_detections in aligned.by_source.items():
                 for detection in frame_detections.detections:
-                    class_features.setdefault(detection.class_id, []).append(detection)
+                    object_id = self._object_id(detection.class_name)
+                    class_features.setdefault(object_id, []).append(detection)
 
             for class_id, detections in class_features.items():
                 if class_id >= self.num_objects:
