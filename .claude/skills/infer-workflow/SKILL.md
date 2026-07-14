@@ -1,38 +1,46 @@
 ---
 name: infer-workflow
-description: "Create a new detection workflow for CleanSightBackend. Use this skill whenever the user asks to create a new detection task, add a new workflow, implement a new XX detection, add a Detector/Analyzer/Judge, or follow the workflow pattern. Trigger on: 新建workflow、新建检测任务、按workflow规范、创建XX检测、add a workflow for、implement detection workflow、新建检测器、新建时序分析器、新建Detector、新建Judge."
+description: "Create a new detection workflow for CleanSightBackend. Use this skill whenever the user asks to create a new detection task, add a new workflow, implement a new XX detection, add a Detector/Operator (流源/流算子), or follow the workflow pattern. Trigger on: 新建workflow、新建检测任务、按workflow规范、创建XX检测、add a workflow for、implement detection workflow、新建检测器、新建流算子、新建Detector、新建Operator、新建时序算子."
 ---
 
 # 检测 Workflow 开发规范
 
-一个检测任务 = **Detector(L1) + TemporalAnalyzer(L3) + Judge(L4)**，由 YAML 装配。
+一个检测任务 = **流源 Detector + 流算子 Operator**，由 YAML 的 `detectors[]` + `rules[]` 装配。
 
-骨架在 [references/templates.md](references/templates.md)，字段在 [references/data-models.md](references/data-models.md)，装配在 [references/yaml-config.md](references/yaml-config.md)。**架构原理（为什么这样分层）见 [workflows/claude.md](../../../app/services/inference/workflows/claude.md)，本 skill 只讲怎么做。**
+骨架在 [references/templates.md](references/templates.md)，字段在 [references/data-models.md](references/data-models.md)，装配在 [references/yaml-config.md](references/yaml-config.md)。**架构原理（为什么两层、流源/流算子怎么分）见 [workflows/claude.md](../../../app/services/inference/workflows/claude.md) 与 [operator.py](../../../app/services/inference/temporal/operator.py) docstring，本 skill 只讲怎么做。** 内嵌时序模型（GRU/Transformer）的算子接入另见 `/temporal-review`。
 
-## 三层契约
+## 两层契约
 
 | 层 | 基类 | 实例 | 输入 → 输出 | 必实现 |
 |----|------|------|-----------|--------|
-| L1 Detector | `Detector` / `YOLODetector` | 多 Client 共享 | 帧 → `DetectionOutput` | `prepare_visualization_data`；YOLO 优先 override `infer_batch` |
-| L3 TemporalAnalyzer | `TemporalAnalyzer` | 每 Client 一个 | `List[DetectionOutput]` 滑窗 → `List[EventFact]` | `trans` / `infer` / `post_process`（**别 override `run`**） |
-| L4 Judge | `Judge` | 每 Client 一个 | `List[EventFact]` → `(events, alarms)` | `step`；可选 `finalize` |
+| 流源 Detector | `Detector` / `YOLODetector` | 无状态，多 Client 共享 | 帧 → `FrameDetections` | `prepare_visualization_data`；YOLO 优先 override `infer_batch(frames, timestamps)` |
+| 流算子 Operator | `Operator`（或 `GRUOperator`） | 每 Client 一个，持 `_sm` | 订阅流滑窗 → `(events, alarms)` | `analyze(windows)` 推 `_sm`、`judge()` 出结果；可选 `finalize()` |
 
-- **Analyzer 只量事实（产 EventFact），Judge 才下判断（出告警）**。阈值/required 放 Judge，不进 `EventFact.meta`。
-- **绑定**：`Detector.name == Analyzer.name == Judge.name`，三者必须一致（系统据此用 `get_slide_window(name)` 串联）。运行时 `analyzer.run(window) → judge.step(facts)` 同步两步走。
+- **合并即真源**：analyze（量事实）+ judge（下判断）共享同一份 `self._sm`，不再有 EventFact 对象间传输、不再有双状态机同步。
+- **身份两维正交**：`name` = 算子自身/输出身份（日志/告警归属）；`subscribes` = 输入流清单（**显式必填**，元素 = 上游 `detector.name`）。**算子名 ≠ 流名。**
+- **绑定**：`detector.name` = 流名 = `slide_window` key = 某算子 `subscribes` 里的元素。系统据此把流喂给订阅它的算子。
 
-## 两种告警模式（都在 Judge）
+## 多流对齐（Operator 基类工具）
 
-| | 实时 (REALTIME) | 结算 (SETTLEMENT) |
+`analyze(windows)` 收到 `{流名: 该流滑窗快照(ts 升序)}`，用基类工具取历史，别自己重造窗：
+
+- 单订阅：`self.primary_window(windows)` → 首个订阅流裁到 `window_seconds` 感受野。
+- 多订阅：`self._zip_by_ts(windows)` → 按 ts inner-join 对齐成 `List[AlignedFrame]`（仅保留各流都到齐的 ts；依赖同帧多流 ts 精确相等）。
+- `self._clip(window)` → 裁到感受野的底层工具。
+
+## 两种告警模式（都在 Operator）
+
+| | 实时 (realtime) | 结算 (settlement) |
 |---|---|---|
-| 触发 | `Judge.step()`，1Hz 上升沿 | `Judge.finalize()`，terminate 时一次 |
+| 触发 | `judge()`，1Hz 上升沿 | `finalize()`，terminate 时一次 |
 | 防重 | 锁存 `self._sm["alarming"]`（0→1 发，1→0 复位） | 无需锁存 |
-| YAML | 默认 | 加 `realtime: false` |
+| YAML | `realtime: true`（纳入 signals_10s） | `realtime: false` |
 
-实时告警边沿触发模板（在 `step()` 内）：
+实时告警边沿触发模板（在 `judge()` 内）：
 ```python
 if is_triggered and not self._sm["alarming"]:
     self._sm["alarming"] = True
-    alarms.append(AlarmInfo(...))
+    alarms.append(Alarm(..., metric=AlarmMetric.XXX))   # metric 由算子显式填
 elif not is_triggered and self._sm["alarming"]:
     self._sm["alarming"] = False
 ```
@@ -46,12 +54,12 @@ new_frames = [f for f in window if f.timestamp > last_ts]
 for f in new_frames: ...                       # 累加 / 喂 ByteTrack
 if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 ```
-⚠️ **指标窗口自管**：在 `self._sm` 维护定长 history 按 `self.window_seconds` 裁剪（见 [bubble.py](../../../app/services/inference/workflows/bubble.py) 的 `new_count_history`），**别**把 `get_slide_window` 返回长度当指标窗口。
+⚠️ **指标窗口自管**：`primary_window`/`_zip_by_ts` 已把窗裁到感受野，但派生 history（如出生率 `new_count_history`）仍要在 `self._sm` 里按 `self.window_seconds` 自行裁剪（见 [bubble.py](../../../app/services/inference/workflows/bubble.py)）。
 
-## Analyzer.infer() 两条路径
+## Operator.analyze() 两条路径
 
-- **纯逻辑状态机**（默认，bubble/bending/mock）：推进 `self._sm` 算指标。
-- **内嵌轻量时序模型**（按需）：`__init__` 里 `torch.jit.load(path).eval()`，`infer()` 用 `torch.no_grad()` 前向。规则：每实例自加载（**不建 registry/基类、不转 onnx**）；⚠️ **滑窗长度必须 ≥ 模型感受域**，不足则不前向。重模型全序列分割（MS-TCN 类）属离线链路，不在此。
+- **纯逻辑状态机**（默认，bubble/bending/mock）：游标推进 `self._sm` 算指标/计数。
+- **内嵌因果序列模型**（`GRUOperator` 子类，见 clean.py）：基类惰性加载 `GRUClassifier`、给 `infer(features)` 出逐帧类别；子类只写 `_adapt_to_features(aligned)→Tensor` + analyze/judge。规则：**模型必须因果**（单向 GRU/causal mask，需未来帧的 MS-TCN 类走离线链路）；⚠️ **窗口帧数 ≥ 感受域**，不足加 warm-up guard（`min_frames`）不前向。接入细则与上线门禁走 `/temporal-review`。
 
 ## 选模板（→ [templates.md](references/templates.md)）
 
@@ -60,29 +68,27 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 | YOLO + 实时告警（最常见） | A | [bubble.py](../../../app/services/inference/workflows/bubble.py) |
 | 无模型 / 纯算法 | B | [mock.py](../../../app/services/inference/workflows/mock.py) |
 | 结算式告警 | C | [bending.py](../../../app/services/inference/workflows/bending.py) |
-| 在线轻量序列模型（analyzer 内嵌） | D | infer() 路径② |
+| 内嵌因果序列模型（多流 GRU） | D | [clean.py](../../../app/services/inference/workflows/clean.py) |
 
 ## 必查清单（⚠️ = 高频 bug）
 
-**Detector**
+**Detector（流源，无状态）**
 - [ ] 选基类：YOLO → `YOLODetector`；无模型 → `Detector`
-- [ ] `name` 写死、三层一致；实现 `prepare_visualization_data`
-- [ ] 优先 override `infer_batch`（try 批量 + except 逐帧 fallback）
-- [ ] ⚠️ batch 与 fallback 的业务字段赋值逻辑一致
+- [ ] `name` 写死（= 产出流名）；实现 `prepare_visualization_data` 返回 `RenderSpec`
+- [ ] YOLO 优先 override `infer_batch(frames, timestamps)`（try 批量 + except 逐帧 fallback）
+- [ ] ⚠️ batch 与 fallback 的业务字段赋值逻辑一致；`timestamps[i]` 原样写入 `FrameDetections.timestamp`（**别自造时间戳**，否则多流 `_zip_by_ts` 漏帧）
 - [ ] ⚠️ `class_name` 取自模型 `result.names`，与训练类别名严格一致（不归一化）
 
-**Analyzer（只产 EventFact）**
-- [ ] `__init__` 全量初始化 `self._sm`（含游标 `last_ts`）
-- [ ] 实现 `trans/infer/post_process`；`infer` 推游标算指标，`post_process` 包成 EventFact，**不判告警**
-- [ ] ⚠️ 指标窗口自管；模型型：窗口 ≥ 感受域 + `torch.no_grad()`
-
-**Judge（出告警）**
-- [ ] 阈值/required 进构造参数；`self._sm` 存决策态（如 `{"alarming": False}`）
-- [ ] `step`：先 `frame = self._frame(facts)` 再按 signal 名取值；实时走上升沿锁存
-- [ ] 结算告警 override `finalize`
+**Operator（流算子，analyze 推 `_sm` / judge 出告警）**
+- [ ] `__init__` 全量初始化 `self._sm`（含游标 `last_ts`）；`subscribes` 显式传入
+- [ ] `analyze(windows)` 用 `primary_window`/`_zip_by_ts` 取窗、推游标算指标，**不返回值**
+- [ ] `judge()` 读 `_sm` 出 `(events, alarms)`：events 是 overlay 字符串、alarms 是 `Alarm`
+- [ ] ⚠️ 指标窗口自管；模型型：窗口 ≥ 感受域 + warm-up guard（细则走 `/temporal-review`）
+- [ ] 实时走上升沿锁存 `_sm["alarming"]`；纯结算 override `finalize()`
 
 **装配**（→ [yaml-config.md](references/yaml-config.md)）
-- [ ] `inference_config.yaml` 加 `class`/`analyzer_class`/`judge_class` + 对应 `*_params`；纯结算加 `realtime: false`
-- [ ] [workflows/\_\_init\_\_.py](../../../app/services/inference/workflows/__init__.py) 补三个类的 import 与 `__all__`
+- [ ] `inference_config.yaml` 对应 stage：`detectors[]` 加 detector（`name`/`class`/`params`），`rules[]` 加 operator（`name`/`subscribes`/`realtime`/`class`/`params`）
+- [ ] 新告警指标 → 在 [AlarmMetric](../../../app/domain/alarm.py) 枚举补一项，`judge()` 里 `metric=` 显式填
+- [ ] **无需**改 [workflows/\_\_init\_\_.py](../../../app/services/inference/workflows/__init__.py)——它是纯包标记，StageFactory 按 `class` 全路径 importlib 实例化
 
-> 接口签名照抄基类；`AlarmInfo` 只有 4 字段（`alarm_mode`/`alarm_metric` 系统自动补）。
+> 接口签名照抄基类；`Alarm` 核心 5 字段（`alarm_type`/`alarm_level`/`alarm_message`/`metric`/`metadata`），`mode`/`stage`/`seq`/`timestamp` 落库时自动补。
