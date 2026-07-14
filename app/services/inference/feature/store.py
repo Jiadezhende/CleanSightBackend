@@ -247,7 +247,8 @@ class FeatureStore(_JsonlBuffer):
         if not path.exists():
             return outputs
         try:
-            with path.open("r", encoding="utf-8") as f:
+            # utf-8-sig 容忍 Windows 手写 features.jsonl 的 UTF-8 BOM；后端自身写出的无 BOM 亦正常。
+            with path.open("r", encoding="utf-8-sig") as f:
                 for line in f:
                     line = line.strip()
                     if not line:

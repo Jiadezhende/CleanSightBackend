@@ -1,9 +1,11 @@
-"""占位离线分割策略：presence 型动作分段（真实时序大模型落地前的 stand-in）。
+"""Mock 离线分割策略：presence 型动作分段（离线链路的无权重 CPU 验证 stand-in）。
 
-算法：把订阅的多路 detector 序列按 ts 归并成统一时间线，某 ts「有动作」= 任一订阅 source
-在该 ts 至少有一个检测框；相邻「有动作」帧归并为一段，产出一条 `SegmentFact`。用最少假设让
-整条离线入口端到端跑通、供测试。真实策略（吃 bbox 特征的时序模型）后续按同基类新增一个模块、
-YAML `offline.class` 切过去即可——其 `preprocess` 在此 override 做张量化/归一化/定长编码。
+对齐 workflows/mock.py 的 MockDetector 定位：不接真实模型、纯启发式，用最少假设让整条离线
+入口端到端跑通。算法：把订阅的多路序列按 ts 归并，某 ts「有动作」= 任一订阅 source 在该 ts
+至少有一个检测框；相邻「有动作」帧归并成一段，产一条 SegmentFact。与检测类别无关。
+
+接进 MOCK stage 的 `offline` 配置（见 config/inference_config.yaml），用未配置的数字 step_id
+（如 -1）经 resolve_stage 回退到 MOCK 手动跑，验证 Store→路由→策略→Ledger 全链路。
 
 不访问 FeatureStore / FactLedger / ClientManager / DB（纯算法）。
 """
@@ -14,11 +16,11 @@ from typing import Any, List, Mapping, Sequence
 
 from app.domain.detection import FrameDetections
 from app.services.inference.models import SegmentFact
-from app.services.inference.offline.base import OfflineSegmenter
+from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
-class CleanActionSegmenter(OfflineSegmenter):
-    """presence 型占位分段器。
+class MockSegmenter(OfflineSegmenter):
+    """presence 型占位分段器（MOCK 链路 stand-in）。
 
     Args:
         name: 策略身份（= SegmentFact.source），工厂注入。

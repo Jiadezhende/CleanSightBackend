@@ -92,7 +92,18 @@ stages:
         class: app.services.inference.workflows.mock.MockOperator
         params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
-    offline: {}
+    # 离线段：本次唯一启用的 offline 配置，作「能端到端跑的配置化路由样例」。
+    # 离线是独立进程手动跑（python -m app.services.inference.offline.cli run --step-id -1），
+    # 不会被在线链路自动执行；未配数字 step_id(如 -1) 经 resolve_stage 回退到本 MOCK stage。
+    # 生产 stage 1/2 的 offline 保持 {} 不启用。
+    offline:
+      enabled: true
+      name: mock_offline
+      subscribes: [mock]
+      class: app.services.inference.offline.segmenters.mock.MockSegmenter
+      params:
+        label: mock_action
+        min_frames: 1
 
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到

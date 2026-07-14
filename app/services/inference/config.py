@@ -59,6 +59,15 @@ class InferenceConfig:
         """获取指定 Stage 的配置"""
         return self.stages.get(stage_name)
 
+    def resolve_stage(self, step_id: Any) -> str:
+        """step_id → stage 配置主键：命中即恒等返回，未知/未配回退 "MOCK"（透传兜底）。
+
+        与 `InferenceManager.resolve_stage` 同规则（同源同义）：离线链路用本配置级解析器把
+        数字存储键（如未配的 -1）解析成 stage 配置 key，**存储读写仍用原数字 step_id**（二者正交）。
+        """
+        step_key = str(step_id)
+        return step_key if step_key in self.stages else "MOCK"
+
     def list_stages(self) -> List[str]:
         """列出所有 Stage 名称"""
         return list(self.stages.keys())

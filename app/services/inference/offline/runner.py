@@ -13,6 +13,7 @@ Runner 自建绑定 `settings.storage_base_dir` 的 FeatureStore / FactLedger（
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass
@@ -57,15 +58,18 @@ class OfflineRunner:
         config: Optional[InferenceConfig] = None,
     ):
         base = Path(base_dir) if base_dir is not None else settings.storage_base_dir
+        self._base_dir = Path(base)
         self._feature_store = FeatureStore(base)
         self._fact_ledger = FactLedger(base)
         self._config_path = config_path
         self._config = config  # 显式注入优先（测试用）；否则走 load_stage_config 单例
 
     def run(self, spec: OfflineRunSpec) -> OfflineRunResult:
-        stage_key = str(spec.step_id)
         config = self._config if self._config is not None else load_stage_config(self._config_path)
 
+        # 存储 step_id（数字）与 stage 配置 key 正交：数字命中即恒等，未知回退 MOCK（与在线同源）。
+        # 存储读写始终用原 spec.step_id，不用 stage_key。
+        stage_key = config.resolve_stage(spec.step_id)
         if config.get_stage_config(stage_key) is None:
             return OfflineRunResult("skipped", None, 0, f"未知 stage '{stage_key}'")
 
@@ -94,11 +98,30 @@ class OfflineRunner:
         self._fact_ledger.replace_segments(
             spec.task_id, spec.step_id, producer, validated
         )
+        self._maybe_write_debug(spec, segmenter)
         logger.info(
             "[OfflineRunner] completed task=%s step=%s producer=%s segments=%d",
             spec.task_id, spec.step_id, producer, len(validated),
         )
         return OfflineRunResult("completed", producer, len(validated))
+
+    def _maybe_write_debug(self, spec: OfflineRunSpec, segmenter) -> None:
+        """策略若产逐帧调试产物（debug_result 非 None），落一份 offline_inference_result.json。
+
+        与 facts.jsonl 同目录，供调试/对比；写失败只告警不影响已成功的事实落盘。
+        """
+        debug = segmenter.debug_result()
+        if debug is None:
+            return
+        path = self._base_dir / str(spec.task_id) / str(spec.step_id) / "offline_inference_result.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"task_id": spec.task_id, "step_id": spec.step_id, **debug}
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("[OfflineRunner] 逐帧调试 JSON 落盘失败 %s: %s", path, e)
 
     @staticmethod
     def _validate_and_stamp(facts: List[SegmentFact], producer: str) -> List[SegmentFact]:
