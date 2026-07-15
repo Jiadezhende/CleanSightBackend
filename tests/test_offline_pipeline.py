@@ -267,10 +267,40 @@ class TestCleanSegmenter:
         }
         mi = seg.preprocess(streams)
         assert isinstance(mi, ModelInput)
-        assert mi.frame_count == 4 and mi.feature_dim == 68  # hand top-2 后为 68 维
+        assert mi.frame_count == 4 and mi.feature_dim == 113  # v2: hand top-2 + top-1/impute/relations
+        assert mi.feature_version == "clean_bbox_v2_top1_impute"
         segs = seg.segment(mi)
         assert [s.label for s in segs] == ["short_brush_cleaning"]
         assert all(s.source == "clean_seg" for s in segs)
+
+    def test_each_clean_model_uses_own_feature_recipe(self):
+        from app.services.inference.offline.segmenters.clean import (
+            CleanASFormerSegmenter,
+            CleanBiGRUSegmenter,
+            CleanMSTCNBiLSTMSegmenter,
+        )
+        streams = {
+            "clean_large": [_clean_frame(t)["clean_large"] for t in (0.1, 0.2, 0.3, 0.4)],
+            "clean_small": [_clean_frame(t)["clean_small"] for t in (0.1, 0.2, 0.3, 0.4)],
+        }
+
+        mstcn = CleanMSTCNBiLSTMSegmenter(name="m", subscribes=["clean_large", "clean_small"], fps=10.0)
+        asformer = CleanASFormerSegmenter(name="a", subscribes=["clean_large", "clean_small"], fps=10.0)
+        bigru = CleanBiGRUSegmenter(name="b", subscribes=["clean_large", "clean_small"], fps=10.0)
+
+        mstcn_input = mstcn.preprocess(streams)
+        asformer_input = asformer.preprocess(streams)
+        bigru_input = bigru.preprocess(streams)
+
+        assert (mstcn.feature_method, mstcn_input.feature_dim, mstcn_input.feature_version) == (
+            "v2", 113, "clean_bbox_v2_top1_impute",
+        )
+        assert (asformer.feature_method, asformer_input.feature_dim, asformer_input.feature_version) == (
+            "business_priors", 121, "clean_bbox_v2_top1_impute+business_priors",
+        )
+        assert (bigru.feature_method, bigru_input.feature_dim, bigru_input.feature_version) == (
+            "window_stats+business_priors", 249, "clean_bbox_v2_top1_impute+center_window+business_priors",
+        )
 
     def test_debug_result_has_frame_predictions(self):
         from app.services.inference.offline.segmenters.clean import CleanSegmenter

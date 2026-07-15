@@ -25,10 +25,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
+import numpy as np
+
 from app.domain.detection import Detection, FrameDetections
 from app.services.inference.models import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
+
+FEATURE_VERSION = "clean_bbox_v2_top1_impute"
 
 ACTION_LABELS = [
     "idle",
@@ -79,20 +83,24 @@ class ModelInput:
     """clean 离线模型输入。
 
     features:
-        [T, F] 数值特征矩阵。当前 F=68，包含 hand top-2、其它目标几何/速度、
-        目标对距离和时间位置编码。
+        [T, F] 数值特征矩阵。基础 v2 为 113 维；具体模型可在
+        transform_features() 内扩展为 121/249 等模型专属输入。
     feature_names:
         features 每一列的名字，便于训练仓和后端排查对齐问题。
     timestamps:
         每一行特征对应的原始帧时间戳。
     fps:
         兜底采样率。speed 优先用真实 timestamp 的 dt 计算，dt 异常时才用 fps。
+    feature_version:
+        特征工程版本。加载 .pt 权重时必须和 checkpoint 内记录的 feature_version /
+        feature_names 对齐，否则说明权重和后端输入不匹配。
     """
 
     features: List[List[float]]
     feature_names: List[str]
     timestamps: List[float]
     fps: float
+    feature_version: str = FEATURE_VERSION
 
     @property
     def frame_count(self) -> int:
@@ -109,6 +117,7 @@ class _ObjectBox:
     cy: float
     area: float
     score: float
+    conf: float
 
 
 @dataclass
@@ -124,18 +133,17 @@ class _ObjectStats:
 
 
 class FeatureVectorizer:
-    """把 clean 检测框序列转换成固定维时序特征。
+    """把 clean 检测框序列转换成 v2 固定维时序特征。
 
-    hand 使用 top-2 规则：
-        两只手是不同实体，不能简单面积加权成一个中心点。这里每帧按 score 选出
-        最可信的两个 hand，分别写入 hand_top1 / hand_top2 槽位。
+    基础特征与 offline-model 的 `clean_bbox_v2_top1_impute` 对齐：
+        - hand 使用 top-2 槽位；
+        - 其它目标使用 top-1，不做同类多框加权平均；
+        - 每个目标包含 present/conf/cx/cy/area/speed/missing_age/imputed；
+        - 对关键目标对补 valid/dist/delta；
+        - 最后补时间位置编码。
 
-    其它对象:
-        同类多框按 confidence * area 加权聚合，保留 count/cx/cy/area/speed。
-
-    speed:
-        使用当前帧和该对象上一次出现帧的真实 timestamp 差值 dt 计算；
-        dt 非法时才使用 fps 兜底。
+    本类只负责产出基础 v2。窗口统计、业务先验等模型专属增强由
+    `_CleanTorchSegmenter.transform_features()` 分发给具体模型类。
     """
 
     def __init__(self, frame_width: int = 640, frame_height: int = 480):
@@ -143,71 +151,58 @@ class FeatureVectorizer:
         self.frame_height = max(1, int(frame_height))
 
     def transform(self, frames: Sequence[FrameDetections], fps: float) -> ModelInput:
-        feature_names = self.feature_names()
         timestamps = [float(f.timestamp) for f in frames]
-        frame_count = max(1, len(frames))
-        default_dt = 1.0 / max(float(fps), 1e-6)
+        frame_count = len(frames)
+        if frame_count <= 0:
+            return ModelInput(features=[], feature_names=self.feature_names(), timestamps=[], fps=float(fps))
 
-        last_center: Dict[str, Tuple[float, float] | None] = {}
-        last_ts: Dict[str, float] = {}
-        rows: List[List[float]] = []
-
-        for idx, frame in enumerate(frames):
-            ts = float(frame.timestamp)
-            boxes = self._collect_boxes(frame)
-            hand_slots = self._top_hand_slots(boxes.get("hand", []))
-            object_stats = self._collect_object_stats(boxes)
-
-            row: List[float] = []
-            centers: Dict[str, List[Tuple[float, float]]] = {}
-            present: Dict[str, bool] = {}
-
-            hand_count = float(len(boxes.get("hand", [])))
-            row.append(min(hand_count, 3.0) / 3.0)
-            present["hand"] = hand_count > 0
-            centers["hand"] = []
-            for slot_idx, slot in enumerate(hand_slots, start=1):
-                key = f"hand_top{slot_idx}"
-                speed = self._speed(key, slot, ts, last_center, last_ts, default_dt)
-                row.extend([1.0 if slot.present else 0.0, slot.cx, slot.cy, slot.area, speed])
-                if slot.present:
-                    centers["hand"].append((slot.cx, slot.cy))
-
-            for obj in OBJECTS:
-                if obj == "hand":
-                    continue
-                stat = object_stats.get(obj, _ObjectStats())
-                speed = self._speed(obj, stat, ts, last_center, last_ts, default_dt)
-                row.extend([min(stat.count, 3.0) / 3.0, stat.cx, stat.cy, stat.area, speed])
-                present[obj] = stat.present
-                centers[obj] = [(stat.cx, stat.cy)] if stat.present else []
-
-            for left, right in PAIR_FEATURES:
-                valid = 1.0 if present.get(left) and present.get(right) else 0.0
-                dist = 0.0
-                if valid:
-                    dist = self._min_center_distance(centers[left], centers[right])
-                row.extend([valid, dist])
-
-            t_norm = 0.0 if frame_count <= 1 else idx / (frame_count - 1)
-            row.extend([t_norm, math.sin(2 * math.pi * t_norm), math.cos(2 * math.pi * t_norm)])
-            rows.append(row)
-
-        return ModelInput(features=rows, feature_names=feature_names, timestamps=timestamps, fps=float(fps))
+        effective_fps = self._effective_fps(timestamps, float(fps))
+        object_arrays = self._collect_object_arrays(frames)
+        features, names = self._build_feature_matrix(object_arrays, frame_count, effective_fps)
+        return ModelInput(
+            features=features.tolist(),
+            feature_names=names,
+            timestamps=timestamps,
+            fps=effective_fps,
+            feature_version=FEATURE_VERSION,
+        )
 
     @staticmethod
     def feature_names() -> List[str]:
-        names = ["hand_count"]
-        for slot in ("hand_top1", "hand_top2"):
-            names.extend([f"{slot}_present", f"{slot}_cx", f"{slot}_cy", f"{slot}_area", f"{slot}_speed"])
-        for obj in OBJECTS:
-            if obj == "hand":
-                continue
-            names.extend([f"{obj}_count", f"{obj}_cx", f"{obj}_cy", f"{obj}_area", f"{obj}_speed"])
-        for left, right in PAIR_FEATURES:
-            names.extend([f"{left}_to_{right}_valid", f"{left}_to_{right}_dist"])
-        names.extend(["t_norm", "t_sin", "t_cos"])
-        return names
+        return FeatureVectorizer._build_feature_matrix({name: [] for name in OBJECTS}, 1, 7.5)[1]
+
+    def _collect_object_arrays(self, frames: Sequence[FrameDetections]) -> Dict[str, List[np.ndarray]]:
+        frame_count = len(frames)
+        out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
+        for idx, frame in enumerate(frames):
+            width, height = self._frame_size(frame)
+            for det in frame.detections:
+                obj = OBJECT_ALIASES.get(str(det.class_name))
+                if obj is None:
+                    continue
+                cx, cy, area = self._bbox_to_center_area(det, width, height)
+                arr = np.zeros((frame_count, 5), dtype=np.float32)
+                arr[idx] = (
+                    1.0,
+                    float(cx),
+                    float(cy),
+                    float(area),
+                    max(0.0, min(1.0, float(det.confidence))),
+                )
+                out[obj].append(arr)
+        return out
+
+    @staticmethod
+    def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
+        if len(timestamps) < 2:
+            return max(float(fallback_fps), 1e-6)
+        deltas = [
+            b - a for a, b in zip(timestamps[:-1], timestamps[1:])
+            if math.isfinite(b - a) and (b - a) > 1e-6
+        ]
+        if not deltas:
+            return max(float(fallback_fps), 1e-6)
+        return max(1.0 / float(np.median(np.asarray(deltas, dtype=np.float32))), 1e-6)
 
     def _collect_boxes(self, frame: FrameDetections) -> Dict[str, List[_ObjectBox]]:
         width, height = self._frame_size(frame)
@@ -217,8 +212,9 @@ class FeatureVectorizer:
             if obj is None:
                 continue
             cx, cy, area = self._bbox_to_center_area(det, width, height)
-            score = max(0.0, float(det.confidence)) * max(area, 1e-6)
-            out[obj].append(_ObjectBox(cx=cx, cy=cy, area=area, score=score))
+            conf = max(0.0, min(1.0, float(det.confidence)))
+            score = conf * math.sqrt(max(area, 1e-6))
+            out[obj].append(_ObjectBox(cx=cx, cy=cy, area=area, score=score, conf=conf))
         return out
 
     def _frame_size(self, frame: FrameDetections) -> Tuple[int, int]:
@@ -247,59 +243,181 @@ class FeatureVectorizer:
         return (nx1 + nx2) * 0.5, (ny1 + ny2) * 0.5, min(1.0, bw * bh)
 
     @staticmethod
-    def _top_hand_slots(hands: Sequence[_ObjectBox]) -> List[_ObjectStats]:
-        selected = sorted(hands, key=lambda b: b.score, reverse=True)[:2]
-        slots = [
-            _ObjectStats(count=1.0, cx=box.cx, cy=box.cy, area=box.area)
-            for box in selected
-        ]
-        while len(slots) < 2:
-            slots.append(_ObjectStats())
-        return slots
+    def _as_box5(row: np.ndarray) -> np.ndarray:
+        if row.shape[0] >= 5:
+            return row[:5].astype(np.float32)
+        out = np.zeros(5, dtype=np.float32)
+        out[: min(4, row.shape[0])] = row[:4]
+        out[4] = 1.0 if out[0] > 0 else 0.0
+        return out
 
     @staticmethod
-    def _collect_object_stats(boxes: Dict[str, List[_ObjectBox]]) -> Dict[str, _ObjectStats]:
-        stats: Dict[str, _ObjectStats] = {}
-        for obj, entries in boxes.items():
-            if obj == "hand" or not entries:
+    def _box_score(row: np.ndarray, prev_center: np.ndarray | None = None) -> float:
+        present, cx, cy, area, conf = [float(x) for x in FeatureVectorizer._as_box5(row)]
+        if present <= 0:
+            return -1.0
+        score = conf * math.sqrt(max(area, 1e-6))
+        if prev_center is not None:
+            score -= 0.15 * min(math.dist((cx, cy), tuple(prev_center)), math.sqrt(2.0))
+        return score
+
+    @staticmethod
+    def _missing_age(raw_present: np.ndarray, max_gap: int) -> np.ndarray:
+        out = np.zeros(len(raw_present), dtype=np.float32)
+        age = 0
+        for idx, flag in enumerate(raw_present > 0):
+            age = 0 if flag else age + 1
+            out[idx] = min(age, max_gap) / max(1, max_gap)
+        return out
+
+    @staticmethod
+    def _impute_short_gaps(raw: np.ndarray, fps: float, max_gap: int = 6) -> Tuple[np.ndarray, np.ndarray]:
+        time_len = raw.shape[0]
+        present = raw[:, 0].astype(np.float32)
+        conf = raw[:, 4].astype(np.float32)
+        cx = raw[:, 1].astype(np.float32).copy()
+        cy = raw[:, 2].astype(np.float32).copy()
+        area = raw[:, 3].astype(np.float32).copy()
+        imputed = np.zeros(time_len, dtype=np.float32)
+
+        detected = np.where(present > 0)[0]
+        if len(detected):
+            for left, right in zip(detected[:-1], detected[1:]):
+                gap = int(right - left - 1)
+                if 0 < gap <= max_gap:
+                    for offset, idx in enumerate(range(left + 1, right), start=1):
+                        ratio = offset / (gap + 1)
+                        cx[idx] = (1 - ratio) * cx[left] + ratio * cx[right]
+                        cy[idx] = (1 - ratio) * cy[left] + ratio * cy[right]
+                        area[idx] = (1 - ratio) * area[left] + ratio * area[right]
+                        conf[idx] = 0.5 * ((1 - ratio) * conf[left] + ratio * conf[right])
+                        imputed[idx] = 1.0
+            last = int(detected[-1])
+            tail_gap = min(max_gap, time_len - last - 1)
+            for idx in range(last + 1, last + tail_gap + 1):
+                cx[idx], cy[idx], area[idx] = cx[last], cy[last], area[last]
+                conf[idx] = 0.5 * conf[last]
+                imputed[idx] = 1.0
+
+        active = (present > 0) | (imputed > 0)
+        coords = np.stack([cx, cy], axis=1)
+        speed = np.zeros(time_len, dtype=np.float32)
+        if time_len > 1:
+            speed[1:] = np.clip(np.linalg.norm(np.diff(coords, axis=0), axis=1) * fps, 0.0, 5.0) / 5.0
+            speed[~active] = 0.0
+
+        feature = np.stack(
+            [present, conf, cx, cy, area, speed, FeatureVectorizer._missing_age(present, max_gap), imputed],
+            axis=1,
+        ).astype(np.float32)
+        feature[~active, 1:6] = 0.0
+        return feature, active
+
+    @staticmethod
+    def _select_hand_slots(hand_arrs: List[np.ndarray], frames: int) -> Tuple[np.ndarray, List[np.ndarray]]:
+        hand_count = np.zeros(frames, dtype=np.float32)
+        slots = [np.zeros((frames, 5), dtype=np.float32), np.zeros((frames, 5), dtype=np.float32)]
+        for t in range(frames):
+            candidates = [FeatureVectorizer._as_box5(arr[t]) for arr in hand_arrs if FeatureVectorizer._as_box5(arr[t])[0] > 0]
+            hand_count[t] = len(candidates)
+            candidates.sort(key=lambda row: FeatureVectorizer._box_score(row), reverse=True)
+            for slot_idx, row in enumerate(candidates[:2]):
+                slots[slot_idx][t] = row
+        return hand_count, slots
+
+    @staticmethod
+    def _select_top1_slot(arrs: List[np.ndarray], frames: int) -> Tuple[np.ndarray, np.ndarray]:
+        count = np.zeros(frames, dtype=np.float32)
+        slot = np.zeros((frames, 5), dtype=np.float32)
+        prev_center: np.ndarray | None = None
+        for t in range(frames):
+            candidates = [FeatureVectorizer._as_box5(arr[t]) for arr in arrs if FeatureVectorizer._as_box5(arr[t])[0] > 0]
+            count[t] = len(candidates)
+            if not candidates:
                 continue
-            weight_sum = sum(max(b.score, 1e-6) for b in entries)
-            cx = sum(b.cx * max(b.score, 1e-6) for b in entries) / weight_sum
-            cy = sum(b.cy * max(b.score, 1e-6) for b in entries) / weight_sum
-            area = sum(b.area * max(b.score, 1e-6) for b in entries) / weight_sum
-            stats[obj] = _ObjectStats(count=float(len(entries)), cx=cx, cy=cy, area=area)
-        return stats
+            candidates.sort(key=lambda row: FeatureVectorizer._box_score(row, prev_center), reverse=True)
+            slot[t] = candidates[0]
+            prev_center = slot[t, 1:3]
+        return count, slot
 
     @staticmethod
-    def _speed(
-        key: str,
-        stat: _ObjectStats,
-        ts: float,
-        last_center: Dict[str, Tuple[float, float] | None],
-        last_ts: Dict[str, float],
-        default_dt: float,
-    ) -> float:
-        if not stat.present:
-            return 0.0
-        center = (stat.cx, stat.cy)
-        previous = last_center.get(key)
-        previous_ts = last_ts.get(key)
-        speed = 0.0
-        if previous is not None and previous_ts is not None:
-            dt = ts - previous_ts
-            if not math.isfinite(dt) or dt <= 1e-6:
-                dt = default_dt
-            speed = min(math.dist(center, previous) / max(dt, 1e-6), 5.0) / 5.0
-        last_center[key] = center
-        last_ts[key] = ts
-        return speed
+    def _build_feature_matrix(
+        object_arrays: Dict[str, List[np.ndarray]],
+        frames: int,
+        fps: float,
+    ) -> Tuple[np.ndarray, List[str]]:
+        blocks: List[np.ndarray] = []
+        names: List[str] = []
+        centers: Dict[str, np.ndarray] = {}
+        active: Dict[str, np.ndarray] = {}
 
-    @staticmethod
-    def _min_center_distance(left: Sequence[Tuple[float, float]], right: Sequence[Tuple[float, float]]) -> float:
-        if not left or not right:
-            return 0.0
-        dist = min(math.dist(a, b) for a in left for b in right)
-        return min(dist, math.sqrt(2.0)) / math.sqrt(2.0)
+        hand_count, hand_slots = FeatureVectorizer._select_hand_slots(object_arrays.get("hand", []), frames)
+        blocks.append((np.clip(hand_count, 0, 3) / 3.0)[:, None].astype(np.float32))
+        names.append("hand_count")
+        hand_centers = []
+        hand_active = []
+        for slot_idx, slot in enumerate(hand_slots, start=1):
+            feature, slot_active = FeatureVectorizer._impute_short_gaps(slot, fps)
+            blocks.append(feature)
+            names += [
+                f"hand_top{slot_idx}_present",
+                f"hand_top{slot_idx}_conf",
+                f"hand_top{slot_idx}_cx",
+                f"hand_top{slot_idx}_cy",
+                f"hand_top{slot_idx}_area",
+                f"hand_top{slot_idx}_speed",
+                f"hand_top{slot_idx}_missing_age",
+                f"hand_top{slot_idx}_imputed",
+            ]
+            hand_centers.append(feature[:, 2:4])
+            hand_active.append(slot_active)
+        centers["hand"] = np.stack(hand_centers, axis=0)
+        active["hand"] = np.logical_or.reduce(hand_active) if hand_active else np.zeros(frames, dtype=bool)
+
+        for obj in OBJECTS:
+            if obj == "hand":
+                continue
+            count, slot = FeatureVectorizer._select_top1_slot(object_arrays.get(obj, []), frames)
+            feature, obj_active = FeatureVectorizer._impute_short_gaps(slot, fps)
+            blocks.append(np.concatenate([(np.clip(count, 0, 3) / 3.0)[:, None], feature], axis=1).astype(np.float32))
+            names += [
+                f"{obj}_candidate_count",
+                f"{obj}_present",
+                f"{obj}_conf",
+                f"{obj}_cx",
+                f"{obj}_cy",
+                f"{obj}_area",
+                f"{obj}_speed",
+                f"{obj}_missing_age",
+                f"{obj}_imputed",
+            ]
+            centers[obj] = feature[:, 2:4]
+            active[obj] = obj_active
+
+        for left, right in PAIR_FEATURES:
+            valid = (active[left] & active[right]).astype(np.float32)
+            if left == "hand":
+                d0 = np.linalg.norm(centers["hand"][0] - centers[right], axis=1)
+                d1 = np.linalg.norm(centers["hand"][1] - centers[right], axis=1)
+                dist = np.minimum(d0, d1).astype(np.float32)
+            elif right == "hand":
+                d0 = np.linalg.norm(centers[left] - centers["hand"][0], axis=1)
+                d1 = np.linalg.norm(centers[left] - centers["hand"][1], axis=1)
+                dist = np.minimum(d0, d1).astype(np.float32)
+            else:
+                dist = np.linalg.norm(centers[left] - centers[right], axis=1).astype(np.float32)
+            dist = np.where(valid > 0, np.clip(dist, 0.0, math.sqrt(2.0)) / math.sqrt(2.0), 0.0)
+            delta = np.zeros(frames, dtype=np.float32)
+            if frames > 1:
+                delta[1:] = np.clip(dist[1:] - dist[:-1], -1.0, 1.0)
+                delta[valid <= 0] = 0.0
+            blocks.append(np.stack([valid, dist, delta], axis=1).astype(np.float32))
+            names += [f"{left}_to_{right}_valid", f"{left}_to_{right}_dist", f"{left}_to_{right}_delta"]
+
+        t = np.linspace(0.0, 1.0, frames, dtype=np.float32)
+        blocks.append(np.stack([t, np.sin(2 * np.pi * t), np.cos(2 * np.pi * t)], axis=1).astype(np.float32))
+        names += ["t_norm", "t_sin", "t_cos"]
+        return np.concatenate(blocks, axis=1).astype(np.float32), names
 
 
 class _RuleDecoder:
@@ -328,6 +446,14 @@ class _RuleDecoder:
     def _presence(self, row: List[float], name_to_idx: Dict[str, int], obj: str) -> float:
         if obj == "hand":
             return min(1.0, self._value(row, name_to_idx, "hand_count") * 3.0)
+        # v2 特征里非 hand 目标同时有 candidate_count 和 present。
+        # 规则 fallback 优先使用真实 present；老 68 维历史输入才回退到 *_count。
+        present = self._value(row, name_to_idx, f"{obj}_present")
+        if present > 0:
+            return min(1.0, present)
+        count = self._value(row, name_to_idx, f"{obj}_candidate_count")
+        if count > 0:
+            return min(1.0, count * 3.0)
         return min(1.0, self._value(row, name_to_idx, f"{obj}_count") * 3.0)
 
     def _predict_row(self, row: List[float], name_to_idx: Dict[str, int]) -> Tuple[str, float]:
@@ -358,6 +484,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
     """clean 模型策略基类：特征转换 + torch 模型加载 + SegmentFact 解码。"""
 
     model_version = "clean_model_v1"
+    feature_method = "v2"
 
     def __init__(
         self,
@@ -394,7 +521,139 @@ class _CleanTorchSegmenter(OfflineSegmenter):
             FrameDetections(detections=by_ts[ts], metadata=metadata_by_ts.get(ts, {}), timestamp=ts)
             for ts in sorted(by_ts)
         ]
-        return self.vectorizer.transform(frames, self.fps)
+        base = self.vectorizer.transform(frames, self.fps)
+        return self.transform_features(base)
+
+    def transform_features(self, model_input: ModelInput) -> ModelInput:
+        """模型专属特征转换虚函数。
+
+        默认返回基础 v2 特征。具体模型类可覆盖或通过 `feature_method`
+        选择不同 recipe，保证“权重使用什么特征训练，推理就用什么特征输入”。
+        """
+        if self.feature_method == "v2":
+            return model_input
+        if self.feature_method == "business_priors":
+            return self._add_business_priors(model_input)
+        if self.feature_method == "window_stats+business_priors":
+            return self._add_business_priors(self._add_centered_window_stats(model_input))
+        raise ValueError(f"unknown clean offline feature_method: {self.feature_method}")
+
+    @staticmethod
+    def _with_features(model_input: ModelInput, features: np.ndarray, names: List[str], version: str) -> ModelInput:
+        return ModelInput(
+            features=features.astype(np.float32).tolist(),
+            feature_names=names,
+            timestamps=list(model_input.timestamps),
+            fps=float(model_input.fps),
+            feature_version=version,
+        )
+
+    @staticmethod
+    def _centered_mean(values: np.ndarray, radius: int) -> np.ndarray:
+        if radius <= 0:
+            return values.astype(np.float32)
+        out = np.zeros_like(values, dtype=np.float32)
+        for idx in range(len(values)):
+            lo = max(0, idx - radius)
+            hi = min(len(values), idx + radius + 1)
+            out[idx] = values[lo:hi].mean(axis=0)
+        return out
+
+    def _add_centered_window_stats(self, model_input: ModelInput, windows: Tuple[int, ...] = (5, 15)) -> ModelInput:
+        feature = np.asarray(model_input.features, dtype=np.float32)
+        names = list(model_input.feature_names)
+        selected = [
+            idx for idx, name in enumerate(names)
+            if name.endswith(("_present", "_conf", "_speed", "_dist", "_delta", "_missing_age", "_imputed"))
+        ]
+        if not selected:
+            return model_input
+
+        base = feature[:, selected]
+        extra_blocks: List[np.ndarray] = []
+        extra_names: List[str] = []
+        for window in windows:
+            radius = max(1, window // 2)
+            mean = self._centered_mean(base, radius)
+            extra_blocks.append(mean)
+            extra_names.extend([f"{names[idx]}_center_mean_w{window}" for idx in selected])
+        out = np.concatenate([feature, *extra_blocks], axis=1).astype(np.float32)
+        return self._with_features(
+            model_input,
+            out,
+            names + extra_names,
+            f"{model_input.feature_version}+center_window",
+        )
+
+    @staticmethod
+    def _col(features: np.ndarray, name_to_idx: Dict[str, int], name: str) -> np.ndarray:
+        idx = name_to_idx.get(name)
+        if idx is None:
+            return np.zeros(features.shape[0], dtype=np.float32)
+        return features[:, idx].astype(np.float32)
+
+    @staticmethod
+    def _near_score(dist: np.ndarray) -> np.ndarray:
+        return np.clip(1.0 - dist, 0.0, 1.0).astype(np.float32)
+
+    def _add_business_priors(self, model_input: ModelInput) -> ModelInput:
+        x = np.asarray(model_input.features, dtype=np.float32)
+        names = list(model_input.feature_names)
+        n = {name: idx for idx, name in enumerate(names)}
+        col = self._col
+
+        hand = np.maximum(col(x, n, "hand_top1_present"), col(x, n, "hand_top2_present"))
+        short_brush = col(x, n, "short_brush_present")
+        syringe = col(x, n, "syringe_present")
+        air_gun = col(x, n, "air_gun_present")
+        brush_tip = col(x, n, "brush_tip_out_present")
+        long_brush = col(x, n, "long_brush_present")
+
+        short_near = self._near_score(col(x, n, "short_brush_to_scope_control_body_dist"))
+        syringe_near = self._near_score(col(x, n, "syringe_to_scope_distal_end_dist"))
+        air_near = self._near_score(col(x, n, "air_gun_to_scope_distal_end_dist"))
+        tip_near = self._near_score(col(x, n, "brush_tip_out_to_scope_distal_end_dist"))
+        long_near = self._near_score(col(x, n, "long_brush_to_scope_mid_section_dist"))
+
+        short_motion = np.maximum(
+            col(x, n, "short_brush_speed"),
+            np.abs(col(x, n, "short_brush_to_scope_control_body_delta")),
+        )
+        syringe_stable = syringe * syringe_near * (1.0 - np.clip(col(x, n, "syringe_speed"), 0.0, 1.0))
+        air_stable = air_gun * air_near * (1.0 - np.clip(col(x, n, "air_gun_speed"), 0.0, 1.0))
+        long_signal = np.maximum.reduce([long_brush, brush_tip, col(x, n, "brush_tip_out_imputed")])
+        long_delta = col(x, n, "brush_tip_out_to_scope_distal_end_delta")
+        hand_to_long = self._near_score(col(x, n, "hand_to_long_brush_dist"))
+
+        priors = np.stack(
+            [
+                hand * short_brush * short_near,
+                hand * short_brush * short_motion,
+                hand * syringe_stable,
+                hand * air_stable,
+                hand * long_signal * np.maximum(tip_near, long_near),
+                hand * long_signal * np.clip(-long_delta, 0.0, 1.0),
+                hand * long_signal * np.clip(long_delta, 0.0, 1.0),
+                hand_to_long * long_signal,
+            ],
+            axis=1,
+        ).astype(np.float32)
+        prior_names = [
+            "prior_short_clean_near",
+            "prior_short_clean_motion",
+            "prior_flush_stable",
+            "prior_air_stable",
+            "prior_long_signal_near_scope",
+            "prior_long_towards_distal",
+            "prior_long_away_distal",
+            "prior_hand_long_contact",
+        ]
+        return self._with_features(
+            model_input,
+            np.concatenate([x, priors], axis=1).astype(np.float32),
+            names + prior_names,
+            f"{model_input.feature_version}+business_priors",
+        )
 
     def segment(self, model_input: ModelInput) -> List[SegmentFact]:
         if model_input.frame_count == 0:
@@ -411,6 +670,8 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self._last_result = {
             "model_version": self.model_version,
             "model_class": type(self).__name__,
+            "feature_method": self.feature_method,
+            "feature_version": model_input.feature_version,
             "feature_dim": model_input.feature_dim,
             "frame_count": model_input.frame_count,
             "frame_predictions": [
@@ -429,7 +690,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         import torch
 
         if self._model is None:
-            self._load_model(model_input.feature_dim, len(ACTION_LABELS))
+            self._load_model(model_input, len(ACTION_LABELS))
 
         x_np = np.asarray(model_input.features, dtype=np.float32)
         if self._normalizer is not None:
@@ -444,7 +705,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         confs = probs.max(axis=1).astype("float32").tolist()
         return labels, confs
 
-    def _load_model(self, in_dim: int, class_count: int) -> None:
+    def _load_model(self, model_input: ModelInput, class_count: int) -> None:
         import torch
 
         path = Path(str(self.model_path))
@@ -457,13 +718,25 @@ class _CleanTorchSegmenter(OfflineSegmenter):
             checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         except TypeError:
             checkpoint = torch.load(path, map_location="cpu")
+        in_dim = model_input.feature_dim
         self._model = self._build_model(in_dim, class_count)
         state_dict = checkpoint.get("state_dict", checkpoint)
         self._model.load_state_dict(state_dict, strict=True)
 
         feature_names = checkpoint.get("feature_names")
-        if feature_names is not None and list(feature_names) != FeatureVectorizer.feature_names():
+        if feature_names is not None and list(feature_names) != list(model_input.feature_names):
             raise ValueError("clean 离线模型 feature_names 与后端特征列不一致")
+        feature_version = checkpoint.get("feature_version")
+        if isinstance(feature_version, str):
+            ckpt_version = feature_version
+        elif feature_version is not None and len(feature_version):
+            ckpt_version = str(feature_version[0])
+        else:
+            ckpt_version = None
+        if ckpt_version is not None and ckpt_version != model_input.feature_version:
+            raise ValueError(
+                f"clean 离线模型 feature_version 不一致: checkpoint={ckpt_version}, input={model_input.feature_version}"
+            )
 
         mean = checkpoint.get("normalizer_mean")
         std = checkpoint.get("normalizer_std")
@@ -703,27 +976,42 @@ def _make_bigru(in_dim: int, class_count: int, hidden: int = 64):
 
 
 class CleanMSTCNBiLSTMSegmenter(_CleanTorchSegmenter):
-    """CLEAN 阶段 MS-TCN + BiLSTM 离线模型。"""
+    """CLEAN 阶段 MS-TCN + BiLSTM 离线模型。
+
+    当前 best checkpoint 对应基础 v2 特征：
+        clean_bbox_v2_top1_impute，113 维。
+    """
 
     model_version = "clean_mstcn_bilstm_v1"
+    feature_method = "v2"
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_mstcn_bilstm(in_dim, class_count)
 
 
 class CleanASFormerSegmenter(_CleanTorchSegmenter):
-    """CLEAN 阶段 ASFormer 风格离线模型。"""
+    """CLEAN 阶段 ASFormer 风格离线模型。
+
+    当前 best checkpoint 对应 v2 + business_priors：
+        clean_bbox_v2_top1_impute+business_priors，121 维。
+    """
 
     model_version = "clean_asformer_v1"
+    feature_method = "business_priors"
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_asformer(in_dim, class_count)
 
 
 class CleanBiGRUSegmenter(_CleanTorchSegmenter):
-    """CLEAN 阶段 BiGRU 离线模型。"""
+    """CLEAN 阶段 BiGRU 离线模型。
+
+    当前 best checkpoint 对应 v2 + center window + business_priors：
+        clean_bbox_v2_top1_impute+center_window+business_priors，249 维。
+    """
 
     model_version = "clean_bigru_v1"
+    feature_method = "window_stats+business_priors"
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_bigru(in_dim, class_count)
