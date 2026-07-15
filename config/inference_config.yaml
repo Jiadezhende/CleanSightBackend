@@ -73,7 +73,29 @@ stages:
           conf_threshold: 0.25
           iou_threshold: 0.45
           enabled: true
-    rules: []
+    rules:
+      - name: clean_monitor
+        subscribes: [clean_large, clean_small]
+        realtime: true               # 实时信号，纳入 signals_10s
+        class: app.services.inference.workflows.clean.CleanOperator
+        params:
+          window_seconds: 10.0
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/gru-final.pt
+          actions:
+            0: idle
+            1: air_injection
+            2: flush
+            3: long_brush_insert
+            4: long_brush_withdraw
+          objects:
+            0: hand
+            1: scope_control_body
+            2: scope_mid_section
+            3: scope_distal_end
+            4: syringe
+            5: air_gun
+            6: short_brush
+            7: brush_tip_out
     # CLEAN 离线模型按 YAML 路由，生产/开发需要启用时把 offline 从 {} 改为类似：
     # offline:
     #   name: clean_offline

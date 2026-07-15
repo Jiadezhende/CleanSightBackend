@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
@@ -91,3 +92,78 @@ class Operator(ABC):
             AlignedFrame(ts=ts, by_source={s: indexed[s][ts] for s in self.subscribes})
             for ts in sorted(common)
         ]
+
+
+class TemporalOperator(Operator):
+    def __init__(
+        self,
+        name: str,
+        subscribes: List[str],
+        window_seconds: float,
+        model_path: str,
+        objects: Dict[int, str],
+        actions: Dict[int, str],
+    ):
+        super().__init__(name, subscribes, window_seconds)
+        if not model_path:
+            raise ValueError(f"model_path is required for {self.__class__.__name__}")
+        self.model_path = model_path
+        self.num_objects = len(objects)
+        self.num_actions = len(actions)
+
+        self._object_id_to_name = objects
+        self._action_id_to_name = actions
+
+        self._object_name_to_id = {v: k for k, v in objects.items()}
+        self._action_name_to_id = {v: k for k, v in actions.items()}
+
+        import torch
+        self._model: torch.nn.Module = None
+        self._model_load_lock = threading.Lock()
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _object_id(self, object_name: str) -> int:
+        return self._object_name_to_id.get(object_name, -1)
+    
+    def _object_name(self, object_id: int) -> str:
+        return self._object_id_to_name.get(object_id, f"object_{object_id}")
+
+    def _action_id(self, action_name: str) -> int:
+        return self._action_name_to_id.get(action_name, -1)
+    
+    def _action_name(self, action_id: int) -> str:
+        return self._action_id_to_name.get(action_id, f"action_{action_id}")
+
+    def _ensure_model_loaded(self) -> None:
+        """惰性加载时序模型 （首次推理时触发，双重检查锁保证线程安全）。"""
+        if self._model is not None:
+            return
+        with self._model_load_lock:
+            if self._model is not None:
+                return
+            try:
+                from pathlib import Path
+                import torch
+
+                if not Path(self.model_path).exists():
+                    raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
+                logger.info("[%s] Loading model: %s", self.name, self.model_path)
+                self._model = torch.jit.load(self.model_path, map_location=self._device)
+                self._model.to(self._device)
+                self._model.eval()
+                logger.info("[%s] Model loaded successfully on %s", self.name, self._device)
+            except Exception as e:
+                logger.error("[%s] Model loading failed: %s", self.name, e, exc_info=True)
+                raise
+
+    def infer(self, features: "torch.Tensor") -> List[int]:
+        """时序模型推理：返回每个时间步的预测类别。"""
+        import torch
+        self._ensure_model_loaded()
+
+        features = features.to(self._device)
+
+        with torch.no_grad():
+            logits = self._model(features)
+
+        return logits
