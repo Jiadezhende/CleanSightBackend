@@ -175,7 +175,7 @@ class CleanOperator(TemporalOperator):
             feature = [0.0] * (self.num_objects * 6)
 
             for frame in aligned.by_source.values():
-                width, height, _ = frame.metadata["frame_shape"]
+                height, width, _ = frame.metadata["frame_shape"]  # (480, 640, 3)
                 if width <= 0 or height <= 0:
                     continue
                 for detection in frame.detections:
