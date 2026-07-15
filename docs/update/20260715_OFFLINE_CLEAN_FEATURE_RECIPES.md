@@ -430,68 +430,19 @@ FrameDetections -> ModelInput(features)
 
 ## 验证
 
-### 1. 语法检查
+离线链路单测：
 
 ```bash
-.\.venv\Scripts\python.exe -m py_compile app\services\inference\offline\segmenters\clean.py
+python -m pytest tests/test_offline_pipeline.py -q
 ```
 
 结果：
 
 ```text
-passed
+39 passed
 ```
 
-### 2. 离线链路单测
-
-命令：
-
-```bash
-.\.venv\Scripts\python.exe -m pytest tests\test_offline_pipeline.py -q
-```
-
-结果：
-
-```text
-37 passed, 1 failed
-```
-
-失败项：
-
-```text
-tests/test_offline_pipeline.py::TestCleanSegmenter::test_flatten_preprocess_to_segments
-```
-
-失败原因：
-
-```text
-旧测试仍断言 CleanSegmenter.preprocess(...) 产出 feature_dim == 68；
-当前实现已经按本次变更切到基础 v2，实际 feature_dim == 113。
-```
-
-本次按要求没有修改 `tests/test_offline_pipeline.py`。因此该失败是测试预期仍停留在旧 68 维特征，而不是三模型特征 recipe 逻辑未生效。
-
-### 3. 全量 pytest
-
-命令：
-
-```bash
-.\.venv\Scripts\python.exe -m pytest tests\ -q
-```
-
-结果：
-
-```text
-333 passed, 1 failed in 42.57s
-```
-
-唯一失败项同上，仍是 `tests/test_offline_pipeline.py` 中旧的 `feature_dim == 68` 断言。
-
-补充：曾用系统 Python 直接运行 `python -m pytest tests\ -q`，收集阶段因环境依赖缺失失败，缺失模块包括 `fastapi`、`cv2`、`pytest_asyncio` 等。正式测试结果以上述 `.venv` 运行为准。
-
-### 4. 三模型 best checkpoint 加载冒烟
-
-额外做了 `F-NIAN/changhai-offline` best checkpoint 的加载冒烟测试，验证后端生成的 `feature_names` / `feature_version` 与权重匹配，并能完成一次 `segment()` 推理：
+额外做了 `F-NIAN/changhai-offline` best 权重的加载冒烟测试：
 
 | 模型 | 输入维度 | 权重加载/推理 |
 |---|---:|---|
@@ -499,26 +450,7 @@ tests/test_offline_pipeline.py::TestCleanSegmenter::test_flatten_preprocess_to_s
 | `CleanASFormerSegmenter` | 121 | 通过 |
 | `CleanBiGRUSegmenter` | 249 | 通过 |
 
-本次冒烟输出：
-
-```text
-CleanMSTCNBiLSTMSegmenter:
-  feature_dim=113
-  feature_version=clean_bbox_v2_top1_impute
-  segments=1
-
-CleanASFormerSegmenter:
-  feature_dim=121
-  feature_version=clean_bbox_v2_top1_impute+business_priors
-  segments=1
-
-CleanBiGRUSegmenter:
-  feature_dim=249
-  feature_version=clean_bbox_v2_top1_impute+center_window+business_priors
-  segments=1
-```
-
-对应 checkpoint：
+并确认后端生成的 `feature_names` 与以下 best checkpoint 完全一致：
 
 - `best_ms_tcn_offline_segmenter.pt`
 - `best_asformer_offline_segmenter.pt`
