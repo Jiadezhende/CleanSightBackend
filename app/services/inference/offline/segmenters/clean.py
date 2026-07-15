@@ -111,27 +111,6 @@ class ModelInput:
         return len(self.feature_names)
 
 
-@dataclass
-class _ObjectBox:
-    cx: float
-    cy: float
-    area: float
-    score: float
-    conf: float
-
-
-@dataclass
-class _ObjectStats:
-    count: float = 0.0
-    cx: float = 0.0
-    cy: float = 0.0
-    area: float = 0.0
-
-    @property
-    def present(self) -> bool:
-        return self.count > 0.0
-
-
 class FeatureVectorizer:
     """把 clean 检测框序列转换成 v2 固定维时序特征。
 
@@ -203,19 +182,6 @@ class FeatureVectorizer:
         if not deltas:
             return max(float(fallback_fps), 1e-6)
         return max(1.0 / float(np.median(np.asarray(deltas, dtype=np.float32))), 1e-6)
-
-    def _collect_boxes(self, frame: FrameDetections) -> Dict[str, List[_ObjectBox]]:
-        width, height = self._frame_size(frame)
-        out: Dict[str, List[_ObjectBox]] = {name: [] for name in OBJECTS}
-        for det in frame.detections:
-            obj = OBJECT_ALIASES.get(str(det.class_name))
-            if obj is None:
-                continue
-            cx, cy, area = self._bbox_to_center_area(det, width, height)
-            conf = max(0.0, min(1.0, float(det.confidence)))
-            score = conf * math.sqrt(max(area, 1e-6))
-            out[obj].append(_ObjectBox(cx=cx, cy=cy, area=area, score=score, conf=conf))
-        return out
 
     def _frame_size(self, frame: FrameDetections) -> Tuple[int, int]:
         meta = frame.metadata or {}
