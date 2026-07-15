@@ -180,6 +180,11 @@ class CleanOperator(TemporalOperator):
                     continue
                 for detection in frame.detections:
                     object_id = self._object_id(detection.class_name)
+
+                    # 忽略未知物体
+                    if object_id < 0 or object_id >= self.num_objects:
+                        continue
+
                     # 忽略未检测到的物体
                     if detection.bbox is None:
                         continue
