@@ -41,16 +41,16 @@ class OfflineSegmenter(ABC):
         self.name = name
         self.subscribes: List[str] = list(subscribes)
 
+    @abstractmethod
     def preprocess(
         self, streams: Mapping[str, Sequence[FrameDetections]]
     ) -> Any:
-        """输入预处理层（预留接缝）：把 raw FrameDetections 序列转成模型可消费的输入。
+        """输入预处理接口：把 raw FrameDetections 序列转成模型可消费的输入。
 
-        默认恒等透传 `streams`——适合直接吃 bbox 序列的轻量/占位策略。需要张量化、归一化、
-        时间降采样、定长编码的重模型 override 本方法（在同模块内内聚特征转换，保持自包含）。
-        返回类型由策略自定，原样传给 `segment`。
+        基类只约束调用形状，不做默认特征工程。bbox 归一化、top-k 目标选择、
+        speed 的 dt 计算、tensor 化、权重加载等都应由具体策略在自己的单文件里完成。
         """
-        return streams
+        raise NotImplementedError
 
     @abstractmethod
     def segment(self, model_input: Any) -> List[SegmentFact]:

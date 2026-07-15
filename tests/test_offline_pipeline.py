@@ -15,10 +15,10 @@ from app.services.inference.feature.store import FactLedger, FeatureStore
 from app.services.inference.models import EventFact, SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
-from app.services.inference.offline.segmenters.mock import MockSegmenter
+from app.services.inference.offline.segmenters.mock import BrushRulesSegmenter
 from app.services.inference.stage_factory import StageFactory
 
-_MOCK_CLASS = "app.services.inference.offline.segmenters.mock.MockSegmenter"
+_MOCK_CLASS = "app.services.inference.offline.segmenters.mock.BrushRulesSegmenter"
 _CLEAN_CLASS = "app.services.inference.offline.segmenters.clean.CleanSegmenter"
 
 
@@ -167,7 +167,7 @@ class TestCreateOfflineSegmenter:
 
     def test_enabled_builds_segmenter(self):
         seg = StageFactory(_config(_OFFLINE_OK)).create_offline_segmenter("2")
-        assert isinstance(seg, MockSegmenter)
+        assert isinstance(seg, BrushRulesSegmenter)
         assert seg.name == "clean_seg"
         assert seg.subscribes == ["clean_large", "clean_small"]
         assert seg.label == "brushing"
@@ -194,7 +194,7 @@ class TestCreateOfflineSegmenter:
         seg = StageFactory(_config(offline)).create_offline_segmenter(
             "2", override_class=_MOCK_CLASS
         )
-        assert isinstance(seg, MockSegmenter)
+        assert isinstance(seg, BrushRulesSegmenter)
 
 
 # ============================ stage 解析回退 ============================
@@ -211,11 +211,11 @@ class TestResolveStage:
         assert cfg.resolve_stage(999) == "MOCK"
 
 
-# ============================ MockSegmenter（MOCK 链路 stand-in） ============================
+# ============================ BrushRulesSegmenter（MOCK 链路 stand-in） ============================
 
-class TestMockSegmenter:
+class TestBrushRulesSegmenter:
     def test_presence_runs_to_segments(self):
-        seg = MockSegmenter(name="p", subscribes=["a"])
+        seg = BrushRulesSegmenter(name="p", subscribes=["a"])
         streams = {"a": [
             make_frame_detections(n=1, ts=1.0),   # active
             make_frame_detections(n=1, ts=2.0),   # active
@@ -227,7 +227,7 @@ class TestMockSegmenter:
         assert all(s.source == "p" for s in segs)
 
     def test_min_frames_drops_short_runs(self):
-        seg = MockSegmenter(name="p", subscribes=["a"], min_frames=2)
+        seg = BrushRulesSegmenter(name="p", subscribes=["a"], min_frames=2)
         streams = {"a": [
             make_frame_detections(n=1, ts=1.0),   # 单帧段，min_frames=2 丢弃
             make_frame_detections(n=0, ts=2.0),
@@ -236,7 +236,7 @@ class TestMockSegmenter:
 
     def test_debug_result_none(self):
         """presence 型无逐帧语义：debug_result 恒 None（Runner 据此不落逐帧 JSON）。"""
-        seg = MockSegmenter(name="p", subscribes=["a"])
+        seg = BrushRulesSegmenter(name="p", subscribes=["a"])
         seg.segment(seg.preprocess({"a": [make_frame_detections(n=1, ts=1.0)]}))
         assert seg.debug_result() is None
 
@@ -267,7 +267,7 @@ class TestCleanSegmenter:
         }
         mi = seg.preprocess(streams)
         assert isinstance(mi, ModelInput)
-        assert mi.frame_count == 4 and mi.feature_dim == 62  # 4 帧拍平、62 维
+        assert mi.frame_count == 4 and mi.feature_dim == 68  # hand top-2 后为 68 维
         segs = seg.segment(mi)
         assert [s.label for s in segs] == ["short_brush_cleaning"]
         assert all(s.source == "clean_seg" for s in segs)
@@ -331,7 +331,7 @@ class TestOfflineRunner:
         assert len(segs) == 1
         assert segs[0].meta["producer"] == "clean_seg"
         assert segs[0].label == "brushing"
-        # MockSegmenter.debug_result() 为 None → 不落逐帧 JSON
+        # BrushRulesSegmenter.debug_result() 为 None → 不落逐帧 JSON
         assert not (tmp_path / "1" / "2" / "offline_inference_result.json").exists()
 
     def test_rerun_idempotent(self, tmp_path):
@@ -394,6 +394,9 @@ class TestOfflineRunner:
 
 
 class BoomSegmenter(OfflineSegmenter):
+    def preprocess(self, streams):
+        return streams
+
     def segment(self, model_input):
         raise RuntimeError("boom")
 

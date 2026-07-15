@@ -5,7 +5,7 @@ stage_factory.create_offline_segmenter）；新增策略 = 往本目录加一个
 `<stage>.py` + YAML `offline` 段切 `class`，实现不散落到框架层（segmenter/runner/cli）。
 """
 
-from app.services.inference.offline.segmenters.clean import CleanSegmenter
-from app.services.inference.offline.segmenters.mock import MockSegmenter
+# 不在包初始化时 import clean/mock 具体类，避免仅跑 mock/CLI query 时提前触发 torch 等重依赖。
+# StageFactory 会按 YAML class path 精确 import 需要的策略类。
 
-__all__: list[str] = ["CleanSegmenter", "MockSegmenter"]
+__all__: list[str] = []
