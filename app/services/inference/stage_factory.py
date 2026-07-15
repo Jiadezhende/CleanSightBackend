@@ -84,9 +84,9 @@ class StageFactory:
     ) -> "OfflineSegmenter | None":
         """为指定 Stage 实例化离线分割策略（`stages.<step_id>.offline`），未启用返回 None。
 
-        offline 配置 schema（`{}` 或 `enabled:false` = 不启用该 stage 离线分段）：
+        offline 配置 schema（空块 `{}` 或整段缺省 = 不启用该 stage 离线分段；
+        非空即视为有意启用，缺字段一律 fail-fast，不再靠额外 enabled 开关）：
             offline:
-              enabled: true
               name: <segmenter 身份，= SegmentFact.source>
               subscribes: [<detector.name>, ...]   # 必须全命中同 stage detector
               class: <OfflineSegmenter 子类全限定路径>
@@ -105,7 +105,7 @@ class StageFactory:
             raise ValueError(f"Stage '{stage_name}' 配置不存在")
 
         offline = stage_config.offline or {}
-        if not offline or not offline.get("enabled", False):
+        if not offline:  # 空块 / 缺省 = 不启用；非空即有意启用，下面缺字段 fail-fast
             return None
 
         name = offline.get("name")

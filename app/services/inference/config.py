@@ -66,7 +66,13 @@ class InferenceConfig:
         数字存储键（如未配的 -1）解析成 stage 配置 key，**存储读写仍用原数字 step_id**（二者正交）。
         """
         step_key = str(step_id)
-        return step_key if step_key in self.stages else "MOCK"
+        if step_key in self.stages:
+            return step_key
+        logger.warning(
+            "[InferenceConfig] 未知的 step_id '%s'，路由到 MOCK stage（与在线 resolve_stage 一致）",
+            step_id,
+        )
+        return "MOCK"
 
     def list_stages(self) -> List[str]:
         """列出所有 Stage 名称"""

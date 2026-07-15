@@ -96,8 +96,7 @@ stages:
     # 离线是独立进程手动跑（python -m app.services.inference.offline.cli run --step-id -1），
     # 不会被在线链路自动执行；未配数字 step_id(如 -1) 经 resolve_stage 回退到本 MOCK stage。
     # 生产 stage 1/2 的 offline 保持 {} 不启用。
-    offline:
-      enabled: true
+    offline:                           # 非空即启用（无需 enabled 开关）；生产 stage 保持 {} 禁用
       name: mock_offline
       subscribes: [mock]
       class: app.services.inference.offline.segmenters.mock.MockSegmenter

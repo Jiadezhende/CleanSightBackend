@@ -146,7 +146,6 @@ def _config(offline):
 
 
 _OFFLINE_OK = {
-    "enabled": True,
     "name": "clean_seg",
     "subscribes": ["clean_large", "clean_small"],
     "class": _MOCK_CLASS,
@@ -155,10 +154,16 @@ _OFFLINE_OK = {
 
 
 class TestCreateOfflineSegmenter:
-    def test_disabled_variants_return_none(self):
-        for offline in ({}, {"enabled": False}):
+    def test_empty_block_returns_none(self):
+        # 空块 / 缺省 = 不启用（presence 驱动，无 enabled 开关）
+        for offline in ({}, None):
             seg = StageFactory(_config(offline)).create_offline_segmenter("2")
             assert seg is None
+
+    def test_nonempty_without_required_fail_fast(self):
+        # 非空块即视为有意启用；缺必填字段 fail-fast，不再静默 return None
+        with pytest.raises(ValueError):
+            StageFactory(_config({"params": {"label": "x"}})).create_offline_segmenter("2")
 
     def test_enabled_builds_segmenter(self):
         seg = StageFactory(_config(_OFFLINE_OK)).create_offline_segmenter("2")
@@ -374,7 +379,7 @@ class TestOfflineRunner:
         """未配数字 step_id(-1) 经 resolve_stage 回退 MOCK.offline，读数字 -1 分区、completed。"""
         cfg = InferenceConfig({"stages": {"MOCK": {
             "detectors": [{"name": "mock"}],
-            "offline": {"enabled": True, "name": "mock_offline", "subscribes": ["mock"],
+            "offline": {"name": "mock_offline", "subscribes": ["mock"],
                         "class": _MOCK_CLASS, "params": {"label": "mock_action", "min_frames": 1}},
         }}})
         store = FeatureStore(tmp_path)
