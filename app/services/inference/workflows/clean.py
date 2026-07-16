@@ -170,25 +170,35 @@ class CleanOperator(TemporalOperator):
             return torch.tensor([])
         
         features = []
+        num_features_per_object = 6
 
         for aligned in aligned_frames:
-            feature = [0.0] * (self.num_objects * 6)
+            feature = self.num_objects * [num_features_per_object * [0.0]]
+
+            if not aligned.by_source or not aligned.by_source.values():
+                # 忽略无数据的帧
+                continue
 
             for frame in aligned.by_source.values():
-                height, width, _ = frame.metadata["frame_shape"]  # (480, 640, 3)
-                if width <= 0 or height <= 0:
+                shape = frame.metadata.get("frame_shape")
+                if not shape or len(shape) != 3:
+                    # 目前仅支持 (H, W, C) 格式
                     continue
+                height, width, _ = shape
+                if width <= 0 or height <= 0:
+                    # 忽略无效图像尺寸
+                    continue
+
+                if not frame.detections:
+                    # 忽略无检测结果的帧
+                    continue
+
                 for detection in frame.detections:
-                    object_id = self._object_id(detection.class_name)
-
-                    # 忽略未知物体
-                    if object_id < 0 or object_id >= self.num_objects:
+                    bbox = detection.bbox
+                    if bbox is None:
+                        # 忽略未检测到的物体
                         continue
-
-                    # 忽略未检测到的物体
-                    if detection.bbox is None:
-                        continue
-                    x1, y1, x2, y2 = detection.bbox
+                    x1, y1, x2, y2 = bbox
 
                     # 确保 bbox 不超出图像边界
                     x1 = max(0, min(width, x1))
@@ -196,8 +206,10 @@ class CleanOperator(TemporalOperator):
                     x2 = max(0, min(width, x2))
                     y2 = max(0, min(height, y2))
                     if x1 >= x2 or y1 >= y2:
+                        # 忽略无效 bbox
                         continue
 
+                    # 计算特征
                     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                     w, h = x2 - x1, y2 - y1
                     area = w * h
@@ -207,11 +219,14 @@ class CleanOperator(TemporalOperator):
                     w, h = w / width, h / height
                     area = area / (width * height)
 
-                    offset = object_id * 6
-                    feature[offset] += 1
+                    # 更新特征向量
                     # TODO: 当前实现为直接取代旧值，并未完全处理同类多实例的情况
-                    feature[offset+1:offset+6] = cx, cy, w, h, area
+                    object_id = self._object_id(detection.class_name)
+                    if 0 <= object_id < self.num_objects:
+                        count = feature[object_id][0]
+                        feature[object_id] = [count + 1, cx, cy, w, h, area]
 
             features.append(feature)
 
-        return torch.tensor(features, dtype=torch.float32)
+        features = torch.tensor(features, dtype=torch.float32).reshape(len(aligned_frames), -1)
+        return features
