@@ -21,7 +21,7 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetections
@@ -120,6 +120,7 @@ class TemporalOperator(Operator):
         import torch
         self._model: torch.nn.Module = None
         self._model_load_lock = threading.Lock()
+        self._load_failed = False
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _object_id(self, object_name: str) -> int:
@@ -134,13 +135,17 @@ class TemporalOperator(Operator):
     def _action_name(self, action_id: int) -> str:
         return self._action_id_to_name.get(action_id, f"action_{action_id}")
 
-    def _ensure_model_loaded(self) -> None:
+    def _try_load_model(self) -> bool:
         """惰性加载时序模型 （首次推理时触发，双重检查锁保证线程安全）。"""
         if self._model is not None:
-            return
+            return True
+        if self._load_failed:
+            return False
         with self._model_load_lock:
             if self._model is not None:
-                return
+                return True
+            if self._load_failed:
+                return False
             try:
                 from pathlib import Path
                 import torch
@@ -152,14 +157,17 @@ class TemporalOperator(Operator):
                 self._model.to(self._device)
                 self._model.eval()
                 logger.info("[%s] Model loaded successfully on %s", self.name, self._device)
+                return True
             except Exception as e:
+                self._load_failed = True
                 logger.error("[%s] Model loading failed: %s", self.name, e, exc_info=True)
                 raise
 
-    def infer(self, features: "torch.Tensor") -> List[int]:
+    def infer(self, features: "torch.Tensor") -> Optional["torch.Tensor"]:
         """时序模型推理：返回每个时间步的预测类别。"""
         import torch
-        self._ensure_model_loaded()
+        if not self._try_load_model():
+            return None
 
         features = features.to(self._device)
 
