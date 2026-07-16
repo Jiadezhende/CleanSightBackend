@@ -123,7 +123,7 @@ class CleanOperator(TemporalOperator):
         )
         self._sm = {
             "last_ts": 0.0,
-            "latest_action": None,
+            "latest_action": 0,
         }
 
     def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
@@ -153,6 +153,8 @@ class CleanOperator(TemporalOperator):
             return
 
         logits = self.infer(features)
+        if logits is None:
+            return
         self._sm["latest_action"] = logits[-1, :].argmax().item()
         self._sm["last_ts"] = new_frames[-1].ts
 
