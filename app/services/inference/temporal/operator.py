@@ -21,7 +21,7 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetections

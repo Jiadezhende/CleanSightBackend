@@ -175,13 +175,14 @@ class CleanOperator(TemporalOperator):
         num_features_per_object = 6
 
         for aligned in aligned_frames:
-            feature = self.num_objects * [num_features_per_object * [0.0]]
-
-            if not aligned.by_source or not aligned.by_source.values():
-                # 忽略无数据的帧
-                continue
+            # 每帧一行特征：异常帧（无数据 / 推理失败 / 尺寸非法 / 无检测）统一留全零行，
+            # 保证特征行数与 aligned_frames 严格一一对应，时间轴不缺帧。
+            feature = [[0.0] * num_features_per_object for _ in range(self.num_objects)]
 
             for frame in aligned.by_source.values():
+                # 跳过检测层推理失败的帧（不参与特征，留零贡献）
+                if not frame.success:
+                    continue
                 shape = frame.metadata.get("frame_shape")
                 if not shape or len(shape) != 3:
                     # 目前仅支持 (H, W, C) 格式
