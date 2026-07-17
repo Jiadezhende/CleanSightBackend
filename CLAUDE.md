@@ -11,12 +11,13 @@ AI 视觉巡检后端系统，基于 FastAPI + YOLOv8：实时 RTSP 流推理、
 
 | 我要… | 去哪 |
 |------|------|
-| 懂架构 / 数据流 / 各服务内部 / schema / API（描述性） | 知识库 [docs/kb/INDEX.md](docs/kb/INDEX.md) |
+| 懂架构 / 数据流 / 各服务内部 / schema / API（描述性） | 先读知识库 [docs/kb/INDEX.md](docs/kb/INDEX.md)，**再扫 [docs/update/](docs/update/) 里晚于 KB 更新时间的增量**（KB 定期融合、可能滞后，见下方注） |
 | 开发规范：分支提交、测试、模块内聚与解耦 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | 部署：Linux 生产 + Windows 开发安装、物料分发 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | 定位代码：目录结构 → [README.md](README.md) 项目结构；某个服务内部 → KB 对应 `SERVICE_*.md` | — |
 
 > 描述性文档改动同步进 `docs/kb/`；每次提交的增量先写 `docs/update/`，定期融合进 KB（细则见 [docs/kb/KB_MAINTENANCE.md](docs/kb/KB_MAINTENANCE.md) 与 [DEVELOPMENT.md](docs/DEVELOPMENT.md)）。
+> **因此 KB 不是最新的：** INDEX 顶部有「更新时间」，`docs/update/` 里文件名日期晚于它的都是尚未融合的增量——查某主题最新状态时，KB 结论要用 update 增量校正后再采信。
 
 ---
 
