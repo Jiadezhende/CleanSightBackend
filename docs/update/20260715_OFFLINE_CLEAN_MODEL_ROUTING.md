@@ -131,7 +131,6 @@ offline:
   class: app.services.inference.offline.segmenters.clean.CleanMSTCNBiLSTMSegmenter
   params:
     model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm.pt
-    fallback_to_rules: false
 ```
 
 切换模型时只需要换 `class` 和权重路径：

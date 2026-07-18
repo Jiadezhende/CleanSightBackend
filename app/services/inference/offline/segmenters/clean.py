@@ -14,8 +14,8 @@
 
 注意:
     这里不包含训练流程。训练仍在独立 offline-model 仓内完成，后端只负责加载
-    已训练权重并执行离线推理。若未配置 model_path，本策略可按 fallback_to_rules
-    使用轻量规则输出，便于本地回环测试；生产配置应显式提供权重路径。
+    已训练权重并执行离线推理。若未配置 model_path，CLEAN 模型会硬失败；
+    本地回环测试应使用已有的 mock.BrushRulesSegmenter。
 """
 
 from __future__ import annotations
@@ -149,6 +149,11 @@ class FeatureVectorizer:
     @staticmethod
     def feature_names() -> List[str]:
         return FeatureVectorizer._build_feature_matrix({name: [] for name in OBJECTS}, 1, 7.5)[1]
+
+    @staticmethod
+    def _finite_matrix(values: np.ndarray) -> np.ndarray:
+        """把 NaN/inf 兜底成 0，保持模型输入尺寸稳定且数值可送入 torch。"""
+        return np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
     def _collect_object_arrays(self, frames: Sequence[FrameDetections]) -> Dict[str, List[np.ndarray]]:
         frame_count = len(frames)
@@ -383,67 +388,7 @@ class FeatureVectorizer:
         t = np.linspace(0.0, 1.0, frames, dtype=np.float32)
         blocks.append(np.stack([t, np.sin(2 * np.pi * t), np.cos(2 * np.pi * t)], axis=1).astype(np.float32))
         names += ["t_norm", "t_sin", "t_cos"]
-        return np.concatenate(blocks, axis=1).astype(np.float32), names
-
-
-class _RuleDecoder:
-    """无权重时的轻量 fallback，只用于本地回环，不作为最终模型精度来源。"""
-
-    def __init__(self, min_duration_s: float):
-        self.min_duration_s = max(0.0, float(min_duration_s))
-
-    def predict(self, model_input: ModelInput) -> Tuple[List[int], List[float]]:
-        name_to_idx = {name: idx for idx, name in enumerate(model_input.feature_names)}
-        labels: List[int] = []
-        confs: List[float] = []
-        for row in model_input.features:
-            label, conf = self._predict_row(row, name_to_idx)
-            labels.append(ACTION_LABELS.index(label))
-            confs.append(conf)
-        return labels, confs
-
-    @staticmethod
-    def _value(row: List[float], name_to_idx: Dict[str, int], name: str) -> float:
-        idx = name_to_idx.get(name)
-        if idx is None or idx >= len(row):
-            return 0.0
-        return float(row[idx])
-
-    def _presence(self, row: List[float], name_to_idx: Dict[str, int], obj: str) -> float:
-        if obj == "hand":
-            return min(1.0, self._value(row, name_to_idx, "hand_count") * 3.0)
-        # v2 特征里非 hand 目标同时有 candidate_count 和 present。
-        # 规则 fallback 优先使用真实 present；老 68 维历史输入才回退到 *_count。
-        present = self._value(row, name_to_idx, f"{obj}_present")
-        if present > 0:
-            return min(1.0, present)
-        count = self._value(row, name_to_idx, f"{obj}_candidate_count")
-        if count > 0:
-            return min(1.0, count * 3.0)
-        return min(1.0, self._value(row, name_to_idx, f"{obj}_count") * 3.0)
-
-    def _predict_row(self, row: List[float], name_to_idx: Dict[str, int]) -> Tuple[str, float]:
-        hand = self._presence(row, name_to_idx, "hand")
-        short_brush = self._presence(row, name_to_idx, "short_brush")
-        long_brush = max(
-            self._presence(row, name_to_idx, "long_brush"),
-            self._presence(row, name_to_idx, "brush_tip_out"),
-        )
-        syringe = self._presence(row, name_to_idx, "syringe")
-        air_gun = self._presence(row, name_to_idx, "air_gun")
-        scope_control = self._presence(row, name_to_idx, "scope_control_body")
-        scope_mid = self._presence(row, name_to_idx, "scope_mid_section")
-        scope_distal = self._presence(row, name_to_idx, "scope_distal_end")
-
-        if air_gun:
-            return "air_injection", max(0.2, air_gun)
-        if syringe:
-            return "flush", max(0.2, syringe)
-        if short_brush and max(hand, scope_control, scope_distal):
-            return "short_brush_cleaning", max(0.2, min(short_brush, max(hand, scope_control, scope_distal)))
-        if long_brush and max(hand, scope_mid, scope_distal):
-            return "long_brush_insert", max(0.2, min(long_brush, max(hand, scope_mid, scope_distal)))
-        return "idle", 1.0
+        return FeatureVectorizer._finite_matrix(np.concatenate(blocks, axis=1)), names
 
 
 class _CleanTorchSegmenter(OfflineSegmenter):
@@ -461,14 +406,12 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         fps: float = 7.5,
         frame_width: int = 640,
         frame_height: int = 480,
-        fallback_to_rules: bool = True,
     ):
         super().__init__(name, subscribes)
         self.model_path = model_path
         self.min_duration_s = max(0.0, float(min_duration_s))
         self.fps = float(fps)
         self.vectorizer = FeatureVectorizer(frame_width, frame_height)
-        self.fallback_to_rules = bool(fallback_to_rules)
         self._model = None
         self._normalizer: Tuple[Any, Any] | None = None
         self._last_result: dict | None = None
@@ -491,23 +434,14 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         return self.transform_features(base)
 
     def transform_features(self, model_input: ModelInput) -> ModelInput:
-        """模型专属特征转换虚函数。
-
-        默认返回基础 v2 特征。具体模型类可覆盖或通过 `feature_method`
-        选择不同 recipe，保证“权重使用什么特征训练，推理就用什么特征输入”。
-        """
-        if self.feature_method == "v2":
-            return model_input
-        if self.feature_method == "business_priors":
-            return self._add_business_priors(model_input)
-        if self.feature_method == "window_stats+business_priors":
-            return self._add_business_priors(self._add_centered_window_stats(model_input))
-        raise ValueError(f"unknown clean offline feature_method: {self.feature_method}")
+        """模型专属特征转换虚函数；子类按自身 checkpoint 的 recipe 覆盖。"""
+        return model_input
 
     @staticmethod
     def _with_features(model_input: ModelInput, features: np.ndarray, names: List[str], version: str) -> ModelInput:
+        features = FeatureVectorizer._finite_matrix(features)
         return ModelInput(
-            features=features.astype(np.float32).tolist(),
+            features=features.tolist(),
             feature_names=names,
             timestamps=list(model_input.timestamps),
             fps=float(model_input.fps),
@@ -625,12 +559,13 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         if model_input.frame_count == 0:
             return []
 
-        if self.model_path:
-            labels, confs = self._predict_with_model(model_input)
-        elif self.fallback_to_rules:
-            labels, confs = _RuleDecoder(self.min_duration_s).predict(model_input)
-        else:
-            raise ValueError(f"{type(self).__name__} 未配置 model_path，且 fallback_to_rules=false")
+        if not self.model_path:
+            raise ValueError(
+                f"{type(self).__name__} 未配置 model_path；CLEAN 离线模型不做规则降级，"
+                "本地回环请使用 mock.BrushRulesSegmenter"
+            )
+
+        labels, confs = self._predict_with_model(model_input)
 
         segments = self._labels_to_segments(model_input.timestamps, labels, confs)
         self._last_result = {
@@ -662,6 +597,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         if self._normalizer is not None:
             mean, std = self._normalizer
             x_np = (x_np - mean) / std
+        x_np = np.nan_to_num(x_np, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
         x = torch.tensor(x_np[None, :, :], dtype=torch.float32)
         self._model.eval()
         with torch.no_grad():
@@ -756,30 +692,6 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
 
 # ==================== 三种 clean 离线模型结构 ====================
-
-
-class _DilatedResidualLayer:
-    """延迟导入 torch 的 TCN 层工厂，避免 mock 路径导入 clean 时抢占重依赖。"""
-
-    @staticmethod
-    def make(channels: int, dilation: int, dropout: float):
-        import torch.nn as nn
-
-        class Layer(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = nn.Sequential(
-                    nn.Conv1d(channels, channels, kernel_size=3, padding=dilation, dilation=dilation),
-                    nn.ReLU(),
-                    nn.Dropout(dropout),
-                    nn.Conv1d(channels, channels, kernel_size=1),
-                )
-                self.act = nn.ReLU()
-
-            def forward(self, x):
-                return self.act(x + self.net(x))
-
-        return Layer()
 
 
 def _make_mstcn_bilstm(in_dim: int, class_count: int, hidden: int = 64):
@@ -965,6 +877,9 @@ class CleanASFormerSegmenter(_CleanTorchSegmenter):
     model_version = "clean_asformer_v1"
     feature_method = "business_priors"
 
+    def transform_features(self, model_input: ModelInput) -> ModelInput:
+        return self._add_business_priors(model_input)
+
     def _build_model(self, in_dim: int, class_count: int):
         return _make_asformer(in_dim, class_count)
 
@@ -978,6 +893,9 @@ class CleanBiGRUSegmenter(_CleanTorchSegmenter):
 
     model_version = "clean_bigru_v1"
     feature_method = "window_stats+business_priors"
+
+    def transform_features(self, model_input: ModelInput) -> ModelInput:
+        return self._add_business_priors(self._add_centered_window_stats(model_input))
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_bigru(in_dim, class_count)

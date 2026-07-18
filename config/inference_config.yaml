@@ -106,7 +106,6 @@ stages:
     #   # class: app.services.inference.offline.segmenters.clean.CleanBiGRUSegmenter
     #   params:
     #     model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm.pt
-    #     fallback_to_rules: false
     offline: {}                      # 生产默认不启用；MOCK stage 提供默认端到端兜底
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================

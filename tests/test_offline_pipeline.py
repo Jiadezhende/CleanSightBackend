@@ -4,6 +4,7 @@
 """
 
 import json
+import math
 
 import pytest
 
@@ -269,9 +270,9 @@ class TestCleanSegmenter:
         assert isinstance(mi, ModelInput)
         assert mi.frame_count == 4 and mi.feature_dim == 113  # v2: hand top-2 + top-1/impute/relations
         assert mi.feature_version == "clean_bbox_v2_top1_impute"
-        segs = seg.segment(mi)
-        assert [s.label for s in segs] == ["short_brush_cleaning"]
-        assert all(s.source == "clean_seg" for s in segs)
+        assert all(math.isfinite(v) for row in mi.features for v in row)
+        with pytest.raises(ValueError, match="model_path"):
+            seg.segment(mi)
 
     def test_each_clean_model_uses_own_feature_recipe(self):
         from app.services.inference.offline.segmenters.clean import (
@@ -302,7 +303,7 @@ class TestCleanSegmenter:
             "window_stats+business_priors", 249, "clean_bbox_v2_top1_impute+center_window+business_priors",
         )
 
-    def test_debug_result_has_frame_predictions(self):
+    def test_no_model_path_hard_fails_without_debug_result(self):
         from app.services.inference.offline.segmenters.clean import CleanSegmenter
         seg = CleanSegmenter(name="clean_seg", subscribes=["clean_large", "clean_small"],
                              min_duration_s=0.1, fps=10.0)
@@ -310,11 +311,9 @@ class TestCleanSegmenter:
             "clean_large": [_clean_frame(t)["clean_large"] for t in (0.1, 0.2, 0.3)],
             "clean_small": [_clean_frame(t)["clean_small"] for t in (0.1, 0.2, 0.3)],
         }
-        seg.segment(seg.preprocess(streams))
-        dbg = seg.debug_result()
-        assert dbg is not None
-        assert len(dbg["frame_predictions"]) == 3
-        assert dbg["frame_predictions"][0]["label"] == "short_brush_cleaning"
+        with pytest.raises(ValueError, match="model_path"):
+            seg.segment(seg.preprocess(streams))
+        assert seg.debug_result() is None
 
 
 # ============================ Runner ============================
@@ -388,22 +387,20 @@ class TestOfflineRunner:
         assert res.status == "completed"
         assert res.segment_count == 1
 
-    def test_clean_segmenter_writes_debug_json(self, tmp_path):
-        """CleanSegmenter 产逐帧 → Runner 落 offline_inference_result.json 含 frame_predictions。"""
+    def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_path):
+        """CleanSegmenter 不再规则降级；未配 model_path 时硬失败且不落结果。"""
         store = FeatureStore(tmp_path)
         for t in (0.1, 0.2, 0.3, 0.4):
             store.append(1, 2, make_frame_inference(cq=None, ts=t, detectors=_clean_frame(t)))
         store.flush(1, 2)
         offline = dict(_OFFLINE_OK, **{"class": _CLEAN_CLASS,
                                        "params": {"min_duration_s": 0.1, "fps": 10.0}})
-        res = OfflineRunner(base_dir=tmp_path, config=_config(offline)).run(
-            OfflineRunSpec(task_id=1, step_id=2))
-        assert res.status == "completed" and res.segment_count == 1
+        with pytest.raises(ValueError, match="model_path"):
+            OfflineRunner(base_dir=tmp_path, config=_config(offline)).run(
+                OfflineRunSpec(task_id=1, step_id=2))
         dbg_path = tmp_path / "1" / "2" / "offline_inference_result.json"
-        assert dbg_path.exists()
-        payload = json.loads(dbg_path.read_text(encoding="utf-8"))
-        assert payload["task_id"] == 1 and payload["step_id"] == 2
-        assert len(payload["frame_predictions"]) == 4
+        assert not dbg_path.exists()
+        assert not (tmp_path / "1" / "2" / "facts.jsonl").exists()
 
     def test_resolve_stage_fallback_to_mock(self, tmp_path):
         """未配数字 step_id(-1) 经 resolve_stage 回退 MOCK.offline，读数字 -1 分区、completed。"""
