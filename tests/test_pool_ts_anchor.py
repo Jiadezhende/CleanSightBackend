@@ -1,22 +1,19 @@
 """守卫：多 detector 聚合后，同帧各流 FrameDetections.timestamp 必须相等（= 帧捕获真值锚点）。
 
-背景：detector 曾在推理时各自 time.time() 生成 FrameDetections.timestamp，违反 Operator._zip_by_ts
-"同帧多流 ts 精确相等（来自同一 FrameInference.timestamp）"的对齐不变式——单流算子侥幸不受影响，
-但多流融合算子会因两流 ts 对不上而 inner-join 交集为空、整帧被丢。
+背景：detector 曾在推理时各自 time.time() 生成 FrameDetections.timestamp，破坏"同帧多流 ts 精确
+相等（来自同一 FrameInference.timestamp）"的不变式。写回口按 `FrameFeature(ts=res.timestamp,
+by_source=res.detections)` 物化整帧多流；帧窗算子用 FrameFeature.ts 裁窗、用投影出的
+FrameDetections.timestamp 推进游标，两者必须同源同值，否则内部对齐错乱。
 
 修复：帧捕获 ts 从 pool.infer_batch 一路穿到 detector，令每帧
 FrameDetections.timestamp == FrameInference.timestamp == Frame.timestamp。本用例锁死该不变式。
 """
 
-from typing import Dict, List, Tuple
-
 import numpy as np
 
-from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetections
+from app.domain.detection import FrameFeature
 from app.services.inference.detection.pool import MultiModelWorkerPool
 from app.services.inference.models import DetectionTask
-from app.services.inference.temporal.operator import Operator
 from app.services.inference.workflows.mock import MockDetector
 
 from factories import make_cq
@@ -33,16 +30,6 @@ def _task(ts: float, cq) -> DetectionTask:
         task_id=cq.task_id, stage=cq.stage, timestamp=ts,
         frame=np.zeros((8, 8, 3), dtype=np.uint8), cq=cq,
     )
-
-
-class _TwoStreamOperator(Operator):
-    """订阅两条流的最小算子，仅用来驱动 _zip_by_ts。"""
-
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:  # pragma: no cover
-        pass
-
-    def judge(self) -> Tuple[List[str], List[Alarm]]:  # pragma: no cover
-        return [], []
 
 
 def test_multi_detector_same_frame_shares_capture_ts():
@@ -65,8 +52,8 @@ def test_multi_detector_same_frame_shares_capture_ts():
         assert fd.timestamp == ts, f"{name} 流 ts={fd.timestamp} != 锚点 {ts}"
 
 
-def test_zip_by_ts_aligns_multi_stream_after_fix():
-    """两流经 pool 后，_zip_by_ts inner-join 能对齐（不再因 ts 不等而漏帧）。"""
+def test_frame_feature_carries_all_streams_at_capture_ts():
+    """两流经 pool 后，写回口物化的 FrameFeature 携两流、ts = 帧捕获锚点（取代旧 _zip_by_ts 对齐）。"""
     pool = MultiModelWorkerPool(
         stage="1",
         models=[_mock_detector("streamA"), _mock_detector("streamB")],
@@ -76,10 +63,8 @@ def test_zip_by_ts_aligns_multi_stream_after_fix():
     ts = 77.0
     fi = pool.infer_batch([_task(ts, cq)])[0]
 
-    op = _TwoStreamOperator(name="fuse", subscribes=["streamA", "streamB"], window_seconds=10.0)
-    windows = {name: [fd] for name, fd in fi.detections.items()}
-    aligned = op._zip_by_ts(windows)
-
-    assert len(aligned) == 1, "多流同帧应对齐出一帧；若为空说明 ts 不等的回归"
-    assert aligned[0].ts == ts
-    assert set(aligned[0].by_source) == {"streamA", "streamB"}
+    # 写回口构造：FrameFeature(ts=res.timestamp, by_source=res.detections)——多流天然对齐同帧。
+    feat = FrameFeature(ts=fi.timestamp, by_source=fi.detections)
+    assert feat.ts == ts
+    assert set(feat.by_source) == {"streamA", "streamB"}
+    assert all(fd.timestamp == ts for fd in feat.by_source.values())

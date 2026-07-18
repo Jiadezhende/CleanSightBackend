@@ -14,14 +14,14 @@ MockOperator（时序线程，流算子）：
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
 from app.services.inference.detection.detector import Detector
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmType
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import Detection, FrameDetections, FrameFeature
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ class MockOperator(Operator):
             "alarm_count": 0,
         }
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: List[FrameFeature]) -> None:
         window = self.primary_window(windows)
         if not window:
             return

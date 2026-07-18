@@ -13,12 +13,12 @@ BendingOperator（时序线程，流算子）：
 """
 
 import logging
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from app.services.inference.detection.detector import YOLODetector
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.domain.detection import FrameDetections
+from app.domain.detection import FrameDetections, FrameFeature
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ class BendingOperator(Operator):
             "last_ts": 0.0,
         }
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: List[FrameFeature]) -> None:
         window = self.primary_window(windows)
         if not window:
             return

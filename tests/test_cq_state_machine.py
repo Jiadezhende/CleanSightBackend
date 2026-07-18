@@ -1,14 +1,12 @@
 """T2: CQ 状态机 + 写门 + close() —— 迟到写入在写入时刻被拒。"""
 
-from types import SimpleNamespace
-
-from factories import make_alarm, make_cq, make_frame, make_frame_detections
+from factories import make_alarm, make_cq, make_frame, make_frame_feature
 from app.services.client.queues import RunState
 
 
 # 本地薄别名：保留原用例可读性，构造逻辑收敛在 factories。
 def _det():
-    return make_frame_detections(class_name="b")
+    return make_frame_feature(source="bubble", class_name="b")
 
 
 # --- 转换：幂等、单调 ---
@@ -39,9 +37,9 @@ def test_frame_and_result_writes_blocked_when_not_active():
     assert cq.append_ca_raw(make_frame()) is False
     cq.append_ca_processed(make_frame())
     assert cq.get_ca_processed_length() == 0
-    cq.push_detection("bubble", _det())
-    assert cq.get_slide_window("bubble") == []
-    cq.set_latest_inference(SimpleNamespace(detections={}, timestamp=1.0))
+    cq.push_detection(_det())
+    assert cq.get_slide_window() == []
+    cq.set_latest_inference(make_frame_feature())
     assert cq.get_latest_inference() is None
 
 
@@ -76,11 +74,11 @@ def test_clear_through_writes_allowed_when_not_active():
 
 def test_close_releases_payload_keeps_identity():
     cq = make_cq()
-    cq.push_detection("bubble", _det())
+    cq.push_detection(_det())
     cq.append_ca_raw(make_frame())
     cq.close()
     # payload 已释放
-    assert cq.get_slide_window("bubble") == []
+    assert cq.get_slide_window() == []
     assert len(cq.ca_raw) == 0
     assert cq.get_recent_alarms() == []
     assert cq.get_latest_inference() is None
@@ -103,5 +101,5 @@ def test_late_write_to_closed_cq_rejected():
     old = make_cq()
     old.close()                              # 模拟旧 run 已拆除
     assert old.append_ca_ready_with_throttle(make_frame()) is False
-    old.push_detection("bubble", _det())
-    assert old.get_slide_window("bubble") == []
+    old.push_detection(_det())
+    assert old.get_slide_window() == []

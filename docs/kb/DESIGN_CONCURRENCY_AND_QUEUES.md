@@ -30,20 +30,20 @@ per-task 生命周期事务锁**收敛为一把** `RLock`，由 `ClientManager.l
 
 ### ClientQueues 锁库存
 
-ClientQueues 中的锁按职责拆分：
+ClientQueues 中的锁按职责拆分（身份 `task_id/step_id/stage/task_started_at` 为构造定死的不可变
+primitive，热路径免锁直读，故**无** `_task_lock`——原历史锁已删）：
 
-- `_task_lock`：task 和 task_started_at。
 - `_raw_lock`：raw queue 和 latest raw。
 - `_viz_lock`：processed queue 和 latest rendered。
-- `_inference_lock`：latest inference。
-- `_frontend_lock`：stage 和 latest temporal。
-- `_slide_window_lock`：检测滑动窗口。
+- `_inference_lock`：latest inference（帧级 `FrameFeature` 原子快照）。
+- `_frontend_lock`：latest temporal。
+- `_slide_window_lock`：帧级 `FrameFeature` 滑窗（一帧一条，多流已对齐）。
 - `_alarm_lock`：alarm log、seq、gate。
 
-clear 时固定顺序：
+clear 时固定顺序（6 把 payload 锁）：
 
 ```text
-_task_lock -> _raw_lock -> _viz_lock -> _inference_lock
+_raw_lock -> _viz_lock -> _inference_lock
 -> _frontend_lock -> _slide_window_lock -> _alarm_lock
 ```
 

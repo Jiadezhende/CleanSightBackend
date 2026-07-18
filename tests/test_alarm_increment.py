@@ -7,7 +7,7 @@
 
 from unittest.mock import patch
 
-from factories import make_alarm, make_bare_cq, make_cq, make_frame_detections
+from factories import make_alarm, make_bare_cq, make_cq, make_frame_detections, make_frame_feature
 
 
 def _cq_with_task():
@@ -114,7 +114,7 @@ def test_blocked_alarm_not_recorded():
 
 def test_slide_window_summary():
     cq = make_bare_cq()
-    cq.push_detection("bubble", make_frame_detections(n=1, class_name="bubble", ts=10.0))
+    cq.push_detection(make_frame_feature(source="bubble", n=1, class_name="bubble", ts=10.0))
     summary = cq.get_slide_window_summary()
     assert summary["bubble"]["active"] is True
     assert summary["bubble"]["hit_count"] == 1

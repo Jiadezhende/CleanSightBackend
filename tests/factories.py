@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from app.domain.alarm import Alarm
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import Detection, FrameDetections, FrameFeature
 from app.domain.frame import Frame
 from app.services.client.queues import ClientQueues
 from app.services.inference.models import FrameInference
@@ -55,6 +55,19 @@ def make_frame_detections(
         timestamp=ts,
         **over,
     )
+
+
+def make_frame_feature(
+    *, ts: float = 1.0, by_source: Optional[Dict[str, FrameDetections]] = None,
+    source: str = "bubble", n: int = 1, class_name: str = "bubble",
+    metadata: Optional[Dict] = None,
+) -> FrameFeature:
+    """一帧多流对齐记录（特征层输入）。by_source 缺省单流 {source: <n 个检测>}。"""
+    if by_source is None:
+        by_source = {
+            source: make_frame_detections(n=n, class_name=class_name, ts=ts, metadata=metadata)
+        }
+    return FrameFeature(ts=ts, by_source=by_source)
 
 
 def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:

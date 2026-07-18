@@ -32,3 +32,15 @@ class FrameDetections:
     timestamp: float  # 时间戳
     success: bool = True  # 推理是否成功
     error: Optional[str] = None  # 错误信息（失败时提供）
+
+
+@dataclass
+class FrameFeature:
+    """一帧多流对齐的检测记录（特征层输入）：ts + {流名: FrameDetections}。
+
+    online 写回口物化、offline 回放重建；不含 cq，可跨 client/inference/offline 复用。
+    注：持有的是对齐后的检测（非计算特征），特征张量化仍在算子内（下一步共享）。
+    """
+
+    ts: float  # 帧捕获时间戳（= 各流 FrameDetections.timestamp）
+    by_source: Dict[str, FrameDetections]  # {流名(detector.name): 该流当帧检测}

@@ -20,21 +20,12 @@ from __future__ import annotations
 import logging
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetections
+from app.domain.detection import FrameDetections, FrameFeature
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class AlignedFrame:
-    """多流按 ts 对齐后的一帧：同一 ts 下各订阅流的 FrameDetections。"""
-
-    ts: float
-    by_source: Dict[str, FrameDetections]
 
 
 class Operator(ABC):
@@ -50,8 +41,8 @@ class Operator(ABC):
 
     # ── 两接口（共享 self._sm）────────────────────────────────
     @abstractmethod
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
-        """消费订阅流、推进 self._sm。windows: {流名: 该流滑窗快照(按 ts 升序)}。"""
+    def analyze(self, windows: List[FrameFeature]) -> None:
+        """消费帧窗、推进 self._sm。windows: 帧级 FrameFeature 快照(按 ts 升序，多流已对齐)。"""
 
     @abstractmethod
     def judge(self) -> Tuple[List[str], List[Alarm]]:
@@ -62,35 +53,20 @@ class Operator(ABC):
         return []
 
     # ── 基类工具 ─────────────────────────────────────────────
-    def _clip(self, window: List[FrameDetections]) -> List[FrameDetections]:
-        """把流裁到本算子感受野（保留 ts >= latest - window_seconds）。"""
+    def _clip(self, window: List[FrameFeature]) -> List[FrameFeature]:
+        """把帧窗裁到本算子感受野（保留 ts >= latest - window_seconds）。"""
         if not window:
             return []
-        cutoff = window[-1].timestamp - self.window_seconds
-        return [d for d in window if d.timestamp >= cutoff]
+        cutoff = window[-1].ts - self.window_seconds
+        return [f for f in window if f.ts >= cutoff]
 
-    def primary_window(
-        self, windows: Dict[str, List[FrameDetections]]
-    ) -> List[FrameDetections]:
-        """单订阅便捷：取首个订阅流并裁到感受野。"""
-        return self._clip(windows.get(self.subscribes[0], []))
-
-    def _zip_by_ts(
-        self, windows: Dict[str, List[FrameDetections]]
-    ) -> List[AlignedFrame]:
-        """多流按 ts 对齐（inner-join：仅保留所有订阅流都到齐的 ts）。
-
-        依赖不变式：同帧多流的 ts 完全相等（来自同一 FrameInference.timestamp），
-        故可用 ts 做精确 key。缺帧/错帧的 ts 被丢弃（latest-wins 等策略留子类 override）。
-        """
-        clipped = {s: self._clip(windows.get(s, [])) for s in self.subscribes}
-        if any(not w for w in clipped.values()):
-            return []
-        indexed = {s: {d.timestamp: d for d in w} for s, w in clipped.items()}
-        common = set.intersection(*(set(idx.keys()) for idx in indexed.values()))
+    def primary_window(self, windows: List[FrameFeature]) -> List[FrameDetections]:
+        """单订阅便捷：裁到感受野后投影首个订阅流的逐帧 FrameDetections。"""
+        src = self.subscribes[0]
         return [
-            AlignedFrame(ts=ts, by_source={s: indexed[s][ts] for s in self.subscribes})
-            for ts in sorted(common)
+            f.by_source[src]
+            for f in self._clip(windows)
+            if f.by_source.get(src) is not None
         ]
 
 
