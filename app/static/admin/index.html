@@ -178,7 +178,7 @@
               <img v-if="liveFrame" :src="liveFrame" alt="live" />
               <div v-else class="video-placeholder">
                 <div style="font-size:40px;margin-bottom:12px">&#128247;</div>
-                <div>{{ selectedClient ? '点击"连接"开始实时画面' : '请先选择客户端' }}</div>
+                <div>{{ liveIdle ? '任务未运行，等待画面…' : (selectedClient ? '点击"连接"开始实时画面' : '请先选择客户端') }}</div>
               </div>
               <div class="fps-badge" v-if="liveConnected">{{ liveFps }} fps</div>
             </div>
@@ -508,6 +508,7 @@ createApp({
     // ─── 实时监控 ───
     const selectedClient = ref('');
     const liveFrame = ref(null);
+    const liveIdle = ref(false);     // 已连但当前无任务（后端 idle 帧）→ 占位显示"等待画面"
     const liveConnected = ref(false);
     const liveFps = ref(0);
     const liveAlarms = ref([]);
@@ -531,9 +532,17 @@ createApp({
       if (!sourceIp) { ElMessage.warning('该任务无 source_ip，无法连接实时画面'); return; }
       liveAlarms.value = [];
       liveSeq = 0;
+      liveIdle.value = false;
       // 视频 WS（wire 不变：?client_id 参数即 source_ip）
       videoWs = new WebSocket(wsApi('/ai/video?client_id=' + encodeURIComponent(sourceIp)));
-      videoWs.onmessage = (e) => { liveFrame.value = e.data; fpsFrameCount++; };
+      videoWs.onmessage = (e) => {
+        // 帧 data URL 直接渲染；控制帧（{"type":"idle"} 任务结束）→ 清屏回占位、不计 fps
+        if (typeof e.data === 'string' && e.data.startsWith('data:')) {
+          liveFrame.value = e.data; liveIdle.value = false; fpsFrameCount++;
+        } else {
+          try { if (JSON.parse(e.data)?.type === 'idle') { liveFrame.value = null; liveIdle.value = true; } } catch {}
+        }
+      };
       videoWs.onclose = () => { if (liveConnected.value) stopLive(); };
       liveConnected.value = true;
       fpsTimer = setInterval(() => { liveFps.value = fpsFrameCount; fpsFrameCount = 0; }, 1000);
@@ -556,6 +565,7 @@ createApp({
       if (alarmPollTimer) { clearInterval(alarmPollTimer); alarmPollTimer = null; }
       liveConnected.value = false;
       liveFrame.value = null;
+      liveIdle.value = false;
       liveFps.value = 0;
       liveAlarms.value = [];
       liveSeq = 0;
@@ -712,7 +722,7 @@ createApp({
         v.src = url;
         v.addEventListener('loadedmetadata', doSeek, { once: true });
       } else {
-        evidenceError.value = '当前浏览器不支持 HLS 播放（hls.js 未加载，可能 CDN 被墙）';
+        evidenceError.value = '当前浏览器不支持 HLS 播放（hls.js 未加载，本地 vendor 缺失或加载失败）';
       }
     }
 
@@ -865,7 +875,7 @@ createApp({
       apiBase,
       activeTab,
       overview, overviewTime, health, barStyle, statusTag,
-      selectedClient, liveFrame, liveConnected, liveClientInfo, liveFps, liveAlarms,
+      selectedClient, liveFrame, liveIdle, liveConnected, liveClientInfo, liveFps, liveAlarms,
       onClientChange, startLive, stopLive,
       metricsJson, rawMetrics, showRaw, latencyChartRef, latencyHistory,
       fetchMetrics, formatDict,

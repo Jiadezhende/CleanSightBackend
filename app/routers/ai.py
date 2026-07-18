@@ -42,15 +42,21 @@ async def lifespan():
 @router.websocket("/video")
 async def websocket_video_endpoint(websocket: WebSocket):
     """
-    WebSocket端点：/ai/video?task_id=xxx（新，首选）或 ?client_id=xxx（旧，即 source_ip）
-    - `task_id`（新）→ `client_manager.get(task_id)` 锁定具体 run（不可变运行键）。
-    - `client_id`（旧，=source_ip）→ 每轮 `find_by_source_ip` 解析当前 run（匹配首个），
-      同 source_ip 换 run 时自动跟随。
+    WebSocket端点：两种并列的请求模式（互斥，task_id 优先），非新旧之分：
+    - `?task_id=xxx` → `client_manager.get(task_id)`，锁定**某一次具体 run**（不可变运行键）；
+      run 结束即止、不跟随新任务。适合溯源 / 针对某次任务的监看。
+    - `?client_id=<source_ip>` → 每轮 `find_by_source_ip` 解析该**点位**的当前 live run
+      （命中多个取最晚启动者），任务来了显示、走了黑屏、换 run 自动跟随。适合大屏 / 固定点位常亮。
     每轮读其最新渲染结果（Base64 JPEG）持续推送。两参皆缺 → 关闭（1008）。
+
+    协议：帧为 `data:image/jpeg;base64,...` 文本；当从"曾推帧 → 无 run"跳变时
+    额外发一次 `{"type":"idle"}` 控制帧，供大屏清屏黑屏（任务结束）。前端按前缀
+    区分：`data:` 开头当图渲染，否则按 JSON 控制帧解析。持续无 run 期间保持静默
+    （不重复发 idle），任务中卡顿（cq 在但无新帧）保持最后一帧、不发 idle。
     """
     # 双模解析（task_id 优先）：构造 per-loop 解析器 + 日志标签
     task_id_raw = websocket.query_params.get("task_id")
-    client_id = websocket.query_params.get("client_id")  # 旧参，即 source_ip
+    client_id = websocket.query_params.get("client_id")  # 点位模式：source_ip（非遗留参）
 
     if task_id_raw is not None:
         try:
@@ -76,6 +82,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
     frame_interval = 1.0 / 30  # 30fps
     frames_sent = 0
     last_log_time = time.time()
+    streaming = False  # 是否处于推帧态：仅在"曾推帧 → 无 run"跳变时发一次 idle
 
     shutdown_event: asyncio.Event = websocket.app.state.shutdown_event
 
@@ -96,11 +103,25 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
     try:
         while not shutdown_event.is_set() and not disconnect_task.done():
-            # 每轮解析当前 run（task_id 直查 / source_ip 匹配首个）→ 读其最新渲染帧
+            # 每轮解析当前 run（task_id 直查 / source_ip 匹配首个）
             cq = resolve()
-            frame = cq.get_latest_rendered() if cq is not None else None
 
+            # 无 run（无任务 / 任务已结束）：仅在"曾推帧 → 现无 run"跳变时发一次
+            # idle 让大屏清屏黑屏；持续无 run 期间保持静默、不重复发（近零流量）。
+            # 与"任务中卡顿"区分：那时 cq 仍在，走下方分支保持最后一帧、不发 idle。
+            if cq is None:
+                if streaming:
+                    streaming = False
+                    try:
+                        await websocket.send_text('{"type":"idle"}')
+                    except Exception:
+                        break
+                await asyncio.sleep(0.05)
+                continue
+
+            frame = cq.get_latest_rendered()
             if frame is None:
+                # cq 在但暂无渲染帧（任务刚起 / 卡顿）：保持上一帧，不发 idle
                 await asyncio.sleep(0.01)  # 减少轮询间隔
                 continue
 
@@ -129,6 +150,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 last_sent_timestamp = current_timestamp
                 last_sent_time = current_time
                 frames_sent += 1
+                streaming = True  # 进入/维持推帧态：任务结束转 None 时才发 idle
 
                 # 每5秒输出统计
                 if current_time - last_log_time >= 5.0:
