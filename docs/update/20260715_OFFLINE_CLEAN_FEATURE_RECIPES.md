@@ -393,9 +393,9 @@ BiGRU 本身是双向循环模型，能利用过去和未来上下文；中心�
 
 如果不一致，直接 fail-fast，避免静默产出错误 timeline。
 
-### 6. 无权重行为
+### 6. 保留 fallback 行为
 
-未配置 `model_path` 时，CLEAN 离线模型会硬失败，不再静默降级成规则分段。无权重本地回环继续使用已有 `mock.BrushRulesSegmenter`，避免把 mock 结果误当成真实 clean 模型输出。
+未配置 `model_path` 时，仍可使用规则 fallback 做本地回环测试。fallback 已兼容新的 v2 特征名，优先读 `*_present` / `*_candidate_count`，历史 68 维输入才回退到 `*_count`。
 
 ## 和离线链路的关系
 
