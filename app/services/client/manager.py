@@ -83,16 +83,25 @@ class ClientManager:
         return task_id in self._runs
 
     def find_by_source_ip(self, source_ip: str) -> Optional[ClientQueues]:
-        """按 source_ip 查 ClientQueues（扫描当前快照，**匹配首个**命中）。
+        """按 source_ip 解析该点位的当前 live run（命中多个取**最晚启动**者）。
 
-        边界垫片用：前端 `/terminate`、WS `/ai/video` 仍以 `?client_id=<source_ip>` 调用，
-        由此把 source_ip 解析回当前 run。同 source_ip 并发多 run 时命中扫描到的第一个
-        （业务不保证 source_ip 唯一，故取首个即可）。
+        「按点位实时跟随」请求模式的解析器：WS `/ai/video`、`/terminate` 以
+        `?client_id=<source_ip>` 调用，把物理点位（摄像头 IP）解析回其当前 live run——
+        任务来了显示、走了黑屏、换 run 自动跟随。是与 `get(task_id)`（锁定某一次具体 run）
+        并列的一等查询轴，非遗留垫片。
+
+        source_ip 业务不保证唯一：同点位并发多 run 时按 `task_started_at` 取**最晚启动**者
+        （新 run 顶掉旧 run 的展示）；单摄像头单任务下即取唯一命中。O(N) 单遍扫描，
+        N=并发 run 数（个位数），每轮解析开销可忽略——WS 每轮重解析正是「跟随」机制本身，
+        不可缓存成取一次（否则锁死旧 run、不跟随换 run/结束）。
         """
+        latest: Optional[ClientQueues] = None
         for cq in self._runs.values():  # 原子读引用后迭代不可变快照
-            if cq.source_ip == source_ip:
-                return cq
-        return None
+            if cq.source_ip == source_ip and (
+                latest is None or cq.task_started_at > latest.task_started_at
+            ):
+                latest = cq
+        return latest
 
     def snapshot(self) -> Mapping[int, ClientQueues]:
         """返回所有 run 的**零拷贝只读视图**（键=task_id，安全迭代，切勿修改）。"""
