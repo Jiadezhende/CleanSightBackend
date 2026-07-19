@@ -152,6 +152,7 @@ def build_base_features(
 
 
 def base_feature_names() -> List[str]:
+    """基础 v2 的 113 个特征列名（跑一遍空矩阵取名，避免维护第二份清单）。"""
     return _build_feature_matrix({name: [] for name in OBJECTS}, 1, 7.5)[1]
 
 
@@ -163,6 +164,7 @@ def _finite_matrix(values: np.ndarray) -> np.ndarray:
 def _collect_object_arrays(
     frames: Sequence[FrameDetections], frame_width: int, frame_height: int
 ) -> Dict[str, List[np.ndarray]]:
+    """把每帧检测框按目标类别归拢成 {obj: [每检测框一个 [T,5] 稀疏数组]}。"""
     frame_count = len(frames)
     out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
     for idx, frame in enumerate(frames):
@@ -185,6 +187,7 @@ def _collect_object_arrays(
 
 
 def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
+    """用相邻帧 dt 的中位数估真实采样率；dt 不可用时回退 fallback_fps。"""
     if len(timestamps) < 2:
         return max(float(fallback_fps), 1e-6)
     deltas = [
@@ -197,6 +200,7 @@ def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
 
 
 def _frame_size(frame: FrameDetections, frame_width: int, frame_height: int) -> Tuple[int, int]:
+    """优先取帧 metadata 里的宽高，缺失时回退传入的默认尺寸。"""
     meta = frame.metadata or {}
     width = meta.get("frame_width") or meta.get("width") or frame_width
     height = meta.get("frame_height") or meta.get("height") or frame_height
@@ -204,6 +208,7 @@ def _frame_size(frame: FrameDetections, frame_width: int, frame_height: int) -> 
 
 
 def _bbox_to_center_area(det: Detection, width: int, height: int) -> Tuple[float, float, float]:
+    """xyxy 框空间归一化后返回 (中心 cx, 中心 cy, 面积)，坐标/面积均截到 [0,1]。"""
     if len(det.bbox) < 4:
         return 0.0, 0.0, 0.0
     x1, y1, x2, y2 = [float(v) for v in det.bbox[:4]]
@@ -224,6 +229,7 @@ def _bbox_to_center_area(det: Detection, width: int, height: int) -> Tuple[float
 
 
 def _as_box5(row: np.ndarray) -> np.ndarray:
+    """把任意长度的行统一成 5 元 [present, cx, cy, area, conf]，不足补零。"""
     if row.shape[0] >= 5:
         return row[:5].astype(np.float32)
     out = np.zeros(5, dtype=np.float32)
@@ -233,6 +239,7 @@ def _as_box5(row: np.ndarray) -> np.ndarray:
 
 
 def _box_score(row: np.ndarray, prev_center: np.ndarray | None = None) -> float:
+    """槽位竞争打分：conf×√area，再对偏离上一帧中心的位移做惩罚；缺框记 -1。"""
     present, cx, cy, area, conf = [float(x) for x in _as_box5(row)]
     if present <= 0:
         return -1.0
@@ -243,6 +250,7 @@ def _box_score(row: np.ndarray, prev_center: np.ndarray | None = None) -> float:
 
 
 def _missing_age(raw_present: np.ndarray, max_gap: int) -> np.ndarray:
+    """连续缺失帧数归一化到 [0,1]（越久没检到越接近 1），一旦命中清零。"""
     out = np.zeros(len(raw_present), dtype=np.float32)
     age = 0
     for idx, flag in enumerate(raw_present > 0):
@@ -252,6 +260,7 @@ def _missing_age(raw_present: np.ndarray, max_gap: int) -> np.ndarray:
 
 
 def _impute_short_gaps(raw: np.ndarray, fps: float, max_gap: int = 6) -> Tuple[np.ndarray, np.ndarray]:
+    """对短缺失段线性插值补帧，算出 speed 等 8 维；返回 (特征, active 掩码)。"""
     time_len = raw.shape[0]
     present = raw[:, 0].astype(np.float32)
     conf = raw[:, 4].astype(np.float32)
@@ -295,6 +304,7 @@ def _impute_short_gaps(raw: np.ndarray, fps: float, max_gap: int = 6) -> Tuple[n
 
 
 def _select_hand_slots(hand_arrs: List[np.ndarray], frames: int) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """每帧按打分取 hand 的 top-2 槽位（双手），并返回逐帧 hand 计数。"""
     hand_count = np.zeros(frames, dtype=np.float32)
     slots = [np.zeros((frames, 5), dtype=np.float32), np.zeros((frames, 5), dtype=np.float32)]
     for t in range(frames):
@@ -307,6 +317,7 @@ def _select_hand_slots(hand_arrs: List[np.ndarray], frames: int) -> Tuple[np.nda
 
 
 def _select_top1_slot(arrs: List[np.ndarray], frames: int) -> Tuple[np.ndarray, np.ndarray]:
+    """每帧取单目标 top-1 槽位（带上一帧中心做时序连续性打分），返回计数与槽位。"""
     count = np.zeros(frames, dtype=np.float32)
     slot = np.zeros((frames, 5), dtype=np.float32)
     prev_center: np.ndarray | None = None
@@ -326,6 +337,7 @@ def _build_feature_matrix(
     frames: int,
     fps: float,
 ) -> Tuple[np.ndarray, List[str]]:
+    """拼装完整 v2 矩阵：hand top-2 + 各目标 top-1 + 关键目标对 + 时间编码，返回 (矩阵, 列名)。"""
     blocks: List[np.ndarray] = []
     names: List[str] = []
     centers: Dict[str, np.ndarray] = {}
@@ -404,6 +416,7 @@ def _build_feature_matrix(
 
 
 def _with_features(model_input: ModelInput, features: np.ndarray, names: List[str], version: str) -> ModelInput:
+    """基于原 ModelInput 换一套特征/列名/版本，重建新 ModelInput（含 finite 兜底）。"""
     features = _finite_matrix(features)
     return ModelInput(
         features=features.tolist(),
@@ -415,6 +428,7 @@ def _with_features(model_input: ModelInput, features: np.ndarray, names: List[st
 
 
 def _centered_mean(values: np.ndarray, radius: int) -> np.ndarray:
+    """以每帧为中心、半径 radius 的居中滑窗均值（边界收缩窗口，不补零）。"""
     if radius <= 0:
         return values.astype(np.float32)
     out = np.zeros_like(values, dtype=np.float32)
@@ -426,6 +440,7 @@ def _centered_mean(values: np.ndarray, radius: int) -> np.ndarray:
 
 
 def add_centered_window_stats(model_input: ModelInput, windows: Tuple[int, ...] = (5, 15)) -> ModelInput:
+    """recipe：对 present/conf/speed 等列追加多尺度居中滑窗均值（BiGRU 用）。"""
     feature = np.asarray(model_input.features, dtype=np.float32)
     names = list(model_input.feature_names)
     selected = [
@@ -453,6 +468,7 @@ def add_centered_window_stats(model_input: ModelInput, windows: Tuple[int, ...] 
 
 
 def _col(features: np.ndarray, name_to_idx: Dict[str, int], name: str) -> np.ndarray:
+    """按列名取一整列；列不存在则返回全零（缺列→补零的统一不变式）。"""
     idx = name_to_idx.get(name)
     if idx is None:
         return np.zeros(features.shape[0], dtype=np.float32)
@@ -460,10 +476,12 @@ def _col(features: np.ndarray, name_to_idx: Dict[str, int], name: str) -> np.nda
 
 
 def _near_score(dist: np.ndarray) -> np.ndarray:
+    """把归一化距离翻成 [0,1] 的接近度（越近越接近 1）。"""
     return np.clip(1.0 - dist, 0.0, 1.0).astype(np.float32)
 
 
 def add_business_priors(model_input: ModelInput) -> ModelInput:
+    """recipe：按业务规则叠加 8 维动作先验（接近度×存在×运动等），ASFormer/BiGRU 用。"""
     x = np.asarray(model_input.features, dtype=np.float32)
     names = list(model_input.feature_names)
     n = {name: idx for idx, name in enumerate(names)}
@@ -555,6 +573,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self._last_result: dict | None = None
 
     def preprocess(self, streams: Mapping[str, Sequence[FrameDetections]]) -> ModelInput:
+        """跨源按时间戳融合成逐帧序列，再算基础 v2 特征并叠加模型专属 recipe。"""
         by_ts: Dict[float, List[Detection]] = {}
         metadata_by_ts: Dict[float, dict] = {}
         for src in self.subscribes:
@@ -576,6 +595,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         return model_input
 
     def segment(self, model_input: ModelInput) -> List[SegmentFact]:
+        """跑模型得到逐帧标签，解码成 SegmentFact；未配 model_path 硬失败，不做规则降级。"""
         if model_input.frame_count == 0:
             return []
 
@@ -604,9 +624,11 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         return segments
 
     def debug_result(self) -> dict | None:
+        """返回最近一次 segment() 的逐帧预测/分段调试快照（未跑过为 None）。"""
         return self._last_result
 
     def _predict_with_model(self, model_input: ModelInput) -> Tuple[List[int], List[float]]:
+        """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 (argmax 标签, 置信度)。"""
         import numpy as np
         import torch
 
@@ -628,6 +650,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         return labels, confs
 
     def _load_model(self, model_input: ModelInput, class_count: int) -> None:
+        """加载 .pt checkpoint 并校验 feature_names/feature_version 与后端输入一致，取出 normalizer。"""
         import torch
 
         path = Path(str(self.model_path))
@@ -668,6 +691,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
     def _labels_to_segments(
         self, timestamps: Sequence[float], labels: Sequence[int], confs: Sequence[float]
     ) -> List[SegmentFact]:
+        """把逐帧标签合并成连续动作段（跳过 idle、过滤短于 min_duration_s 的段）。"""
         segments: List[SegmentFact] = []
         cur_label: int | None = None
         cur_start = cur_end = 0.0
@@ -708,6 +732,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         return segments
 
     def _build_model(self, in_dim: int, class_count: int):
+        """构建本模型的 torch 网络（子类按自身结构实现）。"""
         raise NotImplementedError
 
 
@@ -715,6 +740,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
 
 def _make_mstcn_bilstm(in_dim: int, class_count: int, hidden: int = 64):
+    """构建 MS-TCN + BiLSTM 网络（BiLSTM 编码 → 单阶段 TCN → 两级 refine）。"""
     import torch
     import torch.nn as nn
 
@@ -789,6 +815,7 @@ def _make_mstcn_bilstm(in_dim: int, class_count: int, hidden: int = 64):
 
 
 def _make_asformer(in_dim: int, class_count: int, hidden: int = 64, heads: int = 4):
+    """构建 ASFormer 风格网络（局部卷积 + 多头自注意力 + FFN，带正弦位置编码）。"""
     import math
     import torch
     import torch.nn as nn
@@ -849,6 +876,7 @@ def _make_asformer(in_dim: int, class_count: int, hidden: int = 64, heads: int =
 
 
 def _make_bigru(in_dim: int, class_count: int, hidden: int = 64):
+    """构建 BiGRU 网络（3 层双向 GRU → 时序卷积头）。"""
     import torch
     import torch.nn as nn
 
