@@ -467,30 +467,29 @@ def add_business_priors(model_input: ModelInput) -> ModelInput:
     x = np.asarray(model_input.features, dtype=np.float32)
     names = list(model_input.feature_names)
     n = {name: idx for idx, name in enumerate(names)}
-    col = _col
 
-    hand = np.maximum(col(x, n, "hand_top1_present"), col(x, n, "hand_top2_present"))
-    short_brush = col(x, n, "short_brush_present")
-    syringe = col(x, n, "syringe_present")
-    air_gun = col(x, n, "air_gun_present")
-    brush_tip = col(x, n, "brush_tip_out_present")
-    long_brush = col(x, n, "long_brush_present")
+    hand = np.maximum(_col(x, n, "hand_top1_present"), _col(x, n, "hand_top2_present"))
+    short_brush = _col(x, n, "short_brush_present")
+    syringe = _col(x, n, "syringe_present")
+    air_gun = _col(x, n, "air_gun_present")
+    brush_tip = _col(x, n, "brush_tip_out_present")
+    long_brush = _col(x, n, "long_brush_present")
 
-    short_near = _near_score(col(x, n, "short_brush_to_scope_control_body_dist"))
-    syringe_near = _near_score(col(x, n, "syringe_to_scope_distal_end_dist"))
-    air_near = _near_score(col(x, n, "air_gun_to_scope_distal_end_dist"))
-    tip_near = _near_score(col(x, n, "brush_tip_out_to_scope_distal_end_dist"))
-    long_near = _near_score(col(x, n, "long_brush_to_scope_mid_section_dist"))
+    short_near = _near_score(_col(x, n, "short_brush_to_scope_control_body_dist"))
+    syringe_near = _near_score(_col(x, n, "syringe_to_scope_distal_end_dist"))
+    air_near = _near_score(_col(x, n, "air_gun_to_scope_distal_end_dist"))
+    tip_near = _near_score(_col(x, n, "brush_tip_out_to_scope_distal_end_dist"))
+    long_near = _near_score(_col(x, n, "long_brush_to_scope_mid_section_dist"))
 
     short_motion = np.maximum(
-        col(x, n, "short_brush_speed"),
-        np.abs(col(x, n, "short_brush_to_scope_control_body_delta")),
+        _col(x, n, "short_brush_speed"),
+        np.abs(_col(x, n, "short_brush_to_scope_control_body_delta")),
     )
-    syringe_stable = syringe * syringe_near * (1.0 - np.clip(col(x, n, "syringe_speed"), 0.0, 1.0))
-    air_stable = air_gun * air_near * (1.0 - np.clip(col(x, n, "air_gun_speed"), 0.0, 1.0))
-    long_signal = np.maximum.reduce([long_brush, brush_tip, col(x, n, "brush_tip_out_imputed")])
-    long_delta = col(x, n, "brush_tip_out_to_scope_distal_end_delta")
-    hand_to_long = _near_score(col(x, n, "hand_to_long_brush_dist"))
+    syringe_stable = syringe * syringe_near * (1.0 - np.clip(_col(x, n, "syringe_speed"), 0.0, 1.0))
+    air_stable = air_gun * air_near * (1.0 - np.clip(_col(x, n, "air_gun_speed"), 0.0, 1.0))
+    long_signal = np.maximum.reduce([long_brush, brush_tip, _col(x, n, "brush_tip_out_imputed")])
+    long_delta = _col(x, n, "brush_tip_out_to_scope_distal_end_delta")
+    hand_to_long = _near_score(_col(x, n, "hand_to_long_brush_dist"))
 
     priors = np.stack(
         [
