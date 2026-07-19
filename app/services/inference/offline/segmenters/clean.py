@@ -6,8 +6,8 @@
     - 模型输出到 SegmentFact 的解码逻辑。
 
 输入:
-    OfflineRunner 从 FeatureStore.load_many(task_id, step_id, subscribes)
-    读取 Mapping[source, Sequence[FrameDetections]]。
+    OfflineRunner 从 FeatureStore.load(task_id, step_id) 读取 List[FrameFeature]
+    （帧级、多流已在 by_source 内对齐、按 ts 升序）。
 
 输出:
     List[SegmentFact]，由 Runner 校验并幂等写入 FactLedger。
@@ -23,11 +23,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import Detection, FrameFeature
 from app.services.inference.models import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
@@ -126,15 +126,18 @@ class ModelInput:
 
 
 def build_base_features(
-    frames: Sequence[FrameDetections],
+    frames: Sequence[FrameFeature],
     fps: float,
     frame_width: int = 640,
     frame_height: int = 480,
 ) -> ModelInput:
-    """把 clean 检测框序列转换成 v2 固定维（113）时序特征。"""
+    """把 clean 帧级 FrameFeature 序列转换成 v2 固定维（113）时序特征。
+
+    每帧 `FrameFeature.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
+    """
     frame_width = max(1, int(frame_width))
     frame_height = max(1, int(frame_height))
-    timestamps = [float(f.timestamp) for f in frames]
+    timestamps = [float(ff.ts) for ff in frames]
     frame_count = len(frames)
     if frame_count <= 0:
         return ModelInput(features=[], feature_names=base_feature_names(), timestamps=[], fps=float(fps))
@@ -162,27 +165,31 @@ def _finite_matrix(values: np.ndarray) -> np.ndarray:
 
 
 def _collect_object_arrays(
-    frames: Sequence[FrameDetections], frame_width: int, frame_height: int
+    frames: Sequence[FrameFeature], frame_width: int, frame_height: int
 ) -> Dict[str, List[np.ndarray]]:
-    """把每帧检测框按目标类别归拢成 {obj: [每检测框一个 [T,5] 稀疏数组]}。"""
+    """把每帧检测框按目标类别归拢成 {obj: [每检测框一个 [T,5] 稀疏数组]}。
+
+    每帧遍历 `FrameFeature.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
+    """
     frame_count = len(frames)
     out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
-    for idx, frame in enumerate(frames):
-        width, height = _frame_size(frame, frame_width, frame_height)
-        for det in frame.detections:
-            obj = OBJECT_ALIASES.get(str(det.class_name))
-            if obj is None:
-                continue
-            cx, cy, area = _bbox_to_center_area(det, width, height)
-            arr = np.zeros((frame_count, 5), dtype=np.float32)
-            arr[idx] = (
-                1.0,
-                float(cx),
-                float(cy),
-                float(area),
-                max(0.0, min(1.0, float(det.confidence))),
-            )
-            out[obj].append(arr)
+    for idx, ff in enumerate(frames):
+        width, height = _frame_size(ff, frame_width, frame_height)
+        for fd in ff.by_source.values():
+            for det in fd.detections:
+                obj = OBJECT_ALIASES.get(str(det.class_name))
+                if obj is None:
+                    continue
+                cx, cy, area = _bbox_to_center_area(det, width, height)
+                arr = np.zeros((frame_count, 5), dtype=np.float32)
+                arr[idx] = (
+                    1.0,
+                    float(cx),
+                    float(cy),
+                    float(area),
+                    max(0.0, min(1.0, float(det.confidence))),
+                )
+                out[obj].append(arr)
     return out
 
 
@@ -199,9 +206,9 @@ def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
     return max(1.0 / float(np.median(np.asarray(deltas, dtype=np.float32))), 1e-6)
 
 
-def _frame_size(frame: FrameDetections, frame_width: int, frame_height: int) -> Tuple[int, int]:
-    """优先取帧 metadata 里的宽高，缺失时回退传入的默认尺寸。"""
-    meta = frame.metadata or {}
+def _frame_size(frame: FrameFeature, frame_width: int, frame_height: int) -> Tuple[int, int]:
+    """优先取帧任一流 metadata 里的宽高（同帧各流同值），缺失时回退传入的默认尺寸。"""
+    meta = next((fd.metadata for fd in frame.by_source.values() if fd.metadata), {})
     width = meta.get("frame_width") or meta.get("width") or frame_width
     height = meta.get("frame_height") or meta.get("height") or frame_height
     return max(1, int(width)), max(1, int(height))
@@ -572,23 +579,14 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self._normalizer: Tuple[Any, Any] | None = None
         self._last_result: dict | None = None
 
-    def preprocess(self, streams: Mapping[str, Sequence[FrameDetections]]) -> ModelInput:
-        """跨源按时间戳融合成逐帧序列，再算基础 v2 特征并叠加模型专属 recipe。"""
-        by_ts: Dict[float, List[Detection]] = {}
-        metadata_by_ts: Dict[float, dict] = {}
-        for src in self.subscribes:
-            for fd in streams.get(src, ()):
-                ts = float(fd.timestamp)
-                by_ts.setdefault(ts, []).extend(fd.detections)
-                if fd.metadata:
-                    metadata_by_ts.setdefault(ts, {}).update(fd.metadata)
+    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
+        """帧级 FrameFeature 序列 → 基础 v2 特征 + 模型专属 recipe。
 
-        frames = [
-            FrameDetections(detections=by_ts[ts], metadata=metadata_by_ts.get(ts, {}), timestamp=ts)
-            for ts in sorted(by_ts)
-        ]
-        base = build_base_features(frames, self.fps, self.frame_width, self.frame_height)
-        return self.transform_features(base)
+        多流按帧合并折进 build_base_features（`frames` 已按 ts 升序、各流在 by_source 内对齐）。
+        """
+        return self.transform_features(
+            build_base_features(frames, self.fps, self.frame_width, self.frame_height)
+        )
 
     def transform_features(self, model_input: ModelInput) -> ModelInput:
         """模型专属特征转换虚函数；子类按自身 checkpoint 的 recipe 覆盖。"""

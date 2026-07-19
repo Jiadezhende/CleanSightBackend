@@ -21,7 +21,7 @@
 | `visualization/worker.py` | Viz | `VisualizationWorker` | 读快照渲染，写 `ca_processed` + `_latest_rendered` |
 | `visualization/visualizer.py` | Viz | `FixedVisualizer` | 按 `RenderSpec` 固定渲染 |
 | `workflows/` | 接入点 | bubble/bending/clean/mock | 具体 Detector + Operator 子类 |
-| `offline/` | 离线 | —（仅 `__init__` 占位） | **待实现**：Segmenter/Runner 读 FeatureStore→写 FactLedger |
+| `offline/` | 离线 | `OfflineSegmenter`/`OfflineRunner` + `segmenters/{clean,mock}` + `cli` | 独立进程读 `FeatureStore.load`→策略 `preprocess`/`segment`→写 `FactLedger`（详见 online/offline 分离） |
 
 ## InferenceManager（生命周期编排）
 
@@ -41,7 +41,7 @@
 
 1. `cq.push_detection(FrameFeature(ts=res.timestamp, by_source=res.detections))` → 帧级 `_slide_window`（`Deque[FrameFeature]`，写回口一次物化整帧多流；供 L3，异步缓冲解速差 30fps↔1Hz）。
 2. `cq.set_latest_inference(feature)` → 原子快照（同一 `FrameFeature`，供 Viz；无 `cq`，不成自引用环。Viz 的 stage 取自 `cq.stage`）。
-3. `feature_store.append(task_id, step_id, res, owner=cq)` → L2 落盘（供离线）。
+3. `feature_store.append(task_id, step_id, feature, owner=cq)` → L2 落盘同一份帧级 `FrameFeature`（供离线；两端货币一致）。
 
 全程携 CQ 句柄（`res.cq`，dispatcher pop 时捕获），**无 `client_id` 反查**。
 
@@ -60,7 +60,7 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 
 ## online / offline 分离
 
-实时链（L1→`_slide_window`→L3 tick 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）**彻底分离**：实时不落 FactLedger，Actor 不 load 事实。当前 `offline/` 仅占位，消费端（Segmenter/Runner）**待实现**（见 `docs/update/20260628_OFFLINE_PIPELINE_PHASE1_PROPOSAL.md`）。
+实时链（L1→`_slide_window`→L3 tick 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）**彻底分离**：实时不落 FactLedger，Actor 不 load 事实。两链共用一套货币 **帧级 `FrameFeature`**（`ts + {source: FrameDetections}`）：写回口 `append(feature)` 落盘，离线 `load(task_id, step_id) → List[FrameFeature]`（一次到位、多流已对齐）喂 `OfflineSegmenter.preprocess(frames)`。`offline/` 已接入（独立进程 CLI `python -m app.services.inference.offline.cli run`，见 `runner.py`/`segmenters/`）。
 
 ## Stage 配置与当前阶段
 

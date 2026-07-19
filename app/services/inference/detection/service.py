@@ -282,9 +282,10 @@ class ModelWorkerService:
             # 从同一句柄派生 task_id/step_id（消除跨 snapshot 二次读的键错配窗口）。
             # owner=cq：feature_store 无状态门，靠 store 内归属校验挡「顶层 is_active()
             # 通过后中途 supersede」的迟到写（分区键跨 run 共享，比 is_active() 更本质）。
+            # 落盘同一份帧级 FrameFeature（与帧窗/快照共用），append/load 两端货币一致。
             if self._feature_store is not None:
                 task_id = cq.task_id
                 step_id = cq.step_id
                 if task_id is not None and step_id is not None:
-                    self._feature_store.append(task_id, step_id, res, owner=cq)
+                    self._feature_store.append(task_id, step_id, feature, owner=cq)
 
