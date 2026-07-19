@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -62,6 +63,23 @@ def _deserialize_detection(d: Dict[str, Any]) -> Detection:
         class_id=d["cls_id"],
         class_name=d["cls"],
     )
+
+
+def _extract_frame_wh(detections_by_task: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """从任一检测器帧的 metadata.frame_shape (H, W, C) 提取 (width, height)。
+
+    离线空间归一化（bbox → cx/cy/area）需按真实分辨率换算；但特征回读时 metadata
+    整个被丢，segmenter 只能退回硬编码默认。这里把帧分辨率随记录落盘，让离线可恢复。
+    同一帧所有检测器看同一分辨率，取首个可用值即可；无任何 frame_shape 时返回 None，
+    离线仍按默认兜底（老 features.jsonl 无该字段时同样优雅降级）。
+    """
+    for out in detections_by_task.values():
+        shape = (getattr(out, "metadata", None) or {}).get("frame_shape")
+        if shape is not None and len(shape) >= 2:
+            height, width = int(shape[0]), int(shape[1])
+            if width > 0 and height > 0:
+                return width, height
+    return None
 
 
 class _JsonlBuffer:
@@ -206,6 +224,10 @@ class FeatureStore(_JsonlBuffer):
             }
             # ts = 帧捕获 ts（res.timestamp），供离线/证据按帧对齐，详见模块 docstring
             record = {"ts": res.timestamp, "features": features}
+            # wh = 帧分辨率 [width, height]，供离线空间归一化恢复真实尺寸（无则省略）
+            wh = _extract_frame_wh(res.detections)
+            if wh is not None:
+                record["wh"] = list(wh)
             line = json.dumps(record, ensure_ascii=False) + "\n"
         except Exception as e:  # 序列化失败 best-effort 跳过
             logger.warning("[FeatureStore] 特征序列化失败 task=%s step=%s: %s", task_id, step_id, e)
@@ -215,36 +237,70 @@ class FeatureStore(_JsonlBuffer):
     def load(self, task_id: Any, step_id: Any, source: str) -> List[FrameDetections]:
         """离线回读：把某 source（检测点/模型名）的全序列特征还原为 FrameDetections 列表。
 
-        供离线链路使用（offline 预置）。先 flush 缓冲再读，缺失文件返回空。
-        注：mask/keypoints/metadata 未落盘，回读的 FrameDetections.metadata 为空。
+        供离线链路使用（offline 预置）。委托 `load_many` 的单 source 版本，语义不变。
 
         Args:
             task_id: 任务 id
             step_id: 洗消步骤 id
             source: 检测点名（= Detector/Analyzer.name），对应每帧 features[source]
         """
+        return self.load_many(task_id, step_id, [source]).get(source, [])
+
+    def load_many(
+        self, task_id: Any, step_id: Any, sources: Sequence[str]
+    ) -> Dict[str, List[FrameDetections]]:
+        """离线回读：一次扫描把多个 source 的全序列特征各自还原为 FrameDetections 列表。
+
+        供离线链路使用（offline 预置）。先 flush 缓冲，再**单次顺序扫 features.jsonl**
+        （不为每个 source 重复读整文件）。每个 source 保留所有含该 key 的帧（含 detections 为空
+        的帧），返回序列按 `ts` 升序。文件缺失时每个 source 返回空列表；单行损坏记 warning 后
+        跳过、不中断其余数据。
+        注：mask/keypoints 未落盘，回读为 None；metadata 仅在记录含 `wh`（帧分辨率）时
+        回填 `frame_width`/`frame_height`，供离线空间归一化恢复真实尺寸，其余键不落盘。
+
+        Args:
+            task_id: 任务 id
+            step_id: 洗消步骤 id
+            sources: 检测点名列表（= Detector.name），各对应每帧 features[source]
+        """
+        outputs: Dict[str, List[FrameDetections]] = {src: [] for src in sources}
         self.flush(task_id, step_id)
         path = self._path(task_id, step_id)
         if not path.exists():
-            return []
-        outputs: List[FrameDetections] = []
+            return outputs
         try:
-            with path.open("r", encoding="utf-8") as f:
+            # utf-8-sig 容忍 Windows 手写 features.jsonl 的 UTF-8 BOM；后端自身写出的无 BOM 亦正常。
+            with path.open("r", encoding="utf-8-sig") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
-                    rec = json.loads(line)
-                    dets = (rec.get("features") or {}).get(source)
-                    if dets is None:
+                    try:
+                        rec = json.loads(line)
+                    except Exception as e:  # 单行损坏：跳过不中断其余数据
+                        logger.warning("[FeatureStore] 跳过损坏行 %s: %s", path, e)
                         continue
-                    outputs.append(FrameDetections(
-                        detections=[_deserialize_detection(d) for d in dets],
-                        metadata={},
-                        timestamp=rec.get("ts", 0.0),
-                    ))
+                    features = rec.get("features") or {}
+                    ts = rec.get("ts", 0.0)
+                    # 帧分辨率随记录落盘（写入端 _extract_frame_wh）；回读还原到 metadata
+                    # 供离线空间归一化按真实尺寸换算。老记录无 wh 时留空，segmenter 走默认兜底。
+                    wh = rec.get("wh")
+                    frame_meta: Dict[str, Any] = {}
+                    if isinstance(wh, (list, tuple)) and len(wh) >= 2:
+                        frame_meta = {"frame_width": wh[0], "frame_height": wh[1]}
+                    for src in sources:
+                        dets = features.get(src)
+                        if dets is None:
+                            continue
+                        outputs[src].append(FrameDetections(
+                            detections=[_deserialize_detection(d) for d in dets],
+                            metadata=dict(frame_meta),
+                            timestamp=ts,
+                        ))
         except Exception as e:
             logger.warning("[FeatureStore] 回读失败 %s: %s", path, e)
+        for src in sources:
+            outputs[src].sort(key=lambda fd: fd.timestamp)
         return outputs
 
 
@@ -287,3 +343,75 @@ class FactLedger(_JsonlBuffer):
         except Exception as e:
             logger.warning("[FactLedger] 回读失败 %s: %s", path, e)
         return facts
+
+    def replace_segments(
+        self,
+        task_id: Any,
+        step_id: Any,
+        producer: str,
+        facts: List[SegmentFact],
+    ) -> None:
+        """幂等替换某 producer 的分段事实（离线链路专用）。
+
+        语义：先 flush 本 (task,step) 缓冲 → 读既有 facts.jsonl → 保留所有 EventFact 与
+        `meta.producer != producer` 的其他 SegmentFact → 删同 producer 旧 SegmentFact →
+        追加本次新事实 → 写同目录临时文件并 `os.replace()` 原子替换。写/序列化失败保留旧文件。
+
+        全程持 `self._lock`（与 _write/_enqueue/open_fresh 互斥）串行 read-modify-write；
+        不调用 `flush()`（其会重入锁），改在锁内 inline flush 本 key 缓冲。
+        一期不支持同一 (task,step) 跨进程并发执行。空 facts 视为清除该 producer 旧分段。
+
+        Args:
+            task_id: 任务 id
+            step_id: 洗消步骤 id
+            producer: 生产者身份（= segmenter.name），写入每条新事实 meta.producer
+            facts: 本次产出的 SegmentFact 列表（可空）
+        """
+        if task_id is None or step_id is None:
+            return
+        key = self._key(task_id, step_id)
+        path = self._path(task_id, step_id)
+        with self._lock:
+            # 1) inline flush 本 key 缓冲（不重入 flush()）
+            entry = self._buffers.pop(key, None)
+            if entry:
+                _, _, buffered = entry
+                if buffered:
+                    self._write(path, buffered)
+            # 2) 读既有事实（单行损坏跳过，不丢整文件）
+            existing: List[Union[EventFact, SegmentFact]] = []
+            if path.exists():
+                try:
+                    with path.open("r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                existing.append(fact_from_json(json.loads(line)))
+                            except Exception as e:
+                                logger.warning("[FactLedger] 跳过损坏行 %s: %s", path, e)
+                except Exception as e:
+                    logger.warning("[FactLedger] replace 读既有失败 %s: %s", path, e)
+            # 3) 保留 EventFact + 其他 producer 的 SegmentFact，删同 producer 旧分段
+            kept = [
+                f for f in existing
+                if not (isinstance(f, SegmentFact) and f.meta.get("producer") == producer)
+            ]
+            merged = kept + list(facts)
+            # 4) 原子替换：写临时文件 → os.replace；失败保留旧文件
+            tmp = path.with_name(path.name + ".tmp")
+            try:
+                lines = [json.dumps(f.to_json(), ensure_ascii=False) + "\n" for f in merged]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with tmp.open("w", encoding="utf-8") as f:
+                    f.write("".join(lines))
+                os.replace(tmp, path)
+            except Exception as e:
+                logger.warning("[FactLedger] replace 写失败（保留旧文件）%s: %s", path, e)
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except Exception:
+                    pass
+                raise
