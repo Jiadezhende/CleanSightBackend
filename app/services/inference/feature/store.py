@@ -83,7 +83,7 @@ def _record_to_feature(rec: Dict[str, Any]) -> FrameFeature:
     每源 `FrameDetections.timestamp = 记录级 ts`（同帧多流同源同值）；`metadata={}`、
     `success=True`、`mask/keypoints=None` 均为默认。含 detections 为空的 source。
     """
-    ts = rec.get("ts", 0.0)
+    ts = float(rec.get("ts", 0.0))  # 反序列化边界统一 float（手写 JSONL 可能给 int）
     features = rec.get("features") or {}
     by_source = {
         source: FrameDetections(

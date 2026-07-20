@@ -15,7 +15,7 @@ VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() +
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
