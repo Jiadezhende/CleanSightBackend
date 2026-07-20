@@ -13,7 +13,8 @@ L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特
 帧对齐契约：每条记录的 `ts` = 该帧的 `FrameFeature.ts`（= 帧捕获 ts，与在线滑窗同源），
 与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，故 feature 行可按 `ts` 精确对上
 同帧的 HLS 证据片段与 keypoints。`append`/`load` 两端货币均为帧级 `FrameFeature`
-（`ts + {source: FrameDetections}`），落盘/回读逐值同型（离线与在线共用一套货币）。
+（`ts + {source: FrameDetections}`，离线与在线共用一套货币）；磁盘 record 是它的**精简投影**
+（只落离线必要信息，mask/keypoints/metadata 不落），对称映射见 `_feature_to_record`/`_record_to_feature`。
 """
 
 from __future__ import annotations
@@ -25,31 +26,16 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import numpy as np
-
 from app.domain.detection import Detection, FrameDetections, FrameFeature
 from app.services.inference.models import EventFact, SegmentFact, fact_from_json
 
 logger = logging.getLogger(__name__)
 
 
-def _json_safe(obj: Any) -> Any:
-    """把 numpy 标量 / 数组转成 JSON 可序列化的原生类型。"""
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (list, tuple)):
-        return [_json_safe(x) for x in obj]
-    return obj
-
-
 def _serialize_detection(det) -> Dict[str, Any]:
     """单个 Detection → 特征 dict（bbox 即特征；mask/keypoints 太重不落）。"""
     return {
-        "bbox": _json_safe(det.bbox),
+        "bbox": [int(x) for x in det.bbox],  # 强制原生 int（json 不吃 np.int64），与下方 conf/cls_id 同风格
         "conf": float(det.confidence),
         "cls_id": int(det.class_id),
         "cls": det.class_name,
@@ -63,6 +49,57 @@ def _deserialize_detection(d: Dict[str, Any]) -> Detection:
         confidence=d["conf"],
         class_id=d["cls_id"],
         class_name=d["cls"],
+    )
+
+
+# ── FrameFeature ↔ 磁盘 record 的对称映射（store 私有格式，一对逆运算紧挨放置）──────────
+#
+# 契约：append/load 两端货币都是 FrameFeature；磁盘 record 是它的**精简投影**，只保留离线
+# 必要信息 = ts + 每源检测框(bbox/conf/cls) + 帧分辨率。刻意不落（回读按默认还原）：
+#   - mask/keypoints：重（seg/pose 才有，每帧一张数组），且离线不消费；
+#   - metadata / success / error：离线不消费。
+# 磁盘键全命名（frame_width/frame_height），无位置约定；位置约定只活在 Detection 的
+# bbox=[x1,y1,x2,y2]（其本身就是坐标序）。
+
+
+def _feature_to_record(feature: FrameFeature) -> Dict[str, Any]:
+    """FrameFeature → 磁盘 record（逆运算 _record_to_feature）。"""
+    record: Dict[str, Any] = {
+        "ts": feature.ts,
+        "features": {
+            source: [_serialize_detection(d) for d in fd.detections]
+            for source, fd in feature.by_source.items()
+        },
+    }
+    if feature.frame_width is not None and feature.frame_height is not None:
+        record["frame_width"] = feature.frame_width
+        record["frame_height"] = feature.frame_height
+    return record
+
+
+def _record_to_feature(rec: Dict[str, Any]) -> FrameFeature:
+    """磁盘 record → FrameFeature（_feature_to_record 的逆；未落字段按契约默认还原）。
+
+    每源 `FrameDetections.timestamp = 记录级 ts`（同帧多流同源同值）；`metadata={}`、
+    `success=True`、`mask/keypoints=None` 均为默认。含 detections 为空的 source。
+    """
+    ts = rec.get("ts", 0.0)
+    features = rec.get("features") or {}
+    by_source = {
+        source: FrameDetections(
+            detections=[_deserialize_detection(d) for d in dets],
+            metadata={},
+            timestamp=ts,
+        )
+        for source, dets in features.items()
+    }
+    fw = rec.get("frame_width")
+    fh = rec.get("frame_height")
+    return FrameFeature(
+        ts=ts,
+        by_source=by_source,
+        frame_width=int(fw) if fw is not None else None,
+        frame_height=int(fh) if fh is not None else None,
     )
 
 
@@ -202,17 +239,7 @@ class FeatureStore(_JsonlBuffer):
         if task_id is None or step_id is None:
             return
         try:
-            features = {
-                source: [_serialize_detection(d) for d in fd.detections]
-                for source, fd in feature.by_source.items()
-            }
-            # ts = 帧捕获 ts（feature.ts），供离线/证据按帧对齐，详见模块 docstring
-            record = {"ts": feature.ts, "features": features}
-            # 磁盘沿用紧凑数组 wh = [width, height]（帧级，pool 盖章）：读写各一处、就地注释；
-            # 内存契约用显式 frame_width/frame_height，不外泄位置约定。无分辨率则省略该键。
-            if feature.frame_width is not None and feature.frame_height is not None:
-                record["wh"] = [feature.frame_width, feature.frame_height]
-            line = json.dumps(record, ensure_ascii=False) + "\n"
+            line = json.dumps(_feature_to_record(feature), ensure_ascii=False) + "\n"
         except Exception as e:  # 序列化失败 best-effort 跳过
             logger.warning("[FeatureStore] 特征序列化失败 task=%s step=%s: %s", task_id, step_id, e)
             return
@@ -221,12 +248,10 @@ class FeatureStore(_JsonlBuffer):
     def load(self, task_id: Any, step_id: Any) -> List[FrameFeature]:
         """离线回读：把整段特征还原为帧级 `FrameFeature` 序列（与在线滑窗同型）。
 
-        先 flush 缓冲，再**单次顺序扫 features.jsonl**，每行还原成一个
-        `FrameFeature(ts, by_source={source: FrameDetections})`——含该行 features 里的全部 source
-        （含 detections 为空的 source，present-key 天然落在 by_source 键集上）。返回按 `ts` 升序。
-        文件缺失返回 `[]`；单行损坏记 warning 后跳过、不中断其余数据。
-        注：mask/keypoints 未落盘，回读为 None；FrameDetections.metadata 不落盘、回读为空。
-        记录含 `wh`（磁盘紧凑数组 [w,h]）时还原到帧级 `FrameFeature.frame_width/height`，供离线空间归一化。
+        先 flush 缓冲，再**单次顺序扫 features.jsonl**，每行经 `_record_to_feature` 还原成一个
+        `FrameFeature`（含该行 features 里的全部 source，含 detections 为空的 source，present-key
+        天然落在 by_source 键集上）。返回按 `ts` 升序。文件缺失返回 `[]`；单行损坏记 warning 后跳过、
+        不中断其余数据。未落字段（mask/keypoints/metadata/success）按契约默认还原，详见 `_record_to_feature`。
 
         Args:
             task_id: 任务 id
@@ -249,23 +274,7 @@ class FeatureStore(_JsonlBuffer):
                     except Exception as e:  # 单行损坏：跳过不中断其余数据
                         logger.warning("[FeatureStore] 跳过损坏行 %s: %s", path, e)
                         continue
-                    features = rec.get("features") or {}
-                    ts = rec.get("ts", 0.0)
-                    # 帧分辨率随记录落盘（帧级 wh 数组）；回读还原到 FrameFeature.frame_width/height，供离线空间归一化
-                    # 按真实尺寸换算。老记录无 wh 时留 None，segmenter 走默认兜底。
-                    wh = rec.get("wh")  # 磁盘紧凑数组 [width, height]
-                    fw = fh = None
-                    if isinstance(wh, (list, tuple)) and len(wh) >= 2:
-                        fw, fh = int(wh[0]), int(wh[1])
-                    by_source = {
-                        source: FrameDetections(
-                            detections=[_deserialize_detection(d) for d in dets],
-                            metadata={},
-                            timestamp=ts,
-                        )
-                        for source, dets in features.items()
-                    }
-                    frames.append(FrameFeature(ts=ts, by_source=by_source, frame_width=fw, frame_height=fh))
+                    frames.append(_record_to_feature(rec))
         except Exception as e:
             logger.warning("[FeatureStore] 回读失败 %s: %s", path, e)
         frames.sort(key=lambda ff: ff.ts)
