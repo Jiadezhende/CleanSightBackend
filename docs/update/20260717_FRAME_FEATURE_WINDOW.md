@@ -57,6 +57,14 @@ primitive、热路径免锁直读，该锁不再护任何状态。删除声明 +
 | `_latest_inference` | 写回口 `set_latest_inference` | Viz | 是（改存 `FrameFeature`，去自引用环；Viz stage 取 `cq.stage`） |
 | `FeatureStore` | 写回口 `feature_store.append` | 离线 | 否 |
 
+### 窗口生命周期（冷启动语义）
+
+`_slide_window` 是**时间窗非计数窗**（`deque` 无 `maxlen`，`push_detection` 每帧 append 后按 `cutoff = ts - _slide_window_seconds` 即时淘汰左端）。因此：
+
+- **从第 1 帧写入即开始滚动、从空生长到稳态、永不"等满"**：早期历史不足 `window_seconds` 时 `cutoff` 落在所有帧之前、无可淘汰，窗口只是往上长；超过后尾部旧帧才开始 `popleft`。
+- **共享的是最新帧（右锚 `window[-1].ts`）不是读游标**：无 per-consumer / per-tick 读位置状态，`get_slide_window()` 每次返当前整条快照；各算子以右锚为**终点**、用自身 `window_seconds` 往回 `_clip` 取**不同长度**的历史。时序状态累积靠算子 `self._sm`，不靠队列位置——同一帧会被多个 tick 重叠读到（1Hz tick、帧率更高），是有意的重叠滑窗。
+- **驱动侧唯一门控是空/非空**（`actor._tick`：`if not windows: continue`），**不 gate 窗口是否"帧数够"**。冷启动阶段算子拿到的是不完整短窗——框架不替算子挡"帧数不足"；需完整感受野才有效的模型（如 MS-TCN，感受野 ≫ 窗口）须在 `analyze/judge` 内自行判 `len`/时间跨度短路，否则早期恒吐 Idle/垃圾。
+
 ## 验证
 
 | 项 | 结果 |
