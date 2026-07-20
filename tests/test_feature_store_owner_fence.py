@@ -7,14 +7,14 @@ owner 用对象引用（run 身份 = cq 对象），owner 不符即"迟到于 su
 
 import tempfile
 
-from factories import make_frame_detections, make_frame_inference
+from factories import make_frame_detections, make_frame_feature
 from app.services.inference.feature.store import FeatureStore
 
 
 def _result(ts: float, cls: str, n: int):
-    return make_frame_inference(
-        cq=None, task_id=1, stage="3", ts=ts,
-        detectors={"bubble": make_frame_detections(n=n, class_name=cls, ts=ts)},
+    return make_frame_feature(
+        ts=ts,
+        by_source={"bubble": make_frame_detections(n=n, class_name=cls, ts=ts)},
     )
 
 
@@ -23,8 +23,8 @@ def test_owner_match_lands():
     a = object()
     fs.open_fresh(7, 1, owner=a)
     fs.append(7, 1, _result(1.0, "bubble", 2), owner=a)
-    got = fs.load(7, 1, source="bubble")
-    assert len(got) == 1 and len(got[0].detections) == 2
+    frames = fs.load(7, 1)
+    assert len(frames) == 1 and len(frames[0].by_source["bubble"].detections) == 2
 
 
 def test_stale_owner_rejected_after_supersede():
@@ -43,18 +43,18 @@ def test_stale_owner_rejected_after_supersede():
     # B 的正常写 → 落
     fs.append(7, 1, _result(3.0, "bubble", 1), owner=b)
 
-    got = fs.load(7, 1, source="bubble")
+    frames = fs.load(7, 1)
     # 只见 B 的序列：A 起始帧被 open_fresh 截断、A 迟到帧被归属校验拒
-    assert len(got) == 1
-    assert got[0].timestamp == 3.0
-    assert len(got[0].detections) == 1
+    assert len(frames) == 1
+    assert frames[0].ts == 3.0
+    assert len(frames[0].by_source["bubble"].detections) == 1
 
 
 def test_owner_none_backward_compatible():
     """不调 open_fresh 时 _owner 恒空 → owner=None 放行（既有直连测试语义不变）。"""
     fs = FeatureStore(tempfile.mkdtemp(), batch_size=1)
     fs.append(7, 1, _result(1.0, "bubble", 2))  # owner 默认 None
-    assert len(fs.load(7, 1, source="bubble")) == 1
+    assert len(fs.load(7, 1)) == 1
 
 
 def test_close_clears_owner_by_identity():

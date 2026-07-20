@@ -272,7 +272,10 @@ class ModelWorkerService:
                     )
             # 物化一次帧级 FrameFeature（多流已在 res.detections 内对齐）：帧窗 + 原子快照共用一份。
             # by_source 直接共享 res.detections 引用（pool 每帧新建、无别名突变），不复制。
-            feature = FrameFeature(ts=res.timestamp, by_source=res.detections)
+            feature = FrameFeature(
+                ts=res.timestamp, by_source=res.detections,
+                frame_width=res.frame_width, frame_height=res.frame_height,
+            )
             # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。
             cq.push_detection(feature)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）

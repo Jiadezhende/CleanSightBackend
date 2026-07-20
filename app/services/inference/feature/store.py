@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -64,23 +64,6 @@ def _deserialize_detection(d: Dict[str, Any]) -> Detection:
         class_id=d["cls_id"],
         class_name=d["cls"],
     )
-
-
-def _extract_frame_wh(detections_by_task: Dict[str, Any]) -> Optional[Tuple[int, int]]:
-    """从任一检测器帧的 metadata.frame_shape (H, W, C) 提取 (width, height)。
-
-    离线空间归一化（bbox → cx/cy/area）需按真实分辨率换算；但特征回读时 metadata
-    整个被丢，segmenter 只能退回硬编码默认。这里把帧分辨率随记录落盘，让离线可恢复。
-    同一帧所有检测器看同一分辨率，取首个可用值即可；无任何 frame_shape 时返回 None，
-    离线仍按默认兜底（老 features.jsonl 无该字段时同样优雅降级）。
-    """
-    for out in detections_by_task.values():
-        shape = (getattr(out, "metadata", None) or {}).get("frame_shape")
-        if shape is not None and len(shape) >= 2:
-            height, width = int(shape[0]), int(shape[1])
-            if width > 0 and height > 0:
-                return width, height
-    return None
 
 
 class _JsonlBuffer:
@@ -225,10 +208,10 @@ class FeatureStore(_JsonlBuffer):
             }
             # ts = 帧捕获 ts（feature.ts），供离线/证据按帧对齐，详见模块 docstring
             record = {"ts": feature.ts, "features": features}
-            # wh = 帧分辨率 [width, height]，供离线空间归一化恢复真实尺寸（无则省略）
-            wh = _extract_frame_wh(feature.by_source)
-            if wh is not None:
-                record["wh"] = list(wh)
+            # 磁盘沿用紧凑数组 wh = [width, height]（帧级，pool 盖章）：读写各一处、就地注释；
+            # 内存契约用显式 frame_width/frame_height，不外泄位置约定。无分辨率则省略该键。
+            if feature.frame_width is not None and feature.frame_height is not None:
+                record["wh"] = [feature.frame_width, feature.frame_height]
             line = json.dumps(record, ensure_ascii=False) + "\n"
         except Exception as e:  # 序列化失败 best-effort 跳过
             logger.warning("[FeatureStore] 特征序列化失败 task=%s step=%s: %s", task_id, step_id, e)
@@ -242,8 +225,8 @@ class FeatureStore(_JsonlBuffer):
         `FrameFeature(ts, by_source={source: FrameDetections})`——含该行 features 里的全部 source
         （含 detections 为空的 source，present-key 天然落在 by_source 键集上）。返回按 `ts` 升序。
         文件缺失返回 `[]`；单行损坏记 warning 后跳过、不中断其余数据。
-        注：mask/keypoints 未落盘，回读为 None；每个 FrameDetections.metadata 仅在记录含 `wh`
-        （帧分辨率）时回填 `frame_width`/`frame_height`，供离线空间归一化恢复真实尺寸，其余键不落盘。
+        注：mask/keypoints 未落盘，回读为 None；FrameDetections.metadata 不落盘、回读为空。
+        记录含 `wh`（磁盘紧凑数组 [w,h]）时还原到帧级 `FrameFeature.frame_width/height`，供离线空间归一化。
 
         Args:
             task_id: 任务 id
@@ -268,21 +251,21 @@ class FeatureStore(_JsonlBuffer):
                         continue
                     features = rec.get("features") or {}
                     ts = rec.get("ts", 0.0)
-                    # 帧分辨率随记录落盘（写入端 _extract_frame_wh）；回读还原到 metadata
-                    # 供离线空间归一化按真实尺寸换算。老记录无 wh 时留空，segmenter 走默认兜底。
-                    wh = rec.get("wh")
-                    frame_meta: Dict[str, Any] = {}
+                    # 帧分辨率随记录落盘（帧级 wh 数组）；回读还原到 FrameFeature.frame_width/height，供离线空间归一化
+                    # 按真实尺寸换算。老记录无 wh 时留 None，segmenter 走默认兜底。
+                    wh = rec.get("wh")  # 磁盘紧凑数组 [width, height]
+                    fw = fh = None
                     if isinstance(wh, (list, tuple)) and len(wh) >= 2:
-                        frame_meta = {"frame_width": wh[0], "frame_height": wh[1]}
+                        fw, fh = int(wh[0]), int(wh[1])
                     by_source = {
                         source: FrameDetections(
                             detections=[_deserialize_detection(d) for d in dets],
-                            metadata=dict(frame_meta),
+                            metadata={},
                             timestamp=ts,
                         )
                         for source, dets in features.items()
                     }
-                    frames.append(FrameFeature(ts=ts, by_source=by_source))
+                    frames.append(FrameFeature(ts=ts, by_source=by_source, frame_width=fw, frame_height=fh))
         except Exception as e:
             logger.warning("[FeatureStore] 回读失败 %s: %s", path, e)
         frames.sort(key=lambda ff: ff.ts)

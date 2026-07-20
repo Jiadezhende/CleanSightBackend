@@ -178,17 +178,15 @@ class CleanOperator(TemporalOperator):
             # 保证特征行数与 aligned_frames 严格一一对应，时间轴不缺帧。
             feature = [[0.0] * num_features_per_object for _ in range(self.num_objects)]
 
+            # 帧级分辨率（同帧各流同值）读一次：缺失/非法则本帧留全零行，不进 by_source。
+            width, height = aligned.frame_width, aligned.frame_height
+            if not width or not height or width <= 0 or height <= 0:
+                features.append(feature)
+                continue
+
             for frame in aligned.by_source.values():
                 # 跳过检测层推理失败的帧（不参与特征，留零贡献）
                 if not frame.success:
-                    continue
-                shape = frame.metadata.get("frame_shape")
-                if not shape or len(shape) != 3:
-                    # 目前仅支持 (H, W, C) 格式
-                    continue
-                height, width, _ = shape
-                if width <= 0 or height <= 0:
-                    # 忽略无效图像尺寸
                     continue
 
                 if not frame.detections:

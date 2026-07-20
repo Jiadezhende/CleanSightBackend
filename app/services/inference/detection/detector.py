@@ -149,7 +149,7 @@ class YOLODetector(Detector):
 
         return FrameDetections(
             detections=detections,
-            metadata={"model": "yolo", "frame_shape": frame.shape},
+            metadata={"model": "yolo"},  # 帧分辨率上移 FrameInference.wh，不再逐检测器塞
             timestamp=timestamp,
         )
 

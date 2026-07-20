@@ -125,6 +125,9 @@ class MultiModelWorkerPool:
                 timestamp=req.timestamp,
                 detections=per_frame_results,
                 cq=req.cq,  # 透传捕获句柄，写回凭它投递
+                # 帧分辨率从原始帧盖章：fan-out 前的每帧常量，帧此后即销毁（frame.shape = H, W, C）
+                frame_width=int(req.frame.shape[1]),
+                frame_height=int(req.frame.shape[0]),
             )
             results.append(result)
 

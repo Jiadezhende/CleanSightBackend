@@ -63,8 +63,15 @@ def test_frame_feature_carries_all_streams_at_capture_ts():
     ts = 77.0
     fi = pool.infer_batch([_task(ts, cq)])[0]
 
-    # 写回口构造：FrameFeature(ts=res.timestamp, by_source=res.detections)——多流天然对齐同帧。
-    feat = FrameFeature(ts=fi.timestamp, by_source=fi.detections)
+    # pool 从原始帧 (8,8,3) 盖章帧级分辨率 frame_width/height
+    assert (fi.frame_width, fi.frame_height) == (8, 8)
+
+    # 写回口构造：FrameFeature(ts, by_source, frame_width, frame_height)——多流天然对齐同帧。
+    feat = FrameFeature(
+        ts=fi.timestamp, by_source=fi.detections,
+        frame_width=fi.frame_width, frame_height=fi.frame_height,
+    )
     assert feat.ts == ts
+    assert (feat.frame_width, feat.frame_height) == (8, 8)
     assert set(feat.by_source) == {"streamA", "streamB"}
     assert all(fd.timestamp == ts for fd in feat.by_source.values())

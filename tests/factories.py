@@ -61,13 +61,17 @@ def make_frame_feature(
     *, ts: float = 1.0, by_source: Optional[Dict[str, FrameDetections]] = None,
     source: str = "bubble", n: int = 1, class_name: str = "bubble",
     metadata: Optional[Dict] = None,
+    frame_width: Optional[int] = None, frame_height: Optional[int] = None,
 ) -> FrameFeature:
-    """一帧多流对齐记录（特征层输入）。by_source 缺省单流 {source: <n 个检测>}。"""
+    """一帧多流对齐记录（特征层输入）。by_source 缺省单流 {source: <n 个检测>}。
+
+    frame_width/frame_height 为帧级分辨率，缺省 None（消费方走默认兜底）。
+    """
     if by_source is None:
         by_source = {
             source: make_frame_detections(n=n, class_name=class_name, ts=ts, metadata=metadata)
         }
-    return FrameFeature(ts=ts, by_source=by_source)
+    return FrameFeature(ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height)
 
 
 def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:
@@ -94,11 +98,13 @@ def make_frame_inference(
     *, cq: Optional[ClientQueues] = None, task_id: Optional[int] = None,
     stage: Optional[str] = None, ts: float = 1.0,
     detectors: Optional[Dict[str, FrameDetections]] = None,
+    frame_width: Optional[int] = None, frame_height: Optional[int] = None,
 ) -> FrameInference:
     """推理结果消息。task_id/stage 缺省从 cq 派生（无 cq 时回退 1/"3"）。
 
     detectors 缺省为单流 {"bubble": <1 检测>}；写回句柄 fence 类测试传 cq=<句柄>，
     离线/直连 FeatureStore 类测试传 cq=None 并显式给 detectors。
+    frame_width/frame_height 为帧级分辨率，缺省 None。
     """
     if detectors is None:
         detectors = {"bubble": make_frame_detections(ts=ts)}
@@ -108,6 +114,8 @@ def make_frame_inference(
         timestamp=ts,
         detections=detectors,
         cq=cq,
+        frame_width=frame_width,
+        frame_height=frame_height,
     )
 
 

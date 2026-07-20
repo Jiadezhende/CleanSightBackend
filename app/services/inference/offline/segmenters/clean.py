@@ -207,10 +207,9 @@ def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
 
 
 def _frame_size(frame: FrameFeature, frame_width: int, frame_height: int) -> Tuple[int, int]:
-    """优先取帧任一流 metadata 里的宽高（同帧各流同值），缺失时回退传入的默认尺寸。"""
-    meta = next((fd.metadata for fd in frame.by_source.values() if fd.metadata), {})
-    width = meta.get("frame_width") or meta.get("width") or frame_width
-    height = meta.get("frame_height") or meta.get("height") or frame_height
+    """优先取帧级 `FrameFeature.frame_width/height`（pool 盖章、store 回读还原），缺失时回退传入默认。"""
+    width = frame.frame_width or frame_width
+    height = frame.frame_height or frame_height
     return max(1, int(width)), max(1, int(height))
 
 

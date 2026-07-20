@@ -71,7 +71,6 @@ class MockDetector(Detector):
             detections=detections,
             metadata={
                 "model": "mock_brightness",
-                "frame_shape": frame.shape,
                 "mean_brightness": round(mean_brightness, 2),
             },
             timestamp=timestamp,
