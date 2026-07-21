@@ -73,7 +73,7 @@ integration_tests/
 推流 → /api/start → 等待 duration → /api/terminate
 ```
 
-验证完整正向流程：FFmpeg 推流、后端推理、可视化、正常退出。
+验证完整正向流程：FFmpeg 推流、后端推理、admin 面板观测、正常退出。
 
 ```bash
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
@@ -212,7 +212,7 @@ python integration_tests/test_single_client.py --scenario 9 --task_id 1 --durati
 添加 `--server <ip>` 切换远程；测试环境通常还要带 `--api-port` / `--rtsp-port`：
 
 ```bash
-# 远程测试环境（API 8100 / RTSP 8104），CLEAN 阶段，推 clean-test.mp4，无窗口
+# 远程测试环境（API 8100 / RTSP 8104），CLEAN 阶段，推 clean-test.mp4
 python integration_tests/test_single_client.py \
   --scenario 1 --current-step 2 \
   --task_id 9001 \
@@ -228,7 +228,7 @@ python integration_tests/test_single_client.py \
 ## 多客户端并发测试 `test_multi_client.py`
 
 从数据库查询多个任务，并发运行场景 1，子进程日志写入 `logs/`。
-若未禁用窗口，随机挑 2 个客户端显示 OpenCV 可视化。
+观测走 admin 面板：「总览」tab 看各客户端队列/健康的聚合，「实时监控」tab 逐个选客户端看画面。
 
 ### 参数
 

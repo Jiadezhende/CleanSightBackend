@@ -1,8 +1,8 @@
 """
-单客户端集成测试 - 覆盖6种使用场景
+单客户端集成测试 - 覆盖 9 种使用场景（观测走 admin 运维面板 /admin-f3m8/ui/）
 
 用法:
-    python integration_tests/test_single_client.py --scenario <1-7> --task_id <id> [options]
+    python integration_tests/test_single_client.py --scenario <1-9> --task_id <id> [options]
 
 场景:
     1 - 正常流程:   推流 → start → 等待 → terminate
@@ -13,10 +13,13 @@
     6 - 延迟推流:   先调 start（流未就绪），N秒后推流，验证健康监控自动重连（Bug 2）
     7 - CLEAN阶段:  current_step=2 → CLEAN stage，验证帧透传不黑屏
     8 - MOCK阶段:   无效 current_step → MOCK fallback，验证帧透传不黑屏
+    9 - 阶段切换:   start(LEAK) → DB 改 step=2 → 再 start 触发全量重建 → CLEAN
 
 参数:
-    --scenario    {1,2,3,4,5,6}       必填
+    --scenario    {1-9}                必填
     --server      <host>               默认 localhost
+    --api-port    <int>                默认 8000（后端 HTTP/WS API 端口）
+    --rtsp-port   <int>                默认 8004（RTSPProxy 推流端口）
     --task_id     <int>                必填
     --duration    <seconds>            默认 60
     --video_path  <path>               默认 test/test_video.mp4

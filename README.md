@@ -8,7 +8,8 @@ CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同
 - **分层 AI 检测** — 不同清洗阶段使用不同模型组，支持 CUDA Stream 并行推理
 - **HLS 录制落盘** — raw / processed 双轨视频段自动分段归档，可追溯回放
 - **告警上报** — 时序判定产告警，5s 去重闸门 + 批量异步上报
-- **实时画面推送** — 渲染后帧经 WebSocket 供前端轮询
+- **实时画面推送** — 渲染后帧经 WebSocket 供前端 / 运维面板轮询（非后端 push）
+- **运维面板** — 后端自带 admin 运维面板（`/admin-f3m8/ui/`），实时画面 / 队列健康 / 指标 / 告警证据一站观测
 
 > 架构、数据流、各服务内部、配置与 API 等**描述性内容**以知识库为准，入口 [docs/kb/INDEX.md](docs/kb/INDEX.md)。
 
@@ -33,7 +34,7 @@ app/
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunController）
 │   ├── traceback/       # 溯源段定位 + 媒体 token 鉴权
 │   └── lab/             # 送标裁剪 + Label Studio 上传
-├── data/                # 模型权重：bubble / bend / clean-large / clean-small-best.pt
+├── data/                # 模型权重：bubble / bend / clean-large / clean-small / gru-final（CLEAN 动作分类）.pt
 └── utils/               # 异常 / GuardedExecutor / 网关中间件 / Prometheus 指标 / 上下文
 config/                  # 各服务 YAML（inference / stream / persistence / client / health_monitor）
 mediamtx_gateway/        # RTSP TCP 代理网关（独立进程，对外部署可选）
@@ -78,12 +79,12 @@ cd mediamtx && ./mediamtx        # Linux；Windows 用 ./mediamtx.exe
 # 或直接：python -m app.main
 ```
 
-上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
+起流后打开后端自带的 **admin 运维面板**观测运行状态（实时画面 / 队列健康 / 指标 / 告警证据）：`http://localhost:8000/admin-f3m8/ui/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
 
 ### 接口调用流程（统一 API）
 
 1. **启动任务和流**：`POST /api/start`（合并 load_task + start_stream）
-2. **接收渲染画面**：`WebSocket /ai/video?task_id={task_id}`（旧 `?client_id=` 双模兼容）
+2. **接收渲染画面**：`WebSocket /ai/video?task_id={task_id}`（或 `?client_id=<source_ip>` 点位模式；双模互斥、`task_id` 优先）
 3. **拉取增量消息**：`GET /task/message/{task_id}`（告警增量 + signals_10s）
 4. **终止任务**：`POST /api/terminate?task_id={task_id}`（完整清理资源）
 
@@ -97,7 +98,7 @@ CleanSight 采用**流 / 推理 / 持久化解耦**架构，`RunController` 统�
 graph LR
     A[RTSP 流] --> B[StreamService / FFmpegDecoder]
     B --> C[ClientQueues]
-    C --> D[Inference：L1 检测→L2 特征→L3/L4 时序判定→可视化]
+    C --> D[Inference：Detector 检测→特征聚合/落盘→Operator 时序判定 1Hz→可视化]
     D --> E[PersistenceManager]
     D --> F[WebSocket 前端轮询]
     E --> G[HLS 视频段]
@@ -110,7 +111,7 @@ graph LR
 RTSP (30fps)
   ↓ [FFmpegDecoder 自持读循环，ffmpeg 输出规范化 CFR raw_fps]
 ca_ready（SPSC 无锁 deque，Bresenham 抽帧至 inference_fps）   ca_raw（完整录制缓冲）
-  ↓ [L1 检测 → L2 特征落盘 → L3 时序产事实 → L4 规则出告警 → 可视化]
+  ↓ [Detector 检测 → 特征聚合并落盘 features.jsonl → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
 ca_processed → [HLS 分段：persistence 周期 PULL 拉取整段]
 _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 ```
@@ -134,8 +135,8 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 配置驱动的多阶段推理，检测点拆为无状态 **Detector**（流源）+ per-run **Operator**（流算子，analyze+judge 合并）。当前阶段（`config/inference_config.yaml`）：
 
 - **LEAK**（step `"1"`）：`bubble`（气泡，出生率滑窗 3s、`birth_rate>0.5` 实时告警）+ `bending`（弯折，去抖 5 帧、合格需 4 次弯曲，结算告警）
-- **CLEAN**（step `"2"`）：`clean_large` + `clean_small` 仅提供检测框可视化（`rules: []`，不产告警）
-- **MOCK**：未知 step 的 fallback，纯透传
+- **CLEAN**（step `"2"`）：`clean_large` + `clean_small` 检测 → `clean_monitor`（GRU 动作识别，10s 窗口，`gru-final.pt`）叠加动作事件；当前 `rules: []` 不产告警
+- **MOCK**：未知 step 的 fallback，纯透传（另挂一个 offline 段器 `mock_offline` 作离线路由示例）
 
 **新增检测点**：用 `/infer-workflow` skill 生成 Detector + Operator 框架，规范见 [知识库](docs/kb/INDEX.md)。
 
