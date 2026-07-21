@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import numpy as np
 
@@ -48,10 +48,12 @@ class DetectionTask:
 class FrameInference:
     """推理结果：一帧多检测器聚合（detections[detector_name] = FrameDetections）。
 
-    timestamp 为帧捕获 ts，供 VisualizationWorker 按帧去重（同帧只渲染一次）。
+    timestamp 为帧捕获 ts。本对象是 pool→写回口的传输消息，不被 cq 留存（写回口把
+    detections 物化成 FrameFeature 存入 slide_window/latest_inference，二者均无 cq）。
     cq 为从对应 DetectionTask 透传的捕获句柄，写回只写它、不反查；旧句柄经 CQ 状态机
-    （DRAINING/CLOSED）被挡，碰不到新 run。注：set_latest_inference 把本对象存进 cq 后形成
-    cq→_latest_inference→cq 自引用环，benign（GC 处理循环，close() 释放 payload 时断开）。
+    （DRAINING/CLOSED）被挡，碰不到新 run。
+    frame_width/frame_height 为帧分辨率：fan-out 前定死的每帧常量，pool 从原始帧盖章、随本消息透传，
+    写回口物化进 FrameFeature（原始帧此后即销毁，此处是唯一采集时机）。拆两字段避免 (w,h) 隐式序混淆。
     """
 
     task_id: int
@@ -59,6 +61,8 @@ class FrameInference:
     timestamp: float
     detections: Dict[str, FrameDetections]
     cq: "ClientQueues"
+    frame_width: Optional[int] = None
+    frame_height: Optional[int] = None
 
 
 # ==================== 离线预留事实契约（L3 时序分析层产出）====================

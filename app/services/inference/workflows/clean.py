@@ -18,9 +18,9 @@ from typing import Dict, List, Tuple
 import torch
 
 from app.services.inference.detection.detector import YOLODetector
-from app.services.inference.temporal.operator import AlignedFrame, TemporalOperator
+from app.services.inference.temporal.operator import TemporalOperator
 from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetections
+from app.domain.detection import FrameDetections, FrameFeature
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 # 固定调色板，按 class_id 取色（BGR）
@@ -126,12 +126,11 @@ class CleanOperator(TemporalOperator):
             "latest_action": 0,
         }
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
-        """消费订阅流、推进 self._sm。windows: {流名: 该流滑窗快照(按 ts 升序)}。"""
-        # 按 timestamp 对齐多流
-        aligned_frames = self._zip_by_ts(windows)
+    def analyze(self, windows: List[FrameFeature]) -> None:
+        """消费帧窗、推进 self._sm。windows: 帧级 FrameFeature 快照(按 ts 升序，多流已对齐)。"""
+        aligned_frames = self._clip(windows)
         if not aligned_frames:
-            return        
+            return
         self._advance(aligned_frames)
 
     def judge(self) -> Tuple[List[str], List[Alarm]]:
@@ -140,7 +139,7 @@ class CleanOperator(TemporalOperator):
         alarms = []
         return events, alarms
 
-    def _advance(self, aligned_frames: List[AlignedFrame]) -> None:
+    def _advance(self, aligned_frames: List[FrameFeature]) -> None:
         """推进 self._sm。aligned_frames: 对齐后的窗口快照列表。"""
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in aligned_frames if f.ts > last_ts]
@@ -158,7 +157,7 @@ class CleanOperator(TemporalOperator):
         self._sm["latest_action"] = logits[-1, :].argmax().item()
         self._sm["last_ts"] = new_frames[-1].ts
 
-    def _adapt_to_features(self, aligned_frames: List[AlignedFrame]) -> torch.Tensor:
+    def _adapt_to_features(self, aligned_frames: List[FrameFeature]) -> torch.Tensor:
         """将窗口快照转换为特征矩阵。
 
         同一原始帧的多流检测结果合并到同一个 feature vector 中。
@@ -179,17 +178,15 @@ class CleanOperator(TemporalOperator):
             # 保证特征行数与 aligned_frames 严格一一对应，时间轴不缺帧。
             feature = [[0.0] * num_features_per_object for _ in range(self.num_objects)]
 
+            # 帧级分辨率（同帧各流同值）读一次：缺失/非法则本帧留全零行，不进 by_source。
+            width, height = aligned.frame_width, aligned.frame_height
+            if not width or not height or width <= 0 or height <= 0:
+                features.append(feature)
+                continue
+
             for frame in aligned.by_source.values():
                 # 跳过检测层推理失败的帧（不参与特征，留零贡献）
                 if not frame.success:
-                    continue
-                shape = frame.metadata.get("frame_shape")
-                if not shape or len(shape) != 3:
-                    # 目前仅支持 (H, W, C) 格式
-                    continue
-                height, width, _ = shape
-                if width <= 0 or height <= 0:
-                    # 忽略无效图像尺寸
                     continue
 
                 if not frame.detections:

@@ -20,8 +20,8 @@ class _SpyFeatureStore:
     def __init__(self):
         self.appended = []
 
-    def append(self, task_id, step_id, res, owner=None):
-        self.appended.append((task_id, step_id, res))
+    def append(self, task_id, step_id, feature, owner=None):
+        self.appended.append((task_id, step_id, feature))
 
 
 def _bare_service(feature_store) -> ModelWorkerService:
@@ -43,9 +43,11 @@ def test_active_run_write_back_lands():
     res = _result(cq)
     svc._write_back_results([res])
 
-    assert cq.get_latest_inference() is res
-    assert cq.get_slide_window("bubble")  # 检测入滑窗
-    assert fs.appended == [(1, 3, res)]  # 特征落盘键 = (task_id, step_id)
+    assert cq.get_latest_inference().by_source is res.detections  # 快照 = 物化 FrameFeature
+    assert cq.get_slide_window()  # 检测入滑窗
+    # 特征落盘键 = (task_id, step_id)；落的是帧级 FrameFeature（by_source 即 res.detections）
+    assert [a[:2] for a in fs.appended] == [(1, 3)]
+    assert fs.appended[0][2].by_source is res.detections
 
 
 def test_draining_run_write_back_blocked_and_counted():
@@ -58,7 +60,7 @@ def test_draining_run_write_back_blocked_and_counted():
     svc._write_back_results([_result(cq)])
 
     assert cq.get_latest_inference() is None  # 快照未落
-    assert cq.get_slide_window("bubble") == []  # 滑窗未落
+    assert cq.get_slide_window() == []  # 滑窗未落
     assert fs.appended == []  # 特征这条外部腿也被挡
     assert _stale_drops() - before == 1.0
 
@@ -90,5 +92,6 @@ def test_stale_and_active_in_same_batch_isolated():
     svc._write_back_results([res_stale, res_active])
 
     assert cq_stale.get_latest_inference() is None
-    assert cq_active.get_latest_inference() is res_active
-    assert fs.appended == [(11, 3, res_active)]  # 仅 active 落盘
+    assert cq_active.get_latest_inference().by_source is res_active.detections
+    assert [a[:2] for a in fs.appended] == [(11, 3)]  # 仅 active 落盘
+    assert fs.appended[0][2].by_source is res_active.detections

@@ -21,7 +21,7 @@
 | `visualization/worker.py` | Viz | `VisualizationWorker` | 读快照渲染，写 `ca_processed` + `_latest_rendered` |
 | `visualization/visualizer.py` | Viz | `FixedVisualizer` | 按 `RenderSpec` 固定渲染 |
 | `workflows/` | 接入点 | bubble/bending/clean/mock | 具体 Detector + Operator 子类 |
-| `offline/` | 离线 | —（仅 `__init__` 占位） | **待实现**：Segmenter/Runner 读 FeatureStore→写 FactLedger |
+| `offline/` | 离线 | `OfflineSegmenter`/`OfflineRunner` + `segmenters/{clean,mock}` + `cli` | 独立进程读 `FeatureStore.load`→策略 `preprocess`/`segment`→写 `FactLedger`（详见 online/offline 分离） |
 
 ## InferenceManager（生命周期编排）
 
@@ -39,20 +39,20 @@
 
 `ModelWorkerService._write_back_results(List[FrameInference])` 是 L1 唯一写回口。每条结果先判 `res.cq.is_active()`（DRAINING/CLOSED 丢弃 → `stale_run` 计数），ACTIVE 才三写：
 
-1. `cq.push_detection(detector_name, FrameDetections)` → per-stream `_slide_window`（供 L3，异步缓冲解速差 30fps↔1Hz）。
-2. `cq.set_latest_inference(res)` → 原子快照（供 Viz）。
-3. `feature_store.append(task_id, step_id, res, owner=cq)` → L2 落盘（供离线）。
+1. `cq.push_detection(FrameFeature(ts=res.timestamp, by_source=res.detections))` → 帧级 `_slide_window`（`Deque[FrameFeature]`，写回口一次物化整帧多流；供 L3，异步缓冲解速差 30fps↔1Hz）。
+2. `cq.set_latest_inference(feature)` → 原子快照（同一 `FrameFeature`，供 Viz；无 `cq`，不成自引用环。Viz 的 stage 取自 `cq.stage`）。
+3. `feature_store.append(task_id, step_id, feature, owner=cq)` → L2 落盘同一份帧级 `FrameFeature`（供离线；两端货币一致）。
 
 全程携 CQ 句柄（`res.cq`，dispatcher pop 时捕获），**无 `client_id` 反查**。
 
 ## Detector / Operator 两粒度框架
 
-- **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer_batch(frames, timestamps)`（**唯一推理入口**，无单帧 `infer()`）、`prepare_visualization_data`。`timestamps` 是帧捕获真值锚点（源自 `Frame.timestamp`，pool 从 `req.timestamp` 穿入），须原样写回 `FrameDetections.timestamp`，令每帧 `FrameDetections.timestamp == FrameInference.timestamp`，供 L3 `_zip_by_ts` 多流对齐——detector 不得自造时间戳。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
+- **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer_batch(frames, timestamps)`（**唯一推理入口**，无单帧 `infer()`）、`prepare_visualization_data`。`timestamps` 是帧捕获真值锚点（源自 `Frame.timestamp`，pool 从 `req.timestamp` 穿入），须原样写回 `FrameDetections.timestamp`，令每帧 `FrameDetections.timestamp == FrameInference.timestamp`——写回口据此物化帧级 `FrameFeature` 对齐多流（供 L3），detector 不得自造时间戳。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
 - **Operator**（流算子，规则粒度，per-run 独立）：`name`、`subscribes`（**显式、必填**输入流名列表，缺则 fail-fast）、`window_seconds`；`analyze(windows)` 推进 `self._sm`、`judge() → (overlay_texts, alarms)`、`finalize() → List[Alarm]`（结算，默认空）。analyze+judge **合并**进 Operator（不再有独立 TemporalAnalyzer/Judge，不做 EventFact 跨对象传递）。
 
 ## L3/L4：ClientTemporalActor（~1Hz）
 
-per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 对每个 operator：`windows = {src: cq.get_slide_window(src) for src in op.subscribes}` → `op.analyze(windows)` → `op.judge()` 收 (events, alarms)；汇总后 `cq.set_latest_temporal(events)`，`alarm_sink.persist_alarms(alarms, cq, mode=REALTIME)`。**per-operator 隔离**（单算子异常不断整 tick）。stage 别名在告警离开推理前烧进 `alarm.stage`。停机两段：`signal_stop()` → `finalize_and_stop() → List[Alarm]`（收各 operator `finalize()` 结算告警）。
+per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取一次帧窗 `windows = cq.get_slide_window()`（`List[FrameFeature]`，多流已在写回口对齐），对每个 operator：`op.analyze(windows)`（算子内自行 `_clip` + 按 `subscribes` 投影）→ `op.judge()` 收 (events, alarms)；汇总后 `cq.set_latest_temporal(events)`，`alarm_sink.persist_alarms(alarms, cq, mode=REALTIME)`。**per-operator 隔离**（单算子异常不断整 tick）。stage 别名在告警离开推理前烧进 `alarm.stage`。停机两段：`signal_stop()` → `finalize_and_stop() → List[Alarm]`（收各 operator `finalize()` 结算告警）。
 
 ## 告警落库：alarm_sink.persist_alarms
 
@@ -60,7 +60,7 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 对�
 
 ## online / offline 分离
 
-实时链（L1→`_slide_window`→L3 tick 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）**彻底分离**：实时不落 FactLedger，Actor 不 load 事实。当前 `offline/` 仅占位，消费端（Segmenter/Runner）**待实现**（见 `docs/update/20260628_OFFLINE_PIPELINE_PHASE1_PROPOSAL.md`）。
+实时链（L1→`_slide_window`→L3 tick 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）**彻底分离**：实时不落 FactLedger，Actor 不 load 事实。两链共用一套货币 **帧级 `FrameFeature`**（`ts + {source: FrameDetections}`）：写回口 `append(feature)` 落盘，离线 `load(task_id, step_id) → List[FrameFeature]`（一次到位、多流已对齐）喂 `OfflineSegmenter.preprocess(frames)`。`offline/` 已接入（独立进程 CLI `python -m app.services.inference.offline.cli run`，见 `runner.py`/`segmenters/`）。
 
 ## Stage 配置与当前阶段
 

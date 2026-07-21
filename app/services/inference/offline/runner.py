@@ -79,17 +79,16 @@ class OfflineRunner:
             return OfflineRunResult("skipped", None, 0, f"stage '{stage_key}' offline 未启用")
 
         producer = segmenter.name
-        streams = self._feature_store.load_many(
-            spec.task_id, spec.step_id, segmenter.subscribes
-        )
-        empty = [s for s in segmenter.subscribes if not streams.get(s)]
+        frames = self._feature_store.load(spec.task_id, spec.step_id)
+        present = set().union(*(ff.by_source.keys() for ff in frames)) if frames else set()
+        empty = [s for s in segmenter.subscribes if s not in present]
         if empty:
             # 任一订阅 source 无数据：跳过，不覆盖旧事实
             return OfflineRunResult(
                 "skipped", producer, 0, f"订阅 source 无特征: {empty}"
             )
 
-        model_input = segmenter.preprocess(streams)
+        model_input = segmenter.preprocess(frames)
         facts = segmenter.segment(model_input)  # 算法异常向上抛出，不写
 
         validated = self._validate_and_stamp(facts, producer)

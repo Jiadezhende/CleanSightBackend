@@ -2,7 +2,7 @@
 
 抽象基类已上移分层包：
     流源 Detector / YOLODetector → app.services.inference.detection.detector
-    流算子 Operator / AlignedFrame → app.services.inference.temporal.operator
+    流算子 Operator → app.services.inference.temporal.operator
 
 本目录只放具体检测任务（一任务一文件）：
     Detector（流源，无状态）：BubbleDetector, BendingDetector, MockDetector,

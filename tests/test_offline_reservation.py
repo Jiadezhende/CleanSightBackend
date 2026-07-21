@@ -9,16 +9,16 @@ FeatureStore（特征）与 FactLedger（事实，offline 预置）按 (task_id,
 
 import tempfile
 
-from factories import make_frame_detections, make_frame_inference
+from factories import make_frame_detections, make_frame_feature
 from app.services.inference.models import EventFact, SegmentFact
 from app.services.inference.feature.store import FactLedger, FeatureStore
 
 
 def _make_result(ts: float, bubble_n: int, bending_n: int):
-    # 直连 FeatureStore.append，只读 .detections/.timestamp，不碰 .cq → cq=None
-    return make_frame_inference(
-        cq=None, task_id=1, stage="LEAK", ts=ts,
-        detectors={
+    # 直连 FeatureStore.append，帧级 FrameFeature（无 cq）
+    return make_frame_feature(
+        ts=ts,
+        by_source={
             "bubble": make_frame_detections(n=bubble_n, class_name="bubble", ts=ts),
             "bending": make_frame_detections(n=bending_n, class_name="bent", ts=ts),
         },
@@ -34,12 +34,13 @@ def test_feature_store_load_roundtrip():
     fs.append(7, 1, _make_result(3.0, bubble_n=3, bending_n=0))
     fs.close(7, 1)
 
-    bubble_seq = fs.load(7, 1, source="bubble")
-    assert [o.timestamp for o in bubble_seq] == [1.0, 2.0, 3.0]
+    frames = fs.load(7, 1)
+    assert [ff.ts for ff in frames] == [1.0, 2.0, 3.0]
+    bubble_seq = [ff.by_source["bubble"] for ff in frames]
     assert [len(o.detections) for o in bubble_seq] == [2, 0, 3]
     assert bubble_seq[0].detections[0].class_name == "bubble"
 
-    bending_seq = fs.load(7, 1, source="bending")
+    bending_seq = [ff.by_source["bending"] for ff in frames]
     assert [len(o.detections) for o in bending_seq] == [0, 1, 0]
 
 
@@ -52,13 +53,13 @@ def test_feature_store_step_isolation():
     fs.close(7, 1)
     fs.close(7, 2)
 
-    assert [len(o.detections) for o in fs.load(7, 1, source="bubble")] == [2]
-    assert [len(o.detections) for o in fs.load(7, 2, source="bubble")] == [5]
+    assert [len(ff.by_source["bubble"].detections) for ff in fs.load(7, 1)] == [2]
+    assert [len(ff.by_source["bubble"].detections) for ff in fs.load(7, 2)] == [5]
 
 
 def test_feature_store_load_missing_returns_empty():
     fs = FeatureStore(tempfile.mkdtemp())
-    assert fs.load(999, 1, source="bubble") == []
+    assert fs.load(999, 1) == []
 
 
 def test_fact_ledger_mixed_roundtrip():

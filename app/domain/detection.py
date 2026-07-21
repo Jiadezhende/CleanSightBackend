@@ -32,3 +32,19 @@ class FrameDetections:
     timestamp: float  # 时间戳
     success: bool = True  # 推理是否成功
     error: Optional[str] = None  # 错误信息（失败时提供）
+
+
+@dataclass
+class FrameFeature:
+    """一帧多流对齐的检测记录（特征层输入）：ts + {流名: FrameDetections}。
+
+    online 写回口物化、offline 回放重建；不含 cq，可跨 client/inference/offline 复用。
+    注：持有的是对齐后的检测（非计算特征），特征张量化仍在算子内（下一步共享）。
+    """
+
+    ts: float  # 帧捕获时间戳（= 各流 FrameDetections.timestamp）
+    by_source: Dict[str, FrameDetections]  # {流名(detector.name): 该流当帧检测}
+    # 帧分辨率：fan-out 前定死的每帧常量（同帧各流同值），由 pool 从原始帧盖章、写回口物化带入；
+    # 供归一化/空间还原按真实尺寸换算。拆两字段（非 (w,h) 元组）避免隐式序混淆。缺省 None → 走默认兜底。
+    frame_width: Optional[int] = None
+    frame_height: Optional[int] = None

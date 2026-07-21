@@ -7,19 +7,18 @@
     2. 单测/本地 smoke test 不依赖 torch、GPU、真实 clean 权重。
 
 输入:
-    preprocess(streams) 接收 FeatureStore.load_many 返回的
-    Mapping[source, Sequence[FrameDetections]]，原样传给 segment。
+    preprocess(frames) 接收 FeatureStore.load 返回的 List[FrameFeature]，原样传给 segment。
 
 输出:
-    segment(model_input) 返回 List[SegmentFact]。只要某个 ts 的任一订阅 source
-    存在检测框，就认为该帧 active；连续 active 帧合并为一个片段。
+    segment(model_input) 返回 List[SegmentFact]。只要某帧任一订阅 source 存在检测框，
+    就认为该帧 active；连续 active 帧合并为一个片段。
 """
 
 from __future__ import annotations
 
-from typing import Any, List, Mapping, Sequence
+from typing import Any, List, Sequence
 
-from app.domain.detection import FrameDetections
+from app.domain.detection import FrameFeature
 from app.services.inference.models import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
@@ -45,30 +44,23 @@ class BrushRulesSegmenter(OfflineSegmenter):
         self.label = label
         self.min_frames = max(1, int(min_frames))
 
-    def preprocess(
-        self, streams: Mapping[str, Sequence[FrameDetections]]
-    ) -> Mapping[str, Sequence[FrameDetections]]:
-        """Mock 不做特征工程，直接把原始检测序列交给规则逻辑。"""
-        return streams
+    def preprocess(self, frames: Sequence[FrameFeature]) -> Sequence[FrameFeature]:
+        """Mock 不做特征工程，直接把帧序列交给规则逻辑。"""
+        return frames
 
     def segment(self, model_input: Any) -> List[SegmentFact]:
-        streams: Mapping[str, Sequence[FrameDetections]] = model_input
-        active_by_ts: dict[float, bool] = {}
-        for src in self.subscribes:
-            for fd in streams.get(src, ()):
-                ts = float(fd.timestamp)
-                active_by_ts[ts] = active_by_ts.get(ts, False) or bool(fd.detections)
-
+        frames: Sequence[FrameFeature] = model_input
         segments: List[SegmentFact] = []
         run_start: float | None = None
         run_last = 0.0
         run_count = 0
-        for ts in sorted(active_by_ts):
-            if active_by_ts[ts]:
+        for ff in frames:  # load 已按 ts 升序
+            active = any(fd.detections for fd in ff.by_source.values())
+            if active:
                 if run_start is None:
-                    run_start = ts
+                    run_start = ff.ts
                     run_count = 0
-                run_last = ts
+                run_last = ff.ts
                 run_count += 1
                 continue
 

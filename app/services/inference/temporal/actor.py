@@ -98,11 +98,11 @@ class ClientTemporalActor:
         all_events: List[str] = []
         all_alarms: List[Alarm] = []
 
+        # 帧窗快照（List[FrameFeature]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
+        windows = self._cq.get_slide_window()
         for op in self._operators:
             try:
-                # 按 subscribes 收集各订阅流的滑窗快照（流名 = detector.name）
-                windows = {src: self._cq.get_slide_window(src) for src in op.subscribes}
-                if not any(windows.values()):
+                if not windows:
                     continue
                 op.analyze(windows)                 # 推进共享状态 _sm
                 events, alarms = op.judge()         # 读 _sm 出 overlay + 告警

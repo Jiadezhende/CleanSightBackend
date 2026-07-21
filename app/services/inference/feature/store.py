@@ -10,9 +10,11 @@ L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特
 见 `hls_strategy._persist_*_segment`），随 step 目录被 cleanup TTL 连带回收。
 两者均为 manager 持有的单例：构造时绑定 base_dir，stop_workflow 时 close(task_id, step_id)。
 
-帧对齐契约：每条记录的 `ts` = 该帧的 `FrameInference.timestamp`（= 帧捕获 ts，见
-`workers/base.py` 构造），与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，
-故 feature 行可按 `ts` 精确对上同帧的 HLS 证据片段与 keypoints。
+帧对齐契约：每条记录的 `ts` = 该帧的 `FrameFeature.ts`（= 帧捕获 ts，与在线滑窗同源），
+与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，故 feature 行可按 `ts` 精确对上
+同帧的 HLS 证据片段与 keypoints。`append`/`load` 两端货币均为帧级 `FrameFeature`
+（`ts + {source: FrameDetections}`，离线与在线共用一套货币）；磁盘 record 是它的**精简投影**
+（只落离线必要信息，mask/keypoints/metadata 不落），对称映射见 `_feature_to_record`/`_record_to_feature`。
 """
 
 from __future__ import annotations
@@ -22,33 +24,18 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
-import numpy as np
-
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import Detection, FrameDetections, FrameFeature
 from app.services.inference.models import EventFact, SegmentFact, fact_from_json
 
 logger = logging.getLogger(__name__)
 
 
-def _json_safe(obj: Any) -> Any:
-    """把 numpy 标量 / 数组转成 JSON 可序列化的原生类型。"""
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (list, tuple)):
-        return [_json_safe(x) for x in obj]
-    return obj
-
-
 def _serialize_detection(det) -> Dict[str, Any]:
     """单个 Detection → 特征 dict（bbox 即特征；mask/keypoints 太重不落）。"""
     return {
-        "bbox": _json_safe(det.bbox),
+        "bbox": [int(x) for x in det.bbox],  # 强制原生 int（json 不吃 np.int64），与下方 conf/cls_id 同风格
         "conf": float(det.confidence),
         "cls_id": int(det.class_id),
         "cls": det.class_name,
@@ -65,21 +52,55 @@ def _deserialize_detection(d: Dict[str, Any]) -> Detection:
     )
 
 
-def _extract_frame_wh(detections_by_task: Dict[str, Any]) -> Optional[Tuple[int, int]]:
-    """从任一检测器帧的 metadata.frame_shape (H, W, C) 提取 (width, height)。
+# ── FrameFeature ↔ 磁盘 record 的对称映射（store 私有格式，一对逆运算紧挨放置）──────────
+#
+# 契约：append/load 两端货币都是 FrameFeature；磁盘 record 是它的**精简投影**，只保留离线
+# 必要信息 = ts + 每源检测框(bbox/conf/cls) + 帧分辨率。刻意不落（回读按默认还原）：
+#   - mask/keypoints：重（seg/pose 才有，每帧一张数组），且离线不消费；
+#   - metadata / success / error：离线不消费。
+# 磁盘键全命名（frame_width/frame_height），无位置约定；位置约定只活在 Detection 的
+# bbox=[x1,y1,x2,y2]（其本身就是坐标序）。
 
-    离线空间归一化（bbox → cx/cy/area）需按真实分辨率换算；但特征回读时 metadata
-    整个被丢，segmenter 只能退回硬编码默认。这里把帧分辨率随记录落盘，让离线可恢复。
-    同一帧所有检测器看同一分辨率，取首个可用值即可；无任何 frame_shape 时返回 None，
-    离线仍按默认兜底（老 features.jsonl 无该字段时同样优雅降级）。
+
+def _feature_to_record(feature: FrameFeature) -> Dict[str, Any]:
+    """FrameFeature → 磁盘 record（逆运算 _record_to_feature）。"""
+    record: Dict[str, Any] = {
+        "ts": feature.ts,
+        "features": {
+            source: [_serialize_detection(d) for d in fd.detections]
+            for source, fd in feature.by_source.items()
+        },
+    }
+    if feature.frame_width is not None and feature.frame_height is not None:
+        record["frame_width"] = feature.frame_width
+        record["frame_height"] = feature.frame_height
+    return record
+
+
+def _record_to_feature(rec: Dict[str, Any]) -> FrameFeature:
+    """磁盘 record → FrameFeature（_feature_to_record 的逆；未落字段按契约默认还原）。
+
+    每源 `FrameDetections.timestamp = 记录级 ts`（同帧多流同源同值）；`metadata={}`、
+    `success=True`、`mask/keypoints=None` 均为默认。含 detections 为空的 source。
     """
-    for out in detections_by_task.values():
-        shape = (getattr(out, "metadata", None) or {}).get("frame_shape")
-        if shape is not None and len(shape) >= 2:
-            height, width = int(shape[0]), int(shape[1])
-            if width > 0 and height > 0:
-                return width, height
-    return None
+    ts = float(rec.get("ts", 0.0))  # 反序列化边界统一 float（手写 JSONL 可能给 int）
+    features = rec.get("features") or {}
+    by_source = {
+        source: FrameDetections(
+            detections=[_deserialize_detection(d) for d in dets],
+            metadata={},
+            timestamp=ts,
+        )
+        for source, dets in features.items()
+    }
+    fw = rec.get("frame_width")
+    fh = rec.get("frame_height")
+    return FrameFeature(
+        ts=ts,
+        by_source=by_source,
+        frame_width=int(fw) if fw is not None else None,
+        frame_height=int(fh) if fh is not None else None,
+    )
 
 
 class _JsonlBuffer:
@@ -206,68 +227,41 @@ class FeatureStore(_JsonlBuffer):
     def __init__(self, base_dir: Union[str, Path], batch_size: int = 64):
         super().__init__(base_dir, suffix="features", batch_size=batch_size)
 
-    def append(self, task_id: Any, step_id: Any, res, owner: Any = None) -> None:
-        """追加一帧的多模型特征。
+    def append(self, task_id: Any, step_id: Any, feature: "FrameFeature", owner: Any = None) -> None:
+        """追加一帧的多流特征（帧级 FrameFeature）。
 
         Args:
             task_id: 任务 id（落盘目录键）
             step_id: 洗消步骤 id（落盘目录键，与 HLS 同款 `{task_id}/{step_id}/`）
-            res: FrameInference（duck-typed：.timestamp + .result[task_name]→FrameDetections）
+            feature: FrameFeature（.ts + .by_source[流名]→FrameDetections，与在线滑窗同源同型）
             owner: 本次写属的 run（= cq 对象）；与分区当前 owner 不符即被拒（迟到于 supersede）
         """
         if task_id is None or step_id is None:
             return
         try:
-            features = {
-                task_name: [_serialize_detection(d) for d in out.detections]
-                for task_name, out in res.detections.items()
-            }
-            # ts = 帧捕获 ts（res.timestamp），供离线/证据按帧对齐，详见模块 docstring
-            record = {"ts": res.timestamp, "features": features}
-            # wh = 帧分辨率 [width, height]，供离线空间归一化恢复真实尺寸（无则省略）
-            wh = _extract_frame_wh(res.detections)
-            if wh is not None:
-                record["wh"] = list(wh)
-            line = json.dumps(record, ensure_ascii=False) + "\n"
+            line = json.dumps(_feature_to_record(feature), ensure_ascii=False) + "\n"
         except Exception as e:  # 序列化失败 best-effort 跳过
             logger.warning("[FeatureStore] 特征序列化失败 task=%s step=%s: %s", task_id, step_id, e)
             return
         self._enqueue(task_id, step_id, [line], owner=owner)
 
-    def load(self, task_id: Any, step_id: Any, source: str) -> List[FrameDetections]:
-        """离线回读：把某 source（检测点/模型名）的全序列特征还原为 FrameDetections 列表。
+    def load(self, task_id: Any, step_id: Any) -> List[FrameFeature]:
+        """离线回读：把整段特征还原为帧级 `FrameFeature` 序列（与在线滑窗同型）。
 
-        供离线链路使用（offline 预置）。委托 `load_many` 的单 source 版本，语义不变。
-
-        Args:
-            task_id: 任务 id
-            step_id: 洗消步骤 id
-            source: 检测点名（= Detector/Analyzer.name），对应每帧 features[source]
-        """
-        return self.load_many(task_id, step_id, [source]).get(source, [])
-
-    def load_many(
-        self, task_id: Any, step_id: Any, sources: Sequence[str]
-    ) -> Dict[str, List[FrameDetections]]:
-        """离线回读：一次扫描把多个 source 的全序列特征各自还原为 FrameDetections 列表。
-
-        供离线链路使用（offline 预置）。先 flush 缓冲，再**单次顺序扫 features.jsonl**
-        （不为每个 source 重复读整文件）。每个 source 保留所有含该 key 的帧（含 detections 为空
-        的帧），返回序列按 `ts` 升序。文件缺失时每个 source 返回空列表；单行损坏记 warning 后
-        跳过、不中断其余数据。
-        注：mask/keypoints 未落盘，回读为 None；metadata 仅在记录含 `wh`（帧分辨率）时
-        回填 `frame_width`/`frame_height`，供离线空间归一化恢复真实尺寸，其余键不落盘。
+        先 flush 缓冲，再**单次顺序扫 features.jsonl**，每行经 `_record_to_feature` 还原成一个
+        `FrameFeature`（含该行 features 里的全部 source，含 detections 为空的 source，present-key
+        天然落在 by_source 键集上）。返回按 `ts` 升序。文件缺失返回 `[]`；单行损坏记 warning 后跳过、
+        不中断其余数据。未落字段（mask/keypoints/metadata/success）按契约默认还原，详见 `_record_to_feature`。
 
         Args:
             task_id: 任务 id
             step_id: 洗消步骤 id
-            sources: 检测点名列表（= Detector.name），各对应每帧 features[source]
         """
-        outputs: Dict[str, List[FrameDetections]] = {src: [] for src in sources}
+        frames: List[FrameFeature] = []
         self.flush(task_id, step_id)
         path = self._path(task_id, step_id)
         if not path.exists():
-            return outputs
+            return frames
         try:
             # utf-8-sig 容忍 Windows 手写 features.jsonl 的 UTF-8 BOM；后端自身写出的无 BOM 亦正常。
             with path.open("r", encoding="utf-8-sig") as f:
@@ -280,28 +274,11 @@ class FeatureStore(_JsonlBuffer):
                     except Exception as e:  # 单行损坏：跳过不中断其余数据
                         logger.warning("[FeatureStore] 跳过损坏行 %s: %s", path, e)
                         continue
-                    features = rec.get("features") or {}
-                    ts = rec.get("ts", 0.0)
-                    # 帧分辨率随记录落盘（写入端 _extract_frame_wh）；回读还原到 metadata
-                    # 供离线空间归一化按真实尺寸换算。老记录无 wh 时留空，segmenter 走默认兜底。
-                    wh = rec.get("wh")
-                    frame_meta: Dict[str, Any] = {}
-                    if isinstance(wh, (list, tuple)) and len(wh) >= 2:
-                        frame_meta = {"frame_width": wh[0], "frame_height": wh[1]}
-                    for src in sources:
-                        dets = features.get(src)
-                        if dets is None:
-                            continue
-                        outputs[src].append(FrameDetections(
-                            detections=[_deserialize_detection(d) for d in dets],
-                            metadata=dict(frame_meta),
-                            timestamp=ts,
-                        ))
+                    frames.append(_record_to_feature(rec))
         except Exception as e:
             logger.warning("[FeatureStore] 回读失败 %s: %s", path, e)
-        for src in sources:
-            outputs[src].sort(key=lambda fd: fd.timestamp)
-        return outputs
+        frames.sort(key=lambda ff: ff.ts)
+        return frames
 
 
 class FactLedger(_JsonlBuffer):

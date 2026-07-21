@@ -48,8 +48,9 @@ class Detector(ABC):
             frames: BGR 图像列表
             timestamps: 各帧的帧捕获时间戳（真值锚点，源自 Frame.timestamp）。
                 实现须把 timestamps[i] 原样写入 frames[i] 对应的
-                FrameDetections.timestamp——下游 _zip_by_ts 按此对齐多流，
-                detector 不得自造时间戳（否则同帧多流 ts 不等会漏帧）。
+                FrameDetections.timestamp——写回口据此物化 FrameFeature（帧级多流对齐），
+                帧窗算子用 FrameFeature.ts 裁窗、用 FrameDetections.timestamp 推进游标，
+                二者须同源同值；detector 不得自造时间戳（否则内部对齐错乱）。
 
         Returns:
             List[FrameDetections]：与 frames 一一对应
@@ -148,7 +149,7 @@ class YOLODetector(Detector):
 
         return FrameDetections(
             detections=detections,
-            metadata={"model": "yolo", "frame_shape": frame.shape},
+            metadata={"model": "yolo"},  # 帧分辨率上移 FrameInference.frame_width/height，不再逐检测器塞
             timestamp=timestamp,
         )
 

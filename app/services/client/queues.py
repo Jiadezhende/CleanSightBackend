@@ -9,17 +9,17 @@ import enum
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetections
+from app.domain.detection import FrameFeature
 from app.domain.frame import Frame
 from app.utils.metrics import frame_drop_total
 
-if TYPE_CHECKING:
-    from app.services.inference.models import FrameInference
+# signals_10s 聚合底线（固定 10s），与帧窗保留时长（可 ≥10s）解耦。
+_SIGNALS_WINDOW_SEC = 10.0
 
 
 class RunState(enum.Enum):
@@ -31,7 +31,7 @@ class RunState(enum.Enum):
 
     门控在写入**时刻**判 state（非 dispatch 时刻）：迟到写落到 DRAINING/CLOSED 的旧 CQ 被拒，
     不串台到新 run。状态读免锁（枚举原子读 + 单调）；`_state_lock` 仅串行/幂等转换本身，
-    绝不与 7 把 payload 锁互嵌——无新锁环。
+    绝不与 6 把 payload 锁互嵌——无新锁环。
     """
 
     ACTIVE = "ACTIVE"
@@ -53,7 +53,6 @@ class ClientQueues:
     - 默认 CA 队列最大长度为 2700 帧，约 90 秒的视频缓存（30fps）
 
     锁清单（Lock Inventory）：
-      _task_lock        Lock   （历史）保留于全清顺序；task/task_id/step_id/stage 现为不可变身份，读免锁
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
       _raw_lock         Lock   ca_raw + latest_raw_frame + latest_raw_timestamp
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
@@ -63,7 +62,7 @@ class ClientQueues:
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
 
     全清顺序（clear() 同时持锁时的固定顺序，防死锁）：
-      _task_lock → _raw_lock → _viz_lock → _inference_lock
+      _raw_lock → _viz_lock → _inference_lock
       → _frontend_lock → _slide_window_lock → _alarm_lock
 
     身份（task_id/step_id/source_ip/stage）为构造定死的不可变 primitive，热路径免锁直读。
@@ -98,7 +97,6 @@ class ClientQueues:
         self._decimate_phase: int = 0
 
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
-        self._task_lock = threading.Lock()       # (历史)保留于全清顺序；身份已不可变、读免锁
         self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
         self._viz_lock = threading.Lock()        # ca_processed + _latest_rendered
         self._inference_lock = threading.Lock()  # _latest_inference
@@ -106,7 +104,7 @@ class ClientQueues:
         self._slide_window_lock = threading.Lock()
         self._alarm_lock = threading.Lock()      # _alarm_log + _alarm_seq + _alarm_gate
 
-        # 运行状态机的锁（独立于下方 7 把 payload 锁：只串行/幂等本状态转换，
+        # 运行状态机的锁（独立于下方 6 把 payload 锁：只串行/幂等本状态转换，
         # 从不与任何 payload 锁互嵌，故不引入新锁环——见 RunState docstring）
         self._state: RunState = RunState.ACTIVE
         self._state_lock = threading.Lock()
@@ -147,16 +145,15 @@ class ClientQueues:
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
         self._latest_rendered: Optional[Frame] = None
 
-        # 最新推理结果原子快照（由 _inference_lock 保护）
-        self._latest_inference: Optional[FrameInference] = None
+        # 最新推理快照：帧级 FrameFeature（由 _inference_lock 保护，供 Viz 原子读同帧一致）
+        self._latest_inference: Optional[FrameFeature] = None
 
-        # 滑动窗口：per-stream(detector.name) 检测环形缓冲（由 _slide_window_lock 保护）
-        self._slide_window: Dict[str, Deque[FrameDetections]] = {}
-        # 缓冲保留时长底线（保证 signals_10s 仍见 10s）；感受野只向上扩展，不缩短。
-        self._slide_window_seconds: float = 10.0
-        # per-stream 感受野覆盖：{流名: 订阅该流的算子最大 window_seconds}，由 set_stream_windows 配置。
-        # 实际保留时长 = max(底线, 该流感受野)。
-        self._stream_windows: Dict[str, float] = {}
+        # 滑动窗口：帧级 FrameFeature 环形缓冲（一帧一条，多流已对齐，由 _slide_window_lock 保护）。
+        # 写回口物化 FrameFeature 后单次 push_detection；算子/ signals 统一从此读，无需按 ts 拼帧。
+        self._slide_window: Deque[FrameFeature] = deque()
+        # 帧窗保留时长（秒）：= max(_SIGNALS_WINDOW_SEC 底线, 各算子最大感受野)，由 set_stream_windows 配置。
+        # 只向上扩展；signals_10s 聚合另按固定 10s 底线裁窗，二者解耦。
+        self._slide_window_seconds: float = _SIGNALS_WINDOW_SEC
 
         # 最新时序事件列表（由 _frontend_lock 保护，与 _stage 合并）
         self._latest_temporal: List[str] = []
@@ -257,8 +254,8 @@ class ClientQueues:
 
     # --- latest_inference 操作（原子推理快照）---
 
-    def set_latest_inference(self, result: "FrameInference") -> None:
-        """原子写入最新推理结果（由 InferenceLoop 调用）。
+    def set_latest_inference(self, result: FrameFeature) -> None:
+        """原子写入最新推理快照 FrameFeature（由 InferenceLoop 调用）。
 
         写门：非 ACTIVE 拒——迟到推理结果落到旧 CQ 被拒，不串台。
         """
@@ -267,7 +264,7 @@ class ClientQueues:
         with self._inference_lock:
             self._latest_inference = result
 
-    def get_latest_inference(self) -> Optional["FrameInference"]:
+    def get_latest_inference(self) -> Optional[FrameFeature]:
         """原子读取最新推理结果（由 VisualizationWorker 调用）。"""
         with self._inference_lock:
             return self._latest_inference
@@ -356,13 +353,13 @@ class ClientQueues:
         self.close()
 
     def _release_payload(self) -> None:
-        """原子释放所有队列和重数据缓存（按全清顺序持 7 把 payload 锁）。
+        """原子释放所有队列和重数据缓存（按全清顺序持 6 把 payload 锁）。
 
         身份（task/task_id/step_id/source_ip/stage）不可变，不在此重置——仅释放
         payload（帧/滑窗/告警/快照）回收内存（尤其大块 numpy 帧）。
         """
         locks = [
-            self._task_lock, self._raw_lock, self._viz_lock,
+            self._raw_lock, self._viz_lock,
             self._inference_lock, self._frontend_lock,
             self._slide_window_lock, self._alarm_lock,
         ]
@@ -392,40 +389,35 @@ class ClientQueues:
     # --- slide_window 操作 ---
 
     def set_stream_windows(self, windows: Dict[str, float]) -> None:
-        """配置 per-stream 感受野（{流名: 最大 window_seconds}），整体替换。
+        """配置帧窗保留时长 = max(10s 底线, 各算子最大感受野)。
 
-        由 InferenceManager 在算子实例化后调用：缓冲保留时长取
-        max(底线 10s, 该流感受野)，故感受野只向上扩展，signals_10s 的 10s 不受影响。
+        由 InferenceManager 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
+        单条帧窗保留所有算子里最长的感受野，各算子自行 _clip 到自身 window_seconds；
+        感受野只向上扩展，signals_10s 另按固定 10s 底线裁窗，不受影响。
         """
         with self._slide_window_lock:
-            self._stream_windows = dict(windows)
+            self._slide_window_seconds = max(
+                [_SIGNALS_WINDOW_SEC] + list(windows.values())
+            )
 
-    def push_detection(self, task_name: str, output: FrameDetections) -> None:
-        """将 FrameDetections 追加到 per-stream 滑动窗口，按感受野自动淘汰过期条目。
+    def push_detection(self, feature: FrameFeature) -> None:
+        """将一帧对齐后的 FrameFeature 追加到帧窗，按保留时长淘汰过期条目。
 
-        写门：非 ACTIVE 拒——迟到检测写回落到旧 CQ 被拒。
+        写回口一帧一次（多流已在 FrameFeature.by_source 内对齐），不再逐 detector。
+        写门：非 ACTIVE 拒——迟到写回落到旧 CQ 被拒。
         """
         if self._state is not RunState.ACTIVE:
             return
         with self._slide_window_lock:
-            if task_name not in self._slide_window:
-                self._slide_window[task_name] = deque()
-            window = self._slide_window[task_name]
-            window.append(output)
-            retain = max(
-                self._slide_window_seconds, self._stream_windows.get(task_name, 0.0)
-            )
-            cutoff = output.timestamp - retain
-            while window and window[0].timestamp < cutoff:
-                window.popleft()
+            self._slide_window.append(feature)
+            cutoff = feature.ts - self._slide_window_seconds
+            while self._slide_window and self._slide_window[0].ts < cutoff:
+                self._slide_window.popleft()
 
-    def get_slide_window(self, task_name: str) -> List[FrameDetections]:
-        """返回指定 task 滑动窗口的快照副本（线程安全）。"""
+    def get_slide_window(self) -> List[FrameFeature]:
+        """返回帧窗的快照副本（线程安全）；每条 = 一帧多流对齐检测。"""
         with self._slide_window_lock:
-            window = self._slide_window.get(task_name)
-            if not window:
-                return []
-            return list(window)
+            return list(self._slide_window)
 
     # --- latest_temporal 操作 ---
 
@@ -492,19 +484,28 @@ class ClientQueues:
         {stream_name: {"active": bool, "hit_count": int, "max_conf": float}}
         —— 只按流名聚合，不做流名→metric 映射（那是 inference 展示知识，归 router 装配）。
         """
-        summary: Dict[str, Dict[str, Any]] = {}
+        acc: Dict[str, Dict[str, float]] = {}
         with self._slide_window_lock:
-            for task_name, window in self._slide_window.items():
-                hit_count = 0
-                max_conf = 0.0
-                for output in window:
-                    if output.detections:
-                        hit_count += 1
-                        frame_max_conf = max(d.confidence for d in output.detections)
-                        max_conf = max(max_conf, frame_max_conf)
-                summary[task_name] = {
-                    "active": hit_count > 0,
-                    "hit_count": hit_count,
-                    "max_conf": round(float(max_conf), 4),
-                }
-        return summary
+            if not self._slide_window:
+                return {}
+            # signals_10s 固定按 10s 底线裁窗（帧窗可保留更长感受野，此处不受影响）。
+            cutoff = self._slide_window[-1].ts - _SIGNALS_WINDOW_SEC
+            for feat in self._slide_window:
+                if feat.ts < cutoff:
+                    continue
+                for src, fd in feat.by_source.items():
+                    if fd is None:
+                        continue
+                    a = acc.setdefault(src, {"hit": 0.0, "max_conf": 0.0})
+                    if fd.detections:
+                        a["hit"] += 1
+                        frame_max_conf = max(d.confidence for d in fd.detections)
+                        a["max_conf"] = max(a["max_conf"], frame_max_conf)
+        return {
+            src: {
+                "active": a["hit"] > 0,
+                "hit_count": int(a["hit"]),
+                "max_conf": round(float(a["max_conf"]), 4),
+            }
+            for src, a in acc.items()
+        }

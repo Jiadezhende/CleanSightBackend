@@ -20,12 +20,11 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from app.domain.detection import FrameDetections
+from app.domain.detection import FrameDetections, FrameFeature
 from app.domain.render import RenderSpec
 from app.domain.frame import Frame
 from app.services.inference.naming import get_stage_alias
 from app.services.client import client_manager
-from app.services.inference.models import FrameInference
 from app.services.inference.visualization.visualizer import FixedVisualizer
 
 logger = logging.getLogger(__name__)
@@ -126,13 +125,13 @@ class VisualizationWorker:
     def _process_client(self, task_id: int, cq) -> None:
         """处理单个 run 的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[FrameInference] = cq.get_latest_inference()
+        inference: Optional[FrameFeature] = cq.get_latest_inference()
         if inference is None:
             return
 
         # 2. 去重：跳过已渲染过的同一推理结果
         last_ts = self._last_rendered_ts.get(task_id, 0.0)
-        if inference.timestamp <= last_ts:
+        if inference.ts <= last_ts:
             # 有推理快照但无新结果 → tick 空转。占比高即"上游供帧慢"的直接信号。
             self._stat_stale[task_id] += 1
             return
@@ -145,10 +144,10 @@ class VisualizationWorker:
         # 4. 获取最新时序事件
         events = cq.get_latest_temporal()
 
-        # 5. 渲染（计时，用于判定是否 render-bound）
-        stage = inference.stage
+        # 5. 渲染（计时，用于判定是否 render-bound）。stage 取自 cq 不可变身份（快照不再携 stage）。
+        stage = cq.stage
         t0 = time.perf_counter()
-        annotated_frame = self._render(frame, stage, inference.detections, events)
+        annotated_frame = self._render(frame, stage, inference.by_source, events)
         dt = time.perf_counter() - t0
         self._render_time_sum += dt
         self._render_calls += 1
@@ -157,14 +156,14 @@ class VisualizationWorker:
 
         # 6. 写回
         frame_data = Frame(
-            timestamp=inference.timestamp,
+            timestamp=inference.ts,
             frame=annotated_frame,
         )
         cq.append_ca_processed(frame_data)
         cq.set_latest_rendered(frame_data)
 
         # 7. 更新去重时间戳 + 计成帧数（实际渲染帧数 = processed 真实成帧率）
-        self._last_rendered_ts[task_id] = inference.timestamp
+        self._last_rendered_ts[task_id] = inference.ts
         self._stat_rendered[task_id] += 1
 
     def _render(

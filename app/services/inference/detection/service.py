@@ -14,6 +14,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from app.domain.detection import FrameFeature
 from app.services.client import ClientManager, client_manager
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
 from app.services.inference.models import FrameInference
@@ -260,27 +261,34 @@ class ModelWorkerService:
                 )
                 continue
 
-            # Path 1: per-task slide_window（temporal 需要历史窗口）
+            # 失败可见性：pool 把模型异常降级成 success=False 的空结果，下游与「真没检到」
+            # 不可分。此处 res.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
+            # 聚合计数由 pool.infer_failure_total 承接、此处不再重复计数。
             for task_name, detection_output in res.detections.items():
-                # 失败可见性：pool 把模型异常降级成 success=False 的空结果，下游与「真没检到」
-                # 不可分。此处 res.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
-                # 聚合计数由 pool.infer_failure_total 承接、此处不再重复计数。
                 if not detection_output.success:
                     logger.warning(
                         "[Worker] inference degraded (empty result): task=%s model=%s error=%s",
                         res.task_id, task_name, detection_output.error,
                     )
-                cq.push_detection(task_name, detection_output)
-            # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致）
-            cq.set_latest_inference(res)
+            # 物化一次帧级 FrameFeature（多流已在 res.detections 内对齐）：帧窗 + 原子快照共用一份。
+            # by_source 直接共享 res.detections 引用（pool 每帧新建、无别名突变），不复制。
+            feature = FrameFeature(
+                ts=res.timestamp, by_source=res.detections,
+                frame_width=res.frame_width, frame_height=res.frame_height,
+            )
+            # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。
+            cq.push_detection(feature)
+            # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）
+            cq.set_latest_inference(feature)
             # L2 特征落盘（常开）：offline 链路硬需求，best-effort 不影响主链路。
             # 目录键 (task_id, step_id) 与 HLS 同款；任一为 None 则跳过（拒落，同 HLS 口径）。
             # 从同一句柄派生 task_id/step_id（消除跨 snapshot 二次读的键错配窗口）。
             # owner=cq：feature_store 无状态门，靠 store 内归属校验挡「顶层 is_active()
             # 通过后中途 supersede」的迟到写（分区键跨 run 共享，比 is_active() 更本质）。
+            # 落盘同一份帧级 FrameFeature（与帧窗/快照共用），append/load 两端货币一致。
             if self._feature_store is not None:
                 task_id = cq.task_id
                 step_id = cq.step_id
                 if task_id is not None and step_id is not None:
-                    self._feature_store.append(task_id, step_id, res, owner=cq)
+                    self._feature_store.append(task_id, step_id, feature, owner=cq)
 

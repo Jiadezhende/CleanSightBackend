@@ -1,6 +1,6 @@
 """T1: CQ per-run 不可变 —— 身份构造注入、复用机器已删、换槽、存储 supersede。"""
 
-from factories import make_bare_cq, make_cq, make_frame_detections
+from factories import make_bare_cq, make_cq, make_frame_feature
 from app.services.client.manager import ClientManager
 from app.services.inference.feature.store import FeatureStore
 
@@ -17,7 +17,7 @@ def test_cq_identity_immutable_and_reuse_machinery_gone():
         assert not hasattr(cq, gone), f"{gone} 应已删除"
 
     # clear() 只释放 payload，不重置不可变身份
-    cq.push_detection("x", make_frame_detections(n=0, ts=1.0))
+    cq.push_detection(make_frame_feature(source="x", n=0, ts=1.0))
     cq.clear()
     assert cq.task_id == 7
     assert cq.step_id == 3

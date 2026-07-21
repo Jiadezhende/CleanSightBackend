@@ -13,7 +13,7 @@ import threading
 from collections import defaultdict, deque
 from typing import Deque, Dict, List, Optional
 
-from app.services.client import ClientManager, ClientQueues, client_manager
+from app.services.client import ClientManager, client_manager
 from app.services.inference.models import DetectionTask
 from app.utils.metrics import frame_drop_total
 from app.utils.worker_guard import guarded_run
