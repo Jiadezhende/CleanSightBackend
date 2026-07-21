@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -12,7 +12,7 @@ CleanSight Backend 是一个用于内镜人工清洗流程的 AI 视觉巡检后
 - 客户端来源：`clean_task.source_ip` 为**被动**身份字段（诊断 + 遗留 wire 适配），不再作路由键。
 - 步骤：`current_step` 字符串，`resolve_stage` 恒等路由 `"1"`→LEAK、`"2"`→CLEAN、未知→MOCK（RunController 边界 `int()` 转 step_id）。
 - 告警：数据库表 `clean_alarm`，运行时告警由 Operator（时序判定）产生，过闸编排在 `inference/temporal/alarm_sink`，persistence 无状态落库上报外部接口。
-- 证据：HLS 视频段按 `{storage_base_dir}/{task_id}/{step_id}/` 存储（keypoints JSON 死写已删）。
+- 证据：HLS 视频段按 `{storage_base_dir}/{task_id}/{step_id}/` 存储。
 
 ## 当前业务能力
 
@@ -27,7 +27,7 @@ CleanSight Backend 是一个用于内镜人工清洗流程的 AI 视觉巡检后
 ## 业务边界
 
 - 当前核心检测阶段是 `LEAK`，包含气泡检测和弯折动作检测。
-- `CLEAN` 阶段 `rules: []`，仅两个 detector（clean_large/clean_small）提供检测框可视化，不产生告警。
+- `CLEAN` 阶段有两个 detector（clean_large/clean_small）+ 在线时序算子 `clean_monitor`（动作识别，当前仅出叠字、不产告警）。
 - 追溯按 `task_id + step_id` 定位，不再依赖 `source_ip`，因为注释明确说明该字段可能被业务侧覆写。
 - Lab 只使用 raw 轨送标，不使用 processed 轨。
 

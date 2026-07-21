@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -29,7 +29,7 @@ FastAPI 全局异常处理器在 `app/main.py` 将这些异常转换为 HTTP 响
 - `AppError`：error 后继续。
 - 未预期异常：critical 后继续。
 
-（丢帧不再走异常：vestigial `FrameDrop` 异常已退役，改由 `frame_drop_total` 指标在真实丢帧点计数——见 [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md) 背压部分。）
+（丢帧不走异常：由 `frame_drop_total` 指标在真实丢帧点计数——见 [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md) 背压部分。）
 
 线程入口普遍通过 `guarded_run()` 包装，避免 worker 静默死亡。
 

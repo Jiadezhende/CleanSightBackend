@@ -34,7 +34,7 @@
 ## 职责边界
 
 - **告警落库归属**：过闸编排（`persist_alarms`）在 `inference/temporal/alarm_sink`，persistence 只做无状态落库。RunController 只在拆除结算点调用 `alarm_sink.persist_alarms`（别名已由 actor 构造期一次性烧进 `alarm.stage`，落库直读 `alarm.stage`/`alarm.metric`，不再传 `stage_name`）。
-  > 曾有一版换键工单提议把 `persist_alarms` 整体迁入 `PersistenceManager`、删 `alarm_sink.py`；**该迁移未落地**——当前代码 `alarm_sink.persist_alarms` 仍在 `inference/temporal/`，RunController 从此处 import 调用。以代码为准，勿据旧工单再迁。
+  > 边界固定：告警过闸/编排（`alarm_sink.persist_alarms`）归属 inference 域（`inference/temporal/`），**不迁入 persistence**；persistence 只做无状态落库。
 - **owner 清晰**：decoder=StreamService、workflow/actor/feature=InferenceManager、HLS 残段/目录锁=PersistenceManager、registry=ClientManager。RunController 只按顺序驱动各 owner，不代持其资源。
 
 ## 代码来源

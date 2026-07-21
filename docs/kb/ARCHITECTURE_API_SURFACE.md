@@ -35,7 +35,7 @@ FastAPI `lifespan` 嵌套启动：`health.lifespan()` → `persistence.lifespan(
 
 ## 装配层解耦原则
 
-服务实例在装配时**不得跨服务反向 push 私有字段**。历史上 `InferenceManager.__init__` 曾伸手改 `persistence_manager.hls_pool.strategy.db_dir`（穿透封装，persistence 一重构即静默崩）——已删除。现存储根 `storage_base_dir` 由 `app/settings.py` 单一真源（`CLEANSIGHT_STORAGE_DIR`，相对路径以项目根解析），persistence / inference / traceback **三方一律读它**，不再互相灌值。装配相关的死参数（`InferenceManager.ca_maxlen`）与死配置链（`enable_db_write`、`client_config.state.initial_stage`）已一并清除。stage 路由退化为恒等（主键即 `step_id`，可读名下沉为 stage 的 `alias` 字段），不再维护 `step→stage` 映射常量。详见变更记录 `docs/update/20260627_INFRA_ASSEMBLY_DECOUPLE.md`。
+服务实例在装配时**不得跨服务反向 push 私有字段**（反例：装配时伸手改另一服务的私有 `db_dir`，会在对方重构时静默崩）。存储根 `storage_base_dir` 由 `app/settings.py` 单一真源（`CLEANSIGHT_STORAGE_DIR`，相对路径以项目根解析），persistence / inference / traceback **三方一律读它**，不互相灌值。stage 路由为恒等（主键即 `step_id`，可读名下沉为 stage 的 `alias` 字段），无 `step→stage` 映射常量。改造背景见变更记录 `docs/update/20260627_INFRA_ASSEMBLY_DECOUPLE.md`。
 
 ## 代码来源
 

@@ -21,7 +21,7 @@
 - raw segment
 - processed segment
 
-（keypoints JSON 死写已删，不再定位。）`find()` 根据目标 `ts_ms` 返回触发段和前后上下文。
+`find()` 根据目标 `ts_ms` 返回触发段和前后上下文。
 
 ## MediaToken
 

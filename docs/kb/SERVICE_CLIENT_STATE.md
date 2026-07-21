@@ -27,7 +27,7 @@
 
 ## ClientQueues：一次 run 的不可变身份 + 状态机
 
-**一个 CQ == 一次 run == 一个 `(task_id, step_id)`**。身份 `task_id/step_id/source_ip/stage` 为构造定死的不可变 primitive，热路径免锁直读；切 step/重启 = 建**新** CQ 换槽，不在旧对象上改身份（故 settlement 归属天然正确，无「先停旧 actor 再切字段」的排序不变式）。已删除旧的 `set_task/current_step/status` 可变字段与 `task_id→client_id` 映射。
+**一个 CQ == 一次 run == 一个 `(task_id, step_id)`**。身份 `task_id/step_id/source_ip/stage` 为构造定死的不可变 primitive，热路径免锁直读；切 step/重启 = 建**新** CQ 换槽，不在旧对象上改身份（故 settlement 归属天然正确，无「先停旧 actor 再切字段」的排序不变式）；身份无可变 setter。
 
 ### 运行状态机 `RunState`（单调 ACTIVE→DRAINING→CLOSED）
 

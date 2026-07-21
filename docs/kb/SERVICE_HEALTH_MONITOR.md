@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -22,7 +22,7 @@
 
 ## 断流与重连
 
-若有 decoder 但 `latest_raw_timestamp` 超过 `suspect_timeout`（= heartbeat_timeout，默认 5s）未更新，进入重连模式。`ReconnectState`（`types.py`）字段：`task_id`、`stream_url`、`attempt_count`、`last_attempt_time`、`last_frame_time_before_disconnect`、`cq`（捕获的 CQ 对象引用，作身份 fence 依据）。**已删除 fps/protocol 字段**（固定 RTSP，fps 走配置）。到达重连间隔后调 `stream_service.restart_stream()`；有足够新的新帧则退出重连。
+若有 decoder 但 `latest_raw_timestamp` 超过 `suspect_timeout`（= heartbeat_timeout，默认 5s）未更新，进入重连模式。`ReconnectState`（`types.py`）字段：`task_id`、`stream_url`、`attempt_count`、`last_attempt_time`、`last_frame_time_before_disconnect`、`cq`（捕获的 CQ 对象引用，作身份 fence 依据）。无 fps/protocol 字段（固定 RTSP、fps 走配置）。到达重连间隔后调 `stream_service.restart_stream()`；有足够新的新帧则退出重连。
 
 ## 清理条件
 

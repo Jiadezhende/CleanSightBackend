@@ -17,7 +17,7 @@ CleanSight 的实时路径由多线程、多队列和 per-client 状态组成。
 
 per-task 生命周期事务锁**收敛为一把** `RLock`，由 `ClientManager.lock_for(task_id)` get-or-create。`RunController.start_run` / `stop_run` 全程持它；api 层（`app/routers/api.py`）不再自持锁，只经 `asyncio.to_thread` 把同步持锁段桥出事件循环调 `run_controller`；HealthMonitor 后台线程也走同一把锁。三方共用消除「HM 迟到 cleanup 误删 /start 刚建 CQ」的竞态。RLock 可重入（start_run 持锁内重启时再调 stop_run 不自死锁）。
 
-`InferenceManager` 不再自持 per-client 锁：`start_workflow` / `stop_workflow` 的互斥由上层 `lock_for(task_id)` 承接。TemporalActor finalize 在旧 CQ 不可变身份上归属告警，无需「先停旧 actor 再切字段」的排序。
+`InferenceManager` 不自持 per-client 锁：`start_workflow` / `stop_workflow` 的互斥由上层 `lock_for(task_id)` 承接。TemporalActor finalize 在旧 CQ 不可变身份上归属告警，无需「先停旧 actor 再切字段」的排序。
 
 覆盖场景：并发启动同一任务幂等返回；改 step/URL 触发停旧全量重建；terminate 与 start 共用同一把锁；不同 task 并发不互相阻塞。
 
@@ -31,7 +31,7 @@ per-task 生命周期事务锁**收敛为一把** `RLock`，由 `ClientManager.l
 ### ClientQueues 锁库存
 
 ClientQueues 中的锁按职责拆分（身份 `task_id/step_id/stage/task_started_at` 为构造定死的不可变
-primitive，热路径免锁直读，故**无** `_task_lock`——原历史锁已删）：
+primitive，热路径免锁直读，故**无** `_task_lock`）：
 
 - `_raw_lock`：raw queue 和 latest raw。
 - `_viz_lock`：processed queue 和 latest rendered。
@@ -101,7 +101,7 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 
 持久化服务也采用队列解耦。上游实时路径只把任务放入 `PersistenceManager` 的有界队列，慢任务由后台 worker 异步消费：
 
-- `hls_queue` 隔离视频段写盘、ffmpeg fMP4 转码、playlist/metadata 更新（keypoints JSON 死写已删）。
+- `hls_queue` 隔离视频段写盘、ffmpeg fMP4 转码、playlist/metadata 更新。
 - `alarm_queue` 隔离外部 HTTP 告警上报。
 - `HLSWorkerPool` 和 `AlarmWorkerPool` 独立运行，避免告警上报慢拖住 HLS，或视频转码慢拖住告警。
 - 队列满会计数并返回失败，是系统背压和容量告警的观察点。

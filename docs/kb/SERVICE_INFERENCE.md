@@ -48,7 +48,7 @@
 ## Detector / Operator 两粒度框架
 
 - **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer_batch(frames, timestamps)`（**唯一推理入口**，无单帧 `infer()`）、`prepare_visualization_data`。`timestamps` 是帧捕获真值锚点（源自 `Frame.timestamp`，pool 从 `req.timestamp` 穿入），须原样写回 `FrameDetections.timestamp`，令每帧 `FrameDetections.timestamp == FrameInference.timestamp`——写回口据此物化帧级 `FrameFeature` 对齐多流（供 L3），detector 不得自造时间戳。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
-- **Operator**（流算子，规则粒度，per-run 独立）：`name`、`subscribes`（**显式、必填**输入流名列表，缺则 fail-fast）、`window_seconds`；`analyze(windows: List[FrameFeature])` 推进 `self._sm`、`judge() → (overlay_texts, alarms)`、`finalize() → List[Alarm]`（结算，默认空）。analyze+judge **合并**进 Operator（不再有独立 TemporalAnalyzer/Judge，不做 EventFact 跨对象传递）。`windows` 是帧级 `FrameFeature` 快照（多流已在写回口对齐进 `by_source`），算子内 `_clip` 到自身感受野，单订阅用 `primary_window` 投影自身流。
+- **Operator**（流算子，规则粒度，per-run 独立）：`name`、`subscribes`（**显式、必填**输入流名列表，缺则 fail-fast）、`window_seconds`；`analyze(windows: List[FrameFeature])` 推进 `self._sm`、`judge() → (overlay_texts, alarms)`、`finalize() → List[Alarm]`（结算，默认空）。analyze+judge **合并**进单个 Operator（单对象内完成，不做 EventFact 跨对象传递）。`windows` 是帧级 `FrameFeature` 快照（多流已在写回口对齐进 `by_source`），算子内 `_clip` 到自身感受野，单订阅用 `primary_window` 投影自身流。
 - **TemporalOperator**（`Operator` 子基类，供动作识别时序模型）：多带 `model_path`/`objects`/`actions` 三参，惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、失败 `_load_failed` 锁存），`infer(features)` 前向出 logits。子类 `CleanOperator`（`workflows/clean.py`）在 `analyze` 内把订阅流窗口 `_adapt_to_features` 成 `(T, num_objects×6)` 张量（每物体 `(count,cx,cy,w,h,area)`，异常帧留全零行保持时间轴不缺帧）后 `infer`，取末步 argmax 存 `_sm['latest_action']`；`judge` 仅出 overlay 文案、当前不产告警。这是 CLEAN stage 的**在线**时序算子（YAML `clean_monitor`，`gru-final.pt`，`window_seconds=10`），与离线 CLEAN segmenter 是两条独立链路。
 
 ## L3/L4：ClientTemporalActor（~1Hz）
@@ -70,7 +70,7 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 - **`segmenters/mock.py` `BrushRulesSegmenter`**：纯规则、不依赖 torch/权重，任一订阅 source 有检测框即判该帧 active、连续帧并段。承担 MOCK stage 端到端 smoke + 非法配置兜底——是**离线的真兜底而非脚手架**。
 - **`segmenters/clean.py`**：CLEAN 三种时序模型集中一文件——`CleanMSTCNBiLSTMSegmenter`（MS-TCN+BiLSTM）、`CleanASFormerSegmenter`、`CleanBiGRUSegmenter`，`CleanSegmenter` 别名默认指向前者。特征工程是**模块级纯函数**（`build_base_features` 出基础 v2 特征 + `add_business_priors`/`add_centered_window_stats`）；多态只在各 segmenter override `preprocess`（基础 `super().preprocess()` 后叠加自己的 recipe），无集中 `feature_method` 路由分支。三模型特征维不同：base v2=113、+business_priors=121、+window_stats+business_priors=249。
   - **权重严格加载**：`torch.load(..., weights_only=False)`（checkpoint 含 numpy normalizer，PyTorch≥2.6 默认拒反序列化；带旧版 `TypeError` fallback）、`load_state_dict(strict=True)`，并校验 checkpoint `feature_version`/`feature_names` 与后端输入一致——不一致即 `ValueError` 硬失败，杜绝"看似跑通实际没加载"。
-  - **无权重硬失败**：未配 `model_path` 直接 `ValueError`，**不做规则降级**（旧 `_RuleDecoder`/`fallback_to_rules` 已删）；本地无权重回环走 MOCK stage。特征矩阵有 `NaN/inf→0` 兜底（拼接后 + normalizer 后各一次）。
+  - **无权重硬失败**：未配 `model_path` 直接 `ValueError`，**不做规则降级**；本地无权重回环走 MOCK stage。特征矩阵有 `NaN/inf→0` 兜底（拼接后 + normalizer 后各一次）。
   - 训练/导出权重在独立 `offline-model` 仓，后端只加载 checkpoint 推理；`.pt` 权重不入后端仓。当前权重为 baseline，仅验证工程链路闭环；自动任务结束触发离线 Runner/Judge/复算告警/入库仍未实现。
 
 ## 推理链路压力与吞吐观测
@@ -86,7 +86,6 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 
 - `"1"` / alias `LEAK`：detectors `bubble` + `bending`；rules `bubble_leak`（realtime）、`bending_check`（settlement）；`offline: {}`。
 - `"2"` / alias `CLEAN`：detectors `clean_large` + `clean_small`；rule `clean_monitor`（`CleanOperator`，订阅两流，`gru-final.pt` 在线动作识别，realtime）。`offline: {}`（生产默认不启用；启用时改 `offline.class` 指向 `segmenters/clean.py` 某模型）。
-  > **旧结论已作废**：早前 CLEAN `rules: []`、仅检测框可视化——现已加了在线时序算子 `clean_monitor`，会建 Operator/Actor。
 - `MOCK`：未知 step fallback + taskless 默认，在线纯透传（`mock_passthrough` 恒不触发）；`offline` 段启用 `BrushRulesSegmenter` 作**唯一**端到端离线样例（生产 stage 的 offline 保持 `{}`）。
 
 跨模块共享参数（`raw_fps`/`inference_fps`/`ca_maxlen`/`ca_segment_len`）已上浮 `app/settings.py` 单一真源；本文件只留 `batch_size` 等推理自有参数。

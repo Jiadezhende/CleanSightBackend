@@ -42,11 +42,11 @@ RTSP (仅 RTSP)
 
 ## 落盘与告警（PULL 模型）
 
-HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不触发落盘；persistence 的 `HLSSegmentSweeper` 周期 `take_raw_segment()`/`take_processed_segment()` 主动拉整段。持久化两条队列：HLS queue（raw/processed mp4、playlist、metadata；keypoints 死写已删）、Alarm queue（HTTP 上报）。告警过闸编排在 `inference/temporal/alarm_sink`，persistence 只做无状态落库。
+HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不触发落盘；persistence 的 `HLSSegmentSweeper` 周期 `take_raw_segment()`/`take_processed_segment()` 主动拉整段。持久化两条队列：HLS queue（raw/processed mp4、playlist、metadata）、Alarm queue（HTTP 上报）。告警过闸编排在 `inference/temporal/alarm_sink`，persistence 只做无状态落库。
 
 ## online / offline 分离
 
-实时链（L1→`_slide_window`→L3 1Hz）与离线链（`FeatureStore.load` → `OfflineSegmenter` → `FactLedger`）彻底分离：实时不落 FactLedger。离线消费端**已落地为单一 Runner 路径**（不再是「待实现」半程）：
+实时链（L1→`_slide_window`→L3 1Hz）与离线链（`FeatureStore.load` → `OfflineSegmenter` → `FactLedger`）彻底分离：实时不落 FactLedger。离线消费端是**单一 Runner 路径**：
 
 ```text
 {base}/{task}/{step}/features.jsonl（在线 FeatureStore.append 常开）
@@ -65,7 +65,7 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不
 
 - **独立 OS 进程**，不进 uvicorn；入口在 torch import 前置 `CUDA_VISIBLE_DEVICES=""` + 限线程，与在线链路**零代码/进程耦合、资源不抢占**。手动入口 `python -m app.services.inference.offline.cli run|query --task-id N --step-id M [--strategy PATH]`。
 - **复用现有数据契约**：输入吃 `FrameDetections`/`Detection`（`app.domain.detection`），输出吐 `SegmentFact`（`app.services.inference.models`）；只保留 `ModelInput`（62 维数值矩阵，clean 策略私有）一个离线专有表示，无独立中间数据壳。
-- **单一 Runner 路径**：早期一度存在平行的 `worker.py`/`interfaces.py`/短名注册表已删；框架仅剩 `offline/{segmenter.py(基类),runner.py,cli.py}` + `segmenters/{clean,mock}.py`。新增真实时序模型 = 加一个自包含 `segmenters/<stage>.py` 子类 + YAML `offline.class` 一行（clean.py 已含 MS-TCN/ASFormer/BiGRU 系列 torch 策略基类）。
+- **单一 Runner 路径**：框架仅 `offline/{segmenter.py(基类),runner.py,cli.py}` + `segmenters/{clean,mock}.py`，无并行分派层。新增真实时序模型 = 加一个自包含 `segmenters/<stage>.py` 子类 + YAML `offline.class` 一行（clean.py 已含 MS-TCN/ASFormer/BiGRU 系列 torch 策略基类）。
 - **存储键 vs 配置 key 正交**：存储读写始终用原数字 `step_id`；`resolve_stage` 仅决定用哪个 stage 的 offline 配置（未配 → MOCK.offline 兜底、仍读写 `{task}/{step}/` 分区）。
 - **在线仍不写 FactLedger**（实时不落事实）；离线是唯一 `facts.jsonl` 写方。
 - 后续（未实现）：自动调度、离线 Judge（`SegmentFact` → 合规判断/告警）、结果入库——当前只做链路收敛 + baseline 工程闭环，不判合规、不告警。

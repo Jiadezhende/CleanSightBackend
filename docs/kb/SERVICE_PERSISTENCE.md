@@ -19,7 +19,7 @@
 
 ## PULL 模型：CQ 纯缓冲，sweeper 主动拉
 
-HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不触发落盘。`HLSSegmentSweeper`（`snapshot_fn=client_manager.snapshot`，`interval_seconds=1.0`）周期遍历快照，对每个 CQ 调 `take_raw_segment()` / `take_processed_segment()` 拉整段（攒满 `ca_segment_len` 才弹），再经 `persist_hls_segment` 入 `hls_queue`。旧的 CQ 主动 PUSH 已退役。
+HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不触发落盘。`HLSSegmentSweeper`（`snapshot_fn=client_manager.snapshot`，`interval_seconds=1.0`）周期遍历快照，对每个 CQ 调 `take_raw_segment()` / `take_processed_segment()` 拉整段（攒满 `ca_segment_len` 才弹），再经 `persist_hls_segment` 入 `hls_queue`。
 
 ## 告警落库归属（无状态）
 
@@ -31,7 +31,6 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不
 
 - `{track}_segment_{ts_us}.mp4`：cv2 写 mp4v → ffmpeg 转 HLS-ready fMP4 fragment。
 - `{track}_playlist.m3u8`（含 `#EXTINF`）、`init.mp4`（step 级共享，写一次）、`metadata.json`、`.hls_timescale`。
-- **keypoints JSON 死写已删**（不再写 `keypoints_*.json`）。
 
 `_dir_locks: {target_dir → Lock}`：transcode + playlist append + metadata 更新在目录锁内原子完成（相邻段需读 playlist 算累计时间，防 tfdt 碰撞）；`release_dir_locks(task_id)` 在拆除时删该 task 前缀的所有锁。
 
