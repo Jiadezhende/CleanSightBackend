@@ -1,7 +1,7 @@
 # Processed HLS 回放快放 ~2x 根因观测与改造提案
 
 > **变更状态**：已实现（2026-06-29）　<!-- Fix A + Fix B(15fps) + B2 渲染削峰 全部落地 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_PERSISTENCE.md](../kb/SERVICE_PERSISTENCE.md)(2026-07-21)
 >
 > 相关：[20260628_INFER_PRESSURE_OBSERVABILITY.md](20260628_INFER_PRESSURE_OBSERVABILITY.md)（本次定位所依赖的 `[INFER_PRESSURE]` / `[VIZ_THROUGHPUT]` 观测埋点）、[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)（分层数据流核实）。
 

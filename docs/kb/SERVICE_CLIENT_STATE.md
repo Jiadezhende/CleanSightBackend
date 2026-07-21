@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -56,6 +56,12 @@
 ## 前端消息
 
 `/task/message/{task_id}` 经 `client_manager.get(task_id)` 找活跃 CQ，`get_alarm_snapshot(since_seq)` 原子返回告警增量 + max_seq，并附 `signals_10s`。CQ 只吐自有词汇的原始数据（流名聚合），流名→metric 的展示映射归 router 装配层，不下沉本层。
+
+## client 与 router 的边界（零跨服务依赖 leaf）
+
+client（`ClientManager`/`ClientQueues`）是**零跨服务依赖的中台 leaf**：解耦不靠 DI 注入，而靠「**只吐自有词汇的原始数据 + 展示翻译上移 router**」。CQ 词汇是流名（detector.name）与内部 primitive；任何「流名 → 展示 metric / 中文标签 / stage 别名」的映射都在 router 装配层完成，不下沉本层——本层若引入展示语义，就会与告警/推理服务产生隐性耦合。此边界已落地（对应路由收敛 T4–T5）；对外 wire 侧的 `?client_id=` → `?task_id=` 迁移（T6）**暂缓待前端**，现阶段 `source_ip` 仍是对外路由标识（见下）。
+
+**外部 wire 词汇仍是 `source_ip`，内部运行时键是 `task_id`(int)**：生产前端/集成测试 viewer 按摄像头 IP 连 `/ai/video?client_id=<ip>`、`/terminate?client_id=<ip>`，故 wire 键 `client_id` 值恒为 `source_ip`；边界层经 `find_by_source_ip`（匹配首个，业务不保证唯一）解成当前 run 后转内部 `task_id`。异常/告警/错误响应里保留的 `client_id` 字段名值也 = `source_ip`（诊断标识，非路由键）。T6 迁移完成后 `find_by_source_ip` 垫片可撤。
 
 ## 代码来源
 

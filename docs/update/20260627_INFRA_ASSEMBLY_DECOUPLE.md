@@ -1,7 +1,7 @@
 # 基础装配层解耦：存储根单一真源 + 消除跨服务穿透
 
 > **变更状态**：已完成（2026-06-27）　<!-- 两批改造均已落地并通过验证：全量 pytest 206 passed -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/ARCHITECTURE_API_SURFACE.md](../kb/ARCHITECTURE_API_SURFACE.md)(2026-07-21)
 >
 > 相关：[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)（分层数据流核实）、[20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md](20260626_THREAD_INSTANCE_LIFECYCLE_AUDIT.md)（上一轮生命周期审计）。
 

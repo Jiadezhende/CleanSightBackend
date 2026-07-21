@@ -1,7 +1,7 @@
 # stream 模块清理：decoder 自持读循环（删 selector）+ RTSP-only + 子进程回收收敛
 
 > **变更状态**：生效中（2026-07-05）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_STREAM.md](../kb/SERVICE_STREAM.md)(2026-07-21)
 >
 > 承接：本次建立在 [20260704_RUNKEY_TASKID_LANDING.md](20260704_RUNKEY_TASKID_LANDING.md) 的 `task_id` 换键之上（stream 各方法均以 `task_id:int` 为键）。
 

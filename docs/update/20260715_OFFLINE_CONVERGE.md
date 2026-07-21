@@ -1,7 +1,7 @@
 # 离线推理链路收敛：删平行 worker 路径，统一到 Runner + 复用现有数据契约
 
 > **变更状态**：待提交 PR（2026-07-15）
-> **知识库**：待沉淀　<!-- 沉淀时更新 kb/ARCHITECTURE_DATA_FLOW.md 的 online/offline 段：离线消费端由「入口已落地」改为「已收敛为单一 Runner 路径，见本记录」 -->
+> **知识库**：已沉淀 → [kb/ARCHITECTURE_DATA_FLOW.md](../kb/ARCHITECTURE_DATA_FLOW.md)(2026-07-21)
 >
 > 承接并**取代** [20260714_OFFLINE_INFER_BASELINE.md](20260714_OFFLINE_INFER_BASELINE.md)：该记录描述的 `worker.py` / `interfaces.py` / 单数 `segmenter/` 包 / 短名注册表已删；离线 baseline 收敛为本记录所述的单一 Runner 路径。[20260707_OFFLINE_SEGMENTER_ENTRYPOINT.md](20260707_OFFLINE_SEGMENTER_ENTRYPOINT.md) 的框架骨架保留，仅基类模块更名与数据契约收敛。
 

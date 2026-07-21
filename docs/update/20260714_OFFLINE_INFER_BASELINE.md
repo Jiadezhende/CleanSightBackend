@@ -1,7 +1,7 @@
 # 离线时序 baseline 接入：features.jsonl 到 SegmentFact/FactLedger 闭环
 
 > **变更状态**：待提交 PR（2026-07-14）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/ARCHITECTURE_DATA_FLOW.md](../kb/ARCHITECTURE_DATA_FLOW.md)(2026-07-21)
 >
 > 承接：已有离线入口定义了 `FeatureStore.load -> OfflineSegmenter -> FactLedger` 的一期骨架；本次补齐一个可运行 baseline、手动 worker 和针对性测试，便于后续接真实时序模型。
 

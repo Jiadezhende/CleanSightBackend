@@ -1,7 +1,7 @@
 # 离线分割入口落地（第一步）：独立进程 + 可插拔策略 + 输入预处理预留层
 
 > **变更状态**：生效中（2026-07-07）　<!-- 离线链路开发第一步；框架 + 占位策略已可端到端跑，真实模型与调度层后续接 -->
-> **知识库**：待沉淀　<!-- 沉淀时更新 [ARCHITECTURE_DATA_FLOW.md](../kb/ARCHITECTURE_DATA_FLOW.md) 的「online/offline 分离」段：离线消费端由「待实现」改为「入口已落地，见本记录」 -->
+> **知识库**：已沉淀 → [kb/ARCHITECTURE_DATA_FLOW.md](../kb/ARCHITECTURE_DATA_FLOW.md)(2026-07-21)
 >
 > 相关真源：[kb/ARCHITECTURE_DATA_FLOW.md](../kb/ARCHITECTURE_DATA_FLOW.md)（`FeatureStore.load → OfflineSegmenter → FactLedger` 链路定名）、[kb/DESIGN_EXTENDING_DETECTION.md](../kb/DESIGN_EXTENDING_DETECTION.md)（「加一子类 + YAML 一行」扩展范式）。
 > 承接：建立在 [20260628_OFFLINE_PIPELINE_PHASE1_PROPOSAL.md](20260628_OFFLINE_PIPELINE_PHASE1_PROPOSAL.md) 提案之上，并按开发期实际需求把范围收敛为「先出一个干净的离线推理入口」，把排队/自动调度显式推后（见文末后续计划）。

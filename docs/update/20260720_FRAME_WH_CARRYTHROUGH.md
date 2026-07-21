@@ -1,5 +1,8 @@
 # 帧分辨率从 metadata 提升为帧级透传 wh
 
+> **变更状态**：生效中（历史记录，本次维护确认）
+> **知识库**：已沉淀 → [kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)(2026-07-21)
+
 > 日期：2026-07-20　依据：代码改动　承接：[20260720_FEATURE_STORE_FRAMEFEATURE_IO](20260720_FEATURE_STORE_FRAMEFEATURE_IO.md)
 
 `frame_shape`（帧分辨率）是 **fan-out 之前就定死的每帧输入常量**（一个 `DetectionTask` 扇给 stage 内 N 个模型，各流看同一张图），却被当作检测器输出逐个塞进 `FrameDetections.metadata`，落盘时再用 `_extract_frame_wh` 从任一检测器抠回、回读时还原成另一个名字 `frame_width/frame_height`——一个每帧常量穿过 fan-out 复制 N 份再收敛回 1 份，且 online 读 `frame_shape`、offline 读 `frame_width`，两处消费不对称。

@@ -1,5 +1,8 @@
 # 离线 CLEAN 模型路由与本地权重接入
 
+> **变更状态**：生效中（历史记录，本次维护确认）
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
+
 ## 背景
 
 本次更新承接 `20260715_OFFLINE_CONVERGE.md` 的收敛方向，继续保持离线链路只走一条主路径：

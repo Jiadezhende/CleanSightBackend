@@ -1,7 +1,7 @@
 # 换键落地：运行键收敛为 int task_id + source_ip 边界垫片转正
 
 > **变更状态**：生效中（2026-07-04）　<!-- 运行时全量 task_id 键已落；对外 wire 保持 source_ip 不变 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_RUN_CONTROL.md](../kb/SERVICE_RUN_CONTROL.md)(2026-07-21)
 >
 > 承接：运行身份重构的收官落地——前序已把 CQ per-run 不可变、状态机 ACTIVE/DRAINING/CLOSED、单一拆除出口、句柄写回就位；本文记「换键 client_id→task_id」这一步的实际落地。
 

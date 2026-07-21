@@ -1,7 +1,7 @@
 # 可观测性升级：推理链路静默丢帧（[INFER_PRESSURE]）+ 可视化吞吐量（[VIZ_THROUGHPUT]）
 
 > **变更状态**：生效中（2026-06-28）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
 
 ## 概述
 

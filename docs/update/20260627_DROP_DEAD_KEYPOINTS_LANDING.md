@@ -1,7 +1,7 @@
 # 删除 keypoints JSON 死写——detection 已单源落 FeatureStore
 
 > **变更状态**：生效中（2026-06-27）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
 >
 > 相关：[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)（online/offline 分层数据流）、[20260627_INFER_CONTRACT_PURITY.md](20260627_INFER_CONTRACT_PURITY.md)（推理契约提纯）。
 

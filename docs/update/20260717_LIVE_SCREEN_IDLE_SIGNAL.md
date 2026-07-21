@@ -1,7 +1,7 @@
 # 大屏按 source_ip 常连：`/ai/video` idle 控制帧 + source_ip「按点位跟随」正名（tie-break 最晚启动）
 
 > **变更状态**：生效中（2026-07-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
 >
 > 代码真源：[`websocket_video_endpoint`](../../app/routers/ai.py)、[`find_by_source_ip`](../../app/services/client/manager.py)
 > 承接：`task_id` 于 [20260704_RUNKEY_TASKID_LANDING](20260704_RUNKEY_TASKID_LANDING.md) 成为 run 身份键；本次把 `?client_id=<source_ip>` 从「遗留垫片」正名为与之并列的**按点位实时跟随**请求模式（两者是正交查询轴，不冲突）。

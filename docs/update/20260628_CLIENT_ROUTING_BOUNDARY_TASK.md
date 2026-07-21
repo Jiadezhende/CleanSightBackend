@@ -1,7 +1,7 @@
 # 换键与路由收敛（T4–T6）：task_id 单键 + 句柄写回
 
 > **变更状态**：实施工单（2026-07-01 修订）；T4–T5 已落地、T6 暂缓待前端
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_CLIENT_STATE.md](../kb/SERVICE_CLIENT_STATE.md)(2026-07-21)
 >
 > 承接：本工单建立在前序重构「CQ per-run 不可变 + 状态机 ACTIVE/DRAINING/CLOSED + 单一拆除出口 + 对象身份 fence」之上——那批把不可变 CQ、写入门、跨 run 隔离就位，本工单在其上换键 + 句柄写回。
 

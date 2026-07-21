@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -60,6 +60,28 @@ _raw_lock -> _viz_lock -> _inference_lock
 ### 持久化目录锁
 
 HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist append、metadata update 原子执行，避免并发段写入导致 playlist/tfdt 不一致。
+
+### 线程与实例生命周期审计（已落地结论）
+
+一次全仓线程/实例生命周期审计（创建/销毁时机、持有关系、关停顺序）落地 4 处改动并经远程真实流验证（`CleanSightBackend-test`，2026-06-27）。方法论：**先量再改，不为臆想风险买单**——两处「以为是 bug」经核实后被证伪或收窄。稳定结论：
+
+**三种生命周期粒度**（关停编排入口 [main.py](../../app/main.py) lifespan：health 套 ai，逆序关——先停推理消费侧、再停流生产侧）：
+
+| 粒度 | 实例 | 创建 → 销毁 |
+|------|------|-------------|
+| 进程级单例 | `stream_service`/`persistence_manager`/`InferenceManager`/`GlobalHealthMonitor` | import·lifespan → lifespan 关闭 |
+| stage 级常驻线程 | dispatcher/InferWorker/viz worker/HLS·Alarm 池/cleanup/selector | service `start()` → `stop()` |
+| per-run 动态实例 | TemporalActor/FFmpegDecoder | `start_workflow`·`start_stream` → `stop_workflow`·`stop_stream` |
+
+**唯一真正不可中断点 = `_inference_loop` 的 `infer_batch`（CUDA 同步）**：`stop_event` 看不见，`join(2.0)` 超时后 daemon 强杀在 GPU 半途。无法根治（不能中断 CUDA、不能强杀线程），仅在 `ModelWorkerService.stop()` join 后**内联** `is_alive()` warning 作诊断（沉默即健康），不抽 `join_or_warn` helper（单点不造抽象）。其余常驻循环都真可中断（`stop_event.wait(interval)` 旗 或带超时 `queue.get`）。
+
+**关键副作用不依赖被 join 的 worker**：两条 flush 路径（terminate 侧 `stop_workflow`→`feature_store.close(cq)` 只刷当前 `(task,step)`；lifespan 侧 `InferenceManager.stop()`→`feature_store.flush()` 全量兜底未走正常结束的 run）均跑在**控制/调用线程**，故即便 worker 被 daemon 硬杀，落盘已同步发生——「daemon 硬杀下仍安全」的正面佐证。FeatureStore 同步落盘（实测 max 3.6ms）是有意选择，非缺陷。
+
+**decoder 直接 SIGKILL**（[decoder.py](../../app/services/stream/decoder.py) `stop()`，2026-06-26 落地）：弃 `terminate→wait(2.0)→kill` 三级降级，改 `kill→wait(reap)`。实测卡读时优雅路径白耗 2007ms 后照样 SIGKILL，直接 kill 仅 2ms（`stop_stream` 全程 12.9ms）。零新增风险：ffmpeg 只解码到 `pipe:1` 不写文件（强杀无产物损坏）、RTSP 对端是自有 mediamtx_gateway（断连即回收、不需优雅 TEARDOWN）。副产物：`_stop_decoder_async` fire-and-forget 线程存活 ~2s→~ms，L1-a 线程堆积自愈。
+
+**审计清理的死代码/泄漏**（已落地）：`InferenceManager` 的 per-client `defaultdict(Lock)` 慢泄漏 → 收敛为 `lock_for(task_id)` 单一生命周期锁（天真 pop 会与并发 `start` 撞 race，故不做引用计数回收）；未用的 `ThreadPoolExecutor`（零 `.submit()`）+ 误导性 `num_worker_threads` 删除；`_refresh_thread`（旧 `ClientRefreshThread`，dispatcher 直引单例 ClientManager 后冗余）删除。
+
+**备查（现非问题）**：模型 / CUDA 上下文在 `stop()` 不显式释放——关进程时驱动回收无碍；若将来做「不退进程的重启/换模型」会变真泄漏。selector 优雅停（`shutdown` 未 `set` `_stop_event`）为 cosmetic，OS 兜底关 fd。
 
 ## 方向二：异步解耦与防卡死
 
@@ -127,5 +149,8 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 - `app/services/persistence/workers/hls_worker.py`
 - `app/services/persistence/workers/alarm_worker.py`
 - `app/services/persistence/strategies/hls_strategy.py`
+- `app/main.py`（lifespan 关停编排）
+- `app/services/stream/decoder.py`（SIGKILL `stop()`）
+- `app/services/inference/detection/service.py`（`_inference_loop` + join 后内联 `is_alive` 诊断）
 - `tests/test_api_concurrency.py`
 - `tests/test_teardown_identity_fence.py`

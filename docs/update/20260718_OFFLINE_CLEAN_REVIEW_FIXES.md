@@ -1,5 +1,8 @@
 # 2026-07-18 CLEAN 离线模型 Review 修正
 
+> **变更状态**：生效中（历史记录，本次维护确认）
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
+
 ## 背景
 
 本次更新基于 PR `feat/offline-infer -> dev` 中对 `app/services/inference/offline/segmenters/clean.py` 的 review 意见，目标是继续收敛 CLEAN 离线模型接入边界：

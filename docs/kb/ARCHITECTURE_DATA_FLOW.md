@@ -1,4 +1,4 @@
-> 更新时间：2026-07-11
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -46,7 +46,29 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不
 
 ## online / offline 分离
 
-实时链（L1→`_slide_window`→L3 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）彻底分离：实时不落 FactLedger。离线消费端**待实现**，当前仅有 L2 特征落盘半程。
+实时链（L1→`_slide_window`→L3 1Hz）与离线链（`FeatureStore.load` → `OfflineSegmenter` → `FactLedger`）彻底分离：实时不落 FactLedger。离线消费端**已落地为单一 Runner 路径**（不再是「待实现」半程）：
+
+```text
+{base}/{task}/{step}/features.jsonl（在线 FeatureStore.append 常开）
+  -> OfflineRunner.run(OfflineRunSpec{task_id, step_id[, strategy]})
+       FeatureStore.load(task_id, step_id)           读回 List[FrameFeature]（utf-8-sig 容忍 Windows BOM）
+       -> config.resolve_stage(step_id)              数字命中即恒等，未知回退 MOCK 并 WARN
+       -> stage_factory.create_offline_segmenter()   非空 offline 段即启用，缺字段 fail-fast
+       -> OfflineSegmenter.preprocess(streams)       预处理预留层（clean 私有把订阅流按 ts 跨 source 拍平成 List[FrameDetections] → 62 维 ModelInput）
+       -> OfflineSegmenter.segment(model_input)       逐帧分类 → 归并 SegmentFact
+       -> 全量校验（source==name / start<=end / 有限数 / 0<=conf<=1，任一非法整批失败）
+       -> FactLedger.replace_segments(task_id, step_id, producer, facts)   幂等替换（持锁 + 原子 os.replace，按 producer 过滤）
+       -> 可选 segmenter.debug_result() -> offline_inference_result.json    逐帧调试产物
+```
+
+要点：
+
+- **独立 OS 进程**，不进 uvicorn；入口在 torch import 前置 `CUDA_VISIBLE_DEVICES=""` + 限线程，与在线链路**零代码/进程耦合、资源不抢占**。手动入口 `python -m app.services.inference.offline.cli run|query --task-id N --step-id M [--strategy PATH]`。
+- **复用现有数据契约**：输入吃 `FrameDetections`/`Detection`（`app.domain.detection`），输出吐 `SegmentFact`（`app.services.inference.models`）；只保留 `ModelInput`（62 维数值矩阵，clean 策略私有）一个离线专有表示，无独立中间数据壳。
+- **单一 Runner 路径**：早期一度存在平行的 `worker.py`/`interfaces.py`/短名注册表已删；框架仅剩 `offline/{segmenter.py(基类),runner.py,cli.py}` + `segmenters/{clean,mock}.py`。新增真实时序模型 = 加一个自包含 `segmenters/<stage>.py` 子类 + YAML `offline.class` 一行（clean.py 已含 MS-TCN/ASFormer/BiGRU 系列 torch 策略基类）。
+- **存储键 vs 配置 key 正交**：存储读写始终用原数字 `step_id`；`resolve_stage` 仅决定用哪个 stage 的 offline 配置（未配 → MOCK.offline 兜底、仍读写 `{task}/{step}/` 分区）。
+- **在线仍不写 FactLedger**（实时不落事实）；离线是唯一 `facts.jsonl` 写方。
+- 后续（未实现）：自动调度、离线 Judge（`SegmentFact` → 合规判断/告警）、结果入库——当前只做链路收敛 + baseline 工程闭环，不判合规、不告警。
 
 ## 代码来源
 
@@ -55,5 +77,7 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不
 - `app/services/inference/detection/{dispatcher,service}.py`
 - `app/services/inference/temporal/{actor,alarm_sink}.py`
 - `app/services/inference/visualization/worker.py`
-- `app/services/inference/feature/store.py`
+- `app/services/inference/feature/store.py`（`FeatureStore.load` / `FactLedger.replace_segments`）
+- `app/services/inference/offline/{runner,segmenter,cli}.py`、`app/services/inference/offline/segmenters/{clean,mock}.py`
+- `app/services/inference/config.py`（`resolve_stage`）、`app/services/inference/stage_factory.py`（`create_offline_segmenter`）
 - `app/services/persistence/manager.py`、`app/services/persistence/workers/segment_sweeper.py`

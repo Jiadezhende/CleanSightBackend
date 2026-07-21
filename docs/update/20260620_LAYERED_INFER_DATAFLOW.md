@@ -1,6 +1,7 @@
 # Inference 分层改造后的最新数据流(L1→L2→L3→L4 全链路通信)
 
 > **变更状态**：生效中（2026-06-20）　<!-- 分层改造 Phase 0/1/2 已落地于 refact/layered-infer：2ee4624 / 105bb09 / 9e31304 -->
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
 > **更新（2026-06-20，online/offline 分离）**：online/offline 彻底分离落地——实时链路不再落盘事实(删 temporal 的 FactLedger 写)、`TemporalAnalyzer` 收窄为纯实时 `run(window)->List[EventFact]`；FeatureStore/FactLedger 落盘改 `(task_id, step_id)` 复合键(与 HLS 同款工作目录)；detection 单源(砍 HLS keypoints JSON 的 inference_result，按帧 ts 对齐)。本文已据此重写。
 >
 > 相关：[inference/workflows/CLAUDE.md](../../app/services/inference/workflows/CLAUDE.md)（Workflow 作者文档）、[CLAUDE.md](../../CLAUDE.md)（项目总览，其中 `rt_processed`/`ca_ready` 描述与实现不一致，见下方「与旧文档的出入」）。

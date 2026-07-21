@@ -1,5 +1,8 @@
 # 2026-07-19 CLEAN 离线:去掉 FeatureVectorizer 类抽象
 
+> **变更状态**：生效中（历史记录，本次维护确认）
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
+
 ## 背景
 
 `app/services/inference/offline/segmenters/clean.py` 里特征工程被两层不必要的类抽象包着:

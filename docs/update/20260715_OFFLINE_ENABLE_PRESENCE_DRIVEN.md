@@ -1,7 +1,7 @@
 # 离线 offline 启用改为 presence 驱动 + resolve_stage 回退补 WARN
 
 > **变更状态**：待提交 PR（2026-07-15）
-> **知识库**：待沉淀　<!-- 沉淀时更新 kb 里 offline 配置 schema 段：删除 enabled 开关，改「非空即启用」；resolve_stage 兜底两链路均告警 -->
+> **知识库**：已沉淀 → [kb/SERVICE_CONFIG.md](../kb/SERVICE_CONFIG.md)(2026-07-21)
 >
 > 承接 [20260715_OFFLINE_CONVERGE.md](20260715_OFFLINE_CONVERGE.md)：同一离线链路的两处收敛式简化，无新增能力。
 

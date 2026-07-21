@@ -1,5 +1,8 @@
 # FeatureStore 序列化/反序列化统一到 FrameFeature（离线打通）
 
+> **变更状态**：生效中（历史记录，本次维护确认）
+> **知识库**：已沉淀 → [kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)(2026-07-21)
+
 > 日期：2026-07-20　依据：代码改动
 
 在线滑窗/快照货币早已是帧级 `FrameFeature`（`ts + {source: FrameDetections}` + 帧级 `frame_width/height`），但 L2 落盘基座 `FeatureStore` 两端不对称：`append` 吃 `FrameInference`、`load`/`load_many` 吐 per-source `Dict[str, List[FrameDetections]]`。本次把两端 + 离线消费端统一到 `FrameFeature`。磁盘 record 为 `{ts, features, frame_width?, frame_height?}`（帧分辨率全命名键、缺省省略，老 `features.jsonl` 兼容）。

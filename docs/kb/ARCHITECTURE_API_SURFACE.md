@@ -1,4 +1,4 @@
-> 更新时间：2026-07-07
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -31,7 +31,11 @@
 
 ## 生命周期挂载
 
-FastAPI `lifespan` 嵌套启动：`health.lifespan()` → `persistence.lifespan()` → `ai.lifespan()`（health 最外、ai 最内；停机逆序）。单次 run 的起停不在 lifespan，由 `RunController.start_run`/`stop_run` 编排，见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
+FastAPI `lifespan` 嵌套启动：`health.lifespan()` → `persistence.lifespan()` → `ai.lifespan()`（health 最外、ai 最内；停机逆序）。persistence 平级于 inference，**须先于 inference 起、后于 inference 停**——以承接 `inference.stop()` 的结算告警 + HLS 残段 flush 后再抽干队列（顺序不可换，见 `app/main.py` lifespan 注释）。`yield` 返回即置 `app.state.shutdown_event`，通知 WebSocket 先退出，避免「WS 等 shutdown_event ↔ 清理等 WS」死锁。单次 run 的起停不在 lifespan，由 `RunController.start_run`/`stop_run` 编排，见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
+
+## 装配层解耦原则
+
+服务实例在装配时**不得跨服务反向 push 私有字段**。历史上 `InferenceManager.__init__` 曾伸手改 `persistence_manager.hls_pool.strategy.db_dir`（穿透封装，persistence 一重构即静默崩）——已删除。现存储根 `storage_base_dir` 由 `app/settings.py` 单一真源（`CLEANSIGHT_STORAGE_DIR`，相对路径以项目根解析），persistence / inference / traceback **三方一律读它**，不再互相灌值。装配相关的死参数（`InferenceManager.ca_maxlen`）与死配置链（`enable_db_write`、`client_config.state.initial_stage`）已一并清除。stage 路由退化为恒等（主键即 `step_id`，可读名下沉为 stage 的 `alias` 字段），不再维护 `step→stage` 映射常量。详见变更记录 `docs/update/20260627_INFRA_ASSEMBLY_DECOUPLE.md`。
 
 ## 代码来源
 

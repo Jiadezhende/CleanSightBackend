@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -35,7 +35,13 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不
 
 `_dir_locks: {target_dir → Lock}`：transcode + playlist append + metadata 更新在目录锁内原子完成（相邻段需读 playlist 算累计时间，防 tfdt 碰撞）；`release_dir_locks(task_id)` 在拆除时删该 task 前缀的所有锁。
 
-**processed 段按实测 fps 编码**：`_effective_fps(frames, fallback)` 由帧时间戳跨度 `(N-1)/(ts_last-ts_first)` 求得（回落 `settings.inference_fps`），同一 fps 用于 cv2.VideoWriter 与 EXTINF（详见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)）。
+**processed 段按实测 fps 编码（回放对齐墙钟）**：`_persist_processed_segment` 的 `cv2.VideoWriter` 与 `segment_duration`(EXTINF) 同源用静态 `_effective_fps(frames, fallback)` = `(N-1)/(ts_last-ts_first)`；`span<=0` / 单帧 / 反推值落 `[1,60]` 带外时回落 `self.processed_fps`（= `settings.inference_fps`）。逐段各取自身有效帧率，自动吸收速率抖动。
+- **为何治本**：processed 链路真实成帧率在窗口间漂移（~11-15fps），若固定按标称 fps 编码则播放 `= 标称/真实` 倍快放（曾观测 20fps 编码、~11fps 成帧 → ~1.8x 快放，段间还忽快忽慢）。这是**时钟/速率失配**，非积压/丢帧，backlog 类指标测不到（帧产得慢、既没进队列也没被丢）。逐段实测 fps 让任何真实帧率都对齐墙钟。
+- **raw 段保留现状**：仍按 `self.raw_fps` 编码（实测稳定 30fps）。
+- 三套时间线（EXTINF / tfdt / fragment 媒体时长）仍自洽——EXTINF 仍等于 fragment 媒体时长（详见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)）。
+- 单测：`tests/test_hls_eff_fps.py`（正常反推 / span≤0 / 单帧 / 带外 / 乱序 回退）。
+
+> 速率亏空的上游治理（throttle 相位重采样 + `inference_fps` 15、渲染尾延迟削峰）落在 stream/inference 侧，非本服务；`inference_fps` 是 throttle / VizWorker target / 本服务 processed 编码标称的**单一真源**（[app/settings.py](../../app/settings.py)）。
 
 ## 存储根单一真源
 
@@ -52,5 +58,6 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不
 - `app/services/persistence/strategies/{hls_strategy,alarm_strategy}.py`
 - `app/services/persistence/models.py`、`config.py`
 - `app/services/inference/temporal/alarm_sink.py`（过闸编排归属）
-- `app/settings.py`（storage_base_dir 单一真源）
+- `app/settings.py`（storage_base_dir、inference_fps 单一真源）
 - `config/persistence_config.yaml`
+- `tests/test_hls_eff_fps.py`（processed 段实测 fps 编码）

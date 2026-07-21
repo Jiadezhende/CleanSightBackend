@@ -1,7 +1,7 @@
 # 实时推理链路重构为流处理框架：流源 Detector / 流算子 Operator 两粒度解耦
 
 > **变更状态**：生效中（2026-06-27）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/DESIGN_EXTENDING_DETECTION.md](../kb/DESIGN_EXTENDING_DETECTION.md)(2026-07-21)
 >
 > 相关：[workflows/CLAUDE.md](../../app/services/inference/workflows/CLAUDE.md)（开发者指南已同步）、[20260627_INFRA_ASSEMBLY_DECOUPLE.md](20260627_INFRA_ASSEMBLY_DECOUPLE.md)（装配解耦前序）、[20260627_INFER_CONTRACT_PURITY.md](20260627_INFER_CONTRACT_PURITY.md)（stage 主键/契约前序）。
 

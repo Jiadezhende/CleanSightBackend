@@ -1,7 +1,7 @@
 # 视频追溯能力现状快照（keypoints 下线后）
 
 > **变更状态**：生效中（2026-07-01）　<!-- 描述当前系统实际提供的追溯能力，非一次性代码改动 -->
-> **知识库**：待沉淀　<!-- 定期维护时沉淀进 docs/kb/SERVICE_TRACEBACK_MEDIA.md -->
+> **知识库**：已沉淀 → [kb/SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)(2026-07-21)
 >
 > 相关：[TRACEBACK_API.md](../archive/old_architecture/TRACEBACK_API.md)（对外 API 详表，已同步）、[20260627_DROP_DEAD_KEYPOINTS_LANDING.md](20260627_DROP_DEAD_KEYPOINTS_LANDING.md)（keypoints 落地下线）、[docs/kb/SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)（服务架构）。
 

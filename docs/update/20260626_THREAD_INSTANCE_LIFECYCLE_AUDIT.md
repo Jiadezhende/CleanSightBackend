@@ -1,7 +1,7 @@
 # 线程与实例生命周期审计
 
 > **变更状态**：生效中（2026-06-27）　<!-- 审计完成：4 项改动已落地并经远程真实流验证；L1-b/模型释放为低优先/备查 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/DESIGN_CONCURRENCY_AND_QUEUES.md](../kb/DESIGN_CONCURRENCY_AND_QUEUES.md)(2026-07-21)
 >
 > 相关：[BOUNDARY_LAYER_DESIGN.md](../BOUNDARY_LAYER_DESIGN.md)（异常/重启边界层）、[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)（分层数据流）。
 

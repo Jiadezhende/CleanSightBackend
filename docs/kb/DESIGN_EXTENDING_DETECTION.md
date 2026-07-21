@@ -1,4 +1,4 @@
-> 更新时间：2026-07-11
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -27,7 +27,11 @@
 - `judge() → (List[str], List[Alarm])`：读 `_sm`，返回（叠字文本，告警）。
 - 如有结算逻辑 override `finalize() → List[Alarm]`（任务终止时收集）。
 
-多个 Operator 可订阅同一 Detector；每 Operator 持自己的 `_sm`。工具方法：`primary_window()`（首个订阅流）、`_zip_by_ts()`（多流按时间戳内连对齐）。
+多个 Operator 可订阅同一 Detector；每 Operator 持自己的 `_sm`。工具方法：`primary_window()`（首个订阅流，裁到感受野后投影自身流的逐帧 `FrameDetections`）；`analyze` 收到的 `windows` 是帧级 `List[FrameFeature]`（多流已在写回口按 ts 对齐进 `by_source`，算子直接读，无需自行 zip）。
+
+### 时序模型算子（TemporalOperator）
+
+接入动作识别/序列模型（GRU/Transformer/MS-TCN 等）时继承 `TemporalOperator`（`temporal/operator.py`，`Operator` 子基类），多带 `model_path` / `objects` / `actions` 三参：惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、加载失败锁存），`infer(features) → logits`。子类在 `analyze` 内把订阅流窗口适配成 `(T, feature_dim)` 张量后 `infer`，把预测存进 `_sm`，`judge` 读 `_sm` 出 overlay/告警。参考 `CleanOperator`（`workflows/clean.py`）：`_adapt_to_features` 把每帧多流检测折成 `(num_objects×6)`，异常帧留全零行保持时间轴对齐。`class_name → object_id` 经 `objects` 映射，仍须与训练类别名严格一致。YAML `params` 里配 `model_path`/`objects`/`actions`（见 CLEAN `clean_monitor`）。新增时序算子接入可用 `/temporal-review` skill 走审查清单。
 
 ## 配置 YAML
 
@@ -54,7 +58,11 @@ stages:
 
 ## Stage 路由
 
-stage 主键 = step_id 字符串（`resolve_stage` 恒等路由，未知回落 `MOCK`）。新增洗消步骤 = 加一个 stage 键；给已有 stage 加检测点只改 YAML + 新增类。`rules: []` 的 stage 不建 Operator/Actor（如 CLEAN 仅检测框可视化）。
+stage 主键 = step_id 字符串（`resolve_stage` 恒等路由，未知回落 `MOCK`）。新增洗消步骤 = 加一个 stage 键；给已有 stage 加检测点只改 YAML + 新增类。`rules: []` 的 stage 不建 Operator/Actor（纯检测框可视化）。
+
+## 新增离线 segmenter（可选）
+
+离线段独立于在线链路（独立进程手动跑，不接 CQ/告警）。新增 = 往 `offline/segmenters/` 加一个自包含单文件的 `OfflineSegmenter` 子类 + 目标 stage YAML 的 `offline` 段填 `name`/`subscribes`/`class`（非空即启用，`{}` 或缺省=不启用）。子类实现 `preprocess(frames: Sequence[FrameFeature]) → 模型输入`（基类不做默认特征工程）与 `segment(model_input) → List[SegmentFact]`（每条 `source` 须等于策略 `name`）。`OfflineRunner` 统一校验并幂等写 `FactLedger`。约定：策略是纯算法，不碰 FeatureStore/FactLedger/CQ/DB；权重类模型 `strict=True` 加载并校验 `feature_version`/`feature_names` 一致，无权重应硬失败（`ValueError`）而非规则降级——本地无权重回环走 MOCK stage 的 `BrushRulesSegmenter`。CLEAN 三模型（MS-TCN+BiLSTM / ASFormer / BiGRU）集中在 `segmenters/clean.py`，特征工程为模块级纯函数、多态只在各子类 override `preprocess`。
 
 ## 告警 metric
 
@@ -71,7 +79,9 @@ stage 主键 = step_id 字符串（`resolve_stage` 恒等路由，未知回落 `
 ## 代码来源
 
 - `app/services/inference/detection/detector.py`
-- `app/services/inference/temporal/operator.py`
+- `app/services/inference/temporal/operator.py`（`Operator` + `TemporalOperator`）
+- `app/services/inference/workflows/clean.py`（`CleanOperator` 时序算子示例）
+- `app/services/inference/offline/{segmenter,runner}.py`、`offline/segmenters/{clean,mock}.py`
 - `app/services/inference/stage_factory.py`
 - `app/services/inference/manager.py`
 - `app/services/inference/models.py`
