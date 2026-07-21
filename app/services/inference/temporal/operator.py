@@ -97,7 +97,9 @@ class TemporalOperator(Operator):
         self._model: torch.nn.Module = None
         self._model_load_lock = threading.Lock()
         self._load_failed = False
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 时序 GRU 是小模型（输入48维/隐层64/3层双向）+ 1Hz 推理，实测 CPU 单次 <12ms（预算1000ms）。
+        # 固定 CPU：H2D/D2H 拷贝与 kernel launch 开销盖过本体计算，GPU 留给 YOLO 专用（离线 BiGRU 亦为 CPU）。
+        self._device = torch.device("cpu")
 
     def _object_id(self, object_name: str) -> int:
         return self._object_name_to_id.get(object_name, -1)
