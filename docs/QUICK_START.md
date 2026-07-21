@@ -40,7 +40,7 @@ ffmpeg -re -stream_loop -1 -i test/clean-test.mp4 \
 ### 4. 运行集成测试（终端 4）
 
 ```bash
-python integration_tests/local_full_pipeline_rtsp.py --task_id 1 --duration 30
+python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
 ```
 
 ---
@@ -115,19 +115,19 @@ requests.post("http://localhost:8000/api/terminate", params={"task_id": 1})
 ## 测试方法
 
 ```bash
-# 本地完整流程（30s；--no-window 无窗口）
-python integration_tests/local_full_pipeline_rtsp.py --task_id 1 --duration 30
+# 本地完整流程（30s；观测走 admin 面板 /admin-f3m8/ui/）
+python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
 
 # 远程服务器
-python integration_tests/remote_full_pipeline_rtsp.py --task_id 1 --duration 60 --server <host>
+python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 60 --server <host>
 
 # 并发压力（10 任务）+ 清理残留
-python integration_tests/stress_test.py --max-tasks 10 --duration 60
+python integration_tests/test_multi_client.py --max-tasks 10 --duration 60
 python integration_tests/cleanup_processes.py
 
-# 断线重连
-python integration_tests/test_reconnect_success.py --task_id 1
-python integration_tests/test_reconnect_timeout.py --task_id 1
+# 断线重连（成功 / 超时清理）
+python integration_tests/test_single_client.py --scenario 2 --task_id 1 --duration 60
+python integration_tests/test_single_client.py --scenario 3 --task_id 2 --duration 60
 ```
 
 ---

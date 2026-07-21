@@ -23,8 +23,7 @@ integration_tests/
 ├── test_multi_client.py    # 多客户端并发测试（并发跑场景 1）
 ├── utils.py                # 共享工具（FFmpegController, APIClient, DatabaseHelper）
 ├── cleanup_processes.py    # 清理残留进程的工具脚本
-├── logs/                   # 多客户端测试子进程日志
-└── deprecated/             # 旧版测试脚本（已被上述文件替代，仅供参考）
+└── logs/                   # 多客户端测试子进程日志
 ```
 
 > **观测统一走后端自带的 admin 运维面板** `http://{server}:{api-port}/admin-f3m8/ui/`，见下方[「观测：admin 运维面板」](#观测admin-运维面板)。旧的 `viewer.html` / `frontend.html` / `client_viewer.py` / `visualize_inference.py`（OpenCV 窗口）已删除，功能被 admin 面板覆盖。

@@ -39,7 +39,7 @@ AI 视觉巡检后端系统，基于 FastAPI + YOLOv8：实时 RTSP 流推理、
 python -m app.main              # 直接运行
 
 pytest tests/                                        # 单元 & 组件测试
-python integration_tests/local_full_pipeline_rtsp.py # 集成测试（需真实 RTSP 流）
+python integration_tests/test_single_client.py --scenario 1 --task_id 1  # 集成测试（需真实 RTSP 流）
 python -m mediamtx_gateway.main                       # RTSP TCP 代理网关（可选，对外部署）
 ```
 

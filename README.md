@@ -147,10 +147,10 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 pytest                                              # 单元 & 组件测试
 pytest --cov=app --cov-report=html                  # 覆盖率报告
 
-# 端到端（需真实 RTSP）
-python integration_tests/local_full_pipeline_rtsp.py --task_id 1 --duration 30
-python integration_tests/remote_full_pipeline_rtsp.py --task_id 1 --duration 60 --server <host>
-python integration_tests/stress_test.py --max-tasks 10 --duration 60      # 并发压力
+# 端到端（需真实 RTSP；观测走 admin 面板 /admin-f3m8/ui/）
+python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
+python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 60 --server <host>
+python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      # 并发压力
 ```
 
 ---

@@ -1,6 +1,6 @@
 """
 清理后台推流进程的脚本
-用于清理stress_test.py启动的残留进程
+用于清理 test_multi_client.py / test_single_client.py 启动的残留推流进程
 """
 
 import logging
@@ -19,8 +19,8 @@ def find_and_kill_test_processes():
 
     # 需要查找的进程关键字
     keywords = [
-        "remote_full_pipeline_rtsp.py",
-        "stress_test.py",
+        "test_single_client.py",
+        "test_multi_client.py",
         "ffmpeg",
     ]
 

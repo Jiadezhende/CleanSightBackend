@@ -25,7 +25,7 @@
 
 - `tests/test_stream_rewrite.py`：RTSP URL 内部端口改写。
 - `tests/test_reconnect_on_initial_failure.py`：初始拉流失败后重连。
-- `integration_tests/deprecated/*reconnect*`：旧集成测试线索，运行前需确认可用性和环境。
+- `integration_tests/test_single_client.py --scenario 2/3`：断流重连（成功 / 超时自动清理）端到端场景。
 
 ## Gateway
 
