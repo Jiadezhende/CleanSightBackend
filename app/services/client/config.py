@@ -20,7 +20,8 @@ class FrameConfig:
 
     resize_width: int = 640  # Resize宽度
     resize_height: int = 480  # Resize高度
-    # 注意：inference_fps, ca_maxlen, ca_segment_len 从 app/settings.py 读取（单一真源）
+    # 注意：inference_fps 从 app/settings.py 读取（单一真源）；CA 缓存/段长以秒声明
+    # （ca_maxlen_seconds / ca_segment_seconds），帧数在 ca_maxlen/ca_segment_len 属性按 raw_fps 换算
 
 
 @dataclass
@@ -91,15 +92,15 @@ class ClientConfig:
 
     @property
     def ca_maxlen(self) -> int:
-        """CA队列最大长度（从 settings 单一真源读取）"""
+        """CA队列最大长度（帧数）：时间概念 ca_maxlen_seconds 在此边界按 raw_fps 换算为帧数。"""
         from app.settings import settings
-        return settings.ca_maxlen
+        return settings.ca_maxlen_seconds * settings.raw_fps
 
     @property
     def ca_segment_len(self) -> int:
-        """HLS段长度（帧数，从 settings 单一真源读取）"""
+        """HLS段长度（帧数）：时间概念 ca_segment_seconds 在此边界按 raw_fps 换算为帧数。"""
         from app.settings import settings
-        return settings.ca_segment_len
+        return settings.ca_segment_seconds * settings.raw_fps
 
     @property
     def inference_fps(self) -> int:

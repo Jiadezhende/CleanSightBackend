@@ -501,7 +501,9 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
-        # 1. 生成原始视频段（使用原始视频源帧率30fps）
+        # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），raw_fps 仅作 fallback。
+        # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
+        eff_fps = self._effective_fps(frames, self.raw_fps)
         raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
@@ -509,7 +511,7 @@ class HLSPersistenceStrategy:
         out_raw = None
         try:
             out_raw = cv2.VideoWriter(
-                str(raw_segment_path), fourcc, self.raw_fps, (width, height)
+                str(raw_segment_path), fourcc, eff_fps, (width, height)
             )
             for fd in frames:
                 out_raw.write(fd.frame)
@@ -524,10 +526,10 @@ class HLSPersistenceStrategy:
                 out_raw.release()  # 异常路径也须释放原生编码器句柄
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
-        # cv2.VideoWriter 用固定 fps 写 N 帧 → 输出 mp4v 媒体时长 = N/fps，
-        # ffmpeg 转码到 fMP4 保持该时长。EXTINF 用 wall-clock 帧时间戳差会引入抖动，
-        # 与 fragment 实际时长偏差 0.5+ 秒 → hls.js 段尾 MSE 缓冲洞 → 卡死 + 总时长缩水。
-        segment_duration = len(frames) / self.raw_fps
+        # cv2.VideoWriter 用 eff_fps 写 N 帧 → 输出 mp4v 媒体时长 = N/eff_fps，
+        # ffmpeg 转码到 fMP4 保持该时长。故 EXTINF 必须同用 eff_fps（与写入帧率一致），
+        # 否则与 fragment 实际时长偏差 → hls.js 段尾 MSE 缓冲洞 → 卡死 + 总时长缩水。
+        segment_duration = len(frames) / eff_fps
 
         # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。

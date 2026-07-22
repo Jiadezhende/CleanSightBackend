@@ -5,7 +5,8 @@ decoder:
   # FFmpeg解码器配置
   default_width: 640
   default_height: 480
-  default_fps: 30
+  # default_fps 不在此设置：解码 CFR = 生产者源，单一真源 settings.raw_fps（env CLEANSIGHT_RAW_FPS）。
+  # 在此写死会重造第二个独立 fps 源、与 settings 漂移。
   pix_fmt: "bgr24"
   chunk_read_size: 32768     # 每次读取字节数
 

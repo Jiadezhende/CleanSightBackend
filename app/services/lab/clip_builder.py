@@ -313,20 +313,28 @@ class ClipBuilder:
                 f"(fMP4 fragment 段需要 EXT-X-MAP 才能解码)"
             )
 
-        # 临时 m3u8 落在 step 目录，让 EXT-X-MAP/EXTINF 的相对 URI 能解析到 init.mp4 与各段
+        # 临时 m3u8 落在 step 目录，让 EXT-X-MAP/EXTINF 的相对 URI 能解析到 init.mp4 与各段。
+        # 每段 EXTINF 用相邻段 ts 跨度（实测墙钟），而非假定固定 10s——offset_us 的 seek 基准
+        # 本就是 ts，固定时长在 fps 漂移下会让累计 EXTINF 偏离墙钟、seek 逐段错位。窗口已过
+        # _validate_continuity（无真实录制停顿），故相邻段连续、ts 跨度 ≈ 段媒体时长；末段用中位估算兜底。
         nonce = secrets.token_hex(4)
         tmp_m3u8 = step_dir / f".clip_{nonce}.m3u8"
-        ext_inf_s = self._default_seg_dur_us / 1_000_000.0
+        est_dur_us = _est_segment_duration_us(segs, self._default_seg_dur_us)
+        seg_durs_us = [
+            (segs[i + 1].ts_us - segs[i].ts_us) if i + 1 < len(segs) else est_dur_us
+            for i in range(len(segs))
+        ]
+        target_dur_s = max(seg_durs_us) / 1_000_000.0 if seg_durs_us else 10.0
 
         lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:7",
             "#EXT-X-PLAYLIST-TYPE:VOD",
-            f"#EXT-X-TARGETDURATION:{int(ext_inf_s) + 1}",
+            f"#EXT-X-TARGETDURATION:{int(target_dur_s) + 1}",
             '#EXT-X-MAP:URI="init.mp4"',
         ]
-        for s in segs:
-            lines.append(f"#EXTINF:{ext_inf_s:.3f},")
+        for s, dur_us in zip(segs, seg_durs_us):
+            lines.append(f"#EXTINF:{dur_us / 1_000_000.0:.3f},")
             lines.append(s.path.name)
         lines.append("#EXT-X-ENDLIST")
         tmp_m3u8.write_text("\n".join(lines) + "\n", encoding="utf-8")

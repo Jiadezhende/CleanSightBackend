@@ -13,5 +13,5 @@ from app.settings import settings
 
 inference_manager = InferenceManager(
     rt_fps=settings.raw_fps,
-    ca_segment_seconds=int(settings.ca_segment_len / settings.raw_fps),  # 帧数转秒
+    ca_segment_seconds=settings.ca_segment_seconds,  # 时间概念直取（秒），不再帧数往返换算
 )

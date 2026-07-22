@@ -14,6 +14,10 @@ from app.services.stream import stream_service
 router = APIRouter(prefix="/ai", tags=["ai"])
 logger = logging.getLogger(__name__)
 
+# WS live view 传输带宽上限（帧/秒）：传输层保护常量，非管线 fps、不进部署配置。
+# 推帧主驱动是"新帧即推"（按 frame.timestamp 去重）；此上限仅兜住突发，源 ~inference_fps 下极少触发。
+_WS_MAX_SEND_FPS = 30
+
 
 @asynccontextmanager
 async def lifespan():
@@ -76,10 +80,11 @@ async def websocket_video_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info(f"[WebSocket] 连接已建立: {label}, remote={websocket.client}")
 
-    # 帧率控制和去重
-    last_sent_timestamp = 0.0  # 上一帧的时间戳（来自帧本身）
+    # 推帧驱动 = "新帧即推"（下方按 frame.timestamp 去重，见 last_sent_timestamp 分支）。
+    last_sent_timestamp = 0.0  # 上一帧的时间戳（来自帧本身）——主驱动：仅新帧才推
     last_sent_time = 0.0  # 上一次发送的系统时间
-    frame_interval = 1.0 / 30  # 30fps
+    # 传输带宽上限：本地传输层保护常量（非管线 fps、不进部署配置），兜住突发；源 ~inference_fps 下极少触发。
+    frame_interval = 1.0 / _WS_MAX_SEND_FPS
     frames_sent = 0
     last_log_time = time.time()
     streaming = False  # 是否处于推帧态：仅在"曾推帧 → 无 run"跳变时发一次 idle
@@ -131,7 +136,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 await asyncio.sleep(0.01)
                 continue
 
-            # 帧率控制：确保发送间隔不小于 frame_interval
+            # 带宽上限：确保发送间隔不小于 frame_interval（传输节流，非管线 fps）
             current_time = time.time()
             if last_sent_time > 0:
                 time_since_last = current_time - last_sent_time

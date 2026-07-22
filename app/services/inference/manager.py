@@ -64,8 +64,10 @@ class InferenceManager:
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
         self._actors: Dict[int, ClientTemporalActor] = {}
 
-        # 可视化拉取率 = settings.inference_fps（单一真源）：与推理限流、HLS processed
-        # 打标三处对齐，避免 processed 段实际产出率 ≠ 打标率导致回放偏快。
+        # 可视化 worker 是"采样后 inference 流"的消费者：渲染按 inference.ts 去重，故轮询率
+        # 必须 = 该流速率（检测采样率 settings.inference_fps）——快则空转、慢则丢帧。
+        # 这是"消费者继承源流速率"的合法派生，非 fps 上帝常量；HLS processed 打标另由 eff_fps
+        # 从 ts 反推、模型输入另由 model_input_fps 契约重采样，二者已不再借用本值。
         self.visualization_pool = VisualizationWorkerPool(
             target_fps=settings.inference_fps,
             stage_configs=None,

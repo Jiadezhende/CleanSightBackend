@@ -90,11 +90,12 @@ class Settings(BaseSettings):
 
     # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
     # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
-    raw_fps: int = 30          # 原始视频帧率
-    inference_fps: int = 15    # 推理/输出帧率（HLS processed 打标、client 限流共用）；取 30 的整除值，
-                               # 最小间隔门可干净放行"每隔一帧"（30→20 是算法天花板，本就到不了）
-    ca_maxlen: int = 2700      # CA 队列最大长度（帧数）
-    ca_segment_len: int = 300  # HLS 段长度（帧数）
+    raw_fps: int = 30          # 生产者源：解码 CFR 帧率（decoder default_fps、HLS raw fallback 全派生自此）
+    inference_fps: int = 15    # 采样器：检测抽帧采样率——系统唯一 fps 旋钮（queues Bresenham 抽帧）。
+                               # 取 30 的整除值；不再被 HLS processed/client 限流/模型输入借用（各自派生/契约化）。
+    # CA 缓存/段长本是"时间概念"，以秒声明（时间为跨子系统货币）；帧数在各消费边界按 raw_fps 显式换算。
+    ca_maxlen_seconds: int = 90    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
+    ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
 
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口

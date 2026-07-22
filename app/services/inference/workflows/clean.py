@@ -13,7 +13,7 @@ detector.name = 该 detector 产出的流名（决定 slide_window key 与 Opera
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -112,6 +112,7 @@ class CleanOperator(TemporalOperator):
         model_path: str,
         actions: Dict[int, str],
         objects: Dict[int, str],
+        model_input_fps: Optional[float] = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -120,6 +121,7 @@ class CleanOperator(TemporalOperator):
             model_path=model_path,
             actions=actions,
             objects=objects,
+            model_input_fps=model_input_fps,
         )
         self._sm = {
             "last_ts": 0.0,
@@ -147,7 +149,10 @@ class CleanOperator(TemporalOperator):
         if not new_frames:
             return
 
-        features = self._adapt_to_features(aligned_frames)
+        # 入模前按 ts 重采样到模型契约帧率（检测采样率 → model_input_fps），消 train/serve skew。
+        # 新帧门 / last_ts 推进仍基于完整 aligned_frames，重采样只决定喂给模型的时间轴密度。
+        model_frames = self._resample_by_ts(aligned_frames)
+        features = self._adapt_to_features(model_frames)
         if features.numel() == 0:
             return
 
