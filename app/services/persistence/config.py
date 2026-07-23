@@ -20,9 +20,10 @@ class HLSConfig:
 
     workers: int = 2
     queue_size: int = 100
-    segment_duration: int = 10
     sweep_interval_seconds: float = 1.0  # HLSSegmentSweeper 扫描间隔（秒，PULL 模型）
-    # 注意：raw_fps和processed_fps从inference config动态获取，不在此定义
+    # 注意：不配 segment_duration——分段由 CQ 帧数(ca_segment_len)触发、每段时长由 EXTINF
+    #      从帧 ts 自适应，回放侧也从 EXTINF 读；此处配任何时长都是死值、且会误导。
+    # 注意：HLS 段编码帧率由 strategy 从帧 ts 自适应反推（eff_fps），不在此配置任何 fps
 
 
 @dataclass
@@ -107,7 +108,13 @@ class PersistenceConfig:
             if k in StorageConfig.__dataclass_fields__
         }
         storage = StorageConfig(**storage_kwargs)
-        hls = HLSConfig(**config_dict.get("hls", {}))
+        # 同样防御性过滤：兼容仍残留已废字段（如旧 yaml 的 segment_duration）的 hls 块
+        hls_raw = config_dict.get("hls", {})
+        hls_kwargs = {
+            k: v for k, v in hls_raw.items()
+            if k in HLSConfig.__dataclass_fields__
+        }
+        hls = HLSConfig(**hls_kwargs)
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
         return cls(storage=storage, hls=hls, alarm=alarm)
 
@@ -130,10 +137,6 @@ class PersistenceConfig:
     @property
     def hls_queue_size(self) -> int:
         return self.hls.queue_size
-
-    @property
-    def segment_duration(self) -> int:
-        return self.hls.segment_duration
 
     @property
     def hls_sweep_interval_seconds(self) -> float:
@@ -159,18 +162,6 @@ class PersistenceConfig:
     def cleanup_interval_seconds(self) -> int:
         return self.storage.cleanup_interval_seconds
 
-    @property
-    def raw_fps(self) -> float:
-        """原始视频帧率（从 settings 单一真源读取）"""
-        from app.settings import settings
-        return float(settings.raw_fps)
-
-    @property
-    def processed_fps(self) -> float:
-        """处理后视频帧率（从 settings 单一真源读取 inference_fps）"""
-        from app.settings import settings
-        return float(settings.inference_fps)
-
     def _log_loaded_config(self):
         """输出加载的配置（启动时显示）"""
         # DEBUG级别显示详细配置
@@ -178,11 +169,9 @@ class PersistenceConfig:
             logger.debug("========== Persistence配置 ==========")
             logger.debug("存储: base_dir=%s", self.storage_base_dir)
             logger.debug(
-                "HLS: workers=%d, queue=%d, raw_fps=%.1f, processed_fps=%.1f",
+                "HLS: workers=%d, queue=%d",
                 self.hls.workers,
                 self.hls.queue_size,
-                self.raw_fps,
-                self.processed_fps,
             )
             logger.debug(
                 "告警: workers=%d, queue=%d",
@@ -195,7 +184,7 @@ class PersistenceConfig:
                 self.storage.cleanup_days,
             )
             logger.debug(
-                "📌 fps参数来源: app/settings.py (raw_fps, inference_fps，单一真源)"
+                "📌 HLS 段编码帧率由 strategy 从帧 ts 自适应反推(eff_fps)，配置层不持 fps"
             )
             logger.debug("=====================================")
 
@@ -203,8 +192,7 @@ class PersistenceConfig:
         """配置验证和冲突检测"""
         warnings = []
 
-        # 1. 检查processed_fps是否与inference config一致（由inference模块检查）
-        # 这里不做检查，避免循环依赖
+        # 1. HLS 段编码帧率由 strategy 从帧 ts 反推，配置层不再持 fps，无 fps 一致性校验。
 
         # 2. 检查队列容量合理性
         if self.hls.queue_size < 100:

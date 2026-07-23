@@ -95,7 +95,7 @@
 ### 三个 SET 点（Group 1）
 
 1. **生产者单一真源**：解码 CFR 从 `settings.raw_fps` 经 `default_factory` 取值（[stream/config.py `DecoderConfig.default_fps`](../../app/services/stream/config.py)），删除 [stream_config.yaml](../../config/stream_config.yaml) 里写死的 `default_fps: 30`——消除「两个巧合相等的独立 30」。
-2. **`inference_fps` 收敛为唯一采样旋钮**：抽帧器（[queues.py Bresenham](../../app/services/client/queues.py)）不动，[settings.py:94](../../app/settings.py#L94) 注释重写为「检测抽帧采样率——系统唯一 fps 旋钮」，删「HLS processed 打标 / client 限流共用」。
+2. **`inference_fps` 收敛为唯一采样旋钮**：抽帧器（[queues.py Bresenham](../../app/services/client/queues.py)）不动，[settings.py:94](../../app/settings.py#L94) 注释重写为「检测抽帧采样率——系统唯一 fps 旋钮」，删「HLS processed 打标 / client 限流共用」。收敛后 `settings.inference_fps` 的功能消费者只剩两个合法项：**采样器本尊**（queues 抽帧）与 **viz poll 率**（[manager.py](../../app/services/inference/manager.py)→pool→worker，消费者继承采样流速率、渲染按 `inference.ts` 去重）。HLS processed 的 `processed_fps` 兜底原来也借用 `inference_fps`，一并断开——改读 [persistence/config.py `_PROCESSED_FPS_FALLBACK`](../../app/services/persistence/config.py) 通用编码常量（processed 段主用 `eff_fps` 从 ts 反推，此常量仅退化段兜底，与采样率无关）。
 3. **模型契约在 inference 侧声明**：`model_input_fps: 7.5` 落 [inference_config.yaml](../../config/inference_config.yaml) CleanOperator `params`（紧挨 `actions`/`objects`）。**决策修正**：原计划 4「下沉到产物元数据」被否——7.5 配错**不崩、静默降级**（≠ shape/key mismatch），按判据属「真配置」而非「契约副本」，故声明在 inference 配置、不动跨仓产物 schema。加载期 `None`/`≤0` 在 [TemporalOperator.__init__](../../app/services/inference/temporal/operator.py) 暴露信号。
 
 ### 消费者去 fps 化（Group 2）

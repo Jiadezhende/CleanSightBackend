@@ -28,6 +28,15 @@ from app.utils.exceptions import PersistenceError
 
 logger = logging.getLogger(__name__)
 
+# HLS 段的编码帧率正常由 `_effective_fps` 从帧 ts 反推（完全自适应，不引用任何上游 fps）。
+# 以下三个常量定义"无可测速率"的退化判定与兜底，全部具名、不散落在条件里：
+#   _EFF_FPS_MIN / _EFF_FPS_MAX —— 反推值的合理带；落带外（乱序/重复 ts 致 span 异常）视为不可信。
+#   _DEGENERATE_FALLBACK_FPS   —— 单帧段 / span<=0 / 带外 时的兜底。此时本就无时序信息，
+#       取值与上游 fps 无关，只需给退化的单帧段一个合理 EXTINF；故用本地常量而非上游 raw_fps/inference_fps。
+_EFF_FPS_MIN = 1.0
+_EFF_FPS_MAX = 60.0
+_DEGENERATE_FALLBACK_FPS = 15.0
+
 
 class HLSPersistenceStrategy:
     """HLS持久化策略"""
@@ -35,30 +44,28 @@ class HLSPersistenceStrategy:
     def __init__(
         self,
         db_dir: Path,
-        raw_fps: float = 30.0,
-        processed_fps: float = 20.0,
     ):
         self.db_dir = db_dir
-        self.raw_fps = raw_fps
-        self.processed_fps = processed_fps
+        # HLS 段编码帧率全程从帧 ts 反推（见 _effective_fps），不接收任何上游 fps。
         # 按 target_dir 路径索引的细粒度锁，序列化同一任务目录下的 playlist/metadata 写操作
         self._dir_locks: Dict[str, threading.Lock] = {}
         self._dir_locks_guard = threading.Lock()
 
     @staticmethod
-    def _effective_fps(frames: List[Frame], fallback: float) -> float:
+    def _effective_fps(frames: List[Frame]) -> float:
         """由帧时间戳跨度反推有效编码 fps：`(N-1) / (ts_last - ts_first)`。
 
-        VideoWriter 与 EXTINF 须用同一个返回值，回放才对齐墙钟。span<=0 / 单帧 / 反推值落在
-        合理带 [1, 60] 外（重复或乱序时间戳致 span 异常）时回退标称 `fallback`。
+        VideoWriter 与 EXTINF 须用同一个返回值，回放才对齐墙钟。raw/processed 段一律走此
+        自适应反推、不引用上游 fps。span<=0 / 单帧 / 反推值落在合理带 [1, 60] 外（重复或
+        乱序时间戳致 span 异常）时——即无可测速率的退化段——回退 `_DEGENERATE_FALLBACK_FPS`。
         """
         if len(frames) > 1:
             span = frames[-1].timestamp - frames[0].timestamp
             if span > 0:
                 eff_fps = (len(frames) - 1) / span
-                if 1.0 <= eff_fps <= 60.0:
+                if _EFF_FPS_MIN <= eff_fps <= _EFF_FPS_MAX:
                     return eff_fps
-        return fallback
+        return _DEGENERATE_FALLBACK_FPS
 
     def _get_dir_lock(self, target_dir: Path) -> threading.Lock:
         key = str(target_dir)
@@ -501,9 +508,9 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
-        # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），raw_fps 仅作 fallback。
+        # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），无可测速率时退化兜底。
         # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
-        eff_fps = self._effective_fps(frames, self.raw_fps)
+        eff_fps = self._effective_fps(frames)
         raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
@@ -592,11 +599,11 @@ class HLSPersistenceStrategy:
         start_ts = frames[0].timestamp
 
         # 0. 按本段帧时间戳跨度反推有效 fps：processed 实际成帧率随 throttle / 渲染尖峰
-        # 在窗口间漂移（~11-15fps），固定 processed_fps 编码会按 20/真实率 倍快放，且
+        # 在窗口间漂移（~11-15fps），固定名义帧率编码会按 兜底/真实率 倍快放，且
         # 逐段速率不同 → 段间忽快忽慢的抖动。逐段各取自身 eff_fps，VideoWriter 与 EXTINF
         # 同源 → 每段播成 1.0x，对齐墙钟、抖动消失。详见
         # docs/update/20260629_PROCESSED_PLAYBACK_RATE_PROPOSAL.md。
-        eff_fps = self._effective_fps(frames, self.processed_fps)
+        eff_fps = self._effective_fps(frames)
 
         # 1. 生成处理后视频段（使用实测有效帧率 eff_fps）
         segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"

@@ -76,19 +76,14 @@ class HLSWorkerPool:
         input_queue: Queue,
         num_workers: int = 2,
         db_dir: Path | None = None,
-        segment_duration: int = 10,
-        raw_fps: float = 30.0,
-        processed_fps: float = 20.0,
     ):
         self.input_queue = input_queue
         self.num_workers = num_workers
         self.stop_event = threading.Event()
 
-        # 创建持久化策略
+        # 创建持久化策略（编码帧率全程从帧 ts 自适应反推，不接收上游 fps）
         self.strategy = HLSPersistenceStrategy(
             db_dir=db_dir or Path("database"),
-            raw_fps=raw_fps,
-            processed_fps=processed_fps,
         )
 
         # 创建Worker

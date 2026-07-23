@@ -55,9 +55,6 @@ class PersistenceManager:
             input_queue=self.hls_queue,
             num_workers=self.config.hls_workers,
             db_dir=self.config.storage_base_dir,
-            segment_duration=self.config.segment_duration,
-            raw_fps=self.config.raw_fps,
-            processed_fps=self.config.processed_fps,
         )
 
         self.alarm_pool = AlarmWorkerPool(
