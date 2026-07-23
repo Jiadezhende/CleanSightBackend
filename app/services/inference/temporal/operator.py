@@ -79,7 +79,7 @@ class TemporalOperator(Operator):
         model_path: str,
         objects: Dict[int, str],
         actions: Dict[int, str],
-        model_input_fps: Optional[float] = None,
+        model_input_fps: float,
     ):
         super().__init__(name, subscribes, window_seconds)
         if not model_path:
@@ -88,20 +88,14 @@ class TemporalOperator(Operator):
         self.num_objects = len(objects)
         self.num_actions = len(actions)
 
-        # 模型契约帧率：入模前把窗口按 ts 重采样到此帧率（消 train/serve skew）。
-        # 必须等于训练 fps；配错不崩、静默降级——故加载期即在此暴露信号。
-        if model_input_fps is None:
-            self.model_input_fps: Optional[float] = None
-            logger.warning(
-                "[%s] 未声明 model_input_fps：跳过入模重采样，直接喂检测采样率窗口"
-                "（若训练 fps ≠ 检测采样率则有 train/serve skew）", name,
-            )
-        elif model_input_fps <= 0:
+        # 模型契约帧率：入模前把窗口按 ts 重采样到此帧率（消 train/serve skew）。必须等于训练 fps。
+        # 漏配/配错不崩管线、只静默降级（喂错帧率 → 误分类），故设为必填、加载期即校验暴露：
+        # yaml 漏 key → 构造缺参 TypeError；给了非正值 → 此处 ValueError。
+        if model_input_fps is None or model_input_fps <= 0:
             raise ValueError(
                 f"[{name}] model_input_fps 必须为正（得到 {model_input_fps}）"
             )
-        else:
-            self.model_input_fps = float(model_input_fps)
+        self.model_input_fps: float = float(model_input_fps)
 
         self._object_id_to_name = objects
         self._action_id_to_name = actions
@@ -135,9 +129,9 @@ class TemporalOperator(Operator):
         相位网格抽稀：从首帧起维护理想采样时刻 next_t，每步 += 1/model_input_fps，保留
         首个 ts ≥ next_t 的帧。网格前进（非从"上一保留帧"累加）→ 不累积舍入漂移，2:1
         比例下稳定取到目标帧率；遇缺口令网格落后当前帧时重锚，避免追补突发。
-        纯 ts 函数——不改帧内容、不合成新 ts。未声明契约帧率则原样返回。
+        纯 ts 函数——不改帧内容、不合成新 ts。帧数 < 2 无从抽稀，原样返回。
         """
-        if self.model_input_fps is None or len(frames) < 2:
+        if len(frames) < 2:
             return frames
         min_dt = 1.0 / self.model_input_fps
         kept = [frames[0]]

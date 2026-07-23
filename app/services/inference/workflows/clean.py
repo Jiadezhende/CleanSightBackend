@@ -13,7 +13,7 @@ detector.name = 该 detector 产出的流名（决定 slide_window key 与 Opera
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -112,7 +112,7 @@ class CleanOperator(TemporalOperator):
         model_path: str,
         actions: Dict[int, str],
         objects: Dict[int, str],
-        model_input_fps: Optional[float] = None,
+        model_input_fps: float,
     ) -> None:
         super().__init__(
             name=name,
