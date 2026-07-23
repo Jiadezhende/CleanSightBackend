@@ -2,13 +2,13 @@
 
 架构特点：
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
-2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），1Hz tick
+2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），2Hz tick
 3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
 4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_inference（最新快照）
 
 数据流：
 InferenceLoop → cq.push_detection() + cq.set_latest_inference()  [双写]
-TemporalActor (1Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
+TemporalActor (2Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
 VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal() → render → cq
 """
 
@@ -32,7 +32,7 @@ class InferenceManager:
 
     集成三个独立时钟的 Worker 池：
     - ModelWorkerService（推理，~30 FPS）
-    - ClientTemporalActor（时序分析，1 Hz，per-client）
+    - ClientTemporalActor（时序分析，2 Hz，per-client）
     - VisualizationWorkerPool（可视化，~15 FPS）
 
     三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。
@@ -40,13 +40,8 @@ class InferenceManager:
 
     def __init__(
         self,
-        rt_fps: int = 30,
-        ca_segment_seconds: int = 10,
         db_dir: Optional[str] = None,
     ):
-        # 队列参数
-        self._ca_segment_len = max(10, int(rt_fps * ca_segment_seconds))
-
         # 持久化存储根目录：默认读 settings 单一真源（与 persistence/traceback 同源），
         # 仅显式传 db_dir 时覆盖（测试/特殊场景）。不再 __file__ 自数层级重算。
         from app.settings import settings
@@ -64,8 +59,10 @@ class InferenceManager:
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
         self._actors: Dict[int, ClientTemporalActor] = {}
 
-        # 可视化拉取率 = settings.inference_fps（单一真源）：与推理限流、HLS processed
-        # 打标三处对齐，避免 processed 段实际产出率 ≠ 打标率导致回放偏快。
+        # 可视化 worker 是"采样后 inference 流"的消费者：渲染按 inference.ts 去重，故轮询率
+        # 必须 = 该流速率（检测采样率 settings.inference_fps）——快则空转、慢则丢帧。
+        # 这是"消费者继承源流速率"的合法派生，非 fps 上帝常量；HLS processed 打标另由 eff_fps
+        # 从 ts 反推、模型输入另由 model_input_fps 契约重采样，二者已不再借用本值。
         self.visualization_pool = VisualizationWorkerPool(
             target_fps=settings.inference_fps,
             stage_configs=None,

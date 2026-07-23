@@ -5,13 +5,10 @@
 `InferenceManager()` 构造较重（加载 stage 配置、建 worker 池），只应在消费方显式
 import 本模块时才构造，避免任何 `import app.services.inference.*` 触发 eager 构造。
 
-参数走 settings 单一真源（见 app/settings.py）。
+无需注入 fps/段长：CQ 段长真源在 ClientConfig.ca_segment_len（ca_segment_seconds×raw_fps），
+经 cq_kwargs 注入；可视化轮询率由 manager 内部直读 settings.inference_fps 派生。
 """
 
 from app.services.inference.manager import InferenceManager
-from app.settings import settings
 
-inference_manager = InferenceManager(
-    rt_fps=settings.raw_fps,
-    ca_segment_seconds=int(settings.ca_segment_len / settings.raw_fps),  # 帧数转秒
-)
+inference_manager = InferenceManager()

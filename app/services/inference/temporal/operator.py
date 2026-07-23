@@ -79,6 +79,7 @@ class TemporalOperator(Operator):
         model_path: str,
         objects: Dict[int, str],
         actions: Dict[int, str],
+        model_input_fps: float,
     ):
         super().__init__(name, subscribes, window_seconds)
         if not model_path:
@@ -86,6 +87,29 @@ class TemporalOperator(Operator):
         self.model_path = model_path
         self.num_objects = len(objects)
         self.num_actions = len(actions)
+
+        # 模型契约帧率：入模前把窗口按 ts 重采样到此帧率（消 train/serve skew）。必须等于训练 fps。
+        # 漏配/配错不崩管线、只静默降级（喂错帧率 → 误分类），故设为必填、加载期即校验暴露：
+        # yaml 漏 key → 构造缺参 TypeError；给了非正值 → 此处 ValueError。
+        if model_input_fps is None or model_input_fps <= 0:
+            raise ValueError(
+                f"[{name}] model_input_fps 必须为正（得到 {model_input_fps}）"
+            )
+        # 上界：重采样只能降采样（_resample_by_ts 网格抽稀）。契约帧率 > 检测采样率时无法达成——
+        # 窗口本就没那么密，重采样保留全帧、实际喂检测率而非契约率 → 静默 skew。故加载期即拒，
+        # 别放行成"假达标"。检测采样率 = raw_fps / inference_decimation = settings.inference_fps。
+        from app.settings import settings
+        detection_fps = settings.inference_fps
+        # 相对容差比较：非整除采样率（如 30/7=4.2857…）反推出的 detection_fps 是循环二进制小数，
+        # 与 yaml 里"顶到上限"的十进制字面量可能差 1 ULP。顶格是合法配置（重采样恰为 no-op），
+        # 不能因浮点抖动误拒；容差 1e-9 远小于任何真实"超限"（如 20 vs 15），不放过真错。
+        if model_input_fps > detection_fps * (1.0 + 1e-9):
+            raise ValueError(
+                f"[{name}] model_input_fps({model_input_fps}) > 检测采样率"
+                f"({detection_fps:.3f} = raw_fps/inference_decimation)：重采样只能降采样，"
+                f"契约帧率不可高于检测采样率（要么降 model_input_fps、要么减小 inference_decimation）"
+            )
+        self.model_input_fps: float = float(model_input_fps)
 
         self._object_id_to_name = objects
         self._action_id_to_name = actions
@@ -97,7 +121,7 @@ class TemporalOperator(Operator):
         self._model: torch.nn.Module = None
         self._model_load_lock = threading.Lock()
         self._load_failed = False
-        # 时序 GRU 是小模型（输入48维/隐层64/3层双向）+ 1Hz 推理，实测 CPU 单次 <12ms（预算1000ms）。
+        # 时序 GRU 是小模型（输入48维/隐层64/3层双向）+ 2Hz 推理，实测 CPU 单次 <12ms（预算500ms）。
         # 固定 CPU：H2D/D2H 拷贝与 kernel launch 开销盖过本体计算，GPU 留给 YOLO 专用（离线 BiGRU 亦为 CPU）。
         self._device = torch.device("cpu")
 
@@ -112,6 +136,27 @@ class TemporalOperator(Operator):
     
     def _action_name(self, action_id: int) -> str:
         return self._action_id_to_name.get(action_id, f"action_{action_id}")
+
+    def _resample_by_ts(self, frames: List[FrameFeature]) -> List[FrameFeature]:
+        """按帧 ts 把窗口重采样到 model_input_fps（消 train/serve skew）。
+
+        相位网格抽稀：从首帧起维护理想采样时刻 next_t，每步 += 1/model_input_fps，保留
+        首个 ts ≥ next_t 的帧。网格前进（非从"上一保留帧"累加）→ 不累积舍入漂移，2:1
+        比例下稳定取到目标帧率；遇缺口令网格落后当前帧时重锚，避免追补突发。
+        纯 ts 函数——不改帧内容、不合成新 ts。帧数 < 2 无从抽稀，原样返回。
+        """
+        if len(frames) < 2:
+            return frames
+        min_dt = 1.0 / self.model_input_fps
+        kept = [frames[0]]
+        next_t = frames[0].ts + min_dt
+        for f in frames[1:]:
+            if f.ts >= next_t:
+                kept.append(f)
+                next_t += min_dt
+                if next_t <= f.ts:  # 缺口致网格落后：重锚到当前帧，避免追补突发
+                    next_t = f.ts + min_dt
+        return kept
 
     def _try_load_model(self) -> bool:
         """惰性加载时序模型 （首次推理时触发，双重检查锁保证线程安全）。"""

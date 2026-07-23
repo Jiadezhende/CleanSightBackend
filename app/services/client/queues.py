@@ -74,8 +74,7 @@ class ClientQueues:
         ca_maxlen: int = 2700,
         resize_width: int = 640,
         resize_height: int = 480,
-        inference_fps: int = 15,
-        raw_fps: int = 30,
+        inference_decimation: int = 2,
         *,
         # 不可变运行身份（primitives 直注，一次 CQ == 一次 run，终生不变）。
         # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入已解析好的
@@ -89,12 +88,11 @@ class ClientQueues:
         self.resize_width = resize_width
         self.resize_height = resize_height
 
-        # 帧率配置（降采样率 = inference_fps / raw_fps）
-        self.inference_fps = inference_fps
-        self.raw_fps = raw_fps
-        # 抽帧相位累加器（Bresenham 均匀抽帧）：仅由 decoder 线程读写
-        # （append_ca_ready_with_throttle 内部），无并发，不加锁
-        self._decimate_phase: int = 0
+        # 抽帧降采样倍率（每 N 帧留 1；N=raw_fps/检测率，如 30fps→15fps 取 N=2）。
+        # 抽帧器只需此整数倍率，不引用 raw_fps——源速率概念不进 CQ。
+        self.inference_decimation = inference_decimation
+        # 抽帧计数器：仅由 decoder 线程读写（append_ca_ready_with_throttle 内部），无并发，不加锁
+        self._decimate_counter: int = 0
 
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
         self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
@@ -170,26 +168,25 @@ class ClientQueues:
 
     def append_ca_ready_with_throttle(self, frame_data: Frame) -> bool:
         """
-        添加帧到待推理队列（Bresenham 相位累加器均匀抽帧 + 背压）。
+        添加帧到待推理队列（整数倍率均匀抽帧 + 背压）。
 
-        输入为 ffmpeg 规范化后的 CFR raw_fps 流，按 raw_fps→inference_fps 做均匀抽帧：
-        每个输入帧累加 inference_fps，跨过 raw_fps 阈值时放行一帧。长期保留率精确
-        = inference_fps/raw_fps（支持非整除比，如 30→20 取 keep-keep-drop），不依赖
-        wall-clock —— 消除解码线程调度抖动导致的真实率漂移（旧墙钟门把 15 漏成 ~12）。
+        输入为 ffmpeg 规范化后的 CFR 流：CFR 已把时间烙成等距帧号，故按**帧计数**「每 N 帧
+        留 1」即精确均匀降采样（N=inference_decimation），不依赖 wall-clock —— 消除解码线程
+        调度抖动导致的真实率漂移（旧墙钟门把 15 漏成 ~12）。整数计数天然精确、无浮点累积误差。
+        （整数因子只命中 raw_fps 的整除率；非整除比走不了，模型侧另按 ts 重采样到契约帧率。）
 
         ca_ready 为无锁 SPSC deque，decoder 是唯一写入方，dispatcher 是唯一消费方。
-        _decimate_phase 仅由本方法（decoder 线程）读写，无并发，不加锁。
+        _decimate_counter 仅由本方法（decoder 线程）读写，无并发，不加锁。
         """
-        # 写门：非 ACTIVE（拆除中/已关）拒写——在推进相位累加器之前拒，避免 late 帧扰动抽帧节奏。
+        # 写门：非 ACTIVE（拆除中/已关）拒写——在推进计数器之前拒，避免 late 帧扰动抽帧节奏。
         if self._state is not RunState.ACTIVE:
             return False
 
-        # 1. 相位累加器选帧：相位每输入帧推进一次（累加器正确性的不变式），
-        #    跨过 raw_fps 阈值才放行。
-        self._decimate_phase += self.inference_fps
-        if self._decimate_phase < self.raw_fps:
+        # 1. 整数倍率选帧：计数器每输入帧 +1，攒满 N 帧放行 1 帧（保留率精确 = 1/N）。
+        self._decimate_counter += 1
+        if self._decimate_counter < self.inference_decimation:
             return False
-        self._decimate_phase -= self.raw_fps
+        self._decimate_counter = 0
 
         # 2. 背压：仅对选中帧生效——推理队列满则丢（过载语义同旧）。
         max_len = self.ca_ready.maxlen

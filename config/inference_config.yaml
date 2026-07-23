@@ -80,6 +80,9 @@ stages:
         class: app.services.inference.workflows.clean.CleanOperator
         params:
           window_seconds: 10.0
+          # 模型契约帧率：入模前把 ~inference_fps 的窗口按 ts 重采样到此帧率再喂模型。
+          # 必须等于训练 fps（gru-final.pt 训练于 7.5fps）；配错不崩、静默降级（train/serve skew）。
+          model_input_fps: 7.5
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/gru-final.pt
           actions:
             0: idle

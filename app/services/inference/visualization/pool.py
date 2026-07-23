@@ -19,8 +19,9 @@ class VisualizationWorkerPool:
 
     单线程理由：单帧渲染 ~5ms，@20FPS 时 tick 预算 50ms，约可覆盖 10 clients；
     单线程避免了多线程竞争同一客户端的问题。
-    实际 target_fps 由调用方注入 settings.inference_fps（与推理限流、HLS processed
-    打标对齐），默认值仅作脱离装配时的兜底。
+    实际 target_fps 由调用方注入 settings.inference_fps——viz 是"采样后 inference 流"的
+    消费者，poll 率跟随该流速率（渲染按 inference.ts 去重，快则空转、慢则丢帧），属合法
+    派生而非共用旋钮；HLS processed 打标已改走 eff_fps、不再共享此值。默认值仅作脱离装配时的兜底。
     """
 
     def __init__(

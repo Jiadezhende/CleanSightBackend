@@ -6,11 +6,13 @@
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,9 @@ class DecoderConfig:
 
     default_width: int = 640
     default_height: int = 480
-    default_fps: int = 30
+    # 解码 CFR = 生产者源，单一真源 settings.raw_fps（ffmpeg 强制 CFR、下游全部派生）。
+    # 不在 stream_config.yaml 里再写死一个 fps，否则又成第二个"巧合相等"的独立源。
+    default_fps: int = field(default_factory=lambda: settings.raw_fps)
     pix_fmt: str = "bgr24"
     chunk_read_size: int = 32768
     backpressure_ratio: float = 0.90  # 队列达到90%时丢帧

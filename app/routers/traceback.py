@@ -287,23 +287,16 @@ def _build_vod_playlist(
     playlist_path = task_dir / f"{track}_playlist.m3u8"
     real_durations = _parse_existing_playlist(playlist_path)
 
-    try:
-        from app.services.persistence.config import get_persistence_config
-        default_dur = float(get_persistence_config().hls.segment_duration)
-    except Exception:
-        default_dur = 10.0
-
-    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF。不在 playlist 中的段视为
-    # 在途段（mp4v 已落但 transcode+append 未完成），过滤掉——避免回放出现
-    # 与 fmp4 tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
+    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF（退化段的兜底也只在写入侧的 eff_fps
+    # 里，见 hls_strategy._DEGENERATE_FALLBACK_FPS）。此处只读回、不重新推导、无第二兜底。
+    # 不在 playlist 中的段视为在途段（mp4v 已落但 transcode+append 未完成），过滤掉——避免
+    # 回放出现与 fmp4 tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
     segs = [s for s in segs if s.filename in real_durations]
     if not segs:
         raise HTTPException(status_code=404, detail="No playable segments yet")
 
-    target_duration = max(
-        int(round(max(real_durations.values(), default=default_dur))),
-        1,
-    )
+    # 上一步已保证 real_durations 非空（segs ⊆ real_durations 且非空），max() 无需 default。
+    target_duration = max(int(round(max(real_durations.values()))), 1)
 
     base_url = str(request.base_url).rstrip("/")
     init_token = MediaToken.default().sign(
