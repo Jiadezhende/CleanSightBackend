@@ -101,20 +101,10 @@ class PersistenceConfig:
         Returns:
             PersistenceConfig实例
         """
-        # 仅取已知字段，防御性兼容仍残留 base_dir 的旧 yaml（静默忽略而非崩）
-        storage_raw = config_dict.get("storage", {})
-        storage_kwargs = {
-            k: v for k, v in storage_raw.items()
-            if k in StorageConfig.__dataclass_fields__
-        }
-        storage = StorageConfig(**storage_kwargs)
-        # 同样防御性过滤：兼容仍残留已废字段（如旧 yaml 的 segment_duration）的 hls 块
-        hls_raw = config_dict.get("hls", {})
-        hls_kwargs = {
-            k: v for k, v in hls_raw.items()
-            if k in HLSConfig.__dataclass_fields__
-        }
-        hls = HLSConfig(**hls_kwargs)
+        # yaml 由 git 跟踪、每次部署整仓覆盖为干净版，磁盘不会残留已废字段；
+        # 故不做字段过滤——真出未知字段就让它响亮地崩，别静默吞。
+        storage = StorageConfig(**config_dict.get("storage", {}))
+        hls = HLSConfig(**config_dict.get("hls", {}))
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
         return cls(storage=storage, hls=hls, alarm=alarm)
 
