@@ -90,9 +90,11 @@ class Settings(BaseSettings):
 
     # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
     # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
-    raw_fps: int = 30          # 生产者源：解码 CFR 帧率（decoder default_fps、HLS raw fallback 全派生自此）
-    inference_fps: int = 15    # 采样器：检测抽帧采样率——系统唯一 fps 旋钮（queues Bresenham 抽帧）。
-                               # 取 30 的整除值；不再被 HLS processed/client 限流/模型输入借用（各自派生/契约化）。
+    raw_fps: int = 30          # 生产者源：解码 CFR 帧率（decoder default_fps、HLS raw fallback、CA 秒→帧数换算全派生自此）
+    inference_decimation: int = 2  # 采样器：检测抽帧降采样倍率——系统唯一采样旋钮。抽帧器「每 N 帧留 1」直接用它。
+                               # 检测率 = raw_fps / N（N=2→15fps，派生见 inference_fps property）。整数因子故只能命中
+                               # raw_fps 的整除率（30→15/10/7.5/6…，不支持 30→20 类非整除比）；模型侧另按 ts 重采样到 7.5。
+                               # env: CLEANSIGHT_INFERENCE_DECIMATION
     # CA 缓存/段长本是"时间概念"，以秒声明（时间为跨子系统货币）；帧数在各消费边界按 raw_fps 显式换算。
     ca_maxlen_seconds: int = 90    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
     ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
@@ -131,6 +133,16 @@ class Settings(BaseSettings):
     lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
     lab_export_max_clips_per_submit: int = 20
     lab_export_gap_tolerance_ms: int = 2000   # 相邻段间隔相对 step 实测节奏的允许超出量；>此值判为真录制停顿（源断流/重连）
+
+    @property
+    def inference_fps(self) -> float:
+        """检测抽帧后的有效帧率（派生：raw_fps / inference_decimation）。
+
+        供需要绝对速率的消费者读（如 viz 轮询率）；抽帧器本身只用整数倍率
+        inference_decimation「每 N 帧留 1」，不做此除法。派生化后无从被设成与
+        raw_fps/N 不一致的值（消漂移）。N 非整除 raw_fps 时为小数（如 30/4=7.5）。
+        """
+        return self.raw_fps / self.inference_decimation
 
     @property
     def allowed_ips_set(self) -> frozenset:

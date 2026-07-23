@@ -40,13 +40,8 @@ class InferenceManager:
 
     def __init__(
         self,
-        rt_fps: int = 30,
-        ca_segment_seconds: int = 10,
         db_dir: Optional[str] = None,
     ):
-        # 队列参数
-        self._ca_segment_len = max(10, int(rt_fps * ca_segment_seconds))
-
         # 持久化存储根目录：默认读 settings 单一真源（与 persistence/traceback 同源），
         # 仅显式传 db_dir 时覆盖（测试/特殊场景）。不再 __file__ 自数层级重算。
         from app.settings import settings

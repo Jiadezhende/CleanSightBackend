@@ -103,19 +103,13 @@ class ClientConfig:
         return settings.ca_segment_seconds * settings.raw_fps
 
     @property
-    def inference_fps(self) -> int:
-        """推理帧率（从 settings 单一真源读取）"""
+    def inference_decimation(self) -> int:
+        """检测抽帧降采样倍率（从 settings 单一真源读取；抽帧器「每 N 帧留 1」）"""
         from app.settings import settings
-        return settings.inference_fps
-
-    @property
-    def raw_fps(self) -> int:
-        """原始/解码帧率（从 settings 单一真源读取；抽帧降采样率 = inference_fps/raw_fps）"""
-        from app.settings import settings
-        return settings.raw_fps
+        return settings.inference_decimation
 
     def cq_kwargs(self) -> Dict[str, Any]:
-        """组装 ClientQueues 构造参数（resize 属 client 配置，fps/队列走 settings 单一真源）。
+        """组装 ClientQueues 构造参数（resize 属 client 配置，采样倍率/队列走 settings 单一真源）。
 
         创建 CQ 的唯一配置出口：run 起始由 InferenceManager 调用（早于起流），
         避免"裸建默认值 + 起流时 kwargs 被丢弃"的 dead-kwargs 问题。
@@ -123,8 +117,7 @@ class ClientConfig:
         return {
             "resize_width": self.frame.resize_width,
             "resize_height": self.frame.resize_height,
-            "inference_fps": self.inference_fps,
-            "raw_fps": self.raw_fps,
+            "inference_decimation": self.inference_decimation,
             "ca_maxlen": self.ca_maxlen,
             "ca_segment_len": self.ca_segment_len,
         }
@@ -140,10 +133,10 @@ class ClientConfig:
                 self.ca_segment_len,
             )
             logger.debug(
-                "帧处理: %dx%d, inference_fps=%d",
+                "帧处理: %dx%d, 抽帧倍率 N=%d（每 N 帧留 1）",
                 self.frame.resize_width,
                 self.frame.resize_height,
-                self.inference_fps,
+                self.inference_decimation,
             )
             logger.debug(
                 "状态: timeout=%ds",
@@ -169,21 +162,8 @@ class ClientConfig:
                 f"会导致永远无法触发分段"
             )
 
-        # 检查inference_fps与全局配置冲突
-        try:
-            from app.settings import settings
-
-            global_inference_fps = getattr(settings, "inference_fps", None)
-            if (
-                global_inference_fps
-                and abs(self.inference_fps - int(global_inference_fps)) > 1
-            ):
-                warnings.append(
-                    f"⚠️  配置冲突: client.inference_fps({self.inference_fps}) "
-                    f"!= settings.inference_fps({global_inference_fps})"
-                )
-        except Exception:
-            pass
+        # 注：原 client.inference_fps ↔ settings.inference_fps 冲突检查已删——
+        # 采样倍率现单一真源 settings.inference_decimation，client 直读同源，无从冲突。
 
         # 输出警告
         if warnings:
