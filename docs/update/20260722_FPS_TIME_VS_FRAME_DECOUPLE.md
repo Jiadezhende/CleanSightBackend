@@ -54,7 +54,7 @@
 | 1 | 解码器 | `raw_fps=30` 固定，ffmpeg `fps=` 强制 | 🟢 生产者，保留 set | [settings.py:93](../../app/settings.py#L93)、[stream/config.py:24](../../app/services/stream/config.py#L24) |
 | 2 | 检测抽帧 | `inference_fps=15`（=raw×0.5） | 🟢 采样器，保留 set；**这是 `inference_fps` 唯一合法身份** | [settings.py:94](../../app/settings.py#L94) |
 | 3 | 时序模型输入 | **无显式设定**，隐式=15；契约实为 7.5 | 🔴 契约消费者：读 ts 重采样到 7.5，随产物走 | skew 的精确坐标——契约根本没被表达出来 |
-| 4 | 时序 tick | `tick_interval=1.0s` | ✅ 已对（时间域） | [actor.py:40](../../app/services/inference/temporal/actor.py#L40) |
+| 4 | 时序 tick | `tick_interval=0.5s`（2Hz，2026-07-23 由 1.0s 上调，降告警上升沿延迟） | ✅ 已对（时间域） | [actor.py:40](../../app/services/inference/temporal/actor.py#L40) |
 | 5 | HLS raw 段 | `raw_fps=30` 假定固定 | 🟠 消费者：应读 ts（潜伏同类 bug，raw 较稳未咬到） | [hls_strategy.py:38](../../app/services/persistence/strategies/hls_strategy.py#L38) |
 | 6 | HLS processed 段 | `eff_fps` 从 ts 反推 | ✅ 已对（时间域，正面样板） | [hls_strategy.py:592](../../app/services/persistence/strategies/hls_strategy.py#L592)；默认 `processed_fps=20` 已死、被覆盖 |
 | 7 | AI WS 推流 | 硬编码 `1/30` 轮询 | 🟠 消费者：改「有新 rendered 帧就推」，rate 白捡、不再重发 | 推的是 [`get_latest_rendered()`](../../app/routers/ai.py#L122)，即 rendered 流 |

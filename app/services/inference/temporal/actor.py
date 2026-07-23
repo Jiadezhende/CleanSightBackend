@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class ClientTemporalActor:
-    """per-client 时序分析 actor（注册多个流算子，1Hz 驱动）。
+    """per-client 时序分析 actor（注册多个流算子，2Hz 驱动）。
 
     每个 client 独立一个实例，故障互不影响。
     状态机（_sm）封装在各 Operator 内部，actor 不持有外部 sm 字典。
@@ -37,7 +37,9 @@ class ClientTemporalActor:
         cq,                              # ClientQueues
         stage: str,
         operators: List[Operator],
-        tick_interval: float = 1.0,
+        # tick 间隔（秒，时间域）= 全局唯一 tick 真源：manager 构造时不覆盖，默认即生产值。
+        # 0.5s → 2Hz：判定/告警上升沿延迟减半；单算子 analyze<12ms、预算 500ms 仍宽裕。
+        tick_interval: float = 0.5,
     ):
         self._task_id = task_id
         self._cq = cq

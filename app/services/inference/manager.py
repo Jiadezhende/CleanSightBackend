@@ -2,13 +2,13 @@
 
 架构特点：
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
-2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），1Hz tick
+2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），2Hz tick
 3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
 4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_inference（最新快照）
 
 数据流：
 InferenceLoop → cq.push_detection() + cq.set_latest_inference()  [双写]
-TemporalActor (1Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
+TemporalActor (2Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
 VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal() → render → cq
 """
 
@@ -32,7 +32,7 @@ class InferenceManager:
 
     集成三个独立时钟的 Worker 池：
     - ModelWorkerService（推理，~30 FPS）
-    - ClientTemporalActor（时序分析，1 Hz，per-client）
+    - ClientTemporalActor（时序分析，2 Hz，per-client）
     - VisualizationWorkerPool（可视化，~15 FPS）
 
     三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。

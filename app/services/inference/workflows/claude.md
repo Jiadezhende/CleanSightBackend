@@ -46,7 +46,7 @@ flowchart TD
 
 | 模式 | 触发时机 | 来源方法 | 去向 |
 | ------ | --------- | --------- | ------ |
-| 实时告警 | TemporalActor 1Hz 轮询，`operator.analyze()` 推进状态 → `operator.judge()` 上升沿触发 | `Operator.judge()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
+| 实时告警 | TemporalActor 2Hz 轮询，`operator.analyze()` 推进状态 → `operator.judge()` 上升沿触发 | `Operator.judge()` | persist_alarm → 30s 批次 → HTTP POST 外部数据库 |
 | 结算告警 | 任务 terminate 时调用一次 | `Operator.finalize()` | 同上，由 `ClientTemporalActor.finalize_and_stop()` 收集、`InferenceManager._persist_settlement_alarms()` 驱动 |
 
 > **UI 通知**：`events`（字符串列表）经 VisualizationWorker 渲染为视频帧 overlay，通过 WebSocket 实时推送给前端。`AlarmInfo` 只走持久化，不直接推给前端。
