@@ -324,7 +324,8 @@ class ClipBuilder:
             (segs[i + 1].ts_us - segs[i].ts_us) if i + 1 < len(segs) else est_dur_us
             for i in range(len(segs))
         ]
-        target_dur_s = max(seg_durs_us) / 1_000_000.0 if seg_durs_us else 10.0
+        # segs 非空由方法开头 segs[0].ts_us 解引用保证 → seg_durs_us 必非空，max() 无需兜底。
+        target_dur_s = max(seg_durs_us) / 1_000_000.0
 
         lines = [
             "#EXTM3U",
