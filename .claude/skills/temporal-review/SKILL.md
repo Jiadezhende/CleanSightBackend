@@ -1,6 +1,6 @@
 ---
 name: temporal-review
-description: "Review a temporal analyzer (时序分析模型算子) as it's onboarded into the inference chain — a GRU/Transformer/sequence-model Operator that turns detection windows into actions/states. Use when asked to: review 时序分析器/时序模型/GRU/Transformer 算子接入、review 时序推理代码、时序 Operator review、审查特征适配器/feature adapter、review temporal analyzer/operator. Checklist is severity-ranked: silent-wrong feature bugs first, then crashes, then lifecycle/causality, then style."
+description: "Review a temporal analyzer (时序分析模型算子) as it's onboarded into the inference chain — a GRU/Transformer/sequence-model Operator that turns detection windows into actions/states. Use when asked to: review 时序分析器/时序模型/GRU/Transformer 算子接入、review 时序推理代码、时序 Operator review、审查特征适配器/feature adapter、审查入模帧率/重采样/train-serve skew、review temporal analyzer/operator. Checklist is severity-ranked: silent-wrong feature bugs first, then crashes, then lifecycle/causality, then style."
 ---
 
 # 时序分析器接入 Review
@@ -19,6 +19,14 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 - **归一化裁剪**：docstring 常写"归一化到 [0,1]"，但代码有 `clamp` 吗？越界框/坐标系不匹配会喂负值或超界。
 - **分辨率来源**：除的是帧自带 `metadata["frame_shape"]`（[detector.py:151](../../../app/services/inference/detection/detector.py)）还是全局死配置 `get_client_config().frame.resize_*`（[config.py:21](../../../app/services/client/config.py)）？后者与真正定尺寸的 decoder ffmpeg `scale`（[decoder.py:86](../../../app/services/stream/decoder.py)）靠默认值巧合对齐，改一边忘同步即整体偏移且不报错。**适配器应是 `(detections, shape) → tensor` 纯函数，别读全局态。**
 
+## 🔴 入模时间密度 — train/serve fps skew（shape-check 抓不到的静默错）
+
+模型按**训练 fps 的时间密度**学时序；实时检测采样率 ≠ 训练 fps 时，不重采样就是喂错密度 —— 不抛异常、只是动作错，模型背锅。
+
+- **为何 shape-check 漏判**：fps 只改序列长度 T（变长轴），不改特征维 F。换个 fps 重训的权重加载时 shape/key 全过、密度已错 —— 这是词表数量类契约（能被 shape 抓）之外、**唯一抓不到的那类契约**。
+- **必须有显式重采样层**：入模前按帧 `ts` 把窗口重采样到模型契约帧率（见 [operator.py](../../../app/services/inference/temporal/operator.py) `_resample_by_ts`）；检测密度 ⟂ 模型节奏，中间隔一层，别把检测采样率焊死成模型输入率。
+- **`model_input_fps` 必填 + 加载期校验**：漏配**即崩**（yaml 缺 key → 构造缺参 TypeError；非正值 → `__init__` ValueError），别缺省 `None` + warning 放行 —— warning 会被无视、skew 静默复活。`window_seconds` 与 fps 共定 T，一并按**时间密度契约**看待，不是自由旋钮。
+
 ## 🟠 会抛异常
 
 - **bbox 硬解构** `x1,y1,x2,y2 = bbox`：`Detection.bbox` 契约变（mask/空框）即 `ValueError`。
@@ -29,7 +37,7 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 - **状态全在 `_sm`**：有无逸出成员（`history_frames` 类跨 tick 累加器）？破坏单 `_sm` 不变式。
 - **别重复造窗**：`analyze` 收到的 windows 已被 `_zip_by_ts`/`_clip` 按 `window_seconds` 裁到感受野；算子自己再攒一层历史 = 冗余 + 窗口随 tick 漂移。直接喂整窗。
 - **游标防重**：`last_ts` 跳过已推理帧，否则重叠滑窗重复前向。
-- **因果性（硬门）**：实时链路模型必须因果 —— 单向 GRU / causal mask。双向、或需未来帧才判定（MS-TCN 类）**不能进 1Hz 实时 tick**，走离线链路。感受域 ≥ 窗口；不足加显式 warm-up guard（帧数 < 阈值不推理）。
+- **因果性（硬门）**：实时链路模型必须因果 —— 单向 GRU / causal mask。双向、或需未来帧才判定（MS-TCN 类）**不能进 1Hz 实时 tick**，走离线链路。感受域 ≥ 窗口；不足加显式 warm-up guard（帧数 < 阈值不推理）。**确认 checkpoint 出自因果 pipeline**（训练仓 `sliding_window_temporal`），别把离线双向那版（`full_sequence_temporal` / BiGRU）拿来在线读 `logits[-1]` —— 最后一步后向上下文为零 = 静默误分类，且 jit blob 看不出它是否双向，得回训练仓核对产物来源。
 - **推理 seam**：惰性加载（双检锁）+ `model.eval()` + `torch.no_grad()`；torch/模型 import 下沉、模块顶层不引 torch（同 [detector.py](../../../app/services/inference/detection/detector.py) 把 ultralytics 延迟到加载处）；权重缺失显式报错。
 
 ## ⚪ 契约 / 放置 / 风格
@@ -45,8 +53,9 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 
 判据一句：**能自由调的才配；必须与另一产物严格一致的不配（随产物走）。** 用"配错了会怎样"分流：
 
-- 配错后**行为变、不崩、可调**（`subscribes`/`realtime`/`window_seconds`/`min_frames`/`model_path`）→ 真配置，留 YAML。
-- 配错后 **加载即 shape/key mismatch**（`hidden`/`num_layers`，以及 `objects`/`actions` 的**数量**——它们定 `input_dim=count*4` 与 `num_classes`）→ 这不是配置，是"必须逐位等于产物的契约副本"。放 YAML 只把单一真源劈成"权重+YAML"两处、制造漂移（换个重训权重就得记着同步改），失去配置驱动的意义、流程反更繁琐。label 字符串是词表里唯一"软"的（仅 overlay 显示），也随产物走。
+- 配错后**行为变、不崩、可调**（`subscribes`/`realtime`/`min_frames`/`model_path`）→ 真配置，留 YAML。
+- 配错后 **加载即 shape/key mismatch**（`hidden`/`num_layers`，以及 `objects`/`actions` 的**数量**——它们定 `input_dim = count × 每物体特征数` 与 `num_classes`）→ 这不是配置，是"必须逐位等于产物的契约副本"。放 YAML 只把单一真源劈成"权重+YAML"两处、制造漂移（换个重训权重就得记着同步改），失去配置驱动的意义、流程反更繁琐。label 字符串是词表里唯一"软"的（仅 overlay 显示），也随产物走。
+- 配错后 **不崩、不 shape-mismatch、静默喂错时间密度**（`model_input_fps`，及改变帧数的 `window_seconds`）→ 最阴的一类：skew 温床，shape-check 天生漏判（fps 改 T 不改 F）。至少**必填 + 加载期校验**（见上方 🔴 train/serve skew）；理想随产物走（下方 sidecar），别在部署 YAML 手抄一个 fps 数字。
 
 **实现待商榷（列菜单，别钦定）**——共同点都是配置跟着权重、不进 YAML：
 
@@ -59,7 +68,8 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 
 > 诚实排序（此项目一 GRU、一仓一模型）：safetensors+config ≳ torch.save dict ≫ 现状（arch 抄进 YAML）。别上 registry/onnx——单模型属过度。安全性（safetensors / `weights_only=True`）是当代实践一环，值得一并考虑。
 
-⚠️ 产物格式是**跨仓契约**（时序模型一模型一仓库），schema 需与训练侧约定，别单方拍板。审 YAML 时数一下 `params`：模型架构/词表超参占了一大半，就是该下沉的信号。
+⚠️ 产物格式是**跨仓契约**（时序模型一模型一仓库），schema 需与训练侧约定，别单方拍板。审 YAML 时数一下 `params`：模型架构/词表超参 + **帧率/窗口密度**（`model_input_fps`/`window_seconds`）占了一大半，就是该下沉的信号。
+训练仓（Cleansight_models）本就成对维护 `external_checkpoints/<id>/<id>.yaml`，登记 feature version / tensor shape / 类别顺序 / normalization / 窗口 —— 交付时让后端读这份 sidecar，别在后端 yaml 手抄。注意：它的严格加载器查 param-key + tensor-shape，**恰好抓不到 fps**（fps 改 T 不改 shape），所以 fps 是最该随 sidecar、最不能手抄的一项。
 
 ## 上线门禁（缺一不合入）
 
