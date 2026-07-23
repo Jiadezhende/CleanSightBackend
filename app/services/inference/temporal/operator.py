@@ -95,6 +95,20 @@ class TemporalOperator(Operator):
             raise ValueError(
                 f"[{name}] model_input_fps 必须为正（得到 {model_input_fps}）"
             )
+        # 上界：重采样只能降采样（_resample_by_ts 网格抽稀）。契约帧率 > 检测采样率时无法达成——
+        # 窗口本就没那么密，重采样保留全帧、实际喂检测率而非契约率 → 静默 skew。故加载期即拒，
+        # 别放行成"假达标"。检测采样率 = raw_fps / inference_decimation = settings.inference_fps。
+        from app.settings import settings
+        detection_fps = settings.inference_fps
+        # 相对容差比较：非整除采样率（如 30/7=4.2857…）反推出的 detection_fps 是循环二进制小数，
+        # 与 yaml 里"顶到上限"的十进制字面量可能差 1 ULP。顶格是合法配置（重采样恰为 no-op），
+        # 不能因浮点抖动误拒；容差 1e-9 远小于任何真实"超限"（如 20 vs 15），不放过真错。
+        if model_input_fps > detection_fps * (1.0 + 1e-9):
+            raise ValueError(
+                f"[{name}] model_input_fps({model_input_fps}) > 检测采样率"
+                f"({detection_fps:.3f} = raw_fps/inference_decimation)：重采样只能降采样，"
+                f"契约帧率不可高于检测采样率（要么降 model_input_fps、要么减小 inference_decimation）"
+            )
         self.model_input_fps: float = float(model_input_fps)
 
         self._object_id_to_name = objects
