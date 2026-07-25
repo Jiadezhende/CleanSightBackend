@@ -280,6 +280,8 @@ class ModelWorkerService:
             cq.push_detection(feature)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）
             cq.set_latest_inference(feature)
+            # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）
+            cq.mark_startup_milestone("first_inference")
             # L2 特征落盘（常开）：offline 链路硬需求，best-effort 不影响主链路。
             # 目录键 (task_id, step_id) 与 HLS 同款；任一为 None 则跳过（拒落，同 HLS 口径）。
             # 从同一句柄派生 task_id/step_id（消除跨 snapshot 二次读的键错配窗口）。

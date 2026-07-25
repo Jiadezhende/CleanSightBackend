@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import logging
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -20,6 +21,10 @@ from app.utils.metrics import frame_drop_total
 
 # signals_10s 聚合底线（固定 10s），与帧窗保留时长（可 ≥10s）解耦。
 _SIGNALS_WINDOW_SEC = 10.0
+
+# 启动延迟埋点专用 logger（独立命名，便于 grep/单独调级）：
+# 拆「请求→首个产出」三段——拉流首帧 / 首个推理写回 / 首个告警。
+_startup_logger = logging.getLogger("app.startup_latency")
 
 
 class RunState(enum.Enum):
@@ -119,7 +124,15 @@ class ClientQueues:
         self.stage: str = stage
         # run 起始时刻：供 GlobalHealthMonitor 的 task_max_duration 看门狗判定跑飞任务并超时拆除
         # （monitor.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
+        # 同时作为启动延迟埋点的公共参考钟（mark_startup_milestone 相对它计耗时）。
         self.task_started_at: float = time.time() if task_id is not None else 0.0
+
+        # 启动里程碑埋点（纯观测，first-wins 幂等）：记录每个里程碑首次到达相对
+        # task_started_at 的耗时，仅记一次。无锁——每个 milestone 名字单一生产者线程
+        # （first_frame=decoder / first_inference=写回 / first_alarm=actor），同名无并发写；
+        # 三线程并发 add 的是不同 key，set 恒 ≤3 元素不触发 rehash，GIL 下逐个 add 原子
+        # （同 ca_ready 的无锁 SPSC 约定）。纯日志，不参与任何数据流。
+        self._startup_marks: Set[str] = set()
 
         # 最新原始帧缓存（由 _raw_lock 保护）
         self.latest_raw_frame: Optional[np.ndarray] = None
@@ -243,6 +256,10 @@ class ClientQueues:
             return
         with self._viz_lock:
             self._latest_rendered = frame_data
+        # 启动延迟埋点 C：首个渲染帧就绪（即首个可供 WS 推送给前端的画面；
+        # 仅非空写触发，清空(None)不计。单生产者=唯一 viz worker 线程，幂等）
+        if frame_data is not None:
+            self.mark_startup_milestone("first_rendered")
 
     def get_latest_rendered(self) -> Optional[Frame]:
         """获取最新渲染帧（由 WebSocket 前端推流调用）。"""
@@ -324,6 +341,32 @@ class ClientQueues:
 
     def is_active(self) -> bool:
         return self._state is RunState.ACTIVE
+
+    # --- 启动延迟埋点 ---
+
+    def mark_startup_milestone(self, name: str) -> None:
+        """记录某启动里程碑首次到达（相对 run 起始 task_started_at 的耗时），仅首次记录、幂等。
+
+        name ∈ {"first_frame"(拉流首帧) / "first_inference"(首个推理写回) / "first_rendered"(首个渲染帧就绪)}。
+        三条日志的 +Xms 相减即得启动延迟三段：A=first_frame（拉流建立，通常大头）、
+        B=first_inference−first_frame（首帧→推理）、C=first_rendered−first_inference（推理→
+        渲染标注→首个可供 WS 推送前端的画面）。三段合计 ≈ 用户从请求到「看到第一帧」的等待。
+        （告警段 = actor 相位 + 算子 window_seconds 算法固有累积，非启动优化对象，不埋。）
+
+        设计：无锁，已记录直接返回——每个 name 单一生产者线程，first-wins 天然无竞态；
+        故可在热路径每帧/每批自由调用，首次之后开销仅一次 set 查询；纯日志，不参与数据流。
+        task_started_at 未置（裸建单测）则跳过。
+        """
+        if name in self._startup_marks:
+            return
+        if self.task_started_at <= 0.0:
+            return
+        self._startup_marks.add(name)
+        elapsed_ms = (time.time() - self.task_started_at) * 1000.0
+        _startup_logger.info(
+            "[startup] task=%s step=%s %s +%.0fms",
+            self.task_id, self.step_id, name, elapsed_ms,
+        )
 
     def to_draining(self) -> bool:
         """ACTIVE→DRAINING（幂等、单调）。返回本次是否发生转换。

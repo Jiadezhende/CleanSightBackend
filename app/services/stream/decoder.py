@@ -366,6 +366,10 @@ class FFmpegDecoder:
 
                 self.frames_received += 1
 
+                # 启动延迟埋点 A：拉流建立后首帧解码到手（仅首帧触发一次）
+                if self.frames_received == 1 and self.client_queues is not None:
+                    self.client_queues.mark_startup_milestone("first_frame")
+
                 # log every N frames to observe liveness
                 if self.frames_received % 300 == 0:
                     self.logger.info(
