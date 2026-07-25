@@ -1,10 +1,26 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-07-25
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Configuration Service
 
 配置由 Pydantic settings、YAML 文件和少量运行时配置文件共同组成。
+
+## fps/时间配置三层模型（关键不变式）
+
+fps/时间相关配置归为**三层**，边界定死——这是防止"衍生量被手滑写回 yaml、与 settings 漂移"的核心约束。真源：`app/settings.py`、四个 config loader、`config/*.yaml`。
+
+| 层 | 放什么 | 判据 | 铁律 |
+|----|--------|------|------|
+| **settings 级**（`app/settings.py`） | 跨模块单一真源的**真旋钮** + **时间概念** | 能自由调、调了行为变、不与另一产物强绑 | 整数 fps 旋钮只有 2 个（`raw_fps`/`inference_decimation`） |
+| **yaml 级**（`config/*.yaml`） | **编排**（选哪条 pipeline/流）+ **契约**（随产物钉死的量） | 配错会崩（shape/key）或语义是"选择/契约" | 不含任何衍生量 |
+| **衍生量**（代码属性） | settings 算出的换算结果 | 必须与真源严格一致、不能独立设 | **永不进 yaml**——进了就是第二真源 → 漂移 |
+
+- **settings 真旋钮**：`raw_fps: int = 30`（生产者：解码 CFR 帧率）、`inference_decimation: int = 2`（采样器：检测抽帧"每 N 帧留 1"的唯一旋钮）；**时间概念**：`ca_maxlen_seconds: int = 90`、`ca_segment_seconds: int = 10`（缓存/段长以秒声明，非帧数）。检测率 = `raw_fps / inference_decimation`，整数因子故只命中 `raw_fps` 的整除率（30→15/10/7.5/6…，不支持 30→20 类非整除比）。
+- **yaml 唯一的 fps 是 `model_input_fps: 7.5`**（`inference_config.yaml` CleanOperator `params`）——它是**模型契约**（随产物钉死、模型侧按 ts 重采样入模），配错不崩、静默降级，故必填 + 加载期校验（`TemporalOperator.__init__` 对 `None`/`≤0` 暴露信号）。
+- **衍生量**（由 settings 算出、活在代码属性、永不进 yaml）：`settings.inference_fps`（property = `raw_fps/inference_decimation` = 15.0，viz 轮询率）、`ClientConfig.ca_maxlen`/`ca_segment_len`（`×raw_fps` = 2700/300 帧）、`DecoderConfig.default_fps`（`= raw_fps`，ffmpeg `fps=` filter）、`VizWorkerPool.target_fps`（`= inference_fps`）、`ClientQueues.inference_decimation`（直读 settings）。
+- **天然护栏**：四个 config loader 都是裸 `**dict`、不做字段过滤——谁往 yaml 误写衍生量（如 `raw_fps: 25`），构造即 `TypeError` **当场崩**，无需额外校验。
+- **运行时反推**（既不在 settings 也不在 yaml，从帧 ts 现算）：HLS 段编码 `eff_fps` = `(N-1)/span`（`hls_strategy._effective_fps`，raw/processed 逐段各自反推）、WS 推帧率（rendered 流实际到达率，`ai.py`）、模型入模密度（`_resample_by_ts` 重采样到 `model_input_fps`）。
 
 ## 环境变量
 
@@ -41,9 +57,9 @@
 
 主要配置文件：
 
-- `config/inference_config.yaml`：stage、detectors（流源）、rules（Operator，含 subscribes/window_seconds）、offline（离线段，见下）、`batch_size`。**跨模块共享参数（raw_fps/inference_fps/ca_maxlen/ca_segment_len）已上浮 `app/settings.py` 单一真源，不再放此**。
+- `config/inference_config.yaml`：stage、detectors（流源）、rules（Operator，含 subscribes/window_seconds、CleanOperator 的 `model_input_fps` 模型契约）、offline（离线段，见下）、`batch_size`。**采样率/编码 fps 等衍生量与真旋钮（raw_fps/inference_decimation/ca_*_seconds）在 `app/settings.py`，不放此**（见上「三层模型」）。
 - `config/inference_config_cpu.yaml`：CPU/mock 环境配置。
-- `config/stream_config.yaml`：FFmpeg 解码尺寸、fps、pix_fmt、背压。
+- `config/stream_config.yaml`：FFmpeg 解码尺寸、pix_fmt、背压（`resize`/`backpressure` 等解码参数）。**不含 `default_fps`**（已删——解码 CFR 帧率由 `DecoderConfig.default_fps` 从 `settings.raw_fps` 派生）。
 - `config/persistence_config.yaml`：HLS queue、alarm queue、存储目录、清理策略。
 - `config/health_monitor_config.yaml`：心跳、重连、孤儿流、任务超时。
 - `config/client_config.yaml`：客户端帧尺寸、初始 stage 等。
@@ -101,8 +117,8 @@ MediaMTX Gateway 使用 `GATEWAY_*` 环境变量或 `mediamtx_gateway/config.ini
 
 ## 配置耦合点
 
-- 跨模块共享参数（raw_fps/inference_fps/ca_maxlen/ca_segment_len）与 `storage_base_dir` 均以 `app/settings.py` 为**单一真源**；persistence/client/inference/traceback 都读 settings，不反向钻进彼此的 YAML。
-- HLS segment duration 与 `ca_segment_len`、raw/processed fps 有联动关系。
+- 真旋钮（`raw_fps`/`inference_decimation`）、时间概念（`ca_maxlen_seconds`/`ca_segment_seconds`）与 `storage_base_dir` 均以 `app/settings.py` 为**单一真源**；persistence/client/inference/traceback 都读 settings（或其派生属性），不反向钻进彼此的 YAML。
+- HLS segment duration 由 `ca_segment_seconds`（→衍生 `ca_segment_len` 帧数）决定；段编码 fps 不再联动任何配置 fps，改由帧 ts 逐段反推（`_effective_fps`）。
 - trace/media token TTL 和 secret 由 settings 管理。
 
 ## 服务实例化与类型加载

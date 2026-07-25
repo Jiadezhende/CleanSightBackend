@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-07-25
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -12,7 +12,7 @@
 RTSP (仅 RTSP)
   -> StreamService / FFmpegDecoder（decoder 自持读循环；ffmpeg 输出规范化 CFR raw_fps 流）
   -> ClientQueues.ca_raw（raw HLS 纯缓冲）
-  -> ClientQueues.ca_ready（SPSC deque，Bresenham 均匀抽帧 inference_fps/raw_fps）
+  -> ClientQueues.ca_ready（SPSC deque，整数降采样每 N 帧留 1，N=inference_decimation）
   -- L1 --> StageAwareDispatcher（捕获 CQ 句柄）-> MultiModelWorkerPool -> FrameInference
              ModelWorkerService._write_back_results（单入口，判 cq.is_active()）三写：
                ├─ push_detection -> _slide_window       （-> L3，异步缓冲解速差）
@@ -30,7 +30,7 @@ RTSP (仅 RTSP)
 
 ## 输入与解码
 
-`StreamService` 为每个 `task_id` 创建一个 `FFmpegDecoder`（仅 RTSP）。ffmpeg 用 `scale=W:H,fps=raw_fps` + `-vsync` 输出**规范化 CFR raw_fps** rawvideo 流；decoder **自持读循环线程**读帧（合并双平台单一阻塞读路径），`Frame.timestamp` 取读帧时的墙钟到达时刻（`time.time()`）。主要输出：`ca_raw`（raw HLS 缓冲）、`ca_ready`（待推理，`append_ca_ready_with_throttle` Bresenham 相位累加抽帧 + 背压）、`latest_raw_frame/timestamp`（健康监控/可视化）。
+`StreamService` 为每个 `task_id` 创建一个 `FFmpegDecoder`（仅 RTSP）。ffmpeg 用 `scale=W:H,fps=raw_fps` + `-vsync` 输出**规范化 CFR raw_fps** rawvideo 流；decoder **自持读循环线程**读帧（合并双平台单一阻塞读路径），`Frame.timestamp` 取读帧时的墙钟到达时刻（`time.time()`）。主要输出：`ca_raw`（raw HLS 缓冲）、`ca_ready`（待推理，`append_ca_ready_with_throttle` 整数降采样每 N 帧留 1 + 背压）、`latest_raw_frame/timestamp`（健康监控/可视化）。
 
 ## 推理与时序（L1→L4）
 

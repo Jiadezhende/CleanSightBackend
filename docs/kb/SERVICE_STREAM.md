@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-07-25
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -31,9 +31,9 @@
 
 ## 抽帧与背压
 
-入 `ca_ready` 走 `ClientQueues.append_ca_ready_with_throttle()`：Bresenham 相位累加器按 `inference_fps/raw_fps` 均匀抽帧——每输入帧累加 `inference_fps`、跨过 `raw_fps` 阈值放行一帧，长期保留率精确 `= inference_fps/raw_fps`，支持非整除比（如 30→20 取 keep-keep-drop），**不依赖 wall-clock**（墙钟间隔门受解码线程调度抖动、稳定达不到目标抽帧率，故弃用）。默认 `inference_fps=15`（取 30 的整除值，`raw_fps=30`，见 [app/settings.py](../../app/settings.py)）。队列满则丢（背压只丢推理帧，`ca_raw` 录制继续）。`_decimate_phase` 仅由 decoder 线程读写、SPSC 无锁。decoder 读 `manager.get_pending_count(task_id)` 判背压——此跨模块读是有意保留。
+入 `ca_ready` 走 `ClientQueues.append_ca_ready_with_throttle()`：整数降采样"**每 N 帧留 1**"（N=`inference_decimation`，默认 2）——`_decimate_counter` 计数，未满 N 丢弃、满 N 放行并归零，长期保留率精确 `= 1/N`。输入为 ffmpeg 规范化后的 CFR 流，CFR 已把时间烙成等距帧号，故整数计数天然精确均匀、**不依赖 wall-clock**（墙钟间隔门受解码线程调度抖动、稳定达不到目标抽帧率，故弃用），也无浮点相位累积。整数因子故**只命中整除比**（30→15/10/7.5…，不支持 30→20 类非整除比；非整除诉求由模型侧 `model_input_fps` 按 ts 重采样承接）。检测率 = `raw_fps/N`（默认 30/2=15，见 [app/settings.py](../../app/settings.py) 派生属性 `inference_fps`）。队列满则丢（背压只丢推理帧，`ca_raw` 录制继续）。`_decimate_counter` 仅由 decoder 线程读写、SPSC 无锁。decoder 读 `manager.get_pending_count(task_id)` 判背压——此跨模块读是有意保留。
 
-> `inference_fps` 是 throttle、可视化 VizWorker target、persistence processed 段编码**共用的单一真源**（[app/settings.py](../../app/settings.py)）；改它会同步影响三处。
+> 采样旋钮的**唯一真源**是 `inference_decimation`（[app/settings.py](../../app/settings.py)）；`inference_fps` 是其派生 property（`raw_fps/N`），供 throttle 报告与 VizWorker target 消费（消费者继承采样流速率）。persistence processed 段编码**不再共用** `inference_fps`，改由帧 ts 逐段反推 `eff_fps`（见 [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)）。
 
 ## URL 重写
 

@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-07-25
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -49,7 +49,7 @@
 
 - **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer_batch(frames, timestamps)`（**唯一推理入口**，无单帧 `infer()`）、`prepare_visualization_data`。`timestamps` 是帧捕获真值锚点（源自 `Frame.timestamp`，pool 从 `req.timestamp` 穿入），须原样写回 `FrameDetections.timestamp`，令每帧 `FrameDetections.timestamp == FrameInference.timestamp`——写回口据此物化帧级 `FrameFeature` 对齐多流（供 L3），detector 不得自造时间戳。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
 - **Operator**（流算子，规则粒度，per-run 独立）：`name`、`subscribes`（**显式、必填**输入流名列表，缺则 fail-fast）、`window_seconds`；`analyze(windows: List[FrameFeature])` 推进 `self._sm`、`judge() → (overlay_texts, alarms)`、`finalize() → List[Alarm]`（结算，默认空）。analyze+judge **合并**进单个 Operator（单对象内完成，不做 EventFact 跨对象传递）。`windows` 是帧级 `FrameFeature` 快照（多流已在写回口对齐进 `by_source`），算子内 `_clip` 到自身感受野，单订阅用 `primary_window` 投影自身流。
-- **TemporalOperator**（`Operator` 子基类，供动作识别时序模型）：多带 `model_path`/`objects`/`actions` 三参，惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、失败 `_load_failed` 锁存），`infer(features)` 前向出 logits。子类 `CleanOperator`（`workflows/clean.py`）在 `analyze` 内把订阅流窗口 `_adapt_to_features` 成 `(T, num_objects×6)` 张量（每物体 `(count,cx,cy,w,h,area)`，异常帧留全零行保持时间轴不缺帧）后 `infer`，取末步 argmax 存 `_sm['latest_action']`；`judge` 仅出 overlay 文案、当前不产告警。这是 CLEAN stage 的**在线**时序算子（YAML `clean_monitor`，`gru-final.pt`，`window_seconds=10`），与离线 CLEAN segmenter 是两条独立链路。
+- **TemporalOperator**（`Operator` 子基类，供动作识别时序模型）：多带 `model_path`/`objects`/`actions` 三参，惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、失败 `_load_failed` 锁存），`infer(features)` 前向出 logits。子类 `CleanOperator`（`workflows/clean.py`）在 `analyze` 内**先按帧 ts 重采样**（`_resample_by_ts` 相位网格抽稀到 `model_input_fps`，如 15fps 10s 窗口 150→75 帧@7.5；网格前进不累积漂移、遇缺口重锚不追补突发），再 `_adapt_to_features` 成 `(T, num_objects×6)` 张量（每物体 `(count,cx,cy,w,h,area)`，异常帧留全零行保持时间轴不缺帧）后 `infer`，取末步 argmax 存 `_sm['latest_action']`；`judge` 仅出 overlay 文案、当前不产告警。新帧门 / `last_ts` 推进仍基于**完整**窗口，重采样只定喂模型的时间轴密度——这道显式重采样隔开「检测密度（`inference_decimation`）」与「模型入模节奏（`model_input_fps` 契约）」，消除 train/serve fps skew。这是 CLEAN stage 的**在线**时序算子（YAML `clean_monitor`，`gru-final.pt`，`window_seconds=10`，`model_input_fps=7.5`），与离线 CLEAN segmenter 是两条独立链路。
 
 ## L3/L4：ClientTemporalActor（~1Hz）
 
@@ -88,7 +88,7 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 - `"2"` / alias `CLEAN`：detectors `clean_large` + `clean_small`；rule `clean_monitor`（`CleanOperator`，订阅两流，`gru-final.pt` 在线动作识别，realtime）。`offline: {}`（生产默认不启用；启用时改 `offline.class` 指向 `segmenters/clean.py` 某模型）。
 - `MOCK`：未知 step fallback + taskless 默认，在线纯透传（`mock_passthrough` 恒不触发）；`offline` 段启用 `BrushRulesSegmenter` 作**唯一**端到端离线样例（生产 stage 的 offline 保持 `{}`）。
 
-跨模块共享参数（`raw_fps`/`inference_fps`/`ca_maxlen`/`ca_segment_len`）已上浮 `app/settings.py` 单一真源；本文件只留 `batch_size` 等推理自有参数。
+跨模块真旋钮（`raw_fps`/`inference_decimation`）与时间概念（`ca_*_seconds`）在 `app/settings.py` 单一真源（`inference_fps`/`ca_maxlen` 等为其派生量，见 [SERVICE_CONFIG.md](SERVICE_CONFIG.md) 三层模型）；本 YAML 只留 `batch_size` 等推理自有参数 + `model_input_fps` **模型契约**（CleanOperator `params`，随产物钉死、必填、加载期校验，模型侧按 ts 重采样入模）。
 
 ## naming.py 运行时注册表
 

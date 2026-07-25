@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-07-25
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -41,7 +41,7 @@
 
 ### 队列与槽位
 
-- `ca_ready`：待推理帧，**无锁 SPSC deque**（单生产者 decoder / 单消费者 dispatcher）。入队走 `append_ca_ready_with_throttle`（Bresenham 相位累加器均匀抽帧 `inference_fps/raw_fps` + 背压），非 wall-clock。
+- `ca_ready`：待推理帧，**无锁 SPSC deque**（单生产者 decoder / 单消费者 dispatcher）。入队走 `append_ca_ready_with_throttle`（整数降采样"每 N 帧留 1"，N=`inference_decimation`，`_decimate_counter` 计数 + 背压），非 wall-clock。
 - `ca_raw` / `ca_processed`：raw / processed HLS 落盘**纯缓冲**（`_raw_lock` / `_viz_lock`）。**不触发落盘**——persistence 的 HLSSegmentSweeper 周期 `take_raw_segment()` / `take_processed_segment()` 主动**拉取**（PULL）。
 - `_latest_rendered`：最新渲染帧单槽，供 WebSocket 实时推流（前端轮询）。
 - `_latest_inference`：最新推理结果原子快照，供 VisualizationWorker。
