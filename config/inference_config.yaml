@@ -4,7 +4,7 @@
 # 1. detectors[]：流源（分组粒度），无状态多 Client 共享；name = 该 detector 产出的流名
 # 2. rules[]：流算子（规则粒度），每 Client 独立；subscribes 订阅输入流名，
 #    class = 合并 analyze(推进状态)+judge(出告警) 的 Operator，params.window_seconds = 感受野
-# 3. offline：离线段（stage 粒度）占位，本次未实现
+# 3. offline：离线段（stage 粒度）按 YAML 路由到 OfflineSegmenter，空块表示不启用
 # 4. 可视化使用固定渲染器（FixedVisualizer），Detector 只需提供 VisualizationData
 #
 # 开发者只需：
@@ -17,7 +17,7 @@ stages:
   # 流处理框架，每个 stage 三段：
   #   detectors[] —— 流源（分组粒度）：name = 该 detector 产出的流名（slide_window key）
   #   rules[]     —— 流算子（规则粒度）：subscribes 订阅输入流名，class = 合并 analyze+judge 的 Operator
-  #   offline     —— 离线段（stage 粒度）占位，本次未实现
+  #   offline     —— 离线段（stage 粒度）：非空即启用，class 指定具体离线模型
   #
   # ==================== step "1" / LEAK 阶段（泄漏检测） ====================
   "1":
@@ -73,8 +73,43 @@ stages:
           conf_threshold: 0.25
           iou_threshold: 0.45
           enabled: true
-    rules: []
-    offline: {}                      # 预留：离线动作分割模型（stage 粒度）将挂这里
+    rules:
+      - name: clean_monitor
+        subscribes: [clean_large, clean_small]
+        realtime: true               # 实时信号，纳入 signals_10s
+        class: app.services.inference.workflows.clean.CleanOperator
+        params:
+          window_seconds: 10.0
+          # 模型契约帧率：入模前把 ~inference_fps 的窗口按 ts 重采样到此帧率再喂模型。
+          # 必须等于训练 fps（gru-final.pt 训练于 7.5fps）；配错不崩、静默降级（train/serve skew）。
+          model_input_fps: 7.5
+          model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/gru-final.pt
+          actions:
+            0: idle
+            1: air_injection
+            2: flush
+            3: long_brush_insert
+            4: long_brush_withdraw
+          objects:
+            0: hand
+            1: scope_control_body
+            2: scope_mid_section
+            3: scope_distal_end
+            4: syringe
+            5: air_gun
+            6: short_brush
+            7: brush_tip_out
+    # CLEAN 离线模型按 YAML 路由，生产/开发需要启用时把 offline 从 {} 改为类似：
+    # offline:
+    #   name: clean_offline
+    #   subscribes: [clean_large, clean_small]
+    #   class: app.services.inference.offline.segmenters.clean.CleanMSTCNBiLSTMSegmenter
+    #   # 可选模型:
+    #   # class: app.services.inference.offline.segmenters.clean.CleanASFormerSegmenter
+    #   # class: app.services.inference.offline.segmenters.clean.CleanBiGRUSegmenter
+    #   params:
+    #     model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm.pt
+    offline: {}                      # 生产默认不启用；MOCK stage 提供默认端到端兜底
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================
   MOCK:
@@ -92,7 +127,17 @@ stages:
         class: app.services.inference.workflows.mock.MockOperator
         params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
-    offline: {}
+    # 离线段：本次唯一启用的 offline 配置，作「能端到端跑的配置化路由样例」。
+    # 离线是独立进程手动跑（python -m app.services.inference.offline.cli run --step-id -1），
+    # 不会被在线链路自动执行；未配数字 step_id(如 -1) 经 resolve_stage 回退到本 MOCK stage。
+    # 生产 stage 1/2 的 offline 保持 {} 不启用。
+    offline:                           # 非空即启用（无需 enabled 开关）；生产 stage 保持 {} 禁用
+      name: mock_offline
+      subscribes: [mock]
+      class: app.services.inference.offline.segmenters.mock.BrushRulesSegmenter
+      params:
+        label: mock_action
+        min_frames: 1
 
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到

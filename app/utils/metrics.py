@@ -46,7 +46,7 @@ infer_latency_ms = Histogram(
 # ============================================================================
 
 infer_failure_total = Counter(
-    "infer_failure_total",
+    "infer_failure",  # prometheus 自动补 _total → sample=infer_failure_total；family=infer_failure
     "Total inference failures",
     ["model", "error_type"],
 )
@@ -55,7 +55,7 @@ infer_failure_total = Counter(
 
 标签：
 - model: 模型名称
-- error_type: 异常类型（如 'ModelInferenceError', 'FrameDrop'）
+- error_type: 异常类型（如 'ModelInferenceError'）
 
 用途：
 - 监控推理失败率
@@ -79,23 +79,24 @@ infer_failure_total = Counter(
 # ============================================================================
 
 frame_drop_total = Counter(
-    "frame_drop_total", "Total frames dropped", ["reason"]
+    "frame_drop", "Total frames dropped", ["reason"]  # sample=frame_drop_total；family=frame_drop
 )
 """
-帧丢弃总数（FrameDrop 专用）
+帧丢弃总数（按成因分类的单一真源）
 
 标签：
-- reason: 丢弃原因（如 'decode_failed', 'client_removed', 'quality_check_failed'）
+- reason: 丢弃成因，在真丢帧点就地打标：
+    'ingress_backpressure'（入口背压丢推理帧）、'decode_error'（解码/解析异常帧）、
+    'infer_backlog'（推理阶段队列淘汰）、'raw_backpressure'（ca_raw 录制满）、
+    'hls_backpressure'（ca_processed HLS 满）、'stale_run'（拆除中 run 的迟到结果）
 
 用途：
-- 监控单帧失败率
-- 按丢弃原因分组
+- 监控丢帧率、按成因分组定位瓶颈（入口 / 推理 / 录制 / HLS）
 - 告警：丢帧率 > 10%
 
 示例：
-    if frame is None:
-        frame_drop_total.labels(reason='decode_failed').inc()
-        raise FrameDrop(client_id='client_1', reason='decode_failed')
+    if dropped:
+        frame_drop_total.labels(reason='ingress_backpressure').inc()
 """
 
 
@@ -103,7 +104,7 @@ frame_drop_total = Counter(
 # 4. GPU OOM 计数（Counter）
 # ============================================================================
 
-gpu_oom_total = Counter("gpu_oom_total", "Total GPU out-of-memory errors", ["model"])
+gpu_oom_total = Counter("gpu_oom", "Total GPU out-of-memory errors", ["model"])  # sample=gpu_oom_total
 """
 GPU 内存不足错误总数
 
@@ -130,7 +131,7 @@ GPU 内存不足错误总数
 # ============================================================================
 
 retry_total = Counter(
-    "retry_total", "Total retry attempts", ["operation", "error_type"]
+    "retry", "Total retry attempts", ["operation", "error_type"]  # sample=retry_total；family=retry
 )
 """
 重试总数（所有操作）

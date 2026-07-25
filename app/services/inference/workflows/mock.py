@@ -14,15 +14,14 @@ MockOperator（时序线程，流算子）：
 from __future__ import annotations
 
 import logging
-import time
-from typing import Any, Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
-from app.services.inference.workflows.detector import Detector
-from app.services.inference.workflows.operator import Operator
+from app.services.inference.detection.detector import Detector
+from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmType
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import Detection, FrameDetections, FrameFeature
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
@@ -47,8 +46,8 @@ class MockDetector(Detector):
         super().__init__(name="mock", enabled=enabled)
         self.brightness_threshold = brightness_threshold
 
-    def infer(self, frame: np.ndarray, context: Dict[str, Any]) -> FrameDetections:
-        timestamp = time.time()
+    def _detect(self, frame: np.ndarray, timestamp: float) -> FrameDetections:
+        """单帧亮度启发式检测。timestamp 为帧捕获真值锚点，由 infer_batch 穿入。"""
         h, w = frame.shape[:2]
         cy1, cy2 = h // 4, 3 * h // 4
         cx1, cx2 = w // 4, 3 * w // 4
@@ -72,7 +71,6 @@ class MockDetector(Detector):
             detections=detections,
             metadata={
                 "model": "mock_brightness",
-                "frame_shape": frame.shape,
                 "mean_brightness": round(mean_brightness, 2),
             },
             timestamp=timestamp,
@@ -80,9 +78,11 @@ class MockDetector(Detector):
         )
 
     def infer_batch(
-        self, frames: List[np.ndarray], contexts: List[Dict[str, Any]]
+        self,
+        frames: List[np.ndarray],
+        timestamps: List[float],
     ) -> List[FrameDetections]:
-        return [self.infer(frame, ctx) for frame, ctx in zip(frames, contexts)]
+        return [self._detect(frame, ts) for frame, ts in zip(frames, timestamps)]
 
     def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
         items = [
@@ -150,7 +150,7 @@ class MockOperator(Operator):
             "alarm_count": 0,
         }
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: List[FrameFeature]) -> None:
         window = self.primary_window(windows)
         if not window:
             return

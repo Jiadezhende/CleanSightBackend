@@ -12,6 +12,7 @@ from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app.routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
+from app.services import persistence
 from app.utils import (
     AppError,
     ConflictError,
@@ -57,17 +58,20 @@ async def lifespan(app: FastAPI):
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
 
-    # 按照服务模块启动生命周期管理
+    # 按照服务模块启动生命周期管理（起序 = 嵌套顺序，停序 = 逆序）：
     # 1. 健康监控服务（依赖 client_manager, stream_service, inference_manager）
-    # 2. AI 推理服务
+    # 2. 持久化服务（平级服务，须先于 inference 起、后于 inference 停，
+    #    以承接 inference.stop() 的结算告警 + HLS 残段 flush 后再抽干队列）
+    # 3. AI 推理服务
     async with health.lifespan():
-        async with ai.lifespan():
-            try:
-                yield
-            finally:
-                # yield 返回时立即通知 WebSocket 退出，不等待后续清理
-                # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
-                shutdown_event.set()
+        async with persistence.lifespan():
+            async with ai.lifespan():
+                try:
+                    yield
+                finally:
+                    # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                    # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                    shutdown_event.set()
 
 
 
@@ -123,7 +127,7 @@ async def stream_error_handler(request: Request, exc: StreamConnectionError):
     logger.warning(
         "[BoundaryLayer3] Stream connection error: %s", exc,
         extra={
-            "client_id": exc.client_id,
+            "client_id": exc.source_ip,   # wire 键保留，值=source_ip
             "url": str(request.url),
             "method": request.method,
         },
@@ -133,7 +137,7 @@ async def stream_error_handler(request: Request, exc: StreamConnectionError):
         content={
             "error": "Stream unavailable",
             "detail": str(exc),
-            "client_id": exc.client_id,
+            "client_id": exc.source_ip,   # wire 键保留，值=source_ip
         },
     )
 
@@ -151,7 +155,9 @@ async def ffmpeg_error_handler(request: Request, exc: FFmpegError):
     logger.error(
         "[BoundaryLayer3] FFmpeg error: %s", exc,
         extra={
-            "client_id": exc.client_id,
+            "task_id": exc.task_id,
+            "step_id": exc.step_id,
+            "source_ip": exc.source_ip,
             "url": str(request.url),
         },
     )
@@ -160,7 +166,7 @@ async def ffmpeg_error_handler(request: Request, exc: FFmpegError):
         content={
             "error": "FFmpeg error",
             "detail": str(exc),
-            "client_id": exc.client_id,
+            "client_id": exc.source_ip,   # wire 键保留，值=source_ip
         },
     )
 
@@ -178,7 +184,9 @@ async def database_error_handler(request: Request, exc: DatabaseError):
     logger.error(
         "[BoundaryLayer3] Database error: %s", exc,
         extra={
-            "client_id": exc.client_id,
+            "task_id": exc.task_id,
+            "step_id": exc.step_id,
+            "source_ip": exc.source_ip,
             "url": str(request.url),
         },
     )
@@ -205,7 +213,9 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
     logger.error(
         "[BoundaryLayer3] Model inference error: %s", exc,
         extra={
-            "client_id": exc.client_id,
+            "task_id": exc.task_id,
+            "step_id": exc.step_id,
+            "source_ip": exc.source_ip,
             "url": str(request.url),
         },
     )
@@ -214,7 +224,7 @@ async def inference_error_handler(request: Request, exc: ModelInferenceError):
         content={
             "error": "Inference failed",
             "detail": str(exc),
-            "client_id": exc.client_id,
+            "client_id": exc.source_ip,   # wire 键保留，值=source_ip
         },
     )
 
@@ -232,7 +242,9 @@ async def persistence_error_handler(request: Request, exc: PersistenceError):
     logger.error(
         "[BoundaryLayer3] Persistence error: %s", exc,
         extra={
-            "client_id": exc.client_id,
+            "task_id": exc.task_id,
+            "step_id": exc.step_id,
+            "source_ip": exc.source_ip,
             "url": str(request.url),
         },
     )
@@ -316,7 +328,9 @@ async def conflict_error_handler(request: Request, exc: ConflictError):
     logger.warning(
         "[BoundaryLayer3] Resource conflict: %s", exc,
         extra={
-            "client_id": exc.client_id,
+            "task_id": exc.task_id,
+            "step_id": exc.step_id,
+            "source_ip": exc.source_ip,
             "resource_type": exc.resource_type,
             "resource_id": exc.resource_id,
             "url": str(request.url),
@@ -327,7 +341,7 @@ async def conflict_error_handler(request: Request, exc: ConflictError):
         content={
             "error": "Resource conflict",
             "detail": str(exc),
-            "client_id": exc.client_id,
+            "client_id": exc.source_ip,   # wire 键保留，值=source_ip
             "resource_type": exc.resource_type,
             "resource_id": exc.resource_id,
         },
@@ -347,7 +361,9 @@ async def cleansight_exception_handler(request: Request, exc: AppError):
     logger.error(
         "[BoundaryLayer3] CleanSight exception: %s", exc,
         extra={
-            "client_id": exc.client_id,
+            "task_id": exc.task_id,
+            "step_id": exc.step_id,
+            "source_ip": exc.source_ip,
             "url": str(request.url),
         },
     )

@@ -76,19 +76,14 @@ class HLSWorkerPool:
         input_queue: Queue,
         num_workers: int = 2,
         db_dir: Path | None = None,
-        segment_duration: int = 10,
-        raw_fps: float = 30.0,
-        processed_fps: float = 20.0,
     ):
         self.input_queue = input_queue
         self.num_workers = num_workers
         self.stop_event = threading.Event()
 
-        # 创建持久化策略
+        # 创建持久化策略（编码帧率全程从帧 ts 自适应反推，不接收上游 fps）
         self.strategy = HLSPersistenceStrategy(
             db_dir=db_dir or Path("database"),
-            raw_fps=raw_fps,
-            processed_fps=processed_fps,
         )
 
         # 创建Worker
@@ -124,6 +119,10 @@ class HLSWorkerPool:
         for thread in self.threads:
             thread.join(timeout=timeout)
 
-    def flush_client(self, _client_id: str):
-        """预留接口：客户端断连时调用"""
-        pass
+    def release_dir_locks(self, task_id: int) -> int:
+        """回收该 task 的 HLS 目录锁（转发到 strategy），返回回收数量。"""
+        return self.strategy.release_dir_locks(task_id)
+
+    def purge_step_dir(self, task_id: int, step_id: int) -> bool:
+        """清空该 (task_id, step_id) step 目录（转发到 strategy），返回是否删除。"""
+        return self.strategy.purge_step_dir(task_id, step_id)

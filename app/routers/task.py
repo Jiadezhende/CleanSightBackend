@@ -66,11 +66,52 @@ async def get_task_alarms(task_id: int):
         db.close()
 
 
-def _empty_alarm_payload(task_id: int) -> dict:
+def _build_signals_10s(stream_summary: dict) -> dict:
+    """把 CQ 的按流名汇总（{stream_name: {active,hit_count,max_conf}}）映射为
+    前端 signals_10s（按 metric.value 键组织，含全量空模板）。
+
+    metric 映射是 inference 展示知识，收敛在 router 装配层；CQ 只出纯流名汇总。
+    """
     from app.services.inference.naming import get_task_metric_map
+
+    metric_map = get_task_metric_map()
     _empty = {"active": False, "hit_count": 0, "max_conf": 0.0}
-    signals = {m.value: dict(_empty) for m in get_task_metric_map().values()}
-    return {"task_id": task_id, "max_seq": 0, "signals_10s": signals, "alarms": []}
+    out = {m.value: dict(_empty) for m in metric_map.values()}  # 空模板
+    for stream_name, summ in stream_summary.items():             # 实时覆盖
+        metric = metric_map.get(stream_name)
+        if metric is not None:
+            out[metric.value] = summ
+    return out
+
+
+def _empty_alarm_payload(task_id: int) -> dict:
+    return {
+        "task_id": task_id,
+        "max_seq": 0,
+        "signals_10s": _build_signals_10s({}),
+        "alarms": [],
+    }
+
+
+def _build_task_alarm_message(cq, since_seq: int) -> dict:
+    """装配前端实时告警消息：原子取告警增量 + 滑窗汇总，序列化域对象。"""
+    alarms, max_seq = cq.get_alarm_snapshot(since_seq)  # 原子 (增量, max_seq)
+    return {
+        "task_id": cq.task_id,
+        "max_seq": max_seq,
+        "signals_10s": _build_signals_10s(cq.get_slide_window_summary()),
+        "alarms": [
+            {
+                "seq": a.seq,
+                "mode": a.mode,
+                "metric": a.metric,
+                "level": a.alarm_level,
+                "message": a.alarm_message,
+                "ts": int(a.timestamp),
+            }
+            for a in alarms
+        ],
+    }
 
 
 @router.get("/message/{task_id}")
@@ -91,8 +132,8 @@ async def get_client_frontend_message(
     if since_seq < 0:
         raise HTTPException(status_code=400, detail="since_seq must be >= 0")
 
-    cq = client_manager.get_client_by_task_id(task_id)
+    cq = client_manager.get(task_id)  # 键即 task_id，O(1) 直取
     if cq is None:
         return _empty_alarm_payload(task_id)
 
-    return cq.get_task_alarm_message(task_id=task_id, since_seq=since_seq)
+    return _build_task_alarm_message(cq, since_seq)

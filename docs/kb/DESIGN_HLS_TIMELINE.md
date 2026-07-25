@@ -1,4 +1,4 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-25
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -21,12 +21,11 @@ HLS 策略先用 cv2 写 mp4v，再用 ffmpeg 转为 fMP4 fragment。
 
 代码注释明确说明：
 
-- cv2 使用固定 fps 写 N 帧。
-- 实际媒体时长是 `N / fps`。
+- cv2 用某一 fps 写 N 帧，实际媒体时长 = `N / fps`。
 - ffmpeg 转码到 fMP4 后保持该媒体时长。
 - 若用 wall-clock 帧时间戳差写 EXTINF，可能造成 hls.js 段尾 MSE 缓冲洞、卡死和总时长缩水。
 
-因此 raw 段使用 `len(frames) / raw_fps`，processed 段使用 `len(frames) / processed_fps`。
+段 fps 由 `_effective_fps(frames)` 求得：`(N-1) / (ts_last - ts_first)`（帧时间戳跨度），**不接收任何上游 fps**；退化段（`span<=0`/单帧/反推值落 `[1,60]` 带外）回落本地常量 `_DEGENERATE_FALLBACK_FPS=15.0`。**同一 fps 同时用于 cv2.VideoWriter 与 EXTINF**，保证 raw/processed 段（经推理/可视化后帧率可能非名义值）的写入帧率与时长一致，不会快放（曾因固定 fps 写入实测更少帧数的段导致 2x 快放）。
 
 ## 原子更新
 

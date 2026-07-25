@@ -20,17 +20,13 @@ router = APIRouter(prefix="/admin-f3m8", tags=["admin"])
 # 内部工具函数
 # ---------------------------------------------------------------------------
 
-def _client_info(client_id: str, client_queues) -> dict:
-    task = client_queues.get_task()
+def _client_info(client_id: int, client_queues) -> dict:
     depths = client_queues.get_queue_depths()
-    task_id = task.task_id if task else None
-    task_status = task.status if task else None
-    current_step = task.current_step if task else None
     return {
-        "client_id": client_id,
-        "task_id": task_id,
-        "task_status": task_status,
-        "current_step": current_step,
+        "client_id": client_id,  # 注册表键 = task_id(int)
+        "task_id": client_queues.task_id,
+        "source_ip": client_queues.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
+        "step_id": client_queues.step_id,
         "queue_depths": depths,
     }
 
@@ -71,8 +67,8 @@ def _parse_metrics_json() -> dict:
             }
         result["infer_latency_ms"] = latency_result
 
-    # 2. 推理失败 Counter
-    fail_fam = families.get("infer_failure_total")
+    # 2. 推理失败 Counter（family 名去 _total 后缀：prometheus 对 Counter 剥 _total）
+    fail_fam = families.get("infer_failure")
     if fail_fam:
         by_type: dict = {}
         total_fail = 0
@@ -84,8 +80,8 @@ def _parse_metrics_json() -> dict:
             total_fail += sample.value
         result["infer_failure_total"] = {"total": int(total_fail), "by_type": by_type}
 
-    # 3. 帧丢弃 Counter
-    drop_fam = families.get("frame_drop_total")
+    # 3. 帧丢弃 Counter（family 名去 _total）
+    drop_fam = families.get("frame_drop")
     if drop_fam:
         by_reason: dict = {}
         total_drop = 0
@@ -97,14 +93,14 @@ def _parse_metrics_json() -> dict:
             total_drop += sample.value
         result["frame_drop_total"] = {"total": int(total_drop), "by_reason": by_reason}
 
-    # 4. GPU OOM Counter
-    oom_fam = families.get("gpu_oom_total")
+    # 4. GPU OOM Counter（family 名去 _total）
+    oom_fam = families.get("gpu_oom")
     if oom_fam:
         total_oom = sum(s.value for s in oom_fam.samples if s.name.endswith("_total"))
         result["gpu_oom_total"] = int(total_oom)
 
-    # 5. 重试 Counter
-    retry_fam = families.get("retry_total")
+    # 5. 重试 Counter（family 名去 _total）
+    retry_fam = families.get("retry")
     if retry_fam:
         by_op: dict = {}
         total_retry = 0
@@ -148,8 +144,12 @@ def _quantile(sorted_buckets: list, q: float, total: float) -> float:
 
 @router.get("/overview")
 def get_overview():
-    """聚合仪表盘：活跃客户端、队列深度。前端每 3s 轮询。"""
-    all_clients = client_manager.get_all_clients()
+    """聚合仪表盘：活跃 run（任务）、队列深度。前端每 3s 轮询。
+
+    换键后注册表键即 task_id，一条目 = 一个活跃 run；响应键 `clients`/`client_id`
+    沿用旧名（admin 页 wire，值为 task_id），语义已是 run/任务。
+    """
+    all_clients = client_manager.snapshot()
     clients_info = [_client_info(cid, q) for cid, q in all_clients.items()]
     total_queued = sum(
         d["queue_depths"].get("ca_ready", 0)
@@ -167,17 +167,20 @@ def get_overview():
 
 @router.get("/clients")
 def get_clients():
-    """活跃客户端列表（轻量），供前端下拉框使用。"""
-    all_clients = client_manager.get_all_clients()
+    """活跃 run（任务）列表（轻量），供前端下拉框使用。
+
+    一 run 一 CQ = `registry[task_id]`；响应/路径的 `clients`·`client_id` 为 admin 页 wire 旧名（值=task_id）。
+    """
+    all_clients = client_manager.snapshot()
     return [_client_info(cid, q) for cid, q in all_clients.items()]
 
 
 @router.get("/clients/{client_id}/alarms")
-def get_client_alarms(client_id: str, n: int = Query(20, ge=1, le=100)):
-    """从内存告警日志读取该客户端最近 n 条告警（不走 DB）。"""
+def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
+    """从内存告警日志读取该 run（task_id）最近 n 条告警（不走 DB）。"""
     if not client_manager.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
-    cq = client_manager.get_client(client_id)
+    cq = client_manager.get(client_id)
     alarms = cq.get_recent_alarms(n=n)
     return {
         "client_id": client_id,

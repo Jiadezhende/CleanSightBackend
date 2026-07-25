@@ -1,7 +1,7 @@
 # 线程与实例生命周期审计
 
 > **变更状态**：生效中（2026-06-27）　<!-- 审计完成：4 项改动已落地并经远程真实流验证；L1-b/模型释放为低优先/备查 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/DESIGN_CONCURRENCY_AND_QUEUES.md](../kb/DESIGN_CONCURRENCY_AND_QUEUES.md)(2026-07-21)
 >
 > 相关：[BOUNDARY_LAYER_DESIGN.md](../BOUNDARY_LAYER_DESIGN.md)（异常/重启边界层）、[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)（分层数据流）。
 
@@ -63,7 +63,7 @@
 - `InferenceManager.stop()` [manager.py:550-560](../../app/services/inference/core/manager.py#L550-L560) 据此做**两阶段关闭**：先对所有 actor 并行 `signal_stop()`，再逐个 `finalize_and_stop()`，N 个 actor 的 join 并行收敛而非 N×2s 串行。**值得反向推广到 main 层。**
 
 **2d. InferenceManager（编排者）** [manager.py:522-590](../../app/services/inference/core/manager.py#L522-L590)：
-- `stop()` 顺序：停模型服务 → 两阶段停 actor → `feature_store/fact_ledger.flush()` → 停可视化 → 停持久化。
+- `stop()` 顺序：停模型服务 → 两阶段停 actor → `feature_store.flush()` → 停可视化 → 停持久化。（FactLedger 离线异步写，已从在线 manager 摘除，不在此 flush。）
 
 > **[澄清] 两条独立的 flush 路径，均在控制线程同步执行（非 worker 收尾）**
 >

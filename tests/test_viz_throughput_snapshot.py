@@ -9,13 +9,14 @@
 import threading
 from unittest.mock import patch
 
-from app.services.inference.workers.visualization import VisualizationWorker
+from app.services.inference.visualization.worker import VisualizationWorker
 
 
-def _worker(target_fps: float = 20.0) -> VisualizationWorker:
+def _worker(target_fps: float = 20.0, output_fps: float = None) -> VisualizationWorker:
     return VisualizationWorker(
         stop_event=threading.Event(),
         tick_interval=1.0 / target_fps,
+        output_fps=output_fps,
     )
 
 
@@ -30,7 +31,7 @@ def test_snapshot_silent_when_healthy():
     w._render_time_sum = 200 * 0.002  # 平均 2ms
     w._render_time_max = 0.004        # 峰值 4ms ≪ 50ms 预算
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()
@@ -47,7 +48,7 @@ def test_snapshot_logs_supply_bound():
     w._render_time_sum = 100 * 0.002  # 平均 2ms，渲染清白
     w._render_time_max = 0.005        # 峰值 5ms ≪ 50ms 预算
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -69,7 +70,7 @@ def test_snapshot_logs_render_bound():
     w._render_time_sum = 90 * 0.045   # 平均 45ms
     w._render_time_max = 0.060        # 峰值 60ms ≥ 50ms 预算
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -77,6 +78,75 @@ def test_snapshot_logs_render_bound():
     rendered = fmt % tuple(args)
     assert "[VIZ_THROUGHPUT]" in rendered
     assert "render-bound" in rendered
+
+
+def test_snapshot_silent_when_oversampled_healthy():
+    """过采样（轮询 30Hz、出帧率 15fps）且出帧健康 → 不应误报 supply-bound。
+
+    回归：修复前基准取轮询率，out_fps(15) < 30*0.8=24 恒真 → 告警常亮。
+    修复后基准取 output_fps(15)，15 < 15*0.8=12 为假 → 静默。
+    """
+    w = _worker(target_fps=30.0, output_fps=15.0)
+    window = 10.0
+    # 300 ticks：150 渲染（=15fps，出帧满额）+ 150 空转（过采样必然的空转 tick）
+    w._stat_rendered["c1"] = 150
+    w._stat_stale["c1"] = 150
+    w._render_calls = 150
+    w._render_time_sum = 150 * 0.002  # 平均 2ms
+    w._render_time_max = 0.005        # 峰值 5ms ≪ 33ms 预算
+
+    with patch("app.services.inference.visualization.worker.logger") as log:
+        w._log_throughput_snapshot(window)
+
+    log.info.assert_not_called()
+
+
+def test_snapshot_oversampled_still_flags_real_shortfall():
+    """过采样下真出现出帧亏空（8fps ≪ 15fps 期望）→ 仍应报 supply-bound。"""
+    w = _worker(target_fps=30.0, output_fps=15.0)
+    window = 10.0
+    # 300 ticks：仅 80 渲染（=8fps < 15*0.8=12）+ 220 空转
+    w._stat_rendered["c1"] = 80
+    w._stat_stale["c1"] = 220
+    w._render_calls = 80
+    w._render_time_sum = 80 * 0.002
+    w._render_time_max = 0.005        # 渲染清白 → 归因 supply
+
+    with patch("app.services.inference.visualization.worker.logger") as log:
+        w._log_throughput_snapshot(window)
+
+    log.info.assert_called_once()
+    fmt, *args = log.info.call_args.args
+    rendered = fmt % tuple(args)
+    assert "out=8.0fps" in rendered
+    assert "supply-bound" in rendered
+
+
+def test_snapshot_oversampled_render_spike_over_tick_is_still_supply_bound():
+    """过采样下渲染峰值超「轮询间隔」但仍在「出帧间隔」内 + 供给亏空 → 应报 supply-bound 而非 render-bound。
+
+    复现真实日志：poll=30Hz(tick 33ms)、target=15fps(出帧间隔 66ms)，render max 51.7ms
+    （>33ms tick 但 <66ms 出帧间隔），out=10.6fps、stale=64%。渲染够快支撑 15fps，亏空来自
+    上游供帧——render_bound 的预算须用出帧间隔，否则单帧越过 tick 就被误标 render-bound。
+    """
+    w = _worker(target_fps=30.0, output_fps=15.0)
+    window = 10.0
+    # 300 ticks：106 渲染(=10.6fps) + 194 空转(=64.7%)
+    w._stat_rendered["119"] = 106
+    w._stat_stale["119"] = 194
+    w._render_calls = 106
+    w._render_time_sum = 106 * 0.0185   # 平均 18.5ms « 66ms 出帧间隔
+    w._render_time_max = 0.0517         # 峰值 51.7ms：> 33ms tick 但 < 66ms 出帧间隔
+
+    with patch("app.services.inference.visualization.worker.logger") as log:
+        w._log_throughput_snapshot(window)
+
+    log.info.assert_called_once()
+    fmt, *args = log.info.call_args.args
+    rendered = fmt % tuple(args)
+    assert "out=10.6fps" in rendered
+    assert "supply-bound" in rendered
+    assert "render-bound" not in rendered
 
 
 def test_snapshot_silent_when_idle_stream():
@@ -90,7 +160,7 @@ def test_snapshot_silent_when_idle_stream():
     w._render_time_sum = 5 * 0.002
     w._render_time_max = 0.004
 
-    with patch("app.services.inference.workers.visualization.logger") as log:
+    with patch("app.services.inference.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import struct
 import subprocess
 import threading
@@ -27,6 +28,15 @@ from app.utils.exceptions import PersistenceError
 
 logger = logging.getLogger(__name__)
 
+# HLS 段的编码帧率正常由 `_effective_fps` 从帧 ts 反推（完全自适应，不引用任何上游 fps）。
+# 以下三个常量定义"无可测速率"的退化判定与兜底，全部具名、不散落在条件里：
+#   _EFF_FPS_MIN / _EFF_FPS_MAX —— 反推值的合理带；落带外（乱序/重复 ts 致 span 异常）视为不可信。
+#   _DEGENERATE_FALLBACK_FPS   —— 单帧段 / span<=0 / 带外 时的兜底。此时本就无时序信息，
+#       取值与上游 fps 无关，只需给退化的单帧段一个合理 EXTINF；故用本地常量而非上游 raw_fps/inference_fps。
+_EFF_FPS_MIN = 1.0
+_EFF_FPS_MAX = 60.0
+_DEGENERATE_FALLBACK_FPS = 15.0
+
 
 class HLSPersistenceStrategy:
     """HLS持久化策略"""
@@ -34,30 +44,28 @@ class HLSPersistenceStrategy:
     def __init__(
         self,
         db_dir: Path,
-        raw_fps: float = 30.0,
-        processed_fps: float = 20.0,
     ):
         self.db_dir = db_dir
-        self.raw_fps = raw_fps
-        self.processed_fps = processed_fps
+        # HLS 段编码帧率全程从帧 ts 反推（见 _effective_fps），不接收任何上游 fps。
         # 按 target_dir 路径索引的细粒度锁，序列化同一任务目录下的 playlist/metadata 写操作
         self._dir_locks: Dict[str, threading.Lock] = {}
         self._dir_locks_guard = threading.Lock()
 
     @staticmethod
-    def _effective_fps(frames: List[Frame], fallback: float) -> float:
+    def _effective_fps(frames: List[Frame]) -> float:
         """由帧时间戳跨度反推有效编码 fps：`(N-1) / (ts_last - ts_first)`。
 
-        VideoWriter 与 EXTINF 须用同一个返回值，回放才对齐墙钟。span<=0 / 单帧 / 反推值落在
-        合理带 [1, 60] 外（重复或乱序时间戳致 span 异常）时回退标称 `fallback`。
+        VideoWriter 与 EXTINF 须用同一个返回值，回放才对齐墙钟。raw/processed 段一律走此
+        自适应反推、不引用上游 fps。span<=0 / 单帧 / 反推值落在合理带 [1, 60] 外（重复或
+        乱序时间戳致 span 异常）时——即无可测速率的退化段——回退 `_DEGENERATE_FALLBACK_FPS`。
         """
         if len(frames) > 1:
             span = frames[-1].timestamp - frames[0].timestamp
             if span > 0:
                 eff_fps = (len(frames) - 1) / span
-                if 1.0 <= eff_fps <= 60.0:
+                if _EFF_FPS_MIN <= eff_fps <= _EFF_FPS_MAX:
                     return eff_fps
-        return fallback
+        return _DEGENERATE_FALLBACK_FPS
 
     def _get_dir_lock(self, target_dir: Path) -> threading.Lock:
         key = str(target_dir)
@@ -65,6 +73,43 @@ class HLSPersistenceStrategy:
             if key not in self._dir_locks:
                 self._dir_locks[key] = threading.Lock()
             return self._dir_locks[key]
+
+    def release_dir_locks(self, task_id: int) -> int:
+        """回收指定 task 所有 step 目录的 dir 锁，返回回收数量（任务拆除时调用）。
+
+        锁 key 形如 `str(db_dir/task_id/step_id)`，按 task 前缀批量剔除。拆除后不会再有
+        该 task 的新段入队（CQ 已出 registry、sweeper 扫不到），残段 flush 已在此前入队；
+        极少数在途 transcode 若再取锁会经 `_get_dir_lock` 按需重建同一把、不影响串行正确性。
+        不回收则 `_dir_locks` 随 (task_id, step_id) 单调增长——长跑内存慢泄漏。
+        """
+        prefix = str(self.db_dir / str(task_id)) + os.sep
+        with self._dir_locks_guard:
+            stale = [k for k in self._dir_locks if k.startswith(prefix)]
+            for k in stale:
+                del self._dir_locks[k]
+        return len(stale)
+
+    def purge_step_dir(self, task_id: int, step_id: int) -> bool:
+        """重启 supersede：删除 `{db_dir}/{task_id}/{step_id}` 整个 step 目录，返回是否删除。
+
+        与 FeatureStore.open_fresh 对称——同 (task_id, step_id) 重启一次 run 前清空旧 HLS
+        产物（段 / *_playlist.m3u8 / metadata.json / init.mp4 / .hls_timescale 缓存），
+        否则新段带唯一时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
+        HLS 落盘全靠磁盘文件存在性驱动、无每目录内存态（playlist 首行、init.mp4、timescale
+        缓存均按 `exists()` 惰性重建），故 rmtree 后由后续首段自然重建，安全。
+        持该目录锁串行化，防极端在途 persist_segment 竞争——正常重启路径此刻已无活跃 worker
+        （stop_run 已 flush 残段 + 出 registry + release_dir_locks）。
+        """
+        target_dir = self.db_dir / str(task_id) / str(step_id)
+        if not target_dir.exists():
+            return False
+        with self._get_dir_lock(target_dir):
+            try:
+                shutil.rmtree(target_dir)
+                return True
+            except OSError as e:
+                logger.warning("[HLS] purge step dir failed %s: %s", target_dir, e)
+                return False
 
     # 段文件名格式：{track}_segment_{ts_us}.mp4
     _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
@@ -463,30 +508,35 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
-        # 1. 生成原始视频段（使用原始视频源帧率30fps）
+        # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），无可测速率时退化兜底。
+        # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
+        eff_fps = self._effective_fps(frames)
         raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
+        out_raw = None
         try:
             out_raw = cv2.VideoWriter(
-                str(raw_segment_path), fourcc, self.raw_fps, (width, height)
+                str(raw_segment_path), fourcc, eff_fps, (width, height)
             )
             for fd in frames:
                 out_raw.write(fd.frame)
-            out_raw.release()
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write raw video segment: {raw_segment_path}",
                 operation="hls_write_raw",
                 retryable=True,
             ) from e
+        finally:
+            if out_raw is not None:
+                out_raw.release()  # 异常路径也须释放原生编码器句柄
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
-        # cv2.VideoWriter 用固定 fps 写 N 帧 → 输出 mp4v 媒体时长 = N/fps，
-        # ffmpeg 转码到 fMP4 保持该时长。EXTINF 用 wall-clock 帧时间戳差会引入抖动，
-        # 与 fragment 实际时长偏差 0.5+ 秒 → hls.js 段尾 MSE 缓冲洞 → 卡死 + 总时长缩水。
-        segment_duration = len(frames) / self.raw_fps
+        # cv2.VideoWriter 用 eff_fps 写 N 帧 → 输出 mp4v 媒体时长 = N/eff_fps，
+        # ffmpeg 转码到 fMP4 保持该时长。故 EXTINF 必须同用 eff_fps（与写入帧率一致），
+        # 否则与 fragment 实际时长偏差 → hls.js 段尾 MSE 缓冲洞 → 卡死 + 总时长缩水。
+        segment_duration = len(frames) / eff_fps
 
         # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
@@ -549,30 +599,33 @@ class HLSPersistenceStrategy:
         start_ts = frames[0].timestamp
 
         # 0. 按本段帧时间戳跨度反推有效 fps：processed 实际成帧率随 throttle / 渲染尖峰
-        # 在窗口间漂移（~11-15fps），固定 processed_fps 编码会按 20/真实率 倍快放，且
+        # 在窗口间漂移（~11-15fps），固定名义帧率编码会按 兜底/真实率 倍快放，且
         # 逐段速率不同 → 段间忽快忽慢的抖动。逐段各取自身 eff_fps，VideoWriter 与 EXTINF
         # 同源 → 每段播成 1.0x，对齐墙钟、抖动消失。详见
         # docs/update/20260629_PROCESSED_PLAYBACK_RATE_PROPOSAL.md。
-        eff_fps = self._effective_fps(frames, self.processed_fps)
+        eff_fps = self._effective_fps(frames)
 
         # 1. 生成处理后视频段（使用实测有效帧率 eff_fps）
         segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
+        out_processed = None
         try:
             out_processed = cv2.VideoWriter(
                 str(segment_path), fourcc, eff_fps, (width, height)
             )
             for fd in frames:
                 out_processed.write(fd.frame)
-            out_processed.release()
         except (IOError, cv2.error) as e:
             raise PersistenceError(
                 message=f"Failed to write processed video segment: {segment_path}",
                 operation="hls_write_processed",
                 retryable=True,
             ) from e
+        finally:
+            if out_processed is not None:
+                out_processed.release()  # 异常路径也须释放原生编码器句柄
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致，故与 VideoWriter
         # 用同一个 eff_fps。详见 _persist_raw_segment 对应注释 —— 用 wall-clock 算会导致

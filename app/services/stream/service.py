@@ -1,22 +1,24 @@
 """
-流服务 - 统一管理所有视频流的解码
+流服务 - 统一管理所有 RTSP 视频流的解码
 
 边界层异常处理架构：
 - 业务代码保持纯净（只抛异常，不捕获）
 - 重试逻辑在 GuardedExecutor 框架层
 - 异常分类：StreamConnectionError, FFmpegError
+
+读帧模型：decoder 自持读线程（阻塞读 stdout，Windows/POSIX 统一），
+StreamService 只做 decoder 注册表 + 生命周期编排，不再持有 selector。
 """
 
 import logging
-import os
-import selectors
 import threading
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
+from app.services.client.manager import client_manager
+from app.settings import settings
 from app.utils import (
     ConflictError,
-    FFmpegError,
     StreamConnectionError,
     log_call,
 )
@@ -49,12 +51,6 @@ def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
     return urlunparse(parsed._replace(netloc=new_netloc))
 
 
-# 导入 ClientManager 单例（延迟导入避免循环依赖）
-try:
-    from app.services.client import client_manager
-except ImportError:
-    client_manager = None  # 兼容旧版本
-
 # 导入配置加载器
 try:
     from app.services.client.config import get_client_config
@@ -70,29 +66,18 @@ except Exception as e:
 
 class StreamService:
     def __init__(self):
-        self.decoders: Dict[str, FFmpegDecoder] = {}
-        self.sel = selectors.DefaultSelector() if os.name != "nt" else None
+        self.decoders: Dict[int, FFmpegDecoder] = {}
         self.lock = threading.Lock()
         self.metrics = {}
-        self._stop_event = threading.Event()
 
         # 配置引用
         self.config = _stream_config
 
-        # start selector polling thread on POSIX so stdout is consumed
-        self._selector_thread: Optional[threading.Thread] = None
-        if self.sel is not None:
-            self._selector_thread = threading.Thread(
-                target=self._selector_loop, daemon=True, name="stream_service_selector"
-            )
-            self._selector_thread.start()
-
-        # 注意：健康监控和清理服务现在都是全局服务，在应用启动时初始化，不再由 StreamService 管理
+        # 注意：健康监控和清理服务现在都是全局服务，在应用启动时初始化，不再由 StreamService 管理。
+        # decoder 自持读线程，StreamService 不再需要 selector/轮询线程。
 
     @log_call(level=logging.INFO, log_args=False)
-    def start_stream(
-        self, client_id: str, stream_url: str, fps: int = 30, protocol: str = "RTMP"
-    ):
+    def start_stream(self, task_id: int, stream_url: str):
         """
         注册解码器并尝试首次启动。
 
@@ -100,91 +85,80 @@ class StreamService:
         首次 start() 若失败，健康监控会在下一个心跳周期发起重连。
 
         Args:
-            client_id: 客户端ID
-            stream_url: 流URL
-            fps: 帧率
-            protocol: 协议（RTSP/RTMP）
+            task_id: 运行键（路由标识）
+            stream_url: RTSP 流 URL
 
         Raises:
-            ConflictError: 该 client_id 已有存活的流
+            ConflictError: 该 task_id 已有存活的流
         """
-        self._start_stream_impl(client_id, stream_url, fps, protocol)
+        self._start_stream_impl(task_id, stream_url)
 
-    def _start_stream_impl(
-        self, client_id: str, stream_url: str, fps: int, protocol: str
-    ):
+    def _start_stream_impl(self, task_id: int, stream_url: str):
         """
         业务代码（纯净，只抛异常）
 
         职责：
         1. 检查解码器状态
         2. 创建并启动解码器
-        3. 注册到 selector
-        4. 如果失败，抛出 StreamConnectionError 或 FFmpegError
+        3. 如果失败，抛出 StreamConnectionError 或 FFmpegError
 
         Args:
-            client_id: 客户端ID
-            stream_url: 流URL
-            fps: 帧率
-            protocol: 协议（RTSP/RTMP）
+            task_id: 运行键（路由标识）
+            stream_url: RTSP 流 URL
         """
         with self.lock:
             # 检查是否已有解码器
-            if client_id in self.decoders:
-                existing = self.decoders[client_id]
+            if task_id in self.decoders:
+                existing = self.decoders[task_id]
 
                 # 如果解码器已死，先清理
                 if not existing.is_alive():
                     logger.warning(
-                        f"[{client_id}] Removing dead decoder before restart"
+                        f"[{task_id}] Removing dead decoder before restart"
                     )
-                    self._cleanup_dead_decoder_unsafe(client_id)
+                    self._cleanup_dead_decoder_unsafe(task_id)
                 else:
                     # 解码器还活着，无法重复启动（可能URL不同）
                     logger.warning(
-                        f"[{client_id}] Stream already running, cannot start with different URL"
+                        f"[{task_id}] Stream already running, cannot start with different URL"
                     )
+                    _cq = existing.client_queues
                     raise ConflictError(
-                        message=f"Stream already running for client {client_id}. Stop it first to change stream URL.",
-                        client_id=client_id,
+                        message=f"Stream already running for task {task_id}. Stop it first to change stream URL.",
+                        task_id=task_id,
+                        step_id=_cq.step_id if _cq else None,
+                        source_ip=_cq.source_ip if _cq else None,
                         resource_type="Stream",
-                        resource_id=client_id,
+                        resource_id=str(task_id),
                     )
 
-            logger.info(
-                f"[{client_id}] Starting stream: protocol={protocol}, url={stream_url}"
-            )
+            logger.info(f"[{task_id}] Starting stream: url={stream_url}")
 
             # 内部拉流直连 MediaMTX，绕过 RTSPProxy
-            from app.settings import settings
             rewritten = _rewrite_rtsp_url(
                 stream_url,
                 settings.mediamtx_proxy_port,
                 settings.mediamtx_internal_port,
             )
             if rewritten != stream_url:
-                logger.info(f"[{client_id}] Rewrote stream URL: {stream_url} → {rewritten}")
+                logger.info(f"[{task_id}] Rewrote stream URL: {stream_url} → {rewritten}")
                 stream_url = rewritten
 
-            # 创建或获取 ClientQueues
-            client_queues = self._get_or_create_client_queues(client_id)
-
-            # 构建协议选项
-            protocol_opts = self._build_protocol_opts(protocol)
+            # 获取 ClientQueues（只取不建：由 set_task 在起流前建好换槽）
+            client_queues = self._get_client_queues(task_id)
 
             # 创建解码器
             dec = FFmpegDecoder(
                 manager=self,
-                client_id=client_id,
+                task_id=task_id,
                 stream_url=stream_url,
                 decoder_config=self.config.decoder if self.config else None,
-                protocol_opts=protocol_opts,
                 client_queues=client_queues,
             )
 
             # 先注册解码器，再启动——健康监控可感知启动失败并触发重连
-            self.decoders[client_id] = dec
-            self.metrics[client_id] = {
+            self.decoders[task_id] = dec
+            self.metrics[task_id] = {
                 "frames_received": 0,
                 "frames_dropped": 0,
                 "restarts": 0,
@@ -195,163 +169,67 @@ class StreamService:
             except Exception as e:
                 # start() 失败（如推流端尚未就绪），decoder 已注册，
                 # 健康监控会在下一个心跳检测到 is_alive=False 并进入重连模式
-                logger.warning(f"[{client_id}] Initial start failed: {e}")
+                logger.warning(f"[{task_id}] Initial start failed: {e}")
                 return
 
             logger.info(
-                f"[{client_id}] Stream started successfully (pid={getattr(dec.proc, 'pid', None)})"
+                f"[{task_id}] Stream started successfully (pid={getattr(dec.proc, 'pid', None)})"
             )
 
-            # 注册到 selector（POSIX 系统）
-            if self.sel is not None and dec.proc and dec.proc.stdout:
-                self._register_to_selector(dec)
+    def _get_client_queues(self, task_id: int):
+        """获取该 client 的 ClientQueues（**只取不建**）。
 
-    def _get_or_create_client_queues(self, client_id: str):
+        CQ 由 RunController.start_run 在起流**之前**建好并 client_manager.set 注册
+        （一 CQ == 一 run，身份不可变）；起流阶段只取。缺失说明调用序错（未先建 CQ），
+        返回 None 由上层容错（decoder 空跑）。
         """
-        业务代码：获取或创建客户端队列（纯净，只抛异常）
-
-        Args:
-            client_id: 客户端ID
-
-        Returns:
-            ClientQueues 实例，如果 client_manager 不可用则返回 None
-        """
-        if client_manager is None:
-            return None
-
-        # 帧率/队列参数走 settings 单一真源（见 app/settings.py）
-        from app.settings import settings
-
-        inference_fps = settings.inference_fps
-
-        # 从配置文件读取帧参数（resize 属 client 配置）
-        resize_width = _client_config.frame.resize_width if _client_config else 640
-        resize_height = _client_config.frame.resize_height if _client_config else 480
-        ca_maxlen = settings.ca_maxlen
-        ca_segment_len = settings.ca_segment_len
-
-        client_queues = client_manager.get_client(
-            client_id,
-            resize_width=resize_width,
-            resize_height=resize_height,
-            inference_fps=inference_fps,
-            ca_maxlen=ca_maxlen,
-            ca_segment_len=ca_segment_len,
-        )
-
-        logger.info(
-            f"[{client_id}] ClientQueues created (inference_fps={inference_fps}, "
-            f"ca_maxlen={ca_maxlen}, ca_segment_len={ca_segment_len})"
-        )
-
-        return client_queues
-
-    def _build_protocol_opts(self, protocol: str) -> list:
-        """
-        业务代码：构建协议选项（纯净）
-
-        Args:
-            protocol: 协议类型（RTSP/RTMP）
-
-        Returns:
-            协议选项列表
-        """
-        if protocol == "RTSP":
-            return [
-                "-rtsp_transport",
-                "udp",
-                "-fflags",
-                "nobuffer+discardcorrupt",
-                "-flags",
-                "low_delay",
-                "-err_detect",
-                "ignore_err",
-                "-analyzeduration",
-                "1000000",
-                "-probesize",
-                "1000000",
-            ]
-        return []
-
-    def _register_to_selector(self, decoder: FFmpegDecoder):
-        """
-        业务代码：注册解码器到 selector（纯净，只抛异常）
-
-        Args:
-            decoder: FFmpegDecoder 实例
-
-        Raises:
-            StreamConnectionError: 注册失败
-        """
-        if decoder.proc is None or decoder.proc.stdout is None:
-            raise StreamConnectionError(
-                url=decoder.stream_url,
-                client_id=decoder.client_id,
-                details="Cannot register to selector: process or stdout is None",
+        cq = client_manager.get(task_id)
+        if cq is None:
+            logger.error(
+                "[%s] ClientQueues 不存在（start_stream 早于 set_task？），decoder 将空跑",
+                task_id,
             )
-
-        # 注册到 selector（self.sel 已经在调用前检查过不为 None）
-        if self.sel is not None:
-            self.sel.register(
-                decoder.proc.stdout.fileno(), selectors.EVENT_READ, data=decoder
-            )
+        return cq
 
     @log_call(level=logging.INFO)
-    def stop_stream(self, client_id: str):
+    def stop_stream(self, task_id: int):
         """
         停止流解码（业务代码，纯净）
 
         注意：
-        - decoder 进程的停止是异步的（避免阻塞）
-        - selector 注销在锁内完成
+        - decoder 进程的停止是异步的（避免阻塞 API 响应）
         - ClientManager 由 InferenceManager 统一清理
 
         Args:
-            client_id: 客户端ID
+            task_id: 运行键（路由标识）
         """
         # 1. 从字典中移除decoder（在锁内）
         dec = None
         with self.lock:
-            dec = self.decoders.pop(client_id, None)
+            dec = self.decoders.pop(task_id, None)
             if not dec:
-                logger.debug(f"[{client_id}] No decoder to stop")
+                logger.debug(f"[{task_id}] No decoder to stop")
                 return
 
-            logger.info(f"[{client_id}] Stopping stream")
-
-            # 从selector中注销（必须在锁内）
-            self._unregister_from_selector(dec)
+            logger.info(f"[{task_id}] Stopping stream")
 
             # 清理metrics
-            self.metrics.pop(client_id, None)
+            self.metrics.pop(task_id, None)
 
-        # 2. 异步停止decoder进程（避免阻塞）
+        # 2. 异步停止decoder进程（避免阻塞）。terminal 路径：无新 run 复用该 CQ，
+        #    迟到帧由 CQ 写门（DRAINING/CLOSED）拦截，故异步安全。
         if dec:
-            self._stop_decoder_async(dec, client_id)
+            self._stop_decoder_async(dec, task_id)
 
-        logger.info(f"[{client_id}] Stream stopped")
+        logger.info(f"[{task_id}] Stream stopped")
 
-    def _unregister_from_selector(self, decoder: FFmpegDecoder):
-        """
-        业务代码：从 selector 注销解码器（纯净）
-
-        Args:
-            decoder: FFmpegDecoder 实例
-        """
-        if self.sel is not None and decoder.proc and decoder.proc.stdout:
-            try:
-                self.sel.unregister(decoder.proc.stdout.fileno())
-            except KeyError:
-                # 已经注销过，或 start() 失败导致从未注册，均属正常
-                pass
-
-    def _stop_decoder_async(self, decoder: FFmpegDecoder, client_id: str):
+    def _stop_decoder_async(self, decoder: FFmpegDecoder, task_id: int):
         """
         业务代码：异步停止解码器（避免阻塞）
 
         Args:
             decoder: FFmpegDecoder 实例
-            client_id: 客户端ID
+            task_id: 运行键（路由标识）
         """
 
         def stop_decoder_worker():
@@ -363,74 +241,58 @@ class StreamService:
             2. 捕获所有异常，防止线程崩溃
             """
             try:
-                # 业务逻辑：停止解码器（可能阻塞 2 秒+）
+                # 业务逻辑：停止解码器（kill + reap + join reader）
                 decoder.stop()
-                logger.debug(f"[{client_id}] FFmpeg process stopped")
+                logger.debug(f"[{task_id}] FFmpeg process stopped")
             except Exception as e:
                 # 边界层 1 捕获异常
                 logger.error(
-                    f"[BoundaryLayer1] Failed to stop FFmpeg for {client_id}: {e}",
+                    f"[BoundaryLayer1] Failed to stop FFmpeg for {task_id}: {e}",
                     exc_info=True,
                 )
 
         stop_thread = threading.Thread(
-            target=stop_decoder_worker, daemon=True, name=f"stop-decoder-{client_id}"
+            target=stop_decoder_worker, daemon=True, name=f"stop-decoder-{task_id}"
         )
         stop_thread.start()
 
-    def _cleanup_dead_decoder_unsafe(self, client_id: str):
+    def _cleanup_dead_decoder_unsafe(self, task_id: int):
         """
         业务代码：清理已死亡的解码器（纯净）
 
         注意：此方法必须在持有self.lock的情况下调用。
 
         Args:
-            client_id: 客户端ID
+            task_id: 运行键（路由标识）
         """
-        dec = self.decoders.pop(client_id, None)
-        if dec:
-            self._unregister_from_selector(dec)
-        self.metrics.pop(client_id, None)
-        logger.debug(f"[{client_id}] Dead decoder cleaned")
+        self.decoders.pop(task_id, None)
+        self.metrics.pop(task_id, None)
+        logger.debug(f"[{task_id}] Dead decoder cleaned")
 
-    def has_stream(self, client_id: str) -> bool:
-        with self.lock:
-            dec = self.decoders.get(client_id)
-            return dec is not None and dec.is_alive()
-
-    def get_all_client_ids(self) -> set:
-        """获取所有活跃的客户端ID（有decoder的）
+    def get_all_task_ids(self) -> set:
+        """获取所有活跃 run 的键（有 decoder 的 task_id 集合）。
 
         Returns:
-            客户端ID的集合
+            task_id(int) 的集合
         """
         with self.lock:
             return set(self.decoders.keys())
 
-    def get_stream_info(self, client_id: str) -> Optional[Dict[str, Any]]:
+    def get_stream_info(self, task_id: int) -> Optional[Dict[str, Any]]:
         """获取流配置信息（用于重连）
 
         Returns:
-            流配置字典，包含url, fps, protocol，如果不存在返回None
+            流配置字典，含 url（已是 rewrite 后的内部拉流地址）；不存在返回 None。
+            协议固定 RTSP、fps 取自 config，故无需回传，重连只需 url。
         """
         with self.lock:
-            dec = self.decoders.get(client_id)
+            dec = self.decoders.get(task_id)
             if not dec:
                 return None
-
-            # 判断协议类型
-            protocol = "RTMP"
-            if dec.protocol_opts and any(
-                "rtsp" in str(opt).lower() for opt in dec.protocol_opts
-            ):
-                protocol = "RTSP"
-
-            return {"url": dec.stream_url, "fps": dec.fps, "protocol": protocol}
+            return {"url": dec.stream_url}
 
     @log_call(level=logging.INFO, log_args=False)
-    def restart_stream(
-        self, client_id: str, stream_url: str, fps: int, protocol: str
-    ) -> bool:
+    def restart_stream(self, task_id: int, stream_url: str) -> bool:
         """
         服务层方法：重启流（不使用 GuardedExecutor）
 
@@ -445,10 +307,8 @@ class StreamService:
         - 失败时返回 False（不重试，不阻塞）
 
         Args:
-            client_id: 客户端ID
-            stream_url: 流URL
-            fps: 帧率
-            protocol: 协议（RTSP/RTMP）
+            task_id: 运行键（路由标识）
+            stream_url: RTSP 流 URL
 
         Returns:
             True 表示重启成功，False 表示失败
@@ -459,28 +319,24 @@ class StreamService:
         """
         try:
             # 直接调用实现，不使用 GuardedExecutor
-            self._restart_stream_impl(client_id, stream_url, fps, protocol)
+            self._restart_stream_impl(task_id, stream_url)
             return True
 
         except Exception as e:
             # 记录异常，返回 False（健康监控器会在下一个周期重试）
             logger.warning(
-                f"[StreamService] restart_stream failed: {client_id}, "
+                f"[StreamService] restart_stream failed: {task_id}, "
                 f"error={str(e)[:100]}, health monitor will retry in next check cycle"
             )
             return False
 
-    def _restart_stream_impl(
-        self, client_id: str, stream_url: str, fps: int, protocol: str
-    ) -> bool:
+    def _restart_stream_impl(self, task_id: int, stream_url: str) -> bool:
         """
         业务代码：重启流实现（纯净，只抛异常）
 
         Args:
-            client_id: 客户端ID
-            stream_url: 流URL
-            fps: 帧率
-            protocol: 协议（RTSP/RTMP）
+            task_id: 运行键（路由标识）
+            stream_url: RTSP 流 URL
 
         Returns:
             True表示重启成功
@@ -488,170 +344,74 @@ class StreamService:
         Raises:
             StreamConnectionError: 重启失败
         """
-        # 1. 停止旧的decoder（同步 kill，确保旧进程在新进程启动前彻底退出）
-        # 背景：健康监控每 5s 重连一次，若旧进程仍在运行，新旧进程同时连接
-        # MediaMTX 同一路径（18004），与 Phase-2 push 的 ANNOUNCE 形成竞争，
-        # 导致 MediaMTX 路径建立被延迟。短超时 kill 可将竞争窗口控制在 <100ms。
+        # 1. 同步停止旧 decoder（kill + reap + join reader，SIGKILL 下 ~ms）。
+        #    背景：新旧 decoder 复用同一 ClientQueues.ca_ready（无锁 SPSC deque），
+        #    必须确保旧 reader 线程退出后新 reader 才写入，消除双生产者窗口；
+        #    同时消除旧进程与新进程/Phase-2 push 在 MediaMTX 同路径上的连接竞争。
+        #    重连由健康监控线程驱动，此处几 ms 同步阻塞可接受。
         old_dec = None
         with self.lock:
-            old_dec = self.decoders.get(client_id)
-
-        if old_dec and old_dec.is_alive():
-            # 先强制 kill 旧 FFmpeg 进程（非阻塞，Windows TerminateProcess 立即返回），
-            # 消除旧进程与新进程/Phase-2 push 在 MediaMTX 同路径上的连接竞争。
-            # 随后异步 stop 负责关闭 pipe、等待 reader 线程退出等资源清理。
-            try:
-                if old_dec.proc and old_dec.proc.poll() is None:
-                    old_dec.proc.kill()
-            except Exception as e:
-                logger.debug(f"[{client_id}] kill old decoder failed: {e}")
-            self._stop_decoder_async(old_dec, client_id)
+            old_dec = self.decoders.get(task_id)
+        if old_dec:
+            old_dec.stop()
 
         # 2. 清理旧记录并创建新decoder（在锁内执行）
         with self.lock:
-            self._cleanup_dead_decoder_unsafe(client_id)
+            self._cleanup_dead_decoder_unsafe(task_id)
 
             # 3. 获取现有的ClientQueues（不创建新的）
-            if client_manager is None or not client_manager.has_client(client_id):
+            if not client_manager.has_client(task_id):
                 raise StreamConnectionError(
                     url=stream_url,
-                    client_id=client_id,
+                    task_id=task_id,   # 此刻无 cq，step_id/source_ip 缺省 None
                     details="Cannot restart stream: no ClientQueues",
                 )
 
-            client_queues = client_manager.get_client(client_id)
+            client_queues = client_manager.get(task_id)
 
             # 4. 创建新的decoder
-            protocol_opts = self._build_protocol_opts(protocol)
-
             dec = FFmpegDecoder(
                 manager=self,
-                client_id=client_id,
+                task_id=task_id,
                 stream_url=stream_url,
                 decoder_config=self.config.decoder if self.config else None,
-                protocol_opts=protocol_opts,
                 client_queues=client_queues,
             )
 
-            self.decoders[client_id] = dec
+            self.decoders[task_id] = dec
             dec.start()
 
-            # 5. 注册到 selector
-            self._register_to_selector(dec)
-
-            logger.info(f"[{client_id}] Stream restarted successfully")
+            logger.info(f"[{task_id}] Stream restarted successfully")
             return True
 
-    def get_pending_count(self, client_id: str) -> int:
+    def get_pending_count(self, task_id: int) -> int:
         """
         获取指定客户端的 CA-Ready-Queue 深度（用于背压控制）
 
-        关键修改：检查 CA-Ready-Queue（推理队列）而不是 CA-Raw-Queue
+        关键点：检查 CA-Ready-Queue（推理队列）而不是 CA-Raw-Queue
         原因：CA-Raw-Queue 用于落盘，即使满了也不应阻塞拉流
               CA-Ready-Queue 用于推理，如果满了说明推理跟不上，需要丢帧
         """
-        if client_manager is None:
-            logger.warning(
-                "[BACKPRESSURE] client_manager is None, import may have failed"
-            )
-            return 0
-
         # 先检查客户端是否存在
-        if not client_manager.has_client(client_id):
+        if not client_manager.has_client(task_id):
             return 0
 
-        client_queues = client_manager.get_client(client_id)
+        client_queues = client_manager.get(task_id)
         if client_queues is None:
             logger.warning(
-                f"[BACKPRESSURE] client_queues is None for client_id={client_id}"
+                f"[BACKPRESSURE] client_queues is None for task_id={task_id}"
             )
             return 0
 
         depths = client_queues.get_queue_depths()
         if not depths:
             logger.warning(
-                f"[BACKPRESSURE] get_queue_depths returned empty for client_id={client_id}"
+                f"[BACKPRESSURE] get_queue_depths returned empty for task_id={task_id}"
             )
             return 0
 
-        # 关键修改：检查 CA-Ready-Queue（推理队列）深度
-        ready_depth = depths.get("ca_ready", 0)
-        raw_depth = depths.get("ca_raw", 0)
-
-        # 定期打印队列状态（每300帧打印一次，约10秒）
-        decoder = self.decoders.get(client_id)
-        if decoder and decoder.frames_received % 300 == 0:
-            logger.info(
-                f"[BACKPRESSURE] client={client_id}: ca_ready={ready_depth}/{client_queues.get_ca_ready_capacity()}, ca_raw={raw_depth}/{client_queues.get_ca_raw_capacity()}"
-            )
-
-        return ready_depth  # 返回推理队列深度
-
-    def run_once(self, timeout: float = 0.05):
-        """
-        业务代码：执行一次 selector 轮询（纯净）
-
-        Args:
-            timeout: 超时时间（秒）
-        """
-        if self.sel is None:
-            return
-        events = self.sel.select(timeout=timeout)
-        for key, _ in events:  # type: ignore
-            dec: FFmpegDecoder = key.data
-            # 业务逻辑：调用解码器读取数据
-            # 注意：on_stdout_ready() 内部已经处理了异常（返回 False）
-            dec.on_stdout_ready()
-
-    def _selector_loop(self, timeout: float = 0.05):
-        """
-        Selector 轮询线程（边界层 1）
-
-        职责：
-        1. 持续轮询 selector，调度 FFmpeg stdout 读取
-        2. 捕获所有异常，防止线程崩溃
-        3. 清理资源（selector 关闭）
-
-        Args:
-            timeout: 轮询超时时间（秒）
-        """
-        try:
-            # 业务逻辑：持续轮询
-            while not self._stop_event.is_set():
-                try:
-                    self.run_once(timeout=timeout)
-                except Exception as e:
-                    # 边界层 1 捕获异常（防止线程崩溃）
-                    logger.error(
-                        f"[BoundaryLayer1] Error in selector loop: {e}", exc_info=True
-                    )
-
-        finally:
-            # 资源清理：关闭 selector
-            self._cleanup_selector()
-
-    def _cleanup_selector(self):
-        """
-        业务代码：清理 selector 资源（纯净）
-
-        注意：此方法在 finally 块中调用，不应抛出异常
-        """
-        if self.sel is None:
-            return
-
-        try:
-            # 注销所有文件描述符
-            for key in list(self.sel.get_map().values()):
-                try:
-                    self.sel.unregister(key.fd)
-                except Exception:
-                    pass  # 忽略注销失败
-
-            # 关闭 selector
-            self.sel.close()
-            logger.debug("[StreamService] Selector closed")
-        except Exception as e:
-            logger.error("[StreamService] Error cleaning up selector: %s", e, exc_info=True)
+        # 返回 CA-Ready-Queue（推理队列）深度
+        return depths.get("ca_ready", 0)
 
     def shutdown(self):
         """优雅关闭服务，同步等待所有 FFmpeg 解码器退出。
@@ -668,15 +428,15 @@ class StreamService:
             decoders = list(self.decoders.items())
             self.decoders.clear()
 
-        # 同步逐个停止，确保 FFmpeg 子进程在进程退出前被清理
-        for client_id, decoder in decoders:
+        # 同步逐个停止，确保 FFmpeg 子进程在进程退出前被清理（stop 内含 join reader）
+        for task_id, decoder in decoders:
             try:
                 decoder.stop()
-                logger.debug("[StreamService] Decoder stopped: %s", client_id)
+                logger.debug("[StreamService] Decoder stopped: %s", task_id)
             except Exception as e:
                 logger.error(
                     "[StreamService] Error stopping decoder %s: %s",
-                    client_id, e, exc_info=True,
+                    task_id, e, exc_info=True,
                 )
 
         logger.info("StreamService shutdown complete")

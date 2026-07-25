@@ -1,8 +1,8 @@
 """
-单客户端集成测试 - 覆盖6种使用场景
+单客户端集成测试 - 覆盖 9 种使用场景（观测走 admin 运维面板 /admin-f3m8/ui/）
 
 用法:
-    python integration_tests/test_single_client.py --scenario <1-7> --task_id <id> [options]
+    python integration_tests/test_single_client.py --scenario <1-9> --task_id <id> [options]
 
 场景:
     1 - 正常流程:   推流 → start → 等待 → terminate
@@ -13,15 +13,17 @@
     6 - 延迟推流:   先调 start（流未就绪），N秒后推流，验证健康监控自动重连（Bug 2）
     7 - CLEAN阶段:  current_step=2 → CLEAN stage，验证帧透传不黑屏
     8 - MOCK阶段:   无效 current_step → MOCK fallback，验证帧透传不黑屏
+    9 - 阶段切换:   start(LEAK) → DB 改 step=2 → 再 start 触发全量重建 → CLEAN
 
 参数:
-    --scenario    {1,2,3,4,5,6}       必填
+    --scenario    {1-9}                必填
     --server      <host>               默认 localhost
+    --api-port    <int>                默认 8000（后端 HTTP/WS API 端口）
+    --rtsp-port   <int>                默认 8004（RTSPProxy 推流端口）
     --task_id     <int>                必填
     --duration    <seconds>            默认 60
     --video_path  <path>               默认 test/test_video.mp4
     --fps         <int>                默认 30
-    --no-window                        禁用 OpenCV 可视化窗口
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
     --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
     --current-step <step>              任务阶段(1=LEAK/2=CLEAN/其它=MOCK)，覆盖场景默认
@@ -33,7 +35,6 @@
 """
 
 import argparse
-import asyncio
 import sys
 import time
 from contextlib import contextmanager
@@ -42,7 +43,6 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from integration_tests.client_viewer import InferenceViewer
 from integration_tests.utils import APIClient, DatabaseHelper, FFmpegController
 
 # 自动清理超时: heartbeat(5s) + max_attempts(5) × interval(5s) + buffer(10s) = 40s
@@ -203,16 +203,10 @@ def do_start(api: APIClient, args, pull_url: str, *, label: str = ""):
 
 
 def watch_or_sleep(args, client_id: str, duration: int):
-    """有窗口则用 InferenceViewer 实时展示，无窗口则打印查看器 URL 并 sleep。"""
-    if not args.no_window:
-        viewer = InferenceViewer(
-            client_id, show_window=True, base_port=f"{args.server}:{args.api_port}"
-        )
-        asyncio.run(viewer.connect_and_display(duration))
-    else:
-        print_viewer_url(args.server, client_id, args.api_port)
-        print(f"运行中（无窗口，{duration}s）...")
-        time.sleep(duration)
+    """运行 duration 秒；观测走 admin 运维面板（打印一次面板 URL）。"""
+    print_admin_url(args.server, args.api_port, args.task_id)
+    print(f"运行中（{duration}s）...")
+    time.sleep(duration)
 
 
 def do_terminate(api: APIClient, client_id: str, ffmpeg: FFmpegController = None):
@@ -286,13 +280,19 @@ def poll_until_reconnected(api: APIClient, client_id: str, timeout: int = RECONN
     return False
 
 
-def print_viewer_url(server: str, client_id: str, api_port: int):
-    """打印浏览器查看器 URL（--no-window 模式的替代方案）。"""
-    viewer_path = Path(__file__).parent / "viewer.html"
-    print(f"\n如需在浏览器中查看推理结果，请打开:")
-    print(f"  file:///{viewer_path}?client_id={client_id}&server={server}:{api_port}")
-    print(f"  或运行: python -m http.server 8080")
-    print(f"  然后访问: http://localhost:8080/integration_tests/viewer.html?client_id={client_id}&server={server}:{api_port}\n")
+_admin_url_printed = False
+
+
+def print_admin_url(server: str, api_port: int, task_id: int):
+    """打印 admin 运维面板 URL（观测唯一入口），每次运行只打印一次。"""
+    global _admin_url_printed
+    if _admin_url_printed:
+        return
+    _admin_url_printed = True
+    print(f"\n观测走 admin 运维面板（后端自带，同源同端口）:")
+    print(f"  http://{server}:{api_port}/admin-f3m8/ui/")
+    print(f"  → 「实时监控」tab 选择 task_id={task_id} 对应的客户端并点「连接」")
+    print(f"  → 告警/指标/证据回溯见其余 tab\n")
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +790,6 @@ def main():
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
     parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
-    parser.add_argument("--no-window", action="store_true", dest="no_window", help="禁用 OpenCV 可视化窗口")
     parser.add_argument(
         "--mode",
         choices=["no-stream", "no-terminate"],

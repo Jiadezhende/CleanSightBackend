@@ -1,10 +1,12 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-21
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Traceback And Media Service
 
 追溯服务负责按告警或任务步骤定位 HLS 段，并通过 token 化媒体路由返回可播放资源。
+
+两层路由：`/traceback/*` 业务查询层返回带 HMAC token 的媒体 URL；`/media/*` 访问层校验 token 后流式返回文件。所有落盘按 `(task_id, step_id)` 隔离，链路不读 `source_ip`（`alarm` 表自带 `(task_id, step_id)` 直接定位）。
 
 ## SegmentFinder
 
@@ -18,7 +20,6 @@
 
 - raw segment
 - processed segment
-- keypoints JSON
 
 `find()` 根据目标 `ts_ms` 返回触发段和前后上下文。
 
@@ -34,24 +35,29 @@
 
 `settings.media_token_secret` 为空时，默认 token secret 在进程内生成，重启后旧 token 失效。
 
-## /traceback/*
+token payload 只剩两种 kind：`segment` | `init`（`{"t","s","f","k","e"}`），两 kind 不可互换（`verify(kind=...)` 强校验）。
 
-主要能力：
+## /traceback/*（业务层，4 个端点）
 
-- 告警 evidence：返回 raw/processed clips、keypoints URL、可选 detection JSON。
-- task playlist：为单个 task + step + track 生成 VOD m3u8。
-- alarm playlist：为告警上下文生成 VOD m3u8。
-- timeline：返回该 step 的视频起止和告警事件。
+| 端点 | 方法 | 关键参数 | 返回 |
+|------|------|---------|------|
+| `/alarm/{alarm_id}/evidence` | GET | `n_before`/`n_after`（default=-1, ge=-1, le=20，-1 取配置默认 `traceback_context_before/after`） | JSON：`alarm`+`task_id`+`step_id`+`raw_clips[]`+`processed_clips[]` |
+| `/alarm/{alarm_id}/playlist.m3u8` | GET | `track`（default=processed，`^(raw\|processed)$`）、`n_before`/`n_after` | VOD m3u8（trigger 段 + 上下文，含 `#EXT-X-MAP`） |
+| `/task/{task_id}/playlist.m3u8` | GET | `step_id`（**必填**）、`track`（default=processed） | VOD m3u8（该 step 整段回放；任务级跨 step 聚合本期不支持） |
+| `/task/{task_id}/timeline` | GET | `step_id`（**必填**） | JSON：`start_ms`/`end_ms`/`duration_ms`/`events[]` |
 
-## /media/*
+`evidence` 是**双轨能力唯一的并列出口**：`raw_clips` / `processed_clips` 两条列表，每段含
+`url`/`filename`/`ts_us`/`ts_ms`/`is_trigger`（`_segment_to_url`，traceback.py:61）。注意
+`*_clips[].url` 是裸 fMP4 fragment（无 init），不能直接喂 `<video>`，回放须走 `playlist.m3u8` 端点。
+
+## /media/*（访问层，2 个端点）
 
 媒体路由只接受 token：
 
-- `/media/segment/{token}`：返回 mp4 fragment。
-- `/media/init/{token}`：返回 `init.mp4`。
-- `/media/keypoints/{token}`：返回 JSON。
+- `/media/segment/{token}`：返回 mp4 fragment，`Cache-Control: private, max-age=60`。
+- `/media/init/{token}`：返回 `init.mp4`（step 级共享），`max-age=3600`；由 playlist 的 `#EXT-X-MAP` 自动签发。
 
-路径解析会拒绝 path traversal，并确保文件在 base_dir 内。
+路径解析会拒绝 path traversal，并确保文件在 base_dir 内（`_resolve_media_path`，media.py:27）。
 
 ## VOD playlist 原则
 
@@ -61,6 +67,21 @@ VOD playlist 不直接暴露落盘 LIVE playlist，而是动态生成：
 - 带 `#EXT-X-ENDLIST`
 - 每个 segment URL 都是 token URL
 - 只使用写入侧 playlist 中已有 EXTINF 的段，过滤在途段
+
+## 已废弃 / 不再存在
+
+避免误认为遗漏或试图调用（快照见 update/20260701_TRACEBACK_CAPABILITY_SNAPSHOT.md）：
+
+- **`GET /media/keypoints/{token}`**：端点不存在；media 路由全文仅 `segment`/`init`。
+- **`evidence` 响应的 `keypoints_url` / `detection` 字段**：不返回。
+- **`keypoints_{ts_us}.json` 落盘 / token kind `keypoints`**：均已下线。
+- **`client_id` / `source_ip`**：追溯链路不依赖，`evidence`/`playlist`/`timeline` 均用 alarm 自带 `(task_id, step_id)` 定位。
+
+## 前端调用路径（端到端）
+
+- **告警双轨复核**：`evidence` 拿双轨元数据 → 各请求一条 `alarm/{id}/playlist.m3u8?track=raw|processed` 喂 hls.js（自动经 `/media/init`+`/media/segment` 拉流）；用 `(clips[triggerIdx].ts_ms - clips[0].ts_ms)/1000` seek 到触发段。
+- **单步骤完整回放 + 打点**：`task/{id}/playlist.m3u8?step_id=&track=` 播放 + `task/{id}/timeline?step_id=` 在进度条叠加告警标记。
+- **告警跳转回放**：`evidence` 顶层 `task_id`/`step_id` 直接拼步骤回放 URL。
 
 ## 代码来源
 

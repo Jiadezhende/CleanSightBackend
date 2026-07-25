@@ -1,9 +1,9 @@
 # Lab 送标页支持 raw/processed 双轨查看——processed 只看不送标
 
 > **变更状态**：生效中（2026-06-28）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_LAB.md](../kb/SERVICE_LAB.md)(2026-07-21)
 >
-> 相关：[20260614_LAB_CLIP_TIME_MODEL.md](20260614_LAB_CLIP_TIME_MODEL.md)（lab 选段时间模型）、[../LAB_EXPORT_API.md](../LAB_EXPORT_API.md)（送标导出接口）、[../TRACEBACK_API.md](../TRACEBACK_API.md)（双轨 playlist 数据底座）。
+> 相关：[20260614_LAB_CLIP_TIME_MODEL.md](20260614_LAB_CLIP_TIME_MODEL.md)（lab 选段时间模型）、[../archive/old_architecture/LAB_EXPORT_API.md](../archive/old_architecture/LAB_EXPORT_API.md)（送标导出接口）、[../archive/old_architecture/TRACEBACK_API.md](../archive/old_architecture/TRACEBACK_API.md)（双轨 playlist 数据底座）。
 
 ## 概述
 

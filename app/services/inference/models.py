@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import numpy as np
 
 from app.domain.detection import FrameDetections
+
+if TYPE_CHECKING:
+    from app.services.client import ClientQueues
 
 
 # ==================== 传输对象（online 热路径）====================
@@ -27,25 +30,39 @@ from app.domain.detection import FrameDetections
 
 @dataclass
 class DetectionTask:
-    """推理请求（队列作业）：对某 client/stage 的某帧做检测。"""
+    """推理请求（队列作业）：对某 client/stage 的某帧做检测。
 
-    client_id: str
+    cq 为 dispatcher 在 pop 帧时捕获的 per-run CQ 句柄，随 batch 透传到 FrameInference，
+    供写回凭它投递而**不按键反查**（消除 dispatch→infer→write-back 期间换槽的跨 run 串台）。
+    task_id 为运行键（路由标识），随句柄同行，仅日志/诊断用；路由靠 cq 句柄。
+    """
+
+    task_id: int
     stage: str
     timestamp: float
     frame: np.ndarray
+    cq: "ClientQueues"
 
 
 @dataclass
 class FrameInference:
     """推理结果：一帧多检测器聚合（detections[detector_name] = FrameDetections）。
 
-    timestamp 为帧捕获 ts，供 VisualizationWorker 按帧去重（同帧只渲染一次）。
+    timestamp 为帧捕获 ts。本对象是 pool→写回口的传输消息，不被 cq 留存（写回口把
+    detections 物化成 FrameFeature 存入 slide_window/latest_inference，二者均无 cq）。
+    cq 为从对应 DetectionTask 透传的捕获句柄，写回只写它、不反查；旧句柄经 CQ 状态机
+    （DRAINING/CLOSED）被挡，碰不到新 run。
+    frame_width/frame_height 为帧分辨率：fan-out 前定死的每帧常量，pool 从原始帧盖章、随本消息透传，
+    写回口物化进 FrameFeature（原始帧此后即销毁，此处是唯一采集时机）。拆两字段避免 (w,h) 隐式序混淆。
     """
 
-    client_id: str
+    task_id: int
     stage: str
     timestamp: float
     detections: Dict[str, FrameDetections]
+    cq: "ClientQueues"
+    frame_width: Optional[int] = None
+    frame_height: Optional[int] = None
 
 
 # ==================== 离线预留事实契约（L3 时序分析层产出）====================

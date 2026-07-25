@@ -1,20 +1,14 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-06
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # 检测标准
 
-本文件描述当前代码实际执行的检测标准。业务标准如需调整，应优先修改配置或对应 Analyzer，并补充测试。
+本文件描述当前代码实际执行的检测标准。业务标准如需调整，应优先修改配置或对应 Operator，并补充测试。
 
 ## 阶段路由
 
-当前阶段路由写在 `InferenceManager._STEP_TO_STAGE`：
-
-- `current_step == "1"`：`LEAK`
-- `current_step == "2"`：`CLEAN`
-- 其他值：`MOCK`
-
-配置入口是 `config/inference_config.yaml`。CPU mock 配置另见 `config/inference_config_cpu.yaml`。
+`InferenceManager.resolve_stage(step_id)` 恒等路由：`str(step_id)` 命中 `config/inference_config.yaml` 的 stage 键则用之，否则回落 `MOCK`。当前 stage 键 `"1"`(alias LEAK) / `"2"`(alias CLEAN) / `MOCK`。stage 是 CQ 不可变身份的一部分（构造时定死），无独立 `_STEP_TO_STAGE` 表。
 
 ## LEAK 阶段
 
@@ -25,9 +19,9 @@
 
 ### 气泡检测
 
-`BubbleDetector` 使用 YOLO 检测气泡实例，输出标准化 `DetectionOutput`。
+`BubbleDetector` 使用 YOLO 检测气泡实例，输出标准化 `FrameDetections`。
 
-`BirthRateAnalyzer` 每个 client 独立实例化，使用 ByteTrack 跟踪气泡实例并计算新气泡出生率：
+`BubbleOperator`（rule `bubble_leak`，`subscribes: [bubble]`，`realtime: true`）每 run 独立实例化，使用 ByteTrack 跟踪气泡实例并计算新气泡出生率：
 
 ```text
 birth_rate = 滑动窗口内新气泡数总和 / 窗口帧数
@@ -44,33 +38,39 @@ birth_rate = 滑动窗口内新气泡数总和 / 窗口帧数
 
 `BendingDetector` 使用 YOLO 检测 `straight / bent` 状态。
 
-`DebounceAnalyzer` 每个 client 独立实例化，通过连续帧去抖统计 `STRAIGHT -> BENT` 转换次数：
+`BendingOperator`（rule `bending_check`，`subscribes: [bending]`，`realtime: false`）每 run 独立实例化，通过连续帧去抖统计 `STRAIGHT -> BENT` 转换次数：
 
 - `debounce_frames: 5`
 - `required_bend_actions: 4`
 
 实时阶段只产出 overlay 事件，不上报告警。任务 terminate、切换任务或服务停止时调用 `finalize()`；若累计 `bend_actions < required_bend_actions`，产生 warning 级别结算告警。
 
-## CLEAN 与 MOCK 阶段
+## CLEAN 阶段
 
-当前 `CLEAN` 和 `MOCK` 配置均使用 `MockDetector + MockAnalyzer`，参数设置为不触发告警：
+`CLEAN`（stage `"2"`）当前 `rules: []`——**不建 Operator/Actor，不产告警**，仅由两个 detector 提供检测框可视化：
 
-- `brightness_threshold: 0.0`
-- `consecutive_trigger: 999`
+- `clean_large`（大目标组：手 / scope_control_body / scope_mid_section），`CleanLargeDetector`。
+- `clean_small`（小目标组：syringe / air_gun / scope_distal_end），`CleanSmallDetector`。
 
-这表示当前代码中 CLEAN 阶段是占位透传，不代表最终业务标准。
+离线动作分割模型（stage 粒度）将来挂 `stage."2".offline`（占位，未实现）。CLEAN 尚不代表最终业务标准。
+
+## MOCK 阶段
+
+未知 `current_step` 的 fallback + taskless 默认，纯透传：`MockDetector`（`brightness_threshold: 0.0` 永不触发）+ `MockOperator`（rule `mock_passthrough`，`consecutive_trigger: 999` 恒不告警）。
 
 ## 告警去重
 
-实时告警和结算告警都会经过 `ClientQueues.try_pass_alarm_gate()`。当前固定冷却窗口为 5 秒，同一 task、metric、mode 在窗口内只允许通过一次。
+实时告警和结算告警都经 `ClientQueues.append_alarm_record_with_gate()`。固定冷却窗口 5 秒，同一 `(task_id, metric, mode)` 窗口内只放行一次；过闸编排在 `inference/temporal/alarm_sink.persist_alarms`。
 
 ## 代码来源
 
 - `config/inference_config.yaml`
-- `app/services/inference/core/manager.py`
+- `app/services/inference/manager.py`
 - `app/services/inference/workflows/bubble.py`
 - `app/services/inference/workflows/bending.py`
+- `app/services/inference/workflows/clean.py`
 - `app/services/inference/workflows/mock.py`
+- `app/services/inference/temporal/alarm_sink.py`
 - `app/services/client/queues.py`
 - `tests/test_alarm_increment.py`
 - `tests/test_inference_stage_routing.py`

@@ -1,7 +1,6 @@
 """帧载体契约。"""
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -16,4 +15,3 @@ class Frame:
 
     timestamp: float  # Unix timestamp
     frame: np.ndarray  # 原始或处理后的帧（numpy 数组）
-    inference_result: Optional[Dict[str, Any]] = None  # 处理帧携带的推理结果（raw 帧为 None）

@@ -1,4 +1,4 @@
-> 更新时间：2026-05-24
+> 更新时间：2026-07-25
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -25,9 +25,10 @@
 1. [ARCHITECTURE_API_SURFACE.md](ARCHITECTURE_API_SURFACE.md)
 2. [SERVICE_STREAM.md](SERVICE_STREAM.md)
 3. [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)
-4. [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)
-5. [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)
-6. [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)
+4. [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)
+5. [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)
+6. [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)
+7. [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)
 
 运维排障：
 
@@ -57,14 +58,15 @@
 ## 整体架构
 
 - [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)：概览 FastAPI 主进程、MediaMTX、FFmpeg、Postgres 和外部系统的组件关系。
-- [ARCHITECTURE_DATA_FLOW.md](ARCHITECTURE_DATA_FLOW.md)：追踪视频流从 RTSP/RTMP 输入到推理、可视化、HLS、告警的端到端数据流。
-- [ARCHITECTURE_API_SURFACE.md](ARCHITECTURE_API_SURFACE.md)：索引当前代码注册的 HTTP 与 WebSocket 接口及其所属路由模块。
-- [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)：说明 `clean_task`、`clean_alarm`、HLS 文件目录、playlist、keypoints 和 metadata。
+- [ARCHITECTURE_DATA_FLOW.md](ARCHITECTURE_DATA_FLOW.md)：追踪视频流从 RTSP 输入到推理、可视化、HLS、告警的端到端数据流。
+- [ARCHITECTURE_API_SURFACE.md](ARCHITECTURE_API_SURFACE.md)：API 路由接线图——router 归属、注册与中间件顺序、生命周期挂载（端点请求/响应契约属对外 API 文档，不在本库）。
+- [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)：说明数据模型分层（domain/ORM/DTO）、`clean_task`、`clean_alarm`、HLS 文件目录、playlist、features.jsonl 和 metadata。
 
 ## 逐服务说明
 
 - [SERVICE_STREAM.md](SERVICE_STREAM.md)：说明 StreamService、FFmpegDecoder、URL 重写、背压和断流检测输入。
-- [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)：说明 ClientManager、ClientQueues、任务绑定、队列、前端消息和告警 gate。
+- [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)：说明 ClientManager（COW 注册表，int task_id 键）、ClientQueues（per-run 不可变身份 + ACTIVE/DRAINING/CLOSED 状态机）、队列、前端消息和告警 gate。
+- [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)：说明 RunController 跨服务起停编排、per-task 锁、拆机顺序与对象身份 fence。
 - [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)：说明 InferenceManager、StageFactory、Dispatcher、模型推理、时序分析和可视化三池设计。
 - [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)：说明 HLS/告警持久化队列、worker、慢 IO 分离、fMP4 转码和告警上报。
 - [SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)：说明全局健康监控、断流重连、孤儿状态检测和统一 cleanup_client。
@@ -77,6 +79,6 @@
 
 - [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)：线程安全性、异步解耦、防卡死与可维护性。
 - [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)：说明异常边界层、GuardedExecutor、重试、健康监控和优雅关闭策略。
-- [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md)：说明如何新增 Detector、TemporalAnalyzer、YAML stage 配置和相关测试。
+- [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md)：说明如何新增 Detector（流源）、Operator（流算子，analyze+judge 合并）、YAML stage 配置和相关测试。
 - [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)：说明 fMP4、EXTINF 真值、tfdt、在途段过滤和时间轴计算的关键约束。
 - [TESTING_MAP.md](TESTING_MAP.md)：索引现有测试覆盖面，并给后续改动提供优先补测方向。

@@ -13,9 +13,11 @@ storage:
 hls:
   workers: 2                      # HLS Worker数量
   queue_size: 100                 # HLS队列最大长度
-  segment_duration: 10            # 视频段时长（秒）
+  sweep_interval_seconds: 1.0     # HLSSegmentSweeper 扫描间隔（秒）：周期从活跃 CQ 拉走攒满的整段落盘（PULL）
 
-  # 注意：帧率参数（raw_fps, processed_fps←inference_fps）从 app/settings.py 读取（单一真源）
+  # 注意：不配 segment_duration——分段由 CQ 帧数(settings.ca_segment_seconds)触发、每段时长由
+  #      写入侧 EXTINF 从帧 ts 自适应，回放侧也从 EXTINF 读。配时长是死值且会误导。
+  # 注意：帧率参数从 app/settings.py 读取（单一真源），HLS 段编码 fps 由 strategy 从帧 ts 反推
 
 # 告警持久化配置
 alarm:

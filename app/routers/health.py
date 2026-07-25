@@ -9,9 +9,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter
 
-from app.services import ai
 from app.services.client.manager import client_manager
 from app.services.health_monitor import GlobalHealthMonitor, get_health_monitor_config
+from app.services.inference.instance import inference_manager
 from app.services.stream import stream_service
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ async def lifespan():
     _health_monitor = GlobalHealthMonitor(
         client_manager=client_manager,
         stream_service=stream_service,
-        inference_manager=ai.manager,
+        inference_manager=inference_manager,
         config=health_config,
     )
     _health_monitor.start()

@@ -20,7 +20,8 @@ class FrameConfig:
 
     resize_width: int = 640  # Resize宽度
     resize_height: int = 480  # Resize高度
-    # 注意：inference_fps, ca_maxlen, ca_segment_len 从 app/settings.py 读取（单一真源）
+    # 注意：inference_fps 从 app/settings.py 读取（单一真源）；CA 缓存/段长以秒声明
+    # （ca_maxlen_seconds / ca_segment_seconds），帧数在 ca_maxlen/ca_segment_len 属性按 raw_fps 换算
 
 
 @dataclass
@@ -28,7 +29,7 @@ class StateConfig:
     """状态配置"""
 
     # 注意：初始 stage 不在此配置——未分配任务的客户端默认 MOCK 透传，
-    # 由 ClientQueues(initial_stage="MOCK") 硬编码兜底，无可配语义。
+    # 由 ClientQueues(stage="MOCK") 构造兜底，无可配语义。
     heartbeat_timeout: int = 30  # 心跳超时（秒）
 
 
@@ -91,21 +92,35 @@ class ClientConfig:
 
     @property
     def ca_maxlen(self) -> int:
-        """CA队列最大长度（从 settings 单一真源读取）"""
+        """CA队列最大长度（帧数）：时间概念 ca_maxlen_seconds 在此边界按 raw_fps 换算为帧数。"""
         from app.settings import settings
-        return settings.ca_maxlen
+        return settings.ca_maxlen_seconds * settings.raw_fps
 
     @property
     def ca_segment_len(self) -> int:
-        """HLS段长度（帧数，从 settings 单一真源读取）"""
+        """HLS段长度（帧数）：时间概念 ca_segment_seconds 在此边界按 raw_fps 换算为帧数。"""
         from app.settings import settings
-        return settings.ca_segment_len
+        return settings.ca_segment_seconds * settings.raw_fps
 
     @property
-    def inference_fps(self) -> int:
-        """推理帧率（从 settings 单一真源读取）"""
+    def inference_decimation(self) -> int:
+        """检测抽帧降采样倍率（从 settings 单一真源读取；抽帧器「每 N 帧留 1」）"""
         from app.settings import settings
-        return settings.inference_fps
+        return settings.inference_decimation
+
+    def cq_kwargs(self) -> Dict[str, Any]:
+        """组装 ClientQueues 构造参数（resize 属 client 配置，采样倍率/队列走 settings 单一真源）。
+
+        创建 CQ 的唯一配置出口：run 起始由 InferenceManager 调用（早于起流），
+        避免"裸建默认值 + 起流时 kwargs 被丢弃"的 dead-kwargs 问题。
+        """
+        return {
+            "resize_width": self.frame.resize_width,
+            "resize_height": self.frame.resize_height,
+            "inference_decimation": self.inference_decimation,
+            "ca_maxlen": self.ca_maxlen,
+            "ca_segment_len": self.ca_segment_len,
+        }
 
     def _log_loaded_config(self):
         """输出加载的配置"""
@@ -118,10 +133,10 @@ class ClientConfig:
                 self.ca_segment_len,
             )
             logger.debug(
-                "帧处理: %dx%d, inference_fps=%d",
+                "帧处理: %dx%d, 抽帧倍率 N=%d（每 N 帧留 1）",
                 self.frame.resize_width,
                 self.frame.resize_height,
-                self.inference_fps,
+                self.inference_decimation,
             )
             logger.debug(
                 "状态: timeout=%ds",
@@ -147,21 +162,8 @@ class ClientConfig:
                 f"会导致永远无法触发分段"
             )
 
-        # 检查inference_fps与全局配置冲突
-        try:
-            from app.settings import settings
-
-            global_inference_fps = getattr(settings, "inference_fps", None)
-            if (
-                global_inference_fps
-                and abs(self.inference_fps - int(global_inference_fps)) > 1
-            ):
-                warnings.append(
-                    f"⚠️  配置冲突: client.inference_fps({self.inference_fps}) "
-                    f"!= settings.inference_fps({global_inference_fps})"
-                )
-        except Exception:
-            pass
+        # 注：原 client.inference_fps ↔ settings.inference_fps 冲突检查已删——
+        # 采样倍率现单一真源 settings.inference_decimation，client 直读同源，无从冲突。
 
         # 输出警告
         if warnings:

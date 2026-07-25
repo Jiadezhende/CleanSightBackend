@@ -2,7 +2,7 @@
 多客户端并发集成测试（Scenario 6）
 
 从数据库查询最多 max-tasks 个任务，并发运行 scenario 1（正常流程）。
-若启用可视化，随机挑 2 个客户端打开 OpenCV 窗口，其余使用 --no-window。
+观测走 admin 运维面板（http://{server}:{api_port}/admin-f3m8/ui/ 「总览」/「实时监控」tab）。
 
 用法:
     python integration_tests/test_multi_client.py [options]
@@ -13,12 +13,10 @@
     --max-tasks   <int>     最大并发任务数（默认: 5）
     --video_path  <path>    测试视频路径（默认: test/test_video.mp4）
     --fps         <int>     推流帧率（默认: 30）
-    --no-window             禁用所有 OpenCV 窗口
 """
 
 import argparse
 import os
-import random
 import subprocess
 import sys
 import time
@@ -58,7 +56,7 @@ def get_test_tasks(max_tasks: int) -> list:
         db.close()
 
 
-def spawn_worker(task_id: int, args, show_window: bool, log_dir: Path):
+def spawn_worker(task_id: int, args, log_dir: Path):
     """
     启动单个 test_single_client.py --scenario 1 子进程。
     返回 (subprocess.Popen, log_path)。
@@ -74,8 +72,6 @@ def spawn_worker(task_id: int, args, show_window: bool, log_dir: Path):
         "--video_path", args.video_path,
         "--fps", str(args.fps),
     ]
-    if not show_window:
-        cmd.append("--no-window")
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -118,7 +114,7 @@ def main():
     parser.add_argument("--max-tasks", type=int, default=5, dest="max_tasks", help="最大并发任务数（默认: 5）")
     parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
-    parser.add_argument("--no-window", action="store_true", dest="no_window", help="禁用所有 OpenCV 窗口")
+    parser.add_argument("--api-port", type=int, default=8000, dest="api_port", help="后端 API 端口（默认: 8000）")
     args = parser.parse_args()
 
     if args.video_path is None:
@@ -140,27 +136,22 @@ def main():
 
     print(f"\n找到 {len(tasks)} 个任务: {[t[0] for t in tasks]}")
 
-    # 随机挑 2 个客户端启用可视化（若未禁用窗口）
-    viz_indices = set()
-    if not args.no_window and len(tasks) > 0:
-        k = min(2, len(tasks))
-        viz_indices = set(random.sample(range(len(tasks)), k))
-        print(f"可视化窗口: task_id = {[tasks[i][0] for i in viz_indices]}")
+    print(f"\n观测走 admin 运维面板（后端自带，同源同端口）:")
+    print(f"  http://{args.server}:{args.api_port}/admin-f3m8/ui/")
+    print(f"  → 「总览」看各客户端队列/健康，「实时监控」逐个选客户端看画面\n")
 
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
 
     procs, task_ids, log_paths, log_files = [], [], [], []
     try:
-        for idx, (task_id, source_ip) in enumerate(tasks):
-            show_window = idx in viz_indices
-            proc, log_path, log_file = spawn_worker(task_id, args, show_window, log_dir)
+        for task_id, source_ip in tasks:
+            proc, log_path, log_file = spawn_worker(task_id, args, log_dir)
             procs.append(proc)
             task_ids.append(task_id)
             log_paths.append(log_path)
             log_files.append(log_file)
-            mode = "带窗口" if show_window else "无窗口"
-            print(f"启动 Task {task_id} ({source_ip}) PID={proc.pid} [{mode}] → {log_path.name}")
+            print(f"启动 Task {task_id} ({source_ip}) PID={proc.pid} → {log_path.name}")
             time.sleep(2)  # 错开启动，避免同时争抢 MediaMTX
 
         print(f"\n已启动 {len(procs)} 个子进程，等待完成...\n")

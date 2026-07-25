@@ -1,7 +1,7 @@
 # 推理数据契约提纯：删死字段 + 告警 metric 显式化 + 合并重复落库
 
 > **变更状态**：生效中（2026-06-27）　<!-- 三处清理均已落地，全量 pytest 206 passed -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)(2026-07-21)
 >
 > 相关：[20260627_INFRA_ASSEMBLY_DECOUPLE.md](20260627_INFRA_ASSEMBLY_DECOUPLE.md)（同支前一批：装配层解耦）、[20260620_LAYERED_INFER_DATAFLOW.md](20260620_LAYERED_INFER_DATAFLOW.md)（分层数据流核实）。
 

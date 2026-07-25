@@ -1,7 +1,7 @@
 # 数据模型分层归位：共享契约上浮 domain/、DTO 归边界、帧/告警契约去冗余
 
 > **变更状态**：生效中（2026-06-28）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)(2026-07-21)
 >
 > 相关：[20260627_INFER_CONTRACT_PURITY.md](20260627_INFER_CONTRACT_PURITY.md)（同支前序：契约提纯，删死字段/metric 显式化）、[20260627_STREAM_OPERATOR_FRAMEWORK.md](20260627_STREAM_OPERATOR_FRAMEWORK.md)（流源/流算子框架，Detector/Operator 命名来源）、[20260627_INFRA_ASSEMBLY_DECOUPLE.md](20260627_INFRA_ASSEMBLY_DECOUPLE.md)（装配层解耦）。
 
