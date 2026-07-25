@@ -40,22 +40,31 @@ class VisualizationWorker:
     def __init__(
         self,
         stop_event: threading.Event,
-        tick_interval: float = 1.0 / 20,  # 兜底 ~20 FPS；实际由 pool 按 settings.inference_fps 注入
+        tick_interval: float = 1.0 / 20,  # 兜底 ~20 FPS；实际由 pool 按 settings.raw_fps 过采样注入
         worker_id: int = 0,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        output_fps: Optional[float] = None,
     ):
         """初始化可视化工作线程。
 
         Args:
             stop_event: 停止事件
-            tick_interval: 拉取间隔（秒），由 pool 按 settings.inference_fps 注入
+            tick_interval: 拉取间隔（秒），由 pool 按 settings.raw_fps 过采样注入（轮询率）
             worker_id: 工作线程ID（用于调试）
             stage_configs: Stage 配置字典 {stage_name: {"models": [tasks]}}
+            output_fps: 期望出帧率（= inference_fps），供吞吐告警判「速率亏空」的基准。
+                渲染按 inference.ts 去重，出帧上限恒 = 该值，与轮询率（tick）解耦——过采样后
+                轮询率 > 出帧率，故不能拿轮询率当基准（否则告警恒常亮）。缺省回退轮询率（兼容
+                脱离装配的直接构造/旧测试，此时二者相等）。
         """
         self.stop_event = stop_event
         self.tick_interval = tick_interval
         self.worker_id = worker_id
         self.stage_configs = stage_configs or {}
+        # 期望出帧率：缺省回退轮询率（1/tick），此时退化为过采样前的旧语义
+        self.output_fps = output_fps if output_fps and output_fps > 0 else (
+            1.0 / tick_interval if tick_interval > 0 else 0.0
+        )
         self.fixed_visualizer = FixedVisualizer()
 
         # 去重：记录每个 run(键=task_id) 上次渲染的推理时间戳，避免重复渲染同一帧
@@ -239,7 +248,10 @@ class VisualizationWorker:
         try:
             if window <= 0:
                 return
-            target = 1.0 / self.tick_interval if self.tick_interval > 0 else 0.0
+            poll_rate = 1.0 / self.tick_interval if self.tick_interval > 0 else 0.0
+            # 出帧基准：期望出帧率（inference_fps），与轮询率解耦。过采样后 poll_rate > out_target，
+            # 拿 poll_rate 当基准会让 out_fps(≈out_target) < poll_rate*0.8 恒真、告警常亮。
+            out_target = self.output_fps if self.output_fps > 0 else poll_rate
             budget_ms = self.tick_interval * 1000.0
             avg_ms = (self._render_time_sum / self._render_calls * 1000.0) if self._render_calls else 0.0
             max_ms = self._render_time_max * 1000.0
@@ -247,8 +259,8 @@ class VisualizationWorker:
 
             pressured = render_bound
             parts: List[str] = []
-            # 期望窗内最多 tick 数（供判定"是否真有推理流"，过滤近空闲流的误报）
-            expected_ticks = target * window
+            # 期望窗内最多 tick 数（供判定"是否真有推理流"，过滤近空闲流的误报）——按轮询率算 tick 计数
+            expected_ticks = poll_rate * window
             for cid in sorted(set(self._stat_rendered) | set(self._stat_stale)):
                 rendered = self._stat_rendered.get(cid, 0)
                 stale = self._stat_stale.get(cid, 0)
@@ -256,8 +268,8 @@ class VisualizationWorker:
                 total = rendered + stale
                 stale_pct = (stale / total * 100.0) if total else 0.0
                 tag = ""
-                # 有实际推理流（tick 数足够）且产出 < 目标 80% → 该客户端有压力
-                if total >= expected_ticks * 0.3 and out_fps < target * 0.8:
+                # 有实际推理流（tick 数足够）且产出 < 期望出帧率 80% → 该客户端有压力
+                if total >= expected_ticks * 0.3 and out_fps < out_target * 0.8:
                     pressured = True
                     tag = " (render-bound)" if render_bound else " (supply-bound)"
                 parts.append(
@@ -268,8 +280,8 @@ class VisualizationWorker:
                 return  # 平稳，静默
 
             logger.info(
-                "[VIZ_THROUGHPUT] target=%.0ffps render=%.1fms(max %.1fms, budget %.0fms) || %s",
-                target, avg_ms, max_ms, budget_ms,
+                "[VIZ_THROUGHPUT] target=%.0ffps poll=%.0fHz render=%.1fms(max %.1fms, budget %.0fms) || %s",
+                out_target, poll_rate, avg_ms, max_ms, budget_ms,
                 " | ".join(parts) if parts else "(none)",
             )
         except Exception as e:

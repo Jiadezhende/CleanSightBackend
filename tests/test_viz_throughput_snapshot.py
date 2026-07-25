@@ -12,10 +12,11 @@ from unittest.mock import patch
 from app.services.inference.visualization.worker import VisualizationWorker
 
 
-def _worker(target_fps: float = 20.0) -> VisualizationWorker:
+def _worker(target_fps: float = 20.0, output_fps: float = None) -> VisualizationWorker:
     return VisualizationWorker(
         stop_event=threading.Event(),
         tick_interval=1.0 / target_fps,
+        output_fps=output_fps,
     )
 
 
@@ -77,6 +78,48 @@ def test_snapshot_logs_render_bound():
     rendered = fmt % tuple(args)
     assert "[VIZ_THROUGHPUT]" in rendered
     assert "render-bound" in rendered
+
+
+def test_snapshot_silent_when_oversampled_healthy():
+    """过采样（轮询 30Hz、出帧率 15fps）且出帧健康 → 不应误报 supply-bound。
+
+    回归：修复前基准取轮询率，out_fps(15) < 30*0.8=24 恒真 → 告警常亮。
+    修复后基准取 output_fps(15)，15 < 15*0.8=12 为假 → 静默。
+    """
+    w = _worker(target_fps=30.0, output_fps=15.0)
+    window = 10.0
+    # 300 ticks：150 渲染（=15fps，出帧满额）+ 150 空转（过采样必然的空转 tick）
+    w._stat_rendered["c1"] = 150
+    w._stat_stale["c1"] = 150
+    w._render_calls = 150
+    w._render_time_sum = 150 * 0.002  # 平均 2ms
+    w._render_time_max = 0.005        # 峰值 5ms ≪ 33ms 预算
+
+    with patch("app.services.inference.visualization.worker.logger") as log:
+        w._log_throughput_snapshot(window)
+
+    log.info.assert_not_called()
+
+
+def test_snapshot_oversampled_still_flags_real_shortfall():
+    """过采样下真出现出帧亏空（8fps ≪ 15fps 期望）→ 仍应报 supply-bound。"""
+    w = _worker(target_fps=30.0, output_fps=15.0)
+    window = 10.0
+    # 300 ticks：仅 80 渲染（=8fps < 15*0.8=12）+ 220 空转
+    w._stat_rendered["c1"] = 80
+    w._stat_stale["c1"] = 220
+    w._render_calls = 80
+    w._render_time_sum = 80 * 0.002
+    w._render_time_max = 0.005        # 渲染清白 → 归因 supply
+
+    with patch("app.services.inference.visualization.worker.logger") as log:
+        w._log_throughput_snapshot(window)
+
+    log.info.assert_called_once()
+    fmt, *args = log.info.call_args.args
+    rendered = fmt % tuple(args)
+    assert "out=8.0fps" in rendered
+    assert "supply-bound" in rendered
 
 
 def test_snapshot_silent_when_idle_stream():

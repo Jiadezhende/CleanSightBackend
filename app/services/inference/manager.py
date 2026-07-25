@@ -33,7 +33,7 @@ class InferenceManager:
     集成三个独立时钟的 Worker 池：
     - ModelWorkerService（推理，~30 FPS）
     - ClientTemporalActor（时序分析，2 Hz，per-client）
-    - VisualizationWorkerPool（可视化，~15 FPS）
+    - VisualizationWorkerPool（可视化，轮询 raw_fps~30 Hz 过采样，出帧随 inference_fps~15 FPS 去重）
 
     三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。
     """
@@ -59,12 +59,15 @@ class InferenceManager:
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
         self._actors: Dict[int, ClientTemporalActor] = {}
 
-        # 可视化 worker 是"采样后 inference 流"的消费者：渲染按 inference.ts 去重，故轮询率
-        # 必须 = 该流速率（检测采样率 settings.inference_fps）——快则空转、慢则丢帧。
-        # 这是"消费者继承源流速率"的合法派生，非 fps 上帝常量；HLS processed 打标另由 eff_fps
-        # 从 ts 反推、模型输入另由 model_input_fps 契约重采样，二者已不再借用本值。
+        # 可视化 worker 是"采样后 inference 流"的消费者：渲染按 inference.ts 去重，故每秒吐出的
+        # 不同画面数恒 = 检测采样率（inference_fps）。但轮询率取 raw_fps（源视频帧率，2× 过采样）：
+        # poll 率 == inference_fps 时两个同频时钟拍频，部分 tick 读到旧快照 → 恒报 supply-bound、
+        # 抓帧有 33~66ms 抖动；抬到 raw_fps 后每帧新推理都能在一个 tick 内被抓到（空转 tick 仅读单槽+
+        # 比 ts，~µs 级，不增推理量）。raw_fps 是已有的跨模块真源，无需新旋钮。
+        # 注：HLS processed 打标另由 eff_fps 从 ts 反推、模型输入另由 model_input_fps 契约重采样，均不借本值。
         self.visualization_pool = VisualizationWorkerPool(
-            target_fps=settings.inference_fps,
+            target_fps=settings.raw_fps,          # 轮询率：源视频帧率，对 inference 流 2× 过采样
+            output_fps=settings.inference_fps,    # 期望出帧率：吞吐告警判速率亏空的基准（与轮询率解耦）
             stage_configs=None,
         )
 
