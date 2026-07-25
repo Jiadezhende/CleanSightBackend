@@ -238,8 +238,8 @@ class VisualizationWorker:
         """有压力时打一条 [VIZ_THROUGHPUT]：各客户端产出 fps / 空转占比 + 渲染耗时。
 
         与 [INFER_PRESSURE]（量"积压/丢帧"）正交——本行量"速率亏空"：processed 成帧率
-        是否低于目标，并据渲染耗时是否逼近 tick 预算，自动判定瓶颈侧：
-        - render-bound：单帧渲染峰值 ≥ tick 预算 → 渲染慢拖住产出；
+        是否低于目标，并据渲染耗时是否逼近**出帧间隔**，自动判定瓶颈侧：
+        - render-bound：单帧渲染峰值 ≥ 出帧间隔(1/out_target) → 渲染慢拖住产出；
         - supply-bound：渲染很快但产出仍低 + 空转占比高 → 上游（throttle/推理）供帧慢。
 
         **仅在有客户端产出明显低于目标、或渲染逼近预算时才打**，平稳时静默以免刷屏。
@@ -252,7 +252,10 @@ class VisualizationWorker:
             # 出帧基准：期望出帧率（inference_fps），与轮询率解耦。过采样后 poll_rate > out_target，
             # 拿 poll_rate 当基准会让 out_fps(≈out_target) < poll_rate*0.8 恒真、告警常亮。
             out_target = self.output_fps if self.output_fps > 0 else poll_rate
-            budget_ms = self.tick_interval * 1000.0
+            # render 的预算是「出帧间隔」(1/out_target)，非「轮询间隔」(tick)。过采样后 tick < 出帧间隔，
+            # 单帧渲染只要塞进出帧间隔就不拖累出帧率（两次新推理间有 spare tick）；若拿 tick 当预算，
+            # 本可支撑 out_target 的渲染会被误判 render-bound（把 supply 亏空错记到渲染头上）。
+            budget_ms = (1000.0 / out_target) if out_target > 0 else (self.tick_interval * 1000.0)
             avg_ms = (self._render_time_sum / self._render_calls * 1000.0) if self._render_calls else 0.0
             max_ms = self._render_time_max * 1000.0
             render_bound = max_ms >= budget_ms and self._render_calls > 0

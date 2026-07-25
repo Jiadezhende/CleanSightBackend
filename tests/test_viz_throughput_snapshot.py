@@ -122,6 +122,33 @@ def test_snapshot_oversampled_still_flags_real_shortfall():
     assert "supply-bound" in rendered
 
 
+def test_snapshot_oversampled_render_spike_over_tick_is_still_supply_bound():
+    """过采样下渲染峰值超「轮询间隔」但仍在「出帧间隔」内 + 供给亏空 → 应报 supply-bound 而非 render-bound。
+
+    复现真实日志：poll=30Hz(tick 33ms)、target=15fps(出帧间隔 66ms)，render max 51.7ms
+    （>33ms tick 但 <66ms 出帧间隔），out=10.6fps、stale=64%。渲染够快支撑 15fps，亏空来自
+    上游供帧——render_bound 的预算须用出帧间隔，否则单帧越过 tick 就被误标 render-bound。
+    """
+    w = _worker(target_fps=30.0, output_fps=15.0)
+    window = 10.0
+    # 300 ticks：106 渲染(=10.6fps) + 194 空转(=64.7%)
+    w._stat_rendered["119"] = 106
+    w._stat_stale["119"] = 194
+    w._render_calls = 106
+    w._render_time_sum = 106 * 0.0185   # 平均 18.5ms « 66ms 出帧间隔
+    w._render_time_max = 0.0517         # 峰值 51.7ms：> 33ms tick 但 < 66ms 出帧间隔
+
+    with patch("app.services.inference.visualization.worker.logger") as log:
+        w._log_throughput_snapshot(window)
+
+    log.info.assert_called_once()
+    fmt, *args = log.info.call_args.args
+    rendered = fmt % tuple(args)
+    assert "out=10.6fps" in rendered
+    assert "supply-bound" in rendered
+    assert "render-bound" not in rendered
+
+
 def test_snapshot_silent_when_idle_stream():
     """近空闲流（几乎没有推理流入）即便产出低也不应误报。"""
     w = _worker(target_fps=20.0)

@@ -41,10 +41,24 @@ self.visualization_pool = VisualizationWorkerPool(
 日志样例（仅压力时出现）：
 
 ```
-[VIZ_THROUGHPUT] target=15fps poll=30Hz render=2.0ms(max 5.0ms, budget 33ms) || test.s112 out=8.0fps stale=73% (supply-bound)
+[VIZ_THROUGHPUT] target=15fps poll=30Hz render=2.0ms(max 5.0ms, budget 66ms) || test.s112 out=8.0fps stale=73% (supply-bound)
 ```
 
 > `target` 是期望出帧率（15），`poll` 是轮询率（30）；`out_fps` 现在相对 **target** 判亏空，过采样带来的空转不再误报。
+
+### 4. `visualization/worker.py` — render-bound 预算基准同步解耦（同一 bug 的另一半）
+
+`render_bound = max_ms >= budget_ms` 里的 `budget_ms` 原为**轮询间隔**（`tick_interval`）。过采样后轮询间隔被砍半（66→33ms），而单帧渲染的真实预算是**出帧间隔**（`1/out_target`=66ms）——两次新推理之间有一个 spare tick，渲染只要塞进出帧间隔就不拖累出帧率。用轮询间隔当预算会把「本可支撑 out_target 的渲染」误标 render-bound，把 supply 亏空错记到渲染头上。
+
+改为 `budget_ms = 1000/out_target`（出帧间隔）。非过采样场景下 `out_target == 轮询率`、出帧间隔 == tick，行为不变。
+
+复现日志（修复前误标 render-bound，修复后正确归 supply-bound）：
+
+```
+[VIZ_THROUGHPUT] target=15fps poll=30Hz render=18.5ms(max 51.7ms, budget 66ms) || 119 out=10.6fps stale=64% (supply-bound)
+```
+
+> max 51.7ms > 33ms tick 但 < 66ms 出帧间隔；渲染够快支撑 15fps，亏空来自上游供帧 → supply-bound。
 
 ## 语义边界（勿踩）
 
