@@ -162,9 +162,21 @@ class YOLODetector(Detector):
         # 把这个空目录钉进已 gitignore 的 .ultralytics 并复用同一个，避免污染仓库根与
         # predict/predict2… 累积（详见 app/settings.py:YOLO_RUNS_PROJECT）。
         from app.settings import YOLO_RUNS_PROJECT
+        import time as _time  # [DIAG-TEMP] 定位 40ms 花在哪，定位完删
+        _t0 = _time.perf_counter()
         raw_list = self._model.predict(
             frames, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False,
             project=YOLO_RUNS_PROJECT, name="predict", exist_ok=True,
+        )
+        _wall = (_time.perf_counter() - _t0) * 1000
+        # [DIAG-TEMP] device 判断模型是否真在 GPU；speed 拆 preprocess/inference/postprocess
+        logger.info(
+            "[DIAG %s] device=%s n=%d speed=%s wall=%.1fms",
+            self.name,
+            getattr(self._model, "device", "?"),
+            len(frames),
+            getattr(raw_list[0], "speed", None) if raw_list else None,
+            _wall,
         )
         return [
             self._adapt_output([r], frame, ts)
