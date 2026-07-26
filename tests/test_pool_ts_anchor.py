@@ -37,7 +37,6 @@ def test_multi_detector_same_frame_shares_capture_ts():
     pool = MultiModelWorkerPool(
         stage="1",
         models=[_mock_detector("streamA"), _mock_detector("streamB")],
-        use_cuda_stream=False,
     )
     cq = make_cq()
     ts = 123.456
@@ -57,7 +56,6 @@ def test_frame_feature_carries_all_streams_at_capture_ts():
     pool = MultiModelWorkerPool(
         stage="1",
         models=[_mock_detector("streamA"), _mock_detector("streamB")],
-        use_cuda_stream=False,
     )
     cq = make_cq()
     ts = 77.0
