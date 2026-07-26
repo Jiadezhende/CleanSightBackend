@@ -1,6 +1,6 @@
 """RemoteInferProxy — 主进程侧推理子进程代理（req_id 异步管线 + 防泄漏 + 容错监督）。
 
-把 GPU 前向拆进独立进程（见 infer_worker.py / 诊断文档）后，本类是主进程唯一对接口：
+把 GPU 前向拆进独立进程（见 stage_pool.run_infer_worker / 诊断文档）后，本类是主进程唯一对接口：
   · submit(batch)：给整批帧分配 req_id、把 cq 等**轻量元数据**留在 pending、只把帧送子进程；
   · _collect_loop：单线程抽子进程响应，据 req_id `pending.pop` 重组 FrameInference，走注入的
     write_back（= ModelWorkerService._write_back_results）落回主链路，并在主进程发 Prometheus；
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from app.services.inference.models import DetectionTask, FrameInference
-from app.services.inference.detection.infer_worker import run_infer_worker
+from app.services.inference.detection.stage_pool import run_infer_worker
 from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 if TYPE_CHECKING:
@@ -212,6 +212,17 @@ class RemoteInferProxy:
             self._child_ready.clear()
 
     # ────────────────────────── 提交 ──────────────────────────
+
+    def capacity(self) -> int:
+        """当前可接收的在途批数（= max_inflight - inflight）。子进程未就绪/停机时返 0。
+
+        供唯一提交者（dispatcher）每轮先读、再按额度 submit：inflight 只被提交者 +1、被
+        collector -1（只会让额度变多），故读后按此额度提交不会撞满、无假丢帧。
+        """
+        if self._stop_event.is_set() or not self._child_ready.is_set():
+            return 0
+        with self._lock:
+            return max(0, self._max_inflight - self._inflight)
 
     def submit(self, batch: List[DetectionTask]) -> bool:
         """提交一批（同一 stage）。返回 False 表示未提交（在途满/子进程未就绪/停机），调用方计丢帧。

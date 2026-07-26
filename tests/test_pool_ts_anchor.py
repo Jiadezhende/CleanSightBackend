@@ -12,7 +12,7 @@ FrameDetections.timestamp == FrameInference.timestamp == Frame.timestamp。本�
 import numpy as np
 
 from app.domain.detection import FrameFeature
-from app.services.inference.detection.pool import MultiModelWorkerPool
+from app.services.inference.detection.stage_pool import MultiModelWorkerPool
 from app.services.inference.models import DetectionTask
 from app.services.inference.workflows.mock import MockDetector
 

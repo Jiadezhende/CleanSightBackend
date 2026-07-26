@@ -1,33 +1,24 @@
-"""模型推理服务：编排取帧分组 + 提交到推理子进程 + 写回。
+"""模型推理服务：装配取帧调度 + 推理子进程代理 + 写回。
 
 职责：
-- 管理 StageAwareDispatcher（取帧分组）
-- 每 stage 起提交线程：组批 → RemoteInferProxy.submit（GPU 前向在独立子进程，独占 GIL）
-- collector（在 proxy 内）据 req_id 重组 FrameInference，经 _write_back_results 落回 ClientQueues
+- 装配 StageAwareDispatcher（取帧 + 组批 + 直接提交子进程，单提交者，无独立 submit 线程）
+- 装配 RemoteInferProxy（GPU 前向在独立子进程，独占 GIL）
+- 提供 _write_back_results：collector（在 proxy 内）据 req_id 重组 FrameInference 后落回 ClientQueues
 """
 
 from __future__ import annotations
 
 import logging
-import threading
-import time
 from typing import Any, Dict, List, Optional
 
 from app.domain.detection import FrameFeature
 from app.services.client import ClientManager, client_manager
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
 from app.services.inference.models import FrameInference
-from app.services.inference.detection.remote_infer import RemoteInferProxy
-from app.utils.exceptions import AppError
+from app.services.inference.detection.infer_proxy import RemoteInferProxy
 from app.utils.metrics import frame_drop_total
-from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
-
-# 组批等待窗口（ms）。供给由 dispatcher 10ms 轮询量化、每轮每客户端仅取 1 帧，
-# 1~3ms 窗口内等不到下一轮到帧，故 timeout 的具体值对结果惰性——组批收益来自
-# 队列积压而非等待。此前按 queue_depth 分 1/2/3ms 三档是死代码，拍平为固定值。
-BATCH_TIMEOUT_MS = 2.0
 
 # 在途批数上限（背压 + 防 pending 无界）。1~4 路 + 少数 stage 下 8 足够；GPU 本就串行，
 # 过大只增内存与延迟。真需调优再上 settings（当前无该旋钮，YAGNI）。
@@ -82,131 +73,64 @@ class ModelWorkerService:
 
         self.max_batch_per_stage = max_batch_per_stage
 
-        # 创建 Dispatcher（直接引用 ClientManager）
-        self.dispatcher = StageAwareDispatcher(
-            max_batch_per_stage=max_batch_per_stage,
-            client_manager_instance=self._client_manager,
-        )
-
         # 有 detector 的 stage 主键（= 需在子进程建 pool 的 stage）。
         # 注：GPU 推理已拆进程，主进程**不再**建 MultiModelWorkerPool；stage_configs["models"]
         # 里的 detector 实例仅供 viz 的 prepare_visualization_data（CPU，永不加载模型），故主进程
-        # 保持 CUDA-free。子进程用同一 StageFactory 代码路径从 YAML 自建自己的 pool + 加载权重。
+        # 无 CUDA context（时序 GRU 用 torch 但钉 CPU）。子进程用同一 StageFactory 代码路径从
+        # YAML 自建自己的 pool + 加载权重。
         self._active_stages: List[str] = [
             stage for stage, cfg in self.stage_configs.items() if cfg.get("models")
         ]
+        # 每 stage 组批上限（dispatcher 据此从各 stage deque 拉批）
+        stage_batch_sizes = {
+            stage: cfg.get("batch_size", max_batch_per_stage)
+            for stage, cfg in self.stage_configs.items()
+        }
 
         # 推理子进程代理：submit 批帧 → 子进程 _infer_models → collector 据 req_id 重组
         # FrameInference 走 _write_back_results 落回主链路。写回回调注入本服务的单一写回口。
+        # 先于 Dispatcher 构造：dispatcher 需注入它的 submit/capacity 作为唯一提交者。
         self._proxy = RemoteInferProxy(
             active_stages=self._active_stages,
             write_back=self._write_back_results,
             max_inflight=DEFAULT_MAX_INFLIGHT,
         )
 
-        self._stop_event = threading.Event()
-        self._worker_threads: List[threading.Thread] = []
+        # Dispatcher：取帧 + 组批 + 直接提交（单提交者，无独立 submit 线程）。注入 proxy 的
+        # submit/capacity —— 每轮先读在途额度、再按额度从各 stage deque 拉批 submit，令过量
+        # 提交无竞态、不产生假丢帧。
+        self.dispatcher = StageAwareDispatcher(
+            max_batch_per_stage=max_batch_per_stage,
+            client_manager_instance=self._client_manager,
+            active_stages=self._active_stages,
+            stage_batch_sizes=stage_batch_sizes,
+            submit_batch=self._proxy.submit,
+            capacity=self._proxy.capacity,
+        )
 
         logger.info(
             "ModelWorkerService initialized: stages=%s", self._active_stages
         )
 
     def start(self):
-        """启动服务：推理子进程（含 warmup + 就绪屏障）→ Dispatcher → 每 stage 提交线程。"""
+        """启动服务：推理子进程（含 warmup + 就绪屏障）→ Dispatcher（取帧+组批+提交一体）。"""
         # 先起子进程并等就绪（内部 warmup 触发模型加载 + CUDA init），避免首帧撞加载。
         self._proxy.start()
-
+        # Dispatcher 单线程即完成取帧→组批→提交；不再有 per-stage 提交线程。
         self.dispatcher.start()
-
-        # 为每个 stage 启动一个提交线程（batch → proxy.submit，非阻塞、不再持 GPU）
-        for stage in self._active_stages:
-            from functools import partial
-            thread = threading.Thread(
-                target=guarded_run,
-                args=(partial(self._inference_loop, stage), self._stop_event, f"InferWorker-{stage}"),
-                daemon=True,
-                name=f"InferWorker-{stage}",
-            )
-            thread.start()
-            self._worker_threads.append(thread)
-
-        logger.info("Started %d inference submit threads", len(self._worker_threads))
+        logger.info("ModelWorkerService started (single-dispatcher submit)")
 
     def stop(self):
-        """停止服务：停提交 → 停 dispatcher → 停子进程代理（排空在途写回 + 杀子进程）。"""
-        self._stop_event.set()
+        """停止服务：停 Dispatcher（取帧+提交都在它单线程里）→ 停子进程代理（排空在途 + 杀子进程）。"""
+        # 先停 dispatcher：停后不再有新 submit（取帧与提交同在其单线程）。
         self.dispatcher.stop()
 
-        for thread in self._worker_threads:
-            # 提交线程现在只做 batch→submit（不再持 GPU），join 应立即返回，不会 CUDA wedge。
-            thread.join(timeout=2.0)
-            if thread.is_alive():
-                logger.warning(
-                    "[ModelWorkerService] %s 未在 2s 内退出，将被 daemon 强杀", thread.name,
-                )
-
-        # 代理内部先排空在途批（collector 写回落 FeatureStore），再杀子进程——排空-先于-flush
+        # 再停代理：内部先排空在途批（collector 写回落 FeatureStore），再杀子进程——排空-先于-flush
         # 的不丢数据不变式由 InferenceManager.stop 的顺序（本 stop 早于 feature_store.flush）保证。
         # CUDA wedge 现在是子进程的事：卡死的是子进程，代理直接 kill 重启，主线程不再被 daemon 强杀。
         self._proxy.stop()
 
         logger.info("ModelWorkerService stopped")
-
-    def _inference_loop(self, stage: str):
-        """提交循环：组批 → proxy.submit（非阻塞）。GPU 前向在子进程，写回由 collector 异步落。"""
-        batch_size = self.stage_configs[stage].get(
-            "batch_size", self.max_batch_per_stage
-        )
-
-        while not self._stop_event.is_set():
-            try:
-                # 队列深度仅供下方 DEBUG 日志观测（不再用于自适应超时，见 BATCH_TIMEOUT_MS）
-                queue_depth = self.dispatcher.queue_depth(stage)
-
-                # 从 Dispatcher 获取该 stage 的 batch（固定等待窗口）
-                batch = self.dispatcher.get_batch_for_stage(
-                    stage, max_size=batch_size, timeout_ms=BATCH_TIMEOUT_MS
-                )
-
-                if not batch:
-                    # 没有请求，短暂休眠
-                    time.sleep(0.01)
-                    continue
-
-                # 异步提交到子进程；返回 False = 在途满/子进程未就绪 → 整批丢弃并计数
-                # （背压兜底，防 pending 无界；丢帧非损坏，与既有 backpressure 同性质）。
-                accepted = self._proxy.submit(batch)
-                if not accepted:
-                    frame_drop_total.labels(reason="infer_inflight_full").inc(len(batch))
-
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        "[Worker-%s] Batch submitted: size=%d/%d, accepted=%s, queue_depth=%d",
-                        stage, len(batch), batch_size, accepted, queue_depth,
-                    )
-
-            # 注：不为模型推理异常单列 except——模型异常在子进程 _infer_models 就地降级为
-            # FrameDetections(success=False)（batch 跨多 run，不能上抛炸整批），经响应回主进程；
-            # 失败可见性由 collector 发 infer_failure_total 承接。下面 except AppError 仅兜底
-            # 组批/提交路径万一抛出的应用异常。
-            except AppError as e:
-                # 边界层 1: 应用异常 - ERROR级别
-                logger.error(
-                    "[BoundaryLayer1][Worker-%s] Application error: %s", stage, e,
-                    exc_info=True,
-                    extra={"task_id": getattr(e, "task_id", None)},
-                )
-                time.sleep(0.1)
-                continue
-
-            except Exception as e:
-                # 边界层 1: 未预期的异常 - CRITICAL级别
-                logger.critical(
-                    "[BoundaryLayer1][Worker-%s] Unexpected error: %s", stage, e,
-                    exc_info=True,
-                )
-                time.sleep(0.5)
-                continue
 
     def _write_back_results(self, results: List[FrameInference]):
         """将推理结果双写到**捕获的 CQ 句柄**（res.cq），不按 client_id 反查。
