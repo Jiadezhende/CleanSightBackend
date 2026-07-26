@@ -25,6 +25,11 @@ from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
+# 组批等待窗口（ms）。供给由 dispatcher 10ms 轮询量化、每轮每客户端仅取 1 帧，
+# 1~3ms 窗口内等不到下一轮到帧，故 timeout 的具体值对结果惰性——组批收益来自
+# 队列积压而非等待。此前按 queue_depth 分 1/2/3ms 三档是死代码，拍平为固定值。
+BATCH_TIMEOUT_MS = 2.0
+
 
 class ModelWorkerService:
     """模型推理服务：统一管理多个 stage 的 ModelWorkerPool。
@@ -40,7 +45,6 @@ class ModelWorkerService:
         self,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
-        use_cuda_stream: bool = True,
         client_manager_instance: Optional[ClientManager] = None,
         feature_store: Optional[Any] = None,
     ):
@@ -58,7 +62,6 @@ class ModelWorkerService:
                     },
                 }
             max_batch_per_stage: 每个 stage 最大 batch 大小
-            use_cuda_stream: 是否使用 CUDA Stream 并行
             client_manager_instance: ClientManager 实例（仅用于构造 Dispatcher 枚举 registry；
                 写回不再经它反查，改走 res.cq 捕获句柄）
         """
@@ -76,7 +79,6 @@ class ModelWorkerService:
         self.stage_configs = stage_configs
 
         self.max_batch_per_stage = max_batch_per_stage
-        self.use_cuda_stream = use_cuda_stream
 
         # 创建 Dispatcher（直接引用 ClientManager）
         self.dispatcher = StageAwareDispatcher(
@@ -93,19 +95,13 @@ class ModelWorkerService:
                 self.worker_pools[stage] = MultiModelWorkerPool(
                     stage=stage,
                     models=models,
-                    use_cuda_stream=use_cuda_stream,
                 )
 
         self._stop_event = threading.Event()
         self._worker_threads: List[threading.Thread] = []
 
-        # 取实际生效的 CUDA stream 状态（由 WorkerPool 根据硬件判断）
-        actual_cuda = any(
-            pool.use_cuda_stream for pool in self.worker_pools.values()
-        )
         logger.info(
-            f"ModelWorkerService initialized: stages={list(self.worker_pools.keys())}, "
-            f"CUDA_stream={'enabled' if actual_cuda else 'disabled'}"
+            f"ModelWorkerService initialized: stages={list(self.worker_pools.keys())}"
         )
 
     def start(self):
@@ -176,20 +172,12 @@ class ModelWorkerService:
 
         while not self._stop_event.is_set():
             try:
-                # 获取队列深度（用于自适应超时）
+                # 队列深度仅供下方 DEBUG 日志观测（不再用于自适应超时，见 BATCH_TIMEOUT_MS）
                 queue_depth = self.dispatcher.queue_depth(stage)
 
-                # 自适应超时：针对小并发优化（<10客户端），避免过度等待增加延迟
-                if queue_depth >= batch_size * 2:
-                    timeout_ms = 1.0  # 队列充足，立即触发
-                elif queue_depth >= batch_size:
-                    timeout_ms = 2.0  # 队列适中，短暂等待
-                else:
-                    timeout_ms = 3.0  # 队列不足，稍微等待（避免过度等待）
-
-                # 从 Dispatcher 获取该 stage 的 batch（带超时）
+                # 从 Dispatcher 获取该 stage 的 batch（固定等待窗口）
                 batch = self.dispatcher.get_batch_for_stage(
-                    stage, max_size=batch_size, timeout_ms=timeout_ms
+                    stage, max_size=batch_size, timeout_ms=BATCH_TIMEOUT_MS
                 )
 
                 if not batch:
@@ -210,7 +198,7 @@ class ModelWorkerService:
                     fps = len(batch) / elapsed if elapsed > 0 else 0
                     logger.debug(
                         "[Worker-%s] Batch processed: size=%d/%d, time=%.1fms, fps=%.1f, queue_depth=%d, timeout=%.1fms",
-                        stage, len(batch), batch_size, elapsed*1000, fps, queue_depth, timeout_ms
+                        stage, len(batch), batch_size, elapsed*1000, fps, queue_depth, BATCH_TIMEOUT_MS
                     )
 
             # 注：不为模型推理异常单列 except——它在本循环内到不了：模型异常由

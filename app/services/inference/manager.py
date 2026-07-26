@@ -151,7 +151,6 @@ class InferenceManager:
         return ModelWorkerService(
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
-            use_cuda_stream=True,
             feature_store=self.feature_store,
         )
 

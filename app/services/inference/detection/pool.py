@@ -1,10 +1,11 @@
-"""多模型并行推理 Worker Pool（CUDA Stream 并行）。
+"""多模型推理 Worker Pool（同一 stage 下多模型串行）。
 
 完全解耦版本：使用 InferenceWorkflow 基类，不依赖 pipeline_base。
 
 关键特性：
 - 每个 stage 配置多个模型（基于 InferenceWorkflow）
-- 每个模型绑定独立的 CUDA Stream，实现真正的并行推理
+- 逐模型串行推理（ultralytics predict 内部同步阻塞，自定义 CUDA Stream 对其零并行
+  收益、反而每次前向掺入跨流全设备同步，已拆除）
 - 调用 InferenceWorkflow.infer_batch 接口
 """
 
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Dict, List, Sequence
 
 import numpy as np
 
@@ -34,43 +35,28 @@ except ImportError:
 
 
 class MultiModelWorkerPool:
-    """多模型并行推理 Worker Pool（CUDA Stream 并行）。
+    """多模型推理 Worker Pool（同一 stage 下多模型串行）。
 
     完全解耦版本：
     - 使用 InferenceWorkflow 基类（不依赖 pipeline_base）
-    - 每个模型绑定独立的 CUDA Stream
-    - 支持批量推理加速
+    - 逐模型串行推理（无 CUDA Stream：对同步阻塞的 predict 无并行收益）
 """
 
     def __init__(
         self,
         stage: str,
         models: Sequence[Detector],
-        use_cuda_stream: bool = True,
     ):
         """
         Args:
             stage: Stage 名称（LEAK/CLEAN）
             models: 该 stage 对应的模型列表（基于 InferenceWorkflow）
-            use_cuda_stream: 是否使用 CUDA Stream 并行（True 推荐）
         """
         self.stage = stage
         self.models = list(models)
-        self.use_cuda_stream = (
-            use_cuda_stream and TORCH_AVAILABLE and torch.cuda.is_available()
-        )
-
-        # 为每个模型分配 CUDA Stream
-        self.cuda_streams: List[Optional[Any]] = []
-        if self.use_cuda_stream:
-            for _ in self.models:
-                self.cuda_streams.append(torch.cuda.Stream())
-        else:
-            self.cuda_streams = [None] * len(self.models)
 
         logger.info(
-            f"MultiModelWorkerPool initialized: stage={stage}, models={len(self.models)}, "
-            f"CUDA_stream={'enabled' if self.use_cuda_stream else 'disabled'}"
+            f"MultiModelWorkerPool initialized: stage={stage}, models={len(self.models)}"
         )
 
     def infer_batch(self, batch: List[DetectionTask]) -> List[FrameInference]:
@@ -105,13 +91,8 @@ class MultiModelWorkerPool:
         # 令每帧 FrameDetections.timestamp == FrameInference.timestamp，供下游多流对齐
         timestamps = [req.timestamp for req in batch]
 
-        # 并行执行所有模型的 infer_batch
-        if self.use_cuda_stream:
-            # CUDA Stream 并行版本
-            model_results = self._infer_batch_parallel_cuda(frames, timestamps)
-        else:
-            # 顺序推理版本
-            model_results = self._infer_batch_sequential(frames, timestamps)
+        # 逐模型串行推理（每模型对整批帧跑一次 infer_batch）
+        model_results = self._infer_models(frames, timestamps)
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
         # model_results[i] = {task_name: FrameDetections}
@@ -133,90 +114,15 @@ class MultiModelWorkerPool:
 
         return results
 
-    def _infer_batch_parallel_cuda(
+    def _infer_models(
         self,
         frames: List[np.ndarray],
         timestamps: List[float],
     ) -> List[Dict[str, FrameDetections]]:
-        """CUDA Stream 并行推理。
+        """逐模型串行推理：每个模型对整批帧跑一次，结果按帧索引合并。
 
-        核心思路：
-        - 为每个模型启动异步推理（使用独立 CUDA Stream）
-        - 使用 torch.cuda.synchronize() 等待所有 stream 完成
-        - 合并结果
-
-        返回值说明：
-            List[Dict[str, FrameDetections]]
-            即：List[{task_name: FrameDetections(...)}]
+        单模型失败就地降级为 success=False 的空结果（不上抛，batch 跨多 run）。
         """
-        if not TORCH_AVAILABLE:
-            return self._infer_batch_sequential(frames, timestamps)
-
-        # 启动异步推理
-        async_results: List[tuple[str, List[FrameDetections]]] = []
-
-        for model, cuda_stream in zip(self.models, self.cuda_streams):
-            if not model.enabled:
-                continue
-
-            with torch.cuda.stream(cuda_stream):
-                start_time = time.time()
-                try:
-                    # 调用 InferenceWorkflow.infer_batch （已经返回 FrameDetections 格式）
-                    batch_res = model.infer_batch(frames, timestamps)
-                    async_results.append((model.name, batch_res))
-
-                    # 记录推理延迟（成功）
-                    elapsed_ms = (time.time() - start_time) * 1000
-                    infer_latency_ms.labels(model=model.name).observe(
-                        elapsed_ms / len(frames)
-                    )  # 平均每帧延迟
-
-                except Exception as e:
-                    # 业务逻辑层不应该捕获异常 - 让异常传播到Boundary Layer 1
-                    # 但为了兼容性和防止单个模型失败影响其他模型，这里保留异常捕获
-                    logger.error(
-                        f"Model {model.name} inference failed: {e}", exc_info=True
-                    )
-
-                    # 记录推理失败
-                    infer_failure_total.labels(
-                        model=model.name,
-                        error_type=type(e).__name__,
-                    ).inc()
-
-                    # 返回失败结果（保留各帧捕获 ts，不自造时间戳）
-                    failed: List[FrameDetections] = [
-                        FrameDetections(
-                            detections=[],
-                            metadata={"error": str(e)},
-                            timestamp=ts,
-                            success=False,
-                            error=str(e)
-                        )
-                        for ts in timestamps
-                    ]
-                    async_results.append((model.name, failed))
-
-        # 同步所有 CUDA Stream
-        torch.cuda.synchronize()
-
-        # 合并结果：将每个模型的结果按帧索引组织
-        n = len(frames)
-        merged: List[Dict[str, FrameDetections]] = [{} for _ in range(n)]
-
-        for model_name, batch_res in async_results:
-            for i in range(min(len(batch_res), n)):
-                merged[i][model_name] = batch_res[i]
-
-        return merged
-
-    def _infer_batch_sequential(
-        self,
-        frames: List[np.ndarray],
-        timestamps: List[float],
-    ) -> List[Dict[str, FrameDetections]]:
-        """顺序推理（不使用 CUDA Stream）。"""
         n = len(frames)
         merged: List[Dict[str, FrameDetections]] = [{} for _ in range(n)]
 
@@ -283,10 +189,7 @@ class MultiModelWorkerPool:
 
         try:
             # 执行一次完整推理（触发模型加载和CUDA初始化）
-            if self.use_cuda_stream:
-                results = self._infer_batch_parallel_cuda(dummy_frames, dummy_timestamps)
-            else:
-                results = self._infer_batch_sequential(dummy_frames, dummy_timestamps)
+            results = self._infer_models(dummy_frames, dummy_timestamps)
 
             elapsed = time.time() - start_time
 
