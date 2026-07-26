@@ -1,9 +1,9 @@
 """RemoteInferProxy — 主进程侧推理子进程代理（req_id 异步管线 + 防泄漏 + 容错监督）。
 
-把 GPU 前向拆进独立进程（见 stage_pool.run_infer_worker / 诊断文档）后，本类是主进程唯一对接口：
+把 GPU 前向拆进独立进程（见 stage_worker.run_stages / 诊断文档）后，本类是主进程唯一对接口：
   · submit(batch)：给整批帧分配 req_id、把 cq 等**轻量元数据**留在 pending、只把帧送子进程；
   · _collect_loop：单线程抽子进程响应，据 req_id `pending.pop` 重组 FrameInference，走注入的
-    write_back（= ModelWorkerService._write_back_results）落回主链路，并在主进程发 Prometheus；
+    write_back（= DetectionService._write_back_results）落回主链路，并在主进程发 Prometheus；
   · _supervise_loop：看门狗，子进程死亡/CUDA wedge → 清孤儿 pending（计丢帧）+ 退避重 spawn。
 
 **句柄不过进程边界**：cq 是进程内对象，留主进程按 req_id 关联即可（这正是本方案「架构改动最小」
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from app.services.inference.models import DetectionTask, FrameInference
-from app.services.inference.detection.stage_pool import run_infer_worker
+from app.services.inference.detection.stage_worker import run_stages
 from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 if TYPE_CHECKING:
@@ -66,7 +66,7 @@ class RemoteInferProxy:
         """
         Args:
             active_stages: 需在子进程建 pool 的 stage 主键（= 主进程已筛出有 detector 的 stage）。
-            write_back: 写回回调，收 List[FrameInference]（注入 ModelWorkerService._write_back_results）。
+            write_back: 写回回调，收 List[FrameInference]（注入 DetectionService._write_back_results）。
             max_inflight: 在途批数上限（背压 + 防 pending 无界；满则 submit 返回 False）。
             cuda_device: 子进程 CUDA_VISIBLE_DEVICES（""=CPU，仅测试）。
             ready_timeout: 等子进程 warmup 就绪的超时（模型加载慢，给足）。
@@ -138,7 +138,7 @@ class RemoteInferProxy:
             self._resp_q = self._ctx.Queue(maxsize=self._max_inflight * 4)
             self._ready_ev = self._ctx.Event()
             self._proc = self._ctx.Process(
-                target=run_infer_worker,
+                target=run_stages,
                 args=(self._req_q, self._resp_q, self._ready_ev, self._active_stages, self._cuda_device),
                 name="InferChild",
                 daemon=True,

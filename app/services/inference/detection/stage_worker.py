@@ -1,17 +1,19 @@
-"""多模型推理 Worker Pool（同一 stage 下多模型串行）+ 推理子进程 entrypoint。
+"""StageWorker（同一 stage 下多模型串行）+ 推理子进程 entrypoint run_stages。
 
-完全解耦版本：使用 InferenceWorkflow 基类，不依赖 pipeline_base。
+命名说明：**不叫 Pool**——无线程、无并发、无 worker 复用，历史上的 CUDA Stream 并行已拆除，
+现在只是「一个 stage 的多个模型串行跑一遍」，故为 StageWorker。子进程里的 {stage: StageWorker}
+只是启动时建一次的固定 map，路由是一次 dict 查找，够不上「池」，不单开类。
 
 关键特性：
-- 每个 stage 配置多个模型（基于 InferenceWorkflow）
-- 逐模型串行推理（ultralytics predict 内部同步阻塞，自定义 CUDA Stream 对其零并行
-  收益、反而每次前向掺入跨流全设备同步，已拆除）
-- 调用 InferenceWorkflow.infer_batch 接口
+- 每个 stage 一个 StageWorker，持该 stage 的多个 Detector
+- 逐模型串行推理（ultralytics predict 内部同步阻塞，自定义 CUDA Stream 对其零并行收益、
+  反而每次前向掺入跨流全设备同步，已拆除）
 
-进程边界：本模块底部的 `run_infer_worker` 是 multiprocessing spawn target（子进程独占 GIL 跑
-GPU 前向，见 infer_proxy.RemoteInferProxy）。**故本模块顶层不 import torch**——torch on-CPU
-本身无害，但 spawn 子进程重 import 本模块解析 target 时会跑顶层代码，顶层若 import torch 会早于
-run_infer_worker 钉 CUDA_VISIBLE_DEVICES；torch/ultralytics 一律钉设备后在函数内惰性 import。
+进程边界：本模块底部的 `run_stages` 是 multiprocessing spawn target（子进程独占 GIL 跑 GPU
+前向，见 infer_proxy.RemoteInferProxy）；它建 {stage: StageWorker} 并按 stage 路由请求。
+**故本模块顶层不 import torch**——torch on-CPU 本身无害，但 spawn 子进程重 import 本模块解析
+target 时会跑顶层代码，顶层若 import torch 会早于 run_stages 钉 CUDA_VISIBLE_DEVICES；
+torch/ultralytics 一律钉设备后在函数内惰性 import。
 """
 
 from __future__ import annotations
@@ -31,13 +33,12 @@ from app.services.inference.models import DetectionTask, FrameInference
 logger = logging.getLogger(__name__)
 
 
-class MultiModelWorkerPool:
-    """多模型推理 Worker Pool（同一 stage 下多模型串行）。
+class StageWorker:
+    """单个 stage 的多模型串行推理单元（非线程池——无并发/复用，故不叫 Pool）。
 
-    完全解耦版本：
-    - 使用 InferenceWorkflow 基类（不依赖 pipeline_base）
-    - 逐模型串行推理（无 CUDA Stream：对同步阻塞的 predict 无并行收益）
-"""
+    - 持一个 stage 的多个 Detector，逐模型对整批帧串行跑一遍并按帧 merge
+    - `_infer_models` 是纯数据切口（无 cq、无 Prometheus），子进程与进程内路径共用
+    """
 
     def __init__(
         self,
@@ -47,13 +48,13 @@ class MultiModelWorkerPool:
         """
         Args:
             stage: Stage 名称（LEAK/CLEAN）
-            models: 该 stage 对应的模型列表（基于 InferenceWorkflow）
+            models: 该 stage 对应的模型列表（Detector 实例）
         """
         self.stage = stage
         self.models = list(models)
 
         logger.info(
-            f"MultiModelWorkerPool initialized: stage={stage}, models={len(self.models)}"
+            f"StageWorker initialized: stage={stage}, models={len(self.models)}"
         )
 
     def infer_batch(self, batch: List[DetectionTask]) -> List[FrameInference]:
@@ -129,7 +130,7 @@ class MultiModelWorkerPool:
 
             start_time = time.time()
             try:
-                # 调用 InferenceTask.infer_batch （已经返回 FrameDetections 格式）
+                # 调用 Detector.infer_batch （已经返回 FrameDetections 格式）
                 batch_res = model.infer_batch(frames, timestamps)
                 elapsed_ms = (time.time() - start_time) * 1000
                 for i in range(min(len(batch_res), n)):
@@ -138,7 +139,7 @@ class MultiModelWorkerPool:
                     merged[i][model.name] = fd
 
             except Exception as e:
-                logger.error("[MultiModelWorkerPool] %s infer_batch error: %s", model.name, e, exc_info=True)
+                logger.error("[StageWorker] %s infer_batch error: %s", model.name, e, exc_info=True)
 
                 elapsed_ms = (time.time() - start_time) * 1000
                 for i in range(n):
@@ -160,7 +161,7 @@ class MultiModelWorkerPool:
 
         工作原理：
         1. 生成dummy输入（与真实输入shape一致）
-        2. 执行一次完整的并行推理流程
+        2. 执行一次完整的串行推理流程
         3. 触发模型加载、CUDA内核编译、显存分配
         4. 丢弃预热结果
         """
@@ -207,8 +208,8 @@ class MultiModelWorkerPool:
 # multiprocessing spawn target：子进程独占 GIL 跑 YOLO GPU 前向（根因见
 # docs/update/20260726_INFER_LAUNCH_BOUND_DIAGNOSIS.md：kernel 发射线程在主进程被
 # viz/temporal/HLS/dispatcher 抢 GIL 饿到，GPU 时钟满却 SM 空转、前向读数被吹大）。
-# 只负责「收批帧 → _infer_models → 回结果」，**不碰 cq / 写回 / FeatureStore**——那些
-# 留主进程按 req_id 关联（见 infer_proxy.RemoteInferProxy）。
+# 只负责「收批帧 → 按 stage 路由到 StageWorker._infer_models → 回结果」，**不碰 cq / 写回 /
+# FeatureStore**——那些留主进程按 req_id 关联（见 infer_proxy.RemoteInferProxy）。
 #
 # 进程边界只过纯数据（均 picklable）：
 #   req  (main→child):  (req_id:int, stage:str, frames:List[np.ndarray], timestamps:List[float])
@@ -221,14 +222,14 @@ class MultiModelWorkerPool:
 # 强制 CPU，这边钉到目标卡）。
 
 
-def run_infer_worker(req_q, resp_q, ready_ev, active_stages: List[str], cuda_device: str = "0") -> None:
-    """子进程主函数：建各 stage pool → warmup → 循环消费 req_q。
+def run_stages(req_q, resp_q, ready_ev, active_stages: List[str], cuda_device: str = "0") -> None:
+    """推理子进程主函数：建各 stage 的 StageWorker → warmup → 循环消费 req_q（按 stage 路由）。
 
     Args:
         req_q: 请求队列（main→child），元素 (req_id, stage, frames, timestamps) 或 None（退出哨兵）。
         resp_q: 响应队列（child→main），元素 (req_id, merged)。
-        ready_ev: multiprocessing.Event，pool 建好 + warmup 尝试后置位（就绪屏障）。
-        active_stages: 需建 pool 的 stage 主键列表（= 主进程已筛出有 detector 的 stage）。
+        ready_ev: multiprocessing.Event，StageWorker 建好 + warmup 尝试后置位（就绪屏障）。
+        active_stages: 需建 StageWorker 的 stage 主键列表（= 主进程已筛出有 detector 的 stage）。
         cuda_device: 钉给 CUDA_VISIBLE_DEVICES 的值（"0"/"1"…；""=CPU，仅测试）。
     """
     # ── 0. 忽略 SIGINT：Ctrl-C 会广播给整个进程组（含本子进程），若不忽略会在阻塞的
@@ -247,32 +248,32 @@ def run_infer_worker(req_q, resp_q, ready_ev, active_stages: List[str], cuda_dev
     # 进程身份前缀由上面的 log format 统一注入（`[infer-child]`），消息里不再重复。
     logger.info("启动 pid=%s stages=%s cuda=%r", os.getpid(), active_stages, cuda_device)
 
-    # ── 2. 建各 stage pool（复用主进程同一 StageFactory 代码路径，从 YAML 自建、零新推理逻辑）──
+    # ── 2. 建各 stage 的 StageWorker（复用主进程同一 StageFactory 代码路径，从 YAML 自建、零新推理逻辑）──
     from app.services.inference.config import load_stage_config
     from app.services.inference.stage_factory import StageFactory
 
     config = load_stage_config()
     factory = StageFactory(config)
-    pools: Dict[str, "MultiModelWorkerPool"] = {}
+    stage_workers: Dict[str, "StageWorker"] = {}
     for stage in active_stages:
         detectors = factory.create_detectors_for_stage(stage)
         if detectors:
-            pools[stage] = MultiModelWorkerPool(stage=stage, models=detectors)
+            stage_workers[stage] = StageWorker(stage=stage, models=detectors)
         else:
             logger.warning("stage %s 无 detector，跳过", stage)
 
     # ── 3. warmup（模型加载 + CUDA init 均在此发生；失败不致命，首帧会重试降级）──
     batch_size = config.batch_size
-    for stage, pool in pools.items():
+    for stage, worker in stage_workers.items():
         try:
-            pool.warmup(batch_size=batch_size)
+            worker.warmup(batch_size=batch_size)
         except Exception as e:  # pragma: no cover - warmup 内部已兜底，此为双保险
             logger.error("stage %s warmup 失败: %s", stage, e, exc_info=True)
 
-    ready_ev.set()  # 就绪屏障：pool 建好 + warmup 尝试完成
+    ready_ev.set()  # 就绪屏障：StageWorker 建好 + warmup 尝试完成
     logger.info("ready，进入推理循环")
 
-    # ── 4. 主循环：FIFO 消费 req_q（单进程串行，天然保序）──
+    # ── 4. 主循环：FIFO 消费 req_q，按 stage 路由到对应 StageWorker（单进程串行，天然保序）──
     while True:
         try:
             item = req_q.get()
@@ -286,14 +287,14 @@ def run_infer_worker(req_q, resp_q, ready_ev, active_stages: List[str], cuda_dev
             break
 
         req_id, stage, frames, timestamps = item
-        pool = pools.get(stage)
-        if pool is None:
+        worker = stage_workers.get(stage)
+        if worker is None:
             # 未知 stage：回空结果让主进程 pop pending、不泄漏在途槽
             resp_q.put((req_id, [{} for _ in frames]))
             continue
 
         try:
-            merged = pool._infer_models(frames, timestamps)
+            merged = worker._infer_models(frames, timestamps)
             resp_q.put((req_id, merged))
         except Exception as e:  # pragma: no cover - _infer_models 内部逐模型兜底，此为双保险
             logger.error("req_id=%s 推理异常: %s", req_id, e, exc_info=True)

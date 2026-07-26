@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
-from app.services.inference.detection.service import ModelWorkerService
+from app.services.inference.detection.service import DetectionService
 from app.services.inference.temporal import alarm_sink
 from app.services.inference.temporal.actor import ClientTemporalActor
 from app.services.inference.visualization.pool import VisualizationWorkerPool
@@ -31,7 +31,7 @@ class InferenceManager:
     """推理管理器
 
     集成三个独立时钟的 Worker 池：
-    - ModelWorkerService（推理，~30 FPS）
+    - DetectionService（推理，~30 FPS）
     - ClientTemporalActor（时序分析，2 Hz，per-client）
     - VisualizationWorkerPool（可视化，轮询 raw_fps~30 Hz 过采样，出帧随 inference_fps~15 FPS 去重）
 
@@ -52,7 +52,7 @@ class InferenceManager:
 
         # stage 配置（延迟初始化）
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
-        self._model_worker_service: Optional[ModelWorkerService] = None
+        self._model_worker_service: Optional[DetectionService] = None
 
         # per-client ClientTemporalActor 注册表。
         # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(task_id) per-task 锁承接
@@ -146,9 +146,9 @@ class InferenceManager:
         return self._stage_configs
 
     def _create_async_model_worker_service(self):
-        from app.services.inference.detection.service import ModelWorkerService
+        from app.services.inference.detection.service import DetectionService
 
-        return ModelWorkerService(
+        return DetectionService(
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
             feature_store=self.feature_store,

@@ -25,13 +25,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_INFLIGHT = 8
 
 
-class ModelWorkerService:
-    """模型推理服务：编排取帧分组 + 提交推理子进程 + 写回。
+class DetectionService:
+    """检测服务：装配取帧调度 + 推理子进程代理 + 写回（单提交者，无独立 submit 线程）。
 
     职责：
-    - 管理 StageAwareDispatcher（取帧分组）
-    - 每 stage 起提交线程：组批 → RemoteInferProxy.submit（GPU 前向在独立子进程）
-    - collector 据 req_id 重组 FrameInference，经 _write_back_results 同步到 ClientQueues.slide_window
+    - 装配 StageAwareDispatcher（取帧 + 组批 + 直接提交子进程，唯一提交者）
+    - 装配 RemoteInferProxy（GPU 前向在独立子进程）
+    - collector（proxy 内）据 req_id 重组 FrameInference，经 _write_back_results 落回 ClientQueues
     """
 
     def __init__(
@@ -74,7 +74,7 @@ class ModelWorkerService:
         self.max_batch_per_stage = max_batch_per_stage
 
         # 有 detector 的 stage 主键（= 需在子进程建 pool 的 stage）。
-        # 注：GPU 推理已拆进程，主进程**不再**建 MultiModelWorkerPool；stage_configs["models"]
+        # 注：GPU 推理已拆进程，主进程**不再**建 StageWorker；stage_configs["models"]
         # 里的 detector 实例仅供 viz 的 prepare_visualization_data（CPU，永不加载模型），故主进程
         # 无 CUDA context（时序 GRU 用 torch 但钉 CPU）。子进程用同一 StageFactory 代码路径从
         # YAML 自建自己的 pool + 加载权重。
@@ -109,7 +109,7 @@ class ModelWorkerService:
         )
 
         logger.info(
-            "ModelWorkerService initialized: stages=%s", self._active_stages
+            "DetectionService initialized: stages=%s", self._active_stages
         )
 
     def start(self):
@@ -118,7 +118,7 @@ class ModelWorkerService:
         self._proxy.start()
         # Dispatcher 单线程即完成取帧→组批→提交；不再有 per-stage 提交线程。
         self.dispatcher.start()
-        logger.info("ModelWorkerService started (single-dispatcher submit)")
+        logger.info("DetectionService started (single-dispatcher submit)")
 
     def stop(self):
         """停止服务：停 Dispatcher（取帧+提交都在它单线程里）→ 停子进程代理（排空在途 + 杀子进程）。"""
@@ -130,7 +130,7 @@ class ModelWorkerService:
         # CUDA wedge 现在是子进程的事：卡死的是子进程，代理直接 kill 重启，主线程不再被 daemon 强杀。
         self._proxy.stop()
 
-        logger.info("ModelWorkerService stopped")
+        logger.info("DetectionService stopped")
 
     def _write_back_results(self, results: List[FrameInference]):
         """将推理结果双写到**捕获的 CQ 句柄**（res.cq），不按 client_id 反查。
