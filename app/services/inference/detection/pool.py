@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 import numpy as np
 
@@ -22,11 +22,6 @@ from app.domain.detection import FrameDetections
 from app.services.inference.models import DetectionTask, FrameInference
 
 logger = logging.getLogger(__name__)
-
-# 单模型一次批推理的观测数据（跨进程回传，主进程 collector 据此发 Prometheus 埋点）。
-# 纯元组，picklable：(model_name, elapsed_ms, n_frames, error_type|None)。
-# error_type=None 表示成功；非 None 为异常类名（该模型整批降级为 success=False）。
-ModelStat = Tuple[str, float, int, "str | None"]
 
 # 可选：CUDA 支持
 try:
@@ -82,8 +77,8 @@ class MultiModelWorkerPool:
         # 令每帧 FrameDetections.timestamp == FrameInference.timestamp，供下游多流对齐
         timestamps = [req.timestamp for req in batch]
 
-        # 逐模型串行推理（每模型对整批帧跑一次 infer_batch）；stats 进程内路径丢弃
-        model_results, _stats = self._infer_models(frames, timestamps)
+        # 逐模型串行推理（每模型对整批帧跑一次 infer_batch）
+        model_results = self._infer_models(frames, timestamps)
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
         # model_results[i] = {task_name: FrameDetections}
@@ -109,23 +104,26 @@ class MultiModelWorkerPool:
         self,
         frames: List[np.ndarray],
         timestamps: List[float],
-    ) -> Tuple[List[Dict[str, FrameDetections]], List[ModelStat]]:
+    ) -> List[Dict[str, FrameDetections]]:
         """逐模型串行推理：每个模型对整批帧跑一次，结果按帧索引合并。
 
         **纯数据进出、无 cq、无 Prometheus 副作用**——这是进程边界的天然切口：子进程调它、
-        回传 `(merged, stats)`，主进程 collector 据 stats 发埋点（跨进程 registry 无效，故
-        埋点上移主进程）。单模型失败就地降级为 success=False 的空结果（不上抛，batch 跨多 run），
-        并在 stats 记该模型 error_type。
+        回传 `merged`，主进程 collector 直接据 merged 里的 `FrameDetections` 发埋点（跨进程
+        registry 无效，故埋点上移主进程）。单模型失败就地降级为 success=False（不上抛，batch
+        跨多 run）。
+
+        观测量复用 `FrameDetections`（不另立 stats 通道）——其 metadata 文档语义即「模型名称、
+        推理时间等」：成功帧记 `metadata["infer_ms"]`=该模型整批 wall（parent 除以帧数得每帧均值），
+        失败帧另记 `metadata["error_type"]`（=异常类名，供 Prometheus 低基数 label）。失败信号本就
+        由 `FrameDetections.success` 表达，无需再存一份。
 
         Returns:
-            (merged, stats)：merged[i] = {detector_name: FrameDetections}（与 frames 一一对应）；
-            stats 每启用模型一条 ModelStat(name, elapsed_ms, n, error_type|None)。
+            merged[i] = {detector_name: FrameDetections}（与 frames 一一对应）。
         """
         n = len(frames)
         merged: List[Dict[str, FrameDetections]] = [{} for _ in range(n)]
-        stats: List[ModelStat] = []
         if n == 0:
-            return merged, stats
+            return merged
 
         for model in self.models:
             if not model.enabled:
@@ -135,28 +133,26 @@ class MultiModelWorkerPool:
             try:
                 # 调用 InferenceTask.infer_batch （已经返回 FrameDetections 格式）
                 batch_res = model.infer_batch(frames, timestamps)
-                for i in range(min(len(batch_res), n)):
-                    merged[i][model.name] = batch_res[i]
-
                 elapsed_ms = (time.time() - start_time) * 1000
-                stats.append((model.name, elapsed_ms, n, None))  # 成功：error_type=None
+                for i in range(min(len(batch_res), n)):
+                    fd = batch_res[i]
+                    fd.metadata["infer_ms"] = elapsed_ms  # 该模型整批 wall（观测复用 FrameDetections）
+                    merged[i][model.name] = fd
 
             except Exception as e:
                 logger.error("[MultiModelWorkerPool] %s infer_batch error: %s", model.name, e, exc_info=True)
 
                 elapsed_ms = (time.time() - start_time) * 1000
-                stats.append((model.name, elapsed_ms, n, type(e).__name__))
-
                 for i in range(n):
                     merged[i][model.name] = FrameDetections(
                         detections=[],
-                        metadata={"error": str(e)},
+                        metadata={"error": str(e), "error_type": type(e).__name__, "infer_ms": elapsed_ms},
                         timestamp=timestamps[i],
                         success=False,
                         error=str(e)
                     )
 
-        return merged, stats
+        return merged
 
     def warmup(self, batch_size: int = 1) -> None:
         """模型预热：执行dummy推理以消除冷启动延迟。
@@ -183,8 +179,8 @@ class MultiModelWorkerPool:
         start_time = time.time()
 
         try:
-            # 执行一次完整推理（触发模型加载和CUDA初始化）；warmup 丢弃结果与 stats
-            _results, _stats = self._infer_models(dummy_frames, dummy_timestamps)
+            # 执行一次完整推理（触发模型加载和CUDA初始化）；warmup 丢弃结果
+            _results = self._infer_models(dummy_frames, dummy_timestamps)
 
             elapsed = time.time() - start_time
 

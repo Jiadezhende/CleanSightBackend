@@ -108,7 +108,7 @@ class ModelWorkerService:
         self._worker_threads: List[threading.Thread] = []
 
         logger.info(
-            f"ModelWorkerService initialized: stages={self._active_stages}"
+            "ModelWorkerService initialized: stages=%s", self._active_stages
         )
 
     def start(self):
@@ -130,7 +130,7 @@ class ModelWorkerService:
             thread.start()
             self._worker_threads.append(thread)
 
-        logger.info(f"Started {len(self._worker_threads)} inference submit threads")
+        logger.info("Started %d inference submit threads", len(self._worker_threads))
 
     def stop(self):
         """停止服务：停提交 → 停 dispatcher → 停子进程代理（排空在途写回 + 杀子进程）。"""

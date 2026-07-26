@@ -18,11 +18,15 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from app.services.inference.models import DetectionTask, FrameInference
 from app.services.inference.detection.infer_worker import run_infer_worker
 from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
+
+if TYPE_CHECKING:
+    from app.services.client import ClientQueues
+    from app.domain.detection import FrameDetections
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +38,7 @@ class _Pending:
     cq 留主进程用于写回路由；frame_width/height 在 submit 时从原始帧盖章，供重组 FrameInference。
     """
 
-    cq: object
+    cq: "ClientQueues"   # 与 models.py 的运行句柄类型一致（写回路由，不过进程边界）
     task_id: int
     stage: str
     timestamp: float
@@ -90,6 +94,9 @@ class RemoteInferProxy:
         self._resp_q = None
         self._ready_ev = None
         self._proc = None
+        # 子进程生命周期锁：串行化「建+起子进程」与「杀子进程」，关停竞态下不留孤儿
+        # （spawn 与 kill 互斥；停机标志置位后 spawn 一律早退，不新起进程）。
+        self._proc_lock = threading.Lock()
 
         self._pending: Dict[int, List[_Pending]] = {}
         self._lock = threading.Lock()
@@ -117,20 +124,29 @@ class RemoteInferProxy:
         logger.info("[RemoteInferProxy] started (stages=%s, max_inflight=%d)", self._active_stages, self._max_inflight)
 
     def _spawn_child(self) -> None:
-        """建队列 + 起子进程，阻塞等就绪屏障。失败/停机时不置 ready。"""
-        self._child_ready.clear()
-        self._req_q = self._ctx.Queue(maxsize=self._max_inflight * 4)
-        self._resp_q = self._ctx.Queue(maxsize=self._max_inflight * 4)
-        self._ready_ev = self._ctx.Event()
-        self._proc = self._ctx.Process(
-            target=run_infer_worker,
-            args=(self._req_q, self._resp_q, self._ready_ev, self._active_stages, self._cuda_device),
-            name="InferChild",
-            daemon=True,
-        )
-        self._proc.start()
-        logger.info("[RemoteInferProxy] 子进程 spawn pid=%s，等就绪…", self._proc.pid)
-        ready = self._ready_ev.wait(timeout=self._ready_timeout)
+        """建队列 + 起子进程，阻塞等就绪屏障。失败/停机时不置 ready。
+
+        建+起在 `_proc_lock` 内、与 `_kill_child` 互斥：一旦停机标志已置位就早退不新起，
+        杜绝「停机杀了旧进程后监督线程又起一个孤儿」的竞态（review #1）。就绪等待放锁外，
+        避免 120s ready_timeout 期间阻塞 kill。
+        """
+        with self._proc_lock:
+            if self._stop_event.is_set() or self._no_restart.is_set():
+                return  # 停机中：不再新起子进程
+            self._child_ready.clear()
+            self._req_q = self._ctx.Queue(maxsize=self._max_inflight * 4)
+            self._resp_q = self._ctx.Queue(maxsize=self._max_inflight * 4)
+            self._ready_ev = self._ctx.Event()
+            self._proc = self._ctx.Process(
+                target=run_infer_worker,
+                args=(self._req_q, self._resp_q, self._ready_ev, self._active_stages, self._cuda_device),
+                name="InferChild",
+                daemon=True,
+            )
+            self._proc.start()
+            ready_ev, pid = self._ready_ev, self._proc.pid
+        logger.info("[RemoteInferProxy] 子进程 spawn pid=%s，等就绪…", pid)
+        ready = ready_ev.wait(timeout=self._ready_timeout)
         self._last_resp_ts = time.monotonic()
         if not ready:
             logger.error("[RemoteInferProxy] 子进程 %ss 未就绪（可能模型加载慢/失败）", self._ready_timeout)
@@ -170,25 +186,30 @@ class RemoteInferProxy:
         logger.info("[RemoteInferProxy] stopped (leftover_dropped=%d)", leftover)
 
     def _kill_child(self) -> None:
-        """terminate→join→kill→join 收尸，并关闭队列（镜像 decoder.py 的硬收尸）。"""
-        proc = self._proc
-        if proc is not None:
-            try:
-                if proc.is_alive():
-                    proc.terminate()
-                    proc.join(timeout=2.0)
-                if proc.is_alive():
-                    proc.kill()
-                    proc.join(timeout=2.0)
-            except Exception as e:  # pragma: no cover
-                logger.warning("[RemoteInferProxy] kill child failed: %s", e)
-        for q in (self._req_q, self._resp_q):
-            try:
-                if q is not None:
-                    q.close()
-            except Exception:  # pragma: no cover
-                pass
-        self._child_ready.clear()
+        """terminate→join→kill→join 收尸，并关闭队列（镜像 decoder.py 的硬收尸）。
+
+        在 `_proc_lock` 内、与 `_spawn_child` 互斥：停机路径先置 `_stop_event`/`_no_restart`
+        再调本方法，与之竞争的 spawn 要么已完成（此处杀掉其起的进程）、要么被早退挡住。
+        """
+        with self._proc_lock:
+            proc = self._proc
+            if proc is not None:
+                try:
+                    if proc.is_alive():
+                        proc.terminate()
+                        proc.join(timeout=2.0)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join(timeout=2.0)
+                except Exception as e:  # pragma: no cover
+                    logger.warning("[RemoteInferProxy] kill child failed: %s", e)
+            for q in (self._req_q, self._resp_q):
+                try:
+                    if q is not None:
+                        q.close()
+                except Exception:  # pragma: no cover
+                    pass
+            self._child_ready.clear()
 
     # ────────────────────────── 提交 ──────────────────────────
 
@@ -249,7 +270,7 @@ class RemoteInferProxy:
                 logger.error("[RemoteInferProxy] handle_response 异常: %s", e, exc_info=True)
 
     def _handle_response(self, item) -> None:
-        req_id, merged, stats = item
+        req_id, merged = item
         with self._lock:
             records = self._pending.pop(req_id, None)   # ← 防泄漏核心：pop 移除在途条目
             if records is not None:
@@ -268,20 +289,35 @@ class RemoteInferProxy:
             ))
         # 写回主链路：其内 cq.is_active() 门 + feature_store owner fence 处理迟到/跨 run
         self._write_back(frame_infs)
-        self._emit_stats(stats)
+        self._emit_stats(merged, len(records))
 
     @staticmethod
-    def _emit_stats(stats) -> None:
-        """在主进程发 Prometheus（子进程 registry 无效，故埋点上移）。"""
-        for name, elapsed_ms, n, err in stats:
-            try:
-                if err is None:
-                    if n > 0:
-                        infer_latency_ms.labels(model=name).observe(elapsed_ms / n)
-                else:
-                    infer_failure_total.labels(model=name, error_type=err).inc()
-            except Exception:  # pragma: no cover
-                pass
+    def _emit_stats(merged: List[Dict[str, "FrameDetections"]], n: int) -> None:
+        """在主进程发 Prometheus（子进程 registry 无效，故埋点上移）。
+
+        观测量直接取自 merged 里的 `FrameDetections`（不另立 stats 通道）：成功读 metadata
+        ["infer_ms"] 发延迟、失败（success=False）读 metadata["error_type"] 计失败。每模型每批
+        只发一次（seen 去重）——merged 是逐帧展开，同模型 N 帧共享同一批观测。
+        """
+        if n <= 0:
+            return
+        seen = set()
+        for per_frame in merged:
+            for name, fd in per_frame.items():
+                if name in seen:
+                    continue
+                seen.add(name)
+                try:
+                    if fd.success:
+                        infer_ms = fd.metadata.get("infer_ms")
+                        if infer_ms is not None:
+                            infer_latency_ms.labels(model=name).observe(infer_ms / n)
+                    else:
+                        infer_failure_total.labels(
+                            model=name, error_type=fd.metadata.get("error_type", "Unknown"),
+                        ).inc()
+                except Exception:  # pragma: no cover
+                    pass
 
     # ────────────────────────── 监督 ──────────────────────────
 
