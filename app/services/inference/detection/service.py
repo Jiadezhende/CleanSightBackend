@@ -1,10 +1,9 @@
-"""模型推理服务：统一管理多个 stage 的 ModelWorkerPool。
+"""模型推理服务：编排取帧分组 + 提交到推理子进程 + 写回。
 
 职责：
 - 管理 StageAwareDispatcher（取帧分组）
-- 为每个 stage 创建 MultiModelWorkerPool
-- 启动推理线程，消费各 stage 的批量请求
-- 将 FrameDetections 同步到 ClientQueues.slide_window
+- 每 stage 起提交线程：组批 → RemoteInferProxy.submit（GPU 前向在独立子进程，独占 GIL）
+- collector（在 proxy 内）据 req_id 重组 FrameInference，经 _write_back_results 落回 ClientQueues
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from app.domain.detection import FrameFeature
 from app.services.client import ClientManager, client_manager
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
 from app.services.inference.models import FrameInference
-from app.services.inference.detection.pool import MultiModelWorkerPool
+from app.services.inference.detection.remote_infer import RemoteInferProxy
 from app.utils.exceptions import AppError
 from app.utils.metrics import frame_drop_total
 from app.utils.worker_guard import guarded_run
@@ -30,15 +29,18 @@ logger = logging.getLogger(__name__)
 # 队列积压而非等待。此前按 queue_depth 分 1/2/3ms 三档是死代码，拍平为固定值。
 BATCH_TIMEOUT_MS = 2.0
 
+# 在途批数上限（背压 + 防 pending 无界）。1~4 路 + 少数 stage 下 8 足够；GPU 本就串行，
+# 过大只增内存与延迟。真需调优再上 settings（当前无该旋钮，YAGNI）。
+DEFAULT_MAX_INFLIGHT = 8
+
 
 class ModelWorkerService:
-    """模型推理服务：统一管理多个 stage 的 ModelWorkerPool。
+    """模型推理服务：编排取帧分组 + 提交推理子进程 + 写回。
 
     职责：
     - 管理 StageAwareDispatcher（取帧分组）
-    - 为每个 stage 创建 MultiModelWorkerPool
-    - 启动推理线程，消费各 stage 的批量请求
-    - 将 FrameDetections 同步到 ClientQueues.slide_window
+    - 每 stage 起提交线程：组批 → RemoteInferProxy.submit（GPU 前向在独立子进程）
+    - collector 据 req_id 重组 FrameInference，经 _write_back_results 同步到 ClientQueues.slide_window
     """
 
     def __init__(
@@ -86,30 +88,38 @@ class ModelWorkerService:
             client_manager_instance=self._client_manager,
         )
 
-        # 为每个 stage 创建 MultiModelWorkerPool
-        self.worker_pools: Dict[str, MultiModelWorkerPool] = {}
-        for stage, cfg in self.stage_configs.items():
-            # 使用 InferenceWorkflow 列表
-            models = cfg.get("models", [])
-            if models:
-                self.worker_pools[stage] = MultiModelWorkerPool(
-                    stage=stage,
-                    models=models,
-                )
+        # 有 detector 的 stage 主键（= 需在子进程建 pool 的 stage）。
+        # 注：GPU 推理已拆进程，主进程**不再**建 MultiModelWorkerPool；stage_configs["models"]
+        # 里的 detector 实例仅供 viz 的 prepare_visualization_data（CPU，永不加载模型），故主进程
+        # 保持 CUDA-free。子进程用同一 StageFactory 代码路径从 YAML 自建自己的 pool + 加载权重。
+        self._active_stages: List[str] = [
+            stage for stage, cfg in self.stage_configs.items() if cfg.get("models")
+        ]
+
+        # 推理子进程代理：submit 批帧 → 子进程 _infer_models → collector 据 req_id 重组
+        # FrameInference 走 _write_back_results 落回主链路。写回回调注入本服务的单一写回口。
+        self._proxy = RemoteInferProxy(
+            active_stages=self._active_stages,
+            write_back=self._write_back_results,
+            max_inflight=DEFAULT_MAX_INFLIGHT,
+        )
 
         self._stop_event = threading.Event()
         self._worker_threads: List[threading.Thread] = []
 
         logger.info(
-            f"ModelWorkerService initialized: stages={list(self.worker_pools.keys())}"
+            f"ModelWorkerService initialized: stages={self._active_stages}"
         )
 
     def start(self):
-        """启动服务：Dispatcher + 推理线程 + 模型预热"""
+        """启动服务：推理子进程（含 warmup + 就绪屏障）→ Dispatcher → 每 stage 提交线程。"""
+        # 先起子进程并等就绪（内部 warmup 触发模型加载 + CUDA init），避免首帧撞加载。
+        self._proxy.start()
+
         self.dispatcher.start()
 
-        # 为每个 stage 启动一个推理线程
-        for stage in self.worker_pools.keys():
+        # 为每个 stage 启动一个提交线程（batch → proxy.submit，非阻塞、不再持 GPU）
+        for stage in self._active_stages:
             from functools import partial
             thread = threading.Thread(
                 target=guarded_run,
@@ -120,52 +130,30 @@ class ModelWorkerService:
             thread.start()
             self._worker_threads.append(thread)
 
-        logger.info(f"Started {len(self._worker_threads)} inference worker threads")
-
-        # ========== 模型预热 ==========
-        logger.info("Starting model warmup for all stages...")
-        warmup_start = time.time()
-
-        for stage, worker_pool in self.worker_pools.items():
-            # 获取该stage的批大小
-            batch_size = self.stage_configs[stage].get(
-                "batch_size", self.max_batch_per_stage
-            )
-
-            # 执行预热
-            try:
-                worker_pool.warmup(batch_size=batch_size)
-            except Exception as e:
-                logger.error(
-                    f"Model warmup failed for stage {stage}: {e}", exc_info=True
-                )
-
-        warmup_elapsed = time.time() - warmup_start
-        logger.info(
-            f"Model warmup completed for all stages: "
-            f"elapsed={warmup_elapsed*1000:.1f}ms"
-        )
+        logger.info(f"Started {len(self._worker_threads)} inference submit threads")
 
     def stop(self):
-        """停止服务"""
+        """停止服务：停提交 → 停 dispatcher → 停子进程代理（排空在途写回 + 杀子进程）。"""
         self._stop_event.set()
         self.dispatcher.stop()
 
         for thread in self._worker_threads:
+            # 提交线程现在只做 batch→submit（不再持 GPU），join 应立即返回，不会 CUDA wedge。
             thread.join(timeout=2.0)
-            # infer_batch(CUDA 同步)是唯一不可中断窗口：wedge 时 join 超时、线程被 daemon 强杀。
-            # 无法根治，仅在此留诊断痕迹（关键 flush 已在 InferenceManager.stop 控制线程完成，硬杀不丢数据）。
             if thread.is_alive():
                 logger.warning(
-                    "[ModelWorkerService] %s 未在 2s 内退出（疑似卡在 infer_batch/CUDA），将被 daemon 强杀",
-                    thread.name,
+                    "[ModelWorkerService] %s 未在 2s 内退出，将被 daemon 强杀", thread.name,
                 )
+
+        # 代理内部先排空在途批（collector 写回落 FeatureStore），再杀子进程——排空-先于-flush
+        # 的不丢数据不变式由 InferenceManager.stop 的顺序（本 stop 早于 feature_store.flush）保证。
+        # CUDA wedge 现在是子进程的事：卡死的是子进程，代理直接 kill 重启，主线程不再被 daemon 强杀。
+        self._proxy.stop()
 
         logger.info("ModelWorkerService stopped")
 
     def _inference_loop(self, stage: str):
-        """推理循环：消费指定 stage 的批量请求（支持自适应超时）。"""
-        worker_pool = self.worker_pools[stage]
+        """提交循环：组批 → proxy.submit（非阻塞）。GPU 前向在子进程，写回由 collector 异步落。"""
         batch_size = self.stage_configs[stage].get(
             "batch_size", self.max_batch_per_stage
         )
@@ -185,27 +173,22 @@ class ModelWorkerService:
                     time.sleep(0.01)
                     continue
 
-                # 批量推理
-                start_time = time.time()
-                results = worker_pool.infer_batch(batch)
-                elapsed = time.time() - start_time
+                # 异步提交到子进程；返回 False = 在途满/子进程未就绪 → 整批丢弃并计数
+                # （背压兜底，防 pending 无界；丢帧非损坏，与既有 backpressure 同性质）。
+                accepted = self._proxy.submit(batch)
+                if not accepted:
+                    frame_drop_total.labels(reason="infer_inflight_full").inc(len(batch))
 
-                # 回写结果到 ClientQueues
-                self._write_back_results(results)
-
-                # 调试日志（增加队列深度信息）
-                if len(batch) > 0 and logger.isEnabledFor(logging.DEBUG):
-                    fps = len(batch) / elapsed if elapsed > 0 else 0
+                if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
-                        "[Worker-%s] Batch processed: size=%d/%d, time=%.1fms, fps=%.1f, queue_depth=%d, timeout=%.1fms",
-                        stage, len(batch), batch_size, elapsed*1000, fps, queue_depth, BATCH_TIMEOUT_MS
+                        "[Worker-%s] Batch submitted: size=%d/%d, accepted=%s, queue_depth=%d",
+                        stage, len(batch), batch_size, accepted, queue_depth,
                     )
 
-            # 注：不为模型推理异常单列 except——它在本循环内到不了：模型异常由
-            # pool.infer_batch 就地降级为 FrameDetections(success=False)（batch 跨多 run，
-            # 不能上抛炸整批）。失败可见性改由 _write_back_results 按确定 task_id 记 per-run
-            # 日志、聚合计数由 pool.infer_failure_total 承接。下面 except AppError 仅兜底
-            # 队列/写回等路径万一抛出的应用异常。
+            # 注：不为模型推理异常单列 except——模型异常在子进程 _infer_models 就地降级为
+            # FrameDetections(success=False)（batch 跨多 run，不能上抛炸整批），经响应回主进程；
+            # 失败可见性由 collector 发 infer_failure_total 承接。下面 except AppError 仅兜底
+            # 组批/提交路径万一抛出的应用异常。
             except AppError as e:
                 # 边界层 1: 应用异常 - ERROR级别
                 logger.error(

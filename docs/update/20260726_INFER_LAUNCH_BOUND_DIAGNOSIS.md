@@ -1,6 +1,7 @@
 # clean stage 单路 ~10fps 根因观测与改造提案（launch-bound，非 compute-bound）
 
-> **变更状态**：观测已定位，改造未实现（2026-07-26）
+> **变更状态**：根因已定案（2026-07-26 隔离实验坐实为 **GIL 争用 / 线程调度**，非 GPU 固有开销、非埋点），改造未实现
+> **最新结论看这节** → [分叉已定案：隔离实验（A/B/生产三档）](#分叉已定案隔离实验ab生产三档2026-07-26)。下方「待验证的分叉」「改造方案」的原文保留作过程记录，但**结论已被隔离实验修正**：真线程并行无效、进程隔离优先、TensorRT 降为互补。
 > **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（改造落地后融合）
 >
 > 相关：[20260630_FRAME_DECIMATION_ACCUMULATOR_TASK.md](20260630_FRAME_DECIMATION_ACCUMULATOR_TASK.md)（降采样契约）、[20260628_INFER_PRESSURE_OBSERVABILITY.md](20260628_INFER_PRESSURE_OBSERVABILITY.md)（`[INFER_PRESSURE]` 积压观测）。
@@ -66,6 +67,41 @@ GPU 时钟满、显存充足、无竞争，但 SM 利用率仅 ~12%、功耗仅 
   - 仍 ~20ms → 是 ultralytics/torch 跑此模型的发射开销本身 → 上 **TensorRT engine**。
 
 （复用现有埋点即可，无需另跑独立 bench。）
+
+---
+
+## 分叉已定案：隔离实验（A/B/生产三档，2026-07-26）
+
+拆掉 CUDA-stream + 全局 `synchronize()` 后远程 4090 重测：`inference` **没有**掉到 2–3ms，仍 14–40ms（与拆前 18.9/21.2/49.1 同一量级带）。即分叉落到**第二支**——那套 stream/sync 不是元凶（拆它仍正确：删死代码 + 一刀多余全设备同步，但不是解药）。
+
+进一步用独立探针 [tmp/infer_isolation_probe.py](../../tmp/infer_isolation_probe.py) 切开「app 内注入 vs 固有发射开销」——脚本不 import app，只 ultralytics+torch+numpy，对固定 960×544 帧 loop 跑两模型，同帧对齐打三层口径（`speed['inference']` 前向两端自带 CUDA sync / `wall(predict)` / `d2h`），并做两阶段对照：A 单线程基线、B 加 N 条纯 Python busy 线程模拟 dispatcher/viz/temporal/HLS 抢 GIL。
+
+**三档 `speed['inference']`（CUDA 同步过的前向真值，ms）：**
+
+| 环境 | clean_large | clean_small | 判读 |
+|------|------------|------------|------|
+| **A 单线程隔离** | p50 **8.1** / max 9.6 / std 0.36 | p50 **8.0** / max 9.3 / std 0.28 | GPU 真实算力，磐石稳、不抖 |
+| **生产（本进程多线程）** | 14→40 抖 | 23→36 | 真实、轻度、突发争用 |
+| **B 加 4 条抢 GIL 线程** | p50 **210** / min 137 / max 266 | p50 **214** / min 174 / max 273 | 重度争用，前向读数吹到 **26×** |
+
+**定案结论：根因是线程调度（GIL 争用），不是 GPU 固有开销、不是模型、不是埋点。**
+
+1. **GPU/torch/ultralytics 无罪**：单线程隔离 8ms、几乎零抖（jitter 1.2×）。之前 `[DIAG]` 里的 15–50ms 抖动全是本进程环境注入的。
+2. **争用直接吹大同步过的前向读数**：`speed['inference']` 两端带 CUDA synchronize，加 GIL 争用后从 8ms→210ms（26×）。GPU 实算仍是那 8ms，多出的 ~200ms 是**发射线程抢不到 GIL、kernel 间 GPU 干等**——正对上 `nvidia-smi` 的「时钟满 / SM 12% / 60W」。
+3. **生产 14–40 落在 A(8) 与 B(210) 之间**，即真实线程（比满载 busy 温和且突发）造成的轻度版本，数量级自洽。
+4. **preprocess/postprocess 同步炸**（pre 1.4→9.7、post 0.6→14.7）：letterbox/NMS 等吃 CPU 段一并被 GIL 饿到，进一步证明是 CPU 调度而非 GPU。
+5. **两模型全程相同**（A 8.1≈8.0、B 210≈214）：验证 .pt 结构逐字节相同（均 yolo11n / imgsz 640 / 2.59M 参 / nc=3）。故 `[DIAG]` 里「clean_small 反而慢」纯是**串行排序 + 谁恰好撞上争用窗口**的产物，与模型/imgsz 无关。
+6. **埋点无辜**：`d2h`（`boxes.cpu().numpy()`，对应生产 `_adapt_output`）全程 0.02–0.04ms，可忽略；`speed['inference']` 口径准。生产 Prometheus `infer_latency_ms` 把 D2H 算进「inference」在数值上无害。
+
+> B 的绝对值（210ms）被刻意放大——探针用了 4 条近满载 Python 线程，比真实 viz/dispatcher/temporal 凶得多；有意义的是**方向与机制**（争用会漏进同步过的前向读数），不是绝对数。
+
+### 由此修正的改法（覆盖下方「改造方案」原文）
+
+- **真线程并行（两模型重叠为 max 而非 sum）——否定。** B 证明瓶颈在 CPU 侧 kernel 发射抢 GIL；同进程再开一条推理线程只会互抢同一把 GIL，不重叠，甚至更糟。原「改造方案 1」括注的这条作废。
+- **① 进程隔离（优先，对症根治）**：把 GPU 推理拆到独立进程，或把吃 CPU 的 viz/HLS/temporal 搬出推理进程，让推理循环独占一把 GIL，消除 B 里的争用。也解释了为何「拆 CUDA 伪串行」无效——那拆的是 GPU 侧，病根在 CPU 侧 GIL。
+- **② TensorRT engine（互补）**：融合上百个小 kernel、减少发射点，对残余 CPU 争用不敏感，并把稳态 8ms 压到 ~3ms。不再是「第一步」，而是①之后的增益。
+- **③ 削竞争线程 CPU 胃口**：viz 若按 raw_fps 逐帧渲染，降到 inference_fps 或更低；核查热路径线程内的 numpy 重活。
+- **一步验证①**：真实 app 里临时关 viz+temporal+HLS（或推理跑进子进程），复测 `[DIAG]` 的 `speed['inference']`，若掉回 ~8ms 即坐实进程隔离方案。
 
 ---
 
