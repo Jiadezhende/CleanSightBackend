@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
+from app.services.inference.config import FALLBACK_STAGE
 from app.services.inference.detection.service import DetectionService
 from app.services.inference.temporal import alarm_sink
 from app.services.inference.temporal.actor import ClientTemporalActor
@@ -130,6 +131,18 @@ class InferenceManager:
                             "[InferenceManager] Skipped %d stages (no detectors): %s",
                             len(skipped_stages), skipped_stages
                         )
+                    # 启动不变式：兜底 stage 必须 active（有 detector）。
+                    # resolve_stage 把未知/未配 step_id 一律路由到它，而 dispatcher 只提交
+                    # active stage 的帧——若它被配掉 detector，启动**仍会成功**（上面只 INFO 一行
+                    # Skipped），但此后每个未知 step_id 的 run 都会被取帧后无人消费，静默 0 推理。
+                    # 现网靠「MOCK 恰好配了 detector」这个巧合幸免，此处把巧合提成显式契约。
+                    if FALLBACK_STAGE not in stage_configs:
+                        raise ValueError(
+                            f"兜底 stage '{FALLBACK_STAGE}' 无 detector（未 active）——"
+                            f"未知 step_id 的 run 会被静默黑洞：取帧后无 stage 消费、0 推理且无告警。"
+                            f"请在 inference_config.yaml 为 '{FALLBACK_STAGE}' 配至少一个 detector。"
+                            f"（active={list(stage_configs.keys())}, skipped={skipped_stages}）"
+                        )
                     self._stage_configs = stage_configs
                 else:
                     raise ValueError(
@@ -165,9 +178,9 @@ class InferenceManager:
         if step_key in self._get_stage_configs():
             return step_key
         logger.warning(
-            "[InferenceManager] 未知的 step_id '%s'，路由到 MOCK stage", step_id
+            "[InferenceManager] 未知的 step_id '%s'，路由到 %s stage", step_id, FALLBACK_STAGE
         )
-        return "MOCK"
+        return FALLBACK_STAGE
 
     def start_workflow(self, cq: ClientQueues) -> bool:
         """起该 run 的推理 workflow：open_fresh 特征分区、建并启 actor。
