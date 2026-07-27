@@ -55,7 +55,8 @@ class ClientQueues:
 
     内存保护：
     - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
-    - 默认 CA 队列最大长度为 2700 帧，约 90 秒的视频缓存（30fps）
+    - 默认 CA 队列最大长度为 900 帧，约 30 秒的视频缓存（30fps）
+      （生产值由 settings.ca_maxlen_seconds × raw_fps 派生，此默认仅裸建/测试兜底）
 
     锁清单（Lock Inventory）：
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
@@ -76,7 +77,7 @@ class ClientQueues:
     def __init__(
         self,
         ca_segment_len: int = 150,
-        ca_maxlen: int = 2700,
+        ca_maxlen: int = 900,
         resize_width: int = 640,
         resize_height: int = 480,
         inference_decimation: int = 2,
