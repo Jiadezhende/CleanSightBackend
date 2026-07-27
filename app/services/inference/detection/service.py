@@ -89,23 +89,22 @@ class DetectionService:
 
         # 推理子进程代理：submit 批帧 → 子进程 _infer_models → collector 据 req_id 重组
         # FrameInference 走 _write_back_results 落回主链路。写回回调注入本服务的单一写回口。
-        # 先于 Dispatcher 构造：dispatcher 需注入它的 submit/capacity 作为唯一提交者。
+        # 先于 Dispatcher 构造：dispatcher 需注入它的 submit 作为唯一提交者。
         self._proxy = RemoteInferProxy(
             active_stages=self._active_stages,
             write_back=self._write_back_results,
             max_inflight=DEFAULT_MAX_INFLIGHT,
         )
 
-        # Dispatcher：取帧 + 组批 + 直接提交（单提交者，无独立 submit 线程）。注入 proxy 的
-        # submit/capacity —— 每轮先读在途额度、再按额度从各 stage deque 拉批 submit，令过量
-        # 提交无竞态、不产生假丢帧。
+        # Dispatcher：取帧 + 组批 + 直接提交（单提交者，无独立 submit 线程）。仅注入 proxy 的
+        # submit —— peek-commit 轮转排空，接了才移除、被拒即停（帧留 deque）；限流由 proxy 的
+        # submit 布尔背压独管，dispatcher 不预读在途额度、不感知 inflight。
         self.dispatcher = StageAwareDispatcher(
             max_batch_per_stage=max_batch_per_stage,
             client_manager_instance=self._client_manager,
             active_stages=self._active_stages,
             stage_batch_sizes=stage_batch_sizes,
             submit_batch=self._proxy.submit,
-            capacity=self._proxy.capacity,
         )
 
         logger.info(

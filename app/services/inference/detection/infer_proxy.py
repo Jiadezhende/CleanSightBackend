@@ -213,20 +213,11 @@ class RemoteInferProxy:
 
     # ────────────────────────── 提交 ──────────────────────────
 
-    def capacity(self) -> int:
-        """当前可接收的在途批数（= max_inflight - inflight）。子进程未就绪/停机时返 0。
-
-        供唯一提交者（dispatcher）每轮先读、再按额度 submit：inflight 只被提交者 +1、被
-        collector -1（只会让额度变多），故读后按此额度提交不会撞满、无假丢帧。
-        """
-        if self._stop_event.is_set() or not self._child_ready.is_set():
-            return 0
-        with self._lock:
-            return max(0, self._max_inflight - self._inflight)
-
     def submit(self, batch: List[DetectionTask]) -> bool:
-        """提交一批（同一 stage）。返回 False 表示未提交（在途满/子进程未就绪/停机），调用方计丢帧。
+        """提交一批（同一 stage）。返回 False 即请求限流/未就绪（在途满/子进程未就绪/停机）。
 
+        **限流是 proxy 固有职责**：内部据 `inflight < max_inflight` 判定，满即返 False；调用方
+        （dispatcher）据此把帧留 deque、背压沿链上传，不外泄 inflight 计数（无需 capacity 预读）。
         cq 等留 pending，只把帧送子进程；submit 后不再持有 frame 引用（帧仅活在子进程 + 在途队列）。
         """
         if not batch:

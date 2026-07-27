@@ -2,16 +2,17 @@
 
 职责：
 - 轮询所有客户端的 ca_ready 队列，按 stage 分组入 deque（保证流间公平 Round-Robin）
-- 同一循环内据 proxy 在途额度从各 stage deque 组批、直接 submit 到子进程
-  （替代原 per-stage 提交线程；单提交者 + 先读额度 → 过量提交无竞态、无假丢帧）
+- 同一循环内 peek-commit 轮转排空：每 stage 每圈 peek 一批 submit，proxy 接了才 popleft、
+  被拒即停（帧留 deque，背压沿链上传）。单提交者，不感知 proxy 的 inflight/cap。
 """
 
 from __future__ import annotations
 
+import itertools
 import logging
 import threading
 from collections import defaultdict, deque
-from typing import Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, client_manager
 from app.services.inference.models import DetectionTask
@@ -26,7 +27,7 @@ class StageAwareDispatcher:
 
     职责：
     - 轮询所有客户端的 ca_ready 队列，按 stage 分组入 deque（流间公平 Round-Robin）
-    - 同一循环内据 proxy 在途额度组批、直接 submit 到推理子进程（单提交者）
+    - 同一循环内 peek-commit 轮转排空组批、直接 submit 到推理子进程（单提交者）
 
     改进点：
     - 直接引用全局 ClientManager，实时获取客户端列表
@@ -43,7 +44,6 @@ class StageAwareDispatcher:
         active_stages: Optional[List[str]] = None,
         stage_batch_sizes: Optional[Dict[str, int]] = None,
         submit_batch: Optional[Callable[[List[DetectionTask]], bool]] = None,
-        capacity: Optional[Callable[[], int]] = None,
     ):
         """
         Args:
@@ -52,9 +52,9 @@ class StageAwareDispatcher:
             client_manager_instance: ClientManager 实例（可选，用于依赖注入测试）
             active_stages: 需提交的 stage 主键（有 detector 的 stage）；缺省则只取帧不提交。
             stage_batch_sizes: 各 stage 组批上限；未列出的 stage 用 max_batch_per_stage。
-            submit_batch: 提交回调（= RemoteInferProxy.submit，返回是否接收）。
-            capacity: 在途额度回调（= RemoteInferProxy.capacity）。本类是唯一提交者，
-                每轮先读额度再按额度 submit，故对过量提交无竞态。缺省（无 submit_batch）则不提交。
+            submit_batch: 提交回调（= RemoteInferProxy.submit，返回是否接收）。本类是唯一提交者，
+                peek-commit 轮转：接了才 popleft、被拒即停（帧留 deque），不预读 proxy 的在途额度。
+                缺省（无 submit_batch）则只取帧不提交。
         """
         self._client_manager = client_manager_instance or client_manager
         self.max_batch_per_stage = max_batch_per_stage
@@ -64,7 +64,11 @@ class StageAwareDispatcher:
         self._active_stages: List[str] = list(active_stages or [])
         self._stage_batch_sizes: Dict[str, int] = dict(stage_batch_sizes or {})
         self._submit_batch = submit_batch
-        self._capacity = capacity
+
+        # 背压反馈通道（drain 侧写、admit 侧读的单向异步口子）：预留给未来「入口降帧」——
+        # drain 撞 proxy 满时可在此沉淀各 stage 压力，下一轮 _fetch 经 _admit_to_stage 读它抽稀。
+        # 本次不接通（drain 不写、admit 恒 True），仅固化数据流向，接通时无需再改结构。
+        self._stage_backpressure: Dict[str, Any] = {}
 
         self._stop_event = threading.Event()
         self._dispatch_thread: Optional[threading.Thread] = None
@@ -151,9 +155,15 @@ class StageAwareDispatcher:
                 # 队列为空或并发场景下被其他线程取走
                 continue
 
+            stage = cq.stage  # 不可变身份，直读
+
+            # 背压反馈接缝（本次透明恒放行）：未来「入口降帧」在此据 _stage_backpressure[stage]
+            # 按 ts 相位抽稀，把 drain 侧感知的下游压力回传到取帧侧。
+            if not self._admit_to_stage(stage):
+                continue
+
             # 构造推理请求：捕获该 CQ 句柄随请求同行，写回凭它投递、不反查
             # （cq 即当前 snapshot 迭代出的对象，与 pop_ca_ready() 同源）。
-            stage = cq.stage  # 不可变身份，直读
             req = DetectionTask(
                 task_id=task_id,
                 stage=stage,
@@ -179,47 +189,61 @@ class StageAwareDispatcher:
                 frame_drop_total.labels(reason="infer_backlog").inc()
 
     def _drain_and_submit(self) -> None:
-        """据 proxy 在途额度，从各 active stage deque 组批并直接 submit（单提交者）。
+        """peek-commit 轮转排空：从各 active stage deque 组批并直接 submit（单提交者）。
 
-        本方法是唯一提交者：in-flight 只被这里 +1、被 proxy collector -1（只会让额度变多），
-        故先读一次 capacity()、再按额度逐批 submit，对过量提交天然无竞态——取多少发多少，
-        不会撞满而假丢帧。每轮轮换起始 stage，避免额度被靠前 stage 长期吃满饿死后面的。
+        本方法是唯一提交者。**不预读 proxy 在途额度**——限流是 proxy 固有职责，`submit` 返 False
+        即背压信号。每圈按轮换 offset 遍历各 stage：peek 一批（切片看、不移除）→ submit，接了才
+        `_commit_pop`（popleft），被拒即 return（帧原封留 deque，背压沿链上传、不丢帧）。外层 while
+        循环直到某一整圈无任何进展（全空/全被拒）为止；每 stage 每圈只发一批，天然公平不饿死。
         """
-        if self._submit_batch is None or self._capacity is None or not self._active_stages:
-            return
-        cap = self._capacity()
-        if cap <= 0:
+        if self._submit_batch is None or not self._active_stages:
             return
 
         n = len(self._active_stages)
         offset = self._round_counter % n
-        for k in range(n):
-            if cap <= 0:
-                break
-            stage = self._active_stages[(offset + k) % n]
-            batch_size = self._stage_batch_sizes.get(stage, self.max_batch_per_stage)
-            while cap > 0:
-                batch = self._pull_batch(stage, batch_size)
+        while True:
+            progressed = False
+            for k in range(n):
+                stage = self._active_stages[(offset + k) % n]
+                bsz = self._stage_batch_sizes.get(stage, self.max_batch_per_stage)
+                batch = self._peek_batch(stage, bsz)   # 切片看，不移除
                 if not batch:
-                    break
-                if not self._submit_batch(batch):
-                    # capacity 说有位却被拒（停机/子进程未就绪/req_q 关闭等竞态）：
-                    # 整批计丢、停发本轮（与既有 backpressure 同性质）。
-                    frame_drop_total.labels(reason="infer_inflight_full").inc(len(batch))
-                    cap = 0
-                    break
-                cap -= 1
+                    continue
+                if self._submit_batch(batch):
+                    self._commit_pop(stage, len(batch))  # 接了才 popleft
+                    progressed = True
+                else:
+                    return  # proxy 限流/未就绪：停本轮，帧留 deque，不丢帧
+            if not progressed:
+                return  # 整圈无进展：全空
 
-    def _pull_batch(self, stage: str, max_size: int) -> List[DetectionTask]:
-        """非阻塞从指定 stage deque 取 ≤max_size 帧（线程安全）。"""
-        batch: List[DetectionTask] = []
+    def _peek_batch(self, stage: str, max_size: int) -> List[DetectionTask]:
+        """非阻塞查看指定 stage deque 的前 ≤max_size 帧（切片，不移除；线程安全）。"""
         with self._lock:
-            queue = self._stage_queues.get(stage)
-            if not queue:
-                return batch
-            for _ in range(min(max_size, len(queue))):
-                batch.append(queue.popleft())
-        return batch
+            q = self._stage_queues.get(stage)
+            if not q:
+                return []
+            return list(itertools.islice(q, 0, min(max_size, len(q))))
+
+    def _commit_pop(self, stage: str, n: int) -> None:
+        """提交成功后从 deque 左端移除已提交的 n 帧（线程安全）。
+
+        单提交者单线程顺序 peek→submit→commit，其间无并发写 deque，popleft 的正是 peek 所见。
+        """
+        with self._lock:
+            q = self._stage_queues.get(stage)
+            if not q:
+                return
+            for _ in range(min(n, len(q))):
+                q.popleft()
+
+    def _admit_to_stage(self, stage: str) -> bool:
+        """取帧准入钩子（背压反馈接缝）。**本次恒返回 True**（零行为变化）。
+
+        这是「入口降帧」的唯一挂载点：未来据 self._stage_backpressure[stage]（drain 侧沉淀的
+        下游压力）+ ts 相位在此抽稀，把 proxy 限流的背压回传到取帧侧、替代 deque 满被动淘汰。
+        """
+        return True
 
     def get_stage_queue_depths(self) -> Dict[str, int]:
         """获取各 stage 队列深度（调试用）"""
