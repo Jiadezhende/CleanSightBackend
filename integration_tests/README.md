@@ -236,8 +236,14 @@ python integration_tests/test_single_client.py \
 |---|---|---|
 | `--server` | `localhost` | 服务器地址 |
 | `--duration` | `60` | 每个客户端运行时长 |
-| `--max-tasks` | `5` | 最大并发客户端数（从 DB 查询） |
+| `--max-tasks` | `5` | 最大并发客户端数（从 DB 查询；给了 `--task-ids` 则忽略） |
+| `--task-ids` | 无 | 逗号分隔的 task_id 列表，如 `119,120,121`；不存在的由子进程自建（`source_ip=test.s{task_id}`，结束自动清理） |
+| `--api-port` / `--rtsp-port` | `8000` / `8004` | 透传给每个子进程（测试环境常做端口偏移，如 8100/8104） |
+| `--current-step` | 无 | 透传给每个子进程（`1`=LEAK / `2`=CLEAN / 其它=MOCK） |
 | `--video_path` | `test/test_video.mp4` | 测试视频 |
+
+> **每路的 `source_ip` 必须互异**——它既是推流路径 `rtsp://…/live/{source_ip}`，也是后端路由键；
+> 撞了就是两路推同一个地址。自建任务用 `test.s{task_id}` 天然互异，复用真实任务时需自行确认。
 | `--api-port` | `8000` | 后端 API 端口（用于拼 admin 面板 URL） |
 
 启动后脚本打印 admin 面板 URL，在「总览」tab 看各客户端队列/健康，「实时监控」tab 逐个选客户端看画面。
