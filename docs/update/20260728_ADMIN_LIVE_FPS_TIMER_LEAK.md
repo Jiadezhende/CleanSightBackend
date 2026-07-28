@@ -37,8 +37,13 @@ if (alarmPollTimer) { clearInterval(alarmPollTimer); alarmPollTimer = null; }
 [20260728_VIZ_TICK_HEALTH_AND_SPAN_BASIS.md](20260728_VIZ_TICK_HEALTH_AND_SPAN_BASIS.md)
 与 [20260728_PRESSURE_REASON_REFLECTS_TRIGGER.md](20260728_PRESSURE_REASON_REFLECTS_TRIGGER.md)。
 
+## 排查中撞见但**不是**缺陷的一点
+
+viz 取 `cq.get_latest_frame()`（最新原始帧）叠加检测结果、并盖 `inference.ts`
+（[worker.py](../../app/services/inference/visualization/worker.py) `_process_client`）——
+积压时框会滞后于画面。这是**有意设计**，不要当 bug 去"修"成按 ts 配对：画面优先取最新帧
+保证实时观感。留档以免下次排查时被当成线索。
+
 ## 遗留（未修，另计）
 
-- **渲染帧与检测结果的 ts 错配**：viz 取 `cq.get_latest_frame()`（最新原始帧）却盖 `inference.ts`
-  （[worker.py](../../app/services/inference/visualization/worker.py) `_process_client`）。当前无 backlog 故不显形，一旦积压会表现为框滞后于画面、写进 HLS 的 ts 偏旧。
 - **单帧渲染峰值**：观测到过 `max 132.6ms`（均值 13~15ms），远未触 67ms 预算的告警线但值得留意。
