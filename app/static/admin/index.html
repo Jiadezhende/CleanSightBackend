@@ -545,6 +545,8 @@ createApp({
       };
       videoWs.onclose = () => { if (liveConnected.value) stopLive(); };
       liveConnected.value = true;
+      // 计数器归零后再起表：上一轮连接的残帧不该算进新连接的第一秒
+      fpsFrameCount = 0;
       fpsTimer = setInterval(() => { liveFps.value = fpsFrameCount; fpsFrameCount = 0; }, 1000);
       // 告警增量轮询（/task/message/{task_id}，1s 间隔）
       alarmPollTimer = setInterval(async () => {
@@ -562,6 +564,9 @@ createApp({
 
     function stopLive() {
       videoWs?.close(); videoWs = null;
+      // 两个定时器都得清。漏清 fpsTimer 会每次「切客户端」泄漏一个，多个表争抢同一个
+      // fpsFrameCount（谁先醒谁读走并归零），徽章就在 0 与真值之间跳——画面却是好的。
+      if (fpsTimer) { clearInterval(fpsTimer); fpsTimer = null; }
       if (alarmPollTimer) { clearInterval(alarmPollTimer); alarmPollTimer = null; }
       liveConnected.value = false;
       liveFrame.value = null;
