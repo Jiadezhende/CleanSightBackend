@@ -100,16 +100,42 @@ def test_delta_is_since_last_print_not_since_last_observe(reporter, clock, caplo
 
 
 def test_growing_counter_alone_is_pressure(reporter, clock, caplog):
-    """谓词为假但累计计数仍在涨 → 仍算有压力（丢完就空，水位测不到）。"""
+    """谓词为假但累计计数仍在涨 → 仍算有压力（丢完就空，水位测不到）。
+
+    此时 reason 必须如实报 counter_growth：谓词没响却挂调用方的水位 reason，会打出
+    `utilization=0.000 ... reason=queue_high_watermark` 这种自相矛盾的行。
+    """
     with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
-        reporter.observe(False, depth=0, capacity=256, drop_total=10)   # 首次：播种基线，不报
+        reporter.observe(
+            False, reason="queue_high_watermark", depth=0, capacity=256, drop_total=10,
+        )  # 首次：播种基线，不报
         assert not _lines(caplog)
         clock.advance(11.0)
-        reporter.observe(False, depth=0, capacity=256, drop_total=25)   # 还在丢 → 报
+        reporter.observe(
+            False, reason="queue_high_watermark", depth=0, capacity=256, drop_total=25,
+        )  # 还在丢 → 报
 
     lines = _lines(caplog)
     assert len(lines) == 1
     assert "drop_delta=15" in lines[0]
+    assert "reason=counter_growth" in lines[0]
+    assert "queue_high_watermark" not in lines[0]
+
+
+def test_predicate_wins_reason_when_both_fire(reporter, clock, caplog):
+    """谓词与计数增长同时成立 → reason 取调用方的（水位是更强信号，增量由 *_delta 自明）。"""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        reporter.observe(
+            True, reason="queue_high_watermark", depth=200, capacity=256, drop_total=10,
+        )
+        clock.advance(11.0)
+        reporter.observe(
+            True, reason="queue_high_watermark", depth=240, capacity=256, drop_total=25,
+        )
+
+    lines = _lines(caplog)
+    assert "reason=queue_high_watermark" in lines[-1]
+    assert "drop_delta=15" in lines[-1]
 
 
 def test_first_sight_of_counter_does_not_replay_history(reporter, caplog):

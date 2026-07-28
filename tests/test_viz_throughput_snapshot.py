@@ -175,7 +175,8 @@ def test_snapshot_flags_viz_starved():
     # 转一次渲一次：产出 3fps，几乎不空转（新推理早就在槽里等着了）
     w._stat_rendered["c1"] = 30
     w._stat_stale["c1"] = 0
-    w._first_seen["c1"] = _WIN_START  # 整窗存活
+    w._first_seen["c1"] = _WIN_START           # 整窗存活
+    w._last_seen["c1"] = _WIN_START + window
     w._render_calls = 30
     w._render_time_sum = 30 * 0.002   # 渲染本身很快，不是 render-bound
     w._render_time_max = 0.005
@@ -192,15 +193,16 @@ def test_snapshot_flags_viz_starved():
 
 
 def test_snapshot_silent_for_just_started_run():
-    """run 在窗末尾才起来 → 按其存活跨度算 out_fps，不误报 supply-bound。
+    """run 在窗末尾才起来 → 按其观测跨度算 out_fps，不误报 supply-bound。
 
     旧实现 out_fps = rendered/window 拿整窗当分母，2s 内跑满 15fps 会被算成 3fps；
     历史上那道 0.3 门槛就是为挡这个而设。分母改对后不需要门槛也不误报。
     """
     w = _worker(target_fps=30.0, output_fps=15.0)
     window = 10.0
-    w._tick_count = 300                        # viz 线程健康
-    w._first_seen["c1"] = _WIN_START + 8.0     # 窗末 2s 才首见
+    w._tick_count = 300                          # viz 线程健康
+    w._first_seen["c1"] = _WIN_START + 8.0       # 窗末 2s 才首见
+    w._last_seen["c1"] = _WIN_START + window     # 一直活到窗末
     # 2s × 15fps = 30 帧，出帧其实是满的
     w._stat_rendered["c1"] = 30
     w._stat_stale["c1"] = 30
@@ -214,12 +216,37 @@ def test_snapshot_silent_for_just_started_run():
     log.info.assert_not_called()
 
 
-def test_snapshot_skips_verdict_for_too_short_span():
-    """存活跨度 < 1s → 样本太短，只打数不下压力判定（不因它单独触发日志）。"""
+def test_snapshot_silent_for_run_terminated_mid_window():
+    """run 在窗中途被 terminate → 分母取到末见为止，不误报 supply-bound。
+
+    回归真实日志（2026-07-28 16:01:49）：task 119 在窗内第 3s 被停，整窗内跑满 15fps，
+    但分母若取「首见→窗末」(10s) 会被算成 5.0fps 并误标 supply-bound。
+    """
     w = _worker(target_fps=30.0, output_fps=15.0)
     window = 10.0
     w._tick_count = 300
-    w._first_seen["c1"] = _WIN_START + 9.7     # 只活了 0.3s
+    w._first_seen["c1"] = _WIN_START             # 窗初就在
+    w._last_seen["c1"] = _WIN_START + 3.0        # 第 3s 被 terminate，之后不再被观测到
+    # 3s × 15fps ≈ 45 帧，出帧是满的
+    w._stat_rendered["c1"] = 45
+    w._stat_stale["c1"] = 45
+    w._render_calls = 45
+    w._render_time_sum = 45 * 0.002
+    w._render_time_max = 0.005
+
+    with patch("app.services.inference.visualization.worker.logger") as log:
+        w._log_throughput_snapshot(window)
+
+    log.info.assert_not_called()
+
+
+def test_snapshot_skips_verdict_for_too_short_span():
+    """观测跨度 < 1s → 样本太短，只打数不下压力判定（不因它单独触发日志）。"""
+    w = _worker(target_fps=30.0, output_fps=15.0)
+    window = 10.0
+    w._tick_count = 300
+    w._first_seen["c1"] = _WIN_START + 9.7       # 只活了 0.3s
+    w._last_seen["c1"] = _WIN_START + window
     w._stat_rendered["c1"] = 5
     w._stat_stale["c1"] = 3
     w._render_calls = 5

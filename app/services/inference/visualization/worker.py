@@ -81,7 +81,11 @@ class VisualizationWorker:
         self._win_start: float = 0.0          # 当前统计窗起点（首轮 run 内用 time.time 初始化）
         self._eval_interval: float = 10.0     # 评估窗长（秒）
         self._tick_count: int = 0             # 窗内 _tick() 实际执行次数（viz 线程健康度，与客户端数无关）
-        self._first_seen: Dict[int, float] = {}  # 窗内各 run 首次被观测到的时刻（out_fps 的分母起点）
+        # 窗内各 run 的首见/末见时刻：out_fps 的分母 = 末见−首见（+一个 tick），而非窗长。
+        # 两端都要：run 可能窗中途才起（首见晚），也可能窗中途就停（末见早），
+        # 任一端拿窗界代替都会把出帧率算低而误报 supply-bound。
+        self._first_seen: Dict[int, float] = {}
+        self._last_seen: Dict[int, float] = {}
         # 两个统计字典与 _first_seen/_last_rendered_ts 同键（task_id），标注对齐实际键型
         self._stat_rendered: Dict[int, int] = defaultdict(int)  # 实际渲染（=新推理结果）帧数
         self._stat_stale: Dict[int, int] = defaultdict(int)     # 有推理但无新结果而空转的 tick 数
@@ -155,11 +159,12 @@ class VisualizationWorker:
         if inference is None:
             return
 
-        # 窗内首见时刻：出帧率的分母起点。run 在窗中途才起来时，拿整个窗长当分母会把
-        # out_fps 算低（成帧数是真的，只是活得短）——那正是历史上误报 supply-bound 的成因。
-        # 记在 None 门之后：有推理快照才算"这条流开始供帧了"。
+        # 窗内首见/末见时刻：出帧率的分母区间。run 在窗中途才起或中途就停时，拿窗界当分母
+        # 会把 out_fps 算低（成帧数是真的，只是活得短）——那正是误报 supply-bound 的成因。
+        # 记在 None 门之后：有推理快照才算"这条流在供帧"；末见每轮刷新，run 一停就不再前进。
         if task_id not in self._first_seen:
             self._first_seen[task_id] = now
+        self._last_seen[task_id] = now
 
         # 2. 去重：跳过已渲染过的同一推理结果
         last_ts = self._last_rendered_ts.get(task_id, 0.0)
@@ -253,6 +258,7 @@ class VisualizationWorker:
         self._win_start = now
         self._tick_count = 0
         self._first_seen.clear()
+        self._last_seen.clear()
         self._stat_rendered.clear()
         self._stat_stale.clear()
         self._render_time_sum = 0.0
@@ -268,10 +274,11 @@ class VisualizationWorker:
         - render-bound：单帧渲染峰值 ≥ 出帧间隔(1/out_target) → 渲染慢拖住产出；
         - supply-bound：tick 与渲染都正常但产出仍低 + 空转占比高 → 上游（throttle/推理）供帧慢。
 
-        **出帧率的分母是该 run 在窗内的存活跨度，不是窗长**：run 中途才起来时按窗长算会把
-        out_fps 算低而误报 supply-bound。历史上那道 `total >= expected_ticks*0.3` 的门就是
-        为挡这种误报而设的补丁，但它拿 tick 数当"存活时长"的代理——只在 tick 率标称时成立，
-        于是把 viz-starved（tick 数正好塌下去）一并咽掉了。分母改对后该门已删。
+        **出帧率的分母是该 run 在窗内被观测到的跨度（首见→末见），不是窗长**：run 中途才起
+        或中途就停时按窗长算会把 out_fps 算低而误报 supply-bound。历史上那道
+        `total >= expected_ticks*0.3` 的门就是为挡这种误报而设的补丁，但它拿 tick 数当
+        "存活时长"的代理——只在 tick 率标称时成立，于是把 viz-starved（tick 数正好塌下去）
+        一并咽掉了。分母改对后该门已删。
 
         **仅在三侧任一有压力时才打**，平稳时静默以免刷屏。
         日志失败绝不影响渲染热路径——整体 try/except 包裹。
@@ -299,15 +306,19 @@ class VisualizationWorker:
 
             pressured = render_bound or tick_starved
             parts: List[str] = []
-            win_end = self._win_start + window   # 调用点在 _reset_throughput_window 之前，_win_start 仍是本窗起点
             for cid in sorted(set(self._stat_rendered) | set(self._stat_stale)):
                 rendered = self._stat_rendered.get(cid, 0)
                 stale = self._stat_stale.get(cid, 0)
                 total = rendered + stale
-                # 分母 = 该 run 在窗内的存活跨度（首见→窗末）。未记首见（裸构造/直接喂计数
-                # 的单测）回退窗长，保持旧口径。
+                # 分母 = 该 run 在窗内被观测到的跨度（首见→末见，补一个 tick 补回半开区间），
+                # 两端都取实测：窗中途起（首见晚）与窗中途停（末见早）都不会被算低。
+                # 未记录（裸构造/直接喂计数的单测）回退窗长，保持旧口径。
                 first_seen = self._first_seen.get(cid)
-                span = window if first_seen is None else max(0.0, win_end - first_seen)
+                last_seen = self._last_seen.get(cid)
+                if first_seen is None or last_seen is None:
+                    span = window
+                else:
+                    span = min(window, max(0.0, last_seen - first_seen) + self.tick_interval)
                 out_fps = (rendered / span) if span > 0 else 0.0
                 stale_pct = (stale / total * 100.0) if total else 0.0
                 tag = ""

@@ -35,6 +35,7 @@ __all__ = [
     "DEFAULT_HIGH_WATERMARK_RATIO",
     "DEFAULT_REPORT_INTERVAL",
     "REASON_QUEUE_HIGH_WATERMARK",
+    "REASON_COUNTER_GROWTH",
 ]
 
 # 压力日志专用 logger：全链路压力行的唯一出口（独立于各业务模块的 logger）。
@@ -42,9 +43,15 @@ PRESSURE_LOGGER_NAME = "app.pressure"
 _logger = logging.getLogger(PRESSURE_LOGGER_NAME)
 
 # 稳定 reason 常量（低基数、可 grep；异常文本一律不作 reason）。
-# 目前只有「队列积压」一种——成因由行内字段区分：`reject_delta>0` 即下游在拒收，
-# 否则就是取帧快于提交。别为每种成因再造一个 reason。
+# reason 报的是**本行由哪一侧触发**，不是积压的成因：
+# - 调用方谓词为真（水位越线）→ 用调用方传入的 reason；
+# - 谓词为假、纯粹因 `*_total` 还在涨而打 → REASON_COUNTER_GROWTH。
+# 二者不可混：谓词没响却写 queue_high_watermark，会打出 `utilization=0.000 ...
+# reason=queue_high_watermark` 这种自相矛盾的行，读日志的人会以为队列在积压。
+# **成因**仍由行内字段区分（`reject_delta>0` 即下游在拒收，否则是取帧快于提交），
+# 别为每种成因再造 reason——那是另一个轴。
 REASON_QUEUE_HIGH_WATERMARK = "queue_high_watermark"
+REASON_COUNTER_GROWTH = "counter_growth"
 
 # depth/capacity ≥ 此值即视为积压前兆（不是满才叫压力——满时已经在丢了）
 DEFAULT_HIGH_WATERMARK_RATIO = 0.5
@@ -105,7 +112,8 @@ class PressureReporter:
 
         Args:
             pressured: 调用方谓词（水位越线等）。实际判定为 `pressured or 任一 *_total 增长`。
-            reason: 稳定 reason 常量。
+            reason: 谓词为真时打进日志的稳定 reason 常量。谓词为假、仅因计数增长而打的行
+                会改挂 `REASON_COUNTER_GROWTH`，本参数被忽略——避免水位没越却报水位。
             **fields: 观测字段。名字以 `_total` 结尾的自动补 `*_delta`；值为 None 的不打印
                 （不适用的字段直接不打，不用 -1 等魔法值）。
 
@@ -155,7 +163,11 @@ class PressureReporter:
                     self._baselines[name] = value
             self._last_report_at = now
 
-            line = self._format(reason, fields, deltas)
+            # reason 如实反映触发侧：谓词没响就不能挂调用方的水位 reason（见常量处注释）。
+            # 两者同时成立时以谓词为准——水位是更强的信号，计数增长由行内 *_delta 自明。
+            line = self._format(
+                reason if pressured else REASON_COUNTER_GROWTH, fields, deltas
+            )
 
         # 锁外写日志（logging 自身可能持锁/落盘，不该压在本对象的锁里）
         _logger.warning("%s", line)

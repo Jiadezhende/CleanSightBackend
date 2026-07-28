@@ -8,7 +8,7 @@
 
 - **改了什么**：
   1. 新增 **worker 级 tick 计数**（`_tick_count`），与标称轮询率比，低于 80% 判 **viz-starved**（新的第三侧归因）。
-  2. `out_fps` 的分母从**固定窗长**改为**该 run 在窗内的存活跨度**（`_first_seen` → 窗末）。
+  2. `out_fps` 的分母从**固定窗长**改为**该 run 在窗内被观测到的跨度**（`_first_seen` → `_last_seen`）。
   3. **删除 `total >= expected_ticks * 0.3` 门槛**。
   4. 归因加优先级：`viz-starved > render-bound > supply-bound`。
   5. 日志行加 `ticks=N/expected`；非整窗存活的 run 额外标 `span=X.Xs`。
@@ -49,24 +49,31 @@ tick_rate = self._tick_count / window
 tick_starved = poll_rate > 0 and tick_rate < poll_rate * _TICK_HEALTH_RATIO   # 0.8
 ```
 
-### 2. `_first_seen` — 出帧率的分母起点
+### 2. `_first_seen` / `_last_seen` — 出帧率的分母区间
 
-`_process_client` 在 None 门之后记一次窗内首见时刻（有推理快照才算「这条流开始供帧了」）：
+`_process_client` 在 None 门之后记首见（一次）与末见（每轮刷新）——有推理快照才算「这条流在供帧」：
 
 ```python
 if task_id not in self._first_seen:
     self._first_seen[task_id] = now
+self._last_seen[task_id] = now
 ```
 
 窗末计算：
 
 ```python
-win_end = self._win_start + window          # 调用点在 _reset_throughput_window 之前
-span = window if first_seen is None else max(0.0, win_end - first_seen)
+span = min(window, max(0.0, last_seen - first_seen) + self.tick_interval)
 out_fps = (rendered / span) if span > 0 else 0.0
 ```
 
-`first_seen is None` 回退窗长，保留裸构造/直接喂计数的单测口径。存活 < `_MIN_SPAN_SEC`(1.0s) 的 run **只打数不下压力判定**——分母还没铺开，判了就是误报。
+**两端都必须取实测**：run 可能窗中途才起（首见晚），也可能窗中途就停（末见早），任一端拿窗界代替都会把出帧率算低。补一个 `tick_interval` 是把半开区间补回来（观测到 N 个 tick 对应的时长是 N×tick 而非 (N−1)×tick）。任一端缺失回退窗长，保留裸构造/直接喂计数的单测口径。
+
+观测跨度 < `_MIN_SPAN_SEC`(1.0s) 的 run **只打数不下压力判定**——分母还没铺开，判了就是误报。
+
+> 首版只记了 `_first_seen`、分母取「首见→窗末」，在第一次真实抓包里就打出两条假阳性：
+> `16:01:42` terminate 掉的 task 119，在 `16:01:39→16:01:49` 这个窗里被算成
+> `out=5.0fps (supply-bound)`——它其实活满 3s、跑满 15fps，只是分母被算成了 10s。
+> 补 `_last_seen` 修正，回归见 `test_snapshot_silent_for_run_terminated_mid_window`。
 
 ### 3. 删门槛 + 归因优先级
 
@@ -93,8 +100,9 @@ tick 都不够时产出低是必然的，此时标 supply-bound 等于把账错�
 `tests/test_viz_throughput_snapshot.py`：原 6 例补 `_tick_count`（以前隐含假设 tick 满额，现在显式写出），新增 3 例：
 
 - `test_snapshot_flags_viz_starved` —— #82 场景回归：tick 塌到 3Hz，断言标 `viz-starved` 且**不得**出现 `supply-bound`。
-- `test_snapshot_silent_for_just_started_run` —— 窗末 2s 才起的 run 跑满 15fps，不误报（分母修正的正面回归）。
-- `test_snapshot_skips_verdict_for_too_short_span` —— 存活 0.3s 只打数不判定。
+- `test_snapshot_silent_for_just_started_run` —— 窗末 2s 才起的 run 跑满 15fps，不误报（分母左端）。
+- `test_snapshot_silent_for_run_terminated_mid_window` —— 窗内第 3s 被 terminate 的 run 不误报（分母右端，用 16:01:49 那条真实日志的数字）。
+- `test_snapshot_skips_verdict_for_too_short_span` —— 观测跨度 0.3s 只打数不判定。
 
 原 `test_snapshot_silent_when_idle_stream` 被后两例替换：它测的是「tick 少所以别报」，而真实成因是「活得短所以分母算错」，现在按真实成因写。
 
@@ -102,4 +110,5 @@ tick 都不够时产出低是必然的，此时标 supply-bound 等于把账错�
 
 - `_tick_count` 是 **worker 级**信号，不要按客户端拆——它量的是线程调度，per-client 拆开就又回到「用客户端数据推断线程健康」的老路。
 - `_MIN_SPAN_SEC` 不是 0.3 门槛的换皮：它只挡「样本时长不足以做速率判定」，判据里**不含 tick 数**，故不会随 viz 饥饿一起塌。
+- `span` 的两端都是**实测**，不许拿窗界代替任何一端——首版只记左端就在真实日志里打出了假阳性（见上）。
 - 这次只补观测、不改行为：渲染去重仍在 `inference.ts`，出帧恒 = inference_fps。
