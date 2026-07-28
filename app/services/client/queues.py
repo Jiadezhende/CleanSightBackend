@@ -18,6 +18,11 @@ from app.domain.alarm import Alarm
 from app.domain.detection import FrameFeature
 from app.domain.frame import Frame
 from app.utils.metrics import frame_drop_total
+from app.utils.pressure import (
+    DEFAULT_HIGH_WATERMARK_RATIO,
+    REASON_QUEUE_HIGH_WATERMARK,
+    PressureReporter,
+)
 
 # signals_10s 聚合底线（固定 10s），与帧窗保留时长（可 ≥10s）解耦。
 _SIGNALS_WINDOW_SEC = 10.0
@@ -66,6 +71,8 @@ class ClientQueues:
       _frontend_lock    Lock   _latest_temporal（前端时序事件，低频写）
       _slide_window_lock Lock  _slide_window dict（推理每帧写入，最高竞争锁）
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
+      *_pressure 内建锁  Lock   叶子锁（PressureReporter 自持，只护其几个标量）：
+                               append_* 一律**先出队列锁再上报**，故不与上面任何锁互嵌
 
     全清顺序（clear() 同时持锁时的固定顺序，防死锁）：
       _raw_lock → _viz_lock → _inference_lock
@@ -146,6 +153,7 @@ class ClientQueues:
         self.ca_maxlen = ca_maxlen
         # CA-ReadyQueue：无锁 SPSC deque（单生产者 decoder / 单消费者 dispatcher）
         self.ca_ready: Deque[Frame] = deque(maxlen=ca_maxlen)
+        self.frames_dropped_ready: int = 0
         # CA-RawQueue（由 _raw_lock 保护）
         self.ca_raw: Deque[Frame] = deque(maxlen=ca_maxlen)
         self.frames_dropped_raw: int = 0
@@ -153,6 +161,22 @@ class ClientQueues:
         self.ca_processed: Deque[Frame] = deque(maxlen=ca_maxlen)
         self.frames_dropped_processed: int = 0
         self.ca_segment_len = ca_segment_len
+
+        # 压力日志（[PRESSURE]）：三条队列物理存于本对象，故由本对象上报（每资源单一所有者），
+        # 检查点在各 append_* 内部——不散到 decoder/viz worker 各生产者去，也不为此另起线程：
+        # 写者线程顺带驱动即可。周期快照形态（每 10s 至多一条、平稳时静默），
+        # 故只有 run 在跑（有人写队列）时才会汇报，run 停了自然静默。
+        self._pressure_watermark: int = max(1, int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
+        _identity = {"task_id": task_id, "step_id": step_id, "stage": stage}
+        self._ready_pressure = PressureReporter(
+            "client_queues", "ca_ready", identity=_identity,
+        )
+        self._raw_pressure = PressureReporter(
+            "client_queues", "ca_raw", identity=_identity,
+        )
+        self._processed_pressure = PressureReporter(
+            "client_queues", "ca_processed", identity=_identity,
+        )
 
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
         self._latest_rendered: Optional[Frame] = None
@@ -205,10 +229,56 @@ class ClientQueues:
         # 2. 背压：仅对选中帧生效——推理队列满则丢（过载语义同旧）。
         max_len = self.ca_ready.maxlen
         if max_len is not None and len(self.ca_ready) >= max_len:
+            self.frames_dropped_ready += 1
+            self._observe_ready_pressure()
             return False
 
         self.ca_ready.append(frame_data)
+        self._observe_ready_pressure()
         return True
+
+    def _observe_ready_pressure(self) -> None:
+        """ca_ready 压力观测（仅在放行/满拒两条路径调用，抽帧跳过的帧不观测）。
+
+        无锁 SPSC：读 len 与 [0] 都可能与 dispatcher 的 popleft 交错，取到的是"某一瞬间的
+        近似"——压力观测本就只需要量级，IndexError 兜住即可（比为它加锁划算得多）。
+
+        注：decoder 在写入**之前**还有一道自己的准入背压（占用率越线就主动丢，计
+        `ingress_backpressure`），那是它自己的决策与计数；本行只报队列积压本身。
+        """
+        depth = len(self.ca_ready)
+        oldest_ts = None
+        if depth >= self._pressure_watermark:
+            try:
+                oldest_ts = self.ca_ready[0].timestamp
+            except IndexError:  # pragma: no cover - 与消费者 popleft 交错
+                pass
+        self._report_queue_pressure(
+            self._ready_pressure, depth, oldest_ts, self.frames_dropped_ready
+        )
+
+    def _report_queue_pressure(
+        self,
+        reporter: PressureReporter,
+        depth: int,
+        oldest_ts: Optional[float],
+        drop_total: int,
+    ) -> None:
+        """三条 CA 队列共用的上报形状（**必须在队列锁外调用**）。
+
+        谓词只写水位；"累计丢帧仍在涨"由 reporter 自己并入判定（见 pressure.py）。
+        oldest_age_ms 用墙钟算（帧 ts 是墙钟），压力持续时间由 reporter 用单调钟算。
+        """
+        capacity = self.ca_maxlen
+        reporter.observe(
+            depth >= self._pressure_watermark,
+            reason=REASON_QUEUE_HIGH_WATERMARK,
+            depth=depth,
+            capacity=capacity,
+            utilization=(depth / capacity) if capacity else None,
+            oldest_age_ms=((time.time() - oldest_ts) * 1000.0) if oldest_ts else None,
+            drop_total=drop_total,
+        )
 
     def append_ca_raw(self, frame_data: Frame) -> bool:
         """
@@ -227,6 +297,12 @@ class ClientQueues:
             self.ca_raw.append(frame_data)
             self.latest_raw_frame = frame_data.frame
             self.latest_raw_timestamp = frame_data.timestamp
+            # 锁内只取标量快照（队头 ts 仅在越水位时多读一次，平稳期不付代价）
+            depth = len(self.ca_raw)
+            drops = self.frames_dropped_raw
+            oldest_ts = self.ca_raw[0].timestamp if depth >= self._pressure_watermark else None
+        # 锁外上报
+        self._report_queue_pressure(self._raw_pressure, depth, oldest_ts, drops)
         return True
 
     def append_ca_processed(self, frame_data: Frame) -> None:
@@ -247,6 +323,14 @@ class ClientQueues:
                 self.frames_dropped_processed += 1
                 frame_drop_total.labels(reason="hls_backpressure").inc()
             self.ca_processed.append(frame_data)
+            # 锁内只取标量快照（同 append_ca_raw）
+            depth = len(self.ca_processed)
+            drops = self.frames_dropped_processed
+            oldest_ts = (
+                self.ca_processed[0].timestamp if depth >= self._pressure_watermark else None
+            )
+        # 锁外上报
+        self._report_queue_pressure(self._processed_pressure, depth, oldest_ts, drops)
 
     def set_latest_rendered(self, frame_data: Optional[Frame]) -> None:
         """更新最新渲染帧（由 VisualizationWorker 调用）。传 None 表示清空。
@@ -377,6 +461,7 @@ class ClientQueues:
         with self._state_lock:
             if self._state is RunState.ACTIVE:
                 self._state = RunState.DRAINING
+                self._reset_pressure()
                 return True
             return False
 
@@ -387,7 +472,14 @@ class ClientQueues:
         """
         with self._state_lock:
             self._state = RunState.CLOSED
+            self._reset_pressure()
         self._release_payload()
+
+    def _reset_pressure(self) -> None:
+        """run 拆除时静默清三条队列的压力计时与 delta 基线（不打日志）。"""
+        self._ready_pressure.reset()
+        self._raw_pressure.reset()
+        self._processed_pressure.reset()
 
     def clear(self) -> None:
         """兼容入口：等价 `close()`（供 ClientManager.remove/remove_if/clear_all 调用）。"""

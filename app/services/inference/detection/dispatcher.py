@@ -11,12 +11,18 @@ from __future__ import annotations
 import itertools
 import logging
 import threading
+import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, client_manager
 from app.services.inference.models import DetectionTask
 from app.utils.metrics import frame_drop_total
+from app.utils.pressure import (
+    DEFAULT_HIGH_WATERMARK_RATIO,
+    REASON_QUEUE_HIGH_WATERMARK,
+    PressureReporter,
+)
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
@@ -88,14 +94,17 @@ class StageAwareDispatcher:
         # 各 stage 因 maxlen 满而静默淘汰最旧帧的累计计数（推理掉速时的真实积压信号）
         self._stage_drops: Dict[str, int] = defaultdict(int)
 
-        # 推理压力日志（[INFER_PRESSURE]）：每 ~10s 评估一次，但仅在有压力时才打
-        # （有丢帧 delta，或队列深度逼近上限），平稳时静默，避免刷屏。
+        # 压力日志（[PRESSURE] resource=stage_queue）：每 ~1s 采样，限频与 delta 记账在
+        # PressureReporter 里（每 stage 每 10s 至多一条，平稳时静默）。
+        # **只报自己的 stage deque**：ca_processed 归 ClientQueues 自己报（每资源单一所有者）。
         self._round_counter: int = 0
-        self._check_every_rounds: int = max(1, int(10.0 / self.fetch_interval))
-        self._pressure_queue_ratio: float = 0.5  # 队列深度 ≥ maxlen*该比例 视为积压前兆
-        # 上次打印时的累计丢帧，用于算 delta（"自上次报告以来丢了多少"）
-        self._last_logged_stage_drops: Dict[str, int] = defaultdict(int)
-        self._last_logged_processed_drops: Dict[str, int] = defaultdict(int)
+        self._check_every_rounds: int = max(1, int(1.0 / self.fetch_interval))
+        self._pressure_queue_ratio: float = DEFAULT_HIGH_WATERMARK_RATIO
+        self._stage_pressure: Dict[str, PressureReporter] = {}
+        # 各 stage 被 proxy 拒收（submit 返 False）的累计次数。proxy 内部 inflight 满是它的
+        # 私有状态、不外泄，但**拒收这件事本身**在提交侧看得见：这里计数并并入压力行，
+        # 让「下游满了发不出去」不再是一个静默的布尔值。
+        self._stage_rejects: Dict[str, int] = defaultdict(int)
 
     def start(self):
         """启动调度线程"""
@@ -213,7 +222,10 @@ class StageAwareDispatcher:
                     self._commit_pop(stage, len(batch))  # 接了才 popleft
                     progressed = True
                 else:
-                    return  # proxy 限流/未就绪：停本轮，帧留 deque，不丢帧
+                    # proxy 限流/未就绪：停本轮，帧留 deque，不丢帧。只记数不打日志——
+                    # 满的时候这里每 10ms 撞一次，压力行由 1s 采样按周期统一打。
+                    self._stage_rejects[stage] += 1
+                    return
             if not progressed:
                 return  # 整圈无进展：全空
 
@@ -256,61 +268,53 @@ class StageAwareDispatcher:
             return dict(self._stage_drops)
 
     def _log_pressure_snapshot(self) -> None:
-        """有压力时打一条 [INFER_PRESSURE] 行：stage 队列深度/丢帧 + 各客户端 ca_processed。
+        """采一次各 stage deque 的压力快照，交给 per-stage PressureReporter 按周期打。
 
-        与 stream 侧 [BACKPRESSURE] 行职责分离——后者只反映入口/录制队列（ca_ready/ca_raw，
-        结构上几乎恒空），本行专门暴露推理链路真实积压点：_stage_queues 静默淘汰、ca_processed
-        成帧压力。
+        本方法只做两件事：锁内取标量快照、锁外喂 reporter。限频与 drop/reject delta 记账
+        都在 PressureReporter 里（见 app/utils/pressure.py）。
 
-        **仅在有压力时才打**，平稳时静默以免刷屏。判定为有压力 = 任一 stage 或 ca_processed
-        自上次报告以来有新增丢帧（delta>0），或任一 stage 队列深度 ≥ maxlen*ratio（积压前兆）。
-        drop 给累计值 + delta（delta 才是"此刻是否在丢"的信号）。
+        **只报自己拥有的资源**：stage deque 是本类独有的积压点（proxy 拒收时帧留在这里、
+        满了静默淘汰最旧帧）。ca_processed 由 ClientQueues 在其 append 内自报，本类不代劳。
+        `reject_total` 例外——那是本类调 submit 时看到的返回值，是提交侧的自有观测。
 
         日志失败绝不影响调度热路径——整体 try/except 包裹。
         """
         try:
-            # stage 段：深度 + 容量 + 累计丢帧(delta)
+            # 锁内只取标量（队头 ts 仅在越水位时多读一次，平稳期不付代价）
             with self._lock:
-                depths = {s: len(q) for s, q in self._stage_queues.items()}
-                caps = {s: (q.maxlen or 0) for s, q in self._stage_queues.items()}
-                drops = dict(self._stage_drops)
+                snapshot = []
+                for stage, q in self._stage_queues.items():
+                    depth = len(q)
+                    cap = q.maxlen or 0
+                    oldest_ts = (
+                        q[0].timestamp
+                        if depth and cap and depth >= cap * self._pressure_queue_ratio
+                        else None
+                    )
+                    snapshot.append((
+                        stage, depth, cap, oldest_ts,
+                        self._stage_drops.get(stage, 0), self._stage_rejects.get(stage, 0),
+                    ))
 
-            pressured = False
-            stage_parts: List[str] = []
-            # 取队列与丢帧两侧 stage 并集（有丢帧必有队列，并集仅为稳妥兜底）
-            for stage in sorted(set(depths) | set(drops)):
-                depth = depths.get(stage, 0)
-                cap = caps.get(stage, 0)
-                cum = drops.get(stage, 0)
-                delta = cum - self._last_logged_stage_drops.get(stage, 0)
-                if delta > 0 or (cap > 0 and depth >= cap * self._pressure_queue_ratio):
-                    pressured = True
-                stage_parts.append(f"{stage} q={depth}/{cap} drop={cum}(+{delta})")
-
-            # client 段：ca_processed 深度/容量/累计丢帧(delta)
-            client_parts: List[str] = []
-            processed_drops: Dict[str, int] = {}
-            for task_id, cq in self._client_manager.snapshot().items():
-                cum = cq.frames_dropped_processed
-                processed_drops[task_id] = cum
-                delta = cum - self._last_logged_processed_drops.get(task_id, 0)
-                if delta > 0:
-                    pressured = True
-                client_parts.append(
-                    f"{task_id} ca_processed={cq.get_ca_processed_length()}/"
-                    f"{cq.ca_maxlen} drop={cum}(+{delta})"
+            now = time.time()
+            for stage, depth, cap, oldest_ts, drops, rejects in snapshot:
+                reporter = self._stage_pressure.get(stage)
+                if reporter is None:
+                    reporter = PressureReporter(
+                        "dispatcher", "stage_queue", identity={"stage": stage},
+                    )
+                    self._stage_pressure[stage] = reporter
+                # 谓词只写水位；「丢帧/拒收仍在涨」由 reporter 并入判定
+                # （见 pressure.py：压力 = 谓词 OR 任一 *_total 增长）
+                reporter.observe(
+                    bool(cap) and depth >= cap * self._pressure_queue_ratio,
+                    reason=REASON_QUEUE_HIGH_WATERMARK,
+                    depth=depth,
+                    capacity=cap,
+                    utilization=(depth / cap) if cap else None,
+                    oldest_age_ms=((now - oldest_ts) * 1000.0) if oldest_ts else None,
+                    drop_total=drops,
+                    reject_total=rejects,
                 )
-
-            if not pressured:
-                return  # 平稳，静默
-
-            logger.info(
-                "[INFER_PRESSURE] stages: %s || clients: %s",
-                " | ".join(stage_parts) if stage_parts else "(none)",
-                " | ".join(client_parts) if client_parts else "(none)",
-            )
-            # 仅在实际打印后推进基线，使 delta = 自上次报告以来的增量
-            self._last_logged_stage_drops = defaultdict(int, drops)
-            self._last_logged_processed_drops = defaultdict(int, processed_drops)
         except Exception as e:
             logger.debug("[StageAwareDispatcher] pressure snapshot failed: %s", e)

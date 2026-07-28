@@ -228,6 +228,8 @@ class RemoteInferProxy:
         stage = batch[0].stage
         with self._lock:
             if self._inflight >= self._max_inflight:
+                # 热路径不打日志——满的时候这里每 10ms 就走一次。拒收由唯一调用方
+                # （dispatcher）计数并并入它的周期压力行。
                 return False
             req_id = self._next_req_id
             self._next_req_id += 1
