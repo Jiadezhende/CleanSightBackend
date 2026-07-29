@@ -103,6 +103,7 @@ class RemoteInferProxy:
         self._inflight = 0
         self._next_req_id = 0
         self._last_resp_ts = 0.0
+        self._spawn_at = 0.0     # 本代子进程的 spawn 时刻（判「活着却没就绪」的计时起点）
         self._restarts = 0
 
         self._child_ready = threading.Event()   # 子进程就绪（可接收 submit）
@@ -144,13 +145,20 @@ class RemoteInferProxy:
                 daemon=True,
             )
             self._proc.start()
+            self._spawn_at = time.monotonic()
             ready_ev, pid = self._ready_ev, self._proc.pid
         logger.info("[RemoteInferProxy] 子进程 spawn pid=%s，等就绪…", pid)
         ready = ready_ev.wait(timeout=self._ready_timeout)
         self._last_resp_ts = time.monotonic()
         if not ready:
-            logger.error("[RemoteInferProxy] 子进程 %ss 未就绪（可能模型加载慢/失败）", self._ready_timeout)
-            # 不置 child_ready：submit 会拒收；监督线程后续按死活/wedge 判定处理。
+            logger.error(
+                "[RemoteInferProxy] 子进程 %ss 未就绪（可能模型加载慢/失败）；"
+                "交给监督线程：补看就绪信号，仍无即判失败重启",
+                self._ready_timeout,
+            )
+            # 不置 child_ready：submit 会拒收。**不能就此不管**——子进程还活着、在途恒 0，
+            # 「死」与「wedge」两条判据都不响，那样会永久静默无推理（见 _supervise_loop 的
+            # not_ready 分支：迟到就绪补收，仍不就绪则按失败走重启）。
             return
         self._child_ready.set()
         logger.info("[RemoteInferProxy] 子进程就绪 pid=%s", self._proc.pid)
@@ -332,16 +340,53 @@ class RemoteInferProxy:
                 continue
             proc = self._proc
             dead = proc is None or not proc.is_alive()
+            not_ready = self._poll_readiness(dead)
             with self._lock:
                 inflight = self._inflight
             wedged = inflight > 0 and (time.monotonic() - self._last_resp_ts) > self._response_timeout
-            if dead or wedged:
-                self._handle_child_failure(dead=dead, wedged=wedged)
+            if dead or wedged or not_ready:
+                self._handle_child_failure(dead=dead, wedged=wedged, not_ready=not_ready)
 
-    def _handle_child_failure(self, *, dead: bool, wedged: bool) -> None:
-        """子进程死亡/wedge：停 submit、清孤儿 pending（计丢帧）、退避重 spawn。"""
+    def _poll_readiness(self, dead: bool) -> bool:
+        """看一眼就绪状态并据情更新（**有副作用，不是纯谓词**）。返回：是否判定为久不就绪。
+
+        名字用 `poll` 不用 `check`：本方法会在看到迟到的就绪信号时就地置 `_child_ready`。
+        两步合在一个方法里而不拆开，是为了让「补收先于判失败」这个顺序**无法在调用侧被写反**。
+
+        为什么必须单独判：`_spawn_child` 只 `ready_ev.wait()` **一次**，超时即返回且不置
+        `_child_ready`。此后子进程若活着（模型仍在加载 / warmup 卡在 CUDA），`dead` 不成立；
+        submit 又全被拒 → `inflight` 恒 0 → `wedged` 也不成立。两条判据同时哑火，
+        结果是**永久静默 0 推理**，外部只看得到 dispatcher 的 `[PRESSURE] … reject_total` 在涨。
+
+        分两步（顺序即优先级）：
+        1. **补收**——子进程只是慢，屏障超时后才 `ready_ev.set()`：这里每 tick 补看一眼即可
+           免费捡回，不必杀了重来（重来还要再付一次模型加载）。
+        2. **判失败**——超 `ready_timeout` 仍没就绪信号：交给既有失败路径（kill + 清在途 +
+           退避重 spawn），把「静默不可用」转成「有限次重试 + 每次一条 ERROR」。
+
+        不设「再宽限几秒」的缓冲带：补收读的就是 `_spawn_child` 正在 wait 的同一个 `ready_ev`，
+        「杀在它刚要就绪的瞬间」这个竞态本就由步骤 1 挡住；多让几秒只是把同一个亚微秒窗口
+        整体后移，不消除它，代价却是每次真失败都多躺那几秒。
+        """
+        if dead or self._child_ready.is_set():
+            return False
+        ev = self._ready_ev
+        if ev is not None and ev.is_set():
+            self._child_ready.set()
+            logger.warning(
+                "[RemoteInferProxy] 子进程迟到就绪（超 %.0fs 屏障后才 ready），恢复接收",
+                self._ready_timeout,
+            )
+            return False
+        return (time.monotonic() - self._spawn_at) > self._ready_timeout
+
+    def _handle_child_failure(self, *, dead: bool, wedged: bool, not_ready: bool) -> None:
+        """子进程死亡/wedge/久不就绪：停 submit、清孤儿 pending（计丢帧）、退避重 spawn。"""
         self._child_ready.clear()   # 立即停止接收 submit
-        logger.error("[RemoteInferProxy] 子进程失败 dead=%s wedged=%s，清理在途并重启", dead, wedged)
+        logger.error(
+            "[RemoteInferProxy] 子进程失败 dead=%s wedged=%s not_ready=%s，清理在途并重启",
+            dead, wedged, not_ready,
+        )
         self._kill_child()
 
         with self._lock:

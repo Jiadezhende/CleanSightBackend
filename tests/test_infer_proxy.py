@@ -5,9 +5,10 @@ _handle_child_failure。测的是主进程侧的 req_id 关联、pending 有界�
 """
 
 import queue
+import time
+from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from app.domain.detection import FrameDetections
 from app.services.inference.models import DetectionTask
@@ -119,10 +120,56 @@ def test_child_failure_clears_pending_and_counts_restart_drops():
     p.submit([_task(cq, 3.0)])                   # 1 帧 → 共 3 在途帧
 
     before = _drop("infer_child_restart")
-    p._handle_child_failure(dead=True, wedged=False)
+    p._handle_child_failure(dead=True, wedged=False, not_ready=False)
 
     assert p._pending == {} and p._inflight == 0
     assert _drop("infer_child_restart") - before == 3.0
+
+
+def _not_ready_proxy(*, ev_ready: bool, spawned_ago: float, ready_timeout: float = 120.0):
+    """摆出「子进程活着、`_child_ready` 未置」的现场，供 _poll_readiness 的四条分支复用。
+
+    proc/ready_ev 用 SimpleNamespace 打桩（同 test_dispatcher_round_robin 的做法）：
+    监督线程对它们只调 is_alive() / is_set() 各一次。
+    """
+    p, _ = _proxy()
+    p._child_ready.clear()
+    p._proc = SimpleNamespace(is_alive=lambda: True)
+    p._ready_ev = SimpleNamespace(is_set=lambda: ev_ready)
+    p._ready_timeout = ready_timeout
+    p._spawn_at = time.monotonic() - spawned_ago
+    return p
+
+
+def test_late_ready_is_picked_up_without_restart():
+    """子进程只是慢：屏障超时后才 ready → 监督线程补收，恢复接收、不重启。"""
+    # 早已超时 + 就绪信号已置 → 验证「补收优先于判失败」
+    p = _not_ready_proxy(ev_ready=True, spawned_ago=10_000)
+
+    assert p._poll_readiness(dead=False) is False
+    assert p._child_ready.is_set(), "迟到的就绪信号应被补收，而不是杀了重来"
+
+
+def test_alive_but_never_ready_is_treated_as_failure():
+    """活着、没就绪、超 ready_timeout → 判失败（否则 dead/wedged 双哑火，永久静默 0 推理）。"""
+    p = _not_ready_proxy(ev_ready=False, spawned_ago=100.0, ready_timeout=1.0)
+
+    assert p._poll_readiness(dead=False) is True
+
+
+def test_not_ready_within_timeout_is_not_failure():
+    """还在 ready_timeout 内 → 继续等，不判失败（模型加载本就慢）。"""
+    p = _not_ready_proxy(ev_ready=False, spawned_ago=0.0)
+
+    assert p._poll_readiness(dead=False) is False
+
+
+def test_ready_child_never_flagged_not_ready():
+    """已就绪的子进程不受该判据影响（避免误杀健康子进程）。"""
+    p, _ = _proxy()                            # _proxy 已置 child_ready
+    p._proc = SimpleNamespace(is_alive=lambda: True)
+    p._spawn_at = 0.0                          # 极早的 spawn 时刻也不该触发
+    assert p._poll_readiness(dead=False) is False
 
 
 def test_orphan_response_ignored():
