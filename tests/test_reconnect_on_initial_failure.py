@@ -5,8 +5,8 @@
   健康监控的重连判据 = **decoder 子进程死活**（`stream_service.is_decoder_alive`），不再是帧
   staleness。原因：实测 RTSP 断流时后端 ffmpeg 从 TCP 控制通道即收 EOF 退出（`-timeout` 兜底
   把真挂死也转成退出），故「进程死」= 断流/崩溃/首启失败(该 respawn)，「进程活但无帧」= 正在
-  等首个关键帧/瞬时停(该等，绝不杀)。放弃(cleanup) = 纯时间触发（无帧 ≥ cleanup_timeout），
-  不再数重连次数（max_reconnect_attempts 只作为 cleanup_timeout 的派生系数）。
+  等首个关键帧/瞬时停(该等，绝不杀)。放弃(cleanup) = 纯时间触发（无帧 ≥ cleanup_timeout，
+  直配 20s），不再数重连次数（`max_reconnect_attempts` 已随派生式一并删除）。
 
 测试覆盖：
   1. StreamService：start() 失败后 decoder 必须仍在 self.decoders（供监控接管）
@@ -60,7 +60,7 @@ def _make_monitor(
     config = HealthMonitorConfig(
         heartbeat_timeout=5.0,
         reconnect_interval=5.0,
-        max_reconnect_attempts=5,  # 仅作为 cleanup_timeout 派生系数（=5+5*5=30s）
+        cleanup_timeout=20.0,  # 放弃时限，直配（不再由 attempts×interval 派生）
         check_interval=1.0,
         orphan_timeout=30.0,
         task_max_duration=0.0,  # 禁用任务超时，避免干扰
@@ -190,7 +190,7 @@ class TestHealthMonitorReconnectPath:
         assert client_id not in monitor._reconnecting_clients, (
             "进程活着时即便帧陈旧也不应进入重连（等首帧不能被杀）"
         )
-        # 未超 cleanup_timeout(30s)，也不应清理
+        # 未超 cleanup_timeout(20s)，也不应清理
         monitor._stream_service.restart_stream.assert_not_called()
 
     def test_enters_orphan_when_decoder_not_registered(self):
@@ -251,10 +251,10 @@ class TestFullReconnectScenario:
         )
 
     def test_gives_up_after_cleanup_timeout(self):
-        """无帧时长 ≥ cleanup_timeout（=30s）→ cleanup（纯时间触发，不数次数）。"""
+        """无帧时长 ≥ cleanup_timeout（=20s）→ cleanup（纯时间触发，不数次数）。"""
         client_id = "giveup_client"
-        # 帧已 35s 没更新（> cleanup_timeout 30s）
-        base_timestamp = time.time() - 35.0
+        # 帧已 25s 没更新（> cleanup_timeout 20s）
+        base_timestamp = time.time() - 25.0
 
         mock_cq = MagicMock()
         mock_cq.latest_raw_timestamp = base_timestamp
@@ -269,7 +269,7 @@ class TestFullReconnectScenario:
         monitor._check_all_clients()
         assert client_id in monitor._reconnecting_clients
 
-        # Round 2：_handle 中 idle(35s) >= cleanup_timeout(30s) → FAILED → cleanup → 退出
+        # Round 2：_handle 中 idle(25s) >= cleanup_timeout(20s) → FAILED → cleanup → 退出
         monitor._check_all_clients()
         assert client_id not in monitor._reconnecting_clients, (
             "无帧超 cleanup_timeout 后应退出重连模式（执行 cleanup）"

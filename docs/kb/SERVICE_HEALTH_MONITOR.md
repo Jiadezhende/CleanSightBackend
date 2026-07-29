@@ -33,7 +33,7 @@
 
 触发清理的情况：
 
-- 重连中**无帧时长 ≥ cleanup_timeout**（= heartbeat + reconnect_interval×max_attempts = 30s；纯时间触发，`max_reconnect_attempts` 只作该派生的系数、不再是硬次数上限）。
+- 重连中**无帧时长 ≥ cleanup_timeout**（配置项，默认 20s；纯时间触发，重连本身不数次数——`max_reconnect_attempts` 连同「heartbeat + interval×attempts」的派生式已一并删除）。
 - 任务运行超过 `task_max_duration`（默认 7200s，0=禁用）。
 - 有 ClientQueues 但无 decoder，超过 `orphan_timeout`（默认 30s）。
 - 有 decoder 但无 ClientQueues，立即停止孤儿 decoder。

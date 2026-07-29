@@ -70,9 +70,9 @@ async def lifespan():
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "[GlobalHealthMonitor] Config: reconnect_interval=%.1fs, "
-            "max_reconnect_attempts=%d, orphan_timeout=%.1fs",
+            "cleanup_timeout=%.1fs, orphan_timeout=%.1fs",
             health_config.reconnect_interval,
-            health_config.max_reconnect_attempts,
+            health_config.cleanup_timeout,
             health_config.orphan_timeout,
         )
 
@@ -139,7 +139,7 @@ async def get_monitor_config():
     - check_interval: 检查间隔（秒）
     - heartbeat_timeout: 心跳超时（秒）
     - reconnect_interval: 重连间隔（秒）
-    - max_reconnect_attempts: 最大重连次数
+    - cleanup_timeout: 无帧多久放弃重连并清理（秒）
     - orphan_timeout: 孤儿流超时（秒）
 
     GET /health/monitor/config
@@ -157,13 +157,11 @@ async def get_monitor_config():
             "check_interval": config.check_interval,
             "heartbeat_timeout": config.heartbeat_timeout,
             "reconnect_interval": config.reconnect_interval,
-            "max_reconnect_attempts": config.max_reconnect_attempts,
+            "cleanup_timeout": config.cleanup_timeout,
             "orphan_timeout": config.orphan_timeout,
         },
-        "derived": {
-            "suspect_timeout": _health_monitor.suspect_timeout,
-            "cleanup_timeout": _health_monitor.cleanup_timeout,
-        },
+        # 原 "derived" 块已删：cleanup_timeout 提成一等配置项后，块里两个值都退化成 config
+        # 的恒等副本（suspect_timeout ≡ heartbeat_timeout），同一响应里回显两遍纯属冗余。
     }
 
 

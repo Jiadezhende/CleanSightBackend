@@ -46,11 +46,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from integration_tests.utils import APIClient, DatabaseHelper, FFmpegController
 
 # 自动清理超时: 重连判据为「进程死活」，放弃(cleanup)纯按无帧时长触发——
-# 无帧 ≥ cleanup_timeout(= heartbeat 5s + reconnect_interval 5s × max_attempts 5 = 30s) + buffer
-AUTO_CLEANUP_TIMEOUT = 45
-# 断流重连成功场景: gap 必须 < cleanup_timeout(30s)，否则恢复前就被清理
+# 无帧 ≥ cleanup_timeout(config/health_monitor_config.yaml，直配 20s) + buffer
+AUTO_CLEANUP_TIMEOUT = 35
+# 断流重连成功场景: gap 必须 < cleanup_timeout(20s)，否则恢复前就被清理
 RECONNECT_GAP = 10
-# Scenario 6: 推流延迟默认值（秒）—— 必须 < cleanup_timeout(30s)
+# Scenario 6: 推流延迟默认值（秒）—— 必须 < cleanup_timeout(20s)
 DELAYED_STREAM_DEFAULT = 10
 # Scenario 6: 等待重连成功的最大轮询时长（秒）
 RECONNECT_SUCCESS_TIMEOUT = 45
@@ -400,12 +400,12 @@ def run_scenario_3(args):
     """
     断流后不再恢复：后端 decoder 进程退出 → 反复 respawn 均连不上 → 无帧超 cleanup_timeout
     后自动清理资源。不调用 /api/terminate，通过轮询 /health/status 确认自动清理。
-    预期约 30s 后清理完成（无帧 ≥ cleanup_timeout = 5s + 5×5s = 30s，纯时间触发、不数次数）。
+    预期约 20s 后清理完成（无帧 ≥ cleanup_timeout=20s，纯时间触发、不数次数）。
     """
     phase1 = max(15, int(args.duration * 0.25))
     section("Scenario 3: 断流重连失败（自动清理）",
             "phase1 = max(15, duration*0.25)，然后永久断流",
-            "预期 ~30s 后自动清理（不调 terminate）")
+            "预期 ~20s 后自动清理（不调 terminate）")
 
     with scenario_setup(args) as ctx:
         try:
@@ -545,12 +545,12 @@ def run_scenario_6(args):
       'RECONNECT MODE' → 'restart_stream' → 'Stream restarted successfully'
 
     参数说明：
-      --stream-delay  推流延迟秒数，必须 < cleanup_timeout(30s)（否则来帧前已被清理）
+      --stream-delay  推流延迟秒数，必须 < cleanup_timeout(20s)（否则来帧前已被清理）
       --duration      重连成功后的稳定观察时长
     """
     stream_delay = args.stream_delay
     section("Scenario 6: 延迟推流 — 初始拉流失败后健康监控自动重连",
-            f"推流延迟: {stream_delay}s（须 < cleanup_timeout 30s）",
+            f"推流延迟: {stream_delay}s（须 < cleanup_timeout 20s）",
             f"重连成功超时: {RECONNECT_SUCCESS_TIMEOUT}s")
 
     with scenario_setup(args) as ctx:

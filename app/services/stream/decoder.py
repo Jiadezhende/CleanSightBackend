@@ -28,7 +28,7 @@ DEFAULT_CHANNELS = 3
 #   即收 EOF 而退出；但「真·网络分区」下 socket 既不来数据也不 FIN，ffmpeg 会无限阻塞、进程
 #   保持 alive——健康监控新判据（进程死→重启 / 活着无帧→只等）会把它当「等待中」白等到 cleanup。
 #   加读超时让这类挂死主动超时退出（→ 进程死）→ 被重启。取值 5s：远大于正常包间隔与关键帧
-#   等待期（那期间 socket 有 RTP 流动，不触发），远小于 cleanup_timeout（30s），留足重启窗口。
+#   等待期（那期间 socket 有 RTP 流动，不触发），远小于 cleanup_timeout（20s），留足重启窗口。
 #   实测（三进程实验台）冻结对端后 ffmpeg 报 "Operation timed out" 并退出；-rw_timeout 作为
 #   rtsp 输入选项在本 ffmpeg 上不被接受，故用 demuxer 的 -timeout。
 _RTSP_INPUT_OPTS = [

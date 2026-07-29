@@ -58,12 +58,9 @@ class GlobalHealthMonitor:
 
         # 使用新的配置参数名 reconnect_interval（旧名 restart_delay）
         self.reconnect_interval = self.config.reconnect_interval
-        self.max_reconnect_attempts = self.config.max_reconnect_attempts
 
-        # 计算派生超时值
-        self.cleanup_timeout = self.config.heartbeat_timeout + (
-            self.config.reconnect_interval * self.config.max_reconnect_attempts
-        )
+        # 放弃重连的时限：直读配置（不再由 heartbeat + interval×attempts 派生，见 config.py）
+        self.cleanup_timeout = self.config.cleanup_timeout
         self.orphan_timeout = self.config.orphan_timeout
 
         # 重连成功判定阈值（与心跳超时一致）

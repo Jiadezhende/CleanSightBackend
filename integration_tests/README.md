@@ -288,10 +288,10 @@ http://{server}:{api-port}/admin-f3m8/ui/
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| `heartbeat_timeout` | 5s | 无帧后判定为"可疑"的时间 |
-| `reconnect_interval` | 5s | 每次重连尝试间隔 |
-| `max_reconnect_attempts` | 5 | 最大重连次数 |
+| `heartbeat_timeout` | 5s | 重连成功判定的新帧新鲜度阈值 |
+| `reconnect_interval` | 5s | decoder 进程仍死时两次 respawn 的节流间隔 |
+| `cleanup_timeout` | 20s | 无帧持续超过此时长即放弃重连、清理整个 run |
 | `orphan_timeout` | 30s | 孤儿流超时清理时间 |
 
-流断开后约 **30s** 触发自动清理（5s 等待 + 5×5s 重连）。场景 2 的断流间隔（10s）设计在此窗口内，场景 3 利用此机制验证清理路径，场景 6 利用重连窗口验证延迟推流的自动重连。
+流断开后约 **20s** 触发自动清理（纯时间触发，重连不数次数）。场景 2 的断流间隔（10s）设计在此窗口内，场景 3 利用此机制验证清理路径，场景 6 利用重连窗口验证延迟推流的自动重连。
 ```
