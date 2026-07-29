@@ -63,16 +63,14 @@ class GlobalHealthMonitor:
         # 重连状态（键 = task_id）
         self._reconnecting_clients: Dict[int, ReconnectState] = {}
 
-        # 孤儿流跟踪（键 = task_id，记录最后活跃时间）
-        self._last_activity: Dict[int, float] = {}
-
-        # 累计统计（生命周期内的总计）
+        # 累计统计（生命周期内的总计）。三个重连计数是一组，读法：
+        # 检测到断线 disconnects 次 → 发起 respawn reconnects 次 → 恢复 reconnect_successes 次。
         self._stats = {
             "checks": 0,
-            "suspects": 0,
+            "disconnects": 0,          # 检测到 decoder 进程死、进入重连模式的次数（含首启失败）
             "cleanups": 0,
-            "reconnects": 0,
-            "reconnect_successes": 0,
+            "reconnects": 0,           # 发起 respawn 的次数
+            "reconnect_successes": 0,  # 真来新帧、判定恢复的次数
             "orphans_detected": 0,
         }
 
@@ -216,7 +214,6 @@ class GlobalHealthMonitor:
         self._reconnecting_clients[task_id] = ReconnectState(
             task_id=task_id,
             stream_url=stream_info["url"],
-            attempt_count=0,
             last_attempt_time=0,  # 初始为 0，表示还未尝试
             last_frame_time_before_disconnect=last_frame_time,  # 记录断流前的最后帧时间
             cq=cq,  # 捕获进入重连时的 CQ，作为拆除时的对象身份核对基准
@@ -227,7 +224,7 @@ class GlobalHealthMonitor:
             "will respawn every %ss until frames resume or cleanup_timeout(%.0fs)",
             task_id, self.config.reconnect_interval, self.config.cleanup_timeout
         )
-        self._stats["suspects"] += 1  # 累计统计：进入重连模式的次数
+        self._stats["disconnects"] += 1  # 累计统计：检测到断线、进入重连模式的次数
 
     def _handle_reconnecting_client(self, task_id: int, cq, current_time: float):
         """处理重连中的客户端"""
@@ -355,7 +352,6 @@ class GlobalHealthMonitor:
 
         # 步骤 0: 清理监控器自身的客户端状态（HealthMonitor 专属，防内存泄漏）
         self._reconnecting_clients.pop(task_id, None)
-        self._last_activity.pop(task_id, None)
 
         # 步骤 1-3: 委托给 RunController（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
         from app.services.run_control import run_controller
@@ -399,14 +395,10 @@ class GlobalHealthMonitor:
 
     def _handle_task_timeout(self, task_id: int, cq, task_age: float):
         """处理任务超时：仅执行运维治理动作，不产出业务告警。"""
-        task_id = cq.task_id
-        hours = task_age / 3600
-        max_hours = self.config.task_max_duration / 3600
-
+        # 注：入参 task_id 即 cq.task_id（client_id/task_id 合一后同一个键），不再重取覆盖
         logger.error(
-            "[GlobalHealthMonitor] TASK TIMEOUT: client=%s, task_id=%s, "
-            "running=%.1fh, max=%.1fh",
-            task_id, task_id, hours, max_hours,
+            "[GlobalHealthMonitor] TASK TIMEOUT: task_id=%s, running=%.1fh, max=%.1fh",
+            task_id, task_age / 3600, self.config.task_max_duration / 3600,
         )
 
         self._stats["cleanups"] += 1
@@ -427,14 +419,9 @@ class GlobalHealthMonitor:
             cq: ClientQueues 实例
             current_time: 当前时间戳
         """
-        last_frame_time = cq.latest_raw_timestamp
-
-        # 更新最后活跃时间
-        if task_id not in self._last_activity:
-            self._last_activity[task_id] = last_frame_time
-
-        # 计算空闲时间
-        idle_time = current_time - last_frame_time
+        # 空闲时长直接由帧 ts 算（不另存"最后活跃时间"：cq.latest_raw_timestamp 本身就是它，
+        # 再存一份只会多一处要同步的状态）
+        idle_time = current_time - cq.latest_raw_timestamp
 
         # 如果超过孤儿流超时时间，执行完整清理
         if idle_time >= self.config.orphan_timeout:
@@ -451,9 +438,6 @@ class GlobalHealthMonitor:
                 skip_decoder=True,  # 孤儿流没有解码器
                 expected=cq,
             )
-
-            # 清理活跃时间记录
-            self._last_activity.pop(task_id, None)
 
             if result["errors"]:
                 logger.error(
@@ -522,7 +506,7 @@ class GlobalHealthMonitor:
                 },
                 "monitor_stats": {
                     "checks": int,
-                    "suspects": int,
+                    "disconnects": int,
                     "cleanups": int,
                     ...
                 }

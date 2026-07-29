@@ -58,14 +58,10 @@ async def lifespan():
         inference_manager=inference_manager,
         config=health_config,
     )
+    # 启动行由 GlobalHealthMonitor.start() 自己打（那条报的是 cleanup_timeout——本线上唯一
+    # 还在做判定的时限）。此处不再重复打一条内容相近、却拿 heartbeat_timeout 冒充 timeout 的。
     _health_monitor.start()
 
-    logger.info(
-        "[GlobalHealthMonitor] Started | interval=%.1fs, timeout=%.1fs",
-        health_config.check_interval,
-        health_config.heartbeat_timeout,
-    )
-    
     # DEBUG级别显示详细配置
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -92,8 +88,8 @@ async def lifespan():
             # DEBUG级别显示详细统计
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "[GlobalHealthMonitor] Full stats: suspects=%d, reconnect_successes=%d, orphans=%d",
-                    stats["suspects"],
+                    "[GlobalHealthMonitor] Full stats: disconnects=%d, reconnect_successes=%d, orphans=%d",
+                    stats["disconnects"],
                     stats["reconnect_successes"],
                     stats["orphans_detected"],
                 )
@@ -106,9 +102,9 @@ async def get_monitor_stats():
 
     返回监控循环的累计统计数据（自启动以来的总计）：
     - checks: 监控循环执行次数
-    - suspects: 进入重连模式的客户端总数
+    - disconnects: 检测到断线、进入重连模式的总次数（含首启失败）
     - cleanups: 执行完整清理的总次数
-    - reconnects: 重连尝试的总次数（包括所有客户端的所有尝试）
+    - reconnects: 发起 respawn 的总次数
     - reconnect_successes: 重连成功的总次数
     - orphans_detected: 检测到孤儿（孤儿流 + 孤儿解码器）的总次数
     - reconnecting_count: 当前重连中的客户端数量（实时快照）
@@ -194,15 +190,15 @@ async def get_system_status():
 
     - monitor_stats: 监控累计统计信息（自启动以来的总计）
       - checks: 监控循环执行次数
-      - suspects: 进入重连模式的客户端总数
+      - disconnects: 检测到断线、进入重连模式的总次数（含首启失败）
       - cleanups: 执行完整清理的总次数
-      - reconnects: 重连尝试的总次数
+      - reconnects: 发起 respawn 的总次数
       - reconnect_successes: 重连成功的总次数
       - orphans_detected: 检测到孤儿的总次数
       - reconnecting_clients: 当前重连中的客户端ID列表
 
     性能特性：
-    - 客户端统计为缓存数据（每 check_interval 更新一次，默认 5 秒）
+    - 客户端统计为缓存数据（每 check_interval 更新一次，默认 1 秒）
     - 队列状态为实时查询（调用时获取）
     - 延迟 < 1ms（无重计算开销）
 
