@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,34 @@ class SegmentRef:
         return self.ts_us / 1_000_000.0
 
 
+@dataclass(frozen=True)
+class StepRef:
+    """单个已落盘 step 的摘要（清单类接口用，不含逐段明细）。
+
+    Attributes:
+        task_id: 任务 id
+        step_id: 洗消步骤 id
+        tracks: 该 step **实际落盘**的轨道，按 ("raw", "processed") 顺序
+        first_ts_us: 双轨并集里最早的段开始时间戳（微秒）
+        last_ts_us: 双轨并集里最晚的**段开始**时间戳（微秒）——注意不是任务结束时刻，
+            差一个段长；精确时长由 traceback 的 timeline 按 playlist EXTINF 算
+    """
+
+    task_id: int
+    step_id: int
+    tracks: Tuple[str, ...]
+    first_ts_us: int
+    last_ts_us: int
+
+
+def _dir_name_to_int(name: str) -> Optional[int]:
+    """目录名转 int；非数字（如 `.lab_exports`）返回 None。"""
+    try:
+        return int(name)
+    except (TypeError, ValueError):
+        return None
+
+
 class SegmentFinder:
     """按 (task_id, step_id) + 时间戳定位 HLS 段。
 
@@ -74,6 +102,46 @@ class SegmentFinder:
     def task_dir(self, task_id: int, step_id: int) -> Path:
         """任务-步骤目录绝对路径：{base_dir}/{task_id}/{step_id}/"""
         return self._base_dir / str(task_id) / str(step_id)
+
+    def _scan_step_dir(self, task_id: int, step_id: int) -> Dict[str, List[SegmentRef]]:
+        """单次 iterdir 扫出该 step 目录下按轨道分组的段（各轨内按 ts_us 升序）。
+
+        双轨枚举（清单接口要 tracks）只付一次目录遍历；单轨调用方走 `list_segments`。
+        目录不存在时返回各轨空列表。
+        """
+        by_track: Dict[str, List[SegmentRef]] = {t: [] for t in _VALID_TRACKS}
+
+        task_path = self.task_dir(task_id, step_id)
+        if not task_path.exists() or not task_path.is_dir():
+            return by_track
+
+        for entry in task_path.iterdir():
+            if not entry.is_file():
+                continue
+            m = _SEGMENT_PATTERN.match(entry.name)
+            if not m:
+                continue
+            try:
+                ts_us = int(m.group("ts_us"))
+            except ValueError:
+                logger.warning("Skipping segment with invalid ts_us: %s", entry.name)
+                continue
+
+            track = m.group("track")
+            by_track[track].append(
+                SegmentRef(
+                    task_id=task_id,
+                    step_id=step_id,
+                    track=track,
+                    filename=entry.name,
+                    ts_us=ts_us,
+                    path=entry,
+                )
+            )
+
+        for refs in by_track.values():
+            refs.sort(key=lambda r: r.ts_us)
+        return by_track
 
     def list_segments(
         self,
@@ -97,36 +165,96 @@ class SegmentFinder:
         if track not in _VALID_TRACKS:
             raise ValueError(f"Invalid track: {track!r}, expected one of {_VALID_TRACKS}")
 
-        task_path = self.task_dir(task_id, step_id)
-        if not task_path.exists() or not task_path.is_dir():
+        return self._scan_step_dir(task_id, step_id)[track]
+
+    def list_steps(self, task_id: int) -> List[StepRef]:
+        """列出该 task 下**已落盘**的 step 摘要（按 step_id 升序）。
+
+        一个 step 目录只要两轨都没有段就丢弃——目录建了但没写成段（起流即失败）
+        对回放没有意义，清单不该把它露给前端点开黑屏。
+
+        Returns:
+            StepRef 列表；task 目录不存在或无任何段时返回空列表
+        """
+        task_root = self._base_dir / str(task_id)
+        if not task_root.exists() or not task_root.is_dir():
             return []
 
-        refs: List[SegmentRef] = []
-        for entry in task_path.iterdir():
-            if not entry.is_file():
+        steps: List[StepRef] = []
+        for entry in task_root.iterdir():
+            if not entry.is_dir():
                 continue
-            m = _SEGMENT_PATTERN.match(entry.name)
-            if not m or m.group("track") != track:
-                continue
-            try:
-                ts_us = int(m.group("ts_us"))
-            except ValueError:
-                logger.warning("Skipping segment with invalid ts_us: %s", entry.name)
+            step_id = _dir_name_to_int(entry.name)
+            if step_id is None:
                 continue
 
-            refs.append(
-                SegmentRef(
+            by_track = self._scan_step_dir(task_id, step_id)
+            tracks = tuple(t for t in _VALID_TRACKS if by_track[t])
+            if not tracks:
+                continue
+
+            all_ts = [s.ts_us for t in tracks for s in by_track[t]]
+            steps.append(
+                StepRef(
                     task_id=task_id,
                     step_id=step_id,
-                    track=track,
-                    filename=entry.name,
-                    ts_us=ts_us,
-                    path=entry,
+                    tracks=tracks,
+                    first_ts_us=min(all_ts),
+                    last_ts_us=max(all_ts),
                 )
             )
 
-        refs.sort(key=lambda r: r.ts_us)
-        return refs
+        steps.sort(key=lambda s: s.step_id)
+        return steps
+
+    def list_task_ids(self) -> List[int]:
+        """列出存储根目录下的 task 目录（升序）。
+
+        只认数字目录名——`.lab_exports` 等非任务目录跳过。不校验目录内是否真有段
+        （那要深扫，交给调用方按需 `list_steps`）。
+        """
+        if not self._base_dir.exists() or not self._base_dir.is_dir():
+            return []
+
+        task_ids = [
+            tid
+            for entry in self._base_dir.iterdir()
+            if entry.is_dir() and (tid := _dir_name_to_int(entry.name)) is not None
+        ]
+        task_ids.sort()
+        return task_ids
+
+    def list_task_ids_by_recency(self) -> List[int]:
+        """按「最近有段落盘」倒序列出 task 目录——**廉价粗排，仅供挑候选**。
+
+        排序键 = max(该 task 下各 step 目录的 mtime)。段文件写入会更新其所在
+        step 目录的 mtime，故该值 ≈ 最后一段落盘时刻。只 stat 目录、不进目录读段
+        文件，成本 O(目录数) 而非 O(总段文件数)。
+
+        近似性是有意的：mtime 只用来决定「先深扫谁」，绝不对外当时间戳用——
+        对外的段时间一律取 `list_steps()` 的真实 ts_us。无 step 子目录的 task
+        排序键取 0（排最后），但仍保留在结果里，由调用方深扫时丢弃。
+        """
+        if not self._base_dir.exists() or not self._base_dir.is_dir():
+            return []
+
+        keyed: List[Tuple[float, int]] = []
+        for entry in self._base_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            task_id = _dir_name_to_int(entry.name)
+            if task_id is None:
+                continue
+
+            mtimes = [
+                step.stat().st_mtime
+                for step in entry.iterdir()
+                if step.is_dir() and _dir_name_to_int(step.name) is not None
+            ]
+            keyed.append((max(mtimes) if mtimes else 0.0, task_id))
+
+        keyed.sort(reverse=True)  # mtime 降序；同 mtime 时 task_id 大者优先
+        return [task_id for _, task_id in keyed]
 
     def find(
         self,

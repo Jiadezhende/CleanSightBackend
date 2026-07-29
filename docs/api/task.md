@@ -1,6 +1,11 @@
-# `/task` — 前端消息与告警历史
+# `/task` — 前端消息、告警历史与大屏清单
 
-两个 GET：`message` 走**运行时内存增量**（前端轮询用），`alarms` 走**数据库历史**。通用约定见 [README](README.md)。
+四个 GET，分两组：
+
+- **告警**：`message` 走**运行时内存增量**（前端轮询用），`{task_id}/alarms` 走**数据库历史**。
+- **大屏清单**：`live` 出在线任务、`history` 出可回放的历史任务。两者**只出参数、不出播放 URL**——前端拿参数自己拼 `/ai/video`、`/traceback/*` 的地址。
+
+通用约定见 [README](README.md)。
 
 ---
 
@@ -71,3 +76,77 @@
 ```
 
 **错误**：`503`（DB 查询失败，retryable）。
+
+---
+
+## GET /task/live
+
+在线任务清单（大屏用）。纯内存快照，零 DB、零磁盘，无查询参数。
+
+**200**：
+
+```jsonc
+{
+  "total": 2,
+  "tasks": [
+    {
+      "task_id": 101,                       // → WS /ai/video?task_id=101
+      "source_ip": "10.0.0.1",              // → WS /ai/video?client_id=10.0.0.1
+      "step_id": 2                          // 当前洗消阶段，仅供展示，不参与画面路由
+    }
+  ]
+}
+```
+
+**接实时画面**（两种模式见 [ai.md](ai.md)）：
+
+| 用 | 语义 |
+|---|---|
+| `?task_id=` | 锁定**这一次 run**，run 结束即止、不跟随新任务。适合针对某次任务的监看 |
+| `?client_id=<source_ip>` | 跟随该**点位**的当前 run，任务来了显示、走了黑屏、换 run 自动跟。适合固定点位常亮大屏 |
+
+**无活跃 run**：`{"total": 0, "tasks": []}`（不报错）。
+
+> 与 `/admin-f3m8/clients` 同一份注册表快照，本接口是大屏版——去掉队列深度等运维字段。
+
+---
+
+## GET /task/history
+
+历史任务清单（大屏用）：最近 **10** 个**已完成且能回放**的任务，按最近有画面倒序。无查询参数。
+
+**「已完成」判定**：磁盘上有段（能播）**且** 不在活跃注册表里（跑完了）。刻意**不看** `clean_task.status`——该字段由平台业务侧写入，取值集合后端无从校验；拿它过滤等于把清单挂在未知字面量上，写错就静默变空。
+
+**200**：
+
+```jsonc
+{
+  "tasks": [
+    {
+      "task_id": 101,
+      "source_ip": "10.0.0.1",              // DB 补；DB 不可用或表里无此任务 → null
+      "start_ms": 1700000000000,            // 最早段起点，epoch 毫秒
+      "last_segment_ms": 1700000600000,     // 最后一段的【起点】，不是结束时刻
+      "steps": [
+        { "step_id": 1, "tracks": ["raw", "processed"], "start_ms": …, "last_segment_ms": … },
+        { "step_id": 2, "tracks": ["raw"],              "start_ms": …, "last_segment_ms": … }
+      ]
+    }
+  ]
+}
+```
+
+**接历史画面**（详见 [traceback.md](traceback.md)）：
+
+```
+GET /traceback/task/{task_id}/playlist.m3u8?step_id={step_id}&track={track}
+GET /traceback/task/{task_id}/timeline?step_id={step_id}
+```
+
+> ⚠️ **`track` 必须从 `steps[].tracks` 里挑**。playlist 的 `track` 默认 `processed`，而只落了 raw 的 step 照默认打过去就是 **404**。
+>
+> `last_segment_ms` 是最后一段的**起点**，比任务真正结束早一个段长。要精确时长用 timeline 的 `duration_ms`（按 playlist EXTINF 算）。
+
+**降级**：DB 不可用时仍返回 200，`source_ip` 全为 `null`——清单的存在性判定来自磁盘，DB 只补点位显示，不因此 503。
+
+**不返回 `total`**：固定 10 条，无翻页语义。要带过滤/分页的完整任务列表用 [`GET /lab-f3m8/tasks`](lab.md)（送标页口径，只枚举 raw 轨）。
