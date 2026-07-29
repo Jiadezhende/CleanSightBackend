@@ -97,6 +97,8 @@ class FFmpegController:
                 "ultrafast",
                 "-tune",
                 "zerolatency",
+                "-g",
+                "30",  # GOP=30帧(~1s一个关键帧)：小 GOP 让新 reader 快速拿到关键帧，逼近低延迟实况
                 "-rtsp_transport",
                 "tcp",  # RTSP over TCP
                 "-f",

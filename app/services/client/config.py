@@ -13,6 +13,11 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# 校验阈值：一律用「关系式 / 秒」，不用绝对帧数——本模块货币是时间，绝对帧数阈值的语义会
+# 随 raw_fps 漂移（同一个 300 在 30fps 下是 10s、15fps 下是 20s）。
+_MIN_SEGMENT_SECONDS = 5.0     # HLS 段时长下限：过短则段数与每段 ffmpeg 固定开销放大
+_SEGMENT_HEADROOM_RATIO = 1.2  # ca_maxlen 相对 ca_segment_len 的最小余量（预留 20%）
+
 
 @dataclass
 class FrameConfig:
@@ -146,20 +151,36 @@ class ClientConfig:
             logger.debug("==================================")
 
     def _validate_config(self):
-        """配置验证"""
+        """配置验证：只查关系不变式，不查绝对帧数。
+
+        原 `ca_maxlen < 300` 的绝对帧数地板已删——那是秒制重构前的遗留，冻在帧空间里，
+        语义随 raw_fps 漂移（30fps 下意味 10s、15fps 下意味 20s），且其数值与
+        ca_segment_len 相等纯属当前配置的巧合。真正该守的是下面两条关系式。
+        """
+        from app.settings import settings
+
         warnings = []
 
-        # 检查队列容量合理性
-        if self.ca_maxlen < 300:
+        # 1. HLS 段过短：段数与每段 ffmpeg 固定开销随之放大。段长是时间概念，按秒判、与 raw_fps 无关。
+        if settings.ca_segment_seconds < _MIN_SEGMENT_SECONDS:
             warnings.append(
-                f"⚠️  CA队列容量过小: {self.ca_maxlen}，建议>=2700（90秒缓存）"
+                f"⚠️  HLS段过短: ca_segment_seconds={settings.ca_segment_seconds}s "
+                f"（建议>={_MIN_SEGMENT_SECONDS}s），段数与每段 ffmpeg 固定开销会放大"
             )
 
-        # 检查ca_segment_len是否合理
+        # 2. 装不下一个段 → 永远触发不了分段（致命）
         if self.ca_segment_len > self.ca_maxlen:
             warnings.append(
                 f"❌ ca_segment_len({self.ca_segment_len}) > ca_maxlen({self.ca_maxlen})，"
                 f"会导致永远无法触发分段"
+            )
+        # 3. 装得下但没余量：分段消费一抖动就丢帧，而录制腿丢帧 = 录像永久空洞（非仅延迟）
+        elif self.ca_maxlen < self.ca_segment_len * _SEGMENT_HEADROOM_RATIO:
+            warnings.append(
+                f"⚠️  CA队列余量不足: ca_maxlen({self.ca_maxlen}) < "
+                f"ca_segment_len({self.ca_segment_len})×{_SEGMENT_HEADROOM_RATIO}"
+                f"（需预留{(_SEGMENT_HEADROOM_RATIO - 1) * 100:.0f}%余量），"
+                f"分段消费抖动即丢帧 → 录像空洞"
             )
 
         # 注：原 client.inference_fps ↔ settings.inference_fps 冲突检查已删——

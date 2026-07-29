@@ -60,6 +60,9 @@ def spawn_worker(task_id: int, args, log_dir: Path):
     """
     启动单个 test_single_client.py --scenario 1 子进程。
     返回 (subprocess.Popen, log_path)。
+
+    端口与阶段**必须透传**：测试环境常做端口偏移（如 8100/8104），阶段决定路由到哪个
+    推理 workflow。漏传会让子进程默默打到默认端口 / 默认 LEAK 阶段，与单客户端跑法不等价。
     """
     log_path = log_dir / f"multi_task_{task_id}_{int(time.time())}.log"
     cmd = [
@@ -68,10 +71,14 @@ def spawn_worker(task_id: int, args, log_dir: Path):
         "--scenario", "1",
         "--task_id", str(task_id),
         "--server", args.server,
+        "--api-port", str(args.api_port),
+        "--rtsp-port", str(args.rtsp_port),
         "--duration", str(args.duration),
         "--video_path", args.video_path,
         "--fps", str(args.fps),
     ]
+    if args.current_step is not None:
+        cmd += ["--current-step", str(args.current_step)]
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -115,6 +122,17 @@ def main():
     parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
     parser.add_argument("--api-port", type=int, default=8000, dest="api_port", help="后端 API 端口（默认: 8000）")
+    parser.add_argument("--rtsp-port", type=int, default=8004, dest="rtsp_port", help="RTSPProxy 推流端口（默认: 8004）")
+    parser.add_argument(
+        "--current-step", default=None, dest="current_step",
+        help="任务 current_step（1=LEAK / 2=CLEAN / 其它=MOCK）；透传给每个子进程。"
+             "复用已存在任务时须与 DB 中的值一致（子进程会 fail-fast）。",
+    )
+    parser.add_argument(
+        "--task-ids", default=None, dest="task_ids",
+        help="逗号分隔的 task_id 列表（如 119,120,121）。指定则不查 DB 自动挑选；"
+             "不存在的任务由子进程自建（source_ip=test.s{task_id}，结束自动清理）。",
+    )
     args = parser.parse_args()
 
     if args.video_path is None:
@@ -130,7 +148,14 @@ def main():
     print(f"  运行时长: {args.duration}s")
     print("=" * 60)
 
-    tasks = get_test_tasks(args.max_tasks)
+    if args.task_ids:
+        # 显式指定：每路一个 task_id，子进程自建缺失的任务。
+        # source_ip 是推流路径（rtsp://…/live/{source_ip}）与后端路由键，**每路必须不同**——
+        # 自建任务用 test.s{task_id} 天然互异；复用真实任务时须自行确认不撞。
+        ids = [int(x) for x in args.task_ids.split(",") if x.strip()]
+        tasks = [(tid, "(子进程解析)") for tid in ids]
+    else:
+        tasks = get_test_tasks(args.max_tasks)
     if not tasks:
         raise SystemExit("数据库中没有找到任务，请先创建任务")
 

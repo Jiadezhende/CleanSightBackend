@@ -96,7 +96,7 @@ class Settings(BaseSettings):
                                # raw_fps 的整除率（30→15/10/7.5/6…，不支持 30→20 类非整除比）；模型侧另按 ts 重采样到 7.5。
                                # env: CLEANSIGHT_INFERENCE_DECIMATION
     # CA 缓存/段长本是"时间概念"，以秒声明（时间为跨子系统货币）；帧数在各消费边界按 raw_fps 显式换算。
-    ca_maxlen_seconds: int = 90    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
+    ca_maxlen_seconds: int = 30    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
     ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
 
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）

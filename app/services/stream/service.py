@@ -278,6 +278,18 @@ class StreamService:
         with self.lock:
             return set(self.decoders.keys())
 
+    def is_decoder_alive(self, task_id: int) -> bool:
+        """该 task 的 decoder 子进程是否存活（供健康监控按「进程死活」判据决策）。
+
+        与 get_all_task_ids()（看注册、不看死活）互补：注册但进程已退出（断流 EOF / 崩溃 /
+        首启失败）→ 返回 False，健康监控据此触发重启；进程活着但暂无帧（等首个关键帧 / 瞬时停）
+        → 返回 True，健康监控只等不杀。缺失 decoder 亦 False。
+        锁序 self.lock → decoder.lock，与 _start_stream_impl 内 existing.is_alive() 一致。
+        """
+        with self.lock:
+            dec = self.decoders.get(task_id)
+            return bool(dec and dec.is_alive())
+
     def get_stream_info(self, task_id: int) -> Optional[Dict[str, Any]]:
         """获取流配置信息（用于重连）
 

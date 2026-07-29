@@ -19,6 +19,12 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# 未知/未配 step_id 的兜底 stage 主键：在线 `InferenceManager.resolve_stage` 与离线
+# `InferenceConfig.resolve_stage` 共用同一目标（两者故意不合方法——查的 stage 集合不同：
+# 在线查 active（有 detector），离线查 YAML 全集——但兜底目标必须同源，否则会静默分叉）。
+# 在线侧另有启动不变式强制它 active，见 `InferenceManager._get_stage_configs`。
+FALLBACK_STAGE = "MOCK"
+
 # 全局配置缓存（单例模式）
 _global_inference_config: Optional["InferenceConfig"] = None
 
@@ -60,7 +66,7 @@ class InferenceConfig:
         return self.stages.get(stage_name)
 
     def resolve_stage(self, step_id: Any) -> str:
-        """step_id → stage 配置主键：命中即恒等返回，未知/未配回退 "MOCK"（透传兜底）。
+        """step_id → stage 配置主键：命中即恒等返回，未知/未配回退 FALLBACK_STAGE（透传兜底）。
 
         与 `InferenceManager.resolve_stage` 同规则（同源同义）：离线链路用本配置级解析器把
         数字存储键（如未配的 -1）解析成 stage 配置 key，**存储读写仍用原数字 step_id**（二者正交）。
@@ -69,10 +75,10 @@ class InferenceConfig:
         if step_key in self.stages:
             return step_key
         logger.warning(
-            "[InferenceConfig] 未知的 step_id '%s'，路由到 MOCK stage（与在线 resolve_stage 一致）",
-            step_id,
+            "[InferenceConfig] 未知的 step_id '%s'，路由到 %s stage（与在线 resolve_stage 一致）",
+            step_id, FALLBACK_STAGE,
         )
-        return "MOCK"
+        return FALLBACK_STAGE
 
     def list_stages(self) -> List[str]:
         """列出所有 Stage 名称"""

@@ -8,7 +8,7 @@
 
 from factories import make_cq, make_frame_inference
 from app.services.client.queues import ClientQueues
-from app.services.inference.detection.service import ModelWorkerService
+from app.services.inference.detection.service import DetectionService
 from app.utils.metrics import frame_drop_total
 
 
@@ -24,9 +24,9 @@ class _SpyFeatureStore:
         self.appended.append((task_id, step_id, feature))
 
 
-def _bare_service(feature_store) -> ModelWorkerService:
+def _bare_service(feature_store) -> DetectionService:
     """绕过 __init__（避免加载模型）：write-back 只用 self._feature_store + res.cq。"""
-    svc = ModelWorkerService.__new__(ModelWorkerService)
+    svc = DetectionService.__new__(DetectionService)
     svc._feature_store = feature_store
     return svc
 
