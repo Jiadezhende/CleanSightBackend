@@ -51,20 +51,10 @@ class GlobalHealthMonitor:
         self._stream_service = stream_service
         self._inference_manager = inference_manager
 
-        # 配置
+        # 配置：各阈值一律在用处直读 `self.config.*`，**不在此摊成同名实例属性**。
+        # 那层拷贝原是给 cleanup_timeout 的派生式（heartbeat + interval×attempts）安身的；
+        # 派生式删掉后它们全成了恒等副本，只是把「这个数打哪来」多藏了一跳。
         self.config = config or HealthMonitorConfig()
-        self._check_interval = self.config.check_interval
-        self.suspect_timeout = self.config.heartbeat_timeout
-
-        # 使用新的配置参数名 reconnect_interval（旧名 restart_delay）
-        self.reconnect_interval = self.config.reconnect_interval
-
-        # 放弃重连的时限：直读配置（不再由 heartbeat + interval×attempts 派生，见 config.py）
-        self.cleanup_timeout = self.config.cleanup_timeout
-        self.orphan_timeout = self.config.orphan_timeout
-
-        # 重连成功判定阈值（与心跳超时一致）
-        self.reconnect_success_threshold = self.config.heartbeat_timeout
 
         # 线程控制
         self._stop_event = threading.Event()
@@ -106,10 +96,12 @@ class GlobalHealthMonitor:
             target=self._monitor_loop, daemon=True, name="GlobalHealthMonitor"
         )
         self._thread.start()
+        # 报 cleanup_timeout 而非 heartbeat_timeout：前者才是这条线上唯一还在做判定的时限
+        # （「可疑」区间随进程死活判据一并删除，heartbeat_timeout 现只作重连成功的新帧新鲜度阈值）。
         logger.info(
-            "[GlobalHealthMonitor] Started (check_interval=%.1fs, timeout=%.1fs)",
-            self._check_interval,
-            self.suspect_timeout,
+            "[GlobalHealthMonitor] Started (check_interval=%.1fs, cleanup_timeout=%.1fs)",
+            self.config.check_interval,
+            self.config.cleanup_timeout,
         )
 
     def stop(self):
@@ -128,7 +120,7 @@ class GlobalHealthMonitor:
             try:
                 self._check_all_clients()
                 self._stats["checks"] += 1
-                self._stop_event.wait(timeout=self._check_interval)
+                self._stop_event.wait(timeout=self.config.check_interval)
             except Exception as e:
                 logger.error(
                     f"[GlobalHealthMonitor] Error in monitor loop: {e}", exc_info=True
@@ -189,9 +181,9 @@ class GlobalHealthMonitor:
 
                 if not self._stream_service.is_decoder_alive(task_id):
                     # 进程已退出（断流 EOF / 崩溃 / 首启失败）→ 进入重连（respawn）。
-                    # 比等 suspect_timeout(5s) staleness 更快：下一 tick 即感知。
+                    # 比旧的「等 5s 帧 staleness」更快：下一 tick 即感知。
                     self._enter_reconnect_mode(task_id, last_frame_time, cq)
-                elif last_frame_time > 0 and idle_time >= self.cleanup_timeout:
+                elif last_frame_time > 0 and idle_time >= self.config.cleanup_timeout:
                     # 进程活着却长时间无帧（真挂死正常已被 decoder 的 -timeout 转成进程死，
                     # 此为最后防线）→ 放弃清理。
                     logger.warning(
@@ -233,7 +225,7 @@ class GlobalHealthMonitor:
         logger.warning(
             "[GlobalHealthMonitor] RECONNECT MODE: %s, decoder process dead; "
             "will respawn every %ss until frames resume or cleanup_timeout(%.0fs)",
-            task_id, self.reconnect_interval, self.cleanup_timeout
+            task_id, self.config.reconnect_interval, self.config.cleanup_timeout
         )
         self._stats["suspects"] += 1  # 累计统计：进入重连模式的次数
 
@@ -256,7 +248,9 @@ class GlobalHealthMonitor:
         new_frame_time = cq.latest_raw_timestamp
         if new_frame_time > state.last_frame_time_before_disconnect:
             frame_age = current_time - new_frame_time
-            if frame_age < self.reconnect_success_threshold:
+            # 新鲜度阈值复用 heartbeat_timeout（此处直读而非另起别名：别名会把
+            # 「调 heartbeat_timeout 会连带动到重连成功判定」这层耦合藏起来）
+            if frame_age < self.config.heartbeat_timeout:
                 logger.info(
                     "[GlobalHealthMonitor] RECONNECT SUCCESS: %s, new frames detected", task_id
                 )
@@ -266,11 +260,11 @@ class GlobalHealthMonitor:
 
         # 放弃判定 = 纯时间：无帧时长 ≥ cleanup_timeout（不再数重连次数）。
         idle_time = current_time - new_frame_time
-        if idle_time >= self.cleanup_timeout:
+        if idle_time >= self.config.cleanup_timeout:
             logger.error(
                 "[GlobalHealthMonitor] RECONNECT FAILED: %s, no frames for %.1fs "
                 "(>= cleanup_timeout %.0fs), giving up",
-                task_id, idle_time, self.cleanup_timeout
+                task_id, idle_time, self.config.cleanup_timeout
             )
             self._exit_reconnect_mode(task_id, cleanup=True)
             return
@@ -281,7 +275,7 @@ class GlobalHealthMonitor:
             return
 
         # 进程仍死：按 reconnect_interval 节流后 respawn（无次数上限，由上面的 cleanup_timeout 收口）。
-        if current_time - state.last_attempt_time < self.reconnect_interval:
+        if current_time - state.last_attempt_time < self.config.reconnect_interval:
             return
         state.last_attempt_time = current_time
         self._stats["reconnects"] += 1  # 累计统计：respawn 次数
@@ -382,13 +376,13 @@ class GlobalHealthMonitor:
         logger.error(
             "[GlobalHealthMonitor] STREAM CONNECTION FAILED: %s | "
             "Reason: no frames within cleanup_timeout(%.0fs) | Action: Executing full cleanup...",
-            task_id, self.cleanup_timeout
+            task_id, self.config.cleanup_timeout
         )
 
         # 委托给统一的清理方法
         result = self.cleanup_client(
             task_id=task_id,
-            reason=f"No frames within cleanup_timeout ({self.cleanup_timeout:.0f}s)",
+            reason=f"No frames within cleanup_timeout ({self.config.cleanup_timeout:.0f}s)",
             expected=expected,
         )
 
@@ -443,7 +437,7 @@ class GlobalHealthMonitor:
         idle_time = current_time - last_frame_time
 
         # 如果超过孤儿流超时时间，执行完整清理
-        if idle_time >= self.orphan_timeout:
+        if idle_time >= self.config.orphan_timeout:
             logger.warning(
                 f"[GlobalHealthMonitor] ORPHAN STREAM detected: {task_id}, "
                 f"idle for {idle_time:.1f}s (no decoder), cleaning up"

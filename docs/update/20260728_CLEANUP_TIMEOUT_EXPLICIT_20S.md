@@ -39,7 +39,7 @@ cleanup_timeout: float = 20.0
 | 文件 | 改动 |
 |---|---|
 | `app/services/health_monitor/config.py` | 删 `max_reconnect_attempts`，加 `cleanup_timeout: float = 20.0`（yaml 键同名） |
-| `app/services/health_monitor/monitor.py` | `self.cleanup_timeout` 直读配置；删 `self.max_reconnect_attempts` |
+| `app/services/health_monitor/monitor.py` | 删掉整层同名实例属性别名，阈值一律在用处直读 `self.config.*`（见下节） |
 | `config/health_monitor_config.yaml` | 换键，注释写明「重连不数次数，只由本项收口」与调大/调小的含义 |
 | `app/routers/health.py` | `/health/monitor/config`：`config` 段 `max_reconnect_attempts` → `cleanup_timeout`；**删掉整个 `derived` 块** |
 | `tests/`、`integration_tests/`、`kb/SERVICE_HEALTH_MONITOR.md` | 常量与叙述从 30s 改 20s；集成测试 `AUTO_CLEANUP_TIMEOUT` 45→35 |
@@ -47,3 +47,14 @@ cleanup_timeout: float = 20.0
 **对外契约变更**：`/health/monitor/config` 响应少了 `config.max_reconnect_attempts`，且 `derived` 块整块删除——`cleanup_timeout` 提成一等配置后，该块两个值都退化成 `config` 的恒等副本（`suspect_timeout` ≡ `heartbeat_timeout`），同一响应回显两遍纯属冗余。全仓无消费者（已 grep `integration_tests/`、`app/static/`、`tests/`），该端点只供运维手查。
 
 集成测试的两个时间常量仍在窗口内（`RECONNECT_GAP`=10s、`DELAYED_STREAM_DEFAULT`=10s，均 < 20s），无需改。全套 391 passed。
+
+## 连带清掉 `GlobalHealthMonitor` 的属性别名层
+
+`__init__` 里原本把每个阈值都摊成一个同名实例属性（`self.cleanup_timeout = self.config.cleanup_timeout` 等 6 个）。这层拷贝**本是给 `cleanup_timeout` 的派生式安身的**——那时 `self.cleanup_timeout` 确实不等于任何单个配置项，必须先算再存。派生式删掉后，6 个属性全成了恒等副本，只剩一个作用：把「这个数打哪来」多藏一跳。
+
+故全部删除，阈值一律在用处直读 `self.config.*`。两处需要单独说明：
+
+- **`self.suspect_timeout`**（≡ `heartbeat_timeout`）：「可疑」区间这个判据随进程死活判据一起删除后，它只剩启动日志一个用处，而那行日志打的 `timeout=5.0s` 已经不对应任何还在生效的判定。改为打 `cleanup_timeout`——这条线上唯一还在做判定的时限。
+- **`self.reconnect_success_threshold`**（≡ `heartbeat_timeout`）：这个别名有语义（它在说「新帧新鲜度阈值」），但代价是把「调 `heartbeat_timeout` 会连带动到重连成功判定」这层耦合藏起来。改为在判定处直读 + 一行注释点明复用关系，耦合可见。
+
+`get_stats()` / `get_system_status()` / `/health/*` 均不引用这些属性（已 grep `app/`、`tests/`、`integration_tests/`），纯内部重构，零行为变化。
