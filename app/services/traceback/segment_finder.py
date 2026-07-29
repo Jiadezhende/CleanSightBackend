@@ -65,6 +65,10 @@ class StepRef:
         first_ts_us: 双轨并集里最早的段开始时间戳（微秒）
         last_ts_us: 双轨并集里最晚的**段开始**时间戳（微秒）——注意不是任务结束时刻，
             差一个段长；精确时长由 traceback 的 timeline 按 playlist EXTINF 算
+
+    两个时间戳都取**双轨并集**（与 timeline 的 start_ms/end_ms 同口径）：两轨段边界
+    不一定对齐，实测有过 20+ 秒的差，故它表达的是「该 step 有画面的时间跨度」，
+    不等于任一单轨的播放范围。
     """
 
     task_id: int

@@ -199,16 +199,27 @@ class TestHistoryList:
         assert [t["task_id"] for t in payload["tasks"]] == [101]
 
     @pytest.mark.asyncio
-    async def test_task_level_ts_spans_all_steps(self, monkeypatch, storage):
+    async def test_task_level_time_is_latest_only(self, monkeypatch, storage):
+        """任务级只出 latest_ms，不出 start_ms。
+
+        两个 step 之间可以隔任意长时间，任务级「最早~最晚」跨过中间空档，
+        既不是任务时长也不对应可播放范围——时间字段一律压在 step 粒度。
+        """
         _write_segments(storage, 101, 1, ts_us=1_000_000)
-        _write_segments(storage, 101, 2, ts_us=9_000_000)
+        _write_segments(storage, 101, 2, ts_us=9_000_000)  # 与 step 1 隔 8 秒空档
         _install_registry(monkeypatch, [])
         _install_db(monkeypatch, [])
 
         task = (await _get("/task/history")).json()["tasks"][0]
 
-        assert task["start_ms"] == 1000
-        assert task["last_segment_ms"] == 9000
+        assert task["latest_ms"] == 9000
+        assert "start_ms" not in task
+        assert "last_segment_ms" not in task
+        # step 粒度仍各自给出真实区间
+        assert [(s["start_ms"], s["last_segment_ms"]) for s in task["steps"]] == [
+            (1000, 1000),
+            (9000, 9000),
+        ]
 
     @pytest.mark.asyncio
     async def test_source_ip_filled_from_db(self, monkeypatch, storage):

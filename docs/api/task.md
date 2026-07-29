@@ -125,9 +125,8 @@
     {
       "task_id": 101,
       "source_ip": "10.0.0.1",              // DB 补；DB 不可用或表里无此任务 → null
-      "start_ms": 1700000000000,            // 最早段起点，epoch 毫秒
-      "last_segment_ms": 1700000600000,     // 最后一段的【起点】，不是结束时刻
-      "steps": [
+      "latest_ms": 1700000600000,           // 最近一次有画面的时刻，也是本清单的排序键
+      "steps": [                            // 时间字段只在 step 粒度给，见下方说明
         { "step_id": 1, "tracks": ["raw", "processed"], "start_ms": …, "last_segment_ms": … },
         { "step_id": 2, "tracks": ["raw"],              "start_ms": …, "last_segment_ms": … }
       ]
@@ -144,8 +143,17 @@ GET /traceback/task/{task_id}/timeline?step_id={step_id}
 ```
 
 > ⚠️ **`track` 必须从 `steps[].tracks` 里挑**。playlist 的 `track` 默认 `processed`，而只落了 raw 的 step 照默认打过去就是 **404**。
+
+**时间字段只给到 step 粒度**，任务级不给 `start_ms`：
+
+- 回放本身就是 step 粒度（playlist 必填 `step_id`，跨 step 聚合不支持），且**两个 step 之间可以隔任意长时间**。任务级的「最早 ~ 最晚」会跨过中间空档，既不是任务时长、也不对应任何可播放的东西，只会被误读成连续区间。
+- 任务级因此只留 `latest_ms`（= `max(steps[].last_segment_ms)`），用途明确：清单排序键 + 「这是什么时候的任务」的展示值。
+
+`steps[]` 里那对时间的细则：
+
+> `start_ms` / `last_segment_ms` 是 **raw 与 processed 双轨的并集**，与 timeline 的 `start_ms`/`end_ms` 同口径——两轨段边界不一定对齐，某一轨的实际范围可能比这里窄（实测有过 20+ 秒的差）。它表达的是「这个 step 有画面的时间跨度」，别拿它跟单轨播放进度做逐帧对齐。
 >
-> `last_segment_ms` 是最后一段的**起点**，比任务真正结束早一个段长。要精确时长用 timeline 的 `duration_ms`（按 playlist EXTINF 算）。
+> `last_segment_ms` 是最后一段的**起点**，比 step 真正结束早一个段长（`last_segment_ms + 该段 EXTINF = timeline 的 end_ms`）。要精确时长用 timeline 的 `duration_ms`。
 
 **降级**：DB 不可用时仍返回 200，`source_ip` 全为 `null`——清单的存在性判定来自磁盘，DB 只补点位显示，不因此 503。
 

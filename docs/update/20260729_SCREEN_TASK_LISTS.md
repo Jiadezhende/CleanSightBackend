@@ -11,6 +11,69 @@
 - **为什么改**：大屏需要「点清单条目 → 出画面」。排查后发现**播放端早就齐全、参数闭环也已经通**（`WS /ai/video` 双模、`/traceback/task/{id}/playlist.m3u8`），缺的只是清单这一步的正式入口——现有的两个清单都是后台页专用：`/admin-f3m8/clients` 是运维页、`/lab-f3m8/tasks` 是送标页，且后者**只枚举 `raw` 轨**，而 playlist 的 `track` 默认 `processed`，大屏照抄 step 会 404。
 - **影响面**：新增 2 个端点；`SegmentFinder` 新增 4 个枚举方法（`list_segments` 行为不变）；`lab.py` 改调共用枚举，**对外响应不变**。
 
+## 大屏能力全景（前端接入看这节）
+
+本次补齐后，大屏的两条链路都**不再需要任何外部输入**——不用业务侧喂 task_id、不用从告警里反推 step_id，清单接口自己就是入口。
+
+```
+┌─ 看现在 ────────────────────────────────────────────────┐
+│  GET /task/live                                          │
+│    → tasks[].task_id / source_ip                         │
+│         │                                                │
+│         └→ WS /ai/video?task_id=…  或  ?client_id=…      │
+└──────────────────────────────────────────────────────────┘
+
+┌─ 看过去 ────────────────────────────────────────────────┐
+│  GET /task/history                                       │
+│    → tasks[].task_id + steps[].step_id + steps[].tracks  │
+│         │                                                │
+│         ├→ GET /traceback/task/{task_id}/playlist.m3u8   │
+│         │      ?step_id=…&track=…        （喂 hls.js）    │
+│         └→ GET /traceback/task/{task_id}/timeline        │
+│                ?step_id=…      （进度条告警打点 + 精确时长）│
+└──────────────────────────────────────────────────────────┘
+```
+
+### 链路一：在线 → 实时画面
+
+`GET /task/live` 出的每条给两个可用参数，**选哪个取决于要绑什么**：
+
+| 用 | 绑定 | 任务结束后 | 该点位起新任务 | 适用 |
+|---|---|---|---|---|
+| `?task_id=` | 这一次 run | 永久黑屏，不复活 | 不跟随 | 任务详情页、告警联动 |
+| `?client_id=<source_ip>` | 这个摄像头点位 | 黑屏等待 | **自动恢复推画面** | 大屏墙、固定点位常亮 |
+
+> 固定点位大屏其实**不必轮询 `/task/live`**：一条 `?client_id=` 的 WS 常连就够，无任务时后端静默（零流量），有任务自动来画面。`/task/live` 的价值在「有几路在跑、分别是哪个点位/阶段」这种全局视图，以及需要按 run 锁定的场景。
+
+### 链路二：历史 → 回放
+
+`GET /task/history` 一次给全回放所需的**三个参数**：`task_id`、`steps[].step_id`、`steps[].tracks`。
+
+前端最小流程：
+
+```js
+const { tasks } = await fetch('/task/history').then(r => r.json());
+
+// 每个 task 可能有多个 step，回放是 step 粒度，逐个加载
+for (const task of tasks) {
+  for (const step of task.steps) {
+    const track = step.tracks.includes('processed') ? 'processed' : step.tracks[0];
+    const url = `/traceback/task/${task.task_id}/playlist.m3u8`
+              + `?step_id=${step.step_id}&track=${track}`;
+    // url 直接喂 hls.js，不要自己解析 m3u8
+  }
+}
+```
+
+**这一步取代了原先"从告警里反推 step_id"的绕路**——`GET /task/{task_id}/alarms` 曾是前端拿 step_id 的唯一途径（见 [guide-video.md](../api/guide-video.md)），那要求任务必须产生过告警，无告警的任务根本回放不了。
+
+### 前端必须知道的四条
+
+1. **`track` 从 `steps[].tracks` 里挑，别硬写 `processed`。** playlist 的 `track` 默认就是 `processed`，而只落了 raw 的 step 照默认打过去是 **404**。有了 `tracks` 就不必再「切轨前先 fetch 探一次」。
+2. **回放是 step 粒度，不做跨 step 聚合。** 整单回放前端按 `steps[]` 逐个加载。
+3. **时间字段只到 step 粒度**：任务级只有 `latest_ms`（排序键 + 「这是什么时候的任务」）。理由见下方专节。
+4. **两张清单都只出参数、不出播放 URL**，前端自己拼。播放端的坑（token 300s 过期要重拉 playlist、反代须透传 `X-Forwarded-*`、在途段导致 playlist 短于实际时长）本次没变，仍以 [guide-video.md](../api/guide-video.md) 为准。
+
 ## 关键决策：「已完成」不看 `clean_task.status`
 
 历史清单要「有效且已完成」的任务。判定改用：
@@ -69,9 +132,19 @@
 |------|------|
 | **只出参数，不出 URL** | 清单不返回播放地址，前端自己拼 |
 | **`track` 必须从 `steps[].tracks` 挑** | playlist 默认 `processed`，只落 raw 的 step 照默认打就是 404 |
-| **`last_segment_ms` 是最后一段的起点** | 不是结束时刻，差一个段长；精确时长取 timeline 的 `duration_ms` |
+| **时间字段只到 step 粒度** | 任务级只给 `latest_ms`（排序键 + 展示值），不给 `start_ms`——见下 |
+| **`last_segment_ms` 是最后一段的起点** | 不是结束时刻，差一个段长；且为 raw/processed **双轨并集**（与 timeline 同口径，实测两轨边界可差 20+ 秒）。精确时长取 timeline 的 `duration_ms` |
 | **不出名称** | `clean_task` 表本就没有名称字段，只有 `task_id` + `source_ip` |
 | **`/history` 不返回 `total`** | 固定 10 条，无翻页语义 |
+
+### 为什么任务级不给 `start_ms`
+
+初版给了任务级的 `start_ms` / `last_segment_ms`（= 所有 step 的 min/max），评审时砍掉：
+
+- **回放粒度就是 step**：playlist 必填 `step_id`，跨 step 聚合本期不支持（见 [traceback.md](../api/traceback.md)）。
+- **两个 step 之间可以隔任意长时间**：任务级「最早 ~ 最晚」跨过了中间空档，既不是任务时长、也不对应任何可播放的东西。单 step 的任务它纯冗余，多 step 的任务它是个会被读成「任务持续了这么久」的虚数。
+
+保留 `latest_ms`（= `max(steps[].last_segment_ms)`）单值，用途明确到不会误读：清单排序键 + 「这是什么时候的任务」的展示值。**不成对给 start，就不会被当成连续区间。**
 
 ## 验证
 

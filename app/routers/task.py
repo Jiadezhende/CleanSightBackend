@@ -225,8 +225,14 @@ def list_history_tasks():
     `track` **必须从 `steps[].tracks` 里挑**：playlist 的 track 默认 processed，
     而只落了 raw 的 step 照默认打过去就是 404。
 
-    `last_segment_ms` 是最后一段的**起点**，不是任务结束时刻（差一个段长）；
-    精确时长取 timeline 的 `duration_ms`（按 playlist EXTINF 算）。
+    时间字段的粒度刻意压在 **step** 上——回放本身就是 step 粒度（playlist 必填
+    step_id，跨 step 聚合不支持），且两个 step 之间可以隔任意长时间，任务级
+    「min(start) ~ max(last)」会跨过中间空档，既不是任务时长也不对应任何可播放
+    的东西。任务级只留 `latest_ms`（= max(steps[].last_segment_ms)）作排序键与
+    「最近一次有画面」的展示值，不成对给 start，免得被读成连续区间。
+
+    `last_segment_ms` 是最后一段的**起点**，不是结束时刻（差一个段长）；精确时长
+    取 timeline 的 `duration_ms`（按 playlist EXTINF 算）。
 
     实现是两阶段，避免每次请求全盘扫段：目录 mtime 粗排挑候选 → 只对候选深扫拿
     真实段时间与轨道，收满 10 条即停。mtime 只用于挑候选，对外时间戳一律取真实
@@ -253,8 +259,7 @@ def list_history_tasks():
             {
                 "task_id": task_id,
                 "source_ip": None,  # 下方按页补
-                "start_ms": min(s.first_ts_us for s in steps) // 1000,
-                "last_segment_ms": max(s.last_ts_us for s in steps) // 1000,
+                "latest_ms": max(s.last_ts_us for s in steps) // 1000,
                 "steps": [
                     {
                         "step_id": s.step_id,
@@ -268,7 +273,7 @@ def list_history_tasks():
         )
 
     # 粗筛序基于 mtime（近似），最终顺序按真实段时间戳重排一次
-    tasks.sort(key=lambda t: (t["last_segment_ms"], t["task_id"]), reverse=True)
+    tasks.sort(key=lambda t: (t["latest_ms"], t["task_id"]), reverse=True)
 
     source_ips = _fetch_source_ips([t["task_id"] for t in tasks])
     for t in tasks:
