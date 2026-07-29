@@ -276,7 +276,7 @@ class ClientQueues:
             depth=depth,
             capacity=capacity,
             utilization=(depth / capacity) if capacity else None,
-            oldest_age_ms=((time.time() - oldest_ts) * 1000.0) if oldest_ts else None,
+            oldest_age_ms=((time.time() - oldest_ts) * 1000.0) if oldest_ts is not None else None,
             drop_total=drop_total,
         )
 
