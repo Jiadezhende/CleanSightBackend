@@ -322,8 +322,14 @@ def _build_vod_playlist(
     return "\n".join(lines) + "\n"
 
 
-@router.get(
+# HEAD 与 GET 同注册：原生 HLS 播放栈（Safari/AVPlayer 等）在取 playlist 前会自动
+# 发 HEAD 探可用性，这是浏览器媒体栈行为、前端 JS 拦不住。FastAPI 的 APIRoute 不像
+# Starlette 原生 Route 那样给 GET 自动补 HEAD，漏注册即 405——既不合 RFC 9110，又会
+# 被 Gateway 反扫描当扫描特征计数（阈值 10 次/300s → 封 IP 1h）。
+# body 由 h11 在传输层抑制，Content-Length 仍为真值，handler 照常执行以给出 200/404。
+@router.api_route(
     "/task/{task_id}/playlist.m3u8",
+    methods=["GET", "HEAD"],
     response_class=PlainTextResponse,
     responses={
         200: {
@@ -363,8 +369,9 @@ async def get_task_playlist(
     )
 
 
-@router.get(
+@router.api_route(  # HEAD 同注册，理由见上方 /task/{task_id}/playlist.m3u8
     "/alarm/{alarm_id}/playlist.m3u8",
+    methods=["GET", "HEAD"],
     response_class=PlainTextResponse,
     responses={
         200: {
