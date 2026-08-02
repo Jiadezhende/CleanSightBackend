@@ -6,6 +6,8 @@
 
 推理采用**流处理框架**：检测点拆成两粒度——无状态 **Detector**（流源，多 run 共享）+ per-run **Operator**（流算子，analyze+judge 合并）。新增检测点只需各加一个子类 + YAML 各加一行。可用 `/infer-workflow` skill 生成代码框架。
 
+**落点（一文件一基类）**：Detector 子类写 `detection/impl/<业务>.py`，Operator 子类写 `temporal/impl/<业务>.py`，可选离线 Segmenter 写 `offline/impl/<业务>.py`；三者同名文件，业务聚合由 config stage 绑定表达（各契约包顶层只放基类+框架，`impl/` 放业务实现）。
+
 ## 新增 Detector（流源）
 
 继承 `Detector`（`detection/detector.py`），YOLO 类优先继承 `YOLODetector`（复用模型惰性加载、batch predict、输出适配、CUDA 异常转换）。职责：
@@ -31,7 +33,7 @@
 
 ### 时序模型算子（TemporalOperator）
 
-接入动作识别/序列模型（GRU/Transformer/MS-TCN 等）时继承 `TemporalOperator`（`temporal/operator.py`，`Operator` 子基类），多带 `model_path` / `objects` / `actions` 三参：惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、加载失败锁存），`infer(features) → logits`。子类在 `analyze` 内把订阅流窗口适配成 `(T, feature_dim)` 张量后 `infer`，把预测存进 `_sm`，`judge` 读 `_sm` 出 overlay/告警。参考 `CleanOperator`（`workflows/clean.py`）：`_adapt_to_features` 把每帧多流检测折成 `(num_objects×6)`，异常帧留全零行保持时间轴对齐。`class_name → object_id` 经 `objects` 映射，仍须与训练类别名严格一致。YAML `params` 里配 `model_path`/`objects`/`actions`（见 CLEAN `clean_monitor`）。新增时序算子接入可用 `/temporal-review` skill 走审查清单。
+接入动作识别/序列模型（GRU/Transformer/MS-TCN 等）时继承 `TemporalOperator`（`temporal/operator.py`，`Operator` 子基类），多带 `model_path` / `objects` / `actions` 三参：惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、加载失败锁存），`infer(features) → logits`。子类在 `analyze` 内把订阅流窗口适配成 `(T, feature_dim)` 张量后 `infer`，把预测存进 `_sm`，`judge` 读 `_sm` 出 overlay/告警。参考 `CleanOperator`（`temporal/impl/clean.py`）：`_adapt_to_features` 把每帧多流检测折成 `(num_objects×6)`，异常帧留全零行保持时间轴对齐。`class_name → object_id` 经 `objects` 映射，仍须与训练类别名严格一致。YAML `params` 里配 `model_path`/`objects`/`actions`（见 CLEAN `clean_monitor`）。新增时序算子接入可用 `/temporal-review` skill 走审查清单。
 
 ## 配置 YAML
 
@@ -43,13 +45,13 @@ stages:
     alias: LEAK
     detectors:
       - name: example
-        class: app.services.inference.workflows.example.ExampleDetector
+        class: app.services.inference.detection.impl.example.ExampleDetector
         params: { model_path: ..., conf_threshold: 0.1, enabled: true }
     rules:
       - name: example_rule
         subscribes: [example]      # 必填，值 = 上面 detector.name
         realtime: true             # true 纳入 signals_10s；false 为结算告警
-        class: app.services.inference.workflows.example.ExampleOperator
+        class: app.services.inference.temporal.impl.example.ExampleOperator
         params: { window_seconds: 3.0, ... }
     offline: {}                    # 占位，未实现
 ```
@@ -80,7 +82,7 @@ stage 主键 = step_id 字符串（`resolve_stage` 恒等路由，未知回落 `
 
 - `app/services/inference/detection/detector.py`
 - `app/services/inference/temporal/operator.py`（`Operator` + `TemporalOperator`）
-- `app/services/inference/workflows/clean.py`（`CleanOperator` 时序算子示例）
+- `app/services/inference/temporal/impl/clean.py`（`CleanOperator` 时序算子示例）+ `app/services/inference/detection/impl/clean.py`（检测器）
 - `app/services/inference/offline/{segmenter,runner}.py`、`offline/segmenters/{clean,mock}.py`
 - `app/services/inference/stage_factory.py`
 - `app/services/inference/manager.py`

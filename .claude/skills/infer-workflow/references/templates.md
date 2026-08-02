@@ -1,6 +1,6 @@
 # 代码模板
 
-四种形态各一份骨架，每份含 **流源 Detector + 流算子 Operator** 两件套（一任务一文件，放 `app/services/inference/workflows/`）。`detector.name` = 产出流名，写进算子 `subscribes`；算子 `name` 是自身身份，可不同。签名照抄基类。字段见 [data-models.md](data-models.md)，装配见 [yaml-config.md](yaml-config.md)。
+四种形态各一份骨架，每份含 **流源 Detector + 流算子 Operator** 两件套。**落点：一文件一基类**——`XxxDetector` 写 `app/services/inference/detection/impl/<业务>.py`，`XxxOperator` 写 `app/services/inference/temporal/impl/<业务>.py`（下方代码块把两者并排只为便于对照，落地时拆两个同名文件；别塞进同一文件）。`detector.name` = 产出流名，写进算子 `subscribes`；算子 `name` 是自身身份，可不同。签名照抄基类。字段见 [data-models.md](data-models.md)，装配见 [yaml-config.md](yaml-config.md)。
 
 - [A — YOLO + 实时告警（最常见）](#模板-a) ｜ [B — 无模型纯算法](#模板-b) ｜ [C — 结算告警](#模板-c) ｜ [D — 内嵌因果序列模型](#模板-d)
 
@@ -10,7 +10,7 @@
 
 ## 模板 A
 
-YOLO + 实时告警。参考 [bubble.py](../../../../app/services/inference/workflows/bubble.py)。
+YOLO + 实时告警。参考 [detection/impl/bubble.py](../../../../app/services/inference/detection/impl/bubble.py)（Detector）+ [temporal/impl/bubble.py](../../../../app/services/inference/temporal/impl/bubble.py)（Operator）。
 
 ```python
 import logging
@@ -78,13 +78,13 @@ class XxxOperator(Operator):
         return events, alarms
 ```
 
-> 复杂指标（ByteTrack + birth_rate）把游标推进/算指标拆成 `_advance`/`_compute_metric`，派生 history 在 `_sm` 里按 `window_seconds` 自裁，见 [bubble.py](../../../../app/services/inference/workflows/bubble.py)。`AlarmMetric.XXX` 需先在 [alarm.py](../../../../app/domain/alarm.py) 枚举补一项。
+> 复杂指标（ByteTrack + birth_rate）把游标推进/算指标拆成 `_advance`/`_compute_metric`，派生 history 在 `_sm` 里按 `window_seconds` 自裁，见 [temporal/impl/bubble.py](../../../../app/services/inference/temporal/impl/bubble.py)。`AlarmMetric.XXX` 需先在 [alarm.py](../../../../app/domain/alarm.py) 枚举补一项。
 
 ---
 
 ## 模板 B
 
-无模型纯算法：Detector 继承 `Detector`，实现 `infer_batch(frames, timestamps)`（无 YOLO）。Operator 同模板 A。参考 [mock.py](../../../../app/services/inference/workflows/mock.py)。
+无模型纯算法：Detector 继承 `Detector`，实现 `infer_batch(frames, timestamps)`（无 YOLO）。Operator 同模板 A。参考 [detection/impl/mock.py](../../../../app/services/inference/detection/impl/mock.py)（Detector）+ [temporal/impl/mock.py](../../../../app/services/inference/temporal/impl/mock.py)（Operator）。
 
 ```python
 import numpy as np
@@ -110,7 +110,7 @@ class XxxDetector(Detector):
 
 ## 模板 C
 
-结算告警：实时只产 events，结束才裁决。参考 [bending.py](../../../../app/services/inference/workflows/bending.py)。analyze 照常推游标累计计数，`judge()` 只产进度 events、`finalize()` 出告警。
+结算告警：实时只产 events，结束才裁决。参考 [temporal/impl/bending.py](../../../../app/services/inference/temporal/impl/bending.py)（Operator）+ [detection/impl/bending.py](../../../../app/services/inference/detection/impl/bending.py)（Detector）。analyze 照常推游标累计计数，`judge()` 只产进度 events、`finalize()` 出告警。
 
 ```python
 class XxxOperator(Operator):
@@ -145,7 +145,7 @@ class XxxOperator(Operator):
 
 ## 模板 D
 
-内嵌因果序列模型：Operator 继承 `GRUOperator`（基类惰性加载 `GRUClassifier`、给 `infer(features)→List[int]`）。子类只写 `_adapt_to_features` + analyze/judge。参考 [clean.py](../../../../app/services/inference/workflows/clean.py)。
+内嵌因果序列模型：Operator 继承 `GRUOperator`（基类惰性加载 `GRUClassifier`、给 `infer(features)→List[int]`）。子类只写 `_adapt_to_features` + analyze/judge。参考 [temporal/impl/clean.py](../../../../app/services/inference/temporal/impl/clean.py)（Operator）+ [detection/impl/clean.py](../../../../app/services/inference/detection/impl/clean.py)（Detector）。
 
 规则：**模型必须因果**（单向 GRU / causal mask，需未来帧的 MS-TCN 类走离线链路）；⚠️ **窗口帧数 ≥ 感受域**，不足加 warm-up guard（`min_frames`）不前向；多订阅用 `_zip_by_ts` 对齐。**接入 review 与上线门禁（延迟/感受域/参数量）走 `/temporal-review`。**
 

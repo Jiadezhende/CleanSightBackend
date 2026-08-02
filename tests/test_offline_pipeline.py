@@ -16,11 +16,11 @@ from app.services.inference.feature.store import FactLedger, FeatureStore
 from app.services.inference.models import EventFact, SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
-from app.services.inference.offline.segmenters.mock import BrushRulesSegmenter
+from app.services.inference.offline.impl.mock import BrushRulesSegmenter
 from app.services.inference.stage_factory import StageFactory
 
-_MOCK_CLASS = "app.services.inference.offline.segmenters.mock.BrushRulesSegmenter"
-_CLEAN_CLASS = "app.services.inference.offline.segmenters.clean.CleanSegmenter"
+_MOCK_CLASS = "app.services.inference.offline.impl.mock.BrushRulesSegmenter"
+_CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanSegmenter"
 
 
 # ============================ 存储引擎 ============================
@@ -275,7 +275,7 @@ def _clean_frame(ts):
 
 class TestCleanSegmenter:
     def test_flatten_preprocess_to_segments(self):
-        from app.services.inference.offline.segmenters.clean import CleanSegmenter, ModelInput
+        from app.services.inference.offline.impl.clean import CleanSegmenter, ModelInput
         seg = CleanSegmenter(name="clean_seg", subscribes=["clean_large", "clean_small"],
                              min_duration_s=0.1, fps=10.0)
         streams = {
@@ -291,7 +291,7 @@ class TestCleanSegmenter:
             seg.segment(mi)
 
     def test_each_clean_model_uses_own_feature_recipe(self):
-        from app.services.inference.offline.segmenters.clean import (
+        from app.services.inference.offline.impl.clean import (
             CleanASFormerSegmenter,
             CleanBiGRUSegmenter,
             CleanMSTCNBiLSTMSegmenter,
@@ -321,7 +321,7 @@ class TestCleanSegmenter:
         )
 
     def test_no_model_path_hard_fails_without_debug_result(self):
-        from app.services.inference.offline.segmenters.clean import CleanSegmenter
+        from app.services.inference.offline.impl.clean import CleanSegmenter
         seg = CleanSegmenter(name="clean_seg", subscribes=["clean_large", "clean_small"],
                              min_duration_s=0.1, fps=10.0)
         streams = {
