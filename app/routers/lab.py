@@ -156,20 +156,8 @@ def _optional_int(value) -> Optional[int]:
 
 
 def _list_raw_steps(finder: SegmentFinder, task_id: int) -> List[int]:
-    task_root = finder.base_dir / str(task_id)
-    if not task_root.exists() or not task_root.is_dir():
-        return []
-
-    steps: List[int] = []
-    for entry in task_root.iterdir():
-        if not entry.is_dir():
-            continue
-        step_id = _optional_int(entry.name)
-        if step_id is None:
-            continue
-        if finder.list_segments(task_id, step_id, "raw"):
-            steps.append(step_id)
-    return sorted(steps)
+    """该 task 下有 raw 段的 step（升序）。送标只吃 raw，processed 轨在此无意义。"""
+    return [s.step_id for s in finder.list_steps(task_id) if "raw" in s.tracks]
 
 
 def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
@@ -230,23 +218,16 @@ def _list_storage_tasks(
     q 非空时按 str(task_id) 子串过滤（存储模式下 ip/status 不可知）。
     排序 updated_time desc, task_id desc，再 offset/limit 切片。
     """
-    base_dir = finder.base_dir
     needle = (q or "").strip()
 
     items: List[LabTaskItem] = []
-    if base_dir.exists() and base_dir.is_dir():
-        for entry in base_dir.iterdir():
-            if not entry.is_dir():
-                continue
-            task_id = _optional_int(entry.name)  # 跳过 .lab_exports 等非数字目录
-            if task_id is None:
-                continue
-            if needle and needle not in str(task_id):
-                continue
-            raw_steps = _list_raw_steps(finder, task_id)
-            if not raw_steps:
-                continue
-            items.append(_storage_task_to_item(finder, task_id, raw_steps))
+    for task_id in finder.list_task_ids():  # 已跳过 .lab_exports 等非数字目录
+        if needle and needle not in str(task_id):
+            continue
+        raw_steps = _list_raw_steps(finder, task_id)
+        if not raw_steps:
+            continue
+        items.append(_storage_task_to_item(finder, task_id, raw_steps))
 
     items.sort(key=lambda it: (it.updated_time or 0, it.task_id), reverse=True)
     total = len(items)

@@ -19,7 +19,7 @@
 2. 路径拼出后经 `Path.resolve()`，必须仍落在存储根 `base_dir` 内，否则拒绝。
 两层都命中返回 **400**（不是 404，见错误表）。
 
-`/media` 在 Gateway 走**放宽策略**（绕过限流与反扫描，仍查 IP 白名单与封禁）——见 [README › Gateway](README.md)。
+`/media` 在 Gateway 走**绕过档**（完全跳过限流与反扫描，仍查 IP 白名单与封禁）——段请求自带 HMAC token，验不过即 403，无可枚举面。见 [README › Gateway](README.md)。
 
 ---
 

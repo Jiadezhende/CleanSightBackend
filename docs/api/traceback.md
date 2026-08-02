@@ -104,6 +104,8 @@
 
 **用途**：某 `(task_id, step_id, track)` 的**完整回放**，返回动态生成的 HLS VOD playlist，直接喂 hls.js / 原生 MSE 播放。相比 serve 落盘的 LIVE playlist：保证 VOD 完整性（即使任务未封档）、URL 走 token 化 `/media/*` 不暴露文件系统路径。
 
+**方法**：`GET` / `HEAD`（同一 handler）。原生 HLS 播放栈（Safari / AVPlayer 等）取 playlist 前会自动发 HEAD 探可用性，是浏览器媒体栈行为、前端 JS 拦不住，故 HEAD 与 GET 同注册。HEAD 的 body 由传输层抑制，`Content-Length` 仍是真值，状态码与 GET 完全一致（含下方各种 404/503）。
+
 **路径参数**：`task_id`（int）。
 **查询参数**：
 
@@ -156,13 +158,15 @@ http://<host>:8000/media/segment/<token>
 
 - **段一路 200 突然全 403**：token 过期或服务重启换了 secret，重拉本 playlist 换新 token（详见 [media.md](media.md)），不是鉴权配错。
 - **反代下 m3u8 拉到但段全失败**：host 取自请求，反代未透传 `X-Forwarded-*`，播放器在请求内网地址。
-- **`track` 取值范围**：只有 `raw` / `processed` 两值；一个 step 未必两轨都落盘，硬写 `processed` 而该 step 只有 raw 会 404（A）。后端无枚举可播轨道的端点，前端需按 404 兜底或两轨都试。
+- **`track` 取值范围**：只有 `raw` / `processed` 两值；一个 step 未必两轨都落盘，硬写默认的 `processed` 而该 step 只有 raw 会 404（A）。可播轨道从 [`GET /task/history`](task.md) 的 `steps[].tracks` 里取（该清单只覆盖最近 10 个已完成任务）；不在清单里的任务仍需按 404 兜底或两轨都试。
 
 ---
 
 ## GET /traceback/alarm/{alarm_id}/playlist.m3u8
 
 **用途**：给单条告警的证据回放生成 VOD playlist（触发段 + 前后上下文），供 admin / lab 端直接播放。fMP4 段必须经 m3u8 + init 拼装浏览器才能解码，故告警证据播放走这里而非裸 `/media/segment/{token}`。定位方式同 `/evidence`（用 alarm 自带 `(task_id, step_id)`）。
+
+**方法**：`GET` / `HEAD`（同上，理由与行为一致）。
 
 **路径参数**：`alarm_id`（int）。
 **查询参数**：`track`（默认 processed）、`n_before`、`n_after`（`-1..20`，默认 -1）——语义同本页顶部约定。
