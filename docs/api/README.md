@@ -3,6 +3,7 @@
 对外 HTTP / WebSocket **端点契约**（请求/响应 schema、字段语义、错误码）。按 router 分文件；本页为索引 + 全局通用约定，各 router 文件不重复。
 
 > 路由如何接线（router 归属、中间件与 lifespan 顺序）属架构，见知识库 [docs/kb/INDEX.md](../kb/INDEX.md)。
+> 新增/改写文档前先读 [_TEMPLATE.md](_TEMPLATE.md)（写作规范 + 可复制骨架 + 自检清单）——这些文档面向前端对接，写作视角与自检项以它为准。
 
 ## 索引
 
@@ -33,7 +34,7 @@
 运行键为 int `task_id`。业务端点 `/api/terminate`、`/ai/video` 双模兼容：
 
 - `task_id`（int，**首选**）：O(1) 直取当前 run。
-- `client_id`（str，旧，= `source_ip`）：扫描活跃 run 匹配首个命中；`/ai/video` 下会跟随该 source_ip 的当前 run。
+- `client_id`（str，= `source_ip`）：扫描活跃 run 匹配首个命中。**定性随端点不同**——在控制面 `/api/terminate` 上是兼容期保留的**旧**标识（正解用 `task_id`）；在 `/ai/video` 上是**并列的「点位跟随」模式**（跟随该 source_ip 的当前 run，任务切换自动跟随），非新旧之分。各端点文件按此描述。
 
 `/api/start` 只接受 `task_id`（body）。
 
