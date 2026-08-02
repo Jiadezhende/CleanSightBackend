@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-08-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -23,6 +23,14 @@
 
 `find()` 根据目标 `ts_ms` 返回触发段和前后上下文。
 
+除按 `ts_us` 定位（`find()` / `list_segments()`）外，`SegmentFinder` 是**落盘目录枚举的单一真源**（traceback 与 lab 共用，lab router 不再自行遍历目录）：
+
+- `StepRef`（`task_id / step_id / tracks / first_ts_us / last_ts_us`）：一个 step 的双轨摘要。
+- `_scan_step_dir()`（私有）：单次 `iterdir` 按轨道分组，双轨枚举只付一次目录遍历；`list_segments()` 是其薄封装，对外行为不变（含非法 track 抛 `ValueError`）。
+- `list_steps(task_id)`：该 task 下已落盘 step 的 `StepRef` 列表，两轨皆空的 step 丢弃。
+- `list_task_ids()`：存储根下的数字目录（跳过 `.lab_exports`）。
+- `list_task_ids_by_recency()`：**廉价粗排**，排序键 = `max(step 目录 mtime)`，只 `stat` 目录不读段文件（成本 O(目录数)）。**mtime 仅用于挑深扫候选，绝不当对外时间戳**——对外时间一律取 `list_steps()` 的真实 `ts_us`。
+
 ## MediaToken
 
 媒体 URL 不暴露物理路径。`MediaToken` 生成 HMAC-SHA256 短 TTL token，payload 包含：
@@ -45,6 +53,8 @@ token payload 只剩两种 kind：`segment` | `init`（`{"t","s","f","k","e"}`�
 | `/alarm/{alarm_id}/playlist.m3u8` | GET | `track`（default=processed，`^(raw\|processed)$`）、`n_before`/`n_after` | VOD m3u8（trigger 段 + 上下文，含 `#EXT-X-MAP`） |
 | `/task/{task_id}/playlist.m3u8` | GET | `step_id`（**必填**）、`track`（default=processed） | VOD m3u8（该 step 整段回放；任务级跨 step 聚合本期不支持） |
 | `/task/{task_id}/timeline` | GET | `step_id`（**必填**） | JSON：`start_ms`/`end_ms`/`duration_ms`/`events[]` |
+
+两个 `playlist.m3u8` 端点以 `@router.api_route(methods=["GET","HEAD"])` 注册（非 `@router.get`）：FastAPI 的 `APIRoute` 不像 Starlette 原生 `Route` 那样给 GET 自动补 HEAD，漏注册即 405——既不合 RFC 9110，又会被网关反扫描当扫描特征累计。原生 HLS 播放栈（Safari/AVPlayer/iOS WebView）取 playlist 前自动发 HEAD 探可用性；HEAD 照常执行 handler（扫段+拼 playlist 后丢弃）给出正确 200/404，body 由传输层抑制、`Content-Length` 保留真值。三档网关策略见 [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)。
 
 `evidence` 是**双轨能力唯一的并列出口**：`raw_clips` / `processed_clips` 两条列表，每段含
 `url`/`filename`/`ts_us`/`ts_ms`/`is_trigger`（`_segment_to_url`，traceback.py:61）。注意

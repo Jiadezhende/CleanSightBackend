@@ -1,7 +1,7 @@
 # 推理子进程「活着但没就绪」不再是不可恢复态（补收 + 判失败）
 
 > **变更状态**：生效中（2026-07-28）。修的是一个**尚未在现网触发**的静默失效路径。
-> **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（RemoteInferProxy 监督判据一节）。
+> **知识库**：已沉淀 → [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md)（RemoteInferProxy 监督第三判据 _check_not_ready）(2026-08-02)
 > **前置**：[20260726_INFER_PROCESS_ISOLATION_LANDED.md](20260726_INFER_PROCESS_ISOLATION_LANDED.md)。
 
 ## 缺陷

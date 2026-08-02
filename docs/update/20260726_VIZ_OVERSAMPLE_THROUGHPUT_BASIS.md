@@ -1,7 +1,7 @@
 # 可视化过采样轮询 + 吞吐告警基准与轮询率解耦
 
 > **变更状态**：生效中（2026-07-26）
-> **知识库**：待沉淀 → kb/SERVICE_INFERENCE.md（涉及 [VIZ_THROUGHPUT] 一节）
+> **知识库**：已沉淀 → [DESIGN_OBSERVABILITY](../kb/DESIGN_OBSERVABILITY.md)（[VIZ_THROUGHPUT] 三侧归因）(2026-08-02)
 
 ## 概述
 

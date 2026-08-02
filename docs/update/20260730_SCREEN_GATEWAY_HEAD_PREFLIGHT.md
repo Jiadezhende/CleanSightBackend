@@ -1,7 +1,7 @@
 # 大屏接入止血：playlist 补 HEAD、清单与回放路径进 Gateway 宽松档
 
 > **变更状态**：生效中（2026-07-30）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_GATEWAY_MEDIAMTX](../kb/SERVICE_GATEWAY_MEDIAMTX.md)（三档路径策略）/ [SERVICE_TRACEBACK_MEDIA](../kb/SERVICE_TRACEBACK_MEDIA.md)（playlist 补 HEAD）(2026-08-02)
 >
 > 承接 [20260729_SCREEN_TASK_LISTS.md](20260729_SCREEN_TASK_LISTS.md)（大屏清单端点）。Gateway 三档语义见 [app/utils/gateway.py](../../app/utils/gateway.py)。
 

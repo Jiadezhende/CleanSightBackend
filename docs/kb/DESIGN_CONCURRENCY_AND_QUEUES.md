@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-08-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -70,12 +70,12 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 | 粒度 | 实例 | 创建 → 销毁 |
 |------|------|-------------|
 | 进程级单例 | `stream_service`/`persistence_manager`/`InferenceManager`/`GlobalHealthMonitor` | import·lifespan → lifespan 关闭 |
-| stage 级常驻线程 | dispatcher/InferWorker/viz worker/HLS·Alarm 池/cleanup/selector | service `start()` → `stop()` |
+| stage 级常驻线程/进程 | dispatcher/推理子进程(`RemoteInferProxy` spawn)/viz worker/HLS·Alarm 池/cleanup/selector | service `start()` → `stop()` |
 | per-run 动态实例 | TemporalActor/FFmpegDecoder | `start_workflow`·`start_stream` → `stop_workflow`·`stop_stream` |
 
-**唯一真正不可中断点 = `_inference_loop` 的 `infer_batch`（CUDA 同步）**：`stop_event` 看不见，`join(2.0)` 超时后 daemon 强杀在 GPU 半途。无法根治（不能中断 CUDA、不能强杀线程），仅在 `ModelWorkerService.stop()` join 后**内联** `is_alive()` warning 作诊断（沉默即健康），不抽 `join_or_warn` helper（单点不造抽象）。其余常驻循环都真可中断（`stop_event.wait(interval)` 旗 或带超时 `queue.get`）。
+**唯一真正不可中断点 = 推理子进程内 `StageWorker` 的 GPU 前向（CUDA 同步）**：进程隔离后 GPU 前向不在主进程线程里，主进程 `stop_event` 管不到子进程内的前向。`RemoteInferProxy.stop()` → `_kill_child()` 用 `terminate→join(2.0)→kill→join(2.0)` 硬收尸（镜像 decoder.py，见下），CUDA 半途的前向随进程被杀、不残留孤儿。收益是主进程再无 in-thread CUDA 同步点——旧模型「daemon `join(2.0)` 超时后强杀 GPU 半途线程」的风险已随隔离消失；主进程侧 collector/supervisor/dispatcher 等守护线程都真可中断（`stop_event.wait(interval)` 或带超时 `queue.get`）。
 
-**关键副作用不依赖被 join 的 worker**：两条 flush 路径（terminate 侧 `stop_workflow`→`feature_store.close(cq)` 只刷当前 `(task,step)`；lifespan 侧 `InferenceManager.stop()`→`feature_store.flush()` 全量兜底未走正常结束的 run）均跑在**控制/调用线程**，故即便 worker 被 daemon 硬杀，落盘已同步发生——「daemon 硬杀下仍安全」的正面佐证。FeatureStore 同步落盘（实测 max 3.6ms）是有意选择，非缺陷。
+**关键副作用不依赖被 join 的 worker**：两条 flush 路径（terminate 侧 `stop_workflow`→`feature_store.close(cq)` 只刷当前 `(task,step)`；lifespan 侧 `InferenceManager.stop()`→`feature_store.flush()` 全量兜底未走正常结束的 run）均跑在**控制/调用线程**，故即便推理子进程被硬杀，落盘已同步发生——「硬杀下仍安全」的正面佐证。FeatureStore 同步落盘（实测 max 3.6ms）是有意选择，非缺陷。
 
 **decoder 直接 SIGKILL**（[decoder.py](../../app/services/stream/decoder.py) `stop()`，2026-06-26 落地）：弃 `terminate→wait(2.0)→kill` 三级降级，改 `kill→wait(reap)`。实测卡读时优雅路径白耗 2007ms 后照样 SIGKILL，直接 kill 仅 2ms（`stop_stream` 全程 12.9ms）。零新增风险：ffmpeg 只解码到 `pipe:1` 不写文件（强杀无产物损坏）、RTSP 对端是自有 mediamtx_gateway（断连即回收、不需优雅 TEARDOWN）。副产物：`_stop_decoder_async` fire-and-forget 线程存活 ~2s→~ms，L1-a 线程堆积自愈。
 

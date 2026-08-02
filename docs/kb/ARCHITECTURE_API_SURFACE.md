@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-08-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -14,12 +14,22 @@
 |------|--------|------------|
 | `/api` | `routers/api.py` | 统一任务入口：启动/终止一次 run（桥接 `RunController`） |
 | `/ai` | `routers/ai.py` | 实时推理 WebSocket（渲染帧推送） |
-| `/task` | `routers/task.py` | 任务消息与告警历史查询 |
+| `/task` | `routers/task.py` | 任务消息、告警历史查询，及大屏只读清单（`/task/live` 在线、`/task/history` 历史） |
 | `/traceback` | `routers/traceback.py` | 告警证据 / VOD playlist / 时间轴溯源 |
 | `/media` | `routers/media.py` | HMAC token 化媒体访问（段 / init.mp4） |
 | `/health` | `routers/health.py` | 健康状态与监控统计 |
 | `/lab-f3m8` | `routers/lab.py` | 送标导出 + Label Studio（含静态 UI） |
 | `/admin-f3m8` | `routers/admin.py` | 运维 Admin（概览 / 客户端 / 指标，含静态 UI） |
+
+## 大屏清单端点接线（`/task/live`、`/task/history`）
+
+`routers/task.py` 挂两个只读清单端点，供大屏「点条目→出画面」，无外部输入依赖：
+
+- 二者均为**同步 `def`**（非 `async`），FastAPI 丢线程池执行——磁盘扫描（history）与 DB 查询不堵事件循环。
+- `/task/live` 迭代 `client_manager.snapshot()`（COW 不可变 dict，迭代无需加锁）出在线 run。
+- `/task/history` 无查询参数，两阶段避免每请求全盘扫段：`SegmentFinder.list_task_ids_by_recency()` 粗筛（mtime 近似序）→ 剔除活跃 task → 逐个 `list_steps()` 深扫、收满 `_HISTORY_LIMIT=10` 即停（`_HISTORY_SCAN_CAP=30` 兜住空目录病态）→ 按真实段 ts 重排 → 仅对最终 10 条查一次 DB 取 `source_ip`，整体 `try/except` 吞 DB 故障降级 `source_ip=null`（与 `/traceback/task/{id}/timeline` 同策略，不 503）。
+
+清单只出参数、不出播放 URL；对外请求/响应契约见对外 API 文档（[docs/api/task.md](../api/task.md)）。段枚举能力归 `SegmentFinder`，见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)。
 
 唯一的 WebSocket 路由是 `/ai/video`；其余均为 HTTP。`/lab-f3m8/ui`、`/admin-f3m8/ui` 为 `StaticFiles` 挂载。
 

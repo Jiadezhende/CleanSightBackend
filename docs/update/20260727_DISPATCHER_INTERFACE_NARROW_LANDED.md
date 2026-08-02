@@ -1,7 +1,7 @@
 # 收窄 dispatcher↔proxy 接口：capacity 内化 + peek-commit 轮转排空（生效中）
 
 > **变更状态**：生效中（2026-07-27）。落地 [20260727_DISPATCHER_ALLOC_BACKPRESSURE_PLAN.md](20260727_DISPATCHER_ALLOC_BACKPRESSURE_PLAN.md) 的「①（含职责边界修正）」；「③ 入口降帧」仍属过载区、未落地（只留接缝）。行为在稳态（在途额度充足）下与前一版等价，全量 `pytest tests/` 361 passed。
-> **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（dispatcher↔proxy 接口从 `(submit, capacity)` 收窄为 `submit` 布尔背压；`_drain_and_submit` 改 peek-commit）。
+> **知识库**：已沉淀 → [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md)（dispatcher↔proxy 接口收窄 + peek-commit）(2026-08-02)
 >
 > 承接：建立在「单提交者」模型（[20260726_DETECTION_REPACKAGE_SUBMIT_MERGE.md](20260726_DETECTION_REPACKAGE_SUBMIT_MERGE.md)）之上——那次让 dispatcher 成为唯一提交者、并临时保留 `capacity()` 供「先读额度再发」。本次删掉该临时信号：单提交者下它已冗余。
 

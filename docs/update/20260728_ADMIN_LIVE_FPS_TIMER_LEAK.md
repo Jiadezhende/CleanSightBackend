@@ -1,7 +1,7 @@
 # admin live fps 徽章跳变：根因是前端定时器泄漏，非管线掉帧
 
 > **变更状态**：生效中（2026-07-28）
-> **知识库**：待沉淀 → kb/SERVICE_INFERENCE.md（[VIZ_THROUGHPUT] 一节的排查案例）
+> **知识库**：已沉淀 → [DESIGN_OBSERVABILITY](../kb/DESIGN_OBSERVABILITY.md)（服务端结论并入 [VIZ_THROUGHPUT] 排查案例；前端 fpsTimer 泄漏本身不沉淀）(2026-08-02)
 > **相关**：issue #82
 
 ## 结论

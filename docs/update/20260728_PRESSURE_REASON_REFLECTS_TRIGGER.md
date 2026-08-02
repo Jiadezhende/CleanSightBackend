@@ -1,7 +1,7 @@
 # [PRESSURE] 的 reason 如实反映触发侧（新增 counter_growth）
 
 > **变更状态**：生效中（2026-07-28）
-> **知识库**：待沉淀 → kb/OBSERVABILITY.md（[PRESSURE] 一节，接 [20260727_PRESSURE_LOGGING_V0.md](20260727_PRESSURE_LOGGING_V0.md)）
+> **知识库**：已沉淀 → [DESIGN_OBSERVABILITY](../kb/DESIGN_OBSERVABILITY.md)（reason 触发侧语义）(2026-08-02)
 
 ## 概述
 

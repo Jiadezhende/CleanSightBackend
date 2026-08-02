@@ -1,5 +1,8 @@
 # 重连判据：帧 staleness → decoder 进程死活（根治启动延迟翻倍）
 
+> **变更状态**：生效中（2026-07-26）
+> **知识库**：已沉淀 → [SERVICE_HEALTH_MONITOR](../kb/SERVICE_HEALTH_MONITOR.md)（断流与重连判据 = decoder 进程死活）、[SERVICE_STREAM](../kb/SERVICE_STREAM.md)（_RTSP_INPUT_OPTS：tcp + -timeout）(2026-08-02)
+
 日期：2026-07-26
 影响模块：health_monitor、stream(decoder/service)、集成/单元测试
 

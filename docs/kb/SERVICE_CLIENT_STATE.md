@@ -1,4 +1,4 @@
-> 更新时间：2026-07-25
+> 更新时间：2026-08-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -42,12 +42,24 @@
 ### 队列与槽位
 
 - `ca_ready`：待推理帧，**无锁 SPSC deque**（单生产者 decoder / 单消费者 dispatcher）。入队走 `append_ca_ready_with_throttle`（整数降采样"每 N 帧留 1"，N=`inference_decimation`，`_decimate_counter` 计数 + 背压），非 wall-clock。
-- `ca_raw` / `ca_processed`：raw / processed HLS 落盘**纯缓冲**（`_raw_lock` / `_viz_lock`）。**不触发落盘**——persistence 的 HLSSegmentSweeper 周期 `take_raw_segment()` / `take_processed_segment()` 主动**拉取**（PULL）。
+- `ca_raw` / `ca_processed`：raw / processed HLS 落盘**纯缓冲**（`_raw_lock` / `_viz_lock`）。**不触发落盘**——persistence 的 HLSSegmentSweeper 周期 `take_raw_segment()` / `take_processed_segment()` 主动**拉取**（PULL）。三条 CA 队列（`ca_ready`/`ca_raw`/`ca_processed`）共享容量 `ca_maxlen`，由 `settings.ca_maxlen_seconds`(默认 **30s**) × `settings.raw_fps`(30) 派生 = **900 帧**（时间为跨子系统货币，帧数换算在 `ClientConfig.ca_maxlen` 属性边界）。`ClientQueues.__init__` 裸建默认 `ca_maxlen=900` 是仅裸建/测试兜底的第二真源，生产路径恒被 `cq_kwargs()` 覆盖。取 30s 的取舍：推理腿 `ca_ready` 被 dispatcher 恒掏空、天花板只兜底；录制腿 `ca_raw` 才需余量（丢帧=录像永久空洞），30s≈3 个 HLS 段吸收分段消费抖动。
 - `_latest_rendered`：最新渲染帧单槽，供 WebSocket 实时推流（前端轮询）。
 - `_latest_inference`：最新推理结果原子快照，供 VisualizationWorker。
 - `_slide_window`：per-stream(detector.name) 检测环形缓冲，供时序分析。保留时长 = `max(10s 底线, 该流感受野)`，感受野经 `set_stream_windows` 由 InferenceManager 配置、只向上扩展（signals_10s 的 10s 不受影响）。
 - `_latest_temporal`：最新时序事件，供前端 overlay 与消息接口。
 - `_alarm_log`：内存告警环形日志（maxlen 100），供 `/task/message/{task_id}`。
+
+### CA 队列配置校验（关系式，非绝对帧数）
+
+`ClientConfig._validate_config`（`services/client/config.py`）只查**关系不变式**、不查绝对帧数——本模块货币是时间，绝对帧阈值语义会随 `raw_fps` 漂移。原 `if ca_maxlen < 300` 地板已删（秒制重构前遗留，其值与 `ca_segment_len` 相等纯属巧合）。现三条判据，阈值提为具名常量：
+
+| # | 判据 | 级别 | 理由 |
+|---|---|---|---|
+| 1 | `ca_segment_seconds < _MIN_SEGMENT_SECONDS`(5.0)，**按秒判** | ⚠️ warning | 段过短 → 段数与每段 ffmpeg 固定开销放大；与 raw_fps 无关 |
+| 2 | `ca_segment_len > ca_maxlen` | ❌ fatal | 装不下一个段 → 永远触发不了分段（数学必然） |
+| 3 | `ca_maxlen < ca_segment_len × _SEGMENT_HEADROOM_RATIO`(1.2) | ⚠️ warning | 无 20% 余量 → 分段消费一抖动就丢帧 → 录像空洞 |
+
+2 与 3 走 `if/elif`：装不下时只报致命那条，不叠加余量告警刷屏。当前配置（段 10s、余量 900/300=3.00×）零告警。校验只发日志、不抛异常（fatal 那条记 ERROR 级日志）。
 
 ## 告警 Gate
 

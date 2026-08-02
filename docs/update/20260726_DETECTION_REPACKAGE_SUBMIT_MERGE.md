@@ -1,7 +1,7 @@
 # detection 模块收口：重命名 + entrypoint 并入 StageWorker + 取帧/提交合流单提交者
 
 > **变更状态**：生效中（2026-07-26）。detection 子包完成命名/打包收口与线程模型简化；行为在稳态下与前一版等价，全套 355 passed。
-> **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（L1 检测子包文件名与线程模型需更新）、`kb/INFER_LAYER_LAYOUT` 相关段落。
+> **知识库**：已沉淀 → [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md)（detection 子包/类名归位 + 单提交者）(2026-08-02)
 >
 > 承接：建立在进程隔离落地之上（[20260726_INFER_PROCESS_ISOLATION_LANDED.md](20260726_INFER_PROCESS_ISOLATION_LANDED.md)）——那次把 GPU 前向拆进 spawn 子进程、走 req_id 异步管线。本次不改推理正确性，只做**命名收口 + 线程模型简化**；该前文里的旧文件名（`infer_worker.py`/`remote_infer.py`/`pool.py`）与 `_inference_loop` 描述均被本次取代。
 

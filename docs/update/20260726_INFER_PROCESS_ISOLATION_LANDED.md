@@ -2,7 +2,7 @@
 
 > **变更状态**：已落地并验证。单路 clean stage 从 ~10fps 天花板升到**稳定 ~15fps**（名义 `inference_fps` 目标）。
 > **根因见** → [20260726_INFER_LAUNCH_BOUND_DIAGNOSIS.md](20260726_INFER_LAUNCH_BOUND_DIAGNOSIS.md)（GIL 争用 / 线程调度，非 compute-bound）。
-> **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（L1 检测子包描述需改：GPU 前向已在独立子进程）。
+> **知识库**：已沉淀 → [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md)（L1 推理进程隔离与单提交者管线）(2026-08-02)
 
 ## 做了什么
 

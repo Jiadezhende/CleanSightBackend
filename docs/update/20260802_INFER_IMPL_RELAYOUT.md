@@ -1,6 +1,7 @@
 # 20260802 推理 impl 按契约包归位（解散 workflows/，每包内建 impl/）
 
-> 增量记录，供后续融合进 KB。校正 KB 里所有 `workflows/` 与 `offline/segmenters/` 落点描述。
+> **变更状态**：生效中（2026-08-02）。impl 按契约包归位随 PR #84 合并落地。
+> **知识库**：已沉淀 → [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md) / [DESIGN_EXTENDING_DETECTION](../kb/DESIGN_EXTENDING_DETECTION.md) / [ARCHITECTURE_DATA_FLOW](../kb/ARCHITECTURE_DATA_FLOW.md) / [BUSINESS_DETECTION_STANDARDS](../kb/BUSINESS_DETECTION_STANDARDS.md) / [ARCHITECTURE_STORAGE_AND_SCHEMA](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md) / 新建 [DESIGN_DETECTION_WORKFLOW](../kb/DESIGN_DETECTION_WORKFLOW.md)(2026-08-02)
 
 ## 动机
 

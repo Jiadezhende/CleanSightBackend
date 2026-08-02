@@ -1,7 +1,7 @@
 # 兜底 stage 启动不变式：把「MOCK 恰好有 detector」的巧合提成显式契约
 
 > **变更状态**：生效中（2026-07-27）。新增一条启动 fail-fast + `FALLBACK_STAGE` 常量收口；现网配置本就满足，行为无变化，357 passed（+2）。
-> **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（stage 路由与启动校验段落）。
+> **知识库**：已沉淀 → [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md)（FALLBACK_STAGE 常量 + 启动 fail-fast 不变式）(2026-08-02)
 >
 > 相关：兜底语义本身见 [20260722_FPS_TIME_VS_FRAME_DECOUPLE.md](20260722_FPS_TIME_VS_FRAME_DECOUPLE.md) 之外的 MOCK 兜底约定——MOCK 是**未知 step 的真兜底**，不是 demo 脚手架，勿删。
 

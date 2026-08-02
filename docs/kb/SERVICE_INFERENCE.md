@@ -1,4 +1,4 @@
-> 更新时间：2026-07-25
+> 更新时间：2026-08-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -10,10 +10,11 @@
 
 | 子包/文件 | 层 | 关键类 | 职责 |
 |-----------|----|--------|------|
-| `detection/detector.py` | L1 | `Detector`（含 `YOLODetector`） | 无状态 GPU 推理，帧→`FrameDetections` + 可视化数据；多 run 共享 |
-| `detection/dispatcher.py` | L1 | `StageAwareDispatcher` | 轮询各 run `pop_ca_ready()`，按 stage 分组，**捕获 CQ 句柄**进 `DetectionTask` |
-| `detection/pool.py` | L1 | `MultiModelWorkerPool` | 按 detector batch 推理（可选 CUDA stream），返回 `FrameInference`（携 `cq`） |
-| `detection/service.py` | L1 | `ModelWorkerService` | 管 dispatcher + worker pool；`_write_back_results` 单入口写回 |
+| `detection/detector.py` | L1 | `Detector`（含 `YOLODetector`） | 无状态 GPU 推理抽象，帧→`FrameDetections` + 可视化数据；多 run 共享（不并入子进程 plumbing） |
+| `detection/dispatcher.py` | L1 | `StageAwareDispatcher` | **唯一提交者**：`_fetch_and_dispatch_round` pop 各 run `pop_ca_ready()`、**捕获 CQ 句柄**进 `_stage_queues[stage]` deque，再 `_drain_and_submit` peek-commit 轮转排空 → `proxy.submit` |
+| `detection/infer_proxy.py` | L1 | `RemoteInferProxy` | 主进程侧代理：spawn 推理子进程、`submit`/pending/collector/supervisor；GPU 前向不在主进程 |
+| `detection/stage_worker.py` | L1 | `StageWorker` + `run_stages`（子进程 entrypoint） | 子进程内 `{stage: StageWorker}` 固定 map，按 stage 路由做串行前向；`run_stages` 为 spawn 后主函数 |
+| `detection/service.py` | L1 | `DetectionService` | 装配 proxy（先构造）+ dispatcher；`_write_back_results` 单入口写回（作 `write_back=` 注入给 proxy collector 回调） |
 | `feature/store.py` | L2 | `FeatureStore` / `FactLedger` | per-`(task_id,step_id)` 落 `features.jsonl`；owner fence |
 | `temporal/operator.py` | L3/L4 | `Operator` / `TemporalOperator` | analyze+judge 合并，持 `_sm`，`subscribes` 显式，`window_seconds` 感受野；`TemporalOperator` 子基类另持 torch 时序模型（惰性 `torch.jit.load`）做动作识别 |
 | `temporal/actor.py` | L3/L4 | `ClientTemporalActor` | per-run ~1Hz tick，跑 operators，烧 stage 别名，收结算告警 |
@@ -23,23 +24,41 @@
 | `detection/impl/` | 接入点 | bubble/bending/clean/mock | 具体 Detector 子类（一文件一基类） |
 | `temporal/impl/` | 接入点 | bubble/bending/clean/mock | 具体 Operator 子类（与检测器同名文件） |
 | `offline/impl/` | 接入点 | clean/mock | 具体 OfflineSegmenter 子类 |
-| `offline/` | 离线 | `OfflineSegmenter`/`OfflineRunner` + `segmenters/{clean,mock}` + `cli` | 独立进程读 `FeatureStore.load`→策略 `preprocess`/`segment`→`OfflineRunner` 校验幂等写 `FactLedger`（详见「离线 segmenter 内部」与 online/offline 分离） |
+| `offline/` | 离线 | `OfflineSegmenter`/`OfflineRunner` + `impl/{clean,mock}` + `cli` | 独立进程读 `FeatureStore.load`→策略 `preprocess`/`segment`→`OfflineRunner` 校验幂等写 `FactLedger`（详见「离线 segmenter 内部」与 online/offline 分离） |
 
 ## InferenceManager（生命周期编排）
 
 `manager.py` 单例 `inference_manager`（`instance.py` 惰性构造，配置 fail-fast）。公开方法：
 
-- `start()` / `stop()`：注册 dispatcher/pool + 初始化 naming 表；`stop()` 两阶段（先 `signal_stop` 全 actor，再 join 收 settlement + flush FeatureStore）。
+- `start()` / `stop()`：注册 dispatcher/proxy + 初始化 naming 表；`stop()` 两阶段（先 `signal_stop` 全 actor，再 join 收 settlement + flush FeatureStore）。
 - `start_workflow(cq)`：`FeatureStore.open_fresh`、按 stage 实例化 operators、建并起 `ClientTemporalActor`。入参是 RunController **已注册**（`client_manager.set`）的 CQ——本方法不再碰注册表（set/remove 均归 RunController，与 `stop_run` 对称）。
 - `stop_workflow(cq) → List[Alarm]`：pop actor、finalize 收结算告警、关 feature 分区，返回 settlement 告警（交 RunController 落库）。
-- `resolve_stage(step_id) → str`：**恒等路由**——`str(step_id)` 命中 stage 配置键则返回，否则告警回落 `MOCK`。stage 是 CQ 不可变身份的一部分（构造时定死）。
+- `resolve_stage(step_id) → str`：**恒等路由**——`str(step_id)` 命中 stage 配置键则返回，否则告警回落 `config.FALLBACK_STAGE`（="MOCK"，inference 模块内单一真源）。stage 是 CQ 不可变身份的一部分（构造时定死）。**启动不变式（fail-fast）**：`_get_stage_configs` 末尾强制 `FALLBACK_STAGE ∈ stage_configs`（兜底 stage 必须 active、有 detector），否则 `RuntimeError`（消息带 active/skipped 清单）。此前纯靠现网 YAML 恰好给 MOCK 配了 detector 幸免；掉一行即把「未知 step 的兜底」变成「黑洞」（帧堆进无人 drain 的 deque 静默淘汰、0 推理无告警）且躲过启动检查。在源头把假设变成契约后，`cq.stage` 恒 active。
 - `set_stream_windows` / `status`。
 
 `start_workflow` / `stop_workflow` 的互斥由 RunController 的 `lock_for(task_id)` 承接，本类不自持 per-client 锁；`_actors: {task_id → ClientTemporalActor}`。
 
+## L1 推理进程隔离与单提交者管线
+
+GPU 前向拆在独立 **spawn 子进程**（`stage_worker.run_stages`），主进程无 CUDA context、不做 GPU 前向。根因：单路 clean 卡 ~10fps 天花板经隔离实验定案为 **GIL 争用/线程调度**（GPU 时钟满但 SM ~12%，kernel 发射线程被 viz/temporal/HLS/dispatcher 抢 GIL 饿到），非 compute-bound；隔离后推理循环独占一把 GIL，稳定到名义 ~15fps。
+
+- **主进程无 CUDA context**：实时时序 GRU（temporal）仍 import torch 但钉 `torch.device("cpu")` + 惰性 import；主进程保留的 detector 实例永不加载模型，viz 只调 CPU 侧 `prepare_visualization_data`。GPU/CUDA context 仅在子进程。**必须 spawn**（CUDA+fork 不安全），子进程从 YAML 自建 `{stage: StageWorker}` map、`.pt` 惰性加载、按 stage 路由串行前向。
+- **单提交者 + peek-commit 轮转排空**：dispatcher 是唯一提交者。每轮先 `_fetch_and_dispatch_round`（pop 各 run `pop_ca_ready`、捕获 CQ 进 `_stage_queues[stage]` deque），再 `_drain_and_submit`：外层 while 转圈、每圈每 stage `_peek_batch`（切片看不移除）→ `submit`，接了才 `_commit_pop`（popleft），被拒即 return（帧原封留 deque、背压沿链上传），整圈无进展即停——显式「每 stage 每圈一批」公平分配，防靠前 stage 吃满饿死后面。
+- **dispatcher↔proxy 接口**只 `submit_batch=proxy.submit` 一条（布尔背压）：请求限流是 proxy 固有职责（`inflight >= max_inflight` 即返 False），不外泄计数（旧 `capacity()` 已删）。背压是沿链上传的传播：`submit` False → 帧留 deque → `infer_backlog` 淘汰 → 上游。
+- **异步管线**：`submit` 起 req_id、`pending[req_id]` 存轻量记录（cq/ts/w/h）弃 frame 引用、`inflight++`，子进程前向与主进程下一批 dispatch 重叠。**`cq` 句柄不过进程边界**——切口在纯数据 `_infer_models(frames, ts)`，cq 只在 dispatcher 捕获、collector 用。collector 守护线程据 req_id 从 `pending.pop` 重组 `FrameInference` 回调写回。单子进程单 req_q FIFO，同 stage 保序；埋点上移主进程。
+- **背压反馈接缝（未接通）**：`_fetch_and_dispatch_round` 有透明 `_admit_to_stage`（恒 True）+ 预留 `_stage_backpressure`（drain 侧写、admit 侧读的单向跨轮通道），供未来「入口按 ts 降帧」，待观测到 inflight 长期贴 max 再接通。
+
+## RemoteInferProxy 防泄漏与监督判据
+
+collector + supervisor 两守护线程护住子进程边界，防孤儿 pending 与静默不可用：
+
+- **防泄漏**：pending 有界（`max_inflight=8`，满则拒收、帧留 deque 由 dispatcher 按 `infer_backlog` 淘汰）；collector 每条响应 `pending.pop(req_id)`；子进程死 / CUDA wedge → supervisor 清空 pending、`inflight` 归零、退避重 spawn。迟到 / 跨 run 结果走原写回口，其 `cq.is_active()` 迟到门 + FeatureStore `owner=cq` fence 原样生效。
+- **监督三判据**（`_supervise_loop` 并列）：`dead`（进程死）、`wedged`（inflight>0 且久无响应）、`_check_not_ready`（**活着但没就绪**）。第三条补一个原本不可恢复的静默失效：`_spawn_child` 只 `ready_ev.wait(ready_timeout=120s)` 一次，warmup 超时（冷盘加载大权重 / GPU 被占 / 驱动 hang）则 dead/wedged 同时哑火 → 永不重启、全链 0 推理。`_check_not_ready` 两步：① 补收迟到就绪信号（读同一 `ready_ev` 置 `_child_ready`，不重来省一次加载）；② 仍超 `ready_timeout` → 判失败走 `_handle_child_failure` kill + 清 pending + 退避重 spawn。模型文件补回 / GPU 让出后自动恢复。
+- `frame_drop_total` 的 reason 全集：dispatcher 侧 `infer_backlog`（deque 满淘汰）、`infer_child_down`（stop 时未及排空）、`infer_child_restart`（重启清孤儿）；过渡期的 `infer_inflight_full` 已随 peek-commit 删除。
+
 ## L1 写回：单入口 + 句柄化 + 状态门
 
-`ModelWorkerService._write_back_results(List[FrameInference])` 是 L1 唯一写回口。每条结果先判 `res.cq.is_active()`（DRAINING/CLOSED 丢弃 → `stale_run` 计数），ACTIVE 才三写：
+`DetectionService._write_back_results(List[FrameInference])` 是 L1 唯一写回口，作 `write_back=` 注入给 proxy、由 collector 守护线程据 req_id 重组后回调（proxy 只「重组 + 回调」，不知 FeatureStore/cq/stale_run）。每条结果先判 `res.cq.is_active()`（DRAINING/CLOSED 丢弃 → `stale_run` 计数），ACTIVE 才三写：
 
 1. `cq.push_detection(FrameFeature(ts=res.timestamp, by_source=res.detections))` → 帧级 `_slide_window`（`Deque[FrameFeature]`，写回口一次物化整帧多流；供 L3，异步缓冲解速差 30fps↔1Hz）。
 2. `cq.set_latest_inference(feature)` → 原子快照（同一 `FrameFeature`，供 Viz；无 `cq`，不成自引用环。Viz 的 stage 取自 `cq.stage`）。
@@ -63,31 +82,28 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 
 ## online / offline 分离
 
-实时链（L1→`_slide_window`→L3 tick 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）**彻底分离**：实时不落 FactLedger，Actor 不 load 事实。两链共用一套货币 **帧级 `FrameFeature`**（`ts + {source: FrameDetections}`）：写回口 `append(feature)` 落盘，离线 `load(task_id, step_id) → List[FrameFeature]`（一次到位、多流已对齐）喂 `OfflineSegmenter.preprocess(frames)`。`offline/` 已接入（独立进程 CLI `python -m app.services.inference.offline.cli run`，见 `runner.py`/`segmenters/`）。
+实时链（L1→`_slide_window`→L3 tick 1Hz）与离线链（`FeatureStore.load` → OfflineSegmenter → FactLedger）**彻底分离**：实时不落 FactLedger，Actor 不 load 事实。两链共用一套货币 **帧级 `FrameFeature`**（`ts + {source: FrameDetections}`）：写回口 `append(feature)` 落盘，离线 `load(task_id, step_id) → List[FrameFeature]`（一次到位、多流已对齐）喂 `OfflineSegmenter.preprocess(frames)`。`offline/` 已接入（独立进程 CLI `python -m app.services.inference.offline.cli run`，见 `runner.py`/`impl/`）。
 
 ## 离线 segmenter 内部（`offline/`）
 
 一策略 = 一个 `OfflineSegmenter` 子类（自包含单文件，实现不散落框架层）；`preprocess(frames)` 抽象、无默认特征工程，`segment(model_input) → List[SegmentFact]`。`OfflineRunner.run(spec)`：`load_many` → `preprocess`/`segment` → `_validate_and_stamp`（每条 `SegmentFact.source==策略 name`、`start<=end`、有限数、`0<=conf<=1`）→ `FactLedger.replace_segments`（按 producer 幂等替换）→ 若策略 `debug_result()` 非空补落 `offline_inference_result.json`。入口 `python -m app.services.inference.offline.cli run --task-id --step-id`（独立进程，torch import 前先置 `CUDA_VISIBLE_DEVICES=""` + 限核，CPU-only），`query` 子命令只读 FactLedger。
 
-- **`segmenters/mock.py` `BrushRulesSegmenter`**：纯规则、不依赖 torch/权重，任一订阅 source 有检测框即判该帧 active、连续帧并段。承担 MOCK stage 端到端 smoke + 非法配置兜底——是**离线的真兜底而非脚手架**。
-- **`segmenters/clean.py`**：CLEAN 三种时序模型集中一文件——`CleanMSTCNBiLSTMSegmenter`（MS-TCN+BiLSTM）、`CleanASFormerSegmenter`、`CleanBiGRUSegmenter`，`CleanSegmenter` 别名默认指向前者。特征工程是**模块级纯函数**（`build_base_features` 出基础 v2 特征 + `add_business_priors`/`add_centered_window_stats`）；多态只在各 segmenter override `preprocess`（基础 `super().preprocess()` 后叠加自己的 recipe），无集中 `feature_method` 路由分支。三模型特征维不同：base v2=113、+business_priors=121、+window_stats+business_priors=249。
+- **`impl/mock.py` `BrushRulesSegmenter`**：纯规则、不依赖 torch/权重，任一订阅 source 有检测框即判该帧 active、连续帧并段。承担 MOCK stage 端到端 smoke + 非法配置兜底——是**离线的真兜底而非脚手架**。
+- **`impl/clean.py`**：CLEAN 三种时序模型集中一文件——`CleanMSTCNBiLSTMSegmenter`（MS-TCN+BiLSTM）、`CleanASFormerSegmenter`、`CleanBiGRUSegmenter`，`CleanSegmenter` 别名默认指向前者。特征工程是**模块级纯函数**（`build_base_features` 出基础 v2 特征 + `add_business_priors`/`add_centered_window_stats`）；多态只在各 segmenter override `preprocess`（基础 `super().preprocess()` 后叠加自己的 recipe），无集中 `feature_method` 路由分支。三模型特征维不同：base v2=113、+business_priors=121、+window_stats+business_priors=249。
   - **权重严格加载**：`torch.load(..., weights_only=False)`（checkpoint 含 numpy normalizer，PyTorch≥2.6 默认拒反序列化；带旧版 `TypeError` fallback）、`load_state_dict(strict=True)`，并校验 checkpoint `feature_version`/`feature_names` 与后端输入一致——不一致即 `ValueError` 硬失败，杜绝"看似跑通实际没加载"。
   - **无权重硬失败**：未配 `model_path` 直接 `ValueError`，**不做规则降级**；本地无权重回环走 MOCK stage。特征矩阵有 `NaN/inf→0` 兜底（拼接后 + normalizer 后各一次）。
   - 训练/导出权重在独立 `offline-model` 仓，后端只加载 checkpoint 推理；`.pt` 权重不入后端仓。当前权重为 baseline，仅验证工程链路闭环；自动任务结束触发离线 Runner/Judge/复算告警/入库仍未实现。
 
-## 推理链路压力与吞吐观测
+## 推理链路压力观测（[PRESSURE] / [VIZ_THROUGHPUT]）
 
-两条正交的**仅压力时打印**诊断日志（平稳静默，均 try/except 包裹绝不影响热路径），与既有 `[BACKPRESSURE]`（入口/录制队列）并存：
-
-- `[INFER_PRESSURE]`（backlog）：把此前无计数的两个静默丢帧点暴露出来——dispatcher `_stage_queues[stage]` 满淘汰（`_stage_drops`）、`ClientQueues.ca_processed` 满淘汰（`frames_dropped_processed`，与 `frames_dropped_raw` 对称、`clear()` 不重置）。dispatcher 约 10s 评估一次，有新增丢帧（delta>0）或队深 ≥ `maxlen*_pressure_queue_ratio` 才打印；日志同给累计值与自上次的 delta。
-- `[VIZ_THROUGHPUT]`（throughput）：VizWorker 量真实成帧 fps / 空转占比（`_stat_stale`，去重命中即上游供帧慢）/ 单帧渲染耗时，据"渲染峰值是否逼近 tick 预算"自动标 `render-bound` / `supply-bound`——定位 processed HLS 回放快放（成帧 fps≪编码 fps）根因在哪一级。顺带删了 `_render` 里外层 `frame.copy()`（render 内部已 copy），省一次整帧 memcpy/帧。
+诊断日志契约统一见 [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)（`[PRESSURE]`/`[VIZ_THROUGHPUT]`/`[BACKPRESSURE]` 三条正交、仅压力时打印、平稳静默）。inference 侧的落点：`StageAwareDispatcher` 在调度循环里每 ~1s 采样自己的 stage deque，经 `PressureReporter` 打 `[PRESSURE] resource=stage_queue`（每资源单一上报者，`ca_processed` 交回 `ClientQueues` 自报、不越权汇总）；`_stage_drops` 记 deque 满淘汰、`_stage_rejects` 记 `submit()` 返 False 的下游拒收，二者并入压力行（`reject_delta>0` 即「下游在拒收」判据）。`VisualizationWorker` 另打 `[VIZ_THROUGHPUT]` 量成帧速率亏空，自动三侧归因（`viz-starved > render-bound > supply-bound`）。
 
 ## Stage 配置与当前阶段
 
 `config/inference_config.yaml`，每 stage 三段 `detectors[]` / `rules[]` / `offline{}`，主键 = step_id 字符串，`alias` = 可读名：
 
 - `"1"` / alias `LEAK`：detectors `bubble` + `bending`；rules `bubble_leak`（realtime）、`bending_check`（settlement）；`offline: {}`。
-- `"2"` / alias `CLEAN`：detectors `clean_large` + `clean_small`；rule `clean_monitor`（`CleanOperator`，订阅两流，`gru-final.pt` 在线动作识别，realtime）。`offline: {}`（生产默认不启用；启用时改 `offline.class` 指向 `segmenters/clean.py` 某模型）。
+- `"2"` / alias `CLEAN`：detectors `clean_large` + `clean_small`；rule `clean_monitor`（`CleanOperator`，订阅两流，`gru-final.pt` 在线动作识别，realtime）。`offline: {}`（生产默认不启用；启用时改 `offline.class` 指向 `impl/clean.py` 某模型）。
 - `MOCK`：未知 step fallback + taskless 默认，在线纯透传（`mock_passthrough` 恒不触发）；`offline` 段启用 `BrushRulesSegmenter` 作**唯一**端到端离线样例（生产 stage 的 offline 保持 `{}`）。
 
 跨模块真旋钮（`raw_fps`/`inference_decimation`）与时间概念（`ca_*_seconds`）在 `app/settings.py` 单一真源（`inference_fps`/`ca_maxlen` 等为其派生量，见 [SERVICE_CONFIG.md](SERVICE_CONFIG.md) 三层模型）；本 YAML 只留 `batch_size` 等推理自有参数 + `model_input_fps` **模型契约**（CleanOperator `params`，随产物钉死、必填、加载期校验，模型侧按 ts 重采样入模）。
@@ -102,11 +118,11 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 ## 代码来源
 
 - `app/services/inference/manager.py`、`instance.py`、`stage_factory.py`、`naming.py`、`models.py`、`config.py`
-- `app/services/inference/detection/{detector,dispatcher,pool,service}.py`
+- `app/services/inference/detection/{detector,dispatcher,infer_proxy,stage_worker,service}.py`
 - `app/services/inference/feature/store.py`
 - `app/services/inference/temporal/{operator,actor,alarm_sink}.py`（`operator.py` 含 `Operator` + `TemporalOperator`）
 - `app/services/inference/visualization/{worker,visualizer,pool}.py`（`worker.py` 含 `[VIZ_THROUGHPUT]`）
 - `app/services/inference/detection/impl/{bubble,bending,clean,mock}.py`（Detector 子类）
 - `app/services/inference/temporal/impl/{bubble,bending,clean,mock}.py`（Operator 子类，`clean.py` 含在线 `CleanOperator`）
-- `app/services/inference/offline/{segmenter,runner,cli}.py`、`offline/segmenters/{clean,mock}.py`
+- `app/services/inference/offline/{segmenter,runner,cli}.py`、`offline/impl/{clean,mock}.py`
 - `config/inference_config.yaml`
