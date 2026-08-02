@@ -8,8 +8,9 @@
 # 4. 可视化使用固定渲染器（FixedVisualizer），Detector 只需提供 VisualizationData
 #
 # 开发者只需：
-# 1. 创建 Detector 子类（实现 infer + prepare_visualization_data），detectors[] 加一行
-# 2. 创建 Operator 子类（实现 analyze + judge，可选 override finalize），rules[] 加一行并声明 subscribes
+# 1. 创建 Detector 子类（detection/impl/<业务>.py，实现 infer + prepare_visualization_data），detectors[] 加一行
+# 2. 创建 Operator 子类（temporal/impl/<业务>.py，实现 analyze + judge，可选 override finalize），rules[] 加一行并声明 subscribes
+#    （离线 Segmenter 子类放 offline/impl/<业务>.py；同业务三者同名文件，class 用全限定路径）
 
 stages:
   # 主键 = step_id（task.current_step，字符串）；alias = 可读名（写告警 step_name + 可视化叠字）
@@ -24,14 +25,14 @@ stages:
     alias: LEAK
     detectors:
       - name: bubble
-        class: app.services.inference.workflows.bubble.BubbleDetector
+        class: app.services.inference.detection.impl.bubble.BubbleDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
       - name: bending
-        class: app.services.inference.workflows.bending.BendingDetector
+        class: app.services.inference.detection.impl.bending.BendingDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.1
@@ -41,14 +42,14 @@ stages:
       - name: bubble_leak
         subscribes: [bubble]
         realtime: true               # 实时信号，纳入 signals_10s
-        class: app.services.inference.workflows.bubble.BubbleOperator
+        class: app.services.inference.temporal.impl.bubble.BubbleOperator
         params:
           window_seconds: 3.0          # 感受野（秒）= 出生率滑窗时长
           birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
       - name: bending_check
         subscribes: [bending]
         realtime: false              # 结算告警，不纳入 signals_10s
-        class: app.services.inference.workflows.bending.BendingOperator
+        class: app.services.inference.temporal.impl.bending.BendingOperator
         params:
           debounce_frames: 5           # 状态切换去抖帧数
           required_bend_actions: 4     # 合格所需最少弯曲次数
@@ -60,14 +61,14 @@ stages:
     alias: CLEAN
     detectors:
       - name: clean_large       # 大目标组：手 / scope_control_body / scope_mid_section
-        class: app.services.inference.workflows.clean.CleanLargeDetector
+        class: app.services.inference.detection.impl.clean.CleanLargeDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-large-best.pt
           conf_threshold: 0.25
           iou_threshold: 0.45
           enabled: true
       - name: clean_small       # 小目标组：syringe / air_gun / scope_distal_end
-        class: app.services.inference.workflows.clean.CleanSmallDetector
+        class: app.services.inference.detection.impl.clean.CleanSmallDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-small-best.pt
           conf_threshold: 0.25
@@ -77,7 +78,7 @@ stages:
       - name: clean_monitor
         subscribes: [clean_large, clean_small]
         realtime: true               # 实时信号，纳入 signals_10s
-        class: app.services.inference.workflows.clean.CleanOperator
+        class: app.services.inference.temporal.impl.clean.CleanOperator
         params:
           window_seconds: 10.0
           # 模型契约帧率：入模前把 ~inference_fps 的窗口按 ts 重采样到此帧率再喂模型。
@@ -103,10 +104,10 @@ stages:
     # offline:
     #   name: clean_offline
     #   subscribes: [clean_large, clean_small]
-    #   class: app.services.inference.offline.segmenters.clean.CleanMSTCNBiLSTMSegmenter
+    #   class: app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter
     #   # 可选模型:
-    #   # class: app.services.inference.offline.segmenters.clean.CleanASFormerSegmenter
-    #   # class: app.services.inference.offline.segmenters.clean.CleanBiGRUSegmenter
+    #   # class: app.services.inference.offline.impl.clean.CleanASFormerSegmenter
+    #   # class: app.services.inference.offline.impl.clean.CleanBiGRUSegmenter
     #   params:
     #     model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm.pt
     offline: {}                      # 生产默认不启用；MOCK stage 提供默认端到端兜底
@@ -116,7 +117,7 @@ stages:
     alias: MOCK
     detectors:
       - name: mock
-        class: app.services.inference.workflows.mock.MockDetector
+        class: app.services.inference.detection.impl.mock.MockDetector
         params:
           brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
@@ -124,7 +125,7 @@ stages:
       - name: mock_passthrough
         subscribes: [mock]
         realtime: true
-        class: app.services.inference.workflows.mock.MockOperator
+        class: app.services.inference.temporal.impl.mock.MockOperator
         params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
     # 离线段：本次唯一启用的 offline 配置，作「能端到端跑的配置化路由样例」。
@@ -134,7 +135,7 @@ stages:
     offline:                           # 非空即启用（无需 enabled 开关）；生产 stage 保持 {} 禁用
       name: mock_offline
       subscribes: [mock]
-      class: app.services.inference.offline.segmenters.mock.BrushRulesSegmenter
+      class: app.services.inference.offline.impl.mock.BrushRulesSegmenter
       params:
         label: mock_action
         min_frames: 1

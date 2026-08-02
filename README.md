@@ -29,7 +29,7 @@ app/
 │   ├── run_control.py   # RunController — 跨服务起停一次 run 的单一编排出口
 │   ├── client/          # ClientManager 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
-│   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ workflows/ offline/
+│   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
 │   ├── persistence/     # HLS 落盘 + 告警落库（strategies/ workers/）
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunController）
 │   ├── traceback/       # 溯源段定位 + 媒体 token 鉴权

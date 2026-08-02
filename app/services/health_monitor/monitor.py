@@ -51,23 +51,10 @@ class GlobalHealthMonitor:
         self._stream_service = stream_service
         self._inference_manager = inference_manager
 
-        # 配置
+        # 配置：各阈值一律在用处直读 `self.config.*`，**不在此摊成同名实例属性**。
+        # 那层拷贝原是给 cleanup_timeout 的派生式（heartbeat + interval×attempts）安身的；
+        # 派生式删掉后它们全成了恒等副本，只是把「这个数打哪来」多藏了一跳。
         self.config = config or HealthMonitorConfig()
-        self._check_interval = self.config.check_interval
-        self.suspect_timeout = self.config.heartbeat_timeout
-
-        # 使用新的配置参数名 reconnect_interval（旧名 restart_delay）
-        self.reconnect_interval = self.config.reconnect_interval
-        self.max_reconnect_attempts = self.config.max_reconnect_attempts
-
-        # 计算派生超时值
-        self.cleanup_timeout = self.config.heartbeat_timeout + (
-            self.config.reconnect_interval * self.config.max_reconnect_attempts
-        )
-        self.orphan_timeout = self.config.orphan_timeout
-
-        # 重连成功判定阈值（与心跳超时一致）
-        self.reconnect_success_threshold = self.config.heartbeat_timeout
 
         # 线程控制
         self._stop_event = threading.Event()
@@ -76,16 +63,14 @@ class GlobalHealthMonitor:
         # 重连状态（键 = task_id）
         self._reconnecting_clients: Dict[int, ReconnectState] = {}
 
-        # 孤儿流跟踪（键 = task_id，记录最后活跃时间）
-        self._last_activity: Dict[int, float] = {}
-
-        # 累计统计（生命周期内的总计）
+        # 累计统计（生命周期内的总计）。三个重连计数是一组，读法：
+        # 检测到断线 disconnects 次 → 发起 respawn reconnects 次 → 恢复 reconnect_successes 次。
         self._stats = {
             "checks": 0,
-            "suspects": 0,
+            "disconnects": 0,          # 检测到 decoder 进程死、进入重连模式的次数（含首启失败）
             "cleanups": 0,
-            "reconnects": 0,
-            "reconnect_successes": 0,
+            "reconnects": 0,           # 发起 respawn 的次数
+            "reconnect_successes": 0,  # 真来新帧、判定恢复的次数
             "orphans_detected": 0,
         }
 
@@ -109,10 +94,12 @@ class GlobalHealthMonitor:
             target=self._monitor_loop, daemon=True, name="GlobalHealthMonitor"
         )
         self._thread.start()
+        # 报 cleanup_timeout 而非 heartbeat_timeout：前者才是这条线上唯一还在做判定的时限
+        # （「可疑」区间随进程死活判据一并删除，heartbeat_timeout 现只作重连成功的新帧新鲜度阈值）。
         logger.info(
-            "[GlobalHealthMonitor] Started (check_interval=%.1fs, timeout=%.1fs)",
-            self._check_interval,
-            self.suspect_timeout,
+            "[GlobalHealthMonitor] Started (check_interval=%.1fs, cleanup_timeout=%.1fs)",
+            self.config.check_interval,
+            self.config.cleanup_timeout,
         )
 
     def stop(self):
@@ -131,7 +118,7 @@ class GlobalHealthMonitor:
             try:
                 self._check_all_clients()
                 self._stats["checks"] += 1
-                self._stop_event.wait(timeout=self._check_interval)
+                self._stop_event.wait(timeout=self.config.check_interval)
             except Exception as e:
                 logger.error(
                     f"[GlobalHealthMonitor] Error in monitor loop: {e}", exc_info=True
@@ -184,32 +171,25 @@ class GlobalHealthMonitor:
             has_decoder = task_id in active_decoders
 
             if has_decoder:
-                # 有解码器：检查流健康
+                # 判据 = decoder 子进程死活（非帧 staleness）。实测：RTSP 断流时 ffmpeg 从 TCP
+                # 控制通道即收 EOF 退出（且 -timeout 兜底把真挂死也转成退出），故「进程是否活」
+                # 能干净区分：进程死=断流/崩溃(该重启)，进程活但无帧=等首个关键帧/瞬时停(该等)。
                 last_frame_time = cq.latest_raw_timestamp
-
-                # 防御性检查：如果 timestamp 异常为 0，跳过
-                if last_frame_time == 0:
-                    logger.warning(
-                        "[GlobalHealthMonitor] WARN: %s has zero timestamp (unexpected)", task_id
-                    )
-                    continue
-
                 idle_time = current_time - last_frame_time
 
-                # 进入重连模式（suspect_timeout ~ cleanup_timeout 之间）
-                if (
-                    idle_time >= self.suspect_timeout
-                    and idle_time < self.cleanup_timeout
-                ):
+                if not self._stream_service.is_decoder_alive(task_id):
+                    # 进程已退出（断流 EOF / 崩溃 / 首启失败）→ 进入重连（respawn）。
+                    # 比旧的「等 5s 帧 staleness」更快：下一 tick 即感知。
                     self._enter_reconnect_mode(task_id, last_frame_time, cq)
-
-                # 超过 cleanup_timeout，放弃重连，执行清理
-                elif idle_time >= self.cleanup_timeout:
+                elif last_frame_time > 0 and idle_time >= self.config.cleanup_timeout:
+                    # 进程活着却长时间无帧（真挂死正常已被 decoder 的 -timeout 转成进程死，
+                    # 此为最后防线）→ 放弃清理。
                     logger.warning(
-                        "[GlobalHealthMonitor] TIMEOUT: %s, no frames for %.1fs, giving up reconnect",
+                        "[GlobalHealthMonitor] TIMEOUT: %s alive but no frames for %.1fs, giving up",
                         task_id, idle_time
                     )
                     self._exit_reconnect_mode(task_id, cleanup=True)
+                # else: 进程活着且无帧未超时（等首帧/恢复中）→ 只等，不动
             else:
                 # 无解码器：检查是否为孤儿流（有队列但无解码器）
                 self._handle_potential_orphan(task_id, cq, current_time)
@@ -222,7 +202,7 @@ class GlobalHealthMonitor:
                 self._handle_orphan_decoder(task_id)
 
     def _enter_reconnect_mode(self, task_id: int, last_frame_time: float, cq):
-        """进入重连模式（捕获当前槽位 cq 作对象身份 fence 基准）"""
+        """进入重连模式：decoder 进程已死，起 respawn 循环（捕获 cq 作对象身份 fence 基准）。"""
         # 从 StreamService 获取流配置
         stream_info = self._stream_service.get_stream_info(task_id)
         if not stream_info:
@@ -234,17 +214,17 @@ class GlobalHealthMonitor:
         self._reconnecting_clients[task_id] = ReconnectState(
             task_id=task_id,
             stream_url=stream_info["url"],
-            attempt_count=0,
             last_attempt_time=0,  # 初始为 0，表示还未尝试
             last_frame_time_before_disconnect=last_frame_time,  # 记录断流前的最后帧时间
             cq=cq,  # 捕获进入重连时的 CQ，作为拆除时的对象身份核对基准
         )
 
         logger.warning(
-            "[GlobalHealthMonitor] RECONNECT MODE: %s, will retry every %ss (max %d times)",
-            task_id, self.reconnect_interval, self.max_reconnect_attempts
+            "[GlobalHealthMonitor] RECONNECT MODE: %s, decoder process dead; "
+            "will respawn every %ss until frames resume or cleanup_timeout(%.0fs)",
+            task_id, self.config.reconnect_interval, self.config.cleanup_timeout
         )
-        self._stats["suspects"] += 1  # 累计统计：进入重连模式的次数
+        self._stats["disconnects"] += 1  # 累计统计：检测到断线、进入重连模式的次数
 
     def _handle_reconnecting_client(self, task_id: int, cq, current_time: float):
         """处理重连中的客户端"""
@@ -260,71 +240,51 @@ class GlobalHealthMonitor:
             del self._reconnecting_clients[task_id]
             return
 
-        # 检查是否有新帧（重连成功）
+        # 成功判定 = 真的来了新帧（不是「进程活着」——respawn 后新进程还在等首个关键帧时
+        # 也活着但无帧，此刻不能判成功、更不能重杀）。新帧须足够新，避免读到陈旧 ts 误判。
         new_frame_time = cq.latest_raw_timestamp
         if new_frame_time > state.last_frame_time_before_disconnect:
-            # 检查新帧是否足够新（避免误判）
             frame_age = current_time - new_frame_time
-            if frame_age < self.reconnect_success_threshold:
+            # 新鲜度阈值复用 heartbeat_timeout（此处直读而非另起别名：别名会把
+            # 「调 heartbeat_timeout 会连带动到重连成功判定」这层耦合藏起来）
+            if frame_age < self.config.heartbeat_timeout:
                 logger.info(
-                    "[GlobalHealthMonitor] RECONNECT SUCCESS: %s, new frames detected (attempt %d)",
-                    task_id, state.attempt_count
+                    "[GlobalHealthMonitor] RECONNECT SUCCESS: %s, new frames detected", task_id
                 )
                 self._stats["reconnect_successes"] += 1  # 累计统计：重连成功的次数
                 self._exit_reconnect_mode(task_id, cleanup=False)
                 return
 
-        # 检查是否到达重连间隔
-        time_since_last_attempt = current_time - state.last_attempt_time
-        if time_since_last_attempt < self.reconnect_interval:
-            logger.debug(
-                "[GlobalHealthMonitor] %s waiting for reconnect interval "
-                "(elapsed=%.1fs, need=%ss, attempts=%d/%d)",
-                task_id, time_since_last_attempt, self.reconnect_interval,
-                state.attempt_count, self.max_reconnect_attempts
-            )
-            return
-
-        # 检查是否超过最大重连次数
-        if state.attempt_count >= self.max_reconnect_attempts:
-            idle_time = current_time - new_frame_time
+        # 放弃判定 = 纯时间：无帧时长 ≥ cleanup_timeout（不再数重连次数）。
+        idle_time = current_time - new_frame_time
+        if idle_time >= self.config.cleanup_timeout:
             logger.error(
-                "[GlobalHealthMonitor] RECONNECT FAILED: %s, no frames for %.1fs, max attempts (%d) reached",
-                task_id, idle_time, self.max_reconnect_attempts
+                "[GlobalHealthMonitor] RECONNECT FAILED: %s, no frames for %.1fs "
+                "(>= cleanup_timeout %.0fs), giving up",
+                task_id, idle_time, self.config.cleanup_timeout
             )
             self._exit_reconnect_mode(task_id, cleanup=True)
             return
 
-        # 尝试重连
-        state.attempt_count += 1
+        # 进程活着但还没来帧（respawn 已起活进程、正等首个关键帧 / 连接中）→ 只等，
+        # 绝不 restart 一个活着的进程（否则把「等首帧被杀」的 bug 搬进重连循环）。
+        if self._stream_service.is_decoder_alive(task_id):
+            return
+
+        # 进程仍死：按 reconnect_interval 节流后 respawn（无次数上限，由上面的 cleanup_timeout 收口）。
+        if current_time - state.last_attempt_time < self.config.reconnect_interval:
+            return
         state.last_attempt_time = current_time
-        state.last_frame_time_before_disconnect = new_frame_time
+        self._stats["reconnects"] += 1  # 累计统计：respawn 次数
 
+        # respawn dead decoder。restart_stream 自带成功("Stream restarted successfully")/
+        # 失败("restart_stream failed: <error>")日志，此处不再重复记，避免一次 attempt 打双 WARNING。
+        # 成功 → 下一 tick 检测到新帧走 RECONNECT SUCCESS；失败 → 下个 reconnect_interval 再试，
+        # 无帧满 cleanup_timeout 收口。
         logger.info(
-            "[GlobalHealthMonitor] RECONNECT ATTEMPT %d/%d: %s",
-            state.attempt_count, self.max_reconnect_attempts, task_id
+            "[GlobalHealthMonitor] RECONNECT ATTEMPT: %s (respawn dead decoder)", task_id
         )
-        self._stats["reconnects"] += 1  # 累计统计：重连尝试的总次数
-
-        # 调用 StreamService 重启 decoder
-        # 职责边界：健康监控器自己管理重试逻辑，不依赖 GuardedExecutor
-        success = self._stream_service.restart_stream(
-            task_id=task_id,
-            stream_url=state.stream_url,
-        )
-
-        if success:
-            logger.debug(
-                "[GlobalHealthMonitor] Decoder restarted for %s, waiting for frames...", task_id
-            )
-        else:
-            # 重试将在下一个检查周期自动触发（由 reconnect_interval 控制）
-            logger.warning(
-                "[GlobalHealthMonitor] Reconnect attempt %d failed for %s, will retry in %ss",
-                state.attempt_count, task_id, self.reconnect_interval
-            )
-
-        # 在下一次检查周期判断是否有新帧到达（无论本次成功与否）
+        self._stream_service.restart_stream(task_id=task_id, stream_url=state.stream_url)
 
     def _exit_reconnect_mode(self, task_id: int, cleanup: bool):
         """退出重连模式
@@ -392,7 +352,6 @@ class GlobalHealthMonitor:
 
         # 步骤 0: 清理监控器自身的客户端状态（HealthMonitor 专属，防内存泄漏）
         self._reconnecting_clients.pop(task_id, None)
-        self._last_activity.pop(task_id, None)
 
         # 步骤 1-3: 委托给 RunController（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
         from app.services.run_control import run_controller
@@ -412,14 +371,14 @@ class GlobalHealthMonitor:
         """
         logger.error(
             "[GlobalHealthMonitor] STREAM CONNECTION FAILED: %s | "
-            "Reason: Reconnect failed after %d attempts | Action: Executing full cleanup...",
-            task_id, self.max_reconnect_attempts
+            "Reason: no frames within cleanup_timeout(%.0fs) | Action: Executing full cleanup...",
+            task_id, self.config.cleanup_timeout
         )
 
         # 委托给统一的清理方法
         result = self.cleanup_client(
             task_id=task_id,
-            reason=f"Reconnect failed after {self.max_reconnect_attempts} attempts",
+            reason=f"No frames within cleanup_timeout ({self.config.cleanup_timeout:.0f}s)",
             expected=expected,
         )
 
@@ -436,14 +395,10 @@ class GlobalHealthMonitor:
 
     def _handle_task_timeout(self, task_id: int, cq, task_age: float):
         """处理任务超时：仅执行运维治理动作，不产出业务告警。"""
-        task_id = cq.task_id
-        hours = task_age / 3600
-        max_hours = self.config.task_max_duration / 3600
-
+        # 注：入参 task_id 即 cq.task_id（client_id/task_id 合一后同一个键），不再重取覆盖
         logger.error(
-            "[GlobalHealthMonitor] TASK TIMEOUT: client=%s, task_id=%s, "
-            "running=%.1fh, max=%.1fh",
-            task_id, task_id, hours, max_hours,
+            "[GlobalHealthMonitor] TASK TIMEOUT: task_id=%s, running=%.1fh, max=%.1fh",
+            task_id, task_age / 3600, self.config.task_max_duration / 3600,
         )
 
         self._stats["cleanups"] += 1
@@ -464,17 +419,12 @@ class GlobalHealthMonitor:
             cq: ClientQueues 实例
             current_time: 当前时间戳
         """
-        last_frame_time = cq.latest_raw_timestamp
-
-        # 更新最后活跃时间
-        if task_id not in self._last_activity:
-            self._last_activity[task_id] = last_frame_time
-
-        # 计算空闲时间
-        idle_time = current_time - last_frame_time
+        # 空闲时长直接由帧 ts 算（不另存"最后活跃时间"：cq.latest_raw_timestamp 本身就是它，
+        # 再存一份只会多一处要同步的状态）
+        idle_time = current_time - cq.latest_raw_timestamp
 
         # 如果超过孤儿流超时时间，执行完整清理
-        if idle_time >= self.orphan_timeout:
+        if idle_time >= self.config.orphan_timeout:
             logger.warning(
                 f"[GlobalHealthMonitor] ORPHAN STREAM detected: {task_id}, "
                 f"idle for {idle_time:.1f}s (no decoder), cleaning up"
@@ -488,9 +438,6 @@ class GlobalHealthMonitor:
                 skip_decoder=True,  # 孤儿流没有解码器
                 expected=cq,
             )
-
-            # 清理活跃时间记录
-            self._last_activity.pop(task_id, None)
 
             if result["errors"]:
                 logger.error(
@@ -559,7 +506,7 @@ class GlobalHealthMonitor:
                 },
                 "monitor_stats": {
                     "checks": int,
-                    "suspects": int,
+                    "disconnects": int,
                     "cleanups": int,
                     ...
                 }

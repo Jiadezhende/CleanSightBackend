@@ -96,7 +96,7 @@ class Settings(BaseSettings):
                                # raw_fps 的整除率（30→15/10/7.5/6…，不支持 30→20 类非整除比）；模型侧另按 ts 重采样到 7.5。
                                # env: CLEANSIGHT_INFERENCE_DECIMATION
     # CA 缓存/段长本是"时间概念"，以秒声明（时间为跨子系统货币）；帧数在各消费边界按 raw_fps 显式换算。
-    ca_maxlen_seconds: int = 90    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
+    ca_maxlen_seconds: int = 30    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
     ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
 
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
@@ -110,7 +110,13 @@ class Settings(BaseSettings):
     gateway_rate_window: int = 60            # 速率窗口大小（秒）
     gateway_rate_ban_threshold: int = 5      # 速率超限违规次数阈值（达到后封禁，0=不封禁）
     gateway_rate_ban_window: int = 60        # 速率超限违规计数窗口（秒）
-    gateway_relaxed_prefixes: str = "/health,/task/message,/admin-f3m8,/metrics"  # 宽松路径前缀（逗号分隔）
+    # 宽松路径前缀（逗号分隔）。大屏侧 /task/live、/task/history、/traceback 必须在列：
+    # 前两者是跨 origin 轮询，浏览器的 CORS 预检 OPTIONS 与实际请求各计一次数，普通
+    # 配额（60/60s）撑不住；/traceback 的 404 是正常业务态（只落了 raw 的 step 按默认
+    # track=processed 查即 404），不该被反扫描当扫描特征累计。
+    gateway_relaxed_prefixes: str = (
+        "/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/metrics"
+    )
     gateway_relaxed_rate_limit: int = 600    # 宽松路径每窗口最大请求数
     gateway_bypass_prefixes: str = "/media"  # 完全绕过速率限制与反扫描的前缀（仅靠路由层 token 鉴权），逗号分隔
     gateway_scan_threshold: int = 10         # 触发封禁的 404/405 次数（路径/方法枚举扫描）

@@ -5,7 +5,7 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 
 # 时序分析器接入 Review
 
-新时序分析器 = 一个 `Operator` 子类（analyze+judge 合一、单 `self._sm`）内嵌序列模型（GRU/Transformer…），把检测框滑窗喂成动作/状态。架构原理见 [workflows/CLAUDE.md](../../../app/services/inference/workflows/CLAUDE.md) 与 [operator.py](../../../app/services/inference/temporal/operator.py) docstring，本 skill 只讲**怎么审**。
+新时序分析器 = 一个 `Operator` 子类（analyze+judge 合一、单 `self._sm`）内嵌序列模型（GRU/Transformer…），把检测框滑窗喂成动作/状态。架构原理见 [DESIGN_DETECTION_WORKFLOW.md](../../../docs/kb/DESIGN_DETECTION_WORKFLOW.md) 与 [operator.py](../../../app/services/inference/temporal/operator.py) docstring，本 skill 只讲**怎么审**。
 
 按严重度分档：**🔴 静默错 > 🟠 崩溃 > 🟡 生命周期/因果 > ⚪ 契约/放置/风格**。静默错最贵——不报错、结果错，模型背锅。逐档过下列清单，每档发现如实归档，别拿风格问题挤掉静默错。
 
@@ -44,7 +44,7 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 
 - **Operator 契约**：`analyze` 推 `_sm` 不返回、`judge` 读 `_sm` 出 `(events, alarms)`；别塞领域字段，派生量走 `Detection.extra` / `FrameDetections.metadata`。
 - **realtime 标志**：`true` = 纳入 signals_10s（会触发 `AlarmMetric(stream.upper())` 映射）；纯 overlay 无告警可设 `false`。
-- **放置**：可复用模型基类（如 `GRUOperator`）放 [operator.py](../../../app/services/inference/temporal/operator.py) 抽象 `Operator` 旁，与 `YOLODetector`/`Detector` 同构；具体规则放 `workflows/`。
+- **放置**：可复用模型基类（如 `GRUOperator`）放 [operator.py](../../../app/services/inference/temporal/operator.py) 抽象 `Operator` 旁，与 `YOLODetector`/`Detector` 同构；具体规则放 `temporal/impl/<业务>.py`（一文件一基类）。
 - **风格**：类/模块 docstring 对齐同层写法；未接入的模型（如闲置 transformer）标注"离线/实验预留"，别当死代码留白；行尾空格 / EOF 换行。
 
 ## YAML 装配 — 配置随产物，不进部署 YAML（核心不变式）

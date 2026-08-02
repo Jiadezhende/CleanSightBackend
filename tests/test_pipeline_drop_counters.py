@@ -5,10 +5,13 @@
 - ClientQueues.ca_processed 满（maxlen）时静默淘汰 → frames_dropped_processed
 """
 
-from unittest.mock import MagicMock, patch
+import logging
+import time
+from unittest.mock import MagicMock
 
 from factories import make_bare_cq, make_frame
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
+from app.utils.pressure import PRESSURE_LOGGER_NAME
 
 
 def _frame():
@@ -63,31 +66,81 @@ def test_ca_processed_drop_counted_on_overflow():
     assert cq.get_ca_processed_length() == 3
 
 
-def test_pressure_snapshot_silent_when_calm():
-    """平稳（无丢帧、队列浅）时不应打印 [INFER_PRESSURE]，避免刷屏。"""
+def test_pressure_snapshot_silent_when_calm(caplog):
+    """平稳（无丢帧、队列浅）时不应打印 [PRESSURE]，避免刷屏。"""
     cm = MagicMock()
     cm.snapshot.return_value = {}
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
-    with patch("app.services.inference.detection.dispatcher.logger") as log:
+    with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
+        dispatcher._log_pressure_snapshot()
         dispatcher._log_pressure_snapshot()
 
-    log.info.assert_not_called()
+    assert "[PRESSURE]" not in caplog.text
 
 
-def test_pressure_snapshot_logs_on_drop():
-    """有新增丢帧时应打印一行 [INFER_PRESSURE]。"""
+def test_pressure_snapshot_logs_on_drop(caplog):
+    """新增丢帧（delta>0）应打出一行 —— 即便队列此刻是浅的。
+
+    丢完就空，水位天然测不到；"还在丢"必须自己成为压力信号。
+    首次采样只播种基线（不把历史累计当成刚发生的），第二次才见涨。
+    """
     cm = MagicMock()
     cm.snapshot.return_value = {}
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
-    dispatcher._stage_drops["CLEAN"] = 5  # 自上次报告以来新增丢帧
+    dispatcher._stage_queues["CLEAN"]  # 触发 defaultdict 建 deque
+    dispatcher._stage_drops["CLEAN"] = 0
 
-    with patch("app.services.inference.detection.dispatcher.logger") as log:
+    with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
+        dispatcher._log_pressure_snapshot()          # 播种基线
+        assert "[PRESSURE]" not in caplog.text
+        dispatcher._stage_drops["CLEAN"] = 5         # 自上次报告以来新增丢帧
         dispatcher._log_pressure_snapshot()
 
-    log.info.assert_called_once()
-    # 渲染最终消息文本，校验含标记与 delta
-    fmt, *args = log.info.call_args.args
-    rendered = fmt % tuple(args)
-    assert "[INFER_PRESSURE]" in rendered
-    assert "drop=5(+5)" in rendered
+    assert "component=dispatcher resource=stage_queue stage=CLEAN" in caplog.text
+    assert "drop_total=5 drop_delta=5" in caplog.text
+
+
+def test_submit_rejection_counted_into_pressure_line(caplog):
+    """proxy 拒收（submit 返 False）不再是静默布尔——提交侧计数并进周期压力行。"""
+    cq = make_bare_cq(ca_maxlen=10)
+    cq.ca_ready.append(make_frame(ts=time.time(), shape=(2, 2, 3)))
+    cm = MagicMock()
+    cm.snapshot.return_value = {"c1": cq}
+    stage = cq.stage
+    dispatcher = StageAwareDispatcher(
+        client_manager_instance=cm,
+        active_stages=[stage],
+        submit_batch=lambda batch: False,      # 冒充 proxy 在途满
+    )
+
+    dispatcher._fetch_and_dispatch_round()
+    dispatcher._drain_and_submit()
+
+    assert dispatcher._stage_rejects[stage] == 1
+    assert len(dispatcher._stage_queues[stage]) == 1   # 被拒不丢帧，帧原封留 deque
+
+    with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
+        dispatcher._log_pressure_snapshot()            # 播种基线
+        dispatcher._drain_and_submit()                 # 再撞一次
+        dispatcher._log_pressure_snapshot()
+
+    assert "reject_total=2 reject_delta=1" in caplog.text
+
+
+def test_pressure_snapshot_reports_stage_only(caplog):
+    """dispatcher 只报自己的 stage deque，不代 ClientQueues 汇总 ca_processed。"""
+    cq = make_bare_cq(ca_maxlen=10)
+    cm = MagicMock()
+    cm.snapshot.return_value = {"c1": cq}
+    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+
+    q = dispatcher._stage_queues["CLEAN"]
+    for _ in range(q.maxlen):
+        q.append(make_frame(ts=time.time(), shape=(2, 2, 3)))
+
+    with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
+        dispatcher._log_pressure_snapshot()
+
+    assert "resource=stage_queue" in caplog.text
+    assert "ca_processed" not in caplog.text

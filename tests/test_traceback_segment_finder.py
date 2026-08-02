@@ -4,12 +4,14 @@ SegmentFinder 单元测试
 覆盖：
 - list_segments：按 ts_us 升序返回，过滤非匹配文件
 - find：二分定位 + 上下文扩展
+- list_steps / list_task_ids / list_task_ids_by_recency：清单接口的落盘枚举
 - 边界：ts_ms 早于第一段、晚于最后一段、空目录、track 非法
 - 路径不存在 → 返回空列表
 
 落盘约定：{base_dir}/{task_id}/{step_id}/
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -147,6 +149,94 @@ class TestFind:
             finder_with_segments.find(1, 1, ts_ms=12_000, track="processed", n_before=-1, n_after=0)
         with pytest.raises(ValueError):
             finder_with_segments.find(1, 1, ts_ms=12_000, track="processed", n_before=0, n_after=-1)
+
+
+class TestListSteps:
+    """list_steps：清单接口的落盘 step 摘要（含 tracks 与真实段时间范围）。"""
+
+    def test_returns_empty_when_task_dir_missing(self, tmp_path):
+        assert SegmentFinder(tmp_path).list_steps(999) == []
+
+    def test_reports_tracks_actually_on_disk(self, tmp_path):
+        # step 1 双轨，step 2 只有 raw —— 后者是大屏按 track 默认 processed 打 404 的成因
+        d1 = _make_task_dir(tmp_path, 7, 1)
+        _touch_segment(d1, "raw", 1000)
+        _touch_segment(d1, "processed", 1000)
+        d2 = _make_task_dir(tmp_path, 7, 2)
+        _touch_segment(d2, "raw", 5000)
+
+        steps = SegmentFinder(tmp_path).list_steps(7)
+
+        assert [s.step_id for s in steps] == [1, 2]
+        assert steps[0].tracks == ("raw", "processed")
+        assert steps[1].tracks == ("raw",)
+
+    def test_ts_range_spans_both_tracks(self, tmp_path):
+        d = _make_task_dir(tmp_path, 7, 1)
+        _touch_segment(d, "raw", 1000)
+        _touch_segment(d, "raw", 4000)
+        _touch_segment(d, "processed", 2000)
+
+        step = SegmentFinder(tmp_path).list_steps(7)[0]
+        assert step.first_ts_us == 1000
+        assert step.last_ts_us == 4000
+
+    def test_drops_step_dir_without_segments(self, tmp_path):
+        _make_task_dir(tmp_path, 7, 1)  # 目录建了但没段（起流即失败）
+        d2 = _make_task_dir(tmp_path, 7, 2)
+        _touch_segment(d2, "raw", 1000)
+
+        assert [s.step_id for s in SegmentFinder(tmp_path).list_steps(7)] == [2]
+
+    def test_skips_non_numeric_step_dirs(self, tmp_path):
+        (tmp_path / "7" / "scratch").mkdir(parents=True)
+        d = _make_task_dir(tmp_path, 7, 1)
+        _touch_segment(d, "raw", 1000)
+
+        assert [s.step_id for s in SegmentFinder(tmp_path).list_steps(7)] == [1]
+
+
+class TestListTaskIds:
+    def test_returns_empty_when_base_dir_missing(self, tmp_path):
+        assert SegmentFinder(tmp_path / "nope").list_task_ids() == []
+
+    def test_skips_non_numeric_dirs_and_sorts(self, tmp_path):
+        for task_id in (30, 10, 20):
+            _make_task_dir(tmp_path, task_id, 1)
+        (tmp_path / ".lab_exports").mkdir()
+        (tmp_path / "README.md").write_text("x")
+
+        assert SegmentFinder(tmp_path).list_task_ids() == [10, 20, 30]
+
+
+class TestListTaskIdsByRecency:
+    """mtime 粗排：只用于挑深扫候选，不对外当时间戳。"""
+
+    def test_orders_by_newest_step_dir_mtime(self, tmp_path):
+        for task_id, mtime in ((1, 1_000), (2, 3_000), (3, 2_000)):
+            d = _make_task_dir(tmp_path, task_id, 1)
+            _touch_segment(d, "raw", 100)
+            os.utime(d, (mtime, mtime))  # 确定的 mtime，不靠写入顺序
+
+        assert SegmentFinder(tmp_path).list_task_ids_by_recency() == [2, 3, 1]
+
+    def test_uses_max_step_mtime_within_a_task(self, tmp_path):
+        old = _make_task_dir(tmp_path, 1, 1)
+        new = _make_task_dir(tmp_path, 1, 2)
+        os.utime(old, (1_000, 1_000))
+        os.utime(new, (9_000, 9_000))
+        other = _make_task_dir(tmp_path, 2, 1)
+        os.utime(other, (5_000, 5_000))
+
+        # task 1 取 max(1000, 9000)=9000 → 排在 task 2 前面
+        assert SegmentFinder(tmp_path).list_task_ids_by_recency() == [1, 2]
+
+    def test_task_without_step_dirs_sorts_last_but_is_kept(self, tmp_path):
+        d = _make_task_dir(tmp_path, 1, 1)
+        os.utime(d, (1_000, 1_000))
+        (tmp_path / "2").mkdir()  # 空 task 目录：排序键 0，仍保留由调用方深扫丢弃
+
+        assert SegmentFinder(tmp_path).list_task_ids_by_recency() == [1, 2]
 
 
 class TestSegmentRef:

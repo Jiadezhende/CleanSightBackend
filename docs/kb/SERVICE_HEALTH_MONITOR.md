@@ -20,15 +20,20 @@
 
 内部状态按 task_id 键：`_reconnecting_clients: {task_id → ReconnectState}`、`_last_activity: {task_id → float}`。
 
-## 断流与重连
+## 断流与重连（判据 = decoder 进程死活）
 
-若有 decoder 但 `latest_raw_timestamp` 超过 `suspect_timeout`（= heartbeat_timeout，默认 5s）未更新，进入重连模式。`ReconnectState`（`types.py`）字段：`task_id`、`stream_url`、`attempt_count`、`last_attempt_time`、`last_frame_time_before_disconnect`、`cq`（捕获的 CQ 对象引用，作身份 fence 依据）。无 fps/protocol 字段（固定 RTSP、fps 走配置）。到达重连间隔后调 `stream_service.restart_stream()`；有足够新的新帧则退出重连。
+判据是**后端 decoder 子进程是否存活**（`stream_service.is_decoder_alive(task_id)`），**不是**帧 staleness。依据：实测 RTSP 断流时后端 ffmpeg 从 TCP 控制通道即收 EOF 退出（decoder 的 `-timeout` 兜底把「真·网络分区」下的挂死也转成退出），故进程死活能干净区分——
+
+- **进程已退出**（断流 EOF / 崩溃 / 首启失败）→ 进入重连模式，按 `reconnect_interval` 节流反复 `restart_stream()`（respawn）；某次 respawn 起活进程并来足够新的新帧 → 退出重连（成功）。比旧的 5s staleness 判据更快感知。
+- **进程活着但暂无帧**（等首个关键帧 / 瞬时停）→ **只等，不杀**（根治「等首帧被误杀→重连→再等一个 GOP」的启动延迟翻倍 bug）。
+
+`ReconnectState`（`types.py`）字段：`task_id`、`stream_url`、`last_attempt_time`（respawn 节流）、`last_frame_time_before_disconnect`（判新帧）、`cq`（身份 fence）；`attempt_count` 已停用（不再数次数，保留字段作兼容）。无 fps/protocol 字段（固定 RTSP、fps 走配置）。
 
 ## 清理条件
 
 触发清理的情况：
 
-- 重连达最大次数仍失败。
+- 重连中**无帧时长 ≥ cleanup_timeout**（配置项，默认 20s；纯时间触发，重连本身不数次数——`max_reconnect_attempts` 连同「heartbeat + interval×attempts」的派生式已一并删除）。
 - 任务运行超过 `task_max_duration`（默认 7200s，0=禁用）。
 - 有 ClientQueues 但无 decoder，超过 `orphan_timeout`（默认 30s）。
 - 有 decoder 但无 ClientQueues，立即停止孤儿 decoder。

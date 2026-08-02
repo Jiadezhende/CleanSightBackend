@@ -37,9 +37,11 @@
     .queue-num { width: 36px; text-align: right; color: #374151; font-family: monospace; }
     .live-layout { display: grid; grid-template-columns: 1fr 340px; gap: 16px; }
     .video-box { background: #000; border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; }
-    .video-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    /* 必须 width/height 撑满：max-* 只缩不放，解码帧是 640x480，会缩成盒子中央一小块。
+       撑满后由 object-fit: contain 保比例，宽高比不符时才留黑边。 */
+    .video-box img { width: 100%; height: 100%; object-fit: contain; }
     .video-placeholder { color: #6b7280; text-align: center; padding: 40px; }
-    .fps-badge { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,.55); color: #4ade80; font-family: monospace; font-size: 13px; padding: 2px 8px; border-radius: 4px; }
+    .fps-val { font-family: monospace; }
     .status-panel { display: flex; flex-direction: column; gap: 10px; }
     .status-item { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
     .status-key { font-size: 11px; color: #9ca3af; text-transform: uppercase; letter-spacing: .5px; }
@@ -87,6 +89,10 @@
 
       <!-- ===== Tab 1: 总览 ===== -->
       <el-tab-pane label="总览" name="overview">
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
+          <el-button size="small" @click="refreshOverview">立即刷新</el-button>
+          <span class="refresh-info">3s 自动刷新（仅本 tab 且标签页可见时）</span>
+        </div>
         <div class="stat-row">
           <div class="stat-box">
             <div class="stat-label">活跃客户端</div>
@@ -180,7 +186,6 @@
                 <div style="font-size:40px;margin-bottom:12px">&#128247;</div>
                 <div>{{ liveIdle ? '任务未运行，等待画面…' : (selectedClient ? '点击"连接"开始实时画面' : '请先选择客户端') }}</div>
               </div>
-              <div class="fps-badge" v-if="liveConnected">{{ liveFps }} fps</div>
             </div>
           </div>
           <div class="status-panel">
@@ -191,6 +196,10 @@
             <div class="status-item">
               <div class="status-key">当前阶段</div>
               <div class="status-val">{{ liveClientInfo?.step_id ?? '—' }}</div>
+            </div>
+            <div class="status-item">
+              <div class="status-key">实时帧率</div>
+              <div class="status-val fps-val">{{ liveConnected ? liveFps + ' fps' : '—' }}</div>
             </div>
             <div class="status-item">
               <div class="status-key">实时告警</div>
@@ -213,7 +222,7 @@
       <el-tab-pane label="指标监控" name="metrics">
         <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
           <el-button size="small" @click="fetchMetrics">立即刷新</el-button>
-          <span class="refresh-info">5s 自动刷新 | 最近 {{ latencyHistory.length }} 个采样点</span>
+          <span class="refresh-info">5s 自动刷新（仅本 tab 且标签页可见时） | 最近 {{ latencyHistory.length }} 个采样点</span>
         </div>
 
         <!-- 推理延迟趋势 -->
@@ -468,6 +477,17 @@ createApp({
     function api(path) { return apiBase + path; }
     function wsApi(path) { return apiBase.replace(/^http/, 'ws') + path; }
 
+    // ─── 轮询工具 ───
+    // 所有周期性请求统一走 poller，由下方唯一 gate（syncPollers）按「当前 tab + 标签页可见」开关，
+    // 避免页面一打开就无条件刷屏后端 access 日志。
+    function createPoller(fn, intervalMs) {
+      let timer = null;
+      return {
+        start() { if (timer) return; fn(); timer = setInterval(fn, intervalMs); },  // 起步即拉一次
+        stop() { if (timer) { clearInterval(timer); timer = null; } },
+      };
+    }
+
     // ─── Tab ───
     const activeTab = ref('overview');
 
@@ -475,7 +495,6 @@ createApp({
     const overview = reactive({ active_clients: 0, total_queued_frames: 0, clients: [] });
     const overviewTime = ref('—');
     const health = reactive({});
-    let overviewTimer = null;
 
     async function fetchOverview() {
       try {
@@ -492,6 +511,12 @@ createApp({
         const d = await r.json();
         Object.assign(health, d);
       } catch {}
+    }
+
+    // 手动刷新出口：离开 tab / 标签页切走时轮询已停，用户仍可点按钮拉一次
+    function refreshOverview() {
+      fetchOverview();
+      fetchHealth();
     }
 
     function barStyle(n) {
@@ -514,7 +539,7 @@ createApp({
     const liveAlarms = ref([]);
     let videoWs = null;
     let fpsFrameCount = 0, fpsTimer = null;
-    let alarmPollTimer = null, liveSeq = 0;
+    let liveSeq = 0;
 
     // 从已有的 overview 轮询数据中取当前客户端信息，无需额外请求
     const liveClientInfo = computed(() =>
@@ -523,6 +548,20 @@ createApp({
 
     function onClientChange() {
       if (liveConnected.value) stopLive();
+    }
+
+    // 告警增量轮询体（由 alarmPoller 驱动：liveConnected && 标签页可见）。
+    // 标签页切走会暂停，切回按 liveSeq 增量补拉。
+    async function pollLiveAlarms() {
+      const taskId = liveClientInfo.value?.task_id;
+      if (!taskId) return;
+      try {
+        const d = await fetch(api('/task/message/' + taskId + '?since_seq=' + liveSeq)).then(r => r.json());
+        if (d.alarms?.length) {
+          liveAlarms.value = [...d.alarms.reverse(), ...liveAlarms.value].slice(0, 50);
+          liveSeq = d.max_seq;
+        }
+      } catch {}
     }
 
     function startLive() {
@@ -544,25 +583,19 @@ createApp({
         }
       };
       videoWs.onclose = () => { if (liveConnected.value) stopLive(); };
+      // 告警增量轮询（/task/message/{task_id}，1s）不在此起表：liveConnected 翻 true 后由 gate 拉起
       liveConnected.value = true;
+      // 计数器归零后再起表：上一轮连接的残帧不该算进新连接的第一秒
+      fpsFrameCount = 0;
       fpsTimer = setInterval(() => { liveFps.value = fpsFrameCount; fpsFrameCount = 0; }, 1000);
-      // 告警增量轮询（/task/message/{task_id}，1s 间隔）
-      alarmPollTimer = setInterval(async () => {
-        const taskId = liveClientInfo.value?.task_id;
-        if (!taskId) return;
-        try {
-          const d = await fetch(api('/task/message/' + taskId + '?since_seq=' + liveSeq)).then(r => r.json());
-          if (d.alarms?.length) {
-            liveAlarms.value = [...d.alarms.reverse(), ...liveAlarms.value].slice(0, 50);
-            liveSeq = d.max_seq;
-          }
-        } catch {}
-      }, 1000);
     }
 
     function stopLive() {
       videoWs?.close(); videoWs = null;
-      if (alarmPollTimer) { clearInterval(alarmPollTimer); alarmPollTimer = null; }
+      // fpsTimer 必须清。漏清会每次「切客户端」泄漏一个，多个表争抢同一个
+      // fpsFrameCount（谁先醒谁读走并归零），徽章就在 0 与真值之间跳——画面却是好的。
+      if (fpsTimer) { clearInterval(fpsTimer); fpsTimer = null; }
+      // 告警轮询由 gate 停：liveConnected 翻 false 即触发
       liveConnected.value = false;
       liveFrame.value = null;
       liveIdle.value = false;
@@ -579,16 +612,16 @@ createApp({
     let latencyChart = null;
     // history: [{ts, p50, p95, p99}]
     const latencyHistory = ref([]);
-    let metricsTimer = null;
 
     async function fetchMetrics() {
       try {
+        // 原始 Prometheus 文本只在面板展开时才拉——收起时没人看，白刷一遍 access 日志
         const [mj, rm] = await Promise.all([
           fetch(api('/admin-f3m8/metrics/json')).then(r => r.json()),
-          fetch(api('/metrics')).then(r => r.text()),
+          showRaw.value ? fetch(api('/metrics')).then(r => r.text()) : Promise.resolve(null),
         ]);
         Object.assign(metricsJson, mj);
-        rawMetrics.value = rm;
+        if (rm !== null) rawMetrics.value = rm;
 
         // 聚合延迟分位数（all models average）
         const latData = mj.infer_latency_ms || {};
@@ -852,20 +885,44 @@ createApp({
     }
 
     // ─── 全局轮询 ───
-    async function fetchAll() {
-      await Promise.allSettled([fetchOverview(), fetchHealth()]);
+    // 每个周期性请求一个 poller；开关权全在 syncPollers 一处，别在别处 setInterval。
+    const overviewPoller = createPoller(fetchOverview, 3000);
+    const healthPoller = createPoller(fetchHealth, 15000);   // 健康摘要变化慢，无需 3s
+    const metricsPoller = createPoller(fetchMetrics, 5000);
+    const alarmPoller = createPoller(pollLiveAlarms, 1000);
+
+    const pageVisible = ref(!document.hidden);
+    const onVisibility = () => { pageVisible.value = !document.hidden; };
+
+    const toggle = (p, want) => want ? p.start() : p.stop();
+
+    // 唯一 gate：不在当前 tab、或标签页切走 → 停轮询；切回 start() 会立刻补拉一次。
+    function syncPollers() {
+      const on = pageVisible.value, tab = activeTab.value;
+      // 实时监控 tab 的客户端下拉框与 liveClientInfo(task_id) 都读 overview.clients，故 live 也要 overview
+      toggle(overviewPoller, on && (tab === 'overview' || tab === 'live'));
+      toggle(healthPoller, on && tab === 'overview');
+      toggle(metricsPoller, on && tab === 'metrics');
+      // 告警只在 live tab 显示；离开/切走即停，回来按 liveSeq 增量补拉
+      // （后端 _alarm_log 是 deque(maxlen=100)，暂停期间告警超 100 条才会丢头）
+      toggle(alarmPoller, on && tab === 'live' && liveConnected.value);
     }
 
+    watch([activeTab, pageVisible, liveConnected], syncPollers);
+    // 首次展开原始文本时 metricsPoller 的当轮已跳过 /metrics，补拉一次免得面板空着
+    watch(showRaw, (v) => { if (v) fetchMetrics(); });
+
     onMounted(() => {
-      fetchAll();
-      fetchMetrics();
-      overviewTimer = setInterval(fetchAll, 3000);
-      metricsTimer = setInterval(fetchMetrics, 5000);
+      document.addEventListener('visibilitychange', onVisibility);
+      syncPollers();
     });
 
     onUnmounted(() => {
-      clearInterval(overviewTimer);
-      clearInterval(metricsTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      overviewPoller.stop();
+      healthPoller.stop();
+      metricsPoller.stop();
+      alarmPoller.stop();
       stopLive();
       latencyChart?.destroy();
       distChart?.destroy();
@@ -874,7 +931,7 @@ createApp({
     return {
       apiBase,
       activeTab,
-      overview, overviewTime, health, barStyle, statusTag,
+      overview, overviewTime, health, barStyle, statusTag, refreshOverview,
       selectedClient, liveFrame, liveIdle, liveConnected, liveClientInfo, liveFps, liveAlarms,
       onClientChange, startLive, stopLive,
       metricsJson, rawMetrics, showRaw, latencyChartRef, latencyHistory,

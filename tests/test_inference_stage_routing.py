@@ -2,6 +2,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from app.services.inference.config import FALLBACK_STAGE
 from app.services.inference.manager import InferenceManager
 
 
@@ -46,6 +47,51 @@ def test_start_workflow_no_set_no_actor(manager):
         assert manager.start_workflow(cq) is True
 
     cm.set.assert_not_called()   # 注册职责已上移 RunController，本方法不再 set
+
+
+# ── 启动不变式：兜底 stage 必须 active ──────────────────────────────
+#
+# resolve_stage 把未知 step_id 一律路由到 FALLBACK_STAGE，而 dispatcher 只提交 active
+# （有 detector）stage 的帧。若兜底 stage 被配掉 detector，启动仍会"成功"（只 INFO 一行
+# Skipped），但此后每个未知 step_id 的 run 都取帧后无人消费 → 静默 0 推理。故须 fail-fast。
+# 这里在 config/factory 这层 seam 上测，不碰真权重加载（I/O 边界集成-only）。
+
+
+def _patched_get_stage_configs(stage_names, detectors_by_stage):
+    """注入假 config/factory 跑真实 _get_stage_configs，返回 (manager, ctx管理器对)。"""
+    m = InferenceManager.__new__(InferenceManager)
+    m._stage_configs = None
+    fake_config = SimpleNamespace(list_stages=lambda: list(stage_names), batch_size=4)
+    fake_factory = MagicMock()
+    fake_factory.create_detectors_for_stage.side_effect = (
+        lambda s: list(detectors_by_stage.get(s, []))
+    )
+    fake_factory.create_operators_for_stage.side_effect = lambda s: []
+    return m, (
+        patch("app.services.inference.config.load_stage_config", return_value=fake_config),
+        patch("app.services.inference.stage_factory.StageFactory", return_value=fake_factory),
+    )
+
+
+def test_fallback_stage_without_detector_fails_fast():
+    """兜底 stage 无 detector → 启动即抛，不放行成静默黑洞。"""
+    m, (p_cfg, p_fac) = _patched_get_stage_configs(
+        ["1", FALLBACK_STAGE], {"1": [object()]},  # 兜底 stage 被配掉 detector
+    )
+    with p_cfg, p_fac, pytest.raises(RuntimeError, match=FALLBACK_STAGE):
+        m._get_stage_configs()
+
+
+def test_fallback_stage_with_detector_passes():
+    """兜底 stage 有 detector → 正常放行，且它在 active 集合里（dispatcher 会消费它）。"""
+    m, (p_cfg, p_fac) = _patched_get_stage_configs(
+        ["1", FALLBACK_STAGE], {"1": [object()], FALLBACK_STAGE: [object()]},
+    )
+    with p_cfg, p_fac:
+        configs = m._get_stage_configs()
+    # 不变式的实质：resolve_stage 的兜底目标必须落在 active 集合内
+    assert FALLBACK_STAGE in configs
+    assert m.resolve_stage("未配的step") == FALLBACK_STAGE
 
 
 def test_real_manager_init_invariants_and_stop_workflow_smoke():

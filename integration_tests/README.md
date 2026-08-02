@@ -236,8 +236,14 @@ python integration_tests/test_single_client.py \
 |---|---|---|
 | `--server` | `localhost` | 服务器地址 |
 | `--duration` | `60` | 每个客户端运行时长 |
-| `--max-tasks` | `5` | 最大并发客户端数（从 DB 查询） |
+| `--max-tasks` | `5` | 最大并发客户端数（从 DB 查询；给了 `--task-ids` 则忽略） |
+| `--task-ids` | 无 | 逗号分隔的 task_id 列表，如 `119,120,121`；不存在的由子进程自建（`source_ip=test.s{task_id}`，结束自动清理） |
+| `--api-port` / `--rtsp-port` | `8000` / `8004` | 透传给每个子进程（测试环境常做端口偏移，如 8100/8104） |
+| `--current-step` | 无 | 透传给每个子进程（`1`=LEAK / `2`=CLEAN / 其它=MOCK） |
 | `--video_path` | `test/test_video.mp4` | 测试视频 |
+
+> **每路的 `source_ip` 必须互异**——它既是推流路径 `rtsp://…/live/{source_ip}`，也是后端路由键；
+> 撞了就是两路推同一个地址。自建任务用 `test.s{task_id}` 天然互异，复用真实任务时需自行确认。
 | `--api-port` | `8000` | 后端 API 端口（用于拼 admin 面板 URL） |
 
 启动后脚本打印 admin 面板 URL，在「总览」tab 看各客户端队列/健康，「实时监控」tab 逐个选客户端看画面。
@@ -282,10 +288,10 @@ http://{server}:{api-port}/admin-f3m8/ui/
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| `heartbeat_timeout` | 5s | 无帧后判定为"可疑"的时间 |
-| `reconnect_interval` | 5s | 每次重连尝试间隔 |
-| `max_reconnect_attempts` | 5 | 最大重连次数 |
+| `heartbeat_timeout` | 5s | 重连成功判定的新帧新鲜度阈值 |
+| `reconnect_interval` | 5s | decoder 进程仍死时两次 respawn 的节流间隔 |
+| `cleanup_timeout` | 20s | 无帧持续超过此时长即放弃重连、清理整个 run |
 | `orphan_timeout` | 30s | 孤儿流超时清理时间 |
 
-流断开后约 **30s** 触发自动清理（5s 等待 + 5×5s 重连）。场景 2 的断流间隔（10s）设计在此窗口内，场景 3 利用此机制验证清理路径，场景 6 利用重连窗口验证延迟推流的自动重连。
+流断开后约 **20s** 触发自动清理（纯时间触发，重连不数次数）。场景 2 的断流间隔（10s）设计在此窗口内，场景 3 利用此机制验证清理路径，场景 6 利用重连窗口验证延迟推流的自动重连。
 ```

@@ -1,4 +1,4 @@
-> 更新时间：2026-07-06
+> 更新时间：2026-08-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -66,10 +66,9 @@ birth_rate = 滑动窗口内新气泡数总和 / 窗口帧数
 
 - `config/inference_config.yaml`
 - `app/services/inference/manager.py`
-- `app/services/inference/workflows/bubble.py`
-- `app/services/inference/workflows/bending.py`
-- `app/services/inference/workflows/clean.py`
-- `app/services/inference/workflows/mock.py`
+- `app/services/inference/detection/impl/{bubble,bending,clean,mock}.py`（Detector 子类）
+- `app/services/inference/temporal/impl/{bubble,bending,clean,mock}.py`（Operator 子类）
+- `app/services/inference/offline/impl/{clean,mock}.py`（离线 Segmenter 子类）
 - `app/services/inference/temporal/alarm_sink.py`
 - `app/services/client/queues.py`
 - `tests/test_alarm_increment.py`

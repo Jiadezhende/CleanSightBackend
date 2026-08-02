@@ -24,7 +24,9 @@ class HealthMonitorConfig:
     check_interval: float = 1.0
     heartbeat_timeout: float = 5.0
     reconnect_interval: float = 5.0
-    max_reconnect_attempts: int = 5
+    # 放弃重连、执行清理的无帧时长阈值。以秒直配，不由「次数×间隔」派生——重连本就不数次数
+    # （详见 docs/update/20260728_CLEANUP_TIMEOUT_EXPLICIT_20S.md）。
+    cleanup_timeout: float = 20.0
     orphan_timeout: float = 30.0
     task_max_duration: float = 7200.0  # 任务最大运行时长（秒），0 表示不限制
 
@@ -62,7 +64,7 @@ class HealthMonitorConfig:
                 check_interval=monitor_config.get("check_interval", 1.0),
                 heartbeat_timeout=monitor_config.get("heartbeat_timeout", 5.0),
                 reconnect_interval=monitor_config.get("reconnect_interval", 5.0),
-                max_reconnect_attempts=monitor_config.get("max_reconnect_attempts", 5),
+                cleanup_timeout=monitor_config.get("cleanup_timeout", 20.0),
                 orphan_timeout=monitor_config.get("orphan_timeout", 30.0),
                 task_max_duration=monitor_config.get("task_max_duration", 7200.0),
             )
@@ -81,13 +83,13 @@ class HealthMonitorConfig:
                     "  check_interval: %.1fs"
                     "  heartbeat_timeout: %.1fs"
                     "  reconnect_interval: %.1fs"
-                    "  max_reconnect_attempts: %d"
+                    "  cleanup_timeout: %.1fs"
                     "  orphan_timeout: %.1fs",
                     config_file,
                     config.check_interval,
                     config.heartbeat_timeout,
                     config.reconnect_interval,
-                    config.max_reconnect_attempts,
+                    config.cleanup_timeout,
                     config.orphan_timeout,
                 )
 

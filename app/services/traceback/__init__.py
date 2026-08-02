@@ -13,11 +13,12 @@ step 切洗消台时会被业务侧覆写，无法作为可靠的 task_id → �
 """
 
 from .media_token import MediaToken, MediaTokenError
-from .segment_finder import SegmentFinder, SegmentRef
+from .segment_finder import SegmentFinder, SegmentRef, StepRef
 
 __all__ = [
     "MediaToken",
     "MediaTokenError",
     "SegmentFinder",
     "SegmentRef",
+    "StepRef",
 ]

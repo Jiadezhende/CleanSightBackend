@@ -3,8 +3,10 @@
 
 monitor:
   check_interval: 1.0        # 监控检查间隔（秒）
-  heartbeat_timeout: 5.0     # 心跳超时（秒）- 超过此时间无帧则判定为可疑
-  reconnect_interval: 5.0    # 重连间隔（秒）- 每次重连尝试之间的等待时间
-  max_reconnect_attempts: 5  # 最大重连尝试次数
+  heartbeat_timeout: 5.0     # 心跳超时（秒）- 无帧超过此时间判定为可疑（另作重连成功的新帧新鲜度阈值）
+  reconnect_interval: 5.0    # 重连间隔（秒）- decoder 进程仍死时，两次 respawn 之间的节流间隔
+  cleanup_timeout: 20.0      # 放弃时限（秒）- 无帧持续超过此时间即放弃重连、清理整个 run。
+                             # 重连不数次数（进程死就按 reconnect_interval 无限 respawn），只由本项收口；
+                             # 调大 = 容忍更长的现场中断（摄像机重启/网络抖动），调小 = 更快释放资源。
   orphan_timeout: 30.0       # 孤儿流超时（秒）- 有队列但无解码器的客户端清理超时
   task_max_duration: 1800.0  # 任务最大运行时长（秒）- 超时后触发告警并强制终止，0 表示不限制
