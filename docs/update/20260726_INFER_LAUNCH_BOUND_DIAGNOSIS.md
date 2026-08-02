@@ -2,7 +2,7 @@
 
 > **变更状态**：根因已定案（2026-07-26 隔离实验坐实为 **GIL 争用 / 线程调度**，非 GPU 固有开销、非埋点）；**改造①进程隔离已落地并验证**——单路 clean 从 ~10fps 天花板升到稳定 ~15fps（名义目标），见 [20260726_INFER_PROCESS_ISOLATION_LANDED.md](20260726_INFER_PROCESS_ISOLATION_LANDED.md)。
 > **最新结论看这节** → [分叉已定案：隔离实验（A/B/生产三档）](#分叉已定案隔离实验ab生产三档2026-07-26)。下方「待验证的分叉」「改造方案」的原文保留作过程记录，但**结论已被隔离实验修正**：真线程并行无效、进程隔离优先、TensorRT 降为互补。
-> **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（本次进程隔离落地后融合）
+> **知识库**：已沉淀 → [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md)（进程隔离根因）(2026-08-02)
 >
 > 相关：[20260630_FRAME_DECIMATION_ACCUMULATOR_TASK.md](20260630_FRAME_DECIMATION_ACCUMULATOR_TASK.md)（降采样契约）、[20260628_INFER_PRESSURE_OBSERVABILITY.md](20260628_INFER_PRESSURE_OBSERVABILITY.md)（`[INFER_PRESSURE]` 积压观测）。
 

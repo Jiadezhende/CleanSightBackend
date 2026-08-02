@@ -1,7 +1,7 @@
 # fps 解耦：时间为唯一货币，帧率只在「生产/采样」两点设定
 
 > **变更状态**：生效中（2026-07-22）　<!-- 判据已随实现落地；结构解耦行为不变，Group 4 模型重采样改行为待 A/B 验。见文末「落地详情」 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_CONFIG](../kb/SERVICE_CONFIG.md) / [SERVICE_INFERENCE](../kb/SERVICE_INFERENCE.md) / [ARCHITECTURE_DATA_FLOW](../kb/ARCHITECTURE_DATA_FLOW.md)（fps/时间三层模型与按 ts 重采样，已在位）(2026-08-02)
 >
 > 触发背景：排查「实时链路动作误分类」时，发现根因之一是训练 7.5fps / 推理 15fps 的 train/serve skew；顺藤摸出系统内 `inference_fps` 是个被多处误用的「上帝常量」。本篇把讨论收敛成一条可复用的评审判据。
 > 承接：不依赖任何前序重构；相关代码引用均指向真源。

@@ -1,7 +1,7 @@
 # Detection 链路压力日志 v0：CQ 与 dispatcher 的周期快照（只描述、不决策）
 
 > **变更状态**：生效中（2026-07-27）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_OBSERVABILITY](../kb/DESIGN_OBSERVABILITY.md)（[PRESSURE] 周期快照）(2026-08-02)
 >
 > 承接：本次建立在 [20260727_DISPATCHER_INTERFACE_NARROW_LANDED.md](20260727_DISPATCHER_INTERFACE_NARROW_LANDED.md)（dispatcher↔proxy 收窄为 submit 布尔背压）之上——正是那次收窄让「下游拒收」变成了一个**完全静默**的布尔值。
 

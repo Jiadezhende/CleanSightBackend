@@ -1,7 +1,7 @@
 # 大屏在线/历史任务清单：`GET /task/live` 与 `GET /task/history`
 
 > **变更状态**：生效中（2026-07-29）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_API_SURFACE](../kb/ARCHITECTURE_API_SURFACE.md)（/task/live、/task/history 接线）/ [SERVICE_TRACEBACK_MEDIA](../kb/SERVICE_TRACEBACK_MEDIA.md)（SegmentFinder 枚举能力）(2026-08-02)
 >
 > 对外契约见 [docs/api/task.md](../api/task.md)；播放端契约见 [ai.md](../api/ai.md)、[traceback.md](../api/traceback.md)。
 

@@ -1,7 +1,7 @@
 # [VIZ_THROUGHPUT] 拆出 tick 健康度 + 出帧率分母改按 run 存活跨度
 
 > **变更状态**：生效中（2026-07-28）
-> **知识库**：待沉淀 → kb/SERVICE_INFERENCE.md（[VIZ_THROUGHPUT] 一节，接 [20260726_VIZ_OVERSAMPLE_THROUGHPUT_BASIS.md](20260726_VIZ_OVERSAMPLE_THROUGHPUT_BASIS.md)）
+> **知识库**：已沉淀 → [DESIGN_OBSERVABILITY](../kb/DESIGN_OBSERVABILITY.md)（viz-starved tick 健康度 + 出帧率按 run 存活跨度）(2026-08-02)
 > **相关**：issue #82（双路并发时 admin live fps 在 15↔3 跳变，掉帧位置待定位）
 
 ## 概述

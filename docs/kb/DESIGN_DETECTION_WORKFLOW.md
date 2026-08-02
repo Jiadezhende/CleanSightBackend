@@ -1,4 +1,10 @@
+> 更新时间：2026-08-02
+> 依据来源：代码分析
+> 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
+
 # 检测 Workflow
+
+> 本文是检测链路的**架构总览图**（流程与角色分工），随 08-02 impl 契约包归位从 `app/services/inference/workflows/CLAUDE.md` 迁入。落点/接口细节以 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)、扩展步骤以 [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md) 为准。
 
 ## 整体流程
 
