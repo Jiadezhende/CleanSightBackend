@@ -22,8 +22,8 @@ CleanSight 同时使用数据库表和本地 HLS 文件目录。
 `FrameFeature`（`app/domain/detection.py`）是特征层输入货币：一帧多流对齐的检测记录 `ts + by_source: Dict[流名, FrameDetections]`，外加**帧级分辨率** `frame_width: Optional[int]` / `frame_height: Optional[int]`。在线写回口物化、离线回放重建，两端同型。
 
 - **分辨率沿每帧轴透传（非检测器输出）**：`frame_shape`（帧分辨率）是 fan-out 前定死的每帧输入常量（一个 `DetectionTask` 扇给 stage 内 N 个模型，各流看同一张图），故拆两个显式字段（避免 `(w,h)` 元组隐式序混淆，本仓库有 frame_shape(H,W,C)/wh(W,H)/frame_width 名义打架前例）。采集链：pool（`detection/pool.py`）从原始帧盖章 `frame_width=frame.shape[1], frame_height=frame.shape[0]`（唯一采集点，原始帧此后即销毁）→ `FrameInference`（`inference/models.py` 同名字段）随传输消息透传 → 写回口（`detection/service.py`）物化进 `FrameFeature` → 落盘/回读随 record 走。缺省 None → 消费方走默认兜底。
-- **不再走 `FrameDetections.metadata`**：`FrameDetections` 结构不动，`metadata` 只装真·检测器级数据（`model`/`error`/`mean_brightness`）；检测器（`detection/detector.py`、`workflows/mock.py`）不产 `frame_shape`。
-- **在线/离线消费同源**：online `workflows/clean.py._adapt_to_features` 与 offline `offline/segmenters/clean.py` 都从 `FrameFeature.frame_width/height` 读取（缺失该帧留全零行 / 回退默认尺寸）。两条特征管线（online 6 维、offline 113+ 维）仍刻意分离，仅分辨率来源统一。
+- **不再走 `FrameDetections.metadata`**：`FrameDetections` 结构不动，`metadata` 只装真·检测器级数据（`model`/`error`/`mean_brightness`）；检测器（`detection/detector.py`、`detection/impl/mock.py`）不产 `frame_shape`。
+- **在线/离线消费同源**：online `temporal/impl/clean.py._adapt_to_features` 与 offline `offline/impl/clean.py` 都从 `FrameFeature.frame_width/height` 读取（缺失该帧留全零行 / 回退默认尺寸）。两条特征管线（online 6 维、offline 113+ 维）仍刻意分离，仅分辨率来源统一。
 
 ## 数据库连接
 

@@ -1,84 +1,21 @@
-"""弯折检测：BendingDetector（流源）+ BendingOperator（流算子，analyze+judge 合一）
+"""弯折合格时序算子：BendingOperator（Operator 子类）。
 
-BendingDetector（推理线程）：
-    YOLO11n-det 检测内镜先端状态（straight / bent）。
-    无状态，多 Client 共享同一实例，产出 "bending" 流。
-
-BendingOperator（时序线程，流算子）：
-    订阅 "bending" 流。analyze：5 帧去抖状态机，统计 STRAIGHT→BENT 次数 bend_actions（单份）。
-    judge：实时只产 events（进度 overlay），不上报告警。
-    finalize：bend_actions < required → warning 结算告警。
-    有状态（state/consec_*/bend_actions/last_ts），每 Client 独立。
-    （合并前 bend_actions 在 Analyzer/Judge 各存一份，合并后单份共享。）
+订阅 "bending" 流。analyze：5 帧去抖状态机，统计 STRAIGHT→BENT 次数 bend_actions（单份）。
+judge：实时只产 events（进度 overlay），不上报告警。
+finalize：bend_actions < required → warning 结算告警。
+有状态（state/consec_*/bend_actions/last_ts），每 Client 独立。
+同业务点的流源 Detector 见 detection/impl/bending.py。
 """
 
 import logging
 from typing import List, Tuple
 
-from app.services.inference.detection.detector import YOLODetector
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
 from app.domain.detection import FrameDetections, FrameFeature
-from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 
-
-# ====== 推理线程：Detector ======
-
-class BendingDetector(YOLODetector):
-    """内镜弯折检测器（YOLO11n-det）。无状态，多 Client 共享。"""
-
-    def __init__(
-        self,
-        model_path: str,
-        conf_threshold: float = 0.6,
-        iou_threshold: float = 0.45,
-        enabled: bool = True,
-    ):
-        super().__init__(
-            name="bending",
-            model_path=model_path,
-            conf_threshold=conf_threshold,
-            iou_threshold=iou_threshold,
-            enabled=enabled,
-        )
-
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
-        items = []
-        for det in output.detections:
-            if det.class_name == "bending_debug_box":
-                color = (255, 0, 255)
-            elif det.class_name == "bent":
-                color = (0, 0, 255)
-            else:
-                color = (0, 255, 0)
-
-            items.append(RenderItem(
-                bbox=det.bbox,
-                label=f"{det.class_name} {det.confidence:.2f}",
-                confidence=det.confidence,
-                color=color,
-            ))
-
-        is_bent = any(d.class_name == "bent" for d in output.detections)
-        if is_bent:
-            status_text = "BENT"
-            status_color = (0, 0, 255)
-        else:
-            status_text = "STRAIGHT"
-            status_color = (0, 255, 0)
-
-        return RenderSpec(
-            type=RenderType.BBOX,
-            items=items,
-            status_text=status_text,
-            status_color=status_color,
-            status_position="top-left",
-        )
-
-
-# ====== 时序线程：Operator（analyze 推进状态 + judge/finalize 出告警，共享 _sm）======
 
 class BendingOperator(Operator):
     """弯折合格流算子。订阅 "bending" 流。持 debounce/required 参数。

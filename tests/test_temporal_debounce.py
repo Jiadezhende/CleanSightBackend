@@ -45,7 +45,7 @@ class TestBubbleEdgeTrigger:
 
     @pytest.fixture
     def op(self):
-        from app.services.inference.workflows.bubble import BubbleOperator
+        from app.services.inference.temporal.impl.bubble import BubbleOperator
 
         return BubbleOperator(window_seconds=3.0, birth_rate_threshold=0.5)
 
@@ -109,7 +109,7 @@ class TestBendingDebounce:
 
     @pytest.fixture
     def op(self):
-        from app.services.inference.workflows.bending import BendingOperator
+        from app.services.inference.temporal.impl.bending import BendingOperator
 
         return BendingOperator(debounce_frames=3, required_bend_actions=4)
 

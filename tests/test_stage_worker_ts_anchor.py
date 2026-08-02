@@ -14,7 +14,7 @@ import numpy as np
 from app.domain.detection import FrameFeature
 from app.services.inference.detection.stage_worker import StageWorker
 from app.services.inference.models import DetectionTask
-from app.services.inference.workflows.mock import MockDetector
+from app.services.inference.detection.impl.mock import MockDetector
 
 from factories import make_cq
 

@@ -4,7 +4,7 @@
 
 # Inference Service
 
-推理服务负责 stage 路由、模型推理（L1）、特征落盘（L2）、时序分析 + 判定（L3/L4）、可视化与结算告警。代码已按**处理流程分包**：`detection/ feature/ temporal/ visualization/ workflows/ offline/` + 顶层管件（`manager.py`/`instance.py`/`models.py`/`naming.py`/`stage_factory.py`/`config.py`）。
+推理服务负责 stage 路由、模型推理（L1）、特征落盘（L2）、时序分析 + 判定（L3/L4）、可视化与结算告警。代码已按**处理流程分包**：`detection/ feature/ temporal/ visualization/ offline/` + 顶层管件（`manager.py`/`instance.py`/`models.py`/`naming.py`/`stage_factory.py`/`config.py`）。各契约包（detection/temporal/offline）顶层放基类+框架，业务实现收在各自 `impl/` 子目录。
 
 ## 包结构（子包 = 分层）
 
@@ -20,7 +20,9 @@
 | `temporal/alarm_sink.py` | L4 | `persist_alarms()` | 过闸（CQ gate）+ 落库（persistence），实时/结算统一入口 |
 | `visualization/worker.py` | Viz | `VisualizationWorker` | 读快照渲染，写 `ca_processed` + `_latest_rendered` |
 | `visualization/visualizer.py` | Viz | `FixedVisualizer` | 按 `RenderSpec` 固定渲染 |
-| `workflows/` | 接入点 | bubble/bending/clean/mock | 具体 Detector + Operator 子类 |
+| `detection/impl/` | 接入点 | bubble/bending/clean/mock | 具体 Detector 子类（一文件一基类） |
+| `temporal/impl/` | 接入点 | bubble/bending/clean/mock | 具体 Operator 子类（与检测器同名文件） |
+| `offline/impl/` | 接入点 | clean/mock | 具体 OfflineSegmenter 子类 |
 | `offline/` | 离线 | `OfflineSegmenter`/`OfflineRunner` + `segmenters/{clean,mock}` + `cli` | 独立进程读 `FeatureStore.load`→策略 `preprocess`/`segment`→`OfflineRunner` 校验幂等写 `FactLedger`（详见「离线 segmenter 内部」与 online/offline 分离） |
 
 ## InferenceManager（生命周期编排）
@@ -49,7 +51,7 @@
 
 - **Detector**（流源，分组粒度，无状态共享）：`name`（= 产出流名 = slide_window key）、`infer_batch(frames, timestamps)`（**唯一推理入口**，无单帧 `infer()`）、`prepare_visualization_data`。`timestamps` 是帧捕获真值锚点（源自 `Frame.timestamp`，pool 从 `req.timestamp` 穿入），须原样写回 `FrameDetections.timestamp`，令每帧 `FrameDetections.timestamp == FrameInference.timestamp`——写回口据此物化帧级 `FrameFeature` 对齐多流（供 L3），detector 不得自造时间戳。YOLO 类继承 `YOLODetector` 复用惰性加载/batch/CUDA 异常转换。
 - **Operator**（流算子，规则粒度，per-run 独立）：`name`、`subscribes`（**显式、必填**输入流名列表，缺则 fail-fast）、`window_seconds`；`analyze(windows: List[FrameFeature])` 推进 `self._sm`、`judge() → (overlay_texts, alarms)`、`finalize() → List[Alarm]`（结算，默认空）。analyze+judge **合并**进单个 Operator（单对象内完成，不做 EventFact 跨对象传递）。`windows` 是帧级 `FrameFeature` 快照（多流已在写回口对齐进 `by_source`），算子内 `_clip` 到自身感受野，单订阅用 `primary_window` 投影自身流。
-- **TemporalOperator**（`Operator` 子基类，供动作识别时序模型）：多带 `model_path`/`objects`/`actions` 三参，惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、失败 `_load_failed` 锁存），`infer(features)` 前向出 logits。子类 `CleanOperator`（`workflows/clean.py`）在 `analyze` 内**先按帧 ts 重采样**（`_resample_by_ts` 相位网格抽稀到 `model_input_fps`，如 15fps 10s 窗口 150→75 帧@7.5；网格前进不累积漂移、遇缺口重锚不追补突发），再 `_adapt_to_features` 成 `(T, num_objects×6)` 张量（每物体 `(count,cx,cy,w,h,area)`，异常帧留全零行保持时间轴不缺帧）后 `infer`，取末步 argmax 存 `_sm['latest_action']`；`judge` 仅出 overlay 文案、当前不产告警。新帧门 / `last_ts` 推进仍基于**完整**窗口，重采样只定喂模型的时间轴密度——这道显式重采样隔开「检测密度（`inference_decimation`）」与「模型入模节奏（`model_input_fps` 契约）」，消除 train/serve fps skew。这是 CLEAN stage 的**在线**时序算子（YAML `clean_monitor`，`gru-final.pt`，`window_seconds=10`，`model_input_fps=7.5`），与离线 CLEAN segmenter 是两条独立链路。
+- **TemporalOperator**（`Operator` 子基类，供动作识别时序模型）：多带 `model_path`/`objects`/`actions` 三参，惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、失败 `_load_failed` 锁存），`infer(features)` 前向出 logits。子类 `CleanOperator`（`temporal/impl/clean.py`）在 `analyze` 内**先按帧 ts 重采样**（`_resample_by_ts` 相位网格抽稀到 `model_input_fps`，如 15fps 10s 窗口 150→75 帧@7.5；网格前进不累积漂移、遇缺口重锚不追补突发），再 `_adapt_to_features` 成 `(T, num_objects×6)` 张量（每物体 `(count,cx,cy,w,h,area)`，异常帧留全零行保持时间轴不缺帧）后 `infer`，取末步 argmax 存 `_sm['latest_action']`；`judge` 仅出 overlay 文案、当前不产告警。新帧门 / `last_ts` 推进仍基于**完整**窗口，重采样只定喂模型的时间轴密度——这道显式重采样隔开「检测密度（`inference_decimation`）」与「模型入模节奏（`model_input_fps` 契约）」，消除 train/serve fps skew。这是 CLEAN stage 的**在线**时序算子（YAML `clean_monitor`，`gru-final.pt`，`window_seconds=10`，`model_input_fps=7.5`），与离线 CLEAN segmenter 是两条独立链路。
 
 ## L3/L4：ClientTemporalActor（~1Hz）
 
@@ -104,6 +106,7 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 - `app/services/inference/feature/store.py`
 - `app/services/inference/temporal/{operator,actor,alarm_sink}.py`（`operator.py` 含 `Operator` + `TemporalOperator`）
 - `app/services/inference/visualization/{worker,visualizer,pool}.py`（`worker.py` 含 `[VIZ_THROUGHPUT]`）
-- `app/services/inference/workflows/{bubble,bending,clean,mock}.py`（`clean.py` 含在线 `CleanOperator`）
+- `app/services/inference/detection/impl/{bubble,bending,clean,mock}.py`（Detector 子类）
+- `app/services/inference/temporal/impl/{bubble,bending,clean,mock}.py`（Operator 子类，`clean.py` 含在线 `CleanOperator`）
 - `app/services/inference/offline/{segmenter,runner,cli}.py`、`offline/segmenters/{clean,mock}.py`
 - `config/inference_config.yaml`

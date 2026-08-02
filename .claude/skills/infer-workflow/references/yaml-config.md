@@ -9,8 +9,8 @@ stages:
   "1":                                # 主键 = step_id（task.current_step）
     alias: LEAK                       # 可读名（写告警 step_name + 可视化叠字）
     detectors:
-      - name: bubble                                                   # 产出流名 = slide_window key
-        class: app.services.inference.workflows.bubble.BubbleDetector  # Detector 全路径
+      - name: bubble                                                          # 产出流名 = slide_window key
+        class: app.services.inference.detection.impl.bubble.BubbleDetector    # Detector 全路径
         params:                          # → 传给 Detector.__init__
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.1
@@ -20,7 +20,7 @@ stages:
       - name: bubble_leak                                              # 算子自身/输出身份（≠ 流名）
         subscribes: [bubble]                                           # 输入流清单，显式必填（= detector.name）
         realtime: true                   # 实时信号，纳入 signals_10s
-        class: app.services.inference.workflows.bubble.BubbleOperator  # Operator 全路径
+        class: app.services.inference.temporal.impl.bubble.BubbleOperator  # Operator 全路径
         params:                          # → 传给 Operator.__init__（name/subscribes 由 factory 注入，不重复写）
           window_seconds: 3.0            # 感受野（秒）
           birth_rate_threshold: 0.5      # 阈值等规则参数
@@ -49,13 +49,13 @@ stages:
 
 ## 内嵌序列模型算子的 params
 
-`GRUOperator` 子类（见 templates.md 模板 D / [clean.py](../../../../app/services/inference/workflows/clean.py)）当前把 `model_path` / `objects` / `actions` / `hidden` / `num_layers` / `window_seconds` / `min_frames` 走 `rules[].params`：
+`GRUOperator` 子类（见 templates.md 模板 D / [temporal/impl/clean.py](../../../../app/services/inference/temporal/impl/clean.py)）当前把 `model_path` / `objects` / `actions` / `hidden` / `num_layers` / `window_seconds` / `min_frames` 走 `rules[].params`：
 
 ```yaml
       - name: clean_monitor
         subscribes: [clean_large, clean_small]
         realtime: true
-        class: app.services.inference.workflows.clean.CleanOperator
+        class: app.services.inference.temporal.impl.clean.CleanOperator
         params:
           window_seconds: 10.0
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/gru-final.pt
@@ -69,4 +69,4 @@ stages:
 
 ## 无需改 `__init__.py`
 
-[workflows/\_\_init\_\_.py](../../../../app/services/inference/workflows/__init__.py) 是**纯包标记**，不 re-export。StageFactory 用 `class` 全路径 importlib 实例化，消费方走单文件深路径导入（`from app.services.inference.workflows.bubble import BubbleDetector`）。**别**往 `__init__.py` 加 import / `__all__`——那会让 import 本包即 eager 拉起全部任务模块。
+各 `impl/__init__.py`（`detection/impl` / `temporal/impl` / `offline/impl` 各一个）是**纯包标记**，不 re-export。StageFactory 用 `class` 全路径 importlib 实例化，消费方走单文件深路径导入（`from app.services.inference.detection.impl.bubble import BubbleDetector`）。**别**往 `__init__.py` 加 import / `__all__`——那会让 import 本包即 eager 拉起全部任务模块。

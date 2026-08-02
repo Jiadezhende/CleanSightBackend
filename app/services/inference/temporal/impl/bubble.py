@@ -1,14 +1,10 @@
-"""气泡检测：BubbleDetector（流源）+ BubbleOperator（流算子，analyze+judge 合一）
+"""气泡漏气时序算子：BubbleOperator（Operator 子类）。
 
-BubbleDetector（推理线程）：
-    YOLO11n-seg 检测气泡实例，输出 FrameDetections。
-    无状态，多 Client 共享同一实例，产出 "bubble" 流。
-
-BubbleOperator（时序线程，流算子）：
-    订阅 "bubble" 流。analyze：ByteTrack 跨帧追踪，统计新气泡出生率
-    birth_rate = sum(新气泡数) / 窗口帧数，写入共享 _sm。
-    judge：birth_rate > threshold → 漏气报警（上升沿触发锁存）。
-    有状态（tracker/seen_ids/last_ts/new_count_history/birth_rate/alarming），每 Client 独立。
+订阅 "bubble" 流。analyze：ByteTrack 跨帧追踪，统计新气泡出生率
+birth_rate = sum(新气泡数) / 窗口帧数，写入共享 _sm。
+judge：birth_rate > threshold → 漏气报警（上升沿触发锁存）。
+有状态（tracker/seen_ids/last_ts/new_count_history/birth_rate/alarming），每 Client 独立。
+同业务点的流源 Detector 见 detection/impl/bubble.py。
 """
 
 import logging
@@ -17,11 +13,9 @@ from typing import List, Tuple
 
 import numpy as np
 
-from app.services.inference.detection.detector import YOLODetector
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
 from app.domain.detection import FrameDetections, FrameFeature
-from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 
@@ -66,56 +60,6 @@ class _BBoxAdapter:
         r.cls = self.cls[idx]
         return r
 
-
-# ====== 推理线程：Detector ======
-
-class BubbleDetector(YOLODetector):
-    """气泡检测器（YOLO11n-seg）。无状态，多 Client 共享。"""
-
-    def __init__(
-        self,
-        model_path: str,
-        conf_threshold: float = 0.5,
-        iou_threshold: float = 0.45,
-        enabled: bool = True,
-    ):
-        super().__init__(
-            name="bubble",
-            model_path=model_path,
-            conf_threshold=conf_threshold,
-            iou_threshold=iou_threshold,
-            enabled=enabled,
-        )
-
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
-        items = []
-        for det in output.detections:
-            color = (255, 0, 255) if det.class_name == "bubble_debug_box" else (0, 255, 255)
-            items.append(RenderItem(
-                bbox=det.bbox,
-                label=f"{det.class_name} {det.confidence:.2f}",
-                confidence=det.confidence,
-                color=color,
-            ))
-
-        count = len(output.detections)
-        if count > 0:
-            status_text = f"Bubbles: {count}"
-            status_color = (0, 165, 255) if count > 5 else (0, 255, 255)
-        else:
-            status_text = "No Bubbles"
-            status_color = (0, 255, 0)
-
-        return RenderSpec(
-            type=RenderType.BBOX,
-            items=items,
-            status_text=status_text,
-            status_color=status_color,
-            status_position="top-right",
-        )
-
-
-# ====== 时序线程：Operator（analyze 推进状态 + judge 出告警，共享 _sm）======
 
 class BubbleOperator(Operator):
     """气泡漏气流算子。订阅 "bubble" 流，analyze 算 birth_rate、judge 上升沿告警。
