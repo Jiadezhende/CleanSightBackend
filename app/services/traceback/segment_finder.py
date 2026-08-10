@@ -336,3 +336,43 @@ def get_default_base_dir() -> Path:
     from app.settings import settings
 
     return settings.storage_base_dir
+
+
+def parse_playlist_durations(playlist_path: Path) -> Dict[str, float]:
+    """解析写入侧 LIVE m3u8，提取 filename → EXTINF 时长映射。
+
+    格式约定：每个段对应一行 `#EXTINF:<dur>,` 紧接一行 `<filename>`
+    （见 hls_strategy 的 playlist append）。
+
+    两个消费方共用这一份实现（traceback VOD playlist / lab 整段导出），
+    因为返回值同时承担两个职责：
+    - EXTINF 是段时长唯一真值，不能用文件名 ts 差重新推导；
+    - 键集合即"已完成 transcode+append 的段"，不在其中的是在途段，须过滤。
+
+    解析失败或文件不存在返回空字典。
+    """
+    if not playlist_path.exists():
+        return {}
+    durations: Dict[str, float] = {}
+    try:
+        with playlist_path.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        logger.warning("[SegmentFinder] Failed to read playlist %s: %s", playlist_path, e)
+        return {}
+
+    pending_dur: Optional[float] = None
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("#EXTINF:"):
+            try:
+                # "#EXTINF:1.234,"
+                dur_str = line[len("#EXTINF:") :].rstrip(",").strip()
+                pending_dur = float(dur_str)
+            except ValueError:
+                pending_dur = None
+        elif line and not line.startswith("#"):
+            if pending_dur is not None:
+                durations[line] = pending_dur
+            pending_dur = None
+    return durations

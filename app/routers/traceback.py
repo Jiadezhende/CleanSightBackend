@@ -25,7 +25,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm
 from app.services.traceback import MediaToken, SegmentFinder
-from app.services.traceback.segment_finder import SegmentRef, get_default_base_dir
+from app.services.traceback.segment_finder import (
+    SegmentRef,
+    get_default_base_dir,
+    parse_playlist_durations,
+)
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/traceback", tags=["traceback"])
@@ -221,39 +225,6 @@ async def get_alarm_evidence(
 # ---------------------------------------------------------------------------
 
 
-def _parse_existing_playlist(playlist_path: Path) -> Dict[str, float]:
-    """解析现有 LIVE m3u8，提取 filename → duration 映射。
-
-    格式约定：每个段对应一行 `#EXTINF:<dur>,` 紧接一行 `<filename>`。
-    返回字典；解析失败或文件不存在返回空字典。
-    """
-    if not playlist_path.exists():
-        return {}
-    durations: Dict[str, float] = {}
-    try:
-        with playlist_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
-        logger.warning("[Traceback] Failed to read playlist %s: %s", playlist_path, e)
-        return {}
-
-    pending_dur: Optional[float] = None
-    for raw in lines:
-        line = raw.strip()
-        if line.startswith("#EXTINF:"):
-            try:
-                # "#EXTINF:1.234,"
-                dur_str = line[len("#EXTINF:") :].rstrip(",").strip()
-                pending_dur = float(dur_str)
-            except ValueError:
-                pending_dur = None
-        elif line and not line.startswith("#"):
-            if pending_dur is not None:
-                durations[line] = pending_dur
-            pending_dur = None
-    return durations
-
-
 def _build_vod_playlist(
     request: Request,
     finder: SegmentFinder,
@@ -285,7 +256,7 @@ def _build_vod_playlist(
         )
 
     playlist_path = task_dir / f"{track}_playlist.m3u8"
-    real_durations = _parse_existing_playlist(playlist_path)
+    real_durations = parse_playlist_durations(playlist_path)
 
     # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF（退化段的兜底也只在写入侧的 eff_fps
     # 里，见 hls_strategy._DEGENERATE_FALLBACK_FPS）。此处只读回、不重新推导、无第二兜底。
@@ -449,7 +420,7 @@ def _step_duration_ms(
     start_us: Optional[int] = None
     end_us: Optional[int] = None
     for track in ("raw", "processed"):
-        durations = _parse_existing_playlist(task_dir / f"{track}_playlist.m3u8")
+        durations = parse_playlist_durations(task_dir / f"{track}_playlist.m3u8")
         if not durations:
             continue
         for s in finder.list_segments(task_id, step_id, track):
