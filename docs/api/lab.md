@@ -2,9 +2,11 @@
 
 让操作员在某个 step 的 raw 整段视频上圈选 N 段 `[start_ms, end_ms]`，后端 ffmpeg 剪出 mp4 并上传到 Label Studio（LS）创建标注任务。
 
+另提供一条**旁路**：`GET /download` 把整个 step 的某一轨 remux 成单个 mp4 直接下载，不经 LS，用于取汇报素材/原片。
+
 - 数据源：任务列表来自 **DB**（`clean_task` 表）或 **磁盘**（枚举 raw 段目录），由运行时开关 `task_source` 决定；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id)` 文件约定）。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
-- 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。
+- 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
 - 静态 UI：`GET /lab-f3m8/ui`（`app/static/lab`，`html=True`）。
 - 通用约定（Base URL / Gateway / 错误模型 / 枚举）见 [README](README.md)。
 
@@ -13,10 +15,14 @@
 典型流程：
 
 ```
-① GET /config  ──→ 确认 task_source / LS 已配置
-② GET /tasks   ──→ task_id + step_id + raw_steps
-③ POST /submit ──→ 裁剪 + 送标（per-clip 结果）
-   GET /health ──→ 送标前探测 LS 是否可达
+① GET /config   ──→ 确认 task_source / LS 已配置
+② GET /tasks    ──→ task_id + step_id + raw_steps
+③ POST /submit  ──→ 裁剪 + 送标（per-clip 结果）
+   GET /health  ──→ 送标前探测 LS 是否可达
+
+旁路（不经 LS）：
+② GET /tasks    ──→ task_id + step_id
+   GET /download ──→ 整段 mp4 直接下载（取素材/原片）
 ```
 
 ---
@@ -211,6 +217,71 @@
 | 反复 `ls_unreachable`/`ls_auth` | LS 配置/网络/token 问题，先走 `GET /health` 定位 |
 
 参考实现：仓库内消费本接口的送标页面见 [app/static/lab/index.html](../../app/static/lab/index.html)。
+
+---
+
+## GET /lab-f3m8/download
+
+**用途**：把某个 `(task_id, step_id)` 某一轨**已落盘的全部段**导出为单个 mp4 直接下载。取汇报素材 / 原片用，不经 LS。
+
+与 `POST /submit` 是两条独立路径，**不是同一接口的两种模式**：
+
+| | `/submit` | `/download` |
+|---|---|---|
+| 粒度 | ms 精度区间，可多段 | 整个 step 单轨，一次一个文件 |
+| 编码 | `libx264` 重编码（`-ss/-to` 精确裁剪必需） | 纯 `-c copy` remux，**不重编码** |
+| 轨道 | 仅 `raw` | `raw` / `processed` 均可 |
+| 去向 | 上传 Label Studio | HTTP 响应体直接下载 |
+
+之所以能 `-c copy`：段落盘时已由 ffmpeg 转成 H.264/yuv420p/CRF23 的 fMP4 fragment，导出只是换容器——磁盘速度、零 CPU、零二次画质损失。
+
+**查询参数**：
+
+| 参数 | 类型 | 必填 | 默认 | 范围/说明 |
+|------|------|------|------|-----------|
+| `task_id` | int | **是** | — | 任务 id；缺失 → 422 |
+| `step_id` | int | **是** | — | 洗消步骤 id；缺失 → 422 |
+| `track` | string | 否 | `processed` | 只接受 `raw` \| `processed`，其它值 → 422。`processed` = 画了检测框，`raw` = 原始画面 |
+
+### 响应 `200`
+
+响应体是**二进制 mp4**，不是 JSON。
+
+| 响应头 | 值 |
+|--------|-----|
+| `Content-Type` | `video/mp4` |
+| `Content-Disposition` | `attachment; filename="task{task_id}_step{step_id}_{track}.mp4"` |
+| `Content-Length` | 产物字节数（先落临时文件再发，故长度已知、可显示下载进度） |
+
+产物特征（已用真实段核验）：H.264 / yuv420p、分辨率与源一致、`moov` 前置（faststart，可边下边播和拖动 seek）、时长 = 各段 `EXTINF` 之和。
+
+### 错误
+
+| 状态 | 触发条件 | 响应体形态 |
+|------|---------|-----------|
+| `404` | 该 `(task_id, step_id, track)` 无段，**或**段全为在途段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=.."}` |
+| `422` | 缺 `task_id`/`step_id`，或 `track` 不在枚举内 | FastAPI 校验体（`{"detail":[...]}`） |
+| `503` | step 目录缺 `init.mp4`（历史段未迁移） | `{"detail":{"error":"HLS init segment missing","detail":"...transcode_segments_to_h264.py..."}}` |
+| `500` | ffmpeg 失败 / 超时 / 二进制找不到 | `{"detail":"Export failed: ..."}` |
+
+> 与 `/submit` 一样，**503 的 body 形态和 404 不一致**（HTTPException 只有 `detail`，无 `resource_type`）。判分支只认 status code。
+> `503` 与 `GET /traceback/task/{id}/playlist.m3u8` 同码同措辞——同一个根因（fMP4 无 init 段无法解码），处理方式也相同：跑 `scripts/transcode_segments_to_h264.py` 迁移。
+
+### 前端坑点
+
+- **同步端点，长段要等**。响应在 ffmpeg 跑完后才开始传，30 min 的段通常几秒（remux 是磁盘速度，不是重编码），但仍要给足超时。用原生 `<a download>` 让浏览器接管，别 `fetch` 成 blob——大文件会整个进内存。
+- **`track` 默认是 `processed`，与 `/submit` 的 raw-only 不同**。要原始画面必须显式传 `track=raw`。
+- 某个 step 可能只有一条轨（例如只落了 raw），另一轨取不到会 404——切轨前可先探一次。
+- **step 仍在录制时也能下**，拿到的是当前已落盘的部分，这是预期行为而非残缺文件（在途段被过滤掉了）。
+- 无鉴权、无限流豁免，与本组其它端点一致。
+
+### 静默失败
+
+| 现象 | 后端实际状态 |
+|------|------------|
+| 下到的视频比页面显示的时长短 | 末尾若干段仍在途（mp4v 已落、transcode+append 未完成），被有意过滤；等几秒重下即可 |
+| 反复下同一 step 每次都要等 | 正常——**不做产物缓存**，每次重新 remux。成本在磁盘 IO 不在 CPU |
+| `.lab_exports` 里有残留 `step_*.mp4` | 客户端中途断开导致清理没跑到；下次调用本接口时会顺手回收超过 30 min 的孤儿 |
 
 ---
 
