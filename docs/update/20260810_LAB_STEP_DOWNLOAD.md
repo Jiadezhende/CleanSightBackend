@@ -8,7 +8,7 @@
 ## 概述
 
 - **改了什么**：新增 `GET /lab-f3m8/download?task_id=&step_id=&track=`，把一个 step 某一轨已落盘的全部段 remux 成单个 mp4 直接下载；送标面板 ② 卡片加了下载按钮。
-- **为什么改**：取汇报用的视频识别素材此前只能手工做——rsync 拉段 → 本地补 `#EXT-X-ENDLIST` → ffmpeg HLS demuxer 拼接，三个坑全靠人记（见下）。仓库里的 [scripts/video_export/concat_and_upload.py](../../scripts/video_export/concat_and_upload.py) 三条全踩、早已失效。
+- **为什么改**：取汇报用的视频识别素材此前只能手工做——rsync 拉段 → 本地补 `#EXT-X-ENDLIST` → ffmpeg HLS demuxer 拼接，三个坑全靠人记（见下）。原有的 `scripts/video_export/`（`concat_and_upload.py` + 操作步骤 README）三条全踩、早已失效，**本次一并删除**。
 - **影响面**：新增 1 个路由 + 1 个 service 模块；`_parse_existing_playlist` 从 router 层下沉到 service 层（行为不变）；面板 HTML 加按钮。无新表、无新配置项、无持久化状态。
 
 手工路径的三个坑，正是本接口封装掉的东西：
@@ -67,10 +67,15 @@ StepExporter.export(task_id, step_id, track) -> Path
 
 > 用原生 `<a download>` 而非 `fetch`+blob：浏览器接管下载进度、可断点续传、**不把整个文件读进内存**。
 
-### 5. 保留项（不改动）
+### 5. 删除 `scripts/video_export/`
+
+`concat_and_upload.py` 与 `README_操作步骤.md` 一并删除。该脚本在当前落盘格式下**必然失败或产出坏视频**（目录假设错 + concat demuxer 读不了 fMP4），且仓库内无任何代码引用它——留着只会误导后人照旧文档操作。功能已被本接口完全覆盖。
+
+需要历史流程时从 git 历史取：`git show <本次提交>^:scripts/video_export/README_操作步骤.md`。
+
+### 6. 保留项（不改动）
 
 - **`ClipBuilder` 保持 raw-only、保持 libx264 重编码**。ms 精度裁剪必须 `-ss/-to`，与整段 remux 是两种性质，不合并、不共用参数。
-- **`scripts/video_export/concat_and_upload.py` 原样保留**，只在其 README 顶部加失效警告（脚本本身可能还有人按旧目录结构在用历史数据上跑）。
 
 ## 数据通道 / 行为说明
 
