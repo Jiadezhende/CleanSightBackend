@@ -1,5 +1,29 @@
 # 视频导出 & 上传操作步骤
 
+> ## ⚠️ 本流程已失效（2026-08-10）
+>
+> 第二步的 [concat_and_upload.py](concat_and_upload.py) **在当前落盘格式下必然失败或产出坏视频**，两条都是硬伤：
+>
+> | 问题 | 后果 |
+> |------|------|
+> | 目录假设 `{client_id}/{task_id}/` | 实际是 `{task_id}/{step_id}/`，扫不到任何段 |
+> | 用 `ffmpeg -f concat -c copy` | 段是 fMP4 fragment、**无 moov box**，concat demuxer 读不了；须走 HLS demuxer 吃 `#EXT-X-MAP:URI="init.mp4"` |
+>
+> 即使手工修正上面两条，还有第三个坑：写入侧 `{track}_playlist.m3u8` **不写 `#EXT-X-ENDLIST`**，
+> ffmpeg 会当直播流只读 live edge，前面的段全丢——必须自己补 ENDLIST。
+>
+> **改用接口**（三个坑都已封装，服务端纯 `-c copy` remux，不重编码）：
+>
+> ```bash
+> curl -sS -o out.mp4 \
+>   "http://<host>:8000/lab-f3m8/download?task_id=<task>&step_id=<step>&track=processed"
+> ```
+>
+> 或直接在送标面板 `http://<host>:8000/lab-f3m8/ui/` 上点「⬇ 下载整段」。
+> 契约见 [docs/api/lab.md](../../docs/api/lab.md)，实现说明见 [docs/update/20260810_LAB_STEP_DOWNLOAD.md](../../docs/update/20260810_LAB_STEP_DOWNLOAD.md)。
+>
+> 以下内容仅作历史留存；`rsync`（第一步）与上传（第三步）部分仍可参考。
+
 ## 网络拓扑
 
 ```text
