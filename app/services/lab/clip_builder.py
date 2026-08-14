@@ -319,6 +319,7 @@ class ClipBuilder:
         # _validate_continuity（无真实录制停顿），故相邻段连续、ts 跨度 ≈ 段媒体时长；末段用中位估算兜底。
         nonce = secrets.token_hex(4)
         tmp_m3u8 = step_dir / f".clip_{nonce}.m3u8"
+        tmp_h264 = step_dir / f".clip_{nonce}.h264"
         est_dur_us = _est_segment_duration_us(segs, self._default_seg_dur_us)
         seg_durs_us = [
             (segs[i + 1].ts_us - segs[i].ts_us) if i + 1 < len(segs) else est_dur_us
@@ -340,11 +341,23 @@ class ClipBuilder:
         lines.append("#EXT-X-ENDLIST")
         tmp_m3u8.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        cmd = [
+        from app.settings import settings
+        target_fps = settings.raw_fps
+
+        cmd1 = [
             self._ffmpeg,
             "-y", "-loglevel", "error",
             "-allowed_extensions", "ALL",
             "-i", str(tmp_m3u8),
+            "-c:v", "copy",
+            "-bsf", "h264_mp4toannexb",
+            str(tmp_h264),
+        ]
+        cmd2 = [
+            self._ffmpeg,
+            "-y", "-loglevel", "error",
+            "-r", str(target_fps),
+            "-i", str(tmp_h264),
             "-ss", f"{offset_s:.3f}",
             "-to", f"{end_s:.3f}",
             "-c:v", "libx264",
@@ -360,7 +373,15 @@ class ClipBuilder:
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout,
+                cmd1, capture_output=True, text=True, timeout=timeout,
+            )
+            if result.returncode != 0:
+                raise ClipBuildError(
+                    f"ffmpeg failed (exit={result.returncode}): "
+                    f"{(result.stderr or '')[-1500:]}"
+                )
+            result = subprocess.run(
+                cmd2, capture_output=True, text=True, timeout=timeout,
             )
             if result.returncode != 0:
                 raise ClipBuildError(
@@ -377,3 +398,4 @@ class ClipBuilder:
             ) from e
         finally:
             tmp_m3u8.unlink(missing_ok=True)
+            tmp_h264.unlink(missing_ok=True)
