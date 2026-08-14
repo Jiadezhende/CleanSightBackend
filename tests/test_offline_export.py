@@ -28,6 +28,7 @@ from app.services.persistence.strategies.raw_frame_index import (
 )
 
 _R0 = "app.services.inference.offline.impl.clean.export_r0"
+_R1 = "app.services.inference.offline.impl.clean.export_r1"
 
 
 def _frames(*ts):
@@ -220,13 +221,23 @@ class TestExportRunner:
         with pytest.raises(ValueError):
             ExportRunner(tmp_path).run(ExportSpec(task_id=7, step_id=2, recipe=bad))
 
-    def test_backbone_not_yet_supported(self, tmp_path):
-        """视觉分支（帧源 + backbone）留到 R1a/R1b；此前传 --backbone 须显式报错而非静默降级。"""
+    def test_no_pixels_available_fails_loudly(self, tmp_path):
+        """没有任何 raw 段/sidecar 时，视觉分支硬失败并报出分项原因。
+
+        绝不产出"全零视觉特征"的样例——那会让训练侧以为拿到了视觉信息。
+        （sidecar 落地之前录的 step 正是这种情况。）
+        """
         _write_features(tmp_path, 7, 2, [1.0, 1.2])
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="没有取到任何像素帧"):
             ExportRunner(tmp_path).run(
-                ExportSpec(task_id=7, step_id=2, recipe=_R0, backbone="yolo")
+                ExportSpec(task_id=7, step_id=2, recipe=_R1, backbone="yolo")
             )
+
+    def test_r1_without_backbone_fails(self, tmp_path):
+        """R1 缺 visual 时硬失败，不静默退化成 R0（否则 R1 vs R0 的对照会变成自己比自己）。"""
+        _write_features(tmp_path, 7, 2, [1.0, 1.2])
+        with pytest.raises(ValueError, match="global_vec"):
+            ExportRunner(tmp_path).run(ExportSpec(task_id=7, step_id=2, recipe=_R1))
 
 
 class TestRecipeShortName:

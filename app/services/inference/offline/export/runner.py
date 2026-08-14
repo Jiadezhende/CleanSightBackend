@@ -84,6 +84,22 @@ class ExportRunner:
         base = Path(base_dir) if base_dir is not None else settings.storage_base_dir
         self._base_dir = Path(base)
         self._feature_store = FeatureStore(base)
+        self._last_stats = None  # 上一次取帧的 FetchStats（无视觉分支时为 None）
+
+    def _quality(self, frames_total: int, visual: Optional[VisualFrames]) -> ExportQuality:
+        """汇总质量统计。无视觉分支时像素各项恒 0 并标 needs_pixels=False。"""
+        if visual is None:
+            return ExportQuality(frames_total=frames_total, needs_pixels=False)
+        s = self._last_stats
+        return ExportQuality(
+            frames_total=frames_total,
+            needs_pixels=True,
+            pixel_hit=int(np.count_nonzero(visual.valid)) if visual.valid is not None else 0,
+            pixel_miss=s.pixel_miss if s else 0,
+            no_sidecar=s.no_sidecar if s else 0,
+            not_in_playlist=s.not_in_playlist if s else 0,
+            no_segment=s.no_segment if s else 0,
+        )
 
     def default_out_dir(self, spec: ExportSpec) -> Path:
         """产物目录：`{base}/.offline_exports/{task}/{step}/{recipe}@{backbone}/`。"""
@@ -100,15 +116,12 @@ class ExportRunner:
                 "skipped", spec.recipe, message="无特征（features.jsonl 缺失或为空）"
             )
 
+        self._last_stats = None
         visual = self._build_visual(spec, frames)
         model_input = recipe(frames, visual)
 
         out_dir = Path(spec.out_dir) if spec.out_dir is not None else self.default_out_dir(spec)
-        quality = ExportQuality(
-            frames_total=len(frames),
-            needs_pixels=visual is not None,
-            pixel_hit=int(np.count_nonzero(visual.valid)) if visual is not None and visual.valid is not None else 0,
-        )
+        quality = self._quality(len(frames), visual)
         self._write(out_dir, spec, model_input, quality)
 
         logger.info(
@@ -128,17 +141,64 @@ class ExportRunner:
     def _build_visual(
         self, spec: ExportSpec, frames: Sequence[FrameFeature]
     ) -> Optional[VisualFrames]:
-        """取像素 + 跑 backbone → VisualFrames。
+        """取像素 + 跑 backbone → VisualFrames。未指定 backbone（如 R0）返回 None。
 
-        本阶（R0）恒返回 None：R0 不消费像素，帧源与 backbone 留到第 3 阶（R1a/R1b）接入。
-        届时本方法按 spec.backbone 决定是否解码，其余流程一行不改。
+        **按段流式处理**：解一段 → 前向一批 → 只留降维结果，全程不驻留整段像素与特征图。
+        取不到的帧在 `valid` 里为 False、特征行留零 —— 零值本身不承载语义，语义在 mask 上
+        （不变式 F4）。
         """
         if spec.backbone is None:
             return None
-        raise NotImplementedError(
-            "视觉特征（帧源 + backbone）尚未接入，当前只支持不消费像素的 recipe；"
-            "请去掉 --backbone 或等待 R1a/R1b 落地"
+
+        # 重依赖（torch / ultralytics / ffmpeg 子进程）延迟到真要视觉特征时才引入
+        from app.services.inference.offline.export.backbone import global_pool, load_backbone
+        from app.services.inference.offline.export.frame_source import FetchStats, FrameSource
+
+        width, height = self._frame_size(frames)
+        backbone = load_backbone(spec.backbone, spec.device)
+        source = FrameSource(self._base_dir)
+        stats = FetchStats()
+
+        total = len(frames)
+        valid = np.zeros(total, dtype=bool)
+        global_vec: Optional[np.ndarray] = None
+
+        for out_idx, batch in source.iter_batches(
+            spec.task_id, spec.step_id, [ff.ts for ff in frames], width, height, stats
+        ):
+            deep, _shallow = backbone.forward(batch)
+            pooled = global_pool(deep)
+            if global_vec is None:  # 首批到手才知道通道数，避免把维度写死在框架里
+                global_vec = np.zeros((total, pooled.shape[1]), dtype=np.float32)
+            global_vec[out_idx] = pooled
+            valid[out_idx] = True
+
+        self._last_stats = stats
+        if global_vec is None:  # 一帧都没取到：视觉分支整体不可用，硬失败而非产出全零样例
+            raise RuntimeError(
+                f"task={spec.task_id} step={spec.step_id} 没有取到任何像素帧"
+                f"（no_sidecar={stats.no_sidecar} not_in_playlist={stats.not_in_playlist} "
+                f"no_segment={stats.no_segment}）；该 step 可能录制于 sidecar 落地之前"
+            )
+        logger.info(
+            "[ExportRunner] 取帧 %d/%d 命中（no_sidecar=%d not_in_playlist=%d no_segment=%d decode_short=%d）",
+            stats.pixel_hit, total, stats.no_sidecar, stats.not_in_playlist,
+            stats.no_segment, stats.decode_short,
         )
+        return VisualFrames(
+            ts=[ff.ts for ff in frames],
+            valid=valid,
+            global_vec=global_vec,
+            backbone=backbone.name,
+        )
+
+    @staticmethod
+    def _frame_size(frames: Sequence[FrameFeature]) -> tuple:
+        """取源帧分辨率（rawvideo 管道需据此切帧）。逐帧常量，取首个非空即可。"""
+        for ff in frames:
+            if ff.frame_width and ff.frame_height:
+                return int(ff.frame_width), int(ff.frame_height)
+        raise ValueError("features 未记录帧分辨率，无法解码取帧")
 
     def _write(
         self, out_dir: Path, spec: ExportSpec, model_input: Any, quality: ExportQuality

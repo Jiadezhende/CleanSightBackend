@@ -441,6 +441,51 @@ def export_r0(frames: Sequence[FrameFeature], visual=None) -> ModelInput:
     return build_base_features(frames, _DEFAULT_FPS, _DEFAULT_FRAME_WIDTH, _DEFAULT_FRAME_HEIGHT)
 
 
+def export_r1(frames: Sequence[FrameFeature], visual=None) -> ModelInput:
+    """R1：R0 + 全帧 CNN 深层全局池化向量。回答「视觉信息到底有没有用」。
+
+    **R1a / R1b 是同一个 recipe，只差 backbone**（`--backbone yolo` / `--backbone resnet18`）：
+    前者特征域与本场景匹配但与 bbox 同源，其增量只是"检测头丢掉的信息"；后者是一条独立的
+    视觉通道。两者差异正是 R1 要测的核心变量，故 backbone 是导出器的配置项而非 recipe 分叉。
+
+    取不到像素的帧：视觉块置零，**语义由末列 `visual_valid` 承载**——零值本身不表达
+    "画面里什么都没有"，模型据 mask 判断（不变式 F4）。
+
+    特征列布局：`[基础 113 维 | visual_global_0..C-1 | visual_valid]`
+    视觉向量保持 backbone 原始尺度不做归一化——归一化统计量属训练侧，落在这里会与训练仓的
+    normalizer 形成两份真源。
+
+    Args:
+        frames: 帧级 FrameFeature 序列
+        visual: 必需，且须带 `global_vec`；缺失即硬失败（不静默退化成 R0）
+    """
+    base = export_r0(frames)
+    if visual is None or visual.global_vec is None:
+        raise ValueError("export_r1 需要带 global_vec 的 VisualFrames，请指定 --backbone")
+
+    x = np.asarray(base.features, dtype=np.float32)
+    if x.shape[0] != visual.global_vec.shape[0]:
+        raise ValueError(
+            f"视觉特征与 bbox 特征帧数不一致: {visual.global_vec.shape[0]} vs {x.shape[0]}"
+        )
+
+    valid = (
+        np.ones(x.shape[0], dtype=np.float32) if visual.valid is None
+        else np.asarray(visual.valid, dtype=np.float32)
+    )
+    g = np.asarray(visual.global_vec, dtype=np.float32) * valid[:, None]
+
+    names = list(base.feature_names)
+    names += [f"visual_global_{i}" for i in range(g.shape[1])]
+    names += ["visual_valid"]
+    return _with_features(
+        base,
+        np.concatenate([x, g, valid[:, None]], axis=1),
+        names,
+        f"{base.feature_version}+visual_global@{visual.backbone}",
+    )
+
+
 # -------------------- 模型专属特征 recipe（供子类覆盖的 preprocess 调用） --------------------
 
 

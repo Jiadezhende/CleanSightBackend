@@ -29,22 +29,30 @@ class VisualFrames:
     """一段视频的逐帧视觉特征；与 FrameFeature 序列**逐行同序等长**。
 
     深浅两层是同一次 backbone 前向的两个输出（见需求文档 §4.2.1）：
-        deep    (stride-32) 全局池化 → 场景上下文，语义强
-        shallow (stride-8)  RoIAlign → 手部细节（实测手框占 10.9×12.2 格，深层只有 2.7×3.1）
+        deep    (stride-32) → 全局池化 → `global_vec`：场景上下文，语义强
+        shallow (stride-8)  → RoIAlign → `hand_tokens`：手部细节（实测手框占 10.9×12.2 格，
+                                          深层只有 2.7×3.1）
+
+    **刻意只带降维后的结果，不带原始特征图。** 整段特征图扛不住：一条 10 分钟 step 的浅层
+    图是 `T×128×60×80` float32，428 帧就已超 1GB。故池化与 RoIAlign 都在 backbone 前向的
+    同一趟里做完，本壳只承接结果。
 
     Attributes:
         ts: 每行对应的帧 ts，与 FrameFeature.ts 同源同值
-        deep: [T, C, H/32, W/32]；不消费深层特征的 recipe 为 None
-        shallow: [T, C, H/8, W/8]；不消费浅层特征的 recipe 为 None
         valid: [T] bool。**False = 该帧取不到像素**（无 sidecar / 段不在 playlist / 帧已被淘汰）。
             取不到一律显式 mask 并计入统计，绝不用零向量、邻帧或插值冒充真实帧（不变式 F4）
-        backbone: backbone 身份，写进 manifest 供追溯
+        global_vec: [T, C_deep] 深层全局池化向量；R1 用
+        hand_tokens: [T, K, C_shallow] 手部 RoIAlign token；R2 用（第 4 阶）
+        hand_mask: [T, K] bool，手漏检处为 False（与 valid 正交：valid 说帧有没有，
+            hand_mask 说这帧里第 k 只手有没有）
+        backbone: backbone 身份，写进 manifest 与 feature_version 供追溯
     """
 
     ts: List[float]
-    deep: Optional[np.ndarray] = None
-    shallow: Optional[np.ndarray] = None
     valid: Optional[np.ndarray] = None
+    global_vec: Optional[np.ndarray] = None
+    hand_tokens: Optional[np.ndarray] = None
+    hand_mask: Optional[np.ndarray] = None
     backbone: str = "none"
 
     @property
