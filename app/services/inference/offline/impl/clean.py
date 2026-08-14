@@ -34,6 +34,13 @@ from app.services.inference.offline.segmenter import OfflineSegmenter
 
 FEATURE_VERSION = "clean_bbox_v2_top1_impute"
 
+# 特征工程的三个兜底常量（Segmenter 构造默认值与导出 recipe 共用一处，避免两份漂移）。
+# 都只是**兜底**：真实采样率由 `_effective_fps` 从帧 ts 反推，分辨率优先取 `FrameFeature.frame_*`
+# （pool 盖章、store 回读还原），仅当这些缺失时才落到这里。
+_DEFAULT_FPS = 7.5
+_DEFAULT_FRAME_WIDTH = 640
+_DEFAULT_FRAME_HEIGHT = 480
+
 ACTION_LABELS = [
     "idle",
     "long_brush_insert",
@@ -413,6 +420,27 @@ def _build_feature_matrix(
     return _finite_matrix(np.concatenate(blocks, axis=1)), names
 
 
+# -------------------- 导出 recipe（供离线导出器 importlib 取用） --------------------
+#
+# 统一签名 `(frames, visual) -> ModelInput`（见 offline/export/models.py）。导出器与将来的
+# 融合 Segmenter.preprocess **调同一批函数**，故「训练样例」与「线上特征转换」不可能漂移。
+# 这些是薄封装：真正的特征工程仍在上方模块级纯函数里，不在此复制一行。
+
+
+def export_r0(frames: Sequence[FrameFeature], visual=None) -> ModelInput:
+    """R0：bbox-only 对照基线（现有 v2，113 维）。
+
+    `visual` 恒被忽略——本 recipe 不消费像素，签名统一只是为了让导出器一视同仁地调用。
+    R0 存在的意义是**对照基准**：后续 R1/R2 的增益必须相对它度量，故它也必须走同一套
+    导出管道产出，而不是让训练侧另算一份。
+
+    Args:
+        frames: 帧级 FrameFeature 序列（按 ts 升序，多流已在 by_source 内对齐）
+        visual: 忽略（保持 recipe 统一签名）
+    """
+    return build_base_features(frames, _DEFAULT_FPS, _DEFAULT_FRAME_WIDTH, _DEFAULT_FRAME_HEIGHT)
+
+
 # -------------------- 模型专属特征 recipe（供子类覆盖的 preprocess 调用） --------------------
 
 
@@ -558,9 +586,9 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         subscribes: Sequence[str],
         model_path: str | None = None,
         min_duration_s: float = 0.2,
-        fps: float = 7.5,
-        frame_width: int = 640,
-        frame_height: int = 480,
+        fps: float = _DEFAULT_FPS,
+        frame_width: int = _DEFAULT_FRAME_WIDTH,
+        frame_height: int = _DEFAULT_FRAME_HEIGHT,
     ):
         super().__init__(name, subscribes)
         self.model_path = model_path

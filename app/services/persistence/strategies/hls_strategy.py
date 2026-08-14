@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 
 from app.domain.frame import Frame
+from app.services.persistence.strategies.raw_frame_index import write_frame_index
 from app.settings import settings
 from app.utils.exceptions import PersistenceError
 
@@ -531,6 +532,12 @@ class HLSPersistenceStrategy:
         finally:
             if out_raw is not None:
                 out_raw.release()  # 异常路径也须释放原生编码器句柄
+
+        # 1b. 落逐帧索引 sidecar：记下写进本段的帧 ts 有序表，使离线可由 ts 精确反查段内
+        # ordinal（合成 CFR 抹掉了逐帧真实 ts，详见 raw_frame_index 模块 docstring）。
+        # **刻意在目录锁之外**——sidecar 是段私有文件，与下方锁内的 transcode/playlist/metadata
+        # 三段无竞争，也不参与 tfdt 累计；best-effort，失败不阻断落盘。
+        write_frame_index(raw_segment_path, frames)
 
         # 2. 计算视频段时长：必须与 fMP4 fragment 实际媒体时长完全一致。
         # cv2.VideoWriter 用 eff_fps 写 N 帧 → 输出 mp4v 媒体时长 = N/eff_fps，
