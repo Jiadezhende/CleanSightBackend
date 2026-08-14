@@ -1,9 +1,11 @@
 # ClipBuilder 裁剪改两步：先 copy 出裸 H.264，再按 target_fps 精确裁剪
 
-> **变更状态**：生效中（2026-08-14）
-> **知识库**：待沉淀
+> **变更状态**：生效中（2026-08-14）——**⚠ 临时止血，有明确退出条件，见文末「退出条件」**
+> **知识库**：**不单独沉淀**。本改造预期在写入侧时基修复后撤销，沉淀会把一个过渡态写成常态。
 >
 > 承接：直接缓解 [20260614_LAB_CLIP_TIME_MODEL.md](20260614_LAB_CLIP_TIME_MODEL.md)「已知/延后项 #2 裁剪偏移漂移」——`offset` 混用墙钟与媒体时间，使 `-ss/-to` 裁剪起点偏移。
+>
+> **根因不在本模块**：见 [20260813_HLS_SEGMENT_TIMESCALE_FIX.md](20260813_HLS_SEGMENT_TIMESCALE_FIX.md)。本文只治 ClipBuilder 这一条出口，写入侧未动，其余出口（在线回放、告警证据回放、StepExporter 整段下载）仍坏。
 
 ## 概述
 
@@ -120,4 +122,24 @@ cmd1 失败时立即抛 `ClipBuildError`（截断 stderr 末 1500 字符），�
 1. **`TestRunFfmpegM3u8::test_writes_m3u8_with_init_map_and_segment_list`** — 测试在 `fake_run` 中对每次调用都要求 `cmd` 含 `.m3u8` 输入，但 cmd2 输入是 `.h264`，断言 `m3u8 is not None` 失败：`AssertionError: ffmpeg 调用时临时 m3u8 必须存在`。
 2. **`TestRunFfmpegM3u8::test_cmd_uses_hls_demuxer_not_concat`** — 测试从最后一次 `cmd`（cmd2）断言 `-allowed_extensions`，但 `-allowed_extensions` 只在 cmd1，断言失败：`AssertionError: assert '-allowed_extensions' in ['.ffmpeg/bin/ffmpeg', '-y', '-loglevel', 'error', '-r', '30', ...]`。
 
-> 本次未改动测试代码，保留失败现状，等待判断：① 修改测试适配两步结构（fake_run 改多 call 捕获 + cmd1/cmd2 分别断言）；② 或调整实现让测试不再需要区分两步。
+> 已按 ① 处理：`fake_run` 单槽 `captured["cmd"]` 换成 `_FfmpegCalls` 记录器（收集全部调用，`copy_cmd` / `encode_cmd` 显式指名取哪一步）。单槽写法在两步管线下会被第二次调用覆盖，使「输入是 m3u8」「含 `-allowed_extensions`」这类只对 copy 步成立的断言静默错位到 encode 步——这正是两个用例失败的机制。另加 `test_two_pass_structure` 锁住两步结构本身，并让清理用例先落下部分裸流再失败（否则「h264 被清理」是平凡成立的假绿）。**13 passed**。
+
+---
+
+## 退出条件
+
+**本改造是绕过写入侧时基 bug 的止血，不是根因修复。**
+
+根因：段落盘时每段的 `mdhd.timescale` 各不相同，却共用同一份 `init.mp4`，于是 HLS demuxer 一律拿 init 的 timescale 去解每一段 → 逐段速率 0.63×~1.59× 乱跳。实测与诊断见 [20260813_HLS_SEGMENT_TIMESCALE_FIX.md](20260813_HLS_SEGMENT_TIMESCALE_FIX.md)。本文的两步管线之所以奏效，是因为 cmd1 把被污染的 PTS 整个丢弃、cmd2 用单一 `target_fps` 重建了一条时间轴——**问题被压平，不是被解决**。
+
+因此，上述时基修复落地后**必须撤销本两步改造、恢复单步 HLS demux**：
+
+1. 那时 demux 出的 PTS 已经正确，再重定时反而把正确的墙钟轴抹平成帧计数轴；
+2. 与后续「空洞物化为低帧率黑屏段」**直接冲突**——1fps × 30 帧（代表 30s 断流）经 `-r 30` 重定时会被播成 1s，丢失 29s。见 [20260813_HLS_WALLCLOCK_TIMELINE_REQUIREMENTS.md](20260813_HLS_WALLCLOCK_TIMELINE_REQUIREMENTS.md)。
+
+撤销时的信号：`tests/test_lab_clip_builder.py::test_two_pass_structure` 会失败。它失败即提示"两步结构没了"——那时应确认是有意撤销，随之删除该用例。
+
+### 遗留边界（本期不处理）
+
+- `-r settings.raw_fps` 成立的前提是**本管线只吃 raw 轨**（实测真实帧率 29.95 ≈ 30）。processed 轨实测 ~14.7fps，若将来把 `list_segments` 的 track 改成 processed 而不同步改重定时基准，会**静默快放 2.04×**，无任何断言拦截。
+- 重定时用的是帧计数轴而非墙钟轴，故段间空洞会被压掉。当前 raw 轨全 13 段核算误差 −0.03%（3776 帧 / 30fps = 125.867s vs ΣEXTINF 125.904s），可忽略；但这依赖"raw 真实帧率恰好 ≈ raw_fps"这一数值巧合，掉速时会失准。
