@@ -102,8 +102,13 @@ class ExportRunner:
         )
 
     def default_out_dir(self, spec: ExportSpec) -> Path:
-        """产物目录：`{base}/.offline_exports/{task}/{step}/{recipe}@{backbone}/`。"""
-        tag = f"{recipe_short_name(spec.recipe)}@{spec.backbone or 'none'}"
+        """产物目录：`{base}/.offline_exports/{task}/{step}/{recipe}@{backbone}/`。
+
+        backbone 标识可能带路径与后缀（`yolo:yolo11n.pt`），统一净化成目录名安全的形式。
+        """
+        backbone = (spec.backbone or "none").replace(".pt", "")
+        backbone = backbone.replace(":", "-").replace("/", "-").replace("\\", "-")
+        tag = f"{recipe_short_name(spec.recipe)}@{backbone}"
         return self._base_dir / _EXPORT_SUBDIR / str(spec.task_id) / str(spec.step_id) / tag
 
     def run(self, spec: ExportSpec) -> ExportResult:

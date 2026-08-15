@@ -32,7 +32,7 @@ from app.services.inference.models import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
-FEATURE_VERSION = "clean_bbox_v2_top1_impute"
+FEATURE_VERSION = "clean_bbox_v3_detectable"
 
 # 特征工程的三个兜底常量（Segmenter 构造默认值与导出 recipe 共用一处，避免两份漂移）。
 # 都只是**兜底**：真实采样率由 `_effective_fps` 从帧 ts 反推，分辨率优先取 `FrameFeature.frame_*`
@@ -50,36 +50,28 @@ ACTION_LABELS = [
     "air_injection",
 ]
 
+# 只保留**部署中的检测器真会产出**的类别，与两个 checkpoint 的 `names` 严格对齐：
+#   clean-large-best → hand / scope_control_body / scope_mid_section
+#   clean-small-best → syringe / air_gun / scope_distal_end
+#
+# 刷具（short_brush / long_brush / brush_tip_out）**刻意不在此列**：现场实测这类细长、
+# 高度遮挡的目标基本检不出，且按 CLEAN 模型提案 §3.2D 已定为不作为输入检测类别——
+# 「长刷/短刷」保留业务语义，但证据来自手部局部画面、可见大目标与跨帧变化，不来自刷具框。
+# 曾经把它们列在这里的后果是 33 列特征恒为零，白占输入维度并让 normalizer 的 std=0。
 OBJECTS = [
     "hand",
-    "short_brush",
-    "long_brush",
     "syringe",
     "air_gun",
     "scope_control_body",
     "scope_mid_section",
     "scope_distal_end",
-    "brush_tip_out",
 ]
 
-OBJECT_ALIASES = {
-    "hand": "hand",
-    "short_brush": "short_brush",
-    "long_brush": "long_brush",
-    "syringe": "syringe",
-    "air_gun": "air_gun",
-    "scope_control_body": "scope_control_body",
-    "scope_mid_section": "scope_mid_section",
-    "scope_distal_end": "scope_distal_end",
-    "brush_tip_out": "brush_tip_out",
-}
+OBJECT_ALIASES = {name: name for name in OBJECTS}
 
+# 目标对关系特征（valid/dist/delta）。同样只保留两端都真能检出的对——涉及刷具的 5 组
+# 已随上面一并移除。
 PAIR_FEATURES = [
-    ("hand", "short_brush"),
-    ("hand", "long_brush"),
-    ("brush_tip_out", "scope_distal_end"),
-    ("short_brush", "scope_control_body"),
-    ("long_brush", "scope_mid_section"),
     ("air_gun", "scope_distal_end"),
     ("syringe", "scope_distal_end"),
 ]
@@ -90,8 +82,8 @@ class ModelInput:
     """clean 离线模型输入。
 
     features:
-        [T, F] 数值特征矩阵。基础 v2 为 113 维；具体模型可在
-        覆盖的 preprocess() 内扩展为 121/249 等模型专属输入。
+        [T, F] 数值特征矩阵。基础 v3 为 71 维；具体模型可在
+        覆盖的 preprocess() 内扩展为 73/151 等模型专属输入。
     feature_names:
         features 每一列的名字，便于训练仓和后端排查对齐问题。
     timestamps:
@@ -120,8 +112,8 @@ class ModelInput:
 
 # ==================== 特征工程（模块级纯函数） ====================
 #
-# clean 检测框序列 -> v2 固定维时序特征，与 offline-model 的
-# `clean_bbox_v2_top1_impute` 对齐：
+# clean 检测框序列 -> v3 固定维时序特征，与 offline-model 的
+# `clean_bbox_v3_detectable` 对齐：
 #     - hand 使用 top-2 槽位；
 #     - 其它目标使用 top-1，不做同类多框加权平均；
 #     - 每个目标包含 present/conf/cx/cy/area/speed/missing_age/imputed；
@@ -138,7 +130,7 @@ def build_base_features(
     frame_width: int = 640,
     frame_height: int = 480,
 ) -> ModelInput:
-    """把 clean 帧级 FrameFeature 序列转换成 v2 固定维（113）时序特征。
+    """把 clean 帧级 FrameFeature 序列转换成 v3 固定维（71）时序特征。
 
     每帧 `FrameFeature.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
     """
@@ -162,7 +154,7 @@ def build_base_features(
 
 
 def base_feature_names() -> List[str]:
-    """基础 v2 的 113 个特征列名（跑一遍空矩阵取名，避免维护第二份清单）。"""
+    """基础 v3 的 71 个特征列名（跑一遍空矩阵取名，避免维护第二份清单）。"""
     return _build_feature_matrix({name: [] for name in OBJECTS}, 1, 7.5)[1]
 
 
@@ -345,7 +337,7 @@ def _build_feature_matrix(
     frames: int,
     fps: float,
 ) -> Tuple[np.ndarray, List[str]]:
-    """拼装完整 v2 矩阵：hand top-2 + 各目标 top-1 + 关键目标对 + 时间编码，返回 (矩阵, 列名)。"""
+    """拼装完整 v3 矩阵：hand top-2 + 各目标 top-1 + 关键目标对 + 时间编码，返回 (矩阵, 列名)。"""
     blocks: List[np.ndarray] = []
     names: List[str] = []
     centers: Dict[str, np.ndarray] = {}
@@ -428,7 +420,7 @@ def _build_feature_matrix(
 
 
 def export_r0(frames: Sequence[FrameFeature], visual=None) -> ModelInput:
-    """R0：bbox-only 对照基线（现有 v2，113 维）。
+    """R0：bbox-only 对照基线（v3，71 维）。
 
     `visual` 恒被忽略——本 recipe 不消费像素，签名统一只是为了让导出器一视同仁地调用。
     R0 存在的意义是**对照基准**：后续 R1/R2 的增益必须相对它度量，故它也必须走同一套
@@ -451,7 +443,7 @@ def export_r1(frames: Sequence[FrameFeature], visual=None) -> ModelInput:
     取不到像素的帧：视觉块置零，**语义由末列 `visual_valid` 承载**——零值本身不表达
     "画面里什么都没有"，模型据 mask 判断（不变式 F4）。
 
-    特征列布局：`[基础 113 维 | visual_global_0..C-1 | visual_valid]`
+    特征列布局：`[基础 71 维 | visual_global_0..C-1 | visual_valid]`
     视觉向量保持 backbone 原始尺度不做归一化——归一化统计量属训练侧，落在这里会与训练仓的
     normalizer 形成两份真源。
 
@@ -555,56 +547,36 @@ def _near_score(dist: np.ndarray) -> np.ndarray:
 
 
 def add_business_priors(model_input: ModelInput) -> ModelInput:
-    """recipe：按业务规则叠加 8 维动作先验（接近度×存在×运动等），ASFormer/BiGRU 用。"""
+    """recipe：按业务规则叠加动作先验（接近度×存在×运动等），ASFormer/BiGRU 用。
+
+    只保留**两端目标都真能检出**的先验：灌注（syringe 稳定贴近先端）与注气（air_gun 同理）。
+    原先另有 6 维长/短刷先验，全部建立在刷具检测框上——刷具检不出（见 OBJECTS 注释），
+    那 6 维恒为零，是纯噪声维度。长/短刷动作改由手部局部画面与跨帧变化承担，不在此处造先验。
+    """
     x = np.asarray(model_input.features, dtype=np.float32)
     names = list(model_input.feature_names)
     n = {name: idx for idx, name in enumerate(names)}
 
     hand = np.maximum(_col(x, n, "hand_top1_present"), _col(x, n, "hand_top2_present"))
-    short_brush = _col(x, n, "short_brush_present")
     syringe = _col(x, n, "syringe_present")
     air_gun = _col(x, n, "air_gun_present")
-    brush_tip = _col(x, n, "brush_tip_out_present")
-    long_brush = _col(x, n, "long_brush_present")
 
-    short_near = _near_score(_col(x, n, "short_brush_to_scope_control_body_dist"))
     syringe_near = _near_score(_col(x, n, "syringe_to_scope_distal_end_dist"))
     air_near = _near_score(_col(x, n, "air_gun_to_scope_distal_end_dist"))
-    tip_near = _near_score(_col(x, n, "brush_tip_out_to_scope_distal_end_dist"))
-    long_near = _near_score(_col(x, n, "long_brush_to_scope_mid_section_dist"))
 
-    short_motion = np.maximum(
-        _col(x, n, "short_brush_speed"),
-        np.abs(_col(x, n, "short_brush_to_scope_control_body_delta")),
-    )
     syringe_stable = syringe * syringe_near * (1.0 - np.clip(_col(x, n, "syringe_speed"), 0.0, 1.0))
     air_stable = air_gun * air_near * (1.0 - np.clip(_col(x, n, "air_gun_speed"), 0.0, 1.0))
-    long_signal = np.maximum.reduce([long_brush, brush_tip, _col(x, n, "brush_tip_out_imputed")])
-    long_delta = _col(x, n, "brush_tip_out_to_scope_distal_end_delta")
-    hand_to_long = _near_score(_col(x, n, "hand_to_long_brush_dist"))
 
     priors = np.stack(
         [
-            hand * short_brush * short_near,
-            hand * short_brush * short_motion,
             hand * syringe_stable,
             hand * air_stable,
-            hand * long_signal * np.maximum(tip_near, long_near),
-            hand * long_signal * np.clip(-long_delta, 0.0, 1.0),
-            hand * long_signal * np.clip(long_delta, 0.0, 1.0),
-            hand_to_long * long_signal,
         ],
         axis=1,
     ).astype(np.float32)
     prior_names = [
-        "prior_short_clean_near",
-        "prior_short_clean_motion",
         "prior_flush_stable",
         "prior_air_stable",
-        "prior_long_signal_near_scope",
-        "prior_long_towards_distal",
-        "prior_long_away_distal",
-        "prior_hand_long_contact",
     ]
     return _with_features(
         model_input,
@@ -617,13 +589,13 @@ def add_business_priors(model_input: ModelInput) -> ModelInput:
 class _CleanTorchSegmenter(OfflineSegmenter):
     """clean 模型策略基类：torch 模型加载 + 推理 + SegmentFact 解码。
 
-    特征工程是模块级纯函数：`preprocess` 调 build_base_features 得基础 v2（113 维）；
+    特征工程是模块级纯函数：`preprocess` 调 build_base_features 得基础 v3（71 维）；
     需叠加模型专属 recipe 的子类**覆盖 preprocess**，用 `super().preprocess()` 取基础特征后
     再调模块级特征函数（add_business_priors / add_centered_window_stats）。
     """
 
     model_version = "clean_model_v1"
-    feature_method = "v2"
+    feature_method = "v3"
 
     def __init__(
         self,
@@ -646,7 +618,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self._last_result: dict | None = None
 
     def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
-        """帧级 FrameFeature 序列 → 基础 v2 特征（113 维）。
+        """帧级 FrameFeature 序列 → 基础 v3 特征（71 维）。
 
         多流按帧合并折进 build_base_features（`frames` 已按 ts 升序、各流在 by_source 内对齐）。
         需叠加模型专属 recipe 的子类覆盖本方法，用 `super().preprocess()` 取基础特征后再变换。
@@ -963,12 +935,12 @@ def _make_bigru(in_dim: int, class_count: int, hidden: int = 64):
 class CleanMSTCNBiLSTMSegmenter(_CleanTorchSegmenter):
     """CLEAN 阶段 MS-TCN + BiLSTM 离线模型。
 
-    当前 best checkpoint 对应基础 v2 特征：
-        clean_bbox_v2_top1_impute，113 维。
+    对应基础 v3 特征：
+        clean_bbox_v3_detectable，71 维。
     """
 
     model_version = "clean_mstcn_bilstm_v1"
-    feature_method = "v2"
+    feature_method = "v3"
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_mstcn_bilstm(in_dim, class_count)
@@ -977,8 +949,8 @@ class CleanMSTCNBiLSTMSegmenter(_CleanTorchSegmenter):
 class CleanASFormerSegmenter(_CleanTorchSegmenter):
     """CLEAN 阶段 ASFormer 风格离线模型。
 
-    当前 best checkpoint 对应 v2 + business_priors：
-        clean_bbox_v2_top1_impute+business_priors，121 维。
+    对应 v3 + business_priors：
+        clean_bbox_v3_detectable+business_priors，73 维。
     """
 
     model_version = "clean_asformer_v1"
@@ -994,8 +966,8 @@ class CleanASFormerSegmenter(_CleanTorchSegmenter):
 class CleanBiGRUSegmenter(_CleanTorchSegmenter):
     """CLEAN 阶段 BiGRU 离线模型。
 
-    当前 best checkpoint 对应 v2 + center window + business_priors：
-        clean_bbox_v2_top1_impute+center_window+business_priors，249 维。
+    对应 v3 + center window + business_priors：
+        clean_bbox_v3_detectable+center_window+business_priors，151 维。
     """
 
     model_version = "clean_bigru_v1"

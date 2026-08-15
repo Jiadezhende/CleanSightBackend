@@ -261,14 +261,18 @@ class TestBrushRulesSegmenter:
 # ============================ CleanSegmenter（CLEAN baseline） ============================
 
 def _clean_frame(ts):
-    """一帧：clean_large=[hand, scope_control_body]，clean_small=[short_brush] → short_brush_cleaning。"""
+    """一帧：clean_large=[hand, scope_control_body]，clean_small=[syringe]。
+
+    只用**部署检测器真会产出**的类别（见 impl/clean.py OBJECTS）：刷具类基本检不出、
+    已不在特征输入内，用它造帧只会得到一堆恒零列，测不出任何东西。
+    """
     large = FrameDetections(
         detections=[make_detection(class_name="hand"),
                     make_detection(class_name="scope_control_body")],
         metadata={}, timestamp=ts,
     )
     small = FrameDetections(
-        detections=[make_detection(class_name="short_brush")], metadata={}, timestamp=ts,
+        detections=[make_detection(class_name="syringe")], metadata={}, timestamp=ts,
     )
     return {"clean_large": large, "clean_small": small}
 
@@ -284,8 +288,8 @@ class TestCleanSegmenter:
         }
         mi = seg.preprocess(_frames(streams))
         assert isinstance(mi, ModelInput)
-        assert mi.frame_count == 4 and mi.feature_dim == 113  # v2: hand top-2 + top-1/impute/relations
-        assert mi.feature_version == "clean_bbox_v2_top1_impute"
+        assert mi.frame_count == 4 and mi.feature_dim == 71  # v3: hand top-2 + top-1/impute/relations
+        assert mi.feature_version == "clean_bbox_v3_detectable"
         assert all(math.isfinite(v) for row in mi.features for v in row)
         with pytest.raises(ValueError, match="model_path"):
             seg.segment(mi)
@@ -311,13 +315,13 @@ class TestCleanSegmenter:
         bigru_input = bigru.preprocess(frames)
 
         assert (mstcn.feature_method, mstcn_input.feature_dim, mstcn_input.feature_version) == (
-            "v2", 113, "clean_bbox_v2_top1_impute",
+            "v3", 71, "clean_bbox_v3_detectable",
         )
         assert (asformer.feature_method, asformer_input.feature_dim, asformer_input.feature_version) == (
-            "business_priors", 121, "clean_bbox_v2_top1_impute+business_priors",
+            "business_priors", 73, "clean_bbox_v3_detectable+business_priors",
         )
         assert (bigru.feature_method, bigru_input.feature_dim, bigru_input.feature_version) == (
-            "window_stats+business_priors", 249, "clean_bbox_v2_top1_impute+center_window+business_priors",
+            "window_stats+business_priors", 151, "clean_bbox_v3_detectable+center_window+business_priors",
         )
 
     def test_no_model_path_hard_fails_without_debug_result(self):

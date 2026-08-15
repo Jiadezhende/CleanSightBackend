@@ -123,7 +123,7 @@ class TestR0Recipe:
         got = export_r0(frames)
         want = build_base_features(frames, 7.5, 640, 480)
         assert got.feature_names == want.feature_names
-        assert got.feature_version == want.feature_version == "clean_bbox_v2_top1_impute"
+        assert got.feature_version == want.feature_version == "clean_bbox_v3_detectable"
         np.testing.assert_array_equal(
             np.asarray(got.features, dtype=np.float32),
             np.asarray(want.features, dtype=np.float32),
@@ -134,10 +134,10 @@ class TestR0Recipe:
         frames = [make_frame_feature(ts=1.0, source="clean_large")]
         assert export_r0(frames, None).features == export_r0(frames, object()).features
 
-    def test_base_dim_is_113(self):
+    def test_base_dim_is_71(self):
         frames = [make_frame_feature(ts=float(i), source="clean_large") for i in range(3)]
         out = export_r0(frames)
-        assert out.feature_dim == 113 == len(out.feature_names)
+        assert out.feature_dim == 71 == len(out.feature_names)
 
 
 # ============================ ExportRunner ============================
@@ -151,17 +151,17 @@ class TestExportRunner:
 
         assert result.status == "completed"
         assert result.frame_count == len(ts_list)
-        assert result.feature_dim == 113
+        assert result.feature_dim == 71
 
         npz = np.load(result.out_dir / "input.npz")
-        assert npz["features"].shape == (len(ts_list), 113)
+        assert npz["features"].shape == (len(ts_list), 71)
         assert npz["timestamps"].tolist() == ts_list
 
         manifest = json.loads((result.out_dir / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["recipe"] == _R0
         assert manifest["backbone"] == "none"
-        assert manifest["feature_version"] == "clean_bbox_v2_top1_impute"
-        assert manifest["feature_dim"] == len(manifest["feature_names"]) == 113
+        assert manifest["feature_version"] == "clean_bbox_v3_detectable"
+        assert manifest["feature_dim"] == len(manifest["feature_names"]) == 71
         assert manifest["frame_count"] == len(ts_list)
         assert manifest["ts_start"] == ts_list[0] and manifest["ts_end"] == ts_list[-1]
         assert manifest["quality"]["frames_total"] == len(ts_list)

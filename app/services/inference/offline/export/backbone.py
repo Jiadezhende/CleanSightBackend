@@ -28,11 +28,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# YOLOv8 主干在 model.model 里是纯顺序段（各层 f=-1，无跨层路由）：
-#   0 Conv(s2) 1 Conv(s4) 2 C2f 3 Conv(s8) 4 C2f 5 Conv(s16) 6 C2f 7 Conv(s32) 8 C2f 9 SPPF
-# 取 [:5] 输出为 stride-8 浅层、[:10] 输出为 stride-32 深层。
-_YOLO_SHALLOW_END = 5
-_YOLO_DEEP_END = 10
+# 主干边界与深浅层位置一律**探测得出，不硬编码层号**：本仓 checkpoint 是 YOLO11
+# （C3k2 块，主干 0..10 以 C2PSA 收尾），与 YOLOv8（C2f 块，主干 0..9 以 SPPF 收尾）
+# 层号不同；写死会静默漏掉 C2PSA 整块或切进 head。探测规则见 _probe_backbone：
+#   - head 起点 = 第一个 nn.Upsample（v8/v11 的 head 均以它开头）；
+#   - 浅层 = 主干内最后一个输出 stride==8 的层；深层 = 主干最后一层。
+_SHALLOW_STRIDE = 8
 _DEFAULT_YOLO_CKPT = "app/data/clean-large-best.pt"
 
 
@@ -60,11 +61,14 @@ class _YoloBackbone(Backbone):
 
         path = Path(ckpt)
         if not path.exists():
-            raise FileNotFoundError(f"YOLO 权重不存在: {path}")
-        model = YOLO(str(path)).model.float().eval()
-        self._layers = list(model.model)[:_YOLO_DEEP_END]
+            # ultralytics 官方权重名（如 yolo11n.pt）允许按需下载，用于「同架构未在本域训练」对照
+            if "/" in ckpt or "\\" in ckpt:
+                raise FileNotFoundError(f"YOLO 权重不存在: {path}")
+            logger.info("[Backbone] 本地无 %s，交由 ultralytics 拉取官方权重", ckpt)
+        model = YOLO(str(ckpt)).model.float().eval()
         self._torch = torch
         self._device = device
+        self._layers, self._shallow_at = _probe_backbone(model, torch)
         for layer in self._layers:
             layer.to(device)
         self.name = f"yolo:{path.stem}"
@@ -78,9 +82,46 @@ class _YoloBackbone(Backbone):
         with torch.no_grad():
             for i, layer in enumerate(self._layers):
                 t = layer(t)
-                if i == _YOLO_SHALLOW_END - 1:
+                if i == self._shallow_at:
                     shallow = t
         return t.cpu().numpy(), shallow.cpu().numpy()
+
+
+def _probe_backbone(model, torch) -> Tuple[list, int]:
+    """探测主干边界与浅层位置，返回 (主干层列表, 浅层所在下标)。
+
+    不硬编码层号——本仓是 YOLO11（主干 0..10 以 C2PSA 收尾），YOLOv8 是 0..9 以 SPPF 收尾，
+    写死会静默漏掉 C2PSA 整块或切进 head。规则：
+      1) head 起点 = 第一个 `nn.Upsample`（v8/v11 的 head 均以它开头），其前即主干；
+      2) 用 640×640 假输入逐层前向，记录各层输出 stride；
+      3) 浅层取主干内**最后一个** stride==8 的层（该尺度语义最成熟），深层即主干末层。
+    """
+    import torch.nn as nn
+
+    layers = list(model.model)
+    head_at = next(
+        (i for i, layer in enumerate(layers) if isinstance(layer, nn.Upsample)), len(layers)
+    )
+    backbone = layers[:head_at]
+    if not backbone:
+        raise ValueError("未能识别 YOLO 主干（没找到 head 起点）")
+
+    probe = torch.zeros(1, 3, 640, 640)
+    shallow_at = -1
+    with torch.no_grad():
+        t = probe
+        for i, layer in enumerate(backbone):
+            t = layer(t)
+            if 640 // t.shape[-1] == _SHALLOW_STRIDE:
+                shallow_at = i
+    if shallow_at < 0:
+        raise ValueError(f"主干内未找到 stride-{_SHALLOW_STRIDE} 层")
+    logger.info(
+        "[Backbone] 主干 %d 层（末层 %s，stride %d）；浅层取第 %d 层 %s",
+        len(backbone), type(backbone[-1]).__name__, 640 // t.shape[-1],
+        shallow_at, type(backbone[shallow_at]).__name__,
+    )
+    return backbone, shallow_at
 
 
 class _ResNet18Backbone(Backbone):
