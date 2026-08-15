@@ -1,7 +1,10 @@
-"""离线特征导出链路测试：raw 帧索引 sidecar / R0 recipe / ExportRunner / CLI 参数。
+"""离线导出与视觉块测试：raw 帧索引 sidecar / 视觉块 / 特征健康诊断 / 导出 CLI 参数。
 
 不依赖 GPU / ffmpeg / RTSP / DB：sidecar 的构造与解析是纯函数（`cv2.VideoWriter` 写段、
-段解码属 I/O 边界，按开发规范留给集成测试）；导出链路全用临时 storage。
+段解码属 I/O 边界，按开发规范留给集成测试）；导出链路全用临时 storage 与临时 offline 目录。
+
+导出**本身**的行为（npz + manifest、与推理同源）在 test_offline_pipeline.py 里测，
+那里离编排更近；本文件测的是它周边的输入（sidecar、视觉块）与输出（诊断）。
 """
 
 import json
@@ -15,12 +18,8 @@ from factories import make_detection, make_frame_detections, make_frame_feature
 from app.domain.detection import FrameDetections
 from app.domain.frame import Frame
 from app.services.inference.feature.store import FeatureStore
-from app.services.inference.offline.export.models import ExportSpec
-from app.services.inference.offline.export.runner import (
-    ExportRunner,
-    recipe_short_name,
-)
-from app.services.inference.offline.impl.clean import build_base_features, export_r0
+from app.services.inference.offline import blocks
+from app.services.inference.offline.blocks import BlockKind
 from app.services.persistence.strategies.raw_frame_index import (
     build_frame_index,
     index_path_for,
@@ -28,8 +27,7 @@ from app.services.persistence.strategies.raw_frame_index import (
     write_frame_index,
 )
 
-_R0 = "app.services.inference.offline.impl.clean.export_r0"
-_R1 = "app.services.inference.offline.impl.clean.export_r1"
+_CLEAN_CLASS = "app.services.inference.offline.infer.impl.clean.CleanMSTCNBiLSTMSegmenter"
 
 
 def _frames(*ts):
@@ -104,151 +102,89 @@ class TestRawFrameIndex:
         assert [p.name for p in tmp_path.glob("*.tmp")] == []
 
 
-# ============================ R0 recipe ============================
+# ============================ 视觉块 ============================
 
-class TestR0Recipe:
-    def test_identical_to_build_base_features(self):
-        """**单一真源自证**：导出走的 R0 与直接算的基础特征逐值相等。
-
-        导出器与将来的融合 Segmenter.preprocess 调同一批函数，训练样例与线上特征转换
-        因此不可能漂移。
-        """
-        frames = [
-            make_frame_feature(
-                ts=float(i),
-                by_source={"clean_large": make_frame_detections(n=2, class_name="hand", ts=float(i))},
-                frame_width=640, frame_height=480,
-            )
-            for i in range(1, 6)
-        ]
-        got = export_r0(frames)
-        want = build_base_features(frames, 7.5, 640, 480)
-        assert got.feature_names == want.feature_names
-        assert got.feature_version == want.feature_version == "clean_bbox_v3_detectable"
-        np.testing.assert_array_equal(
-            np.asarray(got.features, dtype=np.float32),
-            np.asarray(want.features, dtype=np.float32),
-        )
-
-    def test_ignores_visual_argument(self):
-        """R0 不消费像素；统一签名只为让导出器一视同仁地调用。"""
-        frames = [make_frame_feature(ts=1.0, source="clean_large")]
-        assert export_r0(frames, None).features == export_r0(frames, object()).features
-
-    def test_base_dim_is_71(self):
-        frames = [make_frame_feature(ts=float(i), source="clean_large") for i in range(3)]
-        out = export_r0(frames)
-        assert out.feature_dim == 71 == len(out.feature_names)
-
-
-# ============================ ExportRunner ============================
-
-class TestExportRunner:
-    def test_completed_writes_npz_and_manifest(self, tmp_path):
-        ts_list = [1.0, 1.2, 1.4, 1.6]
-        _write_features(tmp_path, 7, 2, ts_list)
-
-        result = ExportRunner(tmp_path).run(ExportSpec(task_id=7, step_id=2, recipe=_R0))
-
-        assert result.status == "completed"
-        assert result.frame_count == len(ts_list)
-        assert result.feature_dim == 71
-
-        npz = np.load(result.out_dir / "input.npz")
-        assert npz["features"].shape == (len(ts_list), 71)
-        assert npz["timestamps"].tolist() == ts_list
-
-        manifest = json.loads((result.out_dir / "manifest.json").read_text(encoding="utf-8"))
-        assert manifest["recipe"] == _R0
-        assert manifest["backbone"] == "none"
-        assert manifest["feature_version"] == "clean_bbox_v3_detectable"
-        assert manifest["feature_dim"] == len(manifest["feature_names"]) == 71
-        assert manifest["frame_count"] == len(ts_list)
-        assert manifest["ts_start"] == ts_list[0] and manifest["ts_end"] == ts_list[-1]
-        assert manifest["quality"]["frames_total"] == len(ts_list)
-        assert manifest["quality"]["needs_pixels"] is False
-
-    def test_manifest_is_not_named_metadata_json(self, tmp_path):
-        """产物目录内不得出现 metadata.json。
-
-        StorageCleanupWorker 按 `{base}/*/*/metadata.json` 判定过期 step 目录并 rmtree
-        整个目录 —— 重名会让导出产物在 TTL 到期时被静默删掉。
-        """
-        _write_features(tmp_path, 7, 2, [1.0, 1.2])
-        result = ExportRunner(tmp_path).run(ExportSpec(task_id=7, step_id=2, recipe=_R0))
-        assert not (result.out_dir / "metadata.json").exists()
-        assert (result.out_dir / "manifest.json").exists()
-
-    def test_out_dir_outside_ttl_swept_step_dir(self, tmp_path):
-        """产物不落在 `{base}/{task}/{step}/` —— 那里受 cleanup_days TTL 回收。"""
-        _write_features(tmp_path, 7, 2, [1.0, 1.2])
-        result = ExportRunner(tmp_path).run(ExportSpec(task_id=7, step_id=2, recipe=_R0))
-        step_dir = tmp_path / "7" / "2"
-        assert step_dir not in result.out_dir.parents and result.out_dir != step_dir
-        assert result.out_dir == tmp_path / ".offline_exports" / "7" / "2" / "r0@none"
-
-    def test_explicit_out_dir_overrides(self, tmp_path):
-        _write_features(tmp_path, 7, 2, [1.0, 1.2])
-        target = tmp_path / "elsewhere"
-        result = ExportRunner(tmp_path).run(
-            ExportSpec(task_id=7, step_id=2, recipe=_R0, out_dir=target)
-        )
-        assert result.out_dir == target and (target / "input.npz").exists()
-
-    def test_no_features_skipped_without_writing(self, tmp_path):
-        result = ExportRunner(tmp_path).run(ExportSpec(task_id=99, step_id=2, recipe=_R0))
-        assert result.status == "skipped"
-        assert result.out_dir is None
-        assert not (tmp_path / ".offline_exports").exists()
-
-    def test_rerun_overwrites(self, tmp_path):
-        _write_features(tmp_path, 7, 2, [1.0, 1.2])
-        runner = ExportRunner(tmp_path)
-        spec = ExportSpec(task_id=7, step_id=2, recipe=_R0)
-        first = runner.run(spec)
-        second = runner.run(spec)
-        assert first.out_dir == second.out_dir
-        assert second.status == "completed"
-
-    @pytest.mark.parametrize("bad", [
-        "no_dots_here",
-        "app.services.inference.offline.impl.clean.does_not_exist",
-        "app.nonexistent.module.fn",
-        "app.services.inference.offline.impl.clean.FEATURE_VERSION",  # 不可调用
-    ])
-    def test_bad_recipe_fails_fast(self, tmp_path, bad):
-        """recipe 加载失败一律 fail-fast —— 导出跑空比报错更难查。"""
-        _write_features(tmp_path, 7, 2, [1.0])
-        with pytest.raises(ValueError):
-            ExportRunner(tmp_path).run(ExportSpec(task_id=7, step_id=2, recipe=bad))
-
+class TestVisualBlock:
     def test_no_pixels_available_fails_loudly(self, tmp_path):
         """没有任何 raw 段/sidecar 时，视觉分支硬失败并报出分项原因。
 
-        绝不产出"全零视觉特征"的样例——那会让训练侧以为拿到了视觉信息。
+        绝不产出「全零视觉特征」的块——那会让训练侧以为拿到了视觉信息。
         （sidecar 落地之前录的 step 正是这种情况。）
         """
         _write_features(tmp_path, 7, 2, [1.0, 1.2])
         with pytest.raises(RuntimeError, match="没有取到任何像素帧"):
-            ExportRunner(tmp_path).run(
-                ExportSpec(task_id=7, step_id=2, recipe=_R1, backbone="yolo")
-            )
+            blocks.load(BlockKind.VGLOBAL, 7, 2, backbone="yolo",
+                        storage_dir=tmp_path, offline_dir=tmp_path / "offline")
 
-    def test_r1_without_backbone_fails(self, tmp_path):
-        """R1 缺 visual 时硬失败，不静默退化成 R0（否则 R1 vs R0 的对照会变成自己比自己）。"""
+    def test_visual_needs_backbone(self, tmp_path):
+        """没有 backbone 就没有视觉块——不静默退化成 bbox-only（否则对照会变成自己比自己）。"""
         _write_features(tmp_path, 7, 2, [1.0, 1.2])
-        with pytest.raises(ValueError, match="global_vec"):
-            ExportRunner(tmp_path).run(ExportSpec(task_id=7, step_id=2, recipe=_R1))
+        with pytest.raises(ValueError, match="backbone"):
+            blocks.load(BlockKind.VGLOBAL, 7, 2, storage_dir=tmp_path)
 
+    def test_missing_frame_size_refuses_to_guess(self, tmp_path):
+        """features 没记分辨率时视觉块硬失败：rawvideo 按尺寸切帧，猜错就是整段像素错位。"""
+        store = FeatureStore(tmp_path)
+        store.append(7, 2, make_frame_feature(
+            ts=1.0, by_source={"clean_large": make_frame_detections(n=1, ts=1.0)}))
+        store.flush(7, 2)
+        with pytest.raises(ValueError, match="帧分辨率"):
+            blocks.load(BlockKind.VGLOBAL, 7, 2, backbone="yolo", storage_dir=tmp_path)
 
-class TestRecipeShortName:
-    @pytest.mark.parametrize("path,want", [
-        ("app.services.inference.offline.impl.clean.export_r0", "r0"),
-        ("pkg.mod.export_r1a", "r1a"),
-        ("pkg.mod.custom_fn", "custom_fn"),
+    def test_cache_hit_skips_forward(self, tmp_path, monkeypatch):
+        """视觉块命中缓存就不再解码/前向——这是缓存存在的唯一理由。"""
+        from app.services.inference.offline.blocks import cache, visual
+        from app.services.inference.offline.models import FeatureBlock
+
+        offline_dir = tmp_path / "offline"
+        blk = FeatureBlock(
+            values=np.ones((2, 4), dtype=np.float32),
+            names=[f"visual_global_{i}" for i in range(4)],
+            ts=[1.0, 2.0], valid=np.array([True, False]),
+            version="visual_global@yolo", spans={"vglobal": [0, 4]},
+        )
+        path = cache.cache_dir(7, 2, offline_dir) / "vglobal_yolo.npz"
+        cache.write_block(path, blk, extra={"pixel_hit": 1, "no_sidecar": 1})
+
+        def _boom(*a, **k):
+            raise AssertionError("命中缓存后不该再前向")
+
+        monkeypatch.setattr(visual, "_forward", _boom)
+        stats = blocks.FetchStats()
+        got = visual.build(7, 2, [1.0, 2.0], 640, 480, "yolo",
+                           offline_dir=offline_dir, stats=stats)
+        assert np.array_equal(got.values, blk.values)
+        assert got.version == "visual_global@yolo"
+        assert (stats.pixel_hit, stats.no_sidecar) == (1, 1)  # 统计由 npz 头回填
+
+    def test_cache_miss_on_frame_count_change(self, tmp_path, monkeypatch):
+        """帧数对不上的缓存视为未命中——宁可重算也不能拿错长度的块去对齐。"""
+        from app.services.inference.offline.blocks import cache, visual
+        from app.services.inference.offline.models import FeatureBlock
+
+        offline_dir = tmp_path / "offline"
+        blk = FeatureBlock(values=np.ones((2, 4), dtype=np.float32),
+                           names=[f"visual_global_{i}" for i in range(4)], ts=[1.0, 2.0])
+        cache.write_block(cache.cache_dir(7, 2, offline_dir) / "vglobal_yolo.npz", blk)
+
+        called = {"n": 0}
+
+        def _fake_forward(*a, **k):
+            called["n"] += 1
+            return blk, blocks.FetchStats()
+
+        monkeypatch.setattr(visual, "_forward", _fake_forward)
+        visual.build(7, 2, [1.0, 2.0, 3.0], 640, 480, "yolo", offline_dir=offline_dir)
+        assert called["n"] == 1
+
+    @pytest.mark.parametrize("spec,want", [
+        ("yolo:clean-large-best.pt", "yolo-clean-large-best"),
+        ("resnet18", "resnet18"),
+        ("yolo:/abs/path/x.pt", "yolo--abs-path-x"),
     ])
-    def test_short_name(self, path, want):
-        assert recipe_short_name(path) == want
+    def test_backbone_sanitized_for_filename(self, spec, want):
+        from app.services.inference.offline.blocks import visual
+        assert visual.sanitize(spec) == want
 
 
 # ============================ 特征健康诊断 ============================
@@ -257,28 +193,42 @@ class TestDiagnose:
     """无效特征检测：结构性无效（到处恒定）vs 数据相关无效（这条片段恰好没出现）。"""
 
     def _export(self, tmp_path, task_id, ts_list):
+        import argparse
+        from app.services.inference.config import InferenceConfig
+        from app.services.inference.offline import runner
+
         _write_features(tmp_path, task_id, 2, ts_list)
-        return ExportRunner(tmp_path).run(
-            ExportSpec(task_id=task_id, step_id=2, recipe=_R0)
+        config = InferenceConfig({"stages": {"2": {
+            "detectors": [{"name": "clean_large"}],
+            "offline": {"name": "s", "subscribes": ["clean_large"],
+                        "class": _CLEAN_CLASS, "params": {}},
+        }}})
+        args = argparse.Namespace(
+            task_id=task_id, step_id=2, segmenter=None, device="cpu",
+            threads=1, cache_ttl_days=30, out_dir=None, config=config,
         )
+        return runner.run_export(args, storage_dir=tmp_path, offline_dir=tmp_path / "offline")
 
     def test_single_step_cannot_judge_structural(self, tmp_path):
         """**只有 1 个 step 时无法区分两类无效** —— 报告须显式标注这个局限。
 
         单条片段上的恒定列，既可能是契约声明了检不出的类别（结构性），也可能只是
-        这段视频没出现该目标（数据相关）。不加警示就会把后者误删。
+        这段视频没出现该目标。不加警示就会把后者误删。
         """
-        from app.services.inference.offline.export.diagnose import format_report, scan_columns
+        from app.services.inference.offline.diagnose import format_report, scan_columns
 
         self._export(tmp_path, 7, [1.0, 1.2, 1.4])
-        reports = scan_columns(tmp_path / ".offline_exports")
-        assert list(reports) == ["r0@none"]
-        assert len(reports["r0@none"].steps) == 1
+        reports = scan_columns(tmp_path / "offline" / ".cache")
+        assert list(reports) == ["CleanMSTCNBiLSTMSegmenter"]
+        assert len(reports["CleanMSTCNBiLSTMSegmenter"].steps) == 1
         assert "只有 1 个 step" in format_report(reports)
 
     def test_cross_step_separates_structural_from_data_dependent(self, tmp_path):
         """跨 step 聚合才有判定力：全 step 恒定 = 结构性可疑，部分恒定 = 数据相关。"""
-        from app.services.inference.offline.export.diagnose import scan_columns
+        import argparse
+        from app.services.inference.config import InferenceConfig
+        from app.services.inference.offline import runner
+        from app.services.inference.offline.diagnose import scan_columns
 
         # step A 只有 hand；step B 有 hand + syringe → syringe 列在 A 恒定、在 B 不恒定
         self._export(tmp_path, 7, [1.0, 1.2, 1.4])
@@ -294,9 +244,18 @@ class TestDiagnose:
             store.append(8, 2, make_frame_feature(
                 ts=ts, by_source=dets, frame_width=640, frame_height=480))
         store.flush(8, 2)
-        ExportRunner(tmp_path).run(ExportSpec(task_id=8, step_id=2, recipe=_R0))
+        config = InferenceConfig({"stages": {"2": {
+            "detectors": [{"name": "clean_large"}, {"name": "clean_small"}],
+            "offline": {"name": "s", "subscribes": ["clean_large"],
+                        "class": _CLEAN_CLASS, "params": {}},
+        }}})
+        runner.run_export(
+            argparse.Namespace(task_id=8, step_id=2, segmenter=None, device="cpu",
+                               threads=1, cache_ttl_days=30, out_dir=None, config=config),
+            storage_dir=tmp_path, offline_dir=tmp_path / "offline",
+        )
 
-        r = scan_columns(tmp_path / ".offline_exports")["r0@none"]
+        r = scan_columns(tmp_path / "offline" / ".cache")["CleanMSTCNBiLSTMSegmenter"]
         assert len(r.steps) == 2
         # syringe 的存在性列：step 7 恒定、step 8 有变化 → 数据相关，不该判结构性
         assert "syringe_present" in r.data_dependent
@@ -311,7 +270,7 @@ class TestDiagnose:
         这正是历史上 short_brush/long_brush/brush_tip_out 造成 45 列恒零的根因，
         统计诊断要跑完导出才发现，契约检查在加载 checkpoint 时就能报。
         """
-        import app.services.inference.offline.export.diagnose as diag
+        import app.services.inference.offline.diagnose as diag
 
         class _FakeModel:
             names = {0: "hand", 1: "syringe"}
@@ -320,8 +279,9 @@ class TestDiagnose:
             def __init__(self, path):
                 self.model = _FakeModel()
 
-        fake_ultra = type("m", (), {"YOLO": _FakeYOLO})
-        monkeypatch.setitem(__import__("sys").modules, "ultralytics", fake_ultra)
+        monkeypatch.setitem(
+            __import__("sys").modules, "ultralytics", type("m", (), {"YOLO": _FakeYOLO})
+        )
         ckpt = tmp_path / "fake.pt"
         ckpt.write_bytes(b"x")
 
@@ -333,7 +293,7 @@ class TestDiagnose:
 
     def test_contract_check_reports_unconsumed_classes(self, tmp_path, monkeypatch):
         """反向：检测器产出但契约未消费 → 白丢的检测信号。"""
-        import app.services.inference.offline.export.diagnose as diag
+        import app.services.inference.offline.diagnose as diag
 
         class _FakeModel:
             names = {0: "hand", 1: "air_gun"}
@@ -355,50 +315,75 @@ class TestDiagnose:
 
 class TestExportCli:
     @pytest.mark.parametrize("argv", [
-        [],                                                          # 缺子命令
-        ["nosuchcmd"],                                               # 未知子命令
-        ["run", "--task-id", "1"],                                   # 缺 --step-id / --recipe
-        ["run", "--step-id", "2", "--recipe", _R0],                  # 缺 --task-id
-        ["run", "--task-id", "1", "--step-id", "2"],                 # 缺 --recipe
-        ["run", "--task-id", "1", "--step-id", "2", "--recipe", _R0, "--device", "tpu"],
-        ["contract"],                                                # 缺 --checkpoints
+        [],                                                    # 缺子命令
+        ["nosuchcmd"],                                         # 未知子命令
+        ["export", "--task-id", "1"],                          # 缺 --step-id
+        ["export", "--step-id", "2"],                          # 缺 --task-id
+        ["export", "--task-id", "1", "--step-id", "2", "--device", "tpu"],
+        ["infer", "--task-id", "1", "--step-id", "2", "--device", "tpu"],
+        ["contract"],                                          # 缺 --checkpoints
     ])
     def test_required_args_and_choices(self, argv):
-        from app.services.inference.offline.export import cli
+        from app.services.inference.offline import cli
 
         with pytest.raises(SystemExit):
             cli.main(argv)
 
-    def test_run_end_to_end_exit_zero(self, tmp_path, monkeypatch, capsys):
+    def test_export_end_to_end_exit_zero(self, tmp_path, monkeypatch, capsys):
         """CLI 全链路：completed → 退出码 0，产物落在显式 --out-dir。"""
+        from app.services.inference.config import InferenceConfig
+        from app.services.inference.offline import cli
         from app.settings import settings
-        from app.services.inference.offline.export import cli
 
         _write_features(tmp_path, 7, 2, [1.0, 1.2, 1.4])
         monkeypatch.setattr(type(settings), "storage_base_dir", property(lambda _: tmp_path))
+        monkeypatch.setattr(
+            type(settings), "offline_base_dir", property(lambda _: tmp_path / "offline")
+        )
+        monkeypatch.setattr(
+            "app.services.inference.config.load_stage_config",
+            lambda *a, **k: InferenceConfig({"stages": {"2": {
+                "detectors": [{"name": "clean_large"}],
+                "offline": {"name": "s", "subscribes": ["clean_large"],
+                            "class": _CLEAN_CLASS, "params": {}},
+            }}}),
+        )
         out = tmp_path / "cli_out"
-
         code = cli.main([
-            "run", "--task-id", "7", "--step-id", "2", "--recipe", _R0, "--out-dir", str(out),
+            "export", "--task-id", "7", "--step-id", "2", "--out-dir", str(out),
         ])
         assert code == 0
         assert "completed" in capsys.readouterr().out
-        assert (out / "input.npz").exists() and (out / "manifest.json").exists()
+        tag = "CleanMSTCNBiLSTMSegmenter"
+        assert (out / f"input_{tag}.npz").exists()
+        assert (out / f"manifest_{tag}.json").exists()
+        # manifest 绝不叫 metadata.json：StorageCleanupWorker 按它判定 step 目录并 rmtree
+        assert not (out / "metadata.json").exists()
 
-    def test_bad_recipe_exit_nonzero(self, tmp_path, monkeypatch):
-        """recipe 异常 → 非 0 退出码（配置错不能伪装成成功）。"""
+    def test_export_error_exit_nonzero(self, tmp_path, monkeypatch):
+        """策略加载失败 → 非 0 退出码（配置错不能伪装成成功）。"""
+        from app.services.inference.config import InferenceConfig
+        from app.services.inference.offline import cli
         from app.settings import settings
-        from app.services.inference.offline.export import cli
 
         _write_features(tmp_path, 7, 2, [1.0])
         monkeypatch.setattr(type(settings), "storage_base_dir", property(lambda _: tmp_path))
-        assert cli.main([
-            "run", "--task-id", "7", "--step-id", "2", "--recipe", "bogus_no_dots",
-        ]) == 1
+        monkeypatch.setattr(
+            type(settings), "offline_base_dir", property(lambda _: tmp_path / "offline")
+        )
+        monkeypatch.setattr(
+            "app.services.inference.config.load_stage_config",
+            lambda *a, **k: InferenceConfig({"stages": {"2": {
+                "detectors": [{"name": "clean_large"}],
+                "offline": {"name": "s", "subscribes": ["clean_large"],
+                            "class": "bogus_no_dots", "params": {}},
+            }}}),
+        )
+        assert cli.main(["export", "--task-id", "7", "--step-id", "2"]) == 1
 
     def test_cpu_isolation_disables_gpu(self, monkeypatch):
         """device=cpu 时置空 CUDA_VISIBLE_DEVICES（不抢在线资源）；cuda 时不置。"""
-        from app.services.inference.offline.export.cli import _isolate
+        from app.services.inference.offline.cli import _isolate
 
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         _isolate("cpu", 2)
@@ -407,3 +392,29 @@ class TestExportCli:
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         _isolate("cuda", 2)
         assert os.environ.get("CUDA_VISIBLE_DEVICES") is None
+
+    def test_manifest_json_is_valid(self, tmp_path):
+        """manifest 是可解析 JSON 且带足溯源（哪套特征、哪个 backbone、多少维）。"""
+        import argparse
+        from app.services.inference.config import InferenceConfig
+        from app.services.inference.offline import runner
+
+        _write_features(tmp_path, 7, 2, [1.0, 1.2])
+        config = InferenceConfig({"stages": {"2": {
+            "detectors": [{"name": "clean_large"}],
+            "offline": {"name": "s", "subscribes": ["clean_large"],
+                        "class": _CLEAN_CLASS, "params": {}},
+        }}})
+        runner.run_export(
+            argparse.Namespace(task_id=7, step_id=2, segmenter=None, device="cpu",
+                               threads=1, cache_ttl_days=30, out_dir=None, config=config),
+            storage_dir=tmp_path, offline_dir=tmp_path / "offline",
+        )
+        path = (tmp_path / "offline" / ".cache" / "7" / "2"
+                / "manifest_CleanMSTCNBiLSTMSegmenter.json")
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        assert manifest["segmenter"].endswith("CleanMSTCNBiLSTMSegmenter")
+        assert manifest["backbone"] == "none"
+        assert manifest["feature_dim"] == 71
+        assert manifest["quality"]["frames_total"] == 2
+        assert "decode_short" in manifest["quality"]  # 早先的 ExportQuality 抄漏了这项

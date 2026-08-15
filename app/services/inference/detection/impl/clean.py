@@ -10,7 +10,7 @@
 detector.name = 该 detector 产出的流名（决定 slide_window key 与 Operator.subscribes 订阅），
 故各类硬编码 name（同 BubbleDetector/BendingDetector 的写法）。
 
-同业务点的时序算子见 temporal/impl/clean.py，离线分割见 offline/impl/clean.py。
+同业务点的时序算子见 temporal/impl/clean.py，离线分割见 offline/infer/impl/clean.py。
 """
 
 from __future__ import annotations

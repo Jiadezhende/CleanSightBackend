@@ -1,7 +1,7 @@
 """清洗阶段时序算子：CleanOperator（TemporalOperator 子类）。
 
 订阅 clean_large / clean_small 流，按 model_input_fps 重采样后喂时序模型出动作分类。
-同业务点的流源 Detector 见 detection/impl/clean.py，离线分割见 offline/impl/clean.py。
+同业务点的流源 Detector 见 detection/impl/clean.py，离线分割见 offline/infer/impl/clean.py。
 """
 
 from __future__ import annotations

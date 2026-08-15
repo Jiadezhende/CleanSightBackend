@@ -56,7 +56,7 @@ class ColumnHealth:
 
 @dataclass
 class TagReport:
-    """一个 (recipe@backbone) 组合的诊断结果。"""
+    """一个 Segmenter（= 一套特征 × 一个网络）的诊断结果。"""
 
     tag: str
     steps: List[str] = field(default_factory=list)
@@ -75,36 +75,38 @@ class TagReport:
 def scan_columns(
     export_root: Path, tag_filter: Optional[str] = None
 ) -> Dict[str, TagReport]:
-    """扫描导出产物，按 (recipe@backbone) 聚合各列的恒定情况。
+    """扫描导出产物，按 Segmenter 聚合各列的恒定情况。
+
+    产物布局是 `{root}/{task}/{step}/manifest_{Tag}.json` + 同目录 `input_{Tag}.npz`。
 
     Args:
-        export_root: 导出根目录（`{storage_base_dir}/.offline_exports`）
-        tag_filter: 只看某个 tag（如 `r0@none`）；None = 全部
+        export_root: 产物根目录（`{offline_base_dir}/.cache`）
+        tag_filter: 只看某个 Segmenter（如 `CleanBiGRUSegmenter`）；None = 全部
 
     Returns:
         {tag: TagReport}。**只有 steps ≥ 2 时「结构性可疑」才有判定力**——单个 step 上
         恒定的列既可能是契约错，也可能只是这段视频没出现该目标。
     """
     reports: Dict[str, TagReport] = {}
-    for manifest_path in sorted(Path(export_root).glob("*/*/*/manifest.json")):
+    for manifest_path in sorted(Path(export_root).glob("*/*/manifest_*.json")):
         d = manifest_path.parent
-        tag = d.name
+        tag = manifest_path.stem[len("manifest_"):]
         if tag_filter and tag != tag_filter:
             continue
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            features = np.load(d / "input.npz")["features"]
+            features = np.load(d / f"input_{tag}.npz")["features"]
         except Exception as e:
-            logger.warning("[Diagnose] 跳过不可读产物 %s: %s", d, e)
+            logger.warning("[Diagnose] 跳过不可读产物 %s: %s", manifest_path, e)
             continue
 
         names = list(manifest.get("feature_names") or [])
         if features.ndim != 2 or features.shape[1] != len(names):
-            logger.warning("[Diagnose] 跳过列名与矩阵不匹配的产物 %s", d)
+            logger.warning("[Diagnose] 跳过列名与矩阵不匹配的产物 %s", manifest_path)
             continue
 
         report = reports.setdefault(tag, TagReport(tag=tag))
-        report.steps.append(f"{d.parent.parent.name}/{d.parent.name}")
+        report.steps.append(f"{d.parent.name}/{d.name}")
         std = features.std(axis=0)
         for name, s in zip(names, std):
             col = report.columns.setdefault(name, ColumnHealth(name=name))
@@ -140,7 +142,7 @@ def check_object_contract(
     不必等跑完导出再从矩阵里统计。
 
     Args:
-        objects: 特征契约声明的目标类别（如 impl/clean.py 的 OBJECTS）
+        objects: 特征契约声明的目标类别（如 blocks/bbox.py 的 OBJECTS）
         checkpoints: 部署中的检测器权重路径
 
     Returns:

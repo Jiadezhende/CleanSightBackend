@@ -39,3 +39,14 @@ def tmp_storage(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture
+def tmp_offline(tmp_path, monkeypatch):
+    """把 settings.offline_dir 指到隔离临时目录（离线缓存/导出产物落这里）。
+
+    与 tmp_storage 分开：生产上两者也是平级独立目录——storage 受 7 天 TTL，offline 不受。
+    """
+    root = tmp_path / "offline"
+    monkeypatch.setattr(settings, "offline_dir", str(root))
+    return root

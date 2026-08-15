@@ -104,13 +104,13 @@ stages:
     # offline:
     #   name: clean_offline
     #   subscribes: [clean_large, clean_small]
-    #   class: app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter
-    #   # 可选模型:
-    #   # class: app.services.inference.offline.impl.clean.CleanASFormerSegmenter
-    #   # class: app.services.inference.offline.impl.clean.CleanBiGRUSegmenter
+    #   class: app.services.inference.offline.infer.impl.clean.CleanMSTCNBiLSTMSegmenter
+    #   # 可选模型（换模型就换类——特征方案与网络由 checkpoint 绑死，不是两个自由旋钮）:
+    #   # class: app.services.inference.offline.infer.impl.clean.CleanASFormerSegmenter
+    #   # class: app.services.inference.offline.infer.impl.clean.CleanBiGRUSegmenter
     #   params:
     #     model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm.pt
-    offline: {}                      # 生产默认不启用；MOCK stage 提供默认端到端兜底
+    offline: {}                      # 生产默认不启用
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================
   MOCK:
@@ -128,17 +128,11 @@ stages:
         class: app.services.inference.temporal.impl.mock.MockOperator
         params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
-    # 离线段：本次唯一启用的 offline 配置，作「能端到端跑的配置化路由样例」。
-    # 离线是独立进程手动跑（python -m app.services.inference.offline.cli run --step-id -1），
-    # 不会被在线链路自动执行；未配数字 step_id(如 -1) 经 resolve_stage 回退到本 MOCK stage。
-    # 生产 stage 1/2 的 offline 保持 {} 不启用。
-    offline:                           # 非空即启用（无需 enabled 开关）；生产 stage 保持 {} 禁用
-      name: mock_offline
-      subscribes: [mock]
-      class: app.services.inference.offline.impl.mock.BrushRulesSegmenter
-      params:
-        label: mock_action
-        min_frames: 1
+    # 离线段：**生产配置里离线段全部不启用**，与「只有手动 CLI 跑」的实际语义一致。
+    # 离线不会被在线链路自动执行，没有会崩的在线路径需要它兜底；早先这里挂着一个 mock
+    # Segmenter 并被文档写成「离线的真兜底」，与代码不符——它其实只是脚手架，已降格为
+    # 测试夹具（tests/offline_mock_segmenter.py），由测试自己在临时配置里挂载。
+    offline: {}                        # 非空即启用（无需 enabled 开关）
 
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到

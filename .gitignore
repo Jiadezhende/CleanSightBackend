@@ -9,8 +9,10 @@ __pycache__/
 # C extensions
 *.so
 
-# output
-database/
+# output（**必须带前导斜杠**：无斜杠的 `offline/` 会匹配任意层级的同名目录，
+# 把源码包 app/services/inference/offline/ 一起吞掉）
+/database/
+/offline/
 
 # Distribution / packaging
 .Python
@@ -160,12 +162,15 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+tmp/
 
 # 模型权重 / 测试视频等大二进制走物料分发，不入库
 app/data/*.pt
 test/*.mp4
 
 .agents/
+.codex_work/
+outputs/
 # .claude 下只跟踪团队共享的 skills/（方法论资产，需版本化追加）；其余（settings*.json、
 # skills-disabled/、session 数据）都是本地态，继续忽略。用「忽略目录内容 + 放行 skills」
 # 模式：整目录忽略时 git 不下钻，skills/ 里的新增文件会被静默挡掉。

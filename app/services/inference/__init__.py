@@ -12,7 +12,7 @@
 顶层平铺跨层基础设施：manager / config / naming / stage_factory / models。
 
 一个检测点（业务）的三段实现放各契约包 impl/ 下的**同名文件**：
-`detection/impl/<x>.py`(Detector) + `temporal/impl/<x>.py`(Operator) + 可选 `offline/impl/<x>.py`(Segmenter)，
+`detection/impl/<x>.py`(Detector) + `temporal/impl/<x>.py`(Operator) + 可选 `offline/infer/impl/<x>.py`(Segmenter)，
 一文件一基类；业务聚合由 config stage 绑定表达（见 config/inference_config.yaml）。
 
 本 `__init__` 刻意**不做任何 re-export**（纯包标记）：与 [instance.py] 的

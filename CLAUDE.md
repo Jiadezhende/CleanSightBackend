@@ -7,6 +7,14 @@ AI 视觉巡检后端系统，基于 FastAPI + YOLOv8：实时 RTSP 流推理、
 
 ---
 
+## 对话硬规矩
+
+- **替我做决策必须带证据**：实测数据、代码事实、或该设计换来什么。没量过就说没量过。
+- **输出 ≤300 字**，结论先行。研究/学术侧术语（receptive field、train/serve skew…）加一行白话。
+- **不留黑话**：简写首次出现要展开、说清在讲哪个对象（文件/函数/服务）、必须给结论和下一步，别只堆过程。
+
+---
+
 ## 文档分诊（先读文档，别猜）
 
 | 我要… | 去哪 |
@@ -53,6 +61,8 @@ python -m mediamtx_gateway.main                       # RTSP TCP 代理网关（
 - **跑任何 python/pytest 前先激活项目 `.venv`**，别用裸 `python3`。
 - **写测试走 `tests/factories.py` 单一真源**构造 CQ/Detection 等，别在用例里另起炉灶或复制构造逻辑；契约一变只改 factories 一处。I/O 边界（ffmpeg/CUDA/WS）集成-only，别硬 mock（见 [DEVELOPMENT.md](docs/DEVELOPMENT.md)）。
 - **跨服务别建直接依赖**：共享运行态走 client 中台（`ClientManager`/`ClientQueues`），起停编排走 `RunController`；client 只吐自有词汇原始数据，展示翻译上移 router（见 [DEVELOPMENT.md](docs/DEVELOPMENT.md)）。
+- **技术债治理：契约没稳定前，别给它配套建设**。契约（数据结构 / 字段 / 维度 / 版本号）本身还在迭代时，围着它加的测试、门禁校验、别名映射、manifest 声明、写进文档的具体数字，全是要陪着一起改的债——一次改动被放大成多点同步，配套越厚越不敢动，反而把没验证的设计焊死。判据：这层结构下一轮还会不会改？会 → 只写"一处能改完"的实现，常量留在实现里；稳定（跑通真实数据、维度不再变）后再补测试、外化契约、同步文档。
+- **技术债治理：控制数据模型数量**。新增一个 dataclass / 配置壳 / 注册表前先问：它替掉的是多少行实现？如果被替掉的是一行方法或一个类属性，那这层壳只是把「改一处」换成「改壳 + 改注册表 + 改引用方」，还多一层间接。判据：新壳必须消灭真实重复（两处以上会漂的实现），或承载调用方真需要的运行时可变性；**只为"看起来更声明式"而立的壳一律不建**，用模块级纯函数 + 子类一行覆盖表达。壳一旦立起来就是契约，参见上一条。
 - **Workflow / 新检测点**：`class_name` 直接取自模型 `result.names`，不做归一化，匹配串须与训练类别名严格一致——写错会静默漏检。
 - **Workflow / 新检测点**：统一检测契约是 `Detection`（单框）+ `FrameDetections`（整帧输出，见 [app/domain/detection.py](app/domain/detection.py)）；别为单个检测点塞领域字段（如 `xxx_detected/xxx_count`），派生量放 `Detection.extra` 或 `FrameDetections.metadata`，时序统计交给 L3 Analyzer。
 - `/docs`、`/redoc`、`/openapi.json` 已永久关闭，别尝试打开。

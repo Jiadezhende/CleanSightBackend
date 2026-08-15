@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # 不再各自重算或互相 push（消除跨服务穿透）。
     storage_dir: str = "./database"
 
+    # 离线实验产物根目录（与 storage_dir 平级，**不受 cleanup_days TTL**）。env: CLEANSIGHT_OFFLINE_DIR
+    # 其下只有 .cache/ 一层：视觉块、导出样例、逐帧推理结果全部可重建，由 offline 自己的 gc 回收。
+    # 正式结果仍是 storage 里的 facts.jsonl（SegmentFact），不落这里。
+    offline_dir: str = "./offline"
+
     # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
     # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
     raw_fps: int = 30          # 生产者源：解码 CFR 帧率（decoder default_fps、HLS raw fallback、CA 秒→帧数换算全派生自此）
@@ -174,6 +179,18 @@ class Settings(BaseSettings):
         persistence / inference / traceback 三方都读此值。
         """
         p = Path(self.storage_dir)
+        if p.is_absolute():
+            return p.resolve()
+        return (Path(__file__).parent.parent / p).resolve()
+
+    @property
+    def offline_base_dir(self) -> Path:
+        """离线实验产物根目录（绝对路径）。与 storage_base_dir 同款相对路径解析。
+
+        刻意与 storage_base_dir 平级而非其子目录：storage 整棵树受 StorageCleanupWorker
+        的 cleanup_days TTL 管辖，离线中间产物落进去会在 7 天后连同 step 目录被 rmtree。
+        """
+        p = Path(self.offline_dir)
         if p.is_absolute():
             return p.resolve()
         return (Path(__file__).parent.parent / p).resolve()
