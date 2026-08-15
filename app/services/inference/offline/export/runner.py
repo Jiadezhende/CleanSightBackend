@@ -171,7 +171,7 @@ class ExportRunner:
         for out_idx, batch in source.iter_batches(
             spec.task_id, spec.step_id, [ff.ts for ff in frames], width, height, stats
         ):
-            deep, _shallow = backbone.forward(batch)
+            deep, _shallow = backbone.forward(batch)  # R1 只需深层，浅层不物化
             pooled = global_pool(deep)
             if global_vec is None:  # 首批到手才知道通道数，避免把维度写死在框架里
                 global_vec = np.zeros((total, pooled.shape[1]), dtype=np.float32)

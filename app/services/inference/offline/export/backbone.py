@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -38,13 +38,44 @@ _DEFAULT_YOLO_CKPT = "app/data/clean-large-best.pt"
 
 
 class Backbone:
-    """统一接口：`forward(batch_bgr) -> (deep, shallow)`，两者均为 numpy [n,C,h,w]。"""
+    """统一接口：`forward(batch_bgr) -> (deep, shallow)`，两者均为 numpy [n,C,h,w]。
+
+    `forward` 内部**强制分块**：整段直喂会炸内存。实测 143 帧 @640×480 一次前向峰值
+    5.0 GB —— 单是 BGR→float32 转换就 527MB（143×3×480×640×4），第一层卷积输出
+    937MB（143×16×320×320×4），torch 还要同时持有多个中间层。峰值不随视频长度增长
+    （帧源已按段流式），但 5 GB 本身就会在小内存机器或 GPU 上 OOM。
+    """
 
     name: str = "none"
     deep_stride: int = 32
     shallow_stride: int = 8
+    # 单次前向的帧数上限。峰值内存 ≈ 正比于它；16 帧实测约 0.6 GB，兼顾吞吐与安全。
+    batch_size: int = 16
 
-    def forward(self, batch_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def forward(
+        self, batch_bgr: np.ndarray, want_shallow: bool = False
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """分块跑 `_forward_chunk` 并拼回，保证峰值内存与输入帧数无关。
+
+        `want_shallow=False`（默认）时**不物化浅层特征图**：它比深层大一个数量级
+        （stride-8 是 stride-32 的 16 倍面积，实测 150 帧 369MB vs 46MB），只有 R2 的
+        手部 RoIAlign 需要。R1 只用深层全局向量，白搭一份就是纯浪费。
+        """
+        n = len(batch_bgr)
+        if n <= self.batch_size:
+            return self._forward_chunk(batch_bgr, want_shallow)
+        deeps, shallows = [], []
+        for i in range(0, n, self.batch_size):
+            d, s = self._forward_chunk(batch_bgr[i: i + self.batch_size], want_shallow)
+            deeps.append(d)
+            if want_shallow:
+                shallows.append(s)
+        return np.concatenate(deeps), (np.concatenate(shallows) if want_shallow else None)
+
+    def _forward_chunk(
+        self, batch_bgr: np.ndarray, want_shallow: bool
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """单块前向（帧数 ≤ batch_size），子类实现。"""
         raise NotImplementedError
 
 
@@ -73,7 +104,9 @@ class _YoloBackbone(Backbone):
             layer.to(device)
         self.name = f"yolo:{path.stem}"
 
-    def forward(self, batch_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _forward_chunk(
+        self, batch_bgr: np.ndarray, want_shallow: bool
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         torch = self._torch
         # BGR uint8 [n,H,W,3] → RGB float32 [n,3,H,W] / 255（与 ultralytics 预处理同口径）
         x = batch_bgr[..., ::-1].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
@@ -82,9 +115,9 @@ class _YoloBackbone(Backbone):
         with torch.no_grad():
             for i, layer in enumerate(self._layers):
                 t = layer(t)
-                if i == self._shallow_at:
-                    shallow = t
-        return t.cpu().numpy(), shallow.cpu().numpy()
+                if want_shallow and i == self._shallow_at:
+                    shallow = t.cpu().numpy()
+        return t.cpu().numpy(), shallow
 
 
 def _probe_backbone(model, torch) -> Tuple[list, int]:
@@ -140,7 +173,9 @@ class _ResNet18Backbone(Backbone):
         self._mean = np.array([0.485, 0.456, 0.406], np.float32).reshape(1, 3, 1, 1)
         self._std = np.array([0.229, 0.224, 0.225], np.float32).reshape(1, 3, 1, 1)
 
-    def forward(self, batch_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _forward_chunk(
+        self, batch_bgr: np.ndarray, want_shallow: bool
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         torch = self._torch
         x = batch_bgr[..., ::-1].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
         x = (x - self._mean) / self._std
@@ -152,7 +187,7 @@ class _ResNet18Backbone(Backbone):
             z = net.layer1(z)          # stride 4
             shallow = net.layer2(z)    # stride 8
             deep = net.layer4(net.layer3(shallow))  # stride 32
-        return deep.cpu().numpy(), shallow.cpu().numpy()
+        return deep.cpu().numpy(), (shallow.cpu().numpy() if want_shallow else None)
 
 
 def load_backbone(spec: str, device: str = "cpu") -> Backbone:

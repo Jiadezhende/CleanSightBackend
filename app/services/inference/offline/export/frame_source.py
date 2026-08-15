@@ -110,21 +110,18 @@ class FrameSource:
         for plan in plans:
             if not plan.wanted:
                 continue
-            decoded = self._decode_segment(plan.path, width, height)
-            if decoded is None:
-                stats.decode_short += len(plan.wanted)
+            wanted = dict(plan.wanted)  # ordinal → 输出序号
+            picked = self._decode_wanted(plan.path, width, height, wanted.keys())
+            if picked is None:
+                stats.decode_short += len(wanted)
                 continue
-            out_idx: List[int] = []
-            picked: List[np.ndarray] = []
-            for ordinal, oi in plan.wanted:
-                if ordinal < len(decoded):
-                    out_idx.append(oi)
-                    picked.append(decoded[ordinal])
-                else:  # 解码帧数少于 sidecar 记录（段尾损坏等）
-                    stats.decode_short += 1
-            if out_idx:
-                stats.pixel_hit += len(out_idx)
-                yield out_idx, np.stack(picked)
+            got = sorted(picked)
+            missing = len(wanted) - len(got)
+            if missing:  # 解码帧数少于 sidecar 记录（段尾损坏等）
+                stats.decode_short += missing
+            if got:
+                stats.pixel_hit += len(got)
+                yield [wanted[o] for o in got], np.stack([picked[o] for o in got])
 
     # -------- internal --------
 
@@ -211,10 +208,15 @@ class FrameSource:
             logger.warning("[FrameSource] playlist 读取失败 %s: %s", playlist, e)
             return None
 
-    def _decode_segment(
-        self, segment_path: Path, width: int, height: int
-    ) -> Optional[np.ndarray]:
-        """整段顺序解码为 [N,H,W,3] BGR uint8。失败返回 None。
+    def _decode_wanted(
+        self, segment_path: Path, width: int, height: int, ordinals
+    ) -> Optional[Dict[int, np.ndarray]]:
+        """顺序解码该段，**只保留 `ordinals` 指定的帧**，返回 {ordinal: BGR 帧}。失败返回 None。
+
+        逐帧从 ffmpeg 管道读、边读边丢，不物化整段像素：一个 300 帧 @640×480 的段整段是
+        276MB，而 `subprocess.run(capture_output=True)` 会先把整份 stdout 攒在内存再复制一次
+        （实测解码一段净增 0.68GB）。这里改用 Popen + 定长读，峰值只与**要保留的帧数**有关。
+        读过最大 ordinal 即提前终止 ffmpeg，段尾无用帧完全不解码。
 
         **一段一个临时 m3u8**——见模块 docstring：多段拼接会静默丢整段。
         """
@@ -241,26 +243,51 @@ class FrameSource:
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-an", "-",
         ]
+        wanted = set(ordinals)
+        if not wanted:
+            tmp_m3u8.unlink(missing_ok=True)
+            return {}
+        last_wanted = max(wanted)
+        frame_bytes = width * height * 3
+        out: Dict[int, np.ndarray] = {}
+        proc = None
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, timeout=self._timeout_s, check=False
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=frame_bytes,
             )
-            if proc.returncode != 0:
+            idx = 0
+            while idx <= last_wanted:
+                buf = proc.stdout.read(frame_bytes)
+                if len(buf) < frame_bytes:  # 流结束（或段尾截断）
+                    break
+                if idx in wanted:
+                    out[idx] = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3).copy()
+                idx += 1
+            if not out:
+                stderr = proc.stderr.read() if proc.stderr else b""
                 logger.warning(
-                    "[FrameSource] 解码失败 %s: %s",
-                    segment_path.name, (proc.stderr or b"").decode(errors="replace")[-500:],
+                    "[FrameSource] 未解出任何目标帧 %s: %s",
+                    segment_path.name, stderr.decode(errors="replace")[-500:],
                 )
                 return None
-            frame_bytes = width * height * 3
-            n = len(proc.stdout) // frame_bytes
-            if n == 0:
-                logger.warning("[FrameSource] 解码出 0 帧 %s", segment_path.name)
-                return None
-            return np.frombuffer(proc.stdout[: n * frame_bytes], dtype=np.uint8).reshape(
-                n, height, width, 3
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            return out
+        except (OSError, ValueError) as e:
             logger.warning("[FrameSource] 解码异常 %s: %s", segment_path.name, e)
             return None
         finally:
+            if proc is not None:
+                # 读够即终止：段尾无用帧不必解码，也避免管道写端阻塞
+                for stream in (proc.stdout, proc.stderr):
+                    try:
+                        if stream:
+                            stream.close()
+                    except OSError:
+                        pass
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=self._timeout_s)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
             tmp_m3u8.unlink(missing_ok=True)
