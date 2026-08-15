@@ -16,9 +16,11 @@ recipe 用**全限定路径**（与分割 CLI 的 `--strategy` 同款），框�
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional, Sequence
 
 logger = logging.getLogger("offline.export.cli")
@@ -75,31 +77,84 @@ def _run(args: argparse.Namespace) -> int:
     return 0  # completed / skipped 均为 0
 
 
+def _diagnose(args: argparse.Namespace) -> int:
+    """扫导出产物，报无效（恒定/重复）特征列。不碰 torch/backbone。"""
+    from app.services.inference.offline.export.diagnose import format_report, scan_columns
+    from app.services.inference.offline.export.runner import export_root
+
+    root = Path(args.export_root) if args.export_root else export_root()
+    print(format_report(scan_columns(root, tag_filter=args.tag)))
+    return 0
+
+
+def _contract(args: argparse.Namespace) -> int:
+    """先验契约检查：特征契约声明的目标类别 vs 检测器实际产出的类别名。"""
+    from app.services.inference.offline.export.diagnose import check_object_contract
+
+    module_path, _, attr = args.objects.rpartition(".")
+    objects = getattr(importlib.import_module(module_path), attr)
+    never_produced, never_consumed = check_object_contract(
+        objects, [Path(p) for p in args.checkpoints]
+    )
+    print(f"契约声明 {len(objects)} 类；检测器 checkpoint {len(args.checkpoints)} 个")
+    if never_produced:
+        print(f"\n✗ 契约声明但无检测器产出（这些特征列必然恒零，应从契约移除）: {len(never_produced)}")
+        for n in never_produced:
+            print(f"    {n}")
+    else:
+        print("\n✓ 契约里没有检测器不产出的类别")
+    if never_consumed:
+        print(f"\n⚠ 检测器会产出但契约未消费（白丢的检测信号）: {len(never_consumed)}")
+        for n in never_consumed:
+            print(f"    {n}")
+    return 1 if never_produced else 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.services.inference.offline.export.cli",
         description="离线特征导出：读 FeatureStore 特征 → recipe 转换 → 落模型输入样例。",
     )
-    parser.add_argument("--task-id", type=int, required=True, help="任务 id（存储键）")
-    parser.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（存储键）")
-    parser.add_argument(
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", help="跑一次导出")
+    run.add_argument("--task-id", type=int, required=True, help="任务 id（存储键）")
+    run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（存储键）")
+    run.add_argument(
         "--recipe", required=True,
         help="recipe 函数全限定路径，如 app.services.inference.offline.impl.clean.export_r0",
     )
-    parser.add_argument(
+    run.add_argument(
         "--backbone", default=None,
         help="视觉 backbone 身份；不消费像素的 recipe（如 R0）不传",
     )
-    parser.add_argument(
+    run.add_argument(
         "--device", default="cpu", choices=("cpu", "cuda"),
         help="默认 cpu（禁 GPU，不抢在线资源）",
     )
-    parser.add_argument(
+    run.add_argument(
         "--out-dir", default=None,
         help="产物目录；缺省落 {storage_base_dir}/.offline_exports/{task}/{step}/{recipe}@{backbone}/",
     )
-    parser.add_argument(
+    run.add_argument(
         "--threads", type=int, default=2, help="CPU 线程数（torch.set_num_threads，默认 2）",
+    )
+
+    diag = sub.add_parser(
+        "diagnose", help="扫导出产物找无效特征列（恒定 / 重复）；≥2 个 step 才能判结构性",
+    )
+    diag.add_argument("--export-root", default=None, help="导出根目录；缺省用默认位置")
+    diag.add_argument("--tag", default=None, help="只看某个 recipe@backbone，如 r0@none")
+
+    con = sub.add_parser(
+        "contract", help="先验契约检查：特征契约的目标类别 vs 检测器实际类别名",
+    )
+    con.add_argument(
+        "--objects", default="app.services.inference.offline.impl.clean.OBJECTS",
+        help="目标类别清单的全限定路径",
+    )
+    con.add_argument(
+        "--checkpoints", nargs="+", required=True, help="部署中的检测器权重路径",
     )
 
     args = parser.parse_args(argv)
@@ -108,7 +163,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    return _run(args)
+    if args.command == "run":
+        return _run(args)
+    if args.command == "diagnose":
+        return _diagnose(args)
+    if args.command == "contract":
+        return _contract(args)
+    parser.error(f"未知命令: {args.command}")
+    return 2
 
 
 if __name__ == "__main__":

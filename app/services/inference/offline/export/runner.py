@@ -71,6 +71,12 @@ def _load_recipe(path: str) -> Callable[..., Any]:
     return fn
 
 
+def export_root(base_dir: Optional[Path] = None) -> Path:
+    """导出根目录（诊断与导出共用同一处定义，避免两边各拼一次路径）。"""
+    base = Path(base_dir) if base_dir is not None else settings.storage_base_dir
+    return Path(base) / _EXPORT_SUBDIR
+
+
 def recipe_short_name(path: str) -> str:
     """全限定路径 → 目录名用的短名（`...clean.export_r0` → `r0`）。"""
     tail = path.rpartition(".")[2]
@@ -109,7 +115,7 @@ class ExportRunner:
         backbone = (spec.backbone or "none").replace(".pt", "")
         backbone = backbone.replace(":", "-").replace("/", "-").replace("\\", "-")
         tag = f"{recipe_short_name(spec.recipe)}@{backbone}"
-        return self._base_dir / _EXPORT_SUBDIR / str(spec.task_id) / str(spec.step_id) / tag
+        return export_root(self._base_dir) / str(spec.task_id) / str(spec.step_id) / tag
 
     def run(self, spec: ExportSpec) -> ExportResult:
         """跑一次导出。特征为空 → skipped 且不写产物；recipe 加载/执行失败 → 抛出。"""

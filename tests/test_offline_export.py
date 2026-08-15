@@ -10,8 +10,9 @@ import os
 import numpy as np
 import pytest
 
-from factories import make_frame_detections, make_frame_feature
+from factories import make_detection, make_frame_detections, make_frame_feature
 
+from app.domain.detection import FrameDetections
 from app.domain.frame import Frame
 from app.services.inference.feature.store import FeatureStore
 from app.services.inference.offline.export.models import ExportSpec
@@ -250,14 +251,117 @@ class TestRecipeShortName:
         assert recipe_short_name(path) == want
 
 
+# ============================ 特征健康诊断 ============================
+
+class TestDiagnose:
+    """无效特征检测：结构性无效（到处恒定）vs 数据相关无效（这条片段恰好没出现）。"""
+
+    def _export(self, tmp_path, task_id, ts_list):
+        _write_features(tmp_path, task_id, 2, ts_list)
+        return ExportRunner(tmp_path).run(
+            ExportSpec(task_id=task_id, step_id=2, recipe=_R0)
+        )
+
+    def test_single_step_cannot_judge_structural(self, tmp_path):
+        """**只有 1 个 step 时无法区分两类无效** —— 报告须显式标注这个局限。
+
+        单条片段上的恒定列，既可能是契约声明了检不出的类别（结构性），也可能只是
+        这段视频没出现该目标（数据相关）。不加警示就会把后者误删。
+        """
+        from app.services.inference.offline.export.diagnose import format_report, scan_columns
+
+        self._export(tmp_path, 7, [1.0, 1.2, 1.4])
+        reports = scan_columns(tmp_path / ".offline_exports")
+        assert list(reports) == ["r0@none"]
+        assert len(reports["r0@none"].steps) == 1
+        assert "只有 1 个 step" in format_report(reports)
+
+    def test_cross_step_separates_structural_from_data_dependent(self, tmp_path):
+        """跨 step 聚合才有判定力：全 step 恒定 = 结构性可疑，部分恒定 = 数据相关。"""
+        from app.services.inference.offline.export.diagnose import scan_columns
+
+        # step A 只有 hand；step B 有 hand + syringe → syringe 列在 A 恒定、在 B 不恒定
+        self._export(tmp_path, 7, [1.0, 1.2, 1.4])
+        store = FeatureStore(tmp_path)
+        for i, ts in enumerate([1.0, 1.2, 1.4]):
+            dets = {"clean_large": make_frame_detections(n=1, class_name="hand", ts=ts)}
+            if i:  # 后两帧才出现 syringe，且位置不同 → 该列有变化
+                dets["clean_small"] = FrameDetections(
+                    detections=[make_detection(class_name="syringe",
+                                               bbox=[10 * i, 10 * i, 40 * i, 40 * i])],
+                    metadata={}, timestamp=ts,
+                )
+            store.append(8, 2, make_frame_feature(
+                ts=ts, by_source=dets, frame_width=640, frame_height=480))
+        store.flush(8, 2)
+        ExportRunner(tmp_path).run(ExportSpec(task_id=8, step_id=2, recipe=_R0))
+
+        r = scan_columns(tmp_path / ".offline_exports")["r0@none"]
+        assert len(r.steps) == 2
+        # syringe 的存在性列：step 7 恒定、step 8 有变化 → 数据相关，不该判结构性
+        assert "syringe_present" in r.data_dependent
+        assert "syringe_present" not in r.structural_suspects
+        # **恒定 ≠ 恒零**：本 fixture 里 hand 每帧同一个 bbox，present 恒等于 1 —— 永远是 1
+        # 的列与永远是 0 的列一样不携带信息，都该被判出来。
+        assert "hand_top1_present" in r.structural_suspects
+
+    def test_contract_check_catches_undetectable_classes(self, tmp_path, monkeypatch):
+        """先验契约检查：契约声明但检测器不产出的类别 → 必然恒零，应在配置期就抓住。
+
+        这正是历史上 short_brush/long_brush/brush_tip_out 造成 45 列恒零的根因，
+        统计诊断要跑完导出才发现，契约检查在加载 checkpoint 时就能报。
+        """
+        import app.services.inference.offline.export.diagnose as diag
+
+        class _FakeModel:
+            names = {0: "hand", 1: "syringe"}
+
+        class _FakeYOLO:
+            def __init__(self, path):
+                self.model = _FakeModel()
+
+        fake_ultra = type("m", (), {"YOLO": _FakeYOLO})
+        monkeypatch.setitem(__import__("sys").modules, "ultralytics", fake_ultra)
+        ckpt = tmp_path / "fake.pt"
+        ckpt.write_bytes(b"x")
+
+        never_produced, never_consumed = diag.check_object_contract(
+            ["hand", "syringe", "short_brush", "long_brush"], [ckpt]
+        )
+        assert never_produced == ["long_brush", "short_brush"]
+        assert never_consumed == []
+
+    def test_contract_check_reports_unconsumed_classes(self, tmp_path, monkeypatch):
+        """反向：检测器产出但契约未消费 → 白丢的检测信号。"""
+        import app.services.inference.offline.export.diagnose as diag
+
+        class _FakeModel:
+            names = {0: "hand", 1: "air_gun"}
+
+        class _FakeYOLO:
+            def __init__(self, path):
+                self.model = _FakeModel()
+
+        monkeypatch.setitem(
+            __import__("sys").modules, "ultralytics", type("m", (), {"YOLO": _FakeYOLO})
+        )
+        ckpt = tmp_path / "fake.pt"
+        ckpt.write_bytes(b"x")
+        never_produced, never_consumed = diag.check_object_contract(["hand"], [ckpt])
+        assert never_produced == [] and never_consumed == ["air_gun"]
+
+
 # ============================ CLI ============================
 
 class TestExportCli:
     @pytest.mark.parametrize("argv", [
-        ["--task-id", "1"],                                   # 缺 --step-id / --recipe
-        ["--step-id", "2", "--recipe", _R0],                  # 缺 --task-id
-        ["--task-id", "1", "--step-id", "2"],                 # 缺 --recipe
-        ["--task-id", "1", "--step-id", "2", "--recipe", _R0, "--device", "tpu"],  # 非法设备
+        [],                                                          # 缺子命令
+        ["nosuchcmd"],                                               # 未知子命令
+        ["run", "--task-id", "1"],                                   # 缺 --step-id / --recipe
+        ["run", "--step-id", "2", "--recipe", _R0],                  # 缺 --task-id
+        ["run", "--task-id", "1", "--step-id", "2"],                 # 缺 --recipe
+        ["run", "--task-id", "1", "--step-id", "2", "--recipe", _R0, "--device", "tpu"],
+        ["contract"],                                                # 缺 --checkpoints
     ])
     def test_required_args_and_choices(self, argv):
         from app.services.inference.offline.export import cli
@@ -275,7 +379,7 @@ class TestExportCli:
         out = tmp_path / "cli_out"
 
         code = cli.main([
-            "--task-id", "7", "--step-id", "2", "--recipe", _R0, "--out-dir", str(out),
+            "run", "--task-id", "7", "--step-id", "2", "--recipe", _R0, "--out-dir", str(out),
         ])
         assert code == 0
         assert "completed" in capsys.readouterr().out
@@ -289,7 +393,7 @@ class TestExportCli:
         _write_features(tmp_path, 7, 2, [1.0])
         monkeypatch.setattr(type(settings), "storage_base_dir", property(lambda _: tmp_path))
         assert cli.main([
-            "--task-id", "7", "--step-id", "2", "--recipe", "bogus_no_dots",
+            "run", "--task-id", "7", "--step-id", "2", "--recipe", "bogus_no_dots",
         ]) == 1
 
     def test_cpu_isolation_disables_gpu(self, monkeypatch):
