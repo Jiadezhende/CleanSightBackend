@@ -226,6 +226,10 @@ class ExportRunner:
             "feature_version": model_input.feature_version,
             "feature_dim": model_input.feature_dim,
             "feature_names": list(model_input.feature_names),
+            # 各特征块的列区间 {块名: [起, 止)}。训练仓据此把 bbox / 视觉 / mask 切开，
+            # 各分支独立投影到等宽再融合（F1~F3 的共同前提，也是"视觉块按维度数占带宽"
+            # 的结构性解法）。recipe 未声明时留空，下游可回退按 feature_names 前缀切。
+            "blocks": dict(getattr(model_input, "blocks", {}) or {}),
             "frame_count": model_input.frame_count,
             "fps": model_input.fps,
             "ts_start": model_input.timestamps[0] if model_input.timestamps else None,

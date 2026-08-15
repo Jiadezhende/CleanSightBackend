@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -100,6 +100,9 @@ class ModelInput:
     timestamps: List[float]
     fps: float
     feature_version: str = FEATURE_VERSION
+    # 各特征块在列上的区间 {块名: [起, 止)}，供训练仓按分支切开做等宽投影/门控/交叉注意力
+    # （F1~F3 融合方式全都要分支独立编码）。拼接本身无损，但让下游靠列名前缀猜是脆的。
+    blocks: Dict[str, List[int]] = field(default_factory=dict)
 
     @property
     def frame_count(self) -> int:
@@ -150,6 +153,7 @@ def build_base_features(
         timestamps=timestamps,
         fps=effective_fps,
         feature_version=FEATURE_VERSION,
+        blocks={"bbox": [0, len(names)]},
     )
 
 
@@ -467,22 +471,34 @@ def export_r1(frames: Sequence[FrameFeature], visual=None) -> ModelInput:
     )
     g = np.asarray(visual.global_vec, dtype=np.float32) * valid[:, None]
 
+    nb, nv = x.shape[1], g.shape[1]
     names = list(base.feature_names)
-    names += [f"visual_global_{i}" for i in range(g.shape[1])]
+    names += [f"visual_global_{i}" for i in range(nv)]
     names += ["visual_valid"]
     return _with_features(
         base,
         np.concatenate([x, g, valid[:, None]], axis=1),
         names,
         f"{base.feature_version}+visual_global@{visual.backbone}",
+        blocks={
+            "bbox": [0, nb],
+            "visual_global": [nb, nb + nv],
+            "visual_valid": [nb + nv, nb + nv + 1],
+        },
     )
 
 
 # -------------------- 模型专属特征 recipe（供子类覆盖的 preprocess 调用） --------------------
 
 
-def _with_features(model_input: ModelInput, features: np.ndarray, names: List[str], version: str) -> ModelInput:
-    """基于原 ModelInput 换一套特征/列名/版本，重建新 ModelInput（含 finite 兜底）。"""
+def _with_features(
+    model_input: ModelInput, features: np.ndarray, names: List[str], version: str,
+    blocks: Dict[str, List[int]] | None = None,
+) -> ModelInput:
+    """基于原 ModelInput 换一套特征/列名/版本，重建新 ModelInput（含 finite 兜底）。
+
+    `blocks` 不传则沿用原 ModelInput 的块声明（适用于只在块内追加列的 recipe）。
+    """
     features = _finite_matrix(features)
     return ModelInput(
         features=features.tolist(),
@@ -490,6 +506,7 @@ def _with_features(model_input: ModelInput, features: np.ndarray, names: List[st
         timestamps=list(model_input.timestamps),
         fps=float(model_input.fps),
         feature_version=version,
+        blocks=blocks if blocks is not None else dict(model_input.blocks),
     )
 
 
