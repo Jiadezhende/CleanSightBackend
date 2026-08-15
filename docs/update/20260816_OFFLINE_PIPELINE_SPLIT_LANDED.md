@@ -7,7 +7,7 @@
 
 ## 一句话
 
-`offline/` 从「分割管线 + 导出管线」两条并行结构，重排成 `blocks`（工具）→ `infer`（策略）→ `runner`（编排）三层；离线侧数据壳从 3 个减到 1 个；顺带修掉一个现网的 O(T × 检测框数) 性能坑。
+`offline/` 从「分割管线 + 导出管线」两条并行结构，重排成 `blocks`（工具）→ `segmenter`/`impl`（策略）→ `runner`（编排）三层；离线侧数据壳从 3 个减到 1 个；顺带修掉一个现网的 O(T × 检测框数) 性能坑。
 
 ## 做了什么
 
@@ -39,11 +39,10 @@ app/services/inference/offline/
 │   ├── cache.py    130  .cache 路径 / npz 读写 / 过期清理
 │   ├── frame_source.py 293  ← 原样搬
 │   └── backbone.py 212  ← 原样搬
-└── infer/               策略：吃块出事实
-    ├── segmenter.py 55  基类，只剩 segment()
-    └── impl/
-        ├── clean.py     435  三个 Segmenter + 特征拼装纯函数 + 解码
-        └── clean_nets.py 173 三个 `make_*` 网络结构
+├── segmenter.py     55  基类，只剩 segment()
+└── impl/                策略：吃块出事实
+    ├── clean.py     435  三个 Segmenter + 特征拼装纯函数 + 解码
+    └── clean_nets.py 173 三个 `make_*` 网络结构
 ```
 
 ```
@@ -81,12 +80,12 @@ app/services/inference/offline/
 
 | 影响点 | 状态 |
 |---|---|
-| `settings.offline_dir` + `offline_base_dir` property | 新增；`.gitignore` 已含 `offline/` |
+| `settings.offline_dir` + `offline_base_dir` property | 新增；`.gitignore` 已含 `/offline/`（**必须带前导斜杠**，否则连源码包 `app/.../offline/` 一起吞） |
 | `config/inference_config.yaml` | CLEAN 注释里的 class 路径改新包；MOCK 的 `offline` 改回 `{}` |
 | `stage_factory.py` 的 `OfflineSegmenter` import | 一行 |
 | `tests/conftest.py` | 新增 `tmp_offline` fixture（与 `tmp_storage` 并列） |
 | 两个离线测试文件 | 重写，53 + 31 用例 |
-| `detection/impl/`、`temporal/impl/` 等 docstring 里的 `offline/impl/<x>.py` 路径 | 已改为 `offline/infer/impl/<x>.py` |
+| `detection/impl/`、`temporal/impl/` 等 docstring 里的 `offline/impl/<x>.py` 路径 | 路径不变（`infer/` 中间层已拆掉，Segmenter 仍在 `offline/impl/`） |
 | 存量 `.offline_exports` 产物 | 可直接删（实验中间产物，可重建） |
 
 ## KB 待订正（沉淀时处理）

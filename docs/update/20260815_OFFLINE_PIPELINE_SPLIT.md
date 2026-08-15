@@ -133,7 +133,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 offline:
   name: clean_offline
   subscribes: [clean_large, clean_small]
-  class: app.services.inference.offline.infer.impl.clean.CleanBiGRUSegmenter
+  class: app.services.inference.offline.impl.clean.CleanBiGRUSegmenter
   params:
     model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-bigru.pt
 ```
@@ -213,11 +213,10 @@ app/services/inference/offline/
 │   ├── cache.py        ★  .cache 路径规则 + npz 读写 + 过期清理
 │   ├── frame_source.py    ← 原样搬（含 FetchStats）
 │   └── backbone.py        ← 原样搬
-└── infer/
-    ├── segmenter.py       ← 基类，只剩 segment()
-    └── impl/
-        ├── clean.py       三个 Segmenter 子类 + 特征拼装纯函数 + 解码
-        └── clean_nets.py  ← clean.py:787-950 三个 `_make_*`
+├── segmenter.py            ← 基类，只剩 segment()
+└── impl/                   策略：吃块出事实
+    ├── clean.py            三个 Segmenter 子类 + 特征拼装纯函数 + 解码
+    └── clean_nets.py       ← clean.py:787-950 三个 `_make_*`
 ```
 
 ★ = 新增，← = 从现有文件搬。`export/` 包整体删除，能力并入 `blocks/` 与 `cli.py`。**1001 行的 `impl/clean.py` 按这套自然裂成三份**——它现在混着特征工程、网络结构、Segmenter、导出函数四种东西，是「乱」的最大单点。不建 `common/` 或 `utils/`（见 N4）。

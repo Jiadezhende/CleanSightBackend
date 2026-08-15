@@ -8,7 +8,7 @@
     - 最后补时间位置编码。
 
 全部是无状态纯函数。窗口统计、业务先验等**模型专属**增强不在这里，在
-`infer/impl/clean.py` 里由各 Segmenter 自己叠加——本块只出所有模型共享的那 71 维。
+`impl/clean.py` 里由各 Segmenter 自己叠加——本块只出所有模型共享的那 71 维。
 """
 
 from __future__ import annotations

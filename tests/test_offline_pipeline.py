@@ -20,11 +20,11 @@ from app.services.inference.feature.store import FactLedger, FeatureStore
 from app.services.inference.models import EventFact, SegmentFact
 from app.services.inference.offline import blocks
 from app.services.inference.offline.blocks import BlockKind, NoFeatures
-from app.services.inference.offline.infer.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.stage_factory import StageFactory
 
 _MOCK_CLASS = "offline_mock_segmenter.BrushRulesSegmenter"
-_CLEAN_CLASS = "app.services.inference.offline.infer.impl.clean.CleanMSTCNBiLSTMSegmenter"
+_CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter"
 
 
 # ============================ 存储引擎 ============================
@@ -210,7 +210,7 @@ class TestCreateOfflineSegmenter:
 
         换模型就换 Segmenter 类。这条钉住的是设计决定，不是实现细节。
         """
-        from app.services.inference.offline.infer.impl import clean
+        from app.services.inference.offline.impl import clean
 
         seg = clean.CleanBiGRUSegmenter(name="b", subscribes=["clean_large"])
         assert seg.needs == (BlockKind.BBOX,)
@@ -408,7 +408,7 @@ class TestCleanSegmenter:
     """三个 clean Segmenter 各吃自己那套特征——一个 checkpoint 一个类，不是自由组合。"""
 
     def test_each_model_builds_its_own_input(self, tmp_path):
-        from app.services.inference.offline.infer.impl import clean
+        from app.services.inference.offline.impl import clean
 
         _write_clean_features(tmp_path)
         bl = {BlockKind.BBOX: blocks.load(BlockKind.BBOX, 1, 2, storage_dir=tmp_path)}
@@ -429,7 +429,7 @@ class TestCleanSegmenter:
             assert np.isfinite(mi.values).all()
 
     def test_no_model_path_hard_fails_without_debug_result(self, tmp_path):
-        from app.services.inference.offline.infer.impl import clean
+        from app.services.inference.offline.impl import clean
 
         _write_clean_features(tmp_path)
         seg = clean.CleanMSTCNBiLSTMSegmenter(
@@ -441,7 +441,7 @@ class TestCleanSegmenter:
         assert seg.debug_result() is None
 
     def test_missing_input_raises_no_features(self, tmp_path):
-        from app.services.inference.offline.infer.impl import clean
+        from app.services.inference.offline.impl import clean
 
         seg = clean.CleanMSTCNBiLSTMSegmenter(
             name="clean_seg", subscribes=["clean_large"], storage_dir=tmp_path)
@@ -586,7 +586,7 @@ class TestRunExport:
     def test_export_and_infer_share_one_build_input(self, tmp_path):
         """导出的字节 == 推理实际吃的字节：两条路径调同一个 build_input。"""
         from app.services.inference.offline import runner
-        from app.services.inference.offline.infer.impl import clean
+        from app.services.inference.offline.impl import clean
         import numpy as np
 
         _write_clean_features(tmp_path)

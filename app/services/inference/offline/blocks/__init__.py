@@ -9,7 +9,7 @@
     load_frames()   原始检测帧的逃生口，只给规则型/调试型策略（见其 docstring）
 
 Segmenter 按自己的 `needs` 直接调 `load()`，编排层（cli）不认识块也不认识 FeatureStore。
-块的构建、加载、缓存、回收全部收在本包内，方向是 `infer → blocks` 单向。
+块的构建、加载、缓存、回收全部收在本包内，方向是 `impl → blocks` 单向。
 
 代价分布决定了缓存策略：bbox 块是纯 numpy（1886 帧实测 16 ms），直算；视觉块要解码 +
 backbone 前向（分钟级），进 `.cache`。缓存只给真正贵的那一路，不搞通用块存储。

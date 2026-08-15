@@ -8,7 +8,7 @@ from app.services.inference.config import InferenceConfig
 from app.domain.alarm import AlarmMetric
 
 if TYPE_CHECKING:
-    from app.services.inference.offline.infer.segmenter import OfflineSegmenter
+    from app.services.inference.offline.segmenter import OfflineSegmenter
 
 logger = logging.getLogger(__name__)
 

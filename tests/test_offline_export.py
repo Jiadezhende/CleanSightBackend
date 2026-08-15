@@ -27,7 +27,7 @@ from app.services.persistence.strategies.raw_frame_index import (
     write_frame_index,
 )
 
-_CLEAN_CLASS = "app.services.inference.offline.infer.impl.clean.CleanMSTCNBiLSTMSegmenter"
+_CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter"
 
 
 def _frames(*ts):

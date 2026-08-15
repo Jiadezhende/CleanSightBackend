@@ -27,9 +27,9 @@ from app.services.inference.models import SegmentFact
 from app.services.inference.offline import blocks as blocks_api
 from app.services.inference.offline.blocks import BlockKind
 from app.services.inference.offline.blocks.bbox import effective_fps
-from app.services.inference.offline.infer.impl import clean_nets
-from app.services.inference.offline.infer.segmenter import OfflineSegmenter
+from app.services.inference.offline.impl import clean_nets
 from app.services.inference.offline.models import FeatureBlock, finite
+from app.services.inference.offline.segmenter import OfflineSegmenter
 
 ACTION_LABELS = [
     "idle",

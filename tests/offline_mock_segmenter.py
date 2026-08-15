@@ -18,7 +18,7 @@ from typing import List, Sequence
 from app.domain.detection import FrameFeature
 from app.services.inference.models import SegmentFact
 from app.services.inference.offline.blocks import BlockKind
-from app.services.inference.offline.infer.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
 class BrushRulesSegmenter(OfflineSegmenter):

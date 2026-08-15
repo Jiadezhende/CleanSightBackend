@@ -104,10 +104,10 @@ stages:
     # offline:
     #   name: clean_offline
     #   subscribes: [clean_large, clean_small]
-    #   class: app.services.inference.offline.infer.impl.clean.CleanMSTCNBiLSTMSegmenter
+    #   class: app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter
     #   # 可选模型（换模型就换类——特征方案与网络由 checkpoint 绑死，不是两个自由旋钮）:
-    #   # class: app.services.inference.offline.infer.impl.clean.CleanASFormerSegmenter
-    #   # class: app.services.inference.offline.infer.impl.clean.CleanBiGRUSegmenter
+    #   # class: app.services.inference.offline.impl.clean.CleanASFormerSegmenter
+    #   # class: app.services.inference.offline.impl.clean.CleanBiGRUSegmenter
     #   params:
     #     model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm.pt
     offline: {}                      # 生产默认不启用
