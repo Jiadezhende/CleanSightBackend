@@ -415,6 +415,6 @@ class TestExportCli:
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["segmenter"].endswith("CleanMSTCNBiLSTMSegmenter")
         assert manifest["backbone"] == "none"
-        assert manifest["feature_dim"] == 71
+        assert manifest["feature_dim"] == 68
         assert manifest["quality"]["frames_total"] == 2
         assert "decode_short" in manifest["quality"]  # 早先的 ExportQuality 抄漏了这项

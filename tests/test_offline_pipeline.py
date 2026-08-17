@@ -273,10 +273,12 @@ class TestBlocksLoad:
         _write_clean_features(tmp_path)
         blk = blocks.load(BlockKind.BBOX, 1, 2, storage_dir=tmp_path)
         assert blk.frame_count == 4
-        assert blk.feature_dim == 71  # v3: hand top-2 + top-1/impute/relations + 时间编码
-        assert blk.version == "clean_bbox_v3_detectable"
-        assert blk.names[0] == "hand_count" and len(blk.names) == 71
-        assert blk.spans == {"bbox": [0, 71]}
+        assert blk.feature_dim == 68  # v4: hand top-2 + top-1/impute/relations（无时间编码）
+        assert blk.version == "clean_bbox_v4_notime"
+        assert blk.names[0] == "hand_count" and len(blk.names) == 68
+        # v4 删掉了 t_norm/t_sin/t_cos：三列只有一个自由度，且 t_norm 是「整段进度百分比」
+        assert not any(n.startswith("t_") for n in blk.names)
+        assert blk.spans == {"bbox": [0, 68]}
         assert blk.valid is None  # bbox 恒有效
 
     def test_missing_features_raises_no_features(self, tmp_path):
@@ -413,11 +415,11 @@ class TestCleanSegmenter:
         _write_clean_features(tmp_path)
         bl = {BlockKind.BBOX: blocks.load(BlockKind.BBOX, 1, 2, storage_dir=tmp_path)}
         cases = [
-            (clean.CleanMSTCNBiLSTMSegmenter, "v3", 71, "clean_bbox_v3_detectable"),
-            (clean.CleanASFormerSegmenter, "business_priors", 73,
-             "clean_bbox_v3_detectable+business_priors"),
-            (clean.CleanBiGRUSegmenter, "window_stats+business_priors", 151,
-             "clean_bbox_v3_detectable+center_window+business_priors"),
+            (clean.CleanMSTCNBiLSTMSegmenter, "v3", 68, "clean_bbox_v4_notime"),
+            (clean.CleanASFormerSegmenter, "business_priors", 70,
+             "clean_bbox_v4_notime+business_priors"),
+            (clean.CleanBiGRUSegmenter, "window_stats+business_priors", 148,
+             "clean_bbox_v4_notime+center_window+business_priors"),
         ]
         for cls, method, dim, version in cases:
             seg = cls(name="s", subscribes=["clean_large", "clean_small"], storage_dir=tmp_path)
@@ -575,13 +577,13 @@ class TestRunExport:
         d = offline_dir / ".cache" / "1" / "2"
         tag = "CleanMSTCNBiLSTMSegmenter"
         data = np.load(d / f"input_{tag}.npz")
-        assert data["features"].shape == (4, 71)
+        assert data["features"].shape == (4, 68)
         manifest = json.loads((d / f"manifest_{tag}.json").read_text(encoding="utf-8"))
-        assert manifest["feature_dim"] == 71
-        assert manifest["feature_version"] == "clean_bbox_v3_detectable"
-        assert manifest["spans"] == {"bbox": [0, 71]}
+        assert manifest["feature_dim"] == 68
+        assert manifest["feature_version"] == "clean_bbox_v4_notime"
+        assert manifest["spans"] == {"bbox": [0, 68]}
         assert manifest["backbone"] == "none"
-        assert len(manifest["feature_names"]) == 71
+        assert len(manifest["feature_names"]) == 68
 
     def test_export_and_infer_share_one_build_input(self, tmp_path):
         """导出的字节 == 推理实际吃的字节：两条路径调同一个 build_input。"""

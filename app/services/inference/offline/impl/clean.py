@@ -6,7 +6,7 @@
     - 三个 Segmenter 子类：一个 checkpoint 一个类，`needs` 声明要哪些块；
     - 模型输出到 SegmentFact 的解码逻辑。
 
-基础 71 维 bbox 特征工程不在这里，在 `blocks/bbox.py`——那是所有模型共享的，
+基础 68 维 bbox 特征工程不在这里，在 `blocks/bbox.py`——那是所有模型共享的，
 本文件只放**模型专属**的那几层叠加。
 
 导出器与推理**调的是同一个 `build_input`**：`export --segmenter <类路径>` 拿到的字节，
@@ -45,7 +45,7 @@ ACTION_LABELS = [
 
 
 def bbox_v3(blocks: Mapping[BlockKind, FeatureBlock]) -> FeatureBlock:
-    """R0：bbox-only 基线（71 维）。
+    """R0：bbox-only 基线（68 维）。
 
     blocks 层给的 bbox 块已经是这一份，此处即恒等——保留具名函数是为了让「吃哪套特征」
     在每个 Segmenter 上都是同一种写法。R0 是对照基准，后续 R1/R2 的增益相对它度量。
@@ -54,17 +54,17 @@ def bbox_v3(blocks: Mapping[BlockKind, FeatureBlock]) -> FeatureBlock:
 
 
 def bbox_v3_priors(blocks: Mapping[BlockKind, FeatureBlock]) -> FeatureBlock:
-    """R0 + 业务动作先验（73 维，ASFormer 用）。"""
+    """R0 + 业务动作先验（70 维，ASFormer 用）。"""
     return add_business_priors(bbox_v3(blocks))
 
 
 def bbox_v3_window_priors(blocks: Mapping[BlockKind, FeatureBlock]) -> FeatureBlock:
-    """R0 + 多尺度居中滑窗均值 + 业务先验（151 维，BiGRU 用）。"""
+    """R0 + 多尺度居中滑窗均值 + 业务先验（148 维，BiGRU 用）。"""
     return add_business_priors(add_centered_window_stats(bbox_v3(blocks)))
 
 
 def bbox_v3_visual(blocks: Mapping[BlockKind, FeatureBlock]) -> FeatureBlock:
-    """R1：R0 + 全帧 CNN 深层全局池化向量（71 + C + 1 维）。回答「视觉信息到底有没有用」。
+    """R1：R0 + 全帧 CNN 深层全局池化向量（68 + C + 1 维）。回答「视觉信息到底有没有用」。
 
     **R1a / R1b 是同一套特征，只差 backbone**（Segmenter 类属性 `backbone` 填 `yolo` 或
     `resnet18`）：前者特征域与本场景匹配但与 bbox 同源，其增量只是「检测头丢掉的信息」；
@@ -400,7 +400,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
 
 class CleanMSTCNBiLSTMSegmenter(_CleanTorchSegmenter):
-    """CLEAN 阶段 MS-TCN + BiLSTM 离线模型。吃基础 v3（71 维）。"""
+    """CLEAN 阶段 MS-TCN + BiLSTM 离线模型。吃基础 v4（68 维）。"""
 
     model_version = "clean_mstcn_bilstm_v1"
     feature_method = "v3"
@@ -410,7 +410,7 @@ class CleanMSTCNBiLSTMSegmenter(_CleanTorchSegmenter):
 
 
 class CleanASFormerSegmenter(_CleanTorchSegmenter):
-    """CLEAN 阶段 ASFormer 风格离线模型。吃 v3 + business_priors（73 维）。"""
+    """CLEAN 阶段 ASFormer 风格离线模型。吃 v4 + business_priors（70 维）。"""
 
     model_version = "clean_asformer_v1"
     feature_method = "business_priors"
@@ -423,7 +423,7 @@ class CleanASFormerSegmenter(_CleanTorchSegmenter):
 
 
 class CleanBiGRUSegmenter(_CleanTorchSegmenter):
-    """CLEAN 阶段 BiGRU 离线模型。吃 v3 + center_window + business_priors（151 维）。"""
+    """CLEAN 阶段 BiGRU 离线模型。吃 v4 + center_window + business_priors（148 维）。"""
 
     model_version = "clean_bigru_v1"
     feature_method = "window_stats+business_priors"

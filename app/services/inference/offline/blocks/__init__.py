@@ -101,7 +101,7 @@ def load_frames(
 
     FeatureStore 只在本包内被触碰——这是「编排层不认识块」得以成立的另一半。
 
-    **这是给规则型/调试型策略的逃生口**（它们要看原始检测框而非 71 维特征）。模型型
+    **这是给规则型/调试型策略的逃生口**（它们要看原始检测框而非 68 维特征）。模型型
     Segmenter 一律不得走这条路：特征只能来自 `load()`，否则单一真源（不变式 N1）失守。
     """
     from app.services.inference.feature.store import FeatureStore

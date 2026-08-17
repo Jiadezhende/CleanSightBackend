@@ -1,14 +1,30 @@
-"""CLEAN bbox 特征块：检测框序列 → v3 固定维（71）时序特征。
+"""CLEAN bbox 特征块：检测框序列 → v4 固定维（68）时序特征。
 
-与 offline-model 仓的 `clean_bbox_v3_detectable` 对齐：
     - hand 使用 top-2 槽位；
     - 其它目标使用 top-1，不做同类多框加权平均；
     - 每个目标包含 present/conf/cx/cy/area/speed/missing_age/imputed；
-    - 对关键目标对补 valid/dist/delta；
-    - 最后补时间位置编码。
+    - 对关键目标对补 valid/dist/delta。
+
+v3 → v4 有两处变更，都来自对本地两条真实 step 的实测：
+
+1. **删掉 `t_norm/t_sin/t_cos` 三列时间位置编码。** 它们是 `np.linspace(0,1,frames)` 及
+   其确定性变换——一个自由度占三维、一个 ts 都没读。要害在 `t_norm` 是「整段进度百分
+   比」：算它必须先知道总帧数（因果链路根本算不出），且把 step 时长归一了，2 分钟和
+   10 分钟的段里同一个 0.5 相差 4 倍绝对时间。模型能从中学到的只有「训练集里这个动作
+   一般出现在第百分之几」，时长分布一换就崩。换成绝对秒有量级不可控问题，故直接删。
+
+2. **`effective_fps` 由 dt 中位数改为均值**（见其 docstring）。这一项改的是数值不是维度。
+
+**为什么 speed 仍用整段 fps、而不是逐帧 dt**——这条是量出来的，别再"优化"回去：帧间隔
+看着抖得厉害（dt 在 11~132 ms 间跳），但那是**时间戳噪声，不是真实采样间隔**。三个互相
+独立的证据：相邻 dt 自相关 −0.478/−0.505 ≈ 理论值 −0.5（`dt = T + e_i − e_{i−1}` 叠
+i.i.d. 噪声的特征）；`corr(|Δcoord|, dt)` ≈ 0（真间隔的话位移该随 dt 增长）；按均值法
+定 fps 后帧轴漂移**恒定在 72 ms（≈1 帧）**、末端归零，而非随长度累积。真实采样率是稳的
+15.0 fps。拿逐帧 dt 当分母只会把噪声放大——实测 speed 饱和率 1.9% → 5.8%、逐帧抖动
+增加 33%。
 
 全部是无状态纯函数。窗口统计、业务先验等**模型专属**增强不在这里，在
-`impl/clean.py` 里由各 Segmenter 自己叠加——本块只出所有模型共享的那 71 维。
+`impl/clean.py` 里由各 Segmenter 自己叠加——本块只出所有模型共享的那 68 维。
 """
 
 from __future__ import annotations
@@ -21,7 +37,7 @@ import numpy as np
 from app.domain.detection import Detection, FrameFeature
 from app.services.inference.offline.models import FeatureBlock, finite
 
-FEATURE_VERSION = "clean_bbox_v3_detectable"
+FEATURE_VERSION = "clean_bbox_v4_notime"
 
 # 特征工程的三个兜底常量。都只是**兜底**：真实采样率由 `effective_fps` 从帧 ts 反推，
 # 分辨率优先取 `FrameFeature.frame_*`（pool 盖章、store 回读还原），仅当这些缺失时才落到这里。
@@ -66,7 +82,7 @@ def build(
     frame_height: int = DEFAULT_FRAME_HEIGHT,
     fallback_fps: float = DEFAULT_FPS,
 ) -> FeatureBlock:
-    """帧级 FrameFeature 序列 → 71 维 bbox 特征块。
+    """帧级 FrameFeature 序列 → 68 维 bbox 特征块。
 
     每帧 `FrameFeature.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
     """
@@ -96,12 +112,21 @@ def build(
 
 
 def base_feature_names() -> List[str]:
-    """基础 v3 的 71 个特征列名（跑一遍空矩阵取名，避免维护第二份清单）。"""
+    """基础 v4 的 68 个特征列名（跑一遍空矩阵取名，避免维护第二份清单）。"""
     return _build_feature_matrix({name: [[]] for name in OBJECTS}, 1, DEFAULT_FPS)[1]
 
 
 def effective_fps(timestamps: Sequence[float], fallback_fps: float = DEFAULT_FPS) -> float:
-    """用相邻帧 dt 的中位数估真实采样率；dt 不可用时回退 fallback_fps。"""
+    """用相邻帧 dt 的**均值**估真实采样率；dt 不可用时回退 fallback_fps。
+
+    v3 用的是中位数，偏低 7.5~12.9%（实测两条 step：13.96/13.28 vs 真值 15.0）——帧间隔
+    带 i.i.d. 时间戳噪声，其分布左偏，中位数不是无偏估计。偏差本身不大，但它乘进 `speed`
+    是整段系统性缩放，且把帧序号换算成墙钟时会随长度累积（1886 帧那条累计偏 9.4 秒）。
+    均值等价于 `(n-1)/(ts[-1]-ts[0])`，噪声在求和时相消，实测漂移恒定在 1 帧以内。
+
+    这里仍逐个筛 dt 而不直接用首末差：个别非有限/非正的 dt（时钟回拨、重复 ts）要剔掉，
+    而它们恰好会污染首末差。
+    """
     if len(timestamps) < 2:
         return max(float(fallback_fps), 1e-6)
     deltas = [
@@ -110,7 +135,7 @@ def effective_fps(timestamps: Sequence[float], fallback_fps: float = DEFAULT_FPS
     ]
     if not deltas:
         return max(float(fallback_fps), 1e-6)
-    return max(1.0 / float(np.median(np.asarray(deltas, dtype=np.float32))), 1e-6)
+    return max(1.0 / float(np.mean(np.asarray(deltas, dtype=np.float64))), 1e-6)
 
 
 # ==================== 逐帧候选框归拢 ====================
@@ -253,7 +278,11 @@ def _missing_age(raw_present: np.ndarray, max_gap: int) -> np.ndarray:
 def _impute_short_gaps(
     raw: np.ndarray, fps: float, max_gap: int = 6
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """对短缺失段线性插值补帧，算出 speed 等 8 维；返回 (特征, active 掩码)。"""
+    """对短缺失段线性插值补帧，算出 speed 等 8 维；返回 (特征, active 掩码)。
+
+    speed 用**整段的** fps 而非逐帧 dt：实测帧间隔的抖动是时间戳噪声（见模块 docstring），
+    除以逐帧 dt 等于拿噪声当分母。`max_gap` 以帧计——它约束的是插值跨度而非时长。
+    """
     time_len = raw.shape[0]
     present = raw[:, 0].astype(np.float32)
     conf = raw[:, 4].astype(np.float32)
@@ -304,7 +333,7 @@ def _build_feature_matrix(
     frames: int,
     fps: float,
 ) -> Tuple[np.ndarray, List[str]]:
-    """拼装完整 v3 矩阵：hand top-2 + 各目标 top-1 + 关键目标对 + 时间编码，返回 (矩阵, 列名)。"""
+    """拼装完整 v4 矩阵：hand top-2 + 各目标 top-1 + 关键目标对，返回 (矩阵, 列名)。"""
     blocks: List[np.ndarray] = []
     names: List[str] = []
     centers: Dict[str, np.ndarray] = {}
@@ -375,7 +404,4 @@ def _build_feature_matrix(
         blocks.append(np.stack([valid, dist, delta], axis=1).astype(np.float32))
         names += [f"{left}_to_{right}_valid", f"{left}_to_{right}_dist", f"{left}_to_{right}_delta"]
 
-    t = np.linspace(0.0, 1.0, frames, dtype=np.float32)
-    blocks.append(np.stack([t, np.sin(2 * np.pi * t), np.cos(2 * np.pi * t)], axis=1).astype(np.float32))
-    names += ["t_norm", "t_sin", "t_cos"]
     return finite(np.concatenate(blocks, axis=1)), names
