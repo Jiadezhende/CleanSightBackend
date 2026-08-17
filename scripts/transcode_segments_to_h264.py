@@ -1,16 +1,18 @@
 """
-批量升级历史 mp4 段为 HLS-ready fMP4 + 生成 step 级 init.mp4 + 重写 playlist 头
+批量升级历史 mp4 段为 HLS-ready fMP4 + 生成 track 级 init + 重写 playlist 头
 
 背景：
 - 早期段是 cv2 mp4v（MPEG-4 Part 2），后来升级为 H.264 普通 MP4 + faststart
 - 当前 hls.js 走 m3u8 播放时报 fragParsingError —— HLS 要求 MP4 段必须是 fragmented MP4
-- 本脚本把任意历史 mp4（mp4v / h264 普通 MP4）就地升级为 fMP4，并按 step 写一份共享
-  init.mp4，最后重写 m3u8 头（升 VERSION:7 + 插入 #EXT-X-MAP）
+- 本脚本把任意历史 mp4（mp4v / h264 普通 MP4）就地升级为 fMP4，并按 track 写
+  `{track}_init.mp4`，最后重写 m3u8 头（升 VERSION:7 + 插入 #EXT-X-MAP）
 
 策略：
 - 按 step 目录维度迁移（外层 task_id，内层 step_id）
-- 同 step 内所有段共享一份 init.mp4：第一个段产出时落盘，后续段产出的 init 丢弃
-- 幂等：step 目录已存在 init.mp4 且 playlist 已含 #EXT-X-MAP 则跳过（除非 --force）
+- 同 track 内所有段共享一份 `{track}_init.mp4`：该 track 第一个段产出时落盘，后续丢弃。
+  raw / processed 各一份——两条独立 playlist 各有各的 EXT-X-MAP，共用会指错时间基
+- timescale pin 成 hls_strategy._HLS_TIMESCALE，与新段路径同一时间基
+- 幂等：两份 init 都在且 playlist 已含 #EXT-X-MAP 则跳过（除非 --force）
 - 单段失败仅 WARN 并继续，不中断批次
 
 用法：
@@ -31,6 +33,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from app.services.persistence.strategies.hls_strategy import _HLS_TIMESCALE
 
 logger = logging.getLogger("transcode_segments")
 
@@ -252,6 +256,8 @@ def _transcode_segment_to_fmp4(
         "-an",
         "-output_ts_offset", f"{effective_offset:.6f}",
         "-hls_segment_type", "fmp4",
+        # 与 hls_strategy 写新段路径 pin 同一个 timescale，否则迁移产物与新段的时间基不同
+        "-hls_segment_options", f"video_track_timescale={_HLS_TIMESCALE}",
         # 必须用绝对路径：ffmpeg 8.x 的 HLS muxer 把此处的 basename 解析到进程 cwd
         # 而不是 playlist 输出目录。详见 hls_strategy.py 同名注释。
         "-hls_fmp4_init_filename", str(tmp_init),
@@ -349,6 +355,7 @@ def _playlist_already_fmp4(path: Path) -> bool:
 
 def _rewrite_playlist_header(
     path: Path,
+    track: str,
     durations: Optional[Dict[str, float]] = None,
 ) -> bool:
     """把旧头部重写为 VERSION:7 + EXT-X-MAP，并以 durations 覆盖 EXTINF。
@@ -378,7 +385,7 @@ def _rewrite_playlist_header(
         "#EXTM3U",
         "#EXT-X-VERSION:7",
         f"#EXT-X-TARGETDURATION:{target_duration}",
-        '#EXT-X-MAP:URI="init.mp4"',
+        f'#EXT-X-MAP:URI="{track}_init.mp4"',
     ]
     for dur, fname in new_entries:
         lines.append(f"#EXTINF:{dur:.3f},")
@@ -438,12 +445,14 @@ def _migrate_step(
     - 转码完成后把探测出的 duration 累加到 cumulative
     - 最后用 durations 表覆盖 playlist 的 EXTINF —— 三套时间线对齐
     """
-    init_path = step_dir / "init.mp4"
+    # init 按 track 分开：raw / processed 是两条独立 playlist，各有各的 EXT-X-MAP，
+    # 共用一份会变成「谁先转码谁定」，另一条轨就指向别人的 init。与 hls_strategy 一致。
+    init_paths = {t: step_dir / f"{t}_init.mp4" for t in ("raw", "processed")}
     raw_playlist = step_dir / "raw_playlist.m3u8"
     proc_playlist = step_dir / "processed_playlist.m3u8"
 
     already_migrated = (
-        init_path.exists()
+        all(p.exists() for p in init_paths.values())
         and (not raw_playlist.exists() or _playlist_already_fmp4(raw_playlist))
         and (not proc_playlist.exists() or _playlist_already_fmp4(proc_playlist))
     )
@@ -467,8 +476,9 @@ def _migrate_step(
     if dry_run:
         for seg in segments:
             logger.info("[dry-run] would transcode %s", seg.relative_to(base_dir))
-        if not init_path.exists():
-            logger.info("[dry-run] would create %s", init_path.relative_to(base_dir))
+        for p in init_paths.values():
+            if not p.exists():
+                logger.info("[dry-run] would create %s", p.relative_to(base_dir))
         for pl in (raw_playlist, proc_playlist):
             if pl.exists():
                 logger.info("[dry-run] would rewrite header+EXTINF %s", pl.relative_to(base_dir))
@@ -478,13 +488,14 @@ def _migrate_step(
     raw_segs = [s for s in segments if _track_of(s) == "raw"]
     proc_segs = [s for s in segments if _track_of(s) == "processed"]
 
-    # init 没产出过就让第一个段去捕获
-    init_already = init_path.exists()
     converted = 0
     failed = 0
     durations_by_track: Dict[str, Dict[str, float]] = {"raw": {}, "processed": {}}
 
     for track_name, track_segs in (("raw", raw_segs), ("processed", proc_segs)):
+        init_path = init_paths[track_name]
+        # 该 track 的 init 没产出过就让它的第一个段去捕获
+        init_already = init_path.exists()
         cumulative = 0.0
         for seg in track_segs:
             # 传入 init_path 让 --force 重跑场景能拼接探测 fMP4 fragment
@@ -514,12 +525,12 @@ def _migrate_step(
                 failed += 1
 
     # 重写 playlist：无条件覆盖 EXTINF（新公式 = 探测出的 fragment 媒体时长）
-    for pl, durations in (
-        (raw_playlist, durations_by_track["raw"]),
-        (proc_playlist, durations_by_track["processed"]),
+    for pl, track_name, durations in (
+        (raw_playlist, "raw", durations_by_track["raw"]),
+        (proc_playlist, "processed", durations_by_track["processed"]),
     ):
         if pl.exists():
-            ok = _rewrite_playlist_header(pl, durations=durations)
+            ok = _rewrite_playlist_header(pl, track_name, durations=durations)
             logger.info(
                 "[playlist %s] %s",
                 "rewritten" if ok else "rewrite-failed",
