@@ -46,10 +46,11 @@ class HLSPersistenceStrategy:
         db_dir: Path,
     ):
         self.db_dir = db_dir
-        # HLS 段编码帧率全程从帧 ts 反推（见 _effective_fps），不接收任何上游 fps。
         # 按 target_dir 路径索引的细粒度锁，序列化同一任务目录下的 playlist/metadata 写操作
         self._dir_locks: Dict[str, threading.Lock] = {}
         self._dir_locks_guard = threading.Lock()
+        self.raw_fps = settings.raw_fps
+        self.processed_fps = settings.inference_fps
 
     @staticmethod
     def _effective_fps(frames: List[Frame]) -> float:
@@ -508,9 +509,8 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
-        # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），无可测速率时退化兜底。
-        # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
-        eff_fps = self._effective_fps(frames)
+        # 1. 生成原始视频段（使用原始视频源帧率30fps）
+        eff_fps = self.raw_fps
         raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
@@ -603,9 +603,9 @@ class HLSPersistenceStrategy:
         # 逐段速率不同 → 段间忽快忽慢的抖动。逐段各取自身 eff_fps，VideoWriter 与 EXTINF
         # 同源 → 每段播成 1.0x，对齐墙钟、抖动消失。详见
         # docs/update/20260629_PROCESSED_PLAYBACK_RATE_PROPOSAL.md。
-        eff_fps = self._effective_fps(frames)
+        eff_fps = self.processed_fps
 
-        # 1. 生成处理后视频段（使用实测有效帧率 eff_fps）
+        # 1. 生成处理后视频段（使用处理后视频源帧率 processed_fps）
         segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
