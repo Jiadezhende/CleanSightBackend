@@ -598,11 +598,9 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
-        # 0. 按本段帧时间戳跨度反推有效 fps：processed 实际成帧率随 throttle / 渲染尖峰
-        # 在窗口间漂移（~11-15fps），固定名义帧率编码会按 兜底/真实率 倍快放，且
-        # 逐段速率不同 → 段间忽快忽慢的抖动。逐段各取自身 eff_fps，VideoWriter 与 EXTINF
-        # 同源 → 每段播成 1.0x，对齐墙钟、抖动消失。详见
-        # docs/update/20260629_PROCESSED_PLAYBACK_RATE_PROPOSAL.md。
+        # 固定 processed_fps 编码，不按本段帧 ts 反推。逐段 eff_fps 会破坏 HLS fMP4
+        # timescale 一致性 → SourceBuffer gap → 段尾停摆；代价是回放速率随实测率
+        # （~11-15fps）漂移，视觉上略抖动，但不卡死。详见 docs/update/20260817_HLS_DUAL_TRACK_FIXED_FPS.md。
         eff_fps = self.processed_fps
 
         # 1. 生成处理后视频段（使用处理后视频源帧率 processed_fps）
