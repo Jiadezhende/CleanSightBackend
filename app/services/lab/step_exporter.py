@@ -129,9 +129,9 @@ class StepExporter:
                 f"step_id={step_id} (all in-flight or playlist missing)"
             )
 
-        if not (step_dir / "init.mp4").exists():
+        if not (step_dir / f"{track}_init.mp4").exists():
             raise StepExportInitMissing(
-                f"init.mp4 not found for task {task_id} step {step_id}. "
+                f"{track}_init.mp4 not found for task {task_id} step {step_id}. "
                 "Historical segments must be migrated via "
                 "scripts/transcode_segments_to_h264.py before export."
             )
@@ -141,7 +141,7 @@ class StepExporter:
         output_path = self._temp_root / f"step_{task_id}_{step_id}_{track}_{nonce}.mp4"
 
         tmp_m3u8.write_text(
-            self._build_vod_text(segs, durations), encoding="utf-8"
+            self._build_vod_text(segs, durations, track), encoding="utf-8"
         )
         try:
             self._run_ffmpeg(tmp_m3u8, output_path, n_segments=len(segs))
@@ -164,7 +164,7 @@ class StepExporter:
     # -------- internal --------
 
     @staticmethod
-    def _build_vod_text(segs: List[SegmentRef], durations: dict) -> str:
+    def _build_vod_text(segs: List[SegmentRef], durations: dict, track: str) -> str:
         """构造喂给 ffmpeg 的 VOD m3u8 文本。
 
         段用 basename 引用 —— 该 m3u8 落在 step 目录，相对 URI 才解析得到
@@ -181,7 +181,7 @@ class StepExporter:
             "#EXT-X-PLAYLIST-TYPE:VOD",
             f"#EXT-X-TARGETDURATION:{target_duration}",
             "#EXT-X-MEDIA-SEQUENCE:0",
-            '#EXT-X-MAP:URI="init.mp4"',
+            f'#EXT-X-MAP:URI="{track}_init.mp4"',
         ]
         for s, dur in zip(segs, seg_durs):
             lines.append(f"#EXTINF:{dur:.3f},")

@@ -58,7 +58,7 @@ def _make_step(
     for ts in segs_ts_us:
         (step_dir / f"{track}_segment_{ts}.mp4").write_bytes(b"fake-fmp4")
     if with_init:
-        (step_dir / "init.mp4").write_bytes(b"fake-init")
+        (step_dir / f"{track}_init.mp4").write_bytes(b"fake-init")
 
     in_playlist = segs_ts_us if playlist_ts is None else playlist_ts
     durs = durations or [10.0] * len(in_playlist)
@@ -66,7 +66,7 @@ def _make_step(
         "#EXTM3U",
         "#EXT-X-VERSION:7",
         "#EXT-X-TARGETDURATION:10",
-        '#EXT-X-MAP:URI="init.mp4"',
+        f"#EXT-X-MAP:URI={track}_init.mp4",
     ]
     for ts, d in zip(in_playlist, durs):
         lines.append(f"#EXTINF:{d:.3f},")
@@ -127,7 +127,7 @@ class TestVodPlaylist:
         assert "#EXTM3U" in text
         assert "#EXT-X-VERSION:7" in text
         assert "#EXT-X-PLAYLIST-TYPE:VOD" in text
-        assert '#EXT-X-MAP:URI="init.mp4"' in text
+        assert '#EXT-X-MAP:URI="raw_init.mp4"' in text
         # 段以 basename 出现（相对 URI，依赖临时 m3u8 与段同目录）
         assert f"raw_segment_{TS0}.mp4" in text
         assert f"raw_segment_{TS1}.mp4" in text
