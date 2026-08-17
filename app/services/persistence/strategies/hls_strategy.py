@@ -245,7 +245,7 @@ class HLSPersistenceStrategy:
         return struct.unpack(">I", data[ts_off : ts_off + 4])[0]
 
     @classmethod
-    def _get_or_cache_timescale(cls, target_dir: Path) -> Optional[int]:
+    def _get_or_cache_timescale(cls, target_dir: Path, segment_type: str) -> Optional[int]:
         """读取 step dir 的 timescale；优先用 `.hls_timescale` 缓存文件，否则解析 init.mp4 并写缓存。
 
         缓存文件单行十进制整数。解析失败 / init.mp4 缺失返回 None。
@@ -258,7 +258,7 @@ class HLSPersistenceStrategy:
                     return int(txt)
             except OSError:
                 pass
-        init_path = target_dir / "init.mp4"
+        init_path = target_dir / f"{segment_type}_init.mp4"
         if not init_path.exists():
             return None
         ts = cls._read_timescale_from_init(init_path)
@@ -324,7 +324,7 @@ class HLSPersistenceStrategy:
         return True
 
     @classmethod
-    def _transcode_to_fmp4_segment(cls, path: Path) -> None:
+    def _transcode_to_fmp4_segment(cls, path: Path, segment_type: str) -> None:
         """将 cv2 写出的 mp4v 段转码为 HLS-ready fMP4 fragment，并写入 step 级 init.mp4。
 
         Pipeline：cv2 mp4v → ffmpeg HLS muxer → init.mp4（首段）+ fMP4 fragment（原地替换）
@@ -347,7 +347,7 @@ class HLSPersistenceStrategy:
         失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
         target_dir = path.parent
-        init_path = target_dir / "init.mp4"
+        init_path = target_dir / f"{segment_type}_init.mp4"
         ts_offset = cls._ts_offset_seconds(path)
 
         stem = path.stem
@@ -377,7 +377,7 @@ class HLSPersistenceStrategy:
             settings.ffmpeg_path,
             "-y",
             "-loglevel", "error",
-            "-i", str(path),  # 输入保留绝对路径，与 cwd 无关
+            "-i", str(path.resolve()),  # 输入保留绝对路径，与 cwd 无关
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "23",
@@ -447,7 +447,7 @@ class HLSPersistenceStrategy:
         # hex-patch tfdt：把累计 EXTINF（秒）→ timescale tick 写进 fragment 的 moof/traf/tfdt
         # 没有 init.mp4 / timescale 读不到 → 跳过 patch，不影响首段（offset=0 本就正确）
         if replaced and ts_offset > 0.0:
-            timescale = cls._get_or_cache_timescale(target_dir)
+            timescale = cls._get_or_cache_timescale(target_dir, segment_type)
             if timescale and timescale > 0:
                 cls._patch_fragment_tfdt(path, int(round(ts_offset * timescale)))
             else:
@@ -549,9 +549,9 @@ class HLSPersistenceStrategy:
                             "#EXTM3U\n"
                             "#EXT-X-VERSION:7\n"
                             "#EXT-X-TARGETDURATION:10\n"
-                            '#EXT-X-MAP:URI="init.mp4"\n'
+                            '#EXT-X-MAP:URI="raw_init.mp4"\n'
                         )
-                self._transcode_to_fmp4_segment(raw_segment_path)
+                self._transcode_to_fmp4_segment(raw_segment_path, "raw")
                 with raw_playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n{raw_segment_path.name}\n")
             except IOError as e:
@@ -643,9 +643,9 @@ class HLSPersistenceStrategy:
                             "#EXTM3U\n"
                             "#EXT-X-VERSION:7\n"
                             "#EXT-X-TARGETDURATION:10\n"
-                            '#EXT-X-MAP:URI="init.mp4"\n'
+                            '#EXT-X-MAP:URI="processed_init.mp4"\n'
                         )
-                self._transcode_to_fmp4_segment(segment_path)
+                self._transcode_to_fmp4_segment(segment_path, "processed")
                 with playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n{segment_path.name}\n")
             except IOError as e:
