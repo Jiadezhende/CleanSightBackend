@@ -306,10 +306,11 @@ class ClipBuilder:
         end_s = offset_s + duration_s
 
         step_dir = segs[0].path.parent
-        init_path = step_dir / "init.mp4"
+        # 打点仅用 raw 轨的 init.mp4
+        init_path = step_dir / "raw_init.mp4"
         if not init_path.exists():
             raise ClipBuildError(
-                f"init.mp4 missing in step dir: {step_dir} "
+                f"raw_init.mp4 missing in step dir: {step_dir} "
                 f"(fMP4 fragment 段需要 EXT-X-MAP 才能解码)"
             )
 
@@ -332,7 +333,7 @@ class ClipBuilder:
             "#EXT-X-VERSION:7",
             "#EXT-X-PLAYLIST-TYPE:VOD",
             f"#EXT-X-TARGETDURATION:{int(target_dur_s) + 1}",
-            '#EXT-X-MAP:URI="init.mp4"',
+            '#EXT-X-MAP:URI="raw_init.mp4"',
         ]
         for s, dur_us in zip(segs, seg_durs_us):
             lines.append(f"#EXTINF:{dur_us / 1_000_000.0:.3f},")
