@@ -530,6 +530,8 @@ class HLSPersistenceStrategy:
                 timestamp=start_ts,
             )
 
+            self._update_timeline(target_dir, frames=frames)
+
         logger.info(
             "Raw segment已持久化: task_id=%s step_id=%s frames=%d duration=%.3fs",
             task_id,
@@ -687,3 +689,43 @@ class HLSPersistenceStrategy:
         # 写回文件
         with metadata_path.open("w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    def _update_timeline(self, target_dir: Path, frames: List[Frame]):
+        """把本段每帧的 ts 转成 tick 追加到 .timeline.idx / .timeline.log。
+
+        产出两个文件供 frame_tracker.py 离线回看使用：
+        - .timeline.idx：二进制 numpy structured array，dtype=[("tick", uint64)]，
+          每帧一条 tick 记录，按 raw 段落盘顺序追加。frame_tracker.Timeline 读它建
+          tick → frame_num 反查字典（frame_num = 文件中的记录序号）。
+        - .timeline.log：文本日志，每行 "ts tick"，人工排查用。
+
+        tick = int((ts - first_ts) * _HLS_TIMESCALE) — 与 frame_tracker.Timeline.frame_num_at
+        的 tick 公式完全一致（同 _HLS_TIMESCALE、同 first_ts 来源），保证索引查表命中。
+
+        只在 _persist_raw_segment 调用（不在 processed 调用）：离线推理回看只需 raw 帧。
+
+        持锁（由 _persist_raw_segment 的 _get_dir_lock 保护）：idx 是 append-only 的二进制
+        追加，不持锁多段并发会交错写、破坏 frame_num 与记录序号的对应关系。
+        """
+        metadata_path = target_dir / "metadata.json"
+        idx_path = target_dir / ".timeline.idx"
+        log_path = target_dir / ".timeline.log"
+
+        with metadata_path.open("r", encoding="utf-8") as f:
+            first_ts = json.load(f)["raw_segments"]["first_timestamp"]
+
+        ticks = []
+
+        with log_path.open("a") as log_f, open(idx_path, "ab") as idx_f:
+            for frame in frames:
+                ts = frame.timestamp
+                tick = int((ts - first_ts) * _HLS_TIMESCALE)
+                ticks.append(tick)
+                log_f.write(f"{ts} {tick}\n")
+
+            # numpy 局部 import：避免模块级引入（hls_strategy 不在其他路径用 np）
+            import numpy as np
+            data = np.core.records.fromarrays(
+                [np.array(ticks)], dtype=np.dtype([("tick", np.uint64)]),
+            )
+            data.tofile(idx_f)
