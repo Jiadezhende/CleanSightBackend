@@ -1,182 +1,165 @@
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 from typing import Optional, Iterator
-from collections import OrderedDict
-
 import numpy as np
 
 from app.domain.frame import Frame
-
-# fMP4 媒体时间基，与 hls_strategy.py 的 _HLS_TIMESCALE 必须同值同源。
-# tick = (ts - first_ts) * _HLS_TIMESCALE — 这里算的 tick 与 _update_timeline 写入
-# .timeline.idx 的 tick 是同一个量，故 timeline 索引能正确反查 frame_num。
-# 详见 hls_strategy.py 该常量注释（为什么 pin 90000、为什么不随 fps 变）。
-_HLS_TIMESCALE = 90000
+from app.services.traceback.segment_finder import (
+    SegmentFinder,
+    SegmentRef,
+    get_default_base_dir,
+)
 
 
 class Timeline:
-    """时间线：维护 ts → frame_num 的映射关系。
+    """时间线：ts → 段 → 段内帧号 → 像素。纯查询，零像素缓存。
 
-    读 hls_strategy._update_timeline 产出的 .timeline.idx（二进制 numpy structured array，
-    dtype=[("tick", uint64)]，每帧一条 tick 记录，按 raw 段落盘顺序追加）。
-    建立 tick → frame_num（0-based，全局递增）的反查字典，frame_num 即该帧在整条
-    raw_playlist 中的全局序号。查询时把 ts 转成 tick 直接查表。
+    落盘形态：fMP4 按段落盘（raw_segment_{ts_us}.mp4），
+    每段配一个同名 .idx sidecar（float64 时间戳数组，每帧一条）。
+    解码走 `concat:raw_init.mp4|raw_segment_{ts}.mp4` + `select=between(n,k1,k2)`，
+    不拼 m3u8、不用 -ss，故段内帧号与 sidecar 下标严格 1:1。
+
+    对外只有一个 iter(start_ts, end_ts)。
+
+    段级裁剪省 ffmpeg 调用次数，帧级裁剪不存无效像素。
     """
 
-    def __init__(self, task_dir: Path):
-        self._first_ts = self._get_first_ts(task_dir)
-        data = self._load_from_file(task_dir)
-        self._frame_nums = {tick: i for i, tick in enumerate(data["tick"])}
-
-    def _get_first_ts(self, task_dir: Path) -> float:
-        metadata_path = task_dir / "metadata.json"
-        with open(metadata_path, "r") as f:
-            return json.load(f)["raw_segments"]["first_timestamp"]
-
-    def _load_from_file(self, task_dir: Path) -> np.ndarray:
-        return np.fromfile(
-            task_dir / ".timeline.idx",
-            dtype=np.dtype([("tick", np.uint64)]),
-        )
-
-    def frame_num_at(self, ts: float) -> int:
-        # tick 公式与 hls_strategy._update_timeline 完全一致，保证查表命中。
-        tick = int((ts - self._first_ts) * _HLS_TIMESCALE)
-        return self._frame_nums[tick]
-
-
-class FrameCache:
-    """帧缓存：维护 frame_num → frame 的映射关系。
-
-    用 ffmpeg 从 raw_playlist.m3u8 按 frame_num 范围提取帧（select=between），
-    按 block_size 分块缓存（LRU），避免逐帧 seek 的 ffmpeg 启动开销。
-
-    """
     def __init__(
         self,
-        task_dir: Path,
-        capacity: int = 10,
-        block_size: int = 600,
+        task_id: int,
+        step_id: int,
+        track: str = "raw",
+        finder: Optional[SegmentFinder] = None,
         ffmpeg_bin: Optional[str] = None,
     ):
-        """初始化帧缓存
-
-        task_dir: 任务目录，包含 raw_playlist.m3u8 和 metadata.json。
-        capacity: 缓存块最大数量。
-        block_size: 每个缓存块的帧数。
-        """
-        self._capacity = capacity
-        self._block_size = block_size
-        self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
-
-        self._task_dir = task_dir
-        self._timeline = Timeline(task_dir)
-
+        self._finder = finder or SegmentFinder(get_default_base_dir())
+        self._step_dir = self._finder.task_dir(task_id, step_id)
+        self._segs = self._finder.list_segments(task_id, step_id, track)
+        self._timestamps = np.array([seg.ts_us for seg in self._segs], dtype=np.float64)
         if ffmpeg_bin is None:
             from app.settings import settings
             ffmpeg_bin = settings.ffmpeg_path
-        self._ffmpeg = ffmpeg_bin
+        self._ffmpeg_bin = ffmpeg_bin
 
-    def frame_at(self, ts: float, width: int, height: int) -> np.ndarray:
-        """根据 ts 提取 frame_num 对应的 frame。
-        缓存命中时直接返回，否则从 raw_playlist.m3u8 提取并缓存。
-
-        ts: 时间戳，单位秒。
-        width: 目标帧宽度。
-        height: 目标帧高度。
-
-        返回：
-        np.ndarray: 目标帧数据，形状为 (height, width, 3)。
+    def iter(
+        self,
+        start_ts: Optional[float] = None,
+        end_ts: Optional[float] = None,
+        width: int = 640,
+        height: int = 480,
+    ) -> Iterator[Frame]:
+        """段级裁剪，返回一个时间范围内的所有 Frame。
+        start_ts / end_ts 为 None 时，默认为时间轴首尾。
+        
+        注意：本方法不做任何 ts 匹配校验、不做单点筛选。
+        该方法仅负责返回给定时间范围内的 Frame。
         """
-        frame_num = self._timeline.frame_num_at(ts)
-        idx, offset = divmod(frame_num, self._block_size)
-        block = self._cache.get(idx)
-        if block is None:
-            block = self._load_block(idx, width, height)
-        self._update_cache(idx, block)
-        return block[offset]
+        if not self._segs:
+            return
+        
+        lo, hi = 0, len(self._segs) - 1
+        if start_ts is not None:
+            lo = np.searchsorted(self._timestamps, start_ts * 1e6, side='left')
+            lo = max(0, min(len(self._segs), lo))
+        if end_ts is not None:
+            hi = np.searchsorted(self._timestamps, end_ts * 1e6, side='right') - 1
+            hi = max(0, min(len(self._segs), hi))
+        if lo > hi:
+            return
 
-    def _update_cache(self, block_id: int, block: np.ndarray):
-        # LRU cache
-        if block_id in self._cache:
-            self._cache.move_to_end(block_id)
-        else:
-            if len(self._cache) >= self._capacity:
-                self._cache.popitem(last=False)
-        self._cache[block_id] = block
+        if start_ts is None:
+            start_ts = self._timestamps[0] / 1e6
+        if end_ts is None:
+            end_ts = self._timestamps[-1] / 1e6
 
-    def _load_block(self, block_id: int, width: int, height: int) -> np.ndarray:
-        """
-        加载第 block_id 个数据块，每个块包含 block_size 帧。
-        ffmpeg between 左右均为闭区间。
-        """
-        start = block_id * self._block_size
-        end = start + self._block_size - 1
-        return self._extract_frames(start, end, width, height)
+        for seg in self._segs[lo:hi+1]:
+            yield from self._decode_segment(seg, start_ts, end_ts, width, height)
 
-    def _extract_frames(self, start: int, end: int, width: int, height: int) -> np.ndarray:
-        # 用 ffmpeg select=between(n) 从 raw_playlist 按全局帧号范围提取，
-        # 输出 rawvideo bgr24 到 pipe。-vsync 0 禁用丢帧/重复帧，保证 count 精确。
-        m3u8 = self._task_dir / "raw_playlist.m3u8"
-        count = end - start + 1
+    def _decode_segment(
+        self,
+        seg: SegmentRef,
+        start_ts: float,
+        end_ts: float,
+        width: int = 640,
+        height: int = 480,
+    ) -> Iterator[Frame]:
+        """帧级裁剪，返回同一个段内的指定时间范围内的 Frame。"""
+        sidecar = self._load_sidecar(seg)
+        if len(sidecar) == 0:
+            return
+        k_start, k_end = 0, len(sidecar) - 1
+        if sidecar[k_start] < start_ts:
+            k_start = np.searchsorted(sidecar, start_ts, side='left')
+            k_start = max(0, min(len(sidecar), k_start))
+        if sidecar[k_end] > end_ts:
+            k_end = np.searchsorted(sidecar, end_ts, side='right') - 1
+            k_end = max(0, min(len(sidecar), k_end))
+        if k_start > k_end:
+            return
+        
+        yield from self._run_ffmpeg(seg, sidecar, k_start, k_end, width, height)
+
+    def _run_ffmpeg(
+        self, seg: SegmentRef, sidecar: np.ndarray, k_start: int, k_end: int, width: int, height: int
+    ) -> Iterator[Frame]:
+        """解出段内 [k_start, k_end] 闭区间的帧，yield Frame。"""
         frame_size = width * height * 3
 
-        cmd = [
-            self._ffmpeg,
-            "-i", m3u8.as_posix(),
-            "-vf", f"select=between(n\\,{start}\\,{end})",
-            "-vframes", str(count),
+        cmd = self._build_cmd(seg, k_start, k_end, width, height)
+        with subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        ) as proc:
+            try:
+                for k in range(k_start, k_end + 1):
+                    chunk = proc.stdout.read(frame_size)
+                    if len(chunk) < frame_size:
+                        raise RuntimeError(f"Incomplete frame from {seg.filename}")
+                    pixel = np.frombuffer(chunk, np.uint8).reshape((height, width, 3))
+                    yield Frame(timestamp=sidecar[k], frame=pixel)
+            finally:
+                proc.kill()
+                proc.wait()
+
+    def _load_sidecar(self, seg: SegmentRef) -> np.ndarray:
+        idx_path = self._step_dir / Path(seg.filename).with_suffix(".idx")
+        if not idx_path.exists():
+            raise FileNotFoundError(f"Sidecar not found: {idx_path}")
+        return np.fromfile(idx_path, dtype=np.float64)
+
+    def _build_cmd(
+        self, seg: SegmentRef, start: int, end: int, width: int, height: int
+    ) -> list[str]:
+        return [
+            self._ffmpeg_bin,
+            "-loglevel", "error", "-hide_banner",
+            "-i", f"concat:{self._step_dir / 'raw_init.mp4'}|{self._step_dir / seg.filename}",
+            "-vf", f"scale={width}:{height},select=between(n\\,{start}\\,{end})",
+            "-vframes", str(end - start + 1),
             "-vsync", "0",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "pipe:1",
         ]
 
-        pipe = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=frame_size * 8,
-        )
-
-        frames = []
-        try:
-            while len(frames) < count:
-                chunk = pipe.stdout.read(frame_size)
-                if not chunk:
-                    break
-                if len(chunk) != frame_size:
-                    raise RuntimeError("Incomplete frame from FFmpeg")
-                frames.append(chunk)
-        except Exception as e:
-            pipe.kill()
-            raise RuntimeError(f"FFmpeg decode error: {e}") from e
-
-        stderr = pipe.stderr.read()
-        ret = pipe.wait()
-        if ret != 0:
-            raise RuntimeError(f"FFmpeg failed (code {ret}): {stderr.decode(errors='ignore')}")
-
-        # 若读取到视频末尾，会比 count 少一些帧，此处不做严格校验。
-        raw = b"".join(frames)
-        return np.frombuffer(raw, np.uint8).reshape(-1, height, width, 3)
 
 class FrameTracker:
-    """离线推理帧回看：给定 features.jsonl 内的记录，逐帧从 HLS 落盘段提取原始帧。
-    记录示例：
-    {"ts": 1785982791.9397182, "features": {...}, "frame_width": 640, "frame_height": 480}
-    
-    Pipeline: ts → Timeline.frame_num_at → FrameCache.frame_at（LRU + ffmpeg select）→ Frame。
-    """
-    def __init__(self, task_dir: Path, capacity: int = 10, block_size: int = 600):
-        self._cache = FrameCache(task_dir, capacity, block_size)
+    def __init__(self, task_id: int, step_id: int, track: str = "raw"):
+        self._tl = Timeline(task_id, step_id, track)
 
-    def find(self, records: list[dict]) -> Iterator[Frame]:
-        for record in records:
-            ts = float(record["ts"])
-            width, height = int(record["frame_width"]), int(record["frame_height"])
-            frame = self._cache.frame_at(ts=ts, width=width, height=height)
-            yield Frame(timestamp=ts, frame=frame)
+    def find(self, timestamps: list[float], width: int, height: int) -> Iterator[Frame]:
+        sorted_timestamps = sorted(timestamps)
+        start_ts = float(sorted_timestamps[0])
+        end_ts = float(sorted_timestamps[-1])
+
+        idx = 0
+        for frame in self._tl.iter(start_ts, end_ts, width, height):
+            if abs(frame.timestamp - sorted_timestamps[idx]) <= 1e-4:
+                yield frame
+                idx += 1
+        if idx < len(sorted_timestamps):
+            raise ValueError(f"未找到 ts={sorted_timestamps[idx]} 对应帧")

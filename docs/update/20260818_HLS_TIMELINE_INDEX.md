@@ -1,6 +1,6 @@
 # HLS Timeline 索引：ts → frame_num 反查 + ffmpeg 分块提取
 
-> **变更状态**：生效中（2026-08-18）
+> **变更状态**：已废除（2026-08-18）——单体 tick 索引方案已删除，见 [20260818_FRAME_TRACKER_SIDECAR.md](20260818_FRAME_TRACKER_SIDECAR.md)
 > **知识库**：待沉淀
 
 ## 概述
