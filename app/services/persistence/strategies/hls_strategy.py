@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
+import numpy as np
 
 from app.domain.frame import Frame
 from app.settings import settings
@@ -467,6 +468,14 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
+        # 0. 先落 sidecar 索引，再写 mp4：SegmentFinder 认的是 `raw_segment_*.mp4`，
+        # mp4 一出现该段就对离线反查可见。反过来（先 mp4 后 idx）会留下一个
+        # 「段可见但索引未就位」的窗口（实测 260ms，覆盖 mp4 编码 + transcode 全程），
+        # 期间读侧拿不到 sidecar。孤儿 .idx（mp4 写失败时残留）对 SegmentFinder
+        # 不可见，随 purge_step_dir 的 rmtree 回收，代价远小于该窗口。
+        # 排在最前但**不阻断本段**：写失败只打 warning（理由见 `_update_timeline`）。
+        self._update_timeline(target_dir, frames=frames, timestamp=start_ts)
+
         # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），无可测速率时退化兜底。
         # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
         eff_fps = self._effective_fps(frames)
@@ -529,8 +538,6 @@ class HLSPersistenceStrategy:
                 duration_delta=segment_duration,
                 timestamp=start_ts,
             )
-
-        self._update_timeline(target_dir, frames=frames, timestamp=start_ts)
 
         logger.info(
             "Raw segment已持久化: task_id=%s step_id=%s frames=%d duration=%.3fs",
@@ -696,10 +703,19 @@ class HLSPersistenceStrategy:
         frames: List[Frame],
         timestamp: float,
     ):
+        """写该段的 sidecar 索引：每帧 frame.timestamp 的 float64 原值数组。
+
+        在 mp4 落盘**之前**调用（见 `_persist_raw_segment` 步骤 0），保证索引不晚于
+        段对 SegmentFinder 可见。tmp + os.replace 原子替换，读侧不会看到半截文件。
+
+        **失败不抛**：sidecar 只服务离线反查，回放/下载/送标三条链路都不读它；而本函数
+        排在 mp4 之前，抛出去会让 worker 重试耗尽后连整段视频一起丢（mp4 / playlist /
+        metadata 全不落）——拿主产物给辅助索引陪葬。读侧本就按契约容忍缺 sidecar（见
+        frame_tracker `_load_sidecar`：跳过该段、不打断整条迭代），故此处降级为 warning。
+        """
         idx_path = target_dir / f"raw_segment_{int(timestamp * 1e6)}.idx"
         tmp = idx_path.with_suffix(".tmp")
 
-        import numpy as np
         timestamps = np.array([frame.timestamp for frame in frames], dtype=np.float64)
         try:
             tmp.unlink(missing_ok=True)
@@ -707,9 +723,12 @@ class HLSPersistenceStrategy:
                 timestamps.tofile(f)
             os.replace(tmp, idx_path)
         except OSError as e:
-            tmp.unlink(missing_ok=True)
-            raise PersistenceError(
-                message=f"Failed to update timeline: {idx_path}",
-                operation="hls_update_timeline",
-                retryable=True,
-            ) from e
+            logger.warning(
+                "[HLS] sidecar 写入失败，该段离线不可反查（视频照常落盘）: %s: %s",
+                idx_path, e,
+            )
+            # 清残留 tmp 本身也可能失败（同一个盘的同一个故障），不能让它盖掉上面的告警
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass

@@ -4,6 +4,8 @@
 > **知识库**：待沉淀
 >
 > 承接：取代 [20260818_HLS_TIMELINE_INDEX.md](20260818_HLS_TIMELINE_INDEX.md)——单体 tick 索引（`.timeline.idx` / `.timeline.log` / metadata first_ts）已从代码删除，旧文档仅存档。索引链路不再依赖 `_HLS_TIMESCALE=90000`，仅依赖段内 sidecar 索引（无 tick、无 first_ts）。
+>
+> 后续：本文的**索引格式与解码路径均已通过端到端验收**（1800 帧 ts 位级相等 + 像素逐帧对齐），但读侧实现有两个边界 off-by-one 导致 `FrameTracker.find()` 必然失败，写侧 sidecar 落盘晚于 mp4 有 260ms 竞态。已在 [20260901_FRAME_TRACKER_BOUNDARY_FIX.md](20260901_FRAME_TRACKER_BOUNDARY_FIX.md) 修复，下方「与方案要求不一致的部分」两条随之失效（见文末）。
 
 ## 概述
 
@@ -21,10 +23,14 @@
 - ffmpeg 子进程 `-loglevel error` / `-hide_banner` / `stdin=DEVNULL` 已加。
 - `FrameTracker.find` 检查解出帧数 ≠ sidecar 条数，若不一致则报错。
 
-## 与方案要求不一致的部分
+## 与方案要求不一致的部分（本节两条已于 2026-09-01 失效）
+
+> 下列两条描述的是本次落地时的状态，均已被 [20260901_FRAME_TRACKER_BOUNDARY_FIX.md](20260901_FRAME_TRACKER_BOUNDARY_FIX.md) 处理，**查当前行为以那篇为准**。保留原文仅作沿革。
 
 **方案要求**：最近邻 + 半帧间隔硬阈值，超限报错。 
-**现状**：`Timeline` 不负责配对，仅负责按 ts 顺序迭代帧。容差检查由 `FrameTracker.find` 实现。写方和读方同源，精度源头一致。`FrameTracker.find` 固定 `1e-4`（100µs），配对逻辑为单向严格推进。原始校验要求转为校验传入的所有 ts 是否都有对应的 Frame，无则报错。
+**当时现状**：`Timeline` 不负责配对，仅负责按 ts 顺序迭代帧。容差检查由 `FrameTracker.find` 实现，固定 `1e-4`（100µs），配对逻辑为单向严格推进。原始校验要求转为校验传入的所有 ts 是否都有对应的 Frame，无则报错。 
+**已翻案**：那个 `1e-4` **从来没生效过**——帧级裁剪用精确比较，目标 ts 一旦偏离就先被 `searchsorted` 切出区间，压根轮不到容差判断（实测有效容差 ≈1e-7s）。现已删掉该假承诺，**明确要求位级精确**：写读同源（`FeatureStore` 的 ts 经 `json.dumps` float repr + `float()` 回读是位级 round-trip），ts 即帧的身份，配错帧比报错更坏。
 
 **方案要求**：ffmpeg 子进程 timeout（clip_builder、step_exporter 三样都有）。 
-**现状**：ffmpeg 子进程通过 yield `Frame` 流式输出，未做 timeout。
+**当时现状**：ffmpeg 子进程通过 yield `Frame` 流式输出，未做 timeout。 
+**已补齐**：按段给预算（`max(30s, 帧数 × 0.2s)`，同 step_exporter 口径），daemon `threading.Timer` 看门狗 → `proc.kill()` → 短读抛错。同时把 `stderr=PIPE`（无人读、写满即死锁）改成 `tempfile.TemporaryFile`，失败时把 ffmpeg 原话带进异常。
