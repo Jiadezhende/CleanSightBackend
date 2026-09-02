@@ -256,7 +256,8 @@ async def test_playlist_vod_generation(client, media_root):
 
 @pytest.mark.asyncio
 async def test_playlist_503_when_init_missing(client, media_root):
-    """历史段未迁移（init.mp4 不存在）时 playlist 端点应返回 503 提示运行迁移脚本。"""
+    """缺 `{track}_init.mp4` 时 playlist 端点应 503——fMP4 无 init 段无法解码，
+    且服务端无法自愈（旧格式产物不支持迁移，或首段仍在 transcode）。"""
     _seed_task(media_root, task_id=42, step_id=1,
                ts_us_list=[1_000_000], write_init=False)
 
@@ -265,7 +266,8 @@ async def test_playlist_503_when_init_missing(client, media_root):
     detail = resp.json().get("detail", {})
     assert isinstance(detail, dict)
     assert "init" in detail.get("error", "").lower()
-    assert "transcode_segments_to_h264" in detail.get("detail", "")
+    # 只断言指认了缺失的具体文件，不绑定整句措辞
+    assert "raw_init.mp4" in detail.get("detail", "")
 
 
 @pytest.mark.asyncio

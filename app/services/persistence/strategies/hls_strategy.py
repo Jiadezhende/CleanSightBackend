@@ -1,11 +1,15 @@
 """
-HLS持久化策略
+HLS 持久化策略 —— step 目录落盘格式的唯一写侧真源。
 
-负责：
-- 视频段编码（MP4）
-- M3U8播放列表生成
-- Keypoints JSON序列化
-- metadata.json更新
+负责（产物均落在 `{base_dir}/{task_id}/{step_id}/`）：
+- `{track}_segment_{ts_us}.mp4`  视频段（cv2 mp4v → ffmpeg 转 fMP4 fragment）
+- `{track}_init.mp4`             该轨的 fMP4 init 段，首段转码时产出、整条 playlist 复用
+- `{track}_playlist.m3u8`        LIVE 形态播放列表（不写 ENDLIST，VOD 由读侧动态生成）
+- `raw_segment_{ts_us}.idx`      raw 轨的逐帧 ts sidecar（float64 数组），仅供离线帧反查；
+                                 processed 是渲染结果、离线不消费，故不产
+- `metadata.json`                段数 / 时长 / 首末 ts 统计，兼作 TTL 清理判据
+
+detection 不在此落盘——已由 FeatureStore 按帧 ts 单源写入 features.jsonl。
 """
 
 import json

@@ -243,14 +243,18 @@ def _build_vod_playlist(
     task_dir = finder.task_dir(task_id, step_id)
     init_path = task_dir / f"{track}_init.mp4"
     if not init_path.exists():
+        # 正常落盘的 step 必有 init（首段 transcode 时产出）。缺 init 只剩两种可能：
+        # ① 段是 {track}_init.mp4 命名之前的旧格式产物——不支持，也不提供迁移；
+        # ② 首段正在 transcode 途中（窗口极短）。
+        # 两者服务端都无法自愈，故 503 而非 404，让调用方按「此 step 不可回放」处理。
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "HLS init segment missing",
                 "detail": (
                     f"{track}_init.mp4 not found for task {task_id} step {step_id}. "
-                    "Historical segments must be migrated via "
-                    "scripts/transcode_segments_to_h264.py before HLS playback."
+                    "This step is either mid-transcode or written in an unsupported "
+                    "legacy layout; it cannot be played back."
                 ),
             },
         )

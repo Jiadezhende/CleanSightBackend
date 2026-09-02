@@ -65,7 +65,7 @@ class StepExportNoSegments(StepExportError):
 
 
 class StepExportInitMissing(StepExportError):
-    """step 目录缺 init.mp4，fMP4 fragment 无法解码。"""
+    """step 目录缺 `{track}_init.mp4`，fMP4 fragment 无法解码。"""
 
 
 class StepExporter:
@@ -130,10 +130,12 @@ class StepExporter:
             )
 
         if not (step_dir / f"{track}_init.mp4").exists():
+            # 与 traceback._build_vod_playlist 同一判据：缺 init = 旧格式产物（不支持、
+            # 无迁移路径）或首段仍在 transcode。两者都不可自愈。
             raise StepExportInitMissing(
                 f"{track}_init.mp4 not found for task {task_id} step {step_id}. "
-                "Historical segments must be migrated via "
-                "scripts/transcode_segments_to_h264.py before export."
+                "This step is either mid-transcode or written in an unsupported "
+                "legacy layout; it cannot be exported."
             )
 
         nonce = secrets.token_hex(6)

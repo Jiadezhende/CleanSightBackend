@@ -65,7 +65,7 @@ token payload 只剩两种 kind：`segment` | `init`（`{"t","s","f","k","e"}`�
 媒体路由只接受 token：
 
 - `/media/segment/{token}`：返回 mp4 fragment，`Cache-Control: private, max-age=60`。
-- `/media/init/{token}`：返回 `init.mp4`（step 级共享），`max-age=3600`；由 playlist 的 `#EXT-X-MAP` 自动签发。
+- `/media/init/{token}`：返回 `{track}_init.mp4`（**按轨各一份**，同轨内所有段共享），`max-age=3600`；由 playlist 的 `#EXT-X-MAP` 自动签发。
 
 路径解析会拒绝 path traversal，并确保文件在 base_dir 内（`_resolve_media_path`，media.py:27）。
 
