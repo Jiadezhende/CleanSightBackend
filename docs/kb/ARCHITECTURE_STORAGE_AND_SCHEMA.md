@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -78,7 +78,7 @@ ORM：`DBAlarm` in `app/models.py`
 {storage_base_dir}/{task_id}/{step_id}/
   raw_init.mp4                    # fMP4 init，raw 轨专用（首段转码时产出）
   processed_init.mp4              # 同上，processed 轨专用——两轨独立 playlist，不可互指
-  raw_segment_{ts_us}.mp4
+  raw_segment_{ts_us}.mp4         # fMP4 fragment，mdhd.timescale pin 死 90000
   processed_segment_{ts_us}.mp4
   raw_segment_{ts_us}.idx         # raw 逐帧 ts sidecar（float64 数组），仅供离线帧反查
   raw_playlist.m3u8
@@ -88,7 +88,9 @@ ORM：`DBAlarm` in `app/models.py`
   facts.jsonl                     # L3 事实账本（FactLedger，offline 预置）
 ```
 
-`processed` 轨不产 `.idx`——渲染后的帧只用于展示，离线推理不消费它。
+`processed` 轨不产 `.idx`——渲染后的帧只用于展示，离线推理不消费它。`.idx` 与段同名同目录、
+一帧一条 float64 ts 原值，**先于同名 mp4 落盘**；格式、写读顺序与「ts 位级精确」契约见
+[DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。
 
 > 旧落盘结构（共用 `init.mp4`、`.hls_timescale` 缓存、`.timeline.idx`/`.idx.json` 两代
 > sidecar）**一律不做兼容、无迁移路径**，见

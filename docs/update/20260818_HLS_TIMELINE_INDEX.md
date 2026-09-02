@@ -1,7 +1,7 @@
 # HLS Timeline 索引：ts → frame_num 反查 + ffmpeg 分块提取
 
-> **变更状态**：已废除（2026-08-18）——单体 tick 索引方案已删除，见 [20260818_FRAME_TRACKER_SIDECAR.md](20260818_FRAME_TRACKER_SIDECAR.md)
-> **知识库**：待沉淀
+> **变更状态**：已废除（2026-08-18）——单体 tick 索引方案已删除，见 [20260830_FRAME_TRACKER_SIDECAR.md](20260830_FRAME_TRACKER_SIDECAR.md)
+> **知识库**：无需沉淀（方案已废除，被 [20260830_FRAME_TRACKER_SIDECAR.md](20260830_FRAME_TRACKER_SIDECAR.md) 的段级 sidecar 取代；KB 只记链末状态，不记已死方案。核验过 KB 未被本方案污染——`.timeline.idx`/`.timeline.log` 仅在 [kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md) 的「已废弃残留产物」清单里出现，属有意保留）(2026-09-02)
 
 ## 概述
 

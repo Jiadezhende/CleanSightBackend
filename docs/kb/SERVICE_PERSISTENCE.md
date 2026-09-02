@@ -1,4 +1,4 @@
-> 更新时间：2026-07-25
+> 更新时间：2026-09-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -31,7 +31,9 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不
 
 - `{track}_segment_{ts_us}.mp4`：cv2 写 mp4v → ffmpeg 转 HLS-ready fMP4 fragment。
 - `{track}_playlist.m3u8`（含 `#EXTINF`）、`{track}_init.mp4`（**按轨各一份**，该轨首段转码时写一次）、`metadata.json`。
-- `raw_segment_{ts_us}.idx`：raw 轨逐帧 ts 的 float64 sidecar，供离线帧反查。在 mp4 之前落盘（保证索引不晚于段对 `SegmentFinder` 可见），**写失败只 warning 不阻断本段**——三条视频链路都不读它，不能让辅助索引拖垮主产物。processed 轨不产。
+- `raw_segment_{ts_us}.idx`：raw 轨逐帧 ts 的 float64 sidecar，供离线帧反查。**排在 `cv2.VideoWriter` 之前落盘**（读侧认 mp4 存在即段可见，反过来会留 260ms「段可见但索引未就位」窗口），**写失败只 warning 不阻断本段**——三条视频链路都不读它，不能让辅助索引拖垮主产物。processed 轨不产。格式与读侧契约见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。
+
+fMP4 转码固定 `mdhd.timescale = 90000`（`_HLS_TIMESCALE`，经 `-hls_segment_options` 透传给内层 mp4 muxer），转码完再 hex-patch fragment 的 `tfdt.baseMediaDecodeTime` = 累计 EXTINF × 90000。两条都不是可选项——时间基随 fps 浮动会让整条 playlist 的 tick 被按首段尺度误读，理由与实测数据见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。转码失败保留 mp4v 原文件并 warning，不抛（主流程可用性优先）。
 
 `_dir_locks: {target_dir → Lock}`：transcode + playlist append + metadata 更新在目录锁内原子完成（相邻段需读 playlist 算累计时间，防 tfdt 碰撞）；`release_dir_locks(task_id)` 在拆除时删该 task 前缀的所有锁。
 

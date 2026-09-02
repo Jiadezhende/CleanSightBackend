@@ -1,7 +1,7 @@
 # 送标面板加整段下载接口：`GET /lab-f3m8/download`，纯 remux 不重编码
 
 > **变更状态**：生效中（2026-08-10）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/SERVICE_LAB.md](../kb/SERVICE_LAB.md)（整段导出与 ClipBuilder 分工）/ [kb/SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)（`parse_playlist_durations` 归属与双职责）(2026-09-02)
 >
 > 对外契约见 [docs/api/lab.md](../api/lab.md)；HLS 落盘约定见 [kb/DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)。
 

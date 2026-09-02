@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -25,6 +25,7 @@
 | `temporal/impl/` | 接入点 | bubble/bending/clean/mock | 具体 Operator 子类（与检测器同名文件） |
 | `offline/impl/` | 接入点 | clean/mock | 具体 OfflineSegmenter 子类 |
 | `offline/` | 离线 | `OfflineSegmenter`/`OfflineRunner` + `impl/{clean,mock}` + `cli` | 独立进程读 `FeatureStore.load`→策略 `preprocess`/`segment`→`OfflineRunner` 校验幂等写 `FactLedger`（详见「离线 segmenter 内部」与 online/offline 分离） |
+| `offline/frame_tracker.py` | 离线 | `Timeline` / `FrameTracker` | 按 ts 从 HLS 落盘段反查原始帧像素（读 `.idx` sidecar + ffmpeg 段内取帧），供离线看图/复核 |
 
 ## InferenceManager（生命周期编排）
 
@@ -94,6 +95,20 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
   - **无权重硬失败**：未配 `model_path` 直接 `ValueError`，**不做规则降级**；本地无权重回环走 MOCK stage。特征矩阵有 `NaN/inf→0` 兜底（拼接后 + normalizer 后各一次）。
   - 训练/导出权重在独立 `offline-model` 仓，后端只加载 checkpoint 推理；`.pt` 权重不入后端仓。当前权重为 baseline，仅验证工程链路闭环；自动任务结束触发离线 Runner/Judge/复算告警/入库仍未实现。
 
+## 按 ts 反查原始帧（`offline/frame_tracker.py`）
+
+`features.jsonl` 只存检测框、不存像素；要拿回某帧的画面走 `FrameTracker(task_id, step_id)`：
+`find(timestamps)` 按 ts 精确取帧、`Timeline.iter(start, end)` 按区间流式扫帧，返回 `Frame`
+（可写像素，下游 cv2 可原地改）。两端货币仍是 ts —— 传入的 ts 必须**位级等于** `FeatureStore`
+落盘的帧 ts，这条契约与索引格式、解码路径见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。
+
+- **批量取帧走 `Timeline.iter` 一次扫过，别逐条 `find()`**：单点反查是整段顺序解码（36–73ms），
+  逐条查 N 个点 ≈ N 次整段解码；顺序全量吞吐 ≈2000 fps。
+- **它只吃 HLS 落盘产物，不重跑检测**：离线复核用的帧与实时链路看到的是同一批 CRF23 编码帧，
+  没有 train/serve skew。
+- **当前 `app/` 内零调用方**：工具已端到端验收（1800 帧 ts 位级相等 + 像素逐帧匹配），但尚未接进
+  离线链路；区间查询的调用形状定下来之前，落盘布局知识（段名/init/sidecar 命名）仍散在多处。
+
 ## 推理链路压力观测（[PRESSURE] / [VIZ_THROUGHPUT]）
 
 诊断日志契约统一见 [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)（`[PRESSURE]`/`[VIZ_THROUGHPUT]`/`[BACKPRESSURE]` 三条正交、仅压力时打印、平稳静默）。inference 侧的落点：`StageAwareDispatcher` 在调度循环里每 ~1s 采样自己的 stage deque，经 `PressureReporter` 打 `[PRESSURE] resource=stage_queue`（每资源单一上报者，`ca_processed` 交回 `ClientQueues` 自报、不越权汇总）；`_stage_drops` 记 deque 满淘汰、`_stage_rejects` 记 `submit()` 返 False 的下游拒收，二者并入压力行（`reject_delta>0` 即「下游在拒收」判据）。`VisualizationWorker` 另打 `[VIZ_THROUGHPUT]` 量成帧速率亏空，自动三侧归因（`viz-starved > render-bound > supply-bound`）。
@@ -124,5 +139,5 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 - `app/services/inference/visualization/{worker,visualizer,pool}.py`（`worker.py` 含 `[VIZ_THROUGHPUT]`）
 - `app/services/inference/detection/impl/{bubble,bending,clean,mock}.py`（Detector 子类）
 - `app/services/inference/temporal/impl/{bubble,bending,clean,mock}.py`（Operator 子类，`clean.py` 含在线 `CleanOperator`）
-- `app/services/inference/offline/{segmenter,runner,cli}.py`、`offline/impl/{clean,mock}.py`
+- `app/services/inference/offline/{segmenter,runner,cli,frame_tracker}.py`、`offline/impl/{clean,mock}.py`
 - `config/inference_config.yaml`

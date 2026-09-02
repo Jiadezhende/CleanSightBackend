@@ -1,7 +1,7 @@
 # 离线帧回看：段级 sidecar 索引落地
 
 > **变更状态**：生效中（2026-08-30）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)（sidecar 格式 + 查询链路，与 [20260901](20260901_FRAME_TRACKER_BOUNDARY_FIX.md) 合并为链末状态一次写入）(2026-09-02)
 >
 > 承接：取代 [20260818_HLS_TIMELINE_INDEX.md](20260818_HLS_TIMELINE_INDEX.md)——单体 tick 索引（`.timeline.idx` / `.timeline.log` / metadata first_ts）已从代码删除，旧文档仅存档。索引链路不再依赖 `_HLS_TIMESCALE=90000`，仅依赖段内 sidecar 索引（无 tick、无 first_ts）。
 >

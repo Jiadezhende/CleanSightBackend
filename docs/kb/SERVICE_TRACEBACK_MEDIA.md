@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -30,6 +30,9 @@
 - `list_steps(task_id)`：该 task 下已落盘 step 的 `StepRef` 列表，两轨皆空的 step 丢弃。
 - `list_task_ids()`：存储根下的数字目录（跳过 `.lab_exports`）。
 - `list_task_ids_by_recency()`：**廉价粗排**，排序键 = `max(step 目录 mtime)`，只 `stat` 目录不读段文件（成本 O(目录数)）。**mtime 仅用于挑深扫候选，绝不当对外时间戳**——对外时间一律取 `list_steps()` 的真实 `ts_us`。
+- `parse_playlist_durations(playlist_path)`（模块级函数）：解析写入侧 playlist 得 `{段文件名: EXTINF}`。原住在 `routers/traceback.py`，因是纯文件系统解析、无 HTTP 语义而下沉——否则 lab 的 `StepExporter` 要反向 import router 才能复用。**返回值同时承担两个职责**，traceback VOD 与 lab 整段导出都依赖：`EXTINF` 是段时长唯一真值（不能用文件名 `ts_us` 差重推，会与 fragment 实际媒体时长对不上）；**键集合即「已完成 transcode+append 的段」，不在其中的是在途段必须过滤**。
+
+> 注意 `ClipBuilder`（送标）**不走这条闸**：它只 `list_segments` + 按相邻 `ts_us` 中位差估段尾，故会吃进在途的裸 mp4v 段（见 [SERVICE_LAB.md](SERVICE_LAB.md)）。段级定位当前共三套实现（`SegmentFinder.find` bisect / `Timeline.iter` searchsorted / `ClipBuilder._select_segments` 区间重叠），根因是 `SegmentFinder` 缺区间版 API。
 
 ## MediaToken
 

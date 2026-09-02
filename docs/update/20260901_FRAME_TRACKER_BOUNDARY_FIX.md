@@ -1,7 +1,7 @@
 # 离线帧反查修复：段级/帧级边界 off-by-one、位级精确契约、写侧 sidecar 竞态
 
 > **变更状态**：生效中（2026-09-01）——`FrameTracker.find()` 此前在**任何真实查询下必然失败**，本次修复后端到端 1800/1800 帧对齐。
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [kb/DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)（写读顺序 / 位级精确契约 / 段级定位判据 / 调用代价）、[kb/SERVICE_PERSISTENCE.md](../kb/SERVICE_PERSISTENCE.md)（sidecar 落盘次序）、[kb/SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（`frame_tracker` 能力与零调用方现状）、[kb/TESTING_MAP.md](../kb/TESTING_MAP.md)（seam 单测 + round-trip 互补）(2026-09-02)
 >
 > 承接：建立在 [20260830_FRAME_TRACKER_SIDECAR.md](20260830_FRAME_TRACKER_SIDECAR.md) 的段级 sidecar 方案之上。该方案本身经实测是可靠的（打最小补丁后 1800 帧 ts 位级相等 + 像素逐帧对齐），本次改的是它读侧的边界实现与写侧落盘顺序，不动索引格式。
 
