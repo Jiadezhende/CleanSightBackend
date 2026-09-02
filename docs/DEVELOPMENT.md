@@ -1,6 +1,6 @@
 # CleanSight Backend 开发规范
 
-本文是 CleanSight Backend 的开发**约定**：分支提交流程、测试规范、模块内聚与解耦、日志规范。
+本文是 CleanSight Backend 的开发**约定**：分支提交流程、测试规范、模块内聚与解耦、日志规范、检测点契约。
 环境安装（Linux 生产 / Windows 开发）与物料分发见 [DEPLOYMENT.md](DEPLOYMENT.md)；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
 
 ---
@@ -12,10 +12,12 @@
   - 激活项目 `.venv`（别用裸 `python3` / `python3.x`）。
   - 遵循 PEP 8。
   - `pytest` 全绿。
+  - **逐个 `git add`，别用 `git add .` / `-A`**：先 `git status` 过一遍，确认只有本次任务的改动。调试中间产物（`init.mp4`、`seg0.mp4`、`pl.m3u8` 这类）、样本数据与截图、模型权重（`*.pt`）、`tmp/` 等大体积文件一律不进版本库；反复出现的加进 `.gitignore`。仓库一旦收下大文件，git 历史里就永久留着，事后再删也清不掉。
 - **commit message**：`type(scope): 简述`，`type` 用 `feat` / `fix` / `docs` / `refact` / `test` / `chore`，`scope` 可选（如 `docs(kb):`、`feat(inference):`）。
 - **文档纪律**：
-  - 描述性内容（架构、数据流、服务内部、schema）改动**同步进 `docs/kb/`**，维护规则见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)；对外 API 端点契约改动同步 `docs/api/`。
-  - 每次提交的文档增量先写 `docs/update/`，定期融合进 KB，避免双源漂移。
+  - **一个开发任务一份 `docs/update/YYYYMMDD_主题.md`**，记录本次的改动与结论；同一任务后续提交追加进这份，不按提交次数新建。写法与**两条状态轴**（变更状态 / 知识库）照 [update/_TEMPLATE.md](update/_TEMPLATE.md)——「知识库」轴默认填 `待沉淀`，它是 KB 融合时的欠债清单，漏填等于这次改动不会被沉淀。
+  - **`docs/kb/` 不随手改**：KB 是 update 的融合产物，只在**人主动发起融合**（`/kb-merge` skill）时才写入——日常开发把增量留在 `docs/update/` 即可，别自行同步。内容验收标准见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)。
+  - 对外 API 端点契约改动同步 `docs/api/`（该目录是端点契约真源，不走 KB 融合流程）。
 
 ---
 
@@ -67,3 +69,12 @@
 - **日志配置**（`logging_config.json`：colorlog 彩色 console + 分级 rotating 文件，经 `uvicorn --log-config` 加载）见 [kb/SERVICE_CONFIG.md](kb/SERVICE_CONFIG.md)。
 
 **提交前自检**：全部日志有 `[Module]` 前缀 / `%` 格式化非 f-string / 级别恰当 / 异常带 `exc_info=True` / 无 `print()` / 热路径无 DEBUG。
+
+---
+
+## 5. 检测点 / Workflow 契约
+
+新建检测任务、Detector、Analyzer、Judge 走 `/infer-workflow` skill（含完整模板与 checklist）。两条会**静默出错**的红线单列在此：
+
+- **`class_name` 不做归一化**：直接取自模型 `result.names`，配置/代码里的匹配串须与训练类别名严格一致——写错不报错，只是永远匹配不上，表现为静默漏检。
+- **统一检测契约是 `Detection`（单框）+ `FrameDetections`（整帧输出）**，见 [app/domain/detection.py](../app/domain/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `Detection.extra` 或 `FrameDetections.metadata`，时序统计交给 L3 Analyzer。
