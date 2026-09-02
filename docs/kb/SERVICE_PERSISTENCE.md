@@ -30,7 +30,8 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不
 `HLSPersistenceStrategy.persist_segment()` 按 `{storage_base_dir}/{task_id}/{step_id}` 分 raw/processed 写：
 
 - `{track}_segment_{ts_us}.mp4`：cv2 写 mp4v → ffmpeg 转 HLS-ready fMP4 fragment。
-- `{track}_playlist.m3u8`（含 `#EXTINF`）、`init.mp4`（step 级共享，写一次）、`metadata.json`、`.hls_timescale`。
+- `{track}_playlist.m3u8`（含 `#EXTINF`）、`{track}_init.mp4`（**按轨各一份**，该轨首段转码时写一次）、`metadata.json`。
+- `raw_segment_{ts_us}.idx`：raw 轨逐帧 ts 的 float64 sidecar，供离线帧反查。在 mp4 之前落盘（保证索引不晚于段对 `SegmentFinder` 可见），**写失败只 warning 不阻断本段**——三条视频链路都不读它，不能让辅助索引拖垮主产物。processed 轨不产。
 
 `_dir_locks: {target_dir → Lock}`：transcode + playlist append + metadata 更新在目录锁内原子完成（相邻段需读 playlist 算累计时间，防 tfdt 碰撞）；`release_dir_locks(task_id)` 在拆除时删该 task 前缀的所有锁。
 

@@ -57,7 +57,7 @@ ClipBuilder 使用 raw 轨：
 
 1. 通过 SegmentFinder 找到与 `[start_ms, end_ms]` 重叠的 raw 段。
 2. 校验相邻段间隙（连续性判据见下）。
-3. 构造临时 HLS m3u8，让 ffmpeg HLS demuxer 读取 `init.mp4 + fragments`。
+3. 构造临时 HLS m3u8，让 ffmpeg HLS demuxer 读取 `{track}_init.mp4 + fragments`（送标只吃 raw 轨，故用 `raw_init.mp4`）。
 4. 输出端重编码 libx264，获得 ms 级裁剪 mp4。
 
 代码明确说明不使用 concat demuxer，因为 fMP4 fragment 单独 demux 时缺 codec init。

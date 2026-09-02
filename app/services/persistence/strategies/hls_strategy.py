@@ -1,11 +1,15 @@
 """
-HLS持久化策略
+HLS 持久化策略 —— step 目录落盘格式的唯一写侧真源。
 
-负责：
-- 视频段编码（MP4）
-- M3U8播放列表生成
-- Keypoints JSON序列化
-- metadata.json更新
+负责（产物均落在 `{base_dir}/{task_id}/{step_id}/`）：
+- `{track}_segment_{ts_us}.mp4`  视频段（cv2 mp4v → ffmpeg 转 fMP4 fragment）
+- `{track}_init.mp4`             该轨的 fMP4 init 段，首段转码时产出、整条 playlist 复用
+- `{track}_playlist.m3u8`        LIVE 形态播放列表（不写 ENDLIST，VOD 由读侧动态生成）
+- `raw_segment_{ts_us}.idx`      raw 轨的逐帧 ts sidecar（float64 数组），仅供离线帧反查；
+                                 processed 是渲染结果、离线不消费，故不产
+- `metadata.json`                段数 / 时长 / 首末 ts 统计，兼作 TTL 清理判据
+
+detection 不在此落盘——已由 FeatureStore 按帧 ts 单源写入 features.jsonl。
 """
 
 import json
@@ -21,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
+import numpy as np
 
 from app.domain.frame import Frame
 from app.settings import settings
@@ -36,6 +41,22 @@ logger = logging.getLogger(__name__)
 _EFF_FPS_MIN = 1.0
 _EFF_FPS_MAX = 60.0
 _DEGENERATE_FALLBACK_FPS = 15.0
+
+# fMP4 媒体时间基（mdhd.timescale，即 1 秒切成多少 tick），显式 pin 给 ffmpeg。
+#
+# 必须 pin 的理由：不指定时 ffmpeg 按 `fps 有理数的约分分子 × 2^k`（k 取到 ≥10000）自选
+# timescale，而 init.mp4 只由首段生成、被整条 playlist 复用（EXT-X-MAP 声明的就是它的
+# 时间基）。逐段 eff_fps 不同 → 逐段 timescale 不同 → 后续 fragment 的 tick 被按首段尺度
+# 解读，误差是乘性的：实测 15fps 定 init、14.37fps 段（其自选 timescale=11496）→ 声明
+# 10.02s 却被读成 7.60s，单段 2.4s 空洞，hls.js 段尾停摆。
+# 注意该自选值对 fps 极不连续——15.0→15360 但 14.37→11496（分子 1437 约不动），fps 抖 4%
+# 可致 timescale 差 25%，故「fps 波动不大就没事」不成立。
+#
+# 取 90000：MPEG-TS/RTP 标准视频时钟，能整除 30/25/24/20/15/12/10 等常见帧率（每帧分别
+# 3000/3600/3750/4500/6000/7500/9000 tick，无余数）；非整除帧率下 ffmpeg 按绝对 PTS 取整、
+# 增量差分得出，误差有界 ≤ 半 tick（5.6μs）且不累积。
+# pin 之后 timescale 与编码 fps 彻底解耦，逐段 eff_fps 才是合法的速率表达。
+_HLS_TIMESCALE = 90000
 
 
 class HLSPersistenceStrategy:
@@ -93,10 +114,10 @@ class HLSPersistenceStrategy:
         """重启 supersede：删除 `{db_dir}/{task_id}/{step_id}` 整个 step 目录，返回是否删除。
 
         与 FeatureStore.open_fresh 对称——同 (task_id, step_id) 重启一次 run 前清空旧 HLS
-        产物（段 / *_playlist.m3u8 / metadata.json / init.mp4 / .hls_timescale 缓存），
-        否则新段带唯一时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
-        HLS 落盘全靠磁盘文件存在性驱动、无每目录内存态（playlist 首行、init.mp4、timescale
-        缓存均按 `exists()` 惰性重建），故 rmtree 后由后续首段自然重建，安全。
+        产物（段 / *_playlist.m3u8 / metadata.json / {track}_init.mp4），否则新段带唯一
+        时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
+        HLS 落盘全靠磁盘文件存在性驱动、无每目录内存态（playlist 首行、init 均按 `exists()`
+        惰性重建），故 rmtree 后由后续首段自然重建，安全。
         持该目录锁串行化，防极端在途 persist_segment 竞争——正常重启路径此刻已无活跃 worker
         （stop_run 已 flush 残段 + 出 registry + release_dir_locks）。
         """
@@ -212,64 +233,6 @@ class HLSPersistenceStrategy:
         return None
 
     @classmethod
-    def _read_timescale_from_init(cls, init_path: Path) -> Optional[int]:
-        """从 init.mp4 的 moov/trak/mdia/mdhd 读 timescale（赫兹）。
-
-        失败返回 None。fMP4 init segment 中仅有一个视频 trak，定位 path 固定。
-        """
-        try:
-            data = init_path.read_bytes()
-        except OSError as e:
-            logger.warning("[HLS] read init.mp4 failed (%s): %s", e, init_path)
-            return None
-        located = cls._find_box_path(
-            data, 0, len(data), (b"moov", b"trak", b"mdia", b"mdhd")
-        )
-        if located is None:
-            logger.warning("[HLS] mdhd not found in init.mp4: %s", init_path)
-            return None
-        body_start, body_end = located
-        # mdhd 结构：version(1) flags(3) 之后，version 0/1 决定 creation/modification/timescale/duration 宽度
-        if body_end - body_start < 4:
-            return None
-        version = data[body_start]
-        if version == 1:
-            ts_off = body_start + 4 + 8 + 8  # creation(8) + modification(8)
-            if body_end - body_start < 4 + 8 + 8 + 4:
-                return None
-        else:
-            ts_off = body_start + 4 + 4 + 4  # creation(4) + modification(4)
-            if body_end - body_start < 4 + 4 + 4 + 4:
-                return None
-        return struct.unpack(">I", data[ts_off : ts_off + 4])[0]
-
-    @classmethod
-    def _get_or_cache_timescale(cls, target_dir: Path) -> Optional[int]:
-        """读取 step dir 的 timescale；优先用 `.hls_timescale` 缓存文件，否则解析 init.mp4 并写缓存。
-
-        缓存文件单行十进制整数。解析失败 / init.mp4 缺失返回 None。
-        """
-        cache_path = target_dir / ".hls_timescale"
-        if cache_path.exists():
-            try:
-                txt = cache_path.read_text(encoding="utf-8").strip()
-                if txt.isdigit():
-                    return int(txt)
-            except OSError:
-                pass
-        init_path = target_dir / "init.mp4"
-        if not init_path.exists():
-            return None
-        ts = cls._read_timescale_from_init(init_path)
-        if ts is None or ts <= 0:
-            return None
-        try:
-            cache_path.write_text(str(ts), encoding="utf-8")
-        except OSError as e:
-            logger.warning("[HLS] write timescale cache failed (%s): %s", e, cache_path)
-        return ts
-
-    @classmethod
     def _patch_fragment_tfdt(cls, fragment_path: Path, base_media_decode_time: int) -> bool:
         """把 fmp4 fragment 的 moof/traf/tfdt.baseMediaDecodeTime 改写成指定值（单位=timescale tick）。
 
@@ -323,17 +286,22 @@ class HLSPersistenceStrategy:
         return True
 
     @classmethod
-    def _transcode_to_fmp4_segment(cls, path: Path) -> None:
-        """将 cv2 写出的 mp4v 段转码为 HLS-ready fMP4 fragment，并写入 step 级 init.mp4。
+    def _transcode_to_fmp4_segment(cls, path: Path, segment_type: str) -> None:
+        """将 cv2 写出的 mp4v 段转码为 HLS-ready fMP4 fragment，并写入 track 级 init.mp4。
 
-        Pipeline：cv2 mp4v → ffmpeg HLS muxer → init.mp4（首段）+ fMP4 fragment（原地替换）
-        → hex-patch tfdt.baseMediaDecodeTime 写入累计偏移。
+        Pipeline：cv2 mp4v → ffmpeg HLS muxer → {track}_init.mp4（首段）+ fMP4 fragment
+        （原地替换）→ hex-patch tfdt.baseMediaDecodeTime 写入累计偏移。
 
         - 普通 MP4（moov+mdat 整体）无法被 hls.js 在 m3u8 中作为段播放，会 fragParsingError
         - 改用 `-hls_segment_type fmp4` 让 ffmpeg 产出 init segment（ftyp+moov）+
           fragment（ftyp+moof+mdat），符合 HLS 协议要求
-        - init.mp4 每 step 一份共享：首次写入时落盘到 step 目录 + 缓存 timescale 到
-          `.hls_timescale`，已存在则丢弃产出物（同 step 同摄像头、同编码参数，SPS/PPS 一致）
+        - init 按 track 分开存 `{segment_type}_init.mp4`：raw 与 processed 是两条独立
+          playlist、各有各的 EXT-X-MAP，共用一个文件名会变成「谁先转码谁定」，另一条轨
+          就指向别人的 init。每 track 首次写入落盘，已存在则丢弃产出物（同 track 同摄像头、
+          同编码参数，SPS/PPS 一致）
+        - `-hls_segment_options video_track_timescale=` 把 mdhd.timescale pin 成
+          `_HLS_TIMESCALE`（理由见该常量注释）。注意必须走 `-hls_segment_options` 透传给
+          内层 mp4 muxer——直接给 hls muxer 传 `-video_track_timescale` 会被静默忽略
         - ffmpeg 子进程 cwd=target_dir + 输出全 basename：ffmpeg 4.x/8.x 对
           `-hls_fmp4_init_filename` 的绝对路径解析行为相反（4.x 拼到 playlist 目录前，
           8.x 拼到进程 cwd），只有「cwd=输出目录 + basename」在两个版本上都对
@@ -346,7 +314,7 @@ class HLSPersistenceStrategy:
         失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
         target_dir = path.parent
-        init_path = target_dir / "init.mp4"
+        init_path = target_dir / f"{segment_type}_init.mp4"
         ts_offset = cls._ts_offset_seconds(path)
 
         stem = path.stem
@@ -385,6 +353,8 @@ class HLSPersistenceStrategy:
             # tfdt 偏移不在这里靠 -output_ts_offset 实现（ffmpeg 8.x HLS muxer + fmp4
             # 在 -start_number 0 下会清零 tfdt）—— 改成 transcode 完后 hex-patch tfdt box。
             "-hls_segment_type", "fmp4",
+            # 透传给内层 mp4 muxer：pin mdhd.timescale，切断「timescale 随编码 fps 变」
+            "-hls_segment_options", f"video_track_timescale={_HLS_TIMESCALE}",
             "-hls_fmp4_init_filename", tmp_init.name,
             "-hls_segment_filename", tmp_segment_template.name,
             "-start_number", "0",
@@ -418,14 +388,14 @@ class HLSPersistenceStrategy:
             _cleanup_tmp()
             return
 
-        # init.mp4 落盘：仅当 step 目录尚无 init 时
+        # init 落盘：仅当该 track 尚无 init 时
         if tmp_init.exists():
             if not init_path.exists():
                 try:
                     os.replace(tmp_init, init_path)
                 except OSError as e:
                     logger.warning(
-                        "[HLS] failed to install init.mp4 %s: %s", init_path, e
+                        "[HLS] failed to install init %s: %s", init_path, e
                     )
                     tmp_init.unlink(missing_ok=True)
             else:
@@ -443,17 +413,11 @@ class HLSPersistenceStrategy:
         # 临时 playlist 不再需要（由 persist_segment 自己维护）
         tmp_playlist.unlink(missing_ok=True)
 
-        # hex-patch tfdt：把累计 EXTINF（秒）→ timescale tick 写进 fragment 的 moof/traf/tfdt
-        # 没有 init.mp4 / timescale 读不到 → 跳过 patch，不影响首段（offset=0 本就正确）
+        # hex-patch tfdt：把累计 EXTINF（秒）→ tick 写进 fragment 的 moof/traf/tfdt。
+        # timescale 是 pin 死的常量，与 init.mp4 声明的必然一致，无需回读产物。
+        # 首段 offset=0，本就正确，跳过。
         if replaced and ts_offset > 0.0:
-            timescale = cls._get_or_cache_timescale(target_dir)
-            if timescale and timescale > 0:
-                cls._patch_fragment_tfdt(path, int(round(ts_offset * timescale)))
-            else:
-                logger.warning(
-                    "[HLS] timescale unavailable, tfdt patch skipped for %s (playback may stall)",
-                    path,
-                )
+            cls._patch_fragment_tfdt(path, int(round(ts_offset * _HLS_TIMESCALE)))
 
     def persist_segment(
         self, task_id: int, step_id: int, segment_type: str, frames: List[Frame]
@@ -508,6 +472,14 @@ class HLSPersistenceStrategy:
 
         start_ts = frames[0].timestamp
 
+        # 0. 先落 sidecar 索引，再写 mp4：SegmentFinder 认的是 `raw_segment_*.mp4`，
+        # mp4 一出现该段就对离线反查可见。反过来（先 mp4 后 idx）会留下一个
+        # 「段可见但索引未就位」的窗口（实测 260ms，覆盖 mp4 编码 + transcode 全程），
+        # 期间读侧拿不到 sidecar。孤儿 .idx（mp4 写失败时残留）对 SegmentFinder
+        # 不可见，随 purge_step_dir 的 rmtree 回收，代价远小于该窗口。
+        # 排在最前但**不阻断本段**：写失败只打 warning（理由见 `_update_timeline`）。
+        self._update_timeline(target_dir, frames=frames, timestamp=start_ts)
+
         # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），无可测速率时退化兜底。
         # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
         eff_fps = self._effective_fps(frames)
@@ -549,9 +521,9 @@ class HLSPersistenceStrategy:
                             "#EXTM3U\n"
                             "#EXT-X-VERSION:7\n"
                             "#EXT-X-TARGETDURATION:10\n"
-                            '#EXT-X-MAP:URI="init.mp4"\n'
+                            '#EXT-X-MAP:URI="raw_init.mp4"\n'
                         )
-                self._transcode_to_fmp4_segment(raw_segment_path)
+                self._transcode_to_fmp4_segment(raw_segment_path, "raw")
                 with raw_playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n{raw_segment_path.name}\n")
             except IOError as e:
@@ -643,9 +615,9 @@ class HLSPersistenceStrategy:
                             "#EXTM3U\n"
                             "#EXT-X-VERSION:7\n"
                             "#EXT-X-TARGETDURATION:10\n"
-                            '#EXT-X-MAP:URI="init.mp4"\n'
+                            '#EXT-X-MAP:URI="processed_init.mp4"\n'
                         )
-                self._transcode_to_fmp4_segment(segment_path)
+                self._transcode_to_fmp4_segment(segment_path, "processed")
                 with playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n{segment_path.name}\n")
             except IOError as e:
@@ -728,3 +700,39 @@ class HLSPersistenceStrategy:
         # 写回文件
         with metadata_path.open("w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    def _update_timeline(
+        self,
+        target_dir: Path,
+        frames: List[Frame],
+        timestamp: float,
+    ):
+        """写该段的 sidecar 索引：每帧 frame.timestamp 的 float64 原值数组。
+
+        在 mp4 落盘**之前**调用（见 `_persist_raw_segment` 步骤 0），保证索引不晚于
+        段对 SegmentFinder 可见。tmp + os.replace 原子替换，读侧不会看到半截文件。
+
+        **失败不抛**：sidecar 只服务离线反查，回放/下载/送标三条链路都不读它；而本函数
+        排在 mp4 之前，抛出去会让 worker 重试耗尽后连整段视频一起丢（mp4 / playlist /
+        metadata 全不落）——拿主产物给辅助索引陪葬。读侧本就按契约容忍缺 sidecar（见
+        frame_tracker `_load_sidecar`：跳过该段、不打断整条迭代），故此处降级为 warning。
+        """
+        idx_path = target_dir / f"raw_segment_{int(timestamp * 1e6)}.idx"
+        tmp = idx_path.with_suffix(".tmp")
+
+        timestamps = np.array([frame.timestamp for frame in frames], dtype=np.float64)
+        try:
+            tmp.unlink(missing_ok=True)
+            with open(tmp, "wb") as f:
+                timestamps.tofile(f)
+            os.replace(tmp, idx_path)
+        except OSError as e:
+            logger.warning(
+                "[HLS] sidecar 写入失败，该段离线不可反查（视频照常落盘）: %s: %s",
+                idx_path, e,
+            )
+            # 清残留 tmp 本身也可能失败（同一个盘的同一个故障），不能让它盖掉上面的告警
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass

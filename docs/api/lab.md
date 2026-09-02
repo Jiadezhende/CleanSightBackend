@@ -261,11 +261,11 @@
 |------|---------|-----------|
 | `404` | 该 `(task_id, step_id, track)` 无段，**或**段全为在途段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=.."}` |
 | `422` | 缺 `task_id`/`step_id`，或 `track` 不在枚举内 | FastAPI 校验体（`{"detail":[...]}`） |
-| `503` | step 目录缺 `init.mp4`（历史段未迁移） | `{"detail":{"error":"HLS init segment missing","detail":"...transcode_segments_to_h264.py..."}}` |
+| `503` | step 目录缺 `{track}_init.mp4`（旧格式产物，或首段仍在 transcode） | `{"detail":{"error":"HLS init segment missing","detail":"raw_init.mp4 not found for task .. step ..; ..."}}` |
 | `500` | ffmpeg 失败 / 超时 / 二进制找不到 | `{"detail":"Export failed: ..."}` |
 
 > 与 `/submit` 一样，**503 的 body 形态和 404 不一致**（HTTPException 只有 `detail`，无 `resource_type`）。判分支只认 status code。
-> `503` 与 `GET /traceback/task/{id}/playlist.m3u8` 同码同措辞——同一个根因（fMP4 无 init 段无法解码），处理方式也相同：跑 `scripts/transcode_segments_to_h264.py` 迁移。
+> `503` 与 `GET /traceback/task/{id}/playlist.m3u8` 同码同措辞——同一个根因（fMP4 无 init 段无法解码）。**服务端无法自愈，也没有迁移路径**：旧落盘结构一律不做兼容。若非首段 transcode 途中的瞬时窗口，该 step 就是不可用，前端按「此段录像不可导出」处理即可，不必重试。
 
 ### 前端坑点
 

@@ -52,16 +52,25 @@ max(segment.ts + EXTINF)
 
 而不是 `max(segment.ts)`，否则会漏掉最后一段自身时长。
 
-## init.mp4
+## init 段
 
-fMP4 fragment 播放需要 `init.mp4`。VOD playlist 缺少 init 时返回 503，并提示历史段需迁移。
+fMP4 fragment 播放需要 init 段。**按轨分存 `{track}_init.mp4`**（`raw_init.mp4` /
+`processed_init.mp4`）——raw 与 processed 是两条独立 playlist、各有各的 `#EXT-X-MAP`，
+共用一个文件名会变成「谁先转码谁定」，另一条轨就指向别人的 init。
+
+缺 init 时回放（VOD playlist）与下载（step 导出）均返回 **503**，且**服务端无法自愈**：
+要么段是分轨命名之前的旧格式产物（不支持，也不提供迁移路径——旧落盘结构一律不做兼容，
+见 [../update/20260902_LEGACY_LAYOUT_CLEANUP.md](../update/20260902_LEGACY_LAYOUT_CLEANUP.md)），
+要么首段仍在 transcode 途中（窗口极短）。
+
+> 本节之后的增量（timescale pin=90000、逐段 sidecar `.idx`）见 `docs/update/`
+> 里 20260813 / 20260830 两篇，尚未融合进本文。
 
 ## 代码来源
 
 - `app/services/persistence/strategies/hls_strategy.py`
 - `app/routers/traceback.py`
 - `app/services/traceback/segment_finder.py`
-- `scripts/transcode_segments_to_h264.py`
 - `tests/test_traceback_router.py`
 - `tests/test_lab_clip_builder.py`
 

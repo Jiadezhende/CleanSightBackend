@@ -565,7 +565,7 @@ async def download_step_video(
             resource_id=f"task={task_id},step={step_id},track={track}",
         ) from e
     except StepExportInitMissing as e:
-        # 与 /traceback/task/{id}/playlist.m3u8 同码同措辞：历史段需先迁移
+        # 与 /traceback/task/{id}/playlist.m3u8 同码同措辞：该 step 不可用，服务端无法自愈
         raise HTTPException(
             status_code=503,
             detail={"error": "HLS init segment missing", "detail": str(e)},

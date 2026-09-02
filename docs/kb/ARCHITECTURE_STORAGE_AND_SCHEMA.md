@@ -76,16 +76,23 @@ ORM：`DBAlarm` in `app/models.py`
 
 ```text
 {storage_base_dir}/{task_id}/{step_id}/
-  init.mp4                        # fMP4 init，step 级共享
+  raw_init.mp4                    # fMP4 init，raw 轨专用（首段转码时产出）
+  processed_init.mp4              # 同上，processed 轨专用——两轨独立 playlist，不可互指
   raw_segment_{ts_us}.mp4
   processed_segment_{ts_us}.mp4
+  raw_segment_{ts_us}.idx         # raw 逐帧 ts sidecar（float64 数组），仅供离线帧反查
   raw_playlist.m3u8
   processed_playlist.m3u8
   metadata.json
-  .hls_timescale                 # timescale 缓存
-  features.jsonl                 # L2 检测特征（inference FeatureStore 落盘，供离线）
-  facts.jsonl                    # L3 事实账本（FactLedger，offline 预置）
+  features.jsonl                  # L2 检测特征（inference FeatureStore 落盘，供离线）
+  facts.jsonl                     # L3 事实账本（FactLedger，offline 预置）
 ```
+
+`processed` 轨不产 `.idx`——渲染后的帧只用于展示，离线推理不消费它。
+
+> 旧落盘结构（共用 `init.mp4`、`.hls_timescale` 缓存、`.timeline.idx`/`.idx.json` 两代
+> sidecar）**一律不做兼容、无迁移路径**，见
+> [../update/20260902_LEGACY_LAYOUT_CLEANUP.md](../update/20260902_LEGACY_LAYOUT_CLEANUP.md)。
 
 追溯、Lab 和媒体访问都按该目录约定定位文件。
 
