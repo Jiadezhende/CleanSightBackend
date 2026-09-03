@@ -148,9 +148,10 @@ def load_stage_config(
         return _global_inference_config
 
     if config_path is None:
-        # 默认配置路径（外部config目录）
-        base_dir = Path(__file__).parent.parent.parent.parent.resolve()
-        config_path = base_dir / "config" / "inference_config.yaml"
+        # 默认配置路径（外部 config 目录，单一真源）
+        from app.settings import settings
+
+        config_path = settings.config_dir / "inference_config.yaml"
 
     config_file = Path(config_path)
 

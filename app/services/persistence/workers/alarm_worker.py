@@ -10,7 +10,7 @@ import logging
 import threading
 from queue import Empty, Queue
 
-from app.services.persistence.models import AlarmPersistenceTask
+from app.services.persistence.types import AlarmPersistenceTask
 from app.services.persistence.strategies.alarm_strategy import AlarmPersistenceStrategy
 from app.utils import GuardedExecutor
 from app.utils.worker_guard import guarded_run

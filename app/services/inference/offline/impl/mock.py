@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, List, Sequence
 
 from app.domain.detection import FrameFeature
-from app.services.inference.models import SegmentFact
+from app.services.inference.types import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 

@@ -13,7 +13,7 @@ from factories import make_detection, make_frame_detections, make_frame_feature
 from app.domain.detection import FrameDetections, FrameFeature
 from app.services.inference.config import InferenceConfig
 from app.services.inference.feature.store import FactLedger, FeatureStore
-from app.services.inference.models import EventFact, SegmentFact
+from app.services.inference.types import EventFact, SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
 from app.services.inference.offline.impl.mock import BrushRulesSegmenter

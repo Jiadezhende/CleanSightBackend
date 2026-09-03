@@ -100,7 +100,7 @@ def _force_storage_mode(monkeypatch, tmp_path):
 
     monkeypatch.setattr(lab_router, "get_default_base_dir", lambda: tmp_path)
     monkeypatch.setattr(
-        lab_router.runtime_config, "get_task_source", lambda: "storage"
+        lab_router.lab_config, "get_task_source", lambda: "storage"
     )
     # DB 不应被触碰：若调用 get_db 直接炸，证明走的是 storage 分支
     def _boom():

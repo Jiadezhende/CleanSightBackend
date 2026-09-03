@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +13,7 @@ from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app.routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
-from app.services import persistence
+from app.services import health_monitor, inference, persistence, stream
 from app.utils import (
     AppError,
     ConflictError,
@@ -58,20 +59,23 @@ async def lifespan(app: FastAPI):
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
 
-    # 按照服务模块启动生命周期管理（起序 = 嵌套顺序，停序 = 逆序）：
-    # 1. 健康监控服务（依赖 client_manager, stream_service, inference_manager）
-    # 2. 持久化服务（平级服务，须先于 inference 起、后于 inference 停，
-    #    以承接 inference.stop() 的结算告警 + HLS 残段 flush 后再抽干队列）
-    # 3. AI 推理服务
-    async with health.lifespan():
-        async with persistence.lifespan():
-            async with ai.lifespan():
-                try:
-                    yield
-                finally:
-                    # yield 返回时立即通知 WebSocket 退出，不等待后续清理
-                    # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
-                    shutdown_event.set()
+    # 按服务模块启动生命周期（起序 = 嵌套顺序，停序 = 逆序）。每个服务的起停都归它自己
+    # 包内的 lifespan()，此处只表达**相对顺序**：
+    # 1. 健康监控（最外层：最先起、最后停，全程有人看着下面三个）
+    # 2. 流服务（懒启动、只收尸——decoder 由 run_control 按 run 现起）
+    # 3. 持久化（须先于 inference 起、后于 inference 停，以承接 inference.stop() 的
+    #    结算告警 + HLS 残段 flush 后再抽干队列）
+    # 4. AI 推理
+    async with health_monitor.lifespan():
+        async with stream.lifespan():
+            async with persistence.lifespan():
+                async with inference.lifespan():
+                    try:
+                        yield
+                    finally:
+                        # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                        # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                        shutdown_event.set()
 
 
 
@@ -103,8 +107,11 @@ app.include_router(traceback_router.router)  # 追溯 API（/traceback/*）
 app.include_router(media.router)  # 媒体访问层（/media/*，token 化鉴权）
 app.include_router(lab.router)  # Lab 导出 & Label Studio 送标（/lab-f3m8/*）
 app.include_router(admin.router)  # 运维 Admin API（/admin-f3m8/*）
-app.mount("/admin-f3m8/ui", StaticFiles(directory="app/static/admin", html=True), name="admin-ui")
-app.mount("/lab-f3m8/ui", StaticFiles(directory="app/static/lab", html=True), name="lab-ui")
+# 静态资产路径由 __file__ 推导，**不用 CWD 相对路径**：从仓库根之外的目录启动后端时，
+# "app/static/..." 会解析不到，两个 UI 直接 404（挂载期不报错，静默失败）。
+_STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/admin-f3m8/ui", StaticFiles(directory=_STATIC_DIR / "admin", html=True), name="admin-ui")
+app.mount("/lab-f3m8/ui", StaticFiles(directory=_STATIC_DIR / "lab", html=True), name="lab-ui")
 
 
 # ============================================================================

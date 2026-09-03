@@ -24,7 +24,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 from app.domain.frame import Frame
@@ -485,6 +484,11 @@ class HLSPersistenceStrategy:
         eff_fps = self._effective_fps(frames)
         raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
+
+        # cv2 只被本文件的两个写段函数用到，故在函数体内导入（规范 §2 通路 2）：
+        # 写在模块级会让 `import app.services.persistence.*` 一律拉起 OpenCV（~250ms）。
+        import cv2
+
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
         out_raw = None
@@ -580,6 +584,9 @@ class HLSPersistenceStrategy:
         # 1. 生成处理后视频段（使用实测有效帧率 eff_fps）
         segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
         height, width = frames[0].frame.shape[:2]
+
+        import cv2  # 函数体内导入，理由同 _persist_raw_segment
+
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
         out_processed = None

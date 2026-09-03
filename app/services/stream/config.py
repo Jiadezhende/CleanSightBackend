@@ -48,8 +48,7 @@ class StreamConfig:
             StreamConfig实例
         """
         if config_path is None:
-            base_dir = Path(__file__).parent.parent.parent.parent.resolve()
-            config_path = base_dir / "config" / "stream_config.yaml"
+            config_path = settings.config_dir / "stream_config.yaml"
 
         # 加载YAML
         config_file = Path(config_path)

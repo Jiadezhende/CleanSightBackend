@@ -34,9 +34,9 @@ class HealthMonitorConfig:
     def from_yaml(cls, config_path: Optional[Path] = None) -> "HealthMonitorConfig":
         """从 YAML 加载配置"""
         if config_path is None:
-            # 使用 Path 对象确保路径正确解析
-            base_dir = Path(__file__).parent.parent.parent.parent.resolve()
-            config_path = base_dir / "config" / "health_monitor_config.yaml"
+            from app.settings import settings
+
+            config_path = settings.config_dir / "health_monitor_config.yaml"
 
         # 转换为 Path 对象
         config_file = Path(config_path)

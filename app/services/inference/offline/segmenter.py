@@ -18,7 +18,7 @@
 - 策略不访问 FeatureStore / FactLedger / ClientManager / CQ / 数据库（纯算法）；
 - 输出每条 `SegmentFact.source` 必须等于本策略 `name`；`start <= end`、时间为有限数、`0 <= conf <= 1`
   （由 Runner 统一校验，见 runner.py）。
-- 输入吃 `FrameFeature`（domain，与在线滑窗同型）、输出吐 `SegmentFact`（inference.models），
+- 输入吃 `FrameFeature`（domain，与在线滑窗同型）、输出吐 `SegmentFact`（inference.types），
   不自定义中间数据壳。
 """
 
@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Sequence
 
 from app.domain.detection import FrameFeature
-from app.services.inference.models import SegmentFact
+from app.services.inference.types import SegmentFact
 
 
 class OfflineSegmenter(ABC):
