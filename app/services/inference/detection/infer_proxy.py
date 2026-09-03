@@ -137,6 +137,11 @@ class RemoteInferProxy:
             self._child_ready.clear()
             self._req_q = self._ctx.Queue(maxsize=self._max_inflight * 4)
             self._resp_q = self._ctx.Queue(maxsize=self._max_inflight * 4)
+            # 收尸时会主动断掉 req_q 读端逼停 feeder（见 _kill_child），EPIPE 是预期路径不是故障；
+            # 不预置这面旗子，feeder 每次收尸都会往 stderr 打一坨 BrokenPipeError traceback。
+            # 必须在首次 put（= feeder 线程起点）之前置位——它是按值传给 _feed 的，事后改无效。
+            # 同 CPython 自己的 ProcessPoolExecutor 对 _call_queue 的做法。
+            self._req_q._ignore_epipe = True
             self._ready_ev = self._ctx.Event()
             self._proc = self._ctx.Process(
                 target=run_stages,
@@ -194,7 +199,10 @@ class RemoteInferProxy:
         logger.info("[RemoteInferProxy] stopped (leftover_dropped=%d)", leftover)
 
     def _kill_child(self) -> None:
-        """terminate→join→kill→join 收尸，并关闭队列（镜像 decoder.py 的硬收尸）。
+        """terminate→join→kill→join 收尸，并**断读端 + 撤 join + 关**队列（镜像 decoder.py 的硬收尸）。
+
+        队列那三步的顺序与理由写在下方注释里——只 `close()` 会让卡住的 feeder 线程活到
+        解释器退出、挂死在 multiprocessing 的 atexit 上（实证见 20260902 update 记录）。
 
         在 `_proc_lock` 内、与 `_spawn_child` 互斥：停机路径先置 `_stop_event`/`_no_restart`
         再调本方法，与之竞争的 spawn 要么已完成（此处杀掉其起的进程）、要么被早退挡住。
@@ -211,9 +219,25 @@ class RemoteInferProxy:
                         proc.join(timeout=2.0)
                 except Exception as e:  # pragma: no cover
                     logger.warning("[RemoteInferProxy] kill child failed: %s", e)
+            # 队列收尸：**断读端 + 撤 join**，`close()` 一个都替代不了（缺了会挂死进程退出）。
+            # 子进程 wedge 时不读 req_q，管道 64KB 灌满而一批帧是 MB 级 → 主进程的 QueueFeederThread
+            # 阻塞在 send_bytes。此时 close() 无效：它只往内存 buffer 追个哨兵（feeder 走不到那步），
+            # 且**不关**本进程持有的读端 fd，于是写操作连 EPIPE 都拿不到，永久阻塞。
+            #   · _reader.close()：断本进程这侧读端 → 阻塞的写立刻 EPIPE → feeder 自退、释放它压着的
+            #     整批帧内存。只对 req_q 做；resp_q 的读端是本进程 collector 在用的。
+            #     （= CPython 自己的 Queue._terminate_broken，gh-94777/gh-107219。）
+            #   · cancel_join_thread()：注销 atexit 里那个**无超时**的 thread.join 终结器。它以线程
+            #     为宿主，队列被 _spawn_child 换掉后仍留在 _finalizer_registry 里——子进程真杀不死
+            #     （CUDA D 态）时读端还开着、EPIPE 不来，留一具尸体就够让进程退不出去。
+            if self._req_q is not None:
+                try:
+                    self._req_q._reader.close()
+                except Exception:  # pragma: no cover
+                    pass
             for q in (self._req_q, self._resp_q):
                 try:
                     if q is not None:
+                        q.cancel_join_thread()
                         q.close()
                 except Exception:  # pragma: no cover
                     pass
