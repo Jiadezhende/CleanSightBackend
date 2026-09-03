@@ -83,6 +83,38 @@ Write-Host ""
 # 确保日志目录存在（log-config 在应用代码前加载，需提前创建）
 if (-not (Test-Path "logs")) { New-Item -ItemType Directory -Path "logs" | Out-Null }
 
+# 启动前端口占用自检：只报告，不代为杀进程。
+# 常见成因是上次被强杀 / Ctrl+C 后遗留的孤儿 mediamtx.exe，但占用者也可能是无关服务
+# 或人为在调的另一个实例，杀不杀由人决定。这里 fail fast，避免后面 bind 失败的迷惑报错。
+$conflicts = @()
+foreach ($p in @(
+    @{ Label = "gateway RTSP (extern)"; Port = $ProxyPort },
+    @{ Label = "MediaMTX RTSP (intern)"; Port = $InternalPort }
+)) {
+    $owners = (Get-NetTCPConnection -LocalPort $p.Port -State Listen -ErrorAction SilentlyContinue).OwningProcess
+    foreach ($procId in ($owners | Select-Object -Unique)) {
+        if (-not $procId) { continue }
+        $desc = "PID=$procId"
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if ($proc) {
+            # StartTime 对高权限进程会抛访问拒绝，取不到就算了
+            try { $desc += ", started $($proc.StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" } catch {}
+            $desc = "$($proc.ProcessName) ($desc)"
+        }
+        $conflicts += "  $($p.Port)  $($p.Label)  <- $desc"
+    }
+}
+
+if ($conflicts.Count -gt 0) {
+    Write-Host "Port already in use, refusing to start:" -ForegroundColor Red
+    $conflicts | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "If it is a leftover mediamtx.exe / gateway python from a previous run, clean it up manually:" -ForegroundColor Yellow
+    Write-Host "  Get-Process -Id <PID> | Format-List Name, Path, StartTime" -ForegroundColor Yellow
+    Write-Host "  taskkill /T /F /PID <PID>" -ForegroundColor Yellow
+    exit 1
+}
+
 # 后台启动 RTSP 网关（其自身拉起并守护 MediaMTX，MediaMTX 继承上面设置的 MTX_*）
 $gw = Start-Process -FilePath "python" -ArgumentList "-m", "mediamtx_gateway.main" -NoNewWindow -PassThru
 
@@ -96,6 +128,7 @@ try {
     & uvicorn @uvArgs
 }
 finally {
-    # 后端退出时一并清理网关及其子进程
-    if ($gw -and -not $gw.HasExited) { Stop-Process -Id $gw.Id -Force -ErrorAction SilentlyContinue }
+    # 后端退出时一并清理网关及其子进程（MediaMTX）。
+    # 必须用 taskkill /T：Stop-Process -Force 只杀网关 python，会把 mediamtx.exe 留成孤儿占住 18004。
+    if ($gw) { taskkill /T /F /PID $gw.Id 2>$null | Out-Null }
 }
