@@ -20,8 +20,8 @@ from app.services.client.manager import client_manager
 from app.services.client.queues import ClientQueues
 from app.services.inference.instance import inference_manager
 from app.services.inference.temporal import alarm_sink
-from app.services.persistence import persistence_manager
-from app.services.stream import stream_service
+from app.services.persistence.instance import persistence_manager
+from app.services.stream.instance import stream_service
 from app.utils.exceptions import AppError
 
 logger = logging.getLogger(__name__)

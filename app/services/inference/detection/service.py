@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from app.domain.detection import FrameFeature
 from app.services.client import ClientManager, client_manager
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
-from app.services.inference.models import FrameInference
+from app.services.inference.types import FrameInference
 from app.services.inference.detection.infer_proxy import RemoteInferProxy
 from app.utils.metrics import frame_drop_total
 

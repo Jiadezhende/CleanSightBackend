@@ -49,7 +49,7 @@ from app.services.lab import (
     StepExportInitMissing,
     StepExportNoSegments,
 )
-from app.services.lab import runtime_config
+from app.services.lab import config as lab_config
 from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
@@ -327,7 +327,7 @@ async def list_lab_tasks(
     """
     finder = SegmentFinder(get_default_base_dir())
 
-    if runtime_config.get_task_source() == "storage":
+    if lab_config.get_task_source() == "storage":
         total, tasks = _list_storage_tasks(finder, q, limit, offset)
         return LabTaskListResponse(total=total, tasks=tasks)
 
@@ -383,14 +383,14 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
     from app.settings import settings as s
 
     # ---- LS 配置检查（503）----
-    ls_url = runtime_config.get_url()
-    ls_token = runtime_config.get_token()
+    ls_url = lab_config.get_url()
+    ls_token = lab_config.get_token()
     if not ls_url or not ls_token:
         raise _ls_not_configured()
 
     # ---- 入参校验（400）----
     project_id = _resolve_project_id(
-        req.project_id, runtime_config.get_default_project_id()
+        req.project_id, lab_config.get_default_project_id()
     )
     ordered_clips = _validate_clips(
         req.clips,
@@ -600,9 +600,9 @@ async def lab_health() -> LabHealthResponse:
 
     不抛异常：未配置时 configured=False，可达性判断时 reachable=False + error。
     """
-    ls_url = runtime_config.get_url()
-    ls_token = runtime_config.get_token()
-    default_pid = runtime_config.get_default_project_id()
+    ls_url = lab_config.get_url()
+    ls_token = lab_config.get_token()
+    default_pid = lab_config.get_default_project_id()
 
     if not ls_url or not ls_token:
         return LabHealthResponse(
@@ -641,7 +641,7 @@ async def get_lab_config() -> LabConfigResponse:
 
     不返回 token 明文，只返回 token_configured 表示 env 里是否已配置。
     """
-    return LabConfigResponse(**runtime_config.snapshot())
+    return LabConfigResponse(**lab_config.snapshot())
 
 
 @router.put("/config", response_model=LabConfigResponse)
@@ -651,7 +651,7 @@ async def update_lab_config(req: LabConfigUpdateRequest) -> LabConfigResponse:
     token 不在此处管理（仅 env）。校验失败抛 400。
     """
     try:
-        snap = runtime_config.update(
+        snap = lab_config.update(
             req.label_studio_url, req.default_project_id, req.task_source
         )
     except ValueError as e:

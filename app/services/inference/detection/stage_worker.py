@@ -28,7 +28,7 @@ import numpy as np
 
 from app.services.inference.detection.detector import Detector
 from app.domain.detection import FrameDetections
-from app.services.inference.models import DetectionTask, FrameInference
+from app.services.inference.types import DetectionTask, FrameInference
 
 logger = logging.getLogger(__name__)
 

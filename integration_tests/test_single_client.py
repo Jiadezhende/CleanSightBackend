@@ -601,7 +601,7 @@ def run_scenario_6(args):
                 print(f"  排查步骤:")
                 print(f"  1. 检查后端日志是否有 'Initial start failed, health monitor will retry'")
                 print(f"     → 有: 修复生效，可能重连窗口不够（增大 --stream-delay 或减小延迟）")
-                print(f"     → 无: Bug 2 修复未生效，请重新检查 service.py 注册顺序")
+                print(f"     → 无: Bug 2 修复未生效，请重新检查 stream/manager.py 注册顺序")
                 print(f"  2. 检查后端日志是否有 'orphan' 相关日志")
                 print(f"     → 有: decoder 未注册，健康监控走了 orphan 路径（旧 bug 行为）")
 

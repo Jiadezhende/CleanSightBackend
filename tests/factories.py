@@ -17,7 +17,7 @@ from app.domain.alarm import Alarm
 from app.domain.detection import Detection, FrameDetections, FrameFeature
 from app.domain.frame import Frame
 from app.services.client.queues import ClientQueues
-from app.services.inference.models import FrameInference
+from app.services.inference.types import FrameInference
 
 __all__ = [
     "make_detection",

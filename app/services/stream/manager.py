@@ -25,7 +25,7 @@ from app.utils import (
 
 from .decoder import FFmpegDecoder
 
-logger = logging.getLogger("app.services.stream.service")
+logger = logging.getLogger("app.services.stream.manager")
 
 
 def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
@@ -452,7 +452,3 @@ class StreamService:
                 )
 
         logger.info("StreamService shutdown complete")
-
-
-# singleton service instance
-stream_service = StreamService()

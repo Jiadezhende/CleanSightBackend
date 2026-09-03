@@ -61,7 +61,7 @@ def _run(args: argparse.Namespace) -> int:
 def _query(args: argparse.Namespace) -> int:
     """轻量查询：读 FactLedger 里的 SegmentFact 时间线打印（不碰 torch/runner）。"""
     from app.services.inference.feature.store import FactLedger
-    from app.services.inference.models import SegmentFact
+    from app.services.inference.types import SegmentFact
     from app.settings import settings
 
     ledger = FactLedger(settings.storage_base_dir)

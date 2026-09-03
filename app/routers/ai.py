@@ -2,14 +2,10 @@ import asyncio
 import base64
 import logging
 import time
-from contextlib import asynccontextmanager
 
-import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.services.client import client_manager
-from app.services.inference.instance import inference_manager
-from app.services.stream import stream_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 logger = logging.getLogger(__name__)
@@ -18,29 +14,8 @@ logger = logging.getLogger(__name__)
 # 推帧主驱动是"新帧即推"（按 frame.timestamp 去重）；此上限仅兜住突发，源 ~inference_fps 下极少触发。
 _WS_MAX_SEND_FPS = 30
 
-
-@asynccontextmanager
-async def lifespan():
-    """简单AI服务生命周期管理：启动推理管理器"""
-    # 启动 AI 推理服务
-    inference_manager.start()
-    logger.info("[AIRouter] Inference service started")
-
-    try:
-        yield
-    finally:
-        # lifespan finally 执行时 uvicorn 已 cancel 所有 WebSocket 任务，
-        # 事件循环无其他等待方，直接同步调用即可。
-        try:
-            inference_manager.stop()
-            logger.info("[AIRouter] Inference service stopped")
-        except Exception:
-            logger.exception("[AIRouter] Error stopping inference service")
-        try:
-            stream_service.shutdown()
-            logger.info("[AIRouter] Stream service stopped")
-        except Exception:
-            logger.exception("[AIRouter] Error shutting down stream service")
+# 推理与流的生命周期已归各自服务包（`app.services.inference.lifespan` /
+# `app.services.stream.lifespan`，由 main.py 嵌套）。本 router 只管协议层。
 
 
 @router.websocket("/video")
@@ -76,6 +51,10 @@ async def websocket_video_endpoint(websocket: WebSocket):
     else:
         await websocket.close(code=1008)
         return
+
+    # cv2 只在本端点用于 JPEG 编码，故在函数体内导入（规范 §2 通路 2）：写在模块级会让
+    # `import app.main` 连带拉起 OpenCV（~250ms），而绝大多数进程根本不开这条 WS。
+    import cv2
 
     await websocket.accept()
     logger.info(f"[WebSocket] 连接已建立: {label}, remote={websocket.client}")

@@ -178,6 +178,16 @@ class Settings(BaseSettings):
             return p.resolve()
         return (Path(__file__).parent.parent / p).resolve()
 
+    @property
+    def config_dir(self) -> Path:
+        """服务配置 yaml 的所在目录（项目根 `config/`，绝对路径，单一真源）。
+
+        与 `storage_base_dir` 同款：以项目根为基推导，进程 cwd 变了也不飘。各服务的
+        `config.py` 一律读此值，不再各写一遍 `Path(__file__).parent.parent.parent.parent`
+        ——那种数层级的写法在文件挪窝时会静默指错目录（且五处各数各的）。
+        """
+        return (Path(__file__).parent.parent / "config").resolve()
+
     @model_validator(mode="after")
     def check_required_fields(self):
         """验证必需配置是否完整
