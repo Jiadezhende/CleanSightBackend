@@ -1,15 +1,17 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-09-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Lab Service
 
-Lab 服务用于从 raw HLS 段中裁剪样本视频，并提交到 Label Studio 创建标注任务。
+Lab 服务用于从 raw HLS 段中裁剪样本视频，并提交到 Label Studio 创建标注任务；另有一条不经 LS 的
+**整段导出**旁路，把某轨已落盘的全部段 remux 成单个 mp4 供下载。
 
 ## 路由
 
 - `GET /lab-f3m8/tasks`：可标注任务列表（数据源由运行时 `task_source` 开关决定，见下）
 - `POST /lab-f3m8/submit`
+- `GET /lab-f3m8/download`：整段导出下载（`task_id`/`step_id`/`track`，见「整段导出」）
 - `GET /lab-f3m8/health`
 - `GET /lab-f3m8/config`
 - `PUT /lab-f3m8/config`
@@ -57,7 +59,7 @@ ClipBuilder 使用 raw 轨：
 
 1. 通过 SegmentFinder 找到与 `[start_ms, end_ms]` 重叠的 raw 段。
 2. 校验相邻段间隙（连续性判据见下）。
-3. 构造临时 HLS m3u8，让 ffmpeg HLS demuxer 读取 `init.mp4 + fragments`。
+3. 构造临时 HLS m3u8，让 ffmpeg HLS demuxer 读取 `{track}_init.mp4 + fragments`（送标只吃 raw 轨，故用 `raw_init.mp4`）。
 4. 输出端重编码 libx264，获得 ms 级裁剪 mp4。
 
 代码明确说明不使用 concat demuxer，因为 fMP4 fragment 单独 demux 时缺 codec init。
@@ -65,8 +67,8 @@ ClipBuilder 使用 raw 轨：
 ## 连续性判据（按 step 实测节奏，非固定 10s）
 
 `_validate_continuity`（clip_builder.py:258）判断相邻 raw 段是否存在真实录制停顿。基准**不是**固定的
-段时长（EXTINF 因写死 `raw_fps=30` + 固定 300 帧切段恒 = 10.000s），而是**该 step 全量段相邻 `ts_us`
-间隔的中位数**（实测节奏）：
+段时长（切段按固定帧数 `ca_segment_len`，EXTINF = 帧数 / 该段实测 `eff_fps`；而文件名 `ts_us` 是墙钟），
+而是**该 step 全量段相邻 `ts_us` 间隔的中位数**（实测节奏）：
 
 ```
 baseline = median(相邻段 ts_us 间隔)
@@ -81,9 +83,45 @@ if excess > gap_tolerance_ms: 判真停顿 → 拒裁（error_code range_gap，�
 容差 `lab_export_gap_tolerance_ms`（settings.py，默认 **2000ms**，可运维调，`/submit` 透传）。此前按
 「假定 10s + 0.5s 容差」比对，**送标片越长越必然踩中**，误报 `range_gap`；本判据修复该长片误报。
 
-> 待核验遗留项（本次未修，见 update/20260614_LAB_CLIP_TIME_MODEL.md）：媒体轴（Σ EXTINF，按 30fps）
-> 与墙钟跨度分歧 → 播放偏快、告警 marker 漂移；`_run_ffmpeg` 的 offset 混用墙钟与媒体时间，深窗口下
-> 裁剪起点亚秒级偏移。彻底解法需录制按实测 fps 编码 + EXTINF=实测墙钟，属热路径改动。
+> 该判据本身与 EXTINF 无关，仍成立；但 `_validate_continuity` 的 docstring 还写着旧的「EXTINF 恒
+> 10.000s（按 `raw_fps=30` 推）」假设——raw 段早已改成按实测 `_effective_fps` 编码（见
+> [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)），那句注释是陈旧措辞，不影响逻辑。
+>
+> 遗留项（update/20260614_LAB_CLIP_TIME_MODEL.md 记的「媒体轴与墙钟分歧」）：**系统性分歧的根因已随
+> 逐段实测 fps 编码消除**。ClipBuilder 侧仍有两处未收口：段尾用 `_est_segment_duration_us`（相邻
+> `ts_us` 中位差）估算而非读 EXTINF；且**不过滤在途段**——回放与整段导出都有这道闸，只有送标没有，
+> 实测吃进未转码的裸 mp4v 段不报错、产出残片直接进 Label Studio（既有洞，静默产错标注素材）。
+
+## 整段导出（StepExporter）——与 ClipBuilder 分工
+
+`GET /lab-f3m8/download` 走 `app/services/lab/step_exporter.py`，把 `(task_id, step_id, track)` 的
+**全部已落盘段** remux 成单个 mp4 直接下载（取汇报素材 / 原片）。两条导出路径性质不同、**不合并**：
+
+| | `POST /submit`（ClipBuilder） | `GET /download`（StepExporter） |
+|---|---|---|
+| 范围 | ms 精度区间 | 整个 step 一轨 |
+| 编码 | `-ss/-to` + libx264 重编码 | `-c copy` 纯换容器 + `+faststart` |
+| 轨 | 恒 raw | `raw` \| `processed`（默认 processed，汇报要带框那轨） |
+| 去向 | Label Studio | HTTP attachment 响应 |
+
+> **`-c copy` 不是抄近路，是正解**：段落盘时已由 `hls_strategy` 转成 H.264/yuv420p/CRF23，导出只是
+> 换容器——磁盘速度、零 CPU、零二次画质损失。跟着 ClipBuilder 一起重编码等于白掉一次画质换零收益。
+
+`export()` 的关键约束（与 `ClipBuilder._run_ffmpeg` 同构，坑点相同）：
+
+- **不能用 `-f concat`**：段是 fMP4 fragment（无 moov），concat demuxer 单独 demux 找不到 codec init。
+  必须走 HLS demuxer，靠 `#EXT-X-MAP` 先吃 `{track}_init.mp4` 再串 fragment。
+- **必须自己补 `#EXT-X-ENDLIST`**：写入侧 playlist 是 LIVE 形态，ffmpeg 会当直播流只从 live edge
+  读末尾几段，前面全丢。
+- **临时 m3u8 必须落在 step 目录**：`EXT-X-MAP` 与段名都是相对 URI，放别处解析不到。
+- **时长与在途段判据同走 `parse_playlist_durations()`**：EXTINF 是段时长唯一真值（不能用文件名
+  `ts_us` 差重推），其键集合即「已完成 transcode+append 的段」，不在其中的是在途段必须过滤。
+- **缺 init → 503**，与 traceback playlist 同码同措辞（同一根因，服务端无法自愈，见
+  [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)）；无段 / 段全在途 → 404。
+- **孤儿回收**：产物落 `{base_dir}/.lab_exports/`，路由挂 `BackgroundTask` 响应发完即删；但客户端中途
+  断开时 Starlette 不保证跑到，且 `.lab_exports` 不在 `StorageCleanupWorker` 扫描范围内（它按
+  `metadata.json` 判 step 目录，非数字目录名被跳过），故 `export()` 开头自扫一遍超 30 min 的残留。
+- **不做产物缓存**（step 还在录制时段会增长，失效难判）、不限时长体积（成本在磁盘 IO 不在 CPU）。
 
 ## Label Studio Client
 
@@ -110,8 +148,10 @@ multipart 会把整个 mp4 读入内存。注释说明 Lab 场景下 clip 通常
 
 - `app/routers/lab.py`
 - `app/services/lab/clip_builder.py`
+- `app/services/lab/step_exporter.py`（整段导出）
 - `app/services/lab/label_studio_client.py`
 - `app/services/lab/runtime_config.py`
+- `app/services/traceback/segment_finder.py`（`parse_playlist_durations` 时长/在途段真源）
 - `app/static/lab/index.html`
-- `tests/test_lab_clip_builder.py`
+- `tests/test_lab_clip_builder.py`、`tests/test_lab_step_exporter.py`
 

@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -54,6 +54,19 @@
 ## Lab
 
 - `tests/test_lab_clip_builder.py`：Lab 裁剪构建。
+- `tests/test_lab_step_exporter.py`：整段导出（在途段过滤、缺 init、临时 m3u8 清理、孤儿回收）。
+
+## 离线帧反查（`frame_tracker`）
+
+**两个测试互补，都要跑**——边界数学与「解出来的像素是不是那一帧」是两回事：
+
+- `tests/test_frame_tracker_boundary.py`（进 `pytest tests/`）：**seam 单测，不起 ffmpeg**。子类覆盖
+  `_run_ffmpeg` 改为按 sidecar 合成 Frame（真实实现的契约就是「产出 `sidecar[k_start..k_end]` 对应的
+  帧」），造数只需空 `raw_segment_{ts_us}.mp4` 占位（`SegmentFinder` 只解析文件名）+ 真 `.idx`；复用
+  `tmp_storage` fixture。覆盖段级/帧级边界、空区间、缺 sidecar 降级。
+- `integration_tests/test_frame_tracker_roundtrip.py`（手动跑，约 10s）：**唯一能抓 ts↔像素错配的手段**。
+  只依赖 ffmpeg，不需要 RTSP/DB/后端服务；走真实 `HLSPersistenceStrategy` 落盘再读回，帧内中心色块编码
+  frame_id（三通道 16 阶量化抗 H.264 有损）逐帧比对。写 `database/9900002/` 后自清理。
 
 ## 覆盖率基线与缺口分层
 
@@ -74,6 +87,7 @@
 - 修改清理流程时，补结算告警归属和残余段 flush 测试。
 - 修改 Gateway 配置时，补 relaxed/bypass/normal 三类路径测试。
 - 修改 Lab 上传时，补单段失败不影响整请求的响应结构测试。
+- 动 sidecar 写读顺序或 `frame_tracker` 边界时，seam 单测 + round-trip 两个都要跑（前者抓边界、后者抓像素错配）。
 
 ## 代码来源
 

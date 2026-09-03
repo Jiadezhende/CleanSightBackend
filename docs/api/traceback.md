@@ -135,7 +135,7 @@ http://<host>:8000/media/segment/<token>
 动态生成（不是 serve 落盘文件），四个性质：
 
 - **VOD**（带 `#EXT-X-ENDLIST`），即使任务未封档也当完整点播处理。
-- **fMP4**，`#EXT-X-MAP` 的 init 段不可缺——**裸的 `/media/segment/{token}` 单独播不了**，浏览器解不了无 init 的 fragment。init 段是 step 级共享的一份 `init.mp4`。
+- **fMP4**，`#EXT-X-MAP` 的 init 段不可缺——**裸的 `/media/segment/{token}` 单独播不了**，浏览器解不了无 init 的 fragment。init 段**按轨各一份**（`raw_init.mp4` / `processed_init.mp4`），同轨内所有段共享；两轨是独立 playlist，不可互指。
 - 段 / init URL 都是 **token 化绝对地址**，host 取自请求。
 - **只收「写入侧 playlist 里已有 `#EXTINF`」的段**，在途段（mp4v 已落盘但转码+append 未完成）被过滤——放进去只能填估算时长，会与 fMP4 内部 tfdt 时间戳对不上产生 hls.js 缓冲洞。EXTINF 时长直接回读写入侧 playlist，不重新推导。
 
@@ -148,7 +148,7 @@ http://<host>:8000/media/segment/<token>
 | `422` | 缺 `step_id`，或 `track` 非 `raw`/`processed` | `{"detail":[...]}`（FastAPI 校验格式） |
 | `404`（A） | 该 `(task_id, step_id, track)` 目录下**一个段都没有** | `{"error":"Resource not found","detail":"...","resource_type":"Segments","resource_id":"..."}` |
 | `404`（B） | 有段但**全是在途段**（经 playlist EXTINF 过滤后为空） | `{"detail":"No playable segments yet"}` |
-| `503` | 缺 `init.mp4`（历史段未迁移，需运维转码，服务端无法自愈） | `{"detail":{"error":"HLS init segment missing","detail":"..."}}` |
+| `503` | 缺 `{track}_init.mp4`（旧格式产物，或首段仍在 transcode；服务端无法自愈，**无迁移路径**） | `{"detail":{"error":"HLS init segment missing","detail":"..."}}` |
 
 > **两处不一致，务必只认 status code**：
 > ① 两种 404 的 body 形态不同——A 走异常模型（带 `error`/`resource_type`/`resource_id`），B 是裸 `HTTPException`（**只有 `detail`**）。别靠 body 字段区分「无段」和「全在途」。
@@ -183,7 +183,7 @@ http://<host>:8000/media/segment/<token>
 | `404`（B） | 找到了段但**全在途**（EXTINF 过滤后为空） | `{"detail":"No playable segments yet"}` |
 | `422` | `track` 非法，或 `n_before`/`n_after` 超范围 | `{"detail":[...]}` |
 | `503`（DB） | 拉告警时 DB 不可用 | `{"error":"Database unavailable","detail":"...","retryable":true}` |
-| `503`（init） | 缺 `init.mp4` | `{"detail":{"error":"HLS init segment missing",...}}` |
+| `503`（init） | 缺 `{track}_init.mp4` | `{"detail":{"error":"HLS init segment missing",...}}` |
 
 > 同上：两种 404 body 不一致；两种 503（DB vs init）body 也不一致。**判分支只认 status code。**
 

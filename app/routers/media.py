@@ -85,7 +85,7 @@ async def get_init(token: str = PathParam(..., description="media init segment t
         logger.info("[Media] Init token rejected: %s", e)
         raise HTTPException(status_code=403, detail="Invalid or expired token")
 
-    if payload.filename != "init.mp4":
+    if not payload.filename.endswith("init.mp4"):
         raise HTTPException(status_code=400, detail="Token does not point to init segment")
 
     path = _resolve_media_path(payload.task_id, payload.step_id, payload.filename)

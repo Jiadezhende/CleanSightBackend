@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-02
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -73,7 +73,7 @@
 - [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)：说明 HLS/告警持久化队列、worker、慢 IO 分离、fMP4 转码和告警上报。
 - [SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)：说明全局健康监控、断流重连、孤儿状态检测和统一 cleanup_client。
 - [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)：说明 SegmentFinder、MediaToken、追溯接口、媒体 token 鉴权和 VOD playlist。
-- [SERVICE_LAB.md](SERVICE_LAB.md)：说明 Lab 裁剪 raw 视频、Label Studio 上传、配置和失败隔离策略。
+- [SERVICE_LAB.md](SERVICE_LAB.md)：说明 Lab 裁剪 raw 视频、整段导出下载、Label Studio 上传、配置和失败隔离策略。
 - [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)：说明 FastAPI Gateway、独立 MediaMTX Gateway、IP 白名单、限流和 RTSP TCP 代理。
 - [SERVICE_CONFIG.md](SERVICE_CONFIG.md)：说明环境变量、YAML 配置、Gateway、Lab 和各服务之间的配置耦合点。
 
@@ -84,5 +84,5 @@
 - [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)：说明异常边界层、GuardedExecutor、重试、健康监控和优雅关闭策略。
 - [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)：检测链路架构总览图（整体流程、流源/流算子角色分工、两种告警模式、各检测点详细流程），配合 DESIGN_EXTENDING_DETECTION 使用。
 - [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md)：说明如何新增 Detector（流源）、Operator（流算子，analyze+judge 合并）、YAML stage 配置和相关测试。
-- [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)：说明 fMP4、EXTINF 真值、tfdt、在途段过滤和时间轴计算的关键约束。
+- [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)：说明 fMP4、EXTINF 真值、timescale pin=90000、tfdt、在途段过滤、时间轴计算，以及逐帧 ts sidecar（`.idx`）与离线帧反查的关键约束。
 - [TESTING_MAP.md](TESTING_MAP.md)：索引现有测试覆盖面，并给后续改动提供优先补测方向。

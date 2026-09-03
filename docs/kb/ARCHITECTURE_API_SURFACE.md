@@ -16,7 +16,7 @@
 | `/ai` | `routers/ai.py` | 实时推理 WebSocket（渲染帧推送） |
 | `/task` | `routers/task.py` | 任务消息、告警历史查询，及大屏只读清单（`/task/live` 在线、`/task/history` 历史） |
 | `/traceback` | `routers/traceback.py` | 告警证据 / VOD playlist / 时间轴溯源 |
-| `/media` | `routers/media.py` | HMAC token 化媒体访问（段 / init.mp4） |
+| `/media` | `routers/media.py` | HMAC token 化媒体访问（段 / `{track}_init.mp4`） |
 | `/health` | `routers/health.py` | 健康状态与监控统计 |
 | `/lab-f3m8` | `routers/lab.py` | 送标导出 + Label Studio（含静态 UI） |
 | `/admin-f3m8` | `routers/admin.py` | 运维 Admin（概览 / 客户端 / 指标，含静态 UI） |

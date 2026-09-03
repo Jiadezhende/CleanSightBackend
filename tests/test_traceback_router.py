@@ -35,11 +35,11 @@ def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_ini
     d.mkdir(parents=True, exist_ok=True)
     raw_pl_lines = [
         "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
-        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXT-X-MAP:URI="raw_init.mp4"',
     ]
     proc_pl_lines = [
         "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
-        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXT-X-MAP:URI="processed_init.mp4"',
     ]
     for ts_us in ts_us_list:
         (d / f"raw_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
@@ -51,7 +51,8 @@ def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_ini
     (d / "raw_playlist.m3u8").write_text("\n".join(raw_pl_lines) + "\n")
     (d / "processed_playlist.m3u8").write_text("\n".join(proc_pl_lines) + "\n")
     if write_init:
-        (d / "init.mp4").write_bytes(b"\x00" * 8)
+        (d / "raw_init.mp4").write_bytes(b"\x00" * 8)
+        (d / "processed_init.mp4").write_bytes(b"\x00" * 8)
     return d
 
 
@@ -255,7 +256,8 @@ async def test_playlist_vod_generation(client, media_root):
 
 @pytest.mark.asyncio
 async def test_playlist_503_when_init_missing(client, media_root):
-    """历史段未迁移（init.mp4 不存在）时 playlist 端点应返回 503 提示运行迁移脚本。"""
+    """缺 `{track}_init.mp4` 时 playlist 端点应 503——fMP4 无 init 段无法解码，
+    且服务端无法自愈（旧格式产物不支持迁移，或首段仍在 transcode）。"""
     _seed_task(media_root, task_id=42, step_id=1,
                ts_us_list=[1_000_000], write_init=False)
 
@@ -264,7 +266,8 @@ async def test_playlist_503_when_init_missing(client, media_root):
     detail = resp.json().get("detail", {})
     assert isinstance(detail, dict)
     assert "init" in detail.get("error", "").lower()
-    assert "transcode_segments_to_h264" in detail.get("detail", "")
+    # 只断言指认了缺失的具体文件，不绑定整句措辞
+    assert "raw_init.mp4" in detail.get("detail", "")
 
 
 @pytest.mark.asyncio
@@ -440,10 +443,10 @@ async def test_media_segment_missing_file_returns_404(client, media_root):
 @pytest.mark.asyncio
 async def test_media_init_with_valid_token(client, media_root):
     d = _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
-    expected = (d / "init.mp4").read_bytes()
+    expected = (d / "raw_init.mp4").read_bytes()
 
     token = MediaToken.default().sign(
-        task_id=10, step_id=1, filename="init.mp4", kind="init",
+        task_id=10, step_id=1, filename="raw_init.mp4", kind="init",
     )
     resp = await client.get(f"/media/init/{token}")
     assert resp.status_code == 200
