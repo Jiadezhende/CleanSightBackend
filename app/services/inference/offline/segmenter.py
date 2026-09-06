@@ -7,6 +7,8 @@
 管线两段：
     load(task_id, step_id) → List[FrameFeature]（帧级、多流已对齐、按 ts 升序）
         │
+        ▼ estimate_memory_mb(frames)  ← 可选：报成本，由 Runner 对内存预算判准入（超则 skipped）
+        │
         ▼ preprocess(frames)    ← 输入预处理层（预留）：raw bbox 序列不一定能直接喂模型，
         │                          需张量化/归一化/时间降采样/定长编码的模型在此转换
         ▼ segment(model_input)  ← 模型推理 + 解码为 SegmentFact
@@ -56,6 +58,18 @@ class OfflineSegmenter(ABC):
     def segment(self, model_input: Any) -> List[SegmentFact]:
         """消费 `preprocess` 的输出，做模型推理并解码为动作分段事实。"""
         raise NotImplementedError
+
+    def estimate_memory_mb(self, frames: Sequence[FrameFeature]) -> Optional[float]:
+        """可选：预估「本策略跑完这段输入」的峰值常驻内存（MB）。默认 None = 不报成本。
+
+        **策略层报成本、框架层判**：Runner 在 preprocess 之前调用本方法，超出内存预算时
+        直接返回 `skipped`（不抛异常、不覆盖旧事实），见 runner.py。返回 None 的策略不被拦
+        —— 轻量/规则型策略无需为此写一份估算。
+
+        估算须只依赖 load 后已知的量（帧数、检测框总数），不得跑真实 preprocess。
+        它是模型不是测量，会随特征管线与模型结构漂移，实现方须用单测把它钉在实测点上。
+        """
+        return None
 
     def debug_result(self) -> Optional[dict]:
         """可选：返回上一次 `segment()` 的逐帧调试产物（纯 dict），默认无。

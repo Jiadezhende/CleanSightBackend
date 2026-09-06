@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     ca_maxlen_seconds: int = 30    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
     ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
 
+    # 单进程 RAM 上限（MB）。**通用旋钮，不专属某条链路**：任何"输入规模由外部决定、
+    # 可能长到跑爆内存"的重批处理作业都应在动手前拿自己的成本估算与它比一比，超了就拒绝执行。
+    # 为什么要有：同机跑着在线 uvicorn 时，Linux OOM killer 挑 RSS 最大的进程杀——被杀的很可能
+    # 是 uvicorn 而不是肇事的批处理进程，于是"离线分析跑飞"直通"在线服务中断"。
+    # 当前消费方：离线分割 Runner 的准入闸 + 其 CLI 的 RLIMIT_AS 兜底（Linux only）。
+    # env: CLEANSIGHT_PROCESS_MEMORY_BUDGET_MB
+    process_memory_budget_mb: int = 4096
+
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
     mediamtx_internal_port: int = 18004  # MediaMTX 实际监听端口

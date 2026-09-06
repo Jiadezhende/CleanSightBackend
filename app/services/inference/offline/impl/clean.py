@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -78,13 +78,17 @@ PAIR_FEATURES = [
 ]
 
 
-@dataclass(frozen=True)
+# eq=False：features 是 ndarray，dataclass 自动生成的 __eq__ 会返回布尔数组、真值判定即报错。
+# 没有任何调用点依赖 ModelInput 的相等性，直接关掉比留个会炸的 __eq__ 干净。
+@dataclass(frozen=True, eq=False)
 class ModelInput:
     """clean 离线模型输入。
 
     features:
-        [T, F] 数值特征矩阵。基础 v2 为 113 维；具体模型可在
+        `[T, F] float32` ndarray 特征矩阵。基础 v2 为 113 维；具体模型可在
         覆盖的 preprocess() 内扩展为 121/249 等模型专属输入。
+        **刻意不是 List[List[float]]**：python 装箱是 8.1×（32.6 B/元素 vs 4 B），
+        且 recipe 链路要做多次全量 asarray/tolist 往返；ndarray 让整条链路零转换。
     feature_names:
         features 每一列的名字，便于训练仓和后端排查对齐问题。
     timestamps:
@@ -96,7 +100,7 @@ class ModelInput:
         feature_names 对齐，否则说明权重和后端输入不匹配。
     """
 
-    features: List[List[float]]
+    features: np.ndarray
     feature_names: List[str]
     timestamps: List[float]
     fps: float
@@ -104,7 +108,7 @@ class ModelInput:
 
     @property
     def frame_count(self) -> int:
-        return len(self.features)
+        return int(self.features.shape[0])
 
     @property
     def feature_dim(self) -> int:
@@ -140,13 +144,19 @@ def build_base_features(
     timestamps = [ff.ts for ff in frames]  # FrameFeature.ts 已在 store.load 边界统一 float
     frame_count = len(frames)
     if frame_count <= 0:
-        return ModelInput(features=[], feature_names=base_feature_names(), timestamps=[], fps=float(fps))
+        names = base_feature_names()
+        return ModelInput(
+            features=np.zeros((0, len(names)), dtype=np.float32),
+            feature_names=names,
+            timestamps=[],
+            fps=float(fps),
+        )
 
     effective_fps = _effective_fps(timestamps, float(fps))
-    object_arrays = _collect_object_arrays(frames, frame_width, frame_height)
-    features, names = _build_feature_matrix(object_arrays, frame_count, effective_fps)
+    object_buckets = _collect_object_buckets(frames, frame_width, frame_height)
+    features, names = _build_feature_matrix(object_buckets, frame_count, effective_fps)
     return ModelInput(
-        features=features.tolist(),
+        features=features,
         feature_names=names,
         timestamps=timestamps,
         fps=effective_fps,
@@ -156,7 +166,7 @@ def build_base_features(
 
 def base_feature_names() -> List[str]:
     """基础 v2 的 113 个特征列名（跑一遍空矩阵取名，避免维护第二份清单）。"""
-    return _build_feature_matrix({name: [] for name in OBJECTS}, 1, 7.5)[1]
+    return _build_feature_matrix(_empty_buckets(1), 1, 7.5)[1]
 
 
 def _finite_matrix(values: np.ndarray) -> np.ndarray:
@@ -164,15 +174,24 @@ def _finite_matrix(values: np.ndarray) -> np.ndarray:
     return np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
-def _collect_object_arrays(
-    frames: Sequence[FrameFeature], frame_width: int, frame_height: int
-) -> Dict[str, List[np.ndarray]]:
-    """把每帧检测框按目标类别归拢成 {obj: [每检测框一个 [T,5] 稀疏数组]}。
+def _empty_buckets(frames: int) -> Dict[str, List[List[np.ndarray]]]:
+    """全空的按帧桶（每个目标一条长度 = frames 的空桶列表）。"""
+    return {name: [[] for _ in range(frames)] for name in OBJECTS}
 
-    每帧遍历 `FrameFeature.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
+
+def _collect_object_buckets(
+    frames: Sequence[FrameFeature], frame_width: int, frame_height: int
+) -> Dict[str, List[List[np.ndarray]]]:
+    """把每帧检测框按目标类别归拢成 {obj: 按帧下标的桶列表}，桶内是该帧该类的 5 元向量。
+
+    每帧遍历 `FrameFeature.by_source` 各流的检测（多流按帧合并，落进同一个帧桶）。
+    行向量为 `[present, cx, cy, area, conf]`，present 恒为 1.0（进了桶就是检到了）。
+
+    **不物化时间轴**：曾经这里给每个检测框分配一条全长 `[T,5]` 数组（一个框只有 1 帧有值、
+    填充率 1/T），内存 = 20 B × D × T 即 O(T²)——T=9000 时约 8 GB；且下游选槽位要按帧重扫
+    整段全部数组，时间也是 O(T²)。按帧装桶后内存/时间都只与检测框总数 D 线性相关。
     """
-    frame_count = len(frames)
-    out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
+    out = _empty_buckets(len(frames))
     for idx, ff in enumerate(frames):
         # 帧级分辨率优先（pool 盖章、store 回读还原）；缺失回退传入默认。同帧各流同值。
         width = max(1, int(ff.frame_width or frame_width))
@@ -183,15 +202,16 @@ def _collect_object_arrays(
                 if obj is None:
                     continue
                 cx, cy, area = _bbox_to_center_area(det, width, height)
-                arr = np.zeros((frame_count, 5), dtype=np.float32)
-                arr[idx] = (
-                    1.0,
-                    float(cx),
-                    float(cy),
-                    float(area),
-                    max(0.0, min(1.0, float(det.confidence))),
-                )
-                out[obj].append(arr)
+                out[obj][idx].append(np.array(
+                    (
+                        1.0,
+                        float(cx),
+                        float(cy),
+                        float(area),
+                        max(0.0, min(1.0, float(det.confidence))),
+                    ),
+                    dtype=np.float32,
+                ))
     return out
 
 
@@ -304,12 +324,18 @@ def _impute_short_gaps(raw: np.ndarray, fps: float, max_gap: int = 6) -> Tuple[n
     return feature, active
 
 
-def _select_hand_slots(hand_arrs: List[np.ndarray], frames: int) -> Tuple[np.ndarray, List[np.ndarray]]:
+# 下面两个选槽位函数吃「按帧桶」：桶里只有该帧真检到的框（present 恒 1），故不再需要
+# 「扫整段全部框、过滤 present>0」——旧写法每帧重扫 D_obj 个全长数组，是时间上的另一处 O(T²)。
+# 候选的帧内次序 = 检测遍历序（与旧实现在该帧上的投影一致），配合 list.sort 的稳定性，
+# 逐值结果与旧实现全等（回归测试见 tests/test_offline_feature_scale.py）。
+
+
+def _select_hand_slots(hand_buckets: List[List[np.ndarray]], frames: int) -> Tuple[np.ndarray, List[np.ndarray]]:
     """每帧按打分取 hand 的 top-2 槽位（双手），并返回逐帧 hand 计数。"""
     hand_count = np.zeros(frames, dtype=np.float32)
     slots = [np.zeros((frames, 5), dtype=np.float32), np.zeros((frames, 5), dtype=np.float32)]
     for t in range(frames):
-        candidates = [_as_box5(arr[t]) for arr in hand_arrs if _as_box5(arr[t])[0] > 0]
+        candidates = list(hand_buckets[t])
         hand_count[t] = len(candidates)
         candidates.sort(key=lambda row: _box_score(row), reverse=True)
         for slot_idx, row in enumerate(candidates[:2]):
@@ -317,13 +343,13 @@ def _select_hand_slots(hand_arrs: List[np.ndarray], frames: int) -> Tuple[np.nda
     return hand_count, slots
 
 
-def _select_top1_slot(arrs: List[np.ndarray], frames: int) -> Tuple[np.ndarray, np.ndarray]:
+def _select_top1_slot(buckets: List[List[np.ndarray]], frames: int) -> Tuple[np.ndarray, np.ndarray]:
     """每帧取单目标 top-1 槽位（带上一帧中心做时序连续性打分），返回计数与槽位。"""
     count = np.zeros(frames, dtype=np.float32)
     slot = np.zeros((frames, 5), dtype=np.float32)
     prev_center: np.ndarray | None = None
     for t in range(frames):
-        candidates = [_as_box5(arr[t]) for arr in arrs if _as_box5(arr[t])[0] > 0]
+        candidates = list(buckets[t])
         count[t] = len(candidates)
         if not candidates:
             continue
@@ -334,7 +360,7 @@ def _select_top1_slot(arrs: List[np.ndarray], frames: int) -> Tuple[np.ndarray, 
 
 
 def _build_feature_matrix(
-    object_arrays: Dict[str, List[np.ndarray]],
+    object_buckets: Dict[str, List[List[np.ndarray]]],
     frames: int,
     fps: float,
 ) -> Tuple[np.ndarray, List[str]]:
@@ -344,7 +370,7 @@ def _build_feature_matrix(
     centers: Dict[str, np.ndarray] = {}
     active: Dict[str, np.ndarray] = {}
 
-    hand_count, hand_slots = _select_hand_slots(object_arrays.get("hand", []), frames)
+    hand_count, hand_slots = _select_hand_slots(object_buckets["hand"], frames)
     blocks.append((np.clip(hand_count, 0, 3) / 3.0)[:, None].astype(np.float32))
     names.append("hand_count")
     hand_centers = []
@@ -370,7 +396,7 @@ def _build_feature_matrix(
     for obj in OBJECTS:
         if obj == "hand":
             continue
-        count, slot = _select_top1_slot(object_arrays.get(obj, []), frames)
+        count, slot = _select_top1_slot(object_buckets[obj], frames)
         feature, obj_active = _impute_short_gaps(slot, fps)
         blocks.append(np.concatenate([(np.clip(count, 0, 3) / 3.0)[:, None], feature], axis=1).astype(np.float32))
         names += [
@@ -418,9 +444,8 @@ def _build_feature_matrix(
 
 def _with_features(model_input: ModelInput, features: np.ndarray, names: List[str], version: str) -> ModelInput:
     """基于原 ModelInput 换一套特征/列名/版本，重建新 ModelInput（含 finite 兜底）。"""
-    features = _finite_matrix(features)
     return ModelInput(
-        features=features.tolist(),
+        features=_finite_matrix(features),
         feature_names=names,
         timestamps=list(model_input.timestamps),
         fps=float(model_input.fps),
@@ -442,7 +467,7 @@ def _centered_mean(values: np.ndarray, radius: int) -> np.ndarray:
 
 def add_centered_window_stats(model_input: ModelInput, windows: Tuple[int, ...] = (5, 15)) -> ModelInput:
     """recipe：对 present/conf/speed 等列追加多尺度居中滑窗均值（BiGRU 用）。"""
-    feature = np.asarray(model_input.features, dtype=np.float32)
+    feature = model_input.features  # 已是 [T,F] float32 ndarray（ModelInput 契约）
     names = list(model_input.feature_names)
     selected = [
         idx for idx, name in enumerate(names)
@@ -483,7 +508,7 @@ def _near_score(dist: np.ndarray) -> np.ndarray:
 
 def add_business_priors(model_input: ModelInput) -> ModelInput:
     """recipe：按业务规则叠加 8 维动作先验（接近度×存在×运动等），ASFormer/BiGRU 用。"""
-    x = np.asarray(model_input.features, dtype=np.float32)
+    x = model_input.features  # 已是 [T,F] float32 ndarray（ModelInput 契约）
     names = list(model_input.feature_names)
     n = {name: idx for idx, name in enumerate(names)}
 
@@ -541,6 +566,17 @@ def add_business_priors(model_input: ModelInput) -> ModelInput:
     )
 
 
+# ==================== 内存成本估算系数（D5：策略层报成本，框架层判） ====================
+#
+# 系数取自 docs/update/20260905_TEMPORAL_MEMORY_BOUNDS_PROPOSAL.md §三「证据链」的实测点。
+# 这是**模型不是测量**：改了特征管线或模型结构就会失准，故 tests/test_offline_pipeline.py
+# 把它钉在那几个实测点上。Runner 用它做准入判断，超预算返回 skipped（见 offline/runner.py）。
+_TORCH_BASELINE_BYTES = 300.0 * 1024 * 1024     # import torch + 权重的常驻底噪，约 300 MB
+_LOAD_BYTES_PER_FRAME = 2_600.0                 # FeatureStore.load 回读的 List[FrameFeature] 常驻（严格线性）
+_BUCKET_BYTES_PER_DETECTION = 20.0              # 按帧桶：每框一条 5×float32
+_FEATURE_MATRIX_COPIES = 3                      # base → center_window → priors 链路的峰值并存份数
+
+
 class _CleanTorchSegmenter(OfflineSegmenter):
     """clean 模型策略基类：torch 模型加载 + 推理 + SegmentFact 解码。
 
@@ -551,6 +587,11 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
     model_version = "clean_model_v1"
     feature_method = "v2"
+
+    # 成本估算用的模型侧系数（子类按自身 recipe / 结构覆盖）。默认取 MS-TCN+BiLSTM 的口径，
+    # 与 `CleanSegmenter` 别名指向的 baseline 一致。
+    est_feature_dim = 113                  # preprocess 产出的列数（113 / 121 / 249）
+    est_forward_bytes_per_frame = 7_700.0  # 前向激活的线性项（MS-TCN+BiLSTM 实测 ≈7.7 KB/帧）
 
     def __init__(
         self,
@@ -579,6 +620,29 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         需叠加模型专属 recipe 的子类覆盖本方法，用 `super().preprocess()` 取基础特征后再变换。
         """
         return build_base_features(frames, self.fps, self.frame_width, self.frame_height)
+
+    def estimate_memory_mb(self, frames: Sequence[FrameFeature]) -> Optional[float]:
+        """预估本策略跑完这段输入的峰值常驻内存（MB），供 Runner 做准入判断。
+
+        只吃 `len(frames)` 与检测框总数——两者 load 后已知，不依赖「每帧几个框」的假设系数。
+        分项与系数见模块级 `_TORCH_BASELINE_BYTES` 一段的注释。
+        """
+        t = len(frames)
+        if t <= 0:
+            return _TORCH_BASELINE_BYTES / (1024.0 * 1024.0)
+        detections = sum(len(fd.detections) for ff in frames for fd in ff.by_source.values())
+        total = (
+            _TORCH_BASELINE_BYTES
+            + _LOAD_BYTES_PER_FRAME * t
+            + _BUCKET_BYTES_PER_DETECTION * detections
+            + _FEATURE_MATRIX_COPIES * 4.0 * t * self.est_feature_dim
+            + self.estimate_forward_bytes(t)
+        )
+        return total / (1024.0 * 1024.0)
+
+    def estimate_forward_bytes(self, t: int) -> float:
+        """模型前向激活的内存估算（字节）。默认线性于帧数；非线性结构的子类覆盖。"""
+        return self.est_forward_bytes_per_frame * t
 
     def segment(self, model_input: ModelInput) -> List[SegmentFact]:
         """跑模型得到逐帧标签，解码成 SegmentFact；未配 model_path 硬失败，不做规则降级。"""
@@ -896,6 +960,8 @@ class CleanMSTCNBiLSTMSegmenter(_CleanTorchSegmenter):
 
     model_version = "clean_mstcn_bilstm_v1"
     feature_method = "v2"
+    est_feature_dim = 113
+    est_forward_bytes_per_frame = 7_700.0  # 实测 ≈7.7 KB/帧（T=18000 时 138 MB）
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_mstcn_bilstm(in_dim, class_count)
@@ -910,9 +976,20 @@ class CleanASFormerSegmenter(_CleanTorchSegmenter):
 
     model_version = "clean_asformer_v1"
     feature_method = "business_priors"
+    est_feature_dim = 121
 
     def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
         return add_business_priors(super().preprocess(frames))
+
+    def estimate_forward_bytes(self, t: int) -> float:
+        """ASFormer 的前向是 **O(T²)**：`Block.forward` 的 `nn.MultiheadAttention(x,x,x)` 无
+        `attn_mask`，注意力矩阵在 CPU 实打实物化。系数 66.7 B×T² 由实测反解
+        （T=4500/9000/13500/18000 → 1.7/5.4/11.6/20.3 GB），线性项相形之下可忽略。
+
+        注：提案 D2/D3 要把这里改成按 checkpoint 的 `train_slice_frames` 分块前向，届时本式
+        随之改为线性；在那之前，长 step 走 ASFormer 会被 Runner 的预算闸挡下——这是期望行为。
+        """
+        return 66.7 * float(t) * float(t)
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_asformer(in_dim, class_count)
@@ -927,6 +1004,8 @@ class CleanBiGRUSegmenter(_CleanTorchSegmenter):
 
     model_version = "clean_bigru_v1"
     feature_method = "window_stats+business_priors"
+    est_feature_dim = 249
+    est_forward_bytes_per_frame = 1_800.0  # 实测 ≈1.8 KB/帧（T=18000 时 33 MB）
 
     def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
         return add_business_priors(add_centered_window_stats(super().preprocess(frames)))

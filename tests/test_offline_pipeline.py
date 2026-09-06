@@ -4,8 +4,8 @@
 """
 
 import json
-import math
 
+import numpy as np
 import pytest
 
 from factories import make_detection, make_frame_detections, make_frame_feature
@@ -286,7 +286,10 @@ class TestCleanSegmenter:
         assert isinstance(mi, ModelInput)
         assert mi.frame_count == 4 and mi.feature_dim == 113  # v2: hand top-2 + top-1/impute/relations
         assert mi.feature_version == "clean_bbox_v2_top1_impute"
-        assert all(math.isfinite(v) for row in mi.features for v in row)
+        # features 是 [T,F] float32 ndarray（非 List[List[float]]：装箱 8.1× + 链路多次全量往返）
+        assert isinstance(mi.features, np.ndarray)
+        assert mi.features.dtype == np.float32 and mi.features.shape == (4, 113)
+        assert np.isfinite(mi.features).all()
         with pytest.raises(ValueError, match="model_path"):
             seg.segment(mi)
 
@@ -331,6 +334,70 @@ class TestCleanSegmenter:
         with pytest.raises(ValueError, match="model_path"):
             seg.segment(seg.preprocess(_frames(streams)))
         assert seg.debug_result() is None
+
+
+# ============================ 内存成本估算器 ============================
+
+
+def _synth_frames_for_estimate(frame_count: int, boxes_per_frame: int):
+    """只喂给估算器的最小合成序列（估算只吃帧数与检测框数，框内容无关）。"""
+    return [
+        FrameFeature(ts=i / 15.0, by_source={"clean_large": make_frame_detections(
+            n=boxes_per_frame, class_name="hand", ts=i / 15.0)})
+        for i in range(frame_count)
+    ]
+
+
+class TestMemoryEstimator:
+    """把估算器钉在提案 §三 实测点上——它是模型不是测量，会随代码漂移。
+
+    容差 ±25%：这道闸只需要挡量级失控，钉太紧会因系数微调变成噪声源。
+    """
+
+    def test_mstcn_matches_measured_points(self):
+        from app.services.inference.offline.impl.clean import CleanMSTCNBiLSTMSegmenter
+        seg = CleanMSTCNBiLSTMSegmenter(name="m", subscribes=["clean_large"])
+        # T=9000、5 框/帧：torch 基线 300 + load 2.6KB/帧 + 特征 3×4B×T×113 + 前向 7.7KB/帧
+        est = seg.estimate_memory_mb(_synth_frames_for_estimate(9000, 5))
+        expected = (300 * 1024 * 1024 + 2600 * 9000 + 20 * 45000
+                    + 3 * 4 * 9000 * 113 + 7700 * 9000) / (1024 ** 2)
+        assert 0.75 * expected <= est <= 1.25 * expected
+        # 线性：帧数翻倍，减掉常数基线后成本翻倍
+        est2 = seg.estimate_memory_mb(_synth_frames_for_estimate(18000, 5))
+        assert 1.9 <= (est2 - 300) / (est - 300) <= 2.1
+
+    def test_asformer_quadratic_matches_measured_5_4gb_at_9000(self):
+        """ASFormer 全局注意力实测 T=9000 → 5.4 GB（系数反解 66.7 B×T²）。"""
+        from app.services.inference.offline.impl.clean import CleanASFormerSegmenter
+        seg = CleanASFormerSegmenter(name="a", subscribes=["clean_large"])
+        est = seg.estimate_memory_mb(_synth_frames_for_estimate(9000, 5))
+        measured_mb = 5.4e9 / (1024 ** 2)
+        assert 0.75 * measured_mb <= est <= 1.25 * measured_mb
+        # 平方项主导：帧数翻倍 → 约 4×
+        est2 = seg.estimate_memory_mb(_synth_frames_for_estimate(18000, 5))
+        assert 3.7 <= (est2 - 300) / (est - 300) <= 4.1
+
+    def test_bigru_is_cheapest_of_the_three(self):
+        """三模型相对量级：BiGRU 前向最省（1.8 KB/帧），但特征列最多（249）。"""
+        from app.services.inference.offline.impl.clean import (
+            CleanASFormerSegmenter, CleanBiGRUSegmenter, CleanMSTCNBiLSTMSegmenter,
+        )
+        frames = _synth_frames_for_estimate(9000, 5)
+        bigru = CleanBiGRUSegmenter(name="b", subscribes=["clean_large"]).estimate_memory_mb(frames)
+        mstcn = CleanMSTCNBiLSTMSegmenter(name="m", subscribes=["clean_large"]).estimate_memory_mb(frames)
+        asformer = CleanASFormerSegmenter(name="a", subscribes=["clean_large"]).estimate_memory_mb(frames)
+        assert bigru < mstcn < asformer
+        # 修完 A 之后特征侧已线性且便宜：非 ASFormer 两家 10 min step 都在 500 MB 内
+        assert mstcn < 500 and bigru < 500
+
+    def test_empty_input_reports_only_torch_baseline(self):
+        from app.services.inference.offline.impl.clean import CleanMSTCNBiLSTMSegmenter
+        seg = CleanMSTCNBiLSTMSegmenter(name="m", subscribes=["clean_large"])
+        assert seg.estimate_memory_mb([]) == pytest.approx(300.0)
+
+    def test_base_class_reports_nothing(self):
+        """基类默认不报成本 → 轻量策略无需为准入闸写估算。"""
+        assert BrushRulesSegmenter(name="p", subscribes=["a"]).estimate_memory_mb([]) is None
 
 
 # ============================ Runner ============================
@@ -419,6 +486,40 @@ class TestOfflineRunner:
         assert not dbg_path.exists()
         assert not (tmp_path / "1" / "2" / "facts.jsonl").exists()
 
+    def test_over_budget_skipped_no_write(self, tmp_path):
+        """超内存预算：skipped（不抛异常、不落 facts），与"订阅 source 无特征"同口径。"""
+        _write_features(tmp_path, 1, 2)
+        offline = dict(_OFFLINE_OK, **{"class": "test_offline_pipeline.GreedySegmenter"})
+        res = OfflineRunner(base_dir=tmp_path, config=_config(offline)).run(
+            OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "skipped"
+        assert res.producer == "clean_seg" and res.segment_count == 0
+        assert "超内存预算" in res.message
+        assert not (tmp_path / "1" / "2" / "facts.jsonl").exists()
+
+    def test_within_budget_completes(self, tmp_path):
+        """同一策略、预算调大到能容下 → 正常 completed（证明拦的是预算不是策略本身）。"""
+        _write_features(tmp_path, 1, 2)
+        offline = dict(_OFFLINE_OK, **{"class": "test_offline_pipeline.GreedySegmenter"})
+        res = OfflineRunner(base_dir=tmp_path, config=_config(offline),
+                            memory_budget_mb=2_000_000).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "completed" and res.segment_count == 1
+
+    def test_estimator_failure_does_not_block(self, tmp_path):
+        """估算器抛异常 → 放行（闸门失准不该让本可跑通的任务失败；Linux 侧另有 RLIMIT_AS）。"""
+        _write_features(tmp_path, 1, 2)
+        offline = dict(_OFFLINE_OK, **{"class": "test_offline_pipeline.BadEstimatorSegmenter"})
+        res = OfflineRunner(base_dir=tmp_path, config=_config(offline)).run(
+            OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "completed"
+
+    def test_no_estimate_is_not_gated(self, tmp_path):
+        """策略不报成本（基类默认 None）→ 不被拦。"""
+        _write_features(tmp_path, 1, 2)
+        res = OfflineRunner(base_dir=tmp_path, config=_config(_OFFLINE_OK),
+                            memory_budget_mb=1).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "completed"
+
     def test_resolve_stage_fallback_to_mock(self, tmp_path):
         """未配数字 step_id(-1) 经 resolve_stage 回退 MOCK.offline，读数字 -1 分区、completed。"""
         cfg = InferenceConfig({"stages": {"MOCK": {
@@ -443,6 +544,20 @@ class BoomSegmenter(OfflineSegmenter):
 
     def segment(self, model_input):
         raise RuntimeError("boom")
+
+
+class GreedySegmenter(BrushRulesSegmenter):
+    """报一个巨大内存成本的策略，用来验证准入闸（不依赖真实权重/torch）。"""
+
+    def estimate_memory_mb(self, frames):
+        return 1_000_000.0
+
+
+class BadEstimatorSegmenter(BrushRulesSegmenter):
+    """估算器自己炸了：闸门应放行而不是让本可跑通的任务失败。"""
+
+    def estimate_memory_mb(self, frames):
+        raise RuntimeError("estimator boom")
 
 
 class MarkerSegmenter(OfflineSegmenter):
@@ -480,6 +595,38 @@ class TestCli:
                        "--strategy", "test_offline_pipeline.BoomSegmenter"])
         assert rc == 1
         assert "error" in capsys.readouterr().out
+
+    def test_memory_budget_flag_reaches_runner(self, tmp_storage, monkeypatch, capsys):
+        """--memory-budget-mb 一路传到 Runner 的准入闸；超预算打印 skipped 且退出码仍为 0。"""
+        from app.services.inference.offline import runner as runner_mod
+        _write_features(tmp_storage, 1, 2)
+        offline = dict(_OFFLINE_OK, **{"class": "test_offline_pipeline.GreedySegmenter"})
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(offline))
+        from app.services.inference.offline import cli
+
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2",
+                       "--memory-budget-mb", "2000000"])
+        assert rc == 0 and "completed" in capsys.readouterr().out
+
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2", "--memory-budget-mb", "1"])
+        out = capsys.readouterr().out
+        assert rc == 0  # skipped 不是错误
+        assert "skipped" in out and "超内存预算" in out
+
+    def test_main_does_not_touch_rlimit_in_process(self, tmp_storage, monkeypatch):
+        """默认 apply_process_limits=False：in-process 调 main() 不得改本进程 rlimit。
+
+        守的是一条会伤到测试进程自身的脚：RLIMIT_AS 作用于**调用者进程**，而 cli.main()
+        会被这些用例在 pytest 进程内直接调；真入口在 `__main__` 里显式传 True。
+        """
+        from app.services.inference.offline import runner as runner_mod
+        from app.services.inference.offline import cli
+        _write_features(tmp_storage, 1, 2)
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        called = []
+        monkeypatch.setattr(cli, "_limit_address_space", lambda mb: called.append(mb))
+        assert cli.main(["run", "--task-id", "1", "--step-id", "2"]) == 0
+        assert called == []
 
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""

@@ -3,8 +3,9 @@
 调用方（CLI / 测试）显式给 `(task_id, step_id[, strategy])`，Runner：
     1. 按 step_id 取 stage 配置，实例化 offline 策略（未启用则 skip）；
     2. 一次扫 FeatureStore 读订阅 source 的完整序列；
-    3. 策略 preprocess → segment 产出 SegmentFact；
-    4. 校验 + 补 producer + 排序，幂等 replace 写 FactLedger。
+    3. 准入闸：策略报内存成本，超单进程预算则 skip（不覆盖旧事实）；
+    4. 策略 preprocess → segment 产出 SegmentFact；
+    5. 校验 + 补 producer + 排序，幂等 replace 写 FactLedger。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
 Runner 自建绑定 `settings.storage_base_dir` 的 FeatureStore / FactLedger（不复用在线单例——本就独立进程）。
@@ -56,6 +57,7 @@ class OfflineRunner:
         base_dir: Optional[Union[str, Path]] = None,
         config_path: Optional[Path] = None,
         config: Optional[InferenceConfig] = None,
+        memory_budget_mb: Optional[int] = None,
     ):
         base = Path(base_dir) if base_dir is not None else settings.storage_base_dir
         self._base_dir = Path(base)
@@ -63,6 +65,11 @@ class OfflineRunner:
         self._fact_ledger = FactLedger(base)
         self._config_path = config_path
         self._config = config  # 显式注入优先（测试用）；否则走 load_stage_config 单例
+        # 准入预算：None 时取通用的单进程 RAM 上限（settings.process_memory_budget_mb）。
+        self._memory_budget_mb = (
+            int(memory_budget_mb) if memory_budget_mb is not None
+            else int(settings.process_memory_budget_mb)
+        )
 
     def run(self, spec: OfflineRunSpec) -> OfflineRunResult:
         config = self._config if self._config is not None else load_stage_config(self._config_path)
@@ -88,6 +95,12 @@ class OfflineRunner:
                 "skipped", producer, 0, f"订阅 source 无特征: {empty}"
             )
 
+        over_budget = self._check_memory_budget(segmenter, frames)
+        if over_budget is not None:
+            # 超预算：跳过，不覆盖旧事实（与"订阅 source 无数据"同口径）
+            logger.warning("[OfflineRunner] %s task=%s step=%s", over_budget, spec.task_id, spec.step_id)
+            return OfflineRunResult("skipped", producer, 0, over_budget)
+
         model_input = segmenter.preprocess(frames)
         facts = segmenter.segment(model_input)  # 算法异常向上抛出，不写
 
@@ -103,6 +116,30 @@ class OfflineRunner:
             spec.task_id, spec.step_id, producer, len(validated),
         )
         return OfflineRunResult("completed", producer, len(validated))
+
+    def _check_memory_budget(self, segmenter, frames) -> Optional[str]:
+        """准入闸：策略报成本、框架判预算。超预算返回说明文案，否则 None。
+
+        T 在这条链路上没有任何上限（FeatureStore 无行数上限、step 时长由外部切分决定），
+        所以"能跑多长"必须在动手前判一次，而不是等 OOM。判在 preprocess **之前**——
+        preprocess 本身就是最大的那笔开销，判在它之后等于没判。
+
+        策略不报成本（返回 None）就放行：轻量/规则型策略无需为此写一份估算。
+        估算异常同样放行——闸门失准不该让本可跑通的任务失败，Linux 侧还有 RLIMIT_AS 兜底（见 cli.py）。
+        """
+        try:
+            estimate_mb = segmenter.estimate_memory_mb(frames)
+        except Exception as e:
+            logger.warning("[OfflineRunner] 内存估算失败，跳过预算闸: %s", e)
+            return None
+        if estimate_mb is None or estimate_mb <= self._memory_budget_mb:
+            return None
+        detections = sum(len(fd.detections) for ff in frames for fd in ff.by_source.values())
+        return (
+            f"超内存预算: 估算 {estimate_mb:.0f} MB > 预算 {self._memory_budget_mb} MB"
+            f"（frames={len(frames)} detections={detections}）；"
+            f"缩短 step 时长，或调高 settings.process_memory_budget_mb / CLI --memory-budget-mb"
+        )
 
     def _maybe_write_debug(self, spec: OfflineRunSpec, segmenter) -> None:
         """策略若产逐帧调试产物（debug_result 非 None），落一份 offline_inference_result.json。
