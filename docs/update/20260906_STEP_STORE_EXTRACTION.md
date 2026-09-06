@@ -60,7 +60,7 @@
 |------------|--------|------|
 | 期 1：建包 + 搬 SegmentFinder + 命名真源 | `app/services/step_store/` | §1-§6 |
 | 期 2：格式知识去重 + router 下沉 | 同上 + `routers/traceback.py` | §7-§10 |
-| 期 3：段解码搬迁 + ffmpeg 工具去重 + 正名 | 同上 + `inference/offline/` | 后续任务 |
+| 期 3：段解码搬迁 + 正名 | 同上 + `inference/offline/` | §11-§12 |
 | 期 4：删除入口收口 + 产物注册表 | `step_store/purge.py` | 后续任务 |
 
 **边界（写进 `__init__.py` docstring，防后人往里塞）**：异步调度、**TTL 的调度与策略**、写侧 ffmpeg 转码参数、`FeatureStore` 的批缓冲与 owner fence、`MediaToken`、各家的 ffmpeg cmd、HTTP 状态码与 token 化 URL —— 全部留在原处。
@@ -173,9 +173,62 @@
 
 `playlist.py` 对 `finder` 的类型引用走 `TYPE_CHECKING`，避免包内模块级互引。
 
+---
+
+## 期 3：段解码搬迁 + 正名
+
+### 11. `Timeline` → `step_store/segment_decoder.SegmentDecoder`
+
+**搬迁的理由不是复用**——`FrameTracker` / `Timeline` 在生产代码里**零调用方**（只有 tests 与 integration_tests 用），唯一既定消费者是 ROI 三期。理由是 **sidecar 被劈开了**：
+
+```text
+.idx 这一个文件，期 1 后归三个包管
+  写内容   hls_strategy._update_timeline        persistence
+  命名     layout.sidecar_name / _name_for      step_store     ← 期 1 搬来
+  读内容   Timeline._load_sidecar               inference/offline
+           + 段内帧号 n ↔ 下标 k 的 1:1 对齐
+```
+
+那个 1:1 对齐是整个索引的地基（靠不拼 m3u8、不用 `-ss`、`-vsync 0` 保证，破了不报错、只静默取错帧）。写侧读侧隔着两个包，改一侧看不见另一侧。搬完名字与内容同居本包，与写侧只隔一层。
+
+`git mv frame_tracker.py → step_store/segment_decoder.py`：190 行的解码实现带着大量踩坑注释，历史跟着大头走。
+
+### 12. `FrameTracker` → `inference/offline/frame_finder.FrameFinder`
+
+**留在 offline**：「ts 位级相等对号、配不上就 ValueError」是消费侧策略，不是格式知识。与 `SegmentFinder` 成一组对仗——**段级找段、帧级找帧**。
+
+两者的失败契约相反，这正是它们分居的理由：
+
+| | 契约 | 缺数据时 |
+|---|------|---------|
+| `SegmentDecoder.iter` | 区间扫描，**宽容** | 缺 sidecar 跳过该段、空区间返回空 |
+| `FrameFinder.find` | 点查，**严格** | 任一 ts 配不上就 `ValueError` |
+
+新增 `decoder` 注入口，测试不必再 monkeypatch 模块属性（`monkeypatch.setattr(...frame_tracker.Timeline, Fake)` → `FrameFinder(..., decoder=Fake(...))`）。
+
+> 采用 `FrameFinder` 而非[数据模型正名提案](20260906_OFFLINE_DATA_MODEL_NAMING.md) A 档写的 `FrameLocator`，该提案对应行已同步修订。
+
+连带改名：`tests/test_frame_tracker_boundary.py` → `test_segment_decoder_boundary.py`，`integration_tests/test_frame_tracker_roundtrip.py` → `test_frame_lookup_roundtrip.py`（均 `git mv`）。两个被测对象分居两包但同居一份测试：共用同一个 seam，且拆开会让「宽容层 + 严格层」这对相反契约的用例互相看不见。
+
+### 13. 撤回：不建 `app/utils/ffmpeg.py`
+
+计划里原有一项「ffmpeg 起停工具 ×4 收口」（bin 解析 / 超时预算 / stderr 格式化），**评审后撤回**——三者都是过度包装：
+
+```text
+resolve_bin()         x or settings.ffmpeg_path，3 行
+budget(floor,n,per)   把 max(floor, n*per) 重新命名了一遍
+format_failure(...)   4 处输入形态本就不同（PIPE 的 str vs 临时文件的 fd）
+```
+
+**判据：重复值不值得抽，看它承载的知识显不显然。** 期 1-2 抽的每一样都带着一段论证、写错会静默出错（sidecar 逆运算、`bisect_right - 1`、EXTINF 不能用 ts 差重推、缺 ENDLIST 段全丢）；`max(floor, n*per)` 没有这种东西可论证，重复三遍不产生风险，抽出来也不消除风险。
+
+同样撤回的还有 `finder or SegmentFinder(get_default_base_dir())` 那处（一行）。
+
+> 顺带修正：上一轮把 stderr 截断长度 1500 / 500 / 全量的不一致当成缺陷提了——其实不是。三处面对的读者不同（异常给调用方、warning 给运维），不一致合理，不等于重复。
+
 ## 变更效果
 
-| 维度 | 变更前 | 变更后（期 1-2 后） |
+| 维度 | 变更前 | 变更后（期 1-3 后） |
 |------|--------|------------------|
 | 段文件名正则 | 2 份拷贝（写侧 / 读侧各一） | 1 份，`layout.SEGMENT_PATTERN` |
 | sidecar 命名 | 写侧 f-string 拼、读侧 `with_suffix` 反推，无关联 | `sidecar_name` / `sidecar_name_for` 同一模块内互为逆运算 |
@@ -185,6 +238,8 @@
 | 段二分定位 | 2 份，bisect vs np.searchsorted，off-by-one 各论证一遍 | 1 份 `locate_containing_index`，论证只写一处 |
 | init 判据 / 在途段过滤 | 各 2 份（注释已自认是复制） | 各 1 份 |
 | `routers/traceback.py` 的格式逻辑 | 102 行 | 41 行（只剩状态码、token、单位换算） |
+| sidecar 的名字与内容 | 命名在 step_store、内容解释在 offline，隔两包 | 同居 step_store，与写侧只隔一层 |
+| `Timeline` / `FrameTracker` | 名字像数据结构 / 像目标跟踪，且与三期 `SlotTracks` 撞词 | `SegmentDecoder` / `FrameFinder`，后者与 `SegmentFinder` 成对仗 |
 | `inference` / `lab` 的依赖方向 | 依赖 `traceback`（业务语义包） | 依赖 `step_store`（leaf） |
 | leaf 地位 | 无此概念 | 由 `test_step_store_is_a_leaf` 锁死 |
 
@@ -198,14 +253,17 @@
 | m3u8 逐字对账 | 三种形态（token URL / basename+MEDIA-SEQUENCE / basename 无 MEDIA-SEQUENCE）输出与改造前逐字相同 |
 | 段二分等价性 | `test_frame_tracker_boundary.py` 的 8 个段级裁剪用例全过，含「起点恰为段首帧」「区间早于首段」两个 off-by-one 用例 |
 | 误伤对账 | 代码中已无硬编码落盘名残留；未使用 import 已清（`re` / `Path` / `np.searchsorted`） |
-| 集成测试 | **未跑**（需真实 RTSP 流）；期 3 搬 `Timeline` 后必跑 `integration_tests/test_frame_tracker_roundtrip.py` |
+| **端到端 round-trip** | **13 / 13 PASS**（`integration_tests/test_frame_lookup_roundtrip.py`，期 3 后跑）。含 T1「1800 帧 ts 位级相等 + 像素 id 逐帧匹配」——这是唯一能抓「解出来的是不是那一帧」的手段，直接验证搬迁后 `n ↔ k` 的 1:1 地基仍成立；T11 缺 sidecar 降级只丢该段 150 帧 |
+
+> 该集成测试**不需要 RTSP、不碰数据库**（直接调 `HLSPersistenceStrategy` 走真实写路径，只需 ffmpeg），写 `database/9900002/` 且结束即自清理。
+> Windows 下须加 `PYTHONIOENCODING=utf-8`——脚本里的 ✅ 在 GBK 控制台会 `UnicodeEncodeError`（既有环境问题，与本次改动无关）。
 
 ## 遗留风险 / 后续任务
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
 | **新发现（本次未修）：`traceback` 的 `EXT-X-TARGETDURATION` 用 `round`，可能违反 RFC 8216 §4.3.3.1** | 该字段必须 **≥ 每个 EXTINF 的向上取整值**。三个消费方的算法是 `round`（traceback）/ `ceil`（step_exporter）/ `int+1`（clip_builder）——后两者恒安全，`round` 在「最长段时长小数部分 < 0.5」时会取到比实际段长小的整数（如 max EXTINF = 10.4 → 声明 10）。hls.js 通常宽容，但原生 HLS 播放栈（Safari / AVPlayer）可能拒绝；而该 router 恰恰专门为原生栈补过 HEAD 路由，说明它在服务范围内 | **需拍板**。改 `round` → `ceil` 是一行，但属行为变更（期 2 承诺零行为变更），故本期只把三种算法**原样**参数化保留、不擅自统一。建议单独一个小 PR 修，并在 dev 上用真实段长确认当前是否已经踩中 |
-| **期 3**：`Timeline` → `step_store/segment_decoder.SegmentDecoder`；`FrameTracker` → `offline/FrameFinder`；ffmpeg 起停工具 ×4 收口 | — | 零行为变更。`FrameFinder` 与 `SegmentFinder` 成对仗（段级找段、帧级找帧）。**注意**：[数据模型正名提案](20260906_OFFLINE_DATA_MODEL_NAMING.md) A 档写的是 `FrameLocator`，已改采 `FrameFinder`，落地时同步修订那一行 |
+| `segment_decoder` 让 step_store 有了第一个会起子进程的模块（看门狗线程 + 临时文件 stderr） | 本包此前是纯函数 + 无 I/O 的 `SegmentFinder`，「这个包会不会起进程」的认知负担变了 | 已在 `__init__.py` docstring 显式标注该模块**会起 ffmpeg 子进程**。依赖等级不受影响（`subprocess` 是 stdlib、`numpy` 是 L1），leaf 门禁照常绿 |
 | **期 4**：删除入口收口 + 产物注册表 + 修 P1-①②③ | 唯一有行为变更的一期 | 单独 PR。`cleanup_worker` **目前零单测覆盖**，先补 `tests/test_step_store_purge.py` 再改判据；dev 上先 dry-run 核对会删哪些目录，再开真删 |
 | **新发现（本次未修）**：`app/services/__init__.py` 顶层 `from .client import client_manager`，使**每个** `app.services.*` 子模块的 import 都付 0.28s 过路费 | 实测 `import app.services` 0.303s，而 `import app.services.step_store` 0.275s——即本包自身成本≈0，全是这笔过路费。正是规范 §3/§5 明令禁止的形态（单例应在 `instance.py`、`__init__` 不 re-export），只是门禁未覆盖 `app.services` 这一层 | 另案处理，不混进本次改动面。step_store 的耗时上限故取 1.0 与其他服务包一致，注释写明原因 |
 | `Timeline._build_cmd` 的 init 段此前硬编码 `raw_init.mp4`，本次改为 `layout.init_name(seg.track)` | `Timeline(track="processed")` 下原会拿 raw 的 init 解 processed 段（SPS/PPS 不匹配）。生产代码与测试均只走 `track="raw"`，故无实际影响 | 已随命名收口一并修正，属**顺带修掉的潜在错误**，非行为回归 |

@@ -707,7 +707,8 @@ class HLSPersistenceStrategy:
         **失败不抛**：sidecar 只服务离线反查，回放/下载/送标三条链路都不读它；而本函数
         排在 mp4 之前，抛出去会让 worker 重试耗尽后连整段视频一起丢（mp4 / playlist /
         metadata 全不落）——拿主产物给辅助索引陪葬。读侧本就按契约容忍缺 sidecar（见
-        frame_tracker `_load_sidecar`：跳过该段、不打断整条迭代），故此处降级为 warning。
+        step_store.segment_decoder `_load_sidecar`：跳过该段、不打断整条迭代），
+        故此处降级为 warning。
         """
         idx_path = target_dir / layout.sidecar_name("raw", layout.ts_to_us(timestamp))
         tmp = idx_path.with_suffix(".tmp")

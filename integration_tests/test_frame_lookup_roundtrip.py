@@ -1,17 +1,17 @@
 """
-HLS 帧反查（FrameTracker / Timeline）端到端 round-trip 测试
+HLS 帧反查（SegmentDecoder / FrameFinder）端到端 round-trip 测试
 
 不需要后端服务、RTSP、数据库或推理引擎，只需 FFmpeg：
 直接调 `HLSPersistenceStrategy` 走真实写路径落 fMP4 段 + `.idx` sidecar，
-再用 `FrameTracker` 按 ts 读回，逐帧比对。
+再用 `FrameFinder` 按 ts 读回，逐帧比对。
 
 **这是唯一能抓「ts ↔ 像素错配」的手段**：帧内中心色块编码了 frame_id
 （三通道 16 阶量化，抗 H.264 有损压缩），读回后解码 id 与期望 gid 逐帧比。
-`tests/test_frame_tracker_boundary.py` 用 seam 覆盖了同一套边界数学但不起
+`tests/test_segment_decoder_boundary.py` 用 seam 覆盖了同一套边界数学但不起
 ffmpeg，抓不到「解码出来的像素是不是那一帧」——两者互补，都要跑。
 
 用法:
-    python integration_tests/test_frame_tracker_roundtrip.py [--task_id 9900002] [--keep]
+    python integration_tests/test_frame_lookup_roundtrip.py [--task_id 9900002] [--keep]
 
 参数:
     --task_id <int>  测试任务 ID（默认 9900002，避开真实数据）
@@ -48,7 +48,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.domain.frame import Frame
-from app.services.inference.offline.frame_tracker import FrameTracker, Timeline
+from app.services.inference.offline.frame_finder import FrameFinder
+from app.services.step_store.segment_decoder import SegmentDecoder
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
 from app.settings import settings
 
@@ -136,11 +137,11 @@ def seed(task_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
-    def tl() -> Timeline:
-        return Timeline(task_id, STEP_ID)
+    def tl() -> SegmentDecoder:
+        return SegmentDecoder(task_id, STEP_ID)
 
-    def tracker() -> FrameTracker:
-        return FrameTracker(task_id, STEP_ID)
+    def tracker() -> FrameFinder:
+        return FrameFinder(task_id, STEP_ID)
 
     def t1_full() -> str:
         frames = list(tl().iter())
@@ -274,7 +275,7 @@ def run(task_id: int) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="FrameTracker 端到端 round-trip 测试")
+    parser = argparse.ArgumentParser(description="FrameFinder 端到端 round-trip 测试")
     parser.add_argument("--task_id", type=int, default=9900002,
                         help="测试任务 ID（默认 9900002，避开真实数据）")
     parser.add_argument("--keep", action="store_true",

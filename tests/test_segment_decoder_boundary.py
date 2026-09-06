@@ -1,15 +1,19 @@
 """
-FrameTracker / Timeline 边界单元测试（seam：不起 ffmpeg）
+SegmentDecoder / FrameFinder 边界单元测试（seam：不起 ffmpeg）
 
 段级 + 帧级裁剪是纯 searchsorted 数学，把 `_run_ffmpeg` 这个 I/O 边界替换成
 「按 sidecar 合成 Frame」的 seam，就能不依赖 ffmpeg 覆盖全部边界情形。
-真实解码（ts ↔ 像素是否错配）由 integration_tests/test_frame_tracker_roundtrip.py 端到端验。
+真实解码（ts ↔ 像素是否错配）由 integration_tests/test_frame_lookup_roundtrip.py 端到端验。
+
+两个被测对象分居两包（`step_store.segment_decoder` / `inference.offline.frame_finder`）
+但同居一份测试：它们共用同一个 seam，且 FrameFinder 是 SegmentDecoder 唯一的消费者，
+拆开会让「宽容层 + 严格层」这对相反契约的用例互相看不见。
 
 覆盖：
 - 段级：起点落段中部 / 起点恰为段首帧 / 跨段 / 默认区间含末段 / 区间早于首段 / 晚于末段
 - 帧级：区间落两帧之间 / 跨段接缝相邻帧 / 单帧区间
-- 缺 sidecar：跳过该段而非打断整条迭代
-- find：多点、重复 ts、ts 漂移即失败、空入参
+- 缺 sidecar：跳过该段而非打断整条迭代（宽容层）
+- find：多点、重复 ts、ts 漂移即失败、空入参（严格层）
 - _build_cmd：select 必须在 scale 之前
 
 落盘约定：{base_dir}/{task_id}/{step_id}/raw_segment_{ts_us}.mp4 + 同名 .idx
@@ -22,7 +26,8 @@ import numpy as np
 import pytest
 
 from app.domain.frame import Frame
-from app.services.inference.offline.frame_tracker import FrameTracker, Timeline
+from app.services.inference.offline.frame_finder import FrameFinder
+from app.services.step_store.segment_decoder import SegmentDecoder
 
 TASK_ID = 4242
 STEP_ID = 7
@@ -41,7 +46,7 @@ def seg_frames(s: int) -> List[float]:
     return [ts_of(s * FRAMES_PER_SEG + i) for i in range(FRAMES_PER_SEG)]
 
 
-class FakeDecodeTimeline(Timeline):
+class FakeDecodeSegmentDecoder(SegmentDecoder):
     """把 ffmpeg 解码换成「按 sidecar 合成 1×1 帧」，段内帧号与 sidecar 下标仍 1:1。
 
     真实 `_run_ffmpeg` 的契约就是「产出 sidecar[k_start..k_end] 对应的帧」，
@@ -75,11 +80,11 @@ def step_dir(tmp_storage) -> Path:
 
 
 @pytest.fixture
-def tl(step_dir) -> FakeDecodeTimeline:
-    return FakeDecodeTimeline(TASK_ID, STEP_ID)
+def tl(step_dir) -> FakeDecodeSegmentDecoder:
+    return FakeDecodeSegmentDecoder(TASK_ID, STEP_ID)
 
 
-def ts_out(tl: Timeline, *args, **kwargs) -> List[float]:
+def ts_out(tl: SegmentDecoder, *args, **kwargs) -> List[float]:
     return [f.timestamp for f in tl.iter(*args, **kwargs)]
 
 
@@ -166,44 +171,44 @@ class TestMissingSidecar:
         assert got == expected
 
     def test_empty_timeline_yields_nothing(self, tmp_storage):
-        assert list(Timeline(999, 999).iter()) == []
+        assert list(SegmentDecoder(999, 999).iter()) == []
 
 
 class TestFind:
-    @pytest.fixture(autouse=True)
-    def _patch_tracker(self, monkeypatch, step_dir):
-        """FrameTracker 内部自建 Timeline，这里换成 seam 版。"""
-        monkeypatch.setattr(
-            "app.services.inference.offline.frame_tracker.Timeline", FakeDecodeTimeline
+    @pytest.fixture
+    def ff(self, step_dir) -> FrameFinder:
+        """经 decoder 注入口换成 seam 版，不必 monkeypatch 模块属性。"""
+        return FrameFinder(
+            TASK_ID, STEP_ID, decoder=FakeDecodeSegmentDecoder(TASK_ID, STEP_ID)
         )
 
-    def test_multi_point_across_segments(self):
+    def test_multi_point_across_segments(self, ff):
         gids = [1, 13, 27, 39]
-        got = list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(g) for g in gids], 4, 4))
+        got = list(ff.find([ts_of(g) for g in gids], 4, 4))
         assert [f.timestamp for f in got] == [ts_of(g) for g in gids]
 
-    def test_returns_ts_ascending_not_input_order(self):
+    def test_returns_ts_ascending_not_input_order(self, ff):
         gids = [27, 1, 13]
-        got = list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(g) for g in gids], 4, 4))
+        got = list(ff.find([ts_of(g) for g in gids], 4, 4))
         assert [f.timestamp for f in got] == [ts_of(g) for g in sorted(gids)]
 
-    def test_duplicate_ts_yields_one_frame_each(self):
+    def test_duplicate_ts_yields_one_frame_each(self, ff):
         g = 17
-        got = list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(g), ts_of(g)], 4, 4))
+        got = list(ff.find([ts_of(g), ts_of(g)], 4, 4))
         assert [f.timestamp for f in got] == [ts_of(g), ts_of(g)]
 
     @pytest.mark.parametrize("drift", [1e-6, -1e-6, 1e-3])
-    def test_drifted_ts_raises(self, drift):
+    def test_drifted_ts_raises(self, ff, drift):
         """ts 是帧的身份，不做近似匹配：配错帧比报错更坏。"""
         with pytest.raises(ValueError, match="未找到 ts="):
-            list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(17) + drift], 4, 4))
+            list(ff.find([ts_of(17) + drift], 4, 4))
 
-    def test_ts_outside_timeline_raises(self):
+    def test_ts_outside_timeline_raises(self, ff):
         with pytest.raises(ValueError, match="未找到 ts="):
-            list(FrameTracker(TASK_ID, STEP_ID).find([BASE_TS + 9999], 4, 4))
+            list(ff.find([BASE_TS + 9999], 4, 4))
 
-    def test_empty_input_yields_nothing(self):
-        assert list(FrameTracker(TASK_ID, STEP_ID).find([], 4, 4)) == []
+    def test_empty_input_yields_nothing(self, ff):
+        assert list(ff.find([], 4, 4)) == []
 
 
 class TestBuildCmd:

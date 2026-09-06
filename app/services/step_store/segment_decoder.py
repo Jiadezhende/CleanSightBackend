@@ -1,3 +1,19 @@
+"""
+HLS 段 → 像素帧：step 目录落盘格式的读侧解码实现。
+
+与写侧（`persistence/hls_strategy`）隔着一层 sidecar 契约互为逆运算——**同一个
+`.idx` 文件的命名在 layout、内容解释在这里**，两者必须同居才能互相对照：
+
+    写侧  每落一段 mp4，同时落同名 .idx（该段每帧 frame.timestamp 的 float64 数组）
+    读侧  按 .idx 下标 k 取段内第 k 帧
+
+**「段内帧号 n ↔ sidecar 下标 k 严格 1:1」是整个索引的地基**，靠三件事保证：
+不拼 m3u8、不用 `-ss`、`-vsync 0`。破其中任何一条都不会报错，只会静默取到错帧。
+
+本模块只负责「给定 ts 区间 → 产出该区间的帧」，**不做 ts 匹配校验、不做单点筛选**
+——那是消费侧的策略（见 `inference/offline/frame_finder.py`）。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -44,15 +60,14 @@ def _read_exact(stream, buf: bytearray) -> bool:
     return True
 
 
-class Timeline:
-    """时间线：ts → 段 → 段内帧号 → 像素。纯查询，零像素缓存。
+class SegmentDecoder:
+    """ts → 段 → 段内帧号 → 像素。纯查询，零像素缓存。
 
-    落盘形态：fMP4 按段落盘（raw_segment_{ts_us}.mp4），
-    每段配一个同名 .idx sidecar（float64 时间戳数组，每帧一条）。
-    解码走 `concat:raw_init.mp4|raw_segment_{ts}.mp4` + `select=between(n,k1,k2)`，
-    不拼 m3u8、不用 -ss，故段内帧号与 sidecar 下标严格 1:1。
+    落盘形态：fMP4 按段落盘（`{track}_segment_{ts_us}.mp4`），每段配一个同名 .idx
+    sidecar（float64 时间戳数组，每帧一条）。解码走
+    `concat:{track}_init.mp4|{track}_segment_{ts}.mp4` + `select=between(n,k1,k2)`。
 
-    对外只有一个 iter(start_ts, end_ts)。
+    对外只有一个 `iter(start_ts, end_ts)`。
 
     段级裁剪省 ffmpeg 调用次数，帧级裁剪不存无效像素。
     """
@@ -217,8 +232,8 @@ class Timeline:
         if not idx_path.exists():
             # 段刚落盘、sidecar 尚未就位，或历史遗留段：跳过该段，不打断整条迭代
             #（缺一段的索引不该让前后所有段一起读不了）。单点查询仍会在
-            # FrameTracker.find 里因目标 ts 缺失而硬失败。
-            logger.warning("sidecar 缺失，跳过该段: %s", idx_path)
+            # FrameFinder.find 里因目标 ts 缺失而硬失败——**宽容留在这层、严格留在上层**。
+            logger.warning("[SegmentDecoder] sidecar 缺失，跳过该段: %s", idx_path)
             return np.empty(0, dtype=np.float64)
         return np.fromfile(idx_path, dtype=np.float64)
 
@@ -240,34 +255,3 @@ class Timeline:
             "-pix_fmt", "bgr24",
             "pipe:1",
         ]
-
-
-class FrameTracker:
-    def __init__(self, task_id: int, step_id: int, track: str = "raw"):
-        self._tl = Timeline(task_id, step_id, track)
-
-    def find(self, timestamps: list[float], width: int, height: int) -> Iterator[Frame]:
-        """按 ts 反查帧。
-
-        产出顺序为 **ts 升序**，不保证与入参同序 —— 调用方按 `frame.timestamp`
-        对号入座，勿按位置。重复 ts 按重数各产出一帧（同一 Frame 对象）。
-
-        `timestamps` 必须**位级等于** sidecar 里的帧 ts，即取自同一 run 的
-        features.jsonl / `FeatureStore.load()`（两侧同源同值，见 store.py 的帧对齐
-        契约）。任何精度中转（float32、重新格式化）都会 ValueError —— 这里不做
-        近似匹配：ts 是帧的身份，配错帧比报错更坏。
-        """
-        if not timestamps:
-            return
-        sorted_timestamps = sorted(float(t) for t in timestamps)
-
-        idx = 0
-        for frame in self._tl.iter(
-            sorted_timestamps[0], sorted_timestamps[-1], width, height
-        ):
-            # while 而非 if：重复 ts 在同一帧上连续消费掉
-            while idx < len(sorted_timestamps) and frame.timestamp == sorted_timestamps[idx]:
-                yield frame
-                idx += 1
-        if idx < len(sorted_timestamps):
-            raise ValueError(f"未找到 ts={sorted_timestamps[idx]!r} 对应帧")
