@@ -50,7 +50,7 @@ from app.services.lab import (
     StepExportNoSegments,
 )
 from app.services.lab import config as lab_config
-from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
+from app.services.step_store.finder import SegmentFinder, get_default_base_dir
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])

@@ -36,12 +36,14 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from app.services.traceback.segment_finder import (
+from app.services.step_store import layout
+from app.services.step_store.finder import (
     SegmentFinder,
     SegmentRef,
     get_default_base_dir,
-    parse_playlist_durations,
 )
+from app.services.step_store import playlist
+from app.services.step_store.playlist import parse_playlist_durations
 
 logger = logging.getLogger(__name__)
 
@@ -121,19 +123,19 @@ class StepExporter:
         # EXTINF 是时长唯一真值（不能用文件名 ts 差重推）；键集合同时充当"已完成落盘"
         # 的判据——不在其中的是在途段（mp4v 已落、transcode+append 未完成），必须过滤，
         # 否则 fragment 实际媒体时长与 playlist 估算对不上。
-        durations = parse_playlist_durations(step_dir / f"{track}_playlist.m3u8")
-        segs = [s for s in segs if s.filename in durations]
+        durations = parse_playlist_durations(step_dir / layout.playlist_name(track))
+        segs = playlist.filter_playable(segs, durations)
         if not segs:
             raise StepExportNoSegments(
                 f"No playable {track} segments yet for task_id={task_id}, "
                 f"step_id={step_id} (all in-flight or playlist missing)"
             )
 
-        if not (step_dir / f"{track}_init.mp4").exists():
-            # 与 traceback._build_vod_playlist 同一判据：缺 init = 旧格式产物（不支持、
-            # 无迁移路径）或首段仍在 transcode。两者都不可自愈。
+        if not playlist.has_init(step_dir, track):
+            # 判据在 step_store（与 traceback VOD 回放共用）；这里只决定它映射成哪个
+            # 领域异常 —— 路由层再把它翻成 HTTP 状态码。
             raise StepExportInitMissing(
-                f"{track}_init.mp4 not found for task {task_id} step {step_id}. "
+                f"{layout.init_name(track)} not found for task {task_id} step {step_id}. "
                 "This step is either mid-transcode or written in an unsupported "
                 "legacy layout; it cannot be exported."
             )
@@ -175,22 +177,11 @@ class StepExporter:
         调用方保证 segs 非空、已按时序升序、且每个 filename 都在 durations 里。
         """
         seg_durs = [durations[s.filename] for s in segs]
-        target_duration = max(int(math.ceil(max(seg_durs))), 1)
-
-        lines = [
-            "#EXTM3U",
-            "#EXT-X-VERSION:7",
-            "#EXT-X-PLAYLIST-TYPE:VOD",
-            f"#EXT-X-TARGETDURATION:{target_duration}",
-            "#EXT-X-MEDIA-SEQUENCE:0",
-            f'#EXT-X-MAP:URI="{track}_init.mp4"',
-        ]
-        for s, dur in zip(segs, seg_durs):
-            lines.append(f"#EXTINF:{dur:.3f},")
-            lines.append(s.path.name)
-        # 缺 ENDLIST → ffmpeg 当直播流只读 live edge，前面的段全丢
-        lines.append("#EXT-X-ENDLIST")
-        return "\n".join(lines) + "\n"
+        return playlist.build_vod_playlist(
+            entries=[(s.path.name, d) for s, d in zip(segs, seg_durs)],
+            map_uri=layout.init_name(track),
+            target_duration=max(int(math.ceil(max(seg_durs))), 1),
+        )
 
     def _run_ffmpeg(self, m3u8_path: Path, output_path: Path, n_segments: int) -> None:
         """HLS demuxer 串 fragment → mp4 容器，纯 remux 不重编码。"""

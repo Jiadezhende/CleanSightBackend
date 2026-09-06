@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from app.services.traceback.segment_finder import (
+from app.services.step_store import layout, playlist
+from app.services.step_store.finder import (
     SegmentFinder,
     SegmentRef,
     get_default_base_dir,
@@ -307,10 +308,10 @@ class ClipBuilder:
 
         step_dir = segs[0].path.parent
         # 打点仅用 raw 轨的 init.mp4
-        init_path = step_dir / "raw_init.mp4"
+        init_path = step_dir / layout.init_name("raw")
         if not init_path.exists():
             raise ClipBuildError(
-                f"raw_init.mp4 missing in step dir: {step_dir} "
+                f"{layout.init_name('raw')} missing in step dir: {step_dir} "
                 f"(fMP4 fragment 段需要 EXT-X-MAP 才能解码)"
             )
 
@@ -328,18 +329,19 @@ class ClipBuilder:
         # segs 非空由方法开头 segs[0].ts_us 解引用保证 → seg_durs_us 必非空，max() 无需兜底。
         target_dur_s = max(seg_durs_us) / 1_000_000.0
 
-        lines = [
-            "#EXTM3U",
-            "#EXT-X-VERSION:7",
-            "#EXT-X-PLAYLIST-TYPE:VOD",
-            f"#EXT-X-TARGETDURATION:{int(target_dur_s) + 1}",
-            '#EXT-X-MAP:URI="raw_init.mp4"',
-        ]
-        for s, dur_us in zip(segs, seg_durs_us):
-            lines.append(f"#EXTINF:{dur_us / 1_000_000.0:.3f},")
-            lines.append(s.path.name)
-        lines.append("#EXT-X-ENDLIST")
-        tmp_m3u8.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # 刻意不写 EXT-X-MEDIA-SEQUENCE（media_sequence=None）：与既有产物逐字一致。
+        tmp_m3u8.write_text(
+            playlist.build_vod_playlist(
+                entries=[
+                    (s.path.name, dur_us / 1_000_000.0)
+                    for s, dur_us in zip(segs, seg_durs_us)
+                ],
+                map_uri=layout.init_name("raw"),
+                target_duration=int(target_dur_s) + 1,
+                media_sequence=None,
+            ),
+            encoding="utf-8",
+        )
 
         cmd = [
             self._ffmpeg,

@@ -15,6 +15,8 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from app.services.step_store import layout
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,7 +70,7 @@ class StorageCleanupWorker:
         cutoff = datetime.now() - timedelta(days=self.cleanup_days)
         deleted = 0
 
-        for metadata_path in self.db_dir.glob("*/*/metadata.json"):
+        for metadata_path in self.db_dir.glob(f"*/*/{layout.METADATA_NAME}"):
             step_dir = metadata_path.parent
             try:
                 with metadata_path.open("r", encoding="utf-8") as f:

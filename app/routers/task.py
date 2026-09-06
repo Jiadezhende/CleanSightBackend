@@ -12,8 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm, DBTask
 from app.services.client.manager import client_manager
-from app.services.traceback import SegmentFinder
-from app.services.traceback.segment_finder import get_default_base_dir
+from app.services.step_store.finder import SegmentFinder, get_default_base_dir
 from app.utils.exceptions import DatabaseError
 
 router = APIRouter(prefix="/task", tags=["task"])

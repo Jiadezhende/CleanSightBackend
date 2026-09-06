@@ -28,7 +28,7 @@ from app.services.lab.step_exporter import (
     StepExportInitMissing,
     StepExportNoSegments,
 )
-from app.services.traceback.segment_finder import SegmentFinder, SegmentRef
+from app.services.step_store.finder import SegmentFinder, SegmentRef
 
 
 # ---------------------------------------------------------------------------

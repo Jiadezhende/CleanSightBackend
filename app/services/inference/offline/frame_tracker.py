@@ -4,15 +4,16 @@ import logging
 import subprocess
 import tempfile
 import threading
-from pathlib import Path
 from typing import Optional, Iterator
 import numpy as np
 
 from app.domain.frame import Frame
-from app.services.traceback.segment_finder import (
+from app.services.step_store import layout
+from app.services.step_store.finder import (
     SegmentFinder,
     SegmentRef,
     get_default_base_dir,
+    locate_containing_index,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class Timeline:
         self._finder = finder or SegmentFinder(get_default_base_dir())
         self._step_dir = self._finder.task_dir(task_id, step_id)
         self._segs = self._finder.list_segments(task_id, step_id, track)
-        self._timestamps = np.array([seg.ts_us for seg in self._segs], dtype=np.float64)
+        self._seg_ts_us = [seg.ts_us for seg in self._segs]
         if ffmpeg_bin is None:
             from app.settings import settings
             ffmpeg_bin = settings.ffmpeg_path
@@ -83,7 +84,7 @@ class Timeline:
         """段级裁剪，返回一个时间范围内的所有 Frame。
 
         start_ts / end_ts 为 None 表示该侧不设限，原样下传给帧级裁剪 ——
-        不能拿 `self._timestamps` 的首尾当时间轴首尾：那是**段起始** ts，
+        不能拿 `self._seg_ts_us` 的首尾当时间轴首尾：那是**段起始** ts，
         末段的段首之后还有整整一段的帧。
 
         注意：本方法不做任何 ts 匹配校验、不做单点筛选。
@@ -92,16 +93,17 @@ class Timeline:
         if not self._segs:
             return
 
-        # 要找的是**包含** start_ts 的那一段，故 'right' - 1：'left' 取到的是
-        # start_ts **之后**的段。且段文件名的 ts_us = int(ts*1e6) 是截断值，
-        # 「start_ts 恰为该段首帧」时 start_ts*1e6 > ts_us，'left' 同样会跳过
-        # 该段 —— 即不存在「大部分情况下对」，是无条件错。
+        # 定位「包含该 ts 的段」的语义与 off-by-one 论证见 locate_containing_index。
+        # 两端对返回 -1 的处理相反：起点 clamp 到首段（区间左侧越界仍要从头出帧），
+        # 终点保留 -1（end_ts 早于首段起点 = 空区间，clamp 成 0 会误出第 0 段）。
         lo = 0 if start_ts is None else max(
-            0, int(np.searchsorted(self._timestamps, start_ts * 1e6, side="right")) - 1
+            0, locate_containing_index(self._seg_ts_us, start_ts * 1e6)
         )
-        hi = len(self._segs) - 1 if end_ts is None else int(
-            np.searchsorted(self._timestamps, end_ts * 1e6, side="right")
-        ) - 1
+        hi = (
+            len(self._segs) - 1
+            if end_ts is None
+            else locate_containing_index(self._seg_ts_us, end_ts * 1e6)
+        )
         if lo > hi:  # end_ts 早于首段起点时 hi = -1，在此被拦下
             return
 
@@ -211,7 +213,7 @@ class Timeline:
         return f"{msg}; ffmpeg stderr: {tail}" if tail else msg
 
     def _load_sidecar(self, seg: SegmentRef) -> np.ndarray:
-        idx_path = self._step_dir / Path(seg.filename).with_suffix(".idx")
+        idx_path = self._step_dir / layout.sidecar_name_for(seg.filename)
         if not idx_path.exists():
             # 段刚落盘、sidecar 尚未就位，或历史遗留段：跳过该段，不打断整条迭代
             #（缺一段的索引不该让前后所有段一起读不了）。单点查询仍会在
@@ -226,7 +228,10 @@ class Timeline:
         return [
             self._ffmpeg_bin,
             "-loglevel", "error", "-hide_banner",
-            "-i", f"concat:{self._step_dir / 'raw_init.mp4'}|{self._step_dir / seg.filename}",
+            "-i", (
+                f"concat:{self._step_dir / layout.init_name(seg.track)}"
+                f"|{self._step_dir / seg.filename}"
+            ),
             # select 必须在 scale 之前：反过来会把注定被丢弃的帧也缩放一遍
             "-vf", f"select=between(n\\,{start}\\,{end}),scale={width}:{height}",
             "-vframes", str(end - start + 1),

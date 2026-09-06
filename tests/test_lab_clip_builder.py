@@ -24,7 +24,7 @@ from app.services.lab.clip_builder import (
     ClipRangeGapError,
     ClipSpec,
 )
-from app.services.traceback.segment_finder import SegmentRef
+from app.services.step_store.finder import SegmentRef
 
 
 # ---------------------------------------------------------------------------

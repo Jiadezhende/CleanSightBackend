@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.traceback.segment_finder import SegmentFinder, SegmentRef
+from app.services.step_store.finder import SegmentFinder, SegmentRef
 
 
 def _make_task_dir(base: Path, task_id: int, step_id: int) -> Path:
@@ -259,7 +259,7 @@ class TestBaseDirResolution:
     ):
         from app.settings import settings
         from app.services.persistence.config import get_persistence_config
-        from app.services.traceback.segment_finder import get_default_base_dir
+        from app.services.step_store.finder import get_default_base_dir
 
         monkeypatch.setattr(settings, "storage_dir", "./database")
         write_path = settings.storage_base_dir

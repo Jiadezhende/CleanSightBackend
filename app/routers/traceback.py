@@ -15,7 +15,6 @@
 """
 
 import logging
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -24,12 +23,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
 from app.models import DBAlarm
-from app.services.traceback import MediaToken, SegmentFinder
-from app.services.traceback.segment_finder import (
+from app.services.step_store import layout
+from app.services.step_store.finder import (
+    SegmentFinder,
     SegmentRef,
     get_default_base_dir,
-    parse_playlist_durations,
 )
+from app.services.step_store import playlist
+from app.services.step_store.playlist import parse_playlist_durations
+from app.services.traceback import MediaToken
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/traceback", tags=["traceback"])
@@ -240,61 +242,49 @@ def _build_vod_playlist(
     - init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
     - segs 经 playlist 过滤后为空（全部为在途段）→ 抛 404
     """
-    task_dir = finder.task_dir(task_id, step_id)
-    init_path = task_dir / f"{track}_init.mp4"
-    if not init_path.exists():
-        # 正常落盘的 step 必有 init（首段 transcode 时产出）。缺 init 只剩两种可能：
-        # ① 段是 {track}_init.mp4 命名之前的旧格式产物——不支持，也不提供迁移；
-        # ② 首段正在 transcode 途中（窗口极短）。
-        # 两者服务端都无法自愈，故 503 而非 404，让调用方按「此 step 不可回放」处理。
+    step_dir = finder.task_dir(task_id, step_id)
+    if not playlist.has_init(step_dir, track):
+        # 判据在 step_store（缺 init = 旧格式产物或首段仍在 transcode，均不可自愈）；
+        # 这里只决定它映射成哪个状态码 —— 503 而非 404，让调用方按「此 step 不可回放」处理。
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "HLS init segment missing",
                 "detail": (
-                    f"{track}_init.mp4 not found for task {task_id} step {step_id}. "
+                    f"{layout.init_name(track)} not found for task {task_id} step {step_id}. "
                     "This step is either mid-transcode or written in an unsupported "
                     "legacy layout; it cannot be played back."
                 ),
             },
         )
 
-    playlist_path = task_dir / f"{track}_playlist.m3u8"
-    real_durations = parse_playlist_durations(playlist_path)
-
     # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF（退化段的兜底也只在写入侧的 eff_fps
     # 里，见 hls_strategy._DEGENERATE_FALLBACK_FPS）。此处只读回、不重新推导、无第二兜底。
-    # 不在 playlist 中的段视为在途段（mp4v 已落但 transcode+append 未完成），过滤掉——避免
-    # 回放出现与 fmp4 tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
-    segs = [s for s in segs if s.filename in real_durations]
+    real_durations = parse_playlist_durations(step_dir / layout.playlist_name(track))
+    segs = playlist.filter_playable(segs, real_durations)
     if not segs:
         raise HTTPException(status_code=404, detail="No playable segments yet")
 
-    # 上一步已保证 real_durations 非空（segs ⊆ real_durations 且非空），max() 无需 default。
-    target_duration = max(int(round(max(real_durations.values()))), 1)
-
     base_url = str(request.base_url).rstrip("/")
-    init_token = MediaToken.default().sign(
-        task_id=task_id, step_id=step_id, filename=f"{track}_init.mp4", kind="init",
-    )
 
-    lines: List[str] = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:7",
-        "#EXT-X-PLAYLIST-TYPE:VOD",
-        f"#EXT-X-TARGETDURATION:{target_duration}",
-        "#EXT-X-MEDIA-SEQUENCE:0",
-        f'#EXT-X-MAP:URI="{base_url}/media/init/{init_token}"',
-    ]
-    for s in segs:
-        dur = real_durations[s.filename]
+    def _url(kind: str, seg_task: int, seg_step: int, filename: str) -> str:
         token = MediaToken.default().sign(
-            task_id=s.task_id, step_id=s.step_id, filename=s.filename, kind="segment",
+            task_id=seg_task, step_id=seg_step, filename=filename, kind=kind,
         )
-        lines.append(f"#EXTINF:{dur:.3f},")
-        lines.append(f"{base_url}/media/segment/{token}")
-    lines.append("#EXT-X-ENDLIST")
-    return "\n".join(lines) + "\n"
+        return f"{base_url}/media/{kind}/{token}"
+
+    return playlist.build_vod_playlist(
+        entries=[
+            (
+                _url("segment", s.task_id, s.step_id, s.filename),
+                real_durations[s.filename],
+            )
+            for s in segs
+        ],
+        map_uri=_url("init", task_id, step_id, layout.init_name(track)),
+        # 上一步已保证 real_durations 非空（segs ⊆ real_durations 且非空），max() 无需 default。
+        target_duration=max(int(round(max(real_durations.values()))), 1),
+    )
 
 
 # HEAD 与 GET 同注册：原生 HLS 播放栈（Safari/AVPlayer 等）在取 playlist 前会自动
@@ -412,32 +402,13 @@ def _step_duration_ms(
 ) -> Tuple[int, int, int]:
     """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。
 
-    end_ms 必须取 max(seg.ts + EXTINF)，而不是 max(seg.ts) —— 后者会漏掉最后一段
-    自身长度。EXTINF 是 hls.js / fragment 媒体时长的同源真值，对齐到它才能保证
-    lab 页面顶部"时长 / 进度条右端"和 <video>.duration 一致。
-
-    在途段（mp4v 已落、transcode+append 未完成）在 playlist 里查不到 EXTINF，
-    跳过 —— 与 `_build_vod_playlist` 的过滤策略保持一致。raw / processed 双轨都
-    纳入，取并集的最早起点和最晚终点。
+    µs → ms 的换算留在此处：`step_time_bounds_us` 产出微秒（与段文件名 ts_us 同单位），
+    毫秒是本接口对前端的表示口径。
     """
-    task_dir = finder.task_dir(task_id, step_id)
-    start_us: Optional[int] = None
-    end_us: Optional[int] = None
-    for track in ("raw", "processed"):
-        durations = parse_playlist_durations(task_dir / f"{track}_playlist.m3u8")
-        if not durations:
-            continue
-        for s in finder.list_segments(task_id, step_id, track):
-            dur = durations.get(s.filename)
-            if dur is None:
-                continue
-            seg_end_us = s.ts_us + int(round(dur * 1_000_000))
-            if start_us is None or s.ts_us < start_us:
-                start_us = s.ts_us
-            if end_us is None or seg_end_us > end_us:
-                end_us = seg_end_us
-    if start_us is None or end_us is None:
+    bounds = playlist.step_time_bounds_us(finder, task_id, step_id)
+    if bounds is None:
         return 0, 0, 0
+    start_us, end_us = bounds
     return start_us // 1000, end_us // 1000, max(0, (end_us - start_us) // 1000)
 
 

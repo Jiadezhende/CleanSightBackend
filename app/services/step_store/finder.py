@@ -3,22 +3,23 @@ HLS 段定位
 
 利用文件名 `{track}_segment_{ts_us}.mp4` 中的微秒时间戳 ts_us 二分定位。
 
-依赖落盘约定：
+落盘约定（目录与命名的真源在 [layout.py](layout.py)，本模块不自建）：
     {base_dir}/{task_id}/{step_id}/{raw|processed}_segment_{ts_us}.mp4
 """
 
 import bisect
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from app.services.step_store import layout
 
 logger = logging.getLogger(__name__)
 
 
-_SEGMENT_PATTERN = re.compile(r"^(?P<track>raw|processed)_segment_(?P<ts_us>\d+)\.mp4$")
-_VALID_TRACKS = ("raw", "processed")
+_SEGMENT_PATTERN = layout.SEGMENT_PATTERN
+_VALID_TRACKS = layout.VALID_TRACKS
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,27 @@ def _dir_name_to_int(name: str) -> Optional[int]:
         return None
 
 
+def locate_containing_index(seg_ts_us: Sequence[int], target_us: float) -> int:
+    """段起始 ts 升序数组中，**包含** target_us 的那一段的下标；全都更晚时返回 -1。
+
+    定义：最大的 i 满足 `seg_ts_us[i] <= target_us`。
+
+    ⚠ **必须是 `bisect_right - 1`，不能用 `bisect_left`**：
+    ① `bisect_left` 取到的是 target 之**后**的段；
+    ② 段文件名的 `ts_us = int(ts*1e6)` 是**截断**值，故「target 恰为该段首帧」时
+       `target_us > ts_us`，`bisect_left` 同样会跳过该段。
+    即不存在「大部分情况下对」，用 left 是无条件错。
+
+    返回 -1 表示 target 早于首段起点。**调用方自行决定怎么处理**：段级区间裁剪要靠
+    它表达空区间（clamp 成 0 会把空区间误判成命中第 0 段），而告警取证要 clamp 到
+    首段（取最近的可用段）。这两种需求相反，故本函数不替调用方做决定。
+
+    `target_us` 接受浮点：`seg_ts_us` 元素为整数时，`a <= t ⟺ a <= floor(t)`，
+    故传 `ts*1e6` 原值与传截断值等价，调用方不必自行取整。
+    """
+    return bisect.bisect_right(seg_ts_us, target_us) - 1
+
+
 class SegmentFinder:
     """按 (task_id, step_id) + 时间戳定位 HLS 段。
 
@@ -105,7 +127,7 @@ class SegmentFinder:
 
     def task_dir(self, task_id: int, step_id: int) -> Path:
         """任务-步骤目录绝对路径：{base_dir}/{task_id}/{step_id}/"""
-        return self._base_dir / str(task_id) / str(step_id)
+        return layout.step_dir(self._base_dir, task_id, step_id)
 
     def _scan_step_dir(self, task_id: int, step_id: int) -> Dict[str, List[SegmentRef]]:
         """单次 iterdir 扫出该 step 目录下按轨道分组的段（各轨内按 ts_us 升序）。
@@ -297,11 +319,7 @@ class SegmentFinder:
 
         ts_us = int(ts_ms) * 1000
 
-        # bisect_right 找到第一个 > ts_us 的位置；trigger_idx = pos - 1
-        ts_list = [s.ts_us for s in all_segs]
-        pos = bisect.bisect_right(ts_list, ts_us)
-        trigger_idx = pos - 1
-
+        trigger_idx = locate_containing_index([s.ts_us for s in all_segs], ts_us)
         if trigger_idx < 0:
             # ts_ms 早于第一段开始时间 → 取第一段作为最近的触发段
             trigger_idx = 0
@@ -336,43 +354,3 @@ def get_default_base_dir() -> Path:
     from app.settings import settings
 
     return settings.storage_base_dir
-
-
-def parse_playlist_durations(playlist_path: Path) -> Dict[str, float]:
-    """解析写入侧 LIVE m3u8，提取 filename → EXTINF 时长映射。
-
-    格式约定：每个段对应一行 `#EXTINF:<dur>,` 紧接一行 `<filename>`
-    （见 hls_strategy 的 playlist append）。
-
-    两个消费方共用这一份实现（traceback VOD playlist / lab 整段导出），
-    因为返回值同时承担两个职责：
-    - EXTINF 是段时长唯一真值，不能用文件名 ts 差重新推导；
-    - 键集合即"已完成 transcode+append 的段"，不在其中的是在途段，须过滤。
-
-    解析失败或文件不存在返回空字典。
-    """
-    if not playlist_path.exists():
-        return {}
-    durations: Dict[str, float] = {}
-    try:
-        with playlist_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
-        logger.warning("[SegmentFinder] Failed to read playlist %s: %s", playlist_path, e)
-        return {}
-
-    pending_dur: Optional[float] = None
-    for raw in lines:
-        line = raw.strip()
-        if line.startswith("#EXTINF:"):
-            try:
-                # "#EXTINF:1.234,"
-                dur_str = line[len("#EXTINF:") :].rstrip(",").strip()
-                pending_dur = float(dur_str)
-            except ValueError:
-                pending_dur = None
-        elif line and not line.startswith("#"):
-            if pending_dur is not None:
-                durations[line] = pending_dur
-            pending_dur = None
-    return durations

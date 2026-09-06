@@ -63,7 +63,7 @@ def media_root(tmp_path, monkeypatch):
     from app.routers import traceback as tb_router
 
     monkeypatch.setattr(
-        "app.services.traceback.segment_finder.get_default_base_dir",
+        "app.services.step_store.finder.get_default_base_dir",
         lambda: tmp_path,
     )
     monkeypatch.setattr(media_router, "get_default_base_dir", lambda: tmp_path)

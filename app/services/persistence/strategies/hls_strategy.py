@@ -15,7 +15,6 @@ detection 不在此落盘——已由 FeatureStore 按帧 ts 单源写入 featur
 import json
 import logging
 import os
-import re
 import shutil
 import struct
 import subprocess
@@ -27,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from app.domain.frame import Frame
+from app.services.step_store import layout, playlist
 from app.settings import settings
 from app.utils.exceptions import PersistenceError
 
@@ -131,9 +131,7 @@ class HLSPersistenceStrategy:
                 logger.warning("[HLS] purge step dir failed %s: %s", target_dir, e)
                 return False
 
-    # 段文件名格式：{track}_segment_{ts_us}.mp4
-    _SEGMENT_FNAME_RE = re.compile(r"^(raw|processed)_segment_(\d+)\.mp4$")
-    _EXTINF_RE = re.compile(r"^#EXTINF:([0-9.]+),?$")
+    # 段文件名与 EXTINF 的解析均在 step_store（读写两侧共用一份，不在此另建）
 
     # ISO/IEC 14496-12 box 容器集合：递归扫描 box 树时只下钻这些类型，
     # 其余 box（含 tfdt、mdhd）按 leaf 处理。
@@ -159,30 +157,13 @@ class HLSPersistenceStrategy:
         ⚠ 不要回退到「文件名 ts_us 差」的算法 —— 那是 wall-clock 抖动值，与 fragment
         媒体时长不一致，会重新引入 hls.js 段尾停摆 / 总时长缩水 bug。
         """
-        m = cls._SEGMENT_FNAME_RE.match(path.name)
-        if not m:
+        parsed = layout.parse_segment_name(path.name)
+        if parsed is None:
             return 0.0
-        track = m.group(1)
-        playlist_path = path.parent / f"{track}_playlist.m3u8"
-        if not playlist_path.exists():
-            return 0.0
-        total = 0.0
-        try:
-            with playlist_path.open("r", encoding="utf-8") as f:
-                for raw in f:
-                    em = cls._EXTINF_RE.match(raw.strip())
-                    if em:
-                        try:
-                            total += float(em.group(1))
-                        except ValueError:
-                            continue
-        except OSError as e:
-            logger.warning(
-                "[HLS] read playlist for ts_offset failed (%s): %s — using 0",
-                e, playlist_path,
-            )
-            return 0.0
-        return max(0.0, total)
+        track, _ = parsed
+        # 解析器与读侧共用一份（step_store.playlist）：写侧此前自带一份 `_EXTINF_RE`，
+        # 与读侧的字符串切法并存，对畸形行的容忍度靠巧合一致。
+        return playlist.sum_durations(path.parent / layout.playlist_name(track))
 
     @classmethod
     def _iter_boxes(cls, data: bytes, start: int, end: int):
@@ -313,7 +294,7 @@ class HLSPersistenceStrategy:
         失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
         target_dir = path.parent
-        init_path = target_dir / f"{segment_type}_init.mp4"
+        init_path = target_dir / layout.init_name(segment_type)
         ts_offset = cls._ts_offset_seconds(path)
 
         stem = path.stem
@@ -482,7 +463,9 @@ class HLSPersistenceStrategy:
         # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），无可测速率时退化兜底。
         # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
         eff_fps = self._effective_fps(frames)
-        raw_segment_path = target_dir / f"raw_segment_{int(start_ts * 1e6)}.mp4"
+        raw_segment_path = target_dir / layout.segment_name(
+            "raw", layout.ts_to_us(start_ts)
+        )
         height, width = frames[0].frame.shape[:2]
 
         # cv2 只被本文件的两个写段函数用到，故在函数体内导入（规范 §2 通路 2）：
@@ -516,7 +499,7 @@ class HLSPersistenceStrategy:
 
         # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
-        raw_playlist_path = target_dir / "raw_playlist.m3u8"
+        raw_playlist_path = target_dir / layout.playlist_name("raw")
         with self._get_dir_lock(target_dir):
             try:
                 if not raw_playlist_path.exists():
@@ -525,7 +508,7 @@ class HLSPersistenceStrategy:
                             "#EXTM3U\n"
                             "#EXT-X-VERSION:7\n"
                             "#EXT-X-TARGETDURATION:10\n"
-                            '#EXT-X-MAP:URI="raw_init.mp4"\n'
+                            f'#EXT-X-MAP:URI="{layout.init_name("raw")}"\n'
                         )
                 self._transcode_to_fmp4_segment(raw_segment_path, "raw")
                 with raw_playlist_path.open("a") as f:
@@ -582,7 +565,9 @@ class HLSPersistenceStrategy:
         eff_fps = self._effective_fps(frames)
 
         # 1. 生成处理后视频段（使用实测有效帧率 eff_fps）
-        segment_path = target_dir / f"processed_segment_{int(start_ts * 1e6)}.mp4"
+        segment_path = target_dir / layout.segment_name(
+            "processed", layout.ts_to_us(start_ts)
+        )
         height, width = frames[0].frame.shape[:2]
 
         import cv2  # 函数体内导入，理由同 _persist_raw_segment
@@ -613,7 +598,7 @@ class HLSPersistenceStrategy:
 
         # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
-        playlist_path = target_dir / "processed_playlist.m3u8"
+        playlist_path = target_dir / layout.playlist_name("processed")
         with self._get_dir_lock(target_dir):
             try:
                 if not playlist_path.exists():
@@ -622,7 +607,7 @@ class HLSPersistenceStrategy:
                             "#EXTM3U\n"
                             "#EXT-X-VERSION:7\n"
                             "#EXT-X-TARGETDURATION:10\n"
-                            '#EXT-X-MAP:URI="processed_init.mp4"\n'
+                            f'#EXT-X-MAP:URI="{layout.init_name("processed")}"\n'
                         )
                 self._transcode_to_fmp4_segment(segment_path, "processed")
                 with playlist_path.open("a") as f:
@@ -664,7 +649,7 @@ class HLSPersistenceStrategy:
         timestamp: float,
     ):
         """更新任务元信息文件（metadata.json）—— 调用方须持有该目录的锁"""
-        metadata_path = target_dir / "metadata.json"
+        metadata_path = target_dir / layout.METADATA_NAME
 
         # 读取现有metadata
         if metadata_path.exists():
@@ -724,7 +709,7 @@ class HLSPersistenceStrategy:
         metadata 全不落）——拿主产物给辅助索引陪葬。读侧本就按契约容忍缺 sidecar（见
         frame_tracker `_load_sidecar`：跳过该段、不打断整条迭代），故此处降级为 warning。
         """
-        idx_path = target_dir / f"raw_segment_{int(timestamp * 1e6)}.idx"
+        idx_path = target_dir / layout.sidecar_name("raw", layout.ts_to_us(timestamp))
         tmp = idx_path.with_suffix(".tmp")
 
         timestamps = np.array([frame.timestamp for frame in frames], dtype=np.float64)

@@ -17,8 +17,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Path as PathParam
 from fastapi.responses import FileResponse
 
-from app.services.traceback import MediaToken, MediaTokenError, SegmentFinder
-from app.services.traceback.segment_finder import get_default_base_dir
+from app.services.step_store.finder import SegmentFinder, get_default_base_dir
+from app.services.traceback import MediaToken, MediaTokenError
 
 router = APIRouter(prefix="/media", tags=["media"])
 logger = logging.getLogger(__name__)

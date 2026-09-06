@@ -30,11 +30,21 @@ HEAVY = ("torch", "ultralytics", "cv2")
 # 不做性能回归——机器负载下 import 抖动大，卡太紧会变成噪声源。
 BUDGET = {
     "app.domain":               (set(), 0.20),
+    # step_store 自身几乎零成本（实测 0.275s，而空跑 `import app.services` 就要 0.303s）：
+    # `app/services/__init__.py` 顶层 `from .client import client_manager` 是**每个**
+    # services 子模块的过路费，与本包无关。上限故取 1.0 与其他服务包一致；真正盯的是
+    # 重依赖集合为空那条硬断言。（那笔过路费本身违反规范 §3/§5，另案处理。）
+    "app.services.step_store":  (set(), 1.0),
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
     "app.main":                 (set(), 2.0),
 }
+
+# `step_store` 是零跨服务依赖的 leaf：写侧 persistence 与读侧 traceback / lab /
+# inference.offline 都向它依赖，故它一旦回指任何 app.services.* 就会成环——那正是
+# 抽出本包要消掉的东西（此前写侧不敢依赖读侧，只好把格式知识再写一遍，重复由此而来）。
+LEAF_PACKAGE = "app/services/step_store"
 
 # 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
@@ -139,6 +149,40 @@ def test_singleton_reference_surface():
         "以下文件直接 import 了服务单例，违反规范 §6 的引用面：\n  "
         + "\n  ".join(violations)
         + "\n服务间协作应经 run_control 编排；确有正当理由的加进 SINGLETON_EXCEPTIONS 并写明。"
+    )
+
+
+def test_step_store_is_a_leaf():
+    """step_store 不得 import 任何其他 app.services.* 包（含 app.routers）。
+
+    它只允许依赖 stdlib、numpy 与 `app.settings`（`get_default_base_dir` 读存储根，
+    写在函数体内）。破这条即意味着 leaf 地位失守，写侧读侧的循环依赖会重新长出来。
+    """
+    leaf_dir = REPO_ROOT / LEAF_PACKAGE
+    violations = []
+
+    for path in sorted(leaf_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            elif isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            for name in names:
+                # 本包内部互相 import 是允许的（layout ← finder 等）
+                if name.startswith(f"{LEAF_PACKAGE.replace('/', '.')}"):
+                    continue
+                if name.startswith("app.services.") or name.startswith("app.routers"):
+                    violations.append(f"{rel}:{node.lineno} → {name}")
+
+    assert not violations, (
+        "step_store 不再是 leaf —— 它 import 了别的服务包：\n  "
+        + "\n  ".join(violations)
+        + "\n本包是写侧读侧的公共下游，回指任何服务包都会重新造出循环依赖。"
     )
 
 
