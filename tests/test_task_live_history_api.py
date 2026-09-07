@@ -84,12 +84,13 @@ async def _get(path):
 
 
 @pytest.fixture
-def storage(monkeypatch, tmp_path):
-    """把 /task/history 的存储根目录指到隔离临时目录。"""
-    from app.routers import task as task_router
+def storage(tmp_storage):
+    """把 /task/history 的存储根目录指到隔离临时目录。
 
-    monkeypatch.setattr(task_router, "get_default_base_dir", lambda: tmp_path)
-    return tmp_path
+    直接用 `tmp_storage`（monkeypatch `settings.storage_dir`）——存储根收进
+    step_store 自解析后，不必再逐个 patch 各 router 模块的名字。
+    """
+    return tmp_storage
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Path as PathParam
 from fastapi.responses import FileResponse
 
-from app.services.step_store.finder import SegmentFinder, get_default_base_dir
+from app.services.step_store import store as step_store
 from app.services.traceback import MediaToken, MediaTokenError
 
 router = APIRouter(prefix="/media", tags=["media"])
@@ -25,30 +25,20 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_media_path(task_id: int, step_id: int, filename: str) -> Path:
-    """根据 token 已校验的字段拼出绝对路径，并防止 path traversal。
+    """按 token 已校验的字段取产物路径。
+
+    定位与 path traversal 防御都在 `Step.find_product` —— 本层只把「拿不到」映射成
+    HTTP 状态码，不碰存储根、不拼目录。
 
     Raises:
-        HTTPException(400): filename 含路径分隔符
-        HTTPException(404): 文件不存在或越界
+        HTTPException(404): 文件不存在、越界或文件名非法
     """
-    if "/" in filename or "\\" in filename or filename in (".", ".."):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    base = get_default_base_dir()
-    finder = SegmentFinder(base)
-    candidate = (finder.task_dir(task_id, step_id) / filename).resolve()
-
-    # path traversal 防御：解析后的路径必须在 base_dir 内
-    try:
-        candidate.relative_to(base)
-    except ValueError:
+    candidate = step_store.step(task_id, step_id).find_product(filename)
+    if candidate is None:
         logger.warning(
-            "[Media] Path traversal denied: task_id=%s step_id=%s filename=%s",
+            "[Media] Rejected: task_id=%s step_id=%s filename=%s",
             task_id, step_id, filename,
         )
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-    if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Media file not found")
     return candidate
 

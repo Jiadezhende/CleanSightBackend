@@ -10,7 +10,7 @@ Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 
 数据底座：
 - 复用 traceback 的 (task_id, step_id) 文件系统约定
-- 复用 SegmentFinder 列表/过滤 raw 段
+- 复用 step_store 列表/过滤 raw 段
 - ffmpeg concat demuxer + libx264 实现 ms 精度裁剪
 - urllib.request multipart 上传到 LS（沿用现有 alarm_strategy 的 urllib 风格）
 
@@ -50,7 +50,8 @@ from app.services.lab import (
     StepExportNoSegments,
 )
 from app.services.lab import config as lab_config
-from app.services.step_store.finder import SegmentFinder, get_default_base_dir
+from app.services.step_store import store as step_store
+from app.services.step_store.store import Step
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
@@ -165,15 +166,19 @@ def _optional_int(value) -> Optional[int]:
         return None
 
 
-def _list_raw_steps(finder: SegmentFinder, task_id: int) -> List[int]:
-    """该 task 下有 raw 段的 step（升序）。送标只吃 raw，processed 轨在此无意义。"""
-    return [s.step_id for s in finder.list_steps(task_id) if "raw" in s.tracks]
+def _raw_steps(task_id: int) -> List[Step]:
+    """该 task 下有 raw 段的 step 句柄（升序）。送标只吃 raw，processed 轨在此无意义。
+
+    出句柄而非 id：调用方拿到后还要读段时间戳，句柄里的目录扫描结果已缓存，
+    再问一次不重扫盘。
+    """
+    return [s for s in step_store.steps(task_id) if "raw" in s.tracks]
 
 
-def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
+def _task_row_to_item(row: DBTask) -> LabTaskItem:
     task_id = int(row.task_id)
     step_id = _optional_int(row.current_step)
-    raw_steps = _list_raw_steps(finder, task_id)
+    raw_steps = [s.step_id for s in _raw_steps(task_id)]
     has_current_step_raw = step_id is not None and step_id in raw_steps
 
     return LabTaskItem(
@@ -191,18 +196,21 @@ def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
     )
 
 
-def _storage_task_to_item(
-    finder: SegmentFinder, task_id: int, raw_steps: List[int]
-) -> LabTaskItem:
+def _storage_task_to_item(task_id: int, raw_steps: List[Step]) -> LabTaskItem:
     """从文件系统信息构造 LabTaskItem（存储模式）。
 
     DB 才有的字段（source_ip/status/current_step）无从得知：
     - source_ip=None, status="unknown", step_id/current_step 留空（不推断）
     - updated_time/start_time 从各 raw step 的段时间戳（ts_ms）推导，用于排序与展示
+
+    `playable_only=False`：本清单只报「磁盘上有没有画面、什么时候有」，不解码也不拼
+    m3u8，故在途段照样算数（它下一秒就完成了）。
     """
-    ts_list: List[int] = []
-    for step_id in raw_steps:
-        ts_list.extend(seg.ts_ms for seg in finder.list_segments(task_id, step_id, "raw"))
+    ts_list: List[int] = [
+        seg.ts_ms
+        for step in raw_steps
+        for seg in step.segments("raw", playable_only=False)
+    ]
 
     return LabTaskItem(
         task_id=task_id,
@@ -213,14 +221,14 @@ def _storage_task_to_item(
         updated_time=max(ts_list) if ts_list else None,
         start_time=min(ts_list) if ts_list else None,
         end_time=None,
-        raw_steps=raw_steps,
+        raw_steps=[s.step_id for s in raw_steps],
         has_raw_segments=True,
         has_current_step_raw=False,
     )
 
 
 def _list_storage_tasks(
-    finder: SegmentFinder, q: Optional[str], limit: int, offset: int
+    q: Optional[str], limit: int, offset: int
 ) -> tuple[int, List[LabTaskItem]]:
     """直接枚举存储目录列任务，完全不碰 DB（DB 挂了也能工作）。
 
@@ -231,13 +239,13 @@ def _list_storage_tasks(
     needle = (q or "").strip()
 
     items: List[LabTaskItem] = []
-    for task_id in finder.list_task_ids():  # 已跳过 .lab_exports 等非数字目录
+    for task_id in step_store.tasks():  # 已跳过 .lab_exports 等非数字目录
         if needle and needle not in str(task_id):
             continue
-        raw_steps = _list_raw_steps(finder, task_id)
+        raw_steps = _raw_steps(task_id)
         if not raw_steps:
             continue
-        items.append(_storage_task_to_item(finder, task_id, raw_steps))
+        items.append(_storage_task_to_item(task_id, raw_steps))
 
     items.sort(key=lambda it: (it.updated_time or 0, it.task_id), reverse=True)
     total = len(items)
@@ -325,10 +333,8 @@ async def list_lab_tasks(
     - "db"（默认）：查 clean_task 表 + 文件系统补 raw 段信息（原行为）
     - "storage"：直接枚举存储目录，不碰 DB（业务库挂了时的兜底）
     """
-    finder = SegmentFinder(get_default_base_dir())
-
     if lab_config.get_task_source() == "storage":
-        total, tasks = _list_storage_tasks(finder, q, limit, offset)
+        total, tasks = _list_storage_tasks(q, limit, offset)
         return LabTaskListResponse(total=total, tasks=tasks)
 
     db = next(get_db())
@@ -363,7 +369,7 @@ async def list_lab_tasks(
 
         return LabTaskListResponse(
             total=int(total),
-            tasks=[_task_row_to_item(row, finder) for row in rows],
+            tasks=[_task_row_to_item(row) for row in rows],
         )
     finally:
         db.close()
@@ -400,8 +406,7 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
     )
 
     # ---- 段存在性（404）----
-    finder = SegmentFinder(get_default_base_dir())
-    if not finder.list_segments(req.task_id, req.step_id, "raw"):
+    if not step_store.step(req.task_id, req.step_id).segments("raw", playable_only=False):
         raise NotFoundError(
             f"No raw segments for task_id={req.task_id}, step_id={req.step_id}",
             resource_type="Segments",
@@ -409,11 +414,10 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
         )
 
     # ---- ClipBuilder + LS 客户端 ----
-    temp_root = Path(s.lab_export_temp_dir) if s.lab_export_temp_dir else None
+    # 不传 temp_root：默认走 settings.lab_export_root（它已吃掉 lab_export_temp_dir
+    # 为空时的回退），本层不再自己判空、也不向 step_store 借存储根。
     builder = ClipBuilder(
-        finder=finder,
         ffmpeg_bin=s.ffmpeg_path,
-        temp_root=temp_root,
         preset=s.lab_export_ffmpeg_preset,
         max_duration_ms=s.lab_export_max_clip_ms,
         gap_tolerance_ms=s.lab_export_gap_tolerance_ms,
@@ -546,12 +550,7 @@ async def download_step_video(
     """
     from app.settings import settings as s
 
-    temp_root = Path(s.lab_export_temp_dir) if s.lab_export_temp_dir else None
-    exporter = StepExporter(
-        finder=SegmentFinder(get_default_base_dir()),
-        ffmpeg_bin=s.ffmpeg_path,
-        temp_root=temp_root,
-    )
+    exporter = StepExporter(ffmpeg_bin=s.ffmpeg_path)
 
     try:
         # ffmpeg 是阻塞调用，扔线程池（与 /submit 同样式）

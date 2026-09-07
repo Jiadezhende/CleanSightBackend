@@ -28,7 +28,6 @@ from app.services.lab.step_exporter import (
     StepExportInitMissing,
     StepExportNoSegments,
 )
-from app.services.step_store.finder import SegmentFinder, SegmentRef
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +40,7 @@ TS2 = TS1 + 10_000_000
 
 
 def _make_step(
-    tmp_path: Path,
+    tmp_storage: Path,
     segs_ts_us: List[int],
     *,
     track: str = "raw",
@@ -53,7 +52,7 @@ def _make_step(
 
     playlist_ts 为 None 时 playlist 收录全部段；显式传入可制造"在途段"。
     """
-    step_dir = tmp_path / "1" / "1"
+    step_dir = tmp_storage / "1" / "1"
     step_dir.mkdir(parents=True, exist_ok=True)
     for ts in segs_ts_us:
         (step_dir / f"{track}_segment_{ts}.mp4").write_bytes(b"fake-fmp4")
@@ -77,12 +76,11 @@ def _make_step(
     return step_dir
 
 
-def _exporter(tmp_path: Path) -> StepExporter:
-    """用真 SegmentFinder（要读磁盘）+ 独立 temp_root。"""
+def _exporter(tmp_storage: Path) -> StepExporter:
+    """真读磁盘（存储根由 `tmp_storage` fixture 指到临时目录）+ 独立 temp_root。"""
     return StepExporter(
-        finder=SegmentFinder(tmp_path),
         ffmpeg_bin="/fake/ffmpeg",
-        temp_root=tmp_path / ".lab_exports",
+        temp_root=tmp_storage / ".lab_exports",
     )
 
 
@@ -117,11 +115,11 @@ def _capture_run(monkeypatch, returncode: int = 0, touch_output: bool = True):
 
 
 class TestVodPlaylist:
-    def test_writes_map_endlist_and_all_segments(self, tmp_path, monkeypatch):
-        step_dir = _make_step(tmp_path, [TS0, TS1])
+    def test_writes_map_endlist_and_all_segments(self, tmp_storage, monkeypatch):
+        step_dir = _make_step(tmp_storage, [TS0, TS1])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_path).export(1, 1, "raw")
+        _exporter(tmp_storage).export(1, 1, "raw")
 
         text = cap["m3u8_text"]
         assert "#EXTM3U" in text
@@ -139,39 +137,39 @@ class TestVodPlaylist:
         # 跑完后必须清理
         assert not cap["m3u8_path"].exists()
 
-    def test_extinf_comes_from_playlist_not_ts_delta(self, tmp_path, monkeypatch):
+    def test_extinf_comes_from_playlist_not_ts_delta(self, tmp_storage, monkeypatch):
         """EXTINF 是时长唯一真值；用 ts 差重推会与 fragment 媒体时长对不上。"""
         # ts 间隔 10s，但 playlist 里的真实 EXTINF 是 9.8 / 7.5
-        _make_step(tmp_path, [TS0, TS1], durations=[9.800, 7.500])
+        _make_step(tmp_storage, [TS0, TS1], durations=[9.800, 7.500])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_path).export(1, 1, "raw")
+        _exporter(tmp_storage).export(1, 1, "raw")
 
         text = cap["m3u8_text"]
         assert "#EXTINF:9.800," in text
         assert "#EXTINF:7.500," in text
         assert "#EXTINF:10.000," not in text
-        # TARGETDURATION = ceil(max EXTINF)
+        # TARGETDURATION = round(max EXTINF)（RFC 8216 §4.3.2.1 的判据即四舍五入）
         assert "#EXT-X-TARGETDURATION:10" in text
 
-    def test_in_flight_segments_filtered(self, tmp_path, monkeypatch):
+    def test_in_flight_segments_filtered(self, tmp_storage, monkeypatch):
         """磁盘上有、playlist 里没有 = 在途段（transcode+append 未完成），必须过滤。"""
-        _make_step(tmp_path, [TS0, TS1, TS2], playlist_ts=[TS0, TS1])
+        _make_step(tmp_storage, [TS0, TS1, TS2], playlist_ts=[TS0, TS1])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_path).export(1, 1, "raw")
+        _exporter(tmp_storage).export(1, 1, "raw")
 
         text = cap["m3u8_text"]
         assert f"raw_segment_{TS0}.mp4" in text
         assert f"raw_segment_{TS1}.mp4" in text
         assert f"raw_segment_{TS2}.mp4" not in text
 
-    def test_processed_track_selects_processed_segments(self, tmp_path, monkeypatch):
-        _make_step(tmp_path, [TS0, TS1], track="raw")
-        _make_step(tmp_path, [TS0, TS1], track="processed")
+    def test_processed_track_selects_processed_segments(self, tmp_storage, monkeypatch):
+        _make_step(tmp_storage, [TS0, TS1], track="raw")
+        _make_step(tmp_storage, [TS0, TS1], track="processed")
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_path).export(1, 1, "processed")
+        _exporter(tmp_storage).export(1, 1, "processed")
 
         text = cap["m3u8_text"]
         assert f"processed_segment_{TS0}.mp4" in text
@@ -184,12 +182,12 @@ class TestVodPlaylist:
 
 
 class TestFfmpegCmd:
-    def test_remux_only_never_reencodes(self, tmp_path, monkeypatch):
+    def test_remux_only_never_reencodes(self, tmp_storage, monkeypatch):
         """段落盘时已是 H.264/yuv420p，整段导出只换容器；重编码即画质白掉一次。"""
-        _make_step(tmp_path, [TS0])
+        _make_step(tmp_storage, [TS0])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_path).export(1, 1, "raw")
+        _exporter(tmp_storage).export(1, 1, "raw")
 
         cmd = cap["cmd"]
         assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
@@ -198,12 +196,12 @@ class TestFfmpegCmd:
         # moov 前置，边下边播 / 拖动 seek
         assert "+faststart" in cmd
 
-    def test_uses_hls_demuxer_not_concat(self, tmp_path, monkeypatch):
+    def test_uses_hls_demuxer_not_concat(self, tmp_storage, monkeypatch):
         """关键回归：fMP4 fragment 无 moov，-f concat 必失败。"""
-        _make_step(tmp_path, [TS0])
+        _make_step(tmp_storage, [TS0])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_path).export(1, 1, "raw")
+        _exporter(tmp_storage).export(1, 1, "raw")
 
         cmd = cap["cmd"]
         assert "concat" not in cmd
@@ -212,13 +210,13 @@ class TestFfmpegCmd:
         assert cmd[cmd.index("-allowed_extensions") + 1] == "ALL"
         assert cmd[0] == "/fake/ffmpeg"
 
-    def test_output_lands_in_temp_root(self, tmp_path, monkeypatch):
-        _make_step(tmp_path, [TS0])
+    def test_output_lands_in_temp_root(self, tmp_storage, monkeypatch):
+        _make_step(tmp_storage, [TS0])
         cap = _capture_run(monkeypatch)
 
-        out = _exporter(tmp_path).export(1, 1, "raw")
+        out = _exporter(tmp_storage).export(1, 1, "raw")
 
-        assert out.parent == tmp_path / ".lab_exports"
+        assert out.parent == tmp_storage / ".lab_exports"
         assert out.exists()
         assert Path(cap["cmd"][-1]) == out
 
@@ -229,47 +227,47 @@ class TestFfmpegCmd:
 
 
 class TestFailures:
-    def test_missing_init_fails_fast_without_ffmpeg(self, tmp_path, monkeypatch):
-        _make_step(tmp_path, [TS0], with_init=False)
+    def test_missing_init_fails_fast_without_ffmpeg(self, tmp_storage, monkeypatch):
+        _make_step(tmp_storage, [TS0], with_init=False)
         cap = _capture_run(monkeypatch)
 
         with pytest.raises(StepExportInitMissing):
-            _exporter(tmp_path).export(1, 1, "raw")
+            _exporter(tmp_storage).export(1, 1, "raw")
 
         assert cap["calls"] == 0
 
-    def test_no_segments_on_disk(self, tmp_path, monkeypatch):
-        (tmp_path / "1" / "1").mkdir(parents=True)
+    def test_no_segments_on_disk(self, tmp_storage, monkeypatch):
+        (tmp_storage / "1" / "1").mkdir(parents=True)
         cap = _capture_run(monkeypatch)
 
         with pytest.raises(StepExportNoSegments):
-            _exporter(tmp_path).export(1, 1, "raw")
+            _exporter(tmp_storage).export(1, 1, "raw")
 
         assert cap["calls"] == 0
 
-    def test_all_segments_in_flight(self, tmp_path, monkeypatch):
+    def test_all_segments_in_flight(self, tmp_storage, monkeypatch):
         """段都在磁盘上但一个都没进 playlist —— 无可播内容，不能产出空 mp4。"""
-        _make_step(tmp_path, [TS0, TS1], playlist_ts=[])
+        _make_step(tmp_storage, [TS0, TS1], playlist_ts=[])
         cap = _capture_run(monkeypatch)
 
         with pytest.raises(StepExportNoSegments):
-            _exporter(tmp_path).export(1, 1, "raw")
+            _exporter(tmp_storage).export(1, 1, "raw")
 
         assert cap["calls"] == 0
 
-    def test_ffmpeg_failure_cleans_tmp_m3u8_and_output(self, tmp_path, monkeypatch):
-        step_dir = _make_step(tmp_path, [TS0])
+    def test_ffmpeg_failure_cleans_tmp_m3u8_and_output(self, tmp_storage, monkeypatch):
+        step_dir = _make_step(tmp_storage, [TS0])
         cap = _capture_run(monkeypatch, returncode=1)
 
         with pytest.raises(StepExportError):
-            _exporter(tmp_path).export(1, 1, "raw")
+            _exporter(tmp_storage).export(1, 1, "raw")
 
         assert not cap["m3u8_path"].exists()
         assert not list(step_dir.glob(".export_*.m3u8"))
-        assert not list((tmp_path / ".lab_exports").glob("*.mp4"))
+        assert not list((tmp_storage / ".lab_exports").glob("*.mp4"))
 
-    def test_ffmpeg_binary_missing_cleans_tmp_m3u8(self, tmp_path, monkeypatch):
-        step_dir = _make_step(tmp_path, [TS0])
+    def test_ffmpeg_binary_missing_cleans_tmp_m3u8(self, tmp_storage, monkeypatch):
+        step_dir = _make_step(tmp_storage, [TS0])
 
         def boom(cmd, **kwargs):
             raise FileNotFoundError("no ffmpeg")
@@ -279,7 +277,7 @@ class TestFailures:
         )
 
         with pytest.raises(StepExportError):
-            _exporter(tmp_path).export(1, 1, "raw")
+            _exporter(tmp_storage).export(1, 1, "raw")
 
         assert not list(step_dir.glob(".export_*.m3u8"))
 
@@ -290,10 +288,10 @@ class TestFailures:
 
 
 class TestOrphanSweep:
-    def test_sweeps_stale_exports_keeps_fresh(self, tmp_path, monkeypatch):
+    def test_sweeps_stale_exports_keeps_fresh(self, tmp_storage, monkeypatch):
         """客户端中途断开时 BackgroundTask 不保证跑到，需要这层兜底。"""
-        _make_step(tmp_path, [TS0])
-        exports = tmp_path / ".lab_exports"
+        _make_step(tmp_storage, [TS0])
+        exports = tmp_storage / ".lab_exports"
         exports.mkdir(parents=True, exist_ok=True)
 
         stale = exports / "step_9_9_raw_deadbeef.mp4"
@@ -306,7 +304,7 @@ class TestOrphanSweep:
         os.utime(stale, (old, old))
 
         _capture_run(monkeypatch)
-        _exporter(tmp_path).export(1, 1, "raw")
+        _exporter(tmp_storage).export(1, 1, "raw")
 
         assert not stale.exists()
         assert fresh.exists()

@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm, DBTask
 from app.services.client.manager import client_manager
-from app.services.step_store.finder import SegmentFinder, get_default_base_dir
+from app.services.step_store import store as step_store
 from app.utils.exceptions import DatabaseError
 
 router = APIRouter(prefix="/task", tags=["task"])
@@ -238,36 +238,48 @@ def list_history_tasks():
     段 ts。粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个
     刚停的——大屏下一轮轮询自愈，不加锁。
     """
-    finder = SegmentFinder(get_default_base_dir())
     active_ids = set(client_manager.snapshot().keys())
 
     tasks: List[dict] = []
     scanned = 0
-    for task_id in finder.list_task_ids_by_recency():
+    for task_id in step_store.tasks(recent_first=True):
         if len(tasks) >= _HISTORY_LIMIT or scanned >= _HISTORY_SCAN_CAP:
             break
         if task_id in active_ids:  # 还在跑 → 不算历史
             continue
 
         scanned += 1
-        steps = finder.list_steps(task_id)
-        if not steps:  # 目录在但没段（起流即失败）→ 点开是黑屏，不进清单
+        # 默认 include_empty=False：目录在但没段（起流即失败）→ 点开是黑屏，不进清单
+        steps = step_store.steps(task_id)
+        if not steps:
             continue
+
+        # 时间取**双轨段起始 ts 的并集**，不取 `time_bounds_us`（EXTINF 口径）：本接口
+        # 的 last_segment_ms 按契约就是「最后一段的起点」，且它要能报出没有 playlist
+        # 的 step（历史遗留 / 首段仍在 transcode），故 playable_only=False。
+        # 精确时长归 /timeline 的 duration_ms（那里才该用 EXTINF）。
+        step_rows = []
+        for step in steps:
+            ts = [
+                seg.ts_ms
+                for track in step.tracks
+                for seg in step.segments(track, playable_only=False)
+            ]
+            step_rows.append(
+                {
+                    "step_id": step.step_id,
+                    "tracks": list(step.tracks),
+                    "start_ms": min(ts),
+                    "last_segment_ms": max(ts),
+                }
+            )
 
         tasks.append(
             {
                 "task_id": task_id,
                 "source_ip": None,  # 下方按页补
-                "latest_ms": max(s.last_ts_us for s in steps) // 1000,
-                "steps": [
-                    {
-                        "step_id": s.step_id,
-                        "tracks": list(s.tracks),
-                        "start_ms": s.first_ts_us // 1000,
-                        "last_segment_ms": s.last_ts_us // 1000,
-                    }
-                    for s in steps
-                ],
+                "latest_ms": max(r["last_segment_ms"] for r in step_rows),
+                "steps": step_rows,
             }
         )
 

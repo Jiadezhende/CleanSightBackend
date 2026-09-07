@@ -7,7 +7,6 @@ FeatureStore（特征）与 FactLedger（事实，offline 预置）按 (task_id,
 - FactLedger：EventFact / SegmentFact 混合落盘与按 type 判别回读（offline 数据契约）
 """
 
-import tempfile
 
 from factories import make_frame_detections, make_frame_feature
 from app.services.inference.types import EventFact, SegmentFact
@@ -25,10 +24,9 @@ def _make_result(ts: float, bubble_n: int, bending_n: int):
     )
 
 
-def test_feature_store_load_roundtrip():
+def test_feature_store_load_roundtrip(tmp_storage):
     """落盘的多模型特征可按 (task, step) + source 回读为 FrameDetections 全序列。"""
-    d = tempfile.mkdtemp()
-    fs = FeatureStore(d, batch_size=2)
+    fs = FeatureStore(batch_size=2)
     fs.append(7, 1, _make_result(1.0, bubble_n=2, bending_n=0))
     fs.append(7, 1, _make_result(2.0, bubble_n=0, bending_n=1))
     fs.append(7, 1, _make_result(3.0, bubble_n=3, bending_n=0))
@@ -44,10 +42,9 @@ def test_feature_store_load_roundtrip():
     assert [len(o.detections) for o in bending_seq] == [0, 1, 0]
 
 
-def test_feature_store_step_isolation():
+def test_feature_store_step_isolation(tmp_storage):
     """同 task 不同 step 的特征落到独立目录，互不串台。"""
-    d = tempfile.mkdtemp()
-    fs = FeatureStore(d, batch_size=2)
+    fs = FeatureStore(batch_size=2)
     fs.append(7, 1, _make_result(1.0, bubble_n=2, bending_n=0))
     fs.append(7, 2, _make_result(1.0, bubble_n=5, bending_n=0))
     fs.close(7, 1)
@@ -57,14 +54,14 @@ def test_feature_store_step_isolation():
     assert [len(ff.by_source["bubble"].detections) for ff in fs.load(7, 2)] == [5]
 
 
-def test_feature_store_load_missing_returns_empty():
-    fs = FeatureStore(tempfile.mkdtemp())
+def test_feature_store_load_missing_returns_empty(tmp_storage):
+    fs = FeatureStore()
     assert fs.load(999, 1) == []
 
 
-def test_fact_ledger_mixed_roundtrip():
+def test_fact_ledger_mixed_roundtrip(tmp_storage):
     """FactLedger 支持 EventFact / SegmentFact 混合落盘与按 type 判别回读（offline 契约）。"""
-    fl = FactLedger(tempfile.mkdtemp(), batch_size=8)
+    fl = FactLedger(batch_size=8)
     fl.append(7, 1, [
         EventFact(source="bubble", signal="birth_rate", value=0.7, ts=1.0),
         SegmentFact(source="clean", label="long_brushing", start=0.0, end=5.0),

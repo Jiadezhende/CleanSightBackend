@@ -51,8 +51,8 @@ def test_client_manager_set_replaces_slot_with_new_object():
     assert cm.get(1) is not cq1
 
 
-def test_open_fresh_supersedes_storage_partition(tmp_path):
-    fs = FeatureStore(tmp_path)
+def test_open_fresh_supersedes_storage_partition(tmp_storage):
+    fs = FeatureStore()
     p = fs._path(1, 2)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("old-run-line\n")

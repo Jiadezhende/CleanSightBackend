@@ -42,8 +42,8 @@ def _frames(per_source):
 
 
 class TestLoad:
-    def test_single_scan_multi_source_and_empty_frames_kept(self, tmp_path):
-        store = FeatureStore(tmp_path)
+    def test_single_scan_multi_source_and_empty_frames_kept(self, tmp_storage):
+        store = FeatureStore()
         # ts=1: 两源都有；ts=2: large 空帧(0 检测)、small 有；ts=3: 只有 large
         _append_frame(store, 7, 2, 1.0, {
             "clean_large": make_frame_detections(n=1, ts=1.0),
@@ -64,28 +64,28 @@ class TestLoad:
         assert set(frames[2].by_source) == {"clean_large"}   # ts=3 只有 large
         assert len(frames[1].by_source["clean_large"].detections) == 0  # 空检测帧保留
 
-    def test_missing_file_returns_empty(self, tmp_path):
-        assert FeatureStore(tmp_path).load(1, 1) == []
+    def test_missing_file_returns_empty(self, tmp_storage):
+        assert FeatureStore().load(1, 1) == []
 
-    def test_sorted_by_ts(self, tmp_path):
-        store = FeatureStore(tmp_path)
+    def test_sorted_by_ts(self, tmp_storage):
+        store = FeatureStore()
         for ts in (3.0, 1.0, 2.0):
             _append_frame(store, 1, 1, ts, {"a": make_frame_detections(n=1, ts=ts)})
         assert [ff.ts for ff in store.load(1, 1)] == [1.0, 2.0, 3.0]
 
-    def test_corrupt_line_skipped(self, tmp_path):
-        store = FeatureStore(tmp_path)
+    def test_corrupt_line_skipped(self, tmp_storage):
+        store = FeatureStore()
         _append_frame(store, 1, 1, 1.0, {"a": make_frame_detections(n=1, ts=1.0)})
         store.flush(1, 1)
-        path = tmp_path / "1" / "1" / "features.jsonl"
+        path = tmp_storage / "1" / "1" / "features.jsonl"
         with path.open("a", encoding="utf-8") as f:
             f.write("{ not json\n")
         _append_frame(store, 1, 1, 2.0, {"a": make_frame_detections(n=1, ts=2.0)})
         assert [ff.ts for ff in store.load(1, 1)] == [1.0, 2.0]
 
-    def test_wh_round_trip_restores_frame_size(self, tmp_path):
+    def test_wh_round_trip_restores_frame_size(self, tmp_storage):
         """append 带帧级分辨率的帧 → load 还原到 FrameFeature.frame_width/height（不再灌 metadata）。"""
-        store = FeatureStore(tmp_path)
+        store = FeatureStore()
         _append_frame(store, 1, 1, 1.0, {
             "a": make_frame_detections(n=1, ts=1.0),
         }, frame_width=640, frame_height=480)
@@ -94,13 +94,13 @@ class TestLoad:
         assert ff.by_source["a"].metadata == {}
         assert len(ff.by_source["a"].detections) == 1
 
-    def test_utf8_bom_tolerated(self, tmp_path):
+    def test_utf8_bom_tolerated(self, tmp_storage):
         """Windows 手写 features.jsonl 的 UTF-8 BOM 应能被 load 正常还原。"""
-        path = tmp_path / "1" / "1" / "features.jsonl"
+        path = tmp_storage / "1" / "1" / "features.jsonl"
         path.parent.mkdir(parents=True)
         row = {"ts": 1.0, "features": {"a": [{"bbox": [1, 2, 3, 4], "conf": 0.9, "cls_id": 0, "cls": "hand"}]}}
         path.write_text("﻿" + json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
-        frames = FeatureStore(tmp_path).load(1, 1)
+        frames = FeatureStore().load(1, 1)
         assert [ff.ts for ff in frames] == [1.0]
         assert len(frames[0].by_source["a"].detections) == 1
 
@@ -111,8 +111,8 @@ def _seg(source="p", label="x", start=0.0, end=1.0, producer=None):
 
 
 class TestReplaceSegments:
-    def test_idempotent_rerun_no_dup(self, tmp_path):
-        ledger = FactLedger(tmp_path)
+    def test_idempotent_rerun_no_dup(self, tmp_storage):
+        ledger = FactLedger()
         facts = [_seg(producer="p", start=0, end=1)]
         ledger.replace_segments(1, 1, "p", list(facts))
         ledger.replace_segments(1, 1, "p", list(facts))
@@ -120,8 +120,8 @@ class TestReplaceSegments:
         segs = [f for f in loaded if isinstance(f, SegmentFact)]
         assert len(segs) == 1
 
-    def test_other_producer_and_eventfact_preserved(self, tmp_path):
-        ledger = FactLedger(tmp_path)
+    def test_other_producer_and_eventfact_preserved(self, tmp_storage):
+        ledger = FactLedger()
         # 预置：别的 producer 的分段 + 一条 EventFact
         ledger.append(1, 1, [
             _seg(source="q", producer="q", start=5, end=6),
@@ -133,17 +133,17 @@ class TestReplaceSegments:
         assert producers == {"p", "q"}
         assert any(isinstance(f, EventFact) for f in loaded)
 
-    def test_empty_clears_own_producer(self, tmp_path):
-        ledger = FactLedger(tmp_path)
+    def test_empty_clears_own_producer(self, tmp_storage):
+        ledger = FactLedger()
         ledger.replace_segments(1, 1, "p", [_seg(source="p", producer="p")])
         ledger.replace_segments(1, 1, "p", [])  # 空 → 清该 producer
         segs = [f for f in ledger.load(1, 1) if isinstance(f, SegmentFact)]
         assert segs == []
 
-    def test_write_failure_keeps_old_file(self, tmp_path, monkeypatch):
-        ledger = FactLedger(tmp_path)
+    def test_write_failure_keeps_old_file(self, tmp_storage, monkeypatch):
+        ledger = FactLedger()
         ledger.replace_segments(1, 1, "p", [_seg(source="p", producer="p", start=0, end=1)])
-        path = tmp_path / "1" / "1" / "facts.jsonl"
+        path = tmp_storage / "1" / "1" / "facts.jsonl"
         before = path.read_text(encoding="utf-8")
         # 让 os.replace 抛错，验证旧文件保留
         import app.services.inference.feature.store as store_mod
@@ -335,12 +335,12 @@ class TestCleanSegmenter:
 
 # ============================ Runner ============================
 
-def _runner(tmp_path, offline):
-    return OfflineRunner(base_dir=tmp_path, config=_config(offline))
+def _runner(tmp_storage, offline):
+    return OfflineRunner(config=_config(offline))
 
 
-def _write_features(tmp_path, task_id, step_id):
-    store = FeatureStore(tmp_path)
+def _write_features(tmp_storage, task_id, step_id):
+    store = FeatureStore()
     _append_frame(store, task_id, step_id, 1.0, {
         "clean_large": make_frame_detections(n=1, ts=1.0),
         "clean_small": make_frame_detections(n=1, ts=1.0),
@@ -353,85 +353,85 @@ def _write_features(tmp_path, task_id, step_id):
 
 
 class TestOfflineRunner:
-    def test_unknown_stage_skipped(self, tmp_path):
-        r = OfflineRunner(base_dir=tmp_path, config=_config(_OFFLINE_OK))
+    def test_unknown_stage_skipped(self, tmp_storage):
+        r = OfflineRunner(config=_config(_OFFLINE_OK))
         res = r.run(OfflineRunSpec(task_id=1, step_id=999))
         assert res.status == "skipped"
 
-    def test_offline_disabled_skipped(self, tmp_path):
-        res = _runner(tmp_path, {}).run(OfflineRunSpec(task_id=1, step_id=2))
+    def test_offline_disabled_skipped(self, tmp_storage):
+        res = _runner(tmp_storage, {}).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "skipped"
 
-    def test_missing_input_skipped_no_write(self, tmp_path):
-        res = _runner(tmp_path, _OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+    def test_missing_input_skipped_no_write(self, tmp_storage):
+        res = _runner(tmp_storage, _OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "skipped"
-        assert not (tmp_path / "1" / "2" / "facts.jsonl").exists()
+        assert not (tmp_storage / "1" / "2" / "facts.jsonl").exists()
 
-    def test_completed_writes_facts(self, tmp_path):
-        _write_features(tmp_path, 1, 2)
-        res = _runner(tmp_path, _OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+    def test_completed_writes_facts(self, tmp_storage):
+        _write_features(tmp_storage, 1, 2)
+        res = _runner(tmp_storage, _OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert res.producer == "clean_seg"
         assert res.segment_count == 1
-        segs = [f for f in FactLedger(tmp_path).load(1, 2) if isinstance(f, SegmentFact)]
+        segs = [f for f in FactLedger().load(1, 2) if isinstance(f, SegmentFact)]
         assert len(segs) == 1
         assert segs[0].meta["producer"] == "clean_seg"
         assert segs[0].label == "brushing"
         # BrushRulesSegmenter.debug_result() 为 None → 不落逐帧 JSON
-        assert not (tmp_path / "1" / "2" / "offline_inference_result.json").exists()
+        assert not (tmp_storage / "1" / "2" / "offline_inference_result.json").exists()
 
-    def test_rerun_idempotent(self, tmp_path):
-        _write_features(tmp_path, 1, 2)
-        r = _runner(tmp_path, _OFFLINE_OK)
+    def test_rerun_idempotent(self, tmp_storage):
+        _write_features(tmp_storage, 1, 2)
+        r = _runner(tmp_storage, _OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
-        segs = [f for f in FactLedger(tmp_path).load(1, 2) if isinstance(f, SegmentFact)]
+        segs = [f for f in FactLedger().load(1, 2) if isinstance(f, SegmentFact)]
         assert len(segs) == 1
 
-    def test_strategy_exception_propagates_no_write(self, tmp_path):
-        _write_features(tmp_path, 1, 2)
-        r = OfflineRunner(base_dir=tmp_path, config=_config(dict(_OFFLINE_OK, params={})))
+    def test_strategy_exception_propagates_no_write(self, tmp_storage):
+        _write_features(tmp_storage, 1, 2)
+        r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         with pytest.raises(RuntimeError):
             r.run(OfflineRunSpec(task_id=1, step_id=2,
                                  strategy="test_offline_pipeline.BoomSegmenter"))
-        assert not (tmp_path / "1" / "2" / "facts.jsonl").exists()
+        assert not (tmp_storage / "1" / "2" / "facts.jsonl").exists()
 
-    def test_preprocess_seam_invoked(self, tmp_path):
-        _write_features(tmp_path, 1, 2)
-        r = OfflineRunner(base_dir=tmp_path, config=_config(dict(_OFFLINE_OK, params={})))
+    def test_preprocess_seam_invoked(self, tmp_storage):
+        _write_features(tmp_storage, 1, 2)
+        r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         res = r.run(OfflineRunSpec(task_id=1, step_id=2,
                                    strategy="test_offline_pipeline.MarkerSegmenter"))
         assert res.status == "completed"
         assert res.segment_count == 1
 
-    def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_path):
+    def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_storage):
         """CleanSegmenter 不再规则降级；未配 model_path 时硬失败且不落结果。"""
-        store = FeatureStore(tmp_path)
+        store = FeatureStore()
         for t in (0.1, 0.2, 0.3, 0.4):
             store.append(1, 2, make_frame_feature(ts=t, by_source=_clean_frame(t)))
         store.flush(1, 2)
         offline = dict(_OFFLINE_OK, **{"class": _CLEAN_CLASS,
                                        "params": {"min_duration_s": 0.1, "fps": 10.0}})
         with pytest.raises(ValueError, match="model_path"):
-            OfflineRunner(base_dir=tmp_path, config=_config(offline)).run(
+            OfflineRunner(config=_config(offline)).run(
                 OfflineRunSpec(task_id=1, step_id=2))
-        dbg_path = tmp_path / "1" / "2" / "offline_inference_result.json"
+        dbg_path = tmp_storage / "1" / "2" / "offline_inference_result.json"
         assert not dbg_path.exists()
-        assert not (tmp_path / "1" / "2" / "facts.jsonl").exists()
+        assert not (tmp_storage / "1" / "2" / "facts.jsonl").exists()
 
-    def test_resolve_stage_fallback_to_mock(self, tmp_path):
+    def test_resolve_stage_fallback_to_mock(self, tmp_storage):
         """未配数字 step_id(-1) 经 resolve_stage 回退 MOCK.offline，读数字 -1 分区、completed。"""
         cfg = InferenceConfig({"stages": {"MOCK": {
             "detectors": [{"name": "mock"}],
             "offline": {"name": "mock_offline", "subscribes": ["mock"],
                         "class": _MOCK_CLASS, "params": {"label": "mock_action", "min_frames": 1}},
         }}})
-        store = FeatureStore(tmp_path)
+        store = FeatureStore()
         # MockDetector 纯透传：空检测帧 → 0 段，但链路走通
         store.append(1, -1, make_frame_feature(ts=1.0,
                                                by_source={"mock": make_frame_detections(n=0, ts=1.0)}))
         store.flush(1, -1)
-        res = OfflineRunner(base_dir=tmp_path, config=cfg).run(OfflineRunSpec(task_id=1, step_id=-1))
+        res = OfflineRunner(config=cfg).run(OfflineRunSpec(task_id=1, step_id=-1))
         assert res.status == "completed"
         assert res.producer == "mock_offline"
         assert res.segment_count == 0

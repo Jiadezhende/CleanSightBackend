@@ -7,6 +7,23 @@ m3u8 播放列表的读与写。
 **EXTINF 是段时长的唯一真值**，不能用文件名 ts 差重新推导 —— 那是 wall-clock 抖动值，
 与 fMP4 fragment 的实际媒体时长不一致，会引入 hls.js 段尾停摆 / 总时长缩水。
 
+## 本模块**包内私有**，函数都收「已定位的具体路径」
+
+服务层不该调这里——它们不知道 playlist 文件叫什么、在哪个目录，也不该知道。对外入口
+是 `Step` 的成员（`segments()` / `has_init()` / `time_bounds_us` / `vod_playlist()`），
+存储根只由本包自解析一次。**对外只出 m3u8 成品、不出骨架**：只出骨架等于要求每个
+调用方自己备料，而备料（EXTINF 真值、滤在途、判 init、算 TARGETDURATION）才是写错会
+静默的那部分——骨架写错播放器立刻报错。
+
+包外只有两条**具名例外**（由 tests/test_import_hygiene.py 的门禁锁死）：
+
+    persistence/strategies/hls_strategy  写侧，它本就持有目录、是格式的**定义者**
+                                         （`sum_durations` 算 tfdt 前缀和、手写 EXTINF 行）
+    lab/clip_builder                     每段 EXTINF 取相邻段 ts 跨度而非 playlist
+                                         EXTINF（seek 基准是 ts，换了会逐段错位）。
+                                         验证两者等价后收进 `Step.vod_playlist`，届时
+                                         这条例外撤销
+
 依赖上界：stdlib only（L0）。
 """
 
@@ -14,12 +31,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
-
-from app.services.step_store import layout
-
-if TYPE_CHECKING:  # 仅类型标注，避免 playlist ↔ finder 的模块级互引
-    from app.services.step_store.finder import SegmentFinder, SegmentRef
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -85,80 +97,21 @@ def sum_durations(playlist_path: Path) -> float:
     return max(0.0, sum(dur for _, dur in parse_playlist_entries(playlist_path)))
 
 
-def has_init(step_dir: Path, track: str) -> bool:
-    """该轨的 fMP4 init 段是否已就位。
-
-    正常落盘的 step 必有 init（首段 transcode 时产出）。缺 init 只剩两种可能：
-    ① 段是 `{track}_init.mp4` 命名之前的旧格式产物 —— 不支持，也不提供迁移；
-    ② 首段正在 transcode 途中（窗口极短）。
-
-    **两者服务端都无法自愈**，故调用方应按「此 step 不可播放/导出」处理，而不是当成
-    「暂时没有」。具体映射成什么错误（HTTP 503 / 领域异常）由调用方决定 —— 判据是格式
-    知识，状态码是协议层决定。
-    """
-    return (step_dir / layout.init_name(track)).exists()
-
-
-def filter_playable(
-    segs: Sequence["SegmentRef"], durations: Dict[str, float]
-) -> List["SegmentRef"]:
-    """滤掉在途段：只留已完成 transcode+append、在 playlist 里有 EXTINF 的段。
-
-    在途段 = mp4v 已落盘（故 SegmentFinder 扫得到）但 transcode+append 未完成（故不在
-    playlist 里）。放它们过去会让 fragment 实际媒体时长与 playlist 声明对不上 ——
-    回放侧表现为 hls.js MSE 缓冲洞，导出侧表现为时长错乱。
-    """
-    return [s for s in segs if s.filename in durations]
-
-
-def step_time_bounds_us(
-    finder: "SegmentFinder", task_id: int, step_id: int
-) -> Optional[Tuple[int, int]]:
-    """该 step 双轨并集的 (最早段起点, 最晚段终点)，微秒；无可用段时 None。
-
-    **终点必须取 max(seg.ts + EXTINF)，而不是 max(seg.ts)** —— 后者会漏掉最后一段自身
-    长度。EXTINF 是 hls.js / fragment 媒体时长的同源真值，对齐到它才能保证前端显示的
-    时长与 `<video>.duration` 一致。
-
-    在途段在 playlist 里查不到 EXTINF，跳过（与 `filter_playable` 同一判据）。raw /
-    processed 双轨都纳入，取并集的最早起点与最晚终点 —— 两轨段边界不一定对齐，实测有过
-    20+ 秒的差，故它表达的是「该 step 有画面的时间跨度」，不等于任一单轨的播放范围。
-    """
-    step_dir = finder.task_dir(task_id, step_id)
-    start_us: Optional[int] = None
-    end_us: Optional[int] = None
-
-    for track in layout.VALID_TRACKS:
-        durations = parse_playlist_durations(step_dir / layout.playlist_name(track))
-        if not durations:
-            continue
-        for s in finder.list_segments(task_id, step_id, track):
-            dur = durations.get(s.filename)
-            if dur is None:
-                continue
-            seg_end_us = s.ts_us + int(round(dur * 1_000_000))
-            if start_us is None or s.ts_us < start_us:
-                start_us = s.ts_us
-            if end_us is None or seg_end_us > end_us:
-                end_us = seg_end_us
-
-    if start_us is None or end_us is None:
-        return None
-    return start_us, end_us
-
-
 def build_vod_playlist(
     entries: List[Tuple[str, float]],
     map_uri: str,
     target_duration: int,
     media_sequence: Optional[int] = 0,
 ) -> str:
-    """构造 VOD m3u8 文本（含 ENDLIST）。三个消费方共用这一副骨架。
+    """构造 VOD m3u8 文本（含 ENDLIST）。**骨架，非成品** —— 对外入口是
+    `Step.vod_playlist()`，它在这之上补齐全部备料。
 
     **只共用骨架，不统一语义**：`entries` 的 URI 形态（token 化 URL / 同目录 basename）、
     时长来源（playlist EXTINF / 相邻段 ts 跨度）、`target_duration` 的取整方式都由调用方
     自己备料。这些是真差异而非重复 —— 例如 ClipBuilder 的 seek 基准是 ts，改用 playlist
     EXTINF 会让逐段 seek 错位。
+
+    纯字符串拼装、不碰磁盘。
 
     Args:
         entries: [(段 URI, 时长秒)]，按播放顺序。调用方保证非空、已排序。

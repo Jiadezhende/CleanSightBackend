@@ -1,21 +1,22 @@
 """
 存储 TTL 清理 Worker
 
+**保留策略归本模块，落盘事实归 step_store。** 本模块决定「保留几天、多久扫一次、
+哪些目录该扫、删不删」；「这目录里有哪些产物、最后何时活动、怎么删」在
+[step_store/purge.py](../../step_store/purge.py)。两侧 docstring 互指。
+
 职责：
-- 后台 daemon 线程，定期扫描 database/{task_id}/{step_id}/metadata.json
-- 删除 updated_at 超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度）
+- 后台 daemon 线程，定期扫描 database/{task_id}/{step_id}/
+- 删除最后活动时间超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度）
 - 顺手清空被全部 step 抽走后留下的空 task_id 目录
-- 活跃 step 每 ~10s 更新一次 updated_at，不会被误删
+- 活跃 step 每 ~10s 落一个新段，产物 mtime 随之更新，不会被误删
 """
 
-import json
 import logging
-import shutil
 import threading
 from datetime import datetime, timedelta
-from pathlib import Path
 
-from app.services.step_store import layout
+from app.services.step_store import store as step_store
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +26,26 @@ class StorageCleanupWorker:
 
     def __init__(
         self,
-        db_dir: Path,
         cleanup_days: int,
         interval_seconds: int = 3600,
+        dry_run: bool = False,
     ):
-        self.db_dir = db_dir
+        """
+        **不收 db_dir**：存储根由 step_store 自解析（`settings.storage_base_dir`）。
+        此前它由 `config.storage_base_dir` 传进来，而后者就是 `return
+        settings.storage_base_dir` —— 同一个值绕两层，还把「路径」这个概念塞进了
+        一个只该管保留策略的 worker。测试指向临时目录请 monkeypatch
+        `settings.storage_dir`（`tmp_storage` fixture 即是）。
+
+        Args:
+            cleanup_days: 保留天数
+            interval_seconds: 扫描周期
+            dry_run: 只打印会删哪些 step、不真删。判据换代时先用它核对一轮
+                （新判据会开始回收此前因缺 metadata.json 而漏扫的目录）。
+        """
         self.cleanup_days = cleanup_days
         self.interval_seconds = interval_seconds
+        self.dry_run = dry_run
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -64,58 +78,56 @@ class StorageCleanupWorker:
     def _scan_and_clean(self) -> int:
         """扫描并删除过期 step 目录 + 清空 task_id 父目录，返回删除的 step 数量。
 
-        判定依据：metadata.json 中 updated_at 超过 cleanup_days 天。
-        活跃 step 每 ~10s 更新一次 updated_at，永远不会被误删。
+        判定依据：`Step.last_activity_at`（该 step 全部已登记产物的 mtime 最大值）
+        早于 cutoff。活跃 step 每 ~10s 落一个新段，故永远不会被误删。
+
+        **判据从 `metadata.json` 的 `updated_at` 改过来**（2026-09）：那是 HLS 独有的
+        产物，只有 `features.jsonl` 而没有 HLS 段的 step（HLS 未启用，或首段 transcode
+        失败但推理照常跑）此前永远扫不到，无限期堆积。改判据后这类目录开始被回收。
+
+        `dry_run=True` 时只统计与打印、不真删——上线新判据前先用它核对会删哪些。
         """
-        cutoff = datetime.now() - timedelta(days=self.cleanup_days)
+        cutoff_ts = (datetime.now() - timedelta(days=self.cleanup_days)).timestamp()
         deleted = 0
 
-        for metadata_path in self.db_dir.glob(f"*/*/{layout.METADATA_NAME}"):
-            step_dir = metadata_path.parent
-            try:
-                with metadata_path.open("r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except (IOError, json.JSONDecodeError) as e:
-                logger.debug("[StorageCleanup] Skip unreadable metadata %s: %s", metadata_path, e)
+        # include_empty=True 是本 worker 的命门：默认枚举按契约丢弃「两轨都没段」的
+        # step，而只有 features.jsonl 没有 HLS 段的目录正是此前泄漏的那一类。
+        for step in step_store.steps(include_empty=True):
+            last = step.last_activity_at
+            if last is None:
+                # 没有任何已登记产物：可能是刚建目录、也可能是只剩临时文件的残骸。
+                # 不删——判不出它是"还没写"还是"写完被清空了"，误删的代价高于留一个空目录。
+                logger.debug(
+                    "[StorageCleanup] Skip step without products: task=%s step=%s",
+                    step.task_id, step.step_id,
+                )
+                continue
+            if last >= cutoff_ts:
                 continue
 
-            raw = meta.get("updated_at", "")
-            try:
-                updated_at = datetime.fromisoformat(str(raw))
-            except (ValueError, TypeError):
-                logger.debug("[StorageCleanup] Skip invalid updated_at in %s", metadata_path)
-                continue
-
-            if updated_at >= cutoff:
-                continue
-
-            try:
-                shutil.rmtree(step_dir)
+            when = datetime.fromtimestamp(last).isoformat(timespec="seconds")
+            if self.dry_run:
                 deleted += 1
-                logger.info("[StorageCleanup] Deleted step dir: %s", step_dir)
-            except OSError as e:
-                logger.warning("[StorageCleanup] Failed to delete %s: %s", step_dir, e)
-
-        # 顺手清理被掏空的 task_id 父目录（仅删空目录，rmdir 对非空目录会安全失败）
-        empty_tasks = 0
-        for task_dir in self.db_dir.iterdir():
-            if not task_dir.is_dir():
+                logger.info(
+                    "[StorageCleanup][dry-run] Would delete: task=%s step=%s (last activity %s)",
+                    step.task_id, step.step_id, when,
+                )
                 continue
-            try:
-                next(task_dir.iterdir())
-            except StopIteration:
-                try:
-                    task_dir.rmdir()
-                    empty_tasks += 1
-                    logger.info("[StorageCleanup] Removed empty task dir: %s", task_dir)
-                except OSError as e:
-                    logger.debug("[StorageCleanup] Skip non-removable empty task dir %s: %s", task_dir, e)
-            except OSError as e:
-                logger.debug("[StorageCleanup] Skip unreadable task dir %s: %s", task_dir, e)
+
+            if step_store.purge_step(step.task_id, step.step_id):
+                deleted += 1
+                logger.info(
+                    "[StorageCleanup] Deleted: task=%s step=%s (last activity %s)",
+                    step.task_id, step.step_id, when,
+                )
+
+        # 顺手清理被掏空的 task_id 父目录
+        empty_tasks = 0 if self.dry_run else step_store.sweep_empty_tasks()
 
         if deleted or empty_tasks:
             logger.info(
-                "[StorageCleanup] Scan complete: deleted %d step(s), %d empty task dir(s)",
+                "[StorageCleanup]%s Scan complete: %d step(s), %d empty task dir(s)",
+                "[dry-run]" if self.dry_run else "",
                 deleted, empty_tasks,
             )
 

@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.domain.frame import Frame
 from app.services.inference.offline.frame_finder import FrameFinder
 from app.services.step_store.segment_decoder import SegmentDecoder
+from app.services.step_store import store as step_store
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
 from app.settings import settings
 
@@ -106,7 +107,7 @@ def seed(task_id: int) -> None:
     if target.exists():
         shutil.rmtree(target)
 
-    strategy = HLSPersistenceStrategy(base)
+    strategy = HLSPersistenceStrategy()  # 存储根由 step_store 自解析，与上面的 base 同源
     t0 = time.perf_counter()
     for s in range(N_SEG):
         gids = range(s * FRAMES_PER_SEG, (s + 1) * FRAMES_PER_SEG)
@@ -138,7 +139,7 @@ def seed(task_id: int) -> None:
 
 def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
     def tl() -> SegmentDecoder:
-        return SegmentDecoder(task_id, STEP_ID)
+        return SegmentDecoder.for_step(step_store.step(task_id, STEP_ID))
 
     def tracker() -> FrameFinder:
         return FrameFinder(task_id, STEP_ID)
@@ -287,7 +288,7 @@ def main() -> None:
         seed(args.task_id)
         ok = run(args.task_id)
     finally:
-        # 不留残迹：SegmentFinder.list_task_ids 会把它当成真实任务列出来
+        # 不留残迹：step_store.tasks() 会把它当成真实任务列出来
         if not args.keep and target.exists():
             shutil.rmtree(target)
             print(f"已清理 {target}")

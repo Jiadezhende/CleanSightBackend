@@ -15,7 +15,6 @@ detection 不在此落盘——已由 FeatureStore 按帧 ts 单源写入 featur
 import json
 import logging
 import os
-import shutil
 import struct
 import subprocess
 import threading
@@ -27,6 +26,8 @@ import numpy as np
 
 from app.domain.frame import Frame
 from app.services.step_store import layout, playlist
+from app.services.step_store import store as step_store
+from app.services.step_store.store import Step
 from app.settings import settings
 from app.utils.exceptions import PersistenceError
 
@@ -61,14 +62,17 @@ _HLS_TIMESCALE = 90000
 class HLSPersistenceStrategy:
     """HLS持久化策略"""
 
-    def __init__(
-        self,
-        db_dir: Path,
-    ):
-        self.db_dir = db_dir
+    def __init__(self):
+        """**不收 db_dir、不收存储根**：落盘位置由 step_store 自解析，写路径一律经
+        `Step.product_path(kind, ...)`，本类不再拼目录与文件名。"""
         # HLS 段编码帧率全程从帧 ts 反推（见 _effective_fps），不接收任何上游 fps。
-        # 按 target_dir 路径索引的细粒度锁，序列化同一任务目录下的 playlist/metadata 写操作
-        self._dir_locks: Dict[str, threading.Lock] = {}
+        # 按 (task_id, step_id) 索引的细粒度锁，序列化同一 step 目录下的
+        # transcode + playlist append + metadata 写。
+        #
+        # **锁留在写侧、不进 step_store**：它保护的不变式（相邻段 transcode 不能读到
+        # 相同的累计 EXTINF，否则 tfdt 碰撞）是 HLS 写侧知识；且 step_store 出的是
+        # 随手构造的无状态句柄，锁表挂上去等于每次拿到不同的锁、完全失效。
+        self._dir_locks: Dict[Tuple[int, int], threading.Lock] = {}
         self._dir_locks_guard = threading.Lock()
 
     @staticmethod
@@ -87,49 +91,52 @@ class HLSPersistenceStrategy:
                     return eff_fps
         return _DEGENERATE_FALLBACK_FPS
 
-    def _get_dir_lock(self, target_dir: Path) -> threading.Lock:
-        key = str(target_dir)
+    def _get_dir_lock(self, task_id: int, step_id: int) -> threading.Lock:
+        key = (int(task_id), int(step_id))
         with self._dir_locks_guard:
             if key not in self._dir_locks:
                 self._dir_locks[key] = threading.Lock()
             return self._dir_locks[key]
 
     def release_dir_locks(self, task_id: int) -> int:
-        """回收指定 task 所有 step 目录的 dir 锁，返回回收数量（任务拆除时调用）。
+        """回收指定 task 所有 step 的 dir 锁，返回回收数量（任务拆除时调用）。
 
-        锁 key 形如 `str(db_dir/task_id/step_id)`，按 task 前缀批量剔除。拆除后不会再有
-        该 task 的新段入队（CQ 已出 registry、sweeper 扫不到），残段 flush 已在此前入队；
-        极少数在途 transcode 若再取锁会经 `_get_dir_lock` 按需重建同一把、不影响串行正确性。
+        锁 key 是 `(task_id, step_id)` 元组，按首元素批量剔除 —— 此前是路径字符串，
+        要拼一遍 `db_dir/task_id/` 前缀才能匹配，等于让并发机制依赖目录布局。
+        拆除后不会再有该 task 的新段入队（CQ 已出 registry、sweeper 扫不到），残段
+        flush 已在此前入队；极少数在途 transcode 若再取锁会经 `_get_dir_lock` 按需重建
+        同一把、不影响串行正确性。
         不回收则 `_dir_locks` 随 (task_id, step_id) 单调增长——长跑内存慢泄漏。
         """
-        prefix = str(self.db_dir / str(task_id)) + os.sep
         with self._dir_locks_guard:
-            stale = [k for k in self._dir_locks if k.startswith(prefix)]
+            stale = [k for k in self._dir_locks if k[0] == int(task_id)]
             for k in stale:
                 del self._dir_locks[k]
         return len(stale)
 
     def purge_step_dir(self, task_id: int, step_id: int) -> bool:
-        """重启 supersede：删除 `{db_dir}/{task_id}/{step_id}` 整个 step 目录，返回是否删除。
+        """重启 supersede：删除该 `(task_id, step_id)` 的整个 step 目录，返回是否删除。
 
-        与 FeatureStore.open_fresh 对称——同 (task_id, step_id) 重启一次 run 前清空旧 HLS
-        产物（段 / *_playlist.m3u8 / metadata.json / {track}_init.mp4），否则新段带唯一
-        时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
-        HLS 落盘全靠磁盘文件存在性驱动、无每目录内存态（playlist 首行、init 均按 `exists()`
-        惰性重建），故 rmtree 后由后续首段自然重建，安全。
-        持该目录锁串行化，防极端在途 persist_segment 竞争——正常重启路径此刻已无活跃 worker
-        （stop_run 已 flush 残段 + 出 registry + release_dir_locks）。
+        触发时机由本方法决定（同 (task_id, step_id) 重启一次 run 之前），**删除动作走
+        `step_store.purge_step`**——那里登记着这个目录里有谁的东西。
+
+        ⚠ **删的不只是 HLS 产物**：`features.jsonl` / `facts.jsonl`（inference 写）、
+        离线推理结果一并消失。本方法与 `FeatureStore.open_fresh` 对称，两者共同完成
+        supersede；**本方法必须先于 open_fresh**，反过来新建的 features.jsonl 会被这里
+        抹掉（见 `purge_step` docstring 与 run_control.start_run）。
+
+        为什么 HLS 侧可以整目录删了重建：落盘全靠磁盘文件存在性驱动、无每目录内存态
+        （playlist 首行、init 均按 `exists()` 惰性重建），故 rmtree 后由后续首段自然重建。
+        否则新段带唯一时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
+
+        持该目录锁串行化，防极端在途 persist_segment 竞争——锁是并发机制，不随删除动作
+        搬走。正常重启路径此刻已无活跃 worker（stop_run 已 flush 残段 + 出 registry +
+        release_dir_locks）。
         """
-        target_dir = self.db_dir / str(task_id) / str(step_id)
-        if not target_dir.exists():
-            return False
-        with self._get_dir_lock(target_dir):
-            try:
-                shutil.rmtree(target_dir)
-                return True
-            except OSError as e:
-                logger.warning("[HLS] purge step dir failed %s: %s", target_dir, e)
-                return False
+        # 删除动作交给 step_store（目录不存在时它返回 False，无需先探一次 exists()）；
+        # 锁留在本侧，按 (task_id, step_id) 与写路径串行化。
+        with self._get_dir_lock(task_id, step_id):
+            return step_store.purge_step(task_id, step_id)
 
     # 段文件名与 EXTINF 的解析均在 step_store（读写两侧共用一份，不在此另建）
 
@@ -137,8 +144,8 @@ class HLSPersistenceStrategy:
     # 其余 box（含 tfdt、mdhd）按 leaf 处理。
     _BOX_CONTAINERS = frozenset({b"moov", b"trak", b"mdia", b"moof", b"traf", b"mvex"})
 
-    @classmethod
-    def _ts_offset_seconds(cls, path: Path) -> float:
+    @staticmethod
+    def _ts_offset_seconds(step: Step, track: str) -> float:
         """计算当前段相对该 step+track 首段的时间偏移（秒）。
 
         每个段都由独立的 ffmpeg 进程转码，输入 mp4v 自身从 PTS=0 开始；不补偏移的话
@@ -156,14 +163,14 @@ class HLSPersistenceStrategy:
 
         ⚠ 不要回退到「文件名 ts_us 差」的算法 —— 那是 wall-clock 抖动值，与 fragment
         媒体时长不一致，会重新引入 hls.js 段尾停摆 / 总时长缩水 bug。
+
+        直调包内私有的 `playlist.sum_durations`：本类是 playlist 格式的**定义者**
+        （下面几行就在手写 `#EXTINF:` 与文件头），不是它的消费者，故不走
+        `Step.vod_playlist` 那条成品出口。这是导入门禁里两条具名例外之一。
         """
-        parsed = layout.parse_segment_name(path.name)
-        if parsed is None:
-            return 0.0
-        track, _ = parsed
         # 解析器与读侧共用一份（step_store.playlist）：写侧此前自带一份 `_EXTINF_RE`，
         # 与读侧的字符串切法并存，对畸形行的容忍度靠巧合一致。
-        return playlist.sum_durations(path.parent / layout.playlist_name(track))
+        return playlist.sum_durations(step.product_path("playlist", track=track))
 
     @classmethod
     def _iter_boxes(cls, data: bytes, start: int, end: int):
@@ -266,7 +273,7 @@ class HLSPersistenceStrategy:
         return True
 
     @classmethod
-    def _transcode_to_fmp4_segment(cls, path: Path, segment_type: str) -> None:
+    def _transcode_to_fmp4_segment(cls, step: Step, path: Path, segment_type: str) -> None:
         """将 cv2 写出的 mp4v 段转码为 HLS-ready fMP4 fragment，并写入 track 级 init.mp4。
 
         Pipeline：cv2 mp4v → ffmpeg HLS muxer → {track}_init.mp4（首段）+ fMP4 fragment
@@ -293,10 +300,16 @@ class HLSPersistenceStrategy:
 
         失败时保留 mp4v 原文件并打 warning，不抛异常 —— 主流程可用性优先。
         """
+        init_path = step.product_path("init", track=segment_type)
+        # ffmpeg 的 cwd（见下方路径策略）。**这是本包唯一正当的「拿到目录」方式**：
+        # 从已定位的产物路径取 .parent，而不是自己拼「根 + 两级 id」。
         target_dir = path.parent
-        init_path = target_dir / layout.init_name(segment_type)
-        ts_offset = cls._ts_offset_seconds(path)
+        ts_offset = cls._ts_offset_seconds(step, segment_type)
 
+        # 临时文件：**必须前导点**（`purge` 靠它把临时文件排除在产物之外，否则
+        # `.{stem}.tmp_init.mp4` 会命中 `*_init.mp4` 的产物 glob，崩溃残留会让死 step
+        # 永远显得活跃、躲过 TTL 回收）。名字确定而非 `scratch_path` 的随机 nonce：
+        # 下面的 `_cleanup_tmp` 要能预清同名残留，且段模板必须含 `%d`。
         stem = path.stem
         tmp_init = target_dir / f".{stem}.tmp_init.mp4"
         # ffmpeg HLS muxer 要求 -hls_segment_filename 必须含 %d 模板（即便只有 1 段），
@@ -418,28 +431,18 @@ class HLSPersistenceStrategy:
             PersistenceError: 持久化失败
             ValueError: 未知的segment类型
         """
-        # 创建目标目录：{base_dir}/{task_id}/{step_id}/
-        # 不再使用 client_id（source_ip），因为 step 切洗消台时该字段会被业务侧覆写
-        target_dir = self.db_dir / str(task_id) / str(step_id)
-        try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise PersistenceError(
-                message=f"Failed to create directory: {target_dir}",
-                operation="hls_mkdir",
-                retryable=True,
-            ) from e
+        # 句柄绑一次路由键；目录由 `product_path` 顺带保证存在，本类不再拼路径也不 mkdir。
+        # 不再使用 client_id（source_ip），因为 step 切洗消台时该字段会被业务侧覆写。
+        step = step_store.step(task_id, step_id)
 
         if segment_type == "raw":
-            return self._persist_raw_segment(target_dir, frames, task_id, step_id)
+            return self._persist_raw_segment(step, frames)
         elif segment_type == "processed":
-            return self._persist_processed_segment(target_dir, frames, task_id, step_id)
+            return self._persist_processed_segment(step, frames)
         else:
             raise ValueError(f"Unknown segment type: {segment_type}")
 
-    def _persist_raw_segment(
-        self, target_dir: Path, frames: List[Frame], task_id: int, step_id: int
-    ) -> bool:
+    def _persist_raw_segment(self, step: Step, frames: List[Frame]) -> bool:
         """
         持久化原始视频段（业务代码：纯净）
 
@@ -447,24 +450,24 @@ class HLSPersistenceStrategy:
             PersistenceError: 持久化失败（IOError, cv2.error等）
         """
         if not frames:
-            logger.warning("Raw segment为空: %s", target_dir)
+            logger.warning("Raw segment为空: %s", step)
             return False
 
         start_ts = frames[0].timestamp
 
-        # 0. 先落 sidecar 索引，再写 mp4：SegmentFinder 认的是 `raw_segment_*.mp4`，
+        # 0. 先落 sidecar 索引，再写 mp4：读侧的段扫描认的是 `raw_segment_*.mp4`，
         # mp4 一出现该段就对离线反查可见。反过来（先 mp4 后 idx）会留下一个
         # 「段可见但索引未就位」的窗口（实测 260ms，覆盖 mp4 编码 + transcode 全程），
-        # 期间读侧拿不到 sidecar。孤儿 .idx（mp4 写失败时残留）对 SegmentFinder
+        # 期间读侧拿不到 sidecar。孤儿 .idx（mp4 写失败时残留）对段扫描
         # 不可见，随 purge_step_dir 的 rmtree 回收，代价远小于该窗口。
         # 排在最前但**不阻断本段**：写失败只打 warning（理由见 `_update_timeline`）。
-        self._update_timeline(target_dir, frames=frames, timestamp=start_ts)
+        self._update_timeline(step, frames=frames, timestamp=start_ts)
 
         # 1. 生成原始视频段：帧率从帧 ts 反推（与 processed 段同款），无可测速率时退化兜底。
         # 解码 CFR 名义 30，但实际可漂移；用实测 eff_fps 让回放速率贴合真实墙钟。
         eff_fps = self._effective_fps(frames)
-        raw_segment_path = target_dir / layout.segment_name(
-            "raw", layout.ts_to_us(start_ts)
+        raw_segment_path = step.product_path(
+            "segment", track="raw", ts_us=layout.ts_to_us(start_ts)
         )
         height, width = frames[0].frame.shape[:2]
 
@@ -499,8 +502,8 @@ class HLSPersistenceStrategy:
 
         # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
-        raw_playlist_path = target_dir / layout.playlist_name("raw")
-        with self._get_dir_lock(target_dir):
+        raw_playlist_path = step.product_path("playlist", track="raw")
+        with self._get_dir_lock(step.task_id, step.step_id):
             try:
                 if not raw_playlist_path.exists():
                     with raw_playlist_path.open("w") as f:
@@ -510,7 +513,7 @@ class HLSPersistenceStrategy:
                             "#EXT-X-TARGETDURATION:10\n"
                             f'#EXT-X-MAP:URI="{layout.init_name("raw")}"\n'
                         )
-                self._transcode_to_fmp4_segment(raw_segment_path, "raw")
+                self._transcode_to_fmp4_segment(step, raw_segment_path, "raw")
                 with raw_playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n{raw_segment_path.name}\n")
             except IOError as e:
@@ -521,9 +524,7 @@ class HLSPersistenceStrategy:
                 ) from e
 
             self._update_metadata(
-                target_dir,
-                task_id=task_id,
-                step_id=step_id,
+                step,
                 segment_type="raw",
                 segment_count_delta=1,
                 duration_delta=segment_duration,
@@ -532,16 +533,14 @@ class HLSPersistenceStrategy:
 
         logger.info(
             "Raw segment已持久化: task_id=%s step_id=%s frames=%d duration=%.3fs",
-            task_id,
-            step_id,
+            step.task_id,
+            step.step_id,
             len(frames),
             segment_duration,
         )
         return True
 
-    def _persist_processed_segment(
-        self, target_dir: Path, frames: List[Frame], task_id: int, step_id: int
-    ) -> bool:
+    def _persist_processed_segment(self, step: Step, frames: List[Frame]) -> bool:
         """
         持久化处理后视频段（业务代码：纯净）。
 
@@ -552,7 +551,7 @@ class HLSPersistenceStrategy:
             PersistenceError: 持久化失败（IOError, cv2.error等）
         """
         if not frames:
-            logger.warning("Processed segment为空: %s", target_dir)
+            logger.warning("Processed segment为空: %s", step)
             return False
 
         start_ts = frames[0].timestamp
@@ -565,8 +564,8 @@ class HLSPersistenceStrategy:
         eff_fps = self._effective_fps(frames)
 
         # 1. 生成处理后视频段（使用实测有效帧率 eff_fps）
-        segment_path = target_dir / layout.segment_name(
-            "processed", layout.ts_to_us(start_ts)
+        segment_path = step.product_path(
+            "segment", track="processed", ts_us=layout.ts_to_us(start_ts)
         )
         height, width = frames[0].frame.shape[:2]
 
@@ -598,8 +597,8 @@ class HLSPersistenceStrategy:
 
         # 3 & 4. 持锁完成：transcode（含 ts_offset 读 playlist）+ playlist append + metadata。
         # 三段必须原子，否则相邻段 transcode 会读到相同累计 EXTINF → tfdt 碰撞。
-        playlist_path = target_dir / layout.playlist_name("processed")
-        with self._get_dir_lock(target_dir):
+        playlist_path = step.product_path("playlist", track="processed")
+        with self._get_dir_lock(step.task_id, step.step_id):
             try:
                 if not playlist_path.exists():
                     with playlist_path.open("w") as f:
@@ -609,7 +608,7 @@ class HLSPersistenceStrategy:
                             "#EXT-X-TARGETDURATION:10\n"
                             f'#EXT-X-MAP:URI="{layout.init_name("processed")}"\n'
                         )
-                self._transcode_to_fmp4_segment(segment_path, "processed")
+                self._transcode_to_fmp4_segment(step, segment_path, "processed")
                 with playlist_path.open("a") as f:
                     f.write(f"#EXTINF:{segment_duration:.3f},\n{segment_path.name}\n")
             except IOError as e:
@@ -620,9 +619,7 @@ class HLSPersistenceStrategy:
                 ) from e
 
             self._update_metadata(
-                target_dir,
-                task_id=task_id,
-                step_id=step_id,
+                step,
                 segment_type="processed",
                 segment_count_delta=1,
                 duration_delta=segment_duration,
@@ -631,8 +628,8 @@ class HLSPersistenceStrategy:
 
         logger.info(
             "Processed segment已持久化: task_id=%s step_id=%s frames=%d duration=%.3fs",
-            task_id,
-            step_id,
+            step.task_id,
+            step.step_id,
             len(frames),
             segment_duration,
         )
@@ -640,16 +637,14 @@ class HLSPersistenceStrategy:
 
     def _update_metadata(
         self,
-        target_dir: Path,
-        task_id: int,
-        step_id: int,
+        step: Step,
         segment_type: str,
         segment_count_delta: int,
         duration_delta: float,
         timestamp: float,
     ):
-        """更新任务元信息文件（metadata.json）—— 调用方须持有该目录的锁"""
-        metadata_path = target_dir / layout.METADATA_NAME
+        """更新任务元信息文件（metadata.json）—— 调用方须持有该 step 的锁"""
+        metadata_path = step.product_path("metadata")
 
         # 读取现有metadata
         if metadata_path.exists():
@@ -658,8 +653,8 @@ class HLSPersistenceStrategy:
         else:
             # 初始化metadata
             metadata = {
-                "task_id": task_id,
-                "step_id": step_id,
+                "task_id": step.task_id,
+                "step_id": step.step_id,
                 "start_time": int(timestamp),
                 "end_time": None,
                 "raw_segments": {
@@ -695,14 +690,14 @@ class HLSPersistenceStrategy:
 
     def _update_timeline(
         self,
-        target_dir: Path,
+        step: Step,
         frames: List[Frame],
         timestamp: float,
     ):
         """写该段的 sidecar 索引：每帧 frame.timestamp 的 float64 原值数组。
 
         在 mp4 落盘**之前**调用（见 `_persist_raw_segment` 步骤 0），保证索引不晚于
-        段对 SegmentFinder 可见。tmp + os.replace 原子替换，读侧不会看到半截文件。
+        段对读侧可见。tmp + os.replace 原子替换，读侧不会看到半截文件。
 
         **失败不抛**：sidecar 只服务离线反查，回放/下载/送标三条链路都不读它；而本函数
         排在 mp4 之前，抛出去会让 worker 重试耗尽后连整段视频一起丢（mp4 / playlist /
@@ -710,7 +705,11 @@ class HLSPersistenceStrategy:
         step_store.segment_decoder `_load_sidecar`：跳过该段、不打断整条迭代），
         故此处降级为 warning。
         """
-        idx_path = target_dir / layout.sidecar_name("raw", layout.ts_to_us(timestamp))
+        idx_path = step.product_path(
+            "sidecar", track="raw", ts_us=layout.ts_to_us(timestamp)
+        )
+        # 临时文件不必前导点：`.tmp` 后缀已让它落在所有产物 glob 之外
+        #（`*_segment_*.idx` 匹配不到 `*.tmp`）。
         tmp = idx_path.with_suffix(".tmp")
 
         timestamps = np.array([frame.timestamp for frame in frames], dtype=np.float64)

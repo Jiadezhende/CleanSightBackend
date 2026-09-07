@@ -7,7 +7,7 @@
     4. 校验 + 补 producer + 排序，幂等 replace 写 FactLedger。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
-Runner 自建绑定 `settings.storage_base_dir` 的 FeatureStore / FactLedger（不复用在线单例——本就独立进程）。
+Runner 自建 FeatureStore / FactLedger（不复用在线单例——本就独立进程），落盘位置经 step_store。
 调用方须保证输入已封口（step 已停写、缓冲已 flush）；Runner 不证明在线写入已结束。
 """
 
@@ -18,13 +18,13 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.services.inference.feature.store import FactLedger, FeatureStore
 from app.services.inference.types import SegmentFact
 from app.services.inference.stage_factory import StageFactory
-from app.settings import settings
+from app.services.step_store import store as step_store
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +53,13 @@ class OfflineRunner:
 
     def __init__(
         self,
-        base_dir: Optional[Union[str, Path]] = None,
         config_path: Optional[Path] = None,
         config: Optional[InferenceConfig] = None,
     ):
-        base = Path(base_dir) if base_dir is not None else settings.storage_base_dir
-        self._base_dir = Path(base)
-        self._feature_store = FeatureStore(base)
-        self._fact_ledger = FactLedger(base)
+        """**不持路径也不持存储根**：产物位置一律问 step_store（它自解析
+        `settings.storage_base_dir`）。"""
+        self._feature_store = FeatureStore()
+        self._fact_ledger = FactLedger()
         self._config_path = config_path
         self._config = config  # 显式注入优先（测试用）；否则走 load_stage_config 单例
 
@@ -112,15 +111,13 @@ class OfflineRunner:
         debug = segmenter.debug_result()
         if debug is None:
             return
-        path = self._base_dir / str(spec.task_id) / str(spec.step_id) / "offline_inference_result.json"
+        step = step_store.step(spec.task_id, spec.step_id)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             payload = {"task_id": spec.task_id, "step_id": spec.step_id, **debug}
-            path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            with step.open_product("offline_result", "w") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.warning("[OfflineRunner] 逐帧调试 JSON 落盘失败 %s: %s", path, e)
+            logger.warning("[OfflineRunner] 逐帧调试 JSON 落盘失败 %s: %s", step, e)
 
     @staticmethod
     def _validate_and_stamp(facts: List[SegmentFact], producer: str) -> List[SegmentFact]:

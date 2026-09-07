@@ -87,10 +87,15 @@ class RunController:
             client_manager.set(task_id, cq)
             try:
                 # storage supersede（start 侧两个 service 钩子并排，与 stop_run 拆除侧对称）：
-                #   ① persistence.start_run —— 清空旧 HLS step 目录（无 owner，纯 rmtree）；
-                #   ② inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 截断
-                #      旧 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
+                #   ① persistence.start_run —— 删**整个** step 目录（无 owner，纯 rmtree）；
+                #   ② inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 建
+                #      新 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
                 #   均在建新 CQ 之后、无活跃 worker 写该 (task,step) 之前，全程持 lock_for(task_id)。
+                #
+                # ⚠ **①必须先于②，反过来 open_fresh 建的 features.jsonl 会被①的 rmtree 抹掉，
+                #   且不报错**。①删的是整个目录含 inference 的产物，不只 HLS —— 该契约现已写在
+                #   `step_store.purge.purge_step` 的 docstring 里（此前只活在本注释中，两侧代码
+                #   互不知情）。
                 persistence_manager.start_run(cq)
 
                 # 2d. start_workflow（open_fresh + Actor；CQ 已由上面 set 注册）

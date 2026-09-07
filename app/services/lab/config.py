@@ -30,15 +30,18 @@ _default_project_id: int = 0
 _source: str = "env"  # "file" | "env"
 _task_source: str = "db"  # "db" | "storage" —— 任务列表数据来源
 
-_CONFIG_FILENAME = "lab_runtime_config.json"
 _VALID_TASK_SOURCES = ("db", "storage")
 
 
 def _config_path() -> Path:
-    """持久化文件绝对路径，与 HLS 段写入同一 base_dir。"""
-    from app.services.step_store.finder import get_default_base_dir
+    """持久化文件绝对路径。
 
-    return get_default_base_dir() / _CONFIG_FILENAME
+    直取 `settings.lab_runtime_config_path` —— 它在存储根**旁边**、与任何
+    `(task_id, step_id)` 无关，故不该找 step_store 借根（那个包只回答 step 的问题）。
+    """
+    from app.settings import settings
+
+    return settings.lab_runtime_config_path
 
 
 def _ensure_loaded() -> None:

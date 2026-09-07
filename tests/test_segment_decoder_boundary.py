@@ -28,6 +28,7 @@ import pytest
 from app.domain.frame import Frame
 from app.services.inference.offline.frame_finder import FrameFinder
 from app.services.step_store.segment_decoder import SegmentDecoder
+from app.services.step_store import store as step_store
 
 TASK_ID = 4242
 STEP_ID = 7
@@ -66,9 +67,14 @@ class FakeDecodeSegmentDecoder(SegmentDecoder):
             )
 
 
+def _fake_decoder(task_id: int = TASK_ID, step_id: int = STEP_ID):
+    """经 `for_step` 构造 seam 子类 —— 与 `Step.frames()` 走同一条构造路径。"""
+    return FakeDecodeSegmentDecoder.for_step(step_store.step(task_id, step_id))
+
+
 @pytest.fixture
 def step_dir(tmp_storage) -> Path:
-    """造 N_SEG 段：空 mp4 占位（SegmentFinder 只解析文件名）+ 真 sidecar。"""
+    """造 N_SEG 段：空 mp4 占位（段扫描只解析文件名）+ 真 sidecar。"""
     d = tmp_storage / str(TASK_ID) / str(STEP_ID)
     d.mkdir(parents=True, exist_ok=True)
     for s in range(N_SEG):
@@ -81,7 +87,7 @@ def step_dir(tmp_storage) -> Path:
 
 @pytest.fixture
 def tl(step_dir) -> FakeDecodeSegmentDecoder:
-    return FakeDecodeSegmentDecoder(TASK_ID, STEP_ID)
+    return _fake_decoder()
 
 
 def ts_out(tl: SegmentDecoder, *args, **kwargs) -> List[float]:
@@ -171,16 +177,14 @@ class TestMissingSidecar:
         assert got == expected
 
     def test_empty_timeline_yields_nothing(self, tmp_storage):
-        assert list(SegmentDecoder(999, 999).iter()) == []
+        assert list(SegmentDecoder.for_step(step_store.step(999, 999)).iter()) == []
 
 
 class TestFind:
     @pytest.fixture
     def ff(self, step_dir) -> FrameFinder:
         """经 decoder 注入口换成 seam 版，不必 monkeypatch 模块属性。"""
-        return FrameFinder(
-            TASK_ID, STEP_ID, decoder=FakeDecodeSegmentDecoder(TASK_ID, STEP_ID)
-        )
+        return FrameFinder(TASK_ID, STEP_ID, decoder=_fake_decoder())
 
     def test_multi_point_across_segments(self, ff):
         gids = [1, 13, 27, 39]

@@ -4,8 +4,8 @@
 提供告警证据回溯、任务 VOD 回放、任务时间轴打点三个核心接口。
 
 数据底座：
-- task_id + step_id → 落盘目录：`{base_dir}/{task_id}/{step_id}/`
-- 段定位：文件名 ts_us 二分查找（segment_finder）
+- 落盘的一切经 `step_store`：给 `(task_id, step_id)` 拿 `Step` 句柄，段定位 / EXTINF
+  时长 / init 判据 / VOD m3u8 都问它。本层不知道目录长什么样、文件叫什么名
 - 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
 
 设计要点：
@@ -15,7 +15,7 @@
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -23,15 +23,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
 from app.models import DBAlarm
-from app.services.step_store import layout
-from app.services.step_store.finder import (
-    SegmentFinder,
+from app.services.step_store import store as step_store
+from app.services.step_store.store import (
     SegmentRef,
-    get_default_base_dir,
+    Step,
+    StepInitMissing,
+    StepNoPlayableSegments,
 )
-from app.services.step_store import playlist
-from app.services.step_store.playlist import parse_playlist_durations
 from app.services.traceback import MediaToken
+from app.services.traceback.media_token import MediaKind
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/traceback", tags=["traceback"])
@@ -64,11 +64,18 @@ def _to_ms(detected_at: Optional[int]) -> int:
     return v // 1000      # 微秒级或更高
 
 
-def _segment_to_url(req: Request, finder: SegmentFinder, seg: SegmentRef) -> Dict[str, Any]:
-    """把段引用打包为前端可消费结构（带 token 化 URL）"""
+def _segment_to_url(
+    req: Request, step: Step, seg: SegmentRef, is_trigger: bool
+) -> Dict[str, Any]:
+    """把段引用打包为前端可消费结构（带 token 化 URL）。
+
+    `(task_id, step_id)` 从 `step` 句柄取而不再从 `seg` 取 —— 它们本就是同一个值，
+    段上再带一份只会让调用点去选「用哪个真源」。`is_trigger` 同理：那是查询上下文
+    不是段属性，由 `segments_around()` 返回的下标算出来。
+    """
     token = MediaToken.default().sign(
-        task_id=seg.task_id,
-        step_id=seg.step_id,
+        task_id=step.task_id,
+        step_id=step.step_id,
         filename=seg.filename,
         kind="segment",
     )
@@ -78,8 +85,17 @@ def _segment_to_url(req: Request, finder: SegmentFinder, seg: SegmentRef) -> Dic
         "filename": seg.filename,
         "ts_us": seg.ts_us,
         "ts_ms": seg.ts_ms,
-        "is_trigger": seg.is_trigger,
+        "is_trigger": is_trigger,
     }
+
+
+def _clips(
+    req: Request, step: Step, segs: List[SegmentRef], trigger_idx: int
+) -> List[Dict[str, Any]]:
+    return [
+        _segment_to_url(req, step, s, is_trigger=(i == trigger_idx))
+        for i, s in enumerate(segs)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -199,11 +215,13 @@ async def get_alarm_evidence(
         )
     detected_ms = _to_ms(alarm["detected_at"])
 
-    finder = SegmentFinder(get_default_base_dir())
+    step = step_store.step(task_id, step_id)
 
-    raw_segs = finder.find(task_id, step_id, detected_ms, "raw", n_before, n_after)
-    processed_segs = finder.find(
-        task_id, step_id, detected_ms, "processed", n_before, n_after
+    raw_segs, raw_trigger = step.segments_around(
+        detected_ms, "raw", n_before, n_after
+    )
+    processed_segs, proc_trigger = step.segments_around(
+        detected_ms, "processed", n_before, n_after
     )
 
     if not raw_segs and not processed_segs:
@@ -217,8 +235,8 @@ async def get_alarm_evidence(
         "alarm": alarm,
         "task_id": task_id,
         "step_id": step_id,
-        "raw_clips": [_segment_to_url(request, finder, s) for s in raw_segs],
-        "processed_clips": [_segment_to_url(request, finder, s) for s in processed_segs],
+        "raw_clips": _clips(request, step, raw_segs, raw_trigger),
+        "processed_clips": _clips(request, step, processed_segs, proc_trigger),
     }
 
 
@@ -228,63 +246,42 @@ async def get_alarm_evidence(
 
 
 def _build_vod_playlist(
-    request: Request,
-    finder: SegmentFinder,
-    task_id: int,
-    step_id: int,
-    track: str,
-    segs: List[SegmentRef],
+    request: Request, step: Step, track: str, segs: List[SegmentRef]
 ) -> str:
     """构造 VOD m3u8 文本体。供 task 全量回放与 evidence 上下文回放复用。
 
-    - 要求 segs 已经按时序排序、非空
-    - 调用方负责处理 segs 为空时的 404
-    - init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
-    - segs 经 playlist 过滤后为空（全部为在途段）→ 抛 404
+    **本层只剩两件事：把段身份翻成 token 化 URL、把领域异常翻成状态码。** 备料
+    （EXTINF 真值、滤在途段、判 init、算 TARGETDURATION）全在 `Step.vod_playlist`
+    —— 那才是写错会静默的部分：骨架写错播放器立刻报错，备料写错表现为 hls.js 段尾
+    停摆、缓冲洞。
+
+    URI 形态经 `encode_uri` 注入：step_store 只写**段的身份**（文件名），token 化是
+    访问控制、属本层。
     """
-    step_dir = finder.task_dir(task_id, step_id)
-    if not playlist.has_init(step_dir, track):
-        # 判据在 step_store（缺 init = 旧格式产物或首段仍在 transcode，均不可自愈）；
-        # 这里只决定它映射成哪个状态码 —— 503 而非 404，让调用方按「此 step 不可回放」处理。
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "HLS init segment missing",
-                "detail": (
-                    f"{layout.init_name(track)} not found for task {task_id} step {step_id}. "
-                    "This step is either mid-transcode or written in an unsupported "
-                    "legacy layout; it cannot be played back."
-                ),
-            },
-        )
-
-    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF（退化段的兜底也只在写入侧的 eff_fps
-    # 里，见 hls_strategy._DEGENERATE_FALLBACK_FPS）。此处只读回、不重新推导、无第二兜底。
-    real_durations = parse_playlist_durations(step_dir / layout.playlist_name(track))
-    segs = playlist.filter_playable(segs, real_durations)
-    if not segs:
-        raise HTTPException(status_code=404, detail="No playable segments yet")
-
     base_url = str(request.base_url).rstrip("/")
 
-    def _url(kind: str, seg_task: int, seg_step: int, filename: str) -> str:
+    def _url(kind: str, filename: str) -> str:
+        # step_store 的 kind 取值域（"segment" / "init"）与 MediaKind 恒等，故此处
+        # cast 而非再做一次映射 —— 多一张映射表就多一处可以写错的地方。
         token = MediaToken.default().sign(
-            task_id=seg_task, step_id=seg_step, filename=filename, kind=kind,
+            task_id=step.task_id,
+            step_id=step.step_id,
+            filename=filename,
+            kind=cast(MediaKind, kind),
         )
         return f"{base_url}/media/{kind}/{token}"
 
-    return playlist.build_vod_playlist(
-        entries=[
-            (
-                _url("segment", s.task_id, s.step_id, s.filename),
-                real_durations[s.filename],
-            )
-            for s in segs
-        ],
-        map_uri=_url("init", task_id, step_id, layout.init_name(track)),
-        # 上一步已保证 real_durations 非空（segs ⊆ real_durations 且非空），max() 无需 default。
-        target_duration=max(int(round(max(real_durations.values()))), 1),
-    )
+    try:
+        return step.vod_playlist(track, segments=segs, encode_uri=_url)
+    except StepInitMissing as e:
+        # 缺 init = 旧格式产物或首段仍在 transcode，两者服务端都不可自愈 —— 故 503
+        # 而非 404，让调用方按「此 step 不可回放」处理。
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "HLS init segment missing", "detail": str(e)},
+        ) from e
+    except StepNoPlayableSegments as e:
+        raise HTTPException(status_code=404, detail="No playable segments yet") from e
 
 
 # HEAD 与 GET 同注册：原生 HLS 播放栈（Safari/AVPlayer 等）在取 playlist 前会自动
@@ -317,8 +314,10 @@ async def get_task_playlist(
     - 保证 VOD 完整性（即使任务未封档）
     - URL 走 token 化 /media/segment/*，不暴露文件系统路径
     """
-    finder = SegmentFinder(get_default_base_dir())
-    segs = finder.list_segments(task_id, step_id, track)
+    step = step_store.step(task_id, step_id)
+    # playable_only=False 保留原判据：磁盘上一个段都没有 → 404「没这个 step」；
+    # 有段但全在途 → 由 vod_playlist 抛 StepNoPlayableSegments，措辞不同（见下）。
+    segs = step.segments(track, playable_only=False)
     if not segs:
         raise NotFoundError(
             f"No {track} segments for task {task_id} step {step_id}",
@@ -326,7 +325,7 @@ async def get_task_playlist(
             resource_id=f"task={task_id},step={step_id},track={track}",
         )
 
-    body = _build_vod_playlist(request, finder, task_id, step_id, track, segs)
+    body = _build_vod_playlist(request, step, track, segs)
     return PlainTextResponse(
         content=body,
         media_type="application/vnd.apple.mpegurl",
@@ -375,8 +374,8 @@ async def get_alarm_evidence_playlist(
         )
     detected_ms = _to_ms(alarm["detected_at"])
 
-    finder = SegmentFinder(get_default_base_dir())
-    segs = finder.find(task_id, step_id, detected_ms, track, n_before, n_after)
+    step = step_store.step(task_id, step_id)
+    segs, _trigger_idx = step.segments_around(detected_ms, track, n_before, n_after)
     if not segs:
         raise NotFoundError(
             f"No {track} segments around alarm {alarm_id}",
@@ -384,7 +383,7 @@ async def get_alarm_evidence_playlist(
             resource_id=f"alarm={alarm_id},track={track}",
         )
 
-    body = _build_vod_playlist(request, finder, task_id, step_id, track, segs)
+    body = _build_vod_playlist(request, step, track, segs)
     return PlainTextResponse(
         content=body,
         media_type="application/vnd.apple.mpegurl",
@@ -397,15 +396,13 @@ async def get_alarm_evidence_playlist(
 # ---------------------------------------------------------------------------
 
 
-def _step_duration_ms(
-    finder: SegmentFinder, task_id: int, step_id: int
-) -> Tuple[int, int, int]:
+def _step_duration_ms(step: Step) -> Tuple[int, int, int]:
     """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。
 
-    µs → ms 的换算留在此处：`step_time_bounds_us` 产出微秒（与段文件名 ts_us 同单位），
+    µs → ms 的换算留在此处：`Step.time_bounds_us` 产出微秒（与段文件名 ts_us 同单位），
     毫秒是本接口对前端的表示口径。
     """
-    bounds = playlist.step_time_bounds_us(finder, task_id, step_id)
+    bounds = step.time_bounds_us
     if bounds is None:
         return 0, 0, 0
     start_us, end_us = bounds
@@ -436,8 +433,9 @@ async def get_task_timeline(
           ]
         }
     """
-    finder = SegmentFinder(get_default_base_dir())
-    start_ms, end_ms, duration_ms = _step_duration_ms(finder, task_id, step_id)
+    start_ms, end_ms, duration_ms = _step_duration_ms(
+        step_store.step(task_id, step_id)
+    )
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
     # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。

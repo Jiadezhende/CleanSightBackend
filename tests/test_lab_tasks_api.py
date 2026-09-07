@@ -4,6 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.settings import settings
 
 
 class _FakeQuery:
@@ -63,7 +64,7 @@ async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_path):
     ]
     db = _FakeDB(rows)
     monkeypatch.setattr(lab_router, "get_db", lambda: iter([db]))
-    monkeypatch.setattr(lab_router, "get_default_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
 
     step_dir = tmp_path / "101" / "2"
     step_dir.mkdir(parents=True)
@@ -98,7 +99,7 @@ def _make_raw_segment(base: "object", task_id: int, step_id: int, ts_us: int):
 def _force_storage_mode(monkeypatch, tmp_path):
     from app.routers import lab as lab_router
 
-    monkeypatch.setattr(lab_router, "get_default_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     monkeypatch.setattr(
         lab_router.lab_config, "get_task_source", lambda: "storage"
     )

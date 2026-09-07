@@ -12,16 +12,18 @@ StepExporter —— 把一个 (task_id, step_id, track) 的全部落盘段导出
 fragment，remux 成 mp4 只是换容器——磁盘速度、零 CPU、零二次画质损失。
 
 实现思路（与 ClipBuilder._run_ffmpeg 同构，坑点相同）：
-1. SegmentFinder.list_segments 拿该 step 该轨全部段（按 ts_us 升序）
-2. 用写入侧 playlist 的 EXTINF 作时长真值，同时过滤在途段
-3. 在 step 目录写临时 m3u8（EXT-X-MAP 引 init.mp4 + 段列表 + ENDLIST），喂 ffmpeg HLS demuxer
+1. `Step.segments(track)` 拿该 step 该轨全部**可播**段（在途段已滤掉）
+2. `Step.vod_playlist(track)` 直接出 m3u8 成品 —— EXTINF 真值、init 判据、
+   TARGETDURATION 全在包内备好，本层不重新推导
+3. 把它写进 step 目录的临时 m3u8（`Step.scratch_path` 定位），喂 ffmpeg HLS demuxer
 4. `-c copy -movflags +faststart` 输出到 temp_root
 
 为什么不用 `-f concat`：段是 fMP4 fragment（无 moov），concat demuxer 单独 demux 时找不到
 codec init 会失败。HLS demuxer 通过 EXT-X-MAP 先吃 init.mp4 再串 fragment，才能正确还原。
 
-为什么必须自己补 `#EXT-X-ENDLIST`：写入侧 playlist 是 LIVE 形态（不写 ENDLIST），
-ffmpeg 会当直播流只从 live edge（末尾几段）开始读，前面全丢。
+为什么 m3u8 必须是 VOD 形态（带 `#EXT-X-ENDLIST`）：写入侧 playlist 是 LIVE 形态（不写
+ENDLIST），ffmpeg 会当直播流只从 live edge（末尾几段）开始读，前面全丢。`vod_playlist`
+产出的就是 VOD 形态，本层不必自己补。
 
 依赖：ffmpeg 由 settings.ffmpeg_path 提供（项目自包含 .ffmpeg/bin/，见 app/settings.py）
 """
@@ -29,28 +31,24 @@ ffmpeg 会当直播流只从 live edge（末尾几段）开始读，前面全丢
 from __future__ import annotations
 
 import logging
-import math
 import secrets
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
-from app.services.step_store import layout
-from app.services.step_store.finder import (
-    SegmentFinder,
-    SegmentRef,
-    get_default_base_dir,
+from app.services.step_store import store as step_store
+from app.services.step_store.store import (
+    StepInitMissing,
+    StepNoPlayableSegments,
 )
-from app.services.step_store import playlist
-from app.services.step_store.playlist import parse_playlist_durations
 
 logger = logging.getLogger(__name__)
 
 
 # 孤儿产物回收阈值：客户端中途断开时 Starlette 的 BackgroundTask 不保证跑到，
 # 需要这层兜底。.lab_exports 不在 StorageCleanupWorker 的扫描范围内
-# （它按 metadata.json 判 step 目录，非数字目录名被 _dir_name_to_int 跳过）。
+# （它只枚举两层数字目录名，前导点目录不匹配）。
 _ORPHAN_TTL_SECONDS = 30 * 60
 
 # ffmpeg 超时按段数估。remux 是磁盘速度（无解码编码），5s/段 是很宽的余量。
@@ -75,18 +73,17 @@ class StepExporter:
 
     def __init__(
         self,
-        finder: Optional[SegmentFinder] = None,
         ffmpeg_bin: Optional[str] = None,
         temp_root: Optional[Path] = None,
     ):
         """
         Args:
-            finder: 段定位器；不传则用 get_default_base_dir() 构造
             ffmpeg_bin: ffmpeg 可执行文件路径；默认 None = 用项目自包含的 settings.ffmpeg_path
                 （.ffmpeg/bin/，不回退 PATH），与后端 / ClipBuilder 同源。显式传参可覆写。
-            temp_root: 产物输出根目录；不传则用 {base_dir}/.lab_exports（与 ClipBuilder 同目录）
+            temp_root: 产物输出根目录；不传则用 `settings.lab_export_root`（与 ClipBuilder
+                同目录）。**不再向 step_store 借根** —— 那个包只回答 `(task_id, step_id)`
+                的问题，导出根是「存储根旁边」的东西。
         """
-        self._finder = finder or SegmentFinder(get_default_base_dir())
         if ffmpeg_bin is None:
             from app.settings import settings
 
@@ -94,7 +91,9 @@ class StepExporter:
         self._ffmpeg = ffmpeg_bin
 
         if temp_root is None:
-            temp_root = self._finder.base_dir / ".lab_exports"
+            from app.settings import settings
+
+            temp_root = settings.lab_export_root
         self._temp_root = Path(temp_root)
         self._temp_root.mkdir(parents=True, exist_ok=True)
 
@@ -112,41 +111,32 @@ class StepExporter:
         """
         self._sweep_orphans()
 
-        segs = self._finder.list_segments(task_id, step_id, track)
+        step = step_store.step(task_id, step_id)
+        # 默认 playable_only=True：在途段（mp4v 已落、transcode+append 未完成）必须滤掉，
+        # 否则 fragment 实际媒体时长与 playlist 声明对不上，导出时长错乱。
+        segs = step.segments(track)
         if not segs:
             raise StepExportNoSegments(
-                f"No {track} segments for task_id={task_id}, step_id={step_id}"
+                f"No playable {track} segments for task_id={task_id}, "
+                f"step_id={step_id} (no segments, all in-flight, or playlist missing)"
             )
 
-        step_dir = self._finder.task_dir(task_id, step_id)
+        # m3u8 成品由 step_store 出（EXTINF 真值、init 判据、TARGETDURATION 全在包内）；
+        # 本层只把它的领域异常翻成自家异常 —— 路由层再翻成 HTTP 状态码。
+        try:
+            vod_text = step.vod_playlist(track, segments=segs)
+        except StepInitMissing as e:
+            raise StepExportInitMissing(f"{e} It cannot be exported.") from e
+        except StepNoPlayableSegments as e:
+            raise StepExportNoSegments(str(e)) from e
 
-        # EXTINF 是时长唯一真值（不能用文件名 ts 差重推）；键集合同时充当"已完成落盘"
-        # 的判据——不在其中的是在途段（mp4v 已落、transcode+append 未完成），必须过滤，
-        # 否则 fragment 实际媒体时长与 playlist 估算对不上。
-        durations = parse_playlist_durations(step_dir / layout.playlist_name(track))
-        segs = playlist.filter_playable(segs, durations)
-        if not segs:
-            raise StepExportNoSegments(
-                f"No playable {track} segments yet for task_id={task_id}, "
-                f"step_id={step_id} (all in-flight or playlist missing)"
-            )
-
-        if not playlist.has_init(step_dir, track):
-            # 判据在 step_store（与 traceback VOD 回放共用）；这里只决定它映射成哪个
-            # 领域异常 —— 路由层再把它翻成 HTTP 状态码。
-            raise StepExportInitMissing(
-                f"{layout.init_name(track)} not found for task {task_id} step {step_id}. "
-                "This step is either mid-transcode or written in an unsupported "
-                "legacy layout; it cannot be exported."
-            )
-
+        # 临时 m3u8 必须落在 step 目录（EXT-X-MAP 与段 URI 都是相对引用），该约束与
+        # 前导点命名都由 step_store 保证，本层不拼路径。
+        tmp_m3u8 = step.scratch_path("export")
         nonce = secrets.token_hex(6)
-        tmp_m3u8 = step_dir / f".export_{nonce}.m3u8"
         output_path = self._temp_root / f"step_{task_id}_{step_id}_{track}_{nonce}.mp4"
 
-        tmp_m3u8.write_text(
-            self._build_vod_text(segs, durations, track), encoding="utf-8"
-        )
+        tmp_m3u8.write_text(vod_text, encoding="utf-8")
         try:
             self._run_ffmpeg(tmp_m3u8, output_path, n_segments=len(segs))
         finally:
@@ -166,22 +156,6 @@ class StepExporter:
         return output_path
 
     # -------- internal --------
-
-    @staticmethod
-    def _build_vod_text(segs: List[SegmentRef], durations: dict, track: str) -> str:
-        """构造喂给 ffmpeg 的 VOD m3u8 文本。
-
-        段用 basename 引用 —— 该 m3u8 落在 step 目录，相对 URI 才解析得到
-        同目录的 init.mp4 与各段文件。
-
-        调用方保证 segs 非空、已按时序升序、且每个 filename 都在 durations 里。
-        """
-        seg_durs = [durations[s.filename] for s in segs]
-        return playlist.build_vod_playlist(
-            entries=[(s.path.name, d) for s, d in zip(segs, seg_durs)],
-            map_uri=layout.init_name(track),
-            target_duration=max(int(math.ceil(max(seg_durs))), 1),
-        )
 
     def _run_ffmpeg(self, m3u8_path: Path, output_path: Path, n_segments: int) -> None:
         """HLS demuxer 串 fragment → mp4 容器，纯 remux 不重编码。"""

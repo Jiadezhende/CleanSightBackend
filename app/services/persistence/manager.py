@@ -54,7 +54,6 @@ class PersistenceManager:
         self.hls_pool = HLSWorkerPool(
             input_queue=self.hls_queue,
             num_workers=self.config.hls_workers,
-            db_dir=self.config.storage_base_dir,
         )
 
         self.alarm_pool = AlarmWorkerPool(
@@ -66,7 +65,6 @@ class PersistenceManager:
         self._cleanup_worker: StorageCleanupWorker | None = None
         if self.config.enable_cleanup:
             self._cleanup_worker = StorageCleanupWorker(
-                db_dir=self.config.storage_base_dir,
                 cleanup_days=self.config.cleanup_days,
                 interval_seconds=self.config.cleanup_interval_seconds,
             )

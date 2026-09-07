@@ -38,7 +38,7 @@ class AlarmConfig:
 class StorageConfig:
     """存储配置
 
-    注意：base_dir 已上移到 settings.storage_base_dir（单一真源），不在此定义；
+    注意：base_dir 已上移到 settings（单一真源）并只经 step_store 使用，不在此定义；
     此处仅保留持久化自有职责的参数（清理策略）。
     """
 
@@ -109,16 +109,10 @@ class PersistenceConfig:
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
         return cls(storage=storage, hls=hls, alarm=alarm)
 
-    @property
-    def storage_base_dir(self) -> Path:
-        """存储根目录（绝对路径）——委托 settings 单一真源。
-
-        历史上各服务各自解析此路径，现统一收敛到 settings.storage_base_dir，
-        persistence / inference / traceback 三方同源，消除分叉与跨服务 push。
-        """
-        from app.settings import settings
-
-        return settings.storage_base_dir
+    # 存储根**不在此暴露**：它此前是 `return settings.storage_base_dir`，同一个值
+    # 绕两层，还把「路径」这个概念塞进了一个只该管队列与 worker 数的配置对象。
+    # 落盘路径一律经 step_store 的 `Step.product_path`，由导入门禁锁死
+    #（tests/test_import_hygiene.py::test_storage_root_is_private_to_step_store）。
 
     # 扁平访问器（manager 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
     @property
@@ -158,7 +152,6 @@ class PersistenceConfig:
         # DEBUG级别显示详细配置
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("========== Persistence配置 ==========")
-            logger.debug("存储: base_dir=%s", self.storage_base_dir)
             logger.debug(
                 "HLS: workers=%d, queue=%d",
                 self.hls.workers,

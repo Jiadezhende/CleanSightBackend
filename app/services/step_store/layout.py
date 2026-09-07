@@ -12,7 +12,7 @@ hls_strategy）与读侧（step_store 自身 / lab / inference.offline / routers
 而非失败。
 
 依赖上界：stdlib only（L0）。不 import settings、不 import numpy —— 任何人都该能零成本
-拿到命名。存储根目录的解析在 `finder.get_default_base_dir()`，那里才碰 settings。
+拿到命名。存储根目录的解析在 `finder.storage_root()`，那里才碰 settings。
 """
 
 from __future__ import annotations

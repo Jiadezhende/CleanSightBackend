@@ -5,8 +5,6 @@ owner 用对象引用（run 身份 = cq 对象），owner 不符即"迟到于 su
 无需造真实竞态即可覆盖归属校验。
 """
 
-import tempfile
-
 from factories import make_frame_detections, make_frame_feature
 from app.services.inference.feature.store import FeatureStore
 
@@ -18,8 +16,8 @@ def _result(ts: float, cls: str, n: int):
     )
 
 
-def test_owner_match_lands():
-    fs = FeatureStore(tempfile.mkdtemp(), batch_size=1)
+def test_owner_match_lands(tmp_storage):
+    fs = FeatureStore(batch_size=1)
     a = object()
     fs.open_fresh(7, 1, owner=a)
     fs.append(7, 1, _result(1.0, "bubble", 2), owner=a)
@@ -27,8 +25,8 @@ def test_owner_match_lands():
     assert len(frames) == 1 and len(frames[0].by_source["bubble"].detections) == 2
 
 
-def test_stale_owner_rejected_after_supersede():
-    fs = FeatureStore(tempfile.mkdtemp(), batch_size=1)
+def test_stale_owner_rejected_after_supersede(tmp_storage):
+    fs = FeatureStore(batch_size=1)
     a, b = object(), object()
 
     # run A 起始 + 写一帧
@@ -50,16 +48,16 @@ def test_stale_owner_rejected_after_supersede():
     assert len(frames[0].by_source["bubble"].detections) == 1
 
 
-def test_owner_none_backward_compatible():
+def test_owner_none_backward_compatible(tmp_storage):
     """不调 open_fresh 时 _owner 恒空 → owner=None 放行（既有直连测试语义不变）。"""
-    fs = FeatureStore(tempfile.mkdtemp(), batch_size=1)
+    fs = FeatureStore(batch_size=1)
     fs.append(7, 1, _result(1.0, "bubble", 2))  # owner 默认 None
     assert len(fs.load(7, 1)) == 1
 
 
-def test_close_clears_owner_by_identity():
+def test_close_clears_owner_by_identity(tmp_storage):
     """close(owner) 身份核对清 owner；被新 run 接管后旧 close 不误清。"""
-    fs = FeatureStore(tempfile.mkdtemp(), batch_size=1)
+    fs = FeatureStore(batch_size=1)
     a, b = object(), object()
 
     fs.open_fresh(7, 1, owner=a)

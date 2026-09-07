@@ -1,12 +1,12 @@
 """
-按 ts 反查原始帧：离线链路对 `step_store.segment_decoder` 的消费策略。
+按 ts 反查原始帧：离线链路对 `Step.frames`（step_store 的区间解码出口）的消费策略。
 
-与 `SegmentFinder`（段级找段）成一组对仗：**段级找段、帧级找帧**。
+与 `Step.segments_around`（段级找段）成一组对仗：**段级找段、帧级找帧**。
 
 本模块只有一件事——**把「区间取帧」变成「按 ts 对号取帧」**，两者的失败契约相反：
 
-    SegmentDecoder.iter   区间扫描，宽容：缺 sidecar 跳过该段、空区间返回空
-    FrameFinder.find      点查，严格：任一 ts 配不上就 ValueError
+    Step.frames        区间扫描，宽容：缺 sidecar 跳过该段、空区间返回空
+    FrameFinder.find   点查，严格：任一 ts 配不上就 ValueError
 
 宽容留在解码层（缺一段的索引不该让前后所有段一起读不了），严格留在这层
 （ts 是帧的身份，配错帧比报错更坏）。这也是两者分居两个模块的理由。
@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
-from typing import Iterator, List, Optional
+from functools import partial
+from typing import Callable, Iterator, List, Optional
 
 from app.domain.frame import Frame
-from app.services.step_store.segment_decoder import SegmentDecoder
+from app.services.step_store import store as step_store
 
 
 class FrameFinder:
@@ -28,9 +29,21 @@ class FrameFinder:
         task_id: int,
         step_id: int,
         track: str = "raw",
-        decoder: Optional[SegmentDecoder] = None,
+        decoder: Optional[object] = None,
     ):
-        self._decoder = decoder or SegmentDecoder(task_id, step_id, track)
+        """
+        Args:
+            decoder: 解码源，需有 `iter(start_ts, end_ts, width, height)`。不传则走
+                `Step.frames` —— 落盘定位归 step_store，本模块只管对号入座。
+                注入口是给测试用的 seam（把 ffmpeg 换成按 sidecar 合成帧），不必
+                monkeypatch 模块属性。
+        """
+        if decoder is not None:
+            self._frames: Callable[..., Iterator[Frame]] = decoder.iter  # type: ignore[attr-defined]
+        else:
+            self._frames = partial(
+                step_store.step(task_id, step_id).frames, track
+            )
 
     def find(
         self, timestamps: List[float], width: int, height: int
@@ -50,7 +63,7 @@ class FrameFinder:
         sorted_timestamps = sorted(float(t) for t in timestamps)
 
         idx = 0
-        for frame in self._decoder.iter(
+        for frame in self._frames(
             sorted_timestamps[0], sorted_timestamps[-1], width, height
         ):
             # while 而非 if：重复 ts 在同一帧上连续消费掉

@@ -459,8 +459,8 @@ def seed_hls_segments(
     """
     if base_dir is None:
         try:
-            from app.services.step_store.finder import get_default_base_dir
-            base_dir = get_default_base_dir()
+            from app.settings import settings
+            base_dir = settings.storage_base_dir
         except Exception:
             project_root = Path(__file__).parent.parent.resolve()
             base_dir = (project_root / "database").resolve()

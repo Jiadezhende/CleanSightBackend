@@ -143,6 +143,20 @@ app/services/<svc>/
 三类不可混谈——契约包的"基类 + impl/ 对称"是 20260802 归位时定下的结构，
 基础设施包与活体包本就不该有 `impl/`，不是"没做完"。
 
+**`app/services/` 顶层还有第四类：leaf 包**（不是服务，是被服务共用的下游）。
+
+| 包 | 提供什么 | 谁依赖它 |
+|----|---------|---------|
+| `client/`（`client_manager`） | CQ 注册表中台 | 各服务 |
+| `step_store/` | `database/{task_id}/{step_id}/` 落盘格式的唯一真源 | 写侧 `persistence`、读侧 `lab` / `inference.offline` / `routers` |
+
+判据：**零跨服务依赖**（不 import 任何其他 `app.services.*`），故谁都可以向下依赖它，
+不受 §6 单例引用面约束。`step_store` 由 `test_step_store_is_a_leaf` 锁死这条地位——
+抽它出来之前，写侧不敢依赖读侧（`persistence → traceback` 方向别扭），只好把同一套格式知识
+再写一遍，12 份重复副本就是这么来的。见 [step_store 抽取记录](20260906_STEP_STORE_EXTRACTION.md)。
+
+leaf 包的 `__init__.py` 是标记型（§3 形态一）：不 re-export，消费方走深路径。
+
 > **`cli.py` 例外条款**：服务包内允许有 `cli.py` 作为 `python -m` 离线/运维入口
 > （[`offline/cli.py`](../../app/services/inference/offline/cli.py) 即
 > `python -m app.services.inference.offline.cli run|query`），但它是**单向出口**——
@@ -241,17 +255,24 @@ inference 产告警 → persistence 落库，跨服务但方向正确（下游�
 两处均已写进门禁的 `SINGLETON_EXCEPTIONS` 并注明理由。
 
 `client_manager` **不受本条约束**：它是零跨服务依赖的中台 leaf，谁都可以向下依赖它，
-限制它的引用面没有意义——故它不在门禁的 `SINGLETONS` 表里。
+限制它的引用面没有意义——故它不在门禁的 `SINGLETONS` 表里。`step_store` 同理（见 §1 leaf 包）：
+它连单例都没有——对外是模块级函数 + 随手构造的 `Step` 句柄，无状态可持，故不进 `SINGLETONS`。
+
+**leaf 包对外面的收敛另有三条门禁**（2026-09，随 step_store 期 5 落地）：存储根只对 `settings`
+与本包可见、写成员只许注册过的 writer 调用、`playlist` 骨架不出包。判据是「**拿不到根，路径就无从
+拼起**」——比数还有几处 `/` 拼接可查得多，因为 `root / "x"` 是普通 Path 拼接、门禁看不出它在拼
+step 目录。接口清单见 [step_store 抽取记录](20260906_STEP_STORE_EXTRACTION.md) §2。
 
 #### §7 门禁（唯一硬指标）
 
-[`tests/test_import_hygiene.py`](../../tests/test_import_hygiene.py)（已落地，7 个用例）：
+[`tests/test_import_hygiene.py`](../../tests/test_import_hygiene.py)（已落地，12 个用例）：
 **必须起子进程**——pytest 主进程早被别的用例把 torch/cv2 装进 `sys.modules` 了，在本进程里测等于没测。
 
 ```python
 HEAVY = ("torch", "ultralytics", "cv2")   # 被盯防的重依赖
 BUDGET = {                                # (模块, 允许出现的重依赖集合, 耗时上限秒)
     "app.domain":               (set(), 0.20),
+    "app.services.step_store":  (set(), 1.0),
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
@@ -274,6 +295,14 @@ pyproject），加自定义 marker 会每次跑出 unknown-marker 警告。改�
   `routers/*` / 任意 `__init__.py`）+ 两条具名例外。它同时守住 [DEVELOPMENT.md](../DEVELOPMENT.md) §3
   已写下但此前无人检查的"不建 service 对 service 的直接依赖"。
 - `test_services_do_not_import_routers` —— 锁死期 1 消掉的那个真环，防回潮。
+- `test_step_store_is_a_leaf` —— §1 的 leaf 地位：`step_store` 不得 import 任何
+  `app.services.*` / `app.routers`。破这条，写侧读侧的循环依赖会重新长出来。
+- `test_storage_root_is_private_to_step_store` —— 除 `app/settings.py` 与本包外，
+  禁止访问 `settings.storage_base_dir`。
+- `test_step_store_write_members_have_registered_callers` —— `product_path` / `open_product`
+  只许被 `PRODUCTS` 登记的三个 writer 调用。
+- `test_step_store_playlist_is_package_private` —— m3u8 骨架不出包（对外只出成品
+  `Step.vod_playlist`），两条具名例外各写明退出条件。
 
 一条测试顶十页文档：新增模块只要在任一包的 `__init__` 链上顶层 import L2 依赖，这条即红。
 

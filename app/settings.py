@@ -179,6 +179,28 @@ class Settings(BaseSettings):
         return (Path(__file__).parent.parent / p).resolve()
 
     @property
+    def lab_export_root(self) -> Path:
+        """lab 导出产物的落地根（clip 的 job_dir 与整段导出的 mp4 都在此）。
+
+        `lab_export_temp_dir` 非空则用它，否则 `{storage_base_dir}/.lab_exports`。
+
+        **在存储根旁边，不在任何 step 目录里**，故不该找 step_store 借根 —— 它只回答
+        `(task_id, step_id)` 的问题，「存储根旁边放什么」与那对 id 无关。前导点目录名
+        让 `step_store.tasks()` 的数字目录判据自然跳过它。
+        """
+        if self.lab_export_temp_dir.strip():
+            return Path(self.lab_export_temp_dir)
+        return self.storage_base_dir / ".lab_exports"
+
+    @property
+    def lab_runtime_config_path(self) -> Path:
+        """lab 运行时配置的持久化文件（`{storage_base_dir}/lab_runtime_config.json`）。
+
+        与 `lab_export_root` 同款理由：在存储根旁边，不经 step_store。
+        """
+        return self.storage_base_dir / "lab_runtime_config.json"
+
+    @property
     def config_dir(self) -> Path:
         """服务配置 yaml 的所在目录（项目根 `config/`，绝对路径，单一真源）。
 

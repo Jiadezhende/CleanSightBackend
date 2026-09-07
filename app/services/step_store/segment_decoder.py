@@ -12,6 +12,9 @@ HLS 段 → 像素帧：step 目录落盘格式的读侧解码实现。
 
 本模块只负责「给定 ts 区间 → 产出该区间的帧」，**不做 ts 匹配校验、不做单点筛选**
 ——那是消费侧的策略（见 `inference/offline/frame_finder.py`）。
+
+**包内私有**：对外入口是 `Step.frames(track, start_ts, end_ts)`，它负责定位目录与段
+列表。本类只吃已定位好的输入（一个 `Step` 句柄），故不碰存储根、不自己定位。
 """
 
 from __future__ import annotations
@@ -20,17 +23,13 @@ import logging
 import subprocess
 import tempfile
 import threading
-from typing import Optional, Iterator
+from pathlib import Path
+from typing import Optional, Iterator, Sequence
 import numpy as np
 
 from app.domain.frame import Frame
 from app.services.step_store import layout
-from app.services.step_store.finder import (
-    SegmentFinder,
-    SegmentRef,
-    get_default_base_dir,
-    locate_containing_index,
-)
+from app.services.step_store.store import SegmentRef, Step, _locate_containing_index
 
 logger = logging.getLogger(__name__)
 
@@ -74,20 +73,44 @@ class SegmentDecoder:
 
     def __init__(
         self,
-        task_id: int,
-        step_id: int,
-        track: str = "raw",
-        finder: Optional[SegmentFinder] = None,
+        step_dir: Path,
+        track: str,
+        segments: Sequence[SegmentRef],
         ffmpeg_bin: Optional[str] = None,
     ):
-        self._finder = finder or SegmentFinder(get_default_base_dir())
-        self._step_dir = self._finder.task_dir(task_id, step_id)
-        self._segs = self._finder.list_segments(task_id, step_id, track)
+        """
+        Args:
+            step_dir: 已定位的 step 目录（由 `Step.frames` 给，本类不自己拼）
+            track: 段与 init 属哪一轨。**init 名必须用它而非从段名反解** ——
+                `raw_init.mp4` 解 processed 段会 SPS/PPS 不匹配
+            segments: 该轨全部段，调用方保证已按 ts_us 升序
+        """
+        self._step_dir = Path(step_dir)
+        self._track = track
+        self._segs = list(segments)
         self._seg_ts_us = [seg.ts_us for seg in self._segs]
         if ffmpeg_bin is None:
             from app.settings import settings
             ffmpeg_bin = settings.ffmpeg_path
         self._ffmpeg_bin = ffmpeg_bin
+
+    @classmethod
+    def for_step(
+        cls, step: "Step", track: str = "raw", ffmpeg_bin: Optional[str] = None
+    ):
+        """从 `Step` 句柄构造。**「解码要 Step 的哪几样」只写这一处。**
+
+        `Step.frames()` 与测试的 seam 子类都经此构造，两边不会分叉。
+
+        `playable_only=False`：解码只需要 mp4 与 sidecar 都在，与「该段有没有进
+        playlist」无关 —— 离线反查要能读到刚落盘、transcode 尚未 append 的段。
+        """
+        return cls(
+            step_dir=step._dir,
+            track=track,
+            segments=step.segments(track, playable_only=False),
+            ffmpeg_bin=ffmpeg_bin,
+        )
 
     def iter(
         self,
@@ -108,16 +131,16 @@ class SegmentDecoder:
         if not self._segs:
             return
 
-        # 定位「包含该 ts 的段」的语义与 off-by-one 论证见 locate_containing_index。
+        # 定位「包含该 ts 的段」的语义与 off-by-one 论证见 _locate_containing_index。
         # 两端对返回 -1 的处理相反：起点 clamp 到首段（区间左侧越界仍要从头出帧），
         # 终点保留 -1（end_ts 早于首段起点 = 空区间，clamp 成 0 会误出第 0 段）。
         lo = 0 if start_ts is None else max(
-            0, locate_containing_index(self._seg_ts_us, start_ts * 1e6)
+            0, _locate_containing_index(self._seg_ts_us, start_ts * 1e6)
         )
         hi = (
             len(self._segs) - 1
             if end_ts is None
-            else locate_containing_index(self._seg_ts_us, end_ts * 1e6)
+            else _locate_containing_index(self._seg_ts_us, end_ts * 1e6)
         )
         if lo > hi:  # end_ts 早于首段起点时 hi = -1，在此被拦下
             return
@@ -244,7 +267,7 @@ class SegmentDecoder:
             self._ffmpeg_bin,
             "-loglevel", "error", "-hide_banner",
             "-i", (
-                f"concat:{self._step_dir / layout.init_name(seg.track)}"
+                f"concat:{self._step_dir / layout.init_name(self._track)}"
                 f"|{self._step_dir / seg.filename}"
             ),
             # select 必须在 scale 之前：反过来会把注定被丢弃的帧也缩放一遍

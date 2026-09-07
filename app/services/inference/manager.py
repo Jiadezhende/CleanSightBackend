@@ -14,7 +14,6 @@ VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() +
 
 import logging
 import threading
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
@@ -44,10 +43,7 @@ class InferenceManager:
     三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。
     """
 
-    def __init__(
-        self,
-        db_dir: Optional[str] = None,
-    ):
+    def __init__(self):
         """只做赋值与建空容器，**不产生任何副作用**（不读 settings、不 mkdir、不加载 stage
         配置、不建 worker 池）。重活全在 `start()`（见 `_build_components`）。
 
@@ -55,11 +51,6 @@ class InferenceManager:
         `stage_factory` 的 importlib 把全部 impl 与 torch 在 **import 期**拉起——凡 import
         到本包的人（含只想跑一个纯函数单测的）都得付这笔钱。
         """
-        # 持久化存储根目录的**覆盖值**：默认读 settings 单一真源（与 persistence/traceback
-        # 同源），仅显式传 db_dir 时覆盖（测试/特殊场景）。settings 的读取推迟到 start()。
-        self._db_dir_override = Path(db_dir) if db_dir else None
-        self._db_dir: Optional[Path] = None
-
         self._stop_event = threading.Event()
 
         # stage 配置（延迟初始化）
@@ -89,9 +80,6 @@ class InferenceManager:
 
         from app.settings import settings
 
-        self._db_dir = self._db_dir_override or settings.storage_base_dir
-        self._db_dir.mkdir(parents=True, exist_ok=True)
-
         # 可视化 worker 是"采样后 inference 流"的消费者：渲染按 inference.ts 去重，故每秒吐出的
         # 不同画面数恒 = 检测采样率（inference_fps）。但轮询率取 raw_fps（源视频帧率，2× 过采样）：
         # poll 率 == inference_fps 时两个同频时钟拍频，部分 tick 读到旧快照 → 恒报 supply-bound、
@@ -106,13 +94,13 @@ class InferenceManager:
             stage_configs=None,
         )
 
-        # L2 特征落盘（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
+        # L2 特征落盘（常开，与 HLS 同一个 step 目录，落盘位置经 step_store）。
         # FeatureStore 注入推理服务，由推理写回处按帧追加，生命周期随在线 run（open_fresh/close/flush）。
         # 注：FactLedger（事实账本）是**离线异步写**的 store，生命周期归离线 runner，不由在线 manager
         # 调度——故此处不持有、不 open_fresh/close/flush。待离线流水线建起时由其自行 new + 驱动
-        # （同一 storage_base_dir）。类/契约见 feature/store.py，休眠预留。
+        # （同一存储根 —— step_store 自解析，两侧无需互传）。类/契约见 feature/store.py，休眠预留。
         from app.services.inference.feature.store import FeatureStore
-        self.feature_store = FeatureStore(self._db_dir)
+        self.feature_store = FeatureStore()
 
         self._model_worker_service = self._create_async_model_worker_service()
 

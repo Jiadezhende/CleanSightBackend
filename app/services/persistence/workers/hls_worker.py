@@ -6,7 +6,6 @@ HLS持久化Worker池
 
 import logging
 import threading
-from pathlib import Path
 from queue import Empty, Queue
 
 from app.services.persistence.types import HLSPersistenceTask
@@ -75,16 +74,16 @@ class HLSWorkerPool:
         self,
         input_queue: Queue,
         num_workers: int = 2,
-        db_dir: Path | None = None,
     ):
         self.input_queue = input_queue
         self.num_workers = num_workers
         self.stop_event = threading.Event()
 
-        # 创建持久化策略（编码帧率全程从帧 ts 自适应反推，不接收上游 fps）
-        self.strategy = HLSPersistenceStrategy(
-            db_dir=db_dir or Path("database"),
-        )
+        # 创建持久化策略（编码帧率全程从帧 ts 自适应反推，不接收上游 fps）。
+        # **不再传 db_dir**：存储根由 step_store 自解析（settings.storage_base_dir），
+        # 此前它经 config.storage_base_dir → 这里 → strategy 绕两层，而那个属性
+        # 本身就是 `return settings.storage_base_dir`。
+        self.strategy = HLSPersistenceStrategy()
 
         # 创建Worker
         self.workers = []

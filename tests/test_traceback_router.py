@@ -57,18 +57,13 @@ def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_ini
 
 
 @pytest.fixture
-def media_root(tmp_path, monkeypatch):
-    """注入临时 base_dir，避开真实持久化目录"""
-    from app.routers import media as media_router
-    from app.routers import traceback as tb_router
+def media_root(tmp_storage):
+    """注入临时 base_dir，避开真实持久化目录。
 
-    monkeypatch.setattr(
-        "app.services.step_store.finder.get_default_base_dir",
-        lambda: tmp_path,
-    )
-    monkeypatch.setattr(media_router, "get_default_base_dir", lambda: tmp_path)
-    monkeypatch.setattr(tb_router, "get_default_base_dir", lambda: tmp_path)
-    return tmp_path
+    直接用 `tmp_storage`（monkeypatch `settings.storage_dir`）——存储根收进
+    step_store 自解析后，不必再逐个 patch 各 router 模块的名字。
+    """
+    return tmp_storage
 
 
 @pytest.fixture(autouse=True)

@@ -46,6 +46,34 @@ BUDGET = {
 # 抽出本包要消掉的东西（此前写侧不敢依赖读侧，只好把格式知识再写一遍，重复由此而来）。
 LEAF_PACKAGE = "app/services/step_store"
 
+# 存储根的可见范围。**根拿不到，路径就无从拼起** —— 这比「数还有几处 `/` 拼接」
+# 可查得多：目录 = 根 + 两级 id，只要没人能拿到根，落盘布局就只能问 step_store。
+STORAGE_ROOT_ATTR = "storage_base_dir"
+STORAGE_ROOT_ALLOWED = ("app/settings.py", f"{LEAF_PACKAGE}/")
+
+# 写成员的调用者白名单 = `step_store.purge.PRODUCTS` 里登记的三个 writer。
+# 计划外的第四个写者要先在 PRODUCTS 登记（否则产物对 TTL 不可见），再加进这里。
+WRITE_MEMBERS = ("product_path", "open_product")
+WRITE_MEMBER_ALLOWED = (
+    "app/services/persistence/strategies/hls_strategy.py",
+    "app/services/inference/feature/store.py",
+    "app/services/inference/offline/runner.py",
+    f"{LEAF_PACKAGE}/",
+)
+
+# `step_store.playlist` 是包内私有（对外只出成品 `Step.vod_playlist`，不出骨架：
+# 备料才是写错会静默的部分）。两条具名例外，各有退出条件：
+PLAYLIST_MODULE = "app.services.step_store.playlist"
+PLAYLIST_ALLOWED = {
+    # 写侧是 playlist 格式的**定义者**（手写 EXTINF 行与文件头、算 tfdt 前缀和），
+    # 不是消费者。这条例外是永久的。
+    "app/services/persistence/strategies/hls_strategy.py",
+    # 每段 EXTINF 取相邻段 ts 跨度而非 playlist EXTINF（seek 基准是 ts，换了会逐段
+    # 错位），故走不了 `Step.vod_playlist`。**退出条件**：验证两者在 fps 漂移下等价
+    # 后改走成品出口，然后删掉本行。
+    "app/services/lab/clip_builder.py",
+}
+
 # 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
 SINGLETONS = {
@@ -155,7 +183,7 @@ def test_singleton_reference_surface():
 def test_step_store_is_a_leaf():
     """step_store 不得 import 任何其他 app.services.* 包（含 app.routers）。
 
-    它只允许依赖 stdlib、numpy 与 `app.settings`（`get_default_base_dir` 读存储根，
+    它只允许依赖 stdlib、numpy 与 `app.settings`（`storage_root` 读存储根，
     写在函数体内）。破这条即意味着 leaf 地位失守，写侧读侧的循环依赖会重新长出来。
     """
     leaf_dir = REPO_ROOT / LEAF_PACKAGE
@@ -183,6 +211,98 @@ def test_step_store_is_a_leaf():
         "step_store 不再是 leaf —— 它 import 了别的服务包：\n  "
         + "\n  ".join(violations)
         + "\n本包是写侧读侧的公共下游，回指任何服务包都会重新造出循环依赖。"
+    )
+
+
+def _iter_app_trees():
+    """(相对路径, AST) 逐个产出 `app/` 下的 .py。"""
+    for path in _iter_app_py_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        yield rel, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def test_storage_root_is_private_to_step_store():
+    """除 `app/settings.py` 与 step_store 外，谁都不许碰 `settings.storage_base_dir`。
+
+    存储根一旦流出去，调用方就能自己拼「根 + task_id + step_id + 文件名」，落盘布局
+    重新复制一份到各处——那正是抽出本包要消掉的东西，且**这种拼接门禁抓不到**
+    （`root / "x"` 是普通 Path 拼接，看不出它在拼 step 目录）。故拦在源头：拦根。
+
+    要 step 里的文件走 `Step.product_path(kind)` / `open_product` / `scratch_path`；
+    要存储根**旁边**的东西（lab 导出根、lab 配置文件）在 `settings` 上加派生 property。
+    """
+    violations = []
+    for rel, tree in _iter_app_trees():
+        if any(rel.startswith(p) or rel == p for p in STORAGE_ROOT_ALLOWED):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == STORAGE_ROOT_ATTR:
+                violations.append(f"{rel}:{node.lineno}")
+
+    assert not violations, (
+        f"以下文件直接读了 settings.{STORAGE_ROOT_ATTR}：\n  "
+        + "\n  ".join(violations)
+        + "\n落盘位置一律问 step_store（Step.product_path / open_product / scratch_path）；"
+        "\n存储根旁边的东西在 settings 上加派生 property，别向 step_store 借根。"
+    )
+
+
+def test_step_store_write_members_have_registered_callers():
+    """`product_path` / `open_product` 只许被 `PRODUCTS` 登记的三个 writer 调用。
+
+    防的是「计划外的第四个写者混进来」。注意**这条门禁与 kind 运行时校验是两件事**：
+    kind 校验防「新增产物忘登记 → 对 TTL 不可见」，这条防「谁在写」失控。
+    写权限**不做类型级隔离**（枚举公开、句柄可随手构造，那不是能力对象只是命名仪式）
+    —— Python 里真正拦得住的就是运行时校验与静态门禁这两处。
+    """
+    violations = []
+    for rel, tree in _iter_app_trees():
+        if any(rel.startswith(p) or rel == p for p in WRITE_MEMBER_ALLOWED):
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in WRITE_MEMBERS
+            ):
+                violations.append(f"{rel}:{node.lineno} → .{node.func.attr}()")
+
+    assert not violations, (
+        "以下文件调用了 step_store 的写成员，但不在 PRODUCTS 登记的 writer 列表里：\n  "
+        + "\n  ".join(violations)
+        + "\n新增写者要先在 step_store/purge.py 的 PRODUCTS 登记产物（否则它对 TTL "
+        "不可见），再加进 WRITE_MEMBER_ALLOWED 并写明理由。"
+    )
+
+
+def test_step_store_playlist_is_package_private():
+    """`step_store.playlist` 只出骨架，包外一律走成品 `Step.vod_playlist`。
+
+    只出骨架等于要求每个调用方自己备料，而备料（EXTINF 真值、滤在途、判 init、算
+    TARGETDURATION）才是写错会**静默**的那部分——骨架写错播放器立刻报错，备料写错
+    表现为 hls.js 段尾停摆、缓冲洞、导出时长错乱。两条具名例外见 PLAYLIST_ALLOWED。
+    """
+    violations = []
+    for rel, tree in _iter_app_trees():
+        if rel.startswith(f"{LEAF_PACKAGE}/") or rel in PLAYLIST_ALLOWED:
+            continue
+        for node in ast.walk(tree):
+            hit = (
+                isinstance(node, ast.ImportFrom)
+                and node.module == PLAYLIST_MODULE
+            ) or (
+                isinstance(node, ast.ImportFrom)
+                and node.module == LEAF_PACKAGE.replace("/", ".")
+                and any(a.name == "playlist" for a in node.names)
+            )
+            if hit:
+                violations.append(f"{rel}:{node.lineno}")
+
+    assert not violations, (
+        "以下文件 import 了包内私有的 step_store.playlist：\n  "
+        + "\n  ".join(violations)
+        + "\n拼 VOD m3u8 走 `Step.vod_playlist(track, segments=, encode_uri=)`——"
+        "\n它把 EXTINF 真值、在途段过滤、init 判据与 TARGETDURATION 一并备好。"
     )
 
 
