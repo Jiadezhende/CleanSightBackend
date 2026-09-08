@@ -703,3 +703,94 @@ lambda 内联在 `PRODUCTS` 里，与 HLS 五类的具名函数分居两处。�
 函数改名 `_storage_root`，并把门禁从「只拦属性」扩成「属性 + 该函数的 import 与调用」都拦。
 §9 命名表里 `get_default_base_dir` → `storage_root` 那条仍成立，只是又加了前导下划线。
 
+
+---
+
+## 16. 按域拆开：目录契约共享，HLS 独立，对外只出函数不出句柄
+
+评审判定本包已是上帝类。**根因不是谁偷懒，是跨包流通的货币住在实现包里**：`Step` 句柄出现在
+4 个包 16 个签名里（routers/lab、routers/traceback、lab/clip_builder、persistence/hls_strategy），
+沿途每个使用者对它提一点要求，加起来就是 21 个公开成员。
+
+按域统计 `Step` 的 359 行：**HLS 188 / 跨域 91 / 推理 17**。三个域变更理由不同、依赖量级差两级
+（`frames()` 吃 numpy 起 ffmpeg 子进程，`features_path()` 是字符串拼接——正因如此 `Step.frames`
+必须把 import 写进函数体：一个类的成员要靠懒加载互相躲开对方的依赖，本身就是它们不该同居的
+证据），缓存 `_by_track` / `_durations` 只服务 HLS 却挂在跨域对象上。
+
+§10 把 `StepStore` 门面降为函数时，判据是「有没有状态、有没有身份」；`Step` 两样都有，故当时
+判它「该是类」。**那个判据漏了一维：这个类会不会跨包流通。** 会流通的，即便有状态有身份，也会
+被沿途每个使用者加一点能力。
+
+### 16.1 对外只剩两个模块，都是函数
+
+```text
+step_store/
+  __init__.py     包契约（标记型，不 re-export）
+  store.py        (task, step) 目录契约 —— 所有域共享，对外
+  hls.py          HLS 视频落盘域 —— 对外
+  _layout.py      命名真源 + SegmentRef + 活动标记名（私有，原 layout.py）
+  _playlist.py    m3u8 读写（私有，原 playlist.py）
+  _decoder.py     段 → 像素帧（私有，原 segment_decoder.py）
+```
+
+| | 提供什么 |
+|---|---|
+| `store` | `steps` / `tasks` / `last_activity_at` / `purge_step` / `sweep_empty_tasks` / `file_path` / `open_file` / `find_file` / `scratch_path` |
+| `hls` | `list_steps` / `segments` / `time_bounds_us` / `has_init` / `vod_playlist` / `frames` + 五个写路径 |
+
+`Step` 类删除，全部改为收 `(task_id, step_id, ...)` 的模块函数。**域视图带着限定词，就没有膨胀
+的入口** —— `hls.*` 不可能被要求回答 `features.jsonl` 在哪。跨包签名随之全部退回裸 id，
+「身份不属于存储层」这件事由签名而不是文档表达。
+
+### 16.2 函数按「一次调用 = 一件事 = 一次扫盘」切
+
+当初出句柄的唯一理由是缓存目录扫描（§4.1）。函数式没有跨调用缓存，故不能照搬句柄上的取值器
+——照搬会让一个请求扫好几遍盘。按用例重切后扫盘次数持平或更少：
+
+| 消费方 | 改后 | 扫盘 |
+|---|---|---|
+| routers/traceback playlist | `hls.vod_playlist()` 一次（新增 `HlsTrackMissing` 吸收原先单独的 `tracks` 检查） | 2 → 1 |
+| routers/lab、routers/task 清单 | `hls.list_steps()` 一次出 `StepSegments.by_track`（双轨段清单） | 持平 |
+| lab/clip_builder | 调用方取一次全量段传给 `_select_segments` 与 `_validate_continuity` | 持平 |
+
+`StepSegments.by_track` 的键序固定为 `("raw", "processed")`，对外 `tracks` 字段直接
+`list(by_track)`，`/task/history` 响应逐字节不变。
+
+### 16.3 内部实现对外全部不可见
+
+三个内部模块加下划线前缀，**门禁 `test_step_store_internals_are_package_private` 是强制力**
+（前缀只是信号）。`_playlist` 与 `_layout` 各留两条具名例外：`hls_strategy`（playlist 格式的
+定义者，手写 EXTINF 行与文件头）与 `clip_builder`（EXTINF 口径不同）——两条都随写侧事务化关闭，
+退出条件写在门禁注释里。
+
+`WRITE_MEMBERS` 门禁改盯 `file_path` / `open_file` 与五个 HLS 写路径。**没用裸 `open`**：AST 按
+属性名匹配，会把满仓的 `path.open(...)` 全部误报。
+
+### 16.4 推理侧的文件名还给 inference
+
+`features.jsonl` / `facts.jsonl` / `offline_inference_result.json` 的名字从 `_layout` 删除，
+归还给 `inference/`（`_JsonlBuffer._NAME` 与 `runner._RESULT_NAME`）。判据：**只有两个包必须
+达成一致的名字才进本包**（HLS 那五类：persistence 写、traceback/lab/offline 读）；只有一个
+主人的名字留在主人那里。step_store 对这三个文件零格式知识（不解析、不校验、不理解内容），
+代码级消费方只有 `inference/`——它们是 §12 删掉的产物注册表的残渣，§15 还按「命名单一真源」
+把它们从 lambda 挪进了 layout，等于给残渣加固。
+
+`_JsonlBuffer` 因此比 §15 更简单：两个 `_step_path` / `_step_open` 钩子退回一个 `_NAME` 类属性。
+
+### 16.5 自测
+
+| 项 | 结果 |
+|----|------|
+| 全量 `pytest tests/` | **521 passed**（基线 511，净 +10，与测试文件拆分逐条对得上） |
+| 测试按域拆分 | `test_step_store_api.py` → `test_step_store_dir.py`（枚举/文件出入口/活动标记/traversal）+ `test_step_store_hls.py`（段/在途过滤/time_bounds/vod_playlist/写路径）；`test_step_store_purge.py` 的枚举用例并入前者，只留删除入口与判据方向 |
+| 私有模块门禁 | 手工验证：包外加一行 `from app.services.step_store import _layout` 立刻变红，删掉即绿 |
+| 对外响应 | `/task/history`、`/traceback/*` 断言零修改（`test_task_live_history_api.py` / `test_traceback_router.py`） |
+| 落盘命名 | `test_step_store_hls.py::TestWritePaths` 逐字断言 + `TestVodPlaylist::test_full_text` 整段文本 |
+| 未用 import | AST 扫描 0 残留 |
+
+### 16.6 下一步（未做）
+
+写侧仍是五个路径取值器，**粒度是错的**：落一段是一个原子单元（sidecar + 段 mp4 + init +
+playlist 的 EXTINF 行），拆成路径取值器等于把提交顺序推给调用方。下一步换成
+`hls.write_segment(...)` 事务，同时：删 `metadata.json`（已核实全仓零读者）、HLS 写侧改单线程
+并删掉每 step 目录锁与 `HLSConfig.workers` 配置项、关闭 hls_strategy 的两条门禁例外。

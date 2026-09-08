@@ -92,16 +92,16 @@ class StorageCleanupWorker:
         cutoff_ts = (datetime.now() - timedelta(days=self.cleanup_days)).timestamp()
         deleted = 0
 
-        # include_empty=True 是本 worker 的命门：默认枚举按契约丢弃「两轨都没段」的
-        # step，而只有 features.jsonl 没有 HLS 段的目录正是此前泄漏的那一类。
-        for step in step_store.steps(include_empty=True):
-            last = step.last_activity_at
+        # 走 `store.steps()`（全部目录）而不是 `hls.list_steps()`（只有视频段的 step）：
+        # 只有 features.jsonl 没有 HLS 段的目录正是此前泄漏的那一类，本 worker 必须看见它。
+        for task_id, step_id in step_store.steps():
+            last = step_store.last_activity_at(task_id, step_id)
             if last is None:
                 # 没有活动标记：可能是刚建目录、只剩临时文件的残骸，也可能是本判据
                 # 上线之前建的历史目录。不删——判不出是哪种，误删的代价高于留一个目录。
                 logger.debug(
                     "[StorageCleanup] Skip step without activity marker: task=%s step=%s",
-                    step.task_id, step.step_id,
+                    task_id, step_id,
                 )
                 continue
             if last >= cutoff_ts:
@@ -112,15 +112,15 @@ class StorageCleanupWorker:
                 deleted += 1
                 logger.info(
                     "[StorageCleanup][dry-run] Would delete: task=%s step=%s (last activity %s)",
-                    step.task_id, step.step_id, when,
+                    task_id, step_id, when,
                 )
                 continue
 
-            if step_store.purge_step(step.task_id, step.step_id):
+            if step_store.purge_step(task_id, step_id):
                 deleted += 1
                 logger.info(
                     "[StorageCleanup] Deleted: task=%s step=%s (last activity %s)",
-                    step.task_id, step.step_id, when,
+                    task_id, step_id, when,
                 )
 
         # 顺手清理被掏空的 task_id 父目录

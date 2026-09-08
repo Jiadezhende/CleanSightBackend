@@ -10,7 +10,7 @@ Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 
 数据底座：
 - 复用 traceback 的 (task_id, step_id) 文件系统约定
-- 复用 step_store 列表/过滤 raw 段
+- 复用 step_store.hls 列表/过滤 raw 段
 - ffmpeg concat demuxer + libx264 实现 ms 精度裁剪
 - urllib.request multipart 上传到 LS（沿用现有 alarm_strategy 的 urllib 风格）
 
@@ -50,8 +50,9 @@ from app.services.lab import (
     StepExportNoSegments,
 )
 from app.services.lab import config as lab_config
+from app.services.step_store import hls
 from app.services.step_store import store as step_store
-from app.services.step_store.store import Step
+from app.services.step_store.hls import StepSegments
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
@@ -166,13 +167,12 @@ def _optional_int(value) -> Optional[int]:
         return None
 
 
-def _raw_steps(task_id: int) -> List[Step]:
-    """该 task 下有 raw 段的 step 句柄（升序）。送标只吃 raw，processed 轨在此无意义。
+def _raw_steps(task_id: int) -> List[StepSegments]:
+    """该 task 下有 raw 段的 step 及其段清单（升序）。送标只吃 raw，processed 轨在此无意义。
 
-    出句柄而非 id：调用方拿到后还要读段时间戳，句柄里的目录扫描结果已缓存，
-    再问一次不重扫盘。
+    出**段清单**而非 id：调用方拿到后还要读段时间戳，一次扫描出全，不必再问一遍盘。
     """
-    return [s for s in step_store.steps(task_id) if "raw" in s.tracks]
+    return [s for s in hls.list_steps(task_id) if "raw" in s.by_track]
 
 
 def _task_row_to_item(row: DBTask) -> LabTaskItem:
@@ -196,20 +196,18 @@ def _task_row_to_item(row: DBTask) -> LabTaskItem:
     )
 
 
-def _storage_task_to_item(task_id: int, raw_steps: List[Step]) -> LabTaskItem:
+def _storage_task_to_item(task_id: int, raw_steps: List[StepSegments]) -> LabTaskItem:
     """从文件系统信息构造 LabTaskItem（存储模式）。
 
     DB 才有的字段（source_ip/status/current_step）无从得知：
     - source_ip=None, status="unknown", step_id/current_step 留空（不推断）
     - updated_time/start_time 从各 raw step 的段时间戳（ts_ms）推导，用于排序与展示
 
-    `playable_only=False`：本清单只报「磁盘上有没有画面、什么时候有」，不解码也不拼
-    m3u8，故在途段照样算数（它下一秒就完成了）。
+    `list_steps` 默认 `playable_only=False`：本清单只报「磁盘上有没有画面、什么时候有」，
+    不解码也不拼 m3u8，故在途段照样算数（它下一秒就完成了）。
     """
     ts_list: List[int] = [
-        seg.ts_ms
-        for step in raw_steps
-        for seg in step.segments("raw", playable_only=False)
+        seg.ts_ms for step in raw_steps for seg in step.by_track["raw"]
     ]
 
     return LabTaskItem(
@@ -406,7 +404,7 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
     )
 
     # ---- 段存在性（404）----
-    if not step_store.step(req.task_id, req.step_id).segments("raw", playable_only=False):
+    if not hls.segments(req.task_id, req.step_id, "raw", playable_only=False):
         raise NotFoundError(
             f"No raw segments for task_id={req.task_id}, step_id={req.step_id}",
             resource_type="Segments",

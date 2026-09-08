@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.domain.frame import Frame
 from app.services.inference.offline.frame_finder import FrameFinder
-from app.services.step_store.segment_decoder import SegmentDecoder
+from app.services.step_store._decoder import SegmentDecoder
 from app.services.step_store import store as step_store
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
 from app.settings import settings
@@ -139,7 +139,7 @@ def seed(task_id: int) -> None:
 
 def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
     def tl() -> SegmentDecoder:
-        return SegmentDecoder.for_step(step_store.step(task_id, STEP_ID))
+        return SegmentDecoder.for_step(task_id, STEP_ID)
 
     def tracker() -> FrameFinder:
         return FrameFinder(task_id, STEP_ID)

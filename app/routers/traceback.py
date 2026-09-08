@@ -4,7 +4,7 @@
 提供任务 VOD 回放、任务时间轴打点两个核心接口。
 
 数据底座：
-- 落盘的一切经 `step_store`：给 `(task_id, step_id)` 拿 `Step` 句柄，段定位 / EXTINF
+- 落盘的一切经 `step_store.hls`：传 `(task_id, step_id)`，段定位 / EXTINF
   时长 / init 判据 / VOD m3u8 都问它。本层不知道目录长什么样、文件叫什么名
 - 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
 
@@ -27,11 +27,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
 from app.models import DBAlarm
-from app.services.step_store import store as step_store
-from app.services.step_store.store import (
-    Step,
-    StepInitMissing,
-    StepNoPlayableSegments,
+from app.services.step_store import hls
+from app.services.step_store.hls import (
+    HlsInitMissing,
+    HlsNoPlayableSegments,
+    HlsTrackMissing,
 )
 from app.services.traceback import MediaToken
 from app.services.traceback.media_token import MediaKind
@@ -111,11 +111,11 @@ def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict
 # ---------------------------------------------------------------------------
 
 
-def _build_vod_playlist(request: Request, step: Step, track: str) -> str:
+def _build_vod_playlist(request: Request, task_id: int, step_id: int, track: str) -> str:
     """构造该轨整段回放的 VOD m3u8 文本体。
 
     **本层只剩两件事：把段身份翻成 token 化 URL、把领域异常翻成状态码。** 备料
-    （EXTINF 真值、滤在途段、判 init、算 TARGETDURATION）全在 `Step.vod_playlist`
+    （EXTINF 真值、滤在途段、判 init、算 TARGETDURATION）全在 `hls.vod_playlist`
     —— 那才是写错会静默的部分：骨架写错播放器立刻报错，备料写错表现为 hls.js 段尾
     停摆、缓冲洞。
 
@@ -123,8 +123,10 @@ def _build_vod_playlist(request: Request, step: Step, track: str) -> str:
     访问控制、属本层。
 
     **不再收 `segs` 参数**：告警证据下线后只剩整轨回放一个调用方，而整轨可播段正是
-    `Step.vod_playlist` 的默认取值 —— 段列表出包一趟再原样传回包，中间没有任何一个
+    `hls.vod_playlist` 的默认取值 —— 段列表出包一趟再原样传回包，中间没有任何一个
     字段被读过。
+
+    三个领域异常的判定顺序即此处的状态码顺序，见 `hls.vod_playlist` 的 Raises。
     """
     base_url = str(request.base_url).rstrip("/")
 
@@ -132,23 +134,31 @@ def _build_vod_playlist(request: Request, step: Step, track: str) -> str:
         # step_store 的 kind 取值域（"segment" / "init"）与 MediaKind 恒等，故此处
         # cast 而非再做一次映射 —— 多一张映射表就多一处可以写错的地方。
         token = MediaToken.default().sign(
-            task_id=step.task_id,
-            step_id=step.step_id,
+            task_id=task_id,
+            step_id=step_id,
             filename=filename,
             kind=cast(MediaKind, kind),
         )
         return f"{base_url}/media/{kind}/{token}"
 
     try:
-        return step.vod_playlist(track, encode_uri=_url)
-    except StepInitMissing as e:
+        return hls.vod_playlist(task_id, step_id, track, encode_uri=_url)
+    except HlsTrackMissing as e:
+        # 磁盘上这轨一个段都没有 → 「没这个 step」。此前是本层先问一次 `tracks` 再调
+        # vod_playlist，两次扫盘；现在合并成一次，响应不变。
+        raise NotFoundError(
+            f"No {track} segments for task {task_id} step {step_id}",
+            resource_type="Segments",
+            resource_id=f"task={task_id},step={step_id},track={track}",
+        ) from e
+    except HlsInitMissing as e:
         # 缺 init = 旧格式产物或首段仍在 transcode，两者服务端都不可自愈 —— 故 503
         # 而非 404，让调用方按「此 step 不可回放」处理。
         raise HTTPException(
             status_code=503,
             detail={"error": "HLS init segment missing", "detail": str(e)},
         ) from e
-    except StepNoPlayableSegments as e:
+    except HlsNoPlayableSegments as e:
         raise HTTPException(status_code=404, detail="No playable segments yet") from e
 
 
@@ -182,18 +192,7 @@ async def get_task_playlist(
     - 保证 VOD 完整性（即使任务未封档）
     - URL 走 token 化 /media/segment/*，不暴露文件系统路径
     """
-    step = step_store.step(task_id, step_id)
-    # 「磁盘上这轨一个段都没有」→ 404「没这个 step」。`step.tracks` 与旧写法
-    # （`segments(track, playable_only=False)` 判空）等价且同走一次目录扫描缓存；
-    # 有段但全在途 → 由 vod_playlist 抛 StepNoPlayableSegments，措辞不同（见下）。
-    if track not in step.tracks:
-        raise NotFoundError(
-            f"No {track} segments for task {task_id} step {step_id}",
-            resource_type="Segments",
-            resource_id=f"task={task_id},step={step_id},track={track}",
-        )
-
-    body = _build_vod_playlist(request, step, track)
+    body = _build_vod_playlist(request, task_id, step_id, track)
     return PlainTextResponse(
         content=body,
         media_type="application/vnd.apple.mpegurl",
@@ -206,13 +205,13 @@ async def get_task_playlist(
 # ---------------------------------------------------------------------------
 
 
-def _step_duration_ms(step: Step) -> Tuple[int, int, int]:
+def _step_duration_ms(task_id: int, step_id: int) -> Tuple[int, int, int]:
     """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。
 
-    µs → ms 的换算留在此处：`Step.time_bounds_us` 产出微秒（与段文件名 ts_us 同单位），
+    µs → ms 的换算留在此处：`hls.time_bounds_us` 产出微秒（与段文件名 ts_us 同单位），
     毫秒是本接口对前端的表示口径。
     """
-    bounds = step.time_bounds_us
+    bounds = hls.time_bounds_us(task_id, step_id)
     if bounds is None:
         return 0, 0, 0
     start_us, end_us = bounds
@@ -243,9 +242,7 @@ async def get_task_timeline(
           ]
         }
     """
-    start_ms, end_ms, duration_ms = _step_duration_ms(
-        step_store.step(task_id, step_id)
-    )
+    start_ms, end_ms, duration_ms = _step_duration_ms(task_id, step_id)
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
     # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。

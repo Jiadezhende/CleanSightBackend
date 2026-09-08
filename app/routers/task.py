@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm, DBTask
 from app.services.client.manager import client_manager
+from app.services.step_store import hls
 from app.services.step_store import store as step_store
 from app.utils.exceptions import DatabaseError
 
@@ -249,8 +250,9 @@ def list_history_tasks():
             continue
 
         scanned += 1
-        # 默认 include_empty=False：目录在但没段（起流即失败）→ 点开是黑屏，不进清单
-        steps = step_store.steps(task_id)
+        # `hls.list_steps` 只出有视频段的 step：目录在但没段（起流即失败）→ 点开是黑屏，
+        # 不进清单。一次扫描出双轨段清单，下面不必再逐轨问盘。
+        steps = hls.list_steps(task_id)
         if not steps:
             continue
 
@@ -260,15 +262,11 @@ def list_history_tasks():
         # 精确时长归 /timeline 的 duration_ms（那里才该用 EXTINF）。
         step_rows = []
         for step in steps:
-            ts = [
-                seg.ts_ms
-                for track in step.tracks
-                for seg in step.segments(track, playable_only=False)
-            ]
+            ts = [seg.ts_ms for segs in step.by_track.values() for seg in segs]
             step_rows.append(
                 {
                     "step_id": step.step_id,
-                    "tracks": list(step.tracks),
+                    "tracks": list(step.by_track),  # ("raw", "processed") 序，见 StepSegments
                     "start_ms": min(ts),
                     "last_segment_ms": max(ts),
                 }

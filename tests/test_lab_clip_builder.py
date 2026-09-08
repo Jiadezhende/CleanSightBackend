@@ -24,8 +24,8 @@ from app.services.lab.clip_builder import (
     ClipRangeGapError,
     ClipSpec,
 )
-from app.services.step_store import store as step_store
-from app.services.step_store.store import SegmentRef
+from app.services.step_store import hls
+from app.services.step_store.hls import SegmentRef
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def _make_step_with_segments(
 
 
 def _make_seg_refs(segs_ts_us: List[int]) -> List[SegmentRef]:
-    """段引用只带 filename + ts_us —— 目录、轨、task/step 都从 Step 句柄拿。"""
+    """段引用只带 filename + ts_us —— 目录、轨、task/step 都是调用方传进去问的。"""
     return [
         SegmentRef(filename=f"raw_segment_{ts}.mp4", ts_us=ts) for ts in segs_ts_us
     ]
@@ -55,14 +55,10 @@ def _make_seg_refs(segs_ts_us: List[int]) -> List[SegmentRef]:
 def _builder(tmp_storage: Path) -> ClipBuilder:
     """真读磁盘（存储根由 `tmp_storage` fixture 指到临时目录）+ 独立 temp_root。
 
-    init 判据与临时 m3u8 定位现在都是 Step 的成员（不再由 ClipBuilder 自己从
-    `segs[0].path.parent` 反推目录）——mock 掉句柄等于把被测逻辑一起 mock 掉。
+    init 判据与临时 m3u8 定位现在都在 step_store（不再由 ClipBuilder 自己从
+    `segs[0].path.parent` 反推目录）——mock 掉它等于把被测逻辑一起 mock 掉。
     """
     return ClipBuilder(temp_root=tmp_storage / ".lab_exports")
-
-
-def _step(tmp_storage: Path):
-    return step_store.step(1, 1)
 
 
 def _ok_run(cmd, **kwargs):
@@ -102,7 +98,7 @@ class TestRunFfmpegM3u8:
             return _ok_run(cmd, **kwargs)
 
         monkeypatch.setattr("app.services.lab.clip_builder.subprocess.run", fake_run)
-        _builder(tmp_storage)._run_ffmpeg(_step(tmp_storage), spec, segs, out)
+        _builder(tmp_storage)._run_ffmpeg(spec, segs, out)
 
         text = captured["m3u8_text"]
         assert "#EXTM3U" in text
@@ -133,7 +129,7 @@ class TestRunFfmpegM3u8:
             return _ok_run(cmd, **kwargs)
 
         monkeypatch.setattr("app.services.lab.clip_builder.subprocess.run", fake_run)
-        _builder(tmp_storage)._run_ffmpeg(_step(tmp_storage), spec, segs, step_dir / "out.mp4")
+        _builder(tmp_storage)._run_ffmpeg(spec, segs, step_dir / "out.mp4")
 
         cmd = captured["cmd"]
         # 不能含 concat demuxer
@@ -164,7 +160,7 @@ class TestRunFfmpegM3u8:
             return _ok_run(cmd, **kwargs)
 
         monkeypatch.setattr("app.services.lab.clip_builder.subprocess.run", fake_run)
-        _builder(tmp_storage)._run_ffmpeg(_step(tmp_storage), spec, segs, step_dir / "out.mp4")
+        _builder(tmp_storage)._run_ffmpeg(spec, segs, step_dir / "out.mp4")
 
         cmd = captured["cmd"]
         assert cmd[cmd.index("-ss") + 1] == "2.345"
@@ -189,7 +185,7 @@ class TestRunFfmpegM3u8:
             return _ok_run(cmd, **kwargs)
 
         monkeypatch.setattr("app.services.lab.clip_builder.subprocess.run", fake_run)
-        _builder(tmp_storage)._run_ffmpeg(_step(tmp_storage), spec, segs, step_dir / "out.mp4")
+        _builder(tmp_storage)._run_ffmpeg(spec, segs, step_dir / "out.mp4")
 
         # offset 被 clamp 到 0；end 仍是 (start + duration) - clamped_offset
         # 即 0 → 1.5（duration=1500ms + 原本被截掉的 500ms 偏移）
@@ -213,7 +209,7 @@ class TestRunFfmpegFailFast:
 
         monkeypatch.setattr("app.services.lab.clip_builder.subprocess.run", fake_run)
         with pytest.raises(ClipBuildError, match="init.mp4 missing"):
-            _builder(tmp_storage)._run_ffmpeg(_step(tmp_storage), spec, segs, step_dir / "out.mp4")
+            _builder(tmp_storage)._run_ffmpeg(spec, segs, step_dir / "out.mp4")
         assert called["n"] == 0, "init 缺失时不应调用 ffmpeg"
 
     def test_cleans_up_tmp_m3u8_on_ffmpeg_failure(self, tmp_storage, monkeypatch):
@@ -235,7 +231,7 @@ class TestRunFfmpegFailFast:
 
         monkeypatch.setattr("app.services.lab.clip_builder.subprocess.run", fake_run)
         with pytest.raises(ClipBuildError, match="ffmpeg failed"):
-            _builder(tmp_storage)._run_ffmpeg(_step(tmp_storage), spec, segs, step_dir / "out.mp4")
+            _builder(tmp_storage)._run_ffmpeg(spec, segs, step_dir / "out.mp4")
         assert not captured["m3u8_path"].exists(), "ffmpeg 失败时也必须清理临时 m3u8"
 
 
@@ -277,27 +273,27 @@ class TestValidateContinuity:
         step_ts = _ts_from_spacings([10.6, 10.83, 10.7, 10.9, 10.6])
         builder = _continuity_builder(tmp_storage, step_ts)
         segs = _make_seg_refs(step_ts)  # 整窗送裁
-        builder._validate_continuity(_step(tmp_storage), segs)  # 不抛即通过
+        builder._validate_continuity(_make_seg_refs(step_ts), segs)  # 不抛即通过
 
     def test_occasional_slowdown_within_tolerance_passes(self, tmp_storage):
         """偶发某段变慢（10.83 vs 基准≈10.1）→ excess≈0.7s < 2s → 通过。"""
         step_ts = _ts_from_spacings([10.0, 10.1, 10.83, 10.0])
         builder = _continuity_builder(tmp_storage, step_ts)
-        builder._validate_continuity(_step(tmp_storage), _make_seg_refs(step_ts))
+        builder._validate_continuity(_make_seg_refs(step_ts), _make_seg_refs(step_ts))
 
     def test_genuine_stall_still_rejects(self, tmp_storage):
         """真停顿：一段间隔 16s、基准≈10s → excess≈6s > 2s → 仍拒，且消息报真实超出量。"""
         step_ts = _ts_from_spacings([10.0, 10.0, 16.0, 10.0])
         builder = _continuity_builder(tmp_storage, step_ts)
         with pytest.raises(ClipRangeGapError, match=r"exceeds step rhythm by 6\.0\ds"):
-            builder._validate_continuity(_step(tmp_storage), _make_seg_refs(step_ts))
+            builder._validate_continuity(_make_seg_refs(step_ts), _make_seg_refs(step_ts))
 
     def test_single_selected_segment_no_raise(self, tmp_storage):
         """选中窗口仅 1 段 → 无相邻对 → 提前返回不抛。"""
         step_ts = _ts_from_spacings([10.0, 10.0])
         builder = _continuity_builder(tmp_storage, step_ts)
         one = _make_seg_refs(step_ts[:1])
-        builder._validate_continuity(_step(tmp_storage), one)
+        builder._validate_continuity(_make_seg_refs(step_ts), one)
 
     def test_two_segment_step_never_rejects(self, tmp_storage):
         """整个 step 只有 2 段（仅 1 个间隔样本）→ 基准=该间隔 → excess=0 → 即便间隔很大也不拒。
@@ -306,7 +302,7 @@ class TestValidateContinuity:
         """
         step_ts = _ts_from_spacings([30.0])  # 唯一间隔 30s
         builder = _continuity_builder(tmp_storage, step_ts)
-        builder._validate_continuity(_step(tmp_storage), _make_seg_refs(step_ts))
+        builder._validate_continuity(_make_seg_refs(step_ts), _make_seg_refs(step_ts))
 
     def test_tolerance_is_configurable(self, tmp_storage):
         """同一组段：紧容差判停顿、松容差放行。"""
@@ -314,6 +310,6 @@ class TestValidateContinuity:
         segs = _make_seg_refs(step_ts)
 
         with pytest.raises(ClipRangeGapError):
-            _continuity_builder(tmp_storage, step_ts, gap_tolerance_ms=500)._validate_continuity(_step(tmp_storage), segs)
+            _continuity_builder(tmp_storage, step_ts, gap_tolerance_ms=500)._validate_continuity(_make_seg_refs(step_ts), segs)
 
-        _continuity_builder(tmp_storage, step_ts, gap_tolerance_ms=2000)._validate_continuity(_step(tmp_storage), segs)
+        _continuity_builder(tmp_storage, step_ts, gap_tolerance_ms=2000)._validate_continuity(_make_seg_refs(step_ts), segs)

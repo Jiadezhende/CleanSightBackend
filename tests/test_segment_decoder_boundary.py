@@ -5,7 +5,7 @@ SegmentDecoder / FrameFinder 边界单元测试（seam：不起 ffmpeg）
 「按 sidecar 合成 Frame」的 seam，就能不依赖 ffmpeg 覆盖全部边界情形。
 真实解码（ts ↔ 像素是否错配）由 integration_tests/test_frame_lookup_roundtrip.py 端到端验。
 
-两个被测对象分居两包（`step_store.segment_decoder` / `inference.offline.frame_finder`）
+两个被测对象分居两包（`step_store._decoder` / `inference.offline.frame_finder`）
 但同居一份测试：它们共用同一个 seam，且 FrameFinder 是 SegmentDecoder 唯一的消费者，
 拆开会让「宽容层 + 严格层」这对相反契约的用例互相看不见。
 
@@ -27,8 +27,7 @@ import pytest
 
 from app.domain.frame import Frame
 from app.services.inference.offline.frame_finder import FrameFinder
-from app.services.step_store.segment_decoder import SegmentDecoder
-from app.services.step_store import store as step_store
+from app.services.step_store._decoder import SegmentDecoder
 
 TASK_ID = 4242
 STEP_ID = 7
@@ -68,8 +67,8 @@ class FakeDecodeSegmentDecoder(SegmentDecoder):
 
 
 def _fake_decoder(task_id: int = TASK_ID, step_id: int = STEP_ID):
-    """经 `for_step` 构造 seam 子类 —— 与 `Step.frames()` 走同一条构造路径。"""
-    return FakeDecodeSegmentDecoder.for_step(step_store.step(task_id, step_id))
+    """经 `for_step` 构造 seam 子类 —— 与 `hls.frames()` 走同一条构造路径。"""
+    return FakeDecodeSegmentDecoder.for_step(task_id, step_id)
 
 
 @pytest.fixture
@@ -177,7 +176,7 @@ class TestMissingSidecar:
         assert got == expected
 
     def test_empty_timeline_yields_nothing(self, tmp_storage):
-        assert list(SegmentDecoder.for_step(step_store.step(999, 999)).iter()) == []
+        assert list(SegmentDecoder.for_step(999, 999).iter()) == []
 
 
 class TestFind:

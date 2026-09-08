@@ -13,8 +13,8 @@ layout、内容解释在本模块，两者必须同居本包才能互相对照�
 本模块只负责「给定 ts 区间 → 产出该区间的帧」，**不做 ts 匹配校验、不做单点筛选** —— 那是
 消费侧的策略（`inference/offline/frame_finder.py`）。
 
-**包内私有**：对外入口是 `Step.frames(track, start_ts, end_ts)`，它负责定位目录与段列表。
-本类只吃已定位好的输入（一个 `Step` 句柄），不碰存储根、不自己定位。
+**包内私有**：对外入口是 `hls.frames(task_id, step_id, track, start_ts, end_ts)`。本类只吃
+已定位好的输入（一个 step 目录 + 一份段列表），不碰存储根。
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from typing import Optional, Iterator, Sequence
 import numpy as np
 
 from app.domain.frame import Frame
-from app.services.step_store import layout
-from app.services.step_store.store import SegmentRef, Step
+from app.services.step_store import _layout, store
+from app.services.step_store._layout import SegmentRef
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class SegmentDecoder:
     ):
         """
         Args:
-            step_dir: 已定位的 step 目录（由 `Step.frames` 给，本类不自己拼）
+            step_dir: 已定位的 step 目录（由 `for_step` 给，本类不自己拼）
             track: 段与 init 属哪一轨。**init 名必须用它而非从段名反解** ——
                 `raw_init.mp4` 解 processed 段会 SPS/PPS 不匹配
             segments: 该轨全部段，调用方保证已按 ts_us 升序
@@ -106,18 +106,28 @@ class SegmentDecoder:
 
     @classmethod
     def for_step(
-        cls, step: "Step", track: str = "raw", ffmpeg_bin: Optional[str] = None
+        cls,
+        task_id: int,
+        step_id: int,
+        track: str = "raw",
+        segments: Optional[Sequence[SegmentRef]] = None,
+        ffmpeg_bin: Optional[str] = None,
     ):
-        """从 `Step` 句柄构造。**「解码要 Step 的哪几样」只写这一处** —— `Step.frames()`
-        与测试的 seam 子类都经此构造，两边不会分叉。
+        """按 `(task_id, step_id)` 构造。**「解码要这个 step 的哪几样」只写这一处** ——
+        `hls.frames()` 与测试的 seam 子类都经此构造，两边不会分叉。
 
-        `playable_only=False`：解码只需要 mp4 与 sidecar 都在，与「该段有没有进 playlist」
-        无关 —— 离线反查要能读到刚落盘、transcode 尚未 append 的段。
+        `segments=None` 时自取整轨段，**`playable_only=False`**：解码只需要 mp4 与 sidecar
+        都在，与「该段有没有进 playlist」无关 —— 离线反查要能读到刚落盘、transcode 尚未
+        append 的段。函数体内 import `hls` 是为了避开模块级循环（`hls.frames` 反过来构造本类）。
         """
+        if segments is None:
+            from app.services.step_store import hls
+
+            segments = hls.segments(task_id, step_id, track, playable_only=False)
         return cls(
-            step_dir=step._dir,
+            step_dir=store._step_dir(task_id, step_id),
             track=track,
-            segments=step.segments(track, playable_only=False),
+            segments=segments,
             ffmpeg_bin=ffmpeg_bin,
         )
 
@@ -257,7 +267,7 @@ class SegmentDecoder:
         return f"{msg}; ffmpeg stderr: {tail}" if tail else msg
 
     def _load_sidecar(self, seg: SegmentRef) -> np.ndarray:
-        idx_path = self._step_dir / layout.sidecar_name_for(seg.filename)
+        idx_path = self._step_dir / _layout.sidecar_name_for(seg.filename)
         if not idx_path.exists():
             # 段刚落盘、sidecar 尚未就位，或历史遗留段：跳过该段，不打断整条迭代
             #（缺一段的索引不该让前后所有段一起读不了）。单点查询仍会在
@@ -273,7 +283,7 @@ class SegmentDecoder:
             self._ffmpeg_bin,
             "-loglevel", "error", "-hide_banner",
             "-i", (
-                f"concat:{self._step_dir / layout.init_name(self._track)}"
+                f"concat:{self._step_dir / _layout.init_name(self._track)}"
                 f"|{self._step_dir / seg.filename}"
             ),
             # select 必须在 scale 之前：反过来会把注定被丢弃的帧也缩放一遍

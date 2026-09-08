@@ -5,7 +5,7 @@
 样板，值不上一个会 sleep 的用例。
 
 判据于 2026-09 两次换代：`metadata.json.updated_at` →「已登记产物 mtime 最大值」→
-step 目录内的**活动标记**（`layout.ACTIVITY_NAME`，由 step_store 写入口顺带刷新）。
+step 目录内的**活动标记**（`_layout.ACTIVITY_NAME`，由 step_store 写入口顺带刷新）。
 本文件锁住三代判据下都必须成立的行为，以及最后这次换代新增的行为。
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
-from app.services.step_store import layout
+from app.services.step_store import _layout
 
 DAYS = 7
 _DAY_S = 86400
@@ -39,7 +39,7 @@ def _aged_step(step_dir: Path, age_days: float, *products: str) -> Path:
     """
     for name in products:
         _touch(step_dir / name, age_days)
-    _touch(step_dir / layout.ACTIVITY_NAME, age_days)
+    _touch(step_dir / _layout.ACTIVITY_NAME, age_days)
     return step_dir
 
 
@@ -51,20 +51,20 @@ def _worker(**kw) -> StorageCleanupWorker:
 class TestRetention:
     def test_deletes_expired_step(self, tmp_storage):
         step = _aged_step(tmp_storage / "1" / "2", DAYS + 1,
-                          layout.segment_name("raw", 1), layout.METADATA_NAME)
+                          _layout.segment_name("raw", 1), _layout.METADATA_NAME)
 
         assert _worker()._scan_and_clean() == 1
         assert not step.exists()
 
     def test_keeps_fresh_step(self, tmp_storage):
-        step = _aged_step(tmp_storage / "1" / "2", 1, layout.segment_name("raw", 1))
+        step = _aged_step(tmp_storage / "1" / "2", 1, _layout.segment_name("raw", 1))
 
         assert _worker()._scan_and_clean() == 0
         assert step.exists()
 
     def test_boundary_just_inside_retention(self, tmp_storage):
         """恰好在保留期内（差一小时）不删。"""
-        step = _aged_step(tmp_storage / "1" / "2", DAYS - 1 / 24, layout.METADATA_NAME)
+        step = _aged_step(tmp_storage / "1" / "2", DAYS - 1 / 24, _layout.METADATA_NAME)
 
         assert _worker()._scan_and_clean() == 0
         assert step.exists()
@@ -75,9 +75,9 @@ class TestRetention:
         第一代判据只看 metadata.json，这种目录会被误删。
         """
         step = tmp_storage / "1" / "2"
-        _touch(step / layout.METADATA_NAME, age_days=DAYS + 5)
-        _touch(step / layout.segment_name("raw", 9), age_days=DAYS + 5)
-        _touch(step / layout.ACTIVITY_NAME, age_days=0)
+        _touch(step / _layout.METADATA_NAME, age_days=DAYS + 5)
+        _touch(step / _layout.segment_name("raw", 9), age_days=DAYS + 5)
+        _touch(step / _layout.ACTIVITY_NAME, age_days=0)
 
         assert _worker()._scan_and_clean() == 0
         assert step.exists()
@@ -89,8 +89,8 @@ class TestRetention:
         —— 有第二个真源，崩溃残留的新文件就又能让死 step 赖着不走（第二代判据的坑）。
         """
         step = tmp_storage / "1" / "2"
-        _touch(step / layout.segment_name("raw", 9), age_days=0)
-        _touch(step / layout.ACTIVITY_NAME, age_days=DAYS + 1)
+        _touch(step / _layout.segment_name("raw", 9), age_days=0)
+        _touch(step / _layout.ACTIVITY_NAME, age_days=DAYS + 1)
 
         assert _worker()._scan_and_clean() == 1
         assert not step.exists()

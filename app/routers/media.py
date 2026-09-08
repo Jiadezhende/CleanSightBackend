@@ -27,13 +27,13 @@ logger = logging.getLogger(__name__)
 def _resolve_media_path(task_id: int, step_id: int, filename: str) -> Path:
     """按 token 已校验的字段取产物路径。
 
-    定位与 path traversal 防御都在 `Step.find_product` —— 本层只把「拿不到」映射成
+    定位与 path traversal 防御都在 `store.find_file` —— 本层只把「拿不到」映射成
     HTTP 状态码，不碰存储根、不拼目录。
 
     Raises:
         HTTPException(404): 文件不存在、越界或文件名非法
     """
-    candidate = step_store.step(task_id, step_id).find_product(filename)
+    candidate = step_store.find_file(task_id, step_id, filename)
     if candidate is None:
         logger.warning(
             "[Media] Rejected: task_id=%s step_id=%s filename=%s",

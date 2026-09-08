@@ -26,6 +26,9 @@ from app.services.inference.types import SegmentFact
 from app.services.inference.stage_factory import StageFactory
 from app.services.step_store import store as step_store
 
+# 离线调试产物的文件名归本模块自己持有——step_store 对它没有格式知识。
+_RESULT_NAME = "offline_inference_result.json"
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,13 +114,17 @@ class OfflineRunner:
         debug = segmenter.debug_result()
         if debug is None:
             return
-        step = step_store.step(spec.task_id, spec.step_id)
         try:
             payload = {"task_id": spec.task_id, "step_id": spec.step_id, **debug}
-            with step.open_offline_result("w") as f:
+            with step_store.open_file(
+                spec.task_id, spec.step_id, _RESULT_NAME, "w"
+            ) as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.warning("[OfflineRunner] 逐帧调试 JSON 落盘失败 %s: %s", step, e)
+            logger.warning(
+                "[OfflineRunner] 逐帧调试 JSON 落盘失败 task=%s step=%s: %s",
+                spec.task_id, spec.step_id, e,
+            )
 
     @staticmethod
     def _validate_and_stamp(facts: List[SegmentFact], producer: str) -> List[SegmentFact]:

@@ -5,7 +5,7 @@ ClipBuilder — 从 raw 段拼接出 ms 精度的 mp4 clip。
 输出：单个 mp4 文件，时长 ≈ end_ms - start_ms
 
 实现思路：
-1. `Step.segments('raw', playable_only=False)` 拿到该 step 的全部 raw 段（按 ts_us 升序）
+1. `hls.segments(task_id, step_id, 'raw', playable_only=False)` 拿到全部 raw 段（ts_us 升序）
 2. 过滤出与 [start_ms, end_ms] 时间区间重叠的段
 3. 在 step 目录写一个临时 m3u8（EXT-X-MAP 引 init.mp4 + 选中段列表），喂给 ffmpeg HLS demuxer
 4. 输出端用 -ss/-to 精确裁剪（重编码 libx264，关键帧无关）
@@ -27,9 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from app.services.step_store import layout, playlist
+from app.services.step_store import _layout, _playlist
+from app.services.step_store import hls
 from app.services.step_store import store as step_store
-from app.services.step_store.store import SegmentRef, Step
+from app.services.step_store.hls import SegmentRef
 
 logger = logging.getLogger(__name__)
 
@@ -174,20 +175,22 @@ class ClipBuilder:
                 f"Clip duration {spec.duration_ms} ms exceeds max {self._max_duration_ms} ms"
             )
 
-        # 句柄绑一次路由键往下传：目录扫描结果留在它里面，`_select_segments` 与
-        # `_validate_continuity` 都要全量段，此前是各扫一遍盘。
-        step = step_store.step(spec.task_id, spec.step_id)
+        # 全量段取一次往下传：`_select_segments` 与 `_validate_continuity` 都要它
+        # （前者选窗口、后者算中位基准），分别去问就是扫两遍盘。
+        # `playable_only=False`：本类的时长真源是相邻段 ts 跨度而非 playlist EXTINF
+        # （理由见 `_run_ffmpeg`），故不依赖 playlist 是否已收录该段。
+        all_segs = hls.segments(spec.task_id, spec.step_id, "raw", playable_only=False)
 
-        segs = self._select_segments(step, spec)
+        segs = self._select_segments(all_segs, spec)
         if not segs:
             raise ClipRangeOutOfBoundsError(
                 f"No raw segments overlap [start_ms={spec.start_ms}, end_ms={spec.end_ms}] "
                 f"for task_id={spec.task_id}, step_id={spec.step_id}"
             )
-        self._validate_continuity(step, segs)
+        self._validate_continuity(all_segs, segs)
 
         output_path = job_dir / f"clip_{spec.start_ms}_{spec.end_ms}.mp4"
-        self._run_ffmpeg(step, spec, segs, output_path)
+        self._run_ffmpeg(spec, segs, output_path)
 
         try:
             size_bytes = output_path.stat().st_size
@@ -237,13 +240,10 @@ class ClipBuilder:
 
     # -------- internal --------
 
-    def _select_segments(self, step: Step, spec: ClipSpec) -> List[SegmentRef]:
-        """返回与 [start_ms, end_ms] 重叠的 raw 段列表（按时间升序）。
-
-        `playable_only=False`：本类的时长真源是相邻段 ts 跨度而非 playlist EXTINF
-        （理由见 `_run_ffmpeg`），故不依赖 playlist 是否已收录该段。
-        """
-        all_segs = step.segments("raw", playable_only=False)
+    def _select_segments(
+        self, all_segs: List[SegmentRef], spec: ClipSpec
+    ) -> List[SegmentRef]:
+        """从该 step 的全量 raw 段里挑出与 [start_ms, end_ms] 重叠的（按时间升序）。"""
         if not all_segs:
             return []
 
@@ -260,7 +260,9 @@ class ClipBuilder:
                 overlapping.append(s)
         return overlapping
 
-    def _validate_continuity(self, step: Step, segs: List[SegmentRef]) -> None:
+    def _validate_continuity(
+        self, all_segs: List[SegmentRef], segs: List[SegmentRef]
+    ) -> None:
         """检测选中窗口内是否跨越真实录制停顿（源断流/重连导致的内容跳变）。
 
         基准不能用「假定 10s」：切段按固定帧数（300）、EXTINF=帧数/raw_fps 是
@@ -269,11 +271,14 @@ class ClipBuilder:
 
         因此基准取「该 step 全量段相邻间隔的中位数」（实测节奏，对偶发停顿稳健），
         只有间隔相对该节奏超出 gap_tolerance_ms 才判为真停顿。
+
+        Args:
+            all_segs: 该 step 的**全量** raw 段，用来估稳健基准 —— 选中窗口太短或含洞时，
+                只看窗口内的间隔会让基准失真。
+            segs: 选中窗口内的段，被检查的就是它们之间的间隔。
         """
         if len(segs) < 2:
             return
-        # 用整个 step 的 raw 段估稳健基准，避免选中窗口太短/含洞时基准失真
-        all_segs = step.segments("raw", playable_only=False)
         diffs = sorted(
             all_segs[i + 1].ts_us - all_segs[i].ts_us
             for i in range(len(all_segs) - 1)
@@ -292,7 +297,7 @@ class ClipBuilder:
                 )
 
     def _run_ffmpeg(
-        self, step: Step, spec: ClipSpec, segs: List[SegmentRef], output_path: Path
+        self, spec: ClipSpec, segs: List[SegmentRef], output_path: Path
     ) -> None:
         """跑一次 ffmpeg HLS 拼接 + 精确裁剪。"""
         # offset 是相对于「拼接后流」的起点（即第一段的 ts_us）
@@ -309,10 +314,10 @@ class ClipBuilder:
         end_s = offset_s + duration_s
 
         # 打点仅用 raw 轨的 init.mp4
-        if not step.has_init("raw"):
+        if not hls.has_init(spec.task_id, spec.step_id, "raw"):
             raise ClipBuildError(
-                f"{layout.init_name('raw')} missing for task {step.task_id} "
-                f"step {step.step_id} (fMP4 fragment 段需要 EXT-X-MAP 才能解码)"
+                f"{_layout.init_name('raw')} missing for task {spec.task_id} "
+                f"step {spec.step_id} (fMP4 fragment 段需要 EXT-X-MAP 才能解码)"
             )
 
         # 临时 m3u8 由 step_store 定位（必须与 init/段同目录，相对 URI 才解析得到）。
@@ -320,11 +325,11 @@ class ClipBuilder:
         # 本就是 ts，固定时长在 fps 漂移下会让累计 EXTINF 偏离墙钟、seek 逐段错位。窗口已过
         # _validate_continuity（无真实录制停顿），故相邻段连续、ts 跨度 ≈ 段媒体时长；末段用中位估算兜底。
         #
-        # ⚠ 正因为时长真源不是 playlist EXTINF，本类是唯一走不了 `Step.vod_playlist`
+        # ⚠ 正因为时长真源不是 playlist EXTINF，本类是唯一走不了 `hls.vod_playlist`
         # （成品出口）的调用方，只能直调包内私有的骨架。**退出条件**：验证「相邻段 ts
         # 跨度 ≈ playlist EXTINF」在 fps 漂移下仍成立后，改走 vod_playlist，届时撤销
         # tests/test_import_hygiene.py 里 playlist 模块的这条具名例外。
-        tmp_m3u8 = step.scratch_path("clip")
+        tmp_m3u8 = step_store.scratch_path(spec.task_id, spec.step_id, "clip")
         est_dur_us = _est_segment_duration_us(segs, self._default_seg_dur_us)
         seg_durs_us = [
             (segs[i + 1].ts_us - segs[i].ts_us) if i + 1 < len(segs) else est_dur_us
@@ -335,12 +340,12 @@ class ClipBuilder:
 
         # 刻意不写 EXT-X-MEDIA-SEQUENCE（media_sequence=None）：与既有产物逐字一致。
         tmp_m3u8.write_text(
-            playlist.build_vod_playlist(
+            _playlist.build_vod_playlist(
                 entries=[
                     (s.filename, dur_us / 1_000_000.0)
                     for s, dur_us in zip(segs, seg_durs_us)
                 ],
-                map_uri=layout.init_name("raw"),
+                map_uri=_layout.init_name("raw"),
                 target_duration=int(target_dur_s) + 1,
                 media_sequence=None,
             ),

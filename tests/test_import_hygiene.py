@@ -56,12 +56,14 @@ STORAGE_ROOT_ALLOWED = ("app/settings.py", f"{LEAF_PACKAGE}/")
 STORAGE_ROOT_FN = "_storage_root"
 
 # 写成员的调用者白名单 = 往 step 目录里写东西的三个服务模块。计划外的第四个写者要先在
-# 这里登记——**这条门禁是「谁在写」的唯一约束**（写成员每类产物一个具名方法，没有注册表
-# 可以顺带拦一道；TTL 可见性由写入口顺带刷的活动标记保证，与写者是谁无关）。
+# 这里登记——**这条门禁是「谁在写」的唯一约束**（TTL 可见性由写入口顺带刷的活动标记保证，
+# 与写者是谁无关，没有注册表可以顺带拦一道）。
+#
+# 名字都挑了有区分度的：**别把 `open` 也列进来**——AST 按属性名匹配，会把满仓的
+# `path.open(...)` 全部误报。
 WRITE_MEMBERS = (
     "segment_path", "sidecar_path", "init_path", "playlist_path", "metadata_path",
-    "features_path", "facts_path",
-    "open_features", "open_facts", "open_offline_result",
+    "file_path", "open_file",
 )
 WRITE_MEMBER_ALLOWED = (
     "app/services/persistence/strategies/hls_strategy.py",
@@ -70,17 +72,31 @@ WRITE_MEMBER_ALLOWED = (
     f"{LEAF_PACKAGE}/",
 )
 
-# `step_store.playlist` 是包内私有（对外只出成品 `Step.vod_playlist`，不出骨架：
-# 备料才是写错会静默的部分）。两条具名例外，各有退出条件：
-PLAYLIST_MODULE = "app.services.step_store.playlist"
-PLAYLIST_ALLOWED = {
-    # 写侧是 playlist 格式的**定义者**（手写 EXTINF 行与文件头、算 tfdt 前缀和），
-    # 不是消费者。这条例外是永久的。
-    "app/services/persistence/strategies/hls_strategy.py",
-    # 每段 EXTINF 取相邻段 ts 跨度而非 playlist EXTINF（seek 基准是 ts，换了会逐段
-    # 错位），故走不了 `Step.vod_playlist`。**退出条件**：验证两者在 fps 漂移下等价
-    # 后改走成品出口，然后删掉本行。
-    "app/services/lab/clip_builder.py",
+# 下划线开头的三个模块是包内私有：对外只有 `store`（目录契约）与 `hls`（视频落盘域）
+# 两个模块，「内部实现对外全部不可见」。破这条即意味着调用方又开始自己拼名字/骨架，
+# 而备料（EXTINF 真值、滤在途、判 init、算 TARGETDURATION）写错是**静默**的。
+PRIVATE_MODULES = {
+    "app.services.step_store._layout",
+    "app.services.step_store._playlist",
+    "app.services.step_store._decoder",
+}
+# 具名例外，各有退出条件。key = 模块名，value = {允许的文件}
+PRIVATE_MODULE_ALLOWED = {
+    "app.services.step_store._playlist": {
+        # 写侧是 playlist 格式的**定义者**（手写 EXTINF 行与文件头、算 tfdt 前缀和），
+        # 不是消费者。**退出条件**：写侧事务化（`hls.write_segment`）后，首行与 EXTINF
+        # append 都进包内，这条随之删掉。
+        "app/services/persistence/strategies/hls_strategy.py",
+        # 每段 EXTINF 取相邻段 ts 跨度而非 playlist EXTINF（seek 基准是 ts，换了会逐段
+        # 错位），故走不了 `hls.vod_playlist`。**退出条件**：验证两者在 fps 漂移下等价
+        # 后改走成品出口，然后删掉本行。
+        "app/services/lab/clip_builder.py",
+    },
+    "app.services.step_store._layout": {
+        # 同上两条的连带：它们手拼 m3u8 首行时要 `init_name` 写 EXT-X-MAP。
+        "app/services/persistence/strategies/hls_strategy.py",
+        "app/services/lab/clip_builder.py",
+    },
 }
 
 # 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
@@ -240,8 +256,8 @@ def test_storage_root_is_private_to_step_store():
     重新复制一份到各处——那正是抽出本包要消掉的东西，且**这种拼接门禁抓不到**
     （`root / "x"` 是普通 Path 拼接，看不出它在拼 step 目录）。故拦在源头：拦根。
 
-    要 step 里的文件走 `Step` 的具名写成员（`segment_path` / `open_features` / …）
-    或 `scratch_path`；
+    要 step 里的文件走 `store.file_path` / `store.open_file` / `store.scratch_path`，
+    要视频段走 `hls.*`；
     要存储根**旁边**的东西（lab 导出根、lab 配置文件）在 `settings` 上加派生 property。
     """
     violations = []
@@ -293,34 +309,38 @@ def test_step_store_write_members_have_registered_callers():
     )
 
 
-def test_step_store_playlist_is_package_private():
-    """`step_store.playlist` 只出骨架，包外一律走成品 `Step.vod_playlist`。
+def test_step_store_internals_are_package_private():
+    """`_layout` / `_playlist` / `_decoder` 只许包内 import，对外只有 store 与 hls。
 
-    只出骨架等于要求每个调用方自己备料，而备料（EXTINF 真值、滤在途、判 init、算
-    TARGETDURATION）才是写错会**静默**的那部分——骨架写错播放器立刻报错，备料写错
-    表现为 hls.js 段尾停摆、缓冲洞、导出时长错乱。两条具名例外见 PLAYLIST_ALLOWED。
+    包外自己 import 内部模块，等于又开始自己拼文件名、自己备 m3u8 的料，而备料
+    （EXTINF 真值、滤在途、判 init、算 TARGETDURATION）才是写错会**静默**的那部分——
+    骨架写错播放器立刻报错，备料写错表现为 hls.js 段尾停摆、缓冲洞、导出时长错乱。
+    具名例外与各自的退出条件见 PRIVATE_MODULE_ALLOWED。
     """
+    pkg = LEAF_PACKAGE.replace("/", ".")
+    short = {m.rsplit(".", 1)[1]: m for m in PRIVATE_MODULES}
     violations = []
     for rel, tree in _iter_app_trees():
-        if rel.startswith(f"{LEAF_PACKAGE}/") or rel in PLAYLIST_ALLOWED:
+        if rel.startswith(f"{LEAF_PACKAGE}/"):
             continue
         for node in ast.walk(tree):
-            hit = (
-                isinstance(node, ast.ImportFrom)
-                and node.module == PLAYLIST_MODULE
-            ) or (
-                isinstance(node, ast.ImportFrom)
-                and node.module == LEAF_PACKAGE.replace("/", ".")
-                and any(a.name == "playlist" for a in node.names)
-            )
-            if hit:
-                violations.append(f"{rel}:{node.lineno}")
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            hits = set()
+            if node.module in PRIVATE_MODULES:
+                hits.add(node.module)
+            elif node.module == pkg:
+                hits |= {short[a.name] for a in node.names if a.name in short}
+            for mod in sorted(hits):
+                if rel not in PRIVATE_MODULE_ALLOWED.get(mod, set()):
+                    violations.append(f"{rel}:{node.lineno} → {mod}")
 
     assert not violations, (
-        "以下文件 import 了包内私有的 step_store.playlist：\n  "
+        "以下文件 import 了 step_store 的包内私有模块：\n  "
         + "\n  ".join(violations)
-        + "\n拼 VOD m3u8 走 `Step.vod_playlist(track, segments=, encode_uri=)`——"
-        "\n它把 EXTINF 真值、在途段过滤、init 判据与 TARGETDURATION 一并备好。"
+        + "\n落盘位置问 `store`，视频的一切问 `hls`——拼 VOD m3u8 走"
+        "\n`hls.vod_playlist(task_id, step_id, track, ...)`，它把 EXTINF 真值、"
+        "\n在途段过滤、init 判据与 TARGETDURATION 一并备好。"
     )
 
 

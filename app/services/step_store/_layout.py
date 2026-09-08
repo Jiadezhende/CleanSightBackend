@@ -1,9 +1,8 @@
 """
 step 目录落盘布局的唯一真源：目录怎么拼、文件叫什么。
 
-`{storage_root}/{task_id}/{step_id}/` 下的全部命名约定集中在此。写侧（persistence 的
-hls_strategy）与读侧（step_store 自身 / lab / inference.offline / routers）都向本模块依赖，
-谁也不依赖谁。
+`{storage_root}/{task_id}/{step_id}/` 下的全部命名约定集中在此。**包内私有** —— 对外的名字
+一律经 `hls.py`（视频五类）与 `store.py`（通用文件出入口），调用方不知道任何文件叫什么。
 
 **这条契约值得单独成模块，是因为漏改不报错**：`{track}_segment_{ts_us}.mp4` 与同名 `.idx`
 一旦对不上，读侧按契约只 warning 跳过该段（那个宽容本身是对的），表现为**静默丢帧**。
@@ -13,15 +12,14 @@ hls_strategy）与读侧（step_store 自身 / lab / inference.offline / routers
 （`store._storage_root()`，读 settings，L3）不属于本模块，由持有根的一方拼
 `root / step_subpath(task_id, step_id) / segment_name(...)`。
 
-依赖上界：stdlib only（L0）。不 import settings、不 import numpy —— 这是包外 hls_strategy /
-clip_builder 能零成本直接 import 本模块的前提。
+依赖上界：stdlib only（L0）。不 import settings、不 import numpy。
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 # 轨道：raw = 原始画面（离线反查与送标用），processed = 渲染结果（回放用）
 VALID_TRACKS: Tuple[str, str] = ("raw", "processed")
@@ -33,11 +31,9 @@ SEGMENT_PATTERN = re.compile(
 
 METADATA_NAME = "metadata.json"
 
-# 推理侧三类产物（inference 写、offline 读）。与上面的 HLS 五类同居本模块 —— 此前它们的
-# 名字以 lambda 内联在产物注册表里，注册表拆掉后没理由再留第二个命名真源。
-FEATURES_NAME = "features.jsonl"
-FACTS_NAME = "facts.jsonl"
-OFFLINE_RESULT_NAME = "offline_inference_result.json"
+# 推理侧的 features.jsonl / facts.jsonl / offline_inference_result.json **不在此登记** ——
+# 本包对那三个文件没有任何格式知识（不解析、不校验、不理解内容），名字归 inference 自己持有，
+# 经 `store.file_path(task_id, step_id, name)` 递进来。
 
 # TTL 的唯一判据：本文件的 mtime = 该 step 最后一次有人要写东西的时刻。空文件，只用 mtime。
 #
@@ -51,11 +47,33 @@ OFFLINE_RESULT_NAME = "offline_inference_result.json"
 ACTIVITY_NAME = ".activity"
 
 
+class SegmentRef(NamedTuple):
+    """单个 HLS 段的引用 —— 正好是 `parse_segment_name` 的产物加两个单位换算。
+
+    **只带调用方拿不到的东西**：刻意不带 task_id / step_id（调用方自己就是拿这两个 id 来问的）、
+    track（查询时已指定）、path（消费方只用 `.name`）、duration（EXTINF 真值在 playlist，
+    `vod_playlist` 收口后包外无消费方）。
+    """
+
+    filename: str
+    ts_us: int
+
+    @property
+    def ts_ms(self) -> int:
+        """段开始时间戳（毫秒）"""
+        return self.ts_us // 1000
+
+    @property
+    def ts_s(self) -> float:
+        """段开始时间戳（秒，浮点）"""
+        return self.ts_us / 1_000_000.0
+
+
 def ts_to_us(ts: float) -> int:
     """段时间戳（秒）→ 文件名里的 ts_us。
 
     **截断而非四舍五入**，是既有落盘约定的一部分，不能改：读侧按 ts 定位段依赖
-    `ts_us <= ts*1e6`（见 `segment_decoder._locate_containing_index`）。改成 round 会让
+    `ts_us <= ts*1e6`（见 `_decoder._locate_containing_index`）。改成 round 会让
     「start_ts 恰为该段首帧」的定位无条件出错。
     """
     return int(ts * 1e6)
@@ -66,7 +84,7 @@ def step_subpath(task_id: int, step_id: int) -> Path:
 
     ⚠ **相对路径，不能直接 open**（名字叫 subpath 而非 dir 就是为了拦这个）：当成绝对路径
     用会落到进程 cwd 底下，读模式报 FileNotFoundError，写模式静默造一个野目录。必须由持有
-    根的一方拼 `_storage_root() / step_subpath(...)`。
+    根的一方拼 `store._storage_root() / step_subpath(...)`。
     """
     return Path(str(task_id)) / str(step_id)
 

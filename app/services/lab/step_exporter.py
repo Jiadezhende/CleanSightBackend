@@ -12,10 +12,10 @@ StepExporter —— 把一个 (task_id, step_id, track) 的全部落盘段导出
 fragment，remux 成 mp4 只是换容器——磁盘速度、零 CPU、零二次画质损失。
 
 实现思路（与 ClipBuilder._run_ffmpeg 同构，坑点相同）：
-1. `Step.segments(track)` 拿该 step 该轨全部**可播**段（在途段已滤掉）
-2. `Step.vod_playlist(track)` 直接出 m3u8 成品 —— EXTINF 真值、init 判据、
+1. `hls.segments(task_id, step_id, track)` 拿该轨全部**可播**段（在途段已滤掉）
+2. `hls.vod_playlist(...)` 直接出 m3u8 成品 —— EXTINF 真值、init 判据、
    TARGETDURATION 全在包内备好，本层不重新推导
-3. 把它写进 step 目录的临时 m3u8（`Step.scratch_path` 定位），喂 ffmpeg HLS demuxer
+3. 把它写进 step 目录的临时 m3u8（`store.scratch_path` 定位），喂 ffmpeg HLS demuxer
 4. `-c copy -movflags +faststart` 输出到 temp_root
 
 为什么不用 `-f concat`：段是 fMP4 fragment（无 moov），concat demuxer 单独 demux 时找不到
@@ -37,10 +37,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from app.services.step_store import hls
 from app.services.step_store import store as step_store
-from app.services.step_store.store import (
-    StepInitMissing,
-    StepNoPlayableSegments,
+from app.services.step_store.hls import (
+    HlsInitMissing,
+    HlsNoPlayableSegments,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ class StepExportNoSegments(StepExportError):
 
 
 class StepExportInitMissing(StepExportError):
-    """step 目录缺 `{track}_init.mp4`，fMP4 fragment 无法解码。"""
+    """step 目录缺该轨的 init 段，fMP4 fragment 无法解码。"""
 
 
 class StepExporter:
@@ -111,28 +112,27 @@ class StepExporter:
         """
         self._sweep_orphans()
 
-        step = step_store.step(task_id, step_id)
         # 默认 playable_only=True：在途段（mp4v 已落、transcode+append 未完成）必须滤掉，
         # 否则 fragment 实际媒体时长与 playlist 声明对不上，导出时长错乱。
-        segs = step.segments(track)
+        segs = hls.segments(task_id, step_id, track)
         if not segs:
             raise StepExportNoSegments(
                 f"No playable {track} segments for task_id={task_id}, "
                 f"step_id={step_id} (no segments, all in-flight, or playlist missing)"
             )
 
-        # m3u8 成品由 step_store 出（EXTINF 真值、init 判据、TARGETDURATION 全在包内）；
+        # m3u8 成品由 step_store.hls 出（EXTINF 真值、init 判据、TARGETDURATION 全在包内）；
         # 本层只把它的领域异常翻成自家异常 —— 路由层再翻成 HTTP 状态码。
         try:
-            vod_text = step.vod_playlist(track, segments=segs)
-        except StepInitMissing as e:
+            vod_text = hls.vod_playlist(task_id, step_id, track, segments=segs)
+        except HlsInitMissing as e:
             raise StepExportInitMissing(f"{e} It cannot be exported.") from e
-        except StepNoPlayableSegments as e:
+        except HlsNoPlayableSegments as e:
             raise StepExportNoSegments(str(e)) from e
 
         # 临时 m3u8 必须落在 step 目录（EXT-X-MAP 与段 URI 都是相对引用），该约束与
         # 前导点命名都由 step_store 保证，本层不拼路径。
-        tmp_m3u8 = step.scratch_path("export")
+        tmp_m3u8 = step_store.scratch_path(task_id, step_id, "export")
         nonce = secrets.token_hex(6)
         output_path = self._temp_root / f"step_{task_id}_{step_id}_{track}_{nonce}.mp4"
 

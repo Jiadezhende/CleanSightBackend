@@ -1,9 +1,9 @@
 """
-按 ts 反查原始帧：离线链路对 `Step.frames`（step_store 的区间解码出口）的消费策略。
+按 ts 反查原始帧：离线链路对 `hls.frames`（step_store 的区间解码出口）的消费策略。
 
 本模块只有一件事——**把「区间取帧」变成「按 ts 对号取帧」**，两者的失败契约相反：
 
-    Step.frames        区间扫描，宽容：缺 sidecar 跳过该段、空区间返回空
+    hls.frames         区间扫描，宽容：缺 sidecar 跳过该段、空区间返回空
     FrameFinder.find   点查，严格：任一 ts 配不上就 ValueError
 
 宽容留在解码层（缺一段的索引不该让前后所有段一起读不了），严格留在这层
@@ -16,7 +16,7 @@ from functools import partial
 from typing import Callable, Iterator, List, Optional
 
 from app.domain.frame import Frame
-from app.services.step_store import store as step_store
+from app.services.step_store import hls
 
 
 class FrameFinder:
@@ -32,16 +32,14 @@ class FrameFinder:
         """
         Args:
             decoder: 解码源，需有 `iter(start_ts, end_ts, width, height)`。不传则走
-                `Step.frames` —— 落盘定位归 step_store，本模块只管对号入座。
+                `hls.frames` —— 落盘定位归 step_store，本模块只管对号入座。
                 注入口是给测试用的 seam（把 ffmpeg 换成按 sidecar 合成帧），不必
                 monkeypatch 模块属性。
         """
         if decoder is not None:
             self._frames: Callable[..., Iterator[Frame]] = decoder.iter  # type: ignore[attr-defined]
         else:
-            self._frames = partial(
-                step_store.step(task_id, step_id).frames, track
-            )
+            self._frames = partial(hls.frames, task_id, step_id, track)
 
     def find(
         self, timestamps: List[float], width: int, height: int

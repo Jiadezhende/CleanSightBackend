@@ -6,10 +6,10 @@ L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特
 - FactLedger：L3 产出的事实（EventFact / SegmentFact）追加
   该 step 的 `facts.jsonl`；`load()` 供离线链路回读（offline 预置）。
 
-落盘位置一律经 `step_store` 的具名成员（`Step.features_path` / `open_features` 与
-`facts_path` / `open_facts`）—— 与 HLS 同一个 step 目录，随它被 cleanup TTL 连带回收。
-本模块**不知道根在哪、文件叫什么名**，两个出口由子类各绑一次（见 `_step_path`）。
-两者均为 manager 持有的单例：stop_workflow 时 close(task_id, step_id)。
+落盘位置经 `step_store.store` 的通用文件出入口（`file_path` / `open_file`）—— 与 HLS 同一个
+step 目录，随它被 cleanup TTL 连带回收。**文件名归本模块自己持有**（`_NAME`）：step_store 对
+这两个 jsonl 没有任何格式知识，不该替它们记名字。两者均为 manager 持有的单例：stop_workflow
+时 close(task_id, step_id)。
 
 帧对齐契约：每条记录的 `ts` = 该帧的 `FrameFeature.ts`（= 帧捕获 ts，与在线滑窗同源），
 与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，故 feature 行可按 `ts` 精确对上
@@ -128,19 +128,13 @@ class _JsonlBuffer:
     def _key(task_id: Any, step_id: Any) -> str:
         return f"{task_id}/{step_id}"
 
-    # 本分区在 step 目录里的两个出口，由子类绑到 `Step` 的具名成员上。**本类不拼文件名**，
-    # 也不再报一个 kind 字符串——打错名字在子类那一行就红，不必等第一次写盘。
-    @staticmethod
-    def _step_path(step: "step_store.Step") -> Path:
-        raise NotImplementedError
-
-    @staticmethod
-    def _step_open(step: "step_store.Step", mode: str, **kw):
-        raise NotImplementedError
+    # 本分区的文件名，由子类给。**名字归本模块**：step_store 只提供「这个 step 目录里的一个
+    # 文件」，不认识 features.jsonl 是什么。
+    _NAME: str = ""
 
     def _path(self, task_id: Any, step_id: Any) -> Path:
         """本分区的落盘路径（顺带保证 step 目录存在并刷新活动时间戳）。"""
-        return self._step_path(step_store.step(task_id, step_id))
+        return step_store.file_path(task_id, step_id, self._NAME)
 
     def _enqueue(
         self, task_id: Any, step_id: Any, lines: List[str], owner: Any = None
@@ -234,16 +228,10 @@ class _JsonlBuffer:
 class FeatureStore(_JsonlBuffer):
     """多模型 bbox 特征 per-task 落盘（常开）。"""
 
+    _NAME = "features.jsonl"
+
     def __init__(self, batch_size: int = 64):
         super().__init__(batch_size=batch_size)
-
-    @staticmethod
-    def _step_path(step) -> Path:
-        return step.features_path()
-
-    @staticmethod
-    def _step_open(step, mode: str, **kw):
-        return step.open_features(mode, **kw)
 
     def append(self, task_id: Any, step_id: Any, feature: "FrameFeature", owner: Any = None) -> None:
         """追加一帧的多流特征（帧级 FrameFeature）。
@@ -277,12 +265,13 @@ class FeatureStore(_JsonlBuffer):
         """
         frames: List[FrameFeature] = []
         self.flush(task_id, step_id)
-        step = step_store.step(task_id, step_id)
         try:
             # 读模式**不建目录、不刷活动时间戳**：读一个不存在的 step 不该在盘上留痕，
             # 也不该让它显得还活着。
             # utf-8-sig 容忍 Windows 手写 features.jsonl 的 UTF-8 BOM；后端自身写出的无 BOM 亦正常。
-            with self._step_open(step, "r", encoding="utf-8-sig") as f:
+            with step_store.open_file(
+                task_id, step_id, self._NAME, "r", encoding="utf-8-sig"
+            ) as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -290,13 +279,18 @@ class FeatureStore(_JsonlBuffer):
                     try:
                         rec = json.loads(line)
                     except Exception as e:  # 单行损坏：跳过不中断其余数据
-                        logger.warning("[FeatureStore] 跳过损坏行 %s: %s", step, e)
+                        logger.warning(
+                            "[FeatureStore] 跳过损坏行 task=%s step=%s: %s",
+                            task_id, step_id, e,
+                        )
                         continue
                     frames.append(_record_to_feature(rec))
         except FileNotFoundError:
             return frames
         except Exception as e:
-            logger.warning("[FeatureStore] 回读失败 %s: %s", step, e)
+            logger.warning(
+                "[FeatureStore] 回读失败 task=%s step=%s: %s", task_id, step_id, e
+            )
         frames.sort(key=lambda ff: ff.ts)
         return frames
 
@@ -304,16 +298,10 @@ class FeatureStore(_JsonlBuffer):
 class FactLedger(_JsonlBuffer):
     """L3 事实 per-task 账本（EventFact / SegmentFact）。"""
 
+    _NAME = "facts.jsonl"
+
     def __init__(self, batch_size: int = 16):
         super().__init__(batch_size=batch_size)
-
-    @staticmethod
-    def _step_path(step) -> Path:
-        return step.facts_path()
-
-    @staticmethod
-    def _step_open(step, mode: str, **kw):
-        return step.open_facts(mode, **kw)
 
     def append(
         self,
@@ -335,11 +323,10 @@ class FactLedger(_JsonlBuffer):
     def load(self, task_id: Any, step_id: Any) -> List[Union[EventFact, SegmentFact]]:
         """离线回读：还原该 (task, step) 的全部事实（缺失文件返回空）。"""
         self.flush(task_id, step_id)  # 确保缓冲落盘后再读
-        step = step_store.step(task_id, step_id)
         facts: List[Union[EventFact, SegmentFact]] = []
         try:
             # 读模式不建目录，理由同 FeatureStore.load
-            with self._step_open(step, "r") as f:
+            with step_store.open_file(task_id, step_id, self._NAME, "r") as f:
                 for line in f:
                     line = line.strip()
                     if line:
@@ -347,7 +334,9 @@ class FactLedger(_JsonlBuffer):
         except FileNotFoundError:
             return []
         except Exception as e:
-            logger.warning("[FactLedger] 回读失败 %s: %s", step, e)
+            logger.warning(
+                "[FactLedger] 回读失败 task=%s step=%s: %s", task_id, step_id, e
+            )
         return facts
 
     def replace_segments(
