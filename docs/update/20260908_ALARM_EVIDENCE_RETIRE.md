@@ -43,7 +43,7 @@
 按 CLAUDE.md，本次不动 `docs/kb/`。下次融合时以下位置要跟：
 
 - `docs/kb/BUSINESS_TRACEBACK_AND_LAB.md`：「告警证据回溯」整节（入口两条、流程 6 步、`traceback_context_*` 两个配置项）删除。
-- `docs/kb/SERVICE_TRACEBACK_MEDIA.md`：端点表里 `/alarm/{alarm_id}/evidence`、`/alarm/{alarm_id}/playlist.m3u8` 两行删除；「告警双轨复核」那条消费路径删除。
+- `docs/kb/SERVICE_TRACEBACK_MEDIA.md`：小标题「/traceback/*（业务层，**4 个**端点）」改 2 个；端点表里 `/alarm/{alarm_id}/evidence`、`/alarm/{alarm_id}/playlist.m3u8` 两行删除；「两个 `playlist.m3u8` 端点以 `api_route` 注册」改为一个；「`evidence` 是双轨能力唯一的并列出口……（`_segment_to_url`，traceback.py:61）」整段删除——`_segment_to_url` 已随端点删除，双轨并列出口不复存在（现在两轨各自是独立 playlist）；「告警双轨复核」那条消费路径删除。
 - `docs/kb/BUSINESS_OVERVIEW.md`：「告警证据回溯：`GET /traceback/alarm/{alarm_id}/evidence` 和对应 playlist」一句删除。
 - `docs/kb/TESTING_MAP.md`：`tests/test_traceback_router.py` / `test_traceback_segment_finder.py` 的覆盖描述与 2026-07-05 的覆盖率快照均已过时（用例数变化）。
 
