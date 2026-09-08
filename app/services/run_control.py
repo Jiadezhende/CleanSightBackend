@@ -94,7 +94,7 @@ class RunController:
                 #
                 # ⚠ **①必须先于②，反过来 open_fresh 建的 features.jsonl 会被①的 rmtree 抹掉，
                 #   且不报错**。①删的是整个目录含 inference 的产物，不只 HLS —— 该契约现已写在
-                #   `step_store.purge.purge_step` 的 docstring 里（此前只活在本注释中，两侧代码
+                #   `step_store.purge_step` 的 docstring 里（此前只活在本注释中，两侧代码
                 #   互不知情）。
                 persistence_manager.start_run(cq)
 

@@ -6,28 +6,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _load_env_files():
-    """根据 CLEANSIGHT_ENV 环境变量加载对应的配置文件
+    """按 CLEANSIGHT_ENV 把对应 .env 文件的键值注入 `os.environ`，供 Settings 读取。
 
-    - CLEANSIGHT_ENV=dev  → 加载 .env.dev（默认）
-    - CLEANSIGHT_ENV=test → 加载 .env.test
-    - CLEANSIGHT_ENV=prod → 加载 .env
-
-    该函数会把键值对注入到 `os.environ`，以便 Pydantic 从环境读取。
+    dev→.env.dev（默认）/ test→.env.test / prod→.env。
     """
     base = Path(__file__).parent.parent
     env = os.environ.get("CLEANSIGHT_ENV", "dev").lower()
 
-    # 根据环境变量确定配置文件
     env_files = {"dev": ".env.dev", "test": ".env.test", "prod": ".env"}
-
     env_file_name = env_files.get(env, ".env.dev")
     env_path = base / env_file_name
 
-    # 记录是否为开发模式（供后续校验逻辑判断）
-    global _LOADED_DEV
+    global _LOADED_DEV  # 供 check_required_fields 判断是否放行缺配置
     _LOADED_DEV = env == "dev"
 
-    # 加载环境文件
     if not env_path.exists():
         print(f"[Settings] Warning: Environment file '{env_file_name}' not found")
         return
@@ -83,21 +75,16 @@ class Settings(BaseSettings):
     # 模型路径
     model_path: str = "./app/data"
 
-    # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
-    # persistence / inference / traceback 三方都读 settings.storage_base_dir，
-    # 不再各自重算或互相 push（消除跨服务穿透）。
+    # 持久化存储根（单一真源）。env: CLEANSIGHT_STORAGE_DIR
     storage_dir: str = "./database"
 
-    # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
-    # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
-    raw_fps: int = 30          # 生产者源：解码 CFR 帧率（decoder default_fps、HLS raw fallback、CA 秒→帧数换算全派生自此）
-    inference_decimation: int = 2  # 采样器：检测抽帧降采样倍率——系统唯一采样旋钮。抽帧器「每 N 帧留 1」直接用它。
-                               # 检测率 = raw_fps / N（N=2→15fps，派生见 inference_fps property）。整数因子故只能命中
-                               # raw_fps 的整除率（30→15/10/7.5/6…，不支持 30→20 类非整除比）；模型侧另按 ts 重采样到 7.5。
-                               # env: CLEANSIGHT_INFERENCE_DECIMATION
-    # CA 缓存/段长本是"时间概念"，以秒声明（时间为跨子系统货币）；帧数在各消费边界按 raw_fps 显式换算。
-    ca_maxlen_seconds: int = 30    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
-    ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
+    # 帧率与队列（跨模块单一真源，inference / stream / client / persistence 共读）。
+    raw_fps: int = 30              # 解码 CFR 帧率，下游一切帧率/帧数换算的基准
+    inference_decimation: int = 2  # 系统唯一采样旋钮：抽帧器「每 N 帧留 1」。整数倍率，故只能
+                                   # 命中 raw_fps 的整除率（30→15/10/7.5…，不支持 30→20）
+    # 以秒声明（时间是跨子系统货币），帧数在各消费边界按 raw_fps 换算。
+    ca_maxlen_seconds: int = 30    # CA 队列缓存时长
+    ca_segment_seconds: int = 10   # HLS 段时长
 
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
@@ -110,10 +97,9 @@ class Settings(BaseSettings):
     gateway_rate_window: int = 60            # 速率窗口大小（秒）
     gateway_rate_ban_threshold: int = 5      # 速率超限违规次数阈值（达到后封禁，0=不封禁）
     gateway_rate_ban_window: int = 60        # 速率超限违规计数窗口（秒）
-    # 宽松路径前缀（逗号分隔）。大屏侧 /task/live、/task/history、/traceback 必须在列：
-    # 前两者是跨 origin 轮询，浏览器的 CORS 预检 OPTIONS 与实际请求各计一次数，普通
-    # 配额（60/60s）撑不住；/traceback 的 404 是正常业务态（只落了 raw 的 step 按默认
-    # track=processed 查即 404），不该被反扫描当扫描特征累计。
+    # 宽松路径前缀（逗号分隔）。大屏三条必须在列：/task/live 与 /task/history 是跨 origin
+    # 轮询，CORS 预检与实际请求各计一次，普通配额撑不住；/traceback 的 404 是正常业务态
+    # （只落 raw 的 step 按默认 track=processed 查即 404），不该被反扫描当特征累计。
     gateway_relaxed_prefixes: str = (
         "/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/metrics"
     )
@@ -142,11 +128,9 @@ class Settings(BaseSettings):
 
     @property
     def inference_fps(self) -> float:
-        """检测抽帧后的有效帧率（派生：raw_fps / inference_decimation）。
+        """检测抽帧后的有效帧率。派生而非配置项，故无从与 raw_fps/N 漂移。
 
-        供需要绝对速率的消费者读（如 viz 轮询率）；抽帧器本身只用整数倍率
-        inference_decimation「每 N 帧留 1」，不做此除法。派生化后无从被设成与
-        raw_fps/N 不一致的值（消漂移）。N 非整除 raw_fps 时为小数（如 30/4=7.5）。
+        供需要绝对速率的消费者读（如 viz 轮询率）；抽帧器本身只用整数倍率，不做此除法。
         """
         return self.raw_fps / self.inference_decimation
 
@@ -168,10 +152,10 @@ class Settings(BaseSettings):
 
     @property
     def storage_base_dir(self) -> Path:
-        """持久化存储根目录（绝对路径，单一真源）。
+        """持久化存储根（绝对路径，单一真源）。
 
-        相对路径以项目根为基，避免读写两侧因进程 cwd 不同而分叉到不同目录。
-        persistence / inference / traceback 三方都读此值。
+        相对路径以项目根为基，避免读写两侧因进程 cwd 不同而分叉。
+        **只对 step_store 可见**，由门禁 test_storage_root_is_private_to_step_store 锁死。
         """
         p = Path(self.storage_dir)
         if p.is_absolute():
@@ -180,13 +164,10 @@ class Settings(BaseSettings):
 
     @property
     def lab_export_root(self) -> Path:
-        """lab 导出产物的落地根（clip 的 job_dir 与整段导出的 mp4 都在此）。
+        """lab 导出产物的落地根（clip 的 job_dir 与整段导出的 mp4）。
 
-        `lab_export_temp_dir` 非空则用它，否则 `{storage_base_dir}/.lab_exports`。
-
-        **在存储根旁边，不在任何 step 目录里**，故不该找 step_store 借根 —— 它只回答
-        `(task_id, step_id)` 的问题，「存储根旁边放什么」与那对 id 无关。前导点目录名
-        让 `step_store.tasks()` 的数字目录判据自然跳过它。
+        在存储根**旁边**、与任何 (task_id, step_id) 无关，故派生在此而非向 step_store
+        借根。前导点让 `step_store.tasks()` 的数字目录判据自然跳过它。
         """
         if self.lab_export_temp_dir.strip():
             return Path(self.lab_export_temp_dir)
@@ -194,32 +175,23 @@ class Settings(BaseSettings):
 
     @property
     def lab_runtime_config_path(self) -> Path:
-        """lab 运行时配置的持久化文件（`{storage_base_dir}/lab_runtime_config.json`）。
-
-        与 `lab_export_root` 同款理由：在存储根旁边，不经 step_store。
-        """
+        """lab 运行时配置文件。与 `lab_export_root` 同款：在存储根旁边，不经 step_store。"""
         return self.storage_base_dir / "lab_runtime_config.json"
 
     @property
     def config_dir(self) -> Path:
-        """服务配置 yaml 的所在目录（项目根 `config/`，绝对路径，单一真源）。
+        """服务配置 yaml 目录（项目根 `config/`，绝对路径，单一真源）。
 
-        与 `storage_base_dir` 同款：以项目根为基推导，进程 cwd 变了也不飘。各服务的
-        `config.py` 一律读此值，不再各写一遍 `Path(__file__).parent.parent.parent.parent`
-        ——那种数层级的写法在文件挪窝时会静默指错目录（且五处各数各的）。
+        各服务 config.py 一律读此值，不再各自数 `__file__` 层级——那种写法在文件
+        挪窝时会静默指错目录，且五处各数各的。
         """
         return (Path(__file__).parent.parent / "config").resolve()
 
     @model_validator(mode="after")
     def check_required_fields(self):
-        """验证必需配置是否完整
-
-        - 严格模式（CLEANSIGHT_STRICT=1）：缺失配置时抛出异常，阻止启动
-        - 开发模式（CLEANSIGHT_STRICT=0）：只警告，允许继续运行
-        """
+        """校验必需配置。strict 且非 dev 时缺配置即抛异常阻止启动，否则只告警放行。"""
         is_dev = globals().get("_LOADED_DEV", False)
 
-        # 检查必需配置
         missing_fields = []
 
         # 数据库配置
@@ -242,14 +214,12 @@ class Settings(BaseSettings):
             msg = f"缺少必需配置: {', '.join(missing_fields)}"
 
             if self.strict and not is_dev:
-                # 生产模式且开启严格检查：抛出异常
                 raise ValueError(
                     f"[配置错误] {msg}\n"
                     f"请检查环境变量或 .env 文件\n"
                     f"参考 .env.example 文件查看所需配置"
                 )
             else:
-                # 开发模式或未开启严格检查：只警告
                 print(f"\n{'='*60}")
                 print(f"[Settings] ⚠️  警告: {msg}")
                 print(f"[Settings] 当前为开发模式，允许继续运行")
@@ -260,16 +230,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_ffmpeg_path(self):
-        """ffmpeg_path 为空时指向项目自包含的钉版静态包，消除「install 装到固定位置却要人手抄进 .env」的负担：
+        """留空则指向项目自包含的钉版 `.ffmpeg/bin/`（install 脚本部署），免去手抄进 .env。
 
-        - 项目自包含第三方服务：ffmpeg 与 mediamtx 同为项目内 vendored 二进制，唯一来源是
-          项目根下的 .ffmpeg/bin/（install.sh/install.ps1 部署；Linux 名 ffmpeg，Windows 名 ffmpeg.exe）。
-          钉版保证 HLS fmp4 行为正确，见 docs/HLS_TIMELINE_PITFALL.md。
-        - 不回退 PATH：一处明确来源、失败即报（缺料时由 FFmpegDecoder 抛 FFmpegError，
-          报出确切路径，提示先跑 install 脚本）。
-        - 显式设了 CLEANSIGHT_FFMPEG_PATH 则尊重之（逃生口，如 Mac 开发机指向 homebrew ffmpeg）。
-
-        路径与 install 脚本各自从「项目根」推导 .ffmpeg/bin/，无共享绝对路径耦合。
+        不回退 PATH：一处来源、失败即报（缺料时 FFmpegDecoder 抛 FFmpegError 并报出路径）。
+        钉版是 HLS fmp4 行为正确的前提，见 docs/HLS_TIMELINE_PITFALL.md。
+        显式设 CLEANSIGHT_FFMPEG_PATH 则尊重之（逃生口，如 Mac 开发机指 homebrew）。
         """
         if not self.ffmpeg_path:
             bin_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
@@ -286,7 +251,7 @@ class Settings(BaseSettings):
     )
 
 
-# 在实例化 Settings 前，先把 .env/.env.dev 加载到环境中
+# 必须先于 Settings()：pydantic 只读 os.environ，不认 .env 文件本身。
 _load_env_files()
 settings = Settings()
 
@@ -296,7 +261,6 @@ _yolo_cfg_dir = str(Path(__file__).parent.parent / ".ultralytics")
 os.makedirs(_yolo_cfg_dir, exist_ok=True)
 os.environ["YOLO_CONFIG_DIR"] = _yolo_cfg_dir
 
-# ultralytics 的 predictor.__init__ 无条件 mkdir(save_dir)（即便 save=False），
-# 默认落在仓库根 runs/detect/，每次 warmup/推理都残留空目录。把 predict 的 project
-# 钉进上面已 gitignore 的 .ultralytics，令这些空目录不再污染仓库根。detector 引用此常量。
+# ultralytics 的 predictor.__init__ 无条件 mkdir(save_dir)（即便 save=False），默认落在
+# 仓库根 runs/detect/。钉进已 gitignore 的 .ultralytics，免得每次推理都污染仓库根。
 YOLO_RUNS_PROJECT = str(Path(_yolo_cfg_dir) / "runs" / "detect")

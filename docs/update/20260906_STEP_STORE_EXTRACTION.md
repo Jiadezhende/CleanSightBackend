@@ -434,6 +434,106 @@ step = step_store.step(task_id, step_id)
 
 **已知代价**（未变好也未变坏）：用例漏加 `tmp_storage` 会静默写到真实 `./database` 并读到脏数据，不报错。这个坑在 `StepStore()` 无参回落 settings 时就存在，两个方案都堵不住；真要堵需另加一个 autouse 守卫 fixture，本次未做。
 
+## 11. `store.py` docstring 瘦身：删掉与本文重复的设计辩护
+
+抽包时把大量「为什么这么设计」写进了 `store.py` 的 docstring，而同一批论证本文 §2.3 / §5 / §9 / §10 已有一份 —— 代码里那份是**副本不是真源**。670 行的文件里 292 行是 docstring、仅 211 行是代码。现按下述规则裁到 230 行 docstring（-21%），**代码零改动**（去 docstring 后 AST 与改前逐节点相等，已脚本校验）。
+
+| 处置 | 内容 | 去处 |
+|------|------|------|
+| **留** | 签名语义、单位、`Args` / `Returns` / `Raises` | 原地 |
+| **留** | 写错会**静默出错**的陷阱：`bisect_right` 不能换 `left`、EXTINF 不能用文件名 ts 差重推、`playable_only` 默认值的后果、临时文件前导点命名、`open_product` 读模式不建目录、`time_bounds_us` 终点须含 EXTINF | 原地（删了就真的没人知道了） |
+| **删** | 「曾经带过 X 字段，结果是…」「这段检查曾写在 `routers/media.py`」「此前 `PRODUCTS` 只是文档性注册表」等考古 | 本文 §2.3 / §9 / §10 已有 |
+| **删** | 「刻意不挂在 `Step` 上」「为什么降为函数」等设计辩护 | 同上，代码里压成一句结论 + 锚点 |
+| **删** | 模块 docstring 里与 `__init__.py` 重复的包级契约（原 32 行有 ~90% 是副本） | `__init__.py` 是包契约真源 |
+
+判据是**唯一真源在哪**：调用方读签名时必须知道的留在代码里，回答「当初为什么」的留在本文。
+
+自测：`pytest tests/ -k "step_store or import_hygiene"` **88 passed**；全仓无 `__doc__` / doctest 消费方。
+
+## 12. `purge.py` 名实不符：拆出 `products.py`
+
+原 `purge.py` 模块名是一个**动作**，装的却是一份**注册表**：7 个对外成员里只有 2 个是删除。
+
+```
+Product / PRODUCTS / product_name    命名与注册表   ← 重心在这
+iter_steps                            枚举
+list_products / last_activity         目录内容查询
+purge_step / sweep_empty_tasks        删除          ← 只有这两个对得上模块名
+```
+
+后果是**写一条段的正常路径要穿过一个叫「清除」的模块**：`Step.product_path("segment", …)` → `purge.product_name` → `layout.segment_name`。在写侧读到 `purge` 会以为走错分支。
+
+按内聚主题重切，`purge.py` **整个删除**：
+
+| 去处 | 内容 | 依赖 |
+|------|------|------|
+| `products.py`（新，171 行） | `Product` / `PRODUCTS` / `product_name` / `_products_in` / `list_products` / `last_activity` / `iter_steps` —— 「这目录里有什么、最后何时活动」 | stdlib + `layout` |
+| `store.purge_step` / `store.sweep_empty_tasks` 的函数体 | `rmtree` 整个 step 目录 / `rmdir` 空 task 目录 | `shutil`（store.py 新增 import） |
+
+先拆成 `products.py` + 瘦身版 `purge.py`（72 行），随后判定**删除动作不值得单独成模块**：它不看产物清单、也没有 `store` 以外的调用方，留一个文件只是为了让门面写 `return purge.purge_step(...)` 这行纯转发 —— 与 §10 把 `StepStore` 类降为函数是同一条理由。故 `purge.py` 删除，两个函数体直接写进门面。
+
+`store.py` 因此 608 → 641 行（+33，含合并进来的 ⚠ 契约条款）。
+
+**包外零影响**：改前 `purge` 模块全仓唯一的代码 import 在 `store.py`（其余出现均在注释/docstring 里）。同步改的引用：`cleanup_worker.py` / `inference/feature/store.py` / `run_control.py` 的互指 docstring、`__init__.py` 模块清单、`test_import_hygiene.py` 的两处注释、`test_step_store_purge.py` 的 import 与 5 处调用（该文件名保留 —— 它测的行为还在，只是不再对应一个模块）。
+
+### 未处理：「这文件叫什么」仍有两个真源
+
+HLS 那 5 类名字在 `layout` 的具名函数里，推理侧 4 类（`features.jsonl` / `facts.jsonl` / `offline_inference_result.json` / `visual_roi_*.npz`）以 lambda 形态内联在 `products.PRODUCTS` 里。分界线是「谁写的」而非「什么种类」，属历史遗留。**本轮决定不动**，只在 `__init__.py` 与 `products.py` 的 docstring 里写清分界并注明「新增产物按此归属登记，别再扩大分裂面」。
+
+自测：全量 `pytest tests/` **519 passed**（与 §「自测结果」基线持平，零用例改断言）。
+
+---
+
+## 13. 全包 docstring 复核：口径对齐 + 去重（§11 的收尾）
+
+§11 只瘦身了 `store.py`，其余 5 个文件的 docstring 是抽包过程中陆续写的，存在三类问题。本轮逐份重写，**代码零改动**（AST 逐节点对照，6 份文件全部 SAME）。
+
+**修掉的与事实不符处**（这是本轮的主要价值，行数只是副产物）：
+
+| 处 | 原文 | 实际 |
+|----|------|------|
+| `__init__.py` | 「12 份重复副本」 | 与提交信息「消 8 份」不一致，且随几轮重构已无从核对 → 删掉具体数字，只留结论 |
+| `__init__.py` / `store.py` / `layout.py` | 路径模板写 `{base_dir}/...` | 字段名是 `settings.storage_base_dir`，包内一律称「存储根」/`storage_root()` → 统一为 `{storage_root}` |
+| `store.scratch_path` | 「`purge` 靠它把临时文件排除在产物之外」 | `purge.py` 已在 §12 删除，该逻辑在 `products._products_in` → 改指 `products` |
+| `layout.ts_to_us` | 「见 finder 的段级二分」 | §9 已把 `FrameTracker` 正名为 `FrameFinder`，且段级二分在 `store._locate_containing_index`（finder 是帧级） → 改指正确位置 |
+| `segment_decoder.iter` | 末尾两句重复申明「不做 ts 匹配校验」 | 合进首行 |
+
+**去掉的重复**：同一条论证此前在多处各写一遍，本轮只留真源 + 指针。
+
+- 「路径/存储根不出包」：`__init__.py`（包契约真源）留全文，`store.py` 模块 docstring 压成一句 + 指针。
+- 「只出 m3u8 成品不出骨架」：`playlist.py` 留全文，`Step.vod_playlist` 不再复述。
+- playlist 两条具名例外的**理由与退出条件**：真源是 `test_import_hygiene.py` 的门禁注释（改名单必须改那里），docstring 压成一行点名 + 指针。
+- `layout` / `products` / `segment_decoder` 模块 docstring 里的抽包考古（「此前读侧用 named group、写侧用位置 group」等）：本文已有，代码里删。
+
+**保留不动**：写错会**静默出错**的陷阱，判据同 §11 —— `bisect_right` 不能换 `left`、EXTINF 不能用文件名 ts 差重推、`playable_only` 默认值的后果、sidecar 命名两个方向必须同改、临时文件前导点、`open_product` 读模式不建目录、`time_bounds_us` 终点须含 EXTINF、`purge_step` 与产物创建的先后序、「段内帧号 n ↔ sidecar 下标 k 严格 1:1」的三条保证。这些删了就真的没人知道了。
+
+| 文件 | 行数 | docstring 行数 |
+|------|------|---------------|
+| `__init__.py` | 68 → 55 | 68 → 55 |
+| `layout.py` | 103 → 98 | 51 → 47 |
+| `playlist.py` | 136 → 122 | 68 → 54 |
+| `products.py` | 171 → 163 | 71 → 63 |
+| `segment_decoder.py` | 280 → 271 | 59 → 50 |
+| `store.py` | 641 → 604 | 241 → 204 |
+| **合计** | **1399 → 1313**（-6%） | **558 → 473**（-15%） |
+
+减幅不大是预期内的：§11 已经砍过一轮设计辩护，剩下的多数是签名语义与静默陷阱，按判据不该删。本轮的产出是**口径正确**，不是行数。
+
+自测：AST 对照 6 / 6 SAME（去 docstring 后逐节点相等）；全量 `pytest tests/` **519 passed**。
+
+## 14. 顺带清掉的两笔：`app/services/__init__.py` 的转发、`settings.py` 的注释
+
+**（a）删掉 `app.services` 的 re-export**（原「遗留风险」表里记为「另案」的那条，本轮做掉）。
+
+原文一句 `from .client import client_manager` + `except ImportError: client_manager = None`，**零消费方**（删除前全仓引 `client_manager` 的位置一律走 `from app.services.client import ...` 深路径），却让每个 `app.services.*` 子模块的 import 都付过路费。两笔代价：
+
+- **耗时**：空跑 `import app.services` 0.303s → **0.002s**；`app.services.step_store` 0.3s+ → 与空跑同量级（热 `__pycache__` 下 ~0.001s），且不再被顺带把 `settings` 拉进 `sys.modules`。
+- **静默换错**：那个 `except` 会把真实的 ImportError（打错名字、少装依赖）换成 `None`，表现为「某个 client 突然是 None」而不是 import 就炸。同款写法在 [20260705_STREAM_READER_UNIFY_CLEANUP.md](20260705_STREAM_READER_UNIFY_CLEANUP.md) §5 已因同一理由删过一次。
+
+`test_import_hygiene.py` 的 `app.services.step_store` 耗时上限**仍取 1.0**（与其他服务包一致，不改成贴着实测值的紧上限——机器负载下抖动会变噪声源），只把注释里的过路费说明换成删除后的实测值。
+
+**（b）`settings.py` 的 docstring / 注释按 §11 同款判据过一遍**（代码零改动，AST SAME）。删掉与本文及各服务 docstring 重复的论证（storage_dir 的「三方都读」、`inference_fps` 的派生推导），改掉一处已过期的口径：`storage_base_dir` 原写「persistence / inference / traceback 三方都读此值」，收口后它**只对 step_store 可见**，由门禁 `test_storage_root_is_private_to_step_store` 锁死——照原文去写就会撞门禁。
+
 ---
 
 ## 变更效果
@@ -488,7 +588,7 @@ step = step_store.step(task_id, step_id)
 | `lab/clip_builder` 仍走包内私有骨架 | 唯一没进 `Step.vod_playlist` 的调用方 | 待验证「相邻段 ts 跨度 ≈ playlist EXTINF」在 fps 漂移下是否成立。退出条件已写进门禁例外的注释 |
 | 「无任何已登记产物」的目录永不回收 | `last_activity_at` 返回 `None` 时选择**不删** —— 判不出是「刚建还没写」还是「写完被清空」，误删代价高于留一个空目录。空目录不占空间，且其 task 父目录仍会被 `sweep_empty_tasks` 收走 | 已接受。真要清理需另加「建目录时刻」的记录 |
 | `segment_decoder` 让本包有了第一个会起子进程的模块（看门狗线程 + 临时文件 stderr） | 「这个包会不会起进程」的认知负担变了 | 已在 `__init__.py` 与 `Step.frames` docstring 显式标注。依赖等级不受影响（`subprocess` 是 stdlib、`numpy` 是 L1），leaf 门禁照常绿 |
-| `app/services/__init__.py` 顶层 `from .client import client_manager`，使**每个** `app.services.*` 子模块的 import 都付 0.28s 过路费 | 实测 `import app.services` 0.303s，而 `import app.services.step_store` 0.275s —— 即本包自身成本 ≈ 0，全是这笔过路费。正是[包结构规范](20260903_PACKAGE_LAYOUT_SPEC.md) §3/§5 明令禁止的形态，只是门禁未覆盖 `app.services` 这一层 | 另案。本包耗时上限故取 1.0 与其他服务包一致 |
+| ~~`app/services/__init__.py` 顶层 `from .client import client_manager`，使**每个** `app.services.*` 子模块的 import 都付 0.28s 过路费~~ | 正是[包结构规范](20260903_PACKAGE_LAYOUT_SPEC.md) §3/§5 明令禁止的形态，只是门禁未覆盖 `app.services` 这一层 | **已处理**，见 §14(a)：该 re-export 零消费方，直接删除（`app.services` 0.303s → 0.002s）。「门禁未覆盖 `app.services` 这一层」仍成立，未加新门禁 |
 | `traceback` 包搬空后只剩 `media_token.py` | 是否降为裸模块 `app/services/media_token.py`（先例 `run_control.py`） | 未决，避免搅进本次改动面 |
 | `dry_run` 未接入配置文件 | 运维无法从 yaml 开启 | 刻意不做 —— 判据换代时的一次性验证工具 |
 | `Timeline._build_cmd` 的 init 段此前硬编码 `raw_init.mp4` | `track="processed"` 下原会拿 raw 的 init 解 processed 段（SPS/PPS 不匹配）。生产代码与测试均只走 `track="raw"`，故无实际影响 | 已随命名收口一并修正，属**顺带修掉的潜在错误**，非行为回归 |

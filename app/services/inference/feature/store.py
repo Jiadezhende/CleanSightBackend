@@ -8,7 +8,7 @@ L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特
 
 落盘位置一律经 `step_store` 的 `Step.open_product(kind)` —— 与 HLS 同一个 step 目录，
 随它被 cleanup TTL 连带回收。本模块**不知道根在哪、文件叫什么名**，只报 kind
-（`features` / `facts`，两者都登记在 `purge.PRODUCTS` 里；忘登记会 KeyError 而不是
+（`features` / `facts`，两者都登记在 `products.PRODUCTS` 里；忘登记会 KeyError 而不是
 静默地对 TTL 不可见）。两者均为 manager 持有的单例：stop_workflow 时 close(task_id, step_id)。
 
 帧对齐契约：每条记录的 `ts` = 该帧的 `FrameFeature.ts`（= 帧捕获 ts，与在线滑窗同源），
@@ -117,7 +117,7 @@ class _JsonlBuffer:
         """
         Args:
             kind: 已登记的产物 kind（"features" / "facts"）—— 不是文件名。落盘名由
-                `purge.PRODUCTS` 单一真源给，本类不拼。
+                `products.PRODUCTS` 单一真源给，本类不拼。
         """
         self._kind = kind
         self._batch_size = max(1, int(batch_size))
@@ -209,7 +209,7 @@ class _JsonlBuffer:
 
         ⚠ **必须在 `persistence.start_run` 之后调用**：那一步 rmtree 整个 step 目录
         （含本文件所在分区），顺序反了会把这里刚建的 jsonl 一起抹掉且不报错。契约见
-        `step_store.purge.purge_step`，调用序见 `run_control.start_run`。
+        `step_store.purge_step`，调用序见 `run_control.start_run`。
         """
         if task_id is None or step_id is None:
             return

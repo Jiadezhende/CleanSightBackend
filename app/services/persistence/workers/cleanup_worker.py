@@ -2,8 +2,9 @@
 存储 TTL 清理 Worker
 
 **保留策略归本模块，落盘事实归 step_store。** 本模块决定「保留几天、多久扫一次、
-哪些目录该扫、删不删」；「这目录里有哪些产物、最后何时活动、怎么删」在
-[step_store/purge.py](../../step_store/purge.py)。两侧 docstring 互指。
+哪些目录该扫、删不删」；「这目录里有哪些产物、最后何时活动」在
+[step_store/products.py](../../step_store/products.py)、「怎么删」在
+`step_store.store.purge_step`。两侧 docstring 互指。
 
 职责：
 - 后台 daemon 线程，定期扫描 database/{task_id}/{step_id}/

@@ -1,5 +1,6 @@
 """
-step 目录产物清单 / 活动时间 / 删除入口的单元测试。
+step 目录产物清单 / 活动时间（`step_store.products`）与删除入口
+（`store.purge_step` / `store.sweep_empty_tasks`）的单元测试。
 
 重点覆盖 TTL 判据改造的两个方向（此前 cleanup_worker 零测试覆盖）：
 - **正向**：只有 features.jsonl 无 metadata.json 的目录必须能被看见（旧判据扫不到，
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.step_store import layout, purge
+from app.services.step_store import layout, products
 from app.services.step_store import store as step_store
 
 TASK_ID = 4242
@@ -54,7 +55,7 @@ class TestListProducts:
         for name in expected:
             _touch(step_dir / name)
 
-        got = set(purge.list_products(step_dir))
+        got = set(products.list_products(step_dir))
         assert got == expected
 
     def test_ignores_reader_side_temp_files(self, step_dir):
@@ -65,15 +66,15 @@ class TestListProducts:
         _touch(step_dir / ".clip_deadbeef.m3u8")
         _touch(step_dir / ".export_cafebabe.m3u8")
         _touch(step_dir / ".raw_segment_1.tmp_init.mp4")
-        assert purge.list_products(step_dir) == []
+        assert products.list_products(step_dir) == []
 
     def test_ignores_unregistered_files(self, step_dir):
         _touch(step_dir / "notes.txt")
         _touch(step_dir / "raw_segment_1.tmp")
-        assert purge.list_products(step_dir) == []
+        assert products.list_products(step_dir) == []
 
     def test_empty_dir(self, step_dir):
-        assert purge.list_products(step_dir) == []
+        assert products.list_products(step_dir) == []
 
 
 class TestLastActivity:
@@ -134,7 +135,7 @@ class TestIterSteps:
         assert [(s.task_id, s.step_id) for s in step_store.steps(include_empty=True)] == []
 
     def test_missing_base_dir(self, tmp_path):
-        assert list(purge.iter_steps(tmp_path / "nope")) == []
+        assert list(products.iter_steps(tmp_path / "nope")) == []
 
     def test_sees_step_without_any_hls_product(self, tmp_storage):
         """与 steps() 默认语义的差异：那个按契约丢弃无段 step，include_empty 必须看见。"""

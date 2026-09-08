@@ -30,10 +30,11 @@ HEAVY = ("torch", "ultralytics", "cv2")
 # 不做性能回归——机器负载下 import 抖动大，卡太紧会变成噪声源。
 BUDGET = {
     "app.domain":               (set(), 0.20),
-    # step_store 自身几乎零成本（实测 0.275s，而空跑 `import app.services` 就要 0.303s）：
-    # `app/services/__init__.py` 顶层 `from .client import client_manager` 是**每个**
-    # services 子模块的过路费，与本包无关。上限故取 1.0 与其他服务包一致；真正盯的是
-    # 重依赖集合为空那条硬断言。（那笔过路费本身违反规范 §3/§5，另案处理。）
+    # step_store 此前实测 0.3s+，现在与空跑 `import app.services` 同量级（热 __pycache__
+    # 下 ~0.001s）：差额全是 `app/services/__init__.py` 顶层 `from .client import
+    # client_manager` 这笔过路费（零消费方，已删），删掉后 step_store 也不再顺带把
+    # settings 拉进 sys.modules。上限仍取 1.0 与其他服务包一致——真正盯的是重依赖
+    # 集合为空那条，耗时只兜量级失守。
     "app.services.step_store":  (set(), 1.0),
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
@@ -51,7 +52,7 @@ LEAF_PACKAGE = "app/services/step_store"
 STORAGE_ROOT_ATTR = "storage_base_dir"
 STORAGE_ROOT_ALLOWED = ("app/settings.py", f"{LEAF_PACKAGE}/")
 
-# 写成员的调用者白名单 = `step_store.purge.PRODUCTS` 里登记的三个 writer。
+# 写成员的调用者白名单 = `step_store.products.PRODUCTS` 里登记的三个 writer。
 # 计划外的第四个写者要先在 PRODUCTS 登记（否则产物对 TTL 不可见），再加进这里。
 WRITE_MEMBERS = ("product_path", "open_product")
 WRITE_MEMBER_ALLOWED = (
@@ -270,7 +271,7 @@ def test_step_store_write_members_have_registered_callers():
     assert not violations, (
         "以下文件调用了 step_store 的写成员，但不在 PRODUCTS 登记的 writer 列表里：\n  "
         + "\n  ".join(violations)
-        + "\n新增写者要先在 step_store/purge.py 的 PRODUCTS 登记产物（否则它对 TTL "
+        + "\n新增写者要先在 step_store/products.py 的 PRODUCTS 登记产物（否则它对 TTL "
         "不可见），再加进 WRITE_MEMBER_ALLOWED 并写明理由。"
     )
 

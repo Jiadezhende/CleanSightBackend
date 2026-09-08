@@ -1,20 +1,20 @@
 """
 HLS 段 → 像素帧：step 目录落盘格式的读侧解码实现。
 
-与写侧（`persistence/hls_strategy`）隔着一层 sidecar 契约互为逆运算——**同一个
-`.idx` 文件的命名在 layout、内容解释在这里**，两者必须同居才能互相对照：
+与写侧（`persistence/hls_strategy`）隔着一层 sidecar 契约互为逆运算：
 
     写侧  每落一段 mp4，同时落同名 .idx（该段每帧 frame.timestamp 的 float64 数组）
     读侧  按 .idx 下标 k 取段内第 k 帧
 
-**「段内帧号 n ↔ sidecar 下标 k 严格 1:1」是整个索引的地基**，靠三件事保证：
-不拼 m3u8、不用 `-ss`、`-vsync 0`。破其中任何一条都不会报错，只会静默取到错帧。
+**「段内帧号 n ↔ sidecar 下标 k 严格 1:1」是整个索引的地基**，靠三件事保证：不拼 m3u8、
+不用 `-ss`、`-vsync 0`。破其中任何一条都不报错，只会静默取到错帧。同理，`.idx` 的命名在
+layout、内容解释在本模块，两者必须同居本包才能互相对照。
 
-本模块只负责「给定 ts 区间 → 产出该区间的帧」，**不做 ts 匹配校验、不做单点筛选**
-——那是消费侧的策略（见 `inference/offline/frame_finder.py`）。
+本模块只负责「给定 ts 区间 → 产出该区间的帧」，**不做 ts 匹配校验、不做单点筛选** —— 那是
+消费侧的策略（`inference/offline/frame_finder.py`）。
 
-**包内私有**：对外入口是 `Step.frames(track, start_ts, end_ts)`，它负责定位目录与段
-列表。本类只吃已定位好的输入（一个 `Step` 句柄），故不碰存储根、不自己定位。
+**包内私有**：对外入口是 `Step.frames(track, start_ts, end_ts)`，它负责定位目录与段列表。
+本类只吃已定位好的输入（一个 `Step` 句柄），不碰存储根、不自己定位。
 """
 
 from __future__ import annotations
@@ -60,14 +60,9 @@ def _read_exact(stream, buf: bytearray) -> bool:
 
 
 class SegmentDecoder:
-    """ts → 段 → 段内帧号 → 像素。纯查询，零像素缓存。
+    """ts → 段 → 段内帧号 → 像素。纯查询，零像素缓存，对外只有一个 `iter(start_ts, end_ts)`。
 
-    落盘形态：fMP4 按段落盘（`{track}_segment_{ts_us}.mp4`），每段配一个同名 .idx
-    sidecar（float64 时间戳数组，每帧一条）。解码走
-    `concat:{track}_init.mp4|{track}_segment_{ts}.mp4` + `select=between(n,k1,k2)`。
-
-    对外只有一个 `iter(start_ts, end_ts)`。
-
+    解码走 `concat:{track}_init.mp4|{track}_segment_{ts}.mp4` + `select=between(n,k1,k2)`：
     段级裁剪省 ffmpeg 调用次数，帧级裁剪不存无效像素。
     """
 
@@ -98,12 +93,11 @@ class SegmentDecoder:
     def for_step(
         cls, step: "Step", track: str = "raw", ffmpeg_bin: Optional[str] = None
     ):
-        """从 `Step` 句柄构造。**「解码要 Step 的哪几样」只写这一处。**
+        """从 `Step` 句柄构造。**「解码要 Step 的哪几样」只写这一处** —— `Step.frames()`
+        与测试的 seam 子类都经此构造，两边不会分叉。
 
-        `Step.frames()` 与测试的 seam 子类都经此构造，两边不会分叉。
-
-        `playable_only=False`：解码只需要 mp4 与 sidecar 都在，与「该段有没有进
-        playlist」无关 —— 离线反查要能读到刚落盘、transcode 尚未 append 的段。
+        `playable_only=False`：解码只需要 mp4 与 sidecar 都在，与「该段有没有进 playlist」
+        无关 —— 离线反查要能读到刚落盘、transcode 尚未 append 的段。
         """
         return cls(
             step_dir=step._dir,
@@ -119,14 +113,11 @@ class SegmentDecoder:
         width: int = 640,
         height: int = 480,
     ) -> Iterator[Frame]:
-        """段级裁剪，返回一个时间范围内的所有 Frame。
+        """段级裁剪，产出该时间范围内的所有 Frame。不做 ts 匹配校验、不做单点筛选。
 
-        start_ts / end_ts 为 None 表示该侧不设限，原样下传给帧级裁剪 ——
-        不能拿 `self._seg_ts_us` 的首尾当时间轴首尾：那是**段起始** ts，
-        末段的段首之后还有整整一段的帧。
-
-        注意：本方法不做任何 ts 匹配校验、不做单点筛选。
-        该方法仅负责返回给定时间范围内的 Frame。
+        start_ts / end_ts 为 None 表示该侧不设限，原样下传给帧级裁剪 —— 不能拿
+        `self._seg_ts_us` 的首尾当时间轴首尾：那是**段起始** ts，末段的段首之后还有整整
+        一段的帧。
         """
         if not self._segs:
             return
@@ -156,7 +147,7 @@ class SegmentDecoder:
         width: int = 640,
         height: int = 480,
     ) -> Iterator[Frame]:
-        """帧级裁剪，返回同一个段内的指定时间范围内的 Frame。"""
+        """帧级裁剪，产出单个段内落在该时间范围的 Frame。"""
         sidecar = self._load_sidecar(seg)
         if len(sidecar) == 0:
             return

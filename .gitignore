@@ -185,3 +185,5 @@ mediamtx/mediamtx.exe
 .ffmpeg/
 
 ref/
+temp/
+tmp/
