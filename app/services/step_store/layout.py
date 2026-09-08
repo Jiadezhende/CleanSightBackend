@@ -38,7 +38,7 @@ def ts_to_us(ts: float) -> int:
     """段时间戳（秒）→ 文件名里的 ts_us。
 
     **截断而非四舍五入**，是既有落盘约定的一部分，不能改：读侧按 ts 定位段依赖
-    `ts_us <= ts*1e6`（见 `store._locate_containing_index`）。改成 round 会让
+    `ts_us <= ts*1e6`（见 `segment_decoder._locate_containing_index`）。改成 round 会让
     「start_ts 恰为该段首帧」的定位无条件出错。
     """
     return int(ts * 1e6)

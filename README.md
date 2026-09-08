@@ -165,7 +165,7 @@ python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      
 | 统一 API | `POST /api/start`、`POST /api/terminate`（task_id/client_id 双模） |
 | 实时推流 | `WebSocket /ai/video?task_id=...` |
 | 消息 / 告警 | `GET /task/message/{task_id}`、`GET /task/{task_id}/alarms` |
-| 追溯 | `GET /traceback/alarm/{alarm_id}/evidence`、`/traceback/task/{task_id}/timeline`、playlist |
+| 追溯 | `GET /traceback/task/{task_id}/playlist.m3u8`、`/traceback/task/{task_id}/timeline` |
 | 媒体 | `GET /media/segment/{token}`、`/media/init/{token}`（HMAC token 鉴权） |
 | 健康 | `GET /health/status`、`/health/monitor/stats`、`/health/monitor/config` |
 | 运维 / 送标 | `/admin-f3m8/*`、`/lab-f3m8/*` |

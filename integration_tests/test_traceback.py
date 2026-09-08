@@ -13,10 +13,9 @@
     --alarm_id <int>    测试告警 ID（默认: 9900001，避开真实数据）
 
 测试项:
-    T1  GET /traceback/alarm/{alarm_id}/evidence  — 告警视频证据
-    T2  GET /traceback/task/{task_id}/playlist.m3u8  — VOD 播放列表
-    T3  GET /traceback/task/{task_id}/timeline  — 时间轴打点
-    T4  跟进 T1 中 raw_clips[trigger].url  — 媒体段可达
+    T1  GET /traceback/task/{task_id}/playlist.m3u8  — VOD 播放列表
+    T2  GET /traceback/task/{task_id}/timeline  — 时间轴打点（含该告警的 ts_ms 打点）
+    T3  跟进 T1 playlist 里的段 URI  — 媒体段可达
 """
 
 import argparse
@@ -149,44 +148,13 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
 # ---------------------------------------------------------------------------
 
 
-def test_evidence(ctx: Dict[str, Any]) -> bool:
-    """T1: GET /traceback/alarm/{alarm_id}/evidence"""
-    url = f"{ctx['base_url']}/traceback/alarm/{ctx['alarm_id']}/evidence"
-    print(f"\nT1 evidence  →  {url}")
-
-    resp = _get(url)
-    ok = True
-    ok &= _assert(resp.status_code == 200, f"HTTP 200 (got {resp.status_code})")
-    if resp.status_code != 200:
-        print(f"     响应体: {resp.text[:300]}")
-        return False
-
-    data = resp.json()
-    ok &= _assert(
-        data.get("alarm", {}).get("alarm_id") == ctx["alarm_id"],
-        f"alarm.alarm_id == {ctx['alarm_id']}",
-        str(data.get("alarm", {}).get("alarm_id")),
-    )
-    raw_clips = data.get("raw_clips", [])
-    processed_clips = data.get("processed_clips", [])
-    ok &= _assert(len(raw_clips) > 0, f"raw_clips 非空 (len={len(raw_clips)})")
-    ok &= _assert(len(processed_clips) > 0, f"processed_clips 非空 (len={len(processed_clips)})")
-
-    # 确认有 is_trigger=True 的段
-    trigger_raw = [c for c in raw_clips if c.get("is_trigger")]
-    ok &= _assert(len(trigger_raw) == 1, f"raw_clips 中恰好 1 个触发段 (found={len(trigger_raw)})")
-
-    ctx["_evidence"] = data
-    return ok
-
-
 def test_playlist(ctx: Dict[str, Any]) -> bool:
-    """T2: GET /traceback/task/{task_id}/playlist.m3u8?step_id=..."""
+    """T1: GET /traceback/task/{task_id}/playlist.m3u8?step_id=..."""
     url = (
         f"{ctx['base_url']}/traceback/task/{ctx['task_id']}/playlist.m3u8"
         f"?step_id={ctx['step_id']}"
     )
-    print(f"\nT2 playlist  →  {url}")
+    print(f"\nT1 playlist  →  {url}")
 
     resp = _get(url)
     ok = True
@@ -207,16 +175,19 @@ def test_playlist(ctx: Dict[str, Any]) -> bool:
         len(seg_lines) == _N_SEGMENTS,
         f"包含 {_N_SEGMENTS} 个段 URL (found={len(seg_lines)})",
     )
+
+    # 供 T3 跟进：段 URI 由 playlist 自己给出，与播放器实际会去取的地址同源
+    ctx["_segment_urls"] = [l for l in seg_lines if "/media/segment/" in l]
     return ok
 
 
 def test_timeline(ctx: Dict[str, Any]) -> bool:
-    """T3: GET /traceback/task/{task_id}/timeline?step_id=..."""
+    """T2: GET /traceback/task/{task_id}/timeline?step_id=..."""
     url = (
         f"{ctx['base_url']}/traceback/task/{ctx['task_id']}/timeline"
         f"?step_id={ctx['step_id']}"
     )
-    print(f"\nT3 timeline  →  {url}")
+    print(f"\nT2 timeline  →  {url}")
 
     resp = _get(url)
     ok = True
@@ -237,20 +208,14 @@ def test_timeline(ctx: Dict[str, Any]) -> bool:
 
 
 def test_media_segment(ctx: Dict[str, Any]) -> bool:
-    """T4: 跟进 T1 的 raw_clips[trigger].url 请求媒体段"""
-    evidence = ctx.get("_evidence")
-    if not evidence:
-        print("\nT4 media_seg  →  跳过（T1 未成功）")
+    """T3: 跟进 T1 playlist 里的段 URI 请求媒体段"""
+    seg_urls = ctx.get("_segment_urls")
+    if not seg_urls:
+        print("\nT3 media_seg  →  跳过（T1 未成功或 playlist 内无 token 化段 URI）")
         return False
 
-    raw_clips = evidence.get("raw_clips", [])
-    trigger_clips = [c for c in raw_clips if c.get("is_trigger")]
-    if not trigger_clips:
-        print("\nT4 media_seg  →  跳过（无触发段 URL）")
-        return False
-
-    url = trigger_clips[0]["url"]
-    print(f"\nT4 media_seg →  {url[:80]}...")
+    url = seg_urls[0]
+    print(f"\nT3 media_seg →  {url[:80]}...")
 
     resp = _get(url)
     ok = _assert(
@@ -282,10 +247,9 @@ def run_traceback_test(args) -> bool:
     results: Dict[str, bool] = {}
 
     with traceback_test_fixture(args.task_id, args.alarm_id, args.server) as ctx:
-        results["T1 evidence  "] = test_evidence(ctx)
-        results["T2 playlist  "] = test_playlist(ctx)
-        results["T3 timeline  "] = test_timeline(ctx)
-        results["T4 media_seg "] = test_media_segment(ctx)
+        results["T1 playlist  "] = test_playlist(ctx)
+        results["T2 timeline  "] = test_timeline(ctx)
+        results["T3 media_seg "] = test_media_segment(ctx)
 
     print("\n" + "=" * 60)
     print("测试结果汇总:")

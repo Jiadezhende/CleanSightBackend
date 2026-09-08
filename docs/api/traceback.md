@@ -1,104 +1,22 @@
-# `/traceback` — 告警证据与回放
+# `/traceback` — 步骤回放与时间轴
 
-按**告警**或**任务步骤**定位磁盘上的 HLS 段，返回三种东西：证据 clip 列表（`evidence`）、可直接喂播放器的 VOD playlist（`playlist.m3u8`），或进度条打点的时间轴（`timeline`）。数据源是**磁盘落盘的 HLS 段**（`{base_dir}/{task_id}/{step_id}/`）；告警元数据来自 `clean_alarm` 表（DB）。所有媒体 URL 都是本组端点当场签发的 token 化 `/media/*` 绝对地址（消费见 [media.md](media.md)）。通用约定（Base URL、Gateway、错误模型、时间戳单位）见 [README](README.md)。
+按**任务步骤**定位磁盘上的 HLS 段，返回两种东西：可直接喂播放器的 VOD playlist（`playlist.m3u8`），或进度条打点的时间轴（`timeline`）。数据源是**磁盘落盘的 HLS 段**（`{base_dir}/{task_id}/{step_id}/`）；告警事件来自 `clean_alarm` 表（DB）。所有媒体 URL 都是本组端点当场签发的 token 化 `/media/*` 绝对地址（消费见 [media.md](media.md)）。通用约定（Base URL、Gateway、错误模型、时间戳单位）见 [README](README.md)。
 
 一次请求 = **一个 `(task_id, step_id)`**，不做跨 step 聚合——一个 task 的完整录像分散在各 step 目录里。
 
 ```
-  告警侧：alarm_id ──→ evidence / alarm/playlist.m3u8 （从 alarm 自带的 (task_id, step_id) 定位）
-  任务侧：task_id + step_id ──→ task/playlist.m3u8 / timeline
+  task_id + step_id ──→ task/playlist.m3u8   可播的整 step VOD
+                    └─→ timeline             起止时间 + 时长 + 告警打点 ts_ms
 ```
+
+> **「按 alarm_id 反查视频段」已下线**（原 `/alarm/{id}/evidence` 与 `/alarm/{id}/playlist.m3u8`，2026-09-08）。同一需求改由上面两个端点组合完成：`timeline` 给出该告警的 `events[].ts_ms`，前端在整 step 回放上 seek 过去。那是**帧级**定位，比原先「返回触发段 ± 上下文段」的段级窗口更准。`n_before` / `n_after` 参数与 `settings.traceback_context_before` / `_after` 一并移除。
 
 几处贯穿全组的约定，下面各端点不再重复：
 
 - **`track`**：`raw`（原始画面）| `processed`（带检测框）。默认 `processed`。非 `raw`/`processed` → **422**（FastAPI Query 校验，`pattern` 拦截）。
-- **`n_before` / `n_after`**：触发段前 / 后要带的上下文段数。int，范围 `-1..20`，默认 `-1`。`-1` = 用配置默认（`settings.traceback_context_before` / `_after`），**不是 0**。超范围 → **422**。
 - **`step_id`**（playlist / timeline 必填）：洗消步骤 id，仅返回该 step 的数据。缺失 → **422**。
 - **段 URL 的 host 取自当前请求**（`request.base_url`）：走 Nginx 等反代时若不透传 `X-Forwarded-Proto` / `X-Forwarded-Host`，签出来的就是内网地址——m3u8 能拉到但所有段请求全失败。属部署配置问题。
 - **段 URL 的 token 会过期**（默认 TTL 见 [media.md](media.md)）：播放时长超过 TTL 时后段 token 在播放途中失效 → 段请求 **403**。正确处理是**重拉一次 playlist**换新 token，别在前端续签或缓存旧 token。
-
----
-
-## GET /traceback/alarm/{alarm_id}/evidence
-
-**用途**：给单条告警取「触发段 ± 上下文」的双轨 clip 列表，前端拿到 `url` 列表逐个播放或下载。直接用 alarm 表自带的 `(task_id, step_id)` 定位文件（不查 `clean_task.source_ip`——该字段会被业务侧覆写、不可靠）。段来自磁盘，告警元数据来自 DB。
-
-**路径参数**：`alarm_id`（int）。
-**查询参数**：
-
-| 参数 | 类型 | 必填 | 默认 | 说明 |
-|------|------|------|------|------|
-| `n_before` | int | 否 | -1 | 触发段前上下文段数，`-1..20`；`-1` = 配置默认 |
-| `n_after` | int | 否 | -1 | 触发段后上下文段数，`-1..20`；`-1` = 配置默认 |
-
-（此端点**无 `track` 参数**——raw 与 processed 两轨一次全返回。）
-
-### 响应 `200`
-
-```jsonc
-{
-  "alarm": {
-    "alarm_id": 1001,
-    "task_id": 123,
-    "step_id": 10,
-    "step_name": "泄漏检测",       // 可为 null（DB 列可空）
-    "alarm_type": "流程违规",       // 可为 null；全称，非 /message 的短名 metric
-    "severity": "high",            // 可为 null；low | medium | high | critical
-    "message": "...",              // 可为 null
-    "detected_at": 1751800000000,  // epoch 毫秒（DB 存秒/微秒时后端已归一化）；理论可为 null
-    "resolved": false,             // DB 该列为 null 时归一化为 false，永不返回 null
-    "resolved_by": null,           // 未处理时 null
-    "resolved_at": null            // epoch 毫秒；未处理时 null
-  },
-  "task_id": 123,                  // = alarm.task_id，顶层冗余出一份方便直用
-  "step_id": 10,                   // = alarm.step_id
-  "raw_clips": [
-    {
-      "url": "http://<host>:8000/media/segment/<token>",
-      "filename": "raw_segment_...mp4",
-      "ts_us": 1751800000000000,   // 段起点，epoch 微秒
-      "ts_ms": 1751800000000,      // 段起点，epoch 毫秒
-      "is_trigger": true           // 是否为命中告警的那一段（其余为上下文）
-    }
-  ],
-  "processed_clips": [ /* 同结构 */ ]
-}
-```
-
-| 字段 | 类型 | 说明（含 null / 空条件） |
-|------|------|------------------------|
-| `alarm` | object | 告警对象。字段名用**全称**（`alarm_type`/`severity`），与 `/task/{id}/alarms` 一致，与 `/task/message` 的短名（`metric`/`level`）**不是同一套** |
-| `alarm.step_name` / `alarm.alarm_type` / `alarm.severity` / `alarm.message` | string \| null | 对应 DB 列可空时为 null |
-| `alarm.detected_at` | int \| null | epoch **毫秒**（后端把秒/微秒统一归一到毫秒） |
-| `alarm.resolved` | bool | DB null → 归一化 `false`，**不返回 null** |
-| `alarm.resolved_by` / `alarm.resolved_at` | int \| null | 未处理时 null |
-| `task_id` / `step_id` | int | 顶层回显（= alarm 里同名字段），省得前端再从 `alarm` 里挖 |
-| `raw_clips` / `processed_clips` | array | 该轨的段列表，按时序。**段已被清理 / 还没落盘时为 `[]`**（不是 404，见下） |
-| `[].url` | string | token 化绝对地址，直接可播；host 取自请求 |
-| `[].filename` | string | 段文件名 |
-| `[].ts_us` | int | 段起点，epoch **微秒** |
-| `[].ts_ms` | int | 段起点，epoch **毫秒**（= `ts_us / 1000`） |
-| `[].is_trigger` | bool | 命中告警的那一段为 `true`，前后上下文为 `false` |
-
-**段全被清理 vs 告警不存在——两码事**：告警存在但两轨段都不在了（已清理 / 还未落盘），返回 **200** 且 `raw_clips` / `processed_clips` **都是空数组**（后端只记一条 warning 日志）；只有告警本身查不到、或该告警 `step_id` 为空无法定位，才是 **404**。前端不能凭空数组判 404。
-
-### 错误
-
-| 状态 | 触发条件 | 响应体形态 |
-|------|---------|-----------|
-| `404` | `alarm_id` 不存在；或告警存在但 `step_id` 为 null（无法定位段） | `{"error":"Resource not found","detail":"...","resource_type":"Alarm","resource_id":"..."}` |
-| `422` | `n_before` / `n_after` 超 `-1..20` | `{"detail":[...]}`（FastAPI 校验格式） |
-| `503` | 拉告警时 DB 不可用 | `{"error":"Database unavailable","detail":"...","retryable":true}` |
-| `400` | `alarm.detected_at` 为 null 或 ≤ 0（脏数据兜底，正常不出现） | `{"error":"...","detail":"...","field":"detected_at",...}` |
-
-### 前端坑点
-
-- **空数组 ≠ 404**：段被清理返 200 空数组，只有告警/step_id 缺失才 404。判分支只认 status code。
-- **两轨可能一空一有**：某 step 只落了 raw，`processed_clips` 就是 `[]`——按轨各自兜底，别假设两轨对称。
-- **`is_trigger` 用来高亮**：列表里恰有（通常）一段是 `true`，其余是上下文；不要靠数组下标猜触发段。
-- **要直接喂 HLS 播放器用 playlist 端点**：`evidence` 给的是**裸段 URL 列表**，fMP4 裸段浏览器解不了（缺 init）。要播放走下面的 `/alarm/{id}/playlist.m3u8`。
-
----
 
 ## GET /traceback/task/{task_id}/playlist.m3u8
 
@@ -152,47 +70,13 @@ http://<host>:8000/media/segment/<token>
 
 > **两处不一致，务必只认 status code**：
 > ① 两种 404 的 body 形态不同——A 走异常模型（带 `error`/`resource_type`/`resource_id`），B 是裸 `HTTPException`（**只有 `detail`**）。别靠 body 字段区分「无段」和「全在途」。
-> ② 这里的 503 也是裸 `HTTPException` 且 `detail` 是**嵌套对象**（`{"detail":{"error":...,"detail":...}}`），**不带** README 错误模型的顶层 `error`/`retryable`——与 `/evidence` 的 DB 503（带 `retryable:true`）形态也不一致。
+> ② 这里的 503 也是裸 `HTTPException` 且 `detail` 是**嵌套对象**（`{"detail":{"error":...,"detail":...}}`），**不带** README 错误模型的顶层 `error`/`retryable`。
 
 ### 前端坑点
 
 - **段一路 200 突然全 403**：token 过期或服务重启换了 secret，重拉本 playlist 换新 token（详见 [media.md](media.md)），不是鉴权配错。
 - **反代下 m3u8 拉到但段全失败**：host 取自请求，反代未透传 `X-Forwarded-*`，播放器在请求内网地址。
 - **`track` 取值范围**：只有 `raw` / `processed` 两值；一个 step 未必两轨都落盘，硬写默认的 `processed` 而该 step 只有 raw 会 404（A）。可播轨道从 [`GET /task/history`](task.md) 的 `steps[].tracks` 里取（该清单只覆盖最近 10 个已完成任务）；不在清单里的任务仍需按 404 兜底或两轨都试。
-
----
-
-## GET /traceback/alarm/{alarm_id}/playlist.m3u8
-
-**用途**：给单条告警的证据回放生成 VOD playlist（触发段 + 前后上下文），供 admin / lab 端直接播放。fMP4 段必须经 m3u8 + init 拼装浏览器才能解码，故告警证据播放走这里而非裸 `/media/segment/{token}`。定位方式同 `/evidence`（用 alarm 自带 `(task_id, step_id)`）。
-
-**方法**：`GET` / `HEAD`（同上，理由与行为一致）。
-
-**路径参数**：`alarm_id`（int）。
-**查询参数**：`track`（默认 processed）、`n_before`、`n_after`（`-1..20`，默认 -1）——语义同本页顶部约定。
-
-### 响应 `200`
-
-同 `/task/{id}/playlist.m3u8` 的 m3u8 格式与响应头，区别仅在段范围是「触发段 ± 上下文」而非整个 step。
-
-### 错误
-
-| 状态 | 触发条件 | 响应体形态 |
-|------|---------|-----------|
-| `404`（A） | `alarm_id` 不存在；告警 `step_id` 为 null；或该轨在告警附近**无段** | `{"error":"Resource not found","detail":"...","resource_type":"Alarm"或"Segments",...}` |
-| `404`（B） | 找到了段但**全在途**（EXTINF 过滤后为空） | `{"detail":"No playable segments yet"}` |
-| `422` | `track` 非法，或 `n_before`/`n_after` 超范围 | `{"detail":[...]}` |
-| `503`（DB） | 拉告警时 DB 不可用 | `{"error":"Database unavailable","detail":"...","retryable":true}` |
-| `503`（init） | 缺 `{track}_init.mp4` | `{"detail":{"error":"HLS init segment missing",...}}` |
-
-> 同上：两种 404 body 不一致；两种 503（DB vs init）body 也不一致。**判分支只认 status code。**
-
-### 前端坑点
-
-- 与 task playlist 相同的 token 过期 / 反代 host 两条坑，处理方式一致（重拉 playlist / 透传 `X-Forwarded-*`）。
-- 与 `/evidence` 的区别：`/evidence` 给裸段 URL 列表（能拿到 `ts_ms` / `is_trigger` 等元数据，但不能直接喂播放器），本端点给可播的 m3u8。要做「进度条打点 + 直接播放」通常两个都要。
-
----
 
 ## GET /traceback/task/{task_id}/timeline
 
@@ -264,8 +148,7 @@ http://<host>:8000/media/segment/<token>
 
 | 现象 | 后端实际状态 |
 |------|------------|
-| `/evidence` 返回 200 但 `raw_clips` / `processed_clips` 都是 `[]` | 告警存在但视频段已清理 / 还没落盘。**不是 404**——只有告警本身或其 `step_id` 缺失才 404 |
-| `/evidence` 一轨有 clip 一轨空 | 该 step 只落了其中一轨（如仅 raw），另一轨天然为 `[]` |
+| playlist 一轨能播一轨 404（A） | 该 step 只落了其中一轨（如仅 raw）。两轨不对称是常态，别假设都有 |
 | playlist 返回 404 且 body 只有 `detail` | 段全是在途段（mp4v 已落、转码未完成），EXTINF 过滤后为空；任务进行中重拉会逐渐有段 |
 | playlist 拉到了但所有段请求失败 | 段 URL 是绝对地址，反代未透传 `X-Forwarded-*`，播放器在请求内网地址 |
 | 回放拖到后半段才挂（段突然 403） | 段 token 过期（超 TTL）或服务重启换 secret，需重拉 playlist 换新 token |

@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import bisect
 import logging
 import secrets
 import shutil
@@ -94,20 +93,6 @@ def _dir_name_to_int(name: str) -> Optional[int]:
         return int(name)
     except (TypeError, ValueError):
         return None
-
-
-def _locate_containing_index(seg_ts_us: Sequence[int], target_us: float) -> int:
-    """段起始 ts 升序数组中，**包含** target_us 的那一段的下标（最大的 i 满足
-    `seg_ts_us[i] <= target_us`）；全都更晚时返回 -1。`target_us` 收浮点。
-
-    ⚠ **必须是 `bisect_right - 1`，不能换 `bisect_left`**：文件名里的
-    `ts_us = int(ts*1e6)` 是截断值，「target 恰为该段首帧」时 `target_us > ts_us`，left 会
-    跳过该段。这是无条件错。
-
-    返回 -1 而不 clamp：段级裁剪靠它表达空区间，而告警取证要 clamp 到首段 —— 两种需求相反，
-    不替调用方做决定。
-    """
-    return bisect.bisect_right(seg_ts_us, target_us) - 1
 
 
 # ---------------------------------------------------------------------------
@@ -277,44 +262,6 @@ class Step:
         durations = self._extinf(track)
         return [s for s in segs if s.filename in durations]
 
-    def segments_around(
-        self,
-        ts_ms: int,
-        track: str,
-        before: int = 1,
-        after: int = 2,
-    ) -> Tuple[List[SegmentRef], int]:
-        """定位包含 ts_ms 的段并附带前后上下文。
-
-        Args:
-            ts_ms: 目标时间戳（毫秒，与 `clean_alarm.detected_at` 同单位）
-            track: "raw" 或 "processed"
-            before / after: 触发段前后各附带几段
-
-        Returns:
-            `(段列表, 触发段在该列表里的下标)`，段按 ts_us 升序。无段时返回 `([], -1)`。
-            `ts_ms` 早于首段时触发段取首段（最近的可用段）。
-
-        刻意**不滤在途段**：告警取证要的是「那一刻的画面在哪个文件里」，滤掉会让刚落盘的
-        告警取不到证据。拼 m3u8 时 `vod_playlist` 会再滤一道。
-        """
-        if before < 0 or after < 0:
-            raise ValueError("before/after must be >= 0")
-
-        all_segs = self.segments(track, playable_only=False)
-        if not all_segs:
-            return [], -1
-
-        trigger_idx = _locate_containing_index(
-            [s.ts_us for s in all_segs], int(ts_ms) * 1000
-        )
-        if trigger_idx < 0:
-            trigger_idx = 0  # ts_ms 早于首段起点 → 取首段作为最近的触发段
-
-        lo = max(0, trigger_idx - before)
-        hi = min(len(all_segs), trigger_idx + after + 1)  # +1 因为 slice 不含 end
-        return all_segs[lo:hi], trigger_idx - lo
-
     def has_init(self, track: str) -> bool:
         """该轨的 fMP4 init 段是否已就位。缺了意味着什么见 `StepInitMissing`。"""
         self._check_track(track)
@@ -330,8 +277,9 @@ class Step:
 
         Args:
             track: "raw" 或 "processed"
-            segments: 要收进 playlist 的段；None 表示整轨可播段。传进来的会**再滤一道在
-                途段**（调用方可能来自 `segments_around`，那里刻意不滤）。
+            segments: 要收进 playlist 的段；None 表示整轨可播段（**当前唯一在用的取值**）。
+                显式传入时会**再滤一道在途段** —— 调用方若来自不滤在途段的查询，playlist
+                声明的时长会与 fragment 实际媒体时长对不上，表现为 hls.js 缓冲洞。
             encode_uri: `(kind, filename) -> uri`，`kind ∈ {"segment", "init"}`。默认恒等
                 （裸文件名在与 init/段同目录的 m3u8 里是合法相对 URI）。要 token 化 URL 的
                 从这里注入。

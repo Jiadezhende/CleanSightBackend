@@ -19,6 +19,7 @@ layout、内容解释在本模块，两者必须同居本包才能互相对照�
 
 from __future__ import annotations
 
+import bisect
 import logging
 import subprocess
 import tempfile
@@ -29,7 +30,7 @@ import numpy as np
 
 from app.domain.frame import Frame
 from app.services.step_store import layout
-from app.services.step_store.store import SegmentRef, Step, _locate_containing_index
+from app.services.step_store.store import SegmentRef, Step
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,20 @@ _DECODE_TIMEOUT_PER_FRAME_S = 0.2
 
 # 失败时带进异常的 ffmpeg stderr 尾部长度
 _STDERR_TAIL_CHARS = 500
+
+
+def _locate_containing_index(seg_ts_us: Sequence[int], target_us: float) -> int:
+    """段起始 ts 升序数组中，**包含** target_us 的那一段的下标（最大的 i 满足
+    `seg_ts_us[i] <= target_us`）；全都更晚时返回 -1。`target_us` 收浮点。
+
+    ⚠ **必须是 `bisect_right - 1`，不能换 `bisect_left`**：文件名里的
+    `ts_us = int(ts*1e6)` 是截断值，「target 恰为该段首帧」时 `target_us > ts_us`，left 会
+    跳过该段。这是无条件错。
+
+    **返回 -1 而不 clamp**：`iter()` 的两端对越界的处理相反（起点 clamp 到首段、终点保留
+    -1 表达空区间），故不替调用方做决定。
+    """
+    return bisect.bisect_right(seg_ts_us, target_us) - 1
 
 
 def _read_exact(stream, buf: bytearray) -> bool:

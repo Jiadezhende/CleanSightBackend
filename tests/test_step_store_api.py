@@ -3,7 +3,6 @@ step_store 对外接口单元测试（模块级函数 / `Step` 句柄 / `Segment
 
 覆盖：
 - segments：按 ts_us 升序返回、过滤非匹配文件、playable_only 两种语义
-- segments_around：二分定位 + 上下文扩展 + 触发段下标
 - steps / tasks：清单接口的落盘枚举，含 include_empty / recent_first 两个开关
 - vod_playlist：备料（滤在途、EXTINF 真值、TARGETDURATION）与两个领域异常
 - find_product：path traversal 防御
@@ -118,68 +117,6 @@ class TestPlayableOnly:
         step = step_store.step(1, 1)
         assert step.segments("raw") == []
         assert len(step.segments("raw", playable_only=False)) == 1
-
-
-class TestSegmentsAround:
-    @pytest.fixture
-    def step(self, tmp_storage):
-        # 段时间戳（微秒）：1s / 11s / 21s / 31s
-        d = _make_step_dir(tmp_storage, 1, 1)
-        for ts_us in [1_000_000, 11_000_000, 21_000_000, 31_000_000]:
-            _touch_segment(d, "processed", ts_us)
-        return step_store.step(1, 1)
-
-    def test_returns_empty_when_no_segments(self, tmp_storage):
-        assert step_store.step(1, 1).segments_around(1000, "processed") == ([], -1)
-
-    def test_locates_trigger_segment(self, step):
-        # ts_ms = 12_000 (12s) → 落在 11s 段内
-        segs, idx = step.segments_around(12_000, "processed", before=0, after=0)
-        assert [s.ts_us for s in segs] == [11_000_000]
-        assert idx == 0
-
-    def test_with_context_before_after(self, step):
-        segs, idx = step.segments_around(22_000, "processed", before=1, after=2)
-        assert [s.ts_us for s in segs] == [11_000_000, 21_000_000, 31_000_000]
-        assert segs[idx].ts_us == 21_000_000
-
-    def test_clamps_at_start(self, step):
-        """ts_ms 早于第一段 → 触发段取第一段，且下标不越界到负数。"""
-        segs, idx = step.segments_around(500, "processed", before=2, after=1)
-        assert [s.ts_us for s in segs] == [1_000_000, 11_000_000]
-        assert idx == 0
-
-    def test_clamps_at_end(self, step):
-        segs, idx = step.segments_around(999_999, "processed", before=1, after=5)
-        assert [s.ts_us for s in segs] == [21_000_000, 31_000_000]
-        assert segs[idx].ts_us == 31_000_000
-
-    def test_exact_boundary_ts_match(self, step):
-        """ts_ms 恰为段起点 → 命中该段本身。
-
-        文件名 ts_us 是**截断**值，故 bisect_left 会跳过该段 —— 必须 bisect_right - 1。
-        """
-        segs, idx = step.segments_around(11_000, "processed", before=0, after=0)
-        assert [s.ts_us for s in segs] == [11_000_000]
-        assert idx == 0
-
-    def test_negative_context_rejected(self, step):
-        with pytest.raises(ValueError):
-            step.segments_around(12_000, "processed", before=-1, after=0)
-        with pytest.raises(ValueError):
-            step.segments_around(12_000, "processed", before=0, after=-1)
-
-    def test_includes_in_flight_segments(self, tmp_storage):
-        """取证要的是「那一刻的画面在哪个文件里」，滤掉在途段会让刚落盘的告警取不到证据。"""
-        d = _make_step_dir(tmp_storage, 1, 1)
-        _touch_segment(d, "raw", 1_000_000)
-        _touch_segment(d, "raw", 11_000_000)
-        _write_playlist(d, "raw", [1_000_000])
-
-        segs, _ = step_store.step(1, 1).segments_around(
-            12_000, "raw", before=0, after=0
-        )
-        assert [s.ts_us for s in segs] == [11_000_000]
 
 
 class TestTimeBounds:

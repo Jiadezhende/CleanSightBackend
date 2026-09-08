@@ -870,9 +870,38 @@ createApp({
       return `${m} m ${rs} s`;
     }
 
-    onMounted(() => {
+    // 深链：?task_id=&step_id=[&alarm_id=]
+    // admin 告警列表「查看录像」跳过来，带 alarm_id 时自动 seek 到该告警时刻。
+    //
+    // **定位用 alarm_id 而不是直接传时间戳**：timeline 的 events[].ts_ms 已由后端
+    // `_to_ms` 归一到毫秒，而 `/task/{id}/alarms` 的 detected_at 是 DB 原值（秒/毫秒/
+    // 微秒都可能）。跨页传原值 = 把归一化责任摊给每个调用方，迟早有人漏掉。
+    // seek 放在 loadStep 之后：那里 await 过 attachVideo，此时 <video> 才挂上 src。
+    async function applyDeepLink() {
+      const q = new URLSearchParams(location.search);
+      const taskId = Number(q.get('task_id'));
+      const stepId = Number(q.get('step_id'));
+      if (!taskId || !Number.isFinite(stepId)) return;
+      form.task_id = taskId;
+      form.step_id = stepId;
+      await loadStep();
+      if (!loaded.value) return;
+
+      const alarmId = Number(q.get('alarm_id'));
+      if (!alarmId) return;
+      const ev = timeline.events.find(e => e.alarm_id === alarmId);
+      if (!ev) {
+        ElMessage.warning(`告警 #${alarmId} 不在该 step 的时间轴内，已加载整段录像`);
+        return;
+      }
+      await nextTick();
+      seekToMs(ev.ts_ms);
+    }
+
+    onMounted(async () => {
       fetchHealth();
       fetchTasks();
+      await applyDeepLink();
     });
     onBeforeUnmount(detachVideo);
 
