@@ -17,6 +17,10 @@ import numpy as np
 
 from app.domain.detection import Detection, FrameDetections
 from app.domain.render import RenderSpec
+# 必须在模块顶层：app.settings 的 import 副作用会锁死 YOLO_CONFIG_DIR，而 ultralytics
+# 在自己被 import 的那一刻就冻结 USER_CONFIG_DIR。放进函数里就晚了——绕过 app.main /
+# conftest 直接用 Detector 的进程会把配置写进用户级 ~/.config（Win: %APPDATA%）。
+from app.settings import YOLO_RUNS_PROJECT
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +165,6 @@ class YOLODetector(Detector):
         # ultralytics 无条件 mkdir(save_dir)（即便 save=False），project/name/exist_ok
         # 把这个空目录钉进已 gitignore 的 .ultralytics 并复用同一个，避免污染仓库根与
         # predict/predict2… 累积（详见 app/settings.py:YOLO_RUNS_PROJECT）。
-        from app.settings import YOLO_RUNS_PROJECT
         raw_list = self._model.predict(
             frames, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False,
             project=YOLO_RUNS_PROJECT, name="predict", exist_ok=True,
