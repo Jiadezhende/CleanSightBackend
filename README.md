@@ -9,7 +9,7 @@ CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同
 - **HLS 录制落盘** — raw / processed 双轨视频段自动分段归档，可追溯回放
 - **告警上报** — 时序判定产告警，5s 去重闸门 + 批量异步上报
 - **实时画面推送** — 渲染后帧经 WebSocket 供前端 / 运维面板轮询（非后端 push）
-- **运维面板** — 后端自带 admin 运维面板（`/admin-f3m8/ui/`），实时画面 / 队列健康 / 指标 / 告警证据一站观测
+- **运维面板** — 后端自带 admin 运维面板（`/admin-f3m8/ui/`），实时画面 / 队列健康 / 指标 / 告警列表一站观测
 
 > 架构、数据流、各服务内部、配置与 API 等**描述性内容**以知识库为准，入口 [docs/kb/INDEX.md](docs/kb/INDEX.md)。
 
@@ -79,7 +79,7 @@ cd mediamtx && ./mediamtx        # Linux；Windows 用 ./mediamtx.exe
 # 或直接：python -m app.main
 ```
 
-起流后打开后端自带的 **admin 运维面板**观测运行状态（实时画面 / 队列健康 / 指标 / 告警证据）：`http://localhost:8000/admin-f3m8/ui/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
+起流后打开后端自带的 **admin 运维面板**观测运行状态（实时画面 / 队列健康 / 指标 / 告警列表）：`http://localhost:8000/admin-f3m8/ui/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
 
 ### 接口调用流程（统一 API）
 
@@ -165,7 +165,7 @@ python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      
 | 统一 API | `POST /api/start`、`POST /api/terminate`（task_id/client_id 双模） |
 | 实时推流 | `WebSocket /ai/video?task_id=...` |
 | 消息 / 告警 | `GET /task/message/{task_id}`、`GET /task/{task_id}/alarms` |
-| 追溯 | `GET /traceback/alarm/{alarm_id}/evidence`、`/traceback/task/{task_id}/timeline`、playlist |
+| 追溯 | `GET /traceback/task/{task_id}/playlist.m3u8`、`/traceback/task/{task_id}/timeline` |
 | 媒体 | `GET /media/segment/{token}`、`/media/init/{token}`（HMAC token 鉴权） |
 | 健康 | `GET /health/status`、`/health/monitor/stats`、`/health/monitor/config` |
 | 运维 / 送标 | `/admin-f3m8/*`、`/lab-f3m8/*` |

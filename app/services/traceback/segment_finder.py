@@ -1,13 +1,13 @@
 """
-HLS 段定位
+HLS 段枚举
 
-利用文件名 `{track}_segment_{ts_us}.mp4` 中的微秒时间戳 ts_us 二分定位。
+按 (task_id, step_id) 枚举落盘段，时间戳取自文件名
+`{track}_segment_{ts_us}.mp4` 中的微秒值 ts_us。
 
 依赖落盘约定：
     {base_dir}/{task_id}/{step_id}/{raw|processed}_segment_{ts_us}.mp4
 """
 
-import bisect
 import logging
 import re
 from dataclasses import dataclass
@@ -32,7 +32,6 @@ class SegmentRef:
         filename: 段文件名（如 "processed_segment_1700000000000000.mp4"）
         ts_us: 段开始时间戳（微秒）
         path: 段文件绝对路径
-        is_trigger: 是否为告警触发段（仅在 evidence 上下文中有意义）
     """
 
     task_id: int
@@ -41,7 +40,6 @@ class SegmentRef:
     filename: str
     ts_us: int
     path: Path
-    is_trigger: bool = False
 
     @property
     def ts_ms(self) -> int:
@@ -259,72 +257,6 @@ class SegmentFinder:
 
         keyed.sort(reverse=True)  # mtime 降序；同 mtime 时 task_id 大者优先
         return [task_id for _, task_id in keyed]
-
-    def find(
-        self,
-        task_id: int,
-        step_id: int,
-        ts_ms: int,
-        track: str,
-        n_before: int = 1,
-        n_after: int = 2,
-    ) -> List[SegmentRef]:
-        """定位包含 ts_ms 的段，并扩展前 n_before / 后 n_after 段作为上下文。
-
-        Args:
-            task_id: 任务 id
-            step_id: 洗消步骤 id
-            ts_ms: 目标时间戳（毫秒，与 clean_alarm.detected_at 单位一致）
-            track: "raw" 或 "processed"
-            n_before: 触发段之前要附带的段数
-            n_after: 触发段之后要附带的段数
-
-        Returns:
-            上下文段列表（按 ts_us 升序）。其中 is_trigger=True 标记触发段。
-            如果 ts_ms 早于第一段开始时间，触发段取第一段；如果没有段则返回空列表。
-
-        算法：
-            ts_us = ts_ms * 1000
-            找最大的段满足 segment.ts_us <= ts_us
-            该段就是"触发段"（detected_at 落在该段时间区间内）。
-        """
-        if n_before < 0 or n_after < 0:
-            raise ValueError("n_before/n_after must be >= 0")
-
-        all_segs = self.list_segments(task_id, step_id, track)
-        if not all_segs:
-            return []
-
-        ts_us = int(ts_ms) * 1000
-
-        # bisect_right 找到第一个 > ts_us 的位置；trigger_idx = pos - 1
-        ts_list = [s.ts_us for s in all_segs]
-        pos = bisect.bisect_right(ts_list, ts_us)
-        trigger_idx = pos - 1
-
-        if trigger_idx < 0:
-            # ts_ms 早于第一段开始时间 → 取第一段作为最近的触发段
-            trigger_idx = 0
-
-        start = max(0, trigger_idx - n_before)
-        end = min(len(all_segs), trigger_idx + n_after + 1)  # +1 因为 slice 不含 end
-
-        result: List[SegmentRef] = []
-        for i in range(start, end):
-            s = all_segs[i]
-            # SegmentRef 是 frozen dataclass —— 重建副本设置 is_trigger
-            result.append(
-                SegmentRef(
-                    task_id=s.task_id,
-                    step_id=s.step_id,
-                    track=s.track,
-                    filename=s.filename,
-                    ts_us=s.ts_us,
-                    path=s.path,
-                    is_trigger=(i == trigger_idx),
-                )
-            )
-        return result
 
 
 def get_default_base_dir() -> Path:

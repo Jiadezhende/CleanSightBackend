@@ -126,8 +126,6 @@ class Settings(BaseSettings):
     # 媒体追溯（traceback）配置
     media_token_secret: str = ""             # 媒体 URL HMAC 签名密钥（空则启动时生成随机临时密钥）
     media_token_ttl: int = 300               # 媒体 token 有效期（秒）
-    traceback_context_before: int = 1        # 告警证据：触发段之前的上下文段数
-    traceback_context_after: int = 2         # 告警证据：触发段之后的上下文段数
 
     # Lab / Label Studio 视频段导出
     label_studio_url: str = ""                # LS 服务器 base URL，如 http://10.176.122.22:8080
