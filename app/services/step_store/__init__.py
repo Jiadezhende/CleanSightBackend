@@ -9,7 +9,7 @@ tests/test_import_hygiene.py）。
 
     from app.services.step_store import store as step_store
     step = step_store.step(task_id, step_id)
-    step.segments("raw") / step.vod_playlist("processed") / step.product_path("segment", ...)
+    step.segments("raw") / step.vod_playlist("processed") / step.segment_path("raw", ts_us)
 
 **函数一律模块限定，不裸导入**（`step` / `steps` / `tasks` 是调用方的高频局部变量名，
 裸导入会被就地遮蔽）；类型与异常（`Step` / `SegmentRef` / `StepInitMissing`）按名导入。
@@ -27,12 +27,11 @@ tests/test_import_hygiene.py）。
     playlist.py         m3u8 读（EXTINF）与 VOD 骨架写。**包内私有**，两条具名例外见该
                         模块 docstring
     segment_decoder.py  段 + init → 像素帧。本包唯一起子进程的模块，经 `Step.frames()` 用
-    products.py         产物注册表 + 目录内容查询（有什么、最后何时活动）。未登记的 kind
-                        直接抛，而不是静默地对 TTL 不可见
 
-「这文件叫什么」目前有两处：HLS 那 5 类在 `layout` 的具名函数里，推理侧 4 类
-（features / facts / offline_result / visual_roi）以 lambda 内联在 `products.PRODUCTS` 里。
-这是历史分界，新增产物按上述归属登记，别再扩大分裂面。
+**写侧：每类产物一个具名成员**（`Step.segment_path(track, ts_us)` / `open_features(mode)`
+/ …），签名即命名参数。新增落盘产物在 `Step` 上加一个成员即可，**不需要注册表** ——
+「这目录还活着吗」由写入口顺带刷新的活动标记（`layout.ACTIVITY_NAME`）回答，与产物有哪些
+无关，故新增产物不存在「忘登记就对 TTL 不可见」这回事。
 
 sidecar（`.idx`）的命名在 layout、内容解释在 segment_decoder —— 「段内帧号 n ↔ sidecar
 下标 k 严格 1:1」这个地基破了不报错，只静默取错帧，故名字与内容必须同居本包。

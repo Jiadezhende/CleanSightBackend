@@ -2,8 +2,7 @@
 存储 TTL 清理 Worker
 
 **保留策略归本模块，落盘事实归 step_store。** 本模块决定「保留几天、多久扫一次、
-哪些目录该扫、删不删」；「这目录里有哪些产物、最后何时活动」在
-[step_store/products.py](../../step_store/products.py)、「怎么删」在
+哪些目录该扫、删不删」；「这目录最后何时活动」是 `Step.last_activity_at`、「怎么删」是
 `step_store.store.purge_step`。两侧 docstring 互指。
 
 职责：
@@ -79,12 +78,14 @@ class StorageCleanupWorker:
     def _scan_and_clean(self) -> int:
         """扫描并删除过期 step 目录 + 清空 task_id 父目录，返回删除的 step 数量。
 
-        判定依据：`Step.last_activity_at`（该 step 全部已登记产物的 mtime 最大值）
-        早于 cutoff。活跃 step 每 ~10s 落一个新段，故永远不会被误删。
+        判定依据：`Step.last_activity_at`（step 目录内活动标记的 mtime，由 step_store
+        的写入口顺带刷新）早于 cutoff。活跃 step 每 ~10s 落一个新段、每次都刷新它，故
+        永远不会被误删。
 
-        **判据从 `metadata.json` 的 `updated_at` 改过来**（2026-09）：那是 HLS 独有的
-        产物，只有 `features.jsonl` 而没有 HLS 段的 step（HLS 未启用，或首段 transcode
-        失败但推理照常跑）此前永远扫不到，无限期堆积。改判据后这类目录开始被回收。
+        **判据两次换代**（2026-09）：最早看 `metadata.json.updated_at`，那是 HLS 独有
+        产物，只有 `features.jsonl` 而没有 HLS 段的 step 永远扫不到、无限期堆积；随后
+        改为「已登记产物 mtime 最大值」，代价是每新增一类产物都得记得登记它的 glob；
+        现改为单一活动标记——写者只要问 step_store「往哪写」就已经记账，忘不了。
 
         `dry_run=True` 时只统计与打印、不真删——上线新判据前先用它核对会删哪些。
         """
@@ -96,10 +97,10 @@ class StorageCleanupWorker:
         for step in step_store.steps(include_empty=True):
             last = step.last_activity_at
             if last is None:
-                # 没有任何已登记产物：可能是刚建目录、也可能是只剩临时文件的残骸。
-                # 不删——判不出它是"还没写"还是"写完被清空了"，误删的代价高于留一个空目录。
+                # 没有活动标记：可能是刚建目录、只剩临时文件的残骸，也可能是本判据
+                # 上线之前建的历史目录。不删——判不出是哪种，误删的代价高于留一个目录。
                 logger.debug(
-                    "[StorageCleanup] Skip step without products: task=%s step=%s",
+                    "[StorageCleanup] Skip step without activity marker: task=%s step=%s",
                     step.task_id, step.step_id,
                 )
                 continue

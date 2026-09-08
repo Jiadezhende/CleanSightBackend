@@ -10,7 +10,7 @@ hls_strategy）与读侧（step_store 自身 / lab / inference.offline / routers
 
 **只回答「叫什么、摆在哪一层」，不回答「在磁盘的哪里」**：输出全是相对存储根的片段
 （`*_name` 一段、`step_subpath` 两段），没有成员知道根在哪。故根的解析
-（`store.storage_root()`，读 settings，L3）不属于本模块，由持有根的一方拼
+（`store._storage_root()`，读 settings，L3）不属于本模块，由持有根的一方拼
 `root / step_subpath(task_id, step_id) / segment_name(...)`。
 
 依赖上界：stdlib only（L0）。不 import settings、不 import numpy —— 这是包外 hls_strategy /
@@ -33,6 +33,23 @@ SEGMENT_PATTERN = re.compile(
 
 METADATA_NAME = "metadata.json"
 
+# 推理侧三类产物（inference 写、offline 读）。与上面的 HLS 五类同居本模块 —— 此前它们的
+# 名字以 lambda 内联在产物注册表里，注册表拆掉后没理由再留第二个命名真源。
+FEATURES_NAME = "features.jsonl"
+FACTS_NAME = "facts.jsonl"
+OFFLINE_RESULT_NAME = "offline_inference_result.json"
+
+# TTL 的唯一判据：本文件的 mtime = 该 step 最后一次有人要写东西的时刻。空文件，只用 mtime。
+#
+# **谁写它不由写者记得**：`Step` 的每个写入口（`*_path` / 写模式 `open_*`）顺带 touch 它，
+# 与「顺带 mkdir」同一处。写者只要问包「往哪写」就已经记账，忘不了。
+#
+# 判据换代史（别退回去）：曾用 `metadata.json.updated_at`，那是 HLS 独有产物，只有
+# features.jsonl 的 step 永远扫不到、无限期堆积；也别改用目录 mtime 或按产物 glob 取 mtime
+# 最大值——前者会被临时文件增删刷新，后者要求「新增产物必须登记 glob」，两条都是漏一处就
+# 静默失效的约定。
+ACTIVITY_NAME = ".activity"
+
 
 def ts_to_us(ts: float) -> int:
     """段时间戳（秒）→ 文件名里的 ts_us。
@@ -49,7 +66,7 @@ def step_subpath(task_id: int, step_id: int) -> Path:
 
     ⚠ **相对路径，不能直接 open**（名字叫 subpath 而非 dir 就是为了拦这个）：当成绝对路径
     用会落到进程 cwd 底下，读模式报 FileNotFoundError，写模式静默造一个野目录。必须由持有
-    根的一方拼 `storage_root() / step_subpath(...)`。
+    根的一方拼 `_storage_root() / step_subpath(...)`。
     """
     return Path(str(task_id)) / str(step_id)
 

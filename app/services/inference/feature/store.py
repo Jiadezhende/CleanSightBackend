@@ -1,15 +1,15 @@
 """特征落盘 + 事实账本（per-(task, step) JSONL 追加）。
 
 L2 特征聚合层「隐式」落盘点 —— 实时与离线链路都消费特征：
-- FeatureStore：每帧多模型 bbox 特征追加该 step 的 `features.jsonl`（kind="features"）。
+- FeatureStore：每帧多模型 bbox 特征追加该 step 的 `features.jsonl`。
   常开（离线链路硬需求，非可选）。缓冲批量写、best-effort（IO 异常只记日志不抛）。
 - FactLedger：L3 产出的事实（EventFact / SegmentFact）追加
-  该 step 的 `facts.jsonl`（kind="facts"）；`load()` 供离线链路回读（offline 预置）。
+  该 step 的 `facts.jsonl`；`load()` 供离线链路回读（offline 预置）。
 
-落盘位置一律经 `step_store` 的 `Step.open_product(kind)` —— 与 HLS 同一个 step 目录，
-随它被 cleanup TTL 连带回收。本模块**不知道根在哪、文件叫什么名**，只报 kind
-（`features` / `facts`，两者都登记在 `products.PRODUCTS` 里；忘登记会 KeyError 而不是
-静默地对 TTL 不可见）。两者均为 manager 持有的单例：stop_workflow 时 close(task_id, step_id)。
+落盘位置一律经 `step_store` 的具名成员（`Step.features_path` / `open_features` 与
+`facts_path` / `open_facts`）—— 与 HLS 同一个 step 目录，随它被 cleanup TTL 连带回收。
+本模块**不知道根在哪、文件叫什么名**，两个出口由子类各绑一次（见 `_step_path`）。
+两者均为 manager 持有的单例：stop_workflow 时 close(task_id, step_id)。
 
 帧对齐契约：每条记录的 `ts` = 该帧的 `FrameFeature.ts`（= 帧捕获 ts，与在线滑窗同源），
 与 HLS keypoints/段落盘所用的 `fd.timestamp` 同源同值，故 feature 行可按 `ts` 精确对上
@@ -113,13 +113,7 @@ class _JsonlBuffer:
     使全量 flush 不需从 key 反解路径。
     """
 
-    def __init__(self, kind: str, batch_size: int = 64):
-        """
-        Args:
-            kind: 已登记的产物 kind（"features" / "facts"）—— 不是文件名。落盘名由
-                `products.PRODUCTS` 单一真源给，本类不拼。
-        """
-        self._kind = kind
+    def __init__(self, batch_size: int = 64):
         self._batch_size = max(1, int(batch_size))
         # key=f"{task_id}/{step_id}" → (task_id, step_id, lines)
         self._buffers: Dict[str, tuple] = {}
@@ -134,9 +128,19 @@ class _JsonlBuffer:
     def _key(task_id: Any, step_id: Any) -> str:
         return f"{task_id}/{step_id}"
 
+    # 本分区在 step 目录里的两个出口，由子类绑到 `Step` 的具名成员上。**本类不拼文件名**，
+    # 也不再报一个 kind 字符串——打错名字在子类那一行就红，不必等第一次写盘。
+    @staticmethod
+    def _step_path(step: "step_store.Step") -> Path:
+        raise NotImplementedError
+
+    @staticmethod
+    def _step_open(step: "step_store.Step", mode: str, **kw):
+        raise NotImplementedError
+
     def _path(self, task_id: Any, step_id: Any) -> Path:
-        """本分区的落盘路径。经 `product_path` 拿（顺带保证 step 目录存在）。"""
-        return step_store.step(task_id, step_id).product_path(self._kind)
+        """本分区的落盘路径（顺带保证 step 目录存在并刷新活动时间戳）。"""
+        return self._step_path(step_store.step(task_id, step_id))
 
     def _enqueue(
         self, task_id: Any, step_id: Any, lines: List[str], owner: Any = None
@@ -164,7 +168,7 @@ class _JsonlBuffer:
         """落盘一批行。**仅在持 self._lock 时调用**——与 open_fresh 的 unlink 互斥，
         保证「迟到 drain 写」不会重建已被新 run 截断的文件。"""
         try:
-            # 目录已由 `_path` 的 product_path 保证存在
+            # 目录已由 `_path` 保证存在
             with path.open("a", encoding="utf-8") as f:
                 f.write("".join(lines))
         except Exception as e:  # best-effort：落盘失败不影响主链路
@@ -231,7 +235,15 @@ class FeatureStore(_JsonlBuffer):
     """多模型 bbox 特征 per-task 落盘（常开）。"""
 
     def __init__(self, batch_size: int = 64):
-        super().__init__(kind="features", batch_size=batch_size)
+        super().__init__(batch_size=batch_size)
+
+    @staticmethod
+    def _step_path(step) -> Path:
+        return step.features_path()
+
+    @staticmethod
+    def _step_open(step, mode: str, **kw):
+        return step.open_features(mode, **kw)
 
     def append(self, task_id: Any, step_id: Any, feature: "FrameFeature", owner: Any = None) -> None:
         """追加一帧的多流特征（帧级 FrameFeature）。
@@ -267,10 +279,10 @@ class FeatureStore(_JsonlBuffer):
         self.flush(task_id, step_id)
         step = step_store.step(task_id, step_id)
         try:
-            # 读模式的 open_product **不建目录**：读一个不存在的 step 不该在盘上留痕
-            #（空目录无已登记产物 → TTL 按契约不删 → 永久泄漏）。
+            # 读模式**不建目录、不刷活动时间戳**：读一个不存在的 step 不该在盘上留痕，
+            # 也不该让它显得还活着。
             # utf-8-sig 容忍 Windows 手写 features.jsonl 的 UTF-8 BOM；后端自身写出的无 BOM 亦正常。
-            with step.open_product(self._kind, "r", encoding="utf-8-sig") as f:
+            with self._step_open(step, "r", encoding="utf-8-sig") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -293,7 +305,15 @@ class FactLedger(_JsonlBuffer):
     """L3 事实 per-task 账本（EventFact / SegmentFact）。"""
 
     def __init__(self, batch_size: int = 16):
-        super().__init__(kind="facts", batch_size=batch_size)
+        super().__init__(batch_size=batch_size)
+
+    @staticmethod
+    def _step_path(step) -> Path:
+        return step.facts_path()
+
+    @staticmethod
+    def _step_open(step, mode: str, **kw):
+        return step.open_facts(mode, **kw)
 
     def append(
         self,
@@ -319,7 +339,7 @@ class FactLedger(_JsonlBuffer):
         facts: List[Union[EventFact, SegmentFact]] = []
         try:
             # 读模式不建目录，理由同 FeatureStore.load
-            with step.open_product(self._kind, "r") as f:
+            with self._step_open(step, "r") as f:
                 for line in f:
                     line = line.strip()
                     if line:

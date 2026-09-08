@@ -1,6 +1,7 @@
 # 抽出 `step_store`：step 目录的落盘格式独立成 leaf 包，对外只认 `(task_id, step_id)`
 
-> **变更状态**：已生效（2026-09-06 起，2026-09-07 完成接口收口）
+> **变更状态**：已生效（2026-09-06 起，2026-09-07 完成接口收口，2026-09-08 拆掉产物注册表、
+> TTL 判据换为单一活动标记，见 §15 —— §2.4 / §3 里关于 `PRODUCTS` 的部分自那节起作废）
 > **知识库**：待沉淀
 >
 > <!-- 本文按最终实现写，不记设计过程。行为变更只有两处，集中在 §7。 -->
@@ -592,3 +593,113 @@ HLS 那 5 类名字在 `layout` 的具名函数里，推理侧 4 类（`features
 | `traceback` 包搬空后只剩 `media_token.py` | 是否降为裸模块 `app/services/media_token.py`（先例 `run_control.py`） | 未决，避免搅进本次改动面 |
 | `dry_run` 未接入配置文件 | 运维无法从 yaml 开启 | 刻意不做 —— 判据换代时的一次性验证工具 |
 | `Timeline._build_cmd` 的 init 段此前硬编码 `raw_init.mp4` | `track="processed"` 下原会拿 raw 的 init 解 processed 段（SPS/PPS 不匹配）。生产代码与测试均只走 `track="raw"`，故无实际影响 | 已随命名收口一并修正，属**顺带修掉的潜在错误**，非行为回归 |
+
+---
+
+## 15. 产物注册表拆掉：TTL 判据换成单一活动标记，写侧改具名成员
+
+评审本包的能力设计时判定 `PRODUCTS` 注册表是过度设计：7 个对外成员里，真正承重的只有
+「TTL 该看哪些文件」这一件事，而它有一个便宜得多的做法 —— **在 step 目录里固定写一个文件，
+只用它的 mtime**。注册表连同 `products.py` 整个删除，包从 5 个模块降到 4 个。
+
+### 15.1 注册表扛的四件事，只有一件是承重的
+
+| 原能力 | 真消费方 | 去向 |
+|---|---|---|
+| `pattern` glob | `_products_in` → `last_activity`，TTL 唯一判据 | **换判据**，见 §15.2 |
+| `name` 构造函数 + `product_name(kind, **key)` | 只被 `product_path` / `open_product` 调 | 换成 `Step` 上每类产物一个具名成员，见 §15.3 |
+| `kind` 未登记抛 `KeyError` | 防「新增产物忘登记 → 对 TTL 不可见」 | 随判据换代**一并消失**：TTL 不再看产物清单，新增产物不存在「忘登记」这回事 |
+| `writer` 字段 | 无（docstring 自认「不是权限，只作文档」） | 删 |
+| `list_products` | 无生产调用方（只有测试） | 删 |
+
+### 15.2 TTL 判据第三代：`layout.ACTIVITY_NAME`（`.activity`）的 mtime
+
+三代判据与各自的失效形态：
+
+| 代 | 判据 | 漏在哪 |
+|---|------|--------|
+| 一 | `metadata.json.updated_at` | 那是 **HLS 独有**产物。只有 `features.jsonl` 的 step 永远扫不到 → 无限期堆积（P1-③） |
+| 二 | 已登记产物的 mtime 最大值 | 修好了 P1-③，代价是**每新增一类产物都得记得登记它的 glob**，且 glob 与临时文件区分不开（靠前导点约定兜着，而那条约定当时已被两处 `.tmp` 写法破坏） |
+| 三（本次） | step 目录内 `.activity` 的 mtime | 写者忘不了 —— 它必须先问包「往哪写」，`Step` 的写入口顺带 touch |
+
+关键在**谁 touch**：不是让三个写者各自记得，而是挂在 `Step._write_dir()` 上，与「顺带
+mkdir」同一处。写者能忘记调一个记账函数，但不可能忘记问包要路径。
+
+三条口径写进 docstring：
+
+- **记的是「有人问过往哪写」而非「写成功了」** —— 写入口先 touch 再返回路径。方向偏向保留
+  数据，对 TTL 无害。
+- **读入口一律不 touch，也不建目录**（读模式 `open_*`）：读一个不存在的 step 不该在盘上留
+  痕，也不该让它显得还活着。
+- **`scratch_path` 刻意不 touch**：临时文件是读侧导出/打点的中间产物，不代表这个 step 还在
+  产出。第二代判据下崩溃残留能让死 step 装活，本代从判据上不成立。
+
+`.activity` 文件**留空、只用 mtime**：存内容要 write + read + parse，还得处理半截文件与解析
+失败 —— 那正是第一代判据引入的一整类故障，没必要再来一遍。
+
+### 15.3 写侧：`product_path(kind, **key)` → 每类产物一个具名成员
+
+```text
+改前                                              改后
+step.product_path("segment", track=t, ts_us=n)    step.segment_path(t, ts_us)
+step.product_path("sidecar", track=t, ts_us=n)    step.sidecar_path(t, ts_us)
+step.product_path("init", track=t)                step.init_path(t)
+step.product_path("playlist", track=t)            step.playlist_path(t)
+step.product_path("metadata")                     step.metadata_path()
+step.open_product("features", "a")                step.open_features("a")
+step.open_product("facts", "r")                   step.open_facts("r")
+step.open_product("offline_result", "w")          step.open_offline_result("w")
+```
+
+判据是**参数打错在哪一步报错**：`kind` 字符串 + `**key` 要等到第一次写盘才 `KeyError` /
+`TypeError`，具名签名在调用处就红。写侧调用点 11 处，全在三个 writer 文件里。
+
+`_JsonlBuffer` 是 `kind` 字符串唯一有实际用途的地方（一个类服务两个产物）。改为子类各绑一次
+`_step_path` / `_step_open` 两个钩子，指向 `Step` 的具名成员 —— 名字打错在子类那一行就红。
+
+### 15.4 顺带关掉 §12 留的「文件名两个真源」
+
+推理侧三类名字（`features.jsonl` / `facts.jsonl` / `offline_inference_result.json`）此前以
+lambda 内联在 `PRODUCTS` 里，与 HLS 五类的具名函数分居两处。注册表拆掉后没理由再留第二个
+命名真源，三个常量并入 `layout.py`。**「这文件叫什么」现在只有 `layout` 一处。**
+
+`visual_roi`（三期未落地）的登记项一并删除 —— 它当初登记就是为了「届时别漏掉 TTL 可见性」，
+而这个顾虑随判据换代自然消失。
+
+### 15.5 门禁
+
+`test_step_store_write_members_have_registered_callers` 保留，但**理由重写**：没有注册表之后
+它是纯写者白名单，防「计划外的第四个写者混进来」，不再是「防忘登记」。`WRITE_MEMBERS` 从 2 个
+名字扩成 10 个具名成员。其余三条门禁（leaf 地位 / 存储根私有 / playlist 包内私有）不变。
+
+新增一条测试侧的保护：`TestActivityMarker::test_every_write_member_stamps_activity` 逐个调用
+全部 10 个写成员，断言都刷了标记 —— 新增写成员漏调 `_write_dir()` 的表现是「该写者独占的 step
+静默过期被回收」，属静默错误，必须有测试兜着。
+
+### 15.6 行为变更与已接受的代价
+
+| | 说明 |
+|---|---|
+| **存量目录不再被回收** | 判据上线前建的 step 目录没有 `.activity`，`last_activity_at` 返回 None，按既有契约（判不出死活就不删）永久保留。**明确决定不做迁移**：不写补标记脚本、不回退看目录 mtime。代价是历史目录占盘，收益是判据只有一个真源、没有兜底分支 |
+| 前导点约定的理由变了 | 不再是「把临时文件排除在产物 glob 之外」（没有 glob 了），而是「让半截的临时 mp4 落在 `SEGMENT_PATTERN` 之外，不被 `segments()` 当成真段」。约束仍在，理由更窄，docstring 已改 |
+| `hls_strategy` 两处不带前导点的 `.tmp` 不再是隐患 | 它们此前只是恰好没撞上产物 glob；现在临时文件根本不参与 TTL 判定 |
+
+### 15.7 自测
+
+| 项 | 结果 |
+|----|------|
+| 全量 `pytest tests/` | **511 passed**（HEAD 基线 509，净 +2：删 5 个注册表用例、加 7 个判据与写成员用例） |
+| 判据换代覆盖 | 新增「标记旧但产物新 → 照样回收」用例，锁死判据的单一真源；原「产物旧但刚写过 → 不删」用例改按标记表达，断言不变 |
+| 包体积 | 5 模块 1276 行 → **4 模块 1202 行**；`products.py`（163 行）删除 |
+
+### 15.8 `storage_root()` 降为包内私有
+
+同轮评审发现的另一个洞：`store.storage_root()` 是**公开**函数，而门禁
+`test_storage_root_is_private_to_step_store` 拦的是 `settings.storage_base_dir` 这个**属性
+访问** —— 任何模块 `from app.services.step_store.store import storage_root` 就能拿到根，门禁
+全绿。整条「根拿不到，路径就无从拼起」的论证建立在根真的拿不到之上，而它有一个正门。
+
+生产代码此前没人这么用（唯一包外调用在测试里），故是接口面的洞而非缺陷。两道一起补：
+函数改名 `_storage_root`，并把门禁从「只拦属性」扩成「属性 + 该函数的 import 与调用」都拦。
+§9 命名表里 `get_default_base_dir` → `storage_root` 那条仍成立，只是又加了前导下划线。
+

@@ -114,7 +114,7 @@ class OfflineRunner:
         step = step_store.step(spec.task_id, spec.step_id)
         try:
             payload = {"task_id": spec.task_id, "step_id": spec.step_id, **debug}
-            with step.open_product("offline_result", "w") as f:
+            with step.open_offline_result("w") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning("[OfflineRunner] 逐帧调试 JSON 落盘失败 %s: %s", step, e)

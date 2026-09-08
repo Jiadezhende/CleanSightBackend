@@ -5,6 +5,10 @@
     模块级函数   step / steps / tasks / purge_step / sweep_empty_tasks —— 无身份无状态，
                 存储根一律自解析
 
+**每类产物一个具名写成员**（`segment_path` / `open_features` / …），不走 `kind` 字符串点名：
+参数打错在调用处就红，不必等第一次写盘。TTL 判据不再依赖「产物清单」，改由写入口顺带刷新
+`layout.ACTIVITY_NAME` 的 mtime —— 写者忘不了，因为它必须先问包「往哪写」。
+
     from app.services.step_store import store as step_store
     step = step_store.step(task_id, step_id)
 
@@ -34,7 +38,7 @@ from typing import (
     Tuple,
 )
 
-from app.services.step_store import layout, playlist, products
+from app.services.step_store import layout, playlist
 
 if TYPE_CHECKING:  # 仅类型标注：Frame 属 domain（L0），但 segment_decoder 吃 numpy
     from app.domain.frame import Frame
@@ -140,7 +144,7 @@ class Step:
         """存储根。**首次碰盘时才解析并缓存** —— `steps()` 一次可构造上百个句柄，构造期
         解析等于每个句柄都走一遍 settings + `Path.resolve()`。"""
         if self._base_dir is None:
-            self._base_dir = storage_root()
+            self._base_dir = _storage_root()
         return self._base_dir
 
     @property
@@ -234,12 +238,19 @@ class Step:
 
     @property
     def last_activity_at(self) -> Optional[float]:
-        """最后一次产出的时刻（unix 秒）；无任何已登记产物时 None。判据见
-        `products.last_activity`。
+        """最后一次有人要写东西的时刻（unix 秒），取 `layout.ACTIVITY_NAME` 的 mtime；
+        该文件不存在时 None（本包改判据之前建的目录就没有它，按下述契约不会被删）。
 
-        供 TTL 判断「这目录还活着吗」，**「该不该删」不在本包**，在 `cleanup_worker.py`。
+        记的是「有人问过往哪写」而不是「写成功了」——写入口一律先 touch 后返回路径。方向
+        偏向保留数据，对 TTL 无害。
+
+        供 TTL 判断「这目录还活着吗」，**「该不该删」不在本包**，在 `cleanup_worker.py`；
+        None 时不删也是那边的决定。
         """
-        return products.last_activity(self._dir)
+        try:
+            return (self._dir / layout.ACTIVITY_NAME).stat().st_mtime
+        except OSError:
+            return None
 
     def segments(self, track: str, playable_only: bool = True) -> List[SegmentRef]:
         """该轨全部段，ts 升序。
@@ -342,7 +353,7 @@ class Step:
             start_ts, end_ts, width, height
         )
 
-    # ---------------- 具名文件操作 ----------------
+    # ---------------- 读：按外部给的文件名取产物 ----------------
 
     def find_product(self, filename: str) -> Optional[Path]:
         """按**外部给的**文件名取该 step 下的产物；不存在或越界返回 None。
@@ -359,52 +370,95 @@ class Step:
             return None
         return candidate if candidate.is_file() else None
 
-    def product_path(self, kind: str, **key) -> Path:
-        """该产物该写到哪。**顺带保证 step 目录存在**（写侧入口）。
+    # ---------------- 写侧入口 ----------------
+    #
+    # 每类落盘产物一个具名成员，签名即该产物的命名参数。**一律经 `_write_dir()`** ——
+    # 它保证 step 目录存在并刷新活动时间戳（TTL 判据，见 `layout.ACTIVITY_NAME`）。
+    # 新增产物在此加一个成员，别回到 `product_path(kind, **key)` 那种字符串点名：
+    # 参数打错要在调用处就红，不是等到第一次写盘才 TypeError。
 
-        Args:
-            kind: 必须在 `products.PRODUCTS` 里登记，否则抛 `KeyError` —— 未登记的产物对
-                TTL 不可见，表现为「目录被提前回收，而那个产物还有人要读」。
-            **key: 该 kind 的命名参数（如 segment 要 `track` + `ts_us`）。
+    def _write_dir(self) -> Path:
+        """写侧共用入口：保证 step 目录存在 + 刷新活动时间戳，返回 step 目录。
 
-        与 `find_product` 的分工：本方法按**已登记的 kind** 算，必返回一个路径（文件可以还
-        不存在）；`find_product` 按**外部文件名**找，可能 `None`。
+        touch 失败只记 debug 不抛：它失败意味着目录不可写，紧接着的真实写入会自己报错，
+        没必要在这里替它抛一个更难懂的异常。
         """
-        name = products.product_name(kind, **key)
         step_dir = self._dir
         step_dir.mkdir(parents=True, exist_ok=True)
-        return step_dir / name
+        try:
+            (step_dir / layout.ACTIVITY_NAME).touch()
+        except OSError as e:
+            logger.debug("[StepStore] 活动标记刷新失败 %s: %s", step_dir, e)
+        return step_dir
 
-    def open_product(
-        self, kind: str, mode: str = "r", *, encoding: Optional[str] = None, **key
+    def segment_path(self, track: str, ts_us: int) -> Path:
+        """该段视频文件该写到哪。`ts_us` 由 `layout.ts_to_us` 从秒换算（**截断**，别 round）。"""
+        return self._write_dir() / layout.segment_name(self._check_track(track), ts_us)
+
+    def sidecar_path(self, track: str, ts_us: int) -> Path:
+        """该段的逐帧 ts sidecar（`.idx`）该写到哪。与同段 `segment_path` 必须同 stem ——
+        对不上时读侧按契约只 warning 跳过该段，表现为**静默丢帧**。"""
+        return self._write_dir() / layout.sidecar_name(self._check_track(track), ts_us)
+
+    def init_path(self, track: str) -> Path:
+        """该轨 fMP4 init 段的路径。存在性判断用 `has_init(track)`。"""
+        return self._write_dir() / layout.init_name(self._check_track(track))
+
+    def playlist_path(self, track: str) -> Path:
+        """该轨 LIVE 形态 playlist 的路径。**写侧专用** —— 读 EXTINF 走 `segments()` /
+        `vod_playlist()`，它们把在途段过滤与时长真值一并备好。"""
+        return self._write_dir() / layout.playlist_name(self._check_track(track))
+
+    def metadata_path(self) -> Path:
+        """`metadata.json` 的路径。**已不是 TTL 判据**（那是 `last_activity_at`）。"""
+        return self._write_dir() / layout.METADATA_NAME
+
+    def features_path(self) -> Path:
+        """`features.jsonl` 的路径（在线逐帧特征）。只读场景用 `open_features("r")`。"""
+        return self._write_dir() / layout.FEATURES_NAME
+
+    def facts_path(self) -> Path:
+        """`facts.jsonl` 的路径（离线事实账本）。只读场景用 `open_facts("r")`。"""
+        return self._write_dir() / layout.FACTS_NAME
+
+    def open_features(self, mode: str = "r", *, encoding: Optional[str] = None) -> IO:
+        """开 `features.jsonl`，路径不出包。语义见 `_open`。"""
+        return self._open(layout.FEATURES_NAME, mode, encoding)
+
+    def open_facts(self, mode: str = "r", *, encoding: Optional[str] = None) -> IO:
+        """开 `facts.jsonl`，路径不出包。语义见 `_open`。"""
+        return self._open(layout.FACTS_NAME, mode, encoding)
+
+    def open_offline_result(
+        self, mode: str = "r", *, encoding: Optional[str] = None
     ) -> IO:
-        """直接开产物的文件句柄，路径不出包。`kind` 校验同 `product_path`。
+        """开 `offline_inference_result.json`，路径不出包。语义见 `_open`。"""
+        return self._open(layout.OFFLINE_RESULT_NAME, mode, encoding)
 
-        写模式（`w`/`a`/`x`）经 `product_path` 保证 step 目录存在；**读模式不建目录** ——
-        空目录没有任何已登记产物，`last_activity_at` 返回 None、TTL 按契约不删它，等于读一
-        次不存在的 step 就永久泄漏一个空目录。文件不存在照常抛 `FileNotFoundError`。
+    def _open(self, name: str, mode: str, encoding: Optional[str]) -> IO:
+        """写模式（`w`/`a`/`x`）走 `_write_dir()`（建目录 + 刷活动时间戳）；**读模式两样
+        都不做** —— 读一个不存在的 step 不该在盘上留下空目录，也不该让它显得活跃。文件不
+        存在照常抛 `FileNotFoundError`。
 
         `encoding` 默认 utf-8；二进制模式忽略它。
         """
-        if any(c in mode for c in "wax"):
-            path = self.product_path(kind, **key)
-        else:
-            path = self._dir / products.product_name(kind, **key)
+        base = self._write_dir() if any(c in mode for c in "wax") else self._dir
+        path = base / name
         if "b" in mode:
             return path.open(mode)
         return path.open(mode, encoding=encoding or "utf-8")
 
     def scratch_path(self, prefix: str, suffix: str = ".m3u8") -> Path:
-        """step 目录内的临时文件路径（调用方负责建与删）。顺带保证目录存在。要 ffmpeg 的
-        `cwd` 取返回值的 `.parent`。
+        """step 目录内的临时文件路径（调用方负责建与删）。建目录但**不刷活动时间戳** ——
+        临时文件是读侧导出/打点的中间产物，不代表这个 step 还在产出。要 ffmpeg 的 `cwd`
+        取返回值的 `.parent`。
 
         两条都是格式约束，不是风格：
 
         - **必须落在 step 目录** —— 临时 m3u8 里的 `EXT-X-MAP` 与段 URI 都是相对引用，只有
           与 init/段同目录才解析得到。
-        - **前导点命名** —— `products` 靠它把临时文件排除在产物之外（`.{stem}.tmp_init.mp4`
-          会命中 `*_init.mp4` 这类 glob），否则崩溃残留会让死 step 躲过 TTL 回收。新增临时
-          文件必须沿用。
+        - **前导点命名** —— 前导点让它落在 `layout.SEGMENT_PATTERN` 之外（该正则锚 `^`），
+          半截的临时 mp4 才不会被 `_scan` 当成一个真段列进 `segments()`。新增临时文件沿用。
         """
         step_dir = self._dir
         step_dir.mkdir(parents=True, exist_ok=True)
@@ -425,6 +479,25 @@ def step(task_id: int, step_id: int) -> Step:
     return Step(task_id, step_id)
 
 
+def _iter_step_ids(root: Path) -> Iterator[Tuple[int, int]]:
+    """枚举 root 下全部已落盘的 `(task_id, step_id)`。**只认两层数字目录名**，
+    `.lab_exports` 等非任务目录跳过。对外入口是 `steps(include_empty=True)`。
+    """
+    if not root.is_dir():
+        return
+    for task_dir in sorted(root.iterdir()):
+        if not task_dir.is_dir() or not task_dir.name.isdigit():
+            continue
+        try:
+            children = sorted(task_dir.iterdir())
+        except OSError as e:
+            logger.debug("[StepStore] 无法读取 task 目录 %s: %s", task_dir, e)
+            continue
+        for child in children:
+            if child.is_dir() and child.name.isdigit():
+                yield int(task_dir.name), int(child.name)
+
+
 def steps(task_id: Optional[int] = None, include_empty: bool = False) -> List[Step]:
     """列 step 句柄，按 (task_id, step_id) 升序。
 
@@ -434,10 +507,10 @@ def steps(task_id: Optional[int] = None, include_empty: bool = False) -> List[St
             回放没意义，清单不该把它露给前端点开黑屏。**TTL 恰恰要看见这类目录**（只有
             `features.jsonl` 没有 HLS 段的 step 就属于它），故传 True。
     """
-    base_dir = storage_root()
+    base_dir = _storage_root()
 
     if include_empty:
-        pairs: Iterator[Tuple[int, int]] = products.iter_steps(base_dir)
+        pairs: Iterator[Tuple[int, int]] = _iter_step_ids(base_dir)
         if task_id is not None:
             pairs = (p for p in pairs if p[0] == task_id)
         return [step(t, s) for t, s in pairs]
@@ -471,7 +544,7 @@ def tasks(recent_first: bool = False) -> List[int]:
     非 O(总段文件数)。近似是有意的 —— mtime 只决定「先深扫谁」，**绝不对外当时间戳用**，对
     外时间一律取 `segments()` 的真实 ts_us。无 step 子目录的 task 排序键取 0，但仍在结果里。
     """
-    base_dir = storage_root()
+    base_dir = _storage_root()
     if not base_dir.is_dir():
         return []
 
@@ -500,7 +573,7 @@ def purge_step(task_id: int, step_id: int) -> bool:
     warning 并返回 False，不抛。
 
     ⚠ **删的是整个目录含所有写者的产物**：HLS 段与 playlist、`features.jsonl` /
-    `facts.jsonl`、离线推理结果一并消失（见 `products.PRODUCTS`）。
+    `facts.jsonl`、离线推理结果、活动标记一并消失。
 
     ⚠ **只执行删除，不判断该不该删** —— 保留策略在 `persistence/workers/cleanup_worker.py`，
     重启 supersede 的判断在 `persistence/strategies/hls_strategy.purge_step_dir`。
@@ -508,7 +581,7 @@ def purge_step(task_id: int, step_id: int) -> bool:
     ⚠ **调用方必须在本调用返回之后，才能创建本 run 的任何产物**：反过来，新建的
     `features.jsonl` 会被这里的 rmtree 抹掉且不报错。调用序见 `run_control.start_run`。
     """
-    target = storage_root() / layout.step_subpath(task_id, step_id)
+    target = _storage_root() / layout.step_subpath(task_id, step_id)
     if not target.exists():
         return False
     try:
@@ -524,7 +597,7 @@ def sweep_empty_tasks() -> int:
 
     `rmdir` 对非空目录会安全失败，故无需先检查是否为空。
     """
-    root = storage_root()
+    root = _storage_root()
     if not root.is_dir():
         return 0
     removed = 0
@@ -540,12 +613,15 @@ def sweep_empty_tasks() -> int:
     return removed
 
 
-def storage_root() -> Path:
+def _storage_root() -> Path:
     """存储根目录，直读 `settings.storage_base_dir` 单一真源。
 
-    **`app/` 内除本包外没有调用方**，由 `test_import_hygiene` 门禁锁死 —— 根拿不到，路径就
-    无从拼起。settings 是 L3 故 import 写在函数体内；也正因为它是**函数**而非模块级常量，
-    测试 monkeypatch 后立即生效。
+    **包内私有**：它交出去就等于交出「根 + 两级 id + 文件名」的拼装能力，`settings`
+    那道门禁就白设了（拦属性访问拦不住 `from ...store import _storage_root`）。前导下划线
+    与 `test_import_hygiene.test_storage_root_is_private_to_step_store` 两道一起锁。
+
+    settings 是 L3 故 import 写在函数体内；也正因为它是**函数**而非模块级常量，测试
+    monkeypatch 后立即生效。
     """
     from app.settings import settings
 

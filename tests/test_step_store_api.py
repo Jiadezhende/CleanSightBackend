@@ -6,7 +6,8 @@ step_store 对外接口单元测试（模块级函数 / `Step` 句柄 / `Segment
 - steps / tasks：清单接口的落盘枚举，含 include_empty / recent_first 两个开关
 - vod_playlist：备料（滤在途、EXTINF 真值、TARGETDURATION）与两个领域异常
 - find_product：path traversal 防御
-- product_path / open_product / scratch_path：kind 校验与前导点命名
+- 写成员（`segment_path` / `open_features` / …）：落盘名、建目录、track 校验
+- 活动标记：写成员刷、读入口与 scratch_path 不刷（TTL 判据）
 - 边界：ts_ms 早于第一段、晚于最后一段、空目录、track 非法、路径不存在
 
 落盘约定：{base_dir}/{task_id}/{step_id}/
@@ -321,40 +322,85 @@ class TestFindProduct:
         assert step_store.step(1, 1).find_product(evil) is None
 
 
-class TestProductRegistry:
-    """kind 校验：新增产物忘登记从「静默 TTL 不可见」变成即时失败。"""
+class TestWriteMembers:
+    """每类产物一个具名成员：签名即命名参数，落盘名与 layout 单一真源逐字一致。"""
 
-    def test_named_products_land_in_step_dir(self, tmp_storage):
+    def test_named_members_land_in_step_dir(self, tmp_storage):
         step = step_store.step(1, 1)
-        assert step.product_path("segment", track="raw", ts_us=42).name == "raw_segment_42.mp4"
-        assert step.product_path("init", track="processed").name == "processed_init.mp4"
-        assert step.product_path("metadata").name == "metadata.json"
-        assert step.product_path("features").name == "features.jsonl"
-        assert step.product_path("segment", track="raw", ts_us=42).parent == tmp_storage / "1" / "1"
+        assert step.segment_path("raw", 42).name == "raw_segment_42.mp4"
+        assert step.sidecar_path("raw", 42).name == "raw_segment_42.idx"
+        assert step.init_path("processed").name == "processed_init.mp4"
+        assert step.playlist_path("raw").name == "raw_playlist.m3u8"
+        assert step.metadata_path().name == "metadata.json"
+        assert step.features_path().name == "features.jsonl"
+        assert step.facts_path().name == "facts.jsonl"
+        assert step.segment_path("raw", 42).parent == tmp_storage / "1" / "1"
 
     def test_creates_step_dir(self, tmp_storage):
-        step_store.step(1, 1).product_path("metadata")
+        step_store.step(1, 1).metadata_path()
         assert (tmp_storage / "1" / "1").is_dir()
 
-    def test_unregistered_kind_raises(self, tmp_storage):
-        with pytest.raises(KeyError, match="未登记的产物 kind"):
-            step_store.step(1, 1).product_path("keypoints")
+    def test_rejects_invalid_track(self, tmp_storage):
+        with pytest.raises(ValueError, match="Invalid track"):
+            step_store.step(1, 1).segment_path("bogus", 42)
 
-    def test_open_product_roundtrip(self, tmp_storage):
+    def test_open_roundtrip(self, tmp_storage):
         step = step_store.step(1, 1)
-        with step.open_product("features", "a") as f:
+        with step.open_features("a") as f:
             f.write('{"ts": 1}\n')
-        with step.open_product("features") as f:
+        with step.open_features() as f:
             assert f.read() == '{"ts": 1}\n'
 
-    def test_open_product_read_missing_raises(self, tmp_storage):
+    def test_open_read_missing_raises(self, tmp_storage):
         with pytest.raises(FileNotFoundError):
-            step_store.step(1, 1).open_product("facts")
+            step_store.step(1, 1).open_facts()
+
+
+class TestActivityMarker:
+    """TTL 的唯一判据：每个写入口顺带刷新它，读入口一律不碰。"""
+
+    def test_every_write_member_stamps_activity(self, tmp_storage):
+        """新增写成员漏调 `_write_dir()`，只表现为该写者独占的 step 静默过期被回收。"""
+        writes = [
+            lambda s: s.segment_path("raw", 1),
+            lambda s: s.sidecar_path("raw", 1),
+            lambda s: s.init_path("raw"),
+            lambda s: s.playlist_path("raw"),
+            lambda s: s.metadata_path(),
+            lambda s: s.features_path(),
+            lambda s: s.facts_path(),
+            lambda s: s.open_features("w").close(),
+            lambda s: s.open_facts("w").close(),
+            lambda s: s.open_offline_result("w").close(),
+        ]
+        for i, write in enumerate(writes):
+            step = step_store.step(2, i)
+            assert step.last_activity_at is None
+            write(step)
+            assert step.last_activity_at is not None, write
+
+    def test_read_open_does_not_stamp_or_create_dir(self, tmp_storage):
+        """读一个不存在的 step 不该在盘上留痕，也不该让它显得还活着。"""
+        step = step_store.step(1, 1)
+        with pytest.raises(FileNotFoundError):
+            step.open_features("r")
+        assert not (tmp_storage / "1" / "1").exists()
+        assert step.last_activity_at is None
+
+    def test_scratch_path_does_not_stamp(self, tmp_storage):
+        """临时文件是读侧导出/打点的中间产物，不代表这个 step 还在产出。"""
+        step = step_store.step(1, 1)
+        step.scratch_path("export")
+        assert step.last_activity_at is None
+
+    def test_marker_is_on_disk_not_in_the_handle(self, tmp_storage):
+        step_store.step(1, 1).metadata_path()
+        assert step_store.step(1, 1).last_activity_at is not None
 
 
 class TestScratchPath:
-    def test_leading_dot_keeps_temp_files_out_of_products(self, tmp_storage):
-        """前导点是 purge 区分临时文件与产物的唯一依据 —— 破了死 step 会躲过回收。"""
+    def test_leading_dot_keeps_temp_files_out_of_segment_scan(self, tmp_storage):
+        """前导点让半截的临时 mp4 落在段名正则之外，不被 `segments()` 当成真段。"""
         p = step_store.step(1, 1).scratch_path("clip")
         assert p.name.startswith(".clip_")
         assert p.suffix == ".m3u8"
@@ -383,7 +429,7 @@ class TestSegmentRef:
 class TestBaseDirResolution:
     """存储根目录由 settings.storage_base_dir 单一真源解析，与进程 cwd 无关。
 
-    「读写两侧同源」此前靠断言 `PersistenceConfig.storage_base_dir == storage_root()`
+    「读写两侧同源」此前靠断言 `PersistenceConfig.storage_base_dir == _storage_root()`
     来守；现在它是**结构性保证**——除 settings 与本包外没人能读到那个属性（由
     `test_import_hygiene.test_storage_root_is_private_to_step_store` 锁死），
     persistence 侧的那个转发 property 已随之删除。
@@ -393,7 +439,7 @@ class TestBaseDirResolution:
         self, tmp_path, monkeypatch
     ):
         from app.settings import settings
-        from app.services.step_store.store import storage_root
+        from app.services.step_store.store import _storage_root
 
         monkeypatch.setattr(settings, "storage_dir", "./database")
         write_path = settings.storage_base_dir
@@ -406,7 +452,7 @@ class TestBaseDirResolution:
         assert tmp_path not in write_path.parents
 
         # 本包的默认根解析与 settings 同值（读写两侧共用这一个入口）
-        assert storage_root() == write_path
+        assert _storage_root() == write_path
         assert step_store.step(1, 1)._root == write_path
 
     def test_absolute_base_dir_is_returned_as_is(self, tmp_path, monkeypatch):

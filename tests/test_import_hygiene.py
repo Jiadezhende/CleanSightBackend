@@ -51,10 +51,18 @@ LEAF_PACKAGE = "app/services/step_store"
 # 可查得多：目录 = 根 + 两级 id，只要没人能拿到根，落盘布局就只能问 step_store。
 STORAGE_ROOT_ATTR = "storage_base_dir"
 STORAGE_ROOT_ALLOWED = ("app/settings.py", f"{LEAF_PACKAGE}/")
+# 拦属性访问还不够：`store._storage_root()` 返回的就是那个根，import 一下就绕过去了。
+# 两条一起拦才叫「根拿不到」。
+STORAGE_ROOT_FN = "_storage_root"
 
-# 写成员的调用者白名单 = `step_store.products.PRODUCTS` 里登记的三个 writer。
-# 计划外的第四个写者要先在 PRODUCTS 登记（否则产物对 TTL 不可见），再加进这里。
-WRITE_MEMBERS = ("product_path", "open_product")
+# 写成员的调用者白名单 = 往 step 目录里写东西的三个服务模块。计划外的第四个写者要先在
+# 这里登记——**这条门禁是「谁在写」的唯一约束**（写成员每类产物一个具名方法，没有注册表
+# 可以顺带拦一道；TTL 可见性由写入口顺带刷的活动标记保证，与写者是谁无关）。
+WRITE_MEMBERS = (
+    "segment_path", "sidecar_path", "init_path", "playlist_path", "metadata_path",
+    "features_path", "facts_path",
+    "open_features", "open_facts", "open_offline_result",
+)
 WRITE_MEMBER_ALLOWED = (
     "app/services/persistence/strategies/hls_strategy.py",
     "app/services/inference/feature/store.py",
@@ -184,7 +192,7 @@ def test_singleton_reference_surface():
 def test_step_store_is_a_leaf():
     """step_store 不得 import 任何其他 app.services.* 包（含 app.routers）。
 
-    它只允许依赖 stdlib、numpy 与 `app.settings`（`storage_root` 读存储根，
+    它只允许依赖 stdlib、numpy 与 `app.settings`（`_storage_root` 读存储根，
     写在函数体内）。破这条即意味着 leaf 地位失守，写侧读侧的循环依赖会重新长出来。
     """
     leaf_dir = REPO_ROOT / LEAF_PACKAGE
@@ -223,13 +231,17 @@ def _iter_app_trees():
 
 
 def test_storage_root_is_private_to_step_store():
-    """除 `app/settings.py` 与 step_store 外，谁都不许碰 `settings.storage_base_dir`。
+    """除 `app/settings.py` 与 step_store 外，谁都不许拿到存储根。
+
+    两个口子都要堵：`settings.storage_base_dir` 这个属性，以及包内私有的
+    `store._storage_root()` —— 后者返回的就是同一个值，只拦属性访问等于没拦。
 
     存储根一旦流出去，调用方就能自己拼「根 + task_id + step_id + 文件名」，落盘布局
     重新复制一份到各处——那正是抽出本包要消掉的东西，且**这种拼接门禁抓不到**
     （`root / "x"` 是普通 Path 拼接，看不出它在拼 step 目录）。故拦在源头：拦根。
 
-    要 step 里的文件走 `Step.product_path(kind)` / `open_product` / `scratch_path`；
+    要 step 里的文件走 `Step` 的具名写成员（`segment_path` / `open_features` / …）
+    或 `scratch_path`；
     要存储根**旁边**的东西（lab 导出根、lab 配置文件）在 `settings` 上加派生 property。
     """
     violations = []
@@ -238,10 +250,17 @@ def test_storage_root_is_private_to_step_store():
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == STORAGE_ROOT_ATTR:
-                violations.append(f"{rel}:{node.lineno}")
+                violations.append(f"{rel}:{node.lineno} → settings.{STORAGE_ROOT_ATTR}")
+            # 包内私有的根解析函数，import 或调用都算拿到了根
+            elif isinstance(node, ast.Attribute) and node.attr == STORAGE_ROOT_FN:
+                violations.append(f"{rel}:{node.lineno} → store.{STORAGE_ROOT_FN}()")
+            elif isinstance(node, ast.ImportFrom) and any(
+                a.name == STORAGE_ROOT_FN for a in node.names
+            ):
+                violations.append(f"{rel}:{node.lineno} → import {STORAGE_ROOT_FN}")
 
     assert not violations, (
-        f"以下文件直接读了 settings.{STORAGE_ROOT_ATTR}：\n  "
+        "以下文件拿到了存储根：\n  "
         + "\n  ".join(violations)
         + "\n落盘位置一律问 step_store（Step.product_path / open_product / scratch_path）；"
         "\n存储根旁边的东西在 settings 上加派生 property，别向 step_store 借根。"
@@ -249,12 +268,11 @@ def test_storage_root_is_private_to_step_store():
 
 
 def test_step_store_write_members_have_registered_callers():
-    """`product_path` / `open_product` 只许被 `PRODUCTS` 登记的三个 writer 调用。
+    """`Step` 的写成员只许被登记在案的三个 writer 模块调用。
 
-    防的是「计划外的第四个写者混进来」。注意**这条门禁与 kind 运行时校验是两件事**：
-    kind 校验防「新增产物忘登记 → 对 TTL 不可见」，这条防「谁在写」失控。
-    写权限**不做类型级隔离**（枚举公开、句柄可随手构造，那不是能力对象只是命名仪式）
-    —— Python 里真正拦得住的就是运行时校验与静态门禁这两处。
+    防的是「计划外的第四个写者混进来」。写权限**不做类型级隔离**（句柄可随手构造，
+    发一个 `StepWriter` 类型只是命名仪式、零强制力）—— Python 里真正拦得住的是运行时
+    校验与静态门禁，故就拦在这一处。
     """
     violations = []
     for rel, tree in _iter_app_trees():
@@ -269,10 +287,9 @@ def test_step_store_write_members_have_registered_callers():
                 violations.append(f"{rel}:{node.lineno} → .{node.func.attr}()")
 
     assert not violations, (
-        "以下文件调用了 step_store 的写成员，但不在 PRODUCTS 登记的 writer 列表里：\n  "
+        "以下文件调用了 step_store 的写成员，但不在 writer 白名单里：\n  "
         + "\n  ".join(violations)
-        + "\n新增写者要先在 step_store/products.py 的 PRODUCTS 登记产物（否则它对 TTL "
-        "不可见），再加进 WRITE_MEMBER_ALLOWED 并写明理由。"
+        + "\n新增写者先加进 WRITE_MEMBER_ALLOWED 并写明它往 step 目录里写什么。"
     )
 
 

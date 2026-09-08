@@ -111,7 +111,7 @@ class PersistenceConfig:
 
     # 存储根**不在此暴露**：它此前是 `return settings.storage_base_dir`，同一个值
     # 绕两层，还把「路径」这个概念塞进了一个只该管队列与 worker 数的配置对象。
-    # 落盘路径一律经 step_store 的 `Step.product_path`，由导入门禁锁死
+    # 落盘路径一律经 step_store 的具名写成员（`Step.segment_path` 等），由导入门禁锁死
     #（tests/test_import_hygiene.py::test_storage_root_is_private_to_step_store）。
 
     # 扁平访问器（manager 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
