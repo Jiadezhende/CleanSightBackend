@@ -29,7 +29,8 @@ SEGMENT_PATTERN = re.compile(
     r"^(?P<track>raw|processed)_segment_(?P<ts_us>\d+)\.mp4$"
 )
 
-METADATA_NAME = "metadata.json"
+# 此处**没有** metadata.json：它曾是第一代 TTL 判据（`updated_at`），判据换代后全仓零读者，
+# 每落一段还要 read-modify-write 一次 JSON，2026-09 随写侧事务化一并停写。
 
 # 推理侧的 features.jsonl / facts.jsonl / offline_inference_result.json **不在此登记** ——
 # 本包对那三个文件没有任何格式知识（不解析、不校验、不理解内容），名字归 inference 自己持有，

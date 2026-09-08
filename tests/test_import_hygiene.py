@@ -62,8 +62,7 @@ STORAGE_ROOT_FN = "_storage_root"
 # 名字都挑了有区分度的：**别把 `open` 也列进来**——AST 按属性名匹配，会把满仓的
 # `path.open(...)` 全部误报。
 WRITE_MEMBERS = (
-    "segment_path", "sidecar_path", "init_path", "playlist_path", "metadata_path",
-    "file_path", "open_file",
+    "write_segment", "file_path", "open_file",
 )
 WRITE_MEMBER_ALLOWED = (
     "app/services/persistence/strategies/hls_strategy.py",
@@ -81,20 +80,17 @@ PRIVATE_MODULES = {
     "app.services.step_store._decoder",
 }
 # 具名例外，各有退出条件。key = 模块名，value = {允许的文件}
+# 只剩一条。写侧 hls_strategy 那条已随写事务（`hls.write_segment`）关闭——playlist 首行与
+# EXTINF append 都进了包内，它现在只产字节、不碰格式。
 PRIVATE_MODULE_ALLOWED = {
     "app.services.step_store._playlist": {
-        # 写侧是 playlist 格式的**定义者**（手写 EXTINF 行与文件头、算 tfdt 前缀和），
-        # 不是消费者。**退出条件**：写侧事务化（`hls.write_segment`）后，首行与 EXTINF
-        # append 都进包内，这条随之删掉。
-        "app/services/persistence/strategies/hls_strategy.py",
         # 每段 EXTINF 取相邻段 ts 跨度而非 playlist EXTINF（seek 基准是 ts，换了会逐段
         # 错位），故走不了 `hls.vod_playlist`。**退出条件**：验证两者在 fps 漂移下等价
         # 后改走成品出口，然后删掉本行。
         "app/services/lab/clip_builder.py",
     },
     "app.services.step_store._layout": {
-        # 同上两条的连带：它们手拼 m3u8 首行时要 `init_name` 写 EXT-X-MAP。
-        "app/services/persistence/strategies/hls_strategy.py",
+        # 上一条的连带：手拼 m3u8 首行时要 `init_name` 写 EXT-X-MAP。
         "app/services/lab/clip_builder.py",
     },
 }

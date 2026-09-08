@@ -84,7 +84,7 @@ class TestLastActivity:
     def test_stale_product_does_not_age_out_active_step(self, step_dir):
         """**不误删活跃 step**：产物文件很旧但刚有人写过（标记新鲜）。"""
         old = time.time() - 10000
-        _touch(step_dir / _layout.METADATA_NAME, old)
+        _touch(step_dir / _layout.segment_name("raw", 1), old)
         _mark_active(step_dir)  # mtime = 现在
         assert step_store.last_activity_at(TASK_ID, STEP_ID) > old + 1000
 

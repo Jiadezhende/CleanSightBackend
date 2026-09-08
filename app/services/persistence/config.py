@@ -16,9 +16,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HLSConfig:
-    """HLS持久化配置"""
+    """HLS持久化配置
 
-    workers: int = 2
+    注意：不配 workers——HLS 写侧固定单线程，理由见 `workers/hls_worker.HLSWorkerPool`。
+    留一个旋钮等于留了个能静默把 tfdt 竞争放回来的开关。
+    """
+
     queue_size: int = 100
     sweep_interval_seconds: float = 1.0  # HLSSegmentSweeper 扫描间隔（秒，PULL 模型）
     # 注意：不配 segment_duration——分段由 CQ 帧数(ca_segment_len)触发、每段时长由 EXTINF
@@ -116,10 +119,6 @@ class PersistenceConfig:
 
     # 扁平访问器（manager 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
     @property
-    def hls_workers(self) -> int:
-        return self.hls.workers
-
-    @property
     def hls_queue_size(self) -> int:
         return self.hls.queue_size
 
@@ -152,11 +151,7 @@ class PersistenceConfig:
         # DEBUG级别显示详细配置
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("========== Persistence配置 ==========")
-            logger.debug(
-                "HLS: workers=%d, queue=%d",
-                self.hls.workers,
-                self.hls.queue_size,
-            )
+            logger.debug("HLS: workers=1(fixed), queue=%d", self.hls.queue_size)
             logger.debug(
                 "告警: workers=%d, queue=%d",
                 self.alarm.workers,
@@ -185,15 +180,7 @@ class PersistenceConfig:
         if self.alarm.queue_size < 64:
             warnings.append(f"⚠️  告警队列容量过小: {self.alarm.queue_size}，建议>=128")
 
-        # 3. 检查Worker数量合理性
-        if self.hls.workers > 4:
-            warnings.append(
-                f"⚠️  HLS Worker数量过多: {self.hls.workers}，建议2-4（避免CPU竞争）"
-            )
-
-        if self.hls.workers < 1:
-            warnings.append(f"❌ HLS Worker数量必须>=1")
-
+        # 3. 检查Worker数量合理性（HLS 固定单线程，无需校验）
         if self.alarm.workers < 1:
             warnings.append(f"❌ 告警Worker数量必须>=1")
 

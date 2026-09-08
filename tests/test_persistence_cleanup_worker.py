@@ -51,7 +51,7 @@ def _worker(**kw) -> StorageCleanupWorker:
 class TestRetention:
     def test_deletes_expired_step(self, tmp_storage):
         step = _aged_step(tmp_storage / "1" / "2", DAYS + 1,
-                          _layout.segment_name("raw", 1), _layout.METADATA_NAME)
+                          _layout.segment_name("raw", 1))
 
         assert _worker()._scan_and_clean() == 1
         assert not step.exists()
@@ -64,7 +64,9 @@ class TestRetention:
 
     def test_boundary_just_inside_retention(self, tmp_storage):
         """恰好在保留期内（差一小时）不删。"""
-        step = _aged_step(tmp_storage / "1" / "2", DAYS - 1 / 24, _layout.METADATA_NAME)
+        step = _aged_step(
+            tmp_storage / "1" / "2", DAYS - 1 / 24, _layout.segment_name("raw", 1)
+        )
 
         assert _worker()._scan_and_clean() == 0
         assert step.exists()
@@ -72,10 +74,10 @@ class TestRetention:
     def test_stale_products_do_not_age_out_an_active_step(self, tmp_storage):
         """**不误删活跃 step**：产物文件很旧，但刚有人写过（标记新鲜）。
 
-        第一代判据只看 metadata.json，这种目录会被误删。
+        第一代判据只看 metadata.json（现已停写），这种目录会被误删。
         """
         step = tmp_storage / "1" / "2"
-        _touch(step / _layout.METADATA_NAME, age_days=DAYS + 5)
+        _touch(step / _layout.segment_name("raw", 1), age_days=DAYS + 5)
         _touch(step / _layout.segment_name("raw", 9), age_days=DAYS + 5)
         _touch(step / _layout.ACTIVITY_NAME, age_days=0)
 

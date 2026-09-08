@@ -6,7 +6,7 @@
 - list_steps：清单接口要的双轨段清单（一次扫描出全），只出有段的 step
 - time_bounds_us：终点含末段 EXTINF、双轨并集、跳在途段
 - vod_playlist：备料（滤在途、EXTINF 真值、TARGETDURATION）与三个领域异常的判定顺序
-- 写路径：落盘名与 `_layout` 单一真源逐字一致、track 校验、顺带刷活动标记
+- write_segment：四件产物的原子提交与回滚、tfdt 前缀和、init 每轨一次、并发守卫
 - SegmentRef：单位换算与「只带调用方拿不到的东西」
 
 目录契约那一层（枚举 / 文件出入口 / 活动标记 / traversal）在 test_step_store_dir.py。
@@ -280,41 +280,178 @@ class TestHasInit:
         assert hls.has_init(1, 1, "processed") is False
 
 
-class TestWritePaths:
-    """落盘名与 `_layout` 单一真源逐字一致；写路径顺带刷活动标记。"""
+class TestWriteSegment:
+    """落一段是一个原子单元：sidecar + 段 mp4 + init + playlist 的 EXTINF 行。"""
 
-    def test_names(self, tmp_storage):
-        assert hls.segment_path(1, 1, "raw", 42).name == "raw_segment_42.mp4"
-        assert hls.sidecar_path(1, 1, "raw", 42).name == "raw_segment_42.idx"
-        assert hls.init_path(1, 1, "processed").name == "processed_init.mp4"
-        assert hls.playlist_path(1, 1, "raw").name == "raw_playlist.m3u8"
-        assert hls.metadata_path(1, 1).name == "metadata.json"
-        assert hls.segment_path(1, 1, "raw", 42).parent == tmp_storage / "1" / "1"
+    @staticmethod
+    def _put(task_id, step_id, track, start_ts, dur, *, frame_ts=None, body=b"seg"):
+        """走完整事务落一段（字节由测试直接写，不起 ffmpeg）。"""
+        with hls.write_segment(task_id, step_id, track, start_ts) as seg:
+            seg.stage_path.write_bytes(body)
+            if seg.init_stage_path is not None:
+                seg.init_stage_path.write_bytes(b"init")
+            seg.commit(duration_s=dur, frame_timestamps=frame_ts)
+        return seg
+
+    def test_commit_lands_all_four_artifacts(self, tmp_storage):
+        self._put(1, 1, "raw", 1.5, 10.0, frame_ts=[1.5, 1.6])
+        d = tmp_storage / "1" / "1"
+
+        assert (d / "raw_segment_1500000.mp4").read_bytes() == b"seg"
+        assert (d / "raw_segment_1500000.idx").exists()  # sidecar 与段同 stem
+        assert (d / "raw_init.mp4").read_bytes() == b"init"
+        assert (d / "raw_playlist.m3u8").read_text() == (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:7\n"
+            "#EXT-X-TARGETDURATION:10\n"
+            '#EXT-X-MAP:URI="raw_init.mp4"\n'
+            "#EXTINF:10.000,\n"
+            "raw_segment_1500000.mp4\n"
+        )
+
+    def test_ts_us_truncates(self, tmp_storage):
+        """**截断而非四舍五入**：改成 round 会让「start_ts 恰为该段首帧」的定位无条件出错。"""
+        self._put(1, 1, "raw", 0.9999999, 1.0)
+        assert (tmp_storage / "1" / "1" / "raw_segment_999999.mp4").exists()
+
+    def test_second_segment_appends_without_rewriting_header(self, tmp_storage):
+        self._put(1, 1, "raw", 1.0, 10.0)
+        self._put(1, 1, "raw", 11.0, 10.5)
+        text = (tmp_storage / "1" / "1" / "raw_playlist.m3u8").read_text()
+
+        assert text.count("#EXTM3U") == 1
+        assert text.endswith("#EXTINF:10.500,\nraw_segment_11000000.mp4\n")
+
+    def test_tfdt_offset_is_sum_of_prior_extinf(self, tmp_storage):
+        """tfdt(N) = Σ EXTINF(0..N-1)。三套时间线（EXTINF / tfdt / 媒体时长）同源于此。"""
+        with hls.write_segment(1, 1, "raw", 1.0) as seg:
+            assert seg.tfdt_offset_s == 0.0  # 首段
+            seg.stage_path.write_bytes(b"a")
+            seg.init_stage_path.write_bytes(b"init")
+            seg.commit(duration_s=10.0)
+
+        with hls.write_segment(1, 1, "raw", 11.0) as seg:
+            assert seg.tfdt_offset_s == pytest.approx(10.0)
+            seg.stage_path.write_bytes(b"b")
+            seg.commit(duration_s=10.0)
+
+        with hls.write_segment(1, 1, "raw", 21.0) as seg:
+            assert seg.tfdt_offset_s == pytest.approx(20.0)
+            seg.stage_path.write_bytes(b"c")
+            seg.commit(duration_s=10.0)
+
+    def test_init_stage_is_offered_once_per_track(self, tmp_storage):
+        """该轨已有 init 就不再收：同轨同编码参数下 SPS/PPS 一致，重复产出丢弃。"""
+        with hls.write_segment(1, 1, "raw", 1.0) as seg:
+            assert seg.init_stage_path is not None
+            seg.stage_path.write_bytes(b"a")
+            seg.init_stage_path.write_bytes(b"init")
+            seg.commit(duration_s=10.0)
+
+        with hls.write_segment(1, 1, "raw", 11.0) as seg:
+            assert seg.init_stage_path is None
+            seg.stage_path.write_bytes(b"b")
+            seg.commit(duration_s=10.0)
+
+        # 另一条轨仍要自己的 init：共用会变成「谁先转码谁定」，SPS/PPS 不匹配
+        with hls.write_segment(1, 1, "processed", 1.0) as seg:
+            assert seg.init_stage_path is not None
+            seg.stage_path.write_bytes(b"p")
+            seg.init_stage_path.write_bytes(b"pinit")
+            seg.commit(duration_s=10.0)
+
+        d = tmp_storage / "1" / "1"
+        assert (d / "raw_init.mp4").read_bytes() == b"init"
+        assert (d / "processed_init.mp4").read_bytes() == b"pinit"
+
+    def test_only_raw_gets_a_sidecar(self, tmp_storage):
+        """processed 是渲染结果，离线不消费，不产 sidecar。"""
+        self._put(1, 1, "processed", 1.0, 10.0, frame_ts=None)
+        d = tmp_storage / "1" / "1"
+        assert (d / "processed_segment_1000000.mp4").exists()
+        assert not (d / "processed_segment_1000000.idx").exists()
+
+    def test_sidecar_is_readable_by_the_decoder(self, tmp_storage):
+        """写侧 array('d') 与读侧 np.fromfile(float64) 必须逐字节等价 —— 破了就静默取错帧。"""
+        import numpy as np
+
+        ts = [1.5, 1.5666666, 1.6333333]
+        self._put(1, 1, "raw", 1.5, 10.0, frame_ts=ts)
+        got = np.fromfile(
+            tmp_storage / "1" / "1" / "raw_segment_1500000.idx", dtype=np.float64
+        )
+        assert got.tolist() == ts  # 位级相等，不是近似
+
+    def test_rolls_back_when_body_raises(self, tmp_storage):
+        """异常 = 未提交：临时文件清掉，playlist 一个字节不动。"""
+        self._put(1, 1, "raw", 1.0, 10.0)
+        before = (tmp_storage / "1" / "1" / "raw_playlist.m3u8").read_text()
+
+        with pytest.raises(RuntimeError):
+            with hls.write_segment(1, 1, "raw", 11.0) as seg:
+                seg.stage_path.write_bytes(b"half")
+                raise RuntimeError("boom")
+
+        d = tmp_storage / "1" / "1"
+        assert (d / "raw_playlist.m3u8").read_text() == before
+        assert not (d / "raw_segment_11000000.mp4").exists()
+        assert list(d.glob(".stage_*")) == []  # 无残骸
+
+    def test_rolls_back_when_never_committed(self, tmp_storage):
+        """没抛异常但也没 commit（调用方自己判定该段作废）→ 同样不落盘。"""
+        with hls.write_segment(1, 1, "raw", 1.0) as seg:
+            seg.stage_path.write_bytes(b"unwanted")
+
+        d = tmp_storage / "1" / "1"
+        assert not (d / "raw_segment_1000000.mp4").exists()
+        assert not (d / "raw_playlist.m3u8").exists()
+        assert list(d.glob(".stage_*")) == []
 
     def test_rejects_invalid_track(self, tmp_storage):
         with pytest.raises(ValueError, match="Invalid track"):
-            hls.segment_path(1, 1, "bogus", 42)
+            with hls.write_segment(1, 1, "bogus", 1.0):
+                pass
 
-    def test_write_paths_stamp_activity(self, tmp_storage):
-        """漏刷的表现是该 step 静默过期被回收——静默错误，必须锁住。"""
-        writes = [
-            lambda t, s: hls.segment_path(t, s, "raw", 1),
-            lambda t, s: hls.sidecar_path(t, s, "raw", 1),
-            lambda t, s: hls.init_path(t, s, "raw"),
-            lambda t, s: hls.playlist_path(t, s, "raw"),
-            lambda t, s: hls.metadata_path(t, s),
+    def test_stamps_activity(self, tmp_storage):
+        """写入口必须刷 TTL 判据，否则该 step 静默过期被回收。"""
+        assert store.last_activity_at(1, 1) is None
+        with hls.write_segment(1, 1, "raw", 1.0):
+            pass
+        assert store.last_activity_at(1, 1) is not None
+
+    def test_concurrent_write_on_same_track_raises(self, tmp_storage):
+        """单写者是 tfdt 正确性的前提；被打破时要响亮失败，不能静默写坏偏移。"""
+        with hls.write_segment(1, 1, "raw", 1.0):
+            with pytest.raises(hls.HlsConcurrentWrite):
+                with hls.write_segment(1, 1, "raw", 11.0):
+                    pass
+
+    def test_inflight_key_is_released_after_exception(self, tmp_storage):
+        """守卫不能因为一次失败就把这条轨永久锁死。"""
+        with pytest.raises(RuntimeError):
+            with hls.write_segment(1, 1, "raw", 1.0):
+                raise RuntimeError("boom")
+        with hls.write_segment(1, 1, "raw", 1.0):
+            pass  # 不抛即通过
+
+    def test_other_track_is_not_blocked(self, tmp_storage):
+        """守卫的粒度是 (step, track)：每条轨一份 playlist，各算各的累计 EXTINF。"""
+        with hls.write_segment(1, 1, "raw", 1.0):
+            with hls.write_segment(1, 1, "processed", 1.0):
+                pass
+
+
+class TestPlaylistEntries:
+    def test_returns_pairs_in_write_order(self, tmp_storage):
+        d = _make_step_dir(tmp_storage, 1, 1)
+        _write_playlist(d, "raw", [1000, 2000], dur=9.5)
+        assert hls.playlist_entries(1, 1, "raw") == [
+            ("raw_segment_1000.mp4", 9.5),
+            ("raw_segment_2000.mp4", 9.5),
         ]
-        for i, write in enumerate(writes):
-            assert store.last_activity_at(3, i) is None
-            write(3, i)
-            assert store.last_activity_at(3, i) is not None, write
 
-    def test_ts_to_us_truncates(self, tmp_storage):
-        """**截断而非四舍五入**：改成 round 会让「start_ts 恰为该段首帧」的定位无条件出错。"""
-        assert hls.ts_to_us(1.9999999) == 1_999_999
-        assert hls.segment_path(1, 1, "raw", hls.ts_to_us(0.9999999)).name == (
-            "raw_segment_999999.mp4"
-        )
+    def test_empty_when_missing(self, tmp_storage):
+        assert hls.playlist_entries(1, 1, "raw") == []
 
 
 class TestSegmentRef:

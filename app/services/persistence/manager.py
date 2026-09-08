@@ -51,10 +51,8 @@ class PersistenceManager:
         )
 
         # 创建Worker池
-        self.hls_pool = HLSWorkerPool(
-            input_queue=self.hls_queue,
-            num_workers=self.config.hls_workers,
-        )
+        # HLS 写侧固定单线程（理由见 HLSWorkerPool），故不传 worker 数
+        self.hls_pool = HLSWorkerPool(input_queue=self.hls_queue)
 
         self.alarm_pool = AlarmWorkerPool(
             input_queue=self.alarm_queue,
@@ -197,13 +195,6 @@ class PersistenceManager:
         except Exception as e:
             logger.error("告警入队失败: %s", e, exc_info=True)
             return False
-
-    def release_task_locks(self, task_id: int) -> None:
-        """任务拆除后回收该 task 的 HLS 目录锁（防 _dir_locks 随任务数无限增长）。
-
-        由 RunController.stop_run 在清 registry 之后调用——此时不会再有该 task 的新段入队。
-        """
-        self.hls_pool.release_dir_locks(task_id)
 
     def start_run(self, cq) -> None:
         """per-run 起始钩子（persistence owner）：清空该 (task_id, step_id) 旧 HLS step 目录。

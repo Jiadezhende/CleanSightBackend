@@ -11,7 +11,8 @@ storage:
 
 # HLS持久化配置
 hls:
-  workers: 2                      # HLS Worker数量
+  # 注意：不配 workers——HLS 写侧固定单线程（段的 tfdt 起点是「之前所有 EXTINF 之和」，
+  #      多写者会读到同一个累计值而撞车）。要改并发得连同锁一起重新设计，不是调个数字。
   queue_size: 100                 # HLS队列最大长度
   sweep_interval_seconds: 1.0     # HLSSegmentSweeper 扫描间隔（秒）：周期从活跃 CQ 拉走攒满的整段落盘（PULL）
 

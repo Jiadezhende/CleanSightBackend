@@ -86,6 +86,33 @@ def sum_durations(playlist_path: Path) -> float:
     return max(0.0, sum(dur for _, dur in parse_playlist_entries(playlist_path)))
 
 
+# LIVE playlist 头部声明的 TARGETDURATION。写侧是**边录边追加**，写头时还不知道后面各段
+# 多长，故取一个覆盖常见段长的固定值；VOD 出口按实测 max(EXTINF) 重算，那才是给播放器的。
+_LIVE_TARGET_DURATION = 10
+
+
+def live_header(map_uri: str) -> str:
+    """LIVE 形态 playlist 的头部（**不写 ENDLIST**，边录边 append）。
+
+    `EXT-X-MAP` 必须在任何 EXTINF 之前：fMP4 fragment 没有 init 段无法解码。
+    """
+    return (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:7\n"
+        f"#EXT-X-TARGETDURATION:{_LIVE_TARGET_DURATION}\n"
+        f'#EXT-X-MAP:URI="{map_uri}"\n'
+    )
+
+
+def entry_line(uri: str, duration_s: float) -> str:
+    """一个段在 playlist 里的两行：`#EXTINF:<dur>,` + 文件名。
+
+    ⚠ **三位小数是与 tfdt 对齐的精度**：`sum_durations` 读回来求前缀和当 tfdt 起点，写入
+    精度即回读精度。改格式等于改 tfdt 基准。
+    """
+    return f"#EXTINF:{duration_s:.3f},\n{uri}\n"
+
+
 def build_vod_playlist(
     entries: List[Tuple[str, float]],
     map_uri: str,

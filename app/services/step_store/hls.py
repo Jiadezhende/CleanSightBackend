@@ -19,6 +19,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+from array import array
+from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -53,11 +57,10 @@ __all__ = [
     "has_init",
     "vod_playlist",
     "frames",
-    "segment_path",
-    "sidecar_path",
-    "init_path",
-    "playlist_path",
-    "metadata_path",
+    "playlist_entries",
+    "write_segment",
+    "SegmentWrite",
+    "HlsConcurrentWrite",
 ]
 
 
@@ -328,55 +331,213 @@ def frames(
     )
 
 
+
+
 # ---------------------------------------------------------------------------
-# 写
-#
-# TODO(下一步): 这五个路径出口会被 `write_segment(...)` 事务取代 —— 落一段是一个原子单元
-# （sidecar + 段 mp4 + init + playlist 的 EXTINF 行），拆成路径取值器等于把提交顺序推给
-# 调用方。见 docs/update/20260906_STEP_STORE_EXTRACTION.md §16。
+# 写 —— 一段视频落盘是一个原子单元，故只有一个事务入口
 # ---------------------------------------------------------------------------
 
 
-def segment_path(task_id: int, step_id: int, track: str, ts_us: int) -> Path:
-    """该段视频文件该写到哪。`ts_us` 由 `_layout.ts_to_us` 从秒换算（**截断**，别 round）。"""
-    return store.file_path(
-        task_id, step_id, _layout.segment_name(_check_track(track), ts_us)
-    )
+def playlist_entries(
+    task_id: int, step_id: int, track: str
+) -> List[Tuple[str, float]]:
+    """该轨 LIVE playlist 里的 [(段文件名, EXTINF 秒)]，按写入顺序。文件不存在返回空。
 
-
-def sidecar_path(task_id: int, step_id: int, track: str, ts_us: int) -> Path:
-    """该段的逐帧 ts sidecar（`.idx`）该写到哪。与同段 `segment_path` 必须同 stem —— 对不上
-    时读侧按契约只 warning 跳过该段，表现为**静默丢帧**。"""
-    return store.file_path(
-        task_id, step_id, _layout.sidecar_name(_check_track(track), ts_us)
-    )
-
-
-def init_path(task_id: int, step_id: int, track: str) -> Path:
-    """该轨 fMP4 init 段的路径。存在性判断用 `has_init()`。"""
-    return store.file_path(
-        task_id, step_id, _layout.init_name(_check_track(track))
-    )
-
-
-def playlist_path(task_id: int, step_id: int, track: str) -> Path:
-    """该轨 LIVE 形态 playlist 的路径。**写侧专用** —— 读 EXTINF 走 `segments()` /
-    `vod_playlist()`，它们把在途段过滤与时长真值一并备好。"""
-    return store.file_path(
-        task_id, step_id, _layout.playlist_name(_check_track(track))
-    )
-
-
-def metadata_path(task_id: int, step_id: int) -> Path:
-    """`metadata.json` 的路径。**已不是 TTL 判据**（那是 `store.last_activity_at`），且当前
-    全仓无读者——下一步随写侧事务一并删除。"""
-    return store.file_path(task_id, step_id, _layout.METADATA_NAME)
-
-
-def ts_to_us(ts: float) -> int:
-    """段时间戳（秒）→ 文件名里的 ts_us。写侧算段名用。
-
-    **截断而非四舍五入**，是既有落盘约定的一部分：读侧按 ts 定位段依赖 `ts_us <= ts*1e6`，
-    改成 round 会让「start_ts 恰为该段首帧」的定位无条件出错。
+    给排查/度量工具用（对齐检查、tfdt 前缀和核对）。回放拼 m3u8 走 `vod_playlist`。
     """
-    return _layout.ts_to_us(ts)
+    _check_track(track)
+    return _playlist.parse_playlist_entries(
+        store._step_dir(task_id, step_id) / _layout.playlist_name(track)
+    )
+
+
+class HlsConcurrentWrite(HlsError):
+    """同一 (step, track) 上有两个并发的 `write_segment`。
+
+    HLS 写侧是**单线程**（`HLSWorkerPool` 固定一个 worker）。两个并发写者会读到相同的累计
+    EXTINF，两段 fragment 的 tfdt 起点撞在一起 —— hls.js 播到第二段停在段尾不前进。这条守卫
+    不串行化任何东西，只是让「单写者」这个前提在被打破时**响亮地失败**，而不是静默出错。
+    """
+
+
+# 在途写入的 (task_id, step_id, track)。`_inflight_guard` 只保护这个集合的增删，
+# **不保护写入过程** —— 它不是把并发变成串行，是把并发变成异常。
+_inflight: set = set()
+_inflight_guard = threading.Lock()
+
+
+class SegmentWrite:
+    """`write_segment` 事务的把手：调用方往 `stage_path` 写字节，`commit()` 交回时长与帧 ts。
+
+    调用方只拿到「往哪写」和「tfdt 该从哪开始」，**不知道最终文件叫什么、playlist 长什么样、
+    sidecar 怎么命名** —— 那些连同提交顺序都在 `write_segment` 的退出路径里。
+    """
+
+    __slots__ = (
+        "stage_path",
+        "init_stage_path",
+        "tfdt_offset_s",
+        "_duration_s",
+        "_frame_timestamps",
+        "_committed",
+    )
+
+    def __init__(
+        self,
+        stage_path: Path,
+        init_stage_path: Optional[Path],
+        tfdt_offset_s: float,
+    ):
+        self.stage_path = stage_path
+        self.init_stage_path = init_stage_path
+        self.tfdt_offset_s = tfdt_offset_s
+        self._duration_s: float = 0.0
+        self._frame_timestamps: Optional[Sequence[float]] = None
+        self._committed = False
+
+    def commit(
+        self, duration_s: float, frame_timestamps: Optional[Sequence[float]] = None
+    ) -> None:
+        """声明本段已产出完毕，交出提交所需的两样东西。真正的落盘在事务退出时发生。
+
+        Args:
+            duration_s: 本段 EXTINF。**必须与 fragment 实际媒体时长完全一致**（写侧是
+                `len(frames)/eff_fps`，与编码时用的 fps 同源）—— 对不上就是 hls.js 段尾 MSE
+                缓冲洞 + 总时长缩水。它同时是下一段 tfdt 起点的加数。
+            frame_timestamps: 该段每帧的 ts，落成 sidecar 供离线按 ts 反查帧。**只有 raw 轨产
+                sidecar**（processed 是渲染结果，离线不消费），processed 传 None。
+        """
+        self._duration_s = float(duration_s)
+        self._frame_timestamps = frame_timestamps
+        self._committed = True
+
+
+@contextmanager
+def write_segment(
+    task_id: int, step_id: int, track: str, start_ts: float
+) -> Iterator[SegmentWrite]:
+    """落一段视频：**一个原子单元**（sidecar + 段 mp4 + init + playlist 的 EXTINF 行）。
+
+    调用方在 with 体内把字节产出到 `seg.stage_path`（该轨首段还要把 init 产出到
+    `seg.init_stage_path`），然后 `seg.commit(duration_s, frame_timestamps)`。正常退出时本函数
+    按序提交；**未 commit 或抛异常则一律回滚** —— 临时文件清掉，playlist 一个字节不动。
+
+    Args:
+        start_ts: 本段首帧 ts（**秒**）。段名里的 `ts_us` 由本函数换算，走的是**截断**而非四舍
+            五入 —— 读侧按 ts 定位段依赖 `ts_us <= ts*1e6`，改成 round 会让「start_ts 恰为该段
+            首帧」的定位无条件出错。
+
+    Raises:
+        ValueError: track 非法
+        HlsConcurrentWrite: 同一 (step, track) 已有在途写入（见该异常）
+
+    提交顺序不能改，四条都是写错会**静默**出错的：
+
+    1. **sidecar 先于段 mp4 可见** —— 读侧的段扫描认的是 `{track}_segment_*.mp4`，mp4 一出现该
+       段就对离线反查可见。反过来会留下「段可见但索引未就位」的窗口，期间读侧拿不到 sidecar。
+    2. **sidecar 与段同 stem** —— 对不上时读侧按契约只 warning 跳过该段，表现为静默丢帧。
+    3. **段 mp4 就位后才 append EXTINF** —— playlist 里有一行却没有对应文件，播放器直接报错。
+    4. **`tfdt_offset_s` 在 append 之前读** —— 它是「当前段以前所有 EXTINF 之和」，append 完再
+       读就多算了本段自己。
+
+    **sidecar 写失败不阻断本段**：它只服务离线反查，回放/下载/送标三条链路都不读它；让主产物给
+    辅助索引陪葬不划算。读侧本就按契约容忍缺 sidecar（`_decoder._load_sidecar` 跳过该段）。
+    """
+    _check_track(track)
+    ts_us = _layout.ts_to_us(start_ts)
+    key = (task_id, step_id, track)
+
+    with _inflight_guard:
+        if key in _inflight:
+            raise HlsConcurrentWrite(
+                f"另一个 write_segment 正在写 task={task_id} step={step_id} "
+                f"track={track}；HLS 写侧应为单线程"
+            )
+        _inflight.add(key)
+
+    step_dir = store._step_dir(task_id, step_id)
+    playlist_path = store.file_path(task_id, step_id, _layout.playlist_name(track))
+    stage = store.scratch_path(task_id, step_id, f"stage_{track}_{ts_us}", ".mp4")
+    # 该轨已有 init 就不再收：两轨各有各的 init，同轨同编码参数下 SPS/PPS 一致，重复产出丢弃。
+    init_stage = (
+        None
+        if has_init(task_id, step_id, track)
+        else store.scratch_path(task_id, step_id, f"init_{track}", ".mp4")
+    )
+    seg = SegmentWrite(
+        stage_path=stage,
+        init_stage_path=init_stage,
+        # append 之前读，故求和即得本段的 tfdt 起点；首段读不到条目，返回 0.0
+        tfdt_offset_s=_playlist.sum_durations(playlist_path),
+    )
+
+    try:
+        yield seg
+        if seg._committed:
+            _commit_segment(seg, step_dir, playlist_path, track, ts_us)
+    finally:
+        with _inflight_guard:
+            _inflight.discard(key)
+        # 提交成功后这两个已被 rename 走；失败/未 commit 则在此清掉，不留残骸
+        stage.unlink(missing_ok=True)
+        if init_stage is not None:
+            init_stage.unlink(missing_ok=True)
+
+
+def _commit_segment(
+    seg: SegmentWrite,
+    step_dir: Path,
+    playlist_path: Path,
+    track: str,
+    ts_us: int,
+) -> None:
+    """按序提交一段。顺序的四条理由见 `write_segment` docstring。"""
+    segment_name = _layout.segment_name(track, ts_us)
+
+    # 1. sidecar（只有 raw 轨产），先于段 mp4 可见。失败只 warning，不拖累主产物。
+    if seg._frame_timestamps is not None:
+        _write_sidecar(
+            step_dir / _layout.sidecar_name(track, ts_us), seg._frame_timestamps
+        )
+
+    # 2. 段 mp4 就位（rename 是原子的，读侧不会看到半截文件）
+    os.replace(seg.stage_path, step_dir / segment_name)
+
+    # 3. init：该轨首段才装
+    if seg.init_stage_path is not None and seg.init_stage_path.exists():
+        init_path = step_dir / _layout.init_name(track)
+        if not init_path.exists():
+            os.replace(seg.init_stage_path, init_path)
+
+    # 4. playlist：首次写头（EXT-X-MAP 必须在任何 EXTINF 之前），再 append 本段
+    if not playlist_path.exists():
+        playlist_path.write_text(
+            _playlist.live_header(_layout.init_name(track)), encoding="utf-8"
+        )
+    with playlist_path.open("a", encoding="utf-8") as f:
+        f.write(_playlist.entry_line(segment_name, seg._duration_s))
+
+
+def _write_sidecar(idx_path: Path, timestamps: Sequence[float]) -> None:
+    """把每帧 ts 写成 float64 原值数组（无 tick、无 first_ts）。tmp + os.replace 原子替换。
+
+    用 stdlib `array("d")` 而非 numpy：与读侧的 `np.fromfile(dtype=np.float64)` 逐字节等价
+    （都是本机序 IEEE754 double），但省掉一个「只想拿段清单」的调用方也要付的 numpy import。
+
+    **失败只 warning**：理由见 `write_segment`。临时文件用 `.tmp` 后缀即可 —— 它落在段名正则
+    之外，不会被 `segments()` 当成真段。
+    """
+    tmp = idx_path.with_suffix(".tmp")
+    try:
+        tmp.unlink(missing_ok=True)
+        with tmp.open("wb") as f:
+            array("d", timestamps).tofile(f)
+        os.replace(tmp, idx_path)
+    except OSError as e:
+        logger.warning(
+            "[HLS] sidecar 写入失败，该段离线不可反查（视频照常落盘）: %s: %s", idx_path, e
+        )
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass  # 清残留本身也可能失败（同一个盘的同一个故障），别盖掉上面的告警

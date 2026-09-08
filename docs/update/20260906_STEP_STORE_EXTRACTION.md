@@ -794,3 +794,90 @@ step_store/
 playlist 的 EXTINF 行），拆成路径取值器等于把提交顺序推给调用方。下一步换成
 `hls.write_segment(...)` 事务，同时：删 `metadata.json`（已核实全仓零读者）、HLS 写侧改单线程
 并删掉每 step 目录锁与 `HLSConfig.workers` 配置项、关闭 hls_strategy 的两条门禁例外。
+
+---
+
+## 17. 写侧事务化：落一段是一个原子单元；HLS 写侧改单线程
+
+§16 把读侧收干净了，写侧还是五个路径取值器（`segment_path` / `sidecar_path` / `init_path` /
+`playlist_path` / `metadata_path`）。**粒度是错的**：落一段视频是**一个原子单元** —— sidecar +
+段 mp4 + init（首段）+ playlist 的 EXTINF 行，四者要么一起可见要么都不可见。拆成路径取值器
+等于把这个序列的编排责任推给调用方，而序列里每一条写错都是静默的。
+
+改造前这个序列在 `hls_strategy` 里，step_store 的格式操作与 strategy 的字节生产交替进行：
+
+```text
+0  写 sidecar（必须早于段 mp4 可见）                ← 命名+顺序 = step_store，内容在 strategy
+1  cv2 mp4v → 段的最终文件名                        ← 字节生产 = strategy
+2  EXTINF = len(frames)/eff_fps                     ← eff_fps 是 strategy 的
+3  持锁: playlist 首行 → transcode（内含读 playlist 求 tfdt 偏移）→ append EXTINF → 更新 metadata
+```
+
+### 17.1 `hls.write_segment` 事务
+
+```python
+with hls.write_segment(task_id, step_id, track, start_ts) as seg:
+    cv2 写 seg.stage_path → ffmpeg transcode（init 产到 seg.init_stage_path）
+    → tfdt patch(seg.tfdt_offset_s)
+    seg.commit(duration_s=len(frames)/eff_fps, frame_timestamps=[...])   # raw 才给 ts
+```
+
+调用方只拿到「往哪写字节」「tfdt 从哪开始」两样，**不知道最终文件叫什么、playlist 长什么样、
+sidecar 怎么命名**。正常退出按序提交（sidecar → rename 段 → 装 init → playlist 头/append）；
+**未 commit 或抛异常一律回滚**：临时文件清掉，playlist 一个字节不动。
+
+收进包内的四条静默契约（全写进 `write_segment` docstring）：sidecar 先于段 mp4 可见、sidecar
+与段同 stem、段就位后才 append EXTINF、`tfdt_offset_s` 必须在 append 之前读。
+
+**sidecar 的名字与内容终于同居一包**（§3 记为遗留问题）。内容用 stdlib `array("d")` 写，与读侧
+`np.fromfile(dtype=np.float64)` 逐字节等价，省掉一个「只想拿段清单」的调用方也要付的 numpy
+import；等价性由 `test_sidecar_is_readable_by_the_decoder` 与端到端 T1 双向锁住。
+
+`hls_strategy` 因此 **740 → 451 行**：`_persist_raw_segment` / `_persist_processed_segment` 两个
+各 ~95 行、逐行平行的方法合成一个 `_persist_segment`（两者只差「raw 才产 sidecar」），
+`_ts_offset_seconds` / `_update_metadata` / `_update_timeline` 全部删除，
+`_transcode_to_fmp4_segment` 退化成纯字节生产（吃 stage 路径 + init 落点 + 偏移，不认识任何
+文件名）。它**不再 import `_layout` / `_playlist`**，门禁里那条「写侧是 playlist 格式定义者，
+永久例外」随之关闭，只剩 clip_builder 一条。
+
+**在途段窗口收窄但不消失**：改造前段以最终名出现在 transcode 之前（实测窗口 260ms），改后段直到
+commit 才以正式名出现，窗口缩到 rename 与 append 两次 syscall 之间。崩溃仍可能落在中间，故读侧
+`playable_only` 的容忍**保留不动**。
+
+### 17.2 HLS 写侧改单线程，锁整条删除
+
+目录锁（`_dir_locks` / `_get_dir_lock` / `release_dir_locks`，三层转发到 `manager` 再到
+`run_control.stop_run`）唯一保护的不变式是「相邻段 transcode 不能读到相同的累计 EXTINF，否则
+tfdt 碰撞」。**单写者下它自动成立**，锁与按 task 回收的整条链路删除。
+
+**`HLSConfig.workers` 配置项一并删除**，`HLSWorkerPool` 固定起 1 个线程。留这个旋钮等于留了个
+「在 yaml 里把删锁的保护静默去掉」的开关 —— 有人改回 `workers: 2`，tfdt 竞争就回来了，且没有
+任何东西会报错。
+
+再加一条运行时守卫：`hls` 持一个模块级「在途 (step, track)」集合，同一条轨并发进入
+`write_segment` 直接抛 `HlsConcurrentWrite`。**它不串行化任何东西**（那个 `_inflight_guard`
+只保护集合的增删），只是把「单写者」这个此前只存在于设计意图里的前提变成运行时可检的。
+
+> ⚠ **吞吐与丢段**：单线程要在 10s 内做完 2N 段（N = 并发任务数，每段 300 帧）的 cv2 编码 +
+> ffmpeg 转码。跟不上时 `hls_queue`（`queue_size: 100`）满，
+> `manager._enqueue_hls` 的处理是 **warning 后丢段**、不是阻塞，表现为回放视频有洞。
+> **上线前用真实并发数量一次**，盯日志里的「HLS队列已满，丢弃任务」。改成阻塞/落盘缓冲是独立
+> 议题，本轮未做。
+
+### 17.3 停写 `metadata.json`
+
+`_update_metadata` 整个删除，`_layout.METADATA_NAME` 删除。它曾是第一代 TTL 判据
+（`updated_at`），判据两次换代后**全仓零代码读者**，却仍在每落一段时 read-modify-write 一次
+JSON。存量文件成为孤儿：段扫描按正则忽略它，`purge_step` 随目录一并删除，无需迁移。
+
+### 17.4 自测
+
+| 项 | 结果 |
+|----|------|
+| 全量 `pytest tests/` | **533 passed**（§16 后 521，净 +12，全是 `TestWriteSegment` / `TestPlaylistEntries` 的新用例） |
+| **端到端 round-trip** | `integration_tests/test_frame_lookup_roundtrip.py` **13 / 13 PASS**。含 T1「1800 帧 ts 位级相等 + 像素 id 逐帧匹配」——它直接验证事务产出的文件名与 sidecar 命名/内容与改造前逐字相同，否则解码侧根本找不到段 |
+| **tfdt 链** | 单独核对：走真实写路径落 5 段，逐段断言 fragment 的 `tfdt.baseMediaDecodeTime` == `Σ 之前所有 EXTINF × timescale`，5/5 相等。这是 T1 覆盖不到的那部分（它逐段解码，不看段间偏移） |
+| 事务回滚 | 抛异常与「没 commit」两条路径各一个用例：playlist 逐字节不变、无 `.stage_*` 残骸 |
+| 并发守卫 | 同轨并发抛 `HlsConcurrentWrite`；异常后 key 正常释放（不把该轨永久锁死）；另一条轨不受阻 |
+| 门禁 | 12 条全绿；`_playlist` / `_layout` 的例外从 2 条降到 1 条（只剩 clip_builder） |
+| `hls_strategy` 体量 | 740 → **451 行**（-289） |

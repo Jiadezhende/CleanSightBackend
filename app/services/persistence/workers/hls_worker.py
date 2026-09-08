@@ -68,15 +68,20 @@ class HLSWorker:
 
 
 class HLSWorkerPool:
-    """HLS持久化Worker池"""
+    """HLS 持久化 Worker 池 —— **固定单线程**。
 
-    def __init__(
-        self,
-        input_queue: Queue,
-        num_workers: int = 2,
-    ):
+    段落盘的正确性依赖「同一 step 的相邻段不能读到相同的累计 EXTINF」（否则两段 fragment 的
+    tfdt 起点撞在一起，hls.js 播到第二段停在段尾不前进）。此前靠一张按 (task_id, step_id)
+    索引的目录锁表守这条，现在靠**只有一个写者**守。
+
+    **worker 数不做成配置项**：留一个能在 yaml 里改回 2 的旋钮，等于留了一个静默把 tfdt
+    竞争放回来的开关——没有任何东西会报错。真要恢复并发，得连同锁一起想清楚再改这里。
+    前提被打破时由 `hls.HlsConcurrentWrite` 响亮地报出来。
+    """
+
+    def __init__(self, input_queue: Queue):
         self.input_queue = input_queue
-        self.num_workers = num_workers
+        self.num_workers = 1
         self.stop_event = threading.Event()
 
         # 创建持久化策略（编码帧率全程从帧 ts 自适应反推，不接收上游 fps）。
@@ -91,7 +96,7 @@ class HLSWorkerPool:
 
     def start(self):
         """启动Worker池"""
-        logger.info("[HLSWorkerPool] Starting %d workers", self.num_workers)
+        logger.info("[HLSWorkerPool] Starting %d worker", self.num_workers)
 
         for i in range(self.num_workers):
             worker = HLSWorker(
@@ -117,10 +122,6 @@ class HLSWorkerPool:
 
         for thread in self.threads:
             thread.join(timeout=timeout)
-
-    def release_dir_locks(self, task_id: int) -> int:
-        """回收该 task 的 HLS 目录锁（转发到 strategy），返回回收数量。"""
-        return self.strategy.release_dir_locks(task_id)
 
     def purge_step_dir(self, task_id: int, step_id: int) -> bool:
         """清空该 (task_id, step_id) step 目录（转发到 strategy），返回是否删除。"""
