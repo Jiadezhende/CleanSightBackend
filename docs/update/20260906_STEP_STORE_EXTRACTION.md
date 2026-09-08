@@ -881,3 +881,21 @@ JSON。存量文件成为孤儿：段扫描按正则忽略它，`purge_step` 随
 | 并发守卫 | 同轨并发抛 `HlsConcurrentWrite`；异常后 key 正常释放（不把该轨永久锁死）；另一条轨不受阻 |
 | 门禁 | 12 条全绿；`_playlist` / `_layout` 的例外从 2 条降到 1 条（只剩 clip_builder） |
 | `hls_strategy` 体量 | 740 → **451 行**（-289） |
+
+### 17.5 补：`SIDECAR_TRACKS`
+
+评审追问「为什么 `write_segment` 不直接收 `frames`」时顺带抓到一处漏：`_persist_segment` 里有
+一行 `frame_timestamps=... if track == "raw" else None` —— **「只有 raw 产 sidecar」是布局知识**
+（`_layout.sidecar_name` 的 docstring 就写着它），不该由 strategy 判。改为 `_layout.SIDECAR_TRACKS`，
+写侧**无条件**交出帧 ts，产不产由布局决定。`_persist_segment` 因此对 track 完全对称。
+
+**为什么 `write_segment` 不收 `frames`**（结论记档，免得下次再问）：
+
+- **硬代价**：step_store 就得吃 cv2（L2）。它是**读侧**在依赖的包（routers ×3 / lab ×2 /
+  inference.offline），cv2 进来之后「列个段清单」也要先拉起 OpenCV（~250ms）。边界不是「不碰
+  ffmpeg」（`_decoder` 已经起 ffmpeg 子进程），是「不吃 L2 的 Python 依赖」。
+- **更要紧的**：`eff_fps` 是**编码参数**，同时决定 VideoWriter 帧率 / EXTINF(`len/eff_fps`) /
+  下一段 tfdt 起点。duration 虽能从帧 ts 反推，但那是第二次计算——退化段的兜底
+  （span≤0、eff_fps 出 [1,60] → `_DEGENERATE_FALLBACK_FPS`）是编码策略，step_store 复制它就有
+  两个真源、不复制就算出与 VideoWriter 实际用的不同的值。故 `commit(duration_s=)` 收显式值，
+  **让算出 eff_fps 的那一方为它负责**。

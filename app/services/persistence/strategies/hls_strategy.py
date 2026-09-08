@@ -386,8 +386,8 @@ class HLSPersistenceStrategy:
     ) -> bool:
         """落一段视频。**编码是本方法的事，落盘顺序是 `hls.write_segment` 的事。**
 
-        raw 与 processed 只差一样：**只有 raw 产 sidecar**（processed 是渲染结果，离线不
-        消费）。此前是两个各 ~95 行、逐行平行的方法，编排搬进事务后合得起来了。
+        对 track **完全对称**：帧 ts 无条件交出去，哪条轨真的产 sidecar 由布局决定
+        （`_layout.SIDECAR_TRACKS`）。此前是两个各 ~95 行、逐行平行的方法。
 
         eff_fps 逐段反推而非用名义帧率：processed 的实际成帧率随 throttle / 渲染尖峰在窗口
         间漂移（实测 ~11-15fps），固定帧率编码会按 兜底/真实率 倍快放，且逐段速率不同 →
@@ -438,10 +438,7 @@ class HLSPersistenceStrategy:
             )
             seg.commit(
                 duration_s=segment_duration,
-                # 只有 raw 轨产 sidecar
-                frame_timestamps=(
-                    [f.timestamp for f in frames] if track == "raw" else None
-                ),
+                frame_timestamps=[f.timestamp for f in frames],
             )
 
         logger.info(

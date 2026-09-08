@@ -95,11 +95,16 @@ def segment_name(track: str, ts_us: int) -> str:
     return f"{track}_segment_{ts_us}.mp4"
 
 
+# 哪些轨产逐帧 ts sidecar。**是布局知识，不是调用方的判断** —— processed 是渲染结果、
+# 离线不消费，故不产。写侧无条件把帧 ts 交出来，产不产由这里定。
+SIDECAR_TRACKS: Tuple[str, ...] = ("raw",)
+
+
 def sidecar_name(track: str, ts_us: int) -> str:
     """逐帧 ts sidecar 文件名：与同段 mp4 同 stem，换 .idx 后缀。
 
     内容是该段每帧 `frame.timestamp` 的 float64 原值数组（无 tick、无 first_ts）。
-    只有 raw 轨产 sidecar —— processed 是渲染结果，离线不消费。
+    哪些轨有 sidecar 见 `SIDECAR_TRACKS`。
     """
     return f"{track}_segment_{ts_us}.idx"
 

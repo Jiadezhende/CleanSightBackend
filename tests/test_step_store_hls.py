@@ -365,8 +365,11 @@ class TestWriteSegment:
         assert (d / "processed_init.mp4").read_bytes() == b"pinit"
 
     def test_only_raw_gets_a_sidecar(self, tmp_storage):
-        """processed 是渲染结果，离线不消费，不产 sidecar。"""
-        self._put(1, 1, "processed", 1.0, 10.0, frame_ts=None)
+        """processed 是渲染结果、离线不消费，不产 sidecar。
+
+        **写侧无条件传帧 ts**，产不产由布局决定——「哪条轨有 sidecar」不该让调用方判。
+        """
+        self._put(1, 1, "processed", 1.0, 10.0, frame_ts=[1.0, 1.1])
         d = tmp_storage / "1" / "1"
         assert (d / "processed_segment_1000000.mp4").exists()
         assert not (d / "processed_segment_1000000.idx").exists()

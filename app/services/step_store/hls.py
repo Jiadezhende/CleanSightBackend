@@ -404,8 +404,9 @@ class SegmentWrite:
             duration_s: 本段 EXTINF。**必须与 fragment 实际媒体时长完全一致**（写侧是
                 `len(frames)/eff_fps`，与编码时用的 fps 同源）—— 对不上就是 hls.js 段尾 MSE
                 缓冲洞 + 总时长缩水。它同时是下一段 tfdt 起点的加数。
-            frame_timestamps: 该段每帧的 ts，落成 sidecar 供离线按 ts 反查帧。**只有 raw 轨产
-                sidecar**（processed 是渲染结果，离线不消费），processed 传 None。
+            frame_timestamps: 该段每帧的 ts，落成 sidecar 供离线按 ts 反查帧。**无条件传即可**
+                —— 哪条轨产 sidecar 是布局知识（`_layout.SIDECAR_TRACKS`），不产的轨这里传了
+                也会被忽略，调用方不必自己判。
         """
         self._duration_s = float(duration_s)
         self._frame_timestamps = frame_timestamps
@@ -494,8 +495,8 @@ def _commit_segment(
     """按序提交一段。顺序的四条理由见 `write_segment` docstring。"""
     segment_name = _layout.segment_name(track, ts_us)
 
-    # 1. sidecar（只有 raw 轨产），先于段 mp4 可见。失败只 warning，不拖累主产物。
-    if seg._frame_timestamps is not None:
+    # 1. sidecar（只有 SIDECAR_TRACKS 里的轨产），先于段 mp4 可见。失败只 warning，不拖累主产物。
+    if seg._frame_timestamps is not None and track in _layout.SIDECAR_TRACKS:
         _write_sidecar(
             step_dir / _layout.sidecar_name(track, ts_us), seg._frame_timestamps
         )
