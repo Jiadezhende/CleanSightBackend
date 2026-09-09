@@ -30,11 +30,20 @@ HEAVY = ("torch", "ultralytics", "cv2")
 # 不做性能回归——机器负载下 import 抖动大，卡太紧会变成噪声源。
 BUDGET = {
     "app.domain":               (set(), 0.20),
+    # storage 是 stdlib-only 的 leaf，量级应与 app.domain 同档；上限卡在这里是因为
+    # 包名叫 storage、不自带"只管布局"的约束，一旦有人往里塞 ffmpeg/cv2/批缓冲，
+    # 这条会先红。
+    "app.services.storage":     (set(), 0.20),
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
     "app.main":                 (set(), 2.0),
 }
+
+# 零跨服务依赖的 leaf 包：包内任何模块都不得 import 其他 app.services.*。
+# 这是它能被写侧（persistence）与读侧（traceback / lab / inference.offline / routers）
+# 同时依赖的**前提**——一旦它反向依赖任一服务，就会造出环。
+LEAF_PACKAGES = ("app/services/storage",)
 
 # 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
@@ -139,6 +148,38 @@ def test_singleton_reference_surface():
         "以下文件直接 import 了服务单例，违反规范 §6 的引用面：\n  "
         + "\n  ".join(violations)
         + "\n服务间协作应经 run_control 编排；确有正当理由的加进 SINGLETON_EXCEPTIONS 并写明。"
+    )
+
+
+@pytest.mark.parametrize("package", LEAF_PACKAGES)
+def test_leaf_package_has_no_cross_service_imports(package):
+    """leaf 包不得 import 任何其他 `app.services.*`（包内互相 import 不算）。
+
+    `app/services/storage` 的全部职责是「名字与定位」。它一旦向某个服务伸手，那个服务
+    就不能再依赖它——而写侧与读侧同时依赖它正是抽这个包的全部意义。
+    """
+    package_module = package.replace("/", ".")
+    violations = []
+
+    for path in sorted((REPO_ROOT / package).rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            elif isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            else:
+                continue
+            for name in names:
+                if name.startswith("app.services.") and not name.startswith(package_module):
+                    violations.append(f"{rel}:{node.lineno} → {name}")
+
+    assert not violations, (
+        f"leaf 包 {package} 依赖了其他服务，它就不再是所有人的共同下游：\n  "
+        + "\n  ".join(violations)
     )
 
 
