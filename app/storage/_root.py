@@ -21,7 +21,7 @@
 
 ```python
 # hls.py
-from app.services.storage import _root
+from app.storage import _root
 
 _DOMAIN = "hls"
 
@@ -38,8 +38,11 @@ def segment_path(task_id, step_id, track, ts_us) -> Path:
 两个收益：**域名在一个域文件里只出现一次**（写错一眼可见，且白名单会当场拦下），以及域内
 每个路径函数少写一个参数。
 
-> ⚠ **别把它命名成 `_root`**：域文件顶部有 `from app.services.storage import _root`，同名
+> ⚠ **别把它命名成 `_root`**：域文件顶部有 `from app.storage import _root`，同名
 > 函数会把模块名遮掉，`_root.path` 立刻 `AttributeError`。用 `_domain_root` 或 `_dir`。
+
+重域拆成子包时（`hls/`），这个 helper 要让同包的兄弟模块用得上（删整个域目录、枚举域内
+文件），**去掉前导下划线叫 `domain_dir`**——包内公开、仍不出包（facade 不 re-export 它）。
 
 依赖上界：stdlib only。`settings` 是 L3（读环境有副作用），只在函数体内 import（规范 §2）。
 """

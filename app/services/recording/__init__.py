@@ -1,0 +1,53 @@
+"""recording 模块 —— HLS 录制落盘的编排者。
+
+把 CQ 里攒好的帧变成盘上一个可播的 HLS 段：**什么时候拉、按什么顺序写、算哪一代的产物**。
+格式怎么落盘不在这里，那全在数据层 `app.storage.hls`。
+
+    对外          app/services/recording/
+      __init__.py   本文件：lifespan()
+      instance.py   recording_service 单例
+      service.py    RecordingService —— start / stop / submit_segment /
+                                        flush_residual / forget_task
+      config.py     RecordingConfig（config/recording_config.yaml）
+    包内私有
+      _sweeper.py   周期从活跃 CQ 拉整段，只由 RecordingService 构造
+
+本 `__init__` 不做 re-export（规范 §3 的「门面型」：只有 docstring + `lifespan()`）——顶层
+re-export `service` 会把 `app.storage.hls` 与 client → numpy 那条链摊给每个 import 本包的
+人。消费方走深路径：
+
+    单例   from app.services.recording.instance import recording_service
+    类     from app.services.recording.service import RecordingService
+    配置   from app.services.recording.config import RecordingConfig, get_recording_config
+
+## ⚠ 本期尚未接线
+
+`lifespan()` 与整个服务已就位，但 **`app/main.py` 还没有嵌它**，`run_control` 也还没改。
+当前生产写侧仍是 `persistence/strategies/hls_strategy.py`。接线是单独一轮，见
+`docs/update/20260911_RECORDING_SERVICE.md` 的「明确不做」。
+"""
+
+from contextlib import asynccontextmanager
+
+__all__ = ["lifespan"]
+
+
+@asynccontextmanager
+async def lifespan():
+    """recording 服务生命周期（**起于 inference 之前、停于 inference 之后**）。
+
+    接线时要嵌在 `inference.lifespan` 外层，与 persistence 同一档，理由也一样：
+    `inference.stop()` 会经 `run_control` 交出最后一批 HLS 残段，那时队列必须还活着；
+    等它交完，本 `finally` 再停队列、把剩下的排空——**保序、不丢尾**。
+
+    嵌到 inference 里层会让队列先停，残段提交被拒，而那些帧已经从 CQ 弹出去了，是真丢。
+
+    单例 import 写在函数体内（规范 §3）：写在模块级就等于把上面那笔过路费又收回来。
+    """
+    from app.services.recording.instance import recording_service
+
+    recording_service.start()
+    try:
+        yield
+    finally:
+        recording_service.stop(timeout=10.0)

@@ -30,20 +30,57 @@ HEAVY = ("torch", "ultralytics", "cv2")
 # 不做性能回归——机器负载下 import 抖动大，卡太紧会变成噪声源。
 BUDGET = {
     "app.domain":               (set(), 0.20),
-    # storage 是 stdlib-only 的 leaf，量级应与 app.domain 同档；上限卡在这里是因为
-    # 包名叫 storage、不自带"只管布局"的约束，一旦有人往里塞 ffmpeg/cv2/批缓冲，
-    # 这条会先红。
-    "app.services.storage":     (set(), 0.20),
+    # storage 的每个模块**逐个登记**，不能只登记包名：包根是标记型 __init__、零 re-export，
+    # `import app.storage` 根本不加载任何域文件（实测 1ms / 41 模块），登记包名挡不住有人
+    # 往域文件里塞 ffmpeg/cv2/批缓冲。新增域文件必须同时在这里加一行 ——
+    # 由 test_storage_modules_are_all_budgeted 强制。
+    #
+    # 重域用子包（`hls/`）时，它的 `__init__` 是 **facade 不是标记型**：re-export 会连带
+    # 加载 `_encode` 之类的实现模块，所以那些模块的模块级必须保持 stdlib-only（cv2 走函数
+    # 体内 import），`app.storage.hls` 这条才能维持「重依赖集合为空」。
+    "app.storage":              (set(), 0.20),
+    "app.storage._root":        (set(), 0.20),   # stdlib only
+    "app.storage.tasks":        (set(), 0.20),   # stdlib only
+    # feature 出 FrameFeature → 吃 app.domain（numpy 随 Detection.mask 的标注进来）。
+    # 这是 D1 允许的唯一一档 L1 依赖，上限按 app.domain 的量级加余量。
+    "app.storage.feature":      (set(), 0.40),
+    # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
+    # 这条盯的是**整个域**的模块级依赖。cv2 必须留在 `_encode.write_mp4v` 的函数体内，
+    # 塞回模块级会让这条连同 `app.storage.hls._encode` 一起红。
+    "app.storage.hls":          (set(), 0.40),   # 域货币 Frame → app.domain（numpy）
+    "app.storage.hls._encode":  (set(), 0.40),   # 同上；cv2 在函数体内
+    # 解码侧：货币是 Frame + sidecar 的 float64 数组，故吃 app.domain + numpy。ffmpeg 是
+    # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
+    # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。
+    "app.storage.hls._decode":  (set(), 0.40),
+    "app.storage.hls._fmp4":    (set(), 0.20),   # stdlib only（ffmpeg 是运行时依赖，D5）
+    "app.storage.hls._idx":     (set(), 0.40),   # numpy 是它的货币（float64 数组）
+    "app.storage.hls._write":   (set(), 0.40),   # 域货币 Frame
+    "app.storage.hls._layout":  (set(), 0.20),   # stdlib only
+    "app.storage.hls._m3u8":    (set(), 0.20),   # stdlib only
+    "app.storage.hls._meta":    (set(), 0.20),   # stdlib only
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
+    # recording 登记两条：包名那条是门面型（浅，基本只有 docstring），真正的守门人是
+    # `service` —— 它 import `app.storage.hls`，cv2 一旦从 `_encode` 的函数体挪到模块级，
+    # 这条会先红。
+    "app.services.recording":         (set(), 1.0),
+    "app.services.recording.service": (set(), 1.0),
     "app.main":                 (set(), 2.0),
 }
 
-# 零跨服务依赖的 leaf 包：包内任何模块都不得 import 其他 app.services.*。
-# 这是它能被写侧（persistence）与读侧（traceback / lab / inference.offline / routers）
-# 同时依赖的**前提**——一旦它反向依赖任一服务，就会造出环。
-LEAF_PACKAGES = ("app/services/storage",)
+# 分层包 → 它允许 import 的 `app.*` 前缀白名单（包内互相 import 由 self 前缀覆盖）。
+#
+# **白名单而非黑名单**：`app/storage` 是 services 下面一层的数据层，它能被写侧
+# （persistence）与读侧（traceback / lab / inference.offline / routers）同时依赖的前提，
+# 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.database` / `app.models`
+# ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
+LAYER_PACKAGES = {
+    # app.domain：内存数据契约（Frame / FrameFeature），本层的入参出参就是它们
+    # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
+    "app/storage": ("app.storage", "app.domain", "app.settings"),
+}
 
 # 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
@@ -51,6 +88,7 @@ SINGLETONS = {
     "stream_service": "app.services.stream.instance",
     "inference_manager": "app.services.inference.instance",
     "persistence_manager": "app.services.persistence.instance",
+    "recording_service": "app.services.recording.instance",
     "health_monitor": "app.services.health_monitor.instance",
     "run_controller": "app.services.run_control",
 }
@@ -107,6 +145,32 @@ def test_import_budget(module):
     )
 
 
+@pytest.mark.parametrize("package", sorted(LAYER_PACKAGES))
+def test_storage_modules_are_all_budgeted(package):
+    """分层包里每个模块都得有自己的 BUDGET 条目 —— 否则新域文件天生不在门禁视野里。
+
+    补的是 20260909 记录里点名的那个洞：BUDGET 登记包名，而标记型 `__init__` 不加载任何
+    域文件，于是「往包里塞 cv2 会先红」并不成立。逐模块登记 + 本条覆盖检查才成立。
+
+    模块名按目录层级拼，重域用子包（`hls/_m3u8.py` → `app.storage.hls._m3u8`）时同样成立；
+    各级 `__init__` 折叠成所在包本身。
+    """
+    package_module = package.replace("/", ".")
+    expected = set()
+    for path in sorted((REPO_ROOT / package).rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(REPO_ROOT / package).with_suffix("")
+        parts = [part for part in rel.parts if part != "__init__"]
+        expected.add(".".join([package_module, *parts]))
+
+    missing = sorted(expected - set(BUDGET))
+    assert not missing, (
+        f"分层包 {package} 里这些模块没有导入预算：{missing}\n"
+        "在 BUDGET 里加一行并写明允许哪些重依赖——新增域文件时这是一次显式决策。"
+    )
+
+
 def _iter_app_py_files():
     for path in sorted(APP_DIR.rglob("*.py")):
         if "__pycache__" in path.parts:
@@ -151,14 +215,15 @@ def test_singleton_reference_surface():
     )
 
 
-@pytest.mark.parametrize("package", LEAF_PACKAGES)
-def test_leaf_package_has_no_cross_service_imports(package):
-    """leaf 包不得 import 任何其他 `app.services.*`（包内互相 import 不算）。
+@pytest.mark.parametrize("package", sorted(LAYER_PACKAGES))
+def test_layer_package_imports_only_whitelisted_app_modules(package):
+    """分层包只许 import 白名单里的 `app.*`（stdlib 与三方不受限）。
 
-    `app/services/storage` 的全部职责是「名字与定位」。它一旦向某个服务伸手，那个服务
-    就不能再依赖它——而写侧与读侧同时依赖它正是抽这个包的全部意义。
+    `app/storage` 是 services 下面一层的数据层。它一旦向上或向旁伸手，那一头就不能再
+    依赖它——而写侧与读侧同时依赖它正是抽这个包的全部意义。白名单比黑名单严一档：
+    `app.database` / `app.models` 进来不会造环、不会红，只会把数据层绑死在 ORM 上。
     """
-    package_module = package.replace("/", ".")
+    allowed = LAYER_PACKAGES[package]
     violations = []
 
     for path in sorted((REPO_ROOT / package).rglob("*.py")):
@@ -168,18 +233,24 @@ def test_leaf_package_has_no_cross_service_imports(package):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                names = [node.module or ""]
+                # 相对 import（level > 0）是包内寻址，天然合规
+                names = [] if node.level else [node.module or ""]
             elif isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
             else:
                 continue
             for name in names:
-                if name.startswith("app.services.") and not name.startswith(package_module):
-                    violations.append(f"{rel}:{node.lineno} → {name}")
+                if not name.startswith("app."):
+                    continue
+                if any(name == ok or name.startswith(ok + ".") for ok in allowed):
+                    continue
+                violations.append(f"{rel}:{node.lineno} → {name}")
 
     assert not violations, (
-        f"leaf 包 {package} 依赖了其他服务，它就不再是所有人的共同下游：\n  "
+        f"分层包 {package} import 了白名单外的 app 模块，它就不再是所有人的共同下游：\n  "
         + "\n  ".join(violations)
+        + f"\n白名单：{list(allowed)}。确有正当理由的，改 LAYER_PACKAGES 并在包 docstring 的"
+        "边界声明里写明为什么它属于这一层。"
     )
 
 

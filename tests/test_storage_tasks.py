@@ -1,4 +1,4 @@
-"""`app.services.storage` 基础能力：`_root` 的根解析与 `tasks` 的定位/枚举/删除。
+"""`app.storage` 基础能力：`_root` 的根解析与 `tasks` 的定位/枚举/删除。
 
 落盘约定：`{storage_root}/{task_id}/{step_id}/`，两级目录名均为十进制 id。
 本文件全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.storage import _root, tasks
+from app.storage import _root, tasks
 from app.settings import settings
 
 

@@ -1,0 +1,10 @@
+# 录制服务配置（HLS 段落盘）
+#
+# 注意：没有 workers。落盘走的 SerialTaskQueue 恒为一个消费线程 —— 「同一 step 的段按提交
+#       序写入」这条保证就建立在单消费者上，配成多个不会报错，只会让段间 tfdt 开始碰撞
+#       （表现是回放跳段、画面丢一截）。详见 app/services/recording/service.py 的并发一节。
+# 注意：段长由 CQ 帧数（settings.ca_segment_seconds）触发，段时长由写入侧 EXTINF 从帧 ts
+#       自适应反推，此处不配任何时长或帧率——配了也是死值，且会误导。
+
+queue_size: 100          # 队列排队上限；满了丢这一段并告警
+sweep_interval_seconds: 1.0   # 从活跃 CQ 拉走已攒满整段的扫描间隔（秒）

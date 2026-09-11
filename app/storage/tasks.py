@@ -1,7 +1,7 @@
 """
 task/step 目录域 —— **把 step 目录当整体看**的那三件事：有哪些 task、有哪些 step、整个删掉。
 
-    from app.services.storage import tasks as step_tasks
+    from app.storage import tasks as step_tasks
     for task_id in step_tasks.ids(order="mtime"):
         for step_id in step_tasks.steps(task_id):
             ...
@@ -32,7 +32,7 @@ import shutil
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
-from app.services.storage import _root
+from app.storage import _root
 
 logger = logging.getLogger(__name__)
 
@@ -154,11 +154,15 @@ def purge_step(task_id: int, step_id: int) -> bool:
 
     **它删的是整个 step，不是某一个域**：`hls/`、`features/`、`lab/` 全部子目录一起消失。
     调用方必须知道这一点——历史上 `hls_strategy.purge_step_dir` 的 docstring 自述"只删
-    HLS 产物"而实际 rmtree 整个目录，是一处删除者自述与行为不符的缺陷。要只删一个域，
-    请到那个域自己的模块里找（本模块刻意不提供 `purge_domain`：目前零需求，而
-    「重启 supersede」与「TTL 到期」两个真实场景都是整 step 粒度）。
+    HLS 产物"而实际 rmtree 整个目录，是一处删除者自述与行为不符的缺陷。**要只删一个域，
+    到那个域自己的模块里找**：本模块是跨域的，不提供也不该知道域粒度的删除。
 
-    **不加锁**：并发保护是写侧机制，写者调它时仍在自己的目录锁内。
+    **不加锁——已知缺口，见规范 §7.4 C7。** 这条原本的理由是「写者调它时仍在自己的目录
+    锁内」，但那只对 supersede 成立：TTL 回收由 `cleanup_worker` 发起，它持的是 hls 的
+    目录锁，而 `FeatureStore` 的 append 持的是 `store.py` 自己的 `_lock`——两把不同的锁，
+    `rmtree` 与并发写之间零互斥。**单域锁挡不住跨域删除**。表现是某个域的目录删到一半，
+    或写侧的 `create=True` 在 rmtree 之后把目录重建出来、留一个已被记账删除的僵尸 step，
+    两种都不报错。目标形态：本函数取该 step 的独占锁，各域的写取共享锁。
 
     空 task 目录用 `rmdir` 回收：它对非空目录会安全失败，故无需先判空，也不存在"刚好有
     别的 step 正在建目录"的窗口问题（那种情况下 rmdir 失败，目录保留，正确）。
