@@ -5,6 +5,7 @@ CleanSight 工具模块（边界层异常处理架构）
 - exceptions: 自定义异常层次结构（AppError + 5 个核心异常）
 - decorators: 日志装饰器（log_call、timing）
 - executor: 框架边界层（GuardedExecutor、CircuitBreaker）
+- task_queue: 单消费者串行任务队列（SerialTaskQueue）
 - metrics: Prometheus 可观测性指标
 - context: 简单上下文管理
 
@@ -46,6 +47,7 @@ from .executor import (
     GuardedExecutor,
     RetryExecutorWithCircuitBreaker,
 )
+from .task_queue import SerialTaskQueue
 from .worker_guard import guarded_run
 
 __all__ = [
@@ -70,6 +72,8 @@ __all__ = [
     "ExecutionPolicy",
     # Worker guard (线程级自愈)
     "guarded_run",
+    # Task queue (单消费者串行任务队列)
+    "SerialTaskQueue",
     # Context
     "set_client_id",
     "get_client_id",
