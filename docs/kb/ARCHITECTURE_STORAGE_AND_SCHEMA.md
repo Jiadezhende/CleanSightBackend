@@ -1,4 +1,4 @@
-> 更新时间：2026-09-02
+> 更新时间：2026-09-13
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -97,6 +97,13 @@ ORM：`DBAlarm` in `app/models.py`
 > [../update/20260902_LEGACY_LAYOUT_CLEANUP.md](../update/20260902_LEGACY_LAYOUT_CLEANUP.md)。
 
 追溯、Lab 和媒体访问都按该目录约定定位文件。
+
+> **上面是现役布局（平铺）。** 数据层 `app/storage/` 已落地一套按域隔离的目标布局
+> （`{step}/hls|features|lab/`）与配套的读写抽象，但**生产调用点一个都没迁**，故本节描述
+> 的仍是当前真实盘上结构。目标布局、准入判据与迁移后的定位方式见
+> [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)，迁移进度见
+> [../STORAGE_REFACTOR_MAP.md](../STORAGE_REFACTOR_MAP.md)。切换是 breaking 变更、无迁移
+> 路径，与旧结构同立场。
 
 ## FeatureStore 落盘 record（features.jsonl）
 

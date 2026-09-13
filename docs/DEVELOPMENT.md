@@ -16,6 +16,7 @@
 - **commit message**：`type(scope): 简述`，`type` 用 `feat` / `fix` / `docs` / `refact` / `test` / `chore`，`scope` 可选（如 `docs(kb):`、`feat(inference):`）。
 - **文档纪律**：
   - **一个开发任务一份 `docs/update/YYYYMMDD_主题.md`**，记录本次的改动与结论；同一任务后续提交追加进这份，不按提交次数新建。写法与**两条状态轴**（变更状态 / 知识库）照 [update/_TEMPLATE.md](update/_TEMPLATE.md)——「知识库」轴默认填 `待沉淀`，它是 KB 融合时的欠债清单，漏填等于这次改动不会被沉淀。
+  - **只动文档的任务不落 update 记录**（写进 KB、重组文档、改文档规范、改 docstring 措辞）：用一份文档记录另一份文档的诞生是递归，没人会读。判据是「跑起来的东西有没有变」，条文见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)。顺带改了代码行为的按代码改动处理。
   - **`docs/kb/` 不随手改**：KB 是 update 的融合产物，只在**人主动发起融合**（`/kb-merge` skill）时才写入——日常开发把增量留在 `docs/update/` 即可，别自行同步。内容验收标准见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)。
   - 对外 API 端点契约改动同步 `docs/api/`（该目录是端点契约真源，不走 KB 融合流程）。
 
