@@ -101,9 +101,8 @@ ORM：`DBAlarm` in `app/models.py`
 > **上面是现役布局（平铺）。** 数据层 `app/storage/` 已落地一套按域隔离的目标布局
 > （`{step}/hls|features|lab/`）与配套的读写抽象，但**生产调用点一个都没迁**，故本节描述
 > 的仍是当前真实盘上结构。目标布局、准入判据与迁移后的定位方式见
-> [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)，迁移进度见
-> [../STORAGE_REFACTOR_MAP.md](../STORAGE_REFACTOR_MAP.md)。切换是 breaking 变更、无迁移
-> 路径，与旧结构同立场。
+> [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)。切换是 breaking 变更、无迁移路径，
+> 与旧结构同立场。
 
 ## FeatureStore 落盘 record（features.jsonl）
 

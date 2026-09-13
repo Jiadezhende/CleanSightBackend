@@ -9,8 +9,8 @@
 > **适用范围与当前状态**：`app/storage/` 的代码已全部落地并有单测覆盖，但**生产调用点一个
 > 都没迁**——现役落盘布局仍是 `{task}/{step}/` 平铺（见
 > [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)），本文描述的
-> `{step}/{domain}/` 域隔离布局在迁移完成那一刻才生效。迁移进度见
-> [../STORAGE_REFACTOR_MAP.md](../STORAGE_REFACTOR_MAP.md)（临时索引，迁移完成后删除）。
+> `{step}/{domain}/` 域隔离布局在迁移完成那一刻才生效。**迁移进度不在知识库维护**（它是
+> 过程状态，随迁移完成消失）：各期做了什么见 `docs/update/` 里的 `*_STORAGE_*` 系列记录。
 >
 > **条文编号是代码引用的一部分**：R/W/L/D/T、路线 A/B/C、设计约束 1–8 被 12 处 docstring 与
 > 测试直接引用，**改条文可以，改编号要先搜引用**。代码里残留的 `§7.x` 写法见 §10 对照。

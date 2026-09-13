@@ -6,7 +6,7 @@
 > **本篇只是第 1 期的变更记录。** 现行设计判据（准入四问 / 读侧 R / 写侧 W 三路线 /
 > 定位 L / 依赖 D / 测试 T / 门禁映射）已迁出到活文档
 > 知识库 [docs/kb/DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)，本篇不再承载规范；
-> 迁移进度与能力对照见 [docs/STORAGE_REFACTOR_MAP.md](../STORAGE_REFACTOR_MAP.md)。
+> 后续各期做了什么见 `docs/update/` 里的 `*_STORAGE_*` 系列记录。
 >
 > **追加（2026-09-09）**：包已迁址 `app/services/storage/` → **`app/storage/`**，门禁从
 > 黑名单换成白名单式，见 §7。正文 §1–§5 与「变更效果」里的路径是迁址前的原文，**未回改**
@@ -83,8 +83,11 @@ settings 只在函数体内 import」正是它的直接应用。另外
 
 本期是分期改造的第 1 期，**产出无生产消费方**（仅新单测覆盖）。这是分期的自觉代价，换来
 迁移期可以是一次纯替换、diff 全是「删一行加一行」，而不是「抽层 + 改调用 + 改行为」搅在
-一个 PR 里。**期次划分与最新进度以 [STORAGE_REFACTOR_MAP.md](../STORAGE_REFACTOR_MAP.md)
-为准**（那里按实际落地顺序维护，本篇当时写的顺序已被调整过）。
+一个 PR 里。**本篇当时写的期次顺序已被调整过**（`feature` 域先于 `hls` 落地、解码提前进层），
+各期实况以该期自己的记录为准：[FEATURE_DOMAIN](20260909_STORAGE_FEATURE_DOMAIN.md)、
+[HLS_DOMAIN](20260911_STORAGE_HLS_DOMAIN.md)、
+[HLS_READ_CAPABILITY](20260912_HLS_READ_CAPABILITY.md)、
+[STEP_INIT_SUPERSEDE](20260911_STEP_INIT_SUPERSEDE.md)。
 
 | 部件 | 落在哪 | 详见 |
 |------|--------|------|
@@ -380,17 +383,17 @@ app/
 
 ## 遗留风险 / 后续任务
 
-> 只留第 1 期自身引入、且**至今仍未消解**的条目。已被后续期次接管的（落盘切换的兼容路线、
-> 并发方案、TTL 判据、facts 货币）见 [STORAGE_REFACTOR_MAP.md](../STORAGE_REFACTOR_MAP.md)
-> §5/§6，不在本篇重复。
+> 只留第 1 期自身引入、且**至今仍未消解**的条目。已被后续期次接管的四项——落盘切换的兼容
+> 路线、并发方案、TTL 判据、`facts.jsonl` 的货币——各自见 `20260911_STEP_INIT_SUPERSEDE`、
+> `20260911_STORAGE_HLS_DOMAIN`、`20260909_STORAGE_FEATURE_DOMAIN`，不在本篇重复。
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
-| **`settings` 的 LS 配置路径字段尚未新增** | `lab/config.py:37-41` 仍在 `from ...segment_finder import get_default_base_dir` 拼 `{root}/lab_runtime_config.json`——LS 配置目前仍寄居存储根 | 随调用点迁移一并做：加 `settings.lab_config_path`（str 字段 + env 覆盖）。默认值未定，见 MAP §6.3 决策点 3 |
+| **`settings` 的 LS 配置路径字段尚未新增** | `lab/config.py:37-41` 仍在 `from ...segment_finder import get_default_base_dir` 拼 `{root}/lab_runtime_config.json`——LS 配置目前仍寄居存储根 | 随调用点迁移一并做：加 `settings.lab_config_path`（str 字段 + env 覆盖）。**默认值待拍板**：倾向 `./config/lab_runtime.json` + `.gitignore` + DEPLOYMENT 注明「运行时生成，勿覆盖」；若嫌部署整目录覆盖的风险，改独立 `runtime/` 目录 |
 | **已落盘的 `lab_runtime_config.json` 会成孤儿** | 换路径后旧文件读不到，用户在页面上设的 LS URL / project_id / task_source 回退到 env 默认值 | 影响面小（三个字段，页面上重设一次即可），但**升级说明里要写一句**，否则表现为"升级后送标配置莫名其妙被重置" |
 | **本期代码无生产消费方** | 新包是死代码，只有单测在跑；若迁移停摆，它会成为无人维护的孤儿 | 分期的自觉代价。迁移是本次改造的价值兑现点，不宜长期搁置 |
 | **`dir_name_to_int` 两份并存**（`_root` 与 `segment_finder`） | 期间若有人改其中一份，两份行为分叉 | 删 `segment_finder.py` 时消解。两份都是「非数字返回 None」的三行实现，分叉风险低 |
 | **`purge_step` 合并空目录回收后有一处行为差**（迁移时才显现） | 现在 `cleanup_worker:99-113` 兜底回收**任何**空 task 目录（含因手工删除、重启 supersede 变空的）；合并后只回收"本次 purge 导致变空"的，残留空目录不再有清理者 | 接受：零字节，且 `ids()` 会列出它但 `steps()` 返回 `[]`，调用方本就会丢弃。迁移记录里再点一次 |
 | **`ids(order="mtime")` 的近似性因分层加深而变松** | 它取「step 目录 + 各域子目录」mtime 的最大值。lab 导出临时件写进 `{step}/lab/` 也会刷新该值，于是"看了一眼回放"可能把一个老 task 顶到清单前面 | 接受：本就是**仅供挑深扫候选**的粗排，docstring 与用例都写死了"绝不对外当时间戳用" |
 | **`app/services/__init__.py` 的 re-export 删除未经端到端验证** | 理论上若有动态取属性（`getattr(app.services, "client_manager")`）会 `AttributeError` | `grep` 已确认零静态引用，全量用例通过（含 `app.main` 导入预算用例）。真正的兜底是迁移后那轮 dev 启停 |
-| **三条已知缺陷（#1/#2/#3）本期一条未修** | `features.jsonl` 仍在泄漏；clip 仍可能静默截短 | 见 MAP §2 的期次表 |
+| **三条已知缺陷（#1/#2/#3）本期一条未修** | `features.jsonl` 仍在泄漏；clip 仍可能静默截短 | #2（`purge_step_dir` 自述与行为不符）随 `purge_step` 归位消解；#3（clip 不滤在途段）与 #1（TTL 判据换代）各自独立立项，均在调用点迁移之后 |
