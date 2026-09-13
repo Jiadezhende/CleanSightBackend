@@ -50,7 +50,7 @@ python integration_tests/test_single_client.py --scenario 1 --task_id 1  # 集�
 
 **动手后**
 
-- **改动留档**：**一个开发任务一份** `docs/update/YYYYMMDD_主题.md`，同一任务的后续改动追加进这份，别每改一次新建。
+- **改动留档**：**一个开发任务一份** `docs/update/YYYYMMDD_主题.md`，同一任务的后续改动追加进这份，别每改一次新建。**只动文档的任务不落记录**（判据：跑起来的东西有没有变）——用一份文档记录另一份文档的诞生是递归。
 - **不主动写 `docs/kb/`**：KB 是融合产物，只在人发起维护流程时才更新——日常改动留在 update 里，别顺手同步进 KB。
 
 **汇报时**

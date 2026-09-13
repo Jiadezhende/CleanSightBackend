@@ -4,21 +4,16 @@
                                                       │
                                        hex-patch ─────┘  moof/traf/tfdt
 
-**为什么非转不可**：普通 MP4（moov+mdat 整体）无法被 hls.js 当段播放，会 fragParsingError。
-`-hls_segment_type fmp4` 让 ffmpeg 产出 init segment（ftyp+moov）+ fragment（ftyp+moof+mdat），
-才符合 HLS 协议。
+两件事都不是可选的：普通 MP4（moov+mdat 整体）被 hls.js 当段播会 fragParsingError；而每个段
+由独立 ffmpeg 进程转码、输入自身从 PTS=0 起，不补 tfdt 偏移则所有 fragment 落点都是 0，
+播到第一段末尾就不前进。**tfdt 只能改字节**（ffmpeg 的 `-output_ts_offset` /
+`-itsoffset+-copyts` / `-muxdelay` 在 HLS muxer + fmp4 下全部无效），box 结构固定、size 不变，
+是纯 metadata 改写。背景与实测见 `docs/kb/DESIGN_HLS_TIMELINE.md`。
 
-**为什么 tfdt 要自己改**：每个段由独立 ffmpeg 进程转码、输入 mp4v 自身从 PTS=0 开始，不补
-偏移则所有 fragment 的 tfdt 都是 0，hls.js 播到第一段末尾就不前进。而 ffmpeg 8.x 的 HLS
-muxer 在 `-start_number 0` + fmp4 下会强制清零 tfdt，`-output_ts_offset` /
-`-itsoffset+-copyts` / `-muxdelay` 全部无效——只能转码完直接改字节。fmp4 的 box 结构固定、
-size 不变，是纯 metadata 改写。
+失败语义：ffmpeg 缺失 / 超时 / 非零退出 / 没产出预期文件一律**原样抛**，由调用方删掉整个
+stage、不 rename、不登记。本模块不做降级保留——留下一个 mp4v 冒充 fragment 是静默失败。
 
-失败语义（W4）：ffmpeg 缺失 / 超时 / 非零退出 / 没产出预期文件，一律**原样抛**，由
-`_insert` 删掉整个 stage、不 rename、不登记。本模块不做任何降级保留——留下一个 mp4v 冒充
-fragment，playlist 里就多一条喂给 demuxer 会出垃圾的条目，而那是静默失败。
-
-依赖上界：stdlib only（`app.settings` 只在函数体内 import，规范 §2）。
+依赖上界：stdlib only（`app.settings` 只在函数体内 import）。
 """
 
 from __future__ import annotations
@@ -31,37 +26,24 @@ from typing import Iterator, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# fMP4 媒体时间基（mdhd.timescale，即 1 秒切成多少 tick），显式 pin 给 ffmpeg。
-#
-# 必须 pin 的理由：不指定时 ffmpeg 按 `fps 有理数的约分分子 × 2^k`（k 取到 ≥10000）自选
-# timescale，而 init.mp4 只由首段生成、被整条 playlist 复用（EXT-X-MAP 声明的就是它的
-# 时间基）。逐段 eff_fps 不同 → 逐段 timescale 不同 → 后续 fragment 的 tick 被按首段尺度
-# 解读，误差是乘性的：实测 15fps 定 init、14.37fps 段（其自选 timescale=11496）→ 声明
-# 10.02s 却被读成 7.60s，单段 2.4s 空洞，hls.js 段尾停摆。
-# 注意该自选值对 fps 极不连续——15.0→15360 但 14.37→11496（分子 1437 约不动），fps 抖 4%
-# 可致 timescale 差 25%，故「fps 波动不大就没事」不成立。
-#
-# 取 90000：MPEG-TS/RTP 标准视频时钟，能整除 30/25/24/20/15/12/10 等常见帧率（每帧分别
-# 3000/3600/3750/4500/6000/7500/9000 tick，无余数）；非整除帧率下 ffmpeg 按绝对 PTS 取整、
-# 增量差分得出，误差有界 ≤ 半 tick（5.6μs）且不累积。
-# pin 之后 timescale 与编码 fps 彻底解耦，逐段 eff_fps 才是合法的速率表达。
+# fMP4 媒体时间基（mdhd.timescale），**显式 pin 给 ffmpeg**：不指定时它按段自选，而 init 只由
+# 首段生成、被整条 playlist 复用，逐段 timescale 不同会让后续 fragment 的 tick 被按首段尺度
+# 解读，误差是乘性的（实测单段 2.4s 空洞）。取 90000 的理由与实测见
+# `docs/kb/DESIGN_HLS_TIMELINE.md`。
 TIMESCALE = 90000
 
-# 转码超时（秒）。D3′ ①：层内起的外部工具必须有超时，否则一个卡住的 ffmpeg 会永久占住
-# 调用方的线程。
-#
-# 取 15 而不是"给足余量"的大数：调用侧是**单写者**（一条 SerialTaskQueue 一个消费线程），
-# 一个卡住的 ffmpeg 堵的不是自己那一段，是**所有 task 的录制**。实测单段 ~260 ms，
-# 1080p 满段量级 1–3 s，15 s 已是 5–10× 余量；再大只是把「卡住」变成「卡更久」。
+# 转码超时（秒）。**必须有超时**：调用侧是单写者（一条 SerialTaskQueue 一个消费线程），一个
+# 卡住的 ffmpeg 堵的不是自己那一段，是所有 task 的录制。实测单段 ~260 ms、1080p 满段 1–3 s，
+# 15 s 已是 5–10× 余量。
 _TIMEOUT_S = 15
 
-# stage 目录内的固定文件名。它们**不是产物名**——产物名由 `_layout` 决定，commit 时才
-# rename 过去。固定命名让转码步不必知道自己在为哪个段服务。
+# stage 目录内的固定文件名。它们**不是产物名**——产物名由 `_layout` 决定，commit 时才 rename
+# 过去；固定命名让转码步不必知道自己在为哪个段服务。
 _SOURCE_NAME = "source.mp4"
 _INIT_NAME = "init.mp4"
 _FRAGMENT_NAME = "fragment_0.mp4"
-# ffmpeg HLS muxer 要求 `-hls_segment_filename` 必须含 %d 模板（即便只有 1 段），否则报
-# "Invalid segment filename template"。pin `-start_number 0` 让产物固定为 fragment_0.mp4。
+# `-hls_segment_filename` 必须含 %d 模板（即便只有 1 段），配 `-start_number 0` 让产物固定为
+# fragment_0.mp4。
 _FRAGMENT_TEMPLATE = "fragment_%d.mp4"
 _PLAYLIST_NAME = "index.m3u8"
 
@@ -87,23 +69,21 @@ def transcode(stage: Path) -> Tuple[Path, Path]:
     """把 `stage/source.mp4` 转成 fMP4，返回 `(fragment, init)` 两个 stage 内路径。
 
     Raises:
-        FileNotFoundError: 机器上没有 ffmpeg（D5：那是运行时依赖，import 期不要求）。
+        FileNotFoundError: 机器上没有 ffmpeg（运行时依赖，import 期不要求）。
         subprocess.TimeoutExpired: 超过 `_TIMEOUT_S`。
         subprocess.CalledProcessError: ffmpeg 非零退出（stderr 挂在异常上）。
         RuntimeError: ffmpeg 报成功但没产出 fragment 或 init。
 
-    **路径策略：子进程 cwd=stage，所有输出全传 basename。** 历史踩坑——ffmpeg 8.x
-    (Windows) 把 `-hls_fmp4_init_filename` 的 basename 解析到进程 cwd、传绝对路径才对；
-    ffmpeg 4.x (Ubuntu 22.04) 把绝对路径**当相对路径**拼到 playlist 目录前，得到
-    `/dir/foo/dir/foo/init.mp4` 这种荒诞路径 → ENOENT。两版行为正好相反，唯一兼容写法
-    就是 cwd + basename：两边都拼到 stage 里。
+    两条 ffmpeg 写法上的硬约束，改了会静默或跨平台炸（背景见
+    `docs/kb/DESIGN_HLS_TIMELINE.md`）：
 
-    `-hls_segment_options video_track_timescale=` 是**唯一**能 pin 住 mdhd.timescale 的
-    写法：它透传给内层 mp4 muxer；直接给 hls muxer 传 `-video_track_timescale` 会被静默
-    忽略（理由见 `TIMESCALE` 注释）。
+    - **子进程 `cwd=stage`，所有输出只传 basename**：8.x 与 4.x 对 `-hls_fmp4_init_filename`
+      的路径解析行为正好相反，绝对路径在其中一边必然 ENOENT。
+    - **`-hls_segment_options video_track_timescale=`** 是唯一能 pin 住 mdhd.timescale 的写法
+      （透传给内层 mp4 muxer）；直接给 hls muxer 传 `-video_track_timescale` 会被静默忽略。
 
-    ffmpeg 自己也会在 stage 里写一份 `index.m3u8`，本层不用它——playlist 由 `_m3u8` 按
-    整条 step 的口径维护，转码只出字节。它随 stage 目录一起删。
+    ffmpeg 自己在 stage 里写的那份 `index.m3u8` 本层不用（playlist 由 `_m3u8` 按整条 step 的
+    口径维护），随 stage 目录一起删。
     """
     from app.settings import settings
 

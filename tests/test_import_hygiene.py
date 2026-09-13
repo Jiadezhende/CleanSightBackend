@@ -33,11 +33,21 @@ BUDGET = {
     # storage 的每个模块**逐个登记**，不能只登记包名：包根是标记型 __init__、零 re-export，
     # `import app.storage` 根本不加载任何域文件（实测 1ms / 41 模块），登记包名挡不住有人
     # 往域文件里塞 ffmpeg/cv2/批缓冲。新增域文件必须同时在这里加一行 ——
-    # 由 test_storage_modules_are_all_budgeted 强制。
+    # 由 test_layer_package_modules_are_all_budgeted 强制。
     #
     # 重域用子包（`hls/`）时，它的 `__init__` 是 **facade 不是标记型**：re-export 会连带
     # 加载 `_encode` 之类的实现模块，所以那些模块的模块级必须保持 stdlib-only（cv2 走函数
     # 体内 import），`app.storage.hls` 这条才能维持「重依赖集合为空」。
+    #
+    # ⚠ **子包成员条目实际量的是整个 facade，不是它自己**：import 任何
+    # `app.storage.hls.X` 都会先跑包 `__init__`，于是 `_layout` / `_m3u8` / `_read` /
+    # `types` 这几条的实测值与 `app.storage.hls` 一模一样（~0.10s，且 numpy 已加载）。
+    # 后面标着「stdlib only」的注释说的是**源码事实**，不是本门禁的结论 ——
+    # 往 `types.py` 里塞一行 `import numpy` 不会让任何一条红（numpy 不在 HEAVY，
+    # 且 facade 早已把它拉起来了）。真正被这些条目守住的只有 HEAVY 三项：实测往
+    # `types.py` 塞 `import cv2`，`types` 与 `_read` 两条会一起红。
+    # 要让「某个成员模块自己是不是 stdlib-only」可执行，得另起一条按源码 AST 查
+    # import 的检查，不是调这里的秒数。
     "app.storage":              (set(), 0.20),
     "app.storage._root":        (set(), 0.20),   # stdlib only
     "app.storage.tasks":        (set(), 0.20),   # stdlib only
@@ -53,12 +63,24 @@ BUDGET = {
     # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
     # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。
     "app.storage.hls._decode":  (set(), 0.40),
-    "app.storage.hls._fmp4":    (set(), 0.20),   # stdlib only（ffmpeg 是运行时依赖，D5）
+    # 下面标着「stdlib only」的四条（`_fmp4` / `_layout` / `_m3u8` / `_meta`）秒数上限
+    # 照 `app.storage.hls` 给 0.40 —— 它们量的是同一份活（见上方 ⚠ 段），给 0.20 只会让
+    # 负载高的机器上这几条先于 facade 那条抖。`_read` / `types` 同理。
+    "app.storage.hls._fmp4":    (set(), 0.40),   # stdlib only（ffmpeg 是运行时依赖，D5）
     "app.storage.hls._idx":     (set(), 0.40),   # numpy 是它的货币（float64 数组）
     "app.storage.hls._write":   (set(), 0.40),   # 域货币 Frame
-    "app.storage.hls._layout":  (set(), 0.20),   # stdlib only
-    "app.storage.hls._m3u8":    (set(), 0.20),   # stdlib only
-    "app.storage.hls._meta":    (set(), 0.20),   # stdlib only
+    "app.storage.hls._layout":  (set(), 0.40),   # stdlib only
+    "app.storage.hls._m3u8":    (set(), 0.40),   # stdlib only
+    "app.storage.hls._meta":    (set(), 0.40),   # stdlib only
+    # 读侧组合动作（可播段过滤 / 段级区间定位）与资源容器。两者的源码都是 stdlib-only
+    # （`_read` 只组合 `_layout` + `_m3u8`；`types` 是子包的底、不 import 同包任何模块），
+    # 但**本门禁验不到这一点** —— 见上方 BUDGET 开头的 ⚠ 段。
+    "app.storage.hls._read":    (set(), 0.40),
+    "app.storage.hls.types":    (set(), 0.40),
+    # 服务层工具包。标记型 __init__（零 re-export），故这条盯的只是它自己；每个成员模块
+    # 另行登记，由 test_layer_package_modules_are_all_budgeted 强制。
+    "app.services.utils":              (set(), 0.20),
+    "app.services.utils.vod_playlist": (set(), 0.20),   # stdlib only（math / typing）
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
@@ -80,6 +102,16 @@ LAYER_PACKAGES = {
     # app.domain：内存数据契约（Frame / FrameFeature），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
     "app/storage": ("app.storage", "app.domain", "app.settings"),
+    # 服务层工具：多个 service / router 都要、但不属于任何一个的无状态纯函数。它可以向下
+    # 依赖数据层与基建，但**不得 import 任何兄弟 service 包** —— 破了它，本包就成了
+    # service → service 依赖的后门：lab 想调 traceback 的东西，在这里加个转发函数就绕过去
+    # 了，而 test_singleton_reference_surface 只盯单例、看不见这种转发。
+    #
+    # 注意 "app.services.utils" 作为白名单前缀**不会**放行 "app.services.lab"：检查是
+    # `name == ok or name.startswith(ok + ".")`，兄弟包差的正是那个点。
+    "app/services/utils": (
+        "app.services.utils", "app.storage", "app.domain", "app.utils", "app.settings",
+    ),
 }
 
 # 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
@@ -146,7 +178,7 @@ def test_import_budget(module):
 
 
 @pytest.mark.parametrize("package", sorted(LAYER_PACKAGES))
-def test_storage_modules_are_all_budgeted(package):
+def test_layer_package_modules_are_all_budgeted(package):
     """分层包里每个模块都得有自己的 BUDGET 条目 —— 否则新域文件天生不在门禁视野里。
 
     补的是 20260909 记录里点名的那个洞：BUDGET 登记包名，而标记型 `__init__` 不加载任何

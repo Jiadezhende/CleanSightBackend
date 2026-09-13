@@ -9,12 +9,25 @@
 
 对外**三个动作 + 一组定位/枚举函数**。调用方交出内存里的 `Frame` 序列，拿回这段的身份键；
 cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计七件事全在域内，一件都
-不出现在签名上——**像 `INSERT` 一样**：给一行数据，剩下的是存储的事。`delete` 同理，是
-`DELETE ... WHERE (task, step)`：只执行，不判断该不该删。
+不出现在签名上。`delete` 同理，只执行、不判断该不该删。`read_segment` / `iter_frames` 是
+读向的对称件：给身份键或墙钟区间，拿回带原始 ts 的 `Frame`，**只服务 raw 轨**
+（processed 不落 sidecar）。
 
-`read_segment` / `iter_frames` 是读向的对称件：给身份键或墙钟区间，拿回**带原始 ts 的
-`Frame`**。ffmpeg 解码、帧号与 sidecar 下标的对齐、两级裁剪同样一件不出签名。**只服务
-raw 轨**（processed 不落 sidecar，理由见 `_decode`）。
+## 对外成员
+
+    ① 段容器   SegmentRef / PlayableSegment
+               list_segments            盘上全部段（含在途，不能直接喂播放器）
+               list_segments_by_track   双轨只付一次 iterdir
+               list_segments_in_range   按墙钟区间选段
+               list_playable_segments   已登记可播 + EXTINF 真时长
+               segment_path / init_path / sidecar_path / playlist_path / parse_*
+    ② Frame    read_segment / iter_frames
+    ③ 写       insert_segment / delete
+
+**第三种产出要进来先问一句：它是段的元数据，还是给别人消费的装配产物？** VOD 清单是后者，
+故整体不在本域（→ `app/services/utils/vod_playlist.py`）；域对 `MediaToken`、HTTP URL、
+清单文本一概零认知。写侧落盘的 `{track}_playlist.m3u8` 是本域产物，不受这条影响——读它得出
+的逐段 EXTINF 由 `list_playable_segments` 出口，解析器 `_m3u8.durations` 保持包内私有。
 
 ## 落盘结构
 
@@ -31,74 +44,86 @@ detection 不在本域落盘——它由 `features` 域按帧 ts 单源写入。
 
 ## 三条时间线，一个 `eff_fps`
 
-段的编码帧率由帧 ts 反推（`(N-1)/span`），它同时决定三个值，且必须同源：
+段的编码帧率由帧 ts 反推（`(N-1)/span`），它同时决定三个值，**必须同源**：
 
     编码帧率   cv2.VideoWriter 按它写 N 帧 → 媒体时长 = N/fps
     EXTINF     清单里声明的段时长，= N/fps
     tfdt       该段在媒体轴上的落点，= 此前所有 EXTINF 之和 × 90000
 
-写岔任何一个都**不报错**，表现是 hls.js 段尾停摆、总时长缩水或画面丢一截。这三个值
-过去分散在写侧三处、靠注释互相约束，收进本域正是为了让它们不再跨边界传递。完整推导见
+写岔任何一个都**不报错**，表现是 hls.js 段尾停摆、总时长缩水或画面丢一截。完整推导见
 `docs/update/20260908_EXTINF_TFDT_CONTRACT.md`。
 
 ## 边界
 
-**进本域**：文件名、目录布局、m3u8 文本、fMP4 字节、`.idx` 二进制、编解码，以及为编解码
-起 cv2 / ffmpeg。
-**不进**：切多长一段、失败重试几次、留多久、谁来调、并发几个——策略与编排归 `persistence`
-（判据见 `app/storage/__init__.py` 的四问）。
+**进本域**：文件名、目录布局、m3u8 文本、fMP4 字节、`.idx` 二进制、编解码，以及为编解码起
+cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、谁来调、并发几个。
 
 **并发**：本域不持锁。同一 `(task, step, track)` 的写必须串行，且与该 step 的 `delete` 同序
-——由调用侧的 `SerialTaskQueue` 构造，理由与失效表现见 `_write` 的「并发」一节。
+——由调用侧的 `SerialTaskQueue` 构造，失效表现见 `_write` 的「并发」一节。
 
-**读侧只迁了一半**：解码（段 → `Frame`）与段枚举已在域内，但**调用点尚未迁移**——
-`inference/offline` 的 `Timeline` 与 `traceback/segment_finder` 仍是现役，且它们读的是
-`{step}/` 平铺布局。本域的读函数只认 `{step}/hls/`，两份并存到写侧切换那一刻为止。
-生成 VOD 清单、解析 metadata 仍在各 router 里，没有迁入计划之外的承诺。
+**读侧能力已齐，调用点尚未迁移**：`inference/offline` 的 `Timeline`、
+`traceback/segment_finder` 与三处各自拼 VOD 清单的调用方仍是现役，且它们读的是 `{step}/`
+平铺布局；本域的读函数只认 `{step}/hls/`。`metadata.json` 的读仍在域外，未承诺迁入。
 
 ## 域内分工
 
-    _layout.py   域根 / 文件名 / SegmentRef / 段枚举 / stage 目录（域名在此只出现一次）
+    types.py     本域的资源容器：SegmentRef / PlayableSegment
+                 （stdlib only、不 import 同包任何模块 —— 它是子包的底）
+    _layout.py   域根 / 文件名 / 轨道白名单 / 段枚举 / stage 目录（域名在此只出现一次）
     _encode.py   帧序列 → mp4v，以及 eff_fps 反推（cv2 在函数体内 import）
-    _decode.py   段 → 帧序列（ffmpeg），帧号 ↔ sidecar 下标对齐，两级裁剪
+    _decode.py   段 → 帧序列（ffmpeg），帧号 ↔ sidecar 下标对齐，帧级裁剪
     _fmp4.py     mp4v → fMP4 fragment + init（ffmpeg），tfdt hex-patch
-    _m3u8.py     清单文本：头 / 条目 / 累计 EXTINF
+    _m3u8.py     LIVE 清单文本：写侧（头 / 条目 / 累计）+ 读侧（逐段 EXTINF）
     _idx.py      sidecar 的 float64 布局
     _meta.py     metadata.json 的读改写
     _write.py    写侧对外动作：insert_segment（stage → adjust → commit）/ delete
+    _read.py     读侧对外动作：list_playable_segments / list_segments_in_range
 
-本文件是 **facade**（re-export 域的公开面），不是标记型——调用方分不出 `hls` 是包还是
-模块，这正是「薄域将来变重」能非破坏性升级的前提。代价是 re-export 会连带加载上面这些
-实现模块，故它们的**模块级必须保持 stdlib + `app.domain`**，重依赖（cv2）一律函数体内
-import，`app.storage.hls` 的导入预算才守得住。
+本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
+re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.domain`**，
+重依赖（cv2）一律函数体内 import，导入预算才守得住。
+
+规范见 `docs/kb/DESIGN_STORAGE_LAYER.md`。
 """
 
 from ._decode import iter_frames, read_segment
 from ._layout import (
     TRACKS,
-    SegmentRef,
+    init_name,
     init_path,
     list_segments,
+    list_segments_by_track,
+    parse_init_name,
     parse_segment_name,
     playlist_path,
+    segment_name,
     segment_path,
     sidecar_path,
     ts_to_us,
 )
+from ._read import list_playable_segments, list_segments_in_range
 from ._write import delete, insert_segment
+from .types import PlayableSegment, SegmentRef
 
 __all__ = [
     "TRACKS",
+    "PlayableSegment",
     "SegmentRef",
     "delete",
+    "init_name",
     "init_path",
     "insert_segment",
     "iter_frames",
     "list_segments",
+    "list_segments_by_track",
+    "parse_init_name",
     "parse_segment_name",
+    "list_playable_segments",
     "playlist_path",
     "read_segment",
+    "segment_name",
     "segment_path",
+    "list_segments_in_range",
     "sidecar_path",
     "ts_to_us",
 ]

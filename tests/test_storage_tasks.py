@@ -156,16 +156,16 @@ class TestSteps:
     def test_sorted_ascending(self, tmp_storage):
         for step_id in (3, 1, 10, 2):
             _seed_step(tmp_storage, 1, step_id)
-        assert tasks.steps(1) == [1, 2, 3, 10]
+        assert tasks.list_step_ids(1) == [1, 2, 3, 10]
 
     def test_skips_non_id_dirs_and_files(self, tmp_storage):
         _seed_step(tmp_storage, 1, 1)
         (tmp_storage / "1" / "scratch").mkdir()
         (tmp_storage / "1" / "notes.txt").write_text("x", encoding="utf-8")
-        assert tasks.steps(1) == [1]
+        assert tasks.list_step_ids(1) == [1]
 
     def test_missing_task_dir_returns_empty(self, tmp_storage):
-        assert tasks.steps(999) == []
+        assert tasks.list_step_ids(999) == []
 
     def test_does_not_judge_emptiness(self, tmp_storage):
         """空 step 目录必须被列出 —— TTL 要看见它（features.jsonl 泄漏的正是这一类）。
@@ -173,14 +173,14 @@ class TestSteps:
         「两轨都没段算不算数」是 HLS 域知识，本域不做这个判断。
         """
         (tmp_storage / "1" / "5").mkdir(parents=True)
-        assert tasks.steps(1) == [5]
+        assert tasks.list_step_ids(1) == [5]
 
 
 class TestIds:
     def test_sorted_ascending(self, tmp_storage):
         for task_id in (30, 1, 200):
             _seed_step(tmp_storage, task_id, 1)
-        assert tasks.ids() == [1, 30, 200]
+        assert tasks.list_task_ids() == [1, 30, 200]
 
     def test_skips_non_id_entries(self, tmp_storage):
         """存储根下正常只有数字 task 目录（lab 产物已归入 {task}/{step}/lab/、
@@ -188,17 +188,17 @@ class TestIds:
         _seed_step(tmp_storage, 1, 1)
         (tmp_storage / ".lab_exports").mkdir()  # 旧布局残留
         (tmp_storage / "lab_runtime_config.json").write_text("{}", encoding="utf-8")
-        assert tasks.ids() == [1]
+        assert tasks.list_task_ids() == [1]
 
     def test_missing_root_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "nope"))
-        assert tasks.ids() == []
-        assert tasks.ids(order="mtime") == []
+        assert tasks.list_task_ids() == []
+        assert tasks.list_task_ids(order="mtime") == []
 
     def test_mtime_order_is_descending(self, tmp_storage):
         _set_mtime(_seed_step(tmp_storage, 1, 1), 1_700_000_100)
         _set_mtime(_seed_step(tmp_storage, 2, 1), 1_700_000_900)
-        assert tasks.ids(order="mtime") == [2, 1]
+        assert tasks.list_task_ids(order="mtime") == [2, 1]
 
     def test_mtime_follows_domain_subdir_not_just_step_dir(self, tmp_storage):
         """产物写进 `{step}/{domain}/` 只更新域目录的 mtime，step 目录纹丝不动。
@@ -213,39 +213,39 @@ class TestIds:
 
         # 只让 task 2 的 hls/ 域目录"刚写过东西"——step 目录不碰
         os.utime(fresh / "hls", (1_700_000_900, 1_700_000_900))
-        assert tasks.ids(order="mtime") == [2, 1]
+        assert tasks.list_task_ids(order="mtime") == [2, 1]
 
     def test_mtime_order_keeps_task_without_steps_last(self, tmp_storage):
         """无 step 子目录的 task 排序键取 0（排最后），但**仍保留在结果里**——
         它是否该丢弃由调用方深扫时决定，不是本域的判断。"""
         _set_mtime(_seed_step(tmp_storage, 1, 1), 1_700_000_100)
         (tmp_storage / "2").mkdir()
-        assert tasks.ids(order="mtime") == [1, 2]
+        assert tasks.list_task_ids(order="mtime") == [1, 2]
 
     def test_mtime_tie_breaks_on_larger_task_id(self, tmp_storage):
         for task_id in (1, 2):
             _set_mtime(_seed_step(tmp_storage, task_id, 1), 1_700_000_100)
-        assert tasks.ids(order="mtime") == [2, 1]
+        assert tasks.list_task_ids(order="mtime") == [2, 1]
 
     def test_invalid_order_raises(self, tmp_storage):
         """传错 order 说明调用方对返回顺序有预期，静默按默认走比报错更坏。"""
         with pytest.raises(ValueError, match="Invalid order"):
-            tasks.ids(order="recency")
+            tasks.list_task_ids(order="recency")
 
 
 # ---------------------------------------------------------------------------
-# tasks.purge_step：删除
+# tasks.delete_step：删除
 # ---------------------------------------------------------------------------
 
 
 class TestPurgeStep:
     def test_removes_existing_step(self, tmp_storage):
         _seed_step(tmp_storage, 1, 1, "hls", "raw_segment_100.mp4")
-        assert tasks.purge_step(1, 1) is True
+        assert tasks.delete_step(1, 1) is True
         assert not (tmp_storage / "1" / "1").exists()
 
     def test_missing_step_returns_false(self, tmp_storage):
-        assert tasks.purge_step(1, 1) is False
+        assert tasks.delete_step(1, 1) is False
 
     def test_removes_every_domain_not_just_hls(self, tmp_storage):
         """它删的是整个 step，三个域一起没 —— 不是只删 hls/。
@@ -257,24 +257,24 @@ class TestPurgeStep:
         _seed_step(tmp_storage, 1, 1, "features", "features.jsonl", "facts.jsonl")
         _seed_step(tmp_storage, 1, 1, "lab", "clip_1700_1710.mp4")
 
-        assert tasks.purge_step(1, 1) is True
+        assert tasks.delete_step(1, 1) is True
         assert not (tmp_storage / "1" / "1").exists()
 
     def test_reclaims_task_dir_when_last_step_removed(self, tmp_storage):
         _seed_step(tmp_storage, 1, 1)
-        assert tasks.purge_step(1, 1) is True
+        assert tasks.delete_step(1, 1) is True
         assert not (tmp_storage / "1").exists()
 
     def test_keeps_task_dir_when_other_steps_remain(self, tmp_storage):
         _seed_step(tmp_storage, 1, 1)
         _seed_step(tmp_storage, 1, 2)
-        assert tasks.purge_step(1, 1) is True
+        assert tasks.delete_step(1, 1) is True
         assert (tmp_storage / "1").is_dir()
-        assert tasks.steps(1) == [2]
+        assert tasks.list_step_ids(1) == [2]
 
     def test_keeps_task_dir_with_non_step_leftovers(self, tmp_storage):
         """task 目录里若还有别的东西（非 step 目录/文件），rmdir 安全失败，目录保留。"""
         _seed_step(tmp_storage, 1, 1)
         (tmp_storage / "1" / "notes.txt").write_text("x", encoding="utf-8")
-        assert tasks.purge_step(1, 1) is True
+        assert tasks.delete_step(1, 1) is True
         assert (tmp_storage / "1").is_dir()

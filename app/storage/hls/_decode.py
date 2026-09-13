@@ -3,36 +3,33 @@
     ref = hls.insert_segment(task_id, step_id, "raw", frames)   # 交帧，拿身份键
     list(hls.read_segment(task_id, step_id, ref, width=W, height=H))  # 交身份键，拿帧
 
-**帧带的是墙钟 ts，不是媒体轴时刻**——后者没有意义：媒体轴被 EXTINF/tfdt 压紧过，段与段
-之间的墙钟断流在那条轴上不存在（见 `_fmp4` 的 TIMESCALE 说明）。墙钟 ts 只存在于 sidecar，
-所以本模块的每一帧都是「像素来自 mp4、时间来自 `.idx`」的合成物。
+**帧带的是墙钟 ts，不是媒体轴时刻**（媒体轴被 EXTINF/tfdt 压紧过，段间断流在那条轴上不
+存在）。墙钟 ts 只存在于 sidecar，故每一帧都是「像素来自 mp4、时间来自 `.idx`」的合成物。
 
-## 段内帧号 = sidecar 下标（这条契约是解码方式的直接后果）
+## 段内帧号 = sidecar 下标
 
-写侧逐帧写 ts、cv2 按 N 帧写出 N 帧，两者天然 1:1。读侧要维持它，解码命令只能长成这样：
+写侧逐帧写 ts、cv2 按 N 帧写出 N 帧，两者 1:1。读侧要维持它，解码命令**三处不能动**：
 
     concat:{raw_init.mp4}|{raw_segment_*.mp4}   拼 init 才解得开 fragment
     -vf select=between(n,k1,k2)                 按**帧号**选，不是按时间
     不用 -ss                                    它按时间 seek，会让 n 的原点漂掉
 
-**给这条命令加 `-ss` 优化不会报错**，表现是帧号整体平移、反查回来的是错帧，而
-`FrameTracker.find` 的位级 ts 比较会把它当"没找到"抛 ValueError——错因指向完全错误的方向。
-这正是这套知识必须待在写侧隔壁的理由。
+加 `-ss` 做"优化"不报错，表现是帧号整体平移、反查回来是错帧，而 `FrameTracker.find` 的位级
+ts 比较会把它当"没找到"抛 ValueError，错因指向完全错误的方向。
 
 ## 只服务 raw 轨
 
-`processed` **不落 sidecar**（`_idx` / `_write` 的有意不对称）：它是画完框的渲染结果，
-离线反查要的是原始帧，拿渲染结果构造视觉特征等于把模型自己的输出再喂回去。故
-`iter_frames` 连 `track` 参数都不设，`read_segment` 收到非 raw 的 ref 直接 `ValueError`
-——不是静默返回空，「这条路不通」与「这段没数据」必须分得开。
+`processed` 不落 sidecar（有意的不对称），给不出带墙钟 ts 的帧。故 `iter_frames` 连 `track`
+参数都不设，`read_segment` 收到非 raw 的 ref 直接 `ValueError`——不静默返回空，「这条路不通」
+与「这段没数据」必须分得开。
 
 ## 区间语义
 
-`start_ts` / `end_ts` 是**闭区间**的墙钟秒，`None` 表示该侧不设限。两级裁剪：段级选出
-可能命中的段（省 ffmpeg 调用次数），帧级在段内选 `[k_start, k_end]`（不解无效像素）。
+`start_ts` / `end_ts` 是**闭区间**的墙钟秒，`None` 表示该侧不设限。两级裁剪：段级选出可能
+命中的段（省 ffmpeg 调用次数），帧级在段内选 `[k_start, k_end]`（不解无效像素）。
 
-依赖上界：`app.domain`（域货币 `Frame`）+ numpy（sidecar 的货币）+ stdlib。ffmpeg 是
-**运行时**依赖（D5），`settings.ffmpeg_path` 按 `_fmp4` 的规矩只在函数体内 import。
+依赖上界：`app.domain`（域货币 `Frame`）+ numpy（sidecar 的货币）+ stdlib。ffmpeg 是**运行时**
+依赖，`settings.ffmpeg_path` 只在函数体内 import。
 """
 
 from __future__ import annotations
@@ -47,7 +44,7 @@ import numpy as np
 
 from app.domain.frame import Frame
 
-from . import _idx, _layout
+from . import _idx, _layout, _read
 from ._layout import SegmentRef
 
 logger = logging.getLogger(__name__)
@@ -55,9 +52,8 @@ logger = logging.getLogger(__name__)
 # 本模块唯一服务的轨道。见模块 docstring 的「只服务 raw 轨」。
 _RAW_TRACK = "raw"
 
-# 单段解码的 ffmpeg 预算，口径同写侧：max(下限, 规模 × 单位)。一段是有界工作量
-#（≤ sidecar 条数），故按帧给预算而非给全局超时。实测整段 150 帧解码 73 ms，
-# 0.2 s/帧 余量约 400×，只用于兜「坏盘/网络盘上永久阻塞」。
+# 单段解码的 ffmpeg 预算：max(下限, 帧数 × 单位)。实测整段 150 帧解码 73 ms，此处余量约
+# 400×——它只用于兜「坏盘/网络盘上永久阻塞」，不是性能阈值。
 _DECODE_TIMEOUT_FLOOR_S = 30
 _DECODE_TIMEOUT_PER_FRAME_S = 0.2
 
@@ -76,11 +72,7 @@ def _require_raw(track: str) -> None:
 
 
 def _read_exact(stream, buf: bytearray) -> bool:
-    """把 stream 读满 buf；EOF 提前到达返回 False。
-
-    `readinto` 直接写进调用方给的 buffer，比 `read(n)` 少一次 bytes 分配 + 拷贝；
-    管道上单次 readinto 可能短读，故循环填满。
-    """
+    """把 stream 读满 buf；EOF 提前到达返回 False（管道上单次 readinto 可能短读，故循环）。"""
     view = memoryview(buf)
     got = 0
     while got < len(buf):
@@ -96,11 +88,10 @@ def _build_cmd(
 ) -> List[str]:
     """解出 `[start, end]` 闭区间帧号的 ffmpeg 命令（rawvideo bgr24 走管道）。
 
-    三处不能动的地方，全部在模块 docstring 的「段内帧号 = sidecar 下标」里有账：
-    `concat:` 拼 init、`select` 按帧号、**没有 `-ss`**。此外 `select` 必须排在 `scale`
-    之前——反过来会把注定被丢弃的帧也缩放一遍。
+    四处不能动：`concat:` 拼 init、`select` 按帧号、**没有 `-ss`**（前三条见模块 docstring）、
+    `select` 排在 `scale` 之前（反过来会把注定丢弃的帧也缩放一遍）。
     """
-    from app.settings import settings  # 规范 §2 通路 2，同 `_fmp4.transcode`
+    from app.settings import settings  # 同 `_fmp4.transcode`
 
     init = _layout.init_path(task_id, step_id, _RAW_TRACK)
     segment = _layout.segment_path(task_id, step_id, ref)
@@ -151,9 +142,7 @@ def _run_ffmpeg(
     width: int,
     height: int,
 ) -> Iterator[Frame]:
-    """解出段内 `[k_start, k_end]` 闭区间的帧，逐帧 yield。
-
-    像素来自管道、ts 来自 `sidecar[k]` —— 二者靠帧号对齐，见模块 docstring。
+    """解出段内 `[k_start, k_end]` 闭区间的帧，逐帧 yield（像素来自管道、ts 来自 `sidecar[k]`）。
 
     这是本域**唯一的解码 I/O 边界**，测试把它换掉就能不起 ffmpeg 覆盖全部裁剪数学。
     """
@@ -215,8 +204,8 @@ def read_segment(
         task_id: 任务 id。
         step_id: 洗消步骤 id。
         ref: 段身份键。`ref.track` 必须是 `"raw"`。
-        width / height: 输出分辨率。**无默认值**——漏传该是 `TypeError`，不是静默产出
-            一个尺寸，那会在下游变成 train-serve skew（规范设计约束 5）。
+        width / height: 输出分辨率。**无默认值**——静默产出一个尺寸会在下游变成
+            train-serve skew。
         start_ts / end_ts: 闭区间的墙钟秒，`None` 为该侧不设限。
 
     Returns:
@@ -228,12 +217,9 @@ def read_segment(
         RuntimeError: 解码短读或超时（消息带 ffmpeg stderr 尾部）。
         FileNotFoundError | OSError: 机器上没有 ffmpeg / 起不了子进程。
 
-    **缺 sidecar 返回空迭代器而不是抛**：段刚落盘 sidecar 尚未就位、或写侧那次
-    best-effort 写失败了，都是读侧要照常走下去的情形（跳过该段，别让一个辅助索引
-    打断整条迭代）。这与 `_idx.read` 的契约同源。
-
-    **参数校验是即时的，不是等到迭代**：本函数自己不是生成器，算完裁剪边界后把
-    `_run_ffmpeg` 的生成器返回出去。写错轨道在调用那一行就炸，不会潜伏到循环深处。
+    **缺 sidecar 返回空迭代器而不是抛**（跳过该段，别让一个辅助索引打断整条迭代，契约同
+    `_idx.read`）。**参数校验是即时的**：本函数自己不是生成器，写错轨道在调用那一行就炸，
+    不会潜伏到循环深处。
     """
     _require_raw(ref.track)
 
@@ -271,39 +257,18 @@ def iter_frames(
 ) -> Iterator[Frame]:
     """跨段流式取帧：段级裁剪后逐段 `read_segment`，按时序拼成一条。
 
-    **无 `track` 参数，恒为 raw**（见模块 docstring）。内存占用是 O(1 帧)——每段起一次
-    ffmpeg、边解边出；要「逐段整段进内存」请自己走 `list_segments` + `read_segment`，
-    一段多大是调用方的策略，不是本层的。
+    **无 `track` 参数，恒为 raw。** 内存占用 O(1 帧)：每段起一次 ffmpeg、边解边出；要整段进
+    内存自己走 `list_segments` + `read_segment`。
 
-    `start_ts` / `end_ts` 为 `None` 表示该侧不设限，原样下传给帧级裁剪——**不能拿段起始
-    数组的首尾当时间轴首尾**：那是段**起始** ts，末段的段首之后还有整整一段的帧。
+    两级裁剪 = `_read.list_segments_in_range`（段级）+ `read_segment`（帧级）。`None` 表示该侧不设限，
+    两级都原样收——**不能拿段起始数组的首尾当时间轴首尾**，那是段**起始** ts，末段的段首之后
+    还有整整一段的帧。
 
     Raises: 同 `read_segment`（首次迭代时才发生，本函数是生成器）。
     """
-    segs = _layout.list_segments(task_id, step_id, _RAW_TRACK)
-    if not segs:
-        return
-
-    starts = np.array([ref.ts_us for ref in segs], dtype=np.float64)
-
-    # 要找的是**包含** start_ts 的那一段，故 'right' - 1：'left' 取到的是 start_ts
-    # **之后**的段。且段文件名的 ts_us 是截断值（`_layout.ts_to_us`），「start_ts 恰为
-    # 该段首帧」时 start_ts*1e6 > ts_us，'left' 同样会跳过该段 —— 即不存在「大部分
-    # 情况下对」，是无条件错。
-    lo = (
-        0
-        if start_ts is None
-        else max(0, int(np.searchsorted(starts, start_ts * 1e6, side="right")) - 1)
-    )
-    hi = (
-        len(segs) - 1
-        if end_ts is None
-        else int(np.searchsorted(starts, end_ts * 1e6, side="right")) - 1
-    )
-    if lo > hi:  # end_ts 早于首段起点时 hi = -1，在此被拦下
-        return
-
-    for ref in segs[lo : hi + 1]:
+    for ref in _read.list_segments_in_range(
+        task_id, step_id, _RAW_TRACK, start_ts=start_ts, end_ts=end_ts
+    ):
         yield from read_segment(
             task_id, step_id, ref,
             width=width, height=height, start_ts=start_ts, end_ts=end_ts,
