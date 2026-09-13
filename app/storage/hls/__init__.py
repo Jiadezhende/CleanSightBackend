@@ -16,10 +16,10 @@ cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计�
 ## 对外成员
 
     ① 段容器   SegmentRef / PlayableSegment
-               list_segments           盘上全部段（含在途，不能直接喂播放器）
-               list_segments_by_track  双轨只付一次 iterdir
-               select_segments         按墙钟区间选段
-               playable_segments       已登记可播 + EXTINF 真时长
+               list_segments            盘上全部段（含在途，不能直接喂播放器）
+               list_segments_by_track   双轨只付一次 iterdir
+               list_segments_in_range   按墙钟区间选段
+               list_playable_segments   已登记可播 + EXTINF 真时长
                segment_path / init_path / sidecar_path / playlist_path / parse_*
     ② Frame    read_segment / iter_frames
     ③ 写       insert_segment / delete
@@ -27,7 +27,7 @@ cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计�
 **第三种产出要进来先问一句：它是段的元数据，还是给别人消费的装配产物？** VOD 清单是后者，
 故整体不在本域（→ `app/services/utils/vod_playlist.py`）；域对 `MediaToken`、HTTP URL、
 清单文本一概零认知。写侧落盘的 `{track}_playlist.m3u8` 是本域产物，不受这条影响——读它得出
-的逐段 EXTINF 由 `playable_segments` 出口，解析器 `_m3u8.durations` 保持包内私有。
+的逐段 EXTINF 由 `list_playable_segments` 出口，解析器 `_m3u8.durations` 保持包内私有。
 
 ## 落盘结构
 
@@ -77,7 +77,7 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
     _idx.py      sidecar 的 float64 布局
     _meta.py     metadata.json 的读改写
     _write.py    写侧对外动作：insert_segment（stage → adjust → commit）/ delete
-    _read.py     读侧对外动作：playable_segments / select_segments（段级裁剪在此）
+    _read.py     读侧对外动作：list_playable_segments / list_segments_in_range
 
 本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
 re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.domain`**，
@@ -101,7 +101,7 @@ from ._layout import (
     sidecar_path,
     ts_to_us,
 )
-from ._read import playable_segments, select_segments
+from ._read import list_playable_segments, list_segments_in_range
 from ._write import delete, insert_segment
 from .types import PlayableSegment, SegmentRef
 
@@ -118,12 +118,12 @@ __all__ = [
     "list_segments_by_track",
     "parse_init_name",
     "parse_segment_name",
-    "playable_segments",
+    "list_playable_segments",
     "playlist_path",
     "read_segment",
     "segment_name",
     "segment_path",
-    "select_segments",
+    "list_segments_in_range",
     "sidecar_path",
     "ts_to_us",
 ]

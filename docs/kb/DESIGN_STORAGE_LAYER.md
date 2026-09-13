@@ -101,7 +101,7 @@ tfdt 三处（推导见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)），�
 | `app/storage/hls/` | 子包（facade `__init__` + 实现模块） | 段 / init / playlist / sidecar / metadata：定位、编解码、读写 |
 | `app/storage/feature.py` | 单文件 | `features.jsonl`（`facts.jsonl` 的货币未定，整个留在 `inference/feature/store.py`） |
 | `app/storage/lab.py` | 未落地 | 送标 / 导出临时件 |
-| `app/storage/tasks.py` | 单文件，**唯一的跨域模块** | `steps` / `ids` / `purge_step`——共同特征是「跨所有域」 |
+| `app/storage/tasks.py` | 单文件，**唯一的跨域模块** | `list_task_ids` / `list_step_ids` / `delete_step`——共同特征是「跨所有域」 |
 
 **薄域单文件、重域子包，对外看不出区别**：`from app.storage import hls, feature` 拿到的都是
 一个域的公开面，调用方分不出 `hls` 是包还是模块。所以「薄域将来变重」是**非破坏性升级**。
@@ -110,6 +110,38 @@ tfdt 三处（推导见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)），�
 
 **`tasks.py` 不出定位能力**：往某个域里写东西是那个域自己的事。它只在「跨所有域」时出面，
 且每个入口都以 `(task_id, step_id)` 开头——**本层不提供任何脱离身份键的能力**。
+
+### 成员命名：动词前缀表达「碰盘方式 + 返回粒度」
+
+**动词前缀是封闭集合**，新增成员必须落在其中一个；不确定选哪个说明这个成员的职责还没想清。
+
+```text
+list_<复数>     枚举盘上事实 → 列表，一次 iterdir / 一次读
+read_<单数>     读一份产物 → 内存对象
+iter_<复数>     流式产出，O(1) 内存
+insert_<单数>   事务式写一份（路线 A）
+append_<复数>   追加一批（路线 B）
+write_<单数>    整体替换（路线 C）
+delete_<对象>   删除，只执行不判断
+<名词>_path     定位
+<名词>_name / parse_<名词>_name    名字的编解码对（互为逆运算）
+```
+
+三条配套约定：
+
+- **过滤条件进名字，不进 bool 参数**：`list_playable_segments` / `list_segments_in_range`，
+  而不是 `list_segments(playable_only=True, start_ts=...)`。理由见 R4/R5 的取舍——一次调用
+  一次扫盘，过滤判据往往与要一起返回的字段同源。
+- **返回 id 列表就在名字里说明**：`list_step_ids` 返回 `List[int]`，不叫 `steps`（那读起来
+  像返回 step 对象）。
+- **同义动词只留一个**：删除一律 `delete_`（不用 `remove_` / `purge_`），读一份产物一律
+  `read_`（不用 `load_` / `get_`）。域内动作可省宾语——`hls.delete(task, step)` 的宾语由域名
+  给出；跨域模块不能省，故是 `tasks.delete_step`。
+
+> 这套规范 2026-09-13 落地时改了 7 个成员（`playable_segments` → `list_playable_segments`、
+> `select_segments` → `list_segments_in_range`、`load_features` → `read_features`、
+> `remove_features` → `delete_features`、`purge_step` → `delete_step`、`steps` →
+> `list_step_ids`、`ids` → `list_task_ids`）。早于 2026-09-13 的变更记录里仍是旧名。
 
 ### 路径隔离靠两道执行机制，不是约定
 
@@ -128,7 +160,7 @@ tfdt 三处（推导见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)），�
 | 机制 | 挡什么 | 不挡会怎样 |
 |---|---|---|
 | `domain` **必填、无默认** | 漏传 | 文件写回 step 根、退回平铺——谁也说不清哪个文件归谁。现在是 `TypeError` |
-| `_root.DOMAINS` **白名单** | 打错 | `"feature"` / `"HLS"` 静默造出第四个子目录：写侧不报错、读侧只是"查不到"、`purge_step` 照样删掉，**连残留证据都不留**。现在是 `ValueError` |
+| `_root.DOMAINS` **白名单** | 打错 | `"feature"` / `"HLS"` 静默造出第四个子目录：写侧不报错、读侧只是"查不到"、`delete_step` 照样删掉，**连残留证据都不留**。现在是 `ValueError` |
 
 校验发生在 `mkdir` **之前**（`test_unknown_domain_creates_nothing` 钉死），否则错误的域目录
 已经落盘了才报错。新增一个域要改 `DOMAINS` 常量——这是有意的：往 step 目录里塞新子目录该是
@@ -138,7 +170,7 @@ tfdt 三处（推导见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)），�
 `app/storage/_root.py`、文件名放在各域。
 
 **连带影响，不处理就静默退化**：产物落进 `{step}/{domain}/` 之后，写一个段只更新 `hls/` 的
-mtime，`{step}/` 本身纹丝不动（它只在新建域目录那一刻变）。故 `tasks.ids(order="mtime")`
+mtime，`{step}/` 本身纹丝不动（它只在新建域目录那一刻变）。故 `tasks.list_task_ids(order="mtime")`
 必须下钻域子目录取最大值，否则「最近活动」退化成「首次落盘」。`{step}/` 自身的 mtime 反而
 成了「创建时间」的好代理，TTL 判据用的正是它——两个口径不能复用同一个函数。
 
@@ -248,7 +280,7 @@ def _domain_root(task_id, step_id, *, create=False) -> Path:
 | R6 | **环境坏了原样抛，内容坏了逐行隔离** | 打不开 / 写不进 / 建不了目录 → `OSError` 原样抛；单条记录解析不出 → 跳过 + warning，不让一行毁掉整个文件 |
 
 **R4 与 R5 打架时，切函数优先**：hls 读侧曾设计成 `list_segments(..., playable_only=)` 必填
-bool，改成了 `list_segments`（盘上有哪些段）+ `playable_segments`（已登记、带 EXTINF）两个
+bool，改成了 `list_segments`（盘上有哪些段）+ `list_playable_segments`（已登记、带 EXTINF）两个
 函数——过滤判据与段时长同源于清单键集合，bool 参数方案下调用方拿到段之后还要再读一次
 playlist。代价如实记账：类型上挡不住「直接用 `list_segments` 忘了滤」，防护退化成
 docstring + review。
@@ -329,7 +361,7 @@ docstring + review。
 跨代次的隔离     由调用侧的对象引用判等构造（乐观锁，失败即丢弃）
 ```
 
-同一 step 的写与 `tasks.purge_step` 提交到同一条队列，跨域删除因此不用单开机制。详见
+同一 step 的写与 `tasks.delete_step` 提交到同一条队列，跨域删除因此不用单开机制。详见
 [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)。
 
 **为什么不是层内加锁**：锁保证的是「不重叠」，而 supersede 需要的是「旧 run 已终止」——一个
@@ -427,13 +459,13 @@ docstring + review。
 
 - **层内 per-`(task, step)` 锁 / `_locks.py`**：模块从未接线即删除，改为 §6 的串行队列。
 - **「storage 只管名字与定位，内容怎么读写不进层」**：编解码是本层本职（§0）。
-- **`purge_step` 与各域写者靠读写锁互斥**：该方案已废，按 §6 读。
+- **`delete_step` 与各域写者靠读写锁互斥**：该方案已废，按 §6 读。
 
 ## 代码来源
 
 - `app/storage/__init__.py`（边界清单与设计约束，与本文 §0 / §9.1 必须一致）
 - `app/storage/_root.py`（`DOMAINS` 白名单、`path()` 逐级下钻、根解析记忆化）
-- `app/storage/tasks.py`（`steps` / `ids` / `purge_step`）
+- `app/storage/tasks.py`（`steps` / `ids` / `delete_step`）
 - `app/storage/feature.py`（`features.jsonl` 读写，路线 B）
 - `app/storage/hls/`（`types` / `_layout` / `_encode` / `_decode` / `_fmp4` / `_m3u8` /
   `_idx` / `_meta` / `_write` / `_read`）

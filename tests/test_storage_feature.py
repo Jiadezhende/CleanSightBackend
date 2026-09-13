@@ -121,25 +121,25 @@ class TestFeaturesReadWrite:
     def test_append_load_roundtrip(self, tmp_storage):
         src = [_frame(1.0), _frame(2.0)]
         feature.append_features(1, 2, src)
-        got = feature.load_features(1, 2)
+        got = feature.read_features(1, 2)
         assert [f.ts for f in got] == [1.0, 2.0]
         assert got[0].by_source["cam"].detections[0].bbox == [1, 2, 3, 4]
 
     def test_append_accumulates_across_calls(self, tmp_storage):
         feature.append_features(1, 2, [_frame(1.0)])
         feature.append_features(1, 2, [_frame(2.0), _frame(3.0)])
-        assert [f.ts for f in feature.load_features(1, 2)] == [1.0, 2.0, 3.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [1.0, 2.0, 3.0]
 
     def test_load_sorts_by_ts(self, tmp_storage):
         feature.append_features(1, 2, [_frame(3.0), _frame(1.0), _frame(2.0)])
-        assert [f.ts for f in feature.load_features(1, 2)] == [1.0, 2.0, 3.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [1.0, 2.0, 3.0]
 
     def test_load_missing_returns_empty(self, tmp_storage):
-        assert feature.load_features(9, 9) == []
+        assert feature.read_features(9, 9) == []
 
     def test_load_missing_creates_nothing(self, tmp_storage):
-        """读一个没写过的 step 不该在盘上留空目录 —— 空目录会被 tasks.ids() 列出。"""
-        feature.load_features(9, 9)
+        """读一个没写过的 step 不该在盘上留空目录 —— 空目录会被 tasks.list_task_ids() 列出。"""
+        feature.read_features(9, 9)
         assert list(tmp_storage.iterdir()) == []
 
     def test_empty_batch_writes_nothing(self, tmp_storage):
@@ -157,13 +157,13 @@ class TestFeaturesReadWrite:
     def test_steps_are_isolated(self, tmp_storage):
         feature.append_features(1, 1, [_frame(1.0)])
         feature.append_features(1, 2, [_frame(2.0), _frame(3.0)])
-        assert [f.ts for f in feature.load_features(1, 1)] == [1.0]
-        assert [f.ts for f in feature.load_features(1, 2)] == [2.0, 3.0]
+        assert [f.ts for f in feature.read_features(1, 1)] == [1.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [2.0, 3.0]
 
     def test_tasks_are_isolated(self, tmp_storage):
         feature.append_features(1, 1, [_frame(1.0)])
         feature.append_features(2, 1, [_frame(9.0)])
-        assert [f.ts for f in feature.load_features(2, 1)] == [9.0]
+        assert [f.ts for f in feature.read_features(2, 1)] == [9.0]
 
     def test_skips_corrupt_line_without_losing_the_rest(self, tmp_storage):
         """JSONL 逐行独立：一行坏了不该让其余几万帧陪葬。"""
@@ -172,7 +172,7 @@ class TestFeaturesReadWrite:
         with path.open("a", encoding="utf-8") as f:
             f.write("{not json\n\n")
         feature.append_features(1, 2, [_frame(3.0)])
-        assert [f.ts for f in feature.load_features(1, 2)] == [1.0, 2.0, 3.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [1.0, 2.0, 3.0]
 
     def test_skips_valid_json_that_is_not_an_object(self, tmp_storage):
         """`123` / `[1,2]` 都是合法 JSON，但本域每行按契约是一条 record ——
@@ -180,7 +180,7 @@ class TestFeaturesReadWrite:
         feature.append_features(1, 2, [_frame(1.0)])
         with _features_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write("123\n[1, 2]\n")
-        assert [f.ts for f in feature.load_features(1, 2)] == [1.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [1.0]
 
     def test_skips_record_with_wrong_shape(self, tmp_storage):
         """能 json.loads 但形状不对（缺 conf）的 record 与坏行同等对待，不中断其余帧。"""
@@ -191,7 +191,7 @@ class TestFeaturesReadWrite:
             + json.dumps(feature._feature_to_record(_frame(2.0))) + "\n",
             encoding="utf-8",
         )
-        assert [f.ts for f in feature.load_features(1, 2)] == [2.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [2.0]
 
     def test_tolerates_utf8_bom(self, tmp_storage):
         """Windows 上手写/另存的 features.jsonl 会带 BOM，读侧必须容忍。"""
@@ -201,7 +201,7 @@ class TestFeaturesReadWrite:
             json.dumps(feature._feature_to_record(_frame(5.0))) + "\n",
             encoding="utf-8-sig",
         )
-        assert [f.ts for f in feature.load_features(1, 2)] == [5.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [5.0]
 
     def test_io_failure_propagates(self, tmp_storage):
         """IO 失败原样抛 —— 吞不吞是调用方的策略，本包给不出对两个调用方都对的答案。"""
@@ -214,12 +214,12 @@ class TestFeaturesReadWrite:
 class TestRemoveFeatures:
     def test_removes_and_reports_prior_existence(self, tmp_storage):
         feature.append_features(1, 2, [_frame(1.0)])
-        assert feature.remove_features(1, 2) is True
-        assert feature.load_features(1, 2) == []
-        assert feature.remove_features(1, 2) is False
+        assert feature.delete_features(1, 2) is True
+        assert feature.read_features(1, 2) == []
+        assert feature.delete_features(1, 2) is False
 
     def test_missing_returns_false_and_creates_nothing(self, tmp_storage):
-        assert feature.remove_features(1, 2) is False
+        assert feature.delete_features(1, 2) is False
         assert list(tmp_storage.iterdir()) == []
 
     def test_leaves_the_rest_of_the_domain_untouched(self, tmp_storage):
@@ -232,16 +232,16 @@ class TestRemoveFeatures:
         facts = _facts_file(tmp_storage, 1, 2)
         facts.write_text('{"type": "event"}\n', encoding="utf-8")
 
-        assert feature.remove_features(1, 2) is True
+        assert feature.delete_features(1, 2) is True
         assert facts.read_text(encoding="utf-8") == '{"type": "event"}\n'
         assert facts.parent.is_dir()
 
     def test_append_after_remove_starts_clean(self, tmp_storage):
         """这正是 supersede 要的：新 run 读到的永远是自己那段完整序列。"""
         feature.append_features(1, 2, [_frame(1.0)])
-        feature.remove_features(1, 2)
+        feature.delete_features(1, 2)
         feature.append_features(1, 2, [_frame(9.0)])
-        assert [f.ts for f in feature.load_features(1, 2)] == [9.0]
+        assert [f.ts for f in feature.read_features(1, 2)] == [9.0]
 
 
 # ---------------------------------------------------------------------------
@@ -254,14 +254,14 @@ class TestDomainSeam:
         """只有 features.jsonl、没有 HLS 段的 step 必须被 steps() 看见 ——
         它正是 TTL 判据错选 metadata.json 而永不回收的那一类（缺陷 #1）。"""
         feature.append_features(1, 2, [_frame(1.0)])
-        assert tasks.steps(1) == [2]
-        assert tasks.ids() == [1]
+        assert tasks.list_step_ids(1) == [2]
+        assert tasks.list_task_ids() == [1]
 
-    def test_purge_step_takes_the_whole_domain_with_it(self, tmp_storage):
-        """`purge_step` 删的是整个 step，本域连同尚未迁移的 facts.jsonl 一起没。"""
+    def test_delete_step_takes_the_whole_domain_with_it(self, tmp_storage):
+        """`delete_step` 删的是整个 step，本域连同尚未迁移的 facts.jsonl 一起没。"""
         feature.append_features(1, 2, [_frame(1.0)])
         _facts_file(tmp_storage, 1, 2).write_text('{"n": 1}\n', encoding="utf-8")
 
-        assert tasks.purge_step(1, 2) is True
-        assert feature.load_features(1, 2) == []
+        assert tasks.delete_step(1, 2) is True
+        assert feature.read_features(1, 2) == []
         assert not (tmp_storage / "1").exists()

@@ -11,7 +11,7 @@
 ## 本模块只管这一份 LIVE 清单，写一路 + 读一路
 
     写侧   header / entry / append / total_duration   建清单、追条目、求累计（tfdt 输入）
-    读侧   durations                                  逐段 EXTINF，服务 `playable_segments`
+    读侧   durations                                  逐段 EXTINF，服务 `list_playable_segments`
 
 三条格式事实（全部会静默出错，别绕开）：
 
@@ -110,7 +110,7 @@ def durations(playlist: Path) -> Dict[str, float]:
     返回值同时承担两个职责，故不拆成两个函数：**值**是段时长的唯一真值，**键集合**即
     "已完成转码并登记"的段。带标题的手写条目按坏行跳过。
 
-    **保持包内私有**：消费方都被 `_read.playable_segments` 覆盖（它把键集合与值一次给全）。
+    **保持包内私有**：消费方都被 `_read.list_playable_segments` 覆盖（它把键集合与值一次给全）。
     """
     if not playlist.exists():
         return {}

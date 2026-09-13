@@ -29,7 +29,7 @@ step 根下只有域目录、没有文件；存储根下只有数字命名的 ta
     from app.storage import hls, tasks as step_tasks
     ref = hls.insert_segment(task_id, step_id, "raw", frames)  # 交内存对象，拿身份键
     hls.segment_path(task_id, step_id, ref)                    # 域内定位归域文件
-    step_tasks.purge_step(task_id, step_id)                    # 跨域操作归 tasks
+    step_tasks.delete_step(task_id, step_id)                    # 跨域操作归 tasks
 
 薄域用单文件、重域用子包，对外看不出区别（子包 `__init__` 是 facade，re-export 会连带
 加载实现模块，故那些模块的模块级必须保持 stdlib-only）。
@@ -45,7 +45,7 @@ step 根下只有域目录、没有文件；存储根下只有数字命名的 ta
   `test_layer_package_imports_only_whitelisted_app_modules`。
 - **只收转换，不收策略 / 编排 / 业务语义**：TTL 留多久、失败重试几次、谁来调、并发几个、
   HTTP 状态码，全在层外。反之编解码（含起 cv2 / ffmpeg）是本层本职。
-- **本层不持锁**：同一 step 的写与 `purge_step` 由调用侧提交到同一条 `SerialTaskQueue`
+- **本层不持锁**：同一 step 的写与 `delete_step` 由调用侧提交到同一条 `SerialTaskQueue`
   串行，各域写入口的 docstring 写明这个前提。
 
 本包是标记型 `__init__.py`：纯 docstring，不 re-export，消费方走深路径

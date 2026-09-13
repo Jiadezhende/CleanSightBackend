@@ -370,14 +370,14 @@ class TestPlayableSegments:
         orphan.write_bytes(b"not-registered")
 
         assert len(hls.list_segments(1, 2, "raw")) == 2        # 盘上确实有两个
-        got = hls.playable_segments(1, 2, "raw")
+        got = hls.list_playable_segments(1, 2, "raw")
         assert [s.ref.ts_us for s in got] == [1_700_000_000]   # 能播的只有一个
 
     def test_returns_ts_ascending_with_durations(self, tmp_storage, fake_pipeline):
         for start in (1900.0, 1700.0, 1800.0):                 # 刻意不按序写
             hls.insert_segment(1, 2, "raw", _frames(start=start))
 
-        got = hls.playable_segments(1, 2, "raw")
+        got = hls.list_playable_segments(1, 2, "raw")
         assert [s.ref.ts_us for s in got] == [1_700_000_000, 1_800_000_000, 1_900_000_000]
         assert [s.duration_s for s in got] == pytest.approx([1.0, 1.0, 1.0])
 
@@ -385,11 +385,11 @@ class TestPlayableSegments:
         hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
         hls.insert_segment(1, 2, "processed", _frames(start=1800.0))
 
-        assert [s.ref.track for s in hls.playable_segments(1, 2, "raw")] == ["raw"]
-        assert [s.ref.ts_us for s in hls.playable_segments(1, 2, "processed")] == [1_800_000_000]
+        assert [s.ref.track for s in hls.list_playable_segments(1, 2, "raw")] == ["raw"]
+        assert [s.ref.ts_us for s in hls.list_playable_segments(1, 2, "processed")] == [1_800_000_000]
 
     def test_missing_domain_dir_is_empty(self, tmp_storage):
-        assert hls.playable_segments(1, 2, "raw") == []
+        assert hls.list_playable_segments(1, 2, "raw") == []
 
     def test_missing_playlist_is_empty(self, tmp_storage):
         """段文件在、清单不在 → 一个都不能播（不是"全都能播"）。"""
@@ -398,12 +398,12 @@ class TestPlayableSegments:
         (target / "raw_segment_1700000000.mp4").write_bytes(b"orphan")
 
         assert len(hls.list_segments(1, 2, "raw")) == 1
-        assert hls.playable_segments(1, 2, "raw") == []
+        assert hls.list_playable_segments(1, 2, "raw") == []
 
     @pytest.mark.parametrize("track", ["RAW", "detection", ""])
     def test_invalid_track_raises(self, tmp_storage, track):
         with pytest.raises(ValueError):
-            hls.playable_segments(1, 2, track)
+            hls.list_playable_segments(1, 2, track)
 
 
 class TestSegmentsByTrack:
@@ -440,7 +440,7 @@ class TestStepSummaryRecipe:
         from app.storage import tasks as step_tasks
 
         out = []
-        for step_id in step_tasks.steps(task_id):
+        for step_id in step_tasks.list_step_ids(task_id):
             by_track = hls.list_segments_by_track(task_id, step_id)
             tracks = tuple(t for t in hls.TRACKS if by_track[t])
             if not tracks:                      # 建了目录没写成段 → 点开黑屏，不进清单
@@ -496,12 +496,12 @@ class TestSelectSegments:
 
     def test_no_bounds_returns_everything(self, tmp_storage, fake_pipeline):
         self._seed()
-        assert hls.select_segments(1, 2, "raw") == hls.list_segments(1, 2, "raw")
+        assert hls.list_segments_in_range(1, 2, "raw") == hls.list_segments(1, 2, "raw")
 
     def test_picks_the_segment_containing_start(self, tmp_storage, fake_pipeline):
         """start_ts 落在第二段中间 → 从第二段开始，不是从第三段。"""
         self._seed()
-        got = hls.select_segments(1, 2, "raw", start_ts=1701.5)
+        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.5)
         assert [r.ts_us for r in got] == [1_701_000_000, 1_702_000_000]
 
     def test_start_exactly_at_first_frame_keeps_that_segment(self, tmp_storage, fake_pipeline):
@@ -510,31 +510,31 @@ class TestSelectSegments:
         这不是"大部分情况下对"，是无条件错：任何 ts 只要小数部分非零就踩。
         """
         self._seed(first=1700.0000019)               # 截断后段名是 1700000001
-        got = hls.select_segments(1, 2, "raw", start_ts=1700.0000019)
+        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1700.0000019)
         assert got[0].ts_us == 1_700_000_001         # 第一段还在
 
     def test_end_before_first_segment_is_empty(self, tmp_storage, fake_pipeline):
         """hi = -1 时刻意不 clamp 成 0：救成 0 会把空区间误判成命中第 0 段。"""
         self._seed()
-        assert hls.select_segments(1, 2, "raw", end_ts=1699.0) == []
+        assert hls.list_segments_in_range(1, 2, "raw", end_ts=1699.0) == []
 
     def test_end_inside_a_segment_keeps_it(self, tmp_storage, fake_pipeline):
         self._seed()
-        got = hls.select_segments(1, 2, "raw", end_ts=1701.5)
+        got = hls.list_segments_in_range(1, 2, "raw", end_ts=1701.5)
         assert [r.ts_us for r in got] == [1_700_000_000, 1_701_000_000]
 
     def test_window_inside_one_segment(self, tmp_storage, fake_pipeline):
         self._seed()
-        got = hls.select_segments(1, 2, "raw", start_ts=1701.2, end_ts=1701.8)
+        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.2, end_ts=1701.8)
         assert [r.ts_us for r in got] == [1_701_000_000]
 
     def test_missing_domain_dir_is_empty(self, tmp_storage):
-        assert hls.select_segments(1, 2, "raw", start_ts=0.0, end_ts=1.0) == []
+        assert hls.list_segments_in_range(1, 2, "raw", start_ts=0.0, end_ts=1.0) == []
 
     @pytest.mark.parametrize("track", ["RAW", "detection", ""])
     def test_invalid_track_raises(self, tmp_storage, track):
         with pytest.raises(ValueError):
-            hls.select_segments(1, 2, track)
+            hls.list_segments_in_range(1, 2, track)
 
     @pytest.mark.parametrize(
         "start_ts, end_ts",
@@ -562,7 +562,7 @@ class TestSelectSegments:
         ) - 1
         expected = [] if lo > hi else refs[lo : hi + 1]
 
-        assert hls.select_segments(1, 2, "raw", start_ts=start_ts, end_ts=end_ts) == expected
+        assert hls.list_segments_in_range(1, 2, "raw", start_ts=start_ts, end_ts=end_ts) == expected
 
 
 # ---------------------------------------------------------------------------

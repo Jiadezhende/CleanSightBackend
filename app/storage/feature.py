@@ -8,15 +8,15 @@ features 域 —— `{step}/features/features.jsonl` 的定位、编解码与读
 对外三个成员，货币是 `FrameFeature`：
 
     append_features(task, step, features)   追加一批（一次 open("a")，包内不攒批）
-    load_features(task, step)               回读整段，按 ts 升序
-    remove_features(task, step)             删掉这一份产物（supersede 用）
+    read_features(task, step)               回读整段，按 ts 升序
+    delete_features(task, step)             删掉这一份产物（supersede 用）
 
 **管**：目录在哪、文件叫什么、一行是什么、坏行怎么办。
 **不管**（都在 `inference/feature/store.py`）：批缓冲 / batch_size、owner fence /
 `open_fresh`、best-effort 吞异常——本模块照抛 `OSError`，包成什么由调用方定。
 
 **并发：本域不持锁。** `append_features` 自身不是原子的（一批可能拆成多次底层 write，
-Windows 的 `mode="a"` 也不保证追加原子），同一 step 的写与 `tasks.purge_step` 必须由调用
+Windows 的 `mode="a"` 也不保证追加原子），同一 step 的写与 `tasks.delete_step` 必须由调用
 侧串行——现状是 `store.py` 的 `self._lock` 保证同一 step 只有一个写者。
 
 **facts.jsonl 不在这里**：它落盘属本域，但 `EventFact` / `SegmentFact` 住在
@@ -165,7 +165,7 @@ def _decode(path: Path) -> List[Dict[str, Any]]:
 def append_features(task_id: int, step_id: int, features: Sequence[FrameFeature]) -> None:
     """追加一批帧特征：一次 `open("a")` + 一次 write，包内不攒批。
 
-    空序列是 no-op 且**不建目录**（否则 `tasks.ids()` 会列出一个从没写过东西的 step）。
+    空序列是 no-op 且**不建目录**（否则 `tasks.list_task_ids()` 会列出一个从没写过东西的 step）。
     编码早于 `mkdir`，失败时盘上不留任何痕迹。
 
     Raises:
@@ -179,7 +179,7 @@ def append_features(task_id: int, step_id: int, features: Sequence[FrameFeature]
         f.write(payload)
 
 
-def load_features(task_id: int, step_id: int) -> List[FrameFeature]:
+def read_features(task_id: int, step_id: int) -> List[FrameFeature]:
     """回读整段特征，**按 ts 升序**（升序是返回值的契约，离线的 `bisect` / 滑窗建立在它上
     面）。文件不存在返回 `[]`；形状不对的 record 与坏行同等对待，跳过 + warning。
     """
@@ -194,7 +194,7 @@ def load_features(task_id: int, step_id: int) -> List[FrameFeature]:
     return frames
 
 
-def remove_features(task_id: int, step_id: int) -> bool:
+def delete_features(task_id: int, step_id: int) -> bool:
     """删掉 features.jsonl；返回它此前是否存在。
 
     给写侧的 supersede 用（同 (task, step) 重启 run 前清掉旧序列）。**只执行，不判断该不该

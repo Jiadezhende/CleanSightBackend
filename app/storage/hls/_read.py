@@ -1,7 +1,7 @@
 """读侧组合动作 —— 与 `_write.py` 对称：一次调用回答一个完整的读侧问题。
 
-    playable_segments(task, step, track)               哪些段能播，各自多长
-    select_segments(task, step, track, start, end)     哪些段落在这个墙钟区间里
+    list_playable_segments(task, step, track)               哪些段能播，各自多长
+    list_segments_in_range(task, step, track, start, end)     哪些段落在这个墙钟区间里
 
 两个都产出**段容器**，那是本域读侧两种产出之一（另一种是 `Frame`，归 `_decode`）。
 
@@ -26,7 +26,7 @@ from . import _layout, _m3u8
 from .types import PlayableSegment, SegmentRef
 
 
-def playable_segments(task_id: int, step_id: int, track: str) -> List[PlayableSegment]:
+def list_playable_segments(task_id: int, step_id: int, track: str) -> List[PlayableSegment]:
     """该轨**已完成转码并登记**的段，按 `ts_us` 升序。域目录或清单缺失返回 `[]`。
 
     要喂给播放器或 ffmpeg 的一律走本函数，不要用 `_layout.list_segments`（那个含在途段）。
@@ -50,7 +50,7 @@ def playable_segments(task_id: int, step_id: int, track: str) -> List[PlayableSe
     return out
 
 
-def select_segments(
+def list_segments_in_range(
     task_id: int,
     step_id: int,
     track: str,

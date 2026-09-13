@@ -52,7 +52,7 @@ def _bare_entries(task_id, step_id, track):
     """
     return [
         VodEntry(hls.segment_name(s.ref), s.duration_s)
-        for s in hls.playable_segments(task_id, step_id, track)
+        for s in hls.list_playable_segments(task_id, step_id, track)
     ]
 
 

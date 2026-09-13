@@ -2,8 +2,8 @@
 task/step 目录域 —— **把 step 目录当整体看**的那三件事：有哪些 task、有哪些 step、整个删掉。
 
     from app.storage import tasks as step_tasks
-    for task_id in step_tasks.ids(order="mtime"):
-        for step_id in step_tasks.steps(task_id):
+    for task_id in step_tasks.list_task_ids(order="mtime"):
+        for step_id in step_tasks.list_step_ids(task_id):
             ...
 
 落盘结构（产物按域隔离，step 根下只有域目录、没有文件）：
@@ -13,9 +13,9 @@ task/step 目录域 —— **把 step 目录当整体看**的那三件事：有�
       features/  features.jsonl / facts.jsonl
       lab/       送标与导出的临时件（用完即删，残留随 step TTL 回收）
 
-    steps(task_id)              该 task 下的 step id，升序
-    ids(order=)                 存储根下的 task id，按 id 升序 / 按活动时间降序
-    purge_step(task, step)      删掉整个 step 目录（三个域一起没）+ 回收空 task 目录
+    list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按活动时间降序
+    list_step_ids(task_id)    该 task 下的 step id，升序
+    delete_step(task, step)   删掉整个 step 目录（三个域一起没）+ 回收空 task 目录
 
 **本模块不出定位能力**：往某个域里写东西是那个域自己的事，各域文件用
 `_root.path(task_id, step_id, <自己的域>)` 取路径。本模块只在跨所有域时出面。
@@ -34,9 +34,9 @@ from app.storage import _root
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["steps", "ids", "purge_step"]
+__all__ = ["list_task_ids", "list_step_ids", "delete_step"]
 
-# ids() 支持的排序。非法值炸而不是静默按默认走。
+# list_task_ids() 支持的排序。非法值炸而不是静默按默认走。
 _VALID_ORDERS: Tuple[str, ...] = ("id", "mtime")
 
 
@@ -58,7 +58,7 @@ def _step_id_dirs(task_id: int) -> Iterator[Tuple[int, Path]]:
             yield step_id, entry
 
 
-def steps(task_id: int) -> List[int]:
+def list_step_ids(task_id: int) -> List[int]:
     """该 task 下的 step 子目录 id，升序。task 目录不存在返回 `[]`。
 
     只认数字目录名，文件与非 id 目录一律跳过。**不判断目录里有没有产物**——要按产物过滤
@@ -69,7 +69,7 @@ def steps(task_id: int) -> List[int]:
     return step_ids
 
 
-def ids(order: str = "id") -> List[int]:
+def list_task_ids(order: str = "id") -> List[int]:
     """存储根下的 task 子目录 id。存储根不存在返回 `[]`。
 
     Args:
@@ -122,7 +122,7 @@ def _latest_step_mtime(task_id: int) -> float:
     return max(mtimes) if mtimes else 0.0
 
 
-def purge_step(task_id: int, step_id: int) -> bool:
+def delete_step(task_id: int, step_id: int) -> bool:
     """删除整个 step 目录（含**所有写者**的产物）；父 task 目录若因此变空，一并回收。
 
     Returns:

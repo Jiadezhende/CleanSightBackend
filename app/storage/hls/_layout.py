@@ -88,7 +88,7 @@ def list_segments(task_id: int, step_id: int, track: str) -> List[SegmentRef]:
     建立在它上面）。域目录不存在返回 `[]`。
 
     ⚠ **回答的是"盘上有哪些段文件"，不是"哪些段能播"**：在途段也在返回值里。要喂给播放器或
-    ffmpeg 的一律用 `_read.playable_segments`，拿本函数的结果去拼清单会静默截短。
+    ffmpeg 的一律用 `_read.list_playable_segments`，拿本函数的结果去拼清单会静默截短。
 
     Raises:
         ValueError: track 非法。

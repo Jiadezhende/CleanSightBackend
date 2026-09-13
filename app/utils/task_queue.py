@@ -6,7 +6,7 @@
     q.start()
     q.submit(lambda: hls.write_segment(task_id, step_id, "raw", frames),
              label=f"seg:{task_id}/{step_id}/raw")
-    q.submit(lambda: step_tasks.purge_step(task_id, step_id),
+    q.submit(lambda: step_tasks.delete_step(task_id, step_id),
              label=f"purge:{task_id}/{step_id}", timeout=30.0)
     q.stop()
 

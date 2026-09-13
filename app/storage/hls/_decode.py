@@ -260,13 +260,13 @@ def iter_frames(
     **无 `track` 参数，恒为 raw。** 内存占用 O(1 帧)：每段起一次 ffmpeg、边解边出；要整段进
     内存自己走 `list_segments` + `read_segment`。
 
-    两级裁剪 = `_read.select_segments`（段级）+ `read_segment`（帧级）。`None` 表示该侧不设限，
+    两级裁剪 = `_read.list_segments_in_range`（段级）+ `read_segment`（帧级）。`None` 表示该侧不设限，
     两级都原样收——**不能拿段起始数组的首尾当时间轴首尾**，那是段**起始** ts，末段的段首之后
     还有整整一段的帧。
 
     Raises: 同 `read_segment`（首次迭代时才发生，本函数是生成器）。
     """
-    for ref in _read.select_segments(
+    for ref in _read.list_segments_in_range(
         task_id, step_id, _RAW_TRACK, start_ts=start_ts, end_ts=end_ts
     ):
         yield from read_segment(

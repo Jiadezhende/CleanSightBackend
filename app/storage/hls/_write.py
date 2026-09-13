@@ -26,7 +26,7 @@ mp4v 不是 fragment"的窗口（实测 ~260 ms）。`.stage_` 开头既不匹�
 ## 并发：**本域不持锁，串行由调用侧的队列构造**
 
 前提是：**同一 `(task, step, track)` 的 `insert_segment` 串行调用**，且与该 step 的
-`delete` / `purge_step` 同序——即提交到同一条 `app.utils.task_queue.SerialTaskQueue`。
+`delete` / `delete_step` 同序——即提交到同一条 `app.utils.task_queue.SerialTaskQueue`。
 
 破了这条前提会怎样：两段并发进来会读到同一个累计 EXTINF → tfdt 碰撞 → 后段在播放器里覆盖
 前段，**不报错、不卡顿，只是画面丢一截**。别改成层内加锁（互斥挡不住一个没停的写者）；代价
