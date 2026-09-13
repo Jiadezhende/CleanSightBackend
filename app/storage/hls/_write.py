@@ -1,10 +1,10 @@
 """本域的两个写侧动作：`insert_segment`（写一段）与 `delete`（清掉整个 step 的 hls 产物）。
 
 `insert_segment` 一次调用，从内存帧序列到 `hls/` 目录里一个可播的段：调用方交出
-`Sequence[Frame]`，拿回这段的身份键。中间那七步（编码、转码、位置修补、索引、init、
-清单、统计）全在层内，**没有一步漏到签名上**。
+`Sequence[Frame]`，拿回这段的身份键。中间七步（编码、转码、位置修补、索引、init、清单、
+统计）全在层内，**没有一步漏到签名上**。
 
-## 事务形态：规范 §7.2 路线 A
+## 事务形态：路线 A（规范 `docs/kb/DESIGN_STORAGE_LAYER.md` §5）
 
     ① stage    在 {step}/hls/.stage_{track}_{ts_us}/ 里造产物
                ├ cv2 写 mp4v（_encode）
@@ -14,11 +14,10 @@
                sidecar → init → 段文件 → 清单条目 → 统计
     任一步异常 → 删 stage、不 rename、不登记，原异常上抛
 
-**为什么必须分 stage**：段文件名一出现，读侧就认为它是合法产物（`SegmentFinder` 认的
-就是这个名字）。原地编码会留下一个"文件在、但还是 mp4v 不是 fragment"的窗口（实测
-~260 ms）。放进 stage 目录后，`.stage_` 开头既不匹配段正则、也不是文件，读侧天然看不见。
+**必须分 stage**：段文件名一出现读侧就认为它是合法产物，原地编码会留下一个"文件在、但还是
+mp4v 不是 fragment"的窗口（实测 ~260 ms）。`.stage_` 开头既不匹配段正则、也不是文件。
 
-**为什么 commit 是那个顺序**（W8，三条写反都不报错）：
+**commit 的顺序（三条写反都不报错）**：
 
     sidecar 先于段文件      反过来会留下「段可见但索引未就位」的窗口，离线反查此时拿不到 ts
     init 先于清单头         清单头里的 EXT-X-MAP 指着 init，指向一个不存在的文件 = 播放器直接报错
@@ -29,13 +28,12 @@
 前提是：**同一 `(task, step, track)` 的 `insert_segment` 串行调用**，且与该 step 的
 `delete` / `purge_step` 同序——即提交到同一条 `app.utils.task_queue.SerialTaskQueue`。
 
-破了这条前提会怎样：两段并发进来会读到同一个累计 EXTINF → tfdt 碰撞 → 后段在播放器里
-覆盖前段。**不报错、不卡顿，只是画面丢一截。** 规范 §7.4 C1 原本要本层自己持 step 锁，
-这一条已被队列方案推翻——顺序由提交序构造出来比抢锁更强（它顺带保证「旧残段先落盘、
-再整个删掉」），但代价是这个不变式落在层外、门禁抓不到，所以写在这里。
+破了这条前提会怎样：两段并发进来会读到同一个累计 EXTINF → tfdt 碰撞 → 后段在播放器里覆盖
+前段，**不报错、不卡顿，只是画面丢一截**。别改成层内加锁（互斥挡不住一个没停的写者）；代价
+是这个不变式落在层外、门禁抓不到，所以写在这里。
 
-不同 track、不同 step 之间互不冲突：各写各的段名与清单，唯一的共享产物 `metadata.json`
-是派生量，两轨同时记账最多丢一次计数、不影响播放。
+不同 track、不同 step 之间互不冲突：唯一的共享产物 `metadata.json` 是派生量，两轨同时记账
+最多丢一次计数、不影响播放。
 
 依赖上界：`app.domain`（域货币 `Frame`）+ stdlib。
 """
@@ -75,24 +73,16 @@ def insert_segment(
         等定位函数拿到任一产物的路径。
 
     Raises:
-        ValueError: track 非法，或 `frames` 为空。空段不是"没事发生"而是调用方算错了
-            批次——本层不替它把这件事当成功（也不能：得返回一个不存在的段的身份）。
-        OSError: 建目录 / 编码 / 落盘失败（cv2 的失败也翻译成这一档，见 `_encode`）。
+        ValueError: track 非法，或 `frames` 为空（空段是调用方算错了批次，不当成功）。
+        OSError: 建目录 / 编码 / 落盘失败（cv2 的失败也翻译成这一档）。
         subprocess.CalledProcessError | subprocess.TimeoutExpired | FileNotFoundError:
             ffmpeg 非零退出 / 超时 / 机器上没有 ffmpeg。
-        RuntimeError: ffmpeg 报成功却没产出，或 tfdt 改写失败（见下）。
+        RuntimeError: ffmpeg 报成功却没产出，或 tfdt 改写失败。
 
-    **失败要不要重试、重试几次，是调用方的策略**（§7.0）：本层只负责把"这次是环境坏了
-    还是数据坏了"如实抛出来，并保证失败时域目录里不多一个产物。
-
-    **tfdt 改写失败是致命的，不降级**：一个 tfdt 没修好的 fragment 进了清单，播放器会
-    把它落在媒体轴原点、覆盖前面的段——不报错、不卡顿，只是画面丢一截。这类静默错正是
-    本层存在的理由，所以宁可整段作废、让它在日志里喊出来。它只会在 fragment 结构与预期
-    不符时发生（ffmpeg 换代），那是系统性问题，压着不说会静默烂掉整批录像。
-
-    **sidecar 写失败不致命**：它只服务离线反查，回放/下载/送标三条链路都不读它；而读侧
-    本就按契约容忍缺 sidecar（跳过该段、不打断迭代）。拿整段视频给一个辅助索引陪葬是
-    坏交换，故降级为 warning。
+    失败要不要重试是调用方的策略；本层只保证如实抛出，且失败时域目录里不多一个产物。
+    两档失败的处置刻意不同：**tfdt 改写失败整段作废**（tfdt 没修好的 fragment 进了清单会
+    覆盖前段的画面，且它只在 fragment 结构与预期不符时发生，属系统性问题）；**sidecar 写
+    失败只 warning**（它只服务离线反查，读侧本就容忍缺 sidecar）。
     """
     _layout.require_track(track)
     if not frames:
@@ -173,18 +163,14 @@ def delete(task_id: int, step_id: int) -> bool:
     """删掉本域在该 step 下的**全部**产物（整个 `{step}/hls/` 目录）。
 
     Returns:
-        该目录此前是否存在。删除失败记 warning 后返回 False——它的调用场景是「新一代
-        开写前清掉上一代」，报不报错都得继续往下写，抛出去只会把一次录制整个葬掉。
+        该目录此前是否存在。删除失败记 warning 后返回 False（调用场景是「新一代开写前清掉
+        上一代」，抛出去只会把一次录制整个葬掉）。
 
     **只执行，不判断该不该删**：「这是不是新一代的首次写入」是 run 生命周期语义，归
-    `recording`（与 `feature.remove_features` / `tasks.purge_step` 同款分工）。
+    `recording`。**只删本域**：同 step 的 `features/` 与 `lab/` 一个字节都不碰；域目录本身
+    一起删，下次 `insert_segment` 的 `create=True` 会重建。
 
-    **只删本域**：同 step 的 `features/` 与 `lab/` 一个字节都不碰——这正是产物按域隔离
-    换来的东西。域目录本身一起删掉，下次 `insert_segment` 的 `create=True` 会重建它。
-
-    **不加锁**：串行由调用侧的队列构造，与 `insert_segment` 同一前提（见上方「并发」）。
-    破了那条前提，这里的 `rmtree` 会与在途的段写撞车，表现是目录删到一半或写侧把目录
-    重建出来、留一个已被记账删除的僵尸 step——两种都不报错。
+    **不加锁**：与 `insert_segment` 同一前提（见上方「并发」）。
     """
     domain_dir = _layout.domain_dir(task_id, step_id)
     if not domain_dir.exists():

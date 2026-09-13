@@ -9,13 +9,11 @@
       "created_at": "...", "updated_at": "..."
     }
 
-两个消费方：大屏/清单要"这个 step 有多少段多长"，`cleanup_worker` 拿 `updated_at` 当
-TTL 判据。**它是派生量不是真值**——段时长真值在 playlist 的 EXTINF 里，这里的
-`total_duration` 只是同一批数的累加缓存。
+两个消费方：大屏/清单要"这个 step 有多少段多长"，`cleanup_worker` 拿 `updated_at` 当 TTL
+判据。**它是派生量不是真值**——段时长真值在 playlist 的 EXTINF 里。
 
-**整体读改写（规范 §7.2 路线 C）**：内容由层内序列化、没有"追加一行"的形态，故
-tmp + `os.replace` 换整份。`end_time` 字段从来只写 `null`（没有写侧知道 step 何时结束），
-保留是因为读侧还在按这个形状解析。
+**整体读改写（路线 C）**：tmp + `os.replace` 换整份。`end_time` 从来只写 `null`（没有写侧
+知道 step 何时结束），保留是因为读侧还在按这个形状解析。
 
 依赖上界：stdlib only。
 """
@@ -58,10 +56,8 @@ def _init_document(task_id: int, step_id: int, timestamp: float) -> Dict[str, An
 
 
 def _load(path: Path, task_id: int, step_id: int, timestamp: float) -> Dict[str, Any]:
-    """读现有统计；不存在或解析不出时给一份新的。
-
-    **解析不出就重建 + warning，不抛**：这是派生量，段与 playlist 才是真值。为一份统计
-    缓存中断整段落盘（连带丢掉视频）是拿主产物给账本陪葬；重建的代价只是历史计数归零。
+    """读现有统计；不存在或解析不出时给一份新的（warning，不抛——重建的代价只是计数归零，
+    而抛出去会连带丢掉整段视频）。
     """
     if not path.exists():
         return _init_document(task_id, step_id, timestamp)
@@ -89,11 +85,8 @@ def record_segment(
     """把一个刚登记的段计入统计（每次调用记一段）。
 
     Raises:
-        OSError: 写失败。段本身此刻已登记完毕（W8 把本步排在最后），故抛出去只意味着
-            "统计落后了一段"，不是产物残缺。
-
-    段数恒 +1 而不做成参数：本函数的调用点只有"刚 insert 完一段"这一处，给它一个
-    `count_delta` 只是把一个常量 1 搬到调用方去写。
+        OSError: 写失败。本步排在登记顺序最末，故抛出去只意味着"统计落后了一段"，不是产物
+            残缺。
     """
     document = _load(path, task_id, step_id, timestamp)
 

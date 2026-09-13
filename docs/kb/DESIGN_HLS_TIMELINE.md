@@ -1,4 +1,4 @@
-> 更新时间：2026-09-02
+> 更新时间：2026-09-13
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -51,14 +51,30 @@ pin 之后 timescale 与编码 fps 彻底解耦，逐段 `eff_fps` 才是合法�
 > 这个 box，写入「已入 playlist 的累计 EXTINF × 90000」。三套时间线（EXTINF / tfdt / fragment
 > 媒体时长）必须对齐到同一真值。
 
+### 转码子进程必须 `cwd=输出目录` + 输出全传 basename
+
+**两个 ffmpeg 大版本对 `-hls_fmp4_init_filename` 的路径解析行为正好相反**，唯一兼容写法是
+让子进程 `cwd` 落在输出目录、所有输出参数只给文件名：
+
+- ffmpeg 8.x（Windows 开发机）把 basename 解析到**进程 cwd**，传绝对路径才对；
+- ffmpeg 4.x（Ubuntu 22.04 生产）把绝对路径**当相对路径**拼到 playlist 目录前，得到
+  `/dir/foo/dir/foo/init.mp4` 这类路径 → ENOENT。
+
+改成绝对路径「更稳妥」的直觉在这里是错的：一边对另一边就炸，且只在部署到另一个发行版时才
+暴露。执行形态见 `app/storage/hls/_fmp4.py::transcode`。
+
 ## 原子更新
 
-对同一 `{task_id}/{step_id}` 目录，transcode、playlist append 和 metadata update 必须在目录锁内完成。
+对同一 `{task_id}/{step_id}`，transcode、playlist append 和 metadata update 必须不重叠。
 
 原因：
 
 - 相邻段 transcode 需要读取 playlist 计算累计时间。
 - 并发写入若读到相同累计 EXTINF，可能导致 tfdt 碰撞。
+
+**执行形态已换代**：不再用目录锁，改由调用侧把同一 step 的写与删提交到同一条
+`SerialTaskQueue`（顺序是构造出来的，不是抢出来的），数据层一把锁都不持。见
+[DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md) §6。
 
 ## VOD 过滤在途段
 

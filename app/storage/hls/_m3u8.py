@@ -8,25 +8,21 @@
     raw_segment_1700000000000000.mp4
     ...                                     ← 每段两行，只追加，不写 ENDLIST
 
-**不写 `#EXT-X-ENDLIST`**：这是写侧的 LIVE 清单，随录随追；VOD 形态（含 ENDLIST、可能
-只截其中一段区间）由读侧按需另生成，不动这份。
-
-**EXTINF 是段时长的唯一真值**，不能用相邻段文件名的 ts 差重新推导——那是墙钟量，比媒体
-时长少一个帧间隔，断流时还会把整个停顿算进去。清单里的累计 EXTINF 同时是下一段 tfdt 的
-落点（`tfdt(N) = Σ EXTINF(0..N-1)`），所以本模块的求和函数是写入事务 ② adjust 步的输入。
-
-**键集合即"已完成转码并登记"的段**：不在清单里的段文件是在途段（或转码失败的残留），
-读侧据此过滤。这也是为什么 EXTINF 行必须**最后**追加（W8）。
-
 ## 本模块只管这一份 LIVE 清单，写一路 + 读一路
 
     写侧   header / entry / append / total_duration   建清单、追条目、求累计（tfdt 输入）
     读侧   durations                                  逐段 EXTINF，服务 `playable_segments`
 
-**VOD 形态不在本域**：那是给播放器或 ffmpeg 消费的装配产物，不是段的元数据——hls 域读侧
-只出段容器与 `Frame` 两种产出。渲染在 `app/services/utils/vod_playlist.py`，理由写在
-那个模块的 docstring 里。本模块只出事实（哪些段登记了、各自多长），怎么拼成一份清单、
-每条 URI 长什么样，都是服务层的判断。
+三条格式事实（全部会静默出错，别绕开）：
+
+- **不写 `#EXT-X-ENDLIST`**：这是随录随追的 LIVE 清单；VOD 形态由读侧按需另生成，不动这份。
+- **EXTINF 是段时长的唯一真值**，不能用相邻段文件名的 ts 差重推（那是墙钟量，比媒体时长多
+  出帧间隔与断流停顿）。累计 EXTINF 同时是下一段 tfdt 的落点，故求和函数是写入事务
+  ② adjust 步的输入。
+- **键集合即"已完成转码并登记"的段**，读侧据此过滤在途段；所以 EXTINF 行必须**最后**追加。
+
+**VOD 形态不在本域**（→ `app/services/utils/vod_playlist.py`）：本模块只出事实——哪些段登记
+了、各自多长；怎么拼成一份清单是服务层的判断。
 
 依赖上界：stdlib only。
 """
@@ -50,8 +46,7 @@ _EXTINF_RE = re.compile(r"^#EXTINF:([0-9.]+),?$")
 def header(init_name: str) -> str:
     """清单头（含 `EXT-X-MAP`）。首段登记前写一次，整条清单只有这一份。
 
-    `EXT-X-MAP` 的 URI 是**文件名**不是绝对路径：播放器按相对 playlist 的位置解析，
-    而 playlist 与 init 同在 `hls/` 目录里。
+    `EXT-X-MAP` 的 URI 是**文件名**不是绝对路径（播放器按相对 playlist 的位置解析）。
     """
     return (
         "#EXTM3U\n"
@@ -69,12 +64,8 @@ def entry(duration_s: float, segment_name: str) -> str:
 def total_duration(playlist: Path) -> float:
     """清单里所有 `#EXTINF` 之和（秒）；文件不存在返回 `0.0`。
 
-    这是「本段之前的媒体轴长度」——在把本段条目追加进去**之前**调用，求和即得本段的
-    tfdt 起点。首段读不到任何条目，返回 0.0。
-
-    **读不动就当 0.0**（warning，不抛）：这一步的产物是个偏移量，读失败时 0.0 会让本段
-    落回媒体轴原点、与前段重叠——不好，但比整段作废好；而调用方此刻还什么都没登记。
-    坏行（EXTINF 里不是数）逐行跳过，判据同 R6：内容坏了隔离，环境坏了才是另一回事。
+    这是「本段之前的媒体轴长度」= 本段的 tfdt 起点，**必须在追加本段条目之前调用**。
+    读不动时按 0.0 处理（warning，不抛），坏行逐行跳过。
     """
     if not playlist.exists():
         return 0.0
@@ -98,11 +89,8 @@ def append(playlist: Path, init_name: str, duration_s: float, segment_name: str)
     """登记一个段：清单不存在则先写头，再追加条目。
 
     Raises:
-        OSError: 写失败。此时段文件已就位但没进清单 —— 表现为一个永久"在途"的段
-            （读侧按键集合过滤，不会把它喂给播放器），不是坏数据。
-
-    头与条目分两次 open：头只在首段写一次，把它和条目合并成一次写会让每段都要先判存在
-    再决定写什么，反而多一次 stat。
+        OSError: 写失败。此时段文件已就位但没进清单，表现为一个永久"在途"的段（读侧按键
+            集合过滤，不会把它喂给播放器），不是坏数据。
     """
     if not playlist.exists():
         with playlist.open("w", encoding="utf-8") as f:
@@ -117,20 +105,12 @@ def append(playlist: Path, init_name: str, duration_s: float, segment_name: str)
 
 
 def durations(playlist: Path) -> Dict[str, float]:
-    """段文件名 → EXTINF 秒。文件不存在或读不动返回 `{}`。
+    """段文件名 → EXTINF 秒。文件不存在或读不动返回 `{}`（warning，不抛）。
 
-    返回值同时承担两个职责，这也是它不该被拆成两个函数的理由：
+    返回值同时承担两个职责，故不拆成两个函数：**值**是段时长的唯一真值，**键集合**即
+    "已完成转码并登记"的段。带标题的手写条目按坏行跳过。
 
-    - **值**是段时长的唯一真值（不能用相邻段文件名的 ts 差重推，那是墙钟量）；
-    - **键集合**即"已完成转码并登记"的段，不在其中的是在途段，读侧据此过滤。
-
-    与 `total_duration` 共用 `_EXTINF_RE`：本域写出的条目从不带逗号后的标题，故正则
-    不为它留位置；真遇到带标题的手写清单，那一行按坏行跳过（R6：内容坏了逐行隔离）。
-    **读不动就当空**（warning，不抛）：调用方据此得到"这个 step 没有可播段"，而这与
-    "清单还没建"本就是同一种处置。
-
-    **保持包内私有**：它的消费方都被 `_read.playable_segments` 覆盖了（那个函数把键集合
-    与值一次给全），按准入判据 2「< 2 不进」不出域。
+    **保持包内私有**：消费方都被 `_read.playable_segments` 覆盖（它把键集合与值一次给全）。
     """
     if not playlist.exists():
         return {}
