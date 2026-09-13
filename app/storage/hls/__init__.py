@@ -16,6 +16,26 @@ cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计�
 `Frame`**。ffmpeg 解码、帧号与 sidecar 下标的对齐、两级裁剪同样一件不出签名。**只服务
 raw 轨**（processed 不落 sidecar，理由见 `_decode`）。
 
+## 读侧只出两种产出
+
+    ① 段容器   片段元数据的查询与定位 —— 有哪些段、在哪、能不能播、多长
+               SegmentRef / PlayableSegment
+               list_segments        盘上全部段（含在途，不能直接喂播放器）
+               list_segments_by_track  双轨只付一次 iterdir
+               select_segments      按墙钟区间选段
+               playable_segments    已登记可播 + EXTINF 真时长
+               segment_path / init_path / sidecar_path / playlist_path / parse_*
+
+    ② Frame    把段还原为帧 —— read_segment / iter_frames
+
+**第三种产出要进来先问一句：它是段的元数据，还是给别人消费的装配产物？** VOD 清单是
+后者，故整体不在本域（→ `app/services/utils/vod_playlist.py`）：换掉落盘格式，段容器与
+`Frame` 会跟着消失，而"一份 VOD 由若干 (URI, 时长) 组成"照旧成立——方向相反，说明它
+不属于这里。域对 `MediaToken`、HTTP URL、清单文本一概零认知。
+
+写侧落盘的 `{track}_playlist.m3u8` 不受这条影响：它是本域的**产物**，读它得出的
+逐段 EXTINF 由 `playable_segments` 出口，解析器 `_m3u8.durations` 保持包内私有。
+
 ## 落盘结构
 
     {root}/{task_id}/{step_id}/hls/
@@ -51,21 +71,25 @@ detection 不在本域落盘——它由 `features` 域按帧 ts 单源写入。
 **并发**：本域不持锁。同一 `(task, step, track)` 的写必须串行，且与该 step 的 `delete` 同序
 ——由调用侧的 `SerialTaskQueue` 构造，理由与失效表现见 `_write` 的「并发」一节。
 
-**读侧只迁了一半**：解码（段 → `Frame`）与段枚举已在域内，但**调用点尚未迁移**——
-`inference/offline` 的 `Timeline` 与 `traceback/segment_finder` 仍是现役，且它们读的是
-`{step}/` 平铺布局。本域的读函数只认 `{step}/hls/`，两份并存到写侧切换那一刻为止。
-生成 VOD 清单、解析 metadata 仍在各 router 里，没有迁入计划之外的承诺。
+**读侧能力已齐，调用点尚未迁移**：解码、段枚举、段级区间定位、可播段过滤都在域内了，但
+`inference/offline` 的 `Timeline`、`traceback/segment_finder` 以及三处各自拼 VOD 清单的
+调用方（`routers/traceback`、`lab/step_exporter`、`lab/clip_builder`）仍是现役，且它们读的
+是 `{step}/` 平铺布局。本域的读函数只认 `{step}/hls/`，两份并存到写侧切换那一刻为止。
+`metadata.json` 的读仍在域外，未承诺迁入。
 
 ## 域内分工
 
-    _layout.py   域根 / 文件名 / SegmentRef / 段枚举 / stage 目录（域名在此只出现一次）
+    types.py     本域的资源容器：SegmentRef / PlayableSegment
+                 （stdlib only、不 import 同包任何模块 —— 它是子包的底）
+    _layout.py   域根 / 文件名 / 轨道白名单 / 段枚举 / stage 目录（域名在此只出现一次）
     _encode.py   帧序列 → mp4v，以及 eff_fps 反推（cv2 在函数体内 import）
-    _decode.py   段 → 帧序列（ffmpeg），帧号 ↔ sidecar 下标对齐，两级裁剪
+    _decode.py   段 → 帧序列（ffmpeg），帧号 ↔ sidecar 下标对齐，帧级裁剪
     _fmp4.py     mp4v → fMP4 fragment + init（ffmpeg），tfdt hex-patch
-    _m3u8.py     清单文本：头 / 条目 / 累计 EXTINF
+    _m3u8.py     LIVE 清单文本：写侧（头 / 条目 / 累计）+ 读侧（逐段 EXTINF）
     _idx.py      sidecar 的 float64 布局
     _meta.py     metadata.json 的读改写
     _write.py    写侧对外动作：insert_segment（stage → adjust → commit）/ delete
+    _read.py     读侧对外动作：playable_segments / select_segments（段级裁剪在此）
 
 本文件是 **facade**（re-export 域的公开面），不是标记型——调用方分不出 `hls` 是包还是
 模块，这正是「薄域将来变重」能非破坏性升级的前提。代价是 re-export 会连带加载上面这些
@@ -76,29 +100,41 @@ import，`app.storage.hls` 的导入预算才守得住。
 from ._decode import iter_frames, read_segment
 from ._layout import (
     TRACKS,
-    SegmentRef,
+    init_name,
     init_path,
     list_segments,
+    list_segments_by_track,
+    parse_init_name,
     parse_segment_name,
     playlist_path,
+    segment_name,
     segment_path,
     sidecar_path,
     ts_to_us,
 )
+from ._read import playable_segments, select_segments
 from ._write import delete, insert_segment
+from .types import PlayableSegment, SegmentRef
 
 __all__ = [
     "TRACKS",
+    "PlayableSegment",
     "SegmentRef",
     "delete",
+    "init_name",
     "init_path",
     "insert_segment",
     "iter_frames",
     "list_segments",
+    "list_segments_by_track",
+    "parse_init_name",
     "parse_segment_name",
+    "playable_segments",
     "playlist_path",
     "read_segment",
+    "segment_name",
     "segment_path",
+    "select_segments",
     "sidecar_path",
     "ts_to_us",
 ]

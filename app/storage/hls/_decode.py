@@ -47,7 +47,7 @@ import numpy as np
 
 from app.domain.frame import Frame
 
-from . import _idx, _layout
+from . import _idx, _layout, _read
 from ._layout import SegmentRef
 
 logger = logging.getLogger(__name__)
@@ -275,35 +275,16 @@ def iter_frames(
     ffmpeg、边解边出；要「逐段整段进内存」请自己走 `list_segments` + `read_segment`，
     一段多大是调用方的策略，不是本层的。
 
-    `start_ts` / `end_ts` 为 `None` 表示该侧不设限，原样下传给帧级裁剪——**不能拿段起始
-    数组的首尾当时间轴首尾**：那是段**起始** ts，末段的段首之后还有整整一段的帧。
+    两级裁剪的上半截是 `_read.select_segments`（省 ffmpeg 调用次数），下半截是
+    `read_segment` 的帧级裁剪（不解无效像素）。`start_ts` / `end_ts` 为 `None` 表示该侧
+    不设限，两级都原样收——**不能拿段起始数组的首尾当时间轴首尾**：那是段**起始** ts，
+    末段的段首之后还有整整一段的帧。
 
     Raises: 同 `read_segment`（首次迭代时才发生，本函数是生成器）。
     """
-    segs = _layout.list_segments(task_id, step_id, _RAW_TRACK)
-    if not segs:
-        return
-
-    starts = np.array([ref.ts_us for ref in segs], dtype=np.float64)
-
-    # 要找的是**包含** start_ts 的那一段，故 'right' - 1：'left' 取到的是 start_ts
-    # **之后**的段。且段文件名的 ts_us 是截断值（`_layout.ts_to_us`），「start_ts 恰为
-    # 该段首帧」时 start_ts*1e6 > ts_us，'left' 同样会跳过该段 —— 即不存在「大部分
-    # 情况下对」，是无条件错。
-    lo = (
-        0
-        if start_ts is None
-        else max(0, int(np.searchsorted(starts, start_ts * 1e6, side="right")) - 1)
-    )
-    hi = (
-        len(segs) - 1
-        if end_ts is None
-        else int(np.searchsorted(starts, end_ts * 1e6, side="right")) - 1
-    )
-    if lo > hi:  # end_ts 早于首段起点时 hi = -1，在此被拦下
-        return
-
-    for ref in segs[lo : hi + 1]:
+    for ref in _read.select_segments(
+        task_id, step_id, _RAW_TRACK, start_ts=start_ts, end_ts=end_ts
+    ):
         yield from read_segment(
             task_id, step_id, ref,
             width=width, height=height, start_ts=start_ts, end_ts=end_ts,

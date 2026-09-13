@@ -18,6 +18,16 @@
 **键集合即"已完成转码并登记"的段**：不在清单里的段文件是在途段（或转码失败的残留），
 读侧据此过滤。这也是为什么 EXTINF 行必须**最后**追加（W8）。
 
+## 本模块只管这一份 LIVE 清单，写一路 + 读一路
+
+    写侧   header / entry / append / total_duration   建清单、追条目、求累计（tfdt 输入）
+    读侧   durations                                  逐段 EXTINF，服务 `playable_segments`
+
+**VOD 形态不在本域**：那是给播放器或 ffmpeg 消费的装配产物，不是段的元数据——hls 域读侧
+只出段容器与 `Frame` 两种产出。渲染在 `app/services/utils/vod_playlist.py`，理由写在
+那个模块的 docstring 里。本模块只出事实（哪些段登记了、各自多长），怎么拼成一份清单、
+每条 URI 长什么样，都是服务层的判断。
+
 依赖上界：stdlib only。
 """
 
@@ -26,6 +36,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -98,3 +109,54 @@ def append(playlist: Path, init_name: str, duration_s: float, segment_name: str)
             f.write(header(init_name))
     with playlist.open("a", encoding="utf-8") as f:
         f.write(entry(duration_s, segment_name))
+
+
+# ---------------------------------------------------------------------------
+# 读侧：逐段 EXTINF
+# ---------------------------------------------------------------------------
+
+
+def durations(playlist: Path) -> Dict[str, float]:
+    """段文件名 → EXTINF 秒。文件不存在或读不动返回 `{}`。
+
+    返回值同时承担两个职责，这也是它不该被拆成两个函数的理由：
+
+    - **值**是段时长的唯一真值（不能用相邻段文件名的 ts 差重推，那是墙钟量）；
+    - **键集合**即"已完成转码并登记"的段，不在其中的是在途段，读侧据此过滤。
+
+    与 `total_duration` 共用 `_EXTINF_RE`：本域写出的条目从不带逗号后的标题，故正则
+    不为它留位置；真遇到带标题的手写清单，那一行按坏行跳过（R6：内容坏了逐行隔离）。
+    **读不动就当空**（warning，不抛）：调用方据此得到"这个 step 没有可播段"，而这与
+    "清单还没建"本就是同一种处置。
+
+    **保持包内私有**：它的消费方都被 `_read.playable_segments` 覆盖了（那个函数把键集合
+    与值一次给全），按准入判据 2「< 2 不进」不出域。
+    """
+    if not playlist.exists():
+        return {}
+    try:
+        with playlist.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        logger.warning("[storage.hls] 读清单逐段时长失败，按空处理 %s: %s", playlist, e)
+        return {}
+
+    out: Dict[str, float] = {}
+    pending: float | None = None
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("#EXTINF:"):
+            m = _EXTINF_RE.match(line)
+            if m is None:
+                pending = None
+                continue
+            try:
+                pending = float(m.group(1))
+            except ValueError:
+                pending = None
+        elif line and not line.startswith("#"):
+            # 非注释行 = URI 行。只有紧跟在合法 EXTINF 之后才算一个完整条目。
+            if pending is not None:
+                out[line] = pending
+            pending = None
+    return out

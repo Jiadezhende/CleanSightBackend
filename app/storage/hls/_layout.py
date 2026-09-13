@@ -11,6 +11,8 @@
 **身份键是 `SegmentRef(track, ts_us)`，不是散标量。** 读写两侧共用同一组定位函数
 （L1）：写侧自己构造 ref，读侧从文件名 `parse_segment_name` 解出 ref，路径一律由 ref
 重建——外部字符串从不进入路径拼接，path traversal 结构上不可能（L2）。
+形状本身声明在 `types.py`（本域的资源容器集中一处）；本模块管的是**名字与位置**——
+轨道白名单 `TRACKS` 与校验器 `require_track` 留在这里，它们是词汇表不是形状。
 
 `ts_us` 是**截断**到微秒的墙钟（`int(ts * 1e6)`），不是四舍五入：读侧段级定位的
 `bisect_right - 1` 建立在"段名 ts ≤ 段内首帧 ts"之上，进位会让它落到前一段（T2）。
@@ -22,9 +24,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app.storage import _root
+
+from .types import SegmentRef
 
 # 本域的域名 —— 全文件只出现这一次（样板见 `_root.py`）。
 _DOMAIN = "hls"
@@ -42,21 +46,10 @@ _METADATA_NAME = "metadata.json"
 # 一律匹配不上 —— 这就是 L2 说的"外部输入先经 parse_* 转结构"的执行形态。
 _SEGMENT_RE = re.compile(r"^(?P<track>raw|processed)_segment_(?P<ts_us>\d+)\.mp4$")
 
-
-class SegmentRef(NamedTuple):
-    """一个段在其 step 内的身份：轨道 + 起始时刻（微秒截断）。
-
-    **不带 `task_id` / `step_id`**（L3）：那两个是路由键、调用方手里本来就有；而 track
-    与 ts_us 是从文件名里解出来的，不放进来就得让调用方自己再解一次。
-    """
-
-    track: str
-    ts_us: int
-
-    @property
-    def ts_s(self) -> float:
-        """段起始时刻（秒）。`ts_us` 已截断，回不到原始 float ts（T2）。"""
-        return self.ts_us / 1_000_000.0
+# init 文件名格式：`{track}_init.mp4`。同样是 `parse_init_name` 的校验器。
+# **不能用 `endswith("init.mp4")` 顶替**：那会放行 `evil_init.mp4`、`../raw_init.mp4`，
+# 于是"路径由结构重建"这条就断了，只能退回事后校验 resolve() 在不在根目录里（L2）。
+_INIT_RE = re.compile(r"^(?P<track>raw|processed)_init\.mp4$")
 
 
 def domain_dir(task_id: int, step_id: int, *, create: bool = False) -> Path:
@@ -112,22 +105,44 @@ def list_segments(task_id: int, step_id: int, track: str) -> List[SegmentRef]:
     init、sidecar、`.stage_` 目录都会流经这里，"不是段"是常态不是错误，故那边返回
     `None` 而不抛。
 
+    ⚠ **本函数回答的是"盘上有哪些段文件"，不是"哪些段能播"**：在途段（mp4v 已落、转码
+    或清单登记未完成）也在返回值里。要喂给播放器或 ffmpeg 的一律用 `_read.playable_segments`
+    ——它按清单键集合过滤并顺带给出 EXTINF。拿本函数的结果去拼 VOD 清单会静默截短
+    （`clip_builder` 的缺陷 #3 就是这么来的）。
+
     Raises:
         ValueError: track 非法。
     """
     require_track(track)
+    return list_segments_by_track(task_id, step_id)[track]
+
+
+def list_segments_by_track(task_id: int, step_id: int) -> Dict[str, List[SegmentRef]]:
+    """该 step 下按轨道分组的段，**双轨只付一次 `iterdir`**；各轨内按 `ts_us` 升序。
+
+    域目录不存在时返回各轨空列表（不是空 dict）——调用方可以直接按 track 取，不用先判键。
+
+    要两轨的调用方（step 摘要要回答"这个 step 有哪些轨"）走这个；只要一轨的走
+    `list_segments`，它就是本函数取一个键。分两次扫目录才是浪费，排序多排一条空列表不是。
+
+    同样的「在途段也在返回值里」警告适用，见 `list_segments`。
+    """
+    by_track: Dict[str, List[SegmentRef]] = {t: [] for t in TRACKS}
+
     root = domain_dir(task_id, step_id)
     if not root.is_dir():
-        return []
+        return by_track
 
-    refs = [
-        ref
-        for entry in root.iterdir()
-        if entry.is_file() and (ref := parse_segment_name(entry.name)) is not None
-        if ref.track == track
-    ]
-    refs.sort(key=lambda r: r.ts_us)
-    return refs
+    for entry in root.iterdir():
+        if not entry.is_file():
+            continue
+        ref = parse_segment_name(entry.name)
+        if ref is not None:
+            by_track[ref.track].append(ref)
+
+    for refs in by_track.values():
+        refs.sort(key=lambda r: r.ts_us)
+    return by_track
 
 
 def segment_path(task_id: int, step_id: int, ref: SegmentRef, *, create: bool = False) -> Path:
@@ -150,12 +165,27 @@ def init_path(task_id: int, step_id: int, track: str) -> Path:
     **按 track 分开**：raw 与 processed 是两条独立 playlist、各有各的 EXT-X-MAP，共用
     一个文件名会变成"谁先转码谁定"，另一条轨就指向别人的 init。
     """
-    return domain_dir(task_id, step_id) / f"{require_track(track)}_init.mp4"
+    return domain_dir(task_id, step_id) / init_name(track)
 
 
 def init_name(track: str) -> str:
     """init 段的**文件名**——playlist 的 `EXT-X-MAP:URI` 写的是它，不是绝对路径。"""
     return f"{require_track(track)}_init.mp4"
+
+
+def parse_init_name(name: str) -> Optional[str]:
+    """init 文件名 → track；不是合法 init 名返回 `None`（`init_name` 的逆运算）。
+
+    返回 `None` 而不抛，口径同 `parse_segment_name`：它的用法是**校验一个外部来的名字**
+    （`/media/init/{token}` 解出的 filename）以及枚举时过筛，"不是 init"是常态不是错误。
+
+    这是 L2 在 init 侧的执行形态：调用方拿 track 回头走 `init_path`，路径由结构重建，
+    外部字符串从不进入拼接。
+    """
+    m = _INIT_RE.match(name)
+    if m is None:
+        return None
+    return m.group("track")
 
 
 def playlist_path(task_id: int, step_id: int, track: str) -> Path:
