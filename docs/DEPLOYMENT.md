@@ -21,9 +21,10 @@
 | 5 | 目标机写 `.env`（[§四](#四运行时配置)） | 至少填 DB 五项 + 告警 URL |
 | 6 | 安装（[§三](#三安装)） | `BASE_URL=http://49.234.120.241:8088 ./install.sh` |
 | 7 | 确认脚本末尾自检全过 | torch / CUDA / cv2 / ffmpeg / MediaMTX |
-| 8 | 启动 | `./start_backend.sh prod` |
-| 9 | 端到端验证（[§五](#五部署后验证)） | `test_single_client.py` |
-| 10 | 关闭源机公网分发 | `sudo systemctl stop cleansight-dist` |
+| 8 | **确认启动脚本声明的五个端口在本机空闲**（[§四·端口](#端口)） | 读 `start_backend.sh` 的 `BASE_*` 取值，逐个查占用 |
+| 9 | 启动 | `./start_backend.sh prod` |
+| 10 | 端到端验证（[§五](#五部署后验证)） | `test_single_client.py` |
+| 11 | 关闭源机公网分发 | `sudo systemctl stop cleansight-dist` |
 
 不重建物料就不需要跑 `build.sh`（[§七](#七重建物料buildsh)）。
 
@@ -37,6 +38,7 @@
 | Python | **精确 3.10**，且 `python3 -V` 就是它 | 3.10–3.13 |
 | GPU | NVIDIA 驱动就位，`torch.cuda.is_available()` 为真；不需装 CUDA toolkit | 同左 |
 | 网络 | 能访问源机 `BASE_URL` 与清华 PyPI 镜像 | 同左 |
+| 端口 | 启动脚本声明的五个口本机空闲（取值与查法见 [§四·端口](#端口)） | 同左 |
 | 工具 | `curl`、`python3 -m venv` | PowerShell |
 
 > Python 3.10 是生产硬约束：`wheelhouse/` 按 cp310 打标签，版本不符 `install.sh` 启动即退出。多 Python 环境下要确保 PATH 上的 `python3` 就是 3.10（脚本检的是 `python3 -V`，不是旁装的 `python3.10`）。安装后 `.venv` 已绑定它，激活后用 `python` 即可。
@@ -171,7 +173,8 @@ CLEANSIGHT_GATEWAY_ALLOWED_IPS=<大屏/平台侧 IP>
 | MediaMTX RTSP（内部） | 18004 | 18104 | 否 |
 | MediaMTX RTP / RTCP（UDP，内部） | 8002 / 8003 | 8102 / 8103 | 否 |
 
-- test 与 prod 天然错开 100，可同机并行互不抢占。
+- **启动前必须确认这五个口在本机空闲**——上表是默认值，实际以启动脚本当前的 `BASE_*` / `$Base*` 取值为准，改过端口就按改后的查。被占时不会在安装自检里暴露，只在启动时失败，且 MediaMTX 的绑定失败落在网关日志里、不在后端日志里。占用方无法清除就改脚本换口（两个脚本同步改）。Windows 上还需留意 Docker/WSL 的 HNS 会**预留整段端口块**，`netstat` 看不到监听者但绑定照样失败。
+- test 与 prod 天然错开 100，可同机并行互不抢占——但这只保证这两套之间不打架，机器上其他进程是否占了这些口仍要单独确认。
 - **改端口时两个脚本要同步改**（两份独立声明，不互相引用）。改过的脚本在部署机上会留 git 本地 diff，`git pull` 时手动处理。
 - 对外两个口若经 NAT 映射，**外部端口必须等于内部端口**。非等值映射下后端认不出本机 MediaMTX（[`_rewrite_rtsp_url`](../app/services/stream/manager.py)），会绕公网回源，多数环境直接不通。内部三个口只监听 `127.0.0.1`，不要映射。
 
