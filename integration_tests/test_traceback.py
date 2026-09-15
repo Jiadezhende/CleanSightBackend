@@ -9,6 +9,7 @@
 
 参数:
     --server   <host>   服务器地址（默认: localhost）
+    --api-port <int>    后端 HTTP/WS API 端口（默认: 8000）
     --task_id  <int>    测试任务 ID（默认: 9900001，避开真实数据）
     --alarm_id <int>    测试告警 ID（默认: 9900001，避开真实数据）
 
@@ -36,6 +37,9 @@ from integration_tests.utils import APIClient, DatabaseHelper, seed_hls_segments
 # ---------------------------------------------------------------------------
 # 测试数据参数
 # ---------------------------------------------------------------------------
+
+# 对应标准部署；后端端口可在 .env* 里改（如挪出被占的 8000），用 --api-port 指定。
+DEFAULT_API_PORT = 8000
 
 # 3 段 × 10 秒，告警落在第 2 段（15s 处）
 _N_SEGMENTS = 3
@@ -66,7 +70,7 @@ def _build_test_timestamps(n: int = _N_SEGMENTS) -> tuple:
 
 
 @contextmanager
-def traceback_test_fixture(task_id: int, alarm_id: int, server: str):
+def traceback_test_fixture(task_id: int, alarm_id: int, server: str, api_port: int):
     """预置测试所需数据，退出时无条件清理。
 
     Yields:
@@ -110,7 +114,7 @@ def traceback_test_fixture(task_id: int, alarm_id: int, server: str):
             "ts_us_list": ts_us_list,
             "alarm_detected_at_ms": alarm_detected_at_ms,
             "task_dir": task_dir,
-            "base_url": f"http://{server}:8000",
+            "base_url": f"http://{server}:{api_port}",
         }
 
     finally:
@@ -239,18 +243,21 @@ def test_media_segment(ctx: Dict[str, Any]) -> bool:
 def run_traceback_test(args) -> bool:
     print("\n" + "=" * 60)
     print("CleanSight 告警追溯集成测试")
-    print(f"  服务器: {args.server}:8000")
+    base_url = f"http://{args.server}:{args.api_port}"
+    print(f"  服务器: {args.server}:{args.api_port}")
     print(f"  task_id: {args.task_id} | alarm_id: {args.alarm_id}")
     print("=" * 60)
 
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(base_url)
     if not api.check_health():
         raise SystemExit("后端 API 不可达，请先启动后端服务")
-    print(f"后端 API 正常: http://{args.server}:8000")
+    print(f"后端 API 正常: {base_url}")
 
     results: Dict[str, bool] = {}
 
-    with traceback_test_fixture(args.task_id, args.alarm_id, args.server) as ctx:
+    with traceback_test_fixture(
+        args.task_id, args.alarm_id, args.server, args.api_port
+    ) as ctx:
         results["T1 playlist  "] = test_playlist(ctx)
         results["T2 timeline  "] = test_timeline(ctx)
         results["T3 media_seg "] = test_media_segment(ctx)
@@ -281,6 +288,13 @@ def main():
         description="CleanSight 告警追溯集成测试（无需 FFmpeg，只需后端可达）"
     )
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        default=DEFAULT_API_PORT,
+        dest="api_port",
+        help=f"后端 API 端口（默认: {DEFAULT_API_PORT}）",
+    )
     parser.add_argument(
         "--task_id",
         type=int,
