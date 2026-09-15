@@ -13,6 +13,10 @@ def _load_env_files():
     - CLEANSIGHT_ENV=prod → 加载 .env
 
     该函数会把键值对注入到 `os.environ`，以便 Pydantic 从环境读取。
+
+    优先级：**已存在的环境变量 > 文件值**（`setdefault`，不覆盖）。启动脚本按机器/环境
+    解析出的端口是以 export 形式传进来的，若在此被文件值反向覆盖，脚本与后端会绑到
+    不同端口且无任何报错。这也与网关侧「环境变量 > config.ini > 默认值」的约定一致。
     """
     base = Path(__file__).parent.parent
     env = os.environ.get("CLEANSIGHT_ENV", "dev").lower()
@@ -48,7 +52,7 @@ def _load_env_files():
                     k, v = line.split("=", 1)
                     k = k.strip()
                     v = v.strip().strip('"').strip("'")
-                    os.environ[k] = v
+                    os.environ.setdefault(k, v)
         except Exception:
             # 不要在导入阶段让 .env 文件加载失败阻塞应用
             continue
