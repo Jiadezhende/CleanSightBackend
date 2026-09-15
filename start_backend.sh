@@ -7,7 +7,7 @@
 # 端口：**本脚本的 BASE_* 是 Linux 侧唯一声明处**（Windows 侧同理见 start_backend.ps1）。
 #   改端口只改下面那五行，其余全部派生并注入给三方进程，无需动 .env*、mediamtx.yml、
 #   config.ini、settings.py——它们里的端口只是「脱离本脚本单独跑某个进程」时的回退值。
-#   dev / prod 用基准值（二者同端口，分属不同机器，不冲突）；test 整体 +100（与同机 prod 隔离）。
+#   dev / prod 用基准值（二者同端口，分属不同机器，不冲突）；test 整体 +2（与同机 prod 隔离）。
 
 ENV=${1:-dev}  # 默认开发环境
 
@@ -45,7 +45,7 @@ case $ENV in
 esac
 
 # ===== 端口（唯一声明处：改端口只改这五行）=====
-# dev/prod 直接用基准值；test 整体 +100 以与同机 prod 隔离。
+# dev/prod 直接用基准值；test 整体 +2 以与同机 prod 隔离。
 BASE_BACKEND=8000     # 后端 HTTP/WS
 BASE_PROXY=8004       # 网关对外 RTSP（客户端连这个）
 BASE_INTERNAL=18004   # MediaMTX RTSP（内部，网关回源）
@@ -53,7 +53,7 @@ BASE_RTP=8002         # MediaMTX RTP（UDP，内部）
 BASE_RTCP=8003        # MediaMTX RTCP（UDP，内部）
 
 case $ENV in
-    test) OFFSET=100 ;;
+    test) OFFSET=2 ;;
     *)    OFFSET=0 ;;
 esac
 

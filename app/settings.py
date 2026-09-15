@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # 模型路径
     model_path: str = "./app/data"
 
+    # 推理子进程独占的卡序号，钉给子进程的 CUDA_VISIBLE_DEVICES（""=CPU）。
+    # 共享卡的机器要显式锁卡，避免和邻居抢算力。env: CLEANSIGHT_CUDA_DEVICE
+    cuda_device: str = "0"
+
     # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
     # persistence / inference / traceback 三方都读 settings.storage_base_dir，
     # 不再各自重算或互相 push（消除跨服务穿透）。

@@ -6,7 +6,7 @@
 # 端口：**本脚本的 $Base* 是 Windows 侧唯一声明处**（Linux 侧同理见 start_backend.sh）。
 #   改端口只改下面那五行，其余全部派生并注入给三方进程，无需动 .env*、mediamtx.yml、
 #   config.ini、settings.py——它们里的端口只是「脱离本脚本单独跑某个进程」时的回退值。
-#   基准值与 Linux 保持一致；test 整体 +100（与同机 prod 隔离）。
+#   基准值与 Linux 保持一致；test 整体 +2（与同机 prod 隔离）。
 #   注意：与 start_backend.sh 的 BASE_* 是两份独立声明，改端口时记得两边同步。
 
 param(
@@ -47,14 +47,14 @@ switch ($env.ToLower()) {
 }
 
 # ===== 端口（唯一声明处：改端口只改这五行）=====
-# dev/prod 直接用基准值（与 Linux 一致）；test 整体 +100 以与同机 prod 隔离。
+# dev/prod 直接用基准值（与 Linux 一致）；test 整体 +2 以与同机 prod 隔离。
 $BaseBackend  = 8000   # 后端 HTTP/WS
 $BaseProxy    = 8004   # 网关对外 RTSP（客户端连这个）
 $BaseInternal = 18004  # MediaMTX RTSP（内部，网关回源）
 $BaseRtp      = 8002   # MediaMTX RTP（UDP，内部）
 $BaseRtcp     = 8003   # MediaMTX RTCP（UDP，内部）
 
-$Offset = if ($env.ToLower() -eq "test") { 100 } else { 0 }
+$Offset = if ($env.ToLower() -eq "test") { 2 } else { 0 }
 
 $BackendPort  = $BaseBackend  + $Offset
 $ProxyPort    = $BaseProxy    + $Offset
@@ -108,7 +108,7 @@ if ($conflicts.Count -gt 0) {
 # ===== 端口环境变量：导出前快照，退出时还原 =====
 # PowerShell 的 .ps1 跑在调用方进程内（不像 bash 的 ./script.sh 跑子进程），$env: 赋值会
 # 留在调用方会话里。不还原的话，跑完 test 再在同一窗口手动 `python -m app.main`，
-# 后端会读到残留的 CLEANSIGHT_PORT=8100 而不是 .env 里的值，且毫无提示。
+# 后端会读到残留的 CLEANSIGHT_PORT=8002 而不是 .env 里的值，且毫无提示。
 # 还原到快照而非直接删除：用户自己 $env:CLEANSIGHT_PORT=X 后再调本脚本时，X 应保留。
 $PortEnvNames = @(
     'CLEANSIGHT_PORT', 'CLEANSIGHT_MEDIAMTX_PROXY_PORT', 'CLEANSIGHT_MEDIAMTX_INTERNAL_PORT',

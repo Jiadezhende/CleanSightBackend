@@ -166,15 +166,15 @@ CLEANSIGHT_GATEWAY_ALLOWED_IPS=<大屏/平台侧 IP>
 
 **端口不在 `.env*` 里配，唯一声明处是启动脚本**：Linux 改 [start_backend.sh](../start_backend.sh) 的 `BASE_*` 五行，Windows 改 [start_backend.ps1](../start_backend.ps1) 的 `$Base*` 五行。脚本会把结果以环境变量注入后端、网关与 MediaMTX，压过 `.env*`、`mediamtx.yml`、`config.ini`、`settings.py` 里的同名值——那些只是「脱离脚本单独跑某个进程」时的回退。
 
-| 用途 | dev / prod | test（+100） | 对外？ |
+| 用途 | dev / prod | test（+2） | 对外？ |
 |------|-----------|--------------|-------|
-| 后端 HTTP/WS | 8000 | 8100 | 是 |
-| 网关对外 RTSP | 8004 | 8104 | 是 |
-| MediaMTX RTSP（内部） | 18004 | 18104 | 否 |
-| MediaMTX RTP / RTCP（UDP，内部） | 8002 / 8003 | 8102 / 8103 | 否 |
+| 后端 HTTP/WS | 8000 | 8002 | 是 |
+| 网关对外 RTSP | 8004 | 8006 | 是 |
+| MediaMTX RTSP（内部） | 18004 | 18006 | 否 |
+| MediaMTX RTP / RTCP（UDP，内部） | 8002 / 8003 | 8004 / 8005 | 否 |
 
 - **启动前必须确认这五个口在本机空闲**——上表是默认值，实际以启动脚本当前的 `BASE_*` / `$Base*` 取值为准，改过端口就按改后的查。被占时不会在安装自检里暴露，只在启动时失败，且 MediaMTX 的绑定失败落在网关日志里、不在后端日志里。占用方无法清除就改脚本换口（两个脚本同步改）。Windows 上还需留意 Docker/WSL 的 HNS 会**预留整段端口块**，`netstat` 看不到监听者但绑定照样失败。
-- test 与 prod 天然错开 100，可同机并行互不抢占——但这只保证这两套之间不打架，机器上其他进程是否占了这些口仍要单独确认。
+- test 与 prod 错开 2，可同机并行互不抢占（TCP / UDP 两套端口各自不重号）——但这只保证这两套之间不打架，机器上其他进程是否占了这些口仍要单独确认。
 - **改端口时两个脚本要同步改**（两份独立声明，不互相引用）。改过的脚本在部署机上会留 git 本地 diff，`git pull` 时手动处理。
 - 对外两个口若经 NAT 映射，**外部端口必须等于内部端口**。非等值映射下后端认不出本机 MediaMTX（[`_rewrite_rtsp_url`](../app/services/stream/manager.py)），会绕公网回源，多数环境直接不通。内部三个口只监听 `127.0.0.1`，不要映射。
 
@@ -195,8 +195,8 @@ python integration_tests/test_single_client.py --scenario 1 --task_id <任务ID>
 
 跑之前确认：
 
-- `http://<目标机IP>:<后端端口>/health` 可访问（默认 8000，test 为 8100）。
-- 网关 RTSP 端口可访问（默认 8004，test 为 8104）。
+- `http://<目标机IP>:<后端端口>/health` 可访问（默认 8000，test 为 8002）。
+- 网关 RTSP 端口可访问（默认 8004，test 为 8006）。
 - 测试视频在 `test/test_video.mp4`，否则用 `--video_path` 指定。
 - `<任务ID>` 在数据库中可用；脚本找不到会尝试建测试任务，因此 DB 必须可写。
 
