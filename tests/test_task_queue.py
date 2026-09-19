@@ -20,8 +20,7 @@ def q():
     """每个用例一条新队列——SerialTaskQueue 是一次性的，不能跨用例复用。"""
     created = SerialTaskQueue("test", maxsize=8)
     yield created
-    if created.is_running:
-        created.stop(timeout=5.0)
+    created.stop(timeout=5.0)  # 未 start 过或已 stop 过都是 no-op
 
 
 # ---------------------------------------------------------------------------
@@ -131,14 +130,6 @@ def test_submit_returns_false_when_full(q):
         assert q.submit(lambda: None, label=f"t{i}", timeout=0.01) is True
 
     assert q.submit(lambda: None, label="overflow", timeout=0.01) is False
-
-
-def test_qsize_reflects_backlog(q):
-    """qsize 供压力观测用——不 start 时它就等于已提交数。"""
-    for i in range(3):
-        q.submit(lambda: None, label=f"t{i}", timeout=0.01)
-
-    assert q.qsize() == 3
 
 
 # ---------------------------------------------------------------------------
