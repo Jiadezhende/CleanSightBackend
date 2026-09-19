@@ -1,7 +1,7 @@
 """守卫:start_run 中途失败必须回滚——CQ 不能泄漏在注册表。
 
 背景:CQ 的 set/remove 均归 RunController(与 stop_run 对称)。start_run 在 set 注册 CQ 后,
-把 persistence.start_run / start_workflow / start_stream 包进 try;任一步抛异常即调 stop_run
+把 start_workflow / start_stream 包进 try;任一步抛异常即调 stop_run
 对称回滚(client_manager.remove 注销 CQ)。本用例锁死"失败→注销、不留泄漏"。
 """
 
@@ -29,7 +29,7 @@ def test_start_run_rolls_back_cq_on_workflow_failure():
         patch("app.services.run_control.ClientQueues", return_value=mock_cq),
         patch("app.services.run_control.inference_manager") as mock_inf,
         patch("app.services.run_control.stream_service"),
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.alarm_sink"),
     ):
         mock_inf.resolve_stage.return_value = "0"

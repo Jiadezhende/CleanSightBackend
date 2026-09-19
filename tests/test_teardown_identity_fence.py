@@ -42,7 +42,7 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.inference_manager") as mock_inf,
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
     ):
         mock_inf.stop_workflow.side_effect = capture_state
         result = run_controller.stop_run(tid, reason="test")
@@ -55,6 +55,36 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
     assert result["client_cleaned"] is True
 
 
+# --- 1b. 拆除侧的两次 recording 调用：都发生，且 flush 在 forget 之前 ---
+
+def test_stop_run_flushes_residual_before_forgetting_the_task(_clean_registry):
+    """顺序是 `recording._write` ②「首写自清」的前提，不是风格问题。
+
+    `flush_residual` 在 step 2（CQ 还注册着）、`forget_task` 在 step 4（CQ 已出注册表）。
+    反过来的话残段执行时代次表已空、而 CQ 仍是当前代——首写自清会把这个 step 刚写完的整段
+    录像删掉再写。
+    """
+    tid = _clean_registry
+    cq = make_cq(task_id=tid)
+    client_manager.set(tid, cq)
+
+    calls = []
+
+    with (
+        patch("app.services.run_control.stream_service"),
+        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.recording_service") as mock_recording,
+    ):
+        mock_inf.stop_workflow.return_value = []
+        mock_recording.flush_residual.side_effect = lambda _cq: calls.append("flush")
+        mock_recording.forget_task.side_effect = lambda _tid: calls.append("forget")
+        run_controller.stop_run(tid, reason="test")
+
+    mock_recording.flush_residual.assert_called_once_with(cq)
+    mock_recording.forget_task.assert_called_once_with(tid)
+    assert calls == ["flush", "forget"]
+
+
 # --- 2a. 身份 fence 命中放行（槽位仍是 expected） ---
 
 def test_stop_run_expected_hit_tears_down(_clean_registry):
@@ -65,7 +95,7 @@ def test_stop_run_expected_hit_tears_down(_clean_registry):
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.inference_manager") as mock_inf,
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
     ):
         result = run_controller.stop_run(tid, reason="hm", expected=cq)
 
@@ -87,16 +117,17 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.inference_manager") as mock_inf,
-        patch("app.services.run_control.persistence_manager") as mock_persist,
+        patch("app.services.run_control.recording_service") as mock_recording,
     ):
         # HM 过期决策：拿着旧 cq 来拆，但槽位已换新
         result = run_controller.stop_run(tid, reason="hm-stale", expected=cq_old)
 
     assert result["skipped"] is True
-    # 新 run 毫发无伤：未停 decoder、未落盘、仍在表、仍 ACTIVE
+    # 新 run 毫发无伤：未停 decoder、未落盘、代次记录没被回收、仍在表、仍 ACTIVE
     mock_stream.stop_stream.assert_not_called()
     mock_inf.stop_workflow.assert_not_called()
-    mock_persist.flush_residual_segments.assert_not_called()
+    mock_recording.flush_residual.assert_not_called()
+    mock_recording.forget_task.assert_not_called()
     assert client_manager.get(tid) is cq_new
     assert cq_new.get_state() is RunState.ACTIVE
 

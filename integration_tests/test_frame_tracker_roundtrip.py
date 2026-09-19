@@ -1,9 +1,14 @@
 """
-HLS 帧反查（FrameTracker / Timeline）端到端 round-trip 测试
+HLS 帧反查（storage.hls 读侧 + FrameTracker）端到端 round-trip 测试
 
 不需要后端服务、RTSP、数据库或推理引擎，只需 FFmpeg：
-直接调 `HLSPersistenceStrategy` 走真实写路径落 fMP4 段 + `.idx` sidecar，
-再用 `FrameTracker` 按 ts 读回，逐帧比对。
+直接调 `hls.insert_segment` 走真实写路径落 fMP4 段 + `.idx` sidecar 到 `{step}/hls/`，
+再用 `hls.iter_frames` / `FrameTracker.find` 按 ts 读回，逐帧比对。
+
+**造数与读回都已切到 `app.storage.hls`**（原先是 `HLSPersistenceStrategy` 写平铺布局
++ `Timeline` 读）。`Timeline` 已退役、零调用点、读的还是平铺布局，为它单独再铺一套数据只是
+给一份等着删的实现续命；区间扫帧的那几项（T1–T5、T11–T13）改成直接验数据层的
+`hls.iter_frames`——它们抓的「ts ↔ 像素错配」在新实现上同样是唯一抓得到的手段。
 
 **这是唯一能抓「ts ↔ 像素错配」的手段**：帧内中心色块编码了 frame_id
 （三通道 16 阶量化，抗 H.264 有损压缩），读回后解码 id 与期望 gid 逐帧比。
@@ -31,6 +36,7 @@ ffmpeg，抓不到「解码出来的像素是不是那一帧」——两者互�
     T11 缺 sidecar 只跳过该段、其余照常                （修复前整条迭代中断）
     T12 返回帧可写（下游 cv2 原地操作）           （修复前 np.frombuffer 只读）
     T13 自定义尺寸生效
+    T14 processed 轨直接 ValueError（新实现只服务 raw 轨）
 """
 
 from __future__ import annotations
@@ -48,9 +54,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.domain.frame import Frame
-from app.services.inference.offline.frame_tracker import FrameTracker, Timeline
-from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
+from app.services.inference.offline.frame_tracker import FrameTracker
 from app.settings import settings
+from app.storage import hls
 
 # ---------------------------------------------------------------------------
 # 测试数据参数
@@ -99,23 +105,26 @@ def ts_of(gid: int) -> float:
 # 造数（走真实写路径）
 # ---------------------------------------------------------------------------
 
+def hls_dir(task_id: int) -> Path:
+    """本测试的落盘目录 —— 数据层布局 `{task}/{step}/hls/`，不是旧的平铺。"""
+    return settings.storage_base_dir / str(task_id) / str(STEP_ID) / "hls"
+
+
 def seed(task_id: int) -> None:
-    base = settings.storage_base_dir
-    target = base / str(task_id)
+    target = settings.storage_base_dir / str(task_id)
     if target.exists():
         shutil.rmtree(target)
 
-    strategy = HLSPersistenceStrategy(base)
     t0 = time.perf_counter()
     for s in range(N_SEG):
         gids = range(s * FRAMES_PER_SEG, (s + 1) * FRAMES_PER_SEG)
-        strategy.persist_segment(
+        hls.insert_segment(
             task_id, STEP_ID, "raw",
             [Frame(timestamp=ts_of(g), frame=make_frame(g)) for g in gids],
         )
     dt = time.perf_counter() - t0
 
-    d = target / str(STEP_ID)
+    d = hls_dir(task_id)
     mp4s = sorted(d.glob("raw_segment_*.mp4"))
     idxs = sorted(d.glob("raw_segment_*.idx"))
     size = sum(p.stat().st_size for p in mp4s)
@@ -136,14 +145,18 @@ def seed(task_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
-    def tl() -> Timeline:
-        return Timeline(task_id, STEP_ID)
+    def scan(start_ts=None, end_ts=None, width=W, height=H):
+        """区间扫帧 —— 数据层的 `iter_frames`（无 `track` 参数，恒为 raw 轨）。"""
+        return hls.iter_frames(
+            task_id, STEP_ID,
+            width=width, height=height, start_ts=start_ts, end_ts=end_ts,
+        )
 
     def tracker() -> FrameTracker:
         return FrameTracker(task_id, STEP_ID)
 
     def t1_full() -> str:
-        frames = list(tl().iter())
+        frames = list(scan())
         assert len(frames) == TOTAL, f"帧数 {len(frames)} != {TOTAL}"
         got_ts = [f.timestamp for f in frames]
         assert got_ts == [ts_of(g) for g in range(TOTAL)], "ts 序列与 sidecar 不位级一致"
@@ -154,26 +167,26 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
 
     def t2_mid_start() -> str:
         g = FRAMES_PER_SEG + 70
-        got = [f.timestamp for f in tl().iter(ts_of(g), ts_of(g + 20))]
+        got = [f.timestamp for f in scan(ts_of(g), ts_of(g + 20))]
         assert got == [ts_of(k) for k in range(g, g + 21)], f"实得 {len(got)}/21 帧"
         return "21 帧精确"
 
     def t3_exact_seg_start() -> str:
         g = 5 * FRAMES_PER_SEG
-        got = [f.timestamp for f in tl().iter(ts_of(g), ts_of(g + 5))]
+        got = [f.timestamp for f in scan(ts_of(g), ts_of(g + 5))]
         assert got == [ts_of(k) for k in range(g, g + 6)], f"实得 {len(got)}/6 帧"
         return "段首帧未被截断的 ts_us 挤掉"
 
     def t4_cross_seg() -> str:
         g0, g1 = 3 * FRAMES_PER_SEG + 100, 5 * FRAMES_PER_SEG + 20
-        got = [f.timestamp for f in tl().iter(ts_of(g0), ts_of(g1))]
+        got = [f.timestamp for f in scan(ts_of(g0), ts_of(g1))]
         assert got == [ts_of(k) for k in range(g0, g1 + 1)], f"实得 {len(got)}/{g1-g0+1} 帧"
         return f"跨 3 段 {g1 - g0 + 1} 帧"
 
     def t5_out_of_range() -> str:
         far = ts_of(TOTAL - 1) + 100
-        assert list(tl().iter(far, far + 10)) == [], "越界区间应为空"
-        assert list(tl().iter(BASE_TS - 100, BASE_TS - 50)) == [], "早于首段的区间应为空"
+        assert list(scan(far, far + 10)) == [], "越界区间应为空"
+        assert list(scan(BASE_TS - 100, BASE_TS - 50)) == [], "早于首段的区间应为空"
         return "越界（两侧）均返回空"
 
     def t6_find_single() -> str:
@@ -213,12 +226,11 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         return "位级精确：漂移 1µs 即报错，不做近似匹配"
 
     def t11_missing_sidecar() -> str:
-        d = settings.storage_base_dir / str(task_id) / str(STEP_ID)
-        victim = sorted(d.glob("raw_segment_*.idx"))[6]
+        victim = sorted(hls_dir(task_id).glob("raw_segment_*.idx"))[6]
         bak = victim.with_suffix(".idx.bak")
         victim.rename(bak)
         try:
-            got = [f.timestamp for f in tl().iter()]
+            got = [f.timestamp for f in scan()]
         finally:
             bak.rename(victim)
         exp = [ts_of(g) for g in range(TOTAL)
@@ -227,15 +239,25 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         return f"仅丢该段 {FRAMES_PER_SEG} 帧，其余 {len(exp)} 帧照常"
 
     def t12_writeable() -> str:
-        f = next(tl().iter(ts_of(0), ts_of(0)))
+        f = next(iter(scan(ts_of(0), ts_of(0))))
         assert f.frame.flags.writeable, "返回的 ndarray 只读，下游 cv2 原地操作会抛错"
         cv2.rectangle(f.frame, (0, 0), (9, 9), (0, 0, 255), -1)  # 真做一次原地写
         return "可写，cv2 原地绘制通过"
 
     def t13_scale() -> str:
-        f = next(tl().iter(ts_of(0), ts_of(0), width=320, height=320))
+        f = next(iter(scan(ts_of(0), ts_of(0), width=320, height=320)))
         assert f.frame.shape == (320, 320, 3), f"shape={f.frame.shape}"
         return "scale=320:320 生效（不保持宽高比，调用方自负）"
+
+    def t14_processed_rejected() -> str:
+        """解码只服务 raw 轨：processed 不落 sidecar，给不出带墙钟 ts 的帧。
+        「这条路不通」必须与「这段没数据」分得开，故是 ValueError 而非空迭代器。"""
+        ref = hls.SegmentRef(track="processed", ts_us=hls.ts_to_us(ts_of(0)))
+        try:
+            hls.read_segment(task_id, STEP_ID, ref, width=W, height=H)
+        except ValueError:
+            return "processed 轨直接 ValueError，不静默返回空"
+        raise AssertionError("processed 轨应抛 ValueError，实际静默通过")
 
     return [
         ("T1  全量遍历 ts/像素对齐", t1_full),
@@ -251,6 +273,7 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         ("T11 缺 sidecar 降级", t11_missing_sidecar),
         ("T12 返回帧可写性", t12_writeable),
         ("T13 自定义尺寸", t13_scale),
+        ("T14 processed 轨拒绝", t14_processed_rejected),
     ]
 
 

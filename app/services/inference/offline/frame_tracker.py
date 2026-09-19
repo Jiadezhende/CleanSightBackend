@@ -9,6 +9,7 @@ from typing import Optional, Iterator
 import numpy as np
 
 from app.domain.frame import Frame
+from app.storage import hls
 from app.services.traceback.segment_finder import (
     SegmentFinder,
     SegmentRef,
@@ -44,7 +45,15 @@ def _read_exact(stream, buf: bytearray) -> bool:
 
 
 class Timeline:
-    """时间线：ts → 段 → 段内帧号 → 像素。纯查询，零像素缓存。
+    """⚠ **已退役，零调用点**：本类的能力已由 `app.storage.hls.iter_frames` 取代
+    （段级 + 帧级两级裁剪、sidecar 读、ffmpeg 解码全在域内），`FrameTracker` 已改调数据层。
+    它与下方的模块级私有件（`_read_exact` / `_DECODE_TIMEOUT_*`）一并留在原地只是**尚未到
+    清理期**（旧 HLS 实现统一删除，见 `docs/update/20260916_HLS_CALLSITE_MIGRATION.md` §8
+    「保留项」），不是现役实现——
+    别往这里加功能，也别把新调用点接到它上面。**它读的是旧的 `{step}/` 平铺布局，新写侧
+    落的是 `{step}/hls/`，接上去只会读到空。**
+
+    时间线：ts → 段 → 段内帧号 → 像素。纯查询，零像素缓存。
 
     落盘形态：fMP4 按段落盘（raw_segment_{ts_us}.mp4），
     每段配一个同名 .idx sidecar（float64 时间戳数组，每帧一条）。
@@ -238,8 +247,15 @@ class Timeline:
 
 
 class FrameTracker:
-    def __init__(self, task_id: int, step_id: int, track: str = "raw"):
-        self._tl = Timeline(task_id, step_id, track)
+    """按 ts 反查原始帧。解码与裁剪全下沉到 `app.storage.hls`，本类只剩位级配对。
+
+    **只服务 raw 轨**，故没有 `track` 参数：`processed` 是画完框的渲染结果、按契约不落
+    sidecar，给不出带墙钟 ts 的帧（见 `app/storage/hls/_decode.py` 的「只服务 raw 轨」）。
+    """
+
+    def __init__(self, task_id: int, step_id: int):
+        self._task_id = task_id
+        self._step_id = step_id
 
     def find(self, timestamps: list[float], width: int, height: int) -> Iterator[Frame]:
         """按 ts 反查帧。
@@ -257,8 +273,13 @@ class FrameTracker:
         sorted_timestamps = sorted(float(t) for t in timestamps)
 
         idx = 0
-        for frame in self._tl.iter(
-            sorted_timestamps[0], sorted_timestamps[-1], width, height
+        for frame in hls.iter_frames(
+            self._task_id,
+            self._step_id,
+            width=width,
+            height=height,
+            start_ts=sorted_timestamps[0],
+            end_ts=sorted_timestamps[-1],
         ):
             # while 而非 if：重复 ts 在同一帧上连续消费掉
             while idx < len(sorted_timestamps) and frame.timestamp == sorted_timestamps[idx]:

@@ -4,8 +4,9 @@
 提供任务 VOD 回放、任务时间轴打点两个接口。
 
 数据底座：
-- task_id + step_id → 落盘目录：`{base_dir}/{task_id}/{step_id}/`
-- 段枚举：按文件名 ts_us 升序（segment_finder）
+- task_id + step_id → 落盘目录：`{root}/{task_id}/{step_id}/hls/`（`app.storage.hls` 域）
+- 段枚举与 EXTINF：`hls.list_playable_segments`（一次扫盘同时给出可播段与逐段真时长）
+- 清单骨架：`app.services.utils.vod_playlist.render_vod`（URI 与时长来源归本层）
 - 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
 
 设计要点：
@@ -22,12 +23,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
 from app.models import DBAlarm
-from app.services.traceback import MediaToken, SegmentFinder
-from app.services.traceback.segment_finder import (
-    SegmentRef,
-    get_default_base_dir,
-    parse_playlist_durations,
-)
+from app.services.traceback import MediaToken
+from app.services.utils.vod_playlist import VodEntry, render_vod
+from app.storage import hls
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/traceback", tags=["traceback"])
@@ -106,22 +104,20 @@ def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict
 
 def _build_vod_playlist(
     request: Request,
-    finder: SegmentFinder,
     task_id: int,
     step_id: int,
     track: str,
-    segs: List[SegmentRef],
 ) -> str:
     """构造 VOD m3u8 文本体（供 `get_task_playlist` 使用）。
 
-    - 要求 segs 已经按时序排序、非空
-    - 调用方负责处理 segs 为空时的 404
+    分工：**可播段与逐段 EXTINF 是事实**，由 `hls.list_playable_segments` 出；**m3u8 骨架**
+    由 `vod_playlist.render_vod` 出；本函数只负责把段与 init 换成 token 化 URI——URI 长什么样
+    是协议层的事，数据层与骨架函数都对 `MediaToken` 零认知。
+
     - init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
-    - segs 经 playlist 过滤后为空（全部为在途段）→ 抛 404
+    - 一个可播段都没有（段全在途 / 登记失败）→ 抛 404
     """
-    task_dir = finder.task_dir(task_id, step_id)
-    init_path = task_dir / f"{track}_init.mp4"
-    if not init_path.exists():
+    if not hls.init_path(task_id, step_id, track).exists():
         # 正常落盘的 step 必有 init（首段 transcode 时产出）。缺 init 只剩两种可能：
         # ① 段是 {track}_init.mp4 命名之前的旧格式产物——不支持，也不提供迁移；
         # ② 首段正在 transcode 途中（窗口极短）。
@@ -138,42 +134,35 @@ def _build_vod_playlist(
             },
         )
 
-    playlist_path = task_dir / f"{track}_playlist.m3u8"
-    real_durations = parse_playlist_durations(playlist_path)
-
-    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF（退化段的兜底也只在写入侧的 eff_fps
-    # 里，见 hls_strategy._DEGENERATE_FALLBACK_FPS）。此处只读回、不重新推导、无第二兜底。
-    # 不在 playlist 中的段视为在途段（mp4v 已落但 transcode+append 未完成），过滤掉——避免
+    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF；`list_playable_segments` 只读回、不
+    # 重新推导、无第二兜底。不在清单里的段是在途段或登记失败的段，它同时把它们滤掉——避免
     # 回放出现与 fmp4 tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
-    segs = [s for s in segs if s.filename in real_durations]
-    if not segs:
+    playable = hls.list_playable_segments(task_id, step_id, track)
+    if not playable:
         raise HTTPException(status_code=404, detail="No playable segments yet")
 
-    # 上一步已保证 real_durations 非空（segs ⊆ real_durations 且非空），max() 无需 default。
-    target_duration = max(int(round(max(real_durations.values()))), 1)
-
     base_url = str(request.base_url).rstrip("/")
-    init_token = MediaToken.default().sign(
-        task_id=task_id, step_id=step_id, filename=f"{track}_init.mp4", kind="init",
-    )
+    signer = MediaToken.default()
 
-    lines: List[str] = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:7",
-        "#EXT-X-PLAYLIST-TYPE:VOD",
-        f"#EXT-X-TARGETDURATION:{target_duration}",
-        "#EXT-X-MEDIA-SEQUENCE:0",
-        f'#EXT-X-MAP:URI="{base_url}/media/init/{init_token}"',
-    ]
-    for s in segs:
-        dur = real_durations[s.filename]
-        token = MediaToken.default().sign(
-            task_id=s.task_id, step_id=s.step_id, filename=s.filename, kind="segment",
+    init_token = signer.sign(
+        task_id=task_id, step_id=step_id, filename=hls.init_name(track), kind="init",
+    )
+    entries = [
+        VodEntry(
+            uri=(
+                f"{base_url}/media/segment/"
+                + signer.sign(
+                    task_id=task_id,
+                    step_id=step_id,
+                    filename=hls.segment_name(s.ref),
+                    kind="segment",
+                )
+            ),
+            duration_s=s.duration_s,
         )
-        lines.append(f"#EXTINF:{dur:.3f},")
-        lines.append(f"{base_url}/media/segment/{token}")
-    lines.append("#EXT-X-ENDLIST")
-    return "\n".join(lines) + "\n"
+        for s in playable
+    ]
+    return render_vod(entries, map_uri=f"{base_url}/media/init/{init_token}")
 
 
 # HEAD 与 GET 同注册：原生 HLS 播放栈（Safari/AVPlayer 等）在取 playlist 前会自动
@@ -206,16 +195,17 @@ async def get_task_playlist(
     - 保证 VOD 完整性（即使任务未封档）
     - URL 走 token 化 /media/segment/*，不暴露文件系统路径
     """
-    finder = SegmentFinder(get_default_base_dir())
-    segs = finder.list_segments(task_id, step_id, track)
-    if not segs:
+    # 两档要分开：**盘上一个段都没有** = 这个 step 没这条轨（404 NotFoundError），
+    # **有段但一个都还不可播** = 段全在途，稍后重试就有（404 "No playable segments yet"，
+    # 在 `_build_vod_playlist` 里抛）。合成一档会让前端分不清"挑错 track"和"再等等"。
+    if not hls.list_segments(task_id, step_id, track):
         raise NotFoundError(
             f"No {track} segments for task {task_id} step {step_id}",
             resource_type="Segments",
             resource_id=f"task={task_id},step={step_id},track={track}",
         )
 
-    body = _build_vod_playlist(request, finder, task_id, step_id, track, segs)
+    body = _build_vod_playlist(request, task_id, step_id, track)
     return PlainTextResponse(
         content=body,
         media_type="application/vnd.apple.mpegurl",
@@ -228,9 +218,7 @@ async def get_task_playlist(
 # ---------------------------------------------------------------------------
 
 
-def _step_duration_ms(
-    finder: SegmentFinder, task_id: int, step_id: int
-) -> Tuple[int, int, int]:
+def _step_duration_ms(task_id: int, step_id: int) -> Tuple[int, int, int]:
     """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。
 
     end_ms 必须取 max(seg.ts + EXTINF)，而不是 max(seg.ts) —— 后者会漏掉最后一段
@@ -238,23 +226,16 @@ def _step_duration_ms(
     lab 页面顶部"时长 / 进度条右端"和 <video>.duration 一致。
 
     在途段（mp4v 已落、transcode+append 未完成）在 playlist 里查不到 EXTINF，
-    跳过 —— 与 `_build_vod_playlist` 的过滤策略保持一致。raw / processed 双轨都
-    纳入，取并集的最早起点和最晚终点。
+    由 `hls.list_playable_segments` 一并滤掉 —— 与 `_build_vod_playlist` 同源同策略。
+    raw / processed 双轨都纳入，取并集的最早起点和最晚终点。
     """
-    task_dir = finder.task_dir(task_id, step_id)
     start_us: Optional[int] = None
     end_us: Optional[int] = None
-    for track in ("raw", "processed"):
-        durations = parse_playlist_durations(task_dir / f"{track}_playlist.m3u8")
-        if not durations:
-            continue
-        for s in finder.list_segments(task_id, step_id, track):
-            dur = durations.get(s.filename)
-            if dur is None:
-                continue
-            seg_end_us = s.ts_us + int(round(dur * 1_000_000))
-            if start_us is None or s.ts_us < start_us:
-                start_us = s.ts_us
+    for track in hls.TRACKS:
+        for seg in hls.list_playable_segments(task_id, step_id, track):
+            seg_end_us = seg.ref.ts_us + int(round(seg.duration_s * 1_000_000))
+            if start_us is None or seg.ref.ts_us < start_us:
+                start_us = seg.ref.ts_us
             if end_us is None or seg_end_us > end_us:
                 end_us = seg_end_us
     if start_us is None or end_us is None:
@@ -286,8 +267,7 @@ async def get_task_timeline(
           ]
         }
     """
-    finder = SegmentFinder(get_default_base_dir())
-    start_ms, end_ms, duration_ms = _step_duration_ms(finder, task_id, step_id)
+    start_ms, end_ms, duration_ms = _step_duration_ms(task_id, step_id)
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
     # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。

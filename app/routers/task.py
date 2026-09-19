@@ -12,8 +12,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm, DBTask
 from app.services.client.manager import client_manager
-from app.services.traceback import SegmentFinder
-from app.services.traceback.segment_finder import get_default_base_dir
+from app.storage import hls
+from app.storage import tasks as step_tasks
 from app.utils.exceptions import DatabaseError
 
 router = APIRouter(prefix="/task", tags=["task"])
@@ -210,6 +210,35 @@ def list_live_tasks():
     return {"total": len(tasks), "tasks": tasks}
 
 
+def _summarise_steps(task_id: int) -> List[dict]:
+    """该 task 下**有段**的 step 摘要，按 step_id 升序。
+
+    时间戳取**双轨并集**（与 timeline 的 start_ms/end_ms 同口径）：两轨段边界不一定对齐，
+    实测有过 20+ 秒的差，故它表达的是「该 step 有画面的时间跨度」，不等于任一单轨的播放范围。
+    `last_segment_ms` 是最后一段的**起点**，不是结束时刻。
+
+    ⚠ `tasks.list_step_ids` **不过滤空 step**（那是域知识，TTL 要的正是没过滤的那档）。
+    「两轨都没段就丢弃」必须在这里补：目录建了但没写成段（起流即失败）对回放没有意义，
+    清单不该把它露给前端点开黑屏。
+    """
+    steps: List[dict] = []
+    for step_id in step_tasks.list_step_ids(task_id):
+        by_track = hls.list_segments_by_track(task_id, step_id)
+        tracks = [t for t in hls.TRACKS if by_track[t]]
+        if not tracks:
+            continue
+        all_ts = [ref.ts_us for t in tracks for ref in by_track[t]]
+        steps.append(
+            {
+                "step_id": step_id,
+                "tracks": tracks,
+                "start_ms": min(all_ts) // 1000,
+                "last_segment_ms": max(all_ts) // 1000,
+            }
+        )
+    return steps
+
+
 @router.get("/history")
 def list_history_tasks():
     """历史任务清单（大屏用）：最近 10 个**已完成且能回放**的任务。无查询参数。
@@ -239,19 +268,18 @@ def list_history_tasks():
     段 ts。粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个
     刚停的——大屏下一轮轮询自愈，不加锁。
     """
-    finder = SegmentFinder(get_default_base_dir())
     active_ids = set(client_manager.snapshot().keys())
 
     tasks: List[dict] = []
     scanned = 0
-    for task_id in finder.list_task_ids_by_recency():
+    for task_id in step_tasks.list_task_ids(order="mtime"):
         if len(tasks) >= _HISTORY_LIMIT or scanned >= _HISTORY_SCAN_CAP:
             break
         if task_id in active_ids:  # 还在跑 → 不算历史
             continue
 
         scanned += 1
-        steps = finder.list_steps(task_id)
+        steps = _summarise_steps(task_id)
         if not steps:  # 目录在但没段（起流即失败）→ 点开是黑屏，不进清单
             continue
 
@@ -259,16 +287,8 @@ def list_history_tasks():
             {
                 "task_id": task_id,
                 "source_ip": None,  # 下方按页补
-                "latest_ms": max(s.last_ts_us for s in steps) // 1000,
-                "steps": [
-                    {
-                        "step_id": s.step_id,
-                        "tracks": list(s.tracks),
-                        "start_ms": s.first_ts_us // 1000,
-                        "last_segment_ms": s.last_ts_us // 1000,
-                    }
-                    for s in steps
-                ],
+                "latest_ms": max(s["last_segment_ms"] for s in steps),
+                "steps": steps,
             }
         )
 

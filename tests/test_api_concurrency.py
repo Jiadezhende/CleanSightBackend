@@ -83,7 +83,7 @@ async def test_concurrent_start_same_task_idempotent():
         patch("app.routers.api.get_db", side_effect=fresh_db),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
         patch.object(client_manager, "has_client", side_effect=has_client_side_effect),
@@ -132,7 +132,7 @@ async def test_same_task_url_change_triggers_restart():
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
         patch.object(client_manager, "has_client", return_value=True),
@@ -180,7 +180,7 @@ async def test_start_and_terminate_serialized():
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
         patch.object(client_manager, "has_client", return_value=False),
@@ -238,7 +238,7 @@ async def test_different_clients_not_blocked():
         patch("app.routers.api.get_db", side_effect=mock_get_db),
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues"),
         patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
         patch.object(client_manager, "has_client", return_value=False),
@@ -272,7 +272,7 @@ async def test_terminate_uses_lock():
     with (
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
+        patch("app.services.run_control.recording_service"),
         patch.object(client_manager, "find_by_source_ip", return_value=mock_cq),
         patch.object(client_manager, "get", return_value=mock_cq),
         patch.object(client_manager, "has_client", return_value=True),

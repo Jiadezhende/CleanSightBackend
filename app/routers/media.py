@@ -9,6 +9,11 @@ URL 不暴露文件系统路径，避免越权枚举。
     GET /media/init/{token}       返回 HLS fMP4 init segment（step 级共享）
 
 Token 校验由 MediaToken（HMAC-SHA256 + 短 TTL）完成。
+
+**外部字符串从不进入路径拼接**：token 里的 filename 先由 `hls.parse_segment_name` /
+`hls.parse_init_name` 解成身份键（`SegmentRef` / track），解不出就 400；路径一律由
+`hls.segment_path` / `hls.init_path` 按落盘结构重建。故这里没有 `relative_to(base)`
+那类事后越界检查——能拼出来的路径只可能落在该 step 的 `hls/` 域目录里。
 """
 
 import logging
@@ -17,40 +22,31 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Path as PathParam
 from fastapi.responses import FileResponse
 
-from app.services.traceback import MediaToken, MediaTokenError, SegmentFinder
-from app.services.traceback.segment_finder import get_default_base_dir
+from app.services.traceback import MediaToken, MediaTokenError
+from app.storage import hls
 
 router = APIRouter(prefix="/media", tags=["media"])
 logger = logging.getLogger(__name__)
 
 
-def _resolve_media_path(task_id: int, step_id: int, filename: str) -> Path:
-    """根据 token 已校验的字段拼出绝对路径，并防止 path traversal。
+def _reject(task_id: int, step_id: int, filename: str, detail: str) -> HTTPException:
+    """token 里的 filename 不是合法产物名 —— 记一条 warning 并给出 400。
 
-    Raises:
-        HTTPException(400): filename 含路径分隔符
-        HTTPException(404): 文件不存在或越界
+    签发侧（`MediaToken.sign`）已经拒过带分隔符的名字，走到这里说明 token 不是本服务签
+    的正常流程产物（伪造、或签发方改了命名约定），故按可疑请求记 warning。
     """
-    if "/" in filename or "\\" in filename or filename in (".", ".."):
-        raise HTTPException(status_code=400, detail="Invalid filename")
+    logger.warning(
+        "[Media] Rejected filename: task_id=%s step_id=%s filename=%r",
+        task_id, step_id, filename,
+    )
+    return HTTPException(status_code=400, detail=detail)
 
-    base = get_default_base_dir()
-    finder = SegmentFinder(base)
-    candidate = (finder.task_dir(task_id, step_id) / filename).resolve()
 
-    # path traversal 防御：解析后的路径必须在 base_dir 内
-    try:
-        candidate.relative_to(base)
-    except ValueError:
-        logger.warning(
-            "[Media] Path traversal denied: task_id=%s step_id=%s filename=%s",
-            task_id, step_id, filename,
-        )
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-    if not candidate.exists() or not candidate.is_file():
+def _existing_file(path: Path) -> Path:
+    """产物必须真的在盘上；不在就 404（区别于 400 的"名字非法"）。"""
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="Media file not found")
-    return candidate
+    return path
 
 
 @router.get("/segment/{token}")
@@ -62,10 +58,14 @@ async def get_segment(token: str = PathParam(..., description="media segment tok
         logger.info("[Media] Segment token rejected: %s", e)
         raise HTTPException(status_code=403, detail="Invalid or expired token")
 
-    if not payload.filename.endswith(".mp4"):
-        raise HTTPException(status_code=400, detail="Token does not point to a segment")
+    ref = hls.parse_segment_name(payload.filename)
+    if ref is None:
+        raise _reject(
+            payload.task_id, payload.step_id, payload.filename,
+            "Token does not point to a segment",
+        )
 
-    path = _resolve_media_path(payload.task_id, payload.step_id, payload.filename)
+    path = _existing_file(hls.segment_path(payload.task_id, payload.step_id, ref))
     return FileResponse(
         path=str(path),
         media_type="video/mp4",
@@ -85,10 +85,15 @@ async def get_init(token: str = PathParam(..., description="media init segment t
         logger.info("[Media] Init token rejected: %s", e)
         raise HTTPException(status_code=403, detail="Invalid or expired token")
 
-    if not payload.filename.endswith("init.mp4"):
-        raise HTTPException(status_code=400, detail="Token does not point to init segment")
+    # 判据是 `parse_init_name` 而不是 `endswith("init.mp4")` —— 后者放行 `evil_init.mp4`。
+    track = hls.parse_init_name(payload.filename)
+    if track is None:
+        raise _reject(
+            payload.task_id, payload.step_id, payload.filename,
+            "Token does not point to init segment",
+        )
 
-    path = _resolve_media_path(payload.task_id, payload.step_id, payload.filename)
+    path = _existing_file(hls.init_path(payload.task_id, payload.step_id, track))
     return FileResponse(
         path=str(path),
         media_type="video/mp4",

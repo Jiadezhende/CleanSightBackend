@@ -5,10 +5,15 @@ ClipBuilder — 从 raw 段拼接出 ms 精度的 mp4 clip。
 输出：单个 mp4 文件，时长 ≈ end_ms - start_ms
 
 实现思路：
-1. 复用 SegmentFinder.list_segments(track='raw') 拿到该 step 的全部 raw 段（按 ts_us 升序）
+1. hls.list_segments(track='raw') 拿到该 step 的全部 raw 段（按 ts_us 升序）
 2. 过滤出与 [start_ms, end_ms] 时间区间重叠的段
-3. 在 step 目录写一个临时 m3u8（EXT-X-MAP 引 init.mp4 + 选中段列表），喂给 ffmpeg HLS demuxer
+3. 在 `{step}/hls/` 写一个临时 m3u8（EXT-X-MAP 引 init.mp4 + 选中段列表），喂给 ffmpeg HLS demuxer
 4. 输出端用 -ss/-to 精确裁剪（重编码 libx264，关键帧无关）
+
+为什么不用 `hls.list_playable_segments`：那个给的 EXTINF 是 `帧数/raw_fps` 推出的恒定
+10.000 s，而本文件的 `-ss` seek 基准是文件名里的墙钟 ts。fps 漂移下累计 EXTINF 会偏离墙钟、
+导致逐段 seek 错位，故本文件的每段时长一律取**相邻段 ts 差**（见 vod_playlist 模块 docstring）。
+代价是在途段不被过滤（历史缺陷 #3，clip 静默截短），归后续独立评审。
 
 为什么不用 `-f concat`：raw 段是 fMP4 fragment（无 moov），concat demuxer 单独 demux 时
 找不到 codec init 会失败。HLS demuxer 通过 EXT-X-MAP 先吃 init.mp4 再串 fragment，能正确
@@ -27,11 +32,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from app.services.traceback.segment_finder import (
-    SegmentFinder,
-    SegmentRef,
-    get_default_base_dir,
-)
+from app.services.utils.vod_playlist import VodEntry, render_vod
+from app.storage import hls
+from app.storage.hls import SegmentRef
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +122,6 @@ class ClipBuilder:
 
     def __init__(
         self,
-        finder: Optional[SegmentFinder] = None,
         ffmpeg_bin: Optional[str] = None,
         temp_root: Optional[Path] = None,
         preset: str = "veryfast",
@@ -129,10 +131,9 @@ class ClipBuilder:
     ):
         """
         Args:
-            finder: 段定位器；不传则用 get_default_base_dir() 构造
             ffmpeg_bin: ffmpeg 可执行文件路径；默认 None = 用项目自包含的 settings.ffmpeg_path
                 （.ffmpeg/bin/，不回退 PATH），与后端 / 集成测试同源。显式传参可覆写。
-            temp_root: 临时输出根目录；不传则用 {base_dir}/.lab_exports
+            temp_root: 临时输出根目录；不传则用 {storage_base_dir}/.lab_exports
             preset: libx264 preset
             max_duration_ms: 单段时长上限（兜底防御；上层路由也会拒绝）
             gap_tolerance_ms: 相邻段间隔相对 step 实测节奏（中位数）的允许超出量；
@@ -140,11 +141,11 @@ class ClipBuilder:
             default_segment_duration_s: 段时长 fallback（估计 last seg 是否覆盖 end_ms；
                 以及 step 段数 <2 无法估节奏时的兜底基准）
         """
-        self._finder = finder or SegmentFinder(get_default_base_dir())
+        from app.settings import settings
+
         # 默认走项目自包含的钉版 ffmpeg（settings.ffmpeg_path → .ffmpeg/bin/），不回退 PATH；
         # 显式传参仍可覆写（如测试 / 逃生口）。
         if ffmpeg_bin is None:
-            from app.settings import settings
             ffmpeg_bin = settings.ffmpeg_path
         self._ffmpeg = ffmpeg_bin
         self._preset = preset
@@ -153,7 +154,7 @@ class ClipBuilder:
         self._default_seg_dur_us = int(default_segment_duration_s * 1_000_000)
 
         if temp_root is None:
-            temp_root = self._finder.base_dir / ".lab_exports"
+            temp_root = settings.storage_base_dir / ".lab_exports"
         self._temp_root = Path(temp_root)
         self._temp_root.mkdir(parents=True, exist_ok=True)
 
@@ -183,7 +184,7 @@ class ClipBuilder:
                 f"No raw segments overlap [start_ms={spec.start_ms}, end_ms={spec.end_ms}] "
                 f"for task_id={spec.task_id}, step_id={spec.step_id}"
             )
-        self._validate_continuity(segs)
+        self._validate_continuity(spec, segs)
 
         output_path = job_dir / f"clip_{spec.start_ms}_{spec.end_ms}.mp4"
         self._run_ffmpeg(spec, segs, output_path)
@@ -238,7 +239,7 @@ class ClipBuilder:
 
     def _select_segments(self, spec: ClipSpec) -> List[SegmentRef]:
         """返回与 [start_ms, end_ms] 重叠的 raw 段列表（按时间升序）。"""
-        all_segs = self._finder.list_segments(spec.task_id, spec.step_id, "raw")
+        all_segs = hls.list_segments(spec.task_id, spec.step_id, "raw")
         if not all_segs:
             return []
 
@@ -255,7 +256,7 @@ class ClipBuilder:
                 overlapping.append(s)
         return overlapping
 
-    def _validate_continuity(self, segs: List[SegmentRef]) -> None:
+    def _validate_continuity(self, spec: ClipSpec, segs: List[SegmentRef]) -> None:
         """检测选中窗口内是否跨越真实录制停顿（源断流/重连导致的内容跳变）。
 
         基准不能用「假定 10s」：切段按固定帧数（300）、EXTINF=帧数/raw_fps 是
@@ -267,10 +268,9 @@ class ClipBuilder:
         """
         if len(segs) < 2:
             return
-        # 用整个 step 的 raw 段估稳健基准，避免选中窗口太短/含洞时基准失真
-        all_segs = self._finder.list_segments(
-            segs[0].task_id, segs[0].step_id, "raw"
-        )
+        # 用整个 step 的 raw 段估稳健基准，避免选中窗口太短/含洞时基准失真。
+        # 路由键取自 spec —— SegmentRef 只有 (track, ts_us)，不带 task/step。
+        all_segs = hls.list_segments(spec.task_id, spec.step_id, "raw")
         diffs = sorted(
             all_segs[i + 1].ts_us - all_segs[i].ts_us
             for i in range(len(all_segs) - 1)
@@ -281,8 +281,8 @@ class ClipBuilder:
             excess_us = (segs[i + 1].ts_us - segs[i].ts_us) - baseline_us
             if excess_us > tol_us:
                 raise ClipRangeGapError(
-                    f"Recording gap: segments {segs[i].filename} / "
-                    f"{segs[i + 1].filename} spacing exceeds step rhythm by "
+                    f"Recording gap: segments {hls.segment_name(segs[i])} / "
+                    f"{hls.segment_name(segs[i + 1])} spacing exceeds step rhythm by "
                     f"{excess_us / 1_000_000:.2f}s "
                     f"(baseline {baseline_us / 1_000_000:.2f}s, "
                     f"tolerance {tol_us / 1_000_000:.2f}s)"
@@ -305,19 +305,21 @@ class ClipBuilder:
         duration_s = spec.duration_ms / 1000.0
         end_s = offset_s + duration_s
 
-        step_dir = segs[0].path.parent
         # 打点仅用 raw 轨的 init.mp4
-        init_path = step_dir / "raw_init.mp4"
+        init_path = hls.init_path(spec.task_id, spec.step_id, "raw")
+        step_dir = init_path.parent
         if not init_path.exists():
             raise ClipBuildError(
                 f"raw_init.mp4 missing in step dir: {step_dir} "
                 f"(fMP4 fragment 段需要 EXT-X-MAP 才能解码)"
             )
 
-        # 临时 m3u8 落在 step 目录，让 EXT-X-MAP/EXTINF 的相对 URI 能解析到 init.mp4 与各段。
-        # 每段 EXTINF 用相邻段 ts 跨度（实测墙钟），而非假定固定 10s——offset_us 的 seek 基准
-        # 本就是 ts，固定时长在 fps 漂移下会让累计 EXTINF 偏离墙钟、seek 逐段错位。窗口已过
-        # _validate_continuity（无真实录制停顿），故相邻段连续、ts 跨度 ≈ 段媒体时长；末段用中位估算兜底。
+        # 临时 m3u8 落在 init 与各段的所在目录（`{step}/hls/`），让 EXT-X-MAP/EXTINF 的相对
+        # URI 能解析到它们；`.clip_*.m3u8` 匹配不上域内的段名 / init 名正则，读侧枚举天然跳过。
+        # 每段 EXTINF 用相邻段 ts 跨度（实测墙钟），而非清单里那个假定固定 10s 的 EXTINF——
+        # offset_us 的 seek 基准本就是 ts，固定时长在 fps 漂移下会让累计 EXTINF 偏离墙钟、
+        # seek 逐段错位。窗口已过 _validate_continuity（无真实录制停顿），故相邻段连续、
+        # ts 跨度 ≈ 段媒体时长；末段用中位估算兜底。
         nonce = secrets.token_hex(4)
         tmp_m3u8 = step_dir / f".clip_{nonce}.m3u8"
         est_dur_us = _est_segment_duration_us(segs, self._default_seg_dur_us)
@@ -325,21 +327,14 @@ class ClipBuilder:
             (segs[i + 1].ts_us - segs[i].ts_us) if i + 1 < len(segs) else est_dur_us
             for i in range(len(segs))
         ]
-        # segs 非空由方法开头 segs[0].ts_us 解引用保证 → seg_durs_us 必非空，max() 无需兜底。
-        target_dur_s = max(seg_durs_us) / 1_000_000.0
-
-        lines = [
-            "#EXTM3U",
-            "#EXT-X-VERSION:7",
-            "#EXT-X-PLAYLIST-TYPE:VOD",
-            f"#EXT-X-TARGETDURATION:{int(target_dur_s) + 1}",
-            '#EXT-X-MAP:URI="raw_init.mp4"',
+        # segs 非空由方法开头 segs[0].ts_us 解引用保证 → entries 必非空，render_vod 不会抛。
+        entries = [
+            VodEntry(hls.segment_name(s), dur_us / 1_000_000.0)
+            for s, dur_us in zip(segs, seg_durs_us)
         ]
-        for s, dur_us in zip(segs, seg_durs_us):
-            lines.append(f"#EXTINF:{dur_us / 1_000_000.0:.3f},")
-            lines.append(s.path.name)
-        lines.append("#EXT-X-ENDLIST")
-        tmp_m3u8.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp_m3u8.write_text(
+            render_vod(entries, map_uri=hls.init_name("raw")), encoding="utf-8"
+        )
 
         cmd = [
             self._ffmpeg,

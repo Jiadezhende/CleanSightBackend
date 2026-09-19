@@ -13,7 +13,7 @@ from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app.routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
-from app.services import health_monitor, inference, persistence, stream
+from app.services import health_monitor, inference, persistence, recording, stream
 from app.utils import (
     AppError,
     ConflictError,
@@ -61,21 +61,26 @@ async def lifespan(app: FastAPI):
 
     # 按服务模块启动生命周期（起序 = 嵌套顺序，停序 = 逆序）。每个服务的起停都归它自己
     # 包内的 lifespan()，此处只表达**相对顺序**：
-    # 1. 健康监控（最外层：最先起、最后停，全程有人看着下面三个）
+    # 1. 健康监控（最外层：最先起、最后停，全程有人看着下面几个）
     # 2. 流服务（懒启动、只收尸——decoder 由 run_control 按 run 现起）
     # 3. 持久化（须先于 inference 起、后于 inference 停，以承接 inference.stop() 的
-    #    结算告警 + HLS 残段 flush 后再抽干队列）
-    # 4. AI 推理
+    #    结算告警 flush 后再抽干队列）
+    # 4. 录制（与持久化同一档、同一个理由：inference.stop() 会经 run_control 交出最后一批
+    #    HLS 残段，那时 recording 的队列必须还活着；等它交完，recording 的 finally 再停队列
+    #    把剩下的排空——保序、不丢尾。嵌到 inference 里层会让队列先停、残段提交被拒，而那些
+    #    帧已经从 CQ 弹出去了，是真丢。）
+    # 5. AI 推理
     async with health_monitor.lifespan():
         async with stream.lifespan():
             async with persistence.lifespan():
-                async with inference.lifespan():
-                    try:
-                        yield
-                    finally:
-                        # yield 返回时立即通知 WebSocket 退出，不等待后续清理
-                        # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
-                        shutdown_event.set()
+                async with recording.lifespan():
+                    async with inference.lifespan():
+                        try:
+                            yield
+                        finally:
+                            # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                            # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                            shutdown_event.set()
 
 
 

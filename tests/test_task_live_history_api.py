@@ -7,7 +7,8 @@
   其中 tracks 必须反映磁盘实况——playlist 的 track 默认 processed，只有 raw 的 step
   照默认打过去就是 404，这是本文件的核心回归点。
 
-DB / 文件系统沿用既有 seam：_FakeDB（同 test_lab_tasks_api）+ tmp_path 造段文件。
+DB / 文件系统沿用既有 seam：_FakeDB（同 test_lab_tasks_api）+ `tmp_storage` 造段文件
+（落盘 `{root}/{task}/{step}/hls/`，路径由 `app.storage.hls` 出）。
 """
 
 import os
@@ -17,6 +18,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.storage import hls
 from factories import make_cq
 
 
@@ -68,12 +70,20 @@ def _install_registry(monkeypatch, cqs):
 
 
 def _write_segments(base, task_id, step_id, *, tracks=("raw",), ts_us=1_000_000, mtime=None):
-    d = base / str(task_id) / str(step_id)
+    """在 `{task}/{step}/hls/` 下造段。返回 hls 域目录。
+
+    `mtime` 要**同时**打在 step 目录与 hls 子目录上：粗排键 `tasks._latest_step_mtime`
+    取的是两者的最大值（产物落在域子目录里，只 stat step 目录会退化成"首次落盘时刻"）。
+    """
+    d = hls.init_path(task_id, step_id, "raw").parent
     d.mkdir(parents=True, exist_ok=True)
     for track in tracks:
-        (d / f"{track}_segment_{ts_us}.mp4").write_bytes(b"")
+        hls.segment_path(
+            task_id, step_id, hls.SegmentRef(track=track, ts_us=ts_us)
+        ).write_bytes(b"")
     if mtime is not None:
         os.utime(d, (mtime, mtime))
+        os.utime(d.parent, (mtime, mtime))
     return d
 
 
@@ -84,12 +94,9 @@ async def _get(path):
 
 
 @pytest.fixture
-def storage(monkeypatch, tmp_path):
-    """把 /task/history 的存储根目录指到隔离临时目录。"""
-    from app.routers import task as task_router
-
-    monkeypatch.setattr(task_router, "get_default_base_dir", lambda: tmp_path)
-    return tmp_path
+def storage(tmp_storage):
+    """把 /task/history 的存储根目录指到隔离临时目录（settings.storage_dir 单一真源）。"""
+    return tmp_storage
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +204,26 @@ class TestHistoryList:
         payload = (await _get("/task/history")).json()
 
         assert [t["task_id"] for t in payload["tasks"]] == [101]
+
+    @pytest.mark.asyncio
+    async def test_empty_step_is_dropped_from_a_task_that_has_others(
+        self, monkeypatch, storage
+    ):
+        """同一个 task 里「有目录没段」的 step 不能进 steps[]。
+
+        `tasks.list_step_ids` 刻意**不过滤空 step**（TTL 要的正是没过滤那档），过滤是
+        调用点的责任。漏掉它不会让整条清单消失——只会在大屏多出一个点开黑屏的 step，
+        所以上面那条「整个 task 被丢掉」的用例盖不住它。
+        """
+        _write_segments(storage, 101, 1)
+        (storage / "101" / "2").mkdir(parents=True)          # 建了目录没写成段
+        (storage / "101" / "3" / "hls").mkdir(parents=True)  # 连域目录都建了，还是没段
+        _install_registry(monkeypatch, [])
+        _install_db(monkeypatch, [])
+
+        payload = (await _get("/task/history")).json()
+
+        assert [s["step_id"] for s in payload["tasks"][0]["steps"]] == [1]
 
     @pytest.mark.asyncio
     async def test_task_level_time_is_latest_only(self, monkeypatch, storage):

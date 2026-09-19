@@ -20,7 +20,7 @@ from app.services.client.manager import client_manager
 from app.services.client.queues import ClientQueues
 from app.services.inference.instance import inference_manager
 from app.services.inference.temporal import alarm_sink
-from app.services.persistence.instance import persistence_manager
+from app.services.recording.instance import recording_service
 from app.services.stream.instance import stream_service
 from app.utils.exceptions import AppError
 
@@ -86,12 +86,15 @@ class RunController:
             #   包进 try：任一步失败即回滚注销，避免 CQ 泄漏在注册表。
             client_manager.set(task_id, cq)
             try:
-                # storage supersede（start 侧两个 service 钩子并排，与 stop_run 拆除侧对称）：
-                #   ① persistence.start_run —— 清空旧 HLS step 目录（无 owner，纯 rmtree）；
-                #   ② inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 截断
-                #      旧 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
-                #   均在建新 CQ 之后、无活跃 worker 写该 (task,step) 之前，全程持 lock_for(task_id)。
-                persistence_manager.start_run(cq)
+                # storage supersede（start 侧**只剩一个钩子**）：
+                #   inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 截断
+                #   旧 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
+                #   在建新 CQ 之后、无活跃 worker 写该 (task,step) 之前，全程持 lock_for(task_id)。
+                #
+                # HLS 侧此处**不再有任何 purge 调用**：原 `persistence_manager.start_run(cq)` 是
+                # eager rmtree 整个 step 目录，已换成 recording 的**懒惰首写自清**——本代次第一次
+                # 真正写出一段时才 `hls.delete(task, step)`（见 recording/service.py `_write` ②）。
+                # 语义不同故删而不是改指：新 run 若一段都没写出来，旧录像原样保留、用户还能回放。
 
                 # 2d. start_workflow（open_fresh + Actor；CQ 已由上面 set 注册）
                 if not inference_manager.start_workflow(cq):
@@ -181,12 +184,14 @@ class RunController:
                         "[RunController] stop decoder failed: task=%s - %s", task_id, e, exc_info=True
                     )
 
-            # 2. 落盘残余数据（按 owner 归位，inference 一把拆、persistence 两个独立 sink）：
+            # 2. 落盘残余数据（按 owner 归位，inference 一把拆、告警与录制各一个独立 sink）：
             #    ① inference 停 workflow（停 actor + 关 feature 分区）交出 settlement；
             #    ② persistence 落 settlement 告警（别名已由 actor 烧进 alarm.stage）；
-            #    ③ 清前端槽 + persistence 落 HLS 残段。
+            #    ③ 清前端槽 + recording 落 HLS 残段。
             #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
             #    （→cq.close 释放帧）——本 try 早于下方清理。
+            #    ③ 必须在 CQ 还注册着时做（step 4 的 forget_task 之前）：recording 的首写自清以
+            #    「current is job.cq」为前提，拆除后才执行的残段因此只追加、不删（见 `_write` ②）。
             try:
                 if cq is not None:
                     settlement = inference_manager.stop_workflow(cq)  # Inference owner
@@ -196,7 +201,7 @@ class RunController:
                         )
                     cq.set_latest_temporal([])   # 提前清前端槽，防 WS 读到结束后残留
                     cq.set_latest_rendered(None)
-                    persistence_manager.flush_residual_segments(cq)         # Persistence owner
+                    recording_service.flush_residual(cq)                    # Recording owner
                 result["data_flushed"] = True
             except Exception as e:
                 result["errors"].append(f"flush: {e}")
@@ -221,12 +226,13 @@ class RunController:
                     "[RunController] clean registry failed: %s - %s", task_id, e, exc_info=True
                 )
 
-            # 4. 回收该 task 的 HLS 目录锁（残段已入队、CQ 已出 registry，不会再有新段）
+            # 4. 回收该 task 的录制代次记录（残段已入队、CQ 已出 registry，不会再有新段）。
+            #    forget_task 自己也排进 recording 的队列，FIFO 保证它执行在本代次所有段之后。
             try:
-                persistence_manager.release_task_locks(task_id)
+                recording_service.forget_task(task_id)
             except Exception as e:
                 logger.debug(
-                    "[RunController] release hls locks failed: %s - %s", task_id, e
+                    "[RunController] forget recording task failed: %s - %s", task_id, e
                 )
 
             if result["errors"]:
