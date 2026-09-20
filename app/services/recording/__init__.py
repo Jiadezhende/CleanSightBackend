@@ -6,11 +6,12 @@
     对外          app/services/recording/
       __init__.py   本文件：lifespan()
       instance.py   recording_service 单例
-      service.py    RecordingService —— start / stop / submit_segment /
-                                        flush_residual / forget_task
+      service.py    RecordingService —— start / stop / collect_from /
+                                        submit_segment / flush_residual /
+                                        request_residual_flush / forget_task
       config.py     RecordingConfig（config/recording_config.yaml）
     包内私有
-      _sweeper.py   周期从活跃 CQ 拉整段，只由 RecordingService 构造
+      _sweeper.py   节拍器：周期触发 service.collect_from，只由 RecordingService 构造
 
 本 `__init__` 不做 re-export（规范 §3 的「门面型」：只有 docstring + `lifespan()`）——顶层
 re-export `service` 会把 `app.storage.hls` 与 client → numpy 那条链摊给每个 import 本包的

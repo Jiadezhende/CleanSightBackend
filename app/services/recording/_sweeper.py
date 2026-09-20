@@ -1,14 +1,13 @@
-"""段拉取线程（PULL 模型）—— 周期扫活跃 CQ，把已攒满的整段拉走交给 `RecordingService`。
+"""段拉取的**节拍器**：每隔一个 interval，对每个活跃 CQ 调一次 `service.collect_from`。
 
-**包内私有**（前导下划线）：它只由 `RecordingService.start()` 构造，外面拿到它没有意义
-——启停归服务，拉段的结果也只进服务的队列。
+**它只管什么时候拉，不管拉什么**——取哪几条队列、按什么顺序取、断流残帧怎么办，全在
+`RecordingService.collect_from`。本线程是运行期 CQ 的唯一 drain 者，别处直接调
+`collect_from` / `flush_residual` 会让入队顺序出现竞态（后果见 `service` 模块 docstring
+的不变式 2）。
 
-为什么是 PULL 不是 PUSH：分段判定与落盘触发是录制的职责，`ClientQueues` 该退回纯缓冲
-容器。历史上 `append_ca_*` 里直接调落盘，等于让缓冲区知道存储的事。
+**包内私有**：只由 `RecordingService.start()` 构造，启停归服务。
 
-运行期只落**整段**；末尾不足一段的残帧由 `RecordingService.flush_residual` 在拆除时收尾。
-
-依赖上界：stdlib + `app.domain`。不 import 任何单例——`clients` 与 `service` 都是注入的。
+依赖上界：stdlib。不 import 任何单例——`clients` 与 `service` 都是注入的。
 """
 
 from __future__ import annotations
@@ -21,13 +20,13 @@ logger = logging.getLogger(__name__)
 
 
 class SegmentSweeper:
-    """周期性从活跃 CQ 拉取攒满的 HLS 整段。"""
+    """周期性触发录制服务去各个活跃 CQ 取帧。"""
 
     def __init__(self, clients, service, interval_seconds: float = 1.0):
         """
         Args:
             clients: 提供 `snapshot()` 的 CQ 注册表（= `client_manager`）。
-            service: 拉到段之后交给谁（= `RecordingService`，用它的 `submit_segment`）。
+            service: 每个 CQ 交给谁去取（= `RecordingService`，只用它的 `collect_from`）。
             interval_seconds: 扫描间隔（秒）。1s ≪ 段周期(≈10s) 且 ≪ 缓冲容量(≈90s)。
         """
         self._clients = clients
@@ -59,18 +58,11 @@ class SegmentSweeper:
                 logger.exception("[recording.sweeper] 扫描异常，下一轮重试")
 
     def _sweep(self) -> None:
-        """扫一遍活跃 CQ，把每个已攒满的整段拉走提交。
+        """对每个活跃 CQ 调一次 `collect_from`。
 
-        **`cq` 整个交给 `submit_segment`**，不是拆成 task_id/step_id 再传：代次身份就是
-        这个对象引用，必须在**取帧的那一刻**捕获。晚一步去注册表里取，取到的可能已经是
-        新一代的 CQ，这批帧就会被记到别人名下。
+        **`cq` 整个传过去**，不拆成 task_id/step_id：代次身份就是这个对象引用，必须在
+        **取帧的那一刻**捕获。晚一步去注册表里取，取到的可能已经是新一代的 CQ，这批帧
+        就会被记到别人名下。
         """
         for cq in self._clients.snapshot().values():
-            if cq.step_id is None:
-                # 裸建 / 未绑定 step：定位不到落盘分区。**不取帧**——取了就只能丢，
-                # 留在缓冲里等它绑上 step 才是对的。
-                continue
-            while (seg := cq.take_raw_segment()) is not None:
-                self._service.submit_segment(cq, "raw", seg)
-            while (seg := cq.take_processed_segment()) is not None:
-                self._service.submit_segment(cq, "processed", seg)
+            self._service.collect_from(cq)
