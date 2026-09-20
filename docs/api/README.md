@@ -12,8 +12,8 @@
 | [api.md](api.md) | `/api` | 统一任务入口：启动 / 终止一次 run |
 | [ai.md](ai.md) | `/ai` | 实时推理画面 WebSocket |
 | [task.md](task.md) | `/task` | 前端增量消息 + 告警历史 + 大屏在线/历史任务清单 |
-| [traceback.md](traceback.md) | `/traceback` | 告警证据 / VOD playlist / 时间轴 |
-| [media.md](media.md) | `/media` | token 化媒体访问（段 / init.mp4） |
+| [traceback.md](traceback.md) | `/traceback` | 任务 VOD playlist / 时间轴 |
+| [media.md](media.md) | `/media` | token 化媒体访问（段 / `{track}_init.mp4`） |
 | [health.md](health.md) | `/health` | 健康状态与监控统计 |
 | [admin.md](admin.md) | `/admin-f3m8` | 运维 Admin |
 | [lab.md](lab.md) | `/lab-f3m8` | 送标导出 + Label Studio |

@@ -1,6 +1,6 @@
 # `/media` — token 化媒体访问
 
-前端播放 HLS 时用它拉**段文件（.mp4 fragment）**和**init 段（init.mp4）**的二进制内容。资源来自**磁盘**（`storage_base_dir` 下的 HLS 落盘），URL **不暴露物理路径**——每个文件由一个 HMAC token 定位，token 由 [traceback](traceback.md) 的 playlist 端点签发。通用约定见 [README](README.md)。
+前端播放 HLS 时用它拉**段文件（.mp4 fragment）**和**init 段（`{track}_init.mp4`）**的二进制内容。资源来自**磁盘**（`storage_base_dir` 下的 HLS 落盘），URL **不暴露物理路径**——每个文件由一个 HMAC token 定位，token 由 [traceback](traceback.md) 的 playlist 端点签发。通用约定见 [README](README.md)。
 
 前端不直接构造这两个 URL：它们已内嵌在 traceback 签发的 playlist（`.m3u8`）里，播放器按 playlist 逐段请求即可。本文档面向"需要理解 token 失效行为、排查 403/404"的场景。
 
@@ -63,13 +63,13 @@
 
 ## GET /media/init/{token}
 
-拉 HLS fMP4 **init 段**（`init.mp4`，含 moov box / 编码参数）。同一 step 内所有段共享一份 init，播放器初始化时拉一次即可。
+拉 HLS fMP4 **init 段**（`{track}_init.mp4`，含 moov box / 编码参数）。init **按轨各一份**（`raw_init.mp4` / `processed_init.mp4`），同轨内所有段共享，播放器初始化时按轨拉一次即可。两轨是独立 playlist，不可互指。
 
 **路径参数**：
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `token` | string | 是 | init token（`kind=init`）。token 内 `filename` 固定为 `init.mp4` |
+| `token` | string | 是 | init token（`kind=init`）。token 内 `filename` 为 `raw_init.mp4` 或 `processed_init.mp4`，由签发方按轨决定 |
 
 ### 响应 `200`
 
@@ -88,9 +88,9 @@ init 段在一个 step 生命周期内不变，故 `max-age` 远大于段（**36
 
 | 状态 | 触发条件 | 响应体形态 |
 |------|---------|-----------|
-| `400` | token 内 `filename` 不等于 `init.mp4` | `{"detail":"Token does not point to init segment"}` |
+| `400` | token 内 `filename` 不以 `init.mp4` 结尾 | `{"detail":"Token does not point to init segment"}` |
 | `403` | token 无效 / 签名不符 / 已过期 / `kind` 非 `init` / 格式错误 | `{"detail":"Invalid or expired token"}` |
-| `404` | token 合法但 `init.mp4` 不存在或非常规文件 | `{"detail":"Media file not found"}` |
+| `404` | token 合法但该 init 文件不存在或非常规文件 | `{"detail":"Media file not found"}` |
 
 > 两端点的 403 与 404 body 形态一致（都只有 `detail`）；400 的 `detail` 文案按具体校验点不同（见上表）。**判分支只认 status code。**
 

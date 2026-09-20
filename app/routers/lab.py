@@ -4,6 +4,10 @@ Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 让操作员在一个 step 的 raw 整段视频上选 N 段不重叠的 [start_ms, end_ms]，
 后端剪出对应的 mp4 并提交到 Label Studio 创建标注任务。
 
+另提供整段下载（GET /download）：把该 step 某一轨的全部落盘段 remux 成单个 mp4，
+用于取汇报素材/原片。与送标那条路径的分工——送标要 ms 精度所以必须重编码，
+整段下载只换容器所以 `-c copy`（见 services/lab/step_exporter.py）。
+
 数据底座：
 - 复用 traceback 的 (task_id, step_id) 文件系统约定
 - 复用 SegmentFinder 列表/过滤 raw 段
@@ -23,11 +27,13 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.background import BackgroundTask
 
 from app.database import get_db
 from app.models import DBTask
@@ -38,8 +44,12 @@ from app.services.lab import (
     ClipRangeOutOfBoundsError,
     ClipSpec,
     LabelStudioClient,
+    StepExporter,
+    StepExportError,
+    StepExportInitMissing,
+    StepExportNoSegments,
 )
-from app.services.lab import runtime_config
+from app.services.lab import config as lab_config
 from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
@@ -317,7 +327,7 @@ async def list_lab_tasks(
     """
     finder = SegmentFinder(get_default_base_dir())
 
-    if runtime_config.get_task_source() == "storage":
+    if lab_config.get_task_source() == "storage":
         total, tasks = _list_storage_tasks(finder, q, limit, offset)
         return LabTaskListResponse(total=total, tasks=tasks)
 
@@ -373,14 +383,14 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
     from app.settings import settings as s
 
     # ---- LS 配置检查（503）----
-    ls_url = runtime_config.get_url()
-    ls_token = runtime_config.get_token()
+    ls_url = lab_config.get_url()
+    ls_token = lab_config.get_token()
     if not ls_url or not ls_token:
         raise _ls_not_configured()
 
     # ---- 入参校验（400）----
     project_id = _resolve_project_id(
-        req.project_id, runtime_config.get_default_project_id()
+        req.project_id, lab_config.get_default_project_id()
     )
     ordered_clips = _validate_clips(
         req.clips,
@@ -510,7 +520,77 @@ def _process_one(
 
 
 # ---------------------------------------------------------------------------
-# 接口 2: 健康探测
+# 接口 2: 整段下载
+# ---------------------------------------------------------------------------
+
+
+@router.get("/download")
+async def download_step_video(
+    task_id: int = Query(..., description="任务 id"),
+    step_id: int = Query(..., description="洗消步骤 id"),
+    track: str = Query(
+        default="processed",
+        pattern="^(raw|processed)$",
+        description="processed=带检测框，raw=原始画面",
+    ),
+):
+    """下载某 step 某轨的整段录像（单个 mp4，attachment）。
+
+    段落盘时已是 H.264/yuv420p，这里纯 `-c copy` 换容器——磁盘速度、零 CPU、
+    零二次画质损失，产物是通用 mp4（faststart，可拖动 seek）。
+
+    要 ms 精度区间请走 `/lab-f3m8/submit` 那条（ClipBuilder + libx264），
+    与本接口的零成本 remux 性质不同，不合并。
+
+    step 仍在录制时下载 = 拿到当前已落盘的部分（在途段被过滤，不会产出坏文件）。
+    """
+    from app.settings import settings as s
+
+    temp_root = Path(s.lab_export_temp_dir) if s.lab_export_temp_dir else None
+    exporter = StepExporter(
+        finder=SegmentFinder(get_default_base_dir()),
+        ffmpeg_bin=s.ffmpeg_path,
+        temp_root=temp_root,
+    )
+
+    try:
+        # ffmpeg 是阻塞调用，扔线程池（与 /submit 同样式）
+        output_path = await run_in_threadpool(
+            exporter.export, task_id, step_id, track
+        )
+    except StepExportNoSegments as e:
+        raise NotFoundError(
+            str(e),
+            resource_type="Segments",
+            resource_id=f"task={task_id},step={step_id},track={track}",
+        ) from e
+    except StepExportInitMissing as e:
+        # 与 /traceback/task/{id}/playlist.m3u8 同码同措辞：该 step 不可用，服务端无法自愈
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "HLS init segment missing", "detail": str(e)},
+        ) from e
+    except StepExportError as e:
+        logger.error(
+            "[Lab] step export failed: task=%s step=%s track=%s: %s",
+            task_id, step_id, track, e,
+        )
+        raise HTTPException(status_code=500, detail=f"Export failed: {e}") from e
+
+    # filename= 让 FileResponse 自动带 Content-Disposition: attachment
+    # （区别于 /media/* 播放用的 inline）。
+    # 响应发完后删产物；客户端中途断开时 BackgroundTask 不保证跑到，
+    # 由 StepExporter._sweep_orphans 兜底。
+    return FileResponse(
+        path=str(output_path),
+        media_type="video/mp4",
+        filename=f"task{task_id}_step{step_id}_{track}.mp4",
+        background=BackgroundTask(output_path.unlink, missing_ok=True),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 接口 3: 健康探测
 # ---------------------------------------------------------------------------
 
 
@@ -520,9 +600,9 @@ async def lab_health() -> LabHealthResponse:
 
     不抛异常：未配置时 configured=False，可达性判断时 reachable=False + error。
     """
-    ls_url = runtime_config.get_url()
-    ls_token = runtime_config.get_token()
-    default_pid = runtime_config.get_default_project_id()
+    ls_url = lab_config.get_url()
+    ls_token = lab_config.get_token()
+    default_pid = lab_config.get_default_project_id()
 
     if not ls_url or not ls_token:
         return LabHealthResponse(
@@ -561,7 +641,7 @@ async def get_lab_config() -> LabConfigResponse:
 
     不返回 token 明文，只返回 token_configured 表示 env 里是否已配置。
     """
-    return LabConfigResponse(**runtime_config.snapshot())
+    return LabConfigResponse(**lab_config.snapshot())
 
 
 @router.put("/config", response_model=LabConfigResponse)
@@ -571,7 +651,7 @@ async def update_lab_config(req: LabConfigUpdateRequest) -> LabConfigResponse:
     token 不在此处管理（仅 env）。校验失败抛 400。
     """
     try:
-        snap = runtime_config.update(
+        snap = lab_config.update(
             req.label_studio_url, req.default_project_id, req.task_source
         )
     except ValueError as e:

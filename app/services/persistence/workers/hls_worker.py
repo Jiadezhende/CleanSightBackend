@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from queue import Empty, Queue
 
-from app.services.persistence.models import HLSPersistenceTask
+from app.services.persistence.types import HLSPersistenceTask
 from app.services.persistence.strategies.hls_strategy import HLSPersistenceStrategy
 from app.utils import GuardedExecutor
 from app.utils.worker_guard import guarded_run

@@ -1,6 +1,10 @@
 # SSH private keys
 scripts/hospital_sync/sender/hospital_sync_key
 
+# 同步端本地配置（含明文库口令，模板见 config.ini.example）与打包产物
+scripts/hospital_sync/sender/config.ini
+scripts/hospital_sync/sender/release.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -160,6 +164,8 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+tmp/
+temp/
 
 # 模型权重 / 测试视频等大二进制走物料分发，不入库
 app/data/*.pt

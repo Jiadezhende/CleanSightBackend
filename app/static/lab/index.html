@@ -235,6 +235,12 @@
         <span style="font-weight:400;color:#9ca3af;font-size:12px;margin-left:8px">
           时长 {{ formatDuration(timeline.duration_ms) }} · {{ timeline.events.length }} 个告警 · 送标裁 raw
         </span>
+        <a :href="downloadUrl" download style="margin-left:auto">
+          <el-button size="small" plain>⬇ 下载整段（{{ track }}）</el-button>
+        </a>
+        <span style="font-weight:400;color:#9ca3af;font-size:12px;margin-left:8px">
+          服务端 remux，长段可能等待数十秒
+        </span>
       </div>
       <div class="player-layout">
         <div>
@@ -567,6 +573,12 @@ createApp({
       timeline.start_ms + Math.round(currentTimeSec.value * 1000)
     );
 
+    // 整段下载：用原生 <a download> 而非 fetch+blob —— 浏览器接管下载进度、
+    // 可断点续传、不把整个文件读进内存。跟随当前 track 切换。
+    const downloadUrl = computed(() =>
+      api(`/lab-f3m8/download?task_id=${form.task_id}&step_id=${form.step_id}&track=${track.value}`)
+    );
+
     function bindVideoListeners(v) {
       if (videoListenersBound) return;
       v.addEventListener('timeupdate', () => { currentTimeSec.value = v.currentTime; });
@@ -869,7 +881,7 @@ createApp({
       form, loading, loaded, health,
       taskQuery, taskList, taskScrollEl, fetchTasks, onTaskScroll, selectTask,
       configDialog, openConfigDialog, saveConfig,
-      timeline, videoEl, stripEl, currentAbsMs, track, switchTrack,
+      timeline, videoEl, stripEl, currentAbsMs, track, switchTrack, downloadUrl,
       rangeStyle, markerStyle, cursorStyle, alarmTooltip,
       seekToMs, seekFromStrip,
       pending, pendingValid, pendingError, pendingDurationLabel,

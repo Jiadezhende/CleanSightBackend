@@ -204,6 +204,68 @@ class TestAntiScanStore:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests: 后台清理线程
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupThread:
+    """守 `_cleanup_loop` 这条线程本身，而非它调用的 _sweep。
+
+    上面的 test_sweep_evicts_* 都是 patch 掉 time.monotonic 后直接调 _sweep()，
+    绕开了线程——把 __init__ 里的 Thread(...).start() 删掉，那几个用例照样全绿，
+    字典却会在线上无限增长。这里不打桩、不手调 _sweep，写完就干等，
+    只让线程按 window 自转来清。
+    """
+
+    WINDOW = 1      # 线程周期 = window，取 1s 让用例跑得快
+    N_IPS = 50
+    # 首轮 sweep 时刚写入的时间戳还没出窗（cutoff 恰好压在写入时刻上），
+    # 要等到第二轮才会被判定为 stale，即约 2×WINDOW。留 3 倍余量抗慢机。
+    TIMEOUT = WINDOW * 6
+
+    def test_stores_self_evict_without_manual_sweep(self):
+        whitelist = IPWhitelistStore(allowed=frozenset(), ban_duration=3600)
+        # 两个 threshold 都按 per-IP 计，本用例每个 IP 只写 1 次违规 / 1 次 404，
+        # 设成 10 足以不触发封禁——一旦封禁，对应字典会被 ban 逻辑 pop 掉，
+        # 那就分不清是线程清的还是 ban 清的了。
+        rate = RateLimitStore(
+            limit=1,
+            window=self.WINDOW,
+            ban_store=whitelist,
+            ban_threshold=10,
+            ban_window=self.WINDOW,
+        )
+        antiscan = AntiScanStore(
+            threshold=10,
+            window=self.WINDOW,
+            whitelist_store=whitelist,
+        )
+
+        for i in range(self.N_IPS):
+            ip = f"10.0.0.{i}"
+            rate.is_allowed(ip)             # 首次放行 → 写入 _buckets
+            rate.is_allowed(ip)             # 超限 → 写入 _violations
+            antiscan.record_error(ip, 404)  # → 写入 _errors
+
+        assert len(rate._buckets) == self.N_IPS
+        assert len(rate._violations) == self.N_IPS
+        assert len(antiscan._errors) == self.N_IPS
+
+        deadline = time.monotonic() + self.TIMEOUT
+        while time.monotonic() < deadline:
+            if not (rate._buckets or rate._violations or antiscan._errors):
+                return
+            time.sleep(0.1)
+
+        pytest.fail(
+            f"{self.TIMEOUT}s 内未被清理线程回收："
+            f"_buckets={len(rate._buckets)} "
+            f"_violations={len(rate._violations)} "
+            f"_errors={len(antiscan._errors)}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Integration tests: GatewayMiddleware via httpx
 # ---------------------------------------------------------------------------
 

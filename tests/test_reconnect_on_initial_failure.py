@@ -22,8 +22,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.health_monitor.config import HealthMonitorConfig
-from app.services.health_monitor.monitor import GlobalHealthMonitor
-from app.services.stream.service import StreamService
+from app.services.health_monitor.manager import GlobalHealthMonitor
+from app.services.stream.manager import StreamService
 from app.utils.exceptions import FFmpegError
 
 
@@ -90,7 +90,7 @@ class TestDecoderRegistration:
         self.mock_settings.mediamtx_internal_port = 8554
 
     def _start_with_failing_decoder(self, error):
-        with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
+        with patch("app.services.stream.manager.FFmpegDecoder") as MockDecoder, \
              patch.object(
                  self.service, "_get_client_queues", return_value=MagicMock()
              ), \

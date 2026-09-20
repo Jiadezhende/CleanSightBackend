@@ -34,18 +34,23 @@ class GlobalHealthMonitor:
 
     def __init__(
         self,
-        client_manager,
-        stream_service,
-        inference_manager,
+        client_manager=None,
+        stream_service=None,
+        inference_manager=None,
         config: Optional[HealthMonitorConfig] = None,
     ):
         """初始化全局健康监控
 
+        四个入参**一律可缺省**：构造期不解析、不读 yaml、不碰全局单例，缺省者推迟到
+        `start()` 现取（见该方法）。这样 `instance.py` 里那句模块级构造是零副作用的，
+        import 本包不会连带拉起 client / stream / inference 三条链。
+        测试传入的 mock 会原样保留，`start()` 不覆盖已注入的值。
+
         Args:
-            client_manager: ClientManager 实例
-            stream_service: StreamService 实例
-            inference_manager: InferenceManager 实例
-            config: 健康监控配置
+            client_manager: ClientManager 实例，None 时 start() 取全局单例
+            stream_service: StreamService 实例，None 时 start() 取全局单例
+            inference_manager: InferenceManager 实例，None 时 start() 取全局单例
+            config: 健康监控配置，None 时 start() 读 yaml
         """
         self._client_manager = client_manager
         self._stream_service = stream_service
@@ -54,7 +59,9 @@ class GlobalHealthMonitor:
         # 配置：各阈值一律在用处直读 `self.config.*`，**不在此摊成同名实例属性**。
         # 那层拷贝原是给 cleanup_timeout 的派生式（heartbeat + interval×attempts）安身的；
         # 派生式删掉后它们全成了恒等副本，只是把「这个数打哪来」多藏了一跳。
-        self.config = config or HealthMonitorConfig()
+        # 此处不兜 `or HealthMonitorConfig()`：None 是「待 start() 从 yaml 取」的信号，
+        # 就地兜默认值会让 yaml 里的配置被静默顶掉。
+        self.config: Optional[HealthMonitorConfig] = config
 
         # 线程控制
         self._stop_event = threading.Event()
@@ -83,11 +90,22 @@ class GlobalHealthMonitor:
             "orphan_decoders": 0,
         }
 
+    @property
+    def is_running(self) -> bool:
+        """监控线程是否在跑（未 start / 已 stop / 线程已死 都算 False）"""
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self):
-        """启动监控线程"""
-        if self._thread is not None and self._thread.is_alive():
+        """启动监控线程
+
+        构造期缺省的协作者与配置在此现取：yaml 读盘和三个全局单例的 import 都是副作用，
+        压在这里而不是 `__init__`，import 本包才不用付这笔钱（见 `__init__` docstring）。
+        """
+        if self.is_running:
             logger.warning("[GlobalHealthMonitor] Already running")
             return
+
+        self._resolve_deps()
 
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -102,11 +120,34 @@ class GlobalHealthMonitor:
             self.config.cleanup_timeout,
         )
 
+    def _resolve_deps(self):
+        """把构造期缺省的协作者与配置补齐（已注入的不动）
+
+        三个 import 一律写在函数体内：本模块顶层拉 inference 单例会把 torch/YOLO 链
+        一并拽进来，那是 import 期不该付的钱。
+        """
+        if self.config is None:
+            from app.services.health_monitor.config import get_health_monitor_config
+
+            self.config = get_health_monitor_config()
+        if self._client_manager is None:
+            from app.services.client.manager import client_manager
+
+            self._client_manager = client_manager
+        if self._stream_service is None:
+            from app.services.stream.instance import stream_service
+
+            self._stream_service = stream_service
+        if self._inference_manager is None:
+            from app.services.inference.instance import inference_manager
+
+            self._inference_manager = inference_manager
+
     def stop(self):
         """停止监控线程"""
-        if self._thread is None or not self._thread.is_alive():
+        if not self.is_running:
             return
-        
+
         self._stop_event.set()
         self._thread.join(timeout=5.0)
         logger.info("[GlobalHealthMonitor] Stopped")

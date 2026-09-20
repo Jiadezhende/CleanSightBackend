@@ -10,7 +10,7 @@ FeatureStore（特征）与 FactLedger（事实，offline 预置）按 (task_id,
 import tempfile
 
 from factories import make_frame_detections, make_frame_feature
-from app.services.inference.models import EventFact, SegmentFact
+from app.services.inference.types import EventFact, SegmentFact
 from app.services.inference.feature.store import FactLedger, FeatureStore
 
 

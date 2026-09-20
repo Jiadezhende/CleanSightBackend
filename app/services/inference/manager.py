@@ -15,15 +15,20 @@ VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() +
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.config import FALLBACK_STAGE
-from app.services.inference.detection.service import DetectionService
 from app.services.inference.temporal import alarm_sink
 from app.services.inference.temporal.actor import ClientTemporalActor
-from app.services.inference.visualization.pool import VisualizationWorkerPool
+
+# 两个只在 `_build_components()` 里实例化的重组件走 TYPE_CHECKING + 函数体内导入
+# （规范 §2 通路 2）：`visualization.pool` → worker → visualizer 顶层 `import cv2`，
+# 写在模块级会让 `import app.main`（经 run_control → instance）一律拉起 OpenCV。
+if TYPE_CHECKING:
+    from app.services.inference.detection.service import DetectionService
+    from app.services.inference.visualization.pool import VisualizationWorkerPool
 
 logger = logging.getLogger(__name__)
 
@@ -43,22 +48,49 @@ class InferenceManager:
         self,
         db_dir: Optional[str] = None,
     ):
-        # 持久化存储根目录：默认读 settings 单一真源（与 persistence/traceback 同源），
-        # 仅显式传 db_dir 时覆盖（测试/特殊场景）。不再 __file__ 自数层级重算。
-        from app.settings import settings
-        self._db_dir = Path(db_dir) if db_dir else settings.storage_base_dir
-        self._db_dir.mkdir(parents=True, exist_ok=True)
+        """只做赋值与建空容器，**不产生任何副作用**（不读 settings、不 mkdir、不加载 stage
+        配置、不建 worker 池）。重活全在 `start()`（见 `_build_components`）。
+
+        原因：本类的全局单例在 `instance.py` 里是模块级构造的，构造期加载 stage 配置会经
+        `stage_factory` 的 importlib 把全部 impl 与 torch 在 **import 期**拉起——凡 import
+        到本包的人（含只想跑一个纯函数单测的）都得付这笔钱。
+        """
+        # 持久化存储根目录的**覆盖值**：默认读 settings 单一真源（与 persistence/traceback
+        # 同源），仅显式传 db_dir 时覆盖（测试/特殊场景）。settings 的读取推迟到 start()。
+        self._db_dir_override = Path(db_dir) if db_dir else None
+        self._db_dir: Optional[Path] = None
 
         self._stop_event = threading.Event()
 
         # stage 配置（延迟初始化）
         self._stage_configs: Optional[Dict[str, Dict[str, Any]]] = None
-        self._model_worker_service: Optional[DetectionService] = None
+        self._model_worker_service: Optional["DetectionService"] = None
 
         # per-client ClientTemporalActor 注册表。
         # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(task_id) per-task 锁承接
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
         self._actors: Dict[int, ClientTemporalActor] = {}
+
+        # 两个活体组件在 start() 里建（None = 尚未 start）
+        self.visualization_pool: Optional["VisualizationWorkerPool"] = None
+        self.feature_store = None
+
+        # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
+        # 告警落库/HLS flush 归 PersistenceManager，由 RunController 编排；进程停机残余结算走惰性 import。
+        logger.debug("[InferenceManager] Initialization completed")
+
+    def _build_components(self):
+        """建重组件：存储目录、可视化池、FeatureStore、DetectionService。
+
+        由 `start()` 调用，幂等（重复调用不重建）。放这儿而不是 `__init__` 的理由见后者 docstring。
+        """
+        if self._model_worker_service is not None:
+            return
+
+        from app.settings import settings
+
+        self._db_dir = self._db_dir_override or settings.storage_base_dir
+        self._db_dir.mkdir(parents=True, exist_ok=True)
 
         # 可视化 worker 是"采样后 inference 流"的消费者：渲染按 inference.ts 去重，故每秒吐出的
         # 不同画面数恒 = 检测采样率（inference_fps）。但轮询率取 raw_fps（源视频帧率，2× 过采样）：
@@ -66,6 +98,8 @@ class InferenceManager:
         # 抓帧有 33~66ms 抖动；抬到 raw_fps 后每帧新推理都能在一个 tick 内被抓到（空转 tick 仅读单槽+
         # 比 ts，~µs 级，不增推理量）。raw_fps 是已有的跨模块真源，无需新旋钮。
         # 注：HLS processed 打标另由 eff_fps 从 ts 反推、模型输入另由 model_input_fps 契约重采样，均不借本值。
+        from app.services.inference.visualization.pool import VisualizationWorkerPool
+
         self.visualization_pool = VisualizationWorkerPool(
             target_fps=settings.raw_fps,          # 轮询率：源视频帧率，对 inference 流 2× 过采样
             output_fps=settings.inference_fps,    # 期望出帧率：吞吐告警判速率亏空的基准（与轮询率解耦）
@@ -81,10 +115,6 @@ class InferenceManager:
         self.feature_store = FeatureStore(self._db_dir)
 
         self._model_worker_service = self._create_async_model_worker_service()
-
-        # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
-        # 告警落库/HLS flush 归 PersistenceManager，由 RunController 编排；进程停机残余结算走惰性 import。
-        logger.debug("[InferenceManager] Initialization completed")
 
     def _get_stage_configs(self) -> Dict[str, Dict[str, Any]]:
         """延迟初始化 stage 配置。
@@ -290,14 +320,13 @@ class InferenceManager:
     def start(self):
         logger.info("[InferenceManager] 启动中...")
 
-        if self._model_worker_service:
-            self._model_worker_service.start()
+        # 重组件在此建（构造期零副作用，见 __init__ docstring）
+        self._build_components()
 
-        if self._model_worker_service:
-            self.visualization_pool.stage_configs = self._get_stage_configs()
-
+        self._model_worker_service.start()
+        self.visualization_pool.stage_configs = self._get_stage_configs()
         self.visualization_pool.start()
-        # 注：persistence 生命周期已上移 lifespan（persistence.lifespan 嵌套于 ai.lifespan 外层），
+        # 注：persistence 生命周期已上移 lifespan（persistence.lifespan 嵌套于 inference.lifespan 外层），
         # 不再由本类驱动 start/stop——inference 不拥有平级服务的生命周期。
 
         # 初始化全局映射（均由 YAML 驱动）：
@@ -329,7 +358,7 @@ class InferenceManager:
         # Phase 2: 逐个 join，收集结算告警并经 persistence sink 落库。
         # 进程停机路径（非 per-run 拆除）：actor 产出的 settlement 用 persistence 落库（别名已烧进
         # alarm.stage，与 actor 实时路径同款 sink 调用）——此时 persistence 仍在跑
-        # （persistence.lifespan 于 ai.lifespan 外层，停在 inference 之后）。
+        # （persistence.lifespan 于 inference.lifespan 外层，停在 inference 之后）。
         for task_id, actor in actors:
             try:
                 settlement = actor.finalize_and_stop()
@@ -348,12 +377,15 @@ class InferenceManager:
         # FeatureStore 全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，
         # 残余缓冲（每 (task,step) 最多 batch_size-1 行）需在此 best-effort 落盘，
         # 否则 offline 链路读到的特征尾部会被静默截断。
-        try:
-            self.feature_store.flush()
-        except Exception as e:
-            logger.warning("[InferenceManager] flush feature store on stop failed: %s", e)
+        # 两个组件建于 start()，未 start 过就 stop（异常路径 / 测试）时为 None，跳过即可。
+        if self.feature_store is not None:
+            try:
+                self.feature_store.flush()
+            except Exception as e:
+                logger.warning("[InferenceManager] flush feature store on stop failed: %s", e)
 
-        self.visualization_pool.stop()
+        if self.visualization_pool is not None:
+            self.visualization_pool.stop()
         # 注：persistence.stop() 已上移 persistence.lifespan（停在 inference 之后，抽干队列）。
 
         logger.info("[InferenceManager] Stopped")

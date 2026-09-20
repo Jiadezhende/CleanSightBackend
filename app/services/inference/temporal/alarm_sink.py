@@ -16,7 +16,7 @@ import logging
 from typing import List
 
 from app.domain.alarm import Alarm
-from app.services.persistence import persistence_manager
+from app.services.persistence.instance import persistence_manager
 
 logger = logging.getLogger(__name__)
 

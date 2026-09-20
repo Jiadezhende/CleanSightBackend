@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from app.domain.detection import Detection, FrameDetections, FrameFeature
-from app.services.inference.models import EventFact, SegmentFact, fact_from_json
+from app.services.inference.types import EventFact, SegmentFact, fact_from_json
 
 logger = logging.getLogger(__name__)
 

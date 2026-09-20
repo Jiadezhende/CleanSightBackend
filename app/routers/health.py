@@ -1,28 +1,22 @@
 """
 健康监控路由
 
-提供全局健康监控服务的生命周期管理和状态查询接口
+提供全局健康监控服务的状态查询接口。生命周期归 `app.services.health_monitor.lifespan()`
+（由 `main.py` 嵌套），本模块只读不管起停。
 """
 
 import logging
-from contextlib import asynccontextmanager
 
 from fastapi import APIRouter
 
-from app.services.client.manager import client_manager
-from app.services.health_monitor import GlobalHealthMonitor, get_health_monitor_config
-from app.services.inference.instance import inference_manager
-from app.services.stream import stream_service
+from app.services.health_monitor.instance import health_monitor
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/health", tags=["health"])
 
-# 全局健康监控实例（由 lifespan 管理）
-_health_monitor: GlobalHealthMonitor | None = None
 
-
-def get_health_monitor() -> GlobalHealthMonitor | None:
+def get_health_monitor():
     """获取全局健康监控实例
 
     职责边界：
@@ -30,69 +24,19 @@ def get_health_monitor() -> GlobalHealthMonitor | None:
     - API 路由通过此方法获取健康监控实例
     - 健康监控负责协调所有清理操作
 
+    单例本身在 `app.services.health_monitor.instance`，本函数只是给 router 侧留的
+    旧调用面；服务侧（非 router）要用请直接 import 单例，别反向依赖 `app.routers`。
+
     Returns:
-        GlobalHealthMonitor instance if initialized, None otherwise
+        GlobalHealthMonitor 单例（恒非 None；未启动时 `is_running` 为 False）
 
     Usage:
         from app.routers.health import get_health_monitor
 
         monitor = get_health_monitor()
-        if monitor:
-            result = monitor.cleanup_client(client_id, "API termination request")
+        result = monitor.cleanup_client(client_id, "API termination request")
     """
-    return _health_monitor
-
-
-@asynccontextmanager
-async def lifespan():
-    """全局健康监控服务生命周期管理"""
-    global _health_monitor
-
-    # 加载健康监控配置
-    health_config = get_health_monitor_config()
-
-    # 创建并启动健康监控（传入配置）
-    _health_monitor = GlobalHealthMonitor(
-        client_manager=client_manager,
-        stream_service=stream_service,
-        inference_manager=inference_manager,
-        config=health_config,
-    )
-    # 启动行由 GlobalHealthMonitor.start() 自己打（那条报的是 cleanup_timeout——本线上唯一
-    # 还在做判定的时限）。此处不再重复打一条内容相近、却拿 heartbeat_timeout 冒充 timeout 的。
-    _health_monitor.start()
-
-    # DEBUG级别显示详细配置
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "[GlobalHealthMonitor] Config: reconnect_interval=%.1fs, "
-            "cleanup_timeout=%.1fs, orphan_timeout=%.1fs",
-            health_config.reconnect_interval,
-            health_config.cleanup_timeout,
-            health_config.orphan_timeout,
-        )
-
-    try:
-        yield
-    finally:
-        # 停止健康监控
-        if _health_monitor:
-            stats = _health_monitor.get_stats()
-            _health_monitor.stop()
-            logger.info(
-                "[GlobalHealthMonitor] checks=%d, cleanups=%d, reconnects=%d",
-                stats["checks"],
-                stats["cleanups"],
-                stats["reconnects"],
-            )
-            # DEBUG级别显示详细统计
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[GlobalHealthMonitor] Full stats: disconnects=%d, reconnect_successes=%d, orphans=%d",
-                    stats["disconnects"],
-                    stats["reconnect_successes"],
-                    stats["orphans_detected"],
-                )
+    return health_monitor
 
 
 @router.get("/monitor/stats")
@@ -116,13 +60,13 @@ async def get_monitor_stats():
 
     GET /health/monitor/stats
     """
-    if _health_monitor is None:
+    if not health_monitor.is_running:
         return {
             "status": "not_initialized",
             "message": "Health monitor not initialized",
         }
 
-    stats = _health_monitor.get_stats()
+    stats = health_monitor.get_stats()
     return {"status": "running", **stats}
 
 
@@ -140,13 +84,13 @@ async def get_monitor_config():
 
     GET /health/monitor/config
     """
-    if _health_monitor is None:
+    if not health_monitor.is_running:
         return {
             "status": "not_initialized",
             "message": "Health monitor not initialized",
         }
 
-    config = _health_monitor.config
+    config = health_monitor.config
     return {
         "status": "running",
         "config": {
@@ -204,11 +148,11 @@ async def get_system_status():
 
     GET /health/status
     """
-    if _health_monitor is None:
+    if not health_monitor.is_running:
         return {
             "status": "not_initialized",
             "message": "Health monitor not initialized",
         }
 
-    system_status = _health_monitor.get_system_status()
+    system_status = health_monitor.get_system_status()
     return {"status": "running", **system_status}

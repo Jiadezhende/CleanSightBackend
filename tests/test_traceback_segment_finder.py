@@ -3,9 +3,8 @@ SegmentFinder 单元测试
 
 覆盖：
 - list_segments：按 ts_us 升序返回，过滤非匹配文件
-- find：二分定位 + 上下文扩展
 - list_steps / list_task_ids / list_task_ids_by_recency：清单接口的落盘枚举
-- 边界：ts_ms 早于第一段、晚于最后一段、空目录、track 非法
+- 边界：空目录、track 非法
 - 路径不存在 → 返回空列表
 
 落盘约定：{base_dir}/{task_id}/{step_id}/
@@ -89,66 +88,6 @@ class TestListSegments:
         finder = SegmentFinder(tmp_path)
         with pytest.raises(ValueError, match="Invalid track"):
             finder.list_segments(1, 1, "bogus")
-
-
-class TestFind:
-    @pytest.fixture
-    def finder_with_segments(self, tmp_path):
-        # 段时间戳（微秒）：1_000_000, 11_000_000, 21_000_000, 31_000_000
-        # 即 1s / 11s / 21s / 31s
-        d = _make_task_dir(tmp_path, 1, 1)
-        for ts_us in [1_000_000, 11_000_000, 21_000_000, 31_000_000]:
-            _touch_segment(d, "processed", ts_us)
-        return SegmentFinder(tmp_path)
-
-    def test_find_returns_empty_when_no_segments(self, tmp_path):
-        finder = SegmentFinder(tmp_path)
-        assert finder.find(1, 1, 1000, "processed") == []
-
-    def test_find_locates_trigger_segment(self, finder_with_segments):
-        # ts_ms = 12_000 (12s) → 落在 11s 段内（trigger=11_000_000）
-        segs = finder_with_segments.find(1, 1, ts_ms=12_000, track="processed", n_before=0, n_after=0)
-        assert len(segs) == 1
-        assert segs[0].ts_us == 11_000_000
-        assert segs[0].is_trigger is True
-
-    def test_find_with_context_before_after(self, finder_with_segments):
-        # trigger 在 21s，前 1 后 2
-        segs = finder_with_segments.find(1, 1, ts_ms=22_000, track="processed", n_before=1, n_after=2)
-        assert [s.ts_us for s in segs] == [11_000_000, 21_000_000, 31_000_000]
-        # 触发段标记
-        triggers = [s for s in segs if s.is_trigger]
-        assert len(triggers) == 1
-        assert triggers[0].ts_us == 21_000_000
-
-    def test_find_clamps_at_start(self, finder_with_segments):
-        # ts_ms = 500 早于第一段 (1s) → trigger 取第一段
-        segs = finder_with_segments.find(1, 1, ts_ms=500, track="processed", n_before=2, n_after=1)
-        # 不会越界到负索引
-        assert segs[0].ts_us == 1_000_000
-        assert segs[0].is_trigger is True
-        assert [s.ts_us for s in segs] == [1_000_000, 11_000_000]
-
-    def test_find_clamps_at_end(self, finder_with_segments):
-        # ts_ms = 999_999 远晚于最后一段 → trigger=最后一段
-        segs = finder_with_segments.find(1, 1, ts_ms=999_999, track="processed", n_before=1, n_after=5)
-        assert segs[-1].ts_us == 31_000_000
-        assert any(s.is_trigger and s.ts_us == 31_000_000 for s in segs)
-        # n_after=5 但只有 0 段在后面
-        assert len(segs) == 2  # 21s + 31s
-
-    def test_find_exact_boundary_ts_match(self, finder_with_segments):
-        # ts_ms = 11_000 (= 11s 段开始) → trigger 应是 11s 段（bisect_right 找 first > ts_us）
-        segs = finder_with_segments.find(1, 1, ts_ms=11_000, track="processed", n_before=0, n_after=0)
-        assert len(segs) == 1
-        assert segs[0].ts_us == 11_000_000
-        assert segs[0].is_trigger
-
-    def test_find_negative_context_rejected(self, finder_with_segments):
-        with pytest.raises(ValueError):
-            finder_with_segments.find(1, 1, ts_ms=12_000, track="processed", n_before=-1, n_after=0)
-        with pytest.raises(ValueError):
-            finder_with_segments.find(1, 1, ts_ms=12_000, track="processed", n_before=0, n_after=-1)
 
 
 class TestListSteps:

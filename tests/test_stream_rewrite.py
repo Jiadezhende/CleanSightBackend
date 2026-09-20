@@ -6,7 +6,7 @@ tests/test_stream_rewrite.py
 
 import pytest
 
-from app.services.stream.service import _rewrite_rtsp_url
+from app.services.stream.manager import _rewrite_rtsp_url
 
 PROXY = 8004
 INTERNAL = 18004

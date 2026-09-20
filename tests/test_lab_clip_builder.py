@@ -40,7 +40,7 @@ def _make_step_with_segments(
     for ts in segs_ts_us:
         (step_dir / f"raw_segment_{ts}.mp4").write_bytes(b"fake-fmp4")
     if with_init:
-        (step_dir / "init.mp4").write_bytes(b"fake-init")
+        (step_dir / "raw_init.mp4").write_bytes(b"fake-init")
     return step_dir
 
 
@@ -106,7 +106,7 @@ class TestRunFfmpegM3u8:
         text = captured["m3u8_text"]
         assert "#EXTM3U" in text
         assert "#EXT-X-VERSION:7" in text
-        assert '#EXT-X-MAP:URI="init.mp4"' in text
+        assert '#EXT-X-MAP:URI="raw_init.mp4"' in text
         # 段以 basename 出现（相对 URI，依赖临时 m3u8 与段同目录）
         assert f"raw_segment_{ts0}.mp4" in text
         assert f"raw_segment_{ts1}.mp4" in text

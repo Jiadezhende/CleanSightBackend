@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from app.domain.frame import Frame
 from app.services.persistence.config import PersistenceConfig
-from app.services.persistence.models import (
+from app.services.persistence.types import (
     AlarmPersistenceTask,
     HLSPersistenceTask,
 )

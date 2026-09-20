@@ -14,8 +14,9 @@ from typing import Any, Dict, List, Optional
 from app.domain.detection import FrameFeature
 from app.services.client import ClientManager, client_manager
 from app.services.inference.detection.dispatcher import StageAwareDispatcher
-from app.services.inference.models import FrameInference
+from app.services.inference.types import FrameInference
 from app.services.inference.detection.infer_proxy import RemoteInferProxy
+from app.settings import settings
 from app.utils.metrics import frame_drop_total
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class DetectionService:
             active_stages=self._active_stages,
             write_back=self._write_back_results,
             max_inflight=DEFAULT_MAX_INFLIGHT,
+            cuda_device=settings.cuda_device,
         )
 
         # Dispatcher：取帧 + 组批 + 直接提交（单提交者，无独立 submit 线程）。仅注入 proxy 的

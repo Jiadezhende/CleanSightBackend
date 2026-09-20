@@ -16,7 +16,7 @@ from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, client_manager
-from app.services.inference.models import DetectionTask
+from app.services.inference.types import DetectionTask
 from app.utils.metrics import frame_drop_total
 from app.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,

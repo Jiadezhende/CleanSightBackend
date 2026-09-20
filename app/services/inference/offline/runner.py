@@ -22,7 +22,7 @@ from typing import List, Optional, Union
 
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.services.inference.feature.store import FactLedger, FeatureStore
-from app.services.inference.models import SegmentFact
+from app.services.inference.types import SegmentFact
 from app.services.inference.stage_factory import StageFactory
 from app.settings import settings
 

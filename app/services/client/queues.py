@@ -131,7 +131,7 @@ class ClientQueues:
         self.source_ip: str = source_ip
         self.stage: str = stage
         # run 起始时刻：供 GlobalHealthMonitor 的 task_max_duration 看门狗判定跑飞任务并超时拆除
-        # （monitor.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
+        # （health_monitor/manager.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
         # 同时作为启动延迟埋点的公共参考钟（mark_startup_milestone 相对它计耗时）。
         self.task_started_at: float = time.time() if task_id is not None else 0.0
 

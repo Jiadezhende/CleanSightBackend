@@ -13,6 +13,10 @@ def _load_env_files():
     - CLEANSIGHT_ENV=prod → 加载 .env
 
     该函数会把键值对注入到 `os.environ`，以便 Pydantic 从环境读取。
+
+    优先级：**已存在的环境变量 > 文件值**（`setdefault`，不覆盖）。启动脚本按机器/环境
+    解析出的端口是以 export 形式传进来的，若在此被文件值反向覆盖，脚本与后端会绑到
+    不同端口且无任何报错。这也与网关侧「环境变量 > config.ini > 默认值」的约定一致。
     """
     base = Path(__file__).parent.parent
     env = os.environ.get("CLEANSIGHT_ENV", "dev").lower()
@@ -48,7 +52,7 @@ def _load_env_files():
                     k, v = line.split("=", 1)
                     k = k.strip()
                     v = v.strip().strip('"').strip("'")
-                    os.environ[k] = v
+                    os.environ.setdefault(k, v)
         except Exception:
             # 不要在导入阶段让 .env 文件加载失败阻塞应用
             continue
@@ -82,6 +86,10 @@ class Settings(BaseSettings):
 
     # 模型路径
     model_path: str = "./app/data"
+
+    # 推理子进程独占的卡序号，钉给子进程的 CUDA_VISIBLE_DEVICES（""=CPU）。
+    # 共享卡的机器要显式锁卡，避免和邻居抢算力。env: CLEANSIGHT_CUDA_DEVICE
+    cuda_device: str = "0"
 
     # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
     # persistence / inference / traceback 三方都读 settings.storage_base_dir，
@@ -126,8 +134,6 @@ class Settings(BaseSettings):
     # 媒体追溯（traceback）配置
     media_token_secret: str = ""             # 媒体 URL HMAC 签名密钥（空则启动时生成随机临时密钥）
     media_token_ttl: int = 300               # 媒体 token 有效期（秒）
-    traceback_context_before: int = 1        # 告警证据：触发段之前的上下文段数
-    traceback_context_after: int = 2         # 告警证据：触发段之后的上下文段数
 
     # Lab / Label Studio 视频段导出
     label_studio_url: str = ""                # LS 服务器 base URL，如 http://10.176.122.22:8080
@@ -177,6 +183,16 @@ class Settings(BaseSettings):
         if p.is_absolute():
             return p.resolve()
         return (Path(__file__).parent.parent / p).resolve()
+
+    @property
+    def config_dir(self) -> Path:
+        """服务配置 yaml 的所在目录（项目根 `config/`，绝对路径，单一真源）。
+
+        与 `storage_base_dir` 同款：以项目根为基推导，进程 cwd 变了也不飘。各服务的
+        `config.py` 一律读此值，不再各写一遍 `Path(__file__).parent.parent.parent.parent`
+        ——那种数层级的写法在文件挪窝时会静默指错目录（且五处各数各的）。
+        """
+        return (Path(__file__).parent.parent / "config").resolve()
 
     @model_validator(mode="after")
     def check_required_fields(self):

@@ -66,8 +66,9 @@ class PersistenceConfig:
             PersistenceConfig实例
         """
         if config_path is None:
-            base_dir = Path(__file__).parent.parent.parent.parent.resolve()
-            config_path = base_dir / "config" / "persistence_config.yaml"
+            from app.settings import settings
+
+            config_path = settings.config_dir / "persistence_config.yaml"
 
         # 加载YAML
         config_file = Path(config_path)

@@ -1,21 +1,19 @@
 """
 追溯 API（`/traceback/*`）
 
-提供告警证据回溯、任务 VOD 回放、任务时间轴打点三个核心接口。
+提供任务 VOD 回放、任务时间轴打点两个接口。
 
 数据底座：
 - task_id + step_id → 落盘目录：`{base_dir}/{task_id}/{step_id}/`
-- 段定位：文件名 ts_us 二分查找（segment_finder）
+- 段枚举：按文件名 ts_us 升序（segment_finder）
 - 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
 
 设计要点：
 - 不再依赖 clean_task.source_ip —— 该字段会被业务侧覆写，无法作为可靠输入
-- evidence 接口直接用 alarm 自带的 (task_id, step_id) 定位
 - playlist/timeline 接口必填 step_id query 参数，仅返回该 step 的数据
 """
 
 import logging
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -25,7 +23,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm
 from app.services.traceback import MediaToken, SegmentFinder
-from app.services.traceback.segment_finder import SegmentRef, get_default_base_dir
+from app.services.traceback.segment_finder import (
+    SegmentRef,
+    get_default_base_dir,
+    parse_playlist_durations,
+)
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/traceback", tags=["traceback"])
@@ -58,64 +60,9 @@ def _to_ms(detected_at: Optional[int]) -> int:
     return v // 1000      # 微秒级或更高
 
 
-def _segment_to_url(req: Request, finder: SegmentFinder, seg: SegmentRef) -> Dict[str, Any]:
-    """把段引用打包为前端可消费结构（带 token 化 URL）"""
-    token = MediaToken.default().sign(
-        task_id=seg.task_id,
-        step_id=seg.step_id,
-        filename=seg.filename,
-        kind="segment",
-    )
-    base = str(req.base_url).rstrip("/")
-    return {
-        "url": f"{base}/media/segment/{token}",
-        "filename": seg.filename,
-        "ts_us": seg.ts_us,
-        "ts_ms": seg.ts_ms,
-        "is_trigger": seg.is_trigger,
-    }
-
-
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
-
-
-def _fetch_alarm(alarm_id: int) -> Dict[str, Any]:
-    """按 alarm_id 拉一条告警；不存在则 NotFoundError → 404"""
-    db = next(get_db())
-    try:
-        try:
-            row = db.query(DBAlarm).filter(DBAlarm.alarm_id == int(alarm_id)).first()
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message=f"Failed to fetch alarm {alarm_id}",
-                retryable=True,
-                query=f"SELECT ... FROM clean_alarm WHERE alarm_id = {alarm_id}",
-            ) from e
-
-        if row is None:
-            raise NotFoundError(
-                f"Alarm {alarm_id} not found",
-                resource_type="Alarm",
-                resource_id=str(alarm_id),
-            )
-
-        return {
-            "alarm_id": int(row.alarm_id),
-            "task_id": int(row.task_id),
-            "step_id": int(row.step_id) if row.step_id is not None else None,  # type: ignore[arg-type]
-            "step_name": row.step_name,
-            "alarm_type": row.alarm_type,
-            "severity": row.severity,
-            "message": row.message,
-            "detected_at": int(row.detected_at) if row.detected_at is not None else None,  # type: ignore[arg-type]
-            "resolved": bool(row.resolved) if row.resolved is not None else False,
-            "resolved_by": row.resolved_by,
-            "resolved_at": int(row.resolved_at) if row.resolved_at is not None else None,  # type: ignore[arg-type]
-        }
-    finally:
-        db.close()
 
 
 def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -153,105 +100,8 @@ def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict
 
 
 # ---------------------------------------------------------------------------
-# 接口 1: 告警证据
+# 接口 1: 任务 VOD playlist
 # ---------------------------------------------------------------------------
-
-
-@router.get("/alarm/{alarm_id}/evidence")
-async def get_alarm_evidence(
-    request: Request,
-    alarm_id: int,
-    n_before: int = Query(default=-1, ge=-1, le=20, description="触发段前上下文段数 (-1 用配置默认值)"),
-    n_after: int = Query(default=-1, ge=-1, le=20, description="触发段后上下文段数 (-1 用配置默认值)"),
-):
-    """单条告警的双轨视频证据。
-
-    通过 alarm 表自带的 (task_id, step_id) 直接定位文件，无需查 clean_task.source_ip。
-
-    返回：
-        {
-          "alarm": {...},
-          "raw_clips":       [{"url", "filename", "ts_us", "ts_ms", "is_trigger"}],
-          "processed_clips": [...],
-        }
-    """
-    from app.settings import settings as s
-
-    if n_before < 0:
-        n_before = s.traceback_context_before
-    if n_after < 0:
-        n_after = s.traceback_context_after
-
-    alarm = _fetch_alarm(alarm_id)
-    task_id = alarm["task_id"]
-    step_id = alarm["step_id"]
-    if step_id is None:
-        raise NotFoundError(
-            f"Alarm {alarm_id} has no step_id, cannot locate evidence",
-            resource_type="Alarm",
-            resource_id=str(alarm_id),
-        )
-    detected_ms = _to_ms(alarm["detected_at"])
-
-    finder = SegmentFinder(get_default_base_dir())
-
-    raw_segs = finder.find(task_id, step_id, detected_ms, "raw", n_before, n_after)
-    processed_segs = finder.find(
-        task_id, step_id, detected_ms, "processed", n_before, n_after
-    )
-
-    if not raw_segs and not processed_segs:
-        # 告警存在但视频段都不在了（已清理 / 还未落盘）
-        logger.warning(
-            "[Traceback] No segments found for alarm_id=%s task_id=%s step_id=%s detected_ms=%s",
-            alarm_id, task_id, step_id, detected_ms,
-        )
-
-    return {
-        "alarm": alarm,
-        "task_id": task_id,
-        "step_id": step_id,
-        "raw_clips": [_segment_to_url(request, finder, s) for s in raw_segs],
-        "processed_clips": [_segment_to_url(request, finder, s) for s in processed_segs],
-    }
-
-
-# ---------------------------------------------------------------------------
-# 接口 2: 任务 VOD playlist
-# ---------------------------------------------------------------------------
-
-
-def _parse_existing_playlist(playlist_path: Path) -> Dict[str, float]:
-    """解析现有 LIVE m3u8，提取 filename → duration 映射。
-
-    格式约定：每个段对应一行 `#EXTINF:<dur>,` 紧接一行 `<filename>`。
-    返回字典；解析失败或文件不存在返回空字典。
-    """
-    if not playlist_path.exists():
-        return {}
-    durations: Dict[str, float] = {}
-    try:
-        with playlist_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
-        logger.warning("[Traceback] Failed to read playlist %s: %s", playlist_path, e)
-        return {}
-
-    pending_dur: Optional[float] = None
-    for raw in lines:
-        line = raw.strip()
-        if line.startswith("#EXTINF:"):
-            try:
-                # "#EXTINF:1.234,"
-                dur_str = line[len("#EXTINF:") :].rstrip(",").strip()
-                pending_dur = float(dur_str)
-            except ValueError:
-                pending_dur = None
-        elif line and not line.startswith("#"):
-            if pending_dur is not None:
-                durations[line] = pending_dur
-            pending_dur = None
-    return durations
 
 
 def _build_vod_playlist(
@@ -262,7 +112,7 @@ def _build_vod_playlist(
     track: str,
     segs: List[SegmentRef],
 ) -> str:
-    """构造 VOD m3u8 文本体。供 task 全量回放与 evidence 上下文回放复用。
+    """构造 VOD m3u8 文本体（供 `get_task_playlist` 使用）。
 
     - 要求 segs 已经按时序排序、非空
     - 调用方负责处理 segs 为空时的 404
@@ -270,22 +120,26 @@ def _build_vod_playlist(
     - segs 经 playlist 过滤后为空（全部为在途段）→ 抛 404
     """
     task_dir = finder.task_dir(task_id, step_id)
-    init_path = task_dir / "init.mp4"
+    init_path = task_dir / f"{track}_init.mp4"
     if not init_path.exists():
+        # 正常落盘的 step 必有 init（首段 transcode 时产出）。缺 init 只剩两种可能：
+        # ① 段是 {track}_init.mp4 命名之前的旧格式产物——不支持，也不提供迁移；
+        # ② 首段正在 transcode 途中（窗口极短）。
+        # 两者服务端都无法自愈，故 503 而非 404，让调用方按「此 step 不可回放」处理。
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "HLS init segment missing",
                 "detail": (
-                    f"init.mp4 not found for task {task_id} step {step_id}. "
-                    "Historical segments must be migrated via "
-                    "scripts/transcode_segments_to_h264.py before HLS playback."
+                    f"{track}_init.mp4 not found for task {task_id} step {step_id}. "
+                    "This step is either mid-transcode or written in an unsupported "
+                    "legacy layout; it cannot be played back."
                 ),
             },
         )
 
     playlist_path = task_dir / f"{track}_playlist.m3u8"
-    real_durations = _parse_existing_playlist(playlist_path)
+    real_durations = parse_playlist_durations(playlist_path)
 
     # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF（退化段的兜底也只在写入侧的 eff_fps
     # 里，见 hls_strategy._DEGENERATE_FALLBACK_FPS）。此处只读回、不重新推导、无第二兜底。
@@ -300,7 +154,7 @@ def _build_vod_playlist(
 
     base_url = str(request.base_url).rstrip("/")
     init_token = MediaToken.default().sign(
-        task_id=task_id, step_id=step_id, filename="init.mp4", kind="init",
+        task_id=task_id, step_id=step_id, filename=f"{track}_init.mp4", kind="init",
     )
 
     lines: List[str] = [
@@ -369,66 +223,8 @@ async def get_task_playlist(
     )
 
 
-@router.api_route(  # HEAD 同注册，理由见上方 /task/{task_id}/playlist.m3u8
-    "/alarm/{alarm_id}/playlist.m3u8",
-    methods=["GET", "HEAD"],
-    response_class=PlainTextResponse,
-    responses={
-        200: {
-            "content": {"application/vnd.apple.mpegurl": {}},
-            "description": "Evidence VOD m3u8 (trigger ± context)",
-        }
-    },
-)
-async def get_alarm_evidence_playlist(
-    request: Request,
-    alarm_id: int,
-    track: str = Query(default="processed", pattern="^(raw|processed)$"),
-    n_before: int = Query(default=-1, ge=-1, le=20),
-    n_after: int = Query(default=-1, ge=-1, le=20),
-):
-    """单条告警证据回放的 VOD m3u8（trigger 段 + 前后上下文）。
-
-    fMP4 段必须经 m3u8 + init segment 拼装才能由浏览器原生解码，因此 admin/lab
-    端的「告警证据」播放走该接口而非裸 /media/segment/{token}。
-    """
-    from app.settings import settings as s
-
-    if n_before < 0:
-        n_before = s.traceback_context_before
-    if n_after < 0:
-        n_after = s.traceback_context_after
-
-    alarm = _fetch_alarm(alarm_id)
-    task_id = alarm["task_id"]
-    step_id = alarm["step_id"]
-    if step_id is None:
-        raise NotFoundError(
-            f"Alarm {alarm_id} has no step_id, cannot locate evidence",
-            resource_type="Alarm",
-            resource_id=str(alarm_id),
-        )
-    detected_ms = _to_ms(alarm["detected_at"])
-
-    finder = SegmentFinder(get_default_base_dir())
-    segs = finder.find(task_id, step_id, detected_ms, track, n_before, n_after)
-    if not segs:
-        raise NotFoundError(
-            f"No {track} segments around alarm {alarm_id}",
-            resource_type="Segments",
-            resource_id=f"alarm={alarm_id},track={track}",
-        )
-
-    body = _build_vod_playlist(request, finder, task_id, step_id, track, segs)
-    return PlainTextResponse(
-        content=body,
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-store"},
-    )
-
-
 # ---------------------------------------------------------------------------
-# 接口 3: 任务时间轴打点
+# 接口 2: 任务时间轴打点
 # ---------------------------------------------------------------------------
 
 
@@ -449,7 +245,7 @@ def _step_duration_ms(
     start_us: Optional[int] = None
     end_us: Optional[int] = None
     for track in ("raw", "processed"):
-        durations = _parse_existing_playlist(task_dir / f"{track}_playlist.m3u8")
+        durations = parse_playlist_durations(task_dir / f"{track}_playlist.m3u8")
         if not durations:
             continue
         for s in finder.list_segments(task_id, step_id, track):

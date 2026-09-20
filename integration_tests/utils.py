@@ -452,7 +452,9 @@ def seed_hls_segments(
     每个 ts_us 会生成：
       - raw_segment_{ts_us}.mp4        （16 字节哑文件）
       - processed_segment_{ts_us}.mp4  （16 字节哑文件）
-    另外生成 raw_playlist.m3u8 和 processed_playlist.m3u8（实时播放列表格式，无 EXT-X-ENDLIST）。
+    另外生成 raw_playlist.m3u8 和 processed_playlist.m3u8（实时播放列表格式，无 EXT-X-ENDLIST），
+    以及 raw_init.mp4 / processed_init.mp4 —— traceback 的 VOD playlist 端点缺 init 段直接 503，
+    不造它则回放测试永远拿不到 200。
 
     Returns:
         task_dir Path，调用方在 finally 中用 shutil.rmtree 清理整个目录。
@@ -471,6 +473,9 @@ def seed_hls_segments(
     for ts_us in ts_us_list:
         (task_dir / f"raw_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
         (task_dir / f"processed_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
+
+    (task_dir / "raw_init.mp4").write_bytes(b"\x00" * 8)
+    (task_dir / "processed_init.mp4").write_bytes(b"\x00" * 8)
 
     def _make_playlist(track: str) -> str:
         lines = [

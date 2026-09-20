@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from app.domain.detection import FrameDetections
-from app.services.inference.models import DetectionTask
+from app.services.inference.types import DetectionTask
 from app.services.inference.detection.infer_proxy import RemoteInferProxy
 from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 

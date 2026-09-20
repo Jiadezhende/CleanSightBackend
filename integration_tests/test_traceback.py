@@ -9,14 +9,14 @@
 
 参数:
     --server   <host>   服务器地址（默认: localhost）
+    --api-port <int>    后端 HTTP/WS API 端口（默认: 8000）
     --task_id  <int>    测试任务 ID（默认: 9900001，避开真实数据）
     --alarm_id <int>    测试告警 ID（默认: 9900001，避开真实数据）
 
 测试项:
-    T1  GET /traceback/alarm/{alarm_id}/evidence  — 告警视频证据
-    T2  GET /traceback/task/{task_id}/playlist.m3u8  — VOD 播放列表
-    T3  GET /traceback/task/{task_id}/timeline  — 时间轴打点
-    T4  跟进 T1 中 raw_clips[trigger].url  — 媒体段可达
+    T1  GET /traceback/task/{task_id}/playlist.m3u8  — VOD 播放列表
+    T2  GET /traceback/task/{task_id}/timeline  — 时间轴打点
+    T3  跟进 T1 playlist 里的段 URL  — 媒体段可达
 """
 
 import argparse
@@ -38,6 +38,9 @@ from integration_tests.utils import APIClient, DatabaseHelper, seed_hls_segments
 # 测试数据参数
 # ---------------------------------------------------------------------------
 
+# 对应标准部署；后端端口可在 .env* 里改（如挪出被占的 8000），用 --api-port 指定。
+DEFAULT_API_PORT = 8000
+
 # 3 段 × 10 秒，告警落在第 2 段（15s 处）
 _N_SEGMENTS = 3
 _SEGMENT_DURATION_S = 10
@@ -49,7 +52,8 @@ def _build_test_timestamps(n: int = _N_SEGMENTS) -> tuple:
     """返回 (ts_us_list, alarm_detected_at_ms)。
 
     ts_us_list 为 n 个相隔 10s 的微秒时间戳列表。
-    alarm_detected_at_ms 落在第 2 段起点 +5s 处（二分查找应命中第 2 段）。
+    alarm_detected_at_ms 落在第 2 段起点 +5s 处，即录制时间跨度之内——timeline
+    才会把它作为一个 event 打在进度条上。
     """
     base_s = int(time.time()) - _RECORD_START_OFFSET_S
     ts_us_list = [
@@ -66,7 +70,7 @@ def _build_test_timestamps(n: int = _N_SEGMENTS) -> tuple:
 
 
 @contextmanager
-def traceback_test_fixture(task_id: int, alarm_id: int, server: str):
+def traceback_test_fixture(task_id: int, alarm_id: int, server: str, api_port: int):
     """预置测试所需数据，退出时无条件清理。
 
     Yields:
@@ -110,7 +114,7 @@ def traceback_test_fixture(task_id: int, alarm_id: int, server: str):
             "ts_us_list": ts_us_list,
             "alarm_detected_at_ms": alarm_detected_at_ms,
             "task_dir": task_dir,
-            "base_url": f"http://{server}:8000",
+            "base_url": f"http://{server}:{api_port}",
         }
 
     finally:
@@ -145,48 +149,17 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
 
 
 # ---------------------------------------------------------------------------
-# 5 个测试
+# 3 个测试
 # ---------------------------------------------------------------------------
 
 
-def test_evidence(ctx: Dict[str, Any]) -> bool:
-    """T1: GET /traceback/alarm/{alarm_id}/evidence"""
-    url = f"{ctx['base_url']}/traceback/alarm/{ctx['alarm_id']}/evidence"
-    print(f"\nT1 evidence  →  {url}")
-
-    resp = _get(url)
-    ok = True
-    ok &= _assert(resp.status_code == 200, f"HTTP 200 (got {resp.status_code})")
-    if resp.status_code != 200:
-        print(f"     响应体: {resp.text[:300]}")
-        return False
-
-    data = resp.json()
-    ok &= _assert(
-        data.get("alarm", {}).get("alarm_id") == ctx["alarm_id"],
-        f"alarm.alarm_id == {ctx['alarm_id']}",
-        str(data.get("alarm", {}).get("alarm_id")),
-    )
-    raw_clips = data.get("raw_clips", [])
-    processed_clips = data.get("processed_clips", [])
-    ok &= _assert(len(raw_clips) > 0, f"raw_clips 非空 (len={len(raw_clips)})")
-    ok &= _assert(len(processed_clips) > 0, f"processed_clips 非空 (len={len(processed_clips)})")
-
-    # 确认有 is_trigger=True 的段
-    trigger_raw = [c for c in raw_clips if c.get("is_trigger")]
-    ok &= _assert(len(trigger_raw) == 1, f"raw_clips 中恰好 1 个触发段 (found={len(trigger_raw)})")
-
-    ctx["_evidence"] = data
-    return ok
-
-
 def test_playlist(ctx: Dict[str, Any]) -> bool:
-    """T2: GET /traceback/task/{task_id}/playlist.m3u8?step_id=..."""
+    """T1: GET /traceback/task/{task_id}/playlist.m3u8?step_id=..."""
     url = (
         f"{ctx['base_url']}/traceback/task/{ctx['task_id']}/playlist.m3u8"
         f"?step_id={ctx['step_id']}"
     )
-    print(f"\nT2 playlist  →  {url}")
+    print(f"\nT1 playlist  →  {url}")
 
     resp = _get(url)
     ok = True
@@ -202,21 +175,28 @@ def test_playlist(ctx: Dict[str, Any]) -> bool:
         "mpegurl" in resp.headers.get("content-type", "").lower(),
         f"Content-Type 含 mpegurl (got {resp.headers.get('content-type')})",
     )
-    seg_lines = [l for l in content.splitlines() if l.endswith(".mp4") or "/media/" in l]
+    # 只数段行：#EXT-X-MAP 的 init URL 也含 /media/，必须按「非 # 开头」排掉
+    seg_lines = [
+        l.strip()
+        for l in content.splitlines()
+        if l.strip() and not l.startswith("#") and "/media/segment/" in l
+    ]
     ok &= _assert(
         len(seg_lines) == _N_SEGMENTS,
         f"包含 {_N_SEGMENTS} 个段 URL (found={len(seg_lines)})",
     )
+    if seg_lines:
+        ctx["_segment_url"] = seg_lines[0]
     return ok
 
 
 def test_timeline(ctx: Dict[str, Any]) -> bool:
-    """T3: GET /traceback/task/{task_id}/timeline?step_id=..."""
+    """T2: GET /traceback/task/{task_id}/timeline?step_id=..."""
     url = (
         f"{ctx['base_url']}/traceback/task/{ctx['task_id']}/timeline"
         f"?step_id={ctx['step_id']}"
     )
-    print(f"\nT3 timeline  →  {url}")
+    print(f"\nT2 timeline  →  {url}")
 
     resp = _get(url)
     ok = True
@@ -237,20 +217,13 @@ def test_timeline(ctx: Dict[str, Any]) -> bool:
 
 
 def test_media_segment(ctx: Dict[str, Any]) -> bool:
-    """T4: 跟进 T1 的 raw_clips[trigger].url 请求媒体段"""
-    evidence = ctx.get("_evidence")
-    if not evidence:
-        print("\nT4 media_seg  →  跳过（T1 未成功）")
+    """T3: 跟进 T1 playlist 里的第一条段 URL 请求媒体段"""
+    url = ctx.get("_segment_url")
+    if not url:
+        print("\nT3 media_seg  →  跳过（T1 未拿到段 URL）")
         return False
 
-    raw_clips = evidence.get("raw_clips", [])
-    trigger_clips = [c for c in raw_clips if c.get("is_trigger")]
-    if not trigger_clips:
-        print("\nT4 media_seg  →  跳过（无触发段 URL）")
-        return False
-
-    url = trigger_clips[0]["url"]
-    print(f"\nT4 media_seg →  {url[:80]}...")
+    print(f"\nT3 media_seg →  {url[:80]}...")
 
     resp = _get(url)
     ok = _assert(
@@ -270,22 +243,24 @@ def test_media_segment(ctx: Dict[str, Any]) -> bool:
 def run_traceback_test(args) -> bool:
     print("\n" + "=" * 60)
     print("CleanSight 告警追溯集成测试")
-    print(f"  服务器: {args.server}:8000")
+    base_url = f"http://{args.server}:{args.api_port}"
+    print(f"  服务器: {args.server}:{args.api_port}")
     print(f"  task_id: {args.task_id} | alarm_id: {args.alarm_id}")
     print("=" * 60)
 
-    api = APIClient(f"http://{args.server}:8000")
+    api = APIClient(base_url)
     if not api.check_health():
         raise SystemExit("后端 API 不可达，请先启动后端服务")
-    print(f"后端 API 正常: http://{args.server}:8000")
+    print(f"后端 API 正常: {base_url}")
 
     results: Dict[str, bool] = {}
 
-    with traceback_test_fixture(args.task_id, args.alarm_id, args.server) as ctx:
-        results["T1 evidence  "] = test_evidence(ctx)
-        results["T2 playlist  "] = test_playlist(ctx)
-        results["T3 timeline  "] = test_timeline(ctx)
-        results["T4 media_seg "] = test_media_segment(ctx)
+    with traceback_test_fixture(
+        args.task_id, args.alarm_id, args.server, args.api_port
+    ) as ctx:
+        results["T1 playlist  "] = test_playlist(ctx)
+        results["T2 timeline  "] = test_timeline(ctx)
+        results["T3 media_seg "] = test_media_segment(ctx)
 
     print("\n" + "=" * 60)
     print("测试结果汇总:")
@@ -313,6 +288,13 @@ def main():
         description="CleanSight 告警追溯集成测试（无需 FFmpeg，只需后端可达）"
     )
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        default=DEFAULT_API_PORT,
+        dest="api_port",
+        help=f"后端 API 端口（默认: {DEFAULT_API_PORT}）",
+    )
     parser.add_argument(
         "--task_id",
         type=int,

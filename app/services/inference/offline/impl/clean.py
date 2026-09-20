@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 
 from app.domain.detection import Detection, FrameFeature
-from app.services.inference.models import SegmentFact
+from app.services.inference.types import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
