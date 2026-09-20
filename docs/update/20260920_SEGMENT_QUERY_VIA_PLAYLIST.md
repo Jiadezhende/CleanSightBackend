@@ -1,11 +1,11 @@
 # 段查询收口到清单：域里只剩一个段枚举器
 
 > **变更状态**：已实现（2026-09-20）
-> **选型依据**：[20260919_VIDEO_TIMEBASE_SELECTION.md](20260919_VIDEO_TIMEBASE_SELECTION.md) §5.2
+> **选型依据**：[20260919_VIDEO_TIMEBASE_SELECTION.md](20260919_VIDEO_TIMEBASE_SELECTION.md) Q3（该文 §6 有编号 → 章节对照表）
 > **知识库**：待沉淀 → `DESIGN_HLS_TIMELINE.md`
 >
 > 这是媒体轴那批改动的第一步，可独立落地、独立回滚。送标与进度条改用媒体坐标
-> （同一批选型的 §3.3 / §3.5）是下一步，不在本文。
+> （同一批选型的 Q1 / Q5）是下一步，不在本文。
 
 ## 修的是什么
 
