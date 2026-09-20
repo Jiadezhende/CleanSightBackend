@@ -12,7 +12,17 @@ from fastapi.staticfiles import StaticFiles
 from app.utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from app.routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
+from app.routers import (
+    admin,
+    ai,
+    algorithm,
+    api,
+    health,
+    lab,
+    media,
+    task,
+    traceback as traceback_router,
+)
 from app.services import health_monitor, inference, persistence, recording, stream
 from app.utils import (
     AppError,
@@ -112,6 +122,7 @@ app.include_router(traceback_router.router)  # 追溯 API（/traceback/*）
 app.include_router(media.router)  # 媒体访问层（/media/*，token 化鉴权）
 app.include_router(lab.router)  # Lab 导出 & Label Studio 送标（/lab-f3m8/*）
 app.include_router(admin.router)  # 运维 Admin API（/admin-f3m8/*）
+app.include_router(algorithm.router)  # 算法 API（/algorithm/*，无状态纯计算）
 # 静态资产路径由 __file__ 推导，**不用 CWD 相对路径**：从仓库根之外的目录启动后端时，
 # "app/static/..." 会解析不到，两个 UI 直接 404（挂载期不报错，静默失败）。
 _STATIC_DIR = Path(__file__).parent / "static"
