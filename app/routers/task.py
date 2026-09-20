@@ -223,11 +223,15 @@ def _summarise_steps(task_id: int) -> List[dict]:
     """
     steps: List[dict] = []
     for step_id in step_tasks.list_step_ids(task_id):
-        by_track = hls.list_segments_by_track(task_id, step_id)
+        # 双轨各读一次清单（清单是"有哪些段"的唯一真源；原先那次双轨共用的 iterdir 会把
+        # 在途段与登记失败的段一并算进来）
+        by_track = {
+            t: hls.list_segments(task_id, step_id, t) for t in hls.TRACKS
+        }
         tracks = [t for t in hls.TRACKS if by_track[t]]
         if not tracks:
             continue
-        all_ts = [ref.ts_us for t in tracks for ref in by_track[t]]
+        all_ts = [seg.ref.ts_us for t in tracks for seg in by_track[t]]
         steps.append(
             {
                 "step_id": step_id,

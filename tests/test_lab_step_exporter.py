@@ -261,7 +261,7 @@ class TestFailures:
         _make_step([TS0, TS1], playlist_ts=[])
         cap = _capture_run(monkeypatch)
 
-        with pytest.raises(StepExportNoSegments, match="No playable raw segments"):
+        with pytest.raises(StepExportNoSegments, match="No raw segments"):
             _exporter(tmp_storage).export(1, 1, "raw")
 
         assert cap["calls"] == 0

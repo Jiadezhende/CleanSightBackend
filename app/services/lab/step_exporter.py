@@ -12,7 +12,7 @@ StepExporter —— 把一个 (task_id, step_id, track) 的全部落盘段导出
 fragment，remux 成 mp4 只是换容器——磁盘速度、零 CPU、零二次画质损失。
 
 实现思路（与 ClipBuilder._run_ffmpeg 同构，坑点相同）：
-1. hls.list_playable_segments 一次拿到"哪些段能播"与"各自多长"（EXTINF 真值，在途段已滤）
+1. hls.list_segments 一次拿到"有哪些段"与"各自多长"（清单是唯一真源，EXTINF 是时长真值）
 2. render_vod 拼 VOD 清单（EXT-X-MAP 引 init.mp4 + 段列表 + ENDLIST）
 3. 清单落在 `{step}/hls/`（段与 init 的所在目录），相对 URI 才解析得到它们，喂 ffmpeg HLS demuxer
 4. `-c copy -movflags +faststart` 输出到 temp_root
@@ -104,19 +104,16 @@ class StepExporter:
         """
         self._sweep_orphans()
 
-        # 一次扫盘同时回答"哪些段能播"与"各自多长"：EXTINF 是时长唯一真值（不能用文件名
-        # ts 差重推），而清单的键集合就是"已完成转码并登记"的判据——不在其中的是在途段
-        # （mp4v 已落、transcode+append 未完成），喂给 ffmpeg 会静默截短。
-        playable = hls.list_playable_segments(task_id, step_id, track)
-        if not playable:
-            # 两档文案的区分：盘上一个段都没有 vs 有段但一个都没登记进清单。
-            if not hls.list_segments(task_id, step_id, track):
-                raise StepExportNoSegments(
-                    f"No {track} segments for task_id={task_id}, step_id={step_id}"
-                )
+        # 一次读清单同时回答"有哪些段"与"各自多长"：EXTINF 是时长唯一真值（不能用文件名
+        # ts 差重推），而清单本身就是段集合——没有条目的段是在途段（mp4v 已落、
+        # transcode+append 未完成）或登记失败的段，喂给 ffmpeg 会静默截短。
+        segments = hls.list_segments(task_id, step_id, track)
+        if not segments:
+            # 文案不再分"盘上没段"与"有段没登记"两档：判据收口到清单之后，域里已经没有
+            # 第二个能回答"盘上有什么"的入口了（那正是收口的目的）。两种可能一并提示。
             raise StepExportNoSegments(
-                f"No playable {track} segments yet for task_id={task_id}, "
-                f"step_id={step_id} (all in-flight or playlist missing)"
+                f"No {track} segments for task_id={task_id}, step_id={step_id} "
+                f"(wrong track, or the first segment is still transcoding)"
             )
 
         init_path = hls.init_path(task_id, step_id, track)
@@ -137,13 +134,13 @@ class StepExporter:
         output_path = self._temp_root / f"step_{task_id}_{step_id}_{track}_{nonce}.mp4"
 
         entries = [
-            VodEntry(hls.segment_name(s.ref), s.duration_s) for s in playable
+            VodEntry(hls.segment_name(s.ref), s.duration_s) for s in segments
         ]
         tmp_m3u8.write_text(
             render_vod(entries, map_uri=hls.init_name(track)), encoding="utf-8"
         )
         try:
-            self._run_ffmpeg(tmp_m3u8, output_path, n_segments=len(playable))
+            self._run_ffmpeg(tmp_m3u8, output_path, n_segments=len(segments))
         finally:
             tmp_m3u8.unlink(missing_ok=True)
 
@@ -156,7 +153,7 @@ class StepExporter:
 
         logger.info(
             "[Lab] step export done: task=%s step=%s track=%s segments=%d size=%.1fMB",
-            task_id, step_id, track, len(playable), size_bytes / 1024 / 1024,
+            task_id, step_id, track, len(segments), size_bytes / 1024 / 1024,
         )
         return output_path
 

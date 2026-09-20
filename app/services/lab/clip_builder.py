@@ -10,10 +10,10 @@ ClipBuilder — 从 raw 段拼接出 ms 精度的 mp4 clip。
 3. 在 `{step}/hls/` 写一个临时 m3u8（EXT-X-MAP 引 init.mp4 + 选中段列表），喂给 ffmpeg HLS demuxer
 4. 输出端用 -ss/-to 精确裁剪（重编码 libx264，关键帧无关）
 
-为什么不用 `hls.list_playable_segments`：那个给的 EXTINF 是 `帧数/raw_fps` 推出的恒定
-10.000 s，而本文件的 `-ss` seek 基准是文件名里的墙钟 ts。fps 漂移下累计 EXTINF 会偏离墙钟、
-导致逐段 seek 错位，故本文件的每段时长一律取**相邻段 ts 差**（见 vod_playlist 模块 docstring）。
-代价是在途段不被过滤（历史缺陷 #3，clip 静默截短），归后续独立评审。
+⚠ **本文件暂时只用 `list_segments` 的身份键，不用它给的 EXTINF**：`-ss` 的 seek 基准是
+文件名里的墙钟 ts，每段时长仍取相邻段 ts 差。段查询收口到清单只修掉了"吃进未登记段"那条
+（历史缺陷 #3，clip 静默截短）；墙钟/媒体两套刻度混用的那条（送标区间早 Σgap）是下一步的
+事，见 `docs/update/20260919_VIDEO_TIMEBASE_SELECTION.md` §3.3。
 
 为什么不用 `-f concat`：raw 段是 fMP4 fragment（无 moov），concat demuxer 单独 demux 时
 找不到 codec init 会失败。HLS demuxer 通过 EXT-X-MAP 先吃 init.mp4 再串 fragment，能正确
@@ -239,7 +239,7 @@ class ClipBuilder:
 
     def _select_segments(self, spec: ClipSpec) -> List[SegmentRef]:
         """返回与 [start_ms, end_ms] 重叠的 raw 段列表（按时间升序）。"""
-        all_segs = hls.list_segments(spec.task_id, spec.step_id, "raw")
+        all_segs = [s.ref for s in hls.list_segments(spec.task_id, spec.step_id, "raw")]
         if not all_segs:
             return []
 
@@ -270,7 +270,7 @@ class ClipBuilder:
             return
         # 用整个 step 的 raw 段估稳健基准，避免选中窗口太短/含洞时基准失真。
         # 路由键取自 spec —— SegmentRef 只有 (track, ts_us)，不带 task/step。
-        all_segs = hls.list_segments(spec.task_id, spec.step_id, "raw")
+        all_segs = [s.ref for s in hls.list_segments(spec.task_id, spec.step_id, "raw")]
         diffs = sorted(
             all_segs[i + 1].ts_us - all_segs[i].ts_us
             for i in range(len(all_segs) - 1)

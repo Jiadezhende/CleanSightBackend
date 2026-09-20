@@ -65,25 +65,31 @@ http://<host>:8000/media/segment/<token>
 | 状态 | 触发条件 | 响应体形态 |
 |------|---------|-----------|
 | `422` | 缺 `step_id`，或 `track` 非 `raw`/`processed` | `{"detail":[...]}`（FastAPI 校验格式） |
-| `404`（A） | 该 `(task_id, step_id, track)` 目录下**一个段都没有** | `{"error":"Resource not found","detail":"...","resource_type":"Segments","resource_id":"..."}` |
-| `404`（B） | 有段但**全是在途段**（经 playlist EXTINF 过滤后为空） | `{"detail":"No playable segments yet"}` |
+| `404` | 该 `(task_id, step_id, track)` 的**清单里一个段都没有**。三种成因**不分档**：挑错 track、step 不存在、首段仍在转码 | `{"error":"Resource not found","detail":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=.."}` |
 | `503` | 缺 `{track}_init.mp4`（旧格式产物，或首段仍在 transcode；服务端无法自愈，**无迁移路径**） | `{"detail":{"error":"HLS init segment missing","detail":"..."}}` |
 
-> **两处不一致，务必只认 status code**：
-> ① 两种 404 的 body 形态不同——A 走异常模型（带 `error`/`resource_type`/`resource_id`），B 是裸 `HTTPException`（**只有 `detail`**）。别靠 body 字段区分「无段」和「全在途」。
-> ② 这里的 503 也是裸 `HTTPException` 且 `detail` 是**嵌套对象**（`{"detail":{"error":...,"detail":...}}`），**不带** README 错误模型的顶层 `error`/`retryable`——与其它端点的 DB 503（带 `retryable:true`）形态不一致。
+> **404 曾分两档，2026-09-20 起只有一档**（段查询收口到清单后，域里已无第二个入口去区分
+> 「盘上没文件」和「有文件没登记」）。body 形态保持结构化不变——**不要**改成裸
+> `HTTPException`，那会让按 `resource_type` 分支的客户端静默失效。
+>
+> **503 的形态与众不同**：它是裸 `HTTPException` 且 `detail` 是**嵌套对象**
+> （`{"detail":{"error":...,"detail":...}}`），**不带** README 错误模型的顶层
+> `error`/`retryable`——与其它端点的 DB 503（带 `retryable:true`）不一致。
+>
+> **两档检查的先后不能反**：段检查在 init 检查之前。反过来的话，一个根本不存在的
+> task/step 会先撞上「缺 init」而得到 503，那是"服务端暂时不可用、请重试"的语义。
 
 ### 前端坑点
 
 - **段一路 200 突然全 403**：token 过期或服务重启换了 secret，重拉本 playlist 换新 token（详见 [media.md](media.md)），不是鉴权配错。
 - **反代下 m3u8 拉到但段全失败**：host 取自请求，反代未透传 `X-Forwarded-*`，播放器在请求内网地址。
-- **`track` 取值范围**：只有 `raw` / `processed` 两值；一个 step 未必两轨都落盘，硬写默认的 `processed` 而该 step 只有 raw 会 404（A）。可播轨道从 [`GET /task/history`](task.md) 的 `steps[].tracks` 里取（该清单只覆盖最近 10 个已完成任务）；不在清单里的任务仍需按 404 兜底或两轨都试。
+- **`track` 取值范围**：只有 `raw` / `processed` 两值；一个 step 未必两轨都落盘，硬写默认的 `processed` 而该 step 只有 raw 会 404。可播轨道从 [`GET /task/history`](task.md) 的 `steps[].tracks` 里取（该清单只覆盖最近 10 个已完成任务）；不在清单里的任务仍需按 404 兜底或两轨都试。
 
 ---
 
 ## GET /traceback/task/{task_id}/timeline
 
-**用途**：给某 step 的回放拿「起止时间 + 时长 + 告警事件点」，前端在视频进度条上叠加告警标记。段时长来自**磁盘**（扫 `{task_id}/{step_id}/` 的段并回读 playlist EXTINF），告警事件来自 **DB**——两个数据源独立，DB 挂了只丢事件、不丢时长。
+**用途**：给某 step 的回放拿「起止时间 + 时长 + 告警事件点」，前端在视频进度条上叠加告警标记。段时长来自**磁盘**（读 playlist 的 EXTINF），告警事件来自 **DB**——两个数据源独立，DB 挂了只丢事件、不丢时长。
 
 **路径参数**：`task_id`（int）。
 **查询参数**：`step_id`（int，**必填**；缺失 → 422）。

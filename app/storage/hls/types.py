@@ -1,7 +1,7 @@
 """hls 域的资源容器 —— 本域对外收发的数据形状，集中一处声明。
 
-    SegmentRef        一个段在其 step 内的身份（写侧构造 / 读侧 parse 出来）
-    PlayableSegment   已登记可播的段：身份 + 它在清单里声明的时长
+    SegmentRef   一个段在其 step 内的身份（写侧构造 / 读侧 parse 出来）
+    Segment      一个段：身份 + 它在清单里声明的时长
 
 两个都属本域读侧的**段容器**那一档（另一档是 `Frame`，全仓库的域货币，住在 `app.domain`）。
 
@@ -34,10 +34,11 @@ class SegmentRef(NamedTuple):
         return self.ts_us / 1_000_000.0
 
 
-class PlayableSegment(NamedTuple):
-    """一个已完成转码并登记的段：身份键 + 它在清单里声明的时长。
+class Segment(NamedTuple):
+    """一个段：身份键 + 它在清单里声明的时长。
 
-    两者**必须同源**：EXTINF 既是段时长的唯一真值，其键集合又是"这段能不能播"的判据。
+    两者**必须同源**——都从清单的同一行条目来：URI 给身份，EXTINF 给时长。**没有"不在清单
+    里的段"这回事**：盘上有文件而清单无条目的，是在途产物或登记失败的残留，不是段。
     """
 
     ref: SegmentRef

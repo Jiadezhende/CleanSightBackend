@@ -10,7 +10,8 @@ Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 
 数据底座：
 - (task_id, step_id) → `{root}/{task_id}/{step_id}/hls/`（`app.storage.hls` 域）
-- 段枚举走 `hls.list_segments` / step 枚举走 `storage.tasks.list_step_ids`
+- 段枚举走 `hls.list_segments`（清单是"有哪些段"的唯一真源）/ step 枚举走
+  `storage.tasks.list_step_ids`
 - ffmpeg **HLS demuxer**（临时 VOD 清单 + EXT-X-MAP）+ libx264 实现 ms 精度裁剪
   —— 不是 concat demuxer：fMP4 fragment 无 moov，单独 demux 解不出 codec init
 - urllib.request multipart 上传到 LS（沿用现有 alarm_strategy 的 urllib 风格）
@@ -211,9 +212,11 @@ def _storage_task_to_item(task_id: int, raw_steps: List[int]) -> LabTaskItem:
     """
     ts_list: List[int] = []
     for step_id in raw_steps:
-        ts_list.extend(
-            ref.ts_us // 1000 for ref in hls.list_segments(task_id, step_id, "raw")
-        )
+        for seg in hls.list_segments(task_id, step_id, "raw"):
+            # 末端算**段尾**（ts + EXTINF）而不是段起点：后者会漏掉最后一段自身的长度，
+            # 表现是列表里的"最后更新"恒比实际早一个段长（~10s）。
+            ts_list.append(seg.ref.ts_us // 1000)
+            ts_list.append((seg.ref.ts_us + int(seg.duration_s * 1_000_000)) // 1000)
 
     return LabTaskItem(
         task_id=task_id,

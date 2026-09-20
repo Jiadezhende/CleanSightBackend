@@ -156,7 +156,28 @@ async def test_playlist_step_id_required(client, media_root):
 
 
 @pytest.mark.asyncio
+async def test_playlist_404_keeps_the_structured_body(client, media_root):
+    """404 的 body 必须是结构化的（带 resource_type / resource_id），不是只有 detail。
+
+    收口前这里有两档 404，「盘上一个段都没有」那档走 `NotFoundError` → 全局处理器 →
+    结构化 body。两档塌成一档时若图省事改用裸 `HTTPException`，**响应体形态会静默从结构化
+    变成只有 detail**，按字段分支的客户端就断了——而状态码没变，只断言 404 的用例发现不了。
+    """
+    resp = await client.get("/traceback/task/999/playlist.m3u8?step_id=1")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["resource_type"] == "Segments"
+    assert "task=999" in body["resource_id"]
+
+
+@pytest.mark.asyncio
 async def test_playlist_404_when_no_segments(client, media_root):
+    """不存在的 task/step → 404，**不是 503**。
+
+    与 503 那条用例一起钉住 `_build_vod_playlist` 里两档检查的**先后**：段检查必须在 init
+    检查之前。反过来的话，一个根本不存在的资源会先撞上"缺 init"而得到 503——那是"服务端
+    暂时不可用、请重试"的语义，对不存在的资源是误导。
+    """
     resp = await client.get("/traceback/task/999/playlist.m3u8?step_id=1")
     assert resp.status_code == 404
 

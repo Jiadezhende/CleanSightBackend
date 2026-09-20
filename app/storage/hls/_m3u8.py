@@ -11,7 +11,7 @@
 ## 本模块只管这一份 LIVE 清单，写一路 + 读一路
 
     写侧   header / entry / append / total_duration   建清单、追条目、求累计（tfdt 输入）
-    读侧   durations                                  逐段 EXTINF，服务 `list_playable_segments`
+    读侧   entries                                    有序 (段名, EXTINF)，服务 `list_segments`
 
 三条格式事实（全部会静默出错，别绕开）：
 
@@ -19,7 +19,9 @@
 - **EXTINF 是段时长的唯一真值**，不能用相邻段文件名的 ts 差重推（那是墙钟量，比媒体时长多
   出帧间隔与断流停顿）。累计 EXTINF 同时是下一段 tfdt 的落点，故求和函数是写入事务
   ② adjust 步的输入。
-- **键集合即"已完成转码并登记"的段**，读侧据此过滤在途段；所以 EXTINF 行必须**最后**追加。
+- **这份清单就是"有哪些段"的唯一真源**：段文件名一出现在盘上读侧就看得见，但它此刻可能还在
+  转码、也可能登记失败，两种喂给下游都是缓冲洞或静默截短。所以 EXTINF 行必须**最后**追加
+  ——条目出现的那一刻就是段可见的那一刻。
 
 **VOD 形态不在本域**（→ `app/services/utils/vod_playlist.py`）：本模块只出事实——哪些段登记
 了、各自多长；怎么拼成一份清单是服务层的判断。
@@ -32,7 +34,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Dict
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -104,25 +106,29 @@ def append(playlist: Path, init_name: str, duration_s: float, segment_name: str)
 # ---------------------------------------------------------------------------
 
 
-def durations(playlist: Path) -> Dict[str, float]:
-    """段文件名 → EXTINF 秒。文件不存在或读不动返回 `{}`（warning，不抛）。
+def entries(playlist: Path) -> List[Tuple[str, float]]:
+    """清单里的 `(段文件名, EXTINF 秒)`，**按清单顺序**。文件不存在或读不动返回 `[]`。
 
-    返回值同时承担两个职责，故不拆成两个函数：**值**是段时长的唯一真值，**键集合**即
-    "已完成转码并登记"的段。带标题的手写条目按坏行跳过。
+    返回值同时承担两个职责，故不拆成两个函数：**EXTINF** 是段时长的唯一真值，**这张表本身**
+    即"已完成转码并登记"的段集合——读侧的段枚举就是它，没有第二个判据（见模块 docstring）。
+    带标题的手写条目按坏行跳过。
 
-    **保持包内私有**：消费方都被 `_read.list_playable_segments` 覆盖（它把键集合与值一次给全）。
+    **顺序是契约**：清单只追加，所以清单顺序 = 登记顺序 = 时序。调用方仍可按 `ts_us` 排序
+    自保，但不该靠重新排序来获得时序。
+
+    **保持包内私有**：消费方都被 `_read.list_segments` 覆盖（它把段与时长一次给全）。
     """
     if not playlist.exists():
-        return {}
+        return []
     try:
         with playlist.open("r", encoding="utf-8") as f:
             lines = f.readlines()
     except OSError as e:
         logger.warning("[storage.hls] 读清单逐段时长失败，按空处理 %s: %s", playlist, e)
-        return {}
+        return []
 
-    out: Dict[str, float] = {}
-    pending: float | None = None
+    out: List[Tuple[str, float]] = []
+    pending: Optional[float] = None
     for raw in lines:
         line = raw.strip()
         if line.startswith("#EXTINF:"):
@@ -137,6 +143,6 @@ def durations(playlist: Path) -> Dict[str, float]:
         elif line and not line.startswith("#"):
             # 非注释行 = URI 行。只有紧跟在合法 EXTINF 之后才算一个完整条目。
             if pending is not None:
-                out[line] = pending
+                out.append((line, pending))
             pending = None
     return out

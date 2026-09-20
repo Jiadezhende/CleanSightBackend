@@ -5,7 +5,7 @@
 
 数据底座：
 - task_id + step_id → 落盘目录：`{root}/{task_id}/{step_id}/hls/`（`app.storage.hls` 域）
-- 段枚举与 EXTINF：`hls.list_playable_segments`（一次扫盘同时给出可播段与逐段真时长）
+- 段枚举与 EXTINF：`hls.list_segments`（一次读清单同时给出段与逐段真时长）
 - 清单骨架：`app.services.utils.vod_playlist.render_vod`（URI 与时长来源归本层）
 - 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
 
@@ -110,13 +110,32 @@ def _build_vod_playlist(
 ) -> str:
     """构造 VOD m3u8 文本体（供 `get_task_playlist` 使用）。
 
-    分工：**可播段与逐段 EXTINF 是事实**，由 `hls.list_playable_segments` 出；**m3u8 骨架**
+    分工：**段与逐段 EXTINF 是事实**，由 `hls.list_segments` 出；**m3u8 骨架**
     由 `vod_playlist.render_vod` 出；本函数只负责把段与 init 换成 token 化 URI——URI 长什么样
     是协议层的事，数据层与骨架函数都对 `MediaToken` 零认知。
 
-    - init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
-    - 一个可播段都没有（段全在途 / 登记失败）→ 抛 404
+    - 清单里一个段都没有（挑错 track / step 不存在 / 首段仍在转码）→ 抛 404，文案不分档
+    - 有段但 init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
+
+    **两档的先后不能反**：段检查必须在前。反过来的话，一个根本不存在的 task/step 会先撞上
+    "缺 init" 而得到 503——那是"服务端暂时不可用、请重试"的语义，对一个不存在的资源是误导。
     """
+    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF；`list_segments` 只读回、不重新推导、
+    # 无第二兜底。未登记的段（在途 / append 失败）天然不在其中——喂进去会让回放出现与 fmp4
+    # tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
+    segments = hls.list_segments(task_id, step_id, track)
+    if not segments:
+        # 用 `NotFoundError` 而不是裸 `HTTPException`：前者走全局处理器，产出带
+        # `resource_type` / `resource_id` 的结构化 body。收口前这里有两档 404，其中
+        # 「盘上一个段都没有」那档就是这个形态；塌成一档时若改用裸 HTTPException，
+        # **响应体形态会静默从结构化变成只有 detail**，客户端按字段分支的就断了。
+        raise NotFoundError(
+            f"No {track} segments for task {task_id} step {step_id} "
+            f"(wrong track, or the first segment is still transcoding)",
+            resource_type="Segments",
+            resource_id=f"task={task_id},step={step_id},track={track}",
+        )
+
     if not hls.init_path(task_id, step_id, track).exists():
         # 正常落盘的 step 必有 init（首段 transcode 时产出）。缺 init 只剩两种可能：
         # ① 段是 {track}_init.mp4 命名之前的旧格式产物——不支持，也不提供迁移；
@@ -133,13 +152,6 @@ def _build_vod_playlist(
                 ),
             },
         )
-
-    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF；`list_playable_segments` 只读回、不
-    # 重新推导、无第二兜底。不在清单里的段是在途段或登记失败的段，它同时把它们滤掉——避免
-    # 回放出现与 fmp4 tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
-    playable = hls.list_playable_segments(task_id, step_id, track)
-    if not playable:
-        raise HTTPException(status_code=404, detail="No playable segments yet")
 
     base_url = str(request.base_url).rstrip("/")
     signer = MediaToken.default()
@@ -160,7 +172,7 @@ def _build_vod_playlist(
             ),
             duration_s=s.duration_s,
         )
-        for s in playable
+        for s in segments
     ]
     return render_vod(entries, map_uri=f"{base_url}/media/init/{init_token}")
 
@@ -195,16 +207,10 @@ async def get_task_playlist(
     - 保证 VOD 完整性（即使任务未封档）
     - URL 走 token 化 /media/segment/*，不暴露文件系统路径
     """
-    # 两档要分开：**盘上一个段都没有** = 这个 step 没这条轨（404 NotFoundError），
-    # **有段但一个都还不可播** = 段全在途，稍后重试就有（404 "No playable segments yet"，
-    # 在 `_build_vod_playlist` 里抛）。合成一档会让前端分不清"挑错 track"和"再等等"。
-    if not hls.list_segments(task_id, step_id, track):
-        raise NotFoundError(
-            f"No {track} segments for task {task_id} step {step_id}",
-            resource_type="Segments",
-            resource_id=f"task={task_id},step={step_id},track={track}",
-        )
-
+    # 这里曾按"盘上有段 vs 清单有条目"分出「挑错 track」和「段全在途，再等等」两档文案。
+    # 段查询收口到清单之后，域里不再有第二个能回答"盘上有什么"的入口（那正是收口的目的），
+    # 两档塌成一档——**别为了保住分档再去 iterdir 一次**，那等于把两个真源又留下来。
+    # 唯一的 404 由 `_build_vod_playlist` 抛，文案同时提示两种可能。
     body = _build_vod_playlist(request, task_id, step_id, track)
     return PlainTextResponse(
         content=body,
@@ -226,13 +232,13 @@ def _step_duration_ms(task_id: int, step_id: int) -> Tuple[int, int, int]:
     lab 页面顶部"时长 / 进度条右端"和 <video>.duration 一致。
 
     在途段（mp4v 已落、transcode+append 未完成）在 playlist 里查不到 EXTINF，
-    由 `hls.list_playable_segments` 一并滤掉 —— 与 `_build_vod_playlist` 同源同策略。
+    由 `hls.list_segments` 一并滤掉 —— 与 `_build_vod_playlist` 同源同策略。
     raw / processed 双轨都纳入，取并集的最早起点和最晚终点。
     """
     start_us: Optional[int] = None
     end_us: Optional[int] = None
     for track in hls.TRACKS:
-        for seg in hls.list_playable_segments(task_id, step_id, track):
+        for seg in hls.list_segments(task_id, step_id, track):
             seg_end_us = seg.ref.ts_us + int(round(seg.duration_s * 1_000_000))
             if start_us is None or seg.ref.ts_us < start_us:
                 start_us = seg.ref.ts_us

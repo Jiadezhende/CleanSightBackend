@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.storage import hls
+from app.storage.hls import _m3u8
 from factories import make_cq
 
 
@@ -69,8 +70,13 @@ def _install_registry(monkeypatch, cqs):
     )
 
 
-def _write_segments(base, task_id, step_id, *, tracks=("raw",), ts_us=1_000_000, mtime=None):
-    """在 `{task}/{step}/hls/` 下造段。返回 hls 域目录。
+def _write_segments(
+    base, task_id, step_id, *, tracks=("raw",), ts_us=1_000_000, mtime=None, duration_s=10.0
+):
+    """在 `{task}/{step}/hls/` 下造段**并登记进清单**。返回 hls 域目录。
+
+    登记那一步不能省：「有哪些段」只由清单回答，光有段文件 = 没有段（在途或登记失败）。
+    这里不走 `insert_segment` 只是为了不拉 cv2/ffmpeg，落盘形态与它一致。
 
     `mtime` 要**同时**打在 step 目录与 hls 子目录上：粗排键 `tasks._latest_step_mtime`
     取的是两者的最大值（产物落在域子目录里，只 stat step 目录会退化成"首次落盘时刻"）。
@@ -78,9 +84,12 @@ def _write_segments(base, task_id, step_id, *, tracks=("raw",), ts_us=1_000_000,
     d = hls.init_path(task_id, step_id, "raw").parent
     d.mkdir(parents=True, exist_ok=True)
     for track in tracks:
-        hls.segment_path(
-            task_id, step_id, hls.SegmentRef(track=track, ts_us=ts_us)
-        ).write_bytes(b"")
+        path = hls.segment_path(task_id, step_id, hls.SegmentRef(track=track, ts_us=ts_us))
+        path.write_bytes(b"")
+        _m3u8.append(
+            hls.playlist_path(task_id, step_id, track),
+            hls.init_name(track), duration_s, path.name,
+        )
     if mtime is not None:
         os.utime(d, (mtime, mtime))
         os.utime(d.parent, (mtime, mtime))

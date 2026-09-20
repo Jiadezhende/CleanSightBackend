@@ -1,4 +1,4 @@
-> 更新时间：2026-09-13
+> 更新时间：2026-09-19
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -86,5 +86,6 @@
 - [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)：检测链路架构总览图（整体流程、流源/流算子角色分工、两种告警模式、各检测点详细流程），配合 DESIGN_EXTENDING_DETECTION 使用。
 - [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md)：说明如何新增 Detector（流源）、Operator（流算子，analyze+judge 合并）、YAML stage 配置和相关测试。
 - [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)：说明 fMP4、EXTINF 真值、timescale pin=90000、tfdt、在途段过滤、时间轴计算，以及逐帧 ts sidecar（`.idx`）与离线帧反查的关键约束。
+- [DESIGN_SEGMENT_CONCAT.md](DESIGN_SEGMENT_CONCAT.md)：**选型参考**——把分段视频拼成一条 ffmpeg 能吃的流，由**两条正交的轴**决定（段能否独立 demux → `-f concat`；段能否字节拼接 → `concat:` 协议）。按轴给出落盘格式分类（段自包含 / fragment + 共用 init）与消费端矩阵，再落到「四条真候选 + 四条被排除的写法」的实测对照（`-f concat` 全家被轴 1 结构性判死，不在候选之列）。**另有与轴正交的一节**：三条**静默失败**全部能骗过 `returncode != 0` + `size > 0` 型判据——`-f concat` 清单含 init → exit 0 产零流空壳；LIVE 清单缺 `ENDLIST` → 无限挂死；**路径 ① 遇坏段 → exit 0、全日志级别无输出、`-xerror` 无效，产出合法但截短的 mp4（选对路径照样会中）**。另有 Windows 路径分隔符分歧，与 `clip_builder` 能否换 ③ 的待核验项。动 lab 导出 / 裁剪 / 离线解帧的取数方式前先读。
 - [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)：数据层 `app/storage/` 的**准入判据**——什么进层什么不进（四问）、按域拆包与路径隔离、域容器 `types.py`、定位集中（L）、读写条文（R/W 三路线）、零锁、依赖与测试、门禁映射。**注意它写的是目标形态，调用点尚未迁移**（现役落盘布局见 ARCHITECTURE_STORAGE_AND_SCHEMA.md）。
 - [TESTING_MAP.md](TESTING_MAP.md)：索引现有测试覆盖面，并给后续改动提供优先补测方向。

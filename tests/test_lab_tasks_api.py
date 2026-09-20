@@ -11,16 +11,26 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.storage import hls
+from app.storage.hls import _m3u8
+
+
+def _make_segment(task_id: int, step_id: int, ts_us: int, track: str = "raw"):
+    """在 `{task}/{step}/hls/` 下造一个段**并登记进清单**（路径由 hls 域出，不手拼）。
+
+    登记不能省：「有哪些段」只由清单回答，光有段文件 = 没有段（在途或登记失败）。
+    """
+    path = hls.segment_path(task_id, step_id, hls.SegmentRef(track=track, ts_us=ts_us))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x")
+    _m3u8.append(
+        hls.playlist_path(task_id, step_id, track),
+        hls.init_name(track), 10.0, path.name,
+    )
+    return path
 
 
 def _make_raw_segment(task_id: int, step_id: int, ts_us: int):
-    """在 `{task}/{step}/hls/` 下造一个 raw 段（路径由 hls 域出，不手拼）。"""
-    path = hls.segment_path(
-        task_id, step_id, hls.SegmentRef(track="raw", ts_us=ts_us)
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"x")
-    return path
+    return _make_segment(task_id, step_id, ts_us, track="raw")
 
 
 class _FakeQuery:
@@ -126,11 +136,7 @@ async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_stora
     # task 101 step 3: 建了目录没写成段 → 送标清单里不该出现（list_step_ids 不过滤空 step）
     (tmp_storage / "101" / "3" / "hls").mkdir(parents=True)
     # task 202: 只有 processed 段，没有 raw → 不应入选
-    proc = hls.segment_path(
-        202, 1, hls.SegmentRef(track="processed", ts_us=1_700_000_000_000_000)
-    )
-    proc.parent.mkdir(parents=True)
-    proc.write_bytes(b"x")
+    _make_segment(202, 1, 1_700_000_000_000_000, track="processed")
     # 非数字目录（.lab_exports、config 文件）应被跳过
     (tmp_storage / ".lab_exports").mkdir()
     (tmp_storage / "lab_runtime_config.json").write_text("{}")
@@ -152,9 +158,11 @@ async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_stora
     assert item["status"] == "unknown"
     assert item["source_ip"] is None
     assert item["has_current_step_raw"] is False
-    # updated_time/start_time 从段 ts_ms 推导
+    # start_time = 首段**起点**；updated_time = 末段**段尾**（ts + EXTINF）。
+    # 末端取段尾而不是段起点：后者会漏掉最后一段自身的长度，列表里的"最后更新"就恒比实际
+    # 早一个段长（这里 helper 的 EXTINF 是 10s，故 ...005_000 → ...015_000）。
     assert item["start_time"] == 1_700_000_000_000
-    assert item["updated_time"] == 1_700_000_005_000
+    assert item["updated_time"] == 1_700_000_005_000 + 10_000
 
 
 @pytest.mark.asyncio

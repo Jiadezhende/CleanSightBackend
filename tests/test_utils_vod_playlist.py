@@ -46,7 +46,7 @@ def _bare_entries(task_id, step_id, track):
     """
     return [
         VodEntry(hls.segment_name(s.ref), s.duration_s)
-        for s in hls.list_playable_segments(task_id, step_id, track)
+        for s in hls.list_segments(task_id, step_id, track)
     ]
 
 
@@ -135,7 +135,7 @@ class TestVodParityWithStepExporter:
     )
 
     def test_byte_identical_to_pre_migration_output(self, tmp_storage):
-        """整条装配链（落盘段 → `list_playable_segments` → `VodEntry` → 清单文本）与
+        """整条装配链（落盘段 → `list_segments` → `VodEntry` → 清单文本）与
         迁移前 `StepExporter._build_vod_text` 的输出逐字节相等。
 
         这是"迁 step_exporter 是零行为变更"的证据，也是往后骨架不许漂移的钉子。

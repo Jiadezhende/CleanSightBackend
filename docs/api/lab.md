@@ -72,7 +72,7 @@
 | `tasks[].current_step` | string \| null | DB 模式为 `current_step` 字符串；行内为 null 或 **storage 模式恒 null** |
 | `tasks[].step_id` | int \| null | `current_step` 解析为 int；无法解析或 **storage 模式恒 null** |
 | `tasks[].status` | string \| null | DB 模式取自表；**storage 模式恒 `"unknown"`** |
-| `tasks[].updated_time` | int \| null | epoch **秒**。DB 模式取表；storage 模式取该 task 所有 raw 段 `ts_ms` 的最大值，无段则 null |
+| `tasks[].updated_time` | int \| null | epoch **秒**。DB 模式取表；storage 模式取该 task 所有 raw 段**段尾**（`ts_ms + EXTINF`）的最大值，无段则 null。取段尾而非段起点：后者恒比实际早一个段长（~10s） |
 | `tasks[].start_time` | int \| null | epoch **秒**。DB 模式取表；storage 模式取 raw 段 `ts_ms` 最小值，无段则 null |
 | `tasks[].end_time` | int \| null | epoch **秒**。DB 模式取表；**storage 模式恒 null** |
 | `tasks[].raw_steps` | int[] | 磁盘上确有 raw 段的 step_id（升序） |

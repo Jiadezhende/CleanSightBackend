@@ -26,6 +26,7 @@ from app.services.lab.clip_builder import (
 )
 from app.storage import hls
 from app.storage.hls import SegmentRef
+from factories import seed_hls_segments
 
 
 # ---------------------------------------------------------------------------
@@ -42,13 +43,15 @@ def _hls_dir() -> Path:
 
 
 def _make_step_with_segments(segs_ts_us: List[int], with_init: bool = True) -> Path:
-    """在 `{storage_root}/1/1/hls/` 铺段 + init，路径一律由 hls 域的定位函数给。"""
-    _hls_dir().mkdir(parents=True, exist_ok=True)
-    for ts in segs_ts_us:
-        ref = SegmentRef(track="raw", ts_us=ts)
-        hls.segment_path(TASK_ID, STEP_ID, ref, create=True).write_bytes(b"fake-fmp4")
-    if with_init:
-        hls.init_path(TASK_ID, STEP_ID, "raw").write_bytes(b"fake-init")
+    """在 `{storage_root}/1/1/hls/` 铺段 + init，**并登记进清单**。
+
+    登记那一步不能省：`hls.list_segments` 只认清单，光有段文件等于没有段。
+
+    先删清单再播种，让本函数**幂等**：段文件重复写是覆盖，清单条目重复写是追加——同一组
+    段播两次会得到一份重复条目的清单，相邻 ts 差变 0（`_validate_continuity` 的基准就塌了）。
+    """
+    hls.playlist_path(TASK_ID, STEP_ID, "raw").unlink(missing_ok=True)
+    seed_hls_segments(TASK_ID, STEP_ID, segs_ts_us, track="raw", with_init=with_init)
     return _hls_dir()
 
 

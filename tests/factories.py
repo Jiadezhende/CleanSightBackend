@@ -27,6 +27,7 @@ __all__ = [
     "make_bare_cq",
     "make_frame_inference",
     "make_alarm",
+    "seed_hls_segments",
 ]
 
 
@@ -134,3 +135,42 @@ def make_alarm(
         stage=stage,
         **over,
     )
+
+
+def seed_hls_segments(
+    task_id: int,
+    step_id: int,
+    items,
+    *,
+    track: str = "raw",
+    with_init: bool = True,
+    default_extinf_s: float = 10.0,
+):
+    """在 `{task}/{step}/hls/` 铺段文件 + init，**并登记进清单**；返回域目录。
+
+    `items` 收 `[ts_us]` 或 `[(ts_us, extinf_s)]`。
+
+    **登记那一步不能省**：「有哪些段」只由清单回答，光有段文件 = 没有段（在途，或
+    `_m3u8.append` 失败留下的孤儿）。不走 `hls.insert_segment` 只是为了免拉 cv2/ffmpeg，
+    落盘形态与它一致。
+
+    调用前须让 `settings.storage_dir` 指到临时目录（conftest 的 `tmp_storage` fixture）。
+    """
+    from app.storage import hls
+    from app.storage.hls import _m3u8
+
+    normalised = [it if isinstance(it, tuple) else (it, default_extinf_s) for it in items]
+    domain_dir = hls.init_path(task_id, step_id, track).parent
+    domain_dir.mkdir(parents=True, exist_ok=True)
+
+    for ts_us, extinf_s in normalised:
+        ref = hls.SegmentRef(track=track, ts_us=ts_us)
+        path = hls.segment_path(task_id, step_id, ref, create=True)
+        path.write_bytes(b"fake-fmp4")
+        _m3u8.append(
+            hls.playlist_path(task_id, step_id, track),
+            hls.init_name(track), extinf_s, path.name,
+        )
+    if with_init:
+        hls.init_path(task_id, step_id, track).write_bytes(b"fake-init")
+    return domain_dir
