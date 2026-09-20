@@ -2,7 +2,7 @@
 
 > **变更状态**：生效中（2026-09-12 起，2026-09-13 契约收敛后重写本篇）
 > <!-- 同一开发任务两天的改动合成一篇；中途推翻过一次界线，见「方案选型」。文件名保留起始日期，三处外链不动 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)（2026-09-20）
 >
 > **本篇不复述代码里的东西**：每个函数的签名语义、实现细节的账（`bisect` vs
 > `searchsorted`、`'right'-1`、`hi=-1` 不 clamp 之类）都在对应模块的 docstring 里，

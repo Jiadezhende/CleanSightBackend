@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -57,9 +57,20 @@ _raw_lock -> _viz_lock -> _inference_lock
 
 其他共享队列使用明确锁保护。
 
-### 持久化目录锁
+### 录制落盘：零锁，靠单消费队列 + 对象引用判等
 
-HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist append、metadata update 原子执行，避免并发段写入导致 playlist/tfdt 不一致。
+HLS 写侧**没有任何锁**（旧的 `_dir_locks` 目录锁随 persistence 写侧一起退场，已不存在）。两件正交的事各由一个机制构造：
+
+```text
+同代次内的顺序    由 SerialTaskQueue 的提交序构造   —— 但队列解决不了换代
+跨代次的隔离      由 cq 对象引用判等构造            —— 但校验解决不了乱序
+```
+
+- **顺序**：`app/utils/task_queue.py` 的 `SerialTaskQueue` 是「一条队列 + 一个消费线程」，提交序 == 执行序。相邻段 tfdt 单调、「先落残段再整个删目录」这两条全建立在单消费者上，**加第二个 worker 不报错，只会让段间 tfdt 碰撞、旧段串进新 run**，故 `config/recording_config.yaml` 没有 `workers` 项。
+- **隔离**：落盘任务带着提交那一刻的 `cq` 引用。执行时与注册表当前的 CQ 判等（连 `step_id` 一起比），不是同一代就丢弃、不重试；本代次首写时先 `hls.delete(task, step)` 清掉上一代产物再记账（懒惰 supersede）。
+- **零锁的最后一块**：代次表 `_claimed_by` 只被队列那一个线程碰——`forget_task` 也走队列而不是当场清。跨线程共享的 `_pending_flush` 免锁靠 dict 单次操作的原子性，迭代前先 `list()` 快照。
+
+完整推导与失效表现见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)；`app/storage/hls` 域自身不持锁，串行由调用侧构造。
 
 ### 线程与实例生命周期审计（已落地结论）
 
@@ -69,8 +80,8 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 
 | 粒度 | 实例 | 创建 → 销毁 |
 |------|------|-------------|
-| 进程级单例 | `stream_service`/`persistence_manager`/`InferenceManager`/`GlobalHealthMonitor` | import·lifespan → lifespan 关闭 |
-| stage 级常驻线程/进程 | dispatcher/推理子进程(`RemoteInferProxy` spawn)/viz worker/HLS·Alarm 池/cleanup/selector | service `start()` → `stop()` |
+| 进程级单例 | `stream_service`/`persistence_manager`/`recording_service`/`InferenceManager`/`GlobalHealthMonitor` | import·lifespan → lifespan 关闭 |
+| stage 级常驻线程/进程 | dispatcher/推理子进程(`RemoteInferProxy` spawn)/viz worker/录制队列线程 + 录制 sweeper/Alarm 池/cleanup/selector | service `start()` → `stop()` |
 | per-run 动态实例 | TemporalActor/FFmpegDecoder | `start_workflow`·`start_stream` → `stop_workflow`·`stop_stream` |
 
 **唯一真正不可中断点 = 推理子进程内 `StageWorker` 的 GPU 前向（CUDA 同步）**：进程隔离后 GPU 前向不在主进程线程里，主进程 `stop_event` 管不到子进程内的前向。`RemoteInferProxy.stop()` → `_kill_child()` 用 `terminate→join(2.0)→kill→join(2.0)` 硬收尸（镜像 decoder.py，见下），CUDA 半途的前向随进程被杀、不残留孤儿。收益是主进程再无 in-thread CUDA 同步点——旧模型「daemon `join(2.0)` 超时后强杀 GPU 半途线程」的风险已随隔离消失；主进程侧 collector/supervisor/dispatcher 等守护线程都真可中断（`stop_event.wait(interval)` 或带超时 `queue.get`）。
@@ -97,16 +108,17 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 
 这种设计避免时序分析或渲染阻塞 GPU 推理热路径。
 
-### 持久化队列解耦
+### 落盘/上报的队列解耦（两条独立队列，分属两个服务）
 
-持久化服务也采用队列解耦。上游实时路径只把任务放入 `PersistenceManager` 的有界队列，慢任务由后台 worker 异步消费：
+慢 IO 全部经有界队列异步化，上游只承担入队成本：
 
-- `hls_queue` 隔离视频段写盘、ffmpeg fMP4 转码、playlist/metadata 更新。
-- `alarm_queue` 隔离外部 HTTP 告警上报。
-- `HLSWorkerPool` 和 `AlarmWorkerPool` 独立运行，避免告警上报慢拖住 HLS，或视频转码慢拖住告警。
-- 队列满会计数并返回失败，是系统背压和容量告警的观察点。
+- **录制**：`RecordingService` 的 `SerialTaskQueue`（`queue_size: 100`，**恒 1 个消费线程**）隔离视频段写盘、ffmpeg fMP4 转码、playlist/metadata 更新。它不能扩 worker——顺序即正确性（见上）。
+- **告警**：`PersistenceManager` 的 `alarm_queue` + `AlarmWorkerPool`（1 worker）隔离外部 HTTP 上报。
+- 两条队列分属两个服务、独立起停，避免告警上报慢拖住录制，或视频转码慢拖住告警。
+- 队列满即丢任务并 warning（录制侧丢一段 ≈ 丢 10 秒录像），是背压与容量告警的观察点；**不给无界选项**——无界只是把「丢一段」换成「吃光内存」。
+- 关停顺序由 `main.py` 的 lifespan 嵌套保证：recording / persistence 都在 inference 外层，`inference.stop()` 经 `run_control` 交出的结算告警与 HLS 残段仍能入队，之后队列才排空退出。
 
-这个设计把实时链路和慢 IO 分开：解码、推理、时序、可视化只承担生产持久化任务的成本，不直接承担磁盘、ffmpeg 或网络调用的不确定延迟。
+这个设计把实时链路和慢 IO 分开：解码、推理、时序、可视化只承担生产落盘任务的成本，不直接承担磁盘、ffmpeg 或网络调用的不确定延迟。
 
 ### 可维护性收益
 
@@ -115,7 +127,8 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 - Stream 只关心拉流和产帧。
 - Inference 只关心推理结果和时序告警。
 - Visualization 只关心最新快照的渲染。
-- Persistence 只关心慢 IO 和重试。
+- Recording 只关心 HLS 段何时拉、按什么顺序写、算哪一代。
+- Persistence 只关心告警上报与 TTL 回收。
 - HealthMonitor 只关心失联、重连和统一清理。
 
 这让性能问题和故障边界更容易定位，也让新增检测点、调整持久化策略、替换外部告警接口时不必重写实时主链路。
@@ -146,9 +159,9 @@ HLS 策略对每个 target_dir 使用目录级锁，确保 transcode、playlist 
 - `app/services/inference/temporal/actor.py`
 - `app/services/inference/visualization/worker.py`
 - `app/services/persistence/manager.py`
-- `app/services/persistence/workers/hls_worker.py`
 - `app/services/persistence/workers/alarm_worker.py`
-- `app/services/persistence/strategies/hls_strategy.py`
+- `app/services/recording/{service,_sweeper}.py`（录制零锁模型）
+- `app/utils/task_queue.py`（`SerialTaskQueue`：单消费者、提交序即执行序）
 - `app/main.py`（lifespan 关停编排）
 - `app/services/stream/decoder.py`（SIGKILL `stop()`）
 - `app/services/inference/detection/service.py`（`_inference_loop` + join 后内联 `is_alive` 诊断）

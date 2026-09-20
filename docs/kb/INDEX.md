@@ -1,4 +1,4 @@
-> 更新时间：2026-09-19
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -24,13 +24,15 @@
 后端开发：
 
 1. [ARCHITECTURE_API_SURFACE.md](ARCHITECTURE_API_SURFACE.md)
-2. [SERVICE_STREAM.md](SERVICE_STREAM.md)
-3. [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)
-4. [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)
-5. [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)
-6. [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)
-7. [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)
-8. [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)（动 `app/storage/` 或落盘产物前必读）
+2. [ARCHITECTURE_PACKAGE_LAYERS.md](ARCHITECTURE_PACKAGE_LAYERS.md)（动包结构、加模块、改 import 前必读）
+3. [SERVICE_STREAM.md](SERVICE_STREAM.md)
+4. [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)
+5. [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)
+6. [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)
+7. [SERVICE_RECORDING.md](SERVICE_RECORDING.md)
+8. [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)
+9. [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)
+10. [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)（动 `app/storage/` 或落盘产物前必读）
 
 运维排障：
 
@@ -63,7 +65,8 @@
 - [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)：概览 FastAPI 主进程、MediaMTX、FFmpeg、Postgres 和外部系统的组件关系。
 - [ARCHITECTURE_DATA_FLOW.md](ARCHITECTURE_DATA_FLOW.md)：追踪视频流从 RTSP 输入到推理、可视化、HLS、告警的端到端数据流。
 - [ARCHITECTURE_API_SURFACE.md](ARCHITECTURE_API_SURFACE.md)：API 路由接线图——router 归属、注册与中间件顺序、生命周期挂载（端点请求/响应契约属对外 API 文档，不在本库）。
-- [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)：说明数据模型分层（domain/ORM/DTO）、`clean_task`、`clean_alarm`、HLS 文件目录、playlist、features.jsonl 和 metadata。
+- [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)：说明数据模型分层（domain/ORM/DTO）、`clean_task`、`clean_alarm`、按域隔离的落盘布局（`{task}/{step}/hls|features|lab/`）、playlist、features.jsonl 和 metadata。
+- [ARCHITECTURE_PACKAGE_LAYERS.md](ARCHITECTURE_PACKAGE_LAYERS.md)：`app/` 五层依赖图与导入纪律——层间白名单、L0-L3 重依赖分级与 L2 的三条合法通路、服务包固定文件角色、`__init__` 两形态、单例引用面与依赖注入三档、门禁测试映射。**动包结构或新增 `app/storage/` 域文件前必读**。
 
 ## 逐服务说明
 
@@ -71,9 +74,10 @@
 - [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)：说明 ClientManager（COW 注册表，int task_id 键）、ClientQueues（per-run 不可变身份 + ACTIVE/DRAINING/CLOSED 状态机）、队列、前端消息和告警 gate。
 - [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)：说明 RunController 跨服务起停编排、per-task 锁、拆机顺序与对象身份 fence。
 - [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)：说明 InferenceManager、StageFactory、Dispatcher、模型推理、时序分析和可视化三池设计。
-- [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)：说明 HLS/告警持久化队列、worker、慢 IO 分离、fMP4 转码和告警上报。
+- [SERVICE_RECORDING.md](SERVICE_RECORDING.md)：说明 HLS 录制落盘编排——sweeper 节拍器、单消费队列、代次校验（乐观锁）与首写自清、零锁并发模型、断流残帧 flush、失败不重试的理由。**生产 HLS 写侧就是这里。**
+- [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)：说明告警上报队列与 TTL 回收（HLS 落盘已移交 recording，本包内旧 HLS 四件套仍在但不启动）。
 - [SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)：说明全局健康监控、断流重连、孤儿状态检测和统一 cleanup_client。
-- [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)：说明 SegmentFinder、MediaToken、追溯接口、媒体 token 鉴权和 VOD playlist。
+- [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)：说明任务回放与时间轴接口、MediaToken 鉴权、VOD playlist 渲染，以及段枚举收口到 `app.storage.hls` 之后的取数路径。
 - [SERVICE_LAB.md](SERVICE_LAB.md)：说明 Lab 裁剪 raw 视频、整段导出下载、Label Studio 上传、配置和失败隔离策略。
 - [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)：说明 FastAPI Gateway、独立 MediaMTX Gateway、IP 白名单、限流和 RTSP TCP 代理。
 - [SERVICE_CONFIG.md](SERVICE_CONFIG.md)：说明环境变量、YAML 配置、Gateway、Lab 和各服务之间的配置耦合点。
@@ -87,5 +91,6 @@
 - [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md)：说明如何新增 Detector（流源）、Operator（流算子，analyze+judge 合并）、YAML stage 配置和相关测试。
 - [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)：说明 fMP4、EXTINF 真值、timescale pin=90000、tfdt、在途段过滤、时间轴计算，以及逐帧 ts sidecar（`.idx`）与离线帧反查的关键约束。
 - [DESIGN_SEGMENT_CONCAT.md](DESIGN_SEGMENT_CONCAT.md)：**选型参考**——把分段视频拼成一条 ffmpeg 能吃的流，由**两条正交的轴**决定（段能否独立 demux → `-f concat`；段能否字节拼接 → `concat:` 协议）。按轴给出落盘格式分类（段自包含 / fragment + 共用 init）与消费端矩阵，再落到「四条真候选 + 四条被排除的写法」的实测对照（`-f concat` 全家被轴 1 结构性判死，不在候选之列）。**另有与轴正交的一节**：三条**静默失败**全部能骗过 `returncode != 0` + `size > 0` 型判据——`-f concat` 清单含 init → exit 0 产零流空壳；LIVE 清单缺 `ENDLIST` → 无限挂死；**路径 ① 遇坏段 → exit 0、全日志级别无输出、`-xerror` 无效，产出合法但截短的 mp4（选对路径照样会中）**。另有 Windows 路径分隔符分歧，与 `clip_builder` 能否换 ③ 的待核验项。动 lab 导出 / 裁剪 / 离线解帧的取数方式前先读。
-- [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)：数据层 `app/storage/` 的**准入判据**——什么进层什么不进（四问）、按域拆包与路径隔离、域容器 `types.py`、定位集中（L）、读写条文（R/W 三路线）、零锁、依赖与测试、门禁映射。**注意它写的是目标形态，调用点尚未迁移**（现役落盘布局见 ARCHITECTURE_STORAGE_AND_SCHEMA.md）。
+- [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)：数据层 `app/storage/` 的**准入判据**——什么进层什么不进（四问）、按域拆包与路径隔离、域容器 `types.py`、定位集中（L）、读写条文（R/W 三路线）、零锁、依赖与测试、门禁映射。**它是判据不是现状**：`hls` 域的读写调用点已全部迁入，`features` / `lab` 两域尚未接线，盘上现状见 ARCHITECTURE_STORAGE_AND_SCHEMA.md。
+- [DESIGN_SEGMENT_CONCAT_VERIFY.md](DESIGN_SEGMENT_CONCAT_VERIFY.md)：**验收判据**——与上一篇的「怎么选路」正交。四个失败点里**三个会骗过 `returncode != 0` + `size > 0`**（`-f concat` 清单含 init 产零流空壳、LIVE 清单缺 `ENDLIST` 无限挂死、坏段产出合法但截短的 mp4），而 `step_exporter` / `clip_builder` 两处现役调用点用的正是那对判据。动 lab 导出/裁剪的成功判定前先读。
 - [TESTING_MAP.md](TESTING_MAP.md)：索引现有测试覆盖面，并给后续改动提供优先补测方向。

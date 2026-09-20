@@ -1,7 +1,7 @@
 # `storage/feature.py`：features 域落地（分期改造第 3 期，零调用点改动）
 
 > **变更状态**：生效中（2026-09-09）　<!-- 新模块已落地并有单测/门禁覆盖；本期同样不接调用点，模块暂无生产消费方 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)（2026-09-20）
 >
 > <!-- 承接 20260909_STORAGE_LAYER_BASE.md（第 1 期）。期序有调整，见「变更背景 / 为什么先做 feature」。 -->
 

@@ -2,7 +2,7 @@
 
 > **变更状态**：已实现（2026-09-20）
 > **选型依据**：[20260919_VIDEO_TIMEBASE_SELECTION.md](20260919_VIDEO_TIMEBASE_SELECTION.md) Q3（该文 §6 有编号 → 章节对照表）
-> **知识库**：待沉淀 → `DESIGN_HLS_TIMELINE.md`
+> **知识库**：已沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)、[ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)（2026-09-20）
 >
 > 这是媒体轴那批改动的第一步，可独立落地、独立回滚。送标与进度条改用媒体坐标
 > （同一批选型的 Q1 / Q5）是下一步，不在本文。

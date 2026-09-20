@@ -1,7 +1,7 @@
 # 送标去掉元数据字段（LS 从来收不到）
 
 > **变更状态**：已实现（2026-09-20）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_LAB.md](../kb/SERVICE_LAB.md)（2026-09-20）
 > **相关**：[20260920_MEDIA_AXIS_MIGRATION.md](20260920_MEDIA_AXIS_MIGRATION.md)（同一个 `/lab-f3m8/submit` 契约，上一次改的是区间字段）
 
 ## 删的是什么

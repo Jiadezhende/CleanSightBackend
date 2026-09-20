@@ -1,10 +1,10 @@
-> 更新时间：2026-07-11
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # 任务生命周期
 
-一次 run 的起停由 `RunController`（控制面唯一编排出口）统一驱动，跨 stream / inference / persistence / client 各服务。运行键 = int `task_id`。编排细节见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
+一次 run 的起停由 `RunController`（控制面唯一编排出口）统一驱动，跨 stream / inference / recording / client 各服务。运行键 = int `task_id`。编排细节见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
 
 ## 启动流程
 
@@ -15,7 +15,7 @@
 3. `start_run` 全程持 `client_manager.lock_for(task_id)`（per-task RLock）：
    - 幂等/重启判断（见下）。
    - 建**新** CQ（`stage = resolve_stage(current_step)`，身份不可变）后 `client_manager.set` 注册（set/remove 均归 RunController，与 `stop_run` 对称）。
-   - `persistence_manager.start_run(cq)` 清旧 HLS step 目录 + `inference_manager.start_workflow(cq)`（含 `FeatureStore.open_fresh` + 建 Actor）。
+   - `inference_manager.start_workflow(cq)`（含 `FeatureStore.open_fresh` + 建 Actor）。**start 侧不再清 HLS 目录**——旧录像留到新 run 真写出第一段时才由 recording 自清（懒惰 supersede）。
    - `stream_service.start_stream(task_id, rtsp_url)` 起解码。
    - 注册后的 setup 步全包进 `try`：任一步失败 → `stop_run(expected=cq)` 对称回滚注销、重抛，不留泄漏 CQ。
 
@@ -27,7 +27,7 @@
 
 入口：`POST /api/terminate`，双模——body `{ task_id }`（新，首选，与 start 对称）或 query `?client_id=<source_ip>`（旧，兼容期保留）。经 `to_thread` 调 `run_controller.stop_run(task_id, reason)`。健康监控的自动结束（重连失败/孤儿/超时）经 `cleanup_client` 同样委托 `stop_run`（并传 `expected` CQ 做对象身份 fence）。
 
-`stop_run` 尽力而为、永不抛出，固定顺序：封闸 `to_draining()` → 停 decoder → 落 settlement 告警（`alarm_sink.persist_alarms`）+ flush HLS 残段 → 清 registry（`cq.close()`）→ 回收目录锁。
+`stop_run` 尽力而为、永不抛出，固定顺序：封闸 `to_draining()` → 停 decoder → 落 settlement 告警（`alarm_sink.persist_alarms`）+ flush HLS 残段（`recording_service.flush_residual(cq)`，须在 CQ 还注册着时做）→ 清 registry（`cq.close()`）→ 回收录制代次记录（`recording_service.forget_task`）。
 
 ## 任务切换
 
@@ -38,7 +38,8 @@
 - `app/routers/api.py`
 - `app/services/run_control.py`
 - `app/services/inference/manager.py`
-- `app/services/health_monitor/monitor.py`
+- `app/services/recording/service.py`（`flush_residual` / `forget_task`）
+- `app/services/health_monitor/manager.py`
 - `app/services/client/manager.py`
 - `tests/test_api_concurrency.py`
 - `tests/test_teardown_identity_fence.py`

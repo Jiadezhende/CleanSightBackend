@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -12,7 +12,7 @@
 |------|--------|------|------|
 | `[PRESSURE]` | 队列积压 / 丢帧 / 拒收 | `ClientQueues`（三条 CA 队列）+ `StageAwareDispatcher`（stage deque） | backlog：写者线程顺带驱动的周期快照 |
 | `[VIZ_THROUGHPUT]` | 成帧速率亏空 | `VisualizationWorker` | throughput：真实成帧 fps / 空转占比 / 单帧渲染耗时，自动三侧归因 |
-| `[BACKPRESSURE]` | 入口准入 / 录制队列 | `StreamService`、`FFmpegDecoder`（`stream/{service,decoder}.py`） | 准入决策 / persistence 队列满，与 `[PRESSURE]` 的队列积压语义不重叠 |
+| `[BACKPRESSURE]` | 入口准入 / 录制队列 | `StreamService`、`FFmpegDecoder`（`stream/{service,decoder}.py`） | 准入决策 / 落盘队列满，与 `[PRESSURE]` 的队列积压语义不重叠 |
 
 三者互不覆盖：`[VIZ_THROUGHPUT]` 量速率亏空、`[PRESSURE]` 量积压、`[BACKPRESSURE]` 量入口准入，正交。
 
@@ -85,7 +85,7 @@ reporter 个数 = 3 × 任务数 + active_stage 数
 ## 边界与不重叠
 
 - decoder 的 `_should_drop_frame` 入口准入背压 / `ingress_backpressure` 埋点是它自己的**准入决策**，与 CQ 报的**队列积压**语义不重叠。
-- persistence 的 `hls_queue`/`alarm_queue` 满目前是**每次丢都打一条 warning**，属同类问题但不在 `[PRESSURE]` 体系内。
+- recording 的落盘队列与 persistence 的 `alarm_queue` 满目前是**每次丢都打一条 warning**，属同类问题但不在 `[PRESSURE]` 体系内。
 - `_admit_to_stage` / `_stage_backpressure` 接缝已就位但恒放行（自动降帧/限流/降级留后续）。
 
 ## 代码来源

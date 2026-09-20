@@ -1,16 +1,14 @@
-> 更新时间：2026-09-13
-> 依据来源：代码分析（`app/storage/` 全量 + `tests/test_storage_*.py`）
+> 更新时间：2026-09-20
+> 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # 数据层 `app/storage/` 设计规范
 
 **本文是准入判据，不是现状描述。** 新增域文件、新增成员、review 存储层 PR 时按它判。
 
-> **适用范围与当前状态**：`app/storage/` 的代码已全部落地并有单测覆盖，但**生产调用点一个
-> 都没迁**——现役落盘布局仍是 `{task}/{step}/` 平铺（见
-> [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)），本文描述的
-> `{step}/{domain}/` 域隔离布局在迁移完成那一刻才生效。**迁移进度不在知识库维护**（它是
-> 过程状态，随迁移完成消失）：各期做了什么见 `docs/update/` 里的 `*_STORAGE_*` 系列记录。
+> **适用范围**：本文给的是全层通用的判据，**不逐域记录哪个域已有生产调用点**——那是过程
+> 状态，盘上此刻长什么样见
+> [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)。
 >
 > **条文编号是代码引用的一部分**：R/W/L/D/T、路线 A/B/C、设计约束 1–8 被 12 处 docstring 与
 > 测试直接引用，**改条文可以，改编号要先搜引用**。代码里残留的 `§7.x` 写法见 §10 对照。
@@ -129,9 +127,9 @@ delete_<对象>   删除，只执行不判断
 
 三条配套约定：
 
-- **过滤条件进名字，不进 bool 参数**：`list_playable_segments` / `list_segments_in_range`，
-  而不是 `list_segments(playable_only=True, start_ts=...)`。理由见 R4/R5 的取舍——一次调用
-  一次扫盘，过滤判据往往与要一起返回的字段同源。
+- **过滤条件进名字，不进 bool 参数**：`list_segments_in_range`，而不是
+  `list_segments(start_ts=..., end_ts=...)`。理由见 R4/R5 的取舍——一次调用一次扫盘，过滤
+  判据往往与要一起返回的字段同源。
 - **返回 id 列表就在名字里说明**：`list_step_ids` 返回 `List[int]`，不叫 `steps`（那读起来
   像返回 step 对象）。
 - **同义动词只留一个**：删除一律 `delete_`（不用 `remove_` / `purge_`），读一份产物一律
@@ -142,6 +140,7 @@ delete_<对象>   删除，只执行不判断
 > `select_segments` → `list_segments_in_range`、`load_features` → `read_features`、
 > `remove_features` → `delete_features`、`purge_step` → `delete_step`、`steps` →
 > `list_step_ids`、`ids` → `list_task_ids`）。早于 2026-09-13 的变更记录里仍是旧名。
+> 其中 `list_playable_segments` 后来随段枚举收口一并消失，现在叫 `list_segments`（见 §4）。
 
 ### 路径隔离靠两道执行机制，不是约定
 
@@ -154,8 +153,10 @@ delete_<对象>   删除，只执行不判断
   lab/       送标 clip 与整段导出的临时件（用完即删，残留随 step TTL 回收）
 ```
 
-**step 根下只有域目录、没有文件；存储根下只有数字命名的 task 目录**（`.lab_exports/` 与
-`lab_runtime_config.json` 两个寄居者随之出局）。
+**step 根下只有域目录、没有文件；存储根下只有数字命名的 task 目录**——`.lab_exports/` 与
+`lab_runtime_config.json` 这类寄居者不符合它。这是本层对产物落点的要求，层外自己拼路径的写者
+不受它约束；盘上此刻哪些产物已经进来了见
+[ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)。
 
 | 机制 | 挡什么 | 不挡会怎样 |
 |---|---|---|
@@ -178,11 +179,11 @@ mtime，`{step}/` 本身纹丝不动（它只在新建域目录那一刻变）�
 
 ## 2. 域容器：`types.py` 集中声明本域收发的形状
 
-`app/storage/hls/types.py` 已落地（`SegmentRef` / `PlayableSegment`）。形状该放哪，三问：
+`app/storage/hls/types.py` 已落地（`SegmentRef` / `Segment`）。形状该放哪，三问：
 
 | 问 | 归属 | 例子 |
 |---|---|---|
-| 换掉落盘格式，它会不会跟着消失？ | 会 → **域 `types.py`** | `SegmentRef` 就是文件名解出来的；`PlayableSegment` 的"已登记"来自清单键集合 |
+| 换掉落盘格式，它会不会跟着消失？ | 会 → **域 `types.py`** | `SegmentRef` 就是文件名解出来的；`Segment` 的身份与时长都来自清单同一行 |
 | 不会，且是全仓通用的内存契约 | `app/domain/` | `Frame` / `FrameFeature` |
 | 它是给别人消费的**装配产物**，不是资源的元数据 | 出域 | `VodEntry` → `app/services/utils/vod_playlist.py` |
 
@@ -198,11 +199,11 @@ mtime，`{step}/` 本身纹丝不动（它只在新建域目录那一刻变）�
    `types` 反向依赖 `_layout`，底就不是底了。
 2. **只放对外契约**。函数内部传参用的四行 NamedTuple 放在用它的地方旁边。
 3. **准入判据 2 同样适用**：「有几个包会因为它变了而出错？< 2 不进」。`Step` 摘要建了又撤，
-   因为只有 `app/routers/task.py` 一个消费方，它拿 `list_segments_by_track` 自己统计即可。
+   因为只有 `app/routers/task.py` 一个消费方，它逐轨调 `list_segments` 自己统计即可。
 4. **同名不同义要避开**：`step` 在本仓已是业务实体（`clean_task.current_step`、
    `clean_alarm.step_id`），域内不再定义同名类型。
 
-**读侧产出的档数要卡住**：hls 域只出两种——① 段容器（`SegmentRef` / `PlayableSegment`），
+**读侧产出的档数要卡住**：hls 域只出两种——① 段容器（`SegmentRef` / `Segment`），
 ② `Frame`。第三种形状要进来，先答「它是资源的元数据，还是给别人消费的装配产物」。
 
 ---
@@ -263,8 +264,8 @@ def _domain_root(task_id, step_id, *, create=False) -> Path:
   `database/`**。
 
 **路径出层、根不出层**（设计约束 3）：不出路径就得把每个用到路径的动作（`FileResponse`、
-送标导出）都搬进来，那正是上帝类的长法。兑现物是删掉 10 处
-`SegmentFinder(get_default_base_dir())` 构造样板——层只出模块函数，不出句柄。
+送标导出）都搬进来，那正是上帝类的长法。兑现物已到手——调用侧那 10 处
+`SegmentFinder(get_default_base_dir())` 构造样板全数消除：层只出模块函数，不出句柄。
 
 ---
 
@@ -275,15 +276,19 @@ def _domain_root(task_id, step_id, *, create=False) -> Path:
 | R1 | **出结构，不出字节、不出句柄** | 返回 dataclass / NamedTuple / ndarray / 基本类型；不出 `IO`、不出裸 `bytes` |
 | R2 | **不出目录、不出存储根**；载荷字节的取用位置照出 `Path` | 出目录 = 把布局复制给调用方，且门禁抓不到（`dir / "x"` 是普通拼接） |
 | R3 | **只解析本域格式，不做业务判断，不出领域异常** | 阈值、该不该删、算不算停顿、映射成什么状态码，一律留调用方。多态失败用**事实枚举 + NamedTuple**（`Vod(state, text, segments)`），不是 `Optional[str]` |
-| R4 | **落盘状态是事实，可做过滤参数**；选错会静默出错的参数**必填、无默认** | `ids(order=)` 可给默认（选错只影响清单顺序）；`read_segment` 的 `width`/`height` 不给默认（下游会变成 train-serve skew） |
+| R4 | **落盘状态是事实，可做过滤参数**；选错会静默出错的参数**必填、无默认** | `list_task_ids(order=)` 可给默认（选错只影响清单顺序）；`read_segment` 的 `width`/`height` 不给默认（下游会变成 train-serve skew） |
 | R5 | **一次调用一次扫盘** | 按「一次调用 = 一件事」切函数；不照搬取值器，也不合成跨口径黑盒 |
 | R6 | **环境坏了原样抛，内容坏了逐行隔离** | 打不开 / 写不进 / 建不了目录 → `OSError` 原样抛；单条记录解析不出 → 跳过 + warning，不让一行毁掉整个文件 |
 
 **R4 与 R5 打架时，切函数优先**：hls 读侧曾设计成 `list_segments(..., playable_only=)` 必填
-bool，改成了 `list_segments`（盘上有哪些段）+ `list_playable_segments`（已登记、带 EXTINF）两个
-函数——过滤判据与段时长同源于清单键集合，bool 参数方案下调用方拿到段之后还要再读一次
-playlist。代价如实记账：类型上挡不住「直接用 `list_segments` 忘了滤」，防护退化成
-docstring + review。
+bool，改成了两个函数——过滤判据与段时长同源于清单键集合，bool 参数方案下调用方拿到段之后
+还要再读一次 playlist。
+
+**但一个域里「有哪些 X」最终只许有一个入口**：上面那两个函数中枚举文件系统的那一个（盘上有
+哪些段）后来被**整个删除**，不是降级成私有——`__all__` 拦不住包内误用，留着就是第二个真源。
+收口后只剩 `list_segments`（读清单，带 EXTINF）与它的区间切片 `list_segments_in_range`，两者
+同源、同返回类型。删掉之后「忘了滤」这个风险随之消失，R4/R5 的取舍也不再需要靠 docstring +
+review 兜底——**能删掉一个口径，就别留着靠约定**。
 
 **字节的转换归谁做**：
 
@@ -399,7 +404,7 @@ docstring + review。
 | T5 | **并发有一条真测试**：多线程同时写同一冲突键，断言产物齐备、清单行数正确、位置相关字段（如 tfdt）不碰撞。测试碰私有面在 T3/T5 是正当的——被测的是内部不变式，不是公开契约 |
 
 现有覆盖见 `tests/test_storage_tasks.py` / `test_storage_feature.py` / `test_storage_hls.py`
-（三者合计 244 条）与 [TESTING_MAP.md](TESTING_MAP.md)。
+（三者合计 224 条）与 [TESTING_MAP.md](TESTING_MAP.md)。
 
 ---
 
@@ -429,8 +434,8 @@ docstring + review。
 | L2 外部输入经 `parse_*` | ✅ `parse_segment_name` / `parse_init_name` 对 `../`、绝对路径、非法 track、非数字 ts 返回 `None`；`segment_path` 入参不收裸 `str` |
 | R4 正确性参数必填 | ✅ 漏传 `TypeError` |
 | D3 子进程必须带超时 | ✅ AST 扫 `subprocess.*` 调用有无 `timeout=` |
-| L5 `settings.storage_base_dir` 访问面收敛 | ⏳ 迁移阶段 6（现在加会立刻红） |
-| 文件名字面量不出层 | ⏳ 迁移阶段 6。**AST 扫 `ast.Constant` 并跳过 docstring**，不能 grep（`_segment_` 会命中 30 多处 `ca_segment_len`） |
+| L5 `settings.storage_base_dir` 访问面收敛 | ⏳ 未加。层外仍有若干处直读它（lab 临时件根、offline runner/cli 的 base_dir），现在加会立刻红 |
+| 文件名字面量不出层 | ⏳ 未加。**AST 扫 `ast.Constant` 并跳过 docstring**，不能 grep（`_segment_` 会命中 30 多处 `ca_segment_len`） |
 | R1 / R3 | ⚠️ 靠返回类型标注 + review |
 | D3 的另两个条件（失败作废、只用于编解码） | ⚠️ review |
 | **W 的路线选择（A / B / C）** | ❌ **不可测，只能 review**。这是本规范最需要人看的一条：走错不会红，表现是「中间态被读到」，而那正是静默失败。新增域文件的 PR 必须在描述里写明每类产物选了哪条路线及理由 |
@@ -465,7 +470,7 @@ docstring + review。
 
 - `app/storage/__init__.py`（边界清单与设计约束，与本文 §0 / §9.1 必须一致）
 - `app/storage/_root.py`（`DOMAINS` 白名单、`path()` 逐级下钻、根解析记忆化）
-- `app/storage/tasks.py`（`steps` / `ids` / `delete_step`）
+- `app/storage/tasks.py`（`list_step_ids` / `list_task_ids` / `delete_step`）
 - `app/storage/feature.py`（`features.jsonl` 读写，路线 B）
 - `app/storage/hls/`（`types` / `_layout` / `_encode` / `_decode` / `_fmp4` / `_m3u8` /
   `_idx` / `_meta` / `_write` / `_read`）

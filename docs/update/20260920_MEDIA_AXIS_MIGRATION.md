@@ -4,7 +4,7 @@
 > **选型依据**：[20260919_VIDEO_TIMEBASE_SELECTION.md](20260919_VIDEO_TIMEBASE_SELECTION.md)
 > Q1 / Q3 / Q5 / Q6 / Q7（Q 编号是稳定锚点，该文 §6 有编号 → 章节对照表）。
 > **本文实现的就是该文的选型结论**：UI 侧统一媒体轴，是当前需求下的采用项，不是降级方案。
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)、[SERVICE_LAB.md](../kb/SERVICE_LAB.md)、[BUSINESS_TRACEBACK_AND_LAB.md](../kb/BUSINESS_TRACEBACK_AND_LAB.md)（2026-09-20）
 > **前置**：[20260920_SEGMENT_QUERY_VIA_PLAYLIST.md](20260920_SEGMENT_QUERY_VIA_PLAYLIST.md)
 > （段查询收口到清单，已单独提交）
 
@@ -199,7 +199,7 @@ sweeper 读"。实际有**三个**线程碰它（第三个是队列线程的 `_f
 
 ---
 
-> **知识库沉淀**：本文标「待沉淀 → `DESIGN_HLS_TIMELINE.md`」。本文全篇是落地记录，
+> **知识库沉淀**：本文已沉淀（落点见文首状态轴）。本文全篇是落地记录，
 > 描述的就是现状；**PDT 未实现**，它只出现在 §5 的未触发清单里。沉淀时把
 > "UI 侧统一媒体轴、持久化落墙钟"写成现行设计，把墙钟横轴那一组写成条件触发的备选，
 > 别写成待办欠账。

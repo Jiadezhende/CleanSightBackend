@@ -1,4 +1,4 @@
-> 更新时间：2026-09-02
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -29,15 +29,38 @@
 ## 推理与时序
 
 - `tests/test_inference_stage_routing.py`：`current_step` 到 stage 路由；`start_workflow` 不碰注册表（不 `set`）。
-- `tests/test_pool_ts_anchor.py`：帧捕获 ts 锚点不变式——pool 穿透 `timestamps` 到 detector，各帧 `FrameDetections.timestamp` 精确等于捕获 ts（供写回口按 ts 一次物化整帧多流 `FrameFeature` 对齐）。
+- `tests/test_stage_worker_ts_anchor.py`：帧捕获 ts 锚点不变式——穿透 `timestamps` 到 detector，各帧 `FrameDetections.timestamp` 精确等于捕获 ts（供写回口按 ts 一次物化整帧多流 `FrameFeature` 对齐）。
 - `tests/test_temporal_debounce.py`：时序去抖逻辑。
-- `tests/test_boundary_layers.py`：边界层行为。
+- `tests/test_operator_framework.py`：Operator（流算子）框架契约。
+- `tests/test_infer_proxy.py`：`RemoteInferProxy` 主进程侧——req_id 关联、pending 有界、子进程失败后的孤儿清理。**不 spawn 真子进程、不碰 GPU**（绕过 `_spawn_child`，注入假 `req_q` 手动置 `child_ready`）。
+- `tests/test_boundary_layers.py`：边界层行为（RetryExecutor / CircuitBreaker / 各类异常 handler 的 HTTP 映射）。
 - `tests/test_exception_handling.py`：异常分类和处理。
+
+## 数据层 `app/storage/`
+
+全部用 `tmp_storage` fixture 把存储根指到临时目录，不碰真实 `database/`。
+
+- `tests/test_storage_tasks.py`：`_root` 的根解析 + `tasks` 的定位/枚举/删除。只断言路径与目录事实，不涉及任何产物的内容格式。
+- `tests/test_storage_hls.py`：`{step}/hls/` 的定位、编解码与写入事务。
+- `tests/test_storage_feature.py`：`features.jsonl` 的编解码与读写（`facts.jsonl` 不归本模块管，只当邻居造出来验「删自己那份」与「purge 整个 step」）。
+- `tests/test_storage_cleanup_ttl.py`：TTL 判据 = `{task}/{step}/` 目录自身 mtime，**对平铺与分域两种布局一视同仁**。守的是接线那一刻最容易单向漏盘的一条——`metadata.json` 挪进 `{step}/hls/` 后旧 `glob` 判据会变成「老数据照常回收、新数据永不回收」，两端都不报错。
+
+## 录制与落盘编排
+
+- `tests/test_recording_service.py`：**只钉编排**（代次校验 / 打包 / 懒惰 supersede），格式怎么落盘归 `test_storage_hls.py`。
+- `tests/test_task_queue.py`：`SerialTaskQueue` 的提交序 == 执行序 + 串行性。HLS 去掉目录锁之后，「旧残段先落盘再整个 purge」「同轨相邻段 tfdt 不错位」两条正确性全押在这上面——这里松一寸，那边就是静默的回放跳段。
+- `tests/test_cq_drain_fence.py`：`drain_ca_*` 的时间戳栅栏，即断流 flush 的切点。全排空会把重连后的帧跟断流前的帧拼进同一段，`eff_fps` 由首末帧跨度反推、跨度里混着整个 gap ⇒ 10 秒画面写成 30 秒慢放，且 fps 仍落在 `[1,60]` 内不触发退化兜底，**全程无一条报警**。
+- `tests/test_hls_eff_fps.py`：段编码帧率反推与退化兜底。
+
+## 分层与导入门禁
+
+- `tests/test_import_hygiene.py`：**必须起子进程**——pytest 主进程早被别的用例把 torch/cv2 装进 `sys.modules`，在本进程里测等于没测。四类断言：导入预算（L2 重依赖 + 耗时上限）、storage/services.utils 的 `app.*` 白名单、单例引用面、services 不得 import routers。新增 storage 域文件必须同时在 `BUDGET` 加一行，由 `test_layer_package_modules_are_all_budgeted` 强制。
 
 ## 流与重连
 
 - `tests/test_stream_rewrite.py`：RTSP URL 内部端口改写。
 - `tests/test_reconnect_on_initial_failure.py`：初始拉流失败后重连。
+- `tests/test_rtsp_read_timeout.py`：`-timeout` 必须来自 `settings.rtsp_read_timeout_s`（不再硬编码），外加与 `cleanup_timeout` 的串联预算护栏。钉的是实测结论——静默断流下 ffmpeg 要连续两次读超时才退出，**判死延迟 = 2 × `-timeout`**。
 - `integration_tests/test_single_client.py --scenario 2/3`：断流重连（成功 / 超时自动清理）端到端场景。
 
 ## Gateway
@@ -48,25 +71,37 @@
 ## 追溯与媒体
 
 - `tests/test_traceback_router.py`：追溯路由。
-- `tests/test_traceback_segment_finder.py`：段定位。
 - `tests/test_traceback_media_token.py`：媒体 token。
+- `tests/test_media_timeline.py`：`MediaTimeline` 的媒体轴展开与墙钟↔媒体双向换算。被测的核心事实只有一条——**媒体轴是压紧的墙钟**，段间空隙在它上面不存在，于是「首段墙钟 + 媒体刻度」只在从没断过流时成立。
+- `tests/test_utils_vod_playlist.py`：VOD m3u8 文本渲染（纯函数，无落盘）。
+- `tests/test_task_live_history_api.py`：`/task/history` 两阶段扫描。
 
 ## Lab
 
-- `tests/test_lab_clip_builder.py`：Lab 裁剪构建。
-- `tests/test_lab_step_exporter.py`：整段导出（在途段过滤、缺 init、临时 m3u8 清理、孤儿回收）。
+- `tests/test_lab_clip_builder.py`：Lab 裁剪构建（媒体坐标选段与偏移）。
+- `tests/test_lab_step_exporter.py`：整段导出（缺 init、临时 m3u8 清理、孤儿回收）。
+- `tests/test_lab_tasks_api.py`：Lab 任务列表接口。
+
+## 覆盖已退役实现的用例（随清理期一起删）
+
+`tests/test_traceback_segment_finder.py` 与 `tests/test_hls_segment_sweeper.py` 测的是
+`traceback/segment_finder.py` 与 `persistence/workers/segment_sweeper.py`——两者**已无现役
+调用点**，其能力分别由 `app.storage.hls` / `app.storage.tasks` 与 `app/services/recording/`
+承接。它们现在绿不代表生产路径绿，删旧实现时连同这两个文件一起删。
 
 ## 离线帧反查（`frame_tracker`）
 
 **两个测试互补，都要跑**——边界数学与「解出来的像素是不是那一帧」是两回事：
 
-- `tests/test_frame_tracker_boundary.py`（进 `pytest tests/`）：**seam 单测，不起 ffmpeg**。子类覆盖
-  `_run_ffmpeg` 改为按 sidecar 合成 Frame（真实实现的契约就是「产出 `sidecar[k_start..k_end]` 对应的
-  帧」），造数只需空 `raw_segment_{ts_us}.mp4` 占位（`SegmentFinder` 只解析文件名）+ 真 `.idx`；复用
-  `tmp_storage` fixture。覆盖段级/帧级边界、空区间、缺 sidecar 降级。
+- `tests/test_frame_tracker_boundary.py`（进 `pytest tests/`）：**seam 单测，不起 ffmpeg**。覆盖解码
+  seam 改为按 sidecar 合成 Frame（真实实现的契约就是「产出 `sidecar[k_start..k_end]` 对应的帧」）；
+  复用 `tmp_storage` fixture。覆盖段级/帧级边界、空区间、缺 sidecar 降级。
 - `integration_tests/test_frame_tracker_roundtrip.py`（手动跑，约 10s）：**唯一能抓 ts↔像素错配的手段**。
-  只依赖 ffmpeg，不需要 RTSP/DB/后端服务；走真实 `HLSPersistenceStrategy` 落盘再读回，帧内中心色块编码
-  frame_id（三通道 16 阶量化抗 H.264 有损）逐帧比对。写 `database/9900002/` 后自清理。
+  只依赖 ffmpeg，不需要 RTSP/DB/后端服务；真实落盘再读回，帧内中心色块编码 frame_id
+  （三通道 16 阶量化抗 H.264 有损）逐帧比对。写 `database/9900002/` 后自清理。
+
+> 解码与裁剪已整个下沉到 `app.storage.hls`，`FrameTracker` 只剩位级配对，且**只服务 raw 轨**
+> （processed 按契约不落 sidecar）。动 sidecar 写读顺序或边界时两个都要跑。
 
 ## 覆盖率基线与缺口分层
 
@@ -76,14 +111,15 @@
 
 **缺口分两类，策略相反**：
 
-- **桶 1 — I/O 边界，集成-only，低覆盖是有意**：`stream/decoder.py`、`persistence/strategies/hls_strategy.py`（编码腿）、`inference/detection/pool.py`（CUDA infer_batch）、`inference/visualization/visualizer.py`、`routers/ai.py`（WS 推流循环）、`persistence/workers/*`（线程循环）。硬写单测＝测 mock 不测真实行为，负 ROI；纯逻辑（`_effective_fps`/切段/ROI）早已抽出单测，真实保障靠 `integration_tests/` + 远程真流审计。
+- **桶 1 — I/O 边界，集成-only，低覆盖是有意**：`stream/decoder.py`、`storage/hls/_encode.py` 与 `_fmp4.py`（编码/转码腿）、`inference/detection/pool.py`（CUDA infer_batch）、`inference/visualization/visualizer.py`、`routers/ai.py`（WS 推流循环）、`persistence/workers/*` 与 `recording/_sweeper.py`（线程循环）。硬写单测＝测 mock 不测真实行为，负 ROI；纯逻辑（`_effective_fps`/切段/ROI）早已抽出单测，真实保障靠 `integration_tests/` + 远程真流审计。
 - **桶 2 — 轻缺口（纯函数/线程本地），已补**：`utils/context.py`（`test_context.py`）、`utils/decorators.py`（`test_decorators.py`）、`routers/admin.py`（`test_admin_serialization.py`）。
   - 补 admin 序列化测时**顺带修一个真 bug**：prometheus 对 Counter **剥 `_total` 后缀**（`Counter("frame_drop_total")` → family 名 `frame_drop`），`_parse_metrics_json` 原用 `families.get("frame_drop_total")` 查 family 名，5 指标中 4 个恒 miss。两处收口：admin 4 处 `families.get` 键去后缀 + [metrics.py](../../app/utils/metrics.py) 4 个 Counter 定义名去 `_total`。对外 `/metrics`/PromQL/输出 JSON 键全不变（库自动补 `_total`）。
 
 ## 建议补测
 
 - 新增检测任务时，补 Detector/Analyzer 单元测试和 YAML 加载测试。
-- 修改 HLS 写入逻辑时，补 playlist EXTINF、在途段过滤、timeline end_ms 测试。
+- 修改 HLS 写入逻辑时，补 playlist EXTINF、timeline end_ms 测试。
+- 新增 `app/storage/` 域文件时，**必须同时在 `test_import_hygiene.py` 的 `BUDGET` 加一行**，否则门禁直接红。
 - 修改清理流程时，补结算告警归属和残余段 flush 测试。
 - 修改 Gateway 配置时，补 relaxed/bypass/normal 三类路径测试。
 - 修改 Lab 上传时，补单段失败不影响整请求的响应结构测试。
@@ -94,6 +130,8 @@
 - `tests/`（`factories.py` 构造单一真源、`conftest.py` 共享 fixture）
 - `.coveragerc`（覆盖率配置）
 - `integration_tests/`
+- `app/storage/`
+- `app/services/recording/`
 - `app/services/inference/`
 - `app/services/persistence/`
 - `app/routers/traceback.py`

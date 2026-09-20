@@ -1,7 +1,7 @@
 # 推理子进程收尸：队列 feeder 线程卡死导致后端进程退不出去
 
 > **变更状态**：生效中（2026-09-02）——`_kill_child` 原先只 `q.close()`，无法逼停阻塞中的 QueueFeederThread。一次子进程 wedge 就会留下一具永不退出的尸体线程，挂死整个后端进程的退出，须按两次 Ctrl-C 才能杀掉。
-> **知识库**：待沉淀 → `kb/SERVICE_INFERENCE.md`（进程边界收尸契约）
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-09-20）
 
 ## 概述
 

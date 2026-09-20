@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -24,7 +24,7 @@ RTSP (仅 RTSP)
   -- Viz --> VisualizationWorker（独立线程，轮询快照渲染）
                ├─ append_ca_processed -> ca_processed（processed HLS 纯缓冲）
                └─ set_latest_rendered -> _latest_rendered 快照
-                    ├─ PULL: HLSSegmentSweeper 周期 take_*_segment() -> HLS 分段落盘
+                    ├─ PULL: recording.SegmentSweeper 周期 collect_from(cq) -> HLS 分段落盘
                     └─ WS /ai/video 前端 ~10ms 轮询快照（非后端 push）
 ```
 
@@ -42,7 +42,9 @@ RTSP (仅 RTSP)
 
 ## 落盘与告警（PULL 模型）
 
-HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不触发落盘；persistence 的 `HLSSegmentSweeper` 周期 `take_raw_segment()`/`take_processed_segment()` 主动拉整段。持久化两条队列：HLS queue（raw/processed mp4、playlist、metadata）、Alarm queue（HTTP 上报）。告警过闸编排在 `inference/temporal/alarm_sink`，persistence 只做无状态落库。
+HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不触发落盘；周期拉取者是 **recording 的 `SegmentSweeper`**（纯节拍器，每 1s 对每个活跃 CQ 调一次 `RecordingService.collect_from`，由服务决定取什么、按什么顺序取）。段经单消费者 `SerialTaskQueue` 串行落 `{task}/{step}/hls/`，格式归 `app/storage/hls`，详见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)。
+
+persistence 只剩告警队列（HTTP 上报）与 TTL 回收；其旧的 `HLSSegmentSweeper` / `hls_pool` 仍在 `__init__` 里构造但**不启动**（启回来会与 recording 双 drain，见 [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)）。告警过闸编排在 `inference/temporal/alarm_sink`，persistence 只做无状态落库。
 
 ## online / offline 分离
 
@@ -80,4 +82,5 @@ HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不
 - `app/services/inference/feature/store.py`（`FeatureStore.load` / `FactLedger.replace_segments`）
 - `app/services/inference/offline/{runner,segmenter,cli}.py`、`app/services/inference/offline/impl/{clean,mock}.py`
 - `app/services/inference/config.py`（`resolve_stage`）、`app/services/inference/stage_factory.py`（`create_offline_segmenter`）
-- `app/services/persistence/manager.py`、`app/services/persistence/workers/segment_sweeper.py`
+- `app/services/recording/{service,_sweeper}.py`（HLS PULL 落盘写侧）、`app/storage/hls/`
+- `app/services/persistence/manager.py`（告警入队 + TTL 回收）

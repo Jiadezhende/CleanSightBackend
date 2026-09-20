@@ -1,7 +1,7 @@
 # `SerialTaskQueue` 瘦身：注释压掉 1/4，去掉三处不产生作用的设计
 
 > **变更状态**：生效中（2026-09-19）　<!-- 仅 app/utils/task_queue.py + 其单测；无调用点改动 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_CONCURRENCY_AND_QUEUES.md](../kb/DESIGN_CONCURRENCY_AND_QUEUES.md)（2026-09-20）
 
 ## 概述
 

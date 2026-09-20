@@ -1,7 +1,7 @@
 # hls 域落地：一条 `insert_segment` 吞下从内存帧到可播段的全流程，零调用点改动
 
 > **变更状态**：生效中（2026-09-11）　<!-- 新子包已落地并有 74 条单测覆盖；本期刻意不接调用点，`hls_strategy` 原样保留，运行时行为零变化 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)（2026-09-20）
 >
 > **追加（2026-09-11，随 [RECORDING_SERVICE](20260911_RECORDING_SERVICE.md) 一起做的三处）**：
 > ① `_insert.py` 改名 **`_write.py`**，新增域粒度删除 `delete(task_id, step_id)`——两个都是

@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -15,7 +15,8 @@
 1. **幂等 / 重启清理**：同 task 已有 run 时，`step_id` 与 URL 均未变才幂等返回；任一变化则 `stop_run` 停旧后全量重建。
 2. **建 CQ**：`stage = inference_manager.resolve_stage(current_step)`，构造不可变身份 CQ（含 `source_ip` 被动字段）。
 3. **注册 CQ**：`client_manager.set(task_id, cq)`（COW 发布）。**CQ 的 set/remove 均归 RunController**，与 `stop_run` 的 `client_manager.remove` 对称（set 先、remove 后，镜像）；`start_workflow` 不再自行 set。set 后的所有 setup 步（4、5）包进一个 `try`：任一步失败即回滚注销，避免 CQ 泄漏在注册表。
-4. **storage supersede**（与 stop 侧对称的两个 service 钩子）：`persistence_manager.start_run(cq)` 清空旧 HLS step 目录（无 owner，纯 rmtree）；`inference_manager.start_workflow(cq)` 内含 `FeatureStore.open_fresh`（认领 owner + 截断旧 `features.jsonl`）。均在建并注册新 CQ 之后、无活跃 worker 写该 `(task,step)` 之前完成。
+4. **storage supersede**（start 侧**只剩一个钩子**）：`inference_manager.start_workflow(cq)` 内含 `FeatureStore.open_fresh`（认领 owner + 截断旧 `features.jsonl`），在建并注册新 CQ 之后、无活跃 worker 写该 `(task,step)` 之前完成。
+   > **HLS 侧此处不再有任何 purge 调用**：原 `persistence_manager.start_run(cq)` 是 eager rmtree 整个 step 目录，已换成 recording 的**懒惰首写自清**——本代次第一次真正写出一段时才 `hls.delete(task, step)`。语义不同故删而非改指：新 run 若一段都没写出来，旧录像原样保留、用户还能回放。
 5. **起流**：`stream_service.start_stream(task_id, rtsp_url)`（decoder 键 = task_id；系统只用 RTSP）。
 
 **失败回滚**：4/5 任一步抛错（`start_workflow` 失败抛 `AppError`）→ `stop_run(task_id, expected=cq)` 对称回滚（尽力而为停 decoder/actor、关 feature、`client_manager.remove` 注销 CQ），再重抛。`expected=cq` 做身份 fence，防误清已被 `/start` 换上的健康新 CQ。
@@ -27,15 +28,16 @@
 0. **对象身份 fence**（`expected` 仅 HealthMonitor 自动结束路径传）：HM 在 monitor 线程「先决策后拿锁」，决策→拿锁之间槽位可能被 `/start` 重启换新 CQ；若当前槽位已非 `expected`，整段放弃，防误删健康新 run。api 控制面持锁内决策+执行、无 ABA，不传 expected。
 0b. **封闸** `cq.to_draining()`：ACTIVE→DRAINING，封生产者写；迟到写被门拒不串台，settlement 告警 + HLS flush 仍放行。
 1. **停 decoder**：`stream_service.stop_stream(task_id)`（`skip_decoder=True` 用于孤儿流）。
-2. **落盘残余**（按 owner 归位）：`inference_manager.stop_workflow(cq)` 停 actor + 关 feature 分区并交出 settlement 告警 → `alarm_sink.persist_alarms(settlement, cq, mode=SETTLEMENT)`（别名已由 actor 烧进 `alarm.stage`）→ 清前端槽（`set_latest_temporal([])` / `set_latest_rendered(None)`）→ `persistence_manager.flush_residual_segments(cq)` 落 HLS 残段。
+2. **落盘残余**（按 owner 归位）：`inference_manager.stop_workflow(cq)` 停 actor + 关 feature 分区并交出 settlement 告警 → `alarm_sink.persist_alarms(settlement, cq, mode=SETTLEMENT)`（别名已由 actor 烧进 `alarm.stage`）→ 清前端槽（`set_latest_temporal([])` / `set_latest_rendered(None)`）→ `recording_service.flush_residual(cq)` 落 HLS 残段。
+   > **残段 flush 必须在 CQ 还注册着时做**（早于 step 4 的 `forget_task`，也早于 step 3 的 registry.remove → `cq.close()` 释放帧）：recording 的首写自清以「`current is job.cq`」为前提，拆除后才执行的残段因此只追加、不删目录。
 3. **清 registry**：传 `expected` 走 `remove_if`（身份 fence 删除），否则 `remove`；`cleanup=True` 内含 `cq.close()`（置 CLOSED + 释放 payload）。
-4. **回收 HLS 目录锁**：`persistence_manager.release_task_locks(task_id)`。
+4. **回收录制代次记录**：`recording_service.forget_task(task_id)`（防 `_claimed_by` 随 `(task, step)` 单调增长）。它自己也排进 recording 的队列，FIFO 保证执行在本代次所有段之后。**原「回收 HLS 目录锁」已不存在**——目录锁随 persistence 写侧一起退场。
 
 ## 职责边界
 
 - **告警落库归属**：过闸编排（`persist_alarms`）在 `inference/temporal/alarm_sink`，persistence 只做无状态落库。RunController 只在拆除结算点调用 `alarm_sink.persist_alarms`（别名已由 actor 构造期一次性烧进 `alarm.stage`，落库直读 `alarm.stage`/`alarm.metric`，不再传 `stage_name`）。
   > 边界固定：告警过闸/编排（`alarm_sink.persist_alarms`）归属 inference 域（`inference/temporal/`），**不迁入 persistence**；persistence 只做无状态落库。
-- **owner 清晰**：decoder=StreamService、workflow/actor/feature=InferenceManager、HLS 残段/目录锁=PersistenceManager、registry=ClientManager。RunController 只按顺序驱动各 owner，不代持其资源。
+- **owner 清晰**：decoder=StreamService、workflow/actor/feature=InferenceManager、HLS 残段与代次记录=RecordingService、告警落库=PersistenceManager、registry=ClientManager。RunController 只按顺序驱动各 owner，不代持其资源。
 
 ## 代码来源
 
@@ -43,6 +45,6 @@
 - `app/services/client/manager.py`（`lock_for` / `set` / `remove_if`）
 - `app/services/inference/instance.py`、`app/services/inference/manager.py`（`start_workflow` / `stop_workflow` / `resolve_stage`）
 - `app/services/inference/temporal/alarm_sink.py`（`persist_alarms`）
-- `app/services/persistence/manager.py`（`start_run` / `flush_residual_segments` / `release_task_locks`）
+- `app/services/recording/service.py`（`flush_residual` / `forget_task`）、`app/services/recording/instance.py`
 - `app/services/stream/service.py`（`start_stream` / `stop_stream`）
 - `tests/test_teardown_identity_fence.py`

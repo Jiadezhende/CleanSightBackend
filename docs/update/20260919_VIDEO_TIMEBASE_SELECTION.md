@@ -3,7 +3,7 @@
 > **文档类型**：选型与实测（2026-09-19 初稿，2026-09-20 重写）　**本文不记落地**，指针见 §6
 > **依据来源**：实测（ffmpeg n7.1.4-9，本仓库 `.ffmpeg/bin/`，Windows）+ 代码分析。
 > 标 **实测** 的数字是跑出来的，复现见 §5；其余是代码事实或由实测推出的结论。
-> **知识库**：待沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)
+> **知识库**：已沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)（2026-09-20）
 
 ## 结论
 

@@ -1,7 +1,7 @@
 # EXTINF 与 tfdt 的分工契约：墙钟轴与媒体轴是两条轴，段间空隙只存在于前者
 
 > **变更状态**：无代码变更（2026-09-08）　<!-- 纯知识梳理；据此识别出的缺陷与待验证项见「遗留风险」 -->
-> **知识库**：待沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)
+> **知识库**：已沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)（2026-09-20）
 
 ## 概述
 

@@ -1,7 +1,7 @@
 # 抽 storage leaf 包：基础能力 + 产物按域隔离目录，零调用点改动
 
 > **变更状态**：生效中（2026-09-09）　<!-- 新包已落地并有单测/门禁覆盖；本期刻意不接调用点。落盘目录结构的实际变更发生在迁移期 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)、[ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)（2026-09-20）
 >
 > **本篇只是第 1 期的变更记录。** 现行设计判据（准入四问 / 读侧 R / 写侧 W 三路线 /
 > 定位 L / 依赖 D / 测试 T / 门禁映射）已迁出到活文档

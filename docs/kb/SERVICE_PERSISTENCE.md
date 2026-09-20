@@ -1,65 +1,74 @@
-> 更新时间：2026-09-02
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Persistence Service
 
-持久化服务负责 HLS 视频段落盘、metadata 与告警上报，是**无状态落库层**：慢 IO 与实时路径解耦，过闸/去重编排不在此（见下）。
+持久化服务现在**只剩两件事**：告警上报（异步 HTTP）与存储 TTL 回收。它是**无状态落库层**——过闸/去重/归属编排都不在此。
 
-## PersistenceManager
+**HLS 落盘已整个不在本服务**：写侧是 `app/services/recording/`（见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)），格式归 `app/storage/hls`（见 [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md) 与 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)）。
 
-`PersistenceManager` 启动四件套：`hls_queue`（HLSWorkerPool，默认 2 worker）、`alarm_queue`（AlarmWorkerPool，默认 1 worker）、`_segment_sweeper`（HLSSegmentSweeper 守护线程）、`_cleanup_worker`（StorageCleanupWorker 守护线程）。公开方法：
+## PersistenceManager 启动的两件
 
-- `start()` / `stop(timeout)`：`stop` 按 sweeper→hls→alarm→cleanup 顺序停（先停 sweeper，杜绝新段入队）。
-- `persist_hls_segment(task_id, step_id, segment_type, frames) → bool`：入 `hls_queue`。
-- `persist_alarm(alarm_info: Dict) → bool`：入 `alarm_queue`（**纯入队**，无过闸/去重）。
-- `start_run(cq)`：`hls_pool.purge_step_dir(task_id, step_id)` 清空旧 HLS step 目录（无 owner，纯 rmtree），与 inference 的 `FeatureStore.open_fresh` 对称。
-- `flush_residual_segments(cq)`：拆除时排空 CQ raw/processed 缓冲，按 `ca_segment_len` 切块入队。
-- `release_task_locks(task_id)`：`hls_pool.release_dir_locks(task_id)` 回收该 task 的目录锁。
+`PersistenceManager.start()` 只起：
 
-## PULL 模型：CQ 纯缓冲，sweeper 主动拉
+- `alarm_pool`（`AlarmWorkerPool`，1 worker）：消费 `alarm_queue`，异步 HTTP 上报。
+- `_cleanup_worker`（`StorageCleanupWorker` daemon 线程）：存储 TTL 回收，由 `storage.enable_cleanup` 开关（生产 yaml 置 `true`）。
 
-HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲、不触发落盘。`HLSSegmentSweeper`（`snapshot_fn=client_manager.snapshot`，`interval_seconds=1.0`）周期遍历快照，对每个 CQ 调 `take_raw_segment()` / `take_processed_segment()` 拉整段（攒满 `ca_segment_len` 才弹），再经 `persist_hls_segment` 入 `hls_queue`。
+`stop(timeout)` 与之对称：只停这两个，停 alarm_pool 时会 drain 队列尽量不丢。
+
+对外方法面里日常只用一个：`persist_alarm(alarm_info: Dict) -> bool`，**纯入队**，无过闸/去重。
+
+> `persist_hls_segment` / `flush_residual_segments` / `start_run(cq)` / `release_task_locks` 仍留在类上但**生产已无调用点**（`run_control` 的残段 flush 与代次回收都改调 recording，start 侧的 purge 整个删掉）；只剩 `tests/test_persistence_sink.py` 还在打桩调 `flush_residual_segments`。
+
+## ⚠ 护栏：旧 HLS 四件套仍在 `__init__` 里构造，但绝不能启动
+
+`hls_queue` / `hls_pool`（`HLSWorkerPool`）/ `_segment_sweeper`（`HLSSegmentSweeper`）仍在 `__init__` 里被构造——旧实现尚未删除，直接 `PersistenceManager()` 打桩的测试还依赖它们存在——但 `start()` **刻意不启动它们**。
+
+**把那两行加回去 = 数据静默损坏**：`HLSSegmentSweeper` 与 recording 的 `SegmentSweeper` 都从活跃 CQ **破坏性 drain**。两个同时跑的结果是各拿走一半帧，产出两份互相缺帧、时间轴却都自洽的段，**两端都不报错**。要恢复旧路径，必须先停掉 recording。
+
+`config/persistence_config.yaml` 里的 `hls:` 整节（`workers` / `queue_size` / `sweep_interval_seconds`）随之成为死配置，只被那几个不启动的对象读。
 
 ## 告警落库归属（无状态）
 
-`persist_alarm(alarm_info)` 只做 DB/HTTP 落库入队。**过闸去重（5s 冷却）+ mode 归属 + 别名烧录在 inference 侧**：`ClientQueues.append_alarm_record_with_gate` 管去重，`inference/temporal/alarm_sink.persist_alarms` 管编排（实时/结算），持久化只读 `alarm_info` 里已定好的字段落库。`AlarmWorker` 用 `GuardedExecutor` 调 `AlarmPersistenceStrategy.report_alarm()` HTTP POST 到 `settings.alarm_report_url`；停机后 drain 队列尽量不丢。
+`persist_alarm(alarm_info)` 只做入队。**过闸去重（5s 冷却）+ mode 归属 + 别名烧录在 inference 侧**：`ClientQueues.append_alarm_record_with_gate` 管去重，`inference/temporal/alarm_sink.persist_alarms` 管编排（实时 / 结算），持久化只读 `alarm_info` 里已定好的字段落库。
 
-## HLS 持久化与 fMP4
+`AlarmWorker` 用 `GuardedExecutor`（3 次、指数退避）调 `AlarmPersistenceStrategy.report_alarm()` HTTP POST 到 `settings.alarm_report_url`。
 
-`HLSPersistenceStrategy.persist_segment()` 按 `{storage_base_dir}/{task_id}/{step_id}` 分 raw/processed 写：
+> 边界固定：告警过闸/编排归属 inference 域，**不迁入 persistence**。
 
-- `{track}_segment_{ts_us}.mp4`：cv2 写 mp4v → ffmpeg 转 HLS-ready fMP4 fragment。
-- `{track}_playlist.m3u8`（含 `#EXTINF`）、`{track}_init.mp4`（**按轨各一份**，该轨首段转码时写一次）、`metadata.json`。
-- `raw_segment_{ts_us}.idx`：raw 轨逐帧 ts 的 float64 sidecar，供离线帧反查。**排在 `cv2.VideoWriter` 之前落盘**（读侧认 mp4 存在即段可见，反过来会留 260ms「段可见但索引未就位」窗口），**写失败只 warning 不阻断本段**——三条视频链路都不读它，不能让辅助索引拖垮主产物。processed 轨不产。格式与读侧契约见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。
+配置：`alarm.workers: 1`、`alarm.queue_size: 200`。
 
-fMP4 转码固定 `mdhd.timescale = 90000`（`_HLS_TIMESCALE`，经 `-hls_segment_options` 透传给内层 mp4 muxer），转码完再 hex-patch fragment 的 `tfdt.baseMediaDecodeTime` = 累计 EXTINF × 90000。两条都不是可选项——时间基随 fps 浮动会让整条 playlist 的 tick 被按首段尺度误读，理由与实测数据见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。转码失败保留 mp4v 原文件并 warning，不抛（主流程可用性优先）。
+## 存储 TTL 回收
 
-`_dir_locks: {target_dir → Lock}`：transcode + playlist append + metadata 更新在目录锁内原子完成（相邻段需读 playlist 算累计时间，防 tfdt 碰撞）；`release_dir_locks(task_id)` 在拆除时删该 task 前缀的所有锁。
+`StorageCleanupWorker` 周期（`cleanup_interval_seconds`，默认 3600s）扫 `{db_dir}/{task_id}/{step_id}/`，**两级都只认十进制数字目录名**，删除目录自身 mtime 超 `cleanup_days`（生产 15 天）的 step 目录，顺手 `rmdir` 被掏空的 task 父目录。
 
-**段按实测 fps 编码（回放对齐墙钟）**：`_persist_processed_segment` / `_persist_raw_segment` 的 `cv2.VideoWriter` 与 `segment_duration`(EXTINF) 同源用静态 `_effective_fps(frames)` = `(N-1)/(ts_last-ts_first)`（**不接收任何上游 fps**，全程从帧 ts 反推）；`span<=0` / 单帧 / 反推值落 `[1,60]` 带外这类**退化段**（无可测速率）回落**本地常量** `_DEGENERATE_FALLBACK_FPS=15.0`（与上游 `raw_fps`/`inference_fps` 无关——退化段本无时序信息，只需给个合理 EXTINF）。逐段各取自身有效帧率，自动吸收速率抖动。
-- **为何治本**：processed 链路真实成帧率在窗口间漂移（~11-15fps），若固定按标称 fps 编码则播放 `= 标称/真实` 倍快放（曾观测 20fps 编码、~11fps 成帧 → ~1.8x 快放，段间还忽快忽慢）。这是**时钟/速率失配**，非积压/丢帧，backlog 类指标测不到（帧产得慢、既没进队列也没被丢）。逐段实测 fps 让任何真实帧率都对齐墙钟。
-- **raw 段同款**：与 processed 一样走 `_effective_fps(frames)` 从 ts 反推（实测稳定 ~30fps），`raw_fps` 不再作编码常量——统一「消费者读 ts、不设 fps」。
-- 三套时间线（EXTINF / tfdt / fragment 媒体时长）仍自洽——EXTINF 仍等于 fragment 媒体时长（详见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)）。
-- 单测：`tests/test_hls_eff_fps.py`（正常反推 / span≤0 / 单帧 / 带外 / 乱序 回退）。
+**判据 = `{task}/{step}/` 目录自身的 `st_mtime`，不下钻域子目录。** 旧判据（`glob("*/*/metadata.json")` 读 `updated_at`）已作废：产物按域隔离后 `metadata.json` 落进了 `{step}/hls/`，那个 glob 匹配不到它，表现是**新数据永不回收、老数据照常回收**——单向漏盘且无任何日志。目录 mtime 对平铺与分域两种布局一视同仁，同时消解「只有 features.jsonl、没有 HLS 段的 step 永不回收」那类泄漏。
 
-> 速率亏空的上游治理（throttle 整数降采样 + 检测率 15、渲染尾延迟削峰）落在 stream/inference 侧，非本服务。采样旋钮真源是 `inference_decimation`（[app/settings.py](../../app/settings.py)）；本服务 HLS 段编码**不引用任何上游 fps**，从帧 ts 反推 `_effective_fps`（退化段兜底为本地 `_DEGENERATE_FALLBACK_FPS`）。
+目录 mtime 只在**增删直接子项**时变，而 `{step}/` 的直接子项都是 run 起始那几秒建好的——`hls/` 域目录，以及尚未迁入数据层的 `features.jsonl` / `facts.jsonl`（见 [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)）。此后每段落盘动的是 `hls/` 的 mtime，`features.jsonl` 的 append 也不动父目录，`{step}/` 纹丝不动，故它是创建时间的好代理。（Linux + Python 3.11 拿不到真正的创建时间。）
+
+### 两条已知偏差（设计后果，不是漂移）
+
+1. **`lab/` 是延迟创建的**：某 step 第一次被导出送标时才建这个子目录，那一刻 `{step}/` 的 mtime 被刷新、TTL 计时重置。正在被反复导出的 step 因此天然不被回收——白捡的续命，不是 bug。
+2. **活跃 step 不再免疫**：旧判据下 `updated_at` 每 ~10s 刷新一次，跑着的 step 永远删不掉；换判据后，一个连续跑满 `cleanup_days` 的 step 会被删掉自己正在写的录像。当前任务超时 30 分钟、触发不到，但**把 `cleanup_days` 调小或引入长跑任务时会真的发生**。
+
+### ⚠ 不要改成复用 `app.storage.tasks.list_task_ids(order="mtime")`
+
+那个口径**下钻域子目录取最大值**，答的是「最近活动」不是「创建」——每写一段就续一次命，等于永不回收。两个口径分开是刻意的。同理，本 worker 扫的是注入的 `self.db_dir` 而不复用 `tasks.list_step_ids`（后者一律从 settings 解析路径）：让删除动作认一个它自己没扫过的根是不必要的错位风险。
+
+数字目录名过滤也不是洁癖：存储根下还住着 `.lab_exports/`（lab 导出临时件，自带 30 分钟孤儿扫描），旧判据靠「有没有 `metadata.json`」把它天然挡在外面，换判据后必须显式挡。
 
 ## 存储根单一真源
 
-存储根统一读 `settings.storage_base_dir`（`PersistenceConfig.storage_base_dir` 转发）。persistence 不反向摸 inference，inference 也不摸 persistence 私有 `db_dir`——三方（persistence/FeatureStore/traceback）经 settings 对齐同一根。
-
-## 清理
-
-`StorageCleanupWorker`（`storage.enable_cleanup` 控制，默认开）周期清理已完成且超保留天数的任务目录。
+存储根统一读 `settings.storage_base_dir`（`PersistenceConfig.storage_base_dir` 转发）。persistence 不反向摸 inference，inference 也不摸 persistence 私有 `db_dir`——各方经 settings 对齐同一根。
 
 ## 代码来源
 
-- `app/services/persistence/manager.py`
-- `app/services/persistence/workers/{hls_worker,alarm_worker,cleanup_worker,segment_sweeper}.py`
-- `app/services/persistence/strategies/{hls_strategy,alarm_strategy}.py`
-- `app/services/persistence/models.py`、`config.py`
+- `app/services/persistence/manager.py`（`start()` 只起两件 + 不启动护栏）
+- `app/services/persistence/workers/{alarm_worker,cleanup_worker}.py`
+- `app/services/persistence/strategies/alarm_strategy.py`
+- `app/services/persistence/{config,types,instance}.py`
 - `app/services/inference/temporal/alarm_sink.py`（过闸编排归属）
-- `app/settings.py`（storage_base_dir 单一真源；HLS 段编码不引用上游 fps）
+- `app/settings.py`（`storage_base_dir` / `alarm_report_url`）
 - `config/persistence_config.yaml`
-- `tests/test_hls_eff_fps.py`（processed 段实测 fps 编码）
+- `tests/test_storage_cleanup_ttl.py`、`tests/test_alarm_sink.py`

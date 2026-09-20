@@ -1,4 +1,4 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -15,7 +15,7 @@
 | `/api` | `routers/api.py` | 统一任务入口：启动/终止一次 run（桥接 `RunController`） |
 | `/ai` | `routers/ai.py` | 实时推理 WebSocket（渲染帧推送） |
 | `/task` | `routers/task.py` | 任务消息、告警历史查询，及大屏只读清单（`/task/live` 在线、`/task/history` 历史） |
-| `/traceback` | `routers/traceback.py` | 告警证据 / VOD playlist / 时间轴溯源 |
+| `/traceback` | `routers/traceback.py` | step 级 VOD playlist + 时间轴溯源（两个端点，均必填 `step_id`） |
 | `/media` | `routers/media.py` | HMAC token 化媒体访问（段 / `{track}_init.mp4`） |
 | `/health` | `routers/health.py` | 健康状态与监控统计 |
 | `/lab-f3m8` | `routers/lab.py` | 送标导出 + Label Studio（含静态 UI） |
@@ -27,9 +27,11 @@
 
 - 二者均为**同步 `def`**（非 `async`），FastAPI 丢线程池执行——磁盘扫描（history）与 DB 查询不堵事件循环。
 - `/task/live` 迭代 `client_manager.snapshot()`（COW 不可变 dict，迭代无需加锁）出在线 run。
-- `/task/history` 无查询参数，两阶段避免每请求全盘扫段：`SegmentFinder.list_task_ids_by_recency()` 粗筛（mtime 近似序）→ 剔除活跃 task → 逐个 `list_steps()` 深扫、收满 `_HISTORY_LIMIT=10` 即停（`_HISTORY_SCAN_CAP=30` 兜住空目录病态）→ 按真实段 ts 重排 → 仅对最终 10 条查一次 DB 取 `source_ip`，整体 `try/except` 吞 DB 故障降级 `source_ip=null`（与 `/traceback/task/{id}/timeline` 同策略，不 503）。
+- `/task/history` 无查询参数，两阶段避免每请求全盘扫段：`storage.tasks.list_task_ids(order="mtime")` 粗筛（mtime 近似序）→ 剔除活跃 task → 逐个 `tasks.list_step_ids()` + 双轨 `hls.list_segments()` 深扫、收满 `_HISTORY_LIMIT=10` 即停（`_HISTORY_SCAN_CAP=30` 兜住空目录病态）→ 按真实段 ts 重排 → 仅对最终 10 条查一次 DB 取 `source_ip`，整体 `try/except` 吞 DB 故障降级 `source_ip=null`（与 `/traceback/task/{id}/timeline` 同策略，不 503）。
+- ⚠ `tasks.list_step_ids` **不过滤空 step**（有无产物是域知识，不在目录层；TTL 要的正是没过滤的那档）。「两轨都没段就丢弃」必须由 `_summarise_steps` 自己补，否则清单会把起流即失败的 step 露给前端点开黑屏。
+- mtime 只用于挑深扫候选，**绝不当对外时间戳**——对外时间一律取真实段 `ts_us`；粗筛与深扫之间任务可能刚起/刚停，清单短暂不一致由下一轮轮询自愈，不加锁。
 
-清单只出参数、不出播放 URL；对外请求/响应契约见对外 API 文档（[docs/api/task.md](../api/task.md)）。段枚举能力归 `SegmentFinder`，见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)。
+清单只出参数、不出播放 URL；对外请求/响应契约见对外 API 文档（[docs/api/task.md](../api/task.md)）。段枚举能力归 `app.storage.hls`（清单解析）与 `app.storage.tasks`（跨 task/step 目录），见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md) 与 [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)。
 
 唯一的 WebSocket 路由是 `/ai/video`；其余均为 HTTP。`/lab-f3m8/ui`、`/admin-f3m8/ui` 为 `StaticFiles` 挂载。
 

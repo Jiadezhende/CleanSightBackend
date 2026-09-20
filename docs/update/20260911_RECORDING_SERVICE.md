@@ -1,7 +1,7 @@
 # 新建 recording 服务：代次校验当乐观锁、提交序当锁，零调用点改动
 
 > **变更状态**：生效中（2026-09-11）　<!-- 新服务已落地并有 27 条单测覆盖；本期刻意不接调用点，`hls_strategy` 仍是生产写侧，运行时行为零变化 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)（2026-09-20）
 >
 > <!-- storage 分层第 2 期的下半场：第 2 期把格式收进 app/storage/hls，本篇把编排收进 app/services/recording -->
 

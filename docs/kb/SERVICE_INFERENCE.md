@@ -1,4 +1,4 @@
-> 更新时间：2026-09-02
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -25,7 +25,7 @@
 | `temporal/impl/` | 接入点 | bubble/bending/clean/mock | 具体 Operator 子类（与检测器同名文件） |
 | `offline/impl/` | 接入点 | clean/mock | 具体 OfflineSegmenter 子类 |
 | `offline/` | 离线 | `OfflineSegmenter`/`OfflineRunner` + `impl/{clean,mock}` + `cli` | 独立进程读 `FeatureStore.load`→策略 `preprocess`/`segment`→`OfflineRunner` 校验幂等写 `FactLedger`（详见「离线 segmenter 内部」与 online/offline 分离） |
-| `offline/frame_tracker.py` | 离线 | `Timeline` / `FrameTracker` | 按 ts 从 HLS 落盘段反查原始帧像素（读 `.idx` sidecar + ffmpeg 段内取帧），供离线看图/复核 |
+| `offline/frame_tracker.py` | 离线 | `FrameTracker` | 按 ts 反查原始帧像素：只剩位级配对，解码/裁剪全下沉 `app.storage.hls`（同文件的 `Timeline` 已退役、零调用点） |
 
 ## InferenceManager（生命周期编排）
 
@@ -56,6 +56,31 @@ collector + supervisor 两守护线程护住子进程边界，防孤儿 pending 
 - **防泄漏**：pending 有界（`max_inflight=8`，满则拒收、帧留 deque 由 dispatcher 按 `infer_backlog` 淘汰）；collector 每条响应 `pending.pop(req_id)`；子进程死 / CUDA wedge → supervisor 清空 pending、`inflight` 归零、退避重 spawn。迟到 / 跨 run 结果走原写回口，其 `cq.is_active()` 迟到门 + FeatureStore `owner=cq` fence 原样生效。
 - **监督三判据**（`_supervise_loop` 并列）：`dead`（进程死）、`wedged`（inflight>0 且久无响应）、`_check_not_ready`（**活着但没就绪**）。第三条补一个原本不可恢复的静默失效：`_spawn_child` 只 `ready_ev.wait(ready_timeout=120s)` 一次，warmup 超时（冷盘加载大权重 / GPU 被占 / 驱动 hang）则 dead/wedged 同时哑火 → 永不重启、全链 0 推理。`_check_not_ready` 两步：① 补收迟到就绪信号（读同一 `ready_ev` 置 `_child_ready`，不重来省一次加载）；② 仍超 `ready_timeout` → 判失败走 `_handle_child_failure` kill + 清 pending + 退避重 spawn。模型文件补回 / GPU 让出后自动恢复。
 - `frame_drop_total` 的 reason 全集：dispatcher 侧 `infer_backlog`（deque 满淘汰）、`infer_child_down`（stop 时未及排空）、`infer_child_restart`（重启清孤儿）；过渡期的 `infer_inflight_full` 已随 peek-commit 删除。
+
+## 进程边界收尸契约（daemon 线程 ≠ 进程能退）
+
+主进程侧的线程/进程启动关系：
+
+```text
+后端主进程（uvicorn，非 daemon 主线程）
+├── DetectionService.start() → RemoteInferProxy.start()
+│   ├── _spawn_child(): req_q / resp_q = ctx.Queue()；ctx.Process(target=run_stages, name="InferChild", daemon=True)
+│   ├── Thread("InferCollector", daemon) → resp_q.get → write_back
+│   └── Thread("InferSupervisor", daemon) → 1s tick 看门狗
+└── QueueFeederThread(req_q)  ← 主进程侧，Queue 在首次 put 时惰性拉起，daemon
+```
+
+**`QueueFeederThread` 是 daemon，但 `multiprocessing` 的 `atexit` 钩子会无超时 `join()` 它**——于是它卡住就挂死整个后端进程的退出：uvicorn 已打完 `Application shutdown complete` / `Finished server process`，进程仍不退；再按一次 Ctrl-C 拿到 `atexit → multiprocessing/queues.py _finalize_join → thread.join()` 的 KeyboardInterrupt 栈。触发条件是子进程 wedge（`子进程失败 dead=False wedged=True`）：它不读 `req_q`，管道 64KB 灌满而一批帧是 MB 级，feeder 阻塞在 `send_bytes`。
+
+**此时 `q.close()` 一个都救不了**：它只往内存 buffer 追个哨兵（阻塞中的 feeder 走不到那步），且**不关**本进程持有的读端 fd，写操作连 EPIPE 都拿不到，永久阻塞。
+
+故 `_kill_child` 的队列收尸是**三步**，缺一步就留尸体（`_spawn_child` 另需在建 `req_q` 后、首次 put 前预置 `_ignore_epipe = True`，否则每次收尸都往 stderr 打一坨 `BrokenPipeError`）：
+
+1. `req_q._reader.close()` —— 断本进程这侧读端，阻塞的写立刻 EPIPE、feeder 自退并释放它压着的整批帧内存。**只对 `req_q` 做**，`resp_q` 的读端正由 collector 使用。（= CPython 自己的 `Queue._terminate_broken`。）
+2. `cancel_join_thread()` —— 两个队列都做：注销 atexit 里那个无超时的 `thread.join` 终结器。它以线程为宿主，队列被 `_spawn_child` 换掉后仍留在 `_finalizer_registry` 里；子进程真杀不死（CUDA D 态）时读端还开着、EPIPE 不来，留一具尸体就够让进程退不出去。
+3. `close()`。
+
+收尸只在关停/重启路径（`stop()` 与 `_handle_child_failure` 的 kill→退避→重 spawn），在线推理链路、进程边界数据格式、背压语义均不受影响。
 
 ## L1 写回：单入口 + 句柄化 + 状态门
 
@@ -97,17 +122,30 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 
 ## 按 ts 反查原始帧（`offline/frame_tracker.py`）
 
-`features.jsonl` 只存检测框、不存像素；要拿回某帧的画面走 `FrameTracker(task_id, step_id)`：
-`find(timestamps)` 按 ts 精确取帧、`Timeline.iter(start, end)` 按区间流式扫帧，返回 `Frame`
-（可写像素，下游 cv2 可原地改）。两端货币仍是 ts —— 传入的 ts 必须**位级等于** `FeatureStore`
-落盘的帧 ts，这条契约与索引格式、解码路径见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。
+`features.jsonl` 只存检测框、不存像素；要拿回画面有两个入口，**解码与裁剪都不在本包**，
+已整个下沉到 `app.storage.hls`（落盘布局、sidecar 格式、ffmpeg 解码全在域内，见
+[DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)）：
 
-- **批量取帧走 `Timeline.iter` 一次扫过，别逐条 `find()`**：单点反查是整段顺序解码（36–73ms），
+- **按区间流式扫帧** → `hls.iter_frames(task_id, step_id, *, width, height, start_ts, end_ts)`：
+  段级 + 帧级两级裁剪，内存 O(1 帧)，`None` 表示该侧不设限。
+- **按 ts 精确取帧** → `FrameTracker(task_id, step_id).find(timestamps, width, height)`：
+  本类**只剩位级配对**——内部调 `iter_frames` 扫一遍，边扫边与排好序的目标 ts 做**相等**比较。
+  产出顺序恒为 ts 升序（不保证与入参同序，调用方按 `frame.timestamp` 对号入座）；任一目标 ts
+  没配上直接 `ValueError`，**不做近似匹配**（ts 是帧的身份，配错帧比报错更坏）。
+
+两条约束：
+
+- **只服务 raw 轨，已无 `track` 参数**：`processed` 是画完框的渲染结果、按契约不落 sidecar，
+  给不出带墙钟 ts 的帧。
+- **传入的 ts 必须位级等于 `FeatureStore` 落盘的帧 ts**（同源同值），任何精度中转
+  （float32、重新格式化）都会配不上。契约与索引格式见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)。
+
+- **批量取帧走 `hls.iter_frames` 一次扫过，别逐条 `find()`**：单点反查是整段顺序解码（36–73ms），
   逐条查 N 个点 ≈ N 次整段解码；顺序全量吞吐 ≈2000 fps。
 - **它只吃 HLS 落盘产物，不重跑检测**：离线复核用的帧与实时链路看到的是同一批 CRF23 编码帧，
   没有 train/serve skew。
 - **当前 `app/` 内零调用方**：工具已端到端验收（1800 帧 ts 位级相等 + 像素逐帧匹配），但尚未接进
-  离线链路；区间查询的调用形状定下来之前，落盘布局知识（段名/init/sidecar 命名）仍散在多处。
+  离线链路。
 
 ## 推理链路压力观测（[PRESSURE] / [VIZ_THROUGHPUT]）
 
@@ -140,4 +178,6 @@ per-run daemon 线程，`stop_event.wait(tick_interval)` 节奏。每 tick 取�
 - `app/services/inference/detection/impl/{bubble,bending,clean,mock}.py`（Detector 子类）
 - `app/services/inference/temporal/impl/{bubble,bending,clean,mock}.py`（Operator 子类，`clean.py` 含在线 `CleanOperator`）
 - `app/services/inference/offline/{segmenter,runner,cli,frame_tracker}.py`、`offline/impl/{clean,mock}.py`
+- `app/storage/hls/`（`iter_frames` / `read_segment` —— 帧反查的解码与裁剪实现）
 - `config/inference_config.yaml`
+- `tests/test_infer_proxy.py`、`tests/test_frame_tracker_boundary.py`

@@ -2,7 +2,7 @@
 
 > **变更状态**：已实现（2026-09-20）　**验收**：真实断流未跑，判据见文末
 > **选型依据**：[20260919_VIDEO_TIMEBASE_SELECTION.md](20260919_VIDEO_TIMEBASE_SELECTION.md) Q2（该文 §6 有编号 → 章节对照表）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)、[SERVICE_HEALTH_MONITOR.md](../kb/SERVICE_HEALTH_MONITOR.md)（2026-09-20）
 
 ## 修的是什么
 

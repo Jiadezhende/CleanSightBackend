@@ -1,8 +1,7 @@
 # 拉流读超时：判死延迟是 `-timeout` 的 2 倍，默认值改 2.5s 并收进 settings
 
 > **变更状态**：已实现（2026-09-20）
-> **知识库**：待沉淀 → `SERVICE_STREAM.md`（`_RTSP_INPUT_OPTS` 那条）、
-> `SERVICE_HEALTH_MONITOR.md`（断流与重连判据）
+> **知识库**：已沉淀 → [SERVICE_STREAM.md](../kb/SERVICE_STREAM.md)、[SERVICE_HEALTH_MONITOR.md](../kb/SERVICE_HEALTH_MONITOR.md)（2026-09-20）
 > **前置结论来自**：[20260726_RECONNECT_PROCESS_LIVENESS.md](20260726_RECONNECT_PROCESS_LIVENESS.md)
 > （重连判据 = decoder 进程死活；`-timeout` 就是那一轮加的）
 

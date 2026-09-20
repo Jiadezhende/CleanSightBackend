@@ -1,4 +1,4 @@
-> 更新时间：2026-07-21
+> 更新时间：2026-09-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -12,7 +12,7 @@ CleanSight Backend 是一个用于内镜人工清洗流程的 AI 视觉巡检后
 - 客户端来源：`clean_task.source_ip` 为**被动**身份字段（诊断 + 遗留 wire 适配），不再作路由键。
 - 步骤：`current_step` 字符串，`resolve_stage` 恒等路由 `"1"`→LEAK、`"2"`→CLEAN、未知→MOCK（RunController 边界 `int()` 转 step_id）。
 - 告警：数据库表 `clean_alarm`，运行时告警由 Operator（时序判定）产生，过闸编排在 `inference/temporal/alarm_sink`，persistence 无状态落库上报外部接口。
-- 证据：HLS 视频段按 `{storage_base_dir}/{task_id}/{step_id}/` 存储。
+- 证据：HLS 视频段按 `{storage_base_dir}/{task_id}/{step_id}/hls/` 存储（step 下按域分目录）。
 
 ## 当前业务能力
 
@@ -20,9 +20,9 @@ CleanSight Backend 是一个用于内镜人工清洗流程的 AI 视觉巡检后
 - 实时推理视频：`WebSocket /ai/video?task_id=...`（旧 `?client_id=` 双模兼容）。
 - 实时前端消息：`GET /task/message/{task_id}`。
 - 历史告警查询：`GET /task/{task_id}/alarms`。
-- 告警证据回溯：`GET /traceback/alarm/{alarm_id}/evidence` 和对应 playlist。
 - 单步骤 VOD 回放：`GET /traceback/task/{task_id}/playlist.m3u8?step_id=...`。
-- Lab 送标：`POST /lab-f3m8/submit` 从 raw 轨裁剪视频并提交 Label Studio。
+- 回放时间轴与告警打点：`GET /traceback/task/{task_id}/timeline?step_id=...`（告警定位回放由这两个端点组合完成，按 `alarm_id` 取证据的专用入口已删除）。
+- Lab 送标：`POST /lab-f3m8/submit` 按媒体区间从 raw 轨裁剪视频并提交 Label Studio。
 
 ## 业务边界
 

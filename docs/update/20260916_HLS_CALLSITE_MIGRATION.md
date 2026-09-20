@@ -1,7 +1,7 @@
 # HLS 读写调用点一次性迁移：产物落位换成 `{step}/hls/`，写侧接线到 recording
 
 > **变更状态**：生效中（2026-09-16）　<!-- 读侧 10 个调用点 + 写侧编排全部切到数据层；旧实现留在仓库里但已无调用点、不再启动 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)（2026-09-20）
 >
 > <!-- storage 分层第 4 期的阶段 2 + 4 + 5（MAP §5.1）。阶段 1（回落层）取消，阶段 6（删旧代码）推迟 -->
 
