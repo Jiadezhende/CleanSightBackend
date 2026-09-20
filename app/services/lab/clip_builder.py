@@ -52,14 +52,12 @@ class ClipSpec:
         step_id: 洗消步骤 id
         start_media_ms: 区间起点，相对该 step raw 轨媒体轴原点的毫秒（= `currentTime × 1000`）
         end_media_ms: 区间终点，必须 > `start_media_ms`
-        label: 透传到 Label Studio task meta 的可选标签（非 LS 内的 annotation label）
     """
 
     task_id: int
     step_id: int
     start_media_ms: int
     end_media_ms: int
-    label: Optional[str] = None
 
     @property
     def duration_ms(self) -> int:

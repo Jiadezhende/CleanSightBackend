@@ -40,28 +40,14 @@ class LabelStudioError(Exception):
     """LS 客户端通用异常。"""
 
 
-def _build_multipart(
-    file_path: Path, file_field: str, meta: Optional[dict]
-) -> tuple[bytes, str]:
-    """构造 multipart/form-data body。
+def _build_multipart(file_path: Path, file_field: str) -> tuple[bytes, str]:
+    """构造 multipart/form-data body（单文件，无附加字段）。
 
     Returns:
         (body_bytes, content_type)
     """
     boundary = "----CleanSightLab" + secrets.token_hex(8)
     parts: list[bytes] = []
-
-    if meta:
-        meta_json = json.dumps(meta, ensure_ascii=False).encode("utf-8")
-        parts.append(
-            (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="data"\r\n'
-                f"Content-Type: application/json\r\n\r\n"
-            ).encode("utf-8")
-        )
-        parts.append(meta_json)
-        parts.append(b"\r\n")
 
     parts.append(
         (
@@ -132,14 +118,16 @@ class LabelStudioClient:
         self,
         project_id: int,
         mp4_path: Path,
-        meta: Optional[dict] = None,
     ) -> LabelStudioTaskResult:
         """上传一个 mp4 文件到 LS，作为指定 project 的一条 task。
+
+        task.data 只会有 LS 自己生成的 video 路径：LS 的 /import 在文件上传模式下走
+        `if len(request.FILES)` 分支，不读同一个 multipart 里的其它表单字段，故无法随
+        文件附带元数据（LS 已知限制）。溯源信息只能靠文件名。
 
         Args:
             project_id: LS project id
             mp4_path: 本地 mp4 路径
-            meta: 透传到 task data 的额外字段（JSON）；LS 会把它合并到 task.data
         """
         if not mp4_path.exists() or not mp4_path.is_file():
             return LabelStudioTaskResult(
@@ -150,7 +138,7 @@ class LabelStudioClient:
             )
 
         url = f"{self._base}/api/projects/{int(project_id)}/import"
-        body, content_type = _build_multipart(mp4_path, "file", meta)
+        body, content_type = _build_multipart(mp4_path, "file")
         req = Request(
             url,
             data=body,

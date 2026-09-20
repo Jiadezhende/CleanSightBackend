@@ -135,7 +135,8 @@
 |------|------|------|------|
 | `start_media_ms` | int | 是 | **≥0**，媒体毫秒（片内偏移，非墙钟），否则 422 |
 | `end_media_ms` | int | 是 | **≥1**，否则 422 |
-| `label` | string \| null | 否 | **≤64 字符**，透传到 LS `task.data` 作标注 hint |
+
+> **不收元数据**：LS 的 `/import` 在文件上传模式下只读 `request.FILES`，同一个 multipart 里的非文件字段一律忽略，随 clip 附带 `label`/`task_id` 之类的字段到不了 `task.data`。LS 上那条 task 唯一的溯源线索是文件名 `clip_{start_ms}_{end_ms}.mp4` 里的绝对墙钟区间。
 
 ### 响应 `200` `LabSubmitResponse`
 
@@ -197,7 +198,7 @@
 |------|---------|-----------|
 | `400` | 见下「400 全部触发条件」 | `{"error":"...","detail":"...","field":"clips"\|"project_id"}` |
 | `404` | `(task_id, step_id)` 无任何 raw 段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=raw"}` |
-| `422` | 请求体字段级校验失败（`clips` 为空、`start_media_ms<0`、`end_media_ms<1`、`label>64`） | FastAPI 校验体 |
+| `422` | 请求体字段级校验失败（`clips` 为空、`start_media_ms<0`、`end_media_ms<1`） | FastAPI 校验体 |
 | `503` | LS **url 或 token 未配置** | `{"error":"Label Studio not configured","detail":"url 可在页面填、token 须 env"}`（HTTPException，**body 只有 `detail`，无 `retryable`**） |
 
 **`400` 全部触发条件**（`_validate_clips` / `_resolve_project_id`，整请求级、任一即拒）：

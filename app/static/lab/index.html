@@ -329,7 +329,6 @@
             <th>起点（片内）</th>
             <th>终点（片内）</th>
             <th style="width:80px">时长</th>
-            <th>label（≤64）</th>
             <th style="width:160px">操作</th>
           </tr>
         </thead>
@@ -340,15 +339,12 @@
             <td class="mono">{{ formatDuration(c.end_media_ms) }}<div style="font-size:11px;color:#9ca3af">{{ c.end_media_ms }} ms</div></td>
             <td class="mono">{{ formatDuration(c.end_media_ms - c.start_media_ms) }}</td>
             <td>
-              <el-input v-model="c.label" size="small" placeholder="（可选）" maxlength="64" />
-            </td>
-            <td>
               <el-button size="small" @click="seekToMediaMs(c.start_media_ms)">跳转</el-button>
               <el-button size="small" type="danger" plain @click="removeClip(i)">删除</el-button>
             </td>
           </tr>
           <tr v-if="!clips.length">
-            <td colspan="6" style="text-align:center;color:#9ca3af;padding:20px 0">
+            <td colspan="5" style="text-align:center;color:#9ca3af;padding:20px 0">
               暂无已选段，使用上方[设为起点 / 设为终点 → 加入列表]添加
             </td>
           </tr>
@@ -810,7 +806,6 @@ createApp({
         _key: ++clipKeySeq,
         start_media_ms: pending.start_media_ms,
         end_media_ms: pending.end_media_ms,
-        label: '',
         _overlap: false,
       });
       clips.value.sort((a, b) => a.start_media_ms - b.start_media_ms);
@@ -877,7 +872,6 @@ createApp({
           clips: clips.value.map(c => ({
             start_media_ms: c.start_media_ms,
             end_media_ms: c.end_media_ms,
-            label: c.label?.trim() || null,
           })),
           keep_artifacts_on_failure: true,
         };

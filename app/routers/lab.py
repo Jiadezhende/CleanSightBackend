@@ -76,7 +76,6 @@ class LabClipRange(BaseModel):
         ..., ge=0, description="相对该 step raw 轨媒体轴起点的 ms（= video.currentTime×1000）"
     )
     end_media_ms: int = Field(..., ge=1)
-    label: Optional[str] = Field(None, max_length=64, description="透传到 LS task.data 的标注 hint")
 
 
 class LabSubmitRequest(BaseModel):
@@ -457,7 +456,6 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
                 step_id=req.step_id,
                 start_media_ms=c.start_media_ms,
                 end_media_ms=c.end_media_ms,
-                label=c.label,
             )
             results.append(_process_one(spec, builder, ls, project_id, job_dir))
             if not results[-1].success:
@@ -513,17 +511,9 @@ def _process_one(
         )
 
     # Step 2: upload
-    meta = {
-        "task_id": spec.task_id,
-        "step_id": spec.step_id,
-        "start_ms": clip_res.start_ms,
-        "end_ms": clip_res.end_ms,
-        "start_media_ms": spec.start_media_ms,
-        "end_media_ms": spec.end_media_ms,
-        "label": spec.label,
-        "source": "cleansight",
-    }
-    ls_res = ls.import_clip(project_id, clip_res.output_path, meta=meta)
+    # 不带元数据：LS 的 /import 在文件上传模式下只读 request.FILES，同一个 multipart 里的
+    # 非文件字段一律忽略，曾经拼的那份 meta 从来没到过 task.data。溯源只剩文件名里的墙钟区间。
+    ls_res = ls.import_clip(project_id, clip_res.output_path)
     if not ls_res.success:
         return LabClipResultDTO(
             start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
