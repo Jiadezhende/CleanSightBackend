@@ -123,6 +123,31 @@ class GlobalHealthMonitor:
             self.config.check_interval,
             self.config.cleanup_timeout,
         )
+        self._check_reconnect_budget()
+
+    def _check_reconnect_budget(self) -> None:
+        """`2 × settings.rtsp_read_timeout_s` 占掉过多 cleanup 预算时告警，不纠正。
+
+        两个值分居两处配置却是串联的：`cleanup_timeout` 从最后一帧算起，静默断流下
+        decoder 要先花 `2T` 才退出。依据见 `docs/update/20260920_RTSP_READ_TIMEOUT.md`。
+        """
+        from app.settings import settings
+
+        dead_after = 2 * settings.rtsp_read_timeout_s
+        budget = self.config.cleanup_timeout - dead_after
+        if budget <= 0:
+            logger.error(
+                "[GlobalHealthMonitor] 配置冲突：静默断流判死需 %.1fs（=2×rtsp_read_timeout_s）"
+                "，已 ≥ cleanup_timeout %.1fs —— 静默断流会被直接拆除，重连永不触发。"
+                "请调小 rtsp_read_timeout_s 或调大 cleanup_timeout",
+                dead_after, self.config.cleanup_timeout,
+            )
+        elif budget < self.config.cleanup_timeout / 2:
+            logger.warning(
+                "[GlobalHealthMonitor] 静默断流判死占掉过半 cleanup 预算："
+                "判死 %.1fs，仅剩 %.1fs 供 respawn+建连+等关键帧",
+                dead_after, budget,
+            )
 
     def _resolve_deps(self):
         """把构造期缺省的协作者与配置补齐（已注入的不动）

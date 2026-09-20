@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     ca_maxlen_seconds: int = 30    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
     ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
 
+    # 拉流 socket 读超时（秒）→ decoder ffmpeg 的 `-timeout`。断流判死延迟 = 2×本值，
+    # 上界受 health_monitor 的 cleanup_timeout 约束；三条硬约束见 `_rtsp_input_opts()`。
+    rtsp_read_timeout_s: float = 2.5  # env: CLEANSIGHT_RTSP_READ_TIMEOUT_S
+
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
     mediamtx_internal_port: int = 18004  # MediaMTX 实际监听端口

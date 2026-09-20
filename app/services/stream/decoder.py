@@ -18,28 +18,33 @@ from app.utils.metrics import frame_drop_total
 
 DEFAULT_CHANNELS = 3
 
-# RTSP 输入固定选项（系统只用 RTSP）：TCP 传输 + 读超时 + 低延迟 + 容错解析。
-# 作为 ffmpeg 命令的固定前缀（全在 -i 之前，均作用于输入），见 _build_cmd。
-#
-# transport=tcp：内部从 127.0.0.1 拉流，loopback 上 TCP 无延迟损失，且 RTP 与 RTSP 控制
-#   复用同一连接，消除 UDP 独立 RTP 端口的建连竞态（否则「会话建成却 0 RTP」在健康监控的
-#   进程死活判据下只会白等到 cleanup，不再自动重启）。
-# -timeout（rtsp demuxer 选项，微秒）：socket I/O 读超时。断流时 ffmpeg 一般从 TCP 控制通道
-#   即收 EOF 而退出；但「真·网络分区」下 socket 既不来数据也不 FIN，ffmpeg 会无限阻塞、进程
-#   保持 alive——健康监控新判据（进程死→重启 / 活着无帧→只等）会把它当「等待中」白等到 cleanup。
-#   加读超时让这类挂死主动超时退出（→ 进程死）→ 被重启。取值 5s：远大于正常包间隔与关键帧
-#   等待期（那期间 socket 有 RTP 流动，不触发），远小于 cleanup_timeout（20s），留足重启窗口。
-#   实测（三进程实验台）冻结对端后 ffmpeg 报 "Operation timed out" 并退出；-rw_timeout 作为
-#   rtsp 输入选项在本 ffmpeg 上不被接受，故用 demuxer 的 -timeout。
-_RTSP_INPUT_OPTS = [
-    "-rtsp_transport", "tcp",
-    "-timeout", "5000000",
-    "-fflags", "nobuffer+discardcorrupt",
-    "-flags", "low_delay",
-    "-err_detect", "ignore_err",
-    "-analyzeduration", "1000000",
-    "-probesize", "1000000",
-]
+def _rtsp_input_opts() -> list:
+    """RTSP 输入固定选项（系统只用 RTSP），作为 `-i` 之前的前缀，见 `_build_cmd`。
+
+    三条硬约束，动之前先看：
+
+    - **`-rtsp_transport tcp` 不可换 udp**：UDP 下「会话建成却 0 RTP」在进程死活判据下会
+      白等到 cleanup，不自动重启。
+    - **判死延迟是 `-timeout` 的 2 倍**（`T` → `2T`）：ffmpeg 第一次读超时不致命、重试一次，
+      第二次才退出。所以它的语义是「连续 `2T` 收不到任何字节才判死」，配置改不掉。
+    - **`2T` 必须 < `cleanup_timeout`**（health_monitor，默认 20s）：否则进程还没死就先被
+      判 cleanup 拆除，重连永远轮不上。`GlobalHealthMonitor.start()` 有一条越界告警。
+
+    取值：`settings.rtsp_read_timeout_s`（默认 2.5s → 判死 ~5.4s）。按调用取值，不在 import
+    期定死——否则改 env 要重启才生效。
+
+    实测数据、`-rw_timeout` 为什么不能用、以及 2× 是怎么测出来的，见
+    `docs/update/20260920_RTSP_READ_TIMEOUT.md`。
+    """
+    return [
+        "-rtsp_transport", "tcp",
+        "-timeout", str(int(settings.rtsp_read_timeout_s * 1_000_000)),
+        "-fflags", "nobuffer+discardcorrupt",
+        "-flags", "low_delay",
+        "-err_detect", "ignore_err",
+        "-analyzeduration", "1000000",
+        "-probesize", "1000000",
+    ]
 
 
 class FFmpegDecoder:
@@ -86,7 +91,7 @@ class FFmpegDecoder:
 
     def _build_cmd(self):
         cmd = [settings.ffmpeg_path]
-        cmd += _RTSP_INPUT_OPTS
+        cmd += _rtsp_input_opts()
         cmd += [
             "-i",
             self.stream_url,
