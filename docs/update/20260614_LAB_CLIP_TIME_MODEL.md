@@ -1,7 +1,13 @@
 # 送标裁剪连续性判据改为按 step 实测节奏（修长片误报 range_gap）
 
-> **变更状态**：生效中（历史记录，本次维护确认）
+> **变更状态**：**已被取代（2026-09-20）**，本文保留为历史记录
 > **知识库**：已沉淀 → [kb/SERVICE_LAB.md](../kb/SERVICE_LAB.md)(2026-07-21)
+>
+> **取代它的是**：[20260919_VIDEO_TIMEBASE_SELECTION.md](20260919_VIDEO_TIMEBASE_SELECTION.md) §5.3。
+> 本文这套「中位数基准 + 可配容差」判据是**没有段时长真值**时的补偿——当时
+> `clip_builder` 刻意不读清单 EXTINF。段查询收口到清单之后 EXTINF 就是真值，判据换成
+> `gap = 下一段起点 − (本段起点 + EXTINF) > 0.5s`，fps 漂移由 EXTINF 天然吸收，不再需要
+> 基准与容差。**`lab_export_gap_tolerance_ms` 这个配置项已删除**，别照本文重新加回去。
 
 ## 背景：两套时钟不自洽
 
