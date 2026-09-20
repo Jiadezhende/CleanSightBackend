@@ -233,7 +233,8 @@
           <el-radio-button label="processed">processed 标注</el-radio-button>
         </el-radio-group>
         <span style="font-weight:400;color:#9ca3af;font-size:12px;margin-left:8px">
-          时长 {{ formatDuration(timeline.duration_ms) }} · {{ timeline.events.length }} 个告警 · 送标裁 raw
+          时长 {{ formatDuration(timeline.media_duration_ms) }} · {{ timeline.events.length }} 个告警 · 送标裁 raw
+          <span v-if="hasGap" :title="gapHint" style="color:#f59e0b">· 含信号中断</span>
         </span>
         <a :href="downloadUrl" download style="margin-left:auto">
           <el-button size="small" plain>⬇ 下载整段（{{ track }}）</el-button>
@@ -249,20 +250,25 @@
           </div>
           <div class="timeline-wrap">
             <div class="timeline-label">
-              <span>{{ formatAbsTime(timeline.start_ms) }}</span>
+              <span>00:00</span>
               <span style="color:#374151">时间轴（红=告警，蓝=已选，橙虚=待加入，白=播放头）</span>
-              <span>{{ formatAbsTime(timeline.end_ms) }}</span>
+              <span>{{ formatDuration(timeline.media_duration_ms) }}</span>
             </div>
             <div class="timeline-strip" ref="stripEl" @click="seekFromStrip">
-              <div v-for="c in clips" :key="'c'+c._key" class="tl-clip"
-                   :style="rangeStyle(c.start_ms, c.end_ms)"></div>
-              <div v-if="pending.start_ms !== null && pending.end_ms !== null && pending.end_ms > pending.start_ms"
-                   class="tl-pending"
-                   :style="rangeStyle(pending.start_ms, pending.end_ms)"></div>
+              <!-- 选区只在 raw 轨上画：clips/pending 存的是 raw 的媒体刻度，而进度条分母
+                   随轨变（两轨 Σ EXTINF 不同尺），画在 processed 上位置是错的。打点按钮
+                   本来就只在 raw 可用，这里跟着一起藏，免得给出一个对不上的视觉位置。 -->
+              <template v-if="track === 'raw'">
+                <div v-for="c in clips" :key="'c'+c._key" class="tl-clip"
+                     :style="rangeStyle(c.start_media_ms, c.end_media_ms)"></div>
+                <div v-if="pending.start_media_ms !== null && pending.end_media_ms !== null && pending.end_media_ms > pending.start_media_ms"
+                     class="tl-pending"
+                     :style="rangeStyle(pending.start_media_ms, pending.end_media_ms)"></div>
+              </template>
               <div v-for="ev in timeline.events" :key="ev.alarm_id" class="tl-marker"
-                   :style="markerStyle(ev.ts_ms)"
+                   :style="markerStyle(ev.media_offset_ms)"
                    :title="alarmTooltip(ev)"
-                   @click.stop="seekToMs(ev.ts_ms)"></div>
+                   @click.stop="seekToMediaMs(ev.media_offset_ms)"></div>
               <div class="tl-cursor" :style="cursorStyle"></div>
             </div>
           </div>
@@ -271,18 +277,18 @@
         <div class="player-side">
           <div class="side-item">
             <div class="side-key">当前播放</div>
-            <div class="side-val">{{ formatAbsTime(currentAbsMs) }}</div>
-            <div style="font-size:11px;color:#9ca3af;margin-top:2px">abs_ms = {{ currentAbsMs }}</div>
+            <div class="side-val">{{ formatDuration(currentMediaMs) }}</div>
+            <div style="font-size:11px;color:#9ca3af;margin-top:2px">media_ms = {{ currentMediaMs }}</div>
           </div>
           <div class="side-item">
             <div class="side-key">待加入区间</div>
             <div class="side-val">
-              <span :style="pending.start_ms === null ? 'color:#9ca3af' : ''">
-                {{ pending.start_ms !== null ? formatAbsTime(pending.start_ms) : '— 未设 —' }}
+              <span :style="pending.start_media_ms === null ? 'color:#9ca3af' : ''">
+                {{ pending.start_media_ms !== null ? formatDuration(pending.start_media_ms) : '— 未设 —' }}
               </span>
               <span style="color:#9ca3af"> → </span>
-              <span :style="pending.end_ms === null ? 'color:#9ca3af' : ''">
-                {{ pending.end_ms !== null ? formatAbsTime(pending.end_ms) : '— 未设 —' }}
+              <span :style="pending.end_media_ms === null ? 'color:#9ca3af' : ''">
+                {{ pending.end_media_ms !== null ? formatDuration(pending.end_media_ms) : '— 未设 —' }}
               </span>
             </div>
             <div style="font-size:12px;color:#6b7280;margin-top:4px">
@@ -320,8 +326,8 @@
         <thead>
           <tr>
             <th style="width:36px">#</th>
-            <th>start_ms</th>
-            <th>end_ms</th>
+            <th>起点（片内）</th>
+            <th>终点（片内）</th>
             <th style="width:80px">时长</th>
             <th>label（≤64）</th>
             <th style="width:160px">操作</th>
@@ -330,14 +336,14 @@
         <tbody>
           <tr v-for="(c, i) in clips" :key="c._key" :class="c._overlap ? 'err-row' : ''">
             <td>{{ i + 1 }}</td>
-            <td class="mono">{{ c.start_ms }}<div style="font-size:11px;color:#9ca3af">{{ formatAbsTime(c.start_ms) }}</div></td>
-            <td class="mono">{{ c.end_ms }}<div style="font-size:11px;color:#9ca3af">{{ formatAbsTime(c.end_ms) }}</div></td>
-            <td class="mono">{{ formatDuration(c.end_ms - c.start_ms) }}</td>
+            <td class="mono">{{ formatDuration(c.start_media_ms) }}<div style="font-size:11px;color:#9ca3af">{{ c.start_media_ms }} ms</div></td>
+            <td class="mono">{{ formatDuration(c.end_media_ms) }}<div style="font-size:11px;color:#9ca3af">{{ c.end_media_ms }} ms</div></td>
+            <td class="mono">{{ formatDuration(c.end_media_ms - c.start_media_ms) }}</td>
             <td>
               <el-input v-model="c.label" size="small" placeholder="（可选）" maxlength="64" />
             </td>
             <td>
-              <el-button size="small" @click="seekToMs(c.start_ms)">跳转</el-button>
+              <el-button size="small" @click="seekToMediaMs(c.start_media_ms)">跳转</el-button>
               <el-button size="small" type="danger" plain @click="removeClip(i)">删除</el-button>
             </td>
           </tr>
@@ -376,8 +382,7 @@
         <thead>
           <tr>
             <th style="width:36px">#</th>
-            <th>start_ms</th>
-            <th>end_ms</th>
+            <th>起止（绝对时刻）</th>
             <th style="width:80px">时长</th>
             <th style="width:80px">状态</th>
             <th>LS task_id</th>
@@ -387,8 +392,10 @@
         <tbody>
           <tr v-for="(r, i) in result.clips" :key="i" :class="r.success ? '' : 'err-row'">
             <td>{{ i + 1 }}</td>
-            <td class="mono">{{ r.start_ms }}</td>
-            <td class="mono">{{ r.end_ms }}</td>
+            <td class="mono">
+              <template v-if="r.start_ms">{{ formatAbsTime(r.start_ms) }} → {{ formatAbsTime(r.end_ms) }}</template>
+              <template v-else>—</template>
+            </td>
             <td class="mono">{{ r.duration_ms ? formatDuration(r.duration_ms) : '—' }}</td>
             <td>
               <span class="badge" :class="r.success ? 'badge-ok' : 'badge-err'">
@@ -406,7 +413,7 @@
       <div v-if="result.job_dir" class="result-job-dir">
         ⚠️ 部分段失败，临时 mp4 已保留于 <code>{{ result.job_dir }}</code>。<br />
         可手动 <code>curl -F file=@clip_xxx.mp4 -H "Authorization: Token $LS_TOKEN" $LS_URL/api/projects/{{ result.project_id }}/import</code> 重传，<br />
-        或修复 LS 后直接重新点[提交送标]（段是幂等的，相同 start_ms/end_ms 会重新生成）。
+        或修复 LS 后直接重新点[提交送标]（段是幂等的，相同区间会重新生成）。
       </div>
     </div>
   </div>
@@ -561,7 +568,17 @@ createApp({
     }
 
     // 时间轴 + 视频
-    const timeline = reactive({ start_ms: 0, end_ms: 0, duration_ms: 0, events: [] });
+    // 两套坐标各管一段：
+    //   墙钟 start_ms/end_ms/duration_ms —— 只用于显示"这件事几点发生的"（告警 tooltip、结果表）
+    //   媒体 media_duration_ms + 每个事件的 media_offset_ms —— 进度条、标记落点、打点全用它
+    // **进度条必须走媒体坐标**：currentTime 与 duration 都是媒体量，而告警 ts_ms 是墙钟；
+    // 混用就是"比例不同尺"——断流 20s 的 step 里指针只能走到 96.7%，标记还与画面差一个空洞。
+    // 墙钟↔媒体的换算要清单，只有后端做得了，所以 media_offset_ms 由 /timeline 给。
+    const timeline = reactive({
+      start_ms: 0, end_ms: 0, duration_ms: 0,
+      media_duration_ms: 0, gap_total_ms: 0, has_gap: false,
+      events: [],
+    });
     const videoEl = ref(null);
     const stripEl = ref(null);
     const track = ref('raw');          // 当前查看的轨道：raw（送标源）/ processed（参考）
@@ -569,9 +586,10 @@ createApp({
     let videoListenersBound = false;   // timeupdate/seeked 只绑一次（切轨复用同一 <video> 节点）
 
     const currentTimeSec = ref(0);
-    const currentAbsMs = computed(() =>
-      timeline.start_ms + Math.round(currentTimeSec.value * 1000)
-    );
+    // 播放头的媒体刻度。这里曾是 `timeline.start_ms + currentTime*1000`——那个恒等式只在
+    // 从没断过流时成立，断过就偏早 Σgap，打点跟着错（缺陷 #1）。前端没有清单，算不出真墙钟，
+    // 所以干脆不算：上报媒体刻度，墙钟由后端换算并随响应带回。
+    const currentMediaMs = computed(() => Math.round(currentTimeSec.value * 1000));
 
     // 整段下载：用原生 <a download> 而非 fetch+blob —— 浏览器接管下载进度、
     // 可断点续传、不把整个文件读进内存。跟随当前 track 切换。
@@ -585,6 +603,19 @@ createApp({
       v.addEventListener('seeked',     () => { currentTimeSec.value = v.currentTime; });
       videoListenersBound = true;
     }
+
+    // 该轨累计断流时长，**由后端按逐段精确判据算**（/timeline 的 gap_total_ms）。
+    //
+    // 这里曾是 `duration_ms - media_duration_ms`，**那是错的**：前者是双轨并集的墙钟跨度、
+    // 后者是单轨 Σ EXTINF，两者不同尺，差值里混着"两轨起止不对齐"——推理起步晚于取流时
+    // processed 首段本就晚于 raw 首段，于是零断流的 step 也会亮出"缺失 N 秒"。
+    //
+    // 纯提示：进度条上画不出空洞（媒体轴是压紧的，宽度为零），但操作员有权知道这段录像
+    // 中间缺了东西。
+    const hasGap = computed(() => !!timeline.has_gap);
+    const gapHint = computed(() =>
+      `本段录像累计缺失约 ${formatDuration(timeline.gap_total_ms)}（源信号中断），播放时会直接跳过`
+    );
 
     // seekSec/resumePlay 用于切轨保位：换源后停在同一时刻并维持播放态
     function attachVideo(seekSec = null, resumePlay = false) {
@@ -632,6 +663,11 @@ createApp({
         }
       }
       track.value = next;
+      try {
+        await fetchTimeline(next);          // 媒体坐标按轨算，换轨必须重取
+      } catch (e) {
+        ElMessage.error('时间轴重载失败: ' + e.message);
+      }
       await nextTick();
       attachVideo(savedTime, wasPlaying);
     }
@@ -642,6 +678,28 @@ createApp({
       videoListenersBound = false;   // <video> 节点随 v-if 销毁，下次加载是新节点
     }
 
+    // 媒体坐标按轨算：两轨各自独立切段，Σ EXTINF 与告警的 media_offset_ms 都不同尺，
+    // 所以**切轨必须重取**，不能只换视频源。
+    async function fetchTimeline(trackName) {
+      const url = api(
+        `/traceback/task/${form.task_id}/timeline?step_id=${form.step_id}&track=${trackName}`
+      );
+      const r = await fetch(url);
+      if (!r.ok) {
+        const txt = await r.text();
+        throw new Error(`timeline ${r.status}: ${txt.slice(0, 200)}`);
+      }
+      const d = await r.json();
+      if (!d.media_duration_ms) return false;
+      Object.assign(timeline, {
+        start_ms: d.start_ms, end_ms: d.end_ms, duration_ms: d.duration_ms,
+        media_duration_ms: d.media_duration_ms,
+        gap_total_ms: d.gap_total_ms || 0, has_gap: !!d.has_gap,
+        events: d.events || [],
+      });
+      return true;
+    }
+
     async function loadStep() {
       if (!form.task_id || !form.step_id) {
         ElMessage.warning('请填写 task_id 和 step_id');
@@ -650,17 +708,11 @@ createApp({
       loading.load = true;
       try {
         await fetchHealth();
-        const r = await fetch(api(`/traceback/task/${form.task_id}/timeline?step_id=${form.step_id}`));
-        if (!r.ok) {
-          const txt = await r.text();
-          throw new Error(`timeline ${r.status}: ${txt.slice(0, 200)}`);
-        }
-        const d = await r.json();
-        if (!d.duration_ms) {
+        const ok = await fetchTimeline(track.value);
+        if (!ok) {
           ElMessage.warning('该 step 没有 raw 段，请先确认录制是否完成');
           return;
         }
-        Object.assign(timeline, { start_ms: d.start_ms, end_ms: d.end_ms, duration_ms: d.duration_ms, events: d.events || [] });
         loaded.value = true;
         result.value = null;
         clips.value = [];
@@ -681,59 +733,67 @@ createApp({
       clips.value = [];
       clearPending();
       result.value = null;
-      Object.assign(timeline, { start_ms: 0, end_ms: 0, duration_ms: 0, events: [] });
+      Object.assign(timeline, {
+        start_ms: 0, end_ms: 0, duration_ms: 0,
+        media_duration_ms: 0, gap_total_ms: 0, has_gap: false, events: [],
+      });
     }
 
-    // 时间轴定位
+    // 时间轴定位 —— 横轴是**媒体轴**，四个量同尺：clips / pending / 告警 / 播放头。
+    // 分母是 media_duration_ms（= Σ EXTINF = <video>.duration），不是墙钟跨度 duration_ms。
     function rangeStyle(startMs, endMs) {
-      const left = ((startMs - timeline.start_ms) / timeline.duration_ms) * 100;
-      const width = ((endMs - startMs) / timeline.duration_ms) * 100;
+      const left = (startMs / timeline.media_duration_ms) * 100;
+      const width = ((endMs - startMs) / timeline.media_duration_ms) * 100;
       return { left: `${Math.max(0, left)}%`, width: `${Math.max(0.2, width)}%` };
     }
-    function markerStyle(tsMs) {
-      const left = ((tsMs - timeline.start_ms) / timeline.duration_ms) * 100;
+    function markerStyle(mediaOffsetMs) {
+      const left = (mediaOffsetMs / timeline.media_duration_ms) * 100;
       return { left: `calc(${Math.max(0, Math.min(100, left))}% - 1px)` };
     }
     const cursorStyle = computed(() => {
-      if (!timeline.duration_ms) return { left: '0%' };
-      const p = ((currentAbsMs.value - timeline.start_ms) / timeline.duration_ms) * 100;
+      if (!timeline.media_duration_ms) return { left: '0%' };
+      const p = (currentMediaMs.value / timeline.media_duration_ms) * 100;
       return { left: `calc(${Math.max(0, Math.min(100, p))}% - 1px)` };
     });
     function alarmTooltip(ev) {
       return `[${ev.severity || '?'}] ${ev.alarm_type || ''}\n${ev.message || ''}\n@${formatAbsTime(ev.ts_ms)}`;
     }
-    function seekToMs(absMs) {
-      if (!videoEl.value || !timeline.duration_ms) return;
-      const sec = Math.max(0, (absMs - timeline.start_ms) / 1000);
-      videoEl.value.currentTime = sec;
+    // 媒体刻度就是 currentTime，无需换算 —— 这是横轴选媒体轴换来的：告警标记与播放头落在
+    // 同一把尺上，点标记跳过去看到的就是那一帧（旧实现按墙钟线性反推，断流后偏 Σgap）。
+    function seekToMediaMs(mediaMs) {
+      if (!videoEl.value || !timeline.media_duration_ms) return;
+      videoEl.value.currentTime = Math.max(0, mediaMs) / 1000;
     }
     function seekFromStrip(e) {
       const rect = stripEl.value.getBoundingClientRect();
       const pct = (e.clientX - rect.left) / rect.width;
-      seekToMs(timeline.start_ms + pct * timeline.duration_ms);
+      seekToMediaMs(pct * timeline.media_duration_ms);
     }
 
     // 待选段
-    const pending = reactive({ start_ms: null, end_ms: null });
-    function markStart() { pending.start_ms = currentAbsMs.value; }
-    function markEnd()   { pending.end_ms   = currentAbsMs.value; }
-    function clearPending() { pending.start_ms = null; pending.end_ms = null; }
+    // 区间一律是**媒体刻度**（片内偏移），与上报给后端的字段同名同义。
+    const pending = reactive({ start_media_ms: null, end_media_ms: null });
+    function markStart() { pending.start_media_ms = currentMediaMs.value; }
+    function markEnd()   { pending.end_media_ms   = currentMediaMs.value; }
+    function clearPending() { pending.start_media_ms = null; pending.end_media_ms = null; }
 
-    const pendingValid = computed(() => !!pendingError.value === false && pending.start_ms !== null && pending.end_ms !== null);
+    const pendingValid = computed(() => !!pendingError.value === false && pending.start_media_ms !== null && pending.end_media_ms !== null);
     const pendingError = computed(() => {
-      if (pending.start_ms === null || pending.end_ms === null) return '';
-      if (pending.end_ms <= pending.start_ms) return '终点必须晚于起点';
-      const dur = pending.end_ms - pending.start_ms;
+      if (pending.start_media_ms === null || pending.end_media_ms === null) return '';
+      if (pending.end_media_ms <= pending.start_media_ms) return '终点必须晚于起点';
+      const dur = pending.end_media_ms - pending.start_media_ms;
       if (dur > MAX_CLIP_MS) return `单段超过上限 ${formatDuration(MAX_CLIP_MS)}`;
       // 重叠预判
       for (const c of clips.value) {
-        if (pending.start_ms < c.end_ms && pending.end_ms > c.start_ms) return `与已有段 [${c.start_ms},${c.end_ms}] 重叠`;
+        if (pending.start_media_ms < c.end_media_ms && pending.end_media_ms > c.start_media_ms) {
+          return `与已有段 [${formatDuration(c.start_media_ms)},${formatDuration(c.end_media_ms)}] 重叠`;
+        }
       }
       return '';
     });
     const pendingDurationLabel = computed(() => {
-      if (pending.start_ms === null || pending.end_ms === null) return '—';
-      const d = pending.end_ms - pending.start_ms;
+      if (pending.start_media_ms === null || pending.end_media_ms === null) return '—';
+      const d = pending.end_media_ms - pending.start_media_ms;
       return d > 0 ? formatDuration(d) : '—';
     });
 
@@ -748,12 +808,12 @@ createApp({
       }
       clips.value.push({
         _key: ++clipKeySeq,
-        start_ms: pending.start_ms,
-        end_ms: pending.end_ms,
+        start_media_ms: pending.start_media_ms,
+        end_media_ms: pending.end_media_ms,
         label: '',
         _overlap: false,
       });
-      clips.value.sort((a, b) => a.start_ms - b.start_ms);
+      clips.value.sort((a, b) => a.start_media_ms - b.start_media_ms);
       clearPending();
     }
     function removeClip(i) { clips.value.splice(i, 1); }
@@ -764,26 +824,26 @@ createApp({
     }
 
     // 总校验（包含重叠 / 总时长 / 数量）
-    const totalDurationMs = computed(() => clips.value.reduce((s, c) => s + (c.end_ms - c.start_ms), 0));
+    const totalDurationMs = computed(() => clips.value.reduce((s, c) => s + (c.end_media_ms - c.start_media_ms), 0));
     const validation = computed(() => {
       if (clips.value.length === 0) return { ok: false, error: '至少添加 1 段' };
       if (clips.value.length > MAX_CLIPS) return { ok: false, error: `段数 ${clips.value.length} > ${MAX_CLIPS}` };
-      const sorted = [...clips.value].sort((a, b) => a.start_ms - b.start_ms);
+      const sorted = [...clips.value].sort((a, b) => a.start_media_ms - b.start_media_ms);
       for (let i = 0; i < sorted.length; i++) {
         const c = sorted[i];
-        if (c.end_ms <= c.start_ms) return { ok: false, error: `第 ${i + 1} 段 end_ms <= start_ms` };
-        if ((c.end_ms - c.start_ms) > MAX_CLIP_MS) return { ok: false, error: `第 ${i + 1} 段超过 ${formatDuration(MAX_CLIP_MS)}` };
-        if (i > 0 && c.start_ms < sorted[i - 1].end_ms) return { ok: false, error: `第 ${i + 1} 段与上一段重叠` };
+        if (c.end_media_ms <= c.start_media_ms) return { ok: false, error: `第 ${i + 1} 段终点不晚于起点` };
+        if ((c.end_media_ms - c.start_media_ms) > MAX_CLIP_MS) return { ok: false, error: `第 ${i + 1} 段超过 ${formatDuration(MAX_CLIP_MS)}` };
+        if (i > 0 && c.start_media_ms < sorted[i - 1].end_media_ms) return { ok: false, error: `第 ${i + 1} 段与上一段重叠` };
       }
       if (totalDurationMs.value > MAX_TOTAL_MS) return { ok: false, error: `总时长 ${formatDuration(totalDurationMs.value)} > ${formatDuration(MAX_TOTAL_MS)}` };
       return { ok: true, error: '' };
     });
     // 同步给 row 高亮（仅重叠红条）
     watch(clips, (arr) => {
-      const sorted = [...arr].sort((a, b) => a.start_ms - b.start_ms);
+      const sorted = [...arr].sort((a, b) => a.start_media_ms - b.start_media_ms);
       arr.forEach(c => { c._overlap = false; });
       for (let i = 1; i < sorted.length; i++) {
-        if (sorted[i].start_ms < sorted[i - 1].end_ms) {
+        if (sorted[i].start_media_ms < sorted[i - 1].end_media_ms) {
           sorted[i]._overlap = true;
           sorted[i - 1]._overlap = true;
         }
@@ -815,8 +875,8 @@ createApp({
           task_id: form.task_id,
           step_id: form.step_id,
           clips: clips.value.map(c => ({
-            start_ms: c.start_ms,
-            end_ms: c.end_ms,
+            start_media_ms: c.start_media_ms,
+            end_media_ms: c.end_media_ms,
             label: c.label?.trim() || null,
           })),
           keep_artifacts_on_failure: true,
@@ -881,9 +941,10 @@ createApp({
       form, loading, loaded, health,
       taskQuery, taskList, taskScrollEl, fetchTasks, onTaskScroll, selectTask,
       configDialog, openConfigDialog, saveConfig,
-      timeline, videoEl, stripEl, currentAbsMs, track, switchTrack, downloadUrl,
+      timeline, videoEl, stripEl, currentMediaMs, track, switchTrack, downloadUrl,
+      hasGap, gapHint,
       rangeStyle, markerStyle, cursorStyle, alarmTooltip,
-      seekToMs, seekFromStrip,
+      seekToMediaMs, seekFromStrip,
       pending, pendingValid, pendingError, pendingDurationLabel,
       markStart, markEnd, clearPending, addClip,
       clips, totalDurationMs, validation, canSubmit,

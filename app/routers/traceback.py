@@ -24,6 +24,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm
 from app.services.traceback import MediaToken
+from app.services.utils.media_timeline import MediaTimeline
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
@@ -253,6 +254,11 @@ def _step_duration_ms(task_id: int, step_id: int) -> Tuple[int, int, int]:
 async def get_task_timeline(
     task_id: int,
     step_id: int = Query(..., description="洗消步骤 id（必填，仅返回该 step 的事件）"),
+    track: str = Query(
+        default="raw",
+        pattern="^(raw|processed)$",
+        description="媒体坐标按哪条轨算（两轨各自独立切段，媒体轴不同尺）",
+    ),
 ):
     """单个洗消步骤的时间轴打点（前端在视频进度条上叠加告警标记）。
 
@@ -261,19 +267,27 @@ async def get_task_timeline(
     告警事件来自 DB；DB 不可用时退化为空 events（仍返回段时长），不 503，
     DB 恢复后自动恢复告警标记。
 
-    返回：
-        {
-          "task_id": ...,
-          "step_id": ...,
-          "start_ms": ...,
-          "end_ms": ...,
-          "duration_ms": ...,
-          "events": [
-             {"ts_ms": ..., "type": "alarm", "alarm_id": ..., "severity": ..., "alarm_type": ..., "message": ...}
-          ]
-        }
+    ## 两套坐标，各自回答不同的问题
+
+        墙钟   start_ms / end_ms / duration_ms / 每个事件的 ts_ms
+               "这件事几点发生的" —— 审计、检索、跨 step 对照用
+        媒体   media_duration_ms / gap_total_ms / 每个事件的 media_offset_ms
+               "在播放器的第几秒" —— 进度条、标记落点、跳转用
+
+    **进度条必须用媒体坐标**：`<video>.currentTime` 与 `duration` 都是媒体量，而告警的
+    `ts_ms` 是墙钟。两者混用就是"比例不同尺"——断流 20s 的 step 里，指针按墙钟全长走只能
+    走到 96.7%，且告警标记与画面差整整一个空洞。换算要清单，所以它在这里做，不在浏览器做。
+
+    `media_offset_ms` 随 `track` 变：两轨各自独立切段，Σ EXTINF 不同。前端切轨要重取。
+
+    `gap_total_ms` 是该轨累计断流时长，**必须由后端按逐段精确判据算**——前端拿
+    `duration_ms − media_duration_ms` 去凑会在零断流时误报：前者是双轨并集墙钟跨度、
+    后者是单轨 Σ EXTINF，两者不同尺，差值里混着"两轨起止不对齐"这一项（推理起步晚于
+    取流时 processed 首段必然晚于 raw 首段）。
     """
     start_ms, end_ms, duration_ms = _step_duration_ms(task_id, step_id)
+    timeline = MediaTimeline.load(task_id, step_id, track)
+    gap_total_ms = timeline.total_gap_ms()
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
     # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。
@@ -289,9 +303,13 @@ async def get_task_timeline(
     for a in alarms:
         if a["detected_at"] is None:
             continue
+        ts_ms = _to_ms(a["detected_at"])
         events.append(
             {
-                "ts_ms": _to_ms(a["detected_at"]),
+                "ts_ms": ts_ms,
+                # 告警落在哪一帧 → 播放器的第几毫秒。落进空洞的墙钟吸附到下一段段首
+                # （那段时间在媒体轴上宽度为零，没有"对应刻度"可言）。
+                "media_offset_ms": timeline.media_ms_at(ts_ms),
                 "type": "alarm",
                 "alarm_id": a["alarm_id"],
                 "alarm_type": a["alarm_type"],
@@ -307,8 +325,14 @@ async def get_task_timeline(
     return {
         "task_id": task_id,
         "step_id": step_id,
+        "track": track,
+        # 墙钟：双轨并集的跨度（含断流空洞）
         "start_ms": start_ms,
         "end_ms": end_ms,
         "duration_ms": duration_ms,
+        # 媒体：该轨 Σ EXTINF，与 `<video>.duration` 同源 —— 进度条全长用它
+        "media_duration_ms": timeline.duration_ms,
+        "gap_total_ms": gap_total_ms,
+        "has_gap": gap_total_ms > 0,
         "events": events,
     }

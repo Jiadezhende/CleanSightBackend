@@ -81,6 +81,9 @@ BUDGET = {
     # 另行登记，由 test_layer_package_modules_are_all_budgeted 强制。
     "app.services.utils":              (set(), 0.20),
     "app.services.utils.vod_playlist": (set(), 0.20),   # stdlib only（math / typing）
+    # 媒体轴换算。它 import `app.storage.hls`（段与 EXTINF 的唯一来源），故预算照 hls 那条
+    # 给 0.40 —— 量的是同一份活；它本身是 stdlib（bisect / typing）。
+    "app.services.utils.media_timeline": (set(), 0.40),
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
@@ -129,8 +132,9 @@ SINGLETONS = {
 # 这里只列**具名例外**——每条都得有理由，加新的先想清楚为什么不能走 run_control。
 SINGLETON_EXCEPTIONS = {
     # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态并发起重连/清理，
-    # 天然要持三个协作者。三处 import 均写在 `_resolve_deps()` 函数体内（不是模块级），
-    # 且 run_controller 那处是反向指回编排中枢做拆除。
+    # 天然要持四个协作者（recording 那个只用来在断流时登记一次残帧 flush）。四处 import 均
+    # 写在 `_resolve_deps()` 函数体内（不是模块级），且 run_controller 那处是反向指回编排
+    # 中枢做拆除。
     "app/services/health_monitor/manager.py",
     # 告警落库 sink：inference 产告警 → persistence 落库。跨服务但方向正确（下游依赖），
     # 且 sink 就是为这条方向存在的唯一窄接口。

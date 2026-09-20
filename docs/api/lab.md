@@ -1,6 +1,6 @@
 # `/lab-f3m8` — 送标导出（Label Studio）
 
-让操作员在某个 step 的 raw 整段视频上圈选 N 段 `[start_ms, end_ms]`，后端 ffmpeg 剪出 mp4 并上传到 Label Studio（LS）创建标注任务。
+让操作员在某个 step 的 raw 整段视频上圈选 N 段 `[start_media_ms, end_media_ms]`，后端 ffmpeg 剪出 mp4 并上传到 Label Studio（LS）创建标注任务。
 
 另提供一条**旁路**：`GET /download` 把整个 step 的某一轨 remux 成单个 mp4 直接下载，不经 LS，用于取汇报素材/原片。
 
@@ -10,7 +10,15 @@
 - 静态 UI：`GET /lab-f3m8/ui`（`app/static/lab`，`html=True`）。
 - 通用约定（Base URL / Gateway / 错误模型 / 枚举）见 [README](README.md)。
 
-> 时间单位在本组不统一：`/tasks` 返回的任务时间是 **epoch 秒**，而 `clips[].start_ms/end_ms/duration_ms` 是**毫秒**（绝对墙钟 ms，与 traceback timeline 同源）。逐字段已标注，别混用。
+> **本组有三套时间口径，逐字段已标注，别混用**：
+>
+> | 口径 | 出现在 | 含义 |
+> |------|--------|------|
+> | epoch 秒 | `/tasks` 的任务时间 | 平台侧时间戳 |
+> | **媒体毫秒** | `/submit` **请求**的 `start_media_ms` / `end_media_ms` | 相对该 step raw 轨媒体轴原点的偏移，= `<video>.currentTime × 1000` |
+> | **绝对墙钟毫秒** | `/submit` **响应**的 `start_ms` / `end_ms` | 后端换算出的真实时刻，与 traceback timeline 的 `ts_ms` 同源 |
+>
+> **请求为什么不收墙钟**：媒体轴是压紧的墙钟——断流那段时间在它上面不存在。浏览器手上只有媒体轴上的量，`首段墙钟 + currentTime` 这个换算只在从没断过流时成立，断过就系统性偏早整个断流时长，裁出来的 clip 里没有操作员标的那个事件，且时长对、能播、**不报错**。换算要清单（`(ts_us, EXTINF)` 逐行表），只有后端有，故换算在后端做、结果随响应带回。
 
 典型流程：
 
@@ -94,7 +102,7 @@
 
 ### 前端坑点
 
-- 时间是 **epoch 秒**，与 `/submit` 的毫秒不同源，别拿去当 `start_ms`。
+- 时间是 **epoch 秒**，与 `/submit` 的毫秒不同源，别拿去当区间入参。
 - storage 模式下大量字段退化，务必先 `GET /config` 读 `task_source` 再决定 UI 展示。
 - 分页 `total` 是过滤后总数；翻页用 `offset += limit`。
 
@@ -125,8 +133,8 @@
 
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
-| `start_ms` | int | 是 | **≥0**（绝对墙钟 ms），否则 422 |
-| `end_ms` | int | 是 | **≥1**，否则 422 |
+| `start_media_ms` | int | 是 | **≥0**，媒体毫秒（片内偏移，非墙钟），否则 422 |
+| `end_media_ms` | int | 是 | **≥1**，否则 422 |
 | `label` | string \| null | 否 | **≤64 字符**，透传到 LS `task.data` 作标注 hint |
 
 ### 响应 `200` `LabSubmitResponse`
@@ -142,7 +150,9 @@
   "failure_count": 1,
   "clips": [
     {
-      "start_ms": 0, "end_ms": 3000,   // epoch 墙钟毫秒
+      "start_media_ms": 0, "end_media_ms": 3000,   // 请求原样回显（失败时也有）
+      "start_ms": 1758283512400,                  // 后端换算的绝对墙钟；算不出时 null
+      "end_ms": 1758283515400,
       "success": true,
       "label_studio_task_id": 9001,    // 成功时 LS 分配的 task id；失败时 null
       "duration_ms": 3000,             // 毫秒；build 成功后才有，range/gap 失败时 null
@@ -160,6 +170,8 @@
 | `project_id` | int | 实际用的 project（req 优先，否则 default 回退后的值） |
 | `job_dir` | string \| null | 临时产物目录**绝对路径**。**仅当有段失败 且 `keep_artifacts_on_failure=true`** 时非空；否则（全成功，或不要求保留）已被删除，返回 null |
 | `success_count` / `failure_count` | int | 成功/失败段数，和为 `total` |
+| `clips[].start_media_ms` / `end_media_ms` | int | 请求原样回显，**任何结果都有**，供前端对号入座 |
+| `clips[].start_ms` / `end_ms` | int \| null | 后端换算的**绝对墙钟**毫秒。仅 build 成功（含上传失败）时有；`range_out_of_bounds`/`range_gap`/`ffmpeg_failed` 时 null |
 | `clips[].duration_ms` | int \| null | 毫秒。仅 build 成功（含上传失败）时有；`range_out_of_bounds`/`range_gap`/`ffmpeg_failed` 时 null |
 | `clips[].size_bytes` | int \| null | 同上 null 条件 |
 | `clips[].n_source_segments` | int \| null | 同上 null 条件 |
@@ -170,8 +182,8 @@
 
 | error_code | 触发条件 | 前端处置建议 |
 |------------|---------|-------------|
-| `range_out_of_bounds` | 选的 `[start_ms,end_ms]` 与该 step 的 raw 段无任何重叠 | 提示「所选时间不在可用录像范围内」，引导重新在 timeline 内圈选 |
-| `range_gap` | 范围内相邻段间隔超过 `gap_tolerance_ms`（真录制停顿：源断流/重连） | 提示「该时段录像中断，请缩小范围避开断点」 |
+| `range_out_of_bounds` | 选的 `[start_media_ms,end_media_ms)` 整个落在该 step 媒体轴之外 | 提示「所选时间不在可用录像范围内」，引导重新在 timeline 内圈选 |
+| `range_gap` | 范围内相邻段之间有真实录制停顿（`下一段起点 − (本段起点 + EXTINF) > 0.5s`，源断流/重连） | 提示「该时段录像中断，请缩小范围避开断点」。错误文案里带确切空洞时长与两个段名 |
 | `ffmpeg_failed` | ffmpeg 裁剪失败 / 输出文件缺失 | 视为可重试的后端错误，提示重试；持续失败上报运维查 ffmpeg |
 | `ls_bad_response` | LS 返回非预期（含无 `task_ids`、4xx 非鉴权、解析失败） | 提示「送标失败」，保留 `job_dir` 后可手动重试；查 LS project 是否存在 |
 | `ls_unreachable` | 连不上 LS（网络/超时/URLError） | 提示「Label Studio 不可达」，先 `GET /health` 确认连通再重试 |
@@ -185,15 +197,15 @@
 |------|---------|-----------|
 | `400` | 见下「400 全部触发条件」 | `{"error":"...","detail":"...","field":"clips"\|"project_id"}` |
 | `404` | `(task_id, step_id)` 无任何 raw 段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=raw"}` |
-| `422` | 请求体字段级校验失败（`clips` 为空、`start_ms<0`、`end_ms<1`、`label>64`） | FastAPI 校验体 |
+| `422` | 请求体字段级校验失败（`clips` 为空、`start_media_ms<0`、`end_media_ms<1`、`label>64`） | FastAPI 校验体 |
 | `503` | LS **url 或 token 未配置** | `{"error":"Label Studio not configured","detail":"url 可在页面填、token 须 env"}`（HTTPException，**body 只有 `detail`，无 `retryable`**） |
 
 **`400` 全部触发条件**（`_validate_clips` / `_resolve_project_id`，整请求级、任一即拒）：
 
 - `clips` 段数 > `lab_export_max_clips_per_submit`（默认 20），`field=clips`；
-- 某段 `end_ms ≤ start_ms`，`field=clips`；
-- 某段时长（`end_ms-start_ms`）> `lab_export_max_clip_ms`（默认 300000 ms = 5 min），`field=clips`；
-- 按 `start_ms` 排序后相邻段**重叠**（`start_ms < 前一段 end_ms`），`field=clips`；
+- 某段 `end_media_ms ≤ start_media_ms`，`field=clips`；
+- 某段时长（`end_media_ms-start_media_ms`）> `lab_export_max_clip_ms`（默认 300000 ms = 5 min），`field=clips`；
+- 按 `start_media_ms` 排序后相邻段**重叠**（`start_media_ms < 前一段 end_media_ms`），`field=clips`；
 - 各段时长之和 > `lab_export_max_total_ms`（默认 1800000 ms = 30 min），`field=clips`；
 - `project_id` 缺失（req 未传且无 default），`field=project_id`。
 

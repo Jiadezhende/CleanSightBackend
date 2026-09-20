@@ -25,6 +25,7 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.services.traceback.media_token import MediaToken
 from app.storage import hls
+from factories import seed_hls_segments
 
 
 _SECRET = "test-stable-secret-2026"
@@ -174,9 +175,9 @@ async def test_playlist_404_keeps_the_structured_body(client, media_root):
 async def test_playlist_404_when_no_segments(client, media_root):
     """不存在的 task/step → 404，**不是 503**。
 
-    与 503 那条用例一起钉住 `_build_vod_playlist` 里两档检查的**先后**：段检查必须在 init
-    检查之前。反过来的话，一个根本不存在的资源会先撞上"缺 init"而得到 503——那是"服务端
-    暂时不可用、请重试"的语义，对不存在的资源是误导。
+    与上面那条 503 用例一起钉住 `_build_vod_playlist` 里两档检查的**先后**：段检查必须在
+    init 检查之前。反过来的话，一个根本不存在的资源会先撞上"缺 init"而得到 503——那是
+    "服务端暂时不可用、请重试"的语义，对不存在的资源是误导。
     """
     resp = await client.get("/traceback/task/999/playlist.m3u8?step_id=1")
     assert resp.status_code == 404
@@ -252,6 +253,134 @@ async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
     assert body["events"][0]["ts_ms"] == base_ms + 2_000
     assert body["events"][0]["alarm_id"] == 2
     assert body["events"][1]["ts_ms"] == base_ms + 12_000
+
+
+_TS0_US = 1_700_000_000_000_000        # 段起点，真实 epoch 微秒
+_TS0_MS = _TS0_US // 1000
+
+
+def _install_alarms(monkeypatch, rows):
+    from app.routers import traceback as tb_router
+
+    fake_db = MagicMock()
+    fake_db.query.return_value.filter.return_value.filter.return_value.order_by.return_value.all.return_value = rows
+    fake_db.close = lambda: None
+    monkeypatch.setattr(tb_router, "get_db", lambda: iter([fake_db]))
+
+
+def _alarm(alarm_id, detected_at):
+    return SimpleNamespace(
+        alarm_id=alarm_id, alarm_type="bubble", severity="high",
+        message="b", step_id=1, step_name="s1", detected_at=detected_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeline_gives_media_coordinates_for_the_progress_bar(
+    client, media_root, monkeypatch
+):
+    """进度条要的是媒体坐标：全长 = Σ EXTINF，告警落点 = 它在媒体轴上的位置。
+
+    墙钟那几个字段照旧给（审计/显示用），但**不能拿去配 `<video>.currentTime`** ——
+    两者不同尺，混用就是断流后指针走不满、标记与画面错位。
+    """
+    # 三段各 10s，首尾相接、无空洞。ts 用真实 epoch —— `_to_ms` 把 <10^11 的
+    # detected_at 当秒级处理，小数值会被乘 1000，对不上段的墙钟。
+    _seed_task(task_id=3, step_id=1,
+               ts_us_list=[_TS0_US, _TS0_US + 10_000_000, _TS0_US + 20_000_000])
+    _install_alarms(monkeypatch, [_alarm(1, _TS0_MS + 12_000)])
+
+    body = (await client.get("/traceback/task/3/timeline?step_id=1")).json()
+
+    assert body["track"] == "raw"                            # 默认轨
+    assert body["media_duration_ms"] == 30_000               # Σ EXTINF
+    assert body["duration_ms"] == 30_000                     # 无空洞时两者相等
+    assert body["events"][0]["ts_ms"] == _TS0_MS + 12_000    # 墙钟原值不动
+    assert body["events"][0]["media_offset_ms"] == 12_000    # 减去首段起点
+
+
+@pytest.mark.asyncio
+async def test_timeline_media_offset_skips_the_gap(client, media_root, monkeypatch):
+    """断流之后的告警：墙钟晚了一个空洞，媒体坐标没有。
+
+    这是缺陷 #2 的修复点——旧前端按「(ts_ms − start_ms) / duration_ms」摆标记、按
+    currentTime 摆播放头，断流后两者差整整一个空洞。
+    """
+    # 两段各 10s，起点相隔 30s → 中间 20s 空洞；媒体轴上第二段紧接第一段（10s 处）
+    _seed_task(task_id=4, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 30_000_000])
+    _install_alarms(monkeypatch, [_alarm(1, _TS0_MS + 32_000)])   # 第二段内 2s 处
+
+    body = (await client.get("/traceback/task/4/timeline?step_id=1")).json()
+
+    assert body["duration_ms"] == 40_000                     # 墙钟跨度，含空洞
+    assert body["media_duration_ms"] == 20_000               # 媒体轴是压紧的
+    assert body["events"][0]["media_offset_ms"] == 12_000    # 10s + 段内 2s，不是 32s
+
+
+@pytest.mark.asyncio
+async def test_timeline_track_param_switches_the_media_axis(
+    client, media_root, monkeypatch
+):
+    """两轨各自独立切段 → 媒体轴不同尺，故 `track` 是必要入参（前端切轨要重取）。"""
+    _seed_task(task_id=5, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 10_000_000])
+    # _seed_task 双轨同构，这里再给 processed 追一段，把两轨拉开
+    from app.storage import hls
+    from app.storage.hls import _m3u8
+    ref = hls.SegmentRef(track="processed", ts_us=_TS0_US + 20_000_000)
+    hls.segment_path(5, 1, ref).write_bytes(b"\x00" * 16)
+    _m3u8.append(
+        hls.playlist_path(5, 1, "processed"), "processed_init.mp4", 10.0, hls.segment_name(ref)
+    )
+    _install_alarms(monkeypatch, [])
+
+    raw = (await client.get("/traceback/task/5/timeline?step_id=1&track=raw")).json()
+    proc = (await client.get("/traceback/task/5/timeline?step_id=1&track=processed")).json()
+
+    assert raw["media_duration_ms"] == 20_000
+    assert proc["media_duration_ms"] == 30_000
+    # 墙钟那组与 track 无关：恒取双轨并集
+    assert raw["duration_ms"] == proc["duration_ms"] == 30_000
+
+
+@pytest.mark.asyncio
+async def test_timeline_gap_total_is_zero_without_a_gap(client, media_root, monkeypatch):
+    """零断流的 step 必须报 0 —— 且**两轨都要**，哪怕两轨起止差很多。
+
+    这条钉的是一个真误报：前端曾用「`duration_ms − media_duration_ms`」推断断流总量，
+    而前者是**双轨并集**墙钟跨度、后者是**单轨** Σ EXTINF，两者不同尺。推理起步晚于取流时
+    processed 首段晚于 raw 首段，于是零断流的 step 也会亮出"缺失 N 秒"。夹具刻意造成这个
+    形状：两轨各自内部首尾相接（真的零空洞），但 processed 比 raw 晚起 15s。
+    """
+    seed_hls_segments(8, 1, [_TS0_US, _TS0_US + 10_000_000], track="raw")
+    seed_hls_segments(
+        8, 1, [_TS0_US + 15_000_000, _TS0_US + 25_000_000], track="processed"
+    )
+    _install_alarms(monkeypatch, [])
+
+    for track in ("raw", "processed"):
+        body = (await client.get(f"/traceback/task/8/timeline?step_id=1&track={track}")).json()
+        assert body["gap_total_ms"] == 0, f"{track} 轨零断流却报了空洞"
+        assert body["has_gap"] is False
+        assert body["media_duration_ms"] == 20_000
+        # 并集墙钟跨度 35s 远大于任一单轨的 20s —— 相减法在这里会算出 15s 的假空洞
+        assert body["duration_ms"] == 35_000
+
+
+@pytest.mark.asyncio
+async def test_timeline_gap_total_counts_a_real_gap(client, media_root, monkeypatch):
+    _seed_task(task_id=7, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 30_000_000])
+    _install_alarms(monkeypatch, [])
+
+    body = (await client.get("/traceback/task/7/timeline?step_id=1&track=raw")).json()
+
+    assert body["gap_total_ms"] == 20_000
+    assert body["has_gap"] is True
+
+
+@pytest.mark.asyncio
+async def test_timeline_rejects_unknown_track(client, media_root):
+    resp = await client.get("/traceback/task/1/timeline?step_id=1&track=detection")
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

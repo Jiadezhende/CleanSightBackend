@@ -1,7 +1,7 @@
 """
 Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 
-让操作员在一个 step 的 raw 整段视频上选 N 段不重叠的 [start_ms, end_ms]，
+让操作员在一个 step 的 raw 整段视频上选 N 段不重叠的媒体区间 [start_media_ms, end_media_ms]，
 后端剪出对应的 mp4 并提交到 Label Studio 创建标注任务。
 
 另提供整段下载（GET /download）：把该 step 某一轨的全部落盘段 remux 成单个 mp4，
@@ -66,8 +66,16 @@ logger = logging.getLogger(__name__)
 
 
 class LabClipRange(BaseModel):
-    start_ms: int = Field(..., ge=0, description="绝对墙钟 ms（与 traceback timeline 一致）")
-    end_ms: int = Field(..., ge=1)
+    """送标区间，用**媒体坐标**表达（`<video>.currentTime × 1000`）。
+
+    不收墙钟：媒体轴是压紧的墙钟（断流停顿在它上面不存在），浏览器手上只有媒体轴上的量，
+    `W0 + currentTime` 这个换算只在从没断过流时成立。墙钟由后端用清单换算，随响应带回。
+    """
+
+    start_media_ms: int = Field(
+        ..., ge=0, description="相对该 step raw 轨媒体轴起点的 ms（= video.currentTime×1000）"
+    )
+    end_media_ms: int = Field(..., ge=1)
     label: Optional[str] = Field(None, max_length=64, description="透传到 LS task.data 的标注 hint")
 
 
@@ -86,8 +94,12 @@ class LabSubmitRequest(BaseModel):
 
 
 class LabClipResultDTO(BaseModel):
-    start_ms: int
-    end_ms: int
+    # 请求原样回显（失败时也有），供前端对号入座
+    start_media_ms: int
+    end_media_ms: int
+    # 后端由清单换算出的绝对墙钟；只有走到"选中了段"那一步才算得出，故可空
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
     success: bool
     label_studio_task_id: Optional[int] = None
     duration_ms: Optional[int] = None
@@ -265,7 +277,7 @@ def _validate_clips(
     max_clip_ms: int,
     max_total_ms: int,
 ) -> List[LabClipRange]:
-    """按 start_ms 升序排好，校验：单段时长、不重叠、数量、总时长。
+    """按 start_media_ms 升序排好，校验：单段时长、不重叠、数量、总时长。
 
     Raises:
         ValidationError: 任一校验失败
@@ -276,17 +288,17 @@ def _validate_clips(
             field="clips",
         )
 
-    # 按 start_ms 升序（输入未必有序）
-    ordered = sorted(clips, key=lambda c: c.start_ms)
+    # 按 start_media_ms 升序（输入未必有序）
+    ordered = sorted(clips, key=lambda c: c.start_media_ms)
 
     total_ms = 0
     for i, c in enumerate(ordered):
-        if c.end_ms <= c.start_ms:
+        if c.end_media_ms <= c.start_media_ms:
             raise ValidationError(
-                f"clip[{i}] end_ms ({c.end_ms}) <= start_ms ({c.start_ms})",
+                f"clip[{i}] end_media_ms ({c.end_media_ms}) <= start_media_ms ({c.start_media_ms})",
                 field="clips",
             )
-        duration = c.end_ms - c.start_ms
+        duration = c.end_media_ms - c.start_media_ms
         if duration > max_clip_ms:
             raise ValidationError(
                 f"clip[{i}] duration {duration} ms exceeds max {max_clip_ms} ms",
@@ -294,10 +306,11 @@ def _validate_clips(
             )
         total_ms += duration
 
-        if i > 0 and c.start_ms < ordered[i - 1].end_ms:
+        if i > 0 and c.start_media_ms < ordered[i - 1].end_media_ms:
             raise ValidationError(
                 f"clip[{i}] overlaps with previous "
-                f"(start_ms={c.start_ms} < prev.end_ms={ordered[i - 1].end_ms})",
+                f"(start_media_ms={c.start_media_ms} "
+                f"< prev.end_media_ms={ordered[i - 1].end_media_ms})",
                 field="clips",
             )
 
@@ -426,7 +439,6 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
         temp_root=temp_root,
         preset=s.lab_export_ffmpeg_preset,
         max_duration_ms=s.lab_export_max_clip_ms,
-        gap_tolerance_ms=s.lab_export_gap_tolerance_ms,
     )
     ls = LabelStudioClient(
         base_url=ls_url,
@@ -443,8 +455,8 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
             spec = ClipSpec(
                 task_id=req.task_id,
                 step_id=req.step_id,
-                start_ms=c.start_ms,
-                end_ms=c.end_ms,
+                start_media_ms=c.start_media_ms,
+                end_media_ms=c.end_media_ms,
                 label=c.label,
             )
             results.append(_process_one(spec, builder, ls, project_id, job_dir))
@@ -486,17 +498,17 @@ def _process_one(
         clip_res = builder.build_one(spec, job_dir)
     except ClipRangeOutOfBoundsError as e:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
             error_code="range_out_of_bounds", error=str(e),
         )
     except ClipRangeGapError as e:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
             error_code="range_gap", error=str(e),
         )
     except ClipBuildError as e:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
             error_code="ffmpeg_failed", error=str(e),
         )
 
@@ -504,15 +516,18 @@ def _process_one(
     meta = {
         "task_id": spec.task_id,
         "step_id": spec.step_id,
-        "start_ms": spec.start_ms,
-        "end_ms": spec.end_ms,
+        "start_ms": clip_res.start_ms,
+        "end_ms": clip_res.end_ms,
+        "start_media_ms": spec.start_media_ms,
+        "end_media_ms": spec.end_media_ms,
         "label": spec.label,
         "source": "cleansight",
     }
     ls_res = ls.import_clip(project_id, clip_res.output_path, meta=meta)
     if not ls_res.success:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
+            start_ms=clip_res.start_ms, end_ms=clip_res.end_ms,
             duration_ms=clip_res.duration_ms,
             size_bytes=clip_res.size_bytes,
             n_source_segments=clip_res.n_source_segments,
@@ -521,7 +536,8 @@ def _process_one(
         )
 
     return LabClipResultDTO(
-        start_ms=spec.start_ms, end_ms=spec.end_ms, success=True,
+        start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=True,
+        start_ms=clip_res.start_ms, end_ms=clip_res.end_ms,
         label_studio_task_id=ls_res.task_id,
         duration_ms=clip_res.duration_ms,
         size_bytes=clip_res.size_bytes,
