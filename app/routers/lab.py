@@ -1,7 +1,7 @@
 """
 Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 
-让操作员在一个 step 的 raw 整段视频上选 N 段不重叠的 [start_ms, end_ms]，
+让操作员在一个 step 的 raw 整段视频上选 N 段不重叠的媒体区间 [start_media_ms, end_media_ms]，
 后端剪出对应的 mp4 并提交到 Label Studio 创建标注任务。
 
 另提供整段下载（GET /download）：把该 step 某一轨的全部落盘段 remux 成单个 mp4，
@@ -9,9 +9,11 @@ Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
 整段下载只换容器所以 `-c copy`（见 services/lab/step_exporter.py）。
 
 数据底座：
-- 复用 traceback 的 (task_id, step_id) 文件系统约定
-- 复用 SegmentFinder 列表/过滤 raw 段
-- ffmpeg concat demuxer + libx264 实现 ms 精度裁剪
+- (task_id, step_id) → `{root}/{task_id}/{step_id}/hls/`（`app.storage.hls` 域）
+- 段枚举走 `hls.list_segments`（清单是"有哪些段"的唯一真源）/ step 枚举走
+  `storage.tasks.list_step_ids`
+- ffmpeg **HLS demuxer**（临时 VOD 清单 + EXT-X-MAP）+ libx264 实现 ms 精度裁剪
+  —— 不是 concat demuxer：fMP4 fragment 无 moov，单独 demux 解不出 codec init
 - urllib.request multipart 上传到 LS（沿用现有 alarm_strategy 的 urllib 风格）
 
 设计要点：
@@ -50,7 +52,8 @@ from app.services.lab import (
     StepExportNoSegments,
 )
 from app.services.lab import config as lab_config
-from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
+from app.storage import hls
+from app.storage import tasks as step_tasks
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
@@ -63,9 +66,16 @@ logger = logging.getLogger(__name__)
 
 
 class LabClipRange(BaseModel):
-    start_ms: int = Field(..., ge=0, description="绝对墙钟 ms（与 traceback timeline 一致）")
-    end_ms: int = Field(..., ge=1)
-    label: Optional[str] = Field(None, max_length=64, description="透传到 LS task.data 的标注 hint")
+    """送标区间，用**媒体坐标**表达（`<video>.currentTime × 1000`）。
+
+    不收墙钟：媒体轴是压紧的墙钟（断流停顿在它上面不存在），浏览器手上只有媒体轴上的量，
+    `W0 + currentTime` 这个换算只在从没断过流时成立。墙钟由后端用清单换算，随响应带回。
+    """
+
+    start_media_ms: int = Field(
+        ..., ge=0, description="相对该 step raw 轨媒体轴起点的 ms（= video.currentTime×1000）"
+    )
+    end_media_ms: int = Field(..., ge=1)
 
 
 class LabSubmitRequest(BaseModel):
@@ -83,8 +93,12 @@ class LabSubmitRequest(BaseModel):
 
 
 class LabClipResultDTO(BaseModel):
-    start_ms: int
-    end_ms: int
+    # 请求原样回显（失败时也有），供前端对号入座
+    start_media_ms: int
+    end_media_ms: int
+    # 后端由清单换算出的绝对墙钟；只有走到"选中了段"那一步才算得出，故可空
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
     success: bool
     label_studio_task_id: Optional[int] = None
     duration_ms: Optional[int] = None
@@ -165,15 +179,24 @@ def _optional_int(value) -> Optional[int]:
         return None
 
 
-def _list_raw_steps(finder: SegmentFinder, task_id: int) -> List[int]:
-    """该 task 下有 raw 段的 step（升序）。送标只吃 raw，processed 轨在此无意义。"""
-    return [s.step_id for s in finder.list_steps(task_id) if "raw" in s.tracks]
+def _list_raw_steps(task_id: int) -> List[int]:
+    """该 task 下有 raw 段的 step（升序）。送标只吃 raw，processed 轨在此无意义。
+
+    ⚠ `tasks.list_step_ids` **不过滤空 step**（有无产物是域知识，不在目录层）。这里的
+    「raw 轨非空才收」同时兜住了那一档：建了目录没写成段的 step 不该出现在送标清单里，
+    否则点开是黑屏。
+    """
+    return [
+        step_id
+        for step_id in step_tasks.list_step_ids(task_id)
+        if hls.list_segments(task_id, step_id, "raw")
+    ]
 
 
-def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
+def _task_row_to_item(row: DBTask) -> LabTaskItem:
     task_id = int(row.task_id)
     step_id = _optional_int(row.current_step)
-    raw_steps = _list_raw_steps(finder, task_id)
+    raw_steps = _list_raw_steps(task_id)
     has_current_step_raw = step_id is not None and step_id in raw_steps
 
     return LabTaskItem(
@@ -191,18 +214,20 @@ def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
     )
 
 
-def _storage_task_to_item(
-    finder: SegmentFinder, task_id: int, raw_steps: List[int]
-) -> LabTaskItem:
+def _storage_task_to_item(task_id: int, raw_steps: List[int]) -> LabTaskItem:
     """从文件系统信息构造 LabTaskItem（存储模式）。
 
     DB 才有的字段（source_ip/status/current_step）无从得知：
     - source_ip=None, status="unknown", step_id/current_step 留空（不推断）
-    - updated_time/start_time 从各 raw step 的段时间戳（ts_ms）推导，用于排序与展示
+    - updated_time/start_time 从各 raw step 的段时间戳（ts_us → ms）推导，用于排序与展示
     """
     ts_list: List[int] = []
     for step_id in raw_steps:
-        ts_list.extend(seg.ts_ms for seg in finder.list_segments(task_id, step_id, "raw"))
+        for seg in hls.list_segments(task_id, step_id, "raw"):
+            # 末端算**段尾**（ts + EXTINF）而不是段起点：后者会漏掉最后一段自身的长度，
+            # 表现是列表里的"最后更新"恒比实际早一个段长（~10s）。
+            ts_list.append(seg.ref.ts_us // 1000)
+            ts_list.append((seg.ref.ts_us + int(seg.duration_s * 1_000_000)) // 1000)
 
     return LabTaskItem(
         task_id=task_id,
@@ -220,7 +245,7 @@ def _storage_task_to_item(
 
 
 def _list_storage_tasks(
-    finder: SegmentFinder, q: Optional[str], limit: int, offset: int
+    q: Optional[str], limit: int, offset: int
 ) -> tuple[int, List[LabTaskItem]]:
     """直接枚举存储目录列任务，完全不碰 DB（DB 挂了也能工作）。
 
@@ -231,13 +256,13 @@ def _list_storage_tasks(
     needle = (q or "").strip()
 
     items: List[LabTaskItem] = []
-    for task_id in finder.list_task_ids():  # 已跳过 .lab_exports 等非数字目录
+    for task_id in step_tasks.list_task_ids():  # 已跳过 .lab_exports 等非数字目录
         if needle and needle not in str(task_id):
             continue
-        raw_steps = _list_raw_steps(finder, task_id)
+        raw_steps = _list_raw_steps(task_id)
         if not raw_steps:
             continue
-        items.append(_storage_task_to_item(finder, task_id, raw_steps))
+        items.append(_storage_task_to_item(task_id, raw_steps))
 
     items.sort(key=lambda it: (it.updated_time or 0, it.task_id), reverse=True)
     total = len(items)
@@ -251,7 +276,7 @@ def _validate_clips(
     max_clip_ms: int,
     max_total_ms: int,
 ) -> List[LabClipRange]:
-    """按 start_ms 升序排好，校验：单段时长、不重叠、数量、总时长。
+    """按 start_media_ms 升序排好，校验：单段时长、不重叠、数量、总时长。
 
     Raises:
         ValidationError: 任一校验失败
@@ -262,17 +287,17 @@ def _validate_clips(
             field="clips",
         )
 
-    # 按 start_ms 升序（输入未必有序）
-    ordered = sorted(clips, key=lambda c: c.start_ms)
+    # 按 start_media_ms 升序（输入未必有序）
+    ordered = sorted(clips, key=lambda c: c.start_media_ms)
 
     total_ms = 0
     for i, c in enumerate(ordered):
-        if c.end_ms <= c.start_ms:
+        if c.end_media_ms <= c.start_media_ms:
             raise ValidationError(
-                f"clip[{i}] end_ms ({c.end_ms}) <= start_ms ({c.start_ms})",
+                f"clip[{i}] end_media_ms ({c.end_media_ms}) <= start_media_ms ({c.start_media_ms})",
                 field="clips",
             )
-        duration = c.end_ms - c.start_ms
+        duration = c.end_media_ms - c.start_media_ms
         if duration > max_clip_ms:
             raise ValidationError(
                 f"clip[{i}] duration {duration} ms exceeds max {max_clip_ms} ms",
@@ -280,10 +305,11 @@ def _validate_clips(
             )
         total_ms += duration
 
-        if i > 0 and c.start_ms < ordered[i - 1].end_ms:
+        if i > 0 and c.start_media_ms < ordered[i - 1].end_media_ms:
             raise ValidationError(
                 f"clip[{i}] overlaps with previous "
-                f"(start_ms={c.start_ms} < prev.end_ms={ordered[i - 1].end_ms})",
+                f"(start_media_ms={c.start_media_ms} "
+                f"< prev.end_media_ms={ordered[i - 1].end_media_ms})",
                 field="clips",
             )
 
@@ -325,10 +351,8 @@ async def list_lab_tasks(
     - "db"（默认）：查 clean_task 表 + 文件系统补 raw 段信息（原行为）
     - "storage"：直接枚举存储目录，不碰 DB（业务库挂了时的兜底）
     """
-    finder = SegmentFinder(get_default_base_dir())
-
     if lab_config.get_task_source() == "storage":
-        total, tasks = _list_storage_tasks(finder, q, limit, offset)
+        total, tasks = _list_storage_tasks(q, limit, offset)
         return LabTaskListResponse(total=total, tasks=tasks)
 
     db = next(get_db())
@@ -363,7 +387,7 @@ async def list_lab_tasks(
 
         return LabTaskListResponse(
             total=int(total),
-            tasks=[_task_row_to_item(row, finder) for row in rows],
+            tasks=[_task_row_to_item(row) for row in rows],
         )
     finally:
         db.close()
@@ -400,8 +424,7 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
     )
 
     # ---- 段存在性（404）----
-    finder = SegmentFinder(get_default_base_dir())
-    if not finder.list_segments(req.task_id, req.step_id, "raw"):
+    if not hls.list_segments(req.task_id, req.step_id, "raw"):
         raise NotFoundError(
             f"No raw segments for task_id={req.task_id}, step_id={req.step_id}",
             resource_type="Segments",
@@ -411,12 +434,10 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
     # ---- ClipBuilder + LS 客户端 ----
     temp_root = Path(s.lab_export_temp_dir) if s.lab_export_temp_dir else None
     builder = ClipBuilder(
-        finder=finder,
         ffmpeg_bin=s.ffmpeg_path,
         temp_root=temp_root,
         preset=s.lab_export_ffmpeg_preset,
         max_duration_ms=s.lab_export_max_clip_ms,
-        gap_tolerance_ms=s.lab_export_gap_tolerance_ms,
     )
     ls = LabelStudioClient(
         base_url=ls_url,
@@ -433,9 +454,8 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
             spec = ClipSpec(
                 task_id=req.task_id,
                 step_id=req.step_id,
-                start_ms=c.start_ms,
-                end_ms=c.end_ms,
-                label=c.label,
+                start_media_ms=c.start_media_ms,
+                end_media_ms=c.end_media_ms,
             )
             results.append(_process_one(spec, builder, ls, project_id, job_dir))
             if not results[-1].success:
@@ -476,33 +496,28 @@ def _process_one(
         clip_res = builder.build_one(spec, job_dir)
     except ClipRangeOutOfBoundsError as e:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
             error_code="range_out_of_bounds", error=str(e),
         )
     except ClipRangeGapError as e:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
             error_code="range_gap", error=str(e),
         )
     except ClipBuildError as e:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
             error_code="ffmpeg_failed", error=str(e),
         )
 
     # Step 2: upload
-    meta = {
-        "task_id": spec.task_id,
-        "step_id": spec.step_id,
-        "start_ms": spec.start_ms,
-        "end_ms": spec.end_ms,
-        "label": spec.label,
-        "source": "cleansight",
-    }
-    ls_res = ls.import_clip(project_id, clip_res.output_path, meta=meta)
+    # 不带元数据：LS 的 /import 在文件上传模式下只读 request.FILES，同一个 multipart 里的
+    # 非文件字段一律忽略，曾经拼的那份 meta 从来没到过 task.data。溯源只剩文件名里的墙钟区间。
+    ls_res = ls.import_clip(project_id, clip_res.output_path)
     if not ls_res.success:
         return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
+            start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=False,
+            start_ms=clip_res.start_ms, end_ms=clip_res.end_ms,
             duration_ms=clip_res.duration_ms,
             size_bytes=clip_res.size_bytes,
             n_source_segments=clip_res.n_source_segments,
@@ -511,7 +526,8 @@ def _process_one(
         )
 
     return LabClipResultDTO(
-        start_ms=spec.start_ms, end_ms=spec.end_ms, success=True,
+        start_media_ms=spec.start_media_ms, end_media_ms=spec.end_media_ms, success=True,
+        start_ms=clip_res.start_ms, end_ms=clip_res.end_ms,
         label_studio_task_id=ls_res.task_id,
         duration_ms=clip_res.duration_ms,
         size_bytes=clip_res.size_bytes,
@@ -548,7 +564,6 @@ async def download_step_video(
 
     temp_root = Path(s.lab_export_temp_dir) if s.lab_export_temp_dir else None
     exporter = StepExporter(
-        finder=SegmentFinder(get_default_base_dir()),
         ffmpeg_bin=s.ffmpeg_path,
         temp_root=temp_root,
     )

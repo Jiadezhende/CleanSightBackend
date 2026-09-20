@@ -51,13 +51,26 @@ class FakeCQ:
     def take_processed_segment(self):
         return self.processed_segments.pop(0) if self.processed_segments else None
 
-    def drain_ca_raw(self):
-        out, self.raw_residual = self.raw_residual, []
+    def drain_ca_raw(self, until_ts=None):
+        self.raw_residual, out = _split_at_fence(self.raw_residual, until_ts)
         return out
 
-    def drain_ca_processed(self):
-        out, self.processed_residual = self.processed_residual, []
+    def drain_ca_processed(self, until_ts=None):
+        self.processed_residual, out = _split_at_fence(self.processed_residual, until_ts)
         return out
+
+
+def _split_at_fence(residual, until_ts):
+    """复刻 `ClientQueues.drain_ca_*` 的栅栏语义：`None` 全取，否则只取队首前缀。
+
+    返回 `(留下的, 取走的)`。
+    """
+    if until_ts is None:
+        return [], list(residual)
+    cut = 0
+    while cut < len(residual) and residual[cut].timestamp <= until_ts:
+        cut += 1
+    return list(residual[cut:]), list(residual[:cut])
 
 
 class FakeClients:
@@ -397,6 +410,166 @@ class TestFlushResidual:
 
         assert fake_hls.calls == []          # 同分区已换代 → 丢弃，不是写成 B 的段
 
+    def test_fence_leaves_post_reconnect_frames_in_the_queue(self, fake_hls):
+        """断流 flush 只切栅栏之前的帧。
+
+        全排空的后果是静默的：重连后的帧会跟断流前的帧拼进同一段，该段 `eff_fps` 由首末帧
+        跨度反推、跨度里混着整个 gap → 慢放。栅栏取"断流前最后一帧 ts"，正是那个切点。
+        """
+        cq = FakeCQ(1, 2, ca_segment_len=10)
+        before = _frames(3, start=1700.0)            # 断流前
+        after = _frames(2, start=1720.0)             # 重连后（gap 20s）
+        cq.raw_residual = before + after
+        cq.processed_residual = list(before)
+        svc = _service(FakeClients({}))
+
+        svc.flush_residual(cq, until_ts=before[-1].timestamp)
+
+        assert fake_hls.inserts == [
+            ("insert", 1, 2, "raw", 3),
+            ("insert", 1, 2, "processed", 3),
+        ]
+        assert cq.raw_residual == after, "重连后的帧必须留在队列里，等 sweeper 照常拉整段"
+
+
+class TestCollectFrom:
+    """运行期取帧的唯一入口：拉两轨整段 → 断流残帧，顺序固定。
+
+    这几条原先挂在 `TestSweeper` 上。逻辑从定时器搬回 service 之后，用例跟着搬——断言留在
+    定时器那边就等于承认定时器该懂这套顺序。
+    """
+
+    def test_pulls_both_tracks_in_order(self, fake_hls):
+        cq = FakeCQ(1, 2, name="A")
+        cq.raw_segments = [_frames(3), _frames(3)]
+        cq.processed_segments = [_frames(2)]
+        svc = _service(FakeClients({}))
+
+        svc.collect_from(cq)
+
+        assert fake_hls.inserts == [
+            ("insert", 1, 2, "raw", 3),
+            ("insert", 1, 2, "raw", 3),
+            ("insert", 1, 2, "processed", 2),
+        ]
+
+    def test_cq_without_step_id_keeps_its_frames_buffered(self, fake_hls):
+        """定位不到落盘分区就**不取帧** —— 取了只能丢，留在缓冲里等它绑上 step 才对。"""
+        cq = FakeCQ(1, None)
+        cq.raw_segments = [_frames(3)]
+        svc = _service(FakeClients({}))
+
+        svc.collect_from(cq)
+
+        assert fake_hls.calls == []
+        assert len(cq.raw_segments) == 1
+
+    def test_pending_flush_runs_after_the_full_segments_on_both_tracks(self, fake_hls):
+        """残段的 ts 晚于本轮所有整段，**必须后提交**——反过来清单 ts 就逆序了。
+
+        入队序即执行序，而每段的 tfdt = 执行时读到的累计 EXTINF：顺序一乱，后写的段会在
+        媒体轴上盖掉先写的，不报错、只是画面丢一截。
+
+        **两轨都要断言**：只给 raw 的话，把残帧那步挪到两个 `while` 之间（raw 整段之后、
+        processed 整段之前）照样绿，而那样 processed 清单就逆序了。
+        """
+        cq = FakeCQ(1, 2, ca_segment_len=10, name="A")
+        cq.raw_segments = [_frames(10, start=1700.0)]
+        cq.processed_segments = [_frames(10, start=1700.0)]
+        cq.raw_residual = _frames(4, start=1701.0)
+        cq.processed_residual = _frames(4, start=1701.0)
+        svc = _service(FakeClients({}))
+        svc.request_residual_flush(cq, fence_ts=1709.0)
+
+        svc.collect_from(cq)
+
+        assert fake_hls.inserts == [
+            ("insert", 1, 2, "raw", 10),                   # 先把两轨的整段拉完
+            ("insert", 1, 2, "processed", 10),
+            ("insert", 1, 2, "raw", 4),                    # 残段才轮到
+            ("insert", 1, 2, "processed", 4),
+        ]
+
+    def test_no_pending_request_means_only_full_segments(self, fake_hls):
+        cq = FakeCQ(1, 2, ca_segment_len=10, name="A")
+        cq.raw_segments = [_frames(10)]
+        cq.raw_residual = _frames(4)
+        svc = _service(FakeClients({}))
+
+        svc.collect_from(cq)
+
+        assert fake_hls.inserts == [("insert", 1, 2, "raw", 10)]
+        assert len(cq.raw_residual) == 4, "没有断流请求时残帧照旧留在缓冲里等攒满"
+
+    def test_pending_request_is_consumed_once(self, fake_hls):
+        """挂起请求是一次性的：下一轮 sweep 不该再切一遍。"""
+        cq = FakeCQ(1, 2, ca_segment_len=10, name="A")
+        cq.raw_residual = _frames(4, start=1700.0)
+        svc = _service(FakeClients({}))
+        svc.request_residual_flush(cq, fence_ts=1709.0)
+
+        svc.collect_from(cq)
+        svc.collect_from(cq)
+
+        assert fake_hls.inserts == [("insert", 1, 2, "raw", 4)]
+
+
+class TestPendingFlushRequest:
+    """断流 flush 的登记 / 取走 —— 生产者是 health_monitor 线程，消费者是 sweeper 线程。"""
+
+    def test_request_then_take_returns_the_fence_once(self):
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({}))
+
+        svc.request_residual_flush(cq, fence_ts=1700.5)
+
+        assert svc._take_pending_flush(cq) == 1700.5
+        assert svc._take_pending_flush(cq) is None, "一次性：取走即消费"
+
+    def test_identity_fence_drops_the_previous_generation_request(self):
+        """同一 (task, step) 换代后，上一代挂起的请求不能落到新一代的 CQ 上。"""
+        old = FakeCQ(1, 2, name="A")
+        new = FakeCQ(1, 2, name="B")
+        svc = _service(FakeClients({}))
+
+        svc.request_residual_flush(old, fence_ts=1700.5)
+
+        assert svc._take_pending_flush(new) is None
+        assert svc._take_pending_flush(old) is None, "身份不符的条目一并丢弃，不留给旧 CQ"
+
+    def test_cq_without_partition_key_is_skipped(self):
+        svc = _service(FakeClients({}))
+        svc.request_residual_flush(FakeCQ(1, None), fence_ts=1700.5)
+        assert svc._pending_flush == {}
+
+    def test_forget_task_reclaims_unconsumed_requests(self, fake_hls):
+        """没被 sweeper 消费的请求随代次记录一起回收，否则它连着 cq 引用一直留着。"""
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({}))            # 注册表已空 = 这一代真的走了
+        svc.request_residual_flush(cq, fence_ts=1700.5)
+
+        svc.forget_task(1)
+
+        assert svc._pending_flush == {}
+
+    def test_forget_task_keeps_the_current_generation_request(self, fake_hls):
+        """`forget_task` 是**异步**的（只往队列里排任务，前面可能堆着几秒的编码/转码）。
+
+        这期间同一个 task 完全可能已经起了新一代、并为它登记了同键的请求。无差别清就会
+        把新一代的请求一起吞掉 —— 那次断流的残帧不被切出来，**长回横跨 gap 的慢放段，
+        且静默**。`_claimed_by` 能无差别清是因为它自愈（下一代首写会重新认领），挂起请求
+        是一次性的、不自愈，两者不能套同一个论证。
+        """
+        old = FakeCQ(1, 2, name="A")
+        new = FakeCQ(1, 2, name="B")
+        svc = _service(FakeClients({1: new}))       # 注册表里已经是新一代
+        svc.request_residual_flush(old, fence_ts=1700.5)
+        svc.request_residual_flush(new, fence_ts=1800.5)
+
+        svc.forget_task(1)
+
+        assert svc._take_pending_flush(new) == 1800.5, "新一代的请求不该被上一代的回收带走"
+
 
 # ---------------------------------------------------------------------------
 # sweeper
@@ -404,37 +577,36 @@ class TestFlushResidual:
 
 
 class RecordingSpy:
-    def __init__(self):
-        self.submitted = []
+    """够用的 RecordingService：只记录 `collect_from` 收到了哪些 CQ。
 
-    def submit_segment(self, cq, track, frames):
-        self.submitted.append((cq.name, track, len(frames)))
-        return True
+    sweeper 现在只调这一个方法——**取什么、按什么顺序取全在 service**，所以这个替身不必
+    （也不该）复刻那套逻辑。取帧与顺序的断言在 `TestCollectFrom`。
+    """
+
+    def __init__(self):
+        self.collected = []
+
+    def collect_from(self, cq):
+        self.collected.append(cq.name)
 
 
 class TestSweeper:
-    def test_pulls_both_tracks_and_passes_the_cq_through(self):
-        cq = FakeCQ(1, 2, name="A")
-        cq.raw_segments = [_frames(3), _frames(3)]
-        cq.processed_segments = [_frames(2)]
+    """定时器只剩两件事：扫全量活跃 CQ、逐个交给 `collect_from`。"""
+
+    def test_hands_every_active_cq_to_the_service(self):
+        a, b = FakeCQ(1, 2, name="A"), FakeCQ(9, 2, name="B")
         spy = RecordingSpy()
 
-        SegmentSweeper(clients=FakeClients({1: cq}), service=spy)._sweep()
+        SegmentSweeper(clients=FakeClients({1: a, 9: b}), service=spy)._sweep()
 
-        assert spy.submitted == [
-            ("A", "raw", 3), ("A", "raw", 3), ("A", "processed", 2),
-        ]
+        assert sorted(spy.collected) == ["A", "B"]
 
-    def test_cq_without_step_id_keeps_its_frames_buffered(self):
-        """定位不到落盘分区就**不取帧** —— 取了只能丢，留在缓冲里等它绑上 step 才对。"""
-        cq = FakeCQ(1, None)
-        cq.raw_segments = [_frames(3)]
+    def test_empty_registry_is_a_no_op(self):
         spy = RecordingSpy()
 
-        SegmentSweeper(clients=FakeClients({1: cq}), service=spy)._sweep()
+        SegmentSweeper(clients=FakeClients({}), service=spy)._sweep()
 
-        assert spy.submitted == []
-        assert len(cq.raw_segments) == 1
+        assert spy.collected == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,20 +1,31 @@
 """
 FrameTracker / Timeline 边界单元测试（seam：不起 ffmpeg）
 
-段级 + 帧级裁剪是纯 searchsorted 数学，把 `_run_ffmpeg` 这个 I/O 边界替换成
-「按 sidecar 合成 Frame」的 seam，就能不依赖 ffmpeg 覆盖全部边界情形。
+段级 + 帧级裁剪是纯 searchsorted 数学，把解码这个 I/O 边界替换成「按 sidecar 合成 Frame」
+的 seam，就能不依赖 ffmpeg 覆盖全部边界情形。
 真实解码（ts ↔ 像素是否错配）由 integration_tests/test_frame_tracker_roundtrip.py 端到端验。
 
-覆盖：
-- 段级：起点落段中部 / 起点恰为段首帧 / 跨段 / 默认区间含末段 / 区间早于首段 / 晚于末段
-- 帧级：区间落两帧之间 / 跨段接缝相邻帧 / 单帧区间
-- 缺 sidecar：跳过该段而非打断整条迭代
-- find：多点、重复 ts、ts 漂移即失败、空入参
-- _build_cmd：select 必须在 scale 之前
+**两组用例读的是两种布局**，因为被测的是两套实现：
 
-落盘约定：{base_dir}/{task_id}/{step_id}/raw_segment_{ts_us}.mp4 + 同名 .idx
+- `Timeline`（已退役、零调用点，随清理期删除）读旧的 `{step}/` 平铺布局，seam 打在它自己的
+  `_run_ffmpeg` 上。这几组用例原样保留——它既是那份代码尚在时的回归网，也钉住「`Timeline`
+  没被这次接线改动碰过」。
+- `FrameTracker` 已改调 `app.storage.hls.iter_frames`，读 `{step}/hls/`，造数走
+  `hls.insert_segment`（写侧同源，不手搓文件名），seam 打在 `hls._decode._run_ffmpeg` 上。
+
+覆盖：
+- 段级（Timeline）：起点落段中部 / 起点恰为段首帧 / 跨段 / 默认区间含末段 / 区间早于首段 /
+  晚于末段
+- 帧级（Timeline）：区间落两帧之间 / 跨段接缝相邻帧 / 单帧区间
+- 缺 sidecar（Timeline）：跳过该段而非打断整条迭代
+- find（FrameTracker，走数据层）：多点、升序契约、重复 ts、ts 漂移即失败、越界、空入参、
+  位级相等、`track` 形参已不存在
+- _build_cmd（Timeline）：select 必须在 scale 之前
+
+`hls.iter_frames` 自己的两级裁剪边界由 tests/test_storage_hls.py 覆盖，此处不重复。
 """
 
+import struct
 from pathlib import Path
 from typing import Iterator, List
 
@@ -23,6 +34,8 @@ import pytest
 
 from app.domain.frame import Frame
 from app.services.inference.offline.frame_tracker import FrameTracker, Timeline
+from app.storage import hls
+from app.storage.hls import _decode, _encode, _fmp4, _layout
 
 TASK_ID = 4242
 STEP_ID = 7
@@ -169,41 +182,124 @@ class TestMissingSidecar:
         assert list(Timeline(999, 999).iter()) == []
 
 
-class TestFind:
-    @pytest.fixture(autouse=True)
-    def _patch_tracker(self, monkeypatch, step_dir):
-        """FrameTracker 内部自建 Timeline，这里换成 seam 版。"""
-        monkeypatch.setattr(
-            "app.services.inference.offline.frame_tracker.Timeline", FakeDecodeTimeline
-        )
+# ---------------------------------------------------------------------------
+# FrameTracker（现役）：走 app.storage.hls，读 {step}/hls/
+# ---------------------------------------------------------------------------
 
-    def test_multi_point_across_segments(self):
+
+def _box(typ: bytes, body: bytes) -> bytes:
+    return struct.pack(">I", 8 + len(body)) + typ + body
+
+
+def _fragment_bytes() -> bytes:
+    """最小合法 fMP4 fragment（`moof/traf/tfdt` v1 + mdat）—— 只为让 tfdt 修补有东西可改。"""
+    tfdt_body = b"\x01\x00\x00\x00" + struct.pack(">Q", 0)
+    return _box(b"moof", _box(b"traf", _box(b"tfdt", tfdt_body))) + _box(b"mdat", b"\x00" * 16)
+
+
+@pytest.fixture
+def hls_step(tmp_storage) -> Path:
+    """走真实 `hls.insert_segment` 铺 `{step}/hls/`，只把 cv2 / ffmpeg 两步换成假的。
+
+    刻意不手搓文件名：布局与命名归写侧，测试跟着它走才不会两边各对各的。
+    """
+
+    def _write_mp4v(path, frames, fps):
+        path.write_bytes(b"mp4v-source")
+
+    def _transcode(stage):
+        fragment = stage / "fragment_0.mp4"
+        fragment.write_bytes(_fragment_bytes())
+        init = stage / "init.mp4"
+        init.write_bytes(b"fake-init")
+        return fragment, init
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_encode, "write_mp4v", _write_mp4v)
+        mp.setattr(_fmp4, "transcode", _transcode)
+        for s in range(N_SEG):
+            hls.insert_segment(
+                TASK_ID, STEP_ID, "raw",
+                [
+                    Frame(timestamp=t, frame=np.zeros((4, 4, 3), dtype=np.uint8))
+                    for t in seg_frames(s)
+                ],
+            )
+    return tmp_storage / str(TASK_ID) / str(STEP_ID) / "hls"
+
+
+@pytest.fixture
+def fake_decode(monkeypatch) -> List[tuple]:
+    """把数据层的解码 I/O 边界换成「按 sidecar 合成帧」，契约同真实 `_run_ffmpeg`。"""
+    calls: List[tuple] = []
+
+    def _fake(task_id, step_id, ref, sidecar, k_start, k_end, width, height):
+        calls.append((_layout.segment_name(ref), k_start, k_end))
+        for k in range(k_start, k_end + 1):
+            yield Frame(
+                timestamp=float(sidecar[k]),
+                frame=np.zeros((height, width, 3), dtype=np.uint8),
+            )
+
+    monkeypatch.setattr(_decode, "_run_ffmpeg", _fake)
+    return calls
+
+
+class TestFind:
+    def test_multi_point_across_segments(self, hls_step, fake_decode):
         gids = [1, 13, 27, 39]
         got = list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(g) for g in gids], 4, 4))
         assert [f.timestamp for f in got] == [ts_of(g) for g in gids]
 
-    def test_returns_ts_ascending_not_input_order(self):
+    def test_matched_ts_are_bit_exact(self, hls_step, fake_decode):
+        """sidecar 存 float64 原值，反查回来的 ts 必须与内存里那个**位级**相等。"""
+        wanted = [ts_of(g) for g in (0, 17, 39)]
+        got = [f.timestamp for f in FrameTracker(TASK_ID, STEP_ID).find(wanted, 4, 4)]
+        assert all(a == b for a, b in zip(got, wanted))
+        assert [f.hex() for f in got] == [w.hex() for w in wanted]
+
+    def test_only_needed_segments_are_decoded(self, hls_step, fake_decode):
+        """段级裁剪要真的省掉 ffmpeg 调用：4 段里只该碰跨到的那 2 段。"""
+        list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(13), ts_of(27)], 4, 4))
+        assert len(fake_decode) == 2
+
+    def test_returns_ts_ascending_not_input_order(self, hls_step, fake_decode):
         gids = [27, 1, 13]
         got = list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(g) for g in gids], 4, 4))
         assert [f.timestamp for f in got] == [ts_of(g) for g in sorted(gids)]
 
-    def test_duplicate_ts_yields_one_frame_each(self):
+    def test_duplicate_ts_yields_one_frame_each(self, hls_step, fake_decode):
         g = 17
         got = list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(g), ts_of(g)], 4, 4))
         assert [f.timestamp for f in got] == [ts_of(g), ts_of(g)]
 
     @pytest.mark.parametrize("drift", [1e-6, -1e-6, 1e-3])
-    def test_drifted_ts_raises(self, drift):
+    def test_drifted_ts_raises(self, hls_step, fake_decode, drift):
         """ts 是帧的身份，不做近似匹配：配错帧比报错更坏。"""
         with pytest.raises(ValueError, match="未找到 ts="):
             list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(17) + drift], 4, 4))
 
-    def test_ts_outside_timeline_raises(self):
+    def test_ts_outside_timeline_raises(self, hls_step, fake_decode):
         with pytest.raises(ValueError, match="未找到 ts="):
             list(FrameTracker(TASK_ID, STEP_ID).find([BASE_TS + 9999], 4, 4))
 
-    def test_empty_input_yields_nothing(self):
+    def test_missing_step_raises_not_silently_empty(self, tmp_storage, fake_decode):
+        """盘上一段都没有时也必须硬失败：静默返回空会让上游当成"这些帧没检测框"。"""
+        with pytest.raises(ValueError, match="未找到 ts="):
+            list(FrameTracker(999, 999).find([BASE_TS], 4, 4))
+
+    def test_empty_input_yields_nothing(self, hls_step, fake_decode):
         assert list(FrameTracker(TASK_ID, STEP_ID).find([], 4, 4)) == []
+
+    def test_flat_layout_is_not_read(self, step_dir, fake_decode):
+        """只认 `{step}/hls/`，旧平铺布局**不回落**——读到的只能是空，故硬失败。"""
+        with pytest.raises(ValueError, match="未找到 ts="):
+            list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(0)], 4, 4))
+
+    def test_no_track_parameter(self):
+        """新解码只服务 raw 轨（processed 不落 sidecar），`track` 形参已删除。"""
+        with pytest.raises(TypeError):
+            FrameTracker(TASK_ID, STEP_ID, "processed")
 
 
 class TestBuildCmd:

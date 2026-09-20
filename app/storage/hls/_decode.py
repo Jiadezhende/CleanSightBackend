@@ -266,10 +266,10 @@ def iter_frames(
 
     Raises: 同 `read_segment`（首次迭代时才发生，本函数是生成器）。
     """
-    for ref in _read.list_segments_in_range(
+    for seg in _read.list_segments_in_range(
         task_id, step_id, _RAW_TRACK, start_ts=start_ts, end_ts=end_ts
     ):
         yield from read_segment(
-            task_id, step_id, ref,
+            task_id, step_id, seg.ref,
             width=width, height=height, start_ts=start_ts, end_ts=end_ts,
         )

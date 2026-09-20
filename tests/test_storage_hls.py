@@ -49,6 +49,11 @@ def _hls_dir(root: Path, task_id=1, step_id=2) -> Path:
     return root / str(task_id) / str(step_id) / "hls"
 
 
+def _refs(task_id=1, step_id=2, track="raw"):
+    """段身份键列表。域里**没有**"盘上有哪些段"的入口了（收口到清单），故走清单。"""
+    return [s.ref for s in hls.list_segments(task_id, step_id, track)]
+
+
 def _box(typ: bytes, body: bytes) -> bytes:
     return struct.pack(">I", 8 + len(body)) + typ + body
 
@@ -184,39 +189,31 @@ class TestLayout:
         assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["hls"]
 
 
-class TestListSegments:
-    def test_returns_ts_ascending(self, tmp_storage, fake_pipeline):
-        """升序是返回值的契约 —— 读侧的段级 searchsorted 直接建立在它上面。"""
-        for start in (1900.0, 1700.0, 1800.0):     # 刻意不按序写
-            hls.insert_segment(1, 2, "raw", _frames(start=start))
+class TestNoFilesystemEnumerator:
+    """**域里不存在"盘上有哪些段"这个入口**（2026-09-19 收口）。
 
-        got = hls.list_segments(1, 2, "raw")
-        assert [r.ts_us for r in got] == [1_700_000_000, 1_800_000_000, 1_900_000_000]
+    留着它就是第二个真源：它答的是"盘上有哪些文件"，把在途段与登记失败的段一并算进来，
+    喂给 ffmpeg 会静默截短（exit 0、无输出、产物合法但少一截）。`__all__` 拦得住包外、
+    拦不住包内，所以是整个删除而不是降级为私有。
 
-    def test_filters_by_track(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        hls.insert_segment(1, 2, "processed", _frames(start=1700.0))
+    **`list_segments` 这个名字被留用给了清单实现**，所以"名字不在了"不再是判据——门禁改为
+    钉死它绑在 `_read` 上。`_layout` 重新长出同名函数时这里会红。
+    """
 
-        assert [r.track for r in hls.list_segments(1, 2, "raw")] == ["raw"]
-        assert [r.track for r in hls.list_segments(1, 2, "processed")] == ["processed"]
+    @pytest.mark.parametrize("name", ["list_segments", "list_segments_by_track", "_scan_segment_files"])
+    def test_layout_defines_no_enumerator(self, name):
+        assert not hasattr(_layout, name)
 
-    def test_skips_every_non_segment_neighbour(self, tmp_storage, fake_pipeline):
-        """playlist / init / sidecar / stage 目录都住在同一个域目录里，一个都不许混进来。"""
-        hls.insert_segment(1, 2, "raw", _frames())
-        stage = _layout.stage_dir(1, 2, _layout.SegmentRef("raw", 1_700_000_000))
-        stage.mkdir()
+    def test_facade_enumerator_is_the_playlist_one(self):
+        from app.storage.hls import _read
 
-        assert len(hls.list_segments(1, 2, "raw")) == 1
-        # 域目录里确实还躺着别的东西，不是因为目录空才通过
-        assert len(list(_hls_dir(tmp_storage).iterdir())) > 1
+        assert hls.list_segments is _read.list_segments
+        assert hls.list_segments_in_range is _read.list_segments_in_range
 
-    def test_missing_domain_dir_returns_empty(self, tmp_storage):
-        assert hls.list_segments(1, 2, "raw") == []
-
-    @pytest.mark.parametrize("track", ["RAW", "detection", ""])
-    def test_invalid_track_raises(self, tmp_storage, track):
-        with pytest.raises(ValueError):
-            hls.list_segments(1, 2, track)
+    def test_by_track_variant_is_gone(self):
+        # 双轨一次 iterdir 的那个变体：收口后没有"一次扫盘"可省，逐轨读各自的清单即可
+        assert not hasattr(hls, "list_segments_by_track")
+        assert "list_segments_by_track" not in hls.__all__
 
 
 class TestInitNameCodec:
@@ -324,25 +321,39 @@ class TestPlaylistCodec:
 # ---------------------------------------------------------------------------
 
 
-class TestPlaylistDurations:
+class TestPlaylistEntries:
     def test_roundtrip_with_append(self, tmp_path):
         """写侧写进去的 EXTINF，读侧逐段读回；求和与 total_duration 同源。"""
         playlist = tmp_path / "raw_playlist.m3u8"
-        written = {"raw_segment_0.mp4": 1.0, "raw_segment_1.mp4": 2.5, "raw_segment_2.mp4": 0.125}
-        for name, duration in written.items():
+        written = [("raw_segment_0.mp4", 1.0), ("raw_segment_1.mp4", 2.5), ("raw_segment_2.mp4", 0.125)]
+        for name, duration in written:
             _m3u8.append(playlist, "raw_init.mp4", duration, name)
 
-        got = _m3u8.durations(playlist)
+        got = _m3u8.entries(playlist)
         assert got == pytest.approx(written)
-        assert sum(got.values()) == pytest.approx(_m3u8.total_duration(playlist))
+        assert sum(d for _, d in got) == pytest.approx(_m3u8.total_duration(playlist))
+
+    def test_order_is_the_playlist_order(self, tmp_path):
+        """**顺序是契约**：清单只追加，所以清单顺序 = 登记顺序 = 时序。
+
+        钉住它是因为读侧的段级定位（`bisect_right - 1`）建立在有序之上，而"清单本来就有序"
+        正是收口后不再需要第二次扫盘排序的理由。
+        """
+        playlist = tmp_path / "raw_playlist.m3u8"
+        for name in ["raw_segment_9.mp4", "raw_segment_1.mp4", "raw_segment_5.mp4"]:
+            _m3u8.append(playlist, "raw_init.mp4", 1.0, name)
+
+        assert [n for n, _ in _m3u8.entries(playlist)] == [
+            "raw_segment_9.mp4", "raw_segment_1.mp4", "raw_segment_5.mp4"
+        ]
 
     def test_missing_playlist_is_empty(self, tmp_path):
-        assert _m3u8.durations(tmp_path / "nope.m3u8") == {}
+        assert _m3u8.entries(tmp_path / "nope.m3u8") == []
 
     def test_header_only_playlist_is_empty(self, tmp_path):
         playlist = tmp_path / "raw_playlist.m3u8"
         playlist.write_text(_m3u8.header("raw_init.mp4"), encoding="utf-8")
-        assert _m3u8.durations(playlist) == {}
+        assert _m3u8.entries(playlist) == []
 
     def test_corrupt_extinf_isolates_only_its_own_entry(self, tmp_path):
         """R6：内容坏了逐行隔离 —— 一条坏 EXTINF 不许带走它后面的段。"""
@@ -351,33 +362,65 @@ class TestPlaylistDurations:
             "#EXTM3U\n#EXTINF:1.000,\na.mp4\n#EXTINF:nan-ish,\nb.mp4\n#EXTINF:2.000,\nc.mp4\n",
             encoding="utf-8",
         )
-        assert _m3u8.durations(playlist) == {"a.mp4": 1.0, "c.mp4": 2.0}
+        assert _m3u8.entries(playlist) == [("a.mp4", 1.0), ("c.mp4", 2.0)]
+
+    def test_unknown_tag_lines_are_not_mistaken_for_uris(self, tmp_path):
+        """`#` 开头的都不是 URI —— 清单将来多几行标签（如 PDT）不该把段吃掉。"""
+        playlist = tmp_path / "raw_playlist.m3u8"
+        playlist.write_text(
+            "#EXTM3U\n"
+            "#EXT-X-PROGRAM-DATE-TIME:2026-09-19T12:00:00.000Z\n"
+            "#EXTINF:1.000,\n"
+            "a.mp4\n",
+            encoding="utf-8",
+        )
+        assert _m3u8.entries(playlist) == [("a.mp4", 1.0)]
 
 
 # ---------------------------------------------------------------------------
-# 读侧产出①：段容器（可播过滤 / 双轨枚举 / 区间定位）
+# 读侧产出①：段容器（清单枚举 / 区间定位）
 # ---------------------------------------------------------------------------
 
 
-class TestPlayableSegments:
+class TestSegments:
     def test_filters_segments_missing_from_playlist(self, tmp_storage, fake_pipeline):
-        """判据是"在不在清单键集合里"，不是"盘上有没有这个文件"。
+        """判据是"在不在清单里"，不是"盘上有没有这个文件"。
 
-        造的是登记失败那一档：段文件已就位、清单里没它。旧平铺布局的在途段同理。
+        造的是登记失败那一档：段文件已就位、清单里没它（`_m3u8.append` 抛 `OSError`，或进程
+        崩在 `os.replace(段)` 与 append 之间）。在途段同理。
         """
         hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
         orphan = _hls_dir(tmp_storage) / "raw_segment_9999999999.mp4"
         orphan.write_bytes(b"not-registered")
 
-        assert len(hls.list_segments(1, 2, "raw")) == 2        # 盘上确实有两个
-        got = hls.list_playable_segments(1, 2, "raw")
-        assert [s.ref.ts_us for s in got] == [1_700_000_000]   # 能播的只有一个
+        assert orphan.exists()                                 # 盘上确实躺着它
+        got = hls.list_segments(1, 2, "raw")
+        assert [s.ref.ts_us for s in got] == [1_700_000_000]   # 但它不是段
+
+    def test_non_segment_uri_in_the_playlist_is_skipped(self, tmp_storage, fake_pipeline):
+        """手写进清单的条目不是段——名字过不了段名正则就不认，跳过而不是抛。"""
+        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
+        playlist = _layout.playlist_path(1, 2, "raw")
+        _m3u8.append(playlist, "raw_init.mp4", 5.0, "somebody_elses_file.mp4")
+
+        assert [s.ref.ts_us for s in hls.list_segments(1, 2, "raw")] == [1_700_000_000]
+
+    def test_other_track_segment_name_in_the_playlist_is_skipped(self, tmp_storage, fake_pipeline):
+        """两轨各有各的清单；写串了也不该让 raw 的枚举里冒出 processed 的段。"""
+        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
+        _m3u8.append(
+            _layout.playlist_path(1, 2, "raw"),
+            "raw_init.mp4", 1.0, "processed_segment_1800000000.mp4",
+        )
+
+        got = hls.list_segments(1, 2, "raw")
+        assert [s.ref.track for s in got] == ["raw"]
 
     def test_returns_ts_ascending_with_durations(self, tmp_storage, fake_pipeline):
         for start in (1900.0, 1700.0, 1800.0):                 # 刻意不按序写
             hls.insert_segment(1, 2, "raw", _frames(start=start))
 
-        got = hls.list_playable_segments(1, 2, "raw")
+        got = hls.list_segments(1, 2, "raw")
         assert [s.ref.ts_us for s in got] == [1_700_000_000, 1_800_000_000, 1_900_000_000]
         assert [s.duration_s for s in got] == pytest.approx([1.0, 1.0, 1.0])
 
@@ -385,94 +428,72 @@ class TestPlayableSegments:
         hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
         hls.insert_segment(1, 2, "processed", _frames(start=1800.0))
 
-        assert [s.ref.track for s in hls.list_playable_segments(1, 2, "raw")] == ["raw"]
-        assert [s.ref.ts_us for s in hls.list_playable_segments(1, 2, "processed")] == [1_800_000_000]
+        assert [s.ref.track for s in hls.list_segments(1, 2, "raw")] == ["raw"]
+        assert [s.ref.ts_us for s in hls.list_segments(1, 2, "processed")] == [1_800_000_000]
 
     def test_missing_domain_dir_is_empty(self, tmp_storage):
-        assert hls.list_playable_segments(1, 2, "raw") == []
+        assert hls.list_segments(1, 2, "raw") == []
 
     def test_missing_playlist_is_empty(self, tmp_storage):
-        """段文件在、清单不在 → 一个都不能播（不是"全都能播"）。"""
+        """段文件在、清单不在 → 一个段都没有（不是"全都算段"）。"""
         target = _hls_dir(tmp_storage)
         target.mkdir(parents=True)
         (target / "raw_segment_1700000000.mp4").write_bytes(b"orphan")
 
-        assert len(hls.list_segments(1, 2, "raw")) == 1
-        assert hls.list_playable_segments(1, 2, "raw") == []
+        assert hls.list_segments(1, 2, "raw") == []
 
     @pytest.mark.parametrize("track", ["RAW", "detection", ""])
     def test_invalid_track_raises(self, tmp_storage, track):
         with pytest.raises(ValueError):
-            hls.list_playable_segments(1, 2, track)
-
-
-class TestSegmentsByTrack:
-    def test_both_tracks_in_one_scan(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        hls.insert_segment(1, 2, "processed", _frames(start=1800.0))
-
-        by_track = _layout.list_segments_by_track(1, 2)
-        assert [r.ts_us for r in by_track["raw"]] == [1_700_000_000]
-        assert [r.ts_us for r in by_track["processed"]] == [1_800_000_000]
-
-    def test_missing_domain_dir_returns_empty_lists_not_empty_dict(self, tmp_storage):
-        """调用方直接按 track 取，不该先判键。"""
-        by_track = _layout.list_segments_by_track(1, 2)
-        assert set(by_track) == set(hls.TRACKS)
-        assert all(v == [] for v in by_track.values())
-
-    def test_single_track_view_is_the_same_data(self, tmp_storage, fake_pipeline):
-        for start in (1900.0, 1700.0):
-            hls.insert_segment(1, 2, "raw", _frames(start=start))
-        assert _layout.list_segments_by_track(1, 2)["raw"] == hls.list_segments(1, 2, "raw")
+            hls.list_segments(1, 2, track)
 
 
 class TestStepSummaryRecipe:
     """域**不出** step 摘要类型（要完整摘要的只有一个消费方，准入判据 2「< 2 不进」）。
 
-    但阶段 2 的 `routers/task.py` 要自己统计，这里把那段配方钉住：与现役
-    `SegmentFinder.list_steps` 逐字段相等，说明迁过去是零行为变更。
+    但 `routers/task.py` 要自己统计，这里把那段配方钉住。
+
+    ⚠ 这里曾有一条"与 `SegmentFinder.list_steps` 逐字段相等"的用例，钉的是迁进本域时零行为
+    变更。段查询收口到清单之后那条等式**故意不再成立**：`SegmentFinder` 枚举文件系统，本配方
+    读清单，未登记的段两边给出不同答案——那正是收口要的差别。故删除该用例，换成下面两条。
     """
 
     @staticmethod
     def _summarise(task_id):
-        """调用方侧的三行统计 —— 阶段 2 迁进 routers/task.py 的就是它。"""
+        """调用方侧的统计 —— `routers/task.py._summarise_steps` 用的就是它。"""
         from app.storage import tasks as step_tasks
 
         out = []
         for step_id in step_tasks.list_step_ids(task_id):
-            by_track = hls.list_segments_by_track(task_id, step_id)
+            by_track = {
+                t: hls.list_segments(task_id, step_id, t) for t in hls.TRACKS
+            }
             tracks = tuple(t for t in hls.TRACKS if by_track[t])
             if not tracks:                      # 建了目录没写成段 → 点开黑屏，不进清单
                 continue
-            all_ts = [r.ts_us for t in tracks for r in by_track[t]]
+            all_ts = [s.ref.ts_us for t in tracks for s in by_track[t]]
             out.append((step_id, tracks, min(all_ts), max(all_ts)))
         return out
 
-    def test_matches_segment_finder_list_steps(self, tmp_storage):
-        """两边读的布局不同（平铺 vs `{step}/hls/`），故把同一组段名同时铺到两处。"""
-        from app.services.traceback.segment_finder import SegmentFinder
+    def test_dual_track_step_reports_both(self, tmp_storage, fake_pipeline):
+        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
+        hls.insert_segment(1, 2, "raw", _frames(start=1900.0))
+        hls.insert_segment(1, 2, "processed", _frames(start=1800.0))
+        hls.insert_segment(1, 3, "processed", _frames(start=2000.0))
+        (tmp_storage / "1" / "5" / "hls").mkdir(parents=True)   # 空 step，该丢弃
 
-        layout = {
-            2: ["raw_segment_1700000000.mp4", "raw_segment_1900000000.mp4",
-                "processed_segment_1800000000.mp4"],
-            3: ["processed_segment_2000000000.mp4"],
-            5: [],                                    # 空 step，两边都该丢弃
-        }
-        for step_id, names in layout.items():
-            flat = tmp_storage / "1" / str(step_id)
-            domain = flat / "hls"
-            domain.mkdir(parents=True)
-            for name in names:
-                (flat / name).write_bytes(b"x")
-                (domain / name).write_bytes(b"x")
-
-        legacy = [
-            (s.step_id, s.tracks, s.first_ts_us, s.last_ts_us)
-            for s in SegmentFinder(tmp_storage).list_steps(1)
+        assert self._summarise(1) == [
+            (2, ("raw", "processed"), 1_700_000_000, 1_900_000_000),
+            (3, ("processed",), 2_000_000_000, 2_000_000_000),
         ]
-        assert legacy == self._summarise(1)
-        assert [row[0] for row in legacy] == [2, 3]   # 不是因为两边都空才相等
+
+    def test_unregistered_segments_do_not_make_a_step_appear(self, tmp_storage):
+        """只有段文件、没有清单的 step 不该出现在清单里——点开是黑屏。"""
+        domain = tmp_storage / "1" / "2" / "hls"
+        domain.mkdir(parents=True)
+        (domain / "raw_segment_1700000000.mp4").write_bytes(b"orphan")
+
+        assert self._summarise(1) == []
 
     def test_span_takes_union_of_both_tracks(self, tmp_storage, fake_pipeline):
         """两轨边界不一定对齐 —— 跨度是"有画面的时间范围"，不是任一单轨的播放范围。"""
@@ -484,6 +505,9 @@ class TestStepSummaryRecipe:
 
 class TestSelectSegments:
     """段级区间定位。判据是**段起始 ts**，不是段的覆盖区间（理由见函数 docstring）。
+
+    返回类型与 `list_segments` 同（`Segment`，带 EXTINF）——两个枚举器同源，下游不必按调用
+    的是哪一个来分支。
 
     VOD 渲染的用例已随 `render_vod` 移出本域，见 `tests/test_utils_vod_playlist.py`。
     """
@@ -498,11 +522,17 @@ class TestSelectSegments:
         self._seed()
         assert hls.list_segments_in_range(1, 2, "raw") == hls.list_segments(1, 2, "raw")
 
+    def test_returns_the_same_container_as_list_segments(self, tmp_storage, fake_pipeline):
+        """带 EXTINF 的同一个容器，不是只剩身份键的另一种形状。"""
+        self._seed()
+        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.2, end_ts=1701.8)
+        assert [s.duration_s for s in got] == pytest.approx([1.0])
+
     def test_picks_the_segment_containing_start(self, tmp_storage, fake_pipeline):
         """start_ts 落在第二段中间 → 从第二段开始，不是从第三段。"""
         self._seed()
         got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.5)
-        assert [r.ts_us for r in got] == [1_701_000_000, 1_702_000_000]
+        assert [s.ref.ts_us for s in got] == [1_701_000_000, 1_702_000_000]
 
     def test_start_exactly_at_first_frame_keeps_that_segment(self, tmp_storage, fake_pipeline):
         """段名 ts_us 是**截断**值，故 start_ts*1e6 > ts_us —— 用 'left' 会漏掉整段。
@@ -511,7 +541,7 @@ class TestSelectSegments:
         """
         self._seed(first=1700.0000019)               # 截断后段名是 1700000001
         got = hls.list_segments_in_range(1, 2, "raw", start_ts=1700.0000019)
-        assert got[0].ts_us == 1_700_000_001         # 第一段还在
+        assert got[0].ref.ts_us == 1_700_000_001     # 第一段还在
 
     def test_end_before_first_segment_is_empty(self, tmp_storage, fake_pipeline):
         """hi = -1 时刻意不 clamp 成 0：救成 0 会把空区间误判成命中第 0 段。"""
@@ -521,12 +551,12 @@ class TestSelectSegments:
     def test_end_inside_a_segment_keeps_it(self, tmp_storage, fake_pipeline):
         self._seed()
         got = hls.list_segments_in_range(1, 2, "raw", end_ts=1701.5)
-        assert [r.ts_us for r in got] == [1_700_000_000, 1_701_000_000]
+        assert [s.ref.ts_us for s in got] == [1_700_000_000, 1_701_000_000]
 
     def test_window_inside_one_segment(self, tmp_storage, fake_pipeline):
         self._seed()
         got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.2, end_ts=1701.8)
-        assert [r.ts_us for r in got] == [1_701_000_000]
+        assert [s.ref.ts_us for s in got] == [1_701_000_000]
 
     def test_missing_domain_dir_is_empty(self, tmp_storage):
         assert hls.list_segments_in_range(1, 2, "raw", start_ts=0.0, end_ts=1.0) == []
@@ -551,16 +581,16 @@ class TestSelectSegments:
         两者切点相同。
         """
         self._seed()
-        refs = hls.list_segments(1, 2, "raw")
-        starts = np.array([r.ts_us for r in refs], dtype=np.float64)
+        segs = hls.list_segments(1, 2, "raw")
+        starts = np.array([s.ref.ts_us for s in segs], dtype=np.float64)
 
         lo = 0 if start_ts is None else max(
             0, int(np.searchsorted(starts, start_ts * 1e6, side="right")) - 1
         )
-        hi = len(refs) - 1 if end_ts is None else int(
+        hi = len(segs) - 1 if end_ts is None else int(
             np.searchsorted(starts, end_ts * 1e6, side="right")
         ) - 1
-        expected = [] if lo > hi else refs[lo : hi + 1]
+        expected = [] if lo > hi else segs[lo : hi + 1]
 
         assert hls.list_segments_in_range(1, 2, "raw", start_ts=start_ts, end_ts=end_ts) == expected
 

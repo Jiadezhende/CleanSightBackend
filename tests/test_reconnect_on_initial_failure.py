@@ -71,6 +71,7 @@ def _make_monitor(
         stream_service=mock_ss,
         inference_manager=MagicMock(),
         config=config,
+        recording_service=MagicMock(),
     )
 
 
@@ -175,6 +176,76 @@ class TestHealthMonitorReconnectPath:
         monitor._check_all_clients()
         assert monitor._client_stats["reconnecting"] == 1
         assert monitor._client_stats["orphan_streams"] == 0
+
+    def test_requests_residual_flush_once_on_entering_reconnect(self):
+        """进入重连时登记一次断点残帧 flush，栅栏 = 断流前最后一帧 ts。
+
+        不登记的后果是静默的：断流那刻攒在 CA 队列里的半批帧会被重连后的帧补满，拼成一个
+        横跨 gap 的段，`eff_fps` 被 gap 拉低 → 10 秒画面写成 30 秒慢放，且 fps 仍在合理带
+        内、不触发退化兜底。**登记只能发生一次**——重复登记本身无害（后到覆盖），但每 tick
+        重复意味着它被放错了位置（早退分支之前），那时 `_reconnecting_clients` 还没置上。
+        """
+        client_id = "monitor_flush_request"
+        mock_cq = self._cq(seconds_ago=10.0)
+        last_frame_ts = mock_cq.latest_raw_timestamp
+
+        monitor = _make_monitor(
+            client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
+        )
+
+        monitor._check_all_clients()
+        monitor._recording_service.request_residual_flush.assert_called_once_with(
+            mock_cq, fence_ts=last_frame_ts
+        )
+
+        # 后续轮次走 _handle_reconnecting_client，不该再登记
+        monitor._check_all_clients()
+        monitor._check_all_clients()
+        assert monitor._recording_service.request_residual_flush.call_count == 1
+
+    def test_reregisters_the_same_fence_on_reconnect_success(self):
+        """重连成功时用**同一个**栅栏再登记一次，捞走迟到的断流前帧。
+
+        raw 轨由 decoder 直写，进重连那一刻队列内容就定了；processed 轨由 viz worker 按
+        tick 从推理结果渲染，ts 落后 raw 一个推理管线延迟。延迟超过「检测 + sweeper 一个
+        tick」时，断流前的 processed 帧在首次 flush 之后才入队，没人再切 → processed 轨
+        照样产出横跨 gap 的慢放段。
+
+        重复登记安全：栅栏是时间戳，重连后的帧 ts 都大于它。
+        """
+        client_id = "monitor_flush_on_success"
+        mock_cq = self._cq(seconds_ago=10.0)
+        fence = mock_cq.latest_raw_timestamp
+
+        monitor = _make_monitor(
+            client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
+        )
+        monitor._check_all_clients()                     # 进重连，登记第一次
+
+        mock_cq.latest_raw_timestamp = time.time()       # 新帧来了 → 判定重连成功
+        monitor._check_all_clients()
+
+        assert client_id not in monitor._reconnecting_clients
+        calls = monitor._recording_service.request_residual_flush.call_args_list
+        assert len(calls) == 2
+        assert calls[0] == calls[1], "第二次必须用同一个栅栏，否则会切进重连后的帧"
+        assert calls[1].kwargs["fence_ts"] == fence
+
+    def test_no_residual_flush_request_when_stream_info_missing(self):
+        """`stream_info` 缺失 → 连重连都进不去，也不该登记 flush（否则每 tick 重复登记）。"""
+        client_id = "monitor_flush_no_stream_info"
+        mock_cq = self._cq(seconds_ago=10.0)
+
+        monitor = _make_monitor(
+            client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
+        )
+        monitor._stream_service.get_stream_info.return_value = None
+
+        monitor._check_all_clients()
+        monitor._check_all_clients()
+
+        assert client_id not in monitor._reconnecting_clients
+        monitor._recording_service.request_residual_flush.assert_not_called()
 
     def test_no_reconnect_when_decoder_alive_even_if_frames_stale(self):
         """进程活着但帧陈旧（等首帧/瞬时停）→ 只等，不进重连（这是启动 bug 的根治点）。"""

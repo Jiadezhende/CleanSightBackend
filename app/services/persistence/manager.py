@@ -74,6 +74,9 @@ class PersistenceManager:
         # HLS 分段拉取 Worker（PULL 模型）：周期扫活跃 CQ 把攒满的整段拉走落盘。
         # 注入 client_manager.snapshot + 本管理器的 persist_hls_segment；
         # 依赖方向 persistence→client 单向（client 不再回指 persistence）。
+        #
+        # ⚠ **构造但不启动**：HLS 落盘已切到 `app.services.recording`，`start()` 不再碰它。
+        # 留着只是为了不删旧实现（见 `start()` 的 docstring）。
         from app.services.client.manager import client_manager
 
         self._segment_sweeper = HLSSegmentSweeper(
@@ -83,24 +86,26 @@ class PersistenceManager:
         )
 
     def start(self):
-        """启动持久化服务"""
+        """启动持久化服务（**只起告警池 + TTL 清理**）。
+
+        ⚠ **HLS 落盘已切到 `app.services.recording`**：`hls_pool` 与 `_segment_sweeper` 仍在
+        `__init__` 里构造（旧实现尚未删除，直接 `PersistenceManager()` 打桩的测试仍依赖它们
+        存在），但**这里刻意不启动它们**。
+
+        **重新启用 = 数据静默损坏**：`HLSSegmentSweeper` 与 recording 的 `SegmentSweeper` 都从
+        活跃 CQ **drain**（破坏性取出）。两个同时在跑的结果是各自拿走一半帧，产出两份互相缺帧、
+        时间轴却都自洽的段，**两端都不报错**。要恢复旧路径，必须先停掉 recording。
+        """
         logger.info("启动持久化服务")
-        self.hls_pool.start()
         self.alarm_pool.start()
-        self._segment_sweeper.start()
         if self._cleanup_worker:
             self._cleanup_worker.start()
 
     def stop(self, timeout: float = 10.0):
-        """停止持久化服务（优雅关闭）"""
+        """停止持久化服务（优雅关闭）。与 `start()` 对称：hls_pool / sweeper 从没起过，不停。"""
         logger.info("停止持久化服务")
 
-        # 先停 sweeper（不再拉新段），残段由 RunController 拆除时 flush；
-        # 再停 Worker 池，保证 sweeper 已入队的整段仍被消费落盘。
-        self._segment_sweeper.stop(timeout=5.0)
-
         # 停止Worker池（会等待队列清空）
-        self.hls_pool.stop(timeout=timeout)
         self.alarm_pool.stop(timeout=timeout)
         if self._cleanup_worker:
             self._cleanup_worker.stop(timeout=5.0)

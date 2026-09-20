@@ -102,7 +102,9 @@ def test_real_manager_init_invariants_and_stop_workflow_smoke():
     """
     m = InferenceManager()
     assert m._actors == {}                          # 漏设 → stop_workflow 会 AttributeError
-    assert not hasattr(m, "persistence_manager")    # 已摘除持久化引用
+    # 已摘除落盘服务引用（inference 不持 persistence / recording，落盘经 run_control 编排）
+    assert not hasattr(m, "persistence_manager")
+    assert not hasattr(m, "recording_service")
     assert not hasattr(m, "_client_lifecycle_lock")  # 互斥上移 RunController.lock_for
     # 无 actor、feature close 空跑 → 返回空 settlement、不抛
     cq = MagicMock()

@@ -1,20 +1,18 @@
-"""hls 域的定位、命名与枚举 —— 域内每条路径都从这里出来。
+"""hls 域的定位与命名 —— 域内每条路径都从这里出来。
 
     {root}/{task_id}/{step_id}/hls/
-      {track}_segment_{ts_us}.mp4   段（fMP4 fragment）
-      {track}_init.mp4              该轨的 init 段，首段产出、整条 playlist 复用
-      {track}_playlist.m3u8         LIVE 形态播放列表
-      raw_segment_{ts_us}.idx       raw 轨逐帧 ts sidecar（float64），仅离线反查用
-      metadata.json                 段数 / 时长 / 首末 ts 统计，兼作 TTL 判据
-      .stage_{track}_{ts_us}/       写入事务的暂存目录，commit 后即删
+      {track}_segment_{ts_us}.mp4   段（fMP4 fragment）      {track}_init.mp4   该轨 init
+      {track}_playlist.m3u8         LIVE 清单               raw_segment_{ts_us}.idx  逐帧 ts
+      metadata.json                 统计，兼作 TTL 判据      .stage_{track}_{ts_us}/  写入暂存
 
-**身份键是 `SegmentRef(track, ts_us)`，不是散标量。** 读写两侧共用同一组定位函数：写侧自己
-构造 ref，读侧从文件名 `parse_segment_name` 解出 ref，路径一律由 ref 重建——外部字符串从不
-进入路径拼接。形状声明在 `types.py`；本模块管**名字与位置**，轨道白名单 `TRACKS` 与校验器
-`require_track` 因此留在这里。
+**身份键是 `SegmentRef(track, ts_us)`**：外部字符串一律先 `parse_segment_name` 解成 ref，
+路径由 ref 重建，绝不进字符串拼接。
 
-`ts_us` 是**截断**到微秒的墙钟（`int(ts * 1e6)`）而非四舍五入：读侧段级定位的
-`bisect_right - 1` 建立在"段名 ts ≤ 段内首帧 ts"之上，进位会让它落到前一段。
+`ts_us` 是**截断**到微秒（`int(ts * 1e6)`）不是四舍五入：读侧 `bisect_right - 1` 建立在
+「段名 ts ≤ 段内首帧 ts」之上，进位会让它落到前一段。
+
+**本模块不枚举目录**——「有哪些段」只由清单回答（`_read.list_segments`），
+理由见 `docs/update/20260919_VIDEO_TIMEBASE_SELECTION.md` §5.2。
 
 依赖上界：stdlib only。规范见 `docs/kb/DESIGN_STORAGE_LAYER.md` §3。
 """
@@ -23,7 +21,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 from app.storage import _root
 
@@ -81,44 +79,6 @@ def parse_segment_name(name: str) -> Optional[SegmentRef]:
     if m is None:
         return None
     return SegmentRef(track=m.group("track"), ts_us=int(m.group("ts_us")))
-
-
-def list_segments(task_id: int, step_id: int, track: str) -> List[SegmentRef]:
-    """该轨在这个 step 下的全部段，按 `ts_us` 升序（**升序是返回值的契约**，读侧的段级定位
-    建立在它上面）。域目录不存在返回 `[]`。
-
-    ⚠ **回答的是"盘上有哪些段文件"，不是"哪些段能播"**：在途段也在返回值里。要喂给播放器或
-    ffmpeg 的一律用 `_read.list_playable_segments`，拿本函数的结果去拼清单会静默截短。
-
-    Raises:
-        ValueError: track 非法。
-    """
-    require_track(track)
-    return list_segments_by_track(task_id, step_id)[track]
-
-
-def list_segments_by_track(task_id: int, step_id: int) -> Dict[str, List[SegmentRef]]:
-    """该 step 下按轨道分组的段，**双轨只付一次 `iterdir`**；各轨内按 `ts_us` 升序。
-
-    域目录不存在时返回各轨空列表（不是空 dict），调用方可以直接按 track 取。要一轨的走
-    `list_segments`。同样的「在途段也在返回值里」警告适用。
-    """
-    by_track: Dict[str, List[SegmentRef]] = {t: [] for t in TRACKS}
-
-    root = domain_dir(task_id, step_id)
-    if not root.is_dir():
-        return by_track
-
-    for entry in root.iterdir():
-        if not entry.is_file():
-            continue
-        ref = parse_segment_name(entry.name)
-        if ref is not None:
-            by_track[ref.track].append(ref)
-
-    for refs in by_track.values():
-        refs.sort(key=lambda r: r.ts_us)
-    return by_track
 
 
 def segment_path(task_id: int, step_id: int, ref: SegmentRef, *, create: bool = False) -> Path:

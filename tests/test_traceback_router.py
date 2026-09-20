@@ -5,12 +5,16 @@
 - /traceback/task/{id}/playlist.m3u8：必填 step_id，动态 VOD 生成
 - /traceback/task/{id}/timeline：必填 step_id，仅返回该 step 的事件
 - /media/segment/{token}：合法 token 下载，伪造 token 拒绝
-- 路径穿越防御
+- 路径穿越防御（判据是 `hls.parse_*_name` 解不解得出身份键，不是事后 `relative_to`）
 
-落盘约定：{base_dir}/{task_id}/{step_id}/
+落盘约定：{root}/{task_id}/{step_id}/hls/（`app.storage.hls` 域）
 """
 
-from pathlib import Path
+import base64
+import hashlib
+import hmac
+import json
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -20,6 +24,11 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.services.traceback.media_token import MediaToken
+from app.storage import hls
+from factories import seed_hls_segments
+
+
+_SECRET = "test-stable-secret-2026"
 
 
 # ---------------------------------------------------------------------------
@@ -27,54 +36,62 @@ from app.services.traceback.media_token import MediaToken
 # ---------------------------------------------------------------------------
 
 
-def _seed_task(base_dir: Path, task_id: int, step_id: int, ts_us_list, write_init=True):
-    """造一个任务-步骤的 raw + processed 段 + playlist + init.mp4 文件"""
-    d = base_dir / str(task_id) / str(step_id)
+def _seed_task(task_id: int, step_id: int, ts_us_list, write_init=True):
+    """造一个 step 的双轨段 + playlist + init（新布局 `{step}/hls/`）。
+
+    路径一律由 `hls.*_path` / `hls.*_name` 出，不手拼字符串——落盘布局再动一次时
+    这里自动跟着走。
+    """
+    d = hls.init_path(task_id, step_id, "raw").parent
     d.mkdir(parents=True, exist_ok=True)
-    raw_pl_lines = [
-        "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
-        '#EXT-X-MAP:URI="raw_init.mp4"',
-    ]
-    proc_pl_lines = [
-        "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
-        '#EXT-X-MAP:URI="processed_init.mp4"',
-    ]
-    for ts_us in ts_us_list:
-        (d / f"raw_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
-        (d / f"processed_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
-        raw_pl_lines.append("#EXTINF:10.000,")
-        raw_pl_lines.append(f"raw_segment_{ts_us}.mp4")
-        proc_pl_lines.append("#EXTINF:10.000,")
-        proc_pl_lines.append(f"processed_segment_{ts_us}.mp4")
-    (d / "raw_playlist.m3u8").write_text("\n".join(raw_pl_lines) + "\n")
-    (d / "processed_playlist.m3u8").write_text("\n".join(proc_pl_lines) + "\n")
-    if write_init:
-        (d / "raw_init.mp4").write_bytes(b"\x00" * 8)
-        (d / "processed_init.mp4").write_bytes(b"\x00" * 8)
+
+    for track in hls.TRACKS:
+        lines = [
+            "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
+            f'#EXT-X-MAP:URI="{hls.init_name(track)}"',
+        ]
+        for ts_us in ts_us_list:
+            ref = hls.SegmentRef(track=track, ts_us=ts_us)
+            hls.segment_path(task_id, step_id, ref).write_bytes(b"\x00" * 16)
+            lines.append("#EXTINF:10.000,")
+            lines.append(hls.segment_name(ref))
+        hls.playlist_path(task_id, step_id, track).write_text("\n".join(lines) + "\n")
+        if write_init:
+            hls.init_path(task_id, step_id, track).write_bytes(b"\x00" * 8)
     return d
 
 
-@pytest.fixture
-def media_root(tmp_path, monkeypatch):
-    """注入临时 base_dir，避开真实持久化目录"""
-    from app.routers import media as media_router
-    from app.routers import traceback as tb_router
+def _forge_token(task_id: int, step_id: int, filename: str, kind: str, ttl: int = 300):
+    """绕过 `MediaToken.sign` 的文件名校验直接签一个 token。
 
-    monkeypatch.setattr(
-        "app.services.traceback.segment_finder.get_default_base_dir",
-        lambda: tmp_path,
-    )
-    monkeypatch.setattr(media_router, "get_default_base_dir", lambda: tmp_path)
-    monkeypatch.setattr(tb_router, "get_default_base_dir", lambda: tmp_path)
-    return tmp_path
+    签发侧本来就拦 `/`、`\\`、`..`，所以这种 token 只可能来自伪造；路由必须自己也拦得住
+    （纵深防御：签发与消费是两处独立的把关点）。
+    """
+    payload = {
+        "t": task_id, "s": step_id, "f": filename, "k": kind,
+        "e": int(time.time()) + ttl,
+    }
+    payload_bytes = json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=False, sort_keys=True
+    ).encode("utf-8")
+    sig = hmac.new(_SECRET.encode("utf-8"), payload_bytes, hashlib.sha256).digest()
+
+    def _b64(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{_b64(payload_bytes)}.{_b64(sig)}"
+
+
+@pytest.fixture
+def media_root(tmp_storage):
+    """存储根指到隔离临时目录（`tmp_storage` 改的是 settings.storage_dir 单一真源）。"""
+    return tmp_storage
 
 
 @pytest.fixture(autouse=True)
 def _reset_media_token(monkeypatch):
     """每个测试都用确定的 secret，避免随机化干扰"""
-    monkeypatch.setattr(
-        "app.settings.settings.media_token_secret", "test-stable-secret-2026"
-    )
+    monkeypatch.setattr("app.settings.settings.media_token_secret", _SECRET)
     MediaToken.reset_default()
     yield
     MediaToken.reset_default()
@@ -94,7 +111,7 @@ async def client():
 
 @pytest.mark.asyncio
 async def test_playlist_vod_generation(client, media_root):
-    _seed_task(media_root, task_id=1, step_id=1,
+    _seed_task(task_id=1, step_id=1,
                ts_us_list=[1_000_000, 11_000_000, 21_000_000])
 
     resp = await client.get("/traceback/task/1/playlist.m3u8?step_id=1&track=processed")
@@ -120,7 +137,7 @@ async def test_playlist_vod_generation(client, media_root):
 async def test_playlist_503_when_init_missing(client, media_root):
     """缺 `{track}_init.mp4` 时 playlist 端点应 503——fMP4 无 init 段无法解码，
     且服务端无法自愈（旧格式产物不支持迁移，或首段仍在 transcode）。"""
-    _seed_task(media_root, task_id=42, step_id=1,
+    _seed_task(task_id=42, step_id=1,
                ts_us_list=[1_000_000], write_init=False)
 
     resp = await client.get("/traceback/task/42/playlist.m3u8?step_id=1&track=raw")
@@ -140,7 +157,28 @@ async def test_playlist_step_id_required(client, media_root):
 
 
 @pytest.mark.asyncio
+async def test_playlist_404_keeps_the_structured_body(client, media_root):
+    """404 的 body 必须是结构化的（带 resource_type / resource_id），不是只有 detail。
+
+    收口前这里有两档 404，「盘上一个段都没有」那档走 `NotFoundError` → 全局处理器 →
+    结构化 body。两档塌成一档时若图省事改用裸 `HTTPException`，**响应体形态会静默从结构化
+    变成只有 detail**，按字段分支的客户端就断了——而状态码没变，只断言 404 的用例发现不了。
+    """
+    resp = await client.get("/traceback/task/999/playlist.m3u8?step_id=1")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["resource_type"] == "Segments"
+    assert "task=999" in body["resource_id"]
+
+
+@pytest.mark.asyncio
 async def test_playlist_404_when_no_segments(client, media_root):
+    """不存在的 task/step → 404，**不是 503**。
+
+    与上面那条 503 用例一起钉住 `_build_vod_playlist` 里两档检查的**先后**：段检查必须在
+    init 检查之前。反过来的话，一个根本不存在的资源会先撞上"缺 init"而得到 503——那是
+    "服务端暂时不可用、请重试"的语义，对不存在的资源是误导。
+    """
     resp = await client.get("/traceback/task/999/playlist.m3u8?step_id=1")
     assert resp.status_code == 404
 
@@ -148,8 +186,8 @@ async def test_playlist_404_when_no_segments(client, media_root):
 @pytest.mark.asyncio
 async def test_playlist_step_isolation(client, media_root):
     """请求 step=2 时不能返回 step=1 的段。"""
-    _seed_task(media_root, task_id=5, step_id=1, ts_us_list=[1_000_000])
-    _seed_task(media_root, task_id=5, step_id=2, ts_us_list=[100_000_000, 110_000_000])
+    _seed_task(task_id=5, step_id=1, ts_us_list=[1_000_000])
+    _seed_task(task_id=5, step_id=2, ts_us_list=[100_000_000, 110_000_000])
 
     resp = await client.get("/traceback/task/5/playlist.m3u8?step_id=2&track=processed")
     assert resp.status_code == 200
@@ -158,7 +196,7 @@ async def test_playlist_step_isolation(client, media_root):
 
 @pytest.mark.asyncio
 async def test_playlist_raw_track(client, media_root):
-    _seed_task(media_root, task_id=2, step_id=1, ts_us_list=[1_000_000, 11_000_000])
+    _seed_task(task_id=2, step_id=1, ts_us_list=[1_000_000, 11_000_000])
     resp = await client.get("/traceback/task/2/playlist.m3u8?step_id=1&track=raw")
     assert resp.status_code == 200
     assert resp.text.count("#EXTINF:") == 2
@@ -178,7 +216,7 @@ async def test_playlist_invalid_track(client, media_root):
 
 @pytest.mark.asyncio
 async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
-    _seed_task(media_root, task_id=3, step_id=1,
+    _seed_task(task_id=3, step_id=1,
                ts_us_list=[1_000_000, 11_000_000, 21_000_000])
 
     from app.routers import traceback as tb_router
@@ -217,6 +255,134 @@ async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
     assert body["events"][1]["ts_ms"] == base_ms + 12_000
 
 
+_TS0_US = 1_700_000_000_000_000        # 段起点，真实 epoch 微秒
+_TS0_MS = _TS0_US // 1000
+
+
+def _install_alarms(monkeypatch, rows):
+    from app.routers import traceback as tb_router
+
+    fake_db = MagicMock()
+    fake_db.query.return_value.filter.return_value.filter.return_value.order_by.return_value.all.return_value = rows
+    fake_db.close = lambda: None
+    monkeypatch.setattr(tb_router, "get_db", lambda: iter([fake_db]))
+
+
+def _alarm(alarm_id, detected_at):
+    return SimpleNamespace(
+        alarm_id=alarm_id, alarm_type="bubble", severity="high",
+        message="b", step_id=1, step_name="s1", detected_at=detected_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeline_gives_media_coordinates_for_the_progress_bar(
+    client, media_root, monkeypatch
+):
+    """进度条要的是媒体坐标：全长 = Σ EXTINF，告警落点 = 它在媒体轴上的位置。
+
+    墙钟那几个字段照旧给（审计/显示用），但**不能拿去配 `<video>.currentTime`** ——
+    两者不同尺，混用就是断流后指针走不满、标记与画面错位。
+    """
+    # 三段各 10s，首尾相接、无空洞。ts 用真实 epoch —— `_to_ms` 把 <10^11 的
+    # detected_at 当秒级处理，小数值会被乘 1000，对不上段的墙钟。
+    _seed_task(task_id=3, step_id=1,
+               ts_us_list=[_TS0_US, _TS0_US + 10_000_000, _TS0_US + 20_000_000])
+    _install_alarms(monkeypatch, [_alarm(1, _TS0_MS + 12_000)])
+
+    body = (await client.get("/traceback/task/3/timeline?step_id=1")).json()
+
+    assert body["track"] == "raw"                            # 默认轨
+    assert body["media_duration_ms"] == 30_000               # Σ EXTINF
+    assert body["duration_ms"] == 30_000                     # 无空洞时两者相等
+    assert body["events"][0]["ts_ms"] == _TS0_MS + 12_000    # 墙钟原值不动
+    assert body["events"][0]["media_offset_ms"] == 12_000    # 减去首段起点
+
+
+@pytest.mark.asyncio
+async def test_timeline_media_offset_skips_the_gap(client, media_root, monkeypatch):
+    """断流之后的告警：墙钟晚了一个空洞，媒体坐标没有。
+
+    这是缺陷 #2 的修复点——旧前端按「(ts_ms − start_ms) / duration_ms」摆标记、按
+    currentTime 摆播放头，断流后两者差整整一个空洞。
+    """
+    # 两段各 10s，起点相隔 30s → 中间 20s 空洞；媒体轴上第二段紧接第一段（10s 处）
+    _seed_task(task_id=4, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 30_000_000])
+    _install_alarms(monkeypatch, [_alarm(1, _TS0_MS + 32_000)])   # 第二段内 2s 处
+
+    body = (await client.get("/traceback/task/4/timeline?step_id=1")).json()
+
+    assert body["duration_ms"] == 40_000                     # 墙钟跨度，含空洞
+    assert body["media_duration_ms"] == 20_000               # 媒体轴是压紧的
+    assert body["events"][0]["media_offset_ms"] == 12_000    # 10s + 段内 2s，不是 32s
+
+
+@pytest.mark.asyncio
+async def test_timeline_track_param_switches_the_media_axis(
+    client, media_root, monkeypatch
+):
+    """两轨各自独立切段 → 媒体轴不同尺，故 `track` 是必要入参（前端切轨要重取）。"""
+    _seed_task(task_id=5, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 10_000_000])
+    # _seed_task 双轨同构，这里再给 processed 追一段，把两轨拉开
+    from app.storage import hls
+    from app.storage.hls import _m3u8
+    ref = hls.SegmentRef(track="processed", ts_us=_TS0_US + 20_000_000)
+    hls.segment_path(5, 1, ref).write_bytes(b"\x00" * 16)
+    _m3u8.append(
+        hls.playlist_path(5, 1, "processed"), "processed_init.mp4", 10.0, hls.segment_name(ref)
+    )
+    _install_alarms(monkeypatch, [])
+
+    raw = (await client.get("/traceback/task/5/timeline?step_id=1&track=raw")).json()
+    proc = (await client.get("/traceback/task/5/timeline?step_id=1&track=processed")).json()
+
+    assert raw["media_duration_ms"] == 20_000
+    assert proc["media_duration_ms"] == 30_000
+    # 墙钟那组与 track 无关：恒取双轨并集
+    assert raw["duration_ms"] == proc["duration_ms"] == 30_000
+
+
+@pytest.mark.asyncio
+async def test_timeline_gap_total_is_zero_without_a_gap(client, media_root, monkeypatch):
+    """零断流的 step 必须报 0 —— 且**两轨都要**，哪怕两轨起止差很多。
+
+    这条钉的是一个真误报：前端曾用「`duration_ms − media_duration_ms`」推断断流总量，
+    而前者是**双轨并集**墙钟跨度、后者是**单轨** Σ EXTINF，两者不同尺。推理起步晚于取流时
+    processed 首段晚于 raw 首段，于是零断流的 step 也会亮出"缺失 N 秒"。夹具刻意造成这个
+    形状：两轨各自内部首尾相接（真的零空洞），但 processed 比 raw 晚起 15s。
+    """
+    seed_hls_segments(8, 1, [_TS0_US, _TS0_US + 10_000_000], track="raw")
+    seed_hls_segments(
+        8, 1, [_TS0_US + 15_000_000, _TS0_US + 25_000_000], track="processed"
+    )
+    _install_alarms(monkeypatch, [])
+
+    for track in ("raw", "processed"):
+        body = (await client.get(f"/traceback/task/8/timeline?step_id=1&track={track}")).json()
+        assert body["gap_total_ms"] == 0, f"{track} 轨零断流却报了空洞"
+        assert body["has_gap"] is False
+        assert body["media_duration_ms"] == 20_000
+        # 并集墙钟跨度 35s 远大于任一单轨的 20s —— 相减法在这里会算出 15s 的假空洞
+        assert body["duration_ms"] == 35_000
+
+
+@pytest.mark.asyncio
+async def test_timeline_gap_total_counts_a_real_gap(client, media_root, monkeypatch):
+    _seed_task(task_id=7, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 30_000_000])
+    _install_alarms(monkeypatch, [])
+
+    body = (await client.get("/traceback/task/7/timeline?step_id=1&track=raw")).json()
+
+    assert body["gap_total_ms"] == 20_000
+    assert body["has_gap"] is True
+
+
+@pytest.mark.asyncio
+async def test_timeline_rejects_unknown_track(client, media_root):
+    resp = await client.get("/traceback/task/1/timeline?step_id=1&track=detection")
+    assert resp.status_code == 422
+
+
 @pytest.mark.asyncio
 async def test_timeline_step_id_required(client, media_root):
     resp = await client.get("/traceback/task/999/timeline")
@@ -247,7 +413,7 @@ async def test_timeline_empty_for_unknown_task(client, media_root, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_media_segment_with_valid_token(client, media_root):
-    d = _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    d = _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
     expected = (d / "processed_segment_1000000.mp4").read_bytes()
 
     token = MediaToken.default().sign(
@@ -268,7 +434,7 @@ async def test_media_segment_invalid_token_rejected(client, media_root):
 
 @pytest.mark.asyncio
 async def test_media_segment_wrong_secret_rejected(client, media_root, monkeypatch):
-    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
     # 用错误的 secret 签发的 token
     attacker = MediaToken(secret=b"attacker-secret", default_ttl=300)
     bad_token = attacker.sign(10, 1, "processed_segment_1000000.mp4", kind="segment")
@@ -278,7 +444,7 @@ async def test_media_segment_wrong_secret_rejected(client, media_root, monkeypat
 
 @pytest.mark.asyncio
 async def test_media_segment_kind_mismatch_rejected(client, media_root):
-    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
     # 用 init kind 签发，但访问 segment 路由
     token = MediaToken.default().sign(
         10, 1, "init.mp4", kind="init"
@@ -297,6 +463,23 @@ async def test_media_segment_missing_file_returns_404(client, media_root):
     assert resp.status_code == 404
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filename",
+    ["../../etc/passwd", "..\\..\\windows\\win.ini", "..", "raw_playlist.m3u8"],
+)
+async def test_media_segment_rejects_non_segment_names(client, media_root, filename):
+    """段名解不出 `SegmentRef` → 400，**不是 404**。
+
+    路径由 `hls.segment_path(ref)` 按结构重建，外部字符串根本不进入拼接，所以穿越串
+    连"文件不存在"都到不了——它在解析那一步就被判死。400 而非 404 也更诚实：请求本身
+    非法，不是资源缺失。
+    """
+    token = _forge_token(10, 1, filename, kind="segment")
+    resp = await client.get(f"/media/segment/{token}")
+    assert resp.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # /media/init/{token}
 # ---------------------------------------------------------------------------
@@ -304,7 +487,7 @@ async def test_media_segment_missing_file_returns_404(client, media_root):
 
 @pytest.mark.asyncio
 async def test_media_init_with_valid_token(client, media_root):
-    d = _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    d = _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
     expected = (d / "raw_init.mp4").read_bytes()
 
     token = MediaToken.default().sign(
@@ -319,7 +502,7 @@ async def test_media_init_with_valid_token(client, media_root):
 @pytest.mark.asyncio
 async def test_media_init_kind_mismatch_rejected(client, media_root):
     """segment kind 的 token 不能从 /media/init 拿数据。"""
-    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
     token = MediaToken.default().sign(
         10, 1, "init.mp4", kind="segment",
     )
@@ -330,7 +513,7 @@ async def test_media_init_kind_mismatch_rejected(client, media_root):
 @pytest.mark.asyncio
 async def test_media_init_wrong_filename_rejected(client, media_root):
     """init kind 的 token 必须指向 init.mp4，不能借此读其它 mp4 段。"""
-    _seed_task(media_root, task_id=10, step_id=1, ts_us_list=[1_000_000])
+    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
     token = MediaToken.default().sign(
         10, 1, "processed_segment_1000000.mp4", kind="init",
     )
@@ -339,14 +522,30 @@ async def test_media_init_wrong_filename_rejected(client, media_root):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["evil_init.mp4", "init.mp4", "_init.mp4"])
+async def test_media_init_rejects_lookalike_init_names(client, media_root, filename):
+    """`evil_init.mp4` 必须 400 —— 这是 `endswith("init.mp4")` 放行、
+    `hls.parse_init_name` 拦下的那一类名字（判据是完整匹配 `{raw|processed}_init.mp4`）。
+
+    裸 `init.mp4` 同样不合法：两轨各有各的 init，不带 track 前缀的名字指不出任何一份。
+    """
+    _seed_task(task_id=11, step_id=1, ts_us_list=[1_000_000])
+    (media_root / "11" / "1" / "hls" / "evil_init.mp4").write_bytes(b"pwned")
+
+    token = MediaToken.default().sign(11, 1, filename, kind="init")
+    resp = await client.get(f"/media/init/{token}")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_media_init_missing_file_returns_404(client, media_root):
-    """init.mp4 不存在时返回 404。"""
+    """名字合法但盘上没有 → 404（区别于名字非法的 400）。"""
     _seed_task(
-        media_root, task_id=11, step_id=1,
+        task_id=11, step_id=1,
         ts_us_list=[1_000_000], write_init=False,
     )
     token = MediaToken.default().sign(
-        11, 1, "init.mp4", kind="init",
+        11, 1, "raw_init.mp4", kind="init",
     )
     resp = await client.get(f"/media/init/{token}")
     assert resp.status_code == 404

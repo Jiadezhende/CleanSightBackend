@@ -35,10 +35,10 @@ _VALID_TASK_SOURCES = ("db", "storage")
 
 
 def _config_path() -> Path:
-    """持久化文件绝对路径，与 HLS 段写入同一 base_dir。"""
-    from app.services.traceback.segment_finder import get_default_base_dir
+    """持久化文件绝对路径，寄居存储根（与产物同一 base_dir，但它不是 step 产物）。"""
+    from app.settings import settings
 
-    return get_default_base_dir() / _CONFIG_FILENAME
+    return settings.storage_base_dir / _CONFIG_FILENAME
 
 
 def _ensure_loaded() -> None:

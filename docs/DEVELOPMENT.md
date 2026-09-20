@@ -1,6 +1,6 @@
 # CleanSight Backend 开发规范
 
-本文是 CleanSight Backend 的开发**约定**：分支提交流程、测试规范、模块内聚与解耦、日志规范、检测点契约。
+本文是 CleanSight Backend 的开发**约定**。
 环境安装（Linux 生产 / Windows 开发）与物料分发见 [DEPLOYMENT.md](DEPLOYMENT.md)；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
 
 ---
@@ -12,13 +12,13 @@
   - 激活项目 `.venv`（别用裸 `python3` / `python3.x`）。
   - 遵循 PEP 8。
   - `pytest` 全绿。
-  - **逐个 `git add`，别用 `git add .` / `-A`**：先 `git status` 过一遍，确认只有本次任务的改动。调试中间产物（`init.mp4`、`seg0.mp4`、`pl.m3u8` 这类）、样本数据与截图、模型权重（`*.pt`）、`tmp/` 等大体积文件一律不进版本库；反复出现的加进 `.gitignore`。仓库一旦收下大文件，git 历史里就永久留着，事后再删也清不掉。
+  - **逐个 `git add`，别用 `git add .` / `-A`**：先 `git status` 过一遍，确认只有本次任务的改动。调试中间产物（`init.mp4`、`seg0.mp4`、`pl.m3u8` 这类）、样本数据与截图、模型权重（`*.pt`）、`tmp/` 等大体积文件一律不进版本库；反复出现的加进 `.gitignore`。
 - **commit message**：`type(scope): 简述`，`type` 用 `feat` / `fix` / `docs` / `refact` / `test` / `chore`，`scope` 可选（如 `docs(kb):`、`feat(inference):`）。
 - **文档纪律**：
-  - **一个开发任务一份 `docs/update/YYYYMMDD_主题.md`**，记录本次的改动与结论；同一任务后续提交追加进这份，不按提交次数新建。写法与**两条状态轴**（变更状态 / 知识库）照 [update/_TEMPLATE.md](update/_TEMPLATE.md)——「知识库」轴默认填 `待沉淀`，它是 KB 融合时的欠债清单，漏填等于这次改动不会被沉淀。
-  - **只动文档的任务不落 update 记录**（写进 KB、重组文档、改文档规范、改 docstring 措辞）：用一份文档记录另一份文档的诞生是递归，没人会读。判据是「跑起来的东西有没有变」，条文见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)。顺带改了代码行为的按代码改动处理。
-  - **`docs/kb/` 不随手改**：KB 是 update 的融合产物，只在**人主动发起融合**（`/kb-merge` skill）时才写入——日常开发把增量留在 `docs/update/` 即可，别自行同步。内容验收标准见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)。
-  - 对外 API 端点契约改动同步 `docs/api/`（该目录是端点契约真源，不走 KB 融合流程）。
+  - **一批原子提交一份 `docs/update/YYYYMMDD_主题.md`**（一批 = 能独立落地、测绿的一步）：推进一步就新建一份，只有回头改同分支上已提交的内容才追加进那份。写法与**两条状态轴**（变更状态 / 知识库，后者默认 `待沉淀`）照 [update/_TEMPLATE.md](update/_TEMPLATE.md)。
+  - **只动文档的任务不落 update 记录**，判据是「跑起来的东西有没有变」；顺带改了代码行为的按代码改动处理。条文见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)。
+  - **`docs/kb/` 不随手改**：只在人主动发起融合（`/kb-merge` skill）时写入，日常增量留在 `docs/update/`。验收标准见 [kb/KB_MAINTENANCE.md](kb/KB_MAINTENANCE.md)。
+  - 对外 API 端点契约改动同步 `docs/api/`（端点契约真源，不走 KB 融合）。
 
 ---
 
@@ -29,7 +29,7 @@
   - 端到端集成测试在 `integration_tests/`，需要真实 RTSP 流与可写数据库，不在 `pytest` 默认跑。
 - **测试数据构造单一真源**：
   - `tests/factories.py` 是构造真源——纯函数、**无 pytest 依赖**，`tests/` 直接 `from factories import make_cq` 复用，`integration_tests/` 也可复用。
-  - `tests/conftest.py` 把 factories 包成 factory-as-fixture（如 `make_cq`），需要注入式书写的用例用它，与 factories 同源、不产生第二份构造逻辑。
+  - `tests/conftest.py` 把 factories 包成 factory-as-fixture（如 `make_cq`），供需要注入式书写的用例用。
   - 契约一变（CQ 构造签名、`FrameInference` 加字段等）**只改 factories 一处**，不扫散点。
 - **I/O 边界故意集成-only**：子进程 ffmpeg、CUDA、WebSocket、真实 RTSP 这类外部 I/O 不硬写单测——把纯逻辑抽成 seam 单独测（如 URL 改写、去抖、时间轴计算），I/O 编排留给集成测试。
 - **不追覆盖率数字**：按 [kb/TESTING_MAP.md](kb/TESTING_MAP.md) 的「建议补测」补关键路径。典型：新增检测点补 Detector/Operator 单测 + YAML 加载测试；改 HLS 写入补 playlist EXTINF、在途段过滤、timeline 测试；改清理流程补结算告警归属测试。
@@ -45,7 +45,7 @@
   - client 层**只吐自有词汇的原始数据**（如按流名聚合的信号）；流名 → 展示 metric 的翻译/映射**上移到 router 装配层**，不下沉进 client。
 - **跨服务起停编排走 `RunController`**：一次 run 的 start/stop/restart、per-task 锁、拆机顺序、对象身份 fence 都归 RunController，不下沉到 client 或各 service。
 
-判断落点的经验法则：一段逻辑若需要"知道另一个服务"，八成放错了——要么它属于 client 层的共享状态，要么属于 RunController 的编排，要么该由 router 在装配层翻译。
+判断落点的经验法则：一段逻辑若需要「知道另一个服务」，八成放错了。
 
 依据 KB：[kb/SERVICE_CLIENT_STATE.md](kb/SERVICE_CLIENT_STATE.md)、[kb/SERVICE_RUN_CONTROL.md](kb/SERVICE_RUN_CONTROL.md)。
 
@@ -54,7 +54,7 @@
 ## 4. 日志规范
 
 - **格式** `[ModuleName] message`：方括号内 **PascalCase**（`[ClientManager]`、`[InferenceService]`）；Worker 用 `[Name-N]`（`[HLSWorker-0]`）。禁止 `print()` 代替 `logger`。
-- **参数惰性格式化**：用 `%` 占位符传参，**不用 f-string**（未启用的级别不会提前拼字符串）：
+- **参数惰性格式化**：用 `%` 占位符传参，**不用 f-string**：
   ```python
   logger.info("[StreamDecoder] Connected to %s | %dx%d", url, w, h)   # ✓
   logger.info(f"[StreamDecoder] Connected to {url}")                  # ✗ 提前计算
@@ -67,9 +67,7 @@
   - `CRITICAL` — 致命、无法继续：必要组件启动失败、模型文件缺失。
 - **热路径不打 DEBUG**：每秒数千次的循环（帧处理）用批量/采样日志；复杂计算的日志先守卫 `if logger.isEnabledFor(logging.DEBUG):`。
 - **分隔**：多参数用 `|`，列表项用 `,`；配置详情块仅 DEBUG，用 `===` 包裹。
-- **日志配置**（`logging_config.json`：colorlog 彩色 console + 分级 rotating 文件，经 `uvicorn --log-config` 加载）见 [kb/SERVICE_CONFIG.md](kb/SERVICE_CONFIG.md)。
-
-**提交前自检**：全部日志有 `[Module]` 前缀 / `%` 格式化非 f-string / 级别恰当 / 异常带 `exc_info=True` / 无 `print()` / 热路径无 DEBUG。
+- **日志配置**（`logging_config.json`）见 [kb/SERVICE_CONFIG.md](kb/SERVICE_CONFIG.md)。
 
 ---
 
@@ -77,5 +75,38 @@
 
 新建检测任务、Detector、Analyzer、Judge 走 `/infer-workflow` skill（含完整模板与 checklist）。两条会**静默出错**的红线单列在此：
 
-- **`class_name` 不做归一化**：直接取自模型 `result.names`，配置/代码里的匹配串须与训练类别名严格一致——写错不报错，只是永远匹配不上，表现为静默漏检。
+- **`class_name` 不做归一化**：直接取自模型 `result.names`，配置/代码里的匹配串须与训练类别名严格一致——写错不报错，静默漏检。
 - **统一检测契约是 `Detection`（单框）+ `FrameDetections`（整帧输出）**，见 [app/domain/detection.py](../app/domain/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `Detection.extra` 或 `FrameDetections.metadata`，时序统计交给 L3 Analyzer。
+
+---
+
+## 6. 重构规范
+
+**较大的重构不做破坏性一次性切换**——一把全切过去，单测和上游同时爆，二分不出是新实现的 bug 还是迁移漏改。新旧实现在迁移期并存，按下面四步走：
+
+1. **新实现独立落地**：写在新模块 / 新函数里，旧实现和旧调用点保持原样可用。
+2. **新实现先测绿**：补齐它自己的单测并全绿，再碰任何调用点。
+3. **调用点分批迁移**：每批迁完都能单独 `pytest` 跑通，再进下一批。
+4. **最后单独删旧**：旧实现的清理是独立提交，不和迁移混在一起。
+
+配套：上面每一步各自一份 update 记录（第 1 节文档纪律），不共用一篇长文。
+
+---
+
+## 7. 代码内注释 / docstring 的边界
+
+**解释性内容的家在 `docs/kb/` 与 `docs/update/`，不在代码文件开头。** 代码里只写「用这段代码，当场必须知道什么」。
+
+**留在代码里**（模块 docstring ≤ 15 行，超 30 行当成混进了 KB 内容的信号去拆）：
+
+- 一句话说清这个模块是什么，加 3–5 行调用示例。
+- **会静默出错的调用约束**：一句结论 + 一条去 KB / update 的链接（如「`-ss` 必须在 `-i` 之后，否则 exit 0 产出空壳，见 `docs/kb/DESIGN_SEGMENT_CONCAT.md` §5.3」）。
+- 非显然的不变量与前提：并发假设、调用顺序、谁负责持锁。
+
+**搬去 KB / update**：设计推导与权衡、坐标系 / 时间轴论证、落盘结构与架构图、域内分工表、历史变更记录（「XX 已于 2026-09-19 删除」「旧说法已被推翻」）、被否决的方案。
+
+**操作要点**：
+
+- **是搬家不是删除**：先确认 KB / update 里已有落点（没有就先补），再把代码里那段换成一行链接。
+- 一段论证只留一处，别把 `docs/update/` 的正文抄进 docstring。
+- 包 `__init__.py` 是 facade，写清楚导出什么、有什么硬约束即可；域的完整说明归 KB 的 `DESIGN_*.md`。

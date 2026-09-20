@@ -1,11 +1,11 @@
 """VOD 形态 m3u8 —— 不落盘，每次请求现生成，带 `EXT-X-ENDLIST`。
 
-    entries = [VodEntry(uri_of(s.ref), s.duration_s) for s in hls.list_playable_segments(...)]
+    entries = [VodEntry(uri_of(s.ref), s.duration_s) for s in hls.list_segments(...)]
     text = render_vod(entries, map_uri=uri_of_init)
 
 ## 为什么它不在 `app/storage/hls/` 域里
 
-hls 域的读侧只出**两种产出**：段容器（`SegmentRef` / `PlayableSegment`，回答"有哪些段、
+hls 域的读侧只出**两种产出**：段容器（`SegmentRef` / `Segment`，回答"有哪些段、
 在哪、能不能播、多长"）和 `Frame`（把段还原成帧）。VOD 清单两样都不是——它是**给播放器
 或 ffmpeg 消费的装配产物**，不是段的元数据。段在盘上是什么样，与"把它们拼成一份谁能消费
 的清单"是两件事：换掉落盘格式，段容器与 Frame 都还在，而这份文本会整个消失。
@@ -14,15 +14,16 @@ hls 域的读侧只出**两种产出**：段容器（`SegmentRef` / `PlayableSeg
 那条线的问题是域里留着一个只差一个字段就变成「供人塞 token 的钩子」的函数，而域对 token
 本该零认知。
 
-## 为什么收 `VodEntry` 而不收 `PlayableSegment`
+## 为什么收 `VodEntry` 而不收 `Segment`
 
-三处 VOD 构造里，`lab/clip_builder` 的 EXTINF 取的是**相邻段 ts 差（实测墙钟）**，不是
-playlist 的 EXTINF：它的 `-ss` seek 基准是墙钟 ts，而 EXTINF 是 `N/fps` 推出的恒定
-10.000 s，fps 漂移下累计 EXTINF 会偏离墙钟、导致逐段 seek 错位。
+**时长从哪来是调用方的判断**，本模块只统一骨架。收 `VodEntry` 而不是 `Segment`
+让本模块保持 stdlib only、不依赖 `app.storage`——这是它能同时服务浏览器与 ffmpeg 两类
+消费者的前提。
 
-所以**时长从哪来是调用方的判断**，本模块只能统一骨架。收 `PlayableSegment` 等于把
-"时长必须来自清单 EXTINF"钉死在签名上，`clip_builder` 就用不了——而它正是三个消费方
-之一。顺带地，收 `VodEntry` 让本模块保持 stdlib only、不依赖 `app.storage`。
+> ⚠ 这里曾写着「`lab/clip_builder` 的 EXTINF 取相邻段 ts 差而非清单 EXTINF，因为 `-ss` 的
+> seek 基准是墙钟」。**实测推翻了它**：ffmpeg 的时间轴完全来自 fragment 自己的 `tfdt` +
+> sample duration，改写清单 EXTINF 是空操作（`docs/update/20260919_VIDEO_TIMEBASE_SELECTION.md`
+> §4）。现在三个消费方**一律**传清单 EXTINF 真值，别再照旧说法把 ts 差捡回来。
 
 依赖上界：stdlib only。
 """
@@ -39,9 +40,8 @@ class VodEntry(NamedTuple):
     `uri` 由调用方给，本模块不生成也不改写——它可能是裸文件名（喂 ffmpeg，相对清单位置
     解析）、绝对路径，或 token 化的 HTTP URL。**"段 URI 长什么样"是表示层与鉴权的事**。
 
-    `duration_s` 的来源由调用方定：回放与整段导出取清单的 EXTINF（`hls.list_playable_segments`
-    给），送标裁剪取相邻段 ts 差（见模块 docstring）。**回放那两处不能用 ts 差重推**——
-    那是墙钟量，比媒体时长少一个帧间隔，断流时还会把整个停顿算进去。
+    `duration_s` 一律取清单的 EXTINF（`hls.list_segments` 给），三个消费方都是。
+    **不能用相邻段 ts 差重推**——那是墙钟量，断流时会把整个停顿算进段长。
     """
 
     uri: str
@@ -66,7 +66,7 @@ def render_vod(entries: Sequence[VodEntry], *, map_uri: str) -> str:
 
     Raises:
         ValueError: `entries` 为空。空清单的 `TARGETDURATION` 无从计算，且"一个段都没有
-            的 VOD"不是"没事发生"；"这个 step 还没有可播段"由 `hls.list_playable_segments`
+            的 VOD"不是"没事发生"；"这个 step 还没有可播段"由 `hls.list_segments`
             返回空列表来表达，怎么映射成错误是调用方的判断。
     """
     if not entries:

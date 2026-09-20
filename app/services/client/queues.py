@@ -386,19 +386,38 @@ class ClientQueues:
     def get_ca_processed_length(self) -> int:
         return len(self.ca_processed)
 
-    def drain_ca_raw(self) -> List[Frame]:
-        """原子排空 ca_raw 队列（线程安全，供 flush 使用）"""
-        with self._raw_lock:
-            frames = list(self.ca_raw)
-            self.ca_raw.clear()
-            return frames
+    def drain_ca_raw(self, until_ts: Optional[float] = None) -> List[Frame]:
+        """原子排空 ca_raw 队列（线程安全，供 flush 使用）。
 
-    def drain_ca_processed(self) -> List[Frame]:
-        """原子排空 ca_processed 队列（线程安全，供 flush 使用）"""
+        Args:
+            until_ts: 时间戳栅栏（epoch 秒）。`None` = 全排空（拆除期语义，队列不会再进新帧）；
+                给值则只弹出队首那段 `timestamp <= until_ts` 的连续前缀，其余留在队列里。
+
+        栅栏是给**断流 flush** 用的：重连期队列仍在进新帧，全排空会把重连后的帧一起切进残段，
+        该段又横跨 gap（`effective_fps` 由首末帧跨度反推，被 gap 拉低 = 慢放），正是 flush
+        要消灭的东西。栅栏取"断流前最后一帧的 ts"，与调用时机、与此前拉走了多少整段都无关。
+        """
+        with self._raw_lock:
+            if until_ts is None:
+                frames = list(self.ca_raw)
+                self.ca_raw.clear()
+                return frames
+            taken: List[Frame] = []
+            while self.ca_raw and self.ca_raw[0].timestamp <= until_ts:
+                taken.append(self.ca_raw.popleft())
+            return taken
+
+    def drain_ca_processed(self, until_ts: Optional[float] = None) -> List[Frame]:
+        """原子排空 ca_processed 队列（线程安全，供 flush 使用）。语义同 `drain_ca_raw`。"""
         with self._viz_lock:
-            frames = list(self.ca_processed)
-            self.ca_processed.clear()
-            return frames
+            if until_ts is None:
+                frames = list(self.ca_processed)
+                self.ca_processed.clear()
+                return frames
+            taken: List[Frame] = []
+            while self.ca_processed and self.ca_processed[0].timestamp <= until_ts:
+                taken.append(self.ca_processed.popleft())
+            return taken
 
     def take_raw_segment(self) -> Optional[List[Frame]]:
         """缓冲攒满一整段(ca_segment_len 帧)则原子弹出，否则 None。

@@ -2,17 +2,17 @@
 存储 TTL 清理 Worker
 
 职责：
-- 后台 daemon 线程，定期扫描 database/{task_id}/{step_id}/metadata.json
-- 删除 updated_at 超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度）
+- 后台 daemon 线程，定期扫描 database/{task_id}/{step_id}/ 目录
+- 删除**目录自身 mtime** 超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度）
 - 顺手清空被全部 step 抽走后留下的空 task_id 目录
-- 活跃 step 每 ~10s 更新一次 updated_at，不会被误删
+
+判据为什么是 step 目录自身的 mtime，见 `_scan_and_clean` 的 docstring。
 """
 
-import json
 import logging
 import shutil
 import threading
-from datetime import datetime, timedelta
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -62,29 +62,50 @@ class StorageCleanupWorker:
     def _scan_and_clean(self) -> int:
         """扫描并删除过期 step 目录 + 清空 task_id 父目录，返回删除的 step 数量。
 
-        判定依据：metadata.json 中 updated_at 超过 cleanup_days 天。
-        活跃 step 每 ~10s 更新一次 updated_at，永远不会被误删。
+        **判据 = `{task}/{step}/` 目录自身的 `st_mtime`，不下钻域子目录**，超过
+        `cleanup_days` 天即删。
+
+        ## 为什么不再读 `metadata.json` 的 `updated_at`
+
+        产物已按域隔离（`{step}/hls/` / `features/` / `lab/`），`metadata.json` 随之落进
+        `{step}/hls/`。原来的 `glob("*/*/metadata.json")` 匹配不到它，表现是**新数据永不
+        回收、老数据照常回收**——单向漏盘且无任何日志。改用目录 mtime 后对平铺与分域两种
+        布局一视同仁，同时消解「只有 features.jsonl、没有 HLS 段的 step 永不回收」那类泄漏。
+
+        ## 为什么 `{step}` 的 mtime 是创建时间的好代理
+
+        `{step}/` 的直接子项只有 `hls/` / `features/` / `lab/` 三个域目录，目录 mtime 只在
+        **增删直接子项**时变。段落盘动的是 `hls/` 的 mtime，`{step}/` 纹丝不动。
+        （Linux + Python 3.11 拿不到真正的创建时间：`st_birthtime` 不存在，`st_ctime` 两平台
+        语义不同，都不能当创建时间用。）
+
+        ## ⚠ 两条已知偏差（是设计后果，不是漂移，别当 bug 查）
+
+        1. **`{step}/lab/` 是延迟创建的**：某个 step 第一次被导出送标时才建这个子目录，那一刻
+           `{step}/` 的 mtime 被刷新一次，该 step 的 TTL 计时重置。算白捡的续命——正在被反复
+           导出的 step 天然不被回收。
+        2. **活跃 step 不再免疫**：旧判据下 `updated_at` 每 ~10s 刷新一次，跑着的 step 永远删
+           不掉；换判据后，一个连续跑满 `cleanup_days`（当前 15 天）的 step 会被删掉自己正在
+           写的录像。当前任务超时 30 分钟、触发不到，但**把 `cleanup_days` 调小或引入长跑任务
+           时会真的发生**。
+
+        ## ⚠ 不要改成复用 `app.storage.tasks.list_task_ids(order="mtime")`
+
+        那个口径**下钻域子目录取最大值**，答的是「最近活动」不是「创建」——每写一段就续一次
+        命，等于永不回收。两个口径分开是刻意的，`tasks.py` 的 docstring 也写着这一点。
         """
-        cutoff = datetime.now() - timedelta(days=self.cleanup_days)
+        cutoff = time.time() - self.cleanup_days * 86400
         deleted = 0
 
-        for metadata_path in self.db_dir.glob("*/*/metadata.json"):
-            step_dir = metadata_path.parent
+        for step_dir in self._iter_step_dirs():
             try:
-                with metadata_path.open("r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except (IOError, json.JSONDecodeError) as e:
-                logger.debug("[StorageCleanup] Skip unreadable metadata %s: %s", metadata_path, e)
+                mtime = step_dir.stat().st_mtime
+            except OSError as e:
+                # 扫描期间被删 / 不可读：等同于没扫到
+                logger.debug("[StorageCleanup] Skip unreadable step dir %s: %s", step_dir, e)
                 continue
 
-            raw = meta.get("updated_at", "")
-            try:
-                updated_at = datetime.fromisoformat(str(raw))
-            except (ValueError, TypeError):
-                logger.debug("[StorageCleanup] Skip invalid updated_at in %s", metadata_path)
-                continue
-
-            if updated_at >= cutoff:
+            if mtime >= cutoff:
                 continue
 
             try:
@@ -96,7 +117,7 @@ class StorageCleanupWorker:
 
         # 顺手清理被掏空的 task_id 父目录（仅删空目录，rmdir 对非空目录会安全失败）
         empty_tasks = 0
-        for task_dir in self.db_dir.iterdir():
+        for task_dir in self._iterdir(self.db_dir):
             if not task_dir.is_dir():
                 continue
             try:
@@ -118,3 +139,29 @@ class StorageCleanupWorker:
             )
 
         return deleted
+
+    def _iter_step_dirs(self):
+        """`{db_dir}/{task_id}/{step_id}/` 全体，**两级都只认十进制数字目录名**。
+
+        数字过滤不是洁癖：存储根下还住着 `.lab_exports/`（lab 导出临时件，自带 30 分钟孤儿
+        扫描）。旧判据靠「有没有 `metadata.json`」把它天然挡在外面，换成目录 mtime 后必须由
+        这里显式挡——否则一个 15 天没动过的导出临时目录会被当成过期 step 删掉。
+
+        **不复用 `app.storage.tasks.list_step_ids`**：本 worker 扫的是注入的 `self.db_dir`，
+        而 `tasks`/`_root` 的路径一律从 `settings` 解析——两者在生产同源，但让删除动作认一个
+        它自己没扫过的根，是不必要的错位风险。
+        """
+        for task_dir in self._iterdir(self.db_dir):
+            if not task_dir.is_dir() or not task_dir.name.isdigit():
+                continue
+            for step_dir in self._iterdir(task_dir):
+                if step_dir.is_dir() and step_dir.name.isdigit():
+                    yield step_dir
+
+    @staticmethod
+    def _iterdir(directory: Path):
+        """遍历目录；不存在 / 不可读时产出空序列。"""
+        try:
+            yield from directory.iterdir()
+        except OSError as e:
+            logger.debug("[StorageCleanup] Skip unreadable dir %s: %s", directory, e)

@@ -8,21 +8,15 @@
    ——"段 URI 长什么样"是调用方的判断，本模块不生成也不改写。
 2. **硬格式约束**：ENDLIST 必在（缺了 ffmpeg 当直播流只读 live edge）、`map_uri` 必填
    （漏传该是 TypeError，不是运行时才炸）、`TARGETDURATION` 用 ceil（round 会违反 RFC 8216）。
-3. **与现役 `StepExporter._build_vod_text` 逐字节相等** —— 阶段 2 迁移是零行为变更的唯一
-   证据。这条随 `render_vod` 从 `tests/test_storage_hls.py` 一起搬过来，不能在搬家中丢。
+3. **与迁移前 `StepExporter._build_vod_text` 的输出逐字节相等** —— 读侧调用点迁移是零行为
+   变更的唯一证据。那份实现已随迁移删除，基线因此冻结成字面量（见文末那条用例）。
 """
-
-from pathlib import Path
 
 import pytest
 
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls
 from app.storage.hls import _layout, _m3u8
-
-
-def _hls_dir(root: Path, task_id=1, step_id=2) -> Path:
-    return root / str(task_id) / str(step_id) / "hls"
 
 
 def _seed_segments(task_id, step_id, track, ts_list, duration_s=1.0):
@@ -52,7 +46,7 @@ def _bare_entries(task_id, step_id, track):
     """
     return [
         VodEntry(hls.segment_name(s.ref), s.duration_s)
-        for s in hls.list_playable_segments(task_id, step_id, track)
+        for s in hls.list_segments(task_id, step_id, track)
     ]
 
 
@@ -121,34 +115,36 @@ class TestRenderVod:
 
 
 class TestVodParityWithStepExporter:
-    def test_byte_identical_to_current_implementation(self, tmp_storage):
-        """与现役 `StepExporter._build_vod_text` 逐字节比对。
+    # 迁移前 `StepExporter._build_vod_text` 对下面这组段的输出，逐字节冻结。
+    # 那份实现已随读侧调用点迁移删除（`step_exporter` 改调 `render_vod`），故基线从
+    # "另一份实现"换成字面量——比对的对象没变，只是不再有第二份代码去算它。
+    _LEGACY_TEXT = (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:7\n"
+        "#EXT-X-PLAYLIST-TYPE:VOD\n"
+        "#EXT-X-TARGETDURATION:1\n"
+        "#EXT-X-MEDIA-SEQUENCE:0\n"
+        '#EXT-X-MAP:URI="raw_init.mp4"\n'
+        "#EXTINF:1.000,\n"
+        "raw_segment_1700000000.mp4\n"
+        "#EXTINF:1.000,\n"
+        "raw_segment_1800000000.mp4\n"
+        "#EXTINF:1.000,\n"
+        "raw_segment_1900000000.mp4\n"
+        "#EXT-X-ENDLIST\n"
+    )
 
-        它是三处 VOD 构造里唯一可直接调用的（另两处要 `Request` 或内联在 `_run_ffmpeg`
-        里）。完全相等意味着阶段 2 迁移 step_exporter 是**零行为变更**。
+    def test_byte_identical_to_pre_migration_output(self, tmp_storage):
+        """整条装配链（落盘段 → `list_segments` → `VodEntry` → 清单文本）与
+        迁移前 `StepExporter._build_vod_text` 的输出逐字节相等。
+
+        这是"迁 step_exporter 是零行为变更"的证据，也是往后骨架不许漂移的钉子。
         """
-        from app.services.lab.step_exporter import StepExporter
-        from app.services.traceback.segment_finder import SegmentRef as LegacyRef
-
         _seed_segments(1, 2, "raw", [1_700_000_000, 1_800_000_000, 1_900_000_000])
-
-        durations = _m3u8.durations(hls.playlist_path(1, 2, "raw"))
-        legacy_segs = [
-            LegacyRef(
-                task_id=1,
-                step_id=2,
-                track="raw",
-                filename=name,
-                ts_us=int(name.split("_")[-1].removesuffix(".mp4")),
-                path=_hls_dir(tmp_storage) / name,
-            )
-            for name in sorted(durations)
-        ]
-        legacy_text = StepExporter._build_vod_text(legacy_segs, durations, "raw")
 
         assert (
             render_vod(_bare_entries(1, 2, "raw"), map_uri=hls.init_name("raw"))
-            == legacy_text
+            == self._LEGACY_TEXT
         )
 
     def test_no_playable_segments_yields_empty_entries(self, tmp_storage):
