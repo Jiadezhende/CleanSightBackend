@@ -871,16 +871,16 @@ class TestDelete:
         assert not _hls_dir(tmp_storage).exists()
 
     def test_does_not_touch_sibling_domains(self, tmp_storage, fake_pipeline):
-        """只删本域 —— 同 step 的 features/ 一个字节都不碰，这正是域隔离换来的东西。"""
+        """只删本域 —— 同 step 的 inference/ 一个字节都不碰，这正是域隔离换来的东西。"""
         hls.insert_segment(1, 2, "raw", _frames())
-        features = tmp_storage / "1" / "2" / "features"
-        features.mkdir(parents=True)
-        (features / "features.jsonl").write_text("{}\n", encoding="utf-8")
+        neighbor = tmp_storage / "1" / "2" / "inference"
+        neighbor.mkdir(parents=True)
+        (neighbor / "features.jsonl").write_text("{}\n", encoding="utf-8")
 
         hls.delete(1, 2)
 
-        assert (features / "features.jsonl").read_text(encoding="utf-8") == "{}\n"
-        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["features"]
+        assert (neighbor / "features.jsonl").read_text(encoding="utf-8") == "{}\n"
+        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
 
     def test_does_not_touch_other_steps(self, tmp_storage, fake_pipeline):
         hls.insert_segment(1, 2, "raw", _frames())

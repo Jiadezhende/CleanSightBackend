@@ -22,7 +22,7 @@ docstring 里：`EventFact` / `SegmentFact` 住在 `app.services.inference.types
 `app/storage/` 的依赖白名单不许 import 服务层，货币只能退成 `dict`，与 features 侧收发
 `FrameFeature` 不对称。于是一份产物的路径知识劈成两处。
 
-这是 [STORAGE_REFACTOR_MAP §6.3](../STORAGE_REFACTOR_MAP.md) 待拍板 #2，本批定案：**升格**。
+这是 storage 分层重构里一直挂着的待拍板项（facts 的货币），本批定案：**升格**。
 另有两条在定模型时发现的缺陷，一并订正（见下表 #2 #3）。
 
 | 编号 | 问题 | 风险 |

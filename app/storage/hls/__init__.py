@@ -44,7 +44,7 @@ ffmpeg 静默截短。收口后**「可播」不再是限定词**，故容器叫
       .stage_{track}_{ts_us}/       写入事务的暂存目录，commit 后即删
 
 两条轨（`raw` / `processed`）**各自独立**：各有各的段、init 与清单，互不引用。
-detection 不在本域落盘——它由 `features` 域按帧 ts 单源写入。
+detection 不在本域落盘——它由 `inference` 域按帧 ts 单源写入。
 
 ## 三条时间线，一个 `eff_fps`
 
