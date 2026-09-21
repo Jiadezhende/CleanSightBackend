@@ -1,24 +1,33 @@
-"""录制服务 —— 把 CQ 里攒好的帧变成盘上一个可播的 HLS 段。
+"""录制服务 —— 落盘编排：把 CQ 里攒好的东西变成盘上的产物（HLS 段 + 推理特征）。
 
     start() / stop()                          生命周期
     collect_from(cq)                          取走该 CQ 此刻该落盘的一切（sweeper 每 tick 调）
-    submit_segment(cq, track, frames) -> bool 打包 + 入队
+    submit_segment(cq, track, frames) -> bool 打包 + 入 hls 队列
+    submit_features(cq, features) -> bool     打包 + 入 features 队列
     flush_residual(cq, until_ts=None)         把不足一段的残帧切完落盘（拆除期 RunController 调）
     request_residual_flush(cq, fence_ts)      断流时登记一次残帧 flush（不就地执行）
-    forget_task(task_id) -> bool              代次表回收
+    forget_task(task_id) -> bool              代次表回收（两条队列各排一个）
 
-落盘格式全在 `app.storage.hls`；本模块只管何时拉、按什么顺序写、算哪一代的产物。
+落盘格式全在 `app.storage.hls` / `app.storage.inference`；本模块只管何时拉、按什么顺序写、
+算哪一代的产物。
 
-**三条不变式，破了都不报错、只是数据静默损坏**（推导见
+**两条队列，不是一条**：段写里有 ffmpeg 转码（单段 0.26–3 s），features 排在它后面会跟着
+一起被背压丢，而丢一次就是十几帧特征、静默。两条队列互不阻塞，代价是下面第 4 条。
+
+**四条不变式，破了都不报错、只是数据静默损坏**（前三条的推导见
 `docs/update/20260919_VIDEO_TIMEBASE_SELECTION.md` §5.1）：
 
-1. **队列不能加 worker**：tfdt 会碰撞、旧段串进新 run。配置里因此没有 `workers`。
+1. **队列不能加 worker**（两条都是）：tfdt 会碰撞、旧段串进新 run。配置里因此没有 `workers`。
 2. **运行期 CQ 的 drain 者只能有 sweeper 一个**，入口是 `collect_from`；断流走
    `request_residual_flush` 登记、由 sweeper 那一轮执行，不要在别的线程直接 drain。
 3. **`_pending_flush` 有三个线程碰**（health_monitor 写 / sweeper 取 / 队列线程回收）。
    免锁靠 `dict` 的 `__setitem__`、`pop`、`list()` 各自原子——**逐元素迭代不在此列**。
+   它只服务 HLS：features 没有"段横跨断流 gap"这回事，故不需要栅栏。
+4. **两张代次表各自只被自己那条队列的线程碰**：`_claimed_hls` 归 hls 队列，`_claimed_features`
+   归 features 队列，谁也不读对方。这是全服务零锁的前提——合并成一张表就必须加锁。
 
-依赖：`app.storage.hls` + `app.utils.task_queue` + `client_manager`，不依赖别的 service。
+依赖：`app.storage.hls` / `app.storage.inference` + `app.utils.task_queue` + `client_manager`，
+不依赖别的 service。
 """
 
 from __future__ import annotations
@@ -26,8 +35,9 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
+from app.domain.detection import FrameFeature
 from app.domain.frame import Frame
-from app.storage import hls
+from app.storage import hls, inference
 from app.utils.task_queue import SerialTaskQueue
 
 from ._sweeper import SegmentSweeper
@@ -36,14 +46,15 @@ from .config import RecordingConfig, get_recording_config
 logger = logging.getLogger(__name__)
 
 # 队列名（出现在线程名与所有队列日志里）。
-_QUEUE_NAME = "recording"
+_HLS_QUEUE_NAME = "recording"
+_FEATURE_QUEUE_NAME = "recording-features"
 
 
 class _SegmentJob(NamedTuple):
     """一个待落盘的段。**打包形状，不是对外契约**——外面交 `cq` + 帧，拿不到也用不着它。
 
     `cq` 是提交那一刻的对象引用，只做两件事：与**当时**注册的 CQ 判等、以及被记进
-    `_claimed_by`。不调用它的任何方法，故不要求它还活着（`close()` 之后照样能判等）。
+    `_claimed_hls`。不调用它的任何方法，故不要求它还活着（`close()` 之后照样能判等）。
     """
 
     task_id: int
@@ -57,8 +68,25 @@ class _SegmentJob(NamedTuple):
         return f"seg:{self.task_id}/{self.step_id}/{self.track}@{hls.ts_to_us(self.frames[0].timestamp)}"
 
 
+class _FeatureJob(NamedTuple):
+    """一批待落盘的帧特征。**打包形状，不是对外契约**（同 `_SegmentJob`）。
+
+    没有 track，也没有"攒满一段"的概念——features 每帧一行、行间无依赖，sweeper 每 tick
+    把缓冲里有多少交多少。
+    """
+
+    task_id: int
+    step_id: int
+    features: List[FrameFeature]
+    cq: object
+
+    @property
+    def label(self) -> str:
+        return f"feat:{self.task_id}/{self.step_id}×{len(self.features)}"
+
+
 class RecordingService:
-    """HLS 录制的编排者：拉段 → 打包 → 按序落盘。"""
+    """落盘编排者：拉产物 → 打包 → 按序落盘（HLS 段一条队列，推理特征一条）。"""
 
     def __init__(
         self,
@@ -84,19 +112,26 @@ class RecordingService:
 
         # 落盘队列。**在 start() 里建**：SerialTaskQueue 是一次性的（stop() 之后不能再
         # start()），放构造函数会让单例在 start/stop 两轮之后炸。
-        self._queue: Optional[SerialTaskQueue] = None
+        #
+        # **两条而不是一条**：段写里有 ffmpeg 转码（单段 0.26–3 s），features 排在它后面会
+        # 跟着一起被背压丢。两条各自单消费线程，"提交序 = 执行序"在各自内部成立。
+        self._hls_queue: Optional[SerialTaskQueue] = None
+        self._feature_queue: Optional[SerialTaskQueue] = None
         self._sweeper: Optional[SegmentSweeper] = None
 
-        # (task_id, step_id) → 已经认领过这个目录的那个 cq。
-        # 它回答的是「本代次在这个 step 上写过第一段了吗」，由此决定要不要先清掉上一代。
+        # (task_id, step_id) → 已经认领过这个域目录的那个 cq。**一域一张表。**
+        # 它回答的是「本代次在这个 step 的这个域里写过第一份产物了吗」，由此决定要不要
+        # 先清掉上一代。
         #
         # **认领是一次性的，落盘是连续的**：只在「我还注册着 + 这个 step 我还没认领过」
-        # 时写入一次（见 `_write` 的 ②），此后同代次的段照写不更新；拆除后迟到的残段
-        # 也照写不更新。故它不是「最后写这个目录的是谁」。
+        # 时写入一次（见 `_write` / `_write_features` 的 ②），此后同代次的产物照写不更新；
+        # 拆除后迟到的残段也照写不更新。故它不是「最后写这个目录的是谁」。
         #
-        # **无锁，因为只有队列那一个线程碰它**：`_write` 读写它，`_forget` 清它，两者都
-        # 跑在队列上。控制面调的是 `forget_task`，那只是往队列里排一个任务。
-        self._claimed_by: Dict[Tuple[int, int], object] = {}
+        # **无锁，因为每张表只有自己那条队列的线程碰它**（不变式 4）：`_write` / `_forget_hls`
+        # 跑在 hls 队列上，`_write_features` / `_forget_features` 跑在 features 队列上，
+        # 谁也不读对方的表。控制面调的是 `forget_task`，那只是往两条队列各排一个任务。
+        self._claimed_hls: Dict[Tuple[int, int], object] = {}
+        self._claimed_features: Dict[Tuple[int, int], object] = {}
 
         # (task_id, step_id) → (cq, fence_ts)：断流时挂起的「把这一刻之前的残帧切出来」请求。
         #
@@ -115,9 +150,13 @@ class RecordingService:
     # ── 生命周期 ────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """起队列与 sweeper。"""
-        self._queue = SerialTaskQueue(_QUEUE_NAME, maxsize=self.config.queue_size)
-        self._queue.start()
+        """起两条队列与 sweeper。"""
+        self._hls_queue = SerialTaskQueue(_HLS_QUEUE_NAME, maxsize=self.config.queue_size)
+        self._hls_queue.start()
+        self._feature_queue = SerialTaskQueue(
+            _FEATURE_QUEUE_NAME, maxsize=self.config.queue_size
+        )
+        self._feature_queue.start()
         self._sweeper = SegmentSweeper(
             clients=self._clients,
             service=self,
@@ -127,17 +166,21 @@ class RecordingService:
         logger.info("[recording] 已启动")
 
     def stop(self, timeout: float = 10.0) -> None:
-        """停 sweeper 与队列。
+        """停 sweeper 与两条队列。
 
-        **顺序不能反**：先停 sweeper 不再拉新段，再停队列让它把已入队的排空。反过来
-        会在队列停机后继续拉段，那些段提交被拒、帧已经从 CQ 弹出去了 —— 真丢。
+        **顺序不能反**：先停 sweeper 不再拉新产物，再停队列让它们把已入队的排空。反过来
+        会在队列停机后继续拉，那些产物提交被拒、数据已经从 CQ 弹出去了 —— 真丢。
+        两条队列之间没有顺序要求（写的是不同域的不同文件）。
         """
         if self._sweeper is not None:
             self._sweeper.stop(timeout=5.0)
             self._sweeper = None
-        if self._queue is not None:
-            self._queue.stop(timeout=timeout)
-            self._queue = None
+        if self._hls_queue is not None:
+            self._hls_queue.stop(timeout=timeout)
+            self._hls_queue = None
+        if self._feature_queue is not None:
+            self._feature_queue.stop(timeout=timeout)
+            self._feature_queue = None
         logger.info("[recording] 已停止")
 
     # ── 对外 ────────────────────────────────────────────────────────────────────
@@ -157,7 +200,7 @@ class RecordingService:
         入队成功不等于写成功：真正的落盘在队列线程上异步发生，且可能被代次校验丢弃
         （见 `_write`）。要结果的调用方说明它本就不该异步。
         """
-        if self._queue is None:
+        if self._hls_queue is None:
             logger.warning("[recording] 队列未启动，丢弃段: track=%s", track)
             return False
 
@@ -182,15 +225,58 @@ class RecordingService:
             frames=list(frames),
             cq=cq,
         )
-        return self._queue.submit(lambda: self._write(job), label=job.label)
+        return self._hls_queue.submit(lambda: self._write(job), label=job.label)
+
+    def submit_features(self, cq, features: Sequence[FrameFeature]) -> bool:
+        """把一批帧特征打包成落盘任务交给 features 队列。
+
+        Args:
+            cq: 这批特征属于哪一次 run（代次身份 + task_id / step_id 全取自它，同
+                `submit_segment`）。
+            features: 帧级 `FrameFeature`，按时间升序（= 写回顺序）。
+
+        Returns:
+            是否入队成功。False 意味着这批不会被写（队列满、队列还没起、或入参不合法）。
+
+        入队成功不等于写成功：真正的落盘在队列线程上异步发生，且可能被代次校验丢弃
+        （见 `_write_features`）。
+        """
+        if self._feature_queue is None:
+            logger.warning("[recording] features 队列未启动，丢弃 %d 条特征", len(features))
+            return False
+
+        task_id = cq.task_id
+        step_id = cq.step_id
+        if task_id is None or step_id is None:
+            # 同 submit_segment：裸建 / 未绑定 step 的 CQ 定位不到落盘分区，不抛。
+            logger.warning(
+                "[recording] cq 缺 task_id/step_id，丢弃 %d 条特征: task_id=%s step_id=%s",
+                len(features), task_id, step_id,
+            )
+            return False
+        if not features:
+            # 空批在 storage 层是 no-op，但排一个什么都不干的任务只会占队列。
+            return False
+
+        job = _FeatureJob(
+            task_id=task_id,
+            step_id=step_id,
+            features=list(features),
+            cq=cq,
+        )
+        return self._feature_queue.submit(
+            lambda: self._write_features(job), label=job.label
+        )
 
     def flush_residual(self, cq, until_ts: Optional[float] = None) -> None:
-        """落盘 CQ 残余帧：drain raw/processed → 按 `ca_segment_len` 切段 → 逐段入队。
+        """落盘 CQ 残余产物：drain raw/processed 切段入队，再把剩下的 features 一并交出。
 
         Args:
             cq: 要收尾的 CQ。
             until_ts: 时间戳栅栏。`None`（拆除期）= 全排空；给值（断流期）= 只切这一刻之前
                 的帧，重连后的新帧留在队列里等 sweeper 照常拉整段。
+                **栅栏只作用于段**：features 无论哪条路径都是全排空，它没有"横跨 gap"的问题
+                （见模块不变式 3）。
 
         拆除期须在 `cq.close()` 释放帧之前调（RunController 保证）。切段口径与 sweeper 一致，
         差别只是它拉的是"攒满的整段"、这里拉的是"剩下不足一段的那点"。
@@ -215,16 +301,21 @@ class RecordingService:
             for i in range(0, len(frames), seg_len):
                 self.submit_segment(cq, track, frames[i : i + seg_len])
 
+        self.submit_features(cq, cq.drain_ca_features())
+
     def collect_from(self, cq) -> None:
         """把这个 CQ 此刻该落盘的东西全部取走并入队。**由 sweeper 线程周期调用。**
 
-        这是运行期取帧的唯一入口，三件事的顺序在这里定死：
+        这是运行期取产物的唯一入口，四件事的顺序在这里定死：
 
-            ① 拉 raw 整段      ② 拉 processed 整段      ③ 断流残帧（如果有挂起请求）
+            ① 拉 raw 整段   ② 拉 processed 整段   ③ 断流残帧（如果有挂起请求）   ④ 拉 features
 
         **③ 必须在 ①② 之后**：残段的帧 ts 晚于本轮所有整段，反过来提交会让清单 ts 逆序。
         入队序即执行序，而每段的 `tfdt` 是执行时读到的累计 EXTINF——顺序一乱，后写的段就在
         媒体轴上盖掉先写的，不报错，只是画面丢一截。
+
+        **④ 与 ①②③ 之间没有顺序约束**：features 走另一条队列、写另一个域的另一个文件，
+        与段的媒体轴无关。放最后只是因为它最不紧急。
 
         **这套顺序属于本服务，不属于定时器**：`_sweeper` 只负责"每隔 1 秒对每个活跃 CQ 调
         一次本方法"，它不必知道挂起请求是什么、也不必知道上面那条不变式。
@@ -245,6 +336,9 @@ class RecordingService:
         fence_ts = self._take_pending_flush(cq)
         if fence_ts is not None:
             self.flush_residual(cq, until_ts=fence_ts)
+            return  # flush_residual 末尾已经把 features 一并交出，别再 drain 一次空的
+
+        self.submit_features(cq, cq.drain_ca_features())
 
     def request_residual_flush(self, cq, fence_ts: float) -> None:
         """请求把 `fence_ts` 之前的残帧单独切成段（断流时由 health_monitor 调）。
@@ -300,40 +394,62 @@ class RecordingService:
         return fence_ts
 
     def forget_task(self, task_id: int) -> bool:
-        """回收该 task 名下所有 step 的代次记录（任务拆除后调用），返回是否排进队列。
+        """回收该 task 名下所有 step 的代次记录（任务拆除后调用），返回是否**两条队列都**排上。
 
-        不回收则 `_claimed_by` 随 `(task_id, step_id)` 单调增长——长跑内存慢泄漏（论证同原
+        不回收则两张代次表随 `(task_id, step_id)` 单调增长——长跑内存慢泄漏（论证同原
         `hls_strategy.release_dir_locks`）。
 
         **走队列而不是当场清**，两个收益：
 
-        1. **`_claimed_by` 从此只被队列那一个线程碰**，于是不需要任何锁——这是本服务
-           「全系统零锁」能成立的最后一块（见模块 docstring）。
-        2. **顺序对**：FIFO 保证它排在这一代所有段之后，记录活到最后一段写完才消失，
+        1. **每张表只被自己那条队列的线程碰**，于是不需要任何锁——这是本服务「全系统零锁」
+           能成立的最后一块（模块 docstring 的不变式 4）。故必须**各排各的**：一条队列清不了
+           另一条的表。
+        2. **顺序对**：FIFO 保证它排在这一代所有产物之后，记录活到最后一份写完才消失，
            而不是在残段还没落盘时就被抹掉。
 
         排不进去（队列满或已停机）只是漏一条记录：它是个 payload 已释放的小壳，且下一代
         在这个 step 首写时会照常认领覆盖它。故用默认 timeout、不降级同步执行——这跟
         `SerialTaskQueue` 文档里「purge 这类不许丢的任务要传大 timeout」正好相反。
         """
-        if self._queue is None:
-            return False
-        submitted = self._queue.submit(
-            lambda: self._forget(task_id), label=f"forget:{task_id}"
-        )
+        submitted = True
+        if self._hls_queue is not None:
+            submitted &= self._hls_queue.submit(
+                lambda: self._forget_hls(task_id), label=f"forget:{task_id}"
+            )
+        else:
+            submitted = False
+        if self._feature_queue is not None:
+            submitted &= self._feature_queue.submit(
+                lambda: self._forget_features(task_id), label=f"forget-feat:{task_id}"
+            )
+        else:
+            submitted = False
         if not submitted:
             logger.warning("[recording] 代次记录未能排进队列，漏一条: task_id=%s", task_id)
         return submitted
 
-    def _forget(self, task_id: int) -> None:
-        """在队列线程上清掉该 task 的代次记录。
+    def _forget_features(self, task_id: int) -> None:
+        """在 features 队列线程上清掉该 task 的 features 代次记录。
+
+        比 `_forget_hls` 短一截：features 侧没有挂起的 flush 请求要回收（不变式 3）。
+        """
+        stale = [key for key in self._claimed_features if key[0] == task_id]
+        for key in stale:
+            del self._claimed_features[key]
+        if stale:
+            logger.debug(
+                "[recording] features 代次记录已回收: task_id=%s 条数=%d", task_id, len(stale)
+            )
+
+    def _forget_hls(self, task_id: int) -> None:
+        """在 hls 队列线程上清掉该 task 的段代次记录与挂起的 flush 请求。
 
         **清掉在途任务的记录是安全的**：之后再执行的旧段会走「这个 CQ 已不在注册表里」
         那一档，只追加、不删目录（见 `_write` 的 ②）。真正的新一代会自己重新认领。
         """
         # 挂起的 flush 请求也要回收（否则它连同 cq 引用一直留着），但**必须核对身份**。
         #
-        # `_claimed_by` 可以无差别清，因为它自愈——下一代首写时会重新认领。挂起请求不自愈：
+        # `_claimed_hls` 可以无差别清，因为它自愈——下一代首写时会重新认领。挂起请求不自愈：
         # 它是一次性的，清掉就永远不会再登记。而本方法是**异步**执行的（`forget_task` 只是
         # 往队列里排任务，前面可能还堆着几秒的编码/转码），这期间同一个 task 完全可能已经
         # 起了新一代、并为它登记了同键的请求。无差别清就会把新一代的请求一起吞掉，表现是
@@ -348,11 +464,11 @@ class RecordingService:
             if entry is not None and entry[0] is not current:
                 self._pending_flush.pop(key, None)
 
-        stale = [key for key in self._claimed_by if key[0] == task_id]
+        stale = [key for key in self._claimed_hls if key[0] == task_id]
         for key in stale:
-            del self._claimed_by[key]
+            del self._claimed_hls[key]
         if stale:
-            logger.debug("[recording] 代次记录已回收: task_id=%s 条数=%d", task_id, len(stale))
+            logger.debug("[recording] 段代次记录已回收: task_id=%s 条数=%d", task_id, len(stale))
 
     # ── 队列任务体 ─────────────────────────────────────────────────────────────
 
@@ -394,8 +510,33 @@ class RecordingService:
         # 表里不可能登记着比自己更新的一代：队列是 FIFO 且只有一个消费线程，新一代的第一
         # 次提交必然晚于旧一代的所有提交。**这就是队列不能加 worker 的原因。**
         key = (job.task_id, job.step_id)
-        if current is job.cq and self._claimed_by.get(key) is not job.cq:
+        if current is job.cq and self._claimed_hls.get(key) is not job.cq:
             hls.delete(job.task_id, job.step_id)
-            self._claimed_by[key] = job.cq
+            self._claimed_hls[key] = job.cq
 
         hls.insert_segment(job.task_id, job.step_id, job.track, job.frames)
+
+    def _write_features(self, job: _FeatureJob) -> None:
+        """在 features 队列线程上落一批特征：代次校验 → 本代次首写自清 → 追加。
+
+        与 `_write` 逐条同构（两个 ① ② 的理由原样成立，不重复），三处不同：
+
+        - 清的是 `{step}/inference/`（`inference.delete`），HLS 那个域一个字节不碰。**注意它
+          连 `facts.jsonl` 一起带走**——新一代的特征序列变了，上一代对它的离线分析结果就是
+          脏数据，这是有意的。
+        - 用的是 `_claimed_features` 表，不是 `_claimed_hls`（不变式 4）。
+        - **失败不重试**的理由不同：`append_features` 是纯追加，重试会写出重复帧；而能让它
+          抛的（盘满、权限）都不是瞬时故障。丢一批 ≈ 丢一个 sweep tick 的特征。
+        """
+        current = self._clients.get(job.task_id)
+
+        if current is not None and current is not job.cq and current.step_id == job.step_id:
+            logger.debug("[recording] 换代，丢弃上一代的特征: %s", job.label)
+            return
+
+        key = (job.task_id, job.step_id)
+        if current is job.cq and self._claimed_features.get(key) is not job.cq:
+            inference.delete(job.task_id, job.step_id)
+            self._claimed_features[key] = job.cq
+
+        inference.append_features(job.task_id, job.step_id, job.features)

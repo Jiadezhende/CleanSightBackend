@@ -55,6 +55,7 @@ class ClientQueues:
     - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（设置最大长度防止溢出）
     - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段（设置最大长度防止溢出）
     - CA-ProcessedQueue: 推理后的处理帧（含标注），用于生成处理后 HLS 段（设置最大长度防止溢出）
+    - CA-FeatureQueue: 帧级 FrameFeature 落盘缓冲，等 recording 周期拉走写 features.jsonl
     - _latest_rendered: 单槽位，最新渲染帧，供前端 WebSocket 实时推流
     - _latest_inference: 单槽位，最新推理结果原子快照，供 VisualizationWorker 读取
 
@@ -69,7 +70,8 @@ class ClientQueues:
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
       _inference_lock   Lock   _latest_inference（原子推理快照槽）
       _frontend_lock    Lock   _latest_temporal（前端时序事件，低频写）
-      _slide_window_lock Lock  _slide_window dict（推理每帧写入，最高竞争锁）
+      _slide_window_lock Lock  _slide_window + ca_features（写回口对同一帧连写两者，
+                               同 _viz_lock 护 ca_processed + _latest_rendered 的理由）
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
       *_pressure 内建锁  Lock   叶子锁（PressureReporter 自持，只护其几个标量）：
                                append_* 一律**先出队列锁再上报**，故不与上面任何锁互嵌
@@ -124,7 +126,7 @@ class ClientQueues:
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
         # 注：无 client_id 字段——注册表路由键即 self.task_id(int)；source_ip 为被动来源字段。
-        # step_id 为已解析好的 int（DBAlarm.step_id/落盘目录/FeatureStore 分区键全链路 int）；
+        # step_id 为已解析好的 int（DBAlarm.step_id/落盘目录/落盘分区键全链路 int）；
         # 字符串来源 current_step→int 的转换在 RunController 边界一次完成，本类不再解析。
         self.task_id: Optional[int] = task_id
         self.step_id: Optional[int] = step_id
@@ -190,6 +192,14 @@ class ClientQueues:
         # 帧窗保留时长（秒）：= max(_SIGNALS_WINDOW_SEC 底线, 各算子最大感受野)，由 set_stream_windows 配置。
         # 只向上扩展；signals_10s 聚合另按固定 10s 底线裁窗，二者解耦。
         self._slide_window_seconds: float = _SIGNALS_WINDOW_SEC
+
+        # CA-FeatureQueue：帧级 FrameFeature 落盘缓冲（由 _slide_window_lock 保护）。
+        # 与 _slide_window 是同一份数据的两个去处——前者供算子消费（按感受野裁剪、会丢），
+        # 后者等 recording 每 tick 拉走落盘（只在满时丢最旧）。**不能合并**：裁剪口径归算子
+        # 配置，拿它当落盘缓冲会随某个 stage 调小 window_seconds 而静默丢特征。
+        # 容量复用 ca_maxlen（900 条 ≈ 60s @15fps ≈ 2MB，远小于 ca_raw 的像素帧）。
+        self.ca_features: Deque[FrameFeature] = deque(maxlen=ca_maxlen)
+        self.frames_dropped_features: int = 0
 
         # 最新时序事件列表（由 _frontend_lock 保护，与 _stage 合并）
         self._latest_temporal: List[str] = []
@@ -380,6 +390,7 @@ class ClientQueues:
             "ca_ready": len(self.ca_ready),
             "ca_raw": len(self.ca_raw),
             "ca_processed": len(self.ca_processed),
+            "ca_features": len(self.ca_features),
             "has_rendered": self._latest_rendered is not None,
         }
 
@@ -527,6 +538,7 @@ class ClientQueues:
             self._latest_inference = None
             self._latest_temporal = []
             self._slide_window.clear()
+            self.ca_features.clear()
             self._alarm_log.clear()
             self._alarm_seq = 0
             self._alarm_gate.clear()
@@ -570,6 +582,41 @@ class ClientQueues:
         """返回帧窗的快照副本（线程安全）；每条 = 一帧多流对齐检测。"""
         with self._slide_window_lock:
             return list(self._slide_window)
+
+    # --- ca_features 操作（落盘缓冲，与 slide_window 共用 _slide_window_lock）---
+
+    def append_ca_features(self, feature: FrameFeature) -> None:
+        """把一帧 FrameFeature 放进落盘缓冲（纯缓冲，不触发落盘）。
+
+        落盘由 recording 的 sweeper 周期 `drain_ca_features()` 拉走，本方法只管入队 + 丢帧计数。
+        写门：非 ACTIVE 拒写——迟到写回落到旧 CQ 被拒，不串台。
+
+        与 `push_detection` 是写回口对同一帧的两次投递（消费 / 落盘），故意分两个方法：
+        合并会让"落盘"挂在一个名字完全不提落盘的方法上。
+        """
+        if self._state is not RunState.ACTIVE:
+            return
+        with self._slide_window_lock:
+            if (
+                self.ca_features.maxlen is not None
+                and len(self.ca_features) >= self.ca_features.maxlen
+            ):
+                # deque 满时 append 静默淘汰最旧，先计数
+                self.frames_dropped_features += 1
+                frame_drop_total.labels(reason="feature_backpressure").inc()
+            self.ca_features.append(feature)
+
+    def drain_ca_features(self) -> List[FrameFeature]:
+        """原子排空落盘缓冲（由 recording 的 sweeper 每 tick 调）。
+
+        **没有 `until_ts` 栅栏**，与 `drain_ca_raw` 的不对称是有意的：栅栏是给断流用的，
+        而它要挡的是"一段视频横跨 gap 被 `effective_fps` 反推成慢放"——features 每帧一行、
+        行间无依赖，断流在序列里就是一个 ts 空洞，离线按 ts 自行处理。
+        """
+        with self._slide_window_lock:
+            frames = list(self.ca_features)
+            self.ca_features.clear()
+            return frames
 
     # --- latest_temporal 操作 ---
 

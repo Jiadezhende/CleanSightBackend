@@ -7,7 +7,7 @@
 设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动，不抢在线 GPU/核。
 `run` 的 CPU 隔离在**任何 torch import 之前**生效：置 `CUDA_VISIBLE_DEVICES=""`（禁 GPU）+
 `torch.set_num_threads`（限核，默认 2），故必须先 `_isolate_cpu()` 再 import 触发策略 torch 加载的
-runner/策略模块。`query` 只读 FactLedger，不碰 torch/runner。
+runner/策略模块。`query` 只读 facts.jsonl，不碰 torch/runner。
 
 step_id 恒为**数字存储键**（--step-id int）；未配数字（如 -1）经 config.resolve_stage 回退到
 MOCK stage 配置，存储路径仍用原数字（见 runner.py）。
@@ -59,16 +59,17 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _query(args: argparse.Namespace) -> int:
-    """轻量查询：读 FactLedger 里的 SegmentFact 时间线打印（不碰 torch/runner）。"""
-    from app.services.inference.feature.store import FactLedger
-    from app.services.inference.types import SegmentFact
-    from app.settings import settings
+    """轻量查询：读 facts.jsonl 里的 SegmentFact 时间线打印（不碰 torch/runner）。"""
+    from dataclasses import asdict
 
-    ledger = FactLedger(settings.storage_base_dir)
+    from app.domain.fact import SegmentFact
+    from app.storage import inference as inference_store
+
     rows = [
-        f.to_json()
-        for f in ledger.load(args.task_id, args.step_id)
-        if isinstance(f, SegmentFact) and (args.source is None or f.source == args.source)
+        asdict(f)
+        for f in inference_store.read_facts(args.task_id, args.step_id)
+        if isinstance(f, SegmentFact)
+        and (args.producer is None or f.producer == args.producer)
     ]
     rows.sort(key=lambda r: (float(r.get("start", 0.0)), str(r.get("label", ""))))
     print(json.dumps(
@@ -81,11 +82,11 @@ def _query(args: argparse.Namespace) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.services.inference.offline.cli",
-        description="离线全序列分割：读 FeatureStore 特征 → 策略分段 → 幂等写 FactLedger。",
+        description="离线全序列分割：读 features.jsonl → 策略分段 → 幂等写 facts.jsonl。",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="读特征、跑策略、幂等写 FactLedger")
+    run = sub.add_parser("run", help="读特征、跑策略、幂等写 facts.jsonl")
     run.add_argument("--task-id", type=int, required=True, help="任务 id（存储键）")
     run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（数字存储键；未配回退 MOCK）")
     run.add_argument(
@@ -96,10 +97,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--threads", type=int, default=2, help="CPU 线程数（torch.set_num_threads，默认 2）",
     )
 
-    query = sub.add_parser("query", help="查询 FactLedger 里的 SegmentFact 时间线")
+    query = sub.add_parser("query", help="查询 facts.jsonl 里的 SegmentFact 时间线")
     query.add_argument("--task-id", type=int, required=True)
     query.add_argument("--step-id", type=int, required=True)
-    query.add_argument("--source", default=None, help="只查询某个 SegmentFact source")
+    query.add_argument("--producer", default=None, help="只查询某个 producer 产出的分段")
 
     args = parser.parse_args(argv)
 

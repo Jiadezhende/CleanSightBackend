@@ -9,9 +9,7 @@
     detection/     目标检测 (L1)：Detector 抽象 + dispatcher/pool/service；impl/ 放 Detector 子类
     temporal/      时序分析 (L3/L4)：Operator 抽象 + actor；impl/ 放 Operator 子类
     offline/       离线段：OfflineSegmenter 抽象 + runner/cli；impl/ 放 Segmenter 子类
-2. **基础设施包**：无基类、无 `impl/`，只提供一种被上面几层共用的能力，不随检测点增长。
-    feature/       FeatureStore（在线写）/ FactLedger（离线预留，休眠）
-3. **活体包**：由 manager 持有、有独立起停的 worker 池，生命周期跟着 `manager.start()/stop()`。
+2. **活体包**：由 manager 持有、有独立起停的 worker 池，生命周期跟着 `manager.start()/stop()`。
     visualization/ worker/pool/visualizer
 
 顶层平铺跨层基础设施：manager / config / naming / stage_factory / types。
@@ -30,7 +28,6 @@ re-export 会让即便只取轻量 `.models.FrameInference` 的调用方也拉�
     总编排        from app.services.inference.manager import InferenceManager
     检测基类      from app.services.inference.detection.detector import Detector, YOLODetector
     时序基类      from app.services.inference.temporal.operator import Operator
-    feature_store from app.services.inference.feature.store import FeatureStore, FactLedger
     具体任务      from app.services.inference.detection.impl.bubble import BubbleDetector
                   from app.services.inference.temporal.impl.bubble import BubbleOperator
     工厂/配置     from app.services.inference.stage_factory / .config

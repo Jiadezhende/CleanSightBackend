@@ -52,8 +52,8 @@ L3 时序分析  ──▶  facts.jsonl           EventFact / SegmentFact app/do
 | 1. 事实形状升格 + 三处订正 | `app/domain/fact.py` | ✅ 本批 |
 | 2. 域 codec（`_fact_to_record` / `_record_to_fact`，`type` 判别在这里） | `app/storage/inference/_temporal.py` | ✅ 见 [20260921_STORAGE_INFERENCE_DOMAIN](20260921_STORAGE_INFERENCE_DOMAIN.md) |
 | 3. 域成员（`read_facts` / `write_facts` / `write_debug_result` / `delete`） | 同上 | ✅ 同上 |
-| 4. 调用点迁移：`FactLedger` 退场，`offline/runner.py` 直调数据层 | `inference/offline/` | ❌ 未开工 |
-| 5. 删 `inference/types.py` 的旧两型 | — | ❌ 未开工 |
+| 4. 调用点迁移：`FactLedger` 退场，`offline/runner.py` 直调数据层 | `inference/offline/` | ✅ 见 [20260922_INFERENCE_WRITE_PATH](20260922_INFERENCE_WRITE_PATH.md) |
+| 5. 删 `inference/types.py` 的旧两型 | — | ✅ 同上（`inference/feature/` 子包一并删除） |
 
 ### 方案选型
 
