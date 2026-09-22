@@ -21,7 +21,7 @@ import logging
 from typing import Any, Dict, List, Mapping, Sequence
 
 from app.domain.detection import Detection, FrameDetections, FrameFeature
-from app.storage.inference import _jsonl, _layout
+from . import _jsonl, _layout
 
 logger = logging.getLogger(__name__)
 

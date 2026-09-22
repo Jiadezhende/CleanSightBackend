@@ -30,7 +30,7 @@ import shutil
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
-from app.storage import _root
+from . import _root
 
 logger = logging.getLogger(__name__)
 

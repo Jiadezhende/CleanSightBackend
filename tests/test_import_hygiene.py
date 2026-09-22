@@ -1,6 +1,6 @@
 """导入纪律门禁（规范 §7：唯一硬指标）
 
-两条：
+三条：
 
 1. **导入预算**：目标模块在干净子进程里 import 后，`sys.modules` 不得含预算外的重依赖，
    且耗时不超上限。守住「重依赖懒加载」这条从未被检查过的既有意图——它此前失守两次
@@ -8,6 +8,9 @@
 2. **单例引用面**：服务单例只许被 `run_control`（编排中枢）/ `routers/*`（装配层）/
    本包 `lifespan()` import。同时守住 `docs/DEVELOPMENT.md` §3 写下但无人检查的
    「不建 service 对 service 的直接依赖」。
+3. **相对 / 绝对的分工**：包内一律相对、跨包一律绝对（`DEVELOPMENT.md` §8）。这条不只是
+   风格——第 2 条与分层门禁都靠模块名判定，**跨包写成相对就能绕过它们**，所以由 `_abs_module()`
+   把相对导入还原成绝对再判，并由本条锁死写法。
 
 规范全文：`docs/update/20260903_PACKAGE_LAYOUT_SPEC.md`。
 """
@@ -219,6 +222,21 @@ def _iter_app_py_files():
         yield path
 
 
+def _own_package(path: Path) -> str:
+    """文件所属包的点分名（`app/services/x/manager.py` 与 `app/services/x/__init__.py` 同为 `app.services.x`）。"""
+    parts = path.relative_to(REPO_ROOT).with_suffix("").parts
+    return ".".join(parts[:-1])
+
+
+def _abs_module(path: Path, node: ast.ImportFrom) -> str:
+    """ImportFrom 的绝对模块名；相对导入按文件位置还原，好让下面几条门禁只认一种形态。"""
+    if not node.level:
+        return node.module or ""
+    parts = path.relative_to(REPO_ROOT).with_suffix("").parts
+    base = parts[: len(parts) - node.level]      # __init__ 的末段就是 "__init__"，同一式子成立
+    return ".".join([*base, *([node.module] if node.module else [])])
+
+
 def _is_allowed_importer(rel: str) -> bool:
     """规范 §6 的引用面三类 + 具名例外。"""
     if rel in SINGLETON_EXCEPTIONS:
@@ -242,11 +260,12 @@ def test_singleton_reference_surface():
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or node.module is None:
+            if not isinstance(node, ast.ImportFrom):
                 continue
+            module = _abs_module(path, node)     # 相对导入先还原，否则 `from .instance import x` 隐身
             for alias in node.names:
                 owner = SINGLETONS.get(alias.name)
-                if owner is not None and node.module == owner:
+                if owner is not None and module == owner:
                     violations.append(f"{rel}:{node.lineno} → {alias.name}")
 
     assert not violations, (
@@ -274,8 +293,9 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                # 相对 import（level > 0）是包内寻址，天然合规
-                names = [] if node.level else [node.module or ""]
+                # 相对 import 还原成绝对再判：白名单本就含本包（"app.storage" 等），包内
+                # 寻址照样放行，同时不给「写成相对就绕过白名单」留口子。
+                names = [_abs_module(path, node)]
             elif isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
             else:
@@ -304,8 +324,8 @@ def test_services_do_not_import_routers():
         rel = path.relative_to(REPO_ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("app.routers"):
-                violations.append(f"{rel}:{node.lineno} → {node.module}")
+            if isinstance(node, ast.ImportFrom) and _abs_module(path, node).startswith("app.routers"):
+                violations.append(f"{rel}:{node.lineno} → {_abs_module(path, node)}")
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith("app.routers"):
@@ -313,4 +333,43 @@ def test_services_do_not_import_routers():
 
     assert not violations, (
         "services 反向依赖了 routers（协议层）：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_intra_package_relative_cross_package_absolute():
+    """包内一律相对、跨包一律绝对、相对不上翻（`DEVELOPMENT.md` §8）。
+
+    风格只是表层收益；真正的理由是上面两条门禁与分层白名单都按模块名判定，写法不统一
+    就有第二种表达同一依赖的方式，改门禁时容易只覆盖一种。三类违规分开报，各自给出改法。
+    """
+    up_level, should_be_relative, should_be_absolute = [], [], []
+
+    for path in list(_iter_app_py_files()) + sorted((REPO_ROOT / "mediamtx_gateway").glob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        own = _own_package(path)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            target = _abs_module(path, node)
+            if node.level > 1:
+                up_level.append(f"{rel}:{node.lineno} → {'.' * node.level}{node.module or ''}（= {target}）")
+            elif node.level == 0 and (target == own or target.startswith(own + ".")):
+                should_be_relative.append(f"{rel}:{node.lineno} → {target}")
+            elif node.level == 1 and not (target == own or target.startswith(own + ".")):
+                should_be_absolute.append(f"{rel}:{node.lineno} → {target}")
+
+    assert not up_level, (
+        "相对导入上翻了不止一级，读者无法就地判断指向哪个包：\n  "
+        + "\n  ".join(up_level)
+        + "\n跨包写绝对路径。"
+    )
+    assert not should_be_relative, (
+        "包内引用写成了绝对路径：\n  " + "\n  ".join(should_be_relative)
+        + "\n改成 `from .x import ...`——跨包依赖才用 `from app.` 开头，这样一眼能分清哪些是外部依赖。"
+    )
+    assert not should_be_absolute, (
+        "跨包引用写成了相对路径：\n  " + "\n  ".join(should_be_absolute)
+        + "\n改成绝对路径，否则单例引用面 / 分层白名单这两条门禁按模块名判定时会被绕过。"
     )

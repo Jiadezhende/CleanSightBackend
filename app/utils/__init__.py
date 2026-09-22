@@ -1,20 +1,18 @@
-"""
-CleanSight 工具模块（边界层异常处理架构）
+"""CleanSight 工具模块 —— 基建 leaf，谁都可以向下依赖它。
 
-包含：
-- exceptions: 自定义异常层次结构（AppError + 5 个核心异常）
-- decorators: 日志装饰器（log_call、timing）
-- executor: 框架边界层（GuardedExecutor、CircuitBreaker）
-- task_queue: 单消费者串行任务队列（SerialTaskQueue）
-- metrics: Prometheus 可观测性指标
-- context: 简单上下文管理
+    exceptions   AppError + 5 个服务异常 + 3 个 HTTP 业务异常；retryable/fatal 两个标志
+    executor     GuardedExecutor（函数级重试）、CircuitBreaker
+    worker_guard guarded_run（线程主循环级自愈）
+    decorators   日志装饰器 log_call / timing
+    task_queue   SerialTaskQueue（单消费者串行队列）
+    metrics      Prometheus 指标
+    context      task_id / client_id 的 contextvar
 
-核心原则：
-- 业务代码保持纯净：只抛异常，不捕获异常
-- 重试逻辑在框架边界层：使用 GuardedExecutor
-- 异常捕获在 4 个边界层：Worker.run(), GuardedExecutor, FastAPI handlers, main()
+**硬约束：业务代码只抛异常、不捕获**。捕获只发生在四个边界层（guarded_run /
+GuardedExecutor / FastAPI 异常处理器 / main），别在业务里手写 try/except 或重试循环。
 
-详细文档：app/utils/BOUNDARY_LAYER_EXAMPLES.md
+边界层分工、异常的 retryable/fatal 矩阵、五个重试 policy 的取值，见
+docs/kb/DESIGN_FAULT_TOLERANCE.md。
 """
 
 from .context import (

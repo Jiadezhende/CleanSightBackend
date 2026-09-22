@@ -41,7 +41,7 @@ def _isolate_cpu(num_threads: int) -> None:
 def _run(args: argparse.Namespace) -> int:
     _isolate_cpu(args.threads)
     # runner / 策略 import 放在 CPU 隔离之后：策略模块的 torch import 此时才发生
-    from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
+    from .runner import OfflineRunner, OfflineRunSpec
 
     spec = OfflineRunSpec(task_id=args.task_id, step_id=args.step_id, strategy=args.strategy)
     try:

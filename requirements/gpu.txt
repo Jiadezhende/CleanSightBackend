@@ -1,0 +1,17 @@
+# Windows GPU 开发机（NVIDIA，Python 3.10–3.13）—— install.ps1 装的就是这份。
+#
+# 与 prod.txt 的差别只在 torch 从哪来：wheelhouse 是 Linux cp310 轮子，Windows 用不了，
+# 只能从 cu128 索引在线拉。版本与 build.sh 开头的 TORCH_PKGS 对齐，升级时一起改。
+#
+# 版本带 +cu128 后缀是刻意的：安装时主索引是清华源，那里的 torch==2.8.0 是 CPU 构建；
+# 钉住 +cu128 让 pip 只可能从下面这个 extra index 拿到匹配项，不会静默装成 CPU 版。
+# 若该镜像缺 win_amd64 轮子，换官方源 https://download.pytorch.org/whl/cu128。
+
+--extra-index-url https://mirror.nju.edu.cn/pytorch/whl/cu128
+
+-r base.txt
+
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+
+numpy==1.26.4

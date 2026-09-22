@@ -9,6 +9,6 @@
 注入给 sweeper，方向向下。
 """
 
-from app.services.recording.service import RecordingService
+from .service import RecordingService
 
 recording_service: RecordingService = RecordingService()

@@ -7,8 +7,8 @@
 独立进程手动跑（见 cli.py）。策略实现全部收在 `offline/segmenters/`。
 """
 
-from app.services.inference.offline.runner import OfflineRunner, OfflineRunResult, OfflineRunSpec
-from app.services.inference.offline.segmenter import OfflineSegmenter
+from .runner import OfflineRunner, OfflineRunResult, OfflineRunSpec
+from .segmenter import OfflineSegmenter
 
 __all__: list[str] = [
     "OfflineRunner",

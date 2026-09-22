@@ -13,31 +13,14 @@ MediaMTX Gateway 微服务测试
 """
 
 import asyncio
-import importlib.util
 import socket
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# 加载 scripts/mediamtx_gateway/main.py（无 __init__.py，用 importlib）
-# ---------------------------------------------------------------------------
-
-_MOD_PATH = Path(__file__).resolve().parent.parent / "mediamtx_gateway/main.py"
-_spec = importlib.util.spec_from_file_location("mediamtx_gateway_main", _MOD_PATH)
-_gw_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_gw_mod)
-
-_load_config = _gw_mod._load_config
-_run_mediamtx = _gw_mod._run_mediamtx
-_MAX_RESTARTS = _gw_mod._MAX_RESTARTS
-
-# ---------------------------------------------------------------------------
-# RTSP 代理工具（直接导入 app.utils，与 main.py 共享同一实现）
-# ---------------------------------------------------------------------------
-
-from app.utils.gateway import IPWhitelistStore, RateLimitStore
+from app.utils.gateway import IPWhitelistStore, RateLimitStore  # 与 main.py 共享同一实现
+from mediamtx_gateway import main as gw_main  # 模块对象：monkeypatch 模块级 _CONFIG_PATH 用
+from mediamtx_gateway.main import _MAX_RESTARTS, _load_config, _run_mediamtx
 from mediamtx_gateway.rtsp_proxy import RTSPProxy
 
 
@@ -137,7 +120,7 @@ class MockProcess:
 class TestLoadConfig:
     def test_defaults_no_file_no_env(self, monkeypatch, tmp_path):
         """无 config.ini、无 GATEWAY_* 环境变量 → 全部使用默认值"""
-        monkeypatch.setattr(_gw_mod, "_CONFIG_PATH", tmp_path / "nonexistent.ini")
+        monkeypatch.setattr(gw_main, "_CONFIG_PATH", tmp_path / "nonexistent.ini")
         for key in [
             "GATEWAY_MEDIAMTX_BIN", "GATEWAY_MEDIAMTX_CONFIG",
             "GATEWAY_LISTEN_PORT", "GATEWAY_TARGET_PORT",
@@ -159,7 +142,7 @@ class TestLoadConfig:
 
     def test_env_vars_override_defaults(self, monkeypatch, tmp_path):
         """GATEWAY_* 环境变量优先级高于默认值"""
-        monkeypatch.setattr(_gw_mod, "_CONFIG_PATH", tmp_path / "nonexistent.ini")
+        monkeypatch.setattr(gw_main, "_CONFIG_PATH", tmp_path / "nonexistent.ini")
         monkeypatch.setenv("GATEWAY_LISTEN_PORT", "9999")
         monkeypatch.setenv("GATEWAY_RATE_LIMIT", "5")
         monkeypatch.setenv("GATEWAY_ALLOWED_IPS", "10.0.0.1,10.0.0.2")

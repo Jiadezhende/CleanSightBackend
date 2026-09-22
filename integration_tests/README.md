@@ -9,7 +9,7 @@
 | 后端服务 | `http://{server}:{api-port}` 可访问（本地默认 8000；**当前测试环境 `111.14.140.60:8100`**） |
 | MediaMTX / RTSPProxy | RTSP 服务运行于 `rtsp://{server}:{rtsp-port}`（本地默认 8004；**当前测试环境 `111.14.140.60:8104`**） |
 | FFmpeg | 本地推流由 `FFmpegController` 调用项目内置 `.ffmpeg/bin/ffmpeg`（与后端同源 `settings.ffmpeg_path`）。**推流前须保证该二进制存在**：Linux 由 `install.sh` / Windows 由 `install.ps1` 部署；mac 本地开发若没跑 install，手动 `ln -s $(which ffmpeg) .ffmpeg/bin/ffmpeg` 即可。缺失时脚本会直接报错（非静默）；也可用 `CLEANSIGHT_FFMPEG_PATH` 覆写 |
-| 测试视频 | `test/test_video.mp4`（可通过 `--video_path` 覆盖，如 `test/clean-test.mp4`） |
+| 测试视频 | `integration_tests/fixtures/test_video.mp4`（可通过 `--video_path` 覆盖，如 `integration_tests/fixtures/clean-test.mp4`） |
 | 数据库任务 | `task_id` 不存在则脚本自动创建（结束自动删除）；已存在且 `current_step` 不一致会 fail-fast 报错（见下） |
 
 > 运行解释器：仓库使用 `.venv`。示例里写 `python`，按需替换为 `.venv/bin/python`（macOS/Linux）。
@@ -55,7 +55,7 @@ integration_tests/
 | `--api-port` | `8000` | 后端 HTTP/WS API 端口 |
 | `--rtsp-port` | `8004` | RTSPProxy 推流端口 |
 | `--duration` | `60` | 运行时长（秒），从 start 到 terminate |
-| `--video_path` | `test/test_video.mp4` | 测试视频 |
+| `--video_path` | `integration_tests/fixtures/test_video.mp4` | 测试视频 |
 | `--fps` | `30` | 推流帧率 |
 | `--mode` | `no-stream` | 仅场景 5：`no-stream` / `no-terminate` |
 | `--stream-delay` | `10` | 仅场景 6：推流延迟秒数，须 < 重连窗口 25s |
@@ -217,7 +217,7 @@ python integration_tests/test_single_client.py \
   --scenario 1 --current-step 2 \
   --task_id 9001 \
   --server 111.14.140.60 --api-port 8100 --rtsp-port 8104 \
-  --video_path test/clean-test.mp4 \
+  --video_path integration_tests/fixtures/clean-test.mp4 \
   --duration 60
 ```
 
@@ -240,7 +240,7 @@ python integration_tests/test_single_client.py \
 | `--task-ids` | 无 | 逗号分隔的 task_id 列表，如 `119,120,121`；不存在的由子进程自建（`source_ip=test.s{task_id}`，结束自动清理） |
 | `--api-port` / `--rtsp-port` | `8000` / `8004` | 透传给每个子进程（测试环境常做端口偏移，如 8100/8104） |
 | `--current-step` | 无 | 透传给每个子进程（`1`=LEAK / `2`=CLEAN / 其它=MOCK） |
-| `--video_path` | `test/test_video.mp4` | 测试视频 |
+| `--video_path` | `integration_tests/fixtures/test_video.mp4` | 测试视频 |
 
 > **每路的 `source_ip` 必须互异**——它既是推流路径 `rtsp://…/live/{source_ip}`，也是后端路由键；
 > 撞了就是两路推同一个地址。自建任务用 `test.s{task_id}` 天然互异，复用真实任务时需自行确认。

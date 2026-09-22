@@ -13,15 +13,15 @@ import queue
 from typing import Any, Dict, List, Optional
 
 from app.domain.frame import Frame
-from app.services.persistence.config import PersistenceConfig
-from app.services.persistence.types import (
+from .config import PersistenceConfig
+from .types import (
     AlarmPersistenceTask,
     HLSPersistenceTask,
 )
-from app.services.persistence.workers.alarm_worker import AlarmWorkerPool
-from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
-from app.services.persistence.workers.hls_worker import HLSWorkerPool
-from app.services.persistence.workers.segment_sweeper import HLSSegmentSweeper
+from .workers.alarm_worker import AlarmWorkerPool
+from .workers.cleanup_worker import StorageCleanupWorker
+from .workers.hls_worker import HLSWorkerPool
+from .workers.segment_sweeper import HLSSegmentSweeper
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class PersistenceManager:
             config: 持久化配置（如未提供则使用单例配置）
         """
         if config is None:
-            from app.services.persistence.config import get_persistence_config
+            from .config import get_persistence_config
 
             self.config = get_persistence_config()
         else:

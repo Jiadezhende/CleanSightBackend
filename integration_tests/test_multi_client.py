@@ -11,7 +11,7 @@
     --server      <host>    服务器地址（默认: localhost）
     --duration    <seconds> 运行时长（默认: 60）
     --max-tasks   <int>     最大并发任务数（默认: 5）
-    --video_path  <path>    测试视频路径（默认: test/test_video.mp4）
+    --video_path  <path>    测试视频路径（默认: fixtures/test_video.mp4）
     --fps         <int>     推流帧率（默认: 30）
 """
 
@@ -119,7 +119,7 @@ def main():
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
     parser.add_argument("--max-tasks", type=int, default=5, dest="max_tasks", help="最大并发任务数（默认: 5）")
-    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
+    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: fixtures/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
     parser.add_argument("--api-port", type=int, default=8000, dest="api_port", help="后端 API 端口（默认: 8000）")
     parser.add_argument("--rtsp-port", type=int, default=8004, dest="rtsp_port", help="RTSPProxy 推流端口（默认: 8004）")
@@ -136,7 +136,7 @@ def main():
     args = parser.parse_args()
 
     if args.video_path is None:
-        args.video_path = str(Path(__file__).parent.parent / "test" / "test_video.mp4")
+        args.video_path = str(Path(__file__).parent / "fixtures" / "test_video.mp4")
 
     if not Path(args.video_path).exists():
         raise SystemExit(f"测试视频不存在: {args.video_path}")

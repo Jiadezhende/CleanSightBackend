@@ -11,6 +11,6 @@
 inference 产告警 → persistence 落库），已在门禁白名单中。
 """
 
-from app.services.persistence.manager import PersistenceManager
+from .manager import PersistenceManager
 
 persistence_manager: PersistenceManager = PersistenceManager()

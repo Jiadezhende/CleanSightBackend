@@ -26,7 +26,7 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
-from app.services.inference.detection.detector import Detector
+from .detector import Detector
 from app.domain.detection import FrameDetections
 from app.services.inference.types import DetectionTask, FrameInference
 

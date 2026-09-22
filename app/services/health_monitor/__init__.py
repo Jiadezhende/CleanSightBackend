@@ -13,11 +13,11 @@
 import logging
 from contextlib import asynccontextmanager
 
-from app.services.health_monitor.config import (
+from .config import (
     HealthMonitorConfig,
     get_health_monitor_config,
 )
-from app.services.health_monitor.manager import GlobalHealthMonitor
+from .manager import GlobalHealthMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ async def lifespan():
     单例 import 写在函数体内（规范 §3）：`__init__` 只是包的公开面，不该让「只想拿
     `HealthMonitorConfig` 这个 dataclass」的调用方连带构造出一个全局监控实例。
     """
-    from app.services.health_monitor.instance import health_monitor
+    from .instance import health_monitor
 
     # 配置与三个协作者在 start() 内现取（见 GlobalHealthMonitor._resolve_deps）；
     # 启动行也由 start() 自己打（那条报的是 cleanup_timeout——本线上唯一还在做判定的时限）。
