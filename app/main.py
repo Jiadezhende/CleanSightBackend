@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from .utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from .routers import admin, ai, api, health, lab, media, task, traceback, algorithm as traceback_router
+from .routers import admin, ai, api, health, lab, media, task, algorithm, traceback as traceback_router
 from .services import health_monitor, inference, persistence, recording, stream
 from .utils import (
     AppError,
