@@ -8,10 +8,10 @@ storage —— 数据层：内存数据模型与 `{storage_root}/` 下盘上数�
 ## 落盘结构：`(task_id, step_id)` 是身份键，域子目录是隔离边界
 
     {root}/{task_id}/{step_id}/
-      hls/       {track}_segment_{ts_us}.mp4 / {track}_init.mp4
-                 {track}_playlist.m3u8 / raw_segment_{ts_us}.idx / metadata.json
-      features/  features.jsonl / facts.jsonl
-      lab/       送标 clip 与整段导出的临时件（用完即删，残留随 step TTL 回收）
+      hls/        {track}_segment_{ts_us}.mp4 / {track}_init.mp4
+                  {track}_playlist.m3u8 / raw_segment_{ts_us}.idx / metadata.json
+      inference/  features.jsonl / facts.jsonl / offline_debug.json
+      lab/        送标 clip 与整段导出的临时件（用完即删，残留随 step TTL 回收）
 
 step 根下只有域目录、没有文件；存储根下只有数字命名的 task 目录。域名过 `_root.DOMAINS`
 白名单，笔误当场 `ValueError`。
@@ -19,7 +19,7 @@ step 根下只有域目录、没有文件；存储根下只有数字命名的 ta
 ## 对外：一域一个 import 名，模块函数，不出句柄
 
     tasks.py     跨域：有哪些 task / 有哪些 step / 整个删掉
-    feature.py   features.jsonl（facts.jsonl 未迁入，见该模块）
+    inference/   features.jsonl / facts.jsonl / offline_debug.json：推理链路产物
     hls/         段 / init / playlist / sidecar / metadata：定位、编解码、读写
     lab.py       送标与导出的临时件                                （尚未落地）
 

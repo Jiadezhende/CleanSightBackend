@@ -6,11 +6,11 @@
     - 模型输出到 SegmentFact 的解码逻辑。
 
 输入:
-    OfflineRunner 从 FeatureStore.load(task_id, step_id) 读取 List[FrameFeature]
+    OfflineRunner 从 inference.read_features(task_id, step_id) 读取 List[FrameFeature]
     （帧级、多流已在 by_source 内对齐、按 ts 升序）。
 
 输出:
-    List[SegmentFact]，由 Runner 校验并幂等写入 FactLedger。
+    List[SegmentFact]，由 Runner 校验并幂等写入 facts.jsonl。
 
 注意:
     这里不包含训练流程。训练仍在独立 offline-model 仓内完成，后端只负责加载
@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 
 from app.domain.detection import Detection, FrameFeature
-from app.services.inference.types import SegmentFact
+from app.domain.fact import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
@@ -214,7 +214,7 @@ def _bbox_to_center_area(det: Detection, width: int, height: int) -> Tuple[float
         return 0.0, 0.0, 0.0
     x1, y1, x2, y2 = [float(v) for v in det.bbox[:4]]
 
-    # FeatureStore 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
+    # features.jsonl 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
     # 否则按画面尺寸做空间归一化。
     normalized = max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5
     if normalized:
@@ -688,7 +688,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
             nonlocal cur_label, cur_conf, cur_count
             if cur_label is not None and cur_label != 0 and (cur_end - cur_start) >= self.min_duration_s:
                 segments.append(SegmentFact(
-                    source=self.name,
+                    producer=self.name,
                     label=ACTION_LABELS[cur_label],
                     start=round(cur_start, 6),
                     end=round(cur_end, 6),

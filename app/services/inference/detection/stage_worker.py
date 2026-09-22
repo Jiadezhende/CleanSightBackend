@@ -209,7 +209,7 @@ class StageWorker:
 # docs/update/20260726_INFER_LAUNCH_BOUND_DIAGNOSIS.md：kernel 发射线程在主进程被
 # viz/temporal/HLS/dispatcher 抢 GIL 饿到，GPU 时钟满却 SM 空转、前向读数被吹大）。
 # 只负责「收批帧 → 按 stage 路由到 StageWorker._infer_models → 回结果」，**不碰 cq / 写回 /
-# FeatureStore**——那些留主进程按 req_id 关联（见 infer_proxy.RemoteInferProxy）。
+# 落盘缓冲**——那些留主进程按 req_id 关联（见 infer_proxy.RemoteInferProxy）。
 #
 # 进程边界只过纯数据（均 picklable）：
 #   req  (main→child):  (req_id:int, stage:str, frames:List[np.ndarray], timestamps:List[float])

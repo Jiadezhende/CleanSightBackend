@@ -254,7 +254,7 @@ class TestPurgeStep:
         这条用例把真实行为钉死，免得下一个读 docstring 的人再被误导。
         """
         _seed_step(tmp_storage, 1, 1, "hls", "raw_segment_100.mp4", "raw_playlist.m3u8")
-        _seed_step(tmp_storage, 1, 1, "features", "features.jsonl", "facts.jsonl")
+        _seed_step(tmp_storage, 1, 1, "inference", "features.jsonl", "facts.jsonl")
         _seed_step(tmp_storage, 1, 1, "lab", "clip_1700_1710.mp4")
 
         assert tasks.delete_step(1, 1) is True

@@ -1,30 +1,30 @@
-"""离线分割编排层 —— 把 (task_id, step_id) 一次跑通 FeatureStore → 策略 → FactLedger。
+"""离线分割编排层 —— 把 (task_id, step_id) 一次跑通 features.jsonl → 策略 → facts.jsonl。
 
 调用方（CLI / 测试）显式给 `(task_id, step_id[, strategy])`，Runner：
     1. 按 step_id 取 stage 配置，实例化 offline 策略（未启用则 skip）；
-    2. 一次扫 FeatureStore 读订阅 source 的完整序列；
+    2. 一次读该 step 的完整特征序列；
     3. 策略 preprocess → segment 产出 SegmentFact；
-    4. 校验 + 补 producer + 排序，幂等 replace 写 FactLedger。
+    4. 校验 + 排序，**读回既有事实 → 删掉自己这个 producer 的旧分段 → 整体写回**。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
-Runner 自建绑定 `settings.storage_base_dir` 的 FeatureStore / FactLedger（不复用在线单例——本就独立进程）。
-调用方须保证输入已封口（step 已停写、缓冲已 flush）；Runner 不证明在线写入已结束。
+落盘全经 `app.storage.inference`（存储根归 `settings`，故本类不收 `base_dir`）。
+
+**调用方须保证输入已封口**：step 已停写、且 recording 的 features 队列已把缓冲排空
+（在线链路是异步落盘的）。Runner 不证明这一点。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
+from app.domain.fact import SegmentFact
 from app.services.inference.config import InferenceConfig, load_stage_config
-from app.services.inference.feature.store import FactLedger, FeatureStore
-from app.services.inference.types import SegmentFact
 from app.services.inference.stage_factory import StageFactory
-from app.settings import settings
+from app.storage import inference as inference_store
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +53,9 @@ class OfflineRunner:
 
     def __init__(
         self,
-        base_dir: Optional[Union[str, Path]] = None,
         config_path: Optional[Path] = None,
         config: Optional[InferenceConfig] = None,
     ):
-        base = Path(base_dir) if base_dir is not None else settings.storage_base_dir
-        self._base_dir = Path(base)
-        self._feature_store = FeatureStore(base)
-        self._fact_ledger = FactLedger(base)
         self._config_path = config_path
         self._config = config  # 显式注入优先（测试用）；否则走 load_stage_config 单例
 
@@ -79,7 +74,7 @@ class OfflineRunner:
             return OfflineRunResult("skipped", None, 0, f"stage '{stage_key}' offline 未启用")
 
         producer = segmenter.name
-        frames = self._feature_store.load(spec.task_id, spec.step_id)
+        frames = inference_store.read_features(spec.task_id, spec.step_id)
         present = set().union(*(ff.by_source.keys() for ff in frames)) if frames else set()
         empty = [s for s in segmenter.subscribes if s not in present]
         if empty:
@@ -91,12 +86,10 @@ class OfflineRunner:
         model_input = segmenter.preprocess(frames)
         facts = segmenter.segment(model_input)  # 算法异常向上抛出，不写
 
-        validated = self._validate_and_stamp(facts, producer)
+        validated = self._validate(facts, producer)
         validated.sort(key=lambda f: (f.start, f.end, f.label))
 
-        self._fact_ledger.replace_segments(
-            spec.task_id, spec.step_id, producer, validated
-        )
+        self._replace_own_segments(spec.task_id, spec.step_id, producer, validated)
         self._maybe_write_debug(spec, segmenter)
         logger.info(
             "[OfflineRunner] completed task=%s step=%s producer=%s segments=%d",
@@ -104,33 +97,54 @@ class OfflineRunner:
         )
         return OfflineRunResult("completed", producer, len(validated))
 
-    def _maybe_write_debug(self, spec: OfflineRunSpec, segmenter) -> None:
-        """策略若产逐帧调试产物（debug_result 非 None），落一份 offline_inference_result.json。
+    @staticmethod
+    def _replace_own_segments(
+        task_id: int, step_id: int, producer: str, facts: List[SegmentFact]
+    ) -> None:
+        """幂等替换本 producer 的分段：读回既有 → 丢掉自己的旧分段 → 整体写回。
 
-        与 facts.jsonl 同目录，供调试/对比；写失败只告警不影响已成功的事实落盘。
+        `write_facts` 是**整体替换**，盲写会吃掉别的 producer 的分段与所有 `EventFact`，
+        故合并必须在这里做——「哪些旧事实该保留」是 producer 语义，不是格式事实，数据层
+        不掺和。空 `facts` 即「清除本 producer 的旧分段」。
+
+        一期不支持同一 (task, step) 跨进程并发跑离线：这段 read-modify-write 没有互斥。
+        """
+        kept = [
+            f for f in inference_store.read_facts(task_id, step_id)
+            if not (isinstance(f, SegmentFact) and f.producer == producer)
+        ]
+        inference_store.write_facts(task_id, step_id, kept + facts)
+
+    @staticmethod
+    def _maybe_write_debug(spec: OfflineRunSpec, segmenter) -> None:
+        """策略若产逐帧调试产物（debug_result 非 None），落一份调试 JSON。
+
+        与 facts.jsonl 同域，供调试/对比；写失败只告警不影响已成功的事实落盘。
         """
         debug = segmenter.debug_result()
         if debug is None:
             return
-        path = self._base_dir / str(spec.task_id) / str(spec.step_id) / "offline_inference_result.json"
+        payload = {"task_id": spec.task_id, "step_id": spec.step_id, **debug}
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"task_id": spec.task_id, "step_id": spec.step_id, **debug}
-            path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            inference_store.write_debug_result(spec.task_id, spec.step_id, payload)
         except Exception as e:
-            logger.warning("[OfflineRunner] 逐帧调试 JSON 落盘失败 %s: %s", path, e)
+            logger.warning(
+                "[OfflineRunner] 逐帧调试 JSON 落盘失败 task=%s step=%s: %s",
+                spec.task_id, spec.step_id, e,
+            )
 
     @staticmethod
-    def _validate_and_stamp(facts: List[SegmentFact], producer: str) -> List[SegmentFact]:
-        """全量校验 SegmentFact 并补 meta.producer；任一非法整批失败（不部分写）。"""
+    def _validate(facts: List[SegmentFact], producer: str) -> List[SegmentFact]:
+        """全量校验 SegmentFact；任一非法整批失败（不部分写）。
+
+        `producer` 是一等字段，故只校验不盖章——策略自己填错名字要当场报出来，不能替它补。
+        """
         for f in facts:
             if not isinstance(f, SegmentFact):
                 raise ValueError(f"segmenter 产出非 SegmentFact: {type(f).__name__}")
-            if f.source != producer:
+            if f.producer != producer:
                 raise ValueError(
-                    f"SegmentFact.source '{f.source}' != segmenter name '{producer}'"
+                    f"SegmentFact.producer '{f.producer}' != segmenter name '{producer}'"
                 )
             if not (math.isfinite(f.start) and math.isfinite(f.end)):
                 raise ValueError(f"SegmentFact 时间非有限数: start={f.start} end={f.end}")
@@ -138,10 +152,4 @@ class OfflineRunner:
                 raise ValueError(f"SegmentFact start > end: {f.start} > {f.end}")
             if not (0.0 <= f.conf <= 1.0):
                 raise ValueError(f"SegmentFact conf 越界: {f.conf}")
-            existing = f.meta.get("producer")
-            if existing is not None and existing != producer:
-                raise ValueError(
-                    f"SegmentFact.meta.producer 冲突: '{existing}' != '{producer}'"
-                )
-            f.meta["producer"] = producer
         return facts

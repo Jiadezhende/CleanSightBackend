@@ -15,10 +15,10 @@
 
 约束：
 - `frames` 只读，不得原地修改；
-- 策略不访问 FeatureStore / FactLedger / ClientManager / CQ / 数据库（纯算法）；
-- 输出每条 `SegmentFact.source` 必须等于本策略 `name`；`start <= end`、时间为有限数、`0 <= conf <= 1`
-  （由 Runner 统一校验，见 runner.py）。
-- 输入吃 `FrameFeature`（domain，与在线滑窗同型）、输出吐 `SegmentFact`（inference.types），
+- 策略不访问存储 / ClientManager / CQ / 数据库（纯算法）；
+- 输出每条 `SegmentFact.producer` 必须等于本策略 `name`；`start <= end`、时间为有限数、
+  `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。
+- 输入吃 `FrameFeature`、输出吐 `SegmentFact`（两者都在 `app.domain`，与在线同型），
   不自定义中间数据壳。
 """
 
@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Sequence
 
 from app.domain.detection import FrameFeature
-from app.services.inference.types import SegmentFact
+from app.domain.fact import SegmentFact
 
 
 class OfflineSegmenter(ABC):
@@ -61,7 +61,7 @@ class OfflineSegmenter(ABC):
         """可选：返回上一次 `segment()` 的逐帧调试产物（纯 dict），默认无。
 
         产逐帧预测的策略可 override，返回 `{"frame_predictions": [...], "segments": [...]}`；
-        Runner 若拿到非 None，会补 task/step 落 `offline_inference_result.json`（见 runner.py）。
+        Runner 若拿到非 None，会补 task/step 落 `offline_debug.json`（见 runner.py）。
         presence 型等无逐帧语义的策略保持默认 None → 不落该文件。
         """
         return None

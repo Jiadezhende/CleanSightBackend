@@ -41,6 +41,7 @@ class FakeCQ:
         self.processed_segments = []
         self.raw_residual = []          # drain_ca_raw 一次性取走
         self.processed_residual = []
+        self.features = []              # drain_ca_features 一次性取走
 
     def __repr__(self):                 # 让失败信息可读
         return f"<FakeCQ {self.name} task={self.task_id} step={self.step_id}>"
@@ -57,6 +58,10 @@ class FakeCQ:
 
     def drain_ca_processed(self, until_ts=None):
         self.processed_residual, out = _split_at_fence(self.processed_residual, until_ts)
+        return out
+
+    def drain_ca_features(self):
+        out, self.features = list(self.features), []
         return out
 
 
@@ -111,6 +116,28 @@ class FakeHls:
         return [c for c in self.calls if c[0] == "insert"]
 
 
+class FakeInference:
+    """记录 `delete` / `append_features` 的调用序（推理域的落盘替身）。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def delete(self, task_id, step_id):
+        self.calls.append(("delete", task_id, step_id))
+        return True
+
+    def append_features(self, task_id, step_id, features):
+        self.calls.append(("append", task_id, step_id, len(features)))
+
+    @property
+    def deletes(self):
+        return [c for c in self.calls if c[0] == "delete"]
+
+    @property
+    def appends(self):
+        return [c for c in self.calls if c[0] == "append"]
+
+
 class InlineQueue:
     """同步执行的队列替身：`submit` 当场把任务跑完，测试不必等线程。
 
@@ -137,10 +164,18 @@ def fake_hls(monkeypatch):
     return stub
 
 
+@pytest.fixture
+def fake_inference(monkeypatch):
+    stub = FakeInference()
+    monkeypatch.setattr(recording_service_module, "inference", stub)
+    return stub
+
+
 def _service(clients, *, accept=True) -> RecordingService:
-    """一个装好同步队列的服务（不起线程）。"""
+    """一个装好两条同步队列的服务（不起线程）。"""
     svc = RecordingService(config=RecordingConfig(), clients=clients)
-    svc._queue = InlineQueue(accept=accept)
+    svc._hls_queue = InlineQueue(accept=accept)
+    svc._feature_queue = InlineQueue(accept=accept)
     return svc
 
 
@@ -289,13 +324,13 @@ class TestForgetTask:
         svc.submit_segment(other, "raw", _frames())
 
         assert svc.forget_task(1) is True
-        assert list(svc._claimed_by) == [(9, 2)]
+        assert list(svc._claimed_hls) == [(9, 2)]
 
     def test_goes_through_the_queue(self, fake_hls):
-        """走队列而不是当场清 —— `_claimed_by` 因此只被队列那一个线程碰，不需要锁。"""
+        """走队列而不是当场清 —— `_claimed_hls` 因此只被队列那一个线程碰，不需要锁。"""
         svc = _service(FakeClients({}))
         svc.forget_task(7)
-        assert svc._queue.labels == ["forget:7"]
+        assert svc._hls_queue.labels == ["forget:7"]
 
     def test_runs_after_the_segments_it_follows(self, fake_hls):
         """FIFO：记录活到这一代最后一段写完才消失，而不是在残段还没落盘时就被抹掉。"""
@@ -305,14 +340,14 @@ class TestForgetTask:
         svc.submit_segment(cq, "raw", _frames(start=1700.0))
         svc.forget_task(1)
 
-        assert svc._queue.labels == ["seg:1/2/raw@1700000000", "forget:1"]
-        assert svc._claimed_by == {}
+        assert svc._hls_queue.labels == ["seg:1/2/raw@1700000000", "forget:1"]
+        assert svc._claimed_hls == {}
         assert len(fake_hls.deletes) == 1        # 段是在记录还在时写的，没被重复清
 
     def test_unknown_task_is_a_noop(self, fake_hls):
         svc = _service(FakeClients({}))
         assert svc.forget_task(404) is True      # 排进去了，执行时发现无事可清
-        assert svc._claimed_by == {}
+        assert svc._claimed_hls == {}
 
     def test_queue_not_started(self, fake_hls):
         svc = RecordingService(config=RecordingConfig(), clients=FakeClients({}))
@@ -323,10 +358,10 @@ class TestForgetTask:
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({1: cq}))
         svc.submit_segment(cq, "raw", _frames())
-        svc._queue.accept = False
+        svc._hls_queue.accept = False
 
         assert svc.forget_task(1) is False
-        assert list(svc._claimed_by) == [(1, 2)]
+        assert list(svc._claimed_hls) == [(1, 2)]
 
 
 # ---------------------------------------------------------------------------
@@ -344,14 +379,14 @@ class TestSubmitRejections:
         """空段在 storage 层是 ValueError —— 在入口拦掉，别让它变成队列里的 error log。"""
         svc = _service(FakeClients({}))
         assert svc.submit_segment(FakeCQ(), "raw", []) is False
-        assert svc._queue.labels == []
+        assert svc._hls_queue.labels == []
 
     @pytest.mark.parametrize("task_id,step_id", [(None, 2), (1, None), (None, None)])
     def test_cq_without_partition_key(self, fake_hls, task_id, step_id):
         svc = _service(FakeClients({}))
         cq = FakeCQ(task_id, step_id)
         assert svc.submit_segment(cq, "raw", _frames()) is False
-        assert svc._queue.labels == []
+        assert svc._hls_queue.labels == []
 
     def test_full_queue_returns_false_and_writes_nothing(self, fake_hls):
         svc = _service(FakeClients({}), accept=False)
@@ -361,7 +396,7 @@ class TestSubmitRejections:
     def test_label_identifies_the_exact_segment(self, fake_hls):
         svc = _service(FakeClients({}))
         svc.submit_segment(FakeCQ(1, 2), "raw", _frames(start=1700.0))
-        assert svc._queue.labels == ["seg:1/2/raw@1700000000"]
+        assert svc._hls_queue.labels == ["seg:1/2/raw@1700000000"]
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +424,7 @@ class TestFlushResidual:
     def test_empty_residual_submits_nothing(self, fake_hls):
         svc = _service(FakeClients({}))
         svc.flush_residual(FakeCQ(1, 2))
-        assert svc._queue.labels == []
+        assert svc._hls_queue.labels == []
 
     def test_cq_without_partition_key_is_skipped(self, fake_hls):
         cq = FakeCQ(1, None)
@@ -398,7 +433,7 @@ class TestFlushResidual:
 
         svc.flush_residual(cq)
 
-        assert svc._queue.labels == []
+        assert svc._hls_queue.labels == []
 
     def test_residual_carries_the_generation(self, fake_hls):
         """残段带的是**自己那一代**的身份：拆除后注册表已换人也不会串台。"""
@@ -557,7 +592,7 @@ class TestPendingFlushRequest:
 
         这期间同一个 task 完全可能已经起了新一代、并为它登记了同键的请求。无差别清就会
         把新一代的请求一起吞掉 —— 那次断流的残帧不被切出来，**长回横跨 gap 的慢放段，
-        且静默**。`_claimed_by` 能无差别清是因为它自愈（下一代首写会重新认领），挂起请求
+        且静默**。`_claimed_hls` 能无差别清是因为它自愈（下一代首写会重新认领），挂起请求
         是一次性的、不自愈，两者不能套同一个论证。
         """
         old = FakeCQ(1, 2, name="A")
@@ -610,6 +645,172 @@ class TestSweeper:
 
 
 # ---------------------------------------------------------------------------
+# 特征落盘：另一条队列、另一张代次表，其余与段写同构
+# ---------------------------------------------------------------------------
+
+
+def _feats(n=2, start=1700.0):
+    return [factories.make_frame_feature(ts=start + i / 15.0) for i in range(n)]
+
+
+class TestSubmitFeatures:
+    def test_lands_through_its_own_queue(self, fake_inference):
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({1: cq}))
+
+        assert svc.submit_features(cq, _feats()) is True
+        assert fake_inference.appends == [("append", 1, 2, 2)]
+        assert svc._feature_queue.labels == ["feat:1/2×2"]
+
+    def test_does_not_touch_the_hls_queue(self, fake_hls, fake_inference):
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({1: cq}))
+
+        svc.submit_features(cq, _feats())
+
+        assert svc._hls_queue.labels == []
+        assert fake_hls.calls == []
+
+    def test_queue_not_started(self, fake_inference):
+        svc = RecordingService(config=RecordingConfig(), clients=FakeClients({}))
+        assert svc.submit_features(FakeCQ(), _feats()) is False
+        assert fake_inference.calls == []
+
+    def test_empty_batch_never_reaches_the_queue(self, fake_inference):
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({1: cq}))
+        assert svc.submit_features(cq, []) is False
+        assert svc._feature_queue.labels == []
+
+    @pytest.mark.parametrize("task_id, step_id", [(None, 2), (1, None)])
+    def test_cq_without_partition_key(self, fake_inference, task_id, step_id):
+        cq = FakeCQ(task_id, step_id)
+        svc = _service(FakeClients({}))
+        assert svc.submit_features(cq, _feats()) is False
+        assert svc._feature_queue.labels == []
+
+
+class TestFeatureGeneration:
+    """代次校验与首写自清 —— 判据与段写逐条同构，清的域不同。"""
+
+    def test_same_partition_new_cq_discards_the_old_generation(self, fake_inference):
+        old = FakeCQ(1, 2, name="A")
+        new = FakeCQ(1, 2, name="B")
+        svc = _service(FakeClients({1: new}))
+
+        assert svc.submit_features(old, _feats()) is True   # 入队成功
+        assert fake_inference.calls == []                    # 执行时被丢弃
+
+    def test_step_switch_still_writes(self, fake_inference):
+        step2 = FakeCQ(1, 2, name="A")
+        step3 = FakeCQ(1, 3, name="B")
+        svc = _service(FakeClients({1: step3}))
+
+        svc.submit_features(step2, _feats())
+
+        assert fake_inference.appends == [("append", 1, 2, 2)]
+        assert fake_inference.deletes == []
+
+    def test_first_write_of_a_generation_deletes_then_appends(self, fake_inference):
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({1: cq}))
+
+        svc.submit_features(cq, _feats())
+
+        assert fake_inference.calls == [("delete", 1, 2), ("append", 1, 2, 2)]
+
+    def test_second_write_does_not_delete_again(self, fake_inference):
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({1: cq}))
+
+        svc.submit_features(cq, _feats(start=1700.0))
+        svc.submit_features(cq, _feats(start=1710.0))
+
+        assert len(fake_inference.deletes) == 1
+        assert len(fake_inference.appends) == 2
+
+    def test_straggler_after_forget_task_never_deletes(self, fake_inference):
+        """拆除之后才执行的那批只追加、永不删——同段写那条防炸规则。"""
+        cq = FakeCQ(1, 2)
+        clients = FakeClients({1: cq})
+        svc = _service(clients)
+
+        svc.submit_features(cq, _feats(start=1700.0))
+        clients.registry.clear()
+        svc.forget_task(1)
+        svc.submit_features(cq, _feats(start=1710.0))
+
+        assert len(fake_inference.deletes) == 1
+        assert len(fake_inference.appends) == 2
+
+    def test_supersede_only_clears_its_own_domain(self, fake_hls, fake_inference):
+        """两张表、两个域：特征首写清 inference 域，一个字节都不碰 hls 域，反之亦然。"""
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({1: cq}))
+
+        svc.submit_features(cq, _feats())
+        svc.submit_segment(cq, "raw", _frames())
+
+        assert fake_inference.deletes == [("delete", 1, 2)]
+        assert fake_hls.deletes == [("delete", 1, 2)]   # 各清各的，互不代劳
+
+    def test_forget_task_clears_both_tables(self, fake_hls, fake_inference):
+        cq = FakeCQ(1, 2)
+        clients = FakeClients({1: cq})
+        svc = _service(clients)
+        svc.submit_segment(cq, "raw", _frames())
+        svc.submit_features(cq, _feats())
+        assert list(svc._claimed_hls) == [(1, 2)] and list(svc._claimed_features) == [(1, 2)]
+
+        clients.registry.clear()
+        assert svc.forget_task(1) is True
+
+        assert svc._claimed_hls == {} and svc._claimed_features == {}
+        assert svc._feature_queue.labels[-1] == "forget-feat:1"
+
+
+class TestCollectAndFlushFeatures:
+    def test_collect_pulls_the_feature_buffer(self, fake_hls, fake_inference):
+        cq = FakeCQ(1, 2)
+        cq.features = _feats(n=3)
+        svc = _service(FakeClients({1: cq}))
+
+        svc.collect_from(cq)
+
+        assert fake_inference.appends == [("append", 1, 2, 3)]
+        assert cq.features == []                      # 取走即清
+
+    def test_collect_with_empty_buffer_submits_nothing(self, fake_hls, fake_inference):
+        cq = FakeCQ(1, 2)
+        svc = _service(FakeClients({1: cq}))
+
+        svc.collect_from(cq)
+
+        assert svc._feature_queue.labels == []
+
+    def test_teardown_flush_hands_over_the_tail(self, fake_hls, fake_inference):
+        """拆除期 flush_residual 必须把缓冲里剩下的交出去，否则每个 step 尾部稳定少一截。"""
+        cq = FakeCQ(1, 2)
+        cq.features = _feats(n=2)
+        svc = _service(FakeClients({1: cq}))
+
+        svc.flush_residual(cq)
+
+        assert fake_inference.appends == [("append", 1, 2, 2)]
+
+    def test_pending_flush_path_drains_features_once(self, fake_hls, fake_inference):
+        """断流那条路：collect_from 走 flush_residual 分支，特征只被交出一次。"""
+        cq = FakeCQ(1, 2)
+        cq.features = _feats(n=2)
+        svc = _service(FakeClients({1: cq}))
+        svc.request_residual_flush(cq, fence_ts=1700.5)
+
+        svc.collect_from(cq)
+
+        assert fake_inference.appends == [("append", 1, 2, 2)]
+
+
+# ---------------------------------------------------------------------------
 # 生命周期（真队列，真线程）
 # ---------------------------------------------------------------------------
 
@@ -639,6 +840,49 @@ class TestLifecycle:
         svc.stop(timeout=5.0)
 
         assert svc.submit_segment(FakeCQ(), "raw", _frames()) is False
+
+
+class TestFeatureEndToEnd:
+    """真队列 + 真 `storage.inference`（纯 stdlib，不需要外部工具）。"""
+
+    def test_features_land_in_the_inference_domain_dir(self, tmp_storage):
+        from app.storage import inference
+
+        cq = FakeCQ(1, 2)
+        svc = RecordingService(
+            config=RecordingConfig(sweep_interval_seconds=60.0),
+            clients=FakeClients({1: cq}),
+        )
+        svc.start()
+        try:
+            assert svc.submit_features(cq, _feats(n=3, start=1700.0)) is True
+        finally:
+            svc.stop(timeout=5.0)
+
+        assert (tmp_storage / "1" / "2" / "inference" / "features.jsonl").exists()
+        assert [round(ff.ts, 4) for ff in inference.read_features(1, 2)] == [
+            round(1700.0 + i / 15.0, 4) for i in range(3)
+        ]
+
+    def test_new_generation_wipes_the_previous_one(self, tmp_storage):
+        from app.storage import inference
+
+        a = FakeCQ(1, 2, name="A")
+        b = FakeCQ(1, 2, name="B")
+        clients = FakeClients({1: a})
+        svc = RecordingService(
+            config=RecordingConfig(sweep_interval_seconds=60.0), clients=clients
+        )
+        svc.start()
+        try:
+            svc.submit_features(a, _feats(n=2, start=1700.0))
+            clients.registry[1] = b                      # 重启换代
+            svc.submit_features(b, _feats(n=1, start=1800.0))
+        finally:
+            svc.stop(timeout=5.0)
+
+        # 只剩 B 那一代；A 的整份产物随首写自清一起没
+        assert [round(ff.ts) for ff in inference.read_features(1, 2)] == [1800]
 
 
 # ---------------------------------------------------------------------------

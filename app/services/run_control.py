@@ -86,17 +86,14 @@ class RunController:
             #   包进 try：任一步失败即回滚注销，避免 CQ 泄漏在注册表。
             client_manager.set(task_id, cq)
             try:
-                # storage supersede（start 侧**只剩一个钩子**）：
-                #   inference.start_workflow —— 内含 FeatureStore.open_fresh（认领 owner + 截断
-                #   旧 features.jsonl；owner 绑 cq 故只能在 workflow 起始内做）。
-                #   在建新 CQ 之后、无活跃 worker 写该 (task,step) 之前，全程持 lock_for(task_id)。
-                #
-                # HLS 侧此处**不再有任何 purge 调用**：原 `persistence_manager.start_run(cq)` 是
-                # eager rmtree 整个 step 目录，已换成 recording 的**懒惰首写自清**——本代次第一次
-                # 真正写出一段时才 `hls.delete(task, step)`（见 recording/service.py `_write` ②）。
-                # 语义不同故删而不是改指：新 run 若一段都没写出来，旧录像原样保留、用户还能回放。
+                # storage supersede：start 侧**零钩子**。两个域都走 recording 的**懒惰首写自清**
+                # ——本代次第一次真正写出产物时才清上一代（`hls.delete` / `inference.delete`，
+                # 见 recording/service.py 的 `_write` ② 与 `_write_features` ②）。
+                # 原先这里有两个 eager 清理（`persistence_manager.start_run(cq)` 的整 step rmtree、
+                # 特征分区的起始截断），语义不同故删而不是改指：新 run 若什么都没
+                # 写出来，上一代的录像与特征原样保留，还能回放、还能跑离线。
 
-                # 2d. start_workflow（open_fresh + Actor；CQ 已由上面 set 注册）
+                # 2d. start_workflow（建 Actor；CQ 已由上面 set 注册）
                 if not inference_manager.start_workflow(cq):
                     raise AppError(
                         message=f"Failed to start workflow for task {task_id}",
@@ -111,7 +108,7 @@ class RunController:
                 logger.info("[RunController] stream started: task_id=%s", task_id)
             except Exception:
                 # 任一 setup 步失败：对称回滚（stop_run 尽力而为、永不抛：停 decoder/actor、
-                # close feature、client_manager.remove 注销 CQ）；expected=cq 身份 fence 防误清。
+                # 交出残余产物、client_manager.remove 注销 CQ）；expected=cq 身份 fence 防误清。
                 logger.warning(
                     "[RunController] start_run failed for task=%s; rolling back", task_id
                 )
@@ -185,9 +182,9 @@ class RunController:
                     )
 
             # 2. 落盘残余数据（按 owner 归位，inference 一把拆、告警与录制各一个独立 sink）：
-            #    ① inference 停 workflow（停 actor + 关 feature 分区）交出 settlement；
+            #    ① inference 停 workflow（停 actor）交出 settlement；
             #    ② persistence 落 settlement 告警（别名已由 actor 烧进 alarm.stage）；
-            #    ③ 清前端槽 + recording 落 HLS 残段。
+            #    ③ 清前端槽 + recording 落 HLS 残段与剩余特征。
             #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
             #    （→cq.close 释放帧）——本 try 早于下方清理。
             #    ③ 必须在 CQ 还注册着时做（step 4 的 forget_task 之前）：recording 的首写自清以

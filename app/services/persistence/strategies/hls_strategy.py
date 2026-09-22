@@ -9,7 +9,7 @@ HLS 持久化策略 —— step 目录落盘格式的唯一写侧真源。
                                  processed 是渲染结果、离线不消费，故不产
 - `metadata.json`                段数 / 时长 / 首末 ts 统计，兼作 TTL 清理判据
 
-detection 不在此落盘——已由 FeatureStore 按帧 ts 单源写入 features.jsonl。
+detection 不在此落盘——已由 recording 按帧 ts 单源写入 features.jsonl。
 """
 
 import json
@@ -112,7 +112,7 @@ class HLSPersistenceStrategy:
     def purge_step_dir(self, task_id: int, step_id: int) -> bool:
         """重启 supersede：删除 `{db_dir}/{task_id}/{step_id}` 整个 step 目录，返回是否删除。
 
-        与 FeatureStore.open_fresh 对称——同 (task_id, step_id) 重启一次 run 前清空旧 HLS
+        旧的 eager supersede——同 (task_id, step_id) 重启一次 run 前清空旧 HLS
         产物（段 / *_playlist.m3u8 / metadata.json / {track}_init.mp4），否则新段带唯一
         时间戳文件名不覆盖旧段，只会往同一 playlist 里持续累计。
         HLS 落盘全靠磁盘文件存在性驱动、无每目录内存态（playlist 首行、init 均按 `exists()`
@@ -562,7 +562,7 @@ class HLSPersistenceStrategy:
         """
         持久化处理后视频段（业务代码：纯净）。
 
-        detection 已单源落盘到 FeatureStore（features.jsonl，按帧 ts 对齐），
+        detection 已单源落盘到 features.jsonl（按帧 ts 对齐），
         此处只写视频段，不再转储任何推理结果，避免重复落盘。
 
         Raises:

@@ -264,8 +264,8 @@ class FrameTracker:
         对号入座，勿按位置。重复 ts 按重数各产出一帧（同一 Frame 对象）。
 
         `timestamps` 必须**位级等于** sidecar 里的帧 ts，即取自同一 run 的
-        features.jsonl / `FeatureStore.load()`（两侧同源同值，见 store.py 的帧对齐
-        契约）。任何精度中转（float32、重新格式化）都会 ValueError —— 这里不做
+        features.jsonl / `inference.read_features()`（两侧同源同值，见 `app.domain.fact`
+        的时间轴约束）。任何精度中转（float32、重新格式化）都会 ValueError —— 这里不做
         近似匹配：ts 是帧的身份，配错帧比报错更坏。
         """
         if not timestamps:

@@ -40,7 +40,6 @@ class DetectionService:
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
         client_manager_instance: Optional[ClientManager] = None,
-        feature_store: Optional[Any] = None,
     ):
         """
         Args:
@@ -63,9 +62,6 @@ class DetectionService:
         # 保存 ClientManager 实例：仅供 Dispatcher 枚举活跃 run（合法 multi-run 调度）；
         # 写回路径已句柄化（res.cq），不再经此反查 —— 见 _write_back_results。
         self._client_manager = client_manager_instance or client_manager
-
-        # L2 特征落盘（常开；离线链路硬需求）。由 InferenceManager 注入并管理生命周期
-        self._feature_store = feature_store
 
         # Stage 配置（必须提供）
         if stage_configs is None:
@@ -126,8 +122,9 @@ class DetectionService:
         # 先停 dispatcher：停后不再有新 submit（取帧与提交同在其单线程）。
         self.dispatcher.stop()
 
-        # 再停代理：内部先排空在途批（collector 写回落 FeatureStore），再杀子进程——排空-先于-flush
-        # 的不丢数据不变式由 InferenceManager.stop 的顺序（本 stop 早于 feature_store.flush）保证。
+        # 再停代理：内部先排空在途批（collector 写回把特征放进 cq 缓冲），再杀子进程。排空出来
+        # 的这批还要有人拉走才算不丢——靠 main.py 把 recording.lifespan 嵌在 inference 外层：
+        # 本服务停完、run_control 交出残余，recording 的队列那时还活着。
         # CUDA wedge 现在是子进程的事：卡死的是子进程，代理直接 kill 重启，主线程不再被 daemon 强杀。
         self._proxy.stop()
 
@@ -142,9 +139,12 @@ class DetectionService:
 
         句柄化写回：dispatcher pop 帧时捕获该 run 的 CQ 句柄随 batch 同行，此处直接写它。
         dispatch→infer→write-back 期间若 set_task/stop_run 换槽，旧句柄已转 DRAINING/CLOSED
-        （T2 状态机），本处 is_active() 门统一挡住三写（含 FeatureStore 这条外部落盘腿——
-        push_detection/set_latest_inference 虽已内建 ACTIVE 门，但 feature_store.append 不受
-        cq 门约束），迟到结果落 stale_run 计数而**碰不到新 run**，无跨 run 串台。
+        （T2 状态机），本处 is_active() 门挡住三写，迟到结果落 stale_run 计数而**碰不到新
+        run**，无跨 run 串台。三个写入口自身也各自内建 ACTIVE 门（含落盘缓冲这条腿），
+        顶层这道只是提前退出 + 计数。
+
+        **本方法不碰盘**：落盘缓冲交给 recording 的 sweeper 拉走，代次隔离由它的
+        `_claimed_features` 表兑现（同段写那套），故这里不需要第二道归属校验。
         """
         for res in results:
             cq = res.cq
@@ -178,15 +178,8 @@ class DetectionService:
             cq.set_latest_inference(feature)
             # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）
             cq.mark_startup_milestone("first_inference")
-            # L2 特征落盘（常开）：offline 链路硬需求，best-effort 不影响主链路。
-            # 目录键 (task_id, step_id) 与 HLS 同款；任一为 None 则跳过（拒落，同 HLS 口径）。
-            # 从同一句柄派生 task_id/step_id（消除跨 snapshot 二次读的键错配窗口）。
-            # owner=cq：feature_store 无状态门，靠 store 内归属校验挡「顶层 is_active()
-            # 通过后中途 supersede」的迟到写（分区键跨 run 共享，比 is_active() 更本质）。
-            # 落盘同一份帧级 FrameFeature（与帧窗/快照共用），append/load 两端货币一致。
-            if self._feature_store is not None:
-                task_id = cq.task_id
-                step_id = cq.step_id
-                if task_id is not None and step_id is not None:
-                    self._feature_store.append(task_id, step_id, feature, owner=cq)
+            # Path 3: 落盘缓冲（常开，offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
+            # 由 recording 的 sweeper 每 tick 拉走写 features.jsonl。落的是同一份帧级
+            # FrameFeature（与帧窗/快照共用一个对象）。
+            cq.append_ca_features(feature)
 

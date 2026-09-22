@@ -14,7 +14,6 @@ VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() +
 
 import logging
 import threading
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
@@ -44,22 +43,14 @@ class InferenceManager:
     三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。
     """
 
-    def __init__(
-        self,
-        db_dir: Optional[str] = None,
-    ):
-        """只做赋值与建空容器，**不产生任何副作用**（不读 settings、不 mkdir、不加载 stage
-        配置、不建 worker 池）。重活全在 `start()`（见 `_build_components`）。
+    def __init__(self):
+        """只做赋值与建空容器，**不产生任何副作用**（不读 settings、不加载 stage 配置、
+        不建 worker 池）。重活全在 `start()`（见 `_build_components`）。
 
         原因：本类的全局单例在 `instance.py` 里是模块级构造的，构造期加载 stage 配置会经
         `stage_factory` 的 importlib 把全部 impl 与 torch 在 **import 期**拉起——凡 import
         到本包的人（含只想跑一个纯函数单测的）都得付这笔钱。
         """
-        # 持久化存储根目录的**覆盖值**：默认读 settings 单一真源（与 persistence/traceback
-        # 同源），仅显式传 db_dir 时覆盖（测试/特殊场景）。settings 的读取推迟到 start()。
-        self._db_dir_override = Path(db_dir) if db_dir else None
-        self._db_dir: Optional[Path] = None
-
         self._stop_event = threading.Event()
 
         # stage 配置（延迟初始化）
@@ -71,16 +62,15 @@ class InferenceManager:
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
         self._actors: Dict[int, ClientTemporalActor] = {}
 
-        # 两个活体组件在 start() 里建（None = 尚未 start）
+        # 活体组件在 start() 里建（None = 尚未 start）
         self.visualization_pool: Optional["VisualizationWorkerPool"] = None
-        self.feature_store = None
 
         # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
         # 告警落库/HLS flush 归 PersistenceManager，由 RunController 编排；进程停机残余结算走惰性 import。
         logger.debug("[InferenceManager] Initialization completed")
 
     def _build_components(self):
-        """建重组件：存储目录、可视化池、FeatureStore、DetectionService。
+        """建重组件：可视化池、DetectionService。
 
         由 `start()` 调用，幂等（重复调用不重建）。放这儿而不是 `__init__` 的理由见后者 docstring。
         """
@@ -88,9 +78,6 @@ class InferenceManager:
             return
 
         from app.settings import settings
-
-        self._db_dir = self._db_dir_override or settings.storage_base_dir
-        self._db_dir.mkdir(parents=True, exist_ok=True)
 
         # 可视化 worker 是"采样后 inference 流"的消费者：渲染按 inference.ts 去重，故每秒吐出的
         # 不同画面数恒 = 检测采样率（inference_fps）。但轮询率取 raw_fps（源视频帧率，2× 过采样）：
@@ -106,14 +93,9 @@ class InferenceManager:
             stage_configs=None,
         )
 
-        # L2 特征落盘（常开，与 HLS 同款 {task_id}/{step_id}/ 工作目录）。
-        # FeatureStore 注入推理服务，由推理写回处按帧追加，生命周期随在线 run（open_fresh/close/flush）。
-        # 注：FactLedger（事实账本）是**离线异步写**的 store，生命周期归离线 runner，不由在线 manager
-        # 调度——故此处不持有、不 open_fresh/close/flush。待离线流水线建起时由其自行 new + 驱动
-        # （同一 storage_base_dir）。类/契约见 feature/store.py，休眠预留。
-        from .feature.store import FeatureStore
-        self.feature_store = FeatureStore(self._db_dir)
-
+        # 注：L2 特征落盘不在本服务——写回口把 FrameFeature 放进 cq 的落盘缓冲，由
+        # recording 的 sweeper 拉走写 `{task}/{step}/inference/features.jsonl`。本 manager
+        # 因此不持有任何 store、不管 supersede（recording 首写自清）、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()
 
     def _get_stage_configs(self) -> Dict[str, Dict[str, Any]]:
@@ -194,7 +176,6 @@ class InferenceManager:
         return DetectionService(
             stage_configs=self._get_stage_configs(),
             max_batch_per_stage=8,
-            feature_store=self.feature_store,
         )
 
     # ========== 公共 API ==========
@@ -213,7 +194,7 @@ class InferenceManager:
         return FALLBACK_STAGE
 
     def start_workflow(self, cq: ClientQueues) -> bool:
-        """起该 run 的推理 workflow：open_fresh 特征分区、建并启 actor。
+        """起该 run 的推理 workflow：建并启 actor（存储侧无起始钩子）。
 
         入参是 RunController 已建好并**已注册**（client_manager.set）的不可变身份 CQ
         （一 CQ == 一 run）。调用方已持 lock_for(cq.task_id)，与 stop_workflow 互斥；重启路径下
@@ -230,16 +211,11 @@ class InferenceManager:
             )
             stale.signal_stop()
 
-        # 1. 新 run 起始截断存储分区（重启 supersede，避免同 (task,step) 新旧混写）
-        if cq.step_id is not None:
-            try:
-                self.feature_store.open_fresh(cq.task_id, cq.step_id, owner=cq)
-            except Exception as e:
-                logger.warning(
-                    "[InferenceManager] open_fresh storage failed for task=%s: %s", task_id, e
-                )
+        # 注：起始**不再截断存储分区**。同 (task,step) 重启的 supersede 归 recording 的
+        # 懒惰首写自清（本代次第一批特征真正落盘时才 `inference.delete`），与 HLS 同款——
+        # 新 run 若一帧特征都没写出来，上一代的产物原样保留、离线还能跑。
 
-        # 2. 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
+        # 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
         stage = cq.stage
         stage_cfg = self._get_stage_configs().get(stage, {})
         specs = stage_cfg.get("operator_specs", [])
@@ -277,12 +253,12 @@ class InferenceManager:
         return True
 
     def stop_workflow(self, cq: ClientQueues) -> List[Alarm]:
-        """停该 run 的推理 workflow：停 actor（收结算）+ 关 feature 分区，返回 settlement 列表。
+        """停该 run 的推理 workflow：停 actor（收结算），返回 settlement 列表。
 
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
-        交给 RunController 转 PersistenceManager；HLS flush / 告警落库均归 persistence owner，
-        前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持 lock_for(cq.task_id)，
-        与 start_workflow 互斥。无 actor 返 []；feature close best-effort；别名已由 actor 烧进 alarm.stage。
+        交给 RunController 转 PersistenceManager；HLS 残段 / 剩余特征归 recording，告警落库归
+        persistence，前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持
+        lock_for(cq.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
         task_id = cq.task_id
         logger.info("[InferenceManager] Stopping workflow: task=%s", task_id)
@@ -297,16 +273,8 @@ class InferenceManager:
                     "[InferenceManager] finalize actor failed for task=%s: %s", task_id, e
                 )
 
-        # 关闭本 run 的 FeatureStore 分区（inference 自有组件；best-effort，此时 cq 仍在）
-        try:
-            step_id = cq.step_id
-            if task_id is not None and step_id is not None:
-                self.feature_store.close(task_id, step_id, owner=cq)
-        except Exception as e:
-            logger.warning(
-                "[InferenceManager] Failed to close feature store: task=%s - %s", task_id, e
-            )
-
+        # 注：这里**不收尾特征**。cq 落盘缓冲里剩下的那点由 RunController 紧接着调的
+        # `recording.flush_residual(cq)` 一并交出（它在本方法之后、cq.close() 之前）。
         logger.info("[InferenceManager] Workflow stopped: task=%s", task_id)
         return settlement
 
@@ -374,16 +342,11 @@ class InferenceManager:
                     task_id, e,
                 )
 
-        # FeatureStore 全量 flush：停机时仍有活跃客户端时，逐客户端 close 不会触发，
-        # 残余缓冲（每 (task,step) 最多 batch_size-1 行）需在此 best-effort 落盘，
-        # 否则 offline 链路读到的特征尾部会被静默截断。
-        # 两个组件建于 start()，未 start 过就 stop（异常路径 / 测试）时为 None，跳过即可。
-        if self.feature_store is not None:
-            try:
-                self.feature_store.flush()
-            except Exception as e:
-                logger.warning("[InferenceManager] flush feature store on stop failed: %s", e)
-
+        # 注：停机时不再 flush 特征——落盘缓冲在 cq 上，recording.lifespan 嵌在 inference 外层
+        # （main.py），它的 sweeper 与队列此刻还活着。但 recording.stop 先停 sweeper 再抽队列，
+        # 进程直接停机（非 stop_run）时 cq 里最后不到 1 s 的特征能否被拉走取决于时序——已接受，
+        # 与 HLS 残段同口径。
+        # 组件建于 start()，未 start 过就 stop（异常路径 / 测试）时为 None，跳过即可。
         if self.visualization_pool is not None:
             self.visualization_pool.stop()
         # 注：persistence.stop() 已上移 persistence.lifespan（停在 inference 之后，抽干队列）。

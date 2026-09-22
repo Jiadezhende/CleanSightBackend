@@ -1,8 +1,11 @@
-"""T1: CQ per-run 不可变 —— 身份构造注入、复用机器已删、换槽、存储 supersede。"""
+"""T1: CQ per-run 不可变 —— 身份构造注入、复用机器已删、换槽。
+
+存储 supersede 不在这里：它已从「run 起始截断分区」换成 recording 的懒惰首写自清，
+用例见 `test_recording_service.py` 的 `TestFeatureGeneration`。
+"""
 
 from factories import make_bare_cq, make_cq, make_frame_feature
 from app.services.client.manager import ClientManager
-from app.services.inference.feature.store import FeatureStore
 
 
 def test_cq_identity_immutable_and_reuse_machinery_gone():
@@ -49,15 +52,3 @@ def test_client_manager_set_replaces_slot_with_new_object():
     cm.set(1, cq2)
     assert cm.get(1) is cq2
     assert cm.get(1) is not cq1
-
-
-def test_open_fresh_supersedes_storage_partition(tmp_path):
-    fs = FeatureStore(tmp_path)
-    p = fs._path(1, 2)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("old-run-line\n")
-    assert p.exists()
-
-    # 新 run 起始截断该 (task, step) 分区 → 无新旧混写
-    fs.open_fresh(1, 2)
-    assert not p.exists()

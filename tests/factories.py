@@ -104,7 +104,7 @@ def make_frame_inference(
     """推理结果消息。task_id/stage 缺省从 cq 派生（无 cq 时回退 1/"3"）。
 
     detectors 缺省为单流 {"bubble": <1 检测>}；写回句柄 fence 类测试传 cq=<句柄>，
-    离线/直连 FeatureStore 类测试传 cq=None 并显式给 detectors。
+    离线/直连落盘类测试传 cq=None 并显式给 detectors。
     frame_width/frame_height 为帧级分辨率，缺省 None。
     """
     if detectors is None:
