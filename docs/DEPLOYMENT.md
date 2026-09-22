@@ -68,7 +68,9 @@ vendor/ffmpeg/ffmpeg-linux-x64.tar.xz
 vendor/mediamtx/mediamtx-linux-x64.tar.gz
 ```
 
-脚本依次做：建 `.venv/` → 装 `TORCH_PKGS`（源自 wheelhouse）→ 从清华镜像装 `requirements.txt` → 修 opencv 冲突并把 numpy 钉回 `1.26.4` → 校验 SHA 后部署 ffmpeg 与 MediaMTX → 末尾自检。
+脚本依次做：建 `.venv/` → 装 `TORCH_PKGS`（源自 wheelhouse）→ 从清华镜像装 `requirements/cuda.txt` → 修 opencv 冲突并把 numpy 钉回 `1.26.4` → 校验 SHA 后部署 ffmpeg 与 MediaMTX → 末尾自检。
+
+> 依赖清单分层：`requirements/base.txt` 是平台无关底座，`cuda.txt`（生产主线）/ `cpu.txt`（无 GPU 机）/ `ppu.txt`（阿里 PPU 机）各 `-r base.txt` 后只补自己那份 torch 与 numpy。改依赖只改 `base.txt`，除非改的就是 torch/numpy 本身。
 
 ### Windows 开发机
 
@@ -136,10 +138,16 @@ mediamtx/mediamtx.yml     # 随仓库维护，安装脚本只更新二进制，�
 | `CLEANSIGHT_GATEWAY_ALLOWED_IPS` | 建议配（逗号分隔） | 留空 | 留空 | 空 = 不限制来源 IP |
 | `CLEANSIGHT_GATEWAY_RATE_LIMIT` | `60` | `60` | `120` | `60` |
 | `CLEANSIGHT_STORAGE_DIR` | 指向大容量盘 | 默认 | 默认 | `./database`（HLS 段与告警图都落这里，会持续增长） |
-| `CLEANSIGHT_MODEL_PATH` | 默认 | 默认 | 默认 | `./app/data` |
+| `CLEANSIGHT_MODEL_PATH` | 默认 | 默认 | 默认 | `./app/data`（权重不随仓库分发，见下） |
 | `CLEANSIGHT_FFMPEG_PATH` | 留空 | 留空 | 留空（Mac 可指 homebrew） | 项目内 `.ffmpeg/bin/ffmpeg`，**不回退 PATH** |
 | `CLEANSIGHT_STRICT` | `1` | `1` | `0` | `0` |
 | `CLEANSIGHT_LABEL_STUDIO_URL` / `_TOKEN` / `_DEFAULT_PROJECT_ID` | 按需 | 按需 | 按需 | 空 = 不启用样本回流 |
+
+### 模型权重
+
+**权重不随 git 仓库分发**，从内部模型库按需取用，放到 `CLEANSIGHT_MODEL_PATH` 指向的目录（默认项目内 `app/data/`）。六份 `.pt` 与用到它们的检测点见 [config/inference_config.yaml](../config/inference_config.yaml) 的 `model_path` 行。
+
+`.gitignore` 已挡 `app/data/*.pt`；早期漏进版本库的 `bend-best.pt` / `bubble-best.pt` 已于 2026-09-22 停止跟踪（旧提交里仍有，clone 时照样会拉到，但新部署不再依赖它们随仓库走）。
 
 ### 生产 `.env` 模板
 
@@ -197,7 +205,7 @@ python integration_tests/test_single_client.py --scenario 1 --task_id <任务ID>
 
 - `http://<目标机IP>:<后端端口>/health` 可访问（默认 8000，test 为 8002）。
 - 网关 RTSP 端口可访问（默认 8004，test 为 8006）。
-- 测试视频在 `test/test_video.mp4`，否则用 `--video_path` 指定。
+- 测试视频在 `integration_tests/fixtures/test_video.mp4`，否则用 `--video_path` 指定。
 - `<任务ID>` 在数据库中可用；脚本找不到会尝试建测试任务，因此 DB 必须可写。
 
 通过标准：推流成功 → `/api/start` 返回成功 → 跑满 `duration` 无异常退出 → `/api/terminate` 清理干净。

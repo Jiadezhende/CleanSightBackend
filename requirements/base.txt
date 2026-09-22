@@ -1,0 +1,44 @@
+# 平台无关的依赖全集 —— 四份清单的共同底座，任何变体都 `-r base.txt` 它。
+#
+# 刻意不在此列的两项，都因为"装了就废"：
+#   torch / torchvision  版本钉在 deploy.conf 的 TORCH_PKGS，由 build.sh 下进 wheelhouse、
+#                        install.sh 离线装；PPU 机器则用厂商定制版。
+#   numpy                各变体要求互斥（主线钉 1.26.4，PPU 必须用系统的 2.3.5），
+#                        而 `-r` 只能加不能减，所以只能下放到各变体自己写。
+
+# ========== Core AI ==========
+ultralytics~=8.3.200
+lap>=0.5.12
+
+# ========== CV ==========
+# headless 是硬要求：服务端无显示环境。ultralytics 会带 opencv-python 进来与之冲突，
+# install 脚本装完会显式清理一次。
+opencv-python-headless<4.12.0
+pillow>=10.4,<12.0
+
+# ========== Web Framework ==========
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+python-multipart>=0.0.20
+websockets>=13,<16
+
+# ========== HTTP Clients ==========
+requests>=2.31,<3.0
+httpx>=0.27,<0.29
+
+# ========== Database ==========
+sqlalchemy==2.0.44
+psycopg2-binary==2.9.11
+pydantic-settings==2.12.0
+
+# ========== Testing ==========
+# 不拆 dev.txt：备份机要跑测试（docs/update/20260915_BACKUP_HOST_DUAL_ENV.md），
+# 拆了那台得装两份。
+pytest>=7.4,<9.0
+pytest-asyncio>=0.23,<1.4
+pytest-cov>=4.1  # 覆盖率量化：pytest tests/ --cov=app --cov-report=term-missing
+
+# ========== 日志 / 指标 ==========
+colorlog==6.9.0
+concurrent-log-handler==0.9.29
+prometheus_client==0.16.0

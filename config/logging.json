@@ -1,0 +1,103 @@
+{
+    "version": 1,
+    "disable_existing_loggers": false,
+    "formatters": {
+        "colored": {
+            "()": "colorlog.ColoredFormatter",
+            "format": "%(log_color)s%(asctime)s %(levelname)-8s%(reset)s %(cyan)s[%(name)s]%(reset)s %(message_log_color)s%(message)s",
+            "datefmt": "%H:%M:%S",
+            "log_colors": {
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white"
+            },
+            "secondary_log_colors": {
+                "message": {
+                    "DEBUG": "white",
+                    "INFO": "white",
+                    "WARNING": "yellow",
+                    "ERROR": "red",
+                    "CRITICAL": "red"
+                }
+            }
+        },
+        "default": {
+            "format": "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+            "datefmt": "%H:%M:%S"
+        },
+        "file": {
+            "format": "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        }
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "colored",
+            "stream": "ext://sys.stdout"
+        },
+        "default": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+            "stream": "ext://sys.stdout"
+        },
+        "file_info": {
+            "class": "concurrent_log_handler.ConcurrentTimedRotatingFileHandler",
+            "formatter": "file",
+            "filename": "logs/cleansight-info.log",
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 7,
+            "encoding": "utf-8",
+            "level": "INFO"
+        },
+        "file_warning": {
+            "class": "concurrent_log_handler.ConcurrentTimedRotatingFileHandler",
+            "formatter": "file",
+            "filename": "logs/cleansight-warning.log",
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 7,
+            "encoding": "utf-8",
+            "level": "WARNING"
+        },
+        "file_error": {
+            "class": "concurrent_log_handler.ConcurrentTimedRotatingFileHandler",
+            "formatter": "file",
+            "filename": "logs/cleansight-error.log",
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 7,
+            "encoding": "utf-8",
+            "level": "ERROR"
+        }
+    },
+    "loggers": {
+        "uvicorn": {
+            "handlers": ["console", "file_info", "file_warning", "file_error"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "uvicorn.error": {
+            "handlers": ["console", "file_info", "file_warning", "file_error"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "uvicorn.access": {
+            "handlers": ["console", "file_info", "file_warning", "file_error"],
+            "level": "INFO",
+            "propagate": false
+        },
+        "watchfiles": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": false
+        }
+    },
+    "root": {
+        "handlers": ["console", "file_info", "file_warning", "file_error"],
+        "level": "INFO"
+    }
+}

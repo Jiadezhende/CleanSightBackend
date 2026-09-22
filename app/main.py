@@ -471,13 +471,12 @@ def main():
         os.makedirs("logs", exist_ok=True)
 
         logger.info("Listening on %s:%s", settings.host, settings.port)
-        logger.info("Log config: %s", settings.log_config)
 
         uvicorn.run(
             "app.main:app",
             host=settings.host,
             port=settings.port,
-            log_config=settings.log_config,
+            log_config="config/logging.json",
             reload=False,  # 生产环境禁用热重载
         )
 

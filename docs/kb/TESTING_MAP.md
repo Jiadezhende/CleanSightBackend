@@ -1,4 +1,4 @@
-> 更新时间：2026-09-20
+> 更新时间：2026-09-22
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -105,7 +105,7 @@
 
 ## 覆盖率基线与缺口分层
 
-> `pytest-cov` opt-in 接入（`requirements*.txt` 含 `pytest-cov`，配置见根 `.coveragerc`：`source=app`、`branch=True`、`omit=app/main.py`）。**不入 addopts、不设 `--cov-fail-under` 门禁**；按需 `pytest tests/ --cov=app --cov-report=term-missing`。
+> `pytest-cov` opt-in 接入（`requirements/base.txt` 含 `pytest-cov`，配置见根 `pyproject.toml` 的 `[tool.coverage.*]`：`source=app`、`branch=true`、`omit=app/main.py`）。**不入 addopts、不设 `--cov-fail-under` 门禁**；按需 `pytest tests/ --cov=app --cov-report=term-missing`。
 
 量化基线（2026-07-05 快照，`--cov=app --branch`）：迁移后 **54.7%**（264 passed），补齐轻缺口后 **57.3%**（292 passed）。分层：`domain/` 100%；`services/client/` 71–72%（契约护栏扎实）；`services/traceback/` 93–95%；`services/inference/` 混合（operator/models 高、detector/pool/visualizer/mock 偏低）；`routers/` 混合（api/media/traceback 高，ai/admin 近零）。
 
@@ -128,7 +128,7 @@
 ## 代码来源
 
 - `tests/`（`factories.py` 构造单一真源、`conftest.py` 共享 fixture）
-- `.coveragerc`（覆盖率配置）
+- `pyproject.toml`（pytest `testpaths` + 覆盖率配置）
 - `integration_tests/`
 - `app/storage/`
 - `app/services/recording/`

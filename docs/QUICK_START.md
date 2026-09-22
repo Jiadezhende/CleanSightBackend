@@ -33,7 +33,7 @@ cd mediamtx
 
 ```bash
 # 向 MediaMTX 推一路 RTMP（MediaMTX 会转成 RTSP 供后端拉取）
-ffmpeg -re -stream_loop -1 -i test/clean-test.mp4 \
+ffmpeg -re -stream_loop -1 -i integration_tests/fixtures/clean-test.mp4 \
     -c:v libx264 -preset veryfast -tune zerolatency -f flv rtmp://localhost:1935/live/test
 ```
 

@@ -101,8 +101,8 @@ Write-Host "      torch 闭包（cu128 在线，$TORCH_INDEX_URL）..."
 pip install ($TORCH_PKGS -split '\s+') --index-url $TORCH_INDEX_URL
 Assert-LastExit "torch 安装失败（若 cu128 索引无 win_amd64 wheel，可改用官方源 https://download.pytorch.org/whl/cu128）"
 Write-Host "      其余依赖（在线，$PYPI_INDEX_URL）..."
-pip install -r requirements.txt -i $PYPI_INDEX_URL
-Assert-LastExit "requirements.txt 安装失败"
+pip install -r requirements/cuda.txt -i $PYPI_INDEX_URL
+Assert-LastExit "requirements/cuda.txt 安装失败"
 
 # ultralytics 会拉入 opencv-python，与 headless 版共享 cv2/ 文件。force-reinstall 默认连依赖
 # 一起重装会把 numpy 顶到 2.x（撞 torch ABI），故 --no-deps 只重铺 cv2、不碰 numpy；

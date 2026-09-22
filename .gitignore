@@ -169,7 +169,11 @@ temp/
 
 # 模型权重 / 测试视频等大二进制走物料分发，不入库
 app/data/*.pt
-test/*.mp4
+integration_tests/fixtures/*.mp4
+# 唯一例外：test_video.mp4 随仓库走 —— DEPLOYMENT 的部署后验证让运维直接跑
+# test_single_client.py，它默认取这份；部署机靠 git archive 取码，不跟踪就得另外拷一趟。
+# 其余素材（clean-test.mp4 35M、leak*.mp4）走物料分发，不入库。
+!integration_tests/fixtures/test_video.mp4
 
 .agents/
 # .claude 下只跟踪团队共享的 skills/（方法论资产，需版本化追加）；其余（settings*.json、

@@ -91,7 +91,7 @@ fi
 # 小包始终在线从清华源拉；本地有 wheelhouse 目录则一并作 find-links 兜底。
 extra_links=""; [ -d wheelhouse ] && extra_links="--find-links wheelhouse"
 echo "      其余依赖（在线，${PYPI_INDEX_URL}）..."
-pip install -r requirements.txt -i "$PYPI_INDEX_URL" $extra_links
+pip install -r requirements/cuda.txt -i "$PYPI_INDEX_URL" $extra_links
 
 # ultralytics 会拉入 opencv-python，与 headless 版共享 cv2/ 文件，卸载非 headless 会连带
 # 删共享模块。force-reinstall 默认连依赖一起重装会把 numpy 顶到 2.x（撞 torch ABI），

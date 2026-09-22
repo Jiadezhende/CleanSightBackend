@@ -1,0 +1,10 @@
+# NVIDIA CUDA 机器（生产主线）—— install.sh / install.ps1 装的就是这份。
+#
+# torch / torchvision 不在这里：版本钉在 deploy.conf 的 TORCH_PKGS，
+# 由 build.sh 下进 wheelhouse、install.sh 在本文件之前离线装好。
+
+-r base.txt
+
+# ultralytics 会把 numpy 拉到 2.x，与钉版的 torch wheel 不兼容，必须钉回 1.26.4。
+# install 脚本在末尾还会再钉一次（装 ultralytics 时可能被顶上去）。
+numpy==1.26.4

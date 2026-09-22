@@ -345,7 +345,7 @@ ssh cleansight-deploy 'cd ~/CleanSightBackend && source .venv/bin/activate \
 
 > **必须显式给 `CLEANSIGHT_ENV`**：测试进程默认按 `dev` 加载 `.env.dev`，纯 prod 部署（只有 `.env`）会在连库前直接崩——见坑 6。环境要与 [7] 启动后端时一致。
 
-前置确认：后端 `/health/status` 可达、**RTSP 网关已在 venv 里起且 8004+18004 都在听**（见 [7]）、`test/test_video.mp4` 存在、目标 DB 可写。
+前置确认：后端 `/health/status` 可达、**RTSP 网关已在 venv 里起且 8004+18004 都在听**（见 [7]）、`integration_tests/fixtures/test_video.mp4` 存在、目标 DB 可写。
 
 **通过标志**（日志逐条出现）：
 

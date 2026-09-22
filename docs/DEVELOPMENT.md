@@ -67,7 +67,7 @@
   - `CRITICAL` — 致命、无法继续：必要组件启动失败、模型文件缺失。
 - **热路径不打 DEBUG**：每秒数千次的循环（帧处理）用批量/采样日志；复杂计算的日志先守卫 `if logger.isEnabledFor(logging.DEBUG):`。
 - **分隔**：多参数用 `|`，列表项用 `,`；配置详情块仅 DEBUG，用 `===` 包裹。
-- **日志配置**（`logging_config.json`）见 [kb/SERVICE_CONFIG.md](kb/SERVICE_CONFIG.md)。
+- **日志配置**（`config/logging.json`）见 [kb/SERVICE_CONFIG.md](kb/SERVICE_CONFIG.md)。
 
 ---
 
