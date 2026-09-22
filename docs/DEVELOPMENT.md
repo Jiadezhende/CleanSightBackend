@@ -1,7 +1,7 @@
 # CleanSight Backend 开发规范
 
 本文是 CleanSight Backend 的开发**约定**。
-环境安装（Linux 生产 / Windows 开发）与物料分发见 [DEPLOYMENT.md](DEPLOYMENT.md)；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
+环境安装、物料分发与 `.env` / 端口配置见 `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
 
 ---
 

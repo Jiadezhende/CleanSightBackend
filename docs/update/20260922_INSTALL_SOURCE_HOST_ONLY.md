@@ -40,7 +40,7 @@
 | 源机地址写死、去本地物料分支 | `install.sh` | §2 |
 | Windows 去 GitHub 在线分支、去 deploy.conf 解析 | `install.ps1` | §3 |
 | vendor SHA 钉版整套删除 | `build.sh`、`install.sh` | §4 |
-| 文档与 skill 同步 | `docs/DEPLOYMENT.md`、`.claude/skills/deploy-linux/SKILL.md` | §5 |
+| 部署文档并入 skill | 删 `docs/DEPLOYMENT.md` 与 `deploy-linux`，新建 `.claude/skills/deploy/`（入口先定平台与角色，references 按平台分） | §5 |
 
 ### 方案选型：配置放哪
 
@@ -66,6 +66,7 @@ BASE_URL="${BASE_URL:-http://49.234.120.241:8088}"
 
 - torch 段的 `if [ -z "$BASE_URL" ]` 本地 wheelhouse 分支——只剩 HTTP 流式 + `--require-hashes` 那条
 - ffmpeg / mediamtx 段的 `[ -n "$BASE_URL" ] && dl ...` 条件——改成无条件 `dl`
+- 小包安装的 `[ -d wheelhouse ] && --find-links wheelhouse` 兜底——本地物料路径已删，这行是残留，一并去掉
 - 预检里「BASE_URL 为空则要求本地 wheelhouse/SHA256SUMS 存在」——改成「BASE_URL 必须非空」
 
 `install.sh` 不再需要知道 torch 版本：wheelhouse 里就那一版，目录本身即钉版。
@@ -82,7 +83,26 @@ BASE_URL="${BASE_URL:-http://49.234.120.241:8088}"
 
 **保留的**：`wheelhouse/SHA256SUMS` 的生成与 `install.sh` 的 `--require-hashes`。理由不同——vendor 那四个包只在构建机下载一次、经源机分发，下坏了 `xz -t` / `gzip -t` 当场抓出来；而 wheelhouse 是 6GB wheel 走 HTTP 流式安装、不落盘，`--require-hashes` 是唯一的完整性保障，且 SHA256SUMS 由 build.sh 自动写、不用人维护。
 
-### 5. 保留项（不改动）
+### 5. 部署文档并入 `/deploy` skill，`DEPLOYMENT.md` 与 `deploy-linux` 删除
+
+一个 skill 就够，不再维护一份人读的 `DEPLOYMENT.md` 和一份 Claude 读的 skill 各说一遍。新结构：
+
+```text
+.claude/skills/deploy/
+  SKILL.md                    先定平台（Linux NVIDIA / Windows NVIDIA / PPU / 构建机）再定角色（prod / dev / test），
+                              通用硬约束与流程骨架，<120 行
+  references/linux.md         install.sh 路径：远程传仓库、免密、预检、nohup 装、启动、e2e、七个坑
+  references/windows.md       install.ps1 路径 + HNS 端口预留、孤儿 mediamtx.exe
+  references/ppu.md           无脚本手动路径（原只写在 requirements/ppu.txt 注释里）
+  references/materials.md     源机 + build.sh + 升级流程
+  references/runtime-config.md  .env* 三角色、必填六项、端口表、模型权重
+```
+
+顺手修掉的错说明（原 DEPLOYMENT / README / QUICK_START 互相打架）：README 与 QUICK_START 让「终端 1 手动起 MediaMTX 再跑 start 脚本」（会撞 18004）；README 故障排查让 `apt install ffmpeg`（与「不回退 PATH」矛盾）；DEPLOYMENT 两处写 test 端口「+100」（脚本是 +2）；DEPLOYMENT「rsync 物料后不带 BASE_URL 跑 install.sh」的本地路径本批已删；`deploy-linux` skill 指向 DEVELOPMENT.md 里不存在的「Windows 路径」；PPU 路径在部署文档里没有入口。
+
+同批把 `start_backend.sh` 在 git 里的执行位补上（`git update-index --chmod=+x`）——原 skill 记的「`git archive` 丢 +x」实为仓库本身没打位，每次 clone 都撞。
+
+### 6. 保留项（不改动）
 
 - `build.sh` 的构建机约束（Linux x86_64 + Python 3.10）与 wheelhouse 闭包完整性 dry-run 校验
 - `install.sh` 末尾自检（torch / CUDA / cv2 / ultralytics / ffmpeg / mediamtx）

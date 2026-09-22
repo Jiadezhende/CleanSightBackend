@@ -4,32 +4,26 @@
 
 ## 前置条件
 
-- 已完成 [部署指南](DEPLOYMENT.md) 的环境配置
-- FFmpeg 已安装并在 PATH 中
-- MediaMTX 已获取并可执行（二进制不随 git 分发，见部署指南）
+- 已按 `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）装完环境：`install.sh` / `install.ps1` 会把 FFmpeg 与 MediaMTX 装进项目内的 `.ffmpeg/` 与 `mediamtx/`，不依赖系统 PATH
+- `.env.dev` 已填（六项必填见 skill 的 runtime-config.md）
 
 ---
 
 ## 完整启动流程
 
-### 1. 启动 MediaMTX（终端 1）
-
-```bash
-cd mediamtx
-./mediamtx          # Linux；Windows 用 .\mediamtx.exe
-```
-
-### 2. 启动后端（终端 2）
+### 1. 启动后端（终端 1）
 
 ```bash
 ./start_backend.sh dev      # Linux（加载 .env.dev）
 .\start_backend.ps1 dev     # Windows
 ```
 
-> 验证启动：`GET http://localhost:8000/health/status` 返回 200 即成功。
+一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，**不要再单独起 MediaMTX**，会撞 18004。
+
+> 验证启动：`GET http://localhost:8000/health/status` 返回 200 即成功（没有裸 `/health`）。
 > 生产已永久关闭 `/docs`、`/redoc`、`/openapi.json`，不能用交互式文档页验证。
 
-### 3. 推流测试视频（终端 3）
+### 2. 推流测试视频（终端 2）
 
 ```bash
 # 向 MediaMTX 推一路 RTMP（MediaMTX 会转成 RTSP 供后端拉取）
@@ -37,7 +31,7 @@ ffmpeg -re -stream_loop -1 -i integration_tests/fixtures/clean-test.mp4 \
     -c:v libx264 -preset veryfast -tune zerolatency -f flv rtmp://localhost:1935/live/test
 ```
 
-### 4. 运行集成测试（终端 4）
+### 3. 运行集成测试（终端 3）
 
 ```bash
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
@@ -134,5 +128,5 @@ python integration_tests/test_single_client.py --scenario 3 --task_id 2 --durati
 
 ## 相关文档
 
-- [部署指南](DEPLOYMENT.md) — 环境配置
+- `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）— 装环境、物料、`.env` 与端口
 - [知识库](kb/INDEX.md) — 架构、服务内部、API 清单、配置等描述性内容的单一入口

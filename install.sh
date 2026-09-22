@@ -71,18 +71,17 @@ echo "      核心 torch 闭包（${torch_links}）..."
         --require-hashes -r "$sums_tmp/torch-reqs.txt"
     rm -rf "$sums_tmp"
 }
-# 小包始终在线从清华源拉；本地有 wheelhouse 目录则一并作 find-links 兜底。
-extra_links=""; [ -d wheelhouse ] && extra_links="--find-links wheelhouse"
+# 小包始终在线从清华源拉。
 echo "      其余依赖（在线，${PYPI_INDEX_URL}）..."
-pip install -r requirements/prod.txt -i "$PYPI_INDEX_URL" $extra_links
+pip install -r requirements/prod.txt -i "$PYPI_INDEX_URL"
 
 # ultralytics 会拉入 opencv-python，与 headless 版共享 cv2/ 文件，卸载非 headless 会连带
 # 删共享模块。force-reinstall 默认连依赖一起重装会把 numpy 顶到 2.x（撞 torch ABI），
 # 故 --no-deps 只重铺 cv2、不碰 numpy；随后显式复位 numpy 以防已被顶。
 echo "      修复 opencv headless..."
 pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
-pip install -i "$PYPI_INDEX_URL" $extra_links --no-deps --force-reinstall "opencv-python-headless<4.12.0"
-pip install -i "$PYPI_INDEX_URL" $extra_links "numpy==1.26.4"
+pip install -i "$PYPI_INDEX_URL" --no-deps --force-reinstall "opencv-python-headless<4.12.0"
+pip install -i "$PYPI_INDEX_URL" "numpy==1.26.4"
 
 # ── [2] ffmpeg → 项目内 .ffmpeg/（与 mediamtx 同为项目内二进制，免 sudo）──
 # 必须钉版：ffmpeg 4.x/8.x 对 -hls_fmp4_init_filename 解析差异巨大，见 docs/kb/DESIGN_HLS_TIMELINE.md。
