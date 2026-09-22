@@ -9,6 +9,6 @@
 按规范 §6，本单例只许被 `run_control` / `routers/*` / 本包 `lifespan()` 引用。
 """
 
-from app.services.health_monitor.manager import GlobalHealthMonitor
+from .manager import GlobalHealthMonitor
 
 health_monitor: GlobalHealthMonitor = GlobalHealthMonitor()

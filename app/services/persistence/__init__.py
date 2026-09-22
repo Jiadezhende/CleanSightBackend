@@ -28,7 +28,7 @@ async def lifespan():
 
     单例 import 写在函数体内（规范 §3）：写在模块级就等于把上面那笔过路费又收回来。
     """
-    from app.services.persistence.instance import persistence_manager
+    from .instance import persistence_manager
 
     persistence_manager.start()
     try:

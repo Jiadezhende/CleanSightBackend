@@ -19,16 +19,16 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
-from app.services.inference.config import FALLBACK_STAGE
-from app.services.inference.temporal import alarm_sink
-from app.services.inference.temporal.actor import ClientTemporalActor
+from .config import FALLBACK_STAGE
+from .temporal import alarm_sink
+from .temporal.actor import ClientTemporalActor
 
 # 两个只在 `_build_components()` 里实例化的重组件走 TYPE_CHECKING + 函数体内导入
 # （规范 §2 通路 2）：`visualization.pool` → worker → visualizer 顶层 `import cv2`，
 # 写在模块级会让 `import app.main`（经 run_control → instance）一律拉起 OpenCV。
 if TYPE_CHECKING:
-    from app.services.inference.detection.service import DetectionService
-    from app.services.inference.visualization.pool import VisualizationWorkerPool
+    from .detection.service import DetectionService
+    from .visualization.pool import VisualizationWorkerPool
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class InferenceManager:
         # 抓帧有 33~66ms 抖动；抬到 raw_fps 后每帧新推理都能在一个 tick 内被抓到（空转 tick 仅读单槽+
         # 比 ts，~µs 级，不增推理量）。raw_fps 是已有的跨模块真源，无需新旋钮。
         # 注：HLS processed 打标另由 eff_fps 从 ts 反推、模型输入另由 model_input_fps 契约重采样，均不借本值。
-        from app.services.inference.visualization.pool import VisualizationWorkerPool
+        from .visualization.pool import VisualizationWorkerPool
 
         self.visualization_pool = VisualizationWorkerPool(
             target_fps=settings.raw_fps,          # 轮询率：源视频帧率，对 inference 流 2× 过采样
@@ -111,7 +111,7 @@ class InferenceManager:
         # 注：FactLedger（事实账本）是**离线异步写**的 store，生命周期归离线 runner，不由在线 manager
         # 调度——故此处不持有、不 open_fresh/close/flush。待离线流水线建起时由其自行 new + 驱动
         # （同一 storage_base_dir）。类/契约见 feature/store.py，休眠预留。
-        from app.services.inference.feature.store import FeatureStore
+        from .feature.store import FeatureStore
         self.feature_store = FeatureStore(self._db_dir)
 
         self._model_worker_service = self._create_async_model_worker_service()
@@ -130,8 +130,8 @@ class InferenceManager:
         """
         if self._stage_configs is None:
             try:
-                from app.services.inference.stage_factory import StageFactory
-                from app.services.inference.config import load_stage_config
+                from .stage_factory import StageFactory
+                from .config import load_stage_config
 
                 config = load_stage_config()
                 factory = StageFactory(config)
@@ -189,7 +189,7 @@ class InferenceManager:
         return self._stage_configs
 
     def _create_async_model_worker_service(self):
-        from app.services.inference.detection.service import DetectionService
+        from .detection.service import DetectionService
 
         return DetectionService(
             stage_configs=self._get_stage_configs(),
@@ -332,9 +332,9 @@ class InferenceManager:
         # 初始化全局映射（均由 YAML 驱动）：
         #   task_name → AlarmMetric（实时信号指标）
         #   stage 主键(step_id) → alias（写告警 step_name + 可视化叠字）
-        from app.services.inference.stage_factory import StageFactory
-        from app.services.inference.config import load_stage_config
-        from app.services.inference.naming import _set_task_metric_map, _set_stage_alias_map
+        from .stage_factory import StageFactory
+        from .config import load_stage_config
+        from .naming import _set_task_metric_map, _set_stage_alias_map
         _factory = StageFactory(load_stage_config())
         _set_task_metric_map(_factory.build_task_metric_map())
         _set_stage_alias_map(_factory.build_stage_alias_map())

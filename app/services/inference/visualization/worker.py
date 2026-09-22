@@ -25,7 +25,7 @@ from app.domain.render import RenderSpec
 from app.domain.frame import Frame
 from app.services.inference.naming import get_stage_alias
 from app.services.client import client_manager
-from app.services.inference.visualization.visualizer import FixedVisualizer
+from .visualizer import FixedVisualizer
 
 logger = logging.getLogger(__name__)
 

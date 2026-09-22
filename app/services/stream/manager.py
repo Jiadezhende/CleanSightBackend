@@ -54,7 +54,7 @@ def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
 # 导入配置加载器
 try:
     from app.services.client.config import get_client_config
-    from app.services.stream.config import get_stream_config
+    from .config import get_stream_config
 
     _stream_config = get_stream_config()
     _client_config = get_client_config()

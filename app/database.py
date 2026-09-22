@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import QueuePool
 
-from app.settings import settings
+from .settings import settings
 
 logger = logging.getLogger("app.database")
 

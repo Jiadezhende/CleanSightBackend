@@ -258,7 +258,7 @@ class GuardedExecutor:
         """
         # 如果有重试，记录到 metrics
         if attempts > 0:
-            from app.utils.metrics import retry_total
+            from .metrics import retry_total
 
             retry_total.labels(operation=policy_name, error_type="recovered").inc()
 
@@ -274,7 +274,7 @@ class GuardedExecutor:
             action: 处理动作
             attempts: 尝试次数
         """
-        from app.utils.metrics import gpu_oom_total, retry_total
+        from .metrics import gpu_oom_total, retry_total
 
         exc_type = type(exc).__name__
 

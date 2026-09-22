@@ -110,3 +110,27 @@
 - **是搬家不是删除**：先确认 KB / update 里已有落点（没有就先补），再把代码里那段换成一行链接。
 - 一段论证只留一处，别把 `docs/update/` 的正文抄进 docstring。
 - 包 `__init__.py` 是 facade，写清楚导出什么、有什么硬约束即可；域的完整说明归 KB 的 `DESIGN_*.md`。
+
+---
+
+## 8. 导入规范
+
+四条硬规则，全部由 [tests/test_import_hygiene.py](../tests/test_import_hygiene.py) 门禁执行（`app/` 与 `mediamtx_gateway/` 同等适用）：
+
+- **包内一律相对、跨包一律绝对**。判据是「目标是不是我这个包的后代」，不是目录深浅：
+
+  ```python
+  # app/services/inference/manager.py
+  from .config import load_stage_config              # ✓ 同目录
+  from .detection.service import DetectionService    # ✓ 本包子包
+  from app.services.client.manager import client_manager   # ✓ 跨包（跨服务依赖一眼可见）
+  from app.services.inference.naming import stream_name    # ✗ 包内却写了绝对
+  ```
+
+- **相对导入不上翻**：只许 `from .x import`，禁止 `from ..x` / `from ...x`。要引用兄弟包或父包，写绝对路径。
+- **重依赖（`torch` / `ultralytics` / `cv2`）不写在模块顶层**，写进函数体内；例外只有 `impl/` 下经 `importlib` 按配置加载的实现模块。新增分层包模块要同步在门禁的 `BUDGET` 里登记一行。
+- **`__init__.py` 不 re-export 单例 / manager / impl**：模块级只允许 import 轻量类型；指向 `instance` / `manager` 的 import 写在 `lifespan()` 等函数体内。
+
+> 前两条不是风格偏好：单例引用面与分层白名单两条门禁都按模块名判定依赖，同一条依赖若有两种写法就有绕过的口子。
+
+背景与推导见 [update/20260903_PACKAGE_LAYOUT_SPEC.md](update/20260903_PACKAGE_LAYOUT_SPEC.md)、[update/20260922_IMPORT_CONVENTION.md](update/20260922_IMPORT_CONVENTION.md)。

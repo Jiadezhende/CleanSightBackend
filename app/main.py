@@ -9,12 +9,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.utils.gateway import GatewayMiddleware
+from .utils.gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from app.routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
-from app.services import health_monitor, inference, persistence, recording, stream
-from app.utils import (
+from .routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
+from .services import health_monitor, inference, persistence, recording, stream
+from .utils import (
     AppError,
     ConflictError,
     DatabaseError,
@@ -25,12 +25,12 @@ from app.utils import (
     StreamConnectionError,
     ValidationError,
 )
-from app.utils.metrics import get_metrics
+from .utils.metrics import get_metrics
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    from app.settings import settings
+    from .settings import settings
 
     # 设置日志级别（从 CLEANSIGHT_LOG_LEVEL 读取）
     numeric_level = getattr(logging, settings.log_level.upper(), logging.INFO)
@@ -465,7 +465,7 @@ def main():
         # 启动 FastAPI 应用
         import uvicorn
 
-        from app.settings import settings
+        from .settings import settings
 
         # 确保日志目录存在（TimedRotatingFileHandler 需要）
         os.makedirs("logs", exist_ok=True)

@@ -5,7 +5,7 @@
 
 from sqlalchemy import BigInteger, Boolean, Column, String, Text
 
-from app.database import Base
+from .database import Base
 
 
 # NOTE: 无代码平台托管表，_id 是平台主键(varchar)，业务主键是 task_id

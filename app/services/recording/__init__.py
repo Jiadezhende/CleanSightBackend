@@ -49,7 +49,7 @@ async def lifespan():
 
     单例 import 写在函数体内（规范 §3）：写在模块级就等于把上面那笔过路费又收回来。
     """
-    from app.services.recording.instance import recording_service
+    from .instance import recording_service
 
     recording_service.start()
     try:
