@@ -100,4 +100,4 @@ RELOAD=""
 [ "$ENV" = "dev" ] && RELOAD="--reload"
 
 # 前台启动后端
-uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" $RELOAD --log-config logging_config.json
+uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" $RELOAD --log-config config/logging.json

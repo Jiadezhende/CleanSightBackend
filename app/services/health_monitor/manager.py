@@ -19,8 +19,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from app.services.health_monitor.config import HealthMonitorConfig
-from app.services.health_monitor.types import ReconnectState
+from .config import HealthMonitorConfig
+from .types import ReconnectState
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,7 @@ class GlobalHealthMonitor:
         一并拽进来（recording 则拽 numpy/cv2），那是 import 期不该付的钱。
         """
         if self.config is None:
-            from app.services.health_monitor.config import get_health_monitor_config
+            from .config import get_health_monitor_config
 
             self.config = get_health_monitor_config()
         if self._client_manager is None:

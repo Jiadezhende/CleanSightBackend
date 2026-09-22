@@ -6,6 +6,6 @@
 按规范 §6，本单例只许被 `run_control` / `routers/*` / 本包 `lifespan()` 引用。
 """
 
-from app.services.stream.manager import StreamService
+from .manager import StreamService
 
 stream_service: StreamService = StreamService()

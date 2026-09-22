@@ -141,7 +141,7 @@ try {
     $reload = if ($env.ToLower() -eq "dev") { "--reload" } else { "" }
 
     # 前台启动后端
-    $uvArgs = @("app.main:app", "--host", "0.0.0.0", "--port", "$BackendPort", "--log-config", "logging_config.json")
+    $uvArgs = @("app.main:app", "--host", "0.0.0.0", "--port", "$BackendPort", "--log-config", "config/logging.json")
     if ($reload) { $uvArgs += $reload }
     & uvicorn @uvArgs
 }

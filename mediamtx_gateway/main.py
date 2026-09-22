@@ -10,8 +10,7 @@ MediaMTX Gateway — 独立微服务入口
 
 与主后端完全解耦，拥有独立的 Store 实例，各自的 IP 规则互不影响。
 
-启动方式：
-  python mediamtx_gateway/main.py
+启动方式（只有这一种，须在仓库根目录下执行）：
   python -m mediamtx_gateway.main
 """
 
@@ -20,20 +19,11 @@ import configparser
 import logging
 import os
 import signal
-import sys
 from pathlib import Path
 
-# 将项目根目录加入 sys.path，以便导入 app.utils
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from app.utils.gateway import IPWhitelistStore, RateLimitStore
-from mediamtx_gateway.rtsp_proxy import RTSPProxy
+from .rtsp_proxy import RTSPProxy
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger("mediamtx_gateway")
 
 _CONFIG_PATH = Path(__file__).parent / "config.ini"
@@ -171,6 +161,14 @@ async def _run_mediamtx(
 
 
 async def _main() -> None:
+    # 日志配置放进程入口、不放模块级：模块级 basicConfig 会在任何人 import 本模块时
+    # （测试、工具脚本）顺手改掉根 logger，与 stage_worker 的做法保持一致。
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     conf = _load_config()
     logger.info("[Gateway] listen=:%d → 127.0.0.1:%d", conf["listen_port"], conf["target_port"])
 

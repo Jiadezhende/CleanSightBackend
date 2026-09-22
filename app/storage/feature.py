@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
 from app.domain.detection import Detection, FrameDetections, FrameFeature
-from app.storage import _root
+from . import _root
 
 logger = logging.getLogger(__name__)
 

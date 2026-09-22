@@ -8,7 +8,7 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
-from app.services.inference.visualization.worker import VisualizationWorker
+from .worker import VisualizationWorker
 from app.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)

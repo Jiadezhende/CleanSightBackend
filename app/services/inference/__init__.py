@@ -58,7 +58,7 @@ async def lifespan():
     单例 import 写在函数体内（规范 §3）：这是本包「零 re-export」原则的开关条款——
     写在模块级就等于把 `instance.py` 的 eager 构造重新摊给每个 import 本包的人。
     """
-    from app.services.inference.instance import inference_manager
+    from .instance import inference_manager
 
     inference_manager.start()
     logger.info("[InferenceService] Inference service started")

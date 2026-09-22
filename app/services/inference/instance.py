@@ -9,6 +9,6 @@ import 本模块时才构造，避免任何 `import app.services.inference.*` �
 经 cq_kwargs 注入；可视化轮询率由 manager 内部直读 settings.inference_fps 派生。
 """
 
-from app.services.inference.manager import InferenceManager
+from .manager import InferenceManager
 
 inference_manager = InferenceManager()

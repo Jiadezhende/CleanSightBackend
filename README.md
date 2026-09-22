@@ -18,29 +18,40 @@ CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同
 ## 项目结构
 
 ```
+install.sh / install.ps1          # 装环境（Linux / Windows），物料从源机拉
+start_backend.sh / start_backend.ps1  # 一条命令拉起网关（含 MediaMTX）+ 后端，端口在此声明
+build.sh                          # 构建机打物料（wheelhouse + vendor），只在升级版本时跑
 app/
 ├── main.py              # FastAPI 入口，lifespan 启停各 Service 单例
 ├── settings.py          # 全局配置（Pydantic Settings，读 .env）
 ├── database.py          # SQLAlchemy 连接池（PostgreSQL）
 ├── models.py            # ORM：DBTask / DBAlarm
-├── domain/              # 跨服务共享契约（纯 dataclass）：frame / detection / alarm / render
+├── domain/              # 跨服务共享契约（纯 dataclass）：frame / detection / fact / alarm / render
 ├── routers/             # HTTP/WS 路由：api / ai / task / health / traceback / media / lab / admin
 ├── services/
 │   ├── run_control.py   # RunController — 跨服务起停一次 run 的单一编排出口
 │   ├── client/          # ClientManager 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
 │   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
-│   ├── persistence/     # HLS 落盘 + 告警落库（strategies/ workers/）
+│   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
+│   ├── persistence/     # 告警落库与上报 + TTL 清理（HLS 写侧已迁 recording/）
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunController）
 │   ├── traceback/       # 溯源段定位 + 媒体 token 鉴权
 │   └── lab/             # 送标裁剪 + Label Studio 上传
-├── data/                # 模型权重：bubble / bend / clean-large / clean-small / gru-final（CLEAN 动作分类）.pt
+├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
+├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 deploy skill
 └── utils/               # 异常 / GuardedExecutor / 网关中间件 / Prometheus 指标 / 上下文
-config/                  # 各服务 YAML（inference / stream / persistence / client / health_monitor）
+config/                  # 运维要改的配置：六份服务 YAML + uvicorn 日志 logging.json
+requirements/            # 依赖清单：base.txt 底座 + 按部署路径分的 prod / gpu / ppu
 mediamtx_gateway/        # RTSP TCP 代理网关（独立进程，对外部署可选）
-tests/  integration_tests/  # 单元 & 组件测试 / 端到端集成测试
-docs/                    # 外部文档（API 契约 / 上手 / 规范）；架构知识库见 docs/kb/
+tests/                   # 单元 & 组件测试（裸 pytest 只跑这里）
+integration_tests/       # 端到端集成测试（需真实 RTSP 流），fixtures/ 放测试视频
+scripts/                 # 偶尔手动跑的运维工具（迁移 / SQL）；hospital_sync/ 是医院数据同步的独立交付物，不属后端主链路
+docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口契约，外加开发规范与快速开始
+.claude/skills/deploy/   # 部署规范唯一入口：先定平台与角色，再读对应 references
 ```
+
+根目录只放**每台机器都要跑的生命周期入口**（装、起、打物料）；偶尔跑的工具进 `scripts/`。
 
 ---
 
@@ -55,29 +66,28 @@ docs/                    # 外部文档（API 契约 / 上手 / 规范）；架�
 ### 依赖组件
 
 - **FFmpeg**：视频解码（必需）
-- **MediaMTX**：流媒体网关，端口 1935（RTMP 接入）/ 8004（RTSP）；二进制不随 git 分发，见部署指南
+- **MediaMTX**：流媒体网关，内部 RTSP 18004，经网关对外 8004；二进制不随 git 分发，安装脚本从源机拉到项目内
 - **PostgreSQL**：任务与告警持久化
 
 ### 配置文件
 
 - 环境变量：`.env` / `.env.dev` / `.env.test`（`CLEANSIGHT_` 前缀，单一真源 `app/settings.py`）
-- YAML：`config/inference_config.yaml`、`stream_config.yaml`、`persistence_config.yaml`、`client_config.yaml`、`health_monitor_config.yaml`
+- 服务 YAML：`config/` 下 `inference_config.yaml`、`stream_config.yaml`、`persistence_config.yaml`、`recording_config.yaml`、`client_config.yaml`、`health_monitor_config.yaml`
+- 日志：`config/logging.json`（uvicorn dictConfig，路径硬编码、无环境变量开关）
+- Python 工具配置（pytest / 覆盖率）：`pyproject.toml`
 
-> 完整部署步骤（Linux 生产 + Windows 开发安装）见 [部署指南](docs/DEPLOYMENT.md)；开发规范（分支/测试/模块解耦）见 [开发指南](docs/DEVELOPMENT.md)。
+> 部署（Linux / Windows / PPU 装环境、物料、`.env` 与端口）见 `/deploy` skill：[.claude/skills/deploy/SKILL.md](.claude/skills/deploy/SKILL.md)；开发规范（分支/测试/模块解耦）见 [开发指南](docs/DEVELOPMENT.md)。
 
 ---
 
 ## 快速开始
 
 ```bash
-# 启动 MediaMTX（终端 1）
-cd mediamtx && ./mediamtx        # Linux；Windows 用 ./mediamtx.exe
-
-# 启动后端（终端 2）
 ./start_backend.sh dev           # Linux（加载 .env.dev）
 .\start_backend.ps1 dev          # Windows
-# 或直接：python -m app.main
 ```
+
+一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，不要再单独起 MediaMTX。装环境走 `./install.sh` / `.\install.ps1`，细节见 `/deploy` skill。
 
 起流后打开后端自带的 **admin 运维面板**观测运行状态（实时画面 / 队列健康 / 指标 / 告警列表）：`http://localhost:8000/admin-f3m8/ui/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
 
@@ -99,10 +109,11 @@ graph LR
     A[RTSP 流] --> B[StreamService / FFmpegDecoder]
     B --> C[ClientQueues]
     C --> D[Inference：Detector 检测→特征聚合/落盘→Operator 时序判定 1Hz→可视化]
-    D --> E[PersistenceManager]
+    D --> E[RecordingService]
     D --> F[WebSocket 前端轮询]
+    D --> H[PersistenceManager]
     E --> G[HLS 视频段]
-    E --> H[告警落库/上报]
+    H --> I[告警落库/上报]
 ```
 
 ### 数据流
@@ -112,15 +123,15 @@ RTSP (30fps)
   ↓ [FFmpegDecoder 自持读循环，ffmpeg 输出规范化 CFR raw_fps]
 ca_ready（SPSC 无锁 deque，Bresenham 抽帧至 inference_fps）   ca_raw（完整录制缓冲）
   ↓ [Detector 检测 → 特征聚合并落盘 features.jsonl → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
-ca_processed → [HLS 分段：persistence 周期 PULL 拉取整段]
+ca_processed → [HLS 分段：recording 周期 PULL 拉取整段]
 _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 ```
 
 - `ca_ready`：待推理帧，无锁 SPSC deque（decoder 单产 / dispatcher 单消）
-- `ca_raw` / `ca_processed`：raw / processed HLS 纯缓冲，persistence 主动拉取分段
+- `ca_raw` / `ca_processed`：raw / processed HLS 纯缓冲，recording 主动拉取分段
 - `_latest_rendered` / `_latest_inference` / `_slide_window` / `_latest_temporal`：渲染帧 / 推理快照 / 检测滑窗 / 时序事件
 
-线程角色：检测（StageAwareDispatcher + 每 stage 推理线程，可选 CUDA Stream）、时序（`ClientTemporalActor` per-run ~1Hz）、可视化（独立线程）、持久化（HLS Worker×2 + Alarm Worker×1 + 段 sweeper + 清理 worker）。详见 [知识库](docs/kb/INDEX.md)。
+线程角色：检测（StageAwareDispatcher + 每 stage 推理线程，可选 CUDA Stream）、时序（`ClientTemporalActor` per-run ~1Hz）、可视化（独立线程）、录制（段 sweeper + 一条 SerialTaskQueue 消费线程）、持久化（Alarm Worker×1 + 清理 worker）。详见 [知识库](docs/kb/INDEX.md)。
 
 ---
 
@@ -146,7 +157,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 
 ```bash
 pytest                                              # 单元 & 组件测试
-pytest --cov=app --cov-report=html                  # 覆盖率报告
+pytest --cov --cov-report=html                      # 覆盖率报告（app/ + mediamtx_gateway/）
 
 # 端到端（需真实 RTSP；观测走 admin 面板 /admin-f3m8/ui/）
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
@@ -176,13 +187,13 @@ python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      
 
 | 现象 | 排查 |
 |------|------|
-| `ffmpeg not found` | 安装 FFmpeg（`apt install ffmpeg` / `brew install ffmpeg` / `choco install ffmpeg`），`ffmpeg -version` 验证 |
+| `ffmpeg not found` | 后端只认项目内 `.ffmpeg/bin/ffmpeg`，不回退系统 PATH；重跑 `install.sh` / `install.ps1` 从源机拉钉版 ffmpeg，别装系统版 |
 | 数据库连接失败 | 检查 `.env` 数据库配置、服务是否运行、网络/防火墙 |
 | `CUDA not available` | `nvidia-smi` 查驱动，`torch.cuda.is_available()` 验证；否则自动降级 CPU |
-| 推流超时 / Stream not found | 确认 MediaMTX 运行、URL `rtsp://<host>:8004/live/<name>`、端口 1935/8004 开放 |
+| 推流超时 / Stream not found | 确认 8004 与 18004 都在听（网关日志看 MediaMTX 是否起来）、URL `rtsp://<host>:8004/live/<name>` |
 | WebSocket 断开 | 检查网络、客户端超时、后端日志 |
 
-日志按模块 `[Module]` 前缀着色输出（`logging_config.json`）。更多帮助见 [知识库](docs/kb/INDEX.md) 与 [部署指南](docs/DEPLOYMENT.md)。
+日志按模块 `[Module]` 前缀着色输出（`config/logging.json`）。更多帮助见 [知识库](docs/kb/INDEX.md) 与 `/deploy` skill。
 
 ---
 

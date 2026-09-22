@@ -22,7 +22,7 @@
     --rtsp-port   <int>                默认 8004（RTSPProxy 推流端口）
     --task_id     <int>                必填
     --duration    <seconds>            默认 60
-    --video_path  <path>               默认 test/test_video.mp4
+    --video_path  <path>               默认 integration_tests/fixtures/test_video.mp4
     --fps         <int>                默认 30
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
     --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
@@ -790,7 +790,7 @@ def main():
              "实现「任意阶段 × 任意生命周期」自由组合。",
     )
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
-    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
+    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: fixtures/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
     parser.add_argument(
         "--mode",
@@ -808,7 +808,7 @@ def main():
     args = parser.parse_args()
 
     if args.video_path is None:
-        args.video_path = str(Path(__file__).parent.parent / "test" / "test_video.mp4")
+        args.video_path = str(Path(__file__).parent / "fixtures" / "test_video.mp4")
 
     # 端口随 args 透传（args.api_port / args.rtsp_port），不再使用模块级全局
 

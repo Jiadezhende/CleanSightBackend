@@ -215,7 +215,7 @@ def _extract_client_id(args: tuple, kwargs: dict) -> Optional[str]:
         return getattr(args[0], "client_id", None)
 
     # 回退到线程上下文
-    from app.utils.context import get_client_id
+    from .context import get_client_id
     return get_client_id()
 
 

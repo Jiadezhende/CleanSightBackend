@@ -29,7 +29,7 @@ async def lifespan():
 
     单例 import 写在函数体内（规范 §3）：import 本包不该连带构造出 StreamService。
     """
-    from app.services.stream.instance import stream_service
+    from .instance import stream_service
 
     try:
         yield

@@ -1,7 +1,7 @@
 # CleanSight Backend 开发规范
 
 本文是 CleanSight Backend 的开发**约定**。
-环境安装（Linux 生产 / Windows 开发）与物料分发见 [DEPLOYMENT.md](DEPLOYMENT.md)；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
+环境安装、物料分发与 `.env` / 端口配置见 `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
 
 ---
 
@@ -67,7 +67,7 @@
   - `CRITICAL` — 致命、无法继续：必要组件启动失败、模型文件缺失。
 - **热路径不打 DEBUG**：每秒数千次的循环（帧处理）用批量/采样日志；复杂计算的日志先守卫 `if logger.isEnabledFor(logging.DEBUG):`。
 - **分隔**：多参数用 `|`，列表项用 `,`；配置详情块仅 DEBUG，用 `===` 包裹。
-- **日志配置**（`logging_config.json`）见 [kb/SERVICE_CONFIG.md](kb/SERVICE_CONFIG.md)。
+- **日志配置**（`config/logging.json`）见 [kb/SERVICE_CONFIG.md](kb/SERVICE_CONFIG.md)。
 
 ---
 
@@ -110,3 +110,27 @@
 - **是搬家不是删除**：先确认 KB / update 里已有落点（没有就先补），再把代码里那段换成一行链接。
 - 一段论证只留一处，别把 `docs/update/` 的正文抄进 docstring。
 - 包 `__init__.py` 是 facade，写清楚导出什么、有什么硬约束即可；域的完整说明归 KB 的 `DESIGN_*.md`。
+
+---
+
+## 8. 导入规范
+
+四条硬规则，全部由 [tests/test_import_hygiene.py](../tests/test_import_hygiene.py) 门禁执行（`app/` 与 `mediamtx_gateway/` 同等适用）：
+
+- **包内一律相对、跨包一律绝对**。判据是「目标是不是我这个包的后代」，不是目录深浅：
+
+  ```python
+  # app/services/inference/manager.py
+  from .config import load_stage_config              # ✓ 同目录
+  from .detection.service import DetectionService    # ✓ 本包子包
+  from app.services.client.manager import client_manager   # ✓ 跨包（跨服务依赖一眼可见）
+  from app.services.inference.naming import stream_name    # ✗ 包内却写了绝对
+  ```
+
+- **相对导入不上翻**：只许 `from .x import`，禁止 `from ..x` / `from ...x`。要引用兄弟包或父包，写绝对路径。
+- **重依赖（`torch` / `ultralytics` / `cv2`）不写在模块顶层**，写进函数体内；例外只有 `impl/` 下经 `importlib` 按配置加载的实现模块。新增分层包模块要同步在门禁的 `BUDGET` 里登记一行。
+- **`__init__.py` 不 re-export 单例 / manager / impl**：模块级只允许 import 轻量类型；指向 `instance` / `manager` 的 import 写在 `lifespan()` 等函数体内。
+
+> 前两条不是风格偏好：单例引用面与分层白名单两条门禁都按模块名判定依赖，同一条依赖若有两种写法就有绕过的口子。
+
+背景与推导见 [update/20260903_PACKAGE_LAYOUT_SPEC.md](update/20260903_PACKAGE_LAYOUT_SPEC.md)、[update/20260922_IMPORT_CONVENTION.md](update/20260922_IMPORT_CONVENTION.md)。

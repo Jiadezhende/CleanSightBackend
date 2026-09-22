@@ -77,9 +77,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # 日志配置
+    # 日志配置。uvicorn 的 dictConfig 文件路径不做成开关——它不随环境变化，
+    # 位置硬编码在 app/main.py 与两个 start_backend 脚本里（config/logging.json）。
     log_level: str = "INFO"
-    log_config: str = "logging_config.json"
 
     # 外部工具（ffmpeg_path 留空 = 用项目自包含的 .ffmpeg/bin/ffmpeg，不回退 PATH）
     ffmpeg_path: str = ""
