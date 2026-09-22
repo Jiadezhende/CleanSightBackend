@@ -17,7 +17,8 @@
 
 `{task}/{step}/` 下有两份推理产物：`features.jsonl`（L1 目标检测，每帧一行）与
 `facts.jsonl`（L3 时序分析，每条一行）。前者的落盘能力已经进了数据层
-（[`app/storage/feature.py`](../../app/storage/feature.py)），后者**刻意没迁**——理由写在那个模块的
+（当时的 `app/storage/feature.py`，本批之后随域目录改名成
+[`app/storage/inference/_detection.py`](../../app/storage/inference/_detection.py)），后者**刻意没迁**——理由写在那个模块的
 docstring 里：`EventFact` / `SegmentFact` 住在 `app.services.inference.types`，
 `app/storage/` 的依赖白名单不许 import 服务层，货币只能退成 `dict`，与 features 侧收发
 `FrameFeature` 不对称。于是一份产物的路径知识劈成两处。

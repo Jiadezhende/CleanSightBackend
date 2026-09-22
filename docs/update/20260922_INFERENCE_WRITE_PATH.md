@@ -187,3 +187,10 @@ FactLedger.replace_segments → _replace_own_segments：read_facts → 丢掉自
 | 进程直接停机（非 `stop_run`）时 cq 里 ≤1 s 的特征没人拉 | 每个 step 尾部少 ≤15 帧 | 接受，与 HLS 残段同口径 |
 | 两条队列后 `tasks.delete_step` 只能在一条队列里串行 | 跨域删除与另一条队列的在途写可能乱序 | 现状无人调 `delete_step`（TTL 直接 rmtree），真要接线时需两条队列各设栅栏 |
 | features 队列满时的 warning 量 | 磁盘持续故障下每 tick 一条 | 当前每 client 每秒至多一条，未加去重；真出现再收 |
+
+## 合入 dev 后的订正（2026-09-22）
+
+dev 的导入规范（[20260922_IMPORT_CONVENTION](20260922_IMPORT_CONVENTION.md)：包内相对、跨包绝对）
+合进来后，本批三份记录里的新增模块只有 `app/storage/inference/_temporal.py` 一处违规
+（`from app.storage.inference import _jsonl, _layout` → `from . import _jsonl, _layout`），已改。
+合并后全量 **866 passed**（本批基线 865 + dev 侧网关新增 1）。
