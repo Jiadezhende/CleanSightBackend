@@ -172,7 +172,7 @@ class RemoteInferProxy:
         """排空在途批（写回落盘）→ 停两线程 → 杀子进程 → 剩余在途计丢帧。"""
         self._no_restart.set()  # 监督线程不再重启
 
-        # 1. 排空在途：子进程仍活着，让 collector 把在途批写回（先于上层 feature_store.flush）
+        # 1. 排空在途：子进程仍活着，让 collector 把在途批写回（进 cq 缓冲，由 recording 拉走）
         deadline = time.monotonic() + self._drain_timeout
         while time.monotonic() < deadline:
             with self._lock:
@@ -323,7 +323,7 @@ class RemoteInferProxy:
                 detections=per_frame, cq=rec.cq,
                 frame_width=rec.frame_width, frame_height=rec.frame_height,
             ))
-        # 写回主链路：其内 cq.is_active() 门 + feature_store owner fence 处理迟到/跨 run
+        # 写回主链路：其内 cq.is_active() 门挡迟到/跨 run；落盘侧代次隔离归 recording 的代次表
         self._write_back(frame_infs)
         self._emit_stats(merged, len(records))
 

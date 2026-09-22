@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     cuda_device: str = "0"
 
     # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
-    # persistence / inference / traceback 三方都读 settings.storage_base_dir，
+    # 落盘读写经 app/storage 的 _root 解析它；persistence / traceback / lab 的旧代码直读，
     # 不再各自重算或互相 push（消除跨服务穿透）。
     storage_dir: str = "./database"
 

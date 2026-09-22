@@ -194,3 +194,9 @@ dev 的导入规范（[20260922_IMPORT_CONVENTION](20260922_IMPORT_CONVENTION.md
 合进来后，本批三份记录里的新增模块只有 `app/storage/inference/_temporal.py` 一处违规
 （`from app.storage.inference import _jsonl, _layout` → `from . import _jsonl, _layout`），已改。
 合并后全量 **866 passed**（本批基线 865 + dev 侧网关新增 1）。
+
+**验收后清残留（2026-09-22）**：`InferenceManager` 的 `db_dir` 构造参数与 `_db_dir` 字段是
+FeatureStore 的遗骸（只剩一句 `mkdir`、无人读），删除；`manager.stop_workflow` /
+`infer_proxy` / `stage_factory` / `app/domain/fact.py` 里指向 `feature_store`、`open_fresh`、
+`SegmentFact.source`、「旧型仍在 types.py」的注释全部改掉；`manager.stop` 的停机注释改为如实
+写「最后不到 1 s 的特征能否被拉走取决于时序，已接受」。两份 0921 记录头部状态改为生效中。

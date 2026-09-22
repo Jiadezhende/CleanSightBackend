@@ -185,4 +185,4 @@ class XxxOperator(GRUOperator):
         ...   # 每 AlignedFrame → 一行特征；class_id 经 self.objects 映射到全局槽位，别赌两 .pt 共享标签
 ```
 
-> ⚠️ `_adapt_to_features` 是静默错重灾区（class_id 撞槽、缺席 vs 零框、归一化分辨率来源）——写完务必走 `/temporal-review`。重模型全序列分割（MS-TCN，感受域 ≈2047 帧、需大量未来帧）走**离线链路**读 FeatureStore，不用本模板。
+> ⚠️ `_adapt_to_features` 是静默错重灾区（class_id 撞槽、缺席 vs 零框、归一化分辨率来源）——写完务必走 `/temporal-review`。重模型全序列分割（MS-TCN，感受域 ≈2047 帧、需大量未来帧）走**离线链路**（`OfflineSegmenter` + `app.storage.inference.read_features`），不用本模板。

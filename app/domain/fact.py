@@ -14,10 +14,7 @@
 - **`meta` 只放伴随观测量**：任何被代码读来做判断的键都不许进去。
 
 身份键 `(task_id, step_id)` 不在本模块——它由落盘路径携带。落盘的 `type` 判别字段同样不在
-这里：那是格式知识，归 `app/storage/` 的 codec。
-
-> ⚠ `app/services/inference/types.py` 里还有一对同名旧型（字段是 `source`，事实身份塞在
-> `meta["producer"]`），调用点分批迁移中。字段已改名，两边混用是 `TypeError`，不会静默。
+这里：那是格式知识，归 `app/storage/inference` 的 codec。
 """
 
 from dataclasses import dataclass, field
