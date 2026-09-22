@@ -27,7 +27,7 @@
 
 ```text
 Python 工具配置（pytest / coverage）  →  pyproject.toml（只有 [tool.*]）
-依赖清单（平台三变体）                →  requirements/{base,cuda,cpu,ppu}.txt
+依赖清单（按部署路径）                →  requirements/{base,prod,gpu,ppu}.txt
 运维要改的配置（服务 yaml + 日志）    →  config/
 测试素材（只有集成测试读）            →  integration_tests/fixtures/
 无人引用的空壳 / 旧档                 →  删
@@ -50,20 +50,28 @@ Python 工具配置（pytest / coverage）  →  pyproject.toml（只有 [tool.*
 - `[tool.coverage.*]`：`.coveragerc` 整体搬入，原文件删除。
 - `[tool.pytest.ini_options]`：**只设 `testpaths = ["tests"]`**，裸 `pytest` 即只跑单元/组件测试。刻意不设 `asyncio_mode` / `addopts`——此前没有任何 pytest 配置文件，新增项都可能改变现有 827 个用例的行为，本批的约束是零行为变更。
 
-### 2. `requirements/` — base 底座 + 三个平台变体
+### 2. `requirements/` — base 底座 + 三条部署路径各一份
 
 ```text
 base.txt    平台无关全集（不含 torch，也不含 numpy），补回 lap>=0.5.12
-cuda.txt    -r base.txt + numpy==1.26.4                      ← install.sh / install.ps1 用这份
-cpu.txt     -r base.txt + numpy + --extra-index-url .../cpu + torch/torchvision
-ppu.txt     -r base.txt                                       ← torch/numpy 由系统 site-packages 提供
+prod.txt    -r base.txt + numpy==1.26.4                             ← Linux 生产，install.sh；torch 由 wheelhouse 装
+gpu.txt     -r base.txt + numpy + --extra-index-url cu128 + torch==2.8.0+cu128   ← Windows GPU 开发机，install.ps1
+ppu.txt     -r base.txt                                             ← torch/numpy 由系统 site-packages 提供
 ```
 
-**numpy 必须从 base 下放到各变体**：PPU 机器要的是「不装 numpy」（厂商 torch 按 numpy 2.x 编译，降到 1.26.4 立刻废，见 [20260912_PPU_PLATFORM_DEPS.md](20260912_PPU_PLATFORM_DEPS.md)），而 `-r` 只能加不能减。torch 本就不在 base（版本钉在 `deploy.conf` 的 `TORCH_PKGS`，走 wheelhouse 离线装）。
+**按部署路径分，不按"能不能复用"分**：三条路径三份文件，install 脚本各装自己那份、不再单独拼 torch 安装步骤——原 `install.ps1` 里那段 `$TORCH_PKGS` + `--index-url cu128` 的两步安装，就是这么收进 `gpu.txt` 一行 `pip install -r` 的。ffmpeg / mediamtx 怎么拉不归 requirements 管，那是 install 侧（linux / win 两个脚本）的事。
+
+**numpy 必须从 base 下放到各路径**：PPU 机器要的是「不装 numpy」（厂商 torch 按 numpy 2.x 编译，降到 1.26.4 立刻废，见 [20260912_PPU_PLATFORM_DEPS.md](20260912_PPU_PLATFORM_DEPS.md)），而 `-r` 只能加不能减。torch 同理不在 base：prod 从 wheelhouse 装、ppu 用系统的，只有 gpu 一份自己写。
+
+**`gpu.txt` 的 torch 版本带 `+cu128` 后缀是刻意的**：安装时主索引是清华源，那里 `torch==2.8.0` 在 Windows 是 CPU 构建；钉住本地版本号让 pip 只可能从 extra index 命中，不会静默装错构建。
+
+**原 `requirements-cpu.txt` 对应的 CPU-only 路径不再保留**：没有机器在用，删掉比留一份没人验证的清单干净。要在无 GPU 机上跑，用 `gpu.txt` 换 extra-index 为 `https://download.pytorch.org/whl/cpu`、版本后缀改 `+cpu` 即可。
 
 不用 pyproject 的 `optional-dependencies` 收：`--extra-index-url` 与「刻意不装某包」这两件事 extras 表达不了，且 `install.sh` 是 `pip install -r` + 事后修 opencv / 钉回 numpy 的流程，换 extras 要重写安装脚本。
 
 `pytest` 三件套暂不拆 `dev.txt`——备份机要跑测试（[20260915_BACKUP_HOST_DUAL_ENV.md](20260915_BACKUP_HOST_DUAL_ENV.md)），拆了那台得装两份。
+
+调用点：`install.sh` 改 `-r requirements/prod.txt`；`install.ps1` 的 torch 单独安装步骤与 `requirements.txt` 安装合并为一行 `-r requirements/gpu.txt`；`docs/DEPLOYMENT.md` 流程描述同步。`docs/update/` 里的历史引用不回改（那些记录的是当时事实）。
 
 ### 3. 日志配置：搬进 `config/`，并把「半个开关」整个砍掉
 
@@ -110,7 +118,7 @@ ppu.txt     -r base.txt                                       ← torch/numpy �
 |------|--------|--------|
 | 根目录可见条目 | 27 | 21 |
 | pytest 配置 | 无任何配置文件 | `pyproject.toml` 的 `[tool.pytest.ini_options]` |
-| 依赖清单 | 3 份手抄、已漂（`lap` 漏在 cpu） | 1 份底座 + 3 个只写差异的变体 |
+| 依赖清单 | 3 份手抄、已漂（`lap` 漏在 cpu） | 1 份底座 + 3 条部署路径各一份只写差异（CPU-only 路径删除） |
 | 日志配置路径 | 根目录，且有个被绕过的 env 开关 | `config/logging.json`，三处字面量、无开关 |
 | 测试素材 | `test/`（与 `tests/` 撞名） | `integration_tests/fixtures/` |
 | 权重入库 | 2 份 `.pt`（28M）被跟踪 | 已停跟踪，分发方式写进部署指南 |
@@ -122,7 +130,7 @@ ppu.txt     -r base.txt                                       ← torch/numpy �
 | 全量 `pytest`（裸跑，验 `testpaths`） | **827 passed**，与改动前基线一致 |
 | `pytest tests/test_mediamtx_gateway.py` | 12 passed（网关用例仍被 `testpaths` 收） |
 | 覆盖率配置从 pyproject 生效 | `pytest --cov=app --cov-report=term-missing` 正常出报告，branch 列在、精度 1 位 |
-| `pip install --dry-run -r requirements/{cuda,cpu,ppu}.txt` | 三份均解析通过（清华源），`pip show lap` 有结果 |
+| `pip install --dry-run -r requirements/{prod,gpu,ppu}.txt` | 三份均解析通过（清华源），`pip show lap` 有结果 |
 | `logging.config.dictConfig(config/logging.json)` | 通过，5 个 handler 全部构造成功 |
 | `from app.settings import settings` | 正常；`hasattr(settings, "log_config")` 为 False |
 | 集成测试默认视频路径解析 | `integration_tests/fixtures/test_video.mp4` 存在 |

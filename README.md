@@ -39,7 +39,7 @@ app/
 ├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见部署指南
 └── utils/               # 异常 / GuardedExecutor / 网关中间件 / Prometheus 指标 / 上下文
 config/                  # 运维要改的配置：六份服务 YAML + uvicorn 日志 logging.json
-requirements/            # 依赖清单：base.txt 底座 + cuda / cpu / ppu 三个平台变体
+requirements/            # 依赖清单：base.txt 底座 + 按部署路径分的 prod / gpu / ppu
 mediamtx_gateway/        # RTSP TCP 代理网关（独立进程，对外部署可选）
 tests/                   # 单元 & 组件测试（裸 pytest 只跑这里）
 integration_tests/       # 端到端集成测试（需真实 RTSP 流），fixtures/ 放测试视频

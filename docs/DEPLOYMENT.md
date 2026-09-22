@@ -1,6 +1,6 @@
 # CleanSight Backend 部署指南
 
-事实来源是四个脚本：`deploy.conf`、`install.sh`、`install.ps1`、`build.sh`。与本文不符时以脚本为准。
+事实来源是三个脚本：`install.sh`、`install.ps1`、`build.sh`——各自开头有配置块。与本文不符时以脚本为准。
 
 - **生产** = Linux x86_64 + NVIDIA GPU，跑 `install.sh`。
 - **开发机** = Windows，跑 `install.ps1`；仅为便利，不作为生产标准。
@@ -19,7 +19,7 @@
 | 3 | 让管理员放通目标机 → 源机 `8088` | — |
 | 4 | 目标机验证源机可达 | `curl -I http://49.234.120.241:8088/wheelhouse/SHA256SUMS` |
 | 5 | 目标机写 `.env`（[§四](#四运行时配置)） | 至少填 DB 五项 + 告警 URL |
-| 6 | 安装（[§三](#三安装)） | `BASE_URL=http://49.234.120.241:8088 ./install.sh` |
+| 6 | 安装（[§三](#三安装)） | `./install.sh`（源机地址已写死在脚本开头） |
 | 7 | 确认脚本末尾自检全过 | torch / CUDA / cv2 / ffmpeg / MediaMTX |
 | 8 | **确认启动脚本声明的五个端口在本机空闲**（[§四·端口](#端口)） | 读 `start_backend.sh` 的 `BASE_*` 取值，逐个查占用 |
 | 9 | 启动 | `./start_backend.sh prod` |
@@ -50,37 +50,30 @@
 ### Linux 生产
 
 ```bash
-BASE_URL=http://49.234.120.241:8088 ./install.sh
+./install.sh
 ```
 
-`BASE_URL` 指向物料源机。两种给法，推荐前者（不改仓库文件）：
+源机地址已写死在 `install.sh` 开头的配置块里（当前 `http://49.234.120.241:8088`），常规部署不需要额外指定。换源机或临时指向别处时用环境变量覆盖：
 
 ```bash
-BASE_URL=http://<源机IP>:<端口> ./install.sh   # 临时指定
-BASE_URL="http://<源机IP>:<端口>"              # 或固定写进 deploy.conf
+BASE_URL=http://<源机IP>:<端口> ./install.sh
 ```
 
-**留空 `BASE_URL`** 则改用目标机本地物料，此时这三个文件必须已存在（同步方式见 [§六](#六物料源机)）：
+**三类物料统一走源机**，没有「本地物料」旁路：torch 闭包取 `${BASE_URL}/wheelhouse/`（pip 流式拉、逐 wheel 校 SHA），ffmpeg 与 MediaMTX 取 `${BASE_URL}/vendor/`。所以跑 install 前必须确认源机分发服务在线（[§六](#六物料源机)）。
 
-```text
-wheelhouse/SHA256SUMS
-vendor/ffmpeg/ffmpeg-linux-x64.tar.xz
-vendor/mediamtx/mediamtx-linux-x64.tar.gz
-```
+脚本依次做：建 `.venv/` → 从源机 wheelhouse 流式装 torch 闭包（逐 wheel 校 SHA）→ 从清华镜像装 `requirements/prod.txt` → 修 opencv 冲突并把 numpy 钉回 `1.26.4` → 从源机拉 ffmpeg 与 MediaMTX 并解包到项目内 → 末尾自检。
 
-脚本依次做：建 `.venv/` → 装 `TORCH_PKGS`（源自 wheelhouse）→ 从清华镜像装 `requirements/cuda.txt` → 修 opencv 冲突并把 numpy 钉回 `1.26.4` → 校验 SHA 后部署 ffmpeg 与 MediaMTX → 末尾自检。
-
-> 依赖清单分层：`requirements/base.txt` 是平台无关底座，`cuda.txt`（生产主线）/ `cpu.txt`（无 GPU 机）/ `ppu.txt`（阿里 PPU 机）各 `-r base.txt` 后只补自己那份 torch 与 numpy。改依赖只改 `base.txt`，除非改的就是 torch/numpy 本身。
+> 依赖清单按部署路径分：`requirements/base.txt` 是平台无关底座，`prod.txt`（Linux 生产）/ `gpu.txt`（Windows GPU 开发机）/ `ppu.txt`（阿里 PPU 机）各 `-r base.txt` 后只补自己那份 numpy 与 torch。改依赖只改 `base.txt`，除非改的就是 torch/numpy 本身。
 
 ### Windows 开发机
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass -Force
-$env:BASE_URL="http://49.234.120.241:8088"   # 可选，不给则从 deploy.conf 的 *_WIN_URL 在线下载
+# 源机地址同样已写死在 install.ps1 开头；换源机才需 $env:BASE_URL="http://<IP>:<端口>"
 .\install.ps1
 ```
 
-与生产的差异：torch 从 cu128 镜像在线装（不用 `wheelhouse/`）、Python 版本宽松、Windows 包不做 SHA 强校验。
+与生产的差异：Python 依赖装 `requirements/gpu.txt`——torch 经文件内的 extra-index 从 cu128 镜像在线拉（`wheelhouse/` 是 Linux cp310 轮子，Windows 用不了）、Python 版本宽松。ffmpeg 与 MediaMTX 同样取自源机，两个平台一致。
 
 ### 安装产物
 
@@ -93,15 +86,17 @@ mediamtx/mediamtx.yml     # 随仓库维护，安装脚本只更新二进制，�
 
 应用默认用项目内这两个二进制（`mediamtx_gateway/config.ini` 的 `mediamtx_bin = auto`），无需额外配置。
 
-### deploy.conf 变量速查
+### 配置在哪：每个脚本开头一块
 
-| 变量 | 用途 |
+没有共享的配置文件（原 `deploy.conf` 已删）。谁用的配置就写在谁开头：
+
+| 脚本 | 配置块里有什么 |
 |---|---|
-| `BASE_URL` | 物料源机地址；空 = 用本地 `wheelhouse/` 与 `vendor/` |
-| `TORCH_PKGS` | 核心重包，当前 `torch==2.8.0 torchvision==0.23.0` |
-| `FFMPEG_URL` / `FFMPEG_SHA256` | Linux 生产钉版 ffmpeg |
-| `MEDIAMTX_URL` / `MEDIAMTX_SHA256` | Linux 生产钉版 MediaMTX |
-| `FFMPEG_WIN_URL` / `MEDIAMTX_WIN_URL` | Windows 开发机二进制（无 SHA 校验） |
+| `build.sh` | 上游 `FFMPEG_URL` / `MEDIAMTX_URL` 与两个 `*_WIN_URL`、`TORCH_PKGS`、torch 索引。**升级版本改这里**，改完重跑并同步 `vendor/` 到源机 |
+| `install.sh` | 源机 `BASE_URL`、清华源地址。不含 torch 版本——它从 wheelhouse 装，那个目录本身即钉版 |
+| `install.ps1` | 源机 `BASE_URL`、清华源地址。torch 版本与 cu128 索引在 `requirements/gpu.txt` 里 |
+
+> torch 版本出现在两处：`build.sh` 开头（prod 的 wheelhouse）与 `requirements/gpu.txt`——升级时一起改。
 
 ---
 
@@ -289,13 +284,14 @@ rsync -av vendor/     <target>:/path/to/CleanSightBackend/vendor/
 ./build.sh   # 需 Linux x86_64 + Python 3.10（与生产一致）+ python3/pip/curl/sha256sum
 ```
 
-升级 Linux 二进制的流程（`BASE_URL` 不参与构建）：
+升级 ffmpeg / MediaMTX 的流程：
 
-1. 改 `FFMPEG_URL` 或 `MEDIAMTX_URL`
-2. 临时清空对应的 `*_SHA256`
+1. 改 `build.sh` 开头的 `FFMPEG_URL` / `FFMPEG_WIN_URL`（或 `MEDIAMTX_*`）
+2. 删掉 `vendor/` 下的旧包（build.sh 逐物料幂等，文件在就跳过下载）
 3. 在构建机跑 `./build.sh`
-4. 把打印出的 SHA 回填 `deploy.conf`
-5. 再跑一次 `./build.sh`，确认校验通过
+4. 把 `vendor/` 同步到源机
+
+> 不再做 SHA 钉版比对：包只在构建机下载一次、随后经源机分发，下坏了由 install 侧的 `xz -t` / `gzip -t` 当场抓出来。`wheelhouse/SHA256SUMS` 仍照常生成——6GB wheel 走 HTTP 流式安装时那是唯一的完整性保障。
 
 产物（已在 `.gitignore`，不要提交）：
 
@@ -305,4 +301,4 @@ vendor/ffmpeg/{ffmpeg-linux-x64.tar.xz, ffmpeg-win-x64.zip}
 vendor/mediamtx/{mediamtx-linux-x64.tar.gz, mediamtx-win-x64.zip}
 ```
 
-> `build.sh` 依赖外部 URL 下载，这些地址可能失效，所以它是「物料重建工具」，不是日常发布步骤。生产也不要临时混装 PyTorch / CUDA / ffmpeg / MediaMTX 版本——冲突重灾区，统一由 `deploy.conf` 钉版。
+> `build.sh` 依赖外部 URL 下载，这些地址可能失效，所以它是「物料重建工具」，不是日常发布步骤。生产也不要临时混装 PyTorch / CUDA / ffmpeg / MediaMTX 版本——冲突重灾区，版本统一由 `build.sh` 开头的配置块钉住。

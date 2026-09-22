@@ -12,7 +12,8 @@ description: "Deploy CleanSightBackend to a local or remote Linux x86_64 GPU hos
 ## 事实源（先读，本 skill 不取代它们）
 
 - [DEPLOYMENT.md](docs/DEPLOYMENT.md) — 权威部署说明，变量含义、`install.sh` 内部行为以它为准。
-- [deploy.conf](deploy.conf) — 钉版物料 URL/SHA、`TORCH_PKGS`、`BASE_URL`。**所有版本只在这里改。**
+- [build.sh](build.sh) 开头的配置块 — 上游 ffmpeg / mediamtx 地址、`TORCH_PKGS`。**升级版本在这里改**，改完重跑 build.sh 并把 `vendor/` 同步到源机。
+- [install.sh](install.sh) 开头的配置块 — 源机 `BASE_URL`（已写死默认值，`BASE_URL=... ./install.sh` 可临时覆盖）。
 - [install.sh](install.sh) — Linux 安装入口（生产）。
 - 记忆 `offline-bundle-distribution` / `deploy-docs-stale` — 离线物料分发的设计背景。
 
@@ -30,7 +31,7 @@ description: "Deploy CleanSightBackend to a local or remote Linux x86_64 GPU hos
 | `<BASE_URL>` | 物料分发地址，形如 `http://<源机IP>:<端口>` | 问用户（注意源机上别的服务可能占了常用端口） |
 | `<分发服务名>` | 源机上的 systemd 分发服务名（默认 `cleansight-dist`） | 问用户/源机 `systemctl list-units | grep dist` |
 
-> 分发服务通常是 `static`、**不开机自启**，只在部署窗口手动开。部署命令即 `BASE_URL=<BASE_URL> ./install.sh`。
+> 分发服务通常是 `static`、**不开机自启**，只在部署窗口手动开。部署命令即 `./install.sh`（源机地址已写死在脚本开头；换源机才加 `BASE_URL=<BASE_URL>` 前缀）。
 
 ## 固定约束（与源机无关，不用问）
 
@@ -147,7 +148,7 @@ torch + 全套 CUDA wheel 是流式拉的（几个 GB、`--no-cache-dir` 不落�
 
 ```bash
 ssh cleansight-deploy 'cd ~/CleanSightBackend && rm -f install.log \
-  && nohup env BASE_URL=<BASE_URL> ./install.sh > install.log 2>&1 & echo "PID: $!"'
+  && nohup ./install.sh > install.log 2>&1 & echo "PID: $!"'   # 换源机才加 env BASE_URL=<BASE_URL>
 ```
 
 轮询进度：

@@ -12,8 +12,8 @@
 # 【本文件相对 base.txt 只做减法，不做加法】—— 以下由系统 site-packages 提供，
 # 装进 venv 会 shadow 掉厂商定制版、PPU 立刻不可用：
 #   torch 2.10.0+ppu2.1.0 / torchvision 0.25.0+ppu2.1.0 / torchaudio 2.10.0+ppu2.1.0
-#   numpy 2.3.5  —— PPU torch 按 numpy 2.x 编译，绝不可按 cuda.txt 降到 1.26.4
-# 这两项本就不在 base.txt 里（numpy 下放到各变体，正是为了让本文件能不写它），
+#   numpy 2.3.5  —— PPU torch 按 numpy 2.x 编译，绝不可按 prod.txt 降到 1.26.4
+# 这两项本就不在 base.txt 里（numpy 下放到各路径，正是为了让本文件能不写它），
 # 所以这里只 `-r base.txt` 就够。
 #
 # 验证记录见 docs/update/20260912_PPU_PLATFORM_DEPS.md。

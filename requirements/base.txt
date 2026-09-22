@@ -1,8 +1,8 @@
-# 平台无关的依赖全集 —— 四份清单的共同底座，任何变体都 `-r base.txt` 它。
+# 平台无关的依赖全集 —— 三条部署路径（prod / gpu / ppu）的共同底座，各自都 `-r base.txt` 它。
 #
 # 刻意不在此列的两项，都因为"装了就废"：
-#   torch / torchvision  版本钉在 deploy.conf 的 TORCH_PKGS，由 build.sh 下进 wheelhouse、
-#                        install.sh 离线装；PPU 机器则用厂商定制版。
+#   torch / torchvision  生产从 wheelhouse 离线装（build.sh 产出、源机分发），
+#                        版本见 build.sh 开头；PPU 机器则用厂商定制版。
 #   numpy                各变体要求互斥（主线钉 1.26.4，PPU 必须用系统的 2.3.5），
 #                        而 `-r` 只能加不能减，所以只能下放到各变体自己写。
 
