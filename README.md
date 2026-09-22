@@ -157,7 +157,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 
 ```bash
 pytest                                              # 单元 & 组件测试
-pytest --cov=app --cov-report=html                  # 覆盖率报告
+pytest --cov --cov-report=html                      # 覆盖率报告（app/ + mediamtx_gateway/）
 
 # 端到端（需真实 RTSP；观测走 admin 面板 /admin-f3m8/ui/）
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30

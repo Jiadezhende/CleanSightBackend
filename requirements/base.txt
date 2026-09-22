@@ -34,9 +34,9 @@ pydantic-settings==2.12.0
 # ========== Testing ==========
 # 不拆 dev.txt：备份机要跑测试（docs/update/20260915_BACKUP_HOST_DUAL_ENV.md），
 # 拆了那台得装两份。
-pytest>=7.4,<9.0
+pytest>=7.4,<9.0  # 下限卡 7：pyproject 的 pythonpath ini 选项是 7.0 才有的
 pytest-asyncio>=0.23,<1.4
-pytest-cov>=4.1  # 覆盖率量化：pytest tests/ --cov=app --cov-report=term-missing
+pytest-cov>=4.1  # 覆盖率量化：pytest tests/ --cov --cov-report=term-missing（别带值，见 pyproject 注释）
 
 # ========== 日志 / 指标 ==========
 colorlog==6.9.0
