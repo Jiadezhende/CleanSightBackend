@@ -55,9 +55,9 @@ class ClientQueues:
     - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（设置最大长度防止溢出）
     - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段（设置最大长度防止溢出）
     - CA-ProcessedQueue: 推理后的处理帧（含标注），用于生成处理后 HLS 段（设置最大长度防止溢出）
-    - CA-FeatureQueue: 帧级 FrameDetection 落盘缓冲，等 recording 周期拉走写 features.jsonl
+    - CA-DetectionQueue: 帧级 FrameDetection 落盘缓冲，等 recording 周期拉走写 detections.jsonl
     - _latest_rendered: 单槽位，最新渲染帧，供前端 WebSocket 实时推流
-    - _latest_inference: 单槽位，最新推理结果原子快照，供 VisualizationWorker 读取
+    - _latest_detection: 单槽位，最新推理结果原子快照，供 VisualizationWorker 读取
 
     内存保护：
     - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
@@ -68,16 +68,16 @@ class ClientQueues:
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
       _raw_lock         Lock   ca_raw + latest_raw_frame + latest_raw_timestamp
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
-      _inference_lock   Lock   _latest_inference（原子推理快照槽）
+      _detection_lock   Lock   _latest_detection（原子推理快照槽）
       _frontend_lock    Lock   _latest_temporal（前端时序事件，低频写）
-      _slide_window_lock Lock  _slide_window + ca_features（写回口对同一帧连写两者，
+      _slide_window_lock Lock  _slide_window + ca_detections（写回口对同一帧连写两者，
                                同 _viz_lock 护 ca_processed + _latest_rendered 的理由）
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
       *_pressure 内建锁  Lock   叶子锁（PressureReporter 自持，只护其几个标量）：
                                append_* 一律**先出队列锁再上报**，故不与上面任何锁互嵌
 
     全清顺序（clear() 同时持锁时的固定顺序，防死锁）：
-      _raw_lock → _viz_lock → _inference_lock
+      _raw_lock → _viz_lock → _detection_lock
       → _frontend_lock → _slide_window_lock → _alarm_lock
 
     身份（task_id/step_id/source_ip/stage）为构造定死的不可变 primitive，热路径免锁直读。
@@ -112,7 +112,7 @@ class ClientQueues:
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
         self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
         self._viz_lock = threading.Lock()        # ca_processed + _latest_rendered
-        self._inference_lock = threading.Lock()  # _latest_inference
+        self._detection_lock = threading.Lock()  # _latest_detection
         self._frontend_lock = threading.Lock()   # _latest_temporal
         self._slide_window_lock = threading.Lock()
         self._alarm_lock = threading.Lock()      # _alarm_log + _alarm_seq + _alarm_gate
@@ -183,8 +183,8 @@ class ClientQueues:
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
         self._latest_rendered: Optional[Frame] = None
 
-        # 最新推理快照：帧级 FrameDetection（由 _inference_lock 保护，供 Viz 原子读同帧一致）
-        self._latest_inference: Optional[FrameDetection] = None
+        # 最新推理快照：帧级 FrameDetection（由 _detection_lock 保护，供 Viz 原子读同帧一致）
+        self._latest_detection: Optional[FrameDetection] = None
 
         # 滑动窗口：帧级 FrameDetection 环形缓冲（一帧一条，多流已对齐，由 _slide_window_lock 保护）。
         # 写回口物化 FrameDetection 后单次 push_detection；算子/ signals 统一从此读，无需按 ts 拼帧。
@@ -193,13 +193,13 @@ class ClientQueues:
         # 只向上扩展；signals_10s 聚合另按固定 10s 底线裁窗，二者解耦。
         self._slide_window_seconds: float = _SIGNALS_WINDOW_SEC
 
-        # CA-FeatureQueue：帧级 FrameDetection 落盘缓冲（由 _slide_window_lock 保护）。
+        # CA-DetectionQueue：帧级 FrameDetection 落盘缓冲（由 _slide_window_lock 保护）。
         # 与 _slide_window 是同一份数据的两个去处——前者供算子消费（按感受野裁剪、会丢），
         # 后者等 recording 每 tick 拉走落盘（只在满时丢最旧）。**不能合并**：裁剪口径归算子
-        # 配置，拿它当落盘缓冲会随某个 stage 调小 window_seconds 而静默丢特征。
+        # 配置，拿它当落盘缓冲会随某个 stage 调小 window_seconds 而静默丢检测结果。
         # 容量复用 ca_maxlen（900 条 ≈ 60s @15fps ≈ 2MB，远小于 ca_raw 的像素帧）。
-        self.ca_features: Deque[FrameDetection] = deque(maxlen=ca_maxlen)
-        self.frames_dropped_features: int = 0
+        self.ca_detections: Deque[FrameDetection] = deque(maxlen=ca_maxlen)
+        self.frames_dropped_detections: int = 0
 
         # 最新时序事件列表（由 _frontend_lock 保护，与 _stage 合并）
         self._latest_temporal: List[str] = []
@@ -361,22 +361,22 @@ class ClientQueues:
         with self._viz_lock:
             return self._latest_rendered
 
-    # --- latest_inference 操作（原子推理快照）---
+    # --- latest_detection 操作（原子推理快照）---
 
-    def set_latest_inference(self, result: FrameDetection) -> None:
+    def set_latest_detection(self, result: FrameDetection) -> None:
         """原子写入最新推理快照 FrameDetection（由 InferenceLoop 调用）。
 
         写门：非 ACTIVE 拒——迟到推理结果落到旧 CQ 被拒，不串台。
         """
         if self._state is not RunState.ACTIVE:
             return
-        with self._inference_lock:
-            self._latest_inference = result
+        with self._detection_lock:
+            self._latest_detection = result
 
-    def get_latest_inference(self) -> Optional[FrameDetection]:
+    def get_latest_detection(self) -> Optional[FrameDetection]:
         """原子读取最新推理结果（由 VisualizationWorker 调用）。"""
-        with self._inference_lock:
-            return self._latest_inference
+        with self._detection_lock:
+            return self._latest_detection
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """获取最新原始帧（用于可视化）。"""
@@ -390,7 +390,7 @@ class ClientQueues:
             "ca_ready": len(self.ca_ready),
             "ca_raw": len(self.ca_raw),
             "ca_processed": len(self.ca_processed),
-            "ca_features": len(self.ca_features),
+            "ca_detections": len(self.ca_detections),
             "has_rendered": self._latest_rendered is not None,
         }
 
@@ -523,7 +523,7 @@ class ClientQueues:
         """
         locks = [
             self._raw_lock, self._viz_lock,
-            self._inference_lock, self._frontend_lock,
+            self._detection_lock, self._frontend_lock,
             self._slide_window_lock, self._alarm_lock,
         ]
         with contextlib.ExitStack() as stack:
@@ -535,10 +535,10 @@ class ClientQueues:
             self.latest_raw_frame = None
             self.latest_raw_timestamp = time.time()
             self._latest_rendered = None
-            self._latest_inference = None
+            self._latest_detection = None
             self._latest_temporal = []
             self._slide_window.clear()
-            self.ca_features.clear()
+            self.ca_detections.clear()
             self._alarm_log.clear()
             self._alarm_seq = 0
             self._alarm_gate.clear()
@@ -564,7 +564,7 @@ class ClientQueues:
                 [_SIGNALS_WINDOW_SEC] + list(windows.values())
             )
 
-    def push_detection(self, feature: FrameDetection) -> None:
+    def push_detection(self, frame: FrameDetection) -> None:
         """将一帧对齐后的 FrameDetection 追加到帧窗，按保留时长淘汰过期条目。
 
         写回口一帧一次（多流已在 FrameDetection.by_source 内对齐），不再逐 detector。
@@ -573,8 +573,8 @@ class ClientQueues:
         if self._state is not RunState.ACTIVE:
             return
         with self._slide_window_lock:
-            self._slide_window.append(feature)
-            cutoff = feature.ts - self._slide_window_seconds
+            self._slide_window.append(frame)
+            cutoff = frame.ts - self._slide_window_seconds
             while self._slide_window and self._slide_window[0].ts < cutoff:
                 self._slide_window.popleft()
 
@@ -583,12 +583,12 @@ class ClientQueues:
         with self._slide_window_lock:
             return list(self._slide_window)
 
-    # --- ca_features 操作（落盘缓冲，与 slide_window 共用 _slide_window_lock）---
+    # --- ca_detections 操作（落盘缓冲，与 slide_window 共用 _slide_window_lock）---
 
-    def append_ca_features(self, feature: FrameDetection) -> None:
+    def append_ca_detections(self, frame: FrameDetection) -> None:
         """把一帧 FrameDetection 放进落盘缓冲（纯缓冲，不触发落盘）。
 
-        落盘由 recording 的 sweeper 周期 `drain_ca_features()` 拉走，本方法只管入队 + 丢帧计数。
+        落盘由 recording 的 sweeper 周期 `drain_ca_detections()` 拉走，本方法只管入队 + 丢帧计数。
         写门：非 ACTIVE 拒写——迟到写回落到旧 CQ 被拒，不串台。
 
         与 `push_detection` 是写回口对同一帧的两次投递（消费 / 落盘），故意分两个方法：
@@ -598,24 +598,24 @@ class ClientQueues:
             return
         with self._slide_window_lock:
             if (
-                self.ca_features.maxlen is not None
-                and len(self.ca_features) >= self.ca_features.maxlen
+                self.ca_detections.maxlen is not None
+                and len(self.ca_detections) >= self.ca_detections.maxlen
             ):
                 # deque 满时 append 静默淘汰最旧，先计数
-                self.frames_dropped_features += 1
-                frame_drop_total.labels(reason="feature_backpressure").inc()
-            self.ca_features.append(feature)
+                self.frames_dropped_detections += 1
+                frame_drop_total.labels(reason="detection_backpressure").inc()
+            self.ca_detections.append(frame)
 
-    def drain_ca_features(self) -> List[FrameDetection]:
+    def drain_ca_detections(self) -> List[FrameDetection]:
         """原子排空落盘缓冲（由 recording 的 sweeper 每 tick 调）。
 
         **没有 `until_ts` 栅栏**，与 `drain_ca_raw` 的不对称是有意的：栅栏是给断流用的，
-        而它要挡的是"一段视频横跨 gap 被 `effective_fps` 反推成慢放"——features 每帧一行、
+        而它要挡的是"一段视频横跨 gap 被 `effective_fps` 反推成慢放"——detections 每帧一行、
         行间无依赖，断流在序列里就是一个 ts 空洞，离线按 ts 自行处理。
         """
         with self._slide_window_lock:
-            frames = list(self.ca_features)
-            self.ca_features.clear()
+            frames = list(self.ca_detections)
+            self.ca_detections.clear()
             return frames
 
     # --- latest_temporal 操作 ---

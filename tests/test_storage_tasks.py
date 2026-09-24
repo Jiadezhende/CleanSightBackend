@@ -168,7 +168,7 @@ class TestSteps:
         assert tasks.list_step_ids(999) == []
 
     def test_does_not_judge_emptiness(self, tmp_storage):
-        """空 step 目录必须被列出 —— TTL 要看见它（features.jsonl 泄漏的正是这一类）。
+        """空 step 目录必须被列出 —— TTL 要看见它（detections.jsonl 泄漏的正是这一类）。
 
         「两轨都没段算不算数」是 HLS 域知识，本域不做这个判断。
         """
@@ -254,7 +254,7 @@ class TestPurgeStep:
         这条用例把真实行为钉死，免得下一个读 docstring 的人再被误导。
         """
         _seed_step(tmp_storage, 1, 1, "hls", "raw_segment_100.mp4", "raw_playlist.m3u8")
-        _seed_step(tmp_storage, 1, 1, "inference", "features.jsonl", "facts.jsonl")
+        _seed_step(tmp_storage, 1, 1, "inference", "detections.jsonl", "facts.jsonl")
         _seed_step(tmp_storage, 1, 1, "lab", "clip_1700_1710.mp4")
 
         assert tasks.delete_step(1, 1) is True

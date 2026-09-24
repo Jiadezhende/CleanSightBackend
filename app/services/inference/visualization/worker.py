@@ -3,7 +3,7 @@
 职责：
 - 按固定间隔（tick_interval）轮询所有活跃客户端
 - 从 ClientQueues 主动拉取三要素：
-  - cq.get_latest_inference()  → 原子推理快照（所有 task 同帧一致）
+  - cq.get_latest_detection()  → 原子推理快照（所有 task 同帧一致）
   - cq.get_latest_frame()      → 最新原始帧
   - cq.get_latest_temporal()   → 最新时序事件
 - 调用 FixedVisualizer（同层 visualizer.py）渲染检测框、标注、文字信息到最新帧上
@@ -155,7 +155,7 @@ class VisualizationWorker:
     def _process_client(self, task_id: int, cq, now: float) -> None:
         """处理单个 run 的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[FrameDetection] = cq.get_latest_inference()
+        inference: Optional[FrameDetection] = cq.get_latest_detection()
         if inference is None:
             return
 

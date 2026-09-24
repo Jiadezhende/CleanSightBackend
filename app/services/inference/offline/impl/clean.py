@@ -6,7 +6,7 @@
     - 模型输出到 SegmentFact 的解码逻辑。
 
 输入:
-    OfflineRunner 从 inference.read_features(task_id, step_id) 读取 List[FrameDetection]
+    OfflineRunner 从 inference.read_detections(task_id, step_id) 读取 List[FrameDetection]
     （帧级、多流已在 by_source 内对齐、按 ts 升序）。
 
 输出:
@@ -214,7 +214,7 @@ def _bbox_to_center_area(det: DetBox, width: int, height: int) -> Tuple[float, f
         return 0.0, 0.0, 0.0
     x1, y1, x2, y2 = [float(v) for v in det.bbox[:4]]
 
-    # features.jsonl 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
+    # detections.jsonl 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
     # 否则按画面尺寸做空间归一化。
     normalized = max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5
     if normalized:

@@ -4,12 +4,12 @@
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
 2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），2Hz tick
 3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
-4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_inference（最新快照）
+4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_detection（最新快照）
 
 数据流：
-InferenceLoop → cq.push_detection() + cq.set_latest_inference()  [双写]
+InferenceLoop → cq.push_detection() + cq.set_latest_detection()  [双写]
 TemporalActor (2Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
-VisualizationWorker (~15Hz) → cq.get_latest_inference() + get_latest_frame() + get_latest_temporal() → render → cq
+VisualizationWorker (~15Hz) → cq.get_latest_detection() + get_latest_frame() + get_latest_temporal() → render → cq
 """
 
 import logging
@@ -93,8 +93,8 @@ class InferenceManager:
             stage_configs=None,
         )
 
-        # 注：L2 特征落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
-        # recording 的 sweeper 拉走写 `{task}/{step}/inference/features.jsonl`。本 manager
+        # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
+        # recording 的 sweeper 拉走写 `{task}/{step}/inference/detections.jsonl`。本 manager
         # 因此不持有任何 store、不管 supersede（recording 首写自清）、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()
 
@@ -212,8 +212,8 @@ class InferenceManager:
             stale.signal_stop()
 
         # 注：起始**不再截断存储分区**。同 (task,step) 重启的 supersede 归 recording 的
-        # 懒惰首写自清（本代次第一批特征真正落盘时才 `inference.delete`），与 HLS 同款——
-        # 新 run 若一帧特征都没写出来，上一代的产物原样保留、离线还能跑。
+        # 懒惰首写自清（本代次第一批检测结果真正落盘时才 `inference.delete`），与 HLS 同款——
+        # 新 run 若一帧检测结果都没写出来，上一代的产物原样保留、离线还能跑。
 
         # 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
         stage = cq.stage
@@ -256,7 +256,7 @@ class InferenceManager:
         """停该 run 的推理 workflow：停 actor（收结算），返回 settlement 列表。
 
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
-        交给 RunController 转 PersistenceManager；HLS 残段 / 剩余特征归 recording，告警落库归
+        交给 RunController 转 PersistenceManager；HLS 残段 / 剩余检测结果归 recording，告警落库归
         persistence，前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持
         lock_for(cq.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
@@ -273,7 +273,7 @@ class InferenceManager:
                     "[InferenceManager] finalize actor failed for task=%s: %s", task_id, e
                 )
 
-        # 注：这里**不收尾特征**。cq 落盘缓冲里剩下的那点由 RunController 紧接着调的
+        # 注：这里**不收尾检测结果**。cq 落盘缓冲里剩下的那点由 RunController 紧接着调的
         # `recording.flush_residual(cq)` 一并交出（它在本方法之后、cq.close() 之前）。
         logger.info("[InferenceManager] Workflow stopped: task=%s", task_id)
         return settlement
@@ -342,9 +342,9 @@ class InferenceManager:
                     task_id, e,
                 )
 
-        # 注：停机时不再 flush 特征——落盘缓冲在 cq 上，recording.lifespan 嵌在 inference 外层
+        # 注：停机时不再 flush 检测结果——落盘缓冲在 cq 上，recording.lifespan 嵌在 inference 外层
         # （main.py），它的 sweeper 与队列此刻还活着。但 recording.stop 先停 sweeper 再抽队列，
-        # 进程直接停机（非 stop_run）时 cq 里最后不到 1 s 的特征能否被拉走取决于时序——已接受，
+        # 进程直接停机（非 stop_run）时 cq 里最后不到 1 s 的检测结果能否被拉走取决于时序——已接受，
         # 与 HLS 残段同口径。
         # 组件建于 start()，未 start 过就 stop（异常路径 / 测试）时为 None，跳过即可。
         if self.visualization_pool is not None:

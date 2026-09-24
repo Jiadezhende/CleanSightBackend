@@ -122,14 +122,14 @@ graph LR
 RTSP (30fps)
   ↓ [FFmpegDecoder 自持读循环，ffmpeg 输出规范化 CFR raw_fps]
 ca_ready（SPSC 无锁 deque，Bresenham 抽帧至 inference_fps）   ca_raw（完整录制缓冲）
-  ↓ [Detector 检测 → 特征聚合并落盘 features.jsonl → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
+  ↓ [Detector 检测 → 多流对齐成帧并落盘 detections.jsonl → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
 ca_processed → [HLS 分段：recording 周期 PULL 拉取整段]
 _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 ```
 
 - `ca_ready`：待推理帧，无锁 SPSC deque（decoder 单产 / dispatcher 单消）
 - `ca_raw` / `ca_processed`：raw / processed HLS 纯缓冲，recording 主动拉取分段
-- `_latest_rendered` / `_latest_inference` / `_slide_window` / `_latest_temporal`：渲染帧 / 推理快照 / 检测滑窗 / 时序事件
+- `_latest_rendered` / `_latest_detection` / `_slide_window` / `_latest_temporal`：渲染帧 / 推理快照 / 检测滑窗 / 时序事件
 
 线程角色：检测（StageAwareDispatcher + 每 stage 推理线程，可选 CUDA Stream）、时序（`ClientTemporalActor` per-run ~1Hz）、可视化（独立线程）、录制（段 sweeper + 一条 SerialTaskQueue 消费线程）、持久化（Alarm Worker×1 + 清理 worker）。详见 [知识库](docs/kb/INDEX.md)。
 

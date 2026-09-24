@@ -9,7 +9,7 @@ HLS 持久化策略 —— step 目录落盘格式的唯一写侧真源。
                                  processed 是渲染结果、离线不消费，故不产
 - `metadata.json`                段数 / 时长 / 首末 ts 统计，兼作 TTL 清理判据
 
-detection 不在此落盘——已由 recording 按帧 ts 单源写入 features.jsonl。
+detection 不在此落盘——已由 recording 按帧 ts 单源写入 detections.jsonl。
 """
 
 import json
@@ -562,7 +562,7 @@ class HLSPersistenceStrategy:
         """
         持久化处理后视频段（业务代码：纯净）。
 
-        detection 已单源落盘到 features.jsonl（按帧 ts 对齐），
+        detection 已单源落盘到 detections.jsonl（按帧 ts 对齐），
         此处只写视频段，不再转储任何推理结果，避免重复落盘。
 
         Raises:

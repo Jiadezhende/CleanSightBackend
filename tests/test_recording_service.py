@@ -41,7 +41,7 @@ class FakeCQ:
         self.processed_segments = []
         self.raw_residual = []          # drain_ca_raw 一次性取走
         self.processed_residual = []
-        self.features = []              # drain_ca_features 一次性取走
+        self.detections = []              # drain_ca_detections 一次性取走
 
     def __repr__(self):                 # 让失败信息可读
         return f"<FakeCQ {self.name} task={self.task_id} step={self.step_id}>"
@@ -60,8 +60,8 @@ class FakeCQ:
         self.processed_residual, out = _split_at_fence(self.processed_residual, until_ts)
         return out
 
-    def drain_ca_features(self):
-        out, self.features = list(self.features), []
+    def drain_ca_detections(self):
+        out, self.detections = list(self.detections), []
         return out
 
 
@@ -117,7 +117,7 @@ class FakeHls:
 
 
 class FakeInference:
-    """记录 `delete` / `append_features` 的调用序（推理域的落盘替身）。"""
+    """记录 `delete` / `append_detections` 的调用序（推理域的落盘替身）。"""
 
     def __init__(self):
         self.calls = []
@@ -126,8 +126,8 @@ class FakeInference:
         self.calls.append(("delete", task_id, step_id))
         return True
 
-    def append_features(self, task_id, step_id, features):
-        self.calls.append(("append", task_id, step_id, len(features)))
+    def append_detections(self, task_id, step_id, detections):
+        self.calls.append(("append", task_id, step_id, len(detections)))
 
     @property
     def deletes(self):
@@ -175,7 +175,7 @@ def _service(clients, *, accept=True) -> RecordingService:
     """一个装好两条同步队列的服务（不起线程）。"""
     svc = RecordingService(config=RecordingConfig(), clients=clients)
     svc._hls_queue = InlineQueue(accept=accept)
-    svc._feature_queue = InlineQueue(accept=accept)
+    svc._detection_queue = InlineQueue(accept=accept)
     return svc
 
 
@@ -645,52 +645,52 @@ class TestSweeper:
 
 
 # ---------------------------------------------------------------------------
-# 特征落盘：另一条队列、另一张代次表，其余与段写同构
+# 检测结果落盘：另一条队列、另一张代次表，其余与段写同构
 # ---------------------------------------------------------------------------
 
 
-def _feats(n=2, start=1700.0):
+def _dets(n=2, start=1700.0):
     return [factories.make_frame_detection(ts=start + i / 15.0) for i in range(n)]
 
 
-class TestSubmitFeatures:
+class TestSubmitDetections:
     def test_lands_through_its_own_queue(self, fake_inference):
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({1: cq}))
 
-        assert svc.submit_features(cq, _feats()) is True
+        assert svc.submit_detections(cq, _dets()) is True
         assert fake_inference.appends == [("append", 1, 2, 2)]
-        assert svc._feature_queue.labels == ["feat:1/2×2"]
+        assert svc._detection_queue.labels == ["det:1/2×2"]
 
     def test_does_not_touch_the_hls_queue(self, fake_hls, fake_inference):
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({1: cq}))
 
-        svc.submit_features(cq, _feats())
+        svc.submit_detections(cq, _dets())
 
         assert svc._hls_queue.labels == []
         assert fake_hls.calls == []
 
     def test_queue_not_started(self, fake_inference):
         svc = RecordingService(config=RecordingConfig(), clients=FakeClients({}))
-        assert svc.submit_features(FakeCQ(), _feats()) is False
+        assert svc.submit_detections(FakeCQ(), _dets()) is False
         assert fake_inference.calls == []
 
     def test_empty_batch_never_reaches_the_queue(self, fake_inference):
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({1: cq}))
-        assert svc.submit_features(cq, []) is False
-        assert svc._feature_queue.labels == []
+        assert svc.submit_detections(cq, []) is False
+        assert svc._detection_queue.labels == []
 
     @pytest.mark.parametrize("task_id, step_id", [(None, 2), (1, None)])
     def test_cq_without_partition_key(self, fake_inference, task_id, step_id):
         cq = FakeCQ(task_id, step_id)
         svc = _service(FakeClients({}))
-        assert svc.submit_features(cq, _feats()) is False
-        assert svc._feature_queue.labels == []
+        assert svc.submit_detections(cq, _dets()) is False
+        assert svc._detection_queue.labels == []
 
 
-class TestFeatureGeneration:
+class TestDetectionGeneration:
     """代次校验与首写自清 —— 判据与段写逐条同构，清的域不同。"""
 
     def test_same_partition_new_cq_discards_the_old_generation(self, fake_inference):
@@ -698,7 +698,7 @@ class TestFeatureGeneration:
         new = FakeCQ(1, 2, name="B")
         svc = _service(FakeClients({1: new}))
 
-        assert svc.submit_features(old, _feats()) is True   # 入队成功
+        assert svc.submit_detections(old, _dets()) is True   # 入队成功
         assert fake_inference.calls == []                    # 执行时被丢弃
 
     def test_step_switch_still_writes(self, fake_inference):
@@ -706,7 +706,7 @@ class TestFeatureGeneration:
         step3 = FakeCQ(1, 3, name="B")
         svc = _service(FakeClients({1: step3}))
 
-        svc.submit_features(step2, _feats())
+        svc.submit_detections(step2, _dets())
 
         assert fake_inference.appends == [("append", 1, 2, 2)]
         assert fake_inference.deletes == []
@@ -715,7 +715,7 @@ class TestFeatureGeneration:
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({1: cq}))
 
-        svc.submit_features(cq, _feats())
+        svc.submit_detections(cq, _dets())
 
         assert fake_inference.calls == [("delete", 1, 2), ("append", 1, 2, 2)]
 
@@ -723,8 +723,8 @@ class TestFeatureGeneration:
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({1: cq}))
 
-        svc.submit_features(cq, _feats(start=1700.0))
-        svc.submit_features(cq, _feats(start=1710.0))
+        svc.submit_detections(cq, _dets(start=1700.0))
+        svc.submit_detections(cq, _dets(start=1710.0))
 
         assert len(fake_inference.deletes) == 1
         assert len(fake_inference.appends) == 2
@@ -735,20 +735,20 @@ class TestFeatureGeneration:
         clients = FakeClients({1: cq})
         svc = _service(clients)
 
-        svc.submit_features(cq, _feats(start=1700.0))
+        svc.submit_detections(cq, _dets(start=1700.0))
         clients.registry.clear()
         svc.forget_task(1)
-        svc.submit_features(cq, _feats(start=1710.0))
+        svc.submit_detections(cq, _dets(start=1710.0))
 
         assert len(fake_inference.deletes) == 1
         assert len(fake_inference.appends) == 2
 
     def test_supersede_only_clears_its_own_domain(self, fake_hls, fake_inference):
-        """两张表、两个域：特征首写清 inference 域，一个字节都不碰 hls 域，反之亦然。"""
+        """两张表、两个域：检测结果首写清 inference 域，一个字节都不碰 hls 域，反之亦然。"""
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({1: cq}))
 
-        svc.submit_features(cq, _feats())
+        svc.submit_detections(cq, _dets())
         svc.submit_segment(cq, "raw", _frames())
 
         assert fake_inference.deletes == [("delete", 1, 2)]
@@ -759,26 +759,26 @@ class TestFeatureGeneration:
         clients = FakeClients({1: cq})
         svc = _service(clients)
         svc.submit_segment(cq, "raw", _frames())
-        svc.submit_features(cq, _feats())
-        assert list(svc._claimed_hls) == [(1, 2)] and list(svc._claimed_features) == [(1, 2)]
+        svc.submit_detections(cq, _dets())
+        assert list(svc._claimed_hls) == [(1, 2)] and list(svc._claimed_detections) == [(1, 2)]
 
         clients.registry.clear()
         assert svc.forget_task(1) is True
 
-        assert svc._claimed_hls == {} and svc._claimed_features == {}
-        assert svc._feature_queue.labels[-1] == "forget-feat:1"
+        assert svc._claimed_hls == {} and svc._claimed_detections == {}
+        assert svc._detection_queue.labels[-1] == "forget-det:1"
 
 
-class TestCollectAndFlushFeatures:
-    def test_collect_pulls_the_feature_buffer(self, fake_hls, fake_inference):
+class TestCollectAndFlushDetections:
+    def test_collect_pulls_the_detection_buffer(self, fake_hls, fake_inference):
         cq = FakeCQ(1, 2)
-        cq.features = _feats(n=3)
+        cq.detections = _dets(n=3)
         svc = _service(FakeClients({1: cq}))
 
         svc.collect_from(cq)
 
         assert fake_inference.appends == [("append", 1, 2, 3)]
-        assert cq.features == []                      # 取走即清
+        assert cq.detections == []                      # 取走即清
 
     def test_collect_with_empty_buffer_submits_nothing(self, fake_hls, fake_inference):
         cq = FakeCQ(1, 2)
@@ -786,22 +786,22 @@ class TestCollectAndFlushFeatures:
 
         svc.collect_from(cq)
 
-        assert svc._feature_queue.labels == []
+        assert svc._detection_queue.labels == []
 
     def test_teardown_flush_hands_over_the_tail(self, fake_hls, fake_inference):
         """拆除期 flush_residual 必须把缓冲里剩下的交出去，否则每个 step 尾部稳定少一截。"""
         cq = FakeCQ(1, 2)
-        cq.features = _feats(n=2)
+        cq.detections = _dets(n=2)
         svc = _service(FakeClients({1: cq}))
 
         svc.flush_residual(cq)
 
         assert fake_inference.appends == [("append", 1, 2, 2)]
 
-    def test_pending_flush_path_drains_features_once(self, fake_hls, fake_inference):
-        """断流那条路：collect_from 走 flush_residual 分支，特征只被交出一次。"""
+    def test_pending_flush_path_drains_detections_once(self, fake_hls, fake_inference):
+        """断流那条路：collect_from 走 flush_residual 分支，检测结果只被交出一次。"""
         cq = FakeCQ(1, 2)
-        cq.features = _feats(n=2)
+        cq.detections = _dets(n=2)
         svc = _service(FakeClients({1: cq}))
         svc.request_residual_flush(cq, fence_ts=1700.5)
 
@@ -842,10 +842,10 @@ class TestLifecycle:
         assert svc.submit_segment(FakeCQ(), "raw", _frames()) is False
 
 
-class TestFeatureEndToEnd:
+class TestDetectionEndToEnd:
     """真队列 + 真 `storage.inference`（纯 stdlib，不需要外部工具）。"""
 
-    def test_features_land_in_the_inference_domain_dir(self, tmp_storage):
+    def test_detections_land_in_the_inference_domain_dir(self, tmp_storage):
         from app.storage import inference
 
         cq = FakeCQ(1, 2)
@@ -855,12 +855,12 @@ class TestFeatureEndToEnd:
         )
         svc.start()
         try:
-            assert svc.submit_features(cq, _feats(n=3, start=1700.0)) is True
+            assert svc.submit_detections(cq, _dets(n=3, start=1700.0)) is True
         finally:
             svc.stop(timeout=5.0)
 
-        assert (tmp_storage / "1" / "2" / "inference" / "features.jsonl").exists()
-        assert [round(ff.ts, 4) for ff in inference.read_features(1, 2)] == [
+        assert (tmp_storage / "1" / "2" / "inference" / "detections.jsonl").exists()
+        assert [round(ff.ts, 4) for ff in inference.read_detections(1, 2)] == [
             round(1700.0 + i / 15.0, 4) for i in range(3)
         ]
 
@@ -875,14 +875,14 @@ class TestFeatureEndToEnd:
         )
         svc.start()
         try:
-            svc.submit_features(a, _feats(n=2, start=1700.0))
+            svc.submit_detections(a, _dets(n=2, start=1700.0))
             clients.registry[1] = b                      # 重启换代
-            svc.submit_features(b, _feats(n=1, start=1800.0))
+            svc.submit_detections(b, _dets(n=1, start=1800.0))
         finally:
             svc.stop(timeout=5.0)
 
         # 只剩 B 那一代；A 的整份产物随首写自清一起没
-        assert [round(ff.ts) for ff in inference.read_features(1, 2)] == [1800]
+        assert [round(ff.ts) for ff in inference.read_detections(1, 2)] == [1800]
 
 
 # ---------------------------------------------------------------------------

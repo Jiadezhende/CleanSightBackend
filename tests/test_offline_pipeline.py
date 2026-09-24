@@ -258,9 +258,9 @@ def _debug_path(root, task_id=1, step_id=2):
     return root / str(task_id) / str(step_id) / "inference" / "offline_debug.json"
 
 
-def _write_features(task_id, step_id):
-    """经数据层预置两帧双源特征（storage 根已由 tmp_storage fixture 指到临时目录）。"""
-    inference_store.append_features(task_id, step_id, [
+def _write_detections(task_id, step_id):
+    """经数据层预置两帧双源检测结果（storage 根已由 tmp_storage fixture 指到临时目录）。"""
+    inference_store.append_detections(task_id, step_id, [
         make_frame_detection(ts=ts, by_source={
             "clean_large": make_detector_output(n=1, ts=ts),
             "clean_small": make_detector_output(n=1, ts=ts),
@@ -285,7 +285,7 @@ class TestOfflineRunner:
         assert not _facts_path(tmp_storage).exists()
 
     def test_completed_writes_facts(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert res.producer == "clean_seg"
@@ -298,7 +298,7 @@ class TestOfflineRunner:
         assert not _debug_path(tmp_storage).exists()
 
     def test_rerun_idempotent(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         r = _runner(_OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
@@ -306,7 +306,7 @@ class TestOfflineRunner:
         assert len(segs) == 1
 
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         with pytest.raises(RuntimeError):
             r.run(OfflineRunSpec(task_id=1, step_id=2,
@@ -314,7 +314,7 @@ class TestOfflineRunner:
         assert not _facts_path(tmp_storage).exists()
 
     def test_preprocess_seam_invoked(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         res = r.run(OfflineRunSpec(task_id=1, step_id=2,
                                    strategy="test_offline_pipeline.MarkerSegmenter"))
@@ -323,7 +323,7 @@ class TestOfflineRunner:
 
     def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_storage):
         """CleanSegmenter 不再规则降级；未配 model_path 时硬失败且不落结果。"""
-        inference_store.append_features(1, 2, [
+        inference_store.append_detections(1, 2, [
             make_frame_detection(ts=t, by_source=_clean_frame(t))
             for t in (0.1, 0.2, 0.3, 0.4)
         ])
@@ -342,7 +342,7 @@ class TestOfflineRunner:
                         "class": _MOCK_CLASS, "params": {"label": "mock_action", "min_frames": 1}},
         }}})
         # MockDetector 纯透传：空检测帧 → 0 段，但链路走通
-        inference_store.append_features(1, -1, [
+        inference_store.append_detections(1, -1, [
             make_frame_detection(ts=1.0, by_source={"mock": make_detector_output(n=0, ts=1.0)})
         ])
         res = OfflineRunner(config=cfg).run(OfflineRunSpec(task_id=1, step_id=-1))
@@ -377,7 +377,7 @@ class TestCli:
         # 默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
         # + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
         from app.services.inference.offline import runner as runner_mod
-        _write_features(1, 2)
+        _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
@@ -387,7 +387,7 @@ class TestCli:
 
     def test_run_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
         from app.services.inference.offline import runner as runner_mod
-        _write_features(1, 2)
+        _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2",
@@ -398,7 +398,7 @@ class TestCli:
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""
         from app.services.inference.offline import runner as runner_mod
-        _write_features(1, 2)
+        _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         assert cli.main(["run", "--task-id", "1", "--step-id", "2"]) == 0

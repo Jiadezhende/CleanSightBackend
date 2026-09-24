@@ -50,7 +50,7 @@ def test_multi_detector_same_frame_shares_capture_ts():
         assert fd.timestamp == ts, f"{name} 流 ts={fd.timestamp} != 锚点 {ts}"
 
 
-def test_frame_feature_carries_all_streams_at_capture_ts():
+def test_frame_detection_carries_all_streams_at_capture_ts():
     """两流经 StageWorker 后，组装出的 FrameDetection 携两流、ts = 帧捕获锚点（取代旧 _zip_by_ts 对齐）。"""
     worker = StageWorker(
         stage="1",

@@ -88,10 +88,10 @@ class RunController:
             try:
                 # storage supersede：start 侧**零钩子**。两个域都走 recording 的**懒惰首写自清**
                 # ——本代次第一次真正写出产物时才清上一代（`hls.delete` / `inference.delete`，
-                # 见 recording/service.py 的 `_write` ② 与 `_write_features` ②）。
+                # 见 recording/service.py 的 `_write` ② 与 `_write_detections` ②）。
                 # 原先这里有两个 eager 清理（`persistence_manager.start_run(cq)` 的整 step rmtree、
-                # 特征分区的起始截断），语义不同故删而不是改指：新 run 若什么都没
-                # 写出来，上一代的录像与特征原样保留，还能回放、还能跑离线。
+                # 检测结果分区的起始截断），语义不同故删而不是改指：新 run 若什么都没
+                # 写出来，上一代的录像与检测结果原样保留，还能回放、还能跑离线。
 
                 # 2d. start_workflow（建 Actor；CQ 已由上面 set 注册）
                 if not inference_manager.start_workflow(cq):
@@ -130,7 +130,7 @@ class RunController:
         skip_decoder: bool = False,
         expected: Optional[ClientQueues] = None,
     ) -> Dict[str, Any]:
-        """拆除一次 run：封闸(DRAINING) → 停 decoder → 落盘残余（settlement/HLS/feature close）→ 清 registry。
+        """拆除一次 run：封闸(DRAINING) → 停 decoder → 落盘残余（settlement/HLS/detections）→ 清 registry。
 
         `task_id`(int) 唯一定位一次 run。全程持 `lock_for(task_id)`（唯一锁获取点；
         start_run 重入亦经此）。尽力而为：每步独立 try，单步失败不中断后续；永不抛出。
@@ -184,7 +184,7 @@ class RunController:
             # 2. 落盘残余数据（按 owner 归位，inference 一把拆、告警与录制各一个独立 sink）：
             #    ① inference 停 workflow（停 actor）交出 settlement；
             #    ② persistence 落 settlement 告警（别名已由 actor 烧进 alarm.stage）；
-            #    ③ 清前端槽 + recording 落 HLS 残段与剩余特征。
+            #    ③ 清前端槽 + recording 落 HLS 残段与剩余检测结果。
             #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
             #    （→cq.close 释放帧）——本 try 早于下方清理。
             #    ③ 必须在 CQ 还注册着时做（step 4 的 forget_task 之前）：recording 的首写自清以

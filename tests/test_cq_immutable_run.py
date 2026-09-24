@@ -1,7 +1,7 @@
 """T1: CQ per-run 不可变 —— 身份构造注入、复用机器已删、换槽。
 
 存储 supersede 不在这里：它已从「run 起始截断分区」换成 recording 的懒惰首写自清，
-用例见 `test_recording_service.py` 的 `TestFeatureGeneration`。
+用例见 `test_recording_service.py` 的 `TestDetectionGeneration`。
 """
 
 from factories import make_bare_cq, make_cq, make_frame_detection

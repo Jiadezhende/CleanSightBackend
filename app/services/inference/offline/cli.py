@@ -82,11 +82,11 @@ def _query(args: argparse.Namespace) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.services.inference.offline.cli",
-        description="离线全序列分割：读 features.jsonl → 策略分段 → 幂等写 facts.jsonl。",
+        description="离线全序列分割：读 detections.jsonl → 策略分段 → 幂等写 facts.jsonl。",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="读特征、跑策略、幂等写 facts.jsonl")
+    run = sub.add_parser("run", help="读检测结果、跑策略、幂等写 facts.jsonl")
     run.add_argument("--task-id", type=int, required=True, help="任务 id（存储键）")
     run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（数字存储键；未配回退 MOCK）")
     run.add_argument(

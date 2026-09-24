@@ -106,7 +106,7 @@ def test_real_manager_init_invariants_and_stop_workflow_smoke():
     assert not hasattr(m, "persistence_manager")
     assert not hasattr(m, "recording_service")
     assert not hasattr(m, "_client_lifecycle_lock")  # 互斥上移 RunController.lock_for
-    # 无 actor、feature close 空跑 → 返回空 settlement、不抛
+    # 无 actor、检测结果无残余 → 返回空 settlement、不抛
     cq = MagicMock()
     cq.task_id = 999
     cq.step_id = None

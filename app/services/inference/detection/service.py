@@ -121,7 +121,7 @@ class DetectionService:
         # 先停 dispatcher：停后不再有新 submit（取帧与提交同在其单线程）。
         self.dispatcher.stop()
 
-        # 再停代理：内部先排空在途批（collector 写回把特征放进 cq 缓冲），再杀子进程。排空出来
+        # 再停代理：内部先排空在途批（collector 写回把检测结果放进 cq 缓冲），再杀子进程。排空出来
         # 的这批还要有人拉走才算不丢——靠 main.py 把 recording.lifespan 嵌在 inference 外层：
         # 本服务停完、run_control 交出残余，recording 的队列那时还活着。
         # CUDA wedge 现在是子进程的事：卡死的是子进程，代理直接 kill 重启，主线程不再被 daemon 强杀。
@@ -134,7 +134,7 @@ class DetectionService:
 
         双写策略：
         - slide_window（per-task 拆分）：供 TemporalWorker 历史窗口分析
-        - latest_inference（原子快照）：供 VisualizationWorker 直接读取，保证同帧一致性
+        - latest_detection（原子快照）：供 VisualizationWorker 直接读取，保证同帧一致性
 
         句柄化写回：dispatcher pop 帧时捕获该 run 的 CQ 句柄随 batch 同行，此处直接写它。
         dispatch→infer→write-back 期间若 set_task/stop_run 换槽，旧句柄已转 DRAINING/CLOSED
@@ -143,7 +143,7 @@ class DetectionService:
         顶层这道只是提前退出 + 计数。
 
         **本方法不碰盘**：落盘缓冲交给 recording 的 sweeper 拉走，代次隔离由它的
-        `_claimed_features` 表兑现（同段写那套），故这里不需要第二道归属校验。
+        `_claimed_detections` 表兑现（同段写那套），故这里不需要第二道归属校验。
         """
         for frame in results:
             # 取走句柄并置空：同一对象随后进帧窗 / 快照 / 落盘缓冲，留存的帧一律不带 cq
@@ -171,11 +171,11 @@ class DetectionService:
             # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。
             cq.push_detection(frame)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）
-            cq.set_latest_inference(frame)
+            cq.set_latest_detection(frame)
             # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）
             cq.mark_startup_milestone("first_inference")
             # Path 3: 落盘缓冲（常开，offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
-            # 由 recording 的 sweeper 每 tick 拉走写 features.jsonl。落的是同一份帧级
+            # 由 recording 的 sweeper 每 tick 拉走写 detections.jsonl。落的是同一份帧级
             # FrameDetection（与帧窗/快照共用一个对象）。
-            cq.append_ca_features(frame)
+            cq.append_ca_detections(frame)
 

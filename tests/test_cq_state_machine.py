@@ -39,8 +39,8 @@ def test_frame_and_result_writes_blocked_when_not_active():
     assert cq.get_ca_processed_length() == 0
     cq.push_detection(_det())
     assert cq.get_slide_window() == []
-    cq.set_latest_inference(make_frame_detection())
-    assert cq.get_latest_inference() is None
+    cq.set_latest_detection(make_frame_detection())
+    assert cq.get_latest_detection() is None
 
 
 # --- settlement 非对称：DRAINING 放行、CLOSED 拒 ---
@@ -81,7 +81,7 @@ def test_close_releases_payload_keeps_identity():
     assert cq.get_slide_window() == []
     assert len(cq.ca_raw) == 0
     assert cq.get_recent_alarms() == []
-    assert cq.get_latest_inference() is None
+    assert cq.get_latest_detection() is None
     # 身份小壳保留（供 fence/日志）
     assert cq.task_id == 1
     assert cq.step_id == 1

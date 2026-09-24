@@ -218,7 +218,7 @@ class PersistenceManager:
         与拆除侧 `flush_residual_segments(cq)` 对称（同以 cq 为入参、task_id/step_id 由 cq 派生），
         由 RunController.start_run 编排（在其 client_manager.set 注册 CQ 之后）。
         **已无调用点**：start 侧的 eager supersede 全部换成了 recording 的懒惰首写自清
-        （HLS 与 features 各清各的域），本方法随 persistence 的 HLS 四件套一起待删。
+        （HLS 与 inference 各清各的域），本方法随 persistence 的 HLS 四件套一起待删。
         HLS 无 owner-fence、磁盘无状态，故整个 supersede 就是删目录（rmtree），逐段惰性重建。
         task_id/step_id 缺失早退（与 flush_residual_segments 同口径）。best-effort，永不抛。
         """
