@@ -6,7 +6,7 @@
     - 模型输出到 SegmentFact 的解码逻辑。
 
 输入:
-    OfflineRunner 从 inference.read_features(task_id, step_id) 读取 List[FrameFeature]
+    OfflineRunner 从 inference.read_detections(task_id, step_id) 读取 List[FrameDetection]
     （帧级、多流已在 by_source 内对齐、按 ts 升序）。
 
 输出:
@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from app.domain.detection import Detection, FrameFeature
+from app.domain.detection import DetBox, FrameDetection
 from app.domain.fact import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
@@ -126,18 +126,18 @@ class ModelInput:
 
 
 def build_base_features(
-    frames: Sequence[FrameFeature],
+    frames: Sequence[FrameDetection],
     fps: float,
     frame_width: int = 640,
     frame_height: int = 480,
 ) -> ModelInput:
-    """把 clean 帧级 FrameFeature 序列转换成 v2 固定维（113）时序特征。
+    """把 clean 帧级 FrameDetection 序列转换成 v2 固定维（113）时序特征。
 
-    每帧 `FrameFeature.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
+    每帧 `FrameDetection.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
     """
     frame_width = max(1, int(frame_width))
     frame_height = max(1, int(frame_height))
-    timestamps = [ff.ts for ff in frames]  # FrameFeature.ts 已在 store.load 边界统一 float
+    timestamps = [ff.ts for ff in frames]  # FrameDetection.ts 已在 store.load 边界统一 float
     frame_count = len(frames)
     if frame_count <= 0:
         return ModelInput(features=[], feature_names=base_feature_names(), timestamps=[], fps=float(fps))
@@ -165,11 +165,11 @@ def _finite_matrix(values: np.ndarray) -> np.ndarray:
 
 
 def _collect_object_arrays(
-    frames: Sequence[FrameFeature], frame_width: int, frame_height: int
+    frames: Sequence[FrameDetection], frame_width: int, frame_height: int
 ) -> Dict[str, List[np.ndarray]]:
     """把每帧检测框按目标类别归拢成 {obj: [每检测框一个 [T,5] 稀疏数组]}。
 
-    每帧遍历 `FrameFeature.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
+    每帧遍历 `FrameDetection.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
     """
     frame_count = len(frames)
     out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
@@ -178,7 +178,7 @@ def _collect_object_arrays(
         width = max(1, int(ff.frame_width or frame_width))
         height = max(1, int(ff.frame_height or frame_height))
         for fd in ff.by_source.values():
-            for det in fd.detections:
+            for det in fd.boxes:
                 obj = OBJECT_ALIASES.get(str(det.class_name))
                 if obj is None:
                     continue
@@ -208,13 +208,13 @@ def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
     return max(1.0 / float(np.median(np.asarray(deltas, dtype=np.float32))), 1e-6)
 
 
-def _bbox_to_center_area(det: Detection, width: int, height: int) -> Tuple[float, float, float]:
+def _bbox_to_center_area(det: DetBox, width: int, height: int) -> Tuple[float, float, float]:
     """xyxy 框空间归一化后返回 (中心 cx, 中心 cy, 面积)，坐标/面积均截到 [0,1]。"""
     if len(det.bbox) < 4:
         return 0.0, 0.0, 0.0
     x1, y1, x2, y2 = [float(v) for v in det.bbox[:4]]
 
-    # features.jsonl 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
+    # detections.jsonl 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
     # 否则按画面尺寸做空间归一化。
     normalized = max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5
     if normalized:
@@ -572,8 +572,8 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self._normalizer: Tuple[Any, Any] | None = None
         self._last_result: dict | None = None
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
-        """帧级 FrameFeature 序列 → 基础 v2 特征（113 维）。
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
+        """帧级 FrameDetection 序列 → 基础 v2 特征（113 维）。
 
         多流按帧合并折进 build_base_features（`frames` 已按 ts 升序、各流在 by_source 内对齐）。
         需叠加模型专属 recipe 的子类覆盖本方法，用 `super().preprocess()` 取基础特征后再变换。
@@ -911,7 +911,7 @@ class CleanASFormerSegmenter(_CleanTorchSegmenter):
     model_version = "clean_asformer_v1"
     feature_method = "business_priors"
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         return add_business_priors(super().preprocess(frames))
 
     def _build_model(self, in_dim: int, class_count: int):
@@ -928,7 +928,7 @@ class CleanBiGRUSegmenter(_CleanTorchSegmenter):
     model_version = "clean_bigru_v1"
     feature_method = "window_stats+business_priors"
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         return add_business_priors(add_centered_window_stats(super().preprocess(frames)))
 
     def _build_model(self, in_dim: int, class_count: int):

@@ -36,7 +36,7 @@ _FACT_SEGMENT = "segment"
 
 # ── Fact ↔ 磁盘 record 的对称映射（一对逆运算紧挨放置）─────────────────────────────
 #
-# 契约：两型都无损落盘（不像 FrameFeature 那样投影），故往返在全字段上闭合。
+# 契约：两型都无损落盘（不像 FrameDetection 那样投影），故往返在全字段上闭合。
 # `EventFact.value` 与 `meta` 收任意 JSON 值，不可序列化的内容在 encode 时炸，不静默丢。
 
 

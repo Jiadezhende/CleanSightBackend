@@ -16,7 +16,7 @@ detector.name = 该 detector 产出的流名（决定 slide_window key 与 Opera
 from __future__ import annotations
 
 from app.services.inference.detection.detector import YOLODetector
-from app.domain.detection import FrameDetections
+from app.domain.detection import DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 # 固定调色板，按 class_id 取色（BGR）
@@ -30,7 +30,7 @@ _PALETTE = [
 ]
 
 
-def _bbox_items(output: FrameDetections):
+def _bbox_items(output: DetectorOutput):
     return [
         RenderItem(
             bbox=det.bbox,
@@ -38,7 +38,7 @@ def _bbox_items(output: FrameDetections):
             confidence=det.confidence,
             color=_PALETTE[det.class_id % len(_PALETTE)],
         )
-        for det in output.detections
+        for det in output.boxes
     ]
 
 
@@ -60,7 +60,7 @@ class CleanLargeDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = _bbox_items(output)
         return RenderSpec(
             type=RenderType.BBOX,
@@ -89,7 +89,7 @@ class CleanSmallDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = _bbox_items(output)
         return RenderSpec(
             type=RenderType.BBOX,

@@ -11,7 +11,7 @@ from typing import List, Tuple
 
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmType
-from app.domain.detection import FrameFeature
+from app.domain.detection import FrameDetection
 
 
 class MockOperator(Operator):
@@ -48,7 +48,7 @@ class MockOperator(Operator):
             "alarm_count": 0,
         }
 
-    def analyze(self, windows: List[FrameFeature]) -> None:
+    def analyze(self, windows: List[FrameDetection]) -> None:
         window = self.primary_window(windows)
         if not window:
             return
@@ -57,9 +57,9 @@ class MockOperator(Operator):
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in window if f.timestamp > last_ts]
         for output in new_frames:
-            if len(output.detections) > 0:
+            if len(output.boxes) > 0:
                 self._sm["consecutive"] += 1
-                self._sm["total"] += len(output.detections)
+                self._sm["total"] += len(output.boxes)
             else:
                 self._sm["consecutive"] = 0
         if new_frames:

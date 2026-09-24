@@ -2,7 +2,7 @@
 
 把 GPU 前向拆进独立进程（见 stage_worker.run_stages / 诊断文档）后，本类是主进程唯一对接口：
   · submit(batch)：给整批帧分配 req_id、把 cq 等**轻量元数据**留在 pending、只把帧送子进程；
-  · _collect_loop：单线程抽子进程响应，据 req_id `pending.pop` 重组 FrameInference，走注入的
+  · _collect_loop：单线程抽子进程响应，据 req_id `pending.pop` 组装 FrameDetection，走注入的
     write_back（= DetectionService._write_back_results）落回主链路，并在主进程发 Prometheus；
   · _supervise_loop：看门狗，子进程死亡/CUDA wedge → 清孤儿 pending（计丢帧）+ 退避重 spawn。
 
@@ -20,13 +20,14 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
-from app.services.inference.types import DetectionTask, FrameInference
+from app.domain.detection import FrameDetection
+from app.services.inference.types import DetectionTask
 from .stage_worker import run_stages
 from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 if TYPE_CHECKING:
     from app.services.client import ClientQueues
-    from app.domain.detection import FrameDetections
+    from app.domain.detection import DetectorOutput
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,10 @@ logger = logging.getLogger(__name__)
 class _Pending:
     """在途批的每帧轻量记录：**不含 frame np.ndarray**（submit 后即弃引用，避免主/子双份帧内存）。
 
-    cq 留主进程用于写回路由；frame_width/height 在 submit 时从原始帧盖章，供重组 FrameInference。
+    cq 留主进程用于写回路由；frame_width/height 在 submit 时从原始帧盖章，供组装 FrameDetection。
     """
 
-    cq: "ClientQueues"   # 与 models.py 的运行句柄类型一致（写回路由，不过进程边界）
-    task_id: int
-    stage: str
+    cq: "ClientQueues"   # 写回路由句柄，不过进程边界
     timestamp: float
     frame_width: int
     frame_height: int
@@ -52,7 +51,7 @@ class RemoteInferProxy:
     def __init__(
         self,
         active_stages: List[str],
-        write_back: Callable[[List[FrameInference]], None],
+        write_back: Callable[[List[FrameDetection]], None],
         *,
         max_inflight: int = 8,
         cuda_device: str = "0",
@@ -66,7 +65,7 @@ class RemoteInferProxy:
         """
         Args:
             active_stages: 需在子进程建 pool 的 stage 主键（= 主进程已筛出有 detector 的 stage）。
-            write_back: 写回回调，收 List[FrameInference]（注入 DetectionService._write_back_results）。
+            write_back: 写回回调，收 List[FrameDetection]（注入 DetectionService._write_back_results）。
             max_inflight: 在途批数上限（背压 + 防 pending 无界；满则 submit 返回 False）。
             cuda_device: 子进程 CUDA_VISIBLE_DEVICES（""=CPU，仅测试）。
             ready_timeout: 等子进程 warmup 就绪的超时（模型加载慢，给足）。
@@ -267,7 +266,7 @@ class RemoteInferProxy:
             self._next_req_id += 1
             self._pending[req_id] = [
                 _Pending(
-                    cq=req.cq, task_id=req.task_id, stage=req.stage, timestamp=req.timestamp,
+                    cq=req.cq, timestamp=req.timestamp,
                     frame_width=int(req.frame.shape[1]), frame_height=int(req.frame.shape[0]),
                 )
                 for req in batch
@@ -315,23 +314,23 @@ class RemoteInferProxy:
             # 孤儿响应（子进程重启后的旧响应/重复）——忽略，不写回
             return
 
-        frame_infs: List[FrameInference] = []
+        frames: List[FrameDetection] = []
         for i, rec in enumerate(records):
             per_frame = merged[i] if i < len(merged) else {}
-            frame_infs.append(FrameInference(
-                task_id=rec.task_id, stage=rec.stage, timestamp=rec.timestamp,
-                detections=per_frame, cq=rec.cq,
+            frames.append(FrameDetection(
+                ts=rec.timestamp, by_source=per_frame,
                 frame_width=rec.frame_width, frame_height=rec.frame_height,
+                cq=rec.cq,
             ))
         # 写回主链路：其内 cq.is_active() 门挡迟到/跨 run；落盘侧代次隔离归 recording 的代次表
-        self._write_back(frame_infs)
+        self._write_back(frames)
         self._emit_stats(merged, len(records))
 
     @staticmethod
-    def _emit_stats(merged: List[Dict[str, "FrameDetections"]], n: int) -> None:
+    def _emit_stats(merged: List[Dict[str, "DetectorOutput"]], n: int) -> None:
         """在主进程发 Prometheus（子进程 registry 无效，故埋点上移）。
 
-        观测量直接取自 merged 里的 `FrameDetections`（不另立 stats 通道）：成功读 metadata
+        观测量直接取自 merged 里的 `DetectorOutput`（不另立 stats 通道）：成功读 metadata
         ["infer_ms"] 发延迟、失败（success=False）读 metadata["error_type"] 计失败。每模型每批
         只发一次（seen 去重）——merged 是逐帧展开，同模型 N 帧共享同一批观测。
         """

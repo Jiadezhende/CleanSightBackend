@@ -1,26 +1,26 @@
-"""T4: 写回句柄化 —— write-back 只写捕获的 res.cq，不按 client_id 反查。
+"""T4: 写回句柄化 —— write-back 只写捕获的 frame.cq，不按 client_id 反查。
 
 守两条不变式：
 1. 迟到结果握旧 CQ 句柄 → 旧 CQ 非 ACTIVE（DRAINING/CLOSED）→ 三写（slide_window /
-   latest_inference / ca_features 落盘缓冲）全被挡，落 stale_run 计数，碰不到别的 run；
+   latest_detection / ca_detections 落盘缓冲）全被挡，落 stale_run 计数，碰不到别的 run；
 2. 同一 batch 内，stale run 被挡不殃及同批 ACTIVE run 的正常写回（跨 run 隔离）。
 
 写回口**不碰盘**：第三写只是入 cq 缓冲，真正落盘由 recording 的 sweeper 拉走，故这里
 断言的是缓冲内容而不是文件。
 """
 
-from factories import make_cq, make_frame_inference
+from factories import make_cq, make_frame_detection
 from app.services.client.queues import ClientQueues
 from app.services.inference.detection.service import DetectionService
 from app.utils.metrics import frame_drop_total
 
 
 def _result(cq: ClientQueues, ts: float = 1.0):
-    return make_frame_inference(cq=cq, ts=ts)
+    return make_frame_detection(cq=cq, ts=ts)
 
 
 def _bare_service() -> DetectionService:
-    """绕过 __init__（避免加载模型）：write-back 只用 res.cq，不读 self 的任何字段。"""
+    """绕过 __init__（避免加载模型）：write-back 只用 frame.cq，不读 self 的任何字段。"""
     return DetectionService.__new__(DetectionService)
 
 
@@ -35,12 +35,13 @@ def test_active_run_write_back_lands():
     res = _result(cq)
     svc._write_back_results([res])
 
-    assert cq.get_latest_inference().by_source is res.detections  # 快照 = 物化 FrameFeature
-    assert cq.get_slide_window()  # 检测入滑窗
-    # 落盘缓冲拿到同一份帧级 FrameFeature（by_source 即 res.detections，不复制）
-    buffered = cq.drain_ca_features()
-    assert len(buffered) == 1
-    assert buffered[0].by_source is res.detections
+    assert cq.get_latest_detection() is res  # 快照 = collector 组装的同一份 FrameDetection
+    assert cq.get_slide_window() == [res]  # 检测入滑窗
+    # 落盘缓冲拿到同一份帧级 FrameDetection（不复制）
+    buffered = cq.drain_ca_detections()
+    assert buffered == [res] and buffered[0] is res
+    # 留存的帧不带写回句柄：写回口取走后置 None
+    assert res.cq is None
 
 
 def test_draining_run_write_back_blocked_and_counted():
@@ -51,9 +52,9 @@ def test_draining_run_write_back_blocked_and_counted():
     before = _stale_drops()
     svc._write_back_results([_result(cq)])
 
-    assert cq.get_latest_inference() is None  # 快照未落
+    assert cq.get_latest_detection() is None  # 快照未落
     assert cq.get_slide_window() == []  # 滑窗未落
-    assert cq.drain_ca_features() == []  # 落盘缓冲这条腿也被挡
+    assert cq.drain_ca_detections() == []  # 落盘缓冲这条腿也被挡
     assert _stale_drops() - before == 1.0
 
 
@@ -65,8 +66,8 @@ def test_closed_run_write_back_blocked():
     before = _stale_drops()
     svc._write_back_results([_result(cq)])
 
-    assert cq.get_latest_inference() is None
-    assert cq.drain_ca_features() == []
+    assert cq.get_latest_detection() is None
+    assert cq.drain_ca_detections() == []
     assert _stale_drops() - before == 1.0
 
 
@@ -81,9 +82,9 @@ def test_stale_and_active_in_same_batch_isolated():
     res_active = _result(cq_active)
     svc._write_back_results([res_stale, res_active])
 
-    assert cq_stale.get_latest_inference() is None
-    assert cq_active.get_latest_inference().by_source is res_active.detections
-    assert cq_stale.drain_ca_features() == []  # 仅 active 进缓冲
-    active_buffered = cq_active.drain_ca_features()
+    assert cq_stale.get_latest_detection() is None
+    assert cq_active.get_latest_detection() is res_active
+    assert cq_stale.drain_ca_detections() == []  # 仅 active 进缓冲
+    active_buffered = cq_active.drain_ca_detections()
     assert len(active_buffered) == 1
-    assert active_buffered[0].by_source is res_active.detections
+    assert active_buffered[0] is res_active

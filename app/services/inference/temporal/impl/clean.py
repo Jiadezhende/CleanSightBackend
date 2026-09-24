@@ -12,7 +12,7 @@ import torch
 
 from app.services.inference.temporal.operator import TemporalOperator
 from app.domain.alarm import Alarm
-from app.domain.detection import FrameFeature
+from app.domain.detection import FrameDetection
 
 
 class CleanOperator(TemporalOperator):
@@ -40,8 +40,8 @@ class CleanOperator(TemporalOperator):
             "latest_action": 0,
         }
 
-    def analyze(self, windows: List[FrameFeature]) -> None:
-        """消费帧窗、推进 self._sm。windows: 帧级 FrameFeature 快照(按 ts 升序，多流已对齐)。"""
+    def analyze(self, windows: List[FrameDetection]) -> None:
+        """消费帧窗、推进 self._sm。windows: 帧级 FrameDetection 快照(按 ts 升序，多流已对齐)。"""
         aligned_frames = self._clip(windows)
         if not aligned_frames:
             return
@@ -53,7 +53,7 @@ class CleanOperator(TemporalOperator):
         alarms = []
         return events, alarms
 
-    def _advance(self, aligned_frames: List[FrameFeature]) -> None:
+    def _advance(self, aligned_frames: List[FrameDetection]) -> None:
         """推进 self._sm。aligned_frames: 对齐后的窗口快照列表。"""
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in aligned_frames if f.ts > last_ts]
@@ -74,7 +74,7 @@ class CleanOperator(TemporalOperator):
         self._sm["latest_action"] = logits[-1, :].argmax().item()
         self._sm["last_ts"] = new_frames[-1].ts
 
-    def _adapt_to_features(self, aligned_frames: List[FrameFeature]) -> torch.Tensor:
+    def _adapt_to_features(self, aligned_frames: List[FrameDetection]) -> torch.Tensor:
         """将窗口快照转换为特征矩阵。
 
         同一原始帧的多流检测结果合并到同一个 feature vector 中。
@@ -106,11 +106,11 @@ class CleanOperator(TemporalOperator):
                 if not frame.success:
                     continue
 
-                if not frame.detections:
+                if not frame.boxes:
                     # 忽略无检测结果的帧
                     continue
 
-                for detection in frame.detections:
+                for detection in frame.boxes:
                     bbox = detection.bbox
                     if bbox is None:
                         # 忽略未检测到的物体

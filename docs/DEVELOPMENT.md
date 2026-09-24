@@ -30,7 +30,7 @@
 - **测试数据构造单一真源**：
   - `tests/factories.py` 是构造真源——纯函数、**无 pytest 依赖**，`tests/` 直接 `from factories import make_cq` 复用，`integration_tests/` 也可复用。
   - `tests/conftest.py` 把 factories 包成 factory-as-fixture（如 `make_cq`），供需要注入式书写的用例用。
-  - 契约一变（CQ 构造签名、`FrameInference` 加字段等）**只改 factories 一处**，不扫散点。
+  - 契约一变（CQ 构造签名、`FrameDetection` 加字段等）**只改 factories 一处**，不扫散点。
 - **I/O 边界故意集成-only**：子进程 ffmpeg、CUDA、WebSocket、真实 RTSP 这类外部 I/O 不硬写单测——把纯逻辑抽成 seam 单独测（如 URL 改写、去抖、时间轴计算），I/O 编排留给集成测试。
 - **不追覆盖率数字**：按 [kb/TESTING_MAP.md](kb/TESTING_MAP.md) 的「建议补测」补关键路径。典型：新增检测点补 Detector/Operator 单测 + YAML 加载测试；改 HLS 写入补 playlist EXTINF、在途段过滤、timeline 测试；改清理流程补结算告警归属测试。
 
@@ -76,7 +76,7 @@
 新建检测任务、Detector、Analyzer、Judge 走 `/infer-workflow` skill（含完整模板与 checklist）。两条会**静默出错**的红线单列在此：
 
 - **`class_name` 不做归一化**：直接取自模型 `result.names`，配置/代码里的匹配串须与训练类别名严格一致——写错不报错，静默漏检。
-- **统一检测契约是 `Detection`（单框）+ `FrameDetections`（整帧输出）**，见 [app/domain/detection.py](../app/domain/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `Detection.extra` 或 `FrameDetections.metadata`，时序统计交给 L3 Analyzer。
+- **统一检测契约是 `DetBox`（单框）→ `DetectorOutput`（单检测器单帧）→ `FrameDetection`（多流对齐的整帧）**，见 [app/domain/detection.py](../app/domain/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `DetBox.extra` 或 `DetectorOutput.metadata`，时序统计交给 L3 Analyzer。
 
 ---
 

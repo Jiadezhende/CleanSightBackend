@@ -1,6 +1,6 @@
 """`app.storage.inference`：`{step}/inference/` 下三份推理产物的编解码与读写。
 
-    features.jsonl      L1 检测特征，路线 B（追加）
+    detections.jsonl      L1 检测结果，路线 B（追加）
     facts.jsonl         L3 时序事实，路线 C（原子整体替换）
     offline_debug.json  离线策略调试件，路线 C
 
@@ -8,8 +8,8 @@
 
 四类断言，按规范的优先级排：
 
-1. **往返**（T1）：codec 是本域唯一有内容的东西，正反运算必须闭合。features 侧投影掉的字段
-   （mask/keypoints/metadata）按契约回读为默认值，这是有意有损，也一并钉死；facts 侧无损。
+1. **往返**（T1）：codec 是本域唯一有内容的东西，正反运算必须闭合。detections 侧投影掉的字段
+   （extra/metadata）按契约回读为默认值，这是有意有损，也一并钉死；facts 侧无损。
 2. **事务不变式**（T3）：路线 C 失败即整体作废——旧文件原样保留、不留 tmp。
 3. **落位**：产物只进 `inference/` 子目录，step 根下不留文件——域隔离的执行力。
 4. **错误语义**：坏行逐行隔离、形状不对的 record 跳过、IO 失败原样抛。
@@ -20,7 +20,7 @@ import json
 import numpy as np
 import pytest
 
-from app.domain.detection import Detection, FrameDetections, FrameFeature
+from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.fact import EventFact, SegmentFact
 from app.storage import inference, tasks
 from app.storage.inference import _detection, _jsonl, _temporal
@@ -31,18 +31,18 @@ from app.storage.inference import _detection, _jsonl, _temporal
 # ---------------------------------------------------------------------------
 
 
-def _det(bbox=(1, 2, 3, 4), conf=0.9, cls_id=0, cls="person", **extra) -> Detection:
-    return Detection(bbox=list(bbox), confidence=conf, class_id=cls_id, class_name=cls, **extra)
+def _det(bbox=(1, 2, 3, 4), conf=0.9, cls_id=0, cls="person", **extra) -> DetBox:
+    return DetBox(bbox=list(bbox), confidence=conf, class_id=cls_id, class_name=cls, **extra)
 
 
-def _frame(ts, by_source=None, width=1920, height=1080) -> FrameFeature:
-    """一帧特征。by_source 默认给一个单流单框的最小帧。"""
+def _frame(ts, by_source=None, width=1920, height=1080) -> FrameDetection:
+    """一帧检测结果。by_source 默认给一个单流单框的最小帧。"""
     if by_source is None:
         by_source = {"cam": [_det()]}
-    return FrameFeature(
+    return FrameDetection(
         ts=ts,
         by_source={
-            source: FrameDetections(detections=list(dets), metadata={}, timestamp=ts)
+            source: DetectorOutput(boxes=list(dets), metadata={}, timestamp=ts)
             for source, dets in by_source.items()
         },
         frame_width=width,
@@ -62,8 +62,8 @@ def _domain_dir(root, task_id, step_id):
     return root / str(task_id) / str(step_id) / "inference"
 
 
-def _features_file(root, task_id, step_id):
-    return _domain_dir(root, task_id, step_id) / "features.jsonl"
+def _detections_file(root, task_id, step_id):
+    return _domain_dir(root, task_id, step_id) / "detections.jsonl"
 
 
 def _facts_file(root, task_id, step_id):
@@ -75,160 +75,160 @@ def _debug_file(root, task_id, step_id):
 
 
 # ---------------------------------------------------------------------------
-# features.jsonl：codec 往返（T1）
+# detections.jsonl：codec 往返（T1）
 # ---------------------------------------------------------------------------
 
 
-class TestFeatureCodec:
-    """`_feature_to_record` / `_record_to_feature` 是一对逆运算。"""
+class TestDetectionCodec:
+    """`_frame_to_record` / `_record_to_frame` 是一对逆运算。"""
 
     def test_roundtrip_preserves_projected_fields(self):
         src = _frame(1700.5, {"cam": [_det(bbox=(10, 20, 30, 40), conf=0.75, cls_id=3, cls="hand")]})
-        got = _detection._record_to_feature(_detection._feature_to_record(src))
+        got = _detection._record_to_frame(_detection._frame_to_record(src))
 
         assert got.ts == src.ts
         assert (got.frame_width, got.frame_height) == (1920, 1080)
         assert list(got.by_source) == ["cam"]
-        d = got.by_source["cam"].detections[0]
+        d = got.by_source["cam"].boxes[0]
         assert (d.bbox, d.confidence, d.class_id, d.class_name) == ([10, 20, 30, 40], 0.75, 3, "hand")
 
     def test_roundtrip_is_lossy_by_contract(self):
-        """mask / keypoints / extra / metadata 刻意不落 —— 离线不消费，且每帧一张数组太重。
+        """extra / metadata 刻意不落 —— 离线不消费，且形状不定。
 
         回读为默认值是**契约**不是 bug；这条用例存在的意义是让改坏它的人看见代价。
         """
-        src = _frame(1.0, {"seg": [_det(mask=np.zeros((4, 4)), keypoints=[[1, 2]], extra={"k": "v"})]})
+        src = _frame(1.0, {"seg": [_det(extra={"k": "v"})]})
         src.by_source["seg"].metadata = {"model": "yolo"}
 
-        got = _detection._record_to_feature(_detection._feature_to_record(src))
-        d = got.by_source["seg"].detections[0]
-        assert d.mask is None and d.keypoints is None and d.extra == {}
+        got = _detection._record_to_frame(_detection._frame_to_record(src))
+        d = got.by_source["seg"].boxes[0]
+        assert d.extra == {}
         assert got.by_source["seg"].metadata == {}
 
     def test_roundtrip_keeps_empty_source(self):
         """"该流这帧没检出" 与 "这帧没有该流" 是两回事，present-key 语义必须保住。"""
-        src = _detection._feature_to_record(_frame(1.0, {"cam": [], "ir": [_det()]}))
-        got = _detection._record_to_feature(src)
+        src = _detection._frame_to_record(_frame(1.0, {"cam": [], "ir": [_det()]}))
+        got = _detection._record_to_frame(src)
         assert sorted(got.by_source) == ["cam", "ir"]
-        assert got.by_source["cam"].detections == []
+        assert got.by_source["cam"].boxes == []
 
     def test_record_timestamp_fans_out_to_every_source(self):
-        """同帧多流同源同值：每源 FrameDetections.timestamp = 记录级 ts。"""
-        src = _detection._feature_to_record(_frame(88.25, {"a": [], "b": []}))
-        got = _detection._record_to_feature(src)
+        """同帧多流同源同值：每源 DetectorOutput.timestamp = 记录级 ts。"""
+        src = _detection._frame_to_record(_frame(88.25, {"a": [], "b": []}))
+        got = _detection._record_to_frame(src)
         assert [fd.timestamp for fd in got.by_source.values()] == [88.25, 88.25]
 
     def test_numpy_scalars_survive_json(self):
         """bbox/conf/cls_id 强制成原生类型 —— json 不吃 np.int64，检测器给的常是它。"""
         det = _det(bbox=np.array([1, 2, 3, 4]), conf=np.float32(0.5), cls_id=np.int64(2))
-        json.dumps(_detection._feature_to_record(_frame(1.0, {"cam": [det]})))  # 不抛即通过
+        json.dumps(_detection._frame_to_record(_frame(1.0, {"cam": [det]})))  # 不抛即通过
 
     def test_missing_resolution_restores_as_none(self):
-        rec = _detection._feature_to_record(FrameFeature(ts=1.0, by_source={}))
+        rec = _detection._frame_to_record(FrameDetection(ts=1.0, by_source={}))
         assert "frame_width" not in rec
-        got = _detection._record_to_feature(rec)
+        got = _detection._record_to_frame(rec)
         assert got.frame_width is None and got.frame_height is None
 
     def test_int_ts_from_handwritten_file_becomes_float(self):
         """手写 JSONL 常给整数 ts；反序列化边界统一 float，免得下游比较时类型分叉。"""
-        got = _detection._record_to_feature({"ts": 3, "features": {}})
+        got = _detection._record_to_frame({"ts": 3, "detections": {}})
         assert isinstance(got.ts, float) and got.ts == 3.0
 
 
 # ---------------------------------------------------------------------------
-# features.jsonl：读写
+# detections.jsonl：读写
 # ---------------------------------------------------------------------------
 
 
-class TestFeaturesReadWrite:
+class TestDetectionsReadWrite:
     def test_append_read_roundtrip(self, tmp_storage):
-        inference.append_features(1, 2, [_frame(1.0), _frame(2.0)])
-        got = inference.read_features(1, 2)
+        inference.append_detections(1, 2, [_frame(1.0), _frame(2.0)])
+        got = inference.read_detections(1, 2)
         assert [f.ts for f in got] == [1.0, 2.0]
-        assert got[0].by_source["cam"].detections[0].bbox == [1, 2, 3, 4]
+        assert got[0].by_source["cam"].boxes[0].bbox == [1, 2, 3, 4]
 
     def test_append_accumulates_across_calls(self, tmp_storage):
-        inference.append_features(1, 2, [_frame(1.0)])
-        inference.append_features(1, 2, [_frame(2.0), _frame(3.0)])
-        assert [f.ts for f in inference.read_features(1, 2)] == [1.0, 2.0, 3.0]
+        inference.append_detections(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(2.0), _frame(3.0)])
+        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0, 2.0, 3.0]
 
     def test_read_sorts_by_ts(self, tmp_storage):
-        inference.append_features(1, 2, [_frame(3.0), _frame(1.0), _frame(2.0)])
-        assert [f.ts for f in inference.read_features(1, 2)] == [1.0, 2.0, 3.0]
+        inference.append_detections(1, 2, [_frame(3.0), _frame(1.0), _frame(2.0)])
+        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0, 2.0, 3.0]
 
     def test_read_missing_returns_empty(self, tmp_storage):
-        assert inference.read_features(9, 9) == []
+        assert inference.read_detections(9, 9) == []
 
     def test_read_missing_creates_nothing(self, tmp_storage):
         """读一个没写过的 step 不该在盘上留空目录 —— 空目录会被 tasks.list_task_ids() 列出。"""
-        inference.read_features(9, 9)
+        inference.read_detections(9, 9)
         assert list(tmp_storage.iterdir()) == []
 
     def test_empty_batch_writes_nothing(self, tmp_storage):
         """追加零条 = 没事发生：不建目录、不建文件（与 write_facts 的空批语义刻意不同）。"""
-        inference.append_features(1, 2, [])
+        inference.append_detections(1, 2, [])
         assert list(tmp_storage.iterdir()) == []
 
     def test_writes_into_domain_dir_not_step_root(self, tmp_storage):
         """域隔离：step 根下只有域目录、没有文件。"""
-        inference.append_features(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(1.0)])
         assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
-        assert _features_file(tmp_storage, 1, 2).is_file()
+        assert _detections_file(tmp_storage, 1, 2).is_file()
 
     def test_steps_are_isolated(self, tmp_storage):
-        inference.append_features(1, 1, [_frame(1.0)])
-        inference.append_features(1, 2, [_frame(2.0), _frame(3.0)])
-        assert [f.ts for f in inference.read_features(1, 1)] == [1.0]
-        assert [f.ts for f in inference.read_features(1, 2)] == [2.0, 3.0]
+        inference.append_detections(1, 1, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(2.0), _frame(3.0)])
+        assert [f.ts for f in inference.read_detections(1, 1)] == [1.0]
+        assert [f.ts for f in inference.read_detections(1, 2)] == [2.0, 3.0]
 
     def test_tasks_are_isolated(self, tmp_storage):
-        inference.append_features(1, 1, [_frame(1.0)])
-        inference.append_features(2, 1, [_frame(9.0)])
-        assert [f.ts for f in inference.read_features(2, 1)] == [9.0]
+        inference.append_detections(1, 1, [_frame(1.0)])
+        inference.append_detections(2, 1, [_frame(9.0)])
+        assert [f.ts for f in inference.read_detections(2, 1)] == [9.0]
 
     def test_skips_corrupt_line_without_losing_the_rest(self, tmp_storage):
         """JSONL 逐行独立：一行坏了不该让其余几万帧陪葬。"""
-        inference.append_features(1, 2, [_frame(1.0), _frame(2.0)])
-        with _features_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
+        inference.append_detections(1, 2, [_frame(1.0), _frame(2.0)])
+        with _detections_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write("{not json\n\n")
-        inference.append_features(1, 2, [_frame(3.0)])
-        assert [f.ts for f in inference.read_features(1, 2)] == [1.0, 2.0, 3.0]
+        inference.append_detections(1, 2, [_frame(3.0)])
+        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0, 2.0, 3.0]
 
     def test_skips_valid_json_that_is_not_an_object(self, tmp_storage):
         """`123` / `[1,2]` 都是合法 JSON，但本域每行按契约是一条 record ——
         放行它们只会让 `.get` 在下游炸成 AttributeError。"""
-        inference.append_features(1, 2, [_frame(1.0)])
-        with _features_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
+        inference.append_detections(1, 2, [_frame(1.0)])
+        with _detections_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write("123\n[1, 2]\n")
-        assert [f.ts for f in inference.read_features(1, 2)] == [1.0]
+        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0]
 
     def test_skips_record_with_wrong_shape(self, tmp_storage):
         """能 json.loads 但形状不对（缺 conf）的 record 与坏行同等对待，不中断其余帧。"""
-        path = _features_file(tmp_storage, 1, 2)
+        path = _detections_file(tmp_storage, 1, 2)
         path.parent.mkdir(parents=True)
         path.write_text(
-            json.dumps({"ts": 1.0, "features": {"cam": [{"bbox": [1, 2, 3, 4]}]}}) + "\n"
-            + json.dumps(_detection._feature_to_record(_frame(2.0))) + "\n",
+            json.dumps({"ts": 1.0, "detections": {"cam": [{"bbox": [1, 2, 3, 4]}]}}) + "\n"
+            + json.dumps(_detection._frame_to_record(_frame(2.0))) + "\n",
             encoding="utf-8",
         )
-        assert [f.ts for f in inference.read_features(1, 2)] == [2.0]
+        assert [f.ts for f in inference.read_detections(1, 2)] == [2.0]
 
     def test_tolerates_utf8_bom(self, tmp_storage):
-        """Windows 上手写/另存的 features.jsonl 会带 BOM，读侧必须容忍。"""
-        path = _features_file(tmp_storage, 1, 2)
+        """Windows 上手写/另存的 detections.jsonl 会带 BOM，读侧必须容忍。"""
+        path = _detections_file(tmp_storage, 1, 2)
         path.parent.mkdir(parents=True)
         path.write_text(
-            json.dumps(_detection._feature_to_record(_frame(5.0))) + "\n",
+            json.dumps(_detection._frame_to_record(_frame(5.0))) + "\n",
             encoding="utf-8-sig",
         )
-        assert [f.ts for f in inference.read_features(1, 2)] == [5.0]
+        assert [f.ts for f in inference.read_detections(1, 2)] == [5.0]
 
     def test_io_failure_propagates(self, tmp_storage):
         """IO 失败原样抛 —— 吞不吞是调用方的策略，本包给不出对两个调用方都对的答案。"""
         (tmp_storage / "1").mkdir()
         (tmp_storage / "1" / "2").write_text("occupied", encoding="utf-8")  # step 目录被文件占位
         with pytest.raises(OSError):
-            inference.append_features(1, 2, [_frame(1.0)])
+            inference.append_detections(1, 2, [_frame(1.0)])
 
 
 # ---------------------------------------------------------------------------
@@ -394,14 +394,14 @@ class TestDebugResult:
 
 
 class TestArtifactIsolation:
-    def test_write_facts_leaves_features_alone(self, tmp_storage):
-        inference.append_features(1, 2, [_frame(1.0)])
+    def test_write_facts_leaves_detections_alone(self, tmp_storage):
+        inference.append_detections(1, 2, [_frame(1.0)])
         inference.write_facts(1, 2, [_seg()])
-        assert [f.ts for f in inference.read_features(1, 2)] == [1.0]
+        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0]
 
-    def test_append_features_leaves_facts_alone(self, tmp_storage):
+    def test_append_detections_leaves_facts_alone(self, tmp_storage):
         inference.write_facts(1, 2, [_seg(label="a")])
-        inference.append_features(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(1.0)])
         assert [f.label for f in inference.read_facts(1, 2)] == ["a"]
 
 
@@ -412,14 +412,14 @@ class TestArtifactIsolation:
 
 class TestDeleteDomain:
     def test_deletes_and_reports_prior_existence(self, tmp_storage):
-        inference.append_features(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(1.0)])
         assert inference.delete(1, 2) is True
-        assert inference.read_features(1, 2) == []
+        assert inference.read_detections(1, 2) == []
         assert inference.delete(1, 2) is False
 
     def test_takes_all_three_artifacts(self, tmp_storage):
-        """supersede 清的是整域：新 run 的特征换了，旧 facts 是对旧特征的分析，留着即脏数据。"""
-        inference.append_features(1, 2, [_frame(1.0)])
+        """supersede 清的是整域：新 run 的检测结果换了，旧 facts 是对旧检测结果的分析，留着即脏数据。"""
+        inference.append_detections(1, 2, [_frame(1.0)])
         inference.write_facts(1, 2, [_seg()])
         inference.write_debug_result(1, 2, {"run": 1})
 
@@ -432,7 +432,7 @@ class TestDeleteDomain:
 
     def test_leaves_other_domains_untouched(self, tmp_storage):
         """只删本域：同 step 的 `hls/` 一个字节都不碰。"""
-        inference.append_features(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(1.0)])
         hls_dir = tmp_storage / "1" / "2" / "hls"
         hls_dir.mkdir(parents=True)
         (hls_dir / "raw_playlist.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
@@ -442,10 +442,10 @@ class TestDeleteDomain:
 
     def test_append_after_delete_starts_clean(self, tmp_storage):
         """这正是 supersede 要的：新 run 读到的永远是自己那段完整序列。"""
-        inference.append_features(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(1.0)])
         inference.delete(1, 2)
-        inference.append_features(1, 2, [_frame(9.0)])
-        assert [f.ts for f in inference.read_features(1, 2)] == [9.0]
+        inference.append_detections(1, 2, [_frame(9.0)])
+        assert [f.ts for f in inference.read_detections(1, 2)] == [9.0]
 
 
 # ---------------------------------------------------------------------------
@@ -454,19 +454,19 @@ class TestDeleteDomain:
 
 
 class TestDomainSeam:
-    def test_step_with_only_features_is_visible_to_tasks(self, tmp_storage):
-        """只有 features.jsonl、没有 HLS 段的 step 必须被 list_step_ids 看见 ——
+    def test_step_with_only_detections_is_visible_to_tasks(self, tmp_storage):
+        """只有 detections.jsonl、没有 HLS 段的 step 必须被 list_step_ids 看见 ——
         它正是 TTL 判据错选 metadata.json 而永不回收的那一类（缺陷 #1）。"""
-        inference.append_features(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(1.0)])
         assert tasks.list_step_ids(1) == [2]
         assert tasks.list_task_ids() == [1]
 
     def test_delete_step_takes_the_whole_domain_with_it(self, tmp_storage):
         """`delete_step` 删的是整个 step，本域三份产物一起没。"""
-        inference.append_features(1, 2, [_frame(1.0)])
+        inference.append_detections(1, 2, [_frame(1.0)])
         inference.write_facts(1, 2, [_seg()])
 
         assert tasks.delete_step(1, 2) is True
-        assert inference.read_features(1, 2) == []
+        assert inference.read_detections(1, 2) == []
         assert inference.read_facts(1, 2) == []
         assert not (tmp_storage / "1").exists()

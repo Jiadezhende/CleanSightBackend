@@ -1,15 +1,15 @@
-"""离线分割编排层 —— 把 (task_id, step_id) 一次跑通 features.jsonl → 策略 → facts.jsonl。
+"""离线分割编排层 —— 把 (task_id, step_id) 一次跑通 detections.jsonl → 策略 → facts.jsonl。
 
 调用方（CLI / 测试）显式给 `(task_id, step_id[, strategy])`，Runner：
     1. 按 step_id 取 stage 配置，实例化 offline 策略（未启用则 skip）；
-    2. 一次读该 step 的完整特征序列；
+    2. 一次读该 step 的完整检测序列；
     3. 策略 preprocess → segment 产出 SegmentFact；
     4. 校验 + 排序，**读回既有事实 → 删掉自己这个 producer 的旧分段 → 整体写回**。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
 落盘全经 `app.storage.inference`（存储根归 `settings`，故本类不收 `base_dir`）。
 
-**调用方须保证输入已封口**：step 已停写、且 recording 的 features 队列已把缓冲排空
+**调用方须保证输入已封口**：step 已停写、且 recording 的 detections 队列已把缓冲排空
 （在线链路是异步落盘的）。Runner 不证明这一点。
 """
 
@@ -74,13 +74,13 @@ class OfflineRunner:
             return OfflineRunResult("skipped", None, 0, f"stage '{stage_key}' offline 未启用")
 
         producer = segmenter.name
-        frames = inference_store.read_features(spec.task_id, spec.step_id)
+        frames = inference_store.read_detections(spec.task_id, spec.step_id)
         present = set().union(*(ff.by_source.keys() for ff in frames)) if frames else set()
         empty = [s for s in segmenter.subscribes if s not in present]
         if empty:
             # 任一订阅 source 无数据：跳过，不覆盖旧事实
             return OfflineRunResult(
-                "skipped", producer, 0, f"订阅 source 无特征: {empty}"
+                "skipped", producer, 0, f"订阅 source 无检测结果: {empty}"
             )
 
         model_input = segmenter.preprocess(frames)

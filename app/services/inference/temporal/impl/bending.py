@@ -12,7 +12,7 @@ from typing import List, Tuple
 
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.domain.detection import FrameDetections, FrameFeature
+from app.domain.detection import DetectorOutput, FrameDetection
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class BendingOperator(Operator):
             "last_ts": 0.0,
         }
 
-    def analyze(self, windows: List[FrameFeature]) -> None:
+    def analyze(self, windows: List[FrameDetection]) -> None:
         window = self.primary_window(windows)
         if not window:
             return
@@ -85,7 +85,7 @@ class BendingOperator(Operator):
             )]
         return []
 
-    def _advance(self, window: List[FrameDetections]) -> None:
+    def _advance(self, window: List[DetectorOutput]) -> None:
         """游标推进：仅处理上次 tick 之后的新帧，逐帧驱动状态机。"""
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in window if f.timestamp > last_ts]
@@ -93,7 +93,7 @@ class BendingOperator(Operator):
             return
 
         for frame in new_frames:
-            has_bent = any(d.class_name == "bent" for d in frame.detections)
+            has_bent = any(d.class_name == "bent" for d in frame.boxes)
 
             if self._sm["state"] == "STRAIGHT":
                 if has_bent:

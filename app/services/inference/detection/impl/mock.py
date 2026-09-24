@@ -11,7 +11,7 @@ from typing import List
 import numpy as np
 
 from app.services.inference.detection.detector import Detector
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import DetBox, DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 _MOCK_CLASS_ID = 0
@@ -32,7 +32,7 @@ class MockDetector(Detector):
         super().__init__(name="mock", enabled=enabled)
         self.brightness_threshold = brightness_threshold
 
-    def _detect(self, frame: np.ndarray, timestamp: float) -> FrameDetections:
+    def _detect(self, frame: np.ndarray, timestamp: float) -> DetectorOutput:
         """单帧亮度启发式检测。timestamp 为帧捕获真值锚点，由 infer_batch 穿入。"""
         h, w = frame.shape[:2]
         cy1, cy2 = h // 4, 3 * h // 4
@@ -42,10 +42,10 @@ class MockDetector(Detector):
         gray = np.mean(center_crop, axis=2) if center_crop.ndim == 3 else center_crop.astype(float)
         mean_brightness = float(np.mean(gray))
 
-        detections: List[Detection] = []
+        detections: List[DetBox] = []
         if mean_brightness < self.brightness_threshold:
             confidence = 1.0 - mean_brightness / 255.0
-            detections.append(Detection(
+            detections.append(DetBox(
                 bbox=[cx1, cy1, cx2, cy2],
                 confidence=round(confidence, 4),
                 class_id=_MOCK_CLASS_ID,
@@ -53,8 +53,8 @@ class MockDetector(Detector):
                 extra={"mean_brightness": round(mean_brightness, 2)},
             ))
 
-        return FrameDetections(
-            detections=detections,
+        return DetectorOutput(
+            boxes=detections,
             metadata={
                 "model": "mock_brightness",
                 "mean_brightness": round(mean_brightness, 2),
@@ -67,10 +67,10 @@ class MockDetector(Detector):
         self,
         frames: List[np.ndarray],
         timestamps: List[float],
-    ) -> List[FrameDetections]:
+    ) -> List[DetectorOutput]:
         return [self._detect(frame, ts) for frame, ts in zip(frames, timestamps)]
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = [
             RenderItem(
                 bbox=det.bbox,
@@ -78,10 +78,10 @@ class MockDetector(Detector):
                 confidence=det.confidence,
                 color=(255, 128, 0),
             )
-            for det in output.detections
+            for det in output.boxes
         ]
 
-        detected = len(output.detections) > 0
+        detected = len(output.boxes) > 0
         brightness = output.metadata.get("mean_brightness", "-")
 
         if detected:

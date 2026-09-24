@@ -8,9 +8,9 @@ import math
 
 import pytest
 
-from factories import make_detection, make_frame_detections, make_frame_feature
+from factories import make_det_box, make_detector_output, make_frame_detection
 
-from app.domain.detection import FrameDetections, FrameFeature
+from app.domain.detection import DetectorOutput, FrameDetection
 from app.domain.fact import EventFact, SegmentFact
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmenter import OfflineSegmenter
@@ -24,12 +24,12 @@ _CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanSegmenter"
 
 
 def _frames(per_source):
-    """{src: [FrameDetections 按 ts]} → List[FrameFeature]（按 ts 对齐+升序），供直调 preprocess。"""
+    """{src: [DetectorOutput 按 ts]} → List[FrameDetection]（按 ts 对齐+升序），供直调 preprocess。"""
     by_ts: dict = {}
     for src, fds in per_source.items():
         for fd in fds:
             by_ts.setdefault(fd.timestamp, {})[src] = fd
-    return [FrameFeature(ts=ts, by_source=by_ts[ts]) for ts in sorted(by_ts)]
+    return [FrameDetection(ts=ts, by_source=by_ts[ts]) for ts in sorted(by_ts)]
 
 
 def _seg(producer="p", label="x", start=0.0, end=1.0):
@@ -145,10 +145,10 @@ class TestBrushRulesSegmenter:
     def test_presence_runs_to_segments(self):
         seg = BrushRulesSegmenter(name="p", subscribes=["a"])
         streams = {"a": [
-            make_frame_detections(n=1, ts=1.0),   # active
-            make_frame_detections(n=1, ts=2.0),   # active
-            make_frame_detections(n=0, ts=3.0),   # idle → 断段
-            make_frame_detections(n=1, ts=4.0),   # active（新段）
+            make_detector_output(n=1, ts=1.0),   # active
+            make_detector_output(n=1, ts=2.0),   # active
+            make_detector_output(n=0, ts=3.0),   # idle → 断段
+            make_detector_output(n=1, ts=4.0),   # active（新段）
         ]}
         segs = seg.segment(seg.preprocess(_frames(streams)))
         assert [(s.start, s.end) for s in segs] == [(1.0, 2.0), (4.0, 4.0)]
@@ -157,15 +157,15 @@ class TestBrushRulesSegmenter:
     def test_min_frames_drops_short_runs(self):
         seg = BrushRulesSegmenter(name="p", subscribes=["a"], min_frames=2)
         streams = {"a": [
-            make_frame_detections(n=1, ts=1.0),   # 单帧段，min_frames=2 丢弃
-            make_frame_detections(n=0, ts=2.0),
+            make_detector_output(n=1, ts=1.0),   # 单帧段，min_frames=2 丢弃
+            make_detector_output(n=0, ts=2.0),
         ]}
         assert seg.segment(seg.preprocess(_frames(streams))) == []
 
     def test_debug_result_none(self):
         """presence 型无逐帧语义：debug_result 恒 None（Runner 据此不落逐帧 JSON）。"""
         seg = BrushRulesSegmenter(name="p", subscribes=["a"])
-        seg.segment(seg.preprocess(_frames({"a": [make_frame_detections(n=1, ts=1.0)]})))
+        seg.segment(seg.preprocess(_frames({"a": [make_detector_output(n=1, ts=1.0)]})))
         assert seg.debug_result() is None
 
 
@@ -173,13 +173,13 @@ class TestBrushRulesSegmenter:
 
 def _clean_frame(ts):
     """一帧：clean_large=[hand, scope_control_body]，clean_small=[short_brush] → short_brush_cleaning。"""
-    large = FrameDetections(
-        detections=[make_detection(class_name="hand"),
-                    make_detection(class_name="scope_control_body")],
+    large = DetectorOutput(
+        boxes=[make_det_box(class_name="hand"),
+                    make_det_box(class_name="scope_control_body")],
         metadata={}, timestamp=ts,
     )
-    small = FrameDetections(
-        detections=[make_detection(class_name="short_brush")], metadata={}, timestamp=ts,
+    small = DetectorOutput(
+        boxes=[make_det_box(class_name="short_brush")], metadata={}, timestamp=ts,
     )
     return {"clean_large": large, "clean_small": small}
 
@@ -258,12 +258,12 @@ def _debug_path(root, task_id=1, step_id=2):
     return root / str(task_id) / str(step_id) / "inference" / "offline_debug.json"
 
 
-def _write_features(task_id, step_id):
-    """经数据层预置两帧双源特征（storage 根已由 tmp_storage fixture 指到临时目录）。"""
-    inference_store.append_features(task_id, step_id, [
-        make_frame_feature(ts=ts, by_source={
-            "clean_large": make_frame_detections(n=1, ts=ts),
-            "clean_small": make_frame_detections(n=1, ts=ts),
+def _write_detections(task_id, step_id):
+    """经数据层预置两帧双源检测结果（storage 根已由 tmp_storage fixture 指到临时目录）。"""
+    inference_store.append_detections(task_id, step_id, [
+        make_frame_detection(ts=ts, by_source={
+            "clean_large": make_detector_output(n=1, ts=ts),
+            "clean_small": make_detector_output(n=1, ts=ts),
         })
         for ts in (1.0, 2.0)
     ])
@@ -285,7 +285,7 @@ class TestOfflineRunner:
         assert not _facts_path(tmp_storage).exists()
 
     def test_completed_writes_facts(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert res.producer == "clean_seg"
@@ -298,7 +298,7 @@ class TestOfflineRunner:
         assert not _debug_path(tmp_storage).exists()
 
     def test_rerun_idempotent(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         r = _runner(_OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
@@ -306,7 +306,7 @@ class TestOfflineRunner:
         assert len(segs) == 1
 
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         with pytest.raises(RuntimeError):
             r.run(OfflineRunSpec(task_id=1, step_id=2,
@@ -314,7 +314,7 @@ class TestOfflineRunner:
         assert not _facts_path(tmp_storage).exists()
 
     def test_preprocess_seam_invoked(self, tmp_storage):
-        _write_features(1, 2)
+        _write_detections(1, 2)
         r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         res = r.run(OfflineRunSpec(task_id=1, step_id=2,
                                    strategy="test_offline_pipeline.MarkerSegmenter"))
@@ -323,8 +323,8 @@ class TestOfflineRunner:
 
     def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_storage):
         """CleanSegmenter 不再规则降级；未配 model_path 时硬失败且不落结果。"""
-        inference_store.append_features(1, 2, [
-            make_frame_feature(ts=t, by_source=_clean_frame(t))
+        inference_store.append_detections(1, 2, [
+            make_frame_detection(ts=t, by_source=_clean_frame(t))
             for t in (0.1, 0.2, 0.3, 0.4)
         ])
         offline = dict(_OFFLINE_OK, **{"class": _CLEAN_CLASS,
@@ -342,8 +342,8 @@ class TestOfflineRunner:
                         "class": _MOCK_CLASS, "params": {"label": "mock_action", "min_frames": 1}},
         }}})
         # MockDetector 纯透传：空检测帧 → 0 段，但链路走通
-        inference_store.append_features(1, -1, [
-            make_frame_feature(ts=1.0, by_source={"mock": make_frame_detections(n=0, ts=1.0)})
+        inference_store.append_detections(1, -1, [
+            make_frame_detection(ts=1.0, by_source={"mock": make_detector_output(n=0, ts=1.0)})
         ])
         res = OfflineRunner(config=cfg).run(OfflineRunSpec(task_id=1, step_id=-1))
         assert res.status == "completed"
@@ -377,7 +377,7 @@ class TestCli:
         # 默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
         # + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
         from app.services.inference.offline import runner as runner_mod
-        _write_features(1, 2)
+        _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
@@ -387,7 +387,7 @@ class TestCli:
 
     def test_run_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
         from app.services.inference.offline import runner as runner_mod
-        _write_features(1, 2)
+        _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2",
@@ -398,7 +398,7 @@ class TestCli:
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""
         from app.services.inference.offline import runner as runner_mod
-        _write_features(1, 2)
+        _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         assert cli.main(["run", "--task-id", "1", "--step-id", "2"]) == 0

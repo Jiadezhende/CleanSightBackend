@@ -875,11 +875,11 @@ class TestDelete:
         hls.insert_segment(1, 2, "raw", _frames())
         neighbor = tmp_storage / "1" / "2" / "inference"
         neighbor.mkdir(parents=True)
-        (neighbor / "features.jsonl").write_text("{}\n", encoding="utf-8")
+        (neighbor / "detections.jsonl").write_text("{}\n", encoding="utf-8")
 
         hls.delete(1, 2)
 
-        assert (neighbor / "features.jsonl").read_text(encoding="utf-8") == "{}\n"
+        assert (neighbor / "detections.jsonl").read_text(encoding="utf-8") == "{}\n"
         assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
 
     def test_does_not_touch_other_steps(self, tmp_storage, fake_pipeline):
