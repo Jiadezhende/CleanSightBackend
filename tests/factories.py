@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from app.domain.alarm import Alarm
-from app.domain.detection import Detection, FrameDetections, FrameFeature
+from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.frame import Frame
 from app.services.client.queues import ClientQueues
 from app.services.inference.types import FrameInference
@@ -34,9 +34,9 @@ __all__ = [
 def make_detection(
     *, bbox: Optional[List[int]] = None, confidence: float = 0.9,
     class_id: int = 0, class_name: str = "bubble", **over,
-) -> Detection:
+) -> DetBox:
     """单个检测框。bbox 值对大多数断言无关紧要，默认 [0,0,1,1]。"""
-    return Detection(
+    return DetBox(
         bbox=list(bbox) if bbox is not None else [0, 0, 1, 1],
         confidence=confidence,
         class_id=class_id,
@@ -48,9 +48,9 @@ def make_detection(
 def make_frame_detections(
     *, n: int = 1, class_name: str = "bubble", ts: float = 1.0,
     metadata: Optional[Dict] = None, **over,
-) -> FrameDetections:
+) -> DetectorOutput:
     """一帧的多检测聚合（n 个同类检测）。n=0 表示该帧无检测。"""
-    return FrameDetections(
+    return DetectorOutput(
         detections=[make_detection(class_name=class_name) for _ in range(n)],
         metadata=metadata if metadata is not None else {},
         timestamp=ts,
@@ -59,11 +59,11 @@ def make_frame_detections(
 
 
 def make_frame_feature(
-    *, ts: float = 1.0, by_source: Optional[Dict[str, FrameDetections]] = None,
+    *, ts: float = 1.0, by_source: Optional[Dict[str, DetectorOutput]] = None,
     source: str = "bubble", n: int = 1, class_name: str = "bubble",
     metadata: Optional[Dict] = None,
     frame_width: Optional[int] = None, frame_height: Optional[int] = None,
-) -> FrameFeature:
+) -> FrameDetection:
     """一帧多流对齐记录（特征层输入）。by_source 缺省单流 {source: <n 个检测>}。
 
     frame_width/frame_height 为帧级分辨率，缺省 None（消费方走默认兜底）。
@@ -72,7 +72,7 @@ def make_frame_feature(
         by_source = {
             source: make_frame_detections(n=n, class_name=class_name, ts=ts, metadata=metadata)
         }
-    return FrameFeature(ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height)
+    return FrameDetection(ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height)
 
 
 def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:
@@ -98,7 +98,7 @@ def make_bare_cq(**kw) -> ClientQueues:
 def make_frame_inference(
     *, cq: Optional[ClientQueues] = None, task_id: Optional[int] = None,
     stage: Optional[str] = None, ts: float = 1.0,
-    detectors: Optional[Dict[str, FrameDetections]] = None,
+    detectors: Optional[Dict[str, DetectorOutput]] = None,
     frame_width: Optional[int] = None, frame_height: Optional[int] = None,
 ) -> FrameInference:
     """推理结果消息。task_id/stage 缺省从 cq 派生（无 cq 时回退 1/"3"）。

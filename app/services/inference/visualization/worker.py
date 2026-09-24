@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from app.domain.detection import FrameDetections, FrameFeature
+from app.domain.detection import DetectorOutput, FrameDetection
 from app.domain.render import RenderSpec
 from app.domain.frame import Frame
 from app.services.inference.naming import get_stage_alias
@@ -155,7 +155,7 @@ class VisualizationWorker:
     def _process_client(self, task_id: int, cq, now: float) -> None:
         """处理单个 run 的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[FrameFeature] = cq.get_latest_inference()
+        inference: Optional[FrameDetection] = cq.get_latest_inference()
         if inference is None:
             return
 
@@ -207,7 +207,7 @@ class VisualizationWorker:
         self,
         frame: np.ndarray,
         stage: str,
-        detection_results: Dict[str, FrameDetections],
+        detection_results: Dict[str, DetectorOutput],
         events: List[str],
     ) -> np.ndarray:
         """使用固定渲染器进行可视化。
@@ -215,7 +215,7 @@ class VisualizationWorker:
         Args:
             frame: 原始帧
             stage: 当前阶段
-            detection_results: 推理结果 {task_name: FrameDetections}（同帧原子快照）
+            detection_results: 推理结果 {task_name: DetectorOutput}（同帧原子快照）
             events: 时序事件列表
         """
         try:
@@ -231,7 +231,7 @@ class VisualizationWorker:
             for task in tasks:
                 detection_output = detection_results.get(task.name)
 
-                if not isinstance(detection_output, FrameDetections):
+                if not isinstance(detection_output, DetectorOutput):
                     continue
 
                 vis_data = task.prepare_visualization_data(detection_output)

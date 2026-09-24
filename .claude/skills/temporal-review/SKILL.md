@@ -29,7 +29,7 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 
 ## 🟠 会抛异常
 
-- **bbox 硬解构** `x1,y1,x2,y2 = bbox`：`Detection.bbox` 契约变（mask/空框）即 `ValueError`。
+- **bbox 硬解构** `x1,y1,x2,y2 = bbox`：`DetBox.bbox` 契约变（mask/空框）即 `ValueError`。
 - **除零**：`width`/`height` 为 0 → `inf`/`nan` 静默入模型。
 
 ## 🟡 算子生命周期 / 因果性
@@ -42,7 +42,7 @@ description: "Review a temporal analyzer (时序分析模型算子) as it's onbo
 
 ## ⚪ 契约 / 放置 / 风格
 
-- **Operator 契约**：`analyze` 推 `_sm` 不返回、`judge` 读 `_sm` 出 `(events, alarms)`；别塞领域字段，派生量走 `Detection.extra` / `FrameDetections.metadata`。
+- **Operator 契约**：`analyze` 推 `_sm` 不返回、`judge` 读 `_sm` 出 `(events, alarms)`；别塞领域字段，派生量走 `DetBox.extra` / `DetectorOutput.metadata`。
 - **realtime 标志**：`true` = 纳入 signals_10s（会触发 `AlarmMetric(stream.upper())` 映射）；纯 overlay 无告警可设 `false`。
 - **放置**：可复用模型基类（如 `GRUOperator`）放 [operator.py](../../../app/services/inference/temporal/operator.py) 抽象 `Operator` 旁，与 `YOLODetector`/`Detector` 同构；具体规则放 `temporal/impl/<业务>.py`（一文件一基类）。
 - **风格**：类/模块 docstring 对齐同层写法；未接入的模型（如闲置 transformer）标注"离线/实验预留"，别当死代码留白；行尾空格 / EOF 换行。

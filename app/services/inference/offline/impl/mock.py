@@ -7,7 +7,7 @@
     2. 单测/本地 smoke test 不依赖 torch、GPU、真实 clean 权重。
 
 输入:
-    preprocess(frames) 接收 inference.read_features 返回的 List[FrameFeature]，原样传给 segment。
+    preprocess(frames) 接收 inference.read_features 返回的 List[FrameDetection]，原样传给 segment。
 
 输出:
     segment(model_input) 返回 List[SegmentFact]。只要某帧任一订阅 source 存在检测框，
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, List, Sequence
 
-from app.domain.detection import FrameFeature
+from app.domain.detection import FrameDetection
 from app.domain.fact import SegmentFact
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
@@ -44,12 +44,12 @@ class BrushRulesSegmenter(OfflineSegmenter):
         self.label = label
         self.min_frames = max(1, int(min_frames))
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> Sequence[FrameFeature]:
+    def preprocess(self, frames: Sequence[FrameDetection]) -> Sequence[FrameDetection]:
         """Mock 不做特征工程，直接把帧序列交给规则逻辑。"""
         return frames
 
     def segment(self, model_input: Any) -> List[SegmentFact]:
-        frames: Sequence[FrameFeature] = model_input
+        frames: Sequence[FrameDetection] = model_input
         segments: List[SegmentFact] = []
         run_start: float | None = None
         run_last = 0.0

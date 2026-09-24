@@ -26,7 +26,7 @@ from app.utils.metrics import frame_drop_total, infer_failure_total, infer_laten
 
 if TYPE_CHECKING:
     from app.services.client import ClientQueues
-    from app.domain.detection import FrameDetections
+    from app.domain.detection import DetectorOutput
 
 logger = logging.getLogger(__name__)
 
@@ -328,10 +328,10 @@ class RemoteInferProxy:
         self._emit_stats(merged, len(records))
 
     @staticmethod
-    def _emit_stats(merged: List[Dict[str, "FrameDetections"]], n: int) -> None:
+    def _emit_stats(merged: List[Dict[str, "DetectorOutput"]], n: int) -> None:
         """在主进程发 Prometheus（子进程 registry 无效，故埋点上移）。
 
-        观测量直接取自 merged 里的 `FrameDetections`（不另立 stats 通道）：成功读 metadata
+        观测量直接取自 merged 里的 `DetectorOutput`（不另立 stats 通道）：成功读 metadata
         ["infer_ms"] 发延迟、失败（success=False）读 metadata["error_type"] 计失败。每模型每批
         只发一次（seen 去重）——merged 是逐帧展开，同模型 N 帧共享同一批观测。
         """

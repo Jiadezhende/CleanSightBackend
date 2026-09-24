@@ -23,7 +23,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetections, FrameFeature
+from app.domain.detection import DetectorOutput, FrameDetection
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,8 @@ class Operator(ABC):
 
     # ── 两接口（共享 self._sm）────────────────────────────────
     @abstractmethod
-    def analyze(self, windows: List[FrameFeature]) -> None:
-        """消费帧窗、推进 self._sm。windows: 帧级 FrameFeature 快照(按 ts 升序，多流已对齐)。"""
+    def analyze(self, windows: List[FrameDetection]) -> None:
+        """消费帧窗、推进 self._sm。windows: 帧级 FrameDetection 快照(按 ts 升序，多流已对齐)。"""
 
     @abstractmethod
     def judge(self) -> Tuple[List[str], List[Alarm]]:
@@ -53,15 +53,15 @@ class Operator(ABC):
         return []
 
     # ── 基类工具 ─────────────────────────────────────────────
-    def _clip(self, window: List[FrameFeature]) -> List[FrameFeature]:
+    def _clip(self, window: List[FrameDetection]) -> List[FrameDetection]:
         """把帧窗裁到本算子感受野（保留 ts >= latest - window_seconds）。"""
         if not window:
             return []
         cutoff = window[-1].ts - self.window_seconds
         return [f for f in window if f.ts >= cutoff]
 
-    def primary_window(self, windows: List[FrameFeature]) -> List[FrameDetections]:
-        """单订阅便捷：裁到感受野后投影首个订阅流的逐帧 FrameDetections。"""
+    def primary_window(self, windows: List[FrameDetection]) -> List[DetectorOutput]:
+        """单订阅便捷：裁到感受野后投影首个订阅流的逐帧 DetectorOutput。"""
         src = self.subscribes[0]
         return [
             f.by_source[src]
@@ -137,7 +137,7 @@ class TemporalOperator(Operator):
     def _action_name(self, action_id: int) -> str:
         return self._action_id_to_name.get(action_id, f"action_{action_id}")
 
-    def _resample_by_ts(self, frames: List[FrameFeature]) -> List[FrameFeature]:
+    def _resample_by_ts(self, frames: List[FrameDetection]) -> List[FrameDetection]:
         """按帧 ts 把窗口重采样到 model_input_fps（消 train/serve skew）。
 
         相位网格抽稀：从首帧起维护理想采样时刻 next_t，每步 += 1/model_input_fps，保留

@@ -76,7 +76,7 @@
 新建检测任务、Detector、Analyzer、Judge 走 `/infer-workflow` skill（含完整模板与 checklist）。两条会**静默出错**的红线单列在此：
 
 - **`class_name` 不做归一化**：直接取自模型 `result.names`，配置/代码里的匹配串须与训练类别名严格一致——写错不报错，静默漏检。
-- **统一检测契约是 `Detection`（单框）+ `FrameDetections`（整帧输出）**，见 [app/domain/detection.py](../app/domain/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `Detection.extra` 或 `FrameDetections.metadata`，时序统计交给 L3 Analyzer。
+- **统一检测契约是 `DetBox`（单框）→ `DetectorOutput`（单检测器单帧）→ `FrameDetection`（多流对齐的整帧）**，见 [app/domain/detection.py](../app/domain/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `DetBox.extra` 或 `DetectorOutput.metadata`，时序统计交给 L3 Analyzer。
 
 ---
 

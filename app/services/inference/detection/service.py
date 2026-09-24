@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from app.domain.detection import FrameFeature
+from app.domain.detection import FrameDetection
 from app.services.client import ClientManager, client_manager
 from .dispatcher import StageAwareDispatcher
 from app.services.inference.types import FrameInference
@@ -166,9 +166,9 @@ class DetectionService:
                         "[Worker] inference degraded (empty result): task=%s model=%s error=%s",
                         res.task_id, task_name, detection_output.error,
                     )
-            # 物化一次帧级 FrameFeature（多流已在 res.detections 内对齐）：帧窗 + 原子快照共用一份。
+            # 物化一次帧级 FrameDetection（多流已在 res.detections 内对齐）：帧窗 + 原子快照共用一份。
             # by_source 直接共享 res.detections 引用（pool 每帧新建、无别名突变），不复制。
-            feature = FrameFeature(
+            feature = FrameDetection(
                 ts=res.timestamp, by_source=res.detections,
                 frame_width=res.frame_width, frame_height=res.frame_height,
             )
@@ -180,6 +180,6 @@ class DetectionService:
             cq.mark_startup_milestone("first_inference")
             # Path 3: 落盘缓冲（常开，offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
             # 由 recording 的 sweeper 每 tick 拉走写 features.jsonl。落的是同一份帧级
-            # FrameFeature（与帧窗/快照共用一个对象）。
+            # FrameDetection（与帧窗/快照共用一个对象）。
             cq.append_ca_features(feature)
 

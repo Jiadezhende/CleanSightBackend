@@ -5,7 +5,7 @@
 """
 
 from app.services.inference.detection.detector import YOLODetector
-from app.domain.detection import FrameDetections
+from app.domain.detection import DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 
@@ -27,7 +27,7 @@ class BendingDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = []
         for det in output.detections:
             if det.class_name == "bending_debug_box":

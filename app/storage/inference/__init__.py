@@ -18,7 +18,7 @@
     offline_debug.json  write_debug_result                     路线 C
     整域                delete                                 三份产物一起没
 
-货币是 `app.domain` 的跨服务契约：`FrameFeature`（`app.domain.detection`）与
+货币是 `app.domain` 的跨服务契约：`FrameDetection`（`app.domain.detection`）与
 `Fact = EventFact | SegmentFact`（`app.domain.fact`）。本域不出自己的类型——没有「从文件名
 解出来的身份」这种形状（对照 `hls.SegmentRef`），故没有 `types.py`。
 

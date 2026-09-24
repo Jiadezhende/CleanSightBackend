@@ -10,7 +10,7 @@ import pytest
 
 from factories import make_detection, make_frame_detections, make_frame_feature
 
-from app.domain.detection import FrameDetections, FrameFeature
+from app.domain.detection import DetectorOutput, FrameDetection
 from app.domain.fact import EventFact, SegmentFact
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmenter import OfflineSegmenter
@@ -24,12 +24,12 @@ _CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanSegmenter"
 
 
 def _frames(per_source):
-    """{src: [FrameDetections 按 ts]} → List[FrameFeature]（按 ts 对齐+升序），供直调 preprocess。"""
+    """{src: [DetectorOutput 按 ts]} → List[FrameDetection]（按 ts 对齐+升序），供直调 preprocess。"""
     by_ts: dict = {}
     for src, fds in per_source.items():
         for fd in fds:
             by_ts.setdefault(fd.timestamp, {})[src] = fd
-    return [FrameFeature(ts=ts, by_source=by_ts[ts]) for ts in sorted(by_ts)]
+    return [FrameDetection(ts=ts, by_source=by_ts[ts]) for ts in sorted(by_ts)]
 
 
 def _seg(producer="p", label="x", start=0.0, end=1.0):
@@ -173,12 +173,12 @@ class TestBrushRulesSegmenter:
 
 def _clean_frame(ts):
     """一帧：clean_large=[hand, scope_control_body]，clean_small=[short_brush] → short_brush_cleaning。"""
-    large = FrameDetections(
+    large = DetectorOutput(
         detections=[make_detection(class_name="hand"),
                     make_detection(class_name="scope_control_body")],
         metadata={}, timestamp=ts,
     )
-    small = FrameDetections(
+    small = DetectorOutput(
         detections=[make_detection(class_name="short_brush")], metadata={}, timestamp=ts,
     )
     return {"clean_large": large, "clean_small": small}

@@ -93,7 +93,7 @@ class InferenceManager:
             stage_configs=None,
         )
 
-        # 注：L2 特征落盘不在本服务——写回口把 FrameFeature 放进 cq 的落盘缓冲，由
+        # 注：L2 特征落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
         # recording 的 sweeper 拉走写 `{task}/{step}/inference/features.jsonl`。本 manager
         # 因此不持有任何 store、不管 supersede（recording 首写自清）、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()

@@ -11,7 +11,7 @@ from typing import List, Tuple
 
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmType
-from app.domain.detection import FrameFeature
+from app.domain.detection import FrameDetection
 
 
 class MockOperator(Operator):
@@ -48,7 +48,7 @@ class MockOperator(Operator):
             "alarm_count": 0,
         }
 
-    def analyze(self, windows: List[FrameFeature]) -> None:
+    def analyze(self, windows: List[FrameDetection]) -> None:
         window = self.primary_window(windows)
         if not window:
             return

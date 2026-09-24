@@ -35,9 +35,9 @@ def test_active_run_write_back_lands():
     res = _result(cq)
     svc._write_back_results([res])
 
-    assert cq.get_latest_inference().by_source is res.detections  # 快照 = 物化 FrameFeature
+    assert cq.get_latest_inference().by_source is res.detections  # 快照 = 物化 FrameDetection
     assert cq.get_slide_window()  # 检测入滑窗
-    # 落盘缓冲拿到同一份帧级 FrameFeature（by_source 即 res.detections，不复制）
+    # 落盘缓冲拿到同一份帧级 FrameDetection（by_source 即 res.detections，不复制）
     buffered = cq.drain_ca_features()
     assert len(buffered) == 1
     assert buffered[0].by_source is res.detections

@@ -100,7 +100,7 @@ class ClientTemporalActor:
         all_events: List[str] = []
         all_alarms: List[Alarm] = []
 
-        # 帧窗快照（List[FrameFeature]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
+        # 帧窗快照（List[FrameDetection]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
         windows = self._cq.get_slide_window()
         for op in self._operators:
             try:

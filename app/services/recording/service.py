@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-from app.domain.detection import FrameFeature
+from app.domain.detection import FrameDetection
 from app.domain.frame import Frame
 from app.storage import hls, inference
 from app.utils.task_queue import SerialTaskQueue
@@ -77,7 +77,7 @@ class _FeatureJob(NamedTuple):
 
     task_id: int
     step_id: int
-    features: List[FrameFeature]
+    features: List[FrameDetection]
     cq: object
 
     @property
@@ -227,13 +227,13 @@ class RecordingService:
         )
         return self._hls_queue.submit(lambda: self._write(job), label=job.label)
 
-    def submit_features(self, cq, features: Sequence[FrameFeature]) -> bool:
+    def submit_features(self, cq, features: Sequence[FrameDetection]) -> bool:
         """把一批帧特征打包成落盘任务交给 features 队列。
 
         Args:
             cq: 这批特征属于哪一次 run（代次身份 + task_id / step_id 全取自它，同
                 `submit_segment`）。
-            features: 帧级 `FrameFeature`，按时间升序（= 写回顺序）。
+            features: 帧级 `FrameDetection`，按时间升序（= 写回顺序）。
 
         Returns:
             是否入队成功。False 意味着这批不会被写（队列满、队列还没起、或入参不合法）。

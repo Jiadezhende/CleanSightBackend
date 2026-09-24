@@ -8,7 +8,7 @@
 
 三条硬约束：
 
-- **时间轴**：`ts` / `start` / `end` 均为**帧捕获墙钟 ts**（epoch 秒），与 `FrameFeature.ts`、
+- **时间轴**：`ts` / `start` / `end` 均为**帧捕获墙钟 ts**（epoch 秒），与 `FrameDetection.ts`、
   HLS sidecar `.idx` 的逐帧数组同源同值——事实靠这条与录像互相定位。
 - **`producer` 是产出者身份的唯一真源**：幂等替换按它过滤，别再往 `meta` 里盖第二份。
 - **`meta` 只放伴随观测量**：任何被代码读来做判断的键都不许进去。

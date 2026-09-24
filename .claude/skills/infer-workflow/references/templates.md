@@ -19,7 +19,7 @@ from typing import Dict, List, Tuple
 from app.services.inference.detection.detector import YOLODetector
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.domain.detection import FrameDetections
+from app.domain.detection import DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
@@ -32,9 +32,9 @@ class XxxDetector(YOLODetector):
                          iou_threshold=iou_threshold, enabled=enabled)
 
     # YOLODetector.infer_batch 默认已够用；仅当要写业务字段/自定义输出才 override，
-    # 且 batch 与 except 逐帧 fallback 的赋值逻辑须一致，timestamps[i] 原样写入 FrameDetections。
+    # 且 batch 与 except 逐帧 fallback 的赋值逻辑须一致，timestamps[i] 原样写入 DetectorOutput。
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = [RenderItem(bbox=d.bbox, label=f"{d.class_name} {d.confidence:.2f}",
                             confidence=d.confidence, color=(0, 0, 255))       # BGR
                  for d in output.detections]
@@ -52,7 +52,7 @@ class XxxOperator(Operator):
         self.consecutive_trigger = consecutive_trigger
         self._sm = {"last_ts": 0.0, "consecutive": 0, "alarming": False}
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: Dict[str, List[DetectorOutput]]) -> None:
         window = self.primary_window(windows)                 # 单订阅：裁到感受野
         if not window:
             return
@@ -89,17 +89,17 @@ class XxxOperator(Operator):
 ```python
 import numpy as np
 from app.services.inference.detection.detector import Detector
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import DetBox, DetectorOutput
 
 class XxxDetector(Detector):
     def __init__(self, enabled: bool = True):
         super().__init__(name="xxx", enabled=enabled)
 
     def infer_batch(self, frames: List[np.ndarray],
-                    timestamps: List[float]) -> List[FrameDetections]:
+                    timestamps: List[float]) -> List[DetectorOutput]:
         out = []
         for frame, ts in zip(frames, timestamps):            # timestamps[i] 原样写入，别自造
-            out.append(FrameDetections(detections=[Detection(...)],
+            out.append(DetectorOutput(detections=[DetBox(...)],
                                        metadata={"model": "xxx_algo"},
                                        timestamp=ts, success=True))
         return out
@@ -120,7 +120,7 @@ class XxxOperator(Operator):
         self.required_actions = required_actions
         self._sm = {"last_ts": 0.0, "action_count": 0}
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: Dict[str, List[DetectorOutput]]) -> None:
         window = self.primary_window(windows)
         if not window:
             return
@@ -163,7 +163,7 @@ class XxxOperator(GRUOperator):
         self.min_frames = min_frames if min_frames > 0 else int(window_seconds)
         self._sm = {"last_ts": 0.0, "latest_action": None}
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: Dict[str, List[DetectorOutput]]) -> None:
         aligned = self._zip_by_ts(windows)                    # 多流按 ts 对齐
         if len(aligned) < self.min_frames:                    # ⚠️ warm-up：帧数不足不前向
             return

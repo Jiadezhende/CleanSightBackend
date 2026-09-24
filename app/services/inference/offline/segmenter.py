@@ -5,7 +5,7 @@
 （segmenter/runner/cli）不掺实现。
 
 管线两段：
-    load(task_id, step_id) → List[FrameFeature]（帧级、多流已对齐、按 ts 升序）
+    load(task_id, step_id) → List[FrameDetection]（帧级、多流已对齐、按 ts 升序）
         │
         ▼ preprocess(frames)    ← 输入预处理层（预留）：raw bbox 序列不一定能直接喂模型，
         │                          需张量化/归一化/时间降采样/定长编码的模型在此转换
@@ -18,7 +18,7 @@
 - 策略不访问存储 / ClientManager / CQ / 数据库（纯算法）；
 - 输出每条 `SegmentFact.producer` 必须等于本策略 `name`；`start <= end`、时间为有限数、
   `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。
-- 输入吃 `FrameFeature`、输出吐 `SegmentFact`（两者都在 `app.domain`，与在线同型），
+- 输入吃 `FrameDetection`、输出吐 `SegmentFact`（两者都在 `app.domain`，与在线同型），
   不自定义中间数据壳。
 """
 
@@ -27,7 +27,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Sequence
 
-from app.domain.detection import FrameFeature
+from app.domain.detection import FrameDetection
 from app.domain.fact import SegmentFact
 
 
@@ -43,12 +43,12 @@ class OfflineSegmenter(ABC):
         self.subscribes: List[str] = list(subscribes)
 
     @abstractmethod
-    def preprocess(self, frames: Sequence[FrameFeature]) -> Any:
-        """输入预处理接口：把帧级 FrameFeature 序列转成模型可消费的输入。
+    def preprocess(self, frames: Sequence[FrameDetection]) -> Any:
+        """输入预处理接口：把帧级 FrameDetection 序列转成模型可消费的输入。
 
         基类只约束调用形状，不做默认特征工程。bbox 归一化、top-k 目标选择、
         speed 的 dt 计算、tensor 化、权重加载等都应由具体策略在自己的单文件里完成。
-        `frames` 已按 ts 升序、多流在各 `FrameFeature.by_source` 内对齐（load 保证）。
+        `frames` 已按 ts 升序、多流在各 `FrameDetection.by_source` 内对齐（load 保证）。
         """
         raise NotImplementedError
 

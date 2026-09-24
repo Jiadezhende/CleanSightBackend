@@ -27,7 +27,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 
 from .detector import Detector
-from app.domain.detection import FrameDetections
+from app.domain.detection import DetectorOutput
 from app.services.inference.types import DetectionTask, FrameInference
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class StageWorker:
         ts 锚点穿透），锁死 ts-anchor 不变式的单测仍走它；此路径不发 Prometheus 埋点。
 
         Returns:
-            推理结果列表（FrameInference.detections = {detector_name: FrameDetections}）
+            推理结果列表（FrameInference.detections = {detector_name: DetectorOutput}）
         """
         if not batch:
             return []
@@ -73,14 +73,14 @@ class StageWorker:
         n = len(batch)
         frames = [req.frame for req in batch]
         # 帧捕获时间戳（真值锚点，源自 Frame.timestamp）：穿透到 detector，
-        # 令每帧 FrameDetections.timestamp == FrameInference.timestamp，供下游多流对齐
+        # 令每帧 DetectorOutput.timestamp == FrameInference.timestamp，供下游多流对齐
         timestamps = [req.timestamp for req in batch]
 
         # 逐模型串行推理（每模型对整批帧跑一次 infer_batch）
         model_results = self._infer_models(frames, timestamps)
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
-        # model_results[i] = {task_name: FrameDetections}
+        # model_results[i] = {task_name: DetectorOutput}
         results: List[FrameInference] = []
         for i, req in enumerate(batch):
             per_frame_results = model_results[i] if i < len(model_results) else {}
@@ -103,24 +103,24 @@ class StageWorker:
         self,
         frames: List[np.ndarray],
         timestamps: List[float],
-    ) -> List[Dict[str, FrameDetections]]:
+    ) -> List[Dict[str, DetectorOutput]]:
         """逐模型串行推理：每个模型对整批帧跑一次，结果按帧索引合并。
 
         **纯数据进出、无 cq、无 Prometheus 副作用**——这是进程边界的天然切口：子进程调它、
-        回传 `merged`，主进程 collector 直接据 merged 里的 `FrameDetections` 发埋点（跨进程
+        回传 `merged`，主进程 collector 直接据 merged 里的 `DetectorOutput` 发埋点（跨进程
         registry 无效，故埋点上移主进程）。单模型失败就地降级为 success=False（不上抛，batch
         跨多 run）。
 
-        观测量复用 `FrameDetections`（不另立 stats 通道）——其 metadata 文档语义即「模型名称、
+        观测量复用 `DetectorOutput`（不另立 stats 通道）——其 metadata 文档语义即「模型名称、
         推理时间等」：成功帧记 `metadata["infer_ms"]`=该模型整批 wall（parent 除以帧数得每帧均值），
         失败帧另记 `metadata["error_type"]`（=异常类名，供 Prometheus 低基数 label）。失败信号本就
-        由 `FrameDetections.success` 表达，无需再存一份。
+        由 `DetectorOutput.success` 表达，无需再存一份。
 
         Returns:
-            merged[i] = {detector_name: FrameDetections}（与 frames 一一对应）。
+            merged[i] = {detector_name: DetectorOutput}（与 frames 一一对应）。
         """
         n = len(frames)
-        merged: List[Dict[str, FrameDetections]] = [{} for _ in range(n)]
+        merged: List[Dict[str, DetectorOutput]] = [{} for _ in range(n)]
         if n == 0:
             return merged
 
@@ -130,12 +130,12 @@ class StageWorker:
 
             start_time = time.time()
             try:
-                # 调用 Detector.infer_batch （已经返回 FrameDetections 格式）
+                # 调用 Detector.infer_batch （已经返回 DetectorOutput 格式）
                 batch_res = model.infer_batch(frames, timestamps)
                 elapsed_ms = (time.time() - start_time) * 1000
                 for i in range(min(len(batch_res), n)):
                     fd = batch_res[i]
-                    fd.metadata["infer_ms"] = elapsed_ms  # 该模型整批 wall（观测复用 FrameDetections）
+                    fd.metadata["infer_ms"] = elapsed_ms  # 该模型整批 wall（观测复用 DetectorOutput）
                     merged[i][model.name] = fd
 
             except Exception as e:
@@ -143,7 +143,7 @@ class StageWorker:
 
                 elapsed_ms = (time.time() - start_time) * 1000
                 for i in range(n):
-                    merged[i][model.name] = FrameDetections(
+                    merged[i][model.name] = DetectorOutput(
                         detections=[],
                         metadata={"error": str(e), "error_type": type(e).__name__, "infer_ms": elapsed_ms},
                         timestamp=timestamps[i],
@@ -213,8 +213,8 @@ class StageWorker:
 #
 # 进程边界只过纯数据（均 picklable）：
 #   req  (main→child):  (req_id:int, stage:str, frames:List[np.ndarray], timestamps:List[float])
-#   resp (child→main):  (req_id:int, merged:List[Dict[str,FrameDetections]])
-#   观测量（infer_ms / error_type）复用 FrameDetections.metadata，不另立 stats 通道。
+#   resp (child→main):  (req_id:int, merged:List[Dict[str,DetectorOutput]])
+#   观测量（infer_ms / error_type）复用 DetectorOutput.metadata，不另立 stats 通道。
 #   控制哨兵：req 端收到 None → 优雅退出循环。
 #
 # 导入序契约见模块 docstring：本模块顶层不 import torch；torch/ultralytics 一律在下方钉

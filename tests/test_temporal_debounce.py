@@ -1,7 +1,7 @@
 """测试流算子 Operator 的边沿触发（去抖）机制 —— analyze 推进状态 / judge 出告警，共享 _sm
 
 验证合并后状态机行为与合并前一致：
-- operator.analyze(windows) 消费帧窗（List[FrameFeature]，多流已对齐）、推进共享 _sm
+- operator.analyze(windows) 消费帧窗（List[FrameDetection]，多流已对齐）、推进共享 _sm
 - operator.judge() 做边沿触发判定
   - rising edge: 条件首次成立 → 产出 1 条 AlarmInfo
   - sustained: 条件持续成立 → 不再产出
@@ -15,18 +15,18 @@ import pytest
 
 from factories import make_frame_detections, make_frame_feature
 from app.domain.alarm import AlarmType
-from app.domain.detection import FrameFeature  # 仅用于类型注解
+from app.domain.detection import FrameDetection  # 仅用于类型注解
 
 
 # ========== Fixtures ==========
 
 
 def make_window(pattern: list[int], class_name: str = "bubble",
-                source: str = "bubble") -> list[FrameFeature]:
-    """按模式构造帧窗（List[FrameFeature]，单流已对齐）
+                source: str = "bubble") -> list[FrameDetection]:
+    """按模式构造帧窗（List[FrameDetection]，单流已对齐）
 
     pattern: e.g. [0, 0, 1, 1, 1] — 每个值表示该帧的检测数量
-    每帧 FrameFeature.ts 与内层 FrameDetections.timestamp 对齐同值。
+    每帧 FrameDetection.ts 与内层 DetectorOutput.timestamp 对齐同值。
     """
     base_ts = time.time() - len(pattern) * 0.1
     window = []
@@ -113,7 +113,7 @@ class TestBendingDebounce:
 
         return BendingOperator(debounce_frames=3, required_bend_actions=4)
 
-    def _make_bending_window(self, flags: list[bool]) -> list[FrameFeature]:
+    def _make_bending_window(self, flags: list[bool]) -> list[FrameDetection]:
         """构造弯折帧窗，flags 中 True 表示该帧有 bent 检测（source="bending"）"""
         base_ts = time.time() - len(flags) * 0.1
         window = []

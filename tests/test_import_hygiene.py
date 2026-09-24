@@ -55,7 +55,7 @@ BUDGET = {
     "app.storage._root":        (set(), 0.20),   # stdlib only
     "app.storage.tasks":        (set(), 0.20),   # stdlib only
     # inference 是子包，facade 同 hls：re-export 连带加载两个产物模块，故这条盯的是整个域。
-    # `_detection` 出 FrameFeature → 吃 app.domain（numpy 随 Detection.mask 的标注进来），
+    # `_detection` 出 FrameDetection → 吃 app.domain（numpy 随 DetBox.mask 的标注进来），
     # 这是 D1 允许的唯一一档 L1 依赖；`_temporal` 的货币 Fact 是纯 stdlib dataclass。
     "app.storage.inference":            (set(), 0.40),
     "app.storage.inference._detection": (set(), 0.40),
@@ -110,7 +110,7 @@ BUDGET = {
 # 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.database` / `app.models`
 # ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
-    # app.domain：内存数据契约（Frame / FrameFeature），本层的入参出参就是它们
+    # app.domain：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
     "app/storage": ("app.storage", "app.domain", "app.settings"),
     # 服务层工具：多个 service / router 都要、但不属于任何一个的无状态纯函数。它可以向下
