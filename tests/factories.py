@@ -5,7 +5,7 @@
 
 设计约定：
 - 每个 builder 带"最常见良性态"默认值，用例只写它关心的偏差（关键字 override）。
-- 契约一变（如 CQ 构造签名、FrameInference 加字段），只改这一处，不再扫散点。
+- 契约一变（如 CQ 构造签名、FrameDetection 加字段），只改这一处，不再扫散点。
 - MagicMock 化的 CQ / DB 会话属于"单文件专用替身"，不在此集中（集中无收益）。
 """
 
@@ -17,21 +17,20 @@ from app.domain.alarm import Alarm
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.frame import Frame
 from app.services.client.queues import ClientQueues
-from app.services.inference.types import FrameInference
 
 __all__ = [
-    "make_detection",
-    "make_frame_detections",
+    "make_det_box",
+    "make_detector_output",
+    "make_frame_detection",
     "make_frame",
     "make_cq",
     "make_bare_cq",
-    "make_frame_inference",
     "make_alarm",
     "seed_hls_segments",
 ]
 
 
-def make_detection(
+def make_det_box(
     *, bbox: Optional[List[int]] = None, confidence: float = 0.9,
     class_id: int = 0, class_name: str = "bubble", **over,
 ) -> DetBox:
@@ -45,34 +44,38 @@ def make_detection(
     )
 
 
-def make_frame_detections(
+def make_detector_output(
     *, n: int = 1, class_name: str = "bubble", ts: float = 1.0,
     metadata: Optional[Dict] = None, **over,
 ) -> DetectorOutput:
-    """一帧的多检测聚合（n 个同类检测）。n=0 表示该帧无检测。"""
+    """一个检测器一帧的输出（n 个同类框）。n=0 表示该帧无检测。"""
     return DetectorOutput(
-        detections=[make_detection(class_name=class_name) for _ in range(n)],
+        boxes=[make_det_box(class_name=class_name) for _ in range(n)],
         metadata=metadata if metadata is not None else {},
         timestamp=ts,
         **over,
     )
 
 
-def make_frame_feature(
+def make_frame_detection(
     *, ts: float = 1.0, by_source: Optional[Dict[str, DetectorOutput]] = None,
     source: str = "bubble", n: int = 1, class_name: str = "bubble",
     metadata: Optional[Dict] = None,
     frame_width: Optional[int] = None, frame_height: Optional[int] = None,
+    cq: Optional[ClientQueues] = None,
 ) -> FrameDetection:
-    """一帧多流对齐记录（特征层输入）。by_source 缺省单流 {source: <n 个检测>}。
+    """一帧多流对齐的检测结果。by_source 缺省单流 {source: <n 个框>}。
 
     frame_width/frame_height 为帧级分辨率，缺省 None（消费方走默认兜底）。
+    cq 缺省 None（留存态）；写回句柄 fence 类测试传 cq=<句柄> 模拟 collector 刚组装的帧。
     """
     if by_source is None:
         by_source = {
-            source: make_frame_detections(n=n, class_name=class_name, ts=ts, metadata=metadata)
+            source: make_detector_output(n=n, class_name=class_name, ts=ts, metadata=metadata)
         }
-    return FrameDetection(ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height)
+    return FrameDetection(
+        ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height, cq=cq,
+    )
 
 
 def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:
@@ -93,31 +96,6 @@ def make_cq(
 def make_bare_cq(**kw) -> ClientQueues:
     """无身份裸建（算子/纯队列单测，stage 默认 MOCK）。"""
     return ClientQueues(**kw)
-
-
-def make_frame_inference(
-    *, cq: Optional[ClientQueues] = None, task_id: Optional[int] = None,
-    stage: Optional[str] = None, ts: float = 1.0,
-    detectors: Optional[Dict[str, DetectorOutput]] = None,
-    frame_width: Optional[int] = None, frame_height: Optional[int] = None,
-) -> FrameInference:
-    """推理结果消息。task_id/stage 缺省从 cq 派生（无 cq 时回退 1/"3"）。
-
-    detectors 缺省为单流 {"bubble": <1 检测>}；写回句柄 fence 类测试传 cq=<句柄>，
-    离线/直连落盘类测试传 cq=None 并显式给 detectors。
-    frame_width/frame_height 为帧级分辨率，缺省 None。
-    """
-    if detectors is None:
-        detectors = {"bubble": make_frame_detections(ts=ts)}
-    return FrameInference(
-        task_id=task_id if task_id is not None else (cq.task_id if cq is not None else 1),
-        stage=stage if stage is not None else (cq.stage if cq is not None else "3"),
-        timestamp=ts,
-        detections=detectors,
-        cq=cq,
-        frame_width=frame_width,
-        frame_height=frame_height,
-    )
 
 
 def make_alarm(

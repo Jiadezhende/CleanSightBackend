@@ -5,10 +5,10 @@
 ```python
 # ── 检测（Detector 产出）── app.domain.detection
 DetBox(bbox=[x1, y1, x2, y2], confidence=0.9, class_id=0, class_name="bubble",
-          extra={...})                          # mask/keypoints/extra 可选
+       extra={...})                             # extra 可选（单框派生量，不落盘）
 
-DetectorOutput(                                # 一帧里某检测器的全部框，亦作推理最终输出
-    detections=[DetBox(...), ...],
+DetectorOutput(                                 # 一个检测器 × 一帧的全部框
+    boxes=[DetBox(...), ...],
     metadata={"model": "yolo", "frame_shape": frame.shape},
     timestamp=ts,                               # = 帧捕获真值锚点（infer_batch 的 timestamps[i]）
     success=True, error=None,

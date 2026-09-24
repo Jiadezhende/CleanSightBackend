@@ -21,7 +21,7 @@
 
 本 `__init__` 刻意**不做任何 re-export**（只留 docstring + 下面的 `lifespan()`）：与 [instance.py] 的
 "避免任何 `import app.services.inference.*` 触发 eager 构造" 同一原则——顶层平铺
-re-export 会让即便只取轻量 `.models.FrameInference` 的调用方也拉起 YOLO/cv2/impl
+re-export 会让即便只取轻量 `.types.DetectionTask` 的调用方也拉起 YOLO/cv2/impl
 的重导入链。消费方一律走显式深路径按需导入：
 
     单例          from app.services.inference.instance import inference_manager
@@ -31,7 +31,7 @@ re-export 会让即便只取轻量 `.models.FrameInference` 的调用方也拉�
     具体任务      from app.services.inference.detection.impl.bubble import BubbleDetector
                   from app.services.inference.temporal.impl.bubble import BubbleOperator
     工厂/配置     from app.services.inference.stage_factory / .config
-    数据模型      from app.services.inference.types import FrameInference
+    数据模型      from app.services.inference.types import DetectionTask
 
 内部管件（dispatcher / pool / service / actor / visualization worker）不再对外暴露，
 按需从各自深路径导入。

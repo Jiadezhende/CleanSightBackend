@@ -27,8 +27,8 @@ from typing import Dict, List, Sequence
 import numpy as np
 
 from .detector import Detector
-from app.domain.detection import DetectorOutput
-from app.services.inference.types import DetectionTask, FrameInference
+from app.domain.detection import DetectorOutput, FrameDetection
+from app.services.inference.types import DetectionTask
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +57,15 @@ class StageWorker:
             f"StageWorker initialized: stage={stage}, models={len(self.models)}"
         )
 
-    def infer_batch(self, batch: List[DetectionTask]) -> List[FrameInference]:
-        """批量推理并组装 FrameInference（**进程内**路径，供单测/回退；生产走进程隔离）。
+    def infer_batch(self, batch: List[DetectionTask]) -> List[FrameDetection]:
+        """批量推理并组装 FrameDetection（**进程内**路径，供单测/回退；生产走进程隔离）。
 
         生产热路径已拆进程：子进程只调 `_infer_models`（纯数据、无 cq），主进程 collector
-        据 pending 记录重组 FrameInference。本方法保留同一组装语义（cq 透传 + 帧分辨率盖章 +
+        据 pending 记录组装 FrameDetection。本方法保留同一组装语义（cq 透传 + 帧分辨率盖章 +
         ts 锚点穿透），锁死 ts-anchor 不变式的单测仍走它；此路径不发 Prometheus 埋点。
 
         Returns:
-            推理结果列表（FrameInference.detections = {detector_name: DetectorOutput}）
+            推理结果列表（FrameDetection.by_source = {detector_name: DetectorOutput}）
         """
         if not batch:
             return []
@@ -73,7 +73,7 @@ class StageWorker:
         n = len(batch)
         frames = [req.frame for req in batch]
         # 帧捕获时间戳（真值锚点，源自 Frame.timestamp）：穿透到 detector，
-        # 令每帧 DetectorOutput.timestamp == FrameInference.timestamp，供下游多流对齐
+        # 令每帧 DetectorOutput.timestamp == FrameDetection.ts，供下游多流对齐
         timestamps = [req.timestamp for req in batch]
 
         # 逐模型串行推理（每模型对整批帧跑一次 infer_batch）
@@ -81,19 +81,17 @@ class StageWorker:
 
         # 构造输出：将每帧的 model_results 关联到对应的客户端
         # model_results[i] = {task_name: DetectorOutput}
-        results: List[FrameInference] = []
+        results: List[FrameDetection] = []
         for i, req in enumerate(batch):
             per_frame_results = model_results[i] if i < len(model_results) else {}
 
-            result = FrameInference(
-                task_id=req.task_id,
-                stage=req.stage,
-                timestamp=req.timestamp,
-                detections=per_frame_results,
-                cq=req.cq,  # 透传捕获句柄，写回凭它投递
+            result = FrameDetection(
+                ts=req.timestamp,
+                by_source=per_frame_results,
                 # 帧分辨率从原始帧盖章：fan-out 前的每帧常量，帧此后即销毁（frame.shape = H, W, C）
                 frame_width=int(req.frame.shape[1]),
                 frame_height=int(req.frame.shape[0]),
+                cq=req.cq,  # 透传捕获句柄，写回凭它投递
             )
             results.append(result)
 
@@ -144,7 +142,7 @@ class StageWorker:
                 elapsed_ms = (time.time() - start_time) * 1000
                 for i in range(n):
                     merged[i][model.name] = DetectorOutput(
-                        detections=[],
+                        boxes=[],
                         metadata={"error": str(e), "error_type": type(e).__name__, "infer_ms": elapsed_ms},
                         timestamp=timestamps[i],
                         success=False,

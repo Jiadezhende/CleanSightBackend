@@ -139,7 +139,7 @@ class BubbleOperator(Operator):
         cutoff = window[-1].timestamp - self.window_seconds
 
         for frame in new_frames:
-            adapter = _BBoxAdapter(frame.detections)
+            adapter = _BBoxAdapter(frame.boxes)
             out = self._sm["tracker"].update(adapter)
 
             if len(out) > 0:

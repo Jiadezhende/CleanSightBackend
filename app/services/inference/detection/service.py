@@ -3,7 +3,7 @@
 职责：
 - 装配 StageAwareDispatcher（取帧 + 组批 + 直接提交子进程，单提交者，无独立 submit 线程）
 - 装配 RemoteInferProxy（GPU 前向在独立子进程，独占 GIL）
-- 提供 _write_back_results：collector（在 proxy 内）据 req_id 重组 FrameInference 后落回 ClientQueues
+- 提供 _write_back_results：collector（在 proxy 内）据 req_id 组装 FrameDetection 后落回 ClientQueues
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 from app.domain.detection import FrameDetection
 from app.services.client import ClientManager, client_manager
 from .dispatcher import StageAwareDispatcher
-from app.services.inference.types import FrameInference
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
 from app.utils.metrics import frame_drop_total
@@ -32,7 +31,7 @@ class DetectionService:
     职责：
     - 装配 StageAwareDispatcher（取帧 + 组批 + 直接提交子进程，唯一提交者）
     - 装配 RemoteInferProxy（GPU 前向在独立子进程）
-    - collector（proxy 内）据 req_id 重组 FrameInference，经 _write_back_results 落回 ClientQueues
+    - collector（proxy 内）据 req_id 组装 FrameDetection，经 _write_back_results 落回 ClientQueues
     """
 
     def __init__(
@@ -56,11 +55,11 @@ class DetectionService:
                 }
             max_batch_per_stage: 每个 stage 最大 batch 大小
             client_manager_instance: ClientManager 实例（仅用于构造 Dispatcher 枚举 registry；
-                写回不再经它反查，改走 res.cq 捕获句柄）
+                写回不再经它反查，改走 frame.cq 捕获句柄）
         """
 
         # 保存 ClientManager 实例：仅供 Dispatcher 枚举活跃 run（合法 multi-run 调度）；
-        # 写回路径已句柄化（res.cq），不再经此反查 —— 见 _write_back_results。
+        # 写回路径已句柄化（frame.cq），不再经此反查 —— 见 _write_back_results。
         self._client_manager = client_manager_instance or client_manager
 
         # Stage 配置（必须提供）
@@ -85,7 +84,7 @@ class DetectionService:
         }
 
         # 推理子进程代理：submit 批帧 → 子进程 _infer_models → collector 据 req_id 重组
-        # FrameInference 走 _write_back_results 落回主链路。写回回调注入本服务的单一写回口。
+        # FrameDetection 走 _write_back_results 落回主链路。写回回调注入本服务的单一写回口。
         # 先于 Dispatcher 构造：dispatcher 需注入它的 submit 作为唯一提交者。
         self._proxy = RemoteInferProxy(
             active_stages=self._active_stages,
@@ -130,8 +129,8 @@ class DetectionService:
 
         logger.info("DetectionService stopped")
 
-    def _write_back_results(self, results: List[FrameInference]):
-        """将推理结果双写到**捕获的 CQ 句柄**（res.cq），不按 client_id 反查。
+    def _write_back_results(self, results: List[FrameDetection]):
+        """将推理结果双写到**捕获的 CQ 句柄**（frame.cq），不按 client_id 反查。
 
         双写策略：
         - slide_window（per-task 拆分）：供 TemporalWorker 历史窗口分析
@@ -146,40 +145,37 @@ class DetectionService:
         **本方法不碰盘**：落盘缓冲交给 recording 的 sweeper 拉走，代次隔离由它的
         `_claimed_features` 表兑现（同段写那套），故这里不需要第二道归属校验。
         """
-        for res in results:
-            cq = res.cq
+        for frame in results:
+            # 取走句柄并置空：同一对象随后进帧窗 / 快照 / 落盘缓冲，留存的帧一律不带 cq
+            # （不成 cq → 帧窗 → 帧 → cq 的引用环，下游也读不到可能已过期的句柄）。
+            cq, frame.cq = frame.cq, None
             if not cq.is_active():
                 # 迟到结果：捕获的 run 已被拆除/结算（DRAINING/CLOSED），整条丢弃并计数。
                 frame_drop_total.labels(reason="stale_run").inc()
                 logger.debug(
                     "[Worker] Skip write-back for stale run: task=%s state=%s",
-                    res.task_id, cq.get_state().name,
+                    cq.task_id, cq.get_state().name,
                 )
                 continue
 
             # 失败可见性：pool 把模型异常降级成 success=False 的空结果，下游与「真没检到」
-            # 不可分。此处 res.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
+            # 不可分。此处 cq.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
             # 聚合计数由 pool.infer_failure_total 承接、此处不再重复计数。
-            for task_name, detection_output in res.detections.items():
+            for task_name, detection_output in frame.by_source.items():
                 if not detection_output.success:
                     logger.warning(
                         "[Worker] inference degraded (empty result): task=%s model=%s error=%s",
-                        res.task_id, task_name, detection_output.error,
+                        cq.task_id, task_name, detection_output.error,
                     )
-            # 物化一次帧级 FrameDetection（多流已在 res.detections 内对齐）：帧窗 + 原子快照共用一份。
-            # by_source 直接共享 res.detections 引用（pool 每帧新建、无别名突变），不复制。
-            feature = FrameDetection(
-                ts=res.timestamp, by_source=res.detections,
-                frame_width=res.frame_width, frame_height=res.frame_height,
-            )
+            # 帧窗 / 原子快照 / 落盘缓冲共用 collector 组装的这一份（pool 每帧新建、无别名突变），不复制。
             # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。
-            cq.push_detection(feature)
+            cq.push_detection(frame)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）
-            cq.set_latest_inference(feature)
+            cq.set_latest_inference(frame)
             # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）
             cq.mark_startup_milestone("first_inference")
             # Path 3: 落盘缓冲（常开，offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
             # 由 recording 的 sweeper 每 tick 拉走写 features.jsonl。落的是同一份帧级
             # FrameDetection（与帧窗/快照共用一个对象）。
-            cq.append_ca_features(feature)
+            cq.append_ca_features(frame)
 

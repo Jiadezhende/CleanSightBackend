@@ -9,7 +9,7 @@
 四类断言，按规范的优先级排：
 
 1. **往返**（T1）：codec 是本域唯一有内容的东西，正反运算必须闭合。features 侧投影掉的字段
-   （mask/keypoints/metadata）按契约回读为默认值，这是有意有损，也一并钉死；facts 侧无损。
+   （extra/metadata）按契约回读为默认值，这是有意有损，也一并钉死；facts 侧无损。
 2. **事务不变式**（T3）：路线 C 失败即整体作废——旧文件原样保留、不留 tmp。
 3. **落位**：产物只进 `inference/` 子目录，step 根下不留文件——域隔离的执行力。
 4. **错误语义**：坏行逐行隔离、形状不对的 record 跳过、IO 失败原样抛。
@@ -42,7 +42,7 @@ def _frame(ts, by_source=None, width=1920, height=1080) -> FrameDetection:
     return FrameDetection(
         ts=ts,
         by_source={
-            source: DetectorOutput(detections=list(dets), metadata={}, timestamp=ts)
+            source: DetectorOutput(boxes=list(dets), metadata={}, timestamp=ts)
             for source, dets in by_source.items()
         },
         frame_width=width,
@@ -89,20 +89,20 @@ class TestFeatureCodec:
         assert got.ts == src.ts
         assert (got.frame_width, got.frame_height) == (1920, 1080)
         assert list(got.by_source) == ["cam"]
-        d = got.by_source["cam"].detections[0]
+        d = got.by_source["cam"].boxes[0]
         assert (d.bbox, d.confidence, d.class_id, d.class_name) == ([10, 20, 30, 40], 0.75, 3, "hand")
 
     def test_roundtrip_is_lossy_by_contract(self):
-        """mask / keypoints / extra / metadata 刻意不落 —— 离线不消费，且每帧一张数组太重。
+        """extra / metadata 刻意不落 —— 离线不消费，且形状不定。
 
         回读为默认值是**契约**不是 bug；这条用例存在的意义是让改坏它的人看见代价。
         """
-        src = _frame(1.0, {"seg": [_det(mask=np.zeros((4, 4)), keypoints=[[1, 2]], extra={"k": "v"})]})
+        src = _frame(1.0, {"seg": [_det(extra={"k": "v"})]})
         src.by_source["seg"].metadata = {"model": "yolo"}
 
         got = _detection._record_to_feature(_detection._feature_to_record(src))
-        d = got.by_source["seg"].detections[0]
-        assert d.mask is None and d.keypoints is None and d.extra == {}
+        d = got.by_source["seg"].boxes[0]
+        assert d.extra == {}
         assert got.by_source["seg"].metadata == {}
 
     def test_roundtrip_keeps_empty_source(self):
@@ -110,7 +110,7 @@ class TestFeatureCodec:
         src = _detection._feature_to_record(_frame(1.0, {"cam": [], "ir": [_det()]}))
         got = _detection._record_to_feature(src)
         assert sorted(got.by_source) == ["cam", "ir"]
-        assert got.by_source["cam"].detections == []
+        assert got.by_source["cam"].boxes == []
 
     def test_record_timestamp_fans_out_to_every_source(self):
         """同帧多流同源同值：每源 DetectorOutput.timestamp = 记录级 ts。"""
@@ -145,7 +145,7 @@ class TestFeaturesReadWrite:
         inference.append_features(1, 2, [_frame(1.0), _frame(2.0)])
         got = inference.read_features(1, 2)
         assert [f.ts for f in got] == [1.0, 2.0]
-        assert got[0].by_source["cam"].detections[0].bbox == [1, 2, 3, 4]
+        assert got[0].by_source["cam"].boxes[0].bbox == [1, 2, 3, 4]
 
     def test_append_accumulates_across_calls(self, tmp_storage):
         inference.append_features(1, 2, [_frame(1.0)])

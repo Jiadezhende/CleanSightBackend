@@ -106,11 +106,11 @@ class CleanOperator(TemporalOperator):
                 if not frame.success:
                     continue
 
-                if not frame.detections:
+                if not frame.boxes:
                     # 忽略无检测结果的帧
                     continue
 
-                for detection in frame.detections:
+                for detection in frame.boxes:
                     bbox = detection.bbox
                     if bbox is None:
                         # 忽略未检测到的物体

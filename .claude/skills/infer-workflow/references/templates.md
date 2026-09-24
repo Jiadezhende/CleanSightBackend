@@ -37,8 +37,8 @@ class XxxDetector(YOLODetector):
     def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = [RenderItem(bbox=d.bbox, label=f"{d.class_name} {d.confidence:.2f}",
                             confidence=d.confidence, color=(0, 0, 255))       # BGR
-                 for d in output.detections]
-        detected = len(output.detections) > 0
+                 for d in output.boxes]
+        detected = len(output.boxes) > 0
         return RenderSpec(type=RenderType.BBOX, items=items,
                           status_text="Detected!" if detected else "Normal",
                           status_color=(0, 0, 255) if detected else (0, 255, 0),
@@ -59,7 +59,7 @@ class XxxOperator(Operator):
         last_ts = self._sm["last_ts"]                         # 游标推进
         new_frames = [f for f in window if f.timestamp > last_ts]
         for f in new_frames:
-            self._sm["consecutive"] = self._sm["consecutive"] + 1 if f.detections else 0
+            self._sm["consecutive"] = self._sm["consecutive"] + 1 if f.boxes else 0
         if new_frames:
             self._sm["last_ts"] = new_frames[-1].timestamp
 
@@ -99,7 +99,7 @@ class XxxDetector(Detector):
                     timestamps: List[float]) -> List[DetectorOutput]:
         out = []
         for frame, ts in zip(frames, timestamps):            # timestamps[i] 原样写入，别自造
-            out.append(DetectorOutput(detections=[DetBox(...)],
+            out.append(DetectorOutput(boxes=[DetBox(...)],
                                        metadata={"model": "xxx_algo"},
                                        timestamp=ts, success=True))
         return out

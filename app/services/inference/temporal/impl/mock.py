@@ -57,9 +57,9 @@ class MockOperator(Operator):
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in window if f.timestamp > last_ts]
         for output in new_frames:
-            if len(output.detections) > 0:
+            if len(output.boxes) > 0:
                 self._sm["consecutive"] += 1
-                self._sm["total"] += len(output.detections)
+                self._sm["total"] += len(output.boxes)
             else:
                 self._sm["consecutive"] = 0
         if new_frames:

@@ -55,7 +55,7 @@ class BrushRulesSegmenter(OfflineSegmenter):
         run_last = 0.0
         run_count = 0
         for ff in frames:  # load 已按 ts 升序
-            active = any(fd.detections for fd in ff.by_source.values())
+            active = any(fd.boxes for fd in ff.by_source.values())
             if active:
                 if run_start is None:
                     run_start = ff.ts

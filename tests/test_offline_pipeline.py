@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from factories import make_detection, make_frame_detections, make_frame_feature
+from factories import make_det_box, make_detector_output, make_frame_detection
 
 from app.domain.detection import DetectorOutput, FrameDetection
 from app.domain.fact import EventFact, SegmentFact
@@ -145,10 +145,10 @@ class TestBrushRulesSegmenter:
     def test_presence_runs_to_segments(self):
         seg = BrushRulesSegmenter(name="p", subscribes=["a"])
         streams = {"a": [
-            make_frame_detections(n=1, ts=1.0),   # active
-            make_frame_detections(n=1, ts=2.0),   # active
-            make_frame_detections(n=0, ts=3.0),   # idle → 断段
-            make_frame_detections(n=1, ts=4.0),   # active（新段）
+            make_detector_output(n=1, ts=1.0),   # active
+            make_detector_output(n=1, ts=2.0),   # active
+            make_detector_output(n=0, ts=3.0),   # idle → 断段
+            make_detector_output(n=1, ts=4.0),   # active（新段）
         ]}
         segs = seg.segment(seg.preprocess(_frames(streams)))
         assert [(s.start, s.end) for s in segs] == [(1.0, 2.0), (4.0, 4.0)]
@@ -157,15 +157,15 @@ class TestBrushRulesSegmenter:
     def test_min_frames_drops_short_runs(self):
         seg = BrushRulesSegmenter(name="p", subscribes=["a"], min_frames=2)
         streams = {"a": [
-            make_frame_detections(n=1, ts=1.0),   # 单帧段，min_frames=2 丢弃
-            make_frame_detections(n=0, ts=2.0),
+            make_detector_output(n=1, ts=1.0),   # 单帧段，min_frames=2 丢弃
+            make_detector_output(n=0, ts=2.0),
         ]}
         assert seg.segment(seg.preprocess(_frames(streams))) == []
 
     def test_debug_result_none(self):
         """presence 型无逐帧语义：debug_result 恒 None（Runner 据此不落逐帧 JSON）。"""
         seg = BrushRulesSegmenter(name="p", subscribes=["a"])
-        seg.segment(seg.preprocess(_frames({"a": [make_frame_detections(n=1, ts=1.0)]})))
+        seg.segment(seg.preprocess(_frames({"a": [make_detector_output(n=1, ts=1.0)]})))
         assert seg.debug_result() is None
 
 
@@ -174,12 +174,12 @@ class TestBrushRulesSegmenter:
 def _clean_frame(ts):
     """一帧：clean_large=[hand, scope_control_body]，clean_small=[short_brush] → short_brush_cleaning。"""
     large = DetectorOutput(
-        detections=[make_detection(class_name="hand"),
-                    make_detection(class_name="scope_control_body")],
+        boxes=[make_det_box(class_name="hand"),
+                    make_det_box(class_name="scope_control_body")],
         metadata={}, timestamp=ts,
     )
     small = DetectorOutput(
-        detections=[make_detection(class_name="short_brush")], metadata={}, timestamp=ts,
+        boxes=[make_det_box(class_name="short_brush")], metadata={}, timestamp=ts,
     )
     return {"clean_large": large, "clean_small": small}
 
@@ -261,9 +261,9 @@ def _debug_path(root, task_id=1, step_id=2):
 def _write_features(task_id, step_id):
     """经数据层预置两帧双源特征（storage 根已由 tmp_storage fixture 指到临时目录）。"""
     inference_store.append_features(task_id, step_id, [
-        make_frame_feature(ts=ts, by_source={
-            "clean_large": make_frame_detections(n=1, ts=ts),
-            "clean_small": make_frame_detections(n=1, ts=ts),
+        make_frame_detection(ts=ts, by_source={
+            "clean_large": make_detector_output(n=1, ts=ts),
+            "clean_small": make_detector_output(n=1, ts=ts),
         })
         for ts in (1.0, 2.0)
     ])
@@ -324,7 +324,7 @@ class TestOfflineRunner:
     def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_storage):
         """CleanSegmenter 不再规则降级；未配 model_path 时硬失败且不落结果。"""
         inference_store.append_features(1, 2, [
-            make_frame_feature(ts=t, by_source=_clean_frame(t))
+            make_frame_detection(ts=t, by_source=_clean_frame(t))
             for t in (0.1, 0.2, 0.3, 0.4)
         ])
         offline = dict(_OFFLINE_OK, **{"class": _CLEAN_CLASS,
@@ -343,7 +343,7 @@ class TestOfflineRunner:
         }}})
         # MockDetector 纯透传：空检测帧 → 0 段，但链路走通
         inference_store.append_features(1, -1, [
-            make_frame_feature(ts=1.0, by_source={"mock": make_frame_detections(n=0, ts=1.0)})
+            make_frame_detection(ts=1.0, by_source={"mock": make_detector_output(n=0, ts=1.0)})
         ])
         res = OfflineRunner(config=cfg).run(OfflineRunSpec(task_id=1, step_id=-1))
         assert res.status == "completed"

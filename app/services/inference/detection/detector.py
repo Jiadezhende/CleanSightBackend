@@ -77,7 +77,7 @@ class YOLODetector(Detector):
     消除各 Detector 子类的重复样板代码。
 
     子类只需实现 prepare_visualization_data()。
-    如需自定义输出（如分割 mask），可 override _adapt_output()。
+    如需自定义输出，可 override _adapt_output()。
     """
 
     def __init__(
@@ -126,7 +126,7 @@ class YOLODetector(Detector):
     ) -> DetectorOutput:
         """将 YOLO Results 转换为 DetectorOutput。
 
-        子类可 override 以支持自定义输出格式（如分割 mask、关键点等）。
+        子类可 override 以支持自定义输出格式。
         """
         detections = []
         try:
@@ -148,8 +148,8 @@ class YOLODetector(Detector):
             logger.error("[%s] Output adaptation failed: %s", self.name, e, exc_info=True)
 
         return DetectorOutput(
-            detections=detections,
-            metadata={"model": "yolo"},  # 帧分辨率上移 FrameInference.frame_width/height，不再逐检测器塞
+            boxes=detections,
+            metadata={"model": "yolo"},  # 帧分辨率上移 FrameDetection.frame_width/height，不再逐检测器塞
             timestamp=timestamp,
         )
 
@@ -193,7 +193,7 @@ class YOLODetector(Detector):
             )
             return [
                 DetectorOutput(
-                    detections=[],
+                    boxes=[],
                     metadata={"error": str(e)},
                     timestamp=ts,
                     success=False,

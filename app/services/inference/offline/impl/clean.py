@@ -178,7 +178,7 @@ def _collect_object_arrays(
         width = max(1, int(ff.frame_width or frame_width))
         height = max(1, int(ff.frame_height or frame_height))
         for fd in ff.by_source.values():
-            for det in fd.detections:
+            for det in fd.boxes:
                 obj = OBJECT_ALIASES.get(str(det.class_name))
                 if obj is None:
                     continue

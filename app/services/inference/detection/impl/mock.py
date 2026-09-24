@@ -54,7 +54,7 @@ class MockDetector(Detector):
             ))
 
         return DetectorOutput(
-            detections=detections,
+            boxes=detections,
             metadata={
                 "model": "mock_brightness",
                 "mean_brightness": round(mean_brightness, 2),
@@ -78,10 +78,10 @@ class MockDetector(Detector):
                 confidence=det.confidence,
                 color=(255, 128, 0),
             )
-            for det in output.detections
+            for det in output.boxes
         ]
 
-        detected = len(output.detections) > 0
+        detected = len(output.boxes) > 0
         brightness = output.metadata.get("mean_brightness", "-")
 
         if detected:

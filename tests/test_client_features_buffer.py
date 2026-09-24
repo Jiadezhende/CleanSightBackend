@@ -5,7 +5,7 @@
 缓冲只在满时丢——所以两者不能合并，这里也各测各的。
 """
 
-from factories import make_cq, make_frame_feature
+from factories import make_cq, make_frame_detection
 from app.utils.metrics import frame_drop_total
 
 
@@ -16,7 +16,7 @@ def _feature_drops() -> float:
 def test_append_then_drain_roundtrip():
     cq = make_cq(task_id=1, step_id=2, source_ip="ip")
     for ts in (1.0, 2.0, 3.0):
-        cq.append_ca_features(make_frame_feature(ts=ts))
+        cq.append_ca_features(make_frame_detection(ts=ts))
 
     assert [f.ts for f in cq.drain_ca_features()] == [1.0, 2.0, 3.0]  # 保持写入序
     assert cq.drain_ca_features() == []                               # 取走即清，不重复交付
@@ -27,7 +27,7 @@ def test_full_buffer_drops_oldest_and_counts():
     before = _feature_drops()
 
     for ts in (1.0, 2.0, 3.0):
-        cq.append_ca_features(make_frame_feature(ts=ts))
+        cq.append_ca_features(make_frame_detection(ts=ts))
 
     assert [f.ts for f in cq.drain_ca_features()] == [2.0, 3.0]  # 最旧那帧被挤掉
     assert _feature_drops() - before == 1.0
@@ -37,14 +37,14 @@ def test_draining_run_rejects_writes():
     cq = make_cq(task_id=1, step_id=2, source_ip="ip")
     cq.to_draining()
 
-    cq.append_ca_features(make_frame_feature(ts=1.0))
+    cq.append_ca_features(make_frame_detection(ts=1.0))
 
     assert cq.drain_ca_features() == []
 
 
 def test_close_releases_the_buffer():
     cq = make_cq(task_id=1, step_id=2, source_ip="ip")
-    cq.append_ca_features(make_frame_feature(ts=1.0))
+    cq.append_ca_features(make_frame_detection(ts=1.0))
 
     cq.close()
 
@@ -58,8 +58,8 @@ def test_slide_window_and_buffer_are_independent():
     cq.set_stream_windows({"op": 0.0})   # 底线 10s 感受野
 
     for ts in (1.0, 2.0, 100.0):         # 第三帧把前两帧挤出滑窗
-        cq.push_detection(make_frame_feature(ts=ts))
-        cq.append_ca_features(make_frame_feature(ts=ts))
+        cq.push_detection(make_frame_detection(ts=ts))
+        cq.append_ca_features(make_frame_detection(ts=ts))
 
     assert [f.ts for f in cq.get_slide_window()] == [100.0]
     assert [f.ts for f in cq.drain_ca_features()] == [1.0, 2.0, 100.0]

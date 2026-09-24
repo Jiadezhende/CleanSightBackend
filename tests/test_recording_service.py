@@ -650,7 +650,7 @@ class TestSweeper:
 
 
 def _feats(n=2, start=1700.0):
-    return [factories.make_frame_feature(ts=start + i / 15.0) for i in range(n)]
+    return [factories.make_frame_detection(ts=start + i / 15.0) for i in range(n)]
 
 
 class TestSubmitFeatures:

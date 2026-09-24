@@ -38,7 +38,7 @@ def _bbox_items(output: DetectorOutput):
             confidence=det.confidence,
             color=_PALETTE[det.class_id % len(_PALETTE)],
         )
-        for det in output.detections
+        for det in output.boxes
     ]
 
 

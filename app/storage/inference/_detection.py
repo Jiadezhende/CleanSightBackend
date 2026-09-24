@@ -12,7 +12,7 @@
 Windows 的 `mode="a"` 也不保证追加原子），同一 step 的写与 `_layout.delete` /
 `tasks.delete_step` 必须由调用侧串行。
 
-依赖上界：`app.domain`（numpy 随 `DetBox.mask` 的类型标注进来）+ stdlib。
+依赖上界：`app.domain` + stdlib。
 """
 
 from __future__ import annotations
@@ -29,12 +29,12 @@ logger = logging.getLogger(__name__)
 # ── FrameDetection ↔ 磁盘 record 的对称映射（一对逆运算紧挨放置）────────────────────────
 #
 # 契约：磁盘 record 是 FrameDetection 的**精简投影** = ts + 每源检测框 (bbox/conf/cls) +
-# 帧分辨率。mask / keypoints / metadata 刻意不落，回读按默认还原——投影有损是有意的，故
+# 帧分辨率。DetBox.extra / metadata 刻意不落，回读按默认还原——投影有损是有意的，故
 # 往返断言只在投影后的字段上闭合。磁盘键全命名，无位置约定。
 
 
 def _serialize_detection(det: DetBox) -> Dict[str, Any]:
-    """单个 DetBox → 特征 dict（bbox 即特征；mask/keypoints 太重不落）。"""
+    """单个 DetBox → 磁盘 dict（extra 不落）。"""
     return {
         "bbox": [int(x) for x in det.bbox],  # 强制原生 int（json 不吃 np.int64），与下方同风格
         "conf": float(det.confidence),
@@ -44,7 +44,7 @@ def _serialize_detection(det: DetBox) -> Dict[str, Any]:
 
 
 def _deserialize_detection(d: Mapping[str, Any]) -> DetBox:
-    """特征 dict → DetBox（mask/keypoints 未落盘，回读为 None）。"""
+    """磁盘 dict → DetBox（extra 未落盘，回读为空）。"""
     return DetBox(
         bbox=d["bbox"],
         confidence=d["conf"],
@@ -58,7 +58,7 @@ def _feature_to_record(feature: FrameDetection) -> Dict[str, Any]:
     record: Dict[str, Any] = {
         "ts": feature.ts,
         "features": {
-            source: [_serialize_detection(d) for d in fd.detections]
+            source: [_serialize_detection(d) for d in fd.boxes]
             for source, fd in feature.by_source.items()
         },
     }
@@ -72,14 +72,14 @@ def _record_to_feature(rec: Mapping[str, Any]) -> FrameDetection:
     """磁盘 record → FrameDetection（`_feature_to_record` 的逆；未落字段按契约默认还原）。
 
     每源 `DetectorOutput.timestamp = 记录级 ts`（同帧多流同源同值）；`metadata={}`、
-    `success=True`、`mask/keypoints=None` 均为默认。含 detections 为空的 source ——
+    `success=True`、`DetBox.extra={}` 均为默认。含 detections 为空的 source ——
     "这一帧该流没检出" 与 "这一帧没有该流" 是两回事，present-key 语义必须保住。
     """
     ts = float(rec.get("ts", 0.0))  # 反序列化边界统一 float（手写 JSONL 可能给 int）
     features = rec.get("features") or {}
     by_source = {
         source: DetectorOutput(
-            detections=[_deserialize_detection(d) for d in dets],
+            boxes=[_deserialize_detection(d) for d in dets],
             metadata={},
             timestamp=ts,
         )

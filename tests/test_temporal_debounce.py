@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from factories import make_frame_detections, make_frame_feature
+from factories import make_detector_output, make_frame_detection
 from app.domain.alarm import AlarmType
 from app.domain.detection import FrameDetection  # 仅用于类型注解
 
@@ -32,8 +32,8 @@ def make_window(pattern: list[int], class_name: str = "bubble",
     window = []
     for i, count in enumerate(pattern):
         ts = base_ts + i * 0.1
-        fd = make_frame_detections(n=count, class_name=class_name, ts=ts)
-        window.append(make_frame_feature(ts=ts, by_source={source: fd}))
+        fd = make_detector_output(n=count, class_name=class_name, ts=ts)
+        window.append(make_frame_detection(ts=ts, by_source={source: fd}))
     return window
 
 
@@ -120,8 +120,8 @@ class TestBendingDebounce:
         for i, has_bending in enumerate(flags):
             ts = base_ts + i * 0.1
             n = 1 if has_bending else 0
-            fd = make_frame_detections(n=n, class_name="bent", ts=ts)
-            window.append(make_frame_feature(ts=ts, by_source={"bending": fd}))
+            fd = make_detector_output(n=n, class_name="bent", ts=ts)
+            window.append(make_frame_detection(ts=ts, by_source={"bending": fd}))
         return window
 
     def test_debounce_increments_bend_actions(self, op):

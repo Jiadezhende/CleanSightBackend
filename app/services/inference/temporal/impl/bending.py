@@ -93,7 +93,7 @@ class BendingOperator(Operator):
             return
 
         for frame in new_frames:
-            has_bent = any(d.class_name == "bent" for d in frame.detections)
+            has_bent = any(d.class_name == "bent" for d in frame.boxes)
 
             if self._sm["state"] == "STRAIGHT":
                 if has_bent:

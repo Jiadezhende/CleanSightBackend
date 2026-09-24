@@ -63,21 +63,21 @@ def test_collect_pops_pending_and_writes_back_assembled():
     (req_id, _), = p._pending.items()
 
     # 子进程回：每帧一个 {detector: DetectorOutput}（用轻量 dict 占位即可）
-    from factories import make_frame_detections
-    fd0 = make_frame_detections(n=1, ts=1.0)
-    fd1 = make_frame_detections(n=2, ts=2.0)
+    from factories import make_detector_output
+    fd0 = make_detector_output(n=1, ts=1.0)
+    fd1 = make_detector_output(n=2, ts=2.0)
     p._handle_response((req_id, [{"clean": fd0}, {"clean": fd1}]))
 
     # pending 清空、inflight 归零（pop 生效）
     assert p._pending == {} and p._inflight == 0
-    # write_back 收到 2 条正确重组的 FrameInference（cq 贴回、ts/wh 对齐）
+    # write_back 收到 2 条正确组装的 FrameDetection（cq 贴回、ts/wh 对齐）
     assert len(captured) == 1
-    frame_infs = captured[0]
-    assert [fi.timestamp for fi in frame_infs] == [1.0, 2.0]
-    assert all(fi.cq is cq for fi in frame_infs)
-    assert all((fi.frame_width, fi.frame_height) == (8, 4) for fi in frame_infs)
-    assert frame_infs[0].detections["clean"] is fd0
-    assert frame_infs[1].detections["clean"] is fd1
+    frames = captured[0]
+    assert [f.ts for f in frames] == [1.0, 2.0]
+    assert all(f.cq is cq for f in frames)
+    assert all((f.frame_width, f.frame_height) == (8, 4) for f in frames)
+    assert frames[0].by_source["clean"] is fd0
+    assert frames[1].by_source["clean"] is fd1
 
 
 def test_max_inflight_backpressure_rejects_and_counts():
@@ -187,7 +187,7 @@ def test_failure_metric_derived_from_framedetections():
     (req_id, _), = p._pending.items()
 
     fd_fail = DetectorOutput(
-        detections=[], metadata={"error_type": "RuntimeError", "error": "boom"},
+        boxes=[], metadata={"error_type": "RuntimeError", "error": "boom"},
         timestamp=1.0, success=False, error="boom",
     )
     before = infer_failure_total.labels(model="clean_large", error_type="RuntimeError")._value.get()
@@ -203,8 +203,8 @@ def test_latency_metric_derived_from_framedetections_metadata():
     p.submit([_task(cq, 1.0), _task(cq, 2.0)])  # 2 帧
     (req_id, _), = p._pending.items()
 
-    fd0 = DetectorOutput(detections=[], metadata={"model": "yolo", "infer_ms": 20.0}, timestamp=1.0)
-    fd1 = DetectorOutput(detections=[], metadata={"model": "yolo", "infer_ms": 20.0}, timestamp=2.0)
+    fd0 = DetectorOutput(boxes=[], metadata={"model": "yolo", "infer_ms": 20.0}, timestamp=1.0)
+    fd1 = DetectorOutput(boxes=[], metadata={"model": "yolo", "infer_ms": 20.0}, timestamp=2.0)
     before = infer_latency_ms.labels(model="clean_large")._sum.get()
     # 同模型两帧共享同一批 infer_ms=20；去重后只 observe 一次、值 = 20/2 = 10
     p._handle_response((req_id, [{"clean_large": fd0}, {"clean_large": fd1}]))

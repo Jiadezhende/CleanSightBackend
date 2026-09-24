@@ -696,9 +696,9 @@ class ClientQueues:
                     if fd is None:
                         continue
                     a = acc.setdefault(src, {"hit": 0.0, "max_conf": 0.0})
-                    if fd.detections:
+                    if fd.boxes:
                         a["hit"] += 1
-                        frame_max_conf = max(d.confidence for d in fd.detections)
+                        frame_max_conf = max(d.confidence for d in fd.boxes)
                         a["max_conf"] = max(a["max_conf"], frame_max_conf)
         return {
             src: {
