@@ -522,7 +522,7 @@ class RecordingService:
         与 `_write` 逐条同构（两个 ① ② 的理由原样成立，不重复），三处不同：
 
         - 清的是 `{step}/inference/`（`inference.delete`），HLS 那个域一个字节不碰。**注意它
-          连 `facts.jsonl` 一起带走**——新一代的检测序列变了，上一代对它的离线分析结果就是
+          连 `temporal.jsonl` 一起带走**——新一代的检测序列变了，上一代对它的离线分析结果就是
           脏数据，这是有意的。
         - 用的是 `_claimed_detections` 表，不是 `_claimed_hls`（不变式 4）。
         - **失败不重试**的理由不同：`append_detections` 是纯追加，重试会写出重复帧；而能让它

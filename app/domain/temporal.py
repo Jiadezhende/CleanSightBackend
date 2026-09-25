@@ -1,10 +1,9 @@
 """时序分析事实契约（L3 产出）。
 
-两类事实按时间粒度分型，同落 `facts.jsonl`（一条一行）：
+两类事实按时间粒度分型，同落 `temporal.jsonl`（一条一行）：
 
-    EventFact    点  —— 某信号在某一帧上的电平
-    SegmentFact  区间 —— 一段时间里的一个动作 / 状态
-    Fact         两者的并，读写两侧的货币
+    TemporalEvent    点  —— 某信号在某一帧上的电平
+    TemporalSegment  区间 —— 一段时间里的一个动作 / 状态
 
 三条硬约束：
 
@@ -18,11 +17,11 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Union
+from typing import Any, Dict
 
 
 @dataclass
-class EventFact:
+class TemporalEvent:
     """打点：某信号在某一帧上的电平。
 
     多信号靠不同 `signal` 名区分，不是类型枚举；同一算子一个 tick 可产多条。
@@ -37,7 +36,7 @@ class EventFact:
 
 
 @dataclass
-class SegmentFact:
+class TemporalSegment:
     """分段：一段时间里的一个动作 / 状态。
 
     闭区间 `[start, end]`，单帧段 `start == end`。合法性（有限数、start <= end、conf 值域）
@@ -51,6 +50,3 @@ class SegmentFact:
     conf: float = 1.0
     meta: Dict[str, Any] = field(default_factory=dict)
 
-
-# 读写两侧的货币：`read_facts` 出它的列表，`write_facts` 收它的序列。
-Fact = Union[EventFact, SegmentFact]

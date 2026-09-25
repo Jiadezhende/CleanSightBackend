@@ -9,16 +9,16 @@
         │
         ▼ preprocess(frames)    ← 输入预处理层（预留）：raw bbox 序列不一定能直接喂模型，
         │                          需张量化/归一化/时间降采样/定长编码的模型在此转换
-        ▼ segment(model_input)  ← 模型推理 + 解码为 SegmentFact
+        ▼ segment(model_input)  ← 模型推理 + 解码为 TemporalSegment
         │
-        ▼ List[SegmentFact]
+        ▼ List[TemporalSegment]
 
 约束：
 - `frames` 只读，不得原地修改；
 - 策略不访问存储 / ClientManager / CQ / 数据库（纯算法）；
-- 输出每条 `SegmentFact.producer` 必须等于本策略 `name`；`start <= end`、时间为有限数、
+- 输出每条 `TemporalSegment.producer` 必须等于本策略 `name`；`start <= end`、时间为有限数、
   `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。
-- 输入吃 `FrameDetection`、输出吐 `SegmentFact`（两者都在 `app.domain`，与在线同型），
+- 输入吃 `FrameDetection`、输出吐 `TemporalSegment`（两者都在 `app.domain`，与在线同型），
   不自定义中间数据壳。
 """
 
@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Sequence
 
 from app.domain.detection import FrameDetection
-from app.domain.fact import SegmentFact
+from app.domain.temporal import TemporalSegment
 
 
 class OfflineSegmenter(ABC):
@@ -53,7 +53,7 @@ class OfflineSegmenter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def segment(self, model_input: Any) -> List[SegmentFact]:
+    def segment(self, model_input: Any) -> List[TemporalSegment]:
         """消费 `preprocess` 的输出，做模型推理并解码为动作分段事实。"""
         raise NotImplementedError
 

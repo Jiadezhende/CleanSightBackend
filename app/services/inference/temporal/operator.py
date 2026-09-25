@@ -6,7 +6,7 @@
 - judge()：读 self._sm 出规则结果（overlay 文案 + 实时告警）。
 - finalize()：任务 terminate 时结算一次。
 
-两接口共享同一 self._sm —— 不再有 EventFact 作为对象间传输、不再有双状态机同步。
+两接口共享同一 self._sm —— 不再有 TemporalEvent 作为对象间传输、不再有双状态机同步。
 每个 Client 独立实例，不跨 Client 共享（start_workflow() 时新建）。
 
 身份维度：

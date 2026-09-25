@@ -3,14 +3,14 @@
 本文件保持“单策略文件自包含”：
     - clean 专属特征转换（模块级纯函数）；
     - 三种离线模型结构；
-    - 模型输出到 SegmentFact 的解码逻辑。
+    - 模型输出到 TemporalSegment 的解码逻辑。
 
 输入:
     OfflineRunner 从 inference.read_detections(task_id, step_id) 读取 List[FrameDetection]
     （帧级、多流已在 by_source 内对齐、按 ts 升序）。
 
 输出:
-    List[SegmentFact]，由 Runner 校验并幂等写入 facts.jsonl。
+    List[TemporalSegment]，由 Runner 校验并幂等写入 temporal.jsonl。
 
 注意:
     这里不包含训练流程。训练仍在独立 offline-model 仓内完成，后端只负责加载
@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 
 from app.domain.detection import DetBox, FrameDetection
-from app.domain.fact import SegmentFact
+from app.domain.temporal import TemporalSegment
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
@@ -542,7 +542,7 @@ def add_business_priors(model_input: ModelInput) -> ModelInput:
 
 
 class _CleanTorchSegmenter(OfflineSegmenter):
-    """clean 模型策略基类：torch 模型加载 + 推理 + SegmentFact 解码。
+    """clean 模型策略基类：torch 模型加载 + 推理 + TemporalSegment 解码。
 
     特征工程是模块级纯函数：`preprocess` 调 build_base_features 得基础 v2（113 维）；
     需叠加模型专属 recipe 的子类**覆盖 preprocess**，用 `super().preprocess()` 取基础特征后
@@ -580,8 +580,8 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         """
         return build_base_features(frames, self.fps, self.frame_width, self.frame_height)
 
-    def segment(self, model_input: ModelInput) -> List[SegmentFact]:
-        """跑模型得到逐帧标签，解码成 SegmentFact；未配 model_path 硬失败，不做规则降级。"""
+    def segment(self, model_input: ModelInput) -> List[TemporalSegment]:
+        """跑模型得到逐帧标签，解码成 TemporalSegment；未配 model_path 硬失败，不做规则降级。"""
         if model_input.frame_count == 0:
             return []
 
@@ -676,9 +676,9 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
     def _labels_to_segments(
         self, timestamps: Sequence[float], labels: Sequence[int], confs: Sequence[float]
-    ) -> List[SegmentFact]:
+    ) -> List[TemporalSegment]:
         """把逐帧标签合并成连续动作段（跳过 idle、过滤短于 min_duration_s 的段）。"""
-        segments: List[SegmentFact] = []
+        segments: List[TemporalSegment] = []
         cur_label: int | None = None
         cur_start = cur_end = 0.0
         cur_conf = 0.0
@@ -687,7 +687,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         def flush() -> None:
             nonlocal cur_label, cur_conf, cur_count
             if cur_label is not None and cur_label != 0 and (cur_end - cur_start) >= self.min_duration_s:
-                segments.append(SegmentFact(
+                segments.append(TemporalSegment(
                     producer=self.name,
                     label=ACTION_LABELS[cur_label],
                     start=round(cur_start, 6),

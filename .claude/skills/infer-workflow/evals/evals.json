@@ -4,13 +4,13 @@
     {
       "id": 1,
       "prompt": "帮我新建一个污点检测的 workflow，模型路径是 models/stain.pt，置信度阈值 0.6，连续4帧触发告警，告警级别 high。",
-      "expected_output": "生成两件套：StainDetector（继承 YOLODetector，name=\"stain\"，实现 prepare_visualization_data 返回 RenderSpec；infer_batch 默认够用，仅当要写业务字段才 override 且批量+逐帧 fallback 逻辑一致、timestamps[i] 原样写入 DetectorOutput.timestamp）+ StainOperator（继承 Operator，subscribes=[\"stain\"]，__init__ 全量初始化 self._sm 含 last_ts/consecutive/alarming，analyze(windows) 用 primary_window 取窗+游标推进做连续帧计数、只推 _sm 不返回，judge() 上升沿锁存 self._sm[\"alarming\"] 产实时告警 Alarm(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level=\"high\", metric=AlarmMetric.XXX)，持 consecutive_trigger=4）。给出 inference_config.yaml 中该 stage 的 detectors[]（name/class/params 含 model_path/conf_threshold）+ rules[]（name/subscribes:[stain]/realtime:true/class/params 含 consecutive_trigger）声明；新指标需在 AlarmMetric 枚举补一项。不应出现旧的 TemporalAnalyzer/Judge/EventFact/AlarmInfo/analyzer_class/judge_class 三层契约，也不应往 workflows/__init__.py 加 import/__all__（纯包标记，StageFactory 按 class 全路径 importlib 实例化）。",
+      "expected_output": "生成两件套：StainDetector（继承 YOLODetector，name=\"stain\"，实现 prepare_visualization_data 返回 RenderSpec；infer_batch 默认够用，仅当要写业务字段才 override 且批量+逐帧 fallback 逻辑一致、timestamps[i] 原样写入 DetectorOutput.timestamp）+ StainOperator（继承 Operator，subscribes=[\"stain\"]，__init__ 全量初始化 self._sm 含 last_ts/consecutive/alarming，analyze(windows) 用 primary_window 取窗+游标推进做连续帧计数、只推 _sm 不返回，judge() 上升沿锁存 self._sm[\"alarming\"] 产实时告警 Alarm(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level=\"high\", metric=AlarmMetric.XXX)，持 consecutive_trigger=4）。给出 inference_config.yaml 中该 stage 的 detectors[]（name/class/params 含 model_path/conf_threshold）+ rules[]（name/subscribes:[stain]/realtime:true/class/params 含 consecutive_trigger）声明；新指标需在 AlarmMetric 枚举补一项。不应出现旧的 TemporalAnalyzer/Judge/TemporalEvent/AlarmInfo/analyzer_class/judge_class 三层契约，也不应往 workflows/__init__.py 加 import/__all__（纯包标记，StageFactory 按 class 全路径 importlib 实例化）。",
       "files": []
     },
     {
       "id": 2,
       "prompt": "按 workflow 规范实现一个无模型的帧率监控任务：每帧记录时间戳，当滑动窗口3秒内平均帧率低于5fps时触发告警。",
-      "expected_output": "生成 FpsMonitorDetector（直接继承 Detector，实现 infer_batch(frames, timestamps) 用纯 numpy/time、timestamps[i] 原样写入 DetectorOutput.timestamp，无 YOLO/torch/ultralytics 依赖）+ FpsMonitorOperator（继承 Operator，subscribes 显式声明，self._sm 维护时间戳窗口/last_ts，analyze 用 primary_window 取窗、算窗口内平均 fps 推 _sm，judge 在 fps<5 时上升沿触发实时告警 Alarm 含 alarming 锁存防重复）。给出 YAML 的 detectors[]+rules[] 声明。无需改 workflows/__init__.py。不应出现 TemporalAnalyzer/Judge/EventFact 旧契约。",
+      "expected_output": "生成 FpsMonitorDetector（直接继承 Detector，实现 infer_batch(frames, timestamps) 用纯 numpy/time、timestamps[i] 原样写入 DetectorOutput.timestamp，无 YOLO/torch/ultralytics 依赖）+ FpsMonitorOperator（继承 Operator，subscribes 显式声明，self._sm 维护时间戳窗口/last_ts，analyze 用 primary_window 取窗、算窗口内平均 fps 推 _sm，judge 在 fps<5 时上升沿触发实时告警 Alarm 含 alarming 锁存防重复）。给出 YAML 的 detectors[]+rules[] 声明。无需改 workflows/__init__.py。不应出现 TemporalAnalyzer/Judge/TemporalEvent 旧契约。",
       "files": []
     },
     {

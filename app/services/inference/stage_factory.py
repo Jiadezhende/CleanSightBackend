@@ -87,7 +87,7 @@ class StageFactory:
         offline 配置 schema（空块 `{}` 或整段缺省 = 不启用该 stage 离线分段；
         非空即视为有意启用，缺字段一律 fail-fast，不再靠额外 enabled 开关）：
             offline:
-              name: <segmenter 身份，= SegmentFact.producer>
+              name: <segmenter 身份，= TemporalSegment.producer>
               subscribes: [<detector.name>, ...]   # 必须全命中同 stage detector
               class: <OfflineSegmenter 子类全限定路径>
               params: {...}                         # 原样传入实现类

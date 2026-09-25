@@ -38,7 +38,7 @@ class FrameDetection:
     """一帧多流对齐的检测结果：ts + {流名: DetectorOutput}。
 
     推理 collector 组装、写回口分发给帧窗 / 最新快照 / 落盘缓冲；offline 回放重建。
-    是检测层（L1）产出，与时序层（L3）的 `Fact` 同级；特征由下游算子自行从它算出。
+    是检测层（L1）产出，与时序层（L3）的 `TemporalEvent` / `TemporalSegment` 同级；特征由下游算子自行从它算出。
     """
 
     ts: float  # 帧捕获时间戳（= 各流 DetectorOutput.timestamp）

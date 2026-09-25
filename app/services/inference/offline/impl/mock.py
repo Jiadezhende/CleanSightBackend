@@ -3,14 +3,14 @@
 作用:
     这是离线链路的轻量兜底实现，不代表真实模型。它用于两类场景：
     1. YAML 配置非法或真实模型权重暂不可用时，仍可用最低成本验证
-       detections.jsonl -> OfflineRunner -> SegmentFact -> facts.jsonl 的回环；
+       detections.jsonl -> OfflineRunner -> TemporalSegment -> temporal.jsonl 的回环；
     2. 单测/本地 smoke test 不依赖 torch、GPU、真实 clean 权重。
 
 输入:
     preprocess(frames) 接收 inference.read_detections 返回的 List[FrameDetection]，原样传给 segment。
 
 输出:
-    segment(model_input) 返回 List[SegmentFact]。只要某帧任一订阅 source 存在检测框，
+    segment(model_input) 返回 List[TemporalSegment]。只要某帧任一订阅 source 存在检测框，
     就认为该帧 active；连续 active 帧合并为一个片段。
 """
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, List, Sequence
 
 from app.domain.detection import FrameDetection
-from app.domain.fact import SegmentFact
+from app.domain.temporal import TemporalSegment
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
@@ -27,7 +27,7 @@ class BrushRulesSegmenter(OfflineSegmenter):
     """纯规则 Mock 分段器。
 
     Args:
-        name: 策略身份，必须等于产出 SegmentFact.producer。
+        name: 策略身份，必须等于产出 TemporalSegment.producer。
         subscribes: 订阅的 detector/source 名称列表，由 StageFactory 从 YAML 注入。
         label: active 片段写出的动作标签，默认 `mock_action`。
         min_frames: 一个片段至少包含多少个 active 采样帧。
@@ -48,9 +48,9 @@ class BrushRulesSegmenter(OfflineSegmenter):
         """Mock 不做特征工程，直接把帧序列交给规则逻辑。"""
         return frames
 
-    def segment(self, model_input: Any) -> List[SegmentFact]:
+    def segment(self, model_input: Any) -> List[TemporalSegment]:
         frames: Sequence[FrameDetection] = model_input
-        segments: List[SegmentFact] = []
+        segments: List[TemporalSegment] = []
         run_start: float | None = None
         run_last = 0.0
         run_count = 0
@@ -73,8 +73,8 @@ class BrushRulesSegmenter(OfflineSegmenter):
             segments.append(self._make(run_start, run_last))
         return segments
 
-    def _make(self, start: float, end: float) -> SegmentFact:
-        return SegmentFact(
+    def _make(self, start: float, end: float) -> TemporalSegment:
+        return TemporalSegment(
             producer=self.name,
             label=self.label,
             start=float(start),

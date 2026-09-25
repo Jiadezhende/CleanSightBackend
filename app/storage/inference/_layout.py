@@ -1,7 +1,7 @@
 """本域的布局：域根目录、三份产物的文件名，以及整域删除。
 
     domain_dir(task, step, create=)   本域在该 step 下的根，域内所有路径都经它
-    DETECTIONS_NAME / FACTS_NAME / DEBUG_NAME
+    DETECTIONS_NAME / TEMPORAL_NAME / DEBUG_NAME
     delete(task, step)                清掉整域（三份产物一起没）
 
 域名 `_DOMAIN` 全文件只出现一次；文件名属「内容」归本域持有，`_root` 对其零知识。
@@ -25,7 +25,7 @@ _DOMAIN = "inference"
 
 # 产物文件名。
 DETECTIONS_NAME = "detections.jsonl"  # 每帧一行，L1 检测结果
-FACTS_NAME = "facts.jsonl"        # 每条一行，L3 时序分析事实
+TEMPORAL_NAME = "temporal.jsonl"      # 每条一行，L3 时序分析事实
 DEBUG_NAME = "offline_debug.json" # 离线策略逐帧中间量，给人看的
 
 

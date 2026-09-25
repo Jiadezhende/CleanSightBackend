@@ -11,7 +11,7 @@ import pytest
 from factories import make_det_box, make_detector_output, make_frame_detection
 
 from app.domain.detection import DetectorOutput, FrameDetection
-from app.domain.fact import EventFact, SegmentFact
+from app.domain.temporal import TemporalEvent, TemporalSegment
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
@@ -33,7 +33,7 @@ def _frames(per_source):
 
 
 def _seg(producer="p", label="x", start=0.0, end=1.0):
-    return SegmentFact(producer=producer, label=label, start=start, end=end)
+    return TemporalSegment(producer=producer, label=label, start=start, end=end)
 
 
 class TestReplaceOwnSegments:
@@ -43,24 +43,24 @@ class TestReplaceOwnSegments:
         facts = [_seg(start=0, end=1)]
         OfflineRunner._replace_own_segments(1, 1, "p", list(facts))
         OfflineRunner._replace_own_segments(1, 1, "p", list(facts))
-        segs = [f for f in inference_store.read_facts(1, 1) if isinstance(f, SegmentFact)]
+        segs = [f for f in inference_store.read_temporal(1, 1) if isinstance(f, TemporalSegment)]
         assert len(segs) == 1
 
     def test_other_producer_and_eventfact_preserved(self, tmp_storage):
-        # 预置：别的 producer 的分段 + 一条 EventFact
-        inference_store.write_facts(1, 1, [
+        # 预置：别的 producer 的分段 + 一条 TemporalEvent
+        inference_store.write_temporal(1, 1, [
             _seg(producer="q", start=5, end=6),
-            EventFact(producer="s", signal="sig", value=1, ts=1.0),
+            TemporalEvent(producer="s", signal="sig", value=1, ts=1.0),
         ])
         OfflineRunner._replace_own_segments(1, 1, "p", [_seg(producer="p", start=0, end=1)])
-        loaded = inference_store.read_facts(1, 1)
-        assert {f.producer for f in loaded if isinstance(f, SegmentFact)} == {"p", "q"}
-        assert any(isinstance(f, EventFact) for f in loaded)
+        loaded = inference_store.read_temporal(1, 1)
+        assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"p", "q"}
+        assert any(isinstance(f, TemporalEvent) for f in loaded)
 
     def test_empty_clears_own_producer(self, tmp_storage):
         OfflineRunner._replace_own_segments(1, 1, "p", [_seg()])
         OfflineRunner._replace_own_segments(1, 1, "p", [])  # 空 → 清该 producer
-        segs = [f for f in inference_store.read_facts(1, 1) if isinstance(f, SegmentFact)]
+        segs = [f for f in inference_store.read_temporal(1, 1) if isinstance(f, TemporalSegment)]
         assert segs == []
 
 
@@ -251,7 +251,7 @@ def _runner(offline):
 
 
 def _facts_path(root, task_id=1, step_id=2):
-    return root / str(task_id) / str(step_id) / "inference" / "facts.jsonl"
+    return root / str(task_id) / str(step_id) / "inference" / "temporal.jsonl"
 
 
 def _debug_path(root, task_id=1, step_id=2):
@@ -290,7 +290,7 @@ class TestOfflineRunner:
         assert res.status == "completed"
         assert res.producer == "clean_seg"
         assert res.segment_count == 1
-        segs = [f for f in inference_store.read_facts(1, 2) if isinstance(f, SegmentFact)]
+        segs = [f for f in inference_store.read_temporal(1, 2) if isinstance(f, TemporalSegment)]
         assert len(segs) == 1
         assert segs[0].producer == "clean_seg"
         assert segs[0].label == "brushing"
@@ -302,7 +302,7 @@ class TestOfflineRunner:
         r = _runner(_OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
-        segs = [f for f in inference_store.read_facts(1, 2) if isinstance(f, SegmentFact)]
+        segs = [f for f in inference_store.read_temporal(1, 2) if isinstance(f, TemporalSegment)]
         assert len(segs) == 1
 
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
@@ -367,7 +367,7 @@ class MarkerSegmenter(OfflineSegmenter):
 
     def segment(self, model_input):
         assert model_input.get("marked") is True  # runner 确实先调了 preprocess
-        return [SegmentFact(producer=self.name, label="m", start=0.0, end=1.0)]
+        return [TemporalSegment(producer=self.name, label="m", start=0.0, end=1.0)]
 
 
 # ============================ CLI ============================

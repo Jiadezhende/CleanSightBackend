@@ -4,7 +4,7 @@
     decode(path)           整个 JSONL → record 列表，文件不存在返 []
     write_atomic(path, s)  路线 C：同目录 tmp + os.replace
 
-两份 JSONL 产物共用同一份行框定。`write_atomic` 同时服务 `facts.jsonl` 与
+两份 JSONL 产物共用同一份行框定。`write_atomic` 同时服务 `temporal.jsonl` 与
 `offline_debug.json`——两者都是「整批文本一次性替换」的同一个动作，与逐行格式无关。
 
 **错误语义**：单行坏了跳过 + warning（R6），IO 失败 `OSError` 原样抛，包成什么由调用方定。
