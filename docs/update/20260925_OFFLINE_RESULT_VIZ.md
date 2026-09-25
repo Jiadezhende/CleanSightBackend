@@ -59,11 +59,16 @@ admin「离线推理」tab                 ▼
 
 ### 2. 页面
 
-- 控制行：task 下拉（`offline_steps` 非空的 task）、step 下拉、轨道单选、刷新按钮、CLI 命令提示。切到本 tab 拉一次清单，无轮询。
+布局沿用 lab 送标工作台（2026-09-25 追加：初版的 task / step 两级下拉改为下述任务表，与 lab 统一）：
+
+- ① 选择离线结果：lab 同款任务表（task_id / 状态 / 离线 steps / source_ip / 更新时间 / 操作），工具栏有搜索框（透传 `q`）、刷新、条数；
+  只列 `offline_steps` 非空的 task。点行选该 task（同 task 保留当前 step，否则取第一个），点 step 标签直接选该 step；选中行与标签高亮。
+  表下一行提示 CLI 命令。切到本 tab 拉一次清单，无轮询。
+- ② 分割结果：标题栏带轨道单选与「时长 · 段数 · producer」；左列视频 + 下方泳道框，右列 320px 侧栏（当前播放 / 当前分段 / 类别点选），同 lab 的 `player-layout`。
 - 视频：hls.js 播放 `/traceback` playlist，写法同 lab 页。
-- 配色：③ 的 `labels` 下标取固定色板，`idle` 灰；② 里不在 `labels` 的类名（如 MOCK 的 `mock_action`）续取。类别 chip 即图例。
+- 配色：③ 的 `labels` 下标取固定色板，`idle` 灰；② 里不在 `labels` 的类名（如 MOCK 的 `mock_action`）续取。侧栏类别列表即图例。
 - 泳道 A：Chart.js 横向 floating bar；泳道 B：Chart.js 折线（`parsing: false` + LTTB decimation）。两图 x 轴均为 `[0, media_duration_ms]`，y 轴区钉同宽以逐像素对齐。
-- 交互：点 chip → 选中类加粗 + 填充，其余淡到 15%，两条泳道同步；点泳道任意处 → 视频跳到该时刻；播放游标竖线跟随 `currentTime`（`requestAnimationFrame` 节流，只重绘不重算）。
+- 交互：点类别 → 选中类加粗 + 填充，其余淡到 15%，两条泳道同步；点泳道任意处 → 视频跳到该时刻；播放游标竖线跟随 `currentTime`（`requestAnimationFrame` 节流，只重绘不重算）。
 - 空态：无离线结果的 task（提示 CLI 命令）/ 0 段 / 模型不产概率。
 
 ### 3. 保留项（不改动）
