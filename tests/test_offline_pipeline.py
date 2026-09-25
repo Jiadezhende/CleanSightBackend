@@ -489,6 +489,42 @@ class TestCli:
         assert rc == 1
         assert "error" in capsys.readouterr().out
 
+    def test_run_json_last_line(self, tmp_storage, monkeypatch, capsys):
+        """--json：stdout 末行是结果 JSON（作业服务按此解析）。"""
+        from app.services.inference.offline import runner as runner_mod
+        _write_detections(1, 2)
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        from app.services.inference.offline import cli
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2", "--json"])
+        last = capsys.readouterr().out.strip().splitlines()[-1]
+        assert rc == 0
+        assert json.loads(last) == {
+            "status": "completed", "producer": "BrushRulesSegmenter", "segment_count": 1, "message": "",
+        }
+
+    def test_run_json_error(self, tmp_storage, monkeypatch, capsys):
+        from app.services.inference.offline import runner as runner_mod
+        _write_detections(1, 2)
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        from app.services.inference.offline import cli
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2", "--json",
+                       "--strategy", "test_offline_pipeline.BoomSegmenter"])
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert rc == 1
+        assert payload["status"] == "error" and payload["message"]
+
+    def test_run_strict_skips_unconfigured_step(self, tmp_storage, monkeypatch, capsys):
+        """--strict 透传：未配的 step 不回落 MOCK，直接 skipped。"""
+        from app.services.inference.offline import runner as runner_mod
+        _write_detections(1, 7)
+        cfg = InferenceConfig({"stages": {"MOCK": {"detectors": [{"name": "mock"}], "offline": _OFFLINE_OK}}})
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: cfg)
+        from app.services.inference.offline import cli
+        assert cli.main(["run", "--task-id", "1", "--step-id", "7", "--json", "--strict"]) == 0
+        assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["status"] == "skipped"
+        assert cli.main(["run", "--task-id", "1", "--step-id", "7", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["status"] == "completed"
+
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""
         from app.services.inference.offline import runner as runner_mod
