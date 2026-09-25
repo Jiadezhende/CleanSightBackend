@@ -13,7 +13,7 @@
 | 数据库任务 | `task_id` 不存在则脚本自动创建（结束自动删除）；已存在且 `current_step` 不一致会 fail-fast 报错（见下） |
 
 > 运行解释器：仓库使用 `.venv`。示例里写 `python`，按需替换为 `.venv/bin/python`（macOS/Linux）。
-> **当前测试环境**：`--server 111.14.140.60 --api-port 8100 --rtsp-port 8104`。观测面板 `http://111.14.140.60:8100/admin-f3m8/ui/`。
+> **当前测试环境**：`--server 111.14.140.60 --api-port 8100 --rtsp-port 8104`。观测面板 `http://111.14.140.60:8100/ui-f3m8/admin/`。
 
 ## 文件结构
 
@@ -26,7 +26,7 @@ integration_tests/
 └── logs/                   # 多客户端测试子进程日志
 ```
 
-> **观测统一走后端自带的 admin 运维面板** `http://{server}:{api-port}/admin-f3m8/ui/`，见下方[「观测：admin 运维面板」](#观测admin-运维面板)。旧的 `viewer.html` / `frontend.html` / `client_viewer.py` / `visualize_inference.py`（OpenCV 窗口）已删除，功能被 admin 面板覆盖。
+> **观测统一走后端自带的 admin 运维面板** `http://{server}:{api-port}/ui-f3m8/admin/`，见下方[「观测：admin 运维面板」](#观测admin-运维面板)。旧的 `viewer.html` / `frontend.html` / `client_viewer.py` / `visualize_inference.py`（OpenCV 窗口）已删除，功能被 admin 面板覆盖。
 
 ---
 
@@ -263,7 +263,7 @@ python integration_tests/test_multi_client.py --server 117.50.241.174 --max-task
 集成测试只**驱动**场景（推流 + 调 API + 跑生命周期），**观测**统一走后端自带的 admin 运维面板——无需另起服务、与后端同源同端口、支持多客户端聚合。测试脚本启动后会自动打印面板 URL（端口取自 `--api-port`）：
 
 ```
-http://{server}:{api-port}/admin-f3m8/ui/
+http://{server}:{api-port}/ui-f3m8/admin/
 ```
 
 > 该路径做过混淆（`/admin-f3m8/`）以防扫描器误触，随后端 [app/main.py](../app/main.py) 的挂载点为准；若改过挂载路径，以代码为准。

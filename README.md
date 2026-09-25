@@ -9,7 +9,7 @@ CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同
 - **HLS 录制落盘** — raw / processed 双轨视频段自动分段归档，可追溯回放
 - **告警上报** — 时序判定产告警，5s 去重闸门 + 批量异步上报
 - **实时画面推送** — 渲染后帧经 WebSocket 供前端 / 运维面板轮询（非后端 push）
-- **运维面板** — 后端自带 admin 运维面板（`/admin-f3m8/ui/`），实时画面 / 队列健康 / 指标 / 告警列表一站观测
+- **运维面板** — 后端自带 admin 运维面板（`/ui-f3m8/admin/`），实时画面 / 队列健康 / 指标 / 告警列表一站观测
 
 > 架构、数据流、各服务内部、配置与 API 等**描述性内容**以知识库为准，入口 [docs/kb/INDEX.md](docs/kb/INDEX.md)。
 
@@ -89,7 +89,7 @@ docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口�
 
 一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，不要再单独起 MediaMTX。装环境走 `./install.sh` / `.\install.ps1`，细节见 `/deploy` skill。
 
-起流后打开后端自带的 **admin 运维面板**观测运行状态（实时画面 / 队列健康 / 指标 / 告警列表）：`http://localhost:8000/admin-f3m8/ui/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
+起流后打开后端自带的 **admin 运维面板**观测运行状态（实时画面 / 队列健康 / 指标 / 告警列表）：`http://localhost:8000/ui-f3m8/admin/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
 
 ### 接口调用流程（统一 API）
 
@@ -161,7 +161,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 pytest                                              # 单元 & 组件测试
 pytest --cov --cov-report=html                      # 覆盖率报告（app/ + mediamtx_gateway/）
 
-# 端到端（需真实 RTSP；观测走 admin 面板 /admin-f3m8/ui/）
+# 端到端（需真实 RTSP；观测走 admin 面板 /ui-f3m8/admin/）
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 60 --server <host>
 python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      # 并发压力

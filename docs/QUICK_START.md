@@ -109,7 +109,7 @@ requests.post("http://localhost:8000/api/terminate", params={"task_id": 1})
 ## 测试方法
 
 ```bash
-# 本地完整流程（30s；观测走 admin 面板 /admin-f3m8/ui/）
+# 本地完整流程（30s；观测走 admin 面板 /ui-f3m8/admin/）
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
 
 # 远程服务器

@@ -7,7 +7,7 @@
 - 数据源：任务列表来自 **DB**（`clean_task` 表）或 **磁盘**（枚举 raw 段目录），由运行时开关 `task_source` 决定；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id)` 文件约定）。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
 - 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
-- 静态 UI：`GET /lab-f3m8/ui`（`app/static/lab`，`html=True`）。
+- 静态 UI：`GET /ui-f3m8/lab/`（`app/static/lab`，经 `/ui-f3m8` 统一挂载 `app/static`，`html=True`）。
 - 通用约定（Base URL / Gateway / 错误模型 / 枚举）见 [README](README.md)。
 
 > **本组有三套时间口径，逐字段已标注，别混用**：
