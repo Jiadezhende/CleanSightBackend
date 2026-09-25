@@ -149,7 +149,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 - **CLEAN**（step `"2"`）：`clean_large` + `clean_small` 检测 → `clean_monitor`（GRU 动作识别，10s 窗口，`gru-final.pt`）叠加动作事件；当前 `rules: []` 不产告警
 - **MOCK**：未知 step 的 fallback，纯透传（另挂离线段 `BrushRulesSegmenter` 作 CLI 离线回环示例）
 
-各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanMSTCNBiLSTMSegmenter`（权重 `clean-offline-mstcn-bilstm.pt`）。
+各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanBiGRUSegmenter`（权重 `clean-offline-bigru.pt`）。
 
 **新增检测点**：用 `/infer-workflow` skill 生成 Detector + Operator 框架，规范见 [知识库](docs/kb/INDEX.md)。
 

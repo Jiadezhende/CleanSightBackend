@@ -102,12 +102,12 @@ stages:
             6: short_brush
             7: brush_tip_out
     offline:                         # 离线段（stage 粒度）：class 指定离线模型，缺省/空块 = 不可跑
-      class: app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter
+      class: app.services.inference.offline.impl.clean.CleanBiGRUSegmenter
       # 换 class 须同时换 model_path（权重与特征 recipe 一一对应）：
-      #   app.services.inference.offline.impl.clean.CleanASFormerSegmenter
-      #   app.services.inference.offline.impl.clean.CleanBiGRUSegmenter
+      #   ...impl.clean.CleanASFormerSegmenter     ↔ clean-offline-asformer.pt
+      #   ...impl.clean.CleanMSTCNBiLSTMSegmenter  ↔ clean-offline-mstcn.pt
       params:
-        model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm.pt
+        model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-bigru.pt
         min_duration_s: 0.2          # 短于此时长的动作段丢弃
 
   # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================
