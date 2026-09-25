@@ -2,10 +2,16 @@ import asyncio
 import base64
 import logging
 import time
+from typing import List, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
+from app.domain.temporal import TemporalSegment
 from app.services.client import client_manager
+from app.services.utils.media_timeline import MediaTimeline
+from app.storage import inference as inference_store
+from app.utils.exceptions import NotFoundError
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 logger = logging.getLogger(__name__)
@@ -183,3 +189,68 @@ async def websocket_video_endpoint(websocket: WebSocket):
         logger.info(f"[WebSocket] 连接已关闭: {label}")
 
 
+
+
+# ---------------------------------------------------------------------------
+# 推理结果读取：时序事实（temporal.jsonl）
+# ---------------------------------------------------------------------------
+
+
+class TemporalRequest(BaseModel):
+    task_id: int
+    step_id: int
+    type: Literal["segment"]  # temporal.jsonl 的行判别值；"event" 有生产者时再开
+    track: Literal["raw", "processed"] = "raw"
+
+
+class TemporalSegmentItem(BaseModel):
+    label: str
+    start_media_ms: int
+    end_media_ms: int
+    conf: float
+    producer: str
+
+
+class TemporalResponse(BaseModel):
+    task_id: int
+    step_id: int
+    type: str
+    track: str
+    media_duration_ms: int
+    items: List[TemporalSegmentItem]
+
+
+def _temporal_view(req: TemporalRequest) -> TemporalResponse:
+    """读该 step 的分段事实，墙钟秒换算到 `track` 轨的媒体刻度（与 `<video>.currentTime` 同轴）。"""
+    timeline = MediaTimeline.load(req.task_id, req.step_id, req.track)
+    if not timeline:
+        raise NotFoundError(
+            f"No {req.track} segments for task {req.task_id} step {req.step_id}",
+            resource_type="Segments",
+            resource_id=f"task={req.task_id},step={req.step_id},track={req.track}",
+        )
+    segments = sorted(
+        (f for f in inference_store.read_temporal(req.task_id, req.step_id)
+         if isinstance(f, TemporalSegment)),
+        key=lambda s: (s.start, s.end),
+    )
+    items = [
+        TemporalSegmentItem(
+            label=s.label,
+            start_media_ms=timeline.media_ms_at(int(round(s.start * 1000))),
+            end_media_ms=timeline.media_ms_at(int(round(s.end * 1000))),
+            conf=s.conf,
+            producer=s.producer,
+        )
+        for s in segments
+    ]
+    return TemporalResponse(
+        task_id=req.task_id, step_id=req.step_id, type=req.type, track=req.track,
+        media_duration_ms=timeline.duration_ms, items=items,
+    )
+
+
+@router.post("/temporal", response_model=TemporalResponse)
+def get_temporal(req: TemporalRequest) -> TemporalResponse:
+    """某 step 的时序分析结果（目前只有离线分割段），时间已换算为媒体刻度。"""
+    return _temporal_view(req)

@@ -24,7 +24,7 @@ stages:
         params:                          # → 传给 Operator.__init__（name/subscribes 由 factory 注入，不重复写）
           window_seconds: 3.0            # 感受野（秒）
           birth_rate_threshold: 0.5      # 阈值等规则参数
-    offline: {}                          # 离线段占位，本次未实现
+    offline: {}                          # 离线段（可选）：{class, params}；缺省/空块 = 该 stage 不可跑
 ```
 
 | 字段 | 作用 |
@@ -39,6 +39,8 @@ stages:
 | `rules[].realtime` | `true` = 纳入 signals_10s；纯结算/纯 overlay 设 `false` |
 | `rules[].class` | Operator 全路径，**每 Client 实例化一个** |
 | `rules[].params` | Operator 构造参数；阈值/required/window_seconds 放这里（`name`/`subscribes` 由 factory 注入） |
+| `offline.class` | 离线 `OfflineSegmenter` 全路径（stage 至多一个）；产出分段的 `producer` = 类名，**无** `name`/`subscribes` |
+| `offline.params` | 离线模型构造参数（`cls(**params)`），如 `model_path` / `min_duration_s` |
 
 > 环境变量用 `${VAR:default}` 语法展开（如 `model_path`）。
 > `rules` 留空（如 CLEAN 仅画框）= 不建 Operator，只由 detector 提供检测框可视化。

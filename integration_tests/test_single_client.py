@@ -1,5 +1,5 @@
 """
-单客户端集成测试 - 覆盖 9 种使用场景（观测走 admin 运维面板 /admin-f3m8/ui/）
+单客户端集成测试 - 覆盖 9 种使用场景（观测走 admin 运维面板 /ui-f3m8/admin/）
 
 用法:
     python integration_tests/test_single_client.py --scenario <1-9> --task_id <id> [options]
@@ -291,7 +291,7 @@ def print_admin_url(server: str, api_port: int, task_id: int):
         return
     _admin_url_printed = True
     print(f"\n观测走 admin 运维面板（后端自带，同源同端口）:")
-    print(f"  http://{server}:{api_port}/admin-f3m8/ui/")
+    print(f"  http://{server}:{api_port}/ui-f3m8/admin/")
     print(f"  → 「实时监控」tab 选择 task_id={task_id} 对应的客户端并点「连接」")
     print(f"  → 告警/指标/证据回溯见其余 tab\n")
 

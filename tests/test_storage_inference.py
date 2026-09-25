@@ -1,8 +1,8 @@
 """`app.storage.inference`：`{step}/inference/` 下三份推理产物的编解码与读写。
 
     detections.jsonl      L1 检测结果，路线 B（追加）
-    facts.jsonl         L3 时序事实，路线 C（原子整体替换）
-    offline_debug.json  离线策略调试件，路线 C
+    temporal.jsonl      L3 时序事实，路线 C（原子整体替换）
+    label_probs.npz     离线逐帧类别概率，路线 C
 
 全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
 
@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
-from app.domain.fact import EventFact, SegmentFact
+from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.storage import inference, tasks
 from app.storage.inference import _detection, _jsonl, _temporal
 
@@ -50,12 +50,12 @@ def _frame(ts, by_source=None, width=1920, height=1080) -> FrameDetection:
     )
 
 
-def _seg(label="brush", start=1.0, end=2.0, producer="offline", **kw) -> SegmentFact:
-    return SegmentFact(producer=producer, label=label, start=start, end=end, **kw)
+def _seg(label="brush", start=1.0, end=2.0, producer="offline", **kw) -> TemporalSegment:
+    return TemporalSegment(producer=producer, label=label, start=start, end=end, **kw)
 
 
-def _evt(signal="birth_rate", value=0.5, ts=1.0, producer="bubble_leak", **kw) -> EventFact:
-    return EventFact(producer=producer, signal=signal, value=value, ts=ts, **kw)
+def _evt(signal="birth_rate", value=0.5, ts=1.0, producer="bubble_leak", **kw) -> TemporalEvent:
+    return TemporalEvent(producer=producer, signal=signal, value=value, ts=ts, **kw)
 
 
 def _domain_dir(root, task_id, step_id):
@@ -67,11 +67,11 @@ def _detections_file(root, task_id, step_id):
 
 
 def _facts_file(root, task_id, step_id):
-    return _domain_dir(root, task_id, step_id) / "facts.jsonl"
+    return _domain_dir(root, task_id, step_id) / "temporal.jsonl"
 
 
-def _debug_file(root, task_id, step_id):
-    return _domain_dir(root, task_id, step_id) / "offline_debug.json"
+def _probs_file(root, task_id, step_id):
+    return _domain_dir(root, task_id, step_id) / "label_probs.npz"
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ class TestDetectionsReadWrite:
         assert list(tmp_storage.iterdir()) == []
 
     def test_empty_batch_writes_nothing(self, tmp_storage):
-        """追加零条 = 没事发生：不建目录、不建文件（与 write_facts 的空批语义刻意不同）。"""
+        """追加零条 = 没事发生：不建目录、不建文件（与 write_temporal 的空批语义刻意不同）。"""
         inference.append_detections(1, 2, [])
         assert list(tmp_storage.iterdir()) == []
 
@@ -232,125 +232,125 @@ class TestDetectionsReadWrite:
 
 
 # ---------------------------------------------------------------------------
-# facts.jsonl：codec 往返（T1）
+# temporal.jsonl：codec 往返（T1）
 # ---------------------------------------------------------------------------
 
 
 class TestFactCodec:
-    """`_fact_to_record` / `_record_to_fact` 是一对逆运算。两型都**无损**落盘。"""
+    """`_temporal_to_record` / `_record_to_temporal` 是一对逆运算。两型都**无损**落盘。"""
 
     def test_segment_roundtrip(self):
         src = _seg(label="long_brush_insert", start=1.5, end=9.25, producer="clean_offline",
                    conf=0.93, meta={"n_frames": 42})
-        got = _temporal._record_to_fact(_temporal._fact_to_record(src))
+        got = _temporal._record_to_temporal(_temporal._temporal_to_record(src))
         assert got == src
 
     def test_event_roundtrip(self):
         src = _evt(signal="state", value={"level": 2}, ts=1700.5, producer="bubble_leak",
                    conf=0.4, meta={"window": 3.0})
-        got = _temporal._record_to_fact(_temporal._fact_to_record(src))
+        got = _temporal._record_to_temporal(_temporal._temporal_to_record(src))
         assert got == src
 
     def test_type_field_discriminates(self):
         """判别字段只活在盘上：内存里靠 isinstance，两型混在一个文件里靠它分开。"""
-        assert _temporal._fact_to_record(_seg())["type"] == "segment"
-        assert _temporal._fact_to_record(_evt())["type"] == "event"
+        assert _temporal._temporal_to_record(_seg())["type"] == "segment"
+        assert _temporal._temporal_to_record(_evt())["type"] == "event"
 
     def test_unknown_type_raises(self):
         with pytest.raises(ValueError):
-            _temporal._record_to_fact({"type": "nope", "producer": "p"})
+            _temporal._record_to_temporal({"type": "nope", "producer": "p"})
 
     def test_missing_type_raises(self):
         with pytest.raises(ValueError):
-            _temporal._record_to_fact({"producer": "p", "label": "x", "start": 0, "end": 1})
+            _temporal._record_to_temporal({"producer": "p", "label": "x", "start": 0, "end": 1})
 
     def test_optional_fields_restore_to_defaults(self):
         """手写 JSONL 可能不带 conf / meta —— 按 dataclass 默认还原，不炸。"""
-        got = _temporal._record_to_fact(
+        got = _temporal._record_to_temporal(
             {"type": "segment", "producer": "p", "label": "x", "start": 0, "end": 1}
         )
         assert got.conf == 1.0 and got.meta == {}
 
     def test_int_bounds_from_handwritten_file_become_float(self):
-        got = _temporal._record_to_fact(
+        got = _temporal._record_to_temporal(
             {"type": "segment", "producer": "p", "label": "x", "start": 0, "end": 1}
         )
         assert isinstance(got.start, float) and isinstance(got.end, float)
 
     def test_non_fact_raises(self):
-        """喂进来不是 Fact 的东西要当场炸，不能静默写出半份文件。"""
+        """喂进来不是 TemporalEvent / TemporalSegment 的东西要当场炸，不能静默写出半份文件。"""
         with pytest.raises(TypeError):
-            _temporal._fact_to_record({"type": "segment"})
+            _temporal._temporal_to_record({"type": "segment"})
 
 
 # ---------------------------------------------------------------------------
-# facts.jsonl：读写（路线 C）
+# temporal.jsonl：读写（路线 C）
 # ---------------------------------------------------------------------------
 
 
 class TestFactsReadWrite:
     def test_write_read_roundtrip(self, tmp_storage):
         src = [_seg(label="a"), _evt(signal="s")]
-        inference.write_facts(1, 2, src)
-        assert inference.read_facts(1, 2) == src
+        inference.write_temporal(1, 2, src)
+        assert inference.read_temporal(1, 2) == src
 
     def test_preserves_disk_order(self, tmp_storage):
         """层**不排序**：两型没有共同时间键，排序依据只能由调用方给。"""
-        inference.write_facts(1, 2, [_seg(label="c", start=9.0), _seg(label="a", start=1.0)])
-        assert [f.label for f in inference.read_facts(1, 2)] == ["c", "a"]
+        inference.write_temporal(1, 2, [_seg(label="c", start=9.0), _seg(label="a", start=1.0)])
+        assert [f.label for f in inference.read_temporal(1, 2)] == ["c", "a"]
 
     def test_write_replaces_the_whole_file(self, tmp_storage):
         """整体替换，不是追加 —— 第二次写之后旧内容一条都不剩。"""
-        inference.write_facts(1, 2, [_seg(label="old"), _seg(label="older")])
-        inference.write_facts(1, 2, [_seg(label="new")])
-        assert [f.label for f in inference.read_facts(1, 2)] == ["new"]
+        inference.write_temporal(1, 2, [_seg(label="old"), _seg(label="older")])
+        inference.write_temporal(1, 2, [_seg(label="new")])
+        assert [f.label for f in inference.read_temporal(1, 2)] == ["new"]
 
     def test_empty_batch_writes_an_empty_file(self, tmp_storage):
         """「跑过、没分出任何段」与「根本没跑过」在盘上要能分开：前者留一个空文件。"""
-        inference.write_facts(1, 2, [])
+        inference.write_temporal(1, 2, [])
         assert _facts_file(tmp_storage, 1, 2).is_file()
         assert _facts_file(tmp_storage, 1, 2).read_text(encoding="utf-8") == ""
-        assert inference.read_facts(1, 2) == []
+        assert inference.read_temporal(1, 2) == []
 
     def test_read_missing_returns_empty(self, tmp_storage):
-        assert inference.read_facts(9, 9) == []
+        assert inference.read_temporal(9, 9) == []
 
     def test_read_missing_creates_nothing(self, tmp_storage):
-        inference.read_facts(9, 9)
+        inference.read_temporal(9, 9)
         assert list(tmp_storage.iterdir()) == []
 
     def test_writes_into_domain_dir_not_step_root(self, tmp_storage):
-        inference.write_facts(1, 2, [_seg()])
+        inference.write_temporal(1, 2, [_seg()])
         assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
         assert _facts_file(tmp_storage, 1, 2).is_file()
 
     def test_leaves_no_tmp_behind(self, tmp_storage):
-        """路线 C 的暂存件换名后即消失，盘上不留 `.facts.jsonl.tmp`。"""
-        inference.write_facts(1, 2, [_seg()])
-        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["facts.jsonl"]
+        """路线 C 的暂存件换名后即消失，盘上不留 `.temporal.jsonl.tmp`。"""
+        inference.write_temporal(1, 2, [_seg()])
+        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["temporal.jsonl"]
 
     def test_skips_corrupt_line_without_losing_the_rest(self, tmp_storage):
-        inference.write_facts(1, 2, [_seg(label="a")])
+        inference.write_temporal(1, 2, [_seg(label="a")])
         with _facts_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write("{not json\n")
-        assert [f.label for f in inference.read_facts(1, 2)] == ["a"]
+        assert [f.label for f in inference.read_temporal(1, 2)] == ["a"]
 
     def test_skips_unknown_type_without_losing_the_rest(self, tmp_storage):
         """将来新增第三型时，旧版本读到它是跳过一行，不是整份读不出来。"""
-        inference.write_facts(1, 2, [_seg(label="a")])
+        inference.write_temporal(1, 2, [_seg(label="a")])
         with _facts_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "future", "producer": "p"}) + "\n")
-        assert [f.label for f in inference.read_facts(1, 2)] == ["a"]
+        assert [f.label for f in inference.read_temporal(1, 2)] == ["a"]
 
     def test_encode_failure_touches_nothing(self, tmp_storage):
         """整批先编码完再碰盘：序列化炸的时候盘上一个字节没动（W4）。"""
         with pytest.raises(TypeError):
-            inference.write_facts(1, 2, [_evt(value=object())])
+            inference.write_temporal(1, 2, [_evt(value=object())])
         assert list(tmp_storage.iterdir()) == []
 
     def test_failed_replace_keeps_the_old_file(self, tmp_storage, monkeypatch):
         """换名那步失败 = 整体作废：旧文件原样保留、tmp 不残留、原异常上抛（W4）。"""
-        inference.write_facts(1, 2, [_seg(label="old")])
+        inference.write_temporal(1, 2, [_seg(label="old")])
 
         def boom(src, dst):
             raise OSError("disk full")
@@ -359,33 +359,72 @@ class TestFactsReadWrite:
         # monkeypatch 实例，undo 会把 settings.storage_dir 一并还原，读侧当场指回真实 database/。
         monkeypatch.setattr(_jsonl.os, "replace", boom)
         with pytest.raises(OSError):
-            inference.write_facts(1, 2, [_seg(label="new")])
+            inference.write_temporal(1, 2, [_seg(label="new")])
 
-        assert [f.label for f in inference.read_facts(1, 2)] == ["old"]
-        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["facts.jsonl"]
+        assert [f.label for f in inference.read_temporal(1, 2)] == ["old"]
+        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["temporal.jsonl"]
 
 
 # ---------------------------------------------------------------------------
-# offline_debug.json
+# label_probs.npz
 # ---------------------------------------------------------------------------
 
 
-class TestDebugResult:
-    def test_writes_parsable_json_into_domain_dir(self, tmp_storage):
-        inference.write_debug_result(1, 2, {"task_id": 1, "per_frame": [0, 1, 2]})
+def _probs(ts=(1.0, 2.0, 3.0), labels=("idle", "flush")):
+    t = len(ts)
+    p = np.zeros((t, len(labels)), dtype=np.float32)
+    p[:, -1] = 0.75
+    p[:, 0] = 0.25
+    return LabelProbs(ts=np.array(ts, dtype=np.float64), probs=p, labels=tuple(labels))
+
+
+class TestLabelProbs:
+    def test_roundtrip_ts_bit_exact_probs_float16(self, tmp_storage):
+        ts = (1727000000.123456, 1727000000.190123, 1727000000.256789)
+        inference.write_label_probs(1, 2, _probs(ts=ts))
+        got = inference.read_label_probs(1, 2)
+        assert got.ts.dtype == np.float64 and got.ts.tolist() == list(ts)  # ts 是帧身份，位级相等
+        assert got.probs.dtype == np.float32 and got.probs.shape == (3, 2)
+        assert got.probs[:, 1].tolist() == [0.75] * 3                     # 0.75 在 float16 下精确
+        assert got.labels == ("idle", "flush")
+
+    def test_writes_into_domain_dir_only(self, tmp_storage):
+        inference.write_label_probs(1, 2, _probs())
         assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
-        got = json.loads(_debug_file(tmp_storage, 1, 2).read_text(encoding="utf-8"))
-        assert got == {"task_id": 1, "per_frame": [0, 1, 2]}
+        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["label_probs.npz"]
 
     def test_overwrites_previous_run(self, tmp_storage):
-        inference.write_debug_result(1, 2, {"run": 1})
-        inference.write_debug_result(1, 2, {"run": 2})
-        assert json.loads(_debug_file(tmp_storage, 1, 2).read_text(encoding="utf-8")) == {"run": 2}
+        inference.write_label_probs(1, 2, _probs(labels=("idle", "a")))
+        inference.write_label_probs(1, 2, _probs(labels=("idle", "b")))
+        assert inference.read_label_probs(1, 2).labels == ("idle", "b")
 
-    def test_unserializable_payload_touches_nothing(self, tmp_storage):
-        with pytest.raises(TypeError):
-            inference.write_debug_result(1, 2, {"obj": object()})
+    def test_missing_returns_none(self, tmp_storage):
+        assert inference.read_label_probs(1, 2) is None
         assert list(tmp_storage.iterdir()) == []
+
+    def test_empty_sequence_roundtrips(self, tmp_storage):
+        inference.write_label_probs(
+            1, 2, LabelProbs(ts=np.zeros(0), probs=np.zeros((0, 2)), labels=("idle", "a"))
+        )
+        got = inference.read_label_probs(1, 2)
+        assert got.ts.shape == (0,) and got.probs.shape == (0, 2)
+
+    def test_no_pickle_on_disk(self, tmp_storage):
+        inference.write_label_probs(1, 2, _probs())
+        with np.load(_probs_file(tmp_storage, 1, 2), allow_pickle=False) as npz:  # 能以禁 pickle 读回即无对象数组
+            assert sorted(npz.files) == ["labels", "probs", "ts"]
+
+    def test_failed_write_keeps_old_file_and_no_tmp(self, tmp_storage, monkeypatch):
+        inference.write_label_probs(1, 2, _probs(labels=("idle", "old")))
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_temporal.os, "replace", boom)
+        with pytest.raises(OSError):
+            inference.write_label_probs(1, 2, _probs(labels=("idle", "new")))
+        assert inference.read_label_probs(1, 2).labels == ("idle", "old")
+        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["label_probs.npz"]
 
 
 # ---------------------------------------------------------------------------
@@ -394,15 +433,15 @@ class TestDebugResult:
 
 
 class TestArtifactIsolation:
-    def test_write_facts_leaves_detections_alone(self, tmp_storage):
+    def test_write_temporal_leaves_detections_alone(self, tmp_storage):
         inference.append_detections(1, 2, [_frame(1.0)])
-        inference.write_facts(1, 2, [_seg()])
+        inference.write_temporal(1, 2, [_seg()])
         assert [f.ts for f in inference.read_detections(1, 2)] == [1.0]
 
     def test_append_detections_leaves_facts_alone(self, tmp_storage):
-        inference.write_facts(1, 2, [_seg(label="a")])
+        inference.write_temporal(1, 2, [_seg(label="a")])
         inference.append_detections(1, 2, [_frame(1.0)])
-        assert [f.label for f in inference.read_facts(1, 2)] == ["a"]
+        assert [f.label for f in inference.read_temporal(1, 2)] == ["a"]
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +459,8 @@ class TestDeleteDomain:
     def test_takes_all_three_artifacts(self, tmp_storage):
         """supersede 清的是整域：新 run 的检测结果换了，旧 facts 是对旧检测结果的分析，留着即脏数据。"""
         inference.append_detections(1, 2, [_frame(1.0)])
-        inference.write_facts(1, 2, [_seg()])
-        inference.write_debug_result(1, 2, {"run": 1})
+        inference.write_temporal(1, 2, [_seg()])
+        inference.write_label_probs(1, 2, _probs())
 
         assert inference.delete(1, 2) is True
         assert not _domain_dir(tmp_storage, 1, 2).exists()
@@ -464,9 +503,9 @@ class TestDomainSeam:
     def test_delete_step_takes_the_whole_domain_with_it(self, tmp_storage):
         """`delete_step` 删的是整个 step，本域三份产物一起没。"""
         inference.append_detections(1, 2, [_frame(1.0)])
-        inference.write_facts(1, 2, [_seg()])
+        inference.write_temporal(1, 2, [_seg()])
 
         assert tasks.delete_step(1, 2) is True
         assert inference.read_detections(1, 2) == []
-        assert inference.read_facts(1, 2) == []
+        assert inference.read_temporal(1, 2) == []
         assert not (tmp_storage / "1").exists()

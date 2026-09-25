@@ -1,10 +1,13 @@
-"""时序分析事实契约（L3 产出）。
+"""时序分析产出契约（L3）。
 
-两类事实按时间粒度分型，同落 `facts.jsonl`（一条一行）：
+两类事实按时间粒度分型，同落 `temporal.jsonl`（一条一行）：
 
-    EventFact    点  —— 某信号在某一帧上的电平
-    SegmentFact  区间 —— 一段时间里的一个动作 / 状态
-    Fact         两者的并，读写两侧的货币
+    TemporalEvent    点  —— 某信号在某一帧上的电平
+    TemporalSegment  区间 —— 一段时间里的一个动作 / 状态
+
+另有一份非事实的旁路产物，落 `label_probs.npz`：
+
+    LabelProbs       逐帧类别概率 —— 离线分割模型的原始输出，仅供可视化，不参与任何判断
 
 三条硬约束：
 
@@ -18,11 +21,13 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Union
+from typing import Any, Dict, Tuple
+
+import numpy as np
 
 
 @dataclass
-class EventFact:
+class TemporalEvent:
     """打点：某信号在某一帧上的电平。
 
     多信号靠不同 `signal` 名区分，不是类型枚举；同一算子一个 tick 可产多条。
@@ -37,7 +42,7 @@ class EventFact:
 
 
 @dataclass
-class SegmentFact:
+class TemporalSegment:
     """分段：一段时间里的一个动作 / 状态。
 
     闭区间 `[start, end]`，单帧段 `start == end`。合法性（有限数、start <= end、conf 值域）
@@ -52,5 +57,15 @@ class SegmentFact:
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
-# 读写两侧的货币：`read_facts` 出它的列表，`write_facts` 收它的序列。
-Fact = Union[EventFact, SegmentFact]
+@dataclass(frozen=True, eq=False)
+class LabelProbs:
+    """逐帧类别概率：离线分割模型在每帧上对各 label 的 softmax 输出。
+
+    `ts[i]` 与 `probs[i]` 同行；`labels[j]` 是 `probs[:, j]` 的类名，含背景类（如 `idle`）。
+    形状一致性（`len(ts) == probs.shape[0]`、`len(labels) == probs.shape[1]`）由产出侧校验，
+    本类不自检。`eq=False`：ndarray 字段不支持逐值 `==`。
+    """
+
+    ts: np.ndarray  # [T] float64，帧捕获 ts，与 detections.jsonl 位级相等
+    probs: np.ndarray  # [T, C] float，行为该帧的类别分布
+    labels: Tuple[str, ...]  # C 个类名，顺序即 probs 的列序

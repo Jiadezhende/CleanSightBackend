@@ -56,12 +56,12 @@ BUDGET = {
     "app.storage.tasks":        (set(), 0.20),   # stdlib only
     # inference 是子包，facade 同 hls：re-export 连带加载两个产物模块，故这条盯的是整个域。
     # `_detection` 出 FrameDetection → 吃 app.domain.detection（纯 stdlib dataclass），
-    # 这是 D1 允许的唯一一档 L1 依赖；`_temporal` 的货币 Fact 是纯 stdlib dataclass。
+    # 这是 D1 允许的 L1 依赖；`_temporal` 的货币 `LabelProbs` 同样带 numpy（npz 落盘）。
     "app.storage.inference":            (set(), 0.40),
     "app.storage.inference._detection": (set(), 0.40),
     "app.storage.inference._jsonl":     (set(), 0.40),   # stdlib only
     "app.storage.inference._layout":    (set(), 0.40),   # stdlib only
-    "app.storage.inference._temporal":  (set(), 0.40),   # stdlib only（Fact 不带 numpy）
+    "app.storage.inference._temporal":  (set(), 0.40),   # numpy（LabelProbs / npz）
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
     # 这条盯的是**整个域**的模块级依赖。cv2 必须留在 `_encode.write_mp4v` 的函数体内，
     # 塞回模块级会让这条连同 `app.storage.hls._encode` 一起红。

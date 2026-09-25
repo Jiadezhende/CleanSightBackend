@@ -9,16 +9,16 @@
         │
         ▼ preprocess(frames)    ← 输入预处理层（预留）：raw bbox 序列不一定能直接喂模型，
         │                          需张量化/归一化/时间降采样/定长编码的模型在此转换
-        ▼ segment(model_input)  ← 模型推理 + 解码为 SegmentFact
+        ▼ segment(model_input)  ← 模型推理 + 解码为 TemporalSegment
         │
-        ▼ List[SegmentFact]
+        ▼ List[TemporalSegment]
 
 约束：
 - `frames` 只读，不得原地修改；
 - 策略不访问存储 / ClientManager / CQ / 数据库（纯算法）；
-- 输出每条 `SegmentFact.producer` 必须等于本策略 `name`；`start <= end`、时间为有限数、
+- 输出每条 `TemporalSegment.producer` 必须等于本策略 `name`（= 类名）；`start <= end`、时间为有限数、
   `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。
-- 输入吃 `FrameDetection`、输出吐 `SegmentFact`（两者都在 `app.domain`，与在线同型），
+- 输入吃 `FrameDetection`、输出吐 `TemporalSegment`（两者都在 `app.domain`，与在线同型），
   不自定义中间数据壳。
 """
 
@@ -28,19 +28,16 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Sequence
 
 from app.domain.detection import FrameDetection
-from app.domain.fact import SegmentFact
+from app.domain.temporal import LabelProbs, TemporalSegment
 
 
 class OfflineSegmenter(ABC):
-    """离线全序列分割策略基类。"""
+    """离线全序列分割策略基类。构造参数全部来自 YAML `offline.params`。"""
 
-    def __init__(self, name: str, subscribes: Sequence[str]):
-        if not name:
-            raise ValueError("offline segmenter name is required")
-        if not subscribes:
-            raise ValueError("offline segmenter subscribes is required")
-        self.name = name
-        self.subscribes: List[str] = list(subscribes)
+    @property
+    def name(self) -> str:
+        """策略身份 = 类名，即产出 `TemporalSegment.producer`。"""
+        return type(self).__name__
 
     @abstractmethod
     def preprocess(self, frames: Sequence[FrameDetection]) -> Any:
@@ -53,15 +50,14 @@ class OfflineSegmenter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def segment(self, model_input: Any) -> List[SegmentFact]:
+    def segment(self, model_input: Any) -> List[TemporalSegment]:
         """消费 `preprocess` 的输出，做模型推理并解码为动作分段事实。"""
         raise NotImplementedError
 
-    def debug_result(self) -> Optional[dict]:
-        """可选：返回上一次 `segment()` 的逐帧调试产物（纯 dict），默认无。
+    def label_probs(self) -> Optional[LabelProbs]:
+        """可选旁路：上一次 `segment()` 的逐帧类别概率，仅供可视化，默认无。
 
-        产逐帧预测的策略可 override，返回 `{"frame_predictions": [...], "segments": [...]}`；
-        Runner 若拿到非 None，会补 task/step 落 `offline_debug.json`（见 runner.py）。
-        presence 型等无逐帧语义的策略保持默认 None → 不落该文件。
+        产逐帧概率的模型 override；Runner 拿到非 None 时先于 temporal.jsonl 落 `label_probs.npz`。
+        它不参与任何判断，也不是契约的一部分——规则型策略保持默认 None 即可。
         """
         return None

@@ -4,7 +4,7 @@
 - 出参直接是 `app.domain.detection.FrameDetection`（带 cq 写回句柄），不另立传输类型。
 
 均为进程内 dataclass（非 wire DTO），不背 Pydantic 校验。跨服务共享契约来自 `app.domain`：
-检测 `DetectorOutput` / `FrameDetection`、时序事实 `EventFact` / `SegmentFact`（`app.domain.fact`）、
+检测 `DetectorOutput` / `FrameDetection`、时序事实 `TemporalEvent` / `TemporalSegment`（`app.domain.temporal`）、
 告警 `app.domain.alarm`。
 """
 

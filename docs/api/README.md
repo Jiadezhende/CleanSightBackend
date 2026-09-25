@@ -10,13 +10,13 @@
 | 文件 | 前缀 | 内容 |
 |------|------|------|
 | [api.md](api.md) | `/api` | 统一任务入口：启动 / 终止一次 run |
-| [ai.md](ai.md) | `/ai` | 实时推理画面 WebSocket |
+| [ai.md](ai.md) | `/ai` | 实时推理画面 WebSocket + 推理结果（时序事实）读取 |
 | [task.md](task.md) | `/task` | 前端增量消息 + 告警历史 + 大屏在线/历史任务清单 |
 | [traceback.md](traceback.md) | `/traceback` | 任务 VOD playlist / 时间轴 |
 | [media.md](media.md) | `/media` | token 化媒体访问（段 / `{track}_init.mp4`） |
 | [health.md](health.md) | `/health` | 健康状态与监控统计 |
 | [admin.md](admin.md) | `/admin-f3m8` | 运维 Admin |
-| [lab.md](lab.md) | `/lab-f3m8` | 送标导出 + Label Studio |
+| [lab.md](lab.md) | `/lab-f3m8` | 送标导出 + Label Studio + 离线模型逐帧概率 |
 
 ## 通用约定
 
@@ -46,6 +46,13 @@
 
 `/api/start` 只接受 `task_id`（body）。
 
+### 推理结果读取端点：身份键与类型走 JSON body
+
+- 读取某个 step 推理产物的端点用 `POST` + JSON body，body 携带身份键 `task_id`、`step_id` 与选择项（`type`、`track` 等）；路径只表达资源类别，不带身份。
+- 同一资源类别再分形状时用 body 的 `type` 区分，不拆路径；取值与落盘判别字段同值（如 `/ai/temporal` 的 `type: "segment"`）。
+- 缺字段、类型不对、枚举值非法：**422**（FastAPI 请求校验，响应体是框架的 `{"detail": [...]}`，不是上表的业务错误形状）。
+- 存量例外（本约定之前的 GET 端点，不迁）：`/traceback/task/{task_id}/playlist.m3u8?step_id=`、`/traceback/task/{task_id}/timeline?step_id=`、`/lab-f3m8/download?task_id=&step_id=`。
+
 ### 错误模型
 
 业务异常经 FastAPI 全局 handler 映射为 HTTP（边界层 L3），响应体形如 `{"error": "...", "detail": "...", ...}`：
@@ -68,6 +75,7 @@
 ### 时间戳单位
 
 - 告警 `detected_at` / `resolved_at` / `ts`、追溯 `*_ms`：**epoch 毫秒**。
+- 例外：名字带 `media` 的毫秒字段（`media_ms`、`*_media_ms`、`media_duration_ms`、`media_offset_ms`）是**媒体刻度**——相对该轨首段起点、跳过录制停顿，与 `<video>.currentTime × 1000` 同轴，不是 epoch。
 - 段文件 `ts_us`：微秒。
 - 媒体 token 有效期：秒。
 
