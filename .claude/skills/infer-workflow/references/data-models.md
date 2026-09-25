@@ -4,11 +4,11 @@
 
 ```python
 # ── 检测（Detector 产出）── app.domain.detection
-Detection(bbox=[x1, y1, x2, y2], confidence=0.9, class_id=0, class_name="bubble",
-          extra={...})                          # mask/keypoints/extra 可选
+DetBox(bbox=[x1, y1, x2, y2], confidence=0.9, class_id=0, class_name="bubble",
+       extra={...})                             # extra 可选（单框派生量，不落盘）
 
-FrameDetections(                                # 一帧里某检测器的全部框，亦作推理最终输出
-    detections=[Detection(...), ...],
+DetectorOutput(                                 # 一个检测器 × 一帧的全部框
+    boxes=[DetBox(...), ...],
     metadata={"model": "yolo", "frame_shape": frame.shape},
     timestamp=ts,                               # = 帧捕获真值锚点（infer_batch 的 timestamps[i]）
     success=True, error=None,
@@ -33,7 +33,7 @@ RenderItem(bbox=[x1, y1, x2, y2], label="...", confidence=0.9, color=(B, G, R)) 
 
 > `metric` 由产出方**显式填**（`metric=AlarmMetric.XXX`），下游持久化直接读 `alarm.metric`，不靠文案反推。新检测点要新指标 → 先在 `AlarmMetric` 枚举补一项。
 
-> `Alarm.metadata` 里**别放阈值/required 之外的领域字段**当契约；派生量放 `Detection.extra` / `FrameDetections.metadata`。
+> `Alarm.metadata` 里**别放阈值/required 之外的领域字段**当契约；派生量放 `DetBox.extra` / `DetectorOutput.metadata`。
 
 > `mode`（REALTIME / SETTLEMENT）、`stage`、`seq`、`timestamp` 在落 alarm_log 时由持久化侧/环形缓冲**自动补**，**不要**写进 `Alarm`。
 

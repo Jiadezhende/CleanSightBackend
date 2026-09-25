@@ -15,10 +15,10 @@ description: "Create a new detection workflow for CleanSightBackend. Use this sk
 
 | 层 | 基类 | 实例 | 输入 → 输出 | 必实现 |
 |----|------|------|-----------|--------|
-| 流源 Detector | `Detector` / `YOLODetector` | 无状态，多 Client 共享 | 帧 → `FrameDetections` | `prepare_visualization_data`；YOLO 优先 override `infer_batch(frames, timestamps)` |
+| 流源 Detector | `Detector` / `YOLODetector` | 无状态，多 Client 共享 | 帧 → `DetectorOutput` | `prepare_visualization_data`；YOLO 优先 override `infer_batch(frames, timestamps)` |
 | 流算子 Operator | `Operator`（或 `GRUOperator`） | 每 Client 一个，持 `_sm` | 订阅流滑窗 → `(events, alarms)` | `analyze(windows)` 推 `_sm`、`judge()` 出结果；可选 `finalize()` |
 
-- **合并即真源**：analyze（量事实）+ judge（下判断）共享同一份 `self._sm`，不再有 EventFact 对象间传输、不再有双状态机同步。
+- **合并即真源**：analyze（量事实）+ judge（下判断）共享同一份 `self._sm`，不再有 TemporalEvent 对象间传输、不再有双状态机同步。
 - **身份两维正交**：`name` = 算子自身/输出身份（日志/告警归属）；`subscribes` = 输入流清单（**显式必填**，元素 = 上游 `detector.name`）。**算子名 ≠ 流名。**
 - **绑定**：`detector.name` = 流名 = `slide_window` key = 某算子 `subscribes` 里的元素。系统据此把流喂给订阅它的算子。
 
@@ -80,7 +80,7 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 - [ ] 选基类：YOLO → `YOLODetector`；无模型 → `Detector`
 - [ ] `name` 写死（= 产出流名）；实现 `prepare_visualization_data` 返回 `RenderSpec`
 - [ ] YOLO 优先 override `infer_batch(frames, timestamps)`（try 批量 + except 逐帧 fallback）
-- [ ] ⚠️ batch 与 fallback 的业务字段赋值逻辑一致；`timestamps[i]` 原样写入 `FrameDetections.timestamp`（**别自造时间戳**，否则多流 `_zip_by_ts` 漏帧）
+- [ ] ⚠️ batch 与 fallback 的业务字段赋值逻辑一致；`timestamps[i]` 原样写入 `DetectorOutput.timestamp`（**别自造时间戳**，否则多流 `_zip_by_ts` 漏帧）
 - [ ] ⚠️ `class_name` 取自模型 `result.names`，与训练类别名严格一致（不归一化）
 
 **Operator（流算子，analyze 推 `_sm` / judge 出告警）**

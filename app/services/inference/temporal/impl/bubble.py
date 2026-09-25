@@ -15,7 +15,7 @@ import numpy as np
 
 from app.services.inference.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.domain.detection import FrameDetections, FrameFeature
+from app.domain.detection import DetectorOutput, FrameDetection
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ _BYTETRACK_ARGS = SimpleNamespace(
 
 
 class _BBoxAdapter:
-    """将 List[Detection] 适配为 BYTETracker.update() 所需的接口对象。"""
+    """将 List[DetBox] 适配为 BYTETracker.update() 所需的接口对象。"""
 
     def __init__(self, detections):
         if detections:
@@ -95,7 +95,7 @@ class BubbleOperator(Operator):
             "alarming": False,
         }
 
-    def analyze(self, windows: List[FrameFeature]) -> None:
+    def analyze(self, windows: List[FrameDetection]) -> None:
         window = self.primary_window(windows)
         if not window:
             return
@@ -125,7 +125,7 @@ class BubbleOperator(Operator):
 
         return events, alarms
 
-    def _advance(self, window: List[FrameDetections]) -> None:
+    def _advance(self, window: List[DetectorOutput]) -> None:
         """游标推进：仅处理上次 tick 之后的新帧，驱动 ByteTrack 并记录 new_count。"""
         last_ts = self._sm["last_ts"]
         new_frames = [f for f in window if f.timestamp > last_ts]
@@ -139,7 +139,7 @@ class BubbleOperator(Operator):
         cutoff = window[-1].timestamp - self.window_seconds
 
         for frame in new_frames:
-            adapter = _BBoxAdapter(frame.detections)
+            adapter = _BBoxAdapter(frame.boxes)
             out = self._sm["tracker"].update(adapter)
 
             if len(out) > 0:

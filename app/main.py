@@ -115,9 +115,9 @@ app.include_router(admin.router)  # 运维 Admin API（/admin-f3m8/*）
 app.include_router(algorithm.router)  # 算法 API（/algorithm/*，无状态纯计算）
 # 静态资产路径由 __file__ 推导，**不用 CWD 相对路径**：从仓库根之外的目录启动后端时，
 # "app/static/..." 会解析不到，两个 UI 直接 404（挂载期不报错，静默失败）。
+# 一个挂载出全部静态资产：/ui-f3m8/admin/、/ui-f3m8/lab/ 两页 + /ui-f3m8/vendor/ 共用前端库。
 _STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/admin-f3m8/ui", StaticFiles(directory=_STATIC_DIR / "admin", html=True), name="admin-ui")
-app.mount("/lab-f3m8/ui", StaticFiles(directory=_STATIC_DIR / "lab", html=True), name="lab-ui")
+app.mount("/ui-f3m8", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
 
 
 # ============================================================================

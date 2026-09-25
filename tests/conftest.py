@@ -20,13 +20,13 @@ def make_cq():
 
 
 @pytest.fixture
-def make_detection():
-    return factories.make_detection
+def make_det_box():
+    return factories.make_det_box
 
 
 @pytest.fixture
-def make_frame_inference():
-    return factories.make_frame_inference
+def make_frame_detection():
+    return factories.make_frame_detection
 
 
 # ---- 真正跨文件共享的 setup ----

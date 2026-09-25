@@ -5,7 +5,7 @@
 """
 
 from app.services.inference.detection.detector import YOLODetector
-from app.domain.detection import FrameDetections
+from app.domain.detection import DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 
@@ -27,9 +27,9 @@ class BendingDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = []
-        for det in output.detections:
+        for det in output.boxes:
             if det.class_name == "bending_debug_box":
                 color = (255, 0, 255)
             elif det.class_name == "bent":
@@ -44,7 +44,7 @@ class BendingDetector(YOLODetector):
                 color=color,
             ))
 
-        is_bent = any(d.class_name == "bent" for d in output.detections)
+        is_bent = any(d.class_name == "bent" for d in output.boxes)
         if is_bent:
             status_text = "BENT"
             status_color = (0, 0, 255)

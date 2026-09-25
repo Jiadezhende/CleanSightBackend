@@ -3,14 +3,14 @@
 本文件保持“单策略文件自包含”：
     - clean 专属特征转换（模块级纯函数）；
     - 三种离线模型结构；
-    - 模型输出到 SegmentFact 的解码逻辑。
+    - 模型输出到 TemporalSegment 的解码逻辑。
 
 输入:
-    OfflineRunner 从 FeatureStore.load(task_id, step_id) 读取 List[FrameFeature]
+    OfflineRunner 从 inference.read_detections(task_id, step_id) 读取 List[FrameDetection]
     （帧级、多流已在 by_source 内对齐、按 ts 升序）。
 
 输出:
-    List[SegmentFact]，由 Runner 校验并幂等写入 FactLedger。
+    List[TemporalSegment]，由 Runner 校验并幂等写入 temporal.jsonl。
 
 注意:
     这里不包含训练流程。训练仍在独立 offline-model 仓内完成，后端只负责加载
@@ -27,8 +27,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from app.domain.detection import Detection, FrameFeature
-from app.services.inference.types import SegmentFact
+from app.domain.detection import DetBox, FrameDetection
+from app.domain.temporal import LabelProbs, TemporalSegment
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
@@ -126,18 +126,18 @@ class ModelInput:
 
 
 def build_base_features(
-    frames: Sequence[FrameFeature],
+    frames: Sequence[FrameDetection],
     fps: float,
     frame_width: int = 640,
     frame_height: int = 480,
 ) -> ModelInput:
-    """把 clean 帧级 FrameFeature 序列转换成 v2 固定维（113）时序特征。
+    """把 clean 帧级 FrameDetection 序列转换成 v2 固定维（113）时序特征。
 
-    每帧 `FrameFeature.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
+    每帧 `FrameDetection.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
     """
     frame_width = max(1, int(frame_width))
     frame_height = max(1, int(frame_height))
-    timestamps = [ff.ts for ff in frames]  # FrameFeature.ts 已在 store.load 边界统一 float
+    timestamps = [ff.ts for ff in frames]  # FrameDetection.ts 已在 store.load 边界统一 float
     frame_count = len(frames)
     if frame_count <= 0:
         return ModelInput(features=[], feature_names=base_feature_names(), timestamps=[], fps=float(fps))
@@ -165,11 +165,11 @@ def _finite_matrix(values: np.ndarray) -> np.ndarray:
 
 
 def _collect_object_arrays(
-    frames: Sequence[FrameFeature], frame_width: int, frame_height: int
+    frames: Sequence[FrameDetection], frame_width: int, frame_height: int
 ) -> Dict[str, List[np.ndarray]]:
     """把每帧检测框按目标类别归拢成 {obj: [每检测框一个 [T,5] 稀疏数组]}。
 
-    每帧遍历 `FrameFeature.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
+    每帧遍历 `FrameDetection.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
     """
     frame_count = len(frames)
     out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
@@ -178,7 +178,7 @@ def _collect_object_arrays(
         width = max(1, int(ff.frame_width or frame_width))
         height = max(1, int(ff.frame_height or frame_height))
         for fd in ff.by_source.values():
-            for det in fd.detections:
+            for det in fd.boxes:
                 obj = OBJECT_ALIASES.get(str(det.class_name))
                 if obj is None:
                     continue
@@ -208,13 +208,13 @@ def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
     return max(1.0 / float(np.median(np.asarray(deltas, dtype=np.float32))), 1e-6)
 
 
-def _bbox_to_center_area(det: Detection, width: int, height: int) -> Tuple[float, float, float]:
+def _bbox_to_center_area(det: DetBox, width: int, height: int) -> Tuple[float, float, float]:
     """xyxy 框空间归一化后返回 (中心 cx, 中心 cy, 面积)，坐标/面积均截到 [0,1]。"""
     if len(det.bbox) < 4:
         return 0.0, 0.0, 0.0
     x1, y1, x2, y2 = [float(v) for v in det.bbox[:4]]
 
-    # FeatureStore 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
+    # detections.jsonl 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
     # 否则按画面尺寸做空间归一化。
     normalized = max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5
     if normalized:
@@ -542,7 +542,7 @@ def add_business_priors(model_input: ModelInput) -> ModelInput:
 
 
 class _CleanTorchSegmenter(OfflineSegmenter):
-    """clean 模型策略基类：torch 模型加载 + 推理 + SegmentFact 解码。
+    """clean 模型策略基类：torch 模型加载 + 推理 + TemporalSegment 解码。
 
     特征工程是模块级纯函数：`preprocess` 调 build_base_features 得基础 v2（113 维）；
     需叠加模型专属 recipe 的子类**覆盖 preprocess**，用 `super().preprocess()` 取基础特征后
@@ -554,15 +554,12 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
     def __init__(
         self,
-        name: str,
-        subscribes: Sequence[str],
         model_path: str | None = None,
         min_duration_s: float = 0.2,
         fps: float = 7.5,
         frame_width: int = 640,
         frame_height: int = 480,
     ):
-        super().__init__(name, subscribes)
         self.model_path = model_path
         self.min_duration_s = max(0.0, float(min_duration_s))
         self.fps = float(fps)
@@ -570,18 +567,18 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self.frame_height = max(1, int(frame_height))
         self._model = None
         self._normalizer: Tuple[Any, Any] | None = None
-        self._last_result: dict | None = None
+        self._last_probs: LabelProbs | None = None
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
-        """帧级 FrameFeature 序列 → 基础 v2 特征（113 维）。
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
+        """帧级 FrameDetection 序列 → 基础 v2 特征（113 维）。
 
         多流按帧合并折进 build_base_features（`frames` 已按 ts 升序、各流在 by_source 内对齐）。
         需叠加模型专属 recipe 的子类覆盖本方法，用 `super().preprocess()` 取基础特征后再变换。
         """
         return build_base_features(frames, self.fps, self.frame_width, self.frame_height)
 
-    def segment(self, model_input: ModelInput) -> List[SegmentFact]:
-        """跑模型得到逐帧标签，解码成 SegmentFact；未配 model_path 硬失败，不做规则降级。"""
+    def segment(self, model_input: ModelInput) -> List[TemporalSegment]:
+        """跑模型得到逐帧标签，解码成 TemporalSegment；未配 model_path 硬失败，不做规则降级。"""
         if model_input.frame_count == 0:
             return []
 
@@ -591,30 +588,24 @@ class _CleanTorchSegmenter(OfflineSegmenter):
                 "本地回环请使用 mock.BrushRulesSegmenter"
             )
 
-        labels, confs = self._predict_with_model(model_input)
+        probs = self._predict_with_model(model_input)
+        labels = probs.argmax(axis=1).astype("int64").tolist()
+        confs = probs.max(axis=1).astype("float32").tolist()
 
         segments = self._labels_to_segments(model_input.timestamps, labels, confs)
-        self._last_result = {
-            "model_version": self.model_version,
-            "model_class": type(self).__name__,
-            "feature_method": self.feature_method,
-            "feature_version": model_input.feature_version,
-            "feature_dim": model_input.feature_dim,
-            "frame_count": model_input.frame_count,
-            "frame_predictions": [
-                {"ts": ts, "label": ACTION_LABELS[label], "conf": round(float(conf), 5)}
-                for ts, label, conf in zip(model_input.timestamps, labels, confs)
-            ],
-            "segments": [s.to_json() for s in segments],
-        }
+        self._last_probs = LabelProbs(
+            ts=np.asarray(model_input.timestamps, dtype=np.float64),
+            probs=probs,
+            labels=tuple(ACTION_LABELS),
+        )
         return segments
 
-    def debug_result(self) -> dict | None:
-        """返回最近一次 segment() 的逐帧预测/分段调试快照（未跑过为 None）。"""
-        return self._last_result
+    def label_probs(self) -> LabelProbs | None:
+        """最近一次 segment() 的逐帧 softmax（未跑过为 None），供可视化旁路落盘。"""
+        return self._last_probs
 
-    def _predict_with_model(self, model_input: ModelInput) -> Tuple[List[int], List[float]]:
-        """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 (argmax 标签, 置信度)。"""
+    def _predict_with_model(self, model_input: ModelInput) -> np.ndarray:
+        """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 softmax `[T, len(ACTION_LABELS)]`。"""
         import numpy as np
         import torch
 
@@ -631,9 +622,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         with torch.no_grad():
             logits = self._model(x)[0].transpose(0, 1)
             probs = torch.softmax(logits, dim=-1).cpu().numpy()
-        labels = probs.argmax(axis=1).astype("int64").tolist()
-        confs = probs.max(axis=1).astype("float32").tolist()
-        return labels, confs
+        return probs.astype(np.float32)
 
     def _load_model(self, model_input: ModelInput, class_count: int) -> None:
         """加载 .pt checkpoint 并校验 feature_names/feature_version 与后端输入一致，取出 normalizer。"""
@@ -676,9 +665,9 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
     def _labels_to_segments(
         self, timestamps: Sequence[float], labels: Sequence[int], confs: Sequence[float]
-    ) -> List[SegmentFact]:
+    ) -> List[TemporalSegment]:
         """把逐帧标签合并成连续动作段（跳过 idle、过滤短于 min_duration_s 的段）。"""
-        segments: List[SegmentFact] = []
+        segments: List[TemporalSegment] = []
         cur_label: int | None = None
         cur_start = cur_end = 0.0
         cur_conf = 0.0
@@ -687,8 +676,8 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         def flush() -> None:
             nonlocal cur_label, cur_conf, cur_count
             if cur_label is not None and cur_label != 0 and (cur_end - cur_start) >= self.min_duration_s:
-                segments.append(SegmentFact(
-                    source=self.name,
+                segments.append(TemporalSegment(
+                    producer=self.name,
                     label=ACTION_LABELS[cur_label],
                     start=round(cur_start, 6),
                     end=round(cur_end, 6),
@@ -911,7 +900,7 @@ class CleanASFormerSegmenter(_CleanTorchSegmenter):
     model_version = "clean_asformer_v1"
     feature_method = "business_priors"
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         return add_business_priors(super().preprocess(frames))
 
     def _build_model(self, in_dim: int, class_count: int):
@@ -928,7 +917,7 @@ class CleanBiGRUSegmenter(_CleanTorchSegmenter):
     model_version = "clean_bigru_v1"
     feature_method = "window_stats+business_priors"
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         return add_business_priors(add_centered_window_stats(super().preprocess(frames)))
 
     def _build_model(self, in_dim: int, class_count: int):

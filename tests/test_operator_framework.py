@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from factories import make_bare_cq, make_frame_detections, make_frame_feature
+from factories import make_bare_cq, make_detector_output, make_frame_detection
 from app.services.inference.config import load_stage_config
 from app.domain.alarm import Alarm, AlarmType
 from app.services.inference.stage_factory import StageFactory
@@ -13,7 +13,7 @@ from app.services.inference.temporal.operator import Operator
 
 
 def _out(ts: float, n: int = 1):
-    return make_frame_detections(n=n, class_name="x", ts=ts)
+    return make_detector_output(n=n, class_name="x", ts=ts)
 
 
 class _NoopOperator(Operator):
@@ -53,7 +53,7 @@ def test_factory_injects_subscribes_and_metric_keys():
 
 
 def test_clip_to_receptive_field():
-    win = [make_frame_feature(source="s", ts=t) for t in [0.0, 1.0, 2.0, 3.0, 4.0]]  # latest=4.0
+    win = [make_frame_detection(source="s", ts=t) for t in [0.0, 1.0, 2.0, 3.0, 4.0]]  # latest=4.0
     op_small = _NoopOperator(name="a", subscribes=["s"], window_seconds=2.0)
     op_big = _NoopOperator(name="b", subscribes=["s"], window_seconds=5.0)
     # 感受野 2s → 保留 ts>=2.0：2,3,4
@@ -69,19 +69,19 @@ def test_primary_window_projects_subscribed_source():
     op = _NoopOperator(name="p", subscribes=["a"], window_seconds=10.0)
     # 每帧 by_source 同时含 a/b（写回口已对齐）；primary_window 只投影订阅的 a
     win = [
-        make_frame_feature(ts=t, by_source={"a": _out(t), "b": _out(t, n=2)})
+        make_frame_detection(ts=t, by_source={"a": _out(t), "b": _out(t, n=2)})
         for t in [1.0, 2.0, 3.0]
     ]
     projected = op.primary_window(win)
     assert [fd.timestamp for fd in projected] == [1.0, 2.0, 3.0]
-    assert all(fd.detections[0].class_name == "x" for fd in projected)
+    assert all(fd.boxes[0].class_name == "x" for fd in projected)
 
 
 def test_primary_window_skips_frames_missing_source():
     op = _NoopOperator(name="p", subscribes=["a"], window_seconds=10.0)
     win = [
-        make_frame_feature(ts=1.0, by_source={"a": _out(1.0)}),
-        make_frame_feature(ts=2.0, by_source={"b": _out(2.0)}),  # 无 a → 跳过
+        make_frame_detection(ts=1.0, by_source={"a": _out(1.0)}),
+        make_frame_detection(ts=2.0, by_source={"b": _out(2.0)}),  # 无 a → 跳过
     ]
     assert [fd.timestamp for fd in op.primary_window(win)] == [1.0]
 
@@ -100,7 +100,7 @@ def test_subscribes_required():
 def test_stream_buffer_floor_10s():
     cq = make_bare_cq()
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
-        cq.push_detection(make_frame_feature(source="x", ts=t))
+        cq.push_detection(make_frame_detection(source="x", ts=t))
     # 未配感受野 → 底线 10s：cutoff=20-10=10 → 保留 10,15,20
     win = cq.get_slide_window()
     assert [f.ts for f in win] == [10.0, 15.0, 20.0]
@@ -110,7 +110,7 @@ def test_stream_buffer_extends_with_receptive_field():
     cq = make_bare_cq()
     cq.set_stream_windows({"x": 30.0})  # 感受野 30s > 底线
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
-        cq.push_detection(make_frame_feature(source="x", ts=t))
+        cq.push_detection(make_frame_detection(source="x", ts=t))
     # retain=max(10,30)=30：cutoff=20-30=-10 → 全保留
     win = cq.get_slide_window()
     assert [f.ts for f in win] == [0.0, 5.0, 10.0, 15.0, 20.0]
@@ -139,7 +139,7 @@ def test_per_operator_isolation():
     from app.services.inference.temporal.actor import ClientTemporalActor
 
     cq = MagicMock()
-    cq.get_slide_window.return_value = [make_frame_feature(source="s", ts=1.0)]
+    cq.get_slide_window.return_value = [make_frame_detection(source="s", ts=1.0)]
     captured: List[Alarm] = []
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)

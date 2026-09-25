@@ -5,7 +5,7 @@
 """
 
 from app.services.inference.detection.detector import YOLODetector
-from app.domain.detection import FrameDetections
+from app.domain.detection import DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 
 
@@ -27,9 +27,9 @@ class BubbleDetector(YOLODetector):
             enabled=enabled,
         )
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = []
-        for det in output.detections:
+        for det in output.boxes:
             color = (255, 0, 255) if det.class_name == "bubble_debug_box" else (0, 255, 255)
             items.append(RenderItem(
                 bbox=det.bbox,
@@ -38,7 +38,7 @@ class BubbleDetector(YOLODetector):
                 color=color,
             ))
 
-        count = len(output.detections)
+        count = len(output.boxes)
         if count > 0:
             status_text = f"Bubbles: {count}"
             status_color = (0, 165, 255) if count > 5 else (0, 255, 255)

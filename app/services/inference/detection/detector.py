@@ -15,7 +15,7 @@ from typing import Any, List
 
 import numpy as np
 
-from app.domain.detection import Detection, FrameDetections
+from app.domain.detection import DetBox, DetectorOutput
 from app.domain.render import RenderSpec
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class Detector(ABC):
     """无状态推理检测器基类。
 
     职责：
-    - 执行单帧或批量 GPU 推理，输出标准化 FrameDetections
+    - 执行单帧或批量 GPU 推理，输出标准化 DetectorOutput
     - 准备可视化数据（检测框、标签、状态栏文本等）
 
     不持有任何 per-client 状态。同一实例被所有 client 共享。
@@ -41,23 +41,23 @@ class Detector(ABC):
         self,
         frames: List[np.ndarray],
         timestamps: List[float],
-    ) -> List[FrameDetections]:
+    ) -> List[DetectorOutput]:
         """批量推理（唯一推理入口）。
 
         Args:
             frames: BGR 图像列表
             timestamps: 各帧的帧捕获时间戳（真值锚点，源自 Frame.timestamp）。
                 实现须把 timestamps[i] 原样写入 frames[i] 对应的
-                FrameDetections.timestamp——写回口据此物化 FrameFeature（帧级多流对齐），
-                帧窗算子用 FrameFeature.ts 裁窗、用 FrameDetections.timestamp 推进游标，
+                DetectorOutput.timestamp——写回口据此物化 FrameDetection（帧级多流对齐），
+                帧窗算子用 FrameDetection.ts 裁窗、用 DetectorOutput.timestamp 推进游标，
                 二者须同源同值；detector 不得自造时间戳（否则内部对齐错乱）。
 
         Returns:
-            List[FrameDetections]：与 frames 一一对应
+            List[DetectorOutput]：与 frames 一一对应
         """
 
     @abstractmethod
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         """根据检测输出准备可视化数据。
 
         Args:
@@ -77,7 +77,7 @@ class YOLODetector(Detector):
     消除各 Detector 子类的重复样板代码。
 
     子类只需实现 prepare_visualization_data()。
-    如需自定义输出（如分割 mask），可 override _adapt_output()。
+    如需自定义输出，可 override _adapt_output()。
     """
 
     def __init__(
@@ -123,10 +123,10 @@ class YOLODetector(Detector):
 
     def _adapt_output(
         self, raw_output: Any, frame: np.ndarray, timestamp: float
-    ) -> FrameDetections:
-        """将 YOLO Results 转换为 FrameDetections。
+    ) -> DetectorOutput:
+        """将 YOLO Results 转换为 DetectorOutput。
 
-        子类可 override 以支持自定义输出格式（如分割 mask、关键点等）。
+        子类可 override 以支持自定义输出格式。
         """
         detections = []
         try:
@@ -138,7 +138,7 @@ class YOLODetector(Detector):
                     for box in boxes:
                         xyxy = box.xyxy[0]
                         cls = int(box.cls[0])
-                        detections.append(Detection(
+                        detections.append(DetBox(
                             bbox=[int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
                             confidence=float(box.conf[0]),
                             class_id=cls,
@@ -147,16 +147,16 @@ class YOLODetector(Detector):
         except Exception as e:
             logger.error("[%s] Output adaptation failed: %s", self.name, e, exc_info=True)
 
-        return FrameDetections(
-            detections=detections,
-            metadata={"model": "yolo"},  # 帧分辨率上移 FrameInference.frame_width/height，不再逐检测器塞
+        return DetectorOutput(
+            boxes=detections,
+            metadata={"model": "yolo"},  # 帧分辨率上移 FrameDetection.frame_width/height，不再逐检测器塞
             timestamp=timestamp,
         )
 
     def _run_yolo_batch(
         self, frames: List[np.ndarray], timestamps: List[float]
-    ) -> List[FrameDetections]:
-        """批量 YOLO 推理。timestamps[i] 为帧捕获真值锚点，写入对应 FrameDetections。"""
+    ) -> List[DetectorOutput]:
+        """批量 YOLO 推理。timestamps[i] 为帧捕获真值锚点，写入对应 DetectorOutput。"""
         self._ensure_model_loaded()
         # ultralytics 无条件 mkdir(save_dir)（即便 save=False），project/name/exist_ok
         # 把这个空目录钉进已 gitignore 的 .ultralytics 并复用同一个，避免污染仓库根与
@@ -177,7 +177,7 @@ class YOLODetector(Detector):
         self,
         frames: List[np.ndarray],
         timestamps: List[float],
-    ) -> List[FrameDetections]:
+    ) -> List[DetectorOutput]:
         """批量 YOLO 推理（唯一推理入口）。
 
         整批推理失败时逐帧返回 error 结果，仍保留各帧捕获 ts（不自造时间戳）。
@@ -192,8 +192,8 @@ class YOLODetector(Detector):
                 "[%s] Batch inference failed: %s", self.name, e, exc_info=True,
             )
             return [
-                FrameDetections(
-                    detections=[],
+                DetectorOutput(
+                    boxes=[],
                     metadata={"error": str(e)},
                     timestamp=ts,
                     success=False,

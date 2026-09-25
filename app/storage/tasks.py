@@ -9,9 +9,9 @@ task/step 目录域 —— **把 step 目录当整体看**的那三件事：有�
 落盘结构（产物按域隔离，step 根下只有域目录、没有文件）：
 
     {root}/{task_id}/{step_id}/
-      hls/       段 / init / playlist / sidecar / metadata
-      features/  features.jsonl / facts.jsonl
-      lab/       送标与导出的临时件（用完即删，残留随 step TTL 回收）
+      hls/        段 / init / playlist / sidecar / metadata
+      inference/  detections.jsonl / temporal.jsonl / label_probs.npz
+      lab/        送标与导出的临时件（用完即删，残留随 step TTL 回收）
 
     list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按活动时间降序
     list_step_ids(task_id)    该 task 下的 step id，升序
@@ -131,7 +131,7 @@ def delete_step(task_id: int, step_id: int) -> bool:
     **只执行，不判断该不该删**：「重启 supersede」与「TTL 到期」两个判断分别留在
     `persistence/manager` 与 `persistence/workers/cleanup_worker`。
 
-    **它删的是整个 step，不是某一个域**：`hls/`、`features/`、`lab/` 一起消失。要只删一个
+    **它删的是整个 step，不是某一个域**：`hls/`、`inference/`、`lab/` 一起消失。要只删一个
     域，到那个域自己的模块里找。
 
     **不加锁（本层零锁）**：与该 step 的写之间不重叠，靠调用侧把两者提交到同一条

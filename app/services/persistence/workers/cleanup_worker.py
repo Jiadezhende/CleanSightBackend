@@ -67,14 +67,14 @@ class StorageCleanupWorker:
 
         ## 为什么不再读 `metadata.json` 的 `updated_at`
 
-        产物已按域隔离（`{step}/hls/` / `features/` / `lab/`），`metadata.json` 随之落进
+        产物已按域隔离（`{step}/hls/` / `inference/` / `lab/`），`metadata.json` 随之落进
         `{step}/hls/`。原来的 `glob("*/*/metadata.json")` 匹配不到它，表现是**新数据永不
         回收、老数据照常回收**——单向漏盘且无任何日志。改用目录 mtime 后对平铺与分域两种
-        布局一视同仁，同时消解「只有 features.jsonl、没有 HLS 段的 step 永不回收」那类泄漏。
+        布局一视同仁，同时消解「只有 detections.jsonl、没有 HLS 段的 step 永不回收」那类泄漏。
 
         ## 为什么 `{step}` 的 mtime 是创建时间的好代理
 
-        `{step}/` 的直接子项只有 `hls/` / `features/` / `lab/` 三个域目录，目录 mtime 只在
+        `{step}/` 的直接子项只有 `hls/` / `inference/` / `lab/` 三个域目录，目录 mtime 只在
         **增删直接子项**时变。段落盘动的是 `hls/` 的 mtime，`{step}/` 纹丝不动。
         （Linux + Python 3.11 拿不到真正的创建时间：`st_birthtime` 不存在，`st_ctime` 两平台
         语义不同，都不能当创建时间用。）

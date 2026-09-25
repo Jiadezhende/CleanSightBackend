@@ -167,7 +167,7 @@ def delete(task_id: int, step_id: int) -> bool:
         上一代」，抛出去只会把一次录制整个葬掉）。
 
     **只执行，不判断该不该删**：「这是不是新一代的首次写入」是 run 生命周期语义，归
-    `recording`。**只删本域**：同 step 的 `features/` 与 `lab/` 一个字节都不碰；域目录本身
+    `recording`。**只删本域**：同 step 的 `inference/` 与 `lab/` 一个字节都不碰；域目录本身
     一起删，下次 `insert_segment` 的 `create=True` 会重建。
 
     **不加锁**：与 `insert_segment` 同一前提（见上方「并发」）。

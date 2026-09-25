@@ -38,7 +38,7 @@ from typing import Optional, Tuple
 
 # step 目录下的产物域子目录 —— 封闭集合，唯一真源。域名属于「布局」归本包，产物文件名
 # 属于「内容」归各域自己。新增一个域要改这里，这是有意的。
-DOMAINS: Tuple[str, ...] = ("hls", "features", "lab")
+DOMAINS: Tuple[str, ...] = ("hls", "inference", "lab")
 
 # (settings.storage_dir 原始值, 解析后的绝对路径)
 _root_cache: Optional[Tuple[str, Path]] = None

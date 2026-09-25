@@ -54,9 +54,14 @@ BUDGET = {
     "app.storage":              (set(), 0.20),
     "app.storage._root":        (set(), 0.20),   # stdlib only
     "app.storage.tasks":        (set(), 0.20),   # stdlib only
-    # feature 出 FrameFeature → 吃 app.domain（numpy 随 Detection.mask 的标注进来）。
-    # 这是 D1 允许的唯一一档 L1 依赖，上限按 app.domain 的量级加余量。
-    "app.storage.feature":      (set(), 0.40),
+    # inference 是子包，facade 同 hls：re-export 连带加载两个产物模块，故这条盯的是整个域。
+    # `_detection` 出 FrameDetection → 吃 app.domain.detection（纯 stdlib dataclass），
+    # 这是 D1 允许的 L1 依赖；`_temporal` 的货币 `LabelProbs` 同样带 numpy（npz 落盘）。
+    "app.storage.inference":            (set(), 0.40),
+    "app.storage.inference._detection": (set(), 0.40),
+    "app.storage.inference._jsonl":     (set(), 0.40),   # stdlib only
+    "app.storage.inference._layout":    (set(), 0.40),   # stdlib only
+    "app.storage.inference._temporal":  (set(), 0.40),   # numpy（LabelProbs / npz）
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
     # 这条盯的是**整个域**的模块级依赖。cv2 必须留在 `_encode.write_mp4v` 的函数体内，
     # 塞回模块级会让这条连同 `app.storage.hls._encode` 一起红。
@@ -114,7 +119,7 @@ BUDGET = {
 # 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.database` / `app.models`
 # ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
-    # app.domain：内存数据契约（Frame / FrameFeature），本层的入参出参就是它们
+    # app.domain：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
     "app/storage": ("app.storage", "app.domain", "app.settings"),
     # 算法层：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`

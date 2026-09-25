@@ -7,7 +7,7 @@ actor 由 InferenceManager 在 start_workflow() 时创建，在 stop_workflow() 
 - 注册该 client 所有流算子 Operator（每个 Operator 自带共享状态机 self._sm）
 - 按固定间隔（tick_interval）执行：按 subscribes 收集各订阅流 → operator.analyze 推进状态
   → operator.judge 出告警；per-operator 异常隔离，一个算子炸不影响同 tick 其余
-- 告警 → persistence + ClientQueues.alarm_log；事实是离线概念（FeatureStore 特征 + 离线 worker）
+- 告警 → persistence + ClientQueues.alarm_log；事实是离线概念（detections.jsonl + 离线 worker）
 - 在 finalize_and_stop() 时收集 operator 结算告警
 """
 
@@ -100,7 +100,7 @@ class ClientTemporalActor:
         all_events: List[str] = []
         all_alarms: List[Alarm] = []
 
-        # 帧窗快照（List[FrameFeature]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
+        # 帧窗快照（List[FrameDetection]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
         windows = self._cq.get_slide_window()
         for op in self._operators:
             try:
