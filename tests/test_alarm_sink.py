@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.services.inference.temporal import alarm_sink
+from app.services.inference.online.temporal import alarm_sink
 
 
 def test_persist_alarms_reads_baked_stage(monkeypatch):

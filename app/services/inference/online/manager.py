@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
-from .config import FALLBACK_STAGE
+from app.services.inference.config import FALLBACK_STAGE
 from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
 
@@ -112,8 +112,8 @@ class InferenceManager:
         """
         if self._stage_configs is None:
             try:
-                from .stage_factory import StageFactory
-                from .config import load_stage_config
+                from app.services.inference.stage_factory import StageFactory
+                from app.services.inference.config import load_stage_config
 
                 config = load_stage_config()
                 factory = StageFactory(config)
@@ -300,8 +300,8 @@ class InferenceManager:
         # 初始化全局映射（均由 YAML 驱动）：
         #   task_name → AlarmMetric（实时信号指标）
         #   stage 主键(step_id) → alias（写告警 step_name + 可视化叠字）
-        from .stage_factory import StageFactory
-        from .config import load_stage_config
+        from app.services.inference.stage_factory import StageFactory
+        from app.services.inference.config import load_stage_config
         from .naming import _set_task_metric_map, _set_stage_alias_map
         _factory = StageFactory(load_stage_config())
         _set_task_metric_map(_factory.build_task_metric_map())

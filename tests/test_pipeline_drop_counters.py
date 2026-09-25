@@ -10,7 +10,7 @@ import time
 from unittest.mock import MagicMock
 
 from factories import make_bare_cq, make_frame
-from app.services.inference.detection.dispatcher import StageAwareDispatcher
+from app.services.inference.online.detection.dispatcher import StageAwareDispatcher
 from app.utils.pressure import PRESSURE_LOGGER_NAME
 
 

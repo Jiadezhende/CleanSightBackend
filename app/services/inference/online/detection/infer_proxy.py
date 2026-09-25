@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from app.domain.detection import FrameDetection
-from app.services.inference.types import DetectionTask
+from app.services.inference.online.types import DetectionTask
 from .stage_worker import run_stages
 from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 

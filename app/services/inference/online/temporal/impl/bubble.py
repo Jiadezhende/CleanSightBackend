@@ -13,7 +13,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from app.services.inference.temporal.operator import Operator
+from app.services.inference.online.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
 from app.domain.detection import DetectorOutput, FrameDetection
 

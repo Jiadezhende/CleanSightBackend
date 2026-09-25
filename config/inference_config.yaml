@@ -26,14 +26,14 @@ stages:
     alias: LEAK
     detectors:
       - name: bubble
-        class: app.services.inference.detection.impl.bubble.BubbleDetector
+        class: app.services.inference.online.detection.impl.bubble.BubbleDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
           conf_threshold: 0.1
           iou_threshold: 0.45
           enabled: true
       - name: bending
-        class: app.services.inference.detection.impl.bending.BendingDetector
+        class: app.services.inference.online.detection.impl.bending.BendingDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bend-best.pt
           conf_threshold: 0.1
@@ -43,14 +43,14 @@ stages:
       - name: bubble_leak
         subscribes: [bubble]
         realtime: true               # 实时信号，纳入 signals_10s
-        class: app.services.inference.temporal.impl.bubble.BubbleOperator
+        class: app.services.inference.online.temporal.impl.bubble.BubbleOperator
         params:
           window_seconds: 3.0          # 感受野（秒）= 出生率滑窗时长
           birth_rate_threshold: 0.5    # 新气泡出现率阈值（新气泡数/窗口帧数）
       - name: bending_check
         subscribes: [bending]
         realtime: false              # 结算告警，不纳入 signals_10s
-        class: app.services.inference.temporal.impl.bending.BendingOperator
+        class: app.services.inference.online.temporal.impl.bending.BendingOperator
         params:
           debounce_frames: 5           # 状态切换去抖帧数
           required_bend_actions: 4     # 合格所需最少弯曲次数
@@ -62,14 +62,14 @@ stages:
     alias: CLEAN
     detectors:
       - name: clean_large       # 大目标组：手 / scope_control_body / scope_mid_section
-        class: app.services.inference.detection.impl.clean.CleanLargeDetector
+        class: app.services.inference.online.detection.impl.clean.CleanLargeDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-large-best.pt
           conf_threshold: 0.25
           iou_threshold: 0.45
           enabled: true
       - name: clean_small       # 小目标组：syringe / air_gun / scope_distal_end
-        class: app.services.inference.detection.impl.clean.CleanSmallDetector
+        class: app.services.inference.online.detection.impl.clean.CleanSmallDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-small-best.pt
           conf_threshold: 0.25
@@ -79,7 +79,7 @@ stages:
       - name: clean_monitor
         subscribes: [clean_large, clean_small]
         realtime: true               # 实时信号，纳入 signals_10s
-        class: app.services.inference.temporal.impl.clean.CleanOperator
+        class: app.services.inference.online.temporal.impl.clean.CleanOperator
         params:
           window_seconds: 10.0
           # 模型契约帧率：入模前把 ~inference_fps 的窗口按 ts 重采样到此帧率再喂模型。
@@ -115,7 +115,7 @@ stages:
     alias: MOCK
     detectors:
       - name: mock
-        class: app.services.inference.detection.impl.mock.MockDetector
+        class: app.services.inference.online.detection.impl.mock.MockDetector
         params:
           brightness_threshold: 0.0   # 永不触发检测，纯透传
           enabled: true
@@ -123,7 +123,7 @@ stages:
       - name: mock_passthrough
         subscribes: [mock]
         realtime: true
-        class: app.services.inference.temporal.impl.mock.MockOperator
+        class: app.services.inference.online.temporal.impl.mock.MockOperator
         params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
     # 离线段：规则 Mock，作开发回环。离线是独立进程手动跑

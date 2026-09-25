@@ -10,7 +10,7 @@ from typing import List
 
 import numpy as np
 
-from app.services.inference.detection.detector import Detector
+from app.services.inference.online.detection.detector import Detector
 from app.domain.detection import DetBox, DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 

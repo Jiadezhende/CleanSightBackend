@@ -9,7 +9,7 @@ from factories import make_bare_cq, make_detector_output, make_frame_detection
 from app.services.inference.config import load_stage_config
 from app.domain.alarm import Alarm, AlarmType
 from app.services.inference.stage_factory import StageFactory
-from app.services.inference.temporal.operator import Operator
+from app.services.inference.online.temporal.operator import Operator
 
 
 def _out(ts: float, n: int = 1):
@@ -136,7 +136,7 @@ class _GoodOperator(Operator):
 
 
 def test_per_operator_isolation():
-    from app.services.inference.temporal.actor import ClientTemporalActor
+    from app.services.inference.online.temporal.actor import ClientTemporalActor
 
     cq = MagicMock()
     cq.get_slide_window.return_value = [make_frame_detection(source="s", ts=1.0)]

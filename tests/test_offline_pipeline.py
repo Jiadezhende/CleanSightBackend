@@ -507,7 +507,7 @@ class TestCli:
         """入口模块不得拉起在线服务模块。"""
         import importlib
         import sys
-        for m in ("app.services.inference.manager", "app.main"):
+        for m in ("app.services.inference.online.manager", "app.main"):
             sys.modules.pop(m, None)
         importlib.import_module("app.services.inference.offline.cli")
         assert "app.main" not in sys.modules

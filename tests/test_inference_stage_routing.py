@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.services.inference.config import FALLBACK_STAGE
-from app.services.inference.manager import InferenceManager
+from app.services.inference.online.manager import InferenceManager
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def test_start_workflow_no_set_no_actor(manager):
     # start_workflow(cq) 不再碰注册表（set/remove 均归 RunController，与 stop_run 对称）。
     # 无 operator_specs → 不建 actor。CQ 假定已由 RunController 注册。
     cq = _fake_cq(task_id=7, stage="MOCK", step_id=None)
-    with patch("app.services.inference.manager.client_manager") as cm, \
+    with patch("app.services.inference.online.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
         assert manager.start_workflow(cq) is True
 

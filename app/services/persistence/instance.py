@@ -1,6 +1,6 @@
 """持久化服务全局单例（唯一定义处）
 
-与 `app/services/inference/instance.py` 同一模式：`manager.py` 只管类定义（测试自行
+与 `app/services/inference/online/instance.py` 同一模式：`manager.py` 只管类定义（测试自行
 构造，见 `tests/test_persistence_sink.py`），要那一个全局实例的人才 import 本模块。
 
 单例原先住在 `__init__.py` 的模块级——那让「只想取一个 dataclass」的调用方也得连带

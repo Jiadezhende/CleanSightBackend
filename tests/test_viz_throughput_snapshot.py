@@ -11,7 +11,7 @@
 import threading
 from unittest.mock import patch
 
-from app.services.inference.visualization.worker import VisualizationWorker
+from app.services.inference.online.visualization.worker import VisualizationWorker
 
 # 统计窗起点：测试里给个固定墙钟，令 first_seen 可按"距窗末多少秒"反推
 _WIN_START = 1000.0
@@ -39,7 +39,7 @@ def test_snapshot_silent_when_healthy():
     w._render_time_sum = 200 * 0.002  # 平均 2ms
     w._render_time_max = 0.004        # 峰值 4ms ≪ 50ms 预算
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()
@@ -57,7 +57,7 @@ def test_snapshot_logs_supply_bound():
     w._render_time_sum = 100 * 0.002  # 平均 2ms，渲染清白
     w._render_time_max = 0.005        # 峰值 5ms ≪ 50ms 预算
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -81,7 +81,7 @@ def test_snapshot_logs_render_bound():
     w._render_time_sum = 90 * 0.045   # 平均 45ms
     w._render_time_max = 0.060        # 峰值 60ms ≥ 50ms 预算
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -107,7 +107,7 @@ def test_snapshot_silent_when_oversampled_healthy():
     w._render_time_sum = 150 * 0.002  # 平均 2ms
     w._render_time_max = 0.005        # 峰值 5ms ≪ 33ms 预算
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()
@@ -125,7 +125,7 @@ def test_snapshot_oversampled_still_flags_real_shortfall():
     w._render_time_sum = 80 * 0.002
     w._render_time_max = 0.005        # 渲染清白 → 归因 supply
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -152,7 +152,7 @@ def test_snapshot_oversampled_render_spike_over_tick_is_still_supply_bound():
     w._render_time_sum = 106 * 0.0185   # 平均 18.5ms « 66ms 出帧间隔
     w._render_time_max = 0.0517         # 峰值 51.7ms：> 33ms tick 但 < 66ms 出帧间隔
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -181,7 +181,7 @@ def test_snapshot_flags_viz_starved():
     w._render_time_sum = 30 * 0.002   # 渲染本身很快，不是 render-bound
     w._render_time_max = 0.005
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_called_once()
@@ -210,7 +210,7 @@ def test_snapshot_silent_for_just_started_run():
     w._render_time_sum = 30 * 0.002
     w._render_time_max = 0.005
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()
@@ -234,7 +234,7 @@ def test_snapshot_silent_for_run_terminated_mid_window():
     w._render_time_sum = 45 * 0.002
     w._render_time_max = 0.005
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()
@@ -253,7 +253,7 @@ def test_snapshot_skips_verdict_for_too_short_span():
     w._render_time_sum = 5 * 0.002
     w._render_time_max = 0.004
 
-    with patch("app.services.inference.visualization.worker.logger") as log:
+    with patch("app.services.inference.online.visualization.worker.logger") as log:
         w._log_throughput_snapshot(window)
 
     log.info.assert_not_called()

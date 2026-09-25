@@ -3,35 +3,44 @@
 
 提供统一的推理、时序分析、可视化和持久化接口，以及具体检测任务实现。
 
-子包分三类角色（规范 §1）——**同一目录深度不代表同一种东西**，加子包前先认领是哪类：
+按链路分两段，两段共用的 stage 配置与工厂平铺在本层：
+
+    config.py         stage 配置（online / offline 同源，含 FALLBACK_STAGE）
+    stage_factory.py  按 stage 实例化 Detector / Operator / OfflineSegmenter
+    online/           实时链路：manager / instance / naming / types + 下列子包
+    offline/          离线全序列分割：runner / cli + 下列契约包
+
+online 与 offline 互不 import；共用的东西只能放本层。
+
+子包分两类角色（规范 §1）——**同一目录深度不代表同一种东西**，加子包前先认领是哪类：
 
 1. **契约包**：一个基类 + 它的框架管件 + `impl/` 放业务实现，三包对称，加新检测点只碰 `impl/`。
-    detection/     目标检测 (L1)：Detector 抽象 + dispatcher/pool/service；impl/ 放 Detector 子类
-    temporal/      时序分析 (L3/L4)：Operator 抽象 + actor；impl/ 放 Operator 子类
-    offline/       离线段：OfflineSegmenter 抽象 + runner/cli；impl/ 放 Segmenter 子类
+    online/detection/     目标检测 (L1)：Detector 抽象 + dispatcher/pool/service；impl/ 放 Detector 子类
+    online/temporal/      时序分析 (L3/L4)：Operator 抽象 + actor；impl/ 放 Operator 子类
+    offline/              离线段：OfflineSegmenter 抽象 + runner/cli；impl/ 放 Segmenter 子类
 2. **活体包**：由 manager 持有、有独立起停的 worker 池，生命周期跟着 `manager.start()/stop()`。
-    visualization/ worker/pool/visualizer
+    online/visualization/ worker/pool/visualizer
 
-顶层平铺跨层基础设施：manager / config / naming / stage_factory / types。
 `offline/cli.py` 是 `python -m` 离线入口，**不得被包内任何其他模块 import**（现状零反向引用）。
 
 一个检测点（业务）的三段实现放各契约包 impl/ 下的**同名文件**：
-`detection/impl/<x>.py`(Detector) + `temporal/impl/<x>.py`(Operator) + 可选 `offline/impl/<x>.py`(Segmenter)，
-一文件一基类；业务聚合由 config stage 绑定表达（见 config/inference_config.yaml）。
+`online/detection/impl/<x>.py`(Detector) + `online/temporal/impl/<x>.py`(Operator) +
+可选 `offline/impl/<x>.py`(Segmenter)，一文件一基类；业务聚合由 config stage 绑定表达
+（见 config/inference_config.yaml）。
 
-本 `__init__` 刻意**不做任何 re-export**（只留 docstring + 下面的 `lifespan()`）：与 [instance.py] 的
+本 `__init__` 刻意**不做任何 re-export**（只留 docstring + 下面的 `lifespan()`）：与 [online/instance.py] 的
 "避免任何 `import app.services.inference.*` 触发 eager 构造" 同一原则——顶层平铺
 re-export 会让即便只取轻量 `.types.DetectionTask` 的调用方也拉起 YOLO/cv2/impl
 的重导入链。消费方一律走显式深路径按需导入：
 
-    单例          from app.services.inference.instance import inference_manager
-    总编排        from app.services.inference.manager import InferenceManager
-    检测基类      from app.services.inference.detection.detector import Detector, YOLODetector
-    时序基类      from app.services.inference.temporal.operator import Operator
-    具体任务      from app.services.inference.detection.impl.bubble import BubbleDetector
-                  from app.services.inference.temporal.impl.bubble import BubbleOperator
+    单例          from app.services.inference.online.instance import inference_manager
+    总编排        from app.services.inference.online.manager import InferenceManager
+    检测基类      from app.services.inference.online.detection.detector import Detector, YOLODetector
+    时序基类      from app.services.inference.online.temporal.operator import Operator
+    具体任务      from app.services.inference.online.detection.impl.bubble import BubbleDetector
+                  from app.services.inference.online.temporal.impl.bubble import BubbleOperator
     工厂/配置     from app.services.inference.stage_factory / .config
-    数据模型      from app.services.inference.types import DetectionTask
+    数据模型      from app.services.inference.online.types import DetectionTask
 
 内部管件（dispatcher / pool / service / actor / visualization worker）不再对外暴露，
 按需从各自深路径导入。
@@ -55,7 +64,7 @@ async def lifespan():
     单例 import 写在函数体内（规范 §3）：这是本包「零 re-export」原则的开关条款——
     写在模块级就等于把 `instance.py` 的 eager 构造重新摊给每个 import 本包的人。
     """
-    from .instance import inference_manager
+    from .online.instance import inference_manager
 
     inference_manager.start()
     logger.info("[InferenceService] Inference service started")

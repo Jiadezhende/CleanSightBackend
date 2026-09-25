@@ -10,7 +10,7 @@ finalize：bend_actions < required → warning 结算告警。
 import logging
 from typing import List, Tuple
 
-from app.services.inference.temporal.operator import Operator
+from app.services.inference.online.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
 from app.domain.detection import DetectorOutput, FrameDetection
 

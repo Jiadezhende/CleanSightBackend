@@ -11,7 +11,7 @@
 
 from factories import make_cq, make_frame_detection
 from app.services.client.queues import ClientQueues
-from app.services.inference.detection.service import DetectionService
+from app.services.inference.online.detection.service import DetectionService
 from app.utils.metrics import frame_drop_total
 
 

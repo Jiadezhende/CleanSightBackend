@@ -168,7 +168,7 @@ class GlobalHealthMonitor:
 
             self._stream_service = stream_service
         if self._inference_manager is None:
-            from app.services.inference.instance import inference_manager
+            from app.services.inference.online.instance import inference_manager
 
             self._inference_manager = inference_manager
         if self._recording_service is None:

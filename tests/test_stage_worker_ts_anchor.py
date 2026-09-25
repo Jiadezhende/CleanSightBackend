@@ -11,9 +11,9 @@ DetectorOutput.timestamp == FrameDetection.ts == Frame.timestamp。本用例锁�
 
 import numpy as np
 
-from app.services.inference.detection.stage_worker import StageWorker
-from app.services.inference.types import DetectionTask
-from app.services.inference.detection.impl.mock import MockDetector
+from app.services.inference.online.detection.stage_worker import StageWorker
+from app.services.inference.online.types import DetectionTask
+from app.services.inference.online.detection.impl.mock import MockDetector
 
 from factories import make_cq
 

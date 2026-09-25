@@ -18,8 +18,8 @@ from app.domain.alarm import ALARM_MODE_SETTLEMENT
 from .client.config import get_client_config
 from .client.manager import client_manager
 from .client.queues import ClientQueues
-from .inference.instance import inference_manager
-from .inference.temporal import alarm_sink
+from .inference.online.instance import inference_manager
+from .inference.online.temporal import alarm_sink
 from .recording.instance import recording_service
 from .stream.instance import stream_service
 from app.utils.exceptions import AppError

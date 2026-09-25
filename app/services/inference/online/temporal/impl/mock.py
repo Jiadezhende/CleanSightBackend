@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from app.services.inference.temporal.operator import Operator
+from app.services.inference.online.temporal.operator import Operator
 from app.domain.alarm import Alarm, AlarmType
 from app.domain.detection import FrameDetection
 
