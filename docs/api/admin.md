@@ -1,13 +1,13 @@
 # `/admin-f3m8` — 运维 Admin
 
-运维面板 API：聚合仪表盘、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针。
-数据全部来自**进程内存**（`client_manager` 快照 + Prometheus REGISTRY），非 DB，是**实时**状态，进程重启即清零。
-均**无鉴权**、正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
+运维面板 API：聚合仪表盘、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业。
+数据全部来自**进程内存**（`client_manager` 快照 + Prometheus REGISTRY + 离线作业状态表），非 DB，是**实时**状态，进程重启即清零。
+均**无鉴权**；除离线作业三个端点（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
 
 静态运维 UI（SPA）：`GET /ui-f3m8/admin/`（HTML 页面，非本文档描述的 JSON 端点）。
 
 > **告警字段名用全称**（`alarm_type` / `alarm_level` / `alarm_message`），与 `/task/message` 的短名（`type` / `level` / `message`）不同，前端两处别混用。
-> **时间戳单位不一致**：本组 `overview.timestamp` 与 `alarms[].timestamp` 是 epoch **秒**；`ping.server_time_ms` 是 epoch **毫秒**；而告警历史（`/task`、`/traceback`）用毫秒。对接时逐字段核对单位。
+> **时间戳单位不一致**：本组 `overview.timestamp`、`alarms[].timestamp` 与离线作业的 `*_at` 是 epoch **秒**；`ping.server_time_ms` 是 epoch **毫秒**；而告警历史（`/task`、`/traceback`）用毫秒。对接时逐字段核对单位。
 
 ---
 
@@ -268,3 +268,103 @@
 ### 前端坑点
 
 - `server_time_ms` 是**毫秒**（float），而同组的 `overview.timestamp` / `alarms[].timestamp` 是**秒**（int）——同一面板混用时极易错位。
+
+---
+
+## 离线推理作业
+
+admin「离线推理」tab 用这三个端点提交离线推理，并查看执行进度。
+
+- **执行方式**：作业**串行**执行，同一时刻只跑一个，每个作业起一个子进程跑离线 CLI。
+- **结果去哪看**：跑完的结果落盘在该 step 的 `temporal.jsonl` / `label_probs.npz`，仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab-f3m8/label-probs`](lab.md) 读取。
+- **状态保存**：作业状态只存在进程内存里，后端重启后，排队中的作业和历史记录都会丢失（已落盘的结果不受影响）。
+
+**作业对象**（三个端点返回的都是这个形状）：
+
+```jsonc
+{
+  "task_id": 123,
+  "step_id": 2,
+  "status": "completed",          // 见下表
+  "producer": "CleanBiGRUSegmenter", // 离线模型类名；未跑到模型（排队 / 取消 / 未配置）时为 null
+  "segment_count": 5,             // 写入的分割段数；非 completed 时为 0
+  "message": "",                  // 非 completed 时的原因说明（中文，可直接展示）
+  "submitted_at": 1751800000.12,  // epoch 秒（float）
+  "started_at": 1751800001.50,    // epoch 秒；还没开始跑时为 null
+  "finished_at": 1751800042.03    // epoch 秒；还没结束时为 null
+}
+```
+
+| `status` | 含义 | 结果文件 |
+|----------|------|----------|
+| `queued` | 排队中 | — |
+| `running` | 子进程运行中 | — |
+| `completed` | 跑完并写入 | 已替换为本次结果 |
+| `skipped` | 该 step 没配离线模型，或没有检测结果，或开跑时该 step 正在 live | 不动 |
+| `superseded` | 运行期间检测结果变了（同 step 起了新 run / 残批迟到落盘），本次作废 | 不动；等 step 停写后重跑 |
+| `failed` | 模型异常、超时（30 分钟）、子进程启动失败等，原因见 `message` | 不动 |
+| `cancelled` | 被取消或后端停机 | 不动 |
+
+---
+
+## POST /admin-f3m8/offline/jobs
+
+提交一个 (task_id, step_id) 的离线推理作业。
+
+**请求体**（JSON）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | int | 是 | 任务 id |
+| `step_id` | int | 是 | 洗消步骤 id（数字存储键） |
+
+### 响应 `202`
+
+返回作业对象。如果同一个 (task_id, step_id) 已经在排队或运行，**不会重复入队**，直接返回在途的那个作业（`status` 为 `queued` / `running`）。
+
+### 错误
+
+| status | 何时 | body |
+|--------|------|------|
+| 409 | 该 task 当前正在跑**这个** step（检测结果还在写，没封口） | `{"error": "Resource conflict", "detail": "..."}` |
+| 409 | 排队已满（20 个） | 同上 |
+| 422 | 请求体缺字段或类型不对 | FastAPI 校验错误 |
+
+两种 409 只能靠 `detail` 文案区分，前端直接把 `detail` 提示给用户即可。
+
+---
+
+## GET /admin-f3m8/offline/jobs
+
+列出在途作业和最近结束的作业（最多保留 200 条已结束的），**按提交时间倒序，新提交的在前**。admin tab 在离线推理页可见时每 2 秒轮询一次。
+
+### 响应 `200`
+
+```jsonc
+{ "jobs": [ /* 作业对象 */ ] }
+```
+
+---
+
+## GET /admin-f3m8/offline/jobs/{task_id}/{step_id}
+
+查询单个 (task_id, step_id) 最近一次作业的状态。
+
+### 响应 `200`
+
+返回作业对象。
+
+### 错误
+
+| status | 何时 |
+|--------|------|
+| 404 | 这个 (task_id, step_id) 从来没提交过作业，或者后端重启后记录已清空 |
+
+### 静默失败
+
+| 现象 | 后端实际状态 |
+|------|------------|
+| `completed` 但 `segment_count` 为 0 | 模型跑完了，但没识别出动作段；结果文件已被替换为「无分段」 |
+| `superseded` / `skipped` 后结果没变 | 本次没写任何东西，展示的仍是上一次的结果（如果有） |
+
+参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `runOffline` / `fetchOffJobs`。

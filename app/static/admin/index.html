@@ -260,7 +260,7 @@
         </div>
       </el-tab-pane>
 
-      <!-- ===== Tab: 离线推理（只读：结果由 CLI 离线推理落盘） ===== -->
+      <!-- ===== Tab: 离线推理（提交作业串行执行；结果读盘展示） ===== -->
       <el-tab-pane label="离线推理" name="offline">
         <!-- ① 选择：布局同 lab 送标工作台的任务表 -->
         <div class="card">
@@ -271,6 +271,7 @@
             <label class="field-label">step_id</label>
             <input v-model.number="offForm.step_id" placeholder="必填" class="plain-input" style="width:120px" @keyup.enter="loadOffline" />
             <el-button type="primary" :loading="offLoading" @click="loadOffline">加载</el-button>
+            <el-button :loading="offSubmitting" @click="runOffline">运行离线推理</el-button>
             <el-button v-if="offLoaded" @click="resetOffline">重置</el-button>
           </div>
           <div class="task-panel" style="margin-top:12px">
@@ -318,7 +319,44 @@
             </div>
           </div>
           <div class="hint-line">
-            离线结果由 CLI 产出（跑完点刷新）：<code>python -m app.services.inference.offline.cli run --task-id T --step-id S</code>
+            「运行离线推理」提交后在下方作业列表排队、逐个执行，完成后自动刷新结果。也可手动 CLI：<code>python -m app.services.inference.offline.cli run --task-id T --step-id S</code>
+          </div>
+        </div>
+
+        <!-- 离线作业：串行执行，排队 / 运行中 / 最近结果 -->
+        <div class="card">
+          <div class="card-title">离线作业<span class="card-meta">串行执行，一次一个 · 进程重启后清空</span></div>
+          <div class="task-scroll">
+            <table class="task-table">
+              <thead>
+                <tr>
+                  <th style="width:110px">task_id</th>
+                  <th style="width:70px">step</th>
+                  <th style="width:100px">状态</th>
+                  <th style="width:190px">模型</th>
+                  <th style="width:60px">段数</th>
+                  <th style="width:80px">耗时</th>
+                  <th style="width:150px">提交时间</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="j in offJobs" :key="j.task_id + '-' + j.step_id"
+                    @click="offForm.task_id = j.task_id; offForm.step_id = j.step_id">
+                  <td class="mono">{{ j.task_id }}</td>
+                  <td class="mono">{{ j.step_id }}</td>
+                  <td><el-tag size="small" :type="offJobTag(j.status)">{{ j.status }}</el-tag></td>
+                  <td class="mono">{{ j.producer || '—' }}</td>
+                  <td>{{ j.status === 'completed' ? j.segment_count : '—' }}</td>
+                  <td>{{ offJobElapsed(j) }}</td>
+                  <td>{{ formatTaskTime(j.submitted_at) }}</td>
+                  <td :title="j.message">{{ j.message || '—' }}</td>
+                </tr>
+                <tr v-if="!offJobs.length">
+                  <td colspan="8" class="task-empty">暂无作业</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -973,6 +1011,65 @@ createApp({
       offCurrentMs.value = 0;
     }
 
+    // ─── 离线作业 ───
+    const offJobs = ref([]);
+    const offSubmitting = ref(false);
+    const OFF_ACTIVE = ['queued', 'running'];
+    let offJobStatus = {};   // "task/step" → 上一轮状态；用来发现「刚跑完」
+
+    const offJobTag = (st) => ({ queued: 'info', running: 'warning', completed: 'success', failed: 'danger' }[st] || '');
+    function offJobElapsed(j) {
+      if (!j.started_at) return '—';
+      const end = j.finished_at || Date.now() / 1000;
+      return `${Math.max(0, end - j.started_at).toFixed(1)}s`;
+    }
+
+    async function fetchOffJobs() {
+      try {
+        const r = await fetch(api('/admin-f3m8/offline/jobs'));
+        if (!r.ok) return;
+        const jobs = (await r.json()).jobs || [];
+        let finishedAny = false;
+        for (const j of jobs) {
+          const key = `${j.task_id}/${j.step_id}`;
+          if (OFF_ACTIVE.includes(offJobStatus[key]) && !OFF_ACTIVE.includes(j.status)) {
+            finishedAny = true;
+            if (j.status === 'completed' && j.task_id === offSel.taskId && j.step_id === offSel.stepId && offLoaded.value) {
+              fetchOfflineResult();   // 正在看的这个 step 刚跑完 → 刷新结果
+            }
+          }
+        }
+        offJobStatus = Object.fromEntries(jobs.map(j => [`${j.task_id}/${j.step_id}`, j.status]));
+        offJobs.value = jobs;
+        if (finishedAny) fetchOffTasks();
+      } catch {}
+    }
+
+    async function runOffline() {
+      const taskId = Number(offForm.task_id), stepId = Number(offForm.step_id);
+      if (!Number.isInteger(taskId) || !Number.isInteger(stepId) || offForm.task_id === null || offForm.step_id === null
+          || offForm.task_id === '' || offForm.step_id === '') {
+        ElMessage.warning('请填写 task_id 和 step_id');
+        return;
+      }
+      offSubmitting.value = true;
+      try {
+        const r = await fetch(api('/admin-f3m8/offline/jobs'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: taskId, step_id: stepId }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.status === 409) { ElMessage.warning(d.detail || '无法提交'); return; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        ElMessage.success(d.status === 'running' ? '该 step 已在运行' : `已提交 task ${taskId} / step ${stepId}`);
+        fetchOffJobs();
+      } catch (e) {
+        ElMessage.error('提交失败: ' + e.message);
+      } finally {
+        offSubmitting.value = false;
+      }
+    }
+
     function postJson(path, body) {
       return fetch(api(path), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -1008,7 +1105,7 @@ createApp({
         attachOffVideo();
         renderOffCharts();
         if (!seg.items.length && !prob.labels.length) {
-          ElMessage.info('该 step 还没有离线结果，先用 CLI 运行离线推理');
+          ElMessage.info('该 step 还没有离线结果，先点「运行离线推理」');
         }
       } catch (e) {
         if (e.status === 404) ElMessage.warning(`该 step 没有 ${track} 轨录像段，请确认录制是否完成或换轨`);
@@ -1189,6 +1286,7 @@ createApp({
     const healthPoller = createPoller(fetchHealth, 15000);   // 健康摘要变化慢，无需 3s
     const metricsPoller = createPoller(fetchMetrics, 5000);
     const alarmPoller = createPoller(pollLiveAlarms, 1000);
+    const offJobPoller = createPoller(fetchOffJobs, 2000);
 
     const pageVisible = ref(!document.hidden);
     const onVisibility = () => { pageVisible.value = !document.hidden; };
@@ -1202,6 +1300,7 @@ createApp({
       toggle(overviewPoller, on && (tab === 'overview' || tab === 'live'));
       toggle(healthPoller, on && tab === 'overview');
       toggle(metricsPoller, on && tab === 'metrics');
+      toggle(offJobPoller, on && tab === 'offline');
       // 告警只在 live tab 显示；离开/切走即停，回来按 liveSeq 增量补拉
       // （后端 _alarm_log 是 deque(maxlen=100)，暂停期间告警超 100 条才会丢头）
       toggle(alarmPoller, on && tab === 'live' && liveConnected.value);
@@ -1222,6 +1321,7 @@ createApp({
       healthPoller.stop();
       metricsPoller.stop();
       alarmPoller.stop();
+      offJobPoller.stop();
       stopLive();
       latencyChart?.destroy();
       distChart?.destroy();
@@ -1244,6 +1344,7 @@ createApp({
       offTasks, offListLoading, offSel, offQuery, offForm, offLoading, offLoaded, offSegCount, offHasProbs,
       offLegend, offSelected, offDuration, offCurrentMs, offProducer, offVideoEl, offSegRef, offProbRef,
       offColor, offSegAt, fmtMediaMs, formatTaskTime, fetchOffTasks, selectOffTask, loadOffline, fetchOfflineResult, resetOffline, selectOffLabel,
+      offJobs, offSubmitting, offJobTag, offJobElapsed, runOffline,
     };
   },
 }).use(ElementPlus).mount('#app');

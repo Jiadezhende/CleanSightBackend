@@ -1,5 +1,5 @@
 """
-运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针
+运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针、离线推理作业
 路由前缀：/admin-f3m8（路径混淆，防自动扫描器命中）
 告警查询直接使用 GET /task/{task_id}/alarms（已有双源路由实现）
 """
@@ -8,8 +8,11 @@ import time
 import logging
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from app.services.client.manager import client_manager
+from app.services.inference.offline.instance import offline_job_service
+from app.utils.exceptions import NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -214,3 +217,36 @@ def get_metrics_json():
 def ping():
     """延迟测试探针：立即返回服务端毫秒时间戳，前端计算 RTT。"""
     return {"server_time_ms": time.time() * 1000}
+
+
+# ---------------------------------------------------------------------------
+# 离线推理作业（串行执行，见 app/services/inference/offline/service.py）
+# ---------------------------------------------------------------------------
+
+class OfflineJobRequest(BaseModel):
+    task_id: int
+    step_id: int
+
+
+@router.post("/offline/jobs", status_code=202)
+def submit_offline_job(req: OfflineJobRequest):
+    """提交一个离线推理作业；同键已在排队 / 运行时返回在途那个。step 正在 live 或队满 → 409。"""
+    return offline_job_service.submit(req.task_id, req.step_id).to_dict()
+
+
+@router.get("/offline/jobs")
+def list_offline_jobs():
+    """在途 + 最近结束的离线作业，新提交的在前。"""
+    return {"jobs": [job.to_dict() for job in reversed(offline_job_service.list_jobs())]}
+
+
+@router.get("/offline/jobs/{task_id}/{step_id}")
+def get_offline_job(task_id: int, step_id: int):
+    """单个 (task_id, step_id) 的离线作业状态（前端提交后轮询用）。"""
+    job = offline_job_service.get(task_id, step_id)
+    if job is None:
+        raise NotFoundError(
+            f"no offline job for task {task_id} step {step_id}",
+            resource_type="offline_job", resource_id=f"{task_id}/{step_id}",
+        )
+    return job.to_dict()
