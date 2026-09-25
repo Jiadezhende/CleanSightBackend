@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
@@ -38,6 +38,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.background import BackgroundTask
 
 from app.database import get_db
+from app.domain.temporal import TemporalSegment
 from app.models import DBTask
 from app.services.lab import (
     ClipBuilder,
@@ -52,7 +53,9 @@ from app.services.lab import (
     StepExportNoSegments,
 )
 from app.services.lab import config as lab_config
+from app.services.utils.media_timeline import MediaTimeline
 from app.storage import hls
+from app.storage import inference as inference_store
 from app.storage import tasks as step_tasks
 from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
 
@@ -158,6 +161,7 @@ class LabTaskItem(BaseModel):
     raw_steps: List[int] = Field(default_factory=list)
     has_raw_segments: bool = False
     has_current_step_raw: bool = False
+    offline_steps: List[int] = Field(default_factory=list)  # raw_steps 中有离线推理结果的 step
 
 
 class LabTaskListResponse(BaseModel):
@@ -193,6 +197,16 @@ def _list_raw_steps(task_id: int) -> List[int]:
     ]
 
 
+def _list_offline_steps(task_id: int, raw_steps: List[int]) -> List[int]:
+    """`raw_steps` 中有离线推理结果的 step：有分段事实，或（没有时再查）有逐帧类别概率。"""
+    return [
+        step_id
+        for step_id in raw_steps
+        if any(isinstance(f, TemporalSegment) for f in inference_store.read_temporal(task_id, step_id))
+        or inference_store.read_label_probs(task_id, step_id) is not None
+    ]
+
+
 def _task_row_to_item(row: DBTask) -> LabTaskItem:
     task_id = int(row.task_id)
     step_id = _optional_int(row.current_step)
@@ -211,6 +225,7 @@ def _task_row_to_item(row: DBTask) -> LabTaskItem:
         raw_steps=raw_steps,
         has_raw_segments=bool(raw_steps),
         has_current_step_raw=has_current_step_raw,
+        offline_steps=_list_offline_steps(task_id, raw_steps),
     )
 
 
@@ -241,6 +256,7 @@ def _storage_task_to_item(task_id: int, raw_steps: List[int]) -> LabTaskItem:
         raw_steps=raw_steps,
         has_raw_segments=True,
         has_current_step_raw=False,
+        offline_steps=_list_offline_steps(task_id, raw_steps),
     )
 
 
@@ -391,6 +407,58 @@ async def list_lab_tasks(
         )
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 接口 0.5: 离线分割模型的逐帧类别概率（label_probs.npz）
+# ---------------------------------------------------------------------------
+
+
+class LabelProbsRequest(BaseModel):
+    task_id: int
+    step_id: int
+    track: Literal["raw", "processed"] = "raw"
+
+
+class LabelProbsResponse(BaseModel):
+    task_id: int
+    step_id: int
+    track: str
+    media_duration_ms: int
+    labels: List[str]
+    media_ms: List[int]  # [T]
+    probs: List[List[float]]  # [C][T]：按类分列，一类一条曲线
+
+
+def _label_probs_view(req: LabelProbsRequest) -> LabelProbsResponse:
+    """读该 step 的逐帧类别概率，帧 ts 换算到 `track` 轨的媒体刻度；没有产物返回空数组。"""
+    timeline = MediaTimeline.load(req.task_id, req.step_id, req.track)
+    if not timeline:
+        raise NotFoundError(
+            f"No {req.track} segments for task {req.task_id} step {req.step_id}",
+            resource_type="Segments",
+            resource_id=f"task={req.task_id},step={req.step_id},track={req.track}",
+        )
+    lp = inference_store.read_label_probs(req.task_id, req.step_id)
+    if lp is None:
+        labels: List[str] = []
+        media_ms: List[int] = []
+        probs: List[List[float]] = []
+    else:
+        labels = list(lp.labels)
+        media_ms = [timeline.media_ms_at(int(round(float(t) * 1000))) for t in lp.ts]
+        probs = lp.probs.T.round(3).tolist()
+    return LabelProbsResponse(
+        task_id=req.task_id, step_id=req.step_id, track=req.track,
+        media_duration_ms=timeline.duration_ms,
+        labels=labels, media_ms=media_ms, probs=probs,
+    )
+
+
+@router.post("/label-probs", response_model=LabelProbsResponse)
+def get_label_probs(req: LabelProbsRequest) -> LabelProbsResponse:
+    """离线分割模型逐帧 softmax（可视化旁路），时间已换算为媒体刻度。"""
+    return _label_probs_view(req)
 
 
 # ---------------------------------------------------------------------------

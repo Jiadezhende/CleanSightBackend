@@ -4,6 +4,8 @@
 
 另提供一条**旁路**：`GET /download` 把整个 step 的某一轨 remux 成单个 mp4 直接下载，不经 LS，用于取汇报素材/原片。
 
+另有一条**模型调试读口**：`POST /label-probs` 读某个 step 的离线分割模型逐帧类别概率（admin 离线推理 tab 画概率曲线用）。
+
 - 数据源：任务列表来自 **DB**（`clean_task` 表）或 **磁盘**（枚举 raw 段目录），由运行时开关 `task_source` 决定；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id)` 文件约定）。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
 - 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
@@ -66,7 +68,8 @@
       "end_time": null,                // epoch 秒，storage 模式恒 null
       "raw_steps": [1, 2],             // 磁盘上有 raw 段的 step 列表
       "has_raw_segments": true,
-      "has_current_step_raw": true     // storage 模式恒 false
+      "has_current_step_raw": true,    // storage 模式恒 false
+      "offline_steps": [2]             // raw_steps 中有离线推理结果的 step
     }
   ]
 }
@@ -86,6 +89,7 @@
 | `tasks[].raw_steps` | int[] | 磁盘上确有 raw 段的 step_id（升序） |
 | `tasks[].has_raw_segments` | bool | `raw_steps` 非空。storage 模式只收有 raw 段的 task，故恒 true |
 | `tasks[].has_current_step_raw` | bool | `step_id ∈ raw_steps`。**storage 模式恒 false** |
+| `tasks[].offline_steps` | int[] | `raw_steps` 的子集（升序）：该 step 有离线分割段（`temporal.jsonl` 里的 segment），或有逐帧类别概率（`label_probs.npz`）。两种模式行为一致；没有则 `[]` |
 
 排序：`updated_time desc, task_id desc`。空结果返回 `{"total":0,"tasks":[]}`，不报错。
 
@@ -295,6 +299,61 @@
 | 下到的视频比页面显示的时长短 | 末尾若干段仍在途（mp4v 已落、transcode+append 未完成），被有意过滤；等几秒重下即可 |
 | 反复下同一 step 每次都要等 | 正常——**不做产物缓存**，每次重新 remux。成本在磁盘 IO 不在 CPU |
 | `.lab_exports` 里有残留 `step_*.mp4` | 客户端中途断开导致清理没跑到；下次调用本接口时会顺手回收超过 30 min 的孤儿 |
+
+---
+
+## POST /lab-f3m8/label-probs
+
+读取某个 step 的离线分割模型**逐帧类别概率**（每帧对各类的 softmax），给 admin 离线推理 tab 画概率曲线。
+这是模型调试旁路，不是对外推理结果（正式结果是分割段，见 [`POST /ai/temporal`](ai.md#post-aitemporal)）。
+帧时间已换算为该轨**媒体刻度**（= `<video>.currentTime × 1000`）。身份键走 JSON body，约定见 [README](README.md)。
+
+**请求体**（JSON）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | int | 是 | 任务 id |
+| `step_id` | int | 是 | 洗消步骤 id |
+| `track` | string | 否 | `raw`（默认）/ `processed`，须与播放器加载的轨一致 |
+
+```jsonc
+{"task_id": 42, "step_id": 2, "track": "raw"}
+```
+
+### 响应 `200`
+
+```jsonc
+{
+  "task_id": 42,
+  "step_id": 2,
+  "track": "raw",
+  "media_duration_ms": 612340,                       // 该轨媒体轴总长 = <video>.duration × 1000
+  "labels": ["idle", "long_brush_insert", "long_brush_withdraw",
+             "short_brush_cleaning", "flush", "air_injection"],
+  "media_ms": [0, 67, 133],                          // [T] 逐帧媒体刻度，升序（停顿里的帧会与后一帧同值）
+  "probs": [[0.98, 0.97, 0.95], [0.01, 0.02, 0.03]]  // [C][T]：probs[j] 是 labels[j] 这一类的逐帧概率
+}
+```
+
+| 字段 | 类型 | 说明（含缺省/空条件） |
+|------|------|---------------------|
+| `labels` | string[] | 类名，顺序即模型输出通道序，含背景类（如 `idle`） |
+| `media_ms` | int[] | 逐帧媒体刻度 ms，长度 T |
+| `probs` | float[][] | **按类分列**：`probs.length == labels.length`，每行长度 T。3 位小数（盘上 float16，精度约 3 位有效数字） |
+| — | — | **没有概率产物时 `labels` / `media_ms` / `probs` 均为 `[]`**：从未跑过离线，或该模型不产逐帧概率（如 MOCK 规则分段器）。不报错 |
+
+### 错误
+
+| 状态 | 条件 |
+|------|------|
+| 404 | 该 step 的 `track` 轨没有已登记的段（`resource_type: "Segments"`） |
+| 422 | 缺 `task_id` / `step_id`，或 `track` 不是 `raw`/`processed` |
+
+### 前端坑点
+
+- `probs` 是 `[C][T]` 不是 `[T][C]`：一类直接是一条曲线，别再转置。
+- 切轨要重取：两轨的媒体刻度不同。
+- 10 分钟 step（15fps × 6 类）响应约 400 KB，别放进轮询。
 
 ---
 

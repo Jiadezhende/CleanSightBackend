@@ -1,9 +1,11 @@
-# `/ai` — 实时推理画面
+# `/ai` — 推理画面与推理结果
 
-订阅某一路 run 的**渲染后画面**（叠加了检测框的 JPEG 帧），供前端做 live view / 大屏常亮。
-数据来自内存（各 run 的渲染队列），**实时**、不落库、不可回放。通用约定见 [README](README.md)。
+两组端点，通用约定见 [README](README.md)：
 
-只有一个端点：`WS /ai/video`。
+| 端点 | 数据来源 | 说明 |
+|------|---------|------|
+| `WS /ai/video` | 内存（各 run 的渲染队列） | 某一路 run 的**实时**渲染画面（叠加检测框的 JPEG 帧），不落库、不可回放 |
+| `POST /ai/temporal` | 落盘 `{step}/inference/temporal.jsonl` | 某个 step 的时序分析结果（目前是离线分割段），时间已换算为媒体刻度 |
 
 ---
 
@@ -94,3 +96,66 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 | 帧率明显低于预期（每秒 1–2 帧） | 正常：事件驱动、按 ts 去重，推速跟随源渲染率（≈ `inference_fps`）。30fps 只是上限非目标。 |
 
 > 仓库内消费本接口的参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `startLive`（约 528 行起），含 data-URL 渲染、idle 清屏、按前缀分流。
+
+---
+
+## POST /ai/temporal
+
+读取某个 step 的时序分析结果，给回放页在视频下方画分割段。时间已换算为该轨的**媒体刻度**（与 `<video>.currentTime × 1000` 同轴），前端不用再做墙钟换算。
+结果由离线推理 CLI 产出（`python -m app.services.inference.offline.cli run --task-id T --step-id S`），本端点只读。
+
+**请求体**（JSON）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | int | 是 | 任务 id |
+| `step_id` | int | 是 | 洗消步骤 id |
+| `type` | string | 是 | 事实形状。当前只接受 `"segment"`（区间：一段时间里的一个动作） |
+| `track` | string | 否 | `raw`（默认）/ `processed`。决定换算到哪条轨的媒体轴，须与播放器加载的轨一致 |
+
+```jsonc
+{"task_id": 42, "step_id": 2, "type": "segment", "track": "raw"}
+```
+
+### 响应 `200`
+
+```jsonc
+{
+  "task_id": 42,
+  "step_id": 2,
+  "type": "segment",
+  "track": "raw",
+  "media_duration_ms": 612340,          // 该轨媒体轴总长（Σ EXTINF）= <video>.duration × 1000
+  "items": [
+    {
+      "label": "long_brush_insert",
+      "start_media_ms": 12040,
+      "end_media_ms": 15880,
+      "conf": 0.912,
+      "producer": "CleanMSTCNBiLSTMSegmenter"
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明（含缺省/空条件） |
+|------|------|---------------------|
+| `media_duration_ms` | int | 该轨媒体轴总长，横轴上限用它 |
+| `items` | array | 按 `start_media_ms` 升序。**从未跑过离线或没分出任何段时为 `[]`**（不报错） |
+| `items[].label` | string | 动作类名；背景类（如 `idle`）不产出分段 |
+| `items[].start_media_ms` / `end_media_ms` | int | 闭区间，媒体刻度 ms。单帧段两者相等 |
+| `items[].conf` | float | 段置信度 [0,1]（CLEAN 模型为段内逐帧最大概率的均值） |
+| `items[].producer` | string | 产出该段的模型类名 |
+
+### 错误
+
+| 状态 | 条件 |
+|------|------|
+| 404 | 该 step 的 `track` 轨没有已登记的段（`resource_type: "Segments"`），body 同 `/traceback` playlist 的 404 |
+| 422 | 缺字段、`type` 不是 `"segment"`、`track` 不是 `raw`/`processed` |
+
+### 前端坑点
+
+- **切轨要重取**：两条轨各自切段，同一时刻在两轨上的媒体刻度不同。
+- **落在录制停顿里的时刻**吸附到停顿后第一段的段首（停顿在媒体轴上宽度为零）。
+
