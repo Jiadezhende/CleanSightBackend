@@ -260,6 +260,121 @@
         </div>
       </el-tab-pane>
 
+      <!-- ===== Tab: 离线推理（只读：结果由 CLI 离线推理落盘） ===== -->
+      <el-tab-pane label="离线推理" name="offline">
+        <!-- ① 选择：布局同 lab 送标工作台的任务表 -->
+        <div class="card">
+          <div class="card-title">① 选择步骤</div>
+          <div class="form-row">
+            <label class="field-label">task_id</label>
+            <input v-model.number="offForm.task_id" placeholder="必填" class="plain-input" style="width:160px" @keyup.enter="loadOffline" />
+            <label class="field-label">step_id</label>
+            <input v-model.number="offForm.step_id" placeholder="必填" class="plain-input" style="width:120px" @keyup.enter="loadOffline" />
+            <el-button type="primary" :loading="offLoading" @click="loadOffline">加载</el-button>
+            <el-button v-if="offLoaded" @click="resetOffline">重置</el-button>
+          </div>
+          <div class="task-panel" style="margin-top:12px">
+            <div class="task-toolbar">
+              <div class="form-row" style="gap:8px">
+                <label class="field-label">有离线结果的任务</label>
+                <input v-model.trim="offQuery" placeholder="task_id / IP / 状态"
+                       class="plain-input" style="width:220px" @keyup.enter="fetchOffTasks" />
+                <el-button size="small" :loading="offListLoading" @click="fetchOffTasks">刷新</el-button>
+              </div>
+              <span class="task-total">共 {{ offTasks.length }} 条</span>
+            </div>
+            <div class="task-scroll">
+              <table class="task-table">
+                <thead>
+                  <tr>
+                    <th style="width:110px">task_id</th>
+                    <th style="width:90px">状态</th>
+                    <th style="width:150px">离线 steps</th>
+                    <th>source_ip</th>
+                    <th style="width:170px">更新时间</th>
+                    <th style="width:86px">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in offTasks" :key="t.task_id"
+                      :class="{ selected: Number(offForm.task_id) === t.task_id }"
+                      @click="selectOffTask(t)">
+                    <td class="mono">{{ t.task_id }}</td>
+                    <td>{{ t.status || '—' }}</td>
+                    <td>
+                      <span v-for="s in t.offline_steps" :key="t.task_id + '-' + s" class="step-chip"
+                            :class="{ active: Number(offForm.task_id) === t.task_id && Number(offForm.step_id) === s }"
+                            @click.stop="selectOffTask(t, s)">{{ s }}</span>
+                    </td>
+                    <td class="mono" :title="t.source_ip || ''">{{ t.source_ip || '—' }}</td>
+                    <td>{{ formatTaskTime(t.updated_time) }}</td>
+                    <td><el-button size="small" type="primary" plain @click.stop="selectOffTask(t)">选择</el-button></td>
+                  </tr>
+                  <tr v-if="!offTasks.length">
+                    <td colspan="6" class="task-empty">{{ offListLoading ? '加载中…' : '暂无离线结果' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="hint-line">
+            离线结果由 CLI 产出（跑完点刷新）：<code>python -m app.services.inference.offline.cli run --task-id T --step-id S</code>
+          </div>
+        </div>
+
+        <!-- ② 结果：布局同 lab 的播放器 + 侧栏 -->
+        <div class="card" v-show="offLoaded">
+          <div class="card-title">
+            ② 分割结果 · task {{ offSel.taskId }} / step {{ offSel.stepId }}
+            <el-radio-group v-model="offSel.track" size="small" @change="fetchOfflineResult" style="margin-left:12px">
+              <el-radio-button value="raw">raw 原始</el-radio-button>
+              <el-radio-button value="processed">processed 标注</el-radio-button>
+            </el-radio-group>
+            <span class="card-meta">时长 {{ fmtMediaMs(offDuration) }} · {{ offSegCount }} 段 · {{ offProducer || '无分割结果' }}</span>
+          </div>
+          <div class="player-layout">
+            <div>
+              <div class="video-wrap"><video ref="offVideoEl" controls preload="metadata"></video></div>
+              <div class="lanes-wrap">
+                <div class="lane-title">分割段<span v-if="!offSegCount">（无动作段）</span></div>
+                <div class="lane-seg"><canvas ref="offSegRef"></canvas></div>
+                <div class="lane-title">类别概率</div>
+                <div class="lane-prob" v-show="offHasProbs"><canvas ref="offProbRef"></canvas></div>
+                <div v-if="!offHasProbs" class="task-empty">该模型不产逐帧概率</div>
+              </div>
+            </div>
+
+            <div class="player-side">
+              <div class="side-item">
+                <div class="side-key">当前播放</div>
+                <div class="side-val">{{ fmtMediaMs(offCurrentMs) }}</div>
+                <div class="side-sub">media_ms = {{ Math.round(offCurrentMs) }}</div>
+              </div>
+              <div class="side-item">
+                <div class="side-key">当前分段</div>
+                <template v-if="offSegAt(offCurrentMs)">
+                  <div class="side-val" :style="{ color: offColor(offSegAt(offCurrentMs).label) }">{{ offSegAt(offCurrentMs).label }}</div>
+                  <div class="side-sub">
+                    {{ fmtMediaMs(offSegAt(offCurrentMs).start_media_ms) }} → {{ fmtMediaMs(offSegAt(offCurrentMs).end_media_ms) }}
+                    · conf {{ offSegAt(offCurrentMs).conf.toFixed(3) }}
+                  </div>
+                </template>
+                <div v-else class="side-val" style="color:#9ca3af">—</div>
+              </div>
+              <div class="side-item">
+                <div class="side-key">类别（点选高亮）</div>
+                <div class="label-list">
+                  <div class="label-item" :class="{ active: offSelected === null }" @click="selectOffLabel(null)">全部</div>
+                  <div v-for="l in offLegend" :key="l" class="label-item"
+                       :class="{ active: offSelected === l, dim: offSelected !== null && offSelected !== l }"
+                       @click="selectOffLabel(l)"><i :style="{ background: offColor(l) }"></i>{{ l }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+
       <!-- ===== Tab 3: 指标监控 ===== -->
       <el-tab-pane label="指标监控" name="metrics">
         <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
@@ -434,113 +549,6 @@
           </div>
           <div v-else style="color:#9ca3af;padding:20px;text-align:center">
             配置参数后点击「开始测试」
-          </div>
-        </div>
-      </el-tab-pane>
-
-      <!-- ===== Tab 6: 离线推理（只读：结果由 CLI 离线推理落盘） ===== -->
-      <el-tab-pane label="离线推理" name="offline">
-        <!-- ① 选择：布局同 lab 送标工作台的任务表 -->
-        <div class="card">
-          <div class="card-title">① 选择离线结果</div>
-          <div class="task-panel">
-            <div class="task-toolbar">
-              <div class="form-row" style="gap:8px">
-                <label class="field-label">有离线结果的任务</label>
-                <input v-model.trim="offQuery" placeholder="task_id / IP / 状态"
-                       class="plain-input" style="width:220px" @keyup.enter="fetchOffTasks" />
-                <el-button size="small" :loading="offListLoading" @click="fetchOffTasks">刷新</el-button>
-              </div>
-              <span class="task-total">共 {{ offTasks.length }} 条</span>
-            </div>
-            <div class="task-scroll">
-              <table class="task-table">
-                <thead>
-                  <tr>
-                    <th style="width:110px">task_id</th>
-                    <th style="width:90px">状态</th>
-                    <th style="width:150px">离线 steps</th>
-                    <th>source_ip</th>
-                    <th style="width:170px">更新时间</th>
-                    <th style="width:86px">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="t in offTasks" :key="t.task_id"
-                      :class="{ selected: offSel.taskId === t.task_id }"
-                      @click="selectOffTask(t)">
-                    <td class="mono">{{ t.task_id }}</td>
-                    <td>{{ t.status || '—' }}</td>
-                    <td>
-                      <span v-for="s in t.offline_steps" :key="t.task_id + '-' + s" class="step-chip"
-                            :class="{ active: offSel.taskId === t.task_id && offSel.stepId === s }"
-                            @click.stop="selectOffTask(t, s)">{{ s }}</span>
-                    </td>
-                    <td class="mono" :title="t.source_ip || ''">{{ t.source_ip || '—' }}</td>
-                    <td>{{ formatTaskTime(t.updated_time) }}</td>
-                    <td><el-button size="small" type="primary" plain @click.stop="selectOffTask(t)">选择</el-button></td>
-                  </tr>
-                  <tr v-if="!offTasks.length">
-                    <td colspan="6" class="task-empty">{{ offListLoading ? '加载中…' : '暂无离线结果' }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <div class="hint-line">
-            离线结果由 CLI 产出（跑完点刷新）：<code>python -m app.services.inference.offline.cli run --task-id T --step-id S</code>
-          </div>
-        </div>
-
-        <!-- ② 结果：布局同 lab 的播放器 + 侧栏 -->
-        <div class="card" v-show="offLoaded">
-          <div class="card-title">
-            ② 分割结果 · task {{ offSel.taskId }} / step {{ offSel.stepId }}
-            <el-radio-group v-model="offSel.track" size="small" @change="loadOffline" style="margin-left:12px">
-              <el-radio-button value="raw">raw 原始</el-radio-button>
-              <el-radio-button value="processed">processed 标注</el-radio-button>
-            </el-radio-group>
-            <span class="card-meta">时长 {{ fmtMediaMs(offDuration) }} · {{ offSegCount }} 段 · {{ offProducer || '无分割结果' }}</span>
-          </div>
-          <div class="player-layout">
-            <div>
-              <div class="video-wrap"><video ref="offVideoEl" controls preload="metadata"></video></div>
-              <div class="lanes-wrap">
-                <div class="lane-title">分割段<span v-if="!offSegCount">（无动作段）</span></div>
-                <div class="lane-seg"><canvas ref="offSegRef"></canvas></div>
-                <div class="lane-title">类别概率</div>
-                <div class="lane-prob" v-show="offHasProbs"><canvas ref="offProbRef"></canvas></div>
-                <div v-if="!offHasProbs" class="task-empty">该模型不产逐帧概率</div>
-              </div>
-            </div>
-
-            <div class="player-side">
-              <div class="side-item">
-                <div class="side-key">当前播放</div>
-                <div class="side-val">{{ fmtMediaMs(offCurrentMs) }}</div>
-                <div class="side-sub">media_ms = {{ Math.round(offCurrentMs) }}</div>
-              </div>
-              <div class="side-item">
-                <div class="side-key">当前分段</div>
-                <template v-if="offSegAt(offCurrentMs)">
-                  <div class="side-val" :style="{ color: offColor(offSegAt(offCurrentMs).label) }">{{ offSegAt(offCurrentMs).label }}</div>
-                  <div class="side-sub">
-                    {{ fmtMediaMs(offSegAt(offCurrentMs).start_media_ms) }} → {{ fmtMediaMs(offSegAt(offCurrentMs).end_media_ms) }}
-                    · conf {{ offSegAt(offCurrentMs).conf.toFixed(3) }}
-                  </div>
-                </template>
-                <div v-else class="side-val" style="color:#9ca3af">—</div>
-              </div>
-              <div class="side-item">
-                <div class="side-key">类别（点选高亮）</div>
-                <div class="label-list">
-                  <div class="label-item" :class="{ active: offSelected === null }" @click="selectOffLabel(null)">全部</div>
-                  <div v-for="l in offLegend" :key="l" class="label-item"
-                       :class="{ active: offSelected === l, dim: offSelected !== null && offSelected !== l }"
-                       @click="selectOffLabel(l)"><i :style="{ background: offColor(l) }"></i>{{ l }}</div>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </el-tab-pane>
@@ -873,6 +881,8 @@ createApp({
     const offLegend = ref([]);
     const offSelected = ref(null);
     const offQuery = ref('');
+    const offForm = reactive({ task_id: null, step_id: null });   // 输入框；点表格只填这里，点「加载」才生效
+    const offLoading = ref(false);
     const offDuration = ref(0);        // 该轨媒体轴总长（ms）
     const offCurrentMs = ref(0);       // 播放头媒体刻度；timeupdate 驱动，约 4Hz
     const offProducer = ref('');
@@ -929,24 +939,55 @@ createApp({
       }
     }
 
-    // 点行：同一 task 保留当前 step，否则取第一个有结果的 step；点 step 标签：直接选该 step
+    // 点行 / step 标签只填表单（同 lab 的 selectTask）：同一 task 保留已填 step，否则取第一个有结果的 step。
+    // 已加载时换了目标先重置，免得表单与下方结果对不上。
     function selectOffTask(t, step) {
-      const keep = offSel.taskId === t.task_id && t.offline_steps.includes(offSel.stepId);
-      offSel.taskId = t.task_id;
-      offSel.stepId = step ?? (keep ? offSel.stepId : t.offline_steps[0]);
-      loadOffline();
+      const sameTask = Number(offForm.task_id) === t.task_id;
+      const nextStep = step ?? (sameTask && t.offline_steps.includes(Number(offForm.step_id))
+        ? Number(offForm.step_id) : t.offline_steps[0]);
+      const changed = !sameTask || Number(offForm.step_id) !== nextStep;
+      if (offLoaded.value && changed) resetOffline();
+      offForm.task_id = t.task_id;
+      offForm.step_id = nextStep;
+    }
+
+    function loadOffline() {
+      const taskId = Number(offForm.task_id), stepId = Number(offForm.step_id);
+      const blank = (v) => v === null || v === '' || v === undefined;
+      if (blank(offForm.task_id) || blank(offForm.step_id) || !Number.isInteger(taskId) || !Number.isInteger(stepId)) {
+        ElMessage.warning('请填写 task_id 和 step_id');
+        return;
+      }
+      offSel.taskId = taskId;
+      offSel.stepId = stepId;
+      fetchOfflineResult();
+    }
+
+    function resetOffline() {
+      detachOffVideo();
+      offSegChart?.destroy(); offSegChart = null;
+      offProbChart?.destroy(); offProbChart = null;
+      offLoaded.value = false;
+      offSel.track = 'raw';
+      offSelected.value = null;
+      offCurrentMs.value = 0;
     }
 
     function postJson(path, body) {
       return fetch(api(path), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-      }).then(r => { if (!r.ok) throw new Error(`${path} HTTP ${r.status}`); return r.json(); });
+      }).then(r => {
+        if (!r.ok) { const e = new Error(`${path} HTTP ${r.status}`); e.status = r.status; throw e; }
+        return r.json();
+      });
     }
 
-    async function loadOffline() {
+    // 按 offSel（已加载的身份 + 当前轨）取两份结果并渲染；切轨也走这里
+    async function fetchOfflineResult() {
       const { taskId, stepId, track } = offSel;
       if (taskId == null || stepId == null) return;
       const ident = { task_id: taskId, step_id: stepId, track };
+      offLoading.value = true;
       try {
         const [seg, prob] = await Promise.all([
           postJson('/ai/temporal', { ...ident, type: 'segment' }),
@@ -966,8 +1007,14 @@ createApp({
         await nextTick();
         attachOffVideo();
         renderOffCharts();
+        if (!seg.items.length && !prob.labels.length) {
+          ElMessage.info('该 step 还没有离线结果，先用 CLI 运行离线推理');
+        }
       } catch (e) {
-        ElMessage.error('离线结果加载失败: ' + e.message);
+        if (e.status === 404) ElMessage.warning(`该 step 没有 ${track} 轨录像段，请确认录制是否完成或换轨`);
+        else ElMessage.error('离线结果加载失败: ' + e.message);
+      } finally {
+        offLoading.value = false;
       }
     }
 
@@ -1194,9 +1241,9 @@ createApp({
       alarmFilter, alarmRows, fetchAlarms, formatTs, severityType,
       ltConfig, ltRunning, ltResults, ltStats, distChartRef,
       runLatencyTest, resetLatencyTest,
-      offTasks, offListLoading, offSel, offQuery, offLoaded, offSegCount, offHasProbs,
+      offTasks, offListLoading, offSel, offQuery, offForm, offLoading, offLoaded, offSegCount, offHasProbs,
       offLegend, offSelected, offDuration, offCurrentMs, offProducer, offVideoEl, offSegRef, offProbRef,
-      offColor, offSegAt, fmtMediaMs, formatTaskTime, fetchOffTasks, selectOffTask, loadOffline, selectOffLabel,
+      offColor, offSegAt, fmtMediaMs, formatTaskTime, fetchOffTasks, selectOffTask, loadOffline, fetchOfflineResult, resetOffline, selectOffLabel,
     };
   },
 }).use(ElementPlus).mount('#app');
