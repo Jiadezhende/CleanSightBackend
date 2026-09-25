@@ -17,6 +17,7 @@
 | [health.md](health.md) | `/health` | 健康状态与监控统计 |
 | [admin.md](admin.md) | `/admin-f3m8` | 运维 Admin |
 | [lab.md](lab.md) | `/lab-f3m8` | 送标导出 + Label Studio + 离线模型逐帧概率 |
+| [algorithm.md](algorithm.md) | `/algorithm` | 算法类纯计算（图进结论出，不读库不写盘） |
 
 ## 通用约定
 
