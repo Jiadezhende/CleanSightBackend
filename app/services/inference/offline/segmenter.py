@@ -16,7 +16,7 @@
 约束：
 - `frames` 只读，不得原地修改；
 - 策略不访问存储 / ClientManager / CQ / 数据库（纯算法）；
-- 输出每条 `TemporalSegment.producer` 必须等于本策略 `name`；`start <= end`、时间为有限数、
+- 输出每条 `TemporalSegment.producer` 必须等于本策略 `name`（= 类名）；`start <= end`、时间为有限数、
   `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。
 - 输入吃 `FrameDetection`、输出吐 `TemporalSegment`（两者都在 `app.domain`，与在线同型），
   不自定义中间数据壳。
@@ -32,15 +32,12 @@ from app.domain.temporal import TemporalSegment
 
 
 class OfflineSegmenter(ABC):
-    """离线全序列分割策略基类。"""
+    """离线全序列分割策略基类。构造参数全部来自 YAML `offline.params`。"""
 
-    def __init__(self, name: str, subscribes: Sequence[str]):
-        if not name:
-            raise ValueError("offline segmenter name is required")
-        if not subscribes:
-            raise ValueError("offline segmenter subscribes is required")
-        self.name = name
-        self.subscribes: List[str] = list(subscribes)
+    @property
+    def name(self) -> str:
+        """策略身份 = 类名，即产出 `TemporalSegment.producer`。"""
+        return type(self).__name__
 
     @abstractmethod
     def preprocess(self, frames: Sequence[FrameDetection]) -> Any:

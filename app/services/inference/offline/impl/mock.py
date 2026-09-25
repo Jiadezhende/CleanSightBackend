@@ -10,7 +10,7 @@
     preprocess(frames) 接收 inference.read_detections 返回的 List[FrameDetection]，原样传给 segment。
 
 输出:
-    segment(model_input) 返回 List[TemporalSegment]。只要某帧任一订阅 source 存在检测框，
+    segment(model_input) 返回 List[TemporalSegment]。只要某帧任一 source 存在检测框，
     就认为该帧 active；连续 active 帧合并为一个片段。
 """
 
@@ -27,20 +27,11 @@ class BrushRulesSegmenter(OfflineSegmenter):
     """纯规则 Mock 分段器。
 
     Args:
-        name: 策略身份，必须等于产出 TemporalSegment.producer。
-        subscribes: 订阅的 detector/source 名称列表，由 StageFactory 从 YAML 注入。
         label: active 片段写出的动作标签，默认 `mock_action`。
         min_frames: 一个片段至少包含多少个 active 采样帧。
     """
 
-    def __init__(
-        self,
-        name: str,
-        subscribes: Sequence[str],
-        label: str = "mock_action",
-        min_frames: int = 1,
-    ):
-        super().__init__(name, subscribes)
+    def __init__(self, label: str = "mock_action", min_frames: int = 1):
         self.label = label
         self.min_frames = max(1, int(min_frames))
 

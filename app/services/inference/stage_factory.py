@@ -85,16 +85,13 @@ class StageFactory:
         """为指定 Stage 实例化离线分割策略（`stages.<step_id>.offline`），未启用返回 None。
 
         offline 配置 schema（空块 `{}` 或整段缺省 = 不启用该 stage 离线分段；
-        非空即视为有意启用，缺字段一律 fail-fast，不再靠额外 enabled 开关）：
+        非空即视为有意启用，缺 class 即 fail-fast，不再靠额外 enabled 开关）：
             offline:
-              name: <segmenter 身份，= TemporalSegment.producer>
-              subscribes: [<detector.name>, ...]   # 必须全命中同 stage detector
-              class: <OfflineSegmenter 子类全限定路径>
-              params: {...}                         # 原样传入实现类
+              class: <OfflineSegmenter 子类全限定路径>   # 必填；producer = 类名
+              params: {...}                              # 原样 `cls(**params)`
 
-        工厂注入 `name`/`subscribes`，`params` 不得重复声明这两键。`override_class` 支撑
-        CLI `--strategy`（开发期对比不同策略），覆盖配置 `class` 但沿用同一 name/subscribes。
-        配置缺字段 / 未知 detector / 类加载失败一律 **fail-fast**（抛异常，不静默跳过）。
+        `override_class` 支撑 CLI `--strategy`（开发期对比不同策略），覆盖配置 `class`、沿用 `params`。
+        缺 class / 类加载失败一律 **fail-fast**（抛异常，不静默跳过）。
 
         Args:
             stage_name: stage 主键（= str(step_id)）
@@ -108,37 +105,14 @@ class StageFactory:
         if not offline:  # 空块 / 缺省 = 不启用；非空即有意启用，下面缺字段 fail-fast
             return None
 
-        name = offline.get("name")
-        subscribes = offline.get("subscribes")
         class_path = override_class or offline.get("class")
-        if not name:
-            raise ValueError(f"Stage '{stage_name}' offline 缺少 name")
-        if not subscribes:
-            raise ValueError(f"Stage '{stage_name}' offline 缺少 subscribes")
         if not class_path:
             raise ValueError(f"Stage '{stage_name}' offline 缺少 class")
 
-        # subscribes 必须全部命中同 stage 的 detector name
-        detector_names = {d.get("name") for d in stage_config.detectors}
-        unknown = [s for s in subscribes if s not in detector_names]
-        if unknown:
-            raise ValueError(
-                f"Stage '{stage_name}' offline subscribes 引用未知 detector: {unknown}"
-            )
-
         params = dict(offline.get("params") or {})
-        for reserved in ("name", "subscribes"):
-            if reserved in params:
-                raise ValueError(
-                    f"Stage '{stage_name}' offline params 不得重复声明 '{reserved}'（工厂注入）"
-                )
-
         cls = _import_class(class_path)
-        segmenter = cls(name=name, subscribes=list(subscribes), **params)
-        logger.info(
-            "✓ 创建 OfflineSegmenter: %s (class=%s, subscribes=%s)",
-            name, class_path, subscribes,
-        )
+        segmenter = cls(**params)
+        logger.info("✓ 创建 OfflineSegmenter: %s (class=%s)", segmenter.name, class_path)
         return segmenter
 
     def build_task_metric_map(self) -> Dict[str, AlarmMetric]:

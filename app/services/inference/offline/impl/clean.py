@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -554,15 +554,12 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
     def __init__(
         self,
-        name: str,
-        subscribes: Sequence[str],
         model_path: str | None = None,
         min_duration_s: float = 0.2,
         fps: float = 7.5,
         frame_width: int = 640,
         frame_height: int = 480,
     ):
-        super().__init__(name, subscribes)
         self.model_path = model_path
         self.min_duration_s = max(0.0, float(min_duration_s))
         self.fps = float(fps)
@@ -605,7 +602,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
                 {"ts": ts, "label": ACTION_LABELS[label], "conf": round(float(conf), 5)}
                 for ts, label, conf in zip(model_input.timestamps, labels, confs)
             ],
-            "segments": [s.to_json() for s in segments],
+            "segments": [asdict(s) for s in segments],
         }
         return segments
 
