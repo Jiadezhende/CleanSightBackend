@@ -5,7 +5,6 @@
 
 import json
 import math
-from dataclasses import asdict
 
 import pytest
 
@@ -152,11 +151,11 @@ class TestBrushRulesSegmenter:
         ]}
         assert seg.segment(seg.preprocess(_frames(streams))) == []
 
-    def test_debug_result_none(self):
-        """presence 型无逐帧语义：debug_result 恒 None（Runner 据此不落逐帧 JSON）。"""
+    def test_label_probs_none(self):
+        """规则型无逐帧概率：label_probs 恒 None（Runner 据此不落 label_probs.npz）。"""
         seg = BrushRulesSegmenter()
         seg.segment(seg.preprocess(_frames({"a": [make_detector_output(n=1, ts=1.0)]})))
-        assert seg.debug_result() is None
+        assert seg.label_probs() is None
 
 
 # ============================ CleanSegmenter（CLEAN baseline） ============================
@@ -220,7 +219,7 @@ class TestCleanSegmenter:
             "window_stats+business_priors", 249, "clean_bbox_v2_top1_impute+center_window+business_priors",
         )
 
-    def test_no_model_path_hard_fails_without_debug_result(self):
+    def test_no_model_path_hard_fails_without_label_probs(self):
         from app.services.inference.offline.impl.clean import CleanSegmenter
         seg = CleanSegmenter(min_duration_s=0.1, fps=10.0)
         streams = {
@@ -229,17 +228,14 @@ class TestCleanSegmenter:
         }
         with pytest.raises(ValueError, match="model_path"):
             seg.segment(seg.preprocess(_frames(streams)))
-        assert seg.debug_result() is None
+        assert seg.label_probs() is None
 
-    def test_segment_with_model_builds_debug_result(self, monkeypatch):
-        """带权重路径：逐帧标签 → TemporalSegment + debug_result（segments 经 asdict 序列化，不依赖 torch 前向）。"""
+    def test_segment_with_model_builds_label_probs(self, monkeypatch):
+        """带权重路径（前向打桩，不依赖 torch）：逐帧 softmax → TemporalSegment + label_probs 旁路。"""
         from app.services.inference.offline.impl.clean import ACTION_LABELS, CleanMSTCNBiLSTMSegmenter
         seg = CleanMSTCNBiLSTMSegmenter(model_path="unused.pt", min_duration_s=0.1, fps=10.0)
         label = ACTION_LABELS.index("short_brush_cleaning")
-        monkeypatch.setattr(
-            seg, "_predict_with_model",
-            lambda mi: ([label] * mi.frame_count, [0.9] * mi.frame_count),
-        )
+        monkeypatch.setattr(seg, "_predict_with_model", lambda mi: _onehot_probs(mi.frame_count, label, 0.9))
         streams = {
             "clean_large": [_clean_frame(t)["clean_large"] for t in (0.1, 0.2, 0.3)],
             "clean_small": [_clean_frame(t)["clean_small"] for t in (0.1, 0.2, 0.3)],
@@ -248,9 +244,11 @@ class TestCleanSegmenter:
         assert [(s.producer, s.label, s.start, s.end) for s in segs] == [
             ("CleanMSTCNBiLSTMSegmenter", "short_brush_cleaning", 0.1, 0.3),
         ]
-        debug = seg.debug_result()
-        assert debug["segments"] == [asdict(s) for s in segs]
-        json.dumps(debug)  # 调试产物须可 JSON 序列化（Runner 落 offline_debug.json）
+        probs = seg.label_probs()
+        assert probs.labels == tuple(ACTION_LABELS)
+        assert probs.ts.tolist() == [0.1, 0.2, 0.3]
+        assert probs.probs.shape == (3, len(ACTION_LABELS))
+        assert probs.probs[:, label].tolist() == pytest.approx([0.9] * 3)
 
 
 # ============================ Runner ============================
@@ -263,8 +261,8 @@ def _facts_path(root, task_id=1, step_id=2):
     return root / str(task_id) / str(step_id) / "inference" / "temporal.jsonl"
 
 
-def _debug_path(root, task_id=1, step_id=2):
-    return root / str(task_id) / str(step_id) / "inference" / "offline_debug.json"
+def _probs_path(root, task_id=1, step_id=2):
+    return root / str(task_id) / str(step_id) / "inference" / "label_probs.npz"
 
 
 def _write_detections(task_id, step_id):
@@ -303,8 +301,8 @@ class TestOfflineRunner:
         assert len(segs) == 1
         assert segs[0].producer == "BrushRulesSegmenter"
         assert segs[0].label == "brushing"
-        # BrushRulesSegmenter.debug_result() 为 None → 不落逐帧 JSON
-        assert not _debug_path(tmp_storage).exists()
+        # BrushRulesSegmenter.label_probs() 为 None → 不落 label_probs.npz
+        assert not _probs_path(tmp_storage).exists()
 
     def test_rerun_idempotent(self, tmp_storage):
         _write_detections(1, 2)
@@ -340,7 +338,7 @@ class TestOfflineRunner:
                                        "params": {"min_duration_s": 0.1, "fps": 10.0}})
         with pytest.raises(ValueError, match="model_path"):
             OfflineRunner(config=_config(offline)).run(OfflineRunSpec(task_id=1, step_id=2))
-        assert not _debug_path(tmp_storage).exists()
+        assert not _probs_path(tmp_storage).exists()
         assert not _facts_path(tmp_storage).exists()
 
     def test_resolve_stage_fallback_to_mock(self, tmp_storage):
@@ -380,13 +378,13 @@ class TestOfflineRunner:
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
         assert [f.producer for f in loaded if isinstance(f, TemporalEvent)] == ["clean_monitor"]
 
-    def test_clean_segmenter_with_model_writes_facts_and_debug(self, tmp_storage, monkeypatch):
-        """CLEAN 经 Runner 全链路（模型前向打桩）：facts 与 offline_debug.json 均落盘。"""
+    def test_clean_segmenter_with_model_writes_facts_and_label_probs(self, tmp_storage, monkeypatch):
+        """CLEAN 经 Runner 全链路（模型前向打桩）：temporal.jsonl 与 label_probs.npz 均落盘。"""
         from app.services.inference.offline.impl.clean import ACTION_LABELS, _CleanTorchSegmenter
         label = ACTION_LABELS.index("flush")
         monkeypatch.setattr(
             _CleanTorchSegmenter, "_predict_with_model",
-            lambda self, mi: ([label] * mi.frame_count, [0.8] * mi.frame_count),
+            lambda self, mi: _onehot_probs(mi.frame_count, label, 0.8),
         )
         inference_store.append_detections(1, 2, [
             make_frame_detection(ts=t, by_source=_clean_frame(t)) for t in (0.1, 0.2, 0.3, 0.4)
@@ -395,8 +393,19 @@ class TestOfflineRunner:
                    "params": {"model_path": "unused.pt", "min_duration_s": 0.1}}
         res = _runner(offline).run(OfflineRunSpec(task_id=1, step_id=2))
         assert (res.status, res.producer, res.segment_count) == ("completed", "CleanMSTCNBiLSTMSegmenter", 1)
-        debug = json.loads(_debug_path(tmp_storage).read_text(encoding="utf-8"))
-        assert [s["label"] for s in debug["segments"]] == ["flush"]
+        probs = inference_store.read_label_probs(1, 2)
+        assert probs.labels == tuple(ACTION_LABELS)
+        assert probs.ts.tolist() == [0.1, 0.2, 0.3, 0.4]
+        assert probs.probs.argmax(axis=1).tolist() == [label] * 4
+
+    def test_bad_label_probs_shape_skips_bypass_keeps_facts(self, tmp_storage):
+        """旁路形状不一致：不落 npz，事实照常写（旁路不影响主结果）。"""
+        _write_detections(1, 2)
+        offline = {"class": f"{__name__}.BadProbsSegmenter"}
+        res = _runner(offline).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "completed"
+        assert not _probs_path(tmp_storage).exists()
+        assert _facts_path(tmp_storage).exists()
 
 
 class TestOfflineRunnerStrict:
@@ -502,3 +511,28 @@ class TestCli:
             sys.modules.pop(m, None)
         importlib.import_module("app.services.inference.offline.cli")
         assert "app.main" not in sys.modules
+
+
+def _onehot_probs(frame_count, label, conf):
+    """打桩用逐帧 softmax：目标列 conf，其余列均分余量。"""
+    import numpy as np
+    from app.services.inference.offline.impl.clean import ACTION_LABELS
+    c = len(ACTION_LABELS)
+    probs = np.full((frame_count, c), (1.0 - conf) / (c - 1), dtype=np.float32)
+    probs[:, label] = conf
+    return probs
+
+
+class BadProbsSegmenter(OfflineSegmenter):
+    """label_probs 行数与 ts 对不上的策略：验证 Runner 旁路防护。"""
+
+    def preprocess(self, frames):
+        return frames
+
+    def segment(self, model_input):
+        return []
+
+    def label_probs(self):
+        import numpy as np
+        from app.domain.temporal import LabelProbs
+        return LabelProbs(ts=np.array([1.0, 2.0]), probs=np.zeros((3, 2)), labels=("a", "b"))

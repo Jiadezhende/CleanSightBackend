@@ -1,11 +1,11 @@
-"""L3 时序分析产物 —— `{step}/inference/` 下 `temporal.jsonl` 与 `offline_debug.json` 的读写。
+"""L3 时序分析产物 —— `{step}/inference/` 下 `temporal.jsonl` 与 `label_probs.npz` 的读写。
 
     read_temporal(task, step)                回读全部事实，**落盘序**
     write_temporal(task, step, facts)        整体替换（路线 C）
-    write_debug_result(task, step, payload)  离线策略的逐帧中间量，整体替换（路线 C）
+    read_label_probs(task, step)             回读逐帧类别概率；没有则 None
+    write_label_probs(task, step, probs)     整体替换（路线 C）
 
-事实的货币是 `TemporalEvent | TemporalSegment`（`app.domain.temporal`）；调试产物没有形状，收
-`Mapping`——它的键随离线策略变，给了形状就等于让本层认识某个具体模型的中间量。
+货币都在 `app.domain.temporal`：事实是 `TemporalEvent | TemporalSegment`，逐帧概率是 `LabelProbs`。
 
 两条硬约束：
 
@@ -15,16 +15,18 @@
 - **`read_temporal` 不排序**，原样返回落盘顺序。两型没有共同时间键（`TemporalEvent.ts` 对
   `TemporalSegment.start`），层没有依据替调用方选。
 
-依赖上界：`app.domain.temporal`（stdlib only）+ stdlib。
+依赖上界：`app.domain.temporal` + numpy（`LabelProbs` 的货币）+ stdlib。
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List, Mapping, Sequence
+import os
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from app.domain.temporal import TemporalEvent, TemporalSegment
+import numpy as np
+
+from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from . import _jsonl, _layout
 
 logger = logging.getLogger(__name__)
@@ -133,19 +135,57 @@ def write_temporal(
     _jsonl.write_atomic(path, payload)
 
 
-# ── offline_debug.json ───────────────────────────────────────────────────────────
+# ── label_probs.npz ──────────────────────────────────────────────────────────────
+#
+# 三个键：`ts` float64 [T]（无损）、`probs` float16 [T,C]（**有损**，可视化够用，体积减半）、
+# `labels` unicode [C]。读写都 `allow_pickle=False`：盘上只有数值与定长字符串，不给反序列化任意对象的口子。
+
+_PROBS_DISK_DTYPE = np.float16
 
 
-def write_debug_result(task_id: int, step_id: int, payload: Mapping[str, Any]) -> None:
-    """落一份离线策略的逐帧调试产物（路线 C，整体替换；重复写即覆盖）。
+def write_label_probs(task_id: int, step_id: int, probs: LabelProbs) -> None:
+    """**整体替换**该 step 的逐帧类别概率（路线 C：同目录 tmp → `os.replace`）。
 
-    内容由产出方自定，本层只负责序列化与落位——它是给人看的，故 `indent=2`，也没有配套的
-    读函数。
+    只做序列化与落位，不校验形状一致性——那是产出侧的事（本层不认识「合法的概率」）。
 
     Raises:
-        TypeError: payload 不可 JSON 序列化。
-        OSError: 建目录 / 写 tmp / 换名失败。
+        OSError: 建目录 / 写 tmp / 换名失败。失败时 tmp 删除、旧文件原样保留。
     """
-    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.DEBUG_NAME
-    _jsonl.write_atomic(path, text)
+    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.LABEL_PROBS_NAME
+    tmp = path.with_name("." + path.name + ".tmp")
+    try:
+        # 传文件对象而非路径：`np.savez` 收到不以 .npz 结尾的路径会自作主张补后缀，tmp 名就对不上了。
+        with open(tmp, "wb") as f:
+            np.savez(
+                f,
+                ts=np.asarray(probs.ts, dtype=np.float64),
+                probs=np.asarray(probs.probs).astype(_PROBS_DISK_DTYPE),
+                labels=np.asarray(probs.labels, dtype=np.str_),
+            )
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # 清 tmp 再失败不能盖掉原始错因
+            pass
+        raise
+
+
+def read_label_probs(task_id: int, step_id: int) -> Optional[LabelProbs]:
+    """回读该 step 的逐帧类别概率；文件不存在返回 `None`。
+
+    `probs` 以 float32 返回（盘上 float16，见上）；`ts` 与写入时位级相等。
+
+    Raises:
+        ValueError / KeyError: 文件损坏或缺键。与 jsonl 的逐行容错不同，npz 是整体，坏了就是坏了。
+        OSError: 读失败。
+    """
+    path = _layout.domain_dir(task_id, step_id) / _layout.LABEL_PROBS_NAME
+    if not path.exists():
+        return None
+    with np.load(path, allow_pickle=False) as npz:
+        return LabelProbs(
+            ts=npz["ts"].astype(np.float64),
+            probs=npz["probs"].astype(np.float32),
+            labels=tuple(str(x) for x in npz["labels"]),
+        )

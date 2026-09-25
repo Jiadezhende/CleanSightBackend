@@ -2,7 +2,7 @@
 
     detections.jsonl      L1 检测结果，路线 B（追加）
     temporal.jsonl      L3 时序事实，路线 C（原子整体替换）
-    offline_debug.json  离线策略调试件，路线 C
+    label_probs.npz     离线逐帧类别概率，路线 C
 
 全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
 
@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
-from app.domain.temporal import TemporalEvent, TemporalSegment
+from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.storage import inference, tasks
 from app.storage.inference import _detection, _jsonl, _temporal
 
@@ -70,8 +70,8 @@ def _facts_file(root, task_id, step_id):
     return _domain_dir(root, task_id, step_id) / "temporal.jsonl"
 
 
-def _debug_file(root, task_id, step_id):
-    return _domain_dir(root, task_id, step_id) / "offline_debug.json"
+def _probs_file(root, task_id, step_id):
+    return _domain_dir(root, task_id, step_id) / "label_probs.npz"
 
 
 # ---------------------------------------------------------------------------
@@ -366,26 +366,65 @@ class TestFactsReadWrite:
 
 
 # ---------------------------------------------------------------------------
-# offline_debug.json
+# label_probs.npz
 # ---------------------------------------------------------------------------
 
 
-class TestDebugResult:
-    def test_writes_parsable_json_into_domain_dir(self, tmp_storage):
-        inference.write_debug_result(1, 2, {"task_id": 1, "per_frame": [0, 1, 2]})
+def _probs(ts=(1.0, 2.0, 3.0), labels=("idle", "flush")):
+    t = len(ts)
+    p = np.zeros((t, len(labels)), dtype=np.float32)
+    p[:, -1] = 0.75
+    p[:, 0] = 0.25
+    return LabelProbs(ts=np.array(ts, dtype=np.float64), probs=p, labels=tuple(labels))
+
+
+class TestLabelProbs:
+    def test_roundtrip_ts_bit_exact_probs_float16(self, tmp_storage):
+        ts = (1727000000.123456, 1727000000.190123, 1727000000.256789)
+        inference.write_label_probs(1, 2, _probs(ts=ts))
+        got = inference.read_label_probs(1, 2)
+        assert got.ts.dtype == np.float64 and got.ts.tolist() == list(ts)  # ts 是帧身份，位级相等
+        assert got.probs.dtype == np.float32 and got.probs.shape == (3, 2)
+        assert got.probs[:, 1].tolist() == [0.75] * 3                     # 0.75 在 float16 下精确
+        assert got.labels == ("idle", "flush")
+
+    def test_writes_into_domain_dir_only(self, tmp_storage):
+        inference.write_label_probs(1, 2, _probs())
         assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
-        got = json.loads(_debug_file(tmp_storage, 1, 2).read_text(encoding="utf-8"))
-        assert got == {"task_id": 1, "per_frame": [0, 1, 2]}
+        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["label_probs.npz"]
 
     def test_overwrites_previous_run(self, tmp_storage):
-        inference.write_debug_result(1, 2, {"run": 1})
-        inference.write_debug_result(1, 2, {"run": 2})
-        assert json.loads(_debug_file(tmp_storage, 1, 2).read_text(encoding="utf-8")) == {"run": 2}
+        inference.write_label_probs(1, 2, _probs(labels=("idle", "a")))
+        inference.write_label_probs(1, 2, _probs(labels=("idle", "b")))
+        assert inference.read_label_probs(1, 2).labels == ("idle", "b")
 
-    def test_unserializable_payload_touches_nothing(self, tmp_storage):
-        with pytest.raises(TypeError):
-            inference.write_debug_result(1, 2, {"obj": object()})
+    def test_missing_returns_none(self, tmp_storage):
+        assert inference.read_label_probs(1, 2) is None
         assert list(tmp_storage.iterdir()) == []
+
+    def test_empty_sequence_roundtrips(self, tmp_storage):
+        inference.write_label_probs(
+            1, 2, LabelProbs(ts=np.zeros(0), probs=np.zeros((0, 2)), labels=("idle", "a"))
+        )
+        got = inference.read_label_probs(1, 2)
+        assert got.ts.shape == (0,) and got.probs.shape == (0, 2)
+
+    def test_no_pickle_on_disk(self, tmp_storage):
+        inference.write_label_probs(1, 2, _probs())
+        with np.load(_probs_file(tmp_storage, 1, 2), allow_pickle=False) as npz:  # 能以禁 pickle 读回即无对象数组
+            assert sorted(npz.files) == ["labels", "probs", "ts"]
+
+    def test_failed_write_keeps_old_file_and_no_tmp(self, tmp_storage, monkeypatch):
+        inference.write_label_probs(1, 2, _probs(labels=("idle", "old")))
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_temporal.os, "replace", boom)
+        with pytest.raises(OSError):
+            inference.write_label_probs(1, 2, _probs(labels=("idle", "new")))
+        assert inference.read_label_probs(1, 2).labels == ("idle", "old")
+        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["label_probs.npz"]
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +460,7 @@ class TestDeleteDomain:
         """supersede 清的是整域：新 run 的检测结果换了，旧 facts 是对旧检测结果的分析，留着即脏数据。"""
         inference.append_detections(1, 2, [_frame(1.0)])
         inference.write_temporal(1, 2, [_seg()])
-        inference.write_debug_result(1, 2, {"run": 1})
+        inference.write_label_probs(1, 2, _probs())
 
         assert inference.delete(1, 2) is True
         assert not _domain_dir(tmp_storage, 1, 2).exists()

@@ -24,7 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from app.domain.temporal import TemporalSegment
+import numpy as np
+
+from app.domain.temporal import LabelProbs, TemporalSegment
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
@@ -89,8 +91,10 @@ class OfflineRunner:
         validated = self._validate(facts, producer)
         validated.sort(key=lambda f: (f.start, f.end, f.label))
 
+        # 先旁路、后事实：事实是结果的真源，它落盘即代表本次运行完成；旁路在前，
+        # 页面读到新事实时对应的概率必然已是同一次运行的（反序会短暂配上旧概率）。
+        self._maybe_write_label_probs(spec, segmenter)
         self._replace_segments(spec.task_id, spec.step_id, validated)
-        self._maybe_write_debug(spec, segmenter)
         logger.info(
             "[OfflineRunner] completed task=%s step=%s producer=%s segments=%d",
             spec.task_id, spec.step_id, producer, len(validated),
@@ -114,20 +118,26 @@ class OfflineRunner:
         inference_store.write_temporal(task_id, step_id, kept + facts)
 
     @staticmethod
-    def _maybe_write_debug(spec: OfflineRunSpec, segmenter) -> None:
-        """策略若产逐帧调试产物（debug_result 非 None），落一份调试 JSON。
+    def _maybe_write_label_probs(spec: OfflineRunSpec, segmenter) -> None:
+        """策略若产逐帧类别概率（`label_probs()` 非 None），落 `label_probs.npz`。
 
-        与 temporal.jsonl 同域，供调试/对比；写失败只告警不影响已成功的事实落盘。
+        旁路不影响主结果：形状不一致或写失败只告警、不落，事实照常写。
         """
-        debug = segmenter.debug_result()
-        if debug is None:
+        probs = segmenter.label_probs()
+        if probs is None:
             return
-        payload = {"task_id": spec.task_id, "step_id": spec.step_id, **debug}
+        problem = _label_probs_problem(probs)
+        if problem:
+            logger.warning(
+                "[OfflineRunner] label_probs 形状不一致，不落盘 task=%s step=%s: %s",
+                spec.task_id, spec.step_id, problem,
+            )
+            return
         try:
-            inference_store.write_debug_result(spec.task_id, spec.step_id, payload)
+            inference_store.write_label_probs(spec.task_id, spec.step_id, probs)
         except Exception as e:
             logger.warning(
-                "[OfflineRunner] 逐帧调试 JSON 落盘失败 task=%s step=%s: %s",
+                "[OfflineRunner] label_probs 落盘失败 task=%s step=%s: %s",
                 spec.task_id, spec.step_id, e,
             )
 
@@ -151,3 +161,15 @@ class OfflineRunner:
             if not (0.0 <= f.conf <= 1.0):
                 raise ValueError(f"TemporalSegment conf 越界: {f.conf}")
         return facts
+
+
+def _label_probs_problem(probs: LabelProbs) -> str:
+    """LabelProbs 形状一致性检查，合法返回空串。"""
+    ts, p = np.asarray(probs.ts), np.asarray(probs.probs)
+    if ts.ndim != 1 or p.ndim != 2:
+        return f"期望 ts [T] 与 probs [T,C]，得到 ts{ts.shape} probs{p.shape}"
+    if ts.shape[0] != p.shape[0]:
+        return f"ts 与 probs 行数不等：{ts.shape[0]} != {p.shape[0]}"
+    if len(probs.labels) != p.shape[1]:
+        return f"labels 数与 probs 列数不等：{len(probs.labels)} != {p.shape[1]}"
+    return ""

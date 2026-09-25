@@ -10,7 +10,7 @@ task/step 目录域 —— **把 step 目录当整体看**的那三件事：有�
 
     {root}/{task_id}/{step_id}/
       hls/        段 / init / playlist / sidecar / metadata
-      inference/  detections.jsonl / temporal.jsonl / offline_debug.json
+      inference/  detections.jsonl / temporal.jsonl / label_probs.npz
       lab/        送标与导出的临时件（用完即删，残留随 step TTL 回收）
 
     list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按活动时间降序

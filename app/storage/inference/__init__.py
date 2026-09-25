@@ -9,17 +9,17 @@
     inference.delete(task_id, step_id)                            # 新 run 起始清掉上一代
 
 两份产物按**产出层**分模块：`_detection` 管目标检测产物（L1），`_temporal` 管时序分析产物
-（L3）+ 离线调试件。共用 `_layout`（域根与文件名）和 `_jsonl`（行框定与原子写）。
+（L3）+ 离线逐帧类别概率。共用 `_layout`（域根与文件名）和 `_jsonl`（行框定与原子写）。
 
 ## 对外成员
 
     detections.jsonl      append_detections / read_detections        路线 B（追加）
     temporal.jsonl      read_temporal / write_temporal         路线 C（原子整体替换）
-    offline_debug.json  write_debug_result                     路线 C
+    label_probs.npz     read_label_probs / write_label_probs   路线 C（原子整体替换）
     整域                delete                                 三份产物一起没
 
 货币是 `app.domain` 的跨服务契约：`FrameDetection`（`app.domain.detection`）与
-`TemporalEvent` / `TemporalSegment`（`app.domain.temporal`）。本域不出自己的类型——没有「从文件名
+`TemporalEvent` / `TemporalSegment` / `LabelProbs`（`app.domain.temporal`）。本域不出自己的类型——没有「从文件名
 解出来的身份」这种形状（对照 `hls.SegmentRef`），故没有 `types.py`。
 
 ## 两条调用方必须知道的约束
@@ -35,14 +35,13 @@
     append_temporal     `TemporalEvent` 今天零生产者；在线打点落地时再加，那时它才有 owner
     iter_detections     离线要的是全序列，流式口没有消费方
     detections_path 等  层外没有取用载荷字节的位置，不出路径
-    read_debug_result   调试产物是给人看的
 
 ## 落盘结构
 
     {root}/{task_id}/{step_id}/inference/
       detections.jsonl      每帧一行：ts + {流名: [检测框]} + 帧分辨率
       temporal.jsonl      每条一行：`type` 判别 event / segment
-      offline_debug.json  离线策略逐帧中间量，无固定形状
+      label_probs.npz     离线分割逐帧类别概率：ts [T] + probs [T,C] + labels [C]
       .{name}.tmp         路线 C 的暂存，换名后即消失
 
 ## 边界
@@ -54,13 +53,14 @@
 
 from ._detection import append_detections, read_detections
 from ._layout import delete
-from ._temporal import read_temporal, write_debug_result, write_temporal
+from ._temporal import read_label_probs, read_temporal, write_label_probs, write_temporal
 
 __all__ = [
     "append_detections",
     "delete",
     "read_detections",
+    "read_label_probs",
     "read_temporal",
-    "write_debug_result",
+    "write_label_probs",
     "write_temporal",
 ]

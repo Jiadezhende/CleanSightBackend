@@ -21,14 +21,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
 from app.domain.detection import DetBox, FrameDetection
-from app.domain.temporal import TemporalSegment
+from app.domain.temporal import LabelProbs, TemporalSegment
 from app.services.inference.offline.segmenter import OfflineSegmenter
 
 
@@ -567,7 +567,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self.frame_height = max(1, int(frame_height))
         self._model = None
         self._normalizer: Tuple[Any, Any] | None = None
-        self._last_result: dict | None = None
+        self._last_probs: LabelProbs | None = None
 
     def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         """帧级 FrameDetection 序列 → 基础 v2 特征（113 维）。
@@ -588,30 +588,24 @@ class _CleanTorchSegmenter(OfflineSegmenter):
                 "本地回环请使用 mock.BrushRulesSegmenter"
             )
 
-        labels, confs = self._predict_with_model(model_input)
+        probs = self._predict_with_model(model_input)
+        labels = probs.argmax(axis=1).astype("int64").tolist()
+        confs = probs.max(axis=1).astype("float32").tolist()
 
         segments = self._labels_to_segments(model_input.timestamps, labels, confs)
-        self._last_result = {
-            "model_version": self.model_version,
-            "model_class": type(self).__name__,
-            "feature_method": self.feature_method,
-            "feature_version": model_input.feature_version,
-            "feature_dim": model_input.feature_dim,
-            "frame_count": model_input.frame_count,
-            "frame_predictions": [
-                {"ts": ts, "label": ACTION_LABELS[label], "conf": round(float(conf), 5)}
-                for ts, label, conf in zip(model_input.timestamps, labels, confs)
-            ],
-            "segments": [asdict(s) for s in segments],
-        }
+        self._last_probs = LabelProbs(
+            ts=np.asarray(model_input.timestamps, dtype=np.float64),
+            probs=probs,
+            labels=tuple(ACTION_LABELS),
+        )
         return segments
 
-    def debug_result(self) -> dict | None:
-        """返回最近一次 segment() 的逐帧预测/分段调试快照（未跑过为 None）。"""
-        return self._last_result
+    def label_probs(self) -> LabelProbs | None:
+        """最近一次 segment() 的逐帧 softmax（未跑过为 None），供可视化旁路落盘。"""
+        return self._last_probs
 
-    def _predict_with_model(self, model_input: ModelInput) -> Tuple[List[int], List[float]]:
-        """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 (argmax 标签, 置信度)。"""
+    def _predict_with_model(self, model_input: ModelInput) -> np.ndarray:
+        """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 softmax `[T, len(ACTION_LABELS)]`。"""
         import numpy as np
         import torch
 
@@ -628,9 +622,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         with torch.no_grad():
             logits = self._model(x)[0].transpose(0, 1)
             probs = torch.softmax(logits, dim=-1).cpu().numpy()
-        labels = probs.argmax(axis=1).astype("int64").tolist()
-        confs = probs.max(axis=1).astype("float32").tolist()
-        return labels, confs
+        return probs.astype(np.float32)
 
     def _load_model(self, model_input: ModelInput, class_count: int) -> None:
         """加载 .pt checkpoint 并校验 feature_names/feature_version 与后端输入一致，取出 normalizer。"""

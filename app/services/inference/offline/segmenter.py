@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Sequence
 
 from app.domain.detection import FrameDetection
-from app.domain.temporal import TemporalSegment
+from app.domain.temporal import LabelProbs, TemporalSegment
 
 
 class OfflineSegmenter(ABC):
@@ -54,11 +54,10 @@ class OfflineSegmenter(ABC):
         """消费 `preprocess` 的输出，做模型推理并解码为动作分段事实。"""
         raise NotImplementedError
 
-    def debug_result(self) -> Optional[dict]:
-        """可选：返回上一次 `segment()` 的逐帧调试产物（纯 dict），默认无。
+    def label_probs(self) -> Optional[LabelProbs]:
+        """可选旁路：上一次 `segment()` 的逐帧类别概率，仅供可视化，默认无。
 
-        产逐帧预测的策略可 override，返回 `{"frame_predictions": [...], "segments": [...]}`；
-        Runner 若拿到非 None，会补 task/step 落 `offline_debug.json`（见 runner.py）。
-        presence 型等无逐帧语义的策略保持默认 None → 不落该文件。
+        产逐帧概率的模型 override；Runner 拿到非 None 时先于 temporal.jsonl 落 `label_probs.npz`。
+        它不参与任何判断，也不是契约的一部分——规则型策略保持默认 None 即可。
         """
         return None
