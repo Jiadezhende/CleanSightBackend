@@ -34,6 +34,7 @@ re-export 会让即便只取轻量 `.types.DetectionTask` 的调用方也拉起 
 的重导入链。消费方一律走显式深路径按需导入：
 
     单例          from app.services.inference.online.instance import inference_manager
+                  from app.services.inference.offline.instance import offline_job_service
     总编排        from app.services.inference.online.manager import InferenceManager
     检测基类      from app.services.inference.online.detection.detector import Detector, YOLODetector
     时序基类      from app.services.inference.online.temporal.operator import Operator
@@ -59,19 +60,27 @@ __all__ = ["lifespan"]
 
 @asynccontextmanager
 async def lifespan():
-    """AI 推理服务生命周期管理
+    """AI 推理服务生命周期管理：在线 manager 先起后停，离线作业服务后起先停。
+
+    离线先停：停机时先 kill 在跑的离线子进程，不让它和在线收尾抢 CPU。
 
     单例 import 写在函数体内（规范 §3）：这是本包「零 re-export」原则的开关条款——
     写在模块级就等于把 `instance.py` 的 eager 构造重新摊给每个 import 本包的人。
     """
+    from .offline.instance import offline_job_service
     from .online.instance import inference_manager
 
     inference_manager.start()
     logger.info("[InferenceService] Inference service started")
+    offline_job_service.start()
 
     try:
         yield
     finally:
+        try:
+            offline_job_service.stop()
+        except Exception:
+            logger.exception("[InferenceService] Error stopping offline job service")
         # lifespan finally 执行时 uvicorn 已 cancel 所有 WebSocket 任务，
         # 事件循环无其他等待方，直接同步调用即可。
         try:

@@ -147,6 +147,7 @@ LAYER_PACKAGES = {
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",
     "inference_manager": "app.services.inference.online.instance",
+    "offline_job_service": "app.services.inference.offline.instance",
     "persistence_manager": "app.services.persistence.instance",
     "recording_service": "app.services.recording.instance",
     "health_monitor": "app.services.health_monitor.instance",
