@@ -6,14 +6,16 @@
     3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；
     4. 校验 + 排序，**读回既有事实 → 删掉该 step 全部旧分段、保留 TemporalEvent → 整体写回**。
 
+**换代校验**：读前记下 `detections_stamp`，读完、写前各核对一次；不等即 `superseded`、什么都不写
+（输入被追加 = 未封口；被整域删后重建 = 同 step 新一代 run 已开写）。丢弃不重试。
+
 路由：`strict=False`（CLI 默认）未配 step 经 `resolve_stage` 回落 MOCK；`strict=True`（作业服务）
 只认精确命中的 stage，未配 / offline 为空直接 skipped，不回落。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
 落盘全经 `app.storage.inference`（存储根归 `settings`，故本类不收 `base_dir`）。
 
-**调用方须保证输入已封口**：step 已停写、且 recording 的 detections 队列已把缓冲排空
-（在线链路是异步落盘的）。Runner 不证明这一点。
+调用方仍应只对已停写的 step 提交（运行中的 step 必然 superseded，白算一次）。
 """
 
 from __future__ import annotations
@@ -46,7 +48,10 @@ class OfflineRunSpec:
 
 @dataclass(frozen=True)
 class OfflineRunResult:
-    """一次离线运行的结果。status ∈ {completed, skipped}；异常经 run() 抛出，不落此结构。"""
+    """一次离线运行的结果。status ∈ {completed, skipped, superseded}；异常经 run() 抛出，不落此结构。
+
+    superseded = 换代校验未过（输入在运行期间变了），本次什么都没写。
+    """
 
     status: str
     producer: Optional[str]
@@ -80,16 +85,22 @@ class OfflineRunner:
             return OfflineRunResult("skipped", None, 0, f"stage '{stage_key}' offline 未启用")
 
         producer = segmenter.name
+        stamp = inference_store.detections_stamp(spec.task_id, spec.step_id)
         frames = inference_store.read_detections(spec.task_id, spec.step_id)
         if not frames:
             # 无检测结果：跳过，不覆盖旧事实
             return OfflineRunResult("skipped", producer, 0, "该 step 无检测结果")
+        if inference_store.detections_stamp(spec.task_id, spec.step_id) != stamp:
+            return self._superseded(spec, producer, "读取期间检测结果被改写（未封口或已换代）")
 
         model_input = segmenter.preprocess(frames)
         facts = segmenter.segment(model_input)  # 算法异常向上抛出，不写
 
         validated = self._validate(facts, producer)
         validated.sort(key=lambda f: (f.start, f.end, f.label))
+
+        if inference_store.detections_stamp(spec.task_id, spec.step_id) != stamp:
+            return self._superseded(spec, producer, "运行期间检测结果被追加或换代，放弃写入")
 
         # 先旁路、后事实：事实是结果的真源，它落盘即代表本次运行完成；旁路在前，
         # 页面读到新事实时对应的概率必然已是同一次运行的（反序会短暂配上旧概率）。
@@ -100,6 +111,13 @@ class OfflineRunner:
             spec.task_id, spec.step_id, producer, len(validated),
         )
         return OfflineRunResult("completed", producer, len(validated))
+
+    @staticmethod
+    def _superseded(spec: OfflineRunSpec, producer: str, message: str) -> OfflineRunResult:
+        logger.warning(
+            "[OfflineRunner] superseded task=%s step=%s: %s", spec.task_id, spec.step_id, message,
+        )
+        return OfflineRunResult("superseded", producer, 0, message)
 
     @staticmethod
     def _replace_segments(task_id: int, step_id: int, facts: List[TemporalSegment]) -> None:

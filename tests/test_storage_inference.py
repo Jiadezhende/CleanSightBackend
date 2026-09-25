@@ -16,6 +16,7 @@
 """
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -230,6 +231,40 @@ class TestDetectionsReadWrite:
         with pytest.raises(OSError):
             inference.append_detections(1, 2, [_frame(1.0)])
 
+
+
+class TestDetectionsStamp:
+    """版本戳只做相等比较：追加、整域删后重建、删除都让它变；只读不变。"""
+
+    def test_missing_is_none(self, tmp_storage):
+        assert inference.detections_stamp(1, 2) is None
+
+    def test_read_keeps_stamp(self, tmp_storage):
+        inference.append_detections(1, 2, [_frame(1.0)])
+        stamp = inference.detections_stamp(1, 2)
+        inference.read_detections(1, 2)
+        assert inference.detections_stamp(1, 2) == stamp
+
+    def test_append_changes_stamp(self, tmp_storage):
+        inference.append_detections(1, 2, [_frame(1.0)])
+        stamp = inference.detections_stamp(1, 2)
+        inference.append_detections(1, 2, [_frame(2.0)])
+        assert inference.detections_stamp(1, 2) != stamp
+
+    def test_delete_then_rewrite_changes_stamp(self, tmp_storage):
+        """换代：同内容重写也要变。
+
+        上一代文件先回拨 mtime：Linux 上 rmtree 后 inode 可能立刻复用、mtime 精度是毫秒级，同一
+        tick 内重写同内容会撞戳；真实换代时上一代戳早于重写数秒以上，回拨即还原这个前提。
+        """
+        inference.append_detections(1, 2, [_frame(1.0)])
+        old = _detections_file(tmp_storage, 1, 2)
+        os.utime(old, ns=(old.stat().st_atime_ns, old.stat().st_mtime_ns - 10**9))
+        stamp = inference.detections_stamp(1, 2)
+        inference.delete(1, 2)
+        assert inference.detections_stamp(1, 2) is None
+        inference.append_detections(1, 2, [_frame(1.0)])
+        assert inference.detections_stamp(1, 2) != stamp
 
 # ---------------------------------------------------------------------------
 # temporal.jsonl：codec 往返（T1）

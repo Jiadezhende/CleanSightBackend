@@ -536,3 +536,79 @@ class BadProbsSegmenter(OfflineSegmenter):
         import numpy as np
         from app.domain.temporal import LabelProbs
         return LabelProbs(ts=np.array([1.0, 2.0]), probs=np.zeros((3, 2)), labels=("a", "b"))
+
+
+# ============================ 换代校验 ============================
+
+def _late_frame(ts=9.0):
+    return make_frame_detection(ts=ts, by_source={"clean_large": make_detector_output(n=1, ts=ts)})
+
+
+class _ProbsSegmenter(OfflineSegmenter):
+    """产一段 + 一份合法 label_probs；子类在 segment() 里改输入，验证两份产物都不落。"""
+
+    def preprocess(self, frames):
+        return frames
+
+    def mutate(self):
+        raise NotImplementedError
+
+    def segment(self, model_input):
+        self.mutate()
+        return [TemporalSegment(producer=self.name, label="m", start=0.0, end=1.0)]
+
+    def label_probs(self):
+        import numpy as np
+        from app.domain.temporal import LabelProbs
+        return LabelProbs(ts=np.array([1.0, 2.0]), probs=np.ones((2, 1)), labels=("a",))
+
+
+class AppendDuringSegmentSegmenter(_ProbsSegmenter):
+    """运行期间残批迟到落盘（输入未封口）。"""
+
+    def mutate(self):
+        inference_store.append_detections(1, 2, [_late_frame()])
+
+
+class RegenDuringSegmentSegmenter(_ProbsSegmenter):
+    """运行期间同 step 新一代 run 开写：recording 整域删后重建。"""
+
+    def mutate(self):
+        inference_store.delete(1, 2)
+        inference_store.append_detections(1, 2, [_late_frame()])
+
+
+class TestOfflineRunnerSupersede:
+    """输入戳在读 / 算期间变了 → superseded，temporal 与 label_probs 都不写。"""
+
+    @pytest.mark.parametrize("cls", ["AppendDuringSegmentSegmenter", "RegenDuringSegmentSegmenter"])
+    def test_input_changed_during_segment(self, tmp_storage, cls):
+        _write_detections(1, 2)
+        res = _runner({"class": f"{__name__}.{cls}"}).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert (res.status, res.segment_count) == ("superseded", 0)
+        assert not _facts_path(tmp_storage).exists()
+        assert not _probs_path(tmp_storage).exists()
+
+    def test_input_changed_during_read(self, tmp_storage, monkeypatch):
+        _write_detections(1, 2)
+        real_read = inference_store.read_detections
+
+        def read_then_append(task_id, step_id):
+            frames = real_read(task_id, step_id)
+            inference_store.append_detections(task_id, step_id, [_late_frame()])
+            return frames
+
+        monkeypatch.setattr(inference_store, "read_detections", read_then_append)
+        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "superseded"
+        assert not _facts_path(tmp_storage).exists()
+
+    def test_superseded_keeps_previous_result(self, tmp_storage):
+        """上一次的结果原样保留（superseded 不是「清空」）。"""
+        _write_detections(1, 2)
+        _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+        before = inference_store.read_temporal(1, 2)
+        res = _runner({"class": f"{__name__}.AppendDuringSegmentSegmenter"}).run(
+            OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "superseded"
+        assert inference_store.read_temporal(1, 2) == before

@@ -4,6 +4,7 @@
 
     inference.append_detections(task_id, step_id, [frame, ...])     # 在线写回，追加
     inference.read_detections(task_id, step_id)                     # 离线回读，ts 升序
+    inference.detections_stamp(task_id, step_id)                    # 版本戳，核对输入没被追加 / 换代
     facts = inference.read_temporal(task_id, step_id)               # 读 → 合并 → 写
     inference.write_temporal(task_id, step_id, merged)              # 整体替换
     inference.delete(task_id, step_id)                            # 新 run 起始清掉上一代
@@ -14,6 +15,7 @@
 ## 对外成员
 
     detections.jsonl      append_detections / read_detections        路线 B（追加）
+                          detections_stamp                           版本戳（只做相等比较）
     temporal.jsonl      read_temporal / write_temporal         路线 C（原子整体替换）
     label_probs.npz     read_label_probs / write_label_probs   路线 C（原子整体替换）
     整域                delete                                 三份产物一起没
@@ -51,13 +53,14 @@
 串行（规范 §6）。IO 失败一律 `OSError` 原样抛，包成什么由调用方定。
 """
 
-from ._detection import append_detections, read_detections
+from ._detection import append_detections, detections_stamp, read_detections
 from ._layout import delete
 from ._temporal import read_label_probs, read_temporal, write_label_probs, write_temporal
 
 __all__ = [
     "append_detections",
     "delete",
+    "detections_stamp",
     "read_detections",
     "read_label_probs",
     "read_temporal",

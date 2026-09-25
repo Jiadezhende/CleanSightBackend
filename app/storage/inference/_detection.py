@@ -2,6 +2,7 @@
 
     append_detections(task, step, frames)     追加一批（一次 open("a")，包内不攒批）
     read_detections(task, step)               回读整段，按 ts 升序
+    detections_stamp(task, step)              文件版本戳，离线用来核对输入是否被追加 / 换代
 
 货币是 `FrameDetection`。**路线 B（追加）**：每帧一条、文件只增不改，没有「先造好一个完整产
 物」这回事。删除不在这里——域内删除口径只有 `_layout.delete`（整域）。
@@ -18,7 +19,7 @@ Windows 的 `mode="a"` 也不保证追加原子），同一 step 的写与 `_lay
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from . import _jsonl, _layout
@@ -128,3 +129,16 @@ def read_detections(task_id: int, step_id: int) -> List[FrameDetection]:
             logger.warning("[storage.inference] 跳过形状不对的 record %s: %s", path, e)
     frames.sort(key=lambda ff: ff.ts)
     return frames
+
+
+def detections_stamp(task_id: int, step_id: int) -> Optional[Tuple[int, int, int]]:
+    """检测结果文件的版本戳 `(inode, size, mtime_ns)`；文件不存在返回 None。
+
+    不透明值，只做相等比较：前后两次不等 = 期间被追加（未封口）、被整域删后重建（换代）或被删。
+    """
+    path = _layout.domain_dir(task_id, step_id) / _layout.DETECTIONS_NAME
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
