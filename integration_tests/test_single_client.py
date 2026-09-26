@@ -12,7 +12,7 @@
     5 - 仅 start:   调 start 但不推流(no-stream) 或 不调 terminate(no-terminate)
     6 - 延迟推流:   先调 start（流未就绪），N秒后推流，验证健康监控自动重连（Bug 2）
     7 - CLEAN阶段:  current_step=2 → CLEAN stage，验证帧透传不黑屏
-    8 - MOCK阶段:   无效 current_step → MOCK fallback，验证帧透传不黑屏
+    8 - MOCK阶段:   未配置的 current_step → MOCK fallback，验证帧透传不黑屏
     9 - 阶段切换:   start(LEAK) → DB 改 step=2 → 再 start 触发全量重建 → CLEAN
 
 参数:
@@ -26,7 +26,7 @@
     --fps         <int>                默认 30
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
     --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
-    --current-step <step>              任务阶段(1=LEAK/2=CLEAN/其它=MOCK)，覆盖场景默认
+    --current-step <step>              任务阶段(1=LEAK/2=CLEAN/其它数字=MOCK)，覆盖场景默认
 
 维度说明:
     --scenario     决定「怎么跑」（生命周期：正常/断流/延迟/不 terminate…）
@@ -636,22 +636,23 @@ def run_scenario_7(args):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 8: 无效 current_step → MOCK 阶段透传
+# Scenario 8: 未配置的 current_step → MOCK 阶段透传
 # ---------------------------------------------------------------------------
 
 
 def run_scenario_8(args):
-    """无效 current_step → MOCK 阶段 fallback（验证不黑屏）。
+    """未配置的 current_step → MOCK 阶段 fallback（验证不黑屏）。
 
-    本质是「标准生命周期 + 无效 current_step」的预设别名，等价于
-    `--scenario 1 --current-step 未知阶段`。--current-step 可进一步覆盖。
+    本质是「标准生命周期 + 未配置的数字 current_step」的预设别名，等价于
+    `--scenario 1 --current-step 99`。--current-step 可进一步覆盖。
+    非数字 current_step 属参数错误，/api/start 直接失败，不走 MOCK。
     """
     _run_simple_lifecycle(
         args,
         name="Scenario 8",
-        subtitle="无效 current_step → MOCK 阶段透传（验证不黑屏）",
-        current_step_default="未知阶段",
-        extra=("current_step = '未知阶段' → 预期路由到 MOCK stage",),
+        subtitle="未配置的 current_step → MOCK 阶段透传（验证不黑屏）",
+        current_step_default="99",
+        extra=("current_step = '99'（未配置）→ 预期路由到 MOCK stage",),
         tail=("  验证: 后端日志应有 MOCK stage 路由，WebSocket 帧正常推送（无黑屏）",),
     )
 
@@ -769,7 +770,7 @@ def main():
                        --mode no-terminate: start 但不 terminate
   6  延迟推流:        先 start（无流，预期失败）→ N秒后推流 → 验证自动重连 (Bug 2)
   7  CLEAN阶段:       别名 = scenario 1 + current_step=2 → CLEAN stage（验证不黑屏）
-  8  MOCK阶段:        别名 = scenario 1 + 无效 current_step → MOCK fallback（验证不黑屏）
+  8  MOCK阶段:        别名 = scenario 1 + current_step=99（未配置）→ MOCK fallback（验证不黑屏）
   9  阶段切换:        start(step=1/LEAK) → DB改step=2 → start again → 全量重建 → CLEAN stage
 
 提示: --current-step 可覆盖任意场景的默认阶段，
@@ -785,8 +786,8 @@ def main():
         "--current-step",
         default=None,
         dest="current_step",
-        help="任务 current_step（决定推理 workflow：1=LEAK / 2=CLEAN / 其它=MOCK）。"
-             "默认随场景（1-6→1，7→2，8→MOCK）；显式指定可覆盖场景默认，"
+        help="任务 current_step（决定推理 workflow：1=LEAK / 2=CLEAN / 其它数字=MOCK，非数字 start 失败）。"
+             "默认随场景（1-6→1，7→2，8→99/MOCK）；显式指定可覆盖场景默认，"
              "实现「任意阶段 × 任意生命周期」自由组合。",
     )
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
