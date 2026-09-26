@@ -158,11 +158,13 @@ class DetectionService:
                 )
                 continue
 
-            # 失败可见性：pool 把模型异常降级成 success=False 的空结果，下游与「真没检到」
-            # 不可分。此处 cq.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
+            # 失败可见性：pool 把模型异常降级成 success=False 的空结果（画面照常，只是没框）。
+            # 此处 cq.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
             # 聚合计数由 pool.infer_failure_total 承接、此处不再重复计数。
+            degraded = False
             for task_name, detection_output in frame.by_source.items():
                 if not detection_output.success:
+                    degraded = True
                     logger.warning(
                         "[Worker] inference degraded (empty result): task=%s model=%s error=%s",
                         cq.task_id, task_name, detection_output.error,
@@ -174,8 +176,11 @@ class DetectionService:
             cq.set_latest_detection(frame)
             # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）
             cq.mark_startup_milestone("first_inference")
-            # Path 3: 落盘缓冲（常开，offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
+            # Path 3: 落盘缓冲（offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
             # 由 recording 的 sweeper 每 tick 拉走写 detections.jsonl。落的是同一份帧级
             # FrameDetection（与帧窗/快照共用一个对象）。
-            cq.append_ca_detections(frame)
+            # 降级帧不落：落盘格式不带 success，空框会被离线当成「没检出」。失败时段在离线侧
+            # 是时间空洞；整个 run 全失败则该 step 无检测结果（离线 skipped）。
+            if not degraded:
+                cq.append_ca_detections(frame)
 
