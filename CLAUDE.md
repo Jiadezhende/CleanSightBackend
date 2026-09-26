@@ -14,7 +14,7 @@ AI 视觉巡检后端系统，对实时 RTSP 流提供推理、HLS 录制、告�
 |------|------|
 | 懂架构 / 数据流 / 各服务内部 / schema（描述性） | 先读知识库 [docs/kb/INDEX.md](docs/kb/INDEX.md)，**再扫 [docs/update/](docs/update/) 里晚于 KB 更新时间的增量**（见下方注） |
 | 对外 HTTP / WS 端点契约（请求响应 schema、字段语义、错误码） | [docs/api/](docs/api/)（按 router 分文件，README 是索引 + 全局约定）；路由怎么接线属架构，去 KB |
-| 开发规范：分支提交、测试、模块内聚与解耦、日志、检测点契约、导入写法 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| 开发规范：分支提交、测试、模块内聚与解耦、日志、检测点契约、演进原则（先最简再完善）与重构流程、导入写法 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | 部署：装环境、物料分发、`.env` / 端口、启动验证（Linux / Windows / PPU） | `/deploy` skill（[.claude/skills/deploy/SKILL.md](.claude/skills/deploy/SKILL.md)，先定平台与角色再读对应 references） |
 | 定位代码：目录结构 → [README.md](README.md) 项目结构；某个服务内部 → KB 对应 `SERVICE_*.md` | — |
 
