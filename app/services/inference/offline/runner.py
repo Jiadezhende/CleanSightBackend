@@ -1,7 +1,7 @@
 """离线分割编排层 —— 把 (task_id, step_id) 一次跑通 detections.jsonl → 策略 → temporal.jsonl。
 
 调用方（CLI / 测试）显式给 `(task_id, step_id)`，Runner：
-    1. 按 step_id 取 stage 配置，实例化 offline 策略（未配置 / offline 为空 → ValidationError，不兜底 MOCK）；
+    1. 按 step_id 取 stage 配置，实例化 offline 策略（未配置 / offline 为空 → ValidationError，无兜底）；
     2. 一次读该 step 的完整检测序列（为空则 skip）；
     3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；
     4. 校验 + 排序，**读回既有事实 → 删掉该 step 全部旧分段、保留 TemporalEvent → 整体写回**。

@@ -643,8 +643,7 @@ def run_scenario_7(args):
 def run_scenario_8(args):
     """未配置的 current_step → /api/start 返回 400，不起 run。
 
-    `--current-step` 可覆盖（非数字如「未知阶段」同样应 400）。MOCK 只兜底「配了但 detector
-    全部加载失败」，集成环境不好构造，由单测 tests/test_inference_stage_routing.py 覆盖。
+    `--current-step` 可覆盖（非数字如「未知阶段」同样应 400）。
     """
     section("Scenario 8: 未配置的 current_step → start 拒绝",
             "current_step = '99'（未配置）→ 预期 /api/start 返回 400")

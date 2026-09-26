@@ -40,7 +40,7 @@ integration_tests/
 - **`--current-step`** 决定「**跑什么**」——任务阶段，路由到对应推理 workflow：
   - `1` → LEAK（测漏，默认）
   - `2` → CLEAN（清洁）
-  - 未配置的 step / 非数字 → 参数错误，`/api/start` 返回 400（MOCK 只兜底「配了但 detector 全部加载失败」）
+  - 未配置的 step / 非数字 → 参数错误，`/api/start` 返回 400（无兜底 stage）
 
 例如 `--scenario 2 --current-step 2` = 在 CLEAN 阶段下测断流重连。
 

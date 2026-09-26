@@ -94,7 +94,7 @@ def make_cq(
 
 
 def make_bare_cq(**kw) -> ClientQueues:
-    """无身份裸建（算子/纯队列单测，stage 默认 MOCK）。"""
+    """无身份裸建（算子/纯队列单测，task_id/step_id/stage 均为空默认值）。"""
     return ClientQueues(**kw)
 
 

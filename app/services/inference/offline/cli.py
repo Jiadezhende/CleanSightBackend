@@ -9,7 +9,7 @@
 `torch.set_num_threads`（限核，默认 2），故必须先 `_isolate_cpu()` 再 import 触发策略 torch 加载的
 runner/策略模块。`query` 只读 temporal.jsonl，不碰 torch/runner。
 
-step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（不兜底 MOCK）。
+step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（无兜底）。
 
 输出：stdout 末行恒为一行结果 JSON `{status, producer, segment_count, message}`（失败时 status="error"），
 作业服务（offline/service.py）以子进程调用时解析它。

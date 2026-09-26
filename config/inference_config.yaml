@@ -110,23 +110,6 @@ stages:
         model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-bigru.pt
         min_duration_s: 0.2          # 短于此时长的动作段丢弃
 
-  # ==================== MOCK 阶段（配了但 detector 全部加载失败时的 fallback，纯透传；未配的 step 直接 400） ====================
-  MOCK:
-    alias: MOCK
-    detectors:
-      - name: mock
-        class: app.services.inference.online.detection.impl.mock.MockDetector
-        params:
-          brightness_threshold: 0.0   # 永不触发检测，纯透传
-          enabled: true
-    rules:
-      - name: mock_passthrough
-        subscribes: [mock]
-        realtime: true
-        class: app.services.inference.online.temporal.impl.mock.MockOperator
-        params:
-          consecutive_trigger: 999    # 实际上永不满足，禁止告警
-
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到
 #       app/settings.py 作单一真源，此处不再保留——避免其它模块反向钻进推理配置读共享参数。

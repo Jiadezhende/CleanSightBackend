@@ -109,6 +109,17 @@ class TestCreateOfflineSegmenter:
         with pytest.raises((ImportError, AttributeError)):
             StageFactory(_config(offline)).create_offline_segmenter("2")
 
+    def test_bad_detector_class_fails_fast(self):
+        """detector 构造失败即抛（启动 fail-fast），不再记日志后静默少一个流源。"""
+        cfg = InferenceConfig({"stages": {"2": {"detectors": [{"name": "d", "class": "nonexistent.Bad"}]}}})
+        with pytest.raises(RuntimeError, match="Detector 'd'"):
+            StageFactory(cfg).create_detectors_for_stage("2")
+
+    def test_rule_missing_subscribes_fails_fast(self):
+        cfg = InferenceConfig({"stages": {"2": {"rules": [{"name": "r", "class": "x.Y"}]}}})
+        with pytest.raises(ValueError, match="subscribes"):
+            StageFactory(cfg).create_operators_for_stage("2")
+
     def test_enabled_builds_segmenter(self):
         seg = StageFactory(_config(_OFFLINE_OK)).create_offline_segmenter("2")
         assert isinstance(seg, BrushRulesSegmenter)

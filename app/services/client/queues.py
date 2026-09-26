@@ -97,7 +97,7 @@ class ClientQueues:
         task_id: Optional[int] = None,
         step_id: Optional[int] = None,
         source_ip: str = "",
-        stage: str = "MOCK",
+        stage: str = "",
     ):
         # 尺寸配置
         self.resize_width = resize_width

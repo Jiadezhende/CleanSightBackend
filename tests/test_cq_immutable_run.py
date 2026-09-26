@@ -38,7 +38,7 @@ def test_bare_cq_has_no_identity():
     cq = make_bare_cq()  # 纯队列单测形态（无身份）
     assert cq.task_id is None
     assert cq.step_id is None
-    assert cq.stage == "MOCK"
+    assert cq.stage == ""
 
 
 def test_client_manager_set_replaces_slot_with_new_object():

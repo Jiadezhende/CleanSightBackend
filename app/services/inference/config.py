@@ -21,11 +21,6 @@ from app.utils.exceptions import ValidationError
 
 logger = logging.getLogger(__name__)
 
-# 推理失败兜底 stage 主键：在线 `InferenceManager.resolve_stage` 把「配了但 detector 全部加载失败」
-# 的 stage 路由到它（纯透传，不黑屏）；未配的 step_id 是参数错误，不兜底。
-# 在线侧另有启动不变式强制它 active，见 `InferenceManager._get_stage_configs`。
-FALLBACK_STAGE = "MOCK"
-
 # 全局配置缓存（单例模式）
 _global_inference_config: Optional["InferenceConfig"] = None
 
@@ -69,7 +64,7 @@ class InferenceConfig:
     def require_offline(self, step_id: int) -> str:
         """离线可跑校验：step 在配置中定义且 offline 段非空，返回 stage 主键；否则 `ValidationError`。
 
-        离线不兜底 MOCK——未配置即参数错误。作业服务提交时、runner 运行时共用本校验。
+        未配置即参数错误，无兜底。作业服务提交时、runner 运行时共用本校验。
         """
         step_key = str(step_id)
         stage = self.stages.get(step_key)

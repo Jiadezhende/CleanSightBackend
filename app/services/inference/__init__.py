@@ -5,7 +5,7 @@
 
 按链路分两段，两段共用的 stage 配置与工厂平铺在本层：
 
-    config.py         stage 配置（online / offline 同源，含 FALLBACK_STAGE）
+    config.py         stage 配置（online / offline 同源）
     stage_factory.py  按 stage 实例化 Detector / Operator / OfflineSegmenter
     online/           实时链路：manager / instance / naming / types + 下列子包
     offline/          离线全序列分割：runner / cli + 下列契约包
