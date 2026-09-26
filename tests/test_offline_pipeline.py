@@ -39,6 +39,11 @@ def _seg(producer="p", label="x", start=0.0, end=1.0):
 class TestReplaceSegments:
     """Runner 的 read → 合并 → write：数据层只管整体替换，保留谁是这里的事。"""
 
+    @pytest.fixture(autouse=True)
+    def _domain_exists(self, tmp_storage):
+        """真实调用时已读到检测结果、域目录必在；`_replace_segments` 不建目录（create=False）。"""
+        _write_detections(1, 1)
+
     def test_idempotent_rerun_no_dup(self, tmp_storage):
         facts = [_seg(start=0, end=1)]
         OfflineRunner._replace_segments(1, 1, list(facts))
@@ -648,3 +653,38 @@ class TestOfflineRunnerSupersede:
             OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "superseded"
         assert inference_store.read_temporal(1, 2) == before
+
+
+class TestOfflineRunnerNoResurrect:
+    """戳核对通过之后 step 才被 TTL 回收：superseded，不重建目录（无僵尸 step）。"""
+
+    def test_reclaimed_before_facts_write(self, tmp_storage, monkeypatch):
+        from app.storage import tasks
+        _write_detections(1, 2)
+        monkeypatch.setattr(inference_store, "read_temporal",
+                            lambda t, s: (tasks.delete_step(t, s), [])[1])
+        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "superseded"
+        assert not (tmp_storage / "1").exists()
+
+    def test_reclaimed_before_label_probs_write(self, tmp_storage, monkeypatch):
+        from app.storage import tasks
+        _write_detections(1, 2)
+        real_write = inference_store.write_label_probs
+
+        def reclaim_then_write(t, s, probs, **kw):
+            tasks.delete_step(t, s)
+            return real_write(t, s, probs, **kw)
+
+        monkeypatch.setattr(inference_store, "write_label_probs", reclaim_then_write)
+        res = _runner({"class": f"{__name__}.StaticProbsSegmenter"}).run(
+            OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "superseded"
+        assert not (tmp_storage / "1").exists()
+
+
+class StaticProbsSegmenter(_ProbsSegmenter):
+    """产一段 + 合法 label_probs，不改输入。"""
+
+    def mutate(self):
+        pass

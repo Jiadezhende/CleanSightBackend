@@ -29,6 +29,9 @@
 - **`write_temporal` 是整体替换，不是追加。** `temporal.jsonl` 是多写者共居文件，盲写会吃掉别的
   producer 的分段与所有 `TemporalEvent`。正确姿势：`read_temporal` → 丢掉自己这个 producer 的旧条目
   → `write_temporal(合并结果)`。保留谁是 producer 语义，不是格式事实，故留在调用方。
+- **迟到的写者不建目录**：谁有权删、谁才有权建。离线这类迟到写者对 `write_temporal` /
+  `write_label_probs` 传 `create=False`，域目录已被回收（TTL / 换代）即抛 `DirectoryGoneError`、
+  不重建成僵尸；调用方按「丢弃本次写入」处理。它不防同路径被新一代重建（ABA）。
 - **`read_detections` 按 ts 升序是契约；`read_temporal` 不排序。** 后者两型没有共同时间键
   （`TemporalEvent.ts` 对 `TemporalSegment.start`），层没有依据替调用方选。
 

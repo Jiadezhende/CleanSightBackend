@@ -352,6 +352,32 @@ def is_fatal_error(exception: Exception) -> bool:
     return False
 
 
+class DirectoryGoneError(AppError):
+    """迟到写入的目标目录已被回收（存储层 `create=False` 写入时抛出）。
+
+    用于：「谁有权删、谁才有权建」——迟到的写者（如离线 runner）不建目录，目录没了就不写，
+    免得在 TTL / 换代删掉之后把目录重建成僵尸。调用方按「丢弃本次写入」处理，不是故障。
+
+    特点：retryable=False, fatal=False（目录不会自己回来，重试无意义）
+    """
+
+    retryable = False
+    fatal = False
+
+    path: str
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: str,
+        task_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+    ):
+        super().__init__(message, task_id=task_id, step_id=step_id)
+        self.path = path
+
+
 # ============================================================================
 # HTTP 业务异常（用于 API 路由层）
 # ============================================================================

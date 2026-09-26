@@ -8,6 +8,7 @@
 
 **换代校验**：读前记下 `detections_stamp`，读完、写前各核对一次；不等即 `superseded`、什么都不写
 （输入被追加 = 未封口；被整域删后重建 = 同 step 新一代 run 已开写）。丢弃不重试。
+写入不重建目录（`create=False`）：核对之后目录才被回收（TTL）时同样 `superseded`，不留僵尸 step。
 
 路由：`strict=False`（CLI 默认）未配 step 经 `resolve_stage` 回落 MOCK；`strict=True`（作业服务）
 只认精确命中的 stage，未配 / offline 为空直接 skipped，不回落。
@@ -32,6 +33,7 @@ from app.domain.temporal import LabelProbs, TemporalSegment
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
+from app.utils.exceptions import DirectoryGoneError
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +106,11 @@ class OfflineRunner:
 
         # 先旁路、后事实：事实是结果的真源，它落盘即代表本次运行完成；旁路在前，
         # 页面读到新事实时对应的概率必然已是同一次运行的（反序会短暂配上旧概率）。
-        self._maybe_write_label_probs(spec, segmenter)
-        self._replace_segments(spec.task_id, spec.step_id, validated)
+        try:
+            self._maybe_write_label_probs(spec, segmenter)
+            self._replace_segments(spec.task_id, spec.step_id, validated)
+        except DirectoryGoneError:
+            return self._superseded(spec, producer, "检测结果目录已被回收，放弃写入")
         logger.info(
             "[OfflineRunner] completed task=%s step=%s producer=%s segments=%d",
             spec.task_id, spec.step_id, producer, len(validated),
@@ -133,13 +138,14 @@ class OfflineRunner:
             f for f in inference_store.read_temporal(task_id, step_id)
             if not isinstance(f, TemporalSegment)
         ]
-        inference_store.write_temporal(task_id, step_id, kept + facts)
+        inference_store.write_temporal(task_id, step_id, kept + facts, create=False)
 
     @staticmethod
     def _maybe_write_label_probs(spec: OfflineRunSpec, segmenter) -> None:
         """策略若产逐帧类别概率（`label_probs()` 非 None），落 `label_probs.npz`。
 
-        旁路不影响主结果：形状不一致或写失败只告警、不落，事实照常写。
+        旁路不影响主结果：形状不一致或写失败只告警、不落，事实照常写。例外是目录已被回收
+        （`DirectoryGoneError`）：事实也写不成，上抛给 run() 判 superseded。
         """
         probs = segmenter.label_probs()
         if probs is None:
@@ -152,7 +158,9 @@ class OfflineRunner:
             )
             return
         try:
-            inference_store.write_label_probs(spec.task_id, spec.step_id, probs)
+            inference_store.write_label_probs(spec.task_id, spec.step_id, probs, create=False)
+        except DirectoryGoneError:
+            raise
         except Exception as e:
             logger.warning(
                 "[OfflineRunner] label_probs 落盘失败 task=%s step=%s: %s",
