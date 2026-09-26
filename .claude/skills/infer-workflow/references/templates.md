@@ -84,7 +84,7 @@ class XxxOperator(Operator):
 
 ## 模板 B
 
-无模型纯算法：Detector 继承 `Detector`，实现 `infer_batch(frames, timestamps)`（无 YOLO）。Operator 同模板 A。参考 [detection/impl/mock.py](../../../../app/services/inference/online/detection/impl/mock.py)（Detector）+ [temporal/impl/mock.py](../../../../app/services/inference/online/temporal/impl/mock.py)（Operator）。
+无模型纯算法：Detector 继承 `Detector`，实现 `infer_batch(frames, timestamps)`（无 YOLO）。Operator 同模板 A。Detector 参考 [tests/doubles.py](../../../../tests/doubles.py) 的 `MockDetector`（测试替身，纯 numpy 亮度启发式）。
 
 ```python
 import numpy as np

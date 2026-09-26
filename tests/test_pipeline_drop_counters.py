@@ -23,7 +23,7 @@ def test_stage_queue_drop_counted_when_full():
     cm = MagicMock()
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
-    # 客户端：ca_ready 有一帧，stage=MOCK（ClientQueues 默认 initial_stage）
+    # 客户端：ca_ready 有一帧，stage 为 ClientQueues 裸建默认值
     cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
     cm.snapshot.return_value = {"c1": cq}

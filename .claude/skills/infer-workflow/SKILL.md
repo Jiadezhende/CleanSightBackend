@@ -70,7 +70,7 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 | 场景 | 模板 | 参考（检测器 / 算子） |
 |------|------|------|
 | YOLO + 实时告警（最常见） | A | [detection/impl/bubble.py](../../../app/services/inference/online/detection/impl/bubble.py) / [temporal/impl/bubble.py](../../../app/services/inference/online/temporal/impl/bubble.py) |
-| 无模型 / 纯算法 | B | [detection/impl/mock.py](../../../app/services/inference/online/detection/impl/mock.py) / [temporal/impl/mock.py](../../../app/services/inference/online/temporal/impl/mock.py) |
+| 无模型 / 纯算法 | B | [tests/doubles.py](../../../tests/doubles.py) 的 `MockDetector`（测试替身）/ 算子同模板 A |
 | 结算式告警 | C | [detection/impl/bending.py](../../../app/services/inference/online/detection/impl/bending.py) / [temporal/impl/bending.py](../../../app/services/inference/online/temporal/impl/bending.py) |
 | 内嵌因果序列模型（多流 GRU） | D | [detection/impl/clean.py](../../../app/services/inference/online/detection/impl/clean.py) / [temporal/impl/clean.py](../../../app/services/inference/online/temporal/impl/clean.py) |
 

@@ -29,7 +29,7 @@ stages:
 
 | 字段 | 作用 |
 |------|------|
-| stage 主键 | = `step_id`（`task.current_step`）；`MOCK` 为未知 step 的 fallback |
+| stage 主键 | = `step_id`（`task.current_step`）；无兜底 stage，未配置的 step `/api/start` 返回 400 |
 | `alias` | 可读名，仅出口用（告警 step_name + 可视化叠字），功能性标识一律用主键 |
 | `detectors[].name` | 产出流名 = `slide_window` key；被 `rules[].subscribes` 引用 |
 | `detectors[].class` | Detector 全路径，**多 Client 共享一个实例** |

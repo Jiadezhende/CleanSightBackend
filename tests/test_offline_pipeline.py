@@ -1,4 +1,4 @@
-"""离线分割入口测试：存储引擎 / 配置工厂 / Runner / mock+clean 策略 / stage 解析 / CLI。
+"""离线分割入口测试：存储引擎 / 配置工厂 / Runner / 规则替身+clean 策略 / 离线可跑校验 / CLI。
 
 不依赖 GPU / RTSP / DB / 网络；storage 与 config 全用临时件，用例间不串。
 """
@@ -8,6 +8,7 @@ import math
 
 import pytest
 
+from doubles import BrushRulesSegmenter
 from factories import make_det_box, make_detector_output, make_frame_detection
 
 from app.domain.detection import DetectorOutput, FrameDetection
@@ -15,12 +16,11 @@ from app.domain.temporal import TemporalEvent, TemporalSegment
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
-from app.services.inference.offline.impl.mock import BrushRulesSegmenter
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
 from app.utils.exceptions import ValidationError
 
-_MOCK_CLASS = "app.services.inference.offline.impl.mock.BrushRulesSegmenter"
+_RULES_CLASS = "doubles.BrushRulesSegmenter"  # 测试替身，见 tests/doubles.py
 _CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanSegmenter"
 
 
@@ -80,7 +80,7 @@ def _config(offline):
 
 
 _OFFLINE_OK = {
-    "class": _MOCK_CLASS,
+    "class": _RULES_CLASS,
     "params": {"label": "brushing"},
 }
 # 测试替身策略（定义在本文件下方）：Boom 抛异常，Marker 验证 preprocess 预留层
@@ -102,7 +102,7 @@ class TestCreateOfflineSegmenter:
 
     @pytest.mark.parametrize("class_path", [
         "nonexistent_module.Bad",
-        "app.services.inference.offline.impl.mock.NoSuchSegmenter",
+        "app.services.inference.offline.impl.clean.NoSuchSegmenter",
     ])
     def test_unimportable_class_fail_fast(self, class_path):
         offline = dict(_OFFLINE_OK, **{"class": class_path})
@@ -130,14 +130,14 @@ class TestCreateOfflineSegmenter:
 # ============================ 离线可跑校验 ============================
 
 class TestRequireOffline:
-    """离线不兜底 MOCK：未定义 / offline 为空的 step 都是参数错误。"""
+    """离线无兜底：未定义 / offline 为空的 step 都是参数错误。"""
 
     def test_configured_returns_stage_key(self):
         assert _config(_OFFLINE_OK).require_offline(2) == "2"
 
     @pytest.mark.parametrize("cfg,step_id,reason", [
         (_config(_OFFLINE_OK), 999, "未在推理配置中定义"),
-        (_config(_OFFLINE_OK), -1, "未在推理配置中定义"),   # 无 MOCK 兜底
+        (_config(_OFFLINE_OK), -1, "未在推理配置中定义"),   # -1 不再有特殊含义
         (_config({}), 2, "未配置离线模型"),
     ])
     def test_unrunnable_rejected(self, cfg, step_id, reason):
@@ -145,7 +145,7 @@ class TestRequireOffline:
             cfg.require_offline(step_id)
 
 
-# ============================ BrushRulesSegmenter（MOCK 链路 stand-in） ============================
+# ============================ BrushRulesSegmenter（规则替身） ============================
 
 class TestBrushRulesSegmenter:
     def test_presence_runs_to_segments(self):
@@ -455,7 +455,7 @@ class TestCli:
         assert payload["status"] == "error" and payload["message"] == "boom"
 
     def test_run_unconfigured_step_error(self, tmp_storage, monkeypatch, capsys):
-        """未配置的 step 不兜底 MOCK：退出码 1，末行 JSON status=error。"""
+        """未配置的 step 直接报错：退出码 1，末行 JSON status=error。"""
         from app.services.inference.offline import runner as runner_mod
         _write_detections(1, 7)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))

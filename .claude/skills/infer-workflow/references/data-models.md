@@ -16,7 +16,7 @@ DetectorOutput(                                 # 一个检测器 × 一帧的�
 
 # ── 告警（Operator.judge 实时上升沿 / finalize 结算时产出）── app.domain.alarm
 Alarm(
-    alarm_type=AlarmType.PROCESS_VIOLATION,     # PROCESS_VIOLATION="流程违规" / TASK_TIMEOUT / MOCK(仅测试)
+    alarm_type=AlarmType.PROCESS_VIOLATION,     # PROCESS_VIOLATION="流程违规" / TASK_TIMEOUT
     alarm_level="high",                         # "low" / "medium" / "high" / "critical" / "warning"
     alarm_message="...",
     metric=AlarmMetric.BUBBLE,                  # BUBBLE / BENDING / TASK_TIMEOUT / UNKNOWN；产出方显式填

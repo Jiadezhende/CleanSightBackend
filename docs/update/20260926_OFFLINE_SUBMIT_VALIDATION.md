@@ -9,13 +9,13 @@
 - 作业服务提交时就校验，不通过直接返回 400，不入队，也不留作业记录。
 - runner 和 CLI 遇到同样的 step 抛 `ValidationError`，退出码非 0。
 
-与此同时删掉了 `OfflineRunSpec.strict`、CLI 的 `--strict` 参数、`InferenceConfig.resolve_stage`，以及 YAML 里 MOCK stage 下的 `offline` 段。
+与此同时删掉了 `OfflineRunSpec.strict`、CLI 的 `--strict` 参数和 `InferenceConfig.resolve_stage`。MOCK stage 在同一分支上整体移出了生产配置，见 [20260926_ONLINE_STEP_VALIDATION](20260926_ONLINE_STEP_VALIDATION.md)。
 
 ## 变更背景
 
 - **现状**：离线有两套路由。一套是 CLI 默认用的 `resolve_stage`：未配置的 step 回退到 MOCK 的 `offline`（`BrushRulesSegmenter`）。另一套是作业服务传 `--strict`，未配置就 `skipped`。同一个 step，手动跑和提交作业得到不同结果。另外，`skipped` 混了两种性质不同的情况：参数错（没配置）和数据状态（没有检测结果）。
-- **定性**：离线推理失败就是失败。MOCK 只是写在测试 config 里用的测试替身，不应该被任何路由规则自动选中。未配置的 step 属于参数错误，应该在服务边界直接拦下。
-- **承接**：在线侧同类改动见 [20260926_ONLINE_STEP_VALIDATION](20260926_ONLINE_STEP_VALIDATION.md)。在线侧依然保留「配了但 detector 全部加载失败 → MOCK 透传」，因为在线要保证画面不黑屏；离线没有这个需求。
+- **定性**：离线没有生产可用性要求，推理失败就是失败，显式报错、不兜底。规则分段器 `BrushRulesSegmenter` 只是写在测试 config 里的测试替身，不应该被任何路由规则自动选中。未配置的 step 属于参数错误，应该在服务边界直接拦下。
+- **承接**：在线侧同类改动见 [20260926_ONLINE_STEP_VALIDATION](20260926_ONLINE_STEP_VALIDATION.md)。在线侧同样不再有兜底 stage：未配置的 step 返回 400，配置错误启动即失败；在线为了保证画面，运行时推理失败走逐帧降级（画面照常、没有框）。离线没有这个需求，直接失败。
 
 ## 方案详情
 
@@ -43,7 +43,7 @@ admin POST /offline/jobs → OfflineJobService.submit(task_id, step_id)
 
 - 作业服务和 runner 共用 `require_offline`，校验规则只有一处。服务端先校验，是为了让参数错误在提交时就返回 400，而不是排队跑完子进程后才变成 `failed`。
 - 作业服务在模块顶层 import `app.services.inference.config`。这个模块只依赖 yaml，不会引入 torch。
-- `BrushRulesSegmenter` 保留，作为单测和 smoke test 的测试替身，docstring 已改掉「兜底」的说法。
+- `BrushRulesSegmenter` 从 `app/.../offline/impl/mock.py` 挪到 [`tests/doubles.py`](../../tests/doubles.py)，测试 config 用 `doubles.BrushRulesSegmenter` 引用；生产代码里不再有 mock 实现。
 
 ## 变更效果
 

@@ -340,7 +340,7 @@
 | `labels` | string[] | 类名，顺序即模型输出通道序，含背景类（如 `idle`） |
 | `media_ms` | int[] | 逐帧媒体刻度 ms，长度 T |
 | `probs` | float[][] | **按类分列**：`probs.length == labels.length`，每行长度 T。3 位小数（盘上 float16，精度约 3 位有效数字） |
-| — | — | **没有概率产物时 `labels` / `media_ms` / `probs` 均为 `[]`**：从未跑过离线，或该模型不产逐帧概率（如 MOCK 规则分段器）。不报错 |
+| — | — | **没有概率产物时 `labels` / `media_ms` / `probs` 均为 `[]`**：从未跑过离线，或该模型不产逐帧概率（如规则型分段器）。不报错 |
 
 ### 错误
 

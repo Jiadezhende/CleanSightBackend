@@ -14,8 +14,7 @@
 
 注意:
     这里不包含训练流程。训练仍在独立 offline-model 仓内完成，后端只负责加载
-    已训练权重并执行离线推理。若未配置 model_path，CLEAN 模型会硬失败；
-    本地回环测试应使用已有的 mock.BrushRulesSegmenter。
+    已训练权重并执行离线推理。若未配置 model_path，CLEAN 模型会硬失败。
 """
 
 from __future__ import annotations
@@ -584,8 +583,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
         if not self.model_path:
             raise ValueError(
-                f"{type(self).__name__} 未配置 model_path；CLEAN 离线模型不做规则降级，"
-                "本地回环请使用 mock.BrushRulesSegmenter"
+                f"{type(self).__name__} 未配置 model_path；CLEAN 离线模型不做规则降级"
             )
 
         probs = self._predict_with_model(model_input)

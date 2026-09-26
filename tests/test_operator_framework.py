@@ -132,7 +132,7 @@ class _GoodOperator(Operator):
         self._sm["ran"] = True
 
     def judge(self):
-        return ["good"], [Alarm(alarm_type=AlarmType.MOCK, alarm_level="low", alarm_message="ok")]
+        return ["good"], [Alarm(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="low", alarm_message="ok")]
 
 
 def test_per_operator_isolation():
@@ -144,7 +144,7 @@ def test_per_operator_isolation():
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)
     good = _GoodOperator(name="good", subscribes=["s"], window_seconds=3.0)
-    actor = ClientTemporalActor(task_id=1, cq=cq, stage="MOCK", operators=[bad, good])
+    actor = ClientTemporalActor(task_id=1, cq=cq, stage="1", operators=[bad, good])
     actor._persist_alarms = lambda alarms: captured.extend(alarms)
 
     actor._tick()

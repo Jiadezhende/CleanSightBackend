@@ -55,6 +55,7 @@
 - 判断「YAML 未定义」用的是 `load_stage_config().list_stages()`，也就是 YAML 全集；判断「生效」用的是 `_get_stage_configs()`，只包含有 detector 的 stage。
 - 构造失败会被 `_get_stage_configs` 外层包成 `RuntimeError`，冒到 `inference.lifespan`，后端启动失败。推理子进程在启动时构造 detector 走的是同一段代码，但主进程会先失败，子进程不会带着坏配置起来。
 - `ClientQueues` 的 `stage` 默认值从 `"MOCK"` 改成 `""`，和 `task_id`、`step_id` 等身份字段的裸建默认值一致。生产里 CQ 只由 `RunController` 构造，并且总会显式传入 stage。
+- MOCK 实现移出生产代码：`MockDetector` 与离线的 `BrushRulesSegmenter` 挪到 [`tests/doubles.py`](../../tests/doubles.py)（测试 config 用 `doubles.Xxx` 引用）；`MockOperator` 没有测试引用，直接删；`AlarmType.MOCK` 删除，测试改用 `PROCESS_VIOLATION`。infer-workflow skill 的模板 B 参考改指向 `tests/doubles.py`。
 
 ## 变更效果
 

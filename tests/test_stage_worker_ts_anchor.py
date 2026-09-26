@@ -13,8 +13,7 @@ import numpy as np
 
 from app.services.inference.online.detection.stage_worker import StageWorker
 from app.services.inference.online.types import DetectionTask
-from app.services.inference.online.detection.impl.mock import MockDetector
-
+from doubles import MockDetector
 from factories import make_cq
 
 
