@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.alarm import Alarm
 from app.domain.detection import DetectorOutput, FrameDetection
+from app.services.inference.resample import resample_by_ts
 
 logger = logging.getLogger(__name__)
 
@@ -138,25 +139,8 @@ class TemporalOperator(Operator):
         return self._action_id_to_name.get(action_id, f"action_{action_id}")
 
     def _resample_by_ts(self, frames: List[FrameDetection]) -> List[FrameDetection]:
-        """按帧 ts 把窗口重采样到 model_input_fps（消 train/serve skew）。
-
-        相位网格抽稀：从首帧起维护理想采样时刻 next_t，每步 += 1/model_input_fps，保留
-        首个 ts ≥ next_t 的帧。网格前进（非从"上一保留帧"累加）→ 不累积舍入漂移，2:1
-        比例下稳定取到目标帧率；遇缺口令网格落后当前帧时重锚，避免追补突发。
-        纯 ts 函数——不改帧内容、不合成新 ts。帧数 < 2 无从抽稀，原样返回。
-        """
-        if len(frames) < 2:
-            return frames
-        min_dt = 1.0 / self.model_input_fps
-        kept = [frames[0]]
-        next_t = frames[0].ts + min_dt
-        for f in frames[1:]:
-            if f.ts >= next_t:
-                kept.append(f)
-                next_t += min_dt
-                if next_t <= f.ts:  # 缺口致网格落后：重锚到当前帧，避免追补突发
-                    next_t = f.ts + min_dt
-        return kept
+        """按帧 ts 把窗口重采样到 model_input_fps（消 train/serve skew）。"""
+        return resample_by_ts(frames, self.model_input_fps)
 
     def _try_load_model(self) -> bool:
         """惰性加载时序模型 （首次推理时触发，双重检查锁保证线程安全）。"""
