@@ -30,7 +30,7 @@
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `profile` | string | 否 | `default` | 参数档名。换光照场景（钨丝灯/荧光灯）时才需要动；档名列表在 `app/algorithm/colorstrip/params.yaml`，写了不存在的档 → **400**。**常规调用不要传这个参数** |
+| `profile` | string | 否 | `default` | 参数档名。换光照场景（钨丝灯/荧光灯）时才需要动；档名列表在 `app/services/algorithm/colorstrip/params.yaml`，写了不存在的档 → **400**。**常规调用不要传这个参数** |
 
 **请求体** `ColorstripRequest`：
 
@@ -108,7 +108,7 @@
 - **传 data URL 不用剥前缀**，但别传成 `URL.createObjectURL()` 的 blob URL——那不是 base64。
 - **单次请求约 0.1 s**（4.6 MB 图实测解码 55 ms + 判定 23 ms），别做成 onChange 实时触发，按钮点一次调一次即可。
 - **不要传 `?profile=`**，除非现场换了光源并且后端已经为那个场景标定过参数档。传错档名直接 400；传了个没标定的档，结果可信度无从保证。
-- **响应里没有测量值**（L\*、裕度、色相、色块坐标、标注效果图都没有）。需要这些请找后端：拒判时的完整判据诊断在服务端日志里，调参用 `python -m app.algorithm.colorstrip.cli`。
+- **响应里没有测量值**（L\*、裕度、色相、色块坐标、标注效果图都没有）。需要这些请找后端：拒判时的完整判据诊断在服务端日志里，调参用 `python -m app.services.algorithm.colorstrip.cli`。
 
 ### 静默失败
 
@@ -124,5 +124,6 @@
 ### 参考实现
 
 - 路由与错误映射：[app/routers/algorithm.py](../../app/routers/algorithm.py)
-- 算法与参数：[app/algorithm/colorstrip/](../../app/algorithm/colorstrip/)（阈值与实测依据全在 `params.yaml` 的注释里）
+- 服务接口：[app/services/algorithm/service.py](../../app/services/algorithm/service.py)
+- 算法与参数：[app/services/algorithm/colorstrip/](../../app/services/algorithm/colorstrip/)（阈值与实测依据全在 `params.yaml` 的注释里）
 - 端到端用例（含合成图构造）：[tests/test_algorithm_router.py](../../tests/test_algorithm_router.py)

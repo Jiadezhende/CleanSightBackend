@@ -1,6 +1,6 @@
 """colorstrip 的私有数据契约与结果码。stdlib only，不 import 同包任何模块。
 
-  from app.algorithm.colorstrip.types import Params, OK, E_NO_CARD, message_for
+  from app.services.algorithm.colorstrip.types import Params, OK, E_NO_CARD, message_for
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """过氧乙酸试纸色卡比色判定：以色卡 2000 刻度块为参考下限，试纸更深即合格。
 
-  from app.algorithm.colorstrip import config, grader
+  from app.services.algorithm.colorstrip import config, grader
   res = grader.grade(grader.imdecode(raw_bytes), cfg=config.load())
 
 - params.yaml  全部阈值 + 入参上限 + 默认档名（单一真源，代码里无默认值副本）

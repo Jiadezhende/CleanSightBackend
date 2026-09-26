@@ -8,28 +8,23 @@
   实测 78 ms，最慢样本 156 ms），留在事件循环上会把同进程的 `/ai/video` 推理画面 WS 一起钉住。
 - **算法拒判返 200 + `ok=false`，不是 400**。400 只给请求层问题（base64 解不开、图太大、
   档名写错）；契约见 `docs/api/algorithm.md`，改之前先看那里的「400 与 200+ok:false 的分工」。
-- 算法包只抛 `ValueError` / `KeyError`，翻成 HTTP 是本层的活。
-
-为什么不挂进 `/lab-f3m8`、为什么算法单独成层：见 `docs/update/20260920_COLORSTRIP_API.md`。
+- 算法活在 `app.services.algorithm.service`，本层只做请求解析（base64 / data URL → 字节）与
+  把它的两个具名异常翻成 400。
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
-import logging
 from typing import Optional
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from app.algorithm.colorstrip import config as cs_config
-from app.algorithm.colorstrip import grader as cs_grader
-from app.algorithm.colorstrip import types as cs_types
+from app.services.algorithm import service as algorithm_service
 from app.utils.exceptions import ValidationError
 
 router = APIRouter(prefix="/algorithm", tags=["algorithm"])
-logger = logging.getLogger(__name__)
 
 _DATA_URL_SEP = ";base64,"
 
@@ -94,7 +89,7 @@ def _decode_image_base64(raw: str, max_bytes: int) -> bytes:
     if len(payload) * 3 // 4 > max_bytes:
         raise ValidationError(
             f"图片超过上限 {max_bytes} 字节（解码前 base64 长度 {len(payload)}）。"
-            f"上限在 app/algorithm/colorstrip/params.yaml 的 max_image_bytes",
+            f"上限在 app/services/algorithm/colorstrip/params.yaml 的 max_image_bytes",
             field="image_base64",
         )
     try:
@@ -111,13 +106,6 @@ def _decode_image_base64(raw: str, max_bytes: int) -> bytes:
     return data
 
 
-def _load_profile(profile: Optional[str]):
-    try:
-        return cs_config.load(profile)
-    except KeyError as e:
-        raise ValidationError(str(e.args[0] if e.args else e), field="profile")
-
-
 # ---------------------------------------------------------------------------
 # 接口 1: 试纸色卡比色
 # ---------------------------------------------------------------------------
@@ -128,7 +116,7 @@ def grade_colorstrip(
     req: ColorstripRequest,
     profile: Optional[str] = Query(
         None,
-        description="参数档名（见 app/algorithm/colorstrip/params.yaml）；"
+        description="参数档名（见 app/services/algorithm/colorstrip/params.yaml）；"
         "不传即用该文件的 default_profile。换光照场景才需要动它。",
     ),
 ) -> ColorstripResponse:
@@ -140,31 +128,16 @@ def grade_colorstrip(
 
     判不出来时不猜：返回 200 + `ok=false` + `code`，`message` 里写清该怎么补拍。
     """
-    cfg = _load_profile(profile)
-    data = _decode_image_base64(req.image_base64, cs_config.limits()["max_image_bytes"])
-
+    data = _decode_image_base64(
+        req.image_base64, algorithm_service.colorstrip_max_image_bytes()
+    )
     try:
-        img = cs_grader.imdecode(data)
-    except ValueError as e:
+        verdict = algorithm_service.grade_colorstrip(data, profile=profile)
+    except algorithm_service.UnknownProfileError as e:
+        raise ValidationError(str(e), field="profile")
+    except algorithm_service.ImageDecodeError as e:
         raise ValidationError(str(e), field="image_base64")
 
-    res = cs_grader.grade(img, cfg=cfg)
-
-    if res["ok"]:
-        # 规范固定 1 条试纸，走到这里 strips 必然恰好 1 条（否则是 E_STRIP_COUNT）
-        passed = bool(res["strips"][0]["passed"])
-        return ColorstripResponse(
-            ok=True, passed=passed, code=res["code"],
-            message=cs_types.message_for(res["code"], passed),
-        )
-
-    # 拒判：带实测值的判据诊断只进服务端日志。它是调参用的，对调用方没意义——
-    # 调参走 `python -m app.algorithm.colorstrip.cli`，排障翻这里的日志。
-    logger.info(
-        "colorstrip 拒判 code=%s profile=%s\n%s",
-        res["code"], cfg.profile, "\n".join(f"  {line}" for line in res["log"]),
-    )
     return ColorstripResponse(
-        ok=False, passed=None, code=res["code"],
-        message=cs_types.message_for(res["code"], None),
+        ok=verdict.ok, passed=verdict.passed, code=verdict.code, message=verdict.message,
     )

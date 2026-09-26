@@ -92,15 +92,16 @@ BUDGET = {
     # 媒体轴换算。它 import `app.storage.hls`（段与 EXTINF 的唯一来源），故预算照 hls 那条
     # 给 0.40 —— 量的是同一份活；它本身是 stdlib（bisect / typing）。
     "app.services.utils.media_timeline": (set(), 0.40),
-    # 算法层。cv2 在 grader.py 里一律函数体内 import（规范 §2 通路 2）——它被
-    # `routers/algorithm.py` 模块级 import，挪回顶层会让这条连同 `app.main` 一起红。
+    # 算法服务。cv2 在 grader.py 里一律函数体内 import（规范 §2 通路 2）——它经 `service`
+    # 被 `routers/algorithm.py` 模块级 import，挪回顶层会让这条连同 `app.main` 一起红。
     # numpy 不在 HEAVY 里，grader 顶层的 `import numpy` 不受这条约束。
-    "app.algorithm":                   (set(), 0.20),   # 标记型 __init__，纯 docstring
-    "app.algorithm.colorstrip":        (set(), 0.20),   # 同上
-    "app.algorithm.colorstrip.types":  (set(), 0.20),   # stdlib only（dataclass）
-    "app.algorithm.colorstrip.config": (set(), 0.40),   # yaml
-    "app.algorithm.colorstrip.grader": (set(), 0.60),   # numpy
-    "app.algorithm.colorstrip.cli":    (set(), 0.60),   # 同上；argparse 不加码
+    "app.services.algorithm":                   (set(), 0.20),   # 标记型 __init__，纯 docstring
+    "app.services.algorithm.service":           (set(), 0.60),   # 经 grader 拽 numpy
+    "app.services.algorithm.colorstrip":        (set(), 0.20),   # 标记型 __init__
+    "app.services.algorithm.colorstrip.types":  (set(), 0.20),   # stdlib only（dataclass）
+    "app.services.algorithm.colorstrip.config": (set(), 0.40),   # yaml
+    "app.services.algorithm.colorstrip.grader": (set(), 0.60),   # numpy
+    "app.services.algorithm.colorstrip.cli":    (set(), 0.60),   # 同上；argparse 不加码
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
@@ -122,11 +123,11 @@ LAYER_PACKAGES = {
     # app.domain：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
     "app/storage": ("app.storage", "app.domain", "app.settings"),
-    # 算法层：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
+    # 算法服务：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
     # 都不许碰：阈值、入参上限、默认档一律写进算法子包自己的配置文件（见
-    # `app/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。
-    # 算法只抛 ValueError / KeyError，翻成 HTTP 是 `routers/` 的活。
-    "app/algorithm": ("app.algorithm",),
+    # `app/services/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。
+    # 服务只抛自己的具名异常（ValueError / KeyError 子类），翻成 HTTP 是 `routers/` 的活。
+    "app/services/algorithm": ("app.services.algorithm",),
     # 服务层工具：多个 service / router 都要、但不属于任何一个的无状态纯函数。它可以向下
     # 依赖数据层与基建，但**不得 import 任何兄弟 service 包** —— 破了它，本包就成了
     # service → service 依赖的后门：lab 想调 traceback 的东西，在这里加个转发函数就绕过去
