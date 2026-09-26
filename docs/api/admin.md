@@ -287,7 +287,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
   "task_id": 123,
   "step_id": 2,
   "status": "completed",          // 见下表
-  "producer": "CleanBiGRUSegmenter", // 离线模型类名；未跑到模型（排队 / 取消 / 未配置）时为 null
+  "producer": "CleanNodepGRUSegmenter", // 离线模型类名；未跑到模型（排队 / 取消 / 未配置）时为 null
   "segment_count": 5,             // 写入的分割段数；非 completed 时为 0
   "message": "",                  // 非 completed 时的原因说明（中文，可直接展示）
   "submitted_at": 1751800000.12,  // epoch 秒（float）
