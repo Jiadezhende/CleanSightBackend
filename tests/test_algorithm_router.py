@@ -173,9 +173,9 @@ async def test_bad_image_payload_is_400(client, payload, why):
 @pytest.mark.asyncio
 async def test_oversized_image_is_400(client):
     """超上限要在**解码前**就拒掉，不能先把整张图吃进内存。"""
-    from app.algorithm.colorstrip import config as cs_config
+    from app.services.algorithm import service as algorithm_service
 
-    limit = cs_config.limits()["max_image_bytes"]
+    limit = algorithm_service.colorstrip_max_image_bytes()
     oversized = "A" * (limit * 4 // 3 + 8)     # base64 膨胀 4/3，构造刚好越界的长度
     r = await client.post(URL, json={"image_base64": oversized})
     assert r.status_code == 400

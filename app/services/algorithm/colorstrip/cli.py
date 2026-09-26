@@ -1,6 +1,6 @@
 """对着照片直接跑判定，看判定过程与各判据实测值——换场景调参的主力工具。
 
-  python -m app.algorithm.colorstrip.cli 图1.jpg 图2.jpg [-p 档名] [--viz 输出目录]
+  python -m app.services.algorithm.colorstrip.cli 图1.jpg 图2.jpg [-p 档名] [--viz 输出目录]
 
 拒判时会打出每对候选色块卡在哪条判据、实测值多少，照着去改 params.yaml：
 

@@ -3,8 +3,8 @@
 # 本算法包自包含：参数、入参上限、默认档全在这个文件里，不进 app/settings.py。
 #
 # 用法
-#   python -m app.algorithm.colorstrip.cli 某张图.jpg      # 日志会打出每条判据的实测值
-#   python -m app.algorithm.colorstrip.cli 某张图.jpg -p warm_light
+#   python -m app.services.algorithm.colorstrip.cli 某张图.jpg      # 日志会打出每条判据的实测值
+#   python -m app.services.algorithm.colorstrip.cli 某张图.jpg -p warm_light
 #   HTTP：POST /algorithm/colorstrip（可选 ?profile=档名），见 docs/api/algorithm.md
 #
 # 验收工装（不在仓库里，样本太大）：app/services/temp/colorstrip/

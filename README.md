@@ -27,7 +27,7 @@ app/
 ├── database.py          # SQLAlchemy 连接池（PostgreSQL）
 ├── models.py            # ORM：DBTask / DBAlarm
 ├── domain/              # 跨服务共享契约（纯 dataclass）：frame / detection / fact / alarm / render
-├── routers/             # HTTP/WS 路由：api / ai / task / health / traceback / media / lab / admin
+├── routers/             # HTTP/WS 路由：api / ai / task / health / traceback / media / lab / admin / algorithm
 ├── services/
 │   ├── run_control.py   # RunController — 跨服务起停一次 run 的单一编排出口
 │   ├── client/          # ClientManager 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
@@ -37,7 +37,8 @@ app/
 │   ├── persistence/     # 告警落库与上报 + TTL 清理（HLS 写侧已迁 recording/）
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunController）
 │   ├── traceback/       # 溯源段定位 + 媒体 token 鉴权
-│   └── lab/             # 送标裁剪 + Label Studio 上传
+│   ├── lab/             # 送标裁剪 + Label Studio 上传
+│   └── algorithm/       # 无状态算法服务（试纸比色），与主流程无关，只被 /algorithm/* 调用
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
 ├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 deploy skill
 └── utils/               # 异常 / GuardedExecutor / 网关中间件 / Prometheus 指标 / 上下文

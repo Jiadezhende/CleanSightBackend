@@ -6,8 +6,9 @@
 
 两条会静默出错的约束：
 
-- **cv2 只许在函数体内 import**（规范 §2：L2 依赖禁止模块顶层 import）。本模块被
-  `routers/algorithm.py` 模块级 import，挪回顶层会让 `app.main` 的导入预算失守。
+- **cv2 只许在函数体内 import**（规范 §2：L2 依赖禁止模块顶层 import）。本模块经
+  `services/algorithm/service.py` 被 `routers/algorithm.py` 模块级 import，挪回顶层会让
+  `app.main` 的导入预算失守。
 - **别再加绝对色窗口去堵伪造**：试过两次（先 L\\* 后色相），都挡不住模仿真实色值的那一种。
   职责边界已划定为「防误操作、不防蓄意伪造」，见
   `docs/update/20260920_COLORSTRIP_API.md` 的「已知缺口」。
