@@ -1059,7 +1059,7 @@ createApp({
           body: JSON.stringify({ task_id: taskId, step_id: stepId }),
         });
         const d = await r.json().catch(() => ({}));
-        if (r.status === 409) { ElMessage.warning(d.detail || '无法提交'); return; }
+        if (r.status === 400 || r.status === 409) { ElMessage.warning(d.detail || '无法提交'); return; }
         if (!r.ok) throw new Error('HTTP ' + r.status);
         ElMessage.success(d.status === 'running' ? '该 step 已在运行' : `已提交 task ${taskId} / step ${stepId}`);
         fetchOffJobs();

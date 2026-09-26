@@ -1,10 +1,9 @@
-"""离线链路 Mock/兜底策略：brush_rules。
+"""离线链路 Mock 策略：brush_rules。
 
 作用:
-    这是离线链路的轻量兜底实现，不代表真实模型。它用于两类场景：
-    1. YAML 配置非法或真实模型权重暂不可用时，仍可用最低成本验证
-       detections.jsonl -> OfflineRunner -> TemporalSegment -> temporal.jsonl 的回环；
-    2. 单测/本地 smoke test 不依赖 torch、GPU、真实 clean 权重。
+    纯规则的测试替身，不代表真实模型，也不作任何兜底（离线未配置即报错）。
+    单测 / 本地 smoke test 把它写进 stage 的 offline.class，不依赖 torch、GPU、真实 clean 权重，
+    验证 detections.jsonl -> OfflineRunner -> TemporalSegment -> temporal.jsonl 的回环。
 
 输入:
     preprocess(frames) 接收 inference.read_detections 返回的 List[FrameDetection]，原样传给 segment。

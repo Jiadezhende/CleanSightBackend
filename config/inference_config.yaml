@@ -126,14 +126,6 @@ stages:
         class: app.services.inference.online.temporal.impl.mock.MockOperator
         params:
           consecutive_trigger: 999    # 实际上永不满足，禁止告警
-    # 离线段：规则 Mock，作开发回环。离线是独立进程手动跑
-    # （python -m app.services.inference.offline.cli run --step-id -1），不会被在线链路自动执行；
-    # CLI 下未配数字 step_id（如 -1）经 resolve_stage 回退到本 MOCK stage，作业服务严格路由不回退。
-    offline:
-      class: app.services.inference.offline.impl.mock.BrushRulesSegmenter
-      params:
-        label: mock_action
-        min_frames: 1
 
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到

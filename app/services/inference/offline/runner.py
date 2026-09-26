@@ -1,7 +1,7 @@
 """离线分割编排层 —— 把 (task_id, step_id) 一次跑通 detections.jsonl → 策略 → temporal.jsonl。
 
 调用方（CLI / 测试）显式给 `(task_id, step_id[, strategy])`，Runner：
-    1. 按 step_id 取 stage 配置，实例化 offline 策略（未启用则 skip）；
+    1. 按 step_id 取 stage 配置，实例化 offline 策略（未配置 / offline 为空 → ValidationError，不兜底 MOCK）；
     2. 一次读该 step 的完整检测序列（为空则 skip）；
     3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；
     4. 校验 + 排序，**读回既有事实 → 删掉该 step 全部旧分段、保留 TemporalEvent → 整体写回**。
@@ -9,9 +9,6 @@
 **换代校验**：读前记下 `detections_stamp`，读完、写前各核对一次；不等即 `superseded`、什么都不写
 （输入被追加 = 未封口；被整域删后重建 = 同 step 新一代 run 已开写）。丢弃不重试。
 写入不重建目录（`create=False`）：核对之后目录才被回收（TTL）时同样 `superseded`，不留僵尸 step。
-
-路由：`strict=False`（CLI 默认）未配 step 经 `resolve_stage` 回落 MOCK；`strict=True`（作业服务）
-只认精确命中的 stage，未配 / offline 为空直接 skipped，不回落。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
 落盘全经 `app.storage.inference`（存储根归 `settings`，故本类不收 `base_dir`）。
@@ -45,7 +42,6 @@ class OfflineRunSpec:
     task_id: int
     step_id: int
     strategy: Optional[str] = None  # 覆盖 stage.offline.class（全限定路径），开发期对比策略用
-    strict: bool = False  # True = 不回落 MOCK：未配 stage / offline 为空即 skipped
 
 
 @dataclass(frozen=True)
@@ -75,16 +71,8 @@ class OfflineRunner:
     def run(self, spec: OfflineRunSpec) -> OfflineRunResult:
         config = self._config if self._config is not None else load_stage_config(self._config_path)
 
-        # 存储 step_id（数字）与 stage 配置 key 正交：数字命中即恒等，未知回退 MOCK（与在线同源）；
-        # strict 只认精确命中。存储读写始终用原 spec.step_id，不用 stage_key。
-        stage_key = str(spec.step_id) if spec.strict else config.resolve_stage(spec.step_id)
-        if config.get_stage_config(stage_key) is None:
-            return OfflineRunResult("skipped", None, 0, f"未知 stage '{stage_key}'")
-
-        factory = StageFactory(config)
-        segmenter = factory.create_offline_segmenter(stage_key, override_class=spec.strategy)
-        if segmenter is None:
-            return OfflineRunResult("skipped", None, 0, f"stage '{stage_key}' offline 未启用")
+        stage_key = config.require_offline(spec.step_id)  # 未配置即 ValidationError，不兜底
+        segmenter = StageFactory(config).create_offline_segmenter(stage_key, override_class=spec.strategy)
 
         producer = segmenter.name
         stamp = inference_store.detections_stamp(spec.task_id, spec.step_id)

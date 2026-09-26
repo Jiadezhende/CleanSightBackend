@@ -1,7 +1,7 @@
 """离线分割手动入口 —— 独立进程、CPU-only、限核、同步跑一次；另含 query 查询子命令。
 
     CUDA_VISIBLE_DEVICES="" nice -n 15 \\
-        python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--strategy PATH] [--strict] [--json]
+        python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--strategy PATH] [--json]
     python -m app.services.inference.offline.cli query --task-id 100 --step-id 2
 
 设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动，不抢在线 GPU/核。
@@ -9,10 +9,9 @@
 `torch.set_num_threads`（限核，默认 2），故必须先 `_isolate_cpu()` 再 import 触发策略 torch 加载的
 runner/策略模块。`query` 只读 temporal.jsonl，不碰 torch/runner。
 
-step_id 恒为**数字存储键**（--step-id int）；未配数字（如 -1）经 config.resolve_stage 回退到
-MOCK stage 配置，存储路径仍用原数字（见 runner.py）。
+step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（不兜底 MOCK）。
 
-退出码：completed / skipped / superseded → 0；配置错误 / 输入损坏 / 策略异常 / 写失败 → 非 0。
+退出码：completed / skipped / superseded → 0；step 未配置 / 输入损坏 / 策略异常 / 写失败 → 非 0。
 `--json`：stdout 末行输出一行结果 JSON `{status, producer, segment_count, message}`（失败时 status="error"），
 供作业服务（offline/service.py）以子进程调用时解析；不加时输出人读格式。
 """
@@ -45,7 +44,7 @@ def _run(args: argparse.Namespace) -> int:
     from .runner import OfflineRunner, OfflineRunSpec
 
     spec = OfflineRunSpec(
-        task_id=args.task_id, step_id=args.step_id, strategy=args.strategy, strict=args.strict,
+        task_id=args.task_id, step_id=args.step_id, strategy=args.strategy,
     )
     try:
         result = OfflineRunner().run(spec)
@@ -104,17 +103,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     run = sub.add_parser("run", help="读检测结果、跑策略、幂等写 temporal.jsonl")
     run.add_argument("--task-id", type=int, required=True, help="任务 id（存储键）")
-    run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（数字存储键；未配回退 MOCK）")
+    run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（数字存储键；须在推理配置中配了 offline）")
     run.add_argument(
         "--strategy", default=None,
         help="覆盖 stage.offline.class 的策略全限定路径（开发期对比不同策略）",
     )
     run.add_argument(
         "--threads", type=int, default=2, help="CPU 线程数（torch.set_num_threads，默认 2）",
-    )
-    run.add_argument(
-        "--strict", action="store_true",
-        help="只跑精确配了 offline 的 stage，未配即 skipped（不回落 MOCK）",
     )
     run.add_argument("--json", action="store_true", help="stdout 末行输出一行结果 JSON")
 

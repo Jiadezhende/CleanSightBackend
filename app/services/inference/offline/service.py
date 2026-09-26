@@ -1,13 +1,14 @@
 """离线作业服务 —— 离线推理的提交、串行执行与状态查询。
 
     start() / stop()                          生命周期
-    submit(task_id, step_id) -> OfflineJob    入队；step 正在 live / 队满抛 ConflictError；同键在途返回在途那个
+    submit(task_id, step_id) -> OfflineJob    入队；step 未配离线模型抛 ValidationError；live / 队满抛 ConflictError；
+                                              同键在途返回在途那个
     get(task_id, step_id) -> OfflineJob|None  状态快照
     list_jobs() -> List[OfflineJob]           在途 + 最近结束的，按提交序
     cancel(task_id, step_id) -> bool          排队中的直接取消，运行中的 kill 子进程
 
 执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 起子进程
-`python -m app.services.inference.offline.cli run --strict --json`（CPU 隔离 + 降优先级 + 可 kill）。
+`python -m app.services.inference.offline.cli run --json`（CPU 隔离 + 降优先级 + 可 kill）。
 **本模块不 import runner / torch**：CLI 只作为子进程命令出现。
 
 结果正确性（换代 / 未封口）由 runner 的输入戳校验保证；本服务的 live 检查只为少白算。
@@ -30,6 +31,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from app.services.inference.config import InferenceConfig, load_stage_config
 from app.utils.exceptions import ConflictError
 from app.utils.task_queue import SerialTaskQueue
 
@@ -73,13 +75,14 @@ class OfflineJob:
 
 
 class OfflineJobService:
-    """离线作业服务。`clients` / `launcher` 仅供测试注入（假注册表 / 假 Popen）。"""
+    """离线作业服务。`clients` / `launcher` / `config` 仅供测试注入（假注册表 / 假 Popen / 推理配置）。"""
 
     def __init__(
         self,
         *,
         clients=None,
         launcher: Callable[..., Any] = subprocess.Popen,
+        config: Optional[InferenceConfig] = None,
         job_timeout_s: float = JOB_TIMEOUT_S,
         poll_s: float = POLL_S,
     ) -> None:
@@ -90,6 +93,7 @@ class OfflineJobService:
             clients = client_manager
         self._clients = clients
         self._launcher = launcher
+        self._config = config  # None = 提交时读 load_stage_config 单例
         self._job_timeout_s = job_timeout_s
         self._poll_s = poll_s
 
@@ -126,6 +130,7 @@ class OfflineJobService:
     # ── 对外 ────────────────────────────────────────────────────────────────────
 
     def submit(self, task_id: int, step_id: int) -> OfflineJob:
+        self._stage_config().require_offline(step_id)  # 未配置 / 无离线模型 → ValidationError（400）
         queue = self._queue
         if queue is None:
             raise ConflictError("离线作业服务未启动", task_id=task_id, step_id=step_id)
@@ -275,6 +280,9 @@ class OfflineJobService:
         for key in finished[: max(0, len(finished) - HISTORY)]:
             del self._jobs[key]
 
+    def _stage_config(self) -> InferenceConfig:
+        return self._config if self._config is not None else load_stage_config()
+
     def _is_live(self, task_id: int, step_id: int) -> bool:
         cq = self._clients.get(task_id)
         return cq is not None and cq.step_id == step_id
@@ -287,7 +295,7 @@ def _command(job: OfflineJob) -> List[str]:
     cmd = [
         sys.executable, "-m", _CLI_MODULE, "run",
         "--task-id", str(job.task_id), "--step-id", str(job.step_id),
-        "--strict", "--json", "--threads", str(THREADS),
+        "--json", "--threads", str(THREADS),
     ]
     nice = shutil.which("nice") if os.name != "nt" else None
     return [nice, "-n", "15", *cmd] if nice else cmd

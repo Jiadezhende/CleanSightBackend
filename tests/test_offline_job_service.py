@@ -11,8 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.service import OfflineJobService
-from app.utils.exceptions import ConflictError
+from app.utils.exceptions import ConflictError, ValidationError
+
+# 提交校验只看「step 在配置里且 offline 非空」，class 不会被 import（子进程才实例化）。
+_CFG = InferenceConfig({"stages": {
+    **{k: {"offline": {"class": "unused.Segmenter"}} for k in ("1", "2", "3", "987")},
+    "5": {"detectors": [{"name": "x"}], "offline": {}},   # 有在线检测、无离线模型
+}})
 
 
 class FakeProc:
@@ -81,7 +88,7 @@ def _wait_until(pred, timeout=5.0):
 @pytest.fixture
 def env():
     clients, launcher = FakeClients(), FakeLauncher()
-    svc = OfflineJobService(clients=clients, launcher=launcher, poll_s=0.02)
+    svc = OfflineJobService(config=_CFG, clients=clients, launcher=launcher, poll_s=0.02)
     svc.start()
     yield SimpleNamespace(svc=svc, clients=clients, launcher=launcher)
     svc.stop(timeout=5.0)
@@ -115,11 +122,11 @@ class TestSerial:
         assert (job.status, job.producer, job.segment_count) == ("completed", "P", 3)
         assert job.started_at is not None and job.finished_at is not None
 
-    def test_command_is_strict_json_cli(self, env):
+    def test_command_is_json_cli(self, env):
         env.svc.submit(1, 2)
         cmd = _wait_launched(env, 1).cmd
         assert "app.services.inference.offline.cli" in cmd
-        assert {"run", "--strict", "--json"} <= set(cmd)
+        assert {"run", "--json"} <= set(cmd)
 
     @pytest.mark.parametrize("status", ["skipped", "superseded"])
     def test_runner_statuses_pass_through(self, env, status):
@@ -146,6 +153,14 @@ class TestSubmit:
         assert env.svc.submit(1, 2).status == "queued"
         _wait_launched(env, 2)
 
+    @pytest.mark.parametrize("step_id,reason", [(99, "未在推理配置中定义"), (5, "未配置离线模型")])
+    def test_unrunnable_step_rejected(self, env, step_id, reason):
+        """未配置 / 无离线模型的 step 提交即 ValidationError（400），不入队、不留作业记录。"""
+        with pytest.raises(ValidationError, match=reason):
+            env.svc.submit(1, step_id)
+        assert env.svc.get(1, step_id) is None
+        assert env.launcher.procs == []
+
     def test_live_step_rejected(self, env):
         env.clients.go_live(1, 2)
         with pytest.raises(ConflictError):
@@ -159,7 +174,7 @@ class TestSubmit:
 
     def test_not_started_rejected(self):
         with pytest.raises(ConflictError):
-            OfflineJobService(clients=FakeClients(), launcher=FakeLauncher()).submit(1, 2)
+            OfflineJobService(config=_CFG, clients=FakeClients(), launcher=FakeLauncher()).submit(1, 2)
 
 
 class TestLive:
@@ -228,7 +243,7 @@ class TestFailures:
 
     def test_timeout_kills(self):
         clients, launcher = FakeClients(), FakeLauncher()
-        svc = OfflineJobService(clients=clients, launcher=launcher, poll_s=0.02, job_timeout_s=0.1)
+        svc = OfflineJobService(config=_CFG, clients=clients, launcher=launcher, poll_s=0.02, job_timeout_s=0.1)
         svc.start()
         try:
             svc.submit(1, 2)
@@ -255,7 +270,7 @@ class TestFailures:
 class TestStop:
     def test_stop_kills_running_and_cancels_queued(self):
         clients, launcher = FakeClients(), FakeLauncher()
-        svc = OfflineJobService(clients=clients, launcher=launcher, poll_s=0.02)
+        svc = OfflineJobService(config=_CFG, clients=clients, launcher=launcher, poll_s=0.02)
         svc.start()
         svc.submit(1, 1)
         svc.submit(1, 2)
@@ -268,7 +283,7 @@ class TestStop:
         assert len(launcher.procs) == 1
 
     def test_restart_after_stop(self):
-        svc = OfflineJobService(clients=FakeClients(), launcher=FakeLauncher(), poll_s=0.02)
+        svc = OfflineJobService(config=_CFG, clients=FakeClients(), launcher=FakeLauncher(), poll_s=0.02)
         svc.start()
         svc.stop()
         svc.start()
@@ -280,9 +295,10 @@ class TestStop:
 
 class TestRealSubprocess:
     def test_end_to_end_with_real_cli(self, tmp_storage, monkeypatch):
-        """真起 CLI 子进程：存储根经环境变量传给子进程，未配 stage 的 step 在 strict 下 skipped。
+        """真起 CLI 子进程：存储根经环境变量传给子进程；子进程读真实 YAML，987 未配置 → 退出非 0 → failed。
 
-        不跑模型（不碰 torch），只验证 起进程 / env / cwd / JSON 解析 这条管线。
+        服务侧注入的配置放行 987，子进程侧真实配置拒绝——不跑模型（不碰权重），只验证
+        起进程 / env / cwd / 末行 JSON 解析 这条管线。
         """
         from factories import make_detector_output, make_frame_detection
         from app.storage import inference as inference_store
@@ -291,13 +307,13 @@ class TestRealSubprocess:
         inference_store.append_detections(1, 987, [
             make_frame_detection(ts=1.0, by_source={"x": make_detector_output(n=1, ts=1.0)})
         ])
-        svc = OfflineJobService(clients=FakeClients(), poll_s=0.05)
+        svc = OfflineJobService(config=_CFG, clients=FakeClients(), poll_s=0.05)
         svc.start()
         try:
             svc.submit(1, 987)
             _wait_until(lambda: svc.get(1, 987).status not in ("queued", "running"), timeout=60.0)
             job = svc.get(1, 987)
-            assert job.status == "skipped", job.message
-            assert "987" in job.message
+            assert job.status == "failed", job.message
+            assert "987" in job.message and "未在推理配置中定义" in job.message
         finally:
             svc.stop(timeout=5.0)

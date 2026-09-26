@@ -300,7 +300,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | `queued` | 排队中 | — |
 | `running` | 子进程运行中 | — |
 | `completed` | 跑完并写入 | 已替换为本次结果 |
-| `skipped` | 该 step 没配离线模型，或没有检测结果，或开跑时该 step 正在 live | 不动 |
+| `skipped` | 该 step 没有检测结果，或开跑时该 step 正在 live | 不动 |
 | `superseded` | 运行期间检测结果变了（同 step 起了新 run / 残批迟到落盘），本次作废 | 不动；等 step 停写后重跑 |
 | `failed` | 模型异常、超时（30 分钟）、子进程启动失败等，原因见 `message` | 不动 |
 | `cancelled` | 被取消或后端停机 | 不动 |
@@ -326,6 +326,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 
 | status | 何时 | body |
 |--------|------|------|
+| 400 | 推理配置里没有这个 step，或它没配离线模型（`field="step_id"`）；不入队、不留作业记录 | `{"error": "Validation error", "detail": "...", "field": "step_id"}` |
 | 409 | 该 task 当前正在跑**这个** step（检测结果还在写，没封口） | `{"error": "Resource conflict", "detail": "..."}` |
 | 409 | 排队已满（20 个） | 同上 |
 | 422 | 请求体缺字段或类型不对 | FastAPI 校验错误 |

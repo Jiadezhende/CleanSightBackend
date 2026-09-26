@@ -68,9 +68,9 @@ def test_start_workflow_no_set_no_actor(manager):
 
 # ── 启动不变式：兜底 stage 必须 active ──────────────────────────────
 #
-# resolve_stage 把未知 step_id 一律路由到 FALLBACK_STAGE，而 dispatcher 只提交 active
+# resolve_stage 把 detector 加载失败的 stage 路由到 FALLBACK_STAGE，而 dispatcher 只提交 active
 # （有 detector）stage 的帧。若兜底 stage 被配掉 detector，启动仍会"成功"（只 INFO 一行
-# Skipped），但此后每个未知 step_id 的 run 都取帧后无人消费 → 静默 0 推理。故须 fail-fast。
+# Skipped），但此后兜底的 run 都取帧后无人消费 → 静默 0 推理。故须 fail-fast。
 # 这里在 config/factory 这层 seam 上测，不碰真权重加载（I/O 边界集成-only）。
 
 
