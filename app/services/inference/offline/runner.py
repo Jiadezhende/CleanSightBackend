@@ -8,7 +8,8 @@
 
 **换代校验**：读前记下 `detections_stamp`，读完、写前各核对一次；不等即 `superseded`、什么都不写
 （输入被追加 = 未封口；被整域删后重建 = 同 step 新一代 run 已开写）。丢弃不重试。
-写入不重建目录（`create=False`）：核对之后目录才被回收（TTL）时同样 `superseded`，不留僵尸 step。
+写入不重建目录（`create=False`）：目录已不在时同样 `superseded`。未闭合的两处：戳核对在串行点外（换代
+的毫秒窗口）；TTL 的 rmtree 是复合写，写入插在中途会留下半删目录（见 docs/kb/DESIGN_STALE_WRITES.md）。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
 落盘全经 `app.storage.inference`（存储根归 `settings`，故本类不收 `base_dir`）。

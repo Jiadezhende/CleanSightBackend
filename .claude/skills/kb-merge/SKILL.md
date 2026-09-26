@@ -40,12 +40,12 @@ update 是**写入当时的快照**，可能已被后续改动推翻。每条要
 
 ## Step 4 — 判归属，写入
 
-按主题定落点，KB 27 份文件的分工见 [INDEX.md](../../../docs/kb/INDEX.md) 各分组说明。惯例：
+按主题定落点，前缀定义与 `DESIGN_` 准入见 [KB_MAINTENANCE.md](../../../docs/kb/KB_MAINTENANCE.md)「文件分类」，各文件分工见 [INDEX.md](../../../docs/kb/INDEX.md) 各分组说明。惯例：
 
 | update 主题 | 落点 |
 |---|---|
 | 某个服务内部实现 | `SERVICE_<域>.md` |
-| 跨服务的工程设计/不变式 | `DESIGN_<主题>.md` |
+| 可迁移的设计原则 / 最佳实践（脱离本次问题仍成立） | `DESIGN_<主题>.md` |
 | 业务概念、检测标准、生命周期 | `BUSINESS_*.md` |
 | 组件关系、数据流、API 接线、存储分层 | `ARCHITECTURE_*.md` |
 | 对外端点契约（请求响应 schema） | **不进 KB** → `docs/api/`，那是端点契约真源 |

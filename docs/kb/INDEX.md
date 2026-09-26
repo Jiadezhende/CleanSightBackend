@@ -33,6 +33,7 @@
 8. [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)
 9. [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)
 10. [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)（动 `app/storage/` 或落盘产物前必读）
+11. [DESIGN_STALE_WRITES.md](DESIGN_STALE_WRITES.md)（动队列、清理、迟到结果处理前必读）
 
 运维排障：
 
@@ -82,9 +83,12 @@
 - [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)：说明 FastAPI Gateway、独立 MediaMTX Gateway、IP 白名单、限流和 RTSP TCP 代理。
 - [SERVICE_CONFIG.md](SERVICE_CONFIG.md)：说明环境变量、YAML 配置、Gateway、Lab 和各服务之间的配置耦合点。
 
-## 关键工程设计
+## 设计原则与最佳实践
+
+开发中总结出的设计原则 / 最佳实践，再遇到同类问题时参考（准入见 KB_MAINTENANCE.md「文件分类」）。
 
 - [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)：线程安全性、异步解耦、防卡死与可维护性。
+- [DESIGN_STALE_WRITES.md](DESIGN_STALE_WRITES.md)：迟到写入与换代 / 回收冲突。判据：「前提检查 + 写」与同资源其他写互斥才算闭合；串行点三种来源（单消费队列 / 锁与锁内 CAS / 文件系统原生原子失败，要求对方的删除也原子）；三个要点（前提来自点外才需代次令牌、长任务点外计算点内提交、同任务重启优先按代隔离）；门禁与点外自查只缩窗、提前取消只省资源；按资源的闭合 / 未闭合清单与闭合方案。动队列、清理、落盘或迟到结果处理前先读。
 - [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)：`[PRESSURE]`/`[VIZ_THROUGHPUT]`/`[BACKPRESSURE]` 三条正交诊断日志——压力周期快照、reason 触发侧语义、拒收可见化、日志量上界。
 - [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)：说明异常边界层、GuardedExecutor、重试、健康监控和优雅关闭策略。
 - [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)：检测链路架构总览图（整体流程、流源/流算子角色分工、两种告警模式、各检测点详细流程），配合 DESIGN_EXTENDING_DETECTION 使用。
