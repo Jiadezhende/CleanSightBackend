@@ -40,7 +40,7 @@ update 是**写入当时的快照**，可能已被后续改动推翻。每条要
 
 ## Step 4 — 判归属，写入
 
-按主题定落点，前缀定义与 `DESIGN_` 准入见 [KB_MAINTENANCE.md](../../../docs/kb/KB_MAINTENANCE.md)「文件分类」，各文件分工见 [INDEX.md](../../../docs/kb/INDEX.md) 各分组说明。惯例：
+按主题定落点，前缀分类见 [KB_MAINTENANCE.md](../../../docs/kb/KB_MAINTENANCE.md)「文件分类」，各文件分工见 [INDEX.md](../../../docs/kb/INDEX.md) 各分组说明。惯例：
 
 | update 主题 | 落点 |
 |---|---|
