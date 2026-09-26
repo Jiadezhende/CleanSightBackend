@@ -23,7 +23,7 @@ import numpy as np
 from app.domain.detection import DetectorOutput, FrameDetection
 from app.domain.render import RenderSpec
 from app.domain.frame import Frame
-from app.services.inference.naming import get_stage_alias
+from app.services.inference.online.naming import get_stage_alias
 from app.services.client import client_manager
 from .visualizer import FixedVisualizer
 

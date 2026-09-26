@@ -4,7 +4,7 @@
 同业务点的时序算子（5 帧去抖 + 结算告警）见 temporal/impl/bending.py。
 """
 
-from app.services.inference.detection.detector import YOLODetector
+from app.services.inference.online.detection.detector import YOLODetector
 from app.domain.detection import DetectorOutput
 from app.domain.render import RenderItem, RenderSpec, RenderType
 

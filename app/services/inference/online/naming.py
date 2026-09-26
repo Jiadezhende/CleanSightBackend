@@ -28,8 +28,8 @@ def get_task_metric_map() -> Dict[str, AlarmMetric]:
     若映射尚未初始化（如单元测试场景），自动从 YAML 懒加载一次。
     """
     if not _TASK_METRIC_MAP:
-        from .config import load_stage_config
-        from .stage_factory import StageFactory
+        from app.services.inference.config import load_stage_config
+        from app.services.inference.stage_factory import StageFactory
 
         _set_task_metric_map(StageFactory(load_stage_config()).build_task_metric_map())
     return _TASK_METRIC_MAP
@@ -53,8 +53,8 @@ def get_stage_alias(stage_key: str) -> str:
     若映射尚未初始化（如单元测试场景），自动从 YAML 懒加载一次。
     """
     if not _STAGE_ALIAS_MAP:
-        from .config import load_stage_config
-        from .stage_factory import StageFactory
+        from app.services.inference.config import load_stage_config
+        from app.services.inference.stage_factory import StageFactory
 
         _set_stage_alias_map(StageFactory(load_stage_config()).build_stage_alias_map())
     return _STAGE_ALIAS_MAP.get(stage_key, stage_key)

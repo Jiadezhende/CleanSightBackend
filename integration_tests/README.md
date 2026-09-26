@@ -40,7 +40,7 @@ integration_tests/
 - **`--current-step`** 决定「**跑什么**」——任务阶段，路由到对应推理 workflow：
   - `1` → LEAK（测漏，默认）
   - `2` → CLEAN（清洁）
-  - 其它任意值 → MOCK（兜底透传）
+  - 未配置的 step / 非数字 → 参数错误，`/api/start` 返回 400（无兜底 stage）
 
 例如 `--scenario 2 --current-step 2` = 在 CLEAN 阶段下测断流重连。
 
@@ -50,7 +50,7 @@ integration_tests/
 |---|---|---|
 | `--scenario` | 必填 | 场景编号 1-9 |
 | `--task_id` | 必填 | 数据库任务 ID（不存在则自动创建并在结束时删除） |
-| `--current-step` | 随场景 | 任务阶段（1=LEAK / 2=CLEAN / 其它=MOCK）；显式指定覆盖场景默认 |
+| `--current-step` | 随场景 | 任务阶段（1=LEAK / 2=CLEAN；未配置 start 400）；显式指定覆盖场景默认 |
 | `--server` | `localhost` | 服务器地址（本地/远程均可） |
 | `--api-port` | `8000` | 后端 HTTP/WS API 端口 |
 | `--rtsp-port` | `8004` | RTSPProxy 推流端口 |
@@ -181,10 +181,9 @@ python integration_tests/test_single_client.py --scenario 7 --task_id 1 --durati
 
 ---
 
-#### 场景 8：MOCK 阶段透传（验证不黑屏）
+#### 场景 8：未配置的 current_step → start 400
 
-`--scenario 1 --current-step 未知阶段` 的预设别名：无效 current_step 时 fallback 到 MOCK stage，验证帧透传不黑屏。
-后端日志关键字：`未知的 current_step，路由到 MOCK stage`、`InferWorker-MOCK 线程正常运行`。
+以 `current_step=99`（未配置）调 `/api/start`，预期 400、不起 run（不推流）。`--current-step 未知阶段` 同样应 400。
 
 ```bash
 python integration_tests/test_single_client.py --scenario 8 --task_id 1 --duration 30
@@ -239,7 +238,7 @@ python integration_tests/test_single_client.py \
 | `--max-tasks` | `5` | 最大并发客户端数（从 DB 查询；给了 `--task-ids` 则忽略） |
 | `--task-ids` | 无 | 逗号分隔的 task_id 列表，如 `119,120,121`；不存在的由子进程自建（`source_ip=test.s{task_id}`，结束自动清理） |
 | `--api-port` / `--rtsp-port` | `8000` / `8004` | 透传给每个子进程（测试环境常做端口偏移，如 8100/8104） |
-| `--current-step` | 无 | 透传给每个子进程（`1`=LEAK / `2`=CLEAN / 其它=MOCK） |
+| `--current-step` | 无 | 透传给每个子进程（`1`=LEAK / `2`=CLEAN；未配置 start 400） |
 | `--video_path` | `integration_tests/fixtures/test_video.mp4` | 测试视频 |
 
 > **每路的 `source_ip` 必须互异**——它既是推流路径 `rtsp://…/live/{source_ip}`，也是后端路由键；

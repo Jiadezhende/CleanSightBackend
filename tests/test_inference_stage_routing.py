@@ -2,8 +2,8 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.services.inference.config import FALLBACK_STAGE
-from app.services.inference.manager import InferenceManager
+from app.services.inference.online.manager import InferenceManager
+from app.utils.exceptions import ValidationError
 
 
 @pytest.fixture
@@ -13,21 +13,40 @@ def manager():
     return m
 
 
-# 主键 = step_id：current_step 直接作 stage 主键（恒等路由），未配的 step 回退 MOCK。
-# stage_configs 含 "1"/"2"/"MOCK" 三个已配阶段。
-_STAGE_CONFIGS = {"1": {}, "2": {}, "MOCK": {}}
+# 主键 = step_id：current_step 直接作 stage 主键（恒等路由），无兜底 stage。
+# YAML 配了 "1"/"2"/"3"；其中 "3" 没配 detector（无在线检测）→ 不在 active 集合。
+_STAGE_CONFIGS = {"1": {}, "2": {}}
+_YAML = SimpleNamespace(list_stages=lambda: ["1", "2", "3"])
+
+
+def _routing(manager):
+    return (
+        patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS),
+        patch("app.services.inference.config.load_stage_config", return_value=_YAML),
+    )
 
 
 @pytest.mark.parametrize("step,expected_stage", [
     ("1", "1"),        # 已配 step → 恒等
-    ("2", "2"),        # 已配 step → 恒等
-    ("测漏", "MOCK"),  # 未配 step → 兜底 MOCK
-    ("", "MOCK"),      # 空 step → 兜底 MOCK
+    (2, "2"),          # int 与 str 同键
 ])
 def test_resolve_stage_routes(manager, step, expected_stage):
     # stage 解析上移为公有 resolve_stage（供 RunController 建 CQ 前调用）。
-    with patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
+    p_active, p_yaml = _routing(manager)
+    with p_active, p_yaml:
         assert manager.resolve_stage(step) == expected_stage
+
+
+@pytest.mark.parametrize("step,reason", [
+    (99, "未在推理配置中定义"),
+    ("测漏", "未在推理配置中定义"),
+    ("3", "未配置在线检测"),       # YAML 有、但没 detector
+])
+def test_resolve_stage_unrunnable_rejected(manager, step, reason):
+    """未定义 / 无在线检测的 step 是参数错误：抛 ValidationError（400），无兜底 stage。"""
+    p_active, p_yaml = _routing(manager)
+    with p_active, p_yaml, pytest.raises(ValidationError, match=reason):
+        manager.resolve_stage(step)
 
 
 def _fake_cq(task_id=1, stage="1", step_id=None):
@@ -41,31 +60,37 @@ def _fake_cq(task_id=1, stage="1", step_id=None):
 def test_start_workflow_no_set_no_actor(manager):
     # start_workflow(cq) 不再碰注册表（set/remove 均归 RunController，与 stop_run 对称）。
     # 无 operator_specs → 不建 actor。CQ 假定已由 RunController 注册。
-    cq = _fake_cq(task_id=7, stage="MOCK", step_id=None)
-    with patch("app.services.inference.manager.client_manager") as cm, \
+    cq = _fake_cq(task_id=7, stage="1", step_id=None)
+    with patch("app.services.inference.online.manager.client_manager") as cm, \
          patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
         assert manager.start_workflow(cq) is True
 
     cm.set.assert_not_called()   # 注册职责已上移 RunController，本方法不再 set
 
 
-# ── 启动不变式：兜底 stage 必须 active ──────────────────────────────
+# ── 启动 fail-fast：detector 构造失败即启动失败 ─────────────────────────
 #
-# resolve_stage 把未知 step_id 一律路由到 FALLBACK_STAGE，而 dispatcher 只提交 active
-# （有 detector）stage 的帧。若兜底 stage 被配掉 detector，启动仍会"成功"（只 INFO 一行
-# Skipped），但此后每个未知 step_id 的 run 都取帧后无人消费 → 静默 0 推理。故须 fail-fast。
+# 构造不加载权重，能失败的只有配置错误；_get_stage_configs 不吞，包成 RuntimeError 冒到 lifespan。
 # 这里在 config/factory 这层 seam 上测，不碰真权重加载（I/O 边界集成-only）。
 
 
 def _patched_get_stage_configs(stage_names, detectors_by_stage):
-    """注入假 config/factory 跑真实 _get_stage_configs，返回 (manager, ctx管理器对)。"""
+    """注入假 config/factory 跑真实 _get_stage_configs，返回 (manager, ctx管理器对)。
+
+    detectors_by_stage 的值为异常实例时，模拟该 stage 的 detector 构造失败。
+    """
     m = InferenceManager.__new__(InferenceManager)
     m._stage_configs = None
     fake_config = SimpleNamespace(list_stages=lambda: list(stage_names), batch_size=4)
+
+    def create_detectors(stage):
+        got = detectors_by_stage.get(stage, [])
+        if isinstance(got, Exception):
+            raise got
+        return list(got)
+
     fake_factory = MagicMock()
-    fake_factory.create_detectors_for_stage.side_effect = (
-        lambda s: list(detectors_by_stage.get(s, []))
-    )
+    fake_factory.create_detectors_for_stage.side_effect = create_detectors
     fake_factory.create_operators_for_stage.side_effect = lambda s: []
     return m, (
         patch("app.services.inference.config.load_stage_config", return_value=fake_config),
@@ -73,25 +98,20 @@ def _patched_get_stage_configs(stage_names, detectors_by_stage):
     )
 
 
-def test_fallback_stage_without_detector_fails_fast():
-    """兜底 stage 无 detector → 启动即抛，不放行成静默黑洞。"""
+def test_detector_construction_failure_fails_startup():
+    """任一 stage 的 detector 构造失败 → _get_stage_configs 抛（后端启动失败），不降级成少一个 stage。"""
     m, (p_cfg, p_fac) = _patched_get_stage_configs(
-        ["1", FALLBACK_STAGE], {"1": [object()]},  # 兜底 stage 被配掉 detector
+        ["1", "2"], {"1": [object()], "2": RuntimeError("Stage '2' 创建 Detector 'x' 失败")},
     )
-    with p_cfg, p_fac, pytest.raises(RuntimeError, match=FALLBACK_STAGE):
+    with p_cfg, p_fac, pytest.raises(RuntimeError, match="Detector 'x'"):
         m._get_stage_configs()
 
 
-def test_fallback_stage_with_detector_passes():
-    """兜底 stage 有 detector → 正常放行，且它在 active 集合里（dispatcher 会消费它）。"""
-    m, (p_cfg, p_fac) = _patched_get_stage_configs(
-        ["1", FALLBACK_STAGE], {"1": [object()], FALLBACK_STAGE: [object()]},
-    )
+def test_stage_without_detectors_inactive_not_fatal():
+    """YAML 里没配 detector 的 stage 只是不生效（不是构造失败），启动照常。"""
+    m, (p_cfg, p_fac) = _patched_get_stage_configs(["1", "3"], {"1": [object()]})
     with p_cfg, p_fac:
-        configs = m._get_stage_configs()
-    # 不变式的实质：resolve_stage 的兜底目标必须落在 active 集合内
-    assert FALLBACK_STAGE in configs
-    assert m.resolve_stage("未配的step") == FALLBACK_STAGE
+        assert list(m._get_stage_configs()) == ["1"]
 
 
 def test_real_manager_init_invariants_and_stop_workflow_smoke():

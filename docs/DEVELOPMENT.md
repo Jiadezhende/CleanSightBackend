@@ -80,7 +80,13 @@
 
 ---
 
-## 6. 重构规范
+## 6. 演进与重构规范
+
+**先保最简实现，再逐步完善**：不要试图一次性设计出完美架构。大量不完善的设计比没有设计更难重构，因为每一处都得先读懂、再拆掉。
+
+- **首版只做当前需求必需的部分**：并发、换代、回收这类防护，在流量低、写错能重跑覆盖、没有告警 / DB 等下游副作用时可以先不做。update 记录里写明残余风险，以及到什么条件必须补做。
+- **不叠临时防护**：只能缩小窗口、闭合不了的局部补丁，到整体改造时都要拆掉。要做就按目标方案做对，否则先不做。
+- **完善时按下面的重构流程分步推进。**
 
 **较大的重构不做破坏性一次性切换**——一把全切过去，单测和上游同时爆，二分不出是新实现的 bug 还是迁移漏改。新旧实现在迁移期并存，按下面四步走：
 
@@ -120,11 +126,11 @@
 - **包内一律相对、跨包一律绝对**。判据是「目标是不是我这个包的后代」，不是目录深浅：
 
   ```python
-  # app/services/inference/manager.py
+  # app/services/inference/online/manager.py
   from .config import load_stage_config              # ✓ 同目录
   from .detection.service import DetectionService    # ✓ 本包子包
   from app.services.client.manager import client_manager   # ✓ 跨包（跨服务依赖一眼可见）
-  from app.services.inference.naming import stream_name    # ✗ 包内却写了绝对
+  from app.services.inference.online.naming import stream_name    # ✗ 包内却写了绝对
   ```
 
 - **相对导入不上翻**：只许 `from .x import`，禁止 `from ..x` / `from ...x`。要引用兄弟包或父包，写绝对路径。

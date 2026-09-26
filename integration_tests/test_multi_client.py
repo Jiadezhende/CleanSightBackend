@@ -125,7 +125,7 @@ def main():
     parser.add_argument("--rtsp-port", type=int, default=8004, dest="rtsp_port", help="RTSPProxy 推流端口（默认: 8004）")
     parser.add_argument(
         "--current-step", default=None, dest="current_step",
-        help="任务 current_step（1=LEAK / 2=CLEAN / 其它=MOCK）；透传给每个子进程。"
+        help="任务 current_step（1=LEAK / 2=CLEAN；未配置 start 400）；透传给每个子进程。"
              "复用已存在任务时须与 DB 中的值一致（子进程会 fail-fast）。",
     )
     parser.add_argument(

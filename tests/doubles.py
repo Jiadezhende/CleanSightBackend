@@ -1,18 +1,22 @@
-"""Mock 检测：MockDetector（流源，纯 numpy 亮度启发式，无 YOLO 依赖）。
+"""测试替身：无权重、无 torch 的 Detector / OfflineSegmenter（生产配置与代码里没有 MOCK）。
 
-用于无真实模型权重的 CPU 服务器验证推理链路，亦作未知 step 的 MOCK 透传 fallback。
-无状态，多 Client 共享，产出 "mock" 流。同业务点的时序算子见 temporal/impl/mock.py。
+    MockDetector         纯 numpy 亮度启发式 Detector（中心区灰度均值 < 阈值即出框）
+    BrushRulesSegmenter  纯规则离线分段（任一 source 有框即 active，连续 active 帧并段）
+
+测试 config 里按模块名引用：`{"class": "doubles.BrushRulesSegmenter"}`（tests/ 在 sys.path 上）。
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List, Sequence
 
 import numpy as np
 
-from app.services.inference.detection.detector import Detector
-from app.domain.detection import DetBox, DetectorOutput
+from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.domain.temporal import TemporalSegment
+from app.services.inference.offline.segmenter import OfflineSegmenter
+from app.services.inference.online.detection.detector import Detector
 
 _MOCK_CLASS_ID = 0
 _MOCK_CLASS_NAME = "mock_object"
@@ -97,4 +101,56 @@ class MockDetector(Detector):
             status_text=status_text,
             status_color=status_color,
             status_position="top-left",
+        )
+
+
+class BrushRulesSegmenter(OfflineSegmenter):
+    """纯规则 Mock 分段器。
+
+    Args:
+        label: active 片段写出的动作标签，默认 `mock_action`。
+        min_frames: 一个片段至少包含多少个 active 采样帧。
+    """
+
+    def __init__(self, label: str = "mock_action", min_frames: int = 1):
+        self.label = label
+        self.min_frames = max(1, int(min_frames))
+
+    def preprocess(self, frames: Sequence[FrameDetection]) -> Sequence[FrameDetection]:
+        """Mock 不做特征工程，直接把帧序列交给规则逻辑。"""
+        return frames
+
+    def segment(self, model_input: Any) -> List[TemporalSegment]:
+        frames: Sequence[FrameDetection] = model_input
+        segments: List[TemporalSegment] = []
+        run_start: float | None = None
+        run_last = 0.0
+        run_count = 0
+        for ff in frames:  # load 已按 ts 升序
+            active = any(fd.boxes for fd in ff.by_source.values())
+            if active:
+                if run_start is None:
+                    run_start = ff.ts
+                    run_count = 0
+                run_last = ff.ts
+                run_count += 1
+                continue
+
+            if run_start is not None and run_count >= self.min_frames:
+                segments.append(self._make(run_start, run_last))
+            run_start = None
+            run_count = 0
+
+        if run_start is not None and run_count >= self.min_frames:
+            segments.append(self._make(run_start, run_last))
+        return segments
+
+    def _make(self, start: float, end: float) -> TemporalSegment:
+        return TemporalSegment(
+            producer=self.name,
+            label=self.label,
+            start=float(start),
+            end=float(end),
+            conf=1.0,
+            meta={"model_version": "brush_rules_v1"},
         )

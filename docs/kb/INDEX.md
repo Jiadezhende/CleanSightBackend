@@ -1,4 +1,4 @@
-> 更新时间：2026-09-20
+> 更新时间：2026-09-26
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -33,6 +33,7 @@
 8. [SERVICE_PERSISTENCE.md](SERVICE_PERSISTENCE.md)
 9. [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)
 10. [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md)（动 `app/storage/` 或落盘产物前必读）
+11. [DESIGN_STALE_WRITES.md](DESIGN_STALE_WRITES.md)（动队列、清理、迟到结果处理前必读）
 
 运维排障：
 
@@ -82,9 +83,12 @@
 - [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)：说明 FastAPI Gateway、独立 MediaMTX Gateway、IP 白名单、限流和 RTSP TCP 代理。
 - [SERVICE_CONFIG.md](SERVICE_CONFIG.md)：说明环境变量、YAML 配置、Gateway、Lab 和各服务之间的配置耦合点。
 
-## 关键工程设计
+## 设计原则与最佳实践
+
+开发中总结出的设计原则 / 最佳实践，再遇到同类问题时参考（准入见 KB_MAINTENANCE.md「文件分类」）。
 
 - [DESIGN_CONCURRENCY_AND_QUEUES.md](DESIGN_CONCURRENCY_AND_QUEUES.md)：线程安全性、异步解耦、防卡死与可维护性。
+- [DESIGN_STALE_WRITES.md](DESIGN_STALE_WRITES.md)：迟到写入与换代 / 回收冲突。「前提检查 + 写」之间不穿插同资源的其他写才算闭合，三种工具：单消费线程队列、锁（含锁内 CAS）、资源的原子操作原语（跨进程时用，对方的写也须原子，删除因此要改成 rename 到回收区再删、失败按「没删」处理）；代次令牌两种用法——写前比对 vs 多版本（MVCC：一代一个版本目录、版本号单调不复用、tmp→rename 原子提交、只有属主建版本、读者解析一次锁定句柄、SEALED 封口、只回收非最新版本、一文件一写者）；耗时任务执行与提交分离；每一代新建对象优于复用；门禁与点外自查最多缩窗；按场景选手段（写错可重跑、无下游副作用的可先不防）。动队列、清理、落盘或迟到结果处理前先读。
 - [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)：`[PRESSURE]`/`[VIZ_THROUGHPUT]`/`[BACKPRESSURE]` 三条正交诊断日志——压力周期快照、reason 触发侧语义、拒收可见化、日志量上界。
 - [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)：说明异常边界层、GuardedExecutor、重试、健康监控和优雅关闭策略。
 - [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)：检测链路架构总览图（整体流程、流源/流算子角色分工、两种告警模式、各检测点详细流程），配合 DESIGN_EXTENDING_DETECTION 使用。

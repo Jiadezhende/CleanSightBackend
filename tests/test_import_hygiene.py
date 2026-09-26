@@ -104,6 +104,9 @@ BUDGET = {
     "app.services.algorithm.colorstrip.cli":    (set(), 0.60),   # 同上；argparse 不加码
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
+    # online / offline 两个子包的 `__init__` 都是标记型：import 子包不该拉起任何一段链路。
+    "app.services.inference.online":  (set(), 1.0),
+    "app.services.inference.offline": (set(), 1.0),
     "app.services.persistence": (set(), 1.0),
     # recording 登记两条：包名那条是门面型（浅，基本只有 docstring），真正的守门人是
     # `service` —— 它 import `app.storage.hls`，cv2 一旦从 `_encode` 的函数体挪到模块级，
@@ -144,7 +147,8 @@ LAYER_PACKAGES = {
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",
-    "inference_manager": "app.services.inference.instance",
+    "inference_manager": "app.services.inference.online.instance",
+    "offline_job_service": "app.services.inference.offline.instance",
     "persistence_manager": "app.services.persistence.instance",
     "recording_service": "app.services.recording.instance",
     "health_monitor": "app.services.health_monitor.instance",
@@ -161,7 +165,7 @@ SINGLETON_EXCEPTIONS = {
     "app/services/health_monitor/manager.py",
     # 告警落库 sink：inference 产告警 → persistence 落库。跨服务但方向正确（下游依赖），
     # 且 sink 就是为这条方向存在的唯一窄接口。
-    "app/services/inference/temporal/alarm_sink.py",
+    "app/services/inference/online/temporal/alarm_sink.py",
 }
 
 

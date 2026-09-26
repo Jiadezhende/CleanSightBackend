@@ -81,7 +81,7 @@ def _build_signals_10s(stream_summary: dict) -> dict:
 
     metric 映射是 inference 展示知识，收敛在 router 装配层；CQ 只出纯流名汇总。
     """
-    from app.services.inference.naming import get_task_metric_map
+    from app.services.inference.online.naming import get_task_metric_map
 
     metric_map = get_task_metric_map()
     _empty = {"active": False, "hit_count": 0, "max_conf": 0.0}

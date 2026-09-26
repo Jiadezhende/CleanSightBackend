@@ -12,7 +12,7 @@
     5 - 仅 start:   调 start 但不推流(no-stream) 或 不调 terminate(no-terminate)
     6 - 延迟推流:   先调 start（流未就绪），N秒后推流，验证健康监控自动重连（Bug 2）
     7 - CLEAN阶段:  current_step=2 → CLEAN stage，验证帧透传不黑屏
-    8 - MOCK阶段:   无效 current_step → MOCK fallback，验证帧透传不黑屏
+    8 - 未配置阶段: 未配置的 current_step → /api/start 400
     9 - 阶段切换:   start(LEAK) → DB 改 step=2 → 再 start 触发全量重建 → CLEAN
 
 参数:
@@ -26,7 +26,7 @@
     --fps         <int>                默认 30
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
     --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
-    --current-step <step>              任务阶段(1=LEAK/2=CLEAN/其它=MOCK)，覆盖场景默认
+    --current-step <step>              任务阶段(1=LEAK/2=CLEAN，其它 start 400)，覆盖场景默认
 
 维度说明:
     --scenario     决定「怎么跑」（生命周期：正常/断流/延迟/不 terminate…）
@@ -298,7 +298,7 @@ def print_admin_url(server: str, api_port: int, task_id: int):
 
 # ---------------------------------------------------------------------------
 # 标准生命周期：推流 → start → 观察 duration → terminate
-# Scenario 1/7/8 共用，仅 current_step 与提示文案不同
+# Scenario 1/7 共用，仅 current_step 与提示文案不同
 # ---------------------------------------------------------------------------
 
 
@@ -636,24 +636,29 @@ def run_scenario_7(args):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 8: 无效 current_step → MOCK 阶段透传
+# Scenario 8: 未配置的 current_step → /api/start 参数校验失败
 # ---------------------------------------------------------------------------
 
 
 def run_scenario_8(args):
-    """无效 current_step → MOCK 阶段 fallback（验证不黑屏）。
+    """未配置的 current_step → /api/start 返回 400，不起 run。
 
-    本质是「标准生命周期 + 无效 current_step」的预设别名，等价于
-    `--scenario 1 --current-step 未知阶段`。--current-step 可进一步覆盖。
+    `--current-step` 可覆盖（非数字如「未知阶段」同样应 400）。
     """
-    _run_simple_lifecycle(
-        args,
-        name="Scenario 8",
-        subtitle="无效 current_step → MOCK 阶段透传（验证不黑屏）",
-        current_step_default="未知阶段",
-        extra=("current_step = '未知阶段' → 预期路由到 MOCK stage",),
-        tail=("  验证: 后端日志应有 MOCK stage 路由，WebSocket 帧正常推送（无黑屏）",),
-    )
+    section("Scenario 8: 未配置的 current_step → start 拒绝",
+            "current_step = '99'（未配置）→ 预期 /api/start 返回 400")
+
+    with scenario_setup(args, current_step="99", need_stream=False) as ctx:
+        print(f"\n调用 /api/start（task_id={args.task_id}, current_step={ctx.current_step}）")
+        result = ctx.api.unified_start(args.task_id, ctx.pull_url, args.fps)
+        if "error" not in result:
+            do_terminate(ctx.api, ctx.client_id)
+            raise RuntimeError(f"/api/start 意外成功: {result}")
+        if "400" not in str(result["error"]):
+            raise RuntimeError(f"/api/start 失败但不是 400: {result['error']}")
+        print(f"  [预期] /api/start 400: {str(result['error'])[:200]}")
+
+    print("\nScenario 8 完成")
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +774,7 @@ def main():
                        --mode no-terminate: start 但不 terminate
   6  延迟推流:        先 start（无流，预期失败）→ N秒后推流 → 验证自动重连 (Bug 2)
   7  CLEAN阶段:       别名 = scenario 1 + current_step=2 → CLEAN stage（验证不黑屏）
-  8  MOCK阶段:        别名 = scenario 1 + 无效 current_step → MOCK fallback（验证不黑屏）
+  8  未配置阶段:      current_step=99（未配置）→ /api/start 400，不起 run
   9  阶段切换:        start(step=1/LEAK) → DB改step=2 → start again → 全量重建 → CLEAN stage
 
 提示: --current-step 可覆盖任意场景的默认阶段，
@@ -785,8 +790,8 @@ def main():
         "--current-step",
         default=None,
         dest="current_step",
-        help="任务 current_step（决定推理 workflow：1=LEAK / 2=CLEAN / 其它=MOCK）。"
-             "默认随场景（1-6→1，7→2，8→MOCK）；显式指定可覆盖场景默认，"
+        help="任务 current_step（决定推理 workflow：1=LEAK / 2=CLEAN；未配置或非数字 start 400）。"
+             "默认随场景（1-6→1，7→2，8→99）；显式指定可覆盖场景默认，"
              "实现「任意阶段 × 任意生命周期」自由组合。",
     )
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")

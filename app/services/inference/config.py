@@ -17,13 +17,9 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-logger = logging.getLogger(__name__)
+from app.utils.exceptions import ValidationError
 
-# 未知/未配 step_id 的兜底 stage 主键：在线 `InferenceManager.resolve_stage` 与离线
-# `InferenceConfig.resolve_stage` 共用同一目标（两者故意不合方法——查的 stage 集合不同：
-# 在线查 active（有 detector），离线查 YAML 全集——但兜底目标必须同源，否则会静默分叉）。
-# 在线侧另有启动不变式强制它 active，见 `InferenceManager._get_stage_configs`。
-FALLBACK_STAGE = "MOCK"
+logger = logging.getLogger(__name__)
 
 # 全局配置缓存（单例模式）
 _global_inference_config: Optional["InferenceConfig"] = None
@@ -65,20 +61,18 @@ class InferenceConfig:
         """获取指定 Stage 的配置"""
         return self.stages.get(stage_name)
 
-    def resolve_stage(self, step_id: Any) -> str:
-        """step_id → stage 配置主键：命中即恒等返回，未知/未配回退 FALLBACK_STAGE（透传兜底）。
+    def require_offline(self, step_id: int) -> str:
+        """离线可跑校验：step 在配置中定义且 offline 段非空，返回 stage 主键；否则 `ValidationError`。
 
-        与 `InferenceManager.resolve_stage` 同规则（同源同义）：离线链路用本配置级解析器把
-        数字存储键（如未配的 -1）解析成 stage 配置 key，**存储读写仍用原数字 step_id**（二者正交）。
+        未配置即参数错误，无兜底。作业服务提交时、runner 运行时共用本校验。
         """
         step_key = str(step_id)
-        if step_key in self.stages:
-            return step_key
-        logger.warning(
-            "[InferenceConfig] 未知的 step_id '%s'，路由到 %s stage（与在线 resolve_stage 一致）",
-            step_id, FALLBACK_STAGE,
-        )
-        return FALLBACK_STAGE
+        stage = self.stages.get(step_key)
+        if stage is None:
+            raise ValidationError(f"step {step_id} 未在推理配置中定义", field="step_id", value=step_key)
+        if not stage.offline:
+            raise ValidationError(f"step {step_id} 未配置离线模型", field="step_id", value=step_key)
+        return step_key
 
     def list_stages(self) -> List[str]:
         """列出所有 Stage 名称"""

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
@@ -116,7 +117,9 @@ def read_temporal(task_id: int, step_id: int) -> List[TemporalEvent | TemporalSe
 
 
 def write_temporal(
-    task_id: int, step_id: int, facts: Sequence[TemporalEvent | TemporalSegment]
+    task_id: int,
+    step_id: int,
+    facts: Sequence[TemporalEvent | TemporalSegment],
 ) -> None:
     """**整体替换**该 step 的事实（路线 C：编码 → 同目录 tmp → `os.replace`）。
 
@@ -152,6 +155,10 @@ def write_label_probs(task_id: int, step_id: int, probs: LabelProbs) -> None:
         OSError: 建目录 / 写 tmp / 换名失败。失败时 tmp 删除、旧文件原样保留。
     """
     path = _layout.domain_dir(task_id, step_id, create=True) / _layout.LABEL_PROBS_NAME
+    _write_probs_atomic(path, probs)
+
+
+def _write_probs_atomic(path: Path, probs: LabelProbs) -> None:
     tmp = path.with_name("." + path.name + ".tmp")
     try:
         # 传文件对象而非路径：`np.savez` 收到不以 .npz 结尾的路径会自作主张补后缀，tmp 名就对不上了。

@@ -9,7 +9,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from app.services.inference.detection.dispatcher import StageAwareDispatcher
+from app.services.inference.online.detection.dispatcher import StageAwareDispatcher
 
 
 def _item(stage: str):

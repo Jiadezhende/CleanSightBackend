@@ -11,7 +11,6 @@ class AlarmType(str, Enum):
 
     PROCESS_VIOLATION = "流程违规"
     TASK_TIMEOUT = "任务超时"
-    MOCK = "mock_alarm"  # 仅测试用
 
 
 class AlarmMetric(str, Enum):

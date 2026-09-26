@@ -128,3 +128,4 @@ def read_detections(task_id: int, step_id: int) -> List[FrameDetection]:
             logger.warning("[storage.inference] 跳过形状不对的 record %s: %s", path, e)
     frames.sort(key=lambda ff: ff.ts)
     return frames
+

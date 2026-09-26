@@ -20,7 +20,11 @@ class StageFactory:
         self.config = config
 
     def create_detectors_for_stage(self, stage_name: str) -> List[Any]:
-        """为指定 Stage 创建所有 Detector 实例（流源，共享，推理线程 + 可视化线程）。"""
+        """为指定 Stage 创建所有 Detector 实例（流源，共享，推理线程 + 可视化线程）。
+
+        任一 detector 构造失败即抛（fail-fast，后端启动失败）：构造不加载权重（首次推理才惰性加载），
+        能在这里失败的只有配置错误，不静默少一个流源。
+        """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config:
             logger.warning("Stage '%s' 配置不存在", stage_name)
@@ -28,12 +32,12 @@ class StageFactory:
 
         detectors = []
         for det_cfg in stage_config.detectors:
+            name = det_cfg.get("name", "?")
             try:
-                detector = _instantiate_from_config(det_cfg)
-                detectors.append(detector)
-                logger.info("✓ 成功创建 Detector: %s", det_cfg.get("name", "?"))
+                detectors.append(_instantiate_from_config(det_cfg))
             except Exception as e:
-                logger.error("✗ 创建 Detector 失败 %s: %s", det_cfg.get("name", "?"), e, exc_info=True)
+                raise RuntimeError(f"Stage '{stage_name}' 创建 Detector '{name}' 失败: {e}") from e
+            logger.info("✓ 成功创建 Detector: %s", name)
 
         return detectors
 
@@ -48,7 +52,8 @@ class StageFactory:
 
         Returns:
             List of (OperatorClass, kwargs) tuples。
-            rule.subscribes 显式必填（输入流名 = detector.name）；缺失则 fail-fast 跳过该规则。
+            rule.class / rule.subscribes（输入流名 = detector.name）显式必填；缺失或类加载失败即抛
+            （fail-fast，同 detector：配置错误不静默少告警）。
             rule.name 注入为算子自身/输出身份，subscribes 注入为输入流清单。
         """
         stage_config = self.config.get_stage_config(stage_name)
@@ -61,27 +66,23 @@ class StageFactory:
             name = rule_cfg.get("name", "")
             class_path = rule_cfg.get("class")
             if not class_path:
-                logger.error("✗ rule '%s' 缺少 class 字段，跳过", name)
-                continue
+                raise ValueError(f"Stage '{stage_name}' rule '{name}' 缺少 class 字段")
             subscribes = rule_cfg.get("subscribes")
             if not subscribes:
-                logger.error("✗ rule '%s' 必须显式声明 subscribes（输入流），跳过", name)
-                continue
+                raise ValueError(f"Stage '{stage_name}' rule '{name}' 必须显式声明 subscribes（输入流）")
             try:
                 cls = _import_class(class_path)
-                kwargs = dict(rule_cfg.get("params") or {})
-                kwargs.setdefault("name", name)
-                kwargs["subscribes"] = list(subscribes)
-                specs.append((cls, kwargs))
-                logger.info("✓ 注册 Operator spec: %s (subscribes=%s)", name, subscribes)
             except Exception as e:
-                logger.error("✗ 注册 Operator 失败 %s: %s", name, e, exc_info=True)
+                raise RuntimeError(f"Stage '{stage_name}' 注册 Operator '{name}' 失败: {e}") from e
+            kwargs = dict(rule_cfg.get("params") or {})
+            kwargs.setdefault("name", name)
+            kwargs["subscribes"] = list(subscribes)
+            specs.append((cls, kwargs))
+            logger.info("✓ 注册 Operator spec: %s (subscribes=%s)", name, subscribes)
 
         return specs
 
-    def create_offline_segmenter(
-        self, stage_name: str, override_class: str | None = None
-    ) -> "OfflineSegmenter | None":
+    def create_offline_segmenter(self, stage_name: str) -> "OfflineSegmenter | None":
         """为指定 Stage 实例化离线分割策略（`stages.<step_id>.offline`），未启用返回 None。
 
         offline 配置 schema（空块 `{}` 或整段缺省 = 不启用该 stage 离线分段；
@@ -90,12 +91,10 @@ class StageFactory:
               class: <OfflineSegmenter 子类全限定路径>   # 必填；producer = 类名
               params: {...}                              # 原样 `cls(**params)`
 
-        `override_class` 支撑 CLI `--strategy`（开发期对比不同策略），覆盖配置 `class`、沿用 `params`。
         缺 class / 类加载失败一律 **fail-fast**（抛异常，不静默跳过）。
 
         Args:
             stage_name: stage 主键（= str(step_id)）
-            override_class: 可选，覆盖配置里的 class 全限定路径
         """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config:
@@ -105,7 +104,7 @@ class StageFactory:
         if not offline:  # 空块 / 缺省 = 不启用；非空即有意启用，下面缺字段 fail-fast
             return None
 
-        class_path = override_class or offline.get("class")
+        class_path = offline.get("class")
         if not class_path:
             raise ValueError(f"Stage '{stage_name}' offline 缺少 class")
 

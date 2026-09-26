@@ -9,7 +9,7 @@ from factories import make_bare_cq, make_detector_output, make_frame_detection
 from app.services.inference.config import load_stage_config
 from app.domain.alarm import Alarm, AlarmType
 from app.services.inference.stage_factory import StageFactory
-from app.services.inference.temporal.operator import Operator
+from app.services.inference.online.temporal.operator import Operator
 
 
 def _out(ts: float, n: int = 1):
@@ -132,11 +132,11 @@ class _GoodOperator(Operator):
         self._sm["ran"] = True
 
     def judge(self):
-        return ["good"], [Alarm(alarm_type=AlarmType.MOCK, alarm_level="low", alarm_message="ok")]
+        return ["good"], [Alarm(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="low", alarm_message="ok")]
 
 
 def test_per_operator_isolation():
-    from app.services.inference.temporal.actor import ClientTemporalActor
+    from app.services.inference.online.temporal.actor import ClientTemporalActor
 
     cq = MagicMock()
     cq.get_slide_window.return_value = [make_frame_detection(source="s", ts=1.0)]
@@ -144,7 +144,7 @@ def test_per_operator_isolation():
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)
     good = _GoodOperator(name="good", subscribes=["s"], window_seconds=3.0)
-    actor = ClientTemporalActor(task_id=1, cq=cq, stage="MOCK", operators=[bad, good])
+    actor = ClientTemporalActor(task_id=1, cq=cq, stage="1", operators=[bad, good])
     actor._persist_alarms = lambda alarms: captured.extend(alarms)
 
     actor._tick()

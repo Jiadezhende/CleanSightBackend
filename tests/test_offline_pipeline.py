@@ -1,4 +1,4 @@
-"""离线分割入口测试：存储引擎 / 配置工厂 / Runner / mock+clean 策略 / stage 解析 / CLI。
+"""离线分割入口测试：存储引擎 / 配置工厂 / Runner / 规则替身+clean 策略 / 离线可跑校验 / CLI。
 
 不依赖 GPU / RTSP / DB / 网络；storage 与 config 全用临时件，用例间不串。
 """
@@ -8,6 +8,7 @@ import math
 
 import pytest
 
+from doubles import BrushRulesSegmenter
 from factories import make_det_box, make_detector_output, make_frame_detection
 
 from app.domain.detection import DetectorOutput, FrameDetection
@@ -15,11 +16,11 @@ from app.domain.temporal import TemporalEvent, TemporalSegment
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
-from app.services.inference.offline.impl.mock import BrushRulesSegmenter
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
+from app.utils.exceptions import ValidationError
 
-_MOCK_CLASS = "app.services.inference.offline.impl.mock.BrushRulesSegmenter"
+_RULES_CLASS = "doubles.BrushRulesSegmenter"  # 测试替身，见 tests/doubles.py
 _CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanSegmenter"
 
 
@@ -74,9 +75,12 @@ def _config(offline):
 
 
 _OFFLINE_OK = {
-    "class": _MOCK_CLASS,
+    "class": _RULES_CLASS,
     "params": {"label": "brushing"},
 }
+# 测试替身策略（定义在本文件下方）：Boom 抛异常，Marker 验证 preprocess 预留层
+_BOOM = {"class": "test_offline_pipeline.BoomSegmenter"}
+_MARKER = {"class": "test_offline_pipeline.MarkerSegmenter"}
 
 
 class TestCreateOfflineSegmenter:
@@ -93,12 +97,23 @@ class TestCreateOfflineSegmenter:
 
     @pytest.mark.parametrize("class_path", [
         "nonexistent_module.Bad",
-        "app.services.inference.offline.impl.mock.NoSuchSegmenter",
+        "app.services.inference.offline.impl.clean.NoSuchSegmenter",
     ])
     def test_unimportable_class_fail_fast(self, class_path):
         offline = dict(_OFFLINE_OK, **{"class": class_path})
         with pytest.raises((ImportError, AttributeError)):
             StageFactory(_config(offline)).create_offline_segmenter("2")
+
+    def test_bad_detector_class_fails_fast(self):
+        """detector 构造失败即抛（启动 fail-fast），不再记日志后静默少一个流源。"""
+        cfg = InferenceConfig({"stages": {"2": {"detectors": [{"name": "d", "class": "nonexistent.Bad"}]}}})
+        with pytest.raises(RuntimeError, match="Detector 'd'"):
+            StageFactory(cfg).create_detectors_for_stage("2")
+
+    def test_rule_missing_subscribes_fails_fast(self):
+        cfg = InferenceConfig({"stages": {"2": {"rules": [{"name": "r", "class": "x.Y"}]}}})
+        with pytest.raises(ValueError, match="subscribes"):
+            StageFactory(cfg).create_operators_for_stage("2")
 
     def test_enabled_builds_segmenter(self):
         seg = StageFactory(_config(_OFFLINE_OK)).create_offline_segmenter("2")
@@ -106,29 +121,26 @@ class TestCreateOfflineSegmenter:
         assert seg.name == "BrushRulesSegmenter"  # producer = 类名
         assert seg.label == "brushing"
 
-    def test_override_class(self):
-        offline = dict(_OFFLINE_OK, **{"class": "nonexistent.Bad"})
-        seg = StageFactory(_config(offline)).create_offline_segmenter(
-            "2", override_class=_MOCK_CLASS
-        )
-        assert isinstance(seg, BrushRulesSegmenter)
+
+# ============================ 离线可跑校验 ============================
+
+class TestRequireOffline:
+    """离线无兜底：未定义 / offline 为空的 step 都是参数错误。"""
+
+    def test_configured_returns_stage_key(self):
+        assert _config(_OFFLINE_OK).require_offline(2) == "2"
+
+    @pytest.mark.parametrize("cfg,step_id,reason", [
+        (_config(_OFFLINE_OK), 999, "未在推理配置中定义"),
+        (_config(_OFFLINE_OK), -1, "未在推理配置中定义"),   # -1 不再有特殊含义
+        (_config({}), 2, "未配置离线模型"),
+    ])
+    def test_unrunnable_rejected(self, cfg, step_id, reason):
+        with pytest.raises(ValidationError, match=reason):
+            cfg.require_offline(step_id)
 
 
-# ============================ stage 解析回退 ============================
-
-class TestResolveStage:
-    def test_hit_returns_identity_miss_falls_back_mock(self):
-        cfg = InferenceConfig({"stages": {
-            "2": {"detectors": [{"name": "clean_large"}]},
-            "MOCK": {"detectors": [{"name": "mock"}]},
-        }})
-        assert cfg.resolve_stage(2) == "2"
-        assert cfg.resolve_stage("2") == "2"
-        assert cfg.resolve_stage(-1) == "MOCK"       # 未配数字 → 回退
-        assert cfg.resolve_stage(999) == "MOCK"
-
-
-# ============================ BrushRulesSegmenter（MOCK 链路 stand-in） ============================
+# ============================ BrushRulesSegmenter（规则替身） ============================
 
 class TestBrushRulesSegmenter:
     def test_presence_runs_to_segments(self):
@@ -277,14 +289,15 @@ def _write_detections(task_id, step_id):
 
 
 class TestOfflineRunner:
-    def test_unknown_stage_skipped(self, tmp_storage):
-        r = OfflineRunner(config=_config(_OFFLINE_OK))
-        res = r.run(OfflineRunSpec(task_id=1, step_id=999))
-        assert res.status == "skipped"
+    def test_unconfigured_step_raises_no_write(self, tmp_storage):
+        _write_detections(1, 999)
+        with pytest.raises(ValidationError):
+            _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=999))
+        assert not _facts_path(tmp_storage, step_id=999).exists()
 
-    def test_offline_disabled_skipped(self, tmp_storage):
-        res = _runner({}).run(OfflineRunSpec(task_id=1, step_id=2))
-        assert res.status == "skipped"
+    def test_offline_disabled_raises(self, tmp_storage):
+        with pytest.raises(ValidationError, match="未配置离线模型"):
+            _runner({}).run(OfflineRunSpec(task_id=1, step_id=2))
 
     def test_missing_input_skipped_no_write(self, tmp_storage):
         res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
@@ -314,17 +327,13 @@ class TestOfflineRunner:
 
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
         _write_detections(1, 2)
-        r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         with pytest.raises(RuntimeError):
-            r.run(OfflineRunSpec(task_id=1, step_id=2,
-                                 strategy="test_offline_pipeline.BoomSegmenter"))
+            _runner(_BOOM).run(OfflineRunSpec(task_id=1, step_id=2))
         assert not _facts_path(tmp_storage).exists()
 
     def test_preprocess_seam_invoked(self, tmp_storage):
         _write_detections(1, 2)
-        r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
-        res = r.run(OfflineRunSpec(task_id=1, step_id=2,
-                                   strategy="test_offline_pipeline.MarkerSegmenter"))
+        res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert res.segment_count == 1
 
@@ -341,21 +350,6 @@ class TestOfflineRunner:
         assert not _probs_path(tmp_storage).exists()
         assert not _facts_path(tmp_storage).exists()
 
-    def test_resolve_stage_fallback_to_mock(self, tmp_storage):
-        """未配数字 step_id(-1) 经 resolve_stage 回退 MOCK.offline，读数字 -1 分区、completed。"""
-        cfg = InferenceConfig({"stages": {"MOCK": {
-            "detectors": [{"name": "mock"}],
-            "offline": {"class": _MOCK_CLASS, "params": {"label": "mock_action", "min_frames": 1}},
-        }}})
-        # MockDetector 纯透传：空检测帧 → 0 段，但链路走通
-        inference_store.append_detections(1, -1, [
-            make_frame_detection(ts=1.0, by_source={"mock": make_detector_output(n=0, ts=1.0)})
-        ])
-        res = OfflineRunner(config=cfg).run(OfflineRunSpec(task_id=1, step_id=-1))
-        assert res.status == "completed"
-        assert res.producer == "BrushRulesSegmenter"
-        assert res.segment_count == 0
-
     def test_partial_sources_not_skipped(self, tmp_storage):
         """跳过判据只看检测序列是否为空，不再按 source 名逐一检查。"""
         inference_store.append_detections(1, 2, [
@@ -369,10 +363,8 @@ class TestOfflineRunner:
         """换模型重跑：旧类名的分段整体被替换，TemporalEvent 保留。"""
         _write_detections(1, 2)
         inference_store.write_temporal(1, 2, [TemporalEvent(producer="clean_monitor", signal="sig", value=1, ts=1.0)])
-        r = _runner(dict(_OFFLINE_OK, params={}))  # override_class 沿用 params，Marker 不收参
-        assert r.run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
-        res = r.run(OfflineRunSpec(task_id=1, step_id=2,
-                                   strategy="test_offline_pipeline.MarkerSegmenter"))
+        assert _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
+        res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.producer == "MarkerSegmenter"
         loaded = inference_store.read_temporal(1, 2)
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
@@ -408,43 +400,6 @@ class TestOfflineRunner:
         assert _facts_path(tmp_storage).exists()
 
 
-class TestOfflineRunnerStrict:
-    """strict=True（作业服务）：只认精确命中的 stage，不回落 MOCK。"""
-
-    @staticmethod
-    def _cfg(stage2_offline):
-        return InferenceConfig({"stages": {
-            "2": {"detectors": [{"name": "clean_large"}], "offline": stage2_offline},
-            "MOCK": {"detectors": [{"name": "mock"}], "offline": _OFFLINE_OK},
-        }})
-
-    def test_unconfigured_step_skipped_no_fallback(self, tmp_storage):
-        _write_detections(1, -1)
-        res = OfflineRunner(config=self._cfg(_OFFLINE_OK)).run(
-            OfflineRunSpec(task_id=1, step_id=-1, strict=True))
-        assert res.status == "skipped"
-        assert res.producer is None
-        assert not _facts_path(tmp_storage, step_id=-1).exists()
-
-    def test_empty_offline_skipped(self, tmp_storage):
-        _write_detections(1, 2)
-        res = OfflineRunner(config=self._cfg({})).run(
-            OfflineRunSpec(task_id=1, step_id=2, strict=True))
-        assert res.status == "skipped"
-        assert not _facts_path(tmp_storage).exists()
-
-    def test_configured_step_completed(self, tmp_storage):
-        _write_detections(1, 2)
-        res = OfflineRunner(config=self._cfg(_OFFLINE_OK)).run(
-            OfflineRunSpec(task_id=1, step_id=2, strict=True))
-        assert res.status == "completed"
-
-    def test_non_strict_falls_back_mock(self, tmp_storage):
-        _write_detections(1, -1)
-        res = OfflineRunner(config=self._cfg({})).run(OfflineRunSpec(task_id=1, step_id=-1))
-        assert (res.status, res.producer) == ("completed", "BrushRulesSegmenter")
-
-
 class BoomSegmenter(OfflineSegmenter):
     def preprocess(self, frames):
         return frames
@@ -467,27 +422,42 @@ class MarkerSegmenter(OfflineSegmenter):
 # ============================ CLI ============================
 
 class TestCli:
-    def test_run_completed_exit_zero(self, tmp_storage, monkeypatch, capsys):
-        # 默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
-        # + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
+    def test_run_completed_json_last_line(self, tmp_storage, monkeypatch, capsys):
+        """stdout 末行恒为结果 JSON（作业服务按此解析）。
+
+        默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
+        + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
+        """
         from app.services.inference.offline import runner as runner_mod
         _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
-        out = capsys.readouterr().out
+        last = capsys.readouterr().out.strip().splitlines()[-1]
         assert rc == 0
-        assert "completed" in out
+        assert json.loads(last) == {
+            "status": "completed", "producer": "BrushRulesSegmenter", "segment_count": 1, "message": "",
+        }
 
-    def test_run_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
+    def test_run_strategy_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
         from app.services.inference.offline import runner as runner_mod
         _write_detections(1, 2)
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_BOOM))
+        from app.services.inference.offline import cli
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert rc == 1
+        assert payload["status"] == "error" and payload["message"] == "boom"
+
+    def test_run_unconfigured_step_error(self, tmp_storage, monkeypatch, capsys):
+        """未配置的 step 直接报错：退出码 1，末行 JSON status=error。"""
+        from app.services.inference.offline import runner as runner_mod
+        _write_detections(1, 7)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
-        rc = cli.main(["run", "--task-id", "1", "--step-id", "2",
-                       "--strategy", "test_offline_pipeline.BoomSegmenter"])
-        assert rc == 1
-        assert "error" in capsys.readouterr().out
+        assert cli.main(["run", "--task-id", "1", "--step-id", "7"]) == 1
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["status"] == "error" and "未在推理配置中定义" in payload["message"]
 
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""
@@ -507,7 +477,7 @@ class TestCli:
         """入口模块不得拉起在线服务模块。"""
         import importlib
         import sys
-        for m in ("app.services.inference.manager", "app.main"):
+        for m in ("app.services.inference.online.manager", "app.main"):
             sys.modules.pop(m, None)
         importlib.import_module("app.services.inference.offline.cli")
         assert "app.main" not in sys.modules

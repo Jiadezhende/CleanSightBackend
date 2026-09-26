@@ -9,7 +9,7 @@ description: "Create a new detection workflow for CleanSightBackend. Use this sk
 
 **落点（一文件一基类，同业务同名文件）**：Detector 写 `detection/impl/<业务>.py`，Operator 写 `temporal/impl/<业务>.py`，可选离线 Segmenter 写 `offline/impl/<业务>.py`。三者靠同名文件 + config stage 绑定表达业务聚合（不再有单独的 `workflows/` 目录，也别把 Detector 和 Operator 塞进同一文件）。
 
-骨架在 [references/templates.md](references/templates.md)，字段在 [references/data-models.md](references/data-models.md)，装配在 [references/yaml-config.md](references/yaml-config.md)。**架构原理（为什么两层、流源/流算子怎么分）见 [DESIGN_DETECTION_WORKFLOW.md](../../../docs/kb/DESIGN_DETECTION_WORKFLOW.md) 与 [operator.py](../../../app/services/inference/temporal/operator.py) docstring，本 skill 只讲怎么做。** 内嵌时序模型（GRU/Transformer）的算子接入另见 `/temporal-review`。
+骨架在 [references/templates.md](references/templates.md)，字段在 [references/data-models.md](references/data-models.md)，装配在 [references/yaml-config.md](references/yaml-config.md)。**架构原理（为什么两层、流源/流算子怎么分）见 [DESIGN_DETECTION_WORKFLOW.md](../../../docs/kb/DESIGN_DETECTION_WORKFLOW.md) 与 [operator.py](../../../app/services/inference/online/temporal/operator.py) docstring，本 skill 只讲怎么做。** 内嵌时序模型（GRU/Transformer）的算子接入另见 `/temporal-review`。
 
 ## 两层契约
 
@@ -56,7 +56,7 @@ new_frames = [f for f in window if f.timestamp > last_ts]
 for f in new_frames: ...                       # 累加 / 喂 ByteTrack
 if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 ```
-⚠️ **指标窗口自管**：`primary_window`/`_zip_by_ts` 已把窗裁到感受野，但派生 history（如出生率 `new_count_history`）仍要在 `self._sm` 里按 `self.window_seconds` 自行裁剪（见 [temporal/impl/bubble.py](../../../app/services/inference/temporal/impl/bubble.py)）。
+⚠️ **指标窗口自管**：`primary_window`/`_zip_by_ts` 已把窗裁到感受野，但派生 history（如出生率 `new_count_history`）仍要在 `self._sm` 里按 `self.window_seconds` 自行裁剪（见 [temporal/impl/bubble.py](../../../app/services/inference/online/temporal/impl/bubble.py)）。
 
 ## Operator.analyze() 两条路径
 
@@ -69,10 +69,10 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 
 | 场景 | 模板 | 参考（检测器 / 算子） |
 |------|------|------|
-| YOLO + 实时告警（最常见） | A | [detection/impl/bubble.py](../../../app/services/inference/detection/impl/bubble.py) / [temporal/impl/bubble.py](../../../app/services/inference/temporal/impl/bubble.py) |
-| 无模型 / 纯算法 | B | [detection/impl/mock.py](../../../app/services/inference/detection/impl/mock.py) / [temporal/impl/mock.py](../../../app/services/inference/temporal/impl/mock.py) |
-| 结算式告警 | C | [detection/impl/bending.py](../../../app/services/inference/detection/impl/bending.py) / [temporal/impl/bending.py](../../../app/services/inference/temporal/impl/bending.py) |
-| 内嵌因果序列模型（多流 GRU） | D | [detection/impl/clean.py](../../../app/services/inference/detection/impl/clean.py) / [temporal/impl/clean.py](../../../app/services/inference/temporal/impl/clean.py) |
+| YOLO + 实时告警（最常见） | A | [detection/impl/bubble.py](../../../app/services/inference/online/detection/impl/bubble.py) / [temporal/impl/bubble.py](../../../app/services/inference/online/temporal/impl/bubble.py) |
+| 无模型 / 纯算法 | B | [tests/doubles.py](../../../tests/doubles.py) 的 `MockDetector`（测试替身）/ 算子同模板 A |
+| 结算式告警 | C | [detection/impl/bending.py](../../../app/services/inference/online/detection/impl/bending.py) / [temporal/impl/bending.py](../../../app/services/inference/online/temporal/impl/bending.py) |
+| 内嵌因果序列模型（多流 GRU） | D | [detection/impl/clean.py](../../../app/services/inference/online/detection/impl/clean.py) / [temporal/impl/clean.py](../../../app/services/inference/online/temporal/impl/clean.py) |
 
 ## 必查清单（⚠️ = 高频 bug）
 

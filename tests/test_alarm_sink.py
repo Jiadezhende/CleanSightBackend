@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.services.inference.temporal import alarm_sink
+from app.services.inference.online.temporal import alarm_sink
 
 
 def test_persist_alarms_reads_baked_stage(monkeypatch):
@@ -30,7 +30,7 @@ def test_persist_alarms_reads_baked_stage(monkeypatch):
     cq.append_alarm_record_with_gate.return_value = True  # 过闸
 
     alarm = Alarm(
-        alarm_type=AlarmType.MOCK, alarm_level="low", alarm_message="m",
+        alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="low", alarm_message="m",
         metric=AlarmMetric.BUBBLE,
     )
     alarm.stage = "长刷"  # 产出方已烧的可读别名
@@ -57,7 +57,7 @@ def test_persist_alarms_gate_reject_skips_persist(monkeypatch):
     cq.source_ip = "c"
     cq.append_alarm_record_with_gate.return_value = False  # 冷却窗口拦截
 
-    alarm = Alarm(alarm_type=AlarmType.MOCK, alarm_level="low", alarm_message="m")
+    alarm = Alarm(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="low", alarm_message="m")
     alarm_sink.persist_alarms([alarm], cq=cq, mode="REALTIME")
 
     assert captured == []  # 被闸门挡下，不落库

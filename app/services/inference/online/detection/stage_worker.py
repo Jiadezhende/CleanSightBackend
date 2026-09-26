@@ -28,7 +28,7 @@ import numpy as np
 
 from .detector import Detector
 from app.domain.detection import DetectorOutput, FrameDetection
-from app.services.inference.types import DetectionTask
+from app.services.inference.online.types import DetectionTask
 
 logger = logging.getLogger(__name__)
 

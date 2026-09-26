@@ -102,7 +102,7 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 ## POST /ai/temporal
 
 读取某个 step 的时序分析结果，给回放页在视频下方画分割段。时间已换算为该轨的**媒体刻度**（与 `<video>.currentTime × 1000` 同轴），前端不用再做墙钟换算。
-结果由离线推理 CLI 产出（`python -m app.services.inference.offline.cli run --task-id T --step-id S`），本端点只读。
+结果由离线推理产出（admin 页提交作业，见 [admin.md](admin.md#离线推理作业)；或手动 `python -m app.services.inference.offline.cli run --task-id T --step-id S`），本端点只读。
 
 **请求体**（JSON）：
 
