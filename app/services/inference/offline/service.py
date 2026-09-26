@@ -8,7 +8,7 @@
     cancel(task_id, step_id) -> bool          排队中的直接取消，运行中的 kill 子进程
 
 执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 起子进程
-`python -m app.services.inference.offline.cli run --json`（CPU 隔离 + 降优先级 + 可 kill）。
+`python -m app.services.inference.offline.cli run`（CPU 隔离 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
 **本模块不 import runner / torch**：CLI 只作为子进程命令出现。
 
 结果正确性（换代 / 未封口）由 runner 的输入戳校验保证；本服务的 live 检查只为少白算。
@@ -295,7 +295,7 @@ def _command(job: OfflineJob) -> List[str]:
     cmd = [
         sys.executable, "-m", _CLI_MODULE, "run",
         "--task-id", str(job.task_id), "--step-id", str(job.step_id),
-        "--json", "--threads", str(THREADS),
+        "--threads", str(THREADS),
     ]
     nice = shutil.which("nice") if os.name != "nt" else None
     return [nice, "-n", "15", *cmd] if nice else cmd

@@ -122,11 +122,11 @@ class TestSerial:
         assert (job.status, job.producer, job.segment_count) == ("completed", "P", 3)
         assert job.started_at is not None and job.finished_at is not None
 
-    def test_command_is_json_cli(self, env):
+    def test_command_is_cli_run(self, env):
         env.svc.submit(1, 2)
         cmd = _wait_launched(env, 1).cmd
         assert "app.services.inference.offline.cli" in cmd
-        assert {"run", "--json"} <= set(cmd)
+        assert cmd[cmd.index("run"):cmd.index("run") + 5] == ["run", "--task-id", "1", "--step-id", "2"]
 
     @pytest.mark.parametrize("status", ["skipped", "superseded"])
     def test_runner_statuses_pass_through(self, env, status):

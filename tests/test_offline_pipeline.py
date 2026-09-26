@@ -83,6 +83,9 @@ _OFFLINE_OK = {
     "class": _MOCK_CLASS,
     "params": {"label": "brushing"},
 }
+# 测试替身策略（定义在本文件下方）：Boom 抛异常，Marker 验证 preprocess 预留层
+_BOOM = {"class": "test_offline_pipeline.BoomSegmenter"}
+_MARKER = {"class": "test_offline_pipeline.MarkerSegmenter"}
 
 
 class TestCreateOfflineSegmenter:
@@ -111,13 +114,6 @@ class TestCreateOfflineSegmenter:
         assert isinstance(seg, BrushRulesSegmenter)
         assert seg.name == "BrushRulesSegmenter"  # producer = 类名
         assert seg.label == "brushing"
-
-    def test_override_class(self):
-        offline = dict(_OFFLINE_OK, **{"class": "nonexistent.Bad"})
-        seg = StageFactory(_config(offline)).create_offline_segmenter(
-            "2", override_class=_MOCK_CLASS
-        )
-        assert isinstance(seg, BrushRulesSegmenter)
 
 
 # ============================ 离线可跑校验 ============================
@@ -325,17 +321,13 @@ class TestOfflineRunner:
 
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
         _write_detections(1, 2)
-        r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
         with pytest.raises(RuntimeError):
-            r.run(OfflineRunSpec(task_id=1, step_id=2,
-                                 strategy="test_offline_pipeline.BoomSegmenter"))
+            _runner(_BOOM).run(OfflineRunSpec(task_id=1, step_id=2))
         assert not _facts_path(tmp_storage).exists()
 
     def test_preprocess_seam_invoked(self, tmp_storage):
         _write_detections(1, 2)
-        r = OfflineRunner(config=_config(dict(_OFFLINE_OK, params={})))
-        res = r.run(OfflineRunSpec(task_id=1, step_id=2,
-                                   strategy="test_offline_pipeline.MarkerSegmenter"))
+        res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert res.segment_count == 1
 
@@ -365,10 +357,8 @@ class TestOfflineRunner:
         """换模型重跑：旧类名的分段整体被替换，TemporalEvent 保留。"""
         _write_detections(1, 2)
         inference_store.write_temporal(1, 2, [TemporalEvent(producer="clean_monitor", signal="sig", value=1, ts=1.0)])
-        r = _runner(dict(_OFFLINE_OK, params={}))  # override_class 沿用 params，Marker 不收参
-        assert r.run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
-        res = r.run(OfflineRunSpec(task_id=1, step_id=2,
-                                   strategy="test_offline_pipeline.MarkerSegmenter"))
+        assert _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
+        res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.producer == "MarkerSegmenter"
         loaded = inference_store.read_temporal(1, 2)
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
@@ -426,51 +416,32 @@ class MarkerSegmenter(OfflineSegmenter):
 # ============================ CLI ============================
 
 class TestCli:
-    def test_run_completed_exit_zero(self, tmp_storage, monkeypatch, capsys):
-        # 默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
-        # + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
+    def test_run_completed_json_last_line(self, tmp_storage, monkeypatch, capsys):
+        """stdout 末行恒为结果 JSON（作业服务按此解析）。
+
+        默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
+        + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
+        """
         from app.services.inference.offline import runner as runner_mod
         _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
-        out = capsys.readouterr().out
-        assert rc == 0
-        assert "completed" in out
-
-    def test_run_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
-        from app.services.inference.offline import runner as runner_mod
-        _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
-        from app.services.inference.offline import cli
-        rc = cli.main(["run", "--task-id", "1", "--step-id", "2",
-                       "--strategy", "test_offline_pipeline.BoomSegmenter"])
-        assert rc == 1
-        assert "error" in capsys.readouterr().out
-
-    def test_run_json_last_line(self, tmp_storage, monkeypatch, capsys):
-        """--json：stdout 末行是结果 JSON（作业服务按此解析）。"""
-        from app.services.inference.offline import runner as runner_mod
-        _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
-        from app.services.inference.offline import cli
-        rc = cli.main(["run", "--task-id", "1", "--step-id", "2", "--json"])
         last = capsys.readouterr().out.strip().splitlines()[-1]
         assert rc == 0
         assert json.loads(last) == {
             "status": "completed", "producer": "BrushRulesSegmenter", "segment_count": 1, "message": "",
         }
 
-    def test_run_json_error(self, tmp_storage, monkeypatch, capsys):
+    def test_run_strategy_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
         from app.services.inference.offline import runner as runner_mod
         _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_BOOM))
         from app.services.inference.offline import cli
-        rc = cli.main(["run", "--task-id", "1", "--step-id", "2", "--json",
-                       "--strategy", "test_offline_pipeline.BoomSegmenter"])
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert rc == 1
-        assert payload["status"] == "error" and payload["message"]
+        assert payload["status"] == "error" and payload["message"] == "boom"
 
     def test_run_unconfigured_step_error(self, tmp_storage, monkeypatch, capsys):
         """未配置的 step 不兜底 MOCK：退出码 1，末行 JSON status=error。"""
@@ -478,7 +449,7 @@ class TestCli:
         _write_detections(1, 7)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
-        assert cli.main(["run", "--task-id", "1", "--step-id", "7", "--json"]) == 1
+        assert cli.main(["run", "--task-id", "1", "--step-id", "7"]) == 1
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert payload["status"] == "error" and "未在推理配置中定义" in payload["message"]
 

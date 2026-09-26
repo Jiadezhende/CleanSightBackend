@@ -1,7 +1,7 @@
 """离线分割手动入口 —— 独立进程、CPU-only、限核、同步跑一次；另含 query 查询子命令。
 
     CUDA_VISIBLE_DEVICES="" nice -n 15 \\
-        python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--strategy PATH] [--json]
+        python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--threads 2]
     python -m app.services.inference.offline.cli query --task-id 100 --step-id 2
 
 设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动，不抢在线 GPU/核。
@@ -11,9 +11,9 @@ runner/策略模块。`query` 只读 temporal.jsonl，不碰 torch/runner。
 
 step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（不兜底 MOCK）。
 
+输出：stdout 末行恒为一行结果 JSON `{status, producer, segment_count, message}`（失败时 status="error"），
+作业服务（offline/service.py）以子进程调用时解析它。
 退出码：completed / skipped / superseded → 0；step 未配置 / 输入损坏 / 策略异常 / 写失败 → 非 0。
-`--json`：stdout 末行输出一行结果 JSON `{status, producer, segment_count, message}`（失败时 status="error"），
-供作业服务（offline/service.py）以子进程调用时解析；不加时输出人读格式。
 """
 
 from __future__ import annotations
@@ -43,33 +43,21 @@ def _run(args: argparse.Namespace) -> int:
     # runner / 策略 import 放在 CPU 隔离之后：策略模块的 torch import 此时才发生
     from .runner import OfflineRunner, OfflineRunSpec
 
-    spec = OfflineRunSpec(
-        task_id=args.task_id, step_id=args.step_id, strategy=args.strategy,
-    )
     try:
-        result = OfflineRunner().run(spec)
+        result = OfflineRunner().run(OfflineRunSpec(task_id=args.task_id, step_id=args.step_id))
     except Exception as e:  # 配置/输入/策略/写失败 → 非 0
         logger.error("运行失败 task=%s step=%s: %s", args.task_id, args.step_id, e, exc_info=True)
-        if args.json:
-            _print_json("error", None, 0, str(e))
-        else:
-            print(f"error task={args.task_id} step={args.step_id}: {e}")
+        _print_json("error", None, 0, str(e))
         return 1
-
-    if args.json:
-        _print_json(result.status, result.producer, result.segment_count, result.message)
-        return 0
-    line = f"{result.status} producer={result.producer} segment_count={result.segment_count}"
-    if result.message:
-        line += f" | {result.message}"
-    print(line)
-    return 0  # completed / skipped 均为 0
+    _print_json(result.status, result.producer, result.segment_count, result.message)
+    return 0
 
 
 def _print_json(status: str, producer: Optional[str], segment_count: int, message: str) -> None:
-    # 保持 ensure_ascii：子进程 stdout 走平台代码页（Windows 为 GBK），纯 ASCII 才能被父进程无损解析。
+    # 人读与作业服务共用这一行，故不转义中文；作业服务给子进程置了 PYTHONIOENCODING=utf-8 并按 utf-8 解码。
     print(json.dumps(
         {"status": status, "producer": producer, "segment_count": segment_count, "message": message},
+        ensure_ascii=False,
     ))
 
 
@@ -105,13 +93,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run.add_argument("--task-id", type=int, required=True, help="任务 id（存储键）")
     run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（数字存储键；须在推理配置中配了 offline）")
     run.add_argument(
-        "--strategy", default=None,
-        help="覆盖 stage.offline.class 的策略全限定路径（开发期对比不同策略）",
-    )
-    run.add_argument(
         "--threads", type=int, default=2, help="CPU 线程数（torch.set_num_threads，默认 2）",
     )
-    run.add_argument("--json", action="store_true", help="stdout 末行输出一行结果 JSON")
 
     query = sub.add_parser("query", help="查询 temporal.jsonl 里的 TemporalSegment 时间线")
     query.add_argument("--task-id", type=int, required=True)

@@ -1,6 +1,6 @@
 """离线分割编排层 —— 把 (task_id, step_id) 一次跑通 detections.jsonl → 策略 → temporal.jsonl。
 
-调用方（CLI / 测试）显式给 `(task_id, step_id[, strategy])`，Runner：
+调用方（CLI / 测试）显式给 `(task_id, step_id)`，Runner：
     1. 按 step_id 取 stage 配置，实例化 offline 策略（未配置 / offline 为空 → ValidationError，不兜底 MOCK）；
     2. 一次读该 step 的完整检测序列（为空则 skip）；
     3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；
@@ -37,11 +37,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class OfflineRunSpec:
-    """一次离线运行的输入：稳定存储键 + 可选策略覆盖。"""
+    """一次离线运行的输入：稳定存储键。"""
 
     task_id: int
     step_id: int
-    strategy: Optional[str] = None  # 覆盖 stage.offline.class（全限定路径），开发期对比策略用
 
 
 @dataclass(frozen=True)
@@ -72,7 +71,7 @@ class OfflineRunner:
         config = self._config if self._config is not None else load_stage_config(self._config_path)
 
         stage_key = config.require_offline(spec.step_id)  # 未配置即 ValidationError，不兜底
-        segmenter = StageFactory(config).create_offline_segmenter(stage_key, override_class=spec.strategy)
+        segmenter = StageFactory(config).create_offline_segmenter(stage_key)
 
         producer = segmenter.name
         stamp = inference_store.detections_stamp(spec.task_id, spec.step_id)

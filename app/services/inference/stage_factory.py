@@ -79,9 +79,7 @@ class StageFactory:
 
         return specs
 
-    def create_offline_segmenter(
-        self, stage_name: str, override_class: str | None = None
-    ) -> "OfflineSegmenter | None":
+    def create_offline_segmenter(self, stage_name: str) -> "OfflineSegmenter | None":
         """为指定 Stage 实例化离线分割策略（`stages.<step_id>.offline`），未启用返回 None。
 
         offline 配置 schema（空块 `{}` 或整段缺省 = 不启用该 stage 离线分段；
@@ -90,12 +88,10 @@ class StageFactory:
               class: <OfflineSegmenter 子类全限定路径>   # 必填；producer = 类名
               params: {...}                              # 原样 `cls(**params)`
 
-        `override_class` 支撑 CLI `--strategy`（开发期对比不同策略），覆盖配置 `class`、沿用 `params`。
         缺 class / 类加载失败一律 **fail-fast**（抛异常，不静默跳过）。
 
         Args:
             stage_name: stage 主键（= str(step_id)）
-            override_class: 可选，覆盖配置里的 class 全限定路径
         """
         stage_config = self.config.get_stage_config(stage_name)
         if not stage_config:
@@ -105,7 +101,7 @@ class StageFactory:
         if not offline:  # 空块 / 缺省 = 不启用；非空即有意启用，下面缺字段 fail-fast
             return None
 
-        class_path = override_class or offline.get("class")
+        class_path = offline.get("class")
         if not class_path:
             raise ValueError(f"Stage '{stage_name}' offline 缺少 class")
 
