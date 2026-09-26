@@ -16,7 +16,6 @@
 """
 
 import json
-import os
 
 import numpy as np
 import pytest
@@ -25,7 +24,6 @@ from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.storage import inference, tasks
 from app.storage.inference import _detection, _jsonl, _temporal
-from app.utils.exceptions import DirectoryGoneError
 
 
 # ---------------------------------------------------------------------------
@@ -232,40 +230,6 @@ class TestDetectionsReadWrite:
         with pytest.raises(OSError):
             inference.append_detections(1, 2, [_frame(1.0)])
 
-
-
-class TestDetectionsStamp:
-    """版本戳只做相等比较：追加、整域删后重建、删除都让它变；只读不变。"""
-
-    def test_missing_is_none(self, tmp_storage):
-        assert inference.detections_stamp(1, 2) is None
-
-    def test_read_keeps_stamp(self, tmp_storage):
-        inference.append_detections(1, 2, [_frame(1.0)])
-        stamp = inference.detections_stamp(1, 2)
-        inference.read_detections(1, 2)
-        assert inference.detections_stamp(1, 2) == stamp
-
-    def test_append_changes_stamp(self, tmp_storage):
-        inference.append_detections(1, 2, [_frame(1.0)])
-        stamp = inference.detections_stamp(1, 2)
-        inference.append_detections(1, 2, [_frame(2.0)])
-        assert inference.detections_stamp(1, 2) != stamp
-
-    def test_delete_then_rewrite_changes_stamp(self, tmp_storage):
-        """换代：同内容重写也要变。
-
-        上一代文件先回拨 mtime：Linux 上 rmtree 后 inode 可能立刻复用、mtime 精度是毫秒级，同一
-        tick 内重写同内容会撞戳；真实换代时上一代戳早于重写数秒以上，回拨即还原这个前提。
-        """
-        inference.append_detections(1, 2, [_frame(1.0)])
-        old = _detections_file(tmp_storage, 1, 2)
-        os.utime(old, ns=(old.stat().st_atime_ns, old.stat().st_mtime_ns - 10**9))
-        stamp = inference.detections_stamp(1, 2)
-        inference.delete(1, 2)
-        assert inference.detections_stamp(1, 2) is None
-        inference.append_detections(1, 2, [_frame(1.0)])
-        assert inference.detections_stamp(1, 2) != stamp
 
 # ---------------------------------------------------------------------------
 # temporal.jsonl：codec 往返（T1）
@@ -545,64 +509,3 @@ class TestDomainSeam:
         assert inference.read_detections(1, 2) == []
         assert inference.read_temporal(1, 2) == []
         assert not (tmp_storage / "1").exists()
-
-
-# ---------------------------------------------------------------------------
-# create=False：迟到的写者不重建已被回收的目录
-# ---------------------------------------------------------------------------
-
-
-_LATE_WRITERS = {
-    "temporal": lambda: inference.write_temporal(1, 2, [_seg()], create=False),
-    "label_probs": lambda: inference.write_label_probs(1, 2, _probs(), create=False),
-}
-
-
-class TestNoResurrect:
-    @pytest.mark.parametrize("write", sorted(_LATE_WRITERS))
-    def test_missing_dir_raises_and_creates_nothing(self, tmp_storage, write):
-        with pytest.raises(DirectoryGoneError) as exc:
-            _LATE_WRITERS[write]()
-        assert (exc.value.task_id, exc.value.step_id) == (1, 2)
-        assert exc.value.path == str(_domain_dir(tmp_storage, 1, 2))
-        assert not (tmp_storage / "1").exists()   # 连 task / step 目录都不建
-
-    @pytest.mark.parametrize("write", sorted(_LATE_WRITERS))
-    def test_existing_dir_writes(self, tmp_storage, write):
-        inference.append_detections(1, 2, [_frame(1.0)])
-        _LATE_WRITERS[write]()
-        if write == "temporal":
-            assert inference.read_temporal(1, 2) == [_seg()]
-        else:
-            assert inference.read_label_probs(1, 2) is not None
-
-    @pytest.mark.parametrize("write", sorted(_LATE_WRITERS))
-    def test_dir_reclaimed_after_tmp_written(self, tmp_storage, monkeypatch, write):
-        """tmp 写完、换名之前目录被回收（TTL rmtree）：转成 DirectoryGoneError，不重建、不留 tmp。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-
-        def reclaim_then_replace(src, dst):
-            tasks.delete_step(1, 2)
-            raise FileNotFoundError(src)
-
-        monkeypatch.setattr(os, "replace", reclaim_then_replace)
-        with pytest.raises(DirectoryGoneError):
-            _LATE_WRITERS[write]()
-        assert not (tmp_storage / "1").exists()
-
-    @pytest.mark.parametrize("write", sorted(_LATE_WRITERS))
-    def test_other_oserror_passes_through(self, tmp_storage, monkeypatch, write):
-        """目录还在时的换名失败是别的毛病，原样上抛，不冒充「目录已回收」。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-
-        def denied(src, dst):
-            raise PermissionError(dst)
-
-        monkeypatch.setattr(os, "replace", denied)
-        with pytest.raises(PermissionError):
-            _LATE_WRITERS[write]()
-        assert not list(_domain_dir(tmp_storage, 1, 2).glob(".*.tmp"))
-
-    def test_default_create_still_builds_dir(self, tmp_storage):
-        inference.write_temporal(1, 2, [_seg()])
-        assert _facts_file(tmp_storage, 1, 2).exists()

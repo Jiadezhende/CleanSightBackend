@@ -1,7 +1,7 @@
 # 离线写入不重建已回收目录：`create=False` + `DirectoryGoneError`
 
-> **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **变更状态**：已回退（2026-09-26，见文末追加）
+> **知识库**：无需沉淀（已回退）
 
 ## 概述
 
@@ -68,3 +68,12 @@ runner（戳核对通过后）
 | **本批未闭合 TTL 冲突**（2026-09-26 复核补记）：`create=False` 这一侧是原子的，但 TTL 的 `rmtree` 是「列目录 → 逐个删 → rmdir」复合写，写入插在中途会留下半删目录 | 与进行中的 TTL rmtree 并发时仍会残留僵尸 step | 判据本身原子，缺口在 TTL 的 `rmtree` 是复合写；闭合办法是把 TTL 删除改成先 `rename` 到回收区再删，见 [DESIGN_STALE_WRITES](../kb/DESIGN_STALE_WRITES.md) |
 | recording 的写路径仍全部 `create=True`，拆除后迟到的残段在 TTL 之后同样会重建僵尸 | 已记录在 `tasks.py` 的「已知窄缺口」，要连跑 15 天才会触发，当前任务 30 分钟超时，触发不到 | 单独一批：只有认领分支（本代首写）建目录，其余写入 `create=False` |
 | 同路径重建（ABA） | 换代恰好落在戳核对与写入之间的毫秒窗口 | 接受；要严格时再加读侧版本校验 |
+
+---
+
+## 追加（2026-09-26）：整体回退
+
+删掉 `write_temporal` / `write_label_probs` / `_jsonl.write_atomic` 的 `create` 参数、`_gone_as_error`、`DirectoryGoneError`，
+以及 `LAYER_PACKAGES["app/storage"]` 对 `app.utils.exceptions` 的放行。离线写入恢复为总是建目录。
+理由：手动触发、并发量极低，先保最简实现；换代 / 回收冲突防护以后按 [DESIGN_STALE_WRITES](../kb/DESIGN_STALE_WRITES.md) 的多版本方案统一做，不在这套临时机制上叠加。
+回退后离线写入期间 step 被 TTL 回收，可能重建出只有 `inference/` 的空壳 step，随下一轮 TTL 回收。

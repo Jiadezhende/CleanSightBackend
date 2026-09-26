@@ -1,6 +1,6 @@
-"""离线作业服务：串行、去重、live 拦截、取消 / 停机 / 超时 / 换代 kill、结果解析。
+"""离线作业服务：串行、去重、取消 / 停机 / 超时 kill、结果解析。
 
-子进程与 client 注册表全用假件：FakeProc 由用例手动 `finish()`，不起真进程、不碰 torch。
+子进程全用假件：FakeProc 由用例手动 `finish()`，不起真进程、不碰 torch。
 """
 
 import json
@@ -59,19 +59,6 @@ class FakeLauncher:
         return proc
 
 
-class FakeClients:
-    """task_id → 带 step_id 的假 CQ；空 = 没有 live run。"""
-
-    def __init__(self):
-        self.runs = {}
-
-    def get(self, task_id):
-        return self.runs.get(task_id)
-
-    def go_live(self, task_id, step_id):
-        self.runs[task_id] = SimpleNamespace(step_id=step_id)
-
-
 def _ok(status="completed", producer="P", segment_count=3, message=""):
     return {"status": status, "producer": producer, "segment_count": segment_count, "message": message}
 
@@ -87,10 +74,10 @@ def _wait_until(pred, timeout=5.0):
 
 @pytest.fixture
 def env():
-    clients, launcher = FakeClients(), FakeLauncher()
-    svc = OfflineJobService(config=_CFG, clients=clients, launcher=launcher, poll_s=0.02)
+    launcher = FakeLauncher()
+    svc = OfflineJobService(config=_CFG, launcher=launcher, poll_s=0.02)
     svc.start()
-    yield SimpleNamespace(svc=svc, clients=clients, launcher=launcher)
+    yield SimpleNamespace(svc=svc, launcher=launcher)
     svc.stop(timeout=5.0)
 
 
@@ -128,11 +115,10 @@ class TestSerial:
         assert "app.services.inference.offline.cli" in cmd
         assert cmd[cmd.index("run"):cmd.index("run") + 5] == ["run", "--task-id", "1", "--step-id", "2"]
 
-    @pytest.mark.parametrize("status", ["skipped", "superseded"])
-    def test_runner_statuses_pass_through(self, env, status):
+    def test_skipped_passes_through(self, env):
         env.svc.submit(1, 2)
-        _wait_launched(env, 1).finish(0, _ok(status=status, segment_count=0, message="m"))
-        _wait_until(lambda: _status(env) == status)
+        _wait_launched(env, 1).finish(0, _ok(status="skipped", segment_count=0, message="m"))
+        _wait_until(lambda: _status(env) == "skipped")
         assert env.svc.get(1, 2).message == "m"
 
 
@@ -161,38 +147,9 @@ class TestSubmit:
         assert env.svc.get(1, step_id) is None
         assert env.launcher.procs == []
 
-    def test_live_step_rejected(self, env):
-        env.clients.go_live(1, 2)
-        with pytest.raises(ConflictError):
-            env.svc.submit(1, 2)
-        assert env.svc.get(1, 2) is None
-
-    def test_other_step_of_live_task_accepted(self, env):
-        env.clients.go_live(1, 3)
-        env.svc.submit(1, 2)
-        _wait_launched(env, 1)
-
     def test_not_started_rejected(self):
         with pytest.raises(ConflictError):
-            OfflineJobService(config=_CFG, clients=FakeClients(), launcher=FakeLauncher()).submit(1, 2)
-
-
-class TestLive:
-    def test_live_before_start_skipped_without_launch(self, env):
-        env.svc.submit(1, 1)
-        blocker = _wait_launched(env, 1)
-        env.svc.submit(1, 2)
-        env.clients.go_live(1, 2)
-        blocker.finish(0, _ok())
-        _wait_until(lambda: _status(env) == "skipped")
-        assert len(env.launcher.procs) == 1
-
-    def test_live_while_running_kills_superseded(self, env):
-        env.svc.submit(1, 2)
-        proc = _wait_launched(env, 1)
-        env.clients.go_live(1, 2)
-        _wait_until(lambda: _status(env) == "superseded")
-        assert proc.killed
+            OfflineJobService(config=_CFG, launcher=FakeLauncher()).submit(1, 2)
 
 
 class TestCancel:
@@ -242,8 +199,8 @@ class TestFailures:
         _wait_until(lambda: _status(env) == "failed")
 
     def test_timeout_kills(self):
-        clients, launcher = FakeClients(), FakeLauncher()
-        svc = OfflineJobService(config=_CFG, clients=clients, launcher=launcher, poll_s=0.02, job_timeout_s=0.1)
+        launcher = FakeLauncher()
+        svc = OfflineJobService(config=_CFG, launcher=launcher, poll_s=0.02, job_timeout_s=0.1)
         svc.start()
         try:
             svc.submit(1, 2)
@@ -269,8 +226,8 @@ class TestFailures:
 
 class TestStop:
     def test_stop_kills_running_and_cancels_queued(self):
-        clients, launcher = FakeClients(), FakeLauncher()
-        svc = OfflineJobService(config=_CFG, clients=clients, launcher=launcher, poll_s=0.02)
+        launcher = FakeLauncher()
+        svc = OfflineJobService(config=_CFG, launcher=launcher, poll_s=0.02)
         svc.start()
         svc.submit(1, 1)
         svc.submit(1, 2)
@@ -283,7 +240,7 @@ class TestStop:
         assert len(launcher.procs) == 1
 
     def test_restart_after_stop(self):
-        svc = OfflineJobService(config=_CFG, clients=FakeClients(), launcher=FakeLauncher(), poll_s=0.02)
+        svc = OfflineJobService(config=_CFG, launcher=FakeLauncher(), poll_s=0.02)
         svc.start()
         svc.stop()
         svc.start()
@@ -307,7 +264,7 @@ class TestRealSubprocess:
         inference_store.append_detections(1, 987, [
             make_frame_detection(ts=1.0, by_source={"x": make_detector_output(n=1, ts=1.0)})
         ])
-        svc = OfflineJobService(config=_CFG, clients=FakeClients(), poll_s=0.05)
+        svc = OfflineJobService(config=_CFG, poll_s=0.05)
         svc.start()
         try:
             svc.submit(1, 987)

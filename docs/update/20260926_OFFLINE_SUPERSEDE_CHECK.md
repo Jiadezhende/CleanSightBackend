@@ -1,7 +1,7 @@
 # 离线 Runner 换代校验：输入戳变了就 superseded、不写
 
-> **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **变更状态**：已回退（2026-09-26，见文末追加）
+> **知识库**：无需沉淀（已回退）
 
 ## 概述
 
@@ -58,3 +58,11 @@ write label_probs → write temporal  （都是 tmp + os.replace 原子写）
 |------------|------|---------|
 | 最后一次核对到 `os.replace` 之间还有毫秒级窗口 | 换代如果恰好落在这个窗口里，新一代目录里会多出一份旧分段 | 接受；重跑一次即可覆盖 |
 | CLI 退出码 / 文档还没提到 superseded | CLI 对 superseded 已返回 0，但 docstring 没更新 | 下一批（CLI `--json`）一起改 |
+
+---
+
+## 追加（2026-09-26）：整体回退
+
+删掉 `detections_stamp`、runner 的三处核对和 `superseded` 状态；runner 只剩 `completed` / `skipped`。
+理由：手动触发、并发量极低，先保最简实现；换代 / 回收冲突防护以后按 [DESIGN_STALE_WRITES](../kb/DESIGN_STALE_WRITES.md) 的多版本方案统一做，不在这套临时机制上叠加。
+回退后运行期间同 step 换代，离线结果可能写进新一代目录，重跑即覆盖。

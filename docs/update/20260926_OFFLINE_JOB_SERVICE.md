@@ -75,3 +75,11 @@ stop()：kill 运行中的作业 → queue.stop() 排空，剩下的作业逐个
 | 还没有对外入口 | 前端暂时无法提交 | 下一批加 admin 端点和 admin tab |
 | 作业状态不持久化 | 后端重启后排队中的作业丢失 | 手动触发场景可以接受；做自动触发时再评估是否需要持久化 spool |
 | 自动触发 | 未做 | 在 `stop_run` 末尾调用 `submit` 即可（跳过 `start_rollback` 和 identity-fence 判为 skipped 的情况）；未封口的输入会被 runner 判为 superseded |
+
+---
+
+## 追加（2026-09-26）：去掉三处 live 检查
+
+删掉提交时（409）、开跑前（skipped）、`_watch` 轮询（kill → superseded）三处 `_is_live`，以及 `clients` 注入参数和 `superseded` 状态。
+服务不再依赖 `client_manager`；`_watch` 只管超时。调用方只对已停写的 step 提交。
+理由：手动触发、并发量极低，先保最简实现；换代 / 回收冲突防护以后按 [DESIGN_STALE_WRITES](../kb/DESIGN_STALE_WRITES.md) 的多版本方案统一做，不在这套临时机制上叠加。

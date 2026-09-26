@@ -55,19 +55,16 @@ def decode(path: Path) -> List[Dict[str, Any]]:
     return records
 
 
-def write_atomic(path: Path, text: str, *, create: bool = True) -> None:
+def write_atomic(path: Path, text: str) -> None:
     """整体替换一份文本产物：写同目录 tmp → `os.replace` 原子换名（路线 C）。
 
     tmp 与目标**同目录**（同卷才是原子换名，W1），点开头故匹配不上任何产物名。失败即整体
     作废：删 tmp、不换名、原异常上抛（W4），盘上保留替换前的旧文件。
 
-    `create=False` 不建目录：目录已不在时写 tmp / 换名抛 `FileNotFoundError`（转成什么由调用方定）。
-
     Raises:
         OSError: 建目录 / 写 tmp / 换名失败。是否吞掉由调用方定。
     """
-    if create:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name("." + path.name + ".tmp")
     try:
         tmp.write_text(text, encoding="utf-8")

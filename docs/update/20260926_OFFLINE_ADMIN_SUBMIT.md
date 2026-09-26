@@ -51,3 +51,10 @@ admin 页新增三个端点：`POST /admin-f3m8/offline/jobs`、`GET /admin-f3m8
 |------------|------|---------|
 | 本机没有离线模型权重和存储数据，没有实跑 `completed` 路径和「运行中同键 `/api/start` → superseded」 | 真实模型的耗时与结果，以及换代 kill，只在单测里验证过 | 在有数据和权重的 dev 机上补测；`/api/start` 那项要先与人确认 |
 | 前端没有取消按钮 | 排错了只能等作业跑完 | 服务已提供 `cancel()`，需要时再加端点和按钮 |
+
+---
+
+## 追加（2026-09-26）：去掉「step 在 live」的 409 与 `superseded` 状态
+
+随作业服务去掉 live 检查，`POST /admin-f3m8/offline/jobs` 只剩「队满」一种 409，作业状态不再有 `superseded`，
+`skipped` 只表示「没有检测结果」。契约已同步 [docs/api/admin.md](../api/admin.md)。

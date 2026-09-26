@@ -15,24 +15,19 @@
 - **`read_temporal` 不排序**，原样返回落盘顺序。两型没有共同时间键（`TemporalEvent.ts` 对
   `TemporalSegment.start`），层没有依据替调用方选。
 
-两个写口的 `create=False` 给迟到的写者用（谁有权删、谁才有权建）：域目录已被回收就抛
-`DirectoryGoneError`、不重建。
-
-依赖上界：`app.domain.temporal` + numpy（`LabelProbs` 的货币）+ `app.utils.exceptions` + stdlib。
+依赖上界：`app.domain.temporal` + numpy（`LabelProbs` 的货币）+ stdlib。
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.utils.exceptions import DirectoryGoneError
 from . import _jsonl, _layout
 
 logger = logging.getLogger(__name__)
@@ -121,29 +116,10 @@ def read_temporal(task_id: int, step_id: int) -> List[TemporalEvent | TemporalSe
     return facts
 
 
-@contextmanager
-def _gone_as_error(task_id: int, step_id: int, create: bool) -> Iterator[None]:
-    """`create=False` 时把「域目录已不在」导致的 `FileNotFoundError` 转成 `DirectoryGoneError`。
-
-    判据是目录此刻确实不在——目录还在的 `FileNotFoundError` 是别的毛病，原样上抛。
-    """
-    try:
-        yield
-    except FileNotFoundError as e:
-        root = _layout.domain_dir(task_id, step_id)
-        if create or root.exists():
-            raise
-        raise DirectoryGoneError(
-            f"域目录已被回收，放弃写入: {root}", path=str(root), task_id=task_id, step_id=step_id,
-        ) from e
-
-
 def write_temporal(
     task_id: int,
     step_id: int,
     facts: Sequence[TemporalEvent | TemporalSegment],
-    *,
-    create: bool = True,
 ) -> None:
     """**整体替换**该 step 的事实（路线 C：编码 → 同目录 tmp → `os.replace`）。
 
@@ -155,13 +131,11 @@ def write_temporal(
 
     Raises:
         TypeError: 序列里有不是 `TemporalEvent` / `TemporalSegment` 的东西，或 `value` / `meta` 不可 JSON 序列化。
-        DirectoryGoneError: `create=False` 且域目录已被回收；盘上什么都没写。
         OSError: 建目录 / 写 tmp / 换名失败。是否吞掉由调用方定。
     """
     payload = _jsonl.encode([_temporal_to_record(f) for f in facts])
-    path = _layout.domain_dir(task_id, step_id, create=create) / _layout.TEMPORAL_NAME
-    with _gone_as_error(task_id, step_id, create):
-        _jsonl.write_atomic(path, payload, create=create)
+    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.TEMPORAL_NAME
+    _jsonl.write_atomic(path, payload)
 
 
 # ── label_probs.npz ──────────────────────────────────────────────────────────────
@@ -172,20 +146,16 @@ def write_temporal(
 _PROBS_DISK_DTYPE = np.float16
 
 
-def write_label_probs(
-    task_id: int, step_id: int, probs: LabelProbs, *, create: bool = True,
-) -> None:
+def write_label_probs(task_id: int, step_id: int, probs: LabelProbs) -> None:
     """**整体替换**该 step 的逐帧类别概率（路线 C：同目录 tmp → `os.replace`）。
 
     只做序列化与落位，不校验形状一致性——那是产出侧的事（本层不认识「合法的概率」）。
 
     Raises:
-        DirectoryGoneError: `create=False` 且域目录已被回收；盘上什么都没写。
         OSError: 建目录 / 写 tmp / 换名失败。失败时 tmp 删除、旧文件原样保留。
     """
-    path = _layout.domain_dir(task_id, step_id, create=create) / _layout.LABEL_PROBS_NAME
-    with _gone_as_error(task_id, step_id, create):
-        _write_probs_atomic(path, probs)
+    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.LABEL_PROBS_NAME
+    _write_probs_atomic(path, probs)
 
 
 def _write_probs_atomic(path: Path, probs: LabelProbs) -> None:

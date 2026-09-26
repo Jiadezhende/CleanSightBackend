@@ -278,6 +278,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 - **执行方式**：作业**串行**执行，同一时刻只跑一个，每个作业起一个子进程跑离线 CLI。
 - **结果去哪看**：跑完的结果落盘在该 step 的 `temporal.jsonl` / `label_probs.npz`，仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab-f3m8/label-probs`](lab.md) 读取。
 - **状态保存**：作业状态只存在进程内存里，后端重启后，排队中的作业和历史记录都会丢失（已落盘的结果不受影响）。
+- **只对已结束的 step 提交**：后端不检查该 step 是否正在运行。对运行中的 step 提交会按当时已落盘的部分检测结果出结果；跑的过程中同一 step 被重新开跑，结果可能错配到新一轮，重跑即可覆盖。
 
 **作业对象**（三个端点返回的都是这个形状）：
 
@@ -300,8 +301,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | `queued` | 排队中 | — |
 | `running` | 子进程运行中 | — |
 | `completed` | 跑完并写入 | 已替换为本次结果 |
-| `skipped` | 该 step 没有检测结果，或开跑时该 step 正在 live | 不动 |
-| `superseded` | 运行期间检测结果变了（同 step 起了新 run / 残批迟到落盘），本次作废 | 不动；等 step 停写后重跑 |
+| `skipped` | 该 step 没有检测结果 | 不动 |
 | `failed` | 模型异常、超时（30 分钟）、子进程启动失败等，原因见 `message` | 不动 |
 | `cancelled` | 被取消或后端停机 | 不动 |
 
@@ -327,11 +327,8 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | status | 何时 | body |
 |--------|------|------|
 | 400 | 推理配置里没有这个 step，或它没配离线模型（`field="step_id"`）；不入队、不留作业记录 | `{"error": "Validation error", "detail": "...", "field": "step_id"}` |
-| 409 | 该 task 当前正在跑**这个** step（检测结果还在写，没封口） | `{"error": "Resource conflict", "detail": "..."}` |
-| 409 | 排队已满（20 个） | 同上 |
+| 409 | 排队已满（20 个） | `{"error": "Resource conflict", "detail": "..."}` |
 | 422 | 请求体缺字段或类型不对 | FastAPI 校验错误 |
-
-两种 409 只能靠 `detail` 文案区分，前端直接把 `detail` 提示给用户即可。
 
 ---
 
@@ -366,6 +363,6 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | 现象 | 后端实际状态 |
 |------|------------|
 | `completed` 但 `segment_count` 为 0 | 模型跑完了，但没识别出动作段；结果文件已被替换为「无分段」 |
-| `superseded` / `skipped` 后结果没变 | 本次没写任何东西，展示的仍是上一次的结果（如果有） |
+| `skipped` 后结果没变 | 本次没写任何东西，展示的仍是上一次的结果（如果有） |
 
 参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `runOffline` / `fetchOffJobs`。

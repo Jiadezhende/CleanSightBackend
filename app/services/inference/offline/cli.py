@@ -13,7 +13,7 @@ step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模�
 
 输出：stdout 末行恒为一行结果 JSON `{status, producer, segment_count, message}`（失败时 status="error"），
 作业服务（offline/service.py）以子进程调用时解析它。
-退出码：completed / skipped / superseded → 0；step 未配置 / 输入损坏 / 策略异常 / 写失败 → 非 0。
+退出码：completed / skipped → 0；step 未配置 / 输入损坏 / 策略异常 / 写失败 → 非 0。
 """
 
 from __future__ import annotations

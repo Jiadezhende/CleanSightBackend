@@ -1,6 +1,6 @@
-"""`/admin-f3m8/offline/jobs`：提交 202 / 去重 / 未配置 400 / live 409 / 查询 404。
+"""`/admin-f3m8/offline/jobs`：提交 202 / 去重 / 未配置 400 / 查询 404。
 
-服务换成注入假子进程与假注册表的实例（同 test_offline_job_service），不起真进程。
+服务换成注入假子进程的实例（同 test_offline_job_service），不起真进程。
 """
 
 import pytest
@@ -10,16 +10,16 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.routers import admin
 from app.services.inference.offline.service import OfflineJobService
-from test_offline_job_service import _CFG, FakeClients, FakeLauncher, _ok, _wait_until
+from test_offline_job_service import _CFG, FakeLauncher, _ok, _wait_until
 
 
 @pytest.fixture
 def env(monkeypatch):
-    clients, launcher = FakeClients(), FakeLauncher()
-    svc = OfflineJobService(config=_CFG, clients=clients, launcher=launcher, poll_s=0.02)
+    launcher = FakeLauncher()
+    svc = OfflineJobService(config=_CFG, launcher=launcher, poll_s=0.02)
     svc.start()
     monkeypatch.setattr(admin, "offline_job_service", svc)
-    yield clients, launcher
+    yield launcher
     svc.stop(timeout=5.0)
 
 
@@ -32,7 +32,7 @@ async def client():
 
 @pytest.mark.asyncio
 async def test_submit_then_poll_to_completed(client, env):
-    _, launcher = env
+    launcher = env
     r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2})
     assert r.status_code == 202
     assert (r.json()["task_id"], r.json()["step_id"]) == (1, 2)
@@ -59,14 +59,6 @@ async def test_unconfigured_step_400(client, env):
     r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 99})
     assert r.status_code == 400
     assert r.json()["field"] == "step_id"
-
-
-@pytest.mark.asyncio
-async def test_live_step_409(client, env):
-    clients, _ = env
-    clients.go_live(1, 2)
-    r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2})
-    assert r.status_code == 409
 
 
 @pytest.mark.asyncio

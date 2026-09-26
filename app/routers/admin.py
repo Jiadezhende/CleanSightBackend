@@ -230,7 +230,7 @@ class OfflineJobRequest(BaseModel):
 
 @router.post("/offline/jobs", status_code=202)
 def submit_offline_job(req: OfflineJobRequest):
-    """提交一个离线推理作业；同键已在排队 / 运行时返回在途那个。step 正在 live 或队满 → 409。"""
+    """提交一个离线推理作业；同键已在排队 / 运行时返回在途那个。队满 → 409。"""
     return offline_job_service.submit(req.task_id, req.step_id).to_dict()
 
 

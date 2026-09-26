@@ -125,9 +125,7 @@ BUDGET = {
 LAYER_PACKAGES = {
     # app.domain：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
-    # app.utils.exceptions：异常类型是跨层协议（如 DirectoryGoneError），只放开这一个声明处，
-    #   不放开整个 app.utils
-    "app/storage": ("app.storage", "app.domain", "app.settings", "app.utils.exceptions"),
+    "app/storage": ("app.storage", "app.domain", "app.settings"),
     # 算法服务：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
     # 都不许碰：阈值、入参上限、默认档一律写进算法子包自己的配置文件（见
     # `app/services/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。

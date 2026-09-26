@@ -1,7 +1,7 @@
 """离线作业服务 —— 离线推理的提交、串行执行与状态查询。
 
     start() / stop()                          生命周期
-    submit(task_id, step_id) -> OfflineJob    入队；step 未配离线模型抛 ValidationError；live / 队满抛 ConflictError；
+    submit(task_id, step_id) -> OfflineJob    入队；step 未配离线模型抛 ValidationError；队满抛 ConflictError；
                                               同键在途返回在途那个
     get(task_id, step_id) -> OfflineJob|None  状态快照
     list_jobs() -> List[OfflineJob]           在途 + 最近结束的，按提交序
@@ -11,7 +11,7 @@
 `python -m app.services.inference.offline.cli run`（CPU 隔离 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
 **本模块不 import runner / torch**：CLI 只作为子进程命令出现。
 
-结果正确性（换代 / 未封口）由 runner 的输入戳校验保证；本服务的 live 检查只为少白算。
+不做换代防护：不查 step 是否在 live，调用方只对已停写的 step 提交。
 状态只在内存，重启丢失（结果本身已落盘）。
 """
 
@@ -43,17 +43,17 @@ THREADS = 2              # 子进程 torch 线程数
 QUEUE_SIZE = 20          # 排队上限（不含运行中的那个）
 JOB_TIMEOUT_S = 1800.0   # 单个 job 墙钟上限，超时 kill → failed
 HISTORY = 200            # 已结束的 job 最多保留几条
-POLL_S = 1.0             # 监视子进程的间隔：取消 / 超时 / 换代最多延迟这么久被发现
+POLL_S = 1.0             # 监视子进程的间隔：超时最多延迟这么久被发现
 
 _CLI_MODULE = "app.services.inference.offline.cli"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _STDERR_TAIL_CHARS = 2000
 
 QUEUED, RUNNING = "queued", "running"
-COMPLETED, SKIPPED, SUPERSEDED = "completed", "skipped", "superseded"
+COMPLETED, SKIPPED = "completed", "skipped"
 FAILED, CANCELLED = "failed", "cancelled"
 _ACTIVE = (QUEUED, RUNNING)
-_RUNNER_STATUSES = (COMPLETED, SKIPPED, SUPERSEDED)  # CLI 退出码 0 时的合法结果
+_RUNNER_STATUSES = (COMPLETED, SKIPPED)  # CLI 退出码 0 时的合法结果
 
 
 @dataclass
@@ -75,23 +75,16 @@ class OfflineJob:
 
 
 class OfflineJobService:
-    """离线作业服务。`clients` / `launcher` / `config` 仅供测试注入（假注册表 / 假 Popen / 推理配置）。"""
+    """离线作业服务。`launcher` / `config` 仅供测试注入（假 Popen / 推理配置）。"""
 
     def __init__(
         self,
         *,
-        clients=None,
         launcher: Callable[..., Any] = subprocess.Popen,
         config: Optional[InferenceConfig] = None,
         job_timeout_s: float = JOB_TIMEOUT_S,
         poll_s: float = POLL_S,
     ) -> None:
-        if clients is None:
-            # 函数体内 import：同 RecordingService，免得 import 本模块就拉起 client → numpy。
-            from app.services.client.manager import client_manager
-
-            clients = client_manager
-        self._clients = clients
         self._launcher = launcher
         self._config = config  # None = 提交时读 load_stage_config 单例
         self._job_timeout_s = job_timeout_s
@@ -100,7 +93,7 @@ class OfflineJobService:
         # SerialTaskQueue 是一次性的，在 start() 里建（同 RecordingService）。
         self._queue: Optional[SerialTaskQueue] = None
         # 下面四个字段都由 `_lock` 保护：路由线程（submit / cancel / get）与队列线程（_execute）都碰。
-        # 「查 live + 起子进程」与「取消 + kill」在同一把锁下，故取消不会漏掉刚起的子进程。
+        # 「起子进程」与「取消 + kill」在同一把锁下，故取消不会漏掉刚起的子进程。
         self._lock = threading.Lock()
         self._jobs: "OrderedDict[Tuple[int, int], OfflineJob]" = OrderedDict()
         self._running: Optional[Tuple[OfflineJob, Any]] = None  # (job, proc)
@@ -134,11 +127,6 @@ class OfflineJobService:
         queue = self._queue
         if queue is None:
             raise ConflictError("离线作业服务未启动", task_id=task_id, step_id=step_id)
-        if self._is_live(task_id, step_id):
-            raise ConflictError(
-                f"task {task_id} step {step_id} 正在运行，检测结果未封口",
-                task_id=task_id, step_id=step_id, resource_type="offline_job",
-            )
         key = (task_id, step_id)
         with self._lock:
             current = self._jobs.get(key)
@@ -193,9 +181,6 @@ class OfflineJobService:
                 if self._stopping:
                     self._finish_locked(job, CANCELLED, "服务停机")
                     return
-                if self._is_live(job.task_id, job.step_id):
-                    self._finish_locked(job, SKIPPED, "该 step 正在运行，检测结果未封口")
-                    return
                 try:
                     proc = self._launcher(
                         _command(job), cwd=str(_REPO_ROOT), env=_child_env(),
@@ -210,7 +195,7 @@ class OfflineJobService:
                 self._abort = None
 
             logger.info("[offline] 开始 task=%s step=%s pid=%s", job.task_id, job.step_id, proc.pid)
-            self._watch(job, proc)
+            self._watch(proc)
             with self._lock:
                 abort, self._abort, self._running = self._abort, None, None
                 if abort is not None:
@@ -231,8 +216,8 @@ class OfflineJobService:
                 job.task_id, job.step_id, job.status, job.message,
             )
 
-    def _watch(self, job: OfflineJob, proc) -> None:
-        """等子进程退出；超时 / 该 step 重新 live 时 kill。取消与停机由调用方直接 kill。"""
+    def _watch(self, proc) -> None:
+        """等子进程退出；超时 kill。取消与停机由调用方直接 kill。"""
         deadline = time.monotonic() + self._job_timeout_s
         while True:
             try:
@@ -243,9 +228,6 @@ class OfflineJobService:
             if time.monotonic() >= deadline:
                 with self._lock:
                     self._abort_locked(FAILED, f"超时（>{self._job_timeout_s:.0f}s）")
-            elif self._is_live(job.task_id, job.step_id):
-                with self._lock:
-                    self._abort_locked(SUPERSEDED, "该 step 已开始新一轮运行，终止")
 
     def _finish_from_output(self, job: OfflineJob, returncode: int, out: str, err: str) -> None:
         result = _last_json(out)
@@ -282,10 +264,6 @@ class OfflineJobService:
 
     def _stage_config(self) -> InferenceConfig:
         return self._config if self._config is not None else load_stage_config()
-
-    def _is_live(self, task_id: int, step_id: int) -> bool:
-        cq = self._clients.get(task_id)
-        return cq is not None and cq.step_id == step_id
 
 
 # ── 子进程 ─────────────────────────────────────────────────────────────────────
