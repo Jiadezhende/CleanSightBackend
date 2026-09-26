@@ -22,7 +22,7 @@ from .inference.online.instance import inference_manager
 from .inference.online.temporal import alarm_sink
 from .recording.instance import recording_service
 from .stream.instance import stream_service
-from app.utils.exceptions import AppError
+from app.utils.exceptions import AppError, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,16 @@ class RunController:
         `lock_for(task_id)`，与拆除互斥。幂等命中直接返回；start_workflow 失败抛 AppError。
         CQ 在此构造（编排者持有构造职责），身份含 source_ip 被动字段；stage 由 inference 解析。
         """
-        # 边界层解析：字符串 current_step（DB clean_task.current_step）→ int step_id 一次转换。
-        # DB 列恒为数字串，非数字属坏数据 → int() 抛 ValueError，走 L3 api 异常处理快速失败。
-        step_id = int(current_step)
+        # 边界层解析 + 参数校验（锁外、动旧 run 之前）：字符串 current_step（DB clean_task.current_step）
+        # → int step_id 一次转换；非数字 / 推理配置未定义的 step 属参数错误 → ValidationError（400）。
+        try:
+            step_id = int(current_step)
+        except (TypeError, ValueError):
+            raise ValidationError(
+                f"current_step '{current_step}' 不是数字", field="current_step", value=str(current_step),
+            ) from None
+        # stage 由 inference 解析，是 CQ 不可变身份的一部分
+        stage = inference_manager.resolve_stage(step_id)
 
         with client_manager.lock_for(task_id):
             # 2a. 幂等 / 重启清理（同 task_id 同槽位；不同 task_id 走不同键，天然并发）
@@ -71,8 +78,7 @@ class RunController:
                     )
                     self.stop_run(task_id, reason=f"restart:{task_id}")
 
-            # 2b. 建 CQ（构造上移编排者；stage 由 inference 解析，是 CQ 不可变身份的一部分）
-            stage = inference_manager.resolve_stage(current_step)
+            # 2b. 建 CQ（构造上移编排者）
             cq = ClientQueues(
                 task_id=task_id,
                 step_id=step_id,

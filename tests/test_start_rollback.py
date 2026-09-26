@@ -11,6 +11,7 @@ import pytest
 
 from app.services.client.manager import client_manager
 from app.services.run_control import run_controller
+from app.utils.exceptions import ValidationError
 
 
 def test_start_run_rolls_back_cq_on_workflow_failure():
@@ -45,3 +46,30 @@ def test_start_run_rolls_back_cq_on_workflow_failure():
 
     # 清理本用例建的 per-task 锁,避免跨用例残留
     client_manager._task_locks.pop(task_id, None)
+
+
+@pytest.mark.parametrize("current_step", ["未知阶段", "None"])
+def test_start_run_non_numeric_step_rejected(current_step):
+    """非数字 current_step 是参数错误：ValidationError（400），不解析 stage、不建 CQ。"""
+    with patch("app.services.run_control.inference_manager") as mock_inf:
+        with pytest.raises(ValidationError, match="不是数字"):
+            run_controller.start_run(task_id=4243, current_step=current_step, rtsp_url="rtsp://x")
+    mock_inf.resolve_stage.assert_not_called()
+    assert not client_manager.has_client(4243)
+
+
+def test_start_run_unconfigured_step_keeps_old_run():
+    """未配置的 step 在动旧 run 之前就被拒：同 task 正在跑的 run 不被 stop。"""
+    task_id = 4244
+    with (
+        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.client_manager") as mock_cm,
+        patch.object(run_controller, "stop_run") as stop_run,
+    ):
+        mock_cm.has_client.return_value = True  # 同 task 已有 run（旧 step）
+        mock_cm.get.return_value = MagicMock(step_id=1)
+        mock_inf.resolve_stage.side_effect = ValidationError("step_id '99' 未在推理配置中定义")
+        with pytest.raises(ValidationError):
+            run_controller.start_run(task_id=task_id, current_step="99", rtsp_url="rtsp://x")
+    mock_inf.resolve_stage.assert_called_once_with(99)
+    stop_run.assert_not_called()

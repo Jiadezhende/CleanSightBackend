@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from app.services.inference.config import FALLBACK_STAGE
 from app.services.inference.online.manager import InferenceManager
+from app.utils.exceptions import ValidationError
 
 
 @pytest.fixture
@@ -13,21 +14,37 @@ def manager():
     return m
 
 
-# 主键 = step_id：current_step 直接作 stage 主键（恒等路由），未配的 step 回退 MOCK。
-# stage_configs 含 "1"/"2"/"MOCK" 三个已配阶段。
+# 主键 = step_id：current_step 直接作 stage 主键（恒等路由）。
+# YAML 配了 "1"/"2"/"3"/"MOCK"；其中 "3" 的 detector 全部加载失败 → 不在 active 集合。
 _STAGE_CONFIGS = {"1": {}, "2": {}, "MOCK": {}}
+_YAML = SimpleNamespace(list_stages=lambda: ["1", "2", "3", "MOCK"])
+
+
+def _routing(manager):
+    return (
+        patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS),
+        patch("app.services.inference.config.load_stage_config", return_value=_YAML),
+    )
 
 
 @pytest.mark.parametrize("step,expected_stage", [
     ("1", "1"),        # 已配 step → 恒等
-    ("2", "2"),        # 已配 step → 恒等
-    ("测漏", "MOCK"),  # 未配 step → 兜底 MOCK
-    ("", "MOCK"),      # 空 step → 兜底 MOCK
+    (2, "2"),          # int 与 str 同键
+    ("3", "MOCK"),     # 配了但 detector 加载失败 → 推理失败兜底 MOCK
 ])
 def test_resolve_stage_routes(manager, step, expected_stage):
     # stage 解析上移为公有 resolve_stage（供 RunController 建 CQ 前调用）。
-    with patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
+    p_active, p_yaml = _routing(manager)
+    with p_active, p_yaml:
         assert manager.resolve_stage(step) == expected_stage
+
+
+@pytest.mark.parametrize("step", [99, "测漏", ""])
+def test_resolve_stage_unconfigured_rejected(manager, step):
+    """YAML 未定义的 step 是参数错误：抛 ValidationError（400），不兜底 MOCK。"""
+    p_active, p_yaml = _routing(manager)
+    with p_active, p_yaml, pytest.raises(ValidationError):
+        manager.resolve_stage(step)
 
 
 def _fake_cq(task_id=1, stage="1", step_id=None):
@@ -85,13 +102,13 @@ def test_fallback_stage_without_detector_fails_fast():
 def test_fallback_stage_with_detector_passes():
     """兜底 stage 有 detector → 正常放行，且它在 active 集合里（dispatcher 会消费它）。"""
     m, (p_cfg, p_fac) = _patched_get_stage_configs(
-        ["1", FALLBACK_STAGE], {"1": [object()], FALLBACK_STAGE: [object()]},
+        ["1", "2", FALLBACK_STAGE], {"1": [object()], FALLBACK_STAGE: [object()]},  # "2" 加载失败
     )
     with p_cfg, p_fac:
         configs = m._get_stage_configs()
-    # 不变式的实质：resolve_stage 的兜底目标必须落在 active 集合内
-    assert FALLBACK_STAGE in configs
-    assert m.resolve_stage("未配的step") == FALLBACK_STAGE
+        # 不变式的实质：resolve_stage 的兜底目标必须落在 active 集合内
+        assert FALLBACK_STAGE in configs
+        assert m.resolve_stage("2") == FALLBACK_STAGE
 
 
 def test_real_manager_init_invariants_and_stop_workflow_smoke():

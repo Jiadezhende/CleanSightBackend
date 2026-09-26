@@ -19,9 +19,8 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# 未知/未配 step_id 的兜底 stage 主键：在线 `InferenceManager.resolve_stage` 与离线
-# `InferenceConfig.resolve_stage` 共用同一目标（两者故意不合方法——查的 stage 集合不同：
-# 在线查 active（有 detector），离线查 YAML 全集——但兜底目标必须同源，否则会静默分叉）。
+# 推理失败兜底 stage 主键：在线 `InferenceManager.resolve_stage` 把「配了但 detector 全部加载失败」
+# 的 stage 路由到它（纯透传，不黑屏）；未配的 step_id 是参数错误，不兜底。
 # 在线侧另有启动不变式强制它 active，见 `InferenceManager._get_stage_configs`。
 FALLBACK_STAGE = "MOCK"
 

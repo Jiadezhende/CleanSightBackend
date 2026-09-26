@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
 from app.services.inference.config import FALLBACK_STAGE
+from app.utils.exceptions import ValidationError
 from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
 
@@ -144,14 +145,14 @@ class InferenceManager:
                             len(skipped_stages), skipped_stages
                         )
                     # 启动不变式：兜底 stage 必须 active（有 detector）。
-                    # resolve_stage 把未知/未配 step_id 一律路由到它，而 dispatcher 只提交
+                    # resolve_stage 把 detector 加载失败的 stage 路由到它，而 dispatcher 只提交
                     # active stage 的帧——若它被配掉 detector，启动**仍会成功**（上面只 INFO 一行
-                    # Skipped），但此后每个未知 step_id 的 run 都会被取帧后无人消费，静默 0 推理。
+                    # Skipped），但此后兜底的 run 都会被取帧后无人消费，静默 0 推理。
                     # 现网靠「MOCK 恰好配了 detector」这个巧合幸免，此处把巧合提成显式契约。
                     if FALLBACK_STAGE not in stage_configs:
                         raise ValueError(
                             f"兜底 stage '{FALLBACK_STAGE}' 无 detector（未 active）——"
-                            f"未知 step_id 的 run 会被静默黑洞：取帧后无 stage 消费、0 推理且无告警。"
+                            f"兜底的 run 会被静默黑洞：取帧后无 stage 消费、0 推理且无告警。"
                             f"请在 inference_config.yaml 为 '{FALLBACK_STAGE}' 配至少一个 detector。"
                             f"（active={list(stage_configs.keys())}, skipped={skipped_stages}）"
                         )
@@ -181,15 +182,25 @@ class InferenceManager:
     # ========== 公共 API ==========
 
     def resolve_stage(self, step_id: Any) -> str:
-        """step_id 主键直接作 stage（恒等路由，无映射表）；未知/未配回退 MOCK 透传。
+        """step_id 主键直接作 stage（恒等路由，无映射表）。
+
+        - YAML 未配该 step → `ValidationError`（参数错误，上游不该下发）；
+        - 配了但 detector 全部加载失败（stage 未 active）→ 回退 MOCK 透传（推理失败兜底，不黑屏）。
 
         公有：供 RunController 在建 CQ 前解析 stage（stage 是 CQ 不可变身份的一部分）。
         """
+        from app.services.inference.config import load_stage_config
+
         step_key = str(step_id)
         if step_key in self._get_stage_configs():
             return step_key
+        if step_key not in load_stage_config().list_stages():
+            raise ValidationError(
+                f"step_id '{step_id}' 未在推理配置中定义", field="current_step", value=step_key,
+            )
         logger.warning(
-            "[InferenceManager] 未知的 step_id '%s'，路由到 %s stage", step_id, FALLBACK_STAGE
+            "[InferenceManager] stage '%s' 无可用 detector（加载失败），路由到 %s stage",
+            step_key, FALLBACK_STAGE,
         )
         return FALLBACK_STAGE
 

@@ -48,6 +48,7 @@
 |------|---------|-----------|
 | `422` | 请求体缺 `task_id`/`rtsp_url` 或类型不符（FastAPI 自带校验） | `{"detail":[{"loc":[...],"msg":"...","type":"..."}]}`（**与下方业务错误的 `{"error",...}` 形态不同**） |
 | `400` | 该任务 DB 中 `source_ip` 为空（`ValidationError`，`field="source_ip"`） | `{"error":"Validation error","detail":"...","field":"source_ip"}` |
+| `400` | 该任务 DB 中 `current_step` 不是数字，或推理配置里没有这个 step（`ValidationError`，`field="current_step"`）。**校验在动旧 run 之前**，同 task 正在跑的 run 不受影响 | `{"error":"Validation error","detail":"...","field":"current_step"}` |
 | `404` | `task_id` 在 `clean_task` 表中不存在 | `{"error":"Resource not found","detail":"...","resource_type":"Task","resource_id":"123"}` |
 | `503` | DB 查询失败（`DatabaseError`，可重试） | `{"error":"Internal error","detail":"...","retryable":true}` |
 | `500` | workflow 启动失败等内部错误（`AppError`） | `{"error":"Internal error","detail":"...","retryable":false}` |

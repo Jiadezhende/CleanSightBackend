@@ -110,7 +110,7 @@ stages:
         model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-bigru.pt
         min_duration_s: 0.2          # 短于此时长的动作段丢弃
 
-  # ==================== MOCK 阶段（未知 current_step 的 fallback + taskless 默认，纯透传） ====================
+  # ==================== MOCK 阶段（配了但 detector 全部加载失败时的 fallback，纯透传；未配的 step 直接 400） ====================
   MOCK:
     alias: MOCK
     detectors:
