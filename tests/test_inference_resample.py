@@ -14,12 +14,28 @@ def _ts(frames):
     return [round(f.ts, 6) for f in frames]
 
 
-def test_halves_15fps_to_7_5fps_without_drift():
-    frames = _frames([i / 15 for i in range(300)])
+def _gaps(frames, src_fps):
+    """相邻保留帧间隔（以源帧数计）的集合。"""
+    return {round((b.ts - a.ts) * src_fps) for a, b in zip(frames, frames[1:])}
+
+
+def test_halves_15fps_to_7_5fps_every_other_frame():
+    """ts 按存储格式保留 6 位小数：网格点与帧重合，舍入不得让间隔抖成 1/3 帧。"""
+    frames = _frames([round(i / 15, 6) for i in range(300)])
     kept = resample_by_ts(frames, 7.5)
-    # 浮点累加会偶发单帧相位滑动（间隔 3/15 紧跟 1/15），但帧数与平均帧率不漂
     assert len(kept) == 150
-    assert (kept[-1].ts - kept[0].ts) / (len(kept) - 1) == pytest.approx(2 / 15, rel=1e-2)
+    assert _gaps(kept, 15) == {2}
+
+
+def test_equal_rate_keeps_all_frames():
+    frames = _frames([round(i / 7.5, 6) for i in range(72)])
+    assert resample_by_ts(frames, 7.5) == frames
+
+
+def test_jittered_ts_still_every_other_frame():
+    jitter = [0.004, -0.003, 0.002, -0.004, 0.001, -0.002]
+    frames = _frames([i / 15 + jitter[i % len(jitter)] for i in range(300)])
+    assert _gaps(resample_by_ts(frames, 7.5), 15) == {2}
 
 
 def test_gap_reanchors_instead_of_catching_up():
@@ -27,9 +43,20 @@ def test_gap_reanchors_instead_of_catching_up():
     assert _ts(resample_by_ts(frames, 7.5)) == [0.0, round(2 / 15, 6), 1.0, round(1.0 + 2 / 15, 6)]
 
 
-def test_target_above_input_rate_keeps_all():
+def test_target_above_input_rate_keeps_all_when_lenient():
     frames = _frames([0.0, 0.5, 1.0])
     assert resample_by_ts(frames, 7.5) == frames
+
+
+def test_strict_rejects_input_slower_than_target():
+    frames = _frames([i / 5 for i in range(20)])
+    with pytest.raises(ValueError, match="低于契约帧率"):
+        resample_by_ts(frames, 7.5, strict=True)
+
+
+def test_strict_accepts_equal_rate_with_rounded_ts():
+    frames = _frames([round(i / 7.5, 6) for i in range(72)])
+    assert resample_by_ts(frames, 7.5, strict=True) == frames
 
 
 def test_fewer_than_two_frames_returned_as_is():

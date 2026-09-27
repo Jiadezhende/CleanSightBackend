@@ -99,6 +99,12 @@ class TestSegmenterContract:
         assert set(mi.timestamps) <= {f.ts for f in frames}
         assert mi.fps == 3.75
 
+    def test_preprocess_rejects_detection_rate_below_model_fps(self):
+        data, frames = _golden_frames()  # 7.5fps 检测序列，契约要 15fps → 只能降采样，须报错
+        seg = CleanNodepGRUSegmenter(model_input_fps=data["fps"] * 2)
+        with pytest.raises(ValueError, match="低于契约帧率"):
+            seg.preprocess(frames)
+
 
 # ============================ 加载 / 推理（小权重，需 torch） ============================
 

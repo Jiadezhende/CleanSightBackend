@@ -44,7 +44,7 @@ read_detections(task, step)                     ← 15fps（raw_fps / inference_
 
 | 部件 | 落在哪 | 说明 |
 |------|--------|------|
-| 降采样 | `app/services/inference/resample.py` | 复用在线同一算法（前序提交已上提为共享函数） |
+| 降采样 | `app/services/inference/resample.py` | 复用在线同一算法（前序提交已上提为共享函数）；离线走 `strict=True`，检测帧率低于 `model_input_fps` 即 `ValueError` |
 | 置信度口径 | `_collect_object_arrays(confidence_override=)` | 非 None 时所有框置信度改用该值；旧调用不传，行为不变 |
 | v3 特征 | `_forward_fill` / `_scope_frame` / `_v3_slot_channels` / `_build_v3_matrix` | 逐函数对齐框架 `clean_bbox_v3.py`，复用后端 v2 的选框 / 插值 |
 | nodep 拼接 | `build_nodep_concat_features` | 列名加 `v2.` / `v3.` 前缀区分两半 |
@@ -66,7 +66,7 @@ read_detections(task, step)                     ← 15fps（raw_fps / inference_
 | 项 | 结果 |
 |----|------|
 | 特征逐位对齐 | 合成 72 帧序列（多 hand 候选、同类多框、≤6 帧与长缺口、scope 轴三种回退、废弃类与未知类，分两流）经框架参考实现生成 `tests/fixtures/clean_nodep_golden/expected.npz`；后端输出在 `conf_default`（5 列标注 + 1.0）与 `conf_real`（6 列）两种口径下均 `atol=1e-5` 相等 |
-| `tests/test_offline_clean_nodep_gru.py` | 11 passed：对齐、废弃类块、空输入、因果窗口、构造参数校验、降采样保留真实 ts、随机权重端到端（6 类概率 / ts 对齐 / 行和为 1）、窗口因果性、类别数不符、权重缺失 |
+| `tests/test_offline_clean_nodep_gru.py` | 12 passed：对齐、废弃类块、空输入、因果窗口、构造参数校验、降采样保留真实 ts、检测帧率低于契约报错、随机权重端到端（6 类概率 / ts 对齐 / 行和为 1）、窗口因果性、类别数不符、权重缺失 |
 | 真实权重 + 真实 YAML（临时目录放物料，`CLEANSIGHT_MODEL_PATH` 指过去） | `StageFactory` 建出 `CleanNodepGRUSegmenter`；`strict=True` 加载成功、window=16；输出 `[T,6]` 行和为 1；4500 帧（10 分钟 @7.5fps）前向 0.33s（CPU） |
 | 全量 `pytest tests/` | 965 passed, 8 skipped |
 | 集成测试 | 未跑（需真实环境，交由人工） |
@@ -81,4 +81,3 @@ read_detections(task, step)                     ← 15fps（raw_fps / inference_
 | 开头不足一窗的帧用首帧重复补齐，未确认与训练评估一致 | 仅影响每个 step 开头约 2 秒 | 训练侧确认后按需改 `_causal_windows` |
 | GRU 结构按 state_dict 键推断（GRU 末帧输出直接进 Linear），框架 `build_model` 源码未见 | 若框架在两者之间有激活等无参层，输出会偏 | 训练侧确认或补交 `build_model` 源码 |
 | 特征按整段计算（`t_norm`、v3 中位数回退、v2 插值用到右侧帧），不是因果的 | 离线无碍（前提：训练视频与后端 step 粒度一致）；模型卡「因果、流式可用」不成立，不能原样搬到在线 | 待训练侧确认视频粒度；上在线前需重新设计特征 |
-| `resample_by_ts` 在输入帧率 ≈ 目标帧率时，浮点 ts 会让部分帧被跳过（合成 72 帧 @7.5fps → 7.5 只保留 61 帧） | 默认 15fps → 7.5fps 不受影响；把 `inference_decimation` 调到检测率 = 7.5 时会丢约 15% 帧，在线同样如此 | 需要时给网格比较加半帧容差（在线离线一并改） |

@@ -1218,9 +1218,12 @@ class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
         self.confidence_override = None if confidence_override is None else float(confidence_override)
 
     def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
-        """按 ts 降采样到 model_input_fps（只挑真实帧，ts 与 detections.jsonl 位级相等）→ 226 维特征。"""
+        """按 ts 降采样到 model_input_fps（只挑真实帧，ts 与 detections.jsonl 位级相等）→ 226 维特征。
+
+        检测帧率低于 model_input_fps 即 ValueError（strict）：只能降采样，放行会静默错配时间密度。
+        """
         return build_nodep_concat_features(
-            resample_by_ts(frames, self.fps),
+            resample_by_ts(frames, self.fps, strict=True),
             self.fps,
             self.frame_width,
             self.frame_height,
