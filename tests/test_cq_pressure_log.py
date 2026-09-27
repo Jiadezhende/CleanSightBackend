@@ -117,7 +117,7 @@ def test_behaviour_unchanged_by_logging(caplog, maxlen):
     assert cq.frames_dropped_ready == 2
     assert len(cq.ca_ready) == maxlen
     assert cq.frames_dropped_processed == 2
-    assert cq.get_ca_processed_length() == maxlen
+    assert len(cq.ca_processed) == maxlen
 
 
 def test_decimated_frames_do_not_observe(caplog):

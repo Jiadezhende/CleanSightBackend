@@ -16,8 +16,11 @@ from app.utils.task_queue import SerialTaskQueue
 
 
 @pytest.fixture
-def q():
-    """每个用例一条新队列——SerialTaskQueue 是一次性的，不能跨用例复用。"""
+def q(fast_task_queue):
+    """每个用例一条新队列——SerialTaskQueue 是一次性的，不能跨用例复用。
+
+    轮询间隔压到 0.01s：本文件的断言只关心顺序 / 串行 / 排空 / 拒收，不依赖轮询间隔。
+    """
     created = SerialTaskQueue("test", maxsize=8)
     yield created
     created.stop(timeout=5.0)  # 未 start 过或已 stop 过都是 no-op
@@ -86,13 +89,13 @@ def test_one_failing_task_does_not_kill_the_queue(q):
 def test_stop_drains_pending_tasks(q):
     """已提交的任务在停机时必须落地。
 
-    它们代表已经从上游拿走的数据（HLS 段的帧已从 CQ 弹出），丢掉就是真丢——这正是现在
-    `HLSWorker` 的缺陷：`while not stop_event.is_set()` 一置位就退出，队列里剩的段直接没。
+    它们代表已经从上游拿走的数据（录制段的帧已从 CQ 弹出），丢掉就是真丢。消费循环若
+    `while not stop_event.is_set()` 一置位就退出、不排空，队列里剩的任务直接没。
     """
     done = []
     q.start()
     # 先塞一个慢任务占住消费线程，后面几个必然还在队列里排队时 stop 就会被调用
-    q.submit(lambda: time.sleep(0.2), label="slow")
+    q.submit(lambda: time.sleep(0.05), label="slow")
     for i in range(5):
         q.submit(lambda i=i: done.append(i), label=f"t{i}")
 

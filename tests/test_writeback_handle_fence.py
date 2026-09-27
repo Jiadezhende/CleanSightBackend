@@ -10,6 +10,7 @@
 断言的是缓冲内容而不是文件。
 """
 
+import pytest
 from factories import make_cq, make_detector_output, make_frame_detection
 from app.services.client.queues import ClientQueues
 from app.services.inference.online.detection.service import DetectionService
@@ -45,10 +46,11 @@ def test_active_run_write_back_lands():
     assert res.cq is None
 
 
-def test_draining_run_write_back_blocked_and_counted():
+@pytest.mark.parametrize("seal", [ClientQueues.to_draining, ClientQueues.close], ids=["draining", "closed"])
+def test_non_active_run_write_back_blocked_and_counted(seal):
     svc = _bare_service()
     cq = make_cq(task_id=2, step_id=3, source_ip="ipB", stage="3")
-    cq.to_draining()  # 拆除封闸
+    seal(cq)  # 拆除封闸（DRAINING）/ 已拆除释放 payload（CLOSED）
 
     before = _stale_drops()
     svc._write_back_results([_result(cq)])
@@ -56,19 +58,6 @@ def test_draining_run_write_back_blocked_and_counted():
     assert cq.get_latest_detection() is None  # 快照未落
     assert cq.get_slide_window() == []  # 滑窗未落
     assert cq.drain_ca_detections() == []  # 落盘缓冲这条腿也被挡
-    assert _stale_drops() - before == 1.0
-
-
-def test_closed_run_write_back_blocked():
-    svc = _bare_service()
-    cq = make_cq(task_id=3, step_id=3, source_ip="ipC", stage="3")
-    cq.close()  # CLOSED 释放 payload
-
-    before = _stale_drops()
-    svc._write_back_results([_result(cq)])
-
-    assert cq.get_latest_detection() is None
-    assert cq.drain_ca_detections() == []
     assert _stale_drops() - before == 1.0
 
 

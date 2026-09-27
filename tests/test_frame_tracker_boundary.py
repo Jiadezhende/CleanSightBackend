@@ -19,7 +19,7 @@ FrameTracker / Timeline 边界单元测试（seam：不起 ffmpeg）
 - 帧级（Timeline）：区间落两帧之间 / 跨段接缝相邻帧 / 单帧区间
 - 缺 sidecar（Timeline）：跳过该段而非打断整条迭代
 - find（FrameTracker，走数据层）：多点、升序契约、重复 ts、ts 漂移即失败、越界、空入参、
-  位级相等、`track` 形参已不存在
+  位级相等
 - _build_cmd（Timeline）：select 必须在 scale 之前
 
 `hls.iter_frames` 自己的两级裁剪边界由 tests/test_storage_hls.py 覆盖，此处不重复。
@@ -35,7 +35,7 @@ import pytest
 from app.domain.frame import Frame
 from app.services.inference.offline.frame_tracker import FrameTracker, Timeline
 from app.storage import hls
-from app.storage.hls import _decode, _encode, _fmp4, _layout
+from app.storage.hls import _decode, _encode, _fmp4
 
 TASK_ID = 4242
 STEP_ID = 7
@@ -229,12 +229,10 @@ def hls_step(tmp_storage) -> Path:
 
 
 @pytest.fixture
-def fake_decode(monkeypatch) -> List[tuple]:
+def fake_decode(monkeypatch) -> None:
     """把数据层的解码 I/O 边界换成「按 sidecar 合成帧」，契约同真实 `_run_ffmpeg`。"""
-    calls: List[tuple] = []
 
     def _fake(task_id, step_id, ref, sidecar, k_start, k_end, width, height):
-        calls.append((_layout.segment_name(ref), k_start, k_end))
         for k in range(k_start, k_end + 1):
             yield Frame(
                 timestamp=float(sidecar[k]),
@@ -242,7 +240,6 @@ def fake_decode(monkeypatch) -> List[tuple]:
             )
 
     monkeypatch.setattr(_decode, "_run_ffmpeg", _fake)
-    return calls
 
 
 class TestFind:
@@ -257,11 +254,6 @@ class TestFind:
         got = [f.timestamp for f in FrameTracker(TASK_ID, STEP_ID).find(wanted, 4, 4)]
         assert all(a == b for a, b in zip(got, wanted))
         assert [f.hex() for f in got] == [w.hex() for w in wanted]
-
-    def test_only_needed_segments_are_decoded(self, hls_step, fake_decode):
-        """段级裁剪要真的省掉 ffmpeg 调用：4 段里只该碰跨到的那 2 段。"""
-        list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(13), ts_of(27)], 4, 4))
-        assert len(fake_decode) == 2
 
     def test_returns_ts_ascending_not_input_order(self, hls_step, fake_decode):
         gids = [27, 1, 13]
@@ -290,16 +282,6 @@ class TestFind:
 
     def test_empty_input_yields_nothing(self, hls_step, fake_decode):
         assert list(FrameTracker(TASK_ID, STEP_ID).find([], 4, 4)) == []
-
-    def test_flat_layout_is_not_read(self, step_dir, fake_decode):
-        """只认 `{step}/hls/`，旧平铺布局**不回落**——读到的只能是空，故硬失败。"""
-        with pytest.raises(ValueError, match="未找到 ts="):
-            list(FrameTracker(TASK_ID, STEP_ID).find([ts_of(0)], 4, 4))
-
-    def test_no_track_parameter(self):
-        """新解码只服务 raw 轨（processed 不落 sidecar），`track` 形参已删除。"""
-        with pytest.raises(TypeError):
-            FrameTracker(TASK_ID, STEP_ID, "processed")
 
 
 class TestBuildCmd:

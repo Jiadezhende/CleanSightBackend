@@ -25,7 +25,6 @@ from app.services.lab.clip_builder import (
     ClipSpec,
 )
 from app.services.utils.media_timeline import MediaTimeline
-from app.storage import hls
 from factories import seed_hls_segments
 
 TASK_ID = 1
@@ -37,11 +36,6 @@ _DEFAULT_EXTINF = 10.0
 # ---------------------------------------------------------------------------
 # 造数
 # ---------------------------------------------------------------------------
-
-
-def _hls_dir() -> Path:
-    """`{root}/1/1/hls/` —— 段、init 与临时清单的所在目录。"""
-    return hls.init_path(TASK_ID, STEP_ID, "raw").parent
 
 
 def _seed(items, with_init: bool = True) -> Path:
@@ -115,9 +109,10 @@ class TestRouterConstructionStaysInSync:
     def test_every_kwarg_exists_in_the_signature(self):
         import ast
         import inspect
-        from pathlib import Path as _Path
 
-        source = _Path("app/routers/lab.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "app" / "routers" / "lab.py").read_text(
+            encoding="utf-8"
+        )
         calls = [
             node
             for node in ast.walk(ast.parse(source))
@@ -238,11 +233,8 @@ class TestRunFfmpeg:
         _builder(tmp_storage)._run_ffmpeg(_spec(0, 20_000), window, step_dir / "out.mp4")
 
         text = captured["m3u8_text"]
-        assert "#EXTM3U" in text
-        assert "#EXT-X-VERSION:7" in text
+        # VOD 骨架由 test_utils_vod_playlist 管；这里只验 clip_builder 自己选的 URI 与 EXTINF
         assert '#EXT-X-MAP:URI="raw_init.mp4"' in text
-        assert "#EXT-X-MEDIA-SEQUENCE:0" in text
-        assert "#EXT-X-ENDLIST" in text
         # 段以 basename 出现：HLS demuxer 按清单自身所在目录解析相对 URI
         assert f"raw_segment_{TS0}.mp4" in text
         # EXTINF 用清单真值，不改写（改写对 ffmpeg 是空操作，见模块 docstring）

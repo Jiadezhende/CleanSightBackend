@@ -1,13 +1,13 @@
-"""流处理框架能力测试：subscribes 注入 / 感受野 _clip / 帧窗投影 / 缓冲按感受野 / per-operator 隔离。"""
+"""流处理框架能力测试：subscribes 注入 / 工厂 fail-fast / 感受野 _clip / 帧窗投影 / 缓冲按感受野 / per-operator 隔离。"""
 
 from typing import List
 from unittest.mock import MagicMock
 
 import pytest
 
-from factories import make_bare_cq, make_detector_output, make_frame_detection
-from app.services.inference.config import load_stage_config
-from app.domain.alarm import Alarm, AlarmType
+from factories import make_alarm, make_bare_cq, make_detector_output, make_frame_detection
+from app.services.inference.config import InferenceConfig, load_stage_config
+from app.domain.alarm import Alarm
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.online.temporal.operator import Operator
 
@@ -47,6 +47,22 @@ def test_factory_injects_subscribes_and_metric_keys():
     assert "bubble" in metric_map           # realtime 规则订阅的流
     assert "bending" not in metric_map      # realtime:false → 不纳入
     assert "bubble_leak" not in metric_map  # 不是流名
+
+
+# ========== 工厂 fail-fast：配置错误在构造期即抛 ==========
+
+
+def test_bad_detector_class_fails_fast():
+    """detector 构造失败即抛（启动 fail-fast），不再记日志后静默少一个流源。"""
+    cfg = InferenceConfig({"stages": {"2": {"detectors": [{"name": "d", "class": "nonexistent.Bad"}]}}})
+    with pytest.raises(RuntimeError, match="Detector 'd'"):
+        StageFactory(cfg).create_detectors_for_stage("2")
+
+
+def test_rule_missing_subscribes_fails_fast():
+    cfg = InferenceConfig({"stages": {"2": {"rules": [{"name": "r", "class": "x.Y"}]}}})
+    with pytest.raises(ValueError, match="subscribes"):
+        StageFactory(cfg).create_operators_for_stage("2")
 
 
 # ========== 感受野 _clip ==========
@@ -132,7 +148,7 @@ class _GoodOperator(Operator):
         self._sm["ran"] = True
 
     def judge(self):
-        return ["good"], [Alarm(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="low", alarm_message="ok")]
+        return ["good"], [make_alarm()]
 
 
 def test_per_operator_isolation():

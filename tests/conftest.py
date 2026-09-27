@@ -10,6 +10,7 @@ import pytest
 
 import factories
 from app.settings import settings
+from app.utils import task_queue
 
 
 # ---- factory-as-fixture：返回可调用的构造器（支持 override 参数）----
@@ -39,3 +40,9 @@ def tmp_storage(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture
+def fast_task_queue(monkeypatch):
+    """SerialTaskQueue 消费线程轮询 0.5s → 0.01s：`stop()` 不再每条队列白等半秒。"""
+    monkeypatch.setattr(task_queue, "_POLL_INTERVAL", 0.01)

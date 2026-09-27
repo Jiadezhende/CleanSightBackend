@@ -7,7 +7,7 @@
 
 from unittest.mock import patch
 
-from factories import make_alarm, make_bare_cq, make_cq, make_detector_output, make_frame_detection
+from factories import make_alarm, make_bare_cq, make_cq, make_frame_detection
 
 
 def _cq_with_task():
@@ -17,39 +17,16 @@ def _cq_with_task():
 
 # --- gate 测试（经 append_alarm_record_with_gate 返回值验证）---
 
-def test_gate_first_pass_allowed():
-    cq = _cq_with_task()
-    assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
-
-
-def test_gate_second_within_5s_blocked():
-    cq = _cq_with_task()
-    t0 = 1000.0
-    with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
-    with patch("time.time", return_value=t0 + 4.9):
-        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False
-
-
-def test_gate_allowed_after_window_expires():
-    cq = _cq_with_task()
-    t0 = 1000.0
-    with patch("time.time", return_value=t0):
-        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
-    with patch("time.time", return_value=t0 + 5.0):
-        assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
-
-
 def test_gate_blocked_alarm_does_not_renew_window():
-    """被拦截的告警不续期：固定冷却窗口，窗口从上次通过时刻计算，与中途拦截无关。"""
+    """固定 5s 冷却窗口：首条放行、窗口内拦截、到期（闭边界）放行；被拦截的告警不续期。"""
     cq = _cq_with_task()
     t0 = 1000.0
     with patch("time.time", return_value=t0):
         assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True   # 通过，last=t0
-    with patch("time.time", return_value=t0 + 4.0):
+    with patch("time.time", return_value=t0 + 4.9):
         assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False  # 拦截，last 仍为 t0
     with patch("time.time", return_value=t0 + 5.0):
-        # 窗口从 t0 计，t0+5 到期；若续期应到 t0+9 才通过，验证非续期行为
+        # 窗口从 t0 计，t0+5 到期；若续期应到 t0+9.9 才通过，验证非续期行为
         assert cq.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
 
 
@@ -68,21 +45,6 @@ def test_gate_different_metric_independent():
     with patch("time.time", return_value=t0):
         assert cq.append_alarm_record_with_gate(make_alarm(metric="BUBBLE"), "REALTIME") is True
         assert cq.append_alarm_record_with_gate(make_alarm(metric="BENDING"), "REALTIME") is True
-
-
-def test_gate_reset_on_task_change():
-    """新 run = 新 CQ = fresh gate（一 CQ 一 run，身份不可变）：换 task 建新 CQ，同 key 重新允许。"""
-    t0 = 1000.0
-    cq1 = make_cq(task_id=1, step_id=1, source_ip="c1")
-    with patch("time.time", return_value=t0):
-        assert cq1.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
-    with patch("time.time", return_value=t0 + 1.0):
-        assert cq1.append_alarm_record_with_gate(make_alarm(), "REALTIME") is False  # 仍在窗口内
-
-    # 切换任务 = 建**新** CQ（新 run），gate 天然为空
-    cq2 = make_cq(task_id=2, step_id=1, source_ip="c1")
-    with patch("time.time", return_value=t0 + 1.0):
-        assert cq2.append_alarm_record_with_gate(make_alarm(), "REALTIME") is True
 
 
 # --- 入日志 / seq 测试 ---

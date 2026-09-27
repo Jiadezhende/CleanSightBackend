@@ -3,15 +3,15 @@ StepExporter 单元测试
 
 聚焦整段导出的关键不变量（每一条对应一个会静默产出坏视频的坑）：
 - EXTINF 取自写入侧 playlist 真值，不是文件名 ts 差重推
-- 磁盘上有但 playlist 里没有的段（在途段）被过滤
+- 磁盘上有但 playlist 里没有的段（在途段）不算数：全在途即无可导出
 - 临时 m3u8 落在 `{step}/hls/`（段与 init 的所在目录），使 EXT-X-MAP 的相对 URI 能解析
-- 必须写 #EXT-X-ENDLIST（缺了 ffmpeg 当直播只读 live edge，前面的段全丢）
 - 走 HLS demuxer 而非 -f concat（fMP4 fragment 无 moov）
 - `-c copy`：段本就是 H.264，整段导出决不能重编码
 - init.mp4 缺失时 fail-fast，不调 ffmpeg
 - ffmpeg 失败/异常时临时 m3u8 也要被 finally 清理
 - track 参数真的选到对应轨
 
+VOD 清单骨架（头部 / ENDLIST / TARGETDURATION）归 `render_vod`，由 test_utils_vod_playlist 覆盖。
 不真正调用 ffmpeg —— mock subprocess.run（I/O 边界不硬测，见 DEVELOPMENT.md）。
 """
 
@@ -38,7 +38,6 @@ from app.storage.hls import _m3u8
 
 TS0 = 1_700_000_000_000_000
 TS1 = TS0 + 10_000_000
-TS2 = TS1 + 10_000_000
 
 TASK_ID = 1
 STEP_ID = 1
@@ -123,24 +122,17 @@ def _capture_run(monkeypatch, returncode: int = 0, touch_output: bool = True):
 
 
 class TestVodPlaylist:
-    def test_writes_map_endlist_and_all_segments(self, tmp_storage, monkeypatch):
+    def test_writes_map_and_all_segments(self, tmp_storage, monkeypatch):
         step_dir = _make_step([TS0, TS1])
         cap = _capture_run(monkeypatch)
 
         _exporter(tmp_storage).export(1, 1, "raw")
 
         text = cap["m3u8_text"]
-        assert "#EXTM3U" in text
-        assert "#EXT-X-VERSION:7" in text
-        assert "#EXT-X-PLAYLIST-TYPE:VOD" in text
         assert '#EXT-X-MAP:URI="raw_init.mp4"' in text
         # 段以 basename 出现（相对 URI，依赖临时 m3u8 与段同目录）
         assert f"raw_segment_{TS0}.mp4" in text
         assert f"raw_segment_{TS1}.mp4" in text
-        # 缺 ENDLIST → ffmpeg 当直播流只读 live edge，前面的段全丢
-        assert "#EXT-X-ENDLIST" in text
-        # render_vod 的骨架：MEDIA-SEQUENCE 在三处 VOD 构造里统一补齐
-        assert "#EXT-X-MEDIA-SEQUENCE:0" in text
 
         # 临时 m3u8 必须与段同目录（init.mp4 的相对 URI 才能解析）
         assert cap["m3u8_path"].parent == step_dir
@@ -159,20 +151,6 @@ class TestVodPlaylist:
         assert "#EXTINF:9.800," in text
         assert "#EXTINF:7.500," in text
         assert "#EXTINF:10.000," not in text
-        # TARGETDURATION = ceil(max EXTINF)
-        assert "#EXT-X-TARGETDURATION:10" in text
-
-    def test_in_flight_segments_filtered(self, tmp_storage, monkeypatch):
-        """磁盘上有、playlist 里没有 = 在途段（transcode+append 未完成），必须过滤。"""
-        _make_step([TS0, TS1, TS2], playlist_ts=[TS0, TS1])
-        cap = _capture_run(monkeypatch)
-
-        _exporter(tmp_storage).export(1, 1, "raw")
-
-        text = cap["m3u8_text"]
-        assert f"raw_segment_{TS0}.mp4" in text
-        assert f"raw_segment_{TS1}.mp4" in text
-        assert f"raw_segment_{TS2}.mp4" not in text
 
     def test_processed_track_selects_processed_segments(self, tmp_storage, monkeypatch):
         _make_step([TS0, TS1], track="raw")

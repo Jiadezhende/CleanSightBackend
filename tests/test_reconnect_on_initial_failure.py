@@ -86,16 +86,11 @@ class TestDecoderRegistration:
         self.service = StreamService()
         self.client_id = "reconnect_test_client"
 
-        self.mock_settings = MagicMock()
-        self.mock_settings.mediamtx_proxy_port = 8554
-        self.mock_settings.mediamtx_internal_port = 8554
-
     def _start_with_failing_decoder(self, error):
         with patch("app.services.stream.manager.FFmpegDecoder") as MockDecoder, \
              patch.object(
                  self.service, "_get_client_queues", return_value=MagicMock()
-             ), \
-             patch("app.settings.settings", self.mock_settings):
+             ):
 
             mock_dec = MockDecoder.return_value
             mock_dec.is_alive.return_value = False

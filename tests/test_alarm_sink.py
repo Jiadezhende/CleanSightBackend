@@ -8,10 +8,10 @@ client_id / task_id / step_id 均由 cq 派生，落库调用打到 sink 内部 
 persistence_manager.persist_alarm，测试用 monkeypatch 拦截该出口。
 """
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from app.domain.alarm import Alarm, AlarmMetric, AlarmType
+from factories import make_alarm
+from app.domain.alarm import AlarmMetric
 from app.services.inference.online.temporal import alarm_sink
 
 
@@ -29,11 +29,7 @@ def test_persist_alarms_reads_baked_stage(monkeypatch):
     cq.source_ip = "c"
     cq.append_alarm_record_with_gate.return_value = True  # 过闸
 
-    alarm = Alarm(
-        alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="low", alarm_message="m",
-        metric=AlarmMetric.BUBBLE,
-    )
-    alarm.stage = "长刷"  # 产出方已烧的可读别名
+    alarm = make_alarm(metric=AlarmMetric.BUBBLE, stage="长刷")  # stage = 产出方已烧的可读别名
 
     alarm_sink.persist_alarms([alarm], cq=cq, mode="SETTLEMENT")
 
@@ -57,7 +53,7 @@ def test_persist_alarms_gate_reject_skips_persist(monkeypatch):
     cq.source_ip = "c"
     cq.append_alarm_record_with_gate.return_value = False  # 冷却窗口拦截
 
-    alarm = Alarm(alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="low", alarm_message="m")
+    alarm = make_alarm()
     alarm_sink.persist_alarms([alarm], cq=cq, mode="REALTIME")
 
     assert captured == []  # 被闸门挡下，不落库

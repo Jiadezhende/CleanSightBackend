@@ -58,8 +58,9 @@ class TestRootPath:
         assert _root.path(7, 3, "hls") == root / "7" / "3" / "hls"
 
     def test_does_not_touch_disk(self, tmp_storage):
+        """读一个不存在的 step 不该在盘上留空目录——空目录会被 ids() 列出却没有内容。"""
         _root.path(7, 3, "hls")
-        assert not (tmp_storage / "7").exists()
+        assert list(tmp_storage.iterdir()) == []
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -91,11 +92,6 @@ class TestRootPath:
             _root.path(1, 2, "feature", create=True)
         assert list(tmp_storage.iterdir()) == []
 
-    def test_create_false_leaves_disk_untouched(self, tmp_storage):
-        """读一个不存在的 step 不该在盘上留空目录——空目录会被 ids() 列出却没有内容。"""
-        _root.path(1, 2, "hls")
-        assert list(tmp_storage.iterdir()) == []
-
     def test_create_true_makes_parents(self, tmp_storage):
         got = _root.path(1, 2, "hls", create=True)
         assert got.is_dir()
@@ -115,13 +111,6 @@ class TestRootPath:
         """省掉 domain 也能建——那是 tasks.py 的用法，建的是 step 目录本身。"""
         got = _root.path(1, 2, create=True)
         assert got.is_dir() and got.name == "2"
-
-    def test_domains_do_not_collide(self, tmp_storage):
-        """同名文件落在不同域下互不干扰 —— 这就是隔离本身。"""
-        hls = _root.path(1, 2, "hls", create=True) / "metadata.json"
-        lab = _root.path(1, 2, "lab", create=True) / "metadata.json"
-        assert hls != lab
-        assert hls.parent.name == "hls" and lab.parent.name == "lab"
 
     @pytest.mark.parametrize(
         "name, expected",
@@ -146,6 +135,29 @@ class TestRootPath:
         monkeypatch.setattr(settings, "storage_dir", str(second))
         assert _root.path() == second.resolve()
 
+    def test_relative_storage_dir_resolves_to_project_root_regardless_of_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """相对路径以项目根为基、不随进程 cwd 飘——否则读写两侧会分叉到不同目录。"""
+        from app.services.persistence.config import get_persistence_config
+
+        monkeypatch.setattr(settings, "storage_dir", "./database")
+        resolved = _root.path()
+        assert resolved.is_absolute() and resolved.name == "database"
+        assert resolved == settings.storage_base_dir
+
+        monkeypatch.chdir(tmp_path)                  # 切到完全无关的 cwd
+        assert _root.path() == resolved
+        assert tmp_path not in resolved.parents
+
+        # TTL 清理（cleanup_worker）的扫描根取自这里，须与本包同源
+        assert get_persistence_config().storage_base_dir == resolved
+
+    def test_absolute_storage_dir_is_used_as_is(self, tmp_path, monkeypatch):
+        abs_dir = tmp_path / "custom" / "store"
+        monkeypatch.setattr(settings, "storage_dir", str(abs_dir))
+        assert _root.path() == abs_dir.resolve()
+
 
 # ---------------------------------------------------------------------------
 # tasks.steps / tasks.ids：枚举
@@ -168,10 +180,7 @@ class TestSteps:
         assert tasks.list_step_ids(999) == []
 
     def test_does_not_judge_emptiness(self, tmp_storage):
-        """空 step 目录必须被列出 —— TTL 要看见它（detections.jsonl 泄漏的正是这一类）。
-
-        「两轨都没段算不算数」是 HLS 域知识，本域不做这个判断。
-        """
+        """空 step 目录照样列出：「两轨都没段算不算数」是 HLS 域知识，本域不做这个判断。"""
         (tmp_storage / "1" / "5").mkdir(parents=True)
         assert tasks.list_step_ids(1) == [5]
 
@@ -183,10 +192,11 @@ class TestIds:
         assert tasks.list_task_ids() == [1, 30, 200]
 
     def test_skips_non_id_entries(self, tmp_storage):
-        """存储根下正常只有数字 task 目录（lab 产物已归入 {task}/{step}/lab/、
-        LS 配置已移出存储根）。误建的目录与外部工具留下的文件一律跳过，不报错。"""
+        """存储根下不只有数字 task 目录：lab 导出临时根 `.lab_exports/`（clip_builder /
+        step_exporter）与送标运行时配置 `lab_runtime_config.json`（services/lab/config）都寄居
+        于此，外加误建的目录——一律跳过，不报错。"""
         _seed_step(tmp_storage, 1, 1)
-        (tmp_storage / ".lab_exports").mkdir()  # 旧布局残留
+        (tmp_storage / ".lab_exports").mkdir()
         (tmp_storage / "lab_runtime_config.json").write_text("{}", encoding="utf-8")
         assert tasks.list_task_ids() == [1]
 

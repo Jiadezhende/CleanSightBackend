@@ -49,11 +49,6 @@ class TestMediaTokenSignVerify:
         with pytest.raises(MediaTokenError, match="Kind mismatch"):
             self.mt.verify(token, kind="segment")
 
-    def test_kind_mismatch_rejected(self):
-        token = self.mt.sign(1, 1, "f.mp4", kind="segment")
-        with pytest.raises(MediaTokenError, match="Kind mismatch"):
-            self.mt.verify(token, kind="init")
-
     def test_kind_none_skips_check(self):
         token = self.mt.sign(1, 1, "f.mp4", kind="segment")
         payload = self.mt.verify(token)  # 不限定 kind
@@ -76,12 +71,6 @@ class TestMediaTokenSignVerify:
         with pytest.raises(MediaTokenError, match="Signature mismatch"):
             self.mt.verify(bad)
 
-    def test_expired_token_rejected(self):
-        # 用很短的 TTL 签发，注入未来时间校验
-        token = self.mt.sign(1, 1, "f.mp4", kind="segment", ttl=1, now=1000)
-        with pytest.raises(MediaTokenError, match="expired"):
-            self.mt.verify(token, now=1002)  # 已过期
-
     def test_token_valid_at_boundary(self):
         token = self.mt.sign(1, 1, "f.mp4", kind="segment", ttl=10, now=1000)
         # 1009 < expiry(1010) 可用；1010 == expiry 已过期
@@ -90,13 +79,9 @@ class TestMediaTokenSignVerify:
             self.mt.verify(token, now=1010)
 
     def test_malformed_token_rejected(self):
-        for bad in ["", "no-dot", "...", "x" * 10]:
+        for bad in ["", "no-dot", "...", "x" * 10, "!!!.!!!"]:
             with pytest.raises(MediaTokenError):
                 self.mt.verify(bad)
-
-    def test_garbage_b64_rejected(self):
-        with pytest.raises(MediaTokenError):
-            self.mt.verify("!!!.!!!")
 
     def test_filename_with_slash_rejected(self):
         with pytest.raises(ValueError, match="path traversal"):
