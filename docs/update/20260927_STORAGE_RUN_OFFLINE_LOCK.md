@@ -76,6 +76,7 @@ POST /admin-f3m8/offline/jobs {task_id, step_id, run_id?}
 | runner / CLI | 点名的 run 不在 → reclaimed 不写；运行中被回收 → reclaimed 且不重建；点名旧 run 只写旧 run；`query` 输出 `run_id` |
 | 全量 `pytest tests/` | 839 passed |
 | `integration_tests/test_offline_job_subprocess.py`（真 CLI 子进程，临时存储，不碰 DB） | PASS：子进程收 `--run-id` 正常解析，按预期在 step 配置校验处失败 |
+| dev 端到端（离线期间同 step 重启） | 通过（2026-09-28 回填，人工执行） |
 
 ## 遗留风险 / 后续任务
 

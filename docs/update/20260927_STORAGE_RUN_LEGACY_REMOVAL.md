@@ -52,6 +52,5 @@
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
-| 第 4 期的 dev 端到端（换代期间持续回放、离线期间同 step 重启）尚未执行 | 读侧锁定与离线 409 只有单测覆盖 | 人工执行后回填 4a / 4b 记录 |
 | KB 与新布局不一致 | [DESIGN_STALE_WRITES](../kb/DESIGN_STALE_WRITES.md)、[DESIGN_STORAGE_LAYER](../kb/DESIGN_STORAGE_LAYER.md)、[ARCHITECTURE_STORAGE_AND_SCHEMA](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md) 仍描述 `{step}/{domain}/` 与首写自清 | 下次 KB 维护时融合本系列 update |
 | 旧布局数据读侧不可见 | 切换前的回放与离线结果看不到，残留随 TTL 清掉 | 按提案接受 |

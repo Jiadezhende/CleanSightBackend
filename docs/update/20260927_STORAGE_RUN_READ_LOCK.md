@@ -76,6 +76,7 @@ router 入口  resolve_run(task, step, run_id)          app/routers/_runs.py
 | 新增用例 | timeline 按 run 存续期过滤、无 run 时保持全 0；点名未知 run → 404 Run（timeline / playlist）；清单 token 锁 run、回收后 404；缺 `run_id` 的 token 按最新 run 解析；ai temporal 点名旧 run 拿旧结果；lab `run_ids`；`runs.successor`；`list_task_ids(order="recent")` |
 | 全量 `pytest tests/` | 828 passed |
 | 排序修正 | 按开跑时刻而非段时刻；同 step 更新的空代不参与、不挤掉第 10 名；全量 840 passed |
+| dev 端到端（换代期间持续回放） | 通过（2026-09-28 回填，人工执行） |
 
 ## 遗留风险 / 后续任务
 
