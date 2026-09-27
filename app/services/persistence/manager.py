@@ -2,26 +2,21 @@
 持久化管理器 - 统一调度所有持久化任务
 
 职责：
-- 管理持久化Worker Pool（HLS、告警）
-- 接收持久化请求并路由到对应Worker
-- 提供统一的持久化API
+- 管理告警 Worker Pool 与存储 TTL 清理 Worker
+- 接收告警持久化请求并入队
 - 监控持久化队列和性能指标
+
+HLS 落盘不在本服务：写侧是 `app.services.recording` → `app.storage.hls`。
 """
 
 import logging
 import queue
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from app.domain.frame import Frame
 from .config import PersistenceConfig
-from .types import (
-    AlarmPersistenceTask,
-    HLSPersistenceTask,
-)
+from .types import AlarmPersistenceTask
 from .workers.alarm_worker import AlarmWorkerPool
 from .workers.cleanup_worker import StorageCleanupWorker
-from .workers.hls_worker import HLSWorkerPool
-from .workers.segment_sweeper import HLSSegmentSweeper
 
 logger = logging.getLogger(__name__)
 
@@ -42,19 +37,8 @@ class PersistenceManager:
         else:
             self.config = config
 
-        # 创建持久化队列
-        self.hls_queue: queue.Queue[HLSPersistenceTask] = queue.Queue(
-            maxsize=self.config.hls_queue_size
-        )
         self.alarm_queue: queue.Queue[AlarmPersistenceTask] = queue.Queue(
             maxsize=self.config.alarm_queue_size
-        )
-
-        # 创建Worker池
-        self.hls_pool = HLSWorkerPool(
-            input_queue=self.hls_queue,
-            num_workers=self.config.hls_workers,
-            db_dir=self.config.storage_base_dir,
         )
 
         self.alarm_pool = AlarmWorkerPool(
@@ -71,117 +55,21 @@ class PersistenceManager:
                 interval_seconds=self.config.cleanup_interval_seconds,
             )
 
-        # HLS 分段拉取 Worker（PULL 模型）：周期扫活跃 CQ 把攒满的整段拉走落盘。
-        # 注入 client_manager.snapshot + 本管理器的 persist_hls_segment；
-        # 依赖方向 persistence→client 单向（client 不再回指 persistence）。
-        #
-        # ⚠ **构造但不启动**：HLS 落盘已切到 `app.services.recording`，`start()` 不再碰它。
-        # 留着只是为了不删旧实现（见 `start()` 的 docstring）。
-        from app.services.client.manager import client_manager
-
-        self._segment_sweeper = HLSSegmentSweeper(
-            snapshot_fn=client_manager.snapshot,
-            persist_fn=self.persist_hls_segment,
-            interval_seconds=self.config.hls_sweep_interval_seconds,
-        )
-
     def start(self):
-        """启动持久化服务（**只起告警池 + TTL 清理**）。
-
-        ⚠ **HLS 落盘已切到 `app.services.recording`**：`hls_pool` 与 `_segment_sweeper` 仍在
-        `__init__` 里构造（旧实现尚未删除，直接 `PersistenceManager()` 打桩的测试仍依赖它们
-        存在），但**这里刻意不启动它们**。
-
-        **重新启用 = 数据静默损坏**：`HLSSegmentSweeper` 与 recording 的 `SegmentSweeper` 都从
-        活跃 CQ **drain**（破坏性取出）。两个同时在跑的结果是各自拿走一半帧，产出两份互相缺帧、
-        时间轴却都自洽的段，**两端都不报错**。要恢复旧路径，必须先停掉 recording。
-        """
+        """启动持久化服务（告警池 + TTL 清理）。"""
         logger.info("启动持久化服务")
         self.alarm_pool.start()
         if self._cleanup_worker:
             self._cleanup_worker.start()
 
     def stop(self, timeout: float = 10.0):
-        """停止持久化服务（优雅关闭）。与 `start()` 对称：hls_pool / sweeper 从没起过，不停。"""
+        """停止持久化服务（优雅关闭）。"""
         logger.info("停止持久化服务")
 
         # 停止Worker池（会等待队列清空）
         self.alarm_pool.stop(timeout=timeout)
         if self._cleanup_worker:
             self._cleanup_worker.stop(timeout=5.0)
-
-    # ========== HLS持久化API ==========
-
-    def persist_hls_segment(
-        self,
-        task_id: int,
-        step_id: int,
-        segment_type: str,  # "raw" or "processed"
-        frames: List[Frame],
-    ) -> bool:
-        """持久化HLS视频段
-
-        Args:
-            task_id: 任务ID
-            step_id: 洗消步骤ID（来自 clean_task.current_step 转 int）
-            segment_type: 段类型（raw/processed）
-            frames: 帧数据列表
-
-        Returns:
-            是否成功入队
-        """
-        try:
-            task = HLSPersistenceTask(
-                task_id=task_id,
-                step_id=step_id,
-                segment_type=segment_type,
-                frames=frames,
-            )
-            self.hls_queue.put(task, timeout=1.0)
-            return True
-        except queue.Full:
-            logger.warning(
-                "HLS队列已满，丢弃任务: task_id=%s step_id=%s", task_id, step_id
-            )
-            return False
-        except Exception as e:
-            logger.error("HLS入队失败: %s", e, exc_info=True)
-            return False
-
-    def flush_residual_segments(self, cq) -> None:
-        """拆除期落盘 CQ 残余帧：drain raw/processed → 按 ca_segment_len 切段 → 逐段入队。
-
-        task_id/step_id 由 cq 派生（缺失早退）。须在 cq.close() 释放帧之前调（RunController 保证）。
-        （原 InferenceManager._flush_all_remaining_segments 迁入——切段是持久化领域知识。）
-        """
-        task_id = cq.task_id
-        if task_id is None:
-            logger.warning("[persistence] flush_residual_segments: task_id is None, skip")
-            return
-        step_id = cq.step_id
-        if step_id is None:
-            logger.error(
-                "[persistence] flush_residual_segments: step_id is None (task_id=%s), skip", task_id
-            )
-            return
-
-        seg_len = cq.ca_segment_len
-        raw_frames = cq.drain_ca_raw()
-        processed_frames = cq.drain_ca_processed()
-
-        for i in range(0, len(raw_frames), seg_len):
-            chunk = raw_frames[i : i + seg_len]
-            if chunk:
-                self.persist_hls_segment(
-                    task_id=task_id, step_id=step_id, segment_type="raw", frames=chunk
-                )
-
-        for i in range(0, len(processed_frames), seg_len):
-            chunk = processed_frames[i : i + seg_len]
-            if chunk:
-                self.persist_hls_segment(
-                    task_id=task_id, step_id=step_id, segment_type="processed", frames=chunk
-                )
 
     # ========== 告警持久化API ==========
 
@@ -204,32 +92,3 @@ class PersistenceManager:
         except Exception as e:
             logger.error("告警入队失败: %s", e, exc_info=True)
             return False
-
-    def release_task_locks(self, task_id: int) -> None:
-        """任务拆除后回收该 task 的 HLS 目录锁（防 _dir_locks 随任务数无限增长）。
-
-        由 RunController.stop_run 在清 registry 之后调用——此时不会再有该 task 的新段入队。
-        """
-        self.hls_pool.release_dir_locks(task_id)
-
-    def start_run(self, cq) -> None:
-        """per-run 起始钩子（persistence owner）：清空该 (task_id, step_id) 旧 HLS step 目录。
-
-        与拆除侧 `flush_residual_segments(cq)` 对称（同以 cq 为入参、task_id/step_id 由 cq 派生），
-        由 RunController.start_run 编排（在其 client_manager.set 注册 CQ 之后）。
-        **已无调用点**：start 侧的 eager supersede 全部换成了 recording 的懒惰首写自清
-        （HLS 与 inference 各清各的域），本方法随 persistence 的 HLS 四件套一起待删。
-        HLS 无 owner-fence、磁盘无状态，故整个 supersede 就是删目录（rmtree），逐段惰性重建。
-        task_id/step_id 缺失早退（与 flush_residual_segments 同口径）。best-effort，永不抛。
-        """
-        task_id = cq.task_id
-        if task_id is None:
-            logger.warning("[persistence] start_run: task_id is None, skip")
-            return
-        step_id = cq.step_id
-        if step_id is None:
-            logger.error(
-                "[persistence] start_run: step_id is None (task_id=%s), skip", task_id
-            )
-            return
-        self.hls_pool.purge_step_dir(task_id, step_id)

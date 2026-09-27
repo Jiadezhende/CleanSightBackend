@@ -1,5 +1,5 @@
 """
-task/step 目录域 —— **把 step 目录当整体看**的那三件事：有哪些 task、有哪些 step、整个删掉。
+task/step 目录域 —— **把 step 目录当整体看**的那两件事：有哪些 task、有哪些 step。
 
     from app.storage import tasks as step_tasks
     for task_id in step_tasks.list_task_ids(order="mtime"):
@@ -15,7 +15,6 @@ task/step 目录域 —— **把 step 目录当整体看**的那三件事：有�
 
     list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按活动时间降序
     list_step_ids(task_id)    该 task 下的 step id，升序
-    delete_step(task, step)   删掉整个 step 目录（三个域一起没）+ 回收空 task 目录
 
 **本模块不出定位能力**：往某个域里写东西是那个域自己的事，各域文件用
 `_root.path(task_id, step_id, <自己的域>)` 取路径。本模块只在跨所有域时出面。
@@ -26,7 +25,6 @@ task/step 目录域 —— **把 step 目录当整体看**的那三件事：有�
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
@@ -34,7 +32,7 @@ from . import _root
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["list_task_ids", "list_step_ids", "delete_step"]
+__all__ = ["list_task_ids", "list_step_ids"]
 
 # list_task_ids() 支持的排序。非法值炸而不是静默按默认走。
 _VALID_ORDERS: Tuple[str, ...] = ("id", "mtime")
@@ -120,38 +118,3 @@ def _latest_step_mtime(task_id: int) -> float:
             except OSError:  # 扫描期间被删：等同于没扫到
                 continue
     return max(mtimes) if mtimes else 0.0
-
-
-def delete_step(task_id: int, step_id: int) -> bool:
-    """删除整个 step 目录（含**所有写者**的产物）；父 task 目录若因此变空，一并回收。
-
-    Returns:
-        step 目录是否被删除。目录本就不存在返回 False；删除失败记 warning 后返回 False。
-
-    **只执行，不判断该不该删**：「重启 supersede」与「TTL 到期」两个判断分别留在
-    `persistence/manager` 与 `persistence/workers/cleanup_worker`。
-
-    **它删的是整个 step，不是某一个域**：`hls/`、`inference/`、`lab/` 一起消失。要只删一个
-    域，到那个域自己的模块里找。
-
-    **不加锁（本层零锁）**：与该 step 的写之间不重叠，靠调用侧把两者提交到同一条
-    `SerialTaskQueue`。不守这个前提的表现是某个域的目录删到一半，或写侧 `create=True` 在
-    rmtree 之后把目录重建出来、留一个已被记账删除的僵尸 step——**都不报错**。TTL 回收在
-    这个前提之外（`cleanup_worker` 自己的线程），它删的是过期 step，是已知且接受的窄缺口。
-    """
-    step_dir = _root.path(task_id, step_id)
-    if not step_dir.exists():
-        return False
-
-    try:
-        shutil.rmtree(step_dir)
-    except OSError as e:
-        logger.warning("[Storage] 删除 step 目录失败 %s: %s", step_dir, e)
-        return False
-
-    try:
-        _root.path(task_id).rmdir()
-    except OSError:
-        # 还有别的 step / 已被并发删掉 / 无权限 —— 三种都无需处理，目录留着零成本
-        pass
-    return True

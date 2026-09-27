@@ -49,25 +49,6 @@ def test_resolve_stage_unrunnable_rejected(manager, step, reason):
         manager.resolve_stage(step)
 
 
-def _fake_cq(task_id=1, stage="1", step_id=None):
-    cq = MagicMock()
-    cq.task_id = task_id
-    cq.stage = stage
-    cq.step_id = step_id
-    return cq
-
-
-def test_start_workflow_no_set_no_actor(manager):
-    # start_workflow(cq) 不再碰注册表（set/remove 均归 RunController，与 stop_run 对称）。
-    # 无 operator_specs → 不建 actor。CQ 假定已由 RunController 注册。
-    cq = _fake_cq(task_id=7, stage="1", step_id=None)
-    with patch("app.services.inference.online.manager.client_manager") as cm, \
-         patch.object(manager, "_get_stage_configs", return_value=_STAGE_CONFIGS):
-        assert manager.start_workflow(cq) is True
-
-    cm.set.assert_not_called()   # 注册职责已上移 RunController，本方法不再 set
-
-
 # ── 启动 fail-fast：detector 构造失败即启动失败 ─────────────────────────
 #
 # 构造不加载权重，能失败的只有配置错误；_get_stage_configs 不吞，包成 RuntimeError 冒到 lifespan。
@@ -122,10 +103,6 @@ def test_real_manager_init_invariants_and_stop_workflow_smoke():
     """
     m = InferenceManager()
     assert m._actors == {}                          # 漏设 → stop_workflow 会 AttributeError
-    # 已摘除落盘服务引用（inference 不持 persistence / recording，落盘经 run_control 编排）
-    assert not hasattr(m, "persistence_manager")
-    assert not hasattr(m, "recording_service")
-    assert not hasattr(m, "_client_lifecycle_lock")  # 互斥上移 RunController.lock_for
     # 无 actor、检测结果无残余 → 返回空 settlement、不抛
     cq = MagicMock()
     cq.task_id = 999

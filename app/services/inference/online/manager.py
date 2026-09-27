@@ -66,7 +66,7 @@ class InferenceManager:
         self.visualization_pool: Optional["VisualizationWorkerPool"] = None
 
         # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
-        # 告警落库/HLS flush 归 PersistenceManager，由 RunController 编排；进程停机残余结算走惰性 import。
+        # 告警落库归 PersistenceManager、HLS flush 归 RecordingService，由 RunController 编排；进程停机残余结算走惰性 import。
         logger.debug("[InferenceManager] Initialization completed")
 
     def _build_components(self):

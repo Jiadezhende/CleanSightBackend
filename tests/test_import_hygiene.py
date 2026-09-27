@@ -5,9 +5,11 @@
 1. **导入预算**：目标模块在干净子进程里 import 后，`sys.modules` 不得含预算外的重依赖，
    且耗时不超上限。守住「重依赖懒加载」这条从未被检查过的既有意图——它此前失守两次
    （`app.main` 拽 torch、`persistence.*` 拽 cv2），都是模块级构造/re-export 悄悄引入的。
+   独立进程入口另可登记不许拉起的本仓链路（`FORBIDDEN_APP_IMPORTS`）。
 2. **单例引用面**：服务单例只许被 `run_control`（编排中枢）/ `routers/*`（装配层）/
    本包 `lifespan()` import。同时守住 `docs/DEVELOPMENT.md` §3 写下但无人检查的
-   「不建 service 对 service 的直接依赖」。
+   「不建 service 对 service 的直接依赖」；另有两条方向门禁（services ↛ routers、
+   persistence ↛ inference）按源码 AST 查。
 3. **相对 / 绝对的分工**：包内一律相对、跨包一律绝对（`DEVELOPMENT.md` §8）。这条不只是
    风格——第 2 条与分层门禁都靠模块名判定，**跨包写成相对就能绕过它们**，所以由 `_abs_module()`
    把相对导入还原成绝对再判，并由本条锁死写法。
@@ -107,6 +109,9 @@ BUDGET = {
     # online / offline 两个子包的 `__init__` 都是标记型：import 子包不该拉起任何一段链路。
     "app.services.inference.online":  (set(), 1.0),
     "app.services.inference.offline": (set(), 1.0),
+    # 离线 CLI 是独立进程入口：`_isolate_cpu()` 必须先于任何 torch import，故模块级不许有
+    # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
+    "app.services.inference.offline.cli": (set(), 0.20),
     "app.services.persistence": (set(), 1.0),
     # recording 登记两条：包名那条是门面型（浅，基本只有 docstring），真正的守门人是
     # `service` —— 它 import `app.storage.hls`，cv2 一旦从 `_encode` 的函数体挪到模块级，
@@ -114,6 +119,15 @@ BUDGET = {
     "app.services.recording":         (set(), 1.0),
     "app.services.recording.service": (set(), 1.0),
     "app.main":                 (set(), 2.0),
+}
+
+# BUDGET 模块 → import 后不许出现在 `sys.modules` 的本仓模块前缀。BUDGET 只盯三方重依赖，
+# 这里盯「不该被连带拉起的本仓链路」，与 BUDGET 共用同一次子进程 import。
+FORBIDDEN_APP_IMPORTS = {
+    # 离线 CLI 与在线后端零代码耦合（见其 docstring）：import 期不得拉起后端装配或在线链路
+    "app.services.inference.offline.cli": (
+        "app.main", "app.routers", "app.services.inference.online", "app.services.stream",
+    ),
 }
 
 # 分层包 → 它允许 import 的 `app.*` 前缀白名单（包内互相 import 由 self 前缀覆盖）。
@@ -170,7 +184,7 @@ SINGLETON_EXCEPTIONS = {
 
 
 def _import_in_subprocess(module: str):
-    """在干净子进程里 import，返回 (耗时秒, 已加载的重依赖列表)。
+    """在干净子进程里 import，返回 {elapsed: 耗时秒, heavy: 已加载的重依赖, app: 已加载的 app.* 模块}。
 
     必须起子进程：pytest 进程早已把 torch/cv2 装进 `sys.modules`（别的用例导过），
     在本进程里测等于测了个寂寞。
@@ -181,7 +195,8 @@ def _import_in_subprocess(module: str):
         f"__import__({module!r})\n"
         "elapsed = time.perf_counter() - t\n"
         f"heavy = [m for m in {HEAVY!r} if m in sys.modules]\n"
-        "print(json.dumps({'elapsed': elapsed, 'heavy': heavy}))\n"
+        "app = sorted(m for m in sys.modules if m == 'app' or m.startswith('app.'))\n"
+        "print(json.dumps({'elapsed': elapsed, 'heavy': heavy, 'app': app}))\n"
     )
     proc = subprocess.run(
         [sys.executable, "-c", code],
@@ -206,6 +221,14 @@ def test_import_budget(module):
         f"`import {module}` 耗时 {result['elapsed']:.2f}s，超上限 {max_seconds}s。"
         f"通常意味着有重活跑在了 import 期（应推迟到 start()）。"
     )
+    forbidden = FORBIDDEN_APP_IMPORTS.get(module, ())
+    pulled = [m for m in result["app"] if any(_under(m, f) for f in forbidden)]
+    assert not pulled, f"`import {module}` 连带拉起了不许依赖的本仓模块：{pulled}"
+
+
+def _under(name: str, prefix: str) -> bool:
+    """`name` 是 `prefix` 本身或其子模块（按点分段，`app.services.inference_x` 不算）。"""
+    return name == prefix or name.startswith(prefix + ".")
 
 
 @pytest.mark.parametrize("package", sorted(LAYER_PACKAGES))
@@ -334,24 +357,44 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
     )
 
 
-def test_services_do_not_import_routers():
-    """services 不得反向依赖 routers（分层里唯一出现过的真环，已在期 1 消掉）。"""
+def _imports_under(src_dir: Path, forbidden: str) -> list:
+    """`src_dir` 下所有 import 了 `forbidden`（含子模块）的位置，相对导入先还原成绝对。"""
     violations = []
-    for path in sorted((APP_DIR / "services").rglob("*.py")):
+    for path in sorted(src_dir.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
         rel = path.relative_to(REPO_ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and _abs_module(path, node).startswith("app.routers"):
-                violations.append(f"{rel}:{node.lineno} → {_abs_module(path, node)}")
+            if isinstance(node, ast.ImportFrom):
+                module = _abs_module(path, node)
+                # `from app.services import inference` 的目标在 alias 上，拼回去一起判
+                names = [module, *(f"{module}.{alias.name}" for alias in node.names)]
             elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.startswith("app.routers"):
-                        violations.append(f"{rel}:{node.lineno} → {alias.name}")
+                names = [alias.name for alias in node.names]
+            else:
+                continue
+            hit = next((n for n in names if _under(n, forbidden)), None)
+            if hit is not None:
+                violations.append(f"{rel}:{node.lineno} → {hit}")
+    return violations
 
+
+def test_services_do_not_import_routers():
+    """services 不得反向依赖 routers（分层里唯一出现过的真环，已在期 1 消掉）。"""
+    violations = _imports_under(APP_DIR / "services", "app.routers")
     assert not violations, (
         "services 反向依赖了 routers（协议层）：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_persistence_does_not_import_inference():
+    """persistence 不得反向依赖 inference：告警过闸编排在 inference 侧的 alarm_sink，
+    方向只许 inference → persistence（见 SINGLETON_EXCEPTIONS 里 alarm_sink 那条）。"""
+    violations = _imports_under(APP_DIR / "services" / "persistence", "app.services.inference")
+    assert not violations, (
+        "persistence 反向依赖了 inference：\n  " + "\n  ".join(violations)
+        + "\n跨这两个服务的编排放在 inference 侧的 sink，persistence 只暴露落库接口。"
     )
 
 

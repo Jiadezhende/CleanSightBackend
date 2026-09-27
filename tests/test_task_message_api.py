@@ -44,13 +44,13 @@ async def test_task_message_task_not_in_memory_returns_empty(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_task_message_running_returns_increment(monkeypatch):
+async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
     from app.routers import task as task_router
 
     from app.domain.alarm import AlarmMetric
 
-    # 装配层的 metric 映射用 config 单一真源（lazy YAML），此处只验端点串起装配 +
-    # 原子入口调用；alarm/max_seq 不依赖映射，signals_10s schema 由装配层单测覆盖。
+    # 此处只验接线（按 task_id 取 CQ、since_seq 透传给原子快照入口）；
+    # payload 字段（alarms/max_seq/signals_10s）由 test_task_message_assembler 覆盖。
     alarm = make_alarm(metric=AlarmMetric.BUBBLE, mode="REALTIME", seq=2, timestamp=1.0)
 
     cq = MagicMock()
@@ -69,8 +69,5 @@ async def test_task_message_running_returns_increment(monkeypatch):
         resp = await client.get("/task/message/1?since_seq=1")
 
     assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["max_seq"] == 2
-    assert payload["alarms"][0]["seq"] == 2
     fake_manager.get.assert_called_once_with(1)
     cq.get_alarm_snapshot.assert_called_once_with(1)

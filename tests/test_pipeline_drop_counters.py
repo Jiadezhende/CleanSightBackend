@@ -1,8 +1,10 @@
 """推理链路静默丢帧计数器测试。
 
-覆盖两个新增计数点：
-- StageAwareDispatcher._stage_queues 满（maxlen）时静默淘汰 → get_stage_drops()
-- ClientQueues.ca_processed 满（maxlen）时静默淘汰 → frames_dropped_processed
+覆盖 StageAwareDispatcher 的计数点与压力行：
+- _stage_queues 满（maxlen）时静默淘汰 → get_stage_drops()
+- proxy 拒收（submit 返 False）→ _stage_rejects，并入周期压力行
+
+ClientQueues 各 CA 队列的丢帧计数与压力行见 test_cq_pressure_log。
 """
 
 import logging
@@ -53,24 +55,13 @@ def test_stage_queue_no_drop_when_not_full():
     assert dispatcher.get_stage_drops().get(cq.stage, 0) == 0
 
 
-def test_ca_processed_drop_counted_on_overflow():
-    """未绑定任务时 ca_processed 只进不出，超过 maxlen 的部分应被计数。"""
-    cq = make_bare_cq(ca_maxlen=3)
-    assert cq.ca_maxlen == 3
-
-    for _ in range(5):
-        cq.append_ca_processed(_frame())
-
-    # 前 3 帧填满，后 2 帧触发淘汰计数
-    assert cq.frames_dropped_processed == 2
-    assert cq.get_ca_processed_length() == 3
-
-
 def test_pressure_snapshot_silent_when_calm(caplog):
     """平稳（无丢帧、队列浅）时不应打印 [PRESSURE]，避免刷屏。"""
     cm = MagicMock()
     cm.snapshot.return_value = {}
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    # 放一条浅队列：空 _stage_queues 时采样循环不执行，静默是恒真的
+    dispatcher._stage_queues["CLEAN"].append(make_frame(ts=time.time(), shape=(2, 2, 3)))
 
     with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
         dispatcher._log_pressure_snapshot()
@@ -128,11 +119,10 @@ def test_submit_rejection_counted_into_pressure_line(caplog):
     assert "reject_total=2 reject_delta=1" in caplog.text
 
 
-def test_pressure_snapshot_reports_stage_only(caplog):
-    """dispatcher 只报自己的 stage deque，不代 ClientQueues 汇总 ca_processed。"""
-    cq = make_bare_cq(ca_maxlen=10)
+def test_pressure_snapshot_logs_on_high_watermark(caplog):
+    """stage deque 越水位即打一行（无需丢帧/拒收）。"""
     cm = MagicMock()
-    cm.snapshot.return_value = {"c1": cq}
+    cm.snapshot.return_value = {}
     dispatcher = StageAwareDispatcher(client_manager_instance=cm)
 
     q = dispatcher._stage_queues["CLEAN"]
@@ -142,5 +132,4 @@ def test_pressure_snapshot_reports_stage_only(caplog):
     with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
         dispatcher._log_pressure_snapshot()
 
-    assert "resource=stage_queue" in caplog.text
-    assert "ca_processed" not in caplog.text
+    assert "component=dispatcher resource=stage_queue stage=CLEAN" in caplog.text

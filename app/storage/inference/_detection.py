@@ -9,8 +9,8 @@
 **不管**（都在调用方）：批缓冲、run 生命周期、失败要不要吞——本模块照抛 `OSError`。
 
 **并发：本域不持锁。** `append_detections` 自身不是原子的（一批可能拆成多次底层 write，
-Windows 的 `mode="a"` 也不保证追加原子），同一 step 的写与 `_layout.delete` /
-`tasks.delete_step` 必须由调用侧串行。
+Windows 的 `mode="a"` 也不保证追加原子），同一 step 的写与 `_layout.delete`
+必须由调用侧串行。
 
 依赖上界：`app.domain` + stdlib。
 """

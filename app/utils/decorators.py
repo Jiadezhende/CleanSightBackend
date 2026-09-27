@@ -1,14 +1,12 @@
 """
 CleanSight 装饰器工具集（仅用于日志）
 
-包含 2 个核心装饰器：
-1. log_call - 自动进入/退出日志装饰器
-2. timing - 性能计时装饰器
+log_call - 自动进入/退出日志装饰器
 
 边界层异常处理原则：
 - 业务代码保持纯净，只抛异常，不捕获异常
 - 重试逻辑在 GuardedExecutor 框架层统一管理
-- 异常捕获在 4 个边界层：Worker.run(), GuardedExecutor, FastAPI handlers, main()
+- 异常捕获在 4 个边界层：guarded_run（app/utils/worker_guard.py）, GuardedExecutor, FastAPI handlers, main()
 
 设计原则：
 - 实用优先，避免过度设计
@@ -125,63 +123,6 @@ def log_call(
 
 
 # ============================================================================
-# 2. 性能计时装饰器
-# ============================================================================
-
-
-def timing(
-    threshold_ms: Optional[float] = None,  # 警告阈值（毫秒）
-    warn_on_slow: bool = True,  # 超过阈值时是否发出警告
-    log_always: bool = False,  # 是否总是记录（默认仅在超过阈值时记录）
-):
-    """性能计时装饰器
-
-    Args:
-        threshold_ms: 警告阈值（毫秒），超过此值时发出 WARNING
-        warn_on_slow: 超过阈值时是否发出警告
-        log_always: 是否总是记录性能指标
-
-    示例:
-        @timing(threshold_ms=1000.0, warn_on_slow=True)
-        def infer_batch(frames):
-            ...
-    """
-
-    def decorator(func: Callable):
-        logger = logging.getLogger(func.__module__)
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            client_id = _extract_client_id(args, kwargs)
-            start_time = time.perf_counter()
-
-            try:
-                result = func(*args, **kwargs)
-                return result
-            finally:
-                elapsed_ms = (time.perf_counter() - start_time) * 1000
-                func_name = f"{func.__module__}.{func.__name__}"
-
-                # 构建日志消息
-                timing_msg = f"[TIMING] {func_name} took {elapsed_ms:.2f}ms"
-                if client_id:
-                    timing_msg += f" (client_id={client_id})"
-
-                # 检查阈值
-                if threshold_ms and elapsed_ms > threshold_ms and warn_on_slow:
-                    logger.warning(
-                        f"[SLOW] {func_name} took {elapsed_ms:.2f}ms "
-                        f"(threshold={threshold_ms}ms, client_id={client_id})"
-                    )
-                elif log_always:
-                    logger.debug(timing_msg)
-
-        return wrapper
-
-    return decorator
-
-
-# ============================================================================
 # 工具函数
 # ============================================================================
 
@@ -193,7 +134,6 @@ def _extract_client_id(args: tuple, kwargs: dict) -> Optional[str]:
     1. kwargs 中的 "client_id" 参数
     2. args[0] 如果是字符串（通常第一个参数是 client_id）
     3. 对象的 self.client_id 属性
-    4. 线程上下文（context.get_client_id()）
 
     Args:
         args: 位置参数
@@ -214,9 +154,7 @@ def _extract_client_id(args: tuple, kwargs: dict) -> Optional[str]:
     if args and hasattr(args[0], "client_id"):
         return getattr(args[0], "client_id", None)
 
-    # 回退到线程上下文
-    from .context import get_client_id
-    return get_client_id()
+    return None
 
 
 def _sanitize_args(args: tuple, kwargs: dict) -> dict:

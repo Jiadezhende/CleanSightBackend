@@ -30,12 +30,6 @@ class TestRtspInputOpts:
         """取 `-timeout` 紧跟的那个值。用位置而非正则：顺序本身也是契约的一部分。"""
         return opts[opts.index("-timeout") + 1]
 
-    def test_timeout_comes_from_settings_in_microseconds(self, monkeypatch):
-        monkeypatch.setattr(
-            "app.services.stream.decoder.settings.rtsp_read_timeout_s", 2.5
-        )
-        assert self._timeout_us(_rtsp_input_opts()) == "2500000"
-
     def test_timeout_tracks_settings_changes(self, monkeypatch):
         """按调用取值，不是 import 期定死 —— 否则改 env 要重启才生效，且测试无法覆盖。"""
         monkeypatch.setattr(

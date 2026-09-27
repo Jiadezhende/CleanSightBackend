@@ -6,31 +6,9 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from app.domain.alarm import ALARM_MODE_REALTIME, AlarmMetric, AlarmType
-from app.domain.frame import Frame
-
-
-@dataclass
-class HLSPersistenceTask:
-    """HLS视频段持久化任务
-
-    存储分区键为 (task_id, step_id)，与运行时 client_id（即 source_ip）解耦。
-    """
-
-    task_id: int
-    step_id: int
-    segment_type: str  # "raw" or "processed"
-    frames: List[Frame]
-    timestamp: float = field(default_factory=time.time)
-
-    def __post_init__(self):
-        assert self.segment_type in [
-            "raw",
-            "processed",
-        ], f"Invalid segment_type: {self.segment_type}"
-        assert len(self.frames) > 0, "frames list cannot be empty"
 
 
 @dataclass

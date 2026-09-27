@@ -2,7 +2,7 @@
 
 覆盖收窄接口（去 capacity、proxy 布尔背压）后的 `_drain_and_submit` 三个不变式：
 - 轮转均衡：多 stage 均积压时每 stage 每圈一批交替发，不把额度全给起始 stage（缺口 B 修复）
-- 被拒不丢帧：submit 返 False（proxy 限流）时帧原封留 deque，无静默淘汰、无 drop 计数
+- 被拒不丢帧：submit 返 False（proxy 限流）时帧原封留 deque（被拒后的余量断言见轮转用例）
 - 稳态等价：积压 ≤ batch_size 时每 stage 每轮恰好一批（与旧贪婪行为一致）
 """
 
@@ -50,22 +50,6 @@ def test_round_robin_balanced_under_backpressure():
     # 接了才 popleft：A 弹 4 帧、B 弹 2 帧，其余留 deque
     assert len(d._stage_queues["A"]) == 6
     assert len(d._stage_queues["B"]) == 8
-
-
-def test_rejected_frames_stay_in_deque_no_drop():
-    """submit 恒 False（proxy 限流）：帧原封留 deque，无 popleft、无 drop 计数。"""
-    d = _make_dispatcher(lambda batch: False, batch_sizes={"A": 4, "B": 4})
-    for _ in range(5):
-        d._stage_queues["A"].append(_item("A"))
-        d._stage_queues["B"].append(_item("B"))
-
-    d._drain_and_submit()
-
-    # 被拒即停、帧不动：深度不变、无静默淘汰计数
-    assert len(d._stage_queues["A"]) == 5
-    assert len(d._stage_queues["B"]) == 5
-    assert d.get_stage_drops().get("A", 0) == 0
-    assert d.get_stage_drops().get("B", 0) == 0
 
 
 def test_steady_state_one_batch_each():

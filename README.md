@@ -138,7 +138,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 
 ## 异常处理
 
-四层边界：L1 `Worker.run()` 兜线程崩溃 → L2 `GuardedExecutor` 重试/快速失败 → L3 FastAPI handler 转 HTTP → L4 `main()` 顶层 fail-fast。自定义异常（retryable/fatal 标记）在 `app/utils/exceptions.py`；丢帧不走异常，由 `frame_drop_total` 指标计数。详见 [知识库](docs/kb/INDEX.md)。
+四层边界：L1 `guarded_run()`（`app/utils/worker_guard.py`）兜线程崩溃 → L2 `GuardedExecutor` 重试/快速失败 → L3 FastAPI handler 转 HTTP → L4 `main()` 顶层 fail-fast。自定义异常（retryable/fatal 标记）在 `app/utils/exceptions.py`；丢帧不走异常，由 `frame_drop_total` 指标计数。详见 [知识库](docs/kb/INDEX.md)。
 
 ---
 

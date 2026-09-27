@@ -26,10 +26,8 @@ re-export `service` 会把 `app.storage.hls` 与 client → numpy 那条链摊�
 `app/main.py` 嵌 `lifespan()`（persistence 同一档、inference 外层），`run_control` 拆除时调
 `flush_residual` / `forget_task`，产物落 `{task}/{step}/hls/`。
 
-`persistence/strategies/hls_strategy.py` 那一套旧写侧**代码仍在但已不启动**：
-`PersistenceManager.start()` 不再起 `hls_pool` 与 `HLSSegmentSweeper`。⚠ **别把它们起回来**
-——两个 sweeper 都从活跃 CQ 破坏性 drain，同时跑会各拿走一半帧、产出两份互相缺帧却都自洽的
-段，两端都不报错。
+⚠ **同一时刻只能有一个 sweeper 从 CQ 取帧**——sweeper 从活跃 CQ 破坏性 drain，两个同时跑会
+各拿走一半帧、产出两份互相缺帧却都自洽的段，两端都不报错。
 """
 
 from contextlib import asynccontextmanager

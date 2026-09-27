@@ -157,4 +157,4 @@ vacuum 不回收仍有读者的版本          只回收非最新且被取代超
 - `app/storage/hls/_write.py`、`app/storage/inference/_layout.py`（`delete`：直接 `rmtree`，失败返回 False；recording 不看返回值）
 - `app/services/persistence/workers/cleanup_worker.py`（TTL `rmtree`、`_iter_step_dirs` 只认数字目录名）
 - `app/services/inference/offline/service.py`（作业串行 + 同键去重；不查 live、不做换代 / 回收防护，属 §5「先不防」）
-- 多版本在本仓库的落地方案：[20260926_STORAGE_MVCC_PROPOSAL.md](../update/20260926_STORAGE_MVCC_PROPOSAL.md)
+- 多版本在本仓库的落地方案：[20260927_STORAGE_RUN_DIR_PROPOSAL.md](../update/20260927_STORAGE_RUN_DIR_PROPOSAL.md)

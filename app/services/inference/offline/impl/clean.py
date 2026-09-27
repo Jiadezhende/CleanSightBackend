@@ -1284,7 +1284,3 @@ class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
         model.load_state_dict(checkpoint["model_state"], strict=True)
         self._window = int(meta["window"])
         self._model = model
-
-
-# 兼容旧文档/旧测试中使用的 CleanSegmenter 名称；默认指向推荐离线 baseline。
-CleanSegmenter = CleanMSTCNBiLSTMSegmenter

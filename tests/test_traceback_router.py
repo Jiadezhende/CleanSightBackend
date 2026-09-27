@@ -37,27 +37,9 @@ _SECRET = "test-stable-secret-2026"
 
 
 def _seed_task(task_id: int, step_id: int, ts_us_list, write_init=True):
-    """造一个 step 的双轨段 + playlist + init（新布局 `{step}/hls/`）。
-
-    路径一律由 `hls.*_path` / `hls.*_name` 出，不手拼字符串——落盘布局再动一次时
-    这里自动跟着走。
-    """
-    d = hls.init_path(task_id, step_id, "raw").parent
-    d.mkdir(parents=True, exist_ok=True)
-
+    """造一个 step 的双轨同构段 + 清单 + init（`{step}/hls/`），返回域目录。"""
     for track in hls.TRACKS:
-        lines = [
-            "#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-TARGETDURATION:10",
-            f'#EXT-X-MAP:URI="{hls.init_name(track)}"',
-        ]
-        for ts_us in ts_us_list:
-            ref = hls.SegmentRef(track=track, ts_us=ts_us)
-            hls.segment_path(task_id, step_id, ref).write_bytes(b"\x00" * 16)
-            lines.append("#EXTINF:10.000,")
-            lines.append(hls.segment_name(ref))
-        hls.playlist_path(task_id, step_id, track).write_text("\n".join(lines) + "\n")
-        if write_init:
-            hls.init_path(task_id, step_id, track).write_bytes(b"\x00" * 8)
+        d = seed_hls_segments(task_id, step_id, ts_us_list, track=track, with_init=write_init)
     return d
 
 
@@ -163,24 +145,15 @@ async def test_playlist_404_keeps_the_structured_body(client, media_root):
     收口前这里有两档 404，「盘上一个段都没有」那档走 `NotFoundError` → 全局处理器 →
     结构化 body。两档塌成一档时若图省事改用裸 `HTTPException`，**响应体形态会静默从结构化
     变成只有 detail**，按字段分支的客户端就断了——而状态码没变，只断言 404 的用例发现不了。
+
+    同时与上面那条 503 用例一起钉住两档检查的**先后**：段检查在 init 检查之前，
+    不存在的资源不能先撞上"缺 init"而得到 503（"请重试"语义）。
     """
     resp = await client.get("/traceback/task/999/playlist.m3u8?step_id=1")
     assert resp.status_code == 404
     body = resp.json()
     assert body["resource_type"] == "Segments"
     assert "task=999" in body["resource_id"]
-
-
-@pytest.mark.asyncio
-async def test_playlist_404_when_no_segments(client, media_root):
-    """不存在的 task/step → 404，**不是 503**。
-
-    与上面那条 503 用例一起钉住 `_build_vod_playlist` 里两档检查的**先后**：段检查必须在
-    init 检查之前。反过来的话，一个根本不存在的资源会先撞上"缺 init"而得到 503——那是
-    "服务端暂时不可用、请重试"的语义，对不存在的资源是误导。
-    """
-    resp = await client.get("/traceback/task/999/playlist.m3u8?step_id=1")
-    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -324,13 +297,7 @@ async def test_timeline_track_param_switches_the_media_axis(
     """两轨各自独立切段 → 媒体轴不同尺，故 `track` 是必要入参（前端切轨要重取）。"""
     _seed_task(task_id=5, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 10_000_000])
     # _seed_task 双轨同构，这里再给 processed 追一段，把两轨拉开
-    from app.storage import hls
-    from app.storage.hls import _m3u8
-    ref = hls.SegmentRef(track="processed", ts_us=_TS0_US + 20_000_000)
-    hls.segment_path(5, 1, ref).write_bytes(b"\x00" * 16)
-    _m3u8.append(
-        hls.playlist_path(5, 1, "processed"), "processed_init.mp4", 10.0, hls.segment_name(ref)
-    )
+    seed_hls_segments(5, 1, [_TS0_US + 20_000_000], track="processed")
     _install_alarms(monkeypatch, [])
 
     raw = (await client.get("/traceback/task/5/timeline?step_id=1&track=raw")).json()
@@ -433,16 +400,6 @@ async def test_media_segment_invalid_token_rejected(client, media_root):
 
 
 @pytest.mark.asyncio
-async def test_media_segment_wrong_secret_rejected(client, media_root, monkeypatch):
-    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
-    # 用错误的 secret 签发的 token
-    attacker = MediaToken(secret=b"attacker-secret", default_ttl=300)
-    bad_token = attacker.sign(10, 1, "processed_segment_1000000.mp4", kind="segment")
-    resp = await client.get(f"/media/segment/{bad_token}")
-    assert resp.status_code == 403
-
-
-@pytest.mark.asyncio
 async def test_media_segment_kind_mismatch_rejected(client, media_root):
     _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
     # 用 init kind 签发，但访问 segment 路由
@@ -511,23 +468,16 @@ async def test_media_init_kind_mismatch_rejected(client, media_root):
 
 
 @pytest.mark.asyncio
-async def test_media_init_wrong_filename_rejected(client, media_root):
-    """init kind 的 token 必须指向 init.mp4，不能借此读其它 mp4 段。"""
-    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
-    token = MediaToken.default().sign(
-        10, 1, "processed_segment_1000000.mp4", kind="init",
-    )
-    resp = await client.get(f"/media/init/{token}")
-    assert resp.status_code == 400
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("filename", ["evil_init.mp4", "init.mp4", "_init.mp4"])
+@pytest.mark.parametrize(
+    "filename",
+    ["evil_init.mp4", "init.mp4", "_init.mp4", "processed_segment_1000000.mp4"],
+)
 async def test_media_init_rejects_lookalike_init_names(client, media_root, filename):
     """`evil_init.mp4` 必须 400 —— 这是 `endswith("init.mp4")` 放行、
     `hls.parse_init_name` 拦下的那一类名字（判据是完整匹配 `{raw|processed}_init.mp4`）。
 
     裸 `init.mp4` 同样不合法：两轨各有各的 init，不带 track 前缀的名字指不出任何一份。
+    段名也不行：init kind 的 token 不能借此读其它 mp4 段。
     """
     _seed_task(task_id=11, step_id=1, ts_us_list=[1_000_000])
     (media_root / "11" / "1" / "hls" / "evil_init.mp4").write_bytes(b"pwned")

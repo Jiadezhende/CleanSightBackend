@@ -3,7 +3,7 @@
 验证合并后状态机行为与合并前一致：
 - operator.analyze(windows) 消费帧窗（List[FrameDetection]，多流已对齐）、推进共享 _sm
 - operator.judge() 做边沿触发判定
-  - rising edge: 条件首次成立 → 产出 1 条 AlarmInfo
+  - rising edge: 条件首次成立 → 产出 1 条 Alarm
   - sustained: 条件持续成立 → 不再产出
   - falling edge: 条件消失 → 复位
 - operator.finalize() 结算告警（弯曲不足）

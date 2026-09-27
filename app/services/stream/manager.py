@@ -3,7 +3,7 @@
 
 边界层异常处理架构：
 - 业务代码保持纯净（只抛异常，不捕获）
-- 重试逻辑在 GuardedExecutor 框架层
+- 重试由健康监控按心跳周期驱动（restart_stream 失败返回 False，不在本层重试）
 - 异常分类：StreamConnectionError, FFmpegError
 
 读帧模型：decoder 自持读线程（阻塞读 stdout，Windows/POSIX 统一），
@@ -68,7 +68,6 @@ class StreamService:
     def __init__(self):
         self.decoders: Dict[int, FFmpegDecoder] = {}
         self.lock = threading.Lock()
-        self.metrics = {}
 
         # 配置引用
         self.config = _stream_config
@@ -158,11 +157,6 @@ class StreamService:
 
             # 先注册解码器，再启动——健康监控可感知启动失败并触发重连
             self.decoders[task_id] = dec
-            self.metrics[task_id] = {
-                "frames_received": 0,
-                "frames_dropped": 0,
-                "restarts": 0,
-            }
 
             try:
                 dec.start()
@@ -212,9 +206,6 @@ class StreamService:
                 return
 
             logger.info(f"[{task_id}] Stopping stream")
-
-            # 清理metrics
-            self.metrics.pop(task_id, None)
 
         # 2. 异步停止decoder进程（避免阻塞）。terminal 路径：无新 run 复用该 CQ，
         #    迟到帧由 CQ 写门（DRAINING/CLOSED）拦截，故异步安全。
@@ -266,7 +257,6 @@ class StreamService:
             task_id: 运行键（路由标识）
         """
         self.decoders.pop(task_id, None)
-        self.metrics.pop(task_id, None)
         logger.debug(f"[{task_id}] Dead decoder cleaned")
 
     def get_all_task_ids(self) -> set:
@@ -306,11 +296,10 @@ class StreamService:
     @log_call(level=logging.INFO, log_args=False)
     def restart_stream(self, task_id: int, stream_url: str) -> bool:
         """
-        服务层方法：重启流（不使用 GuardedExecutor）
+        服务层方法：重启流（自动重连用，不能阻塞）
 
         职责边界：
-        - GuardedExecutor 仅用于 start_stream()（用户发起，可以等待）
-        - restart_stream() 不使用 GuardedExecutor（自动重连，不能阻塞）
+        - start_stream() 与本方法都不包 GuardedExecutor
         - 健康监控器负责重试逻辑（在自己的时间间隔内）
 
         与 start_stream 的区别：

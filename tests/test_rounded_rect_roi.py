@@ -57,11 +57,16 @@ def test_pixels_outside_rect_unchanged():
 
 
 def test_rect_partially_offscreen_is_clipped():
-    """矩形越过帧边界时不抛异常，仅在交集 ROI 上绘制。"""
-    out = _base_frame()
-    # 左上角越界
-    FixedVisualizer._draw_rounded_rect(out, (-30, -20), (60, 50), (255, 0, 0), 6, 0.7)
-    assert out.shape == (480, 640, 3)
+    """矩形越过帧边界时不抛异常，交集 ROI 上的像素仍与整帧基准一致。"""
+    pt1, pt2, color, radius, alpha = (-30, -20), (60, 50), (255, 0, 0), 6, 0.7  # 左上角越界
+
+    roi_out = _base_frame()
+    FixedVisualizer._draw_rounded_rect(roi_out, pt1, pt2, color, radius, alpha)
+
+    ref_out = _reference_full_frame(_base_frame(), pt1, pt2, color, radius, alpha)
+
+    assert np.array_equal(roi_out, ref_out)
+    assert not np.array_equal(roi_out, _base_frame())  # 交集内确有绘制（非整段跳过）
 
 
 def test_fully_offscreen_is_noop():

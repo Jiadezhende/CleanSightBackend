@@ -21,6 +21,7 @@
 integration_tests/
 ├── test_single_client.py   # 单客户端测试（场景 1-9）
 ├── test_multi_client.py    # 多客户端并发测试（并发跑场景 1）
+├── test_offline_job_subprocess.py  # 离线作业服务真起 CLI 子进程（无需后端 / RTSP / DB）
 ├── utils.py                # 共享工具（FFmpegController, APIClient, DatabaseHelper）
 ├── cleanup_processes.py    # 清理残留进程的工具脚本
 └── logs/                   # 多客户端测试子进程日志

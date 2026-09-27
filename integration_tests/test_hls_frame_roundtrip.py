@@ -1,22 +1,17 @@
 """
-HLS 帧反查（storage.hls 读侧 + FrameTracker）端到端 round-trip 测试
+HLS 帧反查（storage.hls 读侧）端到端 round-trip 测试
 
 不需要后端服务、RTSP、数据库或推理引擎，只需 FFmpeg：
 直接调 `hls.insert_segment` 走真实写路径落 fMP4 段 + `.idx` sidecar 到 `{step}/hls/`，
-再用 `hls.iter_frames` / `FrameTracker.find` 按 ts 读回，逐帧比对。
-
-**造数与读回都已切到 `app.storage.hls`**（原先是 `HLSPersistenceStrategy` 写平铺布局
-+ `Timeline` 读）。`Timeline` 已退役、零调用点、读的还是平铺布局，为它单独再铺一套数据只是
-给一份等着删的实现续命；区间扫帧的那几项（T1–T5、T11–T13）改成直接验数据层的
-`hls.iter_frames`——它们抓的「ts ↔ 像素错配」在新实现上同样是唯一抓得到的手段。
+再用 `hls.iter_frames` / `hls.read_segment` 按 ts 读回，逐帧比对。
 
 **这是唯一能抓「ts ↔ 像素错配」的手段**：帧内中心色块编码了 frame_id
 （三通道 16 阶量化，抗 H.264 有损压缩），读回后解码 id 与期望 gid 逐帧比。
-`tests/test_frame_tracker_boundary.py` 用 seam 覆盖了同一套边界数学但不起
+`tests/test_storage_hls.py` 用 seam 覆盖了同一套边界数学但不起
 ffmpeg，抓不到「解码出来的像素是不是那一帧」——两者互补，都要跑。
 
 用法:
-    python integration_tests/test_frame_tracker_roundtrip.py [--task_id 9900002] [--keep]
+    python integration_tests/test_hls_frame_roundtrip.py [--task_id 9900002] [--keep]
 
 参数:
     --task_id <int>  测试任务 ID（默认 9900002，避开真实数据）
@@ -28,15 +23,10 @@ ffmpeg，抓不到「解码出来的像素是不是那一帧」——两者互�
     T3  区间起点恰为段首帧                        （修复前同样被跳过：ts_us 截断）
     T4  跨段区间帧数精确                          （修复前 221 帧只出 171）
     T5  越界区间返回空
-    T6  find 单点像素命中                         （修复前 ValueError）
-    T7  find 多点跨段全命中                       （修复前 ValueError）
-    T8  find 返回序为 ts 升序（契约，非 bug）
-    T9  find 重复 ts 产出两帧
-    T10 find 漂移 ts 抛 ValueError（位级精确契约）
-    T11 缺 sidecar 只跳过该段、其余照常                （修复前整条迭代中断）
-    T12 返回帧可写（下游 cv2 原地操作）           （修复前 np.frombuffer 只读）
-    T13 自定义尺寸生效
-    T14 processed 轨直接 ValueError（新实现只服务 raw 轨）
+    T6  缺 sidecar 只跳过该段、其余照常                （修复前整条迭代中断）
+    T7  返回帧可写（下游 cv2 原地操作）           （修复前 np.frombuffer 只读）
+    T8  自定义尺寸生效
+    T9  processed 轨直接 ValueError（只服务 raw 轨）
 """
 
 from __future__ import annotations
@@ -54,7 +44,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.domain.frame import Frame
-from app.services.inference.offline.frame_tracker import FrameTracker
 from app.settings import settings
 from app.storage import hls
 
@@ -152,9 +141,6 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
             width=width, height=height, start_ts=start_ts, end_ts=end_ts,
         )
 
-    def tracker() -> FrameTracker:
-        return FrameTracker(task_id, STEP_ID)
-
     def t1_full() -> str:
         frames = list(scan())
         assert len(frames) == TOTAL, f"帧数 {len(frames)} != {TOTAL}"
@@ -189,43 +175,7 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         assert list(scan(BASE_TS - 100, BASE_TS - 50)) == [], "早于首段的区间应为空"
         return "越界（两侧）均返回空"
 
-    def t6_find_single() -> str:
-        g = 2 * FRAMES_PER_SEG + 33
-        frames = list(tracker().find([ts_of(g)], W, H))
-        assert len(frames) == 1, f"应得 1 帧，实得 {len(frames)}"
-        assert frames[0].timestamp == ts_of(g), "ts 不匹配"
-        assert decode_id(frames[0].frame) == g, "像素 id 不匹配 —— 取到了别的帧"
-        return "单点反查像素命中"
-
-    def t7_find_multi() -> str:
-        gids = [10, 200, 455, 900, 1333, 1799]
-        frames = list(tracker().find([ts_of(g) for g in gids], W, H))
-        assert [decode_id(f.frame) for f in frames] == gids, "像素 id 不匹配"
-        return f"{len(gids)} 点跨段全命中"
-
-    def t8_find_order() -> str:
-        gids = [900, 10, 1333]
-        ids = [decode_id(f.frame) for f in tracker().find([ts_of(g) for g in gids], W, H)]
-        assert ids == sorted(gids), f"应按 ts 升序产出，实得 {ids}"
-        return "按 ts 升序（非入参序）—— 调用方须按 frame.timestamp 对号入座"
-
-    def t9_find_duplicate() -> str:
-        g = 500
-        frames = list(tracker().find([ts_of(g), ts_of(g)], W, H))
-        assert len(frames) == 2, f"重复 ts 应得 2 帧，实得 {len(frames)}"
-        assert all(decode_id(f.frame) == g for f in frames), "像素 id 不匹配"
-        return "重数各产出一帧"
-
-    def t10_find_drift() -> str:
-        for eps in (1e-6, 0.02):
-            try:
-                list(tracker().find([ts_of(300) + eps], W, H))
-            except ValueError:
-                continue
-            raise AssertionError(f"漂移 {eps}s 的 ts 应抛 ValueError，实际静默通过")
-        return "位级精确：漂移 1µs 即报错，不做近似匹配"
-
-    def t11_missing_sidecar() -> str:
+    def t6_missing_sidecar() -> str:
         victim = sorted(hls_dir(task_id).glob("raw_segment_*.idx"))[6]
         bak = victim.with_suffix(".idx.bak")
         victim.rename(bak)
@@ -238,18 +188,18 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         assert got == exp, f"应剩 {len(exp)} 帧，实得 {len(got)}（缺一段索引不该打断整条迭代）"
         return f"仅丢该段 {FRAMES_PER_SEG} 帧，其余 {len(exp)} 帧照常"
 
-    def t12_writeable() -> str:
+    def t7_writeable() -> str:
         f = next(iter(scan(ts_of(0), ts_of(0))))
         assert f.frame.flags.writeable, "返回的 ndarray 只读，下游 cv2 原地操作会抛错"
         cv2.rectangle(f.frame, (0, 0), (9, 9), (0, 0, 255), -1)  # 真做一次原地写
         return "可写，cv2 原地绘制通过"
 
-    def t13_scale() -> str:
+    def t8_scale() -> str:
         f = next(iter(scan(ts_of(0), ts_of(0), width=320, height=320)))
         assert f.frame.shape == (320, 320, 3), f"shape={f.frame.shape}"
         return "scale=320:320 生效（不保持宽高比，调用方自负）"
 
-    def t14_processed_rejected() -> str:
+    def t9_processed_rejected() -> str:
         """解码只服务 raw 轨：processed 不落 sidecar，给不出带墙钟 ts 的帧。
         「这条路不通」必须与「这段没数据」分得开，故是 ValueError 而非空迭代器。"""
         ref = hls.SegmentRef(track="processed", ts_us=hls.ts_to_us(ts_of(0)))
@@ -265,15 +215,10 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         ("T3  区间起点恰为段首帧", t3_exact_seg_start),
         ("T4  跨段区间", t4_cross_seg),
         ("T5  越界区间", t5_out_of_range),
-        ("T6  find 单点", t6_find_single),
-        ("T7  find 多点跨段", t7_find_multi),
-        ("T8  find 返回序契约", t8_find_order),
-        ("T9  find 重复 ts", t9_find_duplicate),
-        ("T10 find ts 漂移", t10_find_drift),
-        ("T11 缺 sidecar 降级", t11_missing_sidecar),
-        ("T12 返回帧可写性", t12_writeable),
-        ("T13 自定义尺寸", t13_scale),
-        ("T14 processed 轨拒绝", t14_processed_rejected),
+        ("T6  缺 sidecar 降级", t6_missing_sidecar),
+        ("T7  返回帧可写性", t7_writeable),
+        ("T8  自定义尺寸", t8_scale),
+        ("T9  processed 轨拒绝", t9_processed_rejected),
     ]
 
 
@@ -297,7 +242,7 @@ def run(task_id: int) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="FrameTracker 端到端 round-trip 测试")
+    parser = argparse.ArgumentParser(description="HLS 帧反查端到端 round-trip 测试")
     parser.add_argument("--task_id", type=int, default=9900002,
                         help="测试任务 ID（默认 9900002，避开真实数据）")
     parser.add_argument("--keep", action="store_true",
@@ -309,7 +254,7 @@ def main() -> None:
         seed(args.task_id)
         ok = run(args.task_id)
     finally:
-        # 不留残迹：SegmentFinder.list_task_ids 会把它当成真实任务列出来
+        # 不留残迹：storage.tasks.list_task_ids 会把它当成真实任务列出来
         if not args.keep and target.exists():
             shutil.rmtree(target)
             print(f"已清理 {target}")
