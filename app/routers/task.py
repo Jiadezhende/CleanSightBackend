@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBAlarm, DBTask
 from app.services.client.manager import client_manager
-from app.storage import hls
+from app.storage import hls, runs
 from app.storage import tasks as step_tasks
 from app.utils.exceptions import DatabaseError
 
@@ -192,7 +192,8 @@ def list_live_tasks():
     - `task_id`   → `WS /ai/video?task_id={task_id}`：锁定**这一次 run**，run 结束即止
     - `source_ip` → `WS /ai/video?client_id={source_ip}`：跟随该**点位**当前 run，换任务自动跟
 
-    `step_id` 仅供展示当前洗消阶段，不参与画面路由。
+    `step_id` 仅供展示当前洗消阶段，不参与画面路由。`run_id` 是这次 run 的身份，回放 / 时间轴
+    带上它即锁定这一次 run。
 
     注：本接口是 admin 页 `/admin-f3m8/clients` 的大屏版——同一份注册表快照，
     去掉队列深度等运维字段。
@@ -200,18 +201,20 @@ def list_live_tasks():
     # 注册表是 COW 不可变 dict：原子读引用后迭代无需加锁
     tasks = [
         {
-            "task_id": cq.task_id,
+            "task_id": cq.run.task_id,
             "source_ip": cq.source_ip,
-            "step_id": cq.step_id,
+            "step_id": cq.run.step_id,
+            "run_id": cq.run.run_id,
         }
         for cq in client_manager.snapshot().values()
+        if cq.run is not None
     ]
     tasks.sort(key=lambda t: t["task_id"])
     return {"total": len(tasks), "tasks": tasks}
 
 
 def _summarise_steps(task_id: int) -> List[dict]:
-    """该 task 下**有段**的 step 摘要，按 step_id 升序。
+    """该 task 下**有段**的 step 摘要，按 step_id 升序。每个 step 取最新可见 run（`run_id` 随之给出）。
 
     时间戳取**双轨并集**（与 timeline 的 start_ms/end_ms 同口径）：两轨段边界不一定对齐，
     实测有过 20+ 秒的差，故它表达的是「该 step 有画面的时间跨度」，不等于任一单轨的播放范围。
@@ -223,11 +226,12 @@ def _summarise_steps(task_id: int) -> List[dict]:
     """
     steps: List[dict] = []
     for step_id in step_tasks.list_step_ids(task_id):
+        run = runs.query(task_id, step_id)
+        if run is None:
+            continue
         # 双轨各读一次清单（清单是"有哪些段"的唯一真源；原先那次双轨共用的 iterdir 会把
         # 在途段与登记失败的段一并算进来）
-        by_track = {
-            t: hls.list_segments(task_id, step_id, t) for t in hls.TRACKS
-        }
+        by_track = {t: hls.list_segments(run, t) for t in hls.TRACKS}
         tracks = [t for t in hls.TRACKS if by_track[t]]
         if not tracks:
             continue
@@ -235,6 +239,7 @@ def _summarise_steps(task_id: int) -> List[dict]:
         steps.append(
             {
                 "step_id": step_id,
+                "run_id": run.run_id,
                 "tracks": tracks,
                 "start_ms": min(all_ts) // 1000,
                 "last_segment_ms": max(all_ts) // 1000,
@@ -267,16 +272,16 @@ def list_history_tasks():
     `last_segment_ms` 是最后一段的**起点**，不是结束时刻（差一个段长）；精确时长
     取 timeline 的 `duration_ms`（按 playlist EXTINF 算）。
 
-    实现是两阶段，避免每次请求全盘扫段：目录 mtime 粗排挑候选 → 只对候选深扫拿
-    真实段时间与轨道，收满 10 条即停。mtime 只用于挑候选，对外时间戳一律取真实
-    段 ts。粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个
+    实现是两阶段，避免每次请求全盘扫段：按最近一次 run 的开始时刻（最大 run_id）粗排挑候选
+    → 只对候选深扫拿真实段时间与轨道，收满 10 条即停。粗排只用于挑候选，对外时间戳一律取
+    真实段 ts。粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个
     刚停的——大屏下一轮轮询自愈，不加锁。
     """
     active_ids = set(client_manager.snapshot().keys())
 
     tasks: List[dict] = []
     scanned = 0
-    for task_id in step_tasks.list_task_ids(order="mtime"):
+    for task_id in step_tasks.list_task_ids(order="recent"):
         if len(tasks) >= _HISTORY_LIMIT or scanned >= _HISTORY_SCAN_CAP:
             break
         if task_id in active_ids:  # 还在跑 → 不算历史
@@ -296,7 +301,7 @@ def list_history_tasks():
             }
         )
 
-    # 粗筛序基于 mtime（近似），最终顺序按真实段时间戳重排一次
+    # 粗筛序基于 run 开始时刻（近似），最终顺序按真实段时间戳重排一次
     tasks.sort(key=lambda t: (t["latest_ms"], t["task_id"]), reverse=True)
 
     source_ips = _fetch_source_ips([t["task_id"] for t in tasks])

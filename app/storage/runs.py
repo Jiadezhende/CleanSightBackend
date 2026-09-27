@@ -3,6 +3,7 @@
     run = runs.allocate(task_id, step_id)           # /api/start 在 lock_for 内调用
     run = runs.query(task_id, step_id)              # 最新可见 run；None → 404
     run = runs.query(task_id, step_id, run_id)      # 点名的 run；目录不在 → None
+    runs.successor(run)                             # 同 step 下一个 run 的 run_id；最新的 → None
 
 硬约束：
 
@@ -18,7 +19,7 @@
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import Optional
 
 from app.domain.run import RunIdentity
 
@@ -26,23 +27,7 @@ from . import _root
 from .hls import _layout as _hls_layout
 from .inference import _layout as _inference_layout
 
-__all__ = ["allocate", "query"]
-
-
-def _run_ids(task_id: int, step_id: int) -> List[int]:
-    """该 step 下的 run 目录 id，升序。旧布局的 `hls/` / `inference/` 不是数字，天然跳过。"""
-    step_dir = _root.path(task_id, step_id)
-    try:
-        entries = list(step_dir.iterdir())
-    except OSError:
-        return []
-    ids = [
-        run_id
-        for entry in entries
-        if (run_id := _root.dir_name_to_int(entry.name)) is not None and entry.is_dir()
-    ]
-    ids.sort()
-    return ids
+__all__ = ["allocate", "query", "successor"]
 
 
 def allocate(task_id: int, step_id: int) -> RunIdentity:
@@ -53,7 +38,7 @@ def allocate(task_id: int, step_id: int) -> RunIdentity:
     Raises:
         OSError: 建目录失败（含 run 目录已存在——那说明分配没有串行）。
     """
-    existing = _run_ids(task_id, step_id)
+    existing = _root.run_ids(task_id, step_id)
     run_id = time.time_ns() // 1000
     if existing:
         run_id = max(run_id, existing[-1] + 1)
@@ -76,8 +61,17 @@ def query(task_id: int, step_id: int, run_id: Optional[int] = None) -> Optional[
     if run_id is not None:
         run = RunIdentity(task_id=task_id, step_id=step_id, run_id=run_id)
         return run if _root.run_path(run).is_dir() else None
-    for candidate in reversed(_run_ids(task_id, step_id)):
+    for candidate in reversed(_root.run_ids(task_id, step_id)):
         run = RunIdentity(task_id=task_id, step_id=step_id, run_id=candidate)
         if _visible(run):
             return run
     return None
+
+
+def successor(run: RunIdentity) -> Optional[int]:
+    """同 step 下紧接着 `run` 分配的那个 run 的 `run_id`；`run` 是最新的则 None。
+
+    不做可见判断：取代关系看的是分配顺序，与有没有产物无关。
+    """
+    later = [r for r in _root.run_ids(run.task_id, run.step_id) if r > run.run_id]
+    return later[0] if later else None

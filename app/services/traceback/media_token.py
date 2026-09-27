@@ -2,7 +2,7 @@
 媒体访问 token：HMAC-SHA256 + 短 TTL 签名
 
 设计目标：
-- /media/{kind}/{token} 路由不暴露文件系统路径，token 编码 task_id/step_id/filename/expiry
+- /media/{kind}/{token} 路由不暴露文件系统路径，token 编码 task_id/step_id/run_id/filename/expiry
 - 默认 TTL 300s，避免被无限期分发
 - 不引入外部缓存：服务端仅做 HMAC 校验，无 token 黑名单
 - secret 来自 settings.media_token_secret；为空时启动一次后随机生成进程内临时 secret，
@@ -10,7 +10,8 @@
 
 Token 结构：
     payload_b64.signature_b64
-    payload = JSON({"t": task_id, "s": step_id, "f": filename, "k": kind, "e": expiry_epoch})
+    payload = JSON({"t": task_id, "s": step_id, "r": run_id, "f": filename, "k": kind, "e": expiry_epoch})
+    "r" 可选：缺省时媒体路由按该 step 最新可见 run 解析（兼容不带它签发的 token）
     signature = HMAC-SHA256(secret, payload_bytes)
 """
 
@@ -45,6 +46,7 @@ class MediaTokenPayload:
     filename: str
     kind: str
     expiry: int
+    run_id: Optional[int] = None
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -119,6 +121,7 @@ class MediaToken:
         kind: MediaKind,
         ttl: Optional[int] = None,
         now: Optional[int] = None,
+        run_id: Optional[int] = None,
     ) -> str:
         """签发 token。
 
@@ -129,6 +132,7 @@ class MediaToken:
             kind: "segment" 或 "init"
             ttl: 有效期（秒），默认取构造时的 default_ttl
             now: 当前时间（epoch 秒，用于测试注入）
+            run_id: 锁定哪个 run；None 时不写进 payload（消费方按最新可见 run 解析）
 
         Returns:
             URL-safe token 字符串
@@ -154,6 +158,8 @@ class MediaToken:
             "k": kind,
             "e": expiry,
         }
+        if run_id is not None:
+            payload["r"] = int(run_id)
         payload_bytes = json.dumps(
             payload, separators=(",", ":"), ensure_ascii=False, sort_keys=True
         ).encode("utf-8")
@@ -213,4 +219,5 @@ class MediaToken:
             filename=str(payload["f"]),
             kind=str(payload["k"]),
             expiry=int(payload["e"]),
+            run_id=int(payload["r"]) if payload.get("r") is not None else None,
         )

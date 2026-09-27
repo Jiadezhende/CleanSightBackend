@@ -4,8 +4,10 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from app.domain.run import RunIdentity
 from app.domain.temporal import TemporalEvent, TemporalSegment
 from app.main import app
+from app.storage import _root
 from app.storage import inference as inference_store
 from factories import seed_hls_segments, make_run
 
@@ -56,6 +58,24 @@ async def test_segments_on_media_axis_sorted_and_gap_snapped(client, tmp_storage
     ]
     assert d["items"][0]["producer"] == "CleanMSTCNBiLSTMSegmenter"
     assert d["items"][0]["conf"] == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_run_id_selects_that_runs_timeline_and_facts(client, tmp_storage):
+    """hls 时间轴与 temporal.jsonl 取自同一个 run：点名旧 run 拿旧结果，缺省拿最新 run。"""
+    old = make_run(1, 2, run_id=_TS0_US)
+    _seed_gapped_raw()
+    inference_store.write_temporal(old, [_seg("old", T0 + 1.0, T0 + 2.0)])
+    new = RunIdentity(1, 2, _TS0_US + 100_000_000)       # 同 step 换代：新 run 目录由分配者建
+    _root.run_path(new).mkdir()
+    seed_hls_segments(1, 2, [_TS0_US + 100_000_000])     # 落进最新的 run，即 new
+    inference_store.write_temporal(new, [_seg("new", T0 + 101.0, T0 + 102.0)])
+
+    r_old = (await client.post("/ai/temporal", json=_body(run_id=old.run_id))).json()
+    r_latest = (await client.post("/ai/temporal", json=_body())).json()
+
+    assert (r_old["run_id"], [i["label"] for i in r_old["items"]]) == (old.run_id, ["old"])
+    assert (r_latest["run_id"], [i["label"] for i in r_latest["items"]]) == (new.run_id, ["new"])
 
 
 @pytest.mark.asyncio

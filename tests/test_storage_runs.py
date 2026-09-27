@@ -214,3 +214,16 @@ class TestLegacyReader:
         with pytest.raises(TypeError):
             write()
         assert list(tmp_storage.iterdir()) == []
+
+
+class TestSuccessor:
+    def test_next_allocated_run_regardless_of_visibility(self, tmp_storage, monkeypatch):
+        a = _alloc(monkeypatch, 1, 2, 10)
+        b = _alloc(monkeypatch, 1, 2, 20)
+        _alloc(monkeypatch, 1, 2, 30)
+        _alloc(monkeypatch, 1, 3, 15)            # 别的 step 不算
+        assert runs.successor(a) == 20
+        assert runs.successor(b) == 30
+
+    def test_latest_run_has_no_successor(self, tmp_storage, monkeypatch):
+        assert runs.successor(_alloc(monkeypatch, 1, 2, 10)) is None

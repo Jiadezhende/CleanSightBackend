@@ -5,7 +5,7 @@
 | 端点 | 数据来源 | 说明 |
 |------|---------|------|
 | `WS /ai/video` | 内存（各 run 的渲染队列） | 某一路 run 的**实时**渲染画面（叠加检测框的 JPEG 帧），不落库、不可回放 |
-| `POST /ai/temporal` | 落盘 `{step}/inference/temporal.jsonl` | 某个 step 的时序分析结果（目前是离线分割段），时间已换算为媒体刻度 |
+| `POST /ai/temporal` | 落盘 `{step}/{run_id}/inference/temporal.jsonl` | 某个 step 一个 run 的时序分析结果（目前是离线分割段），时间已换算为媒体刻度 |
 
 ---
 
@@ -110,19 +110,23 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 |------|------|------|------|
 | `task_id` | int | 是 | 任务 id |
 | `step_id` | int | 是 | 洗消步骤 id |
+| `run_id` | int | 否 | 锁定哪个 run；缺省 = 该 step 最新可见 run（见 [README › run 定位](README.md#run-定位可选-run_id)）。须与播放器加载的 run 一致 |
 | `type` | string | 是 | 事实形状。当前只接受 `"segment"`（区间：一段时间里的一个动作） |
 | `track` | string | 否 | `raw`（默认）/ `processed`。决定换算到哪条轨的媒体轴，须与播放器加载的轨一致 |
 
 ```jsonc
-{"task_id": 42, "step_id": 2, "type": "segment", "track": "raw"}
+{"task_id": 42, "step_id": 2, "run_id": 1751798990000000, "type": "segment", "track": "raw"}
 ```
 
 ### 响应 `200`
+
+HLS 时间轴与 `temporal.jsonl` 取自同一个 run，不会出现新录像配旧结果。
 
 ```jsonc
 {
   "task_id": 42,
   "step_id": 2,
+  "run_id": 1751798990000000,           // 实际读的 run
   "type": "segment",
   "track": "raw",
   "media_duration_ms": 612340,          // 该轨媒体轴总长（Σ EXTINF）= <video>.duration × 1000
@@ -151,11 +155,13 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 
 | 状态 | 条件 |
 |------|------|
-| 404 | 该 step 的 `track` 轨没有已登记的段（`resource_type: "Segments"`），body 同 `/traceback` playlist 的 404 |
+| 404 | 所解析 run 的 `track` 轨没有已登记的段（`resource_type: "Segments"`；缺省 `run_id` 时含该 step 无可见 run），body 同 `/traceback` playlist 的 404 |
+| 404 | 显式 `run_id` 的目录不存在（`resource_type: "Run"`） |
 | 422 | 缺字段、`type` 不是 `"segment"`、`track` 不是 `raw`/`processed` |
 
 ### 前端坑点
 
 - **切轨要重取**：两条轨各自切段，同一时刻在两轨上的媒体刻度不同。
+- **带与 playlist 相同的 `run_id`**：不带时本端点与 playlist 各自解析最新 run，中间同 step 起了新 run 就会把别的 run 的分段画在当前录像上，见 [traceback › 前端坑点](traceback.md#前端坑点)。
 - **落在录制停顿里的时刻**吸附到停顿后第一段的段首（停顿在媒体轴上宽度为零）。
 

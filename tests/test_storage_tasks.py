@@ -6,7 +6,6 @@
 本包只负责「名字与定位」，故这里断言的全是路径与目录事实——不涉及任何产物的内容格式。
 """
 
-import os
 from pathlib import Path
 
 import pytest
@@ -32,15 +31,11 @@ def _seed_step(
     return domain_dir.parent
 
 
-def _set_mtime(step_dir: Path, ts: float) -> None:
-    """把 step 目录**及其所有域子目录**的 mtime 钉到 ts。
-
-    两层都要钉：`ids(order="mtime")` 取的是两者的最大值（产物写进 `hls/` 只更新域目录，
-    step 目录不动），只钉一层会被另一层的"当前时刻"盖过去。
-    """
-    for target in (step_dir, *step_dir.iterdir()):
-        if target.is_dir():
-            os.utime(target, (ts, ts))
+def _seed_run(root: Path, task_id: int, step_id: int, run_id: int) -> Path:
+    """建 `{root}/{task_id}/{step_id}/{run_id}/`，返回 run 目录。"""
+    run_dir = root / str(task_id) / str(step_id) / str(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
 
 
 # ---------------------------------------------------------------------------
@@ -197,39 +192,31 @@ class TestIds:
     def test_missing_root_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "nope"))
         assert tasks.list_task_ids() == []
-        assert tasks.list_task_ids(order="mtime") == []
+        assert tasks.list_task_ids(order="recent") == []
 
-    def test_mtime_order_is_descending(self, tmp_storage):
-        _set_mtime(_seed_step(tmp_storage, 1, 1), 1_700_000_100)
-        _set_mtime(_seed_step(tmp_storage, 2, 1), 1_700_000_900)
-        assert tasks.list_task_ids(order="mtime") == [2, 1]
+    def test_recent_order_is_by_latest_run_id(self, tmp_storage):
+        _seed_run(tmp_storage, 1, 1, 100)
+        _seed_run(tmp_storage, 2, 1, 900)
+        assert tasks.list_task_ids(order="recent") == [2, 1]
 
-    def test_mtime_follows_domain_subdir_not_just_step_dir(self, tmp_storage):
-        """产物写进 `{step}/{domain}/` 只更新域目录的 mtime，step 目录纹丝不动。
+    def test_recent_order_takes_max_over_steps_and_runs(self, tmp_storage):
+        _seed_run(tmp_storage, 1, 1, 500)
+        _seed_run(tmp_storage, 1, 2, 950)                 # task 1 的另一个 step 更晚
+        _seed_run(tmp_storage, 2, 1, 900)
+        _seed_run(tmp_storage, 2, 1, 100)
+        assert tasks.list_task_ids(order="recent") == [1, 2]
 
-        这条盯的是目录隔离的连带退化：若排序只 stat step 目录，该值会退化成「首次落盘
-        时刻」，一个刚写过新段的 task 会被排到后面，大屏历史的「最近」就失准了。
-        """
-        stale = _seed_step(tmp_storage, 1, 1)
-        fresh = _seed_step(tmp_storage, 2, 1)
-        _set_mtime(stale, 1_700_000_100)
-        _set_mtime(fresh, 1_700_000_100)  # 两个 step 目录本身同龄
+    def test_recent_order_keeps_task_without_runs_last(self, tmp_storage):
+        """没有 run 目录的 task（空目录 / 只有旧布局）排序键取 0（排最后），但**仍保留在结果里**
+        ——它是否该丢弃由调用方深扫时决定，不是本域的判断。"""
+        _seed_run(tmp_storage, 1, 1, 100)
+        _seed_step(tmp_storage, 2, 1)                     # 旧布局 {step}/hls/
+        assert tasks.list_task_ids(order="recent") == [1, 2]
 
-        # 只让 task 2 的 hls/ 域目录"刚写过东西"——step 目录不碰
-        os.utime(fresh / "hls", (1_700_000_900, 1_700_000_900))
-        assert tasks.list_task_ids(order="mtime") == [2, 1]
-
-    def test_mtime_order_keeps_task_without_steps_last(self, tmp_storage):
-        """无 step 子目录的 task 排序键取 0（排最后），但**仍保留在结果里**——
-        它是否该丢弃由调用方深扫时决定，不是本域的判断。"""
-        _set_mtime(_seed_step(tmp_storage, 1, 1), 1_700_000_100)
-        (tmp_storage / "2").mkdir()
-        assert tasks.list_task_ids(order="mtime") == [1, 2]
-
-    def test_mtime_tie_breaks_on_larger_task_id(self, tmp_storage):
+    def test_recent_tie_breaks_on_larger_task_id(self, tmp_storage):
         for task_id in (1, 2):
-            _set_mtime(_seed_step(tmp_storage, task_id, 1), 1_700_000_100)
-        assert tasks.list_task_ids(order="mtime") == [2, 1]
+            _seed_run(tmp_storage, task_id, 1, 100)
+        assert tasks.list_task_ids(order="recent") == [2, 1]
 
     def test_invalid_order_raises(self, tmp_storage):
         """传错 order 说明调用方对返回顺序有预期，静默按默认走比报错更坏。"""

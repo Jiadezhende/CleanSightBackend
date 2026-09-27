@@ -8,7 +8,7 @@
 import pytest
 
 from app.services.utils.media_timeline import GAP_THRESHOLD_MS, MediaTimeline
-from factories import seed_hls_segments
+from factories import make_run, seed_hls_segments
 
 TASK_ID = 1
 STEP_ID = 1
@@ -21,7 +21,7 @@ def _seed(items, **kw):
 
 
 def _load(track="raw"):
-    return MediaTimeline.load(TASK_ID, STEP_ID, track)
+    return MediaTimeline.load(make_run(TASK_ID, STEP_ID), track)
 
 
 def _contiguous(n: int, extinf_s: float = 10.0):

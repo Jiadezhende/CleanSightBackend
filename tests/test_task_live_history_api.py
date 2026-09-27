@@ -20,6 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from doubles import FakeDB
 from factories import make_cq, seed_hls_segments
+from app.storage import runs
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +87,8 @@ class TestLiveList:
         _install_registry(
             monkeypatch,
             [
-                make_cq(task_id=202, step_id=1, source_ip="10.0.0.2"),
-                make_cq(task_id=101, step_id=2, source_ip="10.0.0.1"),
+                make_cq(task_id=202, step_id=1, run_id=7, source_ip="10.0.0.2"),
+                make_cq(task_id=101, step_id=2, run_id=9, source_ip="10.0.0.1"),
             ],
         )
 
@@ -96,8 +97,8 @@ class TestLiveList:
         assert payload["total"] == 2
         # task_id / source_ip 即 WS /ai/video 的两种入参；step_id 供展示当前阶段
         assert payload["tasks"] == [
-            {"task_id": 101, "source_ip": "10.0.0.1", "step_id": 2},
-            {"task_id": 202, "source_ip": "10.0.0.2", "step_id": 1},
+            {"task_id": 101, "source_ip": "10.0.0.1", "step_id": 2, "run_id": 9},
+            {"task_id": 202, "source_ip": "10.0.0.2", "step_id": 1, "run_id": 7},
         ]
 
 
@@ -133,6 +134,7 @@ class TestHistoryList:
         assert payload["tasks"][0]["steps"] == [
             {
                 "step_id": 1,
+                "run_id": runs.query(101, 1).run_id,
                 "tracks": ["raw"],
                 "start_ms": 1000,
                 "last_segment_ms": 1000,

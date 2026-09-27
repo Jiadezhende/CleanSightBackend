@@ -176,7 +176,8 @@
     {
       "task_id": 101,                 // → WS /ai/video?task_id=101
       "source_ip": "10.0.0.1",        // → WS /ai/video?client_id=10.0.0.1
-      "step_id": 2                    // 当前洗消阶段，仅供展示，不参与画面路由
+      "step_id": 2,                   // 当前洗消阶段，仅供展示，不参与画面路由
+      "run_id": 1700000000000000      // 这次 run 的身份；回放 / 时间轴带上它即锁定这次 run
     }
   ]
 }
@@ -189,6 +190,7 @@
 | `tasks[].task_id` | int | 运行键；作 `WS /ai/video?task_id=` 入参 |
 | `tasks[].source_ip` | string | 点位标识（= `client_id`）；作 `WS /ai/video?client_id=` 入参 |
 | `tasks[].step_id` | int | 当前洗消阶段，**仅供展示**，不参与画面路由 |
+| `tasks[].run_id` | int | 当前这次 run 的身份（见 [README › run 定位](README.md#run-定位可选-run_id)）；拉该 run 的回放 / 时间轴时作 `run_id` 入参 |
 
 **排序**：按 `task_id` 升序。
 
@@ -230,8 +232,8 @@
       "source_ip": "10.0.0.1",              // DB 补；DB 不可用或表里无此任务 → null
       "latest_ms": 1700000600000,           // 最近一次有画面的时刻，也是本清单的排序键
       "steps": [                            // 时间字段只在 step 粒度给，见下方说明
-        { "step_id": 1, "tracks": ["raw", "processed"], "start_ms": 1700000000000, "last_segment_ms": 1700000580000 },
-        { "step_id": 2, "tracks": ["raw"],              "start_ms": 1700000590000, "last_segment_ms": 1700000600000 }
+        { "step_id": 1, "run_id": 1699999998000000, "tracks": ["raw", "processed"], "start_ms": 1700000000000, "last_segment_ms": 1700000580000 },
+        { "step_id": 2, "run_id": 1700000588000000, "tracks": ["raw"],              "start_ms": 1700000590000, "last_segment_ms": 1700000600000 }
       ]
     }
   ]
@@ -244,8 +246,9 @@
 | `tasks[].task_id` | int | 任务运行键 |
 | `tasks[].source_ip` | string \| null | 点位标识，由 DB `clean_task` 补；**DB 不可用或表里无此任务 → null**（清单本身照常返回，不 503） |
 | `tasks[].latest_ms` | int | `max(steps[].last_segment_ms)`，epoch **毫秒**；清单排序键 + 「这是什么时候的任务」的展示值 |
-| `tasks[].steps` | array | 该任务已落盘的 step，按 `step_id` 升序；两轨都无段的 step 不进清单 |
+| `tasks[].steps` | array | 该任务已落盘的 step，按 `step_id` 升序。每个 step **只描述其最新可见 run**；该 run 两轨都无段的 step 不进清单 |
 | `tasks[].steps[].step_id` | int | 回放入参：`playlist.m3u8?step_id=` |
+| `tasks[].steps[].run_id` | int | 本条摘要描述的那个 run（该 step 最新可见 run）；回放入参：`playlist.m3u8?run_id=`、`timeline?run_id=` |
 | `tasks[].steps[].tracks` | array | 该 step **实际落盘**的轨道，按 `["raw", "processed"]` 顺序；至少一个 |
 | `tasks[].steps[].start_ms` | int | 该 step 最早的段开始时间，epoch **毫秒**，双轨并集 |
 | `tasks[].steps[].last_segment_ms` | int | 该 step 最晚的**段开始**时间，epoch **毫秒**，双轨并集；**不是结束时刻** |
@@ -255,8 +258,8 @@
 **接历史画面**（详见 [traceback.md](traceback.md)）：
 
 ```
-GET /traceback/task/{task_id}/playlist.m3u8?step_id={step_id}&track={track}
-GET /traceback/task/{task_id}/timeline?step_id={step_id}
+GET /traceback/task/{task_id}/playlist.m3u8?step_id={step_id}&track={track}&run_id={run_id}
+GET /traceback/task/{task_id}/timeline?step_id={step_id}&run_id={run_id}
 ```
 
 **时间字段只给到 step 粒度**，任务级不给 `start_ms`：
@@ -274,7 +277,8 @@ GET /traceback/task/{task_id}/timeline?step_id={step_id}
 - **`start_ms` / `last_segment_ms` 是双轨并集**，与 timeline 的 `start_ms`/`end_ms` 同口径——两轨段边界不一定对齐，某一轨的实际范围可能比这里窄（实测有过 20+ 秒的差）。它表达的是「这个 step 有画面的时间跨度」，别拿它跟单轨播放进度做逐帧对齐。
 - **`last_segment_ms` 是最后一段的起点**，比 step 真正结束早一个段长（`last_segment_ms + 该段 EXTINF = timeline 的 end_ms`）。要精确时长用 timeline 的 `duration_ms`。
 - **没有 `total`、没有分页**：固定最多 10 条。要带过滤/分页的完整任务列表用 [`GET /lab-f3m8/tasks`](lab.md)（送标页口径，只枚举 raw 轨）。
-- **清单边缘可能短暂不一致**：粗筛（目录 mtime）与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个刚停的——下一轮轮询自愈，别据此报错。
+- **回放要带 `steps[].run_id`**：不带时 playlist / timeline 各自解析「最新可见 run」，与本清单描述的 run 可能不是同一个（详见 [traceback › 前端坑点](traceback.md#前端坑点)）。
+- **清单边缘可能短暂不一致**：粗筛（按各任务最近一次 run 的开始时刻，即最大 `run_id`）与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个刚停的——下一轮轮询自愈，别据此报错。
 
 ---
 

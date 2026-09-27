@@ -14,6 +14,7 @@ import base64
 import hashlib
 import hmac
 import json
+import shutil
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -22,10 +23,11 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from app.domain.run import RunIdentity
 from app.main import app
 from app.services.traceback.media_token import MediaToken
-from app.storage import hls
-from factories import seed_hls_segments
+from app.storage import _root, hls
+from factories import make_run, seed_hls_segments
 
 
 _SECRET = "test-stable-secret-2026"
@@ -37,7 +39,11 @@ _SECRET = "test-stable-secret-2026"
 
 
 def _seed_task(task_id: int, step_id: int, ts_us_list, write_init=True):
-    """造一个 step 的双轨同构段 + 清单 + init（最新 run 的 `hls/`），返回域目录。"""
+    """造一个 step 的双轨同构段 + 清单 + init（最新 run 的 `hls/`），返回域目录。
+
+    run 的开始时刻取首段 ts：timeline 只收 run 存续期内的告警，run 得开在造数的墙钟之前。
+    """
+    make_run(task_id, step_id, run_id=min(ts_us_list))
     for track in hls.TRACKS:
         d = seed_hls_segments(task_id, step_id, ts_us_list, track=track, with_init=write_init)
     return d
@@ -499,3 +505,97 @@ async def test_media_init_missing_file_returns_404(client, media_root):
     )
     resp = await client.get(f"/media/init/{token}")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# run 锁定：点名 run_id / timeline 告警按 run 存续期 / 清单 token 锁 run
+# ---------------------------------------------------------------------------
+
+
+_RUN_B_US = _TS0_US + 100_000_000   # B 比 A 晚 100s 分配
+
+
+def _seed_two_runs(task_id: int, step_id: int = 1):
+    """同 step 两个 run：A 开在 `_TS0_US`、B 开在 `_RUN_B_US`，各有一段双轨录像。"""
+    a = RunIdentity(task_id, step_id, _TS0_US)
+    b = RunIdentity(task_id, step_id, _RUN_B_US)
+    for run in (a, b):   # 先建 run 目录再铺段：seed 落在「当前最新的 run」里
+        _root.run_path(run).mkdir(parents=True)
+        for track in hls.TRACKS:
+            seed_hls_segments(task_id, step_id, [run.run_id], track=track)
+    return a, b
+
+
+def _alarm_ids(resp):
+    return [e["alarm_id"] for e in resp.json()["events"]]
+
+
+@pytest.mark.asyncio
+async def test_timeline_events_are_limited_to_the_run_lifespan(client, media_root, monkeypatch):
+    """区间 = [本 run 的 run_id 时刻, 下一个 run 的 run_id 时刻)，最新 run 无上界。"""
+    a, b = _seed_two_runs(7)
+    _install_alarms(monkeypatch, [
+        _alarm(1, _TS0_MS - 1_000),               # A 分配之前
+        _alarm(2, _TS0_MS + 5_000),               # A 存续期（含停止时的结算告警）
+        _alarm(3, _RUN_B_US // 1000 + 5_000),     # B 存续期
+    ])
+
+    resp_a = await client.get(f"/traceback/task/7/timeline?step_id=1&run_id={a.run_id}")
+    assert resp_a.json()["run_id"] == a.run_id
+    assert _alarm_ids(resp_a) == [2]
+
+    resp_latest = await client.get("/traceback/task/7/timeline?step_id=1")
+    assert resp_latest.json()["run_id"] == b.run_id
+    assert _alarm_ids(resp_latest) == [3]
+
+
+@pytest.mark.asyncio
+async def test_timeline_without_any_run_keeps_the_all_zero_shape(client, media_root, monkeypatch):
+    """不带 run_id 且该 step 没有可见 run：维持老契约（坐标全 0、告警不按 run 过滤）。"""
+    _install_alarms(monkeypatch, [_alarm(1, _TS0_MS)])
+    body = (await client.get("/traceback/task/77/timeline?step_id=1")).json()
+    assert (body["start_ms"], body["media_duration_ms"], body["run_id"]) == (0, 0, None)
+    assert [e["alarm_id"] for e in body["events"]] == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [
+    "/traceback/task/7/timeline?step_id=1&run_id=123",
+    "/traceback/task/7/playlist.m3u8?step_id=1&track=raw&run_id=123",
+])
+async def test_unknown_run_id_is_404(client, media_root, monkeypatch, path):
+    _seed_two_runs(7)
+    _install_alarms(monkeypatch, [])
+    resp = await client.get(path)
+    assert resp.status_code == 404
+    assert resp.json()["resource_type"] == "Run"
+
+
+@pytest.mark.asyncio
+async def test_playlist_tokens_lock_the_run(client, media_root):
+    """清单里的 token 带着签发时解析的 run：换代后照样取旧 run 的段；旧 run 被回收后 404。"""
+    a, _ = _seed_two_runs(8)
+    body = (await client.get(
+        f"/traceback/task/8/playlist.m3u8?step_id=1&track=raw&run_id={a.run_id}"
+    )).text
+    url = next(line for line in body.splitlines() if "/media/segment/" in line)
+    token = url.rsplit("/", 1)[1]
+
+    payload = MediaToken.default().verify(token, kind="segment")
+    assert payload.run_id == a.run_id
+    assert payload.filename == hls.segment_name(hls.SegmentRef("raw", a.run_id))
+    assert (await client.get(f"/media/segment/{token}")).status_code == 200
+
+    shutil.rmtree(_root.run_path(a))
+    assert (await client.get(f"/media/segment/{token}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_token_without_run_id_resolves_the_latest_visible_run(client, media_root):
+    """上线前签发的 token 没有 run_id：按最新可见 run 解析，不因缺字段校验失败。"""
+    _, b = _seed_two_runs(9)
+    token = MediaToken.default().sign(
+        9, 1, hls.segment_name(hls.SegmentRef("raw", b.run_id)), kind="segment",
+    )
+    assert MediaToken.default().verify(token, kind="segment").run_id is None
+    assert (await client.get(f"/media/segment/{token}")).status_code == 200

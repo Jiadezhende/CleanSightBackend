@@ -29,6 +29,7 @@ from app.services.lab.step_exporter import (
     StepExportNoSegments,
 )
 from app.storage import hls
+from factories import make_run
 from app.storage.hls import _m3u8
 
 
@@ -126,7 +127,7 @@ class TestVodPlaylist:
         step_dir = _make_step([TS0, TS1])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_storage).export(1, 1, "raw")
+        _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         text = cap["m3u8_text"]
         assert '#EXT-X-MAP:URI="raw_init.mp4"' in text
@@ -145,7 +146,7 @@ class TestVodPlaylist:
         _make_step([TS0, TS1], durations=[9.800, 7.500])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_storage).export(1, 1, "raw")
+        _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         text = cap["m3u8_text"]
         assert "#EXTINF:9.800," in text
@@ -157,7 +158,7 @@ class TestVodPlaylist:
         _make_step([TS0, TS1], track="processed")
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_storage).export(1, 1, "processed")
+        _exporter(tmp_storage).export(make_run(1, 1), "processed")
 
         text = cap["m3u8_text"]
         assert f"processed_segment_{TS0}.mp4" in text
@@ -175,7 +176,7 @@ class TestFfmpegCmd:
         _make_step([TS0])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_storage).export(1, 1, "raw")
+        _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         cmd = cap["cmd"]
         assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
@@ -189,7 +190,7 @@ class TestFfmpegCmd:
         _make_step([TS0])
         cap = _capture_run(monkeypatch)
 
-        _exporter(tmp_storage).export(1, 1, "raw")
+        _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         cmd = cap["cmd"]
         assert "concat" not in cmd
@@ -202,7 +203,7 @@ class TestFfmpegCmd:
         _make_step([TS0])
         cap = _capture_run(monkeypatch)
 
-        out = _exporter(tmp_storage).export(1, 1, "raw")
+        out = _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         assert out.parent == tmp_storage / ".lab_exports"
         assert out.exists()
@@ -220,7 +221,7 @@ class TestFailures:
         cap = _capture_run(monkeypatch)
 
         with pytest.raises(StepExportInitMissing):
-            _exporter(tmp_storage).export(1, 1, "raw")
+            _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         assert cap["calls"] == 0
 
@@ -230,7 +231,7 @@ class TestFailures:
         cap = _capture_run(monkeypatch)
 
         with pytest.raises(StepExportNoSegments, match="No raw segments"):
-            _exporter(tmp_storage).export(1, 1, "raw")
+            _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         assert cap["calls"] == 0
 
@@ -240,7 +241,7 @@ class TestFailures:
         cap = _capture_run(monkeypatch)
 
         with pytest.raises(StepExportNoSegments, match="No raw segments"):
-            _exporter(tmp_storage).export(1, 1, "raw")
+            _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         assert cap["calls"] == 0
 
@@ -249,7 +250,7 @@ class TestFailures:
         cap = _capture_run(monkeypatch, returncode=1)
 
         with pytest.raises(StepExportError):
-            _exporter(tmp_storage).export(1, 1, "raw")
+            _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         assert not cap["m3u8_path"].exists()
         assert not list(step_dir.glob(".export_*.m3u8"))
@@ -266,7 +267,7 @@ class TestFailures:
         )
 
         with pytest.raises(StepExportError):
-            _exporter(tmp_storage).export(1, 1, "raw")
+            _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         assert not list(step_dir.glob(".export_*.m3u8"))
 
@@ -293,7 +294,7 @@ class TestOrphanSweep:
         os.utime(stale, (old, old))
 
         _capture_run(monkeypatch)
-        _exporter(tmp_storage).export(1, 1, "raw")
+        _exporter(tmp_storage).export(make_run(1, 1), "raw")
 
         assert not stale.exists()
         assert fresh.exists()

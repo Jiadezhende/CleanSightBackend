@@ -6,6 +6,7 @@
 
     DOMAINS                         run 下的域子目录白名单（封闭集合，唯一真源）
     path(task, step)                逐级定位 {root}/{task}/{step}，不建目录
+    run_ids(task, step)             该 step 下的 run 目录 id，升序
     run_path(run, domain)           定位 {root}/{task}/{step}/{run_id}/{domain}，不建目录
     domain_dir(run, domain, create=) 域文件的统一入口；create 只建域这一级
     legacy_reader                   迁移期装饰器：读口的 (task_id, step_id, ...) 经 runs.query 转成 run
@@ -33,7 +34,7 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import Callable, Optional, Tuple, TypeVar
+from typing import Callable, List, Optional, Tuple, TypeVar
 
 from app.domain.run import RunIdentity
 
@@ -86,6 +87,22 @@ def dir_name_to_int(name: str) -> Optional[int]:
         return int(name)
     except (TypeError, ValueError):
         return None
+
+
+def run_ids(task_id: int, step_id: int) -> List[int]:
+    """该 step 下的 run 目录 id，升序。step 不在 / 不可读返回 `[]`；旧布局的 `hls/` 等非数字
+    名与文件天然跳过。"""
+    try:
+        entries = list(path(task_id, step_id).iterdir())
+    except OSError:
+        return []
+    ids = [
+        run_id
+        for entry in entries
+        if (run_id := dir_name_to_int(entry.name)) is not None and entry.is_dir()
+    ]
+    ids.sort()
+    return ids
 
 
 def run_path(run: RunIdentity, domain: Optional[str] = None) -> Path:

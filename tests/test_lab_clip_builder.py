@@ -25,7 +25,7 @@ from app.services.lab.clip_builder import (
     ClipSpec,
 )
 from app.services.utils.media_timeline import MediaTimeline
-from factories import seed_hls_segments
+from factories import make_run, seed_hls_segments
 
 TASK_ID = 1
 STEP_ID = 1
@@ -43,7 +43,7 @@ def _seed(items, with_init: bool = True) -> Path:
 
 
 def _window(start_media_ms: int, end_media_ms: int) -> MediaTimeline:
-    return MediaTimeline.load(TASK_ID, STEP_ID, RAW_TRACK).select(
+    return MediaTimeline.load(make_run(TASK_ID, STEP_ID), RAW_TRACK).select(
         start_media_ms, end_media_ms
     )
 
@@ -56,7 +56,7 @@ def _contiguous(n: int, extinf_s: float = _DEFAULT_EXTINF) -> List[tuple]:
 
 def _spec(start_media_ms: int, end_media_ms: int) -> ClipSpec:
     return ClipSpec(
-        task_id=TASK_ID, step_id=STEP_ID,
+        run=make_run(TASK_ID, STEP_ID),
         start_media_ms=start_media_ms, end_media_ms=end_media_ms,
     )
 

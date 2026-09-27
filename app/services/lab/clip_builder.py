@@ -1,6 +1,6 @@
 """ClipBuilder —— 从 raw 段拼出一个 ms 精度的 mp4，供送标。
 
-    spec = ClipSpec(task_id, step_id, start_media_ms, end_media_ms)
+    spec = ClipSpec(run, start_media_ms, end_media_ms)   # run: RunIdentity
     res  = ClipBuilder().build_one(spec, job_dir)   # res.output_path / res.start_ms
 
 **区间收媒体刻度、产出带回绝对墙钟**：浏览器算不出真墙钟（媒体轴是压紧的），换算在后端做。
@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from app.domain.run import RunIdentity
 from app.services.utils.media_timeline import GAP_THRESHOLD_MS, MediaTimeline
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls
@@ -48,14 +49,12 @@ class ClipSpec:
     """一个待导出的视频段，区间用媒体刻度表达（理由见模块 docstring）。
 
     Attributes:
-        task_id: 任务 id
-        step_id: 洗消步骤 id
-        start_media_ms: 区间起点，相对该 step raw 轨媒体轴原点的毫秒（= `currentTime × 1000`）
+        run: 取哪个 run 的 raw 段
+        start_media_ms: 区间起点，相对该 run raw 轨媒体轴原点的毫秒（= `currentTime × 1000`）
         end_media_ms: 区间终点，必须 > `start_media_ms`
     """
 
-    task_id: int
-    step_id: int
+    run: RunIdentity
     start_media_ms: int
     end_media_ms: int
 
@@ -153,14 +152,14 @@ class ClipBuilder:
                 f"Clip duration {spec.duration_ms} ms exceeds max {self._max_duration_ms} ms"
             )
 
-        window = MediaTimeline.load(spec.task_id, spec.step_id, RAW_TRACK).select(
+        window = MediaTimeline.load(spec.run, RAW_TRACK).select(
             spec.start_media_ms, spec.end_media_ms
         )
         if not window:
             raise ClipRangeOutOfBoundsError(
                 f"No {RAW_TRACK} segments overlap media range "
                 f"[{spec.start_media_ms}, {spec.end_media_ms}) ms "
-                f"for task_id={spec.task_id}, step_id={spec.step_id}"
+                f"for {spec.run}"
             )
 
         gap = window.first_gap()
@@ -215,8 +214,8 @@ class ClipBuilder:
                 outcomes.append((spec, self.build_one(spec, job_dir), None))
             except ClipBuildError as e:
                 logger.warning(
-                    "[Lab] ClipBuilder failed for task=%s step=%s media[%d,%d]: %s",
-                    spec.task_id, spec.step_id,
+                    "[Lab] ClipBuilder failed for task=%s step=%s run=%s media[%d,%d]: %s",
+                    spec.run.task_id, spec.run.step_id, spec.run.run_id,
                     spec.start_media_ms, spec.end_media_ms, e,
                 )
                 outcomes.append((spec, None, e))
@@ -246,7 +245,7 @@ class ClipBuilder:
         offset_s = offset_ms / 1000.0
         duration_s = spec.duration_ms / 1000.0
 
-        init_path = hls.init_path(spec.task_id, spec.step_id, RAW_TRACK)
+        init_path = hls.init_path(spec.run, RAW_TRACK)
         step_dir = init_path.parent
         if not init_path.exists():
             raise ClipBuildError(

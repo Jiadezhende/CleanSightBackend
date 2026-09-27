@@ -88,7 +88,7 @@ def test_offline_steps_lists_steps_with_segments_or_probs(tmp_storage):
     for step_id in (1, 2, 3, 4):   # 读侧按最新可见 run 解析：先让每个 run 有录像
         seed_hls_segments(1, step_id, [_TS0_US])
 
-    assert lab_router._list_offline_steps(1, [1, 2, 3, 4]) == [1, 2]
+    assert lab_router._list_offline_steps([make_run(1, s) for s in (1, 2, 3, 4)]) == [1, 2]
 
 
 def test_storage_task_item_carries_offline_steps(tmp_storage):
@@ -98,7 +98,8 @@ def test_storage_task_item_carries_offline_steps(tmp_storage):
         TemporalSegment(producer="P", label="flush", start=T0 + 1.0, end=T0 + 2.0),
     ])
 
-    item = lab_router._storage_task_to_item(1, [2, 3])
+    item = lab_router._storage_task_to_item(1, [make_run(1, 2), make_run(1, 3)])
 
     assert item.raw_steps == [2, 3]
+    assert item.run_ids == {2: make_run(1, 2).run_id, 3: make_run(1, 3).run_id}
     assert item.offline_steps == [2]

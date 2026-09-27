@@ -1,6 +1,6 @@
 """媒体轴：段序列展开成可定位的时间轴，以及墙钟↔媒体的双向换算。
 
-    tl = MediaTimeline.load(task_id, step_id, "raw")
+    tl = MediaTimeline.load(run, "raw")       # run: RunIdentity，入口处经 runs.query 解析
     tl.wall_ms_at(12_345)        # 媒体刻度 → 绝对墙钟
     tl.media_ms_at(ts_ms)        # 绝对墙钟 → 媒体刻度（告警标记落点用它）
     tl.select(a, b).first_gap()  # 这段区间里有没有断流
@@ -21,6 +21,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from typing import Iterator, List, NamedTuple, Optional, Tuple
 
+from app.domain.run import RunIdentity
 from app.storage import hls
 from app.storage.hls import Segment
 
@@ -78,7 +79,7 @@ class MediaTimeline:
         self._placed = placed
 
     @classmethod
-    def load(cls, task_id: int, step_id: int, track: str) -> "MediaTimeline":
+    def load(cls, run: RunIdentity, track: str) -> "MediaTimeline":
         """读清单并展开。清单顺序即时序，累加 EXTINF 即落点。
 
         累加用 float 秒、只在出口取整到 ms：逐段取整再累加会让误差随段数线性累积
@@ -92,7 +93,7 @@ class MediaTimeline:
         """
         placed: List[PlacedSegment] = []
         cursor_s = 0.0
-        for seg in hls.list_segments(task_id, step_id, track):
+        for seg in hls.list_segments(run, track):
             placed.append(
                 PlacedSegment(seg=seg, media_start_ms=int(round(cursor_s * 1000)))
             )

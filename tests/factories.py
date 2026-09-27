@@ -121,8 +121,11 @@ def make_alarm(
     )
 
 
-def make_run(task_id: int, step_id: int) -> RunIdentity:
-    """该 step 盘上最新的 run（没有就 `runs.allocate` 一个）——造数用，多次调用落同一个 run。
+def make_run(task_id: int, step_id: int, run_id: Optional[int] = None) -> RunIdentity:
+    """该 step 盘上最新的 run（没有就建一个）——造数用，多次调用落同一个 run。
+
+    没有 run 时：给了 `run_id` 就按它建（造数的墙钟早于「现在」时，让 run 的开始时刻落在
+    首帧之前，timeline 的告警区间才对得上）；否则 `runs.allocate`。
 
     调用前须让 `settings.storage_dir` 指到临时目录。只建 run 目录，**不保证可见**：
     `runs.query` 缺省只认有 `hls/metadata.json` 或 `inference/detections.jsonl` 的 run。
@@ -131,7 +134,13 @@ def make_run(task_id: int, step_id: int) -> RunIdentity:
 
     step_dir = _root.path(task_id, step_id)
     ids = sorted(int(p.name) for p in step_dir.iterdir() if p.name.isdigit()) if step_dir.is_dir() else []
-    return RunIdentity(task_id, step_id, ids[-1]) if ids else runs.allocate(task_id, step_id)
+    if ids:
+        return RunIdentity(task_id, step_id, ids[-1])
+    if run_id is None:
+        return runs.allocate(task_id, step_id)
+    run = RunIdentity(task_id, step_id, run_id)
+    _root.run_path(run).mkdir(parents=True)
+    return run
 
 
 def seed_hls_segments(
