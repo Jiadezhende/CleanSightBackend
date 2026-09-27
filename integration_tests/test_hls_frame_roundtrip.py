@@ -96,7 +96,7 @@ def ts_of(gid: int) -> float:
 
 def hls_dir(task_id: int) -> Path:
     """本测试的落盘目录 —— 该 step 最新可见 run 的 `hls/`。"""
-    return hls.init_path(task_id, STEP_ID, "raw").parent
+    return hls.init_path(runs.query(task_id, STEP_ID), "raw").parent
 
 
 def seed(task_id: int) -> None:
@@ -135,10 +135,12 @@ def seed(task_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
+    run = runs.query(task_id, STEP_ID)
+
     def scan(start_ts=None, end_ts=None, width=W, height=H):
         """区间扫帧 —— 数据层的 `iter_frames`（无 `track` 参数，恒为 raw 轨）。"""
         return hls.iter_frames(
-            task_id, STEP_ID,
+            run,
             width=width, height=height, start_ts=start_ts, end_ts=end_ts,
         )
 
@@ -205,7 +207,7 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         「这条路不通」必须与「这段没数据」分得开，故是 ValueError 而非空迭代器。"""
         ref = hls.SegmentRef(track="processed", ts_us=hls.ts_to_us(ts_of(0)))
         try:
-            hls.read_segment(task_id, STEP_ID, ref, width=W, height=H)
+            hls.read_segment(run, ref, width=W, height=H)
         except ValueError:
             return "processed 轨直接 ValueError，不静默返回空"
         raise AssertionError("processed 轨应抛 ValueError，实际静默通过")

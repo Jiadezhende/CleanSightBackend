@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.run import RunIdentity
-from app.storage._root import legacy_reader
 
 from . import _jsonl, _layout
 
@@ -117,7 +116,6 @@ def append_detections(run: RunIdentity, frames: Sequence[FrameDetection]) -> Non
         f.write(payload)
 
 
-@legacy_reader
 def read_detections(run: RunIdentity) -> List[FrameDetection]:
     """回读整段检测结果，**按 ts 升序**（升序是返回值的契约，离线的 `bisect` / 滑窗建立在它上
     面）。文件不存在返回 `[]`；形状不对的 record 与坏行同等对待，跳过 + warning。

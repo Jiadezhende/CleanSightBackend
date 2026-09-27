@@ -44,7 +44,6 @@ import numpy as np
 
 from app.domain.frame import Frame
 from app.domain.run import RunIdentity
-from app.storage._root import legacy_reader
 
 from . import _idx, _layout, _read
 from ._layout import SegmentRef
@@ -189,7 +188,6 @@ def _run_ffmpeg(
                 proc.wait()
 
 
-@legacy_reader
 def read_segment(
     run: RunIdentity,
     ref: SegmentRef,
@@ -202,7 +200,7 @@ def read_segment(
     """单段解码 —— `insert_segment` 的逆运算。帧级裁剪到 `[start_ts, end_ts]`。
 
     Args:
-        run: 该 run（迁移期另收旧形态 `task_id, step_id`，见 `_root.legacy_reader`）。
+        run: 该 run。
         ref: 段身份键。`ref.track` 必须是 `"raw"`。
         width / height: 输出分辨率。**无默认值**——静默产出一个尺寸会在下游变成
             train-serve skew。
@@ -246,7 +244,6 @@ def read_segment(
     return _run_ffmpeg(run, ref, sidecar, k_start, k_end, width, height)
 
 
-@legacy_reader
 def iter_frames(
     run: RunIdentity,
     *,

@@ -9,7 +9,6 @@
     run_ids(task, step)             该 step 下的 run 目录 id，升序
     run_path(run, domain)           定位 {root}/{task}/{step}/{run_id}/{domain}，不建目录
     domain_dir(run, domain, create=) 域文件的统一入口；create 只建域这一级
-    legacy_reader                   迁移期装饰器：读口的 (task_id, step_id, ...) 经 runs.query 转成 run
     dir_name_to_int(name)           目录名 → id；非数字目录名 → None
 
 ## 各域文件的用法：先声明一个绑死自己域名的 domain_dir
@@ -32,9 +31,8 @@ def domain_dir(run: RunIdentity, *, create: bool = False) -> Path:
 
 from __future__ import annotations
 
-import functools
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple, TypeVar
+from typing import List, Optional, Tuple
 
 from app.domain.run import RunIdentity
 
@@ -138,25 +136,3 @@ def domain_dir(run: RunIdentity, domain: str, *, create: bool = False) -> Path:
         _fs.ensure_dir(located)
     return located
 
-
-_F = TypeVar("_F", bound=Callable)
-
-
-def legacy_reader(fn: _F) -> _F:
-    """迁移期（第 4 期删）：读口 `fn(run, ...)` 另收旧形态 `fn(task_id, step_id, ...)`。
-
-    旧形态经 `runs.query(task_id, step_id)` 解析成最新可见 run；查不到时给 `run_id=0` 的
-    RunIdentity——分配出的 run_id 是微秒时间戳，`{step}/0/` 永不存在，读到的是空、路径不存在。
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        if args and not isinstance(args[0], RunIdentity):
-            from . import runs
-
-            task_id, step_id, *rest = args
-            run = runs.query(task_id, step_id) or RunIdentity(task_id, step_id, 0)
-            args = (run, *rest)
-        return fn(*args, **kwargs)
-
-    return wrapper  # type: ignore[return-value]

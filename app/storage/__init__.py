@@ -24,8 +24,7 @@ run 目录只由 `runs.allocate` 建，写者只建域这一级。存储根下�
     hls/         段 / init / playlist / sidecar / metadata：定位、编解码、读写
     lab.py       送标与导出的临时件                                （尚未落地）
 
-域读写口都以 `run: RunIdentity` 开头（迁移期读口另收 `(task_id, step_id)`，经 `runs.query`
-解析）。域内定位归域文件，`tasks.py` / `runs.py` 只在跨所有域时出面。
+域读写口都以 `run: RunIdentity` 开头，run 经 `runs.query` / `runs.allocate` 取得。域内定位归域文件，`tasks.py` / `runs.py` 只在跨所有域时出面。
 
     from app.storage import hls, runs, tasks as step_tasks
     run = runs.query(task_id, step_id)                         # None → 404

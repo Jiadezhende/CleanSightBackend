@@ -7,8 +7,7 @@
     facts = inference.read_temporal(run)               # 读 → 合并 → 写
     inference.write_temporal(run, merged)              # 整体替换
 
-`run` 是 `RunIdentity`（来自 `app.storage.runs`）。写口只收它；迁移期读口另收旧形态
-`(task_id, step_id, ...)`，解析成最新可见 run（见 `_root.legacy_reader`）。
+`run` 是 `RunIdentity`（来自 `app.storage.runs`），读写口都只收它。
 
 两份产物按**产出层**分模块：`_detection` 管目标检测产物（L1），`_temporal` 管时序分析产物
 （L3）+ 离线逐帧类别概率。共用 `_layout`（域根与文件名）和 `_jsonl`（行框定与原子写）。

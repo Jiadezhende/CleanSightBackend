@@ -6,8 +6,7 @@
     hls.read_segment(run, ref, width=W, height=H)               # 交身份键，拿帧（逆运算）
     hls.segment_path(run, ref)                                  # 要路径时再问
 
-`run` 是 `RunIdentity`（来自 `app.storage.runs`）。写口只收它；迁移期读口另收旧形态
-`(task_id, step_id, ...)`，解析成最新可见 run（见 `_root.legacy_reader`）。
+`run` 是 `RunIdentity`（来自 `app.storage.runs`），读写口都只收它。
 
 对外**两个动作 + 一组定位/枚举函数**。调用方交出内存里的 `Frame` 序列，拿回这段的身份键；
 cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计七件事全在域内，一件都

@@ -21,7 +21,6 @@ from bisect import bisect_right
 from typing import List, Optional
 
 from app.domain.run import RunIdentity
-from app.storage._root import legacy_reader
 
 from . import _layout, _m3u8
 from .types import Segment
@@ -29,7 +28,6 @@ from .types import Segment
 logger = logging.getLogger(__name__)
 
 
-@legacy_reader
 def list_segments(run: RunIdentity, track: str) -> List[Segment]:
     """该轨的段与各自的 EXTINF，按 `ts_us` 升序。清单缺失返回 `[]`。
 
@@ -67,7 +65,6 @@ def list_segments(run: RunIdentity, track: str) -> List[Segment]:
     return out
 
 
-@legacy_reader
 def list_segments_in_range(
     run: RunIdentity,
     track: str,
@@ -78,7 +75,7 @@ def list_segments_in_range(
     """`list_segments` 里落在墙钟区间 `[start_ts, end_ts]` 的那些，按 `ts_us` 升序。
 
     Args:
-        run: 该 run（迁移期另收旧形态 `task_id, step_id`，见 `_root.legacy_reader`）。
+        run: 该 run。
         track: 轨道名。
         start_ts / end_ts: 闭区间的墙钟秒，`None` 表示该侧不设限。
 

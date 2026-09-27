@@ -43,7 +43,7 @@ class TestReplaceSegments:
     def test_empty_clears_segments(self, tmp_storage):
         OfflineRunner._replace_segments(make_run(1, 1), [_seg()])
         OfflineRunner._replace_segments(make_run(1, 1), [])  # 空 → 清该 step 分段
-        segs = [f for f in inference_store.read_temporal(1, 1) if isinstance(f, TemporalSegment)]
+        segs = [f for f in inference_store.read_temporal(make_run(1, 1)) if isinstance(f, TemporalSegment)]
         assert segs == []
 
 
@@ -230,7 +230,7 @@ class TestOfflineRunner:
         assert res.status == "completed"
         assert res.producer == "BrushRulesSegmenter"
         assert res.segment_count == 1
-        segs = [f for f in inference_store.read_temporal(1, 2) if isinstance(f, TemporalSegment)]
+        segs = [f for f in inference_store.read_temporal(make_run(1, 2)) if isinstance(f, TemporalSegment)]
         assert len(segs) == 1
         assert segs[0].producer == "BrushRulesSegmenter"
         assert segs[0].label == "brushing"
@@ -242,7 +242,7 @@ class TestOfflineRunner:
         r = _runner(_OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
-        segs = [f for f in inference_store.read_temporal(1, 2) if isinstance(f, TemporalSegment)]
+        segs = [f for f in inference_store.read_temporal(make_run(1, 2)) if isinstance(f, TemporalSegment)]
         assert len(segs) == 1
 
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
@@ -271,7 +271,7 @@ class TestOfflineRunner:
         assert _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
         res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.producer == "MarkerSegmenter"
-        loaded = inference_store.read_temporal(1, 2)
+        loaded = inference_store.read_temporal(make_run(1, 2))
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
         assert [f.producer for f in loaded if isinstance(f, TemporalEvent)] == ["clean_monitor"]
 
@@ -290,7 +290,7 @@ class TestOfflineRunner:
                    "params": {"model_path": "unused.pt", "min_duration_s": 0.1}}
         res = _runner(offline).run(OfflineRunSpec(task_id=1, step_id=2))
         assert (res.status, res.producer, res.segment_count) == ("completed", "CleanMSTCNBiLSTMSegmenter", 1)
-        probs = inference_store.read_label_probs(1, 2)
+        probs = inference_store.read_label_probs(make_run(1, 2))
         assert probs.labels == tuple(ACTION_LABELS)
         assert probs.ts.tolist() == [0.1, 0.2, 0.3, 0.4]
         assert probs.probs.argmax(axis=1).tolist() == [label] * 4

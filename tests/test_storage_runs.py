@@ -142,8 +142,6 @@ class TestRunKeyedPorts:
         assert [f.ts for f in inference.read_detections(run)] == [1.0]
         assert [f.label for f in inference.read_temporal(run)] == ["a"]
         assert inference.read_label_probs(run).labels == ("a",)
-        # 迁移期读口的旧形态解析成最新可见 run
-        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0]
 
     def test_runs_do_not_see_each_other(self, tmp_storage, monkeypatch):
         a = _alloc(monkeypatch, 1, 2, 10)
@@ -185,34 +183,21 @@ class TestRunKeyedPorts:
 
 
 # ---------------------------------------------------------------------------
-# 迁移期：读口的 (task_id, step_id) 转发（第 4 期删）
+# 读写口只收 RunIdentity
 # ---------------------------------------------------------------------------
 
 
-class TestLegacyReader:
-    def test_forwards_to_latest_visible_run(self, tmp_storage, monkeypatch):
-        old = _alloc(monkeypatch, 1, 2, 10)
-        inference.append_detections(old, [_fd(1.0)])
-        new = _alloc(monkeypatch, 1, 2, 20)
-        inference.append_detections(new, [_fd(2.0)])
-        assert [f.ts for f in inference.read_detections(1, 2)] == [2.0]
-        assert hls.playlist_path(1, 2, "raw") == hls.playlist_path(new, "raw")
-
-    def test_no_run_reads_empty_and_creates_nothing(self, tmp_storage):
-        assert inference.read_detections(1, 2) == []
-        assert inference.read_label_probs(1, 2) is None
-        assert hls.list_segments(1, 2, "raw") == []
-        assert not hls.init_path(1, 2, "raw").exists()
-        assert list(tmp_storage.iterdir()) == []
-
-    @pytest.mark.parametrize("write", [
+class TestPortsOnlyTakeRunIdentity:
+    @pytest.mark.parametrize("call", [
+        lambda: inference.read_detections(1, 2),
         lambda: inference.append_detections(1, 2, [_fd(1.0)]),
         lambda: inference.write_temporal(1, 2, [_seg()]),
+        lambda: hls.list_segments(1, 2, "raw"),
         lambda: hls.insert_segment(1, 2, "raw", [make_frame(ts=1.0)]),
-    ], ids=["append_detections", "write_temporal", "insert_segment"])
-    def test_writers_only_take_run_identity(self, tmp_storage, write):
+    ], ids=["read_detections", "append_detections", "write_temporal", "list_segments", "insert_segment"])
+    def test_task_step_pair_is_rejected(self, tmp_storage, call):
         with pytest.raises(TypeError):
-            write()
+            call()
         assert list(tmp_storage.iterdir()) == []
 
 

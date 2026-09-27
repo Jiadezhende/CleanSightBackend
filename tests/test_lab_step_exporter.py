@@ -45,8 +45,8 @@ STEP_ID = 1
 
 
 def _hls_dir(track: str = "raw") -> Path:
-    """`{root}/1/1/hls/` —— 段、init、playlist 与临时清单的所在目录。"""
-    return hls.init_path(TASK_ID, STEP_ID, track).parent
+    """该 step 的 run 的 `hls/` —— 段、init、playlist 与临时清单的所在目录。"""
+    return hls.init_path(make_run(TASK_ID, STEP_ID), track).parent
 
 
 def _make_step(
@@ -57,23 +57,23 @@ def _make_step(
     playlist_ts: List[int] = None,
     durations: List[float] = None,
 ) -> Path:
-    """在 `{storage_root}/1/1/hls/` 造一组段 + init + LIVE 清单。
+    """在该 step 的 run（`make_run`）的 `hls/` 下造一组段 + init + LIVE 清单。
 
     路径一律由 hls 域的定位函数给，清单由写侧真函数（`_m3u8.header/append`）追出来——
     手写格式会让"EXTINF 是唯一真值"这条断言测了个寂寞。
 
     playlist_ts 为 None 时 playlist 收录全部段；显式传入可制造"在途段"。
     """
-    _hls_dir(track).mkdir(parents=True, exist_ok=True)
+    run = make_run(TASK_ID, STEP_ID)
     for ts in segs_ts_us:
         ref = hls.SegmentRef(track=track, ts_us=ts)
-        hls.segment_path(TASK_ID, STEP_ID, ref, create=True).write_bytes(b"fake-fmp4")
+        hls.segment_path(run, ref, create=True).write_bytes(b"fake-fmp4")
     if with_init:
-        hls.init_path(TASK_ID, STEP_ID, track).write_bytes(b"fake-init")
+        hls.init_path(run, track).write_bytes(b"fake-init")
 
     in_playlist = segs_ts_us if playlist_ts is None else playlist_ts
     durs = durations or [10.0] * len(in_playlist)
-    playlist = hls.playlist_path(TASK_ID, STEP_ID, track)
+    playlist = hls.playlist_path(run, track)
     init_name = hls.init_name(track)
     # 先落头：playlist_ts=[] 时得到一份"有清单、零条目"的文件（段全在途）
     playlist.write_text(_m3u8.header(init_name), encoding="utf-8")

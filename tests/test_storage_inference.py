@@ -175,7 +175,7 @@ class TestDetectionsReadWrite:
 
     def test_read_missing_creates_nothing(self, tmp_storage):
         """读一个没写过的 step 不该在盘上留空目录 —— 空目录会被 tasks.list_task_ids() 列出。"""
-        inference.read_detections(9, 9)
+        inference.read_detections(RunIdentity(9, 9, RUN_ID))
         assert list(tmp_storage.iterdir()) == []
 
     def test_empty_batch_writes_nothing(self, tmp_storage):
@@ -332,7 +332,7 @@ class TestFactsReadWrite:
         assert inference.read_temporal(_run(9, 9)) == []
 
     def test_read_missing_creates_nothing(self, tmp_storage):
-        inference.read_temporal(9, 9)
+        inference.read_temporal(RunIdentity(9, 9, RUN_ID))
         assert list(tmp_storage.iterdir()) == []
 
     def test_writes_into_domain_dir_not_step_root(self, tmp_storage):
@@ -415,7 +415,7 @@ class TestLabelProbs:
         assert inference.read_label_probs(_run(1, 2)).labels == ("idle", "b")
 
     def test_missing_returns_none(self, tmp_storage):
-        assert inference.read_label_probs(1, 2) is None
+        assert inference.read_label_probs(RunIdentity(1, 2, RUN_ID)) is None
         assert list(tmp_storage.iterdir()) == []
 
     def test_empty_sequence_roundtrips(self, tmp_storage):

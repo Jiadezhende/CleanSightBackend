@@ -29,7 +29,6 @@ import numpy as np
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.storage import _fs
 from app.domain.run import RunIdentity
-from app.storage._root import legacy_reader
 
 from . import _jsonl, _layout
 
@@ -104,7 +103,6 @@ def _record_to_temporal(rec: Mapping[str, Any]) -> TemporalEvent | TemporalSegme
 # ── temporal.jsonl ───────────────────────────────────────────────────────────────
 
 
-@legacy_reader
 def read_temporal(run: RunIdentity) -> List[TemporalEvent | TemporalSegment]:
     """回读该 step 的全部事实，**按落盘顺序**（层不排序，理由见模块 docstring）。
 
@@ -171,7 +169,6 @@ def _write_probs(probs: LabelProbs, tmp: Path) -> None:
         )
 
 
-@legacy_reader
 def read_label_probs(run: RunIdentity) -> Optional[LabelProbs]:
     """回读该 step 的逐帧类别概率；文件不存在返回 `None`。
 

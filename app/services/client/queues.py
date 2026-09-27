@@ -217,8 +217,6 @@ class ClientQueues:
     # --- 封装操作方法 ---
 
 
-    # 迁移期转发（第 4 期读者迁到 `cq.run.*`，第 5 期删）。未绑定 run 时为 None。
-    @property
     def task_id(self) -> Optional[int]:
         return self.run.task_id if self.run is not None else None
 

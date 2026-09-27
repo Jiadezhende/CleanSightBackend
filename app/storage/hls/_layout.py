@@ -5,8 +5,7 @@
       {track}_playlist.m3u8         LIVE 清单               raw_segment_{ts_us}.idx  逐帧 ts
       metadata.json                 统计，兼作 TTL 判据      .stage_{track}_{ts_us}/  写入暂存
 
-路径函数的第一个参数是 `run: RunIdentity`；迁移期对外的读口另收旧形态 `(task_id, step_id, ...)`，
-经 `_root.legacy_reader` 解析成最新可见 run。
+路径函数的第一个参数是 `run: RunIdentity`（由调用方经 `runs.query` / `runs.allocate` 取得）。
 
 **身份键是 `SegmentRef(track, ts_us)`**：外部字符串一律先 `parse_segment_name` 解成 ref，
 路径由 ref 重建，绝不进字符串拼接。
@@ -28,7 +27,6 @@ from typing import Optional, Tuple
 
 from app.storage import _root
 from app.domain.run import RunIdentity
-from app.storage._root import legacy_reader
 
 from .types import SegmentRef
 
@@ -86,13 +84,11 @@ def parse_segment_name(name: str) -> Optional[SegmentRef]:
     return SegmentRef(track=m.group("track"), ts_us=int(m.group("ts_us")))
 
 
-@legacy_reader
 def segment_path(run: RunIdentity, ref: SegmentRef, *, create: bool = False) -> Path:
     """段文件路径。`create=True` 时确保 `hls/` 目录存在（写任何产物前用它）。"""
     return domain_dir(run, create=create) / segment_name(ref)
 
 
-@legacy_reader
 def sidecar_path(run: RunIdentity, ref: SegmentRef) -> Path:
     """段的逐帧 ts sidecar 路径（同名换后缀）。
 
@@ -101,7 +97,6 @@ def sidecar_path(run: RunIdentity, ref: SegmentRef) -> Path:
     return segment_path(run, ref).with_suffix(_SIDECAR_SUFFIX)
 
 
-@legacy_reader
 def init_path(run: RunIdentity, track: str) -> Path:
     """该轨的 fMP4 init 段路径。**按 track 分开**——两轨各有各的 EXT-X-MAP，共用一个文件名
     会让后写的那条轨指向别人的 init。
@@ -126,7 +121,6 @@ def parse_init_name(name: str) -> Optional[str]:
     return m.group("track")
 
 
-@legacy_reader
 def playlist_path(run: RunIdentity, track: str) -> Path:
     """该轨的 LIVE playlist 路径。"""
     return domain_dir(run) / f"{require_track(track)}_playlist.m3u8"
