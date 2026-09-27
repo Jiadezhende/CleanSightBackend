@@ -42,20 +42,21 @@ _CFG = InferenceConfig({"stages": {str(STEP_ID): {"offline": {"class": "unused.S
 def run(timeout: float) -> bool:
     from factories import make_detector_output, make_frame_detection, make_run
 
-    inference_store.append_detections(make_run(TASK_ID, STEP_ID), [
+    run = make_run(TASK_ID, STEP_ID)
+    inference_store.append_detections(run, [
         make_frame_detection(ts=1.0, by_source={"x": make_detector_output(n=1, ts=1.0)})
     ])
     svc = OfflineJobService(config=_CFG, poll_s=0.05)
     svc.start()
     try:
-        svc.submit(TASK_ID, STEP_ID)
+        svc.submit(run)
         deadline = time.monotonic() + timeout
-        while svc.get(TASK_ID, STEP_ID).status in ("queued", "running"):
+        while svc.get(run).status in ("queued", "running"):
             if time.monotonic() >= deadline:
                 print(f"FAIL 子进程 {timeout:.0f}s 内未结束")
                 return False
             time.sleep(0.05)
-        job = svc.get(TASK_ID, STEP_ID)
+        job = svc.get(run)
     finally:
         svc.stop(timeout=5.0)
 
