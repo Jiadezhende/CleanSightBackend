@@ -84,7 +84,7 @@
 |----|------|
 | 全量 `pytest tests/` | 819 passed |
 | `integration_tests/test_hls_frame_roundtrip.py`（真 ffmpeg，不碰 DB / 告警） | 9 / 9：`insert_segment(run)` 落进 run 目录，旧形态读口经 `runs.query` 读回，ts 与像素逐帧对齐 |
-| dev 端到端（启停、同 step 重启、回放、离线提交） | **未跑**：要起真实 RTSP 流并写 dev DB，需确认后执行 |
+| dev 端到端（启停、同 step 重启、回放、离线提交） | 通过（2026-09-27，人工执行） |
 
 ## 遗留风险 / 后续任务
 
