@@ -149,7 +149,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 - **LEAK**（step `"1"`）：`bubble`（气泡，出生率滑窗 3s、`birth_rate>0.5` 实时告警）+ `bending`（弯折，去抖 5 帧、合格需 4 次弯曲，结算告警）
 - **CLEAN**（step `"2"`）：`clean_large` + `clean_small` 检测 → `clean_monitor`（GRU 动作识别，10s 窗口，`gru-final.pt`）叠加动作事件；当前 `rules: []` 不产告警
 
-各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanNodepGRUSegmenter`（权重 `clean-offline-gru-nodep.pt` + 同名 `.meta.json`）。
+各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanNodepGRUSegmenter`（自包含权重 `clean-offline-gru-nodep.pt`，由 `scripts/pack_clean_nodep_gru.py` 从训练交付打出）。
 
 **新增检测点**：用 `/infer-workflow` skill 生成 Detector + Operator 框架，规范见 [知识库](docs/kb/INDEX.md)。
 
