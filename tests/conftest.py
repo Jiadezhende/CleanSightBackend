@@ -32,6 +32,13 @@ def make_frame_detection():
 
 # ---- 真正跨文件共享的 setup ----
 
+@pytest.fixture(autouse=True)
+def _isolate_storage_root(tmp_path_factory, monkeypatch):
+    """所有用例默认把存储根指到一个独立临时目录：`start_run` 会 `runs.allocate` 建 run 目录，
+    没显式要 `tmp_storage` 的用例也不能写进真实 `database/`。"""
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path_factory.mktemp("storage")))
+
+
 @pytest.fixture
 def tmp_storage(tmp_path, monkeypatch):
     """把 settings.storage_dir 指到隔离临时目录，读写两侧同源、用例间不串。"""

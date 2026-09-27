@@ -2,15 +2,13 @@
 
     q = SerialTaskQueue("hls")
     q.start()
-    q.submit(lambda: hls.insert_segment(task_id, step_id, "raw", frames),
-             label=f"seg:{task_id}/{step_id}/raw")
-    q.submit(lambda: hls.delete(task_id, step_id),
-             label=f"purge:{task_id}/{step_id}", timeout=30.0)
+    q.submit(lambda: hls.insert_segment(run, "raw", frames),
+             label=f"seg:{run.task_id}/{run.step_id}/raw")
     q.stop()
 
-两条约束，破坏后都不报错，表现是回放跳段、旧段串进新 run：
+两条约束，破坏后都不报错，表现是回放跳段：
 
-- **不加第二个 worker。** 同 step 的「先落残段、再整个删」与相邻段 tfdt 单调，全靠提交序 == 执行序。
+- **不加第二个 worker。** 同一 run 内相邻段 tfdt 单调，全靠提交序 == 执行序。
 - **一条队列一个语义，谁用谁 new**，也不建全局注册表统一起停（停机顺序约束属于域）。
 
 不做：重试（在 fn 里包 `GuardedExecutor`）、优先级、取消、结果回传、并行、跨进程。

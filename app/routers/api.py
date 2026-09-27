@@ -127,16 +127,16 @@ async def terminate(
         return {"status": "success", **no_op_id, "message": "no active run"}
 
     result = await asyncio.to_thread(
-        run_controller.stop_run, cq.task_id, "API termination request"
+        run_controller.stop_run, cq.run.task_id, "API termination request"
     )
 
     if result["errors"]:
         result["status"] = "partial_success"
         logger.warning(
-            f"[terminate] Completed with errors: task={cq.task_id} - {result['errors']}"
+            f"[terminate] Completed with errors: task={cq.run.task_id} - {result['errors']}"
         )
     else:
         result["status"] = "success"
-        logger.info(f"[terminate] Terminated successfully: task={cq.task_id}")
+        logger.info(f"[terminate] Terminated successfully: task={cq.run.task_id}")
 
     return result

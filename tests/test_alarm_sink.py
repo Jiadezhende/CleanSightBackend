@@ -11,6 +11,7 @@ persistence_manager.persist_alarm，测试用 monkeypatch 拦截该出口。
 from unittest.mock import MagicMock
 
 from factories import make_alarm
+from app.domain.run import RunIdentity
 from app.domain.alarm import AlarmMetric
 from app.services.inference.online.temporal import alarm_sink
 
@@ -24,8 +25,7 @@ def test_persist_alarms_reads_baked_stage(monkeypatch):
     )
 
     cq = MagicMock()
-    cq.task_id = 7
-    cq.step_id = 1
+    cq.run = RunIdentity(7, 1, 1)
     cq.source_ip = "c"
     cq.append_alarm_record_with_gate.return_value = True  # 过闸
 
@@ -48,8 +48,7 @@ def test_persist_alarms_gate_reject_skips_persist(monkeypatch):
     )
 
     cq = MagicMock()
-    cq.task_id = 7
-    cq.step_id = 1
+    cq.run = RunIdentity(7, 1, 1)
     cq.source_ip = "c"
     cq.append_alarm_record_with_gate.return_value = False  # 冷却窗口拦截
 

@@ -2,6 +2,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from app.domain.run import RunIdentity
 from app.services.inference.online.manager import InferenceManager
 from app.utils.exceptions import ValidationError
 
@@ -105,6 +106,5 @@ def test_real_manager_init_invariants_and_stop_workflow_smoke():
     assert m._actors == {}                          # 漏设 → stop_workflow 会 AttributeError
     # 无 actor、检测结果无残余 → 返回空 settlement、不抛
     cq = MagicMock()
-    cq.task_id = 999
-    cq.step_id = None
+    cq.run = RunIdentity(999, 0, 1)
     assert m.stop_workflow(cq) == []

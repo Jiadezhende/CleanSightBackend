@@ -114,7 +114,7 @@ class FFmpegDecoder:
         cq = self.client_queues
         return {
             "task_id": self.task_id,
-            "step_id": cq.step_id if cq else None,
+            "step_id": cq.run.step_id if cq and cq.run else None,
             "source_ip": cq.source_ip if cq else None,
         }
 

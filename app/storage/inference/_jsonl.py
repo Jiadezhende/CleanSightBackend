@@ -2,10 +2,10 @@
 
     encode(records)        一批 record → 待写文本
     decode(path)           整个 JSONL → record 列表，文件不存在返 []
-    write_atomic(path, s)  路线 C：同目录 tmp + os.replace
+    write_atomic(path, s)  路线 C：`_fs.replace`，不建父目录
 
 两份 JSONL 产物共用同一份行框定。`write_atomic` 服务 `temporal.jsonl` 的整批文本替换；
-`label_probs.npz` 是二进制，走同样的 tmp + `os.replace` 手法但自己写（见 `_temporal`）。
+`label_probs.npz` 是二进制，自己给 `_fs.replace` 传写函数（见 `_temporal`）。
 
 **错误语义**：单行坏了跳过 + warning（R6），IO 失败 `OSError` 原样抛，包成什么由调用方定。
 
@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
+
+from app.storage import _fs
 
 logger = logging.getLogger(__name__)
 
@@ -56,22 +57,11 @@ def decode(path: Path) -> List[Dict[str, Any]]:
 
 
 def write_atomic(path: Path, text: str) -> None:
-    """整体替换一份文本产物：写同目录 tmp → `os.replace` 原子换名（路线 C）。
+    """整体替换一份文本产物（路线 C，`_fs.replace`）。**不建父目录**。
 
-    tmp 与目标**同目录**（同卷才是原子换名，W1），点开头故匹配不上任何产物名。失败即整体
-    作废：删 tmp、不换名、原异常上抛（W4），盘上保留替换前的旧文件。
+    失败即整体作废：删 tmp、不换名、原异常上抛（W4），盘上保留替换前的旧文件。
 
     Raises:
-        OSError: 建目录 / 写 tmp / 换名失败。是否吞掉由调用方定。
+        OSError: 父目录不在 / 写 tmp / 换名失败。是否吞掉由调用方定。
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name("." + path.name + ".tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:  # 清 tmp 再失败不能盖掉原始错因
-            pass
-        raise
+    _fs.replace(path, lambda tmp: tmp.write_text(text, encoding="utf-8"))

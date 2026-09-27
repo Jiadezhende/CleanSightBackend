@@ -19,7 +19,7 @@ from factories import make_cq, make_detector_output
 
 def _task(cq, ts: float, *, w: int = 8, h: int = 4) -> DetectionTask:
     return DetectionTask(
-        task_id=cq.task_id, stage=cq.stage, timestamp=ts,
+        task_id=cq.run.task_id, stage=cq.stage, timestamp=ts,
         frame=np.zeros((h, w, 3), dtype=np.uint8), cq=cq,
     )
 

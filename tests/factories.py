@@ -16,6 +16,7 @@ import numpy as np
 from app.domain.alarm import Alarm
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.frame import Frame
+from app.domain.run import RunIdentity
 from app.services.client.queues import ClientQueues
 
 __all__ = [
@@ -84,13 +85,18 @@ def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:
 
 
 def make_cq(
-    *, task_id: int = 1, step_id: Optional[int] = 1,
+    *, task_id: int = 1, step_id: Optional[int] = 1, run_id: int = 1,
+    run: Optional[RunIdentity] = None,
     source_ip: str = "c1", stage: str = "1", **kw,
 ) -> ClientQueues:
-    """带不可变运行身份的 CQ（一 CQ == 一 run）。透传 ca_maxlen 等队列参数。"""
-    return ClientQueues(
-        task_id=task_id, step_id=step_id, source_ip=source_ip, stage=stage, **kw
-    )
+    """带不可变运行身份的 CQ（一 CQ == 一 run）。透传 ca_maxlen 等队列参数。
+
+    给了 `run` 就用它（要真落盘时传 `runs.allocate` 的结果）；否则按 task/step/run_id 现拼，
+    `step_id=None` 得到未绑定 run 的 CQ。
+    """
+    if run is None and step_id is not None:
+        run = RunIdentity(task_id, step_id, run_id)
+    return ClientQueues(run=run, source_ip=source_ip, stage=stage, **kw)
 
 
 def make_bare_cq(**kw) -> ClientQueues:
@@ -115,6 +121,28 @@ def make_alarm(
     )
 
 
+def make_run(task_id: int, step_id: int, run_id: Optional[int] = None) -> RunIdentity:
+    """该 step 盘上最新的 run（没有就建一个）——造数用，多次调用落同一个 run。
+
+    没有 run 时：给了 `run_id` 就按它建（造数的墙钟早于「现在」时，让 run 的开始时刻落在
+    首帧之前，timeline 的告警区间才对得上）；否则 `runs.allocate`。
+
+    调用前须让 `settings.storage_dir` 指到临时目录。只建 run 目录，**不保证可见**：
+    `runs.query` 缺省只认有 `hls/metadata.json` 或 `inference/detections.jsonl` 的 run。
+    """
+    from app.storage import _root, runs
+
+    step_dir = _root.path(task_id, step_id)
+    ids = sorted(int(p.name) for p in step_dir.iterdir() if p.name.isdigit()) if step_dir.is_dir() else []
+    if ids:
+        return RunIdentity(task_id, step_id, ids[-1])
+    if run_id is None:
+        return runs.allocate(task_id, step_id)
+    run = RunIdentity(task_id, step_id, run_id)
+    _root.run_path(run).mkdir(parents=True)
+    return run
+
+
 def seed_hls_segments(
     task_id: int,
     step_id: int,
@@ -124,7 +152,8 @@ def seed_hls_segments(
     with_init: bool = True,
     default_extinf_s: float = 10.0,
 ):
-    """在 `{task}/{step}/hls/` 铺段文件 + init，**并登记进清单**；返回域目录。
+    """在该 step 最新的 run（`make_run`）的 `hls/` 下铺段文件 + init，**并登记进清单**；
+    返回域目录。同时写一份 `metadata.json`，让这个 run 对 `runs.query` 可见。
 
     `items` 收 `[ts_us]` 或 `[(ts_us, extinf_s)]`。
 
@@ -134,21 +163,24 @@ def seed_hls_segments(
 
     调用前须让 `settings.storage_dir` 指到临时目录（conftest 的 `tmp_storage` fixture）。
     """
-    from app.storage import hls
-    from app.storage.hls import _m3u8
+    from app.storage import hls, runs
+    from app.storage.hls import _layout, _m3u8
 
+    run = make_run(task_id, step_id)
     normalised = [it if isinstance(it, tuple) else (it, default_extinf_s) for it in items]
-    domain_dir = hls.init_path(task_id, step_id, track).parent
-    domain_dir.mkdir(parents=True, exist_ok=True)
+    domain_dir = _layout.domain_dir(run, create=True)
 
     for ts_us, extinf_s in normalised:
         ref = hls.SegmentRef(track=track, ts_us=ts_us)
-        path = hls.segment_path(task_id, step_id, ref, create=True)
+        path = hls.segment_path(run, ref)
         path.write_bytes(b"fake-fmp4")
         _m3u8.append(
-            hls.playlist_path(task_id, step_id, track),
+            hls.playlist_path(run, track),
             hls.init_name(track), extinf_s, path.name,
         )
     if with_init:
-        hls.init_path(task_id, step_id, track).write_bytes(b"fake-init")
+        hls.init_path(run, track).write_bytes(b"fake-init")
+    metadata = _layout.metadata_path(run)
+    if not metadata.exists():
+        metadata.write_text("{}", encoding="utf-8")
     return domain_dir

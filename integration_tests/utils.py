@@ -447,7 +447,7 @@ def seed_hls_segments(
     ts_us_list: List[int],
     segment_duration: float = 10.0,
 ) -> Path:
-    """在存储根 `{task}/{step}/hls/` 为 raw / processed 两轨铺假段 + init 并登记进清单。
+    """在该 step 最新 run 的 `hls/`（`{task}/{step}/{run_id}/hls/`）为 raw / processed 两轨铺假段 + init 并登记进清单。
 
     复用 `tests/factories.seed_hls_segments`，落盘形态与 `hls.insert_segment` 一致。
     存储根取本进程的 `settings.storage_dir`，须与被测后端同机、同配置。
@@ -461,7 +461,7 @@ def seed_hls_segments(
         domain_dir = seed_track(
             task_id, step_id, ts_us_list, track=track, default_extinf_s=segment_duration
         )
-    step_dir = domain_dir.parent
+    step_dir = domain_dir.parent.parent
     print(f"✅ 创建测试 HLS 段: {domain_dir} ({len(ts_us_list)} 段/轨道)")
     return step_dir
 

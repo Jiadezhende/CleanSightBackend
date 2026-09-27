@@ -28,8 +28,8 @@ def persist_alarms(alarms: List[Alarm], *, cq, mode: str, log_each: bool = False
     metric 直接读 alarm.metric（产出方已填）；client_id / task_id / step_id 均由 cq 派生。
     顺序先内存后外部：内存日志供前端实时轮询，外部库本就 30s 批次。
     """
-    task_id = cq.task_id
-    step_id = cq.step_id
+    task_id = cq.run.task_id
+    step_id = cq.run.step_id
     client_id = cq.source_ip
 
     for alarm in alarms:

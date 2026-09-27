@@ -1,6 +1,6 @@
 """recording 模块 —— HLS 录制落盘的编排者。
 
-把 CQ 里攒好的帧变成盘上一个可播的 HLS 段：**什么时候拉、按什么顺序写、算哪一代的产物**。
+把 CQ 里攒好的帧变成盘上一个可播的 HLS 段：**什么时候拉、按什么顺序写**。
 格式怎么落盘不在这里，那全在数据层 `app.storage.hls`。
 
     对外          app/services/recording/
@@ -8,7 +8,7 @@
       instance.py   recording_service 单例
       service.py    RecordingService —— start / stop / collect_from /
                                         submit_segment / flush_residual /
-                                        request_residual_flush / forget_task
+                                        request_residual_flush
       config.py     RecordingConfig（config/recording_config.yaml）
     包内私有
       _sweeper.py   节拍器：周期触发 service.collect_from，只由 RecordingService 构造
@@ -24,7 +24,7 @@ re-export `service` 会把 `app.storage.hls` 与 client → numpy 那条链摊�
 ## 已接线（生产写侧就是这里）
 
 `app/main.py` 嵌 `lifespan()`（persistence 同一档、inference 外层），`run_control` 拆除时调
-`flush_residual` / `forget_task`，产物落 `{task}/{step}/hls/`。
+`flush_residual`，产物落 `cq.run` 的 `{task}/{step}/{run_id}/hls/` 与 `inference/`。
 
 ⚠ **同一时刻只能有一个 sweeper 从 CQ 取帧**——sweeper 从活跃 CQ 破坏性 drain，两个同时跑会
 各拿走一半帧、产出两份互相缺帧却都自洽的段，两端都不报错。

@@ -1,4 +1,4 @@
-"""`app.storage.inference`：`{step}/inference/` 下三份推理产物的编解码与读写。
+"""`app.storage.inference`：`{step}/{run_id}/inference/` 下三份推理产物的编解码与读写。
 
     detections.jsonl      L1 检测结果，路线 B（追加）
     temporal.jsonl      L3 时序事实，路线 C（原子整体替换）
@@ -11,7 +11,7 @@
 1. **往返**（T1）：codec 是本域唯一有内容的东西，正反运算必须闭合。detections 侧投影掉的字段
    （extra/metadata）按契约回读为默认值，这是有意有损，也一并钉死；facts 侧无损。
 2. **事务不变式**（T3）：路线 C 失败即整体作废——旧文件原样保留、不留 tmp。
-3. **落位**：产物只进 `inference/` 子目录，step 根下不留文件——域隔离的执行力。
+3. **落位**：产物只进 run 下的 `inference/` 子目录，run 根下不留文件——域隔离的执行力。
 4. **错误语义**：坏行逐行隔离、形状不对的 record 跳过、IO 失败原样抛。
 """
 
@@ -22,9 +22,10 @@ import pytest
 
 from factories import make_det_box
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
+from app.domain.run import RunIdentity
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.storage import inference
-from app.storage.inference import _detection, _jsonl, _temporal
+from app.storage import _fs, inference
+from app.storage.inference import _detection, _temporal
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +60,20 @@ def _evt(signal="birth_rate", value=0.5, ts=1.0, producer="bubble_leak", **kw) -
     return TemporalEvent(producer=producer, signal=signal, value=value, ts=ts, **kw)
 
 
+RUN_ID = 7
+
+
+def _run(task_id, step_id):
+    """固定 run_id 的 run，并建好它的目录（分配者的职责，写者只建域这一级）。"""
+    from app.storage import _root
+
+    run = RunIdentity(task_id, step_id, RUN_ID)
+    _root.run_path(run).mkdir(parents=True, exist_ok=True)
+    return run
+
+
 def _domain_dir(root, task_id, step_id):
-    return root / str(task_id) / str(step_id) / "inference"
+    return root / str(task_id) / str(step_id) / str(RUN_ID) / "inference"
 
 
 def _detections_file(root, task_id, step_id):
@@ -143,65 +156,65 @@ class TestDetectionCodec:
 
 class TestDetectionsReadWrite:
     def test_append_read_roundtrip(self, tmp_storage):
-        inference.append_detections(1, 2, [_frame(1.0), _frame(2.0)])
-        got = inference.read_detections(1, 2)
+        inference.append_detections(_run(1, 2), [_frame(1.0), _frame(2.0)])
+        got = inference.read_detections(_run(1, 2))
         assert [f.ts for f in got] == [1.0, 2.0]
         assert got[0].by_source["cam"].boxes[0].bbox == [1, 2, 3, 4]
 
     def test_append_accumulates_across_calls(self, tmp_storage):
-        inference.append_detections(1, 2, [_frame(1.0)])
-        inference.append_detections(1, 2, [_frame(2.0), _frame(3.0)])
-        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0, 2.0, 3.0]
+        inference.append_detections(_run(1, 2), [_frame(1.0)])
+        inference.append_detections(_run(1, 2), [_frame(2.0), _frame(3.0)])
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [1.0, 2.0, 3.0]
 
     def test_read_sorts_by_ts(self, tmp_storage):
-        inference.append_detections(1, 2, [_frame(3.0), _frame(1.0), _frame(2.0)])
-        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0, 2.0, 3.0]
+        inference.append_detections(_run(1, 2), [_frame(3.0), _frame(1.0), _frame(2.0)])
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [1.0, 2.0, 3.0]
 
     def test_read_missing_returns_empty(self, tmp_storage):
-        assert inference.read_detections(9, 9) == []
+        assert inference.read_detections(_run(9, 9)) == []
 
     def test_read_missing_creates_nothing(self, tmp_storage):
         """读一个没写过的 step 不该在盘上留空目录 —— 空目录会被 tasks.list_task_ids() 列出。"""
-        inference.read_detections(9, 9)
+        inference.read_detections(RunIdentity(9, 9, RUN_ID))
         assert list(tmp_storage.iterdir()) == []
 
     def test_empty_batch_writes_nothing(self, tmp_storage):
         """追加零条 = 没事发生：不建目录、不建文件（与 write_temporal 的空批语义刻意不同）。"""
-        inference.append_detections(1, 2, [])
-        assert list(tmp_storage.iterdir()) == []
+        inference.append_detections(_run(1, 2), [])
+        assert not _domain_dir(tmp_storage, 1, 2).exists()
 
-    def test_writes_into_domain_dir_not_step_root(self, tmp_storage):
-        """域隔离：step 根下只有域目录、没有文件。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
+    def test_writes_into_domain_dir_not_run_root(self, tmp_storage):
+        """域隔离：run 根下只有域目录、没有文件。"""
+        inference.append_detections(_run(1, 2), [_frame(1.0)])
+        assert [p.name for p in (tmp_storage / "1" / "2" / str(RUN_ID)).iterdir()] == ["inference"]
         assert _detections_file(tmp_storage, 1, 2).is_file()
 
     def test_steps_are_isolated(self, tmp_storage):
-        inference.append_detections(1, 1, [_frame(1.0)])
-        inference.append_detections(1, 2, [_frame(2.0), _frame(3.0)])
-        assert [f.ts for f in inference.read_detections(1, 1)] == [1.0]
-        assert [f.ts for f in inference.read_detections(1, 2)] == [2.0, 3.0]
+        inference.append_detections(_run(1, 1), [_frame(1.0)])
+        inference.append_detections(_run(1, 2), [_frame(2.0), _frame(3.0)])
+        assert [f.ts for f in inference.read_detections(_run(1, 1))] == [1.0]
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [2.0, 3.0]
 
     def test_tasks_are_isolated(self, tmp_storage):
-        inference.append_detections(1, 1, [_frame(1.0)])
-        inference.append_detections(2, 1, [_frame(9.0)])
-        assert [f.ts for f in inference.read_detections(2, 1)] == [9.0]
+        inference.append_detections(_run(1, 1), [_frame(1.0)])
+        inference.append_detections(_run(2, 1), [_frame(9.0)])
+        assert [f.ts for f in inference.read_detections(_run(2, 1))] == [9.0]
 
     def test_skips_corrupt_line_without_losing_the_rest(self, tmp_storage):
         """JSONL 逐行独立：一行坏了不该让其余几万帧陪葬。"""
-        inference.append_detections(1, 2, [_frame(1.0), _frame(2.0)])
+        inference.append_detections(_run(1, 2), [_frame(1.0), _frame(2.0)])
         with _detections_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write("{not json\n\n")
-        inference.append_detections(1, 2, [_frame(3.0)])
-        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0, 2.0, 3.0]
+        inference.append_detections(_run(1, 2), [_frame(3.0)])
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [1.0, 2.0, 3.0]
 
     def test_skips_valid_json_that_is_not_an_object(self, tmp_storage):
         """`123` / `[1,2]` 都是合法 JSON，但本域每行按契约是一条 record ——
         放行它们只会让 `.get` 在下游炸成 AttributeError。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
+        inference.append_detections(_run(1, 2), [_frame(1.0)])
         with _detections_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write("123\n[1, 2]\n")
-        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0]
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [1.0]
 
     def test_skips_record_with_wrong_shape(self, tmp_storage):
         """能 json.loads 但形状不对（缺 conf）的 record 与坏行同等对待，不中断其余帧。"""
@@ -212,7 +225,7 @@ class TestDetectionsReadWrite:
             + json.dumps(_detection._frame_to_record(_frame(2.0))) + "\n",
             encoding="utf-8",
         )
-        assert [f.ts for f in inference.read_detections(1, 2)] == [2.0]
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [2.0]
 
     def test_tolerates_utf8_bom(self, tmp_storage):
         """Windows 上手写/另存的 detections.jsonl 会带 BOM，读侧必须容忍。"""
@@ -222,14 +235,16 @@ class TestDetectionsReadWrite:
             json.dumps(_detection._frame_to_record(_frame(5.0))) + "\n",
             encoding="utf-8-sig",
         )
-        assert [f.ts for f in inference.read_detections(1, 2)] == [5.0]
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [5.0]
 
     def test_io_failure_propagates(self, tmp_storage):
         """IO 失败原样抛 —— 吞不吞是调用方的策略，本包给不出对两个调用方都对的答案。"""
-        (tmp_storage / "1").mkdir()
-        (tmp_storage / "1" / "2").write_text("occupied", encoding="utf-8")  # step 目录被文件占位
+        run = _run(1, 2)
+        run_dir = tmp_storage / "1" / "2" / str(RUN_ID)
+        run_dir.rmdir()
+        run_dir.write_text("occupied", encoding="utf-8")  # run 目录被文件占位
         with pytest.raises(OSError):
-            inference.append_detections(1, 2, [_frame(1.0)])
+            inference.append_detections(run, [_frame(1.0)])
 
 
 # ---------------------------------------------------------------------------
@@ -292,77 +307,77 @@ class TestFactCodec:
 class TestFactsReadWrite:
     def test_write_read_roundtrip(self, tmp_storage):
         src = [_seg(label="a"), _evt(signal="s")]
-        inference.write_temporal(1, 2, src)
-        assert inference.read_temporal(1, 2) == src
+        inference.write_temporal(_run(1, 2), src)
+        assert inference.read_temporal(_run(1, 2)) == src
 
     def test_preserves_disk_order(self, tmp_storage):
         """层**不排序**：两型没有共同时间键，排序依据只能由调用方给。"""
-        inference.write_temporal(1, 2, [_seg(label="c", start=9.0), _seg(label="a", start=1.0)])
-        assert [f.label for f in inference.read_temporal(1, 2)] == ["c", "a"]
+        inference.write_temporal(_run(1, 2), [_seg(label="c", start=9.0), _seg(label="a", start=1.0)])
+        assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["c", "a"]
 
     def test_write_replaces_the_whole_file(self, tmp_storage):
         """整体替换，不是追加 —— 第二次写之后旧内容一条都不剩。"""
-        inference.write_temporal(1, 2, [_seg(label="old"), _seg(label="older")])
-        inference.write_temporal(1, 2, [_seg(label="new")])
-        assert [f.label for f in inference.read_temporal(1, 2)] == ["new"]
+        inference.write_temporal(_run(1, 2), [_seg(label="old"), _seg(label="older")])
+        inference.write_temporal(_run(1, 2), [_seg(label="new")])
+        assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["new"]
 
     def test_empty_batch_writes_an_empty_file(self, tmp_storage):
         """「跑过、没分出任何段」与「根本没跑过」在盘上要能分开：前者留一个空文件。"""
-        inference.write_temporal(1, 2, [])
+        inference.write_temporal(_run(1, 2), [])
         assert _facts_file(tmp_storage, 1, 2).is_file()
         assert _facts_file(tmp_storage, 1, 2).read_text(encoding="utf-8") == ""
-        assert inference.read_temporal(1, 2) == []
+        assert inference.read_temporal(_run(1, 2)) == []
 
     def test_read_missing_returns_empty(self, tmp_storage):
-        assert inference.read_temporal(9, 9) == []
+        assert inference.read_temporal(_run(9, 9)) == []
 
     def test_read_missing_creates_nothing(self, tmp_storage):
-        inference.read_temporal(9, 9)
+        inference.read_temporal(RunIdentity(9, 9, RUN_ID))
         assert list(tmp_storage.iterdir()) == []
 
-    def test_writes_into_domain_dir_not_step_root(self, tmp_storage):
-        inference.write_temporal(1, 2, [_seg()])
-        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
+    def test_writes_into_domain_dir_not_run_root(self, tmp_storage):
+        inference.write_temporal(_run(1, 2), [_seg()])
+        assert [p.name for p in (tmp_storage / "1" / "2" / str(RUN_ID)).iterdir()] == ["inference"]
         assert _facts_file(tmp_storage, 1, 2).is_file()
 
     def test_leaves_no_tmp_behind(self, tmp_storage):
         """路线 C 的暂存件换名后即消失，盘上不留 `.temporal.jsonl.tmp`。"""
-        inference.write_temporal(1, 2, [_seg()])
+        inference.write_temporal(_run(1, 2), [_seg()])
         assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["temporal.jsonl"]
 
     def test_skips_corrupt_line_without_losing_the_rest(self, tmp_storage):
-        inference.write_temporal(1, 2, [_seg(label="a")])
+        inference.write_temporal(_run(1, 2), [_seg(label="a")])
         with _facts_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write("{not json\n")
-        assert [f.label for f in inference.read_temporal(1, 2)] == ["a"]
+        assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["a"]
 
     def test_skips_unknown_type_without_losing_the_rest(self, tmp_storage):
         """将来新增第三型时，旧版本读到它是跳过一行，不是整份读不出来。"""
-        inference.write_temporal(1, 2, [_seg(label="a")])
+        inference.write_temporal(_run(1, 2), [_seg(label="a")])
         with _facts_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "future", "producer": "p"}) + "\n")
-        assert [f.label for f in inference.read_temporal(1, 2)] == ["a"]
+        assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["a"]
 
     def test_encode_failure_touches_nothing(self, tmp_storage):
         """整批先编码完再碰盘：序列化炸的时候盘上一个字节没动（W4）。"""
         with pytest.raises(TypeError):
-            inference.write_temporal(1, 2, [_evt(value=object())])
-        assert list(tmp_storage.iterdir()) == []
+            inference.write_temporal(_run(1, 2), [_evt(value=object())])
+        assert not _domain_dir(tmp_storage, 1, 2).exists()
 
     def test_failed_replace_keeps_the_old_file(self, tmp_storage, monkeypatch):
         """换名那步失败 = 整体作废：旧文件原样保留、tmp 不残留、原异常上抛（W4）。"""
-        inference.write_temporal(1, 2, [_seg(label="old")])
+        inference.write_temporal(_run(1, 2), [_seg(label="old")])
 
         def boom(src, dst):
             raise OSError("disk full")
 
         # ⚠ 别在这里 monkeypatch.undo()：`tmp_storage` fixture 与本用例共用同一个
         # monkeypatch 实例，undo 会把 settings.storage_dir 一并还原，读侧当场指回真实 database/。
-        monkeypatch.setattr(_jsonl.os, "replace", boom)
+        monkeypatch.setattr(_fs.os, "replace", boom)
         with pytest.raises(OSError):
-            inference.write_temporal(1, 2, [_seg(label="new")])
+            inference.write_temporal(_run(1, 2), [_seg(label="new")])
 
-        assert [f.label for f in inference.read_temporal(1, 2)] == ["old"]
+        assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["old"]
         assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["temporal.jsonl"]
 
 
@@ -382,49 +397,48 @@ def _probs(ts=(1.0, 2.0, 3.0), labels=("idle", "flush")):
 class TestLabelProbs:
     def test_roundtrip_ts_bit_exact_probs_float16(self, tmp_storage):
         ts = (1727000000.123456, 1727000000.190123, 1727000000.256789)
-        inference.write_label_probs(1, 2, _probs(ts=ts))
-        got = inference.read_label_probs(1, 2)
+        inference.write_label_probs(_run(1, 2), _probs(ts=ts))
+        got = inference.read_label_probs(_run(1, 2))
         assert got.ts.dtype == np.float64 and got.ts.tolist() == list(ts)  # ts 是帧身份，位级相等
         assert got.probs.dtype == np.float32 and got.probs.shape == (3, 2)
         assert got.probs[:, 1].tolist() == [0.75] * 3                     # 0.75 在 float16 下精确
         assert got.labels == ("idle", "flush")
 
     def test_writes_into_domain_dir_only(self, tmp_storage):
-        inference.write_label_probs(1, 2, _probs())
-        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
+        inference.write_label_probs(_run(1, 2), _probs())
+        assert [p.name for p in (tmp_storage / "1" / "2" / str(RUN_ID)).iterdir()] == ["inference"]
         assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["label_probs.npz"]
 
     def test_overwrites_previous_run(self, tmp_storage):
-        inference.write_label_probs(1, 2, _probs(labels=("idle", "a")))
-        inference.write_label_probs(1, 2, _probs(labels=("idle", "b")))
-        assert inference.read_label_probs(1, 2).labels == ("idle", "b")
+        inference.write_label_probs(_run(1, 2), _probs(labels=("idle", "a")))
+        inference.write_label_probs(_run(1, 2), _probs(labels=("idle", "b")))
+        assert inference.read_label_probs(_run(1, 2)).labels == ("idle", "b")
 
     def test_missing_returns_none(self, tmp_storage):
-        assert inference.read_label_probs(1, 2) is None
+        assert inference.read_label_probs(RunIdentity(1, 2, RUN_ID)) is None
         assert list(tmp_storage.iterdir()) == []
 
     def test_empty_sequence_roundtrips(self, tmp_storage):
-        inference.write_label_probs(
-            1, 2, LabelProbs(ts=np.zeros(0), probs=np.zeros((0, 2)), labels=("idle", "a"))
+        inference.write_label_probs(_run(1, 2), LabelProbs(ts=np.zeros(0), probs=np.zeros((0, 2)), labels=("idle", "a"))
         )
-        got = inference.read_label_probs(1, 2)
+        got = inference.read_label_probs(_run(1, 2))
         assert got.ts.shape == (0,) and got.probs.shape == (0, 2)
 
     def test_no_pickle_on_disk(self, tmp_storage):
-        inference.write_label_probs(1, 2, _probs())
+        inference.write_label_probs(_run(1, 2), _probs())
         with np.load(_probs_file(tmp_storage, 1, 2), allow_pickle=False) as npz:  # 能以禁 pickle 读回即无对象数组
             assert sorted(npz.files) == ["labels", "probs", "ts"]
 
     def test_failed_write_keeps_old_file_and_no_tmp(self, tmp_storage, monkeypatch):
-        inference.write_label_probs(1, 2, _probs(labels=("idle", "old")))
+        inference.write_label_probs(_run(1, 2), _probs(labels=("idle", "old")))
 
         def boom(*a, **k):
             raise OSError("disk full")
 
-        monkeypatch.setattr(_temporal.os, "replace", boom)
+        monkeypatch.setattr(_fs.os, "replace", boom)
         with pytest.raises(OSError):
-            inference.write_label_probs(1, 2, _probs(labels=("idle", "new")))
-        assert inference.read_label_probs(1, 2).labels == ("idle", "old")
+            inference.write_label_probs(_run(1, 2), _probs(labels=("idle", "new")))
+        assert inference.read_label_probs(_run(1, 2)).labels == ("idle", "old")
         assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["label_probs.npz"]
 
 
@@ -435,54 +449,11 @@ class TestLabelProbs:
 
 class TestArtifactIsolation:
     def test_write_temporal_leaves_detections_alone(self, tmp_storage):
-        inference.append_detections(1, 2, [_frame(1.0)])
-        inference.write_temporal(1, 2, [_seg()])
-        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0]
+        inference.append_detections(_run(1, 2), [_frame(1.0)])
+        inference.write_temporal(_run(1, 2), [_seg()])
+        assert [f.ts for f in inference.read_detections(_run(1, 2))] == [1.0]
 
     def test_append_detections_leaves_facts_alone(self, tmp_storage):
-        inference.write_temporal(1, 2, [_seg(label="a")])
-        inference.append_detections(1, 2, [_frame(1.0)])
-        assert [f.label for f in inference.read_temporal(1, 2)] == ["a"]
-
-
-# ---------------------------------------------------------------------------
-# 整域删除
-# ---------------------------------------------------------------------------
-
-
-class TestDeleteDomain:
-    def test_deletes_and_reports_prior_existence(self, tmp_storage):
-        inference.append_detections(1, 2, [_frame(1.0)])
-        assert inference.delete(1, 2) is True
-        assert inference.read_detections(1, 2) == []
-        assert inference.delete(1, 2) is False
-
-    def test_takes_all_three_artifacts(self, tmp_storage):
-        """supersede 清的是整域：新 run 的检测结果换了，旧 facts 是对旧检测结果的分析，留着即脏数据。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-        inference.write_temporal(1, 2, [_seg()])
-        inference.write_label_probs(1, 2, _probs())
-
-        assert inference.delete(1, 2) is True
-        assert not _domain_dir(tmp_storage, 1, 2).exists()
-
-    def test_missing_returns_false_and_creates_nothing(self, tmp_storage):
-        assert inference.delete(1, 2) is False
-        assert list(tmp_storage.iterdir()) == []
-
-    def test_leaves_other_domains_untouched(self, tmp_storage):
-        """只删本域：同 step 的 `hls/` 一个字节都不碰。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-        hls_dir = tmp_storage / "1" / "2" / "hls"
-        hls_dir.mkdir(parents=True)
-        (hls_dir / "raw_playlist.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
-
-        assert inference.delete(1, 2) is True
-        assert (hls_dir / "raw_playlist.m3u8").read_text(encoding="utf-8") == "#EXTM3U\n"
-
-    def test_append_after_delete_starts_clean(self, tmp_storage):
-        """这正是 supersede 要的：新 run 读到的永远是自己那段完整序列。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-        inference.delete(1, 2)
-        inference.append_detections(1, 2, [_frame(9.0)])
-        assert [f.ts for f in inference.read_detections(1, 2)] == [9.0]
+        inference.write_temporal(_run(1, 2), [_seg(label="a")])
+        inference.append_detections(_run(1, 2), [_frame(1.0)])
+        assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["a"]

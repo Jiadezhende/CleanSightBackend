@@ -51,7 +51,7 @@
 | `400` | 该任务 DB 中 `current_step` 不是数字，或推理配置里没有这个 step、该 step 没配在线检测（`ValidationError`，`field="current_step"`）。**校验在动旧 run 之前**，同 task 正在跑的 run 不受影响 | `{"error":"Validation error","detail":"...","field":"current_step"}` |
 | `404` | `task_id` 在 `clean_task` 表中不存在 | `{"error":"Resource not found","detail":"...","resource_type":"Task","resource_id":"123"}` |
 | `503` | DB 查询失败（`DatabaseError`，可重试） | `{"error":"Internal error","detail":"...","retryable":true}` |
-| `500` | workflow 启动失败等内部错误（`AppError`） | `{"error":"Internal error","detail":"...","retryable":false}` |
+| `500` | workflow 启动失败、落盘目录建不出来（盘满 / 权限）等内部错误（`AppError`）。建目录在停旧 run 之后：step 或 url 变化触发的重启若在这一步失败，旧 run 已停 | `{"error":"Internal error","detail":"...","retryable":false}` |
 
 > **判分支只认 status code，别依赖 body 字段：** 参数缺失/类型错走 FastAPI 的 **422**（body 是 `detail` 数组），而 `source_ip` 为空是业务 **400**（body 是 `{"error","detail","field"}`）——两者都是"入参有问题"但 code 和 body 形态都不同。完整错误模型见 [README](README.md#错误模型)。
 

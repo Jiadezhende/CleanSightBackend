@@ -499,7 +499,7 @@ class GlobalHealthMonitor:
 
     def _handle_task_timeout(self, task_id: int, cq, task_age: float):
         """处理任务超时：仅执行运维治理动作，不产出业务告警。"""
-        # 注：入参 task_id 即 cq.task_id（client_id/task_id 合一后同一个键），不再重取覆盖
+        # 注：入参 task_id 即 cq.run.task_id（client_id/task_id 合一后同一个键），不再重取覆盖
         logger.error(
             "[GlobalHealthMonitor] TASK TIMEOUT: task_id=%s, running=%.1fh, max=%.1fh",
             task_id, task_age / 3600, self.config.task_max_duration / 3600,

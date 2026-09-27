@@ -1,8 +1,8 @@
 """
-StepExporter —— 把一个 (task_id, step_id, track) 的全部落盘段导出为单个 mp4。
+StepExporter —— 把一个 run 某轨的全部落盘段导出为单个 mp4。
 
-输入：(task_id, step_id, track)
-输出：单个 mp4 文件，内容 = 该 step 该轨已完成落盘的全部段按时序拼接
+输入：(run: RunIdentity, track)
+输出：单个 mp4 文件，内容 = 该 run 该轨已完成落盘的全部段按时序拼接
 
 与 ClipBuilder 的分工：
 - ClipBuilder：ms 精度区间裁剪 → 必须 -ss/-to + libx264 重编码（送标用）
@@ -14,7 +14,7 @@ fragment，remux 成 mp4 只是换容器——磁盘速度、零 CPU、零二次
 实现思路（与 ClipBuilder._run_ffmpeg 同构，坑点相同）：
 1. hls.list_segments 一次拿到"有哪些段"与"各自多长"（清单是唯一真源，EXTINF 是时长真值）
 2. render_vod 拼 VOD 清单（EXT-X-MAP 引 init.mp4 + 段列表 + ENDLIST）
-3. 清单落在 `{step}/hls/`（段与 init 的所在目录），相对 URI 才解析得到它们，喂 ffmpeg HLS demuxer
+3. 清单落在 `{run}/hls/`（段与 init 的所在目录），相对 URI 才解析得到它们，喂 ffmpeg HLS demuxer
 4. `-c copy -movflags +faststart` 输出到 temp_root
 
 为什么不用 `-f concat`：段是 fMP4 fragment（无 moov），concat demuxer 单独 demux 时找不到
@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from app.domain.run import RunIdentity
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls
 
@@ -58,7 +59,7 @@ class StepExportError(Exception):
 
 
 class StepExportNoSegments(StepExportError):
-    """该 (task_id, step_id, track) 没有可导出的段（无段 / 全是在途段）。"""
+    """该 run 该轨没有可导出的段（无段 / 全是在途段）。"""
 
 
 class StepExportInitMissing(StepExportError):
@@ -92,8 +93,8 @@ class StepExporter:
 
     # -------- public API --------
 
-    def export(self, task_id: int, step_id: int, track: str) -> Path:
-        """导出整个 step 的指定轨为单个 mp4，返回产物路径。
+    def export(self, run: RunIdentity, track: str) -> Path:
+        """导出该 run 的指定轨为单个 mp4，返回产物路径。
 
         产物归调用方所有——用完须自行删除（路由层挂 BackgroundTask）。
 
@@ -107,7 +108,8 @@ class StepExporter:
         # 一次读清单同时回答"有哪些段"与"各自多长"：EXTINF 是时长唯一真值（不能用文件名
         # ts 差重推），而清单本身就是段集合——没有条目的段是在途段（mp4v 已落、
         # transcode+append 未完成）或登记失败的段，喂给 ffmpeg 会静默截短。
-        segments = hls.list_segments(task_id, step_id, track)
+        task_id, step_id = run.task_id, run.step_id
+        segments = hls.list_segments(run, track)
         if not segments:
             # 文案不再分"盘上没段"与"有段没登记"两档：判据收口到清单之后，域里已经没有
             # 第二个能回答"盘上有什么"的入口了（那正是收口的目的）。两种可能一并提示。
@@ -116,17 +118,15 @@ class StepExporter:
                 f"(wrong track, or the first segment is still transcoding)"
             )
 
-        init_path = hls.init_path(task_id, step_id, track)
+        init_path = hls.init_path(run, track)
         if not init_path.exists():
-            # 与 traceback._build_vod_playlist 同一判据：缺 init = 旧格式产物（不支持、
-            # 无迁移路径）或首段仍在 transcode。两者都不可自愈。
+            # 与 traceback._build_vod_playlist 同一判据：缺 init = 首段仍在 transcode。
             raise StepExportInitMissing(
                 f"{hls.init_name(track)} not found for task {task_id} step {step_id}. "
-                "This step is either mid-transcode or written in an unsupported "
-                "legacy layout; it cannot be exported."
+                "The first segment is still transcoding; it cannot be exported yet."
             )
 
-        # 临时清单落在 init 与段的所在目录（`{step}/hls/`），裸文件名的相对 URI 才解析得到
+        # 临时清单落在 init 与段的所在目录（`{run}/hls/`），裸文件名的相对 URI 才解析得到
         # 它们。`.export_*.m3u8` 匹配不上域内的段名 / init 名正则，读侧枚举天然跳过。
         hls_dir = init_path.parent
         nonce = secrets.token_hex(6)

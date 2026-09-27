@@ -4,6 +4,7 @@ import pytest
 from factories import make_alarm
 from httpx import ASGITransport, AsyncClient
 
+from app.domain.run import RunIdentity
 from app.main import app
 
 
@@ -54,7 +55,7 @@ async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
     alarm = make_alarm(metric=AlarmMetric.BUBBLE, mode="REALTIME", seq=2, timestamp=1.0)
 
     cq = MagicMock()
-    cq.task_id = 1
+    cq.run = RunIdentity(1, 1, 1)
     cq.get_alarm_snapshot.return_value = ([alarm], 2)
     cq.get_slide_window_summary.return_value = {
         "bubble": {"active": True, "hit_count": 1, "max_conf": 0.8}

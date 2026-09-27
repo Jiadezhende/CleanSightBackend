@@ -94,8 +94,8 @@ class InferenceManager:
         )
 
         # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
-        # recording 的 sweeper 拉走写 `{task}/{step}/inference/detections.jsonl`。本 manager
-        # 因此不持有任何 store、不管 supersede（recording 首写自清）、不管 flush。
+        # recording 的 sweeper 拉走写 `cq.run` 的 `inference/detections.jsonl`。本 manager
+        # 因此不持有任何 store、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()
 
     def _get_stage_configs(self) -> Dict[str, Dict[str, Any]]:
@@ -193,12 +193,12 @@ class InferenceManager:
         """起该 run 的推理 workflow：建并启 actor（存储侧无起始钩子）。
 
         入参是 RunController 已建好并**已注册**（client_manager.set）的不可变身份 CQ
-        （一 CQ == 一 run）。调用方已持 lock_for(cq.task_id)，与 stop_workflow 互斥；重启路径下
+        （一 CQ == 一 run）。调用方已持 lock_for(cq.run.task_id)，与 stop_workflow 互斥；重启路径下
         RunController 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
         RunController（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
         resolve_stage 定死）。
         """
-        task_id = cq.task_id
+        task_id = cq.run.task_id
         # 防御：残留旧 actor（正常路径 stop_workflow 已 pop，不应命中）——信号停、丢弃、不结算。
         stale = self._actors.pop(task_id, None)
         if stale is not None:
@@ -207,9 +207,7 @@ class InferenceManager:
             )
             stale.signal_stop()
 
-        # 注：起始**不再截断存储分区**。同 (task,step) 重启的 supersede 归 recording 的
-        # 懒惰首写自清（本代次第一批检测结果真正落盘时才 `inference.delete`），与 HLS 同款——
-        # 新 run 若一帧检测结果都没写出来，上一代的产物原样保留、离线还能跑。
+        # 注：起始不碰存储。每次 run 由 `run_control` 分配自己的 run 目录，上一代产物原样保留。
 
         # 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
         stage = cq.stage
@@ -254,9 +252,9 @@ class InferenceManager:
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
         交给 RunController 转 PersistenceManager；HLS 残段 / 剩余检测结果归 recording，告警落库归
         persistence，前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持
-        lock_for(cq.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
+        lock_for(cq.run.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
-        task_id = cq.task_id
+        task_id = cq.run.task_id
         logger.info("[InferenceManager] Stopping workflow: task=%s", task_id)
 
         settlement: List[Alarm] = []

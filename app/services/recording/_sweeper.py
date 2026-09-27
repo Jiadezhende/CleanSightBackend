@@ -60,9 +60,8 @@ class SegmentSweeper:
     def _sweep(self) -> None:
         """对每个活跃 CQ 调一次 `collect_from`。
 
-        **`cq` 整个传过去**，不拆成 task_id/step_id：代次身份就是这个对象引用，必须在
-        **取帧的那一刻**捕获。晚一步去注册表里取，取到的可能已经是新一代的 CQ，这批帧
-        就会被记到别人名下。
+        **`cq` 整个传过去**：帧归属的 run 就是 `cq.run`，必须在**取帧的那一刻**捕获。晚一步
+        去注册表里取，取到的可能已经是新一代的 CQ，这批帧就会被记到别人名下。
         """
         for cq in self._clients.snapshot().values():
             self._service.collect_from(cq)

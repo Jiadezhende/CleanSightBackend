@@ -15,6 +15,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from app.domain.alarm import ALARM_MODE_SETTLEMENT
+from app.storage import runs
 from .client.config import get_client_config
 from .client.manager import client_manager
 from .client.queues import ClientQueues
@@ -37,7 +38,7 @@ class RunController:
         rtsp_url: str,
         source_ip: str = "",
     ) -> Dict[str, Any]:
-        """启动一次 run：幂等检查 / 重启清理 → 建 CQ + start_workflow → 起流。
+        """启动一次 run：幂等检查 / 重启清理 → 分配 run 目录 → 建 CQ + start_workflow → 起流。
 
         运行键 = **`task_id`(int)**。入参均为 primitive（不接触 DB/HTTP）。全程持
         `lock_for(task_id)`，与拆除互斥。幂等命中直接返回；start_workflow 失败抛 AppError。
@@ -61,7 +62,7 @@ class RunController:
                 if old_cq is not None:
                     cur_url = (stream_service.get_stream_info(task_id) or {}).get("url")
                     # 完全相同（step / URL 均未变）才幂等返回，否则全量重建
-                    if old_cq.step_id == step_id and cur_url == rtsp_url:
+                    if old_cq.run.step_id == step_id and cur_url == rtsp_url:
                         logger.info(
                             "[RunController] start_run idempotent: task=%s", task_id
                         )
@@ -74,42 +75,46 @@ class RunController:
                     # 字段变化（改 step/url）→ 停旧 run，全量重建（重入 lock_for，无害）
                     logger.info(
                         "[RunController] start_run restart: task=%s (step %s->%s)",
-                        task_id, old_cq.step_id, step_id,
+                        task_id, old_cq.run.step_id, step_id,
                     )
                     self.stop_run(task_id, reason=f"restart:{task_id}")
 
-            # 2b. 建 CQ（构造上移编排者）
+            # 2b. 分配 run（必须在 lock_for 内、早于 client_manager.set：同 step 的分配串行，
+            #     run_id 才严格递增；CQ 构造时就带上 RunIdentity，此后不可变）
+            try:
+                run = runs.allocate(task_id, step_id)
+            except OSError as e:
+                raise AppError(
+                    message=f"Failed to allocate run dir for task {task_id}: {e}",
+                    task_id=task_id,
+                    step_id=step_id,
+                    source_ip=source_ip,
+                ) from e
+
+            # 2c. 建 CQ（构造上移编排者）
             cq = ClientQueues(
-                task_id=task_id,
-                step_id=step_id,
+                run=run,
                 source_ip=source_ip,
                 stage=stage,
                 **get_client_config().cq_kwargs(),
             )
 
-            # 2c. 注册 CQ（COW 发布）。CQ 的 set/remove 均归 RunController，与 stop_run 的
+            # 2d. 注册 CQ（COW 发布）。CQ 的 set/remove 均归 RunController，与 stop_run 的
             #   client_manager.remove 对称（set 先、remove 后，镜像）。set 后的所有 setup 步
             #   包进 try：任一步失败即回滚注销，避免 CQ 泄漏在注册表。
             client_manager.set(task_id, cq)
             try:
-                # storage supersede：start 侧**零钩子**。两个域都走 recording 的**懒惰首写自清**
-                # ——本代次第一次真正写出产物时才清上一代（`hls.delete` / `inference.delete`，
-                # 见 recording/service.py 的 `_write` ② 与 `_write_detections` ②）。
-                # 原先这里有两个 eager 清理（`persistence_manager.start_run(cq)` 的整 step rmtree、
-                # 检测结果分区的起始截断），语义不同故删而不是改指：新 run 若什么都没
-                # 写出来，上一代的录像与检测结果原样保留，还能回放、还能跑离线。
-
-                # 2d. start_workflow（建 Actor；CQ 已由上面 set 注册）
+                # 2e. start_workflow（建 Actor；CQ 已由上面 set 注册）
                 if not inference_manager.start_workflow(cq):
                     raise AppError(
                         message=f"Failed to start workflow for task {task_id}",
                         task_id=task_id,
-                        step_id=cq.step_id,
+                        step_id=run.step_id,
                         source_ip=source_ip,
                     )
                 logger.info("[RunController] workflow started: task_id=%s", task_id)
 
-                # 2e. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
+                # 2f. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
                 stream_service.start_stream(task_id=task_id, stream_url=rtsp_url)
                 logger.info("[RunController] stream started: task_id=%s", task_id)
             except Exception:
@@ -193,8 +198,6 @@ class RunController:
             #    ③ 清前端槽 + recording 落 HLS 残段与剩余检测结果。
             #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
             #    （→cq.close 释放帧）——本 try 早于下方清理。
-            #    ③ 必须在 CQ 还注册着时做（step 4 的 forget_task 之前）：recording 的首写自清以
-            #    「current is job.cq」为前提，拆除后才执行的残段因此只追加、不删（见 `_write` ②）。
             try:
                 if cq is not None:
                     settlement = inference_manager.stop_workflow(cq)  # Inference owner
@@ -227,15 +230,6 @@ class RunController:
                 result["errors"].append(f"client_manager: {e}")
                 logger.error(
                     "[RunController] clean registry failed: %s - %s", task_id, e, exc_info=True
-                )
-
-            # 4. 回收该 task 的录制代次记录（残段已入队、CQ 已出 registry，不会再有新段）。
-            #    forget_task 自己也排进 recording 的队列，FIFO 保证它执行在本代次所有段之后。
-            try:
-                recording_service.forget_task(task_id)
-            except Exception as e:
-                logger.debug(
-                    "[RunController] forget recording task failed: %s - %s", task_id, e
                 )
 
             if result["errors"]:

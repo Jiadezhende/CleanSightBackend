@@ -9,7 +9,7 @@ import math
 import pytest
 
 from doubles import BrushRulesSegmenter
-from factories import make_det_box, make_detector_output, make_frame_detection
+from factories import make_det_box, make_detector_output, make_frame_detection, make_run
 
 from app.domain.detection import DetectorOutput
 from app.domain.temporal import TemporalEvent, TemporalSegment
@@ -41,9 +41,9 @@ class TestReplaceSegments:
     """Runner 的 read → 合并 → write：数据层只管整体替换，保留谁是这里的事。"""
 
     def test_empty_clears_segments(self, tmp_storage):
-        OfflineRunner._replace_segments(1, 1, [_seg()])
-        OfflineRunner._replace_segments(1, 1, [])  # 空 → 清该 step 分段
-        segs = [f for f in inference_store.read_temporal(1, 1) if isinstance(f, TemporalSegment)]
+        OfflineRunner._replace_segments(make_run(1, 1), [_seg()])
+        OfflineRunner._replace_segments(make_run(1, 1), [])  # 空 → 清该 step 分段
+        segs = [f for f in inference_store.read_temporal(make_run(1, 1)) if isinstance(f, TemporalSegment)]
         assert segs == []
 
 
@@ -187,17 +187,23 @@ def _runner(offline):
     return OfflineRunner(config=_config(offline))
 
 
+def _inference_dir(task_id, step_id):
+    from app.storage import _root
+
+    return _root.run_path(make_run(task_id, step_id), "inference")
+
+
 def _facts_path(root, task_id=1, step_id=2):
-    return root / str(task_id) / str(step_id) / "inference" / "temporal.jsonl"
+    return _inference_dir(task_id, step_id) / "temporal.jsonl"
 
 
 def _probs_path(root, task_id=1, step_id=2):
-    return root / str(task_id) / str(step_id) / "inference" / "label_probs.npz"
+    return _inference_dir(task_id, step_id) / "label_probs.npz"
 
 
 def _write_detections(task_id, step_id):
     """经数据层预置两帧双源检测结果（storage 根已由 tmp_storage fixture 指到临时目录）。"""
-    inference_store.append_detections(task_id, step_id, [
+    inference_store.append_detections(make_run(task_id, step_id), [
         make_frame_detection(ts=ts, by_source={
             "clean_large": make_detector_output(n=1, ts=ts),
             "clean_small": make_detector_output(n=1, ts=ts),
@@ -224,7 +230,7 @@ class TestOfflineRunner:
         assert res.status == "completed"
         assert res.producer == "BrushRulesSegmenter"
         assert res.segment_count == 1
-        segs = [f for f in inference_store.read_temporal(1, 2) if isinstance(f, TemporalSegment)]
+        segs = [f for f in inference_store.read_temporal(make_run(1, 2)) if isinstance(f, TemporalSegment)]
         assert len(segs) == 1
         assert segs[0].producer == "BrushRulesSegmenter"
         assert segs[0].label == "brushing"
@@ -236,7 +242,7 @@ class TestOfflineRunner:
         r = _runner(_OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
-        segs = [f for f in inference_store.read_temporal(1, 2) if isinstance(f, TemporalSegment)]
+        segs = [f for f in inference_store.read_temporal(make_run(1, 2)) if isinstance(f, TemporalSegment)]
         assert len(segs) == 1
 
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
@@ -247,7 +253,7 @@ class TestOfflineRunner:
 
     def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_storage):
         """CLEAN 分段器不再规则降级；未配 model_path 时硬失败且不落结果。"""
-        inference_store.append_detections(1, 2, [
+        inference_store.append_detections(make_run(1, 2), [
             make_frame_detection(ts=t, by_source=_clean_frame(t))
             for t in (0.1, 0.2, 0.3, 0.4)
         ])
@@ -261,11 +267,11 @@ class TestOfflineRunner:
     def test_model_swap_replaces_old_segments_keeps_eventfact(self, tmp_storage):
         """换模型重跑：旧类名的分段整体被替换，TemporalEvent 保留。"""
         _write_detections(1, 2)
-        inference_store.write_temporal(1, 2, [TemporalEvent(producer="clean_monitor", signal="sig", value=1, ts=1.0)])
+        inference_store.write_temporal(make_run(1, 2), [TemporalEvent(producer="clean_monitor", signal="sig", value=1, ts=1.0)])
         assert _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
         res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.producer == "MarkerSegmenter"
-        loaded = inference_store.read_temporal(1, 2)
+        loaded = inference_store.read_temporal(make_run(1, 2))
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
         assert [f.producer for f in loaded if isinstance(f, TemporalEvent)] == ["clean_monitor"]
 
@@ -277,14 +283,14 @@ class TestOfflineRunner:
             _CleanTorchSegmenter, "_predict_with_model",
             lambda self, mi: _onehot_probs(mi.frame_count, label, 0.8),
         )
-        inference_store.append_detections(1, 2, [
+        inference_store.append_detections(make_run(1, 2), [
             make_frame_detection(ts=t, by_source=_clean_frame(t)) for t in (0.1, 0.2, 0.3, 0.4)
         ])
         offline = {"class": "app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter",
                    "params": {"model_path": "unused.pt", "min_duration_s": 0.1}}
         res = _runner(offline).run(OfflineRunSpec(task_id=1, step_id=2))
         assert (res.status, res.producer, res.segment_count) == ("completed", "CleanMSTCNBiLSTMSegmenter", 1)
-        probs = inference_store.read_label_probs(1, 2)
+        probs = inference_store.read_label_probs(make_run(1, 2))
         assert probs.labels == tuple(ACTION_LABELS)
         assert probs.ts.tolist() == [0.1, 0.2, 0.3, 0.4]
         assert probs.probs.argmax(axis=1).tolist() == [label] * 4
@@ -319,6 +325,50 @@ class MarkerSegmenter(OfflineSegmenter):
 
 
 # ============================ CLI ============================
+
+class TestRunLock:
+    def test_named_missing_run_is_reclaimed_and_writes_nothing(self, tmp_storage):
+        _write_detections(1, 2)
+        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=123))
+        assert (res.status, res.segment_count) == ("reclaimed", 0)
+        assert not _facts_path(tmp_storage).exists()
+
+    def test_run_reclaimed_mid_run_is_reclaimed_and_not_rebuilt(self, tmp_storage, monkeypatch):
+        """跑到一半所在 step 过 TTL 被回收：写入 FileNotFoundError → reclaimed，不重建目录。"""
+        import shutil
+
+        from app.services.inference.offline import runner as runner_mod
+        from app.storage import _root
+
+        _write_detections(1, 2)
+        run = make_run(1, 2)
+        real_validate = runner_mod.OfflineRunner._validate
+
+        def reclaim_then_validate(facts, producer):
+            shutil.rmtree(_root.path(1, 2))
+            return real_validate(facts, producer)
+
+        monkeypatch.setattr(runner_mod.OfflineRunner, "_validate", staticmethod(reclaim_then_validate))
+        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=run.run_id))
+        assert res.status == "reclaimed"
+        assert not _root.path(1, 2).exists()
+
+    def test_named_older_run_is_the_one_written(self, tmp_storage):
+        """锁定点名的 run：同 step 已有更新的 run，结果仍写回旧 run。"""
+        from app.domain.run import RunIdentity
+        from app.storage import _root
+
+        _write_detections(1, 2)
+        old = make_run(1, 2)
+        new = RunIdentity(1, 2, old.run_id + 1)
+        _root.run_path(new).mkdir()
+        inference_store.append_detections(new, [make_frame_detection(ts=9.0)])
+
+        _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=old.run_id))
+
+        assert [f.producer for f in inference_store.read_temporal(old)] == ["BrushRulesSegmenter"]
+        assert inference_store.read_temporal(new) == []
+
 
 class TestCli:
     @pytest.fixture(autouse=True)
@@ -365,7 +415,7 @@ class TestCli:
         rc = cli.main(["query", "--task-id", "1", "--step-id", "2"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["task_id"] == 1
+        assert (payload["task_id"], payload["run_id"]) == (1, make_run(1, 2).run_id)
         assert [row["label"] for row in payload["timeline"]] == ["brushing"]
 
 

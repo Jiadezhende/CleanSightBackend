@@ -1,16 +1,15 @@
-"""L1 目标检测产物 —— `{step}/inference/detections.jsonl` 的编解码与读写。
+"""L1 目标检测产物 —— `{run}/inference/detections.jsonl` 的编解码与读写。
 
-    append_detections(task, step, frames)     追加一批（一次 open("a")，包内不攒批）
-    read_detections(task, step)               回读整段，按 ts 升序
+    append_detections(run, frames)     追加一批（一次 open("a")，包内不攒批）
+    read_detections(run)               回读整段，按 ts 升序
 
 货币是 `FrameDetection`。**路线 B（追加）**：每帧一条、文件只增不改，没有「先造好一个完整产
-物」这回事。删除不在这里——域内删除口径只有 `_layout.delete`（整域）。
+物」这回事。本域不删除：整个 run 目录的回收归 `cleanup_worker`。
 
 **不管**（都在调用方）：批缓冲、run 生命周期、失败要不要吞——本模块照抛 `OSError`。
 
 **并发：本域不持锁。** `append_detections` 自身不是原子的（一批可能拆成多次底层 write，
-Windows 的 `mode="a"` 也不保证追加原子），同一 step 的写与 `_layout.delete`
-必须由调用侧串行。
+Windows 的 `mode="a"` 也不保证追加原子），同一 run 的写必须由调用侧串行。
 
 依赖上界：`app.domain` + stdlib。
 """
@@ -21,6 +20,8 @@ import logging
 from typing import Any, Dict, List, Mapping, Sequence
 
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
+from app.domain.run import RunIdentity
+
 from . import _jsonl, _layout
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,7 @@ def _record_to_frame(rec: Mapping[str, Any]) -> FrameDetection:
 # ── 对外两个成员 ─────────────────────────────────────────────────────────────────
 
 
-def append_detections(task_id: int, step_id: int, frames: Sequence[FrameDetection]) -> None:
+def append_detections(run: RunIdentity, frames: Sequence[FrameDetection]) -> None:
     """追加一批帧检测结果：一次 `open("a")` + 一次 write，包内不攒批（W5）。
 
     空序列是 no-op 且**不建目录**（否则 `tasks.list_task_ids()` 会列出一个从没写过东西的 step）。
@@ -110,16 +111,16 @@ def append_detections(task_id: int, step_id: int, frames: Sequence[FrameDetectio
     if not frames:
         return
     payload = _jsonl.encode([_frame_to_record(f) for f in frames])
-    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.DETECTIONS_NAME
+    path = _layout.domain_dir(run, create=True) / _layout.DETECTIONS_NAME
     with path.open("a", encoding="utf-8") as f:
         f.write(payload)
 
 
-def read_detections(task_id: int, step_id: int) -> List[FrameDetection]:
+def read_detections(run: RunIdentity) -> List[FrameDetection]:
     """回读整段检测结果，**按 ts 升序**（升序是返回值的契约，离线的 `bisect` / 滑窗建立在它上
     面）。文件不存在返回 `[]`；形状不对的 record 与坏行同等对待，跳过 + warning。
     """
-    path = _layout.domain_dir(task_id, step_id) / _layout.DETECTIONS_NAME
+    path = _layout.domain_dir(run) / _layout.DETECTIONS_NAME
     frames: List[FrameDetection] = []
     for rec in _jsonl.decode(path):
         try:

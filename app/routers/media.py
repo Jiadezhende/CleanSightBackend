@@ -13,7 +13,10 @@ Token 校验由 MediaToken（HMAC-SHA256 + 短 TTL）完成。
 **外部字符串从不进入路径拼接**：token 里的 filename 先由 `hls.parse_segment_name` /
 `hls.parse_init_name` 解成身份键（`SegmentRef` / track），解不出就 400；路径一律由
 `hls.segment_path` / `hls.init_path` 按落盘结构重建。故这里没有 `relative_to(base)`
-那类事后越界检查——能拼出来的路径只可能落在该 step 的 `hls/` 域目录里。
+那类事后越界检查——能拼出来的路径只可能落在该 run 的 `hls/` 域目录里。
+
+run 取自 token 的 `run_id`（签发清单时锁定）；缺它的旧 token 按最新可见 run 解析。run 已被
+回收 → 404。
 """
 
 import logging
@@ -22,8 +25,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Path as PathParam
 from fastapi.responses import FileResponse
 
-from app.services.traceback import MediaToken, MediaTokenError
-from app.storage import hls
+from app.domain.run import RunIdentity
+from app.services.traceback import MediaToken, MediaTokenError, MediaTokenPayload
+from app.storage import hls, runs
 
 router = APIRouter(prefix="/media", tags=["media"])
 logger = logging.getLogger(__name__)
@@ -40,6 +44,14 @@ def _reject(task_id: int, step_id: int, filename: str, detail: str) -> HTTPExcep
         task_id, step_id, filename,
     )
     return HTTPException(status_code=400, detail=detail)
+
+
+def _resolve_run(payload: MediaTokenPayload) -> RunIdentity:
+    """token 锁定的 run（缺 `run_id` 的旧 token 按最新可见 run）；run 已回收或不存在 → 404。"""
+    run = runs.query(payload.task_id, payload.step_id, payload.run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Media file not found")
+    return run
 
 
 def _existing_file(path: Path) -> Path:
@@ -65,7 +77,7 @@ async def get_segment(token: str = PathParam(..., description="media segment tok
             "Token does not point to a segment",
         )
 
-    path = _existing_file(hls.segment_path(payload.task_id, payload.step_id, ref))
+    path = _existing_file(hls.segment_path(_resolve_run(payload), ref))
     return FileResponse(
         path=str(path),
         media_type="video/mp4",
@@ -93,7 +105,7 @@ async def get_init(token: str = PathParam(..., description="media init segment t
             "Token does not point to init segment",
         )
 
-    path = _existing_file(hls.init_path(payload.task_id, payload.step_id, track))
+    path = _existing_file(hls.init_path(_resolve_run(payload), track))
     return FileResponse(
         path=str(path),
         media_type="video/mp4",

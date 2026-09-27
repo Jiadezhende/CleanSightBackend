@@ -2,7 +2,7 @@
 HLS 帧反查（storage.hls 读侧）端到端 round-trip 测试
 
 不需要后端服务、RTSP、数据库或推理引擎，只需 FFmpeg：
-直接调 `hls.insert_segment` 走真实写路径落 fMP4 段 + `.idx` sidecar 到 `{step}/hls/`，
+直接调 `hls.insert_segment` 走真实写路径落 fMP4 段 + `.idx` sidecar 到 `{step}/{run_id}/hls/`，
 再用 `hls.iter_frames` / `hls.read_segment` 按 ts 读回，逐帧比对。
 
 **这是唯一能抓「ts ↔ 像素错配」的手段**：帧内中心色块编码了 frame_id
@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.domain.frame import Frame
 from app.settings import settings
-from app.storage import hls
+from app.storage import hls, runs
 
 # ---------------------------------------------------------------------------
 # 测试数据参数
@@ -95,8 +95,8 @@ def ts_of(gid: int) -> float:
 # ---------------------------------------------------------------------------
 
 def hls_dir(task_id: int) -> Path:
-    """本测试的落盘目录 —— 数据层布局 `{task}/{step}/hls/`，不是旧的平铺。"""
-    return settings.storage_base_dir / str(task_id) / str(STEP_ID) / "hls"
+    """本测试的落盘目录 —— 该 step 最新可见 run 的 `hls/`。"""
+    return hls.init_path(runs.query(task_id, STEP_ID), "raw").parent
 
 
 def seed(task_id: int) -> None:
@@ -104,11 +104,12 @@ def seed(task_id: int) -> None:
     if target.exists():
         shutil.rmtree(target)
 
+    run = runs.allocate(task_id, STEP_ID)
     t0 = time.perf_counter()
     for s in range(N_SEG):
         gids = range(s * FRAMES_PER_SEG, (s + 1) * FRAMES_PER_SEG)
         hls.insert_segment(
-            task_id, STEP_ID, "raw",
+            run, "raw",
             [Frame(timestamp=ts_of(g), frame=make_frame(g)) for g in gids],
         )
     dt = time.perf_counter() - t0
@@ -134,10 +135,12 @@ def seed(task_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
+    run = runs.query(task_id, STEP_ID)
+
     def scan(start_ts=None, end_ts=None, width=W, height=H):
         """区间扫帧 —— 数据层的 `iter_frames`（无 `track` 参数，恒为 raw 轨）。"""
         return hls.iter_frames(
-            task_id, STEP_ID,
+            run,
             width=width, height=height, start_ts=start_ts, end_ts=end_ts,
         )
 
@@ -204,7 +207,7 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         「这条路不通」必须与「这段没数据」分得开，故是 ValueError 而非空迭代器。"""
         ref = hls.SegmentRef(track="processed", ts_us=hls.ts_to_us(ts_of(0)))
         try:
-            hls.read_segment(task_id, STEP_ID, ref, width=W, height=H)
+            hls.read_segment(run, ref, width=W, height=H)
         except ValueError:
             return "processed 轨直接 ValueError，不静默返回空"
         raise AssertionError("processed 轨应抛 ValueError，实际静默通过")

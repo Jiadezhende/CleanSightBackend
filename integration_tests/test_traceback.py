@@ -104,7 +104,7 @@ def traceback_test_fixture(task_id: int, alarm_id: int, server: str, api_port: i
             step_name="测漏",
         )
 
-        # 3. 文件系统: HLS 段（{storage}/{task_id}/{step_id}/hls/，登记进清单）
+        # 3. 文件系统: HLS 段（{storage}/{task_id}/{step_id}/{run_id}/hls/，登记进清单）
         task_dir = seed_hls_segments(task_id, step_id, ts_us_list)
 
         yield {

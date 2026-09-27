@@ -3,15 +3,14 @@
 
 两张清单只出参数、不出 URL，所以断言重点是**参数能不能直接喂给播放端**：
 - /live 出的 task_id/source_ip 就是 `WS /ai/video` 的两种入参
-- /history 出的 (task_id, step_id, tracks[]) 就是 `/traceback/.../playlist.m3u8` 的入参，
+- /history 出的 (task_id, step_id, run_id, tracks[]) 就是 `/traceback/.../playlist.m3u8` 的入参，
   其中 tracks 必须反映磁盘实况——playlist 的 track 默认 processed，只有 raw 的 step
   照默认打过去就是 404，这是本文件的核心回归点。
 
 DB / 文件系统沿用既有 seam：`doubles.FakeDB` + `tmp_storage` 里用 `factories.seed_hls_segments`
-造段（落盘 `{root}/{task}/{step}/hls/` 并登记进清单）。
+造段（落盘 `{root}/{task}/{step}/{run_id}/hls/` 并登记进清单）。
 """
 
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +18,8 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from doubles import FakeDB
-from factories import make_cq, seed_hls_segments
+from factories import make_cq, make_run, seed_hls_segments
+from app.storage import runs
 
 
 # ---------------------------------------------------------------------------
@@ -40,23 +40,18 @@ def _install_registry(monkeypatch, cqs):
     """替换活跃注册表快照（决定 /live 出什么、/history 排除谁）。"""
     from app.routers import task as task_router
 
-    runs = {cq.task_id: cq for cq in cqs}
+    runs = {cq.run.task_id: cq for cq in cqs}
     monkeypatch.setattr(
         task_router.client_manager, "snapshot", lambda: runs, raising=True
     )
 
 
-def _write_segments(task_id, step_id, *, tracks=("raw",), ts_us=1_000_000, mtime=None):
-    """每条 track 在 `{task}/{step}/hls/` 下造一段并登记进清单。返回 hls 域目录。
-
-    `mtime` 要**同时**打在 step 目录与 hls 子目录上：粗排键 `tasks._latest_step_mtime`
-    取的是两者的最大值（产物落在域子目录里，只 stat step 目录会退化成"首次落盘时刻"）。
-    """
+def _write_segments(task_id, step_id, *, tracks=("raw",), ts_us=1_000_000, run_id=None):
+    """每条 track 在该 step 的 run（`make_run`，给了 `run_id` 就按它建）的 `hls/` 下造一段并登记
+    进清单。返回 hls 域目录。"""
+    make_run(task_id, step_id, run_id=run_id)
     for track in tracks:
         d = seed_hls_segments(task_id, step_id, [ts_us], track=track)
-    if mtime is not None:
-        os.utime(d, (mtime, mtime))
-        os.utime(d.parent, (mtime, mtime))
     return d
 
 
@@ -86,8 +81,8 @@ class TestLiveList:
         _install_registry(
             monkeypatch,
             [
-                make_cq(task_id=202, step_id=1, source_ip="10.0.0.2"),
-                make_cq(task_id=101, step_id=2, source_ip="10.0.0.1"),
+                make_cq(task_id=202, step_id=1, run_id=7, source_ip="10.0.0.2"),
+                make_cq(task_id=101, step_id=2, run_id=9, source_ip="10.0.0.1"),
             ],
         )
 
@@ -96,8 +91,8 @@ class TestLiveList:
         assert payload["total"] == 2
         # task_id / source_ip 即 WS /ai/video 的两种入参；step_id 供展示当前阶段
         assert payload["tasks"] == [
-            {"task_id": 101, "source_ip": "10.0.0.1", "step_id": 2},
-            {"task_id": 202, "source_ip": "10.0.0.2", "step_id": 1},
+            {"task_id": 101, "source_ip": "10.0.0.1", "step_id": 2, "run_id": 9},
+            {"task_id": 202, "source_ip": "10.0.0.2", "step_id": 1, "run_id": 7},
         ]
 
 
@@ -133,6 +128,7 @@ class TestHistoryList:
         assert payload["tasks"][0]["steps"] == [
             {
                 "step_id": 1,
+                "run_id": runs.query(101, 1).run_id,
                 "tracks": ["raw"],
                 "start_ms": 1000,
                 "last_segment_ms": 1000,
@@ -266,9 +262,9 @@ class TestHistoryList:
 
     @pytest.mark.asyncio
     async def test_caps_at_ten_newest_first(self, monkeypatch, tmp_storage):
-        # 12 个任务，段时间戳递增；mtime 同序，保证粗筛也挑到最新的那批
+        # 12 个任务，run 开跑时刻递增
         for i in range(12):
-            _write_segments(100 + i, 1, ts_us=(i + 1) * 1_000_000, mtime=1_000 + i)
+            _write_segments(100 + i, 1, ts_us=(i + 1) * 1_000_000, run_id=1_000 + i)
         _install_registry(monkeypatch, [])
         _install_db(monkeypatch, [])
 
@@ -277,13 +273,27 @@ class TestHistoryList:
         assert [t["task_id"] for t in payload["tasks"]] == list(range(111, 101, -1))
 
     @pytest.mark.asyncio
-    async def test_order_uses_real_segment_ts_not_mtime(self, monkeypatch, tmp_storage):
-        """mtime 只用于挑候选；最终顺序按真实段时间戳重排。"""
-        _write_segments(101, 1, ts_us=9_000_000, mtime=1_000)  # 段新、mtime 旧
-        _write_segments(202, 1, ts_us=1_000_000, mtime=9_000)  # 段旧、mtime 新
+    async def test_order_is_by_run_start_not_segment_ts(self, monkeypatch, tmp_storage):
+        """排序键是列出的 run 的 run_id（开跑时刻），不是最后一段的时刻。"""
+        _write_segments(101, 1, ts_us=9_000_000, run_id=1_000)  # 早开跑、段晚
+        _write_segments(202, 1, ts_us=1_000_000, run_id=2_000)  # 晚开跑、段早
         _install_registry(monkeypatch, [])
         _install_db(monkeypatch, [])
 
         payload = (await _get("/task/history")).json()
 
-        assert [t["task_id"] for t in payload["tasks"]] == [101, 202]
+        assert [t["task_id"] for t in payload["tasks"]] == [202, 101]
+
+    @pytest.mark.asyncio
+    async def test_unlisted_generations_do_not_count(self, monkeypatch, tmp_storage):
+        """同 step 更新但没段的一代（起流即失败）不参与排序，也不该把后面的任务挤出前 10。"""
+        _write_segments(999, 1, run_id=100)
+        (tmp_storage / "999" / "1" / "9000").mkdir()      # 更新的一代：空 run 目录，粗排上界最高
+        for i in range(10):
+            _write_segments(100 + i, 1, run_id=1_000 + i)
+        _install_registry(monkeypatch, [])
+        _install_db(monkeypatch, [])
+
+        payload = (await _get("/task/history")).json()
+
+        assert [t["task_id"] for t in payload["tasks"]] == list(range(109, 99, -1))

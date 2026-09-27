@@ -1,15 +1,16 @@
-"""hls 域 —— `{step}/hls/` 下那一整套播放产物的定位、编解码与读写。
+"""hls 域 —— `{run}/hls/` 下那一整套播放产物的定位、编解码与读写。
 
     from app.storage import hls
 
-    ref = hls.insert_segment(task_id, step_id, "raw", frames)   # 交帧，拿身份键
-    hls.read_segment(task_id, step_id, ref, width=W, height=H)  # 交身份键，拿帧（逆运算）
-    hls.segment_path(task_id, step_id, ref)                     # 要路径时再问
-    hls.delete(task_id, step_id)                                # 清掉这个 step 的整域产物
+    ref = hls.insert_segment(run, "raw", frames)                # 交帧，拿身份键
+    hls.read_segment(run, ref, width=W, height=H)               # 交身份键，拿帧（逆运算）
+    hls.segment_path(run, ref)                                  # 要路径时再问
 
-对外**三个动作 + 一组定位/枚举函数**。调用方交出内存里的 `Frame` 序列，拿回这段的身份键；
+`run` 是 `RunIdentity`（来自 `app.storage.runs`），读写口都只收它。
+
+对外**两个动作 + 一组定位/枚举函数**。调用方交出内存里的 `Frame` 序列，拿回这段的身份键；
 cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计七件事全在域内，一件都
-不出现在签名上。`delete` 同理，只执行、不判断该不该删。`read_segment` / `iter_frames` 是
+不出现在签名上。`read_segment` / `iter_frames` 是
 读向的对称件：给身份键或墙钟区间，拿回带原始 ts 的 `Frame`，**只服务 raw 轨**
 （processed 不落 sidecar）。
 
@@ -20,7 +21,7 @@ cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计�
                list_segments_in_range   其中落在某墙钟区间里的那些（同源、同返回类型）
                segment_path / init_path / sidecar_path / playlist_path / parse_*
     ② Frame    read_segment / iter_frames
-    ③ 写       insert_segment / delete
+    ③ 写       insert_segment
 
 **「有哪些段」只由清单回答。** 文件系统枚举（`iterdir` + 文件名正则）曾是并行的第二个入口，
 已整个从域里删除（2026-09-19）——留着就是第二个真源，而 `__all__` 拦不住包内误用。盘上有文件
@@ -35,7 +36,7 @@ ffmpeg 静默截短。收口后**「可播」不再是限定词**，故容器叫
 
 ## 落盘结构
 
-    {root}/{task_id}/{step_id}/hls/
+    {root}/{task_id}/{step_id}/{run_id}/hls/
       {track}_segment_{ts_us}.mp4   段（fMP4 fragment）
       {track}_init.mp4              该轨的 init 段，首段产出、整条 playlist 复用
       {track}_playlist.m3u8         LIVE 形态清单，只追加、不写 ENDLIST
@@ -62,14 +63,11 @@ detection 不在本域落盘——它由 `inference` 域按帧 ts 单源写入�
 **进本域**：文件名、目录布局、m3u8 文本、fMP4 字节、`.idx` 二进制、编解码，以及为编解码起
 cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、谁来调、并发几个。
 
-**并发**：本域不持锁。同一 `(task, step, track)` 的写必须串行，且与该 step 的 `delete` 同序
-——由调用侧的 `SerialTaskQueue` 构造，失效表现见 `_write` 的「并发」一节。
+**并发**：本域不持锁。同一 `(run, track)` 的写必须串行——由调用侧的 `SerialTaskQueue` 构造，失效表现见 `_write` 的「并发」一节。
 
 **调用点已全部迁入本域**（2026-09-16）：routers 四处、`lab` 的 clip/export 两处都经本域读写。
 `read_segment` / `iter_frames` 目前无生产调用方，为离线 ROI 视觉特征预留。
 
-**读侧只认 `{step}/hls/`，不回落旧平铺布局**：升级前落在 `{step}/` 的产物在本域看来不存在，
-随 TTL 自然消失（判据是 `{step}` 目录自身的 mtime，对两种布局一视同仁）。
 `metadata.json` 的读仍在域外，未承诺迁入。
 
 ## 域内分工
@@ -83,7 +81,7 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
     _m3u8.py     LIVE 清单文本：写侧（头 / 条目 / 累计）+ 读侧（逐段 EXTINF）
     _idx.py      sidecar 的 float64 布局
     _meta.py     metadata.json 的读改写
-    _write.py    写侧对外动作：insert_segment（stage → adjust → commit）/ delete
+    _write.py    写侧对外动作：insert_segment（stage → adjust → commit）
     _read.py     读侧对外动作：list_segments / list_segments_in_range
 
 本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
@@ -107,14 +105,13 @@ from ._layout import (
     ts_to_us,
 )
 from ._read import list_segments, list_segments_in_range
-from ._write import delete, insert_segment
+from ._write import insert_segment
 from .types import Segment, SegmentRef
 
 __all__ = [
     "TRACKS",
     "Segment",
     "SegmentRef",
-    "delete",
     "init_name",
     "init_path",
     "insert_segment",

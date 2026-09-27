@@ -2,7 +2,7 @@ import asyncio
 import base64
 import logging
 import time
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -12,6 +12,8 @@ from app.services.client import client_manager
 from app.services.utils.media_timeline import MediaTimeline
 from app.storage import inference as inference_store
 from app.utils.exceptions import NotFoundError
+
+from ._runs import resolve_run
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 logger = logging.getLogger(__name__)
@@ -199,6 +201,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
 class TemporalRequest(BaseModel):
     task_id: int
     step_id: int
+    run_id: Optional[int] = None  # 锁定哪个 run；缺省 = 该 step 最新可见 run
     type: Literal["segment"]  # temporal.jsonl 的行判别值；"event" 有生产者时再开
     track: Literal["raw", "processed"] = "raw"
 
@@ -214,6 +217,7 @@ class TemporalSegmentItem(BaseModel):
 class TemporalResponse(BaseModel):
     task_id: int
     step_id: int
+    run_id: int
     type: str
     track: str
     media_duration_ms: int
@@ -221,8 +225,12 @@ class TemporalResponse(BaseModel):
 
 
 def _temporal_view(req: TemporalRequest) -> TemporalResponse:
-    """读该 step 的分段事实，墙钟秒换算到 `track` 轨的媒体刻度（与 `<video>.currentTime` 同轴）。"""
-    timeline = MediaTimeline.load(req.task_id, req.step_id, req.track)
+    """读该 run 的分段事实，墙钟秒换算到 `track` 轨的媒体刻度（与 `<video>.currentTime` 同轴）。
+
+    hls 时间轴与 `temporal.jsonl` 取自同一个 run，新录像不会配上旧结果。
+    """
+    run = resolve_run(req.task_id, req.step_id, req.run_id)
+    timeline = MediaTimeline.load(run, req.track) if run is not None else MediaTimeline([])
     if not timeline:
         raise NotFoundError(
             f"No {req.track} segments for task {req.task_id} step {req.step_id}",
@@ -230,7 +238,7 @@ def _temporal_view(req: TemporalRequest) -> TemporalResponse:
             resource_id=f"task={req.task_id},step={req.step_id},track={req.track}",
         )
     segments = sorted(
-        (f for f in inference_store.read_temporal(req.task_id, req.step_id)
+        (f for f in inference_store.read_temporal(run)
          if isinstance(f, TemporalSegment)),
         key=lambda s: (s.start, s.end),
     )
@@ -245,7 +253,7 @@ def _temporal_view(req: TemporalRequest) -> TemporalResponse:
         for s in segments
     ]
     return TemporalResponse(
-        task_id=req.task_id, step_id=req.step_id, type=req.type, track=req.track,
+        task_id=req.task_id, step_id=req.step_id, run_id=run.run_id, type=req.type, track=req.track,
         media_duration_ms=timeline.duration_ms, items=items,
     )
 

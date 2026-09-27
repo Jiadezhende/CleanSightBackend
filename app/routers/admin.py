@@ -6,6 +6,7 @@
 
 import time
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 from app.services.client.manager import client_manager
 from app.services.inference.offline.instance import offline_job_service
 from app.utils.exceptions import NotFoundError
+
+from ._runs import resolve_run
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +30,9 @@ def _client_info(client_id: int, client_queues) -> dict:
     depths = client_queues.get_queue_depths()
     return {
         "client_id": client_id,  # 注册表键 = task_id(int)
-        "task_id": client_queues.task_id,
+        "task_id": client_queues.run.task_id,
         "source_ip": client_queues.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
-        "step_id": client_queues.step_id,
+        "step_id": client_queues.run.step_id,
         "queue_depths": depths,
     }
 
@@ -226,12 +229,27 @@ def ping():
 class OfflineJobRequest(BaseModel):
     task_id: int
     step_id: int
+    run_id: Optional[int] = None  # 锁定哪个 run；缺省 = 该 step 最新可见 run
+
+
+def _no_run(task_id: int, step_id: int) -> NotFoundError:
+    return NotFoundError(
+        f"no visible run for task {task_id} step {step_id}",
+        resource_type="Run", resource_id=f"task={task_id},step={step_id}",
+    )
 
 
 @router.post("/offline/jobs", status_code=202)
 def submit_offline_job(req: OfflineJobRequest):
-    """提交一个离线推理作业；同键已在排队 / 运行时返回在途那个。队满 → 409。"""
-    return offline_job_service.submit(req.task_id, req.step_id).to_dict()
+    """提交一个离线推理作业，锁定一个 run；同一 run 已在排队 / 运行时返回在途那个。
+
+    step 未配离线模型 → 400（先于 run 解析）；run 找不到 → 404；该 run 正在运行 / 队满 → 409。
+    """
+    offline_job_service.require_offline(req.step_id)
+    run = resolve_run(req.task_id, req.step_id, req.run_id)
+    if run is None:
+        raise _no_run(req.task_id, req.step_id)
+    return offline_job_service.submit(run).to_dict()
 
 
 @router.get("/offline/jobs")
@@ -241,9 +259,10 @@ def list_offline_jobs():
 
 
 @router.get("/offline/jobs/{task_id}/{step_id}")
-def get_offline_job(task_id: int, step_id: int):
-    """单个 (task_id, step_id) 的离线作业状态（前端提交后轮询用）。"""
-    job = offline_job_service.get(task_id, step_id)
+def get_offline_job(task_id: int, step_id: int, run_id: Optional[int] = Query(None)):
+    """某个 run 的离线作业状态（前端提交后轮询用）；缺省 run_id = 该 step 最新可见 run。"""
+    run = resolve_run(task_id, step_id, run_id)
+    job = offline_job_service.get(run) if run is not None else None
     if job is None:
         raise NotFoundError(
             f"no offline job for task {task_id} step {step_id}",
