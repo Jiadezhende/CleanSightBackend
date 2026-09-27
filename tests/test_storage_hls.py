@@ -24,6 +24,7 @@ import pytest
 
 from factories import make_frame
 from app.domain.frame import Frame
+from app.domain.run import RunIdentity
 from app.settings import settings
 from app.storage import hls
 from app.storage.hls import _decode, _encode, _fmp4, _idx, _layout, _m3u8, _meta
@@ -819,7 +820,7 @@ def fake_decode(monkeypatch):
     """
     calls = []
 
-    def _fake(task_id, step_id, ref, sidecar, k_start, k_end, width, height):
+    def _fake(run, ref, sidecar, k_start, k_end, width, height):
         calls.append((_layout.segment_name(ref), k_start, k_end))
         for k in range(k_start, k_end + 1):
             yield make_frame(ts=float(sidecar[k]), shape=(height, width, 3))
@@ -947,7 +948,7 @@ class TestDecodeCommand:
         写错**不报错**：帧号原点一漂，反查回来的是错帧，而位级 ts 比较会把它当
         「没找到」抛 ValueError —— 错因指向完全错误的方向。
         """
-        cmd = _decode._build_cmd(1, 2, _layout.SegmentRef("raw", 42), 3, 7, 64, 48)
+        cmd = _decode._build_cmd(RunIdentity(1, 2, 9), _layout.SegmentRef("raw", 42), 3, 7, 64, 48)
         source = cmd[cmd.index("-i") + 1]
 
         assert "-ss" not in cmd                      # 按时间 seek 会让 n 的原点漂掉
@@ -961,12 +962,13 @@ class TestDecodeCommand:
 
     def test_uses_the_raw_track_init(self, tmp_storage):
         """两轨各有各的 EXT-X-MAP，拿错 init 解出来的是另一条轨的画面。"""
-        cmd = _decode._build_cmd(1, 2, _layout.SegmentRef("raw", 42), 0, 0, 8, 8)
+        run = RunIdentity(1, 2, 9)
+        cmd = _decode._build_cmd(run, _layout.SegmentRef("raw", 42), 0, 0, 8, 8)
         source = cmd[cmd.index("-i") + 1]
 
-        assert str(hls.init_path(1, 2, "raw")) in source
-        assert str(hls.init_path(1, 2, "processed")) not in source
-        assert str(hls.segment_path(1, 2, _layout.SegmentRef("raw", 42))) in source
+        assert str(hls.init_path(run, "raw")) in source
+        assert str(hls.init_path(run, "processed")) not in source
+        assert str(hls.segment_path(run, _layout.SegmentRef("raw", 42))) in source
 
 
 # ---------------------------------------------------------------------------

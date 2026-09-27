@@ -1,9 +1,9 @@
 """L3 时序分析产物 —— `{step}/inference/` 下 `temporal.jsonl` 与 `label_probs.npz` 的读写。
 
-    read_temporal(task, step)                回读全部事实，**落盘序**
-    write_temporal(task, step, facts)        整体替换（路线 C）
-    read_label_probs(task, step)             回读逐帧类别概率；没有则 None
-    write_label_probs(task, step, probs)     整体替换（路线 C）
+    read_temporal(run)                回读全部事实，**落盘序**
+    write_temporal(run, facts)        整体替换（路线 C）
+    read_label_probs(run)             回读逐帧类别概率；没有则 None
+    write_label_probs(run, probs)     整体替换（路线 C）
 
 货币都在 `app.domain.temporal`：事实是 `TemporalEvent | TemporalSegment`，逐帧概率是 `LabelProbs`。
 
@@ -28,6 +28,7 @@ import numpy as np
 
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.storage import _fs
+from app.storage._root import RunKey, legacy_key
 
 from . import _jsonl, _layout
 
@@ -102,12 +103,13 @@ def _record_to_temporal(rec: Mapping[str, Any]) -> TemporalEvent | TemporalSegme
 # ── temporal.jsonl ───────────────────────────────────────────────────────────────
 
 
-def read_temporal(task_id: int, step_id: int) -> List[TemporalEvent | TemporalSegment]:
+@legacy_key
+def read_temporal(run: RunKey) -> List[TemporalEvent | TemporalSegment]:
     """回读该 step 的全部事实，**按落盘顺序**（层不排序，理由见模块 docstring）。
 
     文件不存在返回 `[]`；坏行与形状不对的 record 跳过 + warning。
     """
-    path = _layout.domain_dir(task_id, step_id) / _layout.TEMPORAL_NAME
+    path = _layout.domain_dir(run) / _layout.TEMPORAL_NAME
     facts: List[TemporalEvent | TemporalSegment] = []
     for rec in _jsonl.decode(path):
         try:
@@ -117,9 +119,9 @@ def read_temporal(task_id: int, step_id: int) -> List[TemporalEvent | TemporalSe
     return facts
 
 
+@legacy_key
 def write_temporal(
-    task_id: int,
-    step_id: int,
+    run: RunKey,
     facts: Sequence[TemporalEvent | TemporalSegment],
 ) -> None:
     """**整体替换**该 step 的事实（路线 C：编码 → 同目录 tmp → `os.replace`）。
@@ -135,7 +137,7 @@ def write_temporal(
         OSError: 建目录 / 写 tmp / 换名失败。是否吞掉由调用方定。
     """
     payload = _jsonl.encode([_temporal_to_record(f) for f in facts])
-    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.TEMPORAL_NAME
+    path = _layout.domain_dir(run, create=True) / _layout.TEMPORAL_NAME
     _jsonl.write_atomic(path, payload)
 
 
@@ -147,7 +149,8 @@ def write_temporal(
 _PROBS_DISK_DTYPE = np.float16
 
 
-def write_label_probs(task_id: int, step_id: int, probs: LabelProbs) -> None:
+@legacy_key
+def write_label_probs(run: RunKey, probs: LabelProbs) -> None:
     """**整体替换**该 step 的逐帧类别概率（路线 C：`_fs.replace`）。
 
     只做序列化与落位，不校验形状一致性——那是产出侧的事（本层不认识「合法的概率」）。
@@ -155,7 +158,7 @@ def write_label_probs(task_id: int, step_id: int, probs: LabelProbs) -> None:
     Raises:
         OSError: 建目录 / 写 tmp / 换名失败。失败时 tmp 删除、旧文件原样保留。
     """
-    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.LABEL_PROBS_NAME
+    path = _layout.domain_dir(run, create=True) / _layout.LABEL_PROBS_NAME
     _fs.replace(path, lambda tmp: _write_probs(probs, tmp))
 
 
@@ -170,7 +173,8 @@ def _write_probs(probs: LabelProbs, tmp: Path) -> None:
         )
 
 
-def read_label_probs(task_id: int, step_id: int) -> Optional[LabelProbs]:
+@legacy_key
+def read_label_probs(run: RunKey) -> Optional[LabelProbs]:
     """回读该 step 的逐帧类别概率；文件不存在返回 `None`。
 
     `probs` 以 float32 返回（盘上 float16，见上）；`ts` 与写入时位级相等。
@@ -179,7 +183,7 @@ def read_label_probs(task_id: int, step_id: int) -> Optional[LabelProbs]:
         ValueError / KeyError: 文件损坏或缺键。与 jsonl 的逐行容错不同，npz 是整体，坏了就是坏了。
         OSError: 读失败。
     """
-    path = _layout.domain_dir(task_id, step_id) / _layout.LABEL_PROBS_NAME
+    path = _layout.domain_dir(run) / _layout.LABEL_PROBS_NAME
     if not path.exists():
         return None
     with np.load(path, allow_pickle=False) as npz:

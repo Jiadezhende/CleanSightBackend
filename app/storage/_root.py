@@ -6,7 +6,19 @@
 
     DOMAINS              step 下的域子目录白名单（封闭集合，唯一真源）
     path(...)            逐级定位 {root}/{task}/{step}/{domain}，可选建目录
+    run_path(run, domain) 定位 {root}/{task}/{step}/{run_id}/{domain}，不建目录
+    domain_dir(key, domain, create=)  域文件的统一入口：按位置键解析域目录
+    legacy_key           迁移期装饰器：把旧的 (task_id, step_id, ...) 调用包成 LegacyStep
     dir_name_to_int(name) 目录名 → id；非数字目录名 → None
+
+## 位置键（迁移期，第 5 期删 `LegacyStep` / `legacy_key`）
+
+域文件的读写口第一个参数是位置键 `RunKey = RunIdentity | LegacyStep`：
+
+    RunIdentity(task, step, run_id)  → {step}/{run_id}/{domain}/   create 只建域这一级，run 目录不在即 OSError
+    LegacyStep(task, step)           → {step}/{domain}/            旧布局，create 建到底
+
+旧调用形态 `f(task_id, step_id, ...)` 经 `legacy_key` 包成 `LegacyStep`，与 `f(run, ...)` 同名并存。
 
 ## 各域文件的用法：先声明一个绑死自己域名的私有 root
 
@@ -33,8 +45,12 @@ def _domain_root(task_id: int, step_id: int, *, create: bool = False) -> Path:
 
 from __future__ import annotations
 
+import functools
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple, TypeVar, Union
+
+from app.domain.run import RunIdentity
 
 # step 目录下的产物域子目录 —— 封闭集合，唯一真源。域名属于「布局」归本包，产物文件名
 # 属于「内容」归各域自己。新增一个域要改这里，这是有意的。
@@ -119,3 +135,63 @@ def dir_name_to_int(name: str) -> Optional[int]:
         return int(name)
     except (TypeError, ValueError):
         return None
+
+
+def run_path(run: RunIdentity, domain: Optional[str] = None) -> Path:
+    """`{root}/{task}/{step}/{run_id}[/{domain}]`。只定位，不建目录。
+
+    Raises:
+        ValueError: domain 不在 `DOMAINS` 白名单里。
+    """
+    located = path(run.task_id, run.step_id) / str(run.run_id)
+    if domain is None:
+        return located
+    if domain not in DOMAINS:
+        raise ValueError(f"Unknown domain: {domain!r}, expected one of {DOMAINS}")
+    return located / domain
+
+
+@dataclass(frozen=True)
+class LegacyStep:
+    """旧调用形态 `(task_id, step_id)` 的位置键，指向 `{step}/{domain}/`。迁移期专用。"""
+
+    task_id: int
+    step_id: int
+
+
+RunKey = Union[RunIdentity, LegacyStep]
+
+
+def domain_dir(key: RunKey, domain: str, *, create: bool = False) -> Path:
+    """按位置键解析域目录。
+
+    `create=True`：`RunIdentity` 只建域这一级（`_fs.ensure_dir`），run 目录不在即
+    `FileNotFoundError`——写者不建 run 目录，回收后的迟到写入在这里失败；`LegacyStep` 同
+    `path(..., create=True)` 建到底。
+    """
+    if isinstance(key, RunIdentity):
+        located = run_path(key, domain)
+        if create:
+            from . import _fs
+
+            _fs.ensure_dir(located)
+        return located
+    if isinstance(key, LegacyStep):
+        return path(key.task_id, key.step_id, domain, create=create)
+    raise TypeError(f"位置键须是 RunIdentity 或 LegacyStep，收到 {type(key).__name__}")
+
+
+_F = TypeVar("_F", bound=Callable)
+
+
+def legacy_key(fn: _F) -> _F:
+    """让 `fn(key, ...)` 同时接受旧形态 `fn(task_id, step_id, ...)`（包成 `LegacyStep`）。"""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if args and not isinstance(args[0], (RunIdentity, LegacyStep)):
+            task_id, step_id, *rest = args
+            args = (LegacyStep(task_id, step_id), *rest)
+        return fn(*args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]

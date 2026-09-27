@@ -1,6 +1,6 @@
 """本域的布局：域根目录、三份产物的文件名，以及整域删除。
 
-    domain_dir(task, step, create=)   本域在该 step 下的根，域内所有路径都经它
+    domain_dir(run, create=)          本域在该 run 下的根，域内所有路径都经它
     DETECTIONS_NAME / TEMPORAL_NAME / LABEL_PROBS_NAME
     delete(task, step)                清掉整域（三份产物一起没）
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.storage import _fs, _root
+from app.storage._root import RunKey, legacy_key
 
 # 本域的域名 —— 全文件只出现这一次，写错会被 `_root.DOMAINS` 白名单当场拦下。
 _DOMAIN = "inference"
@@ -25,9 +26,12 @@ TEMPORAL_NAME = "temporal.jsonl"      # 每条一行，L3 时序分析事实
 LABEL_PROBS_NAME = "label_probs.npz"  # 离线分割逐帧类别概率，可视化旁路
 
 
-def domain_dir(task_id: int, step_id: int, *, create: bool = False) -> Path:
-    """本域在该 step 下的根目录 —— 域内所有路径都经它。"""
-    return _root.path(task_id, step_id, _DOMAIN, create=create)
+@legacy_key
+def domain_dir(run: RunKey, *, create: bool = False) -> Path:
+    """本域在该 run 下的根目录 —— 域内所有路径都经它。`create` 语义见 `_root.domain_dir`：
+    `RunIdentity` 只建域这一级，run 目录不在即 `OSError`。
+    """
+    return _root.domain_dir(run, _DOMAIN, create=create)
 
 
 def delete(task_id: int, step_id: int) -> bool:

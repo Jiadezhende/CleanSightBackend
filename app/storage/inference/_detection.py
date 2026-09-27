@@ -21,6 +21,8 @@ import logging
 from typing import Any, Dict, List, Mapping, Sequence
 
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
+from app.storage._root import RunKey, legacy_key
+
 from . import _jsonl, _layout
 
 logger = logging.getLogger(__name__)
@@ -98,7 +100,8 @@ def _record_to_frame(rec: Mapping[str, Any]) -> FrameDetection:
 # ── 对外两个成员 ─────────────────────────────────────────────────────────────────
 
 
-def append_detections(task_id: int, step_id: int, frames: Sequence[FrameDetection]) -> None:
+@legacy_key
+def append_detections(run: RunKey, frames: Sequence[FrameDetection]) -> None:
     """追加一批帧检测结果：一次 `open("a")` + 一次 write，包内不攒批（W5）。
 
     空序列是 no-op 且**不建目录**（否则 `tasks.list_task_ids()` 会列出一个从没写过东西的 step）。
@@ -110,16 +113,17 @@ def append_detections(task_id: int, step_id: int, frames: Sequence[FrameDetectio
     if not frames:
         return
     payload = _jsonl.encode([_frame_to_record(f) for f in frames])
-    path = _layout.domain_dir(task_id, step_id, create=True) / _layout.DETECTIONS_NAME
+    path = _layout.domain_dir(run, create=True) / _layout.DETECTIONS_NAME
     with path.open("a", encoding="utf-8") as f:
         f.write(payload)
 
 
-def read_detections(task_id: int, step_id: int) -> List[FrameDetection]:
+@legacy_key
+def read_detections(run: RunKey) -> List[FrameDetection]:
     """回读整段检测结果，**按 ts 升序**（升序是返回值的契约，离线的 `bisect` / 滑窗建立在它上
     面）。文件不存在返回 `[]`；形状不对的 record 与坏行同等对待，跳过 + warning。
     """
-    path = _layout.domain_dir(task_id, step_id) / _layout.DETECTIONS_NAME
+    path = _layout.domain_dir(run) / _layout.DETECTIONS_NAME
     frames: List[FrameDetection] = []
     for rec in _jsonl.decode(path):
         try:

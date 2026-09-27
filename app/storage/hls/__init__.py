@@ -2,10 +2,13 @@
 
     from app.storage import hls
 
-    ref = hls.insert_segment(task_id, step_id, "raw", frames)   # 交帧，拿身份键
-    hls.read_segment(task_id, step_id, ref, width=W, height=H)  # 交身份键，拿帧（逆运算）
-    hls.segment_path(task_id, step_id, ref)                     # 要路径时再问
+    ref = hls.insert_segment(run, "raw", frames)                # 交帧，拿身份键
+    hls.read_segment(run, ref, width=W, height=H)               # 交身份键，拿帧（逆运算）
+    hls.segment_path(run, ref)                                  # 要路径时再问
     hls.delete(task_id, step_id)                                # 清掉这个 step 的整域产物
+
+`run` 是 `RunIdentity`（来自 `app.storage.runs`）。迁移期旧形态 `(task_id, step_id, ...)` 仍可用，
+指向旧布局 `{step}/hls/`（见 `_root` 的「位置键」）。
 
 对外**三个动作 + 一组定位/枚举函数**。调用方交出内存里的 `Frame` 序列，拿回这段的身份键；
 cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计七件事全在域内，一件都
@@ -35,7 +38,7 @@ ffmpeg 静默截短。收口后**「可播」不再是限定词**，故容器叫
 
 ## 落盘结构
 
-    {root}/{task_id}/{step_id}/hls/
+    {root}/{task_id}/{step_id}/{run_id}/hls/
       {track}_segment_{ts_us}.mp4   段（fMP4 fragment）
       {track}_init.mp4              该轨的 init 段，首段产出、整条 playlist 复用
       {track}_playlist.m3u8         LIVE 形态清单，只追加、不写 ENDLIST

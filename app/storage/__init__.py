@@ -19,6 +19,7 @@ step 根下只有域目录、没有文件；存储根下只有数字命名的 ta
 ## 对外：一域一个 import 名，模块函数，不出句柄
 
     tasks.py     跨域：有哪些 task / 有哪些 step
+    runs.py      run 目录 `{step}/{run_id}/`：allocate（唯一建产物目录者）/ query
     inference/   detections.jsonl / temporal.jsonl / label_probs.npz：推理链路产物
     hls/         段 / init / playlist / sidecar / metadata：定位、编解码、读写
     lab.py       送标与导出的临时件                                （尚未落地）

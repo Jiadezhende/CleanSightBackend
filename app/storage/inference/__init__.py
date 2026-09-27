@@ -2,11 +2,14 @@
 
     from app.storage import inference
 
-    inference.append_detections(task_id, step_id, [frame, ...])     # 在线写回，追加
-    inference.read_detections(task_id, step_id)                     # 离线回读，ts 升序
-    facts = inference.read_temporal(task_id, step_id)               # 读 → 合并 → 写
-    inference.write_temporal(task_id, step_id, merged)              # 整体替换
-    inference.delete(task_id, step_id)                            # 新 run 起始清掉上一代
+    inference.append_detections(run, [frame, ...])     # 在线写回，追加
+    inference.read_detections(run)                     # 离线回读，ts 升序
+    facts = inference.read_temporal(run)               # 读 → 合并 → 写
+    inference.write_temporal(run, merged)              # 整体替换
+    inference.delete(task_id, step_id)                 # 新 run 起始清掉上一代（旧布局）
+
+`run` 是 `RunIdentity`（来自 `app.storage.runs`）。迁移期旧形态 `(task_id, step_id, ...)` 仍可用，
+指向旧布局 `{step}/inference/`（见 `_root` 的「位置键」）。
 
 两份产物按**产出层**分模块：`_detection` 管目标检测产物（L1），`_temporal` 管时序分析产物
 （L3）+ 离线逐帧类别概率。共用 `_layout`（域根与文件名）和 `_jsonl`（行框定与原子写）。
@@ -38,7 +41,7 @@
 
 ## 落盘结构
 
-    {root}/{task_id}/{step_id}/inference/
+    {root}/{task_id}/{step_id}/{run_id}/inference/
       detections.jsonl      每帧一行：ts + {流名: [检测框]} + 帧分辨率
       temporal.jsonl      每条一行：`type` 判别 event / segment
       label_probs.npz     离线分割逐帧类别概率：ts [T] + probs [T,C] + labels [C]

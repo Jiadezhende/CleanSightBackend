@@ -1,7 +1,7 @@
 """读侧组合动作 —— 与 `_write.py` 对称：一次调用回答一个完整的读侧问题。
 
-    list_segments(task, step, track)               有哪些段、各自多长（**段枚举的唯一入口**）
-    list_segments_in_range(task, step, track, ...) 其中落在这个墙钟区间里的那些
+    list_segments(run, track)               有哪些段、各自多长（**段枚举的唯一入口**）
+    list_segments_in_range(run, track, ...) 其中落在这个墙钟区间里的那些
 
 两个同源、同返回类型（`List[Segment]`），后者只是前者加一次区间切片。
 
@@ -20,13 +20,16 @@ import logging
 from bisect import bisect_right
 from typing import List, Optional
 
+from app.storage._root import RunKey, legacy_key
+
 from . import _layout, _m3u8
 from .types import Segment
 
 logger = logging.getLogger(__name__)
 
 
-def list_segments(task_id: int, step_id: int, track: str) -> List[Segment]:
+@legacy_key
+def list_segments(run: RunKey, track: str) -> List[Segment]:
     """该轨的段与各自的 EXTINF，按 `ts_us` 升序。清单缺失返回 `[]`。
 
     本域"有哪些段"的唯一出口——一行清单条目同时给出墙钟锚点（URI 里的 `ts_us`）与媒体长度
@@ -38,7 +41,7 @@ def list_segments(task_id: int, step_id: int, track: str) -> List[Segment]:
     _layout.require_track(track)
 
     out: List[Segment] = []
-    for name, duration_s in _m3u8.entries(_layout.playlist_path(task_id, step_id, track)):
+    for name, duration_s in _m3u8.entries(_layout.playlist_path(run, track)):
         ref = _layout.parse_segment_name(name)
         if ref is None or ref.track != track:
             # 手写进来的条目 / 别的轨的段名：不是本轨的合法段，跳过而不抛
@@ -57,15 +60,15 @@ def list_segments(task_id: int, step_id: int, track: str) -> List[Segment]:
         logger.warning(
             "[storage.hls] 清单顺序与 ts 顺序不一致，已重排；tfdt 可能与媒体轴落点对不上: "
             "task_id=%s step_id=%s track=%s",
-            task_id, step_id, track,
+            run.task_id, run.step_id, track,
         )
         out.sort(key=lambda s: s.ref.ts_us)
     return out
 
 
+@legacy_key
 def list_segments_in_range(
-    task_id: int,
-    step_id: int,
+    run: RunKey,
     track: str,
     *,
     start_ts: Optional[float] = None,
@@ -74,8 +77,7 @@ def list_segments_in_range(
     """`list_segments` 里落在墙钟区间 `[start_ts, end_ts]` 的那些，按 `ts_us` 升序。
 
     Args:
-        task_id: 任务 id。
-        step_id: 洗消步骤 id。
+        run: 位置键（`RunIdentity`，或迁移期旧形态包成的 `LegacyStep`）。
         track: 轨道名。
         start_ts / end_ts: 闭区间的墙钟秒，`None` 表示该侧不设限。
 
@@ -89,7 +91,7 @@ def list_segments_in_range(
     一点只是多解一段（帧级裁剪会滤掉多余的帧），选窄了才是丢帧。要"与区间严格重叠"的调用方
     自己拿段尾口径（`ts_s + duration_s`）去筛。
     """
-    segs = list_segments(task_id, step_id, track)
+    segs = list_segments(run, track)
     if not segs:
         return []
 

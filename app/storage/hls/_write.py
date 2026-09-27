@@ -47,6 +47,7 @@ from typing import Sequence
 
 from app.domain.frame import Frame
 from app.storage import _fs
+from app.storage._root import RunKey, legacy_key
 
 from . import _encode, _fmp4, _idx, _layout, _m3u8, _meta
 from ._layout import SegmentRef
@@ -54,17 +55,17 @@ from ._layout import SegmentRef
 logger = logging.getLogger(__name__)
 
 
+@legacy_key
 def insert_segment(
-    task_id: int,
-    step_id: int,
+    run: RunKey,
     track: str,
     frames: Sequence[Frame],
 ) -> SegmentRef:
     """把一段帧写成该 step 下 `track` 轨的一个 HLS 段，返回它的身份键。
 
     Args:
-        task_id: 任务 id。
-        step_id: 洗消步骤 id。
+        run: 位置键。`RunIdentity` 时只建 `{run}/hls/` 这一级，run 目录不在即 `OSError`
+            （回收后的迟到写入在此失败）；迁移期旧形态 `(task_id, step_id)` 建到底。
         track: `"raw"` 或 `"processed"`。**无默认值**——写错轨不会报错，只是回放时
             两条轨的画面串了（两轨各自独立、都合法）。
         frames: 该段的帧序列，按时间升序。段的起始时刻取首帧 ts。
@@ -87,7 +88,7 @@ def insert_segment(
     """
     _layout.require_track(track)
     if not frames:
-        raise ValueError(f"frames 为空，无法生成段: task_id={task_id} step_id={step_id} track={track}")
+        raise ValueError(f"frames 为空，无法生成段: {run} track={track}")
 
     start_ts = frames[0].timestamp
     ref = SegmentRef(track=track, ts_us=_layout.ts_to_us(start_ts))
@@ -97,11 +98,11 @@ def insert_segment(
     duration_s = _encode.media_duration(len(frames), fps)
 
     # create=True 只在这里做一次，顺带把 hls/ 建出来（域名白名单在 `_root` 那步校验）
-    segment_target = _layout.segment_path(task_id, step_id, ref, create=True)
-    init_target = _layout.init_path(task_id, step_id, track)
-    playlist = _layout.playlist_path(task_id, step_id, track)
+    segment_target = _layout.segment_path(run, ref, create=True)
+    init_target = _layout.init_path(run, track)
+    playlist = _layout.playlist_path(run, track)
 
-    stage = _layout.stage_dir(task_id, step_id, ref)
+    stage = _layout.stage_dir(run, ref)
     # 入口清一次即幂等：同键重试会复用同一个目录名，不清则上次的半成品还在里面
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir()
@@ -125,7 +126,7 @@ def insert_segment(
             # 只有 raw 轨产出 sidecar：processed 是渲染结果、离线不消费
             try:
                 _idx.write(
-                    _layout.sidecar_path(task_id, step_id, ref),
+                    _layout.sidecar_path(run, ref),
                     [frame.timestamp for frame in frames],
                 )
             except OSError as e:
@@ -141,9 +142,9 @@ def insert_segment(
         os.replace(fragment, segment_target)
         _m3u8.append(playlist, _layout.init_name(track), duration_s, segment_target.name)
         _meta.record_segment(
-            _layout.metadata_path(task_id, step_id),
-            task_id=task_id,
-            step_id=step_id,
+            _layout.metadata_path(run),
+            task_id=run.task_id,
+            step_id=run.step_id,
             track=track,
             duration_s=duration_s,
             timestamp=start_ts,
@@ -155,7 +156,7 @@ def insert_segment(
 
     logger.info(
         "[storage.hls] 段已落盘: task_id=%s step_id=%s %s frames=%d duration=%.3fs fps=%.2f",
-        task_id, step_id, _layout.segment_name(ref), len(frames), duration_s, fps,
+        run.task_id, run.step_id, _layout.segment_name(ref), len(frames), duration_s, fps,
     )
     return ref
 
