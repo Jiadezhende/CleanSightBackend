@@ -104,16 +104,14 @@ class TestSegmenterContract:
 # ============================ 加载 / 推理（小权重，需 torch） ============================
 
 
-def _write_training_delivery(tmp_path, *, window=4, num_classes=len(NODEP_GRU_LABELS), meta_patch=None):
-    """模拟训练框架交付：training_state checkpoint + 旁挂 .meta.json（sha256 绑定）。"""
+def _write_artifact(tmp_path, *, window=4, num_classes=len(NODEP_GRU_LABELS), meta_patch=None):
     torch = pytest.importorskip("torch")
     from app.services.inference.offline.impl.clean import _make_window_gru
 
     torch.manual_seed(0)
     model = _make_window_gru(NODEP_FEATURE_DIM, num_classes, hidden=8, num_layers=2, dropout=0.0)
-    path = tmp_path / "gru_best.pt"
-    torch.save({"schema_version": 1, "checkpoint_kind": "training_state", "model_state": model.state_dict(),
-                "optimizer_state": {}}, path)
+    path = tmp_path / "gru.pt"
+    torch.save({"schema_version": 1, "checkpoint_kind": "training_state", "model_state": model.state_dict()}, path)
     meta = {
         "model": {"type": "gru", "input_dim": NODEP_FEATURE_DIM, "num_classes": num_classes,
                   "hidden": 8, "num_layers": 2, "dropout": 0.0},
@@ -125,17 +123,6 @@ def _write_training_delivery(tmp_path, *, window=4, num_classes=len(NODEP_GRU_LA
     meta.update(meta_patch or {})
     Path(f"{path}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return path
-
-
-def _write_artifact(tmp_path, **kwargs):
-    """训练交付 → pack → 自包含部署物料（旁挂 meta 删掉，证明加载不再依赖它）。"""
-    from app.services.inference.offline.impl.clean import pack_window_gru_checkpoint
-
-    src = _write_training_delivery(tmp_path, **kwargs)
-    dst = tmp_path / "clean-offline-gru-nodep.pt"
-    pack_window_gru_checkpoint(src, dst)
-    Path(f"{src}.meta.json").unlink()
-    return dst
 
 
 class TestSegmenterWithModel:
@@ -169,35 +156,24 @@ class TestSegmenterWithModel:
         ({"feature_schema": {"dim": 113, "version": "clean_bbox_v3_scope_frame"}}, "特征契约"),
         ({"pipeline": "full_sequence"}, "滑窗"),
     ])
-    def test_pack_rejects_mismatched_meta(self, tmp_path, meta_patch, match):
-        from app.services.inference.offline.impl.clean import pack_window_gru_checkpoint
-
-        src = _write_training_delivery(tmp_path, meta_patch=meta_patch)
+    def test_meta_mismatch_fails(self, tmp_path, meta_patch, match):
+        path = _write_artifact(tmp_path, meta_patch=meta_patch)
+        data, frames = _golden_frames()
+        seg = CleanNodepGRUSegmenter(model_path=str(path), model_input_fps=data["fps"])
         with pytest.raises(ValueError, match=match):
-            pack_window_gru_checkpoint(src, tmp_path / "out.pt")
+            seg.segment(seg.preprocess(frames))
 
-    def test_pack_drops_training_state(self, tmp_path):
-        import torch
-
-        packed = torch.load(_write_artifact(tmp_path), map_location="cpu", weights_only=True)
-        assert set(packed) == {"model_state", "meta"}
-
-    def test_class_count_mismatch_fails_on_load(self, tmp_path):
-        """内嵌 meta 自洽但与本策略 6 类不符：加载时仍拦下。"""
-        import torch
-
-        path = _write_artifact(tmp_path)
-        packed = torch.load(path, map_location="cpu", weights_only=True)
-        packed["meta"]["model"]["num_classes"] = 5
-        torch.save(packed, path)
+    def test_class_count_mismatch_fails(self, tmp_path):
+        path = _write_artifact(tmp_path, num_classes=5)
         data, frames = _golden_frames()
         seg = CleanNodepGRUSegmenter(model_path=str(path), model_input_fps=data["fps"])
         with pytest.raises(ValueError, match="model 段"):
             seg.segment(seg.preprocess(frames))
 
-    def test_unpacked_training_checkpoint_fails(self, tmp_path):
-        path = _write_training_delivery(tmp_path)
+    def test_missing_meta_fails(self, tmp_path):
+        path = _write_artifact(tmp_path)
+        Path(f"{path}.meta.json").unlink()
         data, frames = _golden_frames()
         seg = CleanNodepGRUSegmenter(model_path=str(path), model_input_fps=data["fps"])
-        with pytest.raises(ValueError, match="内嵌 meta"):
+        with pytest.raises(FileNotFoundError, match="meta.json"):
             seg.segment(seg.preprocess(frames))
