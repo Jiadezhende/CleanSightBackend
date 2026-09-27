@@ -52,7 +52,11 @@ utils                   CircuitBreaker / RetryExecutorWithCircuitBreaker / timin
 - 删 `decorators.timing`、`exceptions.is_retryable_error` / `is_fatal_error`；`__all__` 补上漏掉的 `ConflictError`。
 - 测试：整删 `test_context`；删熔断器 3 条、`timing` 2 条、上下文兜底 1 条；executor 用例统一改用 `persistence` 策略。
 
-### 4. 保留项（不改动）
+### 4. 集成测试造数改用现役布局
+
+`integration_tests/utils.py::seed_hls_segments` 原是手写的旧平铺布局（`{step}/raw_segment_*.mp4`、不登记清单），现役读侧只认 `{step}/hls/` 且「有哪些段」只由清单回答，`test_traceback.py` 造的数读不到。改为复用 `tests/factories.seed_hls_segments` 逐轨铺段（与 `hls.insert_segment` 落盘形态一致），返回值仍是 step 目录，调用方清理逻辑不变；去掉 `base_dir` 参数（唯一调用方不传）。同文件零调用方、读更老布局 `task_{id}/{client}/hls` 的 `check_hls_files` 删除。
+
+### 5. 保留项（不改动）
 
 - `FrameTracker` 与 `hls.iter_frames`：生产暂无入口，为 ROI 提案预留，集成测试在用。
 - dispatcher `_admit_to_stage` 接缝、`metadata.json`、`gpu_oom_total`：待 owner 决定。
@@ -71,6 +75,7 @@ utils                   CircuitBreaker / RetryExecutorWithCircuitBreaker / timin
 |----|------|
 | `import app.main` / `mediamtx_gateway.main` / `integration_tests.utils` | 通过 |
 | 全量 `pytest tests/` | 812 passed |
+| 集成造数（临时存储根，进程内） | 两轨各 3 段 + init 可被 `hls.list_segments` 读到；`/traceback/task/{id}/playlist.m3u8` 200 且含 3 段；清理后无残留 |
 | 复扫被删符号（app / tests / integration_tests / config / README） | 仅余一处历史叙述（`recording/service.py` 论证出处） |
 
 ## 遗留风险 / 后续任务
@@ -78,5 +83,4 @@ utils                   CircuitBreaker / RetryExecutorWithCircuitBreaker / timin
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
 | `docs/kb/DESIGN_FAULT_TOLERANCE.md` 仍列 5 个策略、CircuitBreaker、`is_*_error`；`TESTING_MAP.md` 仍列 context / Timeline / 旧 HLS 测试 | 仅文档 | KB 融合时更新 |
-| `integration_tests/utils.py::seed_hls_segments` 仍把假段写到旧平铺布局 `{step}/raw_segment_*.mp4`，现役读侧只认 `{step}/hls/` | `integration_tests/test_traceback.py` 造的数大概率读不到（预存问题，非本次引入） | 另开任务修 |
 | 删 `infer_batch` 后，帧宽高盖章只在主进程 collector 测（`test_infer_proxy`） | 无 | — |
