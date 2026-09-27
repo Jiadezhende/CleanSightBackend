@@ -167,7 +167,11 @@ class ClientQueues:
         # 写者线程顺带驱动即可。周期快照形态（每 10s 至多一条、平稳时静默），
         # 故只有 run 在跑（有人写队列）时才会汇报，run 停了自然静默。
         self._pressure_watermark: int = max(1, int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
-        _identity = {"task_id": self.task_id, "step_id": self.step_id, "stage": stage}
+        _identity = {
+            "task_id": run.task_id if run else None,
+            "step_id": run.step_id if run else None,
+            "stage": stage,
+        }
         self._ready_pressure = PressureReporter(
             "client_queues", "ca_ready", identity=_identity,
         )
@@ -485,7 +489,7 @@ class ClientQueues:
         elapsed_ms = (time.time() - self.task_started_at) * 1000.0
         _startup_logger.info(
             "[startup] task=%s step=%s %s +%.0fms",
-            self.task_id, self.step_id, name, elapsed_ms,
+            self.run.task_id, self.run.step_id, name, elapsed_ms,
         )
 
     def to_draining(self) -> bool:
@@ -646,15 +650,15 @@ class ClientQueues:
         """闸门去重 + 入环形日志，单 _alarm_lock 内原子完成。
 
         True = 已记录（赋 seq 并入日志），False = 被冷却窗口（5s）拦截、未记录。
-        闸门按 (self.task_id, alarm.metric, mode) 限流；通过后才赋 seq、append。
-        task_id 取自本 CQ 不可变身份（免锁直读），无需调用方传入。
+        闸门按 (alarm.metric, mode) 限流（闸门表本就挂在这个 CQ 上，一 CQ 一 run，键里不再带 task）；
+        通过后才赋 seq、append。
 
         写门（非对称）：仅 CLOSED 拒——ACTIVE 与 DRAINING 均放行，保证拆除期（DRAINING）
         的 settlement 结算告警仍能入账。
         """
         if self._state is RunState.CLOSED:
             return False
-        gate_key = f"{self.task_id}:{alarm.metric}:{mode}"
+        gate_key = f"{alarm.metric}:{mode}"
         now = time.time()
         with self._alarm_lock:
             last = self._alarm_gate.get(gate_key)

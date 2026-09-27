@@ -193,12 +193,12 @@ class InferenceManager:
         """起该 run 的推理 workflow：建并启 actor（存储侧无起始钩子）。
 
         入参是 RunController 已建好并**已注册**（client_manager.set）的不可变身份 CQ
-        （一 CQ == 一 run）。调用方已持 lock_for(cq.task_id)，与 stop_workflow 互斥；重启路径下
+        （一 CQ == 一 run）。调用方已持 lock_for(cq.run.task_id)，与 stop_workflow 互斥；重启路径下
         RunController 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
         RunController（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
         resolve_stage 定死）。
         """
-        task_id = cq.task_id
+        task_id = cq.run.task_id
         # 防御：残留旧 actor（正常路径 stop_workflow 已 pop，不应命中）——信号停、丢弃、不结算。
         stale = self._actors.pop(task_id, None)
         if stale is not None:
@@ -252,9 +252,9 @@ class InferenceManager:
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
         交给 RunController 转 PersistenceManager；HLS 残段 / 剩余检测结果归 recording，告警落库归
         persistence，前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持
-        lock_for(cq.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
+        lock_for(cq.run.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
-        task_id = cq.task_id
+        task_id = cq.run.task_id
         logger.info("[InferenceManager] Stopping workflow: task=%s", task_id)
 
         settlement: List[Alarm] = []

@@ -154,12 +154,12 @@ class DetectionService:
                 frame_drop_total.labels(reason="stale_run").inc()
                 logger.debug(
                     "[Worker] Skip write-back for stale run: task=%s state=%s",
-                    cq.task_id, cq.get_state().name,
+                    cq.run.task_id, cq.get_state().name,
                 )
                 continue
 
             # 失败可见性：pool 把模型异常降级成 success=False 的空结果（画面照常，只是没框）。
-            # 此处 cq.task_id 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
+            # 此处 cq.run 已是确定单值（句柄按帧拆开），按 run 记一条 warning，
             # 聚合计数由 pool.infer_failure_total 承接、此处不再重复计数。
             degraded = False
             for task_name, detection_output in frame.by_source.items():
@@ -167,7 +167,7 @@ class DetectionService:
                     degraded = True
                     logger.warning(
                         "[Worker] inference degraded (empty result): task=%s model=%s error=%s",
-                        cq.task_id, task_name, detection_output.error,
+                        cq.run.task_id, task_name, detection_output.error,
                     )
             # 帧窗 / 原子快照 / 落盘缓冲共用 collector 组装的这一份（pool 每帧新建、无别名突变），不复制。
             # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。

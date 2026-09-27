@@ -62,7 +62,7 @@ class RunController:
                 if old_cq is not None:
                     cur_url = (stream_service.get_stream_info(task_id) or {}).get("url")
                     # 完全相同（step / URL 均未变）才幂等返回，否则全量重建
-                    if old_cq.step_id == step_id and cur_url == rtsp_url:
+                    if old_cq.run.step_id == step_id and cur_url == rtsp_url:
                         logger.info(
                             "[RunController] start_run idempotent: task=%s", task_id
                         )
@@ -75,7 +75,7 @@ class RunController:
                     # 字段变化（改 step/url）→ 停旧 run，全量重建（重入 lock_for，无害）
                     logger.info(
                         "[RunController] start_run restart: task=%s (step %s->%s)",
-                        task_id, old_cq.step_id, step_id,
+                        task_id, old_cq.run.step_id, step_id,
                     )
                     self.stop_run(task_id, reason=f"restart:{task_id}")
 
@@ -109,7 +109,7 @@ class RunController:
                     raise AppError(
                         message=f"Failed to start workflow for task {task_id}",
                         task_id=task_id,
-                        step_id=cq.step_id,
+                        step_id=run.step_id,
                         source_ip=source_ip,
                     )
                 logger.info("[RunController] workflow started: task_id=%s", task_id)

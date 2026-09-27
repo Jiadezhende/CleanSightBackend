@@ -41,7 +41,7 @@ def _install_registry(monkeypatch, cqs):
     """替换活跃注册表快照（决定 /live 出什么、/history 排除谁）。"""
     from app.routers import task as task_router
 
-    runs = {cq.task_id: cq for cq in cqs}
+    runs = {cq.run.task_id: cq for cq in cqs}
     monkeypatch.setattr(
         task_router.client_manager, "snapshot", lambda: runs, raising=True
     )

@@ -30,9 +30,9 @@ def _client_info(client_id: int, client_queues) -> dict:
     depths = client_queues.get_queue_depths()
     return {
         "client_id": client_id,  # 注册表键 = task_id(int)
-        "task_id": client_queues.task_id,
+        "task_id": client_queues.run.task_id,
         "source_ip": client_queues.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
-        "step_id": client_queues.step_id,
+        "step_id": client_queues.run.step_id,
         "queue_depths": depths,
     }
 

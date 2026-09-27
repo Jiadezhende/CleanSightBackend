@@ -106,7 +106,7 @@ def _build_task_alarm_message(cq, since_seq: int) -> dict:
     """装配前端实时告警消息：原子取告警增量 + 滑窗汇总，序列化域对象。"""
     alarms, max_seq = cq.get_alarm_snapshot(since_seq)  # 原子 (增量, max_seq)
     return {
-        "task_id": cq.task_id,
+        "task_id": cq.run.task_id,
         "max_seq": max_seq,
         "signals_10s": _build_signals_10s(cq.get_slide_window_summary()),
         "alarms": [

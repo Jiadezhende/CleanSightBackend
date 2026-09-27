@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from httpx import AsyncClient, ASGITransport
 
+from app.domain.run import RunIdentity
 from app.main import app
 from app.services.client.manager import client_manager
 
@@ -60,8 +61,6 @@ def _new_cq(*, run, **_kwargs):
     """ClientQueues 替身：每次 start 一个新对象，带上真实的 run 身份"""
     cq = MagicMock()
     cq.run = run
-    cq.task_id = run.task_id
-    cq.step_id = run.step_id
     return cq
 
 
@@ -116,8 +115,7 @@ async def test_same_task_url_change_triggers_restart():
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
 
     mock_cq = MagicMock()
-    mock_cq.task_id = 1
-    mock_cq.step_id = 0  # step 同，但下方 URL 不同 → 非幂等，触发重启
+    mock_cq.run = RunIdentity(1, 0, 1)  # step 同，但下方 URL 不同 → 非幂等，触发重启
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
@@ -274,7 +272,7 @@ async def test_different_tasks_not_blocked():
 async def test_terminate_uses_lock(request_kwargs):
     """terminate 解析到 run → stop_run 持 lock_for(task_id)、stop_workflow(cq)。"""
     mock_cq = MagicMock()
-    mock_cq.task_id = 1
+    mock_cq.run = RunIdentity(1, 0, 1)
 
     with (
         patch("app.services.run_control.inference_manager") as mock_inference,

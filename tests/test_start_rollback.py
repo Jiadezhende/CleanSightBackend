@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.domain.run import RunIdentity
 from app.services.client.manager import client_manager
 from app.services.run_control import run_controller
 from app.utils.exceptions import ValidationError
@@ -21,8 +22,7 @@ def test_start_run_rolls_back_cq_on_workflow_failure():
         client_manager.remove(task_id, cleanup=False)
 
     mock_cq = MagicMock()
-    mock_cq.task_id = task_id
-    mock_cq.step_id = 0
+    mock_cq.run = RunIdentity(task_id, 0, 1)
     mock_cq.stage = "0"
     mock_cq.source_ip = "10.9.9.9"
 

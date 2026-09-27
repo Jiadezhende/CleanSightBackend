@@ -125,7 +125,7 @@ class StreamService:
                     raise ConflictError(
                         message=f"Stream already running for task {task_id}. Stop it first to change stream URL.",
                         task_id=task_id,
-                        step_id=_cq.step_id if _cq else None,
+                        step_id=_cq.run.step_id if _cq and _cq.run else None,
                         source_ip=_cq.source_ip if _cq else None,
                         resource_type="Stream",
                         resource_id=str(task_id),
