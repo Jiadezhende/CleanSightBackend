@@ -2,15 +2,15 @@
 
 调用方（CLI / 测试）显式给 `(task_id, step_id)`，Runner：
     1. 按 step_id 取 stage 配置，实例化 offline 策略（未配置 / offline 为空 → ValidationError，无兜底）；
-    2. 一次读该 step 的完整检测序列（为空则 skip）；
+    2. `runs.query` 解析一次最新可见 run，之后全程只读写它；再一次读完整检测序列（没有 run 或为空则 skip）；
     3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；
     4. 校验 + 排序，**读回既有事实 → 删掉该 step 全部旧分段、保留 TemporalEvent → 整体写回**。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
 落盘全经 `app.storage.inference`（存储根归 `settings`，故本类不收 `base_dir`）。
 
-**不做换代 / 回收冲突防护**：调用方只对已停写的 step 提交；运行期间同 step 重启或被 TTL 回收，
-结果可能写进新一代目录或重建出空壳 step，重跑即覆盖。
+run 锁定在入口：运行期间同 step 重启，结果仍写回解析出的那个 run；该 run 被 TTL 回收则写入
+`FileNotFoundError`，不重建目录。「该 run 正在运行」由调用方挡（第 4 期提交时 409）。
 """
 
 from __future__ import annotations
@@ -23,10 +23,12 @@ from typing import List, Optional
 
 import numpy as np
 
+from app.domain.run import RunIdentity
 from app.domain.temporal import LabelProbs, TemporalSegment
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
+from app.storage import runs
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,10 @@ class OfflineRunner:
         segmenter = StageFactory(config).create_offline_segmenter(stage_key)
 
         producer = segmenter.name
-        frames = inference_store.read_detections(spec.task_id, spec.step_id)
+        run = runs.query(spec.task_id, spec.step_id)
+        if run is None:
+            return OfflineRunResult("skipped", producer, 0, "该 step 没有可见的 run")
+        frames = inference_store.read_detections(run)
         if not frames:
             # 无检测结果：跳过，不覆盖旧事实
             return OfflineRunResult("skipped", producer, 0, "该 step 无检测结果")
@@ -80,16 +85,16 @@ class OfflineRunner:
 
         # 先旁路、后事实：事实是结果的真源，它落盘即代表本次运行完成；旁路在前，
         # 页面读到新事实时对应的概率必然已是同一次运行的（反序会短暂配上旧概率）。
-        self._maybe_write_label_probs(spec, segmenter)
-        self._replace_segments(spec.task_id, spec.step_id, validated)
+        self._maybe_write_label_probs(run, segmenter)
+        self._replace_segments(run, validated)
         logger.info(
-            "[OfflineRunner] completed task=%s step=%s producer=%s segments=%d",
-            spec.task_id, spec.step_id, producer, len(validated),
+            "[OfflineRunner] completed task=%s step=%s run=%s producer=%s segments=%d",
+            run.task_id, run.step_id, run.run_id, producer, len(validated),
         )
         return OfflineRunResult("completed", producer, len(validated))
 
     @staticmethod
-    def _replace_segments(task_id: int, step_id: int, facts: List[TemporalSegment]) -> None:
+    def _replace_segments(run: RunIdentity, facts: List[TemporalSegment]) -> None:
         """幂等替换该 step 的分段：读回既有 → 丢掉全部旧 TemporalSegment、保留 TemporalEvent → 整体写回。
 
         一个 stage 至多一个离线模型，换模型重跑时旧模型（旧类名）的分段整体被替换，不与新结果并存。
@@ -99,13 +104,13 @@ class OfflineRunner:
         一期不支持同一 (task, step) 跨进程并发跑离线：这段 read-modify-write 没有互斥。
         """
         kept = [
-            f for f in inference_store.read_temporal(task_id, step_id)
+            f for f in inference_store.read_temporal(run)
             if not isinstance(f, TemporalSegment)
         ]
-        inference_store.write_temporal(task_id, step_id, kept + facts)
+        inference_store.write_temporal(run, kept + facts)
 
     @staticmethod
-    def _maybe_write_label_probs(spec: OfflineRunSpec, segmenter) -> None:
+    def _maybe_write_label_probs(run: RunIdentity, segmenter) -> None:
         """策略若产逐帧类别概率（`label_probs()` 非 None），落 `label_probs.npz`。
 
         旁路不影响主结果：形状不一致或写失败只告警、不落，事实照常写。
@@ -117,15 +122,15 @@ class OfflineRunner:
         if problem:
             logger.warning(
                 "[OfflineRunner] label_probs 形状不一致，不落盘 task=%s step=%s: %s",
-                spec.task_id, spec.step_id, problem,
+                run.task_id, run.step_id, problem,
             )
             return
         try:
-            inference_store.write_label_probs(spec.task_id, spec.step_id, probs)
+            inference_store.write_label_probs(run, probs)
         except Exception as e:
             logger.warning(
                 "[OfflineRunner] label_probs 落盘失败 task=%s step=%s: %s",
-                spec.task_id, spec.step_id, e,
+                run.task_id, run.step_id, e,
             )
 
     @staticmethod

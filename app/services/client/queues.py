@@ -17,6 +17,7 @@ import numpy as np
 from app.domain.alarm import Alarm
 from app.domain.detection import FrameDetection
 from app.domain.frame import Frame
+from app.domain.run import RunIdentity
 from app.utils.metrics import frame_drop_total
 from app.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
@@ -80,7 +81,7 @@ class ClientQueues:
       _raw_lock → _viz_lock → _detection_lock
       → _frontend_lock → _slide_window_lock → _alarm_lock
 
-    身份（task_id/step_id/source_ip/stage）为构造定死的不可变 primitive，热路径免锁直读。
+    身份（run/source_ip/stage）为构造定死的不可变值，热路径免锁直读。
     """
 
     def __init__(
@@ -91,11 +92,10 @@ class ClientQueues:
         resize_height: int = 480,
         inference_decimation: int = 2,
         *,
-        # 不可变运行身份（primitives 直注，一次 CQ == 一次 run，终生不变）。
-        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入已解析好的
-        # task_id/step_id/stage（int 转换与 stage 解析都在 RunController 边界一次完成）。
-        task_id: Optional[int] = None,
-        step_id: Optional[int] = None,
+        # 不可变运行身份（一次 CQ == 一次 run，终生不变）。
+        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入 `runs.allocate`
+        # 分配的 RunIdentity 与已解析好的 stage。
+        run: Optional[RunIdentity] = None,
         source_ip: str = "",
         stage: str = "",
     ):
@@ -125,17 +125,15 @@ class ClientQueues:
         # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_manager COW
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
-        # 注：无 client_id 字段——注册表路由键即 self.task_id(int)；source_ip 为被动来源字段。
-        # step_id 为已解析好的 int（DBAlarm.step_id/落盘目录/落盘分区键全链路 int）；
-        # 字符串来源 current_step→int 的转换在 RunController 边界一次完成，本类不再解析。
-        self.task_id: Optional[int] = task_id
-        self.step_id: Optional[int] = step_id
+        # 注：无 client_id 字段——注册表路由键即 run.task_id(int)；source_ip 为被动来源字段。
+        # 「未绑定 run」只有一个判据：`self.run is None`。
+        self.run: Optional[RunIdentity] = run
         self.source_ip: str = source_ip
         self.stage: str = stage
         # run 起始时刻：供 GlobalHealthMonitor 的 task_max_duration 看门狗判定跑飞任务并超时拆除
         # （health_monitor/manager.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
         # 同时作为启动延迟埋点的公共参考钟（mark_startup_milestone 相对它计耗时）。
-        self.task_started_at: float = time.time() if task_id is not None else 0.0
+        self.task_started_at: float = time.time() if run is not None else 0.0
 
         # 启动里程碑埋点（纯观测，first-wins 幂等）：记录每个里程碑首次到达相对
         # task_started_at 的耗时，仅记一次。无锁——每个 milestone 名字单一生产者线程
@@ -169,7 +167,7 @@ class ClientQueues:
         # 写者线程顺带驱动即可。周期快照形态（每 10s 至多一条、平稳时静默），
         # 故只有 run 在跑（有人写队列）时才会汇报，run 停了自然静默。
         self._pressure_watermark: int = max(1, int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
-        _identity = {"task_id": task_id, "step_id": step_id, "stage": stage}
+        _identity = {"task_id": self.task_id, "step_id": self.step_id, "stage": stage}
         self._ready_pressure = PressureReporter(
             "client_queues", "ca_ready", identity=_identity,
         )
@@ -213,6 +211,16 @@ class ClientQueues:
         self._alarm_gate_window: float = 5.0
 
     # --- 封装操作方法 ---
+
+
+    # 迁移期转发（第 4 期读者迁到 `cq.run.*`，第 5 期删）。未绑定 run 时为 None。
+    @property
+    def task_id(self) -> Optional[int]:
+        return self.run.task_id if self.run is not None else None
+
+    @property
+    def step_id(self) -> Optional[int]:
+        return self.run.step_id if self.run is not None else None
 
     def append_ca_ready_with_throttle(self, frame_data: Frame) -> bool:
         """

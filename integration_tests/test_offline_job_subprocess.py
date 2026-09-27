@@ -40,9 +40,9 @@ _CFG = InferenceConfig({"stages": {str(STEP_ID): {"offline": {"class": "unused.S
 
 
 def run(timeout: float) -> bool:
-    from factories import make_detector_output, make_frame_detection
+    from factories import make_detector_output, make_frame_detection, make_run
 
-    inference_store.append_detections(TASK_ID, STEP_ID, [
+    inference_store.append_detections(make_run(TASK_ID, STEP_ID), [
         make_frame_detection(ts=1.0, by_source={"x": make_detector_output(n=1, ts=1.0)})
     ])
     svc = OfflineJobService(config=_CFG, poll_s=0.05)

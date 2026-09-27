@@ -1,12 +1,12 @@
 """hls 域的定位与命名 —— 域内每条路径都从这里出来。
 
-    {root}/{task_id}/{step_id}/{run_id}/hls/     （位置键为 LegacyStep 时是旧布局 {step}/hls/）
+    {root}/{task_id}/{step_id}/{run_id}/hls/
       {track}_segment_{ts_us}.mp4   段（fMP4 fragment）      {track}_init.mp4   该轨 init
       {track}_playlist.m3u8         LIVE 清单               raw_segment_{ts_us}.idx  逐帧 ts
       metadata.json                 统计，兼作 TTL 判据      .stage_{track}_{ts_us}/  写入暂存
 
-路径函数的第一个参数是位置键 `run`（`_root.RunKey`），旧形态 `(task_id, step_id, ...)` 经
-`_root.legacy_key` 同名并存。
+路径函数的第一个参数是 `run: RunIdentity`；迁移期对外的读口另收旧形态 `(task_id, step_id, ...)`，
+经 `_root.legacy_reader` 解析成最新可见 run。
 
 **身份键是 `SegmentRef(track, ts_us)`**：外部字符串一律先 `parse_segment_name` 解成 ref，
 路径由 ref 重建，绝不进字符串拼接。
@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from app.storage import _root
-from app.storage._root import RunKey, legacy_key
+from app.domain.run import RunIdentity
+from app.storage._root import legacy_reader
 
 from .types import SegmentRef
 
@@ -48,11 +49,10 @@ _SEGMENT_RE = re.compile(r"^(?P<track>raw|processed)_segment_(?P<ts_us>\d+)\.mp4
 _INIT_RE = re.compile(r"^(?P<track>raw|processed)_init\.mp4$")
 
 
-@legacy_key
-def domain_dir(run: RunKey, *, create: bool = False) -> Path:
+def domain_dir(run: RunIdentity, *, create: bool = False) -> Path:
     """本域在该 run 下的根目录 —— 域内所有路径函数都经它。`create` 语义见 `_root.domain_dir`。
 
-    无前导下划线是因为同包的 `_write.delete` 要用它：**包内**公开，仍不出包。
+    无前导下划线是因为同包兄弟模块与 `runs` 要用它：**包内**公开，仍不出包。
     """
     return _root.domain_dir(run, _DOMAIN, create=create)
 
@@ -86,14 +86,14 @@ def parse_segment_name(name: str) -> Optional[SegmentRef]:
     return SegmentRef(track=m.group("track"), ts_us=int(m.group("ts_us")))
 
 
-@legacy_key
-def segment_path(run: RunKey, ref: SegmentRef, *, create: bool = False) -> Path:
+@legacy_reader
+def segment_path(run: RunIdentity, ref: SegmentRef, *, create: bool = False) -> Path:
     """段文件路径。`create=True` 时确保 `hls/` 目录存在（写任何产物前用它）。"""
     return domain_dir(run, create=create) / segment_name(ref)
 
 
-@legacy_key
-def sidecar_path(run: RunKey, ref: SegmentRef) -> Path:
+@legacy_reader
+def sidecar_path(run: RunIdentity, ref: SegmentRef) -> Path:
     """段的逐帧 ts sidecar 路径（同名换后缀）。
 
     **只有 raw 轨会产出它**，但本函数对任何 ref 都给得出路径——"该不该写"是写侧的事。
@@ -101,8 +101,8 @@ def sidecar_path(run: RunKey, ref: SegmentRef) -> Path:
     return segment_path(run, ref).with_suffix(_SIDECAR_SUFFIX)
 
 
-@legacy_key
-def init_path(run: RunKey, track: str) -> Path:
+@legacy_reader
+def init_path(run: RunIdentity, track: str) -> Path:
     """该轨的 fMP4 init 段路径。**按 track 分开**——两轨各有各的 EXT-X-MAP，共用一个文件名
     会让后写的那条轨指向别人的 init。
     """
@@ -126,21 +126,19 @@ def parse_init_name(name: str) -> Optional[str]:
     return m.group("track")
 
 
-@legacy_key
-def playlist_path(run: RunKey, track: str) -> Path:
+@legacy_reader
+def playlist_path(run: RunIdentity, track: str) -> Path:
     """该轨的 LIVE playlist 路径。"""
     return domain_dir(run) / f"{require_track(track)}_playlist.m3u8"
 
 
-@legacy_key
-def metadata_path(run: RunKey) -> Path:
+def metadata_path(run: RunIdentity) -> Path:
     """本域的统计文件路径（两轨共用一份）。它在 `insert_segment` 提交的最后一步出现，
     `runs.query` 拿它当 hls 的可见判据。"""
     return domain_dir(run) / _METADATA_NAME
 
 
-@legacy_key
-def stage_dir(run: RunKey, ref: SegmentRef) -> Path:
+def stage_dir(run: RunIdentity, ref: SegmentRef) -> Path:
     """该段写入事务的暂存目录。
 
     **与目标同卷**（就在 `hls/` 里面），`os.replace` 才是原子换名而不是跨卷复制；目录名

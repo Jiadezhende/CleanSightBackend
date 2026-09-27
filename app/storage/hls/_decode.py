@@ -43,7 +43,8 @@ from typing import Iterator, List, Optional
 import numpy as np
 
 from app.domain.frame import Frame
-from app.storage._root import RunKey, legacy_key
+from app.domain.run import RunIdentity
+from app.storage._root import legacy_reader
 
 from . import _idx, _layout, _read
 from ._layout import SegmentRef
@@ -85,7 +86,7 @@ def _read_exact(stream, buf: bytearray) -> bool:
 
 
 def _build_cmd(
-    run: RunKey, ref: SegmentRef, start: int, end: int, width: int, height: int
+    run: RunIdentity, ref: SegmentRef, start: int, end: int, width: int, height: int
 ) -> List[str]:
     """解出 `[start, end]` 闭区间帧号的 ffmpeg 命令（rawvideo bgr24 走管道）。
 
@@ -134,7 +135,7 @@ def _decode_failure(
 
 
 def _run_ffmpeg(
-    run: RunKey,
+    run: RunIdentity,
     ref: SegmentRef,
     sidecar: np.ndarray,
     k_start: int,
@@ -188,9 +189,9 @@ def _run_ffmpeg(
                 proc.wait()
 
 
-@legacy_key
+@legacy_reader
 def read_segment(
-    run: RunKey,
+    run: RunIdentity,
     ref: SegmentRef,
     *,
     width: int,
@@ -201,7 +202,7 @@ def read_segment(
     """单段解码 —— `insert_segment` 的逆运算。帧级裁剪到 `[start_ts, end_ts]`。
 
     Args:
-        run: 位置键（`RunIdentity`，或迁移期旧形态包成的 `LegacyStep`）。
+        run: 该 run（迁移期另收旧形态 `task_id, step_id`，见 `_root.legacy_reader`）。
         ref: 段身份键。`ref.track` 必须是 `"raw"`。
         width / height: 输出分辨率。**无默认值**——静默产出一个尺寸会在下游变成
             train-serve skew。
@@ -245,9 +246,9 @@ def read_segment(
     return _run_ffmpeg(run, ref, sidecar, k_start, k_end, width, height)
 
 
-@legacy_key
+@legacy_reader
 def iter_frames(
-    run: RunKey,
+    run: RunIdentity,
     *,
     width: int,
     height: int,

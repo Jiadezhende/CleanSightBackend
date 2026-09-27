@@ -32,7 +32,7 @@
 | 能力 | 现有副本 |
 |------|---------|
 | 整体替换（tmp + `os.replace`） | [`_idx.write`](../../app/storage/hls/_idx.py)、[`_meta.record_segment`](../../app/storage/hls/_meta.py)、[`_jsonl.write_atomic`](../../app/storage/inference/_jsonl.py)、[`_temporal._write_probs_atomic`](../../app/storage/inference/_temporal.py)，共 4 份 |
-| 删除目录 | `hls.delete`、`inference.delete`、[`tasks.delete_step`](../../app/storage/tasks.py)（零生产调用点）、`cleanup_worker._scan_and_clean`，共 4 份 |
+| 删除目录 | `hls.delete`、`inference.delete`、`cleanup_worker._scan_and_clean`，共 3 份 |
 | step 目录遍历 | `tasks._step_id_dirs`、`cleanup_worker._iter_step_dirs`，共 2 份 |
 | 时间口径 | TTL 用 `{step}` 自身的 mtime 近似创建时间；`list_task_ids(order="mtime")` 下钻取最大 mtime 表示最近活动，共 2 套 |
 | 代次令牌 | recording 用 `cq` 身份（两处）+ 两张认领表 + 三个 `forget_*`；离线、媒体 token 没有令牌 |
@@ -95,7 +95,7 @@
 | 原语 | 语义 | 收编 |
 |------|------|------|
 | `replace(path, write_fn)` | 写同目录下的 `.{name}.tmp`，再 `os.replace`；失败就删掉 tmp，原异常上抛；**不建父目录** | 4 份整体替换。`_jsonl.write_atomic` 里的 `mkdir(parents=True)` 随之删除 |
-| `remove(path) -> Removed` | 先 rename 到 `{root}/.trash/{uuid}`，再 `rmtree`。返回三态：`ABSENT`（本来就不在）/ `REMOVED` / `FAILED`（rename 失败，盘上原样不动）。rmtree 失败的留在回收区，下一轮再清 | `hls.delete`、`inference.delete`、`tasks.delete_step` 这一期先改为调用它，第 5 期随调用方消失一起删；`cleanup_worker` 的 `rmtree` 改为调用它，长期保留 |
+| `remove(path) -> Removed` | 先 rename 到 `{root}/.trash/{uuid}`，再 `rmtree`。返回三态：`ABSENT`（本来就不在）/ `REMOVED` / `FAILED`（rename 失败，盘上原样不动）。rmtree 失败的留在回收区，下一轮再清 | `hls.delete`、`inference.delete` 这一期先改为调用它，第 3 期随调用方消失一起删；`cleanup_worker` 的 `rmtree` 改为调用它，长期保留 |
 | `ensure_dir(path)` | `mkdir(exist_ok=True)`，**不带 parents** | 写者在 run 目录下建域子目录时用 |
 
 `.trash/` 在存储根下，与所有产物同卷，所以 rename 是原子的。它的名字不是数字，现有的 task / step 枚举都会跳过它。`remove` 每次先 `mkdir(.trash, exist_ok=True)` 再 rename，不假设它存在。
@@ -148,7 +148,7 @@
   - 前端从列表拿到 `run_id` 后，同一页面的各个请求都带上它，跨请求也锁定同一个 run。
 - `MediaTokenPayload` 增加 `run_id`：签发清单时解析一次，用它签发清单里所有段和 init 的 token；`media.py` 经 `runs.query` 拿到 RunIdentity 再取路径。run 被回收后再请求返回 404。`run_id` 在 token 里是可选字段：上线前签发的 token（最长 `media_token_ttl` = 300 s）没有它，按最新 run 解析，不因缺字段校验失败。
 - `tasks.list_task_ids(order="mtime")` 改为按各 step 下最大的 `run_id` 排序，也就是最近一次 run 的开始时刻；`_latest_step_mtime` 删除。
-- **第 3 期过渡**：旧的 (task, step) 签名保留，内部先 `runs.query(task, step)` 再转发；第 4 期迁完调用点后删除。
+- **第 3 期过渡**：只有读口保留旧的 (task, step) 签名，内部先 `runs.query(task, step)` 再转发（查不到按空读）；写口只收 RunIdentity。第 4 期迁完读侧调用点后删除转发。
 
 ### 5. 离线锁定 run（对应全景 ④）
 
@@ -188,9 +188,9 @@
 |----|------|-----------|------|
 | 1 | §1 `_fs` 收编 4 份整体替换，删除（含 `cleanup_worker`）改走 `_fs.remove`；§6 的 `.trash/` 清理与数字目录过滤 | 不变（删除变成原子操作） | 原有单测；新增 `_fs` 单测（三态返回、rename 失败盘上不动、replace 不建父目录）；`cleanup_worker` 不删非数字目录 |
 | 2 | `app/domain/run.py`（`RunIdentity`）；§2–§4 的存储层能力：`runs`（allocate / query）+ 收 RunIdentity 的读写口，与旧签名并存，不接调用点 | 不变 | 新增单测：`run_id` 递增、可见判据、`query` 三种结果（指定存在 / 指定不存在 / 缺省取最新）、`create` 边界 |
-| 3 | 写侧切换：`start_run` 分配 `RunIdentity`，CQ 改收 `run`（`task_id` / `step_id` 保留为转发属性），recording / 离线写入走 RunIdentity；读侧旧签名内部改为经 `runs.query(task, step)` 转发；改写 `test_recording_service.py` 里断言认领表的用例（①② 删除后即失效）；[detection/service.py](../../app/services/inference/online/detection/service.py) `_write_back_results` 注释里的代次隔离依据改为 RunIdentity；`docs/api` 补 `/api/start` 的 mkdir 失败情形 | 新数据落 `{step}/{run_id}/`；旧布局数据读侧不可见 | 全量 pytest + dev 端到端：启停、同 step 重启、回放、离线提交 |
+| 3 | 写侧切换：`start_run` 分配 `RunIdentity`，CQ 改收 `run`（`task_id` / `step_id` 保留为转发属性），recording / 离线写入走 RunIdentity，写口只收 RunIdentity；读侧旧签名内部改为经 `runs.query(task, step)` 转发；随写侧切换一并删除已无调用方的旧实现：`LegacyStep`（第 2 期指向旧布局的位置键）、recording 的 ①② 与认领表、`forget_*`（`_pending_flush` 的回收挪进 `flush_residual(cq)` 的拆除路径）、`hls.delete` / `inference.delete`；改写 `test_recording_service.py` 里断言认领表的用例（①② 删除后即失效）；[detection/service.py](../../app/services/inference/online/detection/service.py) `_write_back_results` 注释里的代次隔离依据改为 RunIdentity；`docs/api` 补 `/api/start` 的 mkdir 失败情形 | 新数据落 `{step}/{run_id}/`；旧布局数据读侧不可见 | 全量 pytest + dev 端到端：启停、同 step 重启、回放、离线提交 |
 | 4 | 调用点迁移：读侧与离线迁到 RunIdentity（各 router、`media_timeline`、lab、媒体 token 带 `run_id`；离线锁定 run、409、`reclaimed`）；§4 的对外契约增量（列表返回 `run_id`、读口接收可选 `run_id`、timeline 告警按 run 存续期过滤、媒体 token 的 `run_id` 可选）并同步 `docs/api`；`cq.task_id` / `cq.step_id` 的读者迁到 `cq.run.*` | 回放与离线整次锁定同一个 run；不带 `run_id` 的老请求行为不变 | 全量 pytest（含不带 `run_id` 的回归用例）+ dev 端到端：换代期间持续回放、离线期间同 step 重启 |
-| 5 | 单独一次提交删旧：认领表、`forget_*`（同一提交把 `_pending_flush` 的回收挪进 `flush_residual(cq)` 的拆除路径，见 §3，否则每次拆除都在表里留一个 CQ 引用）、`hls.delete` / `inference.delete` / `tasks.delete_step`、旧 (task, step) 签名、`_root.path(create=)`、`_latest_step_mtime`、CQ 的身份转发属性 | 不变 | 全量 pytest |
+| 5 | 单独一次提交删旧：读口的 (task, step) 转发、`_root.path(create=)`、CQ 的身份转发属性 | 不变 | 全量 pytest |
 
 ## 变更效果（预期）
 

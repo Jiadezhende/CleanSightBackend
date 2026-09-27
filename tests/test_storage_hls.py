@@ -40,8 +40,20 @@ def _frames(count=15, start=1700.0, fps=15.0, size=(16, 16)):
     return [make_frame(ts=start + i / fps, shape=(*size, 3)) for i in range(count)]
 
 
+RUN_ID = 7
+RUN = RunIdentity(1, 2, RUN_ID)
+
+
 def _hls_dir(root: Path, task_id=1, step_id=2) -> Path:
-    return root / str(task_id) / str(step_id) / "hls"
+    return root / str(task_id) / str(step_id) / str(RUN_ID) / "hls"
+
+
+@pytest.fixture
+def tmp_storage(tmp_storage):
+    """本文件的写入都进固定 run（`RUN_ID`）：先把 step 2 / 3 的 run 目录建好（分配者的职责）。"""
+    for step_id in (2, 3):
+        (tmp_storage / "1" / str(step_id) / str(RUN_ID)).mkdir(parents=True)
+    return tmp_storage
 
 
 def _box(typ: bytes, body: bytes) -> bytes:
@@ -146,28 +158,28 @@ class TestLayout:
         ref = _layout.SegmentRef("raw", 42)
         expected = _hls_dir(tmp_storage)
         for path in (
-            hls.segment_path(1, 2, ref),
-            hls.sidecar_path(1, 2, ref),
-            hls.init_path(1, 2, "raw"),
-            hls.playlist_path(1, 2, "raw"),
-            _layout.metadata_path(1, 2),
-            _layout.stage_dir(1, 2, ref),
+            hls.segment_path(RUN, ref),
+            hls.sidecar_path(RUN, ref),
+            hls.init_path(RUN, "raw"),
+            hls.playlist_path(RUN, "raw"),
+            _layout.metadata_path(RUN),
+            _layout.stage_dir(RUN, ref),
         ):
             assert path.parent == expected
 
     def test_sidecar_is_segment_with_idx_suffix(self, tmp_storage):
         """读侧用 `with_suffix('.idx')` 找 sidecar，写侧不能另拼一套名字。"""
         ref = _layout.SegmentRef("raw", 42)
-        assert hls.sidecar_path(1, 2, ref) == hls.segment_path(1, 2, ref).with_suffix(".idx")
+        assert hls.sidecar_path(RUN, ref) == hls.segment_path(RUN, ref).with_suffix(".idx")
 
     @pytest.mark.parametrize("track", ["RAW", "raw ", "detection", ""])
     def test_invalid_track_raises(self, tmp_storage, track):
         with pytest.raises(ValueError):
-            hls.playlist_path(1, 2, track)
+            hls.playlist_path(RUN, track)
 
     def test_locating_does_not_touch_disk(self, tmp_storage):
-        hls.segment_path(1, 2, _layout.SegmentRef("raw", 42))
-        assert not (tmp_storage / "1").exists()
+        hls.segment_path(RUN, _layout.SegmentRef("raw", 42))
+        assert not _hls_dir(tmp_storage).exists()
 
 
 class TestInitNameCodec:
@@ -200,7 +212,7 @@ class TestInitNameCodec:
     def test_init_path_is_rebuilt_from_parsed_track(self, tmp_storage):
         """L2 的完整链条：外部字符串 → parse → track → 路径由结构重建。"""
         track = hls.parse_init_name("processed_init.mp4")
-        assert hls.init_path(1, 2, track).name == "processed_init.mp4"
+        assert hls.init_path(RUN, track).name == "processed_init.mp4"
 
 
 # ---------------------------------------------------------------------------
@@ -337,50 +349,50 @@ class TestSegments:
         造的是登记失败那一档：段文件已就位、清单里没它（`_m3u8.append` 抛 `OSError`，或进程
         崩在 `os.replace(段)` 与 append 之间）。在途段同理。
         """
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
+        hls.insert_segment(RUN, "raw", _frames(start=1700.0))
         orphan = _hls_dir(tmp_storage) / "raw_segment_9999999999.mp4"
         orphan.write_bytes(b"not-registered")
 
         assert orphan.exists()                                 # 盘上确实躺着它
-        got = hls.list_segments(1, 2, "raw")
+        got = hls.list_segments(RUN, "raw")
         assert [s.ref.ts_us for s in got] == [1_700_000_000]   # 但它不是段
 
     def test_non_segment_uri_in_the_playlist_is_skipped(self, tmp_storage, fake_pipeline):
         """手写进清单的条目不是段——名字过不了段名正则就不认，跳过而不是抛。"""
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        playlist = _layout.playlist_path(1, 2, "raw")
+        hls.insert_segment(RUN, "raw", _frames(start=1700.0))
+        playlist = _layout.playlist_path(RUN, "raw")
         _m3u8.append(playlist, "raw_init.mp4", 5.0, "somebody_elses_file.mp4")
 
-        assert [s.ref.ts_us for s in hls.list_segments(1, 2, "raw")] == [1_700_000_000]
+        assert [s.ref.ts_us for s in hls.list_segments(RUN, "raw")] == [1_700_000_000]
 
     def test_other_track_segment_name_in_the_playlist_is_skipped(self, tmp_storage, fake_pipeline):
         """两轨各有各的清单；写串了也不该让 raw 的枚举里冒出 processed 的段。"""
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
+        hls.insert_segment(RUN, "raw", _frames(start=1700.0))
         _m3u8.append(
-            _layout.playlist_path(1, 2, "raw"),
+            _layout.playlist_path(RUN, "raw"),
             "raw_init.mp4", 1.0, "processed_segment_1800000000.mp4",
         )
 
-        got = hls.list_segments(1, 2, "raw")
+        got = hls.list_segments(RUN, "raw")
         assert [s.ref.track for s in got] == ["raw"]
 
     def test_returns_ts_ascending_with_durations(self, tmp_storage, fake_pipeline):
         for start in (1900.0, 1700.0, 1800.0):                 # 刻意不按序写
-            hls.insert_segment(1, 2, "raw", _frames(start=start))
+            hls.insert_segment(RUN, "raw", _frames(start=start))
 
-        got = hls.list_segments(1, 2, "raw")
+        got = hls.list_segments(RUN, "raw")
         assert [s.ref.ts_us for s in got] == [1_700_000_000, 1_800_000_000, 1_900_000_000]
         assert [s.duration_s for s in got] == pytest.approx([1.0, 1.0, 1.0])
 
     def test_tracks_do_not_cross(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        hls.insert_segment(1, 2, "processed", _frames(start=1800.0))
+        hls.insert_segment(RUN, "raw", _frames(start=1700.0))
+        hls.insert_segment(RUN, "processed", _frames(start=1800.0))
 
-        assert [s.ref.track for s in hls.list_segments(1, 2, "raw")] == ["raw"]
-        assert [s.ref.ts_us for s in hls.list_segments(1, 2, "processed")] == [1_800_000_000]
+        assert [s.ref.track for s in hls.list_segments(RUN, "raw")] == ["raw"]
+        assert [s.ref.ts_us for s in hls.list_segments(RUN, "processed")] == [1_800_000_000]
 
     def test_missing_domain_dir_is_empty(self, tmp_storage):
-        assert hls.list_segments(1, 2, "raw") == []
+        assert hls.list_segments(RUN, "raw") == []
 
     def test_missing_playlist_is_empty(self, tmp_storage):
         """段文件在、清单不在 → 一个段都没有（不是"全都算段"）。"""
@@ -388,12 +400,12 @@ class TestSegments:
         target.mkdir(parents=True)
         (target / "raw_segment_1700000000.mp4").write_bytes(b"orphan")
 
-        assert hls.list_segments(1, 2, "raw") == []
+        assert hls.list_segments(RUN, "raw") == []
 
     @pytest.mark.parametrize("track", ["RAW", "detection", ""])
     def test_invalid_track_raises(self, tmp_storage, track):
         with pytest.raises(ValueError):
-            hls.list_segments(1, 2, track)
+            hls.list_segments(RUN, track)
 
 
 class TestSelectSegments:
@@ -409,22 +421,22 @@ class TestSelectSegments:
     def _seed(count=3, first=1700.0, gap=1.0):
         """连续 count 段，段起始间隔 gap 秒。默认 1700 / 1701 / 1702。"""
         for i in range(count):
-            hls.insert_segment(1, 2, "raw", _frames(start=first + i * gap))
+            hls.insert_segment(RUN, "raw", _frames(start=first + i * gap))
 
     def test_no_bounds_returns_everything(self, tmp_storage, fake_pipeline):
         self._seed()
-        assert hls.list_segments_in_range(1, 2, "raw") == hls.list_segments(1, 2, "raw")
+        assert hls.list_segments_in_range(RUN, "raw") == hls.list_segments(RUN, "raw")
 
     def test_returns_the_same_container_as_list_segments(self, tmp_storage, fake_pipeline):
         """带 EXTINF 的同一个容器，不是只剩身份键的另一种形状。"""
         self._seed()
-        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.2, end_ts=1701.8)
+        got = hls.list_segments_in_range(RUN, "raw", start_ts=1701.2, end_ts=1701.8)
         assert [s.duration_s for s in got] == pytest.approx([1.0])
 
     def test_picks_the_segment_containing_start(self, tmp_storage, fake_pipeline):
         """start_ts 落在第二段中间 → 从第二段开始，不是从第三段。"""
         self._seed()
-        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.5)
+        got = hls.list_segments_in_range(RUN, "raw", start_ts=1701.5)
         assert [s.ref.ts_us for s in got] == [1_701_000_000, 1_702_000_000]
 
     def test_start_exactly_at_first_frame_keeps_that_segment(self, tmp_storage, fake_pipeline):
@@ -433,43 +445,43 @@ class TestSelectSegments:
         这不是"大部分情况下对"，是无条件错：任何 ts 只要小数部分非零就踩。
         """
         self._seed(first=1700.0000019)               # 截断后段名是 1700000001
-        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1700.0000019)
+        got = hls.list_segments_in_range(RUN, "raw", start_ts=1700.0000019)
         assert got[0].ref.ts_us == 1_700_000_001     # 第一段还在
 
     def test_end_before_first_segment_is_empty(self, tmp_storage, fake_pipeline):
         """hi = -1 时刻意不 clamp 成 0：救成 0 会把空区间误判成命中第 0 段。"""
         self._seed()
-        assert hls.list_segments_in_range(1, 2, "raw", end_ts=1699.0) == []
+        assert hls.list_segments_in_range(RUN, "raw", end_ts=1699.0) == []
 
     def test_end_inside_a_segment_keeps_it(self, tmp_storage, fake_pipeline):
         self._seed()
-        got = hls.list_segments_in_range(1, 2, "raw", end_ts=1701.5)
+        got = hls.list_segments_in_range(RUN, "raw", end_ts=1701.5)
         assert [s.ref.ts_us for s in got] == [1_700_000_000, 1_701_000_000]
 
     def test_window_inside_one_segment(self, tmp_storage, fake_pipeline):
         self._seed()
-        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.2, end_ts=1701.8)
+        got = hls.list_segments_in_range(RUN, "raw", start_ts=1701.2, end_ts=1701.8)
         assert [s.ref.ts_us for s in got] == [1_701_000_000]
 
     def test_start_after_last_segment_start_keeps_the_last_segment(self, tmp_storage, fake_pipeline):
         """start_ts 晚于末段段首 → 末段仍入选：判据是段起始，末段可能覆盖到它。"""
         self._seed()
-        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1703.0)
+        got = hls.list_segments_in_range(RUN, "raw", start_ts=1703.0)
         assert [s.ref.ts_us for s in got] == [1_702_000_000]
 
     def test_point_range_on_a_segment_start_keeps_that_segment(self, tmp_storage, fake_pipeline):
         """start_ts == end_ts == 段首：两侧都用 'right'，end 恰在段首也不漏掉该段。"""
         self._seed()
-        got = hls.list_segments_in_range(1, 2, "raw", start_ts=1701.0, end_ts=1701.0)
+        got = hls.list_segments_in_range(RUN, "raw", start_ts=1701.0, end_ts=1701.0)
         assert [s.ref.ts_us for s in got] == [1_701_000_000]
 
     def test_missing_domain_dir_is_empty(self, tmp_storage):
-        assert hls.list_segments_in_range(1, 2, "raw", start_ts=0.0, end_ts=1.0) == []
+        assert hls.list_segments_in_range(RUN, "raw", start_ts=0.0, end_ts=1.0) == []
 
     @pytest.mark.parametrize("track", ["RAW", "detection", ""])
     def test_invalid_track_raises(self, tmp_storage, track):
         with pytest.raises(ValueError):
-            hls.list_segments_in_range(1, 2, track)
+            hls.list_segments_in_range(RUN, track)
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +605,7 @@ class TestEffectiveFps:
 
 class TestInsertSegment:
     def test_raw_insert_produces_the_full_set(self, tmp_storage, fake_pipeline):
-        ref = hls.insert_segment(1, 2, "raw", _frames())
+        ref = hls.insert_segment(RUN, "raw", _frames())
         assert ref == _layout.SegmentRef("raw", 1_700_000_000)
 
         names = sorted(p.name for p in _hls_dir(tmp_storage).iterdir())
@@ -607,51 +619,51 @@ class TestInsertSegment:
 
     def test_step_root_holds_only_domain_dirs(self, tmp_storage, fake_pipeline):
         """域隔离的执行力：step 根下只有 `hls/`，没有文件。"""
-        hls.insert_segment(1, 2, "raw", _frames())
-        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["hls"]
+        hls.insert_segment(RUN, "raw", _frames())
+        assert [p.name for p in (tmp_storage / "1" / "2" / str(RUN_ID)).iterdir()] == ["hls"]
 
     def test_processed_track_writes_no_sidecar(self, tmp_storage, fake_pipeline):
         """processed 是渲染结果、离线不消费 —— 这条不对称是有意的。"""
-        hls.insert_segment(1, 2, "processed", _frames())
+        hls.insert_segment(RUN, "processed", _frames())
         assert not list(_hls_dir(tmp_storage).glob("*.idx"))
 
     def test_extinf_matches_frames_over_eff_fps(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames())
-        text = hls.playlist_path(1, 2, "raw").read_text(encoding="utf-8")
+        hls.insert_segment(RUN, "raw", _frames())
+        text = hls.playlist_path(RUN, "raw").read_text(encoding="utf-8")
         assert "#EXTINF:1.000,\nraw_segment_1700000000.mp4\n" in text
 
     def test_sidecar_holds_every_frame_ts(self, tmp_storage, fake_pipeline):
         frames = _frames()
-        ref = hls.insert_segment(1, 2, "raw", frames)
-        stored = _idx.read(hls.sidecar_path(1, 2, ref))
+        ref = hls.insert_segment(RUN, "raw", frames)
+        stored = _idx.read(hls.sidecar_path(RUN, ref))
         assert list(stored) == [f.timestamp for f in frames]
 
     def test_second_segment_tfdt_equals_accumulated_extinf(self, tmp_storage, fake_pipeline):
         """tfdt(N) = Σ EXTINF(0..N-1) —— 媒体轴严丝合缝的全部理由。"""
-        first = hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        second = hls.insert_segment(1, 2, "raw", _frames(start=1800.0))
+        first = hls.insert_segment(RUN, "raw", _frames(start=1700.0))
+        second = hls.insert_segment(RUN, "raw", _frames(start=1800.0))
 
-        assert _read_tfdt(hls.segment_path(1, 2, first)) == 0
-        assert _read_tfdt(hls.segment_path(1, 2, second)) == 90_000  # 1.000s × 90000
+        assert _read_tfdt(hls.segment_path(RUN, first)) == 0
+        assert _read_tfdt(hls.segment_path(RUN, second)) == 90_000  # 1.000s × 90000
 
     def test_gap_in_wall_clock_leaves_no_gap_on_media_axis(self, tmp_storage, fake_pipeline):
         """墙钟上断流 100s，媒体轴上仍然接着放 —— 空隙只存在于文件名里。"""
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        hls.insert_segment(1, 2, "raw", _frames(start=1701.0))
-        third = hls.insert_segment(1, 2, "raw", _frames(start=1801.0))
-        assert _read_tfdt(hls.segment_path(1, 2, third)) == 180_000
+        hls.insert_segment(RUN, "raw", _frames(start=1700.0))
+        hls.insert_segment(RUN, "raw", _frames(start=1701.0))
+        third = hls.insert_segment(RUN, "raw", _frames(start=1801.0))
+        assert _read_tfdt(hls.segment_path(RUN, third)) == 180_000
 
     def test_init_written_once_per_track(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        init = hls.init_path(1, 2, "raw")
+        hls.insert_segment(RUN, "raw", _frames(start=1700.0))
+        init = hls.init_path(RUN, "raw")
         init.write_bytes(b"first-init-kept")
-        hls.insert_segment(1, 2, "raw", _frames(start=1701.0))
+        hls.insert_segment(RUN, "raw", _frames(start=1701.0))
         assert init.read_bytes() == b"first-init-kept"
 
     def test_metadata_counts_the_segment(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames())
-        hls.insert_segment(1, 2, "processed", _frames())
-        document = json.loads(_layout.metadata_path(1, 2).read_text(encoding="utf-8"))
+        hls.insert_segment(RUN, "raw", _frames())
+        hls.insert_segment(RUN, "processed", _frames())
+        document = json.loads(_layout.metadata_path(RUN).read_text(encoding="utf-8"))
         assert document["raw_segments"]["count"] == 1
         assert document["processed_segments"]["count"] == 1
 
@@ -660,12 +672,12 @@ class TestInsertSegment:
     def test_empty_frames_raises(self, tmp_storage, fake_pipeline):
         """空段不是"没事发生"，是调用方算错了批次。"""
         with pytest.raises(ValueError):
-            hls.insert_segment(1, 2, "raw", [])
+            hls.insert_segment(RUN, "raw", [])
 
     def test_unknown_track_raises_before_touching_disk(self, tmp_storage, fake_pipeline):
         with pytest.raises(ValueError):
-            hls.insert_segment(1, 2, "detection", _frames())
-        assert not (tmp_storage / "1").exists()
+            hls.insert_segment(RUN, "detection", _frames())
+        assert not _hls_dir(tmp_storage).exists()
 
     # ── 失败即整体作废（W4）────────────────────────────────────────────────
 
@@ -673,33 +685,33 @@ class TestInsertSegment:
     def test_stage_failure_publishes_nothing(self, tmp_storage, fake_pipeline, failing_step):
         setattr(fake_pipeline, f"{failing_step}_error", OSError("boom"))
         with pytest.raises(OSError):
-            hls.insert_segment(1, 2, "raw", _frames())
+            hls.insert_segment(RUN, "raw", _frames())
 
         # 域目录可以存在（create 早于编码），但里面一个产物都不能有
         assert list(_hls_dir(tmp_storage).iterdir()) == []
 
     def test_tfdt_patch_failure_aborts_the_whole_segment(self, tmp_storage, fake_pipeline, monkeypatch):
         """tfdt 没修好的段进了清单 = 静默覆盖前段，宁可整段作废、让它喊出来。"""
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
+        hls.insert_segment(RUN, "raw", _frames(start=1700.0))
         monkeypatch.setattr(_fmp4, "patch_tfdt", lambda fragment, tick: False)
 
         with pytest.raises(RuntimeError):
-            hls.insert_segment(1, 2, "raw", _frames(start=1800.0))
+            hls.insert_segment(RUN, "raw", _frames(start=1800.0))
 
         names = sorted(p.name for p in _hls_dir(tmp_storage).iterdir())
         assert "raw_segment_1800000000.mp4" not in names
         assert "raw_segment_1800000000.idx" not in names   # 作废早于 sidecar 落盘
-        text = hls.playlist_path(1, 2, "raw").read_text(encoding="utf-8")
+        text = hls.playlist_path(RUN, "raw").read_text(encoding="utf-8")
         assert text.count("#EXTINF:") == 1                 # 前一段不受影响
 
     def test_retry_reuses_the_same_stage_key(self, tmp_storage, fake_pipeline):
         """W7：stage 名与产物同键，重试自然复用 —— 每段最多留一份残留。"""
         ref = _layout.SegmentRef("raw", 1_700_000_000)
-        stage = _layout.stage_dir(1, 2, ref)
+        stage = _layout.stage_dir(RUN, ref)
         stage.mkdir(parents=True)
         (stage / "leftover.bin").write_bytes(b"from a crashed run")
 
-        assert hls.insert_segment(1, 2, "raw", _frames()) == ref
+        assert hls.insert_segment(RUN, "raw", _frames()) == ref
         assert not stage.exists()
 
     def test_sidecar_failure_does_not_sink_the_segment(self, tmp_storage, fake_pipeline, monkeypatch):
@@ -708,69 +720,20 @@ class TestInsertSegment:
             raise OSError("read-only")
 
         monkeypatch.setattr(_idx, "write", boom)
-        ref = hls.insert_segment(1, 2, "raw", _frames())
+        ref = hls.insert_segment(RUN, "raw", _frames())
 
-        assert hls.segment_path(1, 2, ref).exists()
-        assert not hls.sidecar_path(1, 2, ref).exists()
-        assert "#EXTINF:" in hls.playlist_path(1, 2, "raw").read_text(encoding="utf-8")
+        assert hls.segment_path(RUN, ref).exists()
+        assert not hls.sidecar_path(RUN, ref).exists()
+        assert "#EXTINF:" in hls.playlist_path(RUN, "raw").read_text(encoding="utf-8")
 
     def test_tracks_do_not_collide(self, tmp_storage, fake_pipeline):
         """两轨各写各的清单与段名，同一时刻插两轨互不影响。"""
-        raw = hls.insert_segment(1, 2, "raw", _frames())
-        processed = hls.insert_segment(1, 2, "processed", _frames())
+        raw = hls.insert_segment(RUN, "raw", _frames())
+        processed = hls.insert_segment(RUN, "processed", _frames())
         assert raw.ts_us == processed.ts_us
-        assert hls.segment_path(1, 2, raw) != hls.segment_path(1, 2, processed)
+        assert hls.segment_path(RUN, raw) != hls.segment_path(RUN, processed)
         for track in ("raw", "processed"):
-            assert hls.playlist_path(1, 2, track).read_text(encoding="utf-8").count("#EXTINF:") == 1
-
-
-# ---------------------------------------------------------------------------
-# delete：域粒度删除（重启 supersede 的执行者）
-# ---------------------------------------------------------------------------
-
-
-class TestDelete:
-    def test_removes_every_product_in_the_domain(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames())
-        hls.insert_segment(1, 2, "processed", _frames())
-        assert _hls_dir(tmp_storage).exists()
-
-        assert hls.delete(1, 2) is True
-        assert not _hls_dir(tmp_storage).exists()
-
-    def test_does_not_touch_sibling_domains(self, tmp_storage, fake_pipeline):
-        """只删本域 —— 同 step 的 inference/ 一个字节都不碰，这正是域隔离换来的东西。"""
-        hls.insert_segment(1, 2, "raw", _frames())
-        neighbor = tmp_storage / "1" / "2" / "inference"
-        neighbor.mkdir(parents=True)
-        (neighbor / "detections.jsonl").write_text("{}\n", encoding="utf-8")
-
-        hls.delete(1, 2)
-
-        assert (neighbor / "detections.jsonl").read_text(encoding="utf-8") == "{}\n"
-        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["inference"]
-
-    def test_does_not_touch_other_steps(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(1, 2, "raw", _frames())
-        hls.insert_segment(1, 3, "raw", _frames())
-
-        hls.delete(1, 2)
-
-        assert not _hls_dir(tmp_storage, 1, 2).exists()
-        assert list(_hls_dir(tmp_storage, 1, 3).glob("*.mp4"))
-
-    def test_missing_domain_dir_returns_false(self, tmp_storage):
-        assert hls.delete(1, 2) is False
-
-    def test_next_insert_rebuilds_the_domain_dir(self, tmp_storage, fake_pipeline):
-        """删完不用谁去重建：下一次 insert 的 create=True 自己会建。"""
-        hls.insert_segment(1, 2, "raw", _frames(start=1700.0))
-        hls.delete(1, 2)
-        hls.insert_segment(1, 2, "raw", _frames(start=1800.0))
-
-        text = hls.playlist_path(1, 2, "raw").read_text(encoding="utf-8")
-        assert text.count("#EXTINF:") == 1                  # 上一代的条目没了
-        assert "raw_segment_1800000000.mp4" in text
+            assert hls.playlist_path(RUN, track).read_text(encoding="utf-8").count("#EXTINF:") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -807,7 +770,7 @@ def _dec_frames(seg_index: int, size=(16, 16)):
 def decodable(tmp_storage, fake_pipeline):
     """4 段真 sidecar（段文件是假 fragment —— 解码边界被 seam 换掉，不碰那些字节）。"""
     for s in range(_DEC_N_SEG):
-        hls.insert_segment(1, 2, "raw", _dec_frames(s))
+        hls.insert_segment(RUN, "raw", _dec_frames(s))
     return tmp_storage
 
 
@@ -830,7 +793,7 @@ def fake_decode(monkeypatch):
 
 
 def _ts_out(**kwargs):
-    return [f.timestamp for f in hls.iter_frames(1, 2, width=2, height=2, **kwargs)]
+    return [f.timestamp for f in hls.iter_frames(RUN, width=2, height=2, **kwargs)]
 
 
 class TestSegmentLevelTrim:
@@ -879,7 +842,7 @@ class TestFrameLevelTrim:
         return _layout.SegmentRef("raw", hls.ts_to_us(_dec_ts(seg_index * _DEC_PER_SEG)))
 
     def _seg_out(self, seg_index: int, **kwargs):
-        frames = hls.read_segment(1, 2, self._ref(seg_index), width=2, height=2, **kwargs)
+        frames = hls.read_segment(RUN, self._ref(seg_index), width=2, height=2, **kwargs)
         return [f.timestamp for f in frames]
 
     def test_range_between_two_frames_is_empty(self, decodable, fake_decode):
@@ -900,7 +863,7 @@ class TestFrameLevelTrim:
 
     def test_missing_sidecar_skips_that_segment_only(self, decodable, fake_decode):
         """缺 .idx 跳过该段、不打断整条迭代 —— 一个辅助索引不该让前后所有段一起读不了。"""
-        hls.sidecar_path(1, 2, self._ref(1)).unlink()
+        hls.sidecar_path(RUN, self._ref(1)).unlink()
 
         got = _ts_out()
 
@@ -924,12 +887,12 @@ class TestDecodeTrackContract:
         """
         ref = _layout.SegmentRef("processed", hls.ts_to_us(_dec_ts(0)))
         with pytest.raises(ValueError, match="raw"):
-            hls.read_segment(1, 2, ref, width=2, height=2)
+            hls.read_segment(RUN, ref, width=2, height=2)
 
     def test_iter_frames_has_no_track_parameter(self, decodable, fake_decode):
         """解码恒为 raw：给了 track 参数就得回答"processed 传进来怎么办"。"""
         with pytest.raises(TypeError):
-            list(hls.iter_frames(1, 2, "raw", width=2, height=2))
+            list(hls.iter_frames(RUN, "raw", width=2, height=2))
 
     @pytest.mark.parametrize("missing", ["width", "height"])
     def test_resolution_has_no_default(self, decodable, fake_decode, missing):
@@ -938,7 +901,7 @@ class TestDecodeTrackContract:
         kwargs = {"width": 2, "height": 2}
         kwargs.pop(missing)
         with pytest.raises(TypeError):
-            list(hls.iter_frames(1, 2, **kwargs))
+            list(hls.iter_frames(RUN, **kwargs))
 
 
 class TestDecodeCommand:
@@ -989,24 +952,24 @@ class TestInsertSegmentEndToEnd:
     """真 cv2 + 真 ffmpeg 跑两段，断言产物确实是 HLS 能放的东西。"""
 
     def test_two_real_segments(self, tmp_storage):
-        first = hls.insert_segment(1, 2, "raw", _frames(start=1700.0, size=(64, 64)))
-        second = hls.insert_segment(1, 2, "raw", _frames(start=1800.0, size=(64, 64)))
+        first = hls.insert_segment(RUN, "raw", _frames(start=1700.0, size=(64, 64)))
+        second = hls.insert_segment(RUN, "raw", _frames(start=1800.0, size=(64, 64)))
 
         # 是 fragment（styp + sidx + moof + mdat）不是自带 moov 的整块 mp4 ——
         # 后者喂给 hls.js 会 fragParsingError，这正是要转这一道的理由
-        fragment = hls.segment_path(1, 2, second)
+        fragment = hls.segment_path(RUN, second)
         head = fragment.read_bytes()
         assert head[4:8] == b"styp" and b"moof" in head
-        assert hls.init_path(1, 2, "raw").read_bytes()[4:8] == b"ftyp"
+        assert hls.init_path(RUN, "raw").read_bytes()[4:8] == b"ftyp"
 
         # 三条时间线对齐：tfdt(1) = EXTINF(0) × 90000，两段各 15 帧 @15fps → 各 1.000s
-        playlist = hls.playlist_path(1, 2, "raw").read_text(encoding="utf-8")
+        playlist = hls.playlist_path(RUN, "raw").read_text(encoding="utf-8")
         assert playlist.count("#EXTINF:1.000,") == 2
-        assert _read_tfdt(hls.segment_path(1, 2, first)) == 0
+        assert _read_tfdt(hls.segment_path(RUN, first)) == 0
         assert _read_tfdt(fragment) == _fmp4.seconds_to_ticks(1.0)
 
         # sidecar 与帧一一对应
-        assert list(_idx.read(hls.sidecar_path(1, 2, first))) == [
+        assert list(_idx.read(hls.sidecar_path(RUN, first))) == [
             f.timestamp for f in _frames(start=1700.0)
         ]
         assert not list(_hls_dir(tmp_storage).glob(".stage_*"))
@@ -1015,7 +978,7 @@ class TestInsertSegmentEndToEnd:
         """D5：外部工具是运行时依赖 —— 缺二进制在写入时才炸，且什么都不留下。"""
         monkeypatch.setattr(settings, "ffmpeg_path", "definitely-not-ffmpeg")
         with pytest.raises((FileNotFoundError, OSError, subprocess.SubprocessError)):
-            hls.insert_segment(1, 2, "raw", _frames(size=(64, 64)))
+            hls.insert_segment(RUN, "raw", _frames(size=(64, 64)))
         assert list(_hls_dir(tmp_storage).iterdir()) == []
 
 
@@ -1058,13 +1021,13 @@ class TestDecodeEndToEnd:
             )
             for i in range(_DEC_PER_SEG)
         ]
-        return hls.insert_segment(1, 2, "raw", frames), frames
+        return hls.insert_segment(RUN, "raw", frames), frames
 
     def test_segment_roundtrip_is_frame_exact(self, tmp_storage):
         """`read_segment` 是 `insert_segment` 的逆运算：交出去的帧序列，原样回来。"""
         ref, written = self._write_segment(0)
 
-        got = list(hls.read_segment(1, 2, ref, width=self.SIZE, height=self.SIZE))
+        got = list(hls.read_segment(RUN, ref, width=self.SIZE, height=self.SIZE))
 
         # ts **位级**相等（sidecar 存 float64 原值），不是近似 —— 离线反查按 `==` 配帧
         assert [f.timestamp for f in got] == [f.timestamp for f in written]
@@ -1075,7 +1038,7 @@ class TestDecodeEndToEnd:
         for s in range(2):
             self._write_segment(s)
 
-        got = list(hls.iter_frames(1, 2, width=self.SIZE, height=self.SIZE))
+        got = list(hls.iter_frames(RUN, width=self.SIZE, height=self.SIZE))
 
         assert [self._read_id(f.frame) for f in got] == list(range(2 * _DEC_PER_SEG))
         assert [f.timestamp for f in got] == [_dec_ts(g) for g in range(2 * _DEC_PER_SEG)]
@@ -1086,8 +1049,7 @@ class TestDecodeEndToEnd:
             self._write_segment(s)
         lo, hi = _DEC_PER_SEG - 2, _DEC_PER_SEG + 1   # 跨段接缝，两侧各两帧
 
-        got = list(hls.iter_frames(
-            1, 2, width=self.SIZE, height=self.SIZE,
+        got = list(hls.iter_frames(RUN, width=self.SIZE, height=self.SIZE,
             start_ts=_dec_ts(lo), end_ts=_dec_ts(hi),
         ))
 
@@ -1098,7 +1060,7 @@ class TestDecodeEndToEnd:
         buffer 会就地改写调用方手里的上一帧 —— 两条都靠"逐帧新建 bytearray"兜住。"""
         ref, _ = self._write_segment(0)
 
-        got = list(hls.read_segment(1, 2, ref, width=self.SIZE, height=self.SIZE))
+        got = list(hls.read_segment(RUN, ref, width=self.SIZE, height=self.SIZE))
 
         got[0].frame[0, 0, 0] = 255          # 只读的话这里 ValueError
         assert got[1].frame[0, 0, 0] != 255  # 共享 buffer 的话这里也会变成 255
@@ -1106,10 +1068,10 @@ class TestDecodeEndToEnd:
     def test_processed_segment_is_refused_not_silently_empty(self, tmp_storage):
         """processed 真实落盘后照样拒绝 —— 它有段文件、没 sidecar，正是最容易
         被当成"这段没数据"的情形。"""
-        ref = hls.insert_segment(1, 2, "processed", [
+        ref = hls.insert_segment(RUN, "processed", [
             Frame(timestamp=_dec_ts(i), frame=self._id_frame(i)) for i in range(_DEC_PER_SEG)
         ])
-        assert hls.segment_path(1, 2, ref).exists()
+        assert hls.segment_path(RUN, ref).exists()
 
         with pytest.raises(ValueError, match="raw"):
-            hls.read_segment(1, 2, ref, width=self.SIZE, height=self.SIZE)
+            hls.read_segment(RUN, ref, width=self.SIZE, height=self.SIZE)

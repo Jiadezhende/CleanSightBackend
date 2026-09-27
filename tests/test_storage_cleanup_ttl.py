@@ -173,12 +173,13 @@ def test_real_hls_domain_layout_is_covered(tmp_storage):
     """上面的 `_make_domain_step` 手写了 `hls/` 这一级。万一写侧哪天再下沉一级，手写的
     用例会继续绿而生产继续漏盘——故这里用 `hls.segment_path` 取真实落位再验一遍。"""
     from app.settings import settings
-    from app.storage import hls
+    from app.storage import hls, runs
 
-    seg = hls.segment_path(11, 6, hls.SegmentRef(track="raw", ts_us=1700000000))
-    seg.parent.mkdir(parents=True, exist_ok=True)
+    run = runs.allocate(11, 6)
+    seg = hls.segment_path(run, hls.SegmentRef(track="raw", ts_us=1700000000))
+    seg.parent.mkdir()
     seg.write_bytes(b"fake")
-    step_dir = seg.parent.parent
+    step_dir = seg.parent.parent.parent
     assert step_dir == tmp_storage / "11" / "6"
     _age(step_dir, _RETENTION_DAYS + 1)
 

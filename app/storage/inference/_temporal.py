@@ -28,7 +28,8 @@ import numpy as np
 
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.storage import _fs
-from app.storage._root import RunKey, legacy_key
+from app.domain.run import RunIdentity
+from app.storage._root import legacy_reader
 
 from . import _jsonl, _layout
 
@@ -103,8 +104,8 @@ def _record_to_temporal(rec: Mapping[str, Any]) -> TemporalEvent | TemporalSegme
 # ── temporal.jsonl ───────────────────────────────────────────────────────────────
 
 
-@legacy_key
-def read_temporal(run: RunKey) -> List[TemporalEvent | TemporalSegment]:
+@legacy_reader
+def read_temporal(run: RunIdentity) -> List[TemporalEvent | TemporalSegment]:
     """回读该 step 的全部事实，**按落盘顺序**（层不排序，理由见模块 docstring）。
 
     文件不存在返回 `[]`；坏行与形状不对的 record 跳过 + warning。
@@ -119,9 +120,8 @@ def read_temporal(run: RunKey) -> List[TemporalEvent | TemporalSegment]:
     return facts
 
 
-@legacy_key
 def write_temporal(
-    run: RunKey,
+    run: RunIdentity,
     facts: Sequence[TemporalEvent | TemporalSegment],
 ) -> None:
     """**整体替换**该 step 的事实（路线 C：编码 → 同目录 tmp → `os.replace`）。
@@ -129,8 +129,7 @@ def write_temporal(
     调用方须先 `read_temporal` 再合并——本函数不读既有内容，盲写会吃掉别的 producer 的分段与
     所有 `TemporalEvent`。整批先编码完再碰盘，失败时旧文件原样保留（W4）。
 
-    空序列**照写空文件、不删文件**：「跑过、没分出任何段」与「根本没跑过」在盘上要能分开；
-    删除是 `delete` 的事。
+    空序列**照写空文件、不删文件**：「跑过、没分出任何段」与「根本没跑过」在盘上要能分开。
 
     Raises:
         TypeError: 序列里有不是 `TemporalEvent` / `TemporalSegment` 的东西，或 `value` / `meta` 不可 JSON 序列化。
@@ -149,8 +148,7 @@ def write_temporal(
 _PROBS_DISK_DTYPE = np.float16
 
 
-@legacy_key
-def write_label_probs(run: RunKey, probs: LabelProbs) -> None:
+def write_label_probs(run: RunIdentity, probs: LabelProbs) -> None:
     """**整体替换**该 step 的逐帧类别概率（路线 C：`_fs.replace`）。
 
     只做序列化与落位，不校验形状一致性——那是产出侧的事（本层不认识「合法的概率」）。
@@ -173,8 +171,8 @@ def _write_probs(probs: LabelProbs, tmp: Path) -> None:
         )
 
 
-@legacy_key
-def read_label_probs(run: RunKey) -> Optional[LabelProbs]:
+@legacy_reader
+def read_label_probs(run: RunIdentity) -> Optional[LabelProbs]:
     """回读该 step 的逐帧类别概率；文件不存在返回 `None`。
 
     `probs` 以 float32 返回（盘上 float16，见上）；`ts` 与写入时位级相等。

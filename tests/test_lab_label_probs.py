@@ -9,7 +9,7 @@ from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.main import app
 from app.routers import lab as lab_router
 from app.storage import inference as inference_store
-from factories import seed_hls_segments
+from factories import seed_hls_segments, make_run
 
 T0 = 1_700_000_000
 _TS0_US = T0 * 1_000_000
@@ -37,7 +37,7 @@ async def client():
 @pytest.mark.asyncio
 async def test_probs_by_class_on_media_axis(client, tmp_storage):
     _seed_gapped_raw()
-    inference_store.write_label_probs(1, 2, _probs(
+    inference_store.write_label_probs(make_run(1, 2), _probs(
         [T0 + 1.0, T0 + 12.5, T0 + 25.0],  # 第三帧落在停顿里 → 吸到第三段段首
         [[0.9, 0.05, 0.05], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]],
     ))
@@ -79,12 +79,14 @@ async def test_missing_identity_is_422(client, tmp_storage):
 
 def test_offline_steps_lists_steps_with_segments_or_probs(tmp_storage):
     seg = TemporalSegment(producer="P", label="flush", start=T0 + 1.0, end=T0 + 2.0)
-    inference_store.write_temporal(1, 1, [seg])                                   # 有分段
-    inference_store.write_label_probs(1, 2, _probs([T0 + 1.0], [[1.0, 0.0, 0.0]]))  # 只有概率
-    inference_store.write_temporal(1, 3, [                                        # 只有打点
+    inference_store.write_temporal(make_run(1, 1), [seg])                                   # 有分段
+    inference_store.write_label_probs(make_run(1, 2), _probs([T0 + 1.0], [[1.0, 0.0, 0.0]]))  # 只有概率
+    inference_store.write_temporal(make_run(1, 3), [                                        # 只有打点
         TemporalEvent(producer="op", signal="s", value=1, ts=T0 + 1.0),
     ])
     # step 4 什么都没有
+    for step_id in (1, 2, 3, 4):   # 读侧按最新可见 run 解析：先让每个 run 有录像
+        seed_hls_segments(1, step_id, [_TS0_US])
 
     assert lab_router._list_offline_steps(1, [1, 2, 3, 4]) == [1, 2]
 
@@ -92,7 +94,7 @@ def test_offline_steps_lists_steps_with_segments_or_probs(tmp_storage):
 def test_storage_task_item_carries_offline_steps(tmp_storage):
     _seed_gapped_raw(task_id=1, step_id=2)
     seed_hls_segments(1, 3, [_TS0_US])
-    inference_store.write_temporal(1, 2, [
+    inference_store.write_temporal(make_run(1, 2), [
         TemporalSegment(producer="P", label="flush", start=T0 + 1.0, end=T0 + 2.0),
     ])
 

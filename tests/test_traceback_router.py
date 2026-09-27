@@ -37,7 +37,7 @@ _SECRET = "test-stable-secret-2026"
 
 
 def _seed_task(task_id: int, step_id: int, ts_us_list, write_init=True):
-    """造一个 step 的双轨同构段 + 清单 + init（`{step}/hls/`），返回域目录。"""
+    """造一个 step 的双轨同构段 + 清单 + init（最新 run 的 `hls/`），返回域目录。"""
     for track in hls.TRACKS:
         d = seed_hls_segments(task_id, step_id, ts_us_list, track=track, with_init=write_init)
     return d
@@ -479,8 +479,8 @@ async def test_media_init_rejects_lookalike_init_names(client, media_root, filen
     裸 `init.mp4` 同样不合法：两轨各有各的 init，不带 track 前缀的名字指不出任何一份。
     段名也不行：init kind 的 token 不能借此读其它 mp4 段。
     """
-    _seed_task(task_id=11, step_id=1, ts_us_list=[1_000_000])
-    (media_root / "11" / "1" / "hls" / "evil_init.mp4").write_bytes(b"pwned")
+    hls_dir = _seed_task(task_id=11, step_id=1, ts_us_list=[1_000_000])
+    (hls_dir / "evil_init.mp4").write_bytes(b"pwned")
 
     token = MediaToken.default().sign(11, 1, filename, kind="init")
     resp = await client.get(f"/media/init/{token}")

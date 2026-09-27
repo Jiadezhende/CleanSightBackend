@@ -142,8 +142,8 @@ class DetectionService:
         run**，无跨 run 串台。三个写入口自身也各自内建 ACTIVE 门（含落盘缓冲这条腿），
         顶层这道只是提前退出 + 计数。
 
-        **本方法不碰盘**：落盘缓冲交给 recording 的 sweeper 拉走，代次隔离由它的
-        `_claimed_detections` 表兑现（同段写那套），故这里不需要第二道归属校验。
+        **本方法不碰盘**：落盘缓冲交给 recording 的 sweeper 拉走，写进 `cq.run` 的 run 目录；
+        每次 run 一个目录，代次隔离在盘上成立，故这里不需要第二道归属校验。
         """
         for frame in results:
             # 取走句柄并置空：同一对象随后进帧窗 / 快照 / 落盘缓冲，留存的帧一律不带 cq

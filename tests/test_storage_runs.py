@@ -119,7 +119,9 @@ class TestQuery:
         assert runs.query(1, 2) is None
 
     def test_legacy_layout_is_invisible(self, tmp_storage):
-        inference.append_detections(1, 2, [_fd(1.0)])   # 旧形态落在 {step}/inference/
+        legacy = tmp_storage / "1" / "2" / "inference"          # 旧布局 {step}/inference/
+        legacy.mkdir(parents=True)
+        (legacy / "detections.jsonl").write_text("{}\n")
         assert runs.query(1, 2) is None
 
 
@@ -140,8 +142,8 @@ class TestRunKeyedPorts:
         assert [f.ts for f in inference.read_detections(run)] == [1.0]
         assert [f.label for f in inference.read_temporal(run)] == ["a"]
         assert inference.read_label_probs(run).labels == ("a",)
-        # 旧形态读的是 {step}/inference/，看不到 run 里的产物
-        assert inference.read_detections(1, 2) == []
+        # 迁移期读口的旧形态解析成最新可见 run
+        assert [f.ts for f in inference.read_detections(1, 2)] == [1.0]
 
     def test_runs_do_not_see_each_other(self, tmp_storage, monkeypatch):
         a = _alloc(monkeypatch, 1, 2, 10)
@@ -180,3 +182,35 @@ class TestRunKeyedPorts:
         with pytest.raises(FileNotFoundError):
             inference.append_detections(run, [_fd(2.0)])
         assert not (tmp_storage / "1" / "2").exists()
+
+
+# ---------------------------------------------------------------------------
+# 迁移期：读口的 (task_id, step_id) 转发（第 4 期删）
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyReader:
+    def test_forwards_to_latest_visible_run(self, tmp_storage, monkeypatch):
+        old = _alloc(monkeypatch, 1, 2, 10)
+        inference.append_detections(old, [_fd(1.0)])
+        new = _alloc(monkeypatch, 1, 2, 20)
+        inference.append_detections(new, [_fd(2.0)])
+        assert [f.ts for f in inference.read_detections(1, 2)] == [2.0]
+        assert hls.playlist_path(1, 2, "raw") == hls.playlist_path(new, "raw")
+
+    def test_no_run_reads_empty_and_creates_nothing(self, tmp_storage):
+        assert inference.read_detections(1, 2) == []
+        assert inference.read_label_probs(1, 2) is None
+        assert hls.list_segments(1, 2, "raw") == []
+        assert not hls.init_path(1, 2, "raw").exists()
+        assert list(tmp_storage.iterdir()) == []
+
+    @pytest.mark.parametrize("write", [
+        lambda: inference.append_detections(1, 2, [_fd(1.0)]),
+        lambda: inference.write_temporal(1, 2, [_seg()]),
+        lambda: hls.insert_segment(1, 2, "raw", [make_frame(ts=1.0)]),
+    ], ids=["append_detections", "write_temporal", "insert_segment"])
+    def test_writers_only_take_run_identity(self, tmp_storage, write):
+        with pytest.raises(TypeError):
+            write()
+        assert list(tmp_storage.iterdir()) == []

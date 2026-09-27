@@ -1,4 +1,4 @@
-"""本域的两个写侧动作：`insert_segment`（写一段）与 `delete`（清掉整个 step 的 hls 产物）。
+"""本域的写侧动作：`insert_segment`（写一段）。
 
 `insert_segment` 一次调用，从内存帧序列到 `hls/` 目录里一个可播的段：调用方交出
 `Sequence[Frame]`，拿回这段的身份键。中间七步（编码、转码、位置修补、索引、init、清单、
@@ -25,14 +25,14 @@ mp4v 不是 fragment"的窗口（实测 ~260 ms）。`.stage_` 开头既不匹�
 
 ## 并发：**本域不持锁，串行由调用侧的队列构造**
 
-前提是：**同一 `(task, step, track)` 的 `insert_segment` 串行调用**，且与该 step 的
-`delete` 同序——即提交到同一条 `app.utils.task_queue.SerialTaskQueue`。
+前提是：**同一 `(run, track)` 的 `insert_segment` 串行调用**——即提交到同一条
+`app.utils.task_queue.SerialTaskQueue`。
 
 破了这条前提会怎样：两段并发进来会读到同一个累计 EXTINF → tfdt 碰撞 → 后段在播放器里覆盖
 前段，**不报错、不卡顿，只是画面丢一截**。别改成层内加锁（互斥挡不住一个没停的写者）；代价
 是这个不变式落在层外、门禁抓不到，所以写在这里。
 
-不同 track、不同 step 之间互不冲突：唯一的共享产物 `metadata.json` 是派生量，两轨同时记账
+不同 track、不同 run 之间互不冲突：唯一的共享产物 `metadata.json` 是派生量，两轨同时记账
 最多丢一次计数、不影响播放。
 
 依赖上界：`app.domain`（域货币 `Frame`）+ stdlib。
@@ -46,8 +46,7 @@ import shutil
 from typing import Sequence
 
 from app.domain.frame import Frame
-from app.storage import _fs
-from app.storage._root import RunKey, legacy_key
+from app.domain.run import RunIdentity
 
 from . import _encode, _fmp4, _idx, _layout, _m3u8, _meta
 from ._layout import SegmentRef
@@ -55,17 +54,16 @@ from ._layout import SegmentRef
 logger = logging.getLogger(__name__)
 
 
-@legacy_key
 def insert_segment(
-    run: RunKey,
+    run: RunIdentity,
     track: str,
     frames: Sequence[Frame],
 ) -> SegmentRef:
     """把一段帧写成该 step 下 `track` 轨的一个 HLS 段，返回它的身份键。
 
     Args:
-        run: 位置键。`RunIdentity` 时只建 `{run}/hls/` 这一级，run 目录不在即 `OSError`
-            （回收后的迟到写入在此失败）；迁移期旧形态 `(task_id, step_id)` 建到底。
+        run: 写入哪个 run。只建 `{run}/hls/` 这一级，run 目录不在即 `FileNotFoundError`
+            （回收后的迟到写入在此失败）。
         track: `"raw"` 或 `"processed"`。**无默认值**——写错轨不会报错，只是回放时
             两条轨的画面串了（两轨各自独立、都合法）。
         frames: 该段的帧序列，按时间升序。段的起始时刻取首帧 ts。
@@ -160,19 +158,3 @@ def insert_segment(
     )
     return ref
 
-
-def delete(task_id: int, step_id: int) -> bool:
-    """删掉本域在该 step 下的**全部**产物（整个 `{step}/hls/` 目录）。
-
-    Returns:
-        是否删掉了（`_fs.remove` 为 REMOVED）。不存在或删除失败返回 False，失败只记 warning
-        （调用场景是「新一代开写前清掉上一代」，抛出去只会把一次录制整个葬掉）。删除是原子的：
-        失败时盘上原样不动。
-
-    **只执行，不判断该不该删**：「这是不是新一代的首次写入」是 run 生命周期语义，归
-    `recording`。**只删本域**：同 step 的 `inference/` 与 `lab/` 一个字节都不碰；域目录本身
-    一起删，下次 `insert_segment` 的 `create=True` 会重建。
-
-    **不加锁**：与 `insert_segment` 同一前提（见上方「并发」）。
-    """
-    return _fs.remove(_layout.domain_dir(task_id, step_id)) is _fs.Removed.REMOVED

@@ -20,7 +20,8 @@ import logging
 from bisect import bisect_right
 from typing import List, Optional
 
-from app.storage._root import RunKey, legacy_key
+from app.domain.run import RunIdentity
+from app.storage._root import legacy_reader
 
 from . import _layout, _m3u8
 from .types import Segment
@@ -28,8 +29,8 @@ from .types import Segment
 logger = logging.getLogger(__name__)
 
 
-@legacy_key
-def list_segments(run: RunKey, track: str) -> List[Segment]:
+@legacy_reader
+def list_segments(run: RunIdentity, track: str) -> List[Segment]:
     """该轨的段与各自的 EXTINF，按 `ts_us` 升序。清单缺失返回 `[]`。
 
     本域"有哪些段"的唯一出口——一行清单条目同时给出墙钟锚点（URI 里的 `ts_us`）与媒体长度
@@ -66,9 +67,9 @@ def list_segments(run: RunKey, track: str) -> List[Segment]:
     return out
 
 
-@legacy_key
+@legacy_reader
 def list_segments_in_range(
-    run: RunKey,
+    run: RunIdentity,
     track: str,
     *,
     start_ts: Optional[float] = None,
@@ -77,7 +78,7 @@ def list_segments_in_range(
     """`list_segments` 里落在墙钟区间 `[start_ts, end_ts]` 的那些，按 `ts_us` 升序。
 
     Args:
-        run: 位置键（`RunIdentity`，或迁移期旧形态包成的 `LegacyStep`）。
+        run: 该 run（迁移期另收旧形态 `task_id, step_id`，见 `_root.legacy_reader`）。
         track: 轨道名。
         start_ts / end_ts: 闭区间的墙钟秒，`None` 表示该侧不设限。
 

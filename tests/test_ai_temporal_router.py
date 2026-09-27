@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from app.domain.temporal import TemporalEvent, TemporalSegment
 from app.main import app
 from app.storage import inference as inference_store
-from factories import seed_hls_segments
+from factories import seed_hls_segments, make_run
 
 T0 = 1_700_000_000  # 首段墙钟（秒）
 _TS0_US = T0 * 1_000_000
@@ -38,7 +38,7 @@ def _body(**kw):
 @pytest.mark.asyncio
 async def test_segments_on_media_axis_sorted_and_gap_snapped(client, tmp_storage):
     _seed_gapped_raw()
-    inference_store.write_temporal(1, 2, [
+    inference_store.write_temporal(make_run(1, 2), [
         _seg("flush", T0 + 25.0, T0 + 31.5),          # 起点落在停顿里 → 吸到第三段段首 20000
         _seg("long_brush_insert", T0 + 2.5, T0 + 12.0),
         TemporalEvent(producer="op", signal="state", value=1, ts=T0 + 1.0),  # 不是分段，不出

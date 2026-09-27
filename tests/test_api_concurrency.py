@@ -56,11 +56,12 @@ def _mock_db_session(db_task):
     return session
 
 
-def _new_cq(*, task_id, **_kwargs):
-    """ClientQueues 替身：每次 start 一个新对象，带上真实的 task_id / step_id"""
+def _new_cq(*, run, **_kwargs):
+    """ClientQueues 替身：每次 start 一个新对象，带上真实的 run 身份"""
     cq = MagicMock()
-    cq.task_id = task_id
-    cq.step_id = _kwargs["step_id"]
+    cq.run = run
+    cq.task_id = run.task_id
+    cq.step_id = run.step_id
     return cq
 
 

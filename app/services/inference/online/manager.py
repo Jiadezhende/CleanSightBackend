@@ -94,8 +94,8 @@ class InferenceManager:
         )
 
         # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
-        # recording 的 sweeper 拉走写 `{task}/{step}/inference/detections.jsonl`。本 manager
-        # 因此不持有任何 store、不管 supersede（recording 首写自清）、不管 flush。
+        # recording 的 sweeper 拉走写 `cq.run` 的 `inference/detections.jsonl`。本 manager
+        # 因此不持有任何 store、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()
 
     def _get_stage_configs(self) -> Dict[str, Dict[str, Any]]:
@@ -207,9 +207,7 @@ class InferenceManager:
             )
             stale.signal_stop()
 
-        # 注：起始**不再截断存储分区**。同 (task,step) 重启的 supersede 归 recording 的
-        # 懒惰首写自清（本代次第一批检测结果真正落盘时才 `inference.delete`），与 HLS 同款——
-        # 新 run 若一帧检测结果都没写出来，上一代的产物原样保留、离线还能跑。
+        # 注：起始不碰存储。每次 run 由 `run_control` 分配自己的 run 目录，上一代产物原样保留。
 
         # 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
         stage = cq.stage

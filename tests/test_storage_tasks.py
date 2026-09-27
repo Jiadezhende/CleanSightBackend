@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from app.domain.run import RunIdentity
 from app.storage import _root, tasks
 from app.settings import settings
 
@@ -48,69 +49,62 @@ def _set_mtime(step_dir: Path, ts: float) -> None:
 
 
 class TestRootPath:
-    """`_root.path()` 是唯一定位入口，三个参数从左到右逐级下钻。"""
+    """`_root.path()` 逐级定位 task / step；run 以下归 `run_path` / `domain_dir`。"""
 
     def test_descends_level_by_level(self, tmp_storage):
         root = tmp_storage.resolve()
         assert _root.path() == root == settings.storage_base_dir
         assert _root.path(7) == root / "7"
         assert _root.path(7, 3) == root / "7" / "3"
-        assert _root.path(7, 3, "hls") == root / "7" / "3" / "hls"
+        run = RunIdentity(7, 3, 11)
+        assert _root.run_path(run) == root / "7" / "3" / "11"
+        assert _root.run_path(run, "hls") == root / "7" / "3" / "11" / "hls"
 
     def test_does_not_touch_disk(self, tmp_storage):
-        """读一个不存在的 step 不该在盘上留空目录——空目录会被 ids() 列出却没有内容。"""
-        _root.path(7, 3, "hls")
+        """定位不建目录——空目录会被枚举列出却没有内容。"""
+        _root.path(7, 3)
+        _root.run_path(RunIdentity(7, 3, 11), "hls")
+        _root.domain_dir(RunIdentity(7, 3, 11), "hls")
         assert list(tmp_storage.iterdir()) == []
 
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"step_id": 3},                      # 跳过 task_id
-            {"domain": "hls"},                   # 跳过 task_id + step_id
-            {"task_id": 7, "domain": "hls"},     # 跳过 step_id
-        ],
-    )
-    def test_skipping_a_level_raises(self, tmp_storage, kwargs):
-        """跳级是编程错误：拼出来的路径会静默少一层，产物落到上一级目录。"""
+    def test_skipping_a_level_raises(self, tmp_storage):
+        """跳级是编程错误：拼出来的路径会静默少一层。"""
         with pytest.raises(ValueError):
-            _root.path(**kwargs)
+            _root.path(step_id=3)
 
     @pytest.mark.parametrize("domain", _root.DOMAINS)
     def test_whitelisted_domains_pass(self, tmp_storage, domain):
-        assert _root.path(1, 2, domain).name == domain
+        assert _root.run_path(RunIdentity(1, 2, 3), domain).name == domain
 
     @pytest.mark.parametrize("domain", ["feature", "HLS", "hls/", "..", ""])
     def test_unknown_domain_raises(self, tmp_storage, domain):
-        """域名笔误会静默造出第四个子目录：写侧不报错、读侧只是查不到、purge 照样删掉，
-        连残留证据都不留。白名单把这类静默失败变成 ValueError。"""
+        """域名笔误会静默造出第四个子目录：写侧不报错、读侧只是查不到。白名单把它变成 ValueError。"""
         with pytest.raises(ValueError, match="Unknown domain"):
-            _root.path(1, 2, domain)
+            _root.run_path(RunIdentity(1, 2, 3), domain)
 
     def test_unknown_domain_creates_nothing(self, tmp_storage):
         """校验必须早于 mkdir —— 否则非法域目录已经落盘了才报错。"""
+        (tmp_storage / "1" / "2" / "3").mkdir(parents=True)
         with pytest.raises(ValueError):
-            _root.path(1, 2, "feature", create=True)
+            _root.domain_dir(RunIdentity(1, 2, 3), "feature", create=True)
+        assert list((tmp_storage / "1" / "2" / "3").iterdir()) == []
+
+    def test_create_only_makes_the_domain_level(self, tmp_storage):
+        """写者不建 run 目录：run 目录不在即 FileNotFoundError，什么都不建。"""
+        with pytest.raises(FileNotFoundError):
+            _root.domain_dir(RunIdentity(1, 2, 3), "hls", create=True)
         assert list(tmp_storage.iterdir()) == []
 
-    def test_create_true_makes_parents(self, tmp_storage):
-        got = _root.path(1, 2, "hls", create=True)
-        assert got.is_dir()
-        assert (tmp_storage / "1" / "2").is_dir()  # 中间两层一并建出
+    def test_create_is_idempotent_and_only_makes_its_own_domain(self, tmp_storage):
+        run_dir = tmp_storage / "1" / "2" / "3"
+        run_dir.mkdir(parents=True)
+        _root.domain_dir(RunIdentity(1, 2, 3), "hls", create=True)
+        _root.domain_dir(RunIdentity(1, 2, 3), "hls", create=True)  # exist_ok，不抛
+        assert [p.name for p in run_dir.iterdir()] == ["hls"]
 
-    def test_create_true_is_idempotent(self, tmp_storage):
-        _root.path(1, 2, "hls", create=True)
-        _root.path(1, 2, "hls", create=True)  # exist_ok，不抛
-        assert _root.path(1, 2, "hls").is_dir()
-
-    def test_create_true_only_makes_its_own_domain(self, tmp_storage):
-        """建 hls/ 不该顺带建出 features/ —— 域目录按需生成，空域不留痕。"""
-        _root.path(1, 2, "hls", create=True)
-        assert [p.name for p in (tmp_storage / "1" / "2").iterdir()] == ["hls"]
-
-    def test_create_true_on_shallower_level(self, tmp_storage):
-        """省掉 domain 也能建——那是 tasks.py 的用法，建的是 step 目录本身。"""
-        got = _root.path(1, 2, create=True)
-        assert got.is_dir() and got.name == "2"
+    def test_domain_dir_rejects_non_run(self, tmp_storage):
+        with pytest.raises(TypeError):
+            _root.domain_dir((1, 2), "hls")
 
     @pytest.mark.parametrize(
         "name, expected",
