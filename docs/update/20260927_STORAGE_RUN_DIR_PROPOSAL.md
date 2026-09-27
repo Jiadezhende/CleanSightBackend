@@ -64,7 +64,7 @@
 步骤之间的硬约束：
 
 - **① 必须在 `lock_for` 内完成**：同一 step 的分配串行执行，`run_id` 才能保证递增。**也必须早于 `client_manager.set`**：CQ 构造时就带上 RunIdentity，此后不可变。
-- **② 写者不建 run 目录**：全仓只有 `runs.allocate` 用 `mkdir(parents=True)`。run 被回收后，迟到的写入会在文件系统层原子失败，不会重建出僵尸目录。run 路径不跨代复用，所以「目录在不在」就等于「这个 run 还在不在」，没有 ABA。
+- **② 写者不建 run 目录**：产物目录只有 `runs.allocate` 用 `mkdir(parents=True)`。run 被回收后，迟到的写入会在文件系统层原子失败，不会重建出僵尸目录。run 路径不跨代复用，所以「目录在不在」就等于「这个 run 还在不在」，没有 ABA。
 - **⑤ 按 step 整体回收**：被取代的 run 随 step 一起保留到 TTL，读侧、离线锁定的 run 在此之前一直可用；回收不看 run、不看可见判据，与写侧、读侧都不需要互斥。
 
 | 步骤 / 部件 | 落在哪 | 期 | 详见 |
@@ -108,7 +108,7 @@
 - **路径只在存储层解析**：hls / inference 的读写口收 `RunIdentity`，自己拼出 `{root}/{task}/{step}/{run_id}/{domain}/`；调用方拿不到、也不拼路径。
 - `app/storage/runs.py` 提供 `allocate(task, step) -> RunIdentity`：`run_id = max(time_ns() // 1000, 该 step 已有最大 run_id + 1)`，然后 `mkdir(parents=True)`。run 目录名是纯数字，用 `_root.dir_name_to_int` 解析，和旧布局的 `hls/`、`inference/` 天然区分开。
 - `ClientQueues.__init__` 的 `task_id` / `step_id` 两个关键字参数合并成 `run: Optional[RunIdentity]`，裸建时为 None。`stage`、`source_ip`、`task_started_at` 是 run 的属性、不是身份，仍留在 CQ 上。
-  - 「未绑定 run」只剩一个判据：`cq.run is None`。recording 里 4 处 `task_id is None or step_id is None` 随之收成这一条。
+  - 「未绑定 run」只剩一个判据：`cq.run is None`。recording 里 6 处「缺 task_id / step_id」判断（`submit_segment`、`submit_detections`、`flush_residual`、`request_residual_flush`、`_take_pending_flush`、`collect_from`）随之收成这一条。
 - `run_control.start_run` 在 `lock_for` 内、构造 CQ 之前调用 `allocate`。
 - mkdir 失败时 start 返回失败。现在的 start 不碰盘，这是行为变化。
 - 没写出任何产物就结束的 run 会留下空目录，随 step 由 ⑤ 回收。
@@ -139,12 +139,14 @@
   - 返回 None 时 router 一律 404。
 - 存储层读口改为收 RunIdentity：`hls.list_segments` / `list_segments_in_range` / `segment_path` / `init_path` / `sidecar_path` / `playlist_path` / `read_segment` / `iter_frames`，以及 `inference.read_*`。
 - 调用方在入口处解析一次，往下只传 RunIdentity：traceback、task、lab、ai 四个 router，`media_timeline`、`clip_builder`、`step_exporter`。ai 叠加的 hls 时间轴与 `temporal.jsonl` 取自同一个 RunIdentity。
-- **对外契约只增不改**，老前端不受影响：
+- **对外契约只增字段与可选参数**，老前端不用改；行为上只有 timeline 告警少了区间外的那部分：
   - 返回 `run_id`：`/history` 的 `steps[]`、活跃任务列表、lab 的 step 列表各加一个 `run_id` 字段（整数，微秒，在 JS 安全范围内）。
-  - 接收可选 `run_id`：playlist、`/timeline`、`/ai/temporal`、lab 读口、离线提交。统一经 `runs.query` 查询，不传时与现状一致。
-  - `/timeline` 的告警来自 DB、没有 run 维度：按该 run 的段时间范围过滤。
+  - 接收可选 `run_id`：playlist、`/timeline`、`/ai/temporal`、lab 读口、离线提交与查询。统一经 `runs.query` 查询，不传时按最新 run。
+  - `/timeline` 的 `events` 只含本 run 存续期内的告警：`[该 run 的 run_id 时刻, 同 step 下一个 run 的 run_id 时刻)`，最新 run 没有上界。DB 告警没有 run 维度，区间两端取自盘上的 `run_id`。
+    - 不能用段的时间跨度：结算告警在 `stop_run` 拆除时生成，时间戳是停止时刻，晚于最后一段；重启是先 `stop_run` 再分配新 run，所以它一定落在本 run 的区间内，由 `media_ms_at` 贴到进度条末尾。
+    - 这是对现状的修正：现在同 step 所有 run 的告警都返回，区间外的被 `media_ms_at` 堆到进度条两端。
   - 前端从列表拿到 `run_id` 后，同一页面的各个请求都带上它，跨请求也锁定同一个 run。
-- `MediaTokenPayload` 增加 `run_id`：签发清单时解析一次，用它签发清单里所有段和 init 的 token；`media.py` 按 RunIdentity 取路径。run 被回收后再请求返回 404。
+- `MediaTokenPayload` 增加 `run_id`：签发清单时解析一次，用它签发清单里所有段和 init 的 token；`media.py` 经 `runs.query` 拿到 RunIdentity 再取路径。run 被回收后再请求返回 404。`run_id` 在 token 里是可选字段：上线前签发的 token（最长 `media_token_ttl` = 300 s）没有它，按最新 run 解析，不因缺字段校验失败。
 - `tasks.list_task_ids(order="mtime")` 改为按各 step 下最大的 `run_id` 排序，也就是最近一次 run 的开始时刻；`_latest_step_mtime` 删除。
 - **第 3 期过渡**：旧的 (task, step) 签名保留，内部先 `runs.query(task, step)` 再转发；第 4 期迁完调用点后删除。
 
@@ -156,7 +158,8 @@
   - 服务按 recording 的写法注入 `clients`。
 - CLI 新增可选参数 `--run-id`，入口经 `runs.query` 查询一次，之后同样锁定。服务起子进程时总是传 `--run-id`。
 - runner 全程用 RunIdentity 读写。run 目录不在（所在 step 已过 TTL 被回收）时新增状态 `reclaimed`，什么都不写。
-- 去重键仍是 (task, step)，但要先比较 run：在途作业锁定的 run 与本次解析出的相同 → 返回在途作业；不同 → 取消在途作业、排入新作业（旧 run 的结果读侧已看不到）。否则同 step 换代后再提交，拿到的是旧 run 的作业，`get` 显示 completed 而叠加里看不到分段。
+- `_jobs` 的键从 (task, step) 改为 `RunIdentity`：同一个 run 在途时返回在途作业，不同 run 各跑各的。`get` / `cancel` 同样接收可选 `run_id`，由 admin router 经 `runs.query` 解析。
+  - 仍按 (task, step) 去重会出错：同 step 换代后再提交，拿到的是旧 run 的作业，`get` 显示 completed 而叠加里看不到分段；改成「run 不同就取消在途」也不行，显式指定旧 run 提交会把最新 run 的作业取消掉。
 - `_RUNNER_STATUSES` 加入 `reclaimed`，否则 CLI 返回的这个状态会被解析成 failed。
 
 ### 6. 回收按 step 整体进行（对应全景 ⑤）
@@ -185,9 +188,9 @@
 |----|------|-----------|------|
 | 1 | §1 `_fs` 收编 4 份整体替换，删除（含 `cleanup_worker`）改走 `_fs.remove`；§6 的 `.trash/` 清理与数字目录过滤 | 不变（删除变成原子操作） | 原有单测；新增 `_fs` 单测（三态返回、rename 失败盘上不动、replace 不建父目录）；`cleanup_worker` 不删非数字目录 |
 | 2 | `app/domain/run.py`（`RunIdentity`）；§2–§4 的存储层能力：`runs`（allocate / query）+ 收 RunIdentity 的读写口，与旧签名并存，不接调用点 | 不变 | 新增单测：`run_id` 递增、可见判据、`query` 三种结果（指定存在 / 指定不存在 / 缺省取最新）、`create` 边界 |
-| 3 | 写侧切换：`start_run` 分配 `RunIdentity`，CQ 改收 `run`（`task_id` / `step_id` 保留为转发属性），recording / 离线写入走 RunIdentity；读侧旧签名内部改为经 `runs.query(task, step)` 转发 | 新数据落 `{step}/{run_id}/`；旧布局数据读侧不可见 | 全量 pytest + dev 端到端：启停、同 step 重启、回放、离线提交 |
-| 4 | 调用点迁移：读侧与离线迁到 RunIdentity（各 router、`media_timeline`、lab、媒体 token 带 `run_id`；离线锁定 run、409、`reclaimed`）；§4 的对外契约增量（列表返回 `run_id`、读口接收可选 `run_id`、告警按 run 时间范围过滤）并同步 `docs/api`；`cq.task_id` / `cq.step_id` 的读者迁到 `cq.run.*` | 回放与离线整次锁定同一个 run；不带 `run_id` 的老请求行为不变 | 全量 pytest（含不带 `run_id` 的回归用例）+ dev 端到端：换代期间持续回放、离线期间同 step 重启 |
-| 5 | 单独一次提交删旧：认领表、`forget_*`、`hls.delete` / `inference.delete` / `tasks.delete_step`、旧 (task, step) 签名、`_root.path(create=)`、`_latest_step_mtime`、CQ 的身份转发属性 | 不变 | 全量 pytest |
+| 3 | 写侧切换：`start_run` 分配 `RunIdentity`，CQ 改收 `run`（`task_id` / `step_id` 保留为转发属性），recording / 离线写入走 RunIdentity；读侧旧签名内部改为经 `runs.query(task, step)` 转发；改写 `test_recording_service.py` 里断言认领表的用例（①② 删除后即失效）；[detection/service.py](../../app/services/inference/online/detection/service.py) `_write_back_results` 注释里的代次隔离依据改为 RunIdentity；`docs/api` 补 `/api/start` 的 mkdir 失败情形 | 新数据落 `{step}/{run_id}/`；旧布局数据读侧不可见 | 全量 pytest + dev 端到端：启停、同 step 重启、回放、离线提交 |
+| 4 | 调用点迁移：读侧与离线迁到 RunIdentity（各 router、`media_timeline`、lab、媒体 token 带 `run_id`；离线锁定 run、409、`reclaimed`）；§4 的对外契约增量（列表返回 `run_id`、读口接收可选 `run_id`、timeline 告警按 run 存续期过滤、媒体 token 的 `run_id` 可选）并同步 `docs/api`；`cq.task_id` / `cq.step_id` 的读者迁到 `cq.run.*` | 回放与离线整次锁定同一个 run；不带 `run_id` 的老请求行为不变 | 全量 pytest（含不带 `run_id` 的回归用例）+ dev 端到端：换代期间持续回放、离线期间同 step 重启 |
+| 5 | 单独一次提交删旧：认领表、`forget_*`（同一提交把 `_pending_flush` 的回收挪进 `flush_residual(cq)` 的拆除路径，见 §3，否则每次拆除都在表里留一个 CQ 引用）、`hls.delete` / `inference.delete` / `tasks.delete_step`、旧 (task, step) 签名、`_root.path(create=)`、`_latest_step_mtime`、CQ 的身份转发属性 | 不变 | 全量 pytest |
 
 ## 变更效果（预期）
 
@@ -217,5 +220,7 @@
 | 前端没带上 `run_id` 之前仍会跨请求混读 | 回放页的 playlist、`/timeline`、`/ai/temporal` 是独立请求，不带 `run_id` 时各自解析最新 run，两次请求之间换代，页面会半新半旧 | 后端第 4 期提供能力；前端按需迁移，不阻塞后端上线 |
 | 被取代的 run 随 step 保留到 TTL | 同 step 每重启一次多占一份盘，且 step 的 TTL 从最后一次开跑重新计时 | 接受：不会有频繁重启的任务 |
 | hls 的可见判据依赖 `metadata.json` | 以后废掉 `metadata.json` 时，可见判据要换成其他原子出现的标记 | 废弃时同步修改 `runs` 的可见判据 |
+| 同 step 重启后，新 run 先因检测结果可见、首段 hls 还没出来 | 新 run 约 1 s 就因 `detections.jsonl` 可见，首段 hls 要 10 s 以上；这期间不带 `run_id` 的回放返回 404，不再显示上一次录像 | 接受：窗口约一个段长；要看上一次录像可带其 `run_id` |
+| cleanup_worker 判定过期与删除之间恰好在该 step 分配了新 run | 新 run 随 step 一起被删，整次写入失败 | 接受：前提是 15 天没动的 step 恰在扫描那一刻重启，概率可忽略 |
 | 离线在 stop 之后立刻提交 | 拆除时的残余检测结果还在 detections 队列里（毫秒级），离线会缺最后一批 | 接受：离线子进程启动是秒级，实际碰不到 |
 | 知识库与新布局不一致 | [DESIGN_STALE_WRITES](../kb/DESIGN_STALE_WRITES.md) §3.1 的规则 3、4 与 §6；[DESIGN_STORAGE_LAYER](../kb/DESIGN_STORAGE_LAYER.md) §6；[ARCHITECTURE_STORAGE_AND_SCHEMA](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md) 的布局 | 落地后在 KB 维护时改写 |
