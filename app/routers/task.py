@@ -220,7 +220,7 @@ def _summarise_steps(task_id: int) -> List[dict]:
     实测有过 20+ 秒的差，故它表达的是「该 step 有画面的时间跨度」，不等于任一单轨的播放范围。
     `last_segment_ms` 是最后一段的**起点**，不是结束时刻。
 
-    ⚠ `tasks.list_step_ids` **不过滤空 step**（那是域知识，TTL 要的正是没过滤的那档）。
+    ⚠ `tasks.list_step_ids` **不过滤空 step**（有无产物是域知识，不在目录层）。
     「两轨都没段就丢弃」必须在这里补：目录建了但没写成段（起流即失败）对回放没有意义，
     清单不该把它露给前端点开黑屏。
     """
@@ -252,19 +252,21 @@ def _summarise_steps(task_id: int) -> List[dict]:
 def list_history_tasks():
     """历史任务清单（大屏用）：最近 10 个**已完成且能回放**的任务。无查询参数。
 
-    「已完成」= 磁盘上有段（能播） **且** 不在活跃注册表里（跑完了）。刻意**不看**
+    「已完成」= 磁盘上有段（能播） **且** 不在活跃注册表里（跑完了）。「有段」看的是各 step
+    **最新可见 run**：它没段（首段出来前就停了、只写出了检测结果）时整个 step 不进清单，即使
+    更早的 run 有录像。刻意**不看**
     `clean_task.status`——该字段由平台业务侧写入，取值集合后端无从校验，拿它过滤
     等于把清单挂在一个未知字面量上，写错就静默变空。上述两个条件后端都是权威。
 
-    返回的字段即历史画面入参：
-        GET /traceback/task/{task_id}/playlist.m3u8?step_id={step_id}&track={track}
-        GET /traceback/task/{task_id}/timeline?step_id={step_id}
+    返回的字段即历史画面入参（带上 `run_id`，之后该 step 再开跑也仍指向清单里这一次）：
+        GET /traceback/task/{task_id}/playlist.m3u8?step_id={step_id}&track={track}&run_id={run_id}
+        GET /traceback/task/{task_id}/timeline?step_id={step_id}&run_id={run_id}
 
     `track` **必须从 `steps[].tracks` 里挑**：playlist 的 track 默认 processed，
     而只落了 raw 的 step 照默认打过去就是 404。
 
-    时间字段的粒度刻意压在 **step** 上——回放本身就是 step 粒度（playlist 必填
-    step_id，跨 step 聚合不支持），且两个 step 之间可以隔任意长时间，任务级
+    时间字段的粒度刻意压在 **step** 上——回放本身是一个 step 的一个 run（每个 step 只列
+    最新可见 run，跨 step / 跨 run 聚合不支持），且两个 step 之间可以隔任意长时间，任务级
     「min(start) ~ max(last)」会跨过中间空档，既不是任务时长也不对应任何可播放
     的东西。任务级只留 `latest_ms`（= max(steps[].last_segment_ms)）作排序键与
     「最近一次有画面」的展示值，不成对给 start，免得被读成连续区间。
