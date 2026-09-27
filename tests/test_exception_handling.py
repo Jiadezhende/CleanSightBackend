@@ -7,14 +7,12 @@ CleanSight 异常处理集成测试
 3. 重试次数与退避延迟序列
 """
 
-import time
 import types
 
 import pytest
 
 from app.utils import executor as executor_mod
 from app.utils.exceptions import (
-    DatabaseError,
     FFmpegError,
     ModelInferenceError,
     PersistenceError,
@@ -35,7 +33,7 @@ def sleeps(monkeypatch):
     """
     calls = []
     monkeypatch.setattr(
-        executor_mod, "time", types.SimpleNamespace(sleep=calls.append, time=time.time)
+        executor_mod, "time", types.SimpleNamespace(sleep=calls.append)
     )
     return calls
 
@@ -132,7 +130,7 @@ def test_metrics_gpu_oom():
         )
 
     with pytest.raises(ModelInferenceError):
-        executor.execute(func=oom_func, policy_name="inference")
+        executor.execute(func=oom_func, policy_name="persistence")
 
     # 验证 metric 增加
     after_count = gpu_oom_total._metrics[metric_key]._value.get()
@@ -151,7 +149,7 @@ def test_retry_executor_success():
     def success_func():
         return {"result": "success"}
 
-    result = executor.execute(func=success_func, policy_name="database")
+    result = executor.execute(func=success_func, policy_name="persistence")
 
     assert result == {"result": "success"}
 
@@ -164,7 +162,7 @@ def test_retry_executor_non_retryable_error(sleeps):
         raise FFmpegError("FFmpeg not found", exit_code=1)  # fatal=True
 
     with pytest.raises(FFmpegError):
-        executor.execute(func=non_retryable_func, policy_name="stream")
+        executor.execute(func=non_retryable_func, policy_name="persistence")
 
     assert sleeps == []  # 首次失败即上抛，不退避
 
@@ -178,10 +176,10 @@ def test_retry_executor_max_attempts(sleeps):
     def always_fail():
         nonlocal attempt_count
         attempt_count += 1
-        raise DatabaseError("Always fail", retryable=True)
+        raise PersistenceError("Always fail", operation="hls_write")
 
-    with pytest.raises(DatabaseError):
-        executor.execute(func=always_fail, policy_name="database")  # 最多 3 次
+    with pytest.raises(PersistenceError):
+        executor.execute(func=always_fail, policy_name="persistence")  # 最多 3 次
 
     # 验证：尝试了 3 次，其间按指数退避等了 2 次
     assert (

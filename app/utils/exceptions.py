@@ -320,39 +320,6 @@ class PersistenceError(AppError):
 
 
 # ============================================================================
-# 工具函数
-# ============================================================================
-
-
-def is_retryable_error(exception: Exception) -> bool:
-    """检查异常是否可重试
-
-    Args:
-        exception: 异常对象
-
-    Returns:
-        bool: 如果是 AppError 且 retryable=True，则返回 True
-    """
-    if isinstance(exception, AppError):
-        return exception.retryable
-    return False
-
-
-def is_fatal_error(exception: Exception) -> bool:
-    """检查异常是否致命
-
-    Args:
-        exception: 异常对象
-
-    Returns:
-        bool: 如果是 AppError 且 fatal=True，则返回 True
-    """
-    if isinstance(exception, AppError):
-        return exception.fatal
-    return False
-
-
-# ============================================================================
 # HTTP 业务异常（用于 API 路由层）
 # ============================================================================
 
