@@ -216,14 +216,6 @@ class ClientQueues:
 
     # --- 封装操作方法 ---
 
-
-    def task_id(self) -> Optional[int]:
-        return self.run.task_id if self.run is not None else None
-
-    @property
-    def step_id(self) -> Optional[int]:
-        return self.run.step_id if self.run is not None else None
-
     def append_ca_ready_with_throttle(self, frame_data: Frame) -> bool:
         """
         添加帧到待推理队列（整数倍率均匀抽帧 + 背压）。

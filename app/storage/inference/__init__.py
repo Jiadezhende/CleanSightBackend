@@ -1,4 +1,4 @@
-"""inference 域 —— `{step}/inference/` 下推理链路产物的编解码与读写。
+"""inference 域 —— `{run}/inference/` 下推理链路产物的编解码与读写。
 
     from app.storage import inference
 

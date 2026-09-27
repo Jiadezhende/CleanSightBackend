@@ -1,7 +1,6 @@
 """TTL 回收：判据是 `{task}/{step}/` 目录自身的 mtime，整个 step（含所有 run）一起删。
 
-    {step}/{run_id}/hls/ …   现行布局：`{step}` 的直接子项只有 run 目录
-    {step}/hls/ …            旧布局残留：同一判据，随 step 回收
+    {step}/{run_id}/hls/ …   `{step}` 的直接子项只有 run 目录
 
 step mtime 只在增删直接子项时变，所以它 = 最近一次 `runs.allocate` 的时刻：写段不续命，
 开新 run 续命。删除经 `_fs.remove`（先 rename 进 `.trash/`），回收区每轮先清空。
@@ -31,7 +30,7 @@ def _age(directory: Path, days: float) -> None:
 
 
 def _make_run_step(root: Path, task_id: int, step_id: int, run_id: int = 1700) -> Path:
-    """现行布局：`{step}/{run_id}/hls/` 下一段 + metadata。返回 step 目录。"""
+    """`{step}/{run_id}/hls/` 下一段 + metadata。返回 step 目录。"""
     hls_dir = root / str(task_id) / str(step_id) / str(run_id) / "hls"
     hls_dir.mkdir(parents=True)
     (hls_dir / "raw_segment_1700000000.mp4").write_bytes(b"fake")
@@ -39,36 +38,27 @@ def _make_run_step(root: Path, task_id: int, step_id: int, run_id: int = 1700) -
     return hls_dir.parent.parent
 
 
-def _make_legacy_step(root: Path, task_id: int, step_id: int) -> Path:
-    """旧布局残留：`{step}/hls/`。返回 step 目录。"""
-    hls_dir = root / str(task_id) / str(step_id) / "hls"
-    hls_dir.mkdir(parents=True)
-    (hls_dir / "raw_segment_1700000000.mp4").write_bytes(b"fake")
-    return hls_dir.parent
-
-
-# --- 1. 过期的 step 整个删掉（两种布局），被掏空的 task 目录顺手回收 ---
+# --- 1. 过期的 step 整个删掉，被掏空的 task 目录顺手回收 ---
 
 def test_expired_steps_are_deleted_whole(tmp_path):
     current = _make_run_step(tmp_path, 1, 1)
     (current / "1800").mkdir()                     # 同 step 的另一个 run 一起删
-    legacy = _make_legacy_step(tmp_path, 2, 1)
+    other = _make_run_step(tmp_path, 2, 1)
     _age(current, _RETENTION_DAYS + 1)
-    _age(legacy, _RETENTION_DAYS + 1)
+    _age(other, _RETENTION_DAYS + 1)
 
     assert _worker(tmp_path)._scan_and_clean() == 2
 
     assert not current.exists()
-    assert not legacy.exists()
+    assert not other.exists()
     assert not (tmp_path / "1").exists()
     assert not (tmp_path / "2").exists()
 
 
 # --- 2. 新鲜的 step 不动 ---
 
-@pytest.mark.parametrize("make_step", [_make_run_step, _make_legacy_step])
-def test_fresh_step_survives(tmp_path, make_step):
-    step_dir = make_step(tmp_path, 7, 3)
+def test_fresh_step_survives(tmp_path):
+    step_dir = _make_run_step(tmp_path, 7, 3)
     _age(step_dir, _RETENTION_DAYS - 1)
 
     assert _worker(tmp_path)._scan_and_clean() == 0

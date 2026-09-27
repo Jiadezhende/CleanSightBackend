@@ -69,8 +69,7 @@ class StorageCleanupWorker:
 
         `{step}/` 的直接子项只有 run 目录，目录 mtime 只在增删直接子项时变，所以它就是最近一次
         `runs.allocate` 的时刻：TTL 从该 step 最后一次开跑算起。段与检测结果落在
-        `{step}/{run_id}/{domain}/`，写入不刷新它。旧布局残留（`{step}/hls/` 等）同样按这个
-        判据随 step 回收。
+        `{step}/{run_id}/{domain}/`，写入不刷新它。
 
         ⚠ **活跃 step 不免疫**：一个连续跑满 `cleanup_days` 的 run 会被删掉自己正在写的目录（写者
         随即 `FileNotFoundError`）。任务超时远短于 `cleanup_days`，触发不到；调小 `cleanup_days`

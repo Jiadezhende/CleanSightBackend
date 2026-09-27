@@ -11,7 +11,6 @@ storage —— 数据层：内存数据模型与 `{storage_root}/` 下盘上数�
       hls/        {track}_segment_{ts_us}.mp4 / {track}_init.mp4
                   {track}_playlist.m3u8 / raw_segment_{ts_us}.idx / metadata.json
       inference/  detections.jsonl / temporal.jsonl / label_probs.npz
-      lab/        送标 clip 与整段导出的临时件（用完即删，残留随 step TTL 回收）
 
 run 目录只由 `runs.allocate` 建，写者只建域这一级。存储根下除数字命名的 task 目录外只有
 `.trash/`（`_fs.remove` 的回收区）与 `.lab_exports/`。域名过 `_root.DOMAINS` 白名单，笔误当场 `ValueError`。

@@ -1,4 +1,4 @@
-"""L3 时序分析产物 —— `{step}/inference/` 下 `temporal.jsonl` 与 `label_probs.npz` 的读写。
+"""L3 时序分析产物 —— `{run}/inference/` 下 `temporal.jsonl` 与 `label_probs.npz` 的读写。
 
     read_temporal(run)                回读全部事实，**落盘序**
     write_temporal(run, facts)        整体替换（路线 C）

@@ -38,7 +38,7 @@ from app.domain.run import RunIdentity
 
 # run 目录下的产物域子目录 —— 封闭集合，唯一真源。域名属于「布局」归本包，产物文件名
 # 属于「内容」归各域自己。新增一个域要改这里，这是有意的。
-DOMAINS: Tuple[str, ...] = ("hls", "inference", "lab")
+DOMAINS: Tuple[str, ...] = ("hls", "inference")
 
 # (settings.storage_dir 原始值, 解析后的绝对路径)
 _root_cache: Optional[Tuple[str, Path]] = None
@@ -88,8 +88,7 @@ def dir_name_to_int(name: str) -> Optional[int]:
 
 
 def run_ids(task_id: int, step_id: int) -> List[int]:
-    """该 step 下的 run 目录 id，升序。step 不在 / 不可读返回 `[]`；旧布局的 `hls/` 等非数字
-    名与文件天然跳过。"""
+    """该 step 下的 run 目录 id，升序。step 不在 / 不可读返回 `[]`；非数字名与文件跳过。"""
     try:
         entries = list(path(task_id, step_id).iterdir())
     except OSError:
@@ -107,7 +106,7 @@ def run_path(run: RunIdentity, domain: Optional[str] = None) -> Path:
     """`{root}/{task}/{step}/{run_id}[/{domain}]`。只定位，不建目录。
 
     Raises:
-        ValueError: domain 不在 `DOMAINS` 白名单里（笔误会静默造出第四个域目录）。
+        ValueError: domain 不在 `DOMAINS` 白名单里（笔误会静默造出多余的域目录）。
     """
     located = path(run.task_id, run.step_id) / str(run.run_id)
     if domain is None:

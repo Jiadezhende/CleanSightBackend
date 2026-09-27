@@ -61,7 +61,7 @@ class TestAllocate:
         ids = [runs.allocate(1, 2).run_id for _ in range(3)]
         assert ids == [5_000_000, 5_000_001, 5_000_002]
 
-    def test_legacy_domain_dirs_are_not_run_ids(self, tmp_storage, monkeypatch):
+    def test_non_numeric_dirs_are_not_run_ids(self, tmp_storage, monkeypatch):
         (tmp_storage / "1" / "2" / "hls").mkdir(parents=True)
         monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000)
         assert runs.allocate(1, 2).run_id == 7
@@ -116,12 +116,6 @@ class TestQuery:
     def test_no_visible_run_is_none(self, tmp_storage, monkeypatch):
         assert runs.query(1, 2) is None
         _alloc(monkeypatch, 1, 2, 10)
-        assert runs.query(1, 2) is None
-
-    def test_legacy_layout_is_invisible(self, tmp_storage):
-        legacy = tmp_storage / "1" / "2" / "inference"          # 旧布局 {step}/inference/
-        legacy.mkdir(parents=True)
-        (legacy / "detections.jsonl").write_text("{}\n")
         assert runs.query(1, 2) is None
 
 

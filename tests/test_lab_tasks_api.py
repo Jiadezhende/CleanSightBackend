@@ -1,6 +1,6 @@
 """送标任务清单接口（GET /lab-f3m8/tasks）测试。
 
-落盘约定：`{root}/{task_id}/{step_id}/hls/`（`app.storage.hls` 域）；存储根由 conftest 的
+落盘约定：`{root}/{task_id}/{step_id}/{run_id}/hls/`（`app.storage.hls` 域）；存储根由 conftest 的
 `tmp_storage` fixture 指到临时目录（改的是 settings.storage_dir 单一真源）。
 """
 

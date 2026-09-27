@@ -1,4 +1,4 @@
-"""L1 目标检测产物 —— `{step}/inference/detections.jsonl` 的编解码与读写。
+"""L1 目标检测产物 —— `{run}/inference/detections.jsonl` 的编解码与读写。
 
     append_detections(run, frames)     追加一批（一次 open("a")，包内不攒批）
     read_detections(run)               回读整段，按 ts 升序

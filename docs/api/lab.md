@@ -287,7 +287,7 @@
 | `404` | 所解析 run 的该 `track` 无段（缺省 `run_id` 时含该 step 无可见 run），**或**段全为在途段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=.."}` |
 | `404` | 显式 `run_id` 的目录不存在（写错 / 已被 TTL 回收） | `{"error":"...","resource_type":"Run","resource_id":"task=..,step=..,run=.."}` |
 | `422` | 缺 `task_id`/`step_id`，或 `track` 不在枚举内 | FastAPI 校验体（`{"detail":[...]}`） |
-| `503` | run 的 `hls/` 目录缺 `{track}_init.mp4`（旧格式产物，或首段仍在 transcode） | `{"detail":{"error":"HLS init segment missing","detail":"raw_init.mp4 not found for task .. step ..; ..."}}` |
+| `503` | run 的 `hls/` 目录缺 `{track}_init.mp4`（首段仍在 transcode） | `{"detail":{"error":"HLS init segment missing","detail":"raw_init.mp4 not found for task .. step ..; ..."}}` |
 | `500` | ffmpeg 失败 / 超时 / 二进制找不到 | `{"detail":"Export failed: ..."}` |
 
 > 与 `/submit` 一样，**503 的 body 形态和 404 不一致**（HTTPException 只有 `detail`，无 `resource_type`）。判分支只认 status code。

@@ -6,7 +6,7 @@
 
 ## 事务形态：路线 A（规范 `docs/kb/DESIGN_STORAGE_LAYER.md` §5）
 
-    ① stage    在 {step}/hls/.stage_{track}_{ts_us}/ 里造产物
+    ① stage    在 {run}/hls/.stage_{track}_{ts_us}/ 里造产物
                ├ cv2 写 mp4v（_encode）
                └ ffmpeg 转 fMP4，得 fragment + init（_fmp4）
     ② adjust   读既有清单求累计 EXTINF → hex-patch fragment 的 tfdt（位置相关）

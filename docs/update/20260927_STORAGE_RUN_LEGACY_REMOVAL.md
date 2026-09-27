@@ -38,6 +38,16 @@
 | 全量 `pytest tests/` | 839 passed |
 | `integration_tests/test_hls_frame_roundtrip.py`（真 ffmpeg，不碰 DB） | 9 / 9 |
 
+### 追加修正（2026-09-28）：转发属性补删、清掉旧布局描述
+
+- **CQ 转发属性只删了一半**：原提交只删了 `task_id` 上的 `@property`，方法体和 `step_id` property 都还在。`cq.task_id` 因此成了一个 bound method：有读者时不会 `AttributeError`，而是拿到一个恒真、永不等于任何 id 的值。已删干净。
+- **旧布局描述清理**：
+  - 代码与测试里的 `{step}/hls/`、`{step}/inference/` 改为 `{run}/…`；
+  - 删掉「读侧不回落旧平铺布局」「旧布局残留随 step 回收」等说明，以及只为旧布局造数的用例（`test_legacy_layout_is_invisible`、TTL 的 `_make_legacy_step` 分支）；
+  - `_root.DOMAINS` 去掉已无使用方的 `"lab"`（lab 临时件在 `.lab_exports/`）；
+  - 回放 / 整段导出缺 init 的 503 文案与 `docs/api/{traceback,lab}.md` 去掉「旧格式产物」这一原因：run 目录全由新代码写出，只剩首段在 transcode 这一种可能。
+- 全量 `pytest tests/`：834 passed（减少的 3 条是旧布局用例和 `lab` 域参数化）。
+
 ## 遗留风险 / 后续任务
 
 | 风险 / 待办 | 影响 | 处理计划 |

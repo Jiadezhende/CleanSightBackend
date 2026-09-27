@@ -7,7 +7,7 @@
 - /media/segment/{token}：合法 token 下载，伪造 token 拒绝
 - 路径穿越防御（判据是 `hls.parse_*_name` 解不解得出身份键，不是事后 `relative_to`）
 
-落盘约定：{root}/{task_id}/{step_id}/hls/（`app.storage.hls` 域）
+落盘约定：{root}/{task_id}/{step_id}/{run_id}/hls/（`app.storage.hls` 域）
 """
 
 import base64
@@ -124,7 +124,7 @@ async def test_playlist_vod_generation(client, media_root):
 @pytest.mark.asyncio
 async def test_playlist_503_when_init_missing(client, media_root):
     """缺 `{track}_init.mp4` 时 playlist 端点应 503——fMP4 无 init 段无法解码，
-    且服务端无法自愈（旧格式产物不支持迁移，或首段仍在 transcode）。"""
+    （首段仍在 transcode）。"""
     _seed_task(task_id=42, step_id=1,
                ts_us_list=[1_000_000], write_init=False)
 

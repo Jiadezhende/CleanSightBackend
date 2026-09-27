@@ -69,7 +69,7 @@ http://<host>:8000/media/segment/<token>
 | `422` | 缺 `step_id`，或 `track` 非 `raw`/`processed` | `{"detail":[...]}`（FastAPI 校验格式） |
 | `404` | 所解析 run 的该 `track` **清单里一个段都没有**。成因**不分档**：挑错 track、step 不存在 / 无可见 run（缺省 `run_id` 时）、首段仍在转码 | `{"error":"Resource not found","detail":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=.."}` |
 | `404` | 显式 `run_id` 的目录不存在（写错 / 已被 TTL 回收） | 同上，`"resource_type":"Run","resource_id":"task=..,step=..,run=.."` |
-| `503` | 缺 `{track}_init.mp4`（旧格式产物，或首段仍在 transcode；服务端无法自愈，**无迁移路径**） | `{"detail":{"error":"HLS init segment missing","detail":"..."}}` |
+| `503` | 缺 `{track}_init.mp4`（首段仍在 transcode） | `{"detail":{"error":"HLS init segment missing","detail":"..."}}` |
 
 > **404 曾分两档，2026-09-20 起只有一档**（段查询收口到清单后，域里已无第二个入口去区分
 > 「盘上没文件」和「有文件没登记」）。body 形态保持结构化不变——**不要**改成裸

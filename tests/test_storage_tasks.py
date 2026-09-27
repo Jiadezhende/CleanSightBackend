@@ -196,10 +196,10 @@ class TestIds:
         assert tasks.list_task_ids(order="recent") == [1, 2]
 
     def test_recent_order_keeps_task_without_runs_last(self, tmp_storage):
-        """没有 run 目录的 task（空目录 / 只有旧布局）排序键取 0（排最后），但**仍保留在结果里**
+        """没有 run 目录的 task 排序键取 0（排最后），但**仍保留在结果里**
         ——它是否该丢弃由调用方深扫时决定，不是本域的判断。"""
         _seed_run(tmp_storage, 1, 1, 100)
-        (tmp_storage / "2" / "1" / "hls").mkdir(parents=True)   # 旧布局残留 {step}/hls/
+        (tmp_storage / "2" / "1").mkdir(parents=True)          # 有 step、无 run
         assert tasks.list_task_ids(order="recent") == [1, 2]
 
     def test_recent_tie_breaks_on_larger_task_id(self, tmp_storage):

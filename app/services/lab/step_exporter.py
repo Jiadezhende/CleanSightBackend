@@ -120,12 +120,10 @@ class StepExporter:
 
         init_path = hls.init_path(run, track)
         if not init_path.exists():
-            # 与 traceback._build_vod_playlist 同一判据：缺 init = 旧格式产物（不支持、
-            # 无迁移路径）或首段仍在 transcode。两者都不可自愈。
+            # 与 traceback._build_vod_playlist 同一判据：缺 init = 首段仍在 transcode。
             raise StepExportInitMissing(
                 f"{hls.init_name(track)} not found for task {task_id} step {step_id}. "
-                "This step is either mid-transcode or written in an unsupported "
-                "legacy layout; it cannot be exported."
+                "The first segment is still transcoding; it cannot be exported yet."
             )
 
         # 临时清单落在 init 与段的所在目录（`{run}/hls/`），裸文件名的相对 URI 才解析得到
