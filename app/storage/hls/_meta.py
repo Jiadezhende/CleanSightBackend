@@ -12,7 +12,7 @@
 两个消费方：大屏/清单要"这个 step 有多少段多长"，`cleanup_worker` 拿 `updated_at` 当 TTL
 判据。**它是派生量不是真值**——段时长真值在 playlist 的 EXTINF 里。
 
-**整体读改写（路线 C）**：tmp + `os.replace` 换整份。`end_time` 从来只写 `null`（没有写侧
+**整体读改写（路线 C）**：`_fs.replace` 换整份。`end_time` 从来只写 `null`（没有写侧
 知道 step 何时结束），保留是因为读侧还在按这个形状解析。
 
 依赖上界：stdlib only。
@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-logger = logging.getLogger(__name__)
+from app.storage import _fs
 
-_TMP_SUFFIX = ".tmp"
+logger = logging.getLogger(__name__)
 
 
 def _empty_track_stats() -> Dict[str, Any]:
@@ -104,14 +103,5 @@ def record_segment(
 
     document["updated_at"] = datetime.now().isoformat()
 
-    tmp = path.with_suffix(_TMP_SUFFIX)
     payload = json.dumps(document, ensure_ascii=False, indent=2)
-    try:
-        tmp.write_text(payload, encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    _fs.replace(path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))

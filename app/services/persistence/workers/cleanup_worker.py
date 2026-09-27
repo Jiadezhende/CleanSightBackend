@@ -1,19 +1,21 @@
 """
 存储 TTL 清理 Worker
 
-职责：
-- 后台 daemon 线程，定期扫描 database/{task_id}/{step_id}/ 目录
-- 删除**目录自身 mtime** 超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度）
-- 顺手清空被全部 step 抽走后留下的空 task_id 目录
+职责（每轮依次）：
+- 清空回收区 `{db_dir}/.trash/`（上一轮 rmtree 没删掉的残留）
+- 删除**目录自身 mtime** 超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度），
+  删除走 `app.storage._fs.remove`（先 rename 进回收区，原子）
+- 顺手清空被全部 step 抽走后留下的空 task_id 目录（只认数字目录名）
 
 判据为什么是 step 目录自身的 mtime，见 `_scan_and_clean` 的 docstring。
 """
 
 import logging
-import shutil
 import threading
 import time
 from pathlib import Path
+
+from app.storage import _fs
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,8 @@ class StorageCleanupWorker:
         那个口径**下钻域子目录取最大值**，答的是「最近活动」不是「创建」——每写一段就续一次
         命，等于永不回收。两个口径分开是刻意的，`tasks.py` 的 docstring 也写着这一点。
         """
+        _fs.purge_trash(root=self.db_dir)
+
         cutoff = time.time() - self.cleanup_days * 86400
         deleted = 0
 
@@ -108,17 +112,16 @@ class StorageCleanupWorker:
             if mtime >= cutoff:
                 continue
 
-            try:
-                shutil.rmtree(step_dir)
+            # FAILED 时 `_fs.remove` 已记 warning，盘上原样不动，下一轮再试
+            if _fs.remove(step_dir, root=self.db_dir) is _fs.Removed.REMOVED:
                 deleted += 1
                 logger.info("[StorageCleanup] Deleted step dir: %s", step_dir)
-            except OSError as e:
-                logger.warning("[StorageCleanup] Failed to delete %s: %s", step_dir, e)
 
-        # 顺手清理被掏空的 task_id 父目录（仅删空目录，rmdir 对非空目录会安全失败）
+        # 顺手清理被掏空的 task_id 父目录（仅删空目录，rmdir 对非空目录会安全失败）。
+        # 只认数字目录名：`.trash/`、`.lab_exports/` 空着也不归这里删
         empty_tasks = 0
         for task_dir in self._iterdir(self.db_dir):
-            if not task_dir.is_dir():
+            if not task_dir.is_dir() or not task_dir.name.isdigit():
                 continue
             try:
                 next(task_dir.iterdir())

@@ -128,6 +128,45 @@ def test_non_numeric_dirs_are_not_touched(tmp_path):
     assert exports.exists()
 
 
+def test_empty_non_numeric_dirs_are_not_rmdired(tmp_path):
+    """清空 task 目录那步只认数字目录名：空的 `.lab_exports/` 不归它删。"""
+    (tmp_path / ".lab_exports").mkdir()
+    (tmp_path / "3").mkdir()
+
+    _worker(tmp_path)._scan_and_clean()
+
+    assert (tmp_path / ".lab_exports").is_dir()
+    assert not (tmp_path / "3").exists()
+
+
+# --- 5b. 回收区：每轮先清空；删除经它原子完成 ---
+
+def test_each_round_purges_trash_first(tmp_path):
+    from app.storage import _fs
+
+    leftover = tmp_path / _fs.TRASH_NAME / "deadbeef" / "hls"
+    leftover.mkdir(parents=True)
+    (leftover / "seg.mp4").write_bytes(b"x")
+
+    _worker(tmp_path)._scan_and_clean()
+
+    assert list((tmp_path / _fs.TRASH_NAME).iterdir()) == []
+
+
+def test_failed_rename_keeps_the_step_intact(tmp_path, monkeypatch):
+    from app.storage import _fs
+
+    step_dir = _make_domain_step(tmp_path, 4, 1)
+    _age(step_dir, _RETENTION_DAYS + 1)
+
+    def boom(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(_fs.os, "rename", boom)
+    assert _worker(tmp_path)._scan_and_clean() == 0
+    assert (step_dir / "hls" / "metadata.json").exists()
+
+
 # --- 6. 布局不是本文件自己编的：用 storage.hls 的真实路径再钉一次 ---
 
 def test_real_hls_domain_layout_is_covered(tmp_storage):

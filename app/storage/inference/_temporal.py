@@ -21,13 +21,14 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
+from app.storage import _fs
+
 from . import _jsonl, _layout
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ _PROBS_DISK_DTYPE = np.float16
 
 
 def write_label_probs(task_id: int, step_id: int, probs: LabelProbs) -> None:
-    """**整体替换**该 step 的逐帧类别概率（路线 C：同目录 tmp → `os.replace`）。
+    """**整体替换**该 step 的逐帧类别概率（路线 C：`_fs.replace`）。
 
     只做序列化与落位，不校验形状一致性——那是产出侧的事（本层不认识「合法的概率」）。
 
@@ -155,27 +156,18 @@ def write_label_probs(task_id: int, step_id: int, probs: LabelProbs) -> None:
         OSError: 建目录 / 写 tmp / 换名失败。失败时 tmp 删除、旧文件原样保留。
     """
     path = _layout.domain_dir(task_id, step_id, create=True) / _layout.LABEL_PROBS_NAME
-    _write_probs_atomic(path, probs)
+    _fs.replace(path, lambda tmp: _write_probs(probs, tmp))
 
 
-def _write_probs_atomic(path: Path, probs: LabelProbs) -> None:
-    tmp = path.with_name("." + path.name + ".tmp")
-    try:
-        # 传文件对象而非路径：`np.savez` 收到不以 .npz 结尾的路径会自作主张补后缀，tmp 名就对不上了。
-        with open(tmp, "wb") as f:
-            np.savez(
-                f,
-                ts=np.asarray(probs.ts, dtype=np.float64),
-                probs=np.asarray(probs.probs).astype(_PROBS_DISK_DTYPE),
-                labels=np.asarray(probs.labels, dtype=np.str_),
-            )
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:  # 清 tmp 再失败不能盖掉原始错因
-            pass
-        raise
+def _write_probs(probs: LabelProbs, tmp: Path) -> None:
+    # 传文件对象而非路径：`np.savez` 收到不以 .npz 结尾的路径会自作主张补后缀，tmp 名就对不上了。
+    with open(tmp, "wb") as f:
+        np.savez(
+            f,
+            ts=np.asarray(probs.ts, dtype=np.float64),
+            probs=np.asarray(probs.probs).astype(_PROBS_DISK_DTYPE),
+            labels=np.asarray(probs.labels, dtype=np.str_),
+        )
 
 
 def read_label_probs(task_id: int, step_id: int) -> Optional[LabelProbs]:

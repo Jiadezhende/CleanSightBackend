@@ -46,6 +46,7 @@ import shutil
 from typing import Sequence
 
 from app.domain.frame import Frame
+from app.storage import _fs
 
 from . import _encode, _fmp4, _idx, _layout, _m3u8, _meta
 from ._layout import SegmentRef
@@ -163,8 +164,9 @@ def delete(task_id: int, step_id: int) -> bool:
     """删掉本域在该 step 下的**全部**产物（整个 `{step}/hls/` 目录）。
 
     Returns:
-        该目录此前是否存在。删除失败记 warning 后返回 False（调用场景是「新一代开写前清掉
-        上一代」，抛出去只会把一次录制整个葬掉）。
+        是否删掉了（`_fs.remove` 为 REMOVED）。不存在或删除失败返回 False，失败只记 warning
+        （调用场景是「新一代开写前清掉上一代」，抛出去只会把一次录制整个葬掉）。删除是原子的：
+        失败时盘上原样不动。
 
     **只执行，不判断该不该删**：「这是不是新一代的首次写入」是 run 生命周期语义，归
     `recording`。**只删本域**：同 step 的 `inference/` 与 `lab/` 一个字节都不碰；域目录本身
@@ -172,12 +174,4 @@ def delete(task_id: int, step_id: int) -> bool:
 
     **不加锁**：与 `insert_segment` 同一前提（见上方「并发」）。
     """
-    domain_dir = _layout.domain_dir(task_id, step_id)
-    if not domain_dir.exists():
-        return False
-    try:
-        shutil.rmtree(domain_dir)
-        return True
-    except OSError as e:
-        logger.warning("[storage.hls] 删除域目录失败 %s: %s", domain_dir, e)
-        return False
+    return _fs.remove(_layout.domain_dir(task_id, step_id)) is _fs.Removed.REMOVED

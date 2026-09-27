@@ -12,13 +12,9 @@
 
 from __future__ import annotations
 
-import logging
-import shutil
 from pathlib import Path
 
-from app.storage import _root
-
-logger = logging.getLogger(__name__)
+from app.storage import _fs, _root
 
 # 本域的域名 —— 全文件只出现这一次，写错会被 `_root.DOMAINS` 白名单当场拦下。
 _DOMAIN = "inference"
@@ -38,8 +34,9 @@ def delete(task_id: int, step_id: int) -> bool:
     """删掉本域在该 step 下的**全部**产物（整个 `{step}/inference/` 目录）。
 
     Returns:
-        该目录此前是否存在。删除失败记 warning 后返回 False——调用场景是「新一代 run 开写前
-        清掉上一代」，抛出去只会把一次 run 整个葬掉。
+        是否删掉了（`_fs.remove` 为 REMOVED）。不存在或删除失败返回 False，失败只记 warning——
+        调用场景是「新一代 run 开写前清掉上一代」，抛出去只会把一次 run 整个葬掉。删除是原子的：
+        失败时盘上原样不动。
 
     **三份产物一起没**：detections / temporal / label_probs 同去同归。同 (task, step) 重启一次 run 之
     后，旧 facts 是对旧 detections 的分析结果，留着即脏数据。
@@ -49,12 +46,4 @@ def delete(task_id: int, step_id: int) -> bool:
 
     **不加锁**：同一 step 的写与本函数由调用侧串行（规范 §6）。
     """
-    root = domain_dir(task_id, step_id)
-    if not root.exists():
-        return False
-    try:
-        shutil.rmtree(root)
-        return True
-    except OSError as e:
-        logger.warning("[storage.inference] 删除域目录失败 %s: %s", root, e)
-        return False
+    return _fs.remove(domain_dir(task_id, step_id)) is _fs.Removed.REMOVED

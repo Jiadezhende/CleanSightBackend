@@ -23,8 +23,8 @@ import pytest
 from factories import make_det_box
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.storage import inference
-from app.storage.inference import _detection, _jsonl, _temporal
+from app.storage import _fs, inference
+from app.storage.inference import _detection, _temporal
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +358,7 @@ class TestFactsReadWrite:
 
         # ⚠ 别在这里 monkeypatch.undo()：`tmp_storage` fixture 与本用例共用同一个
         # monkeypatch 实例，undo 会把 settings.storage_dir 一并还原，读侧当场指回真实 database/。
-        monkeypatch.setattr(_jsonl.os, "replace", boom)
+        monkeypatch.setattr(_fs.os, "replace", boom)
         with pytest.raises(OSError):
             inference.write_temporal(1, 2, [_seg(label="new")])
 
@@ -421,7 +421,7 @@ class TestLabelProbs:
         def boom(*a, **k):
             raise OSError("disk full")
 
-        monkeypatch.setattr(_temporal.os, "replace", boom)
+        monkeypatch.setattr(_fs.os, "replace", boom)
         with pytest.raises(OSError):
             inference.write_label_probs(1, 2, _probs(labels=("idle", "new")))
         assert inference.read_label_probs(1, 2).labels == ("idle", "old")
