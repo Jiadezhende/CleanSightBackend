@@ -326,6 +326,50 @@ class MarkerSegmenter(OfflineSegmenter):
 
 # ============================ CLI ============================
 
+class TestRunLock:
+    def test_named_missing_run_is_reclaimed_and_writes_nothing(self, tmp_storage):
+        _write_detections(1, 2)
+        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=123))
+        assert (res.status, res.segment_count) == ("reclaimed", 0)
+        assert not _facts_path(tmp_storage).exists()
+
+    def test_run_reclaimed_mid_run_is_reclaimed_and_not_rebuilt(self, tmp_storage, monkeypatch):
+        """跑到一半所在 step 过 TTL 被回收：写入 FileNotFoundError → reclaimed，不重建目录。"""
+        import shutil
+
+        from app.services.inference.offline import runner as runner_mod
+        from app.storage import _root
+
+        _write_detections(1, 2)
+        run = make_run(1, 2)
+        real_validate = runner_mod.OfflineRunner._validate
+
+        def reclaim_then_validate(facts, producer):
+            shutil.rmtree(_root.path(1, 2))
+            return real_validate(facts, producer)
+
+        monkeypatch.setattr(runner_mod.OfflineRunner, "_validate", staticmethod(reclaim_then_validate))
+        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=run.run_id))
+        assert res.status == "reclaimed"
+        assert not _root.path(1, 2).exists()
+
+    def test_named_older_run_is_the_one_written(self, tmp_storage):
+        """锁定点名的 run：同 step 已有更新的 run，结果仍写回旧 run。"""
+        from app.domain.run import RunIdentity
+        from app.storage import _root
+
+        _write_detections(1, 2)
+        old = make_run(1, 2)
+        new = RunIdentity(1, 2, old.run_id + 1)
+        _root.run_path(new).mkdir()
+        inference_store.append_detections(new, [make_frame_detection(ts=9.0)])
+
+        _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=old.run_id))
+
+        assert [f.producer for f in inference_store.read_temporal(old)] == ["BrushRulesSegmenter"]
+        assert inference_store.read_temporal(new) == []
+
+
 class TestCli:
     @pytest.fixture(autouse=True)
     def _no_cpu_isolation(self, monkeypatch):
@@ -371,7 +415,7 @@ class TestCli:
         rc = cli.main(["query", "--task-id", "1", "--step-id", "2"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["task_id"] == 1
+        assert (payload["task_id"], payload["run_id"]) == (1, make_run(1, 2).run_id)
         assert [row["label"] for row in payload["timeline"]] == ["brushing"]
 
 

@@ -276,9 +276,9 @@
 admin「离线推理」tab 用这三个端点提交离线推理，并查看执行进度。
 
 - **执行方式**：作业**串行**执行，同一时刻只跑一个，每个作业起一个子进程跑离线 CLI。
-- **结果去哪看**：跑完的结果落盘在该 step 的 `temporal.jsonl` / `label_probs.npz`，仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab-f3m8/label-probs`](lab.md) 读取。
+- **结果去哪看**：跑完的结果落盘在该 run 的 `temporal.jsonl` / `label_probs.npz`，仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab-f3m8/label-probs`](lab.md) 读取（带同一个 `run_id`）。
 - **状态保存**：作业状态只存在进程内存里，后端重启后，排队中的作业和历史记录都会丢失（已落盘的结果不受影响）。
-- **只对已结束的 step 提交**：后端不检查该 step 是否正在运行。对运行中的 step 提交会按当时已落盘的部分检测结果出结果；跑的过程中同一 step 被重新开跑，结果可能错配到新一轮，重跑即可覆盖。
+- **作业锁定一个 run**（规则见 [README › run 定位](README.md#run-定位可选-run_id)）：提交时解析一次，整个作业只读写这个 run。该 run 正在运行 → 409（检测结果还在写）；跑的过程中同一 step 重新开跑，新一轮是另一个 run，互不影响；该 run 被 TTL 回收 → `reclaimed`，不写任何东西。
 
 **作业对象**（三个端点返回的都是这个形状）：
 
@@ -286,6 +286,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 {
   "task_id": 123,
   "step_id": 2,
+  "run_id": 1751799990000000,     // 作业锁定的 run
   "status": "completed",          // 见下表
   "producer": "CleanBiGRUSegmenter", // 离线模型类名；未跑到模型（排队 / 取消 / 未配置）时为 null
   "segment_count": 5,             // 写入的分割段数；非 completed 时为 0
@@ -301,7 +302,8 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | `queued` | 排队中 | — |
 | `running` | 子进程运行中 | — |
 | `completed` | 跑完并写入 | 已替换为本次结果 |
-| `skipped` | 该 step 没有检测结果 | 不动 |
+| `skipped` | 该 run 没有检测结果 | 不动 |
+| `reclaimed` | 该 run 的目录已被 TTL 回收（提交后、运行前或运行中） | 不动（目录已不在） |
 | `failed` | 模型异常、超时（30 分钟）、子进程启动失败等，原因见 `message` | 不动 |
 | `cancelled` | 被取消或后端停机 | 不动 |
 
@@ -309,7 +311,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 
 ## POST /admin-f3m8/offline/jobs
 
-提交一个 (task_id, step_id) 的离线推理作业。
+提交一个 run 的离线推理作业。
 
 **请求体**（JSON）：
 
@@ -317,17 +319,19 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 |------|------|------|------|
 | `task_id` | int | 是 | 任务 id |
 | `step_id` | int | 是 | 洗消步骤 id（数字存储键） |
+| `run_id` | int | 否 | 锁定哪个 run；缺省 = 该 step 最新可见 run |
 
 ### 响应 `202`
 
-返回作业对象。如果同一个 (task_id, step_id) 已经在排队或运行，**不会重复入队**，直接返回在途的那个作业（`status` 为 `queued` / `running`）。
+返回作业对象。如果同一个 run 已经在排队或运行，**不会重复入队**，直接返回在途的那个作业（`status` 为 `queued` / `running`）。同一 step 的不同 run 是各自独立的作业。
 
 ### 错误
 
 | status | 何时 | body |
 |--------|------|------|
-| 400 | 推理配置里没有这个 step，或它没配离线模型（`field="step_id"`）；不入队、不留作业记录 | `{"error": "Validation error", "detail": "...", "field": "step_id"}` |
-| 409 | 排队已满（20 个） | `{"error": "Resource conflict", "detail": "..."}` |
+| 400 | 推理配置里没有这个 step，或它没配离线模型（`field="step_id"`）；不入队、不留作业记录。先于 run 解析 | `{"error": "Validation error", "detail": "...", "field": "step_id"}` |
+| 404 | 缺省 `run_id` 且该 step 没有可见 run，或显式 `run_id` 的目录不存在 | `{"error": "Resource not found", "detail": "...", "resource_type": "Run", ...}` |
+| 409 | 该 run 正在运行（停止后再提交），或排队已满（20 个） | `{"error": "Resource conflict", "detail": "..."}` |
 | 422 | 请求体缺字段或类型不对 | FastAPI 校验错误 |
 
 ---
@@ -346,7 +350,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 
 ## GET /admin-f3m8/offline/jobs/{task_id}/{step_id}
 
-查询单个 (task_id, step_id) 最近一次作业的状态。
+查询某个 run 最近一次作业的状态。查询参数 `run_id`（int，可选；缺省 = 该 step 最新可见 run）。
 
 ### 响应 `200`
 
@@ -356,7 +360,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 
 | status | 何时 |
 |--------|------|
-| 404 | 这个 (task_id, step_id) 从来没提交过作业，或者后端重启后记录已清空 |
+| 404 | 这个 run 从来没提交过作业，或者后端重启后记录已清空（`resource_type: "offline_job"`）；显式 `run_id` 的目录不存在（`resource_type: "Run"`） |
 
 ### 静默失败
 
@@ -364,5 +368,6 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 |------|------------|
 | `completed` 但 `segment_count` 为 0 | 模型跑完了，但没识别出动作段；结果文件已被替换为「无分段」 |
 | `skipped` 后结果没变 | 本次没写任何东西，展示的仍是上一次的结果（如果有） |
+| 不带 `run_id` 轮询，状态突然 404 | 同 step 起了新 run，缺省解析到新 run，而作业是提交给旧 run 的；轮询时带上提交响应里的 `run_id` |
 
 参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `runOffline` / `fetchOffJobs`。
