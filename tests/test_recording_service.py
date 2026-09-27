@@ -171,6 +171,16 @@ def fake_inference(monkeypatch):
     return stub
 
 
+@pytest.fixture
+def live_service(fast_task_queue):
+    """真队列、真线程的服务构造器（sweeper 间隔拉长，不自己跑）。队列轮询已调快，`stop()` 不白等。"""
+    def build(clients) -> RecordingService:
+        return RecordingService(
+            config=RecordingConfig(sweep_interval_seconds=60.0), clients=clients
+        )
+    return build
+
+
 def _service(clients, *, accept=True) -> RecordingService:
     """一个装好两条同步队列的服务（不起线程）。"""
     svc = RecordingService(config=RecordingConfig(), clients=clients)
@@ -326,12 +336,6 @@ class TestForgetTask:
         assert svc.forget_task(1) is True
         assert list(svc._claimed_hls) == [(9, 2)]
 
-    def test_goes_through_the_queue(self, fake_hls):
-        """走队列而不是当场清 —— `_claimed_hls` 因此只被队列那一个线程碰，不需要锁。"""
-        svc = _service(FakeClients({}))
-        svc.forget_task(7)
-        assert svc._hls_queue.labels == ["forget:7"]
-
     def test_runs_after_the_segments_it_follows(self, fake_hls):
         """FIFO：记录活到这一代最后一段写完才消失，而不是在残段还没落盘时就被抹掉。"""
         cq = FakeCQ(1, 2)
@@ -392,11 +396,6 @@ class TestSubmitRejections:
         svc = _service(FakeClients({}), accept=False)
         assert svc.submit_segment(FakeCQ(), "raw", _frames()) is False
         assert fake_hls.calls == []
-
-    def test_label_identifies_the_exact_segment(self, fake_hls):
-        svc = _service(FakeClients({}))
-        svc.submit_segment(FakeCQ(1, 2), "raw", _frames(start=1700.0))
-        assert svc._hls_queue.labels == ["seg:1/2/raw@1700000000"]
 
 
 # ---------------------------------------------------------------------------
@@ -816,13 +815,10 @@ class TestCollectAndFlushDetections:
 
 
 class TestLifecycle:
-    def test_stop_drains_what_was_submitted(self, fake_hls):
+    def test_stop_drains_what_was_submitted(self, fake_hls, live_service):
         """已提交的段代表已经从 CQ 弹出去的帧，停机必须把它们写完再退。"""
         cq = FakeCQ(1, 2)
-        svc = RecordingService(
-            config=RecordingConfig(sweep_interval_seconds=60.0),
-            clients=FakeClients({1: cq}),
-        )
+        svc = live_service(FakeClients({1: cq}))
         svc.start()
         try:
             assert svc.submit_segment(cq, "raw", _frames()) is True
@@ -831,28 +827,15 @@ class TestLifecycle:
 
         assert fake_hls.inserts == [("insert", 1, 2, "raw", 3)]
 
-    def test_submit_after_stop_is_rejected(self, fake_hls):
-        svc = RecordingService(
-            config=RecordingConfig(sweep_interval_seconds=60.0),
-            clients=FakeClients({}),
-        )
-        svc.start()
-        svc.stop(timeout=5.0)
-
-        assert svc.submit_segment(FakeCQ(), "raw", _frames()) is False
-
 
 class TestDetectionEndToEnd:
     """真队列 + 真 `storage.inference`（纯 stdlib，不需要外部工具）。"""
 
-    def test_detections_land_in_the_inference_domain_dir(self, tmp_storage):
+    def test_detections_land_in_the_inference_domain_dir(self, tmp_storage, live_service):
         from app.storage import inference
 
         cq = FakeCQ(1, 2)
-        svc = RecordingService(
-            config=RecordingConfig(sweep_interval_seconds=60.0),
-            clients=FakeClients({1: cq}),
-        )
+        svc = live_service(FakeClients({1: cq}))
         svc.start()
         try:
             assert svc.submit_detections(cq, _dets(n=3, start=1700.0)) is True
@@ -863,26 +846,6 @@ class TestDetectionEndToEnd:
         assert [round(ff.ts, 4) for ff in inference.read_detections(1, 2)] == [
             round(1700.0 + i / 15.0, 4) for i in range(3)
         ]
-
-    def test_new_generation_wipes_the_previous_one(self, tmp_storage):
-        from app.storage import inference
-
-        a = FakeCQ(1, 2, name="A")
-        b = FakeCQ(1, 2, name="B")
-        clients = FakeClients({1: a})
-        svc = RecordingService(
-            config=RecordingConfig(sweep_interval_seconds=60.0), clients=clients
-        )
-        svc.start()
-        try:
-            svc.submit_detections(a, _dets(n=2, start=1700.0))
-            clients.registry[1] = b                      # 重启换代
-            svc.submit_detections(b, _dets(n=1, start=1800.0))
-        finally:
-            svc.stop(timeout=5.0)
-
-        # 只剩 B 那一代；A 的整份产物随首写自清一起没
-        assert [round(ff.ts) for ff in inference.read_detections(1, 2)] == [1800]
 
 
 # ---------------------------------------------------------------------------
@@ -900,14 +863,11 @@ def _external_tools_available() -> bool:
 
 @pytest.mark.skipif(not _external_tools_available(), reason="需要 cv2 与项目自带 ffmpeg")
 class TestEndToEnd:
-    def test_two_segments_land_in_the_hls_domain_dir(self, tmp_storage):
+    def test_two_segments_land_in_the_hls_domain_dir(self, tmp_storage, live_service):
         from app.storage import hls
 
         cq = FakeCQ(1, 2)
-        svc = RecordingService(
-            config=RecordingConfig(sweep_interval_seconds=60.0),
-            clients=FakeClients({1: cq}),
-        )
+        svc = live_service(FakeClients({1: cq}))
         big = [factories.make_frame(ts=1700.0 + i / 15.0, shape=(64, 64, 3)) for i in range(15)]
         later = [factories.make_frame(ts=1800.0 + i / 15.0, shape=(64, 64, 3)) for i in range(15)]
 

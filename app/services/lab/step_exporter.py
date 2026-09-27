@@ -8,7 +8,7 @@ StepExporter —— 把一个 (task_id, step_id, track) 的全部落盘段导出
 - ClipBuilder：ms 精度区间裁剪 → 必须 -ss/-to + libx264 重编码（送标用）
 - StepExporter：整段导出 → 纯 `-c copy` remux（汇报素材 / 取原片用）
 
-之所以能 `-c copy`：段落盘时已由 hls_strategy 转成 H.264/yuv420p/CRF23 的 fMP4
+之所以能 `-c copy`：段落盘时已由 `app.storage.hls`（recording 写侧）转成 H.264/yuv420p/CRF23 的 fMP4
 fragment，remux 成 mp4 只是换容器——磁盘速度、零 CPU、零二次画质损失。
 
 实现思路（与 ClipBuilder._run_ffmpeg 同构，坑点相同）：
@@ -166,7 +166,7 @@ class StepExporter:
             "-y", "-loglevel", "error",
             "-allowed_extensions", "ALL",
             "-i", str(m3u8_path),
-            # 段本就是 H.264/yuv420p/CRF23（hls_strategy 落盘时已转），换容器即可：
+            # 段本就是 H.264/yuv420p/CRF23（`app.storage.hls` 落盘时已转），换容器即可：
             # 磁盘速度、零 CPU、零二次画质损失。
             "-c", "copy",
             # moov 前置，边下边播 / 拖动 seek 不用等整个文件

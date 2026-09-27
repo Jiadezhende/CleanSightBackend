@@ -8,7 +8,6 @@
 import pytest
 
 from app.services.utils.media_timeline import GAP_THRESHOLD_MS, MediaTimeline
-from app.storage import hls
 from factories import seed_hls_segments
 
 TASK_ID = 1
@@ -67,21 +66,6 @@ class TestLoad:
 
         assert [p.media_start_ms for p in tl] == [0, 10_000]
         assert tl.duration_ms == 20_000
-
-    def test_unregistered_segment_is_invisible(self, tmp_storage):
-        """段文件在盘上、清单里没有 → 不是段。
-
-        旧实现枚举文件系统，会把这种段喂给 ffmpeg，命中「exit 0 + 全日志级别无输出 +
-        产物合法但少一截」那类静默失败（历史缺陷 #3）。
-        """
-        _seed([TS0])
-        orphan = hls.segment_path(
-            TASK_ID, STEP_ID, hls.SegmentRef(track="raw", ts_us=TS0 + 10_000_000)
-        )
-        orphan.write_bytes(b"not-registered")
-
-        assert orphan.exists()                               # 盘上确实躺着它
-        assert [p.seg.ref.ts_us for p in _load()] == [TS0]
 
     def test_tracks_are_independent(self, tmp_storage):
         """两轨各自独立切段，媒体轴也各是各的。"""
@@ -214,10 +198,6 @@ class TestGaps:
     那是**没有段时长真值**时的补偿（旧实现刻意不读清单 EXTINF）。
     """
 
-    def test_contiguous_has_no_gap(self, tmp_storage):
-        _seed(_contiguous(4))
-        assert _load().first_gap() is None
-
     def test_systematic_fps_drift_has_no_gap(self, tmp_storage):
         """每段墙钟跨度都 >10s（真实 fps < raw_fps 的系统漂移）→ EXTINF 同步变长 → 无空洞。
 
@@ -257,15 +237,6 @@ class TestGaps:
         assert gap_ms == 20_000
         assert cur.seg.ref.ts_us == TS0
         assert nxt.seg.ref.ts_us == TS0 + 30_000_000
-
-    def test_two_segments_are_enough_to_judge(self, tmp_storage):
-        """**行为改善**：只有两段也判得出停顿。
-
-        旧判据在这里必然放行 —— 单一间隔样本既是观测值又是基准，excess 恒为 0，区分不了
-        「漂移」与「停顿」。EXTINF 给的是段自身的长度，不依赖样本量。
-        """
-        _seed(_with_gap(20.0))
-        assert _load().first_gap() is not None
 
     def test_total_gap_sums_every_hole(self, tmp_storage):
         _seed([

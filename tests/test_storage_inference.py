@@ -20,9 +20,10 @@ import json
 import numpy as np
 import pytest
 
+from factories import make_det_box
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.storage import inference, tasks
+from app.storage import inference
 from app.storage.inference import _detection, _jsonl, _temporal
 
 
@@ -32,7 +33,7 @@ from app.storage.inference import _detection, _jsonl, _temporal
 
 
 def _det(bbox=(1, 2, 3, 4), conf=0.9, cls_id=0, cls="person", **extra) -> DetBox:
-    return DetBox(bbox=list(bbox), confidence=conf, class_id=cls_id, class_name=cls, **extra)
+    return make_det_box(bbox=bbox, confidence=conf, class_id=cls_id, class_name=cls, **extra)
 
 
 def _frame(ts, by_source=None, width=1920, height=1080) -> FrameDetection:
@@ -485,27 +486,3 @@ class TestDeleteDomain:
         inference.delete(1, 2)
         inference.append_detections(1, 2, [_frame(9.0)])
         assert [f.ts for f in inference.read_detections(1, 2)] == [9.0]
-
-
-# ---------------------------------------------------------------------------
-# 与 tasks 域的接缝
-# ---------------------------------------------------------------------------
-
-
-class TestDomainSeam:
-    def test_step_with_only_detections_is_visible_to_tasks(self, tmp_storage):
-        """只有 detections.jsonl、没有 HLS 段的 step 必须被 list_step_ids 看见 ——
-        它正是 TTL 判据错选 metadata.json 而永不回收的那一类（缺陷 #1）。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-        assert tasks.list_step_ids(1) == [2]
-        assert tasks.list_task_ids() == [1]
-
-    def test_delete_step_takes_the_whole_domain_with_it(self, tmp_storage):
-        """`delete_step` 删的是整个 step，本域三份产物一起没。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-        inference.write_temporal(1, 2, [_seg()])
-
-        assert tasks.delete_step(1, 2) is True
-        assert inference.read_detections(1, 2) == []
-        assert inference.read_temporal(1, 2) == []
-        assert not (tmp_storage / "1").exists()

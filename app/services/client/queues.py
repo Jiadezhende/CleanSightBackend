@@ -294,10 +294,10 @@ class ClientQueues:
         """
         添加原始帧到落盘缓冲，同时更新最新原始帧缓存（纯缓冲，不触发落盘）。
 
-        分段落盘由 persistence 的 HLSSegmentSweeper 周期 take_raw_segment() 拉取，
+        分段落盘由 recording 的 SegmentSweeper 周期 take_raw_segment() 拉取，
         本方法只管入队 + 丢帧计数 + 刷新 latest_raw_frame。返回是否入队（非 ACTIVE 拒）。
         """
-        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——残段由 flush_residual_segments 收尾）
+        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——残段由 recording 的 flush_residual 收尾）
         if self._state is not RunState.ACTIVE:
             return False
         with self._raw_lock:
@@ -319,7 +319,7 @@ class ClientQueues:
         """
         添加处理帧到落盘缓冲（纯缓冲，不触发落盘）。
 
-        分段落盘由 persistence 的 HLSSegmentSweeper 周期 take_processed_segment() 拉取，
+        分段落盘由 recording 的 SegmentSweeper 周期 take_processed_segment() 拉取，
         本方法只管入队 + 丢帧计数。
         """
         # 写门：非 ACTIVE 拒写
@@ -394,9 +394,6 @@ class ClientQueues:
             "has_rendered": self._latest_rendered is not None,
         }
 
-    def get_ca_processed_length(self) -> int:
-        return len(self.ca_processed)
-
     def drain_ca_raw(self, until_ts: Optional[float] = None) -> List[Frame]:
         """原子排空 ca_raw 队列（线程安全，供 flush 使用）。
 
@@ -433,7 +430,7 @@ class ClientQueues:
     def take_raw_segment(self) -> Optional[List[Frame]]:
         """缓冲攒满一整段(ca_segment_len 帧)则原子弹出，否则 None。
 
-        供 persistence 的 HLSSegmentSweeper 周期拉取。与 append_ca_raw / drain_ca_raw /
+        供 recording 的 SegmentSweeper 周期拉取。与 append_ca_raw / drain_ca_raw /
         _release_payload 同走 _raw_lock，互斥安全。
         """
         with self._raw_lock:
@@ -442,7 +439,7 @@ class ClientQueues:
             return [self.ca_raw.popleft() for _ in range(self.ca_segment_len)]
 
     def take_processed_segment(self) -> Optional[List[Frame]]:
-        """缓冲攒满一整段则原子弹出，否则 None（供 HLSSegmentSweeper 周期拉取）。"""
+        """缓冲攒满一整段则原子弹出，否则 None（供 recording 的 SegmentSweeper 周期拉取）。"""
         with self._viz_lock:
             if len(self.ca_processed) < self.ca_segment_len:
                 return None

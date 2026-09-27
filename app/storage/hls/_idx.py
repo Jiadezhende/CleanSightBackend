@@ -30,7 +30,7 @@ def write(path: Path, timestamps: Sequence[float]) -> None:
     Raises:
         OSError: 写入或换名失败。是否吞掉由调用方定。
 
-    **位级保真是契约**（`FrameTracker` 拿 sidecar 值与内存帧 ts 做相等比较），故走
+    **位级保真是契约**（读回的帧 ts 要能与 detections 里的 ts 做相等比较），故走
     `np.asarray(..., dtype=float64)` 而不是逐个 `float()`。
     """
     tmp = path.with_suffix(_TMP_SUFFIX)

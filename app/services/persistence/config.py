@@ -15,18 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class HLSConfig:
-    """HLS持久化配置"""
-
-    workers: int = 2
-    queue_size: int = 100
-    sweep_interval_seconds: float = 1.0  # HLSSegmentSweeper 扫描间隔（秒，PULL 模型）
-    # 注意：不配 segment_duration——分段由 CQ 帧数(ca_segment_len)触发、每段时长由 EXTINF
-    #      从帧 ts 自适应，回放侧也从 EXTINF 读；此处配任何时长都是死值、且会误导。
-    # 注意：HLS 段编码帧率由 strategy 从帧 ts 自适应反推（eff_fps），不在此配置任何 fps
-
-
-@dataclass
 class AlarmConfig:
     """告警持久化配置"""
 
@@ -52,7 +40,6 @@ class PersistenceConfig:
     """持久化配置（统一入口）"""
 
     storage: StorageConfig = field(default_factory=StorageConfig)
-    hls: HLSConfig = field(default_factory=HLSConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
 
     @classmethod
@@ -105,9 +92,8 @@ class PersistenceConfig:
         # yaml 由 git 跟踪、每次部署整仓覆盖为干净版，磁盘不会残留已废字段；
         # 故不做字段过滤——真出未知字段就让它响亮地崩，别静默吞。
         storage = StorageConfig(**config_dict.get("storage", {}))
-        hls = HLSConfig(**config_dict.get("hls", {}))
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
-        return cls(storage=storage, hls=hls, alarm=alarm)
+        return cls(storage=storage, alarm=alarm)
 
     @property
     def storage_base_dir(self) -> Path:
@@ -121,18 +107,6 @@ class PersistenceConfig:
         return settings.storage_base_dir
 
     # 扁平访问器（manager 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
-    @property
-    def hls_workers(self) -> int:
-        return self.hls.workers
-
-    @property
-    def hls_queue_size(self) -> int:
-        return self.hls.queue_size
-
-    @property
-    def hls_sweep_interval_seconds(self) -> float:
-        return self.hls.sweep_interval_seconds
-
     @property
     def alarm_workers(self) -> int:
         return self.alarm.workers
@@ -160,11 +134,6 @@ class PersistenceConfig:
             logger.debug("========== Persistence配置 ==========")
             logger.debug("存储: base_dir=%s", self.storage_base_dir)
             logger.debug(
-                "HLS: workers=%d, queue=%d",
-                self.hls.workers,
-                self.hls.queue_size,
-            )
-            logger.debug(
                 "告警: workers=%d, queue=%d",
                 self.alarm.workers,
                 self.alarm.queue_size,
@@ -174,33 +143,17 @@ class PersistenceConfig:
                 self.storage.enable_cleanup,
                 self.storage.cleanup_days,
             )
-            logger.debug(
-                "📌 HLS 段编码帧率由 strategy 从帧 ts 自适应反推(eff_fps)，配置层不持 fps"
-            )
             logger.debug("=====================================")
 
     def _validate_config(self):
         """配置验证和冲突检测"""
         warnings = []
 
-        # 1. HLS 段编码帧率由 strategy 从帧 ts 反推，配置层不再持 fps，无 fps 一致性校验。
-
-        # 2. 检查队列容量合理性
-        if self.hls.queue_size < 100:
-            warnings.append(f"⚠️  HLS队列容量过小: {self.hls.queue_size}，建议>=256")
-
+        # 1. 检查队列容量合理性
         if self.alarm.queue_size < 64:
             warnings.append(f"⚠️  告警队列容量过小: {self.alarm.queue_size}，建议>=128")
 
-        # 3. 检查Worker数量合理性
-        if self.hls.workers > 4:
-            warnings.append(
-                f"⚠️  HLS Worker数量过多: {self.hls.workers}，建议2-4（避免CPU竞争）"
-            )
-
-        if self.hls.workers < 1:
-            warnings.append(f"❌ HLS Worker数量必须>=1")
-
+        # 2. 检查Worker数量合理性
         if self.alarm.workers < 1:
             warnings.append(f"❌ 告警Worker数量必须>=1")
 

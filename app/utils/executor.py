@@ -53,33 +53,21 @@ class GuardedExecutor:
 
     使用示例：
         # 业务代码（纯净，只抛异常）
-        def start_ffmpeg(url: str):
-            if not self._validate_url(url):
-                raise StreamConnectionError(url=url, task_id=self.task_id)
-            # ... FFmpeg 启动逻辑
+        def write_segment(path: Path, data: bytes):
+            if not path.parent.exists():
+                raise PersistenceError("dir missing", operation="hls_write")
+            # ... 写盘逻辑
 
         # 服务层调用（框架边界层处理重试）
         executor = GuardedExecutor()
         executor.execute(
-            func=lambda: self.start_ffmpeg(url),
-            policy_name='stream'
+            func=lambda: write_segment(path, data),
+            policy_name='persistence'
         )
     """
 
     # 预定义策略（硬编码，零配置）
     POLICIES: Dict[str, ExecutionPolicy] = {
-        # 流操作：固定延迟 3 秒，最多 5 次
-        "stream": ExecutionPolicy(max_attempts=5, delay=3.0, backoff=False),
-        # 数据库操作：指数退避，最多 3 次
-        "database": ExecutionPolicy(
-            max_attempts=3, delay=1.0, backoff=True, backoff_factor=2.0, max_delay=60.0
-        ),
-        # 外部 API：指数退避，最多 3 次
-        "external_api": ExecutionPolicy(
-            max_attempts=3, delay=2.0, backoff=True, backoff_factor=2.0, max_delay=60.0
-        ),
-        # 模型推理：固定延迟 1 秒，最多 2 次
-        "inference": ExecutionPolicy(max_attempts=2, delay=1.0, backoff=False),
         # 持久化操作：指数退避，最多 3 次
         "persistence": ExecutionPolicy(
             max_attempts=3, delay=1.0, backoff=True, backoff_factor=2.0, max_delay=30.0
@@ -100,7 +88,7 @@ class GuardedExecutor:
     def execute(
         self,
         func: Callable[[], Any],
-        policy_name: str = "database",
+        policy_name: str = "persistence",
         on_retry: Optional[Callable[[int, Exception], None]] = None,
     ) -> Any:
         """
@@ -112,7 +100,7 @@ class GuardedExecutor:
 
         Args:
             func: 要执行的函数（无参数，使用 lambda 或闭包传递参数）
-            policy_name: 策略名称（'stream', 'database', 'external_api', etc.）
+            policy_name: 策略名称（POLICIES 的键，现仅 'persistence'）
             on_retry: 重试回调函数 (attempt, exception) -> None
 
         Returns:
@@ -121,19 +109,6 @@ class GuardedExecutor:
         Raises:
             AppError: 致命错误或重试耗尽
             Exception: 未知异常
-
-        示例：
-            # 业务代码（纯净）
-            def connect_stream(url: str):
-                # 只抛异常，不处理重试
-                if error:
-                    raise StreamConnectionError(url=url)
-
-            # 框架边界调用
-            executor.execute(
-                func=lambda: connect_stream(url),
-                policy_name='stream'
-            )
         """
         policy = self.policies.get(policy_name)
         if not policy:
@@ -141,7 +116,7 @@ class GuardedExecutor:
 
         attempts = 0
 
-        while attempts < policy.max_attempts:
+        while True:
             try:
                 # 执行业务逻辑（可能抛出异常）
                 result = func()
@@ -191,10 +166,6 @@ class GuardedExecutor:
                 )
                 self._record_exception(policy_name, e, Action.FATAL, attempts)
                 raise
-
-        # 重试耗尽 -> 致命
-        logger.error(f"[GuardedExecutor] Max attempts reached for {policy_name}")
-        raise
 
     def _decide_action(
         self, exc: AppError, policy: ExecutionPolicy, attempts: int
@@ -285,188 +256,3 @@ class GuardedExecutor:
         # 2. GPU OOM 专用计数
         if isinstance(exc, ModelInferenceError) and exc.is_cuda_error:
             gpu_oom_total.labels(model=exc.model_name or "unknown").inc()
-
-
-class CircuitBreaker:
-    """
-    熔断器（框架边界层）
-
-    职责：
-    1. 保护下游服务（数据库、外部 API）
-    2. 连续失败 N 次后打开熔断器，快速失败
-    3. 超时后自动尝试恢复
-
-    使用示例：
-        # 创建熔断器
-        db_breaker = CircuitBreaker(
-            name='database',
-            max_failures=5,
-            reset_timeout=60.0
-        )
-
-        # 业务代码（纯净）
-        def query_task(task_id: int):
-            task = db.query(Task).filter_by(id=task_id).first()
-            if not task:
-                raise DatabaseError(f"Task {task_id} not found")
-            return task
-
-        # 框架边界调用
-        db_breaker.call(lambda: query_task(task_id))
-    """
-
-    def __init__(self, name: str, max_failures: int = 5, reset_timeout: float = 60.0):
-        """
-        初始化熔断器
-
-        Args:
-            name: 熔断器名称（用于日志）
-            max_failures: 连续失败阈值
-            reset_timeout: 重置超时时间（秒）
-        """
-        self.name = name
-        self.max_failures = max_failures
-        self.reset_timeout = reset_timeout
-
-        # 状态
-        self.failure_count = 0
-        self.last_failure_time = 0.0
-        self.is_open = False
-
-    def call(self, func: Callable[[], Any]) -> Any:
-        """
-        通过熔断器执行函数
-
-        Args:
-            func: 要执行的函数
-
-        Returns:
-            函数执行结果
-
-        Raises:
-            Exception: 熔断器打开时抛出
-            原始异常: 执行失败时抛出
-        """
-        current_time = time.time()
-
-        # 检查是否应该重置熔断器
-        if self.is_open:
-            if (current_time - self.last_failure_time) > self.reset_timeout:
-                logger.info(
-                    f"[CircuitBreaker] {self.name} reset after {self.reset_timeout}s"
-                )
-                self.is_open = False
-                self.failure_count = 0
-            else:
-                # 熔断器打开，快速失败
-                raise Exception(
-                    f"Circuit breaker '{self.name}' is OPEN "
-                    f"(failures={self.failure_count}/{self.max_failures})"
-                )
-
-        try:
-            # 执行业务逻辑
-            result = func()
-
-            # 成功，重置失败计数
-            if self.failure_count > 0:
-                logger.info(
-                    f"[CircuitBreaker] {self.name} success, reset failure count"
-                )
-            self.failure_count = 0
-
-            return result
-
-        except Exception as e:
-            # 失败，增加计数
-            self.failure_count += 1
-            self.last_failure_time = current_time
-
-            logger.warning(
-                f"[CircuitBreaker] {self.name} failure {self.failure_count}/{self.max_failures}: "
-                f"{str(e)[:100]}"
-            )
-
-            # 达到阈值，打开熔断器
-            if self.failure_count >= self.max_failures:
-                self.is_open = True
-                logger.error(
-                    f"[CircuitBreaker] {self.name} is now OPEN "
-                    f"(failures={self.failure_count}/{self.max_failures})"
-                )
-
-            raise
-
-
-class RetryExecutorWithCircuitBreaker:
-    """
-    带熔断器的重试执行器（框架边界层）
-
-    组合 GuardedExecutor 和 CircuitBreaker，适用于数据库和外部 API
-
-    使用示例：
-        # 创建执行器
-        db_executor = RetryExecutorWithCircuitBreaker(
-            policy_name='database',
-            breaker_name='database',
-            max_failures=5,
-            reset_timeout=60.0
-        )
-
-        # 业务代码（纯净）
-        def query_task(task_id: int):
-            task = db.query(Task).filter_by(id=task_id).first()
-            if not task:
-                raise DatabaseError(f"Task {task_id} not found")
-            return task
-
-        # 框架边界调用（重试 + 熔断器）
-        db_executor.execute(lambda: query_task(task_id))
-    """
-
-    def __init__(
-        self,
-        policy_name: str = "database",
-        breaker_name: str = "default",
-        max_failures: int = 5,
-        reset_timeout: float = 60.0,
-    ):
-        """
-        初始化执行器
-
-        Args:
-            policy_name: 重试策略名称
-            breaker_name: 熔断器名称
-            max_failures: 熔断器失败阈值
-            reset_timeout: 熔断器重置超时
-        """
-        self.retry_executor = GuardedExecutor()
-        self.circuit_breaker = CircuitBreaker(
-            name=breaker_name, max_failures=max_failures, reset_timeout=reset_timeout
-        )
-        self.policy_name = policy_name
-
-    def execute(
-        self,
-        func: Callable[[], Any],
-        on_retry: Optional[Callable[[int, Exception], None]] = None,
-    ) -> Any:
-        """
-        执行带重试和熔断器的操作
-
-        Args:
-            func: 要执行的函数
-            on_retry: 重试回调函数
-
-        Returns:
-            函数执行结果
-
-        Raises:
-            原始异常或熔断器异常
-        """
-        # 先检查熔断器，再执行重试
-        return self.circuit_breaker.call(
-            lambda: self.retry_executor.execute(
-                func=func, policy_name=self.policy_name, on_retry=on_retry
-            )
-        )

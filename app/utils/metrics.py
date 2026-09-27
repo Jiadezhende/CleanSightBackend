@@ -137,7 +137,7 @@ retry_total = Counter(
 重试总数（所有操作）
 
 标签：
-- operation: 操作类型（如 'stream', 'database', 'inference'）
+- operation: GuardedExecutor 的策略名（现仅 'persistence'）
 - error_type: 异常类型
 
 用途：
@@ -147,11 +147,11 @@ retry_total = Counter(
 
 示例：
     try:
-        connect_stream(url)
-    except StreamConnectionError as e:
+        persist_alarm(alarm)
+    except PersistenceError as e:
         retry_total.labels(
-            operation='stream',
-            error_type='StreamConnectionError'
+            operation='persistence',
+            error_type='PersistenceError'
         ).inc()
         # GuardedExecutor 自动重试
 """

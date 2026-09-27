@@ -10,6 +10,7 @@ import pytest
 
 import factories
 from app.settings import settings
+from app.utils import task_queue
 
 
 # ---- factory-as-fixture：返回可调用的构造器（支持 override 参数）----
@@ -33,9 +34,12 @@ def make_frame_detection():
 
 @pytest.fixture
 def tmp_storage(tmp_path, monkeypatch):
-    """把 settings.storage_dir 指到隔离临时目录，读写两侧同源、用例间不串。
-
-    收编 test_traceback_segment_finder 等处散落的 monkeypatch.setattr(settings, ...)。
-    """
+    """把 settings.storage_dir 指到隔离临时目录，读写两侧同源、用例间不串。"""
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture
+def fast_task_queue(monkeypatch):
+    """SerialTaskQueue 消费线程轮询 0.5s → 0.01s：`stop()` 不再每条队列白等半秒。"""
+    monkeypatch.setattr(task_queue, "_POLL_INTERVAL", 0.01)

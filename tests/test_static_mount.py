@@ -36,16 +36,7 @@ async def test_vendor_served(client, name):
     assert r.status_code == 200
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("old", ["/admin-f3m8/ui/", "/lab-f3m8/ui/"])
-async def test_old_page_urls_gone(client, old):
-    r = await client.get(old)
-    assert r.status_code == 404
-
-
 @pytest.mark.parametrize("page", ["admin", "lab"])
-def test_pages_only_reference_shared_vendor(page):
-    """页面里的库引用全走 `/ui-f3m8/vendor/`；各页不再有私有 vendor 目录。"""
-    html = (_STATIC_DIR / page / "index.html").read_text(encoding="utf-8")
-    assert "/ui/vendor/" not in html
+def test_pages_have_no_private_vendor_dir(page):
+    """库文件只放共用的 `static/vendor/`，各页不再有私有 vendor 目录。"""
     assert not (_STATIC_DIR / page / "vendor").exists()

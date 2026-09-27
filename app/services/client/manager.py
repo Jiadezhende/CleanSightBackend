@@ -33,7 +33,7 @@ class ClientManager:
     `set` 换槽，本类只做哑存储、不建 CQ。
 
     读接口（无锁）：`get`(按 task_id 直取,O(1)) / `has_client` / `snapshot`(零拷贝只读视图)
-      / `find_by_source_ip`(扫描,匹配首个) / `get_all_queue_depths` / `get_client_count` / `get_status_summary`。
+      / `find_by_source_ip`(扫描,取最晚启动者) / `get_all_queue_depths` / `get_status_summary`。
     写接口（`_wlock` + COW 换引用）：`set`(换槽) / `remove` / `remove_if` / `clear_all`。
     """
 
@@ -114,10 +114,6 @@ class ClientManager:
         """
         runs = self._runs  # 原子读一份不可变快照
         return {tid: cq.get_queue_depths() for tid, cq in runs.items()}
-
-    def get_client_count(self) -> int:
-        """当前客户端总数（无锁）。"""
-        return len(self._runs)
 
     def get_status_summary(self) -> Dict:
         """整体状态摘要（用于监控和调试）。"""

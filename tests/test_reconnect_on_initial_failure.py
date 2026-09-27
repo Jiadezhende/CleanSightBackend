@@ -86,16 +86,11 @@ class TestDecoderRegistration:
         self.service = StreamService()
         self.client_id = "reconnect_test_client"
 
-        self.mock_settings = MagicMock()
-        self.mock_settings.mediamtx_proxy_port = 8554
-        self.mock_settings.mediamtx_internal_port = 8554
-
     def _start_with_failing_decoder(self, error):
         with patch("app.services.stream.manager.FFmpegDecoder") as MockDecoder, \
              patch.object(
                  self.service, "_get_client_queues", return_value=MagicMock()
-             ), \
-             patch("app.settings.settings", self.mock_settings):
+             ):
 
             mock_dec = MockDecoder.return_value
             mock_dec.is_alive.return_value = False
@@ -125,14 +120,6 @@ class TestDecoderRegistration:
         info = self.service.get_stream_info(self.client_id)
         assert info is not None
         assert info["url"] == "rtsp://127.0.0.1:8554/test"
-
-    def test_metrics_registered_after_failed_start(self):
-        """start() 失败后 self.metrics 中也应有记录。"""
-        self._start_with_failing_decoder(
-            FFmpegError(message="stream not available",
-                        source_ip=self.client_id, exit_code=1)
-        )
-        assert self.client_id in self.service.metrics
 
     def test_is_decoder_alive_false_for_dead_or_missing(self):
         """is_decoder_alive：注册但进程死 → False；未注册 → False。"""

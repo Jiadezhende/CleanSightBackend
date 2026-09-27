@@ -36,7 +36,7 @@ def test_frame_and_result_writes_blocked_when_not_active():
     assert cq.append_ca_ready_with_throttle(make_frame()) is False
     assert cq.append_ca_raw(make_frame()) is False
     cq.append_ca_processed(make_frame())
-    assert cq.get_ca_processed_length() == 0
+    assert len(cq.ca_processed) == 0
     cq.push_detection(_det())
     assert cq.get_slide_window() == []
     cq.set_latest_detection(make_frame_detection())
@@ -93,13 +93,3 @@ def test_clear_is_close_alias():
     cq = make_cq()
     cq.clear()
     assert cq.get_state() is RunState.CLOSED
-
-
-# --- 迟到写：持旧 CQ 句柄者在 close 后写被拒（不串台到新 run） ---
-
-def test_late_write_to_closed_cq_rejected():
-    old = make_cq()
-    old.close()                              # 模拟旧 run 已拆除
-    assert old.append_ca_ready_with_throttle(make_frame()) is False
-    old.push_detection(_det())
-    assert old.get_slide_window() == []

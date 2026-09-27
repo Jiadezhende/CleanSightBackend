@@ -1,4 +1,4 @@
-"""`app.storage` 基础能力：`_root` 的根解析与 `tasks` 的定位/枚举/删除。
+"""`app.storage` 基础能力：`_root` 的根解析与 `tasks` 的定位/枚举。
 
 落盘约定：`{storage_root}/{task_id}/{step_id}/`，两级目录名均为十进制 id。
 本文件全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
@@ -58,8 +58,9 @@ class TestRootPath:
         assert _root.path(7, 3, "hls") == root / "7" / "3" / "hls"
 
     def test_does_not_touch_disk(self, tmp_storage):
+        """读一个不存在的 step 不该在盘上留空目录——空目录会被 ids() 列出却没有内容。"""
         _root.path(7, 3, "hls")
-        assert not (tmp_storage / "7").exists()
+        assert list(tmp_storage.iterdir()) == []
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -91,11 +92,6 @@ class TestRootPath:
             _root.path(1, 2, "feature", create=True)
         assert list(tmp_storage.iterdir()) == []
 
-    def test_create_false_leaves_disk_untouched(self, tmp_storage):
-        """读一个不存在的 step 不该在盘上留空目录——空目录会被 ids() 列出却没有内容。"""
-        _root.path(1, 2, "hls")
-        assert list(tmp_storage.iterdir()) == []
-
     def test_create_true_makes_parents(self, tmp_storage):
         got = _root.path(1, 2, "hls", create=True)
         assert got.is_dir()
@@ -115,13 +111,6 @@ class TestRootPath:
         """省掉 domain 也能建——那是 tasks.py 的用法，建的是 step 目录本身。"""
         got = _root.path(1, 2, create=True)
         assert got.is_dir() and got.name == "2"
-
-    def test_domains_do_not_collide(self, tmp_storage):
-        """同名文件落在不同域下互不干扰 —— 这就是隔离本身。"""
-        hls = _root.path(1, 2, "hls", create=True) / "metadata.json"
-        lab = _root.path(1, 2, "lab", create=True) / "metadata.json"
-        assert hls != lab
-        assert hls.parent.name == "hls" and lab.parent.name == "lab"
 
     @pytest.mark.parametrize(
         "name, expected",
@@ -146,6 +135,29 @@ class TestRootPath:
         monkeypatch.setattr(settings, "storage_dir", str(second))
         assert _root.path() == second.resolve()
 
+    def test_relative_storage_dir_resolves_to_project_root_regardless_of_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """相对路径以项目根为基、不随进程 cwd 飘——否则读写两侧会分叉到不同目录。"""
+        from app.services.persistence.config import get_persistence_config
+
+        monkeypatch.setattr(settings, "storage_dir", "./database")
+        resolved = _root.path()
+        assert resolved.is_absolute() and resolved.name == "database"
+        assert resolved == settings.storage_base_dir
+
+        monkeypatch.chdir(tmp_path)                  # 切到完全无关的 cwd
+        assert _root.path() == resolved
+        assert tmp_path not in resolved.parents
+
+        # TTL 清理（cleanup_worker）的扫描根取自这里，须与本包同源
+        assert get_persistence_config().storage_base_dir == resolved
+
+    def test_absolute_storage_dir_is_used_as_is(self, tmp_path, monkeypatch):
+        abs_dir = tmp_path / "custom" / "store"
+        monkeypatch.setattr(settings, "storage_dir", str(abs_dir))
+        assert _root.path() == abs_dir.resolve()
+
 
 # ---------------------------------------------------------------------------
 # tasks.steps / tasks.ids：枚举
@@ -168,10 +180,7 @@ class TestSteps:
         assert tasks.list_step_ids(999) == []
 
     def test_does_not_judge_emptiness(self, tmp_storage):
-        """空 step 目录必须被列出 —— TTL 要看见它（detections.jsonl 泄漏的正是这一类）。
-
-        「两轨都没段算不算数」是 HLS 域知识，本域不做这个判断。
-        """
+        """空 step 目录照样列出：「两轨都没段算不算数」是 HLS 域知识，本域不做这个判断。"""
         (tmp_storage / "1" / "5").mkdir(parents=True)
         assert tasks.list_step_ids(1) == [5]
 
@@ -183,10 +192,11 @@ class TestIds:
         assert tasks.list_task_ids() == [1, 30, 200]
 
     def test_skips_non_id_entries(self, tmp_storage):
-        """存储根下正常只有数字 task 目录（lab 产物已归入 {task}/{step}/lab/、
-        LS 配置已移出存储根）。误建的目录与外部工具留下的文件一律跳过，不报错。"""
+        """存储根下不只有数字 task 目录：lab 导出临时根 `.lab_exports/`（clip_builder /
+        step_exporter）与送标运行时配置 `lab_runtime_config.json`（services/lab/config）都寄居
+        于此，外加误建的目录——一律跳过，不报错。"""
         _seed_step(tmp_storage, 1, 1)
-        (tmp_storage / ".lab_exports").mkdir()  # 旧布局残留
+        (tmp_storage / ".lab_exports").mkdir()
         (tmp_storage / "lab_runtime_config.json").write_text("{}", encoding="utf-8")
         assert tasks.list_task_ids() == [1]
 
@@ -231,50 +241,3 @@ class TestIds:
         """传错 order 说明调用方对返回顺序有预期，静默按默认走比报错更坏。"""
         with pytest.raises(ValueError, match="Invalid order"):
             tasks.list_task_ids(order="recency")
-
-
-# ---------------------------------------------------------------------------
-# tasks.delete_step：删除
-# ---------------------------------------------------------------------------
-
-
-class TestPurgeStep:
-    def test_removes_existing_step(self, tmp_storage):
-        _seed_step(tmp_storage, 1, 1, "hls", "raw_segment_100.mp4")
-        assert tasks.delete_step(1, 1) is True
-        assert not (tmp_storage / "1" / "1").exists()
-
-    def test_missing_step_returns_false(self, tmp_storage):
-        assert tasks.delete_step(1, 1) is False
-
-    def test_removes_every_domain_not_just_hls(self, tmp_storage):
-        """它删的是整个 step，三个域一起没 —— 不是只删 hls/。
-
-        历史上 hls_strategy.purge_step_dir 自述"只删 HLS 产物"而实际 rmtree 整个目录，
-        这条用例把真实行为钉死，免得下一个读 docstring 的人再被误导。
-        """
-        _seed_step(tmp_storage, 1, 1, "hls", "raw_segment_100.mp4", "raw_playlist.m3u8")
-        _seed_step(tmp_storage, 1, 1, "inference", "detections.jsonl", "temporal.jsonl")
-        _seed_step(tmp_storage, 1, 1, "lab", "clip_1700_1710.mp4")
-
-        assert tasks.delete_step(1, 1) is True
-        assert not (tmp_storage / "1" / "1").exists()
-
-    def test_reclaims_task_dir_when_last_step_removed(self, tmp_storage):
-        _seed_step(tmp_storage, 1, 1)
-        assert tasks.delete_step(1, 1) is True
-        assert not (tmp_storage / "1").exists()
-
-    def test_keeps_task_dir_when_other_steps_remain(self, tmp_storage):
-        _seed_step(tmp_storage, 1, 1)
-        _seed_step(tmp_storage, 1, 2)
-        assert tasks.delete_step(1, 1) is True
-        assert (tmp_storage / "1").is_dir()
-        assert tasks.list_step_ids(1) == [2]
-
-    def test_keeps_task_dir_with_non_step_leftovers(self, tmp_storage):
-        """task 目录里若还有别的东西（非 step 目录/文件），rmdir 安全失败，目录保留。"""
-        _seed_step(tmp_storage, 1, 1)
-        (tmp_storage / "1" / "notes.txt").write_text("x", encoding="utf-8")
-        assert tasks.delete_step(1, 1) is True
-        assert (tmp_storage / "1").is_dir()

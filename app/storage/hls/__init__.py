@@ -65,9 +65,8 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
 **并发**：本域不持锁。同一 `(task, step, track)` 的写必须串行，且与该 step 的 `delete` 同序
 ——由调用侧的 `SerialTaskQueue` 构造，失效表现见 `_write` 的「并发」一节。
 
-**调用点已全部迁入本域**（2026-09-16）：routers 四处、`lab` 的 clip/export 两处、
-`inference/offline` 的 `FrameTracker` 都经本域读写。被取代的 `traceback/segment_finder` 与
-`offline.Timeline` 留在仓库里但已零调用点，等清理期删除。
+**调用点已全部迁入本域**（2026-09-16）：routers 四处、`lab` 的 clip/export 两处都经本域读写。
+`read_segment` / `iter_frames` 目前无生产调用方，为离线 ROI 视觉特征预留。
 
 **读侧只认 `{step}/hls/`，不回落旧平铺布局**：升级前落在 `{step}/` 的产物在本域看来不存在，
 随 TTL 自然消失（判据是 `{step}` 目录自身的 mtime，对两种布局一视同仁）。

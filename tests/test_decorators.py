@@ -1,24 +1,21 @@
-"""日志装饰器：client_id 提取优先级 / 参数清洗 / log_call·timing 行为透明性。
+"""日志装饰器：client_id 提取优先级 / 参数清洗 / log_call 行为透明性。
 
 装饰器只做日志，不改函数语义 —— 核心断言是"透明"：返回值原样、异常照抛。
 """
 
 import logging
-import time
 from types import SimpleNamespace
 
 import numpy as np
 
-from app.utils import context
 from app.utils.decorators import (
     _extract_client_id,
     _sanitize_args,
     log_call,
-    timing,
 )
 
 
-# ---- _extract_client_id 提取优先级（kwargs > args[0] str > self.client_id > 上下文）----
+# ---- _extract_client_id 提取优先级（kwargs > args[0] str > self.client_id）----
 
 def test_extract_from_kwargs():
     assert _extract_client_id((), {"client_id": "kw"}) == "kw"
@@ -33,18 +30,7 @@ def test_extract_from_self_attr():
     assert _extract_client_id((obj,), {}) == "self-id"
 
 
-def test_extract_fallback_to_context():
-    context.clear_context()
-    context.set_client_id("ctx-id")
-    try:
-        # args[0] 非 str、无 client_id 属性 → 回退线程上下文
-        assert _extract_client_id((123,), {}) == "ctx-id"
-    finally:
-        context.clear_context()
-
-
 def test_extract_none_when_nothing():
-    context.clear_context()
     assert _extract_client_id((123,), {}) is None
 
 
@@ -108,24 +94,3 @@ def test_log_call_logs_enter_exit(caplog):
         work()
     text = caplog.text
     assert "[ENTER]" in text and "[EXIT]" in text
-
-
-# ---- timing 透明性 + 阈值告警 ----
-
-def test_timing_returns_result():
-    @timing()
-    def mul(a, b):
-        return a * b
-
-    assert mul(3, 4) == 12
-
-
-def test_timing_warns_when_over_threshold(caplog):
-    # 睡 5ms、阈值 0.1ms → 必超 → 一条 [SLOW] warning（threshold=0 会被 `if threshold_ms` 判假，故用正阈值）
-    @timing(threshold_ms=0.1, warn_on_slow=True)
-    def slow():
-        time.sleep(0.005)
-
-    with caplog.at_level(logging.WARNING):
-        slow()
-    assert "[SLOW]" in caplog.text
