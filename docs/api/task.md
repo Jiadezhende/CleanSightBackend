@@ -215,7 +215,7 @@
 
 ## GET /task/history
 
-**用途**：大屏取**历史任务清单**——最近 **10** 个**已完成且能回放**的任务，按最近有画面倒序。返回的字段即历史画面入参，同样**只出参数、不出播放 URL**。
+**用途**：大屏取**历史任务清单**——最近 **10** 个**已完成且能回放**的任务，按最近一次开跑倒序（见下方「排序」）。返回的字段即历史画面入参，同样**只出参数、不出播放 URL**。
 
 **「已完成」判定**：磁盘上有段（能播）**且** 不在活跃注册表里（跑完了）。刻意**不看** `clean_task.status`——该字段由平台业务侧写入，取值集合后端无从校验；拿它过滤等于把清单挂在未知字面量上，写错就静默变空。
 
@@ -230,7 +230,7 @@
     {
       "task_id": 101,
       "source_ip": "10.0.0.1",              // DB 补；DB 不可用或表里无此任务 → null
-      "latest_ms": 1700000600000,           // 最近一次有画面的时刻，也是本清单的排序键
+      "latest_ms": 1700000600000,           // 最近一次有画面的时刻（展示用，不是排序键）
       "steps": [                            // 时间字段只在 step 粒度给，见下方说明
         { "step_id": 1, "run_id": 1699999998000000, "tracks": ["raw", "processed"], "start_ms": 1700000000000, "last_segment_ms": 1700000580000 },
         { "step_id": 2, "run_id": 1700000588000000, "tracks": ["raw"],              "start_ms": 1700000590000, "last_segment_ms": 1700000600000 }
@@ -245,7 +245,7 @@
 | `tasks` | array | 最多 10 条；无可回放的历史任务为 `[]`。**无 `total` 字段**（固定 10 条，无翻页语义） |
 | `tasks[].task_id` | int | 任务运行键 |
 | `tasks[].source_ip` | string \| null | 点位标识，由 DB `clean_task` 补；**DB 不可用或表里无此任务 → null**（清单本身照常返回，不 503） |
-| `tasks[].latest_ms` | int | `max(steps[].last_segment_ms)`，epoch **毫秒**；清单排序键 + 「这是什么时候的任务」的展示值 |
+| `tasks[].latest_ms` | int | `max(steps[].last_segment_ms)`，epoch **毫秒**；「这是什么时候的任务」的展示值 |
 | `tasks[].steps` | array | 该任务已落盘的 step，按 `step_id` 升序。每个 step **只描述其最新可见 run**；该 run 两轨都无段的 step 不进清单 |
 | `tasks[].steps[].step_id` | int | 回放入参：`playlist.m3u8?step_id=` |
 | `tasks[].steps[].run_id` | int | 本条摘要描述的那个 run（该 step 最新可见 run）；回放入参：`playlist.m3u8?run_id=`、`timeline?run_id=` |
@@ -253,7 +253,7 @@
 | `tasks[].steps[].start_ms` | int | 该 step 最早的段开始时间，epoch **毫秒**，双轨并集 |
 | `tasks[].steps[].last_segment_ms` | int | 该 step 最晚的**段开始**时间，epoch **毫秒**，双轨并集；**不是结束时刻** |
 
-**排序**：按 `latest_ms` 降序（同值再按 `task_id` 降序），最新在前。
+**排序**：按 `max(steps[].run_id)` 降序（同值再按 `task_id` 降序），即清单里列出的 run 中最晚开跑的那个；同一 step 下没被列出的其他代（更早的、或更新但没段的）不参与。**不是**按 `latest_ms`：开跑早、跑得久的任务可能排在开跑晚、先结束的任务后面。
 
 **接历史画面**（详见 [traceback.md](traceback.md)）：
 
@@ -265,7 +265,7 @@ GET /traceback/task/{task_id}/timeline?step_id={step_id}&run_id={run_id}
 **时间字段只给到 step 粒度**，任务级不给 `start_ms`：
 
 - 回放本身就是 step 粒度（playlist 必填 `step_id`，跨 step 聚合不支持），且**两个 step 之间可以隔任意长时间**。任务级的「最早 ~ 最晚」会跨过中间空档，既不是任务时长、也不对应任何可播放的东西，只会被误读成连续区间。
-- 任务级因此只留 `latest_ms`，用途明确：清单排序键 + 「这是什么时候的任务」的展示值。
+- 任务级因此只留 `latest_ms`，用途明确：「这是什么时候的任务」的展示值。
 
 ### 错误
 
@@ -278,7 +278,7 @@ GET /traceback/task/{task_id}/timeline?step_id={step_id}&run_id={run_id}
 - **`last_segment_ms` 是最后一段的起点**，比 step 真正结束早一个段长（`last_segment_ms + 该段 EXTINF = timeline 的 end_ms`）。要精确时长用 timeline 的 `duration_ms`。
 - **没有 `total`、没有分页**：固定最多 10 条。要带过滤/分页的完整任务列表用 [`GET /lab-f3m8/tasks`](lab.md)（送标页口径，只枚举 raw 轨）。
 - **回放要带 `steps[].run_id`**：不带时 playlist / timeline 各自解析「最新可见 run」，与本清单描述的 run 可能不是同一个（详见 [traceback › 前端坑点](traceback.md#前端坑点)）。
-- **清单边缘可能短暂不一致**：粗筛（按各任务最近一次 run 的开始时刻，即最大 `run_id`）与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个刚停的——下一轮轮询自愈，别据此报错。
+- **清单边缘可能短暂不一致**：粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个刚停的——下一轮轮询自愈，别据此报错。
 
 ---
 

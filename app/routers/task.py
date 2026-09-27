@@ -248,6 +248,11 @@ def _summarise_steps(task_id: int) -> List[dict]:
     return steps
 
 
+def _sort_key(task: dict) -> tuple:
+    """历史清单排序键：列出的 run 里最大的 run_id，同值 task_id 大者优先。"""
+    return max(s["run_id"] for s in task["steps"]), task["task_id"]
+
+
 @router.get("/history")
 def list_history_tasks():
     """历史任务清单（大屏用）：最近 10 个**已完成且能回放**的任务。无查询参数。
@@ -268,26 +273,33 @@ def list_history_tasks():
     时间字段的粒度刻意压在 **step** 上——回放本身是一个 step 的一个 run（每个 step 只列
     最新可见 run，跨 step / 跨 run 聚合不支持），且两个 step 之间可以隔任意长时间，任务级
     「min(start) ~ max(last)」会跨过中间空档，既不是任务时长也不对应任何可播放
-    的东西。任务级只留 `latest_ms`（= max(steps[].last_segment_ms)）作排序键与
-    「最近一次有画面」的展示值，不成对给 start，免得被读成连续区间。
+    的东西。任务级只留 `latest_ms`（= max(steps[].last_segment_ms)）作「最近一次有画面」的
+    展示值，不成对给 start，免得被读成连续区间。
+
+    **排序键 = max(steps[].run_id)**：清单里实际列出的那些 run 中最晚开跑的时刻，降序，同值
+    task_id 大者优先。同一 (task, step) 下没被列出的其他代（更早的、或更新但没段的）不参与。
 
     `last_segment_ms` 是最后一段的**起点**，不是结束时刻（差一个段长）；精确时长
     取 timeline 的 `duration_ms`（按 playlist EXTINF 算）。
 
-    实现是两阶段，避免每次请求全盘扫段：按最近一次 run 的开始时刻（最大 run_id）粗排挑候选
-    → 只对候选深扫拿真实段时间与轨道，收满 10 条即停。粗排只用于挑候选，对外时间戳一律取
-    真实段 ts。粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个
-    刚停的——大屏下一轮轮询自愈，不加锁。
+    实现是两阶段，避免每次请求全盘扫段：按 `tasks.latest_run_id`（所有 run 目录的最大 run_id，
+    不看产物）粗排 → 逐个深扫。粗排键是排序键的**上界**，故收满 10 条后，下一个候选的上界已
+    低于第 10 名的排序键即可停——剩下的不可能再挤进来。粗筛与深扫之间任务可能刚起/刚停，
+    清单可能短暂含一个刚起的 run 或漏一个刚停的——大屏下一轮轮询自愈，不加锁。
     """
     active_ids = set(client_manager.snapshot().keys())
 
     tasks: List[dict] = []
     scanned = 0
     for task_id in step_tasks.list_task_ids(order="recent"):
-        if len(tasks) >= _HISTORY_LIMIT or scanned >= _HISTORY_SCAN_CAP:
+        if scanned >= _HISTORY_SCAN_CAP:
             break
         if task_id in active_ids:  # 还在跑 → 不算历史
             continue
+        if len(tasks) >= _HISTORY_LIMIT:
+            tenth = sorted((_sort_key(t) for t in tasks), reverse=True)[_HISTORY_LIMIT - 1]
+            if step_tasks.latest_run_id(task_id) < tenth[0]:  # 上界都挤不进前 10，后面更不可能
+                break
 
         scanned += 1
         steps = _summarise_steps(task_id)
@@ -303,8 +315,8 @@ def list_history_tasks():
             }
         )
 
-    # 粗筛序基于 run 开始时刻（近似），最终顺序按真实段时间戳重排一次
-    tasks.sort(key=lambda t: (t["latest_ms"], t["task_id"]), reverse=True)
+    tasks.sort(key=_sort_key, reverse=True)
+    tasks = tasks[:_HISTORY_LIMIT]
 
     source_ips = _fetch_source_ips([t["task_id"] for t in tasks])
     for t in tasks:

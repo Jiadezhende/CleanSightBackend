@@ -55,6 +55,10 @@ router 入口  resolve_run(task, step, run_id)          app/routers/_runs.py
 - `/task/live` 返回 `run_id`（CQ 的 run），`/task/history` 的 `steps[]` 返回 `run_id`（该 step 最新可见 run）。
 - lab 任务列表新增 `run_ids: {step_id: run_id}`；`raw_steps` / `offline_steps` 都按各 step 最新可见 run 计算。
 - `tasks.list_task_ids` 的排序值由 `"mtime"` 改名为 `"recent"`：取各 step 下最大的 `run_id`（最近一次 run 的开始时刻），`_latest_step_mtime` 删除。唯一调用方 `/task/history` 同步修改。
+- **`/task/history` 的排序（2026-09-27 追加修正）**：
+  - **问题**：本批最初只把粗排改成最大 `run_id`，终排仍按 `latest_ms`（最后一段时刻），而深扫收满 10 条即停。两个键口径不同，开跑早、结束晚的任务可能在截断时被漏掉。
+  - **改为**：终排键 = `max(steps[].run_id)`，即清单里实际列出的 run 中最晚开跑的那个，同值 task_id 大者优先。同一 (task, step) 下没被列出的其他代（更早的、或更新但没段的）不参与。`latest_ms` 只作展示。
+  - **截断条件**：粗排键 `tasks.latest_run_id`（数所有 run 目录，不看产物，由原私有函数改为公开）是终排键的上界。因此收满 10 条后不立刻停，下一个候选的上界已低于第 10 名的键才停，结果精确。
 
 ## 变更效果
 
@@ -71,6 +75,7 @@ router 入口  resolve_run(task, step, run_id)          app/routers/_runs.py
 |----|------|
 | 新增用例 | timeline 按 run 存续期过滤、无 run 时保持全 0；点名未知 run → 404 Run（timeline / playlist）；清单 token 锁 run、回收后 404；缺 `run_id` 的 token 按最新 run 解析；ai temporal 点名旧 run 拿旧结果；lab `run_ids`；`runs.successor`；`list_task_ids(order="recent")` |
 | 全量 `pytest tests/` | 828 passed |
+| 排序修正 | 按开跑时刻而非段时刻；同 step 更新的空代不参与、不挤掉第 10 名；全量 840 passed |
 
 ## 遗留风险 / 后续任务
 

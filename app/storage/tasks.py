@@ -12,7 +12,8 @@ task/step 目录域 —— **把 step 目录当整体看**的那两件事：有�
       hls/        段 / init / playlist / sidecar / metadata
       inference/  detections.jsonl / temporal.jsonl / label_probs.npz
 
-    list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按最近一次 run 的开始时刻降序
+    list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按 latest_run_id 降序
+    latest_run_id(task_id)    该 task 所有 run 目录里最大的 run_id（不看有无产物）
     list_step_ids(task_id)    该 task 下的 step id，升序
 
 **本模块不出定位能力**：往某个域里写东西是那个域自己的事，各域文件用
@@ -31,7 +32,7 @@ from . import _root
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["list_task_ids", "list_step_ids"]
+__all__ = ["latest_run_id", "list_task_ids", "list_step_ids"]
 
 # list_task_ids() 支持的排序。非法值炸而不是静默按默认走。
 _VALID_ORDERS: Tuple[str, ...] = ("id", "recent")
@@ -93,13 +94,17 @@ def list_task_ids(order: str = "id") -> List[int]:
     if order == "id":
         return sorted(task_ids)
 
-    keyed = [(_latest_run_id(task_id), task_id) for task_id in task_ids]
+    keyed = [(latest_run_id(task_id), task_id) for task_id in task_ids]
     keyed.sort(reverse=True)
     return [task_id for _, task_id in keyed]
 
 
-def _latest_run_id(task_id: int) -> int:
-    """该 task 各 step 下最大的 run_id；没有 run 目录返回 0。"""
+def latest_run_id(task_id: int) -> int:
+    """该 task 各 step 下最大的 run_id；没有 run 目录返回 0。
+
+    数的是 run **目录**，不看有无产物：它是「该 task 任一 run 的 run_id」的上界，调用方可拿它
+    剪枝，但它不等于任何「最新可见 run」。
+    """
     latest = 0
     for step_id, _ in _step_id_dirs(task_id):
         ids = _root.run_ids(task_id, step_id)
