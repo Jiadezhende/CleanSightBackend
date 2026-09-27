@@ -5,7 +5,7 @@
 
 ## 概述
 
-删除 7 块生产侧零调用方、只被 `tests/` 引用的代码，连同只测它们的用例：persistence 旧 HLS 写侧整套、`traceback/segment_finder` + `offline.Timeline`、utils 的熔断器 / `timing` / `context` / `is_*_error` 及未用重试策略，以及 5 个零散死方法 / 字段 / 别名。生产运行时行为不变。净删约 3200 行，`tests/` 883 → 812 例。
+删除 7 块生产侧零调用方、只被 `tests/` 引用的代码，连同只测它们的用例：persistence 旧 HLS 写侧整套、`traceback/segment_finder` + `offline/frame_tracker.py` 整文件（`Timeline` / `FrameTracker`）、utils 的熔断器 / `timing` / `context` / `is_*_error` 及未用重试策略，以及 5 个零散死方法 / 字段 / 别名。生产运行时行为不变。净删约 3200 行，`tests/` 883 → 802 例。
 
 ## 变更背景
 
@@ -39,11 +39,11 @@ utils                   CircuitBreaker / RetryExecutorWithCircuitBreaker / timin
 
 ### 2. inference / traceback / stream / client
 
-- 整删 `traceback/segment_finder.py`（读旧平铺布局）；`offline/frame_tracker.py` 删 `Timeline` 及只服务它的 helper，`FrameTracker` 保留（走 `hls.iter_frames`，集成测试在用）。
+- 整删 `traceback/segment_finder.py`（读旧平铺布局）与 `offline/frame_tracker.py`：`Timeline` 零调用；`FrameTracker.find` 只是 `hls.iter_frames` 外加一层按 ts 逐位配对，同样零调用，不迁入 hls 域——按 ts 取帧的能力就是 `hls.iter_frames`，等 ROI 视觉特征真落地再按需在域内补点查。sidecar 位级保真由 `test_storage_hls` 覆盖。
 - `StageWorker.infer_batch` 删除（生产只走子进程 `_infer_models`）；`test_stage_worker_ts_anchor` 改为直接测 `_infer_models` 的 ts 锚定。
 - `clean.CleanSegmenter` 兼容别名、`StreamService.metrics`（只写不读）、`ClientManager.get_client_count` 删除。
 - `integration_tests/utils.py` 取存储根改读 `settings.storage_base_dir`。
-- 测试：整删 `test_traceback_segment_finder`；`test_frame_tracker_boundary` 删 16 条 Timeline 用例。
+- 测试：整删 `test_traceback_segment_finder`、`test_frame_tracker_boundary`；`integration_tests/test_frame_tracker_roundtrip.py` 去掉 5 项 `find` 检查，改名 `test_hls_frame_roundtrip.py`（剩 9 项全测 `iter_frames` / `read_segment`）。
 
 ### 3. utils
 
@@ -58,7 +58,7 @@ utils                   CircuitBreaker / RetryExecutorWithCircuitBreaker / timin
 
 ### 5. 保留项（不改动）
 
-- `FrameTracker` 与 `hls.iter_frames`：生产暂无入口，为 ROI 提案预留，集成测试在用。
+- `hls.read_segment` / `hls.iter_frames`：生产暂无入口，为 ROI 视觉特征提案预留，单测与集成往返测试在用。
 - dispatcher `_admit_to_stage` 接缝、`metadata.json`、`gpu_oom_total`：待 owner 决定。
 
 ## 变更效果
@@ -66,7 +66,7 @@ utils                   CircuitBreaker / RetryExecutorWithCircuitBreaker / timin
 | 维度 | 变更前 | 变更后 |
 |------|--------|--------|
 | 生产死代码 | 7 块，约 2400 行 | 0 |
-| `tests/` 用例 | 883 | 812 |
+| `tests/` 用例 | 883 | 802 |
 | 全量耗时 | 14.2s | 13.5s |
 
 **自测结果**
@@ -74,7 +74,8 @@ utils                   CircuitBreaker / RetryExecutorWithCircuitBreaker / timin
 | 项 | 结果 |
 |----|------|
 | `import app.main` / `mediamtx_gateway.main` / `integration_tests.utils` | 通过 |
-| 全量 `pytest tests/` | 812 passed |
+| 全量 `pytest tests/` | 802 passed |
+| `integration_tests/test_hls_frame_roundtrip.py`（真 ffmpeg） | 9/9 PASS |
 | 集成造数（临时存储根，进程内） | 两轨各 3 段 + init 可被 `hls.list_segments` 读到；`/traceback/task/{id}/playlist.m3u8` 200 且含 3 段；清理后无残留 |
 | 复扫被删符号（app / tests / integration_tests / config / README） | 仅余一处历史叙述（`recording/service.py` 论证出处） |
 
