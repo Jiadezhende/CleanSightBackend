@@ -5,10 +5,7 @@ HLS 帧反查（storage.hls 读侧 + FrameTracker）端到端 round-trip 测试
 直接调 `hls.insert_segment` 走真实写路径落 fMP4 段 + `.idx` sidecar 到 `{step}/hls/`，
 再用 `hls.iter_frames` / `FrameTracker.find` 按 ts 读回，逐帧比对。
 
-**造数与读回都已切到 `app.storage.hls`**（原先是 `HLSPersistenceStrategy` 写平铺布局
-+ `Timeline` 读）。`Timeline` 已退役、零调用点、读的还是平铺布局，为它单独再铺一套数据只是
-给一份等着删的实现续命；区间扫帧的那几项（T1–T5、T11–T13）改成直接验数据层的
-`hls.iter_frames`——它们抓的「ts ↔ 像素错配」在新实现上同样是唯一抓得到的手段。
+区间扫帧的那几项（T1–T5、T11–T13）直接验数据层的 `hls.iter_frames`。
 
 **这是唯一能抓「ts ↔ 像素错配」的手段**：帧内中心色块编码了 frame_id
 （三通道 16 阶量化，抗 H.264 有损压缩），读回后解码 id 与期望 gid 逐帧比。
@@ -309,7 +306,7 @@ def main() -> None:
         seed(args.task_id)
         ok = run(args.task_id)
     finally:
-        # 不留残迹：SegmentFinder.list_task_ids 会把它当成真实任务列出来
+        # 不留残迹：storage.tasks.list_task_ids 会把它当成真实任务列出来
         if not args.keep and target.exists():
             shutil.rmtree(target)
             print(f"已清理 {target}")

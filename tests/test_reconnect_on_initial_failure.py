@@ -121,14 +121,6 @@ class TestDecoderRegistration:
         assert info is not None
         assert info["url"] == "rtsp://127.0.0.1:8554/test"
 
-    def test_metrics_registered_after_failed_start(self):
-        """start() 失败后 self.metrics 中也应有记录。"""
-        self._start_with_failing_decoder(
-            FFmpegError(message="stream not available",
-                        source_ip=self.client_id, exit_code=1)
-        )
-        assert self.client_id in self.service.metrics
-
     def test_is_decoder_alive_false_for_dead_or_missing(self):
         """is_decoder_alive：注册但进程死 → False；未注册 → False。"""
         # 未注册

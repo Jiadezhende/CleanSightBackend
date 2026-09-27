@@ -34,10 +34,7 @@ def make_frame_detection():
 
 @pytest.fixture
 def tmp_storage(tmp_path, monkeypatch):
-    """把 settings.storage_dir 指到隔离临时目录，读写两侧同源、用例间不串。
-
-    收编 test_traceback_segment_finder 等处散落的 monkeypatch.setattr(settings, ...)。
-    """
+    """把 settings.storage_dir 指到隔离临时目录，读写两侧同源、用例间不串。"""
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     return tmp_path
 
