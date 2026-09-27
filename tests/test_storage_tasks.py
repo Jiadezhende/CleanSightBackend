@@ -1,4 +1,4 @@
-"""`app.storage` 基础能力：`_root` 的根解析与 `tasks` 的定位/枚举/删除。
+"""`app.storage` 基础能力：`_root` 的根解析与 `tasks` 的定位/枚举。
 
 落盘约定：`{storage_root}/{task_id}/{step_id}/`，两级目录名均为十进制 id。
 本文件全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
@@ -241,50 +241,3 @@ class TestIds:
         """传错 order 说明调用方对返回顺序有预期，静默按默认走比报错更坏。"""
         with pytest.raises(ValueError, match="Invalid order"):
             tasks.list_task_ids(order="recency")
-
-
-# ---------------------------------------------------------------------------
-# tasks.delete_step：删除
-# ---------------------------------------------------------------------------
-
-
-class TestPurgeStep:
-    def test_removes_existing_step(self, tmp_storage):
-        _seed_step(tmp_storage, 1, 1, "hls", "raw_segment_100.mp4")
-        assert tasks.delete_step(1, 1) is True
-        assert not (tmp_storage / "1" / "1").exists()
-
-    def test_missing_step_returns_false(self, tmp_storage):
-        assert tasks.delete_step(1, 1) is False
-
-    def test_removes_every_domain_not_just_hls(self, tmp_storage):
-        """它删的是整个 step，三个域一起没 —— 不是只删 hls/。
-
-        历史上 hls_strategy.purge_step_dir 自述"只删 HLS 产物"而实际 rmtree 整个目录，
-        这条用例把真实行为钉死，免得下一个读 docstring 的人再被误导。
-        """
-        _seed_step(tmp_storage, 1, 1, "hls", "raw_segment_100.mp4", "raw_playlist.m3u8")
-        _seed_step(tmp_storage, 1, 1, "inference", "detections.jsonl", "temporal.jsonl")
-        _seed_step(tmp_storage, 1, 1, "lab", "clip_1700_1710.mp4")
-
-        assert tasks.delete_step(1, 1) is True
-        assert not (tmp_storage / "1" / "1").exists()
-
-    def test_reclaims_task_dir_when_last_step_removed(self, tmp_storage):
-        _seed_step(tmp_storage, 1, 1)
-        assert tasks.delete_step(1, 1) is True
-        assert not (tmp_storage / "1").exists()
-
-    def test_keeps_task_dir_when_other_steps_remain(self, tmp_storage):
-        _seed_step(tmp_storage, 1, 1)
-        _seed_step(tmp_storage, 1, 2)
-        assert tasks.delete_step(1, 1) is True
-        assert (tmp_storage / "1").is_dir()
-        assert tasks.list_step_ids(1) == [2]
-
-    def test_keeps_task_dir_with_non_step_leftovers(self, tmp_storage):
-        """task 目录里若还有别的东西（非 step 目录/文件），rmdir 安全失败，目录保留。"""
-        _seed_step(tmp_storage, 1, 1)
-        (tmp_storage / "1" / "notes.txt").write_text("x", encoding="utf-8")
-        assert tasks.delete_step(1, 1) is True
-        assert (tmp_storage / "1").is_dir()

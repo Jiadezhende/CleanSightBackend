@@ -23,7 +23,7 @@ import pytest
 from factories import make_det_box
 from app.domain.detection import DetBox, DetectorOutput, FrameDetection
 from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.storage import inference, tasks
+from app.storage import inference
 from app.storage.inference import _detection, _jsonl, _temporal
 
 
@@ -486,20 +486,3 @@ class TestDeleteDomain:
         inference.delete(1, 2)
         inference.append_detections(1, 2, [_frame(9.0)])
         assert [f.ts for f in inference.read_detections(1, 2)] == [9.0]
-
-
-# ---------------------------------------------------------------------------
-# 与 tasks 域的接缝
-# ---------------------------------------------------------------------------
-
-
-class TestDomainSeam:
-    def test_delete_step_takes_the_whole_domain_with_it(self, tmp_storage):
-        """`delete_step` 删的是整个 step，本域三份产物一起没。"""
-        inference.append_detections(1, 2, [_frame(1.0)])
-        inference.write_temporal(1, 2, [_seg()])
-
-        assert tasks.delete_step(1, 2) is True
-        assert inference.read_detections(1, 2) == []
-        assert inference.read_temporal(1, 2) == []
-        assert not (tmp_storage / "1").exists()
