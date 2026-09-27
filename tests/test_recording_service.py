@@ -30,14 +30,13 @@ from app.settings import settings
 
 
 class FakeCQ:
-    """够用的 CQ：身份三件套 + 取段 / drain 残帧。"""
+    """够用的 CQ：`run` 身份 + 取段 / drain 残帧。`bound=False` 造未绑定 run 的 CQ。"""
 
-    def __init__(self, task_id=1, step_id=2, ca_segment_len=3, name="cq", run_id=1, run=None):
-        if run is None and task_id is not None and step_id is not None:
+    def __init__(self, task_id=1, step_id=2, ca_segment_len=3, name="cq", run_id=1, run=None,
+                 bound=True):
+        if run is None and bound:
             run = RunIdentity(task_id, step_id, run_id)
         self.run = run
-        self.task_id = task_id
-        self.step_id = step_id
         self.ca_segment_len = ca_segment_len
         self.name = name
         self.raw_segments = []          # take_raw_segment 依次弹出
@@ -47,7 +46,7 @@ class FakeCQ:
         self.detections = []              # drain_ca_detections 一次性取走
 
     def __repr__(self):                 # 让失败信息可读
-        return f"<FakeCQ {self.name} task={self.task_id} step={self.step_id}>"
+        return f"<FakeCQ {self.name} run={self.run}>"
 
     def take_raw_segment(self):
         return self.raw_segments.pop(0) if self.raw_segments else None
@@ -132,7 +131,7 @@ class FakeInference:
 class InlineQueue:
     """同步执行的队列替身：`submit` 当场把任务跑完，测试不必等线程。
 
-    提交序即执行序这一点与真队列一致（都是 FIFO 单线程语义），所以用它测代次逻辑是
+    提交序即执行序这一点与真队列一致（都是 FIFO 单线程语义），所以用它测取帧顺序是
     等价的；真队列的线程行为另有一条用例覆盖。
     """
 
@@ -237,10 +236,9 @@ class TestSubmitRejections:
         assert svc.submit_segment(FakeCQ(), "raw", []) is False
         assert svc._hls_queue.labels == []
 
-    @pytest.mark.parametrize("task_id,step_id", [(None, 2), (1, None), (None, None)])
-    def test_cq_without_partition_key(self, fake_hls, task_id, step_id):
+    def test_cq_without_run(self, fake_hls):
         svc = _service(FakeClients({}))
-        cq = FakeCQ(task_id, step_id)
+        cq = FakeCQ(bound=False)
         assert svc.submit_segment(cq, "raw", _frames()) is False
         assert svc._hls_queue.labels == []
 
@@ -277,8 +275,8 @@ class TestFlushResidual:
         svc.flush_residual(FakeCQ(1, 2))
         assert svc._hls_queue.labels == []
 
-    def test_cq_without_partition_key_is_skipped(self, fake_hls):
-        cq = FakeCQ(1, None)
+    def test_cq_without_run_is_skipped(self, fake_hls):
+        cq = FakeCQ(bound=False)
         cq.raw_residual = _frames(3)
         svc = _service(FakeClients({}))
 
@@ -339,9 +337,9 @@ class TestCollectFrom:
             ("insert", 1, 2, "processed", 2),
         ]
 
-    def test_cq_without_step_id_keeps_its_frames_buffered(self, fake_hls):
-        """定位不到落盘分区就**不取帧** —— 取了只能丢，留在缓冲里等它绑上 step 才对。"""
-        cq = FakeCQ(1, None)
+    def test_cq_without_run_keeps_its_frames_buffered(self, fake_hls):
+        """定位不到落盘目录就**不取帧** —— 取了只能丢。"""
+        cq = FakeCQ(bound=False)
         cq.raw_segments = [_frames(3)]
         svc = _service(FakeClients({}))
 
@@ -423,9 +421,9 @@ class TestPendingFlushRequest:
         assert svc._take_pending_flush(new) is None
         assert svc._take_pending_flush(old) is None, "身份不符的条目一并丢弃，不留给旧 CQ"
 
-    def test_cq_without_partition_key_is_skipped(self):
+    def test_cq_without_run_is_skipped(self):
         svc = _service(FakeClients({}))
-        svc.request_residual_flush(FakeCQ(1, None), fence_ts=1700.5)
+        svc.request_residual_flush(FakeCQ(bound=False), fence_ts=1700.5)
         assert svc._pending_flush == {}
 
     def test_teardown_flush_reclaims_the_unconsumed_request(self, fake_hls):
@@ -536,9 +534,8 @@ class TestSubmitDetections:
         assert svc.submit_detections(cq, []) is False
         assert svc._detection_queue.labels == []
 
-    @pytest.mark.parametrize("task_id, step_id", [(None, 2), (1, None)])
-    def test_cq_without_partition_key(self, fake_inference, task_id, step_id):
-        cq = FakeCQ(task_id, step_id)
+    def test_cq_without_run(self, fake_inference):
+        cq = FakeCQ(bound=False)
         svc = _service(FakeClients({}))
         assert svc.submit_detections(cq, _dets()) is False
         assert svc._detection_queue.labels == []

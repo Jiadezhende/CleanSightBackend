@@ -4,7 +4,7 @@ StepExporter 单元测试
 聚焦整段导出的关键不变量（每一条对应一个会静默产出坏视频的坑）：
 - EXTINF 取自写入侧 playlist 真值，不是文件名 ts 差重推
 - 磁盘上有但 playlist 里没有的段（在途段）不算数：全在途即无可导出
-- 临时 m3u8 落在 `{step}/hls/`（段与 init 的所在目录），使 EXT-X-MAP 的相对 URI 能解析
+- 临时 m3u8 落在 `{run}/hls/`（段与 init 的所在目录），使 EXT-X-MAP 的相对 URI 能解析
 - 走 HLS demuxer 而非 -f concat（fMP4 fragment 无 moov）
 - `-c copy`：段本就是 H.264，整段导出决不能重编码
 - init.mp4 缺失时 fail-fast，不调 ffmpeg

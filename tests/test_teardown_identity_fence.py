@@ -55,7 +55,7 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
     assert result["client_cleaned"] is True
 
 
-# --- 1b. 拆除侧的两次 recording 调用：都发生，且 flush 在 forget 之前 ---
+# --- 1b. 拆除侧的 recording flush：发生在 CQ 出注册表（cq.close 释放帧）之前 ---
 
 def test_stop_run_flushes_residual_while_cq_still_registered(_clean_registry):
     """`flush_residual` 必须在清 registry（内含 `cq.close()` 释放帧）之前：反过来残帧已被释放。"""

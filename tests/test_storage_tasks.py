@@ -20,17 +20,6 @@ from app.settings import settings
 # ---------------------------------------------------------------------------
 
 
-def _seed_step(
-    root: Path, task_id: int, step_id: int, domain: str = "hls", *filenames: str
-) -> Path:
-    """建 `{root}/{task_id}/{step_id}/{domain}/` 并放几个空文件，返回 **step 目录**。"""
-    domain_dir = root / str(task_id) / str(step_id) / domain
-    domain_dir.mkdir(parents=True, exist_ok=True)
-    for name in filenames:
-        (domain_dir / name).write_bytes(b"x")
-    return domain_dir.parent
-
-
 def _seed_run(root: Path, task_id: int, step_id: int, run_id: int) -> Path:
     """建 `{root}/{task_id}/{step_id}/{run_id}/`，返回 run 目录。"""
     run_dir = root / str(task_id) / str(step_id) / str(run_id)
@@ -149,18 +138,18 @@ class TestRootPath:
 
 
 # ---------------------------------------------------------------------------
-# tasks.steps / tasks.ids：枚举
+# list_step_ids / list_task_ids：枚举
 # ---------------------------------------------------------------------------
 
 
 class TestSteps:
     def test_sorted_ascending(self, tmp_storage):
         for step_id in (3, 1, 10, 2):
-            _seed_step(tmp_storage, 1, step_id)
+            _seed_run(tmp_storage, 1, step_id, 1)
         assert tasks.list_step_ids(1) == [1, 2, 3, 10]
 
     def test_skips_non_id_dirs_and_files(self, tmp_storage):
-        _seed_step(tmp_storage, 1, 1)
+        _seed_run(tmp_storage, 1, 1, 1)
         (tmp_storage / "1" / "scratch").mkdir()
         (tmp_storage / "1" / "notes.txt").write_text("x", encoding="utf-8")
         assert tasks.list_step_ids(1) == [1]
@@ -177,14 +166,14 @@ class TestSteps:
 class TestIds:
     def test_sorted_ascending(self, tmp_storage):
         for task_id in (30, 1, 200):
-            _seed_step(tmp_storage, task_id, 1)
+            _seed_run(tmp_storage, task_id, 1, 1)
         assert tasks.list_task_ids() == [1, 30, 200]
 
     def test_skips_non_id_entries(self, tmp_storage):
         """存储根下不只有数字 task 目录：lab 导出临时根 `.lab_exports/`（clip_builder /
         step_exporter）与送标运行时配置 `lab_runtime_config.json`（services/lab/config）都寄居
         于此，外加误建的目录——一律跳过，不报错。"""
-        _seed_step(tmp_storage, 1, 1)
+        _seed_run(tmp_storage, 1, 1, 1)
         (tmp_storage / ".lab_exports").mkdir()
         (tmp_storage / "lab_runtime_config.json").write_text("{}", encoding="utf-8")
         assert tasks.list_task_ids() == [1]
@@ -210,7 +199,7 @@ class TestIds:
         """没有 run 目录的 task（空目录 / 只有旧布局）排序键取 0（排最后），但**仍保留在结果里**
         ——它是否该丢弃由调用方深扫时决定，不是本域的判断。"""
         _seed_run(tmp_storage, 1, 1, 100)
-        _seed_step(tmp_storage, 2, 1)                     # 旧布局 {step}/hls/
+        (tmp_storage / "2" / "1" / "hls").mkdir(parents=True)   # 旧布局残留 {step}/hls/
         assert tasks.list_task_ids(order="recent") == [1, 2]
 
     def test_recent_tie_breaks_on_larger_task_id(self, tmp_storage):

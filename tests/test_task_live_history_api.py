@@ -3,12 +3,12 @@
 
 两张清单只出参数、不出 URL，所以断言重点是**参数能不能直接喂给播放端**：
 - /live 出的 task_id/source_ip 就是 `WS /ai/video` 的两种入参
-- /history 出的 (task_id, step_id, tracks[]) 就是 `/traceback/.../playlist.m3u8` 的入参，
+- /history 出的 (task_id, step_id, run_id, tracks[]) 就是 `/traceback/.../playlist.m3u8` 的入参，
   其中 tracks 必须反映磁盘实况——playlist 的 track 默认 processed，只有 raw 的 step
   照默认打过去就是 404，这是本文件的核心回归点。
 
 DB / 文件系统沿用既有 seam：`doubles.FakeDB` + `tmp_storage` 里用 `factories.seed_hls_segments`
-造段（落盘 `{root}/{task}/{step}/hls/` 并登记进清单）。
+造段（落盘 `{root}/{task}/{step}/{run_id}/hls/` 并登记进清单）。
 """
 
 from types import SimpleNamespace

@@ -1,4 +1,4 @@
-"""`app.storage.inference`：`{step}/inference/` 下三份推理产物的编解码与读写。
+"""`app.storage.inference`：`{step}/{run_id}/inference/` 下三份推理产物的编解码与读写。
 
     detections.jsonl      L1 检测结果，路线 B（追加）
     temporal.jsonl      L3 时序事实，路线 C（原子整体替换）
@@ -11,7 +11,7 @@
 1. **往返**（T1）：codec 是本域唯一有内容的东西，正反运算必须闭合。detections 侧投影掉的字段
    （extra/metadata）按契约回读为默认值，这是有意有损，也一并钉死；facts 侧无损。
 2. **事务不变式**（T3）：路线 C 失败即整体作废——旧文件原样保留、不留 tmp。
-3. **落位**：产物只进 `inference/` 子目录，step 根下不留文件——域隔离的执行力。
+3. **落位**：产物只进 run 下的 `inference/` 子目录，run 根下不留文件——域隔离的执行力。
 4. **错误语义**：坏行逐行隔离、形状不对的 record 跳过、IO 失败原样抛。
 """
 
@@ -183,8 +183,8 @@ class TestDetectionsReadWrite:
         inference.append_detections(_run(1, 2), [])
         assert not _domain_dir(tmp_storage, 1, 2).exists()
 
-    def test_writes_into_domain_dir_not_step_root(self, tmp_storage):
-        """域隔离：step 根下只有域目录、没有文件。"""
+    def test_writes_into_domain_dir_not_run_root(self, tmp_storage):
+        """域隔离：run 根下只有域目录、没有文件。"""
         inference.append_detections(_run(1, 2), [_frame(1.0)])
         assert [p.name for p in (tmp_storage / "1" / "2" / str(RUN_ID)).iterdir()] == ["inference"]
         assert _detections_file(tmp_storage, 1, 2).is_file()
@@ -335,7 +335,7 @@ class TestFactsReadWrite:
         inference.read_temporal(RunIdentity(9, 9, RUN_ID))
         assert list(tmp_storage.iterdir()) == []
 
-    def test_writes_into_domain_dir_not_step_root(self, tmp_storage):
+    def test_writes_into_domain_dir_not_run_root(self, tmp_storage):
         inference.write_temporal(_run(1, 2), [_seg()])
         assert [p.name for p in (tmp_storage / "1" / "2" / str(RUN_ID)).iterdir()] == ["inference"]
         assert _facts_file(tmp_storage, 1, 2).is_file()

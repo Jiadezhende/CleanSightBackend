@@ -1,4 +1,4 @@
-"""`app.storage.hls`：`{step}/hls/` 的定位、编解码与写入事务。
+"""`app.storage.hls`：`{step}/{run_id}/hls/` 的定位、编解码与写入事务。
 
 全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
 
@@ -8,7 +8,7 @@
    累计时长。`ts_us` 的往返只在 **us 域**闭合（截断有损，读侧的 `bisect` 建立在它上面）。
 2. **事务不变式**（T3）：`insert_segment` 的 stage/commit 顺序与失败作废，用假的
    编码器与转码器测——最该测的断言不能躲在需要 ffmpeg 的函数背后。
-3. **落位**：产物只进 `hls/` 子目录，step 根下不留文件；stage 目录 commit 后即消失。
+3. **落位**：产物只进 run 下的 `hls/` 子目录，run 根下不留文件；stage 目录 commit 后即消失。
 4. **端到端**（T4）：真 cv2 + 真 ffmpeg 跑一遍，只这一条依赖外部二进制，缺料时 skip。
 
 并发（T5）本期无断言：串行调度另有统一基建，本域刻意不加锁（见 `_insert` docstring）。
@@ -617,8 +617,8 @@ class TestInsertSegment:
             "raw_segment_1700000000.mp4",
         ]
 
-    def test_step_root_holds_only_domain_dirs(self, tmp_storage, fake_pipeline):
-        """域隔离的执行力：step 根下只有 `hls/`，没有文件。"""
+    def test_run_root_holds_only_domain_dirs(self, tmp_storage, fake_pipeline):
+        """域隔离的执行力：run 根下只有 `hls/`，没有文件。"""
         hls.insert_segment(RUN, "raw", _frames())
         assert [p.name for p in (tmp_storage / "1" / "2" / str(RUN_ID)).iterdir()] == ["hls"]
 
