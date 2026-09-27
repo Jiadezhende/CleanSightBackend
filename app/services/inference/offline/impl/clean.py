@@ -19,8 +19,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -1159,14 +1157,14 @@ NODEP_GRU_LABELS = (
 _WINDOW_BATCH = 1024
 
 
-def _make_window_gru(input_dim: int, class_count: int, hidden: int, num_layers: int, dropout: float):
-    """单向多层 GRU + 线性头，输入 `[B, window, F]`，取窗口末帧输出 `[B, C]`（state_dict 键 rnn.* / head.*）。"""
+def _make_window_gru(input_dim: int, class_count: int, hidden: int = 128, num_layers: int = 3):
+    """单向 3 层 GRU + 线性头，输入 `[B, window, F]`，取窗口末帧输出 `[B, C]`（state_dict 键 rnn.* / head.*）。"""
     import torch.nn as nn
 
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self.rnn = nn.GRU(input_dim, hidden, num_layers=num_layers, batch_first=True, dropout=dropout)
+            self.rnn = nn.GRU(input_dim, hidden, num_layers=num_layers, batch_first=True, dropout=0.2)
             self.head = nn.Linear(hidden, class_count)
 
         def forward(self, x):
@@ -1182,31 +1180,11 @@ def _causal_windows(x: np.ndarray, window: int) -> np.ndarray:
     return np.lib.stride_tricks.sliding_window_view(padded, window, axis=0).transpose(0, 2, 1)
 
 
-def _check_window_gru_meta(meta: Dict[str, Any], weight_path: Path, class_count: int) -> None:
-    """校验训练框架 `.meta.json` 与权重文件、本策略的特征 / 类别契约一致，不一致即抛。"""
-    digest = hashlib.sha256(weight_path.read_bytes()).hexdigest()
-    if (meta.get("checkpoint_binding") or {}).get("sha256") != digest:
-        raise ValueError(f"权重 sha256 与 meta.json checkpoint_binding 不一致: {weight_path}")
-    schema = meta.get("feature_schema") or {}
-    if (schema.get("version"), schema.get("dim")) != (NODEP_FEATURE_VERSION, NODEP_FEATURE_DIM):
-        raise ValueError(
-            f"meta.json 特征契约 {schema.get('version')}/{schema.get('dim')} "
-            f"!= {NODEP_FEATURE_VERSION}/{NODEP_FEATURE_DIM}"
-        )
-    model_cfg = meta.get("model") or {}
-    if (model_cfg.get("type"), model_cfg.get("input_dim"), model_cfg.get("num_classes")) != (
-        "gru", NODEP_FEATURE_DIM, class_count,
-    ):
-        raise ValueError(f"meta.json model 段与本策略不符: {model_cfg}（期望 gru/{NODEP_FEATURE_DIM}/{class_count}）")
-    if meta.get("pipeline") != "sliding_window_temporal" or int(meta.get("window") or 0) < 1:
-        raise ValueError(f"meta.json 非滑窗时序产物: pipeline={meta.get('pipeline')} window={meta.get('window')}")
-
-
 class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
     """CLEAN 阶段因果滑窗 GRU 离线模型（特征 ama-v3-concat23-nodep-226d，6 类）。
 
-    权重旁须有训练框架产出的 `<model_path>.meta.json`：加载时校验 sha256 / 特征契约 / 类别数，
-    按其 `model` 段重建网络、按 `window` 切窗，缺失或不符即抛。
+    `model_path` 是训练框架 checkpoint 单文件（取 `model_state`，strict 加载）；网络结构与 `window`
+    固定为训练值（hidden=128 / 3 层 / window=16），换训练配置须同步改这里。
     `model_input_fps` 须等于训练帧率、`confidence_override` 须与训练标注口径一致——配错不报错、
     结果静默变差。
     """
@@ -1214,6 +1192,7 @@ class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
     model_version = "clean_gru_nodep226d"
     feature_method = "nodep_concat"
     labels = NODEP_GRU_LABELS
+    window = 16
 
     def __init__(
         self,
@@ -1237,7 +1216,6 @@ class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
             frame_height=frame_height,
         )
         self.confidence_override = None if confidence_override is None else float(confidence_override)
-        self._window = 0
 
     def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         """按 ts 降采样到 model_input_fps（只挑真实帧，ts 与 detections.jsonl 位级相等）→ 226 维特征。"""
@@ -1255,7 +1233,7 @@ class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
 
         if self._model is None:
             self._load_model(model_input, len(self.labels))
-        windows = _causal_windows(np.asarray(model_input.features, dtype=np.float32), self._window)
+        windows = _causal_windows(np.asarray(model_input.features, dtype=np.float32), self.window)
         self._model.eval()
         chunks = []
         with torch.no_grad():
@@ -1265,22 +1243,13 @@ class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
         return np.concatenate(chunks, axis=0).astype(np.float32)
 
     def _load_model(self, model_input: ModelInput, class_count: int) -> None:
-        """校验 meta.json → 按 meta 重建 GRU → strict 加载 checkpoint 的 `model_state`。"""
+        """strict 加载训练框架 checkpoint 的 `model_state`。"""
         import torch
 
         path = Path(str(self.model_path))
-        meta_path = Path(f"{path}.meta.json")
-        for p in (path, meta_path):
-            if not p.exists():
-                raise FileNotFoundError(f"clean 离线模型物料不存在: {p}")
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        _check_window_gru_meta(meta, path, class_count)
-
-        cfg = meta["model"]
-        model = _make_window_gru(
-            NODEP_FEATURE_DIM, class_count, int(cfg["hidden"]), int(cfg["num_layers"]), float(cfg.get("dropout", 0.0)),
-        )
+        if not path.exists():
+            raise FileNotFoundError(f"clean 离线模型权重不存在: {path}")
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        model = _make_window_gru(NODEP_FEATURE_DIM, class_count)
         model.load_state_dict(checkpoint["model_state"], strict=True)
-        self._window = int(meta["window"])
         self._model = model

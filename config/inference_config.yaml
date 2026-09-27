@@ -108,7 +108,7 @@ stages:
       #   ...impl.clean.CleanASFormerSegmenter     ↔ clean-offline-asformer.pt
       #   ...impl.clean.CleanMSTCNBiLSTMSegmenter  ↔ clean-offline-mstcn.pt
       params:
-        model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-gru-nodep.pt  # 同目录须有 <文件名>.meta.json
+        model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-gru-nodep.pt  # 训练框架 checkpoint 单文件；结构 / window 固定在策略类
         # 以下两项须与训练口径一致，配错不报错、静默变差：
         model_input_fps: 7.5         # 入模帧率 = 训练帧率（按 ts 从检测序列抽帧）
         confidence_override: 1.0     # 训练标注无置信度列 → 1.0；null = 用检测真实置信度
