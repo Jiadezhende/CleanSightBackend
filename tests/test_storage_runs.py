@@ -104,13 +104,15 @@ class TestQuery:
 
         assert runs.query(1, 2) == mid
 
-    def test_hls_metadata_makes_a_run_visible(self, tmp_storage, monkeypatch):
+    @pytest.mark.parametrize("track", ["raw", "processed"])
+    def test_registered_segment_makes_a_run_visible(self, tmp_storage, monkeypatch, track):
         run = _alloc(monkeypatch, 1, 2, 10)
-        hls_dir = hls.init_path(run, "raw").parent
+        hls_dir = hls.init_path(run, track).parent
         hls_dir.mkdir()
-        (hls_dir / "raw_playlist.m3u8").write_text("#EXTM3U\n")
-        assert runs.query(1, 2) is None           # 只有 playlist 不算
-        (hls_dir / "metadata.json").write_text("{}")
+        playlist = hls.playlist_path(run, track)
+        playlist.write_text("#EXTM3U\n")
+        assert runs.query(1, 2) is None           # 只有清单头、没有条目不算
+        playlist.write_text(f"#EXTM3U\n#EXTINF:10.000,\n{track}_segment_1700000000000.mp4\n")
         assert runs.query(1, 2) == run
 
     def test_no_visible_run_is_none(self, tmp_storage, monkeypatch):

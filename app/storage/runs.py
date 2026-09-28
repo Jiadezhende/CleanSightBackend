@@ -12,7 +12,7 @@
 - **同一 step 的 `allocate` 必须串行**（调用方持 `lock_for`）：`run_id` 的严格递增靠它。
 - **写者不建 run 目录**：本模块是唯一 `mkdir(parents=True)` 出产物目录的地方；域写口收
   `RunIdentity` 时只建域这一级，run 被回收后的迟到写入原子失败。
-- **可见** = run 下任一域有主产物：`hls/metadata.json`（`insert_segment` 提交的最后一步）
+- **可见** = run 下任一域有主产物：任一轨清单里有段（`hls.query_has_segments`）
   或 `inference/detections.jsonl`。只影响缺省 `run_id` 的查询。
 
 设计见 `docs/update/20260927_STORAGE_RUN_DIR_PROPOSAL.md` §2、§4。
@@ -25,9 +25,9 @@ from typing import List, Optional, Tuple
 
 from app.types.run import RunIdentity
 
+from . import hls as _hls
 from . import tasks as _tasks
 from .utils import root as _root
-from .hls import _layout as _hls_layout
 from .inference import _layout as _inference_layout
 
 __all__ = ["allocate", "query", "query_latest_by_step", "query_lifespan_ms", "successor"]
@@ -52,7 +52,7 @@ def allocate(task_id: int, step_id: int) -> RunIdentity:
 
 def _visible(run: RunIdentity) -> bool:
     detections = _inference_layout.domain_dir(run) / _inference_layout.DETECTIONS_NAME
-    return _hls_layout.metadata_path(run).exists() or detections.exists()
+    return detections.exists() or any(_hls.query_has_segments(run, t) for t in _hls.TRACKS)
 
 
 def query(task_id: int, step_id: int, run_id: Optional[int] = None) -> Optional[RunIdentity]:
