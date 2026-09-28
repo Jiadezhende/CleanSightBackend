@@ -116,7 +116,7 @@ class ClientConfig:
     def cq_kwargs(self) -> Dict[str, Any]:
         """组装 ClientQueues 构造参数（resize 属 client 配置，采样倍率/队列走 settings 单一真源）。
 
-        创建 CQ 的唯一配置出口：run 起始由 InferenceManager 调用（早于起流），
+        创建 CQ 的唯一配置出口：run 起始由 InferenceService 调用（早于起流），
         避免"裸建默认值 + 起流时 kwargs 被丢弃"的 dead-kwargs 问题。
         """
         return {

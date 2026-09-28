@@ -112,7 +112,7 @@ async def get_system_status():
 
     职责边界：
     - 健康监控负责系统级别的状态汇总
-    - 整合来自多个模块的信息（ClientManager、StreamService、InferenceManager）
+    - 整合来自多个模块的信息（ClientManager、StreamService、InferenceService）
     - 提供统一的系统状态视图
     - 替代 /ai/status 端点（推荐使用此端点）
 

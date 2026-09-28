@@ -126,7 +126,7 @@
 - **包内一律相对、跨包一律绝对**。判据是「目标是不是我这个包的后代」，不是目录深浅：
 
   ```python
-  # app/services/inference/online/manager.py
+  # app/services/inference/online/service.py
   from .config import load_stage_config              # ✓ 同目录
   from .detection.service import DetectionService    # ✓ 本包子包
   from app.services.client.manager import client_manager   # ✓ 跨包（跨服务依赖一眼可见）

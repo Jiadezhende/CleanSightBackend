@@ -554,7 +554,7 @@ class ClientQueues:
     def set_stream_windows(self, windows: Dict[str, float]) -> None:
         """配置帧窗保留时长 = max(10s 底线, 各算子最大感受野)。
 
-        由 InferenceManager 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
+        由 InferenceService 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
         单条帧窗保留所有算子里最长的感受野，各算子自行 _clip 到自身 window_seconds；
         感受野只向上扩展，signals_10s 另按固定 10s 底线裁窗，不受影响。
         """

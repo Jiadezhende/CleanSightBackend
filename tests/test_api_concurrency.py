@@ -76,7 +76,7 @@ async def test_restart_with_same_step_and_url_is_idempotent():
 
     with (
         patch("app.routers.api.get_db", side_effect=lambda: iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
+        patch("app.services.run_control.inference_service") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues", side_effect=_new_cq),
@@ -119,7 +119,7 @@ async def test_same_task_url_change_triggers_restart():
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
+        patch("app.services.run_control.inference_service") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues"),
@@ -175,7 +175,7 @@ async def test_start_and_terminate_serialized():
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
+        patch("app.services.run_control.inference_service") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues", side_effect=_new_cq),
@@ -235,7 +235,7 @@ async def test_different_tasks_not_blocked():
 
     with (
         patch("app.routers.api.get_db", side_effect=mock_get_db),
-        patch("app.services.run_control.inference_manager") as mock_inference,
+        patch("app.services.run_control.inference_service") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues", side_effect=_new_cq),
@@ -275,7 +275,7 @@ async def test_terminate_uses_lock(request_kwargs):
     mock_cq.run = RunIdentity(1, 0, 1)
 
     with (
-        patch("app.services.run_control.inference_manager") as mock_inference,
+        patch("app.services.run_control.inference_service") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.recording_service"),
         patch.object(client_manager, "find_by_source_ip", return_value=mock_cq),

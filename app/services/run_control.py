@@ -19,7 +19,7 @@ from app.storage import runs
 from .client.config import get_client_config
 from .client.manager import client_manager
 from .client.queues import ClientQueues
-from .inference.online.instance import inference_manager
+from .inference.online.instance import inference_service
 from .inference.online.temporal import alarm_sink
 from .recording.instance import recording_service
 from .stream.instance import stream_service
@@ -53,7 +53,7 @@ class RunController:
                 f"current_step '{current_step}' 不是数字", field="current_step", value=str(current_step),
             ) from None
         # stage 由 inference 解析，是 CQ 不可变身份的一部分
-        stage = inference_manager.resolve_stage(step_id)
+        stage = inference_service.resolve_stage(step_id)
 
         with client_manager.lock_for(task_id):
             # 2a. 幂等 / 重启清理（同 task_id 同槽位；不同 task_id 走不同键，天然并发）
@@ -105,7 +105,7 @@ class RunController:
             client_manager.set(task_id, cq)
             try:
                 # 2e. start_workflow（建 Actor；CQ 已由上面 set 注册）
-                if not inference_manager.start_workflow(cq):
+                if not inference_service.start_workflow(cq):
                     raise AppError(
                         message=f"Failed to start workflow for task {task_id}",
                         task_id=task_id,
@@ -200,7 +200,7 @@ class RunController:
             #    （→cq.close 释放帧）——本 try 早于下方清理。
             try:
                 if cq is not None:
-                    settlement = inference_manager.stop_workflow(cq)  # Inference owner
+                    settlement = inference_service.stop_workflow(cq)  # Inference owner
                     if settlement:
                         alarm_sink.persist_alarms(
                             settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT, log_each=True

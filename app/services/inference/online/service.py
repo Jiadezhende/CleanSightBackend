@@ -1,4 +1,4 @@
-"""推理管理器 - 核心实现
+"""推理服务 - 核心实现
 
 架构特点：
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class InferenceManager:
-    """推理管理器
+class InferenceService:
+    """推理服务
 
     集成三个独立时钟的 Worker 池：
     - DetectionService（推理，~30 FPS）
@@ -65,9 +65,9 @@ class InferenceManager:
         # 活体组件在 start() 里建（None = 尚未 start）
         self.visualization_pool: Optional["VisualizationWorkerPool"] = None
 
-        # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
+        # 注：InferenceService 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
         # 告警落库归 PersistenceManager、HLS flush 归 RecordingService，由 RunController 编排；进程停机残余结算走惰性 import。
-        logger.debug("[InferenceManager] Initialization completed")
+        logger.debug("[InferenceService] Initialization completed")
 
     def _build_components(self):
         """建重组件：可视化池、DetectionService。
@@ -94,7 +94,7 @@ class InferenceManager:
         )
 
         # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
-        # recording 的 sweeper 拉走写 `cq.run` 的 `inference/detections.jsonl`。本 manager
+        # recording 的 sweeper 拉走写 `cq.run` 的 `inference/detections.jsonl`。本服务
         # 因此不持有任何 store、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()
 
@@ -135,12 +135,12 @@ class InferenceManager:
 
                 if stage_configs:
                     logger.info(
-                        "[InferenceManager] Loaded %d stages (active): %s",
+                        "[InferenceService] Loaded %d stages (active): %s",
                         len(stage_configs), list(stage_configs.keys())
                     )
                     if skipped_stages:
                         logger.info(
-                            "[InferenceManager] Skipped %d stages (no detectors): %s",
+                            "[InferenceService] Skipped %d stages (no detectors): %s",
                             len(skipped_stages), skipped_stages
                         )
                     self._stage_configs = stage_configs
@@ -150,7 +150,7 @@ class InferenceManager:
                         "Please ensure inference_config.yaml contains at least one stage with valid models."
                     )
             except Exception as e:
-                logger.error("[InferenceManager] Failed to load config: %s", e, exc_info=True)
+                logger.error("[InferenceService] Failed to load config: %s", e, exc_info=True)
                 raise RuntimeError(
                     f"Failed to load inference configuration: {e}. "
                     "Please check inference_config.yaml and ensure it is properly configured."
@@ -203,7 +203,7 @@ class InferenceManager:
         stale = self._actors.pop(task_id, None)
         if stale is not None:
             logger.warning(
-                "[InferenceManager] stale actor for task=%s at start_workflow; dropping", task_id
+                "[InferenceService] stale actor for task=%s at start_workflow; dropping", task_id
             )
             stale.signal_stop()
 
@@ -235,12 +235,12 @@ class InferenceManager:
             actor.start()
             self._actors[task_id] = actor
             logger.info(
-                "[InferenceManager] TemporalActor created for task=%s (stage=%s, operators=%d)",
+                "[InferenceService] TemporalActor created for task=%s (stage=%s, operators=%d)",
                 task_id, stage, len(operators),
             )
         else:
             logger.debug(
-                "[InferenceManager] No operator specs for stage %s, skipping TemporalActor",
+                "[InferenceService] No operator specs for stage %s, skipping TemporalActor",
                 stage,
             )
 
@@ -255,7 +255,7 @@ class InferenceManager:
         lock_for(cq.run.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
         task_id = cq.run.task_id
-        logger.info("[InferenceManager] Stopping workflow: task=%s", task_id)
+        logger.info("[InferenceService] Stopping workflow: task=%s", task_id)
 
         settlement: List[Alarm] = []
         actor = self._actors.pop(task_id, None)
@@ -264,12 +264,12 @@ class InferenceManager:
                 settlement = actor.finalize_and_stop()
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] finalize actor failed for task=%s: %s", task_id, e
+                    "[InferenceService] finalize actor failed for task=%s: %s", task_id, e
                 )
 
         # 注：这里**不收尾检测结果**。cq 落盘缓冲里剩下的那点由 RunController 紧接着调的
         # `recording.flush_residual(cq)` 一并交出（它在本方法之后、cq.close() 之前）。
-        logger.info("[InferenceManager] Workflow stopped: task=%s", task_id)
+        logger.info("[InferenceService] Workflow stopped: task=%s", task_id)
         return settlement
 
     def status(self) -> Dict[str, Any]:
@@ -280,7 +280,7 @@ class InferenceManager:
     # ========== 启动/停止 ==========
 
     def start(self):
-        logger.info("[InferenceManager] 启动中...")
+        logger.info("[InferenceService] 启动中...")
 
         # 重组件在此建（构造期零副作用，见 __init__ docstring）
         self._build_components()
@@ -301,7 +301,7 @@ class InferenceManager:
         _set_task_metric_map(_factory.build_task_metric_map())
         _set_stage_alias_map(_factory.build_stage_alias_map())
 
-        logger.info("[InferenceManager] Started")
+        logger.info("[InferenceService] Started")
 
     def stop(self):
         self._stop_event.set()
@@ -332,7 +332,7 @@ class InferenceManager:
                         )
             except Exception as e:
                 logger.warning(
-                    "[InferenceManager] Settlement alarms on stop failed for task=%s: %s",
+                    "[InferenceService] Settlement alarms on stop failed for task=%s: %s",
                     task_id, e,
                 )
 
@@ -345,4 +345,4 @@ class InferenceManager:
             self.visualization_pool.stop()
         # 注：persistence.stop() 已上移 persistence.lifespan（停在 inference 之后，抽干队列）。
 
-        logger.info("[InferenceManager] Stopped")
+        logger.info("[InferenceService] Stopped")

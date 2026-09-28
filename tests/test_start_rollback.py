@@ -28,7 +28,7 @@ def test_start_run_rolls_back_cq_on_workflow_failure():
 
     with (
         patch("app.services.run_control.ClientQueues", return_value=mock_cq),
-        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.inference_service") as mock_inf,
         patch("app.services.run_control.stream_service"),
         patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.alarm_sink"),
@@ -51,7 +51,7 @@ def test_start_run_rolls_back_cq_on_workflow_failure():
 @pytest.mark.parametrize("current_step", ["未知阶段", "None"])
 def test_start_run_non_numeric_step_rejected(current_step):
     """非数字 current_step 是参数错误：ValidationError（400），不解析 stage、不建 CQ。"""
-    with patch("app.services.run_control.inference_manager") as mock_inf:
+    with patch("app.services.run_control.inference_service") as mock_inf:
         with pytest.raises(ValidationError, match="不是数字"):
             run_controller.start_run(task_id=4243, current_step=current_step, rtsp_url="rtsp://x")
     mock_inf.resolve_stage.assert_not_called()
@@ -62,7 +62,7 @@ def test_start_run_unconfigured_step_keeps_old_run():
     """未配置的 step 在动旧 run 之前就被拒：同 task 正在跑的 run 不被 stop。"""
     task_id = 4244
     with (
-        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.inference_service") as mock_inf,
         patch("app.services.run_control.client_manager") as mock_cm,
         patch.object(run_controller, "stop_run") as stop_run,
     ):
