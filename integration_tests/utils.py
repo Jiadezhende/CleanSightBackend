@@ -24,8 +24,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 
 from sqlalchemy import text
 
-from app.database import get_db
-from app.models import DBAlarm, DBTask
+from app.db.database import get_db
+from app.db.alarms import DBAlarm
+from app.db.tasks import DBTask
 
 
 class FFmpegController:

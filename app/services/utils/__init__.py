@@ -10,7 +10,7 @@
 
     可以 import   stdlib、三方、app.types、app.storage、app.settings
     不许 import   **任何兄弟 service 包**（app.services.lab / app.services.recording / …）
-                  app.routers、app.database / app.models
+                  app.routers、app.db
     不许有        单例、lifespan()；模块级状态只有 metrics 的 Prometheus 指标
 
 **「不许 import 兄弟 service」是本层存在的全部前提**。破了它，本包就成了 service → service

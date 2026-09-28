@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import func
 
-from app.database import get_db
-from app.models import DBTask
+from app.db.database import get_db
+from app.db.tasks import DBTask
 
 
 def get_test_tasks(max_tasks: int) -> list:

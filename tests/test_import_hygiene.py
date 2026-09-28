@@ -142,8 +142,8 @@ FORBIDDEN_APP_IMPORTS = {
 #
 # **白名单而非黑名单**：`app/storage` 是 services 下面一层的数据层，它能被写侧
 # （persistence）与读侧（lab / inference.offline / routers）同时依赖的前提，
-# 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.database` / `app.models`
-# ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
+# 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.db`
+# ——它一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
     # app.types：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `utils/root.py` 的规矩只在函数体内 import
@@ -331,7 +331,7 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
 
     `app/storage` 是 services 下面一层的数据层。它一旦向上或向旁伸手，那一头就不能再
     依赖它——而写侧与读侧同时依赖它正是抽这个包的全部意义。白名单比黑名单严一档：
-    `app.database` / `app.models` 进来不会造环、不会红，只会把数据层绑死在 ORM 上。
+    `app.db` 进来不会造环、不会红，只会把数据层绑死在 ORM 上。
     """
     allowed = LAYER_PACKAGES[package]
     violations = []

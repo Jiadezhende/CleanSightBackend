@@ -9,8 +9,9 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import get_db
-from app.models import DBAlarm, DBTask
+from app.db.database import get_db
+from app.db.alarms import DBAlarm
+from app.db.tasks import DBTask
 from app.services.client.manager import client_manager
 from app.storage import hls, runs
 from app.storage import tasks as step_tasks

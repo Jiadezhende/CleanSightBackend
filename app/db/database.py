@@ -4,9 +4,9 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import QueuePool
 
-from .settings import settings
+from app.settings import settings
 
-logger = logging.getLogger("app.database")
+logger = logging.getLogger(__name__)
 
 # 创建数据库引擎（带连接池配置）
 engine = create_engine(

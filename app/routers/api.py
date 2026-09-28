@@ -15,8 +15,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import get_db
-from app.models import DBTask
+from app.db.database import get_db
+from app.db.tasks import DBTask
 from app.services.client import client_manager
 from app.services.run_control import run_controller
 from app.types.exceptions import DatabaseError, NotFoundError, ValidationError

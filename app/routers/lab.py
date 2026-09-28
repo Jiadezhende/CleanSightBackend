@@ -37,10 +37,10 @@ from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.background import BackgroundTask
 
-from app.database import get_db
+from app.db.database import get_db
 from app.types.run import RunIdentity
 from app.types.temporal import TemporalSegment
-from app.models import DBTask
+from app.db.tasks import DBTask
 from app.services.lab import (
     ClipBuilder,
     ClipBuildError,

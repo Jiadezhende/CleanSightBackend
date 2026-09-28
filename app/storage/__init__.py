@@ -42,7 +42,7 @@ run 目录只由 `runs.allocate` 建，写者只建域这一级。存储根下�
 ## 依赖与边界（两条硬约束，细则在规范里）
 
 - **依赖白名单**：stdlib、三方，加 `app.types` 与 `app.settings`（只在函数体内）。别的
-  `app.*` 一律不行，包括 `app.database` / `app.models`。门禁
+  `app.*` 一律不行，包括 `app.db`。门禁
   `test_layer_package_imports_only_whitelisted_app_modules`。
 - **只收转换，不收策略 / 编排 / 业务语义**：TTL 留多久、失败重试几次、谁来调、并发几个、
   HTTP 状态码，全在层外。反之编解码（含起 cv2 / ffmpeg）是本层本职。

@@ -22,9 +22,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import get_db
+from app.db.database import get_db
 from app.types.run import RunIdentity
-from app.models import DBAlarm
+from app.db.alarms import DBAlarm
 from app.services.utils.media_timeline import MediaTimeline
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls, runs

@@ -25,8 +25,6 @@ app/
 ├── main.py              # FastAPI 入口，lifespan 启停各 Service 单例
 ├── settings.py          # 全局配置（Pydantic Settings，读 .env）
 ├── gateway.py           # ASGI 网关中间件 + IP 白名单 / 限流（mediamtx_gateway 进程共用）
-├── database.py          # SQLAlchemy 连接池（PostgreSQL）
-├── models.py            # ORM：DBTask / DBAlarm
 ├── types/               # 跨层共用契约（纯 dataclass）+ AppError 异常体系：frame / detection / temporal / alarm / run / exceptions
 ├── routers/             # HTTP/WS 路由：api / ai / task / health / traceback / media / lab / admin / algorithm
 │   └── utils/           # 本层通用：run 解析 / 媒体 token 签发与校验
@@ -42,6 +40,7 @@ app/
 │   ├── lab/             # 送标裁剪 + Label Studio 上传
 │   └── algorithm/       # 无状态算法服务（试纸比色），与主流程无关，只被 /algorithm/* 调用
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
+├── db/                  # 平台 DB（PostgreSQL，只读）：database 连接池 + 一张表一个 ORM 模块 tasks / alarms
 ├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 deploy skill
 └── utils/               # GuardedExecutor / 日志装饰器
 config/                  # 运维要改的配置：六份服务 YAML + uvicorn 日志 logging.json
