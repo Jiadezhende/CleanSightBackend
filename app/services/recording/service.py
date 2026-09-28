@@ -24,7 +24,7 @@
    免锁靠 `dict` 的 `__setitem__`、`pop` 各自原子。它只服务 HLS：detections 没有"段横跨
    断流 gap"这回事，故不需要栅栏。
 
-依赖：`app.storage.hls` / `app.storage.inference` + `app.utils.task_queue` + `client_manager`，
+依赖：`app.storage.hls` / `app.storage.inference` + `app.services.utils.task_queue` + `client_manager`，
 不依赖别的 service。
 """
 
@@ -37,7 +37,7 @@ from app.types.detection import FrameDetection
 from app.types.frame import Frame
 from app.types.run import RunIdentity
 from app.storage import hls, inference
-from app.utils.task_queue import SerialTaskQueue
+from app.services.utils.task_queue import SerialTaskQueue
 
 from ._sweeper import SegmentSweeper
 from .config import RecordingConfig, get_recording_config

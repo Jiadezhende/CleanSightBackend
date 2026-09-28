@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.settings import Settings, settings
-from app.utils.gateway import AntiScanStore, GatewayMiddleware, IPWhitelistStore, RateLimitStore
+from app.gateway import AntiScanStore, GatewayMiddleware, IPWhitelistStore, RateLimitStore
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ class TestRateLimitStore:
         store.is_allowed("1.2.3.4")
         assert "1.2.3.4" in store._buckets
         # 模拟时间快进超过 window，使 bucket 中的时间戳过期
-        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+        with patch("app.gateway.time.monotonic", return_value=time.monotonic() + 120):
             store._sweep()
         assert "1.2.3.4" not in store._buckets
 
@@ -165,7 +165,7 @@ class TestRateLimitStore:
         store.is_allowed("1.2.3.4")  # 消耗配额
         store.is_allowed("1.2.3.4")  # 触发超限，写入 _violations
         assert "1.2.3.4" in store._violations
-        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+        with patch("app.gateway.time.monotonic", return_value=time.monotonic() + 120):
             store._sweep()
         assert "1.2.3.4" not in store._violations
 
@@ -213,7 +213,7 @@ class TestAntiScanStore:
             antiscan.record_error("10.0.0.3", 404)
         assert "10.0.0.3" in antiscan._errors
         # 模拟时间快进超过 window，使 error 时间戳过期
-        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+        with patch("app.gateway.time.monotonic", return_value=time.monotonic() + 120):
             antiscan._sweep()
         assert "10.0.0.3" not in antiscan._errors
 

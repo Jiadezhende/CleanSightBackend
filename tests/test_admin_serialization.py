@@ -45,7 +45,7 @@ def test_quantile_first_bucket_boundary():
 # ---- _parse_metrics_json：真实 REGISTRY 提取（增量真计数器，验 drop 分支）----
 
 def test_parse_metrics_json_returns_dict_and_reads_drop_counter():
-    from app.utils.metrics import frame_drop_total
+    from app.services.utils.metrics import frame_drop_total
 
     frame_drop_total.labels(reason="unit_test_probe").inc()
     result = _parse_metrics_json()

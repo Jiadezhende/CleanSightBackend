@@ -10,7 +10,7 @@ import pytest
 
 import factories
 from app.settings import settings
-from app.utils import task_queue
+from app.services.utils import task_queue
 
 
 # ---- factory-as-fixture：返回可调用的构造器（支持 override 参数）----

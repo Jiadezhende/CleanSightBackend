@@ -19,7 +19,7 @@ from app.types.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.online.naming import get_stage_alias
 from . import alarm_sink
 from .operator import Operator
-from app.utils.worker_guard import guarded_run
+from app.services.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 

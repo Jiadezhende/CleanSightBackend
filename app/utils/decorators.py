@@ -6,7 +6,7 @@ log_call - 自动进入/退出日志装饰器
 边界层异常处理原则：
 - 业务代码保持纯净，只抛异常，不捕获异常
 - 重试逻辑在 GuardedExecutor 框架层统一管理
-- 异常捕获在 4 个边界层：guarded_run（app/utils/worker_guard.py）, GuardedExecutor, FastAPI handlers, main()
+- 异常捕获在 4 个边界层：guarded_run（app/services/utils/worker_guard.py）, GuardedExecutor, FastAPI handlers, main()
 
 设计原则：
 - 实用优先，避免过度设计

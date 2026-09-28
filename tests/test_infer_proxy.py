@@ -12,7 +12,7 @@ import numpy as np
 
 from app.services.inference.online.types import DetectionTask
 from app.services.inference.online.detection.infer_proxy import RemoteInferProxy
-from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
+from app.services.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 from factories import make_cq, make_detector_output
 

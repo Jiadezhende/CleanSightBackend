@@ -14,7 +14,7 @@ from app.types.frame import Frame
 from .config import DecoderConfig
 from app.settings import settings
 from app.types.exceptions import FFmpegError, StreamConnectionError
-from app.utils.metrics import frame_drop_total
+from app.services.utils.metrics import frame_drop_total
 
 DEFAULT_CHANNELS = 3
 

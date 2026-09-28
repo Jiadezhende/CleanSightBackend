@@ -16,7 +16,7 @@ from app.services.client import ClientManager, client_manager
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
-from app.utils.metrics import frame_drop_total
+from app.services.utils.metrics import frame_drop_total
 
 logger = logging.getLogger(__name__)
 

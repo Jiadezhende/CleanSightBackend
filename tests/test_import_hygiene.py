@@ -97,6 +97,10 @@ BUDGET = {
     # 媒体轴换算。它 import `app.storage.hls`（段与 EXTINF 的唯一来源），故预算照 hls 那条
     # 给 0.40 —— 量的是同一份活；它本身是 stdlib（bisect / typing）。
     "app.services.utils.media_timeline": (set(), 0.40),
+    "app.services.utils.task_queue":   (set(), 0.20),   # stdlib only
+    "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
+    "app.services.utils.pressure":     (set(), 0.20),   # stdlib only
+    "app.services.utils.metrics":      (set(), 0.40),   # prometheus_client（实测 ~0.09s）
     # 算法服务。cv2 在 grader.py 里一律函数体内 import（规范 §2 通路 2）——它经 `service`
     # 被 `routers/algorithm.py` 模块级 import，挪回顶层会让这条连同 `app.main` 一起红。
     # numpy 不在 HEAVY 里，grader 顶层的 `import numpy` 不受这条约束。
@@ -148,7 +152,7 @@ LAYER_PACKAGES = {
     # `app/services/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。
     # 服务只抛自己的具名异常（ValueError / KeyError 子类），翻成 HTTP 是 `routers/` 的活。
     "app/services/algorithm": ("app.services.algorithm",),
-    # 服务层工具：多个 service / router 都要、但不属于任何一个的无状态纯函数。它可以向下
+    # 服务层工具：多个 service / router 都要、但不属于任何一个的通用能力。它可以向下
     # 依赖数据层与基建，但**不得 import 任何兄弟 service 包** —— 破了它，本包就成了
     # service → service 依赖的后门：lab 想调 traceback 的东西，在这里加个转发函数就绕过去
     # 了，而 test_singleton_reference_surface 只盯单例、看不见这种转发。
@@ -156,7 +160,7 @@ LAYER_PACKAGES = {
     # 注意 "app.services.utils" 作为白名单前缀**不会**放行 "app.services.lab"：检查是
     # `name == ok or name.startswith(ok + ".")`，兄弟包差的正是那个点。
     "app/services/utils": (
-        "app.services.utils", "app.storage", "app.types", "app.utils", "app.settings",
+        "app.services.utils", "app.storage", "app.types", "app.settings",
     ),
 }
 

@@ -286,7 +286,7 @@ class GatewayMiddleware:
         with self._init_lock:
             if self._initialized:
                 return
-            from app.settings import settings as s
+            from .settings import settings as s
 
             self._whitelist = IPWhitelistStore(
                 allowed=s.allowed_ips_set,
@@ -329,7 +329,7 @@ class GatewayMiddleware:
             await self._app(scope, receive, send)
             return
 
-        from app.settings import settings
+        from .settings import settings
         if not settings.gateway_enabled:
             await self._app(scope, receive, send)
             return

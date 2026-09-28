@@ -19,7 +19,7 @@ from app.types.exceptions import (
     StreamConnectionError,
 )
 from app.utils.executor import Action, ExecutionPolicy, GuardedExecutor
-from app.utils.metrics import (
+from app.services.utils.metrics import (
     gpu_oom_total,
     retry_total,
 )

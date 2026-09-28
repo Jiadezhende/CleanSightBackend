@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 from app.types.detection import FrameDetection
 from app.services.inference.online.types import DetectionTask
 from .stage_worker import run_stages
-from app.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
+from app.services.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 if TYPE_CHECKING:
     from app.services.client import ClientQueues

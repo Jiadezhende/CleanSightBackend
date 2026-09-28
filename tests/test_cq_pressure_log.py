@@ -12,7 +12,7 @@ import time
 import pytest
 from factories import make_cq, make_frame
 
-from app.utils.pressure import PRESSURE_LOGGER_NAME as CQ_LOGGER
+from app.services.utils.pressure import PRESSURE_LOGGER_NAME as CQ_LOGGER
 
 
 def _lines(caplog, resource=None):

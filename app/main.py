@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .utils.gateway import GatewayMiddleware
+from .gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from .routers import admin, ai, api, health, lab, media, task, algorithm, traceback as traceback_router
@@ -25,7 +25,7 @@ from .types.exceptions import (
     StreamConnectionError,
     ValidationError,
 )
-from .utils.metrics import get_metrics
+from .services.utils.metrics import get_metrics
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

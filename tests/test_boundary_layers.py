@@ -2,7 +2,7 @@
 测试边界层异常处理
 
 4 个边界层：
-1. guarded_run() - worker 线程自愈（app/utils/worker_guard.py，边界层 1）
+1. guarded_run() - worker 线程自愈（app/services/utils/worker_guard.py，边界层 1）
 2. GuardedExecutor - 框架边界层（边界层 2）
 3. FastAPI 全局处理器 - HTTP 边界层（边界层 3）
 4. main() - 顶层 Fail-Fast（边界层 4）

@@ -17,13 +17,13 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 from app.services.client import ClientManager, client_manager
 from app.services.inference.online.types import DetectionTask
-from app.utils.metrics import frame_drop_total
-from app.utils.pressure import (
+from app.services.utils.metrics import frame_drop_total
+from app.services.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
     REASON_QUEUE_HIGH_WATERMARK,
     PressureReporter,
 )
-from app.utils.worker_guard import guarded_run
+from app.services.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class StageAwareDispatcher:
         """采一次各 stage deque 的压力快照，交给 per-stage PressureReporter 按周期打。
 
         本方法只做两件事：锁内取标量快照、锁外喂 reporter。限频与 drop/reject delta 记账
-        都在 PressureReporter 里（见 app/utils/pressure.py）。
+        都在 PressureReporter 里（见 app/services/utils/pressure.py）。
 
         **只报自己拥有的资源**：stage deque 是本类独有的积压点（proxy 拒收时帧留在这里、
         满了静默淘汰最旧帧）。ca_processed 由 ClientQueues 在其 append 内自报，本类不代劳。

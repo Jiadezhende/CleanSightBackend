@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from app.types.run import RunIdentity
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.types.exceptions import ConflictError
-from app.utils.task_queue import SerialTaskQueue
+from app.services.utils.task_queue import SerialTaskQueue
 
 logger = logging.getLogger(__name__)
 

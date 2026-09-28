@@ -9,7 +9,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from .worker import VisualizationWorker
-from app.utils.worker_guard import guarded_run
+from app.services.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 

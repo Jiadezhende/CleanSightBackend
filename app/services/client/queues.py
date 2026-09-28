@@ -18,8 +18,8 @@ from app.types.alarm import Alarm
 from app.types.detection import FrameDetection
 from app.types.frame import Frame
 from app.types.run import RunIdentity
-from app.utils.metrics import frame_drop_total
-from app.utils.pressure import (
+from app.services.utils.metrics import frame_drop_total
+from app.services.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
     REASON_QUEUE_HIGH_WATERMARK,
     PressureReporter,

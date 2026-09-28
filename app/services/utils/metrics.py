@@ -174,7 +174,7 @@ def get_metrics() -> bytes:
 
     示例：
         from fastapi import Response
-        from app.utils.metrics import get_metrics
+        from app.services.utils.metrics import get_metrics
 
         @app.get("/metrics")
         def metrics():
