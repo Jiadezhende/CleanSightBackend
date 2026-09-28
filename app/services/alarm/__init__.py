@@ -1,5 +1,5 @@
 """
-告警服务：批量告警信息上报 + 存储目录 TTL 清理
+告警服务：批量告警信息上报
 
 HLS 落盘不在本服务：写侧是 `app.services.recording` → `app.storage.hls`。
 

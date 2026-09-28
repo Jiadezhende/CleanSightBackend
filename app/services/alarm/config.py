@@ -1,5 +1,6 @@
 """
-告警服务配置模型
+告警服务配置模型：读 `config/persistence_config.yaml` 的 `alarm` 段
+（同文件 `storage` 段归 `app.daemons.cleanup.config`）
 
 支持从YAML文件加载配置，提供默认值
 """
@@ -23,23 +24,9 @@ class AlarmConfig:
 
 
 @dataclass
-class StorageConfig:
-    """存储配置
-
-    注意：base_dir 已上移到 settings.storage_base_dir（单一真源），不在此定义；
-    此处仅保留清理策略参数。
-    """
-
-    enable_cleanup: bool = False
-    cleanup_days: int = 7
-    cleanup_interval_seconds: int = 3600
-
-
-@dataclass
 class AlarmServiceConfig:
     """告警服务配置（统一入口）"""
 
-    storage: StorageConfig = field(default_factory=StorageConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
 
     @classmethod
@@ -91,20 +78,8 @@ class AlarmServiceConfig:
         """
         # yaml 由 git 跟踪、每次部署整仓覆盖为干净版，磁盘不会残留已废字段；
         # 故不做字段过滤——真出未知字段就让它响亮地崩，别静默吞。
-        storage = StorageConfig(**config_dict.get("storage", {}))
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
-        return cls(storage=storage, alarm=alarm)
-
-    @property
-    def storage_base_dir(self) -> Path:
-        """存储根目录（绝对路径）——委托 settings 单一真源。
-
-        历史上各服务各自解析此路径，现统一收敛到 settings.storage_base_dir，
-        alarm / inference / traceback 三方同源，消除分叉与跨服务 push。
-        """
-        from app.settings import settings
-
-        return settings.storage_base_dir
+        return cls(alarm=alarm)
 
     # 扁平访问器（service 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
     @property
@@ -115,33 +90,15 @@ class AlarmServiceConfig:
     def alarm_queue_size(self) -> int:
         return self.alarm.queue_size
 
-    @property
-    def enable_cleanup(self) -> bool:
-        return self.storage.enable_cleanup
-
-    @property
-    def cleanup_days(self) -> int:
-        return self.storage.cleanup_days
-
-    @property
-    def cleanup_interval_seconds(self) -> int:
-        return self.storage.cleanup_interval_seconds
-
     def _log_loaded_config(self):
         """输出加载的配置（启动时显示）"""
         # DEBUG级别显示详细配置
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("========== Alarm配置 ==========")
-            logger.debug("存储: base_dir=%s", self.storage_base_dir)
             logger.debug(
                 "告警: workers=%d, queue=%d",
                 self.alarm.workers,
                 self.alarm.queue_size,
-            )
-            logger.debug(
-                "清理: enabled=%s, days=%d",
-                self.storage.enable_cleanup,
-                self.storage.cleanup_days,
             )
             logger.debug("=====================================")
 

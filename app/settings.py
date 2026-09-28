@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     cuda_device: str = "0"
 
     # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
-    # 落盘读写经 app/storage/utils/root.py 解析它；alarm / traceback / lab 的旧代码直读，
+    # 落盘读写经 app/storage/utils/root.py 解析它；cleanup / traceback / lab 的旧代码直读，
     # 不再各自重算或互相 push（消除跨服务穿透）。
     storage_dir: str = "./database"
 
@@ -180,7 +180,7 @@ class Settings(BaseSettings):
         """持久化存储根目录（绝对路径，单一真源）。
 
         相对路径以项目根为基，避免读写两侧因进程 cwd 不同而分叉到不同目录。
-        alarm / inference / traceback 三方都读此值。
+        cleanup / inference / traceback 三方都读此值。
         """
         p = Path(self.storage_dir)
         if p.is_absolute():

@@ -2,7 +2,7 @@
 告警服务 - 统一调度告警上报任务
 
 职责：
-- 管理告警 Worker Pool 与存储 TTL 清理 Worker
+- 管理告警 Worker Pool
 - 接收告警上报请求并入队
 - 监控告警队列和性能指标
 
@@ -14,7 +14,6 @@ import queue
 from typing import Any, Dict, Optional
 
 from .alarm_worker import AlarmWorkerPool
-from .cleanup_worker import StorageCleanupWorker
 from .config import AlarmServiceConfig
 from .types import AlarmReportTask
 
@@ -46,21 +45,10 @@ class AlarmService:
             num_workers=self.config.alarm_workers,
         )
 
-        # 存储清理 Worker（按配置条件创建）
-        self._cleanup_worker: StorageCleanupWorker | None = None
-        if self.config.enable_cleanup:
-            self._cleanup_worker = StorageCleanupWorker(
-                db_dir=self.config.storage_base_dir,
-                cleanup_days=self.config.cleanup_days,
-                interval_seconds=self.config.cleanup_interval_seconds,
-            )
-
     def start(self):
-        """启动告警服务（告警池 + TTL 清理）。"""
+        """启动告警服务（告警池）。"""
         logger.info("[AlarmService] 启动告警服务")
         self.alarm_pool.start()
-        if self._cleanup_worker:
-            self._cleanup_worker.start()
 
     def stop(self, timeout: float = 10.0):
         """停止告警服务（优雅关闭）。"""
@@ -68,8 +56,6 @@ class AlarmService:
 
         # 停止Worker池（会等待队列清空）
         self.alarm_pool.stop(timeout=timeout)
-        if self._cleanup_worker:
-            self._cleanup_worker.stop(timeout=5.0)
 
     # ========== 告警上报API ==========
 

@@ -36,11 +36,13 @@ app/
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
 │   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
-│   ├── alarm/           # 告警上报 + TTL 清理（HLS 写侧已迁 recording/）
+│   ├── alarm/           # 告警上报（队列 + worker 池 + 重试）
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunController）
 │   ├── traceback/       # 溯源段定位 + 媒体 token 鉴权
 │   ├── lab/             # 送标裁剪 + Label Studio 上传
 │   └── algorithm/       # 无状态算法服务（试纸比色），与主流程无关，只被 /algorithm/* 调用
+├── daemons/
+│   └── cleanup/         # 存储 TTL 清理（按时钟自驱，只依赖 storage）
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
 ├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 deploy skill
 └── utils/               # 日志装饰器

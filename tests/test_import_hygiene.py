@@ -121,6 +121,9 @@ BUDGET = {
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
     "app.services.alarm":       (set(), 1.0),
+    # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
+    "app.daemons":              (set(), 0.20),
+    "app.daemons.cleanup":      (set(), 0.20),
     # recording 登记两条：包名那条是门面型（浅，基本只有 docstring），真正的守门人是
     # `service` —— 它 import `app.storage.hls`，cv2 一旦从 `_encode` 的函数体挪到模块级，
     # 这条会先红。
@@ -172,6 +175,7 @@ SINGLETONS = {
     "inference_manager": "app.services.inference.online.instance",
     "offline_job_service": "app.services.inference.offline.instance",
     "alarm_service": "app.services.alarm.instance",
+    "cleanup_worker": "app.daemons.cleanup.instance",
     "recording_service": "app.services.recording.instance",
     "health_monitor": "app.services.health_monitor.instance",
     "run_controller": "app.services.run_control",
