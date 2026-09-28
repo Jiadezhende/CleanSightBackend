@@ -36,7 +36,7 @@ class GlobalHealthMonitor:
         self,
         client_manager=None,
         stream_service=None,
-        inference_manager=None,
+        inference_service=None,
         config: Optional[HealthMonitorConfig] = None,
         recording_service=None,
     ):
@@ -50,14 +50,14 @@ class GlobalHealthMonitor:
         Args:
             client_manager: ClientManager 实例，None 时 start() 取全局单例
             stream_service: StreamService 实例，None 时 start() 取全局单例
-            inference_manager: InferenceManager 实例，None 时 start() 取全局单例
+            inference_service: InferenceService 实例，None 时 start() 取全局单例
             config: 健康监控配置，None 时 start() 读 yaml
             recording_service: RecordingService 实例，None 时 start() 取全局单例。
                 本模块只用它一个方法：断流时登记残帧 flush（见 `_enter_reconnect_mode`）
         """
         self._client_manager = client_manager
         self._stream_service = stream_service
-        self._inference_manager = inference_manager
+        self._inference_service = inference_service
         self._recording_service = recording_service
 
         # 配置：各阈值一律在用处直读 `self.config.*`，**不在此摊成同名实例属性**。
@@ -167,10 +167,10 @@ class GlobalHealthMonitor:
             from app.services.stream.instance import stream_service
 
             self._stream_service = stream_service
-        if self._inference_manager is None:
-            from app.services.inference.online.instance import inference_manager
+        if self._inference_service is None:
+            from app.services.inference.online.instance import inference_service
 
-            self._inference_manager = inference_manager
+            self._inference_service = inference_service
         if self._recording_service is None:
             from app.services.recording.instance import recording_service
 
@@ -420,7 +420,7 @@ class GlobalHealthMonitor:
         职责边界：
         - 这是唯一的清理入口点
         - 所有清理操作（API、健康监控、孤儿流）都通过此方法
-        - 协调三个模块的清理：StreamService + InferenceManager + ClientManager
+        - 协调三个模块的清理：StreamService + InferenceService + ClientManager
 
         Args:
             task_id: 客户端ID
@@ -595,7 +595,7 @@ class GlobalHealthMonitor:
 
         职责边界：
         - 健康监控负责系统级别的状态汇总
-        - 整合来自多个模块的信息（ClientManager、StreamService、InferenceManager）
+        - 整合来自多个模块的信息（ClientManager、StreamService、InferenceService）
         - 提供统一的系统状态视图
 
         Returns:

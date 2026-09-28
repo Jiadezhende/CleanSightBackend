@@ -172,7 +172,7 @@ class TestIds:
 
     def test_skips_non_id_entries(self, tmp_storage):
         """存储根下不只有数字 task 目录：lab 导出临时根 `.lab_exports/`（clip_builder /
-        step_exporter）与送标运行时配置 `lab_runtime_config.json`（services/lab/config）都寄居
+        step_exporter）与送标运行时配置 `lab_runtime_config.json`（services/lab/runtime_config）都寄居
         于此，外加误建的目录——一律跳过，不报错。"""
         _seed_run(tmp_storage, 1, 1, 1)
         (tmp_storage / ".lab_exports").mkdir()

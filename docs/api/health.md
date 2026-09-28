@@ -65,7 +65,7 @@
 
 **分类互斥关系**：`total_clients = active_streams + reconnecting + orphan_streams`（`orphan_decoders` 统计的是「有解码器但无队列」，不在这条等式里，因为它不属于「有队列的客户端」）。
 
-> **不包含 `queues` 字段。** `/health/status` 的响应**只有** `clients` 和 `monitor_stats` 两块（见 `monitor.py` `get_system_status()`），没有各客户端逐条队列深度（`raw_queue_size` / `ready_queue_size` 等）。要逐客户端队列详情走别的途径（`/admin` 相关端点或 InferenceManager 统计），别指望这里有。
+> **不包含 `queues` 字段。** `/health/status` 的响应**只有** `clients` 和 `monitor_stats` 两块（见 `monitor.py` `get_system_status()`），没有各客户端逐条队列深度（`raw_queue_size` / `ready_queue_size` 等）。要逐客户端队列详情走别的途径（`/admin` 相关端点或 InferenceService 统计），别指望这里有。
 >
 > `monitor_stats` 里**没有** `reconnecting_count`（那是 `/monitor/stats` 独有的），这里只给 `reconnecting_clients` 列表——数量自己取 `.length`。
 

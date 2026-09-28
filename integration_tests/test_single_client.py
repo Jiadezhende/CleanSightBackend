@@ -671,7 +671,7 @@ def run_scenario_9(args):
     同一任务先以 current_step=1（LEAK）启动，运行一段时间后将 DB 中 current_step 改为 2，
     再次调用 /api/start，验证：
       1. 第二次 start 不会幂等返回（step 变化触发全量重建）
-      2. 后端切换到 CLEAN stage（stage 字段由 InferenceManager 根据 current_step 路由）
+      2. 后端切换到 CLEAN stage（stage 字段由 InferenceService 根据 current_step 路由）
       3. 流保持连续推送，两次 start 都成功
 
     验证点（后端日志关键字）：

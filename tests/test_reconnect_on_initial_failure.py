@@ -69,7 +69,7 @@ def _make_monitor(
     return GlobalHealthMonitor(
         client_manager=mock_cm,
         stream_service=mock_ss,
-        inference_manager=MagicMock(),
+        inference_service=MagicMock(),
         config=config,
         recording_service=MagicMock(),
     )

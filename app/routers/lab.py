@@ -41,19 +41,21 @@ from app.db.database import get_db
 from app.types.run import RunIdentity
 from app.types.temporal import TemporalSegment
 from app.db.tasks import DBTask
-from app.services.lab import (
+from app.services.lab import runtime_config as lab_config
+from app.services.lab.clip_builder import (
     ClipBuilder,
     ClipBuildError,
     ClipRangeGapError,
     ClipRangeOutOfBoundsError,
     ClipSpec,
-    LabelStudioClient,
+)
+from app.services.lab.label_studio_client import LabelStudioClient
+from app.services.lab.step_exporter import (
     StepExporter,
     StepExportError,
     StepExportInitMissing,
     StepExportNoSegments,
 )
-from app.services.lab import config as lab_config
 from app.services.utils.media_timeline import MediaTimeline
 from app.storage import hls
 from app.storage import inference as inference_store

@@ -169,7 +169,7 @@ LAYER_PACKAGES = {
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",
-    "inference_manager": "app.services.inference.online.instance",
+    "inference_service": "app.services.inference.online.instance",
     "offline_job_service": "app.services.inference.offline.instance",
     "persistence_manager": "app.services.persistence.instance",
     "recording_service": "app.services.recording.instance",

@@ -5,7 +5,7 @@
 
 按规范 §6，本单例只许被 `run_control` / `routers/*` / 本包 `lifespan()` 引用，外加一处
 具名例外：`health_monitor/manager.py` 断流时要调 `request_residual_flush`（门禁
-`test_singleton_reference_surface`）。包内的 `_sweeper` **不** import 它——服务把自己
+`test_singleton_reference_surface`）。包内的 `sweep_worker` **不** import 它——服务把自己
 注入给 sweeper，方向向下。
 """
 

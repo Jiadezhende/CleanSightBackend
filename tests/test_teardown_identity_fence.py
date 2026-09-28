@@ -41,7 +41,7 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
 
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.inference_service") as mock_inf,
         patch("app.services.run_control.recording_service"),
     ):
         mock_inf.stop_workflow.side_effect = capture_state
@@ -67,7 +67,7 @@ def test_stop_run_flushes_residual_while_cq_still_registered(_clean_registry):
 
     with (
         patch("app.services.run_control.stream_service"),
-        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.inference_service") as mock_inf,
         patch("app.services.run_control.recording_service") as mock_recording,
     ):
         mock_inf.stop_workflow.return_value = []
@@ -90,7 +90,7 @@ def test_stop_run_expected_hit_tears_down(_clean_registry):
 
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.inference_service") as mock_inf,
         patch("app.services.run_control.recording_service"),
     ):
         result = run_controller.stop_run(tid, reason="hm", expected=cq)
@@ -112,7 +112,7 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
 
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.inference_manager") as mock_inf,
+        patch("app.services.run_control.inference_service") as mock_inf,
         patch("app.services.run_control.recording_service") as mock_recording,
     ):
         # HM 过期决策：拿着旧 cq 来拆，但槽位已换新

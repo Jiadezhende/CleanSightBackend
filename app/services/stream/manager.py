@@ -189,7 +189,7 @@ class StreamService:
 
         注意：
         - decoder 进程的停止是异步的（避免阻塞 API 响应）
-        - ClientManager 由 InferenceManager 统一清理
+        - ClientManager 由 InferenceService 统一清理
 
         Args:
             task_id: 运行键（路由标识）

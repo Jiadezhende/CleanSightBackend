@@ -39,7 +39,7 @@ from app.types.run import RunIdentity
 from app.storage import hls, inference
 from app.services.utils.task_queue import SerialTaskQueue
 
-from ._sweeper import SegmentSweeper
+from .sweep_worker import SegmentSweeper
 from .config import RecordingConfig, get_recording_config
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class RecordingService:
         # 跟着一起被背压丢。两条各自单消费线程，"提交序 = 执行序"在各自内部成立。
         self._hls_queue: Optional[SerialTaskQueue] = None
         self._detection_queue: Optional[SerialTaskQueue] = None
-        self._sweeper: Optional[SegmentSweeper] = None
+        self._sweep_worker: Optional[SegmentSweeper] = None
 
         # (task_id, step_id) → (cq, fence_ts)：断流时挂起的「把这一刻之前的残帧切出来」请求。
         #
@@ -133,12 +133,12 @@ class RecordingService:
             _DETECTION_QUEUE_NAME, maxsize=self.config.queue_size
         )
         self._detection_queue.start()
-        self._sweeper = SegmentSweeper(
+        self._sweep_worker = SegmentSweeper(
             clients=self._clients,
             service=self,
             interval_seconds=self.config.sweep_interval_seconds,
         )
-        self._sweeper.start()
+        self._sweep_worker.start()
         logger.info("[recording] 已启动")
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -148,9 +148,9 @@ class RecordingService:
         会在队列停机后继续拉，那些产物提交被拒、数据已经从 CQ 弹出去了 —— 真丢。
         两条队列之间没有顺序要求（写的是不同域的不同文件）。
         """
-        if self._sweeper is not None:
-            self._sweeper.stop(timeout=5.0)
-            self._sweeper = None
+        if self._sweep_worker is not None:
+            self._sweep_worker.stop(timeout=5.0)
+            self._sweep_worker = None
         if self._hls_queue is not None:
             self._hls_queue.stop(timeout=timeout)
             self._hls_queue = None
@@ -273,7 +273,7 @@ class RecordingService:
         **④ 与 ①②③ 之间没有顺序约束**：detections 走另一条队列、写另一个域的另一个文件，
         与段的媒体轴无关。放最后只是因为它最不紧急。
 
-        **这套顺序属于本服务，不属于定时器**：`_sweeper` 只负责"每隔 1 秒对每个活跃 CQ 调
+        **这套顺序属于本服务，不属于定时器**：`sweep_worker` 只负责"每隔 1 秒对每个活跃 CQ 调
         一次本方法"，它不必知道挂起请求是什么、也不必知道上面那条不变式。
 
         运行期本方法是 CQ 的唯一 drain 者，所以它只能被 sweeper 那一个线程调
@@ -325,7 +325,7 @@ class RecordingService:
     def _take_pending_flush(self, cq) -> Optional[float]:
         """取走该 CQ 挂起的 flush 栅栏（一次性）；没有则 `None`。
 
-        **包内私有**，唯一消费者是 `collect_from`。它曾经公开、由 `_sweeper` 直接调——那让
+        **包内私有**，唯一消费者是 `collect_from`。它曾经公开、由 `sweep_worker` 直接调——那让
         定时器知道了「挂起请求」这回事，连带把「先整段后残段」的顺序不变式也搬进了定时器，
         而那条不变式成立的理由（tfdt = 执行时读到的累计 EXTINF）整个是本模块的事。
 
