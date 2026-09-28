@@ -7,7 +7,7 @@
 #   python -m app.services.algorithm.colorstrip.cli 某张图.jpg -p warm_light
 #   HTTP：POST /algorithm/colorstrip（可选 ?profile=档名），见 docs/api/algorithm.md
 #
-# 验收工装（不在仓库里，样本太大）：app/services/temp/colorstrip/
+# 验收工装（不在仓库里，样本太大）：ref/colorstrip/
 #   python stats.py --dir 新样本目录 -p warm_light   # 看新场景下各角色的颜色区间与余量
 #   python acceptance.py                            # 门禁恒用 default 档
 #

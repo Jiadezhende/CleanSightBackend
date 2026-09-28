@@ -11,8 +11,8 @@ import logging
 from typing import List, Tuple
 
 from app.services.inference.online.temporal.operator import Operator
-from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.domain.detection import DetectorOutput, FrameDetection
+from app.types.alarm import Alarm, AlarmMetric, AlarmType
+from app.types.detection import DetectorOutput, FrameDetection
 
 logger = logging.getLogger(__name__)
 

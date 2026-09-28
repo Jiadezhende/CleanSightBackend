@@ -10,7 +10,7 @@
 
 测试覆盖：
   1. StreamService：start() 失败后 decoder 必须仍在 self.decoders（供监控接管）
-  2. GlobalHealthMonitor：进程死 → 重连路径；进程活 → 不重连；未注册 → orphan 路径
+  2. HealthMonitorWorker：进程死 → 重连路径；进程活 → 不重连；未注册 → orphan 路径
   3. 完整状态机：进程死 → respawn → 来帧退出重连
   4. 放弃：无帧超 cleanup_timeout → cleanup（时间触发，非次数）
   5. 对象身份 fence：槽位被 /start 换新 run 时放弃重连
@@ -21,10 +21,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.health_monitor.config import HealthMonitorConfig
-from app.services.health_monitor.manager import GlobalHealthMonitor
-from app.services.stream.manager import StreamService
-from app.utils.exceptions import FFmpegError
+from app.daemons.health_monitor.config import HealthMonitorConfig
+from app.daemons.health_monitor.worker import HealthMonitorWorker
+from app.services.stream.service import StreamService
+from app.types.exceptions import FFmpegError
 
 
 # ===========================================================================
@@ -37,8 +37,8 @@ def _make_monitor(
     active_decoder_ids: set,
     *,
     decoder_alive: bool = True,
-) -> GlobalHealthMonitor:
-    """构建一个带 mock 依赖的 GlobalHealthMonitor，用于单元测试。
+) -> HealthMonitorWorker:
+    """构建一个带 mock 依赖的 HealthMonitorWorker，用于单元测试。
 
     Args:
         client_id: 被测客户端 ID
@@ -66,10 +66,10 @@ def _make_monitor(
         task_max_duration=0.0,  # 禁用任务超时，避免干扰
     )
 
-    return GlobalHealthMonitor(
-        client_manager=mock_cm,
+    return HealthMonitorWorker(
+        client_service=mock_cm,
         stream_service=mock_ss,
-        inference_manager=MagicMock(),
+        inference_service=MagicMock(),
         config=config,
         recording_service=MagicMock(),
     )
@@ -87,7 +87,7 @@ class TestDecoderRegistration:
         self.client_id = "reconnect_test_client"
 
     def _start_with_failing_decoder(self, error):
-        with patch("app.services.stream.manager.FFmpegDecoder") as MockDecoder, \
+        with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
                  self.service, "_get_client_queues", return_value=MagicMock()
              ):
@@ -133,7 +133,7 @@ class TestDecoderRegistration:
 
 
 # ===========================================================================
-# Part 2：GlobalHealthMonitor — 进程死活判据（重连 vs 只等 vs orphan）
+# Part 2：HealthMonitorWorker — 进程死活判据（重连 vs 只等 vs orphan）
 # ===========================================================================
 
 class TestHealthMonitorReconnectPath:
@@ -368,7 +368,7 @@ class TestReconnectIdentityFence:
 
         # 模拟 /start 抢占重启：槽位换成全新 cq_B
         cq_b = self._cq()
-        monitor._client_manager.snapshot.return_value = {client_id: cq_b}
+        monitor._client_service.snapshot.return_value = {client_id: cq_b}
 
         # Round 2：当前 cq(cq_B) 非捕获的 cq_A → 放弃重连，且不对新 run 发起 restart
         monitor._stream_service.restart_stream.reset_mock()

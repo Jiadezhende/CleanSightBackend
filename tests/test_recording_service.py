@@ -16,9 +16,9 @@ from pathlib import Path
 import pytest
 
 import factories
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.recording import service as recording_service_module
-from app.services.recording._sweeper import SegmentSweeper
+from app.services.recording.sweep_worker import SegmentSweeper
 from app.services.recording.config import RecordingConfig
 from app.services.recording.service import RecordingService
 from app.settings import settings

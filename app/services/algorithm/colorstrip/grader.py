@@ -14,7 +14,7 @@
   `docs/update/20260920_COLORSTRIP_API.md` 的「已知缺口」。
 
 阈值取值与调参规矩在 [params.yaml](params.yaml) 的注释里（本文件不留默认值副本）；
-判据由来、对抗用例与已知缺陷见验收工装的 REPORT.md（`app/services/temp/colorstrip/`，不在仓库）。
+判据由来、对抗用例与已知缺陷见验收工装的 REPORT.md（`ref/colorstrip/`，不在仓库）。
 """
 from __future__ import annotations
 

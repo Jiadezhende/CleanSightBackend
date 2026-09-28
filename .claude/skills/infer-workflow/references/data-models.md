@@ -1,9 +1,9 @@
 # 数据模型速查
 
-构造对象时照抄字段，不要臆造。契约分散在 `app/domain/`：检测 [detection.py](../../../../app/domain/detection.py)、告警 [alarm.py](../../../../app/domain/alarm.py)、渲染 [render.py](../../../../app/domain/render.py)。
+构造对象时照抄字段，不要臆造。契约分散在 `app/types/`：检测 [detection.py](../../../../app/types/detection.py)、告警 [alarm.py](../../../../app/types/alarm.py)、渲染 [render.py](../../../../app/services/inference/online/render.py)。
 
 ```python
-# ── 检测（Detector 产出）── app.domain.detection
+# ── 检测（Detector 产出）── app.types.detection
 DetBox(bbox=[x1, y1, x2, y2], confidence=0.9, class_id=0, class_name="bubble",
        extra={...})                             # extra 可选（单框派生量，不落盘）
 
@@ -14,7 +14,7 @@ DetectorOutput(                                 # 一个检测器 × 一帧的�
     success=True, error=None,
 )
 
-# ── 告警（Operator.judge 实时上升沿 / finalize 结算时产出）── app.domain.alarm
+# ── 告警（Operator.judge 实时上升沿 / finalize 结算时产出）── app.types.alarm
 Alarm(
     alarm_type=AlarmType.PROCESS_VIOLATION,     # PROCESS_VIOLATION="流程违规" / TASK_TIMEOUT
     alarm_level="high",                         # "low" / "medium" / "high" / "critical" / "warning"
@@ -23,7 +23,7 @@ Alarm(
     metadata={...},                             # 触发证据，落库 detection_result
 )                                               # mode/stage/seq/timestamp 落库时自动补，别填
 
-# ── 渲染（prepare_visualization_data 返回）── app.domain.render
+# ── 渲染（prepare_visualization_data 返回）── app.services.inference.online.render
 RenderSpec(type=RenderType.BBOX, items=[RenderItem(...), ...],
            status_text="...", status_color=(B, G, R), status_position="top-right")
 RenderItem(bbox=[x1, y1, x2, y2], label="...", confidence=0.9, color=(B, G, R))  # 颜色 BGR

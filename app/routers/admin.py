@@ -11,11 +11,11 @@ from typing import Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from app.services.client.manager import client_manager
+from app.services.client.instance import client_service
 from app.services.inference.offline.instance import offline_job_service
-from app.utils.exceptions import NotFoundError
+from app.types.exceptions import NotFoundError
 
-from ._runs import resolve_run
+from .utils.runs import no_run, resolve_run
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def _client_info(client_id: int, client_queues) -> dict:
 
 
 def _parse_metrics_json() -> dict:
-    """从 Prometheus REGISTRY 提取 5 个核心指标，返回结构化 JSON。"""
+    """从 Prometheus REGISTRY 提取 4 个核心指标，返回结构化 JSON。"""
     from prometheus_client import REGISTRY
 
     # 按 metric family 名聚合
@@ -99,13 +99,7 @@ def _parse_metrics_json() -> dict:
             total_drop += sample.value
         result["frame_drop_total"] = {"total": int(total_drop), "by_reason": by_reason}
 
-    # 4. GPU OOM Counter（family 名去 _total）
-    oom_fam = families.get("gpu_oom")
-    if oom_fam:
-        total_oom = sum(s.value for s in oom_fam.samples if s.name.endswith("_total"))
-        result["gpu_oom_total"] = int(total_oom)
-
-    # 5. 重试 Counter（family 名去 _total）
+    # 4. 重试 Counter（family 名去 _total）
     retry_fam = families.get("retry")
     if retry_fam:
         by_op: dict = {}
@@ -155,7 +149,7 @@ def get_overview():
     换键后注册表键即 task_id，一条目 = 一个活跃 run；响应键 `clients`/`client_id`
     沿用旧名（admin 页 wire，值为 task_id），语义已是 run/任务。
     """
-    all_clients = client_manager.snapshot()
+    all_clients = client_service.snapshot()
     clients_info = [_client_info(cid, q) for cid, q in all_clients.items()]
     total_queued = sum(
         d["queue_depths"].get("ca_ready", 0)
@@ -177,16 +171,16 @@ def get_clients():
 
     一 run 一 CQ = `registry[task_id]`；响应/路径的 `clients`·`client_id` 为 admin 页 wire 旧名（值=task_id）。
     """
-    all_clients = client_manager.snapshot()
+    all_clients = client_service.snapshot()
     return [_client_info(cid, q) for cid, q in all_clients.items()]
 
 
 @router.get("/clients/{client_id}/alarms")
 def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
     """从内存告警日志读取该 run（task_id）最近 n 条告警（不走 DB）。"""
-    if not client_manager.has_client(client_id):
+    if not client_service.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
-    cq = client_manager.get(client_id)
+    cq = client_service.get(client_id)
     alarms = cq.get_recent_alarms(n=n)
     return {
         "client_id": client_id,
@@ -208,7 +202,7 @@ def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
 
 @router.get("/metrics/json")
 def get_metrics_json():
-    """Prometheus 5 个核心指标结构化为 JSON，前端每 5s 刷新。"""
+    """Prometheus 4 个核心指标结构化为 JSON，前端每 5s 刷新。"""
     try:
         return _parse_metrics_json()
     except Exception as exc:
@@ -232,13 +226,6 @@ class OfflineJobRequest(BaseModel):
     run_id: Optional[int] = None  # 锁定哪个 run；缺省 = 该 step 最新可见 run
 
 
-def _no_run(task_id: int, step_id: int) -> NotFoundError:
-    return NotFoundError(
-        f"no visible run for task {task_id} step {step_id}",
-        resource_type="Run", resource_id=f"task={task_id},step={step_id}",
-    )
-
-
 @router.post("/offline/jobs", status_code=202)
 def submit_offline_job(req: OfflineJobRequest):
     """提交一个离线推理作业，锁定一个 run；同一 run 已在排队 / 运行时返回在途那个。
@@ -248,7 +235,7 @@ def submit_offline_job(req: OfflineJobRequest):
     offline_job_service.require_offline(req.step_id)
     run = resolve_run(req.task_id, req.step_id, req.run_id)
     if run is None:
-        raise _no_run(req.task_id, req.step_id)
+        raise no_run(req.task_id, req.step_id)
     return offline_job_service.submit(run).to_dict()
 
 

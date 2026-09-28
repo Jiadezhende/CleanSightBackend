@@ -5,7 +5,7 @@
     read_label_probs(run)             回读逐帧类别概率；没有则 None
     write_label_probs(run, probs)     整体替换（路线 C）
 
-货币都在 `app.domain.temporal`：事实是 `TemporalEvent | TemporalSegment`，逐帧概率是 `LabelProbs`。
+货币都在 `app.types.temporal`：事实是 `TemporalEvent | TemporalSegment`，逐帧概率是 `LabelProbs`。
 
 两条硬约束：
 
@@ -15,7 +15,7 @@
 - **`read_temporal` 不排序**，原样返回落盘顺序。两型没有共同时间键（`TemporalEvent.ts` 对
   `TemporalSegment.start`），层没有依据替调用方选。
 
-依赖上界：`app.domain.temporal` + numpy（`LabelProbs` 的货币）+ stdlib。
+依赖上界：`app.types.temporal` + numpy（`LabelProbs` 的货币）+ stdlib。
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
-from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.storage import _fs
-from app.domain.run import RunIdentity
+from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
+from app.storage.utils import fs as _fs
+from app.types.run import RunIdentity
 
 from . import _jsonl, _layout
 

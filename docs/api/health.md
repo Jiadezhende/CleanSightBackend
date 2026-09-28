@@ -1,6 +1,6 @@
 # `/health` — 健康与监控
 
-一组只读 GET 端点，前端用来观察后端全局健康状态：当前有多少客户端在跑、有没有流在重连、监控循环累计干了多少活。数据全部来自内存中的 `GlobalHealthMonitor` 单例（`app/services/health_monitor/monitor.py`），不查 DB、不落盘。
+一组只读 GET 端点，前端用来观察后端全局健康状态：当前有多少客户端在跑、有没有流在重连、监控循环累计干了多少活。数据全部来自内存中的 `HealthMonitorWorker` 单例（`app/daemons/health_monitor/worker.py`），不查 DB、不落盘。
 
 三个端点均无鉴权、正常返回 **200**，且**永不抛异常**：判断可用性只看 `status` 字段（`running` / `not_initialized`），不要靠 HTTP 状态码。通用约定见 [README](README.md)。
 
@@ -65,7 +65,7 @@
 
 **分类互斥关系**：`total_clients = active_streams + reconnecting + orphan_streams`（`orphan_decoders` 统计的是「有解码器但无队列」，不在这条等式里，因为它不属于「有队列的客户端」）。
 
-> **不包含 `queues` 字段。** `/health/status` 的响应**只有** `clients` 和 `monitor_stats` 两块（见 `monitor.py` `get_system_status()`），没有各客户端逐条队列深度（`raw_queue_size` / `ready_queue_size` 等）。要逐客户端队列详情走别的途径（`/admin` 相关端点或 InferenceManager 统计），别指望这里有。
+> **不包含 `queues` 字段。** `/health/status` 的响应**只有** `clients` 和 `monitor_stats` 两块（见 `worker.py` `get_system_status()`），没有各客户端逐条队列深度（`raw_queue_size` / `ready_queue_size` 等）。要逐客户端队列详情走别的途径（`/admin` 相关端点或 InferenceService 统计），别指望这里有。
 >
 > `monitor_stats` 里**没有** `reconnecting_count`（那是 `/monitor/stats` 独有的），这里只给 `reconnecting_clients` 列表——数量自己取 `.length`。
 
@@ -161,7 +161,7 @@
 | `config.cleanup_timeout` | float | 无帧多久放弃重连并执行完整清理，**秒**（默认 20.0）。**这是一等配置项，可在 YAML 直接配**（`monitor.cleanup_timeout`） |
 | `config.orphan_timeout` | float | 孤儿流空闲超时，**秒**（默认 30.0） |
 
-> **响应只有一个 `config` 块，没有 `derived` 块。** 旧版曾有 `derived` 子块（`suspect_timeout` / `cleanup_timeout` 派生量），现已删除：`cleanup_timeout` 提为一等配置项后，派生式退化成 config 的恒等副本，回显纯属冗余（见 `monitor.py` `get_monitor_config()` 注释）。
+> **响应只有一个 `config` 块，没有 `derived` 块。** 旧版曾有 `derived` 子块（`suspect_timeout` / `cleanup_timeout` 派生量），现已删除：`cleanup_timeout` 提为一等配置项后，派生式退化成 config 的恒等副本，回显纯属冗余（见 `app/routers/health.py` `get_monitor_config()` 注释）。
 >
 > **不再有 `max_reconnect_attempts`。** 重连已不数次数、无尝试上限，仅由 `cleanup_timeout`（纯时间）收口；该字段在 config 回显里也已删除。
 >

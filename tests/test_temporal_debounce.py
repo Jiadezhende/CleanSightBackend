@@ -14,8 +14,8 @@ import time
 import pytest
 
 from factories import make_detector_output, make_frame_detection
-from app.domain.alarm import AlarmType
-from app.domain.detection import FrameDetection  # 仅用于类型注解
+from app.types.alarm import AlarmType
+from app.types.detection import FrameDetection  # 仅用于类型注解
 
 
 # ========== Fixtures ==========

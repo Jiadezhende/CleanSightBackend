@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls
 
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 # 孤儿产物回收阈值：客户端中途断开时 Starlette 的 BackgroundTask 不保证跑到，
-# 需要这层兜底。`.lab_exports` 不在 StorageCleanupWorker 的扫描范围内 —— 它只认**两级都是
+# 需要这层兜底。`.lab_exports` 不在 CleanupWorker（app/daemons/cleanup）的扫描范围内 —— 它只认**两级都是
 # 十进制数字**的 `{task}/{step}/` 目录，`.lab_exports` 这个名字直接被跳过。
 # ⚠ 这是**显式依赖**：TTL 判据已换成目录 mtime（不再看 metadata.json），谁把这个临时目录
 # 改成数字名，它就会在 cleanup_days 后被当成过期 step 整个删掉，而这边不会有任何提示。

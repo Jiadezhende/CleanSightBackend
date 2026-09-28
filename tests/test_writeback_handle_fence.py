@@ -14,7 +14,7 @@ import pytest
 from factories import make_cq, make_detector_output, make_frame_detection
 from app.services.client.queues import ClientQueues
 from app.services.inference.online.detection.service import DetectionService
-from app.utils.metrics import frame_drop_total
+from app.services.utils.metrics import frame_drop_total
 
 
 def _result(cq: ClientQueues, ts: float = 1.0):

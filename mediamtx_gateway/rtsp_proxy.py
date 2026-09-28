@@ -13,7 +13,7 @@ RTSP TCP Gateway
 import asyncio
 import logging
 
-from app.utils.gateway import IPWhitelistStore, RateLimitStore
+from app.gateway import IPWhitelistStore, RateLimitStore
 
 logger = logging.getLogger(__name__)
 

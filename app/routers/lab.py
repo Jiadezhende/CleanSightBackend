@@ -14,7 +14,7 @@ Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
   `storage.tasks.list_step_ids`
 - ffmpeg **HLS demuxer**（临时 VOD 清单 + EXT-X-MAP）+ libx264 实现 ms 精度裁剪
   —— 不是 concat demuxer：fMP4 fragment 无 moov，单独 demux 解不出 codec init
-- urllib.request multipart 上传到 LS（沿用现有 alarm_strategy 的 urllib 风格）
+- urllib.request multipart 上传到 LS（沿用现有 alarm reporter 的 urllib 风格）
 
 设计要点：
 - 整个 submit 同步执行；ffmpeg + LS 上传都在请求线程里跑完
@@ -37,31 +37,33 @@ from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.background import BackgroundTask
 
-from app.database import get_db
-from app.domain.run import RunIdentity
-from app.domain.temporal import TemporalSegment
-from app.models import DBTask
-from app.services.lab import (
+from app.db.database import get_db
+from app.types.run import RunIdentity
+from app.types.temporal import TemporalSegment
+from app.db.tasks import DBTask
+from app.services.lab import runtime_config as lab_config
+from app.services.lab.clip_builder import (
     ClipBuilder,
     ClipBuildError,
     ClipRangeGapError,
     ClipRangeOutOfBoundsError,
     ClipSpec,
-    LabelStudioClient,
+)
+from app.services.lab.label_studio_client import LabelStudioClient
+from app.services.lab.step_exporter import (
     StepExporter,
     StepExportError,
     StepExportInitMissing,
     StepExportNoSegments,
 )
-from app.services.lab import config as lab_config
 from app.services.utils.media_timeline import MediaTimeline
 from app.storage import hls
 from app.storage import inference as inference_store
 from app.storage import runs
 from app.storage import tasks as step_tasks
-from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
+from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
 
-from ._runs import resolve_run
+from .utils.runs import resolve_run
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
 logger = logging.getLogger(__name__)

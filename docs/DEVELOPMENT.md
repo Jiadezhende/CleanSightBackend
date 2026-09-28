@@ -38,12 +38,12 @@
 
 ## 3. 模块内聚 + client 中台解耦
 
-各 service（stream / inference / persistence / traceback / lab …）功能内聚，只做自己的事；**不建 service 对 service 的直接依赖**。跨服务协作靠两个中台：
+各 service（stream / inference / alarm / recording / lab …）功能内聚，只做自己的事；**不建 service 对 service 的直接依赖**。跨服务协作靠两个中台：
 
-- **共享状态走 client 中台层**：跨服务需要读写的运行态统一放 `ClientManager`（COW 注册表，`int task_id` 键）+ `ClientQueues`（一次 run 的不可变身份 + 队列/快照），各服务只与 client 层打交道。
-  - client 层是**零跨服务依赖的 leaf**、哑存储：本身**不构造 CQ**，CQ 由 `RunController` 建好后 `set` 换槽。
+- **共享状态走 client 中台层**：跨服务需要读写的运行态统一放 `ClientService`（COW 注册表，`int task_id` 键）+ `ClientQueues`（一次 run 的不可变身份 + 队列/快照），各服务只与 client 层打交道。
+  - client 层是**零跨服务依赖的 leaf**、哑存储：本身**不构造 CQ**，CQ 由 `RunControlService` 建好后 `set` 换槽。
   - client 层**只吐自有词汇的原始数据**（如按流名聚合的信号）；流名 → 展示 metric 的翻译/映射**上移到 router 装配层**，不下沉进 client。
-- **跨服务起停编排走 `RunController`**：一次 run 的 start/stop/restart、per-task 锁、拆机顺序、对象身份 fence 都归 RunController，不下沉到 client 或各 service。
+- **跨服务起停编排走 `RunControlService`**：一次 run 的 start/stop/restart、per-task 锁、拆机顺序、对象身份 fence 都归 RunControlService，不下沉到 client 或各 service。
 
 判断落点的经验法则：一段逻辑若需要「知道另一个服务」，八成放错了。
 
@@ -53,7 +53,7 @@
 
 ## 4. 日志规范
 
-- **格式** `[ModuleName] message`：方括号内 **PascalCase**（`[ClientManager]`、`[InferenceService]`）；Worker 用 `[Name-N]`（`[HLSWorker-0]`）。禁止 `print()` 代替 `logger`。
+- **格式** `[ModuleName] message`：方括号内 **PascalCase**（`[ClientService]`、`[InferenceService]`）；Worker 用 `[Name-N]`（`[HLSWorker-0]`）。禁止 `print()` 代替 `logger`。
 - **参数惰性格式化**：用 `%` 占位符传参，**不用 f-string**：
   ```python
   logger.info("[StreamDecoder] Connected to %s | %dx%d", url, w, h)   # ✓
@@ -76,7 +76,7 @@
 新建检测任务、Detector、Analyzer、Judge 走 `/infer-workflow` skill（含完整模板与 checklist）。两条会**静默出错**的红线单列在此：
 
 - **`class_name` 不做归一化**：直接取自模型 `result.names`，配置/代码里的匹配串须与训练类别名严格一致——写错不报错，静默漏检。
-- **统一检测契约是 `DetBox`（单框）→ `DetectorOutput`（单检测器单帧）→ `FrameDetection`（多流对齐的整帧）**，见 [app/domain/detection.py](../app/domain/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `DetBox.extra` 或 `DetectorOutput.metadata`，时序统计交给 L3 Analyzer。
+- **统一检测契约是 `DetBox`（单框）→ `DetectorOutput`（单检测器单帧）→ `FrameDetection`（多流对齐的整帧）**，见 [app/types/detection.py](../app/types/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `DetBox.extra` 或 `DetectorOutput.metadata`，时序统计交给 L3 Analyzer。
 
 ---
 
@@ -126,10 +126,10 @@
 - **包内一律相对、跨包一律绝对**。判据是「目标是不是我这个包的后代」，不是目录深浅：
 
   ```python
-  # app/services/inference/online/manager.py
+  # app/services/inference/online/service.py
   from .config import load_stage_config              # ✓ 同目录
   from .detection.service import DetectionService    # ✓ 本包子包
-  from app.services.client.manager import client_manager   # ✓ 跨包（跨服务依赖一眼可见）
+  from app.services.client.instance import client_service   # ✓ 跨包（跨服务依赖一眼可见）
   from app.services.inference.online.naming import stream_name    # ✗ 包内却写了绝对
   ```
 

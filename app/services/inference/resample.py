@@ -14,7 +14,7 @@ from __future__ import annotations
 from statistics import median
 from typing import List, Sequence
 
-from app.domain.detection import FrameDetection
+from app.types.detection import FrameDetection
 
 _RATE_SLACK = 0.01  # strict 下限的相对余量，吸收 ts 舍入与抖动
 

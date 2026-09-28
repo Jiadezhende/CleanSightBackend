@@ -19,7 +19,7 @@ def _item(stage: str):
 
 def _make_dispatcher(submit_batch, *, batch_sizes):
     return StageAwareDispatcher(
-        client_manager_instance=MagicMock(),
+        client_service_instance=MagicMock(),
         active_stages=list(batch_sizes.keys()),
         stage_batch_sizes=batch_sizes,
         submit_batch=submit_batch,

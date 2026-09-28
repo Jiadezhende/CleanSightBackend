@@ -1,13 +1,13 @@
 """temporal.py - per-client 时序分析 Actor（流处理框架的执行上下文）。
 
 每个活跃 client 对应一个 ClientTemporalActor 实例，拥有独立线程。
-actor 由 InferenceManager 在 start_workflow() 时创建，在 stop_workflow() 时停止。
+actor 由 InferenceService 在 start_workflow() 时创建，在 stop_workflow() 时停止。
 
 职责：
 - 注册该 client 所有流算子 Operator（每个 Operator 自带共享状态机 self._sm）
 - 按固定间隔（tick_interval）执行：按 subscribes 收集各订阅流 → operator.analyze 推进状态
   → operator.judge 出告警；per-operator 异常隔离，一个算子炸不影响同 tick 其余
-- 告警 → persistence + ClientQueues.alarm_log；事实是离线概念（detections.jsonl + 离线 worker）
+- 告警 → alarm 服务 + ClientQueues.alarm_log；事实是离线概念（detections.jsonl + 离线 worker）
 - 在 finalize_and_stop() 时收集 operator 结算告警
 """
 
@@ -15,11 +15,11 @@ import logging
 import threading
 from typing import List
 
-from app.domain.alarm import ALARM_MODE_REALTIME, Alarm
+from app.types.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.online.naming import get_stage_alias
 from . import alarm_sink
 from .operator import Operator
-from app.utils.worker_guard import guarded_run
+from app.services.utils.worker_guard import guarded_run
 
 logger = logging.getLogger(__name__)
 

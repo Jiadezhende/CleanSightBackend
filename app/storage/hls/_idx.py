@@ -17,7 +17,7 @@ from typing import Sequence
 
 import numpy as np
 
-from app.storage import _fs
+from app.storage.utils import fs as _fs
 
 _DTYPE = np.float64
 

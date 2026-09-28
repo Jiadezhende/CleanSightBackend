@@ -9,12 +9,13 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import get_db
-from app.models import DBAlarm, DBTask
-from app.services.client.manager import client_manager
+from app.db.database import get_db
+from app.db.alarms import DBAlarm
+from app.db.tasks import DBTask
+from app.services.client.instance import client_service
 from app.storage import hls, runs
 from app.storage import tasks as step_tasks
-from app.utils.exceptions import DatabaseError
+from app.types.exceptions import DatabaseError
 
 router = APIRouter(prefix="/task", tags=["task"])
 logger = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ async def get_client_frontend_message(
     if since_seq < 0:
         raise HTTPException(status_code=400, detail="since_seq must be >= 0")
 
-    cq = client_manager.get(task_id)  # 键即 task_id，O(1) 直取
+    cq = client_service.get(task_id)  # 键即 task_id，O(1) 直取
     if cq is None:
         return _empty_alarm_payload(task_id)
 
@@ -206,7 +207,7 @@ def list_live_tasks():
             "step_id": cq.run.step_id,
             "run_id": cq.run.run_id,
         }
-        for cq in client_manager.snapshot().values()
+        for cq in client_service.snapshot().values()
         if cq.run is not None
     ]
     tasks.sort(key=lambda t: t["task_id"])
@@ -287,7 +288,7 @@ def list_history_tasks():
     低于第 10 名的排序键即可停——剩下的不可能再挤进来。粗筛与深扫之间任务可能刚起/刚停，
     清单可能短暂含一个刚起的 run 或漏一个刚停的——大屏下一轮轮询自愈，不加锁。
     """
-    active_ids = set(client_manager.snapshot().keys())
+    active_ids = set(client_service.snapshot().keys())
 
     tasks: List[dict] = []
     scanned = 0

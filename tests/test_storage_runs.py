@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 
 from factories import make_frame
-from app.domain.detection import DetectorOutput, FrameDetection
-from app.domain.run import RunIdentity
-from app.domain.temporal import LabelProbs, TemporalSegment
+from app.types.detection import DetectorOutput, FrameDetection
+from app.types.run import RunIdentity
+from app.types.temporal import LabelProbs, TemporalSegment
 from app.storage import hls, inference, runs
 
 
@@ -165,7 +165,7 @@ class TestRunKeyedPorts:
         assert list(tmp_storage.iterdir()) == []
 
     def test_write_after_run_dir_removed_fails(self, tmp_storage, monkeypatch):
-        from app.storage import _fs
+        from app.storage.utils import fs as _fs
 
         run = _alloc(monkeypatch, 1, 2, 10)
         inference.append_detections(run, [_fd(1.0)])

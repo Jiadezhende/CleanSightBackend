@@ -20,7 +20,7 @@ description: "Inspect database schema for CleanSightBackend tables. Connects to 
 使用项目的 SQLAlchemy engine 查询 `information_schema.columns`：
 
 ```python
-from app.database import engine
+from app.db.database import engine
 from sqlalchemy import text
 
 TABLE_NAME = "<用户指定的表名，或遍历已知表>"
@@ -65,9 +65,8 @@ PLATFORM_HIDDEN_FIELDS = {
 
 | 表名 | ORM Model | 文件位置 |
 |------|-----------|----------|
-| `clean_task` | `DBTask` | `app/models/task.py` |
-| `clean_alarm` | `DBAlarm` | `app/models/task.py` |
-| `file_path` | `HLSSegment` | `app/models/frame.py` |
+| `clean_task` | `DBTask` | `app/db/tasks.py` |
+| `clean_alarm` | `DBAlarm` | `app/db/alarms.py` |
 
 读取 ORM Model 的 `__table__.columns`，提取已映射的列名和类型。
 
@@ -126,7 +125,7 @@ PLATFORM_HIDDEN_FIELDS = {
 平台在 `t_ci_class` 表中维护了所有业务表的元数据。通过 `name` 字段匹配表名：
 
 ```python
-from app.database import engine
+from app.db.database import engine
 from sqlalchemy import text
 
 with engine.connect() as conn:

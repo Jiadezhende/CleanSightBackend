@@ -33,7 +33,7 @@ class FrameConfig:
 class StateConfig:
     """状态配置"""
 
-    # 注意：stage 不在此配置——由 RunController 在 /api/start 时按 current_step 解析后传给 ClientQueues。
+    # 注意：stage 不在此配置——由 RunControlService 在 /api/start 时按 current_step 解析后传给 ClientQueues。
     heartbeat_timeout: int = 30  # 心跳超时（秒）
 
 
@@ -116,7 +116,7 @@ class ClientConfig:
     def cq_kwargs(self) -> Dict[str, Any]:
         """组装 ClientQueues 构造参数（resize 属 client 配置，采样倍率/队列走 settings 单一真源）。
 
-        创建 CQ 的唯一配置出口：run 起始由 InferenceManager 调用（早于起流），
+        创建 CQ 的唯一配置出口：run 起始由 InferenceService 调用（早于起流），
         避免"裸建默认值 + 起流时 kwargs 被丢弃"的 dead-kwargs 问题。
         """
         return {

@@ -4,12 +4,12 @@
 
 1. **导入预算**：目标模块在干净子进程里 import 后，`sys.modules` 不得含预算外的重依赖，
    且耗时不超上限。守住「重依赖懒加载」这条从未被检查过的既有意图——它此前失守两次
-   （`app.main` 拽 torch、`persistence.*` 拽 cv2），都是模块级构造/re-export 悄悄引入的。
+   （`app.main` 拽 torch、`persistence.*`（现 `alarm.*`）拽 cv2），都是模块级构造/re-export 悄悄引入的。
    独立进程入口另可登记不许拉起的本仓链路（`FORBIDDEN_APP_IMPORTS`）。
 2. **单例引用面**：服务单例只许被 `run_control`（编排中枢）/ `routers/*`（装配层）/
    本包 `lifespan()` import。同时守住 `docs/DEVELOPMENT.md` §3 写下但无人检查的
    「不建 service 对 service 的直接依赖」；另有两条方向门禁（services ↛ routers、
-   persistence ↛ inference）按源码 AST 查。
+   alarm ↛ inference）按源码 AST 查。
 3. **相对 / 绝对的分工**：包内一律相对、跨包一律绝对（`DEVELOPMENT.md` §8）。这条不只是
    风格——第 2 条与分层门禁都靠模块名判定，**跨包写成相对就能绕过它们**，所以由 `_abs_module()`
    把相对导入还原成绝对再判，并由本条锁死写法。
@@ -34,7 +34,7 @@ HEAVY = ("torch", "ultralytics", "cv2")
 # (模块, 允许出现的重依赖集合, 耗时上限秒)。上限取实测 ~3-5× 余量，只兜「量级失守」，
 # 不做性能回归——机器负载下 import 抖动大，卡太紧会变成噪声源。
 BUDGET = {
-    "app.domain":               (set(), 0.20),
+    "app.types":                (set(), 0.20),
     # storage 的每个模块**逐个登记**，不能只登记包名：包根是标记型 __init__、零 re-export，
     # `import app.storage` 根本不加载任何域文件（实测 1ms / 41 模块），登记包名挡不住有人
     # 往域文件里塞 ffmpeg/cv2/批缓冲。新增域文件必须同时在这里加一行 ——
@@ -54,13 +54,14 @@ BUDGET = {
     # 要让「某个成员模块自己是不是 stdlib-only」可执行，得另起一条按源码 AST 查
     # import 的检查，不是调这里的秒数。
     "app.storage":              (set(), 0.20),
-    "app.storage._root":        (set(), 0.20),   # stdlib only
-    "app.storage._fs":          (set(), 0.20),   # stdlib only
+    "app.storage.utils":        (set(), 0.20),   # 标记型 __init__，纯 docstring
+    "app.storage.utils.root":   (set(), 0.20),   # stdlib only
+    "app.storage.utils.fs":     (set(), 0.20),   # stdlib only
     "app.storage.tasks":        (set(), 0.20),   # stdlib only
     # 可见判据要问 hls / inference 两域的产物位置，连带加载两个 facade，预算照它们给
     "app.storage.runs":         (set(), 0.40),
     # inference 是子包，facade 同 hls：re-export 连带加载两个产物模块，故这条盯的是整个域。
-    # `_detection` 出 FrameDetection → 吃 app.domain.detection（纯 stdlib dataclass），
+    # `_detection` 出 FrameDetection → 吃 app.types.detection（纯 stdlib dataclass），
     # 这是 D1 允许的 L1 依赖；`_temporal` 的货币 `LabelProbs` 同样带 numpy（npz 落盘）。
     "app.storage.inference":            (set(), 0.40),
     "app.storage.inference._detection": (set(), 0.40),
@@ -70,9 +71,9 @@ BUDGET = {
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
     # 这条盯的是**整个域**的模块级依赖。cv2 必须留在 `_encode.write_mp4v` 的函数体内，
     # 塞回模块级会让这条连同 `app.storage.hls._encode` 一起红。
-    "app.storage.hls":          (set(), 0.40),   # 域货币 Frame → app.domain（numpy）
+    "app.storage.hls":          (set(), 0.40),   # 域货币 Frame → app.types（numpy）
     "app.storage.hls._encode":  (set(), 0.40),   # 同上；cv2 在函数体内
-    # 解码侧：货币是 Frame + sidecar 的 float64 数组，故吃 app.domain + numpy。ffmpeg 是
+    # 解码侧：货币是 Frame + sidecar 的 float64 数组，故吃 app.types + numpy。ffmpeg 是
     # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
     # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。
     "app.storage.hls._decode":  (set(), 0.40),
@@ -97,6 +98,10 @@ BUDGET = {
     # 媒体轴换算。它 import `app.storage.hls`（段与 EXTINF 的唯一来源），故预算照 hls 那条
     # 给 0.40 —— 量的是同一份活；它本身是 stdlib（bisect / typing）。
     "app.services.utils.media_timeline": (set(), 0.40),
+    "app.services.utils.task_queue":   (set(), 0.20),   # stdlib only
+    "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
+    "app.services.utils.pressure":     (set(), 0.20),   # stdlib only
+    "app.services.utils.metrics":      (set(), 0.40),   # prometheus_client（实测 ~0.09s）
     # 算法服务。cv2 在 grader.py 里一律函数体内 import（规范 §2 通路 2）——它经 `service`
     # 被 `routers/algorithm.py` 模块级 import，挪回顶层会让这条连同 `app.main` 一起红。
     # numpy 不在 HEAVY 里，grader 顶层的 `import numpy` 不受这条约束。
@@ -115,7 +120,13 @@ BUDGET = {
     # 离线 CLI 是独立进程入口：`_isolate_cpu()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
-    "app.services.persistence": (set(), 1.0),
+    "app.services.alarm":       (set(), 1.0),
+    # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
+    "app.daemons":              (set(), 0.20),
+    "app.daemons.cleanup":      (set(), 0.20),
+    # health_monitor 的协作者单例全在函数体内取：import 包 / 单例不拉起任何 app.services（实测 ~0.02s / ~0.05s）
+    "app.daemons.health_monitor":          (set(), 0.20),
+    "app.daemons.health_monitor.instance": (set(), 0.20),
     # recording 登记两条：包名那条是门面型（浅，基本只有 docstring），真正的守门人是
     # `service` —— 它 import `app.storage.hls`，cv2 一旦从 `_encode` 的函数体挪到模块级，
     # 这条会先红。
@@ -136,51 +147,53 @@ FORBIDDEN_APP_IMPORTS = {
 # 分层包 → 它允许 import 的 `app.*` 前缀白名单（包内互相 import 由 self 前缀覆盖）。
 #
 # **白名单而非黑名单**：`app/storage` 是 services 下面一层的数据层，它能被写侧
-# （persistence）与读侧（traceback / lab / inference.offline / routers）同时依赖的前提，
-# 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.database` / `app.models`
-# ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
+# （alarm）与读侧（lab / inference.offline / routers）同时依赖的前提，
+# 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.db`
+# ——它一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
-    # app.domain：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
-    # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
-    "app/storage": ("app.storage", "app.domain", "app.settings"),
+    # app.types：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
+    # app.settings：落盘根的唯一来源，按 `utils/root.py` 的规矩只在函数体内 import
+    "app/storage": ("app.storage", "app.types", "app.settings"),
     # 算法服务：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
     # 都不许碰：阈值、入参上限、默认档一律写进算法子包自己的配置文件（见
     # `app/services/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。
     # 服务只抛自己的具名异常（ValueError / KeyError 子类），翻成 HTTP 是 `routers/` 的活。
     "app/services/algorithm": ("app.services.algorithm",),
-    # 服务层工具：多个 service / router 都要、但不属于任何一个的无状态纯函数。它可以向下
+    # 服务层工具：多个 service / router 都要、但不属于任何一个的通用能力。它可以向下
     # 依赖数据层与基建，但**不得 import 任何兄弟 service 包** —— 破了它，本包就成了
-    # service → service 依赖的后门：lab 想调 traceback 的东西，在这里加个转发函数就绕过去
+    # service → service 依赖的后门：lab 想调 recording 的东西，在这里加个转发函数就绕过去
     # 了，而 test_singleton_reference_surface 只盯单例、看不见这种转发。
     #
     # 注意 "app.services.utils" 作为白名单前缀**不会**放行 "app.services.lab"：检查是
     # `name == ok or name.startswith(ok + ".")`，兄弟包差的正是那个点。
     "app/services/utils": (
-        "app.services.utils", "app.storage", "app.domain", "app.utils", "app.settings",
+        "app.services.utils", "app.storage", "app.types", "app.settings",
     ),
 }
 
-# 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
+# 服务单例 → 定义它的模块。client_service **不在此列**：它是零跨服务依赖的中台 leaf，
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",
-    "inference_manager": "app.services.inference.online.instance",
+    "inference_service": "app.services.inference.online.instance",
     "offline_job_service": "app.services.inference.offline.instance",
-    "persistence_manager": "app.services.persistence.instance",
+    "alarm_service": "app.services.alarm.instance",
+    "cleanup_worker": "app.daemons.cleanup.instance",
     "recording_service": "app.services.recording.instance",
-    "health_monitor": "app.services.health_monitor.instance",
-    "run_controller": "app.services.run_control",
+    "health_monitor_worker": "app.daemons.health_monitor.instance",
+    "run_control_service": "app.services.run_control.instance",
 }
 
 # 允许 import 单例的文件（相对 REPO_ROOT）。前三类由规则表达（见 _is_allowed_importer），
 # 这里只列**具名例外**——每条都得有理由，加新的先想清楚为什么不能走 run_control。
 SINGLETON_EXCEPTIONS = {
     # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态并发起重连/清理，
-    # 天然要持四个协作者（recording 那个只用来在断流时登记一次残帧 flush）。四处 import 均
-    # 写在 `_resolve_deps()` 函数体内（不是模块级），且 run_controller 那处是反向指回编排
-    # 中枢做拆除。
-    "app/services/health_monitor/manager.py",
-    # 告警落库 sink：inference 产告警 → persistence 落库。跨服务但方向正确（下游依赖），
+    # 天然要持四个协作者（client / stream / inference / recording，recording 那个只用来在断流
+    # 时登记一次残帧 flush），四处 import 均写在 `HealthMonitorWorker._resolve_deps()` 函数体内；
+    # 另有 `cleanup_client()` 函数体内一处 run_control_service，是反向指回编排中枢做拆除。
+    # 均不在模块级。
+    "app/daemons/health_monitor/worker.py",
+    # 告警落库 sink：inference 产告警 → alarm 服务上报。跨服务但方向正确（下游依赖），
     # 且 sink 就是为这条方向存在的唯一窄接口。
     "app/services/inference/online/temporal/alarm_sink.py",
 }
@@ -286,7 +299,7 @@ def _is_allowed_importer(rel: str) -> bool:
     """规范 §6 的引用面三类 + 具名例外。"""
     if rel in SINGLETON_EXCEPTIONS:
         return True
-    if rel == "app/services/run_control.py":        # 编排中枢
+    if rel == "app/services/run_control/service.py":    # 编排中枢（instance.py 只构造自身，不 import 别的单例）
         return True
     if rel.startswith("app/routers/"):              # 装配层
         return True
@@ -326,7 +339,7 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
 
     `app/storage` 是 services 下面一层的数据层。它一旦向上或向旁伸手，那一头就不能再
     依赖它——而写侧与读侧同时依赖它正是抽这个包的全部意义。白名单比黑名单严一档：
-    `app.database` / `app.models` 进来不会造环、不会红，只会把数据层绑死在 ORM 上。
+    `app.db` 进来不会造环、不会红，只会把数据层绑死在 ORM 上。
     """
     allowed = LAYER_PACKAGES[package]
     violations = []
@@ -391,13 +404,29 @@ def test_services_do_not_import_routers():
     )
 
 
-def test_persistence_does_not_import_inference():
-    """persistence 不得反向依赖 inference：告警过闸编排在 inference 侧的 alarm_sink，
-    方向只许 inference → persistence（见 SINGLETON_EXCEPTIONS 里 alarm_sink 那条）。"""
-    violations = _imports_under(APP_DIR / "services" / "persistence", "app.services.inference")
+def test_daemons_do_not_import_routers():
+    """daemons 不得反向依赖 routers：routers 只读 daemon 状态，方向只许 routers → daemons。"""
+    violations = _imports_under(APP_DIR / "daemons", "app.routers")
     assert not violations, (
-        "persistence 反向依赖了 inference：\n  " + "\n  ".join(violations)
-        + "\n跨这两个服务的编排放在 inference 侧的 sink，persistence 只暴露落库接口。"
+        "daemons 反向依赖了 routers（协议层）：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_services_do_not_import_daemons():
+    """services 不得依赖 daemons：daemons 按时钟自驱、可依赖 services，反过来就成环。"""
+    violations = _imports_under(APP_DIR / "services", "app.daemons")
+    assert not violations, (
+        "services 依赖了 daemons：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_alarm_does_not_import_inference():
+    """alarm 不得反向依赖 inference：告警过闸编排在 inference 侧的 alarm_sink，
+    方向只许 inference → alarm（见 SINGLETON_EXCEPTIONS 里 alarm_sink 那条）。"""
+    violations = _imports_under(APP_DIR / "services" / "alarm", "app.services.inference")
+    assert not violations, (
+        "alarm 反向依赖了 inference：\n  " + "\n  ".join(violations)
+        + "\n跨这两个服务的编排放在 inference 侧的 sink，alarm 只暴露上报接口。"
     )
 
 

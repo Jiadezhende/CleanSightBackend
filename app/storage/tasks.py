@@ -28,7 +28,7 @@ import logging
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
-from . import _root
+from .utils import root as _root
 
 logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from app.utils.pressure import PRESSURE_LOGGER_NAME, PressureReporter
+from app.services.utils.pressure import PRESSURE_LOGGER_NAME, PressureReporter
 
 LOGGER_NAME = PRESSURE_LOGGER_NAME
 

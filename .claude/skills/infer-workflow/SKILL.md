@@ -92,7 +92,7 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 
 **装配**（→ [yaml-config.md](references/yaml-config.md)）
 - [ ] `inference_config.yaml` 对应 stage：`detectors[]` 加 detector（`name`/`class`/`params`），`rules[]` 加 operator（`name`/`subscribes`/`realtime`/`class`/`params`）
-- [ ] 新告警指标 → 在 [AlarmMetric](../../../app/domain/alarm.py) 枚举补一项，`judge()` 里 `metric=` 显式填
+- [ ] 新告警指标 → 在 [AlarmMetric](../../../app/types/alarm.py) 枚举补一项，`judge()` 里 `metric=` 显式填
 - [ ] **无需**改任何 `impl/__init__.py`（detection/temporal/offline 各一个纯包标记）——StageFactory 按 `class` 全路径 importlib 实例化
 
 > 接口签名照抄基类；`Alarm` 核心 5 字段（`alarm_type`/`alarm_level`/`alarm_message`/`metric`/`metadata`），`mode`/`stage`/`seq`/`timestamp` 落库时自动补。

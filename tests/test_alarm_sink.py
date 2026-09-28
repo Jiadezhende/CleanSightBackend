@@ -1,25 +1,25 @@
-"""alarm_sink.persist_alarms 行为守卫（过闸编排从 PersistenceManager 移回 actor 域后）。
+"""alarm_sink.persist_alarms 行为守卫（过闸编排从 AlarmService 移回 actor 域后）。
 
 覆盖两条不变式：
 1. persist_alarms 直接读 alarm.stage（别名已由 actor 前烧），不反向解析 alias；
 2. 过闸被拒（冷却窗口）时跳过落库。
 
 client_id / task_id / step_id 均由 cq 派生，落库调用打到 sink 内部 import 的
-persistence_manager.persist_alarm，测试用 monkeypatch 拦截该出口。
+alarm_service.persist_alarm，测试用 monkeypatch 拦截该出口。
 """
 
 from unittest.mock import MagicMock
 
 from factories import make_alarm
-from app.domain.run import RunIdentity
-from app.domain.alarm import AlarmMetric
+from app.types.run import RunIdentity
+from app.types.alarm import AlarmMetric
 from app.services.inference.online.temporal import alarm_sink
 
 
 def test_persist_alarms_reads_baked_stage(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        alarm_sink.persistence_manager,
+        alarm_sink.alarm_service,
         "persist_alarm",
         lambda d: captured.append(d) or True,
     )
@@ -42,7 +42,7 @@ def test_persist_alarms_reads_baked_stage(monkeypatch):
 def test_persist_alarms_gate_reject_skips_persist(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        alarm_sink.persistence_manager,
+        alarm_sink.alarm_service,
         "persist_alarm",
         lambda d: captured.append(d) or True,
     )

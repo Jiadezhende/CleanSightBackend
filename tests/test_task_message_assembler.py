@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 from factories import make_alarm
 
 import app.services.inference.online.naming as naming
-from app.domain.run import RunIdentity
-from app.domain.alarm import AlarmMetric
+from app.types.run import RunIdentity
+from app.types.alarm import AlarmMetric
 from app.routers.task import _build_signals_10s, _build_task_alarm_message
 
 

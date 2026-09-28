@@ -13,10 +13,10 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from app.domain.alarm import Alarm
-from app.domain.detection import DetBox, DetectorOutput, FrameDetection
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
+from app.types.alarm import Alarm
+from app.types.detection import DetBox, DetectorOutput, FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 from app.services.client.queues import ClientQueues
 
 __all__ = [
@@ -130,7 +130,8 @@ def make_run(task_id: int, step_id: int, run_id: Optional[int] = None) -> RunIde
     调用前须让 `settings.storage_dir` 指到临时目录。只建 run 目录，**不保证可见**：
     `runs.query` 缺省只认有 `hls/metadata.json` 或 `inference/detections.jsonl` 的 run。
     """
-    from app.storage import _root, runs
+    from app.storage import runs
+    from app.storage.utils import root as _root
 
     step_dir = _root.path(task_id, step_id)
     ids = sorted(int(p.name) for p in step_dir.iterdir() if p.name.isdigit()) if step_dir.is_dir() else []

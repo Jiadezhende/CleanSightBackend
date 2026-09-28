@@ -5,8 +5,8 @@
 """
 
 from app.services.inference.online.detection.detector import YOLODetector
-from app.domain.detection import DetectorOutput
-from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.types.detection import DetectorOutput
+from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 
 
 class BubbleDetector(YOLODetector):

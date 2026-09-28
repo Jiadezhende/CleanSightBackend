@@ -4,14 +4,14 @@
     read_detections(run)               回读整段，按 ts 升序
 
 货币是 `FrameDetection`。**路线 B（追加）**：每帧一条、文件只增不改，没有「先造好一个完整产
-物」这回事。本域不删除：整个 run 目录的回收归 `cleanup_worker`。
+物」这回事。本域不删除：整个 run 目录的回收归 `app.daemons.cleanup`。
 
 **不管**（都在调用方）：批缓冲、run 生命周期、失败要不要吞——本模块照抛 `OSError`。
 
 **并发：本域不持锁。** `append_detections` 自身不是原子的（一批可能拆成多次底层 write，
 Windows 的 `mode="a"` 也不保证追加原子），同一 run 的写必须由调用侧串行。
 
-依赖上界：`app.domain` + stdlib。
+依赖上界：`app.types` + stdlib。
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Mapping, Sequence
 
-from app.domain.detection import DetBox, DetectorOutput, FrameDetection
-from app.domain.run import RunIdentity
+from app.types.detection import DetBox, DetectorOutput, FrameDetection
+from app.types.run import RunIdentity
 
 from . import _jsonl, _layout
 

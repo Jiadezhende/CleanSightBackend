@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from app.services.algorithm import service as algorithm_service
-from app.utils.exceptions import ValidationError
+from app.types.exceptions import ValidationError
 
 router = APIRouter(prefix="/algorithm", tags=["algorithm"])
 

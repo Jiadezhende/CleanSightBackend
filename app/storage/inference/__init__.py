@@ -18,8 +18,8 @@
     temporal.jsonl      read_temporal / write_temporal         路线 C（原子整体替换）
     label_probs.npz     read_label_probs / write_label_probs   路线 C（原子整体替换）
 
-货币是 `app.domain` 的跨服务契约：`FrameDetection`（`app.domain.detection`）与
-`TemporalEvent` / `TemporalSegment` / `LabelProbs`（`app.domain.temporal`）。本域不出自己的类型——没有「从文件名
+货币是 `app.types` 的跨服务契约：`FrameDetection`（`app.types.detection`）与
+`TemporalEvent` / `TemporalSegment` / `LabelProbs`（`app.types.temporal`）。本域不出自己的类型——没有「从文件名
 解出来的身份」这种形状（对照 `hls.SegmentRef`），故没有 `types.py`。
 
 ## 两条调用方必须知道的约束

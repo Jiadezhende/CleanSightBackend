@@ -1,4 +1,4 @@
-"""`app.storage` 基础能力：`_root` 的根解析与 `tasks` 的定位/枚举。
+"""`app.storage` 基础能力：`utils.root` 的根解析与 `tasks` 的定位/枚举。
 
 落盘约定：`{storage_root}/{task_id}/{step_id}/`，两级目录名均为十进制 id。
 本文件全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from app.domain.run import RunIdentity
-from app.storage import _root, tasks
+from app.types.run import RunIdentity
+from app.storage import tasks
+from app.storage.utils import root as _root
 from app.settings import settings
 
 
@@ -117,7 +118,7 @@ class TestRootPath:
         self, tmp_path, monkeypatch
     ):
         """相对路径以项目根为基、不随进程 cwd 飘——否则读写两侧会分叉到不同目录。"""
-        from app.services.persistence.config import get_persistence_config
+        from app.daemons.cleanup.config import get_cleanup_config
 
         monkeypatch.setattr(settings, "storage_dir", "./database")
         resolved = _root.path()
@@ -128,8 +129,8 @@ class TestRootPath:
         assert _root.path() == resolved
         assert tmp_path not in resolved.parents
 
-        # TTL 清理（cleanup_worker）的扫描根取自这里，须与本包同源
-        assert get_persistence_config().storage_base_dir == resolved
+        # TTL 清理（app.daemons.cleanup）的扫描根取自这里，须与本包同源
+        assert get_cleanup_config().storage_base_dir == resolved
 
     def test_absolute_storage_dir_is_used_as_is(self, tmp_path, monkeypatch):
         abs_dir = tmp_path / "custom" / "store"
@@ -171,7 +172,7 @@ class TestIds:
 
     def test_skips_non_id_entries(self, tmp_storage):
         """存储根下不只有数字 task 目录：lab 导出临时根 `.lab_exports/`（clip_builder /
-        step_exporter）与送标运行时配置 `lab_runtime_config.json`（services/lab/config）都寄居
+        step_exporter）与送标运行时配置 `lab_runtime_config.json`（services/lab/runtime_config）都寄居
         于此，外加误建的目录——一律跳过，不报错。"""
         _seed_run(tmp_storage, 1, 1, 1)
         (tmp_storage / ".lab_exports").mkdir()

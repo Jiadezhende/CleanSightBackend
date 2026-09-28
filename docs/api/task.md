@@ -74,7 +74,7 @@
 
 **排序 / 增量语义**：`alarms` 从内存环形缓冲（容量 100 条）里过滤 `seq > since_seq` 得到，升序返回。`since_seq=0`（默认）返回当前缓冲中全部未淘汰的告警——**不是全历史**，历史要查下方 `/alarms`。缓冲满 100 条后最旧的会被淘汰，超出范围的旧告警只能从 DB 侧拿。
 
-**无活跃 run**：`client_manager` 查不到该 `task_id` 时，返回空模板（`max_seq: 0`、`alarms: []`、`signals_10s` 为全零空模板），**HTTP 仍是 200，不报错**。
+**无活跃 run**：`client_service` 查不到该 `task_id` 时，返回空模板（`max_seq: 0`、`alarms: []`、`signals_10s` 为全零空模板），**HTTP 仍是 200，不报错**。
 
 ### 错误
 
@@ -162,7 +162,7 @@
 
 ## GET /task/live
 
-**用途**：大屏取**在线任务清单**。数据是活跃注册表（`ClientManager`）的**纯内存快照**，零 DB、零磁盘。返回的字段即实时画面入参——本端点**只出参数、不出播放 URL**，前端自己拼 `/ai/video` 地址。
+**用途**：大屏取**在线任务清单**。数据是活跃注册表（`ClientService`）的**纯内存快照**，零 DB、零磁盘。返回的字段即实时画面入参——本端点**只出参数、不出播放 URL**，前端自己拼 `/ai/video` 地址。
 
 **路径参数**：无。
 **查询参数**：无。
@@ -288,11 +288,11 @@ GET /traceback/task/{task_id}/timeline?step_id={step_id}&run_id={run_id}
 
 | 现象 | 后端实际状态 |
 |------|------------|
-| `/message` 一直返回空模板（`max_seq:0`、`alarms:[]`） | 该 `task_id` 无活跃 run（`client_manager` 查不到），后端静默返回空模板，非错误 |
+| `/message` 一直返回空模板（`max_seq:0`、`alarms:[]`） | 该 `task_id` 无活跃 run（`client_service` 查不到），后端静默返回空模板，非错误 |
 | `/message` 的 `signals_10s` 全零但确有告警 | 近 10s 窗口内该指标无命中帧，或 detector 未配置该 metric（键仍在，值为空模板） |
 | `/message` 用 `since_seq=0` 拿不到几分钟前的告警 | 内存环形缓冲仅 100 条，旧告警已被淘汰；历史查 `/task/{task_id}/alarms` |
 | `/alarms` 返回 `total:0` 但内存里刚有告警 | AlarmWorker 尚未落库（秒级延迟），DB 里还没这条 |
-| `/live` 返回 `total:0` 但任务确实在跑 | 该 run 尚未注册进 `ClientManager`（刚起）或已注销（刚停）；下一轮轮询即可见 |
+| `/live` 返回 `total:0` 但任务确实在跑 | 该 run 尚未注册进 `ClientService`（刚起）或已注销（刚停）；下一轮轮询即可见 |
 | `/history` 里没有刚跑完的任务 | 该任务磁盘上无段（起流即失败）→ 不进清单；或刚停不久，粗筛/深扫窗口错开，下一轮自愈 |
 | `/history` 的 `source_ip` 全是 null | DB 不可用或 `clean_task` 无此任务，清单降级返回（存在性判定来自磁盘，不 503） |
 | 按 `/history` 的 `step_id` 拉 playlist 得 404 | `track` 用了默认 `processed`，但该 step 只落了 raw；`track` 必须从 `steps[].tracks` 里挑 |

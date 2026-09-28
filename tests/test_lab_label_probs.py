@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
+from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.main import app
 from app.routers import lab as lab_router
 from app.storage import inference as inference_store

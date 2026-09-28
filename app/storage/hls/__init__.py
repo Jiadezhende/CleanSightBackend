@@ -85,7 +85,7 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
     _read.py     读侧对外动作：list_segments / list_segments_in_range
 
 本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
-re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.domain`**，
+re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.types`**，
 重依赖（cv2）一律函数体内 import，导入预算才守得住。
 
 规范见 `docs/kb/DESIGN_STORAGE_LAYER.md`。

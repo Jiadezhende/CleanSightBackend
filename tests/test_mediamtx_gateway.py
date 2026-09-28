@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.utils.gateway import IPWhitelistStore, RateLimitStore  # 与 main.py 共享同一实现
+from app.gateway import IPWhitelistStore, RateLimitStore  # 与 main.py 共享同一实现
 from mediamtx_gateway import main as gw_main  # 模块对象：monkeypatch 模块级 _CONFIG_PATH 用
 from mediamtx_gateway.main import _MAX_RESTARTS, _load_config, _run_mediamtx
 from mediamtx_gateway import rtsp_proxy

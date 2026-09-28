@@ -6,7 +6,7 @@
 """
 
 from factories import make_cq, make_frame_detection
-from app.utils.metrics import frame_drop_total
+from app.services.utils.metrics import frame_drop_total
 
 
 def _detection_drops() -> float:

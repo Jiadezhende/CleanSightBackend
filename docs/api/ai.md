@@ -34,7 +34,7 @@
 data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 ```
 
-编码链：domain `Frame` → `cv2.imencode(".jpg", ...)` → base64 → 前缀 `data:image/jpeg;base64,`（ai.py:149-152）。可直接作 `<img src>`。
+编码链：`app.types` `Frame` → `cv2.imencode(".jpg", ...)` → base64 → 前缀 `data:image/jpeg;base64,`（ai.py:149-152）。可直接作 `<img src>`。
 
 **② 控制帧** —— 仅一种：
 

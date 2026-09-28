@@ -4,7 +4,7 @@
     collect_from(cq)                          取走该 CQ 此刻该落盘的一切（sweeper 每 tick 调）
     submit_segment(cq, track, frames) -> bool 打包 + 入 hls 队列
     submit_detections(cq, frames) -> bool     打包 + 入 detections 队列
-    flush_residual(cq, until_ts=None)         把不足一段的残帧切完落盘（拆除期 RunController 调）
+    flush_residual(cq, until_ts=None)         把不足一段的残帧切完落盘（拆除期 RunControlService 调）
     request_residual_flush(cq, fence_ts)      断流时登记一次残帧 flush（不就地执行）
 
 落盘格式全在 `app.storage.hls` / `app.storage.inference`；本模块只管何时拉、按什么顺序写。
@@ -24,7 +24,7 @@
    免锁靠 `dict` 的 `__setitem__`、`pop` 各自原子。它只服务 HLS：detections 没有"段横跨
    断流 gap"这回事，故不需要栅栏。
 
-依赖：`app.storage.hls` / `app.storage.inference` + `app.utils.task_queue` + `client_manager`，
+依赖：`app.storage.hls` / `app.storage.inference` + `app.services.utils.task_queue` + `client_service`，
 不依赖别的 service。
 """
 
@@ -33,13 +33,13 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-from app.domain.detection import FrameDetection
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
+from app.types.detection import FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 from app.storage import hls, inference
-from app.utils.task_queue import SerialTaskQueue
+from app.services.utils.task_queue import SerialTaskQueue
 
-from ._sweeper import SegmentSweeper
+from .sweep_worker import SegmentSweeper
 from .config import RecordingConfig, get_recording_config
 
 logger = logging.getLogger(__name__)
@@ -90,17 +90,17 @@ class RecordingService:
         """
         Args:
             config: 不传则用全局单例配置。
-            clients: CQ 快照来源（sweeper 用），不传则用 `client_manager`。**只注入这一个
+            clients: CQ 快照来源（sweeper 用），不传则用 `client_service`。**只注入这一个
                 协作者**：包一层 `snapshot_fn` / `current_owner_fn` 之类的窄回调只是
-                多两个要记的名字，单测直接塞一个假的 client_manager 更短。
+                多两个要记的名字，单测直接塞一个假的 client_service 更短。
         """
         self.config = config if config is not None else get_recording_config()
         if clients is None:
             # 函数体内 import：写在模块级会把 client → numpy 那条链变成每个
-            # `import app.services.recording.*` 的过路费（同 PersistenceManager 的写法）。
-            from app.services.client.manager import client_manager
+            # `import app.services.recording.*` 的过路费（同 AlarmService 的写法）。
+            from app.services.client.instance import client_service
 
-            clients = client_manager
+            clients = client_service
         self._clients = clients
 
         # 落盘队列。**在 start() 里建**：SerialTaskQueue 是一次性的（stop() 之后不能再
@@ -110,7 +110,7 @@ class RecordingService:
         # 跟着一起被背压丢。两条各自单消费线程，"提交序 = 执行序"在各自内部成立。
         self._hls_queue: Optional[SerialTaskQueue] = None
         self._detection_queue: Optional[SerialTaskQueue] = None
-        self._sweeper: Optional[SegmentSweeper] = None
+        self._sweep_worker: Optional[SegmentSweeper] = None
 
         # (task_id, step_id) → (cq, fence_ts)：断流时挂起的「把这一刻之前的残帧切出来」请求。
         #
@@ -133,12 +133,12 @@ class RecordingService:
             _DETECTION_QUEUE_NAME, maxsize=self.config.queue_size
         )
         self._detection_queue.start()
-        self._sweeper = SegmentSweeper(
+        self._sweep_worker = SegmentSweeper(
             clients=self._clients,
             service=self,
             interval_seconds=self.config.sweep_interval_seconds,
         )
-        self._sweeper.start()
+        self._sweep_worker.start()
         logger.info("[recording] 已启动")
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -148,9 +148,9 @@ class RecordingService:
         会在队列停机后继续拉，那些产物提交被拒、数据已经从 CQ 弹出去了 —— 真丢。
         两条队列之间没有顺序要求（写的是不同域的不同文件）。
         """
-        if self._sweeper is not None:
-            self._sweeper.stop(timeout=5.0)
-            self._sweeper = None
+        if self._sweep_worker is not None:
+            self._sweep_worker.stop(timeout=5.0)
+            self._sweep_worker = None
         if self._hls_queue is not None:
             self._hls_queue.stop(timeout=timeout)
             self._hls_queue = None
@@ -230,7 +230,7 @@ class RecordingService:
                 **栅栏只作用于段**：detections 无论哪条路径都是全排空，它没有"横跨 gap"的问题
                 （见模块不变式 3）。
 
-        拆除期须在 `cq.close()` 释放帧之前调（RunController 保证）。切段口径与 sweeper 一致，
+        拆除期须在 `cq.close()` 释放帧之前调（RunControlService 保证）。切段口径与 sweeper 一致，
         差别只是它拉的是"攒满的整段"、这里拉的是"剩下不足一段的那点"。
 
         拆除期（`until_ts=None`）顺带回收本 cq 挂起的断流 flush 请求：调用方持 `lock_for`，
@@ -273,7 +273,7 @@ class RecordingService:
         **④ 与 ①②③ 之间没有顺序约束**：detections 走另一条队列、写另一个域的另一个文件，
         与段的媒体轴无关。放最后只是因为它最不紧急。
 
-        **这套顺序属于本服务，不属于定时器**：`_sweeper` 只负责"每隔 1 秒对每个活跃 CQ 调
+        **这套顺序属于本服务，不属于定时器**：`sweep_worker` 只负责"每隔 1 秒对每个活跃 CQ 调
         一次本方法"，它不必知道挂起请求是什么、也不必知道上面那条不变式。
 
         运行期本方法是 CQ 的唯一 drain 者，所以它只能被 sweeper 那一个线程调
@@ -325,7 +325,7 @@ class RecordingService:
     def _take_pending_flush(self, cq) -> Optional[float]:
         """取走该 CQ 挂起的 flush 栅栏（一次性）；没有则 `None`。
 
-        **包内私有**，唯一消费者是 `collect_from`。它曾经公开、由 `_sweeper` 直接调——那让
+        **包内私有**，唯一消费者是 `collect_from`。它曾经公开、由 `sweep_worker` 直接调——那让
         定时器知道了「挂起请求」这回事，连带把「先整段后残段」的顺序不变式也搬进了定时器，
         而那条不变式成立的理由（tfdt = 执行时读到的累计 EXTINF）整个是本模块的事。
 
@@ -354,7 +354,7 @@ class RecordingService:
         `insert_segment` 抛 `FileNotFoundError`，这段丢弃。
 
         **失败不重试。** 异常由 `SerialTaskQueue._execute` 统一记 error 后吞掉，本模块
-        刻意不包 `GuardedExecutor`：`insert_segment` 把清单条目排在最后登记，重试若落在
+        刻意不包重试：`insert_segment` 把清单条目排在最后登记，重试若落在
         「条目已追加、统计写失败」之后，会往 playlist 里写出**重复条目**，毁掉整个 run
         的回放；而现在会抛的失败（ffmpeg 缺失/换代、盘满）基本都是非瞬时的，重试也修不好。
         丢一段 ≈ 丢 10 秒录像，比毁一整段回放便宜。

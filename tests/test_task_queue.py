@@ -1,4 +1,4 @@
-"""`app.utils.task_queue`：单消费者任务队列的顺序、隔离与停机语义。
+"""`app.services.utils.task_queue`：单消费者任务队列的顺序、隔离与停机语义。
 
 断言集中在**这个类唯一卖点**上：提交顺序 == 执行顺序，且执行是串行的。HLS 落盘去掉目录锁
 之后，「旧残段先落盘再整个 purge」「同轨相邻段 tfdt 不错位」两条正确性全部押在这上面——
@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from app.utils.task_queue import SerialTaskQueue
+from app.services.utils.task_queue import SerialTaskQueue
 
 
 @pytest.fixture

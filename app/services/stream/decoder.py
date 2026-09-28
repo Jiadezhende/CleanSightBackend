@@ -10,11 +10,11 @@ from typing import Optional
 
 import numpy as np
 
-from app.domain.frame import Frame
+from app.types.frame import Frame
 from .config import DecoderConfig
 from app.settings import settings
-from app.utils.exceptions import FFmpegError, StreamConnectionError
-from app.utils.metrics import frame_drop_total
+from app.types.exceptions import FFmpegError, StreamConnectionError
+from app.services.utils.metrics import frame_drop_total
 
 DEFAULT_CHANNELS = 3
 
@@ -28,7 +28,7 @@ def _rtsp_input_opts() -> list:
     - **判死延迟是 `-timeout` 的 2 倍**（`T` → `2T`）：ffmpeg 第一次读超时不致命、重试一次，
       第二次才退出。所以它的语义是「连续 `2T` 收不到任何字节才判死」，配置改不掉。
     - **`2T` 必须 < `cleanup_timeout`**（health_monitor，默认 20s）：否则进程还没死就先被
-      判 cleanup 拆除，重连永远轮不上。`GlobalHealthMonitor.start()` 有一条越界告警。
+      判 cleanup 拆除，重连永远轮不上。`HealthMonitorWorker.start()` 有一条越界告警。
 
     取值：`settings.rtsp_read_timeout_s`（默认 2.5s → 判死 ~5.4s）。按调用取值，不在 import
     期定死——否则改 env 要重启才生效。
@@ -289,7 +289,7 @@ class FFmpegDecoder:
 
         起始处捕获 stdout 本地引用，避免 stop() 将 self.proc 置 None 造成的 TOCTOU；
         管道被 stop() 关闭时 read 抛 ValueError（closed file）或返回 b""，均视为流结束正常退出，
-        由 StreamHealthMonitor 决定是否重连，本循环不自动重启。
+        由 HealthMonitorWorker 决定是否重连，本循环不自动重启。
         """
         proc = self.proc
         if proc is None or proc.stdout is None:

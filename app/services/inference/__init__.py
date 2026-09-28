@@ -7,7 +7,7 @@
 
     config.py         stage 配置（online / offline 同源）
     stage_factory.py  按 stage 实例化 Detector / Operator / OfflineSegmenter
-    online/           实时链路：manager / instance / naming / types + 下列子包
+    online/           实时链路：service / instance / naming / types + 下列子包
     offline/          离线全序列分割：runner / cli + 下列契约包
 
 online 与 offline 互不 import；共用的东西只能放本层。
@@ -18,8 +18,8 @@ online 与 offline 互不 import；共用的东西只能放本层。
     online/detection/     目标检测 (L1)：Detector 抽象 + dispatcher/pool/service；impl/ 放 Detector 子类
     online/temporal/      时序分析 (L3/L4)：Operator 抽象 + actor；impl/ 放 Operator 子类
     offline/              离线段：OfflineSegmenter 抽象 + runner/cli；impl/ 放 Segmenter 子类
-2. **活体包**：由 manager 持有、有独立起停的 worker 池，生命周期跟着 `manager.start()/stop()`。
-    online/visualization/ worker/pool/visualizer
+2. **活体包**：由 service 持有、有独立起停的 worker 池，生命周期跟着 `service.start()/stop()`。
+    online/visualization/ visualization_worker/visualizer
 
 `offline/cli.py` 是 `python -m` 离线入口，**不得被包内任何其他模块 import**（现状零反向引用）。
 
@@ -33,9 +33,9 @@ online 与 offline 互不 import；共用的东西只能放本层。
 re-export 会让即便只取轻量 `.types.DetectionTask` 的调用方也拉起 YOLO/cv2/impl
 的重导入链。消费方一律走显式深路径按需导入：
 
-    单例          from app.services.inference.online.instance import inference_manager
+    单例          from app.services.inference.online.instance import inference_service
                   from app.services.inference.offline.instance import offline_job_service
-    总编排        from app.services.inference.online.manager import InferenceManager
+    总编排        from app.services.inference.online.service import InferenceService
     检测基类      from app.services.inference.online.detection.detector import Detector, YOLODetector
     时序基类      from app.services.inference.online.temporal.operator import Operator
     具体任务      from app.services.inference.online.detection.impl.bubble import BubbleDetector
@@ -60,7 +60,7 @@ __all__ = ["lifespan"]
 
 @asynccontextmanager
 async def lifespan():
-    """AI 推理服务生命周期管理：在线 manager 先起后停，离线作业服务后起先停。
+    """AI 推理服务生命周期管理：在线 service 先起后停，离线作业服务后起先停。
 
     离线先停：停机时先 kill 在跑的离线子进程，不让它和在线收尾抢 CPU。
 
@@ -68,9 +68,9 @@ async def lifespan():
     写在模块级就等于把 `instance.py` 的 eager 构造重新摊给每个 import 本包的人。
     """
     from .offline.instance import offline_job_service
-    from .online.instance import inference_manager
+    from .online.instance import inference_service
 
-    inference_manager.start()
+    inference_service.start()
     logger.info("[InferenceService] Inference service started")
     offline_job_service.start()
 
@@ -84,7 +84,7 @@ async def lifespan():
         # lifespan finally 执行时 uvicorn 已 cancel 所有 WebSocket 任务，
         # 事件循环无其他等待方，直接同步调用即可。
         try:
-            inference_manager.stop()
+            inference_service.stop()
             logger.info("[InferenceService] Inference service stopped")
         except Exception:
             logger.exception("[InferenceService] Error stopping inference service")

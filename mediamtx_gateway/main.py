@@ -21,7 +21,7 @@ import os
 import signal
 from pathlib import Path
 
-from app.utils.gateway import IPWhitelistStore, RateLimitStore
+from app.gateway import IPWhitelistStore, RateLimitStore
 from .rtsp_proxy import RTSPProxy
 
 logger = logging.getLogger("mediamtx_gateway")

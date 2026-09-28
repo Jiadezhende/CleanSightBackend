@@ -2,13 +2,13 @@
 测试边界层异常处理
 
 4 个边界层：
-1. guarded_run() - worker 线程自愈（app/utils/worker_guard.py，边界层 1）
-2. GuardedExecutor - 框架边界层（边界层 2）
+1. guarded_run() - worker 线程自愈（app/services/utils/worker_guard.py，边界层 1）
+2. 告警上报重试 - 函数级重试（app/services/alarm/alarm_worker.py，边界层 2）
 3. FastAPI 全局处理器 - HTTP 边界层（边界层 3）
 4. main() - 顶层 Fail-Fast（边界层 4）
 
 本文件覆盖边界层 3 的全局异常处理器；
-GuardedExecutor 的重试/退避见 test_exception_handling.py。
+告警上报的重试/退避见 test_exception_handling.py。
 """
 
 import uuid
@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.utils import (
+from app.types.exceptions import (
     DatabaseError,
     FFmpegError,
     ModelInferenceError,

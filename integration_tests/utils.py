@@ -24,8 +24,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 
 from sqlalchemy import text
 
-from app.database import get_db
-from app.models import DBAlarm, DBTask
+from app.db.database import get_db
+from app.db.alarms import DBAlarm
+from app.db.tasks import DBTask
 
 
 class FFmpegController:
@@ -430,7 +431,7 @@ class APIClient:
             return {"error": str(e)}
 
     def unified_terminate(self, client_id: str) -> Dict[str, Any]:
-        """统一终止接口（推荐）- 完整清理：解码器 + 推理 + ClientManager"""
+        """统一终止接口（推荐）- 完整清理：解码器 + 推理 + ClientService"""
         url = f"{self.base_url}/api/terminate"
         params = {"client_id": client_id}
 

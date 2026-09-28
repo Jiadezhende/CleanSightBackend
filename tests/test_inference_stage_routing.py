@@ -2,14 +2,14 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.domain.run import RunIdentity
-from app.services.inference.online.manager import InferenceManager
-from app.utils.exceptions import ValidationError
+from app.types.run import RunIdentity
+from app.services.inference.online.service import InferenceService
+from app.types.exceptions import ValidationError
 
 
 @pytest.fixture
 def manager():
-    m = InferenceManager.__new__(InferenceManager)
+    m = InferenceService.__new__(InferenceService)
     m._actors = {}
     return m
 
@@ -32,7 +32,7 @@ def _routing(manager):
     (2, "2"),          # int 与 str 同键
 ])
 def test_resolve_stage_routes(manager, step, expected_stage):
-    # stage 解析上移为公有 resolve_stage（供 RunController 建 CQ 前调用）。
+    # stage 解析上移为公有 resolve_stage（供 RunControlService 建 CQ 前调用）。
     p_active, p_yaml = _routing(manager)
     with p_active, p_yaml:
         assert manager.resolve_stage(step) == expected_stage
@@ -61,7 +61,7 @@ def _patched_get_stage_configs(stage_names, detectors_by_stage):
 
     detectors_by_stage 的值为异常实例时，模拟该 stage 的 detector 构造失败。
     """
-    m = InferenceManager.__new__(InferenceManager)
+    m = InferenceService.__new__(InferenceService)
     m._stage_configs = None
     fake_config = SimpleNamespace(list_stages=lambda: list(stage_names), batch_size=4)
 
@@ -97,12 +97,12 @@ def test_stage_without_detectors_inactive_not_fatal():
 
 
 def test_real_manager_init_invariants_and_stop_workflow_smoke():
-    """真实构造 InferenceManager，守卫 __init__ 必设属性 + stop_workflow 空跑。
+    """真实构造 InferenceService，守卫 __init__ 必设属性 + stop_workflow 空跑。
 
     其余测试均 mock/__new__ 绕过真构造，无法发现 __init__ 漏设属性（如 _actors）——
     本用例真构造一次兜底（权重仍惰性、无线程）。
     """
-    m = InferenceManager()
+    m = InferenceService()
     assert m._actors == {}                          # 漏设 → stop_workflow 会 AttributeError
     # 无 actor、检测结果无残余 → 返回空 settlement、不抛
     cq = MagicMock()

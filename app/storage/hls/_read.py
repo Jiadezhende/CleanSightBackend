@@ -20,7 +20,7 @@ import logging
 from bisect import bisect_right
 from typing import List, Optional
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 
 from . import _layout, _m3u8
 from .types import Segment

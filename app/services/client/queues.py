@@ -14,12 +14,12 @@ from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetection
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
-from app.utils.metrics import frame_drop_total
-from app.utils.pressure import (
+from app.types.alarm import Alarm
+from app.types.detection import FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
+from app.services.utils.metrics import frame_drop_total
+from app.services.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
     REASON_QUEUE_HIGH_WATERMARK,
     PressureReporter,
@@ -93,7 +93,7 @@ class ClientQueues:
         inference_decimation: int = 2,
         *,
         # 不可变运行身份（一次 CQ == 一次 run，终生不变）。
-        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入 `runs.allocate`
+        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunControlService 传入 `runs.allocate`
         # 分配的 RunIdentity 与已解析好的 stage。
         run: Optional[RunIdentity] = None,
         source_ip: str = "",
@@ -122,7 +122,7 @@ class ClientQueues:
         self._state: RunState = RunState.ACTIVE
         self._state_lock = threading.Lock()
 
-        # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_manager COW
+        # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_service COW
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
         # 注：无 client_id 字段——注册表路由键即 run.task_id(int)；source_ip 为被动来源字段。
@@ -130,8 +130,8 @@ class ClientQueues:
         self.run: Optional[RunIdentity] = run
         self.source_ip: str = source_ip
         self.stage: str = stage
-        # run 起始时刻：供 GlobalHealthMonitor 的 task_max_duration 看门狗判定跑飞任务并超时拆除
-        # （health_monitor/manager.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
+        # run 起始时刻：供 HealthMonitorWorker 的 task_max_duration 看门狗判定跑飞任务并超时拆除
+        # （daemons/health_monitor/worker.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
         # 同时作为启动延迟埋点的公共参考钟（mark_startup_milestone 相对它计耗时）。
         self.task_started_at: float = time.time() if run is not None else 0.0
 
@@ -511,7 +511,7 @@ class ClientQueues:
         self._processed_pressure.reset()
 
     def clear(self) -> None:
-        """兼容入口：等价 `close()`（供 ClientManager.remove/remove_if/clear_all 调用）。"""
+        """兼容入口：等价 `close()`（供 ClientService.remove/remove_if/clear_all 调用）。"""
         self.close()
 
     def _release_payload(self) -> None:
@@ -554,7 +554,7 @@ class ClientQueues:
     def set_stream_windows(self, windows: Dict[str, float]) -> None:
         """配置帧窗保留时长 = max(10s 底线, 各算子最大感受野)。
 
-        由 InferenceManager 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
+        由 InferenceService 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
         单条帧窗保留所有算子里最长的感受野，各算子自行 _clip 到自身 window_seconds；
         感受野只向上扩展，signals_10s 另按固定 10s 底线裁窗，不受影响。
         """

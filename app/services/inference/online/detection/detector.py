@@ -15,8 +15,8 @@ from typing import Any, List
 
 import numpy as np
 
-from app.domain.detection import DetBox, DetectorOutput
-from app.domain.render import RenderSpec
+from app.types.detection import DetBox, DetectorOutput
+from app.services.inference.online.render import RenderSpec
 
 logger = logging.getLogger(__name__)
 

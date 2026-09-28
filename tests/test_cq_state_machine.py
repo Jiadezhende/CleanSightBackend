@@ -89,7 +89,7 @@ def test_close_releases_payload_keeps_identity():
 
 
 def test_clear_is_close_alias():
-    """ClientManager.remove 走 clear() → 等价 close()（置 CLOSED + 释放 payload）。"""
+    """ClientService.remove 走 clear() → 等价 close()（置 CLOSED + 释放 payload）。"""
     cq = make_cq()
     cq.clear()
     assert cq.get_state() is RunState.CLOSED

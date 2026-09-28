@@ -11,10 +11,10 @@ import pytest
 
 from doubles import FakeLauncher, offline_result, wait_until
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.service import OfflineJobService
-from app.utils.exceptions import ConflictError, ValidationError
+from app.types.exceptions import ConflictError, ValidationError
 
 # 提交校验只看「step 在配置里且 offline 非空」，class 不会被 import（子进程才实例化）。
 _CFG = InferenceConfig({"stages": {

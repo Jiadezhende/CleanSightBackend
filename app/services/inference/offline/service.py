@@ -32,10 +32,10 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.inference.config import InferenceConfig, load_stage_config
-from app.utils.exceptions import ConflictError
-from app.utils.task_queue import SerialTaskQueue
+from app.types.exceptions import ConflictError
+from app.services.utils.task_queue import SerialTaskQueue
 
 logger = logging.getLogger(__name__)
 
@@ -91,9 +91,9 @@ class OfflineJobService:
     ) -> None:
         if clients is None:
             # 函数体内 import：同 RecordingService，别把 client → numpy 链摊给每个 import 本模块的人
-            from app.services.client.manager import client_manager
+            from app.services.client.instance import client_service
 
-            clients = client_manager
+            clients = client_service
         self._clients = clients
         self._launcher = launcher
         self._config = config  # None = 提交时读 load_stage_config 单例

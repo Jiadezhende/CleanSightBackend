@@ -12,15 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
-from app.storage import _fs
+from app.daemons.cleanup.worker import CleanupWorker
+from app.storage.utils import fs as _fs
 
 _DAY = 86400.0
 _RETENTION_DAYS = 15
 
 
-def _worker(db_dir: Path) -> StorageCleanupWorker:
-    return StorageCleanupWorker(db_dir=db_dir, cleanup_days=_RETENTION_DAYS)
+def _worker(db_dir: Path) -> CleanupWorker:
+    return CleanupWorker(db_dir=db_dir, cleanup_days=_RETENTION_DAYS)
 
 
 def _age(directory: Path, days: float) -> None:
