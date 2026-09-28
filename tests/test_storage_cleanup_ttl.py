@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
+from app.services.alarm.cleanup_worker import StorageCleanupWorker
 from app.storage.utils import fs as _fs
 
 _DAY = 86400.0

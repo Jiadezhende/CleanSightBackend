@@ -6,17 +6,17 @@
 职责划分：
 - 过闸/入队（`cq.append_alarm_record_with_gate`）—— client 领域（CQ 自有去重闸门 +
   前端轮询的告警环形缓冲），闸门原子性归 CQ；
-- 落库（`persistence_manager.persist_alarm(dict)`）—— persistence 无状态落库。
+- 落库（`alarm_service.persist_alarm(dict)`）—— alarm 服务无状态上报。
 
-sink 只负责把两者编排到一起,不反向侵入任一方内部状态。persistence 因此不再依赖 cq。
-（原 persist_alarms 一度迁入 PersistenceManager,现按"落库≠过闸编排"归位回产出域。）
+sink 只负责把两者编排到一起,不反向侵入任一方内部状态。alarm 服务因此不再依赖 cq。
+（原 persist_alarms 一度迁入 AlarmService,现按"落库≠过闸编排"归位回产出域。）
 """
 
 import logging
 from typing import List
 
 from app.types.alarm import Alarm
-from app.services.persistence.instance import persistence_manager
+from app.services.alarm.instance import alarm_service
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def persist_alarms(alarms: List[Alarm], *, cq, mode: str, log_each: bool = False
         alarm.mode = mode
         if not cq.append_alarm_record_with_gate(alarm, mode):
             continue
-        persistence_manager.persist_alarm({
+        alarm_service.persist_alarm({
             "task_id": task_id,
             "stage": alarm.stage,
             "step_id": step_id,

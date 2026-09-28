@@ -97,7 +97,7 @@ class RecordingService:
         self.config = config if config is not None else get_recording_config()
         if clients is None:
             # 函数体内 import：写在模块级会把 client → numpy 那条链变成每个
-            # `import app.services.recording.*` 的过路费（同 PersistenceManager 的写法）。
+            # `import app.services.recording.*` 的过路费（同 AlarmService 的写法）。
             from app.services.client.manager import client_manager
 
             clients = client_manager
@@ -354,7 +354,7 @@ class RecordingService:
         `insert_segment` 抛 `FileNotFoundError`，这段丢弃。
 
         **失败不重试。** 异常由 `SerialTaskQueue._execute` 统一记 error 后吞掉，本模块
-        刻意不包 `GuardedExecutor`：`insert_segment` 把清单条目排在最后登记，重试若落在
+        刻意不包重试：`insert_segment` 把清单条目排在最后登记，重试若落在
         「条目已追加、统计写失败」之后，会往 playlist 里写出**重复条目**，毁掉整个 run
         的回放；而现在会抛的失败（ffmpeg 缺失/换代、盘满）基本都是非瞬时的，重试也修不好。
         丢一段 ≈ 丢 10 秒录像，比毁一整段回放便宜。

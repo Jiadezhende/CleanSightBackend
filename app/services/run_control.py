@@ -194,7 +194,7 @@ class RunController:
 
             # 2. 落盘残余数据（按 owner 归位，inference 一把拆、告警与录制各一个独立 sink）：
             #    ① inference 停 workflow（停 actor）交出 settlement；
-            #    ② persistence 落 settlement 告警（别名已由 actor 烧进 alarm.stage）；
+            #    ② alarm 服务上报 settlement 告警（别名已由 actor 烧进 alarm.stage）；
             #    ③ 清前端槽 + recording 落 HLS 残段与剩余检测结果。
             #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
             #    （→cq.close 释放帧）——本 try 早于下方清理。

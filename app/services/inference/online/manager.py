@@ -65,8 +65,8 @@ class InferenceManager:
         # 活体组件在 start() 里建（None = 尚未 start）
         self.visualization_pool: Optional["VisualizationWorkerPool"] = None
 
-        # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
-        # 告警落库归 PersistenceManager、HLS flush 归 RecordingService，由 RunController 编排；进程停机残余结算走惰性 import。
+        # 注：InferenceManager 不再持 alarm_service 引用（不驱动其生命周期、不做拆除期持久化）。
+        # 告警落库归 AlarmService、HLS flush 归 RecordingService，由 RunController 编排；进程停机残余结算走惰性 import。
         logger.debug("[InferenceManager] Initialization completed")
 
     def _build_components(self):
@@ -250,8 +250,8 @@ class InferenceManager:
         """停该 run 的推理 workflow：停 actor（收结算），返回 settlement 列表。
 
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
-        交给 RunController 转 PersistenceManager；HLS 残段 / 剩余检测结果归 recording，告警落库归
-        persistence，前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持
+        交给 RunController 转 AlarmService；HLS 残段 / 剩余检测结果归 recording，告警落库归
+        alarm，前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持
         lock_for(cq.run.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
         task_id = cq.run.task_id
@@ -288,7 +288,7 @@ class InferenceManager:
         self._model_worker_service.start()
         self.visualization_pool.stage_configs = self._get_stage_configs()
         self.visualization_pool.start()
-        # 注：persistence 生命周期已上移 lifespan（persistence.lifespan 嵌套于 inference.lifespan 外层），
+        # 注：alarm 生命周期已上移 lifespan（alarm.lifespan 嵌套于 inference.lifespan 外层），
         # 不再由本类驱动 start/stop——inference 不拥有平级服务的生命周期。
 
         # 初始化全局映射（均由 YAML 驱动）：
@@ -317,10 +317,10 @@ class InferenceManager:
         for _, actor in actors:
             actor.signal_stop()
 
-        # Phase 2: 逐个 join，收集结算告警并经 persistence sink 落库。
-        # 进程停机路径（非 per-run 拆除）：actor 产出的 settlement 用 persistence 落库（别名已烧进
-        # alarm.stage，与 actor 实时路径同款 sink 调用）——此时 persistence 仍在跑
-        # （persistence.lifespan 于 inference.lifespan 外层，停在 inference 之后）。
+        # Phase 2: 逐个 join，收集结算告警并经 alarm sink 落库。
+        # 进程停机路径（非 per-run 拆除）：actor 产出的 settlement 用 alarm 服务落库（别名已烧进
+        # alarm.stage，与 actor 实时路径同款 sink 调用）——此时 alarm 服务仍在跑
+        # （alarm.lifespan 于 inference.lifespan 外层，停在 inference 之后）。
         for task_id, actor in actors:
             try:
                 settlement = actor.finalize_and_stop()
@@ -343,6 +343,6 @@ class InferenceManager:
         # 组件建于 start()，未 start 过就 stop（异常路径 / 测试）时为 None，跳过即可。
         if self.visualization_pool is not None:
             self.visualization_pool.stop()
-        # 注：persistence.stop() 已上移 persistence.lifespan（停在 inference 之后，抽干队列）。
+        # 注：alarm_service.stop() 已上移 alarm.lifespan（停在 inference 之后，抽干队列）。
 
         logger.info("[InferenceManager] Stopped")

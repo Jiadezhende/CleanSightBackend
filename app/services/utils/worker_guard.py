@@ -1,7 +1,7 @@
 """worker_guard.py - Worker 线程自愈包装器。
 
-与 GuardedExecutor（函数级重试）互补：
-- GuardedExecutor：重试单次函数调用（如 persist_segment()）
+与告警上报重试（函数级重试）互补：
+- 告警上报重试（alarm_worker）：重试单次函数调用（如 report_alarm()）
 - guarded_run：重启 worker 的整个主循环（如 while not stop_event）
 
 覆盖场景：主循环控制逻辑的意外异常、C 扩展引发的 Python 级异常。

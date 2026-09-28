@@ -1,7 +1,7 @@
 """
-持久化数据模型
+告警服务数据模型
 
-定义持久化任务的数据结构
+定义告警上报任务的数据结构
 """
 
 import time
@@ -12,8 +12,8 @@ from app.types.alarm import ALARM_MODE_REALTIME, AlarmMetric, AlarmType
 
 
 @dataclass
-class AlarmPersistenceTask:
-    """告警持久化任务"""
+class AlarmReportTask:
+    """告警上报任务"""
 
     task_id: Optional[int]
     stage: Optional[str]
@@ -28,7 +28,7 @@ class AlarmPersistenceTask:
     timestamp: float = field(default_factory=time.time)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "AlarmPersistenceTask":
+    def from_dict(cls, data: Dict[str, Any]) -> "AlarmReportTask":
         """从字典创建告警任务"""
         return cls(
             task_id=data.get("task_id"),

@@ -23,7 +23,7 @@ re-export `service` 会把 `app.storage.hls` 与 client → numpy 那条链摊�
 
 ## 已接线（生产写侧就是这里）
 
-`app/main.py` 嵌 `lifespan()`（persistence 同一档、inference 外层），`run_control` 拆除时调
+`app/main.py` 嵌 `lifespan()`（alarm 同一档、inference 外层），`run_control` 拆除时调
 `flush_residual`，产物落 `cq.run` 的 `{task}/{step}/{run_id}/hls/` 与 `inference/`。
 
 ⚠ **同一时刻只能有一个 sweeper 从 CQ 取帧**——sweeper 从活跃 CQ 破坏性 drain，两个同时跑会
@@ -39,7 +39,7 @@ __all__ = ["lifespan"]
 async def lifespan():
     """recording 服务生命周期（**起于 inference 之前、停于 inference 之后**）。
 
-    在 `app/main.py` 里嵌在 `inference.lifespan` 外层，与 persistence 同一档，理由也一样：
+    在 `app/main.py` 里嵌在 `inference.lifespan` 外层，与 alarm 同一档，理由也一样：
     `inference.stop()` 会经 `run_control` 交出最后一批 HLS 残段，那时队列必须还活着；
     等它交完，本 `finally` 再停队列、把剩下的排空——**保序、不丢尾**。
 

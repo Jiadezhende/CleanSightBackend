@@ -5,7 +5,7 @@ Label Studio HTTP API 极简客户端。
 - ping(): GET /api/version，用于探活
 - import_clip(): POST /api/projects/{project_id}/import (multipart)，上传一个 mp4 创建 task
 
-实现选型：沿用 app/services/persistence/strategies/alarm_strategy.py 的 urllib.request
+实现选型：沿用 app/services/alarm/reporter.py 的 urllib.request
 模式，避免引入 requests/httpx 依赖。multipart 手工拼装。
 
 注意：当前实现把整个 mp4 读进内存。Lab 场景下 clip 通常 <5 min，可接受；

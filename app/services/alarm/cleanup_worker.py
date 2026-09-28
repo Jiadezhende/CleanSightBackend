@@ -58,7 +58,7 @@ class StorageCleanupWorker:
                 self._scan_and_clean()
             except Exception:
                 # L1 边界层：捕获扫描中一切未预期异常，记录后继续下一轮
-                # 不使用 GuardedExecutor（L2），因为此处需要的是线程存活而非立即重试
+                # 不做函数级重试（L2），因为此处需要的是线程存活而非立即重试
                 logger.exception("[StorageCleanup] Unexpected error during scan, will retry next interval")
 
     def _scan_and_clean(self) -> int:
