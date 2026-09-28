@@ -222,7 +222,7 @@ def _runner(offline):
 
 
 def _inference_dir(task_id, step_id):
-    from app.storage import _root
+    from app.storage.utils import root as _root
 
     return _root.run_path(make_run(task_id, step_id), "inference")
 
@@ -372,7 +372,7 @@ class TestRunLock:
         import shutil
 
         from app.services.inference.offline import runner as runner_mod
-        from app.storage import _root
+        from app.storage.utils import root as _root
 
         _write_detections(1, 2)
         run = make_run(1, 2)
@@ -390,7 +390,7 @@ class TestRunLock:
     def test_named_older_run_is_the_one_written(self, tmp_storage):
         """锁定点名的 run：同 step 已有更新的 run，结果仍写回旧 run。"""
         from app.types.run import RunIdentity
-        from app.storage import _root
+        from app.storage.utils import root as _root
 
         _write_detections(1, 2)
         old = make_run(1, 2)

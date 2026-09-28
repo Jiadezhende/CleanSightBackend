@@ -23,7 +23,7 @@ from typing import Optional
 
 from app.types.run import RunIdentity
 
-from . import _root
+from .utils import root as _root
 from .hls import _layout as _hls_layout
 from .inference import _layout as _inference_layout
 

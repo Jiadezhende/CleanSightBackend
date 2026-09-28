@@ -13,7 +13,7 @@ storage —— 数据层：内存数据模型与 `{storage_root}/` 下盘上数�
       inference/  detections.jsonl / temporal.jsonl / label_probs.npz
 
 run 目录只由 `runs.allocate` 建，写者只建域这一级。存储根下除数字命名的 task 目录外只有
-`.trash/`（`_fs.remove` 的回收区）与 `.lab_exports/`。域名过 `_root.DOMAINS` 白名单，笔误当场 `ValueError`。
+`.trash/`（`utils.fs.remove` 的回收区）与 `.lab_exports/`。域名过 `utils.root.DOMAINS` 白名单，笔误当场 `ValueError`。
 
 ## 对外：一域一个 import 名，模块函数，不出句柄
 
@@ -34,10 +34,10 @@ run 目录只由 `runs.allocate` 建，写者只建域这一级。存储根下�
 薄域用单文件、重域用子包，对外看不出区别（子包 `__init__` 是 facade，re-export 会连带
 加载实现模块，故那些模块的模块级必须保持 stdlib-only）。
 
-下划线开头的模块包内私有：
+`utils/` 包内私有：
 
-    _root.py     域名白名单 + 逐级定位 + 域目录只建一级。不枚举、不删除
-    _fs.py       盘上原语：整体替换 / 原子删除（经 `.trash/`）/ 建一级目录，全包只此一份
+    utils/root.py  域名白名单 + 逐级定位 + 域目录只建一级。不枚举、不删除
+    utils/fs.py    盘上原语：整体替换 / 原子删除（经 `.trash/`）/ 建一级目录，全包只此一份
 
 ## 依赖与边界（两条硬约束，细则在规范里）
 

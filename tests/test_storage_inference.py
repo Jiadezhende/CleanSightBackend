@@ -24,7 +24,8 @@ from factories import make_det_box
 from app.types.detection import DetBox, DetectorOutput, FrameDetection
 from app.types.run import RunIdentity
 from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.storage import _fs, inference
+from app.storage import inference
+from app.storage.utils import fs as _fs
 from app.storage.inference import _detection, _temporal
 
 
@@ -65,7 +66,7 @@ RUN_ID = 7
 
 def _run(task_id, step_id):
     """固定 run_id 的 run，并建好它的目录（分配者的职责，写者只建域这一级）。"""
-    from app.storage import _root
+    from app.storage.utils import root as _root
 
     run = RunIdentity(task_id, step_id, RUN_ID)
     _root.run_path(run).mkdir(parents=True, exist_ok=True)

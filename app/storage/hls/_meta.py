@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from app.storage import _fs
+from app.storage.utils import fs as _fs
 
 logger = logging.getLogger(__name__)
 

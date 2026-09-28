@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from app.services.persistence.workers.cleanup_worker import StorageCleanupWorker
-from app.storage import _fs
+from app.storage.utils import fs as _fs
 
 _DAY = 86400.0
 _RETENTION_DAYS = 15

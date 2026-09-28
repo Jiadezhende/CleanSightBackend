@@ -25,7 +25,7 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple
 
-from app.storage import _root
+from app.storage.utils import root as _root
 from app.types.run import RunIdentity
 
 from .types import SegmentRef

@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from app.types.run import RunIdentity
 from app.types.temporal import TemporalEvent, TemporalSegment
 from app.main import app
-from app.storage import _root
+from app.storage.utils import root as _root
 from app.storage import inference as inference_store
 from factories import seed_hls_segments, make_run
 

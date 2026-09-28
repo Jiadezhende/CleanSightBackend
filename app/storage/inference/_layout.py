@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.types.run import RunIdentity
-from app.storage import _root
+from app.storage.utils import root as _root
 
 # 本域的域名 —— 全文件只出现这一次，写错会被 `_root.DOMAINS` 白名单当场拦下。
 _DOMAIN = "inference"

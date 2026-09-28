@@ -54,8 +54,9 @@ BUDGET = {
     # 要让「某个成员模块自己是不是 stdlib-only」可执行，得另起一条按源码 AST 查
     # import 的检查，不是调这里的秒数。
     "app.storage":              (set(), 0.20),
-    "app.storage._root":        (set(), 0.20),   # stdlib only
-    "app.storage._fs":          (set(), 0.20),   # stdlib only
+    "app.storage.utils":        (set(), 0.20),   # 标记型 __init__，纯 docstring
+    "app.storage.utils.root":   (set(), 0.20),   # stdlib only
+    "app.storage.utils.fs":     (set(), 0.20),   # stdlib only
     "app.storage.tasks":        (set(), 0.20),   # stdlib only
     # 可见判据要问 hls / inference 两域的产物位置，连带加载两个 facade，预算照它们给
     "app.storage.runs":         (set(), 0.40),
@@ -145,7 +146,7 @@ FORBIDDEN_APP_IMPORTS = {
 # ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
     # app.types：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
-    # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
+    # app.settings：落盘根的唯一来源，按 `utils/root.py` 的规矩只在函数体内 import
     "app/storage": ("app.storage", "app.types", "app.settings"),
     # 算法服务：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
     # 都不许碰：阈值、入参上限、默认档一律写进算法子包自己的配置文件（见

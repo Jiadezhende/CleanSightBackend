@@ -14,7 +14,7 @@
 ## 各域文件的用法：先声明一个绑死自己域名的 domain_dir
 
 ```python
-from app.storage import _root
+from app.storage.utils import root as _root
 
 _DOMAIN = "hls"
 
@@ -130,7 +130,7 @@ def domain_dir(run: RunIdentity, domain: str, *, create: bool = False) -> Path:
         raise TypeError(f"须是 RunIdentity，收到 {type(run).__name__}")
     located = run_path(run, domain)
     if create:
-        from . import _fs
+        from . import fs as _fs
 
         _fs.ensure_dir(located)
     return located

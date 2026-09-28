@@ -4,7 +4,7 @@
 职责（每轮依次）：
 - 清空回收区 `{db_dir}/.trash/`（上一轮 rmtree 没删掉的残留）
 - 删除**目录自身 mtime** 超过 cleanup_days 天的 step 目录（2026-05 起 step 为最小粒度），
-  删除走 `app.storage._fs.remove`（先 rename 进回收区，原子）
+  删除走 `app.storage.utils.fs.remove`（先 rename 进回收区，原子）
 - 顺手清空被全部 step 抽走后留下的空 task_id 目录（只认数字目录名）
 
 判据为什么是 step 目录自身的 mtime，见 `_scan_and_clean` 的 docstring。
@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from app.storage import _fs
+from app.storage.utils import fs as _fs
 
 logger = logging.getLogger(__name__)
 

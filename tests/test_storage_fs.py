@@ -1,10 +1,10 @@
-"""`app.storage._fs` 盘上原语：整体替换、原子删除、建一级目录。"""
+"""`app.storage.utils.fs` 盘上原语：整体替换、原子删除、建一级目录。"""
 
 import os
 
 import pytest
 
-from app.storage import _fs
+from app.storage.utils import fs as _fs
 
 
 # ---------------------------------------------------------------------------

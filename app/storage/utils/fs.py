@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import _root
+from . import root as _root
 
 logger = logging.getLogger(__name__)
 

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import numpy as np
 
 from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
-from app.storage import _fs
+from app.storage.utils import fs as _fs
 from app.types.run import RunIdentity
 
 from . import _jsonl, _layout

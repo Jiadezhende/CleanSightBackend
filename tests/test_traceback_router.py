@@ -26,7 +26,8 @@ from httpx import ASGITransport, AsyncClient
 from app.types.run import RunIdentity
 from app.main import app
 from app.services.traceback.media_token import MediaToken
-from app.storage import _root, hls
+from app.storage import hls
+from app.storage.utils import root as _root
 from factories import make_run, seed_hls_segments
 
 
