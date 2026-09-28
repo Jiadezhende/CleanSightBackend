@@ -437,7 +437,6 @@ async def metrics():
         - infer_latency_ms: 推理延迟（Histogram）
         - infer_failure_total: 推理失败计数
         - frame_drop_total: 帧丢弃计数
-        - gpu_oom_total: GPU OOM 计数
         - retry_total: 重试计数
     """
     return Response(content=get_metrics(), media_type="text/plain")

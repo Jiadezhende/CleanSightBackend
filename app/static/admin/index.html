@@ -451,11 +451,6 @@
                 <td>{{ formatDict(metricsJson.frame_drop_total?.by_reason) }}</td>
               </tr>
               <tr>
-                <td>GPU OOM</td>
-                <td>{{ metricsJson.gpu_oom_total ?? 0 }}</td>
-                <td>—</td>
-              </tr>
-              <tr>
                 <td>重试</td>
                 <td>{{ metricsJson.retry_total?.total ?? 0 }}</td>
                 <td>{{ formatDict(metricsJson.retry_total?.by_operation) }}</td>

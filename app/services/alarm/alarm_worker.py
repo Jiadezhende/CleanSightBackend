@@ -13,7 +13,7 @@ from queue import Empty, Queue
 from typing import Any, Callable
 
 from app.services.utils.worker_guard import guarded_run
-from app.types.exceptions import AppError, ModelInferenceError
+from app.types.exceptions import AppError
 
 from .reporter import AlarmReporter
 from .types import AlarmReportTask
@@ -43,11 +43,9 @@ def _retry_delay(attempts: int) -> float:
 
 
 def _record_exception(exc: Exception) -> None:
-    from app.services.utils.metrics import gpu_oom_total, retry_total
+    from app.services.utils.metrics import retry_total
 
     retry_total.labels(operation=_RETRY_OPERATION, error_type=type(exc).__name__).inc()
-    if isinstance(exc, ModelInferenceError) and exc.is_cuda_error:
-        gpu_oom_total.labels(model=exc.model_name or "unknown").inc()
 
 
 def _report_with_retry(func: Callable[[], Any]) -> Any:

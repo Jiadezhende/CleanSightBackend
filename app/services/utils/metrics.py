@@ -2,8 +2,8 @@
 CleanSight Prometheus Metrics（可观测性）
 
 基于《实时 AI 视觉检测项目异常处理规范》：
-- 5 个核心 metrics（最小集合）
-- 强制埋点：推理延迟、失败率、丢帧率、GPU OOM、重试计数
+- 4 个核心 metrics（最小集合）
+- 强制埋点：推理延迟、失败率、丢帧率、重试计数
 - 用于 Grafana 可视化和告警
 """
 
@@ -101,33 +101,7 @@ frame_drop_total = Counter(
 
 
 # ============================================================================
-# 4. GPU OOM 计数（Counter）
-# ============================================================================
-
-gpu_oom_total = Counter("gpu_oom", "Total GPU out-of-memory errors", ["model"])  # sample=gpu_oom_total
-"""
-GPU 内存不足错误总数
-
-标签：
-- model: 模型名称
-
-用途：
-- 监控 CUDA OOM 频率
-- 触发批量大小调整
-- 告警：OOM > 5 次/小时
-
-示例：
-    try:
-        results = model.infer(frames)
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower():
-            gpu_oom_total.labels(model='yolov8n').inc()
-            raise ModelInferenceError(message=str(e), is_cuda_error=True)
-"""
-
-
-# ============================================================================
-# 5. 重试计数（Counter）
+# 4. 重试计数（Counter）
 # ============================================================================
 
 retry_total = Counter(

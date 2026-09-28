@@ -179,7 +179,7 @@
 
 ## GET /admin-f3m8/metrics/json
 
-把 Prometheus 5 个核心指标从 REGISTRY 解析为**结构化 JSON**（免前端自己解析 `/metrics` 文本）。前端用它做指标看板，**建议 ~5s 刷新**。
+把 Prometheus 4 个核心指标从 REGISTRY 解析为**结构化 JSON**（免前端自己解析 `/metrics` 文本）。前端用它做指标看板，**建议 ~5s 刷新**。
 
 **请求参数**：无。
 
@@ -203,9 +203,7 @@
     "total": 58,
     "by_reason": { "queue_full": 50, "stale": 8 }
   },
-  // 4) GPU OOM Counter —— 直接是 int，不是对象
-  "gpu_oom_total": 2,
-  // 5) 重试 Counter
+  // 4) 重试 Counter
   "retry_total": {
     "total": 7,
     "by_operation": { "rtsp_connect": 5, "db_write": 2 }
@@ -224,7 +222,6 @@
 | `frame_drop_total` | object | 仅 `frame_drop` Counter 存在时出现 |
 | `frame_drop_total.total` | int | 丢帧总数 |
 | `frame_drop_total.by_reason` | object | 按 `reason` 分组计数 |
-| `gpu_oom_total` | int | 仅 `gpu_oom` Counter 存在时出现；**值直接是 int，非对象** |
 | `retry_total` | object | 仅 `retry` Counter 存在时出现 |
 | `retry_total.total` | int | 重试总数 |
 | `retry_total.by_operation` | object | 按 `operation` 分组计数 |
@@ -237,8 +234,8 @@
 
 | 现象 | 后端实际状态 |
 |------|------------|
-| 返回 `{}`（整个空对象） | 要么 5 个指标全未记录过，要么解析抛异常降级——两者前端**无法区分**，都当"暂无数据"处理即可 |
-| 某个指标 key 缺失（如无 `gpu_oom_total`） | 该指标从未被记录（Counter/Histogram 未注册或无样本），**不是值为 0**——前端应据"key 存在与否"判断，别默认取值 |
+| 返回 `{}`（整个空对象） | 要么 4 个指标全未记录过，要么解析抛异常降级——两者前端**无法区分**，都当"暂无数据"处理即可 |
+| 某个指标 key 缺失（如无 `retry_total`） | 该指标从未被记录（Counter/Histogram 未注册或无样本），**不是值为 0**——前端应据"key 存在与否"判断，别默认取值 |
 | `infer_latency_ms.<model>` 的 `pXX` 全为 `0.0` | 有直方图但样本数 `total<=0` 或桶为空，分位数无法估算 |
 
 ---

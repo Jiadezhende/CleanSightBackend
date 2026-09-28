@@ -2,7 +2,7 @@
 告警上报重试（`app/services/alarm/alarm_worker.py`）测试
 
 基于《实时 AI 视觉检测项目异常处理规范》验证：
-1. Metrics 正确记录（retry / gpu_oom）
+1. Metrics 正确记录（retry）
 2. 重试决策正确（fatal / retryable / 次数上限）
 3. 重试次数与退避延迟序列
 """
@@ -19,14 +19,10 @@ from app.services.alarm.alarm_worker import (
 )
 from app.types.exceptions import (
     FFmpegError,
-    ModelInferenceError,
     PersistenceError,
     StreamConnectionError,
 )
-from app.services.utils.metrics import (
-    gpu_oom_total,
-    retry_total,
-)
+from app.services.utils.metrics import retry_total
 
 
 @pytest.fixture(autouse=True)
@@ -96,29 +92,6 @@ def test_metrics_retry(sleeps):
         after_count == before_count + 2
     ), f"retry_total should increase by 2 (before={before_count}, after={after_count})"
     assert sleeps == [1.0, 2.0]
-
-
-def test_metrics_gpu_oom():
-    """测试 gpu_oom_total metric"""
-    model_name = "test_model"
-    metric_key = (model_name,)
-
-    # 记录前的值
-    before_count = 0
-    if metric_key in gpu_oom_total._metrics:
-        before_count = gpu_oom_total._metrics[metric_key]._value.get()
-
-    def oom_func():
-        raise ModelInferenceError(
-            message="CUDA out of memory", model_name=model_name, is_cuda_error=True
-        )
-
-    with pytest.raises(ModelInferenceError):
-        _report_with_retry(oom_func)
-
-    # 验证 metric 增加
-    after_count = gpu_oom_total._metrics[metric_key]._value.get()
-    assert after_count == before_count + 1, "gpu_oom_total should increase"
 
 
 # ============================================================================

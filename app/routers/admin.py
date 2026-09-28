@@ -38,7 +38,7 @@ def _client_info(client_id: int, client_queues) -> dict:
 
 
 def _parse_metrics_json() -> dict:
-    """从 Prometheus REGISTRY 提取 5 个核心指标，返回结构化 JSON。"""
+    """从 Prometheus REGISTRY 提取 4 个核心指标，返回结构化 JSON。"""
     from prometheus_client import REGISTRY
 
     # 按 metric family 名聚合
@@ -99,13 +99,7 @@ def _parse_metrics_json() -> dict:
             total_drop += sample.value
         result["frame_drop_total"] = {"total": int(total_drop), "by_reason": by_reason}
 
-    # 4. GPU OOM Counter（family 名去 _total）
-    oom_fam = families.get("gpu_oom")
-    if oom_fam:
-        total_oom = sum(s.value for s in oom_fam.samples if s.name.endswith("_total"))
-        result["gpu_oom_total"] = int(total_oom)
-
-    # 5. 重试 Counter（family 名去 _total）
+    # 4. 重试 Counter（family 名去 _total）
     retry_fam = families.get("retry")
     if retry_fam:
         by_op: dict = {}
@@ -208,7 +202,7 @@ def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
 
 @router.get("/metrics/json")
 def get_metrics_json():
-    """Prometheus 5 个核心指标结构化为 JSON，前端每 5s 刷新。"""
+    """Prometheus 4 个核心指标结构化为 JSON，前端每 5s 刷新。"""
     try:
         return _parse_metrics_json()
     except Exception as exc:
