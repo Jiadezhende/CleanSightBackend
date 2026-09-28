@@ -2,8 +2,12 @@
 
     list_segments(run, track)               有哪些段、各自多长（**段枚举的唯一入口**）
     list_segments_in_range(run, track, ...) 其中落在这个墙钟区间里的那些
+    query_span(run, tracks)                 若干轨的段在墙钟上的跨度 → HlsSpan / None
+    query_has_segments(run, track)          该轨有没有段
+    query_has_init(run, track)              该轨的 init 段在不在盘上
 
-两个同源、同返回类型（`List[Segment]`），后者只是前者加一次区间切片。
+前两个同源、同返回类型（`List[Segment]`），后者只是前者加一次区间切片；`query_*` 都建立在
+`list_segments` 上（`query_has_init` 除外：init 不进清单）。
 
 **「有哪些段」只由清单回答**，盘上有文件不算数：在途段与登记失败的段喂给下游是 hls.js
 缓冲洞或 ffmpeg 静默截短（`docs/kb/DESIGN_SEGMENT_CONCAT.md` §5.3）。代价（未登记段的帧
@@ -18,12 +22,12 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_right
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from app.types.run import RunIdentity
 
 from . import _layout, _m3u8
-from .types import Segment
+from .types import HlsSpan, Segment
 
 logger = logging.getLogger(__name__)
 
@@ -110,3 +114,56 @@ def list_segments_in_range(
         return []
 
     return segs[lo : hi + 1]
+
+
+def query_span(run: RunIdentity, tracks: Sequence[str] = _layout.TRACKS) -> Optional[HlsSpan]:
+    """`tracks` 各轨的段在墙钟上的并集跨度；全都没段返回 `None`。
+
+        span = hls.query_span(run)                 # 双轨并集
+        span = hls.query_span(run, ("raw",))       # 只看 raw
+
+    段尾 = 段起点 + round(EXTINF)，与 `<video>.duration` 同源。
+
+    Raises:
+        ValueError: track 非法。
+    """
+    present: List[str] = []
+    start_us: Optional[int] = None
+    last_start_us = end_us = 0
+    for track in tracks:
+        segs = list_segments(run, track)
+        if not segs:
+            continue
+        present.append(track)
+        # list_segments 升序是契约，首末即最早 / 最晚起点；段尾仍逐段取 max（EXTINF 不等长）
+        first, last = segs[0].ref.ts_us, segs[-1].ref.ts_us
+        track_end = max(s.ref.ts_us + int(round(s.duration_s * 1_000_000)) for s in segs)
+        if start_us is None:
+            start_us, last_start_us, end_us = first, last, track_end
+        else:
+            start_us = min(start_us, first)
+            last_start_us = max(last_start_us, last)
+            end_us = max(end_us, track_end)
+    if start_us is None:
+        return None
+    return HlsSpan(
+        tracks=tuple(present), start_us=start_us, last_start_us=last_start_us, end_us=end_us,
+    )
+
+
+def query_has_segments(run: RunIdentity, track: str) -> bool:
+    """该轨清单里有没有段（盘上有文件不算，同 `list_segments`）。
+
+    Raises:
+        ValueError: track 非法。
+    """
+    return bool(list_segments(run, track))
+
+
+def query_has_init(run: RunIdentity, track: str) -> bool:
+    """该轨的 init 段在不在盘上。要路径本身的调用方用 `init_path`。
+
+    Raises:
+        ValueError: track 非法。
+    """
+    return _layout.init_path(run, track).exists()

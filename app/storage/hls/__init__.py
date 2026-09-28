@@ -22,6 +22,8 @@ cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计�
                segment_path / init_path / sidecar_path / playlist_path / parse_*
     ② Frame    read_segment / iter_frames
     ③ 写       insert_segment
+    ④ 查询     HlsSpan / query_span     若干轨的段在墙钟上的并集跨度
+               query_has_segments / query_has_init
 
 **「有哪些段」只由清单回答。** 文件系统枚举（`iterdir` + 文件名正则）曾是并行的第二个入口，
 已整个从域里删除（2026-09-19）——留着就是第二个真源，而 `__all__` 拦不住包内误用。盘上有文件
@@ -72,7 +74,7 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
 
 ## 域内分工
 
-    types.py     本域的资源容器：SegmentRef / Segment
+    types.py     本域的资源容器：SegmentRef / Segment / HlsSpan
                  （stdlib only、不 import 同包任何模块 —— 它是子包的底）
     _layout.py   域根 / 文件名 / 轨道白名单 / stage 目录（域名在此只出现一次；不枚举目录）
     _encode.py   帧序列 → mp4v，以及 eff_fps 反推（cv2 在函数体内 import）
@@ -82,7 +84,7 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
     _idx.py      sidecar 的 float64 布局
     _meta.py     metadata.json 的读改写
     _write.py    写侧对外动作：insert_segment（stage → adjust → commit）
-    _read.py     读侧对外动作：list_segments / list_segments_in_range
+    _read.py     读侧对外动作：list_segments / list_segments_in_range / query_*
 
 本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
 re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.types`**，
@@ -104,12 +106,19 @@ from ._layout import (
     sidecar_path,
     ts_to_us,
 )
-from ._read import list_segments, list_segments_in_range
+from ._read import (
+    list_segments,
+    list_segments_in_range,
+    query_has_init,
+    query_has_segments,
+    query_span,
+)
 from ._write import insert_segment
-from .types import Segment, SegmentRef
+from .types import HlsSpan, Segment, SegmentRef
 
 __all__ = [
     "TRACKS",
+    "HlsSpan",
     "Segment",
     "SegmentRef",
     "init_name",
@@ -120,6 +129,9 @@ __all__ = [
     "parse_segment_name",
     "list_segments",
     "playlist_path",
+    "query_has_init",
+    "query_has_segments",
+    "query_span",
     "read_segment",
     "segment_name",
     "segment_path",

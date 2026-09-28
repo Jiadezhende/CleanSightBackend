@@ -206,3 +206,47 @@ class TestSuccessor:
 
     def test_latest_run_has_no_successor(self, tmp_storage, monkeypatch):
         assert runs.successor(_alloc(monkeypatch, 1, 2, 10)) is None
+
+
+# ---------------------------------------------------------------------------
+# query_latest_by_step / query_lifespan_us
+# ---------------------------------------------------------------------------
+
+
+class TestQueryLatestByStep:
+    def test_latest_visible_run_per_step_in_step_order(self, tmp_storage, monkeypatch):
+        s3 = _alloc(monkeypatch, 1, 3, 10)
+        inference.append_detections(s3, [_fd(1.0)])
+        s1_old = _alloc(monkeypatch, 1, 1, 20)
+        inference.append_detections(s1_old, [_fd(1.0)])
+        s1_new = _alloc(monkeypatch, 1, 1, 30)
+        inference.append_detections(s1_new, [_fd(2.0)])
+        _alloc(monkeypatch, 1, 1, 40)                  # 最新但不可见：跳过它，不跳过这个 step
+
+        assert runs.query_latest_by_step(1) == [s1_new, s3]
+
+    def test_step_without_visible_run_is_left_out(self, tmp_storage, monkeypatch):
+        _alloc(monkeypatch, 1, 1, 10)                  # 只有空 run
+        s2 = _alloc(monkeypatch, 1, 2, 20)
+        inference.append_detections(s2, [_fd(1.0)])
+
+        assert runs.query_latest_by_step(1) == [s2]
+
+    def test_other_tasks_do_not_leak_in(self, tmp_storage, monkeypatch):
+        other = _alloc(monkeypatch, 2, 1, 10)
+        inference.append_detections(other, [_fd(1.0)])
+        assert runs.query_latest_by_step(1) == []
+
+    def test_unknown_task_is_empty(self, tmp_storage):
+        assert runs.query_latest_by_step(99) == []
+
+
+class TestQueryLifespan:
+    def test_bounded_by_the_next_allocated_run(self, tmp_storage, monkeypatch):
+        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000_000)
+        _alloc(monkeypatch, 1, 2, 1_700_000_060_000_000)
+        assert runs.query_lifespan_us(a) == (1_700_000_000_000_000, 1_700_000_060_000_000)
+
+    def test_latest_run_is_open_ended(self, tmp_storage, monkeypatch):
+        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000_000)
+        assert runs.query_lifespan_us(a) == (1_700_000_000_000_000, None)

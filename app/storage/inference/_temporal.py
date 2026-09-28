@@ -4,6 +4,7 @@
     write_temporal(run, facts)        整体替换（路线 C）
     read_label_probs(run)             回读逐帧类别概率；没有则 None
     write_label_probs(run, probs)     整体替换（路线 C）
+    query_has_offline_results(run)    有没有离线推理结果（分段事实或逐帧概率）
 
 货币都在 `app.types.temporal`：事实是 `TemporalEvent | TemporalSegment`，逐帧概率是 `LabelProbs`。
 
@@ -187,3 +188,17 @@ def read_label_probs(run: RunIdentity) -> Optional[LabelProbs]:
             probs=npz["probs"].astype(np.float32),
             labels=tuple(str(x) for x in npz["labels"]),
         )
+
+
+# ── 查询 ─────────────────────────────────────────────────────────────────────────
+
+
+def query_has_offline_results(run: RunIdentity) -> bool:
+    """该 run 有没有离线推理结果：`temporal.jsonl` 里有 `TemporalSegment`，或 `label_probs.npz` 在盘上。
+
+    只有 `TemporalEvent` 不算（那是在线打点）。label_probs 只判文件存在、不解析——损坏的 npz
+    也算「有」，要读内容的调用方照旧走 `read_label_probs`。
+    """
+    if any(isinstance(f, TemporalSegment) for f in read_temporal(run)):
+        return True
+    return (_layout.domain_dir(run) / _layout.LABEL_PROBS_NAME).exists()

@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from factories import make_frame
+from factories import make_frame, seed_hls_segments
 from app.types.frame import Frame
 from app.types.run import RunIdentity
 from app.settings import settings
@@ -482,6 +482,141 @@ class TestSelectSegments:
     def test_invalid_track_raises(self, tmp_storage, track):
         with pytest.raises(ValueError):
             hls.list_segments_in_range(RUN, track)
+
+
+# ---------------------------------------------------------------------------
+# 读侧查询：query_span / query_has_segments / query_has_init
+# ---------------------------------------------------------------------------
+
+TS0 = 1_700_000_000_000_000        # 造数用的首段墙钟起点（us）
+
+
+def _seed_track(items, track="raw", **kw):
+    """往 `RUN`（step 2 的固定 run）的某轨铺段并登记进清单。items: [(ts_us, extinf_s)]。"""
+    return seed_hls_segments(RUN.task_id, RUN.step_id, items, track=track, **kw)
+
+
+class TestQuerySpan:
+    """一个函数替三处旧实现：timeline 的双轨并集时长、历史清单的 step 摘要、lab 存储模式的
+    raw 起止。每条用例标注它钉的是哪一处的语义。"""
+
+    def test_no_segments_on_any_track_is_none(self, tmp_storage):
+        """timeline：无段 → router 回 (0, 0, 0)；历史清单：两轨都没段 → 丢掉该 step。"""
+        assert hls.query_span(RUN) is None
+        assert hls.query_span(RUN, ("raw",)) is None
+
+    def test_playlist_without_entries_is_none(self, tmp_storage):
+        """只有 init、清单里没有段条目（起流即失败的那档）——不是跨度。"""
+        _seed_track([], with_init=True)
+        assert hls.query_span(RUN) is None
+
+    def test_end_includes_the_last_segment_extinf(self, tmp_storage):
+        """timeline：段尾 = 末段起点 + EXTINF，不是末段起点（后者漏掉末段自身长度）。"""
+        _seed_track([(TS0, 10.0), (TS0 + 10_000_000, 4.0)])
+
+        span = hls.query_span(RUN)
+
+        assert span.start_us == TS0
+        assert span.last_start_us == TS0 + 10_000_000
+        assert span.end_us == TS0 + 14_000_000
+
+    def test_union_of_both_tracks(self, tmp_storage):
+        """timeline / 历史清单：双轨取并集——起点取最早、末段起点与段尾取最晚，可以来自不同轨。"""
+        _seed_track([(TS0, 10.0), (TS0 + 10_000_000, 10.0)], track="raw")
+        _seed_track([(TS0 + 3_000_000, 10.0), (TS0 + 13_000_000, 10.0)], track="processed")
+
+        span = hls.query_span(RUN)
+
+        assert span.tracks == ("raw", "processed")
+        assert span.start_us == TS0                        # raw 首段
+        assert span.last_start_us == TS0 + 13_000_000      # processed 末段
+        assert span.end_us == TS0 + 23_000_000             # processed 段尾
+
+    def test_tracks_lists_only_those_with_segments(self, tmp_storage):
+        """历史清单：`tracks` 只列有段的轨。"""
+        _seed_track([(TS0, 10.0)], track="processed")
+
+        span = hls.query_span(RUN)
+
+        assert span.tracks == ("processed",)
+        assert (span.start_us, span.last_start_us) == (TS0, TS0)
+
+    def test_tracks_keep_argument_order(self, tmp_storage):
+        _seed_track([(TS0, 10.0)], track="raw")
+        _seed_track([(TS0, 10.0)], track="processed")
+
+        assert hls.query_span(RUN, ("processed", "raw")).tracks == ("processed", "raw")
+
+    def test_restricting_to_raw_ignores_processed(self, tmp_storage):
+        """lab 存储模式：只看 raw 轨，processed 更晚的段尾不算。"""
+        _seed_track([(TS0, 10.0)], track="raw")
+        _seed_track([(TS0 + 20_000_000, 10.0)], track="processed")
+
+        span = hls.query_span(RUN, ("raw",))
+
+        assert span.tracks == ("raw",)
+        assert span.end_us == TS0 + 10_000_000
+
+    def test_only_requested_track_empty_is_none(self, tmp_storage):
+        """lab 存储模式：raw 没段而 processed 有 → 对 raw 的查询是 None。"""
+        _seed_track([(TS0, 10.0)], track="processed")
+        assert hls.query_span(RUN, ("raw",)) is None
+
+    def test_extinf_is_rounded_not_truncated(self, tmp_storage):
+        """统一 round：`1.001 * 1e6` 在 float 下是 1000999.99…，截断会少 1us（lab 旧实现用 int）。"""
+        _seed_track([(TS0, 1.001)])
+        assert hls.query_span(RUN).end_us == TS0 + 1_001_000
+
+    def test_segments_missing_from_playlist_do_not_count(self, tmp_storage):
+        """与 `list_segments` 同源：盘上有文件而清单没条目的不是段。"""
+        domain = _seed_track([(TS0, 10.0)])
+        (domain / f"raw_segment_{TS0 + 50_000_000}.mp4").write_bytes(b"orphan")
+
+        assert hls.query_span(RUN).end_us == TS0 + 10_000_000
+
+    @pytest.mark.parametrize("track", ["RAW", "detection", ""])
+    def test_invalid_track_raises(self, tmp_storage, track):
+        with pytest.raises(ValueError):
+            hls.query_span(RUN, (track,))
+
+
+class TestQueryHasSegments:
+    def test_true_when_the_playlist_has_entries(self, tmp_storage):
+        _seed_track([(TS0, 10.0)])
+        assert hls.query_has_segments(RUN, "raw") is True
+
+    def test_tracks_are_independent(self, tmp_storage):
+        _seed_track([(TS0, 10.0)], track="processed")
+        assert hls.query_has_segments(RUN, "raw") is False
+
+    def test_orphan_file_is_not_a_segment(self, tmp_storage):
+        target = _hls_dir(tmp_storage)
+        target.mkdir(parents=True)
+        (target / f"raw_segment_{TS0}.mp4").write_bytes(b"orphan")
+        assert hls.query_has_segments(RUN, "raw") is False
+
+    def test_invalid_track_raises(self, tmp_storage):
+        with pytest.raises(ValueError):
+            hls.query_has_segments(RUN, "detection")
+
+
+class TestQueryHasInit:
+    def test_present(self, tmp_storage):
+        _seed_track([(TS0, 10.0)], with_init=True)
+        assert hls.query_has_init(RUN, "raw") is True
+
+    def test_missing_even_with_segments(self, tmp_storage):
+        """首段 transcode 途中：段已登记、init 还没落——traceback 据此回 503。"""
+        _seed_track([(TS0, 10.0)], with_init=False)
+        assert hls.query_has_init(RUN, "raw") is False
+
+    def test_tracks_are_independent(self, tmp_storage):
+        _seed_track([(TS0, 10.0)], track="processed", with_init=True)
+        assert hls.query_has_init(RUN, "raw") is False
+
+    def test_invalid_track_raises(self, tmp_storage):
+        with pytest.raises(ValueError):
+            hls.query_has_init(RUN, "detection")
 
 
 # ---------------------------------------------------------------------------

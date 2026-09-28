@@ -17,6 +17,7 @@
     detections.jsonl      append_detections / read_detections        路线 B（追加）
     temporal.jsonl      read_temporal / write_temporal         路线 C（原子整体替换）
     label_probs.npz     read_label_probs / write_label_probs   路线 C（原子整体替换）
+    查询                query_has_offline_results              有分段事实或有逐帧概率
 
 货币是 `app.types` 的跨服务契约：`FrameDetection`（`app.types.detection`）与
 `TemporalEvent` / `TemporalSegment` / `LabelProbs`（`app.types.temporal`）。本域不出自己的类型——没有「从文件名
@@ -51,10 +52,17 @@
 """
 
 from ._detection import append_detections, read_detections
-from ._temporal import read_label_probs, read_temporal, write_label_probs, write_temporal
+from ._temporal import (
+    query_has_offline_results,
+    read_label_probs,
+    read_temporal,
+    write_label_probs,
+    write_temporal,
+)
 
 __all__ = [
     "append_detections",
+    "query_has_offline_results",
     "read_detections",
     "read_label_probs",
     "read_temporal",

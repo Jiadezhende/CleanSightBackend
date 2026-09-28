@@ -458,3 +458,41 @@ class TestArtifactIsolation:
         inference.write_temporal(_run(1, 2), [_seg(label="a")])
         inference.append_detections(_run(1, 2), [_frame(1.0)])
         assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# query_has_offline_results
+# ---------------------------------------------------------------------------
+
+
+class TestQueryHasOfflineResults:
+    def test_nothing_on_disk(self, tmp_storage):
+        assert inference.query_has_offline_results(_run(1, 2)) is False
+
+    def test_missing_run_dir(self, tmp_storage):
+        assert inference.query_has_offline_results(RunIdentity(1, 2, RUN_ID)) is False
+
+    def test_temporal_segment_counts(self, tmp_storage):
+        inference.write_temporal(_run(1, 2), [_evt(), _seg()])
+        assert inference.query_has_offline_results(_run(1, 2)) is True
+
+    def test_events_alone_do_not_count(self, tmp_storage):
+        """`temporal.jsonl` 在、但只有在线打点（TemporalEvent）——不是离线结果。"""
+        inference.write_temporal(_run(1, 2), [_evt()])
+        assert inference.query_has_offline_results(_run(1, 2)) is False
+
+    def test_empty_temporal_file_does_not_count(self, tmp_storage):
+        inference.write_temporal(_run(1, 2), [])
+        assert inference.query_has_offline_results(_run(1, 2)) is False
+
+    def test_label_probs_alone_counts(self, tmp_storage):
+        inference.write_label_probs(_run(1, 2), _probs())
+        assert inference.query_has_offline_results(_run(1, 2)) is True
+
+    def test_corrupt_label_probs_counts_without_raising(self, tmp_storage):
+        """只判文件存在、不解析：坏 npz 也算「有」，列表页不因它 500。"""
+        _run(1, 2)
+        path = _probs_file(tmp_storage, 1, 2)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"not-an-npz")
+        assert inference.query_has_offline_results(_run(1, 2)) is True
