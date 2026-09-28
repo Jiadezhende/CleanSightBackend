@@ -4,7 +4,7 @@
 支持多种可视化类型：BBox、Segmentation、Keypoint。
 
 纯渲染器：无线程、无队列、无 client 概念，只吃 frame + RenderSpec 出标注帧。
-由 VisualizationWorker（同层 worker.py）持有并调用。
+由 VisualizationWorker（同层 visualization_worker.py）持有并调用。
 """
 
 import logging

@@ -19,7 +19,7 @@ online 与 offline 互不 import；共用的东西只能放本层。
     online/temporal/      时序分析 (L3/L4)：Operator 抽象 + actor；impl/ 放 Operator 子类
     offline/              离线段：OfflineSegmenter 抽象 + runner/cli；impl/ 放 Segmenter 子类
 2. **活体包**：由 service 持有、有独立起停的 worker 池，生命周期跟着 `service.start()/stop()`。
-    online/visualization/ worker/pool/visualizer
+    online/visualization/ visualization_worker/visualizer
 
 `offline/cli.py` 是 `python -m` 离线入口，**不得被包内任何其他模块 import**（现状零反向引用）。
 

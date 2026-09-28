@@ -23,11 +23,11 @@ from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
 
 # 两个只在 `_build_components()` 里实例化的重组件走 TYPE_CHECKING + 函数体内导入
-# （规范 §2 通路 2）：`visualization.pool` → worker → visualizer 顶层 `import cv2`，
+# （规范 §2 通路 2）：`visualization.visualization_worker` → visualizer 顶层 `import cv2`，
 # 写在模块级会让 `import app.main`（经 run_control → instance）一律拉起 OpenCV。
 if TYPE_CHECKING:
     from .detection.service import DetectionService
-    from .visualization.pool import VisualizationWorkerPool
+    from .visualization.visualization_worker import VisualizationWorkerPool
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class InferenceService:
         # 抓帧有 33~66ms 抖动；抬到 raw_fps 后每帧新推理都能在一个 tick 内被抓到（空转 tick 仅读单槽+
         # 比 ts，~µs 级，不增推理量）。raw_fps 是已有的跨模块真源，无需新旋钮。
         # 注：HLS processed 打标另由 eff_fps 从 ts 反推、模型输入另由 model_input_fps 契约重采样，均不借本值。
-        from .visualization.pool import VisualizationWorkerPool
+        from .visualization.visualization_worker import VisualizationWorkerPool
 
         self.visualization_pool = VisualizationWorkerPool(
             target_fps=settings.raw_fps,          # 轮询率：源视频帧率，对 inference 流 2× 过采样
