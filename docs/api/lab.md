@@ -212,7 +212,7 @@
 | `422` | 请求体字段级校验失败（`clips` 为空、`start_media_ms<0`、`end_media_ms<1`） | FastAPI 校验体 |
 | `503` | LS **url 或 token 未配置** | `{"error":"Label Studio not configured","detail":"url 可在页面填、token 须 env"}`（HTTPException，**body 只有 `detail`，无 `retryable`**） |
 
-**`400` 全部触发条件**（`_validate_clips` / `_resolve_project_id`，整请求级、任一即拒）：
+**`400` 全部触发条件**（`app/services/lab/service.py` 的 `validate_clips` / `resolve_project_id`，整请求级、任一即拒）：
 
 - `clips` 段数 > `lab_export_max_clips_per_submit`（默认 20），`field=clips`；
 - 某段 `end_media_ms ≤ start_media_ms`，`field=clips`；
