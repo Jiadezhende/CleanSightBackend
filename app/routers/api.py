@@ -1,10 +1,10 @@
 """
 统一 API 路由
 
-- POST /api/start: DB 加载任务 → 委托 RunController.start_run
-- POST /api/terminate: 委托 RunController.stop_run
+- POST /api/start: DB 加载任务 → 委托 RunControlService.start_run
+- POST /api/terminate: 委托 RunControlService.stop_run
 
-编排（幂等 / 重启清理 / set_task / 起流 / 拆除 + 生命周期锁）全部收敛在 RunController；
+编排（幂等 / 重启清理 / set_task / 起流 / 拆除 + 生命周期锁）全部收敛在 RunControlService；
 本层只做 HTTP/DB 边界 + `asyncio.to_thread` 桥接（把同步的持锁段挪出事件循环）。
 """
 
@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import get_db
 from app.models import DBTask
 from app.services.client.instance import client_service
-from app.services.run_control import run_controller
+from app.services.run_control.instance import run_control_service
 from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class TerminateRequest(BaseModel):
 
 @router.post("/start")
 async def start(req: StartRequest):
-    """统一启动：DB 加载任务 → 委托 `RunController.start_run`（含幂等/重启/set_task/起流）。
+    """统一启动：DB 加载任务 → 委托 `RunControlService.start_run`（含幂等/重启/set_task/起流）。
 
     Raises:
         经异常 handler 转 HTTP：任务不存在 / source_ip 为空 / DB 失败 / 启动失败等。
@@ -80,12 +80,12 @@ async def start(req: StartRequest):
         current_step = str(db_task.current_step)
         logger.info(f"[start] Starting task {req.task_id} (source_ip={source_ip})")
 
-        # 运行键 = str(task_id)（在 RunController 内派生）；source_ip 作被动身份字段透传。
-        # 编排 + 生命周期锁在 RunController；同步持锁段丢进线程，避免阻塞事件循环。
+        # 运行键 = str(task_id)（在 RunControlService 内派生）；source_ip 作被动身份字段透传。
+        # 编排 + 生命周期锁在 RunControlService；同步持锁段丢进线程，避免阻塞事件循环。
         # 注：前端历史字段 fps 已弃用，后端不透传——
         # decoder 输出帧率取自 stream config，抽帧率取自 client config。
         return await asyncio.to_thread(
-            run_controller.start_run,
+            run_control_service.start_run,
             req.task_id,
             current_step,
             req.rtsp_url,
@@ -127,7 +127,7 @@ async def terminate(
         return {"status": "success", **no_op_id, "message": "no active run"}
 
     result = await asyncio.to_thread(
-        run_controller.stop_run, cq.run.task_id, "API termination request"
+        run_control_service.stop_run, cq.run.task_id, "API termination request"
     )
 
     if result["errors"]:

@@ -4,7 +4,7 @@
     collect_from(cq)                          取走该 CQ 此刻该落盘的一切（sweeper 每 tick 调）
     submit_segment(cq, track, frames) -> bool 打包 + 入 hls 队列
     submit_detections(cq, frames) -> bool     打包 + 入 detections 队列
-    flush_residual(cq, until_ts=None)         把不足一段的残帧切完落盘（拆除期 RunController 调）
+    flush_residual(cq, until_ts=None)         把不足一段的残帧切完落盘（拆除期 RunControlService 调）
     request_residual_flush(cq, fence_ts)      断流时登记一次残帧 flush（不就地执行）
 
 落盘格式全在 `app.storage.hls` / `app.storage.inference`；本模块只管何时拉、按什么顺序写。
@@ -230,7 +230,7 @@ class RecordingService:
                 **栅栏只作用于段**：detections 无论哪条路径都是全排空，它没有"横跨 gap"的问题
                 （见模块不变式 3）。
 
-        拆除期须在 `cq.close()` 释放帧之前调（RunController 保证）。切段口径与 sweeper 一致，
+        拆除期须在 `cq.close()` 释放帧之前调（RunControlService 保证）。切段口径与 sweeper 一致，
         差别只是它拉的是"攒满的整段"、这里拉的是"剩下不足一段的那点"。
 
         拆除期（`until_ts=None`）顺带回收本 cq 挂起的断流 flush 请求：调用方持 `lock_for`，

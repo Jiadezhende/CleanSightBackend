@@ -1,5 +1,5 @@
 """
-测试 P0: 任务生命周期并发保护（编排在 RunController，锁在 ClientService.lock_for）
+测试 P0: 任务生命周期并发保护（编排在 RunControlService，锁在 ClientService.lock_for）
 
 验证：
 1. 同 task 已在跑、step 与 url 都没变 → 再 start 幂等返回，不重起流
@@ -8,8 +8,8 @@
 4. 不同 task 的 start 互不阻塞：两边能同时处在各自的持锁段里
 5. terminate（body `{task_id}` 首选入口 / `?client_id=` 兼容入口）获取 per-task 锁
 
-说明：编排逻辑已从 api.py 收敛到 RunController，故 mock 打在
-`app.services.run_control.*`；**保留真实 lock_for**（真锁 → 真串行），故断言真实
+说明：编排逻辑已从 api.py 收敛到 RunControlService，故 mock 打在
+`app.services.run_control.service.*`；**保留真实 lock_for**（真锁 → 真串行），故断言真实
 `_task_locks`。注册表按用例决定：要看「上一次 start 登记的 run」的用例用真实注册表
 （每个用例换一本空表，不污染全局），其余用 patch.object 就地替换 has_client/get/remove。
 """
@@ -76,10 +76,10 @@ async def test_restart_with_same_step_and_url_is_idempotent():
 
     with (
         patch("app.routers.api.get_db", side_effect=lambda: iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.recording_service"),
-        patch("app.services.run_control.ClientQueues", side_effect=_new_cq),
+        patch("app.services.run_control.service.inference_manager") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues", side_effect=_new_cq),
     ):
         mock_inference.start_workflow.return_value = True
         mock_inference.resolve_stage.return_value = "0"
@@ -119,11 +119,11 @@ async def test_same_task_url_change_triggers_restart():
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.recording_service"),
-        patch("app.services.run_control.ClientQueues"),
-        patch.object(client_service, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
+        patch("app.services.run_control.service.inference_manager") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues"),
+        patch.object(client_service, "set"),  # set 已上移 RunControlService：拦真实注册，防污染全局表
         patch.object(client_service, "has_client", return_value=True),
         patch.object(client_service, "get", return_value=mock_cq),
         patch.object(
@@ -175,10 +175,10 @@ async def test_start_and_terminate_serialized():
 
     with (
         patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.recording_service"),
-        patch("app.services.run_control.ClientQueues", side_effect=_new_cq),
+        patch("app.services.run_control.service.inference_manager") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues", side_effect=_new_cq),
     ):
         mock_inference.start_workflow.side_effect = slow_start_workflow
         mock_inference.resolve_stage.return_value = "0"
@@ -235,10 +235,10 @@ async def test_different_tasks_not_blocked():
 
     with (
         patch("app.routers.api.get_db", side_effect=mock_get_db),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.recording_service"),
-        patch("app.services.run_control.ClientQueues", side_effect=_new_cq),
+        patch("app.services.run_control.service.inference_manager") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues", side_effect=_new_cq),
     ):
         mock_inference.start_workflow.side_effect = rendezvous
         mock_inference.resolve_stage.return_value = "0"
@@ -275,9 +275,9 @@ async def test_terminate_uses_lock(request_kwargs):
     mock_cq.run = RunIdentity(1, 0, 1)
 
     with (
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.recording_service"),
+        patch("app.services.run_control.service.inference_manager") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
         patch.object(client_service, "find_by_source_ip", return_value=mock_cq),
         patch.object(client_service, "get", return_value=mock_cq),
         patch.object(client_service, "has_client", return_value=True),

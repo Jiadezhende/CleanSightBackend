@@ -13,7 +13,7 @@ import pytest
 from factories import make_cq
 from app.services.client.instance import client_service
 from app.services.client.queues import RunState
-from app.services.run_control import run_controller
+from app.services.run_control.instance import run_control_service
 
 
 @pytest.fixture
@@ -40,12 +40,12 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
         return []  # 无 settlement
 
     with (
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.inference_manager") as mock_inf,
-        patch("app.services.run_control.recording_service"),
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.inference_manager") as mock_inf,
+        patch("app.services.run_control.service.recording_service"),
     ):
         mock_inf.stop_workflow.side_effect = capture_state
-        result = run_controller.stop_run(tid, reason="test")
+        result = run_control_service.stop_run(tid, reason="test")
 
     assert seen_state["at_flush"] is RunState.DRAINING
     mock_stream.stop_stream.assert_called_once_with(tid)
@@ -66,15 +66,15 @@ def test_stop_run_flushes_residual_while_cq_still_registered(_clean_registry):
     registered_at_flush = []
 
     with (
-        patch("app.services.run_control.stream_service"),
-        patch("app.services.run_control.inference_manager") as mock_inf,
-        patch("app.services.run_control.recording_service") as mock_recording,
+        patch("app.services.run_control.service.stream_service"),
+        patch("app.services.run_control.service.inference_manager") as mock_inf,
+        patch("app.services.run_control.service.recording_service") as mock_recording,
     ):
         mock_inf.stop_workflow.return_value = []
         mock_recording.flush_residual.side_effect = (
             lambda _cq: registered_at_flush.append(client_service.get(tid) is _cq)
         )
-        run_controller.stop_run(tid, reason="test")
+        run_control_service.stop_run(tid, reason="test")
 
     mock_recording.flush_residual.assert_called_once_with(cq)
     assert registered_at_flush == [True]
@@ -89,11 +89,11 @@ def test_stop_run_expected_hit_tears_down(_clean_registry):
     client_service.set(tid, cq)
 
     with (
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.inference_manager") as mock_inf,
-        patch("app.services.run_control.recording_service"),
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.inference_manager") as mock_inf,
+        patch("app.services.run_control.service.recording_service"),
     ):
-        result = run_controller.stop_run(tid, reason="hm", expected=cq)
+        result = run_control_service.stop_run(tid, reason="hm", expected=cq)
 
     mock_stream.stop_stream.assert_called_once_with(tid)
     mock_inf.stop_workflow.assert_called_once_with(cq)
@@ -111,12 +111,12 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
     client_service.set(tid, cq_new)   # 槽位已是新 run（模拟 /start 抢占重启换槽）
 
     with (
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.inference_manager") as mock_inf,
-        patch("app.services.run_control.recording_service") as mock_recording,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.inference_manager") as mock_inf,
+        patch("app.services.run_control.service.recording_service") as mock_recording,
     ):
         # HM 过期决策：拿着旧 cq 来拆，但槽位已换新
-        result = run_controller.stop_run(tid, reason="hm-stale", expected=cq_old)
+        result = run_control_service.stop_run(tid, reason="hm-stale", expected=cq_old)
 
     assert result["skipped"] is True
     # 新 run 毫发无伤：未停 decoder、未落盘、仍在表、仍 ACTIVE

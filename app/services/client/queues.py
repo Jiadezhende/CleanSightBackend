@@ -93,7 +93,7 @@ class ClientQueues:
         inference_decimation: int = 2,
         *,
         # 不可变运行身份（一次 CQ == 一次 run，终生不变）。
-        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入 `runs.allocate`
+        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunControlService 传入 `runs.allocate`
         # 分配的 RunIdentity 与已解析好的 stage。
         run: Optional[RunIdentity] = None,
         source_ip: str = "",

@@ -457,10 +457,10 @@ class GlobalHealthMonitor:
         # 步骤 0: 清理监控器自身的客户端状态（HealthMonitor 专属，防内存泄漏）
         self._reconnecting_clients.pop(task_id, None)
 
-        # 步骤 1-3: 委托给 RunController（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
-        from app.services.run_control import run_controller
+        # 步骤 1-3: 委托给 RunControlService（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
+        from app.services.run_control.instance import run_control_service
 
-        return run_controller.stop_run(
+        return run_control_service.stop_run(
             task_id, reason, skip_decoder=skip_decoder, expected=expected
         )
 

@@ -59,7 +59,7 @@ class InferenceManager:
         self._model_worker_service: Optional["DetectionService"] = None
 
         # per-client ClientTemporalActor 注册表。
-        # 注：start/stop_workflow 的互斥由 RunController 的 lock_for(task_id) per-task 锁承接
+        # 注：start/stop_workflow 的互斥由 RunControlService 的 lock_for(task_id) per-task 锁承接
         # （T3 已落地），本类不再自持 _client_lifecycle_lock。
         self._actors: Dict[int, ClientTemporalActor] = {}
 
@@ -67,7 +67,7 @@ class InferenceManager:
         self.visualization_pool: Optional["VisualizationWorkerPool"] = None
 
         # 注：InferenceManager 不再持 persistence_manager 引用（不驱动其生命周期、不做拆除期持久化）。
-        # 告警落库归 PersistenceManager、HLS flush 归 RecordingService，由 RunController 编排；进程停机残余结算走惰性 import。
+        # 告警落库归 PersistenceManager、HLS flush 归 RecordingService，由 RunControlService 编排；进程停机残余结算走惰性 import。
         logger.debug("[InferenceManager] Initialization completed")
 
     def _build_components(self):
@@ -175,7 +175,7 @@ class InferenceManager:
         YAML 未配该 step，或配了但没有 detector（无在线检测）→ `ValidationError`（参数错误，上游不该
         下发）。无兜底 stage：detector 构造失败在启动时就已 fail-fast，运行时推理失败走逐帧降级。
 
-        公有：供 RunController 在建 CQ 前解析 stage（stage 是 CQ 不可变身份的一部分）。
+        公有：供 RunControlService 在建 CQ 前解析 stage（stage 是 CQ 不可变身份的一部分）。
         """
         from app.services.inference.config import load_stage_config
 
@@ -193,10 +193,10 @@ class InferenceManager:
     def start_workflow(self, cq: ClientQueues) -> bool:
         """起该 run 的推理 workflow：建并启 actor（存储侧无起始钩子）。
 
-        入参是 RunController 已建好并**已注册**（client_service.set）的不可变身份 CQ
+        入参是 RunControlService 已建好并**已注册**（client_service.set）的不可变身份 CQ
         （一 CQ == 一 run）。调用方已持 lock_for(cq.run.task_id)，与 stop_workflow 互斥；重启路径下
-        RunController 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
-        RunController（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
+        RunControlService 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
+        RunControlService（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
         resolve_stage 定死）。
         """
         task_id = cq.run.task_id
@@ -251,8 +251,8 @@ class InferenceManager:
         """停该 run 的推理 workflow：停 actor（收结算），返回 settlement 列表。
 
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
-        交给 RunController 转 PersistenceManager；HLS 残段 / 剩余检测结果归 recording，告警落库归
-        persistence，前端槽清零亦由 RunController 做）。调用方（RunController.stop_run）已持
+        交给 RunControlService 转 PersistenceManager；HLS 残段 / 剩余检测结果归 recording，告警落库归
+        persistence，前端槽清零亦由 RunControlService 做）。调用方（RunControlService.stop_run）已持
         lock_for(cq.run.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
         task_id = cq.run.task_id
@@ -268,7 +268,7 @@ class InferenceManager:
                     "[InferenceManager] finalize actor failed for task=%s: %s", task_id, e
                 )
 
-        # 注：这里**不收尾检测结果**。cq 落盘缓冲里剩下的那点由 RunController 紧接着调的
+        # 注：这里**不收尾检测结果**。cq 落盘缓冲里剩下的那点由 RunControlService 紧接着调的
         # `recording.flush_residual(cq)` 一并交出（它在本方法之后、cq.close() 之前）。
         logger.info("[InferenceManager] Workflow stopped: task=%s", task_id)
         return settlement

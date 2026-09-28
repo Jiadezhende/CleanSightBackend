@@ -1,6 +1,6 @@
 # `/api` — 统一任务 API
 
-启动 / 终止一次 run 的唯一对外入口，桥接内部 `RunController`。数据不落 DB 展示层，操作的是**内存中的运行态**（decoder + 推理 workflow + client registry + HLS）。通用约定（Base URL、Gateway、错误模型、双模标识、时间戳单位）见 [README](README.md)。
+启动 / 终止一次 run 的唯一对外入口，桥接内部 `RunControlService`。数据不落 DB 展示层，操作的是**内存中的运行态**（decoder + 推理 workflow + client registry + HLS）。通用约定（Base URL、Gateway、错误模型、双模标识、时间戳单位）见 [README](README.md)。
 
 ```
   POST /api/start ──→ 起一次 run（task_id 为运行键）
