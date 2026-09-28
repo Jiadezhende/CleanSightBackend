@@ -70,5 +70,5 @@ app/routers/health.py  改 import 与单例名，读法不变
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
-| `test_services_do_not_import_routers` 只扫 `app/services`，health_monitor 迁出后不再受「不许 import routers」约束；`services ↛ daemons` 也无门禁 | 方向违规不会红 | 待定：是否新增 daemons ↛ routers、services ↛ daemons 两条方向门禁（现状两条均满足） |
+| `test_services_do_not_import_routers` 只扫 `app/services`，health_monitor 迁出后不再受「不许 import routers」约束；`services ↛ daemons` 也无门禁 | 方向违规不会红 | 已补：`test_daemons_do_not_import_routers`、`test_services_do_not_import_daemons` |
 | 日志检索关键字从 `[GlobalHealthMonitor]` 变为 `[HealthMonitorWorker]` | 按旧前缀 grep 日志 / 告警规则会漏 | 运维侧知悉 |

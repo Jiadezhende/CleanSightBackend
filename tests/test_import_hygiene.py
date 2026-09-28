@@ -404,6 +404,22 @@ def test_services_do_not_import_routers():
     )
 
 
+def test_daemons_do_not_import_routers():
+    """daemons 不得反向依赖 routers：routers 只读 daemon 状态，方向只许 routers → daemons。"""
+    violations = _imports_under(APP_DIR / "daemons", "app.routers")
+    assert not violations, (
+        "daemons 反向依赖了 routers（协议层）：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_services_do_not_import_daemons():
+    """services 不得依赖 daemons：daemons 按时钟自驱、可依赖 services，反过来就成环。"""
+    violations = _imports_under(APP_DIR / "services", "app.daemons")
+    assert not violations, (
+        "services 依赖了 daemons：\n  " + "\n  ".join(violations)
+    )
+
+
 def test_alarm_does_not_import_inference():
     """alarm 不得反向依赖 inference：告警过闸编排在 inference 侧的 alarm_sink，
     方向只许 inference → alarm（见 SINGLETON_EXCEPTIONS 里 alarm_sink 那条）。"""
