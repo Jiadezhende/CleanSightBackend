@@ -93,17 +93,17 @@ def _capture(monkeypatch, fake=None):
 
 
 class TestRouterConstructionStaysInSync:
-    """路由构造 `ClipBuilder` 时传的每个 kwarg 都必须还在签名里。
+    """送标服务构造 `ClipBuilder` / `ClipSpec` 时传的每个 kwarg 都必须还在签名里。
 
     补的是一个真窟窿：`gap_tolerance_ms` 随判据换输入而退役、`clip_builder` 删了这个参数，
-    而 [`routers/lab.py`](../app/routers/lab.py) 漏改仍在传 —— `/lab-f3m8/submit` **一条
-    测试都没有**，于是只有线上真请求才会撞上 `TypeError`，整个送标端点 500。
+    而构造方（当时在 `routers/lab.py`，现已下沉到
+    [`services/lab/service.py`](../app/services/lab/service.py)）漏改仍在传 —— 只有线上真请求
+    才会撞上 `TypeError`，整个送标端点 500。
 
-    这条是结构断言（读 AST），不需要起服务、不需要 LS/DB 替身；`/submit` 的行为测试是另一
-    回事（目前仍缺，见本仓 update 记录）。
+    这条是结构断言（读 AST），不需要起服务、不需要 LS/DB 替身；行为测试见 test_lab_service.py。
     """
 
-    # 本域所有被路由构造的类。`ClipSpec` 与 `ClipBuilder` 暴露面完全相同——字段刚改过名，
+    # 本域所有被送标服务构造的类。`ClipSpec` 与 `ClipBuilder` 暴露面完全相同——字段刚改过名，
     # 只堵一个等于留另一个。
     TARGETS = {"ClipBuilder": ClipBuilder, "ClipSpec": ClipSpec}
 
@@ -111,9 +111,9 @@ class TestRouterConstructionStaysInSync:
         import ast
         import inspect
 
-        source = (Path(__file__).resolve().parents[1] / "app" / "routers" / "lab.py").read_text(
-            encoding="utf-8"
-        )
+        source = (
+            Path(__file__).resolve().parents[1] / "app" / "services" / "lab" / "service.py"
+        ).read_text(encoding="utf-8")
         calls = [
             node
             for node in ast.walk(ast.parse(source))
@@ -123,7 +123,7 @@ class TestRouterConstructionStaysInSync:
         ]
         found = {node.func.id for node in calls}
         assert found == set(self.TARGETS), (
-            f"lab.py 里少了这些构造调用：{sorted(set(self.TARGETS) - found)}；"
+            f"service.py 里少了这些构造调用：{sorted(set(self.TARGETS) - found)}；"
             "本用例的前提没了，请复核（是真的不构造了，还是改成别的名字了）"
         )
 
@@ -132,7 +132,7 @@ class TestRouterConstructionStaysInSync:
             accepted = set(inspect.signature(self.TARGETS[name]).parameters)
             passed = {kw.arg for kw in call.keywords if kw.arg is not None}
             assert passed <= accepted, (
-                f"lab.py:{call.lineno} 给 {name} 传了签名里没有的参数："
+                f"service.py:{call.lineno} 给 {name} 传了签名里没有的参数："
                 f"{sorted(passed - accepted)}"
             )
 
