@@ -2,6 +2,7 @@
 
     list_segments(run, track)               有哪些段、各自多长（**段枚举的唯一入口**）
     list_segments_in_range(run, track, ...) 其中落在这个墙钟区间里的那些
+    query_timeline(run, track)              该轨展开成媒体轴 → MediaTimeline（换算见 `_timeline`）
     query_span(run, tracks)                 若干轨的段在墙钟上的跨度 → HlsSpan / None
     query_has_segments(run, track)          该轨有没有段
     query_has_init(run, track)              该轨的 init 段在不在盘上
@@ -27,6 +28,7 @@ from typing import List, Optional, Sequence
 from app.types.run import RunIdentity
 
 from . import _layout, _m3u8
+from ._timeline import MediaTimeline, PlacedSegment
 from .types import HlsSpan, Segment
 
 logger = logging.getLogger(__name__)
@@ -114,6 +116,26 @@ def list_segments_in_range(
         return []
 
     return segs[lo : hi + 1]
+
+
+def query_timeline(run: RunIdentity, track: str) -> MediaTimeline:
+    """读该轨清单并展开成媒体轴：段的媒体落点 = 此前所有 EXTINF 之和。清单缺失得空轨。
+
+        tl = hls.query_timeline(run, "raw")
+
+    累加用 float 秒、只在出口取整到 ms（逐段取整再累加，误差随段数线性累积）。**无损依赖
+    EXTINF 落盘精度是 ms 整数倍**（`_m3u8.entry()` 的 `:.3f`）：改了那个精度这里要换成整数
+    累加，否则段间 ±1ms 错位，`select()` 在边界漏段。
+
+    Raises:
+        ValueError: track 非法。
+    """
+    placed: List[PlacedSegment] = []
+    cursor_s = 0.0
+    for seg in list_segments(run, track):
+        placed.append(PlacedSegment(seg=seg, media_start_ms=int(round(cursor_s * 1000))))
+        cursor_s += seg.duration_s
+    return MediaTimeline(placed)
 
 
 def query_span(run: RunIdentity, tracks: Sequence[str] = _layout.TRACKS) -> Optional[HlsSpan]:

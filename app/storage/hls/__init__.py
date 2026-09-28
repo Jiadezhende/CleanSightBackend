@@ -22,7 +22,9 @@ cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计�
                segment_path / init_path / sidecar_path / playlist_path / parse_*
     ② Frame    read_segment / iter_frames
     ③ 写       insert_segment
-    ④ 查询     HlsSpan / query_span     若干轨的段在墙钟上的并集跨度
+    ④ 媒体轴   MediaTimeline / PlacedSegment
+               query_timeline           一条轨展开成媒体轴，墙钟↔媒体换算（`_timeline`）
+    ⑤ 查询     HlsSpan / query_span     若干轨的段在墙钟上的并集跨度
                query_has_segments / query_has_init
 
 **「有哪些段」只由清单回答。** 文件系统枚举（`iterdir` + 文件名正则）曾是并行的第二个入口，
@@ -85,6 +87,7 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
     _meta.py     metadata.json 的读改写
     _write.py    写侧对外动作：insert_segment（stage → adjust → commit）
     _read.py     读侧对外动作：list_segments / list_segments_in_range / query_*
+    _timeline.py 媒体轴：MediaTimeline / PlacedSegment（不碰盘，由 query_timeline 构造）
 
 本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
 re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.types`**，
@@ -112,13 +115,17 @@ from ._read import (
     query_has_init,
     query_has_segments,
     query_span,
+    query_timeline,
 )
+from ._timeline import MediaTimeline, PlacedSegment
 from ._write import insert_segment
 from .types import HlsSpan, Segment, SegmentRef
 
 __all__ = [
     "TRACKS",
     "HlsSpan",
+    "MediaTimeline",
+    "PlacedSegment",
     "Segment",
     "SegmentRef",
     "init_name",
@@ -132,6 +139,7 @@ __all__ = [
     "query_has_init",
     "query_has_segments",
     "query_span",
+    "query_timeline",
     "read_segment",
     "segment_name",
     "segment_path",

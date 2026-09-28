@@ -1,7 +1,8 @@
 """ClipBuilder 单元测试：装配与三档拒绝 + ffmpeg 命令形态。
 
 **媒体轴上的定位本身不在这里**（段从哪来、落点、墙钟换算、空洞判据）—— 那是
-`MediaTimeline` 的职责，见 `tests/test_media_timeline.py`。本文件只测它之上的两件事：
+`hls.MediaTimeline` 与断流判定的职责，见 `tests/test_storage_hls.py`、
+`tests/test_media_timeline.py`。本文件只测它之上的两件事：
 
 1. `build_one` 的装配：媒体刻度进、绝对墙钟出；三档拒绝（区间非法 / 出界 / 跨空洞）。
 2. `_run_ffmpeg` 的命令与临时清单形态：HLS demuxer 而不是 `-f concat`、清单必须与段同目录
@@ -24,7 +25,7 @@ from app.services.lab.clip_builder import (
     ClipRangeOutOfBoundsError,
     ClipSpec,
 )
-from app.services.utils.media_timeline import MediaTimeline
+from app.storage import hls
 from factories import make_run, seed_hls_segments
 
 TASK_ID = 1
@@ -42,8 +43,8 @@ def _seed(items, with_init: bool = True) -> Path:
     return seed_hls_segments(TASK_ID, STEP_ID, items, with_init=with_init)
 
 
-def _window(start_media_ms: int, end_media_ms: int) -> MediaTimeline:
-    return MediaTimeline.load(make_run(TASK_ID, STEP_ID), RAW_TRACK).select(
+def _window(start_media_ms: int, end_media_ms: int) -> hls.MediaTimeline:
+    return hls.query_timeline(make_run(TASK_ID, STEP_ID), RAW_TRACK).select(
         start_media_ms, end_media_ms
     )
 
