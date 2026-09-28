@@ -13,13 +13,11 @@ import logging
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy.exc import SQLAlchemyError
 
-from app.db.database import get_db
-from app.db.tasks import DBTask
+from app.db import tasks as db_tasks
 from app.services.client.instance import client_service
 from app.services.run_control.instance import run_control_service
-from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
+from app.types.exceptions import NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -51,49 +49,35 @@ async def start(req: StartRequest):
     Raises:
         经异常 handler 转 HTTP：任务不存在 / source_ip 为空 / DB 失败 / 启动失败等。
     """
-    db = None
-    try:
-        # DB 查询 + 校验（HTTP/DB 边界，锁外）
-        db = next(get_db())
-        try:
-            db_task = db.query(DBTask).filter(DBTask.task_id == req.task_id).first()
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message=f"Failed to query task {req.task_id}",
-                retryable=True,
-                query="task_lookup_by_id",
-            ) from e
-
-        if not db_task:
-            raise NotFoundError(
-                message=f"Task {req.task_id} not found",
-                resource_type="Task",
-                resource_id=str(req.task_id),
-            )
-
-        source_ip: str | None = db_task.source_ip  # type: ignore[assignment]
-        if not source_ip:
-            raise ValidationError(
-                message="Task source_ip is required", field="source_ip", value=None
-            )
-
-        current_step = str(db_task.current_step)
-        logger.info(f"[start] Starting task {req.task_id} (source_ip={source_ip})")
-
-        # 运行键 = str(task_id)（在 RunControlService 内派生）；source_ip 作被动身份字段透传。
-        # 编排 + 生命周期锁在 RunControlService；同步持锁段丢进线程，避免阻塞事件循环。
-        # 注：前端历史字段 fps 已弃用，后端不透传——
-        # decoder 输出帧率取自 stream config，抽帧率取自 client config。
-        return await asyncio.to_thread(
-            run_control_service.start_run,
-            req.task_id,
-            current_step,
-            req.rtsp_url,
-            source_ip,
+    # DB 查询 + 校验（HTTP/DB 边界，锁外）；DatabaseError 由边界层转 503
+    db_task = db_tasks.query_task(req.task_id)
+    if not db_task:
+        raise NotFoundError(
+            message=f"Task {req.task_id} not found",
+            resource_type="Task",
+            resource_id=str(req.task_id),
         )
-    finally:
-        if db:
-            db.close()
+
+    source_ip: str | None = db_task.source_ip  # type: ignore[assignment]
+    if not source_ip:
+        raise ValidationError(
+            message="Task source_ip is required", field="source_ip", value=None
+        )
+
+    current_step = str(db_task.current_step)
+    logger.info(f"[start] Starting task {req.task_id} (source_ip={source_ip})")
+
+    # 运行键 = str(task_id)（在 RunControlService 内派生）；source_ip 作被动身份字段透传。
+    # 编排 + 生命周期锁在 RunControlService；同步持锁段丢进线程，避免阻塞事件循环。
+    # 注：前端历史字段 fps 已弃用，后端不透传——
+    # decoder 输出帧率取自 stream config，抽帧率取自 client config。
+    return await asyncio.to_thread(
+        run_control_service.start_run,
+        req.task_id,
+        current_step,
+        req.rtsp_url,
+        source_ip,
+    )
 
 
 @router.post("/terminate")

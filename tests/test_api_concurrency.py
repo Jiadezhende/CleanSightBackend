@@ -21,10 +21,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import AsyncClient, ASGITransport
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.db import tasks as db_tasks
 from app.types.run import RunIdentity
 from app.main import app
 from app.services.client.instance import client_service
+
+_real_query_task = db_tasks.query_task
 
 
 # ---------------------------------------------------------------------------
@@ -49,14 +53,6 @@ def _make_db_task(task_id: int = 1, source_ip: str = "10.0.0.1"):
     return task
 
 
-def _mock_db_session(db_task):
-    session = MagicMock()
-    query = MagicMock()
-    query.filter.return_value.first.return_value = db_task
-    session.query.return_value = query
-    return session
-
-
 def _new_cq(*, run, **_kwargs):
     """ClientQueues 替身：每次 start 一个新对象，带上真实的 run 身份"""
     cq = MagicMock()
@@ -75,7 +71,7 @@ async def test_restart_with_same_step_and_url_is_idempotent():
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
 
     with (
-        patch("app.routers.api.get_db", side_effect=lambda: iter([_mock_db_session(db_task)])),
+        patch.object(db_tasks, "query_task", return_value=db_task),
         patch("app.services.run_control.service.inference_service") as mock_inference,
         patch("app.services.run_control.service.stream_service") as mock_stream,
         patch("app.services.run_control.service.recording_service"),
@@ -118,7 +114,7 @@ async def test_same_task_url_change_triggers_restart():
     mock_cq.run = RunIdentity(1, 0, 1)  # step 同，但下方 URL 不同 → 非幂等，触发重启
 
     with (
-        patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
+        patch.object(db_tasks, "query_task", return_value=db_task),
         patch("app.services.run_control.service.inference_service") as mock_inference,
         patch("app.services.run_control.service.stream_service") as mock_stream,
         patch("app.services.run_control.service.recording_service"),
@@ -174,7 +170,7 @@ async def test_start_and_terminate_serialized():
         return True
 
     with (
-        patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
+        patch.object(db_tasks, "query_task", return_value=db_task),
         patch("app.services.run_control.service.inference_service") as mock_inference,
         patch("app.services.run_control.service.stream_service") as mock_stream,
         patch("app.services.run_control.service.recording_service"),
@@ -219,14 +215,6 @@ async def test_different_tasks_not_blocked():
         2: _make_db_task(task_id=2, source_ip="10.0.0.2"),
     }
 
-    def mock_get_db():
-        # 按 filter 条件里的 task_id 取任务（`DBTask.task_id == x` 的右值），不依赖请求到达顺序
-        session = MagicMock()
-        session.query.return_value.filter.side_effect = lambda expr: MagicMock(
-            first=MagicMock(return_value=tasks[expr.right.value])
-        )
-        return iter([session])
-
     barrier = threading.Barrier(2, timeout=2.0)
 
     def rendezvous(cq):
@@ -234,7 +222,7 @@ async def test_different_tasks_not_blocked():
         return True
 
     with (
-        patch("app.routers.api.get_db", side_effect=mock_get_db),
+        patch.object(db_tasks, "query_task", side_effect=tasks.get),  # 按 task_id 取，不依赖到达顺序
         patch("app.services.run_control.service.inference_service") as mock_inference,
         patch("app.services.run_control.service.stream_service") as mock_stream,
         patch("app.services.run_control.service.recording_service"),
@@ -296,6 +284,57 @@ async def test_terminate_uses_lock(request_kwargs):
 
     # 验证真实的 per-task 锁已按 int task_id 创建
     assert 1 in client_service._task_locks
+
+
+# ---------------------------------------------------------------------------
+# Test 6: start 的 DB 边界（不起任何编排）
+# ---------------------------------------------------------------------------
+
+
+def _db_down(task_id):
+    """走真实 query_task、让会话本身失败：503 detail 就是 db 层包出来的 DatabaseError 原文。"""
+    with patch.object(db_tasks, "SessionLocal", side_effect=SQLAlchemyError("boom")):
+        return _real_query_task(task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query_task, status, body",
+    [
+        (
+            lambda task_id: None,
+            404,
+            {"error": "Resource not found", "detail": "Task 7 not found",
+             "resource_type": "Task", "resource_id": "7"},
+        ),
+        (
+            lambda task_id: _make_db_task(task_id=task_id, source_ip=""),
+            400,
+            {"error": "Validation error", "detail": "Task source_ip is required",
+             "field": "source_ip"},
+        ),
+        (
+            _db_down,
+            503,
+            {"error": "Database unavailable", "detail": "Database error: Failed to query task 7 [retryable]",
+             "retryable": True},
+        ),
+    ],
+    ids=["task_missing", "source_ip_empty", "db_down"],
+)
+async def test_start_db_boundary(query_task, status, body):
+    """任务不存在 404 / source_ip 为空 400 / DB 失败 503；三者都不进 start_run。"""
+    with (
+        patch.object(db_tasks, "query_task", side_effect=query_task),
+        patch("app.routers.api.run_control_service") as mock_rc,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            r = await ac.post("/api/start", json={"task_id": 7, "rtsp_url": "rtsp://x/s"})
+
+    assert r.status_code == status
+    assert r.json() == body
+    mock_rc.start_run.assert_not_called()
 
 
 if __name__ == "__main__":

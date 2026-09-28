@@ -7,7 +7,7 @@
   其中 tracks 必须反映磁盘实况——playlist 的 track 默认 processed，只有 raw 的 step
   照默认打过去就是 404，这是本文件的核心回归点。
 
-DB / 文件系统沿用既有 seam：`doubles.FakeDB` + `tmp_storage` 里用 `factories.seed_hls_segments`
+DB 替换 `db_tasks.query_source_ips`；文件系统在 `tmp_storage` 里用 `factories.seed_hls_segments`
 造段（落盘 `{root}/{task}/{step}/{run_id}/hls/` 并登记进清单）。
 """
 
@@ -16,8 +16,8 @@ from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.db import tasks as db_tasks
 from app.main import app
-from doubles import FakeDB
 from factories import make_cq, make_run, seed_hls_segments
 from app.storage import runs
 
@@ -28,12 +28,12 @@ from app.storage import runs
 
 
 def _install_db(monkeypatch, rows):
-    """把 /task/history 的 source_ip 查询接到假 DB。"""
-    from app.routers import task as task_router
+    """把 /task/history 的 source_ip 查询接到假 DB：`rows` 即表里的 (task_id, source_ip) 行。"""
+    def _query_source_ips(task_ids):
+        wanted = set(task_ids)
+        return {r.task_id: r.source_ip for r in rows if r.task_id in wanted}
 
-    db = FakeDB(rows)
-    monkeypatch.setattr(task_router, "get_db", lambda: iter([db]))
-    return db
+    monkeypatch.setattr(db_tasks, "query_source_ips", _query_source_ips)
 
 
 def _install_registry(monkeypatch, cqs):
@@ -246,14 +246,12 @@ class TestHistoryList:
     @pytest.mark.asyncio
     async def test_db_failure_degrades_instead_of_503(self, monkeypatch, tmp_storage):
         """存在性判定来自磁盘，DB 只补 source_ip —— DB 挂了清单照常出。"""
-        from app.routers import task as task_router
-
-        def _boom():
-            raise RuntimeError("connection refused")
+        def _boom(task_ids):
+            raise RuntimeError("connection refused")  # 非 DatabaseError 也得降级（宽泛捕获）
 
         _write_segments(101, 1)
         _install_registry(monkeypatch, [])
-        monkeypatch.setattr(task_router, "get_db", _boom)
+        monkeypatch.setattr(db_tasks, "query_source_ips", _boom)
 
         resp = await _get("/task/history")
 
