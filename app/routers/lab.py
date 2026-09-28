@@ -33,14 +33,10 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_
-from sqlalchemy.exc import SQLAlchemyError
 from starlette.background import BackgroundTask
 
-from app.db.database import get_db
+from app.db import tasks as db_tasks
 from app.types.run import RunIdentity
-from app.types.temporal import TemporalSegment
-from app.db.tasks import DBTask
 from app.services.lab import runtime_config as lab_config
 from app.services.lab.clip_builder import (
     ClipBuilder,
@@ -60,9 +56,9 @@ from app.storage import hls
 from app.storage import inference as inference_store
 from app.storage import runs
 from app.storage import tasks as step_tasks
-from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
+from app.types.exceptions import NotFoundError, ValidationError
 
-from .utils.runs import resolve_run
+from .utils.runs import resolve_run, resolve_timeline
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
 logger = logging.getLogger(__name__)
@@ -195,29 +191,20 @@ def _optional_int(value) -> Optional[int]:
 def _list_raw_runs(task_id: int) -> List[RunIdentity]:
     """该 task 各 step 最新可见 run 中有 raw 段的那些（按 step 升序）。送标只吃 raw。
 
-    ⚠ `tasks.list_step_ids` **不过滤空 step**（有无产物是域知识，不在目录层）。这里的
-    「raw 轨非空才收」同时兜住了那一档：建了目录没写成段的 step 不该出现在送标清单里，
-    否则点开是黑屏。
+    「raw 轨非空才收」同时滤掉建了目录没写成段的 step（点开是黑屏）。
     """
-    found: List[RunIdentity] = []
-    for step_id in step_tasks.list_step_ids(task_id):
-        run = runs.query(task_id, step_id)
-        if run is not None and hls.list_segments(run, "raw"):
-            found.append(run)
-    return found
-
-
-def _list_offline_steps(raw_runs: List[RunIdentity]) -> List[int]:
-    """`raw_runs` 中有离线推理结果的 step：有分段事实，或（没有时再查）有逐帧类别概率。"""
     return [
-        run.step_id
-        for run in raw_runs
-        if any(isinstance(f, TemporalSegment) for f in inference_store.read_temporal(run))
-        or inference_store.read_label_probs(run) is not None
+        run for run in runs.query_latest_by_step(task_id)
+        if hls.query_has_segments(run, "raw")
     ]
 
 
-def _task_row_to_item(row: DBTask) -> LabTaskItem:
+def _list_offline_steps(raw_runs: List[RunIdentity]) -> List[int]:
+    """`raw_runs` 中有离线推理结果的 step。"""
+    return [run.step_id for run in raw_runs if inference_store.query_has_offline_results(run)]
+
+
+def _task_row_to_item(row: db_tasks.DBTask) -> LabTaskItem:
     task_id = int(row.task_id)
     step_id = _optional_int(row.current_step)
     raw_runs = _list_raw_runs(task_id)
@@ -246,15 +233,9 @@ def _storage_task_to_item(task_id: int, raw_runs: List[RunIdentity]) -> LabTaskI
 
     DB 才有的字段（source_ip/status/current_step）无从得知：
     - source_ip=None, status="unknown", step_id/current_step 留空（不推断）
-    - updated_time/start_time 从各 raw step 的段时间戳（ts_us → ms）推导，用于排序与展示
+    - start_time = 各 raw 轨首段起点的最小值；updated_time = 各 raw 轨**段尾**的最大值（ms）
     """
-    ts_list: List[int] = []
-    for run in raw_runs:
-        for seg in hls.list_segments(run, "raw"):
-            # 末端算**段尾**（ts + EXTINF）而不是段起点：后者会漏掉最后一段自身的长度，
-            # 表现是列表里的"最后更新"恒比实际早一个段长（~10s）。
-            ts_list.append(seg.ref.ts_us // 1000)
-            ts_list.append((seg.ref.ts_us + int(seg.duration_s * 1_000_000)) // 1000)
+    spans = [sp for sp in (hls.query_span(run, ("raw",)) for run in raw_runs) if sp is not None]
 
     return LabTaskItem(
         task_id=task_id,
@@ -262,8 +243,8 @@ def _storage_task_to_item(task_id: int, raw_runs: List[RunIdentity]) -> LabTaskI
         current_step=None,
         step_id=None,
         status="unknown",
-        updated_time=max(ts_list) if ts_list else None,
-        start_time=min(ts_list) if ts_list else None,
+        updated_time=max(sp.end_us for sp in spans) // 1000 if spans else None,
+        start_time=min(sp.start_us for sp in spans) // 1000 if spans else None,
         end_time=None,
         raw_steps=[run.step_id for run in raw_runs],
         run_ids={run.step_id: run.run_id for run in raw_runs},
@@ -384,42 +365,11 @@ async def list_lab_tasks(
         total, tasks = _list_storage_tasks(q, limit, offset)
         return LabTaskListResponse(total=total, tasks=tasks)
 
-    db = next(get_db())
-    try:
-        try:
-            query = db.query(DBTask)
-            needle = (q or "").strip()
-            if needle:
-                filters = [
-                    DBTask.source_ip.ilike(f"%{needle}%"),
-                    DBTask.status.ilike(f"%{needle}%"),
-                ]
-                task_id = _optional_int(needle)
-                if task_id is not None:
-                    filters.append(DBTask.task_id == task_id)
-                query = query.filter(or_(*filters))
-
-            total = query.count()
-            rows = (
-                query
-                .order_by(DBTask.updated_time.desc(), DBTask.task_id.desc())
-                .offset(offset)
-                .limit(limit)
-                .all()
-            )
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message="Failed to list lab tasks",
-                retryable=True,
-                query="SELECT ... FROM clean_task",
-            ) from e
-
-        return LabTaskListResponse(
-            total=int(total),
-            tasks=[_task_row_to_item(row) for row in rows],
-        )
-    finally:
-        db.close()
+    total, rows = db_tasks.query_task_page(q, limit=limit, offset=offset)
+    return LabTaskListResponse(
+        total=total,
+        tasks=[_task_row_to_item(row) for row in rows],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -447,14 +397,7 @@ class LabelProbsResponse(BaseModel):
 
 def _label_probs_view(req: LabelProbsRequest) -> LabelProbsResponse:
     """读该 run 的逐帧类别概率，帧 ts 换算到 `track` 轨的媒体刻度；没有产物返回空数组。"""
-    run = resolve_run(req.task_id, req.step_id, req.run_id)
-    timeline = hls.query_timeline(run, req.track) if run is not None else hls.MediaTimeline([])
-    if not timeline:
-        raise NotFoundError(
-            f"No {req.track} segments for task {req.task_id} step {req.step_id}",
-            resource_type="Segments",
-            resource_id=f"task={req.task_id},step={req.step_id},track={req.track}",
-        )
+    run, timeline = resolve_timeline(req.task_id, req.step_id, req.run_id, req.track)
     lp = inference_store.read_label_probs(run)
     if lp is None:
         labels: List[str] = []
@@ -509,7 +452,7 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
 
     # ---- 段存在性（404）----
     run = resolve_run(req.task_id, req.step_id, req.run_id)
-    if run is None or not hls.list_segments(run, "raw"):
+    if run is None or not hls.query_has_segments(run, "raw"):
         raise NotFoundError(
             f"No raw segments for task_id={req.task_id}, step_id={req.step_id}",
             resource_type="Segments",

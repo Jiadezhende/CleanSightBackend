@@ -77,29 +77,28 @@ async def test_missing_identity_is_422(client, tmp_storage):
     assert r.status_code == 422
 
 
-def test_offline_steps_lists_steps_with_segments_or_probs(tmp_storage):
-    seg = TemporalSegment(producer="P", label="flush", start=T0 + 1.0, end=T0 + 2.0)
-    inference_store.write_temporal(make_run(1, 1), [seg])                                   # 有分段
-    inference_store.write_label_probs(make_run(1, 2), _probs([T0 + 1.0], [[1.0, 0.0, 0.0]]))  # 只有概率
-    inference_store.write_temporal(make_run(1, 3), [                                        # 只有打点
-        TemporalEvent(producer="op", signal="s", value=1, ts=T0 + 1.0),
-    ])
-    # step 4 什么都没有
-    for step_id in (1, 2, 3, 4):   # 读侧按最新可见 run 解析：先让每个 run 有录像
-        seed_hls_segments(1, step_id, [_TS0_US])
-
-    assert lab_router._list_offline_steps([make_run(1, s) for s in (1, 2, 3, 4)]) == [1, 2]
-
-
 def test_storage_task_item_carries_offline_steps(tmp_storage):
+    """offline_steps = 有分段事实（step 2）或有逐帧概率（step 4）的 step；只有打点（step 3）不算。
+
+    判定本身的全部分支见 test_storage_inference::TestQueryHasOfflineResults。
+    """
     _seed_gapped_raw(task_id=1, step_id=2)
     seed_hls_segments(1, 3, [_TS0_US])
+    seed_hls_segments(1, 4, [_TS0_US])
     inference_store.write_temporal(make_run(1, 2), [
         TemporalSegment(producer="P", label="flush", start=T0 + 1.0, end=T0 + 2.0),
     ])
+    inference_store.write_temporal(make_run(1, 3), [
+        TemporalEvent(producer="op", signal="s", value=1, ts=T0 + 1.0),
+    ])
+    inference_store.write_label_probs(make_run(1, 4), _probs([T0 + 1.0], [[1.0, 0.0, 0.0]]))
 
-    item = lab_router._storage_task_to_item(1, [make_run(1, 2), make_run(1, 3)])
+    runs_ = [make_run(1, s) for s in (2, 3, 4)]
+    item = lab_router._storage_task_to_item(1, runs_)
 
-    assert item.raw_steps == [2, 3]
-    assert item.run_ids == {2: make_run(1, 2).run_id, 3: make_run(1, 3).run_id}
-    assert item.offline_steps == [2]
+    assert item.raw_steps == [2, 3, 4]
+    assert item.run_ids == {r.step_id: r.run_id for r in runs_}
+    assert item.offline_steps == [2, 4]
+    # 跨 run 取 raw 轨：最早段起点 / 最晚段尾（step 2 末段 T0+30s 起、EXTINF 10s）
+    assert item.start_time == T0 * 1000
+    assert item.updated_time == (T0 + 40) * 1000

@@ -9,15 +9,13 @@ from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.db import tasks as db_tasks
 from app.main import app
-from doubles import FakeDB
 from factories import seed_hls_segments
 
 
 @pytest.mark.asyncio
 async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_storage):
-    from app.routers import lab as lab_router
-
     rows = [
         SimpleNamespace(
             task_id=101,
@@ -29,16 +27,22 @@ async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_storage):
             end_time=1_700_000_010_000,
         )
     ]
-    db = FakeDB(rows)
-    monkeypatch.setattr(lab_router, "get_db", lambda: iter([db]))
+    calls = []
+
+    def _page(needle, *, limit, offset):
+        calls.append((needle, limit, offset))
+        return len(rows), rows
+
+    monkeypatch.setattr(db_tasks, "query_task_page", _page)
 
     seed_hls_segments(101, 2, [1_700_000_000_000_000])
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/lab-f3m8/tasks")
+        resp = await client.get("/lab-f3m8/tasks", params={"q": " 10.0 ", "limit": 20, "offset": 5})
 
     assert resp.status_code == 200
+    assert calls == [(" 10.0 ", 20, 5)]   # q 原样下传（strip 在 db 层）
     payload = resp.json()
     assert payload["total"] == 1
     assert payload["tasks"][0]["task_id"] == 101
@@ -46,7 +50,6 @@ async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_storage):
     assert payload["tasks"][0]["raw_steps"] == [2]
     assert payload["tasks"][0]["has_raw_segments"] is True
     assert payload["tasks"][0]["has_current_step_raw"] is True
-    assert db.closed is True
 
 
 # ---------------------------------------------------------------------------
@@ -60,11 +63,11 @@ def _force_storage_mode(monkeypatch):
     monkeypatch.setattr(
         lab_router.lab_config, "get_task_source", lambda: "storage"
     )
-    # DB 不应被触碰：若调用 get_db 直接炸，证明走的是 storage 分支
-    def _boom():
+    # DB 不应被触碰：若查 DB 直接炸，证明走的是 storage 分支
+    def _boom(*_args, **_kwargs):
         raise AssertionError("storage mode must not touch the DB")
 
-    monkeypatch.setattr(lab_router, "get_db", _boom)
+    monkeypatch.setattr(db_tasks, "query_task_page", _boom)
 
 
 @pytest.mark.asyncio
