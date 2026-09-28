@@ -12,7 +12,7 @@ import types
 import pytest
 
 from app.utils import executor as executor_mod
-from app.utils.exceptions import (
+from app.types.exceptions import (
     FFmpegError,
     ModelInferenceError,
     PersistenceError,

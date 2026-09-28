@@ -15,7 +15,7 @@ import logging
 import threading
 from typing import List
 
-from app.domain.alarm import ALARM_MODE_REALTIME, Alarm
+from app.types.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.online.naming import get_stage_alias
 from . import alarm_sink
 from .operator import Operator

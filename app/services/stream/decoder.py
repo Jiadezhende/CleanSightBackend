@@ -10,10 +10,10 @@ from typing import Optional
 
 import numpy as np
 
-from app.domain.frame import Frame
+from app.types.frame import Frame
 from .config import DecoderConfig
 from app.settings import settings
-from app.utils.exceptions import FFmpegError, StreamConnectionError
+from app.types.exceptions import FFmpegError, StreamConnectionError
 from app.utils.metrics import frame_drop_total
 
 DEFAULT_CHANNELS = 3

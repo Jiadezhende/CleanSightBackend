@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response
 
 from .routers import admin, ai, api, health, lab, media, task, algorithm, traceback as traceback_router
 from .services import health_monitor, inference, persistence, recording, stream
-from .utils import (
+from .types.exceptions import (
     AppError,
     ConflictError,
     DatabaseError,

@@ -18,7 +18,7 @@
 - 策略不访问存储 / ClientManager / CQ / 数据库（纯算法）；
 - 输出每条 `TemporalSegment.producer` 必须等于本策略 `name`（= 类名）；`start <= end`、时间为有限数、
   `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。
-- 输入吃 `FrameDetection`、输出吐 `TemporalSegment`（两者都在 `app.domain`，与在线同型），
+- 输入吃 `FrameDetection`、输出吐 `TemporalSegment`（两者都在 `app.types`，与在线同型），
   不自定义中间数据壳。
 """
 
@@ -27,8 +27,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Sequence
 
-from app.domain.detection import FrameDetection
-from app.domain.temporal import LabelProbs, TemporalSegment
+from app.types.detection import FrameDetection
+from app.types.temporal import LabelProbs, TemporalSegment
 
 
 class OfflineSegmenter(ABC):

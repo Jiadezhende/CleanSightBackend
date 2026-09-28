@@ -3,12 +3,12 @@
 - task_metric_map: stream_name(detector.name) → AlarmMetric（signals_10s 用）
 - stage_alias:     stage 主键(step_id) → 可读别名（写告警 step_name + 可视化叠字）
 
-均非数据契约，而是 inference 自有的运行时状态，故不进 app/domain，与被动契约分离。
+均非数据契约，而是 inference 自有的运行时状态，故不进 app/types，与被动契约分离。
 """
 
 from typing import Dict
 
-from app.domain.alarm import AlarmMetric
+from app.types.alarm import AlarmMetric
 
 # YAML model name → AlarmMetric 映射，由 InferenceManager.start() 初始化
 # 通过 get_task_metric_map() 访问，不要直接读取此变量

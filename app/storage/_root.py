@@ -25,7 +25,7 @@ def domain_dir(run: RunIdentity, *, create: bool = False) -> Path:
 
 域名因此在一个域文件里只出现一次。⚠ **别把 helper 命名成 `_root`**：同名函数会把模块名遮掉。
 
-依赖上界：stdlib + `app.domain.run`。`settings` 只在函数体内 import。规范见
+依赖上界：stdlib + `app.types.run`。`settings` 只在函数体内 import。规范见
 `docs/kb/DESIGN_STORAGE_LAYER.md` §3。
 """
 
@@ -34,7 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 
 # run 目录下的产物域子目录 —— 封闭集合，唯一真源。域名属于「布局」归本包，产物文件名
 # 属于「内容」归各域自己。新增一个域要改这里，这是有意的。

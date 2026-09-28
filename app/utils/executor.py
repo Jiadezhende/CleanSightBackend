@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
-from .exceptions import AppError, ModelInferenceError
+from app.types.exceptions import AppError, ModelInferenceError
 
 logger = logging.getLogger(__name__)
 

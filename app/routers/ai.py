@@ -7,11 +7,11 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from app.domain.temporal import TemporalSegment
+from app.types.temporal import TemporalSegment
 from app.services.client import client_manager
 from app.services.utils.media_timeline import MediaTimeline
 from app.storage import inference as inference_store
-from app.utils.exceptions import NotFoundError
+from app.types.exceptions import NotFoundError
 
 from ._runs import resolve_run
 
@@ -131,7 +131,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                     await asyncio.sleep(frame_interval - time_since_last)
                     current_time = time.time()  # 更新时间
 
-            # 边界编码：domain Frame → JPEG base64 data URL（仅此一处，内联）
+            # 边界编码：app.types Frame → JPEG base64 data URL（仅此一处，内联）
             try:
                 _, buf = cv2.imencode(".jpg", frame.frame)
                 b64 = base64.b64encode(buf.tobytes()).decode("utf-8")

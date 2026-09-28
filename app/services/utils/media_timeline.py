@@ -21,7 +21,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from typing import Iterator, List, NamedTuple, Optional, Tuple
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.storage import hls
 from app.storage.hls import Segment
 

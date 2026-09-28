@@ -7,7 +7,7 @@ import pytest
 
 from factories import make_alarm, make_bare_cq, make_detector_output, make_frame_detection
 from app.services.inference.config import InferenceConfig, load_stage_config
-from app.domain.alarm import Alarm
+from app.types.alarm import Alarm
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.online.temporal.operator import Operator
 

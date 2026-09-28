@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.utils.media_timeline import GAP_THRESHOLD_MS, MediaTimeline
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls

@@ -14,7 +14,7 @@ from app.models import DBAlarm, DBTask
 from app.services.client.manager import client_manager
 from app.storage import hls, runs
 from app.storage import tasks as step_tasks
-from app.utils.exceptions import DatabaseError
+from app.types.exceptions import DatabaseError
 
 router = APIRouter(prefix="/task", tags=["task"])
 logger = logging.getLogger(__name__)

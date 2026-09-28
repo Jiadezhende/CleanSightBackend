@@ -33,9 +33,9 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-from app.domain.detection import FrameDetection
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
+from app.types.detection import FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 from app.storage import hls, inference
 from app.utils.task_queue import SerialTaskQueue
 

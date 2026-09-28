@@ -24,7 +24,7 @@ import pytest
 from app.services.health_monitor.config import HealthMonitorConfig
 from app.services.health_monitor.manager import GlobalHealthMonitor
 from app.services.stream.manager import StreamService
-from app.utils.exceptions import FFmpegError
+from app.types.exceptions import FFmpegError
 
 
 # ===========================================================================

@@ -23,7 +23,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.main import app
 from app.services.traceback.media_token import MediaToken
 from app.storage import _root, hls

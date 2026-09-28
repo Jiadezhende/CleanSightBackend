@@ -1,6 +1,6 @@
 """SQLAlchemy ORM（DB 行映射，DB schema 单一真源）。
 
-只放 ORM；运行时契约见 app/domain，API DTO 跟各自 router 走。
+只放 ORM；运行时契约见 app/types，API DTO 跟各自 router 走。
 """
 
 from sqlalchemy import BigInteger, Boolean, Column, String, Text

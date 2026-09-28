@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from app.domain.detection import DetBox, FrameDetection
-from app.domain.temporal import LabelProbs, TemporalSegment
+from app.types.detection import DetBox, FrameDetection
+from app.types.temporal import LabelProbs, TemporalSegment
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.resample import resample_by_ts
 

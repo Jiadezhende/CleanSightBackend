@@ -1,6 +1,5 @@
 """CleanSight 工具模块 —— 基建 leaf，谁都可以向下依赖它。
 
-    exceptions   AppError + 5 个服务异常 + 3 个 HTTP 业务异常；retryable/fatal 两个标志
     executor     GuardedExecutor（函数级重试）
     worker_guard guarded_run（线程主循环级自愈）
     decorators   日志装饰器 log_call
@@ -15,32 +14,11 @@ docs/kb/DESIGN_FAULT_TOLERANCE.md。
 """
 
 from .decorators import log_call
-from .exceptions import (
-    AppError,
-    ConflictError,
-    DatabaseError,
-    FFmpegError,
-    ModelInferenceError,
-    NotFoundError,
-    PersistenceError,
-    StreamConnectionError,
-    ValidationError,
-)
 from .executor import ExecutionPolicy, GuardedExecutor
 from .task_queue import SerialTaskQueue
 from .worker_guard import guarded_run
 
 __all__ = [
-    # Exceptions (基类 + 核心异常 + HTTP业务异常)
-    "AppError",
-    "StreamConnectionError",
-    "FFmpegError",
-    "DatabaseError",
-    "ModelInferenceError",
-    "PersistenceError",
-    "NotFoundError",
-    "ValidationError",
-    "ConflictError",
     # Decorators (仅用于日志)
     "log_call",
     # Executor framework (边界层异常处理)

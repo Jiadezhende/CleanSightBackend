@@ -69,7 +69,7 @@ def _query(args: argparse.Namespace) -> int:
     """轻量查询：读 temporal.jsonl 里的 TemporalSegment 时间线打印（不碰 torch/runner）。"""
     from dataclasses import asdict
 
-    from app.domain.temporal import TemporalSegment
+    from app.types.temporal import TemporalSegment
     from app.storage import inference as inference_store
     from app.storage import runs
 

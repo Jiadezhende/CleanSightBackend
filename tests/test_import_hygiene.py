@@ -34,7 +34,7 @@ HEAVY = ("torch", "ultralytics", "cv2")
 # (模块, 允许出现的重依赖集合, 耗时上限秒)。上限取实测 ~3-5× 余量，只兜「量级失守」，
 # 不做性能回归——机器负载下 import 抖动大，卡太紧会变成噪声源。
 BUDGET = {
-    "app.domain":               (set(), 0.20),
+    "app.types":                (set(), 0.20),
     # storage 的每个模块**逐个登记**，不能只登记包名：包根是标记型 __init__、零 re-export，
     # `import app.storage` 根本不加载任何域文件（实测 1ms / 41 模块），登记包名挡不住有人
     # 往域文件里塞 ffmpeg/cv2/批缓冲。新增域文件必须同时在这里加一行 ——
@@ -60,7 +60,7 @@ BUDGET = {
     # 可见判据要问 hls / inference 两域的产物位置，连带加载两个 facade，预算照它们给
     "app.storage.runs":         (set(), 0.40),
     # inference 是子包，facade 同 hls：re-export 连带加载两个产物模块，故这条盯的是整个域。
-    # `_detection` 出 FrameDetection → 吃 app.domain.detection（纯 stdlib dataclass），
+    # `_detection` 出 FrameDetection → 吃 app.types.detection（纯 stdlib dataclass），
     # 这是 D1 允许的 L1 依赖；`_temporal` 的货币 `LabelProbs` 同样带 numpy（npz 落盘）。
     "app.storage.inference":            (set(), 0.40),
     "app.storage.inference._detection": (set(), 0.40),
@@ -70,9 +70,9 @@ BUDGET = {
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
     # 这条盯的是**整个域**的模块级依赖。cv2 必须留在 `_encode.write_mp4v` 的函数体内，
     # 塞回模块级会让这条连同 `app.storage.hls._encode` 一起红。
-    "app.storage.hls":          (set(), 0.40),   # 域货币 Frame → app.domain（numpy）
+    "app.storage.hls":          (set(), 0.40),   # 域货币 Frame → app.types（numpy）
     "app.storage.hls._encode":  (set(), 0.40),   # 同上；cv2 在函数体内
-    # 解码侧：货币是 Frame + sidecar 的 float64 数组，故吃 app.domain + numpy。ffmpeg 是
+    # 解码侧：货币是 Frame + sidecar 的 float64 数组，故吃 app.types + numpy。ffmpeg 是
     # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
     # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。
     "app.storage.hls._decode":  (set(), 0.40),
@@ -140,9 +140,9 @@ FORBIDDEN_APP_IMPORTS = {
 # 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.database` / `app.models`
 # ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
-    # app.domain：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
+    # app.types：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `_root.py` 的规矩只在函数体内 import
-    "app/storage": ("app.storage", "app.domain", "app.settings"),
+    "app/storage": ("app.storage", "app.types", "app.settings"),
     # 算法服务：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
     # 都不许碰：阈值、入参上限、默认档一律写进算法子包自己的配置文件（见
     # `app/services/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。
@@ -156,7 +156,7 @@ LAYER_PACKAGES = {
     # 注意 "app.services.utils" 作为白名单前缀**不会**放行 "app.services.lab"：检查是
     # `name == ok or name.startswith(ok + ".")`，兄弟包差的正是那个点。
     "app/services/utils": (
-        "app.services.utils", "app.storage", "app.domain", "app.utils", "app.settings",
+        "app.services.utils", "app.storage", "app.types", "app.utils", "app.settings",
     ),
 }
 

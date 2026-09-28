@@ -1,6 +1,6 @@
 """一次运行（run）的身份：`RunIdentity(task_id, step_id, run_id)`。
 
-    from app.domain.run import RunIdentity
+    from app.types.run import RunIdentity
     run = runs.allocate(task_id, step_id)     # 活着的 run（/api/start）
     run = runs.query(task_id, step_id)        # 盘上的 run（读侧、离线）
 

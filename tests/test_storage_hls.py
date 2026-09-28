@@ -23,8 +23,8 @@ import numpy as np
 import pytest
 
 from factories import make_frame
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 from app.settings import settings
 from app.storage import hls
 from app.storage.hls import _decode, _encode, _fmp4, _idx, _layout, _m3u8, _meta

@@ -28,7 +28,7 @@
 `start_ts` / `end_ts` 是**闭区间**的墙钟秒，`None` 表示该侧不设限。两级裁剪：段级选出可能
 命中的段（省 ffmpeg 调用次数），帧级在段内选 `[k_start, k_end]`（不解无效像素）。
 
-依赖上界：`app.domain`（域货币 `Frame`）+ numpy（sidecar 的货币）+ stdlib。ffmpeg 是**运行时**
+依赖上界：`app.types`（域货币 `Frame`）+ numpy（sidecar 的货币）+ stdlib。ffmpeg 是**运行时**
 依赖，`settings.ffmpeg_path` 只在函数体内 import。
 """
 
@@ -42,8 +42,8 @@ from typing import Iterator, List, Optional
 
 import numpy as np
 
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 
 from . import _idx, _layout, _read
 from ._layout import SegmentRef

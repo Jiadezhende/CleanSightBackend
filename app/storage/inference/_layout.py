@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.storage import _root
 
 # 本域的域名 —— 全文件只出现这一次，写错会被 `_root.DOMAINS` 白名单当场拦下。

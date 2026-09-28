@@ -15,7 +15,7 @@ sink 只负责把两者编排到一起,不反向侵入任一方内部状态。pe
 import logging
 from typing import List
 
-from app.domain.alarm import Alarm
+from app.types.alarm import Alarm
 from app.services.persistence.instance import persistence_manager
 
 logger = logging.getLogger(__name__)

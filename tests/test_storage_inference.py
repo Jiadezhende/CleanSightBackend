@@ -21,9 +21,9 @@ import numpy as np
 import pytest
 
 from factories import make_det_box
-from app.domain.detection import DetBox, DetectorOutput, FrameDetection
-from app.domain.run import RunIdentity
-from app.domain.temporal import LabelProbs, TemporalEvent, TemporalSegment
+from app.types.detection import DetBox, DetectorOutput, FrameDetection
+from app.types.run import RunIdentity
+from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.storage import _fs, inference
 from app.storage.inference import _detection, _temporal
 

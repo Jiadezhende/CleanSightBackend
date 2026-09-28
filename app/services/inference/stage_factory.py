@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Tuple, Type, TYPE_CHECKING
 
 from .config import InferenceConfig
-from app.domain.alarm import AlarmMetric
+from app.types.alarm import AlarmMetric
 
 if TYPE_CHECKING:
     from .offline.segmenter import OfflineSegmenter

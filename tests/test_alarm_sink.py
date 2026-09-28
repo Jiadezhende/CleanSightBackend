@@ -11,8 +11,8 @@ persistence_manager.persist_alarm，测试用 monkeypatch 拦截该出口。
 from unittest.mock import MagicMock
 
 from factories import make_alarm
-from app.domain.run import RunIdentity
-from app.domain.alarm import AlarmMetric
+from app.types.run import RunIdentity
+from app.types.alarm import AlarmMetric
 from app.services.inference.online.temporal import alarm_sink
 
 

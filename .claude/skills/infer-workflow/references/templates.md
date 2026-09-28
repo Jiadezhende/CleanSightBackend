@@ -18,9 +18,9 @@ from typing import Dict, List, Tuple
 
 from app.services.inference.online.detection.detector import YOLODetector
 from app.services.inference.online.temporal.operator import Operator
-from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.domain.detection import DetectorOutput
-from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.types.alarm import Alarm, AlarmMetric, AlarmType
+from app.types.detection import DetectorOutput
+from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class XxxOperator(Operator):
         return events, alarms
 ```
 
-> 复杂指标（ByteTrack + birth_rate）把游标推进/算指标拆成 `_advance`/`_compute_metric`，派生 history 在 `_sm` 里按 `window_seconds` 自裁，见 [temporal/impl/bubble.py](../../../../app/services/inference/online/temporal/impl/bubble.py)。`AlarmMetric.XXX` 需先在 [alarm.py](../../../../app/domain/alarm.py) 枚举补一项。
+> 复杂指标（ByteTrack + birth_rate）把游标推进/算指标拆成 `_advance`/`_compute_metric`，派生 history 在 `_sm` 里按 `window_seconds` 自裁，见 [temporal/impl/bubble.py](../../../../app/services/inference/online/temporal/impl/bubble.py)。`AlarmMetric.XXX` 需先在 [alarm.py](../../../../app/types/alarm.py) 枚举补一项。
 
 ---
 
@@ -89,7 +89,7 @@ class XxxOperator(Operator):
 ```python
 import numpy as np
 from app.services.inference.online.detection.detector import Detector
-from app.domain.detection import DetBox, DetectorOutput
+from app.types.detection import DetBox, DetectorOutput
 
 class XxxDetector(Detector):
     def __init__(self, enabled: bool = True):

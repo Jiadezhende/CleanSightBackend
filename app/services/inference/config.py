@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from app.utils.exceptions import ValidationError
+from app.types.exceptions import ValidationError
 
 logger = logging.getLogger(__name__)
 

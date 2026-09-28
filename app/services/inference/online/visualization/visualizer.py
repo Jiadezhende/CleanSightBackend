@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 

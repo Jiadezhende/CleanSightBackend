@@ -2,9 +2,9 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.inference.online.manager import InferenceManager
-from app.utils.exceptions import ValidationError
+from app.types.exceptions import ValidationError
 
 
 @pytest.fixture

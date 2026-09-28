@@ -8,9 +8,9 @@
 
 from typing import Optional
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.storage import runs
-from app.utils.exceptions import NotFoundError
+from app.types.exceptions import NotFoundError
 
 
 def resolve_run(task_id: int, step_id: int, run_id: Optional[int]) -> Optional[RunIdentity]:

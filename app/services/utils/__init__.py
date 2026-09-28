@@ -8,7 +8,7 @@
 
 ## 边界
 
-    可以 import   stdlib、三方、app.domain、app.storage、app.utils、app.settings
+    可以 import   stdlib、三方、app.types、app.storage、app.utils、app.settings
     不许 import   **任何兄弟 service 包**（app.services.lab / app.services.traceback / …）
                   app.routers、app.database / app.models
     不许有        活体、单例、lifespan()、模块级状态、类句柄

@@ -11,8 +11,8 @@ from typing import Dict, List, Tuple
 import torch
 
 from app.services.inference.online.temporal.operator import TemporalOperator
-from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetection
+from app.types.alarm import Alarm
+from app.types.detection import FrameDetection
 
 
 class CleanOperator(TemporalOperator):

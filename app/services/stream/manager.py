@@ -17,11 +17,8 @@ from urllib.parse import urlparse, urlunparse
 
 from app.services.client.manager import client_manager
 from app.settings import settings
-from app.utils import (
-    ConflictError,
-    StreamConnectionError,
-    log_call,
-)
+from app.types.exceptions import ConflictError, StreamConnectionError
+from app.utils import log_call
 
 from .decoder import FFmpegDecoder
 

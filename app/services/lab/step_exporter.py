@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls
 

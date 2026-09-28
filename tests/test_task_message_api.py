@@ -4,7 +4,7 @@ import pytest
 from factories import make_alarm
 from httpx import ASGITransport, AsyncClient
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.main import app
 
 
@@ -48,7 +48,7 @@ async def test_task_message_task_not_in_memory_returns_empty(monkeypatch):
 async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
     from app.routers import task as task_router
 
-    from app.domain.alarm import AlarmMetric
+    from app.types.alarm import AlarmMetric
 
     # 此处只验接线（按 task_id 取 CQ、since_seq 透传给原子快照入口）；
     # payload 字段（alarms/max_seq/signals_10s）由 test_task_message_assembler 覆盖。

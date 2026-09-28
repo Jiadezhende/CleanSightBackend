@@ -16,9 +16,9 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from app.domain.alarm import ALARM_MODE_SETTLEMENT, Alarm
+from app.types.alarm import ALARM_MODE_SETTLEMENT, Alarm
 from app.services.client import ClientQueues, client_manager
-from app.utils.exceptions import ValidationError
+from app.types.exceptions import ValidationError
 from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
 

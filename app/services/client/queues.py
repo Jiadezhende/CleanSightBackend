@@ -14,10 +14,10 @@ from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from app.domain.alarm import Alarm
-from app.domain.detection import FrameDetection
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
+from app.types.alarm import Alarm
+from app.types.detection import FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 from app.utils.metrics import frame_drop_total
 from app.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,

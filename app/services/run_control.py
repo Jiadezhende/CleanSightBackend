@@ -14,7 +14,7 @@ CQ 构造职责在此（编排者建 CQ → start_workflow(cq)）；source_ip �
 import logging
 from typing import Any, Dict, Optional
 
-from app.domain.alarm import ALARM_MODE_SETTLEMENT
+from app.types.alarm import ALARM_MODE_SETTLEMENT
 from app.storage import runs
 from .client.config import get_client_config
 from .client.manager import client_manager
@@ -23,7 +23,7 @@ from .inference.online.instance import inference_manager
 from .inference.online.temporal import alarm_sink
 from .recording.instance import recording_service
 from .stream.instance import stream_service
-from app.utils.exceptions import AppError, ValidationError
+from app.types.exceptions import AppError, ValidationError
 
 logger = logging.getLogger(__name__)
 

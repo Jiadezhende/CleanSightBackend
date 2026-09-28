@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.storage import _root, tasks
 from app.settings import settings
 

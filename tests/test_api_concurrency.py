@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from httpx import AsyncClient, ASGITransport
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.main import app
 from app.services.client.manager import client_manager
 

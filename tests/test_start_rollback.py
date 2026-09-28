@@ -9,10 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.client.manager import client_manager
 from app.services.run_control import run_controller
-from app.utils.exceptions import ValidationError
+from app.types.exceptions import ValidationError
 
 
 def test_start_run_rolls_back_cq_on_workflow_failure():

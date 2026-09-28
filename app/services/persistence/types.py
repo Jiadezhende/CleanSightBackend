@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from app.domain.alarm import ALARM_MODE_REALTIME, AlarmMetric, AlarmType
+from app.types.alarm import ALARM_MODE_REALTIME, AlarmMetric, AlarmType
 
 
 @dataclass

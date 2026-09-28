@@ -4,8 +4,8 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from app.domain.run import RunIdentity
-from app.domain.temporal import TemporalEvent, TemporalSegment
+from app.types.run import RunIdentity
+from app.types.temporal import TemporalEvent, TemporalSegment
 from app.main import app
 from app.storage import _root
 from app.storage import inference as inference_store

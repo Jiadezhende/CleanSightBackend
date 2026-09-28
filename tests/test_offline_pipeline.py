@@ -11,14 +11,14 @@ import pytest
 from doubles import BrushRulesSegmenter
 from factories import make_det_box, make_detector_output, make_frame_detection, make_run
 
-from app.domain.detection import DetectorOutput
-from app.domain.temporal import TemporalEvent, TemporalSegment
+from app.types.detection import DetectorOutput
+from app.types.temporal import TemporalEvent, TemporalSegment
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmenter import OfflineSegmenter
 from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
-from app.utils.exceptions import ValidationError
+from app.types.exceptions import ValidationError
 
 _RULES_CLASS = "doubles.BrushRulesSegmenter"  # 测试替身，见 tests/doubles.py
 _CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter"
@@ -389,7 +389,7 @@ class TestRunLock:
 
     def test_named_older_run_is_the_one_written(self, tmp_storage):
         """锁定点名的 run：同 step 已有更新的 run，结果仍写回旧 run。"""
-        from app.domain.run import RunIdentity
+        from app.types.run import RunIdentity
         from app.storage import _root
 
         _write_detections(1, 2)
@@ -474,5 +474,5 @@ class BadProbsSegmenter(OfflineSegmenter):
 
     def label_probs(self):
         import numpy as np
-        from app.domain.temporal import LabelProbs
+        from app.types.temporal import LabelProbs
         return LabelProbs(ts=np.array([1.0, 2.0]), probs=np.zeros((3, 2)), labels=("a", "b"))

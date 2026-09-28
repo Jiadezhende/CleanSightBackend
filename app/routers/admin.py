@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from app.services.client.manager import client_manager
 from app.services.inference.offline.instance import offline_job_service
-from app.utils.exceptions import NotFoundError
+from app.types.exceptions import NotFoundError
 
 from ._runs import resolve_run
 

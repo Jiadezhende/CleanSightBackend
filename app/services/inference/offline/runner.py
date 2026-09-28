@@ -24,8 +24,8 @@ from typing import List, Optional
 
 import numpy as np
 
-from app.domain.run import RunIdentity
-from app.domain.temporal import LabelProbs, TemporalSegment
+from app.types.run import RunIdentity
+from app.types.temporal import LabelProbs, TemporalSegment
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store

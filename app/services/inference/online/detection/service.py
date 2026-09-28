@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from app.domain.detection import FrameDetection
+from app.types.detection import FrameDetection
 from app.services.client import ClientManager, client_manager
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy

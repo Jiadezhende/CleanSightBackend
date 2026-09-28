@@ -11,7 +11,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict
 
-from app.domain.alarm import AlarmType
+from app.types.alarm import AlarmType
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class AlarmPersistenceStrategy:
         Raises:
             PersistenceError: HTTP上报失败
         """
-        from app.utils.exceptions import PersistenceError
+        from app.types.exceptions import PersistenceError
 
         client_id = alarm_info.get("client_id", "unknown")
 

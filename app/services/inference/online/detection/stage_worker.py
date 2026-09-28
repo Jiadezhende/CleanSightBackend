@@ -27,7 +27,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 
 from .detector import Detector
-from app.domain.detection import DetectorOutput
+from app.types.detection import DetectorOutput
 
 logger = logging.getLogger(__name__)
 

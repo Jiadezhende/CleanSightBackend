@@ -32,9 +32,9 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.inference.config import InferenceConfig, load_stage_config
-from app.utils.exceptions import ConflictError
+from app.types.exceptions import ConflictError
 from app.utils.task_queue import SerialTaskQueue
 
 logger = logging.getLogger(__name__)

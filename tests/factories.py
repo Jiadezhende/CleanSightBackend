@@ -13,10 +13,10 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from app.domain.alarm import Alarm
-from app.domain.detection import DetBox, DetectorOutput, FrameDetection
-from app.domain.frame import Frame
-from app.domain.run import RunIdentity
+from app.types.alarm import Alarm
+from app.types.detection import DetBox, DetectorOutput, FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 from app.services.client.queues import ClientQueues
 
 __all__ = [

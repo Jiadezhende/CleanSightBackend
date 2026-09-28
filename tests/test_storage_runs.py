@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 
 from factories import make_frame
-from app.domain.detection import DetectorOutput, FrameDetection
-from app.domain.run import RunIdentity
-from app.domain.temporal import LabelProbs, TemporalSegment
+from app.types.detection import DetectorOutput, FrameDetection
+from app.types.run import RunIdentity
+from app.types.temporal import LabelProbs, TemporalSegment
 from app.storage import hls, inference, runs
 
 

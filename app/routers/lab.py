@@ -38,8 +38,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.background import BackgroundTask
 
 from app.database import get_db
-from app.domain.run import RunIdentity
-from app.domain.temporal import TemporalSegment
+from app.types.run import RunIdentity
+from app.types.temporal import TemporalSegment
 from app.models import DBTask
 from app.services.lab import (
     ClipBuilder,
@@ -59,7 +59,7 @@ from app.storage import hls
 from app.storage import inference as inference_store
 from app.storage import runs
 from app.storage import tasks as step_tasks
-from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
+from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
 
 from ._runs import resolve_run
 

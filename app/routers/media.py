@@ -25,7 +25,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Path as PathParam
 from fastapi.responses import FileResponse
 
-from app.domain.run import RunIdentity
+from app.types.run import RunIdentity
 from app.services.traceback import MediaToken, MediaTokenError, MediaTokenPayload
 from app.storage import hls, runs
 

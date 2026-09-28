@@ -22,8 +22,8 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.domain.alarm import Alarm
-from app.domain.detection import DetectorOutput, FrameDetection
+from app.types.alarm import Alarm
+from app.types.detection import DetectorOutput, FrameDetection
 from app.services.inference.resample import resample_by_ts
 
 logger = logging.getLogger(__name__)
