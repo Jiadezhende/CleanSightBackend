@@ -3,7 +3,7 @@
     {root}/{task_id}/{step_id}/{run_id}/hls/
       {track}_segment_{ts_ms}.mp4   段（fMP4 fragment）      {track}_init.mp4   该轨 init
       {track}_playlist.m3u8         LIVE 清单               raw_segment_{ts_ms}.idx  逐帧 ts
-      metadata.json                 统计，兼作 TTL 判据      .stage_{track}_{ts_ms}/  写入暂存
+      .stage_{track}_{ts_ms}/       写入暂存
 
 路径函数的第一个参数是 `run: RunIdentity`（由调用方经 `runs.query` / `runs.allocate` 取得）。
 
@@ -41,7 +41,6 @@ TRACKS: Tuple[str, ...] = ("raw", "processed")
 # 产物文件名 —— 内容归本域自己持有，`_root` 对其零知识。
 _SEGMENT_SUFFIX = ".mp4"
 _SIDECAR_SUFFIX = ".idx"
-_METADATA_NAME = "metadata.json"
 
 # 段名 / init 名格式，同时是 parse_* 的校验器：斜杠、`..`、绝对路径、非法 track、非数字 ts
 # 一律匹配不上。**不能用 `endswith("init.mp4")` 顶替**——那会放行 `evil_init.mp4`。
@@ -130,12 +129,6 @@ def parse_init_name(name: str) -> Optional[str]:
 def playlist_path(run: RunIdentity, track: str) -> Path:
     """该轨的 LIVE playlist 路径。"""
     return domain_dir(run) / f"{require_track(track)}_playlist.m3u8"
-
-
-def metadata_path(run: RunIdentity) -> Path:
-    """本域的统计文件路径（两轨共用一份）。它在 `insert_segment` 提交的最后一步出现，
-    `runs.query` 拿它当 hls 的可见判据。"""
-    return domain_dir(run) / _METADATA_NAME
 
 
 def stage_dir(run: RunIdentity, ref: SegmentRef) -> Path:

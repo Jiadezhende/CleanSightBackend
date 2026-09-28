@@ -9,7 +9,7 @@ storage —— 数据层：内存数据模型与 `{storage_root}/` 下盘上数�
 
     {root}/{task_id}/{step_id}/{run_id}/
       hls/        {track}_segment_{ts_ms}.mp4 / {track}_init.mp4
-                  {track}_playlist.m3u8 / raw_segment_{ts_ms}.idx / metadata.json
+                  {track}_playlist.m3u8 / raw_segment_{ts_ms}.idx
       inference/  detections.jsonl / temporal.jsonl / label_probs.npz
 
 run 目录只由 `runs.allocate` 建，写者只建域这一级。存储根下除数字命名的 task 目录外只有

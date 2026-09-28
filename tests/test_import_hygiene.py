@@ -77,7 +77,7 @@ BUDGET = {
     # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
     # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。
     "app.storage.hls._decode":  (set(), 0.40),
-    # 下面标着「stdlib only」的四条（`_fmp4` / `_layout` / `_m3u8` / `_meta`）秒数上限
+    # 下面标着「stdlib only」的三条（`_fmp4` / `_layout` / `_m3u8`）秒数上限
     # 照 `app.storage.hls` 给 0.40 —— 它们量的是同一份活（见上方 ⚠ 段），给 0.20 只会让
     # 负载高的机器上这几条先于 facade 那条抖。`_read` / `types` 同理。
     "app.storage.hls._fmp4":    (set(), 0.40),   # stdlib only（ffmpeg 是运行时依赖，D5）
@@ -85,7 +85,6 @@ BUDGET = {
     "app.storage.hls._write":   (set(), 0.40),   # 域货币 Frame
     "app.storage.hls._layout":  (set(), 0.40),   # stdlib only
     "app.storage.hls._m3u8":    (set(), 0.40),   # stdlib only
-    "app.storage.hls._meta":    (set(), 0.40),   # stdlib only
     # 读侧组合动作（可播段过滤 / 段级区间定位）与资源容器。两者的源码都是 stdlib-only
     # （`_read` 只组合 `_layout` + `_m3u8`；`types` 是子包的底、不 import 同包任何模块），
     # 但**本门禁验不到这一点** —— 见上方 BUDGET 开头的 ⚠ 段。

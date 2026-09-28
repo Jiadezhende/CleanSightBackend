@@ -1,8 +1,8 @@
 """本域的写侧动作：`insert_segment`（写一段）。
 
 `insert_segment` 一次调用，从内存帧序列到 `hls/` 目录里一个可播的段：调用方交出
-`Sequence[Frame]`，拿回这段的身份键。中间七步（编码、转码、位置修补、索引、init、清单、
-统计）全在层内，**没有一步漏到签名上**。
+`Sequence[Frame]`，拿回这段的身份键。中间六步（编码、转码、位置修补、索引、init、清单）
+全在层内，**没有一步漏到签名上**。
 
 ## 事务形态：路线 A（规范 `docs/kb/DESIGN_STORAGE_LAYER.md` §5）
 
@@ -11,7 +11,7 @@
                └ ffmpeg 转 fMP4，得 fragment + init（_fmp4）
     ② adjust   读既有清单求累计 EXTINF → hex-patch fragment 的 tfdt（位置相关）
     ③ commit   按 W8 的顺序把 stage 里的东西搬进域目录并登记：
-               sidecar → init → 段文件 → 清单条目 → 统计
+               sidecar → init → 段文件 → 清单条目
     任一步异常 → 删 stage、不 rename、不登记，原异常上抛
 
 **必须分 stage**：段文件名一出现读侧就认为它是合法产物，原地编码会留下一个"文件在、但还是
@@ -32,8 +32,7 @@ mp4v 不是 fragment"的窗口（实测 ~260 ms）。`.stage_` 开头既不匹�
 前段，**不报错、不卡顿，只是画面丢一截**。别改成层内加锁（互斥挡不住一个没停的写者）；代价
 是这个不变式落在层外、门禁抓不到，所以写在这里。
 
-不同 track、不同 run 之间互不冲突：唯一的共享产物 `metadata.json` 是派生量，两轨同时记账
-最多丢一次计数、不影响播放。
+不同 track、不同 run 之间互不冲突：两轨各写各的段、init 与清单，没有共享产物。
 
 依赖上界：`app.types`（域货币 `Frame`）+ stdlib。
 """
@@ -48,7 +47,7 @@ from typing import Sequence
 from app.types.frame import Frame
 from app.types.run import RunIdentity
 
-from . import _encode, _fmp4, _idx, _layout, _m3u8, _meta
+from . import _encode, _fmp4, _idx, _layout, _m3u8
 from ._layout import SegmentRef
 
 logger = logging.getLogger(__name__)
@@ -139,14 +138,6 @@ def insert_segment(
 
         os.replace(fragment, segment_target)
         _m3u8.append(playlist, _layout.init_name(track), duration_s, segment_target.name)
-        _meta.record_segment(
-            _layout.metadata_path(run),
-            task_id=run.task_id,
-            step_id=run.step_id,
-            track=track,
-            duration_s=duration_s,
-            timestamp=start_ts,
-        )
     finally:
         # 成功路径留下的是 source.mp4 与 ffmpeg 自己那份 index.m3u8；失败路径留下半成品。
         # 两种都该走，故放 finally 而不是 except。

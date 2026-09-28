@@ -14,7 +14,6 @@
 并发（T5）本期无断言：串行调度另有统一基建，本域刻意不加锁（见 `_insert` docstring）。
 """
 
-import json
 import struct
 import subprocess
 from pathlib import Path
@@ -27,7 +26,7 @@ from app.types.frame import Frame
 from app.types.run import RunIdentity
 from app.settings import settings
 from app.storage import hls
-from app.storage.hls import _decode, _encode, _fmp4, _idx, _layout, _m3u8, _meta
+from app.storage.hls import _decode, _encode, _fmp4, _idx, _layout, _m3u8
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +181,6 @@ class TestLayout:
             hls.sidecar_path(RUN, ref),
             hls.init_path(RUN, "raw"),
             hls.playlist_path(RUN, "raw"),
-            _layout.metadata_path(RUN),
             _layout.stage_dir(RUN, ref),
         ):
             assert path.parent == expected
@@ -848,45 +846,6 @@ class TestTimelineWallGaps:
 
 
 # ---------------------------------------------------------------------------
-# metadata.json（路线 C）
-# ---------------------------------------------------------------------------
-
-
-class TestMetadata:
-    def test_first_record_initialises_both_tracks(self, tmp_path):
-        path = tmp_path / "metadata.json"
-        _meta.record_segment(path, task_id=1, step_id=2, track="raw", duration_s=1.5, timestamp=1700.0)
-        document = json.loads(path.read_text(encoding="utf-8"))
-        assert document["task_id"] == 1 and document["step_id"] == 2
-        assert document["raw_segments"] == {
-            "count": 1, "total_duration": 1.5,
-            "first_timestamp": 1700.0, "last_timestamp": 1700.0,
-        }
-        assert document["processed_segments"]["count"] == 0
-        assert document["end_time"] is None
-
-    def test_records_accumulate(self, tmp_path):
-        path = tmp_path / "metadata.json"
-        for ts in (1700.0, 1710.0):
-            _meta.record_segment(path, task_id=1, step_id=2, track="raw", duration_s=10.0, timestamp=ts)
-        raw = json.loads(path.read_text(encoding="utf-8"))["raw_segments"]
-        assert (raw["count"], raw["total_duration"]) == (2, 20.0)
-        assert (raw["first_timestamp"], raw["last_timestamp"]) == (1700.0, 1710.0)
-
-    def test_corrupt_document_is_rebuilt_not_fatal(self, tmp_path):
-        """派生量坏了不该让整段视频陪葬 —— 重建 + warning。"""
-        path = tmp_path / "metadata.json"
-        path.write_text("{ not json", encoding="utf-8")
-        _meta.record_segment(path, task_id=1, step_id=2, track="raw", duration_s=1.0, timestamp=1700.0)
-        assert json.loads(path.read_text(encoding="utf-8"))["raw_segments"]["count"] == 1
-
-    def test_write_leaves_no_tmp(self, tmp_path):
-        path = tmp_path / "metadata.json"
-        _meta.record_segment(path, task_id=1, step_id=2, track="raw", duration_s=1.0, timestamp=1700.0)
-        assert [p.name for p in tmp_path.iterdir()] == ["metadata.json"]
-
-
-# ---------------------------------------------------------------------------
 # tfdt 改写（T3：不依赖外部工具）
 # ---------------------------------------------------------------------------
 
@@ -973,7 +932,6 @@ class TestInsertSegment:
 
         names = sorted(p.name for p in _hls_dir(tmp_storage).iterdir())
         assert names == [
-            "metadata.json",
             "raw_init.mp4",
             "raw_playlist.m3u8",
             "raw_segment_1700000.idx",
@@ -1022,13 +980,6 @@ class TestInsertSegment:
         init.write_bytes(b"first-init-kept")
         hls.insert_segment(RUN, "raw", _frames(start=1701.0))
         assert init.read_bytes() == b"first-init-kept"
-
-    def test_metadata_counts_the_segment(self, tmp_storage, fake_pipeline):
-        hls.insert_segment(RUN, "raw", _frames())
-        hls.insert_segment(RUN, "processed", _frames())
-        document = json.loads(_layout.metadata_path(RUN).read_text(encoding="utf-8"))
-        assert document["raw_segments"]["count"] == 1
-        assert document["processed_segments"]["count"] == 1
 
     # ── 入参 ────────────────────────────────────────────────────────────────
 
