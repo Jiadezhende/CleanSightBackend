@@ -93,6 +93,13 @@ BUDGET = {
     "app.storage.hls.types":    (set(), 0.40),
     # 服务层工具包。标记型 __init__（零 re-export），故这条盯的只是它自己；每个成员模块
     # 另行登记，由 test_layer_package_modules_are_all_budgeted 强制。
+    # 平台 DB 只读层。包根标记型；其余三条都经 `database` 拉起 sqlalchemy + psycopg2 + settings
+    # （实测 ~0.35s，sqlalchemy.orm 占 ~0.29s）。sqlalchemy 不在 HEAVY，这几条守的是 HEAVY 三项
+    # 与量级：查询函数只该组合 ORM，任何 numpy / cv2 / 单例进来都是走错了层。
+    "app.db":                   (set(), 0.20),
+    "app.db.database":          (set(), 1.0),
+    "app.db.tasks":             (set(), 1.0),
+    "app.db.alarms":            (set(), 1.0),
     "app.services.utils":              (set(), 0.20),
     "app.services.utils.vod_playlist": (set(), 0.20),   # stdlib only（math / typing）
     # 媒体轴换算。它 import `app.storage.hls`（段与 EXTINF 的唯一来源），故预算照 hls 那条
@@ -154,6 +161,11 @@ LAYER_PACKAGES = {
     # app.types：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `utils/root.py` 的规矩只在函数体内 import
     "app/storage": ("app.storage", "app.types", "app.settings"),
+    # 平台 DB 只读层：routers（及后续 services）向下查它，它只认 ORM + 连接配置
+    # （app.settings 出 database_url）+ 异常契约（app.types.exceptions）。一旦 import
+    # services / storage / routers，查询就和运行态或盘上产物绑在一起，DB 与 storage
+    # 也不再是可以各自单独降级的两个下游（lab 存储模式、task 历史清单都靠这一点）。
+    "app/db": ("app.db", "app.types", "app.settings"),
     # 算法服务：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
     # 都不许碰：阈值、入参上限、默认档一律写进算法子包自己的配置文件（见
     # `app/services/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。
