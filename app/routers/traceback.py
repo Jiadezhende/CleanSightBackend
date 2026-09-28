@@ -16,90 +16,23 @@
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from sqlalchemy.exc import SQLAlchemyError
 
-from app.db.database import get_db
+from app.db import alarms as db_alarms
 from app.types.run import RunIdentity
-from app.db.alarms import DBAlarm
 from app.services.utils.media_timeline import total_gap_ms
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls, runs
-from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
+from app.types.exceptions import DatabaseError, NotFoundError
 
 from .utils.media_token import MediaToken
 from .utils.runs import resolve_run
 
 router = APIRouter(prefix="/traceback", tags=["traceback"])
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# 工具：detected_at 单位归一化
-# ---------------------------------------------------------------------------
-
-
-def _to_ms(detected_at: Optional[int]) -> int:
-    """把 detected_at 归一到毫秒。
-
-    - 平台若以秒（10 位整数）存入，乘 1000
-    - 已是毫秒（13 位）原样返回
-    - 微秒（16 位）则除以 1000
-    """
-    if detected_at is None:
-        raise ValidationError("alarm.detected_at is null", field="detected_at")
-    v = int(detected_at)
-    if v <= 0:
-        raise ValidationError(
-            "alarm.detected_at must be positive", field="detected_at", value=str(v)
-        )
-    if v < 10**11:        # 秒级
-        return v * 1000
-    if v < 10**14:        # 毫秒级
-        return v
-    return v // 1000      # 微秒级或更高
-
-
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
-
-
-def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    """按 task_id [+step_id] 拉告警列表（用于 timeline）。
-
-    step_id 不为 None 时仅返回该 step 的告警。
-    """
-    db = next(get_db())
-    try:
-        try:
-            q = db.query(DBAlarm).filter(DBAlarm.task_id == int(task_id))
-            if step_id is not None:
-                q = q.filter(DBAlarm.step_id == int(step_id))
-            rows = q.order_by(DBAlarm.detected_at.asc()).all()
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message=f"Failed to fetch alarms for task {task_id}",
-                retryable=True,
-            ) from e
-
-        return [
-            {
-                "alarm_id": int(r.alarm_id),
-                "alarm_type": r.alarm_type,
-                "severity": r.severity,
-                "message": r.message,
-                "step_id": int(r.step_id) if r.step_id is not None else None,  # type: ignore[arg-type]
-                "step_name": r.step_name,
-                "detected_at": int(r.detected_at) if r.detected_at is not None else None,  # type: ignore[arg-type]
-            }
-            for r in rows
-        ]
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +74,7 @@ def _build_vod_playlist(request: Request, run: RunIdentity, track: str) -> str:
         # **响应体形态会静默从结构化变成只有 detail**，客户端按字段分支的就断了。
         raise _no_segments(task_id, step_id, track)
 
-    if not hls.init_path(run, track).exists():
+    if not hls.query_has_init(run, track):
         # 正常落盘的 run 必有 init（首段 transcode 时产出）。缺 init 只剩首段正在 transcode
         # 途中（窗口极短），故 503 而非 404，让调用方按「此 run 暂不可回放」处理。
         raise HTTPException(
@@ -233,31 +166,6 @@ async def get_task_playlist(
 # ---------------------------------------------------------------------------
 
 
-def _step_duration_ms(run: RunIdentity) -> Tuple[int, int, int]:
-    """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。
-
-    end_ms 必须取 max(seg.ts + EXTINF)，而不是 max(seg.ts) —— 后者会漏掉最后一段
-    自身长度。EXTINF 是 hls.js / fragment 媒体时长的同源真值，对齐到它才能保证
-    lab 页面顶部"时长 / 进度条右端"和 <video>.duration 一致。
-
-    在途段（mp4v 已落、transcode+append 未完成）在 playlist 里查不到 EXTINF，
-    由 `hls.list_segments` 一并滤掉 —— 与 `_build_vod_playlist` 同源同策略。
-    raw / processed 双轨都纳入，取并集的最早起点和最晚终点。
-    """
-    start_us: Optional[int] = None
-    end_us: Optional[int] = None
-    for track in hls.TRACKS:
-        for seg in hls.list_segments(run, track):
-            seg_end_us = seg.ref.ts_us + int(round(seg.duration_s * 1_000_000))
-            if start_us is None or seg.ref.ts_us < start_us:
-                start_us = seg.ref.ts_us
-            if end_us is None or seg_end_us > end_us:
-                end_us = seg_end_us
-    if start_us is None or end_us is None:
-        return 0, 0, 0
-    return start_us // 1000, end_us // 1000, max(0, (end_us - start_us) // 1000)
-
-
 @router.get("/task/{task_id}/timeline")
 async def get_task_timeline(
     task_id: int,
@@ -300,22 +208,28 @@ async def get_task_timeline(
     run = resolve_run(task_id, step_id, run_id)
     lo_ms: Optional[int] = None
     hi_ms: Optional[int] = None
+    span: Optional[hls.HlsSpan] = None
     if run is None:
-        start_ms, end_ms, duration_ms = 0, 0, 0
         timeline = hls.MediaTimeline([])
     else:
-        start_ms, end_ms, duration_ms = _step_duration_ms(run)
+        # 墙钟跨度取双轨并集；段尾含末段自身 EXTINF（不是 max(段起点)）
+        span = hls.query_span(run)
         timeline = hls.query_timeline(run, track)
-        lo_ms = run.run_id // 1000
-        successor = runs.successor(run)
-        hi_ms = successor // 1000 if successor is not None else None
+        lo_us, hi_us = runs.query_lifespan_us(run)
+        lo_ms = lo_us // 1000
+        hi_ms = hi_us // 1000 if hi_us is not None else None
+    if span is None:
+        start_ms, end_ms, duration_ms = 0, 0, 0
+    else:
+        start_ms, end_ms = span.start_us // 1000, span.end_us // 1000
+        duration_ms = max(0, (span.end_us - span.start_us) // 1000)
     gap_total_ms = total_gap_ms(timeline)
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
     # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。
     events: List[Dict[str, Any]] = []
     try:
-        alarms = _fetch_task_alarms(task_id, step_id=step_id)
+        alarms = db_alarms.query_step_alarms(task_id, step_id)
     except DatabaseError:
         logger.warning(
             "[Timeline] DB 不可用，task=%s step=%s 退化为无告警时间轴", task_id, step_id
@@ -323,9 +237,9 @@ async def get_task_timeline(
         alarms = []
 
     for a in alarms:
-        if a["detected_at"] is None:
+        if a.detected_at is None:
             continue
-        ts_ms = _to_ms(a["detected_at"])
+        ts_ms = db_alarms.detected_at_ms(a.detected_at)
         if lo_ms is not None and ts_ms < lo_ms:
             continue
         if hi_ms is not None and ts_ms >= hi_ms:
@@ -337,12 +251,12 @@ async def get_task_timeline(
                 # （那段时间在媒体轴上宽度为零，没有"对应刻度"可言）。
                 "media_offset_ms": timeline.media_ms_at(ts_ms),
                 "type": "alarm",
-                "alarm_id": a["alarm_id"],
-                "alarm_type": a["alarm_type"],
-                "severity": a["severity"],
-                "step_id": a["step_id"],
-                "step_name": a["step_name"],
-                "message": a["message"],
+                "alarm_id": int(a.alarm_id),
+                "alarm_type": a.alarm_type,
+                "severity": a.severity,
+                "step_id": int(a.step_id) if a.step_id is not None else None,
+                "step_name": a.step_name,
+                "message": a.message,
             }
         )
 

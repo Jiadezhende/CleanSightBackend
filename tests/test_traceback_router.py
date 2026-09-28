@@ -17,17 +17,18 @@ import json
 import shutil
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from app.db import alarms as db_alarms
 from app.types.run import RunIdentity
 from app.main import app
 from app.routers.utils.media_token import MediaToken
 from app.storage import hls
 from app.storage.utils import root as _root
+from app.types.exceptions import DatabaseError
 from factories import make_run, seed_hls_segments
 
 
@@ -199,8 +200,6 @@ async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
     _seed_task(task_id=3, step_id=1,
                ts_us_list=[1_000_000, 11_000_000, 21_000_000])
 
-    from app.routers import traceback as tb_router
-
     base_ms = 1_700_000_000_000
     rows = [
         SimpleNamespace(
@@ -212,13 +211,11 @@ async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
             message="bend", step_id=1, step_name="s1", detected_at=base_ms + 2_000,
         ),
     ]
-    fake_db = MagicMock()
-    fake_db.query.return_value.filter.return_value.filter.return_value.order_by.return_value.all.return_value = rows
-    fake_db.close = lambda: None
-    monkeypatch.setattr(tb_router, "get_db", lambda: iter([fake_db]))
+    calls = _install_alarms(monkeypatch, rows)
 
     resp = await client.get("/traceback/task/3/timeline?step_id=1")
     assert resp.status_code == 200, resp.text
+    assert calls == [(3, 1)]
     body = resp.json()
     assert body["task_id"] == 3
     assert body["step_id"] == 1
@@ -240,12 +237,15 @@ _TS0_MS = _TS0_US // 1000
 
 
 def _install_alarms(monkeypatch, rows):
-    from app.routers import traceback as tb_router
+    """替换 `db_alarms.query_step_alarms`；记下每次调用的 (task_id, step_id)。"""
+    calls = []
 
-    fake_db = MagicMock()
-    fake_db.query.return_value.filter.return_value.filter.return_value.order_by.return_value.all.return_value = rows
-    fake_db.close = lambda: None
-    monkeypatch.setattr(tb_router, "get_db", lambda: iter([fake_db]))
+    def _fake(task_id, step_id):
+        calls.append((task_id, step_id))
+        return list(rows)
+
+    monkeypatch.setattr(db_alarms, "query_step_alarms", _fake)
+    return calls
 
 
 def _alarm(alarm_id, detected_at):
@@ -253,6 +253,36 @@ def _alarm(alarm_id, detected_at):
         alarm_id=alarm_id, alarm_type="bubble", severity="high",
         message="b", step_id=1, step_name="s1", detected_at=detected_at,
     )
+
+
+@pytest.mark.asyncio
+async def test_timeline_degrades_to_no_events_when_db_is_down(client, media_root, monkeypatch):
+    """DB 不可用 → 200、段时长照给、events 为空（不 503）。"""
+    _seed_task(task_id=3, step_id=1, ts_us_list=[_TS0_US])
+
+    def _boom(task_id, step_id):
+        raise DatabaseError("Failed to fetch alarms for task 3", retryable=True)
+
+    monkeypatch.setattr(db_alarms, "query_step_alarms", _boom)
+    resp = await client.get("/traceback/task/3/timeline?step_id=1")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["events"] == []
+    assert body["duration_ms"] == 10_000
+
+
+@pytest.mark.asyncio
+async def test_timeline_skips_null_detected_at_and_rejects_non_positive(
+    client, media_root, monkeypatch
+):
+    """detected_at 为 NULL 的告警跳过；<=0 的非法值走 ValidationError → 400。"""
+    _seed_task(task_id=3, step_id=1, ts_us_list=[_TS0_US])
+    _install_alarms(monkeypatch, [_alarm(1, None), _alarm(2, _TS0_MS + 1_000)])
+    assert _alarm_ids(await client.get("/traceback/task/3/timeline?step_id=1")) == [2]
+
+    _install_alarms(monkeypatch, [_alarm(1, -5)])
+    resp = await client.get("/traceback/task/3/timeline?step_id=1")
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -264,7 +294,7 @@ async def test_timeline_gives_media_coordinates_for_the_progress_bar(
     墙钟那几个字段照旧给（审计/显示用），但**不能拿去配 `<video>.currentTime`** ——
     两者不同尺，混用就是断流后指针走不满、标记与画面错位。
     """
-    # 三段各 10s，首尾相接、无空洞。ts 用真实 epoch —— `_to_ms` 把 <10^11 的
+    # 三段各 10s，首尾相接、无空洞。ts 用真实 epoch —— `db_alarms.detected_at_ms` 把 <10^11 的
     # detected_at 当秒级处理，小数值会被乘 1000，对不上段的墙钟。
     _seed_task(task_id=3, step_id=1,
                ts_us_list=[_TS0_US, _TS0_US + 10_000_000, _TS0_US + 20_000_000])
@@ -366,12 +396,7 @@ async def test_timeline_step_id_required(client, media_root):
 @pytest.mark.asyncio
 async def test_timeline_empty_for_unknown_task(client, media_root, monkeypatch):
     """目录不存在时返回零时长 + 空事件，不再 404。"""
-    from app.routers import traceback as tb_router
-
-    fake_db = MagicMock()
-    fake_db.query.return_value.filter.return_value.filter.return_value.order_by.return_value.all.return_value = []
-    fake_db.close = lambda: None
-    monkeypatch.setattr(tb_router, "get_db", lambda: iter([fake_db]))
+    _install_alarms(monkeypatch, [])
 
     resp = await client.get("/traceback/task/999/timeline?step_id=1")
     assert resp.status_code == 200
