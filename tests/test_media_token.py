@@ -26,13 +26,13 @@ class TestMediaTokenSignVerify:
         token = self.mt.sign(
             task_id=42,
             step_id=1,
-            filename="processed_segment_1700000000000000.mp4",
+            filename="processed_segment_1700000000000.mp4",
             kind="segment",
         )
         payload = self.mt.verify(token, kind="segment")
         assert payload.task_id == 42
         assert payload.step_id == 1
-        assert payload.filename == "processed_segment_1700000000000000.mp4"
+        assert payload.filename == "processed_segment_1700000000000.mp4"
         assert payload.kind == "segment"
         assert payload.expiry > int(time.time())
 

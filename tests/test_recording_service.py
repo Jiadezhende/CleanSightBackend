@@ -666,8 +666,8 @@ class TestEndToEnd:
         hls_dir = tmp_storage / "1" / "2" / str(cq.run.run_id) / "hls"
         assert sorted(p.name for p in hls_dir.glob("*.mp4")) == [
             "raw_init.mp4",
-            "raw_segment_1700000000.mp4",
-            "raw_segment_1800000000.mp4",
+            "raw_segment_1700000.mp4",
+            "raw_segment_1800000.mp4",
         ]
         playlist = hls.playlist_path(cq.run, "raw").read_text(encoding="utf-8")
         assert playlist.count("#EXTINF:") == 2
