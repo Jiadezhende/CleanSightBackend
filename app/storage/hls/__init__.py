@@ -41,12 +41,12 @@ ffmpeg 静默截短。收口后**「可播」不再是限定词**，故容器叫
 ## 落盘结构
 
     {root}/{task_id}/{step_id}/{run_id}/hls/
-      {track}_segment_{ts_us}.mp4   段（fMP4 fragment）
+      {track}_segment_{ts_ms}.mp4   段（fMP4 fragment）
       {track}_init.mp4              该轨的 init 段，首段产出、整条 playlist 复用
       {track}_playlist.m3u8         LIVE 形态清单，只追加、不写 ENDLIST
-      raw_segment_{ts_us}.idx       raw 轨逐帧 ts sidecar（float64），仅离线反查用
+      raw_segment_{ts_ms}.idx       raw 轨逐帧 ts sidecar（float64），仅离线反查用
       metadata.json                 段数 / 时长 / 首末 ts，兼作 TTL 判据
-      .stage_{track}_{ts_us}/       写入事务的暂存目录，commit 后即删
+      .stage_{track}_{ts_ms}/       写入事务的暂存目录，commit 后即删
 
 两条轨（`raw` / `processed`）**各自独立**：各有各的段、init 与清单，互不引用。
 detection 不在本域落盘——它由 `inference` 域按帧 ts 单源写入。
@@ -107,7 +107,7 @@ from ._layout import (
     segment_name,
     segment_path,
     sidecar_path,
-    ts_to_us,
+    ts_to_ms,
 )
 from ._read import (
     list_segments,
@@ -145,5 +145,5 @@ __all__ = [
     "segment_path",
     "list_segments_in_range",
     "sidecar_path",
-    "ts_to_us",
+    "ts_to_ms",
 ]

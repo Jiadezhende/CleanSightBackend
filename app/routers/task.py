@@ -184,8 +184,8 @@ def _summarise_steps(task_id: int) -> List[dict]:
                 "step_id": run.step_id,
                 "run_id": run.run_id,
                 "tracks": list(span.tracks),
-                "start_ms": span.start_us // 1000,
-                "last_segment_ms": span.last_start_us // 1000,
+                "start_ms": span.start_ms,
+                "last_segment_ms": span.last_start_ms,
             }
         )
     return steps

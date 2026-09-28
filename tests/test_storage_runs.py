@@ -51,23 +51,23 @@ class TestAllocate:
         assert (run.task_id, run.step_id) == (1, 2)
         assert (tmp_storage / "1" / "2" / str(run.run_id)).is_dir()
 
-    def test_run_id_is_microseconds_now(self, tmp_storage, monkeypatch):
+    def test_run_id_is_epoch_milliseconds_now(self, tmp_storage, monkeypatch):
         monkeypatch.setattr(runs.time, "time_ns", lambda: 1_700_000_000_123_456_789)
-        assert runs.allocate(1, 2).run_id == 1_700_000_000_123_456
+        assert runs.allocate(1, 2).run_id == 1_700_000_000_123
 
     def test_strictly_increasing_even_if_clock_stalls_or_goes_back(self, tmp_storage, monkeypatch):
         clock = iter([5_000_000, 5_000_000, 1_000_000])
-        monkeypatch.setattr(runs.time, "time_ns", lambda: next(clock) * 1000)
+        monkeypatch.setattr(runs.time, "time_ns", lambda: next(clock) * 1_000_000)
         ids = [runs.allocate(1, 2).run_id for _ in range(3)]
         assert ids == [5_000_000, 5_000_001, 5_000_002]
 
     def test_non_numeric_dirs_are_not_run_ids(self, tmp_storage, monkeypatch):
         (tmp_storage / "1" / "2" / "hls").mkdir(parents=True)
-        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000)
+        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000_000)
         assert runs.allocate(1, 2).run_id == 7
 
     def test_steps_are_independent(self, tmp_storage, monkeypatch):
-        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000)
+        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000_000)
         assert runs.allocate(1, 2).run_id == 7
         assert runs.allocate(1, 3).run_id == 7
 
@@ -78,7 +78,7 @@ class TestAllocate:
 
 
 def _alloc(monkeypatch, task, step, run_id):
-    monkeypatch.setattr(runs.time, "time_ns", lambda: run_id * 1000)
+    monkeypatch.setattr(runs.time, "time_ns", lambda: run_id * 1_000_000)
     run = runs.allocate(task, step)
     assert run.run_id == run_id
     return run
@@ -209,7 +209,7 @@ class TestSuccessor:
 
 
 # ---------------------------------------------------------------------------
-# query_latest_by_step / query_lifespan_us
+# query_latest_by_step / query_lifespan_ms
 # ---------------------------------------------------------------------------
 
 
@@ -243,10 +243,10 @@ class TestQueryLatestByStep:
 
 class TestQueryLifespan:
     def test_bounded_by_the_next_allocated_run(self, tmp_storage, monkeypatch):
-        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000_000)
-        _alloc(monkeypatch, 1, 2, 1_700_000_060_000_000)
-        assert runs.query_lifespan_us(a) == (1_700_000_000_000_000, 1_700_000_060_000_000)
+        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000)
+        _alloc(monkeypatch, 1, 2, 1_700_000_060_000)
+        assert runs.query_lifespan_ms(a) == (1_700_000_000_000, 1_700_000_060_000)
 
     def test_latest_run_is_open_ended(self, tmp_storage, monkeypatch):
-        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000_000)
-        assert runs.query_lifespan_us(a) == (1_700_000_000_000_000, None)
+        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000)
+        assert runs.query_lifespan_ms(a) == (1_700_000_000_000, None)

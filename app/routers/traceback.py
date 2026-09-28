@@ -215,14 +215,12 @@ async def get_task_timeline(
         # 墙钟跨度取双轨并集；段尾含末段自身 EXTINF（不是 max(段起点)）
         span = hls.query_span(run)
         timeline = hls.query_timeline(run, track)
-        lo_us, hi_us = runs.query_lifespan_us(run)
-        lo_ms = lo_us // 1000
-        hi_ms = hi_us // 1000 if hi_us is not None else None
+        lo_ms, hi_ms = runs.query_lifespan_ms(run)
     if span is None:
         start_ms, end_ms, duration_ms = 0, 0, 0
     else:
-        start_ms, end_ms = span.start_us // 1000, span.end_us // 1000
-        duration_ms = max(0, (span.end_us - span.start_us) // 1000)
+        start_ms, end_ms = span.start_ms, span.end_ms
+        duration_ms = max(0, span.end_ms - span.start_ms)
     gap_total_ms = total_gap_ms(timeline)
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，

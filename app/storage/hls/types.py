@@ -22,18 +22,18 @@ from typing import NamedTuple, Tuple
 
 
 class SegmentRef(NamedTuple):
-    """一个段在其 step 内的身份：轨道 + 起始时刻（微秒截断）。
+    """一个段在其 step 内的身份：轨道 + 起始时刻（epoch 毫秒，向下取整）。
 
     **不带 `task_id` / `step_id`**：那两个是路由键、调用方手里本来就有。
     """
 
     track: str
-    ts_us: int
+    ts_ms: int
 
     @property
     def ts_s(self) -> float:
-        """段起始时刻（秒）。`ts_us` 已截断，回不到原始 float ts。"""
-        return self.ts_us / 1_000_000.0
+        """段起始时刻（秒）。`ts_ms` 已向下取整，回不到原始 float ts。"""
+        return self.ts_ms / 1000.0
 
 
 class Segment(NamedTuple):
@@ -48,12 +48,12 @@ class Segment(NamedTuple):
 
 
 class HlsSpan(NamedTuple):
-    """一个 run 若干轨的段在墙钟上的跨度（各轨取并集），单位微秒。
+    """一个 run 若干轨的段在墙钟上的跨度（各轨取并集），单位 epoch 毫秒。
 
-    `end_us` = max(段起点 + round(EXTINF))，不是末段起点——后者漏掉末段自身长度。
+    `end_ms` = max(段起点 + round(EXTINF))，不是末段起点——后者漏掉末段自身长度。
     """
 
     tracks: Tuple[str, ...]   # 有段的那些轨，保持入参顺序
-    start_us: int             # 最早段起点
-    last_start_us: int        # 最晚段起点
-    end_us: int               # 最晚段尾
+    start_ms: int             # 最早段起点
+    last_start_ms: int        # 最晚段起点
+    end_ms: int               # 最晚段尾

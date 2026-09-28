@@ -59,7 +59,7 @@ class _SegmentJob(NamedTuple):
     @property
     def label(self) -> str:
         r = self.run
-        return f"seg:{r.task_id}/{r.step_id}/{r.run_id}/{self.track}@{hls.ts_to_us(self.frames[0].timestamp)}"
+        return f"seg:{r.task_id}/{r.step_id}/{r.run_id}/{self.track}@{hls.ts_to_ms(self.frames[0].timestamp)}"
 
 
 class _DetectionJob(NamedTuple):

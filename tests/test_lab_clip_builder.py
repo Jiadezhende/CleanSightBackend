@@ -30,7 +30,7 @@ from factories import make_run, seed_hls_segments
 
 TASK_ID = 1
 STEP_ID = 1
-TS0 = 1_700_000_000_000_000        # 首段墙钟起点（us）
+TS0 = 1_700_000_000_000            # 首段墙钟起点（epoch ms）
 _DEFAULT_EXTINF = 10.0
 
 
@@ -51,8 +51,8 @@ def _window(start_media_ms: int, end_media_ms: int) -> hls.MediaTimeline:
 
 def _contiguous(n: int, extinf_s: float = _DEFAULT_EXTINF) -> List[tuple]:
     """n 个首尾相接的段（墙钟间隔 = EXTINF，即无空洞）。"""
-    step_us = int(extinf_s * 1_000_000)
-    return [(TS0 + i * step_us, extinf_s) for i in range(n)]
+    step_ms = int(extinf_s * 1000)
+    return [(TS0 + i * step_ms, extinf_s) for i in range(n)]
 
 
 def _spec(start_media_ms: int, end_media_ms: int) -> ClipSpec:
@@ -152,7 +152,7 @@ class TestBuildOne:
 
         res = _builder(tmp_storage).build_one(_spec(12_000, 15_000), job_dir)
 
-        assert (res.start_ms, res.end_ms) == (TS0 // 1000 + 12_000, TS0 // 1000 + 15_000)
+        assert (res.start_ms, res.end_ms) == (TS0 + 12_000, TS0 + 15_000)
         assert res.duration_ms == 3_000
         assert res.n_source_segments == 1
 
@@ -162,7 +162,7 @@ class TestBuildOne:
         这是缺陷 #1 的后端一半：前端按「W0 + currentTime」上报会偏早 Σgap，改由后端换算
         之后，偏移由清单逐段算出，空洞不再被吞掉。
         """
-        _seed([(TS0, 10.0), (TS0 + 30_000_000, 10.0)])       # 两段之间 20s 空洞
+        _seed([(TS0, 10.0), (TS0 + 30_000, 10.0)])       # 两段之间 20s 空洞
         _capture(monkeypatch)
         job_dir = tmp_storage / "job"
         job_dir.mkdir()
@@ -170,10 +170,10 @@ class TestBuildOne:
         res = _builder(tmp_storage).build_one(_spec(12_000, 15_000), job_dir)
 
         # 媒体 12s 落在第二段内 2s 处 → 墙钟 = 第二段起点 + 2s（而不是 W0 + 12s）
-        assert res.start_ms == (TS0 + 30_000_000) // 1000 + 2_000
+        assert res.start_ms == TS0 + 30_000 + 2_000
 
     def test_rejects_a_window_spanning_a_gap(self, tmp_storage, monkeypatch):
-        _seed([(TS0, 10.0), (TS0 + 30_000_000, 10.0)])
+        _seed([(TS0, 10.0), (TS0 + 30_000, 10.0)])
         _capture(monkeypatch)
         job_dir = tmp_storage / "job"
         job_dir.mkdir()

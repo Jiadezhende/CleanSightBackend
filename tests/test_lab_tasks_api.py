@@ -35,7 +35,7 @@ async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_storage):
 
     monkeypatch.setattr(db_tasks, "query_task_page", _page)
 
-    seed_hls_segments(101, 2, [1_700_000_000_000_000])
+    seed_hls_segments(101, 2, [1_700_000_000_000])
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -75,12 +75,12 @@ async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_stora
     _force_storage_mode(monkeypatch)
 
     # task 101: 两个 step 都有 raw 段
-    seed_hls_segments(101, 1, [1_700_000_000_000_000])
-    seed_hls_segments(101, 2, [1_700_000_005_000_000])
+    seed_hls_segments(101, 1, [1_700_000_000_000])
+    seed_hls_segments(101, 2, [1_700_000_005_000])
     # task 101 step 3: 建了目录没写成段 → 送标清单里不该出现（list_step_ids 不过滤空 step）
     (tmp_storage / "101" / "3" / "hls").mkdir(parents=True)
     # task 202: 只有 processed 段，没有 raw → 不应入选
-    seed_hls_segments(202, 1, [1_700_000_000_000_000], track="processed")
+    seed_hls_segments(202, 1, [1_700_000_000_000], track="processed")
     # 非数字目录（.lab_exports、config 文件）应被跳过
     (tmp_storage / ".lab_exports").mkdir()
     (tmp_storage / "lab_runtime_config.json").write_text("{}")
@@ -114,9 +114,9 @@ async def test_storage_mode_sort_paginate_and_filter(monkeypatch, tmp_storage):
     _force_storage_mode(monkeypatch)
 
     # 三个 task，updated_time 递增：301 < 302 < 303
-    seed_hls_segments(301, 1, [1_700_000_001_000_000])
-    seed_hls_segments(302, 1, [1_700_000_002_000_000])
-    seed_hls_segments(303, 1, [1_700_000_003_000_000])
+    seed_hls_segments(301, 1, [1_700_000_001_000])
+    seed_hls_segments(302, 1, [1_700_000_002_000])
+    seed_hls_segments(303, 1, [1_700_000_003_000])
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:

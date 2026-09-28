@@ -1,4 +1,4 @@
-"""段的逐帧时间戳 sidecar：`raw_segment_{ts_us}.idx`。
+"""段的逐帧时间戳 sidecar：`raw_segment_{ts_ms}.idx`。
 
 **二进制布局：float64 裸数组，每帧一条，无头无尾**（`np.ndarray.tofile` / `np.fromfile` 的
 原生字节序）。没有 magic、没有长度字段——条数由文件大小 ÷ 8 得出。

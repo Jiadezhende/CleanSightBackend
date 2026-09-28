@@ -5,7 +5,7 @@
     run = runs.query(task_id, step_id, run_id)      # 点名的 run；目录不在 → None
     runs.successor(run)                             # 同 step 下一个 run 的 run_id；最新的 → None
     runs.query_latest_by_step(task_id)              # 各 step 的最新可见 run，按 step 升序
-    start_us, end_us = runs.query_lifespan_us(run)  # 存续区间 [分配时刻, 下一个 run 分配时刻)
+    start_ms, end_ms = runs.query_lifespan_ms(run)  # 存续区间 [分配时刻, 下一个 run 分配时刻)
 
 硬约束：
 
@@ -30,19 +30,19 @@ from .utils import root as _root
 from .hls import _layout as _hls_layout
 from .inference import _layout as _inference_layout
 
-__all__ = ["allocate", "query", "query_latest_by_step", "query_lifespan_us", "successor"]
+__all__ = ["allocate", "query", "query_latest_by_step", "query_lifespan_ms", "successor"]
 
 
 def allocate(task_id: int, step_id: int) -> RunIdentity:
     """分配一个新 run 并建出它的目录。
 
-    `run_id = max(当前微秒, 该 step 已有最大 run_id + 1)`：时钟回拨也严格递增。
+    `run_id = max(当前墙钟毫秒, 该 step 已有最大 run_id + 1)`：时钟回拨也严格递增。
 
     Raises:
         OSError: 建目录失败（含 run 目录已存在——那说明分配没有串行）。
     """
     existing = _root.run_ids(task_id, step_id)
-    run_id = time.time_ns() // 1000
+    run_id = time.time_ns() // 1_000_000
     if existing:
         run_id = max(run_id, existing[-1] + 1)
     run = RunIdentity(task_id=task_id, step_id=step_id, run_id=run_id)
@@ -90,10 +90,10 @@ def query_latest_by_step(task_id: int) -> List[RunIdentity]:
     return found
 
 
-def query_lifespan_us(run: RunIdentity) -> Tuple[int, Optional[int]]:
-    """`run` 的存续区间 `[start_us, end_us)`：自身分配时刻到同 step 下一个 run 的分配时刻（墙钟微秒）。
+def query_lifespan_ms(run: RunIdentity) -> Tuple[int, Optional[int]]:
+    """`run` 的存续区间 `[start_ms, end_ms)`：自身分配时刻到同 step 下一个 run 的分配时刻（墙钟毫秒）。
 
-    最新的 run 没有上界，`end_us` 为 None。不做可见判断（同 `successor`）。
-    两端都是 `run_id`：`allocate` 让它等于分配时刻微秒（时钟回拨时取已有最大值 + 1）。
+    最新的 run 没有上界，`end_ms` 为 None。不做可见判断（同 `successor`）。
+    两端都是 `run_id`：`allocate` 让它等于分配时刻毫秒（时钟回拨时取已有最大值 + 1）。
     """
     return run.run_id, successor(run)

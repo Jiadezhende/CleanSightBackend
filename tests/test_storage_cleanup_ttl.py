@@ -147,7 +147,7 @@ def test_real_run_layout_is_covered(tmp_storage):
     from app.storage import hls, runs
 
     run = runs.allocate(11, 6)
-    seg = hls.segment_path(run, hls.SegmentRef(track="raw", ts_us=1700000000), create=True)
+    seg = hls.segment_path(run, hls.SegmentRef(track="raw", ts_ms=1700000000000), create=True)
     seg.write_bytes(b"fake")
     step_dir = tmp_storage / "11" / "6"
     assert seg.parent.parent.parent == step_dir

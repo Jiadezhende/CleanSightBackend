@@ -12,14 +12,14 @@ from app.storage import inference as inference_store
 from factories import seed_hls_segments, make_run
 
 T0 = 1_700_000_000
-_TS0_US = T0 * 1_000_000
+_TS0_MS = T0 * 1000
 _LABELS = ("idle", "long_brush_insert", "flush")
 
 
 def _seed_gapped_raw(task_id=1, step_id=2):
     """raw 轨三段各 10s，第二、三段之间停 10s。媒体轴 0~30000ms。"""
     seed_hls_segments(task_id, step_id, [
-        _TS0_US, _TS0_US + 10_000_000, _TS0_US + 30_000_000,
+        _TS0_MS, _TS0_MS + 10_000, _TS0_MS + 30_000,
     ])
 
 
@@ -83,8 +83,8 @@ def test_storage_task_item_carries_offline_steps(tmp_storage):
     判定本身的全部分支见 test_storage_inference::TestQueryHasOfflineResults。
     """
     _seed_gapped_raw(task_id=1, step_id=2)
-    seed_hls_segments(1, 3, [_TS0_US])
-    seed_hls_segments(1, 4, [_TS0_US])
+    seed_hls_segments(1, 3, [_TS0_MS])
+    seed_hls_segments(1, 4, [_TS0_MS])
     inference_store.write_temporal(make_run(1, 2), [
         TemporalSegment(producer="P", label="flush", start=T0 + 1.0, end=T0 + 2.0),
     ])

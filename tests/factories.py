@@ -156,7 +156,7 @@ def seed_hls_segments(
     """在该 step 最新的 run（`make_run`）的 `hls/` 下铺段文件 + init，**并登记进清单**；
     返回域目录。同时写一份 `metadata.json`，让这个 run 对 `runs.query` 可见。
 
-    `items` 收 `[ts_us]` 或 `[(ts_us, extinf_s)]`。
+    `items` 收 `[ts_ms]` 或 `[(ts_ms, extinf_s)]`（ts_ms 是段名里的 epoch 毫秒）。
 
     **登记那一步不能省**：「有哪些段」只由清单回答，光有段文件 = 没有段（在途，或
     `_m3u8.append` 失败留下的孤儿）。不走 `hls.insert_segment` 只是为了免拉 cv2/ffmpeg，
@@ -171,8 +171,8 @@ def seed_hls_segments(
     normalised = [it if isinstance(it, tuple) else (it, default_extinf_s) for it in items]
     domain_dir = _layout.domain_dir(run, create=True)
 
-    for ts_us, extinf_s in normalised:
-        ref = hls.SegmentRef(track=track, ts_us=ts_us)
+    for ts_ms, extinf_s in normalised:
+        ref = hls.SegmentRef(track=track, ts_ms=ts_ms)
         path = hls.segment_path(run, ref)
         path.write_bytes(b"fake-fmp4")
         _m3u8.append(

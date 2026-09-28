@@ -46,12 +46,12 @@ def _install_registry(monkeypatch, cqs):
     )
 
 
-def _write_segments(task_id, step_id, *, tracks=("raw",), ts_us=1_000_000, run_id=None):
+def _write_segments(task_id, step_id, *, tracks=("raw",), ts_ms=1_000, run_id=None):
     """每条 track 在该 step 的 run（`make_run`，给了 `run_id` 就按它建）的 `hls/` 下造一段并登记
     进清单。返回 hls 域目录。"""
     make_run(task_id, step_id, run_id=run_id)
     for track in tracks:
-        d = seed_hls_segments(task_id, step_id, [ts_us], track=track)
+        d = seed_hls_segments(task_id, step_id, [ts_ms], track=track)
     return d
 
 
@@ -148,8 +148,8 @@ class TestHistoryList:
     @pytest.mark.asyncio
     async def test_step_span_takes_union_of_both_tracks(self, monkeypatch, tmp_storage):
         """step 时间跨度取双轨并集：两轨段边界不对齐时，起点、终点可以各来自不同轨。"""
-        seed_hls_segments(101, 1, [1_000_000, 5_000_000], track="raw")        # 起点在 raw
-        seed_hls_segments(101, 1, [3_000_000, 9_000_000], track="processed")  # 终点在 processed
+        seed_hls_segments(101, 1, [1_000, 5_000], track="raw")        # 起点在 raw
+        seed_hls_segments(101, 1, [3_000, 9_000], track="processed")  # 终点在 processed
         _install_registry(monkeypatch, [])
         _install_db(monkeypatch, [])
 
@@ -160,8 +160,8 @@ class TestHistoryList:
     @pytest.mark.asyncio
     async def test_running_task_is_excluded(self, monkeypatch, tmp_storage):
         """磁盘有段但还在跑 → 不算历史（本次「已完成」判定的核心）。"""
-        _write_segments(101, 1, ts_us=1_000_000)
-        _write_segments(202, 1, ts_us=2_000_000)
+        _write_segments(101, 1, ts_ms=1_000)
+        _write_segments(202, 1, ts_ms=2_000)
         _install_registry(monkeypatch, [make_cq(task_id=202, step_id=1)])
         _install_db(monkeypatch, [])
 
@@ -207,8 +207,8 @@ class TestHistoryList:
         两个 step 之间可以隔任意长时间，任务级「最早~最晚」跨过中间空档，
         既不是任务时长也不对应可播放范围——时间字段一律压在 step 粒度。
         """
-        _write_segments(101, 1, ts_us=1_000_000)
-        _write_segments(101, 2, ts_us=9_000_000)  # 与 step 1 隔 8 秒空档
+        _write_segments(101, 1, ts_ms=1_000)
+        _write_segments(101, 2, ts_ms=9_000)  # 与 step 1 隔 8 秒空档
         _install_registry(monkeypatch, [])
         _install_db(monkeypatch, [])
 
@@ -262,7 +262,7 @@ class TestHistoryList:
     async def test_caps_at_ten_newest_first(self, monkeypatch, tmp_storage):
         # 12 个任务，run 开跑时刻递增
         for i in range(12):
-            _write_segments(100 + i, 1, ts_us=(i + 1) * 1_000_000, run_id=1_000 + i)
+            _write_segments(100 + i, 1, ts_ms=(i + 1) * 1_000, run_id=1_000 + i)
         _install_registry(monkeypatch, [])
         _install_db(monkeypatch, [])
 
@@ -273,8 +273,8 @@ class TestHistoryList:
     @pytest.mark.asyncio
     async def test_order_is_by_run_start_not_segment_ts(self, monkeypatch, tmp_storage):
         """排序键是列出的 run 的 run_id（开跑时刻），不是最后一段的时刻。"""
-        _write_segments(101, 1, ts_us=9_000_000, run_id=1_000)  # 早开跑、段晚
-        _write_segments(202, 1, ts_us=1_000_000, run_id=2_000)  # 晚开跑、段早
+        _write_segments(101, 1, ts_ms=9_000, run_id=1_000)  # 早开跑、段晚
+        _write_segments(202, 1, ts_ms=1_000, run_id=2_000)  # 晚开跑、段早
         _install_registry(monkeypatch, [])
         _install_db(monkeypatch, [])
 

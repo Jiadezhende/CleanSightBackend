@@ -37,8 +37,8 @@ from app.storage.hls import _m3u8
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-TS0 = 1_700_000_000_000_000
-TS1 = TS0 + 10_000_000
+TS0 = 1_700_000_000_000
+TS1 = TS0 + 10_000
 
 TASK_ID = 1
 STEP_ID = 1
@@ -50,7 +50,7 @@ def _hls_dir(track: str = "raw") -> Path:
 
 
 def _make_step(
-    segs_ts_us: List[int],
+    segs_ts_ms: List[int],
     *,
     track: str = "raw",
     with_init: bool = True,
@@ -65,13 +65,13 @@ def _make_step(
     playlist_ts 为 None 时 playlist 收录全部段；显式传入可制造"在途段"。
     """
     run = make_run(TASK_ID, STEP_ID)
-    for ts in segs_ts_us:
-        ref = hls.SegmentRef(track=track, ts_us=ts)
+    for ts in segs_ts_ms:
+        ref = hls.SegmentRef(track=track, ts_ms=ts)
         hls.segment_path(run, ref, create=True).write_bytes(b"fake-fmp4")
     if with_init:
         hls.init_path(run, track).write_bytes(b"fake-init")
 
-    in_playlist = segs_ts_us if playlist_ts is None else playlist_ts
+    in_playlist = segs_ts_ms if playlist_ts is None else playlist_ts
     durs = durations or [10.0] * len(in_playlist)
     playlist = hls.playlist_path(run, track)
     init_name = hls.init_name(track)

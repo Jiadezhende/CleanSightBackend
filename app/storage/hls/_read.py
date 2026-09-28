@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 
 
 def list_segments(run: RunIdentity, track: str) -> List[Segment]:
-    """该轨的段与各自的 EXTINF，按 `ts_us` 升序。清单缺失返回 `[]`。
+    """该轨的段与各自的 EXTINF，按 `ts_ms` 升序。清单缺失返回 `[]`。
 
-    本域"有哪些段"的唯一出口——一行清单条目同时给出墙钟锚点（URI 里的 `ts_us`）与媒体长度
+    本域"有哪些段"的唯一出口——一行清单条目同时给出墙钟锚点（URI 里的 `ts_ms`）与媒体长度
     （EXTINF），不需要跟文件系统 join。**不枚举目录**：盘上有文件而清单无条目的不是段。
 
     Raises:
@@ -61,13 +61,13 @@ def list_segments(run: RunIdentity, track: str) -> List[Segment]:
     # ts 顺序"时一致，而那个前提恰好是 `_write` 反复警告的并发失效点（同 step 并发写 →
     # tfdt 碰撞）。真出现逆序时，这里排一下会让读侧算出的媒体偏移与文件里实际的 tfdt
     # 对不上——seek 到错误的帧，且不报错。所以要留一条日志，把静默错变成查得到的异常。
-    if any(a.ref.ts_us > b.ref.ts_us for a, b in zip(out, out[1:])):
+    if any(a.ref.ts_ms > b.ref.ts_ms for a, b in zip(out, out[1:])):
         logger.warning(
             "[storage.hls] 清单顺序与 ts 顺序不一致，已重排；tfdt 可能与媒体轴落点对不上: "
             "task_id=%s step_id=%s track=%s",
             run.task_id, run.step_id, track,
         )
-        out.sort(key=lambda s: s.ref.ts_us)
+        out.sort(key=lambda s: s.ref.ts_ms)
     return out
 
 
@@ -78,7 +78,7 @@ def list_segments_in_range(
     start_ts: Optional[float] = None,
     end_ts: Optional[float] = None,
 ) -> List[Segment]:
-    """`list_segments` 里落在墙钟区间 `[start_ts, end_ts]` 的那些，按 `ts_us` 升序。
+    """`list_segments` 里落在墙钟区间 `[start_ts, end_ts]` 的那些，按 `ts_ms` 升序。
 
     Args:
         run: 该 run。
@@ -100,17 +100,17 @@ def list_segments_in_range(
         return []
 
     # 要找的是**包含** start_ts 的那一段，故 'right' - 1：'left' 取到的是 start_ts 之后的
-    # 段，且段名 ts_us 是截断值，「start_ts 恰为该段首帧」时它同样会跳过该段 —— 无条件错。
-    # 用 stdlib bisect 而非 np.searchsorted：ts_us < 2^53 时两者逐值等价。
+    # 段，且段名 ts_ms 是向下取整值，「start_ts 恰为该段首帧」时它同样会跳过该段 —— 无条件错。
+    # 用 stdlib bisect 而非 np.searchsorted：ts_ms < 2^53 时两者逐值等价。
     lo = (
         0
         if start_ts is None
-        else max(0, bisect_right(segs, start_ts * 1e6, key=lambda s: s.ref.ts_us) - 1)
+        else max(0, bisect_right(segs, start_ts * 1000, key=lambda s: s.ref.ts_ms) - 1)
     )
     hi = (
         len(segs) - 1
         if end_ts is None
-        else bisect_right(segs, end_ts * 1e6, key=lambda s: s.ref.ts_us) - 1
+        else bisect_right(segs, end_ts * 1000, key=lambda s: s.ref.ts_ms) - 1
     )
     if lo > hi:  # end_ts 早于首段起点时 hi = -1，在此被拦下；刻意不 clamp 成 0
         return []
@@ -150,26 +150,26 @@ def query_span(run: RunIdentity, tracks: Sequence[str] = _layout.TRACKS) -> Opti
         ValueError: track 非法。
     """
     present: List[str] = []
-    start_us: Optional[int] = None
-    last_start_us = end_us = 0
+    start_ms: Optional[int] = None
+    last_start_ms = end_ms = 0
     for track in tracks:
         segs = list_segments(run, track)
         if not segs:
             continue
         present.append(track)
         # list_segments 升序是契约，首末即最早 / 最晚起点；段尾仍逐段取 max（EXTINF 不等长）
-        first, last = segs[0].ref.ts_us, segs[-1].ref.ts_us
-        track_end = max(s.ref.ts_us + int(round(s.duration_s * 1_000_000)) for s in segs)
-        if start_us is None:
-            start_us, last_start_us, end_us = first, last, track_end
+        first, last = segs[0].ref.ts_ms, segs[-1].ref.ts_ms
+        track_end = max(s.ref.ts_ms + int(round(s.duration_s * 1000)) for s in segs)
+        if start_ms is None:
+            start_ms, last_start_ms, end_ms = first, last, track_end
         else:
-            start_us = min(start_us, first)
-            last_start_us = max(last_start_us, last)
-            end_us = max(end_us, track_end)
-    if start_us is None:
+            start_ms = min(start_ms, first)
+            last_start_ms = max(last_start_ms, last)
+            end_ms = max(end_ms, track_end)
+    if start_ms is None:
         return None
     return HlsSpan(
-        tracks=tuple(present), start_us=start_us, last_start_us=last_start_us, end_us=end_us,
+        tracks=tuple(present), start_ms=start_ms, last_start_ms=last_start_ms, end_ms=end_ms,
     )
 
 

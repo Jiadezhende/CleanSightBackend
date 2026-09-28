@@ -12,7 +12,7 @@ from factories import make_run, seed_hls_segments
 
 TASK_ID = 1
 STEP_ID = 1
-TS0 = 1_700_000_000_000_000        # 首段墙钟起点（us）
+TS0 = 1_700_000_000_000            # 首段墙钟起点（epoch ms）
 
 
 def _seed(items, **kw):
@@ -25,13 +25,13 @@ def _load(track="raw"):
 
 def _contiguous(n: int, extinf_s: float = 10.0):
     """n 个首尾相接的段（墙钟间隔 = EXTINF，即无空洞）。"""
-    step_us = int(extinf_s * 1_000_000)
-    return [(TS0 + i * step_us, extinf_s) for i in range(n)]
+    step_ms = int(extinf_s * 1000)
+    return [(TS0 + i * step_ms, extinf_s) for i in range(n)]
 
 
 def _with_gap(gap_s: float, extinf_s: float = 10.0):
     """两段，中间隔着 `gap_s` 秒的空洞。"""
-    second = TS0 + int((extinf_s + gap_s) * 1_000_000)
+    second = TS0 + int((extinf_s + gap_s) * 1000)
     return [(TS0, extinf_s), (second, extinf_s)]
 
 
@@ -56,7 +56,7 @@ class TestGaps:
         items, ts = [], TS0
         for extinf in (10.6, 10.83, 10.7, 10.9):
             items.append((ts, extinf))
-            ts += int(extinf * 1_000_000)
+            ts += int(extinf * 1000)
         _seed(items)
 
         assert first_gap(_load()) is None
@@ -84,14 +84,14 @@ class TestGaps:
         cur, nxt, gap_ms = first_gap(_load())
 
         assert gap_ms == 20_000
-        assert cur.seg.ref.ts_us == TS0
-        assert nxt.seg.ref.ts_us == TS0 + 30_000_000
+        assert cur.seg.ref.ts_ms == TS0
+        assert nxt.seg.ref.ts_ms == TS0 + 30_000
 
     def test_total_gap_sums_every_hole(self, tmp_storage):
         _seed([
             (TS0, 10.0),
-            (TS0 + 30_000_000, 10.0),        # 空洞 20s
-            (TS0 + 45_000_000, 10.0),        # 空洞 5s
+            (TS0 + 30_000, 10.0),        # 空洞 20s
+            (TS0 + 45_000, 10.0),        # 空洞 5s
         ])
 
         assert total_gap_ms(_load()) == 25_000
@@ -114,9 +114,9 @@ class TestGaps:
         """窗口之外的断流与这段区间的内容无关，不该牵连它。"""
         _seed([
             (TS0, 10.0),
-            (TS0 + 10_000_000, 10.0),
-            (TS0 + 40_000_000, 10.0),        # ← 与上一段之间有 20s 空洞
-            (TS0 + 50_000_000, 10.0),
+            (TS0 + 10_000, 10.0),
+            (TS0 + 40_000, 10.0),        # ← 与上一段之间有 20s 空洞
+            (TS0 + 50_000, 10.0),
         ])
         tl = _load()
 

@@ -34,7 +34,7 @@ class PlacedSegment(NamedTuple):
 
     @property
     def wall_start_ms(self) -> int:
-        return self.seg.ref.ts_us // 1000
+        return self.seg.ref.ts_ms
 
     @property
     def wall_end_ms(self) -> int:

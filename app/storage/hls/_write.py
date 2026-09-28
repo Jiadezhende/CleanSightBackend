@@ -6,7 +6,7 @@
 
 ## 事务形态：路线 A（规范 `docs/kb/DESIGN_STORAGE_LAYER.md` §5）
 
-    ① stage    在 {run}/hls/.stage_{track}_{ts_us}/ 里造产物
+    ① stage    在 {run}/hls/.stage_{track}_{ts_ms}/ 里造产物
                ├ cv2 写 mp4v（_encode）
                └ ffmpeg 转 fMP4，得 fragment + init（_fmp4）
     ② adjust   读既有清单求累计 EXTINF → hex-patch fragment 的 tfdt（位置相关）
@@ -69,7 +69,7 @@ def insert_segment(
         frames: 该段的帧序列，按时间升序。段的起始时刻取首帧 ts。
 
     Returns:
-        `SegmentRef(track, ts_us)` —— 段在本 step 内的身份键，可用它经 `segment_path`
+        `SegmentRef(track, ts_ms)` —— 段在本 step 内的身份键，可用它经 `segment_path`
         等定位函数拿到任一产物的路径。
 
     Raises:
@@ -89,7 +89,7 @@ def insert_segment(
         raise ValueError(f"frames 为空，无法生成段: {run} track={track}")
 
     start_ts = frames[0].timestamp
-    ref = SegmentRef(track=track, ts_us=_layout.ts_to_us(start_ts))
+    ref = SegmentRef(track=track, ts_ms=_layout.ts_to_ms(start_ts))
 
     # 编码帧率与媒体时长同源：VideoWriter 用它、EXTINF 用它、tfdt 由 EXTINF 累加而来。
     fps = _encode.effective_fps(frames)

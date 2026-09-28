@@ -40,14 +40,14 @@ _SECRET = "test-stable-secret-2026"
 # ---------------------------------------------------------------------------
 
 
-def _seed_task(task_id: int, step_id: int, ts_us_list, write_init=True):
+def _seed_task(task_id: int, step_id: int, ts_ms_list, write_init=True):
     """造一个 step 的双轨同构段 + 清单 + init（最新 run 的 `hls/`），返回域目录。
 
     run 的开始时刻取首段 ts：timeline 只收 run 存续期内的告警，run 得开在造数的墙钟之前。
     """
-    make_run(task_id, step_id, run_id=min(ts_us_list))
+    make_run(task_id, step_id, run_id=min(ts_ms_list))
     for track in hls.TRACKS:
-        d = seed_hls_segments(task_id, step_id, ts_us_list, track=track, with_init=write_init)
+        d = seed_hls_segments(task_id, step_id, ts_ms_list, track=track, with_init=write_init)
     return d
 
 
@@ -102,7 +102,7 @@ async def client():
 @pytest.mark.asyncio
 async def test_playlist_vod_generation(client, media_root):
     _seed_task(task_id=1, step_id=1,
-               ts_us_list=[1_000_000, 11_000_000, 21_000_000])
+               ts_ms_list=[1_000, 11_000, 21_000])
 
     resp = await client.get("/traceback/task/1/playlist.m3u8?step_id=1&track=processed")
     assert resp.status_code == 200, resp.text
@@ -128,7 +128,7 @@ async def test_playlist_503_when_init_missing(client, media_root):
     """缺 `{track}_init.mp4` 时 playlist 端点应 503——fMP4 无 init 段无法解码，
     （首段仍在 transcode）。"""
     _seed_task(task_id=42, step_id=1,
-               ts_us_list=[1_000_000], write_init=False)
+               ts_ms_list=[1_000], write_init=False)
 
     resp = await client.get("/traceback/task/42/playlist.m3u8?step_id=1&track=raw")
     assert resp.status_code == 503
@@ -167,8 +167,8 @@ async def test_playlist_404_keeps_the_structured_body(client, media_root):
 @pytest.mark.asyncio
 async def test_playlist_step_isolation(client, media_root):
     """请求 step=2 时不能返回 step=1 的段。"""
-    _seed_task(task_id=5, step_id=1, ts_us_list=[1_000_000])
-    _seed_task(task_id=5, step_id=2, ts_us_list=[100_000_000, 110_000_000])
+    _seed_task(task_id=5, step_id=1, ts_ms_list=[1_000])
+    _seed_task(task_id=5, step_id=2, ts_ms_list=[100_000, 110_000])
 
     resp = await client.get("/traceback/task/5/playlist.m3u8?step_id=2&track=processed")
     assert resp.status_code == 200
@@ -177,7 +177,7 @@ async def test_playlist_step_isolation(client, media_root):
 
 @pytest.mark.asyncio
 async def test_playlist_raw_track(client, media_root):
-    _seed_task(task_id=2, step_id=1, ts_us_list=[1_000_000, 11_000_000])
+    _seed_task(task_id=2, step_id=1, ts_ms_list=[1_000, 11_000])
     resp = await client.get("/traceback/task/2/playlist.m3u8?step_id=1&track=raw")
     assert resp.status_code == 200
     assert resp.text.count("#EXTINF:") == 2
@@ -198,7 +198,7 @@ async def test_playlist_invalid_track(client, media_root):
 @pytest.mark.asyncio
 async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
     _seed_task(task_id=3, step_id=1,
-               ts_us_list=[1_000_000, 11_000_000, 21_000_000])
+               ts_ms_list=[1_000, 11_000, 21_000])
 
     base_ms = 1_700_000_000_000
     rows = [
@@ -219,9 +219,9 @@ async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
     body = resp.json()
     assert body["task_id"] == 3
     assert body["step_id"] == 1
-    assert body["start_ms"] == 1_000  # 1s（首段起点 ts_us=1_000_000）
+    assert body["start_ms"] == 1_000  # 1s（首段起点 ts_ms=1_000）
     # end_ms = 末段起点 + EXTINF。_seed_task 给每段 EXTINF=10s，末段 ts=21s → end=31s。
-    # 不能用「最大 ts_us」当 end，否则漏算最后一段自身长度，跟 hls.js 实播总时长对不上。
+    # 不能用「最大 ts_ms」当 end，否则漏算最后一段自身长度，跟 hls.js 实播总时长对不上。
     assert body["end_ms"] == 31_000   # 21s + 10s EXTINF
     assert body["duration_ms"] == 30_000
 
@@ -232,8 +232,7 @@ async def test_timeline_returns_alarm_events(client, media_root, monkeypatch):
     assert body["events"][1]["ts_ms"] == base_ms + 12_000
 
 
-_TS0_US = 1_700_000_000_000_000        # 段起点，真实 epoch 微秒
-_TS0_MS = _TS0_US // 1000
+_TS0_MS = 1_700_000_000_000            # 段起点，真实 epoch 毫秒
 
 
 def _install_alarms(monkeypatch, rows):
@@ -258,7 +257,7 @@ def _alarm(alarm_id, detected_at):
 @pytest.mark.asyncio
 async def test_timeline_degrades_to_no_events_when_db_is_down(client, media_root, monkeypatch):
     """DB 不可用 → 200、段时长照给、events 为空（不 503）。"""
-    _seed_task(task_id=3, step_id=1, ts_us_list=[_TS0_US])
+    _seed_task(task_id=3, step_id=1, ts_ms_list=[_TS0_MS])
 
     def _boom(task_id, step_id):
         raise DatabaseError("Failed to fetch alarms for task 3", retryable=True)
@@ -276,7 +275,7 @@ async def test_timeline_skips_null_detected_at_and_rejects_non_positive(
     client, media_root, monkeypatch
 ):
     """detected_at 为 NULL 的告警跳过；<=0 的非法值走 ValidationError → 400。"""
-    _seed_task(task_id=3, step_id=1, ts_us_list=[_TS0_US])
+    _seed_task(task_id=3, step_id=1, ts_ms_list=[_TS0_MS])
     _install_alarms(monkeypatch, [_alarm(1, None), _alarm(2, _TS0_MS + 1_000)])
     assert _alarm_ids(await client.get("/traceback/task/3/timeline?step_id=1")) == [2]
 
@@ -297,7 +296,7 @@ async def test_timeline_gives_media_coordinates_for_the_progress_bar(
     # 三段各 10s，首尾相接、无空洞。ts 用真实 epoch —— `db_alarms.detected_at_ms` 把 <10^11 的
     # detected_at 当秒级处理，小数值会被乘 1000，对不上段的墙钟。
     _seed_task(task_id=3, step_id=1,
-               ts_us_list=[_TS0_US, _TS0_US + 10_000_000, _TS0_US + 20_000_000])
+               ts_ms_list=[_TS0_MS, _TS0_MS + 10_000, _TS0_MS + 20_000])
     _install_alarms(monkeypatch, [_alarm(1, _TS0_MS + 12_000)])
 
     body = (await client.get("/traceback/task/3/timeline?step_id=1")).json()
@@ -317,7 +316,7 @@ async def test_timeline_media_offset_skips_the_gap(client, media_root, monkeypat
     currentTime 摆播放头，断流后两者差整整一个空洞。
     """
     # 两段各 10s，起点相隔 30s → 中间 20s 空洞；媒体轴上第二段紧接第一段（10s 处）
-    _seed_task(task_id=4, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 30_000_000])
+    _seed_task(task_id=4, step_id=1, ts_ms_list=[_TS0_MS, _TS0_MS + 30_000])
     _install_alarms(monkeypatch, [_alarm(1, _TS0_MS + 32_000)])   # 第二段内 2s 处
 
     body = (await client.get("/traceback/task/4/timeline?step_id=1")).json()
@@ -332,9 +331,9 @@ async def test_timeline_track_param_switches_the_media_axis(
     client, media_root, monkeypatch
 ):
     """两轨各自独立切段 → 媒体轴不同尺，故 `track` 是必要入参（前端切轨要重取）。"""
-    _seed_task(task_id=5, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 10_000_000])
+    _seed_task(task_id=5, step_id=1, ts_ms_list=[_TS0_MS, _TS0_MS + 10_000])
     # _seed_task 双轨同构，这里再给 processed 追一段，把两轨拉开
-    seed_hls_segments(5, 1, [_TS0_US + 20_000_000], track="processed")
+    seed_hls_segments(5, 1, [_TS0_MS + 20_000], track="processed")
     _install_alarms(monkeypatch, [])
 
     raw = (await client.get("/traceback/task/5/timeline?step_id=1&track=raw")).json()
@@ -355,9 +354,9 @@ async def test_timeline_gap_total_is_zero_without_a_gap(client, media_root, monk
     processed 首段晚于 raw 首段，于是零断流的 step 也会亮出"缺失 N 秒"。夹具刻意造成这个
     形状：两轨各自内部首尾相接（真的零空洞），但 processed 比 raw 晚起 15s。
     """
-    seed_hls_segments(8, 1, [_TS0_US, _TS0_US + 10_000_000], track="raw")
+    seed_hls_segments(8, 1, [_TS0_MS, _TS0_MS + 10_000], track="raw")
     seed_hls_segments(
-        8, 1, [_TS0_US + 15_000_000, _TS0_US + 25_000_000], track="processed"
+        8, 1, [_TS0_MS + 15_000, _TS0_MS + 25_000], track="processed"
     )
     _install_alarms(monkeypatch, [])
 
@@ -372,7 +371,7 @@ async def test_timeline_gap_total_is_zero_without_a_gap(client, media_root, monk
 
 @pytest.mark.asyncio
 async def test_timeline_gap_total_counts_a_real_gap(client, media_root, monkeypatch):
-    _seed_task(task_id=7, step_id=1, ts_us_list=[_TS0_US, _TS0_US + 30_000_000])
+    _seed_task(task_id=7, step_id=1, ts_ms_list=[_TS0_MS, _TS0_MS + 30_000])
     _install_alarms(monkeypatch, [])
 
     body = (await client.get("/traceback/task/7/timeline?step_id=1&track=raw")).json()
@@ -412,12 +411,12 @@ async def test_timeline_empty_for_unknown_task(client, media_root, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_media_segment_with_valid_token(client, media_root):
-    d = _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
-    expected = (d / "processed_segment_1000000.mp4").read_bytes()
+    d = _seed_task(task_id=10, step_id=1, ts_ms_list=[1_000])
+    expected = (d / "processed_segment_1000.mp4").read_bytes()
 
     token = MediaToken.default().sign(
         task_id=10, step_id=1,
-        filename="processed_segment_1000000.mp4", kind="segment",
+        filename="processed_segment_1000.mp4", kind="segment",
     )
     resp = await client.get(f"/media/segment/{token}")
     assert resp.status_code == 200
@@ -433,7 +432,7 @@ async def test_media_segment_invalid_token_rejected(client, media_root):
 
 @pytest.mark.asyncio
 async def test_media_segment_kind_mismatch_rejected(client, media_root):
-    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
+    _seed_task(task_id=10, step_id=1, ts_ms_list=[1_000])
     # 用 init kind 签发，但访问 segment 路由
     token = MediaToken.default().sign(
         10, 1, "init.mp4", kind="init"
@@ -476,7 +475,7 @@ async def test_media_segment_rejects_non_segment_names(client, media_root, filen
 
 @pytest.mark.asyncio
 async def test_media_init_with_valid_token(client, media_root):
-    d = _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
+    d = _seed_task(task_id=10, step_id=1, ts_ms_list=[1_000])
     expected = (d / "raw_init.mp4").read_bytes()
 
     token = MediaToken.default().sign(
@@ -491,7 +490,7 @@ async def test_media_init_with_valid_token(client, media_root):
 @pytest.mark.asyncio
 async def test_media_init_kind_mismatch_rejected(client, media_root):
     """segment kind 的 token 不能从 /media/init 拿数据。"""
-    _seed_task(task_id=10, step_id=1, ts_us_list=[1_000_000])
+    _seed_task(task_id=10, step_id=1, ts_ms_list=[1_000])
     token = MediaToken.default().sign(
         10, 1, "init.mp4", kind="segment",
     )
@@ -502,7 +501,7 @@ async def test_media_init_kind_mismatch_rejected(client, media_root):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "filename",
-    ["evil_init.mp4", "init.mp4", "_init.mp4", "processed_segment_1000000.mp4"],
+    ["evil_init.mp4", "init.mp4", "_init.mp4", "processed_segment_1000.mp4"],
 )
 async def test_media_init_rejects_lookalike_init_names(client, media_root, filename):
     """`evil_init.mp4` 必须 400 —— 这是 `endswith("init.mp4")` 放行、
@@ -511,7 +510,7 @@ async def test_media_init_rejects_lookalike_init_names(client, media_root, filen
     裸 `init.mp4` 同样不合法：两轨各有各的 init，不带 track 前缀的名字指不出任何一份。
     段名也不行：init kind 的 token 不能借此读其它 mp4 段。
     """
-    hls_dir = _seed_task(task_id=11, step_id=1, ts_us_list=[1_000_000])
+    hls_dir = _seed_task(task_id=11, step_id=1, ts_ms_list=[1_000])
     (hls_dir / "evil_init.mp4").write_bytes(b"pwned")
 
     token = MediaToken.default().sign(11, 1, filename, kind="init")
@@ -524,7 +523,7 @@ async def test_media_init_missing_file_returns_404(client, media_root):
     """名字合法但盘上没有 → 404（区别于名字非法的 400）。"""
     _seed_task(
         task_id=11, step_id=1,
-        ts_us_list=[1_000_000], write_init=False,
+        ts_ms_list=[1_000], write_init=False,
     )
     token = MediaToken.default().sign(
         11, 1, "raw_init.mp4", kind="init",
@@ -538,13 +537,13 @@ async def test_media_init_missing_file_returns_404(client, media_root):
 # ---------------------------------------------------------------------------
 
 
-_RUN_B_US = _TS0_US + 100_000_000   # B 比 A 晚 100s 分配
+_RUN_B_MS = _TS0_MS + 100_000       # B 比 A 晚 100s 分配
 
 
 def _seed_two_runs(task_id: int, step_id: int = 1):
-    """同 step 两个 run：A 开在 `_TS0_US`、B 开在 `_RUN_B_US`，各有一段双轨录像。"""
-    a = RunIdentity(task_id, step_id, _TS0_US)
-    b = RunIdentity(task_id, step_id, _RUN_B_US)
+    """同 step 两个 run：A 开在 `_TS0_MS`、B 开在 `_RUN_B_MS`，各有一段双轨录像。"""
+    a = RunIdentity(task_id, step_id, _TS0_MS)
+    b = RunIdentity(task_id, step_id, _RUN_B_MS)
     for run in (a, b):   # 先建 run 目录再铺段：seed 落在「当前最新的 run」里
         _root.run_path(run).mkdir(parents=True)
         for track in hls.TRACKS:
@@ -563,7 +562,7 @@ async def test_timeline_events_are_limited_to_the_run_lifespan(client, media_roo
     _install_alarms(monkeypatch, [
         _alarm(1, _TS0_MS - 1_000),               # A 分配之前
         _alarm(2, _TS0_MS + 5_000),               # A 存续期（含停止时的结算告警）
-        _alarm(3, _RUN_B_US // 1000 + 5_000),     # B 存续期
+        _alarm(3, _RUN_B_MS + 5_000),             # B 存续期
     ])
 
     resp_a = await client.get(f"/traceback/task/7/timeline?step_id=1&run_id={a.run_id}")
