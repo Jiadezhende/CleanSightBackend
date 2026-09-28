@@ -4,7 +4,6 @@
     MockDetector         纯 numpy 亮度启发式 Detector（中心区灰度均值 < 阈值即出框）
     BrushRulesSegmenter  纯规则离线分段（任一 source 有框即 active，连续 active 帧并段）
     FakeLauncher         离线作业服务的子进程启动器；FakeProc 由用例手动 `finish()`
-    FakeDB               SQLAlchemy 会话替身，`query()` 恒返回构造时给的 rows
     wait_until           轮询直到条件成立，超时即断言失败
 
 测试 config 里按模块名引用：`{"class": "doubles.BrushRulesSegmenter"}`（tests/ 在 sys.path 上）。
@@ -201,51 +200,6 @@ class FakeLauncher:
 def offline_result(status="completed", producer="P", segment_count=3, message=""):
     """CLI stdout 末行的结果 JSON。"""
     return {"status": status, "producer": producer, "segment_count": segment_count, "message": message}
-
-
-# ---------------------------------------------------------------------------
-# DB 会话
-# ---------------------------------------------------------------------------
-
-
-class FakeQuery:
-    def __init__(self, rows):
-        self._rows = rows
-        self._offset = 0
-        self._limit = None
-
-    def filter(self, *_args, **_kwargs):
-        return self
-
-    def count(self):
-        return len(self._rows)
-
-    def order_by(self, *_args, **_kwargs):
-        return self
-
-    def offset(self, value):
-        self._offset = value
-        return self
-
-    def limit(self, value):
-        self._limit = value
-        return self
-
-    def all(self):
-        end = None if self._limit is None else self._offset + self._limit
-        return self._rows[self._offset:end]
-
-
-class FakeDB:
-    def __init__(self, rows):
-        self._rows = rows
-        self.closed = False
-
-    def query(self, *_args, **_kwargs):
-        return FakeQuery(self._rows)
-
-    def close(self):
-        self.closed = True
 
 
 # ---------------------------------------------------------------------------
