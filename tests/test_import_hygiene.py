@@ -112,6 +112,7 @@ BUDGET = {
     "app.services.algorithm.colorstrip.config": (set(), 0.40),   # yaml
     "app.services.algorithm.colorstrip.grader": (set(), 0.60),   # numpy
     "app.services.algorithm.colorstrip.cli":    (set(), 0.60),   # 同上；argparse 不加码
+    "app.services.lab.service":  (set(), 0.60),   # routers/lab 模块级 import 它；经 clip_builder 拽 hls（numpy），实测 ~0.17s
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     # online / offline 两个子包的 `__init__` 都是标记型：import 子包不该拉起任何一段链路。
