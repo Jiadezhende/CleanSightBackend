@@ -180,6 +180,40 @@ class TestCleanSegmenter:
         assert probs.probs.shape == (3, len(ACTION_LABELS))
         assert probs.probs[:, label].tolist() == pytest.approx([0.9] * 3)
 
+    def test_nodep_gru_resamples_to_model_fps_then_builds_226d(self, monkeypatch):
+        """15fps 检测 → 7.5fps 入模（只挑真实帧）；前向打桩：6 类 label_probs 落在降采样后的 ts 上。"""
+        from app.services.inference.offline.impl.clean import NODEP_GRU_LABELS, CleanNodepGRUSegmenter
+        ts = [round(i / 15, 6) for i in range(8)]
+        streams = {src: [_clean_frame(t)[src] for t in ts] for src in ("clean_large", "clean_small")}
+        seg = CleanNodepGRUSegmenter(model_path="unused.pt", model_input_fps=7.5, min_duration_s=0.0)
+        label = NODEP_GRU_LABELS.index("short_brush_cleaning")
+        monkeypatch.setattr(seg, "_predict_with_model",
+                            lambda mi: _onehot_probs(mi.frame_count, label, 0.9, len(NODEP_GRU_LABELS)))
+
+        mi = seg.preprocess(_frames(streams))
+        assert (mi.feature_dim, mi.feature_version, mi.timestamps) == (
+            226, "ama-v3-concat23-nodep-226d", ts[::2],
+        )
+        assert all(math.isfinite(v) for row in mi.features for v in row)
+        segs = seg.segment(mi)
+        assert [(s.label, s.start, s.end) for s in segs] == [("short_brush_cleaning", ts[0], ts[6])]
+        assert seg.label_probs().labels == NODEP_GRU_LABELS
+
+    def test_nodep_gru_rejects_detection_rate_below_model_fps(self):
+        from app.services.inference.offline.impl.clean import CleanNodepGRUSegmenter
+        ts = [i / 5 for i in range(6)]
+        streams = {src: [_clean_frame(t)[src] for t in ts] for src in ("clean_large", "clean_small")}
+        with pytest.raises(ValueError, match="低于契约帧率"):
+            CleanNodepGRUSegmenter(model_input_fps=7.5).preprocess(_frames(streams))
+
+    def test_causal_windows_end_at_own_frame_and_pad_with_first(self):
+        import numpy as np
+        from app.services.inference.offline.impl.clean import _causal_windows
+        x = np.arange(10, dtype=np.float32).reshape(5, 2)
+        w = _causal_windows(x, 3)
+        np.testing.assert_array_equal(w[:, -1], x)
+        np.testing.assert_array_equal(w[1], x[[0, 0, 1]])
+
 
 # ============================ Runner ============================
 
@@ -369,11 +403,11 @@ class TestCli:
         assert [row["label"] for row in payload["timeline"]] == ["brushing"]
 
 
-def _onehot_probs(frame_count, label, conf):
-    """打桩用逐帧 softmax：目标列 conf，其余列均分余量。"""
+def _onehot_probs(frame_count, label, conf, class_count=None):
+    """打桩用逐帧 softmax：目标列 conf，其余列均分余量。class_count 缺省为旧三模型的 ACTION_LABELS 类数。"""
     import numpy as np
     from app.services.inference.offline.impl.clean import ACTION_LABELS
-    c = len(ACTION_LABELS)
+    c = class_count or len(ACTION_LABELS)
     probs = np.full((frame_count, c), (1.0 - conf) / (c - 1), dtype=np.float32)
     probs[:, label] = conf
     return probs

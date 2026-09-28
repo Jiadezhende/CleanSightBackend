@@ -65,8 +65,8 @@ read_detections(task, step)                     ← 15fps（raw_fps / inference_
 
 | 项 | 结果 |
 |----|------|
-| 特征逐位对齐 | 合成 72 帧序列（多 hand 候选、同类多框、≤6 帧与长缺口、scope 轴三种回退、废弃类与未知类，分两流）经框架参考实现生成 `tests/fixtures/clean_nodep_golden/expected.npz`；后端输出在 `conf_default`（5 列标注 + 1.0）与 `conf_real`（6 列）两种口径下均 `atol=1e-5` 相等 |
-| `tests/test_offline_clean_nodep_gru.py` | 12 passed：对齐、废弃类块、空输入、因果窗口、构造参数校验、降采样保留真实 ts、检测帧率低于契约报错、随机权重端到端（6 类概率 / ts 对齐 / 行和为 1）、窗口因果性、类别数不符、权重缺失 |
+| 特征逐位对齐（开发期一次性验证，未入库） | 合成 72 帧序列（多 hand 候选、同类多框、≤6 帧与长缺口、scope 轴三种回退、废弃类与未知类，分两流）经框架参考实现（`ref/`）生成期望特征；后端输出在 `conf_default`（5 列标注 + 1.0）与 `conf_real`（6 列）两种口径下均 `atol=1e-5` 相等 |
+| `tests/test_offline_pipeline.py::TestCleanSegmenter`（新增 3 例，不依赖 torch / fixture） | 15fps→7.5fps 降采样后 226 维特征 + 前向打桩出 6 类分段与 label_probs、检测帧率低于契约报错、因果窗口切分 |
 | 真实权重 + 真实 YAML（临时目录放物料，`CLEANSIGHT_MODEL_PATH` 指过去） | `StageFactory` 建出 `CleanNodepGRUSegmenter`；`strict=True` 加载成功、window=16；输出 `[T,6]` 行和为 1；4500 帧（10 分钟 @7.5fps）前向 0.33s（CPU） |
 | 全量 `pytest tests/` | 965 passed, 8 skipped |
 | 集成测试 | 未跑（需真实环境，交由人工） |
@@ -76,6 +76,7 @@ read_detections(task, step)                     ← 15fps（raw_fps / inference_
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
 | **部署须放新物料**：`app/data/clean-offline-gru-nodep.pt`（由 `gru_nodep226d_w16_seed42_best.pt` 改名） | 缺失则 CLEAN 离线作业失败（不影响在线） | 随模型物料分发 |
+| 特征与训练框架的逐位对齐没有回归测试（金标 fixture 未入库） | 后续改动 v2 / v3 特征函数可能静默偏离训练口径 | 改特征函数时用 `ref/` 参考实现手工复核 |
 | 换权重时 window / 特征版本无运行时校验（checkpoint 不带这两项） | 换了不同 window 或特征版本的权重不报错、静默变差 | 换权重须同步改策略类常量；或请训练侧把契约写进 checkpoint |
 | `model_input_fps=7.5`、`confidence_override=1.0` 未经训练侧确认 | 配错不报错，特征静默偏离训练分布 | 训练侧确认后只改 YAML |
 | 开头不足一窗的帧用首帧重复补齐，未确认与训练评估一致 | 仅影响每个 step 开头约 2 秒 | 训练侧确认后按需改 `_causal_windows` |
