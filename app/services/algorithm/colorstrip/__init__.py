@@ -10,5 +10,5 @@
 重依赖变 eager，而 cv2 是禁止模块顶层 import 的 L2 依赖。
 
 设计推导、判据实测依据与已知缺陷见 `docs/update/20260920_COLORSTRIP_API.md` 与验收工装的
-REPORT.md（`app/services/temp/colorstrip/`，含 28 MB 样本，不在仓库里）。
+REPORT.md（`ref/colorstrip/`，含 28 MB 样本，不在仓库里）。
 """
