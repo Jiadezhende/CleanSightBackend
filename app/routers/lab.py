@@ -61,7 +61,7 @@ from app.storage import runs
 from app.storage import tasks as step_tasks
 from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
 
-from ._runs import resolve_run
+from .utils.runs import resolve_run
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
 logger = logging.getLogger(__name__)

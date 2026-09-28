@@ -13,7 +13,7 @@ from app.services.utils.media_timeline import MediaTimeline
 from app.storage import inference as inference_store
 from app.types.exceptions import NotFoundError
 
-from ._runs import resolve_run
+from .utils.runs import resolve_run
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 logger = logging.getLogger(__name__)

@@ -29,6 +29,7 @@ app/
 ├── models.py            # ORM：DBTask / DBAlarm
 ├── types/               # 跨层共用契约（纯 dataclass）+ AppError 异常体系：frame / detection / temporal / alarm / run / exceptions
 ├── routers/             # HTTP/WS 路由：api / ai / task / health / traceback / media / lab / admin / algorithm
+│   └── utils/           # 本层通用：run 解析 / 媒体 token 签发与校验
 ├── services/
 │   ├── run_control.py   # RunController — 跨服务起停一次 run 的单一编排出口
 │   ├── utils/           # 服务层通用：串行队列 / 线程自愈 / 压力日志 / Prometheus 指标 / VOD m3u8 / 媒体轴
@@ -38,7 +39,6 @@ app/
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
 │   ├── persistence/     # 告警落库与上报 + TTL 清理（HLS 写侧已迁 recording/）
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunController）
-│   ├── traceback/       # 溯源段定位 + 媒体 token 鉴权
 │   ├── lab/             # 送标裁剪 + Label Studio 上传
 │   └── algorithm/       # 无状态算法服务（试纸比色），与主流程无关，只被 /algorithm/* 调用
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/

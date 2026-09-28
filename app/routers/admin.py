@@ -15,7 +15,7 @@ from app.services.client.manager import client_manager
 from app.services.inference.offline.instance import offline_job_service
 from app.types.exceptions import NotFoundError
 
-from ._runs import resolve_run
+from .utils.runs import no_run, resolve_run
 
 logger = logging.getLogger(__name__)
 
@@ -232,13 +232,6 @@ class OfflineJobRequest(BaseModel):
     run_id: Optional[int] = None  # 锁定哪个 run；缺省 = 该 step 最新可见 run
 
 
-def _no_run(task_id: int, step_id: int) -> NotFoundError:
-    return NotFoundError(
-        f"no visible run for task {task_id} step {step_id}",
-        resource_type="Run", resource_id=f"task={task_id},step={step_id}",
-    )
-
-
 @router.post("/offline/jobs", status_code=202)
 def submit_offline_job(req: OfflineJobRequest):
     """提交一个离线推理作业，锁定一个 run；同一 run 已在排队 / 运行时返回在途那个。
@@ -248,7 +241,7 @@ def submit_offline_job(req: OfflineJobRequest):
     offline_job_service.require_offline(req.step_id)
     run = resolve_run(req.task_id, req.step_id, req.run_id)
     if run is None:
-        raise _no_run(req.task_id, req.step_id)
+        raise no_run(req.task_id, req.step_id)
     return offline_job_service.submit(run).to_dict()
 
 

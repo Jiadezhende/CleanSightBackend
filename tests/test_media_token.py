@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from app.services.traceback.media_token import (
+from app.routers.utils.media_token import (
     MediaToken,
     MediaTokenError,
 )

@@ -9,12 +9,12 @@
 ## 边界
 
     可以 import   stdlib、三方、app.types、app.storage、app.settings
-    不许 import   **任何兄弟 service 包**（app.services.lab / app.services.traceback / …）
+    不许 import   **任何兄弟 service 包**（app.services.lab / app.services.recording / …）
                   app.routers、app.database / app.models
     不许有        单例、lifespan()；模块级状态只有 metrics 的 Prometheus 指标
 
 **「不许 import 兄弟 service」是本层存在的全部前提**。破了它，本包就成了 service → service
-依赖的后门：`lab` 想调 `traceback` 的东西，只要在这里加个转发函数就绕过去了，而门禁与
+依赖的后门：`lab` 想调 `recording` 的东西，只要在这里加个转发函数就绕过去了，而门禁与
 review 都只会看到「一个工具包」。那比三份重复实现更坏——重复至少是看得见的。
 这条由 `tests/test_import_hygiene.py` 的 `LAYER_PACKAGES` 守。
 

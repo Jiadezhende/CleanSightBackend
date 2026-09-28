@@ -141,7 +141,7 @@ FORBIDDEN_APP_IMPORTS = {
 # 分层包 → 它允许 import 的 `app.*` 前缀白名单（包内互相 import 由 self 前缀覆盖）。
 #
 # **白名单而非黑名单**：`app/storage` 是 services 下面一层的数据层，它能被写侧
-# （persistence）与读侧（traceback / lab / inference.offline / routers）同时依赖的前提，
+# （persistence）与读侧（lab / inference.offline / routers）同时依赖的前提，
 # 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.database` / `app.models`
 # ——那两个一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
@@ -155,7 +155,7 @@ LAYER_PACKAGES = {
     "app/services/algorithm": ("app.services.algorithm",),
     # 服务层工具：多个 service / router 都要、但不属于任何一个的通用能力。它可以向下
     # 依赖数据层与基建，但**不得 import 任何兄弟 service 包** —— 破了它，本包就成了
-    # service → service 依赖的后门：lab 想调 traceback 的东西，在这里加个转发函数就绕过去
+    # service → service 依赖的后门：lab 想调 recording 的东西，在这里加个转发函数就绕过去
     # 了，而 test_singleton_reference_surface 只盯单例、看不见这种转发。
     #
     # 注意 "app.services.utils" 作为白名单前缀**不会**放行 "app.services.lab"：检查是
