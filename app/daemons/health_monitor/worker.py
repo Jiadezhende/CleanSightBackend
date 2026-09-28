@@ -25,7 +25,7 @@ from .types import ReconnectState
 logger = logging.getLogger(__name__)
 
 
-class GlobalHealthMonitor:
+class HealthMonitorWorker:
     """全局健康监控服务
 
     作为独立的全局服务，有权限协调多个模块进行清理。
@@ -106,20 +106,20 @@ class GlobalHealthMonitor:
         压在这里而不是 `__init__`，import 本包才不用付这笔钱（见 `__init__` docstring）。
         """
         if self.is_running:
-            logger.warning("[GlobalHealthMonitor] Already running")
+            logger.warning("[HealthMonitorWorker] Already running")
             return
 
         self._resolve_deps()
 
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._monitor_loop, daemon=True, name="GlobalHealthMonitor"
+            target=self._monitor_loop, daemon=True, name="HealthMonitorWorker"
         )
         self._thread.start()
         # 报 cleanup_timeout 而非 heartbeat_timeout：前者才是这条线上唯一还在做判定的时限
         # （「可疑」区间随进程死活判据一并删除，heartbeat_timeout 现只作重连成功的新帧新鲜度阈值）。
         logger.info(
-            "[GlobalHealthMonitor] Started (check_interval=%.1fs, cleanup_timeout=%.1fs)",
+            "[HealthMonitorWorker] Started (check_interval=%.1fs, cleanup_timeout=%.1fs)",
             self.config.check_interval,
             self.config.cleanup_timeout,
         )
@@ -137,14 +137,14 @@ class GlobalHealthMonitor:
         budget = self.config.cleanup_timeout - dead_after
         if budget <= 0:
             logger.error(
-                "[GlobalHealthMonitor] 配置冲突：静默断流判死需 %.1fs（=2×rtsp_read_timeout_s）"
+                "[HealthMonitorWorker] 配置冲突：静默断流判死需 %.1fs（=2×rtsp_read_timeout_s）"
                 "，已 ≥ cleanup_timeout %.1fs —— 静默断流会被直接拆除，重连永不触发。"
                 "请调小 rtsp_read_timeout_s 或调大 cleanup_timeout",
                 dead_after, self.config.cleanup_timeout,
             )
         elif budget < self.config.cleanup_timeout / 2:
             logger.warning(
-                "[GlobalHealthMonitor] 静默断流判死占掉过半 cleanup 预算："
+                "[HealthMonitorWorker] 静默断流判死占掉过半 cleanup 预算："
                 "判死 %.1fs，仅剩 %.1fs 供 respawn+建连+等关键帧",
                 dead_after, budget,
             )
@@ -183,7 +183,7 @@ class GlobalHealthMonitor:
 
         self._stop_event.set()
         self._thread.join(timeout=5.0)
-        logger.info("[GlobalHealthMonitor] Stopped")
+        logger.info("[HealthMonitorWorker] Stopped")
 
     def _monitor_loop(self):
         """监控循环"""
@@ -195,7 +195,7 @@ class GlobalHealthMonitor:
                 self._stop_event.wait(timeout=self.config.check_interval)
             except Exception as e:
                 logger.error(
-                    f"[GlobalHealthMonitor] Error in monitor loop: {e}", exc_info=True
+                    f"[HealthMonitorWorker] Error in monitor loop: {e}", exc_info=True
                 )
                 time.sleep(1.0)
 
@@ -259,7 +259,7 @@ class GlobalHealthMonitor:
                     # 进程活着却长时间无帧（真挂死正常已被 decoder 的 -timeout 转成进程死，
                     # 此为最后防线）→ 放弃清理。
                     logger.warning(
-                        "[GlobalHealthMonitor] TIMEOUT: %s alive but no frames for %.1fs, giving up",
+                        "[HealthMonitorWorker] TIMEOUT: %s alive but no frames for %.1fs, giving up",
                         task_id, idle_time
                     )
                     self._exit_reconnect_mode(task_id, cleanup=True)
@@ -281,7 +281,7 @@ class GlobalHealthMonitor:
         stream_info = self._stream_service.get_stream_info(task_id)
         if not stream_info:
             logger.debug(
-                "[GlobalHealthMonitor] Cannot enter reconnect mode: no stream info for %s (decoder may not be ready yet)", task_id
+                "[HealthMonitorWorker] Cannot enter reconnect mode: no stream info for %s (decoder may not be ready yet)", task_id
             )
             return
 
@@ -312,7 +312,7 @@ class GlobalHealthMonitor:
         self._recording_service.request_residual_flush(cq, fence_ts=last_frame_time)
 
         logger.warning(
-            "[GlobalHealthMonitor] RECONNECT MODE: %s, decoder process dead; "
+            "[HealthMonitorWorker] RECONNECT MODE: %s, decoder process dead; "
             "will respawn every %ss until frames resume or cleanup_timeout(%.0fs)",
             task_id, self.config.reconnect_interval, self.config.cleanup_timeout
         )
@@ -326,7 +326,7 @@ class GlobalHealthMonitor:
         # 说明本次重连针对的 run 已被新 run 取代——放弃本次重连，绝不误动新 run。
         if state.cq is not None and cq is not state.cq:
             logger.info(
-                "[GlobalHealthMonitor] Reconnect abandoned (slot replaced by newer run): %s",
+                "[HealthMonitorWorker] Reconnect abandoned (slot replaced by newer run): %s",
                 task_id,
             )
             del self._reconnecting_clients[task_id]
@@ -341,7 +341,7 @@ class GlobalHealthMonitor:
             # 「调 heartbeat_timeout 会连带动到重连成功判定」这层耦合藏起来）
             if frame_age < self.config.heartbeat_timeout:
                 logger.info(
-                    "[GlobalHealthMonitor] RECONNECT SUCCESS: %s, new frames detected", task_id
+                    "[HealthMonitorWorker] RECONNECT SUCCESS: %s, new frames detected", task_id
                 )
                 self._stats["reconnect_successes"] += 1  # 累计统计：重连成功的次数
                 # 用**同一个栅栏**再登记一次，捞走迟到的断流前帧。
@@ -363,7 +363,7 @@ class GlobalHealthMonitor:
         idle_time = current_time - new_frame_time
         if idle_time >= self.config.cleanup_timeout:
             logger.error(
-                "[GlobalHealthMonitor] RECONNECT FAILED: %s, no frames for %.1fs "
+                "[HealthMonitorWorker] RECONNECT FAILED: %s, no frames for %.1fs "
                 "(>= cleanup_timeout %.0fs), giving up",
                 task_id, idle_time, self.config.cleanup_timeout
             )
@@ -386,7 +386,7 @@ class GlobalHealthMonitor:
         # 成功 → 下一 tick 检测到新帧走 RECONNECT SUCCESS；失败 → 下个 reconnect_interval 再试，
         # 无帧满 cleanup_timeout 收口。
         logger.info(
-            "[GlobalHealthMonitor] RECONNECT ATTEMPT: %s (respawn dead decoder)", task_id
+            "[HealthMonitorWorker] RECONNECT ATTEMPT: %s (respawn dead decoder)", task_id
         )
         self._stream_service.restart_stream(task_id=task_id, stream_url=state.stream_url)
 
@@ -450,7 +450,7 @@ class GlobalHealthMonitor:
             - 返回详细的每步状态
         """
         logger.info(
-            "[GlobalHealthMonitor] cleanup_client: %s, reason='%s', skip_decoder=%s",
+            "[HealthMonitorWorker] cleanup_client: %s, reason='%s', skip_decoder=%s",
             task_id, reason, skip_decoder
         )
 
@@ -474,7 +474,7 @@ class GlobalHealthMonitor:
         `expected`：进入重连时捕获的 cq_A，透传给 stop_run 作对象身份 fence。
         """
         logger.error(
-            "[GlobalHealthMonitor] STREAM CONNECTION FAILED: %s | "
+            "[HealthMonitorWorker] STREAM CONNECTION FAILED: %s | "
             "Reason: no frames within cleanup_timeout(%.0fs) | Action: Executing full cleanup...",
             task_id, self.config.cleanup_timeout
         )
@@ -488,12 +488,12 @@ class GlobalHealthMonitor:
 
         if result["errors"]:
             logger.error(
-                "[GlobalHealthMonitor] Cleanup completed with errors: %s | Errors: %s | Action: Call /api/start to restart the stream.",
+                "[HealthMonitorWorker] Cleanup completed with errors: %s | Errors: %s | Action: Call /api/start to restart the stream.",
                 task_id, result['errors']
             )
         else:
             logger.info(
-                "[GlobalHealthMonitor] Full cleanup completed: %s | Action: Call /api/start to restart the stream.",
+                "[HealthMonitorWorker] Full cleanup completed: %s | Action: Call /api/start to restart the stream.",
                 task_id
             )
 
@@ -501,7 +501,7 @@ class GlobalHealthMonitor:
         """处理任务超时：仅执行运维治理动作，不产出业务告警。"""
         # 注：入参 task_id 即 cq.run.task_id（client_id/task_id 合一后同一个键），不再重取覆盖
         logger.error(
-            "[GlobalHealthMonitor] TASK TIMEOUT: task_id=%s, running=%.1fh, max=%.1fh",
+            "[HealthMonitorWorker] TASK TIMEOUT: task_id=%s, running=%.1fh, max=%.1fh",
             task_id, task_age / 3600, self.config.task_max_duration / 3600,
         )
 
@@ -530,7 +530,7 @@ class GlobalHealthMonitor:
         # 如果超过孤儿流超时时间，执行完整清理
         if idle_time >= self.config.orphan_timeout:
             logger.warning(
-                f"[GlobalHealthMonitor] ORPHAN STREAM detected: {task_id}, "
+                f"[HealthMonitorWorker] ORPHAN STREAM detected: {task_id}, "
                 f"idle for {idle_time:.1f}s (no decoder), cleaning up"
             )
             self._stats["orphans_detected"] += 1  # 累计统计：检测到孤儿的总次数
@@ -545,11 +545,11 @@ class GlobalHealthMonitor:
 
             if result["errors"]:
                 logger.error(
-                    "[GlobalHealthMonitor] Orphan cleanup with errors: %s - %s", task_id, result['errors']
+                    "[HealthMonitorWorker] Orphan cleanup with errors: %s - %s", task_id, result['errors']
                 )
             else:
                 logger.info(
-                    "[GlobalHealthMonitor] Orphan cleanup completed: %s", task_id
+                    "[HealthMonitorWorker] Orphan cleanup completed: %s", task_id
                 )
 
     def _handle_orphan_decoder(self, task_id: int):
@@ -563,7 +563,7 @@ class GlobalHealthMonitor:
             task_id: 客户端ID
         """
         logger.warning(
-            f"[GlobalHealthMonitor] ORPHAN DECODER detected: {task_id}, "
+            f"[HealthMonitorWorker] ORPHAN DECODER detected: {task_id}, "
             f"decoder running but no client queue found, stopping decoder"
         )
         self._stats["orphans_detected"] += 1
@@ -575,11 +575,11 @@ class GlobalHealthMonitor:
             with self._client_service.lock_for(task_id):
                 self._stream_service.stop_stream(task_id)
             logger.info(
-                f"[GlobalHealthMonitor] Orphan decoder stopped: {task_id}"
+                f"[HealthMonitorWorker] Orphan decoder stopped: {task_id}"
             )
         except Exception as e:
             logger.error(
-                "[GlobalHealthMonitor] Failed to stop orphan decoder: %s - %s", task_id, e, exc_info=True
+                "[HealthMonitorWorker] Failed to stop orphan decoder: %s - %s", task_id, e, exc_info=True
             )
 
     def get_stats(self):

@@ -15,8 +15,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services.health_monitor.config import HealthMonitorConfig
-from app.services.health_monitor.manager import GlobalHealthMonitor
+from app.daemons.health_monitor.config import HealthMonitorConfig
+from app.daemons.health_monitor.worker import HealthMonitorWorker
 from app.services.stream.decoder import _rtsp_input_opts
 
 
@@ -54,8 +54,8 @@ class TestRtspInputOpts:
 # ---------------------------------------------------------------------------
 
 
-def _monitor(cleanup_timeout: float) -> GlobalHealthMonitor:
-    return GlobalHealthMonitor(
+def _monitor(cleanup_timeout: float) -> HealthMonitorWorker:
+    return HealthMonitorWorker(
         client_service=MagicMock(),
         stream_service=MagicMock(),
         inference_service=MagicMock(),

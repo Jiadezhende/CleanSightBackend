@@ -2,7 +2,7 @@
 流处理服务配置加载器
 
 负责流解码相关配置
-注意：健康监控配置已迁移到 app/services/health_monitor/config.py
+注意：健康监控配置已迁移到 app/daemons/health_monitor/config.py
 """
 
 import logging

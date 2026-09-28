@@ -1,7 +1,7 @@
 """
 健康监控路由
 
-提供全局健康监控服务的状态查询接口。生命周期归 `app.services.health_monitor.lifespan()`
+提供全局健康监控服务的状态查询接口。生命周期归 `app.daemons.health_monitor.lifespan()`
 （由 `main.py` 嵌套），本模块只读不管起停。
 """
 
@@ -9,7 +9,7 @@ import logging
 
 from fastapi import APIRouter
 
-from app.services.health_monitor.instance import health_monitor
+from app.daemons.health_monitor.instance import health_monitor_worker
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +24,11 @@ def get_health_monitor():
     - API 路由通过此方法获取健康监控实例
     - 健康监控负责协调所有清理操作
 
-    单例本身在 `app.services.health_monitor.instance`，本函数只是给 router 侧留的
+    单例本身在 `app.daemons.health_monitor.instance`，本函数只是给 router 侧留的
     旧调用面；服务侧（非 router）要用请直接 import 单例，别反向依赖 `app.routers`。
 
     Returns:
-        GlobalHealthMonitor 单例（恒非 None；未启动时 `is_running` 为 False）
+        HealthMonitorWorker 单例（恒非 None；未启动时 `is_running` 为 False）
 
     Usage:
         from app.routers.health import get_health_monitor
@@ -36,7 +36,7 @@ def get_health_monitor():
         monitor = get_health_monitor()
         result = monitor.cleanup_client(client_id, "API termination request")
     """
-    return health_monitor
+    return health_monitor_worker
 
 
 @router.get("/monitor/stats")
@@ -60,13 +60,13 @@ async def get_monitor_stats():
 
     GET /health/monitor/stats
     """
-    if not health_monitor.is_running:
+    if not health_monitor_worker.is_running:
         return {
             "status": "not_initialized",
             "message": "Health monitor not initialized",
         }
 
-    stats = health_monitor.get_stats()
+    stats = health_monitor_worker.get_stats()
     return {"status": "running", **stats}
 
 
@@ -84,13 +84,13 @@ async def get_monitor_config():
 
     GET /health/monitor/config
     """
-    if not health_monitor.is_running:
+    if not health_monitor_worker.is_running:
         return {
             "status": "not_initialized",
             "message": "Health monitor not initialized",
         }
 
-    config = health_monitor.config
+    config = health_monitor_worker.config
     return {
         "status": "running",
         "config": {
@@ -148,11 +148,11 @@ async def get_system_status():
 
     GET /health/status
     """
-    if not health_monitor.is_running:
+    if not health_monitor_worker.is_running:
         return {
             "status": "not_initialized",
             "message": "Health monitor not initialized",
         }
 
-    system_status = health_monitor.get_system_status()
+    system_status = health_monitor_worker.get_system_status()
     return {"status": "running", **system_status}

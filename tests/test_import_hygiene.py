@@ -124,6 +124,9 @@ BUDGET = {
     # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
     "app.daemons":              (set(), 0.20),
     "app.daemons.cleanup":      (set(), 0.20),
+    # health_monitor 的协作者单例全在函数体内取：import 包 / 单例不拉起任何 app.services（实测 ~0.02s / ~0.05s）
+    "app.daemons.health_monitor":          (set(), 0.20),
+    "app.daemons.health_monitor.instance": (set(), 0.20),
     # recording 登记两条：包名那条是门面型（浅，基本只有 docstring），真正的守门人是
     # `service` —— 它 import `app.storage.hls`，cv2 一旦从 `_encode` 的函数体挪到模块级，
     # 这条会先红。
@@ -177,7 +180,7 @@ SINGLETONS = {
     "alarm_service": "app.services.alarm.instance",
     "cleanup_worker": "app.daemons.cleanup.instance",
     "recording_service": "app.services.recording.instance",
-    "health_monitor": "app.services.health_monitor.instance",
+    "health_monitor_worker": "app.daemons.health_monitor.instance",
     "run_control_service": "app.services.run_control.instance",
 }
 
@@ -185,10 +188,11 @@ SINGLETONS = {
 # 这里只列**具名例外**——每条都得有理由，加新的先想清楚为什么不能走 run_control。
 SINGLETON_EXCEPTIONS = {
     # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态并发起重连/清理，
-    # 天然要持四个协作者（recording 那个只用来在断流时登记一次残帧 flush）。四处 import 均
-    # 写在 `_resolve_deps()` 函数体内（不是模块级），且 run_control_service 那处是反向指回编排
-    # 中枢做拆除。
-    "app/services/health_monitor/manager.py",
+    # 天然要持四个协作者（client / stream / inference / recording，recording 那个只用来在断流
+    # 时登记一次残帧 flush），四处 import 均写在 `HealthMonitorWorker._resolve_deps()` 函数体内；
+    # 另有 `cleanup_client()` 函数体内一处 run_control_service，是反向指回编排中枢做拆除。
+    # 均不在模块级。
+    "app/daemons/health_monitor/worker.py",
     # 告警落库 sink：inference 产告警 → alarm 服务上报。跨服务但方向正确（下游依赖），
     # 且 sink 就是为这条方向存在的唯一窄接口。
     "app/services/inference/online/temporal/alarm_sink.py",
