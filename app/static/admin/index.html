@@ -933,10 +933,10 @@ createApp({
       const n = parseInt(hex.slice(1), 16);
       return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
     }
-    function formatTaskTime(value) {   // 同 lab：epoch 秒 / 毫秒 / 微秒统一到毫秒再格式化
+    function formatTaskTime(value) {   // 任务时间是 epoch 毫秒，离线作业 *_at 是 epoch 秒：统一到毫秒再格式化
       let n = Number(value);
       if (!n) return '—';
-      if (n < 10 ** 11) n *= 1000; else if (n >= 10 ** 14) n = Math.floor(n / 1000);
+      if (n < 10 ** 11) n *= 1000;
       const d = new Date(n), pad = (x) => String(x).padStart(2, '0');
       return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     }

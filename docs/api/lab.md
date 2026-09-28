@@ -17,11 +17,11 @@
 >
 > | 口径 | 出现在 | 含义 |
 > |------|--------|------|
-> | epoch 秒 | `/tasks` 的任务时间 | 平台侧时间戳 |
+> | epoch 毫秒 | `/tasks` 的任务时间 | DB 模式为平台 `clean_task` 列原值，storage 模式取自盘上段的墙钟 |
 > | **媒体毫秒** | `/submit` **请求**的 `start_media_ms` / `end_media_ms` | 相对该 step raw 轨媒体轴原点的偏移，= `<video>.currentTime × 1000` |
 > | **绝对墙钟毫秒** | `/submit` **响应**的 `start_ms` / `end_ms` | 后端换算出的真实时刻，与 traceback timeline 的 `ts_ms` 同源 |
 >
-> **请求为什么不收墙钟**：媒体轴是压紧的墙钟——断流那段时间在它上面不存在。浏览器手上只有媒体轴上的量，`首段墙钟 + currentTime` 这个换算只在从没断过流时成立，断过就系统性偏早整个断流时长，裁出来的 clip 里没有操作员标的那个事件，且时长对、能播、**不报错**。换算要清单（`(ts_us, EXTINF)` 逐行表），只有后端有，故换算在后端做、结果随响应带回。
+> **请求为什么不收墙钟**：媒体轴是压紧的墙钟——断流那段时间在它上面不存在。浏览器手上只有媒体轴上的量，`首段墙钟 + currentTime` 这个换算只在从没断过流时成立，断过就系统性偏早整个断流时长，裁出来的 clip 里没有操作员标的那个事件，且时长对、能播、**不报错**。换算要清单（段起点 + EXTINF 的逐行表），只有后端有，故换算在后端做、结果随响应带回。
 
 典型流程：
 
@@ -64,11 +64,11 @@
       "current_step": "1",             // storage 模式恒 null
       "step_id": 1,                    // storage 模式恒 null
       "status": "running",             // storage 模式恒 "unknown"
-      "updated_time": 1751800000,      // epoch 秒，可 null
-      "start_time": 1751799000,        // epoch 秒，可 null
-      "end_time": null,                // epoch 秒，storage 模式恒 null
+      "updated_time": 1751800000000,   // epoch 毫秒，可 null
+      "start_time": 1751799000000,     // epoch 毫秒，可 null
+      "end_time": null,                // epoch 毫秒，storage 模式恒 null
       "raw_steps": [1, 2],             // 最新可见 run 有 raw 段的 step 列表
-      "run_ids": {"1": 1751798990000000, "2": 1751799500000000},  // step_id → 该 step 最新可见 run
+      "run_ids": {"1": 1751798990000, "2": 1751799500000},  // step_id → 该 step 最新可见 run
       "has_raw_segments": true,
       "has_current_step_raw": true,    // storage 模式恒 false
       "offline_steps": [2]             // raw_steps 中有离线推理结果的 step
@@ -85,9 +85,9 @@
 | `tasks[].current_step` | string \| null | DB 模式为 `current_step` 字符串；行内为 null 或 **storage 模式恒 null** |
 | `tasks[].step_id` | int \| null | `current_step` 解析为 int；无法解析或 **storage 模式恒 null** |
 | `tasks[].status` | string \| null | DB 模式取自表；**storage 模式恒 `"unknown"`** |
-| `tasks[].updated_time` | int \| null | epoch **秒**。DB 模式取表；storage 模式取该 task 所有 raw 段**段尾**（`ts_ms + EXTINF`）的最大值，无段则 null。取段尾而非段起点：后者恒比实际早一个段长（~10s） |
-| `tasks[].start_time` | int \| null | epoch **秒**。DB 模式取表；storage 模式取 raw 段 `ts_ms` 最小值，无段则 null |
-| `tasks[].end_time` | int \| null | epoch **秒**。DB 模式取表；**storage 模式恒 null** |
+| `tasks[].updated_time` | int \| null | epoch **毫秒**（两种模式同单位）。DB 模式取表；storage 模式取该 task 所有 raw 段**段尾**（段起点 + 该段 EXTINF 时长）的最大值，无段则 null。取段尾而非段起点：后者恒比实际早一个段长（~10s） |
+| `tasks[].start_time` | int \| null | epoch **毫秒**（两种模式同单位）。DB 模式取表；storage 模式取 raw 段起点的最小值，无段则 null |
+| `tasks[].end_time` | int \| null | epoch **毫秒**。DB 模式取表；**storage 模式恒 null** |
 | `tasks[].raw_steps` | int[] | **最新可见 run** 确有 raw 段的 step_id（升序）。只看最新可见 run：它没有 raw 段（如同 step 刚重启、新 run 首段未出）时该 step 不列出，即便更早的 run 有 |
 | `tasks[].run_ids` | object | `raw_steps` 每一项 → 该 step 最新可见 run 的 `run_id`。**JSON 键是字符串**（`"1"`），值是 int。后续 submit / download / label-probs / `/ai/temporal` / traceback 带上它即锁定同一个 run |
 | `tasks[].has_raw_segments` | bool | `raw_steps` 非空。storage 模式只收有 raw 段的 task，故恒 true |
@@ -109,7 +109,7 @@
 
 ### 前端坑点
 
-- 时间是 **epoch 秒**，与 `/submit` 的毫秒不同源，别拿去当区间入参。
+- 时间是 **epoch 毫秒墙钟**，与 `/submit` 请求的媒体毫秒不同轴，别拿去当区间入参。
 - storage 模式下大量字段退化，务必先 `GET /config` 读 `task_source` 再决定 UI 展示。
 - 分页 `total` 是过滤后总数；翻页用 `offset += limit`。
 
@@ -152,7 +152,7 @@
 {
   "task_id": 123,
   "step_id": 1,
-  "run_id": 1751798990000000,          // 实际裁剪的 run
+  "run_id": 1751798990000,          // 实际裁剪的 run
   "project_id": 5,                     // 实际使用的 project（含 default 回退后的值）
   "job_dir": null,                     // 仅「有段失败 且 keep_artifacts_on_failure=true」时非空
   "total": 2,
@@ -327,7 +327,7 @@
 | `track` | string | 否 | `raw`（默认）/ `processed`，须与播放器加载的轨一致 |
 
 ```jsonc
-{"task_id": 42, "step_id": 2, "run_id": 1751798990000000, "track": "raw"}
+{"task_id": 42, "step_id": 2, "run_id": 1751798990000, "track": "raw"}
 ```
 
 ### 响应 `200`
@@ -336,7 +336,7 @@
 {
   "task_id": 42,
   "step_id": 2,
-  "run_id": 1751798990000000,                        // 实际读的 run
+  "run_id": 1751798990000,                        // 实际读的 run
   "track": "raw",
   "media_duration_ms": 612340,                       // 该轨媒体轴总长 = <video>.duration × 1000
   "labels": ["idle", "long_brush_insert", "long_brush_withdraw",

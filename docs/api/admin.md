@@ -283,7 +283,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 {
   "task_id": 123,
   "step_id": 2,
-  "run_id": 1751799990000000,     // 作业锁定的 run
+  "run_id": 1751799990000,     // 作业锁定的 run
   "status": "completed",          // 见下表
   "producer": "CleanNodepGRUSegmenter", // 离线模型类名；未跑到模型（排队 / 取消 / 未配置）时为 null
   "segment_count": 5,             // 写入的分割段数；非 completed 时为 0

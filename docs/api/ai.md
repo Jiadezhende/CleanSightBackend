@@ -115,7 +115,7 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 | `track` | string | 否 | `raw`（默认）/ `processed`。决定换算到哪条轨的媒体轴，须与播放器加载的轨一致 |
 
 ```jsonc
-{"task_id": 42, "step_id": 2, "run_id": 1751798990000000, "type": "segment", "track": "raw"}
+{"task_id": 42, "step_id": 2, "run_id": 1751798990000, "type": "segment", "track": "raw"}
 ```
 
 ### 响应 `200`
@@ -126,7 +126,7 @@ HLS 时间轴与 `temporal.jsonl` 取自同一个 run，不会出现新录像配
 {
   "task_id": 42,
   "step_id": 2,
-  "run_id": 1751798990000000,           // 实际读的 run
+  "run_id": 1751798990000,           // 实际读的 run
   "type": "segment",
   "track": "raw",
   "media_duration_ms": 612340,          // 该轨媒体轴总长（Σ EXTINF）= <video>.duration × 1000
