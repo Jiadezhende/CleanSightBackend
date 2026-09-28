@@ -9,7 +9,7 @@
       "created_at": "...", "updated_at": "..."
     }
 
-两个消费方：大屏/清单要"这个 step 有多少段多长"，`cleanup_worker` 拿 `updated_at` 当 TTL
+两个消费方：大屏/清单要"这个 step 有多少段多长"，`app.daemons.cleanup` 拿 `updated_at` 当 TTL
 判据。**它是派生量不是真值**——段时长真值在 playlist 的 EXTINF 里。
 
 **整体读改写（路线 C）**：`_fs.replace` 换整份。`end_time` 从来只写 `null`（没有写侧

@@ -4,12 +4,12 @@
 
 1. **导入预算**：目标模块在干净子进程里 import 后，`sys.modules` 不得含预算外的重依赖，
    且耗时不超上限。守住「重依赖懒加载」这条从未被检查过的既有意图——它此前失守两次
-   （`app.main` 拽 torch、`persistence.*` 拽 cv2），都是模块级构造/re-export 悄悄引入的。
+   （`app.main` 拽 torch、`persistence.*`（现 `alarm.*`）拽 cv2），都是模块级构造/re-export 悄悄引入的。
    独立进程入口另可登记不许拉起的本仓链路（`FORBIDDEN_APP_IMPORTS`）。
 2. **单例引用面**：服务单例只许被 `run_control`（编排中枢）/ `routers/*`（装配层）/
    本包 `lifespan()` import。同时守住 `docs/DEVELOPMENT.md` §3 写下但无人检查的
    「不建 service 对 service 的直接依赖」；另有两条方向门禁（services ↛ routers、
-   persistence ↛ inference）按源码 AST 查。
+   alarm ↛ inference）按源码 AST 查。
 3. **相对 / 绝对的分工**：包内一律相对、跨包一律绝对（`DEVELOPMENT.md` §8）。这条不只是
    风格——第 2 条与分层门禁都靠模块名判定，**跨包写成相对就能绕过它们**，所以由 `_abs_module()`
    把相对导入还原成绝对再判，并由本条锁死写法。
@@ -120,7 +120,10 @@ BUDGET = {
     # 离线 CLI 是独立进程入口：`_isolate_cpu()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
-    "app.services.persistence": (set(), 1.0),
+    "app.services.alarm":       (set(), 1.0),
+    # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
+    "app.daemons":              (set(), 0.20),
+    "app.daemons.cleanup":      (set(), 0.20),
     # recording 登记两条：包名那条是门面型（浅，基本只有 docstring），真正的守门人是
     # `service` —— 它 import `app.storage.hls`，cv2 一旦从 `_encode` 的函数体挪到模块级，
     # 这条会先红。
@@ -141,7 +144,7 @@ FORBIDDEN_APP_IMPORTS = {
 # 分层包 → 它允许 import 的 `app.*` 前缀白名单（包内互相 import 由 self 前缀覆盖）。
 #
 # **白名单而非黑名单**：`app/storage` 是 services 下面一层的数据层，它能被写侧
-# （persistence）与读侧（lab / inference.offline / routers）同时依赖的前提，
+# （alarm）与读侧（lab / inference.offline / routers）同时依赖的前提，
 # 是它谁都不依赖。旧规则只黑名单了 `app.services.*`，挡不住 `app.db`
 # ——它一进来，数据层就绑死了 ORM，而这不会造环、不会红，只会在某天想换存储时才发现。
 LAYER_PACKAGES = {
@@ -171,7 +174,8 @@ SINGLETONS = {
     "stream_service": "app.services.stream.instance",
     "inference_service": "app.services.inference.online.instance",
     "offline_job_service": "app.services.inference.offline.instance",
-    "persistence_manager": "app.services.persistence.instance",
+    "alarm_service": "app.services.alarm.instance",
+    "cleanup_worker": "app.daemons.cleanup.instance",
     "recording_service": "app.services.recording.instance",
     "health_monitor": "app.services.health_monitor.instance",
     "run_control_service": "app.services.run_control.instance",
@@ -185,7 +189,7 @@ SINGLETON_EXCEPTIONS = {
     # 写在 `_resolve_deps()` 函数体内（不是模块级），且 run_control_service 那处是反向指回编排
     # 中枢做拆除。
     "app/services/health_monitor/manager.py",
-    # 告警落库 sink：inference 产告警 → persistence 落库。跨服务但方向正确（下游依赖），
+    # 告警落库 sink：inference 产告警 → alarm 服务上报。跨服务但方向正确（下游依赖），
     # 且 sink 就是为这条方向存在的唯一窄接口。
     "app/services/inference/online/temporal/alarm_sink.py",
 }
@@ -396,13 +400,13 @@ def test_services_do_not_import_routers():
     )
 
 
-def test_persistence_does_not_import_inference():
-    """persistence 不得反向依赖 inference：告警过闸编排在 inference 侧的 alarm_sink，
-    方向只许 inference → persistence（见 SINGLETON_EXCEPTIONS 里 alarm_sink 那条）。"""
-    violations = _imports_under(APP_DIR / "services" / "persistence", "app.services.inference")
+def test_alarm_does_not_import_inference():
+    """alarm 不得反向依赖 inference：告警过闸编排在 inference 侧的 alarm_sink，
+    方向只许 inference → alarm（见 SINGLETON_EXCEPTIONS 里 alarm_sink 那条）。"""
+    violations = _imports_under(APP_DIR / "services" / "alarm", "app.services.inference")
     assert not violations, (
-        "persistence 反向依赖了 inference：\n  " + "\n  ".join(violations)
-        + "\n跨这两个服务的编排放在 inference 侧的 sink，persistence 只暴露落库接口。"
+        "alarm 反向依赖了 inference：\n  " + "\n  ".join(violations)
+        + "\n跨这两个服务的编排放在 inference 侧的 sink，alarm 只暴露上报接口。"
     )
 
 

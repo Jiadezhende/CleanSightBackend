@@ -1,5 +1,6 @@
 """
-持久化配置模型（重构版）
+告警服务配置模型：读 `config/persistence_config.yaml` 的 `alarm` 段
+（同文件 `storage` 段归 `app.daemons.cleanup.config`）
 
 支持从YAML文件加载配置，提供默认值
 """
@@ -16,41 +17,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AlarmConfig:
-    """告警持久化配置"""
+    """告警上报配置"""
 
     workers: int = 1
     queue_size: int = 200
 
 
 @dataclass
-class StorageConfig:
-    """存储配置
+class AlarmServiceConfig:
+    """告警服务配置（统一入口）"""
 
-    注意：base_dir 已上移到 settings.storage_base_dir（单一真源），不在此定义；
-    此处仅保留持久化自有职责的参数（清理策略）。
-    """
-
-    enable_cleanup: bool = False
-    cleanup_days: int = 7
-    cleanup_interval_seconds: int = 3600
-
-
-@dataclass
-class PersistenceConfig:
-    """持久化配置（统一入口）"""
-
-    storage: StorageConfig = field(default_factory=StorageConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
 
     @classmethod
-    def from_yaml(cls, config_path: Optional[str] = None) -> "PersistenceConfig":
+    def from_yaml(cls, config_path: Optional[str] = None) -> "AlarmServiceConfig":
         """从YAML配置文件加载
 
         Args:
             config_path: YAML配置文件路径，默认为 config/persistence_config.yaml
 
         Returns:
-            PersistenceConfig实例
+            AlarmServiceConfig实例
         """
         if config_path is None:
             from app.settings import settings
@@ -67,7 +54,7 @@ class PersistenceConfig:
             try:
                 with open(config_file, "r", encoding="utf-8") as f:
                     config_dict = yaml.safe_load(f) or {}
-                logger.info("✓ 已加载persistence配置: %s", config_path)
+                logger.info("✓ 已加载alarm配置: %s", config_path)
                 config = cls.from_dict(config_dict)
             except Exception as e:
                 logger.error("✗ 加载配置文件失败: %s，使用默认配置", e, exc_info=True)
@@ -80,33 +67,21 @@ class PersistenceConfig:
         return config
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "PersistenceConfig":
+    def from_dict(cls, config_dict: Dict[str, Any]) -> "AlarmServiceConfig":
         """从字典构造配置对象
 
         Args:
             config_dict: 配置字典
 
         Returns:
-            PersistenceConfig实例
+            AlarmServiceConfig实例
         """
         # yaml 由 git 跟踪、每次部署整仓覆盖为干净版，磁盘不会残留已废字段；
         # 故不做字段过滤——真出未知字段就让它响亮地崩，别静默吞。
-        storage = StorageConfig(**config_dict.get("storage", {}))
         alarm = AlarmConfig(**config_dict.get("alarm", {}))
-        return cls(storage=storage, alarm=alarm)
+        return cls(alarm=alarm)
 
-    @property
-    def storage_base_dir(self) -> Path:
-        """存储根目录（绝对路径）——委托 settings 单一真源。
-
-        历史上各服务各自解析此路径，现统一收敛到 settings.storage_base_dir，
-        persistence / inference / traceback 三方同源，消除分叉与跨服务 push。
-        """
-        from app.settings import settings
-
-        return settings.storage_base_dir
-
-    # 扁平访问器（manager 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
+    # 扁平访问器（service 唯一入口；嵌套 dataclass 仅作分组存储，全仓无嵌套访问）
     @property
     def alarm_workers(self) -> int:
         return self.alarm.workers
@@ -115,33 +90,15 @@ class PersistenceConfig:
     def alarm_queue_size(self) -> int:
         return self.alarm.queue_size
 
-    @property
-    def enable_cleanup(self) -> bool:
-        return self.storage.enable_cleanup
-
-    @property
-    def cleanup_days(self) -> int:
-        return self.storage.cleanup_days
-
-    @property
-    def cleanup_interval_seconds(self) -> int:
-        return self.storage.cleanup_interval_seconds
-
     def _log_loaded_config(self):
         """输出加载的配置（启动时显示）"""
         # DEBUG级别显示详细配置
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("========== Persistence配置 ==========")
-            logger.debug("存储: base_dir=%s", self.storage_base_dir)
+            logger.debug("========== Alarm配置 ==========")
             logger.debug(
                 "告警: workers=%d, queue=%d",
                 self.alarm.workers,
                 self.alarm.queue_size,
-            )
-            logger.debug(
-                "清理: enabled=%s, days=%d",
-                self.storage.enable_cleanup,
-                self.storage.cleanup_days,
             )
             logger.debug("=====================================")
 
@@ -157,7 +114,7 @@ class PersistenceConfig:
         if self.alarm.workers < 1:
             warnings.append(f"❌ 告警Worker数量必须>=1")
 
-        # 注意：告警重试配置由 GuardedExecutor 统一处理，无需在此验证
+        # 注意：告警重试策略写死在 alarm_worker，无需在此验证
 
         # 输出警告
         if warnings:
@@ -168,12 +125,12 @@ class PersistenceConfig:
 
 
 # 全局单例（延迟加载）
-_global_persistence_config: Optional[PersistenceConfig] = None
+_global_alarm_config: Optional[AlarmServiceConfig] = None
 
 
-def get_persistence_config() -> PersistenceConfig:
-    """获取全局持久化配置（单例模式）"""
-    global _global_persistence_config
-    if _global_persistence_config is None:
-        _global_persistence_config = PersistenceConfig.from_yaml()
-    return _global_persistence_config
+def get_alarm_config() -> AlarmServiceConfig:
+    """获取全局告警服务配置（单例模式）"""
+    global _global_alarm_config
+    if _global_alarm_config is None:
+        _global_alarm_config = AlarmServiceConfig.from_yaml()
+    return _global_alarm_config

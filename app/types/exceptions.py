@@ -6,6 +6,9 @@ CleanSight 自定义异常层次结构
 - retryable: 是否可重试（瞬时故障）
 - fatal: 是否致命（系统级错误，需停止服务）
 - 6个核心异常类（AppError + 5个服务异常）
+
+**硬约束：业务代码只抛异常、不捕获**。捕获只发生在四个边界层（guarded_run /
+告警上报重试 / FastAPI 异常处理器 / main），见 docs/kb/DESIGN_FAULT_TOLERANCE.md。
 """
 
 from typing import Optional

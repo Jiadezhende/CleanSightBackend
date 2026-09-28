@@ -14,7 +14,7 @@ Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
   `storage.tasks.list_step_ids`
 - ffmpeg **HLS demuxer**（临时 VOD 清单 + EXT-X-MAP）+ libx264 实现 ms 精度裁剪
   —— 不是 concat demuxer：fMP4 fragment 无 moov，单独 demux 解不出 codec init
-- urllib.request multipart 上传到 LS（沿用现有 alarm_strategy 的 urllib 风格）
+- urllib.request multipart 上传到 LS（沿用现有 alarm reporter 的 urllib 风格）
 
 设计要点：
 - 整个 submit 同步执行；ffmpeg + LS 上传都在请求线程里跑完

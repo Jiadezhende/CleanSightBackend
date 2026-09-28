@@ -1,6 +1,6 @@
 """跨服务共享的纯数据契约（dataclass / enum）。
 
-无框架依赖（除 numpy）、无 service 逻辑、无 ORM。routers / inference / persistence /
+无框架依赖（除 numpy）、无 service 逻辑、无 ORM。routers / inference / alarm /
 client 均从此处取契约，依赖方向单向（types 不依赖任何 service）。
 按 concern 分文件：frame / detection / temporal / alarm / run / exceptions。调用方从子模块显式 import。
 """

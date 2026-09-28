@@ -35,14 +35,16 @@ app/
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
 │   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
-│   ├── persistence/     # 告警落库与上报 + TTL 清理（HLS 写侧已迁 recording/）
+│   ├── alarm/           # 告警上报（队列 + worker 池 + 重试）
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunControlService）
 │   ├── lab/             # 送标裁剪 + Label Studio 上传
 │   └── algorithm/       # 无状态算法服务（试纸比色），与主流程无关，只被 /algorithm/* 调用
+├── daemons/
+│   └── cleanup/         # 存储 TTL 清理（按时钟自驱，只依赖 storage）
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
 ├── db/                  # 平台 DB（PostgreSQL，只读）：database 连接池 + 一张表一个 ORM 模块 tasks / alarms
 ├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 deploy skill
-└── utils/               # GuardedExecutor / 日志装饰器
+└── utils/               # 日志装饰器
 config/                  # 运维要改的配置：六份服务 YAML + uvicorn 日志 logging.json
 requirements/            # 依赖清单：base.txt 底座 + 按部署路径分的 prod / gpu / ppu
 mediamtx_gateway/        # RTSP TCP 代理网关（独立进程，对外部署可选）
@@ -113,7 +115,7 @@ graph LR
     C --> D[Inference：Detector 检测→特征聚合/落盘→Operator 时序判定 1Hz→可视化]
     D --> E[RecordingService]
     D --> F[WebSocket 前端轮询]
-    D --> H[PersistenceManager]
+    D --> H[AlarmService]
     E --> G[HLS 视频段]
     H --> I[告警落库/上报]
 ```
@@ -139,7 +141,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 
 ## 异常处理
 
-四层边界：L1 `guarded_run()`（`app/services/utils/worker_guard.py`）兜线程崩溃 → L2 `GuardedExecutor` 重试/快速失败 → L3 FastAPI handler 转 HTTP → L4 `main()` 顶层 fail-fast。自定义异常（retryable/fatal 标记）在 `app/types/exceptions.py`；丢帧不走异常，由 `frame_drop_total` 指标计数。详见 [知识库](docs/kb/INDEX.md)。
+四层边界：L1 `guarded_run()`（`app/services/utils/worker_guard.py`）兜线程崩溃 → L2 告警上报重试/快速失败（`app/services/alarm/alarm_worker.py`）→ L3 FastAPI handler 转 HTTP → L4 `main()` 顶层 fail-fast。自定义异常（retryable/fatal 标记）在 `app/types/exceptions.py`；丢帧不走异常，由 `frame_drop_total` 指标计数。详见 [知识库](docs/kb/INDEX.md)。
 
 ---
 

@@ -92,11 +92,11 @@ class Settings(BaseSettings):
     cuda_device: str = "0"
 
     # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
-    # 落盘读写经 app/storage/utils/root.py 解析它；persistence / traceback / lab 的旧代码直读，
+    # 落盘读写经 app/storage/utils/root.py 解析它；cleanup / traceback / lab 的旧代码直读，
     # 不再各自重算或互相 push（消除跨服务穿透）。
     storage_dir: str = "./database"
 
-    # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
+    # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / alarm 四方共读，
     # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
     raw_fps: int = 30          # 生产者源：解码 CFR 帧率（decoder default_fps、HLS raw fallback、CA 秒→帧数换算全派生自此）
     inference_decimation: int = 2  # 采样器：检测抽帧降采样倍率——系统唯一采样旋钮。抽帧器「每 N 帧留 1」直接用它。
@@ -180,7 +180,7 @@ class Settings(BaseSettings):
         """持久化存储根目录（绝对路径，单一真源）。
 
         相对路径以项目根为基，避免读写两侧因进程 cwd 不同而分叉到不同目录。
-        persistence / inference / traceback 三方都读此值。
+        cleanup / inference / traceback 三方都读此值。
         """
         p = Path(self.storage_dir)
         if p.is_absolute():

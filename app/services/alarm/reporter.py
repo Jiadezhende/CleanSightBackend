@@ -1,5 +1,5 @@
 """
-告警持久化策略
+告警上报器
 
 负责：
 - HTTP上报到外部数据库
@@ -17,8 +17,8 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 
-class AlarmPersistenceStrategy:
-    """告警持久化策略（无状态）。去重由 ClientQueues.append_alarm_record_with_gate 统一控制。"""
+class AlarmReporter:
+    """告警上报器（无状态）。去重由 ClientQueues.append_alarm_record_with_gate 统一控制。"""
 
     def __init__(self):
         pass
@@ -48,7 +48,7 @@ class AlarmPersistenceStrategy:
         return bool(alarm_info.get("task_id") and alarm_info.get("step_id") is not None)
 
     def _send_alarm_http(self, alarm_info: Dict[str, Any]) -> bool:
-        """HTTP上报告警到外部数据库（单次尝试，重试由GuardedExecutor处理）"""
+        """HTTP上报告警到外部数据库（单次尝试，重试由 alarm_worker 处理）"""
         url = settings.alarm_report_url
 
         step_id = alarm_info.get("step_id")

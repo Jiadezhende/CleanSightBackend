@@ -137,7 +137,7 @@ retry_total = Counter(
 重试总数（所有操作）
 
 标签：
-- operation: GuardedExecutor 的策略名（现仅 'persistence'）
+- operation: 重试来源（现仅告警上报重试，标签值 'persistence'）
 - error_type: 异常类型
 
 用途：
@@ -153,7 +153,7 @@ retry_total = Counter(
             operation='persistence',
             error_type='PersistenceError'
         ).inc()
-        # GuardedExecutor 自动重试
+        # alarm_worker 自动重试
 """
 
 

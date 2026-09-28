@@ -118,7 +118,7 @@ class TestRootPath:
         self, tmp_path, monkeypatch
     ):
         """相对路径以项目根为基、不随进程 cwd 飘——否则读写两侧会分叉到不同目录。"""
-        from app.services.persistence.config import get_persistence_config
+        from app.daemons.cleanup.config import get_cleanup_config
 
         monkeypatch.setattr(settings, "storage_dir", "./database")
         resolved = _root.path()
@@ -129,8 +129,8 @@ class TestRootPath:
         assert _root.path() == resolved
         assert tmp_path not in resolved.parents
 
-        # TTL 清理（cleanup_worker）的扫描根取自这里，须与本包同源
-        assert get_persistence_config().storage_base_dir == resolved
+        # TTL 清理（app.daemons.cleanup）的扫描根取自这里，须与本包同源
+        assert get_cleanup_config().storage_base_dir == resolved
 
     def test_absolute_storage_dir_is_used_as_is(self, tmp_path, monkeypatch):
         abs_dir = tmp_path / "custom" / "store"

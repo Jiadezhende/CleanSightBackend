@@ -1,5 +1,5 @@
 """
-存储 TTL 清理 Worker
+存储 TTL 清理 Worker（单例见 `instance.py`，启停见包 `lifespan()`）
 
 职责（每轮依次）：
 - 清空回收区 `{db_dir}/.trash/`（上一轮 rmtree 没删掉的残留）
@@ -20,7 +20,7 @@ from app.storage.utils import fs as _fs
 logger = logging.getLogger(__name__)
 
 
-class StorageCleanupWorker:
+class CleanupWorker:
     """后台 TTL 清理 Worker"""
 
     def __init__(
@@ -37,11 +37,11 @@ class StorageCleanupWorker:
 
     def start(self) -> None:
         self._thread = threading.Thread(
-            target=self._run, daemon=True, name="StorageCleanup"
+            target=self._run, daemon=True, name="CleanupWorker"
         )
         self._thread.start()
         logger.info(
-            "[StorageCleanup] Started, interval=%ds, retention=%dd",
+            "[CleanupWorker] Started, interval=%ds, retention=%dd",
             self.interval_seconds,
             self.cleanup_days,
         )
@@ -58,8 +58,8 @@ class StorageCleanupWorker:
                 self._scan_and_clean()
             except Exception:
                 # L1 边界层：捕获扫描中一切未预期异常，记录后继续下一轮
-                # 不使用 GuardedExecutor（L2），因为此处需要的是线程存活而非立即重试
-                logger.exception("[StorageCleanup] Unexpected error during scan, will retry next interval")
+                # 不做函数级重试（L2），因为此处需要的是线程存活而非立即重试
+                logger.exception("[CleanupWorker] Unexpected error during scan, will retry next interval")
 
     def _scan_and_clean(self) -> int:
         """扫描并删除过期 step 目录 + 清空 task_id 父目录，返回删除的 step 数量。
@@ -85,7 +85,7 @@ class StorageCleanupWorker:
                 mtime = step_dir.stat().st_mtime
             except OSError as e:
                 # 扫描期间被删 / 不可读：等同于没扫到
-                logger.debug("[StorageCleanup] Skip unreadable step dir %s: %s", step_dir, e)
+                logger.debug("[CleanupWorker] Skip unreadable step dir %s: %s", step_dir, e)
                 continue
 
             if mtime >= cutoff:
@@ -94,7 +94,7 @@ class StorageCleanupWorker:
             # FAILED 时 `_fs.remove` 已记 warning，盘上原样不动，下一轮再试
             if _fs.remove(step_dir, root=self.db_dir) is _fs.Removed.REMOVED:
                 deleted += 1
-                logger.info("[StorageCleanup] Deleted step dir: %s", step_dir)
+                logger.info("[CleanupWorker] Deleted step dir: %s", step_dir)
 
         # 顺手清理被掏空的 task_id 父目录（仅删空目录，rmdir 对非空目录会安全失败）。
         # 只认数字目录名：`.trash/`、`.lab_exports/` 空着也不归这里删
@@ -108,15 +108,15 @@ class StorageCleanupWorker:
                 try:
                     task_dir.rmdir()
                     empty_tasks += 1
-                    logger.info("[StorageCleanup] Removed empty task dir: %s", task_dir)
+                    logger.info("[CleanupWorker] Removed empty task dir: %s", task_dir)
                 except OSError as e:
-                    logger.debug("[StorageCleanup] Skip non-removable empty task dir %s: %s", task_dir, e)
+                    logger.debug("[CleanupWorker] Skip non-removable empty task dir %s: %s", task_dir, e)
             except OSError as e:
-                logger.debug("[StorageCleanup] Skip unreadable task dir %s: %s", task_dir, e)
+                logger.debug("[CleanupWorker] Skip unreadable task dir %s: %s", task_dir, e)
 
         if deleted or empty_tasks:
             logger.info(
-                "[StorageCleanup] Scan complete: deleted %d step(s), %d empty task dir(s)",
+                "[CleanupWorker] Scan complete: deleted %d step(s), %d empty task dir(s)",
                 deleted, empty_tasks,
             )
 
@@ -146,4 +146,4 @@ class StorageCleanupWorker:
         try:
             yield from directory.iterdir()
         except OSError as e:
-            logger.debug("[StorageCleanup] Skip unreadable dir %s: %s", directory, e)
+            logger.debug("[CleanupWorker] Skip unreadable dir %s: %s", directory, e)

@@ -292,7 +292,7 @@ class StreamService:
         服务层方法：重启流（自动重连用，不能阻塞）
 
         职责边界：
-        - start_stream() 与本方法都不包 GuardedExecutor
+        - start_stream() 与本方法都不包重试
         - 健康监控器负责重试逻辑（在自己的时间间隔内）
 
         与 start_stream 的区别：
@@ -312,7 +312,7 @@ class StreamService:
             - 不向上传播异常（避免阻塞健康监控线程）
         """
         try:
-            # 直接调用实现，不使用 GuardedExecutor
+            # 直接调用实现，不包重试
             self._restart_stream_impl(task_id, stream_url)
             return True
 

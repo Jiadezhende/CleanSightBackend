@@ -1,5 +1,5 @@
 """盘上原语 —— 整体替换、原子删除、建一级目录，全包只此一份。**包内私有**（唯一的包外
-调用方是 `cleanup_worker`，只用 `remove` / `purge_trash`）。
+调用方是 `app.daemons.cleanup`，只用 `remove` / `purge_trash`）。
 
     _fs.replace(path, lambda tmp: tmp.write_text(s))   # 同目录 tmp + os.replace
     _fs.remove(step_dir)                               # rename 进 {root}/.trash/ 再 rmtree

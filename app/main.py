@@ -13,7 +13,8 @@ from .gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from .routers import admin, ai, api, health, lab, media, task, algorithm, traceback as traceback_router
-from .services import health_monitor, inference, persistence, recording, stream
+from .daemons import cleanup
+from .services import alarm, health_monitor, inference, recording, stream
 from .types.exceptions import (
     AppError,
     ConflictError,
@@ -63,16 +64,17 @@ async def lifespan(app: FastAPI):
     # 包内的 lifespan()，此处只表达**相对顺序**：
     # 1. 健康监控（最外层：最先起、最后停，全程有人看着下面几个）
     # 2. 流服务（懒启动、只收尸——decoder 由 run_control 按 run 现起）
-    # 3. 持久化（须先于 inference 起、后于 inference 停，以承接 inference.stop() 的
+    # 3. 存储 TTL 清理（独立时钟，不依赖下面任何服务；停在告警之后）
+    # 4. 告警（须先于 inference 起、后于 inference 停，以承接 inference.stop() 的
     #    结算告警 flush 后再抽干队列）
-    # 4. 录制（与持久化同一档、同一个理由：inference.stop() 会经 run_control 交出最后一批
+    # 5. 录制（与告警同一档、同一个理由：inference.stop() 会经 run_control 交出最后一批
     #    HLS 残段，那时 recording 的队列必须还活着；等它交完，recording 的 finally 再停队列
     #    把剩下的排空——保序、不丢尾。嵌到 inference 里层会让队列先停、残段提交被拒，而那些
     #    帧已经从 CQ 弹出去了，是真丢。）
-    # 5. AI 推理
+    # 6. AI 推理
     async with health_monitor.lifespan():
         async with stream.lifespan():
-            async with persistence.lifespan():
+            async with cleanup.lifespan(), alarm.lifespan():
                 async with recording.lifespan():
                     async with inference.lifespan():
                         try:

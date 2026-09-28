@@ -33,7 +33,7 @@ class Alarm:
 
     核心字段（alarm_type/level/message/metric/metadata）由产出方（Operator）填；
     stage 由 temporal actor 产出时烧入别名，mode/seq/timestamp 在落 alarm_log 时由
-    persistence sink / 环形缓冲补全（故均带默认值）。
+    alarm sink / 环形缓冲补全（故均带默认值）。
     metric 由产出方显式填，下游持久化直接读 alarm.metric，不靠文案反推。
     （原 AlarmRecord 已并入此类——同一份告警从产出到落缓冲只有一种形态。）
     """

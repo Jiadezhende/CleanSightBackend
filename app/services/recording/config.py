@@ -1,6 +1,6 @@
 """recording 服务配置（`config/recording_config.yaml`）。
 
-两个旋钮，故是一个扁平 dataclass —— persistence 那边的三层嵌套是因为它有 storage / hls /
+两个旋钮，故是一个扁平 dataclass —— alarm 那边的三层嵌套是因为它有 storage / hls /
 alarm 三组参数，这里没有分组可言。
 
 **刻意没有 `workers`**：落盘走的 `SerialTaskQueue` 恒为一个消费线程，「同一 step 的写按提交序执行」
@@ -52,7 +52,7 @@ class RecordingConfig:
 
         logger.info("✓ 已加载 recording 配置: %s", config_path)
         # yaml 由 git 跟踪、每次部署整仓覆盖为干净版，磁盘不会残留已废字段；
-        # 故不做字段过滤——真出未知字段就让它响亮地崩，别静默吞（同 persistence 口径）。
+        # 故不做字段过滤——真出未知字段就让它响亮地崩，别静默吞（同 alarm 口径）。
         return cls(**raw)
 
 
