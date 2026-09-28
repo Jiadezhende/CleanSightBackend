@@ -63,7 +63,7 @@
 | 缺省 | 该 step **最新可见** run（已有 HLS 段清单或检测结果即可见） | 各端点原有的「无数据」响应，不变 |
 | 显式 | 就是这个 run | **404** `{"error":"Resource not found","detail":"...","resource_type":"Run","resource_id":"task=..,step=..,run=.."}`：id 写错，或该 run 已被 TTL 回收 |
 
-- `run_id` = 该 run 分配时刻的 epoch **微秒**（int，≈1.8e15，在 JS 安全整数内），同 step 内严格递增；当不透明身份用即可。
+- `run_id` = 该 run 分配时刻的 epoch **毫秒**（int，≈1.8e12），同 step 内严格递增；当不透明身份用即可。
 - 取值来源：[`/task/live`](task.md#get-tasklive) `tasks[].run_id`、[`/task/history`](task.md#get-taskhistory) `steps[].run_id`、[`/lab-f3m8/tasks`](lab.md#get-lab-f3m8tasks) `run_ids`；各读端点响应也回显实际读的 `run_id`。
 - 适用端点：`/traceback` playlist / timeline、`/media/*`（run 锁在 token 里）、`POST /ai/temporal`、`/lab-f3m8` 的 submit / download / label-probs。
 - 纯增量：不带 `run_id` 的老客户端照常工作。**同一页面的多个请求要带同一个 `run_id`**，否则可能各自解析到不同 run，见 [traceback › 前端坑点](traceback.md#前端坑点)。
@@ -91,7 +91,7 @@
 
 - 告警 `detected_at` / `resolved_at` / `ts`、追溯 `*_ms`：**epoch 毫秒**。
 - 例外：名字带 `media` 的毫秒字段（`media_ms`、`*_media_ms`、`media_duration_ms`、`media_offset_ms`）是**媒体刻度**——相对该轨首段起点、跳过录制停顿，与 `<video>.currentTime × 1000` 同轴，不是 epoch。
-- 段文件 `ts_us`、`run_id`：微秒。
+- `run_id`、盘上段文件名里的起点：**epoch 毫秒**。
 - 媒体 token 有效期：秒。
 
 ### 枚举取值

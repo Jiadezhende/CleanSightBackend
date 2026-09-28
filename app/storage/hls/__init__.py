@@ -9,7 +9,7 @@
 `run` 是 `RunIdentity`（来自 `app.storage.runs`），读写口都只收它。
 
 对外**两个动作 + 一组定位/枚举函数**。调用方交出内存里的 `Frame` 序列，拿回这段的身份键；
-cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计七件事全在域内，一件都
+cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist 六件事全在域内，一件都
 不出现在签名上。`read_segment` / `iter_frames` 是
 读向的对称件：给身份键或墙钟区间，拿回带原始 ts 的 `Frame`，**只服务 raw 轨**
 （processed 不落 sidecar）。
@@ -22,6 +22,10 @@ cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist、统计�
                segment_path / init_path / sidecar_path / playlist_path / parse_*
     ② Frame    read_segment / iter_frames
     ③ 写       insert_segment
+    ④ 媒体轴   MediaTimeline / PlacedSegment
+               query_timeline           一条轨展开成媒体轴，墙钟↔媒体换算（`_timeline`）
+    ⑤ 查询     HlsSpan / query_span     若干轨的段在墙钟上的并集跨度
+               query_has_segments / query_has_init
 
 **「有哪些段」只由清单回答。** 文件系统枚举（`iterdir` + 文件名正则）曾是并行的第二个入口，
 已整个从域里删除（2026-09-19）——留着就是第二个真源，而 `__all__` 拦不住包内误用。盘上有文件
@@ -37,12 +41,11 @@ ffmpeg 静默截短。收口后**「可播」不再是限定词**，故容器叫
 ## 落盘结构
 
     {root}/{task_id}/{step_id}/{run_id}/hls/
-      {track}_segment_{ts_us}.mp4   段（fMP4 fragment）
+      {track}_segment_{ts_ms}.mp4   段（fMP4 fragment）
       {track}_init.mp4              该轨的 init 段，首段产出、整条 playlist 复用
       {track}_playlist.m3u8         LIVE 形态清单，只追加、不写 ENDLIST
-      raw_segment_{ts_us}.idx       raw 轨逐帧 ts sidecar（float64），仅离线反查用
-      metadata.json                 段数 / 时长 / 首末 ts，兼作 TTL 判据
-      .stage_{track}_{ts_us}/       写入事务的暂存目录，commit 后即删
+      raw_segment_{ts_ms}.idx       raw 轨逐帧 ts sidecar（float64），仅离线反查用
+      .stage_{track}_{ts_ms}/       写入事务的暂存目录，commit 后即删
 
 两条轨（`raw` / `processed`）**各自独立**：各有各的段、init 与清单，互不引用。
 detection 不在本域落盘——它由 `inference` 域按帧 ts 单源写入。
@@ -68,11 +71,9 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
 **调用点已全部迁入本域**（2026-09-16）：routers 四处、`lab` 的 clip/export 两处都经本域读写。
 `read_segment` / `iter_frames` 目前无生产调用方，为离线 ROI 视觉特征预留。
 
-`metadata.json` 的读仍在域外，未承诺迁入。
-
 ## 域内分工
 
-    types.py     本域的资源容器：SegmentRef / Segment
+    types.py     本域的资源容器：SegmentRef / Segment / HlsSpan
                  （stdlib only、不 import 同包任何模块 —— 它是子包的底）
     _layout.py   域根 / 文件名 / 轨道白名单 / stage 目录（域名在此只出现一次；不枚举目录）
     _encode.py   帧序列 → mp4v，以及 eff_fps 反推（cv2 在函数体内 import）
@@ -80,9 +81,9 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
     _fmp4.py     mp4v → fMP4 fragment + init（ffmpeg），tfdt hex-patch
     _m3u8.py     LIVE 清单文本：写侧（头 / 条目 / 累计）+ 读侧（逐段 EXTINF）
     _idx.py      sidecar 的 float64 布局
-    _meta.py     metadata.json 的读改写
     _write.py    写侧对外动作：insert_segment（stage → adjust → commit）
-    _read.py     读侧对外动作：list_segments / list_segments_in_range
+    _read.py     读侧对外动作：list_segments / list_segments_in_range / query_*
+    _timeline.py 媒体轴：MediaTimeline / PlacedSegment（不碰盘，由 query_timeline 构造）
 
 本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
 re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.types`**，
@@ -102,14 +103,25 @@ from ._layout import (
     segment_name,
     segment_path,
     sidecar_path,
-    ts_to_us,
+    ts_to_ms,
 )
-from ._read import list_segments, list_segments_in_range
+from ._read import (
+    list_segments,
+    list_segments_in_range,
+    query_has_init,
+    query_has_segments,
+    query_span,
+    query_timeline,
+)
+from ._timeline import MediaTimeline, PlacedSegment
 from ._write import insert_segment
-from .types import Segment, SegmentRef
+from .types import HlsSpan, Segment, SegmentRef
 
 __all__ = [
     "TRACKS",
+    "HlsSpan",
+    "MediaTimeline",
+    "PlacedSegment",
     "Segment",
     "SegmentRef",
     "init_name",
@@ -120,10 +132,14 @@ __all__ = [
     "parse_segment_name",
     "list_segments",
     "playlist_path",
+    "query_has_init",
+    "query_has_segments",
+    "query_span",
+    "query_timeline",
     "read_segment",
     "segment_name",
     "segment_path",
     "list_segments_in_range",
     "sidecar_path",
-    "ts_to_us",
+    "ts_to_ms",
 ]

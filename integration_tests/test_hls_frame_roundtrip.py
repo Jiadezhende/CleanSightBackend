@@ -20,7 +20,7 @@ ffmpeg，抓不到「解码出来的像素是不是那一帧」——两者互�
 测试项（括号内为修复前的实测表现，见 docs/update/20260901_FRAME_TRACKER_BOUNDARY_FIX.md）:
     T1  全量遍历 ts 位级相等 + 像素 id 逐帧匹配   （修复前 1651/1800，末段整段丢失）
     T2  区间起点落段中部                          （修复前该段被整段跳过）
-    T3  区间起点恰为段首帧                        （修复前同样被跳过：ts_us 截断）
+    T3  区间起点恰为段首帧                        （修复前同样被跳过：ts_ms 向下取整）
     T4  跨段区间帧数精确                          （修复前 221 帧只出 171）
     T5  越界区间返回空
     T6  缺 sidecar 只跳过该段、其余照常                （修复前整条迭代中断）
@@ -164,7 +164,7 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
         g = 5 * FRAMES_PER_SEG
         got = [f.timestamp for f in scan(ts_of(g), ts_of(g + 5))]
         assert got == [ts_of(k) for k in range(g, g + 6)], f"实得 {len(got)}/6 帧"
-        return "段首帧未被截断的 ts_us 挤掉"
+        return "段首帧未被向下取整的 ts_ms 挤掉"
 
     def t4_cross_seg() -> str:
         g0, g1 = 3 * FRAMES_PER_SEG + 100, 5 * FRAMES_PER_SEG + 20
@@ -205,7 +205,7 @@ def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
     def t9_processed_rejected() -> str:
         """解码只服务 raw 轨：processed 不落 sidecar，给不出带墙钟 ts 的帧。
         「这条路不通」必须与「这段没数据」分得开，故是 ValueError 而非空迭代器。"""
-        ref = hls.SegmentRef(track="processed", ts_us=hls.ts_to_us(ts_of(0)))
+        ref = hls.SegmentRef(track="processed", ts_ms=hls.ts_to_ms(ts_of(0)))
         try:
             hls.read_segment(run, ref, width=W, height=H)
         except ValueError:

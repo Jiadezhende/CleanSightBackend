@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from app.types.run import RunIdentity
-from app.services.utils.media_timeline import GAP_THRESHOLD_MS, MediaTimeline
+from app.services.utils.media_timeline import GAP_THRESHOLD_MS, first_gap
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls
 
@@ -152,7 +152,7 @@ class ClipBuilder:
                 f"Clip duration {spec.duration_ms} ms exceeds max {self._max_duration_ms} ms"
             )
 
-        window = MediaTimeline.load(spec.run, RAW_TRACK).select(
+        window = hls.query_timeline(spec.run, RAW_TRACK).select(
             spec.start_media_ms, spec.end_media_ms
         )
         if not window:
@@ -162,7 +162,7 @@ class ClipBuilder:
                 f"for {spec.run}"
             )
 
-        gap = window.first_gap()
+        gap = first_gap(window)
         if gap is not None:
             cur, nxt, gap_ms = gap
             raise ClipRangeGapError(
@@ -232,7 +232,7 @@ class ClipBuilder:
     # -------- internal --------
 
     def _run_ffmpeg(
-        self, spec: ClipSpec, window: MediaTimeline, output_path: Path
+        self, spec: ClipSpec, window: hls.MediaTimeline, output_path: Path
     ) -> None:
         """写临时清单 → 跑一次 HLS 拼接 + 输出侧精确裁剪。"""
         offset_ms = window.media_offset_ms(spec.start_media_ms)

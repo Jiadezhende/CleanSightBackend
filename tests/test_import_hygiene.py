@@ -77,7 +77,7 @@ BUDGET = {
     # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
     # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。
     "app.storage.hls._decode":  (set(), 0.40),
-    # 下面标着「stdlib only」的四条（`_fmp4` / `_layout` / `_m3u8` / `_meta`）秒数上限
+    # 下面标着「stdlib only」的三条（`_fmp4` / `_layout` / `_m3u8`）秒数上限
     # 照 `app.storage.hls` 给 0.40 —— 它们量的是同一份活（见上方 ⚠ 段），给 0.20 只会让
     # 负载高的机器上这几条先于 facade 那条抖。`_read` / `types` 同理。
     "app.storage.hls._fmp4":    (set(), 0.40),   # stdlib only（ffmpeg 是运行时依赖，D5）
@@ -85,18 +85,26 @@ BUDGET = {
     "app.storage.hls._write":   (set(), 0.40),   # 域货币 Frame
     "app.storage.hls._layout":  (set(), 0.40),   # stdlib only
     "app.storage.hls._m3u8":    (set(), 0.40),   # stdlib only
-    "app.storage.hls._meta":    (set(), 0.40),   # stdlib only
     # 读侧组合动作（可播段过滤 / 段级区间定位）与资源容器。两者的源码都是 stdlib-only
     # （`_read` 只组合 `_layout` + `_m3u8`；`types` 是子包的底、不 import 同包任何模块），
     # 但**本门禁验不到这一点** —— 见上方 BUDGET 开头的 ⚠ 段。
     "app.storage.hls._read":    (set(), 0.40),
     "app.storage.hls.types":    (set(), 0.40),
+    # 媒体轴（MediaTimeline / PlacedSegment）：源码 stdlib + `.types`，不碰盘；同上量的是 facade
+    "app.storage.hls._timeline": (set(), 0.40),
     # 服务层工具包。标记型 __init__（零 re-export），故这条盯的只是它自己；每个成员模块
     # 另行登记，由 test_layer_package_modules_are_all_budgeted 强制。
+    # 平台 DB 只读层。包根标记型；其余三条都经 `database` 拉起 sqlalchemy + psycopg2 + settings
+    # （实测 ~0.35s，sqlalchemy.orm 占 ~0.29s）。sqlalchemy 不在 HEAVY，这几条守的是 HEAVY 三项
+    # 与量级：查询函数只该组合 ORM，任何 numpy / cv2 / 单例进来都是走错了层。
+    "app.db":                   (set(), 0.20),
+    "app.db.database":          (set(), 1.0),
+    "app.db.tasks":             (set(), 1.0),
+    "app.db.alarms":            (set(), 1.0),
     "app.services.utils":              (set(), 0.20),
     "app.services.utils.vod_playlist": (set(), 0.20),   # stdlib only（math / typing）
-    # 媒体轴换算。它 import `app.storage.hls`（段与 EXTINF 的唯一来源），故预算照 hls 那条
-    # 给 0.40 —— 量的是同一份活；它本身是 stdlib（bisect / typing）。
+    # 断流判定（阈值 + first_gap / total_gap_ms）。它 import `app.storage.hls`（媒体轴在那），
+    # 故预算照 hls 那条给 0.40 —— 量的是同一份活；它本身是 stdlib（typing）。
     "app.services.utils.media_timeline": (set(), 0.40),
     "app.services.utils.task_queue":   (set(), 0.20),   # stdlib only
     "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
@@ -112,6 +120,7 @@ BUDGET = {
     "app.services.algorithm.colorstrip.config": (set(), 0.40),   # yaml
     "app.services.algorithm.colorstrip.grader": (set(), 0.60),   # numpy
     "app.services.algorithm.colorstrip.cli":    (set(), 0.60),   # 同上；argparse 不加码
+    "app.services.lab.service":  (set(), 0.60),   # routers/lab 模块级 import 它；经 clip_builder 拽 hls（numpy），实测 ~0.17s
     "app.services.client":      (set(), 1.0),
     "app.services.inference":   (set(), 1.0),
     # online / offline 两个子包的 `__init__` 都是标记型：import 子包不该拉起任何一段链路。
@@ -154,6 +163,11 @@ LAYER_PACKAGES = {
     # app.types：内存数据契约（Frame / FrameDetection），本层的入参出参就是它们
     # app.settings：落盘根的唯一来源，按 `utils/root.py` 的规矩只在函数体内 import
     "app/storage": ("app.storage", "app.types", "app.settings"),
+    # 平台 DB 只读层：routers（及后续 services）向下查它，它只认 ORM + 连接配置
+    # （app.settings 出 database_url）+ 异常契约（app.types.exceptions）。一旦 import
+    # services / storage / routers，查询就和运行态或盘上产物绑在一起，DB 与 storage
+    # 也不再是可以各自单独降级的两个下游（lab 存储模式、task 历史清单都靠这一点）。
+    "app/db": ("app.db", "app.types", "app.settings"),
     # 算法服务：无状态纯计算。白名单只有它自己 —— **零 `app.*` 依赖**，连 `app.settings`
     # 都不许碰：阈值、入参上限、默认档一律写进算法子包自己的配置文件（见
     # `app/services/algorithm/colorstrip/params.yaml`），这样一个算法包能整个拷走、单独跑。

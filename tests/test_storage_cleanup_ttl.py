@@ -30,11 +30,11 @@ def _age(directory: Path, days: float) -> None:
 
 
 def _make_run_step(root: Path, task_id: int, step_id: int, run_id: int = 1700) -> Path:
-    """`{step}/{run_id}/hls/` 下一段 + metadata。返回 step 目录。"""
+    """`{step}/{run_id}/hls/` 下一段 + 清单。返回 step 目录。"""
     hls_dir = root / str(task_id) / str(step_id) / str(run_id) / "hls"
     hls_dir.mkdir(parents=True)
     (hls_dir / "raw_segment_1700000000.mp4").write_bytes(b"fake")
-    (hls_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    (hls_dir / "raw_playlist.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
     return hls_dir.parent.parent
 
 
@@ -135,7 +135,7 @@ def test_failed_rename_keeps_the_step_intact(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_fs.os, "rename", boom)
     assert _worker(tmp_path)._scan_and_clean() == 0
-    assert (step_dir / "1700" / "hls" / "metadata.json").exists()
+    assert (step_dir / "1700" / "hls" / "raw_playlist.m3u8").exists()
 
 
 # --- 6. 布局不是本文件自己编的：用 runs + hls 的真实落位再钉一次 ---
@@ -147,7 +147,7 @@ def test_real_run_layout_is_covered(tmp_storage):
     from app.storage import hls, runs
 
     run = runs.allocate(11, 6)
-    seg = hls.segment_path(run, hls.SegmentRef(track="raw", ts_us=1700000000), create=True)
+    seg = hls.segment_path(run, hls.SegmentRef(track="raw", ts_ms=1700000000000), create=True)
     seg.write_bytes(b"fake")
     step_dir = tmp_storage / "11" / "6"
     assert seg.parent.parent.parent == step_dir

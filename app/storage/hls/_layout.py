@@ -1,17 +1,17 @@
 """hls 域的定位与命名 —— 域内每条路径都从这里出来。
 
     {root}/{task_id}/{step_id}/{run_id}/hls/
-      {track}_segment_{ts_us}.mp4   段（fMP4 fragment）      {track}_init.mp4   该轨 init
-      {track}_playlist.m3u8         LIVE 清单               raw_segment_{ts_us}.idx  逐帧 ts
-      metadata.json                 统计，兼作 TTL 判据      .stage_{track}_{ts_us}/  写入暂存
+      {track}_segment_{ts_ms}.mp4   段（fMP4 fragment）      {track}_init.mp4   该轨 init
+      {track}_playlist.m3u8         LIVE 清单               raw_segment_{ts_ms}.idx  逐帧 ts
+      .stage_{track}_{ts_ms}/       写入暂存
 
 路径函数的第一个参数是 `run: RunIdentity`（由调用方经 `runs.query` / `runs.allocate` 取得）。
 
-**身份键是 `SegmentRef(track, ts_us)`**：外部字符串一律先 `parse_segment_name` 解成 ref，
+**身份键是 `SegmentRef(track, ts_ms)`**：外部字符串一律先 `parse_segment_name` 解成 ref，
 路径由 ref 重建，绝不进字符串拼接。
 
-`ts_us` 是**截断**到微秒（`int(ts * 1e6)`）不是四舍五入：读侧 `bisect_right - 1` 建立在
-「段名 ts ≤ 段内首帧 ts」之上，进位会让它落到前一段。
+`ts_ms` 是**向下取整**到毫秒（按 ts 的精确值，不是 `int(ts * 1000)`）不是四舍五入：读侧
+`bisect_right - 1` 建立在「段名 ts ≤ 段内首帧 ts」之上，进位会让它落到前一段。
 
 **本模块不枚举目录**——「有哪些段」只由清单回答（`_read.list_segments`），
 理由见 `docs/update/20260919_VIDEO_TIMEBASE_SELECTION.md` §5.2。
@@ -21,7 +21,9 @@
 
 from __future__ import annotations
 
+import math
 import re
+from fractions import Fraction
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -39,11 +41,10 @@ TRACKS: Tuple[str, ...] = ("raw", "processed")
 # 产物文件名 —— 内容归本域自己持有，`_root` 对其零知识。
 _SEGMENT_SUFFIX = ".mp4"
 _SIDECAR_SUFFIX = ".idx"
-_METADATA_NAME = "metadata.json"
 
 # 段名 / init 名格式，同时是 parse_* 的校验器：斜杠、`..`、绝对路径、非法 track、非数字 ts
 # 一律匹配不上。**不能用 `endswith("init.mp4")` 顶替**——那会放行 `evil_init.mp4`。
-_SEGMENT_RE = re.compile(r"^(?P<track>raw|processed)_segment_(?P<ts_us>\d+)\.mp4$")
+_SEGMENT_RE = re.compile(r"^(?P<track>raw|processed)_segment_(?P<ts_ms>\d+)\.mp4$")
 _INIT_RE = re.compile(r"^(?P<track>raw|processed)_init\.mp4$")
 
 
@@ -66,14 +67,18 @@ def require_track(track: str) -> str:
     return track
 
 
-def ts_to_us(ts: float) -> int:
-    """墙钟秒 → 文件名里的 `ts_us`。**截断**不是四舍五入，理由见模块 docstring。"""
-    return int(ts * 1e6)
+def ts_to_ms(ts: float) -> int:
+    """墙钟秒 → 文件名里的 `ts_ms`。**向下取整**不是四舍五入，理由见模块 docstring。
+
+    按 float 的精确值取整：`int(ts * 1000)` 的乘法会舍入，`0.29 * 1000 == 290.0` 而 0.29 的
+    精确值略小于它，结果比首帧晚。
+    """
+    return math.floor(Fraction(ts) * 1000)
 
 
 def segment_name(ref: SegmentRef) -> str:
     """`SegmentRef` → 段文件名（`parse_segment_name` 的逆运算）。"""
-    return f"{require_track(ref.track)}_segment_{int(ref.ts_us)}{_SEGMENT_SUFFIX}"
+    return f"{require_track(ref.track)}_segment_{int(ref.ts_ms)}{_SEGMENT_SUFFIX}"
 
 
 def parse_segment_name(name: str) -> Optional[SegmentRef]:
@@ -81,7 +86,7 @@ def parse_segment_name(name: str) -> Optional[SegmentRef]:
     m = _SEGMENT_RE.match(name)
     if m is None:
         return None
-    return SegmentRef(track=m.group("track"), ts_us=int(m.group("ts_us")))
+    return SegmentRef(track=m.group("track"), ts_ms=int(m.group("ts_ms")))
 
 
 def segment_path(run: RunIdentity, ref: SegmentRef, *, create: bool = False) -> Path:
@@ -126,12 +131,6 @@ def playlist_path(run: RunIdentity, track: str) -> Path:
     return domain_dir(run) / f"{require_track(track)}_playlist.m3u8"
 
 
-def metadata_path(run: RunIdentity) -> Path:
-    """本域的统计文件路径（两轨共用一份）。它在 `insert_segment` 提交的最后一步出现，
-    `runs.query` 拿它当 hls 的可见判据。"""
-    return domain_dir(run) / _METADATA_NAME
-
-
 def stage_dir(run: RunIdentity, ref: SegmentRef) -> Path:
     """该段写入事务的暂存目录。
 
@@ -139,4 +138,4 @@ def stage_dir(run: RunIdentity, ref: SegmentRef) -> Path:
     **与产物同键**（不是随机 nonce），故每段最多留一份残留、重试自然复用。它匹配不上
     `_SEGMENT_RE`，读侧枚举天然跳过。
     """
-    return domain_dir(run) / f".stage_{require_track(ref.track)}_{int(ref.ts_us)}"
+    return domain_dir(run) / f".stage_{require_track(ref.track)}_{int(ref.ts_ms)}"

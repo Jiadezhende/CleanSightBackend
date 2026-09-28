@@ -100,8 +100,8 @@ class FakeHls:
         self.calls = []
         self.runs = []
 
-    def ts_to_us(self, ts):             # `_SegmentJob.label` 用得到
-        return int(ts * 1e6)
+    def ts_to_ms(self, ts):             # `_SegmentJob.label` 用得到
+        return int(ts * 1000)
 
     def insert_segment(self, run, track, frames):
         self.calls.append(("insert", run.task_id, run.step_id, track, len(frames)))
@@ -196,7 +196,7 @@ class TestRunIsolation:
         assert svc.submit_segment(cq, "raw", _frames()) is True
 
         assert fake_hls.runs == [cq.run]
-        assert svc._hls_queue.labels == ["seg:1/2/5/raw@1700000000"]
+        assert svc._hls_queue.labels == ["seg:1/2/5/raw@1700000"]
 
     def test_late_segment_of_the_old_generation_lands_in_its_own_run(self, fake_hls):
         """同 step 重启后，旧一代迟到的段写进旧 run（补全旧录像结尾），不丢、不写进新 run。"""
@@ -666,8 +666,8 @@ class TestEndToEnd:
         hls_dir = tmp_storage / "1" / "2" / str(cq.run.run_id) / "hls"
         assert sorted(p.name for p in hls_dir.glob("*.mp4")) == [
             "raw_init.mp4",
-            "raw_segment_1700000000.mp4",
-            "raw_segment_1800000000.mp4",
+            "raw_segment_1700000.mp4",
+            "raw_segment_1800000.mp4",
         ]
         playlist = hls.playlist_path(cq.run, "raw").read_text(encoding="utf-8")
         assert playlist.count("#EXTINF:") == 2

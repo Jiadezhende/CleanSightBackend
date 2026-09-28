@@ -51,23 +51,23 @@ class TestAllocate:
         assert (run.task_id, run.step_id) == (1, 2)
         assert (tmp_storage / "1" / "2" / str(run.run_id)).is_dir()
 
-    def test_run_id_is_microseconds_now(self, tmp_storage, monkeypatch):
+    def test_run_id_is_epoch_milliseconds_now(self, tmp_storage, monkeypatch):
         monkeypatch.setattr(runs.time, "time_ns", lambda: 1_700_000_000_123_456_789)
-        assert runs.allocate(1, 2).run_id == 1_700_000_000_123_456
+        assert runs.allocate(1, 2).run_id == 1_700_000_000_123
 
     def test_strictly_increasing_even_if_clock_stalls_or_goes_back(self, tmp_storage, monkeypatch):
         clock = iter([5_000_000, 5_000_000, 1_000_000])
-        monkeypatch.setattr(runs.time, "time_ns", lambda: next(clock) * 1000)
+        monkeypatch.setattr(runs.time, "time_ns", lambda: next(clock) * 1_000_000)
         ids = [runs.allocate(1, 2).run_id for _ in range(3)]
         assert ids == [5_000_000, 5_000_001, 5_000_002]
 
     def test_non_numeric_dirs_are_not_run_ids(self, tmp_storage, monkeypatch):
         (tmp_storage / "1" / "2" / "hls").mkdir(parents=True)
-        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000)
+        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000_000)
         assert runs.allocate(1, 2).run_id == 7
 
     def test_steps_are_independent(self, tmp_storage, monkeypatch):
-        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000)
+        monkeypatch.setattr(runs.time, "time_ns", lambda: 7_000_000)
         assert runs.allocate(1, 2).run_id == 7
         assert runs.allocate(1, 3).run_id == 7
 
@@ -78,7 +78,7 @@ class TestAllocate:
 
 
 def _alloc(monkeypatch, task, step, run_id):
-    monkeypatch.setattr(runs.time, "time_ns", lambda: run_id * 1000)
+    monkeypatch.setattr(runs.time, "time_ns", lambda: run_id * 1_000_000)
     run = runs.allocate(task, step)
     assert run.run_id == run_id
     return run
@@ -104,13 +104,15 @@ class TestQuery:
 
         assert runs.query(1, 2) == mid
 
-    def test_hls_metadata_makes_a_run_visible(self, tmp_storage, monkeypatch):
+    @pytest.mark.parametrize("track", ["raw", "processed"])
+    def test_registered_segment_makes_a_run_visible(self, tmp_storage, monkeypatch, track):
         run = _alloc(monkeypatch, 1, 2, 10)
-        hls_dir = hls.init_path(run, "raw").parent
+        hls_dir = hls.init_path(run, track).parent
         hls_dir.mkdir()
-        (hls_dir / "raw_playlist.m3u8").write_text("#EXTM3U\n")
-        assert runs.query(1, 2) is None           # 只有 playlist 不算
-        (hls_dir / "metadata.json").write_text("{}")
+        playlist = hls.playlist_path(run, track)
+        playlist.write_text("#EXTM3U\n")
+        assert runs.query(1, 2) is None           # 只有清单头、没有条目不算
+        playlist.write_text(f"#EXTM3U\n#EXTINF:10.000,\n{track}_segment_1700000000000.mp4\n")
         assert runs.query(1, 2) == run
 
     def test_no_visible_run_is_none(self, tmp_storage, monkeypatch):
@@ -206,3 +208,47 @@ class TestSuccessor:
 
     def test_latest_run_has_no_successor(self, tmp_storage, monkeypatch):
         assert runs.successor(_alloc(monkeypatch, 1, 2, 10)) is None
+
+
+# ---------------------------------------------------------------------------
+# query_latest_by_step / query_lifespan_ms
+# ---------------------------------------------------------------------------
+
+
+class TestQueryLatestByStep:
+    def test_latest_visible_run_per_step_in_step_order(self, tmp_storage, monkeypatch):
+        s3 = _alloc(monkeypatch, 1, 3, 10)
+        inference.append_detections(s3, [_fd(1.0)])
+        s1_old = _alloc(monkeypatch, 1, 1, 20)
+        inference.append_detections(s1_old, [_fd(1.0)])
+        s1_new = _alloc(monkeypatch, 1, 1, 30)
+        inference.append_detections(s1_new, [_fd(2.0)])
+        _alloc(monkeypatch, 1, 1, 40)                  # 最新但不可见：跳过它，不跳过这个 step
+
+        assert runs.query_latest_by_step(1) == [s1_new, s3]
+
+    def test_step_without_visible_run_is_left_out(self, tmp_storage, monkeypatch):
+        _alloc(monkeypatch, 1, 1, 10)                  # 只有空 run
+        s2 = _alloc(monkeypatch, 1, 2, 20)
+        inference.append_detections(s2, [_fd(1.0)])
+
+        assert runs.query_latest_by_step(1) == [s2]
+
+    def test_other_tasks_do_not_leak_in(self, tmp_storage, monkeypatch):
+        other = _alloc(monkeypatch, 2, 1, 10)
+        inference.append_detections(other, [_fd(1.0)])
+        assert runs.query_latest_by_step(1) == []
+
+    def test_unknown_task_is_empty(self, tmp_storage):
+        assert runs.query_latest_by_step(99) == []
+
+
+class TestQueryLifespan:
+    def test_bounded_by_the_next_allocated_run(self, tmp_storage, monkeypatch):
+        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000)
+        _alloc(monkeypatch, 1, 2, 1_700_000_060_000)
+        assert runs.query_lifespan_ms(a) == (1_700_000_000_000, 1_700_000_060_000)
+
+    def test_latest_run_is_open_ended(self, tmp_storage, monkeypatch):
+        a = _alloc(monkeypatch, 1, 2, 1_700_000_000_000)
+        assert runs.query_lifespan_ms(a) == (1_700_000_000_000, None)

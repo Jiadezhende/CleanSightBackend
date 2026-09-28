@@ -445,7 +445,7 @@ class APIClient:
 def seed_hls_segments(
     task_id: int,
     step_id: int,
-    ts_us_list: List[int],
+    ts_ms_list: List[int],
     segment_duration: float = 10.0,
 ) -> Path:
     """在该 step 最新 run 的 `hls/`（`{task}/{step}/{run_id}/hls/`）为 raw / processed 两轨铺假段 + init 并登记进清单。
@@ -460,10 +460,10 @@ def seed_hls_segments(
 
     for track in ("raw", "processed"):
         domain_dir = seed_track(
-            task_id, step_id, ts_us_list, track=track, default_extinf_s=segment_duration
+            task_id, step_id, ts_ms_list, track=track, default_extinf_s=segment_duration
         )
     step_dir = domain_dir.parent.parent
-    print(f"✅ 创建测试 HLS 段: {domain_dir} ({len(ts_us_list)} 段/轨道)")
+    print(f"✅ 创建测试 HLS 段: {domain_dir} ({len(ts_ms_list)} 段/轨道)")
     return step_dir
 
 

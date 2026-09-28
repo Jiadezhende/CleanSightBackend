@@ -177,7 +177,7 @@
       "task_id": 101,                 // → WS /ai/video?task_id=101
       "source_ip": "10.0.0.1",        // → WS /ai/video?client_id=10.0.0.1
       "step_id": 2,                   // 当前洗消阶段，仅供展示，不参与画面路由
-      "run_id": 1700000000000000      // 这次 run 的身份；回放 / 时间轴带上它即锁定这次 run
+      "run_id": 1700000000000      // 这次 run 的身份；回放 / 时间轴带上它即锁定这次 run
     }
   ]
 }
@@ -232,8 +232,8 @@
       "source_ip": "10.0.0.1",              // DB 补；DB 不可用或表里无此任务 → null
       "latest_ms": 1700000600000,           // 最近一次有画面的时刻（展示用，不是排序键）
       "steps": [                            // 时间字段只在 step 粒度给，见下方说明
-        { "step_id": 1, "run_id": 1699999998000000, "tracks": ["raw", "processed"], "start_ms": 1700000000000, "last_segment_ms": 1700000580000 },
-        { "step_id": 2, "run_id": 1700000588000000, "tracks": ["raw"],              "start_ms": 1700000590000, "last_segment_ms": 1700000600000 }
+        { "step_id": 1, "run_id": 1699999998000, "tracks": ["raw", "processed"], "start_ms": 1700000000000, "last_segment_ms": 1700000580000 },
+        { "step_id": 2, "run_id": 1700000588000, "tracks": ["raw"],              "start_ms": 1700000590000, "last_segment_ms": 1700000600000 }
       ]
     }
   ]

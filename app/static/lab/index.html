@@ -905,15 +905,8 @@ createApp({
       const pad = (n, w = 2) => String(n).padStart(w, '0');
       return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
     }
-    function normalizeEpochMs(value) {
-      const n = Number(value);
-      if (!n) return 0;
-      if (n < 10 ** 11) return n * 1000;
-      if (n >= 10 ** 14) return Math.floor(n / 1000);
-      return n;
-    }
-    function formatTaskTime(value) {
-      return formatAbsTime(normalizeEpochMs(value));
+    function formatTaskTime(value) {   // /tasks 的任务时间两种模式都是 epoch 毫秒
+      return formatAbsTime(Number(value) || 0);
     }
     function formatDuration(ms) {
       if (!ms || ms < 0) return '—';

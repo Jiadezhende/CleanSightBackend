@@ -116,7 +116,7 @@ http://<host>:8000/media/segment/<token>
 {
   "task_id": 123,
   "step_id": 10,
-  "run_id": 1751799990000000,    // 实际读的 run；仅缺省 run_id 且该 step 无可见 run 时为 null
+  "run_id": 1751799990000,    // 实际读的 run；仅缺省 run_id 且该 step 无可见 run 时为 null
   "start_ms": 1751800000000,     // 该 run 最早段起点，epoch 毫秒；无段时为 0
   "end_ms": 1751800060000,       // 最后一段起点 + 其 EXTINF 时长，epoch 毫秒；无段时为 0
   "duration_ms": 60000,          // end_ms - start_ms（含断流空洞）；无段时为 0
@@ -145,7 +145,7 @@ http://<host>:8000/media/segment/<token>
 | `run_id` | int \| null | 实际读的 run（见 [README › run 定位](README.md#run-定位可选-run_id)）。**仅当缺省 `run_id` 且该 step 没有可见 run 时为 `null`**：此时其余字段保持旧的全 0 形态，`events` 不按 run 过滤 |
 | `start_ms` / `end_ms` / `duration_ms` | int | epoch **毫秒**。该 run 磁盘上无段时**三者均为 `0`**。取 raw / processed **双轨并集**的最早起点、最晚终点 |
 | `end_ms` | int | = `max(段起点 + 该段 EXTINF)`，**不是** `max(段起点)`——已含最后一段自身时长，与 `<video>.duration` 对齐 |
-| `events` | array | 该 step 中落在**该 run 存续期** `[run_id 时刻, 同 step 下一个 run 的 run_id 时刻)` 内的告警（`run_id` 微秒折成毫秒比较；最新 run 无上界），按 `ts_ms` 升序。**无告警或 DB 不可用时为 `[]`**。DB 告警没有 run 维度，故按时间切；结算告警时间戳是停止时刻（晚于最后一段、早于下一个 run 分配），仍落在本区间，`media_offset_ms` 吸附到进度条末端 |
+| `events` | array | 该 step 中落在**该 run 存续期** `[run_id 时刻, 同 step 下一个 run 的 run_id 时刻)` 内的告警（`run_id` 即 epoch 毫秒，直接与 `ts_ms` 比较；最新 run 无上界），按 `ts_ms` 升序。**无告警或 DB 不可用时为 `[]`**。DB 告警没有 run 维度，故按时间切；结算告警时间戳是停止时刻（晚于最后一段、早于下一个 run 分配），仍落在本区间，`media_offset_ms` 吸附到进度条末端 |
 | `media_duration_ms` | int | 该 `track` 的 Σ EXTINF，**与 `<video>.duration` 同源**。无段时 `0` |
 | `gap_total_ms` / `has_gap` | int / bool | 该轨累计断流时长：所有满足 `下一段起点 − (本段起点 + EXTINF) > 0.5s` 的空隙之和。无段时 `0` / `false` |
 | `events[].ts_ms` | int | epoch **毫秒**（`detected_at` 为 null 的告警被跳过，不进 events） |

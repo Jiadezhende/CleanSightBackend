@@ -4,18 +4,15 @@
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import List
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy.exc import SQLAlchemyError
 
-from app.db.database import get_db
-from app.db.alarms import DBAlarm
-from app.db.tasks import DBTask
+from app.db import alarms as db_alarms
+from app.db import tasks as db_tasks
 from app.services.client.instance import client_service
 from app.storage import hls, runs
 from app.storage import tasks as step_tasks
-from app.types.exceptions import DatabaseError
 
 router = APIRouter(prefix="/task", tags=["task"])
 logger = logging.getLogger(__name__)
@@ -37,43 +34,23 @@ async def get_task_alarms(task_id: int):
     Raises:
         DatabaseError: 数据库查询失败（由边界层 3 转换为 503）
     """
-    db = next(get_db())
-    try:
-        try:
-            rows = (
-                db.query(DBAlarm)
-                .filter(DBAlarm.task_id == int(task_id))
-                .order_by(DBAlarm.create_time.desc())
-                .all()
-            )
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message=f"Failed to fetch alarms for task {task_id}",
-                retryable=True,
-                query=f"SELECT ... FROM clean_alarm WHERE task_id = {task_id}",
-            ) from e
-
-        alarms = []
-        for r in rows:
-            alarms.append(
-                {
-                    "alarm_id": r.alarm_id,
-                    "task_id": r.task_id,
-                    "step_id": r.step_id,
-                    "step_name": r.step_name,
-                    "alarm_type": r.alarm_type,
-                    "severity": r.severity,
-                    "message": r.message,
-                    "resolved": bool(r.resolved) if r.resolved is not None else False,
-                    "resolved_by": r.resolved_by,
-                    "detected_at": int(r.detected_at) if r.detected_at is not None else None,  # type: ignore[arg-type]
-                    "resolved_at": int(r.resolved_at) if r.resolved_at is not None else None,  # type: ignore[arg-type]
-                }
-            )
-
-        return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
-    finally:
-        db.close()
+    alarms = [
+        {
+            "alarm_id": r.alarm_id,
+            "task_id": r.task_id,
+            "step_id": r.step_id,
+            "step_name": r.step_name,
+            "alarm_type": r.alarm_type,
+            "severity": r.severity,
+            "message": r.message,
+            "resolved": bool(r.resolved) if r.resolved is not None else False,
+            "resolved_by": r.resolved_by,
+            "detected_at": int(r.detected_at) if r.detected_at is not None else None,  # type: ignore[arg-type]
+            "resolved_at": int(r.resolved_at) if r.resolved_at is not None else None,  # type: ignore[arg-type]
+        }
+        for r in db_alarms.query_task_alarms(task_id)  # create_time 降序
+    ]
+    return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
 
 
 def _build_signals_10s(stream_summary: dict) -> dict:
@@ -158,33 +135,6 @@ async def get_client_frontend_message(
 # ---------------------------------------------------------------------------
 
 
-def _fetch_source_ips(task_ids: List[int]) -> Dict[int, Optional[str]]:
-    """批量取 task_id → source_ip（单次 IN 查询）。
-
-    DB 在这里是**锦上添花**：历史清单的存在性判定完全来自磁盘，source_ip 只是
-    给大屏显示点位。故 DB 任何故障（含建连失败）都吞掉返回空映射，让清单降级为
-    source_ip=null 照常返回，不 503——与 /traceback timeline 的降级策略一致。
-    """
-    if not task_ids:
-        return {}
-
-    db = None
-    try:
-        db = next(get_db())
-        rows = (
-            db.query(DBTask.task_id, DBTask.source_ip)
-            .filter(DBTask.task_id.in_(task_ids))
-            .all()
-        )
-        return {int(r.task_id): r.source_ip for r in rows}
-    except Exception as exc:  # noqa: BLE001 —— 降级路径，不区分故障类型
-        logger.warning("[TaskList] DB 不可用，历史清单降级为无 source_ip: %s", exc)
-        return {}
-    finally:
-        if db is not None:
-            db.close()
-
-
 @router.get("/live")
 def list_live_tasks():
     """在线任务清单（大屏用）。纯内存，零 DB、零磁盘。
@@ -221,29 +171,21 @@ def _summarise_steps(task_id: int) -> List[dict]:
     实测有过 20+ 秒的差，故它表达的是「该 step 有画面的时间跨度」，不等于任一单轨的播放范围。
     `last_segment_ms` 是最后一段的**起点**，不是结束时刻。
 
-    ⚠ `tasks.list_step_ids` **不过滤空 step**（有无产物是域知识，不在目录层）。
-    「两轨都没段就丢弃」必须在这里补：目录建了但没写成段（起流即失败）对回放没有意义，
-    清单不该把它露给前端点开黑屏。
+    ⚠ 「两轨都没段就丢弃」（`query_span` 返回 None）必须在这里补：`query_latest_by_step` 只看
+    run 可见，不看有无段；目录建了但没写成段（起流即失败）的 step 点开是黑屏。
     """
     steps: List[dict] = []
-    for step_id in step_tasks.list_step_ids(task_id):
-        run = runs.query(task_id, step_id)
-        if run is None:
+    for run in runs.query_latest_by_step(task_id):
+        span = hls.query_span(run)
+        if span is None:
             continue
-        # 双轨各读一次清单（清单是"有哪些段"的唯一真源；原先那次双轨共用的 iterdir 会把
-        # 在途段与登记失败的段一并算进来）
-        by_track = {t: hls.list_segments(run, t) for t in hls.TRACKS}
-        tracks = [t for t in hls.TRACKS if by_track[t]]
-        if not tracks:
-            continue
-        all_ts = [seg.ref.ts_us for t in tracks for seg in by_track[t]]
         steps.append(
             {
-                "step_id": step_id,
+                "step_id": run.step_id,
                 "run_id": run.run_id,
-                "tracks": tracks,
-                "start_ms": min(all_ts) // 1000,
-                "last_segment_ms": max(all_ts) // 1000,
+                "tracks": list(span.tracks),
+                "start_ms": span.start_ms,
+                "last_segment_ms": span.last_start_ms,
             }
         )
     return steps
@@ -319,7 +261,13 @@ def list_history_tasks():
     tasks.sort(key=_sort_key, reverse=True)
     tasks = tasks[:_HISTORY_LIMIT]
 
-    source_ips = _fetch_source_ips([t["task_id"] for t in tasks])
+    # DB 只给大屏补点位显示，存在性判定全在磁盘：DB 任何故障（含建连失败）都降级为
+    # source_ip=null 照常返回，不 503——与 /traceback timeline 的降级策略一致
+    try:
+        source_ips = db_tasks.query_source_ips([t["task_id"] for t in tasks])
+    except Exception as exc:  # noqa: BLE001 —— 降级路径，不区分故障类型
+        logger.warning("[TaskList] DB 不可用，历史清单降级为无 source_ip: %s", exc)
+        source_ips = {}
     for t in tasks:
         t["source_ip"] = source_ips.get(t["task_id"])
 

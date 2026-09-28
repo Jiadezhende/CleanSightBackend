@@ -128,7 +128,7 @@ def make_run(task_id: int, step_id: int, run_id: Optional[int] = None) -> RunIde
     首帧之前，timeline 的告警区间才对得上）；否则 `runs.allocate`。
 
     调用前须让 `settings.storage_dir` 指到临时目录。只建 run 目录，**不保证可见**：
-    `runs.query` 缺省只认有 `hls/metadata.json` 或 `inference/detections.jsonl` 的 run。
+    `runs.query` 缺省只认清单里有段或有 `inference/detections.jsonl` 的 run。
     """
     from app.storage import runs
     from app.storage.utils import root as _root
@@ -154,9 +154,9 @@ def seed_hls_segments(
     default_extinf_s: float = 10.0,
 ):
     """在该 step 最新的 run（`make_run`）的 `hls/` 下铺段文件 + init，**并登记进清单**；
-    返回域目录。同时写一份 `metadata.json`，让这个 run 对 `runs.query` 可见。
+    返回域目录。有段登记即对 `runs.query` 可见。
 
-    `items` 收 `[ts_us]` 或 `[(ts_us, extinf_s)]`。
+    `items` 收 `[ts_ms]` 或 `[(ts_ms, extinf_s)]`（ts_ms 是段名里的 epoch 毫秒）。
 
     **登记那一步不能省**：「有哪些段」只由清单回答，光有段文件 = 没有段（在途，或
     `_m3u8.append` 失败留下的孤儿）。不走 `hls.insert_segment` 只是为了免拉 cv2/ffmpeg，
@@ -171,8 +171,8 @@ def seed_hls_segments(
     normalised = [it if isinstance(it, tuple) else (it, default_extinf_s) for it in items]
     domain_dir = _layout.domain_dir(run, create=True)
 
-    for ts_us, extinf_s in normalised:
-        ref = hls.SegmentRef(track=track, ts_us=ts_us)
+    for ts_ms, extinf_s in normalised:
+        ref = hls.SegmentRef(track=track, ts_ms=ts_ms)
         path = hls.segment_path(run, ref)
         path.write_bytes(b"fake-fmp4")
         _m3u8.append(
@@ -181,7 +181,4 @@ def seed_hls_segments(
         )
     if with_init:
         hls.init_path(run, track).write_bytes(b"fake-init")
-    metadata = _layout.metadata_path(run)
-    if not metadata.exists():
-        metadata.write_text("{}", encoding="utf-8")
     return domain_dir
