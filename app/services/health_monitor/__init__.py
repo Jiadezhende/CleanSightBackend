@@ -4,7 +4,7 @@
 职责：
 - 监控所有客户端的流健康状态
 - 检测断流并自动重连
-- 协调完整清理（Stream + Inference + ClientManager）
+- 协调完整清理（Stream + Inference + ClientService）
 - 检测孤儿流（有 ClientQueues 但没有 Decoder）
 
 生命周期由本包的 `lifespan()` 负责，`main.py` 嵌套调用；单例在 `instance.py`。

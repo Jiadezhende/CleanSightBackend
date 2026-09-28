@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from app.services.client.manager import client_manager
+from app.services.client.instance import client_service
 from app.services.inference.offline.instance import offline_job_service
 from app.types.exceptions import NotFoundError
 
@@ -155,7 +155,7 @@ def get_overview():
     换键后注册表键即 task_id，一条目 = 一个活跃 run；响应键 `clients`/`client_id`
     沿用旧名（admin 页 wire，值为 task_id），语义已是 run/任务。
     """
-    all_clients = client_manager.snapshot()
+    all_clients = client_service.snapshot()
     clients_info = [_client_info(cid, q) for cid, q in all_clients.items()]
     total_queued = sum(
         d["queue_depths"].get("ca_ready", 0)
@@ -177,16 +177,16 @@ def get_clients():
 
     一 run 一 CQ = `registry[task_id]`；响应/路径的 `clients`·`client_id` 为 admin 页 wire 旧名（值=task_id）。
     """
-    all_clients = client_manager.snapshot()
+    all_clients = client_service.snapshot()
     return [_client_info(cid, q) for cid, q in all_clients.items()]
 
 
 @router.get("/clients/{client_id}/alarms")
 def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
     """从内存告警日志读取该 run（task_id）最近 n 条告警（不走 DB）。"""
-    if not client_manager.has_client(client_id):
+    if not client_service.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
-    cq = client_manager.get(client_id)
+    cq = client_service.get(client_id)
     alarms = cq.get_recent_alarms(n=n)
     return {
         "client_id": client_id,

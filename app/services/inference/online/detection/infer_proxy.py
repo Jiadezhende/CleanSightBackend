@@ -26,7 +26,7 @@ from .stage_worker import run_stages
 from app.services.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 if TYPE_CHECKING:
-    from app.services.client import ClientQueues
+    from app.services.client.queues import ClientQueues
     from app.types.detection import DetectorOutput
 
 logger = logging.getLogger(__name__)

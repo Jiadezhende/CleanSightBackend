@@ -33,7 +33,7 @@ class FrameConfig:
 class StateConfig:
     """状态配置"""
 
-    # 注意：stage 不在此配置——由 RunController 在 /api/start 时按 current_step 解析后传给 ClientQueues。
+    # 注意：stage 不在此配置——由 RunControlService 在 /api/start 时按 current_step 解析后传给 ClientQueues。
     heartbeat_timeout: int = 30  # 心跳超时（秒）
 
 

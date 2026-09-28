@@ -56,7 +56,7 @@ class TestRtspInputOpts:
 
 def _monitor(cleanup_timeout: float) -> GlobalHealthMonitor:
     return GlobalHealthMonitor(
-        client_manager=MagicMock(),
+        client_service=MagicMock(),
         stream_service=MagicMock(),
         inference_service=MagicMock(),
         config=HealthMonitorConfig(cleanup_timeout=cleanup_timeout),

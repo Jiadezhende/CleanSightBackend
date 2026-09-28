@@ -29,14 +29,14 @@ app/
 ├── routers/             # HTTP/WS 路由：api / ai / task / health / traceback / media / lab / admin / algorithm
 │   └── utils/           # 本层通用：run 解析 / 媒体 token 签发与校验
 ├── services/
-│   ├── run_control.py   # RunController — 跨服务起停一次 run 的单一编排出口
+│   ├── run_control/     # RunControlService — 跨服务起停一次 run 的单一编排出口
 │   ├── utils/           # 服务层通用：串行队列 / 线程自愈 / 压力日志 / Prometheus 指标 / VOD m3u8 / 媒体轴
-│   ├── client/          # ClientManager 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
+│   ├── client/          # ClientService 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
 │   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
 │   ├── persistence/     # 告警落库与上报 + TTL 清理（HLS 写侧已迁 recording/）
-│   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunController）
+│   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunControlService）
 │   ├── lab/             # 送标裁剪 + Label Studio 上传
 │   └── algorithm/       # 无状态算法服务（试纸比色），与主流程无关，只被 /algorithm/* 调用
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
@@ -104,7 +104,7 @@ docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口�
 
 ## 整体架构
 
-CleanSight 采用**流 / 推理 / 持久化解耦**架构，`RunController` 统一编排一次 run 的起停，运行键为 int `task_id`。
+CleanSight 采用**流 / 推理 / 持久化解耦**架构，`RunControlService` 统一编排一次 run 的起停，运行键为 int `task_id`。
 
 ```mermaid
 graph LR

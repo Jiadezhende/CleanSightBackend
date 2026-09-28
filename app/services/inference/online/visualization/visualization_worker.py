@@ -25,7 +25,7 @@ from app.types.detection import DetectorOutput, FrameDetection
 from app.services.inference.online.render import RenderSpec
 from app.types.frame import Frame
 from app.services.inference.online.naming import get_stage_alias
-from app.services.client import client_manager
+from app.services.client.instance import client_service
 from app.services.utils.worker_guard import guarded_run
 from .visualizer import FixedVisualizer
 
@@ -139,7 +139,7 @@ class VisualizationWorker:
         # 它量的是「viz 线程有没有转够」，与客户端数无关。
         self._tick_count += 1
 
-        all_clients = client_manager.snapshot()
+        all_clients = client_service.snapshot()
         for task_id, cq in all_clients.items():
             try:
                 self._process_client(task_id, cq, now)
@@ -149,7 +149,7 @@ class VisualizationWorker:
                     self.worker_id, task_id, e, exc_info=True,
                 )
 
-        # 自清理：移除已不在 ClientManager 中的客户端去重记录（防止内存泄漏）
+        # 自清理：移除已不在 ClientService 中的客户端去重记录（防止内存泄漏）
         stale_ids = self._last_rendered_ts.keys() - all_clients.keys()
         for stale_id in stale_ids:
             del self._last_rendered_ts[stale_id]

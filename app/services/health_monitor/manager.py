@@ -4,7 +4,7 @@
 独立的全局服务，负责：
 1. 监控所有客户端的流健康状态
 2. 检测断流并自动重连
-3. 重连失败后协调完整清理（Stream + Inference + ClientManager）
+3. 重连失败后协调完整清理（Stream + Inference + ClientService）
 4. 检测孤儿流（有 ClientQueues 但没有 Decoder）
 
 职责：
@@ -34,7 +34,7 @@ class GlobalHealthMonitor:
 
     def __init__(
         self,
-        client_manager=None,
+        client_service=None,
         stream_service=None,
         inference_service=None,
         config: Optional[HealthMonitorConfig] = None,
@@ -48,14 +48,14 @@ class GlobalHealthMonitor:
         测试传入的 mock 会原样保留，`start()` 不覆盖已注入的值。
 
         Args:
-            client_manager: ClientManager 实例，None 时 start() 取全局单例
+            client_service: ClientService 实例，None 时 start() 取全局单例
             stream_service: StreamService 实例，None 时 start() 取全局单例
             inference_service: InferenceService 实例，None 时 start() 取全局单例
             config: 健康监控配置，None 时 start() 读 yaml
             recording_service: RecordingService 实例，None 时 start() 取全局单例。
                 本模块只用它一个方法：断流时登记残帧 flush（见 `_enter_reconnect_mode`）
         """
-        self._client_manager = client_manager
+        self._client_service = client_service
         self._stream_service = stream_service
         self._inference_service = inference_service
         self._recording_service = recording_service
@@ -159,10 +159,10 @@ class GlobalHealthMonitor:
             from .config import get_health_monitor_config
 
             self.config = get_health_monitor_config()
-        if self._client_manager is None:
-            from app.services.client.manager import client_manager
+        if self._client_service is None:
+            from app.services.client.instance import client_service
 
-            self._client_manager = client_manager
+            self._client_service = client_service
         if self._stream_service is None:
             from app.services.stream.instance import stream_service
 
@@ -202,7 +202,7 @@ class GlobalHealthMonitor:
     def _check_all_clients(self):
         """检查所有客户端的健康状态（含孤儿流检测和孤儿解码器检测）"""
         current_time = time.time()
-        all_clients = self._client_manager.snapshot()
+        all_clients = self._client_service.snapshot()
 
         # 获取所有活跃的解码器
         active_decoders = set(self._stream_service.get_all_task_ids())
@@ -420,7 +420,7 @@ class GlobalHealthMonitor:
         职责边界：
         - 这是唯一的清理入口点
         - 所有清理操作（API、健康监控、孤儿流）都通过此方法
-        - 协调三个模块的清理：StreamService + InferenceService + ClientManager
+        - 协调三个模块的清理：StreamService + InferenceService + ClientService
 
         Args:
             task_id: 客户端ID
@@ -457,10 +457,10 @@ class GlobalHealthMonitor:
         # 步骤 0: 清理监控器自身的客户端状态（HealthMonitor 专属，防内存泄漏）
         self._reconnecting_clients.pop(task_id, None)
 
-        # 步骤 1-3: 委托给 RunController（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
-        from app.services.run_control import run_controller
+        # 步骤 1-3: 委托给 RunControlService（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
+        from app.services.run_control.instance import run_control_service
 
-        return run_controller.stop_run(
+        return run_control_service.stop_run(
             task_id, reason, skip_decoder=skip_decoder, expected=expected
         )
 
@@ -572,7 +572,7 @@ class GlobalHealthMonitor:
         # 仍需从 decoders 字典中移除条目，否则下一轮检查会重复检测到孤儿。
         # 绕过 stop_run（无 CQ），故显式持 lock_for 防与并发 start 撞。
         try:
-            with self._client_manager.lock_for(task_id):
+            with self._client_service.lock_for(task_id):
                 self._stream_service.stop_stream(task_id)
             logger.info(
                 f"[GlobalHealthMonitor] Orphan decoder stopped: {task_id}"
@@ -595,7 +595,7 @@ class GlobalHealthMonitor:
 
         职责边界：
         - 健康监控负责系统级别的状态汇总
-        - 整合来自多个模块的信息（ClientManager、StreamService、InferenceService）
+        - 整合来自多个模块的信息（ClientService、StreamService、InferenceService）
         - 提供统一的系统状态视图
 
         Returns:

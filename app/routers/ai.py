@@ -8,7 +8,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from app.types.temporal import TemporalSegment
-from app.services.client import client_manager
+from app.services.client.instance import client_service
 from app.services.utils.media_timeline import MediaTimeline
 from app.storage import inference as inference_store
 from app.types.exceptions import NotFoundError
@@ -30,7 +30,7 @@ _WS_MAX_SEND_FPS = 30
 async def websocket_video_endpoint(websocket: WebSocket):
     """
     WebSocket端点：两种并列的请求模式（互斥，task_id 优先），非新旧之分：
-    - `?task_id=xxx` → `client_manager.get(task_id)`，锁定**某一次具体 run**（不可变运行键）；
+    - `?task_id=xxx` → `client_service.get(task_id)`，锁定**某一次具体 run**（不可变运行键）；
       run 结束即止、不跟随新任务。适合溯源 / 针对某次任务的监看。
     - `?client_id=<source_ip>` → 每轮 `find_by_source_ip` 解析该**点位**的当前 live run
       （命中多个取最晚启动者），任务来了显示、走了黑屏、换 run 自动跟随。适合大屏 / 固定点位常亮。
@@ -51,10 +51,10 @@ async def websocket_video_endpoint(websocket: WebSocket):
         except ValueError:
             await websocket.close(code=1008)
             return
-        resolve = lambda: client_manager.get(task_id)  # noqa: E731
+        resolve = lambda: client_service.get(task_id)  # noqa: E731
         label = f"task_id={task_id}"
     elif client_id:
-        resolve = lambda: client_manager.find_by_source_ip(client_id)  # noqa: E731
+        resolve = lambda: client_service.find_by_source_ip(client_id)  # noqa: E731
         label = f"client_id={client_id}"
     else:
         await websocket.close(code=1008)

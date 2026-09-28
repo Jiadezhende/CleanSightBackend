@@ -25,7 +25,7 @@ class SegmentSweeper:
     def __init__(self, clients, service, interval_seconds: float = 1.0):
         """
         Args:
-            clients: 提供 `snapshot()` 的 CQ 注册表（= `client_manager`）。
+            clients: 提供 `snapshot()` 的 CQ 注册表（= `client_service`）。
             service: 每个 CQ 交给谁去取（= `RecordingService`，只用它的 `collect_from`）。
             interval_seconds: 扫描间隔（秒）。1s ≪ 段周期(≈10s) 且 ≪ 缓冲容量(≈90s)。
         """

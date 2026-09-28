@@ -15,14 +15,13 @@ import threading
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
-from app.services.client.manager import client_manager
+from app.services.client.instance import client_service
 from app.settings import settings
 from app.types.exceptions import ConflictError, StreamConnectionError
-from app.utils import log_call
 
 from .decoder import FFmpegDecoder
 
-logger = logging.getLogger("app.services.stream.manager")
+logger = logging.getLogger(__name__)
 
 
 def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
@@ -72,7 +71,6 @@ class StreamService:
         # 注意：健康监控和清理服务现在都是全局服务，在应用启动时初始化，不再由 StreamService 管理。
         # decoder 自持读线程，StreamService 不再需要 selector/轮询线程。
 
-    @log_call(level=logging.INFO, log_args=False)
     def start_stream(self, task_id: int, stream_url: str):
         """
         注册解码器并尝试首次启动。
@@ -170,11 +168,11 @@ class StreamService:
     def _get_client_queues(self, task_id: int):
         """获取该 client 的 ClientQueues（**只取不建**）。
 
-        CQ 由 RunController.start_run 在起流**之前**建好并 client_manager.set 注册
+        CQ 由 RunControlService.start_run 在起流**之前**建好并 client_service.set 注册
         （一 CQ == 一 run，身份不可变）；起流阶段只取。缺失说明调用序错（未先建 CQ），
         返回 None 由上层容错（decoder 空跑）。
         """
-        cq = client_manager.get(task_id)
+        cq = client_service.get(task_id)
         if cq is None:
             logger.error(
                 "[%s] ClientQueues 不存在（start_stream 早于 set_task？），decoder 将空跑",
@@ -182,14 +180,13 @@ class StreamService:
             )
         return cq
 
-    @log_call(level=logging.INFO)
     def stop_stream(self, task_id: int):
         """
         停止流解码（业务代码，纯净）
 
         注意：
         - decoder 进程的停止是异步的（避免阻塞 API 响应）
-        - ClientManager 由 InferenceService 统一清理
+        - ClientService 由 InferenceService 统一清理
 
         Args:
             task_id: 运行键（路由标识）
@@ -290,7 +287,6 @@ class StreamService:
                 return None
             return {"url": dec.stream_url}
 
-    @log_call(level=logging.INFO, log_args=False)
     def restart_stream(self, task_id: int, stream_url: str) -> bool:
         """
         服务层方法：重启流（自动重连用，不能阻塞）
@@ -358,14 +354,14 @@ class StreamService:
             self._cleanup_dead_decoder_unsafe(task_id)
 
             # 3. 获取现有的ClientQueues（不创建新的）
-            if not client_manager.has_client(task_id):
+            if not client_service.has_client(task_id):
                 raise StreamConnectionError(
                     url=stream_url,
                     task_id=task_id,   # 此刻无 cq，step_id/source_ip 缺省 None
                     details="Cannot restart stream: no ClientQueues",
                 )
 
-            client_queues = client_manager.get(task_id)
+            client_queues = client_service.get(task_id)
 
             # 4. 创建新的decoder
             dec = FFmpegDecoder(
@@ -391,10 +387,10 @@ class StreamService:
               CA-Ready-Queue 用于推理，如果满了说明推理跟不上，需要丢帧
         """
         # 先检查客户端是否存在
-        if not client_manager.has_client(task_id):
+        if not client_service.has_client(task_id):
             return 0
 
-        client_queues = client_manager.get(task_id)
+        client_queues = client_service.get(task_id)
         if client_queues is None:
             logger.warning(
                 f"[BACKPRESSURE] client_queues is None for task_id={task_id}"

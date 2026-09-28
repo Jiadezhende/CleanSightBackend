@@ -68,7 +68,7 @@ CLEANSIGHT_GATEWAY_ALLOWED_IPS=<大屏/平台侧 IP>
 - **启动前确认这五个口空闲**，实际以脚本当前取值为准。被占不会在安装自检里暴露，只在启动时失败，且 MediaMTX 的绑定失败落在网关日志、不在后端日志。Linux 查 `ss -ltn`，Windows 见 windows.md 坑 1（HNS 预留对 netstat 不可见）。
 - test 与 prod 错开 2，可同机并行；但只保证这两套之间不打架，其他进程是否占口仍要单独确认。
 - **改端口两个脚本同步改**。改过的脚本在部署机留 git 本地 diff，`git pull` 时手动处理。
-- 对外两个口若经 NAT 映射，**外部端口必须等于内部端口**。非等值映射下后端认不出本机 MediaMTX（`app/services/stream/manager.py` 的 `_rewrite_rtsp_url`），会绕公网回源，多数环境直接不通。内部三个口只监听 `127.0.0.1`，不要映射。
+- 对外两个口若经 NAT 映射，**外部端口必须等于内部端口**。非等值映射下后端认不出本机 MediaMTX（`app/services/stream/service.py` 的 `_rewrite_rtsp_url`），会绕公网回源，多数环境直接不通。内部三个口只监听 `127.0.0.1`，不要映射。
 
 ## 模型权重
 

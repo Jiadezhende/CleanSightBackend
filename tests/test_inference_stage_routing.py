@@ -32,7 +32,7 @@ def _routing(manager):
     (2, "2"),          # int 与 str 同键
 ])
 def test_resolve_stage_routes(manager, step, expected_stage):
-    # stage 解析上移为公有 resolve_stage（供 RunController 建 CQ 前调用）。
+    # stage 解析上移为公有 resolve_stage（供 RunControlService 建 CQ 前调用）。
     p_active, p_yaml = _routing(manager)
     with p_active, p_yaml:
         assert manager.resolve_stage(step) == expected_stage

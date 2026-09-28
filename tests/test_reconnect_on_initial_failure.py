@@ -23,7 +23,7 @@ import pytest
 
 from app.services.health_monitor.config import HealthMonitorConfig
 from app.services.health_monitor.manager import GlobalHealthMonitor
-from app.services.stream.manager import StreamService
+from app.services.stream.service import StreamService
 from app.types.exceptions import FFmpegError
 
 
@@ -67,7 +67,7 @@ def _make_monitor(
     )
 
     return GlobalHealthMonitor(
-        client_manager=mock_cm,
+        client_service=mock_cm,
         stream_service=mock_ss,
         inference_service=MagicMock(),
         config=config,
@@ -87,7 +87,7 @@ class TestDecoderRegistration:
         self.client_id = "reconnect_test_client"
 
     def _start_with_failing_decoder(self, error):
-        with patch("app.services.stream.manager.FFmpegDecoder") as MockDecoder, \
+        with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
                  self.service, "_get_client_queues", return_value=MagicMock()
              ):
@@ -368,7 +368,7 @@ class TestReconnectIdentityFence:
 
         # 模拟 /start 抢占重启：槽位换成全新 cq_B
         cq_b = self._cq()
-        monitor._client_manager.snapshot.return_value = {client_id: cq_b}
+        monitor._client_service.snapshot.return_value = {client_id: cq_b}
 
         # Round 2：当前 cq(cq_B) 非捕获的 cq_A → 放弃重连，且不对新 run 发起 restart
         monitor._stream_service.restart_stream.reset_mock()

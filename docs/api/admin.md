@@ -1,7 +1,7 @@
 # `/admin-f3m8` — 运维 Admin
 
 运维面板 API：聚合仪表盘、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业。
-数据全部来自**进程内存**（`client_manager` 快照 + Prometheus REGISTRY + 离线作业状态表），非 DB，是**实时**状态，进程重启即清零。
+数据全部来自**进程内存**（`client_service` 快照 + Prometheus REGISTRY + 离线作业状态表），非 DB，是**实时**状态，进程重启即清零。
 均**无鉴权**；除离线作业三个端点（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
 
 静态运维 UI（SPA）：`GET /ui-f3m8/admin/`（HTML 页面，非本文档描述的 JSON 端点）。

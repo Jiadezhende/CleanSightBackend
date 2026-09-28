@@ -12,7 +12,8 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from app.types.detection import FrameDetection
-from app.services.client import ClientManager, client_manager
+from app.services.client.instance import client_service
+from app.services.client.service import ClientService
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
@@ -38,7 +39,7 @@ class DetectionService:
         self,
         stage_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         max_batch_per_stage: int = 8,
-        client_manager_instance: Optional[ClientManager] = None,
+        client_service_instance: Optional[ClientService] = None,
     ):
         """
         Args:
@@ -54,13 +55,13 @@ class DetectionService:
                     },
                 }
             max_batch_per_stage: 每个 stage 最大 batch 大小
-            client_manager_instance: ClientManager 实例（仅用于构造 Dispatcher 枚举 registry；
+            client_service_instance: ClientService 实例（仅用于构造 Dispatcher 枚举 registry；
                 写回不再经它反查，改走 frame.cq 捕获句柄）
         """
 
-        # 保存 ClientManager 实例：仅供 Dispatcher 枚举活跃 run（合法 multi-run 调度）；
+        # 保存 ClientService 实例：仅供 Dispatcher 枚举活跃 run（合法 multi-run 调度）；
         # 写回路径已句柄化（frame.cq），不再经此反查 —— 见 _write_back_results。
-        self._client_manager = client_manager_instance or client_manager
+        self._client_service = client_service_instance or client_service
 
         # Stage 配置（必须提供）
         if stage_configs is None:
@@ -98,7 +99,7 @@ class DetectionService:
         # submit 布尔背压独管，dispatcher 不预读在途额度、不感知 inflight。
         self.dispatcher = StageAwareDispatcher(
             max_batch_per_stage=max_batch_per_stage,
-            client_manager_instance=self._client_manager,
+            client_service_instance=self._client_service,
             active_stages=self._active_stages,
             stage_batch_sizes=stage_batch_sizes,
             submit_batch=self._proxy.submit,

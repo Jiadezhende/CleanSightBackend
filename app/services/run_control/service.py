@@ -1,7 +1,7 @@
 """运行控制：跨服务编排一次 run 的启停（控制面唯一编排出口）。
 
-与 RunRegistry（存储）对仗：Registry 存 run，Controller 控 run 的起/停。
-`start_run` / `stop_run` 对称，均在 `client_manager.lock_for(task_id)`（per-task RLock，
+与 RunRegistry（存储）对仗：Registry 存 run，RunControlService 控 run 的起/停。
+`start_run` / `stop_run` 对称，均在 `client_service.lock_for(task_id)`（per-task RLock，
 运行键 = `task_id:int`）下串行——api（经 asyncio.to_thread）与 HealthMonitor（后台线程）
 共用同一把锁，消除「HealthMonitor 迟到 cleanup 误删 /start 刚建 CQ」的竞态。
 
@@ -16,19 +16,19 @@ from typing import Any, Dict, Optional
 
 from app.types.alarm import ALARM_MODE_SETTLEMENT
 from app.storage import runs
-from .client.config import get_client_config
-from .client.manager import client_manager
-from .client.queues import ClientQueues
-from .inference.online.instance import inference_service
-from .inference.online.temporal import alarm_sink
-from .recording.instance import recording_service
-from .stream.instance import stream_service
+from app.services.client.config import get_client_config
+from app.services.client.instance import client_service
+from app.services.client.queues import ClientQueues
+from app.services.inference.online.instance import inference_service
+from app.services.inference.online.temporal import alarm_sink
+from app.services.recording.instance import recording_service
+from app.services.stream.instance import stream_service
 from app.types.exceptions import AppError, ValidationError
 
 logger = logging.getLogger(__name__)
 
 
-class RunController:
+class RunControlService:
     """跨服务运行编排者（控制面）：对称 start_run / stop_run，共用任务级锁。"""
 
     def start_run(
@@ -55,16 +55,16 @@ class RunController:
         # stage 由 inference 解析，是 CQ 不可变身份的一部分
         stage = inference_service.resolve_stage(step_id)
 
-        with client_manager.lock_for(task_id):
+        with client_service.lock_for(task_id):
             # 2a. 幂等 / 重启清理（同 task_id 同槽位；不同 task_id 走不同键，天然并发）
-            if client_manager.has_client(task_id):
-                old_cq = client_manager.get(task_id)
+            if client_service.has_client(task_id):
+                old_cq = client_service.get(task_id)
                 if old_cq is not None:
                     cur_url = (stream_service.get_stream_info(task_id) or {}).get("url")
                     # 完全相同（step / URL 均未变）才幂等返回，否则全量重建
                     if old_cq.run.step_id == step_id and cur_url == rtsp_url:
                         logger.info(
-                            "[RunController] start_run idempotent: task=%s", task_id
+                            "[RunControlService] start_run idempotent: task=%s", task_id
                         )
                         return {
                             "status": "success",
@@ -74,12 +74,12 @@ class RunController:
                         }
                     # 字段变化（改 step/url）→ 停旧 run，全量重建（重入 lock_for，无害）
                     logger.info(
-                        "[RunController] start_run restart: task=%s (step %s->%s)",
+                        "[RunControlService] start_run restart: task=%s (step %s->%s)",
                         task_id, old_cq.run.step_id, step_id,
                     )
                     self.stop_run(task_id, reason=f"restart:{task_id}")
 
-            # 2b. 分配 run（必须在 lock_for 内、早于 client_manager.set：同 step 的分配串行，
+            # 2b. 分配 run（必须在 lock_for 内、早于 client_service.set：同 step 的分配串行，
             #     run_id 才严格递增；CQ 构造时就带上 RunIdentity，此后不可变）
             try:
                 run = runs.allocate(task_id, step_id)
@@ -99,10 +99,10 @@ class RunController:
                 **get_client_config().cq_kwargs(),
             )
 
-            # 2d. 注册 CQ（COW 发布）。CQ 的 set/remove 均归 RunController，与 stop_run 的
-            #   client_manager.remove 对称（set 先、remove 后，镜像）。set 后的所有 setup 步
+            # 2d. 注册 CQ（COW 发布）。CQ 的 set/remove 均归 RunControlService，与 stop_run 的
+            #   client_service.remove 对称（set 先、remove 后，镜像）。set 后的所有 setup 步
             #   包进 try：任一步失败即回滚注销，避免 CQ 泄漏在注册表。
-            client_manager.set(task_id, cq)
+            client_service.set(task_id, cq)
             try:
                 # 2e. start_workflow（建 Actor；CQ 已由上面 set 注册）
                 if not inference_service.start_workflow(cq):
@@ -112,16 +112,16 @@ class RunController:
                         step_id=run.step_id,
                         source_ip=source_ip,
                     )
-                logger.info("[RunController] workflow started: task_id=%s", task_id)
+                logger.info("[RunControlService] workflow started: task_id=%s", task_id)
 
                 # 2f. 起流（decoder 键 = task_id，与注册表一致；系统只用 RTSP）
                 stream_service.start_stream(task_id=task_id, stream_url=rtsp_url)
-                logger.info("[RunController] stream started: task_id=%s", task_id)
+                logger.info("[RunControlService] stream started: task_id=%s", task_id)
             except Exception:
                 # 任一 setup 步失败：对称回滚（stop_run 尽力而为、永不抛：停 decoder/actor、
-                # 交出残余产物、client_manager.remove 注销 CQ）；expected=cq 身份 fence 防误清。
+                # 交出残余产物、client_service.remove 注销 CQ）；expected=cq 身份 fence 防误清。
                 logger.warning(
-                    "[RunController] start_run failed for task=%s; rolling back", task_id
+                    "[RunControlService] start_run failed for task=%s; rolling back", task_id
                 )
                 self.stop_run(task_id, reason=f"start_rollback:{task_id}", expected=cq)
                 raise
@@ -152,7 +152,7 @@ class RunController:
         当初捕获的 `expected`，整段拆除放弃（不停新 run 的 decoder、不清其数据），防误删健康新 run。
         api 控制面（start/terminate）持锁内决策+执行、无 ABA，故不传 expected。
         """
-        with client_manager.lock_for(task_id):
+        with client_service.lock_for(task_id):
             result: Dict[str, Any] = {
                 "client_id": None,   # 诊断字段（保键名兼容），语义=source_ip，取到 cq 后回填
                 "reason": reason,
@@ -162,7 +162,7 @@ class RunController:
                 "errors": [],
             }
 
-            cq = client_manager.get(task_id)
+            cq = client_service.get(task_id)
             if cq is not None:
                 result["client_id"] = cq.source_ip
 
@@ -170,7 +170,7 @@ class RunController:
             #    避免误停/误清「同键新实例」（被 /start 抢占重启后装入的新 run）。
             if expected is not None and cq is not expected:
                 logger.info(
-                    "[RunController] stop_run(reason=%r) skipped by identity fence: task=%s "
+                    "[RunControlService] stop_run(reason=%r) skipped by identity fence: task=%s "
                     "(slot replaced by newer run)", reason, task_id,
                 )
                 result["skipped"] = True
@@ -189,7 +189,7 @@ class RunController:
                 except Exception as e:
                     result["errors"].append(f"decoder: {e}")
                     logger.error(
-                        "[RunController] stop decoder failed: task=%s - %s", task_id, e, exc_info=True
+                        "[RunControlService] stop decoder failed: task=%s - %s", task_id, e, exc_info=True
                     )
 
             # 2. 落盘残余数据（按 owner 归位，inference 一把拆、告警与录制各一个独立 sink）：
@@ -212,37 +212,34 @@ class RunController:
             except Exception as e:
                 result["errors"].append(f"flush: {e}")
                 logger.error(
-                    "[RunController] flush data failed: %s - %s", task_id, e, exc_info=True
+                    "[RunControlService] flush data failed: %s - %s", task_id, e, exc_info=True
                 )
 
-            # 3. 清 registry（owner=ClientManager）：cleanup=True 内含 cq.close()（置 CLOSED + 释放 payload）。
+            # 3. 清 registry（owner=ClientService）：cleanup=True 内含 cq.close()（置 CLOSED + 释放 payload）。
             #    expected 提供 → 对象身份核对删除（remove_if）；否则普通 remove。
             try:
                 if expected is not None:
-                    removed = client_manager.remove_if(task_id, expected, cleanup=True)
+                    removed = client_service.remove_if(task_id, expected, cleanup=True)
                     result["client_cleaned"] = removed
-                elif client_manager.has_client(task_id):
-                    removal = client_manager.remove(task_id, cleanup=True)
+                elif client_service.has_client(task_id):
+                    removal = client_service.remove(task_id, cleanup=True)
                     result["client_cleaned"] = removal["removed"]
                     if removal["error"]:
-                        result["errors"].append(f"client_manager: {removal['error']}")
+                        result["errors"].append(f"client_service: {removal['error']}")
             except Exception as e:
-                result["errors"].append(f"client_manager: {e}")
+                result["errors"].append(f"client_service: {e}")
                 logger.error(
-                    "[RunController] clean registry failed: %s - %s", task_id, e, exc_info=True
+                    "[RunControlService] clean registry failed: %s - %s", task_id, e, exc_info=True
                 )
 
             if result["errors"]:
                 logger.warning(
-                    "[RunController] stop_run(reason=%r) completed with errors: %s - %s",
+                    "[RunControlService] stop_run(reason=%r) completed with errors: %s - %s",
                     reason, task_id, result["errors"],
                 )
             else:
                 logger.info(
-                    "[RunController] stop_run(reason=%r) completed: %s", reason, task_id
+                    "[RunControlService] stop_run(reason=%r) completed: %s", reason, task_id
                 )
             return result
 
-
-# 全局单例
-run_controller = RunController()

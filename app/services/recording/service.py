@@ -4,7 +4,7 @@
     collect_from(cq)                          取走该 CQ 此刻该落盘的一切（sweeper 每 tick 调）
     submit_segment(cq, track, frames) -> bool 打包 + 入 hls 队列
     submit_detections(cq, frames) -> bool     打包 + 入 detections 队列
-    flush_residual(cq, until_ts=None)         把不足一段的残帧切完落盘（拆除期 RunController 调）
+    flush_residual(cq, until_ts=None)         把不足一段的残帧切完落盘（拆除期 RunControlService 调）
     request_residual_flush(cq, fence_ts)      断流时登记一次残帧 flush（不就地执行）
 
 落盘格式全在 `app.storage.hls` / `app.storage.inference`；本模块只管何时拉、按什么顺序写。
@@ -24,7 +24,7 @@
    免锁靠 `dict` 的 `__setitem__`、`pop` 各自原子。它只服务 HLS：detections 没有"段横跨
    断流 gap"这回事，故不需要栅栏。
 
-依赖：`app.storage.hls` / `app.storage.inference` + `app.services.utils.task_queue` + `client_manager`，
+依赖：`app.storage.hls` / `app.storage.inference` + `app.services.utils.task_queue` + `client_service`，
 不依赖别的 service。
 """
 
@@ -90,17 +90,17 @@ class RecordingService:
         """
         Args:
             config: 不传则用全局单例配置。
-            clients: CQ 快照来源（sweeper 用），不传则用 `client_manager`。**只注入这一个
+            clients: CQ 快照来源（sweeper 用），不传则用 `client_service`。**只注入这一个
                 协作者**：包一层 `snapshot_fn` / `current_owner_fn` 之类的窄回调只是
-                多两个要记的名字，单测直接塞一个假的 client_manager 更短。
+                多两个要记的名字，单测直接塞一个假的 client_service 更短。
         """
         self.config = config if config is not None else get_recording_config()
         if clients is None:
             # 函数体内 import：写在模块级会把 client → numpy 那条链变成每个
             # `import app.services.recording.*` 的过路费（同 PersistenceManager 的写法）。
-            from app.services.client.manager import client_manager
+            from app.services.client.instance import client_service
 
-            clients = client_manager
+            clients = client_service
         self._clients = clients
 
         # 落盘队列。**在 start() 里建**：SerialTaskQueue 是一次性的（stop() 之后不能再
@@ -230,7 +230,7 @@ class RecordingService:
                 **栅栏只作用于段**：detections 无论哪条路径都是全排空，它没有"横跨 gap"的问题
                 （见模块不变式 3）。
 
-        拆除期须在 `cq.close()` 释放帧之前调（RunController 保证）。切段口径与 sweeper 一致，
+        拆除期须在 `cq.close()` 释放帧之前调（RunControlService 保证）。切段口径与 sweeper 一致，
         差别只是它拉的是"攒满的整段"、这里拉的是"剩下不足一段的那点"。
 
         拆除期（`until_ts=None`）顺带回收本 cq 挂起的断流 flush 请求：调用方持 `lock_for`，

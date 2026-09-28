@@ -165,7 +165,7 @@ LAYER_PACKAGES = {
     ),
 }
 
-# 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
+# 服务单例 → 定义它的模块。client_service **不在此列**：它是零跨服务依赖的中台 leaf，
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",
@@ -174,7 +174,7 @@ SINGLETONS = {
     "persistence_manager": "app.services.persistence.instance",
     "recording_service": "app.services.recording.instance",
     "health_monitor": "app.services.health_monitor.instance",
-    "run_controller": "app.services.run_control",
+    "run_control_service": "app.services.run_control.instance",
 }
 
 # 允许 import 单例的文件（相对 REPO_ROOT）。前三类由规则表达（见 _is_allowed_importer），
@@ -182,7 +182,7 @@ SINGLETONS = {
 SINGLETON_EXCEPTIONS = {
     # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态并发起重连/清理，
     # 天然要持四个协作者（recording 那个只用来在断流时登记一次残帧 flush）。四处 import 均
-    # 写在 `_resolve_deps()` 函数体内（不是模块级），且 run_controller 那处是反向指回编排
+    # 写在 `_resolve_deps()` 函数体内（不是模块级），且 run_control_service 那处是反向指回编排
     # 中枢做拆除。
     "app/services/health_monitor/manager.py",
     # 告警落库 sink：inference 产告警 → persistence 落库。跨服务但方向正确（下游依赖），
@@ -291,7 +291,7 @@ def _is_allowed_importer(rel: str) -> bool:
     """规范 §6 的引用面三类 + 具名例外。"""
     if rel in SINGLETON_EXCEPTIONS:
         return True
-    if rel == "app/services/run_control.py":        # 编排中枢
+    if rel == "app/services/run_control/service.py":    # 编排中枢（instance.py 只构造自身，不 import 别的单例）
         return True
     if rel.startswith("app/routers/"):              # 装配层
         return True

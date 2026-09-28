@@ -93,7 +93,7 @@ class ClientQueues:
         inference_decimation: int = 2,
         *,
         # 不可变运行身份（一次 CQ == 一次 run，终生不变）。
-        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入 `runs.allocate`
+        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunControlService 传入 `runs.allocate`
         # 分配的 RunIdentity 与已解析好的 stage。
         run: Optional[RunIdentity] = None,
         source_ip: str = "",
@@ -122,7 +122,7 @@ class ClientQueues:
         self._state: RunState = RunState.ACTIVE
         self._state_lock = threading.Lock()
 
-        # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_manager COW
+        # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_service COW
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
         # 注：无 client_id 字段——注册表路由键即 run.task_id(int)；source_ip 为被动来源字段。
@@ -511,7 +511,7 @@ class ClientQueues:
         self._processed_pressure.reset()
 
     def clear(self) -> None:
-        """兼容入口：等价 `close()`（供 ClientManager.remove/remove_if/clear_all 调用）。"""
+        """兼容入口：等价 `close()`（供 ClientService.remove/remove_if/clear_all 调用）。"""
         self.close()
 
     def _release_payload(self) -> None:

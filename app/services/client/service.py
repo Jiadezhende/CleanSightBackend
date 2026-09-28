@@ -1,5 +1,5 @@
 """
-客户端队列管理器单例模块
+客户端队列注册表（ClientService）
 
 按「读多写少」的中台形态实现：读全程无锁（原子读不可变快照引用），写极少走单锁
 copy-on-write 换引用（不阻塞读）。
@@ -20,16 +20,16 @@ from typing import Any, Dict, List, Mapping, Optional
 from .config import get_client_config
 from .queues import ClientQueues
 
-logger = logging.getLogger("app.services.client.manager")
+logger = logging.getLogger(__name__)
 
 # 加载客户端配置（单例）
 _client_config = get_client_config()
 
 
-class ClientManager:
+class ClientService:
     """客户端队列注册表（COW 中台，支持依赖注入）。
 
-    键 = **`task_id`(int)**（由 RunController 决定并传入）；CQ 由 RunController 建好后
+    键 = **`task_id`(int)**（由 RunControlService 决定并传入）；CQ 由 RunControlService 建好后
     `set` 换槽，本类只做哑存储、不建 CQ。
 
     读接口（无锁）：`get`(按 task_id 直取,O(1)) / `has_client` / `snapshot`(零拷贝只读视图)
@@ -38,7 +38,7 @@ class ClientManager:
     """
 
     def __init__(self, config=None):
-        """初始化 ClientManager。
+        """初始化 ClientService。
 
         Args:
             config: 可选配置对象（便于测试注入 mock 配置）。
@@ -49,20 +49,20 @@ class ClientManager:
         self._runs: Dict[int, ClientQueues] = {}
         self._wlock = threading.Lock()  # 只串行「写」（create / remove），不阻塞读
 
-        # per-task 生命周期锁（RLock）：护一次 start/teardown 事务，供 RunController
+        # per-task 生命周期锁（RLock）：护一次 start/teardown 事务，供 RunControlService
         # / api / HealthMonitor 共用串行化同一 task 的启停。与 _wlock 是两把不同的锁：
         # _wlock 全局极短护换引用；_task_locks[task_id] per-task 长持护跨服务事务。
         self._task_locks: Dict[int, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
 
-        logger.info("[ClientManager] Initialized")
+        logger.info("[ClientService] Initialized")
 
     # ── 任务级锁（per-task 生命周期事务锁）────────────────────
 
     def lock_for(self, task_id: int) -> threading.RLock:
         """返回该 task_id 的生命周期 RLock（get-or-create）。
 
-        供 RunController.start_run / stop_run 及 HealthMonitor 共用，串行化同一 task 的
+        供 RunControlService.start_run / stop_run 及 HealthMonitor 共用，串行化同一 task 的
         启停事务。RLock：同线程可重入（start_run 持锁内再调 stop_run 不自死锁）。
         """
         with self._task_locks_guard:
@@ -139,16 +139,16 @@ class ClientManager:
     def set(self, task_id: int, cq: ClientQueues) -> None:
         """原子装入/替换 task_id 槽位为一个已建好的（不可变身份）CQ。
 
-        供 `RunController.start_run` 路径：每次 run 建**新** CQ 后整体换槽（不在旧 CQ 上原地改）。
+        供 `RunControlService.start_run` 路径：每次 run 建**新** CQ 后整体换槽（不在旧 CQ 上原地改）。
         `_wlock` 下 COW 换引用发布，读者原子读引用即看到全新对象——观察不到半建态。
         旧槽引用被丢弃后，仅其自身 payload（帧/缓冲）随 close/GC 释放；decoder/actor
-        **不由 CQ 持有**，由 RunController.stop_run 显式拆除，不随换槽 GC 回收。
+        **不由 CQ 持有**，由 RunControlService.stop_run 显式拆除，不随换槽 GC 回收。
         """
         with self._wlock:
             new = dict(self._runs)
             new[task_id] = cq
             self._runs = new
-        logger.info(f"[ClientManager] set run: task_id={task_id}")
+        logger.info(f"[ClientService] set run: task_id={task_id}")
 
     def remove(self, task_id: int, cleanup: bool = True) -> Dict[str, Any]:
         """注销该 task 的 run，可选清理其队列资源。
@@ -228,6 +228,3 @@ class ClientManager:
         logger.info(f"所有 run 资源已清理 (总数: {len(results)})")
         return results
 
-
-# 全局单例实例
-client_manager = ClientManager()
