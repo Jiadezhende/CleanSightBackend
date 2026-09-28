@@ -91,9 +91,9 @@ class OfflineJobService:
     ) -> None:
         if clients is None:
             # 函数体内 import：同 RecordingService，别把 client → numpy 链摊给每个 import 本模块的人
-            from app.services.client.manager import client_manager
+            from app.services.client.instance import client_service
 
-            clients = client_manager
+            clients = client_service
         self._clients = clients
         self._launcher = launcher
         self._config = config  # None = 提交时读 load_stage_config 单例

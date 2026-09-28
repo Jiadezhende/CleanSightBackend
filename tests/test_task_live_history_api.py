@@ -42,7 +42,7 @@ def _install_registry(monkeypatch, cqs):
 
     runs = {cq.run.task_id: cq for cq in cqs}
     monkeypatch.setattr(
-        task_router.client_manager, "snapshot", lambda: runs, raising=True
+        task_router.client_service, "snapshot", lambda: runs, raising=True
     )
 
 

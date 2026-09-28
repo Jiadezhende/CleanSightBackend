@@ -1,5 +1,5 @@
 """
-测试 P0: 任务生命周期并发保护（编排在 RunController，锁在 ClientManager.lock_for）
+测试 P0: 任务生命周期并发保护（编排在 RunController，锁在 ClientService.lock_for）
 
 验证：
 1. 同 task 已在跑、step 与 url 都没变 → 再 start 幂等返回，不重起流
@@ -24,7 +24,7 @@ from httpx import AsyncClient, ASGITransport
 
 from app.types.run import RunIdentity
 from app.main import app
-from app.services.client.manager import client_manager
+from app.services.client.instance import client_service
 
 
 # ---------------------------------------------------------------------------
@@ -33,12 +33,12 @@ from app.services.client.manager import client_manager
 
 
 @pytest.fixture(autouse=True)
-def _isolate_client_manager(monkeypatch):
+def _isolate_client_service(monkeypatch):
     """每个用例一本空注册表 + 清空 per-task 锁缓存；结束后原样恢复"""
-    monkeypatch.setattr(client_manager, "_runs", {})
-    client_manager._task_locks.clear()
+    monkeypatch.setattr(client_service, "_runs", {})
+    client_service._task_locks.clear()
     yield
-    client_manager._task_locks.clear()
+    client_service._task_locks.clear()
 
 
 def _make_db_task(task_id: int = 1, source_ip: str = "10.0.0.1"):
@@ -123,11 +123,11 @@ async def test_same_task_url_change_triggers_restart():
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.recording_service"),
         patch("app.services.run_control.ClientQueues"),
-        patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
-        patch.object(client_manager, "has_client", return_value=True),
-        patch.object(client_manager, "get", return_value=mock_cq),
+        patch.object(client_service, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
+        patch.object(client_service, "has_client", return_value=True),
+        patch.object(client_service, "get", return_value=mock_cq),
         patch.object(
-            client_manager, "remove", return_value={"removed": True, "error": None}
+            client_service, "remove", return_value={"removed": True, "error": None}
         ),
     ):
         mock_inference.start_workflow.return_value = True
@@ -278,11 +278,11 @@ async def test_terminate_uses_lock(request_kwargs):
         patch("app.services.run_control.inference_manager") as mock_inference,
         patch("app.services.run_control.stream_service") as mock_stream,
         patch("app.services.run_control.recording_service"),
-        patch.object(client_manager, "find_by_source_ip", return_value=mock_cq),
-        patch.object(client_manager, "get", return_value=mock_cq),
-        patch.object(client_manager, "has_client", return_value=True),
+        patch.object(client_service, "find_by_source_ip", return_value=mock_cq),
+        patch.object(client_service, "get", return_value=mock_cq),
+        patch.object(client_service, "has_client", return_value=True),
         patch.object(
-            client_manager, "remove", return_value={"removed": True, "error": None}
+            client_service, "remove", return_value={"removed": True, "error": None}
         ),
     ):
         mock_inference.stop_workflow.return_value = []
@@ -295,7 +295,7 @@ async def test_terminate_uses_lock(request_kwargs):
         mock_inference.stop_workflow.assert_called_once_with(mock_cq)
 
     # 验证真实的 per-task 锁已按 int task_id 创建
-    assert 1 in client_manager._task_locks
+    assert 1 in client_service._task_locks
 
 
 if __name__ == "__main__":

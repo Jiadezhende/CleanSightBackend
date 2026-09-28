@@ -32,7 +32,7 @@ app/
 ├── services/
 │   ├── run_control.py   # RunController — 跨服务起停一次 run 的单一编排出口
 │   ├── utils/           # 服务层通用：串行队列 / 线程自愈 / 压力日志 / Prometheus 指标 / VOD m3u8 / 媒体轴
-│   ├── client/          # ClientManager 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
+│   ├── client/          # ClientService 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
 │   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物

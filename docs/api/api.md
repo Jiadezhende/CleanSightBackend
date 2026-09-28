@@ -107,7 +107,7 @@
 | `decoder_stopped` | bool | decoder 是否已停 |
 | `data_flushed` | bool | 结算 + HLS + feature 落盘是否完成 |
 | `client_cleaned` | bool | registry 中的 CQ 是否已注销 |
-| `errors` | string[] | 失败子步列表，形如 `"decoder: ..."`、`"flush: ..."`、`"client_manager: ..."`；全成功则 `[]` |
+| `errors` | string[] | 失败子步列表，形如 `"decoder: ..."`、`"flush: ..."`、`"client_service: ..."`；全成功则 `[]` |
 
 > 注意：命中 run 的成功响应体里**没有** `task_id` 字段（那是 no-op 响应才有的）；命中路径用 `client_id`（= source_ip）标识。别假设两条 200 路径 body 同构。
 
@@ -139,4 +139,4 @@
 | 现象 | 后端实际状态 |
 |------|------------|
 | 调 terminate 拿到 200 但"感觉没停" | 若是 no-op 体（`message":"no active run"`），说明该键**根本没匹配到活跃 run**（键传错 / run 早已停）——不是停失败，是压根没这路 run |
-| 拿到 200 `success` 但残留未清 | 看 `partial_success` + `errors`：某子步（decoder/flush/client_manager）失败被吞进 body，主流程不抛，需据 `errors` 排查 |
+| 拿到 200 `success` 但残留未清 | 看 `partial_success` + `errors`：某子步（decoder/flush/client_service）失败被吞进 body，主流程不抛，需据 `errors` 排查 |

@@ -23,7 +23,7 @@ def _frame():
 def test_stage_queue_drop_counted_when_full():
     """_stage_queues 已满时再 dispatch 一帧，应记一次 stage 丢帧。"""
     cm = MagicMock()
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
     # 客户端：ca_ready 有一帧，stage 为 ClientQueues 裸建默认值
     cq = make_bare_cq(ca_maxlen=10)
@@ -44,7 +44,7 @@ def test_stage_queue_drop_counted_when_full():
 def test_stage_queue_no_drop_when_not_full():
     """队列未满时 dispatch 不应记丢帧。"""
     cm = MagicMock()
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
     cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
@@ -59,7 +59,7 @@ def test_pressure_snapshot_silent_when_calm(caplog):
     """平稳（无丢帧、队列浅）时不应打印 [PRESSURE]，避免刷屏。"""
     cm = MagicMock()
     cm.snapshot.return_value = {}
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
     # 放一条浅队列：空 _stage_queues 时采样循环不执行，静默是恒真的
     dispatcher._stage_queues["CLEAN"].append(make_frame(ts=time.time(), shape=(2, 2, 3)))
 
@@ -78,7 +78,7 @@ def test_pressure_snapshot_logs_on_drop(caplog):
     """
     cm = MagicMock()
     cm.snapshot.return_value = {}
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
     dispatcher._stage_queues["CLEAN"]  # 触发 defaultdict 建 deque
     dispatcher._stage_drops["CLEAN"] = 0
 
@@ -100,7 +100,7 @@ def test_submit_rejection_counted_into_pressure_line(caplog):
     cm.snapshot.return_value = {"c1": cq}
     stage = cq.stage
     dispatcher = StageAwareDispatcher(
-        client_manager_instance=cm,
+        client_service_instance=cm,
         active_stages=[stage],
         submit_batch=lambda batch: False,      # 冒充 proxy 在途满
     )
@@ -123,7 +123,7 @@ def test_pressure_snapshot_logs_on_high_watermark(caplog):
     """stage deque 越水位即打一行（无需丢帧/拒收）。"""
     cm = MagicMock()
     cm.snapshot.return_value = {}
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
     q = dispatcher._stage_queues["CLEAN"]
     for _ in range(q.maxlen):

@@ -86,7 +86,7 @@ def traceback_test_fixture(task_id: int, alarm_id: int, server: str, api_port: i
     print(f"[Setup] alarm detected_at = {alarm_detected_at_ms} ms（第 2 段内）")
 
     try:
-        # 1. DB: 任务记录（source_ip 仍写入但只用于运行时 ClientManager；
+        # 1. DB: 任务记录（source_ip 仍写入但只用于运行时 ClientService；
         #    追溯不再依赖该字段）
         DatabaseHelper.create_test_task(
             task_id, source_ip=f"test.tb.{task_id}", current_step=str(step_id)

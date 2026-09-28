@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from app.services.client import ClientQueues
+    from app.services.client.queues import ClientQueues
 
 
 # ==================== 传输对象（online 热路径）====================

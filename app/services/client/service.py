@@ -1,5 +1,5 @@
 """
-客户端队列管理器单例模块
+客户端队列注册表（ClientService）
 
 按「读多写少」的中台形态实现：读全程无锁（原子读不可变快照引用），写极少走单锁
 copy-on-write 换引用（不阻塞读）。
@@ -20,13 +20,13 @@ from typing import Any, Dict, List, Mapping, Optional
 from .config import get_client_config
 from .queues import ClientQueues
 
-logger = logging.getLogger("app.services.client.manager")
+logger = logging.getLogger(__name__)
 
 # 加载客户端配置（单例）
 _client_config = get_client_config()
 
 
-class ClientManager:
+class ClientService:
     """客户端队列注册表（COW 中台，支持依赖注入）。
 
     键 = **`task_id`(int)**（由 RunController 决定并传入）；CQ 由 RunController 建好后
@@ -38,7 +38,7 @@ class ClientManager:
     """
 
     def __init__(self, config=None):
-        """初始化 ClientManager。
+        """初始化 ClientService。
 
         Args:
             config: 可选配置对象（便于测试注入 mock 配置）。
@@ -55,7 +55,7 @@ class ClientManager:
         self._task_locks: Dict[int, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
 
-        logger.info("[ClientManager] Initialized")
+        logger.info("[ClientService] Initialized")
 
     # ── 任务级锁（per-task 生命周期事务锁）────────────────────
 
@@ -148,7 +148,7 @@ class ClientManager:
             new = dict(self._runs)
             new[task_id] = cq
             self._runs = new
-        logger.info(f"[ClientManager] set run: task_id={task_id}")
+        logger.info(f"[ClientService] set run: task_id={task_id}")
 
     def remove(self, task_id: int, cleanup: bool = True) -> Dict[str, Any]:
         """注销该 task 的 run，可选清理其队列资源。
@@ -228,6 +228,3 @@ class ClientManager:
         logger.info(f"所有 run 资源已清理 (总数: {len(results)})")
         return results
 
-
-# 全局单例实例
-client_manager = ClientManager()

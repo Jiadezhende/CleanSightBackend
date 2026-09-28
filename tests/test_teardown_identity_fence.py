@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from factories import make_cq
-from app.services.client.manager import client_manager
+from app.services.client.instance import client_service
 from app.services.client.queues import RunState
 from app.services.run_control import run_controller
 
@@ -21,8 +21,8 @@ def _clean_registry():
     """隔离真实单例状态：测试前后清掉被测 run（键=int task_id）的槽位与锁。"""
     tid = 1
     yield tid
-    client_manager.remove(tid, cleanup=False) if client_manager.has_client(tid) else None
-    client_manager._task_locks.pop(tid, None)
+    client_service.remove(tid, cleanup=False) if client_service.has_client(tid) else None
+    client_service._task_locks.pop(tid, None)
 
 
 # --- 1. 封闸先于落盘 ---
@@ -30,7 +30,7 @@ def _clean_registry():
 def test_stop_run_drains_before_flush_then_closes(_clean_registry):
     tid = _clean_registry
     cq = make_cq(task_id=tid)
-    client_manager.set(tid, cq)
+    client_service.set(tid, cq)
 
     seen_state = {}
 
@@ -51,7 +51,7 @@ def test_stop_run_drains_before_flush_then_closes(_clean_registry):
     mock_stream.stop_stream.assert_called_once_with(tid)
     # 拆完：CQ 已 CLOSED（remove→clear→close），出表
     assert cq.get_state() is RunState.CLOSED
-    assert not client_manager.has_client(tid)
+    assert not client_service.has_client(tid)
     assert result["client_cleaned"] is True
 
 
@@ -61,7 +61,7 @@ def test_stop_run_flushes_residual_while_cq_still_registered(_clean_registry):
     """`flush_residual` 必须在清 registry（内含 `cq.close()` 释放帧）之前：反过来残帧已被释放。"""
     tid = _clean_registry
     cq = make_cq(task_id=tid)
-    client_manager.set(tid, cq)
+    client_service.set(tid, cq)
 
     registered_at_flush = []
 
@@ -72,13 +72,13 @@ def test_stop_run_flushes_residual_while_cq_still_registered(_clean_registry):
     ):
         mock_inf.stop_workflow.return_value = []
         mock_recording.flush_residual.side_effect = (
-            lambda _cq: registered_at_flush.append(client_manager.get(tid) is _cq)
+            lambda _cq: registered_at_flush.append(client_service.get(tid) is _cq)
         )
         run_controller.stop_run(tid, reason="test")
 
     mock_recording.flush_residual.assert_called_once_with(cq)
     assert registered_at_flush == [True]
-    assert client_manager.get(tid) is None
+    assert client_service.get(tid) is None
 
 
 # --- 2a. 身份 fence 命中放行（槽位仍是 expected） ---
@@ -86,7 +86,7 @@ def test_stop_run_flushes_residual_while_cq_still_registered(_clean_registry):
 def test_stop_run_expected_hit_tears_down(_clean_registry):
     tid = _clean_registry
     cq = make_cq(task_id=tid)
-    client_manager.set(tid, cq)
+    client_service.set(tid, cq)
 
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
@@ -98,7 +98,7 @@ def test_stop_run_expected_hit_tears_down(_clean_registry):
     mock_stream.stop_stream.assert_called_once_with(tid)
     mock_inf.stop_workflow.assert_called_once_with(cq)
     assert cq.get_state() is RunState.CLOSED
-    assert not client_manager.has_client(tid)
+    assert not client_service.has_client(tid)
     assert result.get("skipped") is not True
 
 
@@ -108,7 +108,7 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
     tid = _clean_registry
     cq_old = make_cq(task_id=tid)          # 同 task_id，不同对象（HM 捕获的旧实例）
     cq_new = make_cq(task_id=tid)
-    client_manager.set(tid, cq_new)   # 槽位已是新 run（模拟 /start 抢占重启换槽）
+    client_service.set(tid, cq_new)   # 槽位已是新 run（模拟 /start 抢占重启换槽）
 
     with (
         patch("app.services.run_control.stream_service") as mock_stream,
@@ -123,7 +123,7 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
     mock_stream.stop_stream.assert_not_called()
     mock_inf.stop_workflow.assert_not_called()
     mock_recording.flush_residual.assert_not_called()
-    assert client_manager.get(tid) is cq_new
+    assert client_service.get(tid) is cq_new
     assert cq_new.get_state() is RunState.ACTIVE
 
 

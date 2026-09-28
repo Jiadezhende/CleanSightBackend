@@ -430,7 +430,7 @@ class APIClient:
             return {"error": str(e)}
 
     def unified_terminate(self, client_id: str) -> Dict[str, Any]:
-        """统一终止接口（推荐）- 完整清理：解码器 + 推理 + ClientManager"""
+        """统一终止接口（推荐）- 完整清理：解码器 + 推理 + ClientService"""
         url = f"{self.base_url}/api/terminate"
         params = {"client_id": client_id}
 

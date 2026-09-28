@@ -165,7 +165,7 @@ LAYER_PACKAGES = {
     ),
 }
 
-# 服务单例 → 定义它的模块。client_manager **不在此列**：它是零跨服务依赖的中台 leaf，
+# 服务单例 → 定义它的模块。client_service **不在此列**：它是零跨服务依赖的中台 leaf，
 # 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",

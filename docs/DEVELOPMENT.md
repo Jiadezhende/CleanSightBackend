@@ -40,7 +40,7 @@
 
 各 service（stream / inference / persistence / traceback / lab …）功能内聚，只做自己的事；**不建 service 对 service 的直接依赖**。跨服务协作靠两个中台：
 
-- **共享状态走 client 中台层**：跨服务需要读写的运行态统一放 `ClientManager`（COW 注册表，`int task_id` 键）+ `ClientQueues`（一次 run 的不可变身份 + 队列/快照），各服务只与 client 层打交道。
+- **共享状态走 client 中台层**：跨服务需要读写的运行态统一放 `ClientService`（COW 注册表，`int task_id` 键）+ `ClientQueues`（一次 run 的不可变身份 + 队列/快照），各服务只与 client 层打交道。
   - client 层是**零跨服务依赖的 leaf**、哑存储：本身**不构造 CQ**，CQ 由 `RunController` 建好后 `set` 换槽。
   - client 层**只吐自有词汇的原始数据**（如按流名聚合的信号）；流名 → 展示 metric 的翻译/映射**上移到 router 装配层**，不下沉进 client。
 - **跨服务起停编排走 `RunController`**：一次 run 的 start/stop/restart、per-task 锁、拆机顺序、对象身份 fence 都归 RunController，不下沉到 client 或各 service。
@@ -53,7 +53,7 @@
 
 ## 4. 日志规范
 
-- **格式** `[ModuleName] message`：方括号内 **PascalCase**（`[ClientManager]`、`[InferenceService]`）；Worker 用 `[Name-N]`（`[HLSWorker-0]`）。禁止 `print()` 代替 `logger`。
+- **格式** `[ModuleName] message`：方括号内 **PascalCase**（`[ClientService]`、`[InferenceService]`）；Worker 用 `[Name-N]`（`[HLSWorker-0]`）。禁止 `print()` 代替 `logger`。
 - **参数惰性格式化**：用 `%` 占位符传参，**不用 f-string**：
   ```python
   logger.info("[StreamDecoder] Connected to %s | %dx%d", url, w, h)   # ✓
@@ -129,7 +129,7 @@
   # app/services/inference/online/manager.py
   from .config import load_stage_config              # ✓ 同目录
   from .detection.service import DetectionService    # ✓ 本包子包
-  from app.services.client.manager import client_manager   # ✓ 跨包（跨服务依赖一眼可见）
+  from app.services.client.instance import client_service   # ✓ 跨包（跨服务依赖一眼可见）
   from app.services.inference.online.naming import stream_name    # ✗ 包内却写了绝对
   ```
 

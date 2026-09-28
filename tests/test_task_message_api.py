@@ -31,7 +31,7 @@ async def test_task_message_task_not_in_memory_returns_empty(monkeypatch):
 
     fake_manager = MagicMock()
     fake_manager.get.return_value = None
-    monkeypatch.setattr(task_router, "client_manager", fake_manager)
+    monkeypatch.setattr(task_router, "client_service", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -63,7 +63,7 @@ async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
 
     fake_manager = MagicMock()
     fake_manager.get.return_value = cq
-    monkeypatch.setattr(task_router, "client_manager", fake_manager)
+    monkeypatch.setattr(task_router, "client_service", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:

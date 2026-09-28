@@ -17,7 +17,8 @@ import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.types.alarm import ALARM_MODE_SETTLEMENT, Alarm
-from app.services.client import ClientQueues, client_manager
+from app.services.client.instance import client_service
+from app.services.client.queues import ClientQueues
 from app.types.exceptions import ValidationError
 from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
@@ -192,7 +193,7 @@ class InferenceManager:
     def start_workflow(self, cq: ClientQueues) -> bool:
         """起该 run 的推理 workflow：建并启 actor（存储侧无起始钩子）。
 
-        入参是 RunController 已建好并**已注册**（client_manager.set）的不可变身份 CQ
+        入参是 RunController 已建好并**已注册**（client_service.set）的不可变身份 CQ
         （一 CQ == 一 run）。调用方已持 lock_for(cq.run.task_id)，与 stop_workflow 互斥；重启路径下
         RunController 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
         RunController（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
@@ -273,7 +274,7 @@ class InferenceManager:
         return settlement
 
     def status(self) -> Dict[str, Any]:
-        clients = client_manager.snapshot()
+        clients = client_service.snapshot()
         stats = {task_id: cq.get_queue_depths() for task_id, cq in clients.items()}
         return {"clients": len(clients), "queues": stats}
 
@@ -325,7 +326,7 @@ class InferenceManager:
             try:
                 settlement = actor.finalize_and_stop()
                 if settlement:
-                    cq = client_manager.get(task_id)
+                    cq = client_service.get(task_id)
                     if cq:
                         alarm_sink.persist_alarms(
                             settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT
