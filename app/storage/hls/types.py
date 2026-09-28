@@ -2,8 +2,10 @@
 
     SegmentRef   一个段在其 step 内的身份（写侧构造 / 读侧 parse 出来）
     Segment      一个段：身份 + 它在清单里声明的时长
+    HlsSpan      一个 run 若干轨的段在墙钟上的跨度（`query_span` 的返回）
 
-两个都属本域读侧的**段容器**那一档（另一档是 `Frame`，全仓库的域货币，住在 `app.types`）。
+前两个属本域读侧的**段容器**那一档（另一档是 `Frame`，全仓库的域货币，住在 `app.types`）；
+`HlsSpan` 是段容器的汇总，消费方是 routers 的 task / traceback / lab 三处。
 
 **只放对外契约**：函数内部传参用的四行 NamedTuple 放在用它的地方旁边。判据（换掉落盘格式
 会不会跟着消失 / 是不是装配产物 / 消费方够不够两个）见
@@ -16,7 +18,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, Tuple
 
 
 class SegmentRef(NamedTuple):
@@ -43,3 +45,15 @@ class Segment(NamedTuple):
 
     ref: SegmentRef
     duration_s: float
+
+
+class HlsSpan(NamedTuple):
+    """一个 run 若干轨的段在墙钟上的跨度（各轨取并集），单位微秒。
+
+    `end_us` = max(段起点 + round(EXTINF))，不是末段起点——后者漏掉末段自身长度。
+    """
+
+    tracks: Tuple[str, ...]   # 有段的那些轨，保持入参顺序
+    start_us: int             # 最早段起点
+    last_start_us: int        # 最晚段起点
+    end_us: int               # 最晚段尾

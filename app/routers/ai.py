@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from app.types.temporal import TemporalSegment
 from app.services.client.instance import client_service
-from app.services.utils.media_timeline import MediaTimeline
+from app.storage import hls
 from app.storage import inference as inference_store
 from app.types.exceptions import NotFoundError
 
@@ -230,7 +230,7 @@ def _temporal_view(req: TemporalRequest) -> TemporalResponse:
     hls 时间轴与 `temporal.jsonl` 取自同一个 run，新录像不会配上旧结果。
     """
     run = resolve_run(req.task_id, req.step_id, req.run_id)
-    timeline = MediaTimeline.load(run, req.track) if run is not None else MediaTimeline([])
+    timeline = hls.query_timeline(run, req.track) if run is not None else hls.MediaTimeline([])
     if not timeline:
         raise NotFoundError(
             f"No {req.track} segments for task {req.task_id} step {req.step_id}",

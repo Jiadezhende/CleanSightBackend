@@ -56,7 +56,6 @@ from app.services.lab.step_exporter import (
     StepExportInitMissing,
     StepExportNoSegments,
 )
-from app.services.utils.media_timeline import MediaTimeline
 from app.storage import hls
 from app.storage import inference as inference_store
 from app.storage import runs
@@ -449,7 +448,7 @@ class LabelProbsResponse(BaseModel):
 def _label_probs_view(req: LabelProbsRequest) -> LabelProbsResponse:
     """读该 run 的逐帧类别概率，帧 ts 换算到 `track` 轨的媒体刻度；没有产物返回空数组。"""
     run = resolve_run(req.task_id, req.step_id, req.run_id)
-    timeline = MediaTimeline.load(run, req.track) if run is not None else MediaTimeline([])
+    timeline = hls.query_timeline(run, req.track) if run is not None else hls.MediaTimeline([])
     if not timeline:
         raise NotFoundError(
             f"No {req.track} segments for task {req.task_id} step {req.step_id}",

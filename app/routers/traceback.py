@@ -25,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.db.database import get_db
 from app.types.run import RunIdentity
 from app.db.alarms import DBAlarm
-from app.services.utils.media_timeline import MediaTimeline
+from app.services.utils.media_timeline import total_gap_ms
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls, runs
 from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
@@ -302,14 +302,14 @@ async def get_task_timeline(
     hi_ms: Optional[int] = None
     if run is None:
         start_ms, end_ms, duration_ms = 0, 0, 0
-        timeline = MediaTimeline([])
+        timeline = hls.MediaTimeline([])
     else:
         start_ms, end_ms, duration_ms = _step_duration_ms(run)
-        timeline = MediaTimeline.load(run, track)
+        timeline = hls.query_timeline(run, track)
         lo_ms = run.run_id // 1000
         successor = runs.successor(run)
         hi_ms = successor // 1000 if successor is not None else None
-    gap_total_ms = timeline.total_gap_ms()
+    gap_total_ms = total_gap_ms(timeline)
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
     # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。

@@ -4,6 +4,8 @@
     run = runs.query(task_id, step_id)              # 最新可见 run；None → 404
     run = runs.query(task_id, step_id, run_id)      # 点名的 run；目录不在 → None
     runs.successor(run)                             # 同 step 下一个 run 的 run_id；最新的 → None
+    runs.query_latest_by_step(task_id)              # 各 step 的最新可见 run，按 step 升序
+    start_us, end_us = runs.query_lifespan_us(run)  # 存续区间 [分配时刻, 下一个 run 分配时刻)
 
 硬约束：
 
@@ -19,15 +21,16 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from app.types.run import RunIdentity
 
+from . import tasks as _tasks
 from .utils import root as _root
 from .hls import _layout as _hls_layout
 from .inference import _layout as _inference_layout
 
-__all__ = ["allocate", "query", "successor"]
+__all__ = ["allocate", "query", "query_latest_by_step", "query_lifespan_us", "successor"]
 
 
 def allocate(task_id: int, step_id: int) -> RunIdentity:
@@ -75,3 +78,22 @@ def successor(run: RunIdentity) -> Optional[int]:
     """
     later = [r for r in _root.run_ids(run.task_id, run.step_id) if r > run.run_id]
     return later[0] if later else None
+
+
+def query_latest_by_step(task_id: int) -> List[RunIdentity]:
+    """该 task 各 step 的最新可见 run（即 `query(task_id, step_id)`），按 step 升序；无可见 run 的 step 不出现。"""
+    found: List[RunIdentity] = []
+    for step_id in _tasks.list_step_ids(task_id):
+        run = query(task_id, step_id)
+        if run is not None:
+            found.append(run)
+    return found
+
+
+def query_lifespan_us(run: RunIdentity) -> Tuple[int, Optional[int]]:
+    """`run` 的存续区间 `[start_us, end_us)`：自身分配时刻到同 step 下一个 run 的分配时刻（墙钟微秒）。
+
+    最新的 run 没有上界，`end_us` 为 None。不做可见判断（同 `successor`）。
+    两端都是 `run_id`：`allocate` 让它等于分配时刻微秒（时钟回拨时取已有最大值 + 1）。
+    """
+    return run.run_id, successor(run)

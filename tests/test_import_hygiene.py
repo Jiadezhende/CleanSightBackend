@@ -91,6 +91,8 @@ BUDGET = {
     # 但**本门禁验不到这一点** —— 见上方 BUDGET 开头的 ⚠ 段。
     "app.storage.hls._read":    (set(), 0.40),
     "app.storage.hls.types":    (set(), 0.40),
+    # 媒体轴（MediaTimeline / PlacedSegment）：源码 stdlib + `.types`，不碰盘；同上量的是 facade
+    "app.storage.hls._timeline": (set(), 0.40),
     # 服务层工具包。标记型 __init__（零 re-export），故这条盯的只是它自己；每个成员模块
     # 另行登记，由 test_layer_package_modules_are_all_budgeted 强制。
     # 平台 DB 只读层。包根标记型；其余三条都经 `database` 拉起 sqlalchemy + psycopg2 + settings
@@ -102,8 +104,8 @@ BUDGET = {
     "app.db.alarms":            (set(), 1.0),
     "app.services.utils":              (set(), 0.20),
     "app.services.utils.vod_playlist": (set(), 0.20),   # stdlib only（math / typing）
-    # 媒体轴换算。它 import `app.storage.hls`（段与 EXTINF 的唯一来源），故预算照 hls 那条
-    # 给 0.40 —— 量的是同一份活；它本身是 stdlib（bisect / typing）。
+    # 断流判定（阈值 + first_gap / total_gap_ms）。它 import `app.storage.hls`（媒体轴在那），
+    # 故预算照 hls 那条给 0.40 —— 量的是同一份活；它本身是 stdlib（typing）。
     "app.services.utils.media_timeline": (set(), 0.40),
     "app.services.utils.task_queue":   (set(), 0.20),   # stdlib only
     "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only

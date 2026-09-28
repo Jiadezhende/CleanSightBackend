@@ -3,18 +3,19 @@
     run = resolve_run(task_id, step_id, run_id)   # 点名的 run 不在 → 404；缺省且无可见 run → None
     if run is None:
         raise no_run(task_id, step_id)            # 端点必须有 run 时，None 分支的 404
+    run, tl = resolve_timeline(task_id, step_id, run_id, track)   # 再要求该轨有段，否则 404
     run = resolve_media_run(payload)              # /media/*：token 锁定的 run，不在 → HTTP 404
 
 缺省 `run_id` 时 `resolve_run` 返回 None 而不是 404：老前端不带 `run_id`，各端点对「这个 step
 没数据」原有的响应（404 / 全 0）保持不变，由调用方按原样处理。
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 from fastapi import HTTPException
 
 from app.types.run import RunIdentity
-from app.storage import runs
+from app.storage import hls, runs
 from app.types.exceptions import NotFoundError
 
 from .media_token import MediaTokenPayload
@@ -38,6 +39,21 @@ def no_run(task_id: int, step_id: int) -> NotFoundError:
         f"no visible run for task {task_id} step {step_id}",
         resource_type="Run", resource_id=f"task={task_id},step={step_id}",
     )
+
+
+def resolve_timeline(
+    task_id: int, step_id: int, run_id: Optional[int], track: str
+) -> Tuple[RunIdentity, hls.MediaTimeline]:
+    """`resolve_run` + 该轨媒体轴；无可见 run 或该轨无段 → 404（Segments）。点名不中的 404 同 `resolve_run`。"""
+    run = resolve_run(task_id, step_id, run_id)
+    timeline = hls.query_timeline(run, track) if run is not None else hls.MediaTimeline([])
+    if not timeline:
+        raise NotFoundError(
+            f"No {track} segments for task {task_id} step {step_id}",
+            resource_type="Segments",
+            resource_id=f"task={task_id},step={step_id},track={track}",
+        )
+    return run, timeline
 
 
 def resolve_media_run(payload: MediaTokenPayload) -> RunIdentity:
