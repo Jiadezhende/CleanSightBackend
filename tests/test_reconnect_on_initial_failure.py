@@ -23,7 +23,7 @@ import pytest
 
 from app.services.health_monitor.config import HealthMonitorConfig
 from app.services.health_monitor.manager import GlobalHealthMonitor
-from app.services.stream.manager import StreamService
+from app.services.stream.service import StreamService
 from app.types.exceptions import FFmpegError
 
 
@@ -87,7 +87,7 @@ class TestDecoderRegistration:
         self.client_id = "reconnect_test_client"
 
     def _start_with_failing_decoder(self, error):
-        with patch("app.services.stream.manager.FFmpegDecoder") as MockDecoder, \
+        with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
                  self.service, "_get_client_queues", return_value=MagicMock()
              ):

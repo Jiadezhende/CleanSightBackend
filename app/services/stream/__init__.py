@@ -11,7 +11,7 @@
 消费方走深路径：
 
     单例      from app.services.stream.instance import stream_service
-    类        from app.services.stream.manager import StreamService
+    类        from app.services.stream.service import StreamService
     解码器    from app.services.stream.decoder import FFmpegDecoder
 """
 
