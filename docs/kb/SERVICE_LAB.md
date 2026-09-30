@@ -20,7 +20,7 @@ Lab 有三条路径：从一次 run 的 raw 轨裁剪区间送 Label Studio（Cl
 | `GET\|PUT /lab-f3m8/config` | LS 连接配置读写（`runtime_config`，持久化） |
 | `/ui-f3m8/lab/` | 送标工作台（`app/static/lab/index.html`，经全局 `/ui-f3m8` 挂载，前端库取 `/ui-f3m8/vendor/`） |
 
-`lab-f3m8` / `ui-f3m8` 都是混淆前缀，降低扫描器命中率（无登录）。`/ui-f3m8` 属网关宽松前缀，见 [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)。带 `(task_id, step_id, 可选 run_id)` 的端点在入口经 `app/routers/utils/runs.py` 解析一次 run，之后只用这个 `RunIdentity`（见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)「读侧 run 锁定」）。
+`lab-f3m8` / `ui-f3m8` 都是混淆前缀，降低扫描器命中率（无登录）。`/ui-f3m8` 属网关普通档，见 [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)。带 `(task_id, step_id, 可选 run_id)` 的端点在入口经 `app/routers/utils/runs.py` 解析一次 run，之后只用这个 `RunIdentity`（见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)「读侧 run 锁定」）。
 
 ## router 只管检查顺序与 DTO，流程在 service
 

@@ -125,7 +125,7 @@ test_intra_package_relative_cross_package_absolute
 
 ## Gateway
 
-- `test_gateway.py`：IP 白名单、速率限制、反扫描三类 store 与清理线程；HTTP 覆盖 relaxed（用生产默认 `gateway_relaxed_prefixes` 参数化，含 `/ui-f3m8/admin/`）/ bypass（跳过限流与反扫描）/ normal（超限封禁升级）三档；WebSocket 封禁与限流时 close。
+- `test_gateway.py`：IP 白名单、速率限制、反扫描三类 store 与清理线程；HTTP 覆盖 relaxed（用生产默认 `gateway_relaxed_prefixes` 参数化，含 `/admin-f3m8/overview`）/ bypass（跳过限流与反扫描）/ normal（超限封禁升级）三档；WebSocket 封禁与限流时 close。
 - `test_mediamtx_gateway.py`：配置加载、RTSP TCP 代理（转发 / 封禁 / 限流 / 目标不可达）、MediaMTX 进程守护（正常退出 / stop_event / 崩溃重启 / 超限停止）。
 
 ## 追溯与媒体

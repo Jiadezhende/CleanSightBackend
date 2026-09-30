@@ -108,7 +108,7 @@ FastAPI Gateway（`app/gateway.py`）的配置全在 settings：
 
 - 开关与白名单：`gateway_enabled`、`gateway_allowed_ips`（逗号分隔，空 = 不限制）
 - 普通档：`gateway_rate_limit` / `gateway_rate_window`，持续超限升级封禁 `gateway_rate_ban_threshold` / `gateway_rate_ban_window`
-- 宽松档：`gateway_relaxed_prefixes`（默认 `/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/ui-f3m8,/metrics`）+ `gateway_relaxed_rate_limit`
+- 宽松档：`gateway_relaxed_prefixes`（默认 `/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/metrics`）+ `gateway_relaxed_rate_limit`
 - 绕过档：`gateway_bypass_prefixes`（默认 `/media`）
 - 反扫描：`gateway_scan_threshold` / `gateway_scan_window` / `gateway_ban_duration`
 

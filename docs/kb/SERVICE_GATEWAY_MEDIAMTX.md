@@ -17,8 +17,8 @@
 
 | 档 | 限流 | 反扫描计数 | IP 白名单 / 封禁 | 默认前缀 |
 |----|------|:-:|:-:|------|
-| normal | `gateway_rate_limit`（60 / 60s）；窗口内超限 `gateway_rate_ban_threshold`（5）次即升级封禁 | 计 | 查 | 其余全部（含 `/api`、`/ai`、`/lab-f3m8`、`/algorithm`） |
-| relaxed | `gateway_relaxed_rate_limit`（600 / 60s），独立 bucket；不升级封禁 | 不计 | 查 | `/health`、`/task/message`、`/task/live`、`/task/history`、`/traceback`、`/admin-f3m8`、`/ui-f3m8`、`/metrics` |
+| normal | `gateway_rate_limit`（60 / 60s）；窗口内超限 `gateway_rate_ban_threshold`（5）次即升级封禁 | 计 | 查 | 其余全部（含 `/api`、`/ai`、`/lab-f3m8`、`/ui-f3m8`、`/algorithm`） |
+| relaxed | `gateway_relaxed_rate_limit`（600 / 60s），独立 bucket；不升级封禁 | 不计 | 查 | `/health`、`/task/message`、`/task/live`、`/task/history`、`/traceback`、`/admin-f3m8`、`/metrics` |
 | bypass | 跳过 | 不计 | 查 | `/media` |
 
 前缀默认值定在 `app/settings.py`（`.env` 可覆盖），大屏自封是生产正确性问题，不依赖部署手工配置。
@@ -35,8 +35,10 @@
   播放端逐个 HEAD 探 playlist，若计数会正好撞线。
 - **`/task/live`、`/task/history` 用 relaxed**：大屏跨 origin 轮询，CORS 预检 `OPTIONS` 与实际请求各计一次，3s 一轮即
   40 次 / 分，普通档撑不住。
-- **`/ui-f3m8` 用 relaxed**：一次开页拉 index.html 加多个 vendor 资产，普通档下刷新几次就会升级封禁；访问根 `/ui-f3m8/`
-  的 404 也不再计入反扫描。
+- **`/admin-f3m8` 用 relaxed**：admin 页数据接口，单页轮询 overview（3s）/ metrics/json（5s）/ offline/jobs（2s）约
+  62 次 / 分；页内延迟测试默认向 `/admin-f3m8/ping` 发 100 个请求、并发 5。
+- **`/ui-f3m8` 留在 normal**：静态页开一次只拉 5~6 个资产（`index.html` + vendor），普通档足够；页面的高频请求都打在
+  `/admin-f3m8` 等宽松前缀上。
 - **`/algorithm` 留在 normal**：比色端点没有轮询需求。
 
 ## MediaMTX Gateway（`mediamtx_gateway/`）
