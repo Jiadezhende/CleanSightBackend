@@ -1,7 +1,8 @@
 # step 初始化改为域内懒惰 supersede：写者首写自清，编排层零 purge 调用点
 
-> **变更状态**：提案（2026-09-11）　<!-- 设计已收敛；§1/§2 的实现已落地但未接线，`start_run` 当前仍是整 step rmtree -->
-> **知识库**：待沉淀
+> **变更状态**：生效中（提案 2026-09-11 → 2026-09-16 随 HLS 调用点迁移接线）　<!-- 首写自清已是生产写侧行为：run_control 的 start_run 不再有任何 purge 调用 -->
+> **知识库**：已沉淀 → [SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)（2026-09-20）
+> **追加（2026-09-20）**：下方「本篇状态维持『提案』」那段已过期——`main.py` 已嵌 `recording.lifespan()`，`start_run` 的整 step rmtree 已删除，生产写侧就是懒惰首写自清。
 >
 > **追加（2026-09-11）**：§1（代次校验）与 §2（hls 域首写自清）**的实现已落地**在新建的
 > `app/services/recording/`，`storage.hls` 也补上了 §2 要的域内清理入口（`hls.delete`），

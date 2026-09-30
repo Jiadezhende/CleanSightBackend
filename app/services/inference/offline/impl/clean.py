@@ -1,21 +1,20 @@
 """CLEAN stage 离线模型策略。
 
 本文件保持“单策略文件自包含”：
-    - clean 专属特征转换（模块级纯函数）；
-    - 三种离线模型结构；
-    - 模型输出到 SegmentFact 的解码逻辑。
+    - clean 专属特征转换（模块级纯函数：v2 / v3 / nodep 拼接及 recipe）；
+    - 离线模型结构（三种整段模型 + 因果滑窗 GRU）；
+    - 模型输出到 TemporalSegment 的解码逻辑。
 
 输入:
-    OfflineRunner 从 FeatureStore.load(task_id, step_id) 读取 List[FrameFeature]
+    OfflineRunner 从 inference.read_detections(task_id, step_id) 读取 List[FrameDetection]
     （帧级、多流已在 by_source 内对齐、按 ts 升序）。
 
 输出:
-    List[SegmentFact]，由 Runner 校验并幂等写入 FactLedger。
+    List[TemporalSegment]，由 Runner 校验并幂等写入 temporal.jsonl。
 
 注意:
     这里不包含训练流程。训练仍在独立 offline-model 仓内完成，后端只负责加载
-    已训练权重并执行离线推理。若未配置 model_path，CLEAN 模型会硬失败；
-    本地回环测试应使用已有的 mock.BrushRulesSegmenter。
+    已训练权重并执行离线推理。若未配置 model_path，CLEAN 模型会硬失败。
 """
 
 from __future__ import annotations
@@ -27,9 +26,10 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from app.domain.detection import Detection, FrameFeature
-from app.services.inference.types import SegmentFact
+from app.types.detection import DetBox, FrameDetection
+from app.types.temporal import LabelProbs, TemporalSegment
 from app.services.inference.offline.segmenter import OfflineSegmenter
+from app.services.inference.resample import resample_by_ts
 
 
 FEATURE_VERSION = "clean_bbox_v2_top1_impute"
@@ -126,18 +126,18 @@ class ModelInput:
 
 
 def build_base_features(
-    frames: Sequence[FrameFeature],
+    frames: Sequence[FrameDetection],
     fps: float,
     frame_width: int = 640,
     frame_height: int = 480,
 ) -> ModelInput:
-    """把 clean 帧级 FrameFeature 序列转换成 v2 固定维（113）时序特征。
+    """把 clean 帧级 FrameDetection 序列转换成 v2 固定维（113）时序特征。
 
-    每帧 `FrameFeature.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
+    每帧 `FrameDetection.by_source` 里的多流检测在此按帧合并消费（无需上游先融合）。
     """
     frame_width = max(1, int(frame_width))
     frame_height = max(1, int(frame_height))
-    timestamps = [ff.ts for ff in frames]  # FrameFeature.ts 已在 store.load 边界统一 float
+    timestamps = [ff.ts for ff in frames]  # FrameDetection.ts 已在 store.load 边界统一 float
     frame_count = len(frames)
     if frame_count <= 0:
         return ModelInput(features=[], feature_names=base_feature_names(), timestamps=[], fps=float(fps))
@@ -165,11 +165,15 @@ def _finite_matrix(values: np.ndarray) -> np.ndarray:
 
 
 def _collect_object_arrays(
-    frames: Sequence[FrameFeature], frame_width: int, frame_height: int
+    frames: Sequence[FrameDetection],
+    frame_width: int,
+    frame_height: int,
+    confidence_override: float | None = None,
 ) -> Dict[str, List[np.ndarray]]:
     """把每帧检测框按目标类别归拢成 {obj: [每检测框一个 [T,5] 稀疏数组]}。
 
-    每帧遍历 `FrameFeature.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
+    每帧遍历 `FrameDetection.by_source` 各流的检测（多流按帧合并，同 idx 落同一行）。
+    `confidence_override` 非 None 时所有框置信度改用该值（对齐无置信度列的训练标注）。
     """
     frame_count = len(frames)
     out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
@@ -178,18 +182,19 @@ def _collect_object_arrays(
         width = max(1, int(ff.frame_width or frame_width))
         height = max(1, int(ff.frame_height or frame_height))
         for fd in ff.by_source.values():
-            for det in fd.detections:
+            for det in fd.boxes:
                 obj = OBJECT_ALIASES.get(str(det.class_name))
                 if obj is None:
                     continue
                 cx, cy, area = _bbox_to_center_area(det, width, height)
+                conf = det.confidence if confidence_override is None else confidence_override
                 arr = np.zeros((frame_count, 5), dtype=np.float32)
                 arr[idx] = (
                     1.0,
                     float(cx),
                     float(cy),
                     float(area),
-                    max(0.0, min(1.0, float(det.confidence))),
+                    max(0.0, min(1.0, float(conf))),
                 )
                 out[obj].append(arr)
     return out
@@ -208,13 +213,13 @@ def _effective_fps(timestamps: Sequence[float], fallback_fps: float) -> float:
     return max(1.0 / float(np.median(np.asarray(deltas, dtype=np.float32))), 1e-6)
 
 
-def _bbox_to_center_area(det: Detection, width: int, height: int) -> Tuple[float, float, float]:
+def _bbox_to_center_area(det: DetBox, width: int, height: int) -> Tuple[float, float, float]:
     """xyxy 框空间归一化后返回 (中心 cx, 中心 cy, 面积)，坐标/面积均截到 [0,1]。"""
     if len(det.bbox) < 4:
         return 0.0, 0.0, 0.0
     x1, y1, x2, y2 = [float(v) for v in det.bbox[:4]]
 
-    # FeatureStore 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
+    # detections.jsonl 当前保存的是 xyxy。若数值已经在 0-1，则按归一化坐标处理；
     # 否则按画面尺寸做空间归一化。
     normalized = max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5
     if normalized:
@@ -541,8 +546,222 @@ def add_business_priors(model_input: ModelInput) -> ModelInput:
     )
 
 
+# -------------------- clean_bbox_v3_scope_frame（113 维，scope 器械轴坐标系） --------------------
+#
+# 与训练框架 `clean_bbox_v3.py` 逐函数对齐：槽位选择 / 短缺失插值复用上面 v2 的实现，
+# 位置投影到 control_body→distal_end 轴（缺席回退 mid_section），面积取相对 distal_end 的对数比。
+
+_V3_CLIP_POS = 4.0
+_V3_CLIP_LOG = 6.0
+_V3_FALLBACK_REF_LEN = 0.35
+_V3_FALLBACK_REF_AREA = 0.02
+_V3_SLOT_CHANNELS = ["present", "conf", "along", "across", "log_area_ratio", "speed", "missing_age", "imputed"]
+
+
+def _forward_fill(values: np.ndarray, valid: np.ndarray, fallback: float) -> np.ndarray:
+    """沿时间前向填充有效值；序列内无任何有效值时全部回退 fallback。"""
+    out = np.full(len(values), float(fallback), dtype=np.float32)
+    last = None
+    for idx in range(len(values)):
+        if valid[idx]:
+            last = float(values[idx])
+        if last is not None:
+            out[idx] = last
+    return out
+
+
+def _scope_frame(
+    features: Dict[str, np.ndarray], active: Dict[str, np.ndarray], frames: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """由 scope 三点构造逐帧 (单位轴向量, 轴长 ref_len, 参考面积 ref_area)。"""
+    control = features["scope_control_body"][:, 2:4]
+    mid = features["scope_mid_section"][:, 2:4]
+    distal = features["scope_distal_end"][:, 2:4]
+    active_ctl = active["scope_control_body"]
+    active_mid = active["scope_mid_section"]
+    active_dis = active["scope_distal_end"]
+
+    axes = np.zeros((frames, 2), dtype=np.float32)
+    ref_len = np.full(frames, _V3_FALLBACK_REF_LEN, dtype=np.float32)
+    last_axis = None
+    valid_lens: List[float] = []
+    len_valid = np.zeros(frames, dtype=bool)
+    for idx in range(frames):
+        for left, right, left_ok, right_ok in (
+            (control[idx], distal[idx], active_ctl[idx], active_dis[idx]),
+            (mid[idx], distal[idx], active_mid[idx], active_dis[idx]),
+            (control[idx], mid[idx], active_ctl[idx], active_mid[idx]),
+        ):
+            if not (left_ok and right_ok):
+                continue
+            vector = right - left
+            length = float(np.linalg.norm(vector))
+            if length <= 1e-4:
+                continue
+            last_axis = (vector / length).astype(np.float32)
+            ref_len[idx] = length
+            len_valid[idx] = True
+            valid_lens.append(length)
+            break
+        axes[idx] = last_axis if last_axis is not None else np.array([1.0, 0.0], np.float32)
+    if valid_lens:
+        median_len = float(np.median(valid_lens))
+        ref_len = np.where(len_valid, ref_len, _forward_fill(ref_len, len_valid, median_len)).astype(np.float32)
+
+    area_values = np.where(active_dis, features["scope_distal_end"][:, 4], np.nan).astype(np.float32)
+    if active_dis.any():
+        median_area = float(np.nanmedian(area_values))
+        ref_area = np.where(
+            active_dis,
+            area_values,
+            _forward_fill(np.nan_to_num(area_values, nan=median_area), active_dis, median_area),
+        ).astype(np.float32)
+    else:
+        ref_area = np.full(frames, _V3_FALLBACK_REF_AREA, dtype=np.float32)
+    return axes, ref_len, ref_area
+
+
+def _v3_slot_channels(
+    feature: np.ndarray,
+    active: np.ndarray,
+    axes: np.ndarray,
+    ref_len: np.ndarray,
+    ref_area: np.ndarray,
+    control: np.ndarray,
+) -> np.ndarray:
+    """把 v2 插值特征 `[T,8]` 转成 v3 的 8 通道 scope 坐标特征。"""
+    relative = feature[:, 2:4] - control
+    along = np.einsum("td,td->t", relative, axes) / ref_len
+    perpendicular = np.stack([-axes[:, 1], axes[:, 0]], axis=1)
+    across = np.einsum("td,td->t", relative, perpendicular) / ref_len
+    log_ratio = np.log((feature[:, 4] + 1e-4) / (ref_area + 1e-4))
+    channels = np.stack(
+        [
+            feature[:, 0],
+            feature[:, 1],
+            np.clip(along, -_V3_CLIP_POS, _V3_CLIP_POS),
+            np.clip(across, -_V3_CLIP_POS, _V3_CLIP_POS),
+            np.clip(log_ratio, -_V3_CLIP_LOG, _V3_CLIP_LOG),
+            feature[:, 5],
+            feature[:, 6],
+            feature[:, 7],
+        ],
+        axis=1,
+    ).astype(np.float32)
+    channels[~active, 1:6] = 0.0
+    return channels
+
+
+def _build_v3_matrix(
+    object_arrays: Dict[str, List[np.ndarray]], frames: int, fps: float
+) -> Tuple[np.ndarray, List[str]]:
+    """拼装 v3 base 矩阵 `[T,113]`，块布局与 v2 base 一一对应，返回 (矩阵, 列名)。"""
+    features: Dict[str, np.ndarray] = {}
+    active: Dict[str, np.ndarray] = {}
+    counts: Dict[str, np.ndarray] = {}
+
+    hand_count, hand_slots = _select_hand_slots(object_arrays.get("hand", []), frames)
+    for slot_idx, slot in enumerate(hand_slots, start=1):
+        features[f"hand_top{slot_idx}"], active[f"hand_top{slot_idx}"] = _impute_short_gaps(slot, fps)
+    for obj in OBJECTS:
+        if obj == "hand":
+            continue
+        counts[obj], slot = _select_top1_slot(object_arrays.get(obj, []), frames)
+        features[obj], active[obj] = _impute_short_gaps(slot, fps)
+
+    axes, ref_len, ref_area = _scope_frame(features, active, frames)
+    control = features["scope_control_body"][:, 2:4]
+
+    blocks: List[np.ndarray] = [(np.clip(hand_count, 0, 3) / 3.0)[:, None].astype(np.float32)]
+    names: List[str] = ["hand_count"]
+    for key in ("hand_top1", "hand_top2"):
+        blocks.append(_v3_slot_channels(features[key], active[key], axes, ref_len, ref_area, control))
+        names += [f"{key}_{ch}" for ch in _V3_SLOT_CHANNELS]
+    for obj in OBJECTS:
+        if obj == "hand":
+            continue
+        blocks.append(np.concatenate(
+            [
+                (np.clip(counts[obj], 0, 3) / 3.0)[:, None].astype(np.float32),
+                _v3_slot_channels(features[obj], active[obj], axes, ref_len, ref_area, control),
+            ],
+            axis=1,
+        ))
+        names.append(f"{obj}_candidate_count")
+        names += [f"{obj}_{ch}" for ch in _V3_SLOT_CHANNELS]
+
+    for left, right in PAIR_FEATURES:
+        left_keys = ["hand_top1", "hand_top2"] if left == "hand" else [left]
+        right_keys = ["hand_top1", "hand_top2"] if right == "hand" else [right]
+        valid = np.zeros(frames, dtype=np.float32)
+        dist = np.full(frames, np.inf, dtype=np.float32)
+        for lk in left_keys:
+            for rk in right_keys:
+                pair_valid = (active[lk] & active[rk]).astype(np.float32)
+                pair_dist = np.linalg.norm(features[lk][:, 2:4] - features[rk][:, 2:4], axis=1)
+                pick = (pair_valid > 0) & (pair_dist < dist)
+                valid[pick] = 1.0
+                dist[pick] = pair_dist[pick]
+        dist = np.where(valid > 0, np.clip(dist, 0.0, math.sqrt(2.0)) / math.sqrt(2.0), 0.0).astype(np.float32)
+        delta = np.zeros(frames, dtype=np.float32)
+        if frames > 1:
+            delta[1:] = np.clip(dist[1:] - dist[:-1], -1.0, 1.0)
+            delta[valid <= 0] = 0.0
+        blocks.append(np.stack([valid, dist, delta], axis=1).astype(np.float32))
+        names += [f"{left}_to_{right}_valid", f"{left}_to_{right}_dist", f"{left}_to_{right}_delta"]
+
+    t = np.linspace(0.0, 1.0, frames, dtype=np.float32)
+    blocks.append(np.stack([t, np.sin(2 * np.pi * t), np.cos(2 * np.pi * t)], axis=1).astype(np.float32))
+    names += ["t_norm", "t_sin", "t_cos"]
+    return _finite_matrix(np.concatenate(blocks, axis=1)), names
+
+
+# -------------------- ama-v3-concat23-nodep-226d（v2 ⊕ v3，剔除废弃类） --------------------
+
+NODEP_FEATURE_VERSION = "ama-v3-concat23-nodep-226d"
+NODEP_FEATURE_DIM = 226
+NODEP_DEPRECATED_OBJECTS = ("scope_distal_end", "short_brush", "long_brush")
+
+
+def build_nodep_concat_features(
+    frames: Sequence[FrameDetection],
+    fps: float,
+    frame_width: int = 640,
+    frame_height: int = 480,
+    confidence_override: float | None = None,
+) -> ModelInput:
+    """v2 ⊕ v3 同编码拼接 `[T,226]`；废弃类检测在读入层丢弃（对应块全零）。
+
+    `fps` 用模型契约帧率（训练框架以固定 fps 算 speed），不从 ts 估计。
+    列名加 `v2.` / `v3.` 前缀区分两半（两半同名列很多）。
+    """
+    frame_count = len(frames)
+    if frame_count <= 0:
+        return ModelInput(
+            features=[], feature_names=[], timestamps=[], fps=float(fps), feature_version=NODEP_FEATURE_VERSION,
+        )
+    object_arrays = _collect_object_arrays(
+        frames, max(1, int(frame_width)), max(1, int(frame_height)), confidence_override,
+    )
+    for obj in NODEP_DEPRECATED_OBJECTS:
+        object_arrays[obj] = []
+    timestamps = [ff.ts for ff in frames]
+    v2, v2_names = _build_feature_matrix(object_arrays, frame_count, float(fps))
+    v3, v3_names = _build_v3_matrix(object_arrays, frame_count, float(fps))
+    features = np.concatenate([v2, v3], axis=1).astype(np.float32)
+    if features.shape[1] != NODEP_FEATURE_DIM:
+        raise AssertionError(f"nodep 拼接维度 {features.shape[1]} != {NODEP_FEATURE_DIM}")
+    return ModelInput(
+        features=features.tolist(),
+        feature_names=[f"v2.{n}" for n in v2_names] + [f"v3.{n}" for n in v3_names],
+        timestamps=timestamps,
+        fps=float(fps),
+        feature_version=NODEP_FEATURE_VERSION,
+    )
+
+
 class _CleanTorchSegmenter(OfflineSegmenter):
-    """clean 模型策略基类：torch 模型加载 + 推理 + SegmentFact 解码。
+    """clean 模型策略基类：torch 模型加载 + 推理 + TemporalSegment 解码。
 
     特征工程是模块级纯函数：`preprocess` 调 build_base_features 得基础 v2（113 维）；
     需叠加模型专属 recipe 的子类**覆盖 preprocess**，用 `super().preprocess()` 取基础特征后
@@ -551,18 +770,17 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
     model_version = "clean_model_v1"
     feature_method = "v2"
+    # 模型输出列序 → 动作名（与权重一一对应）；id 0 须为背景类，解码时跳过
+    labels: Tuple[str, ...] = tuple(ACTION_LABELS)
 
     def __init__(
         self,
-        name: str,
-        subscribes: Sequence[str],
         model_path: str | None = None,
         min_duration_s: float = 0.2,
         fps: float = 7.5,
         frame_width: int = 640,
         frame_height: int = 480,
     ):
-        super().__init__(name, subscribes)
         self.model_path = model_path
         self.min_duration_s = max(0.0, float(min_duration_s))
         self.fps = float(fps)
@@ -570,56 +788,49 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         self.frame_height = max(1, int(frame_height))
         self._model = None
         self._normalizer: Tuple[Any, Any] | None = None
-        self._last_result: dict | None = None
+        self._last_probs: LabelProbs | None = None
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
-        """帧级 FrameFeature 序列 → 基础 v2 特征（113 维）。
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
+        """帧级 FrameDetection 序列 → 基础 v2 特征（113 维）。
 
         多流按帧合并折进 build_base_features（`frames` 已按 ts 升序、各流在 by_source 内对齐）。
         需叠加模型专属 recipe 的子类覆盖本方法，用 `super().preprocess()` 取基础特征后再变换。
         """
         return build_base_features(frames, self.fps, self.frame_width, self.frame_height)
 
-    def segment(self, model_input: ModelInput) -> List[SegmentFact]:
-        """跑模型得到逐帧标签，解码成 SegmentFact；未配 model_path 硬失败，不做规则降级。"""
+    def segment(self, model_input: ModelInput) -> List[TemporalSegment]:
+        """跑模型得到逐帧标签，解码成 TemporalSegment；未配 model_path 硬失败，不做规则降级。"""
         if model_input.frame_count == 0:
             return []
 
         if not self.model_path:
             raise ValueError(
-                f"{type(self).__name__} 未配置 model_path；CLEAN 离线模型不做规则降级，"
-                "本地回环请使用 mock.BrushRulesSegmenter"
+                f"{type(self).__name__} 未配置 model_path；CLEAN 离线模型不做规则降级"
             )
 
-        labels, confs = self._predict_with_model(model_input)
+        probs = self._predict_with_model(model_input)
+        labels = probs.argmax(axis=1).astype("int64").tolist()
+        confs = probs.max(axis=1).astype("float32").tolist()
 
         segments = self._labels_to_segments(model_input.timestamps, labels, confs)
-        self._last_result = {
-            "model_version": self.model_version,
-            "model_class": type(self).__name__,
-            "feature_method": self.feature_method,
-            "feature_version": model_input.feature_version,
-            "feature_dim": model_input.feature_dim,
-            "frame_count": model_input.frame_count,
-            "frame_predictions": [
-                {"ts": ts, "label": ACTION_LABELS[label], "conf": round(float(conf), 5)}
-                for ts, label, conf in zip(model_input.timestamps, labels, confs)
-            ],
-            "segments": [s.to_json() for s in segments],
-        }
+        self._last_probs = LabelProbs(
+            ts=np.asarray(model_input.timestamps, dtype=np.float64),
+            probs=probs,
+            labels=self.labels,
+        )
         return segments
 
-    def debug_result(self) -> dict | None:
-        """返回最近一次 segment() 的逐帧预测/分段调试快照（未跑过为 None）。"""
-        return self._last_result
+    def label_probs(self) -> LabelProbs | None:
+        """最近一次 segment() 的逐帧 softmax（未跑过为 None），供可视化旁路落盘。"""
+        return self._last_probs
 
-    def _predict_with_model(self, model_input: ModelInput) -> Tuple[List[int], List[float]]:
-        """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 (argmax 标签, 置信度)。"""
+    def _predict_with_model(self, model_input: ModelInput) -> np.ndarray:
+        """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 softmax `[T, len(self.labels)]`。"""
         import numpy as np
         import torch
 
         if self._model is None:
-            self._load_model(model_input, len(ACTION_LABELS))
+            self._load_model(model_input, len(self.labels))
 
         x_np = np.asarray(model_input.features, dtype=np.float32)
         if self._normalizer is not None:
@@ -631,9 +842,7 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         with torch.no_grad():
             logits = self._model(x)[0].transpose(0, 1)
             probs = torch.softmax(logits, dim=-1).cpu().numpy()
-        labels = probs.argmax(axis=1).astype("int64").tolist()
-        confs = probs.max(axis=1).astype("float32").tolist()
-        return labels, confs
+        return probs.astype(np.float32)
 
     def _load_model(self, model_input: ModelInput, class_count: int) -> None:
         """加载 .pt checkpoint 并校验 feature_names/feature_version 与后端输入一致，取出 normalizer。"""
@@ -676,9 +885,9 @@ class _CleanTorchSegmenter(OfflineSegmenter):
 
     def _labels_to_segments(
         self, timestamps: Sequence[float], labels: Sequence[int], confs: Sequence[float]
-    ) -> List[SegmentFact]:
+    ) -> List[TemporalSegment]:
         """把逐帧标签合并成连续动作段（跳过 idle、过滤短于 min_duration_s 的段）。"""
-        segments: List[SegmentFact] = []
+        segments: List[TemporalSegment] = []
         cur_label: int | None = None
         cur_start = cur_end = 0.0
         cur_conf = 0.0
@@ -687,9 +896,9 @@ class _CleanTorchSegmenter(OfflineSegmenter):
         def flush() -> None:
             nonlocal cur_label, cur_conf, cur_count
             if cur_label is not None and cur_label != 0 and (cur_end - cur_start) >= self.min_duration_s:
-                segments.append(SegmentFact(
-                    source=self.name,
-                    label=ACTION_LABELS[cur_label],
+                segments.append(TemporalSegment(
+                    producer=self.name,
+                    label=self.labels[cur_label],
                     start=round(cur_start, 6),
                     end=round(cur_end, 6),
                     conf=min(1.0, max(0.0, cur_conf / max(cur_count, 1))),
@@ -911,7 +1120,7 @@ class CleanASFormerSegmenter(_CleanTorchSegmenter):
     model_version = "clean_asformer_v1"
     feature_method = "business_priors"
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         return add_business_priors(super().preprocess(frames))
 
     def _build_model(self, in_dim: int, class_count: int):
@@ -928,12 +1137,122 @@ class CleanBiGRUSegmenter(_CleanTorchSegmenter):
     model_version = "clean_bigru_v1"
     feature_method = "window_stats+business_priors"
 
-    def preprocess(self, frames: Sequence[FrameFeature]) -> ModelInput:
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
         return add_business_priors(add_centered_window_stats(super().preprocess(frames)))
 
     def _build_model(self, in_dim: int, class_count: int):
         return _make_bigru(in_dim, class_count)
 
 
-# 兼容旧文档/旧测试中使用的 CleanSegmenter 名称；默认指向推荐离线 baseline。
-CleanSegmenter = CleanMSTCNBiLSTMSegmenter
+# ==================== 因果滑窗 GRU（训练框架 sliding_window_temporal 产物） ====================
+
+NODEP_GRU_LABELS = (
+    "idle",
+    "water_injection",
+    "flush",
+    "long_brush_insert",
+    "long_brush_withdraw",
+    "short_brush_cleaning",
+)
+_WINDOW_BATCH = 1024
+
+
+def _make_window_gru(input_dim: int, class_count: int, hidden: int = 128, num_layers: int = 3):
+    """单向 3 层 GRU + 线性头，输入 `[B, window, F]`，取窗口末帧输出 `[B, C]`（state_dict 键 rnn.* / head.*）。"""
+    import torch.nn as nn
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rnn = nn.GRU(input_dim, hidden, num_layers=num_layers, batch_first=True, dropout=0.2)
+            self.head = nn.Linear(hidden, class_count)
+
+        def forward(self, x):
+            out, _ = self.rnn(x)
+            return self.head(out[:, -1])
+
+    return Model()
+
+
+def _causal_windows(x: np.ndarray, window: int) -> np.ndarray:
+    """`[T,F]` → 每帧一个以它为末帧的窗口 `[T,window,F]`；开头不足一窗的用首帧重复补齐。"""
+    padded = np.concatenate([np.repeat(x[:1], window - 1, axis=0), x], axis=0)
+    return np.lib.stride_tricks.sliding_window_view(padded, window, axis=0).transpose(0, 2, 1)
+
+
+class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
+    """CLEAN 阶段因果滑窗 GRU 离线模型（特征 ama-v3-concat23-nodep-226d，6 类）。
+
+    `model_path` 是训练框架 checkpoint 单文件（取 `model_state`，strict 加载）；网络结构与 `window`
+    固定为训练值（hidden=128 / 3 层 / window=16），换训练配置须同步改这里。
+    `model_input_fps` 须等于训练帧率、`confidence_override` 须与训练标注口径一致——配错不报错、
+    结果静默变差。
+    """
+
+    model_version = "clean_gru_nodep226d"
+    feature_method = "nodep_concat"
+    labels = NODEP_GRU_LABELS
+    window = 16
+
+    def __init__(
+        self,
+        model_path: str | None = None,
+        *,
+        model_input_fps: float,
+        min_duration_s: float = 0.2,
+        confidence_override: float | None = None,
+        frame_width: int = 640,
+        frame_height: int = 480,
+    ):
+        if float(model_input_fps) <= 0:
+            raise ValueError(f"model_input_fps 必须大于 0: {model_input_fps}")
+        if confidence_override is not None and not 0.0 <= float(confidence_override) <= 1.0:
+            raise ValueError(f"confidence_override 必须在 0..1: {confidence_override}")
+        super().__init__(
+            model_path=model_path,
+            min_duration_s=min_duration_s,
+            fps=model_input_fps,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        self.confidence_override = None if confidence_override is None else float(confidence_override)
+
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
+        """按 ts 降采样到 model_input_fps（只挑真实帧，ts 与 detections.jsonl 位级相等）→ 226 维特征。
+
+        检测帧率低于 model_input_fps 即 ValueError（strict）：只能降采样，放行会静默错配时间密度。
+        """
+        return build_nodep_concat_features(
+            resample_by_ts(frames, self.fps, strict=True),
+            self.fps,
+            self.frame_width,
+            self.frame_height,
+            self.confidence_override,
+        )
+
+    def _predict_with_model(self, model_input: ModelInput) -> np.ndarray:
+        """每帧取以它为末帧的窗口前向，返回逐帧 softmax `[T, len(self.labels)]`。"""
+        import torch
+
+        if self._model is None:
+            self._load_model(model_input, len(self.labels))
+        windows = _causal_windows(np.asarray(model_input.features, dtype=np.float32), self.window)
+        self._model.eval()
+        chunks = []
+        with torch.no_grad():
+            for start in range(0, len(windows), _WINDOW_BATCH):
+                batch = torch.from_numpy(np.ascontiguousarray(windows[start:start + _WINDOW_BATCH]))
+                chunks.append(torch.softmax(self._model(batch), dim=-1).numpy())
+        return np.concatenate(chunks, axis=0).astype(np.float32)
+
+    def _load_model(self, model_input: ModelInput, class_count: int) -> None:
+        """strict 加载训练框架 checkpoint 的 `model_state`。"""
+        import torch
+
+        path = Path(str(self.model_path))
+        if not path.exists():
+            raise FileNotFoundError(f"clean 离线模型权重不存在: {path}")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        model = _make_window_gru(NODEP_FEATURE_DIM, class_count)
+        model.load_state_dict(checkpoint["model_state"], strict=True)
+        self._model = model

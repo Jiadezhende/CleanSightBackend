@@ -9,11 +9,11 @@
 | 后端服务 | `http://{server}:{api-port}` 可访问（本地默认 8000；**当前测试环境 `111.14.140.60:8100`**） |
 | MediaMTX / RTSPProxy | RTSP 服务运行于 `rtsp://{server}:{rtsp-port}`（本地默认 8004；**当前测试环境 `111.14.140.60:8104`**） |
 | FFmpeg | 本地推流由 `FFmpegController` 调用项目内置 `.ffmpeg/bin/ffmpeg`（与后端同源 `settings.ffmpeg_path`）。**推流前须保证该二进制存在**：Linux 由 `install.sh` / Windows 由 `install.ps1` 部署；mac 本地开发若没跑 install，手动 `ln -s $(which ffmpeg) .ffmpeg/bin/ffmpeg` 即可。缺失时脚本会直接报错（非静默）；也可用 `CLEANSIGHT_FFMPEG_PATH` 覆写 |
-| 测试视频 | `test/test_video.mp4`（可通过 `--video_path` 覆盖，如 `test/clean-test.mp4`） |
+| 测试视频 | `integration_tests/fixtures/test_video.mp4`（可通过 `--video_path` 覆盖，如 `integration_tests/fixtures/clean-test.mp4`） |
 | 数据库任务 | `task_id` 不存在则脚本自动创建（结束自动删除）；已存在且 `current_step` 不一致会 fail-fast 报错（见下） |
 
 > 运行解释器：仓库使用 `.venv`。示例里写 `python`，按需替换为 `.venv/bin/python`（macOS/Linux）。
-> **当前测试环境**：`--server 111.14.140.60 --api-port 8100 --rtsp-port 8104`。观测面板 `http://111.14.140.60:8100/admin-f3m8/ui/`。
+> **当前测试环境**：`--server 111.14.140.60 --api-port 8100 --rtsp-port 8104`。观测面板 `http://111.14.140.60:8100/ui-f3m8/admin/`。
 
 ## 文件结构
 
@@ -21,12 +21,13 @@
 integration_tests/
 ├── test_single_client.py   # 单客户端测试（场景 1-9）
 ├── test_multi_client.py    # 多客户端并发测试（并发跑场景 1）
+├── test_offline_job_subprocess.py  # 离线作业服务真起 CLI 子进程（无需后端 / RTSP / DB）
 ├── utils.py                # 共享工具（FFmpegController, APIClient, DatabaseHelper）
 ├── cleanup_processes.py    # 清理残留进程的工具脚本
 └── logs/                   # 多客户端测试子进程日志
 ```
 
-> **观测统一走后端自带的 admin 运维面板** `http://{server}:{api-port}/admin-f3m8/ui/`，见下方[「观测：admin 运维面板」](#观测admin-运维面板)。旧的 `viewer.html` / `frontend.html` / `client_viewer.py` / `visualize_inference.py`（OpenCV 窗口）已删除，功能被 admin 面板覆盖。
+> **观测统一走后端自带的 admin 运维面板** `http://{server}:{api-port}/ui-f3m8/admin/`，见下方[「观测：admin 运维面板」](#观测admin-运维面板)。旧的 `viewer.html` / `frontend.html` / `client_viewer.py` / `visualize_inference.py`（OpenCV 窗口）已删除，功能被 admin 面板覆盖。
 
 ---
 
@@ -40,7 +41,7 @@ integration_tests/
 - **`--current-step`** 决定「**跑什么**」——任务阶段，路由到对应推理 workflow：
   - `1` → LEAK（测漏，默认）
   - `2` → CLEAN（清洁）
-  - 其它任意值 → MOCK（兜底透传）
+  - 未配置的 step / 非数字 → 参数错误，`/api/start` 返回 400（无兜底 stage）
 
 例如 `--scenario 2 --current-step 2` = 在 CLEAN 阶段下测断流重连。
 
@@ -50,12 +51,12 @@ integration_tests/
 |---|---|---|
 | `--scenario` | 必填 | 场景编号 1-9 |
 | `--task_id` | 必填 | 数据库任务 ID（不存在则自动创建并在结束时删除） |
-| `--current-step` | 随场景 | 任务阶段（1=LEAK / 2=CLEAN / 其它=MOCK）；显式指定覆盖场景默认 |
+| `--current-step` | 随场景 | 任务阶段（1=LEAK / 2=CLEAN；未配置 start 400）；显式指定覆盖场景默认 |
 | `--server` | `localhost` | 服务器地址（本地/远程均可） |
 | `--api-port` | `8000` | 后端 HTTP/WS API 端口 |
 | `--rtsp-port` | `8004` | RTSPProxy 推流端口 |
 | `--duration` | `60` | 运行时长（秒），从 start 到 terminate |
-| `--video_path` | `test/test_video.mp4` | 测试视频 |
+| `--video_path` | `integration_tests/fixtures/test_video.mp4` | 测试视频 |
 | `--fps` | `30` | 推流帧率 |
 | `--mode` | `no-stream` | 仅场景 5：`no-stream` / `no-terminate` |
 | `--stream-delay` | `10` | 仅场景 6：推流延迟秒数，须 < 重连窗口 25s |
@@ -181,10 +182,9 @@ python integration_tests/test_single_client.py --scenario 7 --task_id 1 --durati
 
 ---
 
-#### 场景 8：MOCK 阶段透传（验证不黑屏）
+#### 场景 8：未配置的 current_step → start 400
 
-`--scenario 1 --current-step 未知阶段` 的预设别名：无效 current_step 时 fallback 到 MOCK stage，验证帧透传不黑屏。
-后端日志关键字：`未知的 current_step，路由到 MOCK stage`、`InferWorker-MOCK 线程正常运行`。
+以 `current_step=99`（未配置）调 `/api/start`，预期 400、不起 run（不推流）。`--current-step 未知阶段` 同样应 400。
 
 ```bash
 python integration_tests/test_single_client.py --scenario 8 --task_id 1 --duration 30
@@ -217,7 +217,7 @@ python integration_tests/test_single_client.py \
   --scenario 1 --current-step 2 \
   --task_id 9001 \
   --server 111.14.140.60 --api-port 8100 --rtsp-port 8104 \
-  --video_path test/clean-test.mp4 \
+  --video_path integration_tests/fixtures/clean-test.mp4 \
   --duration 60
 ```
 
@@ -239,8 +239,8 @@ python integration_tests/test_single_client.py \
 | `--max-tasks` | `5` | 最大并发客户端数（从 DB 查询；给了 `--task-ids` 则忽略） |
 | `--task-ids` | 无 | 逗号分隔的 task_id 列表，如 `119,120,121`；不存在的由子进程自建（`source_ip=test.s{task_id}`，结束自动清理） |
 | `--api-port` / `--rtsp-port` | `8000` / `8004` | 透传给每个子进程（测试环境常做端口偏移，如 8100/8104） |
-| `--current-step` | 无 | 透传给每个子进程（`1`=LEAK / `2`=CLEAN / 其它=MOCK） |
-| `--video_path` | `test/test_video.mp4` | 测试视频 |
+| `--current-step` | 无 | 透传给每个子进程（`1`=LEAK / `2`=CLEAN；未配置 start 400） |
+| `--video_path` | `integration_tests/fixtures/test_video.mp4` | 测试视频 |
 
 > **每路的 `source_ip` 必须互异**——它既是推流路径 `rtsp://…/live/{source_ip}`，也是后端路由键；
 > 撞了就是两路推同一个地址。自建任务用 `test.s{task_id}` 天然互异，复用真实任务时需自行确认。
@@ -263,7 +263,7 @@ python integration_tests/test_multi_client.py --server 117.50.241.174 --max-task
 集成测试只**驱动**场景（推流 + 调 API + 跑生命周期），**观测**统一走后端自带的 admin 运维面板——无需另起服务、与后端同源同端口、支持多客户端聚合。测试脚本启动后会自动打印面板 URL（端口取自 `--api-port`）：
 
 ```
-http://{server}:{api-port}/admin-f3m8/ui/
+http://{server}:{api-port}/ui-f3m8/admin/
 ```
 
 > 该路径做过混淆（`/admin-f3m8/`）以防扫描器误触，随后端 [app/main.py](../app/main.py) 的挂载点为准；若改过挂载路径，以代码为准。

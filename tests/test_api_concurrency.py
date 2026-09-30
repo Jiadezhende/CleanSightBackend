@@ -1,26 +1,34 @@
 """
-测试 P0: 任务生命周期并发保护（编排在 RunController，锁在 ClientManager.lock_for）
+测试 P0: 任务生命周期并发保护（编排在 RunControlService，锁在 ClientService.lock_for）
 
 验证：
-1. 并发 start 同一 client → 只有一个真正执行，另一个幂等返回
-2. 跨任务切换 → 触发重启清理（stop_run）后再建新任务
-3. start + terminate 并发 → 经 per-client 锁串行执行，不崩溃/死锁
-4. 不同 client 的请求互不阻塞
-5. terminate 获取 per-client 锁（client_manager.lock_for）
+1. 同 task 已在跑、step 与 url 都没变 → 再 start 幂等返回，不重起流
+2. 同 task 改 url → 触发重启清理（stop_run）后再建新任务
+3. 同 task 的 start + terminate 并发 → 经 per-task 锁串行：terminate 的拆除等 start 做完
+4. 不同 task 的 start 互不阻塞：两边能同时处在各自的持锁段里
+5. terminate（body `{task_id}` 首选入口 / `?client_id=` 兼容入口）获取 per-task 锁
 
-说明：编排逻辑已从 api.py 收敛到 RunController，故 mock 打在
-`app.services.run_control.*`；`client_manager` 的 has_client/get/remove 用 patch.object
-就地替换，但**保留真实 lock_for**（真锁 → 真串行），故断言真实 `_task_locks`。
+说明：编排逻辑已从 api.py 收敛到 RunControlService，故 mock 打在
+`app.services.run_control.service.*`；**保留真实 lock_for**（真锁 → 真串行），故断言真实
+`_task_locks`。注册表按用例决定：要看「上一次 start 登记的 run」的用例用真实注册表
+（每个用例换一本空表，不污染全局），其余用 patch.object 就地替换 has_client/get/remove。
 """
 
 import asyncio
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import AsyncClient, ASGITransport
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.db import tasks as db_tasks
+from app.types.run import RunIdentity
 from app.main import app
-from app.services.client.manager import client_manager
+from app.services.client.instance import client_service
+
+_real_query_task = db_tasks.query_task
 
 
 # ---------------------------------------------------------------------------
@@ -29,11 +37,12 @@ from app.services.client.manager import client_manager
 
 
 @pytest.fixture(autouse=True)
-def _clear_locks():
-    """每个测试前后清空 per-client 任务级锁缓存"""
-    client_manager._task_locks.clear()
+def _isolate_client_service(monkeypatch):
+    """每个用例一本空注册表 + 清空 per-task 锁缓存；结束后原样恢复"""
+    monkeypatch.setattr(client_service, "_runs", {})
+    client_service._task_locks.clear()
     yield
-    client_manager._task_locks.clear()
+    client_service._task_locks.clear()
 
 
 def _make_db_task(task_id: int = 1, source_ip: str = "10.0.0.1"):
@@ -44,74 +53,51 @@ def _make_db_task(task_id: int = 1, source_ip: str = "10.0.0.1"):
     return task
 
 
-def _mock_db_session(db_task):
-    session = MagicMock()
-    query = MagicMock()
-    query.filter.return_value.first.return_value = db_task
-    session.query.return_value = query
-    return session
+def _new_cq(*, run, **_kwargs):
+    """ClientQueues 替身：每次 start 一个新对象，带上真实的 run 身份"""
+    cq = MagicMock()
+    cq.run = run
+    return cq
 
 
 # ---------------------------------------------------------------------------
-# Test 1: 并发 start 同一任务 → 幂等
+# Test 1: 同 task、step 与 url 不变 → 幂等
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_concurrent_start_same_task_idempotent():
-    """两个并发 start（同 task_id/同 client）：第一个建，第二个幂等返回。"""
+async def test_restart_with_same_step_and_url_is_idempotent():
+    """同 task 连续两次 start（step、url 均相同）：第二次幂等返回，不拆旧、不重建、不重起流。"""
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
 
-    start_stream_calls = []
-
-    def track_start_stream(**kwargs):
-        start_stream_calls.append(kwargs)
-
-    call_count = {"has_client": 0}
-    mock_cq = MagicMock()
-    mock_cq.task_id = 1
-    mock_cq.step_id = 0  # 幂等比对读 old_cq.step_id（= int(db.current_step)）
-
-    def has_client_side_effect(cid):
-        call_count["has_client"] += 1
-        return call_count["has_client"] > 1  # 首次未建、之后已建
-
-    def fresh_db():
-        return iter([_mock_db_session(db_task)])
-
     with (
-        patch("app.routers.api.get_db", side_effect=fresh_db),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
-        patch("app.services.run_control.ClientQueues"),
-        patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
-        patch.object(client_manager, "has_client", side_effect=has_client_side_effect),
-        patch.object(client_manager, "get", return_value=mock_cq),
+        patch.object(db_tasks, "query_task", return_value=db_task),
+        patch("app.services.run_control.service.inference_service") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues", side_effect=_new_cq),
     ):
         mock_inference.start_workflow.return_value = True
         mock_inference.resolve_stage.return_value = "0"
-        mock_stream.start_stream.side_effect = track_start_stream
         mock_stream.get_stream_info.return_value = {"url": "rtsp://test/stream"}
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            payload = {"task_id": 1, "rtsp_url": "rtsp://test/stream", "fps": 30}
-            results = await asyncio.gather(
-                ac.post("/api/start", json=payload),
-                ac.post("/api/start", json=payload),
-            )
+            payload = {"task_id": 1, "rtsp_url": "rtsp://test/stream"}
+            first = await ac.post("/api/start", json=payload)
+            second = await ac.post("/api/start", json=payload)
 
-        for r in results:
-            assert r.status_code == 200
-            assert r.json()["status"] == "success"
-
-        # 幂等：start_stream 只被调一次
-        assert len(start_stream_calls) == 1
+    assert first.status_code == 200 and second.status_code == 200
+    assert "idempotent" not in first.json()["message"]
+    assert "idempotent" in second.json()["message"]
+    # 只有第一次真正建任务、起流；第二次没有拆旧
+    mock_inference.start_workflow.assert_called_once()
+    mock_stream.start_stream.assert_called_once()
+    mock_stream.stop_stream.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Test 2: 跨任务切换 → 触发重启清理
+# Test 2: 同 task 改 url → 触发重启清理
 # ---------------------------------------------------------------------------
 
 
@@ -119,26 +105,25 @@ async def test_concurrent_start_same_task_idempotent():
 async def test_same_task_url_change_triggers_restart():
     """同 task_id（同 int 键槽位）改 URL → 先 stop_run 拆旧、再建新（重启语义）。
 
-    换键后运行键 = str(task_id)：抢占/重启只在**同 task_id**改 step/url 时发生；
-    不同 task_id 走不同槽位、天然并发（见 test_different_clients_not_blocked）。
+    运行键 = task_id：抢占/重启只在**同 task_id**改 step/url 时发生；
+    不同 task_id 走不同槽位、天然并发（见 test_different_tasks_not_blocked）。
     """
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
 
     mock_cq = MagicMock()
-    mock_cq.task_id = 1
-    mock_cq.step_id = 0  # step 同，但下方 URL 不同 → 非幂等，触发重启
+    mock_cq.run = RunIdentity(1, 0, 1)  # step 同，但下方 URL 不同 → 非幂等，触发重启
 
     with (
-        patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
-        patch("app.services.run_control.ClientQueues"),
-        patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
-        patch.object(client_manager, "has_client", return_value=True),
-        patch.object(client_manager, "get", return_value=mock_cq),
+        patch.object(db_tasks, "query_task", return_value=db_task),
+        patch("app.services.run_control.service.inference_service") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues"),
+        patch.object(client_service, "set"),  # set 已上移 RunControlService：拦真实注册，防污染全局表
+        patch.object(client_service, "has_client", return_value=True),
+        patch.object(client_service, "get", return_value=mock_cq),
         patch.object(
-            client_manager, "remove", return_value={"removed": True, "error": None}
+            client_service, "remove", return_value={"removed": True, "error": None}
         ),
     ):
         mock_inference.start_workflow.return_value = True
@@ -164,132 +149,192 @@ async def test_same_task_url_change_triggers_restart():
 
 
 # ---------------------------------------------------------------------------
-# Test 3: start 和 terminate 并发 → 串行、不崩溃
+# Test 3: 同 task 的 start 和 terminate 并发 → 串行
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_start_and_terminate_serialized():
-    """同一 run（task_id=1）的 start 与 terminate 并发：经 lock_for 串行，均正常完成。"""
+    """start 持锁段还没走完时到达的 terminate，要等 start 做完才开始拆（stop_stream）。
+
+    start 在持锁段里（start_workflow）停 0.2s；terminate 在此期间发出。经 lock_for 串行时
+    事件序必为 enter → exit → stop；锁失效则 terminate 的 stop_stream 插在中间。
+    """
     db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
+    events = []
 
-    mock_cq = MagicMock()
-    mock_cq.task_id = 1
+    def slow_start_workflow(cq):
+        events.append("start_workflow:enter")
+        time.sleep(0.2)
+        events.append("start_workflow:exit")
+        return True
 
     with (
-        patch("app.routers.api.get_db", return_value=iter([_mock_db_session(db_task)])),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
-        patch("app.services.run_control.ClientQueues"),
-        patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
-        patch.object(client_manager, "has_client", return_value=False),
-        patch.object(client_manager, "get", return_value=mock_cq),
-        patch.object(client_manager, "find_by_source_ip", return_value=mock_cq),
-        patch.object(
-            client_manager, "remove", return_value={"removed": True, "error": None}
-        ),
+        patch.object(db_tasks, "query_task", return_value=db_task),
+        patch("app.services.run_control.service.inference_service") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues", side_effect=_new_cq),
     ):
-        mock_inference.start_workflow.return_value = True
+        mock_inference.start_workflow.side_effect = slow_start_workflow
         mock_inference.resolve_stage.return_value = "0"
+        mock_inference.stop_workflow.return_value = []
+        mock_stream.stop_stream.side_effect = lambda task_id: events.append("stop_stream")
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            results = await asyncio.gather(
-                ac.post(
-                    "/api/start",
-                    json={"task_id": 1, "rtsp_url": "rtsp://test/stream", "fps": 30},
-                ),
-                ac.post("/api/terminate", params={"client_id": "10.0.0.1"}),
+            start = asyncio.create_task(
+                ac.post("/api/start", json={"task_id": 1, "rtsp_url": "rtsp://test/stream"})
             )
+            # 等 start 进入持锁段（此时 CQ 已登记，terminate 查得到 run）再发 terminate
+            while "start_workflow:enter" not in events:
+                await asyncio.sleep(0.005)
+            terminate = await ac.post("/api/terminate", json={"task_id": 1})
+            start_resp = await start
 
-        for r in results:
-            assert r.status_code == 200
+    assert start_resp.status_code == 200
+    assert terminate.status_code == 200
+    assert terminate.json()["status"] == "success"
+    assert events == ["start_workflow:enter", "start_workflow:exit", "stop_stream"]
 
 
 # ---------------------------------------------------------------------------
-# Test 4: 不同 client 互不阻塞
+# Test 4: 不同 task 互不阻塞
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_different_clients_not_blocked():
-    """不同 client_id → 不同 lock_for，互不干扰，各起一次流。"""
-    db_task_a = _make_db_task(task_id=1, source_ip="10.0.0.1")
-    db_task_b = _make_db_task(task_id=2, source_ip="10.0.0.2")
+async def test_different_tasks_not_blocked():
+    """不同 task_id → 不同 lock_for：两个 start 能同时处在各自的持锁段里。
 
-    call_count = {"q": 0}
+    start_workflow（持锁段内）过一道 2 方 Barrier：两边都进来才放行。若两者被同一把锁
+    串行，先进的那个等不到另一个，Barrier 超时 → start_workflow 抛 → 该请求非 200。
+    """
+    tasks = {
+        1: _make_db_task(task_id=1, source_ip="10.0.0.1"),
+        2: _make_db_task(task_id=2, source_ip="10.0.0.2"),
+    }
 
-    def mock_get_db():
-        session = MagicMock()
-        query = MagicMock()
+    barrier = threading.Barrier(2, timeout=2.0)
 
-        def filter_side_effect(*args, **kwargs):
-            result = MagicMock()
-            call_count["q"] += 1
-            result.first.return_value = db_task_a if call_count["q"] <= 1 else db_task_b
-            return result
-
-        query.filter.side_effect = filter_side_effect
-        session.query.return_value = query
-        return iter([session])
+    def rendezvous(cq):
+        barrier.wait()
+        return True
 
     with (
-        patch("app.routers.api.get_db", side_effect=mock_get_db),
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
-        patch("app.services.run_control.ClientQueues"),
-        patch.object(client_manager, "set"),  # set 已上移 RunController：拦真实注册，防污染全局表
-        patch.object(client_manager, "has_client", return_value=False),
+        patch.object(db_tasks, "query_task", side_effect=tasks.get),  # 按 task_id 取，不依赖到达顺序
+        patch("app.services.run_control.service.inference_service") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues", side_effect=_new_cq),
     ):
-        mock_inference.start_workflow.return_value = True
+        mock_inference.start_workflow.side_effect = rendezvous
         mock_inference.resolve_stage.return_value = "0"
+        mock_inference.stop_workflow.return_value = []
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             results = await asyncio.gather(
-                ac.post("/api/start", json={"task_id": 1, "rtsp_url": "rtsp://a/stream", "fps": 30}),
-                ac.post("/api/start", json={"task_id": 2, "rtsp_url": "rtsp://b/stream", "fps": 30}),
+                ac.post("/api/start", json={"task_id": 1, "rtsp_url": "rtsp://a/stream"}),
+                ac.post("/api/start", json={"task_id": 2, "rtsp_url": "rtsp://b/stream"}),
             )
 
-        for r in results:
-            assert r.status_code == 200
-        assert mock_stream.start_stream.call_count == 2
+    assert [r.status_code for r in results] == [200, 200]
+    assert sorted(c.kwargs["task_id"] for c in mock_stream.start_stream.call_args_list) == [1, 2]
 
 
 # ---------------------------------------------------------------------------
-# Test 5: terminate 获取 per-client 锁
+# Test 5: terminate 获取 per-task 锁
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_terminate_uses_lock():
-    """terminate（wire=source_ip）经垫片解析 run → stop_run 持 lock_for(task_id)、stop_workflow(cq)。"""
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"json": {"task_id": 1}},              # 首选：body 传 task_id，直查运行键
+        {"params": {"client_id": "10.0.0.1"}},  # 兼容期：?client_id=（source_ip）扫描回 run
+    ],
+    ids=["body_task_id", "query_client_id"],
+)
+async def test_terminate_uses_lock(request_kwargs):
+    """terminate 解析到 run → stop_run 持 lock_for(task_id)、stop_workflow(cq)。"""
     mock_cq = MagicMock()
-    mock_cq.task_id = 1
+    mock_cq.run = RunIdentity(1, 0, 1)
 
     with (
-        patch("app.services.run_control.inference_manager") as mock_inference,
-        patch("app.services.run_control.stream_service") as mock_stream,
-        patch("app.services.run_control.persistence_manager"),
-        patch.object(client_manager, "find_by_source_ip", return_value=mock_cq),
-        patch.object(client_manager, "get", return_value=mock_cq),
-        patch.object(client_manager, "has_client", return_value=True),
+        patch("app.services.run_control.service.inference_service") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch.object(client_service, "find_by_source_ip", return_value=mock_cq),
+        patch.object(client_service, "get", return_value=mock_cq),
+        patch.object(client_service, "has_client", return_value=True),
         patch.object(
-            client_manager, "remove", return_value={"removed": True, "error": None}
+            client_service, "remove", return_value={"removed": True, "error": None}
         ),
     ):
         mock_inference.stop_workflow.return_value = []
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            r = await ac.post("/api/terminate", params={"client_id": "10.0.0.1"})
+            r = await ac.post("/api/terminate", **request_kwargs)
 
         assert r.status_code == 200
+        mock_stream.stop_stream.assert_called_once_with(1)
         mock_inference.stop_workflow.assert_called_once_with(mock_cq)
 
     # 验证真实的 per-task 锁已按 int task_id 创建
-    assert 1 in client_manager._task_locks
+    assert 1 in client_service._task_locks
+
+
+# ---------------------------------------------------------------------------
+# Test 6: start 的 DB 边界（不起任何编排）
+# ---------------------------------------------------------------------------
+
+
+def _db_down(task_id):
+    """走真实 query_task、让会话本身失败：503 detail 就是 db 层包出来的 DatabaseError 原文。"""
+    with patch.object(db_tasks, "SessionLocal", side_effect=SQLAlchemyError("boom")):
+        return _real_query_task(task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query_task, status, body",
+    [
+        (
+            lambda task_id: None,
+            404,
+            {"error": "Resource not found", "detail": "Task 7 not found",
+             "resource_type": "Task", "resource_id": "7"},
+        ),
+        (
+            lambda task_id: _make_db_task(task_id=task_id, source_ip=""),
+            400,
+            {"error": "Validation error", "detail": "Task source_ip is required",
+             "field": "source_ip"},
+        ),
+        (
+            _db_down,
+            503,
+            {"error": "Database unavailable", "detail": "Database error: Failed to query task 7 [retryable]",
+             "retryable": True},
+        ),
+    ],
+    ids=["task_missing", "source_ip_empty", "db_down"],
+)
+async def test_start_db_boundary(query_task, status, body):
+    """任务不存在 404 / source_ip 为空 400 / DB 失败 503；三者都不进 start_run。"""
+    with (
+        patch.object(db_tasks, "query_task", side_effect=query_task),
+        patch("app.routers.api.run_control_service") as mock_rc,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            r = await ac.post("/api/start", json={"task_id": 7, "rtsp_url": "rtsp://x/s"})
+
+    assert r.status_code == status
+    assert r.json() == body
+    mock_rc.start_run.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 """推理链路静默丢帧计数器测试。
 
-覆盖两个新增计数点：
-- StageAwareDispatcher._stage_queues 满（maxlen）时静默淘汰 → get_stage_drops()
-- ClientQueues.ca_processed 满（maxlen）时静默淘汰 → frames_dropped_processed
+覆盖 StageAwareDispatcher 的计数点与压力行：
+- _stage_queues 满（maxlen）时静默淘汰 → get_stage_drops()
+- proxy 拒收（submit 返 False）→ _stage_rejects，并入周期压力行
+
+ClientQueues 各 CA 队列的丢帧计数与压力行见 test_cq_pressure_log。
 """
 
 import logging
@@ -10,8 +12,8 @@ import time
 from unittest.mock import MagicMock
 
 from factories import make_bare_cq, make_frame
-from app.services.inference.detection.dispatcher import StageAwareDispatcher
-from app.utils.pressure import PRESSURE_LOGGER_NAME
+from app.services.inference.online.detection.dispatcher import StageAwareDispatcher
+from app.services.utils.pressure import PRESSURE_LOGGER_NAME
 
 
 def _frame():
@@ -21,9 +23,9 @@ def _frame():
 def test_stage_queue_drop_counted_when_full():
     """_stage_queues 已满时再 dispatch 一帧，应记一次 stage 丢帧。"""
     cm = MagicMock()
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
-    # 客户端：ca_ready 有一帧，stage=MOCK（ClientQueues 默认 initial_stage）
+    # 客户端：ca_ready 有一帧，stage 为 ClientQueues 裸建默认值
     cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
     cm.snapshot.return_value = {"c1": cq}
@@ -42,7 +44,7 @@ def test_stage_queue_drop_counted_when_full():
 def test_stage_queue_no_drop_when_not_full():
     """队列未满时 dispatch 不应记丢帧。"""
     cm = MagicMock()
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
     cq = make_bare_cq(ca_maxlen=10)
     cq.ca_ready.append(_frame())
@@ -53,24 +55,13 @@ def test_stage_queue_no_drop_when_not_full():
     assert dispatcher.get_stage_drops().get(cq.stage, 0) == 0
 
 
-def test_ca_processed_drop_counted_on_overflow():
-    """未绑定任务时 ca_processed 只进不出，超过 maxlen 的部分应被计数。"""
-    cq = make_bare_cq(ca_maxlen=3)
-    assert cq.ca_maxlen == 3
-
-    for _ in range(5):
-        cq.append_ca_processed(_frame())
-
-    # 前 3 帧填满，后 2 帧触发淘汰计数
-    assert cq.frames_dropped_processed == 2
-    assert cq.get_ca_processed_length() == 3
-
-
 def test_pressure_snapshot_silent_when_calm(caplog):
     """平稳（无丢帧、队列浅）时不应打印 [PRESSURE]，避免刷屏。"""
     cm = MagicMock()
     cm.snapshot.return_value = {}
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
+    # 放一条浅队列：空 _stage_queues 时采样循环不执行，静默是恒真的
+    dispatcher._stage_queues["CLEAN"].append(make_frame(ts=time.time(), shape=(2, 2, 3)))
 
     with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
         dispatcher._log_pressure_snapshot()
@@ -87,7 +78,7 @@ def test_pressure_snapshot_logs_on_drop(caplog):
     """
     cm = MagicMock()
     cm.snapshot.return_value = {}
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
     dispatcher._stage_queues["CLEAN"]  # 触发 defaultdict 建 deque
     dispatcher._stage_drops["CLEAN"] = 0
 
@@ -109,7 +100,7 @@ def test_submit_rejection_counted_into_pressure_line(caplog):
     cm.snapshot.return_value = {"c1": cq}
     stage = cq.stage
     dispatcher = StageAwareDispatcher(
-        client_manager_instance=cm,
+        client_service_instance=cm,
         active_stages=[stage],
         submit_batch=lambda batch: False,      # 冒充 proxy 在途满
     )
@@ -128,12 +119,11 @@ def test_submit_rejection_counted_into_pressure_line(caplog):
     assert "reject_total=2 reject_delta=1" in caplog.text
 
 
-def test_pressure_snapshot_reports_stage_only(caplog):
-    """dispatcher 只报自己的 stage deque，不代 ClientQueues 汇总 ca_processed。"""
-    cq = make_bare_cq(ca_maxlen=10)
+def test_pressure_snapshot_logs_on_high_watermark(caplog):
+    """stage deque 越水位即打一行（无需丢帧/拒收）。"""
     cm = MagicMock()
-    cm.snapshot.return_value = {"c1": cq}
-    dispatcher = StageAwareDispatcher(client_manager_instance=cm)
+    cm.snapshot.return_value = {}
+    dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
     q = dispatcher._stage_queues["CLEAN"]
     for _ in range(q.maxlen):
@@ -142,5 +132,4 @@ def test_pressure_snapshot_reports_stage_only(caplog):
     with caplog.at_level(logging.INFO, logger=PRESSURE_LOGGER_NAME):
         dispatcher._log_pressure_snapshot()
 
-    assert "resource=stage_queue" in caplog.text
-    assert "ca_processed" not in caplog.text
+    assert "component=dispatcher resource=stage_queue stage=CLEAN" in caplog.text

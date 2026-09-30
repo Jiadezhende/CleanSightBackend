@@ -1,0 +1,34 @@
+# Python 工具配置的唯一落点（pytest / coverage，以后的 lint 也放这里）。
+#
+# 刻意不写 [project] 与 [build-system]：本仓库不是可安装包——部署靠 git archive 取码、
+# 进程用 `python -m app.main` 起，依赖走 requirements/。加上那两段只会让 pip 与构建后端
+# 把它当成待打包项目，凭空多一条谁都不走的路。
+
+[tool.pytest.ini_options]
+# 裸 `pytest` 只跑单元/组件测试；集成测试要真实 RTSP 流，由 integration_tests/ 下的脚本显式启动。
+testpaths = ["tests"]
+
+# 仓库不是可安装包，`app` / `mediamtx_gateway` 要靠仓库根在 sys.path 上才 import 得到。
+# 不写这条时只有 `python -m pytest`（隐式加 cwd）能跑，裸 `pytest` 直接 ModuleNotFoundError。
+pythonpath = ["."]
+
+# ===== 覆盖率（opt-in：仅 `pytest --cov` 时生效，不改默认测试行为）=====
+# 用法：pytest tests/ --cov --cov-report=term-missing [--cov-report=html]
+# 注意用不带值的 `--cov`：`--cov=app` 会覆盖下面的 source，把网关那个进程漏掉。
+
+[tool.coverage.run]
+# 仓库跑两个进程，覆盖率也统计两个：app/（后端）+ mediamtx_gateway/（RTSP 网关）。
+source = ["app", "mediamtx_gateway"]
+branch = true
+omit = [
+    "app/main.py",        # 进程启动壳（lifespan 编排），走集成/端到端而非单测
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 1
+
+[tool.coverage.html]
+directory = "htmlcov"

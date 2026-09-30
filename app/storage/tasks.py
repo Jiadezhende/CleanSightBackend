@@ -1,24 +1,23 @@
 """
-task/step 目录域 —— **把 step 目录当整体看**的那三件事：有哪些 task、有哪些 step、整个删掉。
+task/step 目录域 —— **把 step 目录当整体看**的那两件事：有哪些 task、有哪些 step。
 
     from app.storage import tasks as step_tasks
-    for task_id in step_tasks.list_task_ids(order="mtime"):
+    for task_id in step_tasks.list_task_ids(order="recent"):
         for step_id in step_tasks.list_step_ids(task_id):
             ...
 
-落盘结构（产物按域隔离，step 根下只有域目录、没有文件）：
+落盘结构（一次 run 一个目录，产物在 run 下按域隔离）：
 
-    {root}/{task_id}/{step_id}/
-      hls/       段 / init / playlist / sidecar / metadata
-      features/  features.jsonl / facts.jsonl
-      lab/       送标与导出的临时件（用完即删，残留随 step TTL 回收）
+    {root}/{task_id}/{step_id}/{run_id}/
+      hls/        段 / init / playlist / sidecar / metadata
+      inference/  detections.jsonl / temporal.jsonl / label_probs.npz
 
-    list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按活动时间降序
+    list_task_ids(order=)     存储根下的 task id，按 id 升序 / 按 latest_run_id 降序
+    latest_run_id(task_id)    该 task 所有 run 目录里最大的 run_id（不看有无产物）
     list_step_ids(task_id)    该 task 下的 step id，升序
-    delete_step(task, step)   删掉整个 step 目录（三个域一起没）+ 回收空 task 目录
 
 **本模块不出定位能力**：往某个域里写东西是那个域自己的事，各域文件用
-`_root.path(task_id, step_id, <自己的域>)` 取路径。本模块只在跨所有域时出面。
+`_root.domain_dir(run, <自己的域>)` 取路径；run 的分配与查询归 `runs.py`。
 
 依赖上界：stdlib only。规范见 `docs/kb/DESIGN_STORAGE_LAYER.md` §1。
 """
@@ -26,18 +25,17 @@ task/step 目录域 —— **把 step 目录当整体看**的那三件事：有�
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
-from app.storage import _root
+from .utils import root as _root
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["list_task_ids", "list_step_ids", "delete_step"]
+__all__ = ["latest_run_id", "list_task_ids", "list_step_ids"]
 
 # list_task_ids() 支持的排序。非法值炸而不是静默按默认走。
-_VALID_ORDERS: Tuple[str, ...] = ("id", "mtime")
+_VALID_ORDERS: Tuple[str, ...] = ("id", "recent")
 
 
 def _iterdir(directory: Path) -> Iterator[Path]:
@@ -73,16 +71,14 @@ def list_task_ids(order: str = "id") -> List[int]:
     """存储根下的 task 子目录 id。存储根不存在返回 `[]`。
 
     Args:
-        order: `"id"` 升序；`"mtime"` 按 `_latest_step_mtime()` 降序。
+        order: `"id"` 升序；`"recent"` 按该 task 各 step 下最大的 `run_id` 降序（= 最近一次 run
+            的开始时刻），同值时 task_id 大者优先。没有 run 目录的 task 排序键取 0（排最后）但
+            仍在结果里，由调用方深扫时丢弃。
 
     Raises:
-        ValueError: order 不在 ("id", "mtime") 内。
+        ValueError: order 不在 ("id", "recent") 内。
 
-    只认数字目录名，非 id 目录跳过、不报错。
-
-    ⚠ **`order="mtime"` 是近似值，仅供挑深扫候选**，绝不能当时间戳对外（对外的时间一律取
-    真实段 ts）——lab 临时件的增删同样会刷新它。无 step 子目录的 task 排序键取 0（排最后）
-    但仍在结果里，由调用方深扫时丢弃。成本 O(目录数)：只 stat 目录，不读文件。
+    只认数字目录名，非 id 目录跳过、不报错。成本 O(目录数)：只列目录，不读文件。
     """
     if order not in _VALID_ORDERS:
         raise ValueError(f"Invalid order: {order!r}, expected one of {_VALID_ORDERS}")
@@ -98,60 +94,20 @@ def list_task_ids(order: str = "id") -> List[int]:
     if order == "id":
         return sorted(task_ids)
 
-    # mtime 降序；同 mtime 时 task_id 大者优先（元组整体逆序排，与旧实现同口径）
-    keyed = [(_latest_step_mtime(task_id), task_id) for task_id in task_ids]
+    keyed = [(latest_run_id(task_id), task_id) for task_id in task_ids]
     keyed.sort(reverse=True)
     return [task_id for _, task_id in keyed]
 
 
-def _latest_step_mtime(task_id: int) -> float:
-    """该 task 「最后有人写东西」的近似时刻；无 step 子目录返回 0.0。
+def latest_run_id(task_id: int) -> int:
+    """该 task 各 step 下最大的 run_id；没有 run 目录返回 0。
 
-    取 **step 目录及其各域子目录** mtime 的最大值。**必须下钻到域子目录**：产物落在
-    `{step}/{domain}/` 里，写一个段只更新 `hls/` 的 mtime，step 目录本身纹丝不动，只 stat
-    它会让这个值静默退化成「该 step 首次落盘的时刻」。
+    数的是 run **目录**，不看有无产物：它是「该 task 任一 run 的 run_id」的上界，调用方可拿它
+    剪枝，但它不等于任何「最新可见 run」。
     """
-    mtimes: List[float] = []
-    for _, step_dir in _step_id_dirs(task_id):
-        for candidate in (step_dir, *_iterdir(step_dir)):
-            try:
-                if candidate.is_dir():
-                    mtimes.append(candidate.stat().st_mtime)
-            except OSError:  # 扫描期间被删：等同于没扫到
-                continue
-    return max(mtimes) if mtimes else 0.0
-
-
-def delete_step(task_id: int, step_id: int) -> bool:
-    """删除整个 step 目录（含**所有写者**的产物）；父 task 目录若因此变空，一并回收。
-
-    Returns:
-        step 目录是否被删除。目录本就不存在返回 False；删除失败记 warning 后返回 False。
-
-    **只执行，不判断该不该删**：「重启 supersede」与「TTL 到期」两个判断分别留在
-    `persistence/manager` 与 `persistence/workers/cleanup_worker`。
-
-    **它删的是整个 step，不是某一个域**：`hls/`、`features/`、`lab/` 一起消失。要只删一个
-    域，到那个域自己的模块里找。
-
-    **不加锁（本层零锁）**：与该 step 的写之间不重叠，靠调用侧把两者提交到同一条
-    `SerialTaskQueue`。不守这个前提的表现是某个域的目录删到一半，或写侧 `create=True` 在
-    rmtree 之后把目录重建出来、留一个已被记账删除的僵尸 step——**都不报错**。TTL 回收在
-    这个前提之外（`cleanup_worker` 自己的线程），它删的是过期 step，是已知且接受的窄缺口。
-    """
-    step_dir = _root.path(task_id, step_id)
-    if not step_dir.exists():
-        return False
-
-    try:
-        shutil.rmtree(step_dir)
-    except OSError as e:
-        logger.warning("[Storage] 删除 step 目录失败 %s: %s", step_dir, e)
-        return False
-
-    try:
-        _root.path(task_id).rmdir()
-    except OSError:
-        # 还有别的 step / 已被并发删掉 / 无权限 —— 三种都无需处理，目录留着零成本
-        pass
-    return True
+    latest = 0
+    for step_id, _ in _step_id_dirs(task_id):
+        ids = _root.run_ids(task_id, step_id)
+        if ids:
+            latest = max(latest, ids[-1])
+    return latest

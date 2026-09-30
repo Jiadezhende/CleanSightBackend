@@ -1,6 +1,6 @@
 # 告警证据反查下线（2026-09-08）
 
-> 状态：待沉淀
+> **知识库**：已沉淀 → [SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)、[BUSINESS_TRACEBACK_AND_LAB.md](../kb/BUSINESS_TRACEBACK_AND_LAB.md)、[BUSINESS_OVERVIEW.md](../kb/BUSINESS_OVERVIEW.md)、[ARCHITECTURE_API_SURFACE.md](../kb/ARCHITECTURE_API_SURFACE.md)（2026-09-20）
 
 `GET /traceback/alarm/{alarm_id}/evidence` 与 `GET /traceback/alarm/{alarm_id}/playlist.m3u8` 两个公开端点**删除**，连同只服务它们的下游代码、admin 面板的证据 UI 一并清除。`/traceback/task/{task_id}/playlist.m3u8` 与 `/traceback/task/{task_id}/timeline` **保留不动**（lab 页面在用）。
 
@@ -38,7 +38,7 @@
 1. **playlist 用例必然 503**：`integration_tests/utils.py` 的 `seed_hls_segments` 只造段文件和 playlist，**不造 `{track}_init.mp4`**。而 `_build_vod_playlist` 在缺 init 时直接抛 503（fMP4 无 init 段无法解码）。已补上两轨的 init 哑文件。
 2. **段数断言口径错**：段行过滤条件是 `l.endswith(".mp4") or "/media/" in l`，会把 `#EXT-X-MAP:URI="http://host/media/init/<token>"` 那行也数进去，实际段数永远比预期多 1。已改为「非 `#` 开头且含 `/media/segment/`」。
 
-## 待沉淀：KB 需要改的位置
+## KB 需要改的位置（已于 2026-09-20 按此沉淀）
 
 按 CLAUDE.md，本次不动 `docs/kb/`。下次融合时以下位置要跟：
 

@@ -1,6 +1,6 @@
 # 代码模板
 
-四种形态各一份骨架，每份含 **流源 Detector + 流算子 Operator** 两件套。**落点：一文件一基类**——`XxxDetector` 写 `app/services/inference/detection/impl/<业务>.py`，`XxxOperator` 写 `app/services/inference/temporal/impl/<业务>.py`（下方代码块把两者并排只为便于对照，落地时拆两个同名文件；别塞进同一文件）。`detector.name` = 产出流名，写进算子 `subscribes`；算子 `name` 是自身身份，可不同。签名照抄基类。字段见 [data-models.md](data-models.md)，装配见 [yaml-config.md](yaml-config.md)。
+四种形态各一份骨架，每份含 **流源 Detector + 流算子 Operator** 两件套。**落点：一文件一基类**——`XxxDetector` 写 `app/services/inference/online/detection/impl/<业务>.py`，`XxxOperator` 写 `app/services/inference/online/temporal/impl/<业务>.py`（下方代码块把两者并排只为便于对照，落地时拆两个同名文件；别塞进同一文件）。`detector.name` = 产出流名，写进算子 `subscribes`；算子 `name` 是自身身份，可不同。签名照抄基类。字段见 [data-models.md](data-models.md)，装配见 [yaml-config.md](yaml-config.md)。
 
 - [A — YOLO + 实时告警（最常见）](#模板-a) ｜ [B — 无模型纯算法](#模板-b) ｜ [C — 结算告警](#模板-c) ｜ [D — 内嵌因果序列模型](#模板-d)
 
@@ -10,17 +10,17 @@
 
 ## 模板 A
 
-YOLO + 实时告警。参考 [detection/impl/bubble.py](../../../../app/services/inference/detection/impl/bubble.py)（Detector）+ [temporal/impl/bubble.py](../../../../app/services/inference/temporal/impl/bubble.py)（Operator）。
+YOLO + 实时告警。参考 [detection/impl/bubble.py](../../../../app/services/inference/online/detection/impl/bubble.py)（Detector）+ [temporal/impl/bubble.py](../../../../app/services/inference/online/temporal/impl/bubble.py)（Operator）。
 
 ```python
 import logging
 from typing import Dict, List, Tuple
 
-from app.services.inference.detection.detector import YOLODetector
-from app.services.inference.temporal.operator import Operator
-from app.domain.alarm import Alarm, AlarmMetric, AlarmType
-from app.domain.detection import FrameDetections
-from app.domain.render import RenderItem, RenderSpec, RenderType
+from app.services.inference.online.detection.detector import YOLODetector
+from app.services.inference.online.temporal.operator import Operator
+from app.types.alarm import Alarm, AlarmMetric, AlarmType
+from app.types.detection import DetectorOutput
+from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +32,13 @@ class XxxDetector(YOLODetector):
                          iou_threshold=iou_threshold, enabled=enabled)
 
     # YOLODetector.infer_batch 默认已够用；仅当要写业务字段/自定义输出才 override，
-    # 且 batch 与 except 逐帧 fallback 的赋值逻辑须一致，timestamps[i] 原样写入 FrameDetections。
+    # 且 batch 与 except 逐帧 fallback 的赋值逻辑须一致，timestamps[i] 原样写入 DetectorOutput。
 
-    def prepare_visualization_data(self, output: FrameDetections) -> RenderSpec:
+    def prepare_visualization_data(self, output: DetectorOutput) -> RenderSpec:
         items = [RenderItem(bbox=d.bbox, label=f"{d.class_name} {d.confidence:.2f}",
                             confidence=d.confidence, color=(0, 0, 255))       # BGR
-                 for d in output.detections]
-        detected = len(output.detections) > 0
+                 for d in output.boxes]
+        detected = len(output.boxes) > 0
         return RenderSpec(type=RenderType.BBOX, items=items,
                           status_text="Detected!" if detected else "Normal",
                           status_color=(0, 0, 255) if detected else (0, 255, 0),
@@ -52,14 +52,14 @@ class XxxOperator(Operator):
         self.consecutive_trigger = consecutive_trigger
         self._sm = {"last_ts": 0.0, "consecutive": 0, "alarming": False}
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: Dict[str, List[DetectorOutput]]) -> None:
         window = self.primary_window(windows)                 # 单订阅：裁到感受野
         if not window:
             return
         last_ts = self._sm["last_ts"]                         # 游标推进
         new_frames = [f for f in window if f.timestamp > last_ts]
         for f in new_frames:
-            self._sm["consecutive"] = self._sm["consecutive"] + 1 if f.detections else 0
+            self._sm["consecutive"] = self._sm["consecutive"] + 1 if f.boxes else 0
         if new_frames:
             self._sm["last_ts"] = new_frames[-1].timestamp
 
@@ -78,28 +78,28 @@ class XxxOperator(Operator):
         return events, alarms
 ```
 
-> 复杂指标（ByteTrack + birth_rate）把游标推进/算指标拆成 `_advance`/`_compute_metric`，派生 history 在 `_sm` 里按 `window_seconds` 自裁，见 [temporal/impl/bubble.py](../../../../app/services/inference/temporal/impl/bubble.py)。`AlarmMetric.XXX` 需先在 [alarm.py](../../../../app/domain/alarm.py) 枚举补一项。
+> 复杂指标（ByteTrack + birth_rate）把游标推进/算指标拆成 `_advance`/`_compute_metric`，派生 history 在 `_sm` 里按 `window_seconds` 自裁，见 [temporal/impl/bubble.py](../../../../app/services/inference/online/temporal/impl/bubble.py)。`AlarmMetric.XXX` 需先在 [alarm.py](../../../../app/types/alarm.py) 枚举补一项。
 
 ---
 
 ## 模板 B
 
-无模型纯算法：Detector 继承 `Detector`，实现 `infer_batch(frames, timestamps)`（无 YOLO）。Operator 同模板 A。参考 [detection/impl/mock.py](../../../../app/services/inference/detection/impl/mock.py)（Detector）+ [temporal/impl/mock.py](../../../../app/services/inference/temporal/impl/mock.py)（Operator）。
+无模型纯算法：Detector 继承 `Detector`，实现 `infer_batch(frames, timestamps)`（无 YOLO）。Operator 同模板 A。Detector 参考 [tests/doubles.py](../../../../tests/doubles.py) 的 `MockDetector`（测试替身，纯 numpy 亮度启发式）。
 
 ```python
 import numpy as np
-from app.services.inference.detection.detector import Detector
-from app.domain.detection import Detection, FrameDetections
+from app.services.inference.online.detection.detector import Detector
+from app.types.detection import DetBox, DetectorOutput
 
 class XxxDetector(Detector):
     def __init__(self, enabled: bool = True):
         super().__init__(name="xxx", enabled=enabled)
 
     def infer_batch(self, frames: List[np.ndarray],
-                    timestamps: List[float]) -> List[FrameDetections]:
+                    timestamps: List[float]) -> List[DetectorOutput]:
         out = []
         for frame, ts in zip(frames, timestamps):            # timestamps[i] 原样写入，别自造
-            out.append(FrameDetections(detections=[Detection(...)],
+            out.append(DetectorOutput(boxes=[DetBox(...)],
                                        metadata={"model": "xxx_algo"},
                                        timestamp=ts, success=True))
         return out
@@ -110,7 +110,7 @@ class XxxDetector(Detector):
 
 ## 模板 C
 
-结算告警：实时只产 events，结束才裁决。参考 [temporal/impl/bending.py](../../../../app/services/inference/temporal/impl/bending.py)（Operator）+ [detection/impl/bending.py](../../../../app/services/inference/detection/impl/bending.py)（Detector）。analyze 照常推游标累计计数，`judge()` 只产进度 events、`finalize()` 出告警。
+结算告警：实时只产 events，结束才裁决。参考 [temporal/impl/bending.py](../../../../app/services/inference/online/temporal/impl/bending.py)（Operator）+ [detection/impl/bending.py](../../../../app/services/inference/online/detection/impl/bending.py)（Detector）。analyze 照常推游标累计计数，`judge()` 只产进度 events、`finalize()` 出告警。
 
 ```python
 class XxxOperator(Operator):
@@ -120,7 +120,7 @@ class XxxOperator(Operator):
         self.required_actions = required_actions
         self._sm = {"last_ts": 0.0, "action_count": 0}
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: Dict[str, List[DetectorOutput]]) -> None:
         window = self.primary_window(windows)
         if not window:
             return
@@ -145,13 +145,13 @@ class XxxOperator(Operator):
 
 ## 模板 D
 
-内嵌因果序列模型：Operator 继承 `GRUOperator`（基类惰性加载 `GRUClassifier`、给 `infer(features)→List[int]`）。子类只写 `_adapt_to_features` + analyze/judge。参考 [temporal/impl/clean.py](../../../../app/services/inference/temporal/impl/clean.py)（Operator）+ [detection/impl/clean.py](../../../../app/services/inference/detection/impl/clean.py)（Detector）。
+内嵌因果序列模型：Operator 继承 `GRUOperator`（基类惰性加载 `GRUClassifier`、给 `infer(features)→List[int]`）。子类只写 `_adapt_to_features` + analyze/judge。参考 [temporal/impl/clean.py](../../../../app/services/inference/online/temporal/impl/clean.py)（Operator）+ [detection/impl/clean.py](../../../../app/services/inference/online/detection/impl/clean.py)（Detector）。
 
 规则：**模型必须因果**（单向 GRU / causal mask，需未来帧的 MS-TCN 类走离线链路）；⚠️ **窗口帧数 ≥ 感受域**，不足加 warm-up guard（`min_frames`）不前向；多订阅用 `_zip_by_ts` 对齐。**接入 review 与上线门禁（延迟/感受域/参数量）走 `/temporal-review`。**
 
 ```python
 import torch
-from app.services.inference.temporal.operator import AlignedFrame, GRUOperator
+from app.services.inference.online.temporal.operator import AlignedFrame, GRUOperator
 
 class XxxOperator(GRUOperator):
     def __init__(self, name: str, subscribes: List[str], window_seconds: float,
@@ -163,7 +163,7 @@ class XxxOperator(GRUOperator):
         self.min_frames = min_frames if min_frames > 0 else int(window_seconds)
         self._sm = {"last_ts": 0.0, "latest_action": None}
 
-    def analyze(self, windows: Dict[str, List[FrameDetections]]) -> None:
+    def analyze(self, windows: Dict[str, List[DetectorOutput]]) -> None:
         aligned = self._zip_by_ts(windows)                    # 多流按 ts 对齐
         if len(aligned) < self.min_frames:                    # ⚠️ warm-up：帧数不足不前向
             return
@@ -185,4 +185,4 @@ class XxxOperator(GRUOperator):
         ...   # 每 AlignedFrame → 一行特征；class_id 经 self.objects 映射到全局槽位，别赌两 .pt 共享标签
 ```
 
-> ⚠️ `_adapt_to_features` 是静默错重灾区（class_id 撞槽、缺席 vs 零框、归一化分辨率来源）——写完务必走 `/temporal-review`。重模型全序列分割（MS-TCN，感受域 ≈2047 帧、需大量未来帧）走**离线链路**读 FeatureStore，不用本模板。
+> ⚠️ `_adapt_to_features` 是静默错重灾区（class_id 撞槽、缺席 vs 零框、归一化分辨率来源）——写完务必走 `/temporal-review`。重模型全序列分割（MS-TCN，感受域 ≈2047 帧、需大量未来帧）走**离线链路**（`OfflineSegmenter` + `app.storage.inference.read_detections`），不用本模板。

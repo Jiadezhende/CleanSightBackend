@@ -1,18 +1,17 @@
 # Windows GPU 开发机一键安装（原生 PowerShell）
 #
 # 对标 install.sh，面向 Windows GPU 开发机：
-#   torch/torchvision → 从 cu128 索引在线拉
-#   其余 Python 依赖   → 从清华源在线拉
-#   ffmpeg / mediamtx → BASE_URL 非空则从源机离线拉，空则从 deploy.conf 内在线 *_WIN_URL 拉；
-#                       解压部署到项目内 .ffmpeg\ 与 mediamtx\。一处明确来源、无 PATH fallback、失败即报。
+#   Python 依赖       → requirements/gpu.txt（torch 从 cu128 索引在线拉，其余走清华源）
+#   ffmpeg / mediamtx → 从源机 ${BASE_URL}/vendor/ 拉，解压部署到项目内 .ffmpeg\ 与 mediamtx\。
+#                       一处明确来源、无 PATH fallback、失败即报。
 #
-# 钉板版本/URL 在 deploy.conf（与 Linux 共享单一事实源，本脚本正则解析其中的 bash 变量）；
-# 在线镜像写死本脚本。开发便利向：Windows 物料不做 SHA 强校验、不做服务化。生产请用 Linux build.sh + install.sh。
+# 配置写在下方配置块（Linux 侧同款写法，两个脚本各自持有、不再共享 deploy.conf）。
+# 开发便利向：不做服务化。生产请用 Linux build.sh + install.sh。
 #
 # 用法（在项目根目录）：
 #   Set-ExecutionPolicy -Scope Process Bypass -Force
-#   .\install.ps1                                        # 在线装（torch/ffmpeg/mediamtx 走公网）
-#   $env:BASE_URL="http://<源机IP>:8080"; .\install.ps1  # 离线装（从源机 HTTP 拉）
+#   .\install.ps1                                        # Python 依赖走公网，二进制走源机
+#   $env:BASE_URL="http://<IP>:<端口>"; .\install.ps1    # 临时换源机
 # 装完启动：.\start_backend.ps1 dev
 
 $ErrorActionPreference = "Stop"
@@ -40,32 +39,13 @@ function Expand-RemoteZip($url, $tag) {
     return $tmp
 }
 
-# ── 解析 deploy.conf（纯 bash 变量：KEY="value"）──
-function Read-DeployConf {
-    $conf = @{}
-    foreach ($line in Get-Content "deploy.conf") {
-        if ($line -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*"?([^"]*)"?\s*$') {
-            $conf[$Matches[1]] = $Matches[2].Trim()
-        }
-    }
-    return $conf
-}
-$conf = Read-DeployConf
-$TORCH_PKGS       = $conf["TORCH_PKGS"]
-$FFMPEG_WIN_URL   = $conf["FFMPEG_WIN_URL"]
-$MEDIAMTX_WIN_URL = $conf["MEDIAMTX_WIN_URL"]
-foreach ($kv in @{ TORCH_PKGS = $TORCH_PKGS; FFMPEG_WIN_URL = $FFMPEG_WIN_URL; MEDIAMTX_WIN_URL = $MEDIAMTX_WIN_URL }.GetEnumerator()) {
-    if ([string]::IsNullOrWhiteSpace($kv.Value)) { Write-Error "deploy.conf 缺少 $($kv.Key)" }
-}
+# ══════════════ 配置 ══════════════
+# 源机物料基址（ffmpeg / mediamtx 从这里拉）。写死默认值，$env:BASE_URL 可临时覆盖。
+$BASE_URL = if ($env:BASE_URL) { $env:BASE_URL } else { "http://49.234.120.241:8088" }
 
-# 在线镜像写死在脚本里（非「钉板物料」，不入 deploy.conf；与 install.sh 一致）。
-$TORCH_INDEX_URL = "https://mirror.nju.edu.cn/pytorch/whl/cu128"
-$PYPI_INDEX_URL  = "https://pypi.tuna.tsinghua.edu.cn/simple"
-
-# 源机物料基址：非空 → ffmpeg/mediamtx 从源机离线拉；空 → 用上面在线 *_WIN_URL。
-# deploy.conf 里是 ${BASE_URL:-} 的 bash 占位、对 PS 无意义，故只认 env 或 conf 中已填的字面量。
-$cb = $conf["BASE_URL"]; if ($cb -match '^\$\{') { $cb = '' }
-$BASE_URL = if ($env:BASE_URL) { $env:BASE_URL } else { $cb }
+# 主 PyPI 索引。torch 的版本与 cu128 索引写在 requirements/gpu.txt 里，本脚本不再单独装它。
+$PYPI_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+# ═════════════════════════════════
 
 # ── 执行前环境检查 ──
 if ($env:OS -ne "Windows_NT") { Write-Error "仅支持 Windows（Linux 请用 ./install.sh）" }
@@ -95,14 +75,11 @@ if (-not (Test-Path ".\.venv\Scripts\Activate.ps1")) {
 python -m pip install --upgrade pip
 Assert-LastExit "升级 pip 失败"
 
-# ── [1/3] Python 依赖：torch（cu128 在线）+ 其余（清华源）──
+# ── [1/3] Python 依赖：requirements/gpu.txt（torch 经文件内 extra-index 走 cu128，其余走清华源）──
 Write-Host "[1/3] Python 依赖" -ForegroundColor Green
-Write-Host "      torch 闭包（cu128 在线，$TORCH_INDEX_URL）..."
-pip install ($TORCH_PKGS -split '\s+') --index-url $TORCH_INDEX_URL
-Assert-LastExit "torch 安装失败（若 cu128 索引无 win_amd64 wheel，可改用官方源 https://download.pytorch.org/whl/cu128）"
-Write-Host "      其余依赖（在线，$PYPI_INDEX_URL）..."
-pip install -r requirements.txt -i $PYPI_INDEX_URL
-Assert-LastExit "requirements.txt 安装失败"
+Write-Host "      requirements/gpu.txt（主索引 $PYPI_INDEX_URL，torch 走 cu128 镜像）..."
+pip install -r requirements/gpu.txt -i $PYPI_INDEX_URL
+Assert-LastExit "requirements/gpu.txt 安装失败（torch 拉不到时见该文件头：可换官方 cu128 源）"
 
 # ultralytics 会拉入 opencv-python，与 headless 版共享 cv2/ 文件。force-reinstall 默认连依赖
 # 一起重装会把 numpy 顶到 2.x（撞 torch ABI），故 --no-deps 只重铺 cv2、不碰 numpy；
@@ -114,10 +91,10 @@ Assert-LastExit "opencv-python-headless 安装失败"
 pip install -i $PYPI_INDEX_URL "numpy==1.26.4"
 Assert-LastExit "numpy 复位失败"
 
-# ── [2/3] ffmpeg → 项目内 .ffmpeg\（BASE_URL 离线优先，无 fallback，失败即报）──
-# 必须钉版：ffmpeg 4.x/8.x 对 -hls_fmp4_init_filename 解析差异巨大，见 docs/HLS_TIMELINE_PITFALL.md。
+# ── [2/3] ffmpeg → 项目内 .ffmpeg\（源机唯一来源，无 fallback，失败即报）──
+# 必须钉版：ffmpeg 4.x/8.x 对 -hls_fmp4_init_filename 解析差异巨大，见 docs/kb/DESIGN_HLS_TIMELINE.md。
 Write-Host "[2/3] ffmpeg -> .ffmpeg\" -ForegroundColor Green
-$ffUrl = if ($BASE_URL) { "$($BASE_URL.TrimEnd('/'))/vendor/ffmpeg/ffmpeg-win-x64.zip" } else { $FFMPEG_WIN_URL }
+$ffUrl = "$($BASE_URL.TrimEnd('/'))/vendor/ffmpeg/ffmpeg-win-x64.zip"
 $ffTmp = Expand-RemoteZip $ffUrl "ffmpeg-win64"
 try {
     $inner = Get-ChildItem -Path $ffTmp -Directory | Where-Object { $_.Name -like "ffmpeg-*" } | Select-Object -First 1
@@ -131,9 +108,9 @@ try {
     if (Test-Path $ffTmp) { Remove-Item $ffTmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-# ── [3/3] mediamtx → 项目内 mediamtx\（BASE_URL 离线优先，无 fallback；保留 git 跟踪的 mediamtx.yml/LICENSE）──
+# ── [3/3] mediamtx → 项目内 mediamtx\（源机唯一来源；保留 git 跟踪的 mediamtx.yml/LICENSE）──
 Write-Host "[3/3] mediamtx -> mediamtx\" -ForegroundColor Green
-$mtxUrl = if ($BASE_URL) { "$($BASE_URL.TrimEnd('/'))/vendor/mediamtx/mediamtx-win-x64.zip" } else { $MEDIAMTX_WIN_URL }
+$mtxUrl = "$($BASE_URL.TrimEnd('/'))/vendor/mediamtx/mediamtx-win-x64.zip"
 $mtxTmp = Expand-RemoteZip $mtxUrl "mediamtx-win64"
 try {
     # mediamtx win zip 为扁平结构（根含 mediamtx.exe / mediamtx.yml / LICENSE），只取 exe，不覆盖仓库 yml。

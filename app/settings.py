@@ -77,9 +77,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # 日志配置
+    # 日志配置。uvicorn 的 dictConfig 文件路径不做成开关——它不随环境变化，
+    # 位置硬编码在 app/main.py 与两个 start_backend 脚本里（config/logging.json）。
     log_level: str = "INFO"
-    log_config: str = "logging_config.json"
 
     # 外部工具（ffmpeg_path 留空 = 用项目自包含的 .ffmpeg/bin/ffmpeg，不回退 PATH）
     ffmpeg_path: str = ""
@@ -92,11 +92,11 @@ class Settings(BaseSettings):
     cuda_device: str = "0"
 
     # 持久化存储根目录（单一真源）。env: CLEANSIGHT_STORAGE_DIR
-    # persistence / inference / traceback 三方都读 settings.storage_base_dir，
+    # 落盘读写经 app/storage/utils/root.py 解析它；cleanup / traceback / lab 的旧代码直读，
     # 不再各自重算或互相 push（消除跨服务穿透）。
     storage_dir: str = "./database"
 
-    # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / persistence 四方共读，
+    # 视频/推理帧率与队列（跨模块单一真源；inference / stream / client / alarm 四方共读，
     # 不再寄生在 inference_config.yaml 的 global 块里互相反向依赖）。env: CLEANSIGHT_RAW_FPS 等。
     raw_fps: int = 30          # 生产者源：解码 CFR 帧率（decoder default_fps、HLS raw fallback、CA 秒→帧数换算全派生自此）
     inference_decimation: int = 2  # 采样器：检测抽帧降采样倍率——系统唯一采样旋钮。抽帧器「每 N 帧留 1」直接用它。
@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     # CA 缓存/段长本是"时间概念"，以秒声明（时间为跨子系统货币）；帧数在各消费边界按 raw_fps 显式换算。
     ca_maxlen_seconds: int = 30    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
     ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
+
+    # 拉流 socket 读超时（秒）→ decoder ffmpeg 的 `-timeout`。断流判死延迟 = 2×本值，
+    # 上界受 health_monitor 的 cleanup_timeout 约束；三条硬约束见 `_rtsp_input_opts()`。
+    rtsp_read_timeout_s: float = 2.5  # env: CLEANSIGHT_RTSP_READ_TIMEOUT_S
 
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
@@ -121,7 +125,9 @@ class Settings(BaseSettings):
     # 宽松路径前缀（逗号分隔）。大屏侧 /task/live、/task/history、/traceback 必须在列：
     # 前两者是跨 origin 轮询，浏览器的 CORS 预检 OPTIONS 与实际请求各计一次数，普通
     # 配额（60/60s）撑不住；/traceback 的 404 是正常业务态（只落了 raw 的 step 按默认
-    # track=processed 查即 404），不该被反扫描当扫描特征累计。
+    # track=processed 查即 404），不该被反扫描当扫描特征累计。/admin-f3m8 是 admin 页的
+    # 数据接口，单页轮询约 62 次/分并带延迟测试突发。/ui-f3m8 静态页不在列：开页只拉
+    # 5~6 个资产，普通配额足够。
     gateway_relaxed_prefixes: str = (
         "/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/metrics"
     )
@@ -144,7 +150,6 @@ class Settings(BaseSettings):
     lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
     lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
     lab_export_max_clips_per_submit: int = 20
-    lab_export_gap_tolerance_ms: int = 2000   # 相邻段间隔相对 step 实测节奏的允许超出量；>此值判为真录制停顿（源断流/重连）
 
     @property
     def inference_fps(self) -> float:
@@ -177,7 +182,7 @@ class Settings(BaseSettings):
         """持久化存储根目录（绝对路径，单一真源）。
 
         相对路径以项目根为基，避免读写两侧因进程 cwd 不同而分叉到不同目录。
-        persistence / inference / traceback 三方都读此值。
+        cleanup / inference / traceback 三方都读此值。
         """
         p = Path(self.storage_dir)
         if p.is_absolute():

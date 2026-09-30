@@ -1,7 +1,7 @@
 """段 fMP4 → 内存 `Frame` —— `_encode` 的读向对称件。
 
-    ref = hls.insert_segment(task_id, step_id, "raw", frames)   # 交帧，拿身份键
-    list(hls.read_segment(task_id, step_id, ref, width=W, height=H))  # 交身份键，拿帧
+    ref = hls.insert_segment(run, "raw", frames)                # 交帧，拿身份键
+    list(hls.read_segment(run, ref, width=W, height=H))        # 交身份键，拿帧
 
 **帧带的是墙钟 ts，不是媒体轴时刻**（媒体轴被 EXTINF/tfdt 压紧过，段间断流在那条轴上不
 存在）。墙钟 ts 只存在于 sidecar，故每一帧都是「像素来自 mp4、时间来自 `.idx`」的合成物。
@@ -14,8 +14,8 @@
     -vf select=between(n,k1,k2)                 按**帧号**选，不是按时间
     不用 -ss                                    它按时间 seek，会让 n 的原点漂掉
 
-加 `-ss` 做"优化"不报错，表现是帧号整体平移、反查回来是错帧，而 `FrameTracker.find` 的位级
-ts 比较会把它当"没找到"抛 ValueError，错因指向完全错误的方向。
+加 `-ss` 做"优化"不报错，表现是帧号整体平移：帧上的 ts 仍取自 sidecar、看着正确，像素却是
+别的帧。
 
 ## 只服务 raw 轨
 
@@ -28,7 +28,7 @@ ts 比较会把它当"没找到"抛 ValueError，错因指向完全错误的方�
 `start_ts` / `end_ts` 是**闭区间**的墙钟秒，`None` 表示该侧不设限。两级裁剪：段级选出可能
 命中的段（省 ffmpeg 调用次数），帧级在段内选 `[k_start, k_end]`（不解无效像素）。
 
-依赖上界：`app.domain`（域货币 `Frame`）+ numpy（sidecar 的货币）+ stdlib。ffmpeg 是**运行时**
+依赖上界：`app.types`（域货币 `Frame`）+ numpy（sidecar 的货币）+ stdlib。ffmpeg 是**运行时**
 依赖，`settings.ffmpeg_path` 只在函数体内 import。
 """
 
@@ -42,7 +42,8 @@ from typing import Iterator, List, Optional
 
 import numpy as np
 
-from app.domain.frame import Frame
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 
 from . import _idx, _layout, _read
 from ._layout import SegmentRef
@@ -84,7 +85,7 @@ def _read_exact(stream, buf: bytearray) -> bool:
 
 
 def _build_cmd(
-    task_id: int, step_id: int, ref: SegmentRef, start: int, end: int, width: int, height: int
+    run: RunIdentity, ref: SegmentRef, start: int, end: int, width: int, height: int
 ) -> List[str]:
     """解出 `[start, end]` 闭区间帧号的 ffmpeg 命令（rawvideo bgr24 走管道）。
 
@@ -93,8 +94,8 @@ def _build_cmd(
     """
     from app.settings import settings  # 同 `_fmp4.transcode`
 
-    init = _layout.init_path(task_id, step_id, _RAW_TRACK)
-    segment = _layout.segment_path(task_id, step_id, ref)
+    init = _layout.init_path(run, _RAW_TRACK)
+    segment = _layout.segment_path(run, ref)
     return [
         settings.ffmpeg_path,
         "-loglevel", "error", "-hide_banner",
@@ -133,8 +134,7 @@ def _decode_failure(
 
 
 def _run_ffmpeg(
-    task_id: int,
-    step_id: int,
+    run: RunIdentity,
     ref: SegmentRef,
     sidecar: np.ndarray,
     k_start: int,
@@ -149,7 +149,7 @@ def _run_ffmpeg(
     frame_size = width * height * 3
     n_frames = k_end - k_start + 1
     budget = max(_DECODE_TIMEOUT_FLOOR_S, n_frames * _DECODE_TIMEOUT_PER_FRAME_S)
-    cmd = _build_cmd(task_id, step_id, ref, k_start, k_end, width, height)
+    cmd = _build_cmd(run, ref, k_start, k_end, width, height)
     timed_out = threading.Event()
 
     # stderr 落临时文件而非 PIPE：PIPE 没人读，写满即死锁（`-loglevel error` 只是让它
@@ -189,8 +189,7 @@ def _run_ffmpeg(
 
 
 def read_segment(
-    task_id: int,
-    step_id: int,
+    run: RunIdentity,
     ref: SegmentRef,
     *,
     width: int,
@@ -201,8 +200,7 @@ def read_segment(
     """单段解码 —— `insert_segment` 的逆运算。帧级裁剪到 `[start_ts, end_ts]`。
 
     Args:
-        task_id: 任务 id。
-        step_id: 洗消步骤 id。
+        run: 该 run。
         ref: 段身份键。`ref.track` 必须是 `"raw"`。
         width / height: 输出分辨率。**无默认值**——静默产出一个尺寸会在下游变成
             train-serve skew。
@@ -223,11 +221,11 @@ def read_segment(
     """
     _require_raw(ref.track)
 
-    sidecar = _idx.read(_layout.sidecar_path(task_id, step_id, ref))
+    sidecar = _idx.read(_layout.sidecar_path(run, ref))
     if len(sidecar) == 0:
         logger.warning(
             "[storage.hls] sidecar 缺失或为空，跳过该段: task_id=%s step_id=%s %s",
-            task_id, step_id, _layout.segment_name(ref),
+            run.task_id, run.step_id, _layout.segment_name(ref),
         )
         return iter(())
 
@@ -243,12 +241,11 @@ def read_segment(
     if k_start > k_end:
         return iter(())
 
-    return _run_ffmpeg(task_id, step_id, ref, sidecar, k_start, k_end, width, height)
+    return _run_ffmpeg(run, ref, sidecar, k_start, k_end, width, height)
 
 
 def iter_frames(
-    task_id: int,
-    step_id: int,
+    run: RunIdentity,
     *,
     width: int,
     height: int,
@@ -266,10 +263,10 @@ def iter_frames(
 
     Raises: 同 `read_segment`（首次迭代时才发生，本函数是生成器）。
     """
-    for ref in _read.list_segments_in_range(
-        task_id, step_id, _RAW_TRACK, start_ts=start_ts, end_ts=end_ts
+    for seg in _read.list_segments_in_range(
+        run, _RAW_TRACK, start_ts=start_ts, end_ts=end_ts
     ):
         yield from read_segment(
-            task_id, step_id, ref,
+            run, seg.ref,
             width=width, height=height, start_ts=start_ts, end_ts=end_ts,
         )

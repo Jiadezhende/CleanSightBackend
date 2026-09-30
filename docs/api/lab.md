@@ -1,27 +1,38 @@
 # `/lab-f3m8` — 送标导出（Label Studio）
 
-让操作员在某个 step 的 raw 整段视频上圈选 N 段 `[start_ms, end_ms]`，后端 ffmpeg 剪出 mp4 并上传到 Label Studio（LS）创建标注任务。
+让操作员在某个 step 的 raw 整段视频上圈选 N 段 `[start_media_ms, end_media_ms]`，后端 ffmpeg 剪出 mp4 并上传到 Label Studio（LS）创建标注任务。
 
 另提供一条**旁路**：`GET /download` 把整个 step 的某一轨 remux 成单个 mp4 直接下载，不经 LS，用于取汇报素材/原片。
 
-- 数据源：任务列表来自 **DB**（`clean_task` 表）或 **磁盘**（枚举 raw 段目录），由运行时开关 `task_source` 决定；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id)` 文件约定）。
+另有一条**模型调试读口**：`POST /label-probs` 读某个 step 的离线分割模型逐帧类别概率（admin 离线推理 tab 画概率曲线用）。
+
+- 数据源：任务列表来自 **DB**（`clean_task` 表）或 **磁盘**（枚举 raw 段目录），由运行时开关 `task_source` 决定；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id, run_id)` 文件约定）。
+- submit / download / label-probs 都收可选 `run_id`（缺省 = 该 step 最新可见 run），JSON 响应回显实际读的 `run_id`。规则见 [README › run 定位](README.md#run-定位可选-run_id)。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
 - 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
-- 静态 UI：`GET /lab-f3m8/ui`（`app/static/lab`，`html=True`）。
+- 静态 UI：`GET /ui-f3m8/lab/`（`app/static/lab`，经 `/ui-f3m8` 统一挂载 `app/static`，`html=True`）。
 - 通用约定（Base URL / Gateway / 错误模型 / 枚举）见 [README](README.md)。
 
-> 时间单位在本组不统一：`/tasks` 返回的任务时间是 **epoch 秒**，而 `clips[].start_ms/end_ms/duration_ms` 是**毫秒**（绝对墙钟 ms，与 traceback timeline 同源）。逐字段已标注，别混用。
+> **本组有三套时间口径，逐字段已标注，别混用**：
+>
+> | 口径 | 出现在 | 含义 |
+> |------|--------|------|
+> | epoch 毫秒 | `/tasks` 的任务时间 | DB 模式为平台 `clean_task` 列原值，storage 模式取自盘上段的墙钟 |
+> | **媒体毫秒** | `/submit` **请求**的 `start_media_ms` / `end_media_ms` | 相对该 step raw 轨媒体轴原点的偏移，= `<video>.currentTime × 1000` |
+> | **绝对墙钟毫秒** | `/submit` **响应**的 `start_ms` / `end_ms` | 后端换算出的真实时刻，与 traceback timeline 的 `ts_ms` 同源 |
+>
+> **请求为什么不收墙钟**：媒体轴是压紧的墙钟——断流那段时间在它上面不存在。浏览器手上只有媒体轴上的量，`首段墙钟 + currentTime` 这个换算只在从没断过流时成立，断过就系统性偏早整个断流时长，裁出来的 clip 里没有操作员标的那个事件，且时长对、能播、**不报错**。换算要清单（段起点 + EXTINF 的逐行表），只有后端有，故换算在后端做、结果随响应带回。
 
 典型流程：
 
 ```
 ① GET /config   ──→ 确认 task_source / LS 已配置
-② GET /tasks    ──→ task_id + step_id + raw_steps
+② GET /tasks    ──→ task_id + step_id + raw_steps + run_ids
 ③ POST /submit  ──→ 裁剪 + 送标（per-clip 结果）
    GET /health  ──→ 送标前探测 LS 是否可达
 
 旁路（不经 LS）：
-② GET /tasks    ──→ task_id + step_id
+② GET /tasks    ──→ task_id + step_id + run_ids
    GET /download ──→ 整段 mp4 直接下载（取素材/原片）
 ```
 
@@ -53,12 +64,14 @@
       "current_step": "1",             // storage 模式恒 null
       "step_id": 1,                    // storage 模式恒 null
       "status": "running",             // storage 模式恒 "unknown"
-      "updated_time": 1751800000,      // epoch 秒，可 null
-      "start_time": 1751799000,        // epoch 秒，可 null
-      "end_time": null,                // epoch 秒，storage 模式恒 null
-      "raw_steps": [1, 2],             // 磁盘上有 raw 段的 step 列表
+      "updated_time": 1751800000000,   // epoch 毫秒，可 null
+      "start_time": 1751799000000,     // epoch 毫秒，可 null
+      "end_time": null,                // epoch 毫秒，storage 模式恒 null
+      "raw_steps": [1, 2],             // 最新可见 run 有 raw 段的 step 列表
+      "run_ids": {"1": 1751798990000, "2": 1751799500000},  // step_id → 该 step 最新可见 run
       "has_raw_segments": true,
-      "has_current_step_raw": true     // storage 模式恒 false
+      "has_current_step_raw": true,    // storage 模式恒 false
+      "offline_steps": [2]             // raw_steps 中有离线推理结果的 step
     }
   ]
 }
@@ -72,12 +85,14 @@
 | `tasks[].current_step` | string \| null | DB 模式为 `current_step` 字符串；行内为 null 或 **storage 模式恒 null** |
 | `tasks[].step_id` | int \| null | `current_step` 解析为 int；无法解析或 **storage 模式恒 null** |
 | `tasks[].status` | string \| null | DB 模式取自表；**storage 模式恒 `"unknown"`** |
-| `tasks[].updated_time` | int \| null | epoch **秒**。DB 模式取表；storage 模式取该 task 所有 raw 段 `ts_ms` 的最大值，无段则 null |
-| `tasks[].start_time` | int \| null | epoch **秒**。DB 模式取表；storage 模式取 raw 段 `ts_ms` 最小值，无段则 null |
-| `tasks[].end_time` | int \| null | epoch **秒**。DB 模式取表；**storage 模式恒 null** |
-| `tasks[].raw_steps` | int[] | 磁盘上确有 raw 段的 step_id（升序） |
+| `tasks[].updated_time` | int \| null | epoch **毫秒**（两种模式同单位）。DB 模式取表；storage 模式取该 task 所有 raw 段**段尾**（段起点 + 该段 EXTINF 时长）的最大值，无段则 null。取段尾而非段起点：后者恒比实际早一个段长（~10s） |
+| `tasks[].start_time` | int \| null | epoch **毫秒**（两种模式同单位）。DB 模式取表；storage 模式取 raw 段起点的最小值，无段则 null |
+| `tasks[].end_time` | int \| null | epoch **毫秒**。DB 模式取表；**storage 模式恒 null** |
+| `tasks[].raw_steps` | int[] | **最新可见 run** 确有 raw 段的 step_id（升序）。只看最新可见 run：它没有 raw 段（如同 step 刚重启、新 run 首段未出）时该 step 不列出，即便更早的 run 有 |
+| `tasks[].run_ids` | object | `raw_steps` 每一项 → 该 step 最新可见 run 的 `run_id`。**JSON 键是字符串**（`"1"`），值是 int。后续 submit / download / label-probs / `/ai/temporal` / traceback 带上它即锁定同一个 run |
 | `tasks[].has_raw_segments` | bool | `raw_steps` 非空。storage 模式只收有 raw 段的 task，故恒 true |
 | `tasks[].has_current_step_raw` | bool | `step_id ∈ raw_steps`。**storage 模式恒 false** |
+| `tasks[].offline_steps` | int[] | `raw_steps` 的子集（升序）：该 step 最新可见 run 有离线分割段（`temporal.jsonl` 里的 segment），或有逐帧类别概率（`label_probs.npz`）。两种模式行为一致；没有则 `[]` |
 
 排序：`updated_time desc, task_id desc`。空结果返回 `{"total":0,"tasks":[]}`，不报错。
 
@@ -94,7 +109,7 @@
 
 ### 前端坑点
 
-- 时间是 **epoch 秒**，与 `/submit` 的毫秒不同源，别拿去当 `start_ms`。
+- 时间是 **epoch 毫秒墙钟**，与 `/submit` 请求的媒体毫秒不同轴，别拿去当区间入参。
 - storage 模式下大量字段退化，务必先 `GET /config` 读 `task_source` 再决定 UI 展示。
 - 分页 `total` 是过滤后总数；翻页用 `offset += limit`。
 
@@ -102,7 +117,7 @@
 
 | 现象 | 后端实际状态 |
 |------|------------|
-| 列表为空但你确信有任务 | 该 task 磁盘上无 raw 段（storage 模式直接不收）；或 `q` 过滤掉了 |
+| 列表为空但你确信有任务 | 该 task 各 step 的最新可见 run 都无 raw 段（storage 模式直接不收）；或 `q` 过滤掉了 |
 | 某任务字段全是 null/"unknown" | 当前处于 **storage 模式**，非 bug |
 
 ---
@@ -117,6 +132,7 @@
 |------|------|------|------|------|
 | `task_id` | int | 是 | — | 运行键 |
 | `step_id` | int | 是 | — | 步序号 |
+| `run_id` | int \| null | 否 | null | 锁定哪个 run；null = 该 step 最新可见 run。取自 `/tasks` 的 `run_ids[step_id]` |
 | `project_id` | int \| null | 否 | null | LS project id；为空/0 时回退 `default_project_id`（见 /config），都没有 → 400 |
 | `clips` | array | 是 | — | **≥1 段**（空 → 422），元素见下 |
 | `keep_artifacts_on_failure` | bool | 否 | true | 任一段失败时是否保留 `job_dir` 下的 mp4 供手动重试 |
@@ -125,9 +141,10 @@
 
 | 字段 | 类型 | 必填 | 约束 |
 |------|------|------|------|
-| `start_ms` | int | 是 | **≥0**（绝对墙钟 ms），否则 422 |
-| `end_ms` | int | 是 | **≥1**，否则 422 |
-| `label` | string \| null | 否 | **≤64 字符**，透传到 LS `task.data` 作标注 hint |
+| `start_media_ms` | int | 是 | **≥0**，媒体毫秒（片内偏移，非墙钟），否则 422 |
+| `end_media_ms` | int | 是 | **≥1**，否则 422 |
+
+> **不收元数据**：LS 的 `/import` 在文件上传模式下只读 `request.FILES`，同一个 multipart 里的非文件字段一律忽略，随 clip 附带 `label`/`task_id` 之类的字段到不了 `task.data`。LS 上那条 task 唯一的溯源线索是文件名 `clip_{start_ms}_{end_ms}.mp4` 里的绝对墙钟区间。
 
 ### 响应 `200` `LabSubmitResponse`
 
@@ -135,6 +152,7 @@
 {
   "task_id": 123,
   "step_id": 1,
+  "run_id": 1751798990000,          // 实际裁剪的 run
   "project_id": 5,                     // 实际使用的 project（含 default 回退后的值）
   "job_dir": null,                     // 仅「有段失败 且 keep_artifacts_on_failure=true」时非空
   "total": 2,
@@ -142,7 +160,9 @@
   "failure_count": 1,
   "clips": [
     {
-      "start_ms": 0, "end_ms": 3000,   // epoch 墙钟毫秒
+      "start_media_ms": 0, "end_media_ms": 3000,   // 请求原样回显（失败时也有）
+      "start_ms": 1758283512400,                  // 后端换算的绝对墙钟；算不出时 null
+      "end_ms": 1758283515400,
       "success": true,
       "label_studio_task_id": 9001,    // 成功时 LS 分配的 task id；失败时 null
       "duration_ms": 3000,             // 毫秒；build 成功后才有，range/gap 失败时 null
@@ -157,9 +177,12 @@
 
 | 字段 | 类型 | 说明（含 null 条件） |
 |------|------|---------------------|
+| `run_id` | int | 实际裁剪的 run（请求缺省时即解析到的最新可见 run） |
 | `project_id` | int | 实际用的 project（req 优先，否则 default 回退后的值） |
 | `job_dir` | string \| null | 临时产物目录**绝对路径**。**仅当有段失败 且 `keep_artifacts_on_failure=true`** 时非空；否则（全成功，或不要求保留）已被删除，返回 null |
 | `success_count` / `failure_count` | int | 成功/失败段数，和为 `total` |
+| `clips[].start_media_ms` / `end_media_ms` | int | 请求原样回显，**任何结果都有**，供前端对号入座 |
+| `clips[].start_ms` / `end_ms` | int \| null | 后端换算的**绝对墙钟**毫秒。仅 build 成功（含上传失败）时有；`range_out_of_bounds`/`range_gap`/`ffmpeg_failed` 时 null |
 | `clips[].duration_ms` | int \| null | 毫秒。仅 build 成功（含上传失败）时有；`range_out_of_bounds`/`range_gap`/`ffmpeg_failed` 时 null |
 | `clips[].size_bytes` | int \| null | 同上 null 条件 |
 | `clips[].n_source_segments` | int \| null | 同上 null 条件 |
@@ -170,8 +193,8 @@
 
 | error_code | 触发条件 | 前端处置建议 |
 |------------|---------|-------------|
-| `range_out_of_bounds` | 选的 `[start_ms,end_ms]` 与该 step 的 raw 段无任何重叠 | 提示「所选时间不在可用录像范围内」，引导重新在 timeline 内圈选 |
-| `range_gap` | 范围内相邻段间隔超过 `gap_tolerance_ms`（真录制停顿：源断流/重连） | 提示「该时段录像中断，请缩小范围避开断点」 |
+| `range_out_of_bounds` | 选的 `[start_media_ms,end_media_ms)` 整个落在该 step 媒体轴之外 | 提示「所选时间不在可用录像范围内」，引导重新在 timeline 内圈选 |
+| `range_gap` | 范围内相邻段之间有真实录制停顿（`下一段起点 − (本段起点 + EXTINF) > 0.5s`，源断流/重连） | 提示「该时段录像中断，请缩小范围避开断点」。错误文案里带确切空洞时长与两个段名 |
 | `ffmpeg_failed` | ffmpeg 裁剪失败 / 输出文件缺失 | 视为可重试的后端错误，提示重试；持续失败上报运维查 ffmpeg |
 | `ls_bad_response` | LS 返回非预期（含无 `task_ids`、4xx 非鉴权、解析失败） | 提示「送标失败」，保留 `job_dir` 后可手动重试；查 LS project 是否存在 |
 | `ls_unreachable` | 连不上 LS（网络/超时/URLError） | 提示「Label Studio 不可达」，先 `GET /health` 确认连通再重试 |
@@ -184,20 +207,21 @@
 | 状态 | 触发条件 | 响应体形态 |
 |------|---------|-----------|
 | `400` | 见下「400 全部触发条件」 | `{"error":"...","detail":"...","field":"clips"\|"project_id"}` |
-| `404` | `(task_id, step_id)` 无任何 raw 段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=raw"}` |
-| `422` | 请求体字段级校验失败（`clips` 为空、`start_ms<0`、`end_ms<1`、`label>64`） | FastAPI 校验体 |
+| `404` | 所解析 run 无任何 raw 段（缺省 `run_id` 时含该 step 无可见 run） | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=raw"}` |
+| `404` | 显式 `run_id` 的目录不存在（写错 / 已被 TTL 回收） | `{"error":"...","resource_type":"Run","resource_id":"task=..,step=..,run=.."}` |
+| `422` | 请求体字段级校验失败（`clips` 为空、`start_media_ms<0`、`end_media_ms<1`） | FastAPI 校验体 |
 | `503` | LS **url 或 token 未配置** | `{"error":"Label Studio not configured","detail":"url 可在页面填、token 须 env"}`（HTTPException，**body 只有 `detail`，无 `retryable`**） |
 
-**`400` 全部触发条件**（`_validate_clips` / `_resolve_project_id`，整请求级、任一即拒）：
+**`400` 全部触发条件**（`app/services/lab/service.py` 的 `validate_clips` / `resolve_project_id`，整请求级、任一即拒）：
 
 - `clips` 段数 > `lab_export_max_clips_per_submit`（默认 20），`field=clips`；
-- 某段 `end_ms ≤ start_ms`，`field=clips`；
-- 某段时长（`end_ms-start_ms`）> `lab_export_max_clip_ms`（默认 300000 ms = 5 min），`field=clips`；
-- 按 `start_ms` 排序后相邻段**重叠**（`start_ms < 前一段 end_ms`），`field=clips`；
+- 某段 `end_media_ms ≤ start_media_ms`，`field=clips`；
+- 某段时长（`end_media_ms-start_media_ms`）> `lab_export_max_clip_ms`（默认 300000 ms = 5 min），`field=clips`；
+- 按 `start_media_ms` 排序后相邻段**重叠**（`start_media_ms < 前一段 end_media_ms`），`field=clips`；
 - 各段时长之和 > `lab_export_max_total_ms`（默认 1800000 ms = 30 min），`field=clips`；
 - `project_id` 缺失（req 未传且无 default），`field=project_id`。
 
-> 校验顺序：先查 LS 配置（**503**）→ 再算 project_id/校验 clips（**400**）→ 再查段存在性（**404**）。故未配置 LS 时即便入参也非法，也先返回 503。
+> 校验顺序：先查 LS 配置（**503**）→ 再算 project_id/校验 clips（**400**）→ 再解析 run、查段存在性（**404**）。故未配置 LS 时即便入参也非法，也先返回 503。
 > **503 与 400/404 的 body 形态不一致**：503 是 HTTPException（`{"detail":{...}}`，无 `field`/`retryable`），400/404 是业务异常体（带 `field` 或 `resource_type`）。**判分支只认 status code，别依赖 body 字段**。
 
 ### 前端坑点
@@ -242,6 +266,7 @@
 | `task_id` | int | **是** | — | 任务 id；缺失 → 422 |
 | `step_id` | int | **是** | — | 洗消步骤 id；缺失 → 422 |
 | `track` | string | 否 | `processed` | 只接受 `raw` \| `processed`，其它值 → 422。`processed` = 画了检测框，`raw` = 原始画面 |
+| `run_id` | int | 否 | 最新可见 run | 锁定导出哪个 run |
 
 ### 响应 `200`
 
@@ -250,7 +275,7 @@
 | 响应头 | 值 |
 |--------|-----|
 | `Content-Type` | `video/mp4` |
-| `Content-Disposition` | `attachment; filename="task{task_id}_step{step_id}_{track}.mp4"` |
+| `Content-Disposition` | `attachment; filename="task{task_id}_step{step_id}_{track}.mp4"`（不含 `run_id`：同 step 不同 run 的下载同名） |
 | `Content-Length` | 产物字节数（先落临时文件再发，故长度已知、可显示下载进度） |
 
 产物特征（已用真实段核验）：H.264 / yuv420p、分辨率与源一致、`moov` 前置（faststart，可边下边播和拖动 seek）、时长 = 各段 `EXTINF` 之和。
@@ -259,9 +284,10 @@
 
 | 状态 | 触发条件 | 响应体形态 |
 |------|---------|-----------|
-| `404` | 该 `(task_id, step_id, track)` 无段，**或**段全为在途段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=.."}` |
+| `404` | 所解析 run 的该 `track` 无段（缺省 `run_id` 时含该 step 无可见 run），**或**段全为在途段 | `{"error":"...","resource_type":"Segments","resource_id":"task=..,step=..,track=.."}` |
+| `404` | 显式 `run_id` 的目录不存在（写错 / 已被 TTL 回收） | `{"error":"...","resource_type":"Run","resource_id":"task=..,step=..,run=.."}` |
 | `422` | 缺 `task_id`/`step_id`，或 `track` 不在枚举内 | FastAPI 校验体（`{"detail":[...]}`） |
-| `503` | step 目录缺 `{track}_init.mp4`（旧格式产物，或首段仍在 transcode） | `{"detail":{"error":"HLS init segment missing","detail":"raw_init.mp4 not found for task .. step ..; ..."}}` |
+| `503` | run 的 `hls/` 目录缺 `{track}_init.mp4`（首段仍在 transcode） | `{"detail":{"error":"HLS init segment missing","detail":"raw_init.mp4 not found for task .. step ..; ..."}}` |
 | `500` | ffmpeg 失败 / 超时 / 二进制找不到 | `{"detail":"Export failed: ..."}` |
 
 > 与 `/submit` 一样，**503 的 body 形态和 404 不一致**（HTTPException 只有 `detail`，无 `resource_type`）。判分支只认 status code。
@@ -282,6 +308,64 @@
 | 下到的视频比页面显示的时长短 | 末尾若干段仍在途（mp4v 已落、transcode+append 未完成），被有意过滤；等几秒重下即可 |
 | 反复下同一 step 每次都要等 | 正常——**不做产物缓存**，每次重新 remux。成本在磁盘 IO 不在 CPU |
 | `.lab_exports` 里有残留 `step_*.mp4` | 客户端中途断开导致清理没跑到；下次调用本接口时会顺手回收超过 30 min 的孤儿 |
+
+---
+
+## POST /lab-f3m8/label-probs
+
+读取某个 step 的离线分割模型**逐帧类别概率**（每帧对各类的 softmax），给 admin 离线推理 tab 画概率曲线。
+这是模型调试旁路，不是对外推理结果（正式结果是分割段，见 [`POST /ai/temporal`](ai.md#post-aitemporal)）。
+帧时间已换算为该轨**媒体刻度**（= `<video>.currentTime × 1000`）。身份键走 JSON body，约定见 [README](README.md)。
+
+**请求体**（JSON）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | int | 是 | 任务 id |
+| `step_id` | int | 是 | 洗消步骤 id |
+| `run_id` | int | 否 | 锁定哪个 run；缺省 = 该 step 最新可见 run。须与播放器加载的 run 一致 |
+| `track` | string | 否 | `raw`（默认）/ `processed`，须与播放器加载的轨一致 |
+
+```jsonc
+{"task_id": 42, "step_id": 2, "run_id": 1751798990000, "track": "raw"}
+```
+
+### 响应 `200`
+
+```jsonc
+{
+  "task_id": 42,
+  "step_id": 2,
+  "run_id": 1751798990000,                        // 实际读的 run
+  "track": "raw",
+  "media_duration_ms": 612340,                       // 该轨媒体轴总长 = <video>.duration × 1000
+  "labels": ["idle", "long_brush_insert", "long_brush_withdraw",
+             "short_brush_cleaning", "flush", "air_injection"],
+  "media_ms": [0, 67, 133],                          // [T] 逐帧媒体刻度，升序（停顿里的帧会与后一帧同值）
+  "probs": [[0.98, 0.97, 0.95], [0.01, 0.02, 0.03]]  // [C][T]：probs[j] 是 labels[j] 这一类的逐帧概率
+}
+```
+
+| 字段 | 类型 | 说明（含缺省/空条件） |
+|------|------|---------------------|
+| `labels` | string[] | 类名，顺序即模型输出通道序，含背景类（如 `idle`） |
+| `media_ms` | int[] | 逐帧媒体刻度 ms，长度 T |
+| `probs` | float[][] | **按类分列**：`probs.length == labels.length`，每行长度 T。3 位小数（盘上 float16，精度约 3 位有效数字） |
+| — | — | **没有概率产物时 `labels` / `media_ms` / `probs` 均为 `[]`**：从未跑过离线，或该模型不产逐帧概率（如规则型分段器）。不报错 |
+
+### 错误
+
+| 状态 | 条件 |
+|------|------|
+| 404 | 所解析 run 的 `track` 轨没有已登记的段（`resource_type: "Segments"`；缺省 `run_id` 时含该 step 无可见 run） |
+| 404 | 显式 `run_id` 的目录不存在（`resource_type: "Run"`） |
+| 422 | 缺 `task_id` / `step_id`，或 `track` 不是 `raw`/`processed` |
+
+### 前端坑点
+
+- `probs` 是 `[C][T]` 不是 `[T][C]`：一类直接是一条曲线，别再转置。
+- 切轨要重取：两轨的媒体刻度不同。
+- 10 分钟 step（15fps × 6 类）响应约 400 KB，别放进轮询。
 
 ---
 

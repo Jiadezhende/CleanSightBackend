@@ -1,147 +1,150 @@
-> 更新时间：2026-07-25
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Configuration Service
 
-配置由 Pydantic settings、YAML 文件和少量运行时配置文件共同组成。
+配置由三部分组成：`app/settings.py`（Pydantic settings，env 前缀 `CLEANSIGHT_`）、`config/*.yaml`（启动时只读）、
+少量页面可改的运行时配置文件。各角色 `.env*` 取值、端口表与部署操作见 deploy skill 的
+[runtime-config.md](../../.claude/skills/deploy/references/runtime-config.md)。
 
-## fps/时间配置三层模型（关键不变式）
+## fps / 时间配置分三层，衍生量永不进 yaml
 
-fps/时间相关配置归为**三层**，边界定死——这是防止"衍生量被手滑写回 yaml、与 settings 漂移"的核心约束。真源：`app/settings.py`、四个 config loader、`config/*.yaml`。
+| 层 | 放什么 | 判据 |
+|----|--------|------|
+| settings（`app/settings.py`） | 跨模块单一真源的真旋钮 + 时间概念 | 可自由调、不与某个产物强绑 |
+| yaml（`config/*.yaml`） | 编排（选哪条 pipeline / 流）+ 契约（随产物钉死的量） | 配错会崩，或语义是「选择 / 契约」 |
+| 衍生量（代码属性） | 由 settings 算出的换算结果 | 必须与真源一致，进 yaml 就成了第二真源 |
 
-| 层 | 放什么 | 判据 | 铁律 |
-|----|--------|------|------|
-| **settings 级**（`app/settings.py`） | 跨模块单一真源的**真旋钮** + **时间概念** | 能自由调、调了行为变、不与另一产物强绑 | 整数 fps 旋钮只有 2 个（`raw_fps`/`inference_decimation`） |
-| **yaml 级**（`config/*.yaml`） | **编排**（选哪条 pipeline/流）+ **契约**（随产物钉死的量） | 配错会崩（shape/key）或语义是"选择/契约" | 不含任何衍生量 |
-| **衍生量**（代码属性） | settings 算出的换算结果 | 必须与真源严格一致、不能独立设 | **永不进 yaml**——进了就是第二真源 → 漂移 |
+- **真旋钮只有两个**：`raw_fps = 30`（解码 CFR 帧率）、`inference_decimation = 2`（检测抽帧每 N 帧留 1）。
+  检测率 = `raw_fps / inference_decimation`，整数因子只能命中整除率（30 → 15 / 10 / 7.5 / 6…）。
+- **时间概念**以秒声明：`ca_maxlen_seconds = 30`、`ca_segment_seconds = 10`（HLS 段长由后者触发）。
+- **衍生量**：`settings.inference_fps`（= 15.0）、`ClientConfig.ca_maxlen` / `ca_segment_len`（× `raw_fps` = 900 / 300 帧，
+  经 `cq_kwargs()` 传给 CQ，`inference_decimation` 同路）、`DecoderConfig.default_fps`（= `raw_fps`，ffmpeg `fps=`）、
+  `VisualizationWorkerPool.target_fps`（轮询率 = `raw_fps`）/ `output_fps`（= `inference_fps`）。
+- **yaml 里唯一的 fps 是 `model_input_fps`**（`inference_config.yaml` 两处，均 7.5：`CleanOperator` 与 CLEAN 离线段）。
+  它是模型契约，配错不崩、静默变差，故必填并在加载期校验：在线 `TemporalOperator.__init__` 要求 >0 且 ≤
+  `settings.inference_fps`；离线 `CleanNodepGRUSegmenter` 构造要求 >0，入模时检测帧率低于它即 `ValueError`。
+- **运行时从帧 ts 反推、不读任何配置**：HLS 段编码 fps（`app/storage/hls/_encode.py::effective_fps` = `(N-1)/span`，
+  落在 [1, 60] 外或单帧 / span≤0 时回退 15.0）、WS 推帧率（`ai.py`）、模型入模密度
+  （`app/services/inference/resample.py::resample_by_ts`）。
 
-- **settings 真旋钮**：`raw_fps: int = 30`（生产者：解码 CFR 帧率）、`inference_decimation: int = 2`（采样器：检测抽帧"每 N 帧留 1"的唯一旋钮）；**时间概念**：`ca_maxlen_seconds: int = 90`、`ca_segment_seconds: int = 10`（缓存/段长以秒声明，非帧数）。检测率 = `raw_fps / inference_decimation`，整数因子故只命中 `raw_fps` 的整除率（30→15/10/7.5/6…，不支持 30→20 类非整除比）。
-- **yaml 唯一的 fps 是 `model_input_fps: 7.5`**（`inference_config.yaml` CleanOperator `params`）——它是**模型契约**（随产物钉死、模型侧按 ts 重采样入模），配错不崩、静默降级，故必填 + 加载期校验（`TemporalOperator.__init__` 对 `None`/`≤0` 暴露信号）。
-- **衍生量**（由 settings 算出、活在代码属性、永不进 yaml）：`settings.inference_fps`（property = `raw_fps/inference_decimation` = 15.0，viz 轮询率）、`ClientConfig.ca_maxlen`/`ca_segment_len`（`×raw_fps` = 2700/300 帧）、`DecoderConfig.default_fps`（`= raw_fps`，ffmpeg `fps=` filter）、`VizWorkerPool.target_fps`（`= inference_fps`）、`ClientQueues.inference_decimation`（直读 settings）。
-- **天然护栏**：四个 config loader 都是裸 `**dict`、不做字段过滤——谁往 yaml 误写衍生量（如 `raw_fps: 25`），构造即 `TypeError` **当场崩**，无需额外校验。
-- **运行时反推**（既不在 settings 也不在 yaml，从帧 ts 现算）：HLS 段编码 `eff_fps` = `(N-1)/span`（`hls_strategy._effective_fps`，raw/processed 逐段各自反推）、WS 推帧率（rendered 流实际到达率，`ai.py`）、模型入模密度（`_resample_by_ts` 重采样到 `model_input_fps`）。
+### yaml 写进未知字段：只有 recording 会当场崩
 
-## 环境变量
+| loader | 未知字段（如误写 `raw_fps: 25`）的结果 |
+|---|---|
+| recording（`RecordingConfig.from_yaml` 末尾裸 `cls(**raw)`，不在 try 内） | `TypeError`，启动即崩 |
+| client / stream / alarm / cleanup（`**dict` 构造包在 `try` 里） | 记一条 ERROR，**整份回退默认值**，进程照常起 |
+| health_monitor（按键 `.get`）、inference（按键取段） | 忽略 |
 
-`app/settings.py` 使用 `CLEANSIGHT_` 前缀。
+其余 loader 靠 yaml 由 git 跟踪、部署整仓覆盖来保持干净。
 
-环境文件加载规则：
+## settings 其它关键项
 
-- `CLEANSIGHT_ENV=dev`：加载 `.env.dev`
-- `CLEANSIGHT_ENV=test`：加载 `.env.test`
-- `CLEANSIGHT_ENV=prod`：加载 `.env`
-- 默认是 dev
+- **`rtsp_read_timeout_s = 2.5`**：转成微秒喂 decoder ffmpeg 的 `-timeout`。存的是 flag 原值，实际断流判死延迟约为
+  `2×` 本值（ffmpeg 行为，可能随版本变）。它与 health_monitor 的 `cleanup_timeout` 串联：判死占掉过多预算时
+  `HealthMonitorWorker.start()` 只告警、不纠正。见 [SERVICE_STREAM.md](SERVICE_STREAM.md) / [SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)。
+- **`storage_base_dir` / `config_dir`**：相对路径一律以项目根为基解析，与进程 cwd 无关。存储根的唯一来源是
+  `storage_base_dir`（env `CLEANSIGHT_STORAGE_DIR`），各方都读它、不互相灌值。七个服务 loader
+  （`app/services/{client,inference,recording,stream,alarm}/config.py`、`app/daemons/{health_monitor,cleanup}/config.py`）
+  一律 `settings.config_dir / "xxx.yaml"`；唯一例外是 `app/services/algorithm/colorstrip/config.py` 读同目录 `params.yaml`。
+- **媒体 token**：`media_token_secret`（空则启动时随机生成）、`media_token_ttl = 300`。
 
-### 环境端口隔离
+## 环境文件与必填项
 
-`start_backend.sh [dev|test|prod]` 一条命令拉起整套（RTSP 网关含 MediaMTX + 后端 app），并按环境分配端口。基准端口（`dev`/`prod` 直接用，二者同端口、分属不同机器故不冲突）与 `test` 偏移（整体 +100，与同机 prod 隔离）：
+- `CLEANSIGHT_ENV` 选文件：`dev` → `.env.dev`（缺省）、`test` → `.env.test`、`prod` → `.env`。
+- `_load_env_files()` 用 `os.environ.setdefault` 注入，**已存在的环境变量压过文件值**——启动脚本 export 的端口因此
+  能压住 `.env*` 同名键。
+- **必填六项**（`db_host` / `db_port` / `db_name` / `db_user` / `db_password` / `alarm_report_url`）没有默认值：
+  缺任一项，`import app.settings` 即抛 pydantic `ValidationError`，与 `strict` 无关（`env_ignore_empty=True`，空值等同缺失）。
+  `check_required_fields` 的 strict 分支（`strict=True` 且非 dev 才抛）实际只可能拦到 `CLEANSIGHT_DB_PORT=0`。
 
-| 端口 | 基准（dev/prod） | test（+100） |
-|------|------------------|--------------|
-| 后端 HTTP/WS（`BACKEND_PORT`） | 8000 | 8100 |
-| 网关对外 RTSP（`PROXY_PORT`，客户端连这个） | 8004 | 8104 |
-| MediaMTX RTSP 内部回源（`INTERNAL_PORT`） | 18004 | 18104 |
-| MediaMTX RTP/RTCP（UDP，内部） | 8002 / 8003 | 8102 / 8103 |
+## 端口的唯一声明处是启动脚本
 
-脚本据此导出 `CLEANSIGHT_MEDIAMTX_PROXY_PORT`/`_INTERNAL_PORT`（后端回源改写）、`GATEWAY_LISTEN_PORT`/`GATEWAY_TARGET_PORT`（网关）、`MTX_RTSPADDRESS`/`MTX_RTPADDRESS`/`MTX_RTCPADDRESS`（MediaMTX 原生）。来源：`start_backend.sh`。
-
-严格模式：
-
-- `strict=True` 且非 dev 时，缺少必需配置会阻止启动。
-- dev 或非严格模式下，只打印警告。
-
-必需配置包括数据库配置和外部接口 URL。
+`start_backend.sh` 的 `BASE_*` / `start_backend.ps1` 的 `$Base*` 五行是端口唯一真源（两份脚本各自声明，改端口需同步）。
+脚本导出 `CLEANSIGHT_PORT`、`CLEANSIGHT_MEDIAMTX_PROXY_PORT` / `_INTERNAL_PORT`、`GATEWAY_LISTEN_PORT` /
+`GATEWAY_TARGET_PORT`、`MTX_RTSPADDRESS` / `MTX_RTPADDRESS` / `MTX_RTCPADDRESS`。`.env*` 不含端口项；`settings.py`
+的 `port` / `mediamtx_*_port`、`mediamtx.yml`、网关 `config.ini` 里的端口只是脱离脚本单独跑时的回退值。
+`CLEANSIGHT_PORT` 必须导出，否则 `python -m app.main` 读到的 `settings.port` 会与脚本不一致。端口表、NAT 1:1 约束见
+[runtime-config.md](../../.claude/skills/deploy/references/runtime-config.md)。
 
 ## YAML 配置
 
-主要配置文件：
+| 文件 | 内容 |
+|------|------|
+| `config/inference_config.yaml` | 每个 stage 的 `detectors[]` / `rules[]`（Operator，含 `subscribes`、`params.window_seconds` / `model_input_fps`）/ `offline`，顶层 `batch_size`。权重路径写 `${CLEANSIGHT_MODEL_PATH:./app/data}/<文件>.pt`（`config.py::_expand_env_vars` 展开）。detector 导入或构造失败、operator 类导入失败、rule 缺 `class` / `subscribes` → 后端启动失败；operator 在每次 `start_workflow` 才 `cls(**kwargs)` 构造（`online/service.py`），参数错（如 `model_input_fps` 越界）只让该次 `/api/start` 回滚报错 |
+| `config/stream_config.yaml` | `decoder:` 段：`default_width` / `default_height`、`pix_fmt`、`chunk_read_size`、`backpressure_ratio`；不含 fps |
+| `config/client_config.yaml` | `frame:` 段 resize 宽高；stage 不在此（由 `start_run` 按 `current_step` 传给 CQ） |
+| `config/recording_config.yaml` | `queue_size`、`sweep_interval_seconds`；没有 `workers`（段写恒单消费线程，配多了不报错、只让段间 tfdt 碰撞），不配任何时长或帧率 |
+| `config/persistence_config.yaml` | 分段读：`storage:` → `daemons/cleanup/config.py::CleanupConfig`（`enable_cleanup` / `cleanup_days` / `cleanup_interval_seconds`）；`alarm:` → `services/alarm/config.py::AlarmServiceConfig`（`workers` / `queue_size`）。告警重试参数写死在 `alarm_worker.py` |
+| `config/health_monitor_config.yaml` | `monitor:` 段：`check_interval` 1.0、`heartbeat_timeout` 5.0、`reconnect_interval` 5.0、`cleanup_timeout` 20.0、`orphan_timeout` 30.0、`task_max_duration` 1800.0 |
+| `config/logging.json` | 日志 dictConfig，见下 |
+| `app/services/algorithm/colorstrip/params.yaml` | 比色阈值、`max_image_bytes`、`default_profile`；随算法包走、不经 `config_dir`，现场调参只能改包内文件。见 [SERVICE_ALGORITHM.md](SERVICE_ALGORITHM.md) |
 
-- `config/inference_config.yaml`：stage、detectors（流源）、rules（Operator，含 subscribes/window_seconds、CleanOperator 的 `model_input_fps` 模型契约）、offline（离线段，见下）、`batch_size`。**采样率/编码 fps 等衍生量与真旋钮（raw_fps/inference_decimation/ca_*_seconds）在 `app/settings.py`，不放此**（见上「三层模型」）。
-- `config/inference_config_cpu.yaml`：CPU/mock 环境配置。
-- `config/stream_config.yaml`：FFmpeg 解码尺寸、pix_fmt、背压（`resize`/`backpressure` 等解码参数）。**不含 `default_fps`**（已删——解码 CFR 帧率由 `DecoderConfig.default_fps` 从 `settings.raw_fps` 派生）。
-- `config/persistence_config.yaml`：HLS queue、alarm queue、存储目录、清理策略。
-- `config/health_monitor_config.yaml`：心跳、重连、孤儿流、任务超时。
-- `config/client_config.yaml`：客户端帧尺寸、初始 stage 等。
+### offline 段：非空即启用，`class` 必填，无兜底
 
-### offline 段 schema（离线分割）
+- 每个 stage 的 `offline` 形状只有 `{class, params}`：空块 / 缺省 = 该 stage 不可跑离线；非空时 `class` 为全限定类路径、
+  必须可导入，构造参数全部来自 `params`（`cls(**params)`），产出的 `TemporalSegment.producer` = 类名。
+- 可跑校验只有 `InferenceConfig.require_offline(step_id)`：step 未定义或 `offline` 为空 → `ValidationError`。
+  admin 提交（400）与 Runner 运行（CLI 退出码 1）共用。
+- 在线进程从不实例化 `offline` 块的类：类路径错、权重缺失只在离线作业里暴露（该作业 failed）。
+- 当前：step `"1"`（LEAK）`offline: {}`；step `"2"`（CLEAN）为 `CleanNodepGRUSegmenter`，`params` =
+  `model_path: …/clean-offline-gru-nodep.pt`、`model_input_fps: 7.5`、`confidence_override: 1.0`、`min_duration_s: 0.2`。
+  `model_input_fps` / `confidence_override` 须与训练口径一致，配错不报错（训练口径待核验）。
+- yaml 注释给出三个备选类（只收 `model_path` / `min_duration_s`），换 `class` 须同时换 `params`：
 
-每个 stage 下 `offline` 段（stage 粒度）路由到一个 `OfflineSegmenter`。启用判据是 **presence 驱动**——不再有 `enabled` 布尔开关：
+| class | 权重 |
+|---|---|
+| `CleanNodepGRUSegmenter`（默认） | `clean-offline-gru-nodep.pt` |
+| `CleanBiGRUSegmenter` | `clean-offline-bigru.pt` |
+| `CleanASFormerSegmenter` | `clean-offline-asformer.pt` |
+| `CleanMSTCNBiLSTMSegmenter` | `clean-offline-mstcn.pt` |
 
-- **空块 `{}` / 缺省 = 不启用**（`create_offline_segmenter` 返回 None，Runner skip）。这是临时禁用某 stage offline 的唯一方式（留空或整段删除/注释）。
-- **非空即视为有意启用**；此时字段 `name` / `subscribes` / `class` 必填，缺任一 **fail-fast 抛 `ValueError`**（旧的「配全字段却漏写 `enabled: true` 导致静默不跑」的降级已消除）。`subscribes` 必须全命中同 stage 的 detector；`params` 不得重复声明 `name`/`subscribes`；`class` 为全限定类路径（与在线 Detector/Operator 同风格，无短名注册表）。
-- `resolve_stage(step_id)`：数字 step 命中即恒等，**未知 step_id 回退 `MOCK` 并打 WARN**（与在线 `InferenceManager.resolve_stage` 对齐同源同义——两链路兜底都可见，避免「-1 冒烟」与「真打错 step」混淆）。
-
-当前 YAML 现状：生产 stage（bubble/bending=step1、clean=step2）`offline` 均保持 `{}` 不启用（守 CLAUDE.md 硬规矩，离线不触碰在线 B2B 测试）；仅 **MOCK stage 的 `offline` 启用**（`class: ...segmenters.mock.BrushRulesSegmenter`, `subscribes: [mock]`），作「能端到端跑的配置化路由样例」。CLEAN 真实离线模型（`segmenters.clean` 的 MS-TCN/ASFormer/BiGRU 系列）以注释形式示例，开发期手动跑需在 dev 配置里临时把 `CLEAN.offline` 配上 `name/subscribes/class`。来源：`app/services/inference/stage_factory.py` `create_offline_segmenter`、`app/services/inference/config.py` `resolve_stage`、`config/inference_config.yaml`。
+离线权重命名 `clean-offline-<模型>.pt`，与在线权重同放 `${CLEANSIGHT_MODEL_PATH:./app/data}`。
 
 ## Gateway 配置
 
-FastAPI Gateway 配置在 settings 中：
+FastAPI Gateway（`app/gateway.py`）的配置全在 settings：
 
-- `gateway_enabled`
-- `gateway_allowed_ips`
-- `gateway_rate_limit`
-- `gateway_relaxed_prefixes`
-- `gateway_bypass_prefixes`
-- `gateway_scan_threshold`
-- `gateway_ban_duration`
+- 开关与白名单：`gateway_enabled`、`gateway_allowed_ips`（逗号分隔，空 = 不限制）
+- 普通档：`gateway_rate_limit` / `gateway_rate_window`，持续超限升级封禁 `gateway_rate_ban_threshold` / `gateway_rate_ban_window`
+- 宽松档：`gateway_relaxed_prefixes`（默认 `/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/metrics`）+ `gateway_relaxed_rate_limit`
+- 绕过档：`gateway_bypass_prefixes`（默认 `/media`）
+- 反扫描：`gateway_scan_threshold` / `gateway_scan_window` / `gateway_ban_duration`
 
-MediaMTX Gateway 使用 `GATEWAY_*` 环境变量或 `mediamtx_gateway/config.ini`。
+分档行为见 [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)。MediaMTX 网关读 `GATEWAY_*` 环境变量或
+`mediamtx_gateway/config.ini`。
 
 ## Lab 配置
 
-静态 settings：
-
-- `label_studio_token`
-- `lab_export_*`
-
-运行时可持久化配置：
-
-- Label Studio URL
-- 默认 project_id
-
-来源：`app/services/lab/runtime_config.py`
+- 静态 settings：`label_studio_token`（只在 env，页面不可见）、`label_studio_url` / `label_studio_default_project_id`
+  （运行时配置的 env 回退值）、`lab_export_*`（临时目录、ffmpeg preset、单段 / 总时长 / 段数上限）。
+- 运行时配置（`app/services/lab/runtime_config.py`，不是 `config.py`）：Label Studio URL、默认 project_id、任务列表
+  数据源（`db` / `storage`）。持久化在 `{storage_base_dir}/lab_runtime_config.json`，文件存在用文件值、否则回退 env；
+  改完即时生效、重启保留；读写经模块锁。
 
 ## 日志配置
 
-`start_backend.sh` 以 `uvicorn --log-config logging_config.json` 加载日志（`logging.config` dictConfig 格式），不在 app 代码里 `dictConfig`。`logging_config.json`：
+- `config/logging.json` 由 uvicorn `--log-config` 加载（dictConfig），app 代码不调 `dictConfig`。路径是字面量，写在三处：
+  `app/main.py` 的 `uvicorn.run`、`start_backend.sh`、`start_backend.ps1`。
+- 内容：console handler（`colorlog.ColoredFormatter`）+ `file_info` / `file_warning` / `file_error` 三个
+  `ConcurrentTimedRotatingFileHandler`（按级别分文件、按时间轮转）；root level `INFO`。
+- `CLEANSIGHT_LOG_LEVEL`（`settings.log_level`，默认 `INFO`）在 `app/main.py` lifespan 开头设置 root logger 级别，
+  覆盖 `logging.json` 的 root level。
+- 日志编码规范见 [DEVELOPMENT.md §4](../DEVELOPMENT.md)。
 
-- console handler：`colorlog.ColoredFormatter` 彩色输出。
-- 文件 handler：`file_info` / `file_warning` / `file_error` 三个 `ConcurrentTimedRotatingFileHandler`，按级别分文件、时间轮转。
-- root level `INFO`，handlers = console + 三个文件。
-- `logging_config_fallback.json` 为兜底配置。
+## 单例何时读 yaml
 
-日志**编码规范**（`[Module]` 前缀、`%` 惰性格式化、级别语义、热路径守卫）属贡献者约定，不在本库（见 docs/ 开发规范）。
-
-> 注：无基于 `CLEANSIGHT_ENV` 的 dev/prod 日志级别分支，也未接 `LOG_LEVEL` 环境变量覆盖（旧文档的相关说法未落地）。
-
-## 配置耦合点
-
-- 真旋钮（`raw_fps`/`inference_decimation`）、时间概念（`ca_maxlen_seconds`/`ca_segment_seconds`）与 `storage_base_dir` 均以 `app/settings.py` 为**单一真源**；persistence/client/inference/traceback 都读 settings（或其派生属性），不反向钻进彼此的 YAML。
-- HLS segment duration 由 `ca_segment_seconds`（→衍生 `ca_segment_len` 帧数）决定；段编码 fps 不再联动任何配置 fps，改由帧 ts 逐段反推（`_effective_fps`）。
-- trace/media token TTL 和 secret 由 settings 管理。
-
-## 服务实例化与类型加载
-
-对象按「是否单例 + 何时构造」分四类（详见 `docs/update/20260701_SERVICE_INSTANTIATION_DESIGN.md`，部分为设计草案、**待核验**）：
-
-- **A 饿汉单例（import 时）**：`client_manager`、`stream_service`、`persistence_manager`、`run_controller`——构造廉价、无重资源。
-- **B leaf-lazy 单例（消费方显式 import）**：`inference_manager`（`instance.py`）——读 `inference_config.yaml` fail-fast，但 YOLO 权重/worker 线程等重资源仍惰性，不在 import/构造时加载。
-- **C DI 装配（assembler 点）**：`GlobalHealthMonitor` 在 `routers/health.py` 注入依赖构造。
-- **D 类型/契约（per-run/message）**：`Detector`/`Operator`/`Frame`/`FrameDetections` 等，永不单例。
-
-不变式：重资源（模型权重、worker 线程、per-run 组件）绝不在 import 或构造时创建，只在首次使用或显式 `.start()` 时；循环 import 用 point-of-use 惰性 import 打破。
+`client_service` / `stream_service` / `cleanup_worker` 在 import 期、`recording_service` / `alarm_service` 在构造期读 yaml；
+其余单例推迟到 `start()` 或首次使用。完整表见 [ARCHITECTURE_PACKAGE_LAYERS.md](ARCHITECTURE_PACKAGE_LAYERS.md)
+「单例构造」一节。
 
 ## 代码来源
 
-- `app/settings.py`
-- `start_backend.sh`（环境端口隔离）
-- `app/services/inference/config.py`（`resolve_stage`）
-- `app/services/inference/stage_factory.py`（`create_offline_segmenter` offline schema）
-- `app/services/stream/config.py`
-- `app/services/persistence/config.py`
-- `app/services/health_monitor/config.py`
-- `app/services/client/config.py`
-- `app/services/lab/runtime_config.py`
-- `config/*.yaml`
-
+- `app/settings.py`（真旋钮、`rtsp_read_timeout_s`、`storage_base_dir` / `config_dir`、`_load_env_files`、`check_required_fields`、gateway 前缀、Lab 项）
+- `start_backend.sh` / `start_backend.ps1`（`BASE_*` / `$Base*`）、`.env.example`
+- `app/main.py`（`log_level` 设 root 级别、`uvicorn.run(log_config=...)`）
+- `app/services/{client,stream,recording,alarm,inference}/config.py`、`app/daemons/{cleanup,health_monitor}/config.py`
+- `app/services/inference/stage_factory.py`（`create_offline_segmenter`）、`app/services/inference/online/temporal/operator.py`、`app/services/inference/offline/impl/clean.py`
+- `app/storage/hls/_encode.py`（`effective_fps`）、`app/services/lab/runtime_config.py`、`app/services/algorithm/colorstrip/config.py`
+- `config/*.yaml`、`config/logging.json`

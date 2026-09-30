@@ -4,8 +4,10 @@
 提供任务 VOD 回放、任务时间轴打点两个接口。
 
 数据底座：
-- task_id + step_id → 落盘目录：`{base_dir}/{task_id}/{step_id}/`
-- 段枚举：按文件名 ts_us 升序（segment_finder）
+- (task_id, step_id, 可选 run_id) → 入口处 `resolve_run` 解析一次 run，整个请求只读这个 run
+  的 `{root}/{task_id}/{step_id}/{run_id}/hls/`（`app.storage.hls` 域）；缺省 run_id = 最新可见 run
+- 段枚举与 EXTINF：`hls.list_segments`（一次读清单同时给出段与逐段真时长）
+- 清单骨架：`app.services.utils.vod_playlist.render_vod`（URI 与时长来源归本层）
 - 媒体访问：HMAC token 化的 /media/* 路由（media_token + media router）
 
 设计要点：
@@ -14,89 +16,23 @@
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import get_db
-from app.models import DBAlarm
-from app.services.traceback import MediaToken, SegmentFinder
-from app.services.traceback.segment_finder import (
-    SegmentRef,
-    get_default_base_dir,
-    parse_playlist_durations,
-)
-from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
+from app.db import alarms as db_alarms
+from app.types.run import RunIdentity
+from app.services.utils.media_timeline import total_gap_ms
+from app.services.utils.vod_playlist import VodEntry, render_vod
+from app.storage import hls, runs
+from app.types.exceptions import DatabaseError, NotFoundError
+
+from .utils.media_token import MediaToken
+from .utils.runs import resolve_run
 
 router = APIRouter(prefix="/traceback", tags=["traceback"])
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# 工具：detected_at 单位归一化
-# ---------------------------------------------------------------------------
-
-
-def _to_ms(detected_at: Optional[int]) -> int:
-    """把 detected_at 归一到毫秒。
-
-    - 平台若以秒（10 位整数）存入，乘 1000
-    - 已是毫秒（13 位）原样返回
-    - 微秒（16 位）则除以 1000
-    """
-    if detected_at is None:
-        raise ValidationError("alarm.detected_at is null", field="detected_at")
-    v = int(detected_at)
-    if v <= 0:
-        raise ValidationError(
-            "alarm.detected_at must be positive", field="detected_at", value=str(v)
-        )
-    if v < 10**11:        # 秒级
-        return v * 1000
-    if v < 10**14:        # 毫秒级
-        return v
-    return v // 1000      # 微秒级或更高
-
-
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
-
-
-def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    """按 task_id [+step_id] 拉告警列表（用于 timeline）。
-
-    step_id 不为 None 时仅返回该 step 的告警。
-    """
-    db = next(get_db())
-    try:
-        try:
-            q = db.query(DBAlarm).filter(DBAlarm.task_id == int(task_id))
-            if step_id is not None:
-                q = q.filter(DBAlarm.step_id == int(step_id))
-            rows = q.order_by(DBAlarm.detected_at.asc()).all()
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message=f"Failed to fetch alarms for task {task_id}",
-                retryable=True,
-            ) from e
-
-        return [
-            {
-                "alarm_id": int(r.alarm_id),
-                "alarm_type": r.alarm_type,
-                "severity": r.severity,
-                "message": r.message,
-                "step_id": int(r.step_id) if r.step_id is not None else None,  # type: ignore[arg-type]
-                "step_name": r.step_name,
-                "detected_at": int(r.detected_at) if r.detected_at is not None else None,  # type: ignore[arg-type]
-            }
-            for r in rows
-        ]
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -104,76 +40,79 @@ def _fetch_task_alarms(task_id: int, step_id: Optional[int] = None) -> List[Dict
 # ---------------------------------------------------------------------------
 
 
-def _build_vod_playlist(
-    request: Request,
-    finder: SegmentFinder,
-    task_id: int,
-    step_id: int,
-    track: str,
-    segs: List[SegmentRef],
-) -> str:
+def _no_segments(task_id: int, step_id: int, track: str) -> NotFoundError:
+    return NotFoundError(
+        f"No {track} segments for task {task_id} step {step_id} "
+        f"(wrong track, or the first segment is still transcoding)",
+        resource_type="Segments",
+        resource_id=f"task={task_id},step={step_id},track={track}",
+    )
+
+
+def _build_vod_playlist(request: Request, run: RunIdentity, track: str) -> str:
     """构造 VOD m3u8 文本体（供 `get_task_playlist` 使用）。
 
-    - 要求 segs 已经按时序排序、非空
-    - 调用方负责处理 segs 为空时的 404
-    - init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
-    - segs 经 playlist 过滤后为空（全部为在途段）→ 抛 404
+    分工：**段与逐段 EXTINF 是事实**，由 `hls.list_segments` 出；**m3u8 骨架**
+    由 `vod_playlist.render_vod` 出；本函数只负责把段与 init 换成 token 化 URI——URI 长什么样
+    是协议层的事，数据层与骨架函数都对 `MediaToken` 零认知。
+
+    - 清单里一个段都没有（挑错 track / step 不存在 / 首段仍在转码）→ 抛 404，文案不分档
+    - 有段但 init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
+
+    **两档的先后不能反**：段检查必须在前。反过来的话，一个根本不存在的 task/step 会先撞上
+    "缺 init" 而得到 503——那是"服务端暂时不可用、请重试"的语义，对一个不存在的资源是误导。
     """
-    task_dir = finder.task_dir(task_id, step_id)
-    init_path = task_dir / f"{track}_init.mp4"
-    if not init_path.exists():
-        # 正常落盘的 step 必有 init（首段 transcode 时产出）。缺 init 只剩两种可能：
-        # ① 段是 {track}_init.mp4 命名之前的旧格式产物——不支持，也不提供迁移；
-        # ② 首段正在 transcode 途中（窗口极短）。
-        # 两者服务端都无法自愈，故 503 而非 404，让调用方按「此 step 不可回放」处理。
+    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF；`list_segments` 只读回、不重新推导、
+    # 无第二兜底。未登记的段（在途 / append 失败）天然不在其中——喂进去会让回放出现与 fmp4
+    # tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
+    task_id, step_id = run.task_id, run.step_id
+    segments = hls.list_segments(run, track)
+    if not segments:
+        # 用 `NotFoundError` 而不是裸 `HTTPException`：前者走全局处理器，产出带
+        # `resource_type` / `resource_id` 的结构化 body。收口前这里有两档 404，其中
+        # 「盘上一个段都没有」那档就是这个形态；塌成一档时若改用裸 HTTPException，
+        # **响应体形态会静默从结构化变成只有 detail**，客户端按字段分支的就断了。
+        raise _no_segments(task_id, step_id, track)
+
+    if not hls.query_has_init(run, track):
+        # 正常落盘的 run 必有 init（首段 transcode 时产出）。缺 init 只剩首段正在 transcode
+        # 途中（窗口极短），故 503 而非 404，让调用方按「此 run 暂不可回放」处理。
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "HLS init segment missing",
                 "detail": (
                     f"{track}_init.mp4 not found for task {task_id} step {step_id}. "
-                    "This step is either mid-transcode or written in an unsupported "
-                    "legacy layout; it cannot be played back."
+                    "The first segment is still transcoding; it cannot be played back yet."
                 ),
             },
         )
 
-    playlist_path = task_dir / f"{track}_playlist.m3u8"
-    real_durations = parse_playlist_durations(playlist_path)
-
-    # VOD 时长唯一真值源 = 写入侧 playlist 的 EXTINF（退化段的兜底也只在写入侧的 eff_fps
-    # 里，见 hls_strategy._DEGENERATE_FALLBACK_FPS）。此处只读回、不重新推导、无第二兜底。
-    # 不在 playlist 中的段视为在途段（mp4v 已落但 transcode+append 未完成），过滤掉——避免
-    # 回放出现与 fmp4 tfdt 累计对不上的"估算"行，导致 hls.js MSE 缓冲洞。
-    segs = [s for s in segs if s.filename in real_durations]
-    if not segs:
-        raise HTTPException(status_code=404, detail="No playable segments yet")
-
-    # 上一步已保证 real_durations 非空（segs ⊆ real_durations 且非空），max() 无需 default。
-    target_duration = max(int(round(max(real_durations.values()))), 1)
-
     base_url = str(request.base_url).rstrip("/")
-    init_token = MediaToken.default().sign(
-        task_id=task_id, step_id=step_id, filename=f"{track}_init.mp4", kind="init",
-    )
+    signer = MediaToken.default()
 
-    lines: List[str] = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:7",
-        "#EXT-X-PLAYLIST-TYPE:VOD",
-        f"#EXT-X-TARGETDURATION:{target_duration}",
-        "#EXT-X-MEDIA-SEQUENCE:0",
-        f'#EXT-X-MAP:URI="{base_url}/media/init/{init_token}"',
-    ]
-    for s in segs:
-        dur = real_durations[s.filename]
-        token = MediaToken.default().sign(
-            task_id=s.task_id, step_id=s.step_id, filename=s.filename, kind="segment",
+    # 清单里所有 token 都锁同一个 run：播放途中换代，段与 init 仍取自签发时解析的这个 run
+    init_token = signer.sign(
+        task_id=task_id, step_id=step_id, filename=hls.init_name(track), kind="init",
+        run_id=run.run_id,
+    )
+    entries = [
+        VodEntry(
+            uri=(
+                f"{base_url}/media/segment/"
+                + signer.sign(
+                    task_id=task_id,
+                    step_id=step_id,
+                    filename=hls.segment_name(s.ref),
+                    kind="segment",
+                    run_id=run.run_id,
+                )
+            ),
+            duration_s=s.duration_s,
         )
-        lines.append(f"#EXTINF:{dur:.3f},")
-        lines.append(f"{base_url}/media/segment/{token}")
-    lines.append("#EXT-X-ENDLIST")
-    return "\n".join(lines) + "\n"
+        for s in segments
+    ]
+    return render_vod(entries, map_uri=f"{base_url}/media/init/{init_token}")
 
 
 # HEAD 与 GET 同注册：原生 HLS 播放栈（Safari/AVPlayer 等）在取 playlist 前会自动
@@ -197,25 +136,24 @@ async def get_task_playlist(
     task_id: int,
     step_id: int = Query(..., description="洗消步骤 id（必填，仅返回该 step 的回放）"),
     track: str = Query(default="processed", pattern="^(raw|processed)$"),
+    run_id: Optional[int] = Query(default=None, description="锁定哪个 run；缺省 = 该 step 最新可见 run"),
 ):
     """单个洗消步骤的完整回放 VOD m3u8（动态生成，带 #EXT-X-ENDLIST）。
 
-    仅返回 (task_id, step_id) 对应目录下的段。任务级跨 step 聚合本期不支持。
+    仅返回该 step 一个 run 的段。任务级跨 step 聚合本期不支持。
 
     相比直接 serve 落盘 LIVE playlist：
     - 保证 VOD 完整性（即使任务未封档）
     - URL 走 token 化 /media/segment/*，不暴露文件系统路径
     """
-    finder = SegmentFinder(get_default_base_dir())
-    segs = finder.list_segments(task_id, step_id, track)
-    if not segs:
-        raise NotFoundError(
-            f"No {track} segments for task {task_id} step {step_id}",
-            resource_type="Segments",
-            resource_id=f"task={task_id},step={step_id},track={track}",
-        )
-
-    body = _build_vod_playlist(request, finder, task_id, step_id, track, segs)
+    # 这里曾按"盘上有段 vs 清单有条目"分出「挑错 track」和「段全在途，再等等」两档文案。
+    # 段查询收口到清单之后，域里不再有第二个能回答"盘上有什么"的入口（那正是收口的目的），
+    # 两档塌成一档——**别为了保住分档再去 iterdir 一次**，那等于把两个真源又留下来。
+    # 唯一的 404 由 `_build_vod_playlist` 抛，文案同时提示两种可能。
+    run = resolve_run(task_id, step_id, run_id)
+    if run is None:
+        raise _no_segments(task_id, step_id, track)
+    body = _build_vod_playlist(request, run, track)
     return PlainTextResponse(
         content=body,
         media_type="application/vnd.apple.mpegurl",
@@ -228,72 +166,68 @@ async def get_task_playlist(
 # ---------------------------------------------------------------------------
 
 
-def _step_duration_ms(
-    finder: SegmentFinder, task_id: int, step_id: int
-) -> Tuple[int, int, int]:
-    """返回 (start_ms, end_ms, duration_ms)。无段时返回 (0, 0, 0)。
-
-    end_ms 必须取 max(seg.ts + EXTINF)，而不是 max(seg.ts) —— 后者会漏掉最后一段
-    自身长度。EXTINF 是 hls.js / fragment 媒体时长的同源真值，对齐到它才能保证
-    lab 页面顶部"时长 / 进度条右端"和 <video>.duration 一致。
-
-    在途段（mp4v 已落、transcode+append 未完成）在 playlist 里查不到 EXTINF，
-    跳过 —— 与 `_build_vod_playlist` 的过滤策略保持一致。raw / processed 双轨都
-    纳入，取并集的最早起点和最晚终点。
-    """
-    task_dir = finder.task_dir(task_id, step_id)
-    start_us: Optional[int] = None
-    end_us: Optional[int] = None
-    for track in ("raw", "processed"):
-        durations = parse_playlist_durations(task_dir / f"{track}_playlist.m3u8")
-        if not durations:
-            continue
-        for s in finder.list_segments(task_id, step_id, track):
-            dur = durations.get(s.filename)
-            if dur is None:
-                continue
-            seg_end_us = s.ts_us + int(round(dur * 1_000_000))
-            if start_us is None or s.ts_us < start_us:
-                start_us = s.ts_us
-            if end_us is None or seg_end_us > end_us:
-                end_us = seg_end_us
-    if start_us is None or end_us is None:
-        return 0, 0, 0
-    return start_us // 1000, end_us // 1000, max(0, (end_us - start_us) // 1000)
-
-
 @router.get("/task/{task_id}/timeline")
 async def get_task_timeline(
     task_id: int,
     step_id: int = Query(..., description="洗消步骤 id（必填，仅返回该 step 的事件）"),
+    track: str = Query(
+        default="raw",
+        pattern="^(raw|processed)$",
+        description="媒体坐标按哪条轨算（两轨各自独立切段，媒体轴不同尺）",
+    ),
+    run_id: Optional[int] = Query(default=None, description="锁定哪个 run；缺省 = 该 step 最新可见 run"),
 ):
     """单个洗消步骤的时间轴打点（前端在视频进度条上叠加告警标记）。
 
-    仅扫 `{task_id}/{step_id}/` 目录的段、仅取该 step 的告警事件。
+    仅扫该 step 一个 run 的段；告警只取该 run 存续期内的：`[run_id 时刻, 同 step 下一个 run 的
+    run_id 时刻)`，最新 run 没有上界。DB 告警没有 run 维度，区间两端取自盘上的 run_id；结算告警
+    时间戳是停止时刻、晚于最后一段，但一定早于下一个 run 的分配，故落在本区间内。该 step 没有
+    可见 run（且没点名）时不过滤、坐标全 0。
 
     告警事件来自 DB；DB 不可用时退化为空 events（仍返回段时长），不 503，
     DB 恢复后自动恢复告警标记。
 
-    返回：
-        {
-          "task_id": ...,
-          "step_id": ...,
-          "start_ms": ...,
-          "end_ms": ...,
-          "duration_ms": ...,
-          "events": [
-             {"ts_ms": ..., "type": "alarm", "alarm_id": ..., "severity": ..., "alarm_type": ..., "message": ...}
-          ]
-        }
+    ## 两套坐标，各自回答不同的问题
+
+        墙钟   start_ms / end_ms / duration_ms / 每个事件的 ts_ms
+               "这件事几点发生的" —— 审计、检索、跨 step 对照用
+        媒体   media_duration_ms / gap_total_ms / 每个事件的 media_offset_ms
+               "在播放器的第几秒" —— 进度条、标记落点、跳转用
+
+    **进度条必须用媒体坐标**：`<video>.currentTime` 与 `duration` 都是媒体量，而告警的
+    `ts_ms` 是墙钟。两者混用就是"比例不同尺"——断流 20s 的 step 里，指针按墙钟全长走只能
+    走到 96.7%，且告警标记与画面差整整一个空洞。换算要清单，所以它在这里做，不在浏览器做。
+
+    `media_offset_ms` 随 `track` 变：两轨各自独立切段，Σ EXTINF 不同。前端切轨要重取。
+
+    `gap_total_ms` 是该轨累计断流时长，**必须由后端按逐段精确判据算**——前端拿
+    `duration_ms − media_duration_ms` 去凑会在零断流时误报：前者是双轨并集墙钟跨度、
+    后者是单轨 Σ EXTINF，两者不同尺，差值里混着"两轨起止不对齐"这一项（推理起步晚于
+    取流时 processed 首段必然晚于 raw 首段）。
     """
-    finder = SegmentFinder(get_default_base_dir())
-    start_ms, end_ms, duration_ms = _step_duration_ms(finder, task_id, step_id)
+    run = resolve_run(task_id, step_id, run_id)
+    lo_ms: Optional[int] = None
+    hi_ms: Optional[int] = None
+    span: Optional[hls.HlsSpan] = None
+    if run is None:
+        timeline = hls.MediaTimeline([])
+    else:
+        # 墙钟跨度取双轨并集；段尾含末段自身 EXTINF（不是 max(段起点)）
+        span = hls.query_span(run)
+        timeline = hls.query_timeline(run, track)
+        lo_ms, hi_ms = runs.query_lifespan_ms(run)
+    if span is None:
+        start_ms, end_ms, duration_ms = 0, 0, 0
+    else:
+        start_ms, end_ms = span.start_ms, span.end_ms
+        duration_ms = max(0, span.end_ms - span.start_ms)
+    gap_total_ms = total_gap_ms(timeline)
 
     # 段时长来自磁盘，告警事件来自 DB。DB 不可用时退化为「无告警标记」的时间轴，
     # 不让整条加载链路 503；DB 恢复后自动重新带回标记（自愈，无需切换任何开关）。
     events: List[Dict[str, Any]] = []
     try:
-        alarms = _fetch_task_alarms(task_id, step_id=step_id)
+        alarms = db_alarms.query_step_alarms(task_id, step_id)
     except DatabaseError:
         logger.warning(
             "[Timeline] DB 不可用，task=%s step=%s 退化为无告警时间轴", task_id, step_id
@@ -301,18 +235,26 @@ async def get_task_timeline(
         alarms = []
 
     for a in alarms:
-        if a["detected_at"] is None:
+        if a.detected_at is None:
+            continue
+        ts_ms = db_alarms.detected_at_ms(a.detected_at)
+        if lo_ms is not None and ts_ms < lo_ms:
+            continue
+        if hi_ms is not None and ts_ms >= hi_ms:
             continue
         events.append(
             {
-                "ts_ms": _to_ms(a["detected_at"]),
+                "ts_ms": ts_ms,
+                # 告警落在哪一帧 → 播放器的第几毫秒。落进空洞的墙钟吸附到下一段段首
+                # （那段时间在媒体轴上宽度为零，没有"对应刻度"可言）。
+                "media_offset_ms": timeline.media_ms_at(ts_ms),
                 "type": "alarm",
-                "alarm_id": a["alarm_id"],
-                "alarm_type": a["alarm_type"],
-                "severity": a["severity"],
-                "step_id": a["step_id"],
-                "step_name": a["step_name"],
-                "message": a["message"],
+                "alarm_id": int(a.alarm_id),
+                "alarm_type": a.alarm_type,
+                "severity": a.severity,
+                "step_id": int(a.step_id) if a.step_id is not None else None,
+                "step_name": a.step_name,
+                "message": a.message,
             }
         )
 
@@ -321,8 +263,15 @@ async def get_task_timeline(
     return {
         "task_id": task_id,
         "step_id": step_id,
+        "run_id": run.run_id if run is not None else None,
+        "track": track,
+        # 墙钟：双轨并集的跨度（含断流空洞）
         "start_ms": start_ms,
         "end_ms": end_ms,
         "duration_ms": duration_ms,
+        # 媒体：该轨 Σ EXTINF，与 `<video>.duration` 同源 —— 进度条全长用它
+        "media_duration_ms": timeline.duration_ms,
+        "gap_total_ms": gap_total_ms,
+        "has_gap": gap_total_ms > 0,
         "events": events,
     }

@@ -18,13 +18,15 @@ from urllib.parse import urlparse
 
 import requests
 
-# 添加项目根目录到路径
+# 添加项目根目录到路径；tests/ 供复用 factories（测试数据构造单一真源）
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 
 from sqlalchemy import text
 
-from app.database import get_db
-from app.models import DBAlarm, DBTask
+from app.db.database import get_db
+from app.db.alarms import DBAlarm
+from app.db.tasks import DBTask
 
 
 class FFmpegController:
@@ -429,7 +431,7 @@ class APIClient:
             return {"error": str(e)}
 
     def unified_terminate(self, client_id: str) -> Dict[str, Any]:
-        """统一终止接口（推荐）- 完整清理：解码器 + 推理 + ClientManager"""
+        """统一终止接口（推荐）- 完整清理：解码器 + 推理 + ClientService"""
         url = f"{self.base_url}/api/terminate"
         params = {"client_id": client_id}
 
@@ -443,88 +445,26 @@ class APIClient:
 def seed_hls_segments(
     task_id: int,
     step_id: int,
-    ts_us_list: List[int],
-    base_dir: Optional[Path] = None,
+    ts_ms_list: List[int],
     segment_duration: float = 10.0,
 ) -> Path:
-    """在 base_dir/{task_id}/{step_id}/ 下创建假 HLS 段文件，供追溯接口测试使用。
+    """在该 step 最新 run 的 `hls/`（`{task}/{step}/{run_id}/hls/`）为 raw / processed 两轨铺假段 + init 并登记进清单。
 
-    每个 ts_us 会生成：
-      - raw_segment_{ts_us}.mp4        （16 字节哑文件）
-      - processed_segment_{ts_us}.mp4  （16 字节哑文件）
-    另外生成 raw_playlist.m3u8 和 processed_playlist.m3u8（实时播放列表格式，无 EXT-X-ENDLIST），
-    以及 raw_init.mp4 / processed_init.mp4 —— traceback 的 VOD playlist 端点缺 init 段直接 503，
-    不造它则回放测试永远拿不到 200。
+    复用 `tests/factories.seed_hls_segments`，落盘形态与 `hls.insert_segment` 一致。
+    存储根取本进程的 `settings.storage_dir`，须与被测后端同机、同配置。
 
     Returns:
-        task_dir Path，调用方在 finally 中用 shutil.rmtree 清理整个目录。
+        step 目录 `{task}/{step}`，调用方在 finally 中 rmtree 清理。
     """
-    if base_dir is None:
-        try:
-            from app.services.traceback.segment_finder import get_default_base_dir
-            base_dir = get_default_base_dir()
-        except Exception:
-            project_root = Path(__file__).parent.parent.resolve()
-            base_dir = (project_root / "database").resolve()
+    from factories import seed_hls_segments as seed_track
 
-    task_dir = Path(base_dir) / str(task_id) / str(step_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
-
-    for ts_us in ts_us_list:
-        (task_dir / f"raw_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
-        (task_dir / f"processed_segment_{ts_us}.mp4").write_bytes(b"\x00" * 16)
-
-    (task_dir / "raw_init.mp4").write_bytes(b"\x00" * 8)
-    (task_dir / "processed_init.mp4").write_bytes(b"\x00" * 8)
-
-    def _make_playlist(track: str) -> str:
-        lines = [
-            "#EXTM3U",
-            "#EXT-X-VERSION:3",
-            f"#EXT-X-TARGETDURATION:{int(segment_duration)}",
-        ]
-        for ts_us in ts_us_list:
-            lines.append(f"#EXTINF:{segment_duration:.3f},")
-            lines.append(f"{track}_segment_{ts_us}.mp4")
-        return "\n".join(lines) + "\n"
-
-    (task_dir / "raw_playlist.m3u8").write_text(_make_playlist("raw"), encoding="utf-8")
-    (task_dir / "processed_playlist.m3u8").write_text(
-        _make_playlist("processed"), encoding="utf-8"
-    )
-
-    print(f"✅ 创建测试 HLS 段: {task_dir} ({len(ts_us_list)} 段/轨道)")
-    return task_dir
-
-
-def check_hls_files(client_id: str, task_id: int) -> Dict[str, Any]:
-    """检查 HLS 文件是否生成"""
-    base_dir = Path(__file__).parent.parent / "database"
-
-    # 根据任务查找目录
-    task_dir = base_dir / f"task_{task_id}" / client_id / "hls"
-
-    if not task_dir.exists():
-        # 尝试查找其他可能的路径
-        for subdir in base_dir.rglob("hls"):
-            if client_id in str(subdir):
-                task_dir = subdir
-                break
-
-    result = {
-        "exists": task_dir.exists(),
-        "path": str(task_dir),
-        "segments": [],
-        "playlists": [],
-    }
-
-    if task_dir.exists():
-        # 查找视频段
-        result["segments"] = [str(f) for f in task_dir.glob("*_segment_*.mp4")]
-        # 查找播放列表
-        result["playlists"] = [str(f) for f in task_dir.glob("*.m3u8")]
-
-    return result
+    for track in ("raw", "processed"):
+        domain_dir = seed_track(
+            task_id, step_id, ts_ms_list, track=track, default_extinf_s=segment_duration
+        )
+    step_dir = domain_dir.parent.parent
+    print(f"✅ 创建测试 HLS 段: {domain_dir} ({len(ts_ms_list)} 段/轨道)")
+    return step_dir
 
 
 def wait_for_condition(

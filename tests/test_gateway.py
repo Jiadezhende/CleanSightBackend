@@ -3,54 +3,75 @@
 """
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-from app.utils.gateway import AntiScanStore, GatewayMiddleware, IPWhitelistStore, RateLimitStore
+from app.settings import Settings, settings
+from app.gateway import AntiScanStore, GatewayMiddleware, IPWhitelistStore, RateLimitStore
 
 
 # ---------------------------------------------------------------------------
-# 工具：构造 mock Settings
+# 工具：把测试配置写进真实 settings，走真实 `_ensure_initialized` 建 store
 # ---------------------------------------------------------------------------
 
 
-def _make_settings(**overrides):
-    s = MagicMock()
-    s.gateway_enabled = True
-    s.allowed_ips_set = frozenset()   # 默认不限制
-    s.gateway_rate_limit = 60
-    s.gateway_rate_window = 60
-    s.gateway_rate_ban_threshold = 5  # 速率超限违规 5 次触发封禁
-    s.gateway_rate_ban_window = 60
-    s.gateway_relaxed_prefixes = "/health,/task/message"
-    s.gateway_relaxed_rate_limit = 600
-    s.gateway_bypass_prefixes = "/media"
-    s.gateway_scan_threshold = 10
-    s.gateway_scan_window = 300
-    s.gateway_ban_duration = 3600
-    for k, v in overrides.items():
-        setattr(s, k, v)
-    return s
+# 各用例的基线配置：显式写死，不随 .env.* 漂移；用例只覆盖自己关心的字段
+_BASELINE = dict(
+    gateway_enabled=True,
+    gateway_allowed_ips="",           # 空 = 不限制
+    gateway_rate_limit=60,
+    gateway_rate_window=60,
+    gateway_rate_ban_threshold=5,     # 速率超限违规 5 次触发封禁
+    gateway_rate_ban_window=60,
+    gateway_relaxed_prefixes="/health,/task/message",
+    gateway_relaxed_rate_limit=600,
+    gateway_bypass_prefixes="/media",
+    gateway_scan_threshold=10,
+    gateway_scan_window=300,
+    gateway_ban_duration=3600,
+)
+
+# 生产默认宽松前缀（Settings 字段默认值，不受 .env.* 覆盖）
+_PROD_RELAXED_PREFIXES = Settings.model_fields["gateway_relaxed_prefixes"].default
+
+
+def _reset(gw: GatewayMiddleware) -> None:
+    """清掉懒初始化状态，下次请求 / `_ensure_initialized` 按当前 settings 重建"""
+    gw._initialized = False
+    gw._whitelist = None
+    gw._ratelimit = None
+    gw._relaxed_ratelimit = None
+    gw._relaxed_prefixes = ()
+    gw._bypass_prefixes = ()
+    gw._antiscan = None
 
 
 @pytest.fixture(autouse=True)
 def _reset_gateway():
-    """每个测试前重置 GatewayMiddleware 的懒初始化状态"""
-    # 找到 app 中注册的 GatewayMiddleware 实例并重置
+    """前后各重置一次 app 上的 GatewayMiddleware：不吃上个用例的封禁，也不把封禁留给别的测试文件"""
     middleware = _find_gateway_middleware()
     if middleware:
-        middleware._initialized = False
-        middleware._whitelist = None
-        middleware._ratelimit = None
-        middleware._relaxed_ratelimit = None
-        middleware._relaxed_prefixes = ()
-        middleware._bypass_prefixes = ()
-        middleware._antiscan = None
+        _reset(middleware)
     yield
+    if middleware:
+        _reset(middleware)
+
+
+@pytest.fixture
+def init_gw(monkeypatch):
+    """`init_gw(gw, **overrides)`：基线 + overrides 写进 settings，再调真实初始化"""
+
+    def _init(gw: GatewayMiddleware, **overrides) -> GatewayMiddleware:
+        for key, value in {**_BASELINE, **overrides}.items():
+            monkeypatch.setattr(settings, key, value)
+        _reset(gw)
+        gw._ensure_initialized()
+        return gw
+
+    return _init
 
 
 def _find_gateway_middleware() -> GatewayMiddleware | None:
@@ -131,7 +152,7 @@ class TestRateLimitStore:
         store.is_allowed("1.2.3.4")
         assert "1.2.3.4" in store._buckets
         # 模拟时间快进超过 window，使 bucket 中的时间戳过期
-        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+        with patch("app.gateway.time.monotonic", return_value=time.monotonic() + 120):
             store._sweep()
         assert "1.2.3.4" not in store._buckets
 
@@ -144,7 +165,7 @@ class TestRateLimitStore:
         store.is_allowed("1.2.3.4")  # 消耗配额
         store.is_allowed("1.2.3.4")  # 触发超限，写入 _violations
         assert "1.2.3.4" in store._violations
-        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+        with patch("app.gateway.time.monotonic", return_value=time.monotonic() + 120):
             store._sweep()
         assert "1.2.3.4" not in store._violations
 
@@ -160,18 +181,12 @@ class TestAntiScanStore:
         antiscan = AntiScanStore(threshold=threshold, window=window, whitelist_store=whitelist)
         return whitelist, antiscan
 
-    def test_404_triggers_ban_on_threshold(self):
-        # 路径枚举扫描：大量 404 达到阈值后触发封禁
+    @pytest.mark.parametrize("status", [404, 405])  # 路径枚举 / 方法枚举
+    def test_scan_status_triggers_ban_on_threshold(self, status):
         whitelist, antiscan = self._make_stores(threshold=3)
         for _ in range(3):
-            antiscan.record_error("6.6.6.6", 404)
+            antiscan.record_error("6.6.6.6", status)
         assert not whitelist.is_allowed("6.6.6.6")
-
-    def test_405_triggers_ban(self):
-        whitelist, antiscan = self._make_stores(threshold=2)
-        antiscan.record_error("7.7.7.7", 405)
-        antiscan.record_error("7.7.7.7", 405)
-        assert not whitelist.is_allowed("7.7.7.7")
 
     def test_200_does_not_count(self):
         whitelist, antiscan = self._make_stores(threshold=2)
@@ -198,7 +213,7 @@ class TestAntiScanStore:
             antiscan.record_error("10.0.0.3", 404)
         assert "10.0.0.3" in antiscan._errors
         # 模拟时间快进超过 window，使 error 时间戳过期
-        with patch("app.utils.gateway.time.monotonic", return_value=time.monotonic() + 120):
+        with patch("app.gateway.time.monotonic", return_value=time.monotonic() + 120):
             antiscan._sweep()
         assert "10.0.0.3" not in antiscan._errors
 
@@ -217,7 +232,7 @@ class TestCleanupThread:
     只让线程按 window 自转来清。
     """
 
-    WINDOW = 1      # 线程周期 = window，取 1s 让用例跑得快
+    WINDOW = 0.2    # 线程周期 = window，取 0.2s 让用例跑得快
     N_IPS = 50
     # 首轮 sweep 时刚写入的时间戳还没出窗（cutoff 恰好压在写入时刻上），
     # 要等到第二轮才会被判定为 stale，即约 2×WINDOW。留 3 倍余量抗慢机。
@@ -255,7 +270,7 @@ class TestCleanupThread:
         while time.monotonic() < deadline:
             if not (rate._buckets or rate._violations or antiscan._errors):
                 return
-            time.sleep(0.1)
+            time.sleep(0.02)
 
         pytest.fail(
             f"{self.TIMEOUT}s 内未被清理线程回收："
@@ -277,42 +292,30 @@ class TestGatewayMiddlewareHTTP:
         transport = ASGITransport(app=app, client=(client_ip, 9999))
         return AsyncClient(transport=transport, base_url="http://test")
 
-    async def test_gateway_disabled_allows_all(self):
-        with patch("app.settings.settings") as mock_settings:
-            mock_settings.gateway_enabled = False
-            async with await self._client("1.2.3.4") as client:
-                resp = await client.get("/health/status")
-        assert resp.status_code != 403
-
-    async def test_blocked_ip_returns_403(self):
+    @pytest.fixture
+    def gw(self):
         gw = _find_gateway_middleware()
         assert gw is not None, "GatewayMiddleware not found in middleware stack"
+        return gw
 
-        _init_gw(gw, _make_settings(allowed_ips_set=frozenset({"10.0.0.1"})))
+    async def test_gateway_disabled_allows_all(self, gw, init_gw, monkeypatch):
+        # 白名单不含 1.2.3.4：开着会 403（见 test_blocked_ip_returns_403），关掉必须放行
+        init_gw(gw, gateway_allowed_ips="10.0.0.1")
+        monkeypatch.setattr(settings, "gateway_enabled", False)
+        async with await self._client("1.2.3.4") as client:
+            resp = await client.get("/health/status")
+        assert resp.status_code != 403
+
+    async def test_blocked_ip_returns_403(self, gw, init_gw):
+        init_gw(gw, gateway_allowed_ips="10.0.0.1")
         async with await self._client("5.5.5.5") as client:
             resp = await client.get("/health/status")
         assert resp.status_code == 403
         assert resp.json()["error"] == "Forbidden"
 
-    async def test_allowed_ip_passes(self):
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        _init_gw(gw, _make_settings(allowed_ips_set=frozenset({"127.0.0.1"})))
-        async with await self._client("127.0.0.1") as client:
-            resp = await client.get("/health/status")
-        assert resp.status_code != 403
-
-    async def test_rate_limit_returns_429(self):
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
+    async def test_rate_limit_returns_429(self, gw, init_gw):
         # gateway_scan_threshold=100 防止 3 次 405 触发反扫描 ban，干扰限流测试
-        _init_gw(gw, _make_settings(
-            gateway_rate_limit=3,
-            gateway_rate_window=60,
-            gateway_scan_threshold=100,
-        ))
+        init_gw(gw, gateway_rate_limit=3, gateway_rate_window=60, gateway_scan_threshold=100)
         async with await self._client("127.0.0.1") as client:
             for _ in range(3):
                 await client.get("/api/start")  # GET→405，但限流发生在路由之前
@@ -320,64 +323,46 @@ class TestGatewayMiddlewareHTTP:
         assert resp.status_code == 429
         assert resp.json()["error"] == "Too Many Requests"
 
-    async def test_relaxed_prefix_uses_relaxed_limit(self):
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        # rate_limit=2（普通路径很紧），relaxed_rate_limit=100（宽松）
-        _init_gw(gw, _make_settings(gateway_rate_limit=2, gateway_relaxed_rate_limit=100))
-        async with await self._client("127.0.0.1") as client:
-            for _ in range(5):
-                resp = await client.get("/health/status")
-        # /health/status 匹配 /health 前缀，走宽松 bucket，不应 429
-        assert resp.status_code != 429
-
-    async def test_task_message_uses_relaxed_limit(self):
-        """任务结束后前端持续轮询 /task/message，不应触发限流或封禁"""
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        _init_gw(gw, _make_settings(
-            gateway_rate_limit=2,         # 普通路径很紧
+    @pytest.mark.parametrize("path", ["/health/status", "/task/message/123", "/admin-f3m8/overview"])
+    async def test_relaxed_prefix_uses_relaxed_limit(self, gw, init_gw, path):
+        """生产默认宽松前缀下，健康检查、任务结束后前端持续轮询的 /task/message、admin 页数据接口不被限流或封禁"""
+        init_gw(
+            gw,
+            gateway_relaxed_prefixes=_PROD_RELAXED_PREFIXES,
+            gateway_rate_limit=2,         # 普通路径很紧：第 3 次即 429
             gateway_relaxed_rate_limit=100,
             gateway_scan_threshold=1000,  # 防干扰
-        ))
+        )
         async with await self._client("127.0.0.1") as client:
             for _ in range(10):
-                resp = await client.get("/task/message/123")
-        # /task/message/* 走宽松 bucket，不应 429，也不封禁
-        assert resp.status_code != 429
-        assert resp.status_code != 403
+                resp = await client.get(path)
+        assert resp.status_code not in (403, 429)
 
-    async def test_bypass_prefix_skips_rate_limit(self):
+    async def test_bypass_prefix_skips_rate_limit(self, gw, init_gw):
         """bypass 前缀（如 /media）完全跳过速率限制，token 鉴权由路由层负责"""
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        _init_gw(gw, _make_settings(
+        init_gw(
+            gw,
             gateway_rate_limit=1,           # 普通路径极紧
             gateway_relaxed_rate_limit=1,   # 宽松也极紧
             gateway_bypass_prefixes="/media",
             gateway_scan_threshold=1000,
-        ))
+        )
         async with await self._client("127.0.0.1") as client:
             # /media/segment/<bad-token> 会被路由层 403，但中间件不应限流
             for _ in range(20):
                 resp = await client.get("/media/segment/fake")
         assert resp.status_code != 429
 
-    async def test_bypass_prefix_skips_antiscan(self):
+    async def test_bypass_prefix_skips_antiscan(self, gw, init_gw):
         """bypass 前缀的 404 不计入反扫描计数，避免合法 token 流量误触发封禁"""
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        _init_gw(gw, _make_settings(
+        init_gw(
+            gw,
             gateway_scan_threshold=3,
             gateway_scan_window=60,
             gateway_ban_duration=3600,
             gateway_rate_limit=1000,
             gateway_bypass_prefixes="/media",
-        ))
+        )
         async with await self._client("127.0.0.1") as client:
             # /media/* 的 404/403 应该不计入反扫描
             for _ in range(5):
@@ -386,58 +371,41 @@ class TestGatewayMiddlewareHTTP:
             resp = await client.get("/health/status")
         assert resp.status_code != 403
 
-    async def test_405_scan_triggers_ban(self):
-        """405（方法枚举）达到阈值后触发封禁"""
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        _init_gw(gw, _make_settings(
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/nonexistent_path_xyz",  # 404：路径枚举
+            "/api/start",             # 405：方法枚举（该路由只接受 POST）
+        ],
+    )
+    async def test_scan_triggers_ban(self, gw, init_gw, path):
+        """404 / 405 达到阈值后触发封禁"""
+        init_gw(
+            gw,
             gateway_scan_threshold=3,
             gateway_scan_window=60,
             gateway_ban_duration=3600,
             gateway_rate_limit=1000,
-        ))
+        )
         async with await self._client("127.0.0.1") as client:
-            # GET /api/start → 405（该路由只接受 POST），触发 3 次反扫描计数
             for _ in range(3):
-                await client.get("/api/start")
+                await client.get(path)
             # IP 已封禁，下一次请求应返回 403
             resp = await client.get("/health/status")
         assert resp.status_code == 403
 
-    async def test_404_scan_triggers_ban(self):
-        """路径枚举扫描：大量 404 达到阈值后触发封禁"""
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        _init_gw(gw, _make_settings(
-            gateway_scan_threshold=3,
-            gateway_scan_window=60,
-            gateway_ban_duration=3600,
-            gateway_rate_limit=1000,
-        ))
-        async with await self._client("127.0.0.1") as client:
-            # 模拟路径枚举：访问 3 个不存在的路径
-            for _ in range(3):
-                await client.get("/nonexistent_path_xyz")
-            # IP 已封禁，下一次请求应返回 403
-            resp = await client.get("/health/status")
-        assert resp.status_code == 403
-
-    async def test_rate_limit_ban_escalation(self):
+    async def test_rate_limit_ban_escalation(self, gw, init_gw):
         """速率超限持续违规达到阈值后触发封禁"""
-        gw = _find_gateway_middleware()
-        assert gw is not None
-
-        _init_gw(gw, _make_settings(
+        init_gw(
+            gw,
             gateway_rate_limit=2,
             gateway_rate_window=60,
             gateway_rate_ban_threshold=3,   # 违规 3 次触发封禁
             gateway_rate_ban_window=60,
             gateway_scan_threshold=1000,    # 防止 405 干扰
-        ))
-        # 使用 /metrics（普通路径走 _ratelimit，有封禁升级）
-        # /health/status 走 _health_ratelimit，没有封禁升级
+        )
+        # 普通路径走 _ratelimit，有封禁升级；宽松路径走 _relaxed_ratelimit，没有。
+        # /metrics 在生产默认宽松前缀里，这里靠基线前缀（/health,/task/message）当普通路径用
         async with await self._client("127.0.0.1") as client:
             # 消耗配额（2 次正常）
             for _ in range(2):
@@ -484,9 +452,8 @@ class TestGatewayMiddlewareWebSocket:
     async def _receive(self):
         return {"type": "websocket.connect"}
 
-    async def test_blocked_ip_sends_websocket_close(self):
-        gw = GatewayMiddleware(_noop_app)
-        _init_gw(gw, _make_settings(allowed_ips_set=frozenset({"10.0.0.1"})))
+    async def test_blocked_ip_sends_websocket_close(self, init_gw):
+        gw = init_gw(GatewayMiddleware(_noop_app), gateway_allowed_ips="10.0.0.1")
 
         send, messages = await _collect_send()
         await gw(_ws_scope(client_ip="5.5.5.5"), self._receive, send)
@@ -498,14 +465,14 @@ class TestGatewayMiddlewareWebSocket:
         # 不应有任何 http.response.* 消息
         assert not any(m["type"].startswith("http.response") for m in messages)
 
-    async def test_rate_limited_sends_websocket_close(self):
-        gw = GatewayMiddleware(_noop_app)
-        _init_gw(gw, _make_settings(
+    async def test_rate_limited_sends_websocket_close(self, init_gw):
+        gw = init_gw(
+            GatewayMiddleware(_noop_app),
             gateway_rate_limit=1,
             gateway_rate_window=60,
             gateway_scan_threshold=1000,
             gateway_rate_ban_threshold=1000,  # 避免触发封禁，仅测试限流拒绝
-        ))
+        )
 
         # 预先把 rate bucket 塞满，直接命中超限分支
         gw._ratelimit.is_allowed("127.0.0.1")
@@ -518,39 +485,3 @@ class TestGatewayMiddlewareWebSocket:
         assert messages[0]["code"] == 1008
         assert messages[0].get("reason") == "Rate limit exceeded"
         assert not any(m["type"].startswith("http.response") for m in messages)
-
-
-# ---------------------------------------------------------------------------
-# 辅助：手动初始化 GatewayMiddleware（用于测试）
-# ---------------------------------------------------------------------------
-
-
-def _init_gw(gw: GatewayMiddleware, mock_settings) -> None:
-    """用 mock settings 初始化 gateway 的各 store"""
-    gw._whitelist = IPWhitelistStore(
-        allowed=mock_settings.allowed_ips_set,
-        ban_duration=mock_settings.gateway_ban_duration,
-    )
-    gw._ratelimit = RateLimitStore(
-        limit=mock_settings.gateway_rate_limit,
-        window=mock_settings.gateway_rate_window,
-        ban_store=gw._whitelist,
-        ban_threshold=mock_settings.gateway_rate_ban_threshold,
-        ban_window=mock_settings.gateway_rate_ban_window,
-    )
-    gw._relaxed_ratelimit = RateLimitStore(
-        limit=mock_settings.gateway_relaxed_rate_limit,
-        window=mock_settings.gateway_rate_window,
-    )
-    gw._relaxed_prefixes = tuple(
-        p.strip() for p in mock_settings.gateway_relaxed_prefixes.split(",") if p.strip()
-    )
-    gw._bypass_prefixes = tuple(
-        p.strip() for p in mock_settings.gateway_bypass_prefixes.split(",") if p.strip()
-    )
-    gw._antiscan = AntiScanStore(
-        threshold=mock_settings.gateway_scan_threshold,
-        window=mock_settings.gateway_scan_window,
-        whitelist_store=gw._whitelist,
-    )
-    gw._initialized = True

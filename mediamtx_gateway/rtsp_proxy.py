@@ -13,11 +13,15 @@ RTSP TCP Gateway
 import asyncio
 import logging
 
-from app.utils.gateway import IPWhitelistStore, RateLimitStore
+from app.gateway import IPWhitelistStore, RateLimitStore
 
 logger = logging.getLogger(__name__)
 
 _CHUNK = 65536
+
+# MediaMTX 可能比代理晚几秒就绪（启动竞争）或短暂重启中，连目标失败时重试
+_CONNECT_RETRIES = 10
+_CONNECT_RETRY_DELAY = 0.5  # 秒，总等待上限 5s
 
 
 def _abort(writer: asyncio.StreamWriter) -> None:
@@ -97,23 +101,20 @@ class RTSPProxy:
             _abort(writer)
             return
 
-        # MediaMTX 可能比代理晚几秒就绪（启动竞争）或短暂重启中，重试最多 10 次
-        _RETRIES = 10
-        _RETRY_DELAY = 0.5  # 秒，总等待上限 5s
         target_reader = target_writer = None
-        for attempt in range(_RETRIES):
+        for attempt in range(_CONNECT_RETRIES):
             try:
                 target_reader, target_writer = await asyncio.open_connection(
                     "127.0.0.1", self._target_port
                 )
                 break
             except ConnectionRefusedError:
-                if attempt < _RETRIES - 1:
-                    await asyncio.sleep(_RETRY_DELAY)
+                if attempt < _CONNECT_RETRIES - 1:
+                    await asyncio.sleep(_CONNECT_RETRY_DELAY)
                 else:
                     logger.warning(
                         "[RTSPProxy] MediaMTX unreachable on 127.0.0.1:%d after %d attempts",
-                        self._target_port, _RETRIES,
+                        self._target_port, _CONNECT_RETRIES,
                     )
                     _abort(writer)
                     return

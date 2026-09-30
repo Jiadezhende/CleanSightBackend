@@ -10,13 +10,14 @@
 | 文件 | 前缀 | 内容 |
 |------|------|------|
 | [api.md](api.md) | `/api` | 统一任务入口：启动 / 终止一次 run |
-| [ai.md](ai.md) | `/ai` | 实时推理画面 WebSocket |
+| [ai.md](ai.md) | `/ai` | 实时推理画面 WebSocket + 推理结果（时序事实）读取 |
 | [task.md](task.md) | `/task` | 前端增量消息 + 告警历史 + 大屏在线/历史任务清单 |
 | [traceback.md](traceback.md) | `/traceback` | 任务 VOD playlist / 时间轴 |
 | [media.md](media.md) | `/media` | token 化媒体访问（段 / `{track}_init.mp4`） |
 | [health.md](health.md) | `/health` | 健康状态与监控统计 |
 | [admin.md](admin.md) | `/admin-f3m8` | 运维 Admin |
-| [lab.md](lab.md) | `/lab-f3m8` | 送标导出 + Label Studio |
+| [lab.md](lab.md) | `/lab-f3m8` | 送标导出 + Label Studio + 离线模型逐帧概率 |
+| [algorithm.md](algorithm.md) | `/algorithm` | 算法类纯计算（图进结论出，不读库不写盘） |
 
 ## 通用约定
 
@@ -46,6 +47,27 @@
 
 `/api/start` 只接受 `task_id`（body）。
 
+### 推理结果读取端点：身份键与类型走 JSON body
+
+- 读取某个 step 推理产物的端点用 `POST` + JSON body，body 携带身份键 `task_id`、`step_id` 与选择项（`type`、`track` 等）；路径只表达资源类别，不带身份。
+- 同一资源类别再分形状时用 body 的 `type` 区分，不拆路径；取值与落盘判别字段同值（如 `/ai/temporal` 的 `type: "segment"`）。
+- 缺字段、类型不对、枚举值非法：**422**（FastAPI 请求校验，响应体是框架的 `{"detail": [...]}`，不是上表的业务错误形状）。
+- 存量例外（本约定之前的 GET 端点，不迁）：`/traceback/task/{task_id}/playlist.m3u8?step_id=`、`/traceback/task/{task_id}/timeline?step_id=`、`/lab-f3m8/download?task_id=&step_id=`。
+
+### run 定位：可选 `run_id`
+
+同一 `(task_id, step_id)` 每启动一次是一个新 run，各有独立的录像与推理产物（盘上 `{task_id}/{step_id}/{run_id}/`）。读录像 / 推理产物的端点都收可选 `run_id`，入口处解析一次，整个请求只读这一个 run：
+
+| `run_id` | 读哪个 run | 找不到时 |
+|--------|-----------|---------|
+| 缺省 | 该 step **最新可见** run（已有 HLS 段清单或检测结果即可见） | 各端点原有的「无数据」响应，不变 |
+| 显式 | 就是这个 run | **404** `{"error":"Resource not found","detail":"...","resource_type":"Run","resource_id":"task=..,step=..,run=.."}`：id 写错，或该 run 已被 TTL 回收 |
+
+- `run_id` = 该 run 分配时刻的 epoch **毫秒**（int，≈1.8e12），同 step 内严格递增；当不透明身份用即可。
+- 取值来源：[`/task/live`](task.md#get-tasklive) `tasks[].run_id`、[`/task/history`](task.md#get-taskhistory) `steps[].run_id`、[`/lab-f3m8/tasks`](lab.md#get-lab-f3m8tasks) `run_ids`；各读端点响应也回显实际读的 `run_id`。
+- 适用端点：`/traceback` playlist / timeline、`/media/*`（run 锁在 token 里）、`POST /ai/temporal`、`/lab-f3m8` 的 submit / download / label-probs。
+- 纯增量：不带 `run_id` 的老客户端照常工作。**同一页面的多个请求要带同一个 `run_id`**，否则可能各自解析到不同 run，见 [traceback › 前端坑点](traceback.md#前端坑点)。
+
 ### 错误模型
 
 业务异常经 FastAPI 全局 handler 映射为 HTTP（边界层 L3），响应体形如 `{"error": "...", "detail": "...", ...}`：
@@ -68,7 +90,8 @@
 ### 时间戳单位
 
 - 告警 `detected_at` / `resolved_at` / `ts`、追溯 `*_ms`：**epoch 毫秒**。
-- 段文件 `ts_us`：微秒。
+- 例外：名字带 `media` 的毫秒字段（`media_ms`、`*_media_ms`、`media_duration_ms`、`media_offset_ms`）是**媒体刻度**——相对该轨首段起点、跳过录制停顿，与 `<video>.currentTime × 1000` 同轴，不是 epoch。
+- `run_id`、盘上段文件名里的起点：**epoch 毫秒**。
 - 媒体 token 有效期：秒。
 
 ### 枚举取值

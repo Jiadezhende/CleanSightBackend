@@ -5,7 +5,7 @@
 
 设计约定：
 - 每个 builder 带"最常见良性态"默认值，用例只写它关心的偏差（关键字 override）。
-- 契约一变（如 CQ 构造签名、FrameInference 加字段），只改这一处，不再扫散点。
+- 契约一变（如 CQ 构造签名、FrameDetection 加字段），只改这一处，不再扫散点。
 - MagicMock 化的 CQ / DB 会话属于"单文件专用替身"，不在此集中（集中无收益）。
 """
 
@@ -13,29 +13,30 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from app.domain.alarm import Alarm
-from app.domain.detection import Detection, FrameDetections, FrameFeature
-from app.domain.frame import Frame
+from app.types.alarm import Alarm
+from app.types.detection import DetBox, DetectorOutput, FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
 from app.services.client.queues import ClientQueues
-from app.services.inference.types import FrameInference
 
 __all__ = [
-    "make_detection",
-    "make_frame_detections",
+    "make_det_box",
+    "make_detector_output",
+    "make_frame_detection",
     "make_frame",
     "make_cq",
     "make_bare_cq",
-    "make_frame_inference",
     "make_alarm",
+    "seed_hls_segments",
 ]
 
 
-def make_detection(
+def make_det_box(
     *, bbox: Optional[List[int]] = None, confidence: float = 0.9,
     class_id: int = 0, class_name: str = "bubble", **over,
-) -> Detection:
+) -> DetBox:
     """单个检测框。bbox 值对大多数断言无关紧要，默认 [0,0,1,1]。"""
-    return Detection(
+    return DetBox(
         bbox=list(bbox) if bbox is not None else [0, 0, 1, 1],
         confidence=confidence,
         class_id=class_id,
@@ -44,34 +45,38 @@ def make_detection(
     )
 
 
-def make_frame_detections(
+def make_detector_output(
     *, n: int = 1, class_name: str = "bubble", ts: float = 1.0,
     metadata: Optional[Dict] = None, **over,
-) -> FrameDetections:
-    """一帧的多检测聚合（n 个同类检测）。n=0 表示该帧无检测。"""
-    return FrameDetections(
-        detections=[make_detection(class_name=class_name) for _ in range(n)],
+) -> DetectorOutput:
+    """一个检测器一帧的输出（n 个同类框）。n=0 表示该帧无检测。"""
+    return DetectorOutput(
+        boxes=[make_det_box(class_name=class_name) for _ in range(n)],
         metadata=metadata if metadata is not None else {},
         timestamp=ts,
         **over,
     )
 
 
-def make_frame_feature(
-    *, ts: float = 1.0, by_source: Optional[Dict[str, FrameDetections]] = None,
+def make_frame_detection(
+    *, ts: float = 1.0, by_source: Optional[Dict[str, DetectorOutput]] = None,
     source: str = "bubble", n: int = 1, class_name: str = "bubble",
     metadata: Optional[Dict] = None,
     frame_width: Optional[int] = None, frame_height: Optional[int] = None,
-) -> FrameFeature:
-    """一帧多流对齐记录（特征层输入）。by_source 缺省单流 {source: <n 个检测>}。
+    cq: Optional[ClientQueues] = None,
+) -> FrameDetection:
+    """一帧多流对齐的检测结果。by_source 缺省单流 {source: <n 个框>}。
 
     frame_width/frame_height 为帧级分辨率，缺省 None（消费方走默认兜底）。
+    cq 缺省 None（留存态）；写回句柄 fence 类测试传 cq=<句柄> 模拟 collector 刚组装的帧。
     """
     if by_source is None:
         by_source = {
-            source: make_frame_detections(n=n, class_name=class_name, ts=ts, metadata=metadata)
+            source: make_detector_output(n=n, class_name=class_name, ts=ts, metadata=metadata)
         }
-    return FrameFeature(ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height)
+    return FrameDetection(
+        ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height, cq=cq,
+    )
 
 
 def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:
@@ -80,43 +85,23 @@ def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:
 
 
 def make_cq(
-    *, task_id: int = 1, step_id: Optional[int] = 1,
+    *, task_id: int = 1, step_id: Optional[int] = 1, run_id: int = 1,
+    run: Optional[RunIdentity] = None,
     source_ip: str = "c1", stage: str = "1", **kw,
 ) -> ClientQueues:
-    """带不可变运行身份的 CQ（一 CQ == 一 run）。透传 ca_maxlen 等队列参数。"""
-    return ClientQueues(
-        task_id=task_id, step_id=step_id, source_ip=source_ip, stage=stage, **kw
-    )
+    """带不可变运行身份的 CQ（一 CQ == 一 run）。透传 ca_maxlen 等队列参数。
+
+    给了 `run` 就用它（要真落盘时传 `runs.allocate` 的结果）；否则按 task/step/run_id 现拼，
+    `step_id=None` 得到未绑定 run 的 CQ。
+    """
+    if run is None and step_id is not None:
+        run = RunIdentity(task_id, step_id, run_id)
+    return ClientQueues(run=run, source_ip=source_ip, stage=stage, **kw)
 
 
 def make_bare_cq(**kw) -> ClientQueues:
-    """无身份裸建（算子/纯队列单测，stage 默认 MOCK）。"""
+    """无身份裸建（算子/纯队列单测，task_id/step_id/stage 均为空默认值）。"""
     return ClientQueues(**kw)
-
-
-def make_frame_inference(
-    *, cq: Optional[ClientQueues] = None, task_id: Optional[int] = None,
-    stage: Optional[str] = None, ts: float = 1.0,
-    detectors: Optional[Dict[str, FrameDetections]] = None,
-    frame_width: Optional[int] = None, frame_height: Optional[int] = None,
-) -> FrameInference:
-    """推理结果消息。task_id/stage 缺省从 cq 派生（无 cq 时回退 1/"3"）。
-
-    detectors 缺省为单流 {"bubble": <1 检测>}；写回句柄 fence 类测试传 cq=<句柄>，
-    离线/直连 FeatureStore 类测试传 cq=None 并显式给 detectors。
-    frame_width/frame_height 为帧级分辨率，缺省 None。
-    """
-    if detectors is None:
-        detectors = {"bubble": make_frame_detections(ts=ts)}
-    return FrameInference(
-        task_id=task_id if task_id is not None else (cq.task_id if cq is not None else 1),
-        stage=stage if stage is not None else (cq.stage if cq is not None else "3"),
-        timestamp=ts,
-        detections=detectors,
-        cq=cq,
-        frame_width=frame_width,
-        frame_height=frame_height,
-    )
 
 
 def make_alarm(
@@ -134,3 +119,66 @@ def make_alarm(
         stage=stage,
         **over,
     )
+
+
+def make_run(task_id: int, step_id: int, run_id: Optional[int] = None) -> RunIdentity:
+    """该 step 盘上最新的 run（没有就建一个）——造数用，多次调用落同一个 run。
+
+    没有 run 时：给了 `run_id` 就按它建（造数的墙钟早于「现在」时，让 run 的开始时刻落在
+    首帧之前，timeline 的告警区间才对得上）；否则 `runs.allocate`。
+
+    调用前须让 `settings.storage_dir` 指到临时目录。只建 run 目录，**不保证可见**：
+    `runs.query` 缺省只认清单里有段或有 `inference/detections.jsonl` 的 run。
+    """
+    from app.storage import runs
+    from app.storage.utils import root as _root
+
+    step_dir = _root.path(task_id, step_id)
+    ids = sorted(int(p.name) for p in step_dir.iterdir() if p.name.isdigit()) if step_dir.is_dir() else []
+    if ids:
+        return RunIdentity(task_id, step_id, ids[-1])
+    if run_id is None:
+        return runs.allocate(task_id, step_id)
+    run = RunIdentity(task_id, step_id, run_id)
+    _root.run_path(run).mkdir(parents=True)
+    return run
+
+
+def seed_hls_segments(
+    task_id: int,
+    step_id: int,
+    items,
+    *,
+    track: str = "raw",
+    with_init: bool = True,
+    default_extinf_s: float = 10.0,
+):
+    """在该 step 最新的 run（`make_run`）的 `hls/` 下铺段文件 + init，**并登记进清单**；
+    返回域目录。有段登记即对 `runs.query` 可见。
+
+    `items` 收 `[ts_ms]` 或 `[(ts_ms, extinf_s)]`（ts_ms 是段名里的 epoch 毫秒）。
+
+    **登记那一步不能省**：「有哪些段」只由清单回答，光有段文件 = 没有段（在途，或
+    `_m3u8.append` 失败留下的孤儿）。不走 `hls.insert_segment` 只是为了免拉 cv2/ffmpeg，
+    落盘形态与它一致。
+
+    调用前须让 `settings.storage_dir` 指到临时目录（conftest 的 `tmp_storage` fixture）。
+    """
+    from app.storage import hls, runs
+    from app.storage.hls import _layout, _m3u8
+
+    run = make_run(task_id, step_id)
+    normalised = [it if isinstance(it, tuple) else (it, default_extinf_s) for it in items]
+    domain_dir = _layout.domain_dir(run, create=True)
+
+    for ts_ms, extinf_s in normalised:
+        ref = hls.SegmentRef(track=track, ts_ms=ts_ms)
+        path = hls.segment_path(run, ref)
+        path.write_bytes(b"fake-fmp4")
+        _m3u8.append(
+            hls.playlist_path(run, track),
+            hls.init_name(track), extinf_s, path.name,
+        )
+    if with_init:
+        hls.init_path(run, track).write_bytes(b"fake-init")
+    return domain_dir

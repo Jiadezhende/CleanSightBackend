@@ -49,19 +49,19 @@ _RECORD_START_OFFSET_S = 3600
 
 
 def _build_test_timestamps(n: int = _N_SEGMENTS) -> tuple:
-    """返回 (ts_us_list, alarm_detected_at_ms)。
+    """返回 (ts_ms_list, alarm_detected_at_ms)。
 
-    ts_us_list 为 n 个相隔 10s 的微秒时间戳列表。
+    ts_ms_list 为 n 个相隔 10s 的 epoch 毫秒段起点列表。
     alarm_detected_at_ms 落在第 2 段起点 +5s 处，即录制时间跨度之内——timeline
     才会把它作为一个 event 打在进度条上。
     """
     base_s = int(time.time()) - _RECORD_START_OFFSET_S
-    ts_us_list = [
-        (base_s + i * _SEGMENT_DURATION_S) * 1_000_000 for i in range(n)
+    ts_ms_list = [
+        (base_s + i * _SEGMENT_DURATION_S) * 1000 for i in range(n)
     ]
     # 第 2 段（index 1）起点 +5s
-    alarm_detected_at_ms = ts_us_list[1] // 1000 + 5_000
-    return ts_us_list, alarm_detected_at_ms
+    alarm_detected_at_ms = ts_ms_list[1] + 5_000
+    return ts_ms_list, alarm_detected_at_ms
 
 
 # ---------------------------------------------------------------------------
@@ -75,10 +75,10 @@ def traceback_test_fixture(task_id: int, alarm_id: int, server: str, api_port: i
 
     Yields:
         dict with keys: task_id, step_id, alarm_id,
-                        ts_us_list, alarm_detected_at_ms, task_dir
+                        ts_ms_list, alarm_detected_at_ms, task_dir
     """
     step_id = 1  # 测漏阶段
-    ts_us_list, alarm_detected_at_ms = _build_test_timestamps()
+    ts_ms_list, alarm_detected_at_ms = _build_test_timestamps()
     task_dir: Optional[Path] = None
 
     print(f"\n[Setup] task_id={task_id}, step_id={step_id}, alarm_id={alarm_id}")
@@ -86,7 +86,7 @@ def traceback_test_fixture(task_id: int, alarm_id: int, server: str, api_port: i
     print(f"[Setup] alarm detected_at = {alarm_detected_at_ms} ms（第 2 段内）")
 
     try:
-        # 1. DB: 任务记录（source_ip 仍写入但只用于运行时 ClientManager；
+        # 1. DB: 任务记录（source_ip 仍写入但只用于运行时 ClientService；
         #    追溯不再依赖该字段）
         DatabaseHelper.create_test_task(
             task_id, source_ip=f"test.tb.{task_id}", current_step=str(step_id)
@@ -104,14 +104,14 @@ def traceback_test_fixture(task_id: int, alarm_id: int, server: str, api_port: i
             step_name="测漏",
         )
 
-        # 3. 文件系统: HLS 段（新路径 {base_dir}/{task_id}/{step_id}/）
-        task_dir = seed_hls_segments(task_id, step_id, ts_us_list)
+        # 3. 文件系统: HLS 段（{storage}/{task_id}/{step_id}/{run_id}/hls/，登记进清单）
+        task_dir = seed_hls_segments(task_id, step_id, ts_ms_list)
 
         yield {
             "task_id": task_id,
             "step_id": step_id,
             "alarm_id": alarm_id,
-            "ts_us_list": ts_us_list,
+            "ts_ms_list": ts_ms_list,
             "alarm_detected_at_ms": alarm_detected_at_ms,
             "task_dir": task_dir,
             "base_url": f"http://{server}:{api_port}",

@@ -9,16 +9,16 @@ description: "Create a new detection workflow for CleanSightBackend. Use this sk
 
 **落点（一文件一基类，同业务同名文件）**：Detector 写 `detection/impl/<业务>.py`，Operator 写 `temporal/impl/<业务>.py`，可选离线 Segmenter 写 `offline/impl/<业务>.py`。三者靠同名文件 + config stage 绑定表达业务聚合（不再有单独的 `workflows/` 目录，也别把 Detector 和 Operator 塞进同一文件）。
 
-骨架在 [references/templates.md](references/templates.md)，字段在 [references/data-models.md](references/data-models.md)，装配在 [references/yaml-config.md](references/yaml-config.md)。**架构原理（为什么两层、流源/流算子怎么分）见 [DESIGN_DETECTION_WORKFLOW.md](../../../docs/kb/DESIGN_DETECTION_WORKFLOW.md) 与 [operator.py](../../../app/services/inference/temporal/operator.py) docstring，本 skill 只讲怎么做。** 内嵌时序模型（GRU/Transformer）的算子接入另见 `/temporal-review`。
+骨架在 [references/templates.md](references/templates.md)，字段在 [references/data-models.md](references/data-models.md)，装配在 [references/yaml-config.md](references/yaml-config.md)。**架构原理（为什么两层、流源/流算子怎么分）见 [DESIGN_DETECTION_WORKFLOW.md](../../../docs/kb/DESIGN_DETECTION_WORKFLOW.md) 与 [operator.py](../../../app/services/inference/online/temporal/operator.py) docstring，本 skill 只讲怎么做。** 内嵌时序模型（GRU/Transformer）的算子接入另见 `/temporal-review`。
 
 ## 两层契约
 
 | 层 | 基类 | 实例 | 输入 → 输出 | 必实现 |
 |----|------|------|-----------|--------|
-| 流源 Detector | `Detector` / `YOLODetector` | 无状态，多 Client 共享 | 帧 → `FrameDetections` | `prepare_visualization_data`；YOLO 优先 override `infer_batch(frames, timestamps)` |
+| 流源 Detector | `Detector` / `YOLODetector` | 无状态，多 Client 共享 | 帧 → `DetectorOutput` | `prepare_visualization_data`；YOLO 优先 override `infer_batch(frames, timestamps)` |
 | 流算子 Operator | `Operator`（或 `GRUOperator`） | 每 Client 一个，持 `_sm` | 订阅流滑窗 → `(events, alarms)` | `analyze(windows)` 推 `_sm`、`judge()` 出结果；可选 `finalize()` |
 
-- **合并即真源**：analyze（量事实）+ judge（下判断）共享同一份 `self._sm`，不再有 EventFact 对象间传输、不再有双状态机同步。
+- **合并即真源**：analyze（量事实）+ judge（下判断）共享同一份 `self._sm`，不再有 TemporalEvent 对象间传输、不再有双状态机同步。
 - **身份两维正交**：`name` = 算子自身/输出身份（日志/告警归属）；`subscribes` = 输入流清单（**显式必填**，元素 = 上游 `detector.name`）。**算子名 ≠ 流名。**
 - **绑定**：`detector.name` = 流名 = `slide_window` key = 某算子 `subscribes` 里的元素。系统据此把流喂给订阅它的算子。
 
@@ -56,7 +56,7 @@ new_frames = [f for f in window if f.timestamp > last_ts]
 for f in new_frames: ...                       # 累加 / 喂 ByteTrack
 if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 ```
-⚠️ **指标窗口自管**：`primary_window`/`_zip_by_ts` 已把窗裁到感受野，但派生 history（如出生率 `new_count_history`）仍要在 `self._sm` 里按 `self.window_seconds` 自行裁剪（见 [temporal/impl/bubble.py](../../../app/services/inference/temporal/impl/bubble.py)）。
+⚠️ **指标窗口自管**：`primary_window`/`_zip_by_ts` 已把窗裁到感受野，但派生 history（如出生率 `new_count_history`）仍要在 `self._sm` 里按 `self.window_seconds` 自行裁剪（见 [temporal/impl/bubble.py](../../../app/services/inference/online/temporal/impl/bubble.py)）。
 
 ## Operator.analyze() 两条路径
 
@@ -69,10 +69,10 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 
 | 场景 | 模板 | 参考（检测器 / 算子） |
 |------|------|------|
-| YOLO + 实时告警（最常见） | A | [detection/impl/bubble.py](../../../app/services/inference/detection/impl/bubble.py) / [temporal/impl/bubble.py](../../../app/services/inference/temporal/impl/bubble.py) |
-| 无模型 / 纯算法 | B | [detection/impl/mock.py](../../../app/services/inference/detection/impl/mock.py) / [temporal/impl/mock.py](../../../app/services/inference/temporal/impl/mock.py) |
-| 结算式告警 | C | [detection/impl/bending.py](../../../app/services/inference/detection/impl/bending.py) / [temporal/impl/bending.py](../../../app/services/inference/temporal/impl/bending.py) |
-| 内嵌因果序列模型（多流 GRU） | D | [detection/impl/clean.py](../../../app/services/inference/detection/impl/clean.py) / [temporal/impl/clean.py](../../../app/services/inference/temporal/impl/clean.py) |
+| YOLO + 实时告警（最常见） | A | [detection/impl/bubble.py](../../../app/services/inference/online/detection/impl/bubble.py) / [temporal/impl/bubble.py](../../../app/services/inference/online/temporal/impl/bubble.py) |
+| 无模型 / 纯算法 | B | [tests/doubles.py](../../../tests/doubles.py) 的 `MockDetector`（测试替身）/ 算子同模板 A |
+| 结算式告警 | C | [detection/impl/bending.py](../../../app/services/inference/online/detection/impl/bending.py) / [temporal/impl/bending.py](../../../app/services/inference/online/temporal/impl/bending.py) |
+| 内嵌因果序列模型（多流 GRU） | D | [detection/impl/clean.py](../../../app/services/inference/online/detection/impl/clean.py) / [temporal/impl/clean.py](../../../app/services/inference/online/temporal/impl/clean.py) |
 
 ## 必查清单（⚠️ = 高频 bug）
 
@@ -80,7 +80,7 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 - [ ] 选基类：YOLO → `YOLODetector`；无模型 → `Detector`
 - [ ] `name` 写死（= 产出流名）；实现 `prepare_visualization_data` 返回 `RenderSpec`
 - [ ] YOLO 优先 override `infer_batch(frames, timestamps)`（try 批量 + except 逐帧 fallback）
-- [ ] ⚠️ batch 与 fallback 的业务字段赋值逻辑一致；`timestamps[i]` 原样写入 `FrameDetections.timestamp`（**别自造时间戳**，否则多流 `_zip_by_ts` 漏帧）
+- [ ] ⚠️ batch 与 fallback 的业务字段赋值逻辑一致；`timestamps[i]` 原样写入 `DetectorOutput.timestamp`（**别自造时间戳**，否则多流 `_zip_by_ts` 漏帧）
 - [ ] ⚠️ `class_name` 取自模型 `result.names`，与训练类别名严格一致（不归一化）
 
 **Operator（流算子，analyze 推 `_sm` / judge 出告警）**
@@ -92,7 +92,7 @@ if new_frames: self._sm["last_ts"] = new_frames[-1].timestamp
 
 **装配**（→ [yaml-config.md](references/yaml-config.md)）
 - [ ] `inference_config.yaml` 对应 stage：`detectors[]` 加 detector（`name`/`class`/`params`），`rules[]` 加 operator（`name`/`subscribes`/`realtime`/`class`/`params`）
-- [ ] 新告警指标 → 在 [AlarmMetric](../../../app/domain/alarm.py) 枚举补一项，`judge()` 里 `metric=` 显式填
+- [ ] 新告警指标 → 在 [AlarmMetric](../../../app/types/alarm.py) 枚举补一项，`judge()` 里 `metric=` 显式填
 - [ ] **无需**改任何 `impl/__init__.py`（detection/temporal/offline 各一个纯包标记）——StageFactory 按 `class` 全路径 importlib 实例化
 
 > 接口签名照抄基类；`Alarm` 核心 5 字段（`alarm_type`/`alarm_level`/`alarm_message`/`metric`/`metadata`），`mode`/`stage`/`seq`/`timestamp` 落库时自动补。

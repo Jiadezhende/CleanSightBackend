@@ -1,19 +1,21 @@
 """离线分割手动入口 —— 独立进程、CPU-only、限核、同步跑一次；另含 query 查询子命令。
 
     CUDA_VISIBLE_DEVICES="" nice -n 15 \\
-        python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--strategy PATH]
-    python -m app.services.inference.offline.cli query --task-id 100 --step-id 2
+        python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--run-id R] [--threads 2]
+    python -m app.services.inference.offline.cli query --task-id 100 --step-id 2 [--run-id R]
 
 设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动，不抢在线 GPU/核。
 `run` 的 CPU 隔离在**任何 torch import 之前**生效：置 `CUDA_VISIBLE_DEVICES=""`（禁 GPU）+
 `torch.set_num_threads`（限核，默认 2），故必须先 `_isolate_cpu()` 再 import 触发策略 torch 加载的
-runner/策略模块。`query` 只读 FactLedger，不碰 torch/runner。
+runner/策略模块。`query` 只读 temporal.jsonl，不碰 torch/runner。
 
-step_id 恒为**数字存储键**（--step-id int）；未配数字（如 -1）经 config.resolve_stage 回退到
-MOCK stage 配置，存储路径仍用原数字（见 runner.py）。
+step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（无兜底）。
+`--run-id` 缺省 = 该 step 最新可见 run；入口解析一次，之后整次运行只读写这个 run。
 
-退出码：completed / skipped → 0；配置错误 / 输入损坏 / 策略异常 / 写失败 → 非 0。
-一期不做排队/并发/自动触发；只对已封口（step 已停写）的数据手动运行。
+输出：stdout 末行恒为一行结果 JSON `{status, producer, segment_count, message}`（失败时 status="error"），
+作业服务（offline/service.py）以子进程调用时解析它。
+退出码：completed / skipped / reclaimed（点名的 run 已被回收）→ 0；step 未配置 / 输入损坏 /
+策略异常 / 写失败 → 非 0。
 """
 
 from __future__ import annotations
@@ -41,38 +43,50 @@ def _isolate_cpu(num_threads: int) -> None:
 def _run(args: argparse.Namespace) -> int:
     _isolate_cpu(args.threads)
     # runner / 策略 import 放在 CPU 隔离之后：策略模块的 torch import 此时才发生
-    from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
+    from .runner import OfflineRunner, OfflineRunSpec
 
-    spec = OfflineRunSpec(task_id=args.task_id, step_id=args.step_id, strategy=args.strategy)
     try:
-        result = OfflineRunner().run(spec)
+        result = OfflineRunner().run(
+            OfflineRunSpec(task_id=args.task_id, step_id=args.step_id, run_id=args.run_id)
+        )
     except Exception as e:  # 配置/输入/策略/写失败 → 非 0
         logger.error("运行失败 task=%s step=%s: %s", args.task_id, args.step_id, e, exc_info=True)
-        print(f"error task={args.task_id} step={args.step_id}: {e}")
+        _print_json("error", None, 0, str(e))
         return 1
+    _print_json(result.status, result.producer, result.segment_count, result.message)
+    return 0
 
-    line = f"{result.status} producer={result.producer} segment_count={result.segment_count}"
-    if result.message:
-        line += f" | {result.message}"
-    print(line)
-    return 0  # completed / skipped 均为 0
+
+def _print_json(status: str, producer: Optional[str], segment_count: int, message: str) -> None:
+    # 人读与作业服务共用这一行，故不转义中文；作业服务给子进程置了 PYTHONIOENCODING=utf-8 并按 utf-8 解码。
+    print(json.dumps(
+        {"status": status, "producer": producer, "segment_count": segment_count, "message": message},
+        ensure_ascii=False,
+    ))
 
 
 def _query(args: argparse.Namespace) -> int:
-    """轻量查询：读 FactLedger 里的 SegmentFact 时间线打印（不碰 torch/runner）。"""
-    from app.services.inference.feature.store import FactLedger
-    from app.services.inference.types import SegmentFact
-    from app.settings import settings
+    """轻量查询：读 temporal.jsonl 里的 TemporalSegment 时间线打印（不碰 torch/runner）。"""
+    from dataclasses import asdict
 
-    ledger = FactLedger(settings.storage_base_dir)
+    from app.types.temporal import TemporalSegment
+    from app.storage import inference as inference_store
+    from app.storage import runs
+
+    run = runs.query(args.task_id, args.step_id, args.run_id)
+    facts = inference_store.read_temporal(run) if run is not None else []
     rows = [
-        f.to_json()
-        for f in ledger.load(args.task_id, args.step_id)
-        if isinstance(f, SegmentFact) and (args.source is None or f.source == args.source)
+        asdict(f)
+        for f in facts
+        if isinstance(f, TemporalSegment)
+        and (args.producer is None or f.producer == args.producer)
     ]
     rows.sort(key=lambda r: (float(r.get("start", 0.0)), str(r.get("label", ""))))
     print(json.dumps(
-        {"task_id": args.task_id, "step_id": args.step_id, "timeline": rows},
+        {
+            "task_id": args.task_id, "step_id": args.step_id,
+            "run_id": run.run_id if run is not None else None, "timeline": rows,
+        },
         ensure_ascii=False, indent=2,
     ))
     return 0
@@ -81,25 +95,23 @@ def _query(args: argparse.Namespace) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.services.inference.offline.cli",
-        description="离线全序列分割：读 FeatureStore 特征 → 策略分段 → 幂等写 FactLedger。",
+        description="离线全序列分割：读 detections.jsonl → 策略分段 → 幂等写 temporal.jsonl。",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="读特征、跑策略、幂等写 FactLedger")
+    run = sub.add_parser("run", help="读检测结果、跑策略、幂等写 temporal.jsonl")
     run.add_argument("--task-id", type=int, required=True, help="任务 id（存储键）")
-    run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（数字存储键；未配回退 MOCK）")
-    run.add_argument(
-        "--strategy", default=None,
-        help="覆盖 stage.offline.class 的策略全限定路径（开发期对比不同策略）",
-    )
+    run.add_argument("--step-id", type=int, required=True, help="洗消步骤 id（数字存储键；须在推理配置中配了 offline）")
+    run.add_argument("--run-id", type=int, default=None, help="锁定哪个 run（缺省 = 该 step 最新可见 run）")
     run.add_argument(
         "--threads", type=int, default=2, help="CPU 线程数（torch.set_num_threads，默认 2）",
     )
 
-    query = sub.add_parser("query", help="查询 FactLedger 里的 SegmentFact 时间线")
+    query = sub.add_parser("query", help="查询 temporal.jsonl 里的 TemporalSegment 时间线")
     query.add_argument("--task-id", type=int, required=True)
     query.add_argument("--step-id", type=int, required=True)
-    query.add_argument("--source", default=None, help="只查询某个 SegmentFact source")
+    query.add_argument("--run-id", type=int, default=None, help="查哪个 run（缺省 = 该 step 最新可见 run）")
+    query.add_argument("--producer", default=None, help="只查询某个 producer 产出的分段")
 
     args = parser.parse_args(argv)
 

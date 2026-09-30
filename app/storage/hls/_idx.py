@@ -1,4 +1,4 @@
-"""段的逐帧时间戳 sidecar：`raw_segment_{ts_us}.idx`。
+"""段的逐帧时间戳 sidecar：`raw_segment_{ts_ms}.idx`。
 
 **二进制布局：float64 裸数组，每帧一条，无头无尾**（`np.ndarray.tofile` / `np.fromfile` 的
 原生字节序）。没有 magic、没有长度字段——条数由文件大小 ÷ 8 得出。
@@ -12,41 +12,32 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 
-_DTYPE = np.float64
+from app.storage.utils import fs as _fs
 
-# tmp 后缀。与目标**同目录**，`os.replace` 才是原子换名；它也匹配不上段正则。
-_TMP_SUFFIX = ".tmp"
+_DTYPE = np.float64
 
 
 def write(path: Path, timestamps: Sequence[float]) -> None:
-    """原子写入时间戳数组（tmp + `os.replace`），读侧不会看到半截文件。
+    """原子写入时间戳数组（`_fs.replace`），读侧不会看到半截文件。
 
     Raises:
         OSError: 写入或换名失败。是否吞掉由调用方定。
 
-    **位级保真是契约**（`FrameTracker` 拿 sidecar 值与内存帧 ts 做相等比较），故走
+    **位级保真是契约**（读回的帧 ts 要能与 detections 里的 ts 做相等比较），故走
     `np.asarray(..., dtype=float64)` 而不是逐个 `float()`。
     """
-    tmp = path.with_suffix(_TMP_SUFFIX)
     array = np.asarray(list(timestamps), dtype=_DTYPE)
-    try:
-        tmp.unlink(missing_ok=True)
+
+    def _write(tmp: Path) -> None:
         with open(tmp, "wb") as f:
             array.tofile(f)
-        os.replace(tmp, path)
-    except OSError:
-        # 清残留 tmp 本身也可能失败（同一个盘的同一个故障），不能让它盖掉原异常
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+
+    _fs.replace(path, _write)
 
 
 def read(path: Path) -> np.ndarray:

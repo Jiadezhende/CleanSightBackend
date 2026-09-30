@@ -8,8 +8,9 @@ from unittest.mock import MagicMock
 
 from factories import make_alarm
 
-import app.services.inference.naming as naming
-from app.domain.alarm import AlarmMetric
+import app.services.inference.online.naming as naming
+from app.types.run import RunIdentity
+from app.types.alarm import AlarmMetric
 from app.routers.task import _build_signals_10s, _build_task_alarm_message
 
 
@@ -43,7 +44,7 @@ def test_build_task_alarm_message_assembles_via_atomic_snapshot(monkeypatch):
     alarm = make_alarm(metric=AlarmMetric.BUBBLE, mode="REALTIME", seq=2, timestamp=1.0)
 
     cq = MagicMock()
-    cq.task_id = 7
+    cq.run = RunIdentity(7, 1, 1)
     cq.get_alarm_snapshot.return_value = ([alarm], 2)
     cq.get_slide_window_summary.return_value = {
         "bubble": {"active": True, "hit_count": 1, "max_conf": 0.8}

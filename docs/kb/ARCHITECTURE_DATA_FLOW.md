@@ -1,83 +1,110 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # 数据流
 
-本文件描述实时流从输入到展示、落盘和告警的主路径。运行键全链路为 int `task_id`。
+实时流从输入到展示、落盘、告警的主路径，以及 run 结束后的离线分析链。运行键为 int `task_id`；盘上产物按 run
+分目录，身份是 `RunIdentity(task_id, step_id, run_id)`（`app/types/run.py`），CQ 构造时绑定 `cq.run`。
 
 ## 端到端路径
 
 ```text
-RTSP (仅 RTSP)
-  -> StreamService / FFmpegDecoder（decoder 自持读循环；ffmpeg 输出规范化 CFR raw_fps 流）
+RTSP
+  -> StreamService / FFmpegDecoder（自持读循环线程；ffmpeg 输出规范化 CFR raw_fps 流）
   -> ClientQueues.ca_raw（raw HLS 纯缓冲）
-  -> ClientQueues.ca_ready（SPSC deque，整数降采样每 N 帧留 1，N=inference_decimation）
-  -- L1 --> StageAwareDispatcher（唯一提交者，捕获 CQ 句柄）-> RemoteInferProxy.submit -> 推理子进程 -> collector 重组 FrameInference
+  -> ClientQueues.ca_ready（SPSC deque，每 N 帧留 1，N = inference_decimation）
+  -- L1 --> StageAwareDispatcher（唯一提交者，捕获 CQ 句柄）-> RemoteInferProxy.submit -> 推理子进程
+             -> collector 组装 FrameDetection（带 cq 句柄）
              DetectionService._write_back_results（单入口，判 cq.is_active()）三写：
-               ├─ push_detection -> _slide_window       （-> L3，异步缓冲解速差）
-               ├─ set_latest_inference                  （-> Viz 原子快照）
-               └─ FeatureStore.append -> features.jsonl  （L2 落盘，-> 离线）
-  -- L3/L4 --> ClientTemporalActor（~1Hz tick）-> Operator.analyze()/judge()
+               ├─ push_detection -> _slide_window        （-> L3）
+               ├─ set_latest_detection                   （-> Viz 快照）
+               └─ append_ca_detections -> ca_detections  （落盘缓冲；降级帧不入）
+  -- L3/L4 --> ClientTemporalActor（2Hz tick）-> Operator.analyze()/judge()
                  -> set_latest_temporal（前端事件）
-                 -> alarm_sink.persist_alarms（过闸 + 落库）
+                 -> alarm_sink.persist_alarms（过闸 + 入 alarm 队列上报）
   -- Viz --> VisualizationWorker（独立线程，轮询快照渲染）
                ├─ append_ca_processed -> ca_processed（processed HLS 纯缓冲）
-               └─ set_latest_rendered -> _latest_rendered 快照
-                    ├─ PULL: HLSSegmentSweeper 周期 take_*_segment() -> HLS 分段落盘
-                    └─ WS /ai/video 前端 ~10ms 轮询快照（非后端 push）
+               └─ set_latest_rendered -> _latest_rendered 快照（WS /ai/video 由前端轮询，非后端 push）
+  -- PULL --> recording.SegmentSweeper 每 1s collect_from(cq)
+                 ├─ ca_raw / ca_processed -> "recording" 队列            -> {run}/hls/
+                 └─ drain_ca_detections   -> "recording-detections" 队列 -> {run}/inference/detections.jsonl
 ```
+
+`{run}` = `{storage_base_dir}/{task_id}/{step_id}/{run_id}/`，由 `start_run` 里的 `runs.allocate` 在构造 CQ 前建好；
+盘上布局见 [ARCHITECTURE_STORAGE_AND_SCHEMA.md](ARCHITECTURE_STORAGE_AND_SCHEMA.md)。
 
 ## 输入与解码
 
-`StreamService` 为每个 `task_id` 创建一个 `FFmpegDecoder`（仅 RTSP）。ffmpeg 用 `scale=W:H,fps=raw_fps` + `-vsync` 输出**规范化 CFR raw_fps** rawvideo 流；decoder **自持读循环线程**读帧（合并双平台单一阻塞读路径），`Frame.timestamp` 取读帧时的墙钟到达时刻（`time.time()`）。主要输出：`ca_raw`（raw HLS 缓冲）、`ca_ready`（待推理，`append_ca_ready_with_throttle` 整数降采样每 N 帧留 1 + 背压）、`latest_raw_frame/timestamp`（健康监控/可视化）。
+每个 `task_id` 一个 `FFmpegDecoder`。ffmpeg 以 `scale=W:H,fps=raw_fps` + `-vsync` 输出 CFR rawvideo；读循环线程
+逐帧取墙钟 `time.time()` 作 `Frame.timestamp`，写 `ca_raw`、经 `append_ca_ready_with_throttle`（整数降采样 + 背压）写
+`ca_ready`，并更新 `latest_raw_frame/timestamp`（健康监控、可视化用）。
 
-## 推理与时序（L1→L4）
+## 推理与时序（L1→L4）：帧捕获 ts 是全链路对齐锚点
 
-`StageAwareDispatcher` 是**唯一提交者**：`_fetch_and_dispatch_round` pop 各 run `ca_ready`、按 stage **捕获 CQ 句柄**进 `_stage_queues` deque，再 `_drain_and_submit` peek-commit 轮转排空 → `RemoteInferProxy.submit`（布尔背压，拒收即帧留 deque）。GPU 前向在独立 **spawn 子进程**串行执行，collector 守护线程据 req_id 重组 `FrameInference`（**cq 句柄不过进程边界**，切口在纯数据 `_infer_models`）。**帧捕获 ts 是真值锚点**：`Frame.timestamp` 一路穿透到 `detector.infer_batch(frames, timestamps)`，写入各帧 `FrameDetections.timestamp`，令同帧多流 ts 精确相等——写回口据此**一次物化整帧多流 `FrameFeature`**（`by_source` 对齐，无需 zip），detector 不得自造时间戳。写回由 `DetectionService._write_back_results` 单入口完成，先判 `cq.is_active()`（迟到写落到 DRAINING/CLOSED 旧 CQ 被丢弃、不串台），再三写 `_slide_window` / `_latest_inference` / `FeatureStore`。`ClientTemporalActor` per-run ~1Hz 读 `_slide_window` 跑 operators，产前端事件 + 告警。详见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)。
+- **单提交者**：`StageAwareDispatcher` 从各 run 的 `ca_ready` 取帧、按 stage 捕获 CQ 句柄入 `_stage_queues`，
+  轮转提交给 `RemoteInferProxy`（布尔背压，拒收即帧留 deque）。GPU 前向在 spawn 子进程串行执行。
+- **cq 句柄不过进程边界**：子进程只收纯数据（`_infer_models`）；collector 线程从 `_Pending` 把 cq 与分辨率盖回 `FrameDetection`。
+- **ts 锚点**：`Frame.timestamp` 穿透到 `detector.infer_batch(frames, timestamps)` 并写入各流
+  `DetectorOutput.timestamp`，同帧多流 ts 精确相等，`FrameDetection.by_source` 据此对齐；detector 不得自造时间戳。
+- **写回单入口、零 IO**：`_write_back_results` 取走 `frame.cq` 并置 None，判 `cq.is_active()`——迟到写落到
+  DRAINING/CLOSED 的旧 CQ 即丢弃、计 `frame_drop_total{reason="stale_run"}`，不串台。检测结果落盘由 recording 来拉，
+  inference 不依赖 recording。
+- **降级帧不落盘**：任一源 `success=False` 的帧照写帧窗与快照，但不入 `ca_detections`——落盘格式不带 `success`，
+  空框会被离线当成「没检出」。
+- `ClientTemporalActor` per-run 以 `tick_interval=0.5s` 读 `_slide_window` 跑 operators，产前端事件与告警。
 
-## 可视化与前端
+细节见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)；压力观测点 `[PRESSURE]` / `[VIZ_THROUGHPUT]` 见
+[DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)。
 
-`VisualizationWorker` 独立线程轮询各 run，读最新推理快照 / 最新原始帧 / 最新时序事件，渲染后写 `ca_processed`（processed HLS 缓冲）与 `_latest_rendered`（供 `/ai/video` WS 前端轮询）。观测点：`[PRESSURE]`（队列积压/拒收）、`[VIZ_THROUGHPUT]`（可视化吞吐），统一见 [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)。
+## 落盘走 PULL：recording 拉，两条队列互不阻塞
 
-## 落盘与告警（PULL 模型）
+CQ 的 `ca_raw` / `ca_processed` / `ca_detections` 都是纯缓冲，不触发落盘。`SegmentSweeper` 是纯节拍器，每 1s 对每个
+活跃 CQ 调一次 `RecordingService.collect_from`，由服务决定取什么、按什么顺序取。两条 `SerialTaskQueue` 各一个消费线程：
 
-HLS 分段落盘为 **PULL**：CQ 的 `ca_raw`/`ca_processed` 是纯缓冲，不触发落盘；persistence 的 `HLSSegmentSweeper` 周期 `take_raw_segment()`/`take_processed_segment()` 主动拉整段。持久化两条队列：HLS queue（raw/processed mp4、playlist、metadata）、Alarm queue（HTTP 上报）。告警过闸编排在 `inference/temporal/alarm_sink`，persistence 只做无状态落库。
+- `recording`：HLS 段写入 `{run}/hls/`，格式归 `app.storage.hls`；
+- `recording-detections`：`inference.append_detections(cq.run, frames)` 追加 `detections.jsonl`，格式归 `app.storage.inference`。
 
-## online / offline 分离
+分两条是因为段写含 ffmpeg 转码（单段 0.26–3 s），检测结果排在后面会被一起背压丢弃且无声。产物只写进 `cq.run`
+指向的目录，旧 run 的迟到写落回旧目录。
 
-实时链（L1→`_slide_window`→L3 1Hz）与离线链（`FeatureStore.load` → `OfflineSegmenter` → `FactLedger`）彻底分离：实时不落 FactLedger。离线消费端是**单一 Runner 路径**：
+**残帧 flush 只在 `stop_run` 发生**：`stop_run` 依次 `stop_workflow`（收结算告警）→ `recording.flush_residual(cq)`
+（切完不足一段的残帧，并排空 `ca_detections`）→ 注销 CQ（`cq.close()`）。触发方是 `/api/terminate`、`/api/start`
+重启、health_monitor，以及进程停机（`run_control.lifespan` 逐个 stop_run，见
+[ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)）。详见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)。
+
+告警上报在 `app/services/alarm/`（入队 + HTTP 上报与重试，见 [SERVICE_ALARM.md](SERVICE_ALARM.md)）；过闸去重与
+模式归属在 `inference/online/temporal/alarm_sink`。存储 TTL 清理由 `app/daemons/cleanup/` 负责。
+
+## 在线与离线只经盘上产物相连
+
+在线由 recording 写 `detections.jsonl`；离线读它、写 `temporal.jsonl` / `label_probs.npz`。两段代码互不 import，
+共用的 `config.py` / `stage_factory.py` / `resample.py` 在 `app/services/inference/` 顶层。
 
 ```text
-{base}/{task}/{step}/features.jsonl（在线 FeatureStore.append 常开）
-  -> OfflineRunner.run(OfflineRunSpec{task_id, step_id[, strategy]})
-       FeatureStore.load(task_id, step_id)           读回 List[FrameFeature]（utf-8-sig 容忍 Windows BOM）
-       -> config.resolve_stage(step_id)              数字命中即恒等，未知回退 MOCK 并 WARN
-       -> stage_factory.create_offline_segmenter()   非空 offline 段即启用，缺字段 fail-fast
-       -> OfflineSegmenter.preprocess(streams)       预处理预留层（clean 私有把订阅流按 ts 跨 source 拍平成 List[FrameDetections] → 62 维 ModelInput）
-       -> OfflineSegmenter.segment(model_input)       逐帧分类 → 归并 SegmentFact
-       -> 全量校验（source==name / start<=end / 有限数 / 0<=conf<=1，任一非法整批失败）
-       -> FactLedger.replace_segments(task_id, step_id, producer, facts)   幂等替换（持锁 + 原子 os.replace，按 producer 过滤）
-       -> 可选 segmenter.debug_result() -> offline_inference_result.json    逐帧调试产物
+{run}/inference/detections.jsonl
+  -> OfflineRunner.run(OfflineRunSpec{task_id, step_id, run_id?})
+       require_offline(step_id) → 解析并锁定一个 run → read_detections → segmenter → 校验
+       → ① label_probs.npz（可选旁路）→ ② temporal.jsonl（丢旧 TemporalSegment、保留 TemporalEvent、原子写回）
 ```
 
-要点：
+- **独立 OS 进程**，不进 uvicorn：CLI 在 torch import 前置 `CUDA_VISIBLE_DEVICES=""` 并限线程。入口有两个：手动
+  `python -m app.services.inference.offline.cli run|query --task-id T --step-id S [--run-id R]`；admin 页
+  `POST /admin-f3m8/offline/jobs` → `OfflineJobService`（串行、起 CLI 子进程、超时 kill）。
+- **写方唯一**：`detections.jsonl` 只由 recording 写；`temporal.jsonl` / `label_probs.npz` 只由离线 Runner 写。
+  同一 run 跨进程并发跑离线无互斥。
+- **复用在线契约**：输入 `FrameDetection`，输出 `TemporalSegment` / `LabelProbs`；ts 为帧捕获墙钟浮点秒（毫秒规则的具名例外）。
+- **读口**：`POST /ai/temporal`（分段 → 媒体毫秒）、`POST /lab-f3m8/label-probs`（逐帧概率），都经 `resolve_timeline`
+  锁定同一 run 的媒体轴；`GET /lab-f3m8/tasks` 的 `offline_steps` 由 `inference.query_has_offline_results` 判定。
+- **未实现**：run 结束后自动触发、离线判合规 / 告警、结果入库。
 
-- **独立 OS 进程**，不进 uvicorn；入口在 torch import 前置 `CUDA_VISIBLE_DEVICES=""` + 限线程，与在线链路**零代码/进程耦合、资源不抢占**。手动入口 `python -m app.services.inference.offline.cli run|query --task-id N --step-id M [--strategy PATH]`。
-- **复用现有数据契约**：输入吃 `FrameDetections`/`Detection`（`app.domain.detection`），输出吐 `SegmentFact`（`app.services.inference.models`）；只保留 `ModelInput`（62 维数值矩阵，clean 策略私有）一个离线专有表示，无独立中间数据壳。
-- **单一 Runner 路径**：框架仅 `offline/{segmenter.py(基类),runner.py,cli.py}` + `impl/{clean,mock}.py`，无并行分派层。新增真实时序模型 = 加一个自包含 `impl/<stage>.py` 子类 + YAML `offline.class` 一行（clean.py 已含 MS-TCN/ASFormer/BiGRU 系列 torch 策略基类）。
-- **存储键 vs 配置 key 正交**：存储读写始终用原数字 `step_id`；`resolve_stage` 仅决定用哪个 stage 的 offline 配置（未配 → MOCK.offline 兜底、仍读写 `{task}/{step}/` 分区）。
-- **在线仍不写 FactLedger**（实时不落事实）；离线是唯一 `facts.jsonl` 写方。
-- 后续（未实现）：自动调度、离线 Judge（`SegmentFact` → 合规判断/告警）、结果入库——当前只做链路收敛 + baseline 工程闭环，不判合规、不告警。
+Runner 各步的失败语义（skipped / reclaimed / 校验规则）见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)「`OfflineRunner`」。
 
 ## 代码来源
 
-- `app/services/stream/service.py`、`app/services/stream/decoder.py`
-- `app/services/client/queues.py`
-- `app/services/inference/detection/{dispatcher,infer_proxy,stage_worker,service}.py`
-- `app/services/inference/temporal/{actor,alarm_sink}.py`
-- `app/services/inference/visualization/worker.py`
-- `app/services/inference/feature/store.py`（`FeatureStore.load` / `FactLedger.replace_segments`）
-- `app/services/inference/offline/{runner,segmenter,cli}.py`、`app/services/inference/offline/impl/{clean,mock}.py`
-- `app/services/inference/config.py`（`resolve_stage`）、`app/services/inference/stage_factory.py`（`create_offline_segmenter`）
-- `app/services/persistence/manager.py`、`app/services/persistence/workers/segment_sweeper.py`
+- `app/services/stream/decoder.py`、`app/services/client/queues.py`
+- `app/services/inference/online/detection/{dispatcher,infer_proxy,stage_worker,service}.py`
+- `app/services/inference/online/temporal/{actor,alarm_sink}.py`、`app/services/inference/online/visualization/visualization_worker.py`
+- `app/services/inference/offline/{runner,cli,service}.py`、`app/services/inference/config.py`
+- `app/services/recording/{service,sweep_worker}.py`、`app/services/run_control/service.py`（`start_run` / `stop_run` / `shutdown`）
+- `app/storage/{hls,inference}/`、`app/storage/runs.py`、`app/types/{detection,temporal,run}.py`

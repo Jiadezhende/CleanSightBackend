@@ -1,57 +1,42 @@
 """
-Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）
+Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）：送标任务清单、逐帧类别概率、送标、整段下载、LS 探活 / 配置。
 
-让操作员在一个 step 的 raw 整段视频上选 N 段不重叠的 [start_ms, end_ms]，
-后端剪出对应的 mp4 并提交到 Label Studio 创建标注任务。
-
-另提供整段下载（GET /download）：把该 step 某一轨的全部落盘段 remux 成单个 mp4，
-用于取汇报素材/原片。与送标那条路径的分工——送标要 ms 精度所以必须重编码，
-整段下载只换容器所以 `-c copy`（见 services/lab/step_exporter.py）。
-
-数据底座：
-- 复用 traceback 的 (task_id, step_id) 文件系统约定
-- 复用 SegmentFinder 列表/过滤 raw 段
-- ffmpeg concat demuxer + libx264 实现 ms 精度裁剪
-- urllib.request multipart 上传到 LS（沿用现有 alarm_strategy 的 urllib 风格）
-
-设计要点：
-- 整个 submit 同步执行；ffmpeg + LS 上传都在请求线程里跑完
-- 单段失败不让整请求失败：HTTP 仍 200，每段在 response 里带 success/error_code
-- 仅 raw 轨；processed 轨不送标
-- 无新表，无任何持久化状态（除临时 job_dir 下的 mp4 文件）
+- 送标（POST /submit）：在一个 step 的 raw 轨上选 N 段不重叠的媒体区间，剪成 mp4 提交到 Label Studio；
+  流程在 `services/lab/service.py`，router 只做检查顺序（503 → 400 → 400 → 404）与 DTO 映射。
+  单段失败不让整请求失败：HTTP 仍 200，每段带 success / error_code。
+- 整段下载（GET /download）：某轨全部落盘段 `-c copy` remux 成单个 mp4（`service.export_step`）。
+- (task_id, step_id, 可选 run_id) → 入口处 `resolve_run` 解析一次 run，之后只用这个 run。
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
-from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_
-from sqlalchemy.exc import SQLAlchemyError
 from starlette.background import BackgroundTask
 
-from app.database import get_db
-from app.models import DBTask
-from app.services.lab import (
-    ClipBuilder,
-    ClipBuildError,
-    ClipRangeGapError,
-    ClipRangeOutOfBoundsError,
-    ClipSpec,
-    LabelStudioClient,
-    StepExporter,
+from app.db import tasks as db_tasks
+from app.types.run import RunIdentity
+from app.services.lab import runtime_config as lab_config
+from app.services.lab import service as lab_service
+from app.services.lab.step_exporter import (
     StepExportError,
     StepExportInitMissing,
     StepExportNoSegments,
 )
-from app.services.lab import config as lab_config
-from app.services.traceback.segment_finder import SegmentFinder, get_default_base_dir
-from app.utils.exceptions import DatabaseError, NotFoundError, ValidationError
+from app.services.lab.types import ClipRange
+from app.storage import hls
+from app.storage import inference as inference_store
+from app.storage import runs
+from app.storage import tasks as step_tasks
+from app.types.exceptions import NotFoundError, ValidationError
+
+from .utils.runs import resolve_run, resolve_timeline
 
 router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
 logger = logging.getLogger(__name__)
@@ -63,14 +48,22 @@ logger = logging.getLogger(__name__)
 
 
 class LabClipRange(BaseModel):
-    start_ms: int = Field(..., ge=0, description="绝对墙钟 ms（与 traceback timeline 一致）")
-    end_ms: int = Field(..., ge=1)
-    label: Optional[str] = Field(None, max_length=64, description="透传到 LS task.data 的标注 hint")
+    """送标区间，用**媒体坐标**表达（`<video>.currentTime × 1000`）。
+
+    不收墙钟：媒体轴是压紧的墙钟（断流停顿在它上面不存在），浏览器手上只有媒体轴上的量，
+    `W0 + currentTime` 这个换算只在从没断过流时成立。墙钟由后端用清单换算，随响应带回。
+    """
+
+    start_media_ms: int = Field(
+        ..., ge=0, description="相对该 step raw 轨媒体轴起点的 ms（= video.currentTime×1000）"
+    )
+    end_media_ms: int = Field(..., ge=1)
 
 
 class LabSubmitRequest(BaseModel):
     task_id: int
     step_id: int
+    run_id: Optional[int] = Field(None, description="锁定哪个 run；缺省 = 该 step 最新可见 run")
     project_id: Optional[int] = Field(
         None,
         description="LS project id；不传则使用 settings.label_studio_default_project_id",
@@ -83,8 +76,12 @@ class LabSubmitRequest(BaseModel):
 
 
 class LabClipResultDTO(BaseModel):
-    start_ms: int
-    end_ms: int
+    # 请求原样回显（失败时也有），供前端对号入座
+    start_media_ms: int
+    end_media_ms: int
+    # 后端由清单换算出的绝对墙钟；只有走到"选中了段"那一步才算得出，故可空
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
     success: bool
     label_studio_task_id: Optional[int] = None
     duration_ms: Optional[int] = None
@@ -97,6 +94,7 @@ class LabClipResultDTO(BaseModel):
 class LabSubmitResponse(BaseModel):
     task_id: int
     step_id: int
+    run_id: int
     project_id: int
     job_dir: Optional[str] = None
     total: int
@@ -142,8 +140,11 @@ class LabTaskItem(BaseModel):
     start_time: Optional[int] = None
     end_time: Optional[int] = None
     raw_steps: List[int] = Field(default_factory=list)
+    # raw_steps 各自最新可见 run 的 run_id，键为 step_id；后续请求带上它即锁定同一个 run
+    run_ids: Dict[int, int] = Field(default_factory=dict)
     has_raw_segments: bool = False
     has_current_step_raw: bool = False
+    offline_steps: List[int] = Field(default_factory=list)  # raw_steps 中有离线推理结果的 step
 
 
 class LabTaskListResponse(BaseModel):
@@ -152,7 +153,7 @@ class LabTaskListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 校验工具
+# 任务清单组装
 # ---------------------------------------------------------------------------
 
 
@@ -165,15 +166,27 @@ def _optional_int(value) -> Optional[int]:
         return None
 
 
-def _list_raw_steps(finder: SegmentFinder, task_id: int) -> List[int]:
-    """该 task 下有 raw 段的 step（升序）。送标只吃 raw，processed 轨在此无意义。"""
-    return [s.step_id for s in finder.list_steps(task_id) if "raw" in s.tracks]
+def _list_raw_runs(task_id: int) -> List[RunIdentity]:
+    """该 task 各 step 最新可见 run 中有 raw 段的那些（按 step 升序）。送标只吃 raw。
+
+    「raw 轨非空才收」同时滤掉建了目录没写成段的 step（点开是黑屏）。
+    """
+    return [
+        run for run in runs.query_latest_by_step(task_id)
+        if hls.query_has_segments(run, "raw")
+    ]
 
 
-def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
+def _list_offline_steps(raw_runs: List[RunIdentity]) -> List[int]:
+    """`raw_runs` 中有离线推理结果的 step。"""
+    return [run.step_id for run in raw_runs if inference_store.query_has_offline_results(run)]
+
+
+def _task_row_to_item(row: db_tasks.DBTask) -> LabTaskItem:
     task_id = int(row.task_id)
     step_id = _optional_int(row.current_step)
-    raw_steps = _list_raw_steps(finder, task_id)
+    raw_runs = _list_raw_runs(task_id)
+    raw_steps = [run.step_id for run in raw_runs]
     has_current_step_raw = step_id is not None and step_id in raw_steps
 
     return LabTaskItem(
@@ -186,23 +199,21 @@ def _task_row_to_item(row: DBTask, finder: SegmentFinder) -> LabTaskItem:
         start_time=_optional_int(row.start_time),
         end_time=_optional_int(row.end_time),
         raw_steps=raw_steps,
+        run_ids={run.step_id: run.run_id for run in raw_runs},
         has_raw_segments=bool(raw_steps),
         has_current_step_raw=has_current_step_raw,
+        offline_steps=_list_offline_steps(raw_runs),
     )
 
 
-def _storage_task_to_item(
-    finder: SegmentFinder, task_id: int, raw_steps: List[int]
-) -> LabTaskItem:
+def _storage_task_to_item(task_id: int, raw_runs: List[RunIdentity]) -> LabTaskItem:
     """从文件系统信息构造 LabTaskItem（存储模式）。
 
     DB 才有的字段（source_ip/status/current_step）无从得知：
     - source_ip=None, status="unknown", step_id/current_step 留空（不推断）
-    - updated_time/start_time 从各 raw step 的段时间戳（ts_ms）推导，用于排序与展示
+    - start_time = 各 raw 轨首段起点的最小值；updated_time = 各 raw 轨**段尾**的最大值（ms）
     """
-    ts_list: List[int] = []
-    for step_id in raw_steps:
-        ts_list.extend(seg.ts_ms for seg in finder.list_segments(task_id, step_id, "raw"))
+    spans = [sp for sp in (hls.query_span(run, ("raw",)) for run in raw_runs) if sp is not None]
 
     return LabTaskItem(
         task_id=task_id,
@@ -210,17 +221,19 @@ def _storage_task_to_item(
         current_step=None,
         step_id=None,
         status="unknown",
-        updated_time=max(ts_list) if ts_list else None,
-        start_time=min(ts_list) if ts_list else None,
+        updated_time=max(sp.end_ms for sp in spans) if spans else None,
+        start_time=min(sp.start_ms for sp in spans) if spans else None,
         end_time=None,
-        raw_steps=raw_steps,
+        raw_steps=[run.step_id for run in raw_runs],
+        run_ids={run.step_id: run.run_id for run in raw_runs},
         has_raw_segments=True,
         has_current_step_raw=False,
+        offline_steps=_list_offline_steps(raw_runs),
     )
 
 
 def _list_storage_tasks(
-    finder: SegmentFinder, q: Optional[str], limit: int, offset: int
+    q: Optional[str], limit: int, offset: int
 ) -> tuple[int, List[LabTaskItem]]:
     """直接枚举存储目录列任务，完全不碰 DB（DB 挂了也能工作）。
 
@@ -231,81 +244,17 @@ def _list_storage_tasks(
     needle = (q or "").strip()
 
     items: List[LabTaskItem] = []
-    for task_id in finder.list_task_ids():  # 已跳过 .lab_exports 等非数字目录
+    for task_id in step_tasks.list_task_ids():  # 已跳过 .lab_exports 等非数字目录
         if needle and needle not in str(task_id):
             continue
-        raw_steps = _list_raw_steps(finder, task_id)
-        if not raw_steps:
+        raw_runs = _list_raw_runs(task_id)
+        if not raw_runs:
             continue
-        items.append(_storage_task_to_item(finder, task_id, raw_steps))
+        items.append(_storage_task_to_item(task_id, raw_runs))
 
     items.sort(key=lambda it: (it.updated_time or 0, it.task_id), reverse=True)
     total = len(items)
     return total, items[offset : offset + limit]
-
-
-def _validate_clips(
-    clips: List[LabClipRange],
-    *,
-    max_clips: int,
-    max_clip_ms: int,
-    max_total_ms: int,
-) -> List[LabClipRange]:
-    """按 start_ms 升序排好，校验：单段时长、不重叠、数量、总时长。
-
-    Raises:
-        ValidationError: 任一校验失败
-    """
-    if len(clips) > max_clips:
-        raise ValidationError(
-            f"Too many clips: {len(clips)} > max {max_clips}",
-            field="clips",
-        )
-
-    # 按 start_ms 升序（输入未必有序）
-    ordered = sorted(clips, key=lambda c: c.start_ms)
-
-    total_ms = 0
-    for i, c in enumerate(ordered):
-        if c.end_ms <= c.start_ms:
-            raise ValidationError(
-                f"clip[{i}] end_ms ({c.end_ms}) <= start_ms ({c.start_ms})",
-                field="clips",
-            )
-        duration = c.end_ms - c.start_ms
-        if duration > max_clip_ms:
-            raise ValidationError(
-                f"clip[{i}] duration {duration} ms exceeds max {max_clip_ms} ms",
-                field="clips",
-            )
-        total_ms += duration
-
-        if i > 0 and c.start_ms < ordered[i - 1].end_ms:
-            raise ValidationError(
-                f"clip[{i}] overlaps with previous "
-                f"(start_ms={c.start_ms} < prev.end_ms={ordered[i - 1].end_ms})",
-                field="clips",
-            )
-
-    if total_ms > max_total_ms:
-        raise ValidationError(
-            f"Total duration {total_ms} ms exceeds max {max_total_ms} ms",
-            field="clips",
-        )
-
-    return ordered
-
-
-def _resolve_project_id(req_project_id: Optional[int], default_pid: int) -> int:
-    """req.project_id 优先；为空时 fallback 到 settings 默认；都没就 400。"""
-    pid = req_project_id if req_project_id else default_pid
-    if not pid or pid <= 0:
-        raise ValidationError(
-            "project_id is required: pass it in the request body or set "
-            "CLEANSIGHT_LABEL_STUDIO_DEFAULT_PROJECT_ID",
-            field="project_id",
-        )
-    return int(pid)
 
 
 # ---------------------------------------------------------------------------
@@ -325,48 +274,63 @@ async def list_lab_tasks(
     - "db"（默认）：查 clean_task 表 + 文件系统补 raw 段信息（原行为）
     - "storage"：直接枚举存储目录，不碰 DB（业务库挂了时的兜底）
     """
-    finder = SegmentFinder(get_default_base_dir())
-
     if lab_config.get_task_source() == "storage":
-        total, tasks = _list_storage_tasks(finder, q, limit, offset)
+        total, tasks = _list_storage_tasks(q, limit, offset)
         return LabTaskListResponse(total=total, tasks=tasks)
 
-    db = next(get_db())
-    try:
-        try:
-            query = db.query(DBTask)
-            needle = (q or "").strip()
-            if needle:
-                filters = [
-                    DBTask.source_ip.ilike(f"%{needle}%"),
-                    DBTask.status.ilike(f"%{needle}%"),
-                ]
-                task_id = _optional_int(needle)
-                if task_id is not None:
-                    filters.append(DBTask.task_id == task_id)
-                query = query.filter(or_(*filters))
+    total, rows = db_tasks.query_task_page(q, limit=limit, offset=offset)
+    return LabTaskListResponse(
+        total=total,
+        tasks=[_task_row_to_item(row) for row in rows],
+    )
 
-            total = query.count()
-            rows = (
-                query
-                .order_by(DBTask.updated_time.desc(), DBTask.task_id.desc())
-                .offset(offset)
-                .limit(limit)
-                .all()
-            )
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message="Failed to list lab tasks",
-                retryable=True,
-                query="SELECT ... FROM clean_task",
-            ) from e
 
-        return LabTaskListResponse(
-            total=int(total),
-            tasks=[_task_row_to_item(row, finder) for row in rows],
-        )
-    finally:
-        db.close()
+# ---------------------------------------------------------------------------
+# 接口 0.5: 离线分割模型的逐帧类别概率（label_probs.npz）
+# ---------------------------------------------------------------------------
+
+
+class LabelProbsRequest(BaseModel):
+    task_id: int
+    step_id: int
+    run_id: Optional[int] = None  # 锁定哪个 run；缺省 = 该 step 最新可见 run
+    track: Literal["raw", "processed"] = "raw"
+
+
+class LabelProbsResponse(BaseModel):
+    task_id: int
+    step_id: int
+    run_id: int
+    track: str
+    media_duration_ms: int
+    labels: List[str]
+    media_ms: List[int]  # [T]
+    probs: List[List[float]]  # [C][T]：按类分列，一类一条曲线
+
+
+def _label_probs_view(req: LabelProbsRequest) -> LabelProbsResponse:
+    """读该 run 的逐帧类别概率，帧 ts 换算到 `track` 轨的媒体刻度；没有产物返回空数组。"""
+    run, timeline = resolve_timeline(req.task_id, req.step_id, req.run_id, req.track)
+    lp = inference_store.read_label_probs(run)
+    if lp is None:
+        labels: List[str] = []
+        media_ms: List[int] = []
+        probs: List[List[float]] = []
+    else:
+        labels = list(lp.labels)
+        media_ms = [timeline.media_ms_at(int(round(float(t) * 1000))) for t in lp.ts]
+        probs = lp.probs.T.round(3).tolist()
+    return LabelProbsResponse(
+        task_id=req.task_id, step_id=req.step_id, run_id=run.run_id, track=req.track,
+        media_duration_ms=timeline.duration_ms,
+        labels=labels, media_ms=media_ms, probs=probs,
+    )
+
+
+@router.post("/label-probs", response_model=LabelProbsResponse)
+def get_label_probs(req: LabelProbsRequest) -> LabelProbsResponse:
+    """离线分割模型逐帧 softmax（可视化旁路），时间已换算为媒体刻度。"""
+    return _label_probs_view(req)
 
 
 # ---------------------------------------------------------------------------
@@ -380,142 +344,49 @@ async def submit_clips(req: LabSubmitRequest) -> LabSubmitResponse:
 
     单段失败不让整请求失败；HTTP 仍 200，每段在 clips[] 里携带 success/error_code。
     """
-    from app.settings import settings as s
-
     # ---- LS 配置检查（503）----
-    ls_url = lab_config.get_url()
-    ls_token = lab_config.get_token()
-    if not ls_url or not ls_token:
-        raise _ls_not_configured()
+    try:
+        ls_url, ls_token = lab_service.require_label_studio()
+    except lab_service.LabelStudioNotConfiguredError:
+        raise _ls_not_configured() from None
 
     # ---- 入参校验（400）----
-    project_id = _resolve_project_id(
-        req.project_id, lab_config.get_default_project_id()
-    )
-    ordered_clips = _validate_clips(
-        req.clips,
-        max_clips=s.lab_export_max_clips_per_submit,
-        max_clip_ms=s.lab_export_max_clip_ms,
-        max_total_ms=s.lab_export_max_total_ms,
+    project_id = lab_service.resolve_project_id(req.project_id)
+    ordered_clips = lab_service.validate_clips(
+        [ClipRange(c.start_media_ms, c.end_media_ms) for c in req.clips]
     )
 
     # ---- 段存在性（404）----
-    finder = SegmentFinder(get_default_base_dir())
-    if not finder.list_segments(req.task_id, req.step_id, "raw"):
+    run = resolve_run(req.task_id, req.step_id, req.run_id)
+    if run is None or not hls.query_has_segments(run, "raw"):
         raise NotFoundError(
             f"No raw segments for task_id={req.task_id}, step_id={req.step_id}",
             resource_type="Segments",
             resource_id=f"task={req.task_id},step={req.step_id},track=raw",
         )
 
-    # ---- ClipBuilder + LS 客户端 ----
-    temp_root = Path(s.lab_export_temp_dir) if s.lab_export_temp_dir else None
-    builder = ClipBuilder(
-        finder=finder,
-        ffmpeg_bin=s.ffmpeg_path,
-        temp_root=temp_root,
-        preset=s.lab_export_ffmpeg_preset,
-        max_duration_ms=s.lab_export_max_clip_ms,
-        gap_tolerance_ms=s.lab_export_gap_tolerance_ms,
+    # ffmpeg / urlopen 都是阻塞调用
+    outcome = await run_in_threadpool(
+        lab_service.submit_clips,
+        run,
+        ordered_clips,
+        project_id=project_id,
+        ls_url=ls_url,
+        ls_token=ls_token,
+        keep_artifacts_on_failure=req.keep_artifacts_on_failure,
     )
-    ls = LabelStudioClient(
-        base_url=ls_url,
-        token=ls_token,
-    )
-
-    # 实际工作放到线程池里：ffmpeg/urlopen 都是阻塞调用
-    def _do_work() -> LabSubmitResponse:
-        job_dir = builder.new_job_dir()
-        results: List[LabClipResultDTO] = []
-        any_failure = False
-
-        for c in ordered_clips:
-            spec = ClipSpec(
-                task_id=req.task_id,
-                step_id=req.step_id,
-                start_ms=c.start_ms,
-                end_ms=c.end_ms,
-                label=c.label,
-            )
-            results.append(_process_one(spec, builder, ls, project_id, job_dir))
-            if not results[-1].success:
-                any_failure = True
-
-        # 全部成功 / 不要求保留 → 清理
-        retained_job_dir: Optional[str] = None
-        if any_failure and req.keep_artifacts_on_failure:
-            retained_job_dir = str(job_dir)
-        else:
-            builder.cleanup(job_dir)
-
-        success_count = sum(1 for r in results if r.success)
-        return LabSubmitResponse(
-            task_id=req.task_id,
-            step_id=req.step_id,
-            project_id=project_id,
-            job_dir=retained_job_dir,
-            total=len(results),
-            success_count=success_count,
-            failure_count=len(results) - success_count,
-            clips=results,
-        )
-
-    return await run_in_threadpool(_do_work)
-
-
-def _process_one(
-    spec: ClipSpec,
-    builder: ClipBuilder,
-    ls: LabelStudioClient,
-    project_id: int,
-    job_dir: Path,
-) -> LabClipResultDTO:
-    """处理一段：build → 上传。返回单段 DTO（不抛）。"""
-    # Step 1: build mp4
-    try:
-        clip_res = builder.build_one(spec, job_dir)
-    except ClipRangeOutOfBoundsError as e:
-        return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
-            error_code="range_out_of_bounds", error=str(e),
-        )
-    except ClipRangeGapError as e:
-        return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
-            error_code="range_gap", error=str(e),
-        )
-    except ClipBuildError as e:
-        return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
-            error_code="ffmpeg_failed", error=str(e),
-        )
-
-    # Step 2: upload
-    meta = {
-        "task_id": spec.task_id,
-        "step_id": spec.step_id,
-        "start_ms": spec.start_ms,
-        "end_ms": spec.end_ms,
-        "label": spec.label,
-        "source": "cleansight",
-    }
-    ls_res = ls.import_clip(project_id, clip_res.output_path, meta=meta)
-    if not ls_res.success:
-        return LabClipResultDTO(
-            start_ms=spec.start_ms, end_ms=spec.end_ms, success=False,
-            duration_ms=clip_res.duration_ms,
-            size_bytes=clip_res.size_bytes,
-            n_source_segments=clip_res.n_source_segments,
-            error_code=ls_res.error_code or "ls_bad_response",
-            error=ls_res.error,
-        )
-
-    return LabClipResultDTO(
-        start_ms=spec.start_ms, end_ms=spec.end_ms, success=True,
-        label_studio_task_id=ls_res.task_id,
-        duration_ms=clip_res.duration_ms,
-        size_bytes=clip_res.size_bytes,
-        n_source_segments=clip_res.n_source_segments,
+    results = [LabClipResultDTO(**dataclasses.asdict(o)) for o in outcome.clips]
+    success_count = sum(1 for r in results if r.success)
+    return LabSubmitResponse(
+        task_id=req.task_id,
+        step_id=req.step_id,
+        run_id=run.run_id,
+        project_id=project_id,
+        job_dir=str(outcome.job_dir) if outcome.job_dir is not None else None,
+        total=len(results),
+        success_count=success_count,
+        failure_count=len(results) - success_count,
+        clips=results,
     )
 
 
@@ -533,6 +404,7 @@ async def download_step_video(
         pattern="^(raw|processed)$",
         description="processed=带检测框，raw=原始画面",
     ),
+    run_id: Optional[int] = Query(None, description="锁定哪个 run；缺省 = 该 step 最新可见 run"),
 ):
     """下载某 step 某轨的整段录像（单个 mp4，attachment）。
 
@@ -544,20 +416,16 @@ async def download_step_video(
 
     step 仍在录制时下载 = 拿到当前已落盘的部分（在途段被过滤，不会产出坏文件）。
     """
-    from app.settings import settings as s
-
-    temp_root = Path(s.lab_export_temp_dir) if s.lab_export_temp_dir else None
-    exporter = StepExporter(
-        finder=SegmentFinder(get_default_base_dir()),
-        ffmpeg_bin=s.ffmpeg_path,
-        temp_root=temp_root,
-    )
-
+    run = resolve_run(task_id, step_id, run_id)
+    if run is None:
+        raise NotFoundError(
+            f"No {track} segments for task_id={task_id}, step_id={step_id}",
+            resource_type="Segments",
+            resource_id=f"task={task_id},step={step_id},track={track}",
+        )
     try:
         # ffmpeg 是阻塞调用，扔线程池（与 /submit 同样式）
-        output_path = await run_in_threadpool(
-            exporter.export, task_id, step_id, track
-        )
+        output_path = await run_in_threadpool(lab_service.export_step, run, track)
     except StepExportNoSegments as e:
         raise NotFoundError(
             str(e),
@@ -613,14 +481,7 @@ async def lab_health() -> LabHealthResponse:
             default_project_id=default_pid,
         )
 
-    def _ping() -> tuple[bool, Optional[str]]:
-        try:
-            cli = LabelStudioClient(ls_url, ls_token, timeout=10)
-            return cli.ping()
-        except Exception as e:  # noqa: BLE001
-            return False, f"{type(e).__name__}: {e}"
-
-    reachable, err = await run_in_threadpool(_ping)
+    reachable, err = await run_in_threadpool(lab_service.ping_label_studio, ls_url, ls_token)
     return LabHealthResponse(
         configured=True,
         reachable=reachable,

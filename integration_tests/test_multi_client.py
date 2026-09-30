@@ -2,7 +2,7 @@
 多客户端并发集成测试（Scenario 6）
 
 从数据库查询最多 max-tasks 个任务，并发运行 scenario 1（正常流程）。
-观测走 admin 运维面板（http://{server}:{api_port}/admin-f3m8/ui/ 「总览」/「实时监控」tab）。
+观测走 admin 运维面板（http://{server}:{api_port}/ui-f3m8/admin/ 「总览」/「实时监控」tab）。
 
 用法:
     python integration_tests/test_multi_client.py [options]
@@ -11,7 +11,7 @@
     --server      <host>    服务器地址（默认: localhost）
     --duration    <seconds> 运行时长（默认: 60）
     --max-tasks   <int>     最大并发任务数（默认: 5）
-    --video_path  <path>    测试视频路径（默认: test/test_video.mp4）
+    --video_path  <path>    测试视频路径（默认: fixtures/test_video.mp4）
     --fps         <int>     推流帧率（默认: 30）
 """
 
@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import func
 
-from app.database import get_db
-from app.models import DBTask
+from app.db.database import get_db
+from app.db.tasks import DBTask
 
 
 def get_test_tasks(max_tasks: int) -> list:
@@ -119,13 +119,13 @@ def main():
     parser.add_argument("--server", default="localhost", help="服务器地址（默认: localhost）")
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
     parser.add_argument("--max-tasks", type=int, default=5, dest="max_tasks", help="最大并发任务数（默认: 5）")
-    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
+    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: fixtures/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
     parser.add_argument("--api-port", type=int, default=8000, dest="api_port", help="后端 API 端口（默认: 8000）")
     parser.add_argument("--rtsp-port", type=int, default=8004, dest="rtsp_port", help="RTSPProxy 推流端口（默认: 8004）")
     parser.add_argument(
         "--current-step", default=None, dest="current_step",
-        help="任务 current_step（1=LEAK / 2=CLEAN / 其它=MOCK）；透传给每个子进程。"
+        help="任务 current_step（1=LEAK / 2=CLEAN；未配置 start 400）；透传给每个子进程。"
              "复用已存在任务时须与 DB 中的值一致（子进程会 fail-fast）。",
     )
     parser.add_argument(
@@ -136,7 +136,7 @@ def main():
     args = parser.parse_args()
 
     if args.video_path is None:
-        args.video_path = str(Path(__file__).parent.parent / "test" / "test_video.mp4")
+        args.video_path = str(Path(__file__).parent / "fixtures" / "test_video.mp4")
 
     if not Path(args.video_path).exists():
         raise SystemExit(f"测试视频不存在: {args.video_path}")
@@ -162,7 +162,7 @@ def main():
     print(f"\n找到 {len(tasks)} 个任务: {[t[0] for t in tasks]}")
 
     print(f"\n观测走 admin 运维面板（后端自带，同源同端口）:")
-    print(f"  http://{args.server}:{args.api_port}/admin-f3m8/ui/")
+    print(f"  http://{args.server}:{args.api_port}/ui-f3m8/admin/")
     print(f"  → 「总览」看各客户端队列/健康，「实时监控」逐个选客户端看画面\n")
 
     log_dir = Path(__file__).parent / "logs"

@@ -1,82 +1,73 @@
 """
-CleanSight 异常处理集成测试
+告警上报重试（`app/services/alarm/alarm_worker.py`）测试
 
 基于《实时 AI 视觉检测项目异常处理规范》验证：
-1. Metrics 正确记录（retry / gpu_oom）
-2. Action 决策正确（RETRY/FATAL）
-3. 重试/退避策略与端到端持久化重试
+1. Metrics 正确记录（retry）
+2. 重试决策正确（fatal / retryable / 次数上限）
+3. 重试次数与退避延迟序列
 """
 
-import time
-from unittest.mock import Mock, patch
+import types
 
 import pytest
 
-from app.utils.exceptions import (
-    DatabaseError,
+from app.services.alarm import alarm_worker as alarm_worker_mod
+from app.services.alarm.alarm_worker import (
+    _report_with_retry,
+    _retry_delay,
+    _should_retry,
+)
+from app.types.exceptions import (
     FFmpegError,
-    ModelInferenceError,
     PersistenceError,
     StreamConnectionError,
 )
-from app.utils.executor import Action, ExecutionPolicy, GuardedExecutor
-from app.utils.metrics import (
-    gpu_oom_total,
-    retry_total,
-)
+from app.services.utils.metrics import retry_total
+
+
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch):
+    """免掉告警重试的真实退避等待；返回每次 sleep 的秒数，供断言退避序列。
+
+    只换 alarm_worker 模块里的 `time` 引用，不动全局 time.sleep。
+    """
+    calls = []
+    monkeypatch.setattr(
+        alarm_worker_mod, "time", types.SimpleNamespace(sleep=calls.append)
+    )
+    return calls
 
 # ============================================================================
-# Phase 5 Test 3: Action 决策测试
+# 重试决策
 # ============================================================================
 
 
-def test_action_decision_fatal():
-    """测试 Action.FATAL 决策（fatal=True）"""
-    executor = GuardedExecutor()
-    policy = ExecutionPolicy(max_attempts=3)
-
+def test_should_retry_fatal():
+    """fatal=True 不重试"""
     exc = FFmpegError("FFmpeg crashed", exit_code=1)  # fatal=True
-    action = executor._decide_action(exc, policy, attempts=1)
-
-    assert action == Action.FATAL, "FFmpegError should result in Action.FATAL"
+    assert _should_retry(exc, attempts=1) is False
 
 
-def test_action_decision_retry():
-    """测试 Action.RETRY 决策（retryable=True）"""
-    executor = GuardedExecutor()
-    policy = ExecutionPolicy(max_attempts=3)
-
+def test_should_retry_retryable():
+    """retryable=True 且未达上限则重试"""
     exc = StreamConnectionError(url="rtsp://test")  # retryable=True
-    action = executor._decide_action(exc, policy, attempts=1)
-
-    assert action == Action.RETRY, "StreamConnectionError should result in Action.RETRY"
+    assert _should_retry(exc, attempts=1) is True
 
 
-def test_action_decision_retry_exhausted():
-    """测试 Action.FATAL 决策（重试耗尽）"""
-    executor = GuardedExecutor()
-    policy = ExecutionPolicy(max_attempts=3)
-
+def test_should_retry_exhausted():
+    """retryable=True 但已达上限（3 次）不再重试"""
     exc = StreamConnectionError(url="rtsp://test")  # retryable=True
-    action = executor._decide_action(exc, policy, attempts=3)
-
-    # 重试次数已达上限，应该返回 FATAL
-    assert action == Action.FATAL, "Retry exhausted should result in Action.FATAL"
+    assert _should_retry(exc, attempts=3) is False
 
 
 # ============================================================================
-# Phase 5 Test 4: Metrics 验证
+# Metrics 验证
 # ============================================================================
 
 
-def test_metrics_retry():
-    """测试 retry_total metric"""
-    executor = GuardedExecutor()
-
-    # 修复：operation 应该是 policy_name（'stream'）
-    operation = "stream"  # policy_name
-    error_type = "StreamConnectionError"
-    metric_key = (operation, error_type)
+def test_metrics_retry(sleeps):
+    """测试 retry_total metric（operation 标签沿用 'persistence'）"""
+    metric_key = ("persistence", "PersistenceError")  # (operation, 异常类名)
 
     # 记录前的值
     before_count = 0
@@ -89,203 +80,113 @@ def test_metrics_retry():
         nonlocal attempt_count
         attempt_count += 1
         if attempt_count < 3:
-            raise StreamConnectionError(url="rtsp://test")
+            raise PersistenceError("Disk full", operation="hls_write")
         return "success"
 
-    result = executor.execute(func=failing_func, policy_name="stream")
+    result = _report_with_retry(failing_func)
 
-    # 验证：成功返回，且 retry_total 增加
+    # 验证：成功返回，retry_total 每次失败 +1，退避按指数 1s → 2s
     assert result == "success", "Should succeed after retries"
     after_count = retry_total._metrics[metric_key]._value.get()
-    # 应该重试了 2 次（第 3 次成功）
     assert (
-        after_count >= before_count + 2
-    ), f"retry_total should increase (before={before_count}, after={after_count})"
-
-
-def test_metrics_gpu_oom():
-    """测试 gpu_oom_total metric"""
-    executor = GuardedExecutor()
-
-    model_name = "test_model"
-    metric_key = (model_name,)
-
-    # 记录前的值
-    before_count = 0
-    if metric_key in gpu_oom_total._metrics:
-        before_count = gpu_oom_total._metrics[metric_key]._value.get()
-
-    def oom_func():
-        raise ModelInferenceError(
-            message="CUDA out of memory", model_name=model_name, is_cuda_error=True
-        )
-
-    with pytest.raises(ModelInferenceError):
-        executor.execute(func=oom_func, policy_name="inference")
-
-    # 验证 metric 增加
-    after_count = gpu_oom_total._metrics[metric_key]._value.get()
-    assert after_count == before_count + 1, "gpu_oom_total should increase"
+        after_count == before_count + 2
+    ), f"retry_total should increase by 2 (before={before_count}, after={after_count})"
+    assert sleeps == [1.0, 2.0]
 
 
 # ============================================================================
-# Phase 5 Test 5: GuardedExecutor 集成测试
+# 重试执行
 # ============================================================================
 
 
-def test_retry_executor_success():
-    """测试 GuardedExecutor 成功执行"""
-    executor = GuardedExecutor()
-
+def test_report_with_retry_success():
+    """首次成功直接返回结果"""
     def success_func():
         return {"result": "success"}
 
-    result = executor.execute(func=success_func, policy_name="database")
-
-    assert result == {"result": "success"}
+    assert _report_with_retry(success_func) == {"result": "success"}
 
 
-def test_retry_executor_retryable_error():
-    """测试 GuardedExecutor 重试可重试的异常"""
-    executor = GuardedExecutor()
-
-    attempt_count = 0
-
-    def retryable_func():
-        nonlocal attempt_count
-        attempt_count += 1
-        if attempt_count < 3:
-            raise DatabaseError("Connection timeout", retryable=True)
-        return "success"
-
-    result = executor.execute(func=retryable_func, policy_name="database")  # 最多 3 次
-
-    assert result == "success"
-    assert attempt_count == 3, "Should retry twice before succeeding"
-
-
-def test_retry_executor_non_retryable_error():
-    """测试 GuardedExecutor 不重试不可重试的异常"""
-    executor = GuardedExecutor()
-
+def test_report_with_retry_non_retryable_error(sleeps):
+    """不可重试的异常首次即上抛"""
     def non_retryable_func():
         raise FFmpegError("FFmpeg not found", exit_code=1)  # fatal=True
 
     with pytest.raises(FFmpegError):
-        executor.execute(func=non_retryable_func, policy_name="stream")
+        _report_with_retry(non_retryable_func)
+
+    assert sleeps == []  # 首次失败即上抛，不退避
 
 
-def test_retry_executor_max_attempts():
-    """测试 GuardedExecutor 达到最大重试次数"""
-    executor = GuardedExecutor()
+def test_report_with_retry_unknown_exception(sleeps):
+    """非 AppError 异常不重试，原样上抛，并计入 retry_total"""
+    metric_key = ("persistence", "RuntimeError")
+    before_count = 0
+    if metric_key in retry_total._metrics:
+        before_count = retry_total._metrics[metric_key]._value.get()
 
+    def boom():
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        _report_with_retry(boom)
+
+    assert sleeps == []
+    assert retry_total._metrics[metric_key]._value.get() == before_count + 1
+
+
+def test_report_with_retry_max_attempts(sleeps):
+    """达到最大尝试次数后上抛"""
     attempt_count = 0
 
     def always_fail():
         nonlocal attempt_count
         attempt_count += 1
-        raise DatabaseError("Always fail", retryable=True)
+        raise PersistenceError("Always fail", operation="hls_write")
 
-    with pytest.raises(DatabaseError):
-        executor.execute(func=always_fail, policy_name="database")  # 最多 3 次
+    with pytest.raises(PersistenceError):
+        _report_with_retry(always_fail)  # 最多 3 次
 
-    # 验证：尝试了 3 次
+    # 验证：尝试了 3 次，其间按指数退避等了 2 次
     assert (
         attempt_count == 3
     ), f"Should attempt max_attempts times (actual: {attempt_count})"
+    assert sleeps == [1.0, 2.0]
+
+
+def test_reporter_http_failure_is_retried(sleeps, monkeypatch):
+    """真实 AlarmReporter 的 HTTP 失败抛可重试 PersistenceError，经 _report_with_retry 重试到上限"""
+    from app.services.alarm.reporter import AlarmReporter
+
+    reporter = AlarmReporter()
+    sent = []
+    monkeypatch.setattr(reporter, "_send_alarm_http", lambda info: sent.append(info) or False)
+
+    with pytest.raises(PersistenceError) as exc_info:
+        _report_with_retry(lambda: reporter.report_alarm({"task_id": 7, "step_id": 2}))
+
+    assert exc_info.value.retryable
+    assert len(sent) == 3
+    assert sleeps == [1.0, 2.0]
 
 
 # ============================================================================
-# Phase 5 Test 6: 延迟计算测试
+# 延迟计算
 # ============================================================================
 
 
-def test_calculate_delay_fixed():
-    """测试固定延迟策略"""
-    executor = GuardedExecutor()
-    policy = ExecutionPolicy(delay=2.0, backoff=False)
-
-    delay1 = executor._calculate_delay(policy, attempts=1)
-    delay2 = executor._calculate_delay(policy, attempts=2)
-    delay3 = executor._calculate_delay(policy, attempts=3)
-
-    assert delay1 == 2.0
-    assert delay2 == 2.0
-    assert delay3 == 2.0
+def test_retry_delay_exponential_backoff():
+    """指数退避：1.0, 2.0, 4.0, 8.0"""
+    assert _retry_delay(1) == 1.0
+    assert _retry_delay(2) == 2.0
+    assert _retry_delay(3) == 4.0
+    assert _retry_delay(4) == 8.0
 
 
-def test_calculate_delay_exponential_backoff():
-    """测试指数退避策略"""
-    executor = GuardedExecutor()
-    policy = ExecutionPolicy(
-        delay=1.0, backoff=True, backoff_factor=2.0, max_delay=10.0
-    )
-
-    delay1 = executor._calculate_delay(policy, attempts=1)
-    delay2 = executor._calculate_delay(policy, attempts=2)
-    delay3 = executor._calculate_delay(policy, attempts=3)
-    delay4 = executor._calculate_delay(policy, attempts=4)
-
-    # 指数退避：1.0, 2.0, 4.0, 8.0
-    assert delay1 == 1.0
-    assert delay2 == 2.0
-    assert delay3 == 4.0
-    assert delay4 == 8.0
-
-
-def test_calculate_delay_exponential_backoff_max():
-    """测试指数退避达到上限"""
-    executor = GuardedExecutor()
-    policy = ExecutionPolicy(
-        delay=1.0, backoff=True, backoff_factor=2.0, max_delay=5.0  # 限制最大延迟
-    )
-
-    delay5 = executor._calculate_delay(policy, attempts=5)
-    delay10 = executor._calculate_delay(policy, attempts=10)
-
-    # 指数退避会超过 max_delay，应该被限制在 5.0
-    assert delay5 == 5.0, f"delay5 should be capped at max_delay (actual: {delay5})"
-    assert delay10 == 5.0, f"delay10 should be capped at max_delay (actual: {delay10})"
-
-
-# ============================================================================
-# Phase 5 Test 7: 端到端场景测试
-# ============================================================================
-
-
-def test_end_to_end_persistence_retry():
-    """
-    端到端测试：持久化重试
-
-    场景：
-    - 写入 HLS 视频段
-    - 第 1 次失败（磁盘满）
-    - 第 2 次成功
-
-    验证：
-    - 最终成功
-    - 重试 1 次
-    """
-    executor = GuardedExecutor()
-
-    attempt_count = 0
-
-    def persist_segment():
-        nonlocal attempt_count
-        attempt_count += 1
-        if attempt_count == 1:
-            raise PersistenceError(
-                message="Disk full",
-                source_ip="persist_test",
-                operation="hls_write",
-                retryable=True,
-            )
-        return "segment_saved"
-
-    result = executor.execute(func=persist_segment, policy_name="persistence")
-
-    assert result == "segment_saved"
-    assert attempt_count == 2, "Should retry once"
+def test_retry_delay_capped_at_max():
+    """指数退避超过 30s 上限后被截断"""
+    assert _retry_delay(6) == 30.0, "2**5 = 32 应被截到 30"
+    assert _retry_delay(10) == 30.0
 
 
 if __name__ == "__main__":

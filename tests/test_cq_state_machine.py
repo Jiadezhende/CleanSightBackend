@@ -1,12 +1,12 @@
 """T2: CQ 状态机 + 写门 + close() —— 迟到写入在写入时刻被拒。"""
 
-from factories import make_alarm, make_cq, make_frame, make_frame_feature
+from factories import make_alarm, make_cq, make_frame, make_frame_detection
 from app.services.client.queues import RunState
 
 
 # 本地薄别名：保留原用例可读性，构造逻辑收敛在 factories。
 def _det():
-    return make_frame_feature(source="bubble", class_name="b")
+    return make_frame_detection(source="bubble", class_name="b")
 
 
 # --- 转换：幂等、单调 ---
@@ -36,11 +36,11 @@ def test_frame_and_result_writes_blocked_when_not_active():
     assert cq.append_ca_ready_with_throttle(make_frame()) is False
     assert cq.append_ca_raw(make_frame()) is False
     cq.append_ca_processed(make_frame())
-    assert cq.get_ca_processed_length() == 0
+    assert len(cq.ca_processed) == 0
     cq.push_detection(_det())
     assert cq.get_slide_window() == []
-    cq.set_latest_inference(make_frame_feature())
-    assert cq.get_latest_inference() is None
+    cq.set_latest_detection(make_frame_detection())
+    assert cq.get_latest_detection() is None
 
 
 # --- settlement 非对称：DRAINING 放行、CLOSED 拒 ---
@@ -81,25 +81,15 @@ def test_close_releases_payload_keeps_identity():
     assert cq.get_slide_window() == []
     assert len(cq.ca_raw) == 0
     assert cq.get_recent_alarms() == []
-    assert cq.get_latest_inference() is None
+    assert cq.get_latest_detection() is None
     # 身份小壳保留（供 fence/日志）
-    assert cq.task_id == 1
-    assert cq.step_id == 1
+    assert cq.run.task_id == 1
+    assert cq.run.step_id == 1
     assert cq.stage == "1"
 
 
 def test_clear_is_close_alias():
-    """ClientManager.remove 走 clear() → 等价 close()（置 CLOSED + 释放 payload）。"""
+    """ClientService.remove 走 clear() → 等价 close()（置 CLOSED + 释放 payload）。"""
     cq = make_cq()
     cq.clear()
     assert cq.get_state() is RunState.CLOSED
-
-
-# --- 迟到写：持旧 CQ 句柄者在 close 后写被拒（不串台到新 run） ---
-
-def test_late_write_to_closed_cq_rejected():
-    old = make_cq()
-    old.close()                              # 模拟旧 run 已拆除
-    assert old.append_ca_ready_with_throttle(make_frame()) is False
-    old.push_detection(_det())
-    assert old.get_slide_window() == []

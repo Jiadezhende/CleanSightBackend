@@ -4,17 +4,15 @@
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import List
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import get_db
-from app.models import DBAlarm, DBTask
-from app.services.client.manager import client_manager
-from app.services.traceback import SegmentFinder
-from app.services.traceback.segment_finder import get_default_base_dir
-from app.utils.exceptions import DatabaseError
+from app.db import alarms as db_alarms
+from app.db import tasks as db_tasks
+from app.services.client.instance import client_service
+from app.storage import hls, runs
+from app.storage import tasks as step_tasks
 
 router = APIRouter(prefix="/task", tags=["task"])
 logger = logging.getLogger(__name__)
@@ -36,43 +34,23 @@ async def get_task_alarms(task_id: int):
     Raises:
         DatabaseError: 数据库查询失败（由边界层 3 转换为 503）
     """
-    db = next(get_db())
-    try:
-        try:
-            rows = (
-                db.query(DBAlarm)
-                .filter(DBAlarm.task_id == int(task_id))
-                .order_by(DBAlarm.create_time.desc())
-                .all()
-            )
-        except SQLAlchemyError as e:
-            raise DatabaseError(
-                message=f"Failed to fetch alarms for task {task_id}",
-                retryable=True,
-                query=f"SELECT ... FROM clean_alarm WHERE task_id = {task_id}",
-            ) from e
-
-        alarms = []
-        for r in rows:
-            alarms.append(
-                {
-                    "alarm_id": r.alarm_id,
-                    "task_id": r.task_id,
-                    "step_id": r.step_id,
-                    "step_name": r.step_name,
-                    "alarm_type": r.alarm_type,
-                    "severity": r.severity,
-                    "message": r.message,
-                    "resolved": bool(r.resolved) if r.resolved is not None else False,
-                    "resolved_by": r.resolved_by,
-                    "detected_at": int(r.detected_at) if r.detected_at is not None else None,  # type: ignore[arg-type]
-                    "resolved_at": int(r.resolved_at) if r.resolved_at is not None else None,  # type: ignore[arg-type]
-                }
-            )
-
-        return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
-    finally:
-        db.close()
+    alarms = [
+        {
+            "alarm_id": r.alarm_id,
+            "task_id": r.task_id,
+            "step_id": r.step_id,
+            "step_name": r.step_name,
+            "alarm_type": r.alarm_type,
+            "severity": r.severity,
+            "message": r.message,
+            "resolved": bool(r.resolved) if r.resolved is not None else False,
+            "resolved_by": r.resolved_by,
+            "detected_at": int(r.detected_at) if r.detected_at is not None else None,  # type: ignore[arg-type]
+            "resolved_at": int(r.resolved_at) if r.resolved_at is not None else None,  # type: ignore[arg-type]
+        }
+        for r in db_alarms.query_task_alarms(task_id)  # create_time 降序
+    ]
+    return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
 
 
 def _build_signals_10s(stream_summary: dict) -> dict:
@@ -81,7 +59,7 @@ def _build_signals_10s(stream_summary: dict) -> dict:
 
     metric 映射是 inference 展示知识，收敛在 router 装配层；CQ 只出纯流名汇总。
     """
-    from app.services.inference.naming import get_task_metric_map
+    from app.services.inference.online.naming import get_task_metric_map
 
     metric_map = get_task_metric_map()
     _empty = {"active": False, "hit_count": 0, "max_conf": 0.0}
@@ -106,7 +84,7 @@ def _build_task_alarm_message(cq, since_seq: int) -> dict:
     """装配前端实时告警消息：原子取告警增量 + 滑窗汇总，序列化域对象。"""
     alarms, max_seq = cq.get_alarm_snapshot(since_seq)  # 原子 (增量, max_seq)
     return {
-        "task_id": cq.task_id,
+        "task_id": cq.run.task_id,
         "max_seq": max_seq,
         "signals_10s": _build_signals_10s(cq.get_slide_window_summary()),
         "alarms": [
@@ -141,7 +119,7 @@ async def get_client_frontend_message(
     if since_seq < 0:
         raise HTTPException(status_code=400, detail="since_seq must be >= 0")
 
-    cq = client_manager.get(task_id)  # 键即 task_id，O(1) 直取
+    cq = client_service.get(task_id)  # 键即 task_id，O(1) 直取
     if cq is None:
         return _empty_alarm_payload(task_id)
 
@@ -157,33 +135,6 @@ async def get_client_frontend_message(
 # ---------------------------------------------------------------------------
 
 
-def _fetch_source_ips(task_ids: List[int]) -> Dict[int, Optional[str]]:
-    """批量取 task_id → source_ip（单次 IN 查询）。
-
-    DB 在这里是**锦上添花**：历史清单的存在性判定完全来自磁盘，source_ip 只是
-    给大屏显示点位。故 DB 任何故障（含建连失败）都吞掉返回空映射，让清单降级为
-    source_ip=null 照常返回，不 503——与 /traceback timeline 的降级策略一致。
-    """
-    if not task_ids:
-        return {}
-
-    db = None
-    try:
-        db = next(get_db())
-        rows = (
-            db.query(DBTask.task_id, DBTask.source_ip)
-            .filter(DBTask.task_id.in_(task_ids))
-            .all()
-        )
-        return {int(r.task_id): r.source_ip for r in rows}
-    except Exception as exc:  # noqa: BLE001 —— 降级路径，不区分故障类型
-        logger.warning("[TaskList] DB 不可用，历史清单降级为无 source_ip: %s", exc)
-        return {}
-    finally:
-        if db is not None:
-            db.close()
-
-
 @router.get("/live")
 def list_live_tasks():
     """在线任务清单（大屏用）。纯内存，零 DB、零磁盘。
@@ -192,7 +143,8 @@ def list_live_tasks():
     - `task_id`   → `WS /ai/video?task_id={task_id}`：锁定**这一次 run**，run 结束即止
     - `source_ip` → `WS /ai/video?client_id={source_ip}`：跟随该**点位**当前 run，换任务自动跟
 
-    `step_id` 仅供展示当前洗消阶段，不参与画面路由。
+    `step_id` 仅供展示当前洗消阶段，不参与画面路由。`run_id` 是这次 run 的身份，回放 / 时间轴
+    带上它即锁定这一次 run。
 
     注：本接口是 admin 页 `/admin-f3m8/clients` 的大屏版——同一份注册表快照，
     去掉队列深度等运维字段。
@@ -200,58 +152,100 @@ def list_live_tasks():
     # 注册表是 COW 不可变 dict：原子读引用后迭代无需加锁
     tasks = [
         {
-            "task_id": cq.task_id,
+            "task_id": cq.run.task_id,
             "source_ip": cq.source_ip,
-            "step_id": cq.step_id,
+            "step_id": cq.run.step_id,
+            "run_id": cq.run.run_id,
         }
-        for cq in client_manager.snapshot().values()
+        for cq in client_service.snapshot().values()
+        if cq.run is not None
     ]
     tasks.sort(key=lambda t: t["task_id"])
     return {"total": len(tasks), "tasks": tasks}
+
+
+def _summarise_steps(task_id: int) -> List[dict]:
+    """该 task 下**有段**的 step 摘要，按 step_id 升序。每个 step 取最新可见 run（`run_id` 随之给出）。
+
+    时间戳取**双轨并集**（与 timeline 的 start_ms/end_ms 同口径）：两轨段边界不一定对齐，
+    实测有过 20+ 秒的差，故它表达的是「该 step 有画面的时间跨度」，不等于任一单轨的播放范围。
+    `last_segment_ms` 是最后一段的**起点**，不是结束时刻。
+
+    ⚠ 「两轨都没段就丢弃」（`query_span` 返回 None）必须在这里补：`query_latest_by_step` 只看
+    run 可见，不看有无段；目录建了但没写成段（起流即失败）的 step 点开是黑屏。
+    """
+    steps: List[dict] = []
+    for run in runs.query_latest_by_step(task_id):
+        span = hls.query_span(run)
+        if span is None:
+            continue
+        steps.append(
+            {
+                "step_id": run.step_id,
+                "run_id": run.run_id,
+                "tracks": list(span.tracks),
+                "start_ms": span.start_ms,
+                "last_segment_ms": span.last_start_ms,
+            }
+        )
+    return steps
+
+
+def _sort_key(task: dict) -> tuple:
+    """历史清单排序键：列出的 run 里最大的 run_id，同值 task_id 大者优先。"""
+    return max(s["run_id"] for s in task["steps"]), task["task_id"]
 
 
 @router.get("/history")
 def list_history_tasks():
     """历史任务清单（大屏用）：最近 10 个**已完成且能回放**的任务。无查询参数。
 
-    「已完成」= 磁盘上有段（能播） **且** 不在活跃注册表里（跑完了）。刻意**不看**
+    「已完成」= 磁盘上有段（能播） **且** 不在活跃注册表里（跑完了）。「有段」看的是各 step
+    **最新可见 run**：它没段（首段出来前就停了、只写出了检测结果）时整个 step 不进清单，即使
+    更早的 run 有录像。刻意**不看**
     `clean_task.status`——该字段由平台业务侧写入，取值集合后端无从校验，拿它过滤
     等于把清单挂在一个未知字面量上，写错就静默变空。上述两个条件后端都是权威。
 
-    返回的字段即历史画面入参：
-        GET /traceback/task/{task_id}/playlist.m3u8?step_id={step_id}&track={track}
-        GET /traceback/task/{task_id}/timeline?step_id={step_id}
+    返回的字段即历史画面入参（带上 `run_id`，之后该 step 再开跑也仍指向清单里这一次）：
+        GET /traceback/task/{task_id}/playlist.m3u8?step_id={step_id}&track={track}&run_id={run_id}
+        GET /traceback/task/{task_id}/timeline?step_id={step_id}&run_id={run_id}
 
     `track` **必须从 `steps[].tracks` 里挑**：playlist 的 track 默认 processed，
     而只落了 raw 的 step 照默认打过去就是 404。
 
-    时间字段的粒度刻意压在 **step** 上——回放本身就是 step 粒度（playlist 必填
-    step_id，跨 step 聚合不支持），且两个 step 之间可以隔任意长时间，任务级
+    时间字段的粒度刻意压在 **step** 上——回放本身是一个 step 的一个 run（每个 step 只列
+    最新可见 run，跨 step / 跨 run 聚合不支持），且两个 step 之间可以隔任意长时间，任务级
     「min(start) ~ max(last)」会跨过中间空档，既不是任务时长也不对应任何可播放
-    的东西。任务级只留 `latest_ms`（= max(steps[].last_segment_ms)）作排序键与
-    「最近一次有画面」的展示值，不成对给 start，免得被读成连续区间。
+    的东西。任务级只留 `latest_ms`（= max(steps[].last_segment_ms)）作「最近一次有画面」的
+    展示值，不成对给 start，免得被读成连续区间。
+
+    **排序键 = max(steps[].run_id)**：清单里实际列出的那些 run 中最晚开跑的时刻，降序，同值
+    task_id 大者优先。同一 (task, step) 下没被列出的其他代（更早的、或更新但没段的）不参与。
 
     `last_segment_ms` 是最后一段的**起点**，不是结束时刻（差一个段长）；精确时长
     取 timeline 的 `duration_ms`（按 playlist EXTINF 算）。
 
-    实现是两阶段，避免每次请求全盘扫段：目录 mtime 粗排挑候选 → 只对候选深扫拿
-    真实段时间与轨道，收满 10 条即停。mtime 只用于挑候选，对外时间戳一律取真实
-    段 ts。粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个
-    刚停的——大屏下一轮轮询自愈，不加锁。
+    实现是两阶段，避免每次请求全盘扫段：按 `tasks.latest_run_id`（所有 run 目录的最大 run_id，
+    不看产物）粗排 → 逐个深扫。粗排键是排序键的**上界**，故收满 10 条后，下一个候选的上界已
+    低于第 10 名的排序键即可停——剩下的不可能再挤进来。粗筛与深扫之间任务可能刚起/刚停，
+    清单可能短暂含一个刚起的 run 或漏一个刚停的——大屏下一轮轮询自愈，不加锁。
     """
-    finder = SegmentFinder(get_default_base_dir())
-    active_ids = set(client_manager.snapshot().keys())
+    active_ids = set(client_service.snapshot().keys())
 
     tasks: List[dict] = []
     scanned = 0
-    for task_id in finder.list_task_ids_by_recency():
-        if len(tasks) >= _HISTORY_LIMIT or scanned >= _HISTORY_SCAN_CAP:
+    for task_id in step_tasks.list_task_ids(order="recent"):
+        if scanned >= _HISTORY_SCAN_CAP:
             break
         if task_id in active_ids:  # 还在跑 → 不算历史
             continue
+        if len(tasks) >= _HISTORY_LIMIT:
+            tenth = sorted((_sort_key(t) for t in tasks), reverse=True)[_HISTORY_LIMIT - 1]
+            if step_tasks.latest_run_id(task_id) < tenth[0]:  # 上界都挤不进前 10，后面更不可能
+                break
 
         scanned += 1
-        steps = finder.list_steps(task_id)
+        steps = _summarise_steps(task_id)
         if not steps:  # 目录在但没段（起流即失败）→ 点开是黑屏，不进清单
             continue
 
@@ -259,23 +253,21 @@ def list_history_tasks():
             {
                 "task_id": task_id,
                 "source_ip": None,  # 下方按页补
-                "latest_ms": max(s.last_ts_us for s in steps) // 1000,
-                "steps": [
-                    {
-                        "step_id": s.step_id,
-                        "tracks": list(s.tracks),
-                        "start_ms": s.first_ts_us // 1000,
-                        "last_segment_ms": s.last_ts_us // 1000,
-                    }
-                    for s in steps
-                ],
+                "latest_ms": max(s["last_segment_ms"] for s in steps),
+                "steps": steps,
             }
         )
 
-    # 粗筛序基于 mtime（近似），最终顺序按真实段时间戳重排一次
-    tasks.sort(key=lambda t: (t["latest_ms"], t["task_id"]), reverse=True)
+    tasks.sort(key=_sort_key, reverse=True)
+    tasks = tasks[:_HISTORY_LIMIT]
 
-    source_ips = _fetch_source_ips([t["task_id"] for t in tasks])
+    # DB 只给大屏补点位显示，存在性判定全在磁盘：DB 任何故障（含建连失败）都降级为
+    # source_ip=null 照常返回，不 503——与 /traceback timeline 的降级策略一致
+    try:
+        source_ips = db_tasks.query_source_ips([t["task_id"] for t in tasks])
+    except Exception as exc:  # noqa: BLE001 —— 降级路径，不区分故障类型
+        logger.warning("[TaskList] DB 不可用，历史清单降级为无 source_ip: %s", exc)
+        source_ips = {}
     for t in tasks:
         t["source_ip"] = source_ips.get(t["task_id"])
 

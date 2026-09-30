@@ -10,7 +10,7 @@
 
 测试覆盖：
   1. StreamService：start() 失败后 decoder 必须仍在 self.decoders（供监控接管）
-  2. GlobalHealthMonitor：进程死 → 重连路径；进程活 → 不重连；未注册 → orphan 路径
+  2. HealthMonitorWorker：进程死 → 重连路径；进程活 → 不重连；未注册 → orphan 路径
   3. 完整状态机：进程死 → respawn → 来帧退出重连
   4. 放弃：无帧超 cleanup_timeout → cleanup（时间触发，非次数）
   5. 对象身份 fence：槽位被 /start 换新 run 时放弃重连
@@ -21,10 +21,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.health_monitor.config import HealthMonitorConfig
-from app.services.health_monitor.manager import GlobalHealthMonitor
-from app.services.stream.manager import StreamService
-from app.utils.exceptions import FFmpegError
+from app.daemons.health_monitor.config import HealthMonitorConfig
+from app.daemons.health_monitor.worker import HealthMonitorWorker
+from app.services.stream.service import StreamService
+from app.types.exceptions import FFmpegError
 
 
 # ===========================================================================
@@ -37,8 +37,8 @@ def _make_monitor(
     active_decoder_ids: set,
     *,
     decoder_alive: bool = True,
-) -> GlobalHealthMonitor:
-    """构建一个带 mock 依赖的 GlobalHealthMonitor，用于单元测试。
+) -> HealthMonitorWorker:
+    """构建一个带 mock 依赖的 HealthMonitorWorker，用于单元测试。
 
     Args:
         client_id: 被测客户端 ID
@@ -66,11 +66,12 @@ def _make_monitor(
         task_max_duration=0.0,  # 禁用任务超时，避免干扰
     )
 
-    return GlobalHealthMonitor(
-        client_manager=mock_cm,
+    return HealthMonitorWorker(
+        client_service=mock_cm,
         stream_service=mock_ss,
-        inference_manager=MagicMock(),
+        inference_service=MagicMock(),
         config=config,
+        recording_service=MagicMock(),
     )
 
 
@@ -85,16 +86,11 @@ class TestDecoderRegistration:
         self.service = StreamService()
         self.client_id = "reconnect_test_client"
 
-        self.mock_settings = MagicMock()
-        self.mock_settings.mediamtx_proxy_port = 8554
-        self.mock_settings.mediamtx_internal_port = 8554
-
     def _start_with_failing_decoder(self, error):
-        with patch("app.services.stream.manager.FFmpegDecoder") as MockDecoder, \
+        with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
                  self.service, "_get_client_queues", return_value=MagicMock()
-             ), \
-             patch("app.settings.settings", self.mock_settings):
+             ):
 
             mock_dec = MockDecoder.return_value
             mock_dec.is_alive.return_value = False
@@ -125,14 +121,6 @@ class TestDecoderRegistration:
         assert info is not None
         assert info["url"] == "rtsp://127.0.0.1:8554/test"
 
-    def test_metrics_registered_after_failed_start(self):
-        """start() 失败后 self.metrics 中也应有记录。"""
-        self._start_with_failing_decoder(
-            FFmpegError(message="stream not available",
-                        source_ip=self.client_id, exit_code=1)
-        )
-        assert self.client_id in self.service.metrics
-
     def test_is_decoder_alive_false_for_dead_or_missing(self):
         """is_decoder_alive：注册但进程死 → False；未注册 → False。"""
         # 未注册
@@ -145,7 +133,7 @@ class TestDecoderRegistration:
 
 
 # ===========================================================================
-# Part 2：GlobalHealthMonitor — 进程死活判据（重连 vs 只等 vs orphan）
+# Part 2：HealthMonitorWorker — 进程死活判据（重连 vs 只等 vs orphan）
 # ===========================================================================
 
 class TestHealthMonitorReconnectPath:
@@ -175,6 +163,76 @@ class TestHealthMonitorReconnectPath:
         monitor._check_all_clients()
         assert monitor._client_stats["reconnecting"] == 1
         assert monitor._client_stats["orphan_streams"] == 0
+
+    def test_requests_residual_flush_once_on_entering_reconnect(self):
+        """进入重连时登记一次断点残帧 flush，栅栏 = 断流前最后一帧 ts。
+
+        不登记的后果是静默的：断流那刻攒在 CA 队列里的半批帧会被重连后的帧补满，拼成一个
+        横跨 gap 的段，`eff_fps` 被 gap 拉低 → 10 秒画面写成 30 秒慢放，且 fps 仍在合理带
+        内、不触发退化兜底。**登记只能发生一次**——重复登记本身无害（后到覆盖），但每 tick
+        重复意味着它被放错了位置（早退分支之前），那时 `_reconnecting_clients` 还没置上。
+        """
+        client_id = "monitor_flush_request"
+        mock_cq = self._cq(seconds_ago=10.0)
+        last_frame_ts = mock_cq.latest_raw_timestamp
+
+        monitor = _make_monitor(
+            client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
+        )
+
+        monitor._check_all_clients()
+        monitor._recording_service.request_residual_flush.assert_called_once_with(
+            mock_cq, fence_ts=last_frame_ts
+        )
+
+        # 后续轮次走 _handle_reconnecting_client，不该再登记
+        monitor._check_all_clients()
+        monitor._check_all_clients()
+        assert monitor._recording_service.request_residual_flush.call_count == 1
+
+    def test_reregisters_the_same_fence_on_reconnect_success(self):
+        """重连成功时用**同一个**栅栏再登记一次，捞走迟到的断流前帧。
+
+        raw 轨由 decoder 直写，进重连那一刻队列内容就定了；processed 轨由 viz worker 按
+        tick 从推理结果渲染，ts 落后 raw 一个推理管线延迟。延迟超过「检测 + sweeper 一个
+        tick」时，断流前的 processed 帧在首次 flush 之后才入队，没人再切 → processed 轨
+        照样产出横跨 gap 的慢放段。
+
+        重复登记安全：栅栏是时间戳，重连后的帧 ts 都大于它。
+        """
+        client_id = "monitor_flush_on_success"
+        mock_cq = self._cq(seconds_ago=10.0)
+        fence = mock_cq.latest_raw_timestamp
+
+        monitor = _make_monitor(
+            client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
+        )
+        monitor._check_all_clients()                     # 进重连，登记第一次
+
+        mock_cq.latest_raw_timestamp = time.time()       # 新帧来了 → 判定重连成功
+        monitor._check_all_clients()
+
+        assert client_id not in monitor._reconnecting_clients
+        calls = monitor._recording_service.request_residual_flush.call_args_list
+        assert len(calls) == 2
+        assert calls[0] == calls[1], "第二次必须用同一个栅栏，否则会切进重连后的帧"
+        assert calls[1].kwargs["fence_ts"] == fence
+
+    def test_no_residual_flush_request_when_stream_info_missing(self):
+        """`stream_info` 缺失 → 连重连都进不去，也不该登记 flush（否则每 tick 重复登记）。"""
+        client_id = "monitor_flush_no_stream_info"
+        mock_cq = self._cq(seconds_ago=10.0)
+
+        monitor = _make_monitor(
+            client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
+        )
+        monitor._stream_service.get_stream_info.return_value = None
+
+        monitor._check_all_clients()
+        monitor._check_all_clients()
+
+        assert client_id not in monitor._reconnecting_clients
+        monitor._recording_service.request_residual_flush.assert_not_called()
 
     def test_no_reconnect_when_decoder_alive_even_if_frames_stale(self):
         """进程活着但帧陈旧（等首帧/瞬时停）→ 只等，不进重连（这是启动 bug 的根治点）。"""
@@ -310,7 +368,7 @@ class TestReconnectIdentityFence:
 
         # 模拟 /start 抢占重启：槽位换成全新 cq_B
         cq_b = self._cq()
-        monitor._client_manager.snapshot.return_value = {client_id: cq_b}
+        monitor._client_service.snapshot.return_value = {client_id: cq_b}
 
         # Round 2：当前 cq(cq_B) 非捕获的 cq_A → 放弃重连，且不对新 run 发起 restart
         monitor._stream_service.restart_stream.reset_mock()

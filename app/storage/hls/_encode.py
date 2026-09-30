@@ -7,7 +7,7 @@ mp4v，带自己的 moov），交给 `_fmp4` 再转成 HLS 要的 fragment。
 `EXTINF`、以及由 EXTINF 累加出来的 `tfdt`，三者必须同源，否则播放器段尾停摆或总时长缩水
 （推导见 `docs/update/20260908_EXTINF_TFDT_CONTRACT.md`）。
 
-依赖上界：`app.domain`（域货币 `Frame`，numpy 随它进来）+ stdlib。**cv2 走函数体内 import**
+依赖上界：`app.types`（域货币 `Frame`，numpy 随它进来）+ stdlib。**cv2 走函数体内 import**
 ——模块级会让 `import app.storage.hls` 一律拉起 OpenCV（~250 ms）。
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from app.domain.frame import Frame
+from app.types.frame import Frame
 
 # 编码帧率由 `effective_fps` 从帧 ts 反推，不引用任何上游 fps。以下定义"无可测速率"的
 # 退化判定与兜底：反推值落在 [MIN, MAX] 外（乱序/重复 ts 致 span 异常）视为不可信。

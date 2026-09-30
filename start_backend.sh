@@ -65,7 +65,7 @@ RTCP_PORT=$((BASE_RTCP + OFFSET))
 
 # 注入给三方进程。这些 export 是环境变量，压得过 .env* 里的同名键
 # （见 settings.py:_load_env_files 的 setdefault），故上面五行是运行时的唯一真源。
-#   后端：uvicorn 绑定口 + 识别本机 MediaMTX 并回源改写（app/services/stream/manager.py:_rewrite_rtsp_url）
+#   后端：uvicorn 绑定口 + 识别本机 MediaMTX 并回源改写（app/services/stream/service.py:_rewrite_rtsp_url）
 #   CLEANSIGHT_PORT 必须导出——否则 `python -m app.main` 路径（读 settings.port）会与本脚本分叉到不同端口
 export CLEANSIGHT_PORT=$BACKEND_PORT
 export CLEANSIGHT_MEDIAMTX_PROXY_PORT=$PROXY_PORT
@@ -100,4 +100,4 @@ RELOAD=""
 [ "$ENV" = "dev" ] && RELOAD="--reload"
 
 # 前台启动后端
-uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" $RELOAD --log-config logging_config.json
+uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" $RELOAD --log-config config/logging.json

@@ -1,0 +1,268 @@
+"""
+HLS 帧反查（storage.hls 读侧）端到端 round-trip 测试
+
+不需要后端服务、RTSP、数据库或推理引擎，只需 FFmpeg：
+直接调 `hls.insert_segment` 走真实写路径落 fMP4 段 + `.idx` sidecar 到 `{step}/{run_id}/hls/`，
+再用 `hls.iter_frames` / `hls.read_segment` 按 ts 读回，逐帧比对。
+
+**这是唯一能抓「ts ↔ 像素错配」的手段**：帧内中心色块编码了 frame_id
+（三通道 16 阶量化，抗 H.264 有损压缩），读回后解码 id 与期望 gid 逐帧比。
+`tests/test_storage_hls.py` 用 seam 覆盖了同一套边界数学但不起
+ffmpeg，抓不到「解码出来的像素是不是那一帧」——两者互补，都要跑。
+
+用法:
+    python integration_tests/test_hls_frame_roundtrip.py [--task_id 9900002] [--keep]
+
+参数:
+    --task_id <int>  测试任务 ID（默认 9900002，避开真实数据）
+    --keep           保留生成的 database/{task_id}/ 目录（默认结束即删）
+
+测试项（括号内为修复前的实测表现，见 docs/update/20260901_FRAME_TRACKER_BOUNDARY_FIX.md）:
+    T1  全量遍历 ts 位级相等 + 像素 id 逐帧匹配   （修复前 1651/1800，末段整段丢失）
+    T2  区间起点落段中部                          （修复前该段被整段跳过）
+    T3  区间起点恰为段首帧                        （修复前同样被跳过：ts_ms 向下取整）
+    T4  跨段区间帧数精确                          （修复前 221 帧只出 171）
+    T5  越界区间返回空
+    T6  缺 sidecar 只跳过该段、其余照常                （修复前整条迭代中断）
+    T7  返回帧可写（下游 cv2 原地操作）           （修复前 np.frombuffer 只读）
+    T8  自定义尺寸生效
+    T9  processed 轨直接 ValueError（只服务 raw 轨）
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+import time
+from pathlib import Path
+from typing import Callable, List, Tuple
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from app.types.frame import Frame
+from app.settings import settings
+from app.storage import hls, runs
+
+# ---------------------------------------------------------------------------
+# 测试数据参数
+# ---------------------------------------------------------------------------
+
+STEP_ID = 2
+FPS = 15.0
+FRAMES_PER_SEG = 150          # 与线上一段 10s @15fps 同量级
+N_SEG = 12
+W, H = 640, 480
+BASE_TS = 1786731122.204701   # 固定起点，让 ts 抖动与截断行为可复现
+TOTAL = N_SEG * FRAMES_PER_SEG
+
+_rng = np.random.default_rng(42)
+# 背景用平滑噪声：纯噪声码率爆炸、纯色又编不出真实的帧间依赖，
+# 都会让「解码是否对齐」的结论失真。
+_TEXTURE = cv2.GaussianBlur(
+    _rng.integers(0, 256, size=(H, W + 256, 3), dtype=np.uint8), (9, 9), 0
+)
+
+
+def make_frame(gid: int) -> np.ndarray:
+    """帧内容 = 平移的背景纹理 + 中心色块编码的 frame_id。"""
+    img = _TEXTURE[:, gid % 256:gid % 256 + W].copy()
+    b = (gid % 16) * 16 + 8
+    g = ((gid // 16) % 16) * 16 + 8
+    r = ((gid // 256) % 16) * 16 + 8
+    img[H // 2 - 60:H // 2 + 60, W // 2 - 60:W // 2 + 60] = (b, g, r)
+    return img
+
+
+def decode_id(img: np.ndarray) -> int:
+    """从中心色块解回 frame_id。取内 60×60 求均值，躲开块边缘的压缩振铃。"""
+    h, w = img.shape[:2]
+    patch = img[h // 2 - 30:h // 2 + 30, w // 2 - 30:w // 2 + 30]
+    b, g, r = [int(round((float(patch[:, :, c].mean()) - 8) / 16)) for c in range(3)]
+    return (b % 16) + (g % 16) * 16 + (r % 16) * 256
+
+
+def ts_of(gid: int) -> float:
+    """15fps + 确定性抖动 —— 真实采集 ts 不等距，等距会掩盖边界 bug。"""
+    return BASE_TS + gid / FPS + 0.004 * np.sin(gid * 1.7)
+
+
+# ---------------------------------------------------------------------------
+# 造数（走真实写路径）
+# ---------------------------------------------------------------------------
+
+def hls_dir(task_id: int) -> Path:
+    """本测试的落盘目录 —— 该 step 最新可见 run 的 `hls/`。"""
+    return hls.init_path(runs.query(task_id, STEP_ID), "raw").parent
+
+
+def seed(task_id: int) -> None:
+    target = settings.storage_base_dir / str(task_id)
+    if target.exists():
+        shutil.rmtree(target)
+
+    run = runs.allocate(task_id, STEP_ID)
+    t0 = time.perf_counter()
+    for s in range(N_SEG):
+        gids = range(s * FRAMES_PER_SEG, (s + 1) * FRAMES_PER_SEG)
+        hls.insert_segment(
+            run, "raw",
+            [Frame(timestamp=ts_of(g), frame=make_frame(g)) for g in gids],
+        )
+    dt = time.perf_counter() - t0
+
+    d = hls_dir(task_id)
+    mp4s = sorted(d.glob("raw_segment_*.mp4"))
+    idxs = sorted(d.glob("raw_segment_*.idx"))
+    size = sum(p.stat().st_size for p in mp4s)
+    print(f"造数：{len(mp4s)} 段 / {len(idxs)} sidecar / {TOTAL} 帧，"
+          f"{dt:.1f}s，视频 {size / 1e6:.1f}MB，索引 {sum(p.stat().st_size for p in idxs) / 1e3:.1f}KB")
+    assert len(mp4s) == N_SEG and len(idxs) == N_SEG, "写路径没产出预期数量的段/sidecar"
+
+    # 前置断言：sidecar 必须位级等于写入的 ts，否则后面所有对齐结论都无意义
+    for s, p in enumerate(idxs):
+        arr = np.fromfile(p, dtype=np.float64)
+        exp = np.array([ts_of(s * FRAMES_PER_SEG + i) for i in range(FRAMES_PER_SEG)])
+        assert np.array_equal(arr, exp), f"sidecar {p.name} 与源 ts 不位级一致"
+    print("前置：sidecar 与源 ts 位级一致 ✅\n")
+
+
+# ---------------------------------------------------------------------------
+# 测试项
+# ---------------------------------------------------------------------------
+
+def build_checks(task_id: int) -> List[Tuple[str, Callable[[], str]]]:
+    run = runs.query(task_id, STEP_ID)
+
+    def scan(start_ts=None, end_ts=None, width=W, height=H):
+        """区间扫帧 —— 数据层的 `iter_frames`（无 `track` 参数，恒为 raw 轨）。"""
+        return hls.iter_frames(
+            run,
+            width=width, height=height, start_ts=start_ts, end_ts=end_ts,
+        )
+
+    def t1_full() -> str:
+        frames = list(scan())
+        assert len(frames) == TOTAL, f"帧数 {len(frames)} != {TOTAL}"
+        got_ts = [f.timestamp for f in frames]
+        assert got_ts == [ts_of(g) for g in range(TOTAL)], "ts 序列与 sidecar 不位级一致"
+        mism = [(g, decode_id(f.frame)) for g, f in enumerate(frames)
+                if decode_id(f.frame) != g]
+        assert not mism, f"像素-ts 错配 {len(mism)} 帧，首例 {mism[:3]}"
+        return f"{TOTAL} 帧：ts 位级相等 + 像素 id 逐帧匹配"
+
+    def t2_mid_start() -> str:
+        g = FRAMES_PER_SEG + 70
+        got = [f.timestamp for f in scan(ts_of(g), ts_of(g + 20))]
+        assert got == [ts_of(k) for k in range(g, g + 21)], f"实得 {len(got)}/21 帧"
+        return "21 帧精确"
+
+    def t3_exact_seg_start() -> str:
+        g = 5 * FRAMES_PER_SEG
+        got = [f.timestamp for f in scan(ts_of(g), ts_of(g + 5))]
+        assert got == [ts_of(k) for k in range(g, g + 6)], f"实得 {len(got)}/6 帧"
+        return "段首帧未被向下取整的 ts_ms 挤掉"
+
+    def t4_cross_seg() -> str:
+        g0, g1 = 3 * FRAMES_PER_SEG + 100, 5 * FRAMES_PER_SEG + 20
+        got = [f.timestamp for f in scan(ts_of(g0), ts_of(g1))]
+        assert got == [ts_of(k) for k in range(g0, g1 + 1)], f"实得 {len(got)}/{g1-g0+1} 帧"
+        return f"跨 3 段 {g1 - g0 + 1} 帧"
+
+    def t5_out_of_range() -> str:
+        far = ts_of(TOTAL - 1) + 100
+        assert list(scan(far, far + 10)) == [], "越界区间应为空"
+        assert list(scan(BASE_TS - 100, BASE_TS - 50)) == [], "早于首段的区间应为空"
+        return "越界（两侧）均返回空"
+
+    def t6_missing_sidecar() -> str:
+        victim = sorted(hls_dir(task_id).glob("raw_segment_*.idx"))[6]
+        bak = victim.with_suffix(".idx.bak")
+        victim.rename(bak)
+        try:
+            got = [f.timestamp for f in scan()]
+        finally:
+            bak.rename(victim)
+        exp = [ts_of(g) for g in range(TOTAL)
+               if not (6 * FRAMES_PER_SEG <= g < 7 * FRAMES_PER_SEG)]
+        assert got == exp, f"应剩 {len(exp)} 帧，实得 {len(got)}（缺一段索引不该打断整条迭代）"
+        return f"仅丢该段 {FRAMES_PER_SEG} 帧，其余 {len(exp)} 帧照常"
+
+    def t7_writeable() -> str:
+        f = next(iter(scan(ts_of(0), ts_of(0))))
+        assert f.frame.flags.writeable, "返回的 ndarray 只读，下游 cv2 原地操作会抛错"
+        cv2.rectangle(f.frame, (0, 0), (9, 9), (0, 0, 255), -1)  # 真做一次原地写
+        return "可写，cv2 原地绘制通过"
+
+    def t8_scale() -> str:
+        f = next(iter(scan(ts_of(0), ts_of(0), width=320, height=320)))
+        assert f.frame.shape == (320, 320, 3), f"shape={f.frame.shape}"
+        return "scale=320:320 生效（不保持宽高比，调用方自负）"
+
+    def t9_processed_rejected() -> str:
+        """解码只服务 raw 轨：processed 不落 sidecar，给不出带墙钟 ts 的帧。
+        「这条路不通」必须与「这段没数据」分得开，故是 ValueError 而非空迭代器。"""
+        ref = hls.SegmentRef(track="processed", ts_ms=hls.ts_to_ms(ts_of(0)))
+        try:
+            hls.read_segment(run, ref, width=W, height=H)
+        except ValueError:
+            return "processed 轨直接 ValueError，不静默返回空"
+        raise AssertionError("processed 轨应抛 ValueError，实际静默通过")
+
+    return [
+        ("T1  全量遍历 ts/像素对齐", t1_full),
+        ("T2  区间起点落段中部", t2_mid_start),
+        ("T3  区间起点恰为段首帧", t3_exact_seg_start),
+        ("T4  跨段区间", t4_cross_seg),
+        ("T5  越界区间", t5_out_of_range),
+        ("T6  缺 sidecar 降级", t6_missing_sidecar),
+        ("T7  返回帧可写性", t7_writeable),
+        ("T8  自定义尺寸", t8_scale),
+        ("T9  processed 轨拒绝", t9_processed_rejected),
+    ]
+
+
+def run(task_id: int) -> bool:
+    results = []
+    for name, fn in build_checks(task_id):
+        try:
+            results.append(("✅", name, fn() or ""))
+        except AssertionError as e:
+            results.append(("❌", name, str(e)))
+        except Exception as e:  # noqa: BLE001
+            results.append(("💥", name, f"{type(e).__name__}: {e}"))
+
+    print("=" * 88)
+    for mark, name, detail in results:
+        print(f"{mark} {name:26s} {detail}")
+    print("=" * 88)
+    passed = sum(1 for r in results if r[0] == "✅")
+    print(f"PASS {passed} / {len(results)}")
+    return passed == len(results)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="HLS 帧反查端到端 round-trip 测试")
+    parser.add_argument("--task_id", type=int, default=9900002,
+                        help="测试任务 ID（默认 9900002，避开真实数据）")
+    parser.add_argument("--keep", action="store_true",
+                        help="保留生成的 database/{task_id}/ 目录")
+    args = parser.parse_args()
+
+    target = settings.storage_base_dir / str(args.task_id)
+    try:
+        seed(args.task_id)
+        ok = run(args.task_id)
+    finally:
+        # 不留残迹：storage.tasks.list_task_ids 会把它当成真实任务列出来
+        if not args.keep and target.exists():
+            shutil.rmtree(target)
+            print(f"已清理 {target}")
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,5 @@
-# 持久化服务配置
-# 包含存储、HLS视频持久化、告警持久化相关的业务参数
+# storage 段 → 存储 TTL 清理（app/daemons/cleanup）
+# alarm 段   → 告警上报（app/services/alarm）
 
 # 存储配置
 # 注意：存储根目录 base_dir 已上移到 settings（env: CLEANSIGHT_STORAGE_DIR，默认 ./database），
@@ -9,20 +9,10 @@ storage:
   cleanup_days: 15                 # 保留天数：status=completed 且超过此天数的任务目录将被删除
   cleanup_interval_seconds: 3600  # 清理扫描间隔（秒），默认每小时一次
 
-# HLS持久化配置
-hls:
-  workers: 2                      # HLS Worker数量
-  queue_size: 100                 # HLS队列最大长度
-  sweep_interval_seconds: 1.0     # HLSSegmentSweeper 扫描间隔（秒）：周期从活跃 CQ 拉走攒满的整段落盘（PULL）
-
-  # 注意：不配 segment_duration——分段由 CQ 帧数(settings.ca_segment_seconds)触发、每段时长由
-  #      写入侧 EXTINF 从帧 ts 自适应，回放侧也从 EXTINF 读。配时长是死值且会误导。
-  # 注意：帧率参数从 app/settings.py 读取（单一真源），HLS 段编码 fps 由 strategy 从帧 ts 反推
-
 # 告警持久化配置
 alarm:
   workers: 1                      # 告警Worker数量
   queue_size: 200                 # 告警队列最大长度
 
-  # 注意：告警上报重试由 GuardedExecutor 统一处理（persistence策略：3次，指数退避）
+  # 注意：告警上报重试写死在 app/services/alarm/alarm_worker.py（3次，指数退避）
   # 注意：告警降频由 ClientQueues.try_pass_alarm_gate 统一控制（5s 固定冷却窗口）

@@ -121,7 +121,7 @@ foreach ($n in $PortEnvNames) { $PortEnvBackup[$n] = [Environment]::GetEnvironme
 $gw = $null
 try {
     # 导出给三方进程（设为环境变量即压过 .env* 同名键，见 settings.py:_load_env_files 的 setdefault）：
-    #   后端：uvicorn 绑定口 + 识别本机 MediaMTX 并回源改写（app/services/stream/manager.py:_rewrite_rtsp_url）
+    #   后端：uvicorn 绑定口 + 识别本机 MediaMTX 并回源改写（app/services/stream/service.py:_rewrite_rtsp_url）
     #   CLEANSIGHT_PORT 必须导出——否则 `python -m app.main` 路径（读 settings.port）会与本脚本分叉到不同端口
     $env:CLEANSIGHT_PORT                   = "$BackendPort"
     $env:CLEANSIGHT_MEDIAMTX_PROXY_PORT    = "$ProxyPort"
@@ -141,7 +141,7 @@ try {
     $reload = if ($env.ToLower() -eq "dev") { "--reload" } else { "" }
 
     # 前台启动后端
-    $uvArgs = @("app.main:app", "--host", "0.0.0.0", "--port", "$BackendPort", "--log-config", "logging_config.json")
+    $uvArgs = @("app.main:app", "--host", "0.0.0.0", "--port", "$BackendPort", "--log-config", "config/logging.json")
     if ($reload) { $uvArgs += $reload }
     & uvicorn @uvArgs
 }

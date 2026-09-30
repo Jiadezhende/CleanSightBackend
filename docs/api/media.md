@@ -8,7 +8,7 @@
   traceback /playlist ──→ m3u8（内含 segment/init 的 token URL）──→ 播放器逐段 GET /media/*
 ```
 
-**Token**：HMAC-SHA256 签名的不透明字符串，形如 `payload_b64.signature_b64`（URL-safe base64，无 padding）。consumer **无需解析**，整串放进 path 即可。payload 编码 `task_id / step_id / filename / kind / expiry`；`kind` 区分 `segment` / `init`，服务端校验时会核对 `kind` 必须与端点匹配（segment token 不能当 init 用，反之亦然）。
+**Token**：HMAC-SHA256 签名的不透明字符串，形如 `payload_b64.signature_b64`（URL-safe base64，无 padding）。consumer **无需解析**，整串放进 path 即可。payload 编码 `task_id / step_id / run_id / filename / kind / expiry`（`run_id` 即签发 playlist 时解析到的 run，见 [README › run 定位](README.md#run-定位可选-run_id)；本次变更前签发、不含它的 token（TTL ≤ 300s）按该 step 最新可见 run 解析）；`kind` 区分 `segment` / `init`，服务端校验时会核对 `kind` 必须与端点匹配（segment token 不能当 init 用，反之亦然）。
 
 - **TTL**：默认 **300 秒**（`media_token_ttl` 可配，单位**秒**）。签发时写入绝对过期时间 `expiry`（epoch 秒），校验时 `expiry <= now` 即过期。
 - **secret**：取自 `settings.media_token_secret`；**未配置**则进程启动时生成随机临时密钥并告警一次——此时**服务重启会让所有已签发 token 立即失效**（属预期行为，生产须配 `CLEANSIGHT_MEDIA_TOKEN_SECRET`）。
@@ -54,7 +54,7 @@
 | `400` | `filename` 含 `/` `\` 或为 `.` / `..` | `{"detail":"Invalid filename"}` |
 | `400` | 路径 resolve 后越出存储根（path traversal） | `{"detail":"Invalid path"}` |
 | `403` | token 无效 / 签名不符 / 已过期 / `kind` 非 `segment` / 格式错误 | `{"detail":"Invalid or expired token"}` |
-| `404` | token 合法但目标文件不存在或非常规文件 | `{"detail":"Media file not found"}` |
+| `404` | token 合法但目标文件不存在或非常规文件；或 token 锁定的 run 已被 TTL 回收 / 不存在 | `{"detail":"Media file not found"}` |
 
 > **注意是 403 不是 401**：token 校验失败（含过期、kind 不符）一律 **403**，不区分"未过期但伪造"与"已过期"——body 都是同一句 `Invalid or expired token`，**别依赖 body 文案判分支，只认 status code**。
 > **path traversal 是 400 不是 404**：拼路径越界走 400（`Invalid path`），只有"路径合法但文件确实不在磁盘上"才是 404。
@@ -82,7 +82,7 @@
 | `Cache-Control` | `private, max-age=3600` | 仅本客户端可缓存，缓存 **3600 秒（1 小时）** |
 | `Content-Disposition` | `inline` | 内联，不触发下载 |
 
-init 段在一个 step 生命周期内不变，故 `max-age` 远大于段（**3600s vs 段的 60s**）：前端只需拉一次并长期缓存，切段不重拉 init。
+init 段在一个 run 生命周期内不变，故 `max-age` 远大于段（**3600s vs 段的 60s**）：前端只需拉一次并长期缓存，切段不重拉 init。
 
 ### 错误
 
@@ -90,7 +90,7 @@ init 段在一个 step 生命周期内不变，故 `max-age` 远大于段（**36
 |------|---------|-----------|
 | `400` | token 内 `filename` 不以 `init.mp4` 结尾 | `{"detail":"Token does not point to init segment"}` |
 | `403` | token 无效 / 签名不符 / 已过期 / `kind` 非 `init` / 格式错误 | `{"detail":"Invalid or expired token"}` |
-| `404` | token 合法但该 init 文件不存在或非常规文件 | `{"detail":"Media file not found"}` |
+| `404` | token 合法但该 init 文件不存在或非常规文件；或 token 锁定的 run 已被 TTL 回收 / 不存在 | `{"detail":"Media file not found"}` |
 
 > 两端点的 403 与 404 body 形态一致（都只有 `detail`）；400 的 `detail` 文案按具体校验点不同（见上表）。**判分支只认 status code。**
 
@@ -114,7 +114,7 @@ init 段在一个 step 生命周期内不变，故 `max-age` 远大于段（**36
 |------|------------|
 | 段一路 200，突然全变 403 | token 到期或服务重启使 secret 变化——不是鉴权配错，重拉 playlist 换新 token |
 | 200 但播放器解不出画面 | 拿到了 segment 却没先拉/缓存 init 段；fMP4 fragment 无 init 无法解码 |
-| 404 而非 403 | token 合法、TTL 内，但磁盘上该文件已被滚动清理或从未落盘（段过期删除） |
+| 404 而非 403 | token 合法、TTL 内，但磁盘上该文件已被滚动清理或从未落盘（段过期删除），或 token 锁定的整个 run 已被回收——重拉 playlist 也只会拿到别的 run（或 404），原录像已不在 |
 | 400 `Invalid path` | 极少见，通常意味着 token 被篡改或签发侧构造了越界文件名——正常前端不会触发 |
 
 > 消费本接口的实现：token URL 由 [traceback](traceback.md) 的 playlist 端点内嵌进 `.m3u8`，前端播放器（HLS.js / 原生 MSE）按 playlist 逐段请求，一般不直接手写这两个 URL。

@@ -1,15 +1,21 @@
 """
-运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针
+运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针、离线推理作业
 路由前缀：/admin-f3m8（路径混淆，防自动扫描器命中）
 告警查询直接使用 GET /task/{task_id}/alarms（已有双源路由实现）
 """
 
 import time
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
-from app.services.client.manager import client_manager
+from app.services.client.instance import client_service
+from app.services.inference.offline.instance import offline_job_service
+from app.types.exceptions import NotFoundError
+
+from .utils.runs import no_run, resolve_run
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +30,15 @@ def _client_info(client_id: int, client_queues) -> dict:
     depths = client_queues.get_queue_depths()
     return {
         "client_id": client_id,  # 注册表键 = task_id(int)
-        "task_id": client_queues.task_id,
+        "task_id": client_queues.run.task_id,
         "source_ip": client_queues.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
-        "step_id": client_queues.step_id,
+        "step_id": client_queues.run.step_id,
         "queue_depths": depths,
     }
 
 
 def _parse_metrics_json() -> dict:
-    """从 Prometheus REGISTRY 提取 5 个核心指标，返回结构化 JSON。"""
+    """从 Prometheus REGISTRY 提取 4 个核心指标，返回结构化 JSON。"""
     from prometheus_client import REGISTRY
 
     # 按 metric family 名聚合
@@ -93,13 +99,7 @@ def _parse_metrics_json() -> dict:
             total_drop += sample.value
         result["frame_drop_total"] = {"total": int(total_drop), "by_reason": by_reason}
 
-    # 4. GPU OOM Counter（family 名去 _total）
-    oom_fam = families.get("gpu_oom")
-    if oom_fam:
-        total_oom = sum(s.value for s in oom_fam.samples if s.name.endswith("_total"))
-        result["gpu_oom_total"] = int(total_oom)
-
-    # 5. 重试 Counter（family 名去 _total）
+    # 4. 重试 Counter（family 名去 _total）
     retry_fam = families.get("retry")
     if retry_fam:
         by_op: dict = {}
@@ -149,7 +149,7 @@ def get_overview():
     换键后注册表键即 task_id，一条目 = 一个活跃 run；响应键 `clients`/`client_id`
     沿用旧名（admin 页 wire，值为 task_id），语义已是 run/任务。
     """
-    all_clients = client_manager.snapshot()
+    all_clients = client_service.snapshot()
     clients_info = [_client_info(cid, q) for cid, q in all_clients.items()]
     total_queued = sum(
         d["queue_depths"].get("ca_ready", 0)
@@ -171,16 +171,16 @@ def get_clients():
 
     一 run 一 CQ = `registry[task_id]`；响应/路径的 `clients`·`client_id` 为 admin 页 wire 旧名（值=task_id）。
     """
-    all_clients = client_manager.snapshot()
+    all_clients = client_service.snapshot()
     return [_client_info(cid, q) for cid, q in all_clients.items()]
 
 
 @router.get("/clients/{client_id}/alarms")
 def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
     """从内存告警日志读取该 run（task_id）最近 n 条告警（不走 DB）。"""
-    if not client_manager.has_client(client_id):
+    if not client_service.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
-    cq = client_manager.get(client_id)
+    cq = client_service.get(client_id)
     alarms = cq.get_recent_alarms(n=n)
     return {
         "client_id": client_id,
@@ -202,7 +202,7 @@ def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
 
 @router.get("/metrics/json")
 def get_metrics_json():
-    """Prometheus 5 个核心指标结构化为 JSON，前端每 5s 刷新。"""
+    """Prometheus 4 个核心指标结构化为 JSON，前端每 5s 刷新。"""
     try:
         return _parse_metrics_json()
     except Exception as exc:
@@ -214,3 +214,45 @@ def get_metrics_json():
 def ping():
     """延迟测试探针：立即返回服务端毫秒时间戳，前端计算 RTT。"""
     return {"server_time_ms": time.time() * 1000}
+
+
+# ---------------------------------------------------------------------------
+# 离线推理作业（串行执行，见 app/services/inference/offline/service.py）
+# ---------------------------------------------------------------------------
+
+class OfflineJobRequest(BaseModel):
+    task_id: int
+    step_id: int
+    run_id: Optional[int] = None  # 锁定哪个 run；缺省 = 该 step 最新可见 run
+
+
+@router.post("/offline/jobs", status_code=202)
+def submit_offline_job(req: OfflineJobRequest):
+    """提交一个离线推理作业，锁定一个 run；同一 run 已在排队 / 运行时返回在途那个。
+
+    step 未配离线模型 → 400（先于 run 解析）；run 找不到 → 404；该 run 正在运行 / 队满 → 409。
+    """
+    offline_job_service.require_offline(req.step_id)
+    run = resolve_run(req.task_id, req.step_id, req.run_id)
+    if run is None:
+        raise no_run(req.task_id, req.step_id)
+    return offline_job_service.submit(run).to_dict()
+
+
+@router.get("/offline/jobs")
+def list_offline_jobs():
+    """在途 + 最近结束的离线作业，新提交的在前。"""
+    return {"jobs": [job.to_dict() for job in reversed(offline_job_service.list_jobs())]}
+
+
+@router.get("/offline/jobs/{task_id}/{step_id}")
+def get_offline_job(task_id: int, step_id: int, run_id: Optional[int] = Query(None)):
+    """某个 run 的离线作业状态（前端提交后轮询用）；缺省 run_id = 该 step 最新可见 run。"""
+    run = resolve_run(task_id, step_id, run_id)
+    job = offline_job_service.get(run) if run is not None else None
+    if job is None:
+        raise NotFoundError(
+            f"no offline job for task {task_id} step {step_id}",
+            resource_type="offline_job", resource_id=f"{task_id}/{step_id}",
+        )
+    return job.to_dict()

@@ -1,5 +1,5 @@
 """
-单客户端集成测试 - 覆盖 9 种使用场景（观测走 admin 运维面板 /admin-f3m8/ui/）
+单客户端集成测试 - 覆盖 9 种使用场景（观测走 admin 运维面板 /ui-f3m8/admin/）
 
 用法:
     python integration_tests/test_single_client.py --scenario <1-9> --task_id <id> [options]
@@ -12,7 +12,7 @@
     5 - 仅 start:   调 start 但不推流(no-stream) 或 不调 terminate(no-terminate)
     6 - 延迟推流:   先调 start（流未就绪），N秒后推流，验证健康监控自动重连（Bug 2）
     7 - CLEAN阶段:  current_step=2 → CLEAN stage，验证帧透传不黑屏
-    8 - MOCK阶段:   无效 current_step → MOCK fallback，验证帧透传不黑屏
+    8 - 未配置阶段: 未配置的 current_step → /api/start 400
     9 - 阶段切换:   start(LEAK) → DB 改 step=2 → 再 start 触发全量重建 → CLEAN
 
 参数:
@@ -22,11 +22,11 @@
     --rtsp-port   <int>                默认 8004（RTSPProxy 推流端口）
     --task_id     <int>                必填
     --duration    <seconds>            默认 60
-    --video_path  <path>               默认 test/test_video.mp4
+    --video_path  <path>               默认 integration_tests/fixtures/test_video.mp4
     --fps         <int>                默认 30
     --mode        no-stream|no-terminate  仅 scenario 5，默认 no-stream
     --stream-delay <seconds>           仅 scenario 6，推流延迟（默认 10s）
-    --current-step <step>              任务阶段(1=LEAK/2=CLEAN/其它=MOCK)，覆盖场景默认
+    --current-step <step>              任务阶段(1=LEAK/2=CLEAN，其它 start 400)，覆盖场景默认
 
 维度说明:
     --scenario     决定「怎么跑」（生命周期：正常/断流/延迟/不 terminate…）
@@ -291,14 +291,14 @@ def print_admin_url(server: str, api_port: int, task_id: int):
         return
     _admin_url_printed = True
     print(f"\n观测走 admin 运维面板（后端自带，同源同端口）:")
-    print(f"  http://{server}:{api_port}/admin-f3m8/ui/")
+    print(f"  http://{server}:{api_port}/ui-f3m8/admin/")
     print(f"  → 「实时监控」tab 选择 task_id={task_id} 对应的客户端并点「连接」")
     print(f"  → 告警/指标/证据回溯见其余 tab\n")
 
 
 # ---------------------------------------------------------------------------
 # 标准生命周期：推流 → start → 观察 duration → terminate
-# Scenario 1/7/8 共用，仅 current_step 与提示文案不同
+# Scenario 1/7 共用，仅 current_step 与提示文案不同
 # ---------------------------------------------------------------------------
 
 
@@ -601,7 +601,7 @@ def run_scenario_6(args):
                 print(f"  排查步骤:")
                 print(f"  1. 检查后端日志是否有 'Initial start failed, health monitor will retry'")
                 print(f"     → 有: 修复生效，可能重连窗口不够（增大 --stream-delay 或减小延迟）")
-                print(f"     → 无: Bug 2 修复未生效，请重新检查 stream/manager.py 注册顺序")
+                print(f"     → 无: Bug 2 修复未生效，请重新检查 stream/service.py 注册顺序")
                 print(f"  2. 检查后端日志是否有 'orphan' 相关日志")
                 print(f"     → 有: decoder 未注册，健康监控走了 orphan 路径（旧 bug 行为）")
 
@@ -636,24 +636,29 @@ def run_scenario_7(args):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 8: 无效 current_step → MOCK 阶段透传
+# Scenario 8: 未配置的 current_step → /api/start 参数校验失败
 # ---------------------------------------------------------------------------
 
 
 def run_scenario_8(args):
-    """无效 current_step → MOCK 阶段 fallback（验证不黑屏）。
+    """未配置的 current_step → /api/start 返回 400，不起 run。
 
-    本质是「标准生命周期 + 无效 current_step」的预设别名，等价于
-    `--scenario 1 --current-step 未知阶段`。--current-step 可进一步覆盖。
+    `--current-step` 可覆盖（非数字如「未知阶段」同样应 400）。
     """
-    _run_simple_lifecycle(
-        args,
-        name="Scenario 8",
-        subtitle="无效 current_step → MOCK 阶段透传（验证不黑屏）",
-        current_step_default="未知阶段",
-        extra=("current_step = '未知阶段' → 预期路由到 MOCK stage",),
-        tail=("  验证: 后端日志应有 MOCK stage 路由，WebSocket 帧正常推送（无黑屏）",),
-    )
+    section("Scenario 8: 未配置的 current_step → start 拒绝",
+            "current_step = '99'（未配置）→ 预期 /api/start 返回 400")
+
+    with scenario_setup(args, current_step="99", need_stream=False) as ctx:
+        print(f"\n调用 /api/start（task_id={args.task_id}, current_step={ctx.current_step}）")
+        result = ctx.api.unified_start(args.task_id, ctx.pull_url, args.fps)
+        if "error" not in result:
+            do_terminate(ctx.api, ctx.client_id)
+            raise RuntimeError(f"/api/start 意外成功: {result}")
+        if "400" not in str(result["error"]):
+            raise RuntimeError(f"/api/start 失败但不是 400: {result['error']}")
+        print(f"  [预期] /api/start 400: {str(result['error'])[:200]}")
+
+    print("\nScenario 8 完成")
 
 
 # ---------------------------------------------------------------------------
@@ -666,7 +671,7 @@ def run_scenario_9(args):
     同一任务先以 current_step=1（LEAK）启动，运行一段时间后将 DB 中 current_step 改为 2，
     再次调用 /api/start，验证：
       1. 第二次 start 不会幂等返回（step 变化触发全量重建）
-      2. 后端切换到 CLEAN stage（stage 字段由 InferenceManager 根据 current_step 路由）
+      2. 后端切换到 CLEAN stage（stage 字段由 InferenceService 根据 current_step 路由）
       3. 流保持连续推送，两次 start 都成功
 
     验证点（后端日志关键字）：
@@ -769,7 +774,7 @@ def main():
                        --mode no-terminate: start 但不 terminate
   6  延迟推流:        先 start（无流，预期失败）→ N秒后推流 → 验证自动重连 (Bug 2)
   7  CLEAN阶段:       别名 = scenario 1 + current_step=2 → CLEAN stage（验证不黑屏）
-  8  MOCK阶段:        别名 = scenario 1 + 无效 current_step → MOCK fallback（验证不黑屏）
+  8  未配置阶段:      current_step=99（未配置）→ /api/start 400，不起 run
   9  阶段切换:        start(step=1/LEAK) → DB改step=2 → start again → 全量重建 → CLEAN stage
 
 提示: --current-step 可覆盖任意场景的默认阶段，
@@ -785,12 +790,12 @@ def main():
         "--current-step",
         default=None,
         dest="current_step",
-        help="任务 current_step（决定推理 workflow：1=LEAK / 2=CLEAN / 其它=MOCK）。"
-             "默认随场景（1-6→1，7→2，8→MOCK）；显式指定可覆盖场景默认，"
+        help="任务 current_step（决定推理 workflow：1=LEAK / 2=CLEAN；未配置或非数字 start 400）。"
+             "默认随场景（1-6→1，7→2，8→99）；显式指定可覆盖场景默认，"
              "实现「任意阶段 × 任意生命周期」自由组合。",
     )
     parser.add_argument("--duration", type=int, default=60, help="运行时长（秒，默认: 60）")
-    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: test/test_video.mp4）")
+    parser.add_argument("--video_path", default=None, help="测试视频路径（默认: fixtures/test_video.mp4）")
     parser.add_argument("--fps", type=int, default=30, help="推流帧率（默认: 30）")
     parser.add_argument(
         "--mode",
@@ -808,7 +813,7 @@ def main():
     args = parser.parse_args()
 
     if args.video_path is None:
-        args.video_path = str(Path(__file__).parent.parent / "test" / "test_video.mp4")
+        args.video_path = str(Path(__file__).parent / "fixtures" / "test_video.mp4")
 
     # 端口随 args 透传（args.api_port / args.rtsp_port），不再使用模块级全局
 

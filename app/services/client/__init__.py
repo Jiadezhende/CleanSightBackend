@@ -1,14 +1,8 @@
+"""客户端中台：跨服务共享的运行态注册表（COW，`int task_id` 键）+ 每次 run 的 ClientQueues。
+
+本 `__init__` 不做 re-export，消费方走深路径：
+
+    单例      from app.services.client.instance import client_service
+    类        from app.services.client.service import ClientService
+    CQ        from app.services.client.queues import ClientQueues
 """
-客户端管理模块
-
-提供客户端队列和管理器的统一接口
-"""
-
-from .manager import ClientManager, client_manager
-from .queues import ClientQueues
-
-__all__ = [
-    "ClientQueues",
-    "ClientManager",
-    "client_manager",
-]

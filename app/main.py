@@ -9,12 +9,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.utils.gateway import GatewayMiddleware
+from .gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from app.routers import admin, ai, api, health, lab, media, task, traceback as traceback_router
-from app.services import health_monitor, inference, persistence, stream
-from app.utils import (
+from .routers import admin, ai, api, health, lab, media, task, algorithm, traceback as traceback_router
+from .daemons import cleanup, health_monitor
+from .services import alarm, inference, recording, run_control, stream
+from .types.exceptions import (
     AppError,
     ConflictError,
     DatabaseError,
@@ -25,12 +26,12 @@ from app.utils import (
     StreamConnectionError,
     ValidationError,
 )
-from app.utils.metrics import get_metrics
+from .services.utils.metrics import get_metrics
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    from app.settings import settings
+    from .settings import settings
 
     # 设置日志级别（从 CLEANSIGHT_LOG_LEVEL 读取）
     numeric_level = getattr(logging, settings.log_level.upper(), logging.INFO)
@@ -61,21 +62,29 @@ async def lifespan(app: FastAPI):
 
     # 按服务模块启动生命周期（起序 = 嵌套顺序，停序 = 逆序）。每个服务的起停都归它自己
     # 包内的 lifespan()，此处只表达**相对顺序**：
-    # 1. 健康监控（最外层：最先起、最后停，全程有人看着下面三个）
+    # 1. 健康监控（最外层：最先起、最后停，全程有人看着下面几个）
     # 2. 流服务（懒启动、只收尸——decoder 由 run_control 按 run 现起）
-    # 3. 持久化（须先于 inference 起、后于 inference 停，以承接 inference.stop() 的
-    #    结算告警 + HLS 残段 flush 后再抽干队列）
-    # 4. AI 推理
+    # 3. 存储 TTL 清理（独立时钟，不依赖下面任何服务；停在告警之后）
+    # 4. 告警（须先于 inference 起、后于 inference 停，以承接停机拆 run 交出的
+    #    结算告警后再抽干队列）
+    # 5. 录制（与告警同一档、同一个理由：停机拆 run 会交出最后一批 HLS 残段与检测结果，
+    #    那时 recording 的队列必须还活着；等它交完，recording 的 finally 再停队列
+    #    把剩下的排空——保序、不丢尾。嵌到 inference 里层会让队列先停、残段提交被拒，而那些
+    #    帧已经从 CQ 弹出去了，是真丢。）
+    # 6. AI 推理
+    # 7. 运行控制（最里层：停机时最先退出，趁推理 / 录制 / 告警都还活着逐个 stop_run）
     async with health_monitor.lifespan():
         async with stream.lifespan():
-            async with persistence.lifespan():
-                async with inference.lifespan():
-                    try:
-                        yield
-                    finally:
-                        # yield 返回时立即通知 WebSocket 退出，不等待后续清理
-                        # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
-                        shutdown_event.set()
+            async with cleanup.lifespan(), alarm.lifespan():
+                async with recording.lifespan():
+                    async with inference.lifespan():
+                        async with run_control.lifespan():
+                            try:
+                                yield
+                            finally:
+                                # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                                # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                                shutdown_event.set()
 
 
 
@@ -107,11 +116,12 @@ app.include_router(traceback_router.router)  # 追溯 API（/traceback/*）
 app.include_router(media.router)  # 媒体访问层（/media/*，token 化鉴权）
 app.include_router(lab.router)  # Lab 导出 & Label Studio 送标（/lab-f3m8/*）
 app.include_router(admin.router)  # 运维 Admin API（/admin-f3m8/*）
+app.include_router(algorithm.router)  # 算法 API（/algorithm/*，无状态纯计算）
 # 静态资产路径由 __file__ 推导，**不用 CWD 相对路径**：从仓库根之外的目录启动后端时，
 # "app/static/..." 会解析不到，两个 UI 直接 404（挂载期不报错，静默失败）。
+# 一个挂载出全部静态资产：/ui-f3m8/admin/、/ui-f3m8/lab/ 两页 + /ui-f3m8/vendor/ 共用前端库。
 _STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/admin-f3m8/ui", StaticFiles(directory=_STATIC_DIR / "admin", html=True), name="admin-ui")
-app.mount("/lab-f3m8/ui", StaticFiles(directory=_STATIC_DIR / "lab", html=True), name="lab-ui")
+app.mount("/ui-f3m8", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
 
 
 # ============================================================================
@@ -429,7 +439,6 @@ async def metrics():
         - infer_latency_ms: 推理延迟（Histogram）
         - infer_failure_total: 推理失败计数
         - frame_drop_total: 帧丢弃计数
-        - gpu_oom_total: GPU OOM 计数
         - retry_total: 重试计数
     """
     return Response(content=get_metrics(), media_type="text/plain")
@@ -460,19 +469,18 @@ def main():
         # 启动 FastAPI 应用
         import uvicorn
 
-        from app.settings import settings
+        from .settings import settings
 
         # 确保日志目录存在（TimedRotatingFileHandler 需要）
         os.makedirs("logs", exist_ok=True)
 
         logger.info("Listening on %s:%s", settings.host, settings.port)
-        logger.info("Log config: %s", settings.log_config)
 
         uvicorn.run(
             "app.main:app",
             host=settings.host,
             port=settings.port,
-            log_config=settings.log_config,
+            log_config="config/logging.json",
             reload=False,  # 生产环境禁用热重载
         )
 

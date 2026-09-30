@@ -1,5 +1,5 @@
 # 全局健康监控配置
-# GlobalHealthMonitor 是独立的全局服务，配置也应该独立
+# HealthMonitorWorker 是独立的全局服务，配置也应该独立
 
 monitor:
   check_interval: 1.0        # 监控检查间隔（秒）

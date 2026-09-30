@@ -14,11 +14,12 @@ from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from app.domain.alarm import Alarm
-from app.domain.detection import FrameFeature
-from app.domain.frame import Frame
-from app.utils.metrics import frame_drop_total
-from app.utils.pressure import (
+from app.types.alarm import Alarm
+from app.types.detection import FrameDetection
+from app.types.frame import Frame
+from app.types.run import RunIdentity
+from app.services.utils.metrics import frame_drop_total
+from app.services.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
     REASON_QUEUE_HIGH_WATERMARK,
     PressureReporter,
@@ -55,8 +56,9 @@ class ClientQueues:
     - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（设置最大长度防止溢出）
     - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段（设置最大长度防止溢出）
     - CA-ProcessedQueue: 推理后的处理帧（含标注），用于生成处理后 HLS 段（设置最大长度防止溢出）
+    - CA-DetectionQueue: 帧级 FrameDetection 落盘缓冲，等 recording 周期拉走写 detections.jsonl
     - _latest_rendered: 单槽位，最新渲染帧，供前端 WebSocket 实时推流
-    - _latest_inference: 单槽位，最新推理结果原子快照，供 VisualizationWorker 读取
+    - _latest_detection: 单槽位，最新推理结果原子快照，供 VisualizationWorker 读取
 
     内存保护：
     - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
@@ -67,18 +69,19 @@ class ClientQueues:
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
       _raw_lock         Lock   ca_raw + latest_raw_frame + latest_raw_timestamp
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
-      _inference_lock   Lock   _latest_inference（原子推理快照槽）
+      _detection_lock   Lock   _latest_detection（原子推理快照槽）
       _frontend_lock    Lock   _latest_temporal（前端时序事件，低频写）
-      _slide_window_lock Lock  _slide_window dict（推理每帧写入，最高竞争锁）
+      _slide_window_lock Lock  _slide_window + ca_detections（写回口对同一帧连写两者，
+                               同 _viz_lock 护 ca_processed + _latest_rendered 的理由）
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
       *_pressure 内建锁  Lock   叶子锁（PressureReporter 自持，只护其几个标量）：
                                append_* 一律**先出队列锁再上报**，故不与上面任何锁互嵌
 
     全清顺序（clear() 同时持锁时的固定顺序，防死锁）：
-      _raw_lock → _viz_lock → _inference_lock
+      _raw_lock → _viz_lock → _detection_lock
       → _frontend_lock → _slide_window_lock → _alarm_lock
 
-    身份（task_id/step_id/source_ip/stage）为构造定死的不可变 primitive，热路径免锁直读。
+    身份（run/source_ip/stage）为构造定死的不可变值，热路径免锁直读。
     """
 
     def __init__(
@@ -89,13 +92,12 @@ class ClientQueues:
         resize_height: int = 480,
         inference_decimation: int = 2,
         *,
-        # 不可变运行身份（primitives 直注，一次 CQ == 一次 run，终生不变）。
-        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunController 传入已解析好的
-        # task_id/step_id/stage（int 转换与 stage 解析都在 RunController 边界一次完成）。
-        task_id: Optional[int] = None,
-        step_id: Optional[int] = None,
+        # 不可变运行身份（一次 CQ == 一次 run，终生不变）。
+        # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunControlService 传入 `runs.allocate`
+        # 分配的 RunIdentity 与已解析好的 stage。
+        run: Optional[RunIdentity] = None,
         source_ip: str = "",
-        stage: str = "MOCK",
+        stage: str = "",
     ):
         # 尺寸配置
         self.resize_width = resize_width
@@ -110,7 +112,7 @@ class ClientQueues:
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
         self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
         self._viz_lock = threading.Lock()        # ca_processed + _latest_rendered
-        self._inference_lock = threading.Lock()  # _latest_inference
+        self._detection_lock = threading.Lock()  # _latest_detection
         self._frontend_lock = threading.Lock()   # _latest_temporal
         self._slide_window_lock = threading.Lock()
         self._alarm_lock = threading.Lock()      # _alarm_log + _alarm_seq + _alarm_gate
@@ -120,20 +122,18 @@ class ClientQueues:
         self._state: RunState = RunState.ACTIVE
         self._state_lock = threading.Lock()
 
-        # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_manager COW
+        # 不可变运行身份：一次构造定死，直读、无锁——CQ 经 client_service COW
         # 换引用发布，读者原子读引用即 acquire，观察不到半建对象。切 step/重启 = 建新 CQ 换槽，
         # 不在此对象上改身份。故 settlement 归属天然正确，无需"先停旧 actor 再切字段"的排序不变式。
-        # 注：无 client_id 字段——注册表路由键即 self.task_id(int)；source_ip 为被动来源字段。
-        # step_id 为已解析好的 int（DBAlarm.step_id/落盘目录/FeatureStore 分区键全链路 int）；
-        # 字符串来源 current_step→int 的转换在 RunController 边界一次完成，本类不再解析。
-        self.task_id: Optional[int] = task_id
-        self.step_id: Optional[int] = step_id
+        # 注：无 client_id 字段——注册表路由键即 run.task_id(int)；source_ip 为被动来源字段。
+        # 「未绑定 run」只有一个判据：`self.run is None`。
+        self.run: Optional[RunIdentity] = run
         self.source_ip: str = source_ip
         self.stage: str = stage
-        # run 起始时刻：供 GlobalHealthMonitor 的 task_max_duration 看门狗判定跑飞任务并超时拆除
-        # （health_monitor/manager.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
+        # run 起始时刻：供 HealthMonitorWorker 的 task_max_duration 看门狗判定跑飞任务并超时拆除
+        # （daemons/health_monitor/worker.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
         # 同时作为启动延迟埋点的公共参考钟（mark_startup_milestone 相对它计耗时）。
-        self.task_started_at: float = time.time() if task_id is not None else 0.0
+        self.task_started_at: float = time.time() if run is not None else 0.0
 
         # 启动里程碑埋点（纯观测，first-wins 幂等）：记录每个里程碑首次到达相对
         # task_started_at 的耗时，仅记一次。无锁——每个 milestone 名字单一生产者线程
@@ -167,7 +167,11 @@ class ClientQueues:
         # 写者线程顺带驱动即可。周期快照形态（每 10s 至多一条、平稳时静默），
         # 故只有 run 在跑（有人写队列）时才会汇报，run 停了自然静默。
         self._pressure_watermark: int = max(1, int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
-        _identity = {"task_id": task_id, "step_id": step_id, "stage": stage}
+        _identity = {
+            "task_id": run.task_id if run else None,
+            "step_id": run.step_id if run else None,
+            "stage": stage,
+        }
         self._ready_pressure = PressureReporter(
             "client_queues", "ca_ready", identity=_identity,
         )
@@ -181,15 +185,23 @@ class ClientQueues:
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
         self._latest_rendered: Optional[Frame] = None
 
-        # 最新推理快照：帧级 FrameFeature（由 _inference_lock 保护，供 Viz 原子读同帧一致）
-        self._latest_inference: Optional[FrameFeature] = None
+        # 最新推理快照：帧级 FrameDetection（由 _detection_lock 保护，供 Viz 原子读同帧一致）
+        self._latest_detection: Optional[FrameDetection] = None
 
-        # 滑动窗口：帧级 FrameFeature 环形缓冲（一帧一条，多流已对齐，由 _slide_window_lock 保护）。
-        # 写回口物化 FrameFeature 后单次 push_detection；算子/ signals 统一从此读，无需按 ts 拼帧。
-        self._slide_window: Deque[FrameFeature] = deque()
+        # 滑动窗口：帧级 FrameDetection 环形缓冲（一帧一条，多流已对齐，由 _slide_window_lock 保护）。
+        # 写回口物化 FrameDetection 后单次 push_detection；算子/ signals 统一从此读，无需按 ts 拼帧。
+        self._slide_window: Deque[FrameDetection] = deque()
         # 帧窗保留时长（秒）：= max(_SIGNALS_WINDOW_SEC 底线, 各算子最大感受野)，由 set_stream_windows 配置。
         # 只向上扩展；signals_10s 聚合另按固定 10s 底线裁窗，二者解耦。
         self._slide_window_seconds: float = _SIGNALS_WINDOW_SEC
+
+        # CA-DetectionQueue：帧级 FrameDetection 落盘缓冲（由 _slide_window_lock 保护）。
+        # 与 _slide_window 是同一份数据的两个去处——前者供算子消费（按感受野裁剪、会丢），
+        # 后者等 recording 每 tick 拉走落盘（只在满时丢最旧）。**不能合并**：裁剪口径归算子
+        # 配置，拿它当落盘缓冲会随某个 stage 调小 window_seconds 而静默丢检测结果。
+        # 容量复用 ca_maxlen（900 条 ≈ 60s @15fps ≈ 2MB，远小于 ca_raw 的像素帧）。
+        self.ca_detections: Deque[FrameDetection] = deque(maxlen=ca_maxlen)
+        self.frames_dropped_detections: int = 0
 
         # 最新时序事件列表（由 _frontend_lock 保护，与 _stage 合并）
         self._latest_temporal: List[str] = []
@@ -284,10 +296,10 @@ class ClientQueues:
         """
         添加原始帧到落盘缓冲，同时更新最新原始帧缓存（纯缓冲，不触发落盘）。
 
-        分段落盘由 persistence 的 HLSSegmentSweeper 周期 take_raw_segment() 拉取，
+        分段落盘由 recording 的 SegmentSweeper 周期 take_raw_segment() 拉取，
         本方法只管入队 + 丢帧计数 + 刷新 latest_raw_frame。返回是否入队（非 ACTIVE 拒）。
         """
-        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——残段由 flush_residual_segments 收尾）
+        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——残段由 recording 的 flush_residual 收尾）
         if self._state is not RunState.ACTIVE:
             return False
         with self._raw_lock:
@@ -309,7 +321,7 @@ class ClientQueues:
         """
         添加处理帧到落盘缓冲（纯缓冲，不触发落盘）。
 
-        分段落盘由 persistence 的 HLSSegmentSweeper 周期 take_processed_segment() 拉取，
+        分段落盘由 recording 的 SegmentSweeper 周期 take_processed_segment() 拉取，
         本方法只管入队 + 丢帧计数。
         """
         # 写门：非 ACTIVE 拒写
@@ -351,22 +363,22 @@ class ClientQueues:
         with self._viz_lock:
             return self._latest_rendered
 
-    # --- latest_inference 操作（原子推理快照）---
+    # --- latest_detection 操作（原子推理快照）---
 
-    def set_latest_inference(self, result: FrameFeature) -> None:
-        """原子写入最新推理快照 FrameFeature（由 InferenceLoop 调用）。
+    def set_latest_detection(self, result: FrameDetection) -> None:
+        """原子写入最新推理快照 FrameDetection（由 InferenceLoop 调用）。
 
         写门：非 ACTIVE 拒——迟到推理结果落到旧 CQ 被拒，不串台。
         """
         if self._state is not RunState.ACTIVE:
             return
-        with self._inference_lock:
-            self._latest_inference = result
+        with self._detection_lock:
+            self._latest_detection = result
 
-    def get_latest_inference(self) -> Optional[FrameFeature]:
+    def get_latest_detection(self) -> Optional[FrameDetection]:
         """原子读取最新推理结果（由 VisualizationWorker 调用）。"""
-        with self._inference_lock:
-            return self._latest_inference
+        with self._detection_lock:
+            return self._latest_detection
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """获取最新原始帧（用于可视化）。"""
@@ -380,30 +392,47 @@ class ClientQueues:
             "ca_ready": len(self.ca_ready),
             "ca_raw": len(self.ca_raw),
             "ca_processed": len(self.ca_processed),
+            "ca_detections": len(self.ca_detections),
             "has_rendered": self._latest_rendered is not None,
         }
 
-    def get_ca_processed_length(self) -> int:
-        return len(self.ca_processed)
+    def drain_ca_raw(self, until_ts: Optional[float] = None) -> List[Frame]:
+        """原子排空 ca_raw 队列（线程安全，供 flush 使用）。
 
-    def drain_ca_raw(self) -> List[Frame]:
-        """原子排空 ca_raw 队列（线程安全，供 flush 使用）"""
+        Args:
+            until_ts: 时间戳栅栏（epoch 秒）。`None` = 全排空（拆除期语义，队列不会再进新帧）；
+                给值则只弹出队首那段 `timestamp <= until_ts` 的连续前缀，其余留在队列里。
+
+        栅栏是给**断流 flush** 用的：重连期队列仍在进新帧，全排空会把重连后的帧一起切进残段，
+        该段又横跨 gap（`effective_fps` 由首末帧跨度反推，被 gap 拉低 = 慢放），正是 flush
+        要消灭的东西。栅栏取"断流前最后一帧的 ts"，与调用时机、与此前拉走了多少整段都无关。
+        """
         with self._raw_lock:
-            frames = list(self.ca_raw)
-            self.ca_raw.clear()
-            return frames
+            if until_ts is None:
+                frames = list(self.ca_raw)
+                self.ca_raw.clear()
+                return frames
+            taken: List[Frame] = []
+            while self.ca_raw and self.ca_raw[0].timestamp <= until_ts:
+                taken.append(self.ca_raw.popleft())
+            return taken
 
-    def drain_ca_processed(self) -> List[Frame]:
-        """原子排空 ca_processed 队列（线程安全，供 flush 使用）"""
+    def drain_ca_processed(self, until_ts: Optional[float] = None) -> List[Frame]:
+        """原子排空 ca_processed 队列（线程安全，供 flush 使用）。语义同 `drain_ca_raw`。"""
         with self._viz_lock:
-            frames = list(self.ca_processed)
-            self.ca_processed.clear()
-            return frames
+            if until_ts is None:
+                frames = list(self.ca_processed)
+                self.ca_processed.clear()
+                return frames
+            taken: List[Frame] = []
+            while self.ca_processed and self.ca_processed[0].timestamp <= until_ts:
+                taken.append(self.ca_processed.popleft())
+            return taken
 
     def take_raw_segment(self) -> Optional[List[Frame]]:
         """缓冲攒满一整段(ca_segment_len 帧)则原子弹出，否则 None。
 
-        供 persistence 的 HLSSegmentSweeper 周期拉取。与 append_ca_raw / drain_ca_raw /
+        供 recording 的 SegmentSweeper 周期拉取。与 append_ca_raw / drain_ca_raw /
         _release_payload 同走 _raw_lock，互斥安全。
         """
         with self._raw_lock:
@@ -412,7 +441,7 @@ class ClientQueues:
             return [self.ca_raw.popleft() for _ in range(self.ca_segment_len)]
 
     def take_processed_segment(self) -> Optional[List[Frame]]:
-        """缓冲攒满一整段则原子弹出，否则 None（供 HLSSegmentSweeper 周期拉取）。"""
+        """缓冲攒满一整段则原子弹出，否则 None（供 recording 的 SegmentSweeper 周期拉取）。"""
         with self._viz_lock:
             if len(self.ca_processed) < self.ca_segment_len:
                 return None
@@ -450,7 +479,7 @@ class ClientQueues:
         elapsed_ms = (time.time() - self.task_started_at) * 1000.0
         _startup_logger.info(
             "[startup] task=%s step=%s %s +%.0fms",
-            self.task_id, self.step_id, name, elapsed_ms,
+            self.run.task_id, self.run.step_id, name, elapsed_ms,
         )
 
     def to_draining(self) -> bool:
@@ -482,7 +511,7 @@ class ClientQueues:
         self._processed_pressure.reset()
 
     def clear(self) -> None:
-        """兼容入口：等价 `close()`（供 ClientManager.remove/remove_if/clear_all 调用）。"""
+        """兼容入口：等价 `close()`（供 ClientService.remove/remove_if/clear_all 调用）。"""
         self.close()
 
     def _release_payload(self) -> None:
@@ -493,7 +522,7 @@ class ClientQueues:
         """
         locks = [
             self._raw_lock, self._viz_lock,
-            self._inference_lock, self._frontend_lock,
+            self._detection_lock, self._frontend_lock,
             self._slide_window_lock, self._alarm_lock,
         ]
         with contextlib.ExitStack() as stack:
@@ -505,9 +534,10 @@ class ClientQueues:
             self.latest_raw_frame = None
             self.latest_raw_timestamp = time.time()
             self._latest_rendered = None
-            self._latest_inference = None
+            self._latest_detection = None
             self._latest_temporal = []
             self._slide_window.clear()
+            self.ca_detections.clear()
             self._alarm_log.clear()
             self._alarm_seq = 0
             self._alarm_gate.clear()
@@ -524,7 +554,7 @@ class ClientQueues:
     def set_stream_windows(self, windows: Dict[str, float]) -> None:
         """配置帧窗保留时长 = max(10s 底线, 各算子最大感受野)。
 
-        由 InferenceManager 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
+        由 InferenceService 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
         单条帧窗保留所有算子里最长的感受野，各算子自行 _clip 到自身 window_seconds；
         感受野只向上扩展，signals_10s 另按固定 10s 底线裁窗，不受影响。
         """
@@ -533,24 +563,59 @@ class ClientQueues:
                 [_SIGNALS_WINDOW_SEC] + list(windows.values())
             )
 
-    def push_detection(self, feature: FrameFeature) -> None:
-        """将一帧对齐后的 FrameFeature 追加到帧窗，按保留时长淘汰过期条目。
+    def push_detection(self, frame: FrameDetection) -> None:
+        """将一帧对齐后的 FrameDetection 追加到帧窗，按保留时长淘汰过期条目。
 
-        写回口一帧一次（多流已在 FrameFeature.by_source 内对齐），不再逐 detector。
+        写回口一帧一次（多流已在 FrameDetection.by_source 内对齐），不再逐 detector。
         写门：非 ACTIVE 拒——迟到写回落到旧 CQ 被拒。
         """
         if self._state is not RunState.ACTIVE:
             return
         with self._slide_window_lock:
-            self._slide_window.append(feature)
-            cutoff = feature.ts - self._slide_window_seconds
+            self._slide_window.append(frame)
+            cutoff = frame.ts - self._slide_window_seconds
             while self._slide_window and self._slide_window[0].ts < cutoff:
                 self._slide_window.popleft()
 
-    def get_slide_window(self) -> List[FrameFeature]:
+    def get_slide_window(self) -> List[FrameDetection]:
         """返回帧窗的快照副本（线程安全）；每条 = 一帧多流对齐检测。"""
         with self._slide_window_lock:
             return list(self._slide_window)
+
+    # --- ca_detections 操作（落盘缓冲，与 slide_window 共用 _slide_window_lock）---
+
+    def append_ca_detections(self, frame: FrameDetection) -> None:
+        """把一帧 FrameDetection 放进落盘缓冲（纯缓冲，不触发落盘）。
+
+        落盘由 recording 的 sweeper 周期 `drain_ca_detections()` 拉走，本方法只管入队 + 丢帧计数。
+        写门：非 ACTIVE 拒写——迟到写回落到旧 CQ 被拒，不串台。
+
+        与 `push_detection` 是写回口对同一帧的两次投递（消费 / 落盘），故意分两个方法：
+        合并会让"落盘"挂在一个名字完全不提落盘的方法上。
+        """
+        if self._state is not RunState.ACTIVE:
+            return
+        with self._slide_window_lock:
+            if (
+                self.ca_detections.maxlen is not None
+                and len(self.ca_detections) >= self.ca_detections.maxlen
+            ):
+                # deque 满时 append 静默淘汰最旧，先计数
+                self.frames_dropped_detections += 1
+                frame_drop_total.labels(reason="detection_backpressure").inc()
+            self.ca_detections.append(frame)
+
+    def drain_ca_detections(self) -> List[FrameDetection]:
+        """原子排空落盘缓冲（由 recording 的 sweeper 每 tick 调）。
+
+        **没有 `until_ts` 栅栏**，与 `drain_ca_raw` 的不对称是有意的：栅栏是给断流用的，
+        而它要挡的是"一段视频横跨 gap 被 `effective_fps` 反推成慢放"——detections 每帧一行、
+        行间无依赖，断流在序列里就是一个 ts 空洞，离线按 ts 自行处理。
+        """
+        with self._slide_window_lock:
+            frames = list(self.ca_detections)
+            self.ca_detections.clear()
+            return frames
 
     # --- latest_temporal 操作 ---
 
@@ -575,15 +640,15 @@ class ClientQueues:
         """闸门去重 + 入环形日志，单 _alarm_lock 内原子完成。
 
         True = 已记录（赋 seq 并入日志），False = 被冷却窗口（5s）拦截、未记录。
-        闸门按 (self.task_id, alarm.metric, mode) 限流；通过后才赋 seq、append。
-        task_id 取自本 CQ 不可变身份（免锁直读），无需调用方传入。
+        闸门按 (alarm.metric, mode) 限流（闸门表本就挂在这个 CQ 上，一 CQ 一 run，键里不再带 task）；
+        通过后才赋 seq、append。
 
         写门（非对称）：仅 CLOSED 拒——ACTIVE 与 DRAINING 均放行，保证拆除期（DRAINING）
         的 settlement 结算告警仍能入账。
         """
         if self._state is RunState.CLOSED:
             return False
-        gate_key = f"{self.task_id}:{alarm.metric}:{mode}"
+        gate_key = f"{alarm.metric}:{mode}"
         now = time.time()
         with self._alarm_lock:
             last = self._alarm_gate.get(gate_key)
@@ -630,9 +695,9 @@ class ClientQueues:
                     if fd is None:
                         continue
                     a = acc.setdefault(src, {"hit": 0.0, "max_conf": 0.0})
-                    if fd.detections:
+                    if fd.boxes:
                         a["hit"] += 1
-                        frame_max_conf = max(d.confidence for d in fd.detections)
+                        frame_max_conf = max(d.confidence for d in fd.boxes)
                         a["max_conf"] = max(a["max_conf"], frame_max_conf)
         return {
             src: {

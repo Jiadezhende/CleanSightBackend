@@ -1,6 +1,6 @@
 # `/api` — 统一任务 API
 
-启动 / 终止一次 run 的唯一对外入口，桥接内部 `RunController`。数据不落 DB 展示层，操作的是**内存中的运行态**（decoder + 推理 workflow + client registry + HLS）。通用约定（Base URL、Gateway、错误模型、双模标识、时间戳单位）见 [README](README.md)。
+启动 / 终止一次 run 的唯一对外入口，桥接内部 `RunControlService`。数据不落 DB 展示层，操作的是**内存中的运行态**（decoder + 推理 workflow + client registry + HLS）。通用约定（Base URL、Gateway、错误模型、双模标识、时间戳单位）见 [README](README.md)。
 
 ```
   POST /api/start ──→ 起一次 run（task_id 为运行键）
@@ -48,9 +48,10 @@
 |------|---------|-----------|
 | `422` | 请求体缺 `task_id`/`rtsp_url` 或类型不符（FastAPI 自带校验） | `{"detail":[{"loc":[...],"msg":"...","type":"..."}]}`（**与下方业务错误的 `{"error",...}` 形态不同**） |
 | `400` | 该任务 DB 中 `source_ip` 为空（`ValidationError`，`field="source_ip"`） | `{"error":"Validation error","detail":"...","field":"source_ip"}` |
+| `400` | 该任务 DB 中 `current_step` 不是数字，或推理配置里没有这个 step、该 step 没配在线检测（`ValidationError`，`field="current_step"`）。**校验在动旧 run 之前**，同 task 正在跑的 run 不受影响 | `{"error":"Validation error","detail":"...","field":"current_step"}` |
 | `404` | `task_id` 在 `clean_task` 表中不存在 | `{"error":"Resource not found","detail":"...","resource_type":"Task","resource_id":"123"}` |
 | `503` | DB 查询失败（`DatabaseError`，可重试） | `{"error":"Internal error","detail":"...","retryable":true}` |
-| `500` | workflow 启动失败等内部错误（`AppError`） | `{"error":"Internal error","detail":"...","retryable":false}` |
+| `500` | workflow 启动失败、落盘目录建不出来（盘满 / 权限）等内部错误（`AppError`）。建目录在停旧 run 之后：step 或 url 变化触发的重启若在这一步失败，旧 run 已停 | `{"error":"Internal error","detail":"...","retryable":false}` |
 
 > **判分支只认 status code，别依赖 body 字段：** 参数缺失/类型错走 FastAPI 的 **422**（body 是 `detail` 数组），而 `source_ip` 为空是业务 **400**（body 是 `{"error","detail","field"}`）——两者都是"入参有问题"但 code 和 body 形态都不同。完整错误模型见 [README](README.md#错误模型)。
 
@@ -106,7 +107,7 @@
 | `decoder_stopped` | bool | decoder 是否已停 |
 | `data_flushed` | bool | 结算 + HLS + feature 落盘是否完成 |
 | `client_cleaned` | bool | registry 中的 CQ 是否已注销 |
-| `errors` | string[] | 失败子步列表，形如 `"decoder: ..."`、`"flush: ..."`、`"client_manager: ..."`；全成功则 `[]` |
+| `errors` | string[] | 失败子步列表，形如 `"decoder: ..."`、`"flush: ..."`、`"client_service: ..."`；全成功则 `[]` |
 
 > 注意：命中 run 的成功响应体里**没有** `task_id` 字段（那是 no-op 响应才有的）；命中路径用 `client_id`（= source_ip）标识。别假设两条 200 路径 body 同构。
 
@@ -138,4 +139,4 @@
 | 现象 | 后端实际状态 |
 |------|------------|
 | 调 terminate 拿到 200 但"感觉没停" | 若是 no-op 体（`message":"no active run"`），说明该键**根本没匹配到活跃 run**（键传错 / run 早已停）——不是停失败，是压根没这路 run |
-| 拿到 200 `success` 但残留未清 | 看 `partial_success` + `errors`：某子步（decoder/flush/client_manager）失败被吞进 body，主流程不抛，需据 `errors` 排查 |
+| 拿到 200 `success` 但残留未清 | 看 `partial_success` + `errors`：某子步（decoder/flush/client_service）失败被吞进 body，主流程不抛，需据 `errors` 排查 |

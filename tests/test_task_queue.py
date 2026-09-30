@@ -1,4 +1,4 @@
-"""`app.utils.task_queue`：单消费者任务队列的顺序、隔离与停机语义。
+"""`app.services.utils.task_queue`：单消费者任务队列的顺序、隔离与停机语义。
 
 断言集中在**这个类唯一卖点**上：提交顺序 == 执行顺序，且执行是串行的。HLS 落盘去掉目录锁
 之后，「旧残段先落盘再整个 purge」「同轨相邻段 tfdt 不错位」两条正确性全部押在这上面——
@@ -12,16 +12,18 @@ import time
 
 import pytest
 
-from app.utils.task_queue import SerialTaskQueue
+from app.services.utils.task_queue import SerialTaskQueue
 
 
 @pytest.fixture
-def q():
-    """每个用例一条新队列——SerialTaskQueue 是一次性的，不能跨用例复用。"""
+def q(fast_task_queue):
+    """每个用例一条新队列——SerialTaskQueue 是一次性的，不能跨用例复用。
+
+    轮询间隔压到 0.01s：本文件的断言只关心顺序 / 串行 / 排空 / 拒收，不依赖轮询间隔。
+    """
     created = SerialTaskQueue("test", maxsize=8)
     yield created
-    if created.is_running:
-        created.stop(timeout=5.0)
+    created.stop(timeout=5.0)  # 未 start 过或已 stop 过都是 no-op
 
 
 # ---------------------------------------------------------------------------
@@ -87,13 +89,13 @@ def test_one_failing_task_does_not_kill_the_queue(q):
 def test_stop_drains_pending_tasks(q):
     """已提交的任务在停机时必须落地。
 
-    它们代表已经从上游拿走的数据（HLS 段的帧已从 CQ 弹出），丢掉就是真丢——这正是现在
-    `HLSWorker` 的缺陷：`while not stop_event.is_set()` 一置位就退出，队列里剩的段直接没。
+    它们代表已经从上游拿走的数据（录制段的帧已从 CQ 弹出），丢掉就是真丢。消费循环若
+    `while not stop_event.is_set()` 一置位就退出、不排空，队列里剩的任务直接没。
     """
     done = []
     q.start()
     # 先塞一个慢任务占住消费线程，后面几个必然还在队列里排队时 stop 就会被调用
-    q.submit(lambda: time.sleep(0.2), label="slow")
+    q.submit(lambda: time.sleep(0.05), label="slow")
     for i in range(5):
         q.submit(lambda i=i: done.append(i), label=f"t{i}")
 
@@ -131,14 +133,6 @@ def test_submit_returns_false_when_full(q):
         assert q.submit(lambda: None, label=f"t{i}", timeout=0.01) is True
 
     assert q.submit(lambda: None, label="overflow", timeout=0.01) is False
-
-
-def test_qsize_reflects_backlog(q):
-    """qsize 供压力观测用——不 start 时它就等于已提交数。"""
-    for i in range(3):
-        q.submit(lambda: None, label=f"t{i}", timeout=0.01)
-
-    assert q.qsize() == 3
 
 
 # ---------------------------------------------------------------------------

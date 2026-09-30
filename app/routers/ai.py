@@ -2,10 +2,16 @@ import asyncio
 import base64
 import logging
 import time
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
-from app.services.client import client_manager
+from app.types.temporal import TemporalSegment
+from app.services.client.instance import client_service
+from app.storage import inference as inference_store
+
+from .utils.runs import resolve_timeline
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 logger = logging.getLogger(__name__)
@@ -22,7 +28,7 @@ _WS_MAX_SEND_FPS = 30
 async def websocket_video_endpoint(websocket: WebSocket):
     """
     WebSocket端点：两种并列的请求模式（互斥，task_id 优先），非新旧之分：
-    - `?task_id=xxx` → `client_manager.get(task_id)`，锁定**某一次具体 run**（不可变运行键）；
+    - `?task_id=xxx` → `client_service.get(task_id)`，锁定**某一次具体 run**（不可变运行键）；
       run 结束即止、不跟随新任务。适合溯源 / 针对某次任务的监看。
     - `?client_id=<source_ip>` → 每轮 `find_by_source_ip` 解析该**点位**的当前 live run
       （命中多个取最晚启动者），任务来了显示、走了黑屏、换 run 自动跟随。适合大屏 / 固定点位常亮。
@@ -43,10 +49,10 @@ async def websocket_video_endpoint(websocket: WebSocket):
         except ValueError:
             await websocket.close(code=1008)
             return
-        resolve = lambda: client_manager.get(task_id)  # noqa: E731
+        resolve = lambda: client_service.get(task_id)  # noqa: E731
         label = f"task_id={task_id}"
     elif client_id:
-        resolve = lambda: client_manager.find_by_source_ip(client_id)  # noqa: E731
+        resolve = lambda: client_service.find_by_source_ip(client_id)  # noqa: E731
         label = f"client_id={client_id}"
     else:
         await websocket.close(code=1008)
@@ -123,7 +129,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                     await asyncio.sleep(frame_interval - time_since_last)
                     current_time = time.time()  # 更新时间
 
-            # 边界编码：domain Frame → JPEG base64 data URL（仅此一处，内联）
+            # 边界编码：app.types Frame → JPEG base64 data URL（仅此一处，内联）
             try:
                 _, buf = cv2.imencode(".jpg", frame.frame)
                 b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
@@ -183,3 +189,67 @@ async def websocket_video_endpoint(websocket: WebSocket):
         logger.info(f"[WebSocket] 连接已关闭: {label}")
 
 
+
+
+# ---------------------------------------------------------------------------
+# 推理结果读取：时序事实（temporal.jsonl）
+# ---------------------------------------------------------------------------
+
+
+class TemporalRequest(BaseModel):
+    task_id: int
+    step_id: int
+    run_id: Optional[int] = None  # 锁定哪个 run；缺省 = 该 step 最新可见 run
+    type: Literal["segment"]  # temporal.jsonl 的行判别值；"event" 有生产者时再开
+    track: Literal["raw", "processed"] = "raw"
+
+
+class TemporalSegmentItem(BaseModel):
+    label: str
+    start_media_ms: int
+    end_media_ms: int
+    conf: float
+    producer: str
+
+
+class TemporalResponse(BaseModel):
+    task_id: int
+    step_id: int
+    run_id: int
+    type: str
+    track: str
+    media_duration_ms: int
+    items: List[TemporalSegmentItem]
+
+
+def _temporal_view(req: TemporalRequest) -> TemporalResponse:
+    """读该 run 的分段事实，墙钟秒换算到 `track` 轨的媒体刻度（与 `<video>.currentTime` 同轴）。
+
+    hls 时间轴与 `temporal.jsonl` 取自同一个 run，新录像不会配上旧结果。
+    """
+    run, timeline = resolve_timeline(req.task_id, req.step_id, req.run_id, req.track)
+    segments = sorted(
+        (f for f in inference_store.read_temporal(run)
+         if isinstance(f, TemporalSegment)),
+        key=lambda s: (s.start, s.end),
+    )
+    items = [
+        TemporalSegmentItem(
+            label=s.label,
+            start_media_ms=timeline.media_ms_at(int(round(s.start * 1000))),
+            end_media_ms=timeline.media_ms_at(int(round(s.end * 1000))),
+            conf=s.conf,
+            producer=s.producer,
+        )
+        for s in segments
+    ]
+    return TemporalResponse(
+        task_id=req.task_id, step_id=req.step_id, run_id=run.run_id, type=req.type, track=req.track,
+        media_duration_ms=timeline.duration_ms, items=items,
+    )
+
+
+@router.post("/temporal", response_model=TemporalResponse)
+def get_temporal(req: TemporalRequest) -> TemporalResponse:
+    """某 step 的时序分析结果（目前只有离线分割段），时间已换算为媒体刻度。"""
+    return _temporal_view(req)

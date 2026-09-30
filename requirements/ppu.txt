@@ -1,0 +1,24 @@
+# 阿里 PPU-ZW810E 平台（非 NVIDIA）。
+#
+# 适用机器：CUDA 兼容层为 /usr/local/PPU_SDK/CUDA_SDK 的阿里 PPU 实例。
+# 判别方式：nvidia-smi 输出头部是 "PPU-SMI" 而非 "NVIDIA-SMI"，设备节点为 /dev/alixpu_ppu*。
+# 主线 install.sh（cp310 + 官方 CUDA wheel）在此类机器上不可用。
+#
+# 用法（venv 必须带 --system-site-packages，否则 PPU torch 不可见）：
+#   source /usr/local/PPU_SDK/envsetup.sh          # 缺此步 PPU 内核编译会 abort
+#   /usr/local/bin/python3 -m venv --system-site-packages .venv
+#   .venv/bin/pip install -i https://mirrors.aliyun.com/pypi/simple/ -r requirements/ppu.txt
+#
+# 【本文件相对 base.txt 只做减法，不做加法】—— 以下由系统 site-packages 提供，
+# 装进 venv 会 shadow 掉厂商定制版、PPU 立刻不可用：
+#   torch 2.10.0+ppu2.1.0 / torchvision 0.25.0+ppu2.1.0 / torchaudio 2.10.0+ppu2.1.0
+#   numpy 2.3.5  —— PPU torch 按 numpy 2.x 编译，绝不可按 prod.txt 降到 1.26.4
+# 这两项本就不在 base.txt 里（numpy 下放到各路径，正是为了让本文件能不写它），
+# 所以这里只 `-r base.txt` 就够。
+#
+# 验证记录见 docs/update/20260912_PPU_PLATFORM_DEPS.md。
+#
+# opencv 照装不误：系统那份是 QT5 GUI 版（opencv-python 4.11.0.86），服务端无显示环境，
+# 需要 base.txt 里的 headless 在 venv 内把它 shadow 掉。
+
+-r base.txt

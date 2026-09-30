@@ -2,6 +2,7 @@
 
 > **变更状态**：提案（2026-09-06）　<!-- 三期工程；A 档可立即做，B 档需拍板是否同期 -->
 > **知识库**：无需沉淀（提案；落地后另行沉淀）
+> **后续**：B 档已按另一套命名落地（`DetBox` / `DetectorOutput` / `FrameDetection`、`detections.jsonl`），见 [20260924_DETECTION_TYPE_RENAME.md](20260924_DETECTION_TYPE_RENAME.md) 起的三篇；本篇 B 档的类名建议作废。
 >
 > 相关：[20260903_PACKAGE_LAYOUT_SPEC.md](20260903_PACKAGE_LAYOUT_SPEC.md)（**同类改名的既有原则与 playbook**，本篇直接沿用）、[20260905_OFFLINE_ROI_VISUAL_PROPOSAL.md](20260905_OFFLINE_ROI_VISUAL_PROPOSAL.md)（ROI 视觉特征，本篇是它的前置）、[20260628_OFFLINE_PIPELINE_PHASE1_PROPOSAL.md](20260628_OFFLINE_PIPELINE_PHASE1_PROPOSAL.md)（离线链路一期）。
 

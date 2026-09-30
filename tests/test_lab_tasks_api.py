@@ -1,55 +1,21 @@
+"""送标任务清单接口（GET /lab-f3m8/tasks）测试。
+
+落盘约定：`{root}/{task_id}/{step_id}/{run_id}/hls/`（`app.storage.hls` 域）；存储根由 conftest 的
+`tmp_storage` fixture 指到临时目录（改的是 settings.storage_dir 单一真源）。
+"""
+
 from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.db import tasks as db_tasks
 from app.main import app
-
-
-class _FakeQuery:
-    def __init__(self, rows):
-        self._rows = rows
-        self._offset = 0
-        self._limit = None
-
-    def filter(self, *_args, **_kwargs):
-        return self
-
-    def count(self):
-        return len(self._rows)
-
-    def order_by(self, *_args, **_kwargs):
-        return self
-
-    def offset(self, value):
-        self._offset = value
-        return self
-
-    def limit(self, value):
-        self._limit = value
-        return self
-
-    def all(self):
-        end = None if self._limit is None else self._offset + self._limit
-        return self._rows[self._offset:end]
-
-
-class _FakeDB:
-    def __init__(self, rows):
-        self._rows = rows
-        self.closed = False
-
-    def query(self, *_args, **_kwargs):
-        return _FakeQuery(self._rows)
-
-    def close(self):
-        self.closed = True
+from factories import seed_hls_segments
 
 
 @pytest.mark.asyncio
-async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_path):
-    from app.routers import lab as lab_router
-
+async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_storage):
     rows = [
         SimpleNamespace(
             task_id=101,
@@ -61,19 +27,22 @@ async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_path):
             end_time=1_700_000_010_000,
         )
     ]
-    db = _FakeDB(rows)
-    monkeypatch.setattr(lab_router, "get_db", lambda: iter([db]))
-    monkeypatch.setattr(lab_router, "get_default_base_dir", lambda: tmp_path)
+    calls = []
 
-    step_dir = tmp_path / "101" / "2"
-    step_dir.mkdir(parents=True)
-    (step_dir / "raw_segment_1700000000000000.mp4").write_bytes(b"x")
+    def _page(needle, *, limit, offset):
+        calls.append((needle, limit, offset))
+        return len(rows), rows
+
+    monkeypatch.setattr(db_tasks, "query_task_page", _page)
+
+    seed_hls_segments(101, 2, [1_700_000_000_000])
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/lab-f3m8/tasks")
+        resp = await client.get("/lab-f3m8/tasks", params={"q": " 10.0 ", "limit": 20, "offset": 5})
 
     assert resp.status_code == 200
+    assert calls == [(" 10.0 ", 20, 5)]   # q 原样下传（strip 在 db 层）
     payload = resp.json()
     assert payload["total"] == 1
     assert payload["tasks"][0]["task_id"] == 101
@@ -81,7 +50,6 @@ async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_path):
     assert payload["tasks"][0]["raw_steps"] == [2]
     assert payload["tasks"][0]["has_raw_segments"] is True
     assert payload["tasks"][0]["has_current_step_raw"] is True
-    assert db.closed is True
 
 
 # ---------------------------------------------------------------------------
@@ -89,40 +57,33 @@ async def test_lab_tasks_list_returns_raw_steps(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _make_raw_segment(base: "object", task_id: int, step_id: int, ts_us: int):
-    step_dir = base / str(task_id) / str(step_id)
-    step_dir.mkdir(parents=True, exist_ok=True)
-    (step_dir / f"raw_segment_{ts_us}.mp4").write_bytes(b"x")
-
-
-def _force_storage_mode(monkeypatch, tmp_path):
+def _force_storage_mode(monkeypatch):
     from app.routers import lab as lab_router
 
-    monkeypatch.setattr(lab_router, "get_default_base_dir", lambda: tmp_path)
     monkeypatch.setattr(
         lab_router.lab_config, "get_task_source", lambda: "storage"
     )
-    # DB 不应被触碰：若调用 get_db 直接炸，证明走的是 storage 分支
-    def _boom():
+    # DB 不应被触碰：若查 DB 直接炸，证明走的是 storage 分支
+    def _boom(*_args, **_kwargs):
         raise AssertionError("storage mode must not touch the DB")
 
-    monkeypatch.setattr(lab_router, "get_db", _boom)
+    monkeypatch.setattr(db_tasks, "query_task_page", _boom)
 
 
 @pytest.mark.asyncio
-async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_path):
-    _force_storage_mode(monkeypatch, tmp_path)
+async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_storage):
+    _force_storage_mode(monkeypatch)
 
     # task 101: 两个 step 都有 raw 段
-    _make_raw_segment(tmp_path, 101, 1, 1_700_000_000_000_000)
-    _make_raw_segment(tmp_path, 101, 2, 1_700_000_005_000_000)
+    seed_hls_segments(101, 1, [1_700_000_000_000])
+    seed_hls_segments(101, 2, [1_700_000_005_000])
+    # task 101 step 3: 建了目录没写成段 → 送标清单里不该出现（list_step_ids 不过滤空 step）
+    (tmp_storage / "101" / "3" / "hls").mkdir(parents=True)
     # task 202: 只有 processed 段，没有 raw → 不应入选
-    proc_dir = tmp_path / "202" / "1"
-    proc_dir.mkdir(parents=True)
-    (proc_dir / "processed_segment_1700000000000000.mp4").write_bytes(b"x")
+    seed_hls_segments(202, 1, [1_700_000_000_000], track="processed")
     # 非数字目录（.lab_exports、config 文件）应被跳过
-    (tmp_path / ".lab_exports").mkdir()
-    (tmp_path / "lab_runtime_config.json").write_text("{}")
+    (tmp_storage / ".lab_exports").mkdir()
+    (tmp_storage / "lab_runtime_config.json").write_text("{}")
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -133,7 +94,7 @@ async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_path)
     assert payload["total"] == 1
     item = payload["tasks"][0]
     assert item["task_id"] == 101
-    assert item["raw_steps"] == [1, 2]
+    assert item["raw_steps"] == [1, 2]     # step 3 有目录没段 → 不进清单
     assert item["has_raw_segments"] is True
     # 占位字段：step 留空、status=unknown、ip 为空
     assert item["step_id"] is None
@@ -141,19 +102,21 @@ async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_path)
     assert item["status"] == "unknown"
     assert item["source_ip"] is None
     assert item["has_current_step_raw"] is False
-    # updated_time/start_time 从段 ts_ms 推导
+    # start_time = 首段**起点**；updated_time = 末段**段尾**（ts + EXTINF）。
+    # 末端取段尾而不是段起点：后者会漏掉最后一段自身的长度，列表里的"最后更新"就恒比实际
+    # 早一个段长（seed_hls_segments 缺省 EXTINF 10s，故 ...005_000 → ...015_000）。
     assert item["start_time"] == 1_700_000_000_000
-    assert item["updated_time"] == 1_700_000_005_000
+    assert item["updated_time"] == 1_700_000_005_000 + 10_000
 
 
 @pytest.mark.asyncio
-async def test_storage_mode_sort_paginate_and_filter(monkeypatch, tmp_path):
-    _force_storage_mode(monkeypatch, tmp_path)
+async def test_storage_mode_sort_paginate_and_filter(monkeypatch, tmp_storage):
+    _force_storage_mode(monkeypatch)
 
     # 三个 task，updated_time 递增：301 < 302 < 303
-    _make_raw_segment(tmp_path, 301, 1, 1_700_000_001_000_000)
-    _make_raw_segment(tmp_path, 302, 1, 1_700_000_002_000_000)
-    _make_raw_segment(tmp_path, 303, 1, 1_700_000_003_000_000)
+    seed_hls_segments(301, 1, [1_700_000_001_000])
+    seed_hls_segments(302, 1, [1_700_000_002_000])
+    seed_hls_segments(303, 1, [1_700_000_003_000])
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:

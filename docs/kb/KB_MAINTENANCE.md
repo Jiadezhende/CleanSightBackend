@@ -1,4 +1,4 @@
-> 更新时间：2026-09-13
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -16,7 +16,7 @@
 
 ## 纯文档改动不落 `docs/update/` 记录
 
-「一个开发任务一份 update 记录」这条只约束**代码 / 配置 / 行为**改动。**只动文档的任务
+「一批原子提交一份 update 记录」这条只约束**代码 / 配置 / 行为**改动。**只动文档的任务
 （写进 KB、重组文档、改文档规范、改 docstring 措辞）不再另写一份 update 记录**——写了就是
 用一份文档记录另一份文档的诞生，递归且无人会读。
 
@@ -33,6 +33,21 @@
 - `INDEX.md` 是唯一入口；新增文件后必须更新 `INDEX.md`。
 - 业务结论必须配代码来源路径，不能只写口头理解。
 - 对尚未由代码验证的推测，用“待核验”标注，不写成事实。
+
+## 文件分类（按前缀）
+
+| 前缀 | 写什么 |
+| --- | --- |
+| `BUSINESS_` | 业务概念、检测标准、生命周期 |
+| `ARCHITECTURE_` | 组件关系、数据流、API 接线、存储分层、包依赖 |
+| `SERVICE_` | 某个服务的内部实现与现状 |
+| `DESIGN_` | 开发中总结出的**设计原则 / 最佳实践**，再遇到同类问题时拿来参考 |
+
+`DESIGN_` 的准入：
+
+- 内容必须**可迁移**：脱离当初触发它的那个问题仍然成立。只在某一处成立的实现细节归 `SERVICE_`。
+- 写原则、判据、反例与适用边界；本仓库的具体代码只作例证或落地清单出现。
+- 现状描述（某服务现在怎么实现、盘上现在长什么样）不进 `DESIGN_`，归 `SERVICE_` / `ARCHITECTURE_`。
 
 ## 更新时间规则
 
@@ -59,14 +74,17 @@ grep -h '^> 更新时间：' docs/kb/*.md | sort | uniq -c
 
 - 应用入口：`app/main.py`
 - 统一 API：`app/routers/api.py`
-- 运行编排：`app/services/run_control.py`
-- 共享契约：`app/domain/`
-- 推理服务：`app/services/inference/`
+- 运行编排：`app/services/run_control/`
+- 共享契约：`app/types/`
+- 推理服务：`app/services/inference/`（`online/` + `offline/` + 共享层）
 - 流服务：`app/services/stream/`
 - 客户端状态：`app/services/client/`
-- 持久化：`app/services/persistence/`
-- 健康监控：`app/services/health_monitor/`
-- 追溯与媒体：`app/routers/traceback.py`、`app/routers/media.py`、`app/services/traceback/`
+- 录制：`app/services/recording/`
+- 告警上报：`app/services/alarm/`
+- 后台 daemons：`app/daemons/health_monitor/`、`app/daemons/cleanup/`
+- 数据层 / 平台 DB：`app/storage/`、`app/db/`
+- 追溯与媒体：`app/routers/traceback.py`、`app/routers/media.py`、`app/routers/utils/`
 - Lab：`app/routers/lab.py`、`app/services/lab/`
-- Gateway：`app/utils/gateway.py`、`mediamtx_gateway/`
+- 算法：`app/routers/algorithm.py`、`app/services/algorithm/`
+- Gateway：`app/gateway.py`、`mediamtx_gateway/`
 
