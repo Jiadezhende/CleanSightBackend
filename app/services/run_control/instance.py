@@ -4,7 +4,7 @@
 
     from app.services.run_control.instance import run_control_service
 
-按规范 §6，本单例只许被 `routers/*` 与具名例外（健康监控）引用。
+按规范 §6，本单例只许被 `routers/*`、本包 `lifespan()` 与具名例外（健康监控）引用。
 """
 
 from .service import RunControlService

@@ -319,9 +319,8 @@ class InferenceService:
             actor.signal_stop()
 
         # Phase 2: 逐个 join，收集结算告警并经 alarm sink 落库。
-        # 进程停机路径（非 per-run 拆除）：actor 产出的 settlement 用 alarm 服务落库（别名已烧进
-        # alarm.stage，与 actor 实时路径同款 sink 调用）——此时 alarm 服务仍在跑
-        # （alarm.lifespan 于 inference.lifespan 外层，停在 inference 之后）。
+        # 兜底路径：正常停机时 run_control.lifespan 已先逐个 stop_run 摘走全部 actor，这里为空；
+        # 仍有残留 actor 时 settlement 照样经 alarm 服务落库（alarm.lifespan 于 inference 外层）。
         for task_id, actor in actors:
             try:
                 settlement = actor.finalize_and_stop()
@@ -337,10 +336,6 @@ class InferenceService:
                     task_id, e,
                 )
 
-        # 注：停机时不再 flush 检测结果——落盘缓冲在 cq 上，recording.lifespan 嵌在 inference 外层
-        # （main.py），它的 sweeper 与队列此刻还活着。但 recording.stop 先停 sweeper 再抽队列，
-        # 进程直接停机（非 stop_run）时 cq 里最后不到 1 s 的检测结果能否被拉走取决于时序——已接受，
-        # 与 HLS 残段同口径。
         # 组件建于 start()，未 start 过就 stop（异常路径 / 测试）时为 None，跳过即可。
         if self.visualization_pool is not None:
             self.visualization_pool.stop()
