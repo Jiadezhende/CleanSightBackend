@@ -4,7 +4,7 @@
 1. persist_alarms 直接读 alarm.stage（别名已由 actor 前烧），不反向解析 alias；
 2. 过闸被拒（冷却窗口）时跳过落库。
 
-client_id / task_id / step_id 均由 cq 派生，落库调用打到 sink 内部 import 的
+task_id / step_id 均由 cq 派生，落库调用打到 sink 内部 import 的
 alarm_service.persist_alarm，测试用 monkeypatch 拦截该出口。
 """
 

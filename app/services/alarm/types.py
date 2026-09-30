@@ -17,7 +17,6 @@ class AlarmReportTask:
 
     task_id: Optional[int]
     stage: Optional[str]
-    client_id: Optional[str]
     alarm_type: str
     alarm_metric: str
     alarm_mode: str
@@ -34,7 +33,6 @@ class AlarmReportTask:
             task_id=data.get("task_id"),
             stage=data.get("stage"),
             step_id=data.get("step_id"),
-            client_id=data.get("client_id"),
             alarm_type=data.get("alarm_type", AlarmType.PROCESS_VIOLATION),
             alarm_metric=data.get("alarm_metric", AlarmMetric.UNKNOWN),
             alarm_mode=data.get("alarm_mode", ALARM_MODE_REALTIME),
@@ -50,7 +48,6 @@ class AlarmReportTask:
             "task_id": self.task_id,
             "stage": self.stage,
             "step_id": self.step_id,
-            "client_id": self.client_id,
             "alarm_type": self.alarm_type,
             "alarm_metric": self.alarm_metric,
             "alarm_mode": self.alarm_mode,

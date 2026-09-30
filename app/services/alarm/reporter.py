@@ -31,14 +31,13 @@ class AlarmReporter:
         """
         from app.types.exceptions import PersistenceError
 
-        client_id = alarm_info.get("client_id", "unknown")
-
         if self._should_send_http(alarm_info):
             http_success = self._send_alarm_http(alarm_info)
             if not http_success:
                 raise PersistenceError(
                     message="Alarm HTTP report to external database failed",
-                    client_id=client_id,
+                    task_id=alarm_info.get("task_id"),
+                    step_id=alarm_info.get("step_id"),
                     operation="alarm_http_report",
                     retryable=True,
                 )
