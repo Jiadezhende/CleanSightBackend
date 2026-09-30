@@ -1,7 +1,7 @@
 # 平台 DB 独立成 app/db/：database 搬家，models 按表拆成 tasks / alarms
 
 > **变更状态**：已完成（2026-09-28）——纯搬迁与拆文件，不改运行逻辑、不迁移任何查询
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)（2026-09-30）
 
 ## 概述
 

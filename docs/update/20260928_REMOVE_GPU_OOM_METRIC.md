@@ -1,7 +1,7 @@
 # 删除恒为空的 gpu_oom_total 指标
 
 > **变更状态**：生效中（2026-09-28）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_FAULT_TOLERANCE.md](../kb/DESIGN_FAULT_TOLERANCE.md)（2026-09-30）
 
 ## 概述
 

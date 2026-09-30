@@ -1,7 +1,7 @@
 # 检测契约三型改名：一个粒度一个名词
 
 > **变更状态**：生效中（2026-09-24）　<!-- 纯改名，零行为变更 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[DESIGN_EXTENDING_DETECTION.md](../kb/DESIGN_EXTENDING_DETECTION.md)（2026-09-30）
 
 ## 概述
 

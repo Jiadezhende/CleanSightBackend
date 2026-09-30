@@ -1,7 +1,7 @@
 # routers/utils/runs 新增 resolve_timeline（取 run + 媒体轴，否则 404），调用点暂不替换
 
 > **变更状态**：生效中（2026-09-28）——纯新增，ai / lab 仍各自内联同一段逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)（2026-09-30）
 
 ## 概述
 

@@ -1,4 +1,4 @@
-> 更新时间：2026-09-20
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -18,7 +18,7 @@
 
 ## `[PRESSURE]`：周期快照，非状态机
 
-公共件 [`PressureReporter`](../../app/utils/pressure.py)。**到点（默认 10s）且当下有压力才打一行，平稳静默**——不做 ENTER/ONGOING/RECOVER 边沿状态机，先要能 grep 的心跳，不要精确窗口起止。代价：瞬时尖峰可能被采样点错过、压力结束表现为「不再出新行」（无恢复行），两条都接受。整个机制 = **限频 + 谓词 + delta** 三件事。
+公共件 [`PressureReporter`](../../app/services/utils/pressure.py)。**到点（默认 10s）且当下有压力才打一行，平稳静默**——不做 ENTER/ONGOING/RECOVER 边沿状态机，先要能 grep 的心跳，不要精确窗口起止。代价：瞬时尖峰可能被采样点错过、压力结束表现为「不再出新行」（无恢复行），两条都接受。整个机制 = **限频 + 谓词 + delta** 三件事。
 
 ### 每个资源恰好一个上报者
 
@@ -29,7 +29,7 @@
 | `ca_processed` | `ClientQueues` | `append_ca_processed` 内部 | 同上 |
 | `stage_queue` | `StageAwareDispatcher` | 调度循环 ~1s 采样 | 同上 |
 
-只有这两个组件汇报：队列存于谁、检查就在谁的写入方法内部，**由写者线程顺带驱动**——不新起线程，不把水位判定散到 decoder / VisualizationWorker 等生产者（它们一行未改）。dispatcher 复用既有调度循环、每 ~1s 采一次（限频仍 10s，采样密只换更及时的首行）。`ClientQueues` 天然「只在任务运行时」汇报（没人写队列就没有 observe）；`to_draining()`/`close()` 里静默 `reset()` 清计时与基线。水位比 `DEFAULT_HIGH_WATERMARK_RATIO=0.5`、上报间隔 `DEFAULT_REPORT_INTERVAL=10.0` 均在 [pressure.py](../../app/utils/pressure.py)，等有真实压力数据再谈上 settings。
+只有这两个组件汇报：队列存于谁、检查就在谁的写入方法内部，**由写者线程顺带驱动**——不新起线程，不把水位判定散到 decoder / VisualizationWorker 等生产者（它们一行未改）。dispatcher 复用既有调度循环、每 ~1s 采一次（限频仍 10s，采样密只换更及时的首行）。`ClientQueues` 天然「只在任务运行时」汇报（没人写队列就没有 observe）；`to_draining()`/`close()` 里静默 `reset()` 清计时与基线。水位比 `DEFAULT_HIGH_WATERMARK_RATIO=0.5`、上报间隔 `DEFAULT_REPORT_INTERVAL=10.0` 均在 [pressure.py](../../app/services/utils/pressure.py)，等有真实压力数据再谈上 settings。
 
 ### 日志契约
 
@@ -85,14 +85,14 @@ reporter 个数 = 3 × 任务数 + active_stage 数
 ## 边界与不重叠
 
 - decoder 的 `_should_drop_frame` 入口准入背压 / `ingress_backpressure` 埋点是它自己的**准入决策**，与 CQ 报的**队列积压**语义不重叠。
-- recording 的落盘队列与 persistence 的 `alarm_queue` 满目前是**每次丢都打一条 warning**，属同类问题但不在 `[PRESSURE]` 体系内。
+- recording 的落盘队列与 alarm 服务的 `alarm_queue` 满目前是**每次丢都打一条 warning**，属同类问题但不在 `[PRESSURE]` 体系内。
 - `_admit_to_stage` / `_stage_backpressure` 接缝已就位但恒放行（自动降帧/限流/降级留后续）。
 
 ## 代码来源
 
-- `app/utils/pressure.py`（`PressureReporter` + reason 常量 + logger `app.pressure`）
+- `app/services/utils/pressure.py`（`PressureReporter` + reason 常量 + logger `app.pressure`）
 - `app/services/client/queues.py`（三条 CA 队列上报，`frames_dropped_ready/raw/processed`，`_pressure_watermark`）
-- `app/services/inference/detection/dispatcher.py`（`_stage_drops`/`_stage_rejects`，stage deque 上报）
-- `app/services/inference/visualization/worker.py`（`[VIZ_THROUGHPUT]`）
+- `app/services/inference/online/detection/dispatcher.py`（`_stage_drops`/`_stage_rejects`，stage deque 上报）
+- `app/services/inference/online/visualization/visualization_worker.py`（`[VIZ_THROUGHPUT]`）
 - `app/services/stream/{service,decoder}.py`（`[BACKPRESSURE]`）
 - `tests/test_pressure_reporter.py`、`tests/test_cq_pressure_log.py`、`tests/test_pipeline_drop_counters.py`

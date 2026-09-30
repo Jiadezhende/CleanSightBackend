@@ -1,7 +1,7 @@
 # run_control 单文件改为包：RunControlService + instance.py 单例
 
 > **变更状态**：已完成（2026-09-28）——纯搬迁与改名，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_RUN_CONTROL.md](../kb/SERVICE_RUN_CONTROL.md)（2026-09-30）
 
 ## 概述
 

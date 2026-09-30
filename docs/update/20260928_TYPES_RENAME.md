@@ -1,7 +1,7 @@
 # 契约包 app/domain 改名 app/types，AppError 体系并入，render 下沉到 inference.online
 
 > **变更状态**：已完成（2026-09-28）——纯搬迁与改名，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)、[ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)（2026-09-30）
 
 ## 概述
 

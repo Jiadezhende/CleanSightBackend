@@ -1,7 +1,7 @@
 # 时序分析事实升格到 `app/domain/fact.py`：产出者身份归一、时间轴钉死
 
 > **变更状态**：生效中（2026-09-22）　<!-- 第 2–5 步已随 20260921_STORAGE_INFERENCE_DOMAIN 与 20260922_INFERENCE_WRITE_PATH 落地；旧型已删。正文「保留项」一节是本批当时的状态 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-09-30）
 >
 > <!-- 推理域数据层接线的第 1 步：先定数据模型，再写 codec，最后迁调用点 -->
 

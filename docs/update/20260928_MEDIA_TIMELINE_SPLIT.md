@@ -1,7 +1,7 @@
 # 媒体轴拆进 storage.hls，services/utils/media_timeline 只留断流阈值判定
 
 > **变更状态**：生效中（2026-09-28）——搬迁 + 改签名，调用方同批改完，对外 HTTP 行为不变
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)、[SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)（2026-09-30）
 
 ## 概述
 

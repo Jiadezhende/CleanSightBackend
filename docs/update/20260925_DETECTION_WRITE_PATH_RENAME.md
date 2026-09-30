@@ -1,7 +1,7 @@
 # 检测结果写链路 feature → detection 改名，落盘文件改为 `detections.jsonl`
 
 > **变更状态**：生效中（2026-09-25）　<!-- 纯改名；落盘文件名与行内键变更，dev 上的 inference/features.jsonl 不再可见 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)（2026-09-30）
 
 ## 概述
 

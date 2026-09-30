@@ -1,7 +1,7 @@
 # api.start 改走 db_tasks.query_task，router 不再持有 DB session
 
 > **变更状态**：生效中（2026-09-28）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_API_SURFACE.md](../kb/ARCHITECTURE_API_SURFACE.md)、[BUSINESS_TASK_LIFECYCLE.md](../kb/BUSINESS_TASK_LIFECYCLE.md)（2026-09-30）
 
 ## 概述
 

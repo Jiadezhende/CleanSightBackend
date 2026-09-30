@@ -1,7 +1,7 @@
 # 离线作业服务：SerialTaskQueue 串行 + 子进程跑 CLI
 
 > **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[DESIGN_FAULT_TOLERANCE.md](../kb/DESIGN_FAULT_TOLERANCE.md)（2026-09-30）
 
 ## 概述
 

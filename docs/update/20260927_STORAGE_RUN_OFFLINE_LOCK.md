@@ -1,7 +1,7 @@
 # 离线作业锁定 run：运行中的 run 提交 409，按 run 去重，新增 `reclaimed`
 
 > **变更状态**：生效中（2026-09-27）——「落盘按运行分目录」第 4 期第二批（4b）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[DESIGN_STALE_WRITES.md](../kb/DESIGN_STALE_WRITES.md)、[BUSINESS_TASK_LIFECYCLE.md](../kb/BUSINESS_TASK_LIFECYCLE.md)（2026-09-30）
 
 ## 概述
 

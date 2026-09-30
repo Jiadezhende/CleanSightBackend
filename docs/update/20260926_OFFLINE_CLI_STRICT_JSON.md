@@ -1,7 +1,7 @@
 # 离线 CLI 增加 `--strict` / `--json`
 
 > **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **知识库**：无需沉淀（`--strict` / `--json` 已被后续记录删除，末行 JSON 见 [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)）
 
 ## 概述
 

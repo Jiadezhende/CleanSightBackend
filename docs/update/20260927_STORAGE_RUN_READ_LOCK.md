@@ -1,7 +1,7 @@
 # 读侧入口解析一次 run、整次请求锁定；对外增 `run_id` 字段与可选参数
 
 > **变更状态**：生效中（2026-09-27）——「落盘按运行分目录」第 4 期第一批（4a）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)、[ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)（2026-09-30）
 
 ## 概述
 

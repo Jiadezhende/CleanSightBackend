@@ -1,7 +1,7 @@
 # 推理产物写侧接线：落盘编排交给 recording，删掉 `inference/feature/` 子包
 
 > **变更状态**：生效中（2026-09-22）　<!-- 在线写侧、离线读侧、facts 调用点同批切到 app/storage/inference；旧子包已删除 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)、[SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[SERVICE_CLIENT_STATE.md](../kb/SERVICE_CLIENT_STATE.md)、[ARCHITECTURE_DATA_FLOW.md](../kb/ARCHITECTURE_DATA_FLOW.md)（2026-09-30）
 >
 > <!-- 承接 20260921 的两步（domain/fact.py + storage/inference 子包），本批是它们的价值兑现 -->
 

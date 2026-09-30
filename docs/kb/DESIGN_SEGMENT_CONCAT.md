@@ -1,4 +1,4 @@
-> 更新时间：2026-09-19
+> 更新时间：2026-09-30
 > 依据来源：实测（ffmpeg n7.1.4-9，Windows）+ 代码分析
 > 可信级别：exit code、产物大小、时长、帧数、日志原文均为实测值，复现方法见 §6；
 > 标注「待核验」的是未在本仓库验证过的推导，不作为事实采信
@@ -169,8 +169,8 @@ B1 是唯一被证明过的选项，代价是 `-f concat` 永久不可用——�
 
 ### 落到红线
 
-**`app/` 下任何地方出现 `-f concat` 都是错的，没有例外**（理由见 §2，本文不再重复）。现有三处
-注释各写了一遍：`app/routers/lab.py`、`app/services/lab/step_exporter.py`、
+**`app/` 下任何地方出现 `-f concat` 都是错的，没有例外**（理由见 §2，本文不再重复）。现有两处
+注释各写了一遍：`app/services/lab/step_exporter.py`、
 `app/services/lab/clip_builder.py` 的模块 docstring。
 
 ---
@@ -229,7 +229,7 @@ ffmpeg -allowed_extensions ALL -i /path/to/step/hls/.tmp_xxx.m3u8 -c copy out.mp
 
 | | |
 |---|---|
-| **优势** | 段顺序、每段时长（EXTINF）、init 引用都由清单显式声明，ffmpeg 不用猜；能表达「只取子集」；能**覆盖**每段时长（下游按清单的 EXTINF 建时间轴，见 §5 的待核验项）；命令行长度恒定，段数无上限；跨平台无路径分歧（裸文件名） |
+| **优势** | 段顺序、每段时长（EXTINF）、init 引用都由清单显式声明，ffmpeg 不用猜；能表达「只取子集」；**不能**覆盖 fMP4 段的时长（ffmpeg 的时间轴来自 fragment 的 tfdt，改写清单 EXTINF 实测是空操作，见 §5 末）；命令行长度恒定，段数无上限；跨平台无路径分歧（裸文件名） |
 | **局限** | 必须落一个临时文件到段所在目录 → 该目录必须可写（只读挂载不可用）；进程被 SIGKILL 时残留清单；临时文件是「非本域产物」，与按域隔离的落盘结构有张力；**坏段会静默截短**（VERIFY §3） |
 | **适合** | 段数多（数百）、目录可写、需要显式声明每段时长的场景 |
 
@@ -316,7 +316,7 @@ ffmpeg -i "concatf:/anywhere/list.txt" -c copy out.mp4
   └─ 否 ↓
 
 需要由调用方**覆盖**每段时长（不用段自带的 tfdt 口径）？
-  └─ 是 → 只能 ①（③/③' 给不出这个能力）。先读下方待核验项
+  └─ fMP4 段做不到：①/③/③' 都听 tfdt（清单 EXTINF 改写是空操作，见下方），应在写段时就把 tfdt 打对
   └─ 否 ↓
 
 段数会超过几百？
@@ -336,19 +336,12 @@ ffmpeg -i "concatf:/anywhere/list.txt" -c copy out.mp4
 | 整段导出 [`lab/step_exporter.py`](../../app/services/lab/step_exporter.py) | ffmpeg | 否 | 无 | ~180 | ① | ① 或 ③'（③ 到 ~400 段顶到上限） |
 | 回放清单 [`routers/traceback.py`](../../app/routers/traceback.py) | **浏览器** | 否 | 播放器自理 | ~180 | HLS 清单 | ✅ 不适用本文 |
 
-> **待核验：`clip_builder` 能不能换 ③。** 它写临时清单时**刻意不用盘上的 EXTINF**，改用相邻段
-> ts 差（墙钟实测值），因为 `-ss` 的 seek 基准是墙钟；而盘上 fragment 的 tfdt 被 hex-patch 成的是
-> 「累计 EXTINF × 90000」，EXTINF = `帧数/fps`（媒体时长）。**两套时长口径在盘上不一致。**
-> 于是问题是：HLS demuxer 解 fMP4 段时，包的时间戳听清单的 EXTINF 还是听 fragment 自己的 tfdt？
->
-> - 听 EXTINF → 路径 ① 是**承重的**，那份临时清单是唯一能注入墙钟时长的地方，换 ③ 会让 seek
->   基准静默退回媒体时间轴，表现是长任务上裁剪位置逐渐漂移。
-> - 听 tfdt → `clip_builder` 现在写的墙钟 EXTINF 就是装饰，它的 seek 基准**已经**是错的。
->
-> **§6 的复现材料区分不了这两种**：那里用的是 ffmpeg 原生产出的 fragment，EXTINF 与 tfdt 天然
-> 一致，两种解释给出同一个结果。要判别得另造一份两者故意错开的材料（如 EXTINF 写 12s、
-> tfdt 按 10s 打）。**在此之前不要按「③ 更省」去切 `clip_builder`。**
-> `step_exporter` 不受影响（它用 `list_segments` 的 EXTINF 真值，与 tfdt 同源）。
+> **`clip_builder` 的临时清单不承载时长。** 它写临时清单时直接用清单 EXTINF 真值；HLS demuxer 解
+> fMP4 段时包时间戳来自 fragment 自己的 `tfdt` + sample duration，改写清单 EXTINF（如换成相邻段
+> ts 差）实测是空操作（[`clip_builder.py`](../../app/services/lab/clip_builder.py) 模块 docstring）。
+> 送标区间本就收媒体刻度（见 [SERVICE_LAB.md](SERVICE_LAB.md)），`-ss` 的 seek 基准与 tfdt 同轴。
+> 因此「换 ③」不受时长口径约束，只剩 §5 的静默失败判据与 Windows 路径分隔符两个考量。
+> `step_exporter` 同理（用 `list_segments` 的 EXTINF 真值，与 tfdt 同源）。
 >
 > ---
 >

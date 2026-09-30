@@ -1,7 +1,7 @@
 # recording / lab 按包骨架改名：_sweeper.py → sweep_worker.py，lab/config.py → runtime_config.py，lab 包根零 re-export
 
 > **变更状态**：已完成（2026-09-28）——纯改名与 import 路径调整，不改运行逻辑；`temp/colorstrip` 的物理搬迁待本地执行（见遗留风险）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)、[SERVICE_LAB.md](../kb/SERVICE_LAB.md)（2026-09-30）
 
 ## 概述
 

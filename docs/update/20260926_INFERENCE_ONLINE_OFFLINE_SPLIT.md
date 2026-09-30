@@ -1,7 +1,7 @@
 # inference 包拆成 online/ + offline/ + 共享层（纯搬迁）
 
 > **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)（2026-09-30）
 
 ## 概述
 

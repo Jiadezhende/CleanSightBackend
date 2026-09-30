@@ -1,7 +1,7 @@
 # 可视化线程体合并：visualization/pool.py + worker.py → visualization_worker.py
 
 > **变更状态**：已完成（2026-09-28）——纯文件合并，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-09-30）
 
 ## 概述
 

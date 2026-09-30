@@ -1,7 +1,7 @@
 # admin 离线推理 tab：提交作业 + 作业列表
 
 > **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_API_SURFACE.md](../kb/ARCHITECTURE_API_SURFACE.md)、[SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-09-30）
 
 ## 概述
 

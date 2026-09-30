@@ -1,7 +1,7 @@
 # lab router 的送标 / 整段下载 / LS 探活切到 services/lab/service.py，删除 router 内旧实现
 
 > **变更状态**：生效中（2026-09-28）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_LAB.md](../kb/SERVICE_LAB.md)（2026-09-30）
 
 ## 概述
 

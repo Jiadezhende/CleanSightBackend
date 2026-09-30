@@ -1,7 +1,7 @@
 # `app/algorithm/` 收进 `app/services/algorithm/`，算法对外经 service 接口提供
 
 > **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_ALGORITHM.md](../kb/SERVICE_ALGORITHM.md)、[ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)（2026-09-30）
 
 ## 概述
 

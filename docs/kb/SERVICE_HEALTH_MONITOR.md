@@ -1,22 +1,24 @@
-> 更新时间：2026-09-20
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
-# Health Monitor Service
+# Health Monitor（daemon）
 
-全局健康监控是自动化治理组件，负责断流重连、任务超时、孤儿状态清理和统一 cleanup。全程按 int `task_id` 键。
+全局健康监控是按时钟自驱的后台 daemon，负责断流重连、任务超时、孤儿状态清理和统一 cleanup。全程按 int `task_id` 键。
 
-## 启动位置与协作者
+## 位置、启动与协作者
 
-生命周期归本包自己的 `lifespan()`（`app/services/health_monitor/__init__.py`），在 `app/main.py` 的嵌套 lifespan 里是**最外层**：最先起、最后停，全程看着 stream / persistence / recording / inference 四层。单例在 `instance.py`，`routers/health.py` 只读它做状态查询。
+包在 `app/daemons/health_monitor/`：`worker.py`（类 `HealthMonitorWorker`）、`instance.py`（单例 `health_monitor_worker`）、`config.py`、`types.py`；`__init__.py` 只有 docstring + `lifespan()`，零 re-export。日志前缀与线程名 `[HealthMonitorWorker]`。
 
-`GlobalHealthMonitor.__init__` 的五个入参（`client_manager` / `stream_service` / `inference_manager` / `config` / `recording_service`）**一律可缺省且构造期零副作用**：不读 yaml、不碰全局单例，缺省者一并推迟到 `start()` 里的 `_resolve_deps()` 现取（四个 import 都写在函数体内——顶层拉 inference 会把 torch/YOLO 链拽进来，recording 则拽 numpy/cv2）。已注入的值 `start()` 不覆盖，测试传 mock 即可。
+生命周期归本包 `lifespan()`，在 `app/main.py` 的嵌套 lifespan 里是**最外层**：最先起、最后停，全程看着 stream / (cleanup, alarm) / recording / inference。`routers/health.py::get_health_monitor()` 只读单例做状态查询（routers → daemons 只读，daemons 不 import routers，门禁 `test_daemons_do_not_import_routers`）。
+
+`HealthMonitorWorker.__init__` 的五个入参（`client_service` / `stream_service` / `inference_service` / `config` / `recording_service`）**一律可缺省且构造期零副作用**：不读 yaml、不碰全局单例，缺省者一并推迟到 `start()` 里的 `_resolve_deps()` 现取（四个 import 都写在函数体内——顶层拉 inference 会把 torch/YOLO 链拽进来，recording 则拽 numpy/cv2）。已注入的值 `start()` 不覆盖，测试传 mock 即可。导入预算门禁锁住这一点：`app.daemons.health_monitor` 与 `.instance` 的 import 不拉起任何 `app.services`（`tests/test_import_hygiene.py` BUDGET）。取别家单例是单例引用面门禁的具名例外（`SINGLETON_EXCEPTIONS`）。
 
 ## 检测对象
 
 每轮检查读取：
 
-- `client_manager.snapshot()`（`{task_id → ClientQueues}`）。
+- `client_service.snapshot()`（`{task_id → ClientQueues}`）。
 - StreamService 中所有 decoder 的 task_id。
 - 每个 ClientQueues 的 `latest_raw_timestamp`。
 
@@ -29,7 +31,7 @@
 - **进程已退出**（断流 EOF / 崩溃 / 首启失败）→ 进入重连模式，按 `reconnect_interval` 节流反复 `restart_stream()`（respawn）；某次 respawn 起活进程并来足够新的新帧 → 退出重连（成功）。比旧的 5s staleness 判据更快感知。
 - **进程活着但暂无帧**（等首个关键帧 / 瞬时停）→ **只等，不杀**（根治「等首帧被误杀→重连→再等一个 GOP」的启动延迟翻倍 bug）。
 
-`ReconnectState`（`types.py`）字段：`task_id`、`stream_url`、`last_attempt_time`（respawn 节流）、`last_frame_time_before_disconnect`（判新帧）、`cq`（身份 fence）；`attempt_count` 已停用（不再数次数，保留字段作兼容）。无 fps/protocol 字段（固定 RTSP、fps 走配置）。
+`ReconnectState`（`types.py`）字段：`task_id`、`stream_url`、`last_attempt_time`（respawn 节流）、`last_frame_time_before_disconnect`（判新帧）、`cq`（身份 fence），共五个；不数重连次数（无计数字段）。无 fps/protocol 字段（固定 RTSP、fps 走配置）。
 
 重连成功的判据是**真来了新帧**（`latest_raw_timestamp` 超过断流前那一帧、且 `frame_age < heartbeat_timeout`），不是「进程活着」——respawn 后的新进程在等首个关键帧时也活着但无帧，此刻判成功或重杀都是错的。进程活着却还没来帧一律只等。
 
@@ -45,7 +47,7 @@
              └──────────────────── cleanup_timeout（默认 20s）──────────────────┘
 ```
 
-当前默认：`rtsp_read_timeout_s=2.5` ⇒ 判死 ~5.4s，留给重连 ~15s。`GlobalHealthMonitor.start()` 末尾调 `_check_reconnect_budget()` 做越界检查，**只告警不纠正**（两个值各有正当运维理由，代码没资格替人选）：
+当前默认：`rtsp_read_timeout_s=2.5` ⇒ 判死 ~5.4s，留给重连 ~15s。`HealthMonitorWorker.start()` 末尾调 `_check_reconnect_budget()` 做越界检查，**只告警不纠正**（两个值各有正当运维理由，代码没资格替人选）：
 
 - `2T ≥ cleanup_timeout` → ERROR「配置冲突」：进程还没死就先被判 cleanup 拆除，重连永不触发。
 - 剩余预算 < `cleanup_timeout/2` → WARNING：判死占掉过半预算。
@@ -63,7 +65,7 @@
 
 **不登记的后果是静默的**：断流那刻攒在 CA 队列里的半批帧被重连后的帧补满，拼成横跨 gap 的段；`eff_fps` 由首末帧跨度反推、跨度里混进整段 gap → 10 秒画面写成 30 秒 EXTINF，3× 慢放，回放/导出/送标三条链路一起中招。而 `eff_fps≈9.99` 仍落在合理带 `[1,60]` 内不触发退化兜底，**全程无一条报警，每次重连必现**。
 
-`recording_service` 是本类的第 5 个协作者，与其余四个同款：构造注入 + `_resolve_deps()` 里函数体内 import 取全局单例。本模块只用它这一个方法；flush 的实际执行、段打包与队列语义全归 recording（见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)）。
+`recording_service` 是 `_resolve_deps()` 取的四个协作者之一（client / stream / inference / recording），同款：构造注入 + 函数体内 import 取全局单例。本模块只用它这一个方法；flush 的实际执行、段打包与队列语义全归 recording（见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)）。
 
 ## 清理条件
 
@@ -74,19 +76,19 @@
 - 有 ClientQueues 但无 decoder，超过 `orphan_timeout`（默认 30s）。
 - 有 decoder 但无 ClientQueues，立即停止孤儿 decoder。
 
-## cleanup_client → 委托 RunController
+## cleanup_client → 委托 RunControlService
 
-`cleanup_client(task_id, reason, skip_decoder=False, expected=None)` 是统一清理入口（API terminate 走 api→RunController，重连失败/孤儿/超时走本入口），**直接委托** `run_controller.stop_run(task_id, reason, skip_decoder=skip_decoder, expected=expected)`——不再各自调 `InferenceManager.remove_client` / `ClientManager.remove_client`。
+`cleanup_client(task_id, reason, skip_decoder=False, expected=None)` 是统一清理入口（API terminate 走 api→RunControlService，重连失败/孤儿/超时走本入口），先清本类的 `_reconnecting_clients` 条目，再**直接委托** `run_control_service.stop_run(task_id, reason, skip_decoder=skip_decoder, expected=expected)`——本类不自己拆 inference / client。`run_control_service` 不是 `_resolve_deps()` 的一员，而是在 `cleanup_client()` 函数体内另取。
 
-`expected` 传监控线程在**决策时刻**捕获的 CQ 对象引用：monitor 线程「先决策后拿锁」，决策→拿锁间槽位可能被 `/start` 重启换新 CQ，`stop_run` 内以 `expected` 做对象身份 fence，槽位已非 expected 则整段放弃，防误删健康新 run。拆机顺序（封闸→停 decoder→落 settlement/HLS→清 registry）由 RunController 统一，见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
+`expected` 传监控线程在**决策时刻**捕获的 CQ 对象引用：monitor 线程「先决策后拿锁」，决策→拿锁间槽位可能被 `/start` 重启换新 CQ，`stop_run` 内以 `expected` 做对象身份 fence，槽位已非 expected 则整段放弃，防误删健康新 run。拆机顺序（封闸→停 decoder→落 settlement/HLS 与检测结果残余→清 registry）由 RunControlService 统一，见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
 
 ## 代码来源
 
-- `app/services/health_monitor/manager.py`（`GlobalHealthMonitor`）
-- `app/services/health_monitor/__init__.py`（`lifespan()`）、`instance.py`（单例）
-- `app/services/health_monitor/config.py`
-- `app/services/health_monitor/types.py`
-- `app/services/run_control.py`（`cleanup_client` 委托的 `stop_run`）
+- `app/daemons/health_monitor/worker.py`（`HealthMonitorWorker`、`_resolve_deps`、`cleanup_client`）
+- `app/daemons/health_monitor/__init__.py`（`lifespan()`）、`instance.py`（单例 `health_monitor_worker`）
+- `app/daemons/health_monitor/config.py`
+- `app/daemons/health_monitor/types.py`（`ReconnectState`）
+- `app/services/run_control/service.py`（`cleanup_client` 委托的 `stop_run`）
 - `app/services/recording/service.py`（`request_residual_flush`）
 - `app/settings.py`（`rtsp_read_timeout_s`，预算护栏的另一半）
 - `app/routers/health.py`（只读状态查询）

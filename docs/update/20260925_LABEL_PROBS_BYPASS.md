@@ -1,7 +1,7 @@
 # 离线逐帧类别概率旁路：`offline_debug.json` → `label_probs.npz`
 
 > **变更状态**：生效中（2026-09-25）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-09-30）
 
 ## 概述
 
