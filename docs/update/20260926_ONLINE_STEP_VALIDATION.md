@@ -1,7 +1,7 @@
 # 在线 step 校验与去 MOCK：未配置即 400，构造失败启动即失败，降级帧不落盘
 
 > **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [BUSINESS_DETECTION_STANDARDS.md](../kb/BUSINESS_DETECTION_STANDARDS.md)、[SERVICE_RUN_CONTROL.md](../kb/SERVICE_RUN_CONTROL.md)、[DESIGN_FAULT_TOLERANCE.md](../kb/DESIGN_FAULT_TOLERANCE.md)（2026-09-30）
 
 ## 概述
 

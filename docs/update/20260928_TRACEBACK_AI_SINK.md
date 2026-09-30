@@ -1,7 +1,7 @@
 # traceback / ai 两个 router 改走 app.db 与 storage 查询，删掉内联的查库、段跨度、run 区间逻辑
 
 > **变更状态**：生效中（2026-09-28）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)（2026-09-30）
 
 ## 概述
 

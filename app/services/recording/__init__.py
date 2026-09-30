@@ -40,7 +40,8 @@ async def lifespan():
     """recording 服务生命周期（**起于 inference 之前、停于 inference 之后**）。
 
     在 `app/main.py` 里嵌在 `inference.lifespan` 外层，与 alarm 同一档，理由也一样：
-    `inference.stop()` 会经 `run_control` 交出最后一批 HLS 残段，那时队列必须还活着；
+    停机拆 run（`run_control.lifespan`，嵌在 inference 里层）会交出最后一批 HLS 残段与检测结果，
+    那时队列必须还活着；
     等它交完，本 `finally` 再停队列、把剩下的排空——**保序、不丢尾**。
 
     嵌到 inference 里层会让队列先停，残段提交被拒，而那些帧已经从 CQ 弹出去了，是真丢。

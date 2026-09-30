@@ -1,45 +1,50 @@
-> 更新时间：2026-09-20
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # 任务生命周期
 
-一次 run 的起停由 `RunController`（控制面唯一编排出口）统一驱动，跨 stream / inference / recording / client 各服务。运行键 = int `task_id`。编排细节见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
+一次 run 的起停全部经 `RunControlService.start_run` / `stop_run`，运行键是 int `task_id`。本文件只写业务流程与规则；各步 owner、加锁与失败处理见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)。
 
-## 启动流程
+## run 是回放、追溯、送标、离线分析的单位
 
-入口：`POST /api/start`（body `{ task_id, rtsp_url }`；历史字段 `fps` 已弃用——后端从不使用，老前端继续带无害，新前端可省）。
+- 同一 `(task_id, step_id)` 每开跑一次就是一个新 run，盘上一个目录 `{task}/{step}/{run_id}/`。`run_id` = 开跑时刻 epoch 毫秒，同 step 内严格递增；身份 `RunIdentity`（`app/types/run.py`）。
+- 一个 CQ 对应一个 run，CQ 构造时带上 `RunIdentity`，此后不变。
+- 读侧缺省取该 step 最新可见 run，带 `run_id` 可点名旧 run；timeline 告警按 run 存续期 `[run_id, 下一个 run_id)` 归属。
+- 离线分析锁定一个 run：对正在运行的 run 提交返回 409（输入还在写）。
 
-1. API 层从 `clean_task` 查 `task_id`，校验存在、取 `source_ip`（被动身份字段）。
-2. 经 `asyncio.to_thread` 桥接调 `run_controller.start_run(task_id, current_step, rtsp_url, source_ip)`（把同步持锁段挪出事件循环）。
-3. `start_run` 全程持 `client_manager.lock_for(task_id)`（per-task RLock）：
-   - 幂等/重启判断（见下）。
-   - 建**新** CQ（`stage = resolve_stage(current_step)`，身份不可变）后 `client_manager.set` 注册（set/remove 均归 RunController，与 `stop_run` 对称）。
-   - `inference_manager.start_workflow(cq)`（含 `FeatureStore.open_fresh` + 建 Actor）。**start 侧不再清 HLS 目录**——旧录像留到新 run 真写出第一段时才由 recording 自清（懒惰 supersede）。
-   - `stream_service.start_stream(task_id, rtsp_url)` 起解码。
-   - 注册后的 setup 步全包进 `try`：任一步失败 → `stop_run(expected=cq)` 对称回滚注销、重抛，不留泄漏 CQ。
+## 启动：参数校验在动旧 run 之前
 
-## 幂等条件
+入口 `POST /api/start`，body `{ task_id, rtsp_url }`（历史字段 `fps` 已弃用，带上无害）。
 
-同 task 已运行时，仅当 `step_id` 与流 URL **均未变**才幂等返回；任一变化（改 step / 换流）→ 先 `stop_run` 停旧、再全量重建（建新 CQ 换槽，不复用旧对象）。
+1. API 层查 `clean_task`：任务不存在 → 404，`source_ip` 为空 → 400，DB 失败 → 503。
+2. 经 `asyncio.to_thread` 调 `start_run`。`current_step` 非数字、未配置或无在线检测 → 400；此校验在锁外、动旧 run 之前，失败时已在跑的 run 不受影响。
+3. 持 `lock_for(task_id)`：幂等判断 → 分配 run 目录 → 建并注册 CQ → 建推理 Actor → 起解码。注册后任一步失败即 `stop_run(expected=cq)` 回滚并重抛。
 
-## 终止流程
+## 同 task 再次 start：step 与 URL 都没变才幂等
 
-入口：`POST /api/terminate`，双模——body `{ task_id }`（新，首选，与 start 对称）或 query `?client_id=<source_ip>`（旧，兼容期保留）。经 `to_thread` 调 `run_controller.stop_run(task_id, reason)`。健康监控的自动结束（重连失败/孤儿/超时）经 `cleanup_client` 同样委托 `stop_run`（并传 `expected` CQ 做对象身份 fence）。
+任一变化（改 step / 换流）→ 先 `stop_run` 停旧，再全量建新 run，不复用旧对象。换代的隔离：
 
-`stop_run` 尽力而为、永不抛出，固定顺序：封闸 `to_draining()` → 停 decoder → 落 settlement 告警（`alarm_sink.persist_alarms`）+ flush HLS 残段（`recording_service.flush_residual(cq)`，须在 CQ 还注册着时做）→ 清 registry（`cq.close()`）→ 回收录制代次记录（`recording_service.forget_task`）。
+- 内存侧：旧 run 的结算告警归属旧 CQ；旧 run 迟到的写入撞 DRAINING / CLOSED 状态门被拒，不串到新 run。
+- 盘上：一 run 一目录，旧 run 迟到的落盘写进它自己的目录；换代不清旧产物，旧 run 保留到 step TTL。
+- 回放：缺省指向最新可见 run；新 run 刚起时有一段缺省回放为空的窗口，见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)「读侧 run 锁定」。
 
-## 任务切换
+## 四条路径结束一次 run，全部走 stop_run
 
-同 task 再次 start 且 step/URL 变化即触发切换：先 `stop_run` 停旧、再建新 run。per-run 不可变 CQ 天然保证隔离——旧 run 的结算告警归属旧 CQ；晚到的旧 run 写入撞 DRAINING/CLOSED 状态门被拒，不串台到新 run（无需「先停旧 actor 再切字段」的排序不变式）。
+| 触发 | 入口 |
+|------|------|
+| 前端终止 | `POST /api/terminate`：body `{ task_id }`（首选）或 query `?client_id=<source_ip>`（旧入口）；查不到 run 时 success no-op |
+| 健康监控 | 重连无帧超时 / 孤儿 / 任务超时，经 `cleanup_client` 调 `stop_run`，传 `expected` CQ 做身份 fence |
+| 启动回滚 | `start_run` 注册后的 setup 步失败 |
+| 进程停机 | `run_control.lifespan` 退出时 `shutdown()` 对每个在跑的 run 调 `stop_run(reason="shutdown")`；嵌在 `inference.lifespan` 里层，保证早于 `inference.stop()`、recording / alarm 队列仍活着 |
+
+`stop_run` 尽力而为、永不抛出，固定顺序：封闸 `to_draining()` → 停 decoder → 停 Actor 并上报结算告警 → `flush_residual(cq)` 交出 HLS 残段与剩余检测结果 → 注销 CQ（`cq.close()` 释放帧，故 flush 必须在它之前）。四条路径都会把每个 run 最后不足一段的录像与检测结果交给 recording 落盘。
 
 ## 代码来源
 
-- `app/routers/api.py`
-- `app/services/run_control.py`
-- `app/services/inference/manager.py`
-- `app/services/recording/service.py`（`flush_residual` / `forget_task`）
-- `app/services/health_monitor/manager.py`
-- `app/services/client/manager.py`
-- `tests/test_api_concurrency.py`
-- `tests/test_teardown_identity_fence.py`
+- `app/routers/api.py`、`app/db/tasks.py`
+- `app/services/run_control/service.py`（`start_run` / `stop_run` / `shutdown`）、`app/services/run_control/__init__.py`（`lifespan`）、`app/main.py`（lifespan 嵌套）
+- `app/storage/runs.py`、`app/types/run.py`
+- `app/services/recording/service.py`（`flush_residual`）、`app/daemons/health_monitor/worker.py`（`cleanup_client`）
+- `app/services/inference/offline/service.py`（运行中 run 提交 409）
+- `tests/test_api_concurrency.py`、`tests/test_start_rollback.py`、`tests/test_teardown_identity_fence.py`、`tests/test_run_control_shutdown.py`

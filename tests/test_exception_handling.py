@@ -154,6 +154,22 @@ def test_report_with_retry_max_attempts(sleeps):
     assert sleeps == [1.0, 2.0]
 
 
+def test_reporter_http_failure_is_retried(sleeps, monkeypatch):
+    """真实 AlarmReporter 的 HTTP 失败抛可重试 PersistenceError，经 _report_with_retry 重试到上限"""
+    from app.services.alarm.reporter import AlarmReporter
+
+    reporter = AlarmReporter()
+    sent = []
+    monkeypatch.setattr(reporter, "_send_alarm_http", lambda info: sent.append(info) or False)
+
+    with pytest.raises(PersistenceError) as exc_info:
+        _report_with_retry(lambda: reporter.report_alarm({"task_id": 7, "step_id": 2}))
+
+    assert exc_info.value.retryable
+    assert len(sent) == 3
+    assert sleeps == [1.0, 2.0]
+
+
 # ============================================================================
 # 延迟计算
 # ============================================================================

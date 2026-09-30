@@ -1,7 +1,7 @@
 # 送标流程、整段导出、LS 探活下沉到 services/lab/service.py（新实现独立落地）
 
 > **变更状态**：生效中（2026-09-28）　新接口已落地并测绿；`routers/lab.py` 已切换到本接口，见 [20260928_LAB_ROUTER_SERVICE_SWITCH.md](20260928_LAB_ROUTER_SERVICE_SWITCH.md)
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_LAB.md](../kb/SERVICE_LAB.md)（2026-09-30）
 
 ## 概述
 

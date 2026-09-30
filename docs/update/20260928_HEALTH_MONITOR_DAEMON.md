@@ -1,7 +1,7 @@
 # health_monitor 迁入 app/daemons/
 
 > **变更状态**：已完成（2026-09-28）——只搬迁与改名，监控逻辑、配置、HTTP 契约不变
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_HEALTH_MONITOR.md](../kb/SERVICE_HEALTH_MONITOR.md)（2026-09-30）
 
 ## 概述
 

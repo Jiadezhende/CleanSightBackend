@@ -5,7 +5,7 @@
     2. `runs.query` 解析一次 run（点名的，或缺省时最新可见的），之后全程只读写它；再一次读完整
        检测序列（点名的 run 不在 → reclaimed；缺省且没有可见 run，或检测序列为空 → skipped）；
     3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；
-    4. 校验 + 排序，**读回既有事实 → 删掉该 step 全部旧分段、保留 TemporalEvent → 整体写回**。
+    4. 校验 + 排序，**读回既有事实 → 删掉该 run 全部旧分段、保留 TemporalEvent → 整体写回**。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
 落盘全经 `app.storage.inference`（存储根归 `settings`，故本类不收 `base_dir`）。
@@ -106,11 +106,11 @@ class OfflineRunner:
 
     @staticmethod
     def _replace_segments(run: RunIdentity, facts: List[TemporalSegment]) -> None:
-        """幂等替换该 step 的分段：读回既有 → 丢掉全部旧 TemporalSegment、保留 TemporalEvent → 整体写回。
+        """幂等替换该 run 的分段：读回既有 → 丢掉全部旧 TemporalSegment、保留 TemporalEvent → 整体写回。
 
         一个 stage 至多一个离线模型，换模型重跑时旧模型（旧类名）的分段整体被替换，不与新结果并存。
         `write_temporal` 是**整体替换**，盲写会吃掉在线产出的 `TemporalEvent`，故合并必须在这里做——
-        「哪些旧事实该保留」是离线语义，不是格式事实，数据层不掺和。空 `facts` 即「清除该 step 的分段」。
+        「哪些旧事实该保留」是离线语义，不是格式事实，数据层不掺和。空 `facts` 即「清除该 run 的分段」。
 
         一期不支持同一 (task, step) 跨进程并发跑离线：这段 read-modify-write 没有互斥。
         """

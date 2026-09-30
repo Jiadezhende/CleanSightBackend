@@ -1,7 +1,7 @@
 # 盘上原语收编进 `app/storage/_fs.py`，删除一律经回收区原子完成
 
 > **变更状态**：生效中（2026-09-27）——「落盘按运行分目录」第 1 期
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)、[DESIGN_STALE_WRITES.md](../kb/DESIGN_STALE_WRITES.md)（2026-09-30）
 
 ## 概述
 

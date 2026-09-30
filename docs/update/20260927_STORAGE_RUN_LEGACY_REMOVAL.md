@@ -1,7 +1,7 @@
 # 删除 run 迁移期的两处转发：读口的 `(task_id, step_id)` 形态与 CQ 的身份属性
 
 > **变更状态**：生效中（2026-09-27）——「落盘按运行分目录」第 5 期，全部分期完成
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[SERVICE_CLIENT_STATE.md](../kb/SERVICE_CLIENT_STATE.md)（2026-09-30）
 
 ## 概述
 

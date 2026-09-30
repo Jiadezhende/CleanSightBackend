@@ -1,7 +1,7 @@
 # 解散 app/utils：gateway 提到 app 根，队列 / 自愈 / 压力 / 指标下沉 services/utils
 
 > **变更状态**：已完成（2026-09-28）——纯搬迁与改名，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)（2026-09-30）
 
 ## 概述
 

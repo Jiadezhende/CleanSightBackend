@@ -25,12 +25,11 @@ def persist_alarms(alarms: List[Alarm], *, cq, mode: str, log_each: bool = False
     """把一批告警过闸门后落库 + 记入内存环形缓冲（实时/结算共用一条映射）。
 
     别名已由产出方（temporal actor）烧进 alarm.stage，此处直接读、不反向 import inference.naming；
-    metric 直接读 alarm.metric（产出方已填）；client_id / task_id / step_id 均由 cq 派生。
+    metric 直接读 alarm.metric（产出方已填）；task_id / step_id 均由 cq 派生。
     顺序先内存后外部：内存日志供前端实时轮询，外部库本就 30s 批次。
     """
     task_id = cq.run.task_id
     step_id = cq.run.step_id
-    client_id = cq.source_ip
 
     for alarm in alarms:
         # 给产出方的同一份告警补 mode，再过闸门+入环形缓冲（seq 由其赋；stage 已烧）。
@@ -42,7 +41,6 @@ def persist_alarms(alarms: List[Alarm], *, cq, mode: str, log_each: bool = False
             "task_id": task_id,
             "stage": alarm.stage,
             "step_id": step_id,
-            "client_id": client_id,
             "alarm_type": alarm.alarm_type,
             "alarm_metric": alarm.metric,
             "alarm_mode": mode,
@@ -52,5 +50,5 @@ def persist_alarms(alarms: List[Alarm], *, cq, mode: str, log_each: bool = False
         })
         if log_each:
             logger.info(
-                "[alarm_sink] %s alarm for %s: %s", mode, client_id, alarm.alarm_message
+                "[alarm_sink] %s alarm for task=%s step=%s: %s", mode, task_id, step_id, alarm.alarm_message
             )

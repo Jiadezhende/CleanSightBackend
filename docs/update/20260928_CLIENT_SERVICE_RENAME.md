@@ -1,7 +1,7 @@
 # client 中台改名 ClientService，单例 client_service 移入 instance.py
 
 > **变更状态**：已完成（2026-09-28）——纯搬迁与改名，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_CLIENT_STATE.md](../kb/SERVICE_CLIENT_STATE.md)（2026-09-30）
 
 ## 概述
 

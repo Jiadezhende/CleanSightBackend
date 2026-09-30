@@ -1,7 +1,7 @@
 # 存储 TTL 清理迁出 alarm，落 app/daemons/cleanup/
 
 > **变更状态**：已完成（2026-09-28）——搬迁与改名；cleanup 起停从 AlarmService 拆成独立 lifespan，清理逻辑不变
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[ARCHITECTURE_OVERVIEW.md](../kb/ARCHITECTURE_OVERVIEW.md)（2026-09-30）
 
 ## 概述
 

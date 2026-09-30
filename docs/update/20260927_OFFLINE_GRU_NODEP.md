@@ -1,7 +1,7 @@
 # CLEAN 离线接入因果滑窗 GRU（nodep-226d 特征），设为默认离线模型
 
 > **变更状态**：生效中（2026-09-27）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[SERVICE_CONFIG.md](../kb/SERVICE_CONFIG.md)（2026-09-30）
 
 ## 概述
 

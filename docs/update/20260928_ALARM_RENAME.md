@@ -1,7 +1,7 @@
 # persistence 服务改名 alarm，GuardedExecutor 内联进 alarm_worker
 
 > **变更状态**：已完成（2026-09-28）——搬迁与改名；告警重试从通用执行器内联进 alarm_worker，重试语义不变
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_ALARM.md](../kb/SERVICE_ALARM.md)、[DESIGN_FAULT_TOLERANCE.md](../kb/DESIGN_FAULT_TOLERANCE.md)（2026-09-30）
 
 ## 概述
 

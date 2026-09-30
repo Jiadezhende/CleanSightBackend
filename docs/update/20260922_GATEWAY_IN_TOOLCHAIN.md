@@ -1,7 +1,7 @@
 # 网关进程纳入 Python 工具链：覆盖率统计两个进程、pytest 自带 pythonpath、去掉入口的 sys.path 与模块级 basicConfig
 
 > **变更状态**：生效中（2026-09-22）——全量 `pytest` 827 passed，网关 `python -m` 实跑验过（起 MediaMTX、日志格式不变、退出无孤儿进程）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_GATEWAY_MEDIAMTX.md](../kb/SERVICE_GATEWAY_MEDIAMTX.md)、[TESTING_MAP.md](../kb/TESTING_MAP.md)（2026-09-30）
 
 ## 概述
 

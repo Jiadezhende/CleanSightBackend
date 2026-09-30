@@ -1,7 +1,7 @@
 # inference.online 入口改名：manager.py → service.py，InferenceManager → InferenceService
 
 > **变更状态**：已完成（2026-09-28）——纯改名，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-09-30）
 
 ## 概述
 

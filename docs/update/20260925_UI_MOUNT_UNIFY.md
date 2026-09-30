@@ -1,7 +1,7 @@
 # 静态资产统一挂到 `/ui-f3m8`：admin / lab 两页 + 共用 vendor
 
 > **变更状态**：生效中（2026-09-25）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_API_SURFACE.md](../kb/ARCHITECTURE_API_SURFACE.md)、[SERVICE_GATEWAY_MEDIAMTX.md](../kb/SERVICE_GATEWAY_MEDIAMTX.md)、[SERVICE_LAB.md](../kb/SERVICE_LAB.md)（2026-09-30）
 
 ## 概述
 

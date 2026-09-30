@@ -1,7 +1,7 @@
 # 删除只剩测试在调用的生产死代码（连同其测试）
 
 > **变更状态**：生效中（2026-09-27）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_ALARM.md](../kb/SERVICE_ALARM.md)、[DESIGN_FAULT_TOLERANCE.md](../kb/DESIGN_FAULT_TOLERANCE.md)、[TESTING_MAP.md](../kb/TESTING_MAP.md)（2026-09-30）
 
 ## 概述
 

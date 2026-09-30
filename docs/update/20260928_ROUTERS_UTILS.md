@@ -1,7 +1,7 @@
 # routers 层通用能力收进 app/routers/utils/，删除 services/traceback 包
 
 > **变更状态**：已完成（2026-09-28）——纯搬迁与改名，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_TRACEBACK_MEDIA.md](../kb/SERVICE_TRACEBACK_MEDIA.md)、[ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)（2026-09-30）
 
 ## 概述
 

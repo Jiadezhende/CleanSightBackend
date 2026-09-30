@@ -1,7 +1,7 @@
 # app/db 新增 clean_task / clean_alarm 只读查询函数，并纳入分层门禁
 
 > **变更状态**：生效中（2026-09-28）——新函数已落地并测绿；routers 仍走旧的 `get_db` 内联查询，调用点迁移在下一批
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)（2026-09-30）
 
 ## 概述
 

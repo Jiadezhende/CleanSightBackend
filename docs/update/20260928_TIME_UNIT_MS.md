@@ -1,7 +1,7 @@
 # 时间量纲统一为整数毫秒：run_id、段名、HlsSpan 不再用微秒
 
 > **变更状态**：生效中（2026-09-28）；盘上旧微秒数据须先跑一次性迁移脚本（不入库）才能被读到
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)、[ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)（2026-09-30）
 
 ## 概述
 

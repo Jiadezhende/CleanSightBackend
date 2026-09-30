@@ -1,7 +1,7 @@
 # 写侧切到 run 目录：`start_run` 分配 run，recording / 离线只写自己的 run，首写自清与认领表删除
 
 > **变更状态**：生效中（2026-09-27）——「落盘按运行分目录」第 3 期；新数据落 `{step}/{run_id}/`，旧布局数据读侧不可见
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_RUN_CONTROL.md](../kb/SERVICE_RUN_CONTROL.md)、[SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)、[BUSINESS_TASK_LIFECYCLE.md](../kb/BUSINESS_TASK_LIFECYCLE.md)、[DESIGN_STALE_WRITES.md](../kb/DESIGN_STALE_WRITES.md)（2026-09-30）
 
 ## 概述
 

@@ -1,92 +1,60 @@
-> 更新时间：2026-08-02
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
-# 新增检测任务指南
+# 新增检测任务
 
-推理采用**流处理框架**：检测点拆成两粒度——无状态 **Detector**（流源，多 run 共享）+ per-run **Operator**（流算子，analyze+judge 合并）。新增检测点只需各加一个子类 + YAML 各加一行。可用 `/infer-workflow` skill 生成代码框架。
+新增检测点 = 一个 Detector 子类 + 一个 Operator 子类 + YAML 各加一条，可选再加一个离线 Segmenter。代码骨架、字段速查和逐项检查清单在 `/infer-workflow` skill（`.claude/skills/infer-workflow/`），接口签名见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)「Detector / Operator 框架接口」，分层判据见 [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)。本文只列步骤与容易静默出错的约束。
 
-**落点（一文件一基类）**：Detector 子类写 `detection/impl/<业务>.py`，Operator 子类写 `temporal/impl/<业务>.py`，可选离线 Segmenter 写 `offline/impl/<业务>.py`；三者同名文件，业务聚合由 config stage 绑定表达（各契约包顶层只放基类+框架，`impl/` 放业务实现）。
+## 落点：三段同名文件，一文件一基类
 
-## 新增 Detector（流源）
+均在 `app/services/inference/` 下：Detector 写 `online/detection/impl/<业务>.py`，Operator 写 `online/temporal/impl/<业务>.py`，离线 Segmenter 写 `offline/impl/<业务>.py`。业务聚合由 YAML 的 stage 绑定表达；`StageFactory` 按 `class` 全路径 importlib 实例化，不用改任何 `impl/__init__.py`。online 与 offline 互不 import，两边都要用的纯函数放推理包顶层（如 `resample.py`）。
 
-继承 `Detector`（`detection/detector.py`），YOLO 类优先继承 `YOLODetector`（复用模型惰性加载、batch predict、输出适配、CUDA 异常转换）。职责：
+## 步骤
 
-- 设唯一 `name`——即该 detector 产出的**流名**（slide_window 的 key，Operator 用它 `subscribes`）。
-- `infer_batch(frames, timestamps) → List[FrameDetections]`（**唯一推理入口**，无单帧 `infer()`）。`timestamps[i]` 是帧捕获真值锚点（源自 `Frame.timestamp`），实现须原样写入 `frames[i]` 对应的 `FrameDetections.timestamp`，**不得自造时间戳**——写回口按同帧 ts 精确相等把多流一次物化进整帧 `FrameFeature.by_source`，ts 不等会错位漏帧。YOLO 子类已在 `YOLODetector.infer_batch` 实现（整批失败逐帧返回 error 结果、仍保留各帧 ts）。
-- `prepare_visualization_data(output) → RenderSpec`（可视化用固定渲染器 `FixedVisualizer`）。
-- **不持 per-run 状态**。
+1. **Detector**：YOLO 模型继承 `YOLODetector`（只需实现 `prepare_visualization_data`），否则继承 `Detector` 并实现 `infer_batch`。`name` 写死为产出流名。
+2. **Operator**：继承 `Operator`，`__init__` 完整初始化 `self._sm`（含游标 `last_ts`），实现 `analyze` / `judge`，结算逻辑 override `finalize`。内嵌时序模型时继承 `TemporalOperator`，接入走 `/temporal-review` 审查清单。
+3. **YAML**：`config/inference_config.yaml` 对应 stage 的 `detectors[]` 加流源、`rules[]` 加算子（`name` / `subscribes` / `realtime` / `class` / `params`）。`name` 与 `subscribes` 由工厂注入，不写进 `params`。
+4. **新 stage**（新洗消步骤）：加一个 step_id 键并至少配一个 detector 才生效；`rules: []` 的 stage 只画检测框、不建 Actor。
+5. **告警指标**：新检测点需要新指标时，先在 `app/types/alarm.py::AlarmMetric` 补枚举，算子产 `Alarm` 时显式填 `metric`。
+6. **离线 Segmenter**（可选）：见下节。
+7. **测试**：见文末。
 
-`class_name` 直接取自模型 `result.names`，不做归一化——匹配字符串必须与训练类别名严格一致。`FrameDetections`（`app/domain/detection.py`，含 `Detection` 列表）是统一检测契约，不要为单点往里加领域字段（如 `xxx_detected/xxx_count`）；派生量放 `Detection.extra`，时序统计交给 Operator。
+## 容易静默出错的约束
 
-## 新增 Operator（流算子）
+- **时间戳原样回写**：`infer_batch` 必须把 `timestamps[i]` 写进对应 `DetectorOutput.timestamp`。自造时间戳不报错，但多流对齐和算子游标会错位。
+- **类别名严格一致**：`class_name` 直接取模型 `result.names`、不归一化；算子里匹配的字符串（如 `"bent"`）和 `TemporalOperator` 的 `objects` 词表都必须与训练类别名逐字相同。
+- **`DetectorOutput` 不加领域字段**：单框派生量放 `DetBox.extra`（不落盘），时序统计放 Operator。
+- **跨帧累加必须用游标**：帧窗每 tick 重叠，按 `last_ts` 只处理新帧；自己派生的历史要按 `window_seconds` 裁剪。
+- **`signals_10s` 要求流名能映射到指标**：只有 `realtime: true` 规则订阅的流、且 `AlarmMetric(流名.upper())` 存在时才进映射，否则只打 warning 跳过（CLEAN 的两条流即如此）。
+- **`TemporalOperator` 的 `model_input_fps`**：须等于训练帧率，且 ≤ `settings.inference_fps`。配错帧率不报错、静默误分类；超上界则在 `start_workflow` 构造时抛错，表现为每次 `/api/start` 失败，后端本身照常启动。
+- **YAML 结构错误让后端起不来**：detector 导入 / 构造失败、rule 缺 `class` 或 `subscribes`、operator 类导入失败，都会在启动期抛出，不会静默少一个组件。
 
-继承 `Operator`（`temporal/operator.py`），per-run 独立实例（可持 ByteTrack、计数器、锁存等状态于 `self._sm`）。职责：
+## 新增离线 Segmenter
 
-- `name`（规则名）与 `subscribes`（**显式必填**的输入流名列表——即所订阅 Detector 的 `name`；不提供隐式默认，缺失 fail-fast）。
-- `window_seconds`：感受野（秒），`analyze` 内用 `_clip()` 裁窗。
-- `analyze(windows: Dict[str, List[FrameDetections]]) → None`：读订阅流窗口，推进 `self._sm`。
-- `judge() → (List[str], List[Alarm])`：读 `_sm`，返回（叠字文本，告警）。
-- 如有结算逻辑 override `finalize() → List[Alarm]`（任务终止时收集）。
+离线段独立于在线链路（CLI 子进程跑，不接 CQ / 告警），对整段检测序列做全序列分割。
 
-多个 Operator 可订阅同一 Detector；每 Operator 持自己的 `_sm`。工具方法：`primary_window()`（首个订阅流，裁到感受野后投影自身流的逐帧 `FrameDetections`）；`analyze` 收到的 `windows` 是帧级 `List[FrameFeature]`（多流已在写回口按 ts 对齐进 `by_source`，算子直接读，无需自行 zip）。
+- 往 `offline/impl/` 加一个自包含单文件的 `OfflineSegmenter` 子类，目标 stage 的 `offline` 块填 `class` + `params`（只有这两个键，`params` 原样作构造参数）。一个 stage 至多一个离线模型。
+- `name` = 类名，自动成为 `TemporalSegment.producer`，子类不要覆盖。`segment` 产出的时间是帧捕获墙钟 ts；Runner 统一校验（producer、有限数、start ≤ end、conf 值域，任一非法整批失败）并替换该 run 的全部分段。
+- 策略是纯算法：不碰 `app.storage` / CQ / DB，`frames` 只读。
+- 按训练帧率入模的模型用 `resample_by_ts(frames, fps, strict=True)`，检测帧率不够即报错。
+- 权重类模型只读单个 `.pt`，网络结构与 window 写死在类里，`strict=True` 加载；无 `model_path` 硬失败（`ValueError`），不做规则降级。权重与特征 recipe 一一对应，换策略时 `class` 与 `params` 一起换。
+- 本地回环用 `tests/doubles.py::BrushRulesSegmenter`（纯规则、无权重）写进注入的 config；验证入口是 CLI `run` 或 admin「运行离线推理」。
 
-### 时序模型算子（TemporalOperator）
+## 测试清单
 
-接入动作识别/序列模型（GRU/Transformer/MS-TCN 等）时继承 `TemporalOperator`（`temporal/operator.py`，`Operator` 子基类），多带 `model_path` / `objects` / `actions` 三参：惰性 `torch.jit.load`（双检锁、缺文件 `FileNotFoundError`、加载失败锁存），`infer(features) → logits`。子类在 `analyze` 内把订阅流窗口适配成 `(T, feature_dim)` 张量后 `infer`，把预测存进 `_sm`，`judge` 读 `_sm` 出 overlay/告警。参考 `CleanOperator`（`temporal/impl/clean.py`）：`_adapt_to_features` 把每帧多流检测折成 `(num_objects×6)`，异常帧留全零行保持时间轴对齐。`class_name → object_id` 经 `objects` 映射，仍须与训练类别名严格一致。YAML `params` 里配 `model_path`/`objects`/`actions`（见 CLEAN `clean_monitor`）。新增时序算子接入可用 `/temporal-review` skill 走审查清单。
-
-## 配置 YAML
-
-`config/inference_config.yaml` 对应 stage 下，`detectors[]` 加流源、`rules[]` 加算子：
-
-```yaml
-stages:
-  "1":
-    alias: LEAK
-    detectors:
-      - name: example
-        class: app.services.inference.detection.impl.example.ExampleDetector
-        params: { model_path: ..., conf_threshold: 0.1, enabled: true }
-    rules:
-      - name: example_rule
-        subscribes: [example]      # 必填，值 = 上面 detector.name
-        realtime: true             # true 纳入 signals_10s；false 为结算告警
-        class: app.services.inference.temporal.impl.example.ExampleOperator
-        params: { window_seconds: 3.0, ... }
-    offline: {}                    # 占位，未实现
-```
-
-`StageFactory` 按 YAML 建共享 Detector 实例 + Operator specs，并构建 `_TASK_METRIC_MAP`（仅 `realtime:true` 流）与 `_STAGE_ALIAS_MAP`（`stage.alias`）。
-
-## Stage 路由
-
-stage 主键 = step_id 字符串（`resolve_stage` 恒等路由，未知回落 `MOCK`）。新增洗消步骤 = 加一个 stage 键；给已有 stage 加检测点只改 YAML + 新增类。`rules: []` 的 stage 不建 Operator/Actor（纯检测框可视化）。
-
-## 新增离线 segmenter（可选）
-
-离线段独立于在线链路（独立进程手动跑，不接 CQ/告警）。新增 = 往 `offline/impl/` 加一个自包含单文件的 `OfflineSegmenter` 子类 + 目标 stage YAML 的 `offline` 段填 `name`/`subscribes`/`class`（非空即启用，`{}` 或缺省=不启用）。子类实现 `preprocess(frames: Sequence[FrameFeature]) → 模型输入`（基类不做默认特征工程）与 `segment(model_input) → List[SegmentFact]`（每条 `source` 须等于策略 `name`）。`OfflineRunner` 统一校验并幂等写 `FactLedger`。约定：策略是纯算法，不碰 FeatureStore/FactLedger/CQ/DB；权重类模型 `strict=True` 加载并校验 `feature_version`/`feature_names` 一致，无权重应硬失败（`ValueError`）而非规则降级——本地无权重回环走 MOCK stage 的 `BrushRulesSegmenter`。CLEAN 三模型（MS-TCN+BiLSTM / ASFormer / BiGRU）集中在 `impl/clean.py`，特征工程为模块级纯函数、多态只在各子类 override `preprocess`。
-
-## 告警 metric
-
-`AlarmMetric` 由 Operator 产 `Alarm` 时**显式设定**（`alarm.metric`），非下游文本反推。新增流名后确认 `_TASK_METRIC_MAP` 是否需补枚举/映射测试。
-
-## 测试建议
-
-- Detector 输出 `FrameDetections` 格式正确。
-- Operator 上升沿触发 / 恢复 / 结算逻辑正确。
-- YAML 可被 `StageFactory` 加载。
-- `resolve_stage` 能路由到目标 stage。
-- `/task/message/{task_id}` 的 signals 含新 metric。
+- Detector：输出 `DetectorOutput` 格式正确，`timestamp` 原样回写。
+- Operator：实时告警的上升沿触发与复位、结算逻辑、游标不重复计数。
+- YAML 能被 `StageFactory` 加载；目标 step 的 `resolve_stage` 恒等返回，未配置 step 抛 `ValidationError`（`tests/test_inference_stage_routing.py`）。
+- 新指标：`/task/message/{task_id}` 的 `signals_10s` 含该 metric。
+- 离线策略：`require_offline` 通过，Runner 产出 `producer` = 类名（`tests/test_offline_pipeline.py`）。
 
 ## 代码来源
 
-- `app/services/inference/detection/detector.py`
-- `app/services/inference/temporal/operator.py`（`Operator` + `TemporalOperator`）
-- `app/services/inference/temporal/impl/clean.py`（`CleanOperator` 时序算子示例）+ `app/services/inference/detection/impl/clean.py`（检测器）
-- `app/services/inference/offline/{segmenter,runner}.py`、`offline/impl/{clean,mock}.py`
-- `app/services/inference/stage_factory.py`
-- `app/services/inference/manager.py`
-- `app/services/inference/models.py`
-- `app/domain/detection.py`
+- `app/services/inference/online/detection/detector.py`、`online/temporal/operator.py`
+- `app/services/inference/online/{detection,temporal}/impl/{bubble,bending,clean}.py`
+- `app/services/inference/offline/{segmenter,runner}.py`、`offline/impl/clean.py`
+- `app/services/inference/{stage_factory,config,resample}.py`、`online/service.py`
+- `app/types/{detection,temporal,alarm}.py`
 - `config/inference_config.yaml`
-- `tests/test_inference_stage_routing.py`
+- `tests/test_inference_stage_routing.py`、`tests/test_offline_pipeline.py`、`tests/doubles.py`

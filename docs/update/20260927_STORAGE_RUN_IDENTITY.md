@@ -1,7 +1,7 @@
 # 存储层按 run 定位：`RunIdentity` + `runs.allocate/query`，域读写口与旧签名并存
 
 > **变更状态**：生效中（2026-09-27）——「落盘按运行分目录」第 2 期；新能力已落地，尚无生产调用点
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)（2026-09-30）
 
 ## 概述
 

@@ -1,7 +1,7 @@
 # admin 离线推理 tab：视频 + 分割段 / 类别概率两条泳道（只读）
 
 > **变更状态**：生效中（2026-09-25）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_API_SURFACE.md](../kb/ARCHITECTURE_API_SURFACE.md)、[SERVICE_LAB.md](../kb/SERVICE_LAB.md)（2026-09-30）
 
 ## 概述
 

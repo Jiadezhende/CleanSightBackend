@@ -1,7 +1,7 @@
 # `app/storage/inference/` 子包：三份推理产物进数据层，域目录从 `features/` 改名
 
 > **变更状态**：生效中（2026-09-22）　<!-- 调用点已随 20260922_INFERENCE_WRITE_PATH 切走，inference/feature/ 子包已删。正文「保留项」一节是本批当时的状态 -->
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)、[DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)（2026-09-30）
 >
 > <!-- 推理域数据层接线的第 2 步。第 1 步（事实契约升格）见 20260921_INFERENCE_FACT_CONTRACT.md -->
 

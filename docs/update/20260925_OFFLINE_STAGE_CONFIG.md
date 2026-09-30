@@ -1,7 +1,7 @@
 # 离线段配置收缩：`offline` 块只留 `class` + `params`，CLEAN 默认启用
 
 > **变更状态**：生效中（2026-09-25）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_CONFIG.md](../kb/SERVICE_CONFIG.md)、[SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[DESIGN_EXTENDING_DETECTION.md](../kb/DESIGN_EXTENDING_DETECTION.md)（2026-09-30）
 
 ## 概述
 

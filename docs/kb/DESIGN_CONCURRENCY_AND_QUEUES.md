@@ -1,169 +1,92 @@
-> 更新时间：2026-09-20
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # 线程安全与异步解耦设计
 
-CleanSight 的实时路径由多线程、多队列和 per-client 状态组成。这部分设计的核心意义有两个方向：
+实时路径由多线程、多队列和 per-run 状态组成。本文件只写可迁移的原则、判据与反例，本仓库落地只作一行例证，现状细节在对应 SERVICE_ 文件。迟到写入与换代冲突（写门、代次、fence 的闭合判据）专门见 [DESIGN_STALE_WRITES.md](DESIGN_STALE_WRITES.md)。
 
-1. 线程安全性：明确哪些状态可共享、由谁读写、用哪把锁保护，避免竞态、错归属和死锁。
-2. 异步解耦：把推理、时序、渲染、持久化、外部 IO 拆成独立节奏，避免慢任务卡住实时链路，提高服务可维护性和故障隔离能力。
+## 线程安全：先划清共享状态的边界，再决定加什么锁
 
-## 方向一：线程安全性
+方法论是**自底向上**：底层组件每个方法各自原子，不依赖调用方持外锁；上层只为「多步组合序列」加锁，不重复保护底层已安全的字段。
 
-线程安全设计的重点不是“到处加锁”，而是把共享状态边界划清楚：同一 client 的生命周期变更串行化；不同用途的数据用不同锁；高频热路径尽量少锁；必须同时清理多个状态时固定加锁顺序。
+### 生命周期事务：一个运行键一把可重入锁，所有发起方共用
 
-### 生命周期锁统一到 `ClientManager.lock_for(task_id)`
+同一运行单元的起 / 停 / 重启是跨多个服务的多步事务，**所有能发起它的调用方必须共用同一把锁**；api 一把、后台线程一把，等于没锁。锁要可重入，因为「重启 = 持锁内先停再起」。
 
-per-task 生命周期事务锁**收敛为一把** `RLock`，由 `ClientManager.lock_for(task_id)` get-or-create。`RunController.start_run` / `stop_run` 全程持它；api 层（`app/routers/api.py`）不再自持锁，只经 `asyncio.to_thread` 把同步持锁段桥出事件循环调 `run_controller`；HealthMonitor 后台线程也走同一把锁。三方共用消除「HM 迟到 cleanup 误删 /start 刚建 CQ」的竞态。RLock 可重入（start_run 持锁内重启时再调 stop_run 不自死锁）。
+- `asyncio.Lock` 管不住独立 `threading.Thread`，所以服务层的线程锁是必要纵深，不是冗余：api 协程经 `asyncio.to_thread` 把持锁段挪出事件循环，服务层 RLock 串行事务，数据层细粒度锁护读写。
+- 被编排的下层服务（如推理的 start/stop workflow）不再自持 per-run 锁，互斥由上层事务锁承接。
+- 例证：`ClientService.lock_for(task_id)`，`RunControlService` 与 HealthMonitorWorker 共用（[SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)）。
 
-`InferenceManager` 不自持 per-client 锁：`start_workflow` / `stop_workflow` 的互斥由上层 `lock_for(task_id)` 承接。TemporalActor finalize 在旧 CQ 不可变身份上归属告警，无需「先停旧 actor 再切字段」的排序。
+### 换代隔离：写门挡迟到写，身份 fence 挡迟到拆除
 
-覆盖场景：并发启动同一任务幂等返回；改 step/URL 触发停旧全量重建；terminate 与 start 共用同一把锁；不同 task 并发不互相阻塞。
+- **写门**：运行态对象带单调状态机，在**写入时刻**判状态；门可以不对称，拆除期仍需的收尾写（结算、残余 flush）放行。单调前提下门禁本身即闭合（见 [DESIGN_STALE_WRITES.md](DESIGN_STALE_WRITES.md) §4）。
+- **对象身份 fence**：「先决策后拿锁」的发起方在决策时捕获对象引用，拿锁后核对槽位仍是它，否则整段放弃。持锁内决策并执行的发起方没有 ABA，不需要 fence。
+- **per-run 不可变**：切换 = 建新对象换槽，不在旧对象上改身份。身份不可变就没有身份锁，也没有「先停旧消费者再切字段」的隐式排序。
+- 例证：`ClientQueues` 的 ACTIVE→DRAINING→CLOSED 与 `remove_if` / `stop_run(expected=…)`（[SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)）。
 
-### CQ 状态机写门 + 对象身份 fence
+### 锁设计原则
 
-跨 run 隔离靠两道机制，不靠 run_epoch：
+1. **按访问模式分锁，不按资源分锁**：同一业务动作总一起读写的字段归同一把锁（例：`_viz_lock` 同护 `ca_processed` 与 `_latest_rendered`）。
+2. **能证明 SPSC 就不加锁**：单写单读、角色固定时，GIL 下 `deque.append/popleft` 原子（例：`ca_ready`）。重启可能出现第二个生产者时，须保证旧生产者先退出（例：`restart_stream` 同步停旧）。
+3. **快照避免锁嵌套**：先在轻锁下把要读的字段快照到局部变量，再进重锁，顺带消除 TOCTOU。
+4. **多锁固定顺序**：在类 docstring 声明唯一全清顺序，用 `ExitStack` 顺序加锁；叶子锁由调用方在自己的锁外调用。
+5. **有不变式的关联值同临界区读**（例：`get_alarm_snapshot` 一把锁内返回 `(增量, max_seq)`，游标不漏告警）。
+6. **setter 只赋值**，缓存清理等副作用拆到显式方法。
+7. **幂等精确到「完全相同」**，不能只查主键（例：`start_run` 仅 step 与 URL 都不变才幂等，否则全量重建）。
+8. **有锁的类在 docstring 维护「锁清单 + 全清顺序」**，`grep` 锁名即可核对（例：`ClientQueues`）。
 
-- **写门**：CQ 有单调状态机 `ACTIVE→DRAINING→CLOSED`（`_state_lock` 仅串行转换，不与 payload 锁互嵌）。所有写在**写入时刻**判 state，迟到写（decoder 抽帧 / 结果写回 / tick）落到 DRAINING/CLOSED 的旧 CQ 被拒，不串台到同键新 run。settlement 告警与 HLS flush 在 DRAINING 仍放行（非对称门）。详见 [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)。
-- **对象身份 fence**：`ClientManager.remove_if(task_id, expected_cq)` 仅当槽位 `is expected_cq` 才删；`RunController.stop_run(expected=...)` 在拆除前核对槽位仍是当初捕获的 CQ，否则整段放弃，防 HM 误删被 /start 抢占重启的新 run。
+### 落盘编排：单消费队列管顺序，不跨代复用路径管隔离
 
-### ClientQueues 锁库存
-
-ClientQueues 中的锁按职责拆分（身份 `task_id/step_id/stage/task_started_at` 为构造定死的不可变
-primitive，热路径免锁直读，故**无** `_task_lock`）：
-
-- `_raw_lock`：raw queue 和 latest raw。
-- `_viz_lock`：processed queue 和 latest rendered。
-- `_inference_lock`：latest inference（帧级 `FrameFeature` 原子快照）。
-- `_frontend_lock`：latest temporal。
-- `_slide_window_lock`：帧级 `FrameFeature` 滑窗（一帧一条，多流已对齐）。
-- `_alarm_lock`：alarm log、seq、gate。
-
-clear 时固定顺序（6 把 payload 锁）：
+写盘的两件事正交，各用一个机制，不要用锁同时解决：
 
 ```text
-_raw_lock -> _viz_lock -> _inference_lock
--> _frontend_lock -> _slide_window_lock -> _alarm_lock
+同一目标内的顺序    单消费队列：提交序 == 执行序
+跨代的隔离          盘上路径不跨代复用：每代一个目录，写者只写自己那一代
 ```
 
-### SPSC 队列
+- 凡是正确性依赖执行序的写（如位置相关的累计偏移），**加第二个 worker 不报错、只会静默损坏**，所以不要把 worker 数做成配置项。
+- 落盘任务带提交时刻的版本句柄；写者不建版本目录，版本被回收后迟到写原子失败，不会重建僵尸目录。
+- 跨线程共享的小表免锁的前提：只做单次原子操作（`__setitem__` / `get` / `pop`），不逐元素迭代。
+- 例证：`RecordingService` 两条 `SerialTaskQueue` + run 目录（[SERVICE_RECORDING.md](SERVICE_RECORDING.md)）。
 
-`ca_ready` 是无锁 SPSC deque：
+## 异步解耦：慢 IO 不直接阻塞实时链路
 
-- 单生产者：decoder。
-- 单消费者：dispatcher。
-- 依赖 CPython GIL 下 deque append/popleft 原子性。
+### 按节奏拆池，经共享快照交接
 
-其他共享队列使用明确锁保护。
+推理、时序、可视化各按自己的节奏跑，经 per-run 状态对象交接：推理写帧窗、最新检测与落盘缓冲；时序读帧窗、写时序事件与告警；可视化读最新帧与检测、写渲染帧与 processed 缓冲。时序分析或渲染慢不会阻塞 GPU 推理热路径。
 
-### 录制落盘：零锁，靠单消费队列 + 对象引用判等
+### 一条队列一个语义，慢度不同的 IO 不共用
 
-HLS 写侧**没有任何锁**（旧的 `_dir_locks` 目录锁随 persistence 写侧一起退场，已不存在）。两件正交的事各由一个机制构造：
+慢 IO 一律经有界队列异步化，上游只付入队成本。慢度差一个量级的两类工作放进同一条队列，快的会被慢的一起背压丢掉，而且静默。
 
-```text
-同代次内的顺序    由 SerialTaskQueue 的提交序构造   —— 但队列解决不了换代
-跨代次的隔离      由 cq 对象引用判等构造            —— 但校验解决不了乱序
-```
+- 队列满即丢任务并 warning，这是背压与容量告警的观察点；**不给无界选项**——无界只是把「丢一段」换成「吃光内存」。
+- 可丢任务用短入队超时；不许丢的任务传大超时并检查返回值、失败时降级同步执行。
+- 例证：录制段 / 检测结果 / 告警 / 离线作业各一条队列（`recording`、`recording-detections`、`alarm_queue`、`offline`）。
 
-- **顺序**：`app/utils/task_queue.py` 的 `SerialTaskQueue` 是「一条队列 + 一个消费线程」，提交序 == 执行序。相邻段 tfdt 单调、「先落残段再整个删目录」这两条全建立在单消费者上，**加第二个 worker 不报错，只会让段间 tfdt 碰撞、旧段串进新 run**，故 `config/recording_config.yaml` 没有 `workers` 项。
-- **隔离**：落盘任务带着提交那一刻的 `cq` 引用。执行时与注册表当前的 CQ 判等（连 `step_id` 一起比），不是同一代就丢弃、不重试；本代次首写时先 `hls.delete(task, step)` 清掉上一代产物再记账（懒惰 supersede）。
-- **零锁的最后一块**：代次表 `_claimed_by` 只被队列那一个线程碰——`forget_task` 也走队列而不是当场清。跨线程共享的 `_pending_flush` 免锁靠 dict 单次操作的原子性，迭代前先 `list()` 快照。
+### 生命周期：内层写者先停，外层队列后停
 
-完整推导与失效表现见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)；`app/storage/hls` 域自身不持锁，串行由调用侧构造。
+三种粒度：进程级单例（import 或 lifespan 建）、常驻线程 / 子进程（服务 `start()`→`stop()`）、per-run 动态实例（Actor / decoder，随 run 起停）。
 
-### 线程与实例生命周期审计（已落地结论）
+- **关停按嵌套逆序**：产出方在内层先停，承接其产出的队列在外层后停、排空。
+- **「外层队列活得更久」只保证已提交的任务不丢**：还在缓冲里、要靠拆除路径显式交出的东西，停机路径必须自己把交出动作走一遍。反例：停机只停推理、不走 per-run 拆除，各 run 缓冲里不足一段的残帧与最后一批检测结果随进程丢失。例证：`run_control.lifespan` 嵌在最内层，停机先逐个 `stop_run`（[SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)）。
+- **不可中断的点隔离到子进程**：线程里的 CUDA 同步前向无法被 `stop_event` 打断，放进子进程才能硬收尸（例：`RemoteInferProxy._kill_child` 的 `terminate→join(2)→kill→join(2)`）；主进程侧守护线程都用 `stop_event.wait` 或带超时的 `queue.get`，真可中断。
+- **关键副作用不依赖会被硬杀的执行体**：会被杀的一方只产出内存结果，落盘交给活得更久的一方（例：推理写回只进 CQ 缓冲，由 recording 队列落盘）。
+- **只读外部进程直接 SIGKILL**：没有产物可损坏、对端能自行回收连接时，优雅退出只是白等（例：`FFmpegDecoder.stop()`）。
+- **备查**：模型 / CUDA 上下文在 `stop()` 不显式释放，关进程时由驱动回收；将来若做「不退进程换模型」会变成真泄漏。
 
-一次全仓线程/实例生命周期审计（创建/销毁时机、持有关系、关停顺序）落地 4 处改动并经远程真实流验证（`CleanSightBackend-test`，2026-06-27）。方法论：**先量再改，不为臆想风险买单**——两处「以为是 bug」经核实后被证伪或收窄。稳定结论：
+## 通用并发件（`app/services/utils/`，不属于任何服务、不 import 兄弟服务）
 
-**三种生命周期粒度**（关停编排入口 [main.py](../../app/main.py) lifespan：health 套 ai，逆序关——先停推理消费侧、再停流生产侧）：
-
-| 粒度 | 实例 | 创建 → 销毁 |
-|------|------|-------------|
-| 进程级单例 | `stream_service`/`persistence_manager`/`recording_service`/`InferenceManager`/`GlobalHealthMonitor` | import·lifespan → lifespan 关闭 |
-| stage 级常驻线程/进程 | dispatcher/推理子进程(`RemoteInferProxy` spawn)/viz worker/录制队列线程 + 录制 sweeper/Alarm 池/cleanup/selector | service `start()` → `stop()` |
-| per-run 动态实例 | TemporalActor/FFmpegDecoder | `start_workflow`·`start_stream` → `stop_workflow`·`stop_stream` |
-
-**唯一真正不可中断点 = 推理子进程内 `StageWorker` 的 GPU 前向（CUDA 同步）**：进程隔离后 GPU 前向不在主进程线程里，主进程 `stop_event` 管不到子进程内的前向。`RemoteInferProxy.stop()` → `_kill_child()` 用 `terminate→join(2.0)→kill→join(2.0)` 硬收尸（镜像 decoder.py，见下），CUDA 半途的前向随进程被杀、不残留孤儿。收益是主进程再无 in-thread CUDA 同步点——旧模型「daemon `join(2.0)` 超时后强杀 GPU 半途线程」的风险已随隔离消失；主进程侧 collector/supervisor/dispatcher 等守护线程都真可中断（`stop_event.wait(interval)` 或带超时 `queue.get`）。
-
-**关键副作用不依赖被 join 的 worker**：两条 flush 路径（terminate 侧 `stop_workflow`→`feature_store.close(cq)` 只刷当前 `(task,step)`；lifespan 侧 `InferenceManager.stop()`→`feature_store.flush()` 全量兜底未走正常结束的 run）均跑在**控制/调用线程**，故即便推理子进程被硬杀，落盘已同步发生——「硬杀下仍安全」的正面佐证。FeatureStore 同步落盘（实测 max 3.6ms）是有意选择，非缺陷。
-
-**decoder 直接 SIGKILL**（[decoder.py](../../app/services/stream/decoder.py) `stop()`，2026-06-26 落地）：弃 `terminate→wait(2.0)→kill` 三级降级，改 `kill→wait(reap)`。实测卡读时优雅路径白耗 2007ms 后照样 SIGKILL，直接 kill 仅 2ms（`stop_stream` 全程 12.9ms）。零新增风险：ffmpeg 只解码到 `pipe:1` 不写文件（强杀无产物损坏）、RTSP 对端是自有 mediamtx_gateway（断连即回收、不需优雅 TEARDOWN）。副产物：`_stop_decoder_async` fire-and-forget 线程存活 ~2s→~ms，L1-a 线程堆积自愈。
-
-**审计清理的死代码/泄漏**（已落地）：`InferenceManager` 的 per-client `defaultdict(Lock)` 慢泄漏 → 收敛为 `lock_for(task_id)` 单一生命周期锁（天真 pop 会与并发 `start` 撞 race，故不做引用计数回收）；未用的 `ThreadPoolExecutor`（零 `.submit()`）+ 误导性 `num_worker_threads` 删除；`_refresh_thread`（旧 `ClientRefreshThread`，dispatcher 直引单例 ClientManager 后冗余）删除。
-
-**备查（现非问题）**：模型 / CUDA 上下文在 `stop()` 不显式释放——关进程时驱动回收无碍；若将来做「不退进程的重启/换模型」会变真泄漏。selector 优雅停（`shutdown` 未 `set` `_stop_event`）为 cosmetic，OS 兜底关 fd。
-
-## 方向二：异步解耦与防卡死
-
-异步解耦设计的重点是让每类工作按自己的节奏运行。实时链路只传递必要快照或入队任务，慢推理、慢渲染、慢磁盘、慢 HTTP 不直接阻塞上游，从而降低“一个慢点拖死整条链路”的风险。
-
-### 三池解耦
-
-推理、时序、可视化通过 ClientQueues 解耦：
-
-- 推理写 slide_window 和 latest_inference。
-- 时序读 slide_window，写 latest_temporal 和 alarm。
-- 可视化读 latest_inference/latest_frame/latest_temporal，写 ca_processed/latest_rendered。
-
-这种设计避免时序分析或渲染阻塞 GPU 推理热路径。
-
-### 落盘/上报的队列解耦（两条独立队列，分属两个服务）
-
-慢 IO 全部经有界队列异步化，上游只承担入队成本：
-
-- **录制**：`RecordingService` 的 `SerialTaskQueue`（`queue_size: 100`，**恒 1 个消费线程**）隔离视频段写盘、ffmpeg fMP4 转码、playlist/metadata 更新。它不能扩 worker——顺序即正确性（见上）。
-- **告警**：`PersistenceManager` 的 `alarm_queue` + `AlarmWorkerPool`（1 worker）隔离外部 HTTP 上报。
-- 两条队列分属两个服务、独立起停，避免告警上报慢拖住录制，或视频转码慢拖住告警。
-- 队列满即丢任务并 warning（录制侧丢一段 ≈ 丢 10 秒录像），是背压与容量告警的观察点；**不给无界选项**——无界只是把「丢一段」换成「吃光内存」。
-- 关停顺序由 `main.py` 的 lifespan 嵌套保证：recording / persistence 都在 inference 外层，`inference.stop()` 经 `run_control` 交出的结算告警与 HLS 残段仍能入队，之后队列才排空退出。
-
-这个设计把实时链路和慢 IO 分开：解码、推理、时序、可视化只承担生产落盘任务的成本，不直接承担磁盘、ffmpeg 或网络调用的不确定延迟。
-
-### 可维护性收益
-
-解耦后，每个模块的职责更窄：
-
-- Stream 只关心拉流和产帧。
-- Inference 只关心推理结果和时序告警。
-- Visualization 只关心最新快照的渲染。
-- Recording 只关心 HLS 段何时拉、按什么顺序写、算哪一代。
-- Persistence 只关心告警上报与 TTL 回收。
-- HealthMonitor 只关心失联、重连和统一清理。
-
-这让性能问题和故障边界更容易定位，也让新增检测点、调整持久化策略、替换外部告警接口时不必重写实时主链路。
-
-## 锁设计原则（可复用方法论）
-
-沉淀自纯 `threading` 架构，可复用于其他模块。基础方法论：**自底向上构建线程安全**——底层组件（`ClientQueues`）每个方法各自原子、不依赖调用方持外锁；上层只为「多步组合序列」加锁，不重复保护底层已安全的字段。核心思路：**按访问模式分锁，不按资源分锁**——同一业务动作总一起读写的字段归同一把锁（如 `_viz_lock` 合并 `ca_processed`+`_latest_rendered`，VizWorker 一次加锁写两者）。
-
-1. **识别 SPSC，消除不必要的锁**：单写单读且角色固定时，GIL 已保证 `deque.append/popleft` 原子（`ca_ready`：decoder 唯一写、dispatcher 唯一读，无锁）。能证明不需要锁就不加。
-2. **快照模式避免锁嵌套**：热路径读多把锁保护的字段时，先在轻锁下快照到局部变量再进重锁，两锁生命周期不重叠——同时消除 TOCTOU。
-3. **固定全清顺序防死锁**：同时持多锁（`clear()`）时死锁充要条件是不同路径乱序取锁；在类 docstring 声明唯一顺序，用 `contextlib.ExitStack` 顺序加锁、逆序释放。
-4. **关联值同临界区读**：存在不变式的两值必须一次加锁同读。例：`get_alarm_snapshot` 单 `_alarm_lock` 内返回 `(增量告警, max_seq)`，保证 `max_seq ≥ max(a.seq)`，游标不漏告警。
-5. **赋值与副作用分离**：setter 只赋值，缓存清理/事件触发等副作用拆到显式方法（合约写 docstring）。本系统更进一步——**CQ per-run 不可变**：身份构造定死、无 setter 副作用，清理走 `close()`/`_release_payload`。
-6. **状态机转换先退旧再进新**：生命周期切换严格「旧状态完整退出→再建新」。本系统由 `RunController` 保证（`to_draining`→停 decoder/actor→建新 CQ），per-run 不可变让 settlement 归属天然正确，无需「先停旧 actor 再切字段」的隐式排序。
-7. **按业务层级纵深分锁**：不同调用来源需各自锁层——api 协程经 `asyncio.to_thread` 桥出、服务层 `lock_for(task_id)` RLock 串行事务、数据层细粒度锁护读写。关键：`asyncio.Lock` 管不住独立 `threading.Thread`（HealthMonitor），故服务层 RLock 是必要纵深，非冗余。
-8. **幂等语义精确到「完全相同」**：不能只查主键。`RunController.start_run` 仅当 `step_id` 与流 URL 均不变才幂等返回，否则全量停旧重建——低频生命周期操作，全量重建的简单性优于部分更新的边界复杂度。
-
-每个有锁的类应在 docstring 维护「锁清单 + 全清顺序」（`grep` 锁名即可验证代码与文档一致），见 `ClientQueues` docstring。
+- **`task_queue.SerialTaskQueue`**：一条有界队列 + 一个消费线程；一次性（`stop()` 后不能再 `start()`）；谁用谁 new，不建全局注册表统一起停（停机顺序属于域）。任务异常在 `_execute` 记 error 吞掉，所以消费线程不包 `guarded_run`；不做重试、优先级、取消、结果回传。
+- **`worker_guard.guarded_run`**：包常驻 worker 的整个主循环，崩溃后冷却 2 s 重启、最多连续 3 次，`stop_event` 已置位则不再重启。与函数级重试互补；覆盖不了 segfault 与死锁。用在 `AlarmWorkerPool`、dispatcher、`ClientTemporalActor`、`VisualizationWorkerPool` 四处（容错分层见 [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)）。
+- **`pressure.PressureReporter`**：只描述、不决策的 `[PRESSURE]` 周期快照；只接状态型资源，事件照常直接打日志（见 [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)）。
 
 ## 代码来源
 
-- `app/routers/api.py`
-- `app/services/run_control.py`
-- `app/services/client/manager.py`（`lock_for` / COW / `remove_if`）
-- `app/services/client/queues.py`（`RunState` 状态机 + 锁库存）
-- `app/services/inference/manager.py`
-- `app/services/inference/detection/dispatcher.py`
-- `app/services/inference/temporal/actor.py`
-- `app/services/inference/visualization/worker.py`
-- `app/services/persistence/manager.py`
-- `app/services/persistence/workers/alarm_worker.py`
-- `app/services/recording/{service,_sweeper}.py`（录制零锁模型）
-- `app/utils/task_queue.py`（`SerialTaskQueue`：单消费者、提交序即执行序）
-- `app/main.py`（lifespan 关停编排）
-- `app/services/stream/decoder.py`（SIGKILL `stop()`）
-- `app/services/inference/detection/service.py`（`_inference_loop` + join 后内联 `is_alive` 诊断）
-- `tests/test_api_concurrency.py`
-- `tests/test_teardown_identity_fence.py`
+- `app/routers/api.py`（`asyncio.to_thread` 桥接）
+- `app/services/run_control/service.py`、`app/services/client/{service,queues}.py`
+- `app/services/inference/online/detection/{dispatcher,infer_proxy}.py`
+- `app/services/recording/{service,sweep_worker}.py`、`app/services/alarm/{service,alarm_worker}.py`、`app/services/inference/offline/service.py`
+- `app/services/utils/{task_queue,worker_guard,pressure}.py`
+- `app/services/stream/decoder.py`（SIGKILL `stop()`）、`app/main.py`（lifespan 嵌套）
+- `tests/test_api_concurrency.py`、`tests/test_teardown_identity_fence.py`、`tests/test_task_queue.py`

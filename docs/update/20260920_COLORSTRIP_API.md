@@ -1,7 +1,7 @@
 # 试纸比色开放 HTTP 接口 + 新建 `app/algorithm/` 算法层
 
 > **变更状态**：已实现（2026-09-20）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_ALGORITHM.md](../kb/SERVICE_ALGORITHM.md)、[ARCHITECTURE_API_SURFACE.md](../kb/ARCHITECTURE_API_SURFACE.md)、[ARCHITECTURE_OVERVIEW.md](../kb/ARCHITECTURE_OVERVIEW.md)、[BUSINESS_DETECTION_STANDARDS.md](../kb/BUSINESS_DETECTION_STANDARDS.md)（2026-09-30）
 > **前置**：无。算法本身的可行性验证、判据标定与已知缺陷见
 > `app/services/temp/colorstrip/REPORT.md`（含 28 MB 样本，整个目录在 `.gitignore` 里）
 

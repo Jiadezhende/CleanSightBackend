@@ -1,4 +1,4 @@
-> 更新时间：2026-09-26
+> 更新时间：2026-09-30
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -74,14 +74,17 @@ grep -h '^> 更新时间：' docs/kb/*.md | sort | uniq -c
 
 - 应用入口：`app/main.py`
 - 统一 API：`app/routers/api.py`
-- 运行编排：`app/services/run_control.py`
-- 共享契约：`app/domain/`
-- 推理服务：`app/services/inference/`
+- 运行编排：`app/services/run_control/`
+- 共享契约：`app/types/`
+- 推理服务：`app/services/inference/`（`online/` + `offline/` + 共享层）
 - 流服务：`app/services/stream/`
 - 客户端状态：`app/services/client/`
-- 持久化：`app/services/persistence/`
-- 健康监控：`app/services/health_monitor/`
-- 追溯与媒体：`app/routers/traceback.py`、`app/routers/media.py`、`app/services/traceback/`
+- 录制：`app/services/recording/`
+- 告警上报：`app/services/alarm/`
+- 后台 daemons：`app/daemons/health_monitor/`、`app/daemons/cleanup/`
+- 数据层 / 平台 DB：`app/storage/`、`app/db/`
+- 追溯与媒体：`app/routers/traceback.py`、`app/routers/media.py`、`app/routers/utils/`
 - Lab：`app/routers/lab.py`、`app/services/lab/`
-- Gateway：`app/utils/gateway.py`、`mediamtx_gateway/`
+- 算法：`app/routers/algorithm.py`、`app/services/algorithm/`
+- Gateway：`app/gateway.py`、`mediamtx_gateway/`
 

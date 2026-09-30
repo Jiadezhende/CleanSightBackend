@@ -243,3 +243,12 @@ class RunControlService:
                 )
             return result
 
+    def shutdown(self) -> None:
+        """进程停机：逐个 stop_run 在跑的 run，交出 settlement / HLS 残段 / 剩余检测结果。
+
+        须在 `inference.stop()` 之前、recording / alarm 队列仍活着时调（`run_control.lifespan`
+        嵌在 `inference.lifespan` 里层保证）。
+        """
+        for task_id in list(client_service.snapshot()):
+            self.stop_run(task_id, reason="shutdown")
+

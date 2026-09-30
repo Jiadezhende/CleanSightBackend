@@ -1,7 +1,7 @@
 # 仓库根目录收敛：配置/依赖/素材各归其位，顺带修掉三个既有缺陷
 
 > **变更状态**：生效中（2026-09-22）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)、[TESTING_MAP.md](../kb/TESTING_MAP.md)（2026-09-30）
 
 ## 概述
 

@@ -1,7 +1,7 @@
 # 离线 CLI 精简：删 `--strategy` / `--json`，固定输出一行 JSON
 
 > **变更状态**：生效中（2026-09-26）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-09-30）
 
 ## 概述
 

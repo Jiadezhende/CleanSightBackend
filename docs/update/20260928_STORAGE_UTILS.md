@@ -1,7 +1,7 @@
 # storage 私有工具 _fs / _root 收进 app/storage/utils/
 
 > **变更状态**：已完成（2026-09-28）——纯搬迁与改名，不改运行逻辑
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)（2026-09-30）
 
 ## 概述
 
