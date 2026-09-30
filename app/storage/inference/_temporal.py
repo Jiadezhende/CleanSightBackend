@@ -10,9 +10,9 @@
 
 两条硬约束：
 
-- **`write_temporal` 是整体替换，不是追加。** `temporal.jsonl` 是多写者共居文件（不同 producer 的
-  分段、将来的实时打点），**盲写会吃掉别人的事实**：正确姿势是 `read_temporal` → 丢掉自己这个
-  producer 的旧条目、其余原样留下 → `write_temporal(合并结果)`。保留谁是 producer 语义，归调用方。
+- **`write_temporal` 是整体替换，不是追加。** `temporal.jsonl` 里分段与 `TemporalEvent`（将来的
+  实时打点）共居，**盲写会吃掉既有事实**：正确姿势是 `read_temporal` → 按调用方语义挑出要保留的 →
+  `write_temporal(合并结果)`。保留哪些归调用方（离线 Runner：丢全部旧分段、留 `TemporalEvent`）。
 - **`read_temporal` 不排序**，原样返回落盘顺序。两型没有共同时间键（`TemporalEvent.ts` 对
   `TemporalSegment.start`），层没有依据替调用方选。
 
@@ -123,9 +123,9 @@ def write_temporal(
     run: RunIdentity,
     facts: Sequence[TemporalEvent | TemporalSegment],
 ) -> None:
-    """**整体替换**该 step 的事实（路线 C：编码 → 同目录 tmp → `os.replace`）。
+    """**整体替换**该 run 的事实（路线 C：编码 → 同目录 tmp → `os.replace`）。
 
-    调用方须先 `read_temporal` 再合并——本函数不读既有内容，盲写会吃掉别的 producer 的分段与
+    调用方须先 `read_temporal` 再合并——本函数不读既有内容，盲写会吃掉既有的分段与
     所有 `TemporalEvent`。整批先编码完再碰盘，失败时旧文件原样保留（W4）。
 
     空序列**照写空文件、不删文件**：「跑过、没分出任何段」与「根本没跑过」在盘上要能分开。
