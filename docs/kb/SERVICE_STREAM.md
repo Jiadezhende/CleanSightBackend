@@ -4,76 +4,65 @@
 
 # Stream Service
 
-流服务为每个 run 管理一个 FFmpeg 解码器，把帧写入 ClientQueues。运行键 = int `task_id`（与注册表/decoder 字典一致），系统**只用 RTSP**。
+每个 run 一个 FFmpeg 解码器，把帧写进该 run 的 ClientQueues（下称 CQ）。运行键 = int `task_id`；系统只用 RTSP。
 
-`StreamService` 只做 **decoder 注册表 + 生命周期编排**：读帧由 decoder 自持线程完成，服务侧无 selector/轮询线程（构造 `StreamService()` 无起线程副作用）。跨模块只读 `client_service`（顶层直接导入单例、boot 期 fail-fast，非惰性/吞异常）。类在 `app/services/stream/service.py`，单例 `stream_service` 在 `instance.py`；`__init__.py` 只有 `lifespan()`（无启动段，关停时 `shutdown()` 收尸）。公开方法不包日志装饰器（日志里没有 `[ENTER]` / `[EXIT]` 行）。
+`StreamService` 只是 decoder 注册表 + 生命周期编排：读帧在 decoder 自持线程里，服务侧没有轮询线程，构造无副作用。类在 `service.py`，单例 `stream_service` 在 `instance.py`；`__init__.py` 只有 `lifespan()`（无启动段，finally 里调 `shutdown()`）。CQ 只取不建：`client_service.get(task_id)` 取不到时记 error、decoder 空跑（说明调用序错了）。
 
-## 主要职责与方法
+## StreamService 公开方法
 
-`StreamService`（单例 `stream_service`）公开：
+| 方法 | 语义 |
+| ---- | ---- |
+| `start_stream(task_id, url)` | 先注册 decoder 再同步 `start()`。同 task 已有存活 decoder → `ConflictError`；已死的先清掉。首次 `start()` 失败**不抛**，decoder 留在字典里，由健康监控下个 tick 重连 |
+| `stop_stream(task_id)` | 从字典弹出后交 daemon 线程异步 `stop()`，不阻塞调用方；迟到帧由 CQ 写门（DRAINING/CLOSED）拦下 |
+| `restart_stream(task_id, url) → bool` | 锁外同步停旧 → 锁内清旧、建新、`start()`，复用现有 CQ。旧 reader join 完新 reader 才写 `ca_ready`，保住 SPSC 单生产者，也避免新旧进程在 MediaMTX 同路径上抢连接。吞掉所有异常、失败返回 False，不阻塞健康监控线程 |
+| `is_decoder_alive(task_id)` | decoder 子进程是否存活，即健康监控的断流判据 |
+| `get_all_task_ids()` | 已**注册**的 task_id，不看死活——「已死待重连」的 decoder 必须留在里面 |
+| `get_stream_info(task_id)` | `{"url": 重写后的拉流地址}` 或 None；重连只需 url |
+| `get_pending_count(task_id)` | `ca_ready` 深度，供 decoder 准入背压 |
+| `shutdown()` | 摘走全部 decoder 后逐个同步 `stop()`。停机时各 run 的 decoder 已由 `run_control` 拆掉（见 [SERVICE_RUN_CONTROL.md](SERVICE_RUN_CONTROL.md)），这里只收不属于任何 run 的残留 |
 
-- `start_stream(task_id, stream_url)`：注册 decoder 并 `start()`（同步起，成功即返回）。首次 `start()` 失败时 decoder **仍留字典**，由健康监控下个心跳重连（不抛出、不做函数级重试）。同 task 已有**存活** decoder 时抛 `ConflictError`；已死的先清掉再建。
-- `stop_stream(task_id)`：从 decoders 字典弹出并**异步** `stop()`——terminal 路径，无新 run 复用该 CQ，迟到帧由 CQ 写门（DRAINING/CLOSED）拦截，异步安全、不阻塞 API。
-- `restart_stream(task_id, stream_url) → bool`：**同步停旧** decoder（锁外 kill+reap+join，再入锁 cleanup+建新+`start()`）→ 建新 → 起新。旧 reader join 后新 reader 才写 `ca_ready`（无锁 SPSC deque），消除双生产者窗口；同时消除旧/新进程与 Phase-2 push 在 MediaMTX 同路径的连接竞争。捕获所有异常返回 `bool`，不阻塞健康监控线程。
-- `get_stream_info(task_id) → {"url": ...} | None`（协议固定 RTSP、fps 取自 config，重连只需 url）、`get_all_task_ids() → set`（看**注册**不看 `is_alive()`，保留「死掉但仍注册」的 decoder 供重连——若按 `is_alive()` 判断会误清待重连 decoder）、`get_pending_count(task_id) → int`（读 `ca_ready` 深度，供背压/健康）、`shutdown()`（同步逐个 `stop()`，进程退出前清干净）。
+## FFmpegDecoder：同步起、自持读线程、SIGKILL 停
 
-## FFmpegDecoder（自持读循环，RTSP-only）
+- **组合而非继承**：decoder 持有 reader 线程、自身不是 `Thread`，因为 `start()` 必须同步完成 Popen 与秒退检测并当场抛异常——健康监控靠这个同步失败信号首次感知。
+- **`start()`**：Popen 后等 0.1 s 看是否秒退；秒退则 `wait(1.0)` 回收僵尸，按 stderr 标记（404 / not found / connection refused 等网络类）抛 `StreamConnectionError`（可重试），否则抛 `FFmpegError`（致命）；二进制不存在也抛 `FFmpegError`。
+- **`_reader_loop`**：阻塞读 stdout，双平台同一路径；开头捕获 stdout 本地引用，避开 `stop()` 置 `proc=None` 的 TOCTOU；读到 `b""` 或 `ValueError` 即正常退出，不自行重启。
+- **`stop()`**：进程活着就直接 SIGKILL，再无条件 `wait(timeout)` 回收、关管道，锁外 join 两个线程。只解码到 pipe、无产物可损坏，卡在死 socket 上的 ffmpeg 又收不到 SIGTERM，优雅等待只会白耗 ~2 s。
+- **输出规范化为 CFR**：`-vf scale=W:H,fps=raw_fps -vsync drop`，rawvideo bgr24、默认 640x480；帧率只取 `settings.raw_fps`，yaml 不写 fps。
+- **帧与去向**：`Frame.timestamp = time.time()`（读到帧的墙钟时刻）；写 `ca_raw`（全帧率）、`ca_ready`（经准入背压与抽帧）、`latest_raw_frame / latest_raw_timestamp`。
+- `settings.ffmpeg_path` 与 `_rtsp_input_opts()` 每次建命令时读，改 env 不用重启进程。
 
-- **自持线程**：`_reader_loop`（`_reader_thread`）阻塞读 rawvideo stdout，双平台单一路径、无外部 selector；`_read_stderr_loop`（`_stderr_thread`）读 stderr。`start()` 末尾**无条件**起 reader 线程。循环起始处捕获 `stdout` 本地引用，避开 `stop()` 置 `self.proc=None` 的 TOCTOU；管道被关时 `read` 抛 `ValueError` 或返回 `b""` 均视为流结束、正常退出，**不自动重启**（重连交 `HealthMonitorWorker`）。
-- **组合而非继承**：decoder 拥有一个 reader 线程，而非 `class FFmpegDecoder(threading.Thread)`——因 `start()` 需**同步**完成建流 + 秒退检测并抛 `FFmpegError` / `StreamConnectionError` 供 health monitor 首次感知；把 Popen 移进 `run()` 会丢掉这个同步失败信号。
-- **RTSP-only**：固定 RTSP 输入选项由模块级函数 `_rtsp_input_opts()` 出，作 `-i` 之前的前缀，无 `protocol` 字段/RTMP 分支；ffmpeg 路径直接读 `settings.ffmpeg_path`（无 import 期快照）。选项**按调用取值、不在 import 期定死**——定死则改 env 要重启进程才生效。
-- **输出规范化 CFR**：ffmpeg 用 `scale=W:H,fps=raw_fps` + `-vsync drop` 输出定尺寸定像素格式（默认 bgr24 / 640x480）的 CFR raw_fps rawvideo。
-- **同步起、快速失败**：`start()` 在返回前同步抛 `FFmpegError` / `StreamConnectionError`（不延迟到线程）；秒退分支 `raise` 前 `wait(timeout=1.0)` 回收僵尸，并按 stderr 标记区分 `StreamConnectionError`（可重试）与 `FFmpegError`（致命）。
-- **子进程回收（无条件）**：`stop()` 无条件 `kill()`（直接 SIGKILL：仅解码到 pipe 无产物损坏、对端自有 gateway、卡死 socket 收不到 SIGTERM）+ `wait(timeout)`（`wait()` 移出 `if poll() is None`，对已退出进程立即 reap）+ 关管道；**锁外** join reader/stderr 两线程（对称回收，跳过自身线程）——即便快速失败的进程也回收，无僵尸。
-- **帧时间戳**：`Frame.timestamp = time.time()`（读帧时墙钟到达时刻），非合成时钟。
+## 准入背压只丢推理帧，录像照写
 
-写入去向：`ca_raw`（raw HLS 缓冲）、`ca_ready`（待推理）、`latest_raw_frame/latest_raw_timestamp`（健康监控/可视化）。
+decoder 每解析出一帧，经 `manager.get_pending_count()`（manager 即 StreamService，这条回读是有意保留的）取 `ca_ready` 深度。占用率 ≥ `backpressure_ratio`（默认 0.90，`config/stream_config.yaml`）时，该帧不进 `ca_ready`，计 `frame_drop_total{reason="ingress_backpressure"}`，每丢 100 帧打一条 DEBUG `[BACKPRESSURE]`；`ca_raw` 照写。解析异常计 `reason="decode_error"`。进 `ca_ready` 之后的整数抽帧与队满兜底在 CQ 内，见 [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)。
 
 ## 拉流读超时：判死延迟是 `-timeout` 的 2 倍
 
-`_rtsp_input_opts()` 里的 `-timeout T`（微秒）是**socket 读超时**，取自 `settings.rtsp_read_timeout_s`（默认 2.5s，env `CLEANSIGHT_RTSP_READ_TIMEOUT_S`）。三条硬约束：
+`-timeout T` 是 socket 读超时，取自 `settings.rtsp_read_timeout_s`（默认 2.5 s，env `CLEANSIGHT_RTSP_READ_TIMEOUT_S`）。
 
-- **`-timeout T` 的实际判死延迟是 `2T`，不是 `T`**。ffmpeg 第一次读超时**不致命**——它重试一次，第二次超时才退出。故该 flag 的真实语义是「连续 `2T` 收不到任何字节才判死」。这是 ffmpeg demux 层自带的重试，**配置改不掉**：逐个去掉 `-err_detect ignore_err` / `-fflags nobuffer+discardcorrupt`、乃至只剩 `-rtsp_transport tcp -timeout` 的最小组合，行为都是 2×。实测（ffmpeg n7.1.4，真·网络分区场景——中继停止双向转发但不 close、不发 FIN）：
+- **实际判死延迟是 `2T`**：ffmpeg 第一次读超时不致命、会重试一次，第二次才退出。这是 demux 层行为，去掉 `-err_detect ignore_err`、`-fflags nobuffer+discardcorrupt` 乃至只留 `-rtsp_transport tcp -timeout` 都一样。实测（ffmpeg n7.1.4，中继停止双向转发但不发 FIN）：
 
-```text
-  -timeout    首次触发               退出                    比值
-    2.0s      —                      4.50s                   2.25×
-    2.5s      2.75s                  5.41s                   2.16×
-    5.0s      5.11 / 5.12 / 5.26s    10.51 / 10.56 / 10.42s  2.10×
-   10.0s      —                      20.28s                  2.03×
-```
+  ```text
+    -timeout    首次触发               退出                    比值
+      2.0s      —                      4.50s                   2.25×
+      2.5s      2.75s                  5.41s                   2.16×
+      5.0s      5.11 / 5.12 / 5.26s    10.51 / 10.56 / 10.42s  2.10×
+     10.0s      —                      20.28s                  2.03×
+  ```
 
-  比值随 T 增大收敛到 2 ⇒ 是「两次等待 + 常数开销」，没有第三次。
+  比值随 T 增大收敛到 2：两次等待加常数开销，没有第三次。
+- **两次超时之间可恢复**：冻结跨过第一次超时、在第二次之前解冻，关键帧一到立即恢复，进程不退。
+- **`2T` 必须明显小于健康监控的 `cleanup_timeout`**（默认 20 s），否则进程还没退就被 cleanup 拆掉，重连永远轮不上。预算关系与越界告警见 [SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)。
+- **`-rtsp_transport tcp` 不可换 udp**：UDP 下「会话建成却 0 RTP」时进程不退，只能白等到 cleanup。
+- **settings 存 flag 原值而非判死延迟**：2× 是实测关系、可能随 ffmpeg 版本变，折进配置值会让配置静默失真。
 
-- **第一次超时之后仍可恢复**：冻结跨过第一次超时、在第二次之前解冻，关键帧一来立刻恢复解码，进程不退、不算断流。
-- **`2T` 必须明显小于 `cleanup_timeout`**（health_monitor，默认 20s）：两个值分居两处配置却是串联的——`cleanup_timeout` 从最后一帧算起，静默断流下 decoder 先花 `2T` 才退出，剩下的才是 respawn + 建连 + 等首个关键帧的预算。`2T ≥ cleanup_timeout` 时进程还没死就先被判 cleanup 拆除，重连永不触发。`HealthMonitorWorker.start()` 有一条越界告警（只告警不纠正，见 [SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)）。
-- **`-rtsp_transport tcp` 不可换 udp**：UDP 下「会话建成却 0 RTP」在「进程死活」判据下会白等到 cleanup，不会自动重启。
+## URL 重写：后端拉流绕过 RTSPProxy
 
-> settings 里存的是 **flag 原值**而非判死延迟：2× 是实测关系、可能随 ffmpeg 版本变，把它折进配置值会让配置静默撒谎。
-
-## 抽帧与背压
-
-入 `ca_ready` 走 `ClientQueues.append_ca_ready_with_throttle()`：整数降采样"**每 N 帧留 1**"（N=`inference_decimation`，默认 2）——`_decimate_counter` 计数，未满 N 丢弃、满 N 放行并归零，长期保留率精确 `= 1/N`。输入为 ffmpeg 规范化后的 CFR 流，CFR 已把时间烙成等距帧号，故整数计数天然精确均匀、**不依赖 wall-clock**（墙钟间隔门受解码线程调度抖动、稳定达不到目标抽帧率，故弃用），也无浮点相位累积。整数因子故**只命中整除比**（30→15/10/7.5…，不支持 30→20 类非整除比；非整除诉求由模型侧 `model_input_fps` 按 ts 重采样承接）。检测率 = `raw_fps/N`（默认 30/2=15，见 [app/settings.py](../../app/settings.py) 派生属性 `inference_fps`）。队列满则丢（背压只丢推理帧，`ca_raw` 录制继续）。`_decimate_counter` 仅由 decoder 线程读写、SPSC 无锁。decoder 经构造注入的 `manager`（= `StreamService`）读 `get_pending_count(task_id)` 判背压——这条 decoder → service 的回读是有意保留。
-
-> 采样旋钮的**唯一真源**是 `inference_decimation`（[app/settings.py](../../app/settings.py)）；`inference_fps` 是其派生 property（`raw_fps/N`），供 throttle 报告与 VizWorker target 消费（消费者继承采样流速率）。HLS 段编码**不共用** `inference_fps`，由帧 ts 逐段反推 `effective_fps`（`app/storage/hls/_encode.py`；写侧编排见 [SERVICE_RECORDING.md](SERVICE_RECORDING.md)，时间轴见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)）。
-
-## URL 重写
-
-`_rewrite_rtsp_url()` 仅当 URL 端口 == `settings.mediamtx_proxy_port` 时生效：host 固定 `127.0.0.1`、port 改 `settings.mediamtx_internal_port`、保留 userinfo——后端拉流绕过 RTSPProxy 直连本机 MediaMTX 内部端口。
-
-## 健康监控输入
-
-健康监控的断流判据是 **decoder 子进程死活**（`is_decoder_alive`），`latest_raw_timestamp` 只用于「重连是否成功」与最后防线的无帧超时。重连接管在 `HealthMonitorWorker`（见 [SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)）：`start_stream` 失败后 decoder 仍留字典由监控异步重连，本层不做函数级重试（`restart_stream` 失败返回 False）。真·网络分区下把「挂死」转成「进程退出」的正是上面那条 `-timeout`，故这条判据的**感知延迟 = `2 × rtsp_read_timeout_s`**。
+`_rewrite_rtsp_url()` 仅当 URL 端口等于 `settings.mediamtx_proxy_port` 时生效：host 改 `127.0.0.1`、端口改 `settings.mediamtx_internal_port`、保留 userinfo，直连本机 MediaMTX 内部端口。
 
 ## 代码来源
 
-- `app/services/stream/service.py`（`StreamService`）
-- `app/services/stream/__init__.py`（`lifespan()`）
+- `app/services/stream/service.py`（`StreamService`、`_rewrite_rtsp_url`）
 - `app/services/stream/decoder.py`（`_rtsp_input_opts` / `FFmpegDecoder`）
-- `app/services/stream/instance.py`（单例）
-- `app/services/stream/config.py`
-- `app/settings.py`（`rtsp_read_timeout_s`）
-- `config/stream_config.yaml`
-- `tests/test_rtsp_read_timeout.py`
-- `tests/test_stream_rewrite.py`
-- `tests/test_reconnect_on_initial_failure.py`
+- `app/services/stream/{__init__,instance,config}.py`、`config/stream_config.yaml`
+- `app/settings.py`（`raw_fps`、`rtsp_read_timeout_s`）
+- `tests/test_rtsp_read_timeout.py`、`tests/test_stream_rewrite.py`、`tests/test_reconnect_on_initial_failure.py`

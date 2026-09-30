@@ -1,7 +1,7 @@
 # 进程停机前逐个 stop_run：交出 HLS 残段与剩余检测结果
 
 > **变更状态**：生效中（2026-09-30）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_RUN_CONTROL.md](../kb/SERVICE_RUN_CONTROL.md)、[ARCHITECTURE_OVERVIEW.md](../kb/ARCHITECTURE_OVERVIEW.md)（2026-09-30）
 
 ## 概述
 

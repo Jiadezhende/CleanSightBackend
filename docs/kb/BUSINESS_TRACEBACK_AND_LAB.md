@@ -4,67 +4,51 @@
 
 # 追溯与 Lab 送标
 
-追溯和 Lab 共用 HLS 落盘结果，核心定位键是 `(task_id, step_id, 可选 run_id)`：同一步骤每次开跑一个 run，回放、时间轴、送标、导出的单位都是一个 run；不带 `run_id` 时取该 step 最新可见 run。
+追溯和 Lab 共用 HLS 落盘结果，定位键是 `(task_id, step_id, 可选 run_id)`：回放、时间轴、送标、导出的单位都是一个 run，不带 `run_id` 时取该 step 最新可见 run。实现见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md) 与 [SERVICE_LAB.md](SERVICE_LAB.md)。
 
-## 两套时间坐标（两个板块的共同前提）
+## 播放器里定位用媒体坐标，要保存的时刻落墙钟
 
-同一个 run 的一条轨上并存两把尺，**混用即静默算错**：
+同一条轨上并存墙钟（段文件名里的采集时刻，断流有宽度）与媒体坐标（Σ EXTINF，即 `<video>.currentTime`，断流宽度为零），混用会静默算错；换算要读清单，只有后端做得了。定义见 [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)「两套坐标：墙钟与媒体轴」。
 
-```
-墙钟   段文件名里的采集时刻（ts_ms）。回答"这件事几点发生的"——审计、检索、落库、素材命名。
-       断流那段时间在它上面有宽度。
-媒体   Σ EXTINF，与 <video>.currentTime / duration 同源。回答"在播放器的第几秒"——
-       进度条、告警标记、seek、裁剪。它是压紧的墙钟，断流在它上面宽度为零。
-```
+- 进度条、告警标记、seek、裁剪区间一律用媒体坐标。
+- 离开本次请求还要保存的时刻（审计、落库、素材命名）一律用墙钟——媒体刻度依赖当前段集合，段增删后同一刻度指向另一帧。
 
-换算要读清单，**只有后端做得了**（`app.storage.hls` 的 `MediaTimeline`，经 `hls.query_timeline(run, track)` 构造），浏览器侧的 `首段墙钟 + currentTime` 只在从没断过流时成立。因此：**凡是要在播放器里定位的量一律走媒体坐标；凡是要离开本次请求被保存下来的时刻一律落墙钟**（媒体刻度依赖当前段集合，段增删后同一个刻度就指向另一帧）。
+## 告警定位回放由 playlist + timeline 两个端点组合完成
 
-## 告警定位回放
+后端没有按 `alarm_id` 取证据或解析位置的端点。流程：
 
-按 `alarm_id` 一次取回证据的专用入口**已不存在**。同一件事由两个 run 级端点组合完成：
+1. 从告警来源（`GET /task/{task_id}/alarms` 或实时推送）拿到 `(task_id, step_id, detected_at)`，链路不查 `source_ip`。
+2. `GET /traceback/task/{task_id}/playlist.m3u8?step_id=&track=[&run_id=]` 播放该 step 的一个 run。
+3. `GET /traceback/task/{task_id}/timeline?step_id=&track=[&run_id=]` 返回该 run 存续期 `[run_id, 下一个 run_id)` 内的告警，每条带墙钟 `ts_ms` 与媒体刻度 `media_offset_ms`，前端按后者落标记、跳转。
+4. 媒体 URL 都是 HMAC token，锁定签发时解析的 run，不暴露文件系统路径。
 
-- `GET /traceback/task/{task_id}/playlist.m3u8?step_id=...&track=...[&run_id=...]`
-- `GET /traceback/task/{task_id}/timeline?step_id=...&track=...[&run_id=...]`
+DB 告警没有 run 维度，靠 run 存续区间归属。同 step 重跑后旧 run 仍可点名回放，直到随 step 被 TTL 回收。
 
-流程：
+## 回放与时间轴只覆盖一个 step 的一个 run
 
-1. 从告警来源（`GET /task/{task_id}/alarms` 或实时推送）拿到 `(task_id, step_id, detected_at)`——`clean_alarm` 自带这三项，**链路不查 `source_ip`**。
-2. 用 `(task_id, step_id)` 拼 playlist 播放该 step 的一个 run（缺省最新可见 run；可带 `run_id` 点名旧 run）。
-3. timeline 只返回**该 run 存续期** `[run_id, 下一个 run 的 run_id)` 内的告警事件，每条同时带墙钟 `ts_ms` 与媒体刻度 `media_offset_ms`；前端按后者在进度条上落标记、跳转。
-4. 媒体 URL 全部是 HMAC token（锁定签发时解析的 run），不暴露文件系统路径。
+`step_id` 必填，不跨 step、不跨 run 聚合（两次之间可隔任意长时间，聚合区间对应不到可播放的东西）。
 
-**能力边界**：调用方必须自带 `(task_id, step_id)`；后端没有 `alarm_id → 位置` 的解析端点，DB 告警本身也没有 run 维度（靠 run 存续区间归属）。回放范围就是一个 run 的完整录像；同 step 重跑后旧 run 仍可点名回放，直到随 step 被 TTL 回收。
+- 段与时长只认写入侧清单的 EXTINF，在途段天然被滤掉。
+- timeline 的 `duration_ms`（双轨并集墙钟跨度）与 `media_duration_ms`（单轨 Σ EXTINF）不同尺；断流总时长只能用后端给的 `gap_total_ms`，不能拿两者相减。
+- DB 不可用时 timeline 退化为空事件、仍返回时长，不 503。
+- 点名的 run 不存在（写错或已被 TTL 回收）→ 404；不点名且无可见 run → playlist 404、timeline 全 0。
 
-## 任务回放与时间轴
+## Lab 送标：从 raw 轨裁媒体区间，逐段推给 Label Studio
 
-`step_id` 必填，只返回单个洗消步骤一个 run 的数据，**不做跨 step 聚合，也不跨 run 聚合**（两个 step / run 之间可以隔任意长时间，聚合区间不对应任何可播放的东西）。
+操作员在工作台（`/ui-f3m8/lab/`）从任务列表选定一个 run（列表给出每个 step 的 `run_id`，后续请求带上即锁定），在 raw 轨上选多个不重叠的媒体区间提交；后端换算墙钟、用 ffmpeg 裁成 mp4，逐段上传 Label Studio。admin 页离线 tab 复用 Lab 的任务列表与 `/label-probs`。
 
-- 段与时长的唯一真源是写入侧 playlist 的 EXTINF（`app.storage.hls.list_segments(run, track)`），不用文件名时间戳估算；在途段不在清单里，天然被滤掉。
-- timeline 的 `duration_ms` 是 **raw/processed 双轨并集**的墙钟跨度，`media_duration_ms` 是**单轨** Σ EXTINF，两者不同尺——断流总时长必须由后端逐段算出（`gap_total_ms`），不能拿两者相减去凑。
-- 时间轴事件来自 `clean_alarm`（经 `app/db/alarms.py` 查询函数读取）；DB 不可用时退化为空事件、仍返回时长，不 503。
-- 点名的 run 不存在（写错或已被 TTL 回收）→ 404；不点名且该 step 没有可见 run → playlist 404、timeline 全 0。
-
-## Lab 送标
-
-入口：`POST /lab-f3m8/submit`、`GET /lab-f3m8/tasks`、`POST /lab-f3m8/label-probs`、`GET /lab-f3m8/download`、`GET /lab-f3m8/health`、`GET|PUT /lab-f3m8/config`；工作台页面 `/ui-f3m8/lab/`。admin 页离线 tab 与 lab 共用 `/lab-f3m8/tasks` 清单（`offline_steps`）、`/lab-f3m8/label-probs` 与 `/traceback` playlist。
-
-Lab **只裁 raw 轨**（processed 是渲染结果，标注要原始画面；processed 可切换查看但不可打点）。操作员在一个 run 内选多个不重叠的媒体区间 `[start_media_ms, end_media_ms]`，后端换算出墙钟、用 ffmpeg 裁成 mp4，逐段上传到 Label Studio。流程在 `app/services/lab/service.py`，router 只管检查顺序与响应组装。
-
-当前约束：
-
-- 区间用**媒体坐标**提交，墙钟由后端换算后随响应带回（算不出时 null）。
-- 跨越真实录制停顿的区间拒裁（`error_code=range_gap`）；判据 `gap = 下一段起点 − (本段起点 + EXTINF) > 0.5s`。
-- 单段最大时长 `lab_export_max_clip_ms`、单次总时长 `lab_export_max_total_ms`、单次 clip 数 `lab_export_max_clips_per_submit`。
-- 送标 clip **不带元数据**：LS 的 multipart 导入只读文件字段，非文件字段一律忽略，素材侧溯源只剩文件名里的墙钟区间。
-- LS url 与默认 project_id 可经 Lab config 持久化；token 只能来自 env。
-- 任务列表可切 `task_source=storage`，完全不碰业务库（DB 故障时送标不受牵连）；列表给出每个 step 的 `run_id`，后续请求带上即锁定同一个 run。
-- `/label-probs` 返回离线分割模型的逐帧类别概率（已换算为媒体刻度），只供可视化，不参与任何判断。
+- 只裁 raw 轨：标注要原始画面。processed 可切换查看，但不可打点。
+- 跨越真实录制停顿（相邻段墙钟间隙 > 0.5 s）的区间拒裁（`range_gap`）。
+- 单段时长、单次总时长、单次 clip 数各有上限（`settings.lab_export_max_*`）。
+- 单段失败不影响其他段：HTTP 仍 200，每段带 `success` / `error_code` 与墙钟区间。
+- clip 不带元数据（LS 忽略 multipart 非文件字段），素材侧溯源只剩文件名里的墙钟区间。后端职责止于推 clip，不负责导出标注或转训练集。
+- LS url 与默认 project_id 可在页面改并持久化；token 只来自 env。
+- 任务列表可切 `task_source=storage`，完全不碰业务库，DB 故障时送标不受牵连。
+- `/label-probs` 返回离线分割模型的逐帧类别概率（媒体刻度），只供可视化，不参与任何判断。
 
 ## 代码来源
 
 - `app/routers/traceback.py`、`app/routers/media.py`、`app/routers/lab.py`
 - `app/routers/utils/runs.py`、`app/routers/utils/media_token.py`
-- `app/storage/hls/`（`_timeline.py` 媒体轴、`_read.py` 清单枚举与 `query_*`）、`app/storage/runs.py`、`app/storage/tasks.py`
-- `app/services/utils/media_timeline.py`（断流阈值）、`app/services/utils/vod_playlist.py`
-- `app/services/lab/service.py`、`clip_builder.py`、`step_exporter.py`、`label_studio_client.py`、`runtime_config.py`
-- `app/db/alarms.py`、`app/db/tasks.py`
+- `app/storage/hls/`、`app/storage/runs.py`、`app/services/utils/media_timeline.py`
+- `app/services/lab/`、`app/db/alarms.py`

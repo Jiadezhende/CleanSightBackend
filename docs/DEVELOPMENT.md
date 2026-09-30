@@ -106,7 +106,7 @@
 **留在代码里**（模块 docstring ≤ 15 行，超 30 行当成混进了 KB 内容的信号去拆）：
 
 - 一句话说清这个模块是什么，加 3–5 行调用示例。
-- **会静默出错的调用约束**：一句结论 + 一条去 KB / update 的链接（如「`-ss` 必须在 `-i` 之后，否则 exit 0 产出空壳，见 `docs/kb/DESIGN_SEGMENT_CONCAT.md` §5.3」）。
+- **会静默出错的调用约束**：一句结论 + 一条去 KB / update 的链接（如「`-ss` 必须在 `-i` 之后，否则 exit 0 产出空壳，见 `docs/kb/DESIGN_SEGMENT_CONCAT.md` §5」）。
 - 非显然的不变量与前提：并发假设、调用顺序、谁负责持锁。
 
 **搬去 KB / update**：设计推导与权衡、坐标系 / 时间轴论证、落盘结构与架构图、域内分工表、历史变更记录（「XX 已于 2026-09-19 删除」「旧说法已被推翻」）、被否决的方案。
@@ -127,10 +127,10 @@
 
   ```python
   # app/services/inference/online/service.py
-  from .config import load_stage_config              # ✓ 同目录
-  from .detection.service import DetectionService    # ✓ 本包子包
+  from .naming import get_stage_alias                # ✓ 同目录
+  from .temporal.actor import ClientTemporalActor    # ✓ 本包子包
   from app.services.client.instance import client_service   # ✓ 跨包（跨服务依赖一眼可见）
-  from app.services.inference.online.naming import stream_name    # ✗ 包内却写了绝对
+  from app.services.inference.online.render import RenderSpec    # ✗ 包内却写了绝对
   ```
 
 - **相对导入不上翻**：只许 `from .x import`，禁止 `from ..x` / `from ...x`。要引用兄弟包或父包，写绝对路径。
