@@ -59,6 +59,21 @@ def test_strict_accepts_equal_rate_with_rounded_ts():
     assert resample_by_ts(frames, 7.5, strict=True) == frames
 
 
+def test_strict_judges_rate_by_mean_not_median():
+    """25fps 源补帧到 30fps 再隔帧抽：间隔 80/80/40ms 循环，中位数 80ms 但均值正好 15fps，不得拒收。"""
+    ts, t = [], 0.0
+    for i in range(90):
+        ts.append(round(t, 6))
+        t += (0.08, 0.08, 0.04)[i % 3]
+    frames = _frames(ts)
+    assert resample_by_ts(frames, 15.0, strict=True) == frames
+
+
+def test_strict_ignores_outage_gap_when_judging_rate():
+    frames = _frames([i / 15 for i in range(150)] + [20 + i / 15 for i in range(150)])
+    assert len(resample_by_ts(frames, 15.0, strict=True)) == 300
+
+
 def test_fewer_than_two_frames_returned_as_is():
     assert resample_by_ts([], 7.5) == []
     one = _frames([0.3])

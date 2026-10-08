@@ -34,8 +34,13 @@ def resample_by_ts(frames: Sequence[FrameDetection], fps: float, *, strict: bool
         return list(frames)
     input_dt = median(dts)
     min_dt = 1.0 / fps
-    if strict and input_dt > min_dt * (1 + _RATE_SLACK):
-        raise ValueError(f"输入帧率 {1.0 / input_dt:.3f}fps 低于契约帧率 {fps}fps，只能降采样")
+    if strict:
+        # 速率取「剔除断流缺口（> 2×中位间隔）后的平均间隔」，不取中位数：ts 是到达墙钟，25fps 源经 ffmpeg
+        # 补帧到 30fps 再隔帧抽，间隔呈 80/80/40ms 节律——中位数落在 80ms，会把均值 15fps 的流误判成 12.9fps。
+        steady = [dt for dt in dts if dt <= 2 * input_dt]
+        mean_dt = sum(steady) / len(steady)
+        if mean_dt > min_dt * (1 + _RATE_SLACK):
+            raise ValueError(f"输入帧率 {1.0 / mean_dt:.3f}fps 低于契约帧率 {fps}fps，只能降采样")
     tol = input_dt / 2
     kept = [frames[0]]
     next_t = frames[0].ts + min_dt
