@@ -1,8 +1,8 @@
 """CLEAN stage 离线模型策略。
 
 本文件保持“单策略文件自包含”：
-    - clean 专属特征转换（模块级纯函数：v2 / v3 / nodep 拼接及 recipe）；
-    - 离线模型结构（三种整段模型 + 因果滑窗 GRU）；
+    - clean 专属特征转换（模块级纯函数：v2 / v3 / nodep 拼接 / v5-bundle 及 recipe）；
+    - 离线模型结构（三种整段模型 + 因果滑窗 GRU + 整段 MS-TCN2）；
     - 模型输出到 TemporalSegment 的解码逻辑。
 
 输入:
@@ -691,29 +691,36 @@ def _build_v3_matrix(
         names += [f"{obj}_{ch}" for ch in _V3_SLOT_CHANNELS]
 
     for left, right in PAIR_FEATURES:
-        left_keys = ["hand_top1", "hand_top2"] if left == "hand" else [left]
-        right_keys = ["hand_top1", "hand_top2"] if right == "hand" else [right]
-        valid = np.zeros(frames, dtype=np.float32)
-        dist = np.full(frames, np.inf, dtype=np.float32)
-        for lk in left_keys:
-            for rk in right_keys:
-                pair_valid = (active[lk] & active[rk]).astype(np.float32)
-                pair_dist = np.linalg.norm(features[lk][:, 2:4] - features[rk][:, 2:4], axis=1)
-                pick = (pair_valid > 0) & (pair_dist < dist)
-                valid[pick] = 1.0
-                dist[pick] = pair_dist[pick]
-        dist = np.where(valid > 0, np.clip(dist, 0.0, math.sqrt(2.0)) / math.sqrt(2.0), 0.0).astype(np.float32)
-        delta = np.zeros(frames, dtype=np.float32)
-        if frames > 1:
-            delta[1:] = np.clip(dist[1:] - dist[:-1], -1.0, 1.0)
-            delta[valid <= 0] = 0.0
-        blocks.append(np.stack([valid, dist, delta], axis=1).astype(np.float32))
+        blocks.append(_pair_channels(features, active, left, right, frames))
         names += [f"{left}_to_{right}_valid", f"{left}_to_{right}_dist", f"{left}_to_{right}_delta"]
 
     t = np.linspace(0.0, 1.0, frames, dtype=np.float32)
     blocks.append(np.stack([t, np.sin(2 * np.pi * t), np.cos(2 * np.pi * t)], axis=1).astype(np.float32))
     names += ["t_norm", "t_sin", "t_cos"]
     return _finite_matrix(np.concatenate(blocks, axis=1)), names
+
+
+def _pair_channels(
+    features: Dict[str, np.ndarray], active: Dict[str, np.ndarray], left: str, right: str, frames: int
+) -> np.ndarray:
+    """目标对 `[T,3]` valid/dist/delta：图像坐标距离 / √2，hand 取有效槽位中更近的一只。"""
+    left_keys = ["hand_top1", "hand_top2"] if left == "hand" else [left]
+    right_keys = ["hand_top1", "hand_top2"] if right == "hand" else [right]
+    valid = np.zeros(frames, dtype=np.float32)
+    dist = np.full(frames, np.inf, dtype=np.float32)
+    for lk in left_keys:
+        for rk in right_keys:
+            pair_valid = (active[lk] & active[rk]).astype(np.float32)
+            pair_dist = np.linalg.norm(features[lk][:, 2:4] - features[rk][:, 2:4], axis=1)
+            pick = (pair_valid > 0) & (pair_dist < dist)
+            valid[pick] = 1.0
+            dist[pick] = pair_dist[pick]
+    dist = np.where(valid > 0, np.clip(dist, 0.0, math.sqrt(2.0)) / math.sqrt(2.0), 0.0).astype(np.float32)
+    delta = np.zeros(frames, dtype=np.float32)
+    if frames > 1:
+        delta[1:] = np.clip(dist[1:] - dist[:-1], -1.0, 1.0)
+        delta[valid <= 0] = 0.0
+    return np.stack([valid, dist, delta], axis=1).astype(np.float32)
 
 
 # -------------------- ama-v3-concat23-nodep-226d（v2 ⊕ v3，剔除废弃类） --------------------
@@ -758,6 +765,231 @@ def build_nodep_concat_features(
         fps=float(fps),
         feature_version=NODEP_FEATURE_VERSION,
     )
+
+
+# -------------------- ama-v5-bundle-94d（abs 65 ⊕ scope 18 ⊕ axis 2 ⊕ pair 9） --------------------
+#
+# 与训练框架 `clean_bbox_v5.py`（recipe full 紧凑化 + fix-compact-pair）经 `extract_ama_features.build_candidate_columns`
+# 拼出的 94 列逐列对齐。与 nodep 的差异：检测先按训练标注口径预筛（每帧每类按面积留前 K 个框）；
+# 器械轴改为 ctrl→mid，锚点双向插值 + 1 s 中值平滑——用到未来帧，只能离线。
+
+V5_FEATURE_VERSION = "ama-v5-bundle-94d"
+V5_FEATURE_DIM = 94
+_V5_OBJECTS = ("syringe", "air_gun", "scope_control_body", "scope_mid_section", "brush_tip_out")  # 非 hand 有效类，OBJECTS 序
+_V5_TOP_K = {"hand": 2}  # 其余类 1
+_V5_DEAD_COLUMN_PREFIXES = tuple(f"{obj}_" for obj in NODEP_DEPRECATED_OBJECTS) + tuple(
+    f"{left}_to_{right}_" for left, right in PAIR_FEATURES
+    if left in NODEP_DEPRECATED_OBJECTS or right in NODEP_DEPRECATED_OBJECTS
+)
+_V5_SCOPE_CHANNELS = ((2, "along"), (3, "across"), (4, "log_area_ratio"))  # _v3_slot_channels 的列号
+# 轴退化列：原点即 ctrl → ctrl 的 along/across ≡ 0；面积基准即 mid → mid 的 log_area_ratio ≡ 0
+_V5_AXIS_DEGENERATE = frozenset({
+    "scope_control_body_along", "scope_control_body_across", "scope_mid_section_log_area_ratio",
+})
+_V5_PAIRS = (("hand", "scope_control_body"), ("hand", "scope_mid_section"), ("scope_control_body", "scope_mid_section"))
+_V5_MIN_AXIS_LEN = 0.03
+_V5_SMOOTH_SECONDS = 1.0
+_V5_AGE_CAP_SECONDS = 5.0
+
+
+def _collect_top_area_arrays(
+    frames: Sequence[FrameDetection],
+    frame_width: int,
+    frame_height: int,
+    confidence_override: float | None,
+) -> Dict[str, List[np.ndarray]]:
+    """每帧每类按面积留前 K 个框（hand 2、其余 1；废弃类与未知类丢弃），打包成每类 ≤K 个 `[T,5]` 数组。
+
+    对齐训练标注（auto-annotate 每帧每类按面积 top-K 写框文件）。第 k 个数组放各帧面积第 k 大的框、
+    缺席帧全零：`_select_*` 逐帧只取 present>0 的行，与 `_collect_object_arrays` 的「每框一个数组」等价，
+    内存 O(T·K) 而非 O(T·框数)。
+    """
+    frame_count = len(frames)
+    out: Dict[str, List[np.ndarray]] = {name: [] for name in OBJECTS}
+    for idx, ff in enumerate(frames):
+        width = max(1, int(ff.frame_width or frame_width))
+        height = max(1, int(ff.frame_height or frame_height))
+        per_obj: Dict[str, List[Tuple[float, float, float, float]]] = {}
+        for fd in ff.by_source.values():
+            for det in fd.boxes:
+                obj = OBJECT_ALIASES.get(str(det.class_name))
+                if obj is None or obj in NODEP_DEPRECATED_OBJECTS:
+                    continue
+                cx, cy, area = _bbox_to_center_area(det, width, height)
+                conf = det.confidence if confidence_override is None else confidence_override
+                per_obj.setdefault(obj, []).append((cx, cy, area, max(0.0, min(1.0, float(conf)))))
+        for obj, boxes in per_obj.items():
+            boxes.sort(key=lambda box: box[2], reverse=True)
+            slots = out[obj]
+            for k, (cx, cy, area, conf) in enumerate(boxes[:_V5_TOP_K.get(obj, 1)]):
+                if k == len(slots):
+                    slots.append(np.zeros((frame_count, 5), dtype=np.float32))
+                slots[k][idx] = (1.0, cx, cy, area, conf)
+    return out
+
+
+def _interp_fill(values: np.ndarray, valid: np.ndarray) -> Tuple[np.ndarray | None, np.ndarray | None]:
+    """有效帧之间线性插值、两端常值外推；返回 (filled `[T,d]`, 距最近有效帧的帧数 `[T]`)，无有效帧返回 (None, None)。"""
+    index = np.flatnonzero(valid)
+    if index.size == 0:
+        return None, None
+    time = np.arange(len(valid))
+    values = values.reshape(len(valid), -1)
+    filled = np.stack([np.interp(time, index, values[index, col]) for col in range(values.shape[1])], axis=1)
+    position = np.searchsorted(index, time)
+    left = index[np.clip(position - 1, 0, index.size - 1)]
+    right = index[np.clip(position, 0, index.size - 1)]
+    age = np.minimum(np.abs(time - left), np.abs(right - time))
+    return filled.astype(np.float32), age.astype(np.float32)
+
+
+def _median_smooth(values: np.ndarray, window: int) -> np.ndarray:
+    """沿时间居中中值平滑（边界按端值延拓），`values` 为 `[T,d]`。"""
+    if window <= 1 or len(values) < 2:
+        return values
+    half = window // 2
+    padded = np.pad(values, ((half, half), (0, 0)), mode="edge")
+    view = np.lib.stride_tricks.sliding_window_view(padded, window, axis=0)
+    return np.median(view, axis=-1).astype(np.float32)
+
+
+def _v5_scope_frame(
+    features: Dict[str, np.ndarray], active: Dict[str, np.ndarray], frames: int, fps: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """ctrl→mid 器械轴：返回 (origin `[T,2]`, 单位轴 `[T,2]`, ref_len, ref_area, observed, age 秒)。
+
+    两锚点各自双向插值后做 1 s 中值平滑；轴长 ≤ 0.03 的帧不可信，轴向与轴长从可信帧插值。
+    """
+    ctrl_ok = active["scope_control_body"]
+    mid_ok = active["scope_mid_section"]
+    ctrl, ctrl_age = _interp_fill(features["scope_control_body"][:, 2:4], ctrl_ok)
+    mid, mid_age = _interp_fill(features["scope_mid_section"][:, 2:4], mid_ok)
+    window = max(1, int(round(fps * _V5_SMOOTH_SECONDS))) | 1
+    if ctrl is not None:
+        ctrl = _median_smooth(ctrl, window)
+    if mid is not None:
+        mid = _median_smooth(mid, window)
+
+    if ctrl is not None:
+        origin = ctrl
+    elif mid is not None:
+        origin = mid
+    else:
+        origin = np.full((frames, 2), 0.5, dtype=np.float32)
+
+    axes = np.tile(np.array([1.0, 0.0], dtype=np.float32), (frames, 1))
+    ref_len = np.full(frames, _V3_FALLBACK_REF_LEN, dtype=np.float32)
+    observed = np.zeros(frames, dtype=bool)
+    age = np.full(frames, _V5_AGE_CAP_SECONDS, dtype=np.float32)
+    if ctrl is not None and mid is not None:
+        vector = mid - ctrl
+        length = np.linalg.norm(vector, axis=1)
+        good = length > _V5_MIN_AXIS_LEN
+        unit, _ = _interp_fill(vector / np.maximum(length, 1e-6)[:, None], good)
+        if unit is not None:
+            axes = unit / np.maximum(np.linalg.norm(unit, axis=1, keepdims=True), 1e-6)
+            ref_len = _interp_fill(length, good)[0][:, 0]
+            observed = good & ctrl_ok & mid_ok
+            age = np.maximum(ctrl_age, mid_age) / fps
+
+    ref_area = np.full(frames, _V3_FALLBACK_REF_AREA, dtype=np.float32)
+    for name in ("scope_mid_section", "scope_control_body"):
+        area, _ = _interp_fill(features[name][:, 4], active[name])
+        if area is not None:
+            ref_area = area[:, 0]
+            break
+
+    return (
+        origin.astype(np.float32), axes.astype(np.float32), ref_len.astype(np.float32),
+        ref_area.astype(np.float32), observed, age.astype(np.float32),
+    )
+
+
+def build_ama_v5_bundle_features(
+    frames: Sequence[FrameDetection],
+    fps: float,
+    frame_width: int = 640,
+    frame_height: int = 480,
+    confidence_override: float | None = None,
+) -> ModelInput:
+    """`[T,94]`：abs（v2 去废弃类与死 pair）⊕ scope 几何 ⊕ axis 观测 ⊕ hand/ctrl/mid 三组 pair。
+
+    `fps` 用模型契约帧率（speed、中值平滑窗口、axis_age 都按它换算），不从 ts 估计。
+    列名与训练侧 `feature_columns.json` 一致（`abs/` `scope/` `pair/` 前缀）。
+    """
+    frame_count = len(frames)
+    if frame_count <= 0:
+        return ModelInput(
+            features=[], feature_names=[], timestamps=[], fps=float(fps), feature_version=V5_FEATURE_VERSION,
+        )
+    fps = float(fps)
+    object_arrays = _collect_top_area_arrays(
+        frames, max(1, int(frame_width)), max(1, int(frame_height)), confidence_override,
+    )
+
+    v2, v2_names = _build_feature_matrix(object_arrays, frame_count, fps)
+    keep = [i for i, name in enumerate(v2_names) if not name.startswith(_V5_DEAD_COLUMN_PREFIXES)]
+    blocks: List[np.ndarray] = [v2[:, keep]]
+    names: List[str] = [f"abs/{v2_names[i]}" for i in keep]
+
+    features: Dict[str, np.ndarray] = {}
+    active: Dict[str, np.ndarray] = {}
+    _, hand_slots = _select_hand_slots(object_arrays["hand"], frame_count)
+    for slot_idx, slot in enumerate(hand_slots, start=1):
+        features[f"hand_top{slot_idx}"], active[f"hand_top{slot_idx}"] = _impute_short_gaps(slot, fps)
+    for obj in _V5_OBJECTS:
+        _, slot = _select_top1_slot(object_arrays[obj], frame_count)
+        features[obj], active[obj] = _impute_short_gaps(slot, fps)
+
+    origin, axes, ref_len, ref_area, observed, age = _v5_scope_frame(features, active, frame_count, fps)
+    for key in ("hand_top1", "hand_top2", *_V5_OBJECTS):
+        channels = _v3_slot_channels(features[key], active[key], axes, ref_len, ref_area, origin)
+        for col, channel in _V5_SCOPE_CHANNELS:
+            if f"{key}_{channel}" not in _V5_AXIS_DEGENERATE:
+                blocks.append(channels[:, col:col + 1])
+                names.append(f"scope/{key}_{channel}")
+
+    blocks.append(np.stack(
+        [observed.astype(np.float32), np.minimum(age, _V5_AGE_CAP_SECONDS) / _V5_AGE_CAP_SECONDS], axis=1,
+    ))
+    names += ["scope/axis_observed", "scope/axis_age"]
+
+    for left, right in _V5_PAIRS:
+        blocks.append(_pair_channels(features, active, left, right, frame_count))
+        names += [f"pair/{left}_to_{right}_{suffix}" for suffix in ("valid", "dist", "delta")]
+
+    matrix = _finite_matrix(np.concatenate(blocks, axis=1))
+    if matrix.shape[1] != V5_FEATURE_DIM:
+        raise AssertionError(f"{V5_FEATURE_VERSION} 维度 {matrix.shape[1]} != {V5_FEATURE_DIM}")
+    return ModelInput(
+        features=matrix.tolist(),
+        feature_names=names,
+        timestamps=[ff.ts for ff in frames],
+        fps=fps,
+        feature_version=V5_FEATURE_VERSION,
+    )
+
+
+def merge_short_runs(labels: np.ndarray, min_len: int) -> np.ndarray:
+    """逐帧标签里长度 < min_len 的段并入左右相邻段中较长的一段（等长取左）；从最短的段开始，直到没有短段或只剩一段。
+
+    对齐训练侧 `eval_protocol.merge_short_segments`：只看段长，不含顺序 / 类别先验。
+    """
+    out = np.asarray(labels).copy()
+    if min_len <= 1:
+        return out
+    while True:
+        bounds = np.flatnonzero(np.diff(out)) + 1
+        starts = np.concatenate([[0], bounds])
+        ends = np.concatenate([bounds, [out.size]])
+        lengths = ends - starts
+        if len(starts) <= 1 or lengths.min() >= min_len:
+            return out
+        i = int(np.argmin(lengths))
+        left = lengths[i - 1] if i > 0 else -1
+        right = lengths[i + 1] if i + 1 < len(starts) else -1
+        donor = i - 1 if left >= right else i + 1
+        out[starts[i]:ends[i]] = out[starts[donor]]
 
 
 class _CleanTorchSegmenter(OfflineSegmenter):
@@ -809,8 +1041,9 @@ class _CleanTorchSegmenter(OfflineSegmenter):
             )
 
         probs = self._predict_with_model(model_input)
-        labels = probs.argmax(axis=1).astype("int64").tolist()
-        confs = probs.max(axis=1).astype("float32").tolist()
+        frame_labels = self._frame_labels(probs)
+        labels = frame_labels.tolist()
+        confs = probs[np.arange(len(frame_labels)), frame_labels].astype("float32").tolist()
 
         segments = self._labels_to_segments(model_input.timestamps, labels, confs)
         self._last_probs = LabelProbs(
@@ -823,6 +1056,10 @@ class _CleanTorchSegmenter(OfflineSegmenter):
     def label_probs(self) -> LabelProbs | None:
         """最近一次 segment() 的逐帧 softmax（未跑过为 None），供可视化旁路落盘。"""
         return self._last_probs
+
+    def _frame_labels(self, probs: np.ndarray) -> np.ndarray:
+        """逐帧 softmax `[T,C]` → 逐帧标签 `[T]`（int64）；需要逐帧后处理的子类覆盖。"""
+        return probs.argmax(axis=1).astype("int64")
 
     def _predict_with_model(self, model_input: ModelInput) -> np.ndarray:
         """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 softmax `[T, len(self.labels)]`。"""
@@ -1254,5 +1491,137 @@ class CleanNodepGRUSegmenter(_CleanTorchSegmenter):
             raise FileNotFoundError(f"clean 离线模型权重不存在: {path}")
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         model = _make_window_gru(NODEP_FEATURE_DIM, class_count)
+        model.load_state_dict(checkpoint["model_state"], strict=True)
+        self._model = model
+
+
+# ==================== 整段 MS-TCN2（训练框架 full_sequence_temporal 产物，ama-v5-bundle-94d） ====================
+
+
+def _make_mstcn2(input_dim: int, class_count: int, hidden: int = 32, num_stages: int = 2, num_layers: int = 5):
+    """MS-TCN2：buffer 内 z-score → 双膨胀预测 stage → (num_stages-1) 个单膨胀精化 stage。
+
+    输入 `[B,T,F]`，输出最后一个 stage 的 logits `[B,C,T]`。双向卷积，非因果。
+    state_dict 键 norm_mean / norm_std / stage0.* / refines.*；推理不需要 dropout，故不建。
+    """
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class DualDilatedLayer(nn.Module):
+        def __init__(self, i: int):
+            super().__init__()
+            fine, coarse = 2 ** i, 2 ** (num_layers - 1 - i)
+            self.conv_fine = nn.Conv1d(hidden, hidden, kernel_size=3, padding=fine, dilation=fine)
+            self.conv_coarse = nn.Conv1d(hidden, hidden, kernel_size=3, padding=coarse, dilation=coarse)
+            self.conv_1x1 = nn.Conv1d(2 * hidden, hidden, kernel_size=1)
+
+        def forward(self, x):
+            return x + self.conv_1x1(F.relu(torch.cat([self.conv_fine(x), self.conv_coarse(x)], dim=1)))
+
+    class DilatedLayer(nn.Module):
+        def __init__(self, dilation: int):
+            super().__init__()
+            self.conv_dilated = nn.Conv1d(hidden, hidden, kernel_size=3, padding=dilation, dilation=dilation)
+            self.conv_1x1 = nn.Conv1d(hidden, hidden, kernel_size=1)
+
+        def forward(self, x):
+            return x + self.conv_1x1(F.relu(self.conv_dilated(x)))
+
+    class Stage(nn.Module):
+        def __init__(self, in_channels: int, layers):
+            super().__init__()
+            self.in_proj = nn.Conv1d(in_channels, hidden, kernel_size=1)
+            self.layers = nn.ModuleList(layers)
+            self.out = nn.Conv1d(hidden, class_count, kernel_size=1)
+
+        def forward(self, x):
+            z = self.in_proj(x)
+            for layer in self.layers:
+                z = layer(z)
+            return self.out(z)
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.stage0 = Stage(input_dim, [DualDilatedLayer(i) for i in range(num_layers)])
+            self.refines = nn.ModuleList(
+                Stage(class_count, [DilatedLayer(2 ** i) for i in range(num_layers)])
+                for _ in range(num_stages - 1)
+            )
+            self.register_buffer("norm_mean", torch.zeros(1, 1, input_dim))
+            self.register_buffer("norm_std", torch.ones(1, 1, input_dim))
+
+        def forward(self, x):
+            logits = self.stage0(((x - self.norm_mean) / self.norm_std).transpose(1, 2))
+            for refine in self.refines:
+                logits = refine(F.softmax(logits, dim=1))
+            return logits
+
+    return Model()
+
+
+class CleanV5BundleMSTCN2Segmenter(_CleanTorchSegmenter):
+    """CLEAN 阶段整段 MS-TCN2 离线模型（特征 ama-v5-bundle-94d，6 类）。
+
+    `model_path` 是训练框架 checkpoint 单文件（取 `model_state`，z-score 统计在 buffer 内，strict 加载）；
+    网络结构固定为训练值（hidden=32 / 2 stage / 5 层），换训练配置须同步改这里。
+    双向卷积 + 特征用到未来帧，只能整段离线。逐帧 argmax 后按 `min_segment_frames` 把短段并入相邻较长段
+    （训练侧唯一认可的后处理，不含顺序先验）；`label_probs` 是后处理前的原始概率。
+    `model_input_fps` 须等于训练帧率、`confidence_override` 须与训练标注口径一致——配错不报错、结果静默变差。
+    """
+
+    model_version = "clean_mstcn2_v5bundle94d"
+    feature_method = "ama_v5_bundle"
+    labels = NODEP_GRU_LABELS
+
+    def __init__(
+        self,
+        model_path: str | None = None,
+        *,
+        model_input_fps: float,
+        min_segment_frames: int = 20,
+        confidence_override: float | None = None,
+        frame_width: int = 640,
+        frame_height: int = 480,
+    ):
+        if float(model_input_fps) <= 0:
+            raise ValueError(f"model_input_fps 必须大于 0: {model_input_fps}")
+        if int(min_segment_frames) < 0:
+            raise ValueError(f"min_segment_frames 不能为负: {min_segment_frames}")
+        if confidence_override is not None and not 0.0 <= float(confidence_override) <= 1.0:
+            raise ValueError(f"confidence_override 必须在 0..1: {confidence_override}")
+        super().__init__(
+            model_path=model_path,
+            min_duration_s=0.0,
+            fps=model_input_fps,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        self.min_segment_frames = int(min_segment_frames)
+        self.confidence_override = None if confidence_override is None else float(confidence_override)
+
+    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
+        """按 ts 降采样到 model_input_fps（strict，只挑真实帧）→ 94 维特征。"""
+        return build_ama_v5_bundle_features(
+            resample_by_ts(frames, self.fps, strict=True),
+            self.fps,
+            self.frame_width,
+            self.frame_height,
+            self.confidence_override,
+        )
+
+    def _frame_labels(self, probs: np.ndarray) -> np.ndarray:
+        return merge_short_runs(super()._frame_labels(probs), self.min_segment_frames)
+
+    def _load_model(self, model_input: ModelInput, class_count: int) -> None:
+        """strict 加载训练框架 checkpoint 的 `model_state`（含 norm_mean / norm_std buffer）。"""
+        import torch
+
+        path = Path(str(self.model_path))
+        if not path.exists():
+            raise FileNotFoundError(f"clean 离线模型权重不存在: {path}")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        model = _make_mstcn2(V5_FEATURE_DIM, class_count)
         model.load_state_dict(checkpoint["model_state"], strict=True)
         self._model = model
