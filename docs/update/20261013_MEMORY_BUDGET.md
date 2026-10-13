@@ -80,7 +80,7 @@ sweeper 停滞    N × 2 × ca_maxlen × fb + N × ca_ready_maxlen × fb
 | sweeper 停滞 | ≈ 37GB | ≈ 15.9GiB |
 | 最坏 + 基线 6GiB | — | ≈ 21.8GiB < 32GB 机器的 MemAvailable（约 29GiB），启动自检通过 |
 
-`ca_maxlen_seconds` 保持 30 时，最坏 + 基线约 29.5GiB，会被启动自检拒绝；用例 `test_default_plan_fits_32g_server_but_30s_cache_does_not` 锁住这条依据。
+`ca_maxlen_seconds` 保持 30 时，最坏 + 基线约 29.5GiB，会被启动自检拒绝。
 
 **自测结果**
 

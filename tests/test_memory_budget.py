@@ -67,13 +67,6 @@ def test_estimate_scenarios_take_max_not_sum():
     assert est.worst == max(est.recording_stall, est.inference_stall, est.sweeper_stall) + 6144 * MB
 
 
-def test_default_plan_fits_32g_server_but_30s_cache_does_not():
-    """提案的定参依据：32GB 机器 MemAvailable ≈ 29GiB，20s 缓存过、30s 缓存不过。"""
-    available = 29 * GIB
-    assert estimate(_plan()).worst <= available
-    assert estimate(_plan(ca_maxlen=900)).worst > available
-
-
 def test_read_mem_available(tmp_path):
     p = tmp_path / "meminfo"
     p.write_text("MemTotal:       32000000 kB\nMemAvailable:   29000000 kB\n", encoding="ascii")

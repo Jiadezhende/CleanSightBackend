@@ -1318,9 +1318,13 @@ class TestEncodeStdinEndToEnd:
         assert exc.value.stderr
 
     def test_timeout_kills_ffmpeg(self, tmp_path, monkeypatch):
+        """超时必须杀掉 ffmpeg 并上抛，不能卡在写 stdin 上。
+
+        帧数只需让总字节远超管道缓冲（这里 ~2MB ≫ 64KB）即可让写端阻塞。
+        """
         monkeypatch.setattr(_fmp4, "_TIMEOUT_S", 0.001)
         with pytest.raises(subprocess.TimeoutExpired):
-            _fmp4.encode(tmp_path, _frames(300, size=(480, 640)), 15.0)
+            _fmp4.encode(tmp_path, _frames(30, size=(240, 320)), 15.0)
 
 
 @pytest.mark.skipif(not _external_tools_available(), reason="需要 cv2 与项目自带 ffmpeg")
