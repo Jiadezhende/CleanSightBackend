@@ -110,6 +110,7 @@ BUDGET = {
     "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
     "app.services.utils.pressure":     (set(), 0.20),   # stdlib only
     "app.services.utils.memory_budget": (set(), 0.20),  # stdlib only
+    "app.services.utils.frame_ring":    (set(), 0.40),  # numpy + multiprocessing.shared_memory
     "app.services.utils.metrics":      (set(), 0.40),   # prometheus_client（实测 ~0.09s）
     # 算法服务。cv2 在 grader.py 里一律函数体内 import（规范 §2 通路 2）——它经 `service`
     # 被 `routers/algorithm.py` 模块级 import，挪回顶层会让这条连同 `app.main` 一起红。
