@@ -327,12 +327,14 @@ class RemoteInferProxy:
         return True
 
     def _rollback(self, req_id: int) -> None:
+        # 槽位归还与 _handle_child_failure 的 reset 必须在同一把锁内互斥：
+        # 锁外归还若落在 reset 之后，空闲表会出现重复槽位号，同一槽位被两批同时占用。
         with self._lock:
             if self._pending.pop(req_id, None) is not None:
                 self._inflight -= 1
             slots = self._req_slots.pop(req_id, None)
-        if slots is not None and self._ring is not None:
-            self._ring.release(slots)
+            if slots is not None and self._ring is not None:
+                self._ring.release(slots)
 
     # ────────────────────────── 收集 ──────────────────────────
 
@@ -359,8 +361,8 @@ class RemoteInferProxy:
             if records is not None:
                 self._inflight -= 1
             slots = self._req_slots.pop(req_id, None)
-        if slots is not None and self._ring is not None:
-            self._ring.release(slots)                   # 子进程已拷出并答复，槽位可复用
+            if slots is not None and self._ring is not None:
+                self._ring.release(slots)               # 子进程已拷出并答复，槽位可复用；锁内归还同 _rollback
         if records is None:
             # 孤儿响应（子进程重启后的旧响应/重复）——忽略，不写回
             return
@@ -468,8 +470,8 @@ class RemoteInferProxy:
             self._pending.clear()
             self._req_slots.clear()
             self._inflight = 0
-        if self._ring is not None:
-            self._ring.reset()   # 子进程已死，在途槽位不会再被读
+            if self._ring is not None:
+                self._ring.reset()   # 子进程已死，在途槽位不会再被读；锁内重置，与归还互斥
         if orphaned:
             frame_drop_total.labels(reason="infer_child_restart").inc(orphaned)
             logger.warning("[RemoteInferProxy] 丢弃在途 %d 帧（子进程重启）", orphaned)

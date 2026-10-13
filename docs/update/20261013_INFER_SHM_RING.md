@@ -60,6 +60,12 @@ collector ─► _handle_response：pop pending 同时 pop 槽位 → ring.relea
 | 真 spawn 冒烟（本地，stage "2" 两个 YOLO，CPU 与 GPU 各一次）：3 批 × 4 帧全部写回，两路检测源齐全、ts 对齐，槽位全数归还，停机干净 | 通过 |
 | 全量 `pytest tests/` | 1020 passed |
 
+## 追加（2026-10-13）：槽位归还与重启重置挪进同一把锁
+
+- **问题**：答复归还（`_handle_response`）、回滚归还（`_rollback`）在 `_lock` 内取出槽位号、出锁后才 `ring.release`；子进程失败时 `_handle_child_failure` 在锁内清在途、出锁后才 `ring.reset()`。若归还落在 reset 之后，空闲表会出现重复槽位号（`release` 只追加不查重），重复会一直留到下次重置。之后同一槽位可能同时分给两批请求，后写的帧覆盖先写的，A 路的检测结果在 B 路画面上算出并写回 A 路，不报错。触发窗口是子进程死亡/判 wedge 的那一刻，微秒级。
+- **改法**：[infer_proxy.py](../../app/services/inference/online/detection/infer_proxy.py) 三处 `release` / `reset` 全部挪进 `_lock`，与渲染代理的 `_clear_inflight` / `drain` / `_forget` 一致。锁顺序固定为 proxy 锁 → ring 锁，ring 不回调 proxy，不成环。
+- **测试**：未新增用例（竞态窗口无法在单测里稳定复现）。全量 `pytest tests/` 1034 passed。
+
 ## 遗留风险 / 后续任务
 
 | 风险 / 待办 | 处理计划 |
