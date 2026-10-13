@@ -9,6 +9,7 @@
 
     view = SharedFrameRingView(ring.spec)        # 消费进程按 spec 附着
     frame = view.read(slot, shape)               # 拷出一份独立数组（不持有共享内存视图）
+    view.write(slot, result)                     # 请求-应答式：结果写回同一槽位，生产方收到答复再 read
 
 槽位的生命周期归生产方：**消费方不归还**，生产方在收到对应答复（或判定对端已死）时归还。
 依据见 docs/update/20261013_SHARED_FRAME_RING.md。
@@ -82,6 +83,12 @@ class SharedFrameRing:
         with self._lock:
             self._free = deque(range(self.spec.slots))
 
+    def read(self, slot: int, shape: Tuple[int, ...]) -> np.ndarray:
+        """拷出槽位内容（请求-应答式用法下读消费方写回的结果）。"""
+        src = np.ndarray(shape, dtype=np.uint8, buffer=self._shm.buf,
+                         offset=slot * self.spec.slot_bytes)
+        return src.copy()
+
     def write(self, slot: int, frame: np.ndarray) -> None:
         if not self.fits(frame):
             raise ValueError(
@@ -119,6 +126,16 @@ class SharedFrameRingView:
 
     def read_all(self, frames: SharedFrames) -> List[np.ndarray]:
         return [self.read(s, shape) for s, shape in zip(frames.slots, frames.shapes)]
+
+    def write(self, slot: int, frame: np.ndarray) -> None:
+        """把结果写回同一槽位（请求-应答式用法：读出输入后原地写出结果，生产方收到答复再读）。"""
+        if frame.dtype != np.uint8 or frame.nbytes > self.spec.slot_bytes:
+            raise ValueError(
+                f"帧放不进槽位: dtype={frame.dtype} nbytes={frame.nbytes} slot_bytes={self.spec.slot_bytes}"
+            )
+        dst = np.ndarray(frame.shape, dtype=np.uint8, buffer=self._shm.buf,
+                         offset=slot * self.spec.slot_bytes)
+        dst[...] = frame
 
     def close(self) -> None:
         self._shm.close()

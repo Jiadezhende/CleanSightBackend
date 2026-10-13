@@ -127,6 +127,9 @@ BUDGET = {
     "app.services.inference":   (set(), 1.0),
     # online / offline 两个子包的 `__init__` 都是标记型：import 子包不该拉起任何一段链路。
     "app.services.inference.online":  (set(), 1.0),
+    # 渲染子进程的 import 链：只许 cv2（+ PIL），拉起 torch 就是每个渲染子进程几百 MB 常驻
+    "app.services.inference.online.visualization.render_child": (set(), 0.40),
+    "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
     # 离线 CLI 是独立进程入口：`_isolate_cpu()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。

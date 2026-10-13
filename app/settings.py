@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     memory_baseline_mb: int = 6144        # 进程基线：torch / CUDA 上下文 / 渲染子进程 / ffmpeg 解码进程
     memory_check_enforce: bool = True     # False = 超预算只告警不拒绝启动（资源紧的测试机用）
 
+    # 可视化渲染子进程数（渲染 GIL 争用是 15 路下的瓶颈，挪进子进程各持一把 GIL）。
+    # 0 = 在可视化线程内渲染（旧路径，开发机 / 少路数可用）。env: CLEANSIGHT_VIZ_PROCESSES
+    viz_processes: int = 2
+
     # 拉流 socket 读超时（秒）→ decoder ffmpeg 的 `-timeout`。断流判死延迟 = 2×本值，
     # 上界受 health_monitor 的 cleanup_timeout 约束；三条硬约束见 `_rtsp_input_opts()`。
     rtsp_read_timeout_s: float = 2.5  # env: CLEANSIGHT_RTSP_READ_TIMEOUT_S
