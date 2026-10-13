@@ -168,7 +168,12 @@ class ClientQueues:
         # 检查点在各 append_* 内部——不散到 decoder/viz worker 各生产者去，也不为此另起线程：
         # 写者线程顺带驱动即可。周期快照形态（每 10s 至多一条、平稳时静默），
         # 故只有 run 在跑（有人写队列）时才会汇报，run 停了自然静默。
-        self._pressure_watermark: int = max(1, int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
+        # raw / processed 由 sweeper 整段拉走，深度在 0~1 段之间来回是常态：水位至少 1.5 段
+        # （sweeper 落后半段才算压力），否则段长 = 半缓存时每段都误报。不超过 ca_maxlen。
+        self._pressure_watermark: int = max(1, min(
+            ca_maxlen,
+            max(int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO), ca_segment_len * 3 // 2),
+        ))
         self._ready_watermark: int = max(1, int(self.ca_ready_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
         _identity = {
             "task_id": run.task_id if run else None,

@@ -90,6 +90,12 @@ sweeper 停滞    N × 2 × ca_maxlen × fb + N × ca_ready_maxlen × fb
 | `tests/test_recording_service.py::TestHlsByteBudget`（新增：超预算拒收、停滞后恢复、入队失败归还、写失败归还） | 4 passed |
 | 全量 `pytest tests/` | 1002 passed |
 
+## 追加（2026-10-13）：ca_raw / ca_processed 压力水位改为至少 1.5 段
+
+- **问题**：`ca_maxlen_seconds` 降到 20 后，`ca_maxlen = 600` 帧，原水位 `ca_maxlen × 0.5 = 300` 正好等于段长 300 帧。sweeper 每秒整段拉取，每攒满一段、还没被拉走的那一刻深度就到 300，于是每条 raw / processed 队列都周期性打 `[PRESSURE] ... reason=queue_high_watermark`。test 环境 8 路实测出现（`ca_processed depth=300 capacity=600 utilization=0.500`）。15 路时 warning 日志里每秒约 2 行误报，⑥ 验收依赖的压力信号会被淹没。
+- **改法**：[queues.py](../../app/services/client/queues.py) 的 `_pressure_watermark = min(ca_maxlen, max(ca_maxlen × 0.5, 1.5 × ca_segment_len))`，含义是 sweeper 落后半段才算压力。默认参数下为 450 帧。`ca_ready` 的水位不变。
+- **测试**：未新增用例。`test_cq_pressure_log.py` 中两条用 `ca_maxlen=10` 测日志机制的用例补传 `ca_segment_len=2`（原先沿用裸建默认段长 150，生产上不可能出现），断言不变。全量 `pytest tests/` 1034 passed。
+
 ## 遗留风险 / 后续任务
 
 | 风险 / 待办 | 影响 | 处理计划 |
