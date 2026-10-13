@@ -1,21 +1,20 @@
 """本域的写侧动作：`insert_segment`（写一段）。
 
 `insert_segment` 一次调用，从内存帧序列到 `hls/` 目录里一个可播的段：调用方交出
-`Sequence[Frame]`，拿回这段的身份键。中间六步（编码、转码、位置修补、索引、init、清单）
+`Sequence[Frame]`，拿回这段的身份键。中间五步（编码、位置修补、索引、init、清单）
 全在层内，**没有一步漏到签名上**。
 
 ## 事务形态：路线 A（规范 `docs/kb/DESIGN_STORAGE_LAYER.md` §5）
 
     ① stage    在 {run}/hls/.stage_{track}_{ts_ms}/ 里造产物
-               ├ cv2 写 mp4v（_encode）
-               └ ffmpeg 转 fMP4，得 fragment + init（_fmp4）
+               └ 帧经 stdin 灌 ffmpeg，一次编码得 fragment + init（_fmp4.encode）
     ② adjust   读既有清单求累计 EXTINF → hex-patch fragment 的 tfdt（位置相关）
     ③ commit   按 W8 的顺序把 stage 里的东西搬进域目录并登记：
                sidecar → init → 段文件 → 清单条目
     任一步异常 → 删 stage、不 rename、不登记，原异常上抛
 
-**必须分 stage**：段文件名一出现读侧就认为它是合法产物，原地编码会留下一个"文件在、但还是
-mp4v 不是 fragment"的窗口（实测 ~260 ms）。`.stage_` 开头既不匹配段正则、也不是文件。
+**必须分 stage**：段文件名一出现读侧就认为它是合法产物，原地编码会留下一个"文件在、但 tfdt
+还没修补"的窗口。`.stage_` 开头既不匹配段正则、也不是文件。
 
 **commit 的顺序（三条写反都不报错）**：
 
@@ -72,8 +71,9 @@ def insert_segment(
         等定位函数拿到任一产物的路径。
 
     Raises:
-        ValueError: track 非法，或 `frames` 为空（空段是调用方算错了批次，不当成功）。
-        OSError: 建目录 / 编码 / 落盘失败（cv2 的失败也翻译成这一档）。
+        ValueError: track 非法，`frames` 为空（空段是调用方算错了批次，不当成功），
+            或段内帧尺寸不一致。
+        OSError: 建目录 / 落盘失败。
         subprocess.CalledProcessError | subprocess.TimeoutExpired | FileNotFoundError:
             ffmpeg 非零退出 / 超时 / 机器上没有 ffmpeg。
         RuntimeError: ffmpeg 报成功却没产出，或 tfdt 改写失败。
@@ -90,7 +90,7 @@ def insert_segment(
     start_ts = frames[0].timestamp
     ref = SegmentRef(track=track, ts_ms=_layout.ts_to_ms(start_ts))
 
-    # 编码帧率与媒体时长同源：VideoWriter 用它、EXTINF 用它、tfdt 由 EXTINF 累加而来。
+    # 编码帧率与媒体时长同源：ffmpeg -framerate 用它、EXTINF 用它、tfdt 由 EXTINF 累加而来。
     fps = _encode.effective_fps(frames)
     duration_s = _encode.media_duration(len(frames), fps)
 
@@ -105,9 +105,8 @@ def insert_segment(
     stage.mkdir()
 
     try:
-        # ① stage —— 锁外的重活：编码 + 转码，产物全在 stage 里，读侧看不见
-        _encode.write_mp4v(_fmp4.source_path(stage), frames, fps)
-        fragment, init = _fmp4.transcode(stage)
+        # ① stage —— 锁外的重活：帧经 stdin 一次编码成 fMP4，产物全在 stage 里，读侧看不见
+        fragment, init = _fmp4.encode(stage, frames, fps)
 
         # ② adjust —— 位置相关的最后修补：本段在媒体轴上的落点 = 此前所有 EXTINF 之和。
         # 必须在把本段条目追加进清单**之前**读，此刻清单恰好只含 0..N-1 段。
@@ -139,7 +138,7 @@ def insert_segment(
         os.replace(fragment, segment_target)
         _m3u8.append(playlist, _layout.init_name(track), duration_s, segment_target.name)
     finally:
-        # 成功路径留下的是 source.mp4 与 ffmpeg 自己那份 index.m3u8；失败路径留下半成品。
+        # 成功路径留下的是 ffmpeg 日志与它自己那份 index.m3u8；失败路径留下半成品。
         # 两种都该走，故放 finally 而不是 except。
         shutil.rmtree(stage, ignore_errors=True)
 
