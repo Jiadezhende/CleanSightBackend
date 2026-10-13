@@ -87,11 +87,17 @@ class InferenceService:
         # 比 ts，~µs 级，不增推理量）。raw_fps 是已有的跨模块真源，无需新旋钮。
         # 注：HLS processed 打标另由 eff_fps 从 ts 反推、模型输入另由 model_input_fps 契约重采样，均不借本值。
         from .visualization.visualization_worker import VisualizationWorkerPool
+        from app.services.client.config import get_client_config
 
+        frame_cfg = get_client_config().frame
         self.visualization_pool = VisualizationWorkerPool(
             target_fps=settings.raw_fps,          # 轮询率：源视频帧率，对 inference 流 2× 过采样
             output_fps=settings.inference_fps,    # 期望出帧率：吞吐告警判速率亏空的基准（与轮询率解耦）
             stage_configs=None,
+            # 渲染挪进子进程（GIL 争用下单线程渲染撑不住多路），槽位按规划路数留 2 倍余量
+            render_processes=settings.viz_processes,
+            frame_bytes=frame_cfg.resize_width * frame_cfg.resize_height * 3,
+            render_slots=max(32, 2 * settings.capacity_planned_streams),
         )
 
         # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由

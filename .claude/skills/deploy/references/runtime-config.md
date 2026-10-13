@@ -33,6 +33,11 @@
 | `CLEANSIGHT_FFMPEG_PATH` | 留空 | 留空 | 留空 | 项目内 `.ffmpeg/bin/ffmpeg`，**不回退 PATH** |
 | `CLEANSIGHT_STRICT` | `1` | `1` | `0` | `0` |
 | `CLEANSIGHT_LABEL_STUDIO_URL` / `_TOKEN` / `_DEFAULT_PROJECT_ID` | 按需 | 按需 | 按需 | 空 = 不启用样本回流 |
+| `CLEANSIGHT_CAPACITY_PLANNED_STREAMS` | 按实际最大路数（默认 15） | 同 prod | 默认 | `15`。启动内存自检按它估算最坏占用，**不限制实际路数** |
+| `CLEANSIGHT_MEMORY_CHECK_ENFORCE` | `true` | `true`；内存不足 32GB 的测试机设 `false` | 默认 | `true`：最坏占用超过 `MemAvailable` 就拒绝启动；日志 `内存自检未通过` 会列出各项。仅 Linux 生效 |
+| `CLEANSIGHT_VIZ_PROCESSES` | `2` | `2` | 默认 | `2`：渲染子进程数。15 路时 processed 出帧不到 14fps 可调到 `3`；`0` = 线程内渲染（旧路径） |
+
+> **共享内存**：推理与渲染的帧环各占约 29MB，在 `/dev/shm`。裸机部署没有影响；如果放进容器，默认 64MB 的 `/dev/shm` 余量很小，要 `--shm-size=256m`。
 
 ### 生产 `.env` 模板
 

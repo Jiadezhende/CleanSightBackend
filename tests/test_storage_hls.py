@@ -83,7 +83,7 @@ def _read_tfdt(path: Path) -> int:
 
 @pytest.fixture
 def fake_pipeline(monkeypatch):
-    """把 ① stage 那两步（cv2 编码、ffmpeg 转码）换成假的，只留事务骨架。
+    """把 ① stage 那一步（帧经 stdin 灌 ffmpeg 编码）换成假的，只留事务骨架。
 
     返回一个记录器，测试可以用它改写"转码产出什么"或让某一步失败。
     """
@@ -94,12 +94,9 @@ def fake_pipeline(monkeypatch):
             self.transcode_error = None
             self.tfdt_seed = 0
 
-        def write_mp4v(self, path, frames, fps):
+        def encode(self, stage, frames, fps):
             if self.encode_error is not None:
                 raise self.encode_error
-            path.write_bytes(b"mp4v-source")
-
-        def transcode(self, stage):
             if self.transcode_error is not None:
                 raise self.transcode_error
             fragment = stage / "fragment_0.mp4"
@@ -109,8 +106,7 @@ def fake_pipeline(monkeypatch):
             return fragment, init
 
     pipeline = Pipeline()
-    monkeypatch.setattr(_encode, "write_mp4v", pipeline.write_mp4v)
-    monkeypatch.setattr(_fmp4, "transcode", pipeline.transcode)
+    monkeypatch.setattr(_fmp4, "encode", pipeline.encode)
     return pipeline
 
 
@@ -1294,6 +1290,41 @@ class TestInsertSegmentEndToEnd:
         with pytest.raises((FileNotFoundError, OSError, subprocess.SubprocessError)):
             hls.insert_segment(RUN, "raw", _frames(size=(64, 64)))
         assert list(_hls_dir(tmp_storage).iterdir()) == []
+
+
+class TestEncodeInputGuard:
+    def test_mixed_frame_sizes_rejected_before_spawning(self, tmp_path, monkeypatch):
+        """rawvideo 按首帧尺寸切帧：混入异尺寸帧会让整段错位，必须在起 ffmpeg 前拒掉。"""
+        monkeypatch.setattr(settings, "ffmpeg_path", "definitely-not-ffmpeg")
+        frames = _frames(2, size=(16, 16)) + _frames(1, start=1800.0, size=(8, 8))
+        with pytest.raises(ValueError):
+            _fmp4.encode(tmp_path, frames, 15.0)
+
+
+@pytest.mark.skipif(not _external_tools_available(), reason="需要 cv2 与项目自带 ffmpeg")
+class TestEncodeStdinEndToEnd:
+    def test_non_contiguous_frames_encode(self, tmp_path):
+        """渲染/切片产出的帧可能是非连续视图，写 stdin 前要变连续，否则 rawvideo 字节错乱。"""
+        base = np.zeros((64, 128, 3), dtype=np.uint8)
+        frames = [Frame(timestamp=1700.0 + i / 15.0, frame=base[:, :64]) for i in range(15)]
+        fragment, init = _fmp4.encode(tmp_path, frames, 15.0)
+        assert fragment.exists() and init.exists()
+
+    def test_ffmpeg_failure_raises_with_stderr_and_does_not_hang(self, tmp_path):
+        """奇数宽度 yuv420p 编码失败：ffmpeg 提前退出时写端不能卡住，错误带 stderr 上抛。"""
+        frames = _frames(15, size=(64, 63))
+        with pytest.raises(subprocess.CalledProcessError) as exc:
+            _fmp4.encode(tmp_path, frames, 15.0)
+        assert exc.value.stderr
+
+    def test_timeout_kills_ffmpeg(self, tmp_path, monkeypatch):
+        """超时必须杀掉 ffmpeg 并上抛，不能卡在写 stdin 上。
+
+        帧数只需让总字节远超管道缓冲（这里 ~2MB ≫ 64KB）即可让写端阻塞。
+        """
+        monkeypatch.setattr(_fmp4, "_TIMEOUT_S", 0.001)
+        with pytest.raises(subprocess.TimeoutExpired):
+            _fmp4.encode(tmp_path, _frames(30, size=(240, 320)), 15.0)
 
 
 @pytest.mark.skipif(not _external_tools_available(), reason="需要 cv2 与项目自带 ffmpeg")

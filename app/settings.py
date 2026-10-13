@@ -104,8 +104,22 @@ class Settings(BaseSettings):
                                # raw_fps 的整除率（30→15/10/7.5/6…，不支持 30→20 类非整除比）；模型侧另按 ts 重采样到 7.5。
                                # env: CLEANSIGHT_INFERENCE_DECIMATION
     # CA 缓存/段长本是"时间概念"，以秒声明（时间为跨子系统货币）；帧数在各消费边界按 raw_fps 显式换算。
-    ca_maxlen_seconds: int = 30    # CA 队列缓存时长（秒）→ 帧数 = ×raw_fps
+    ca_maxlen_seconds: int = 20    # ca_raw / ca_processed 缓存时长（秒）→ 帧数 = ×raw_fps
     ca_segment_seconds: int = 10   # HLS 段时长（秒）→ 帧数 = ×raw_fps
+    # ca_ready（待推理）缓存时长（秒）→ 帧数 = ×inference_fps。推理腿不需要深缓冲：积压的陈帧
+    # 对实时督促无用，只占内存（与 ca_raw 不再共享的那部分帧）。env: CLEANSIGHT_CA_READY_SECONDS
+    ca_ready_seconds: float = 2.0
+
+    # 内存容量规划（启动自检用，**不拦截 /api/start**）：按「规划路数 × 单路最坏缓存 + 录像队列
+    # 字节预算 + 进程基线」估最坏占用，超过 MemAvailable 拒绝启动。仅 Linux 生效。
+    # 依据见 docs/update/20261013_MEMORY_BUDGET.md。env: CLEANSIGHT_CAPACITY_PLANNED_STREAMS 等
+    capacity_planned_streams: int = 15
+    memory_baseline_mb: int = 6144        # 进程基线：torch / CUDA 上下文 / 渲染子进程 / ffmpeg 解码进程
+    memory_check_enforce: bool = True     # False = 超预算只告警不拒绝启动（资源紧的测试机用）
+
+    # 可视化渲染子进程数（渲染 GIL 争用是 15 路下的瓶颈，挪进子进程各持一把 GIL）。
+    # 0 = 在可视化线程内渲染（旧路径，开发机 / 少路数可用）。env: CLEANSIGHT_VIZ_PROCESSES
+    viz_processes: int = 2
 
     # 拉流 socket 读超时（秒）→ decoder ffmpeg 的 `-timeout`。断流判死延迟 = 2×本值，
     # 上界受 health_monitor 的 cleanup_timeout 约束；三条硬约束见 `_rtsp_input_opts()`。

@@ -24,7 +24,7 @@ def _lines(caplog, resource=None):
 
 def test_processed_line_carries_identity_and_age(caplog):
     """越水位（maxlen 的一半）打一行，带身份 + 深度 + 最老帧年龄。"""
-    cq = make_cq(task_id=7, step_id=3, stage="CLEAN", ca_maxlen=10)
+    cq = make_cq(task_id=7, step_id=3, stage="CLEAN", ca_maxlen=10, ca_segment_len=2)
     now = time.time()
 
     with caplog.at_level(logging.INFO, logger=CQ_LOGGER):
@@ -77,7 +77,7 @@ def test_teardown_is_silent(caplog):
 
 
 def test_raw_and_ready_report_their_own_resource(caplog):
-    cq = make_cq(ca_maxlen=10, inference_decimation=1)
+    cq = make_cq(ca_maxlen=10, ca_segment_len=2, inference_decimation=1)
     with caplog.at_level(logging.INFO, logger=CQ_LOGGER):
         for _ in range(6):
             cq.append_ca_raw(make_frame(ts=time.time()))

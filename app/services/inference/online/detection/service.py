@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from app.types.detection import FrameDetection
 from app.services.client.instance import client_service
 from app.services.client.service import ClientService
+from app.services.client.config import get_client_config
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
@@ -87,11 +88,16 @@ class DetectionService:
         # 推理子进程代理：submit 批帧 → 子进程 _infer_models → collector 据 req_id 重组
         # FrameDetection 走 _write_back_results 落回主链路。写回回调注入本服务的单一写回口。
         # 先于 Dispatcher 构造：dispatcher 需注入它的 submit 作为唯一提交者。
+        # 送帧走共享内存环：单槽 = CQ 声明的帧尺寸，槽位数 = 在途批上限 × 最大批大小（环不先于在途上限耗尽）。
+        frame_cfg = get_client_config().frame
+        max_batch = max(stage_batch_sizes.values(), default=max_batch_per_stage)
         self._proxy = RemoteInferProxy(
             active_stages=self._active_stages,
             write_back=self._write_back_results,
             max_inflight=DEFAULT_MAX_INFLIGHT,
             cuda_device=settings.cuda_device,
+            frame_slot_bytes=frame_cfg.resize_width * frame_cfg.resize_height * 3,
+            ring_slots=DEFAULT_MAX_INFLIGHT * max_batch,
         )
 
         # Dispatcher：取帧 + 组批 + 直接提交（单提交者，无独立 submit 线程）。仅注入 proxy 的

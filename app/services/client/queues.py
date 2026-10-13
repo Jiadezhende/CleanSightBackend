@@ -62,8 +62,8 @@ class ClientQueues:
 
     内存保护：
     - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
-    - 默认 CA 队列最大长度为 900 帧，约 30 秒的视频缓存（30fps）
-      （生产值由 settings.ca_maxlen_seconds × raw_fps 派生，此默认仅裸建/测试兜底）
+    - ca_raw / ca_processed 默认 900 帧，ca_ready 默认同值（生产值分别由
+      settings.ca_maxlen_seconds × raw_fps、ca_ready_seconds × inference_fps 派生，此默认仅裸建/测试兜底）
 
     锁清单（Lock Inventory）：
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
@@ -91,6 +91,7 @@ class ClientQueues:
         resize_width: int = 640,
         resize_height: int = 480,
         inference_decimation: int = 2,
+        ca_ready_maxlen: Optional[int] = None,
         *,
         # 不可变运行身份（一次 CQ == 一次 run，终生不变）。
         # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunControlService 传入 `runs.allocate`
@@ -148,11 +149,12 @@ class ClientQueues:
             time.time()
         )  # 初始化为创建时间，支持启动失败检测
 
-        # 三条 CA 队列共用同一 maxlen（统一容量，非 per-queue）；公有属性直读，
-        # 不提供 get_*_capacity 包装（同 ca_segment_len 风格，见类 docstring 身份直读约定）。
+        # ca_raw / ca_processed 共用 ca_maxlen；ca_ready 独立浅上限（推理腿不需要深缓冲），
+        # 缺省同 ca_maxlen（裸建/测试）。公有属性直读，不提供 get_*_capacity 包装。
         self.ca_maxlen = ca_maxlen
+        self.ca_ready_maxlen = ca_ready_maxlen if ca_ready_maxlen is not None else ca_maxlen
         # CA-ReadyQueue：无锁 SPSC deque（单生产者 decoder / 单消费者 dispatcher）
-        self.ca_ready: Deque[Frame] = deque(maxlen=ca_maxlen)
+        self.ca_ready: Deque[Frame] = deque(maxlen=self.ca_ready_maxlen)
         self.frames_dropped_ready: int = 0
         # CA-RawQueue（由 _raw_lock 保护）
         self.ca_raw: Deque[Frame] = deque(maxlen=ca_maxlen)
@@ -166,7 +168,13 @@ class ClientQueues:
         # 检查点在各 append_* 内部——不散到 decoder/viz worker 各生产者去，也不为此另起线程：
         # 写者线程顺带驱动即可。周期快照形态（每 10s 至多一条、平稳时静默），
         # 故只有 run 在跑（有人写队列）时才会汇报，run 停了自然静默。
-        self._pressure_watermark: int = max(1, int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
+        # raw / processed 由 sweeper 整段拉走，深度在 0~1 段之间来回是常态：水位至少 1.5 段
+        # （sweeper 落后半段才算压力），否则段长 = 半缓存时每段都误报。不超过 ca_maxlen。
+        self._pressure_watermark: int = max(1, min(
+            ca_maxlen,
+            max(int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO), ca_segment_len * 3 // 2),
+        ))
+        self._ready_watermark: int = max(1, int(self.ca_ready_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
         _identity = {
             "task_id": run.task_id if run else None,
             "step_id": run.step_id if run else None,
@@ -260,13 +268,14 @@ class ClientQueues:
         """
         depth = len(self.ca_ready)
         oldest_ts = None
-        if depth >= self._pressure_watermark:
+        if depth >= self._ready_watermark:
             try:
                 oldest_ts = self.ca_ready[0].timestamp
             except IndexError:  # pragma: no cover - 与消费者 popleft 交错
                 pass
         self._report_queue_pressure(
-            self._ready_pressure, depth, oldest_ts, self.frames_dropped_ready
+            self._ready_pressure, depth, oldest_ts, self.frames_dropped_ready,
+            capacity=self.ca_ready_maxlen, watermark=self._ready_watermark,
         )
 
     def _report_queue_pressure(
@@ -275,15 +284,22 @@ class ClientQueues:
         depth: int,
         oldest_ts: Optional[float],
         drop_total: int,
+        *,
+        capacity: Optional[int] = None,
+        watermark: Optional[int] = None,
     ) -> None:
         """三条 CA 队列共用的上报形状（**必须在队列锁外调用**）。
 
         谓词只写水位；"累计丢帧仍在涨"由 reporter 自己并入判定（见 pressure.py）。
         oldest_age_ms 用墙钟算（帧 ts 是墙钟），压力持续时间由 reporter 用单调钟算。
+        capacity / watermark 缺省取 ca_raw / ca_processed 的口径（ca_maxlen）。
         """
-        capacity = self.ca_maxlen
+        if capacity is None:
+            capacity = self.ca_maxlen
+        if watermark is None:
+            watermark = self._pressure_watermark
         reporter.observe(
-            depth >= self._pressure_watermark,
+            depth >= watermark,
             reason=REASON_QUEUE_HIGH_WATERMARK,
             depth=depth,
             capacity=capacity,

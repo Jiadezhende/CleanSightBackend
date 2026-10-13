@@ -249,6 +249,76 @@ class TestSubmitRejections:
 
 
 # ---------------------------------------------------------------------------
+# 段队列在途字节预算
+# ---------------------------------------------------------------------------
+
+
+class HoldQueue:
+    """收下任务但不执行，`run_all()` 才执行——模拟转码停滞。"""
+
+    def __init__(self):
+        self.pending = []
+
+    def submit(self, fn, *, label, timeout=1.0):
+        self.pending.append(fn)
+        return True
+
+    def run_all(self):
+        fns, self.pending = self.pending, []
+        for fn in fns:
+            fn()
+
+
+def _big_frames(n, start=1700.0):
+    """每帧 384KiB：1MB 预算装得下 2 帧、装不下 3 帧。"""
+    return [factories.make_frame(ts=start + i / 15.0, shape=(256, 512, 3)) for i in range(n)]
+
+
+def _budget_service(queue) -> RecordingService:
+    svc = RecordingService(config=RecordingConfig(queue_max_mb=1), clients=FakeClients({}))
+    svc._hls_queue = queue
+    svc._detection_queue = InlineQueue()
+    return svc
+
+
+class TestHlsByteBudget:
+    def test_segment_over_budget_is_rejected(self, fake_hls):
+        svc = _budget_service(InlineQueue())
+        assert svc.submit_segment(FakeCQ(), "raw", _big_frames(3)) is False
+        assert fake_hls.calls == []
+        assert svc._hls_inflight_bytes == 0
+
+    def test_stalled_queue_rejects_once_budget_is_spent_then_recovers(self, fake_hls):
+        q = HoldQueue()
+        svc = _budget_service(q)
+        cq = FakeCQ()
+
+        assert svc.submit_segment(cq, "raw", _big_frames(2)) is True
+        assert svc.submit_segment(cq, "raw", _big_frames(1, start=1800.0)) is False   # 预算已占满
+
+        q.run_all()                                   # 转码恢复，写完归还字节
+        assert svc._hls_inflight_bytes == 0
+        assert svc.submit_segment(cq, "raw", _big_frames(2, start=1900.0)) is True
+
+    def test_bytes_released_when_queue_refuses(self, fake_hls):
+        svc = _budget_service(InlineQueue(accept=False))
+        assert svc.submit_segment(FakeCQ(), "raw", _big_frames(2)) is False
+        assert svc._hls_inflight_bytes == 0
+
+    def test_bytes_released_when_write_fails(self, fake_hls, monkeypatch):
+        def boom(*a, **k):
+            raise FileNotFoundError("run reclaimed")
+        monkeypatch.setattr(fake_hls, "insert_segment", boom)
+        q = HoldQueue()
+        svc = _budget_service(q)
+        svc.submit_segment(FakeCQ(), "raw", _big_frames(2))
+
+        with pytest.raises(FileNotFoundError):
+            q.run_all()
+        assert svc._hls_inflight_bytes == 0
+
+
+# ---------------------------------------------------------------------------
 # 残段收尾
 # ---------------------------------------------------------------------------
 

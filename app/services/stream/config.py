@@ -27,7 +27,6 @@ class DecoderConfig:
     # 不在 stream_config.yaml 里再写死一个 fps，否则又成第二个"巧合相等"的独立源。
     default_fps: int = field(default_factory=lambda: settings.raw_fps)
     pix_fmt: str = "bgr24"
-    chunk_read_size: int = 32768
     backpressure_ratio: float = 0.90  # 队列达到90%时丢帧
 
 

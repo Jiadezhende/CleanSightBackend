@@ -169,7 +169,9 @@ class StageWorker:
 # 落盘缓冲**——那些留主进程按 req_id 关联（见 infer_proxy.RemoteInferProxy）。
 #
 # 进程边界只过纯数据（均 picklable）：
-#   req  (main→child):  (req_id:int, stage:str, frames:List[np.ndarray], timestamps:List[float])
+#   req  (main→child):  (req_id:int, stage:str, frames, timestamps:List[float])
+#                       frames = SharedFrames（共享内存环槽位，按 ring_spec 附着后拷出）
+#                              | List[np.ndarray]（环未启用 / 帧放不进槽位时的 pickle 直送）
 #   resp (child→main):  (req_id:int, merged:List[Dict[str,DetectorOutput]])
 #   观测量（infer_ms / error_type）复用 DetectorOutput.metadata，不另立 stats 通道。
 #   控制哨兵：req 端收到 None → 优雅退出循环。
@@ -179,7 +181,9 @@ class StageWorker:
 # 强制 CPU，这边钉到目标卡）。
 
 
-def run_stages(req_q, resp_q, ready_ev, active_stages: List[str], cuda_device: str = "0") -> None:
+def run_stages(
+    req_q, resp_q, ready_ev, active_stages: List[str], cuda_device: str = "0", ring_spec=None,
+) -> None:
     """推理子进程主函数：建各 stage 的 StageWorker → warmup → 循环消费 req_q（按 stage 路由）。
 
     Args:
@@ -188,6 +192,7 @@ def run_stages(req_q, resp_q, ready_ev, active_stages: List[str], cuda_device: s
         ready_ev: multiprocessing.Event，StageWorker 建好 + warmup 尝试后置位（就绪屏障）。
         active_stages: 需建 StageWorker 的 stage 主键列表（= 主进程已筛出有 detector 的 stage）。
         cuda_device: 钉给 CUDA_VISIBLE_DEVICES 的值（"0"/"1"…；""=CPU，仅测试）。
+        ring_spec: 主进程共享内存帧环的 RingSpec；None = 帧只走 pickle 直送。
     """
     # ── 0. 忽略 SIGINT：Ctrl-C 会广播给整个进程组（含本子进程），若不忽略会在阻塞的
     # req_q.get() 处抛 KeyboardInterrupt 打出丑陋 traceback。关停统一由父进程处理——
@@ -227,6 +232,11 @@ def run_stages(req_q, resp_q, ready_ev, active_stages: List[str], cuda_device: s
         except Exception as e:  # pragma: no cover - warmup 内部已兜底，此为双保险
             logger.error("stage %s warmup 失败: %s", stage, e, exc_info=True)
 
+    ring_view = None
+    if ring_spec is not None:
+        from app.services.utils.frame_ring import SharedFrameRingView
+        ring_view = SharedFrameRingView(ring_spec)
+
     ready_ev.set()  # 就绪屏障：StageWorker 建好 + warmup 尝试完成
     logger.info("ready，进入推理循环")
 
@@ -244,6 +254,9 @@ def run_stages(req_q, resp_q, ready_ev, active_stages: List[str], cuda_device: s
             break
 
         req_id, stage, frames, timestamps = item
+        if not isinstance(frames, list):
+            # SharedFrames：拷出后即可答复，主进程收到答复才复用这些槽位
+            frames = ring_view.read_all(frames)
         worker = stage_workers.get(stage)
         if worker is None:
             # 未知 stage：回空结果让主进程 pop pending、不泄漏在途槽
