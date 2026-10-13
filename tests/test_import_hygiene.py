@@ -69,10 +69,10 @@ BUDGET = {
     "app.storage.inference._layout":    (set(), 0.40),   # stdlib only
     "app.storage.inference._temporal":  (set(), 0.40),   # numpy（LabelProbs / npz）
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
-    # 这条盯的是**整个域**的模块级依赖。cv2 必须留在 `_encode.write_mp4v` 的函数体内，
-    # 塞回模块级会让这条连同 `app.storage.hls._encode` 一起红。
+    # 这条盯的是**整个域**的模块级依赖。写侧编码走 ffmpeg 子进程（`_fmp4.encode`），不用 cv2；
+    # 谁把 cv2 塞回模块级，这条会连同 `app.storage.hls._encode` 一起红。
     "app.storage.hls":          (set(), 0.40),   # 域货币 Frame → app.types（numpy）
-    "app.storage.hls._encode":  (set(), 0.40),   # 同上；cv2 在函数体内
+    "app.storage.hls._encode":  (set(), 0.40),   # 同上
     # 解码侧：货币是 Frame + sidecar 的 float64 数组，故吃 app.types + numpy。ffmpeg 是
     # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
     # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。

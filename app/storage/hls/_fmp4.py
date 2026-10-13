@@ -1,8 +1,8 @@
-"""mp4v → HLS-ready fMP4 fragment，以及 fragment 内 `tfdt` 的改写。
+"""帧序列 → HLS-ready fMP4 fragment，以及 fragment 内 `tfdt` 的改写。
 
-    source.mp4  ──ffmpeg(hls muxer, fmp4)──▶  init.mp4 + fragment_0.mp4
-                                                      │
-                                       hex-patch ─────┘  moof/traf/tfdt
+    frames ──stdin rawvideo──▶ ffmpeg(libx264, hls muxer, fmp4) ──▶ init.mp4 + fragment_0.mp4
+                                                                          │
+                                                           hex-patch ─────┘  moof/traf/tfdt
 
 两件事都不是可选的：普通 MP4（moov+mdat 整体）被 hls.js 当段播会 fragParsingError；而每个段
 由独立 ffmpeg 进程转码、输入自身从 PTS=0 起，不补 tfdt 偏移则所有 fragment 落点都是 0，
@@ -11,7 +11,7 @@
 是纯 metadata 改写。背景与实测见 `docs/kb/DESIGN_HLS_TIMELINE.md`。
 
 失败语义：ffmpeg 缺失 / 超时 / 非零退出 / 没产出预期文件一律**原样抛**，由调用方删掉整个
-stage、不 rename、不登记。本模块不做降级保留——留下一个 mp4v 冒充 fragment 是静默失败。
+stage、不 rename、不登记。本模块不做降级保留。
 
 依赖上界：stdlib only（`app.settings` 只在函数体内 import）。
 """
@@ -43,7 +43,6 @@ _TIMEOUT_S = 15
 
 # stage 目录内的固定文件名。它们**不是产物名**——产物名由 `_layout` 决定，commit 时才 rename
 # 过去；固定命名让转码步不必知道自己在为哪个段服务。
-_SOURCE_NAME = "source.mp4"
 _INIT_NAME = "init.mp4"
 _FRAGMENT_NAME = "fragment_0.mp4"
 # `-hls_segment_filename` 必须含 %d 模板（即便只有 1 段），配 `-start_number 0` 让产物固定为
@@ -55,11 +54,6 @@ _LOG_NAME = "ffmpeg.log"
 # ISO/IEC 14496-12 box 容器集合：递归扫描 box 树时只下钻这些类型，
 # 其余 box（含 tfdt、mdhd）按 leaf 处理。
 _BOX_CONTAINERS = frozenset({b"moov", b"trak", b"mdia", b"moof", b"traf", b"mvex"})
-
-
-def source_path(stage: Path) -> Path:
-    """stage 目录里那份待转码的 mp4v 的位置（由 `_encode.write_mp4v` 写入）。"""
-    return stage / _SOURCE_NAME
 
 
 def seconds_to_ticks(seconds: float) -> int:
@@ -74,7 +68,16 @@ def encode(stage: Path, frames: Sequence["Frame"], fps: float) -> Tuple[Path, Pa
     """帧序列经 stdin 以 rawvideo（bgr24）灌给 ffmpeg，一次编码成 fMP4，返回 `(fragment, init)`。
 
     `fps` 必须是 `_encode.effective_fps(frames)` 的返回值——它同时是 EXTINF 的来源。
-    其余 ffmpeg 参数与 `transcode` 一致（cwd=stage、只传 basename、pin 住 timescale）。
+
+    两条 ffmpeg 写法上的硬约束，改了会静默或跨平台炸（背景见 `docs/kb/DESIGN_HLS_TIMELINE.md`）：
+
+    - **子进程 `cwd=stage`，所有输出只传 basename**：8.x 与 4.x 对 `-hls_fmp4_init_filename`
+      的路径解析行为正好相反，绝对路径在其中一边必然 ENOENT。
+    - **`-hls_segment_options video_track_timescale=`** 是唯一能 pin 住 mdhd.timescale 的写法
+      （透传给内层 mp4 muxer）；直接给 hls muxer 传 `-video_track_timescale` 会被静默忽略。
+
+    ffmpeg 自己在 stage 里写的那份 `index.m3u8` 本层不用（playlist 由 `_m3u8` 按整条 step 的
+    口径维护），随 stage 目录一起删。
 
     Raises:
         ValueError: 帧尺寸不一致或不是 3 通道（rawvideo 按首帧尺寸切帧，混入异尺寸帧会整段错位）。
@@ -155,7 +158,7 @@ def encode(stage: Path, frames: Sequence["Frame"], fps: float) -> Tuple[Path, Pa
 
 
 def _output_args() -> list:
-    """fMP4 输出段参数（编码器 + HLS muxer），`encode` 与 `transcode` 共用。"""
+    """fMP4 输出段参数（编码器 + HLS muxer）。"""
     return [
         "-c:v", "libx264",
         "-preset", "veryfast",
@@ -175,74 +178,6 @@ def _output_args() -> list:
         "-f", "hls",
         _PLAYLIST_NAME,
     ]
-
-
-# ── 转码 ─────────────────────────────────────────────────────────────────────────
-
-
-def transcode(stage: Path) -> Tuple[Path, Path]:
-    """把 `stage/source.mp4` 转成 fMP4，返回 `(fragment, init)` 两个 stage 内路径。
-
-    Raises:
-        FileNotFoundError: 机器上没有 ffmpeg（运行时依赖，import 期不要求）。
-        subprocess.TimeoutExpired: 超过 `_TIMEOUT_S`。
-        subprocess.CalledProcessError: ffmpeg 非零退出（stderr 挂在异常上）。
-        RuntimeError: ffmpeg 报成功但没产出 fragment 或 init。
-
-    两条 ffmpeg 写法上的硬约束，改了会静默或跨平台炸（背景见
-    `docs/kb/DESIGN_HLS_TIMELINE.md`）：
-
-    - **子进程 `cwd=stage`，所有输出只传 basename**：8.x 与 4.x 对 `-hls_fmp4_init_filename`
-      的路径解析行为正好相反，绝对路径在其中一边必然 ENOENT。
-    - **`-hls_segment_options video_track_timescale=`** 是唯一能 pin 住 mdhd.timescale 的写法
-      （透传给内层 mp4 muxer）；直接给 hls muxer 传 `-video_track_timescale` 会被静默忽略。
-
-    ffmpeg 自己在 stage 里写的那份 `index.m3u8` 本层不用（playlist 由 `_m3u8` 按整条 step 的
-    口径维护），随 stage 目录一起删。
-    """
-    from app.settings import settings
-
-    cmd = [
-        settings.ffmpeg_path,
-        "-y",
-        "-loglevel", "error",
-        "-i", _SOURCE_NAME,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-an",
-        # tfdt 偏移不在这里靠 -output_ts_offset 实现（ffmpeg 8.x HLS muxer + fmp4 在
-        # -start_number 0 下会清零 tfdt）—— 改成转码完 hex-patch，见 `patch_tfdt`。
-        "-hls_segment_type", "fmp4",
-        "-hls_segment_options", f"video_track_timescale={TIMESCALE}",
-        "-hls_fmp4_init_filename", _INIT_NAME,
-        "-hls_segment_filename", _FRAGMENT_TEMPLATE,
-        "-start_number", "0",
-        "-hls_time", "99999",
-        "-hls_list_size", "0",
-        "-hls_flags", "temp_file",
-        "-f", "hls",
-        _PLAYLIST_NAME,
-    ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=_TIMEOUT_S,
-        cwd=str(stage),
-    )
-    if result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode, cmd, output=result.stdout, stderr=result.stderr
-        )
-
-    fragment = stage / _FRAGMENT_NAME
-    init = stage / _INIT_NAME
-    missing = [p.name for p in (fragment, init) if not p.exists()]
-    if missing:
-        raise RuntimeError(f"ffmpeg 退出码 0 但未产出 {missing}: {stage}")
-    return fragment, init
 
 
 # ── ISO BMFF box 遍历与 tfdt 改写 ────────────────────────────────────────────────
