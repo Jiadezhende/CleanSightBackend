@@ -1,11 +1,11 @@
 # 15 路并发分阶段改造提案：主进程减负、内存按字节兜底、录像单次编码、渲染进程化
 
-> **变更状态**：进行中（2026-10-13）　① – ⑤ 已在 `feature/scale-15-streams` 落地，各阶段记录见下表「详见」列对应的 update；⑥ 15 路验收压测待在测试环境进行
+> **变更状态**：进行中（2026-10-13）　① – ⑤ 已在 `feature/scale-15-streams` 落地，各阶段记录见下表「详见」列对应的 update；⑥ 15 路验收压测待在测试环境进行。各节数字已按落地实测更新，选型表保留选型期实验值
 > **知识库**：无需沉淀（提案；落地记录另行沉淀）
 
 ## 概述
 
-目标是医院内网单机 15 路并发（每路解码 30fps、推理与渲染 15fps），不动前后端契约。计划分 6 个阶段、7 批提交：解码直写帧数组 → 内存按字节兜底 → 录像单次编码 → 推理送帧改共享内存环 → 渲染挪进子进程 → 15 路验收压测。本文记录每项决策、被否掉的备选方案，以及支撑决策的实验数据。
+目标是医院内网单机 15 路并发（每路解码 30fps、推理与渲染 15fps），不动前后端契约。分 6 个阶段、8 批提交：解码直写帧数组 → 内存按字节兜底 → 录像单次编码 → 推理送帧改共享内存环 → 渲染挪进子进程 → 15 路验收压测。本文记录每项决策、被否掉的备选方案，以及支撑决策的实验数据。
 
 ## 变更背景
 
@@ -24,7 +24,7 @@
 |------|------|------------|------|
 | #1 | 解码读线程每帧在持有 GIL 时拼帧（三次整帧拷贝 + 两次大块新分配），单线程测 0.80–0.94ms/帧 | 解码 13.9–21.7fps（应为 30），送推理 103–162 帧/s（应为 225） | 推理断档；解码积压在 RTSP 侧 |
 | #2 | 渲染在单个线程里，瓶颈是 GIL 而非算力：开 1/2/4/8 个线程，总吞吐 178/170/165/159 帧/s | 现行架构 4 路 13.4、6 路 9.2、8 路 2.3、15 路 0.4 fps/路 | processed 轨和实时画面断帧 |
-| #3 | 录像只有一条串行队列，每段先编 mp4v 再转码 libx264，编码两次 | 吞吐约 486 帧/s，需求 675 帧/s | 持续积压，最终丢段（证据永久缺失） |
+| #3 | 录像只有一条串行队列，每段先编 mp4v 再转码 libx264，编码两次 | 吞吐约 351 帧/s，需求 675 帧/s | 持续积压，最终丢段（证据永久缺失） |
 | #4 | 录像队列按段数限长：100 段 × 285MB | 转码停滞时最多占 28.5GB 才开始丢段 | 在丢段之前先 OOM |
 | #5 | 推理送帧走 `mp.Queue` pickle | 主进程 1.1–1.9ms/帧 | 主进程 CPU 余量被吃掉 |
 
@@ -76,7 +76,7 @@ RTSP ─► ffmpeg 解码子进程 ─pipe─► [主进程] 读线程：readint
 |------|------|--------|------|
 | ① 解码直写帧数组 | 1 批 | `app/services/stream/decoder.py` | §1 |
 | ② 内存按字节兜底 | 1 批 | `app/settings.py`、`app/services/client/{config,queues}.py`、`app/services/recording/service.py`、`app/main.py`（启动自检） | §2 |
-| ③ 录像单次编码 | 1 批 | `app/storage/hls/{_encode,_fmp4,_write}.py` | §3 |
+| ③ 录像单次编码 | 2 批（切换 + 删旧） | `app/storage/hls/{_encode,_fmp4,_write}.py` | §3 |
 | ④ 推理送帧改共享内存环 | 2 批（组件 + 迁移/删旧） | 新增 `app/services/utils/frame_ring.py`；`app/services/inference/online/detection/{infer_proxy,stage_worker}.py` | §4 |
 | ⑤ 渲染挪进子进程 | 2 批（代理 + 迁移/删旧） | `app/services/inference/online/visualization/` | §5 |
 | ⑥ 验收压测 + 条件项 | — | 测试环境 / 生产机 | §6 |
@@ -99,7 +99,7 @@ RTSP ─► ffmpeg 解码子进程 ─pipe─► [主进程] 读线程：readint
 | D3 跨进程送帧 | 共享内存环，队列只传槽位号 | 满速约 9,700 帧/s，主进程 0.10–0.13ms/帧（≈一次整帧 memcpy） | **采用** |
 | | `mp.Queue`（现行） | 满速 434–805 帧/s，主进程 1.1–1.9ms/帧 | 否 |
 | | Redis / TCP | TCP 回环（Redis 的下界，少了服务端那一跳）满速只有 168–186 帧/s，达不到 225 的需求；还要多部署一个组件 | 否：跨机器、多消费者、持久化这些需求都不存在 |
-| D4 录像编码 | 帧以 rawvideo 经 stdin 灌 ffmpeg，单次编码 | 串行吞吐 4.58 段/s ≈ 1030 帧/s，需求 675 帧/s | **采用** |
+| D4 录像编码 | 帧以 rawvideo 经 stdin 灌 ffmpeg，单次编码 | 串行吞吐 4.58 段/s ≈ 1030 帧/s（按 processed 150 帧/段估；落地实测见 §3），需求 675 帧/s | **采用** |
 | | 保留两次编码，按 task 分片并行 | 2 个 worker 3.78 段/s ≈ 850 帧/s，但 CPU 编码量翻倍 | 留作储备（§6） |
 | | NVENC | — | 否：和推理争 GPU，GeForce 卡有并发编码会话数上限，CPU 方案已够用 |
 | D5 内存兜底 | 录像队列按字节限额 + ca_ready 独立上限 + 启动自检 | 见 §2 | **采用** |
@@ -139,7 +139,7 @@ std = arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
 | 解码 fps（两批） | 13.9 / 21.7 | 30.0 / 30.0 |
 | 送推理 帧/s（需求 225） | 103 / 162 | 225 / 224 |
 
-**本批验收**：用假管道（每次只返回短读）给读循环补单测，覆盖整帧拼接、跨读边界、EOF 残帧；`bench_mainproc` 15 路解码 ≥29.5fps。
+**落地实测**（真实 `FFmpegDecoder` + `ClientQueues`，15 路，不加送推理负载）：解码改前改后都是 30fps，收益体现在 GIL 余量上——同进程渲染线程吞吐 141 → 288 帧/s。
 
 ### 2. 内存按字节兜底（全景 ②）
 
@@ -147,17 +147,17 @@ std = arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
 
 ```text
 情形                          现行                                   改后
-正常运行（各路段边界对齐）     15 ×（raw 285MB + processed 285MB）= 8.5GB   不变
-录像停滞（sweeper 正常）       100 段 × 285MB = 28.5GB + 8.5GB ≈ 37GB    预算 B + 8.5GB（B 默认 8.5GB）≈ 17GB
-推理停滞                      ca_ready 900 帧（与 ca_raw 大部分不共享）≈ +8–11GB    ca_ready 2s ≈ +0.4GB
-sweeper 停滞（三队列都满）     15 × 3 × 900 帧 ≈ 37GB                   15 × 2 × 600 帧 + 0.4GB ≈ 17GB（ca_maxlen 20s）
-最坏值                        ≈ 37GB                                  ≈ 17GB + 进程基线
+正常运行（各路段边界对齐）     15 ×（raw 285MB + processed 285MB）= 8.5GB   不变（7.7GiB）
+录像停滞（sweeper 正常）       100 段 × 285MB = 28.5GB + 8.5GB ≈ 37GB    预算 8GiB + 7.7GiB ≈ 15.7GiB
+推理停滞                      ca_ready 900 帧（与 ca_raw 大部分不共享）≈ +8–11GB    ca_ready 30 帧 ≈ +0.4GB
+sweeper 停滞（三队列都满）     15 × 3 × 900 帧 ≈ 37GB                   15 × 2 × 600 帧 + 0.4GB ≈ 15.9GiB（ca_maxlen 20s）
+最坏值                        ≈ 37GB                                  ≈ 15.9GiB + 进程基线
 ```
 
 几种停滞不会同时发生：sweeper 活着时 ca 队列会持续被拉空；sweeper 停了，录像队列也就不再进段。
 
-- **2a. ca_ready 独立浅上限，`ca_maxlen_seconds` 从 30 降到 20**：新增 `settings.ca_ready_seconds`（默认 2，帧数 = 秒数 × raw_fps）。解码背压改为看 `ca_ready.maxlen`。ca_raw / ca_processed 仍沿用 `ca_maxlen_seconds`，改为 20 后是 600 帧，仍满足现有的「≥1.2 倍段长（360 帧）」校验，raw 轨给录像留 2 段余量。依据：调度器取帧速度远高于输入（约 1000fps 对 225fps），ca_ready 正常时总是空的；积压 60 秒的旧帧对实时督促也没有用。
-- **2b. 录像队列按字节限额**：`RecordingService` 记录每条队列在途的字节数，`submit_segment` 超过 `recording_queue_max_mb` 即拒收。拒收沿用现有的「丢段 + warning」语义，只是触发条件从段数变成字节；在途字节在 `_write` 结束时扣减（不论成败）。默认值取一轮对齐突发：15 × (285 + 285)MB ≈ 8.5GB。保留段数上限作双保险。
+- **2a. ca_ready 独立浅上限，`ca_maxlen_seconds` 从 30 降到 20**：新增 `settings.ca_ready_seconds`（默认 2，帧数 = 秒数 × inference_fps = 30）。解码背压改为看 `ca_ready.maxlen`。ca_raw / ca_processed 仍沿用 `ca_maxlen_seconds`，改为 20 后是 600 帧，仍满足现有的「≥1.2 倍段长（360 帧）」校验，raw 轨给录像留 2 段余量。依据：调度器取帧速度远高于输入（约 1000fps 对 225fps），ca_ready 正常时总是空的；积压 60 秒的旧帧对实时督促也没有用。
+- **2b. 录像队列按字节限额**：`RecordingService` 记录每条队列在途的字节数，`submit_segment` 超过 `recording_queue_max_mb` 即拒收。拒收沿用现有的「丢段 + warning」语义，只是触发条件从段数变成字节；在途字节在 `_write` 结束时扣减（不论成败）。默认 `queue_max_mb = 8192`，约一轮对齐突发 15 × (285 + 285)MB。保留段数上限作双保险。
 - **2c. 启动自检**：新增 `settings.capacity_planned_streams`（默认 15），**只用于预算，不拦截 `/api/start`**，所以不改契约。启动时按上表的最坏值公式加上进程基线，与 `/proc/meminfo` 的 `MemAvailable` 比较，超了拒绝启动，并在报错里给出各项构成。这条遵循知识库「靠量级差才不触发的冲突，写成启动校验」。Windows 开发机跳过并打 warning。
 - **malloc 参数不动**：WSL 模拟 15 路持续分配和跨线程释放，60 秒内 RSS/存活稳定在 1.06，释放后全部归还（0.01GB）。
 
@@ -167,7 +167,7 @@ sweeper 停滞（三队列都满）     15 × 3 × 900 帧 ≈ 37GB             
 | `MALLOC_ARENA_MAX=2` | 5.87GB | 6.36GB | 1.08 | 2.74GB |
 | `MALLOC_MMAP_THRESHOLD_=131072` | 6.06GB | 6.10GB | 1.01 | 0.01GB |
 
-**32GB 下的余量**：最坏约 17GB，加上进程基线约 5–6GB（主进程里时序 GRU 用的 torch、推理子进程的 CUDA 上下文、2 个渲染子进程、15 个 ffmpeg 解码进程），合计约 23GB。32GB 的机器开机后 `MemAvailable` 约 29GB，启动自检能通过，还剩约 6GB 余量。如果保持 30s，最坏约 25GB，加上基线约 31GB，会被启动自检拒绝，这就是降到 20s 的依据。
+**32GB 下的余量**：最坏约 15.9GiB，加上进程基线 `memory_baseline_mb = 6144`（估计值：主进程里时序 GRU 用的 torch、推理子进程的 CUDA 上下文、2 个渲染子进程、15 个 ffmpeg 解码进程），合计约 21.8GiB。32GB 的机器开机后 `MemAvailable` 约 29GiB，启动自检能通过，还剩约 7GiB 余量。如果保持 30s，最坏加基线约 29.5GiB，会被启动自检拒绝，这就是降到 20s 的依据。
 
 ### 3. `storage/hls` — 录像单次编码（全景 ③）
 
@@ -188,20 +188,24 @@ frames ─► ffmpeg -f rawvideo -pix_fmt bgr24 -s WxH -framerate effective_fps 
 > **失败语义**：ffmpeg 中途退出 → 写 stdin 报 BrokenPipe → 和现行的转码失败一样记 error、丢这一段，不重试。
 > **迁移**：新增按帧转码的函数并测绿（检查 EXTINF、tfdt、帧数和现行产物一致，复用 `test_storage_hls.py` 的端到端用例）→ `insert_segment` 切换过去 → 删除 `write_mp4v` 和 mp4v 中间文件。
 
+落地实测（真 `hls.insert_segment`，640×480，6 次取中位数）：
+
 | 指标 | 现行 | 单次编码 |
 |------|------|---------|
-| 单段耗时 raw 300 帧 | 0.57s | 0.20s |
-| 单段耗时 processed 150 帧 | 0.35s | 0.14s |
-| 串行吞吐（raw:processed = 1:1） | 2.16 段/s ≈ 486 帧/s | 4.58 段/s ≈ 1030 帧/s |
-| 15 路需求 | 450（raw）+ 225（processed）= 675 帧/s | 同左 |
+| 单段耗时 raw 300 帧（30fps） | 0.63s | 0.22s |
+| 单段耗时 processed 300 帧（15fps） | 1.08s | 0.23s |
+| 单条队列串行吞吐 | ≈ 351 帧/s | ≈ 1333 帧/s |
+| 15 路需求 | 450（raw）+ 225（processed）= 675 帧/s | 同左，余量约 2 倍 |
+
+> 选型期按 processed 每段 150 帧估算出「现行 486 → 单次编码 1030 帧/s」；processed 实际每段也是 300 帧，真实的旧吞吐更低。
 
 ### 4. 推理送帧改共享内存环（全景 ④）
 
 - **组件**：新增 `app/services/utils/frame_ring.py`，提供 `SharedFrameRing`（固定槽位大小 = 单帧字节数；空闲槽位表；名字带 pid）。它属于通用并发件，不 import 任何具体服务。
-- **槽位数**：在途批数上限 × 最大批大小 × 2，约 64 个槽、约 60MB，替代现行 `mp.Queue` 缓冲（上限约 177MB）。
+- **槽位数**：在途批数上限 × 最大批大小 = 8 × 4 = 32 个槽、约 29MB，替代现行 `mp.Queue` 缓冲（上限约 177MB）。帧尺寸超出槽位时整批退回 pickle 直送，不卡死在拒收上。
 - **数据流**：`submit` 把帧拷进空闲槽，请求只带 `(req_id, 槽位号列表, 形状)`；子进程按名字映射这块共享内存，原地读取。
 - **槽位回收（防泄漏）**：收到对应响应、`pending.pop` 时归还；`submit` 送不进去回滚时归还；子进程重启清空 pending 时，全部在途槽位归还。没有空闲槽时按现有的「在途满即拒收、计丢帧」处理。
-- **残留清理**：停机时 `unlink`；启动时清理 `/dev/shm` 里旧 pid 留下的同前缀残段，防止主进程被硬杀后泄漏。
+- **残留清理**：停机时 `close` + `unlink`；主进程被 SIGKILL 时由 multiprocessing 的 resource_tracker unlink。启动时扫 `/dev/shm` 清残段没有做——只有主进程连同 resource_tracker 一起被硬杀才会残留，残段名带 pid 前缀可手工清。
 
 | 送帧方式（满速、无其他负载） | 吞吐 | 主进程 CPU/帧 |
 |------|------|------|
@@ -214,17 +218,23 @@ frames ─► ffmpeg -f rawvideo -pix_fmt bgr24 -s WxH -framerate effective_fps 
 ### 5. 渲染挪进子进程（全景 ⑤）
 
 - **新增 `RemoteRenderProxy`**：照搬 `RemoteInferProxy` 的模式，包括 spawn 子进程、req_id 加 pending、监督线程退避重启、按 terminate → join → kill 三步收子进程。
-- **主进程这边不变**：`VisualizationWorker` 的轮询、去重、吞吐统计不变。`prepare_visualization_data` 仍在主进程生成 `RenderSpec`（小数据类，走队列）；原始帧拷进共享内存的输入槽，子进程渲染到输出槽。
-- **写回**：主进程把输出槽拷成新数组，再走现行的 `cq.append_ca_processed` 和 `set_latest_rendered`。processed 轨、实时画面、HLS 都不变。
-- **防迟到写**：pending 里留着 cq 句柄，写回前判 `cq.is_active()`，和推理写回同一套门禁。
+- **主进程这边不变**：`VisualizationWorker` 的轮询、去重、吞吐统计不变。`prepare_visualization_data` 仍在主进程生成 `RenderSpec`（小数据类，走队列）；原始帧拷进共享内存槽，子进程原地渲染写回同一槽位。
+- **每 run 单飞**：同一 run 同时最多一个在途渲染，保证 processed 帧按 ts 顺序进 `ca_processed`。
+- **写回**：主进程在下一个 tick 把槽位结果拷成新数组，再走现行的 `cq.append_ca_processed` 和 `set_latest_rendered`。processed 轨、实时画面、HLS 都不变。
+- **防迟到写**：请求上下文带 cq 句柄，写回经 cq 写门，非 ACTIVE 拒收，和推理写回同一套门禁。
+- **就地渲染兜底**：池未就绪、槽满或帧放不进槽位时，在 viz 线程就地渲染（旧路径）；`viz_processes = 0` 时全部就地渲染。
 - **子进程挂掉**：在途渲染丢弃，计入 `frame_drop_total{reason="viz_child_down"}`。
 - **子进程只 import 渲染器和 render 类型**：不能拉起 torch / ultralytics，用导入门禁测试锁住。单个子进程常驻约 100–150MB。
-- **子进程数**：`settings.viz_processes = 2`（已定）。实验中 2 个子进程渲染 13.2–14.7fps/路，已接近测量方法上限 14.4–14.7。⑥ 验收不达标时，先确认瓶颈在渲染再加。
+- **子进程数**：`settings.viz_processes = 2`（已定）。落地实测 2 个子进程每路 12.6–13.2fps，3–4 个也只到 13.8fps，均低于 ⑥ 的 14fps 达标线；选型期测得的测量方法上限是 14.4–14.7。达标线保持 14fps 不变（2026-10-13 与负责人确认），⑥ 不达标时按 §6 的归因处理，不直接加进程。
 
-| 指标（15 路，readinto + 共享内存送帧，多批） | 渲染线程 | 2 个子进程 | 4 个子进程 |
-|------|------|------|------|
-| 渲染 fps/路（需求 15，测量方法上限 14.4–14.7） | 7.0–7.1（Queue 送帧时 2.2–10.7） | 13.2–14.7 | 14.4 |
-| 主进程 CPU | 1.6–1.75 核 | 0.47–0.81 核 | 0.68–0.77 核 |
+落地实测（真实组件 15 路：`FFmpegDecoder` + `ClientQueues` + 模拟推理每帧 3+3 框 + 真实 `VisualizationWorkerPool`，每组 12s，已含 ① ④）：
+
+| 渲染子进程数 | processed 出帧 fps/路 平均（最低） | 主进程 CPU |
+|------|------|------|
+| 0（线程内，旧路径） | 6.0 (6.0) / 6.7 (6.7) | 1.57 / 1.58 核 |
+| **2（默认）** | **12.6 (10.7) / 13.2 (11.3)** | **0.73 / 0.86 核** |
+| 3 | 13.8 (13.3) | 0.74 核 |
+| 4 | 13.8 (13.4) | 0.81 核 |
 
 ### 6. 15 路验收压测与条件项（全景 ⑥）
 
@@ -235,9 +245,17 @@ frames ─► ffmpeg -f rawvideo -pix_fmt bgr24 -s WxH -framerate effective_fps 
 | 解码 | 每路 ≥29.5fps，`ingress_backpressure` 丢帧为 0 | decoder 统计日志、`frame_drop_total` |
 | 推理 | 每路 ≥14fps，`infer_backlog` 不持续增长 | `[PRESSURE]`、`infer_latency_ms` |
 | 渲染 | 每路 ≥14fps，不出现 viz-starved | `[VIZ_THROUGHPUT]` |
-| 录像 | 零丢段，队列在途字节不持续增长 | recording 的 warning、新增的在途字节指标 |
-| 内存 | 30 分钟内 RSS 稳定在 §2 的预算内 | 进程 RSS |
+| 录像 | 零丢段 | recording 的丢段 warning（带在途 MB / 预算）、`frame_drop_total{reason="recording_budget"}` |
+| 内存 | 30 分钟内 RSS 稳定在 §2 的预算内；按实测回填 `memory_baseline_mb` | 进程 RSS |
 | 接口 | `/task/live` P95 < 200ms | 压测侧统计 |
+
+**渲染不达标时先归因再动参数**（本地 2–4 个子进程都没到 14fps，见 §5）：看 `[VIZ_THROUGHPUT]` 的标注——
+
+| 归因 | 含义 | 处理 |
+|------|------|------|
+| render-bound | 子进程渲染耗时逼近出帧间隔 | 调大 `CLEANSIGHT_VIZ_PROCESSES` |
+| supply-bound | 渲染够快，新推理结果供不上 | 查推理吞吐（转推理条件项），加渲染进程无效 |
+| viz-starved | 主进程 viz 线程 tick 不足 | 查主进程 GIL 占用 |
 
 **条件项**：只有验收不达标，且先做实验确认是对应环节的问题时才做。
 
@@ -256,16 +274,19 @@ frames ─► ffmpeg -f rawvideo -pix_fmt bgr24 -s WxH -framerate effective_fps 
 - **录像单队列执行顺序**：分片只作为条件项，而且按 run 归属分片。
 - **processed 段长**：300 帧（15fps 下 20s），本提案不动。
 
-## 变更效果（实验预期，以 ⑥ 实测为准）
+## 变更效果（本地落地实测，以 ⑥ 为准）
 
-| 维度（15 路） | 现行 | 全部阶段落地后 |
-|------|------|------|
-| 解码 fps | 13.9–21.7 | 30.0 |
-| 送推理 帧/s（需求 225） | 103–162 | 225 |
-| 渲染 fps/路（需求 15） | 0.4–0.7 | 13.2–14.7 |
-| 主进程 CPU | 1.1 核（GIL 受限） | 0.5–0.8 核 |
-| 录像吞吐（需求 675 帧/s） | ≈486 帧/s | ≈1030 帧/s |
-| 最坏内存 | ≈37GB | ≈17GB + 进程基线 ≈ 23GB（32GB 机器） |
+| 维度（15 路） | 改前 | ① – ⑤ 落地后 | 来源 |
+|------|------|------|------|
+| 解码 fps | 13.9–21.7 | 30.0 | §1 合成负载 |
+| 送推理 帧/s（需求 225） | 103–162 | 225 | §1 合成负载 |
+| 主进程送推理 CPU/帧 | 1.1–1.9ms | 0.10–0.13ms | §4 |
+| 渲染 fps/路（达标线 14） | 6.0–6.7（①④ 已落地、渲染仍在线程内） | 12.6–13.2（最低 10.7–11.3） | §5 |
+| 主进程 CPU | 1.57 核 | 0.73–0.86 核 | §5 |
+| 录像串行吞吐（需求 675 帧/s） | ≈351 帧/s | ≈1333 帧/s | §3 |
+| 最坏内存 | ≈37GB | ≈15.9GiB + 基线 6GiB ≈ 21.8GiB（32GB 机器） | §2 |
+
+> 选型期合成负载下（旧解码 + Queue 送帧 + 线程渲染）渲染只有 0.4–0.7fps/路；上表「改前」列是各阶段落地时的直接对照。
 
 ## 遗留风险 / 后续任务
 
@@ -275,5 +296,7 @@ frames ─► ffmpeg -f rawvideo -pix_fmt bgr24 -s WxH -framerate effective_fps 
 | 实际部署机与「中等性能服务器」假设不符（内存 <32GB、大小核 CPU、核数更少） | 启动自检可能拒绝启动；渲染、转码余量不足 | 部署时取 `lscpu`、`free -g` 核对；内存不足按 §2 的公式继续下调 `ca_maxlen_seconds`（下限 12s = 1.2 倍段长） |
 | 编码、解码、渲染子进程同时满载时的整机 CPU 没测过（录像编码是单独测的） | 16 核机器上可能互相争抢 | ⑥ 时观察整机 CPU，需要时把 ffmpeg 编码线程数调小 |
 | GPU 吞吐没做实验 | 15 路推理可能不达标 | ⑥ 不达标时，先单独做推理基准，再决定 FP16 / 组批 / TensorRT |
-| 共享内存在主进程被硬杀后残留 | `/dev/shm` 泄漏 | ④ 的启动清理负责兜底 |
+| 共享内存在主进程连同 resource_tracker 被硬杀后残留 | `/dev/shm` 泄漏 | 概率低，残段名带 pid 前缀可手工清；有实际需要再补启动清理 |
 | 渲染子进程增加 CPU 占用（每个最多约 1 核） | 和 ffmpeg 转码争 CPU | ⑥ 时观察整机 CPU；默认 2 个子进程 |
+| 本地渲染 2–4 个子进程都低于 14fps 达标线 | processed 轨与实时画面偶有跳帧 | ⑥ 按 §6 的归因表处理，达标线不降 |
+| `memory_baseline_mb = 6144` 是估计值 | 估低了，自检会放过真实超限 | ⑥ 记录进程总 RSS 后回填 |
