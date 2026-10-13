@@ -53,6 +53,12 @@ ffmpeg stdout ─► _read_frame：np.empty(frame_size) + readinto 循环读满 
 | `tests/test_decoder_read_frame.py`（新增：短读跨边界拼帧、EOF 残帧丢弃、每帧独立数组、读循环喂满后在 EOF 退出） | 4 passed |
 | 全量 `pytest tests/` | 987 passed |
 
+## 追加（2026-10-13）：解码帧恢复只读
+
+- **问题**：旧读法的帧来自 `np.frombuffer(bytes)`，天然只读；改成 `np.empty` + `readinto` 后帧变成可写数组。同一数组被 ca_raw（录像）、ca_ready（推理）、最新帧快照（渲染 / 实时画面）共用，日后任何一处误做原地绘制都会静默污染全部下游。
+- **改法**：[decoder.py](../../app/services/stream/decoder.py) 的 `_read_frame` 读满一帧后释放 memoryview，再置 `arr.flags.writeable = False`。
+- **验证**：现有下游都不原地写帧（渲染先 `frame.copy()`）。用真实视频冒烟：只读帧经共享内存环写入、ffmpeg stdin 编码、`FixedVisualizer.render` 均正常，原地写入会抛 `ValueError`。全量 `pytest tests/` 1034 passed。
+
 ## 遗留风险 / 后续任务
 
 | 风险 / 待办 | 影响 | 处理计划 |

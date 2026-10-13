@@ -319,6 +319,9 @@ class FFmpegDecoder:
             if not n:
                 return None
             got += n
+        view.release()
+        # 读满即封为只读：同一数组被录像 / 推理 / 实时画面共用，误写一处会静默污染全部下游
+        arr.flags.writeable = False
         return arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
 
     def _should_drop_frame(self, pending_count: int, queue_capacity: int) -> bool:
