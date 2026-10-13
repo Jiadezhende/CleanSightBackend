@@ -1,6 +1,6 @@
 # 15 路并发分阶段改造提案：主进程减负、内存按字节兜底、录像单次编码、渲染进程化
 
-> **变更状态**：提案（2026-10-13）　代码未改动；决策依据为本地基准实验，各阶段落地时各出一份 update 记录
+> **变更状态**：进行中（2026-10-13）　① – ⑤ 已在 `feature/scale-15-streams` 落地，各阶段记录见下表「详见」列对应的 update；⑥ 15 路验收压测待在测试环境进行
 > **知识库**：无需沉淀（提案；落地记录另行沉淀）
 
 ## 概述
@@ -79,7 +79,9 @@ RTSP ─► ffmpeg 解码子进程 ─pipe─► [主进程] 读线程：readint
 | ③ 录像单次编码 | 1 批 | `app/storage/hls/{_encode,_fmp4,_write}.py` | §3 |
 | ④ 推理送帧改共享内存环 | 2 批（组件 + 迁移/删旧） | 新增 `app/services/utils/frame_ring.py`；`app/services/inference/online/detection/{infer_proxy,stage_worker}.py` | §4 |
 | ⑤ 渲染挪进子进程 | 2 批（代理 + 迁移/删旧） | `app/services/inference/online/visualization/` | §5 |
-| ⑥ 验收压测 + 条件项 | — | 生产机 | §6 |
+| ⑥ 验收压测 + 条件项 | — | 测试环境 / 生产机 | §6 |
+
+各阶段落地记录：① [DECODER_READINTO](20261013_DECODER_READINTO.md)　② [MEMORY_BUDGET](20261013_MEMORY_BUDGET.md)　③ [HLS_STDIN_SINGLE_ENCODE](20261013_HLS_STDIN_SINGLE_ENCODE.md) + [HLS_DROP_MP4V_PATH](20261013_HLS_DROP_MP4V_PATH.md)　④ [SHARED_FRAME_RING](20261013_SHARED_FRAME_RING.md) + [INFER_SHM_RING](20261013_INFER_SHM_RING.md)　⑤ [VIZ_RENDER_PROXY](20261013_VIZ_RENDER_PROXY.md) + [VIZ_RENDER_PROCESSES](20261013_VIZ_RENDER_PROCESSES.md)
 
 ### 方案选型
 
