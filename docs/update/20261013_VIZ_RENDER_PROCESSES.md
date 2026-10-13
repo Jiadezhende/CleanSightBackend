@@ -64,6 +64,7 @@
 | `tests/test_viz_worker_render_proxy.py`（新增：提交后在下一 tick 收回写回且不重送、在途 run 不重送也不就地渲染、池拒收时就地渲染、已关闭 run 的迟到结果被写门拒收） | 4 passed |
 | `tests/test_viz_throughput_snapshot.py`（未改，线程内路径） | passed |
 | 全量 `pytest tests/` | 1035 passed |
+| 后端起停冒烟（本地 dev，uvicorn + `config/logging.json`）：6s 就绪，推理与渲染两个代理都带共享内存环启动（日志 `ring=32x921600B`）；Ctrl-Break 优雅停机 2.5s 完成，两个代理正常 stopped、在途为 0，4 个子进程全部退出、无误报重启 | 通过 |
 
 ## 遗留风险 / 后续任务
 

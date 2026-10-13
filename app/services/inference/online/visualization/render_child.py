@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 def run_renderer(req_q, resp_q, ready_ev, ring_spec) -> None:
     """渲染子进程主函数。"""
     if threading.current_thread() is threading.main_thread():
-        # Ctrl-C 广播给整个进程组；关停统一由父进程 terminate 驱动（同推理子进程的做法）
+        # Ctrl-C（Windows 另有 Ctrl-Break）广播给整个进程组；关停统一由父进程 terminate 驱动
+        # （同推理子进程的做法）。不忽略的话子进程先于父进程的有序停机死掉，监督线程会误判失败去重启。
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] [render-child] %(name)s: %(message)s",
