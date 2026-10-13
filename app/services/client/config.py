@@ -102,6 +102,12 @@ class ClientConfig:
         return settings.ca_maxlen_seconds * settings.raw_fps
 
     @property
+    def ca_ready_maxlen(self) -> int:
+        """待推理队列上限（帧数）：ca_ready_seconds 按 inference_fps 换算（ca_ready 只进抽帧后的帧）。"""
+        from app.settings import settings
+        return max(1, round(settings.ca_ready_seconds * settings.inference_fps))
+
+    @property
     def ca_segment_len(self) -> int:
         """HLS段长度（帧数）：时间概念 ca_segment_seconds 在此边界按 raw_fps 换算为帧数。"""
         from app.settings import settings
@@ -124,6 +130,7 @@ class ClientConfig:
             "resize_height": self.frame.resize_height,
             "inference_decimation": self.inference_decimation,
             "ca_maxlen": self.ca_maxlen,
+            "ca_ready_maxlen": self.ca_ready_maxlen,
             "ca_segment_len": self.ca_segment_len,
         }
 
@@ -133,8 +140,9 @@ class ClientConfig:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("========== Client配置 ==========")
             logger.debug(
-                "队列: ca=%d, segment=%d",
+                "队列: ca=%d, ready=%d, segment=%d",
                 self.ca_maxlen,
+                self.ca_ready_maxlen,
                 self.ca_segment_len,
             )
             logger.debug(

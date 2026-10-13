@@ -56,6 +56,8 @@ async def lifespan(app: FastAPI):
     logger.info("[CleanSight] Strict mode: %s | Debug: %s", settings.strict, settings.debug)
     logger.info("=" * 60)
 
+    _check_memory_budget(settings)
+
     # shutdown event：供 WebSocket handler 感知服务器关闭
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
@@ -86,6 +88,55 @@ async def lifespan(app: FastAPI):
                                 # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
                                 shutdown_event.set()
 
+
+
+def _check_memory_budget(settings) -> None:
+    """启动自检：规划路数下的最坏帧缓存 + 进程基线 vs MemAvailable，超了拒绝启动（或只告警）。
+
+    只做容量规划，不拦截 /api/start。非 Linux 读不到 MemAvailable，跳过。
+    公式见 `app/services/utils/memory_budget.py`。
+    """
+    from .services.client.config import get_client_config
+    from .services.recording.config import get_recording_config
+    from .services.stream.config import get_stream_config
+    from .services.utils.memory_budget import MemoryPlan, estimate, read_mem_available
+
+    client_cfg = get_client_config()
+    decoder_cfg = get_stream_config().decoder
+    plan = MemoryPlan(
+        streams=settings.capacity_planned_streams,
+        frame_bytes=decoder_cfg.default_width * decoder_cfg.default_height * 3,
+        ca_maxlen=client_cfg.ca_maxlen,
+        ca_ready_maxlen=client_cfg.ca_ready_maxlen,
+        segment_len=client_cfg.ca_segment_len,
+        recording_budget_bytes=get_recording_config().queue_max_mb * 2**20,
+        baseline_bytes=settings.memory_baseline_mb * 2**20,
+    )
+    est = estimate(plan)
+    gib = 2**30
+    breakdown = (
+        "streams=%d | 稳态 %.1fGiB | 转码停滞 %.1fGiB | 推理停滞 %.1fGiB | sweeper 停滞 %.1fGiB "
+        "| 基线 %.1fGiB | 最坏 %.1fGiB"
+    ) % (
+        plan.streams, est.normal / gib, est.recording_stall / gib, est.inference_stall / gib,
+        est.sweeper_stall / gib, est.baseline / gib, est.worst / gib,
+    )
+    available = read_mem_available()
+    if available is None:
+        logger.warning("[CleanSight] 内存自检跳过（读不到 MemAvailable，非 Linux）: %s", breakdown)
+        return
+    if est.worst <= available:
+        logger.info("[CleanSight] 内存自检通过: %s | MemAvailable %.1fGiB", breakdown, available / gib)
+        return
+    msg = (
+        "内存自检未通过: %s | MemAvailable %.1fGiB。调小 CLEANSIGHT_CAPACITY_PLANNED_STREAMS / "
+        "CLEANSIGHT_CA_MAXLEN_SECONDS / recording_config.yaml 的 queue_max_mb，"
+        "或设 CLEANSIGHT_MEMORY_CHECK_ENFORCE=false 只告警"
+    ) % (breakdown, available / gib)
+    if settings.memory_check_enforce:
+        logger.critical("[CleanSight] %s", msg)
+        raise RuntimeError(msg)
+    logger.warning("[CleanSight] %s", msg)
 
 
 app = FastAPI(

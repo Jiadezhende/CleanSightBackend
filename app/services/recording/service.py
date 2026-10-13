@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from app.types.detection import FrameDetection
@@ -38,6 +39,7 @@ from app.types.frame import Frame
 from app.types.run import RunIdentity
 from app.storage import hls, inference
 from app.services.utils.task_queue import SerialTaskQueue
+from app.services.utils.metrics import frame_drop_total
 
 from .sweep_worker import SegmentSweeper
 from .config import RecordingConfig, get_recording_config
@@ -112,6 +114,12 @@ class RecordingService:
         self._detection_queue: Optional[SerialTaskQueue] = None
         self._sweep_worker: Optional[SegmentSweeper] = None
 
+        # HLS 段队列的在途字节（已入队、未写完）。段是像素帧，只按段数限长挡不住内存：
+        # 转码一停滞，100 段 × 285MB 就先把内存吃满才轮到丢段。提交线程（sweeper / 拆除路径）
+        # 加、队列线程减，故带锁。
+        self._hls_inflight_bytes = 0
+        self._hls_inflight_lock = threading.Lock()
+
         # (task_id, step_id) → (cq, fence_ts)：断流时挂起的「把这一刻之前的残帧切出来」请求。
         #
         # **三个线程碰它**：health_monitor 写（`request_residual_flush`）、sweeper 线程取走
@@ -127,6 +135,8 @@ class RecordingService:
 
     def start(self) -> None:
         """起两条队列与 sweeper。"""
+        with self._hls_inflight_lock:
+            self._hls_inflight_bytes = 0
         self._hls_queue = SerialTaskQueue(_HLS_QUEUE_NAME, maxsize=self.config.queue_size)
         self._hls_queue.start()
         self._detection_queue = SerialTaskQueue(
@@ -170,7 +180,8 @@ class RecordingService:
             frames: 该段的帧，按时间升序。
 
         Returns:
-            是否入队成功。**False 意味着这段不会被写**（队列满、队列还没起、或入参不合法）。
+            是否入队成功。**False 意味着这段不会被写**（队列满、在途字节超
+            `queue_max_mb`、队列还没起、或入参不合法）。
 
         入队成功不等于写成功：真正的落盘在队列线程上异步发生（见 `_write`）。要结果的调用方
         说明它本就不该异步。
@@ -189,7 +200,31 @@ class RecordingService:
             return False
 
         job = _SegmentJob(run=cq.run, track=track, frames=list(frames))
-        return self._hls_queue.submit(lambda: self._write(job), label=job.label)
+        nbytes = sum(f.frame.nbytes for f in job.frames)
+        if not self._reserve_hls_bytes(nbytes):
+            frame_drop_total.labels(reason="recording_budget").inc(len(job.frames))
+            logger.warning(
+                "[recording] 段队列在途字节超预算，丢弃段: %s | %.0fMB in flight, budget %dMB",
+                job.label, self._hls_inflight_bytes / 2**20, self.config.queue_max_mb,
+            )
+            return False
+        ok = self._hls_queue.submit(lambda: self._write(job, nbytes), label=job.label)
+        if not ok:
+            self._release_hls_bytes(nbytes)
+        return ok
+
+    def _reserve_hls_bytes(self, nbytes: int) -> bool:
+        """在途字节记账：未超预算则计入并返回 True。"""
+        budget = self.config.queue_max_mb * 2**20
+        with self._hls_inflight_lock:
+            if self._hls_inflight_bytes + nbytes > budget:
+                return False
+            self._hls_inflight_bytes += nbytes
+            return True
+
+    def _release_hls_bytes(self, nbytes: int) -> None:
+        with self._hls_inflight_lock:
+            self._hls_inflight_bytes -= nbytes
 
     def submit_detections(self, cq, frames: Sequence[FrameDetection]) -> bool:
         """把一批帧检测结果打包成落盘任务交给 detections 队列。
@@ -347,8 +382,8 @@ class RecordingService:
 
     # ── 队列任务体 ─────────────────────────────────────────────────────────────
 
-    def _write(self, job: _SegmentJob) -> None:
-        """在队列线程上把一段写进它所属 run 的 `hls/`。
+    def _write(self, job: _SegmentJob, nbytes: int = 0) -> None:
+        """在队列线程上把一段写进它所属 run 的 `hls/`；无论成败都归还在途字节 `nbytes`。
 
         旧一代迟到的段写进它自己的 run 目录，新一代读不到；run 目录已被回收时
         `insert_segment` 抛 `FileNotFoundError`，这段丢弃。
@@ -359,7 +394,10 @@ class RecordingService:
         的回放；而现在会抛的失败（ffmpeg 缺失/换代、盘满）基本都是非瞬时的，重试也修不好。
         丢一段 ≈ 丢 10 秒录像，比毁一整段回放便宜。
         """
-        hls.insert_segment(job.run, job.track, job.frames)
+        try:
+            hls.insert_segment(job.run, job.track, job.frames)
+        finally:
+            self._release_hls_bytes(nbytes)
 
     def _write_detections(self, job: _DetectionJob) -> None:
         """在 detections 队列线程上把一批检测结果追加进它所属 run 的 `inference/`。
