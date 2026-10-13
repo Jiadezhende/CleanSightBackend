@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 # WS live view 传输带宽上限（帧/秒）：传输层保护常量，非管线 fps、不进部署配置。
 # 推帧主驱动是"新帧即推"（按 frame.timestamp 去重）；此上限仅兜住突发，源 ~inference_fps 下极少触发。
 _WS_MAX_SEND_FPS = 30
+# WS live view 的 JPEG 质量：只管实时观看，不影响录像与送标（各自 libx264 编码）。
+# 640×480 下 95（cv2 默认）每帧 base64 ≈127KB、15fps 需 ≈15Mbps；75 ≈55KB、≈6.4Mbps。
+_WS_JPEG_QUALITY = 75
 
 # 推理与流的生命周期已归各自服务包（`app.services.inference.lifespan` /
 # `app.services.stream.lifespan`，由 main.py 嵌套）。本 router 只管协议层。
@@ -131,7 +134,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
 
             # 边界编码：app.types Frame → JPEG base64 data URL（仅此一处，内联）
             try:
-                _, buf = cv2.imencode(".jpg", frame.frame)
+                _, buf = cv2.imencode(".jpg", frame.frame, [cv2.IMWRITE_JPEG_QUALITY, _WS_JPEG_QUALITY])
                 b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
                 data_url = f"data:image/jpeg;base64,{b64}"
                 await websocket.send_text(data_url)
