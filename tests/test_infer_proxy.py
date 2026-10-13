@@ -207,3 +207,97 @@ def test_latency_metric_derived_from_framedetections_metadata():
     # 同模型两帧共享同一批 infer_ms=20；去重后只 observe 一次、值 = 20/2 = 10
     p._handle_response((req_id, [{"clean_large": fd0}, {"clean_large": fd1}]))
     assert infer_latency_ms.labels(model="clean_large")._sum.get() - before == 10.0
+
+
+# ---------------------------------------------------------------------------
+# 共享内存环送帧
+# ---------------------------------------------------------------------------
+
+from app.services.utils.frame_ring import SharedFrameRing, SharedFrameRingView, SharedFrames  # noqa: E402
+
+_SLOT = 8 * 4 * 3   # _task 默认帧 4×8×3
+
+
+def _ring_proxy(*, slots: int = 4, max_inflight: int = 8):
+    p, captured = _proxy(max_inflight=max_inflight)
+    p._ring = SharedFrameRing(slots=slots, slot_bytes=_SLOT, prefix="cstest")
+    return p, captured
+
+
+def test_ring_submit_ships_slot_handles_not_arrays():
+    p, _ = _ring_proxy()
+    try:
+        cq = make_cq(stage="1")
+        frame = np.full((4, 8, 3), 5, dtype=np.uint8)
+        task = DetectionTask(task_id=1, stage="1", timestamp=1.0, frame=frame, cq=cq)
+        assert p.submit([task]) is True
+
+        req_id, _, payload, _ = p._req_q.get_nowait()
+        assert isinstance(payload, SharedFrames) and len(payload.slots) == 1
+        view = SharedFrameRingView(payload.spec)
+        try:
+            assert np.array_equal(view.read_all(payload)[0], frame)
+        finally:
+            view.close()
+        assert p._ring.free_count == 3
+    finally:
+        p._ring.close()
+
+
+def test_ring_slots_released_on_response():
+    p, _ = _ring_proxy()
+    try:
+        cq = make_cq(stage="1")
+        p.submit([_task(cq, 1.0), _task(cq, 2.0)])
+        (req_id, _), = p._pending.items()
+        p._handle_response((req_id, [{}, {}]))
+        assert p._ring.free_count == 4 and p._req_slots == {}
+    finally:
+        p._ring.close()
+
+
+def test_ring_exhausted_rejects_like_inflight_full():
+    p, _ = _ring_proxy(slots=2)
+    try:
+        cq = make_cq(stage="1")
+        assert p.submit([_task(cq, 1.0), _task(cq, 2.0)]) is True
+        assert p.submit([_task(cq, 3.0)]) is False      # 槽位用尽 → 背压
+        assert p._inflight == 1 and len(p._pending) == 1
+    finally:
+        p._ring.close()
+
+
+def test_ring_reset_on_child_failure():
+    p, _ = _ring_proxy()
+    p._no_restart.set()
+    try:
+        cq = make_cq(stage="1")
+        p.submit([_task(cq, 1.0), _task(cq, 2.0)])
+        p._handle_child_failure(dead=True, wedged=False, not_ready=False)
+        assert p._ring.free_count == 4 and p._req_slots == {}
+    finally:
+        p._ring.close()
+
+
+def test_ring_slots_released_when_put_fails():
+    p, _ = _ring_proxy()
+    try:
+        p._req_q = SimpleNamespace(put=lambda *a, **k: (_ for _ in ()).throw(queue.Full()))
+        cq = make_cq(stage="1")
+        assert p.submit([_task(cq, 1.0)]) is False
+        assert p._ring.free_count == 4 and p._pending == {} and p._inflight == 0
+    finally:
+        p._ring.close()
+
+
+def test_oversize_frames_fall_back_to_inline():
+    """帧尺寸超出槽位（配置不符）：整批走 pickle 直送，不能卡死在拒收上。"""
+    p, _ = _ring_proxy()
+    try:
+        cq = make_cq(stage="1")
+        assert p.submit([_task(cq, 1.0, w=16, h=8)]) is True
+        _, _, payload, _ = p._req_q.get_nowait()
+        assert isinstance(payload, list) and payload[0].shape == (8, 16, 3)
+        assert p._ring.free_count == 4
+    finally:
+        p._ring.close()

@@ -9,6 +9,10 @@
 **句柄不过进程边界**：cq 是进程内对象，留主进程按 req_id 关联即可（这正是本方案「架构改动最小」
 的支点）。**防泄漏三重**：pending 有界（max_inflight，满则 submit 拒收计丢帧）、collect 每条
 响应 pop 移除、子进程失败时清空 pending 并计 `infer_child_restart`。
+
+**送帧走共享内存环**（`frame_slot_bytes` 给了才启用）：帧拷进 `SharedFrameRing` 槽位，队列只传
+`SharedFrames`；槽位随 pending 同生共死（答复时归还、子进程失败时 reset）。放不进槽位的帧
+（尺寸超配）整批退回 pickle 直送。依据见 docs/update/20261013_INFER_SHM_RING.md。
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 from app.types.detection import FrameDetection
 from app.services.inference.online.types import DetectionTask
 from .stage_worker import run_stages
+from app.services.utils.frame_ring import SharedFrameRing, SharedFrames
 from app.services.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 if TYPE_CHECKING:
@@ -61,6 +66,8 @@ class RemoteInferProxy:
         restart_backoff_max: float = 30.0,
         max_restarts: Optional[int] = None,
         supervise_interval: float = 1.0,
+        frame_slot_bytes: Optional[int] = None,
+        ring_slots: int = 0,
     ):
         """
         Args:
@@ -73,6 +80,8 @@ class RemoteInferProxy:
             drain_timeout: stop() 排空在途批的上限。
             restart_backoff_max: 重启退避上限秒。
             max_restarts: 累计重启上限（None=不限）。
+            frame_slot_bytes: 共享内存环单槽字节（= 单帧 W×H×3）；None 则不建环、帧走 pickle。
+            ring_slots: 环槽位数，应 ≥ max_inflight × 最大批大小，否则环先于在途上限耗尽。
         """
         self._active_stages = list(active_stages)
         self._write_back = write_back
@@ -84,6 +93,11 @@ class RemoteInferProxy:
         self._restart_backoff_max = restart_backoff_max
         self._max_restarts = max_restarts
         self._supervise_interval = supervise_interval
+        self._frame_slot_bytes = frame_slot_bytes
+        self._ring_slots = ring_slots
+        self._ring: Optional[SharedFrameRing] = None
+        # req_id → 该批占用的环槽位（与 _pending 同锁、同生同灭）
+        self._req_slots: Dict[int, List[int]] = {}
 
         # spawn 上下文：CUDA + fork 不安全，且我们要主进程保持 CUDA-free。
         import multiprocessing as _mp
@@ -115,13 +129,19 @@ class RemoteInferProxy:
     # ────────────────────────── 生命周期 ──────────────────────────
 
     def start(self) -> None:
-        """spawn 子进程并等就绪，起 collector + supervisor 线程。"""
+        """建共享内存环 → spawn 子进程并等就绪，起 collector + supervisor 线程。"""
+        if self._frame_slot_bytes and self._ring_slots > 0:
+            self._ring = SharedFrameRing(self._ring_slots, self._frame_slot_bytes, prefix="csinfer")
         self._spawn_child()
         self._collector = threading.Thread(target=self._collect_loop, name="InferCollector", daemon=True)
         self._supervisor = threading.Thread(target=self._supervise_loop, name="InferSupervisor", daemon=True)
         self._collector.start()
         self._supervisor.start()
-        logger.info("[RemoteInferProxy] started (stages=%s, max_inflight=%d)", self._active_stages, self._max_inflight)
+        logger.info(
+            "[RemoteInferProxy] started (stages=%s, max_inflight=%d, ring=%s)",
+            self._active_stages, self._max_inflight,
+            f"{self._ring.spec.slots}x{self._ring.spec.slot_bytes}B" if self._ring else "off",
+        )
 
     def _spawn_child(self) -> None:
         """建队列 + 起子进程，阻塞等就绪屏障。失败/停机时不置 ready。
@@ -144,7 +164,10 @@ class RemoteInferProxy:
             self._ready_ev = self._ctx.Event()
             self._proc = self._ctx.Process(
                 target=run_stages,
-                args=(self._req_q, self._resp_q, self._ready_ev, self._active_stages, self._cuda_device),
+                args=(
+                    self._req_q, self._resp_q, self._ready_ev, self._active_stages, self._cuda_device,
+                    self._ring.spec if self._ring is not None else None,
+                ),
                 name="InferChild",
                 daemon=True,
             )
@@ -192,9 +215,12 @@ class RemoteInferProxy:
         with self._lock:
             leftover = sum(len(r) for r in self._pending.values())
             self._pending.clear()
+            self._req_slots.clear()
             self._inflight = 0
         if leftover:
             frame_drop_total.labels(reason="infer_child_down").inc(leftover)
+        if self._ring is not None:
+            self._ring.close()
         logger.info("[RemoteInferProxy] stopped (leftover_dropped=%d)", leftover)
 
     def _kill_child(self) -> None:
@@ -249,7 +275,8 @@ class RemoteInferProxy:
 
         **限流是 proxy 固有职责**：内部据 `inflight < max_inflight` 判定，满即返 False；调用方
         （dispatcher）据此把帧留 deque、背压沿链上传，不外泄 inflight 计数（无需 capacity 预读）。
-        cq 等留 pending，只把帧送子进程；submit 后不再持有 frame 引用（帧仅活在子进程 + 在途队列）。
+        cq 等留 pending，只把帧送子进程；submit 后不再持有 frame 引用（帧仅活在环槽位 / 子进程 + 在途队列）。
+        环槽位不够同样返回 False（与在途满同一种背压）。
         """
         if not batch:
             return True
@@ -257,11 +284,19 @@ class RemoteInferProxy:
             return False
 
         stage = batch[0].stage
+        frames = [req.frame for req in batch]
+        ring = self._ring
+        use_ring = ring is not None and all(ring.fits(f) for f in frames)
         with self._lock:
             if self._inflight >= self._max_inflight:
                 # 热路径不打日志——满的时候这里每 10ms 就走一次。拒收由唯一调用方
                 # （dispatcher）计数并并入它的周期压力行。
                 return False
+            slots = None
+            if use_ring:
+                slots = ring.acquire(len(frames))
+                if slots is None:
+                    return False
             req_id = self._next_req_id
             self._next_req_id += 1
             self._pending[req_id] = [
@@ -271,20 +306,33 @@ class RemoteInferProxy:
                 )
                 for req in batch
             ]
+            if slots is not None:
+                self._req_slots[req_id] = slots
             self._inflight += 1
 
-        frames = [req.frame for req in batch]
         timestamps = [req.timestamp for req in batch]
         try:
-            self._req_q.put((req_id, stage, frames, timestamps), timeout=1.0)
+            if slots is not None:
+                for slot, frame in zip(slots, frames):
+                    ring.write(slot, frame)
+                payload = SharedFrames(ring.spec, tuple(slots), tuple(f.shape for f in frames))
+            else:
+                payload = frames
+            self._req_q.put((req_id, stage, payload, timestamps), timeout=1.0)
         except (queue.Full, ValueError, OSError) as e:
-            # 送不进去（队列满/已关闭）：回滚 pending，计丢帧
-            with self._lock:
-                if self._pending.pop(req_id, None) is not None:
-                    self._inflight -= 1
+            # 送不进去（队列满/已关闭）：回滚 pending 与槽位，计丢帧
+            self._rollback(req_id)
             logger.warning("[RemoteInferProxy] req_q put 失败，丢弃 req_id=%s: %s", req_id, e)
             return False
         return True
+
+    def _rollback(self, req_id: int) -> None:
+        with self._lock:
+            if self._pending.pop(req_id, None) is not None:
+                self._inflight -= 1
+            slots = self._req_slots.pop(req_id, None)
+        if slots is not None and self._ring is not None:
+            self._ring.release(slots)
 
     # ────────────────────────── 收集 ──────────────────────────
 
@@ -310,6 +358,9 @@ class RemoteInferProxy:
             records = self._pending.pop(req_id, None)   # ← 防泄漏核心：pop 移除在途条目
             if records is not None:
                 self._inflight -= 1
+            slots = self._req_slots.pop(req_id, None)
+        if slots is not None and self._ring is not None:
+            self._ring.release(slots)                   # 子进程已拷出并答复，槽位可复用
         if records is None:
             # 孤儿响应（子进程重启后的旧响应/重复）——忽略，不写回
             return
@@ -415,7 +466,10 @@ class RemoteInferProxy:
         with self._lock:
             orphaned = sum(len(r) for r in self._pending.values())
             self._pending.clear()
+            self._req_slots.clear()
             self._inflight = 0
+        if self._ring is not None:
+            self._ring.reset()   # 子进程已死，在途槽位不会再被读
         if orphaned:
             frame_drop_total.labels(reason="infer_child_restart").inc(orphaned)
             logger.warning("[RemoteInferProxy] 丢弃在途 %d 帧（子进程重启）", orphaned)
