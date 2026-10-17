@@ -8,7 +8,7 @@
     cancel(run) -> bool                       排队中的直接取消，运行中的 kill 子进程
 
 执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 起子进程
-`python -m app.services.inference.offline.cli run`（CPU 隔离 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
+`python -m app.services.inference.offline.cli run`（钉卡 + 限核 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
 **本模块不 import runner / torch**：CLI 只作为子进程命令出现。
 
 作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `--run-id`，
@@ -311,8 +311,7 @@ def _priority_kwargs() -> Dict[str, Any]:
 
 
 def _child_env() -> Dict[str, str]:
-    env = dict(os.environ)  # 含 CLEANSIGHT_ENV 与已加载的 .env，子进程落到同一个存储根
-    env["CUDA_VISIBLE_DEVICES"] = ""
+    env = dict(os.environ)  # 含 CLEANSIGHT_ENV 与已加载的 .env，子进程落到同一个存储根、钉同一张卡（cli._isolate）
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 

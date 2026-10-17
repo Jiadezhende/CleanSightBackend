@@ -15,7 +15,8 @@
 
 约束：
 - `frames` 只读，不得原地修改；
-- 策略不访问存储 / ClientService / CQ / 数据库（纯算法）；
+- 策略不访问存储 / ClientService / CQ / 数据库（纯算法）；要原始画面的策略声明 `uses_context = True`，
+  由 Runner 以 `preprocess(frames, context)` 注入 `OfflineContext`，经它取 run 级资源；
 - 输出每条 `TemporalSegment.producer` 必须等于本策略 `name`（= 类名）；`start <= end`、时间为有限数、
   `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。
 - 输入吃 `FrameDetection`、输出吐 `TemporalSegment`（两者都在 `app.types`，与在线同型），
@@ -25,14 +26,30 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Sequence
+from dataclasses import dataclass
+from typing import Any, Callable, ClassVar, Iterator, List, Optional, Sequence
 
 from app.types.detection import FrameDetection
+from app.types.frame import Frame
 from app.types.temporal import LabelProbs, TemporalSegment
+
+# 该 run 的 raw 轨取帧：`video(width=, height=, start_ts=None, end_ts=None) -> Iterator[Frame]`。
+# 帧 ts 位级等于 detections 的 ts，可直接 `==` 匹配（`app.storage.hls.iter_frames`）。
+VideoSource = Callable[..., Iterator[Frame]]
+
+
+@dataclass(frozen=True)
+class OfflineContext:
+    """Runner 注入给 `uses_context` 策略的 run 级资源；策略经它取数据，不直接碰存储。"""
+
+    video: VideoSource
 
 
 class OfflineSegmenter(ABC):
     """离线全序列分割策略基类。构造参数全部来自 YAML `offline.params`。"""
+
+    #: True → Runner 以 `preprocess(frames, context)` 调用；默认 `preprocess(frames)`。
+    uses_context: ClassVar[bool] = False
 
     @property
     def name(self) -> str:

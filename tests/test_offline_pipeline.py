@@ -5,6 +5,7 @@
 
 import json
 import math
+import os
 
 import pytest
 
@@ -63,6 +64,7 @@ _OFFLINE_OK = {
 # 测试替身策略（定义在本文件下方）：Boom 抛异常，Marker 验证 preprocess 预留层
 _BOOM = {"class": "test_offline_pipeline.BoomSegmenter"}
 _MARKER = {"class": "test_offline_pipeline.MarkerSegmenter"}
+_CONTEXT = {"class": "test_offline_pipeline.ContextSegmenter"}
 
 
 class TestCreateOfflineSegmenter:
@@ -329,6 +331,17 @@ class TestOfflineRunner:
         assert probs.ts.tolist() == [0.1, 0.2, 0.3, 0.4]
         assert probs.probs.argmax(axis=1).tolist() == [label] * 4
 
+    def test_context_strategy_gets_video_bound_to_locked_run(self, tmp_storage, monkeypatch):
+        """`uses_context` 策略经 context.video 取帧：参数原样透传给 hls.iter_frames，run 是锁定的那个。"""
+        from app.services.inference.offline import runner as runner_mod
+
+        calls = []
+        monkeypatch.setattr(runner_mod.hls, "iter_frames", lambda run, **kw: calls.append((run, kw)) or iter(()))
+        _write_detections(1, 2)
+        res = _runner(_CONTEXT).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "completed"
+        assert calls == [(make_run(1, 2), {"width": 640, "height": 480})]
+
     def test_bad_label_probs_shape_skips_bypass_keeps_facts(self, tmp_storage):
         """旁路形状不一致：不落 npz，事实照常写（旁路不影响主结果）。"""
         _write_detections(1, 2)
@@ -356,6 +369,18 @@ class MarkerSegmenter(OfflineSegmenter):
     def segment(self, model_input):
         assert model_input.get("marked") is True  # runner 确实先调了 preprocess
         return [TemporalSegment(producer=self.name, label="m", start=0.0, end=1.0)]
+
+
+class ContextSegmenter(OfflineSegmenter):
+    """`uses_context`：preprocess 收第二个参数，并真的经它取一次帧。"""
+
+    uses_context = True
+
+    def preprocess(self, frames, context):
+        return list(context.video(width=640, height=480))
+
+    def segment(self, model_input):
+        return [TemporalSegment(producer=self.name, label="c", start=0.0, end=1.0)]
 
 
 # ============================ CLI ============================
@@ -406,10 +431,20 @@ class TestRunLock:
 
 class TestCli:
     @pytest.fixture(autouse=True)
-    def _no_cpu_isolation(self, monkeypatch):
-        # _isolate_cpu 会在 pytest 主进程里永久置空 CUDA_VISIBLE_DEVICES、改 torch 线程数，污染后续用例
+    def _no_isolation(self, monkeypatch):
+        # _isolate 会在 pytest 主进程里永久改 CUDA_VISIBLE_DEVICES 与 torch 线程数，污染后续用例
         from app.services.inference.offline import cli
-        monkeypatch.setattr(cli, "_isolate_cpu", lambda num_threads: None)
+        monkeypatch.setattr(cli, "_isolate", lambda num_threads: None)
+
+    def test_pin_device_uses_online_inference_card(self, monkeypatch):
+        """离线子进程与在线推理子进程钉同一张卡（settings.cuda_device），不碰机器上别的卡。"""
+        from app.services.inference.offline import cli
+        from app.settings import settings
+
+        monkeypatch.setattr(settings, "cuda_device", "1")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
+        cli._pin_device()
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
     def test_run_completed_json_last_line(self, tmp_storage, monkeypatch, capsys):
         """stdout 末行恒为结果 JSON（作业服务按此解析）。
