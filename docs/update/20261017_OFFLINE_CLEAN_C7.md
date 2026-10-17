@@ -124,10 +124,9 @@ read_detections(run)                                   15 fps
 
 - **起因**：线上作业失败「输入帧率 12.994fps 低于契约帧率 15.0fps」。原实现对检测帧率做 strict 校验（低于 15fps 的 1% 即失败），
   而线上检测帧率随推理负载波动是常态。
-- **改动**：`CleanC7Segmenter` 新增参数 `min_input_fps`（YAML 默认 10）。检测帧率（相邻 ts 差的中位数，零星丢帧不影响）
-  ≥ 15fps → 按 ts 抽稀到 15；介于 `min_input_fps` 与 15 之间 → 原样放行并 WARNING；低于 `min_input_fps` 才失败。
-  中位帧率计算抽成 [`resample.input_fps`](../../app/services/inference/resample.py)，`resample_by_ts` 行为不变。
+- **改动**：检测帧率（相邻 ts 差的中位数，零星丢帧不影响）≥ 15fps → 按 ts 抽稀到 15；低于 15fps → 原样放行并 WARNING，
+  **不设下限、不失败**（人定）。中位帧率计算抽成 [`resample.input_fps`](../../app/services/inference/resample.py)，`resample_by_ts` 行为不变。
 - **代价**：模型与特征里的时间窗口按帧计、按 15fps 标定（角色平滑 ±7 帧、送刷手速度 2/5/10/20 帧差分、pp20 = 20 帧）。
   13fps 输入时这些窗口在时间上拉长约 15%、速度类特征按帧换算会偏低约 13%；这次没有评估对段级 F1 的影响。
   线上若长期低于 15fps，应先查在线推理为什么掉帧，而不是继续调低下限。
-- **自测**：新增 / 改写用例（低于下限失败、12.99fps 只告警、15fps 无告警、参数越界、`input_fps` 对零星丢帧稳健）；全量 `pytest tests/` 1069 passed。
+- **自测**：新增 / 改写用例（12.99 / 5fps 只告警不失败、15fps 无告警、`input_fps` 对零星丢帧稳健）；全量 `pytest tests/` 1068 passed。

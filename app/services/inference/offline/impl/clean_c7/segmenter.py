@@ -3,10 +3,10 @@
     offline:
       class: app.services.inference.offline.impl.clean_c7.segmenter.CleanC7Segmenter
       params: {model_dir: .../clean-offline-c7-v41, backbone_dir: .../backbones/dinov2_vits14,
-               device: cuda, max_crops_per_s: 150, min_input_fps: 10}
+               device: cuda, max_crops_per_s: 150}
 
 物料目录内文件名固定：``model_dir/{temporal.pt, hand_state.npz}``，``backbone_dir`` = dinov2 hub 代码 + 权重。
-输入契约：训练帧率 15 fps（快于它按 ts 抽稀；慢于它照常跑并告警，低于 ``min_input_fps`` 才失败）、640×480；
+输入契约：训练帧率 15 fps（快于它按 ts 抽稀；慢于它照常跑，只告警）、640×480；
 raw 录像缺任何一帧有手的画面即整次失败，不跳手。
 手部嵌入缓存在本 run 的 ``inference/cache_hand_embeddings.npz``：手（ts、框）与骨干口径都一致才复用，否则重算覆盖。
 """
@@ -65,7 +65,6 @@ class CleanC7Segmenter(OfflineSegmenter):
         max_crops_per_s: Optional[float] = 150.0,
         batch_size: int = 16,
         min_segment_frames: int = PP_MIN_LEN,
-        min_input_fps: float = 10.0,
     ):
         if not (device == "cpu" or device.startswith("cuda")):
             raise ValueError(f"device 只能是 cpu / cuda[:n]: {device!r}")
@@ -75,19 +74,16 @@ class CleanC7Segmenter(OfflineSegmenter):
             raise ValueError(f"batch_size 必须 >= 1: {batch_size}")
         if int(min_segment_frames) < 0:
             raise ValueError(f"min_segment_frames 不能为负: {min_segment_frames}")
-        if not 0 < float(min_input_fps) <= FPS:
-            raise ValueError(f"min_input_fps 须在 (0, {FPS}]: {min_input_fps}")
         self.model_dir = Path(model_dir)
         self.backbone_dir = Path(backbone_dir)
         self.device = device
         self.max_crops_per_s = None if max_crops_per_s is None else float(max_crops_per_s)
         self.batch_size = int(batch_size)
         self.min_segment_frames = int(min_segment_frames)
-        self.min_input_fps = float(min_input_fps)
         self._last_probs: Optional[LabelProbs] = None
 
     def preprocess(self, frames: Sequence[FrameDetection], context: OfflineContext) -> C7Input:
-        _check_input_rate(frames, self.min_input_fps)
+        _warn_low_rate(frames)
         frames = resample_by_ts(frames, FPS)
         _check_resolution(frames)
         ts = np.asarray([f.ts for f in frames], dtype=np.float64)
@@ -199,13 +195,11 @@ def _cache_matches(cached, row_ts: np.ndarray, row_boxes: np.ndarray, key: str) 
     )
 
 
-def _check_input_rate(frames: Sequence[FrameDetection], min_fps: float) -> None:
-    """检测帧率随在线负载波动：低于 ``min_fps`` 才失败；低于训练帧率只告警（按帧计的窗口与速度会相应拉长）。"""
+def _warn_low_rate(frames: Sequence[FrameDetection]) -> None:
+    """检测帧率随在线负载波动：低于训练帧率只告警、不失败（按帧计的窗口与速度会相应拉长）。"""
     rate = input_fps(frames)
     if rate is None or rate >= FPS * (1 - _RATE_SLACK):
         return
-    if rate < min_fps:
-        raise ValueError(f"输入帧率 {rate:.3f}fps 低于下限 min_input_fps={min_fps}（训练帧率 {FPS}fps）")
     logger.warning("[CleanC7Segmenter] 输入帧率 %.3ffps 低于训练帧率 %.1ffps，照常推理", rate, FPS)
 
 

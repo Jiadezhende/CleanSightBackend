@@ -161,23 +161,18 @@ class TestContract:
         with pytest.raises(ValueError, match="640×480"):
             _segmenter().preprocess(frames, _context(_video([]))[0])
 
-    def test_rejects_detection_rate_below_floor(self):
-        frames = [_frame(t / 7.5) for t in range(5)]
-        with pytest.raises(ValueError, match="低于下限"):
-            _segmenter(min_input_fps=10).preprocess(frames, _context(_video([]))[0])
-
-    def test_fluctuating_rate_above_floor_only_warns(self, caplog):
-        """线上检测帧率随负载波动（实测 12.99fps）：高于下限照常跑，只告警。"""
-        frames = [_frame(t / 12.994) for t in range(30)]
-        seg_mod._check_input_rate(frames, 10.0)
+    @pytest.mark.parametrize("rate", [12.994, 5.0])
+    def test_low_rate_only_warns_never_fails(self, caplog, rate):
+        """线上检测帧率随负载波动（实测 12.99fps）：再低也照常跑，只告警。"""
+        seg_mod._warn_low_rate([_frame(t / rate) for t in range(30)])
         assert "低于训练帧率" in caplog.text
-        caplog.clear()
-        seg_mod._check_input_rate([_frame(t / 15.0) for t in range(30)], 10.0)
+
+    def test_contract_rate_does_not_warn(self, caplog):
+        seg_mod._warn_low_rate([_frame(t / 15.0) for t in range(30)])
         assert caplog.text == ""
 
     @pytest.mark.parametrize("kw", [
         {"device": "mps"}, {"max_crops_per_s": 0}, {"batch_size": 0}, {"min_segment_frames": -1},
-        {"min_input_fps": 0}, {"min_input_fps": 16},
     ])
     def test_bad_params_fail_at_construction(self, kw):
         with pytest.raises(ValueError):
