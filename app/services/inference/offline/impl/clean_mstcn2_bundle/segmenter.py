@@ -72,7 +72,7 @@ class CleanMSTCN2BundleSegmenter(OfflineSegmenter):
             raise FileNotFoundError(f"clean 离线模型权重不存在: {path}")
         from .model import load_model, predict_probs  # torch 只在真正前向时拉起
 
-        probs = predict_probs([load_model(path)], model_input.features)
+        probs = predict_probs(load_model(path), model_input.features)
         labels = merge_short_segments(probs.argmax(axis=1), self.min_segment_frames)
         self._last_probs = LabelProbs(ts=model_input.ts, probs=probs, labels=self.labels)
         return self._segments(model_input.ts, labels, probs)

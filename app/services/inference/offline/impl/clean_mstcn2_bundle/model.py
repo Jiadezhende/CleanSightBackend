@@ -86,17 +86,16 @@ class MSTCN2(nn.Module):
         return out.transpose(1, 2)
 
 
-def load_model(path: Path, device="cpu") -> MSTCN2:
+def load_model(path: Path) -> MSTCN2:
     """读训练状态 checkpoint 的 ``model_state``，strict 加载后返回 eval 模式的模型。"""
     model = MSTCN2(**STRUCTURE)
     checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
     model.load_state_dict(checkpoint["model_state"], strict=True)
-    return model.to(device).eval()
+    return model.eval()
 
 
 @torch.no_grad()
-def predict_probs(models: list[MSTCN2], feats: np.ndarray, device="cpu") -> np.ndarray:
-    """[T, 6] softmax 概率；多个模型时取平均。"""
-    x = torch.from_numpy(np.asarray(feats, dtype=np.float32)).unsqueeze(0).to(device)
-    probs = [torch.softmax(m(x), dim=-1)[0].cpu().numpy() for m in models]
-    return np.mean(probs, axis=0).astype(np.float32)
+def predict_probs(model: MSTCN2, feats: np.ndarray) -> np.ndarray:
+    """[T, 6] softmax 概率（CPU）。"""
+    x = torch.from_numpy(np.asarray(feats, dtype=np.float32)).unsqueeze(0)
+    return torch.softmax(model(x), dim=-1)[0].numpy().astype(np.float32)

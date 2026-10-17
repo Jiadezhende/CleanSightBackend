@@ -38,6 +38,7 @@ from .hand_state import (
     DINO_WEIGHTS, EMBED_DIM, HandStateClassifier, backbone_key, embed_crops, load_dino, mask_overlay, square_crop,
 )
 from .postprocess import PP_MIN_LEN, merge_short_segments
+from .roles import hand_rows
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +95,10 @@ class CleanMSTCN2RoleEmbedSegmenter(OfflineSegmenter):
         _check_resolution(frames)
         ts = np.asarray([f.ts for f in frames], dtype=np.float64)
         rows = detection_rows(frames, width=WIDTH, height=HEIGHT)
-        emb = self._embed(ts, hand_boxes_per_frame(rows), context)
+        hands = hand_rows(rows)
+        emb = self._embed(ts, hand_boxes_per_frame(hands), context)
         hand_probs = HandStateClassifier(self.model_dir / HAND_STATE_FILE).probs(emb.astype(np.float64))
-        return RoleEmbedInput(ts=ts, features=build_features(rows, hand_probs))
+        return RoleEmbedInput(ts=ts, features=build_features(rows, hand_probs, hands))
 
     def segment(self, model_input: RoleEmbedInput) -> List[TemporalSegment]:
         from .model import load_model, predict_probs  # torch 只在真正前向时拉起
@@ -104,7 +106,7 @@ class CleanMSTCN2RoleEmbedSegmenter(OfflineSegmenter):
         if len(model_input.ts) == 0:
             return []
         model = load_model(self.model_dir / TEMPORAL_FILE)  # 整段前向 CPU 即可（9000 帧 ~16 ms）
-        probs = predict_probs([model], model_input.features)
+        probs = predict_probs(model, model_input.features)
         labels = merge_short_segments(probs.argmax(axis=1), self.min_segment_frames)
         self._last_probs = LabelProbs(ts=model_input.ts, probs=probs, labels=self.labels)
         return self._segments(model_input.ts, labels, probs)

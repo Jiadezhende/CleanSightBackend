@@ -38,7 +38,7 @@ def test_pp20_merges_short_runs_and_skips_idle(monkeypatch, tmp_path):
     probs[np.arange(labels.size), labels] = 0.9
     from app.services.inference.offline.impl.clean_mstcn2_bundle import model as model_mod
     monkeypatch.setattr(model_mod, "load_model", lambda path: None)
-    monkeypatch.setattr(model_mod, "predict_probs", lambda models, x: probs)
+    monkeypatch.setattr(model_mod, "predict_probs", lambda model, x: probs)
     seg = CleanMSTCN2BundleSegmenter(model_dir=str(tmp_path))
     segs = seg.segment(seg.preprocess(_frames(labels.size)))
     assert [(s.producer, s.label) for s in segs] == [("CleanMSTCN2BundleSegmenter", "long_brush_insert")]

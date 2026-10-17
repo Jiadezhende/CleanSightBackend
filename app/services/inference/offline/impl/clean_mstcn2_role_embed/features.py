@@ -16,16 +16,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from .bundle import bundle_columns
+from .bundle import compute_bundle
 from .contract import FEATURE_COLUMNS
 from .hand_state import CLASSES
 from .roles import assign_roles, ctrl_height, hand_rows, role_columns
 from .slots import SlotContext, role_order
 
 
-def hand_boxes_per_frame(frames: list[list[tuple]]) -> list[list[tuple]]:
-    """每帧手框 [(cx, cy, w, h)]（行序），供裁剪；全部帧展开后的行序即 ``hand_probs`` / 嵌入的行序。"""
-    _t, boxes, per_frame = hand_rows(frames)
+def hand_boxes_per_frame(hands) -> list[list[tuple]]:
+    """``hands`` = ``roles.hand_rows(frames)`` → 每帧手框 [(cx, cy, w, h)]，供裁剪；展开后的行序即 ``hand_probs`` / 嵌入的行序。"""
+    _t, boxes, per_frame = hands
     return [[tuple(boxes[r]) for r in rows] for rows in per_frame]
 
 
@@ -38,21 +38,21 @@ def hand_state_columns(t_of: np.ndarray, hand_probs: np.ndarray, T: int) -> dict
     return {n: out[:, i] for i, n in enumerate(names)}
 
 
-def build_features(frames: list[list[tuple]], hand_probs: np.ndarray, columns=FEATURE_COLUMNS,
-                   return_roles: bool = False):
-    """[T, 106] float32。``frames``：逐帧检测行；``hand_probs``：[N, 5]，按 ``hand_rows`` 的手行序排列。"""
-    t_of, boxes, per_frame = hand_rows(frames)
+def build_features(frames: list[list[tuple]], hand_probs: np.ndarray, hands=None) -> np.ndarray:
+    """[T, 106] float32。``frames``：逐帧检测行；``hand_probs``：[N, 5]，按 ``hand_rows`` 的手行序排列；
+    ``hands``：已算好的 ``hand_rows(frames)``（缺省现算）。"""
+    t_of, boxes, per_frame = hands if hands is not None else hand_rows(frames)
     T = len(frames)
     if len(hand_probs) != len(boxes):
         raise ValueError(f"手部状态概率 {len(hand_probs)} 行，但检测里有 {len(boxes)} 只手")
     hand_probs = np.asarray(hand_probs, dtype=np.float64).reshape(-1, len(CLASSES))
     feed, scope = assign_roles(boxes, per_frame, hand_probs[:, 0])
-    cols = bundle_columns(frames)
-    cols.update(SlotContext(frames).hand_columns(role_order(per_frame, feed, scope)))
+    bundle = compute_bundle(frames)
+    cols = dict(bundle.columns)
+    cols.update(SlotContext(frames, bundle).hand_columns(role_order(per_frame, feed, scope)))
     cols.update(role_columns(boxes, feed, scope, ctrl_height(frames)))
     cols.update(hand_state_columns(t_of, hand_probs, T))
-    missing = [c for c in columns if c not in cols]
+    missing = [c for c in FEATURE_COLUMNS if c not in cols]
     if missing:
         raise ValueError(f"缺少特征列：{missing}")
-    x = np.stack([np.asarray(cols[c], dtype=np.float32)[:T] for c in columns], axis=1)
-    return (x, {"feed": feed, "scope": scope, "hand_frame": t_of, "hand_boxes": boxes}) if return_roles else x
+    return np.stack([np.asarray(cols[c], dtype=np.float32)[:T] for c in FEATURE_COLUMNS], axis=1)

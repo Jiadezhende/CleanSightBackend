@@ -7,16 +7,14 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
 from .features_ama.clean_bbox_v2 import _impute_short_gaps
 from .features_ama.clean_bbox_v3 import _slot_channels
-from .features_ama.clean_bbox_v5 import _pair_block, scope_frame_offline
-from .frames import CTRL, FPS, HAND, MID
+from .features_ama.clean_bbox_v5 import Bundle, _pair_block
+from .frames import FPS, HAND
 
-ANCHORS = {CTRL: "scope_control_body", MID: "scope_mid_section"}
+ANCHORS = ("scope_control_body", "scope_mid_section")
 
 
 def _clip01(v: float) -> float:
@@ -29,37 +27,16 @@ def _cxcya(det) -> tuple:
     return tuple(np.float32(v) for v in (_clip01(cx), _clip01(cy), _clip01(w) * _clip01(h)))
 
 
-def _top1_slot(per_frame) -> np.ndarray:
-    """单目标槽位（conf = 1，带上一帧中心惩罚），[T, 5] = present, cx, cy, area, conf。"""
-    slot = np.zeros((len(per_frame), 5), dtype=np.float32)
-    prev = None
-    for t, cands in enumerate(per_frame):
-        if not cands:
-            continue
-
-        def score(c):
-            s = 1.0 * math.sqrt(max(float(c[2]), 1e-6))
-            if prev is not None:
-                s -= 0.15 * min(math.dist((float(c[0]), float(c[1])), tuple(prev)), math.sqrt(2.0))
-            return s
-
-        best = sorted(cands, key=score, reverse=True)[0]
-        slot[t] = (1.0, best[0], best[1], best[2], 1.0)
-        prev = slot[t, 1:3]
-    return slot
-
-
 class SlotContext:
     """一个视频与排序无关的部分：每帧的手框、操作部 / 插入部锚点和器械轴。"""
 
-    def __init__(self, frames: list[list[tuple]]):
+    def __init__(self, frames: list[list[tuple]], bundle: Bundle):
+        """``bundle``：同一视频 ``bundle.compute_bundle`` 的结果，复用它的锚点轨迹与器械轴（与 bundle 列同一口径）。"""
         self.T = len(frames)
         self.hands = [[_cxcya(d) for d in dets if d[0] == HAND] for dets in frames]
-        self.feats, self.active = {}, {}
-        for cid, name in ANCHORS.items():
-            per_frame = [[_cxcya(d) for d in dets if d[0] == cid] for dets in frames]
-            self.feats[name], self.active[name] = _impute_short_gaps(_top1_slot(per_frame), FPS)
-        self.frame = scope_frame_offline(self.feats, self.active, self.T, FPS, smooth=True)
+        self.feats = {name: bundle.features[name] for name in ANCHORS}
+        self.active = {name: bundle.active[name] for name in ANCHORS}
+        self.frame = bundle.frame
 
     def hand_columns(self, order) -> dict[str, np.ndarray]:
         """order[t] = (槽位 1 的手在本帧中的序号或 None, 槽位 2 的 …) → 受排序影响的 28 列。"""
