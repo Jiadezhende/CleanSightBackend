@@ -1,10 +1,19 @@
-"""mstcn2-role-embed 的输入输出契约：106 维特征列名与列序（= 训练交付包 ``feature_columns.json``）、6 类动作名与类序。
-
-两者都随权重固定，改动必须换权重。
+"""mstcn2-role-embed 随权重固定的契约：类序、106 维特征列序（= 训练交付包 ``feature_columns.json``）、
+网络结构、输入分辨率、物料文件名与 checkpoint 格式。改动必须换权重。
 """
 
 ACTION_NAMES = ("idle", "water_injection", "flush", "long_brush_insert", "long_brush_withdraw",
                 "short_brush_cleaning")
+
+# 训练配方 sig-c6fb-feedrole-fineB-e30-small（交付包 .pt.json 的 model 段）；换训练配置须同步改这里
+STRUCTURE = dict(in_dim=106, classes=len(ACTION_NAMES), hidden=32, num_stages=2, num_layers=5, dropout=0.3)
+
+WIDTH, HEIGHT = 640, 480  # 训练分辨率；水印遮挡区域按它写死
+
+# 物料：model_dir/{TEMPORAL_FILE, HAND_STATE_FILE}。temporal.pt 是纯 state_dict（weights_only=True、strict）；
+# hand_state.npz 是 PCA + 逐类逻辑回归参数（allow_pickle=False）。骨干目录的文件名见 hand_state.DINO_WEIGHTS。
+TEMPORAL_FILE = "temporal.pt"
+HAND_STATE_FILE = "hand_state.npz"
 
 FEATURE_VERSION = "sig-feedrole-slot-fineB-v41-106d"
 

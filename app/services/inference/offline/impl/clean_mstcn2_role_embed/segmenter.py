@@ -27,7 +27,7 @@ from app.types.temporal import LabelProbs, TemporalSegment
 from app.services.inference.offline.segmenter import OfflineContext, OfflineSegmenter
 from app.services.inference.resample import input_fps, resample_by_ts
 
-from .contract import ACTION_NAMES
+from .contract import ACTION_NAMES, HAND_STATE_FILE, HEIGHT, TEMPORAL_FILE, WIDTH
 from .features import build_features, hand_boxes_per_frame
 from .frames import FPS, detection_rows
 from .hand_state import (
@@ -37,10 +37,7 @@ from .postprocess import PP_MIN_LEN, merge_short_segments
 
 logger = logging.getLogger(__name__)
 
-TEMPORAL_FILE = "temporal.pt"
-HAND_STATE_FILE = "hand_state.npz"
 CACHE_NAME = "hand_embeddings"  # 键：ts [N] / boxes [N,4] / emb [N,768] fp16 / backbone 标识
-WIDTH, HEIGHT = 640, 480  # 训练分辨率；水印遮挡区域按它写死
 _RATE_SLACK = 0.01  # 帧率比较的相对余量，吸收 ts 舍入与抖动（同 resample）
 
 

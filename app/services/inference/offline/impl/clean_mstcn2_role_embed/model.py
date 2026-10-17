@@ -1,7 +1,7 @@
 """时序模型 MS-TCN2（推理部分），与仓库 ``framework/cleansight_eval/temporal/models/mstcn2.py`` 结构一致。
 
 输入 [B, T, 106] → 模型内 z-score（均值 / 方差是随权重保存的 buffer）→ 预测生成 stage → 精化 stage →
-最后一个 stage 的 logits [B, T, 6]。双向卷积，非因果，只能整段离线推理。结构超参写死在 ``STRUCTURE``，
+最后一个 stage 的 logits [B, T, 6]。双向卷积，非因果，只能整段离线推理。结构超参写死在 ``contract.STRUCTURE``，
 权重是纯 state_dict 单文件，strict 加载。
 """
 
@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .contract import ACTION_NAMES
+from .contract import STRUCTURE
 
 
 class DilatedResidualLayer(nn.Module):
@@ -84,10 +84,6 @@ class MSTCN2(nn.Module):
         for refine in self.refines:
             out = refine(F.softmax(out, dim=1))
         return out.transpose(1, 2)
-
-
-# 训练配方 sig-c6fb-feedrole-fineB-e30-small（交付包 .pt.json 的 model 段）；换训练配置须同步改这里
-STRUCTURE = dict(in_dim=106, classes=len(ACTION_NAMES), hidden=32, num_stages=2, num_layers=5, dropout=0.3)
 
 
 def load_model(path: Path, device="cpu") -> MSTCN2:
