@@ -7,6 +7,7 @@
 
 物料目录内文件名固定：``model_dir/{temporal.pt, hand_state.npz}``，``backbone_dir`` = dinov2 hub 代码 + 权重。
 输入契约：15 fps（= 检测帧率，strict 校验）、640×480；raw 录像缺任何一帧有手的画面即整次失败，不跳手。
+手部嵌入缓存在本 run 的 ``inference/cache_hand_embeddings.npz``：手（ts、框）与骨干口径都一致才复用，否则重算覆盖。
 """
 
 from __future__ import annotations
@@ -22,19 +23,22 @@ import numpy as np
 
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
-from app.services.inference.offline.segmenter import OfflineContext, OfflineSegmenter, VideoSource
+from app.services.inference.offline.segmenter import OfflineContext, OfflineSegmenter
 from app.services.inference.resample import resample_by_ts
 
 from .contract import ACTION_NAMES
 from .features import build_features, hand_boxes_per_frame
 from .frames import FPS, detection_rows
-from .hand_state import EMBED_DIM, HandStateClassifier, embed_crops, load_dino, mask_overlay, square_crop
+from .hand_state import (
+    EMBED_DIM, HandStateClassifier, backbone_key, embed_crops, load_dino, mask_overlay, square_crop,
+)
 from .postprocess import PP_MIN_LEN, merge_short_segments
 
 logger = logging.getLogger(__name__)
 
 TEMPORAL_FILE = "temporal.pt"
 HAND_STATE_FILE = "hand_state.npz"
+CACHE_NAME = "hand_embeddings"  # 键：ts [N] / boxes [N,4] / emb [N,768] fp16 / backbone 标识
 WIDTH, HEIGHT = 640, 480  # 训练分辨率；水印遮挡区域按它写死
 
 
@@ -81,7 +85,7 @@ class CleanC7Segmenter(OfflineSegmenter):
         _check_resolution(frames)
         ts = np.asarray([f.ts for f in frames], dtype=np.float64)
         rows = detection_rows(frames, width=WIDTH, height=HEIGHT)
-        emb = self._embed(ts, hand_boxes_per_frame(rows), context.video)
+        emb = self._embed(ts, hand_boxes_per_frame(rows), context)
         hand_probs = HandStateClassifier(self.model_dir / HAND_STATE_FILE).probs(emb.astype(np.float64))
         return C7Input(ts=ts, features=build_features(rows, hand_probs))
 
@@ -119,19 +123,32 @@ class CleanC7Segmenter(OfflineSegmenter):
             ))
         return out
 
-    def _embed(self, ts: np.ndarray, hands: List[List[tuple]], video: VideoSource) -> np.ndarray:
-        """按 ts 从 raw 轨取有手的帧，逐只手裁剪嵌入；行序 = 逐帧、帧内检测行序（= ``hand_rows``）。"""
+    def _embed(self, ts: np.ndarray, hands: List[List[tuple]], context: OfflineContext) -> np.ndarray:
+        """每只手的嵌入，行序 = 逐帧、帧内检测行序（= ``hand_rows``）；本 run 的缓存与这些手逐行一致就直接用。"""
+        row_ts = np.asarray([t for t, boxes in zip(ts, hands) for _ in boxes], dtype=np.float64)
+        row_boxes = np.asarray([b for boxes in hands for b in boxes], dtype=np.float64).reshape(-1, 4)
+        if len(row_ts) == 0:
+            return np.zeros((0, EMBED_DIM), dtype=np.float16)
+        key = backbone_key(self.backbone_dir)
+        cached = context.load_cache(CACHE_NAME)
+        if _cache_matches(cached, row_ts, row_boxes, key):
+            logger.info("[CleanC7Segmenter] 手部嵌入命中缓存 | hands=%d", len(row_ts))
+            return cached["emb"]
+        emb = self._compute_embeddings(ts, hands, context)
+        context.save_cache(CACHE_NAME, {"ts": row_ts, "boxes": row_boxes, "emb": emb, "backbone": np.array(key)})
+        return emb
+
+    def _compute_embeddings(self, ts: np.ndarray, hands: List[List[tuple]], context: OfflineContext) -> np.ndarray:
+        """按 ts 从 raw 轨取有手的帧，逐只手裁剪嵌入；缺任何一帧即失败，不跳手。"""
         wanted = {float(t): boxes for t, boxes in zip(ts, hands) if boxes}
         total = sum(len(b) for b in wanted.values())
-        if not wanted:
-            return np.zeros((0, EMBED_DIM), dtype=np.float16)
         device = self._resolve_device()
         started = time.monotonic()
         net = load_dino(self.backbone_dir, device)
         found = set()
 
         def crops():
-            for frame in video(width=WIDTH, height=HEIGHT, start_ts=min(wanted), end_ts=max(wanted)):
+            for frame in context.video(width=WIDTH, height=HEIGHT, start_ts=min(wanted), end_ts=max(wanted)):
                 boxes = wanted.get(frame.timestamp)
                 if boxes is None or frame.timestamp in found:
                     continue
@@ -161,6 +178,18 @@ class CleanC7Segmenter(OfflineSegmenter):
                 f"{os.environ.get('CUDA_VISIBLE_DEVICES')!r}）；无 GPU 的机器把 device 配成 cpu"
             )
         return self.device
+
+
+def _cache_matches(cached, row_ts: np.ndarray, row_boxes: np.ndarray, key: str) -> bool:
+    """缓存与本次的手逐行一致（ts、框）且来自同一骨干与裁剪口径。"""
+    if not cached or not {"ts", "boxes", "emb", "backbone"} <= cached.keys():
+        return False
+    return (
+        str(cached["backbone"]) == key
+        and cached["emb"].shape == (len(row_ts), EMBED_DIM)
+        and np.array_equal(cached["ts"], row_ts)
+        and np.array_equal(cached["boxes"], row_boxes)
+    )
 
 
 def _check_resolution(frames: Sequence[FrameDetection]) -> None:

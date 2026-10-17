@@ -63,11 +63,22 @@ def _video(frames_by_ts, calls=None):
     return video
 
 
+def _context(video, store=None):
+    store = {} if store is None else store
+    return OfflineContext(
+        video=video,
+        load_cache=lambda name: store.get(name),
+        save_cache=lambda name, arrays: store.__setitem__(name, dict(arrays)),
+    ), store
+
+
 class TestEmbed:
     @pytest.fixture(autouse=True)
     def _stub_backbone(self, monkeypatch):
-        """DINOv2 打桩：嵌入 = 裁剪图中心像素值（能看出每行来自哪一帧）。"""
-        monkeypatch.setattr(seg_mod, "load_dino", lambda backbone_dir, device: None)
+        """DINOv2 打桩：嵌入 = 裁剪图中心像素值（能看出每行来自哪一帧）；记录骨干被加载几次。"""
+        self.loads = []
+        monkeypatch.setattr(seg_mod, "load_dino", lambda backbone_dir, device: self.loads.append(device))
+        monkeypatch.setattr(seg_mod, "backbone_key", lambda backbone_dir: "key-a")
         monkeypatch.setattr(CleanC7Segmenter, "_resolve_device", lambda self: "cpu")
 
         def embed(net, crops, device, batch_size, max_crops_per_s):
@@ -76,22 +87,57 @@ class TestEmbed:
 
         monkeypatch.setattr(seg_mod, "embed_crops", embed)
 
+    _TS = np.array([1.0, 2.0, 3.0])
+    _HANDS = [[(0.5, 0.5, 0.1, 0.1), (0.6, 0.6, 0.1, 0.1)], [], [(0.5, 0.5, 0.1, 0.1)]]
+    _PIXELS = [(0.5, 9), (1.0, 10), (2.0, 20), (3.0, 30)]
+
     def test_rows_follow_frame_then_box_order_and_skip_handless_frames(self):
-        ts = np.array([1.0, 2.0, 3.0])
-        hands = [[(0.5, 0.5, 0.1, 0.1), (0.6, 0.6, 0.1, 0.1)], [], [(0.5, 0.5, 0.1, 0.1)]]
         calls = []
-        emb = _segmenter()._embed(ts, hands, _video([(0.5, 9), (1.0, 10), (2.0, 20), (3.0, 30)], calls))
+        ctx, store = _context(_video(self._PIXELS, calls))
+        emb = _segmenter()._embed(self._TS, self._HANDS, ctx)
         assert emb[:, 0].tolist() == [10, 10, 30]
         assert calls == [{"width": 640, "height": 480, "start_ts": 1.0, "end_ts": 3.0}]
+        saved = store["hand_embeddings"]
+        assert saved["ts"].tolist() == [1.0, 1.0, 3.0] and saved["boxes"].shape == (3, 4)
+        assert str(saved["backbone"]) == "key-a"
 
-    def test_missing_frame_fails_instead_of_skipping_hands(self):
+    def test_matching_cache_skips_video_and_backbone(self):
+        ctx, store = _context(_video(self._PIXELS))
+        _segmenter()._embed(self._TS, self._HANDS, ctx)
+        calls = []
+        again, _ = _context(_video(self._PIXELS, calls), store)
+        emb = _segmenter()._embed(self._TS, self._HANDS, again)
+        assert emb[:, 0].tolist() == [10, 10, 30]
+        assert calls == [] and len(self.loads) == 1
+
+    @pytest.mark.parametrize("change", ["backbone", "boxes"])
+    def test_stale_cache_is_recomputed_and_overwritten(self, monkeypatch, change):
+        ctx, store = _context(_video(self._PIXELS))
+        _segmenter()._embed(self._TS, self._HANDS, ctx)
+        hands = self._HANDS
+        if change == "backbone":
+            monkeypatch.setattr(seg_mod, "backbone_key", lambda backbone_dir: "key-b")
+        else:
+            hands = [hands[0], [], [(0.4, 0.4, 0.1, 0.1)]]
+        again, _ = _context(_video(self._PIXELS), store)
+        _segmenter()._embed(self._TS, hands, again)
+        assert len(self.loads) == 2
+        saved = store["hand_embeddings"]
+        assert str(saved["backbone"]) == ("key-b" if change == "backbone" else "key-a")
+        assert saved["boxes"][-1].tolist() == list(hands[2][0])
+
+    def test_missing_frame_fails_instead_of_skipping_hands_and_saves_nothing(self):
         hands = [[(0.5, 0.5, 0.1, 0.1)], [(0.5, 0.5, 0.1, 0.1)]]
+        ctx, store = _context(_video([(1.0, 10)]))
         with pytest.raises(ValueError, match="缺 1/2"):
-            _segmenter()._embed(np.array([1.0, 2.0]), hands, _video([(1.0, 10)]))
+            _segmenter()._embed(np.array([1.0, 2.0]), hands, ctx)
+        assert store == {}
 
-    def test_no_hands_never_touches_video_or_backbone(self):
-        emb = _segmenter()._embed(np.array([1.0]), [[]], _video([], calls := []))
-        assert emb.shape == (0, 768) and calls == []
+    def test_no_hands_never_touches_video_backbone_or_cache(self):
+        calls = []
+        ctx, store = _context(_video([], calls))
+        emb = _segmenter()._embed(np.array([1.0]), [[]], ctx)
+        assert emb.shape == (0, 768) and calls == [] and self.loads == [] and store == {}
 
 
 class TestSegments:
@@ -113,12 +159,12 @@ class TestContract:
     def test_rejects_non_640x480(self):
         frames = [_frame(t / 15, w=1280, h=720) for t in range(3)]
         with pytest.raises(ValueError, match="640×480"):
-            _segmenter().preprocess(frames, OfflineContext(video=_video([])))
+            _segmenter().preprocess(frames, _context(_video([]))[0])
 
     def test_rejects_detection_rate_below_15fps(self):
         frames = [_frame(t / 7.5) for t in range(5)]
         with pytest.raises(ValueError, match="低于契约帧率"):
-            _segmenter().preprocess(frames, OfflineContext(video=_video([])))
+            _segmenter().preprocess(frames, _context(_video([]))[0])
 
     @pytest.mark.parametrize("kw", [
         {"device": "mps"}, {"max_crops_per_s": 0}, {"batch_size": 0}, {"min_segment_frames": -1},

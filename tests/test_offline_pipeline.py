@@ -342,6 +342,21 @@ class TestOfflineRunner:
         assert res.status == "completed"
         assert calls == [(make_run(1, 2), {"width": 640, "height": 480})]
 
+    def test_context_cache_roundtrips_and_degrades_to_miss(self, tmp_storage):
+        """缓存经 context 存取；读坏了当未命中，写失败（run 已回收）只告警不抛。"""
+        import numpy as np
+        from app.types.run import RunIdentity
+
+        _write_detections(1, 2)
+        run = make_run(1, 2)
+        ctx = OfflineRunner._context(run)
+        assert ctx.load_cache("c") is None
+        ctx.save_cache("c", {"a": np.arange(3)})
+        assert ctx.load_cache("c")["a"].tolist() == [0, 1, 2]
+        (_inference_dir(1, 2) / "cache_c.npz").write_bytes(b"broken")
+        assert ctx.load_cache("c") is None
+        OfflineRunner._context(RunIdentity(1, 2, run.run_id + 1)).save_cache("c", {"a": np.zeros(1)})
+
     def test_bad_label_probs_shape_skips_bypass_keeps_facts(self, tmp_storage):
         """旁路形状不一致：不落 npz，事实照常写（旁路不影响主结果）。"""
         _write_detections(1, 2)

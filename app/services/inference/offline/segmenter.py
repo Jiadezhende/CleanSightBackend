@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Iterator, List, Optional, Sequence
+from typing import Any, Callable, ClassVar, Dict, Iterator, List, Mapping, Optional, Sequence
 
 from app.types.detection import FrameDetection
 from app.types.frame import Frame
@@ -40,9 +40,15 @@ VideoSource = Callable[..., Iterator[Frame]]
 
 @dataclass(frozen=True)
 class OfflineContext:
-    """Runner 注入给 `uses_context` 策略的 run 级资源；策略经它取数据，不直接碰存储。"""
+    """Runner 注入给 `uses_context` 策略的 run 级资源；策略经它取数据，不直接碰存储。
+
+    缓存是该 run 的中间产物（`{name: ndarray}`，随 run 目录 TTL 回收）：没有或读坏了 `load_cache` 返回 None；
+    `save_cache` 写失败只告警。内容是否仍有效由策略自己核对。
+    """
 
     video: VideoSource
+    load_cache: Callable[[str], Optional[Dict[str, Any]]]
+    save_cache: Callable[[str, Mapping[str, Any]], None]
 
 
 class OfflineSegmenter(ABC):

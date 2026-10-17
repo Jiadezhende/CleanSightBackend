@@ -22,7 +22,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Mapping, Optional
 
 import numpy as np
 
@@ -115,7 +115,11 @@ class OfflineRunner:
     @staticmethod
     def _context(run: RunIdentity) -> OfflineContext:
         """绑定到本次锁定 run 的资源；取帧只走 raw 轨（帧 ts 与 detections 位级相等）。"""
-        return OfflineContext(video=functools.partial(hls.iter_frames, run))
+        return OfflineContext(
+            video=functools.partial(hls.iter_frames, run),
+            load_cache=functools.partial(_load_cache, run),
+            save_cache=functools.partial(_save_cache, run),
+        )
 
     @staticmethod
     def _replace_segments(run: RunIdentity, facts: List[TemporalSegment]) -> None:
@@ -179,6 +183,25 @@ class OfflineRunner:
             if not (0.0 <= f.conf <= 1.0):
                 raise ValueError(f"TemporalSegment conf 越界: {f.conf}")
         return facts
+
+
+def _load_cache(run: RunIdentity, name: str) -> Optional[Dict[str, np.ndarray]]:
+    """缓存读坏了当作没有（策略重算并覆盖），不让一份坏缓存卡死这个 run 的离线作业。"""
+    try:
+        return inference_store.read_offline_cache(run, name)
+    except (OSError, ValueError, KeyError) as e:
+        logger.warning("[OfflineRunner] 缓存不可读，按未命中处理 task=%s step=%s name=%s: %s",
+                       run.task_id, run.step_id, name, e)
+        return None
+
+
+def _save_cache(run: RunIdentity, name: str, arrays: Mapping[str, np.ndarray]) -> None:
+    """缓存写失败只告警：本次结果不依赖它；run 已被回收时后面写事实会判 reclaimed。"""
+    try:
+        inference_store.write_offline_cache(run, name, arrays)
+    except OSError as e:
+        logger.warning("[OfflineRunner] 缓存写失败 task=%s step=%s name=%s: %s",
+                       run.task_id, run.step_id, name, e)
 
 
 def _label_probs_problem(probs: LabelProbs) -> str:

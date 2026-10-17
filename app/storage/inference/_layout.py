@@ -1,7 +1,7 @@
-"""本域的布局：域根目录与三份产物的文件名。
+"""本域的布局：域根目录与各产物的文件名。
 
     domain_dir(run, create=)          本域在该 run 下的根，域内所有路径都经它
-    DETECTIONS_NAME / TEMPORAL_NAME / LABEL_PROBS_NAME
+    DETECTIONS_NAME / TEMPORAL_NAME / LABEL_PROBS_NAME / cache_name(name)
 
 域名 `_DOMAIN` 全文件只出现一次；文件名属「内容」归本域持有，`_root` 对其零知识。
 
@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from app.types.run import RunIdentity
@@ -22,6 +23,15 @@ _DOMAIN = "inference"
 DETECTIONS_NAME = "detections.jsonl"  # 每帧一行，L1 检测结果
 TEMPORAL_NAME = "temporal.jsonl"      # 每条一行，L3 时序分析事实
 LABEL_PROBS_NAME = "label_probs.npz"  # 离线分割逐帧类别概率，可视化旁路
+
+_CACHE_NAME_RE = re.compile(r"[a-z0-9_]+")
+
+
+def cache_name(name: str) -> str:
+    """离线策略中间产物缓存的文件名 `cache_{name}.npz`；`name` 只许小写字母、数字、下划线。"""
+    if not _CACHE_NAME_RE.fullmatch(name):
+        raise ValueError(f"缓存名只许 [a-z0-9_]: {name!r}")
+    return f"cache_{name}.npz"
 
 
 def domain_dir(run: RunIdentity, *, create: bool = False) -> Path:

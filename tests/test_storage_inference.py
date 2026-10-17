@@ -496,3 +496,52 @@ class TestQueryHasOfflineResults:
         path.parent.mkdir(parents=True)
         path.write_bytes(b"not-an-npz")
         assert inference.query_has_offline_results(_run(1, 2)) is True
+
+
+# ---------------------------------------------------------------------------
+# cache_{name}.npz：离线策略中间产物缓存
+# ---------------------------------------------------------------------------
+
+
+class TestOfflineCache:
+    def test_roundtrip_keeps_dtype_and_values(self, tmp_storage):
+        arrays = {"ts": np.array([1727000000.123456, 1.5]), "emb": np.ones((2, 3), np.float16),
+                  "backbone": np.array("dinov2|abc")}
+        inference.write_offline_cache(_run(1, 2), "hand_embeddings", arrays)
+        got = inference.read_offline_cache(_run(1, 2), "hand_embeddings")
+        assert got.keys() == arrays.keys()
+        assert got["ts"].tolist() == arrays["ts"].tolist() and got["emb"].dtype == np.float16
+        assert str(got["backbone"]) == "dinov2|abc"
+        assert [p.name for p in _domain_dir(tmp_storage, 1, 2).iterdir()] == ["cache_hand_embeddings.npz"]
+
+    def test_overwrite_replaces_whole_file(self, tmp_storage):
+        inference.write_offline_cache(_run(1, 2), "c", {"a": np.zeros(1), "b": np.zeros(1)})
+        inference.write_offline_cache(_run(1, 2), "c", {"a": np.ones(1)})
+        assert inference.read_offline_cache(_run(1, 2), "c").keys() == {"a"}
+
+    def test_missing_returns_none_creates_nothing(self, tmp_storage):
+        assert inference.read_offline_cache(RunIdentity(1, 2, RUN_ID), "c") is None
+        assert list(tmp_storage.iterdir()) == []
+
+    @pytest.mark.parametrize("name", ["", "Hand", "../x", "a.b"])
+    def test_bad_name_rejected(self, tmp_storage, name):
+        with pytest.raises(ValueError):
+            inference.write_offline_cache(_run(1, 2), name, {"a": np.zeros(1)})
+
+    @pytest.mark.parametrize("payload", [b"not-an-npz", b""])
+    def test_corrupt_file_is_value_error(self, tmp_storage, payload):
+        _run(1, 2)
+        path = _domain_dir(tmp_storage, 1, 2) / "cache_c.npz"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(payload)
+        with pytest.raises(ValueError):
+            inference.read_offline_cache(_run(1, 2), "c")
+
+    def test_object_arrays_refused(self, tmp_storage):
+        with pytest.raises(ValueError):
+            inference.write_offline_cache(_run(1, 2), "c", {"a": np.array([{"x": 1}], dtype=object)})
+
+    def test_reclaimed_run_write_fails_not_rebuilt(self, tmp_storage):
+        with pytest.raises(FileNotFoundError):
+            inference.write_offline_cache(RunIdentity(1, 2, RUN_ID), "c", {"a": np.zeros(1)})
+        assert list(tmp_storage.iterdir()) == []

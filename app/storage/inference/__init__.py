@@ -17,6 +17,7 @@
     detections.jsonl      append_detections / read_detections        路线 B（追加）
     temporal.jsonl      read_temporal / write_temporal         路线 C（原子整体替换）
     label_probs.npz     read_label_probs / write_label_probs   路线 C（原子整体替换）
+    cache_{name}.npz    read_offline_cache / write_offline_cache   路线 C；离线策略的中间产物，内容归策略
     查询                query_has_offline_results              有分段事实或有逐帧概率
 
 货币是 `app.types` 的跨服务契约：`FrameDetection`（`app.types.detection`）与
@@ -43,6 +44,7 @@
       detections.jsonl      每帧一行：ts + {流名: [检测框]} + 帧分辨率
       temporal.jsonl      每条一行：`type` 判别 event / segment
       label_probs.npz     离线分割逐帧类别概率：ts [T] + probs [T,C] + labels [C]
+      cache_{name}.npz    离线策略中间产物缓存（如 C7 的手部嵌入），随 run 目录 TTL 回收
       .{name}.tmp         路线 C 的暂存，换名后即消失
 
 ## 边界
@@ -51,6 +53,7 @@
 谁——全在调用方。**本域不持锁**：同一 run 的写由调用侧串行（规范 §6）。IO 失败一律 `OSError` 原样抛，包成什么由调用方定。
 """
 
+from ._cache import read_offline_cache, write_offline_cache
 from ._detection import append_detections, read_detections
 from ._temporal import (
     query_has_offline_results,
@@ -65,7 +68,9 @@ __all__ = [
     "query_has_offline_results",
     "read_detections",
     "read_label_probs",
+    "read_offline_cache",
     "read_temporal",
     "write_label_probs",
+    "write_offline_cache",
     "write_temporal",
 ]

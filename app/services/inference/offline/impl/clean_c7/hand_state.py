@@ -86,6 +86,17 @@ def load_dino(backbone_dir: Path, device: str):
     return net.eval().to(device)
 
 
+def backbone_key(backbone_dir: Path) -> str:
+    """嵌入的来源标识：骨干名 + 权重 sha256 + 裁剪口径。任何一项变了，旧嵌入缓存即失效。"""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(Path(backbone_dir) / DINO_WEIGHTS, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return f"{DINO}|{digest.hexdigest()}|crop{CROP_SCALE}x{CROP_SIZE}|overlay{OVERLAY}"
+
+
 def _batches(crops: Iterable[np.ndarray], batch_size: int) -> Iterator[list[np.ndarray]]:
     batch = []
     for crop in crops:
