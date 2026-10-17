@@ -31,7 +31,7 @@ from .contract import ACTION_NAMES
 from .features import build_features, hand_boxes_per_frame
 from .frames import FPS, detection_rows
 from .hand_state import (
-    EMBED_DIM, HandStateClassifier, backbone_key, embed_crops, load_dino, mask_overlay, square_crop,
+    DINO_WEIGHTS, EMBED_DIM, HandStateClassifier, backbone_key, embed_crops, load_dino, mask_overlay, square_crop,
 )
 from .postprocess import PP_MIN_LEN, merge_short_segments
 
@@ -107,6 +107,14 @@ class CleanMSTCN2RoleEmbedSegmenter(OfflineSegmenter):
         labels = merge_short_segments(probs.argmax(axis=1), self.min_segment_frames)
         self._last_probs = LabelProbs(ts=model_input.ts, probs=probs, labels=self.labels)
         return self._segments(model_input.ts, labels, probs)
+
+    def materials(self) -> Sequence[Path]:
+        return (
+            self.model_dir / TEMPORAL_FILE,
+            self.model_dir / HAND_STATE_FILE,
+            self.backbone_dir / "hubconf.py",
+            self.backbone_dir / DINO_WEIGHTS,
+        )
 
     def label_probs(self) -> Optional[LabelProbs]:
         return self._last_probs

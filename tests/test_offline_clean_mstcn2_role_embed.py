@@ -196,6 +196,11 @@ class TestContract:
         with pytest.raises(ValueError):
             _segmenter(**kw)
 
+    def test_materials_are_model_and_backbone_files(self):
+        assert [p.as_posix() for p in _segmenter().materials()] == [
+            "m/temporal.pt", "m/hand_state.npz", "b/hubconf.py", "b/dinov2_vits14_pretrain.pth",
+        ]
+
     def test_shipped_yaml_builds_mstcn2_role_embed(self):
         from app.services.inference.config import load_stage_config
         from app.services.inference.stage_factory import StageFactory

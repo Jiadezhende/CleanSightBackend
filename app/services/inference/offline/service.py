@@ -118,6 +118,20 @@ class OfflineJobService:
         self._queue = SerialTaskQueue("offline", maxsize=QUEUE_SIZE)
         self._queue.start()
         logger.info("[offline] 作业服务已启动")
+        self._preflight_materials()
+
+    def _preflight_materials(self) -> None:
+        """启动时核对激活策略的物料：缺失只告警（不影响在线，提交该 step 的作业时才会失败）。"""
+        try:
+            from .materials import check_materials
+
+            config = self._config if self._config is not None else load_stage_config()
+            missing = [s for s in check_materials(config) if not s.exists]
+        except Exception as e:
+            logger.warning("[offline] 物料预检未完成: %s", e)
+            return
+        for s in missing:
+            logger.warning("[offline] 离线物料缺失 | stage=%s | producer=%s | %s", s.stage, s.producer, s.path)
 
     def stop(self, timeout: float = 10.0) -> None:
         """kill 运行中的子进程，排队中的在排空时逐个记 cancelled（不会被「排空」拖住）。"""

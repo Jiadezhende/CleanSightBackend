@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, ClassVar, Dict, Iterator, List, Mapping, Optional, Sequence
 
 from app.types.detection import FrameDetection
@@ -76,6 +77,13 @@ class OfflineSegmenter(ABC):
     def segment(self, model_input: Any) -> List[TemporalSegment]:
         """消费 `preprocess` 的输出，做模型推理并解码为动作分段事实。"""
         raise NotImplementedError
+
+    def materials(self) -> Sequence[Path]:
+        """本实例按构造参数解析出的必需物料文件（部署核对 / 启动预检用）。
+
+        只拼路径：不读盘、不 import torch。不需要物料的策略保持默认空。
+        """
+        return ()
 
     def label_probs(self) -> Optional[LabelProbs]:
         """可选旁路：上一次 `segment()` 的逐帧类别概率，仅供可视化，默认无。

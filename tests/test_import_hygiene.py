@@ -394,6 +394,58 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
     )
 
 
+# 离线策略实现：每个策略一个包（或单文件模块），只许依赖框架契约；兄弟策略之间零 import。
+OFFLINE_IMPL_DIR = APP_DIR / "services" / "inference" / "offline" / "impl"
+OFFLINE_IMPL_ALLOWED = (
+    "app.services.inference.offline.segmenter",
+    "app.services.inference.resample",
+    "app.types",
+)
+
+
+def _offline_impl_units():
+    for path in sorted(OFFLINE_IMPL_DIR.iterdir()):
+        if path.name.startswith("__"):
+            continue
+        if path.is_dir():
+            yield f"app.services.inference.offline.impl.{path.name}", sorted(path.rglob("*.py"))
+        elif path.suffix == ".py":
+            yield f"app.services.inference.offline.impl.{path.stem}", [path]
+
+
+@pytest.mark.parametrize("unit,files", list(_offline_impl_units()), ids=lambda v: v if isinstance(v, str) else "")
+def test_offline_impl_imports_only_framework_contract(unit, files):
+    """一个离线策略只许 import 自己与框架契约（`OFFLINE_IMPL_ALLOWED`）。
+
+    历史策略要长期保留做对照：特征 / 后处理随权重冻结，策略间共享一份代码，改一处就会让别的历史模型静默漂移。
+    宁可复制，不许跨包 import；存储、client、其他 service 一律经 Runner 注入的 `OfflineContext`。
+    """
+    def ok(name):
+        return any(name == a or name.startswith(a + ".") for a in (unit, *OFFLINE_IMPL_ALLOWED))
+
+    violations = []
+    for path in files:
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = _abs_module(path, node)
+                if not module.startswith("app.") or ok(module):
+                    continue
+                bad = [f"{module}.{a.name}" for a in node.names if not ok(f"{module}.{a.name}")]
+            elif isinstance(node, ast.Import):
+                bad = [a.name for a in node.names if a.name.startswith("app.") and not ok(a.name)]
+            else:
+                continue
+            violations += [f"{rel}:{node.lineno} → {name}" for name in bad]
+    assert not violations, (
+        f"离线策略 {unit} import 了框架契约以外的 app 模块：\n  " + "\n  ".join(violations)
+        + f"\n允许：自身 + {list(OFFLINE_IMPL_ALLOWED)}。要用别的策略的代码就复制一份进本包。"
+    )
+
+
 def _imports_under(src_dir: Path, forbidden: str) -> list:
     """`src_dir` 下所有 import 了 `forbidden`（含子模块）的位置，相对导入先还原成绝对。"""
     violations = []

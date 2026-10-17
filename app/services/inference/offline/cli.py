@@ -2,6 +2,7 @@
 
     nice -n 15 python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--run-id R] [--threads 2]
     python -m app.services.inference.offline.cli query --task-id 100 --step-id 2 [--run-id R]
+    python -m app.services.inference.offline.cli materials            # 各 stage 激活策略的物料核对，缺失退出码 1
 
 设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动。
 `run` 的隔离在**任何 torch import 之前**生效：`CUDA_VISIBLE_DEVICES` 钉成 `settings.cuda_device`（与在线
@@ -99,6 +100,19 @@ def _query(args: argparse.Namespace) -> int:
     return 0
 
 
+def _materials(args: argparse.Namespace) -> int:
+    """各 stage 激活的离线策略要哪些物料、在不在；有缺失退出码 1（部署核对用）。"""
+    from .materials import check_materials
+    from app.services.inference.config import load_stage_config
+
+    statuses = check_materials(load_stage_config())
+    print(json.dumps(
+        [{"stage": s.stage, "producer": s.producer, "path": str(s.path), "exists": s.exists} for s in statuses],
+        ensure_ascii=False, indent=2,
+    ))
+    return 0 if all(s.exists for s in statuses) else 1
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.services.inference.offline.cli",
@@ -120,6 +134,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     query.add_argument("--run-id", type=int, default=None, help="查哪个 run（缺省 = 该 step 最新可见 run）")
     query.add_argument("--producer", default=None, help="只查询某个 producer 产出的分段")
 
+    sub.add_parser("materials", help="核对各 stage 激活的离线策略物料是否齐全（缺失退出码 1）")
+
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -132,6 +148,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run(args)
     if args.command == "query":
         return _query(args)
+    if args.command == "materials":
+        return _materials(args)
     parser.error(f"未知命令: {args.command}")
     return 2
 
