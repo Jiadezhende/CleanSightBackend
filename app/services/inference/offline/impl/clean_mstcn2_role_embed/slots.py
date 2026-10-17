@@ -1,7 +1,7 @@
 """角色序手部槽位：槽位 1 = 握镜手，槽位 2 = 送刷手，按此顺序重算 bundle 中与手部槽位有关的 28 列。
 
 原 bundle 把两只手按框面积排序（面积序）。这里只改变「哪只手放进哪个槽位」，各列的计算方式不变：
-短缺失插值、器械轴坐标、手到器械的距离都沿用 bundle 的实现（``features_ama``）。
+短缺失插值、器械轴坐标、手到器械的距离都沿用 ``bundle.py`` 的实现。
 与仓库 ``tools/hand_slot_stability.py::Video.hand_columns`` + ``tools/build_feedrole_slot_arm.py`` 同口径。
 """
 
@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .features_ama.clean_bbox_v2 import _impute_short_gaps
-from .features_ama.clean_bbox_v3 import _slot_channels
-from .features_ama.clean_bbox_v5 import Bundle, _pair_block
+from .bundle import Bundle, _impute_short_gaps, _pair_block, _slot_channels
 from .frames import FPS, HAND
 
 ANCHORS = ("scope_control_body", "scope_mid_section")
