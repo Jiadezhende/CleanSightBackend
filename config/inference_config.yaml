@@ -29,7 +29,7 @@ stages:
         class: app.services.inference.online.detection.impl.bubble.BubbleDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
-          conf_threshold: 0.1
+          conf_threshold: 0.6
           iou_threshold: 0.45
           enabled: true
       - name: bending
