@@ -2,8 +2,11 @@
 
     offline:
       class: app.services.inference.offline.impl.clean_gru_nodep.segmenter.CleanGRUNodepSegmenter
-      params: {model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-gru-nodep,
-               model_input_fps: 7.5, confidence_override: 1.0, min_duration_s: 0.2}
+      params:
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-gru-nodep
+        model_input_fps: 7.5
+        confidence_override: 1.0
+        min_duration_s: 0.2
 
 ``model_input_fps`` 须等于训练帧率、``confidence_override`` 须与训练标注口径一致（训练标注无置信度列 → 1.0）——配错不报错、
 结果静默变差。逐帧 argmax → 合并连续同类帧（跳过 idle、丢弃短于 ``min_duration_s`` 的段）。

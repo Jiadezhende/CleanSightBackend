@@ -103,9 +103,9 @@ stages:
             7: brush_tip_out
     offline:                         # 离线段（stage 粒度）：class 指定离线模型，缺省/空块 = 不可跑
       class: app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
-      # 换 class 须同时换 params（物料与特征 recipe 一一对应）。上一版默认：
-      #   ...impl.clean.CleanNodepGRUSegmenter ↔ model_path: .../clean-offline-gru-nodep.pt,
-      #   model_input_fps: 7.5, confidence_override: 1.0, min_duration_s: 0.2
+      # 换 class 须同时换 params（物料与特征 recipe 一一对应）。历史策略各自一个包，可直接粘贴的 YAML 片段写在
+      # impl/<包>/segmenter.py 的 docstring：clean_mstcn_bilstm / clean_asformer / clean_bigru / clean_gru_nodep（上一版默认）/
+      # clean_mstcn2_bundle。物料核对：python -m app.services.inference.offline.cli materials
       params:
         # 物料一个模型一个目录，目录内文件名由策略类写死
         model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-role-embed          # temporal.pt + hand_state.npz

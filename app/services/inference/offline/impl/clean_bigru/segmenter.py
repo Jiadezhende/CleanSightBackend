@@ -2,7 +2,9 @@
 
     offline:
       class: app.services.inference.offline.impl.clean_bigru.segmenter.CleanBiGRUSegmenter
-      params: {model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-bigru, min_duration_s: 0.2}
+      params:
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-bigru
+        min_duration_s: 0.2
 
 物料 ``model_dir/model.pt``（格式见 contract.py）。逐帧 argmax → 合并连续同类帧（跳过 idle、丢弃短于 ``min_duration_s`` 的段）。
 """

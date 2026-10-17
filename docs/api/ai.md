@@ -136,7 +136,7 @@ HLS 时间轴与 `temporal.jsonl` 取自同一个 run，不会出现新录像配
       "start_media_ms": 12040,
       "end_media_ms": 15880,
       "conf": 0.912,
-      "producer": "CleanMSTCNBiLSTMSegmenter"
+      "producer": "CleanMSTCN2RoleEmbedSegmenter"
     }
   ]
 }

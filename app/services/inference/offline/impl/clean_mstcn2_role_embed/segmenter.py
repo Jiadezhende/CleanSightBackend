@@ -2,8 +2,12 @@
 
     offline:
       class: app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
-      params: {model_dir: .../clean-offline-mstcn2-role-embed, backbone_dir: .../backbones/dinov2_vits14,
-               device: cuda, max_crops_per_s: 150, max_duration_s: 900}
+      params:
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-role-embed
+        backbone_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/backbones/dinov2_vits14
+        device: cuda
+        max_crops_per_s: 150
+        max_duration_s: 900
 
 物料目录内文件名固定：``model_dir/{temporal.pt, hand_state.npz}``，``backbone_dir`` = dinov2 hub 代码 + 权重。
 输入契约：训练帧率 15 fps（快于它按 ts 抽稀；慢于它照常跑，只告警）、640×480；

@@ -2,7 +2,8 @@
 
     offline:
       class: app.services.inference.offline.impl.clean_mstcn2_bundle.segmenter.CleanMSTCN2BundleSegmenter
-      params: {model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-bundle}
+      params:
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-bundle
 
 物料 ``model_dir/model.pt``（格式见 contract.py）。输入契约：训练帧率 15 fps（快于它按 ts 抽稀；慢于它照常跑，只告警）。
 检测按训练框文件口径还原（面积 top-K、6 位小数、置信度恒 1）→ 94 维 → 整段 MS-TCN2 → pp20（短于 20 帧的段并入相邻较长段）。
