@@ -167,12 +167,24 @@ class TestContract:
         seg_mod._warn_low_rate([_frame(t / rate) for t in range(30)])
         assert "低于训练帧率" in caplog.text
 
+    def test_long_run_truncated_to_first_max_duration(self, caplog):
+        frames = [_frame(1000.0 + t) for t in range(0, 1201, 60)]  # 20 分钟，每分钟一帧
+        kept = seg_mod._truncate(frames, 900.0)
+        assert [f.ts - 1000.0 for f in kept] == [float(t) for t in range(0, 901, 60)]
+        assert "只推理前 900s" in caplog.text
+
+    def test_short_run_or_no_cap_untouched(self):
+        frames = [_frame(float(t)) for t in range(10)]
+        assert seg_mod._truncate(frames, 900.0) is frames
+        assert seg_mod._truncate(frames, None) is frames
+
     def test_contract_rate_does_not_warn(self, caplog):
         seg_mod._warn_low_rate([_frame(t / 15.0) for t in range(30)])
         assert caplog.text == ""
 
     @pytest.mark.parametrize("kw", [
         {"device": "mps"}, {"max_crops_per_s": 0}, {"batch_size": 0}, {"min_segment_frames": -1},
+        {"max_duration_s": 0},
     ])
     def test_bad_params_fail_at_construction(self, kw):
         with pytest.raises(ValueError):
@@ -185,3 +197,4 @@ class TestContract:
         seg = StageFactory(load_stage_config()).create_offline_segmenter("2")
         assert isinstance(seg, CleanC7Segmenter) and seg.uses_context
         assert (seg.model_dir.name, seg.backbone_dir.name) == ("clean-offline-c7-v41", "dinov2_vits14")
+        assert seg.max_duration_s == 900.0

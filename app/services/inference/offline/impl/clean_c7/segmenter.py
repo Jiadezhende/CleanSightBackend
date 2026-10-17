@@ -3,11 +3,11 @@
     offline:
       class: app.services.inference.offline.impl.clean_c7.segmenter.CleanC7Segmenter
       params: {model_dir: .../clean-offline-c7-v41, backbone_dir: .../backbones/dinov2_vits14,
-               device: cuda, max_crops_per_s: 150}
+               device: cuda, max_crops_per_s: 150, max_duration_s: 900}
 
 物料目录内文件名固定：``model_dir/{temporal.pt, hand_state.npz}``，``backbone_dir`` = dinov2 hub 代码 + 权重。
 输入契约：训练帧率 15 fps（快于它按 ts 抽稀；慢于它照常跑，只告警）、640×480；
-raw 录像缺任何一帧有手的画面即整次失败，不跳手。
+只看前 ``max_duration_s``（从首帧起），超出部分截断不推理；raw 录像缺任何一帧有手的画面即整次失败，不跳手。
 手部嵌入缓存在本 run 的 ``inference/cache_hand_embeddings.npz``：手（ts、框）与骨干口径都一致才复用，否则重算覆盖。
 """
 
@@ -65,6 +65,7 @@ class CleanC7Segmenter(OfflineSegmenter):
         max_crops_per_s: Optional[float] = 150.0,
         batch_size: int = 16,
         min_segment_frames: int = PP_MIN_LEN,
+        max_duration_s: Optional[float] = 900.0,
     ):
         if not (device == "cpu" or device.startswith("cuda")):
             raise ValueError(f"device 只能是 cpu / cuda[:n]: {device!r}")
@@ -74,15 +75,19 @@ class CleanC7Segmenter(OfflineSegmenter):
             raise ValueError(f"batch_size 必须 >= 1: {batch_size}")
         if int(min_segment_frames) < 0:
             raise ValueError(f"min_segment_frames 不能为负: {min_segment_frames}")
+        if max_duration_s is not None and float(max_duration_s) <= 0:
+            raise ValueError(f"max_duration_s 必须大于 0（不截断填 null）: {max_duration_s}")
         self.model_dir = Path(model_dir)
         self.backbone_dir = Path(backbone_dir)
         self.device = device
         self.max_crops_per_s = None if max_crops_per_s is None else float(max_crops_per_s)
         self.batch_size = int(batch_size)
         self.min_segment_frames = int(min_segment_frames)
+        self.max_duration_s = None if max_duration_s is None else float(max_duration_s)
         self._last_probs: Optional[LabelProbs] = None
 
     def preprocess(self, frames: Sequence[FrameDetection], context: OfflineContext) -> C7Input:
+        frames = _truncate(frames, self.max_duration_s)
         _warn_low_rate(frames)
         frames = resample_by_ts(frames, FPS)
         _check_resolution(frames)
@@ -193,6 +198,19 @@ def _cache_matches(cached, row_ts: np.ndarray, row_boxes: np.ndarray, key: str) 
         and np.array_equal(cached["ts"], row_ts)
         and np.array_equal(cached["boxes"], row_boxes)
     )
+
+
+def _truncate(frames: Sequence[FrameDetection], max_duration_s: Optional[float]) -> Sequence[FrameDetection]:
+    """只留首帧起 ``max_duration_s`` 内的帧（闭区间），限住超长 step 的取帧 / 嵌入开销。"""
+    if max_duration_s is None or not frames or frames[-1].ts - frames[0].ts <= max_duration_s:
+        return frames
+    cutoff = frames[0].ts + max_duration_s
+    kept = [f for f in frames if f.ts <= cutoff]
+    logger.warning(
+        "[CleanC7Segmenter] 检测时长 %.0fs 超过上限 %.0fs，只推理前 %.0fs | frames %d → %d",
+        frames[-1].ts - frames[0].ts, max_duration_s, max_duration_s, len(frames), len(kept),
+    )
+    return kept
 
 
 def _warn_low_rate(frames: Sequence[FrameDetection]) -> None:

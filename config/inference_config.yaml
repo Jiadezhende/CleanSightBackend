@@ -112,6 +112,7 @@ stages:
         backbone_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/backbones/dinov2_vits14     # dinov2 hub 代码 + 权重
         device: cuda                 # DINOv2 所用设备；卡号随在线推理（settings.cuda_device）。无 GPU 的机器配 cpu
         max_crops_per_s: 150         # DINOv2 限速（次裁剪/秒），与在线 YOLO 共卡时让出算力；null = 不限速
+        max_duration_s: 900          # 只推理首帧起前 15 分钟，超出截断（限住超长 step 的资源占用）；null = 不截断
 
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到
