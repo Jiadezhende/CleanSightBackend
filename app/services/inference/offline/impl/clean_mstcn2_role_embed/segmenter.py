@@ -90,7 +90,7 @@ class CleanMSTCN2RoleEmbedSegmenter(OfflineSegmenter):
     def preprocess(self, frames: Sequence[FrameDetection], context: OfflineContext) -> RoleEmbedInput:
         frames = _truncate(frames, self.max_duration_s)
         _warn_low_rate(frames)
-        frames = resample_by_ts(frames, FPS)
+        frames = _dedup_ts(resample_by_ts(frames, FPS))
         _check_resolution(frames)
         ts = np.asarray([f.ts for f in frames], dtype=np.float64)
         rows = detection_rows(frames, width=WIDTH, height=HEIGHT)
@@ -219,6 +219,16 @@ def _truncate(frames: Sequence[FrameDetection], max_duration_s: Optional[float])
         "[CleanMSTCN2RoleEmbedSegmenter] 检测时长 %.0fs 超过上限 %.0fs，只推理前 %.0fs | frames %d → %d",
         frames[-1].ts - frames[0].ts, max_duration_s, max_duration_s, len(frames), len(kept),
     )
+    return kept
+
+
+def _dedup_ts(frames: Sequence[FrameDetection]) -> Sequence[FrameDetection]:
+    """同 ts 只留首帧：取帧与嵌入按 ts 对齐，同 ts 多帧会让嵌入行数与手行数对不上（输入慢于 7.5fps 时 resample 放行重复 ts）。"""
+    seen = set()
+    kept = [f for f in frames if not (f.ts in seen or seen.add(f.ts))]
+    if len(kept) == len(frames):
+        return frames
+    logger.warning("[CleanMSTCN2RoleEmbedSegmenter] 检测有重复 ts，同 ts 只留首帧 | frames %d → %d", len(frames), len(kept))
     return kept
 
 

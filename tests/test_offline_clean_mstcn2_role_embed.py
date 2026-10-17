@@ -178,6 +178,19 @@ class TestContract:
         assert seg_mod._truncate(frames, 900.0) is frames
         assert seg_mod._truncate(frames, None) is frames
 
+    def test_duplicate_ts_keeps_first_frame(self, caplog):
+        """5fps 输入下 resample 放行重复 ts；同 ts 多帧会让嵌入行数与手行数对不上，只留首帧。"""
+        first, second = _det("hand", [0, 0, 64, 48]), _det("syringe", [0, 0, 64, 48])
+        frames = [_frame(0.0), _frame(0.2, first), _frame(0.2, second), _frame(0.4)]
+        kept = seg_mod._dedup_ts(seg_mod.resample_by_ts(frames, 15))
+        assert [f.ts for f in kept] == [0.0, 0.2, 0.4]
+        assert kept[1].by_source["clean_large"].boxes == [first]
+        assert "重复 ts" in caplog.text
+
+    def test_unique_ts_untouched(self, caplog):
+        frames = [_frame(t / 15) for t in range(5)]
+        assert seg_mod._dedup_ts(frames) is frames and caplog.text == ""
+
     def test_contract_rate_does_not_warn(self, caplog):
         seg_mod._warn_low_rate([_frame(t / 15.0) for t in range(30)])
         assert caplog.text == ""

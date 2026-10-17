@@ -139,3 +139,11 @@ read_detections(run)                                   15 fps
   （目录内文件不变）。交付包原名（`role-hands-c7-mstcn2-v41`、`c7ref`）是外部名，保留。
 - **影响**：已部署机器的物料目录要同步改名；改名前产出的离线分段 producer 仍是 `CleanC7Segmenter`，按 producer 查询时不会命中。
 - **自测**：全量 `pytest tests/` 1071 passed。
+
+## 追加（2026-10-17）：同 ts 多帧只留首帧
+
+- **起因**（PR #115 review）：`_compute_embeddings` 按 ts 建字典取帧、算嵌入，同 ts 多帧互相覆盖；`hand_rows` 按行计手。
+  两者行数对不上时 `build_features` 报「手部状态概率 N 行，但检测里有 M 只手」，整次失败。
+  触发要两个条件同时成立：检测本身有重复 ts，且输入慢于 7.5fps（`resample_by_ts` 的 tol = 半个中位间隔 ≥ 1/15s 才放行重复 ts）。
+- **改动**：`preprocess` 在 `resample_by_ts` 之后接 `_dedup_ts`：同 ts 只留首帧，有丢帧时 WARNING；无重复时原样返回。
+- **自测**：新增用例（5fps 含重复 ts 经 resample + 去重后 ts 唯一且留首帧、无重复不动）；全量 `pytest tests/` 1117 passed。
