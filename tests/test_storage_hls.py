@@ -7,9 +7,9 @@
 1. **往返**（T1/T2）：段名 ↔ SegmentRef、sidecar 二进制 ↔ float64 数组、EXTINF 行 ↔
    累计时长。`ts_ms` 的往返只在 **ms 域**闭合（向下取整有损，读侧的 `bisect` 建立在它上面）。
 2. **事务不变式**（T3）：`insert_segment` 的 stage/commit 顺序与失败作废，用假的
-   编码器与转码器测——最该测的断言不能躲在需要 ffmpeg 的函数背后。
+   编码器测——最该测的断言不能躲在需要 ffmpeg 的函数背后。
 3. **落位**：产物只进 run 下的 `hls/` 子目录，run 根下不留文件；stage 目录 commit 后即消失。
-4. **端到端**（T4）：真 cv2 + 真 ffmpeg 跑一遍，只这一条依赖外部二进制，缺料时 skip。
+4. **端到端**（T4）：真 ffmpeg 跑一遍，只这一条依赖外部二进制，缺料时 skip。
 
 并发（T5）本期无断言：串行调度另有统一基建，本域刻意不加锁（见 `_insert` docstring）。
 """
@@ -85,20 +85,17 @@ def _read_tfdt(path: Path) -> int:
 def fake_pipeline(monkeypatch):
     """把 ① stage 那一步（帧经 stdin 灌 ffmpeg 编码）换成假的，只留事务骨架。
 
-    返回一个记录器，测试可以用它改写"转码产出什么"或让某一步失败。
+    返回一个记录器，测试可以用它改写"编码产出什么"或让编码失败。
     """
 
     class Pipeline:
         def __init__(self):
             self.encode_error = None
-            self.transcode_error = None
             self.tfdt_seed = 0
 
         def encode(self, stage, frames, fps):
             if self.encode_error is not None:
                 raise self.encode_error
-            if self.transcode_error is not None:
-                raise self.transcode_error
             fragment = stage / "fragment_0.mp4"
             fragment.write_bytes(_fragment_bytes(self.tfdt_seed))
             init = stage / "init.mp4"
@@ -620,7 +617,7 @@ class TestQueryHasInit:
         assert hls.query_has_init(RUN, "raw") is True
 
     def test_missing_even_with_segments(self, tmp_storage):
-        """首段 transcode 途中：段已登记、init 还没落——traceback 据此回 503。"""
+        """首段编码途中：段已登记、init 还没落——traceback 据此回 503。"""
         _seed_track([(TS0, 10.0)], with_init=False)
         assert hls.query_has_init(RUN, "raw") is False
 
@@ -991,9 +988,8 @@ class TestInsertSegment:
 
     # ── 失败即整体作废（W4）────────────────────────────────────────────────
 
-    @pytest.mark.parametrize("failing_step", ["encode", "transcode"])
-    def test_stage_failure_publishes_nothing(self, tmp_storage, fake_pipeline, failing_step):
-        setattr(fake_pipeline, f"{failing_step}_error", OSError("boom"))
+    def test_stage_failure_publishes_nothing(self, tmp_storage, fake_pipeline):
+        fake_pipeline.encode_error = OSError("boom")
         with pytest.raises(OSError):
             hls.insert_segment(RUN, "raw", _frames())
 
@@ -1250,16 +1246,12 @@ class TestDecodeCommand:
 
 
 def _external_tools_available() -> bool:
-    try:
-        import cv2  # noqa: F401
-    except ImportError:
-        return False
     return Path(settings.ffmpeg_path).exists()
 
 
-@pytest.mark.skipif(not _external_tools_available(), reason="需要 cv2 与项目自带 ffmpeg")
+@pytest.mark.skipif(not _external_tools_available(), reason="需要项目自带 ffmpeg")
 class TestInsertSegmentEndToEnd:
-    """真 cv2 + 真 ffmpeg 跑两段，断言产物确实是 HLS 能放的东西。"""
+    """真 ffmpeg 跑两段，断言产物确实是 HLS 能放的东西。"""
 
     def test_two_real_segments(self, tmp_storage):
         first = hls.insert_segment(RUN, "raw", _frames(start=1700.0, size=(64, 64)))
@@ -1301,7 +1293,7 @@ class TestEncodeInputGuard:
             _fmp4.encode(tmp_path, frames, 15.0)
 
 
-@pytest.mark.skipif(not _external_tools_available(), reason="需要 cv2 与项目自带 ffmpeg")
+@pytest.mark.skipif(not _external_tools_available(), reason="需要项目自带 ffmpeg")
 class TestEncodeStdinEndToEnd:
     def test_non_contiguous_frames_encode(self, tmp_path):
         """渲染/切片产出的帧可能是非连续视图，写 stdin 前要变连续，否则 rawvideo 字节错乱。"""
@@ -1327,9 +1319,9 @@ class TestEncodeStdinEndToEnd:
             _fmp4.encode(tmp_path, _frames(30, size=(240, 320)), 15.0)
 
 
-@pytest.mark.skipif(not _external_tools_available(), reason="需要 cv2 与项目自带 ffmpeg")
+@pytest.mark.skipif(not _external_tools_available(), reason="需要项目自带 ffmpeg")
 class TestDecodeEndToEnd:
-    """真 cv2 编码 + 真 ffmpeg 转码/解码跑一遍 —— **段级往返闭合到内存对象**（规范 §7.8）。
+    """真 ffmpeg 编码 + 解码跑一遍 —— **段级往返闭合到内存对象**（规范 §7.8）。
 
     帧内中心色块编码 frame_id（三通道各 4 bit、每阶 17 阶距，抗两道有损压缩）。
     **这是唯一能抓「ts ↔ 像素错配」的手段**：只比 ts 的话，帧号整体平移一位照样全绿，
