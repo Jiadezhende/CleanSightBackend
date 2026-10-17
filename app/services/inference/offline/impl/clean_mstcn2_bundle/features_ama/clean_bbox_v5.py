@@ -1,17 +1,12 @@
-"""ama-v5 离线特征：v2 绝对坐标块 ⊕ v3 器械轴块（轴修复版）⊕ 按 recipe 追加的通道。
+"""bundle 94 列（ama-v5-bundle-94d）的单遍计算：v2 绝对坐标块 ⊕ ctrl→mid 器械轴几何通道 ⊕ 轴观测 ⊕ hand / 锚点 pair。
 
-用法::
-
-    feats, names, version = build_ama_v5_features(
-        frame_rows, detection_mapping=..., fps=..., confidence_default=..., recipe="fix")
+    result = build_bundle(frame_rows, detection_mapping=..., fps=15.0, confidence_default=1.0)
+    result.columns            # {列名: [T] float32}，94 列；result.features / active / frame 供调用方复用
 
 硬约束：
-- 仅限离线：轴锚点双向填充、中值平滑、中心差分速度都会用到未来帧，不能用于流式推理；
-- 输入必须包含全部检测类的行，废弃类（scope_distal_end / short_brush / long_brush）由本模块剔除；
-- recipe 就是契约（维度见 ``RECIPES``），换 recipe 必须重训；
-- fix-compact 系列按列名规则 ``compact_keep`` 从 fix-226 选列，规则或列序变动必须升版本；
-- 放在 framework 的 ``temporal/features/`` 下，与 clean_bbox_v2 / v3 / v4 同包。
-设计与实验方案见 MODEL_SCHEME_V5.md。
+- 仅限离线：轴锚点双向填充、中值平滑都会用到未来帧，不能用于流式推理；
+- 废弃类（scope_distal_end / short_brush / long_brush）在读入层剔除；留哪些列由列名规则 ``compact_keep`` 决定，规则变动必须升版本。
+- 训练仓的同名实现分 ``full`` 与 ``fix-compact-pair`` 两个 recipe 各算一遍再拼；这里一次算完，逐列取自同一组函数调用，数值逐位一致。
 """
 
 from __future__ import annotations
@@ -23,26 +18,21 @@ import numpy as np
 from .clean_bbox_v2 import (
     OBJECTS,
     PAIR_FEATURES,
+    _build_base_matrix,
     _impute_short_gaps,
     _read_object_arrays,
     _select_hand_slots,
     _select_top1_slot,
-    build_clean_bbox_features,
 )
 from .clean_bbox_v3 import (
-    _CLIP_POS,
     _FALLBACK_REF_AREA,
     _FALLBACK_REF_LEN,
     V3_SLOT_CHANNELS,
     _slot_channels,
 )
-from .clean_bbox_v3 import _build_base_matrix as _build_v3_matrix
 
 DEPRECATED = frozenset({"scope_distal_end", "short_brush", "long_brush"})
-RECIPES = {"fix": 226, "smooth": 228, "full": 234, "fix-compact": 83, "fix-compact-pair": 92}
-VERSIONS = {recipe: f"ama-v5-{recipe}-{dim}d" for recipe, dim in RECIPES.items()}
-SMOOTH_RECIPES = frozenset({"smooth", "full"})
-COMPACT_RECIPES = frozenset({"fix-compact", "fix-compact-pair"})
+BUNDLE_DIM = 94
 
 # 紧凑契约的列名规则（作用于 fix-226 的列名）：
 # CP1 废弃类槽位列、任一端为废弃类的 pair 列（两块都删）；
@@ -68,9 +58,6 @@ COMPACT_PAIRS = (("hand", "scope_control_body"), ("hand", "scope_mid_section"), 
 MIN_AXIS_LEN = 0.03
 SMOOTH_SECONDS = 1.0
 AGE_CAP_SECONDS = 5.0
-VEL_SPANS_SECONDS = (0.5, 1.0, 2.0)
-VEL_CLIP = 2.0
-VEL_OBJECTS = ("hand_near", "brush_tip_out")
 
 
 class ScopeFrame(NamedTuple):
@@ -177,58 +164,6 @@ def scope_frame_offline(
     )
 
 
-def _scope_block(arrays: dict, frames: int, fps: float, *, smooth: bool):
-    """v3 113 维布局原样保留，只用修复后的坐标系重算各槽位通道。"""
-    matrix, names = _build_v3_matrix(arrays, frames, fps)
-    features, active = _object_tracks(arrays, frames, fps)
-    frame = scope_frame_offline(features, active, frames, fps, smooth=smooth)
-    width = len(V3_SLOT_CHANNELS)
-    for key in ["hand_top1", "hand_top2"] + [name for name in OBJECTS if name != "hand"]:
-        start = names.index(f"{key}_{V3_SLOT_CHANNELS[0]}")
-        matrix[:, start : start + width] = _slot_channels(
-            features[key], active[key], frame.axes, frame.ref_len, frame.ref_area, frame.origin
-        )
-    return matrix, names, features, active, frame
-
-
-def _near_hand(features: dict, active: dict, origin: np.ndarray):
-    """逐帧取离器械轴原点更近的那只手（送刷的手通常靠近镜口）。"""
-    centers = [features[f"hand_top{index}"][:, 2:4] for index in (1, 2)]
-    oks = [active[f"hand_top{index}"] for index in (1, 2)]
-    dists = [
-        np.where(ok, np.linalg.norm(center - origin, axis=1), np.inf)
-        for center, ok in zip(centers, oks)
-    ]
-    pick_second = dists[1] < dists[0]
-    return np.where(pick_second[:, None], centers[1], centers[0]), oks[0] | oks[1]
-
-
-def _velocity_block(features: dict, active: dict, frame: ScopeFrame, fps: float):
-    """沿器械轴的有符号速度（中心差分，多时间尺度），单位为轴长/秒，归一化到 [-1,1]。"""
-    tracks = {
-        "hand_near": _near_hand(features, active, frame.origin),
-        "brush_tip_out": (features["brush_tip_out"][:, 2:4], active["brush_tip_out"]),
-    }
-    frames = len(frame.origin)
-    time = np.arange(frames)
-    columns, names = [], []
-    for name in VEL_OBJECTS:
-        center, ok = tracks[name]
-        along = np.einsum("td,td->t", center - frame.origin, frame.axes) / frame.ref_len
-        along = np.clip(along, -_CLIP_POS, _CLIP_POS)
-        for span in VEL_SPANS_SECONDS:
-            half = max(1, int(round(span * fps / 2)))
-            low = np.clip(time - half, 0, frames - 1)
-            high = np.clip(time + half, 0, frames - 1)
-            valid = ok[low] & ok[high] & (high > low)
-            velocity = (along[high] - along[low]) * fps / np.maximum(high - low, 1)
-            velocity = np.clip(velocity, -VEL_CLIP, VEL_CLIP) / VEL_CLIP
-            velocity[~valid] = 0.0
-            columns.append(velocity.astype(np.float32))
-            names.append(f"{name}_v_along_{span:g}s")
-    return np.stack(columns, axis=1), names
-
-
 def compact_keep(name: str) -> bool:
     """fix-226 列名 → 是否进入紧凑契约（规则 R1–R3，见模块常量）。"""
     block, _, column = name.partition("/")
@@ -270,52 +205,55 @@ def _pair_block(features: dict, active: dict, frames: int):
     return np.stack(columns, axis=1), names
 
 
-def build_ama_v5_features(
+class Bundle(NamedTuple):
+    columns: dict  # {列名: [T] float32}，94 列
+    features: dict  # 各槽位插值后的 [T,8]（hand_top1 / hand_top2 / 各目标）
+    active: dict  # 各槽位 [T] bool
+    frame: ScopeFrame  # 平滑后的 ctrl→mid 器械轴
+
+
+def build_bundle(
     frame_rows: list[list[tuple]],
     *,
     detection_mapping: dict[int, str],
     fps: float,
     confidence_default: float,
-    mask_target_ids: frozenset[int] = frozenset(),
-    recipe: str = "fix",
-):
-    """逐视频 [T,D]；返回 (矩阵, 列名, 契约版本)。"""
-    if recipe not in RECIPES:
-        raise ValueError(f"未知 recipe={recipe!r}；可用: {sorted(RECIPES)}")
+) -> Bundle:
+    """逐视频 bundle 94 列 + 中间量。列名、取值与训练仓 ``build_candidate_columns``（full + fix-compact-pair）逐位一致。"""
+    if not frame_rows:
+        raise ValueError("bundle 特征至少需要一帧")
+    if fps <= 0:
+        raise ValueError("bundle 特征 fps 必须大于0")
+    if not 0.0 <= confidence_default <= 1.0:
+        raise ValueError("detection_confidence_default 必须在0..1")
     filtered = {cid: name for cid, name in detection_mapping.items() if name not in DEPRECATED}
-    v2_feats, v2_names = build_clean_bbox_features(
-        frame_rows,
-        detection_mapping=filtered,
-        fps=fps,
-        confidence_default=confidence_default,
-        mask_target_ids=mask_target_ids,
-    )
-    arrays = _read_object_arrays(frame_rows, filtered, confidence_default, mask_target_ids)
+    arrays = _read_object_arrays(frame_rows, filtered, confidence_default, frozenset())
     frames = len(frame_rows)
-    v3_feats, v3_names, features, active, frame = _scope_block(
-        arrays, frames, fps, smooth=recipe in SMOOTH_RECIPES
-    )
+    columns: dict[str, np.ndarray] = {}
 
-    blocks = [v2_feats, v3_feats]
-    names = [f"abs/{name}" for name in v2_names] + [f"scope/{name}" for name in v3_names]
-    if recipe in COMPACT_RECIPES:
-        keep = [index for index, name in enumerate(names) if compact_keep(name)]
-        blocks = [np.concatenate(blocks, axis=1)[:, keep]]
-        names = [names[index] for index in keep]
-    if recipe == "fix-compact-pair":
-        pairs, pair_names = _pair_block(features, active, frames)
-        blocks.append(pairs)
-        names += pair_names
-    if recipe in SMOOTH_RECIPES:
-        age = np.minimum(frame.age_seconds, AGE_CAP_SECONDS) / AGE_CAP_SECONDS
-        blocks.append(np.stack([frame.observed.astype(np.float32), age], axis=1))
-        names += ["scope/axis_observed", "scope/axis_age"]
-    if recipe == "full":
-        velocity, velocity_names = _velocity_block(features, active, frame, fps)
-        blocks.append(velocity)
-        names += [f"scope/{name}" for name in velocity_names]
+    def put(name: str, values: np.ndarray) -> None:
+        columns[name] = np.nan_to_num(np.asarray(values, dtype=np.float32))
 
-    feats = np.nan_to_num(np.concatenate(blocks, axis=1)).astype(np.float32)
-    if feats.shape != (frames, RECIPES[recipe]):
-        raise AssertionError(f"{VERSIONS[recipe]} 形状异常: {feats.shape}")
-    return feats, names, VERSIONS[recipe]
+    v2_feats, v2_names = _build_base_matrix(arrays, frames, fps)
+    for index, name in enumerate(v2_names):
+        if compact_keep(f"abs/{name}"):
+            put(f"abs/{name}", v2_feats[:, index])
+
+    features, active = _object_tracks(arrays, frames, fps)
+    frame = scope_frame_offline(features, active, frames, fps, smooth=True)
+    for key in ["hand_top1", "hand_top2"] + [name for name in OBJECTS if name != "hand"]:
+        kept = [(i, f"scope/{key}_{ch}") for i, ch in enumerate(V3_SLOT_CHANNELS) if compact_keep(f"scope/{key}_{ch}")]
+        if not kept:
+            continue
+        channels = _slot_channels(features[key], active[key], frame.axes, frame.ref_len, frame.ref_area, frame.origin)
+        for index, name in kept:
+            put(name, channels[:, index])
+
+    put("scope/axis_observed", frame.observed.astype(np.float32))
+    put("scope/axis_age", np.minimum(frame.age_seconds, AGE_CAP_SECONDS) / AGE_CAP_SECONDS)
+    pairs, pair_names = _pair_block(features, active, frames)
+    for index, name in enumerate(pair_names):
+        put(name, pairs[:, index])
+    if len(columns) != BUNDLE_DIM:
+        raise AssertionError(f"bundle 列数 {len(columns)} != {BUNDLE_DIM}")
+    return Bundle(columns, features, active, frame)

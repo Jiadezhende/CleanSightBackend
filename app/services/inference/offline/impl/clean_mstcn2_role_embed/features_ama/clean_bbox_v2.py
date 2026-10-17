@@ -12,7 +12,6 @@ import math
 
 import numpy as np
 
-BASE_DIM = 113
 
 OBJECTS = [
     "hand",
@@ -308,30 +307,3 @@ def _read_object_arrays(
             )
             arrays[object_name].append(frame_index, row)
     return arrays
-
-
-def build_clean_bbox_features(
-    frame_rows: list[list[tuple]],
-    *,
-    detection_mapping: dict[int, str],
-    fps: float,
-    confidence_default: float,
-    mask_target_ids: frozenset[int] = frozenset(),
-):
-    """逐帧检测行构造 ``[T,113]``，返回矩阵与列名。"""
-
-    if not frame_rows:
-        raise ValueError("CLEAN 特征至少需要一帧")
-    if fps <= 0:
-        raise ValueError("CLEAN 特征 fps 必须大于0")
-    if not 0.0 <= confidence_default <= 1.0:
-        raise ValueError("detection_confidence_default 必须在0..1")
-    arrays = _read_object_arrays(
-        frame_rows, detection_mapping, confidence_default, mask_target_ids
-    )
-    features, names = _build_base_matrix(arrays, len(frame_rows), fps)
-    if features.shape != (len(frame_rows), BASE_DIM):
-        raise ValueError(
-            f"CLEAN 特征形状异常: actual={tuple(features.shape)}, expected={(len(frame_rows), BASE_DIM)}"
-        )
-    return features, names
