@@ -102,17 +102,16 @@ stages:
             6: short_brush
             7: brush_tip_out
     offline:                         # 离线段（stage 粒度）：class 指定离线模型，缺省/空块 = 不可跑
-      class: app.services.inference.offline.impl.clean.CleanNodepGRUSegmenter
-      # 换 class 须同时换 params（权重与特征 recipe 一一对应；下列三类只收 model_path / min_duration_s）：
-      #   ...impl.clean.CleanBiGRUSegmenter        ↔ clean-offline-bigru.pt
-      #   ...impl.clean.CleanASFormerSegmenter     ↔ clean-offline-asformer.pt
-      #   ...impl.clean.CleanMSTCNBiLSTMSegmenter  ↔ clean-offline-mstcn.pt
+      class: app.services.inference.offline.impl.clean_c7.segmenter.CleanC7Segmenter
+      # 换 class 须同时换 params（物料与特征 recipe 一一对应）。上一版默认：
+      #   ...impl.clean.CleanNodepGRUSegmenter ↔ model_path: .../clean-offline-gru-nodep.pt,
+      #   model_input_fps: 7.5, confidence_override: 1.0, min_duration_s: 0.2
       params:
-        model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-gru-nodep.pt  # 训练框架 checkpoint 单文件；结构 / window 固定在策略类
-        # 以下两项须与训练口径一致，配错不报错、静默变差：
-        model_input_fps: 7.5         # 入模帧率 = 训练帧率（按 ts 从检测序列抽帧）
-        confidence_override: 1.0     # 训练标注无置信度列 → 1.0；null = 用检测真实置信度
-        min_duration_s: 0.2          # 短于此时长的动作段丢弃
+        # 物料一个模型一个目录，目录内文件名由策略类写死
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-c7-v41          # temporal.pt + hand_state.npz
+        backbone_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/backbones/dinov2_vits14     # dinov2 hub 代码 + 权重
+        device: cuda                 # DINOv2 所用设备；卡号随在线推理（settings.cuda_device）。无 GPU 的机器配 cpu
+        max_crops_per_s: 150         # DINOv2 限速（次裁剪/秒），与在线 YOLO 共卡时让出算力；null = 不限速
 
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到

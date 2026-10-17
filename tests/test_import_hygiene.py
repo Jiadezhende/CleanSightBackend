@@ -293,8 +293,9 @@ def test_layer_package_modules_are_all_budgeted(package):
 
 
 def _iter_app_py_files():
+    # app/data 是推理物料目录（权重、模型骨干自带的第三方代码），不是本仓源码
     for path in sorted(APP_DIR.rglob("*.py")):
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or path.is_relative_to(APP_DIR / "data"):
             continue
         yield path
 
