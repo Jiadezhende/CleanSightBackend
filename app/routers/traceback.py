@@ -56,7 +56,7 @@ def _build_vod_playlist(request: Request, run: RunIdentity, track: str) -> str:
     由 `vod_playlist.render_vod` 出；本函数只负责把段与 init 换成 token 化 URI——URI 长什么样
     是协议层的事，数据层与骨架函数都对 `MediaToken` 零认知。
 
-    - 清单里一个段都没有（挑错 track / step 不存在 / 首段仍在转码）→ 抛 404，文案不分档
+    - 清单里一个段都没有（挑错 track / step 不存在 / 首段仍在编码）→ 抛 404，文案不分档
     - 有段但 init.mp4 缺失 → 抛 503（fMP4 无 init 段无法播放）
 
     **两档的先后不能反**：段检查必须在前。反过来的话，一个根本不存在的 task/step 会先撞上
@@ -75,7 +75,7 @@ def _build_vod_playlist(request: Request, run: RunIdentity, track: str) -> str:
         raise _no_segments(task_id, step_id, track)
 
     if not hls.query_has_init(run, track):
-        # 正常落盘的 run 必有 init（首段 transcode 时产出）。缺 init 只剩首段正在 transcode
+        # 正常落盘的 run 必有 init（首段编码时产出）。缺 init 只剩首段正在编码
         # 途中（窗口极短），故 503 而非 404，让调用方按「此 run 暂不可回放」处理。
         raise HTTPException(
             status_code=503,

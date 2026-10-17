@@ -5,7 +5,7 @@
                                                            hex-patch ─────┘  moof/traf/tfdt
 
 两件事都不是可选的：普通 MP4（moov+mdat 整体）被 hls.js 当段播会 fragParsingError；而每个段
-由独立 ffmpeg 进程转码、输入自身从 PTS=0 起，不补 tfdt 偏移则所有 fragment 落点都是 0，
+由独立 ffmpeg 进程编码、输入自身从 PTS=0 起，不补 tfdt 偏移则所有 fragment 落点都是 0，
 播到第一段末尾就不前进。**tfdt 只能改字节**（ffmpeg 的 `-output_ts_offset` /
 `-itsoffset+-copyts` / `-muxdelay` 在 HLS muxer + fmp4 下全部无效），box 结构固定、size 不变，
 是纯 metadata 改写。背景与实测见 `docs/kb/DESIGN_HLS_TIMELINE.md`。
@@ -36,13 +36,12 @@ logger = logging.getLogger(__name__)
 # `docs/kb/DESIGN_HLS_TIMELINE.md`。
 TIMESCALE = 90000
 
-# 转码超时（秒）。**必须有超时**：调用侧是单写者（一条 SerialTaskQueue 一个消费线程），一个
-# 卡住的 ffmpeg 堵的不是自己那一段，是所有 task 的录制。实测单段 ~260 ms、1080p 满段 1–3 s，
-# 15 s 已是 5–10× 余量。
+# 编码超时（秒）。**必须有超时**：调用侧是单写者（一条 SerialTaskQueue 一个消费线程），一个
+# 卡住的 ffmpeg 堵的不是自己那一段，是所有 task 的录制。
 _TIMEOUT_S = 15
 
 # stage 目录内的固定文件名。它们**不是产物名**——产物名由 `_layout` 决定，commit 时才 rename
-# 过去；固定命名让转码步不必知道自己在为哪个段服务。
+# 过去；固定命名让编码步不必知道自己在为哪个段服务。
 _INIT_NAME = "init.mp4"
 _FRAGMENT_NAME = "fragment_0.mp4"
 # `-hls_segment_filename` 必须含 %d 模板（即便只有 1 段），配 `-start_number 0` 让产物固定为

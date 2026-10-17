@@ -126,7 +126,7 @@ async def test_playlist_vod_generation(client, media_root):
 @pytest.mark.asyncio
 async def test_playlist_503_when_init_missing(client, media_root):
     """缺 `{track}_init.mp4` 时 playlist 端点应 503——fMP4 无 init 段无法解码，
-    （首段仍在 transcode）。"""
+    （首段仍在编码）。"""
     _seed_task(task_id=42, step_id=1,
                ts_ms_list=[1_000], write_init=False)
 

@@ -11,7 +11,7 @@
 # 开发者只需：
 # 1. 创建 Detector 子类（detection/impl/<业务>.py，实现 infer + prepare_visualization_data），detectors[] 加一行
 # 2. 创建 Operator 子类（temporal/impl/<业务>.py，实现 analyze + judge，可选 override finalize），rules[] 加一行并声明 subscribes
-#    （离线 Segmenter 子类放 offline/impl/<业务>.py；同业务三者同名文件，class 用全限定路径）
+#    （离线 Segmenter 一个策略一个包，放 offline/impl/<业务>_<模型>/；class 用全限定路径）
 
 stages:
   # 主键 = step_id（task.current_step，字符串）；alias = 可读名（写告警 step_name + 可视化叠字）

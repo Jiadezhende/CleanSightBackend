@@ -10,7 +10,7 @@
 落盘格式全在 `app.storage.hls` / `app.storage.inference`；本模块只管何时拉、按什么顺序写。
 产物写进 `cq.run` 指向的 run 目录：每次 run 一个目录，换代隔离不归本模块。
 
-**两条队列，不是一条**：段写里有 ffmpeg 转码（单段 0.26–3 s），detections 排在它后面会跟着
+**两条队列，不是一条**：段写里有 ffmpeg 编码，detections 排在它后面会跟着
 一起被背压丢，而丢一次就是十几帧检测结果、静默。两条队列互不阻塞。
 
 **三条不变式，破了都不报错、只是数据静默损坏**（推导见
@@ -108,14 +108,14 @@ class RecordingService:
         # 落盘队列。**在 start() 里建**：SerialTaskQueue 是一次性的（stop() 之后不能再
         # start()），放构造函数会让单例在 start/stop 两轮之后炸。
         #
-        # **两条而不是一条**：段写里有 ffmpeg 转码（单段 0.26–3 s），detections 排在它后面会
+        # **两条而不是一条**：段写里有 ffmpeg 编码，detections 排在它后面会
         # 跟着一起被背压丢。两条各自单消费线程，"提交序 = 执行序"在各自内部成立。
         self._hls_queue: Optional[SerialTaskQueue] = None
         self._detection_queue: Optional[SerialTaskQueue] = None
         self._sweep_worker: Optional[SegmentSweeper] = None
 
         # HLS 段队列的在途字节（已入队、未写完）。段是像素帧，只按段数限长挡不住内存：
-        # 转码一停滞，100 段 × 285MB 就先把内存吃满才轮到丢段。提交线程（sweeper / 拆除路径）
+        # 编码一停滞，100 段 × 285MB 就先把内存吃满才轮到丢段。提交线程（sweeper / 拆除路径）
         # 加、队列线程减，故带锁。
         self._hls_inflight_bytes = 0
         self._hls_inflight_lock = threading.Lock()

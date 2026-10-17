@@ -29,7 +29,7 @@ class RecordingConfig:
     queue_size: int = 100
 
     # HLS 段队列在途字节上限（MB）。段是像素帧（10s × 30fps × 0.92MB ≈ 285MB/段），只按段数限长时
-    # 转码一停滞就先吃满内存才丢段；超过本值 `submit_segment` 拒收（丢段 + 告警，语义同队列满）。
+    # 编码一停滞就先吃满内存才丢段；超过本值 `submit_segment` 拒收（丢段 + 告警，语义同队列满）。
     # 默认 ≈ 15 路 raw + processed 各一段同时到期的突发量。须 ≥ 单段字节，否则段段被拒。
     queue_max_mb: int = 8192
 

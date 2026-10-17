@@ -1,8 +1,8 @@
 """离线分割策略基类 —— 两段接缝：输入预处理层（预留）+ 模型推理分割。
 
 一个离线推理策略 = 一个 `OfflineSegmenter` 子类（对齐在线 Detector/Operator「加一子类」范式，
-见 docs/kb/DESIGN_EXTENDING_DETECTION.md）。策略实现全部收在 `offline/segmenters/`，框架层
-（segmenter/runner/cli）不掺实现。
+见 docs/kb/DESIGN_EXTENDING_DETECTION.md）。策略实现在 `offline/impl/`，一个策略一个包；框架层
+（segmenter/runner/materials/cli）不掺实现。
 
 管线两段：
     load(task_id, step_id) → List[FrameDetection]（帧级、多流已对齐、按 ts 升序）
@@ -68,7 +68,7 @@ class OfflineSegmenter(ABC):
         """输入预处理接口：把帧级 FrameDetection 序列转成模型可消费的输入。
 
         基类只约束调用形状，不做默认特征工程。bbox 归一化、top-k 目标选择、
-        speed 的 dt 计算、tensor 化、权重加载等都应由具体策略在自己的单文件里完成。
+        speed 的 dt 计算、tensor 化、权重加载等都应由具体策略在自己的包里完成。
         `frames` 已按 ts 升序、多流在各 `FrameDetection.by_source` 内对齐（load 保证）。
         """
         raise NotImplementedError
