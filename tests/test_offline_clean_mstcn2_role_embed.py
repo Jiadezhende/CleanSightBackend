@@ -1,0 +1,224 @@
+"""CLEAN mstcn2-role-embed 离线策略：检测 → 训练口径检测行、取帧裁剪的对齐与缺帧、分段解码、配置装配。
+
+特征数值与训练逐位一致是接入时的一次性核对（见 docs/update/20261017_OFFLINE_CLEAN_MSTCN2_ROLE_EMBED.md），不在这里重放；
+这里不加载任何真实权重、不跑 torch 前向。
+"""
+
+import numpy as np
+import pytest
+
+from factories import make_det_box, make_detector_output, make_frame_detection
+
+from app.types.frame import Frame
+from app.services.inference.offline.segmenter import OfflineContext
+from app.services.inference.offline.impl.clean_mstcn2_role_embed import segmenter as seg_mod
+from app.services.inference.offline.impl.clean_mstcn2_role_embed.contract import ACTION_NAMES
+from app.services.inference.offline.impl.clean_mstcn2_role_embed.frames import detection_rows
+from app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter import CleanMSTCN2RoleEmbedSegmenter
+
+
+def _det(name, bbox):
+    return make_det_box(class_name=name, bbox=bbox)
+
+
+def _frame(ts, *boxes, w=640, h=480):
+    out = make_detector_output(n=0, ts=ts)
+    out.boxes = list(boxes)
+    return make_frame_detection(ts=ts, by_source={"clean_large": out}, frame_width=w, frame_height=h)
+
+
+def _segmenter(**kw):
+    return CleanMSTCN2RoleEmbedSegmenter(model_dir="m", backbone_dir="b", **kw)
+
+
+class TestDetectionRows:
+    def test_area_top_k_class_order_normalized(self):
+        frame = _frame(
+            1.0,
+            _det("syringe", [0, 0, 64, 48]),
+            _det("hand", [0, 0, 10, 10]),           # 最小的手，top-2 外
+            _det("hand", [100, 100, 164, 196]),     # 面积第一
+            _det("syringe", [0, 0, 128, 96]),       # 面积更大的 syringe 胜出
+            _det("hand", [0, 0, 32, 48]),
+            _det("bubble", [0, 0, 600, 400]),       # 不在 mstcn2-role-embed 类表里 → 忽略
+        )
+        rows = detection_rows([frame], width=640, height=480)[0]
+        assert rows == [
+            (0, 0.20625, 0.308333, 0.1, 0.2),
+            (0, 0.025, 0.05, 0.05, 0.1),
+            (4, 0.1, 0.1, 0.2, 0.2),
+        ]
+
+    def test_empty_frame_keeps_its_slot(self):
+        assert detection_rows([_frame(1.0), _frame(2.0, _det("hand", [0, 0, 64, 48]))],
+                              width=640, height=480)[0] == []
+
+
+def _video(frames_by_ts, calls=None):
+    def video(**kw):
+        if calls is not None:
+            calls.append(kw)
+        for ts, pixel in frames_by_ts:
+            yield Frame(timestamp=ts, frame=np.full((480, 640, 3), pixel, np.uint8))
+    return video
+
+
+def _context(video, store=None):
+    store = {} if store is None else store
+    return OfflineContext(
+        video=video,
+        load_cache=lambda name: store.get(name),
+        save_cache=lambda name, arrays: store.__setitem__(name, dict(arrays)),
+    ), store
+
+
+class TestEmbed:
+    @pytest.fixture(autouse=True)
+    def _stub_backbone(self, monkeypatch):
+        """DINOv2 打桩：嵌入 = 裁剪图中心像素值（能看出每行来自哪一帧）；记录骨干被加载几次。"""
+        self.loads = []
+        monkeypatch.setattr(seg_mod, "load_dino", lambda backbone_dir, device: self.loads.append(device))
+        monkeypatch.setattr(seg_mod, "backbone_key", lambda backbone_dir: "key-a")
+        monkeypatch.setattr(CleanMSTCN2RoleEmbedSegmenter, "_resolve_device", lambda self: "cpu")
+
+        def embed(net, crops, device, batch_size, max_crops_per_s):
+            rows = [np.full(768, crop[112, 112, 0], np.float16) for crop in crops]
+            return np.stack(rows) if rows else np.zeros((0, 768), np.float16)
+
+        monkeypatch.setattr(seg_mod, "embed_crops", embed)
+
+    _TS = np.array([1.0, 2.0, 3.0])
+    _HANDS = [[(0.5, 0.5, 0.1, 0.1), (0.6, 0.6, 0.1, 0.1)], [], [(0.5, 0.5, 0.1, 0.1)]]
+    _PIXELS = [(0.5, 9), (1.0, 10), (2.0, 20), (3.0, 30)]
+
+    def test_rows_follow_frame_then_box_order_and_skip_handless_frames(self):
+        calls = []
+        ctx, store = _context(_video(self._PIXELS, calls))
+        emb = _segmenter()._embed(self._TS, self._HANDS, ctx)
+        assert emb[:, 0].tolist() == [10, 10, 30]
+        assert calls == [{"width": 640, "height": 480, "start_ts": 1.0, "end_ts": 3.0}]
+        saved = store["hand_embeddings"]
+        assert saved["ts"].tolist() == [1.0, 1.0, 3.0] and saved["boxes"].shape == (3, 4)
+        assert str(saved["backbone"]) == "key-a"
+
+    def test_matching_cache_skips_video_and_backbone(self):
+        ctx, store = _context(_video(self._PIXELS))
+        _segmenter()._embed(self._TS, self._HANDS, ctx)
+        calls = []
+        again, _ = _context(_video(self._PIXELS, calls), store)
+        emb = _segmenter()._embed(self._TS, self._HANDS, again)
+        assert emb[:, 0].tolist() == [10, 10, 30]
+        assert calls == [] and len(self.loads) == 1
+
+    @pytest.mark.parametrize("change", ["backbone", "boxes"])
+    def test_stale_cache_is_recomputed_and_overwritten(self, monkeypatch, change):
+        ctx, store = _context(_video(self._PIXELS))
+        _segmenter()._embed(self._TS, self._HANDS, ctx)
+        hands = self._HANDS
+        if change == "backbone":
+            monkeypatch.setattr(seg_mod, "backbone_key", lambda backbone_dir: "key-b")
+        else:
+            hands = [hands[0], [], [(0.4, 0.4, 0.1, 0.1)]]
+        again, _ = _context(_video(self._PIXELS), store)
+        _segmenter()._embed(self._TS, hands, again)
+        assert len(self.loads) == 2
+        saved = store["hand_embeddings"]
+        assert str(saved["backbone"]) == ("key-b" if change == "backbone" else "key-a")
+        assert saved["boxes"][-1].tolist() == list(hands[2][0])
+
+    def test_missing_frame_fails_instead_of_skipping_hands_and_saves_nothing(self):
+        hands = [[(0.5, 0.5, 0.1, 0.1)], [(0.5, 0.5, 0.1, 0.1)]]
+        ctx, store = _context(_video([(1.0, 10)]))
+        with pytest.raises(ValueError, match="缺 1/2"):
+            _segmenter()._embed(np.array([1.0, 2.0]), hands, ctx)
+        assert store == {}
+
+    def test_no_hands_never_touches_video_backbone_or_cache(self):
+        calls = []
+        ctx, store = _context(_video([], calls))
+        emb = _segmenter()._embed(np.array([1.0]), [[]], ctx)
+        assert emb.shape == (0, 768) and calls == [] and self.loads == [] and store == {}
+
+
+class TestSegments:
+    def test_idle_skipped_conf_is_label_mean(self):
+        labels = np.array([0, 3, 3, 3, 0, 4, 4])
+        probs = np.zeros((7, len(ACTION_NAMES)), np.float32)
+        probs[np.arange(7), labels] = [1, 0.5, 0.7, 0.9, 1, 0.6, 0.8]
+        ts = np.arange(7, dtype=np.float64) / 15
+        segs = _segmenter()._segments(ts, labels, probs)
+        assert [(s.label, s.start, s.end) for s in segs] == [
+            ("long_brush_insert", ts[1], ts[3]),
+            ("long_brush_withdraw", ts[5], ts[6]),
+        ]
+        assert [round(s.conf, 6) for s in segs] == [0.7, 0.7]
+        assert {s.producer for s in segs} == {"CleanMSTCN2RoleEmbedSegmenter"}
+
+
+class TestContract:
+    def test_rejects_non_640x480(self):
+        frames = [_frame(t / 15, w=1280, h=720) for t in range(3)]
+        with pytest.raises(ValueError, match="640×480"):
+            _segmenter().preprocess(frames, _context(_video([]))[0])
+
+    @pytest.mark.parametrize("rate", [12.994, 5.0])
+    def test_low_rate_only_warns_never_fails(self, caplog, rate):
+        """线上检测帧率随负载波动（实测 12.99fps）：再低也照常跑，只告警。"""
+        seg_mod._warn_low_rate([_frame(t / rate) for t in range(30)])
+        assert "低于训练帧率" in caplog.text
+
+    def test_long_run_truncated_to_first_max_duration(self, caplog):
+        frames = [_frame(1000.0 + t) for t in range(0, 1201, 60)]  # 20 分钟，每分钟一帧
+        kept = seg_mod._truncate(frames, 900.0)
+        assert [f.ts - 1000.0 for f in kept] == [float(t) for t in range(0, 901, 60)]
+        assert "只推理前 900s" in caplog.text
+
+    def test_short_run_or_no_cap_untouched(self):
+        frames = [_frame(float(t)) for t in range(10)]
+        assert seg_mod._truncate(frames, 900.0) is frames
+        assert seg_mod._truncate(frames, None) is frames
+
+    def test_duplicate_ts_keeps_first_frame(self, caplog):
+        """5fps 输入下 resample 放行重复 ts；同 ts 多帧会让嵌入行数与手行数对不上，只留首帧。"""
+        first, second = _det("hand", [0, 0, 64, 48]), _det("syringe", [0, 0, 64, 48])
+        frames = [_frame(0.0), _frame(0.2, first), _frame(0.2, second), _frame(0.4)]
+        kept = seg_mod._dedup_ts(seg_mod.resample_by_ts(frames, 15))
+        assert [f.ts for f in kept] == [0.0, 0.2, 0.4]
+        assert kept[1].by_source["clean_large"].boxes == [first]
+        assert "重复 ts" in caplog.text
+
+    def test_unique_ts_untouched(self, caplog):
+        frames = [_frame(t / 15) for t in range(5)]
+        assert seg_mod._dedup_ts(frames) is frames and caplog.text == ""
+
+    def test_contract_rate_does_not_warn(self, caplog):
+        seg_mod._warn_low_rate([_frame(t / 15.0) for t in range(30)])
+        assert caplog.text == ""
+
+    def test_25fps_source_rhythm_is_not_low_rate(self, caplog):
+        """线上「12.994fps」的成因：25fps 源补帧再隔帧抽，间隔 80/80/40ms，均值仍是 15fps，不该告警。"""
+        ts = np.cumsum([0.0] + [(0.08, 0.08, 0.04)[i % 3] for i in range(90)])
+        seg_mod._warn_low_rate([_frame(float(t)) for t in ts])
+        assert caplog.text == ""
+
+    @pytest.mark.parametrize("kw", [
+        {"device": "mps"}, {"max_crops_per_s": 0}, {"batch_size": 0}, {"min_segment_frames": -1},
+        {"max_duration_s": 0},
+    ])
+    def test_bad_params_fail_at_construction(self, kw):
+        with pytest.raises(ValueError):
+            _segmenter(**kw)
+
+    def test_materials_are_model_and_backbone_files(self):
+        assert [p.as_posix() for p in _segmenter().materials()] == [
+            "m/temporal.pt", "m/hand_state.npz", "b/hubconf.py", "b/dinov2_vits14_pretrain.pth",
+        ]
+
+    def test_shipped_yaml_builds_mstcn2_role_embed(self):
+        from app.services.inference.config import load_stage_config
+        from app.services.inference.stage_factory import StageFactory
+
+        seg = StageFactory(load_stage_config()).create_offline_segmenter("2")
+        assert isinstance(seg, CleanMSTCN2RoleEmbedSegmenter) and seg.uses_context
+        assert (seg.model_dir.name, seg.backbone_dir.name) == ("clean-offline-mstcn2-role-embed", "dinov2_vits14")
+        assert seg.max_duration_s == 900.0

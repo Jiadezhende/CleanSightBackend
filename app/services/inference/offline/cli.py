@@ -1,13 +1,14 @@
-"""离线分割手动入口 —— 独立进程、CPU-only、限核、同步跑一次；另含 query 查询子命令。
+"""离线分割手动入口 —— 独立进程、钉卡、限核、同步跑一次；另含 query 查询子命令。
 
-    CUDA_VISIBLE_DEVICES="" nice -n 15 \\
-        python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--run-id R] [--threads 2]
+    nice -n 15 python -m app.services.inference.offline.cli run --task-id 100 --step-id 2 [--run-id R] [--threads 2]
     python -m app.services.inference.offline.cli query --task-id 100 --step-id 2 [--run-id R]
+    python -m app.services.inference.offline.cli materials            # 各 stage 激活策略的物料核对，缺失退出码 1
 
-设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动，不抢在线 GPU/核。
-`run` 的 CPU 隔离在**任何 torch import 之前**生效：置 `CUDA_VISIBLE_DEVICES=""`（禁 GPU）+
-`torch.set_num_threads`（限核，默认 2），故必须先 `_isolate_cpu()` 再 import 触发策略 torch 加载的
-runner/策略模块。`query` 只读 temporal.jsonl，不碰 torch/runner。
+设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动。
+`run` 的隔离在**任何 torch import 之前**生效：`CUDA_VISIBLE_DEVICES` 钉成 `settings.cuda_device`（与在线
+推理子进程同一张卡，不碰机器上别的卡；""=CPU）+ `torch.set_num_threads`（限核，默认 2），故必须先
+`_isolate()` 再 import 触发策略 torch 加载的 runner/策略模块。用不用 GPU、限多少速由策略参数定。
+`query` 只读 temporal.jsonl，不碰 torch/runner。
 
 step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（无兜底）。
 `--run-id` 缺省 = 该 step 最新可见 run；入口解析一次，之后整次运行只读写这个 run。
@@ -30,19 +31,26 @@ from typing import Optional, Sequence
 logger = logging.getLogger("offline.cli")
 
 
-def _isolate_cpu(num_threads: int) -> None:
-    """CPU 隔离：禁 GPU + 限 torch 线程。**须在任何 torch import 之前调用。**"""
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+def _pin_device() -> None:
+    """可见卡钉成在线推理子进程那一张（`settings.cuda_device`，""=CPU）。"""
+    from app.settings import settings
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = settings.cuda_device
+
+
+def _isolate(num_threads: int) -> None:
+    """钉卡 + 限 torch 线程。**须在任何 torch import 之前调用。**"""
+    _pin_device()
     try:
-        import torch  # 此处才首次 import torch，已置 CUDA_VISIBLE_DEVICES → 看不到 GPU
+        import torch  # 此处才首次 import torch，CUDA_VISIBLE_DEVICES 已钉好
         torch.set_num_threads(max(1, num_threads))
     except Exception:  # torch 未安装 / 占位策略不需要 torch —— 不阻断
         pass
 
 
 def _run(args: argparse.Namespace) -> int:
-    _isolate_cpu(args.threads)
-    # runner / 策略 import 放在 CPU 隔离之后：策略模块的 torch import 此时才发生
+    _isolate(args.threads)
+    # runner / 策略 import 放在隔离之后：策略模块的 torch import 此时才发生
     from .runner import OfflineRunner, OfflineRunSpec
 
     try:
@@ -92,6 +100,19 @@ def _query(args: argparse.Namespace) -> int:
     return 0
 
 
+def _materials(args: argparse.Namespace) -> int:
+    """各 stage 激活的离线策略要哪些物料、在不在；有缺失退出码 1（部署核对用）。"""
+    from .materials import check_materials
+    from app.services.inference.config import load_stage_config
+
+    statuses = check_materials(load_stage_config())
+    print(json.dumps(
+        [{"stage": s.stage, "producer": s.producer, "path": str(s.path), "exists": s.exists} for s in statuses],
+        ensure_ascii=False, indent=2,
+    ))
+    return 0 if all(s.exists for s in statuses) else 1
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.services.inference.offline.cli",
@@ -113,6 +134,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     query.add_argument("--run-id", type=int, default=None, help="查哪个 run（缺省 = 该 step 最新可见 run）")
     query.add_argument("--producer", default=None, help="只查询某个 producer 产出的分段")
 
+    sub.add_parser("materials", help="核对各 stage 激活的离线策略物料是否齐全（缺失退出码 1）")
+
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -125,6 +148,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run(args)
     if args.command == "query":
         return _query(args)
+    if args.command == "materials":
+        return _materials(args)
     parser.error(f"未知命令: {args.command}")
     return 2
 

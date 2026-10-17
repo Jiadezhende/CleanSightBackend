@@ -5,18 +5,41 @@
 
     model_frames = resample_by_ts(frames, model_input_fps)               # 宽松：输入慢于 fps 时原样放行
     model_frames = resample_by_ts(frames, model_input_fps, strict=True)  # 严格：输入慢于 fps 即 ValueError
+    rate = input_fps(frames)                                             # 输入帧率（剔除断流缺口后的平均间隔）
 
-只能降采样，不合成帧。
+只能降采样，不合成帧。帧率判据用「剔除断流缺口（> 2×中位间隔）后的平均间隔」，不用中位数：
+ts 是到达墙钟，25fps 源经 ffmpeg 补帧到 30fps 再隔帧抽时间隔呈 80/80/40ms 节律，中位数会把均值 15fps 判成 12.9fps
+（docs/update/20261017_RESAMPLE_RATE_BY_STEADY_MEAN.md）。
 """
 
 from __future__ import annotations
 
 from statistics import median
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from app.types.detection import FrameDetection
 
 _RATE_SLACK = 0.01  # strict 下限的相对余量，吸收 ts 舍入与抖动
+
+
+def _median_dt(frames: Sequence[FrameDetection]) -> Optional[float]:
+    dts = [b.ts - a.ts for a, b in zip(frames, frames[1:]) if b.ts > a.ts]
+    return median(dts) if dts else None
+
+
+def _steady_mean_dt(frames: Sequence[FrameDetection]) -> Optional[float]:
+    dts = [b.ts - a.ts for a, b in zip(frames, frames[1:]) if b.ts > a.ts]
+    if not dts:
+        return None
+    gap = 2 * median(dts)
+    steady = [dt for dt in dts if dt <= gap]
+    return sum(steady) / len(steady)
+
+
+def input_fps(frames: Sequence[FrameDetection]) -> Optional[float]:
+    """输入帧率 = 1 / 剔除断流缺口后的平均间隔；帧数 < 2 或 ts 全相同返回 None。"""
+    dt = _steady_mean_dt(frames)
+    return None if dt is None else 1.0 / dt
 
 
 def resample_by_ts(frames: Sequence[FrameDetection], fps: float, *, strict: bool = False) -> List[FrameDetection]:
@@ -25,17 +48,18 @@ def resample_by_ts(frames: Sequence[FrameDetection], fps: float, *, strict: bool
     tol = 半个输入帧间隔（相邻 ts 差的中位数）：整数比下网格点与帧 ts 重合，ts 舍入 / 抖动不致跳到下一帧。
     网格前进（非从"上一保留帧"累加）→ 不累积漂移；遇缺口令网格落后当前帧时重锚，避免追补突发。
     纯 ts 函数——不改帧内容、不合成新 ts。帧数 < 2 原样返回。
-    strict=True 时输入帧率低于 fps（超出 1% 余量）抛 ValueError。
+    strict=True 时输入帧率（`input_fps` 口径）低于 fps（超出 1% 余量）抛 ValueError。
     """
     if len(frames) < 2:
         return list(frames)
-    dts = [b.ts - a.ts for a, b in zip(frames, frames[1:]) if b.ts > a.ts]
-    if not dts:
+    input_dt = _median_dt(frames)
+    if input_dt is None:
         return list(frames)
-    input_dt = median(dts)
     min_dt = 1.0 / fps
-    if strict and input_dt > min_dt * (1 + _RATE_SLACK):
-        raise ValueError(f"输入帧率 {1.0 / input_dt:.3f}fps 低于契约帧率 {fps}fps，只能降采样")
+    if strict:
+        rate_dt = _steady_mean_dt(frames)
+        if rate_dt > min_dt * (1 + _RATE_SLACK):
+            raise ValueError(f"输入帧率 {1.0 / rate_dt:.3f}fps 低于契约帧率 {fps}fps，只能降采样")
     tol = input_dt / 2
     kept = [frames[0]]
     next_t = frames[0].ts + min_dt

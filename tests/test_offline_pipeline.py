@@ -4,7 +4,8 @@
 """
 
 import json
-import math
+import os
+from pathlib import Path
 
 import pytest
 
@@ -21,7 +22,6 @@ from app.storage import inference as inference_store
 from app.types.exceptions import ValidationError
 
 _RULES_CLASS = "doubles.BrushRulesSegmenter"  # 测试替身，见 tests/doubles.py
-_CLEAN_CLASS = "app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter"
 
 
 def _frames(per_source):
@@ -63,6 +63,7 @@ _OFFLINE_OK = {
 # 测试替身策略（定义在本文件下方）：Boom 抛异常，Marker 验证 preprocess 预留层
 _BOOM = {"class": "test_offline_pipeline.BoomSegmenter"}
 _MARKER = {"class": "test_offline_pipeline.MarkerSegmenter"}
+_CONTEXT = {"class": "test_offline_pipeline.ContextSegmenter"}
 
 
 class TestCreateOfflineSegmenter:
@@ -79,7 +80,7 @@ class TestCreateOfflineSegmenter:
 
     @pytest.mark.parametrize("class_path", [
         "nonexistent_module.Bad",
-        "app.services.inference.offline.impl.clean.NoSuchSegmenter",
+        "doubles.NoSuchSegmenter",
     ])
     def test_unimportable_class_fail_fast(self, class_path):
         offline = dict(_OFFLINE_OK, **{"class": class_path})
@@ -109,110 +110,6 @@ class TestRequireOffline:
     def test_unrunnable_rejected(self, cfg, step_id, reason):
         with pytest.raises(ValidationError, match=reason):
             cfg.require_offline(step_id)
-
-
-# ============================ CLEAN 分段器 ============================
-
-def _clean_frame(ts):
-    """一帧：clean_large=[hand, scope_control_body]，clean_small=[short_brush] → short_brush_cleaning。"""
-    large = DetectorOutput(
-        boxes=[make_det_box(class_name="hand"),
-                    make_det_box(class_name="scope_control_body")],
-        metadata={}, timestamp=ts,
-    )
-    small = DetectorOutput(
-        boxes=[make_det_box(class_name="short_brush")], metadata={}, timestamp=ts,
-    )
-    return {"clean_large": large, "clean_small": small}
-
-
-class TestCleanSegmenter:
-    def test_each_clean_model_uses_own_feature_recipe(self):
-        from app.services.inference.offline.impl.clean import (
-            CleanASFormerSegmenter,
-            CleanBiGRUSegmenter,
-            CleanMSTCNBiLSTMSegmenter,
-        )
-        streams = {
-            "clean_large": [_clean_frame(t)["clean_large"] for t in (0.1, 0.2, 0.3, 0.4)],
-            "clean_small": [_clean_frame(t)["clean_small"] for t in (0.1, 0.2, 0.3, 0.4)],
-        }
-
-        mstcn = CleanMSTCNBiLSTMSegmenter(fps=10.0)
-        asformer = CleanASFormerSegmenter(fps=10.0)
-        bigru = CleanBiGRUSegmenter(fps=10.0)
-
-        frames = _frames(streams)
-        mstcn_input = mstcn.preprocess(frames)
-        asformer_input = asformer.preprocess(frames)
-        bigru_input = bigru.preprocess(frames)
-
-        assert (mstcn.feature_method, mstcn_input.feature_dim, mstcn_input.feature_version) == (
-            "v2", 113, "clean_bbox_v2_top1_impute",
-        )
-        assert (asformer.feature_method, asformer_input.feature_dim, asformer_input.feature_version) == (
-            "business_priors", 121, "clean_bbox_v2_top1_impute+business_priors",
-        )
-        assert (bigru.feature_method, bigru_input.feature_dim, bigru_input.feature_version) == (
-            "window_stats+business_priors", 249, "clean_bbox_v2_top1_impute+center_window+business_priors",
-        )
-        for mi in (mstcn_input, asformer_input, bigru_input):
-            assert mi.frame_count == 4
-            assert all(math.isfinite(v) for row in mi.features for v in row)
-
-    def test_segment_with_model_builds_label_probs(self, monkeypatch):
-        """带权重路径（前向打桩，不依赖 torch）：逐帧 softmax → TemporalSegment + label_probs 旁路。"""
-        from app.services.inference.offline.impl.clean import ACTION_LABELS, CleanMSTCNBiLSTMSegmenter
-        seg = CleanMSTCNBiLSTMSegmenter(model_path="unused.pt", min_duration_s=0.1, fps=10.0)
-        label = ACTION_LABELS.index("short_brush_cleaning")
-        monkeypatch.setattr(seg, "_predict_with_model", lambda mi: _onehot_probs(mi.frame_count, label, 0.9))
-        streams = {
-            "clean_large": [_clean_frame(t)["clean_large"] for t in (0.1, 0.2, 0.3)],
-            "clean_small": [_clean_frame(t)["clean_small"] for t in (0.1, 0.2, 0.3)],
-        }
-        segs = seg.segment(seg.preprocess(_frames(streams)))
-        assert [(s.producer, s.label, s.start, s.end) for s in segs] == [
-            ("CleanMSTCNBiLSTMSegmenter", "short_brush_cleaning", 0.1, 0.3),
-        ]
-        probs = seg.label_probs()
-        assert probs.labels == tuple(ACTION_LABELS)
-        assert probs.ts.tolist() == [0.1, 0.2, 0.3]
-        assert probs.probs.shape == (3, len(ACTION_LABELS))
-        assert probs.probs[:, label].tolist() == pytest.approx([0.9] * 3)
-
-    def test_nodep_gru_resamples_to_model_fps_then_builds_226d(self, monkeypatch):
-        """15fps 检测 → 7.5fps 入模（只挑真实帧）；前向打桩：6 类 label_probs 落在降采样后的 ts 上。"""
-        from app.services.inference.offline.impl.clean import NODEP_GRU_LABELS, CleanNodepGRUSegmenter
-        ts = [round(i / 15, 6) for i in range(8)]
-        streams = {src: [_clean_frame(t)[src] for t in ts] for src in ("clean_large", "clean_small")}
-        seg = CleanNodepGRUSegmenter(model_path="unused.pt", model_input_fps=7.5, min_duration_s=0.0)
-        label = NODEP_GRU_LABELS.index("short_brush_cleaning")
-        monkeypatch.setattr(seg, "_predict_with_model",
-                            lambda mi: _onehot_probs(mi.frame_count, label, 0.9, len(NODEP_GRU_LABELS)))
-
-        mi = seg.preprocess(_frames(streams))
-        assert (mi.feature_dim, mi.feature_version, mi.timestamps) == (
-            226, "ama-v3-concat23-nodep-226d", ts[::2],
-        )
-        assert all(math.isfinite(v) for row in mi.features for v in row)
-        segs = seg.segment(mi)
-        assert [(s.label, s.start, s.end) for s in segs] == [("short_brush_cleaning", ts[0], ts[6])]
-        assert seg.label_probs().labels == NODEP_GRU_LABELS
-
-    def test_nodep_gru_rejects_detection_rate_below_model_fps(self):
-        from app.services.inference.offline.impl.clean import CleanNodepGRUSegmenter
-        ts = [i / 5 for i in range(6)]
-        streams = {src: [_clean_frame(t)[src] for t in ts] for src in ("clean_large", "clean_small")}
-        with pytest.raises(ValueError, match="低于契约帧率"):
-            CleanNodepGRUSegmenter(model_input_fps=7.5).preprocess(_frames(streams))
-
-    def test_causal_windows_end_at_own_frame_and_pad_with_first(self):
-        import numpy as np
-        from app.services.inference.offline.impl.clean import _causal_windows
-        x = np.arange(10, dtype=np.float32).reshape(5, 2)
-        w = _causal_windows(x, 3)
-        np.testing.assert_array_equal(w[:, -1], x)
-        np.testing.assert_array_equal(w[1], x[[0, 0, 1]])
 
 
 # ============================ Runner ============================
@@ -285,19 +182,6 @@ class TestOfflineRunner:
             _runner(_BOOM).run(OfflineRunSpec(task_id=1, step_id=2))
         assert not _facts_path(tmp_storage).exists()
 
-    def test_clean_segmenter_without_model_path_fails_no_write(self, tmp_storage):
-        """CLEAN 分段器不再规则降级；未配 model_path 时硬失败且不落结果。"""
-        inference_store.append_detections(make_run(1, 2), [
-            make_frame_detection(ts=t, by_source=_clean_frame(t))
-            for t in (0.1, 0.2, 0.3, 0.4)
-        ])
-        offline = dict(_OFFLINE_OK, **{"class": _CLEAN_CLASS,
-                                       "params": {"min_duration_s": 0.1, "fps": 10.0}})
-        with pytest.raises(ValueError, match="model_path"):
-            OfflineRunner(config=_config(offline)).run(OfflineRunSpec(task_id=1, step_id=2))
-        assert not _probs_path(tmp_storage).exists()
-        assert not _facts_path(tmp_storage).exists()
-
     def test_model_swap_replaces_old_segments_keeps_eventfact(self, tmp_storage):
         """换模型重跑：旧类名的分段整体被替换，TemporalEvent 保留。"""
         _write_detections(1, 2)
@@ -309,25 +193,40 @@ class TestOfflineRunner:
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
         assert [f.producer for f in loaded if isinstance(f, TemporalEvent)] == ["clean_monitor"]
 
-    def test_clean_segmenter_with_model_writes_facts_and_label_probs(self, tmp_storage, monkeypatch):
-        """CLEAN 经 Runner 全链路（模型前向打桩）：temporal.jsonl 与 label_probs.npz 均落盘。"""
-        from app.services.inference.offline.impl.clean import ACTION_LABELS, _CleanTorchSegmenter
-        label = ACTION_LABELS.index("flush")
-        monkeypatch.setattr(
-            _CleanTorchSegmenter, "_predict_with_model",
-            lambda self, mi: _onehot_probs(mi.frame_count, label, 0.8),
-        )
-        inference_store.append_detections(make_run(1, 2), [
-            make_frame_detection(ts=t, by_source=_clean_frame(t)) for t in (0.1, 0.2, 0.3, 0.4)
-        ])
-        offline = {"class": "app.services.inference.offline.impl.clean.CleanMSTCNBiLSTMSegmenter",
-                   "params": {"model_path": "unused.pt", "min_duration_s": 0.1}}
-        res = _runner(offline).run(OfflineRunSpec(task_id=1, step_id=2))
-        assert (res.status, res.producer, res.segment_count) == ("completed", "CleanMSTCNBiLSTMSegmenter", 1)
+    def test_label_probs_bypass_written_with_facts(self, tmp_storage):
+        """策略产逐帧概率：temporal.jsonl 与 label_probs.npz 都落盘，概率原样（float16 精度内）。"""
+        _write_detections(1, 2)
+        res = _runner({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert (res.status, res.segment_count) == ("completed", 1)
         probs = inference_store.read_label_probs(make_run(1, 2))
-        assert probs.labels == tuple(ACTION_LABELS)
-        assert probs.ts.tolist() == [0.1, 0.2, 0.3, 0.4]
-        assert probs.probs.argmax(axis=1).tolist() == [label] * 4
+        assert probs.labels == ("idle", "x") and probs.ts.tolist() == [1.0, 2.0]
+        assert probs.probs[:, 1].tolist() == [0.75, 0.75]
+
+    def test_context_strategy_gets_video_bound_to_locked_run(self, tmp_storage, monkeypatch):
+        """`uses_context` 策略经 context.video 取帧：参数原样透传给 hls.iter_frames，run 是锁定的那个。"""
+        from app.services.inference.offline import runner as runner_mod
+
+        calls = []
+        monkeypatch.setattr(runner_mod.hls, "iter_frames", lambda run, **kw: calls.append((run, kw)) or iter(()))
+        _write_detections(1, 2)
+        res = _runner(_CONTEXT).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert res.status == "completed"
+        assert calls == [(make_run(1, 2), {"width": 640, "height": 480})]
+
+    def test_context_cache_roundtrips_and_degrades_to_miss(self, tmp_storage):
+        """缓存经 context 存取；读坏了当未命中，写失败（run 已回收）只告警不抛。"""
+        import numpy as np
+        from app.types.run import RunIdentity
+
+        _write_detections(1, 2)
+        run = make_run(1, 2)
+        ctx = OfflineRunner._context(run)
+        assert ctx.load_cache("c") is None
+        ctx.save_cache("c", {"a": np.arange(3)})
+        assert ctx.load_cache("c")["a"].tolist() == [0, 1, 2]
+        (_inference_dir(1, 2) / "cache_c.npz").write_bytes(b"broken")
+        assert ctx.load_cache("c") is None
+        OfflineRunner._context(RunIdentity(1, 2, run.run_id + 1)).save_cache("c", {"a": np.zeros(1)})
 
     def test_bad_label_probs_shape_skips_bypass_keeps_facts(self, tmp_storage):
         """旁路形状不一致：不落 npz，事实照常写（旁路不影响主结果）。"""
@@ -356,6 +255,18 @@ class MarkerSegmenter(OfflineSegmenter):
     def segment(self, model_input):
         assert model_input.get("marked") is True  # runner 确实先调了 preprocess
         return [TemporalSegment(producer=self.name, label="m", start=0.0, end=1.0)]
+
+
+class ContextSegmenter(OfflineSegmenter):
+    """`uses_context`：preprocess 收第二个参数，并真的经它取一次帧。"""
+
+    uses_context = True
+
+    def preprocess(self, frames, context):
+        return list(context.video(width=640, height=480))
+
+    def segment(self, model_input):
+        return [TemporalSegment(producer=self.name, label="c", start=0.0, end=1.0)]
 
 
 # ============================ CLI ============================
@@ -406,10 +317,20 @@ class TestRunLock:
 
 class TestCli:
     @pytest.fixture(autouse=True)
-    def _no_cpu_isolation(self, monkeypatch):
-        # _isolate_cpu 会在 pytest 主进程里永久置空 CUDA_VISIBLE_DEVICES、改 torch 线程数，污染后续用例
+    def _no_isolation(self, monkeypatch):
+        # _isolate 会在 pytest 主进程里永久改 CUDA_VISIBLE_DEVICES 与 torch 线程数，污染后续用例
         from app.services.inference.offline import cli
-        monkeypatch.setattr(cli, "_isolate_cpu", lambda num_threads: None)
+        monkeypatch.setattr(cli, "_isolate", lambda num_threads: None)
+
+    def test_pin_device_uses_online_inference_card(self, monkeypatch):
+        """离线子进程与在线推理子进程钉同一张卡（settings.cuda_device），不碰机器上别的卡。"""
+        from app.services.inference.offline import cli
+        from app.settings import settings
+
+        monkeypatch.setattr(settings, "cuda_device", "1")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
+        cli._pin_device()
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
     def test_run_completed_json_last_line(self, tmp_storage, monkeypatch, capsys):
         """stdout 末行恒为结果 JSON（作业服务按此解析）。
@@ -453,14 +374,76 @@ class TestCli:
         assert [row["label"] for row in payload["timeline"]] == ["brushing"]
 
 
-def _onehot_probs(frame_count, label, conf, class_count=None):
-    """打桩用逐帧 softmax：目标列 conf，其余列均分余量。class_count 缺省为旧三模型的 ACTION_LABELS 类数。"""
-    import numpy as np
-    from app.services.inference.offline.impl.clean import ACTION_LABELS
-    c = class_count or len(ACTION_LABELS)
-    probs = np.full((frame_count, c), (1.0 - conf) / (c - 1), dtype=np.float32)
-    probs[:, label] = conf
-    return probs
+class ProbsSegmenter(OfflineSegmenter):
+    """产逐帧概率的替身：一段 + 与输入帧对齐的 label_probs。"""
+
+    def preprocess(self, frames):
+        return [f.ts for f in frames]
+
+    def segment(self, ts):
+        import numpy as np
+        from app.types.temporal import LabelProbs
+        self._probs = LabelProbs(ts=np.asarray(ts), probs=np.tile([0.25, 0.75], (len(ts), 1)), labels=("idle", "x"))
+        return [TemporalSegment(producer=self.name, label="x", start=ts[0], end=ts[-1], conf=0.75)]
+
+    def label_probs(self):
+        return self._probs
+
+
+class MaterialSegmenter(OfflineSegmenter):
+    """声明物料的替身：`files` 原样作为 materials()。"""
+
+    def __init__(self, files=()):
+        self.files = [Path(f) for f in files]
+
+    def materials(self):
+        return self.files
+
+    def preprocess(self, frames):
+        return frames
+
+    def segment(self, model_input):
+        return []
+
+
+def _materials_config(tmp_path, *names):
+    (tmp_path / "have.pt").write_bytes(b"x")
+    return _config({"class": f"{__name__}.MaterialSegmenter", "params": {"files": [str(tmp_path / n) for n in names]}})
+
+
+class TestMaterials:
+    def test_lists_active_strategy_materials_per_stage(self, tmp_path):
+        from app.services.inference.offline.materials import check_materials
+
+        statuses = check_materials(_materials_config(tmp_path, "have.pt", "gone.pt"))
+        assert [(s.stage, s.producer, s.path.name, s.exists) for s in statuses] == [
+            ("2", "MaterialSegmenter", "have.pt", True), ("2", "MaterialSegmenter", "gone.pt", False),
+        ]
+
+    def test_stage_without_offline_and_default_strategy_list_nothing(self):
+        from app.services.inference.offline.materials import check_materials
+
+        assert check_materials(_config({})) == []
+        assert check_materials(_config(_OFFLINE_OK)) == []
+
+    @pytest.mark.parametrize("names,rc", [(("have.pt",), 0), (("have.pt", "gone.pt"), 1)])
+    def test_cli_exit_code_reflects_missing(self, tmp_path, monkeypatch, capsys, names, rc):
+        from app.services.inference import config as config_mod
+        from app.services.inference.offline import cli
+
+        monkeypatch.setattr(config_mod, "load_stage_config", lambda *a, **k: _materials_config(tmp_path, *names))
+        assert cli.main(["materials"]) == rc
+        assert [row["exists"] for row in json.loads(capsys.readouterr().out)] == [n == "have.pt" for n in names]
+
+    def test_service_start_warns_missing_but_starts(self, tmp_path, caplog):
+        from app.services.inference.offline.service import OfflineJobService
+
+        svc = OfflineJobService(config=_materials_config(tmp_path, "have.pt", "gone.pt"), clients=object())
+        svc.start()
+        try:
+            assert "离线物料缺失" in caplog.text and "gone.pt" in caplog.text and "have.pt" not in caplog.text
+        finally:
+            svc.stop()
 
 
 class BadProbsSegmenter(OfflineSegmenter):

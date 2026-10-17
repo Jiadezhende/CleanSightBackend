@@ -4,7 +4,8 @@
     1. 按 step_id 取 stage 配置，实例化 offline 策略（未配置 / offline 为空 → ValidationError，无兜底）；
     2. `runs.query` 解析一次 run（点名的，或缺省时最新可见的），之后全程只读写它；再一次读完整
        检测序列（点名的 run 不在 → reclaimed；缺省且没有可见 run，或检测序列为空 → skipped）；
-    3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；
+    3. 策略 preprocess → segment 产出 TemporalSegment（producer = 策略类名）；`uses_context` 策略另注入
+       绑定该 run 的 `OfflineContext`（raw 轨取帧）；
     4. 校验 + 排序，**读回既有事实 → 删掉该 run 全部旧分段、保留 TemporalEvent → 整体写回**。
 
 离线链路只识别稳定存储键 `(task_id, step_id)`；不接 client / CQ / 在线 Operator / 告警 / DB。
@@ -16,11 +17,12 @@ run 锁定在入口：运行期间同 step 重启，结果仍写回解析出的�
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Mapping, Optional
 
 import numpy as np
 
@@ -28,8 +30,11 @@ from app.types.run import RunIdentity
 from app.types.temporal import LabelProbs, TemporalSegment
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.services.inference.stage_factory import StageFactory
+from app.storage import hls
 from app.storage import inference as inference_store
 from app.storage import runs
+
+from .segmenter import OfflineContext
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +88,10 @@ class OfflineRunner:
             # 无检测结果：跳过，不覆盖旧事实
             return OfflineRunResult("skipped", producer, 0, "该 step 无检测结果")
 
-        model_input = segmenter.preprocess(frames)
+        if segmenter.uses_context:
+            model_input = segmenter.preprocess(frames, self._context(run))
+        else:
+            model_input = segmenter.preprocess(frames)
         facts = segmenter.segment(model_input)  # 算法异常向上抛出，不写
 
         validated = self._validate(facts, producer)
@@ -103,6 +111,15 @@ class OfflineRunner:
             run.task_id, run.step_id, run.run_id, producer, len(validated),
         )
         return OfflineRunResult("completed", producer, len(validated))
+
+    @staticmethod
+    def _context(run: RunIdentity) -> OfflineContext:
+        """绑定到本次锁定 run 的资源；取帧只走 raw 轨（帧 ts 与 detections 位级相等）。"""
+        return OfflineContext(
+            video=functools.partial(hls.iter_frames, run),
+            load_cache=functools.partial(_load_cache, run),
+            save_cache=functools.partial(_save_cache, run),
+        )
 
     @staticmethod
     def _replace_segments(run: RunIdentity, facts: List[TemporalSegment]) -> None:
@@ -166,6 +183,25 @@ class OfflineRunner:
             if not (0.0 <= f.conf <= 1.0):
                 raise ValueError(f"TemporalSegment conf 越界: {f.conf}")
         return facts
+
+
+def _load_cache(run: RunIdentity, name: str) -> Optional[Dict[str, np.ndarray]]:
+    """缓存读坏了当作没有（策略重算并覆盖），不让一份坏缓存卡死这个 run 的离线作业。"""
+    try:
+        return inference_store.read_offline_cache(run, name)
+    except (OSError, ValueError, KeyError) as e:
+        logger.warning("[OfflineRunner] 缓存不可读，按未命中处理 task=%s step=%s name=%s: %s",
+                       run.task_id, run.step_id, name, e)
+        return None
+
+
+def _save_cache(run: RunIdentity, name: str, arrays: Mapping[str, np.ndarray]) -> None:
+    """缓存写失败只告警：本次结果不依赖它；run 已被回收时后面写事实会判 reclaimed。"""
+    try:
+        inference_store.write_offline_cache(run, name, arrays)
+    except OSError as e:
+        logger.warning("[OfflineRunner] 缓存写失败 task=%s step=%s name=%s: %s",
+                       run.task_id, run.step_id, name, e)
 
 
 def _label_probs_problem(probs: LabelProbs) -> str:

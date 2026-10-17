@@ -68,6 +68,7 @@ BUDGET = {
     "app.storage.inference._jsonl":     (set(), 0.40),   # stdlib only
     "app.storage.inference._layout":    (set(), 0.40),   # stdlib only
     "app.storage.inference._temporal":  (set(), 0.40),   # numpy（LabelProbs / npz）
+    "app.storage.inference._cache":     (set(), 0.40),   # numpy（npz）
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
     # 这条盯的是**整个域**的模块级依赖。写侧编码走 ffmpeg 子进程（`_fmp4.encode`），不用 cv2；
     # 谁把 cv2 塞回模块级，这条会连同 `app.storage.hls._encode` 一起红。
@@ -131,7 +132,7 @@ BUDGET = {
     "app.services.inference.online.visualization.render_child": (set(), 0.40),
     "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
-    # 离线 CLI 是独立进程入口：`_isolate_cpu()` 必须先于任何 torch import，故模块级不许有
+    # 离线 CLI 是独立进程入口：`_isolate()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
     "app.services.alarm":       (set(), 1.0),
@@ -293,8 +294,9 @@ def test_layer_package_modules_are_all_budgeted(package):
 
 
 def _iter_app_py_files():
+    # app/data 是推理物料目录（权重、模型骨干自带的第三方代码），不是本仓源码
     for path in sorted(APP_DIR.rglob("*.py")):
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or path.is_relative_to(APP_DIR / "data"):
             continue
         yield path
 
@@ -389,6 +391,58 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
         + "\n  ".join(violations)
         + f"\n白名单：{list(allowed)}。确有正当理由的，改 LAYER_PACKAGES 并在包 docstring 的"
         "边界声明里写明为什么它属于这一层。"
+    )
+
+
+# 离线策略实现：每个策略一个包（或单文件模块），只许依赖框架契约；兄弟策略之间零 import。
+OFFLINE_IMPL_DIR = APP_DIR / "services" / "inference" / "offline" / "impl"
+OFFLINE_IMPL_ALLOWED = (
+    "app.services.inference.offline.segmenter",
+    "app.services.inference.resample",
+    "app.types",
+)
+
+
+def _offline_impl_units():
+    for path in sorted(OFFLINE_IMPL_DIR.iterdir()):
+        if path.name.startswith("__"):
+            continue
+        if path.is_dir():
+            yield f"app.services.inference.offline.impl.{path.name}", sorted(path.rglob("*.py"))
+        elif path.suffix == ".py":
+            yield f"app.services.inference.offline.impl.{path.stem}", [path]
+
+
+@pytest.mark.parametrize("unit,files", list(_offline_impl_units()), ids=lambda v: v if isinstance(v, str) else "")
+def test_offline_impl_imports_only_framework_contract(unit, files):
+    """一个离线策略只许 import 自己与框架契约（`OFFLINE_IMPL_ALLOWED`）。
+
+    历史策略要长期保留做对照：特征 / 后处理随权重冻结，策略间共享一份代码，改一处就会让别的历史模型静默漂移。
+    宁可复制，不许跨包 import；存储、client、其他 service 一律经 Runner 注入的 `OfflineContext`。
+    """
+    def ok(name):
+        return any(name == a or name.startswith(a + ".") for a in (unit, *OFFLINE_IMPL_ALLOWED))
+
+    violations = []
+    for path in files:
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = _abs_module(path, node)
+                if not module.startswith("app.") or ok(module):
+                    continue
+                bad = [f"{module}.{a.name}" for a in node.names if not ok(f"{module}.{a.name}")]
+            elif isinstance(node, ast.Import):
+                bad = [a.name for a in node.names if a.name.startswith("app.") and not ok(a.name)]
+            else:
+                continue
+            violations += [f"{rel}:{node.lineno} → {name}" for name in bad]
+    assert not violations, (
+        f"离线策略 {unit} import 了框架契约以外的 app 模块：\n  " + "\n  ".join(violations)
+        + f"\n允许：自身 + {list(OFFLINE_IMPL_ALLOWED)}。要用别的策略的代码就复制一份进本包。"
     )
 
 

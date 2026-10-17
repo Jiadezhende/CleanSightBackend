@@ -8,7 +8,7 @@
     cancel(run) -> bool                       排队中的直接取消，运行中的 kill 子进程
 
 执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 起子进程
-`python -m app.services.inference.offline.cli run`（CPU 隔离 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
+`python -m app.services.inference.offline.cli run`（钉卡 + 限核 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
 **本模块不 import runner / torch**：CLI 只作为子进程命令出现。
 
 作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `--run-id`，
@@ -118,6 +118,20 @@ class OfflineJobService:
         self._queue = SerialTaskQueue("offline", maxsize=QUEUE_SIZE)
         self._queue.start()
         logger.info("[offline] 作业服务已启动")
+        self._preflight_materials()
+
+    def _preflight_materials(self) -> None:
+        """启动时核对激活策略的物料：缺失只告警（不影响在线，提交该 step 的作业时才会失败）。"""
+        try:
+            from .materials import check_materials
+
+            config = self._config if self._config is not None else load_stage_config()
+            missing = [s for s in check_materials(config) if not s.exists]
+        except Exception as e:
+            logger.warning("[offline] 物料预检未完成: %s", e)
+            return
+        for s in missing:
+            logger.warning("[offline] 离线物料缺失 | stage=%s | producer=%s | %s", s.stage, s.producer, s.path)
 
     def stop(self, timeout: float = 10.0) -> None:
         """kill 运行中的子进程，排队中的在排空时逐个记 cancelled（不会被「排空」拖住）。"""
@@ -311,8 +325,7 @@ def _priority_kwargs() -> Dict[str, Any]:
 
 
 def _child_env() -> Dict[str, str]:
-    env = dict(os.environ)  # 含 CLEANSIGHT_ENV 与已加载的 .env，子进程落到同一个存储根
-    env["CUDA_VISIBLE_DEVICES"] = ""
+    env = dict(os.environ)  # 含 CLEANSIGHT_ENV 与已加载的 .env，子进程落到同一个存储根、钉同一张卡（cli._isolate）
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 
