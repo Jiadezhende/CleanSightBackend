@@ -3,7 +3,7 @@
 import pytest
 from factories import make_frame_detection
 
-from app.services.inference.resample import resample_by_ts
+from app.services.inference.resample import input_fps, resample_by_ts
 
 
 def _frames(ts_list):
@@ -69,3 +69,10 @@ def test_frames_are_not_copied_or_modified():
     frames = _frames([0.0, 1 / 15, 2 / 15])
     kept = resample_by_ts(frames, 7.5)
     assert kept[0] is frames[0] and kept[1] is frames[2]
+
+
+def test_input_fps_is_median_rate_robust_to_sparse_drops():
+    ts = [i / 15 for i in range(30) if i not in (7, 19)]  # 零星丢两帧
+    assert input_fps(_frames(ts)) == pytest.approx(15.0)
+    assert input_fps(_frames([1.0])) is None
+    assert input_fps(_frames([1.0, 1.0])) is None

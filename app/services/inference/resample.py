@@ -5,6 +5,7 @@
 
     model_frames = resample_by_ts(frames, model_input_fps)               # 宽松：输入慢于 fps 时原样放行
     model_frames = resample_by_ts(frames, model_input_fps, strict=True)  # 严格：输入慢于 fps 即 ValueError
+    rate = input_fps(frames)                                             # 输入帧率（相邻 ts 差的中位数）
 
 只能降采样，不合成帧。
 """
@@ -12,11 +13,22 @@
 from __future__ import annotations
 
 from statistics import median
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from app.types.detection import FrameDetection
 
 _RATE_SLACK = 0.01  # strict 下限的相对余量，吸收 ts 舍入与抖动
+
+
+def _median_dt(frames: Sequence[FrameDetection]) -> Optional[float]:
+    dts = [b.ts - a.ts for a, b in zip(frames, frames[1:]) if b.ts > a.ts]
+    return median(dts) if dts else None
+
+
+def input_fps(frames: Sequence[FrameDetection]) -> Optional[float]:
+    """输入帧率 = 1 / 相邻 ts 差的中位数（零星丢帧不影响）；帧数 < 2 或 ts 全相同返回 None。"""
+    dt = _median_dt(frames)
+    return None if dt is None else 1.0 / dt
 
 
 def resample_by_ts(frames: Sequence[FrameDetection], fps: float, *, strict: bool = False) -> List[FrameDetection]:
@@ -29,10 +41,9 @@ def resample_by_ts(frames: Sequence[FrameDetection], fps: float, *, strict: bool
     """
     if len(frames) < 2:
         return list(frames)
-    dts = [b.ts - a.ts for a, b in zip(frames, frames[1:]) if b.ts > a.ts]
-    if not dts:
+    input_dt = _median_dt(frames)
+    if input_dt is None:
         return list(frames)
-    input_dt = median(dts)
     min_dt = 1.0 / fps
     if strict and input_dt > min_dt * (1 + _RATE_SLACK):
         raise ValueError(f"输入帧率 {1.0 / input_dt:.3f}fps 低于契约帧率 {fps}fps，只能降采样")
