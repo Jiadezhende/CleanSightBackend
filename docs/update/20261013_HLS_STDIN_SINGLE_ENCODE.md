@@ -1,7 +1,7 @@
 # 录像段改为帧经 stdin 单次编码：去掉 mp4v 中间文件，单段落盘提速约 3.8 倍
 
 > **变更状态**：生效中（2026-10-13）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_HLS_TIMELINE.md](../kb/DESIGN_HLS_TIMELINE.md)、[SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)（2026-10-17）
 
 ## 概述
 

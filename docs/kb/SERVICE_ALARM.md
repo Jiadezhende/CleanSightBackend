@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -42,7 +42,7 @@
 - `urllib` POST JSON 到 `settings.alarm_report_url`，超时 10 s；payload 含 `task_id` / `step_id` / `step_name`（取 `stage`）/ `alarm_type` / `alarm_level` / `alarm_message` / `alarm_time`（`detected_at` 格式化为 `%Y-%m-%d %H:%M:%S`），有 `detection_result` 时附上。
 - 响应 JSON `code == 0` 才算成功；HTTP 异常、非 JSON、`code != 0` 都判失败。
 
-> ⚠ **上报失败实际不会重试（代码缺陷）**：失败分支构造 `PersistenceError(message=…, client_id=…, operation=…, retryable=True)`，而 `PersistenceError.__init__` 不接受 `client_id`（`app/types/exceptions.py`），于是抛出的是 `TypeError`。它走上表「非 `AppError`」一行：CRITICAL、不重试、`retry_total{error_type="TypeError"}`。现有 `tests/test_exception_handling.py` 直接构造 `PersistenceError`，覆盖不到这条路径。
+- 失败抛 `PersistenceError(task_id=…, step_id=…, operation="alarm_http_report", retryable=True)`，走上表第二行按退避重试。告警链路（`alarm_sink` → `AlarmReportTask` → `AlarmReporter`）只带 `task_id` + `step_id`，不带 `client_id`。
 
 ## 过闸与编排归 inference 域
 
@@ -60,4 +60,4 @@
 - `app/types/exceptions.py`（`PersistenceError` 构造签名）
 - `app/services/inference/online/temporal/alarm_sink.py`、`app/services/client/queues.py`（`append_alarm_record_with_gate`）
 - `app/settings.py`（`alarm_report_url`）、`config/persistence_config.yaml`
-- `tests/test_exception_handling.py`（`_should_retry` / `_retry_delay` / `_report_with_retry` + `retry_total`）、`tests/test_alarm_sink.py`、`tests/test_alarm_increment.py`
+- `tests/test_exception_handling.py`（`_should_retry` / `_retry_delay` / `_report_with_retry` + `retry_total`；`test_reporter_http_failure_is_retried` 走真实 reporter）、`tests/test_alarm_sink.py`、`tests/test_alarm_increment.py`

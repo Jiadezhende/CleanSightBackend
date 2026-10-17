@@ -1,7 +1,7 @@
 # 离线策略中间产物缓存落 run 的 inference 域，mstcn2-role-embed 手部嵌入重跑直接复用
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[ARCHITECTURE_STORAGE_AND_SCHEMA.md](../kb/ARCHITECTURE_STORAGE_AND_SCHEMA.md)（2026-10-17）
 
 ## 概述
 

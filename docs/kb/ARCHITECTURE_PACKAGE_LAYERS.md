@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析（`app/` 全量 + `tests/test_import_hygiene.py`）
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -27,6 +27,7 @@ types/                         跨层契约 dataclass + exceptions（AppError �
 
 - `app/` 根只放组装与跨进程文件：`main.py`（lifespan 与路由装配）、`settings.py`（有 import 副作用）、
   `gateway.py`（后端中间件与 `mediamtx_gateway` 进程共用 `IPWhitelistStore` / `RateLimitStore`），加 `static/`、`data/`。
+  `data/` 是推理物料目录（权重、骨干自带的第三方 `.py`），不是源码：导入门禁扫描 app 源码时排除它。
 - 通用能力的落点：只一个包用留在该包；同层 ≥2 个包用进 `<层>/utils/`；跨层的契约与异常进 `types/`，其余放
   `app/` 根（`app/services/utils/__init__.py`）。
 - **只有 routers 调 `app.db`**：全仓 `sqlalchemy` 只出现在 `app/db/`；routers 调 `db_tasks` / `db_alarms` 的
@@ -46,6 +47,7 @@ types/                         跨层契约 dataclass + exceptions（AppError �
 | `test_daemons_do_not_import_routers` | daemons ↛ routers |
 | `test_services_do_not_import_daemons` | services ↛ daemons |
 | `test_alarm_does_not_import_inference` | alarm ↛ inference（只许 inference → alarm） |
+| `test_offline_impl_imports_only_framework_contract`（按策略包参数化） | `offline/impl/` 下每个顶层包 / 单文件模块只许 import 自身 + `offline.segmenter` / `inference.resample` / `app.types`（`OFFLINE_IMPL_ALLOWED`）；兄弟策略零 import。不复用 `LAYER_PACKAGES`：按前缀放行会把 `impl` 下的兄弟包一起放行 |
 | `test_intra_package_relative_cross_package_absolute` | 包内相对 / 跨包绝对 / 相对不上翻；覆盖 `app/` 与 `mediamtx_gateway/*.py`，含函数体内 import |
 
 按模块名判定的门禁都先经 `_abs_module()` 把相对导入还原成绝对名，写成相对绕不过去。
@@ -66,7 +68,8 @@ app/services/utils     → app.services.utils, app.storage, app.types, app.setti
 - 前缀检查是 `name == ok or name.startswith(ok + ".")`，所以 `app.services.utils` 不会放行 `app.services.lab`。
   若放行兄弟包，`services/utils` 就成了 service → service 依赖的后门，而单例门禁看不见这种转发。
 - `services/utils` 成员：`vod_playlist` / `media_timeline`（只做断流判定，媒体轴在 `storage.hls`）/ `task_queue` /
-  `worker_guard` / `pressure` / `metrics`；模块级状态只有 metrics 的 Prometheus 指标。
+  `worker_guard` / `pressure` / `metrics` / `frame_ring`（跨进程送帧的共享内存环）/ `memory_budget`（启动内存自检的估算）；
+  模块级状态只有 metrics 的 Prometheus 指标。
 
 ## 2. 重依赖只在三处出现，门禁只盯 torch / ultralytics / cv2
 
@@ -80,12 +83,13 @@ app/services/utils     → app.services.utils, app.storage, app.types, app.setti
 L2 现存位置：
 
 1. **`impl/` 顶层**：只经 `stage_factory._import_class` 按配置 `importlib` 加载（如
-   `online/temporal/impl/clean.py` 顶层 `import torch`）。`impl/` 一旦被任何 `__init__.py` re-export 就退化为 eager。
-2. **函数体内 import**：`storage/hls/_encode.py::write_mp4v`、`algorithm/colorstrip/grader.py` 的 cv2。
+   `online/temporal/impl/clean.py` 顶层 `import torch`；离线策略包一般在加载权重的函数体内才 import torch，缺权重时先于 torch 报错）。`impl/` 一旦被任何 `__init__.py` re-export 就退化为 eager。
+2. **函数体内 import**：`algorithm/colorstrip/grader.py` 的 cv2（`storage/` 已无 cv2，hls 写侧改由 ffmpeg 编码）。
    另一种形态是在函数体内 import 整个重模块：`online/visualization/visualizer.py` 顶层 `import cv2`，
    由 `online/service.py` 在 `_build_components()` 里才 import `visualization_worker`。
 3. **spawn 子进程 target 模块**：`online/detection/stage_worker.py` 顶层**不许** import torch，否则早于
-   `run_stages` 钉 `CUDA_VISIBLE_DEVICES`（正确性约束）。
+   `run_stages` 钉 `CUDA_VISIBLE_DEVICES`（正确性约束）。渲染子进程入口 `online/visualization/render_child.py`
+   整条 import 链不得拉起 torch（BUDGET 登记为零重依赖；它只 import 只许 cv2 的 `visualizer`）。
 
 门禁 `HEAVY = ("torch", "ultralytics", "cv2")`；numpy / sqlalchemy 不在其中。
 
@@ -129,7 +133,8 @@ app/services/inference/
   config.py / stage_factory.py / resample.py    online / offline 共享层
   online/     service(InferenceService) / instance(inference_service) / naming / types / render
               + detection/ temporal/（契约包） + visualization/（活体包）
-  offline/    service(OfflineJobService) / instance(offline_job_service) / runner / segmenter / cli + impl/
+  offline/    service(OfflineJobService) / instance(offline_job_service) / runner / segmenter / materials / cli
+              + impl/<策略包>/（一个策略一个自包含包，见 SERVICE_INFERENCE）
 ```
 
 online 与 offline 运行期互不 import，共用的只能放 `inference/` 这一层。

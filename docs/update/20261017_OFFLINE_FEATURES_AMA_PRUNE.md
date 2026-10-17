@@ -1,7 +1,7 @@
 # mstcn2-role-embed / mstcn2-bundle 的 features_ama 删去跑不到的代码
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-10-17）
 
 ## 概述
 

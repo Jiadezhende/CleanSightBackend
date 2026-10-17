@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -25,7 +25,10 @@
 
 - **组合而非继承**：decoder 持有 reader 线程、自身不是 `Thread`，因为 `start()` 必须同步完成 Popen 与秒退检测并当场抛异常——健康监控靠这个同步失败信号首次感知。
 - **`start()`**：Popen 后等 0.1 s 看是否秒退；秒退则 `wait(1.0)` 回收僵尸，按 stderr 标记（404 / not found / connection refused 等网络类）抛 `StreamConnectionError`（可重试），否则抛 `FFmpegError`（致命）；二进制不存在也抛 `FFmpegError`。
-- **`_reader_loop`**：阻塞读 stdout，双平台同一路径；开头捕获 stdout 本地引用，避开 `stop()` 置 `proc=None` 的 TOCTOU；读到 `b""` 或 `ValueError` 即正常退出，不自行重启。
+- **`_reader_loop`**：阻塞读 stdout，双平台同一路径；开头捕获 stdout 本地引用，避开 `stop()` 置 `proc=None` 的 TOCTOU；`_read_frame` 返回 None（EOF）或 `ValueError` 即正常退出，不自行重启。
+- **`_read_frame`：每帧新数组 + `readinto` 读满**：`np.empty(frame_size)` 后循环 `readinto` 直到读满一帧，EOF 时不足一帧的残帧丢弃、返回 None。内核直接写进帧数组，拼帧不持 GIL（多路并发时主进程 GIL 的主要释放点）。
+  - **不得复用读缓冲**：`ca_raw` / `ca_ready` / 最新帧快照 / 录像段都持有同一帧引用，复用会静默覆盖在排的帧。
+  - **帧读满即置只读**（`writeable = False`）：同一数组被录像、推理、实时画面共用，任何一处原地写都会污染全部下游；下游需要改像素必须先 `copy()`，原地写会抛 `ValueError`。
 - **`stop()`**：进程活着就直接 SIGKILL，再无条件 `wait(timeout)` 回收、关管道，锁外 join 两个线程。只解码到 pipe、无产物可损坏，卡在死 socket 上的 ffmpeg 又收不到 SIGTERM，优雅等待只会白耗 ~2 s。
 - **输出规范化为 CFR**：`-vf scale=W:H,fps=raw_fps -vsync drop`，rawvideo bgr24、默认 640x480；帧率只取 `settings.raw_fps`，yaml 不写 fps。
 - **帧与去向**：`Frame.timestamp = time.time()`（读到帧的墙钟时刻）；写 `ca_raw`（全帧率）、`ca_ready`（经准入背压与抽帧）、`latest_raw_frame / latest_raw_timestamp`。
@@ -33,7 +36,7 @@
 
 ## 准入背压只丢推理帧，录像照写
 
-decoder 每解析出一帧，经 `manager.get_pending_count()`（manager 即 StreamService，这条回读是有意保留的）取 `ca_ready` 深度。占用率 ≥ `backpressure_ratio`（默认 0.90，`config/stream_config.yaml`）时，该帧不进 `ca_ready`，计 `frame_drop_total{reason="ingress_backpressure"}`，每丢 100 帧打一条 DEBUG `[BACKPRESSURE]`；`ca_raw` 照写。解析异常计 `reason="decode_error"`。进 `ca_ready` 之后的整数抽帧与队满兜底在 CQ 内，见 [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)。
+decoder 每解析出一帧，经 `manager.get_pending_count()`（manager 即 StreamService，这条回读是有意保留的）取 `ca_ready` 深度，容量取 CQ 的 `ca_ready_maxlen`（独立浅上限，见 [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)）。占用率 ≥ `backpressure_ratio`（默认 0.90，`config/stream_config.yaml`）时，该帧不进 `ca_ready`，计 `frame_drop_total{reason="ingress_backpressure"}`，每丢 100 帧打一条 DEBUG `[BACKPRESSURE]`；`ca_raw` 照写。解析异常计 `reason="decode_error"`。进 `ca_ready` 之后的整数抽帧与队满兜底在 CQ 内，见 [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)。
 
 ## 拉流读超时：判死延迟是 `-timeout` 的 2 倍
 
@@ -65,4 +68,4 @@ decoder 每解析出一帧，经 `manager.get_pending_count()`（manager 即 Str
 - `app/services/stream/decoder.py`（`_rtsp_input_opts` / `FFmpegDecoder`）
 - `app/services/stream/{__init__,instance,config}.py`、`config/stream_config.yaml`
 - `app/settings.py`（`raw_fps`、`rtsp_read_timeout_s`）
-- `tests/test_rtsp_read_timeout.py`、`tests/test_stream_rewrite.py`、`tests/test_reconnect_on_initial_failure.py`
+- `tests/test_decoder_read_frame.py`（短读跨边界拼帧、EOF 残帧丢弃、每帧独立数组）、`tests/test_rtsp_read_timeout.py`、`tests/test_stream_rewrite.py`、`tests/test_reconnect_on_initial_failure.py`

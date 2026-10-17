@@ -1,7 +1,7 @@
 # v2 系三个历史离线策略迁成自包含包（MS-TCN+BiLSTM / ASFormer / BiGRU），特征提速约 45 倍
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-10-17）
 
 ## 概述
 

@@ -1,7 +1,7 @@
 # mstcn2-role-embed 离线只推理首帧起前 15 分钟，超长 step 截断
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-10-17）
 
 ## 概述
 

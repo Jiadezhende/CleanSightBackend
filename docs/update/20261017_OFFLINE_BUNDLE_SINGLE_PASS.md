@@ -1,7 +1,7 @@
 # bundle 94 列改为单遍计算，mstcn2-bundle 特征提速约 3.5 倍
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-10-17）
 
 ## 概述
 

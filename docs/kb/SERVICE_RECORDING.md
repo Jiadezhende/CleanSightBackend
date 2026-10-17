@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -20,7 +20,7 @@ app/storage/inference/    格式：detections.jsonl 的 record 形状与追加
 |------|--------|------|
 | `start()` / `stop(timeout)` | `recording.lifespan()` | 起停两条队列与 sweeper |
 | `collect_from(cq)` | SegmentSweeper（唯一） | 取走该 CQ 此刻该落盘的一切 |
-| `submit_segment(cq, track, frames) -> bool` | 内部 + 单测 | 打包成段任务入 `"recording"` 队列；False = 这段不会被写 |
+| `submit_segment(cq, track, frames) -> bool` | 内部 + 单测 | 打包成段任务入 `"recording"` 队列；False = 这段不会被写（含在途字节超预算） |
 | `submit_detections(cq, frames) -> bool` | 内部 + 单测 | 打包成任务入 `"recording-detections"` 队列；False = 这批不会被写 |
 | `flush_residual(cq, until_ts=None)` | `RunControlService.stop_run`、`collect_from` | 把不足一段的残帧切段入队，末尾把 `ca_detections` 全排空一并交出 |
 | `request_residual_flush(cq, fence_ts)` | HealthMonitorWorker（断流时） | **只登记**一次残帧 flush，由 sweeper 下一 tick 执行 |
@@ -51,6 +51,10 @@ lifespan 嵌在 inference 外层、与 alarm 同档。停机时最内层的 `run
 
 run 目录已被 TTL 回收时，写口抛 `FileNotFoundError`（写者不建 run 目录），这批丢弃。
 
+**段队列按在途字节限额，超了丢段**：`submit_segment` 入队前按帧 `nbytes` 之和记账（`_hls_inflight_lock` 护一个计数），超 `queue_max_mb` 即拒收、计 `frame_drop_total{reason="recording_budget"}`（按帧计）并 warning；`_write` 无论成败在 `finally` 里归还，入队失败当场归还。段数上限 `queue_size` 保留作双保险。只按段数限长时内存上限是 100 段 × 每段约 285MB，编码一停滞 OOM 会先于丢段发生；`queue_max_mb` 是启动内存自检的输入之一（[ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)）。detections 队列只按条数限长。
+
+**单段吞吐**：段写是单消费线程，只能靠把单段做快来扛多路——`insert_segment` 让帧经 stdin 一次编码成 fMP4（[DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)），640×480、300 帧单段约 0.22 s，串行吞吐约 1333 帧/s（Windows 本地实测），15 路需求 raw 450 + processed 225 = 675 帧/s。不达标时的储备方案是按 task 分片并行，须另证不破坏 run 内顺序。
+
 **失败不重试**：`_write` / `_write_detections` 各只调一次 `hls.insert_segment` / `inference.append_detections`，异常由 `SerialTaskQueue._execute` 记 error 吞掉。`insert_segment` 最后才登记清单条目，重试可能写出重复条目、毁掉整个 run 的回放；`append_detections` 纯追加，重试会写出重复帧；会抛的失败（ffmpeg 缺失、盘满、权限、run 已回收）都不是瞬时的。丢一段 ≈ 丢 10 s 录像，比写坏整个 run 便宜（判据见 [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)）。
 
 ## Sweeper 是纯节拍器
@@ -79,7 +83,7 @@ sweeper → collect_from ④ → _DetectionJob(run, frames)
 拆除 / 停机：stop_run → flush_residual(cq) 末尾全排空
 ```
 
-- **两条队列**：段写含 ffmpeg 转码（单段 0.26–3 s），detections 排在它后面会跟着被背压丢，一次十几帧、而且静默。
+- **两条队列**：段写含 ffmpeg 编码（单段约 0.2 s 起，停滞时更久），detections 排在它后面会跟着被背压丢，一次十几帧、而且静默。
 - **缓冲放在 CQ 上**：与 `ca_processed` 同形，拉模式不产生 inference → recording 的依赖边，也保住「drain 者只有 sweeper」。容量与丢弃口径见 [SERVICE_CLIENT_STATE.md](SERVICE_CLIENT_STATE.md)。
 - 每 tick 有多少交多少（15 fps 下约 15 帧一批）。`detections.jsonl` 的唯一写者是本服务，离线 runner 只读（`inference.read_detections(run)`）。
 
@@ -109,7 +113,8 @@ sweeper 下一 tick → collect_from ③ → flush_residual(cq, until_ts=fence)
 | 项 | 默认 | 语义 |
 |----|------|------|
 | `queue_size` | 100 | 每条队列各自的上限；满了 `submit_*` 返回 False 并 warning。不给无界选项 |
-| `sweep_interval_seconds` | 1.0 | 扫描间隔，远小于段周期（≈10 s）与 CQ 缓冲容量（≈30 s） |
+| `queue_max_mb` | 8192 | 段队列在途字节上限；超了丢这一段并 warning。必须 ≥ 单段字节（约 285MB），否则每段都被拒 |
+| `sweep_interval_seconds` | 1.0 | 扫描间隔，远小于段周期（≈10 s）与 CQ 缓冲容量（≈20 s） |
 
 不在这里配的：`workers`（不变式 1）、段时长与帧率（段长由 `settings.ca_segment_seconds` 按帧数触发，段时长由写侧从帧 ts 反推）。
 

@@ -1,7 +1,7 @@
 # 删除旧离线策略文件 impl/clean.py
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀（KB 里 `SERVICE_INFERENCE.md` 等对 `offline/impl/clean.py` 的描述需在融合时改为「一个策略一个包」）
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-10-17）
 
 ## 概述
 

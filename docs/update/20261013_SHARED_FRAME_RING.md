@@ -1,7 +1,7 @@
 # 新增共享内存帧环 SharedFrameRing：跨进程送帧时队列只传槽位号
 
 > **变更状态**：生效中（2026-10-13）　组件已落地并测绿，尚无调用方（下一批接入推理代理）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_CONCURRENCY_AND_QUEUES.md](../kb/DESIGN_CONCURRENCY_AND_QUEUES.md)、[SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-10-17）
 
 ## 概述
 

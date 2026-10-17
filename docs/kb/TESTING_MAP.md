@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -17,7 +17,7 @@
   - `seed_hls_segments(...)`：铺段文件 + init **并登记进清单**——「有哪些段」只由清单回答，不登记等于没有段。
 - **`conftest.py`**：唯一的 autouse `_isolate_storage_root` 把每个用例的 `settings.storage_dir` 指到独立临时目录（`start_run` 会建 run 目录）；`tmp_storage` 显式指到 `tmp_path` 并返回路径；`fast_task_queue` 把 `task_queue._POLL_INTERVAL` 调到 0.01 s；`make_cq` 等 fixture 与 factories 同源。
 - **`doubles.py`**（跨文件共用替身的唯一落点）：`MockDetector`（numpy 启发式，无 torch）、`BrushRulesSegmenter`（测试 config 以 `doubles.BrushRulesSegmenter` 引用）、`FakeProc` / `FakeLauncher` / `offline_result`（离线作业子进程替身）、`wait_until`。生产代码与配置里没有 MOCK 实现；测试文件之间不互相 import；单文件专用的 MagicMock 替身留在本地。
-- 提速 patch 点：告警退避 patch `alarm_worker` 模块内的 `time`；`TestCli` 把 `cli._isolate_cpu` 换成 no-op（否则永久改 pytest 主进程的 CUDA 可见性与 torch 线程数）；`mediamtx_gateway/rtsp_proxy.py` 的 `_CONNECT_RETRIES` / `_CONNECT_RETRY_DELAY`。
+- 提速 patch 点：告警退避 patch `alarm_worker` 模块内的 `time`；`TestCli` 把 `cli._isolate` 换成 no-op（否则永久改 pytest 主进程的 CUDA 可见性与 torch 线程数）；`mediamtx_gateway/rtsp_proxy.py` 的 `_CONNECT_RETRIES` / `_CONNECT_RETRY_DELAY`。
 
 ## API 与编排
 
@@ -41,7 +41,8 @@
 - `test_client_detections_buffer.py`：`ca_detections` 写门、满时丢最旧并计数、`drain` 原子全排空。
 - `test_client_service_find_by_source_ip.py`：多个命中取 `task_started_at` 最晚者。
 - `test_alarm_increment.py`：告警 gate（冷却窗口，被拦不续期）+ seq 自增。
-- `test_cq_pressure_log.py`：CA 队列压力日志不改变入队 / 丢帧 / 返回值行为。
+- `test_cq_pressure_log.py`：CA 队列压力日志不改变入队 / 丢帧 / 返回值行为。测日志机制的小容量用例须显式传 `ca_segment_len`（水位含 1.5 × 段长项，裸建默认段长 150 会把水位顶到容量）。
+- `test_memory_budget.py`：`ca_ready` 独立浅上限（裸建缺省沿用 `ca_maxlen`）、估算公式取最大而非相加、读 `MemAvailable`、启动自检的通过 / 拒绝 / 只告警 / 跳过。
 
 ## 推理（在线）
 
@@ -49,21 +50,27 @@
 - `test_stage_worker_ts_anchor.py`：多 detector 聚合后同帧各流 `DetectorOutput.timestamp` 都等于帧捕获 ts。
 - `test_operator_framework.py`：Operator 契约：subscribes 注入、工厂 fail-fast、感受野裁剪、帧窗投影、per-operator 隔离。
 - `test_temporal_debounce.py`：气泡边沿触发、弯折去抖与 `finalize` 结算。
-- `test_inference_resample.py`：`resample_by_ts`（在线 Operator / 离线 Segmenter 共用）：2:1、1:1、缺口重锚、strict 拒慢输入。
+- `test_inference_resample.py`：`resample_by_ts`（在线 Operator / 离线 Segmenter 共用）：2:1、1:1、缺口重锚、strict 拒慢输入；`input_fps` 按剔缺口平均判帧率（80/80/40ms 节律判 15fps、断流不拉低、丢帧如实计入、真实欠采样仍拒）。
 - `test_alarm_sink.py`：`persist_alarms` 直读 `alarm.stage`、过闸被拒不落库。
-- `test_infer_proxy.py`：`RemoteInferProxy` 主进程侧：req_id 关联、pending 有界、子进程失败后孤儿清理、ready 判定；不 spawn 子进程、不碰 GPU。
+- `test_infer_proxy.py`：`RemoteInferProxy` 主进程侧：req_id 关联、pending 有界、子进程失败后孤儿清理、ready 判定；共享内存环（送槽位不送数组、答复归还、环耗尽背压、失败 reset、put 失败归还、超尺寸退回 pickle）；不 spawn 子进程、不碰 GPU。槽位归还与 reset 的竞态窗口单测无法稳定复现，无用例。
+- `test_frame_ring.py`：`SharedFrameRing` 要么全给要么不给、归还与 reset、往返且拷出独立、非连续帧、超尺寸与错误 dtype、close 幂等、spawn 子进程跨进程读。
+- `test_render_proxy.py`：`RemoteRenderProxy` 单飞、读槽位并归还、槽满 / 帧放不进 / 未就绪拒收、put 失败归还、孤儿答复丢弃、失败清理计丢帧；`render_child.serve` 原地渲染、渲染失败保留原帧。
+- `test_viz_worker_render_proxy.py`：提交后下一 tick 收回写回且不重送、在途 run 不重送也不就地渲染、池拒收时就地渲染、已关闭 run 的迟到结果被写门拒收。
+- `test_decoder_read_frame.py`：`FFmpegDecoder._read_frame` 短读跨边界拼帧、EOF 残帧丢弃、每帧独立数组、读循环喂满后在 EOF 退出。
 - `test_dispatcher_round_robin.py` / `test_pipeline_drop_counters.py`：轮转均衡、被拒不丢帧；stage 队列满与 proxy 拒收的计数并入压力行。
 - `test_pressure_reporter.py` / `test_viz_throughput_snapshot.py`：有压力才打、限频、delta 相对上次打印；`[VIZ_THROUGHPUT]` 归因 supply-bound / render-bound / viz-starved。
 - `test_rounded_rect_roi.py`：`_draw_rounded_rect` ROI 局部化与整帧实现像素级等价。
 
 ## 告警上报与异常边界
 
-- `test_exception_handling.py`：`alarm_worker.py` 重试：fatal / retryable / 次数上限、retry 指标、退避序列 `[1.0, 2.0]`。
+- `test_exception_handling.py`：`alarm_worker.py` 重试：fatal / retryable / 次数上限、retry 指标、退避序列 `[1.0, 2.0]`；`test_reporter_http_failure_is_retried` 走真实 `AlarmReporter` 抛出点（手工构造异常覆盖不到构造参数写错这类 `TypeError`）。
 - `test_boundary_layers.py`：只测边界层 3（FastAPI 全局异常 handler 的 6 条 HTTP 映射）；边界层 1（`worker_guard.guarded_run`）无用例。
 
 ## 离线推理与作业
 
-- `test_offline_pipeline.py`：`_replace_segments`、离线 Segmenter 工厂、`require_offline`、`OfflineRunner`（read-merge-write、运行锁、回收的 run 不写、npz 形状不对只跳旁路）、clean 策略（打桩前向）、CLI 退出码。
+- `test_offline_pipeline.py`：框架层，只用本文件的替身策略（`ProbsSegmenter` / `MaterialSegmenter` 等），不引用真实策略：`_replace_segments`、离线 Segmenter 工厂、`require_offline`、`OfflineRunner`（read-merge-write、运行锁、回收的 run 不写、npz 形状不对只跳旁路、`uses_context` 策略拿到绑定锁定 run 的 video、缓存读坏降级）、物料清单与 CLI `materials` 退出码、`_pin_device` 取 `settings.cuda_device`、CLI 退出码。
+- `test_offline_clean_<包名>.py`（每个策略包一份）：特征口径、分段解码与 `label_probs`、缺权重先于 torch 报错、参数校验、物料清单；mstcn2-role-embed 另测检测行口径、取帧顺序与缺帧失败、手部嵌入缓存命中 / 失效、截断、同 ts 去重、低帧率只告警、随仓 YAML 装配。权重与 torch 前向一律打桩。
+- `test_offline_impl_catalog.py`：每个策略包都登记；各包 docstring 的 YAML 片段合法、`class` 指向本包、能被 `StageFactory` 装配、`model_dir` 名 = `clean-offline-<模型>`、物料都在声明的目录下。新增策略包须在此登记。
 - `test_offline_job_service.py`：串行、按 run 去重、运行中 run 409、取消 / 停机 / 超时 kill、结果解析（`doubles.FakeLauncher`）。
 - 真 CLI 子进程见 `integration_tests/test_offline_job_subprocess.py`。
 
@@ -72,14 +79,14 @@
 - `test_storage_tasks.py`：根解析（相对路径以项目根为基、与 cwd 无关）+ `tasks` 定位与枚举。
 - `test_storage_fs.py`：整体替换、原子删除（rename 进 `.trash/`）、清回收区、建一级目录。
 - `test_storage_runs.py`：`runs.allocate` 严格递增（时钟停滞 / 回拨）、`runs.query` 可见判据、`successor`、`query_latest_by_step`、域读写口只收 `RunIdentity`。
-- `test_storage_hls.py`：hls 域唯一单测文件：段名 / init 名 / sidecar / 清单编解码、`insert_segment` 事务、选段与 `query_*`、媒体轴（`TestTimeline*` / `TestWallFromMedia` / `TestMediaFromWall`）、tfdt patch、`effective_fps`、裁剪与解码契约；端到端用例缺 cv2 / ffmpeg 时 skip。
-- `test_storage_inference.py`：`detections.jsonl`（追加，投影有损）/ `temporal.jsonl`（原子替换，无损）/ `label_probs.npz` 往返、坏行隔离、`query_has_offline_results`。
+- `test_storage_hls.py`：hls 域唯一单测文件：段名 / init 名 / sidecar / 清单编解码、`insert_segment` 事务（`fake_pipeline` 打桩 `_fmp4.encode`）、选段与 `query_*`、媒体轴（`TestTimeline*` / `TestWallFromMedia` / `TestMediaFromWall`）、tfdt patch、`effective_fps`、裁剪与解码契约；`_fmp4.encode` 的帧尺寸校验、非连续帧、ffmpeg 失败带 stderr 且不卡死、超时 kill；端到端用例缺 ffmpeg 时 skip。
+- `test_storage_inference.py`：`detections.jsonl`（追加，投影有损）/ `temporal.jsonl`（原子替换，无损）/ `label_probs.npz` / `cache_{name}.npz`（往返、覆盖、缺失、非法名、损坏、拒对象数组、回收后写）往返、坏行隔离、`query_has_offline_results`。
 - `test_storage_cleanup_ttl.py`：TTL 判据 = `{task}/{step}/` 目录 mtime（开新 run 续命、写段不续命），整个 step 一起删；先 rename 进 `.trash/`；非数字目录不碰。
 - `test_db_queries.py`：`app.db` 只读查询跑在内存 SQLite 上（真 SQL），失败路径用未建表引擎触发真 `OperationalError`；SQLite 与 PostgreSQL 的 NULL 排序相反，用例不造 NULL。其余 router 用例的 DB 替身一律 monkeypatch `db_tasks.query_*` / `db_alarms.query_*`。
 
 ## 录制与落盘编排
 
-- `test_recording_service.py`：只钉编排（落盘格式归 `test_storage_hls.py`）：按 run 落盘（旧一代迟到段写进它自己的 run）、拒收条件、`flush_residual`、`collect_from` 整段先于残段、断流 flush 请求的身份核对与拆除回收、detections 落盘。
+- `test_recording_service.py`：只钉编排（落盘格式归 `test_storage_hls.py`）：按 run 落盘（旧一代迟到段写进它自己的 run）、拒收条件、段队列在途字节预算（`TestHlsByteBudget`：超预算拒收、停滞后恢复、入队失败与写失败都归还）、`flush_residual`、`collect_from` 整段先于残段、断流 flush 请求的身份核对与拆除回收、detections 落盘。
 - `test_task_queue.py`：`SerialTaskQueue` 提交序 == 执行序、串行、停机语义。HLS 落盘不加目录锁，「同轨相邻段 tfdt 不错位」全押在这上面，失守即静默的回放跳段。
 - `test_cq_drain_fence.py`：`drain_ca_*` 的时间戳栅栏（断流 flush 切点）。全排空会把重连前后的帧拼进同一段，`effective_fps` 被 gap 拉低却仍在 `[1,60]` 内，10 秒画面写成 30 秒慢放且无任何报警。另测 `take_*_segment`。
 
@@ -92,7 +99,7 @@
 
 ## 分层与导入门禁：test_import_hygiene 必须起子进程
 
-pytest 主进程早已装入 torch / cv2，在本进程里测等于没测。9 条门禁：
+pytest 主进程早已装入 torch / cv2，在本进程里测等于没测。10 条门禁：
 
 ```text
 test_import_budget                       干净子进程 import 后不得出现 torch / ultralytics / cv2、耗时 < 上限；
@@ -110,11 +117,14 @@ test_services_do_not_import_routers      services ↛ routers
 test_daemons_do_not_import_routers       daemons ↛ routers
 test_services_do_not_import_daemons      services ↛ daemons
 test_alarm_does_not_import_inference     alarm ↛ inference
+test_offline_impl_imports_only_framework_contract
+                                         offline/impl/ 每个策略包只许 import 自身 + offline.segmenter /
+                                         inference.resample / app.types（兄弟策略零 import）
 test_intra_package_relative_cross_package_absolute
                                          包内相对、跨包绝对、相对不上翻（含 mediamtx_gateway/）
 ```
 
-按 AST 查，相对导入先还原成绝对再判。新增分层包模块必须同时在 `BUDGET` 加一行，否则直接红。
+按 AST 查，相对导入先还原成绝对再判。新增分层包模块必须同时在 `BUDGET` 加一行，否则直接红。源码扫描排除 `app/data/`（推理物料目录，含骨干自带的第三方 `.py`）。
 
 ## 流与重连
 
@@ -167,7 +177,7 @@ test_intra_package_relative_cross_package_absolute
 pytest tests/ --cov --cov-report=term-missing   # 用不带值的 --cov；--cov=app 会覆盖 source、漏掉网关
 ```
 
-I/O 边界模块低覆盖是有意的，靠集成保障：`stream/decoder.py`、`storage/hls/_encode.py` 与 `_fmp4.py`、`inference/online/detection/{stage_worker,infer_proxy}.py`、`inference/online/visualization/visualizer.py`、`routers/ai.py`（WS 推流循环）、`alarm/alarm_worker.py` 与 `recording/sweep_worker.py`（线程循环）。其中的纯逻辑（`effective_fps` / 切段 / ROI）已抽出单测；其余纯函数缺口应补单测。
+I/O 边界模块低覆盖是有意的，靠集成保障：`stream/decoder.py`、`storage/hls/_fmp4.py`、`inference/online/detection/{stage_worker,infer_proxy}.py`、`inference/online/visualization/visualizer.py`、`routers/ai.py`（WS 推流循环）、`alarm/alarm_worker.py` 与 `recording/sweep_worker.py`（线程循环）。其中的纯逻辑（`effective_fps` / 切段 / ROI）已抽出单测；其余纯函数缺口应补单测。
 
 ## 建议补测
 

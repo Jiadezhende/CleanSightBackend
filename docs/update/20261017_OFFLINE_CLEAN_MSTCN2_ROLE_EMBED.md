@@ -1,7 +1,7 @@
 # CLEAN 离线接入新基准 mstcn2-role-embed（手部角色化 MS-TCN2），设为默认离线模型；推理物料改为一个模型一个目录
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[BUSINESS_DETECTION_STANDARDS.md](../kb/BUSINESS_DETECTION_STANDARDS.md)（2026-10-17）
 
 ## 概述
 

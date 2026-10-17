@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -43,7 +43,7 @@
 
 | 成员 | 锁 | 用途 |
 |------|----|------|
-| `ca_ready` | 无锁 SPSC deque | 待推理帧；唯一生产者 decoder、唯一消费者 dispatcher |
+| `ca_ready` | 无锁 SPSC deque | 待推理帧；唯一生产者 decoder、唯一消费者 dispatcher；独立浅上限 `ca_ready_maxlen` |
 | `ca_raw` + `latest_raw_frame / latest_raw_timestamp` | `_raw_lock` | raw HLS 落盘缓冲 + 最新原始帧（可视化与健康监控读） |
 | `ca_processed` + `_latest_rendered` | `_viz_lock` | processed HLS 落盘缓冲 + WS 推流的最新渲染帧；VizWorker 对同帧连写两者 |
 | `_latest_detection` | `_detection_lock` | 最新帧级 `FrameDetection` 快照，供 VisualizationWorker |
@@ -56,7 +56,7 @@
 - **`drain_ca_raw / drain_ca_processed(until_ts)`**：`None` 全排空（拆除期）；给值只弹队首 `timestamp <= until_ts` 的连续前缀（断流期，防残段横跨重连 gap）。`drain_ca_detections()` 无栅栏：每帧一行、行间无依赖。
 - **`ca_detections` 不能与 `_slide_window` 合并**：帧窗按算子感受野裁剪，拿它当落盘缓冲，某个 stage 调小 `window_seconds` 就会静默丢检测结果。任一源降级的帧不入 `ca_detections`。
 - **帧窗保留时长** = `max(10 s, 各算子最大感受野)`，由 InferenceService 经 `set_stream_windows` 配置、只向上扩；`signals_10s` 另按固定 10 s 裁窗。
-- **队满丢最旧并计数**：`ca_raw` 计 `frame_drop_total{reason="raw_backpressure"}`，`ca_processed` 计 `hls_backpressure`，`ca_detections` 计 `detection_backpressure`；`ca_ready` 满只计 `frames_dropped_ready`。三条像素队列各挂一个 `PressureReporter`（[DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)）。
+- **队满丢最旧并计数**：`ca_raw` 计 `frame_drop_total{reason="raw_backpressure"}`，`ca_processed` 计 `hls_backpressure`，`ca_detections` 计 `detection_backpressure`；`ca_ready` 满只计 `frames_dropped_ready`。三条像素队列各挂一个 `PressureReporter`（[DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)）：`ca_raw` / `ca_processed` 水位 = `min(ca_maxlen, max(ca_maxlen × 0.5, 1.5 × ca_segment_len))`（默认 450 帧，即 sweeper 落后半段才算压力——水位若等于段长，每攒满一段都会误报）；`ca_ready` 水位 = `ca_ready_maxlen × 0.5`。
 
 ## 抽帧：每 N 帧留 1，按帧计数不看墙钟
 
@@ -69,9 +69,12 @@
 
 ## 容量以秒声明，配置校验只查关系式
 
-四条 CA 队列共用 `ca_maxlen` = `settings.ca_maxlen_seconds`（30）× `raw_fps`（30）= 900；段长 `ca_segment_len` = `ca_segment_seconds`（10）× `raw_fps` = 300。帧数换算只在 `ClientConfig` 属性边界发生，`cq_kwargs()` 是生产建 CQ 的唯一配置出口；`ClientQueues.__init__` 的默认值（900 / 150）只供裸建与测试。取 30 s 是给录制腿留余量：`ca_raw` 丢帧即录像永久空洞，30 s ≈ 3 段，吸收分段消费抖动。
+`ca_raw` / `ca_processed` / `ca_detections` 共用 `ca_maxlen` = `settings.ca_maxlen_seconds`（20）× `raw_fps`（30）= 600；段长 `ca_segment_len` = `ca_segment_seconds`（10）× `raw_fps` = 300。`ca_ready` 另有独立浅上限 `ca_ready_maxlen` = `ca_ready_seconds`（2.0）× `inference_fps`（15）= 30 帧。帧数换算只在 `ClientConfig` 属性边界发生，`cq_kwargs()` 是生产建 CQ 的唯一配置出口；`ClientQueues.__init__` 的默认值（`ca_maxlen` 900 / 段长 150，`ca_ready_maxlen` 缺省沿用 `ca_maxlen`）只供裸建与测试。
 
-`ClientConfig._validate_config` 只查关系式，不查绝对帧数（其语义会随 `raw_fps` 漂移）：段长 < 5 s；`ca_segment_len > ca_maxlen`（装不下一段，永远触发不了分段）；`ca_maxlen < ca_segment_len × 1.2`（余量不足 20%）。后两条 `if/elif` 互斥。三条都只打 WARNING、不抛异常（「装不下一段」也只是 WARNING，文案带 ❌）。当前余量 3.00×，零告警。
+- **`ca_maxlen` 20 s ≈ 2 段**：给录制腿留余量，`ca_raw` 丢帧即录像永久空洞；同时是 15 路最坏内存预算的主项（启动内存自检见 [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)），30 s 时 15 路预算超出 32GB 机器。
+- **`ca_ready` 只需 2 s**：dispatcher 取帧远快于输入，正常时队列总是空的；推理停滞时积压的陈帧对实时督促无用，与 `ca_maxlen` 共享上限只会额外占 8–11GB（15 路）。decoder 准入背压的容量也取它。
+
+`ClientConfig._validate_config` 只查关系式，不查绝对帧数（其语义会随 `raw_fps` 漂移）：段长 < 5 s；`ca_segment_len > ca_maxlen`（装不下一段，永远触发不了分段）；`ca_maxlen < ca_segment_len × 1.2`（余量不足 20%）。后两条 `if/elif` 互斥。三条都只打 WARNING、不抛异常（「装不下一段」也只是 WARNING，文案带 ❌）。当前余量 2.00×，零告警。
 
 ## 告警闸门与前端消息
 

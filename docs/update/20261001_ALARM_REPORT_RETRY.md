@@ -1,7 +1,7 @@
 # 告警 HTTP 上报失败恢复重试；告警链路去掉 client_id
 
 > **变更状态**：生效中（2026-10-01）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_ALARM.md](../kb/SERVICE_ALARM.md)、[DESIGN_FAULT_TOLERANCE.md](../kb/DESIGN_FAULT_TOLERANCE.md)（2026-10-17）
 
 ## 概述
 

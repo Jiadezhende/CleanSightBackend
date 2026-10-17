@@ -1,7 +1,7 @@
 # 离线策略框架：物料清单与启动预检，策略包隔离门禁，框架测试只用替身
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)、[DESIGN_EXTENDING_DETECTION.md](../kb/DESIGN_EXTENDING_DETECTION.md)（2026-10-17）
 
 ## 概述
 

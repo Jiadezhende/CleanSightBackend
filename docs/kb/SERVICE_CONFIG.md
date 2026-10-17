@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -18,13 +18,14 @@
 
 - **真旋钮只有两个**：`raw_fps = 30`（解码 CFR 帧率）、`inference_decimation = 2`（检测抽帧每 N 帧留 1）。
   检测率 = `raw_fps / inference_decimation`，整数因子只能命中整除率（30 → 15 / 10 / 7.5 / 6…）。
-- **时间概念**以秒声明：`ca_maxlen_seconds = 30`、`ca_segment_seconds = 10`（HLS 段长由后者触发）。
-- **衍生量**：`settings.inference_fps`（= 15.0）、`ClientConfig.ca_maxlen` / `ca_segment_len`（× `raw_fps` = 900 / 300 帧，
-  经 `cq_kwargs()` 传给 CQ，`inference_decimation` 同路）、`DecoderConfig.default_fps`（= `raw_fps`，ffmpeg `fps=`）、
+- **时间概念**以秒声明：`ca_maxlen_seconds = 20`、`ca_segment_seconds = 10`（HLS 段长由后者触发）、`ca_ready_seconds = 2.0`。
+- **衍生量**：`settings.inference_fps`（= 15.0）、`ClientConfig.ca_maxlen` / `ca_segment_len`（× `raw_fps` = 600 / 300 帧）、
+  `ClientConfig.ca_ready_maxlen`（× `inference_fps` = 30 帧），经 `cq_kwargs()` 传给 CQ（`inference_decimation` 同路）、`DecoderConfig.default_fps`（= `raw_fps`，ffmpeg `fps=`）、
   `VisualizationWorkerPool.target_fps`（轮询率 = `raw_fps`）/ `output_fps`（= `inference_fps`）。
-- **yaml 里唯一的 fps 是 `model_input_fps`**（`inference_config.yaml` 两处，均 7.5：`CleanOperator` 与 CLEAN 离线段）。
-  它是模型契约，配错不崩、静默变差，故必填并在加载期校验：在线 `TemporalOperator.__init__` 要求 >0 且 ≤
-  `settings.inference_fps`；离线 `CleanNodepGRUSegmenter` 构造要求 >0，入模时检测帧率低于它即 `ValueError`。
+- **yaml 里唯一的 fps 是 `model_input_fps`**（现只在 `CleanOperator`，7.5）。它是模型契约，配错不崩、静默变差，故必填并在
+  加载期校验：在线 `TemporalOperator.__init__` 要求 >0 且 ≤ `settings.inference_fps`。离线策略的入模帧率随权重固定，
+  写在各策略包的 `contract` / 模块常量里（默认 mstcn2-role-embed 为 15）；只有历史策略 `CleanGRUNodepSegmenter` 仍收
+  `model_input_fps` 参数，构造要求 >0，入模时检测帧率低于它即 `ValueError`。
 - **运行时从帧 ts 反推、不读任何配置**：HLS 段编码 fps（`app/storage/hls/_encode.py::effective_fps` = `(N-1)/span`，
   落在 [1, 60] 外或单帧 / span≤0 时回退 15.0）、WS 推帧率（`ai.py`）、模型入模密度
   （`app/services/inference/resample.py::resample_by_ts`）。
@@ -50,6 +51,18 @@
   一律 `settings.config_dir / "xxx.yaml"`；唯一例外是 `app/services/algorithm/colorstrip/config.py` 读同目录 `params.yaml`。
 - **媒体 token**：`media_token_secret`（空则启动时随机生成）、`media_token_ttl = 300`。
 
+## 容量与进程数（15 路规划）
+
+| settings 项 | 默认 | env | 用途 |
+|---|---|---|---|
+| `capacity_planned_streams` | 15 | `CLEANSIGHT_CAPACITY_PLANNED_STREAMS` | 启动内存自检的规划路数；也定渲染槽位数 `max(32, 2×N)` |
+| `memory_baseline_mb` | 6144 | `CLEANSIGHT_MEMORY_BASELINE_MB` | 帧缓存之外的进程基线（估计值，待 15 路压测按实测回填） |
+| `memory_check_enforce` | true | `CLEANSIGHT_MEMORY_CHECK_ENFORCE` | false = 超预算只告警不拒绝启动（内存 < 32GB 的测试机用） |
+| `viz_processes` | 2 | `CLEANSIGHT_VIZ_PROCESSES` | 渲染子进程数；0 = 在 viz 线程内渲染 |
+| `cuda_device` | `"0"` | `CLEANSIGHT_CUDA_DEVICE` | 在线推理子进程与离线作业子进程共用的那张卡；`""` = 都看不到 GPU |
+
+自检公式与行为见 [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)；另一项输入是 `recording_config.yaml` 的 `queue_max_mb`。
+
 ## 环境文件与必填项
 
 - `CLEANSIGHT_ENV` 选文件：`dev` → `.env.dev`（缺省）、`test` → `.env.test`、`prod` → `.env`。
@@ -72,10 +85,10 @@
 
 | 文件 | 内容 |
 |------|------|
-| `config/inference_config.yaml` | 每个 stage 的 `detectors[]` / `rules[]`（Operator，含 `subscribes`、`params.window_seconds` / `model_input_fps`）/ `offline`，顶层 `batch_size`。权重路径写 `${CLEANSIGHT_MODEL_PATH:./app/data}/<文件>.pt`（`config.py::_expand_env_vars` 展开）。detector 导入或构造失败、operator 类导入失败、rule 缺 `class` / `subscribes` → 后端启动失败；operator 在每次 `start_workflow` 才 `cls(**kwargs)` 构造（`online/service.py`），参数错（如 `model_input_fps` 越界）只让该次 `/api/start` 回滚报错 |
-| `config/stream_config.yaml` | `decoder:` 段：`default_width` / `default_height`、`pix_fmt`、`chunk_read_size`、`backpressure_ratio`；不含 fps |
+| `config/inference_config.yaml` | 每个 stage 的 `detectors[]` / `rules[]`（Operator，含 `subscribes`、`params.window_seconds` / `model_input_fps`）/ `offline`，顶层 `batch_size`。权重路径写 `${CLEANSIGHT_MODEL_PATH:./app/data}/…`（`config.py::_expand_env_vars` 展开）：在线权重是扁平 `.pt` 文件，离线物料是目录。detector 导入或构造失败、operator 类导入失败、rule 缺 `class` / `subscribes` → 后端启动失败；operator 在每次 `start_workflow` 才 `cls(**kwargs)` 构造（`online/service.py`），参数错（如 `model_input_fps` 越界）只让该次 `/api/start` 回滚报错 |
+| `config/stream_config.yaml` | `decoder:` 段：`default_width` / `default_height`、`pix_fmt`、`backpressure_ratio`；不含 fps（读帧按整帧 `readinto`，没有读块大小项） |
 | `config/client_config.yaml` | `frame:` 段 resize 宽高；stage 不在此（由 `start_run` 按 `current_step` 传给 CQ） |
-| `config/recording_config.yaml` | `queue_size`、`sweep_interval_seconds`；没有 `workers`（段写恒单消费线程，配多了不报错、只让段间 tfdt 碰撞），不配任何时长或帧率 |
+| `config/recording_config.yaml` | `queue_size`、`queue_max_mb`（段队列在途字节上限，8192）、`sweep_interval_seconds`；没有 `workers`（段写恒单消费线程，配多了不报错、只让段间 tfdt 碰撞），不配任何时长或帧率 |
 | `config/persistence_config.yaml` | 分段读：`storage:` → `daemons/cleanup/config.py::CleanupConfig`（`enable_cleanup` / `cleanup_days` / `cleanup_interval_seconds`）；`alarm:` → `services/alarm/config.py::AlarmServiceConfig`（`workers` / `queue_size`）。告警重试参数写死在 `alarm_worker.py` |
 | `config/health_monitor_config.yaml` | `monitor:` 段：`check_interval` 1.0、`heartbeat_timeout` 5.0、`reconnect_interval` 5.0、`cleanup_timeout` 20.0、`orphan_timeout` 30.0、`task_max_duration` 1800.0 |
 | `config/logging.json` | 日志 dictConfig，见下 |
@@ -88,19 +101,27 @@
 - 可跑校验只有 `InferenceConfig.require_offline(step_id)`：step 未定义或 `offline` 为空 → `ValidationError`。
   admin 提交（400）与 Runner 运行（CLI 退出码 1）共用。
 - 在线进程从不实例化 `offline` 块的类：类路径错、权重缺失只在离线作业里暴露（该作业 failed）。
-- 当前：step `"1"`（LEAK）`offline: {}`；step `"2"`（CLEAN）为 `CleanNodepGRUSegmenter`，`params` =
-  `model_path: …/clean-offline-gru-nodep.pt`、`model_input_fps: 7.5`、`confidence_override: 1.0`、`min_duration_s: 0.2`。
-  `model_input_fps` / `confidence_override` 须与训练口径一致，配错不报错（训练口径待核验）。
-- yaml 注释给出三个备选类（只收 `model_path` / `min_duration_s`），换 `class` 须同时换 `params`：
+- 当前：step `"1"`（LEAK）`offline: {}`；step `"2"`（CLEAN）为 `CleanMSTCN2RoleEmbedSegmenter`，`params` =
+  `model_dir: …/clean-offline-mstcn2-role-embed`、`backbone_dir: …/backbones/dinov2_vits14`、`device: cuda`、
+  `max_crops_per_s: 150`、`max_duration_s: 900`（含义见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)）。
+- 换 `class` 须同时换 `params`（物料与特征 recipe 一一对应）。每个历史策略包的 `segmenter.py` docstring 给出可直接粘贴的
+  块格式 YAML 片段（`tests/test_offline_impl_catalog.py` 保证它合法、能装配、`model_dir` 名 = `clean-offline-<模型>`）。
+  不要写成 `params: {model_dir: ${…}}` 流式写法：`${…}` 的花括号会让 YAML 解析失败。
+- **离线物料一个模型一个目录** `${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-<模型>/`，目录内文件名由策略类写死；
+  共享骨干放 `app/data/backbones/<名>/`。核对当前激活策略的物料：`python -m app.services.inference.offline.cli materials`
+  （缺失退出码 1）；后端启动时离线作业服务也会预检并逐条 WARNING。
 
-| class | 权重 |
-|---|---|
-| `CleanNodepGRUSegmenter`（默认） | `clean-offline-gru-nodep.pt` |
-| `CleanBiGRUSegmenter` | `clean-offline-bigru.pt` |
-| `CleanASFormerSegmenter` | `clean-offline-asformer.pt` |
-| `CleanMSTCNBiLSTMSegmenter` | `clean-offline-mstcn.pt` |
+```text
+app/data/
+  clean-offline-mstcn2-role-embed/{temporal.pt, hand_state.npz}   默认
+  backbones/dinov2_vits14/                                        DINOv2 hub 代码 + 权重
+  clean-offline-mstcn2-bundle/model.pt
+  clean-offline-gru-nodep/model.pt                                上一版默认
+  clean-offline-{mstcn-bilstm,asformer,bigru}/model.pt
+```
 
-离线权重命名 `clean-offline-<模型>.pt`，与在线权重同放 `${CLEANSIGHT_MODEL_PATH:./app/data}`。
+- 在线权重（`clean-large-best.pt` 等）仍是扁平文件，各自被替换时再按目录规范放。`.gitignore` 忽略 `app/data/*/`。
+- 物料目录与骨干代码尚未进 `/deploy` 分发流程（待补）：新机器缺物料时离线作业失败，不影响在线。
 
 ## Gateway 配置
 
@@ -145,6 +166,6 @@ FastAPI Gateway（`app/gateway.py`）的配置全在 settings：
 - `start_backend.sh` / `start_backend.ps1`（`BASE_*` / `$Base*`）、`.env.example`
 - `app/main.py`（`log_level` 设 root 级别、`uvicorn.run(log_config=...)`）
 - `app/services/{client,stream,recording,alarm,inference}/config.py`、`app/daemons/{cleanup,health_monitor}/config.py`
-- `app/services/inference/stage_factory.py`（`create_offline_segmenter`）、`app/services/inference/online/temporal/operator.py`、`app/services/inference/offline/impl/clean.py`
+- `app/services/inference/stage_factory.py`（`create_offline_segmenter`）、`app/services/inference/online/temporal/operator.py`、`app/services/inference/offline/{materials,cli}.py`、`app/services/inference/offline/impl/clean_*/`
 - `app/storage/hls/_encode.py`（`effective_fps`）、`app/services/lab/runtime_config.py`、`app/services/algorithm/colorstrip/config.py`
 - `config/*.yaml`、`config/logging.json`

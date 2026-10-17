@@ -1,7 +1,7 @@
 # 解码读循环改 readinto 整帧直写：拼帧移出 GIL
 
 > **变更状态**：生效中（2026-10-13）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_STREAM.md](../kb/SERVICE_STREAM.md)、[SERVICE_CONFIG.md](../kb/SERVICE_CONFIG.md)（2026-10-17）
 
 ## 概述
 

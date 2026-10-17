@@ -1,7 +1,7 @@
 # 删除录像段 mp4v 中间编码旧路径
 
 > **变更状态**：生效中（2026-10-13）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [DESIGN_STORAGE_LAYER.md](../kb/DESIGN_STORAGE_LAYER.md)、[ARCHITECTURE_PACKAGE_LAYERS.md](../kb/ARCHITECTURE_PACKAGE_LAYERS.md)（2026-10-17）
 
 ## 概述
 

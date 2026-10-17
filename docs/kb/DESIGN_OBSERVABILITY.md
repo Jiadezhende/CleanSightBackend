@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -24,11 +24,13 @@
 
 | resource | 上报者 | 检查点 | 谓词 |
 |----------|--------|--------|------|
-| `ca_ready` / `ca_raw` / `ca_processed` | `ClientQueues` | 各自 `append_*` 内、队列锁外 | 深度 ≥ `maxlen × 0.5` |
+| `ca_ready` | `ClientQueues` | `append_ca_ready_with_throttle` 内、队列锁外 | 深度 ≥ `ca_ready_maxlen × 0.5` |
+| `ca_raw` / `ca_processed` | `ClientQueues` | 各自 `append_*` 内、队列锁外 | 深度 ≥ `min(maxlen, max(maxlen × 0.5, 1.5 × 段长))`（默认 450 帧） |
 | `stage_queue` | `StageAwareDispatcher` | 调度循环每 ~1 s 采样一次 | 同上 |
 
 - 队列存在谁那里，就由谁在写入方法里上报；不另起线程，不把水位判定散到各生产者。`ClientQueues` 因此天然只在 run 运行时汇报，`to_draining()` / `close()` 静默 `reset()` 计时与基线。
 - 水位比 0.5、间隔 10 s 是 `pressure.py` 常量，等有真实压力数据再谈上 settings。
+- **被周期性整批消费的队列，水位必须高于一个批量**：`ca_raw` / `ca_processed` 由 sweeper 每满一段（300 帧）整段拉走，每攒满一段、还没被拉走的那一刻深度就到段长。`ca_maxlen` 降到 600 后 `× 0.5` 正好等于段长，每条队列周期性误报（15 路时每秒约 2 行，真压力被淹没）。水位取「落后半段」= 1.5 × 段长才表示消费方真的落后了。
 - 只有状态型资源接它；子进程死亡、wedge、落盘失败是**事件**，照常直接打 ERROR / WARNING。
 - **日志契约**：单行 `key=value`，全 WARNING，走专用 logger `app.pressure`（可一行 `setLevel(ERROR)` 静音，不影响业务日志）；不适用的字段直接不打，不用 `-1` 之类魔法值；`observe()` 整体 try/except，绝不影响热路径。
 
@@ -55,6 +57,8 @@ dispatcher → proxy 的背压是 `submit()` 返回的布尔值，本身完全�
 - **速率亏空的基准是 `output_fps`（= inference_fps），不是轮询率**：轮询率是 `raw_fps`（30），对推理流 2× 过采样只为更快抓到新推理，渲染仍按 `inference.ts` 去重。拿轮询率作基准会让 `15 < 30×0.8` 恒真、100% 误报 supply-bound；render-bound 预算同理用出帧间隔 `1000/out_target`。
 - **viz-starved 看 worker 级 tick 健康度**：`_tick_count` 在遍历客户端之前自增，低于标称轮询率的 80% 判 viz-starved（线程被 GIL 争用饿着）。反例：拿「有快照的 tick 数」当 run 存活时长的代理，viz 饿着时它同样塌，把本该报的故障咽掉。
 - **出帧率分母用 run 的实测存活跨度** `_first_seen → _last_seen`（加一个 tick）；拿窗界代替会把中途起停的 run 出帧率算低、误报 supply-bound。跨度 < 1 s（`_MIN_SPAN_SEC`）只打数不判定。
+
+- **渲染耗时取实际执行渲染的那一方**：渲染在子进程池时，render-bound 判据用子进程回报的单帧耗时（随 `drain` 结果带回），不用主进程提交耗时；viz-starved / supply-bound 判据不变。
 
 **非缺陷**：viz 取最新原始帧叠检测框并盖 `inference.ts`，积压时框滞后于画面是有意设计（画面实时优先），不要修成按 ts 配对。
 

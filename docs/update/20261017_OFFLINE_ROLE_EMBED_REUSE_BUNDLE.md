@@ -1,7 +1,7 @@
 # mstcn2-role-embed 复用 bundle 中间量，清掉后端自写部分的死参数
 
 > **变更状态**：生效中（2026-10-17）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [SERVICE_INFERENCE.md](../kb/SERVICE_INFERENCE.md)（2026-10-17）
 
 ## 概述
 

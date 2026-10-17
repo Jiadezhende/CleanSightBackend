@@ -1,7 +1,7 @@
 # 内存按字节兜底：ca_ready 独立浅上限、录像段队列按字节限额、启动内存自检
 
 > **变更状态**：生效中（2026-10-13）
-> **知识库**：待沉淀
+> **知识库**：已沉淀 → [ARCHITECTURE_OVERVIEW.md](../kb/ARCHITECTURE_OVERVIEW.md)、[SERVICE_CLIENT_STATE.md](../kb/SERVICE_CLIENT_STATE.md)、[SERVICE_RECORDING.md](../kb/SERVICE_RECORDING.md)、[SERVICE_CONFIG.md](../kb/SERVICE_CONFIG.md)（2026-10-17）
 
 ## 概述
 
