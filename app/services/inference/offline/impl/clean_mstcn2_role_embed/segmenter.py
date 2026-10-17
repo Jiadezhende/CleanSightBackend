@@ -1,8 +1,8 @@
-"""CLEAN 新基准 C7 离线策略（YAML ``offline.class`` 指向 ``CleanC7Segmenter``）。
+"""CLEAN 新基准 mstcn2-role-embed 离线策略（YAML ``offline.class`` 指向 ``CleanMSTCN2RoleEmbedSegmenter``）。
 
     offline:
-      class: app.services.inference.offline.impl.clean_c7.segmenter.CleanC7Segmenter
-      params: {model_dir: .../clean-offline-c7-v41, backbone_dir: .../backbones/dinov2_vits14,
+      class: app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
+      params: {model_dir: .../clean-offline-mstcn2-role-embed, backbone_dir: .../backbones/dinov2_vits14,
                device: cuda, max_crops_per_s: 150, max_duration_s: 900}
 
 物料目录内文件名固定：``model_dir/{temporal.pt, hand_state.npz}``，``backbone_dir`` = dinov2 hub 代码 + 权重。
@@ -45,12 +45,12 @@ _RATE_SLACK = 0.01  # 帧率比较的相对余量，吸收 ts 舍入与抖动（
 
 
 @dataclass(frozen=True)
-class C7Input:
+class RoleEmbedInput:
     ts: np.ndarray        # [T] float64，帧捕获 ts
     features: np.ndarray  # [T, 106] float32
 
 
-class CleanC7Segmenter(OfflineSegmenter):
+class CleanMSTCN2RoleEmbedSegmenter(OfflineSegmenter):
     """手部角色化 MS-TCN2：手部裁剪 → DINOv2 → 手部状态分类器 → 106 维特征 → 整段前向 → pp20。"""
 
     uses_context = True
@@ -86,7 +86,7 @@ class CleanC7Segmenter(OfflineSegmenter):
         self.max_duration_s = None if max_duration_s is None else float(max_duration_s)
         self._last_probs: Optional[LabelProbs] = None
 
-    def preprocess(self, frames: Sequence[FrameDetection], context: OfflineContext) -> C7Input:
+    def preprocess(self, frames: Sequence[FrameDetection], context: OfflineContext) -> RoleEmbedInput:
         frames = _truncate(frames, self.max_duration_s)
         _warn_low_rate(frames)
         frames = resample_by_ts(frames, FPS)
@@ -95,9 +95,9 @@ class CleanC7Segmenter(OfflineSegmenter):
         rows = detection_rows(frames, width=WIDTH, height=HEIGHT)
         emb = self._embed(ts, hand_boxes_per_frame(rows), context)
         hand_probs = HandStateClassifier(self.model_dir / HAND_STATE_FILE).probs(emb.astype(np.float64))
-        return C7Input(ts=ts, features=build_features(rows, hand_probs))
+        return RoleEmbedInput(ts=ts, features=build_features(rows, hand_probs))
 
-    def segment(self, model_input: C7Input) -> List[TemporalSegment]:
+    def segment(self, model_input: RoleEmbedInput) -> List[TemporalSegment]:
         from .model import load_model, predict_probs  # torch 只在真正前向时拉起
 
         if len(model_input.ts) == 0:
@@ -140,7 +140,7 @@ class CleanC7Segmenter(OfflineSegmenter):
         key = backbone_key(self.backbone_dir)
         cached = context.load_cache(CACHE_NAME)
         if _cache_matches(cached, row_ts, row_boxes, key):
-            logger.info("[CleanC7Segmenter] 手部嵌入命中缓存 | hands=%d", len(row_ts))
+            logger.info("[CleanMSTCN2RoleEmbedSegmenter] 手部嵌入命中缓存 | hands=%d", len(row_ts))
             return cached["emb"]
         emb = self._compute_embeddings(ts, hands, context)
         context.save_cache(CACHE_NAME, {"ts": row_ts, "boxes": row_boxes, "emb": emb, "backbone": np.array(key)})
@@ -172,7 +172,7 @@ class CleanC7Segmenter(OfflineSegmenter):
         if len(emb) != total:
             raise AssertionError(f"手部嵌入 {len(emb)} 行，应为 {total}")
         logger.info(
-            "[CleanC7Segmenter] 手部嵌入完成 | frames=%d | hands=%d | device=%s | %.1fs",
+            "[CleanMSTCN2RoleEmbedSegmenter] 手部嵌入完成 | frames=%d | hands=%d | device=%s | %.1fs",
             len(wanted), total, device, time.monotonic() - started,
         )
         return emb
@@ -207,7 +207,7 @@ def _truncate(frames: Sequence[FrameDetection], max_duration_s: Optional[float])
     cutoff = frames[0].ts + max_duration_s
     kept = [f for f in frames if f.ts <= cutoff]
     logger.warning(
-        "[CleanC7Segmenter] 检测时长 %.0fs 超过上限 %.0fs，只推理前 %.0fs | frames %d → %d",
+        "[CleanMSTCN2RoleEmbedSegmenter] 检测时长 %.0fs 超过上限 %.0fs，只推理前 %.0fs | frames %d → %d",
         frames[-1].ts - frames[0].ts, max_duration_s, max_duration_s, len(frames), len(kept),
     )
     return kept
@@ -218,10 +218,10 @@ def _warn_low_rate(frames: Sequence[FrameDetection]) -> None:
     rate = input_fps(frames)
     if rate is None or rate >= FPS * (1 - _RATE_SLACK):
         return
-    logger.warning("[CleanC7Segmenter] 输入帧率 %.3ffps 低于训练帧率 %.1ffps，照常推理", rate, FPS)
+    logger.warning("[CleanMSTCN2RoleEmbedSegmenter] 输入帧率 %.3ffps 低于训练帧率 %.1ffps，照常推理", rate, FPS)
 
 
 def _check_resolution(frames: Sequence[FrameDetection]) -> None:
     for f in frames:
         if (f.frame_width, f.frame_height) not in ((None, None), (WIDTH, HEIGHT)):
-            raise ValueError(f"C7 只接受 {WIDTH}×{HEIGHT} 输入（训练分辨率 / 水印位置），得到 {f.frame_width}×{f.frame_height}")
+            raise ValueError(f"mstcn2-role-embed 只接受 {WIDTH}×{HEIGHT} 输入（训练分辨率 / 水印位置），得到 {f.frame_width}×{f.frame_height}")

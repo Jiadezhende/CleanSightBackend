@@ -44,7 +44,7 @@
       detections.jsonl      每帧一行：ts + {流名: [检测框]} + 帧分辨率
       temporal.jsonl      每条一行：`type` 判别 event / segment
       label_probs.npz     离线分割逐帧类别概率：ts [T] + probs [T,C] + labels [C]
-      cache_{name}.npz    离线策略中间产物缓存（如 C7 的手部嵌入），随 run 目录 TTL 回收
+      cache_{name}.npz    离线策略中间产物缓存（如 mstcn2-role-embed 的手部嵌入），随 run 目录 TTL 回收
       .{name}.tmp         路线 C 的暂存，换名后即消失
 
 ## 边界

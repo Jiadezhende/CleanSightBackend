@@ -1,0 +1,6 @@
+"""CLEAN 新基准 mstcn2-role-embed（手部角色化）离线策略：检测框 + 手部图像 → 106 维特征 → MS-TCN2 → 动作段。
+
+策略类在 ``segmenter.CleanMSTCN2RoleEmbedSegmenter``（YAML 经全限定路径加载）。其余模块移植自训练交付包
+``role-hands-c7-mstcn2-v41/c7ref``，只改了输入边界（读框文件 / 读视频 → 内存里的检测行与 raw 帧）；
+特征的计算方式不许改，任何数值变化都要换特征版本并重训。
+"""

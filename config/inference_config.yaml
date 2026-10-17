@@ -102,13 +102,13 @@ stages:
             6: short_brush
             7: brush_tip_out
     offline:                         # 离线段（stage 粒度）：class 指定离线模型，缺省/空块 = 不可跑
-      class: app.services.inference.offline.impl.clean_c7.segmenter.CleanC7Segmenter
+      class: app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
       # 换 class 须同时换 params（物料与特征 recipe 一一对应）。上一版默认：
       #   ...impl.clean.CleanNodepGRUSegmenter ↔ model_path: .../clean-offline-gru-nodep.pt,
       #   model_input_fps: 7.5, confidence_override: 1.0, min_duration_s: 0.2
       params:
         # 物料一个模型一个目录，目录内文件名由策略类写死
-        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-c7-v41          # temporal.pt + hand_state.npz
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-role-embed          # temporal.pt + hand_state.npz
         backbone_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/backbones/dinov2_vits14     # dinov2 hub 代码 + 权重
         device: cuda                 # DINOv2 所用设备；卡号随在线推理（settings.cuda_device）。无 GPU 的机器配 cpu
         max_crops_per_s: 150         # DINOv2 限速（次裁剪/秒），与在线 YOLO 共卡时让出算力；null = 不限速

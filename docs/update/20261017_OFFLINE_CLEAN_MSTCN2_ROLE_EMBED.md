@@ -1,11 +1,11 @@
-# CLEAN 离线接入新基准 C7（手部角色化 MS-TCN2），设为默认离线模型；推理物料改为一个模型一个目录
+# CLEAN 离线接入新基准 mstcn2-role-embed（手部角色化 MS-TCN2），设为默认离线模型；推理物料改为一个模型一个目录
 
 > **变更状态**：生效中（2026-10-17）
 > **知识库**：待沉淀
 
 ## 概述
 
-新增离线策略 [`CleanC7Segmenter`](../../app/services/inference/offline/impl/clean_c7/segmenter.py)，接入训练侧交付的
+新增离线策略 [`CleanMSTCN2RoleEmbedSegmenter`](../../app/services/inference/offline/impl/clean_mstcn2_role_embed/segmenter.py)，接入训练侧交付的
 `role-hands-c7-mstcn2-v41`：检测框 + 手部裁剪（DINOv2 + 手部状态分类器）→ 106 维特征 → MS-TCN2 → pp20。
 CLEAN（step `2`）`offline.class` 切到该类。物料按新规范放 `app/data/<模型目录>/`。旧策略保留未删。
 
@@ -38,17 +38,17 @@ read_detections(run)                                   15 fps
 
 | 部件 | 落在哪 |
 |------|--------|
-| 策略类、取帧裁剪编排、分段解码 | [`clean_c7/segmenter.py`](../../app/services/inference/offline/impl/clean_c7/segmenter.py) |
-| 检测 → 训练口径检测行 | [`clean_c7/frames.py`](../../app/services/inference/offline/impl/clean_c7/frames.py) |
-| 裁剪、DINOv2 加载与限速嵌入、分类器 | [`clean_c7/hand_state.py`](../../app/services/inference/offline/impl/clean_c7/hand_state.py) |
-| 特征（bundle / 角色 / 槽位 / 手部状态） | `clean_c7/{features,bundle,roles,slots}.py` + `features_ama/` |
-| 列序与类序契约 | [`clean_c7/contract.py`](../../app/services/inference/offline/impl/clean_c7/contract.py) |
-| 网络（结构写死）与 pp20 | `clean_c7/{model,postprocess}.py` |
+| 策略类、取帧裁剪编排、分段解码 | [`clean_mstcn2_role_embed/segmenter.py`](../../app/services/inference/offline/impl/clean_mstcn2_role_embed/segmenter.py) |
+| 检测 → 训练口径检测行 | [`clean_mstcn2_role_embed/frames.py`](../../app/services/inference/offline/impl/clean_mstcn2_role_embed/frames.py) |
+| 裁剪、DINOv2 加载与限速嵌入、分类器 | [`clean_mstcn2_role_embed/hand_state.py`](../../app/services/inference/offline/impl/clean_mstcn2_role_embed/hand_state.py) |
+| 特征（bundle / 角色 / 槽位 / 手部状态） | `clean_mstcn2_role_embed/{features,bundle,roles,slots}.py` + `features_ama/` |
+| 列序与类序契约 | [`clean_mstcn2_role_embed/contract.py`](../../app/services/inference/offline/impl/clean_mstcn2_role_embed/contract.py) |
+| 网络（结构写死）与 pp20 | `clean_mstcn2_role_embed/{model,postprocess}.py` |
 | 配置 | [`config/inference_config.yaml`](../../config/inference_config.yaml) step `2` offline |
 
 ### 1. 移植方式：参考实现原样复制，只改输入边界
 
-`clean_c7/` 下除 `segmenter.py` / `frames.py` 外均复制自交付包 `c7ref/`，只做了这些改动：
+`clean_mstcn2_role_embed/` 下除 `segmenter.py` / `frames.py` 外均复制自交付包 `c7ref/`，只做了这些改动：
 
 - `features_ama/clean_bbox_v2._read_object_arrays`：读框文件 → 收已解析的逐帧检测行（参数名 `frame_paths` → `frame_rows`）；
 - `features.py` / `bundle.py`：同上换入参；列名从 `feature_columns.json` 改为 `contract.FEATURE_COLUMNS` 常量；
@@ -72,8 +72,8 @@ read_detections(run)                                   15 fps
 
 | 文件 | 来源（交付包 `role-hands-c7-mstcn2-v41`） | sha256 |
 |------|------|--------|
-| `clean-offline-c7-v41/temporal.pt` | `weights/temporal/fold0-seed42.pt` | `7dec83e2…102c9` |
-| `clean-offline-c7-v41/hand_state.npz` | `weights/hand_state/all.npz` | `2dc194cb…363d02a4` |
+| `clean-offline-mstcn2-role-embed/temporal.pt` | `weights/temporal/fold0-seed42.pt` | `7dec83e2…102c9` |
+| `clean-offline-mstcn2-role-embed/hand_state.npz` | `weights/hand_state/all.npz` | `2dc194cb…363d02a4` |
 | `backbones/dinov2_vits14/` | torch.hub `facebookresearch_dinov2_main` 代码目录 + `dinov2_vits14_pretrain.pth` | 权重 `b938bf1b…60cd9` |
 
 `app/data` 下会有骨干自带的第三方 `.py`，导入规范门禁（`test_import_hygiene`）的 app 源码扫描已排除 `app/data`。
@@ -106,7 +106,7 @@ read_detections(run)                                   15 fps
 
 | 项 | 结果 |
 |----|------|
-| 新增 `tests/test_offline_clean_c7.py` | 13 passed（检测行口径、取帧顺序 / 缺帧失败、分段解码、输入契约、参数校验、随仓 YAML 装配） |
+| 新增 `tests/test_offline_clean_mstcn2_role_embed.py` | 13 passed（检测行口径、取帧顺序 / 缺帧失败、分段解码、输入契约、参数校验、随仓 YAML 装配） |
 | 全量 `pytest tests/` | 1049 passed |
 | 集成测试（真实流） | 未跑 |
 
@@ -118,7 +118,7 @@ read_detections(run)                                   15 fps
 | 限速默认值按开发机定 | 生产 15 路满载时在线余量未知 | 生产机复测后调 `max_crops_per_s` |
 | 每次运行都重算手部嵌入（占耗时约 90%） | 换权重重跑历史 run 时 GPU 开销重复 | 下一批：嵌入缓存落 `inference/` 域 |
 | 部署物料（目录与骨干代码）未进 `/deploy` 分发流程 | 新机器缺物料时离线作业失败（不影响在线） | 按人定，本批不管部署 |
-| 旧离线策略（`impl/clean.py` 里的 nodep GRU 等）仍在 | 无 | C7 定型后单独删除 |
+| 旧离线策略（`impl/clean.py` 里的 nodep GRU 等）仍在 | 无 | mstcn2-role-embed 定型后单独删除 |
 
 ## 追加（2026-10-17）：输入帧率门禁放宽
 
@@ -130,3 +130,11 @@ read_detections(run)                                   15 fps
   13fps 输入时这些窗口在时间上拉长约 15%、速度类特征按帧换算会偏低约 13%；这次没有评估对段级 F1 的影响。
   线上若长期低于 15fps，应先查在线推理为什么掉帧，而不是继续调低下限。
 - **自测**：新增 / 改写用例（12.99 / 5fps 只告警不失败、15fps 无告警、`input_fps` 对零星丢帧稳健）；全量 `pytest tests/` 1068 passed。
+
+## 追加（2026-10-17）：模型改名 mstcn2-role-embed
+
+- **改动**：后端侧模型名由训练侧代号 C7 改为 `mstcn2-role-embed`。包 `impl/clean_c7/` → `impl/clean_mstcn2_role_embed/`，
+  类 `CleanC7Segmenter` → `CleanMSTCN2RoleEmbedSegmenter`（即 producer），物料目录 `clean-offline-c7-v41` → `clean-offline-mstcn2-role-embed`
+  （目录内文件不变）。交付包原名（`role-hands-c7-mstcn2-v41`、`c7ref`）是外部名，保留。
+- **影响**：已部署机器的物料目录要同步改名；改名前产出的离线分段 producer 仍是 `CleanC7Segmenter`，按 producer 查询时不会命中。
+- **自测**：全量 `pytest tests/` 1071 passed。

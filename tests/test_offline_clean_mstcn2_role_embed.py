@@ -1,6 +1,6 @@
-"""CLEAN C7 离线策略：检测 → 训练口径检测行、取帧裁剪的对齐与缺帧、分段解码、配置装配。
+"""CLEAN mstcn2-role-embed 离线策略：检测 → 训练口径检测行、取帧裁剪的对齐与缺帧、分段解码、配置装配。
 
-特征数值与训练逐位一致是接入时的一次性核对（见 docs/update/20261017_OFFLINE_CLEAN_C7.md），不在这里重放；
+特征数值与训练逐位一致是接入时的一次性核对（见 docs/update/20261017_OFFLINE_CLEAN_MSTCN2_ROLE_EMBED.md），不在这里重放；
 这里不加载任何真实权重、不跑 torch 前向。
 """
 
@@ -11,10 +11,10 @@ from factories import make_det_box, make_detector_output, make_frame_detection
 
 from app.types.frame import Frame
 from app.services.inference.offline.segmenter import OfflineContext
-from app.services.inference.offline.impl.clean_c7 import segmenter as seg_mod
-from app.services.inference.offline.impl.clean_c7.contract import ACTION_NAMES
-from app.services.inference.offline.impl.clean_c7.frames import detection_rows
-from app.services.inference.offline.impl.clean_c7.segmenter import CleanC7Segmenter
+from app.services.inference.offline.impl.clean_mstcn2_role_embed import segmenter as seg_mod
+from app.services.inference.offline.impl.clean_mstcn2_role_embed.contract import ACTION_NAMES
+from app.services.inference.offline.impl.clean_mstcn2_role_embed.frames import detection_rows
+from app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter import CleanMSTCN2RoleEmbedSegmenter
 
 
 def _det(name, bbox):
@@ -28,7 +28,7 @@ def _frame(ts, *boxes, w=640, h=480):
 
 
 def _segmenter(**kw):
-    return CleanC7Segmenter(model_dir="m", backbone_dir="b", **kw)
+    return CleanMSTCN2RoleEmbedSegmenter(model_dir="m", backbone_dir="b", **kw)
 
 
 class TestDetectionRows:
@@ -40,7 +40,7 @@ class TestDetectionRows:
             _det("hand", [100, 100, 164, 196]),     # 面积第一
             _det("syringe", [0, 0, 128, 96]),       # 面积更大的 syringe 胜出
             _det("hand", [0, 0, 32, 48]),
-            _det("bubble", [0, 0, 600, 400]),       # 不在 C7 类表里 → 忽略
+            _det("bubble", [0, 0, 600, 400]),       # 不在 mstcn2-role-embed 类表里 → 忽略
         )
         rows = detection_rows([frame], width=640, height=480)[0]
         assert rows == [
@@ -79,7 +79,7 @@ class TestEmbed:
         self.loads = []
         monkeypatch.setattr(seg_mod, "load_dino", lambda backbone_dir, device: self.loads.append(device))
         monkeypatch.setattr(seg_mod, "backbone_key", lambda backbone_dir: "key-a")
-        monkeypatch.setattr(CleanC7Segmenter, "_resolve_device", lambda self: "cpu")
+        monkeypatch.setattr(CleanMSTCN2RoleEmbedSegmenter, "_resolve_device", lambda self: "cpu")
 
         def embed(net, crops, device, batch_size, max_crops_per_s):
             rows = [np.full(768, crop[112, 112, 0], np.float16) for crop in crops]
@@ -152,7 +152,7 @@ class TestSegments:
             ("long_brush_withdraw", ts[5], ts[6]),
         ]
         assert [round(s.conf, 6) for s in segs] == [0.7, 0.7]
-        assert {s.producer for s in segs} == {"CleanC7Segmenter"}
+        assert {s.producer for s in segs} == {"CleanMSTCN2RoleEmbedSegmenter"}
 
 
 class TestContract:
@@ -190,11 +190,11 @@ class TestContract:
         with pytest.raises(ValueError):
             _segmenter(**kw)
 
-    def test_shipped_yaml_builds_c7(self):
+    def test_shipped_yaml_builds_mstcn2_role_embed(self):
         from app.services.inference.config import load_stage_config
         from app.services.inference.stage_factory import StageFactory
 
         seg = StageFactory(load_stage_config()).create_offline_segmenter("2")
-        assert isinstance(seg, CleanC7Segmenter) and seg.uses_context
-        assert (seg.model_dir.name, seg.backbone_dir.name) == ("clean-offline-c7-v41", "dinov2_vits14")
+        assert isinstance(seg, CleanMSTCN2RoleEmbedSegmenter) and seg.uses_context
+        assert (seg.model_dir.name, seg.backbone_dir.name) == ("clean-offline-mstcn2-role-embed", "dinov2_vits14")
         assert seg.max_duration_s == 900.0

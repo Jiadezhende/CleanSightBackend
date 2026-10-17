@@ -1,11 +1,11 @@
-# C7 离线只推理首帧起前 15 分钟，超长 step 截断
+# mstcn2-role-embed 离线只推理首帧起前 15 分钟，超长 step 截断
 
 > **变更状态**：生效中（2026-10-17）
 > **知识库**：待沉淀
 
 ## 概述
 
-[`CleanC7Segmenter`](../../app/services/inference/offline/impl/clean_c7/segmenter.py) 新增参数 `max_duration_s`（YAML 默认 900）：
+[`CleanMSTCN2RoleEmbedSegmenter`](../../app/services/inference/offline/impl/clean_mstcn2_role_embed/segmenter.py) 新增参数 `max_duration_s`（YAML 默认 900）：
 检测序列从首帧起超过该时长时，只保留前 15 分钟（闭区间）推理，其余截断并 WARNING；`null` = 不截断。
 截断发生在取帧之前，raw 录像只解码前 15 分钟，嵌入、特征、`label_probs` 与分段都只覆盖这段。
 

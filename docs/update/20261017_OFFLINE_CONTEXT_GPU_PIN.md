@@ -7,12 +7,12 @@
 
 离线子进程不再禁 GPU，改为钉成 `settings.cuda_device`（与在线推理子进程同一张卡）；离线策略新增可选的
 `OfflineContext` 注入口，声明 `uses_context = True` 的策略经它按 raw 轨取本 run 的帧。现有策略行为不变。
-这是 CLEAN 新基准 C7（手部裁剪 → DINOv2 → 手部状态分类器）接入的前置框架改动。
+这是 CLEAN 新基准 mstcn2-role-embed（手部裁剪 → DINOv2 → 手部状态分类器）接入的前置框架改动。
 
 ## 变更背景
 
 - **现状**：离线子进程 `CUDA_VISIBLE_DEVICES=""`，只能跑 CPU；策略约定只吃 `FrameDetection`，拿不到像素。
-- **触发来源**：C7 要按检测手框裁原始画面过 DINOv2 ViT-S/14。实测（RTX 5060 Laptop）CPU 2 线程 68 ms/次，
+- **触发来源**：mstcn2-role-embed 要按检测手框裁原始画面过 DINOv2 ViT-S/14。实测（RTX 5060 Laptop）CPU 2 线程 68 ms/次，
   10 分钟 step 约 1.7 万次裁剪 ≈ 20 min，逼近 1800 s 作业超时；GPU fp16 0.82 ms/次。人定：离线开 GPU、限速，
   且和 YOLO 指定同一张卡、不碰机器上其他卡。
 
@@ -53,5 +53,5 @@ OfflineJobService ── 子进程（env 不再改 CUDA_VISIBLE_DEVICES）
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
-| 离线 GPU 与在线 YOLO 抢卡：实测 DINOv2 不限速时 YOLO 吞吐 232 → 76–82 img/s；限 150 次/s 时 −13% | 在线检测掉帧 | 由使用 GPU 的策略自带限速参数（C7 接入时落地），生产机复测后定默认值 |
+| 离线 GPU 与在线 YOLO 抢卡：实测 DINOv2 不限速时 YOLO 吞吐 232 → 76–82 img/s；限 150 次/s 时 −13% | 在线检测掉帧 | 由使用 GPU 的策略自带限速参数（mstcn2-role-embed 接入时落地），生产机复测后定默认值 |
 | 子进程 CUDA 上下文显存（Windows 实测 115 MiB，Linux 通常更大） | 与在线共卡的显存预算 | 生产机复测 |
