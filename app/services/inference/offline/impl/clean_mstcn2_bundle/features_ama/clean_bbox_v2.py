@@ -1,4 +1,4 @@
-"""ActionMixed bbox 序列到 CLEAN 离线模型113/121/249维特征。
+"""ActionMixed bbox 序列到 v2 基础 113 维特征（bundle 的 abs 块）。
 
 数学口径迁自 CleanSightBackend 的 CLEAN offline segmenter。输入是当前模型仓库逐帧 YOLO
 文本：``class cx cy w h [confidence]``。五列标注没有置信度时使用 YAML 明确声明的
@@ -12,15 +12,7 @@ import math
 
 import numpy as np
 
-BASE_VERSION = "clean_bbox_v2_top1_impute"
-ASFORMER_VERSION = f"{BASE_VERSION}+business_priors"
-BIGRU_VERSION = f"{BASE_VERSION}+center_window+business_priors"
-
-CLEAN_FEATURE_DIMS = {
-    BASE_VERSION: 113,
-    ASFORMER_VERSION: 121,
-    BIGRU_VERSION: 249,
-}
+BASE_DIM = 113
 
 OBJECTS = [
     "hand",
@@ -275,99 +267,6 @@ def _build_base_matrix(object_arrays: dict[str, list[np.ndarray]], frames: int, 
     return _finite(np.concatenate(blocks, axis=1)), names
 
 
-def _with_features(features, names, version, extra, extra_names):
-    return _finite(np.concatenate([features, extra], axis=1)), names + extra_names, version
-
-
-def _add_centered_window_stats(features, names, version, windows=(5, 15)):
-    selected = [
-        index
-        for index, name in enumerate(names)
-        if name.endswith(
-            ("_present", "_conf", "_speed", "_dist", "_delta", "_missing_age", "_imputed")
-        )
-    ]
-    base = features[:, selected]
-    extra_blocks, extra_names = [], []
-    for window in windows:
-        radius = max(1, window // 2)
-        mean = np.zeros_like(base, dtype=np.float32)
-        for index in range(len(base)):
-            mean[index] = base[max(0, index - radius) : min(len(base), index + radius + 1)].mean(axis=0)
-        extra_blocks.append(mean)
-        extra_names.extend([f"{names[index]}_center_mean_w{window}" for index in selected])
-    return _with_features(
-        features,
-        names,
-        f"{version}+center_window",
-        np.concatenate(extra_blocks, axis=1),
-        extra_names,
-    )
-
-
-def _column(features, name_to_index, name):
-    index = name_to_index.get(name)
-    return np.zeros(features.shape[0], dtype=np.float32) if index is None else features[:, index]
-
-
-def _add_business_priors(features, names, version):
-    indexes = {name: index for index, name in enumerate(names)}
-    column = lambda name: _column(features, indexes, name)
-    near = lambda name: np.clip(1.0 - column(name), 0.0, 1.0)
-
-    hand = np.maximum(column("hand_top1_present"), column("hand_top2_present"))
-    short_brush = column("short_brush_present")
-    syringe = column("syringe_present")
-    air_gun = column("air_gun_present")
-    brush_tip = column("brush_tip_out_present")
-    long_brush = column("long_brush_present")
-    short_motion = np.maximum(
-        column("short_brush_speed"),
-        np.abs(column("short_brush_to_scope_control_body_delta")),
-    )
-    syringe_stable = syringe * near("syringe_to_scope_distal_end_dist") * (
-        1.0 - np.clip(column("syringe_speed"), 0.0, 1.0)
-    )
-    air_stable = air_gun * near("air_gun_to_scope_distal_end_dist") * (
-        1.0 - np.clip(column("air_gun_speed"), 0.0, 1.0)
-    )
-    long_signal = np.maximum.reduce(
-        [long_brush, brush_tip, column("brush_tip_out_imputed")]
-    )
-    long_delta = column("brush_tip_out_to_scope_distal_end_delta")
-    priors = np.stack(
-        [
-            hand * short_brush * near("short_brush_to_scope_control_body_dist"),
-            hand * short_brush * short_motion,
-            hand * syringe_stable,
-            hand * air_stable,
-            hand
-            * long_signal
-            * np.maximum(
-                near("brush_tip_out_to_scope_distal_end_dist"),
-                near("long_brush_to_scope_mid_section_dist"),
-            ),
-            hand * long_signal * np.clip(-long_delta, 0.0, 1.0),
-            hand * long_signal * np.clip(long_delta, 0.0, 1.0),
-            near("hand_to_long_brush_dist") * long_signal,
-        ],
-        axis=1,
-    ).astype(np.float32)
-    prior_names = [
-        "prior_short_clean_near",
-        "prior_short_clean_motion",
-        "prior_flush_stable",
-        "prior_air_stable",
-        "prior_long_signal_near_scope",
-        "prior_long_towards_distal",
-        "prior_long_away_distal",
-        "prior_hand_long_contact",
-    ]
-    return _with_features(
-        features, names, f"{version}+business_priors", priors, prior_names
-    )
-
-
 def _empty_object_arrays(frames: int) -> dict[str, _FrameDets]:
     return {name: _FrameDets() for name in OBJECTS}
 
@@ -411,29 +310,15 @@ def _read_object_arrays(
     return arrays
 
 
-def _apply_recipe(features, names, version, requested_version):
-    if requested_version == BASE_VERSION:
-        return features, names, version
-    if requested_version == ASFORMER_VERSION:
-        return _add_business_priors(features, names, version)
-    if requested_version == BIGRU_VERSION:
-        features, names, version = _add_centered_window_stats(features, names, version)
-        return _add_business_priors(features, names, version)
-    raise ValueError(
-        f"不支持 CLEAN feature version={requested_version!r}；可用: {sorted(CLEAN_FEATURE_DIMS)}"
-    )
-
-
 def build_clean_bbox_features(
     frame_rows: list[list[tuple]],
     *,
     detection_mapping: dict[int, str],
-    feature_version: str,
     fps: float,
     confidence_default: float,
     mask_target_ids: frozenset[int] = frozenset(),
 ):
-    """逐帧 bbox 路径构造 ``[T,F]``，返回矩阵、列名和实际 feature version。"""
+    """逐帧检测行构造 ``[T,113]``，返回矩阵与列名。"""
 
     if not frame_rows:
         raise ValueError("CLEAN 特征至少需要一帧")
@@ -445,25 +330,8 @@ def build_clean_bbox_features(
         frame_rows, detection_mapping, confidence_default, mask_target_ids
     )
     features, names = _build_base_matrix(arrays, len(frame_rows), fps)
-    features, names, actual_version = _apply_recipe(
-        features, names, BASE_VERSION, feature_version
-    )
-    expected_dim = CLEAN_FEATURE_DIMS[feature_version]
-    if features.shape != (len(frame_rows), expected_dim):
+    if features.shape != (len(frame_rows), BASE_DIM):
         raise ValueError(
-            f"CLEAN 特征形状异常: actual={tuple(features.shape)}, expected={(len(frame_rows), expected_dim)}"
+            f"CLEAN 特征形状异常: actual={tuple(features.shape)}, expected={(len(frame_rows), BASE_DIM)}"
         )
-    return features, names, actual_version
-
-
-def clean_feature_names(feature_version: str) -> list[str]:
-    """返回稳定列名，用于加载前校验 checkpoint 的 feature_names。"""
-
-    arrays = _empty_object_arrays(1)
-    features, names = _build_base_matrix(arrays, 1, 7.5)
-    _features, names, actual_version = _apply_recipe(
-        features, names, BASE_VERSION, feature_version
-    )
-    if actual_version != feature_version:
-        raise AssertionError(f"feature recipe 版本异常: {actual_version} != {feature_version}")
-    return names
+    return features, names

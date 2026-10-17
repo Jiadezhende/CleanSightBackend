@@ -37,13 +37,10 @@ from .clean_bbox_v3 import (
     _slot_channels,
 )
 from .clean_bbox_v3 import _build_base_matrix as _build_v3_matrix
-from .clean_bbox_v4 import V4_PAIRS
 
 DEPRECATED = frozenset({"scope_distal_end", "short_brush", "long_brush"})
 RECIPES = {"fix": 226, "smooth": 228, "full": 234, "fix-compact": 83, "fix-compact-pair": 92}
 VERSIONS = {recipe: f"ama-v5-{recipe}-{dim}d" for recipe, dim in RECIPES.items()}
-AMA_V5_FEATURE_DIMS = {VERSIONS[recipe]: dim for recipe, dim in RECIPES.items()}
-AMA_V5_RECIPE_BY_VERSION = {version: recipe for recipe, version in VERSIONS.items()}
 SMOOTH_RECIPES = frozenset({"smooth", "full"})
 COMPACT_RECIPES = frozenset({"fix-compact", "fix-compact-pair"})
 
@@ -65,7 +62,8 @@ AXIS_DEGENERATE = frozenset(
         "scope/scope_mid_section_log_area_ratio",
     }
 )
-COMPACT_PAIRS = tuple(V4_PAIRS)
+# 原 clean_bbox_v4.V4_PAIRS（v4 其余部分 bundle 不用，已删）
+COMPACT_PAIRS = (("hand", "scope_control_body"), ("hand", "scope_mid_section"), ("scope_control_body", "scope_mid_section"))
 
 MIN_AXIS_LEN = 0.03
 SMOOTH_SECONDS = 1.0
@@ -285,10 +283,9 @@ def build_ama_v5_features(
     if recipe not in RECIPES:
         raise ValueError(f"未知 recipe={recipe!r}；可用: {sorted(RECIPES)}")
     filtered = {cid: name for cid, name in detection_mapping.items() if name not in DEPRECATED}
-    v2_feats, v2_names, _ = build_clean_bbox_features(
+    v2_feats, v2_names = build_clean_bbox_features(
         frame_rows,
         detection_mapping=filtered,
-        feature_version="clean_bbox_v2_top1_impute",
         fps=fps,
         confidence_default=confidence_default,
         mask_target_ids=mask_target_ids,
@@ -322,15 +319,3 @@ def build_ama_v5_features(
     if feats.shape != (frames, RECIPES[recipe]):
         raise AssertionError(f"{VERSIONS[recipe]} 形状异常: {feats.shape}")
     return feats, names, VERSIONS[recipe]
-
-
-def ama_v5_feature_names(recipe: str) -> list[str]:
-    """recipe 的稳定列名（不读数据），用于校验 checkpoint 的 feature_names。"""
-    _feats, names, _version = build_ama_v5_features(
-        [[]],
-        detection_mapping={},
-        fps=7.5,
-        confidence_default=1.0,
-        recipe=recipe,
-    )
-    return names

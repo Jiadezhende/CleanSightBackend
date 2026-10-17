@@ -23,15 +23,11 @@ from .clean_bbox_v2 import (
     PAIR_FEATURES,
     _finite,
     _impute_short_gaps,
-    _read_object_arrays,
     _select_hand_slots,
     _select_top1_slot,
 )
 
-VERSION = "clean_bbox_v3_scope_frame"
-CLEAN_V3_VERSION = VERSION  # 与 features/__init__ 导出名一致
 FEATURE_DIM = 113
-CLEAN_V3_FEATURE_DIMS = {VERSION: FEATURE_DIM}
 
 _CLIP_POS = 4.0
 _CLIP_LOG = 6.0
@@ -253,32 +249,3 @@ def _build_base_matrix(object_arrays: dict[str, list[np.ndarray]], frames: int, 
             f"clean_bbox_v3 base 矩阵形状异常: {tuple(matrix.shape)} != ({frames}, {FEATURE_DIM})"
         )
     return matrix, names
-
-
-def build_clean_bbox_v3_features(
-    frame_rows: list[list[tuple]],
-    *,
-    detection_mapping: dict[int, str],
-    fps: float,
-    confidence_default: float,
-    mask_target_ids: frozenset[int] = frozenset(),
-):
-    """逐帧 bbox 路径构造 ``[T,113]``，返回矩阵、列名和实际 feature version。"""
-    if not frame_rows:
-        raise ValueError("CLEAN v3 特征至少需要一帧")
-    if fps <= 0:
-        raise ValueError("CLEAN v3 特征 fps 必须大于0")
-    if not 0.0 <= confidence_default <= 1.0:
-        raise ValueError("detection_confidence_default 必须在0..1")
-    arrays = _read_object_arrays(
-        frame_rows, detection_mapping, confidence_default, mask_target_ids
-    )
-    features, names = _build_base_matrix(arrays, len(frame_rows), fps)
-    return features, names, VERSION
-
-
-def clean_v3_feature_names() -> list[str]:
-    """返回稳定列名，用于加载前校验 checkpoint 的 feature_names。"""
-    arrays = {name: [] for name in OBJECTS}
-    _features, names = _build_base_matrix(arrays, 1, 7.5)
-    return names

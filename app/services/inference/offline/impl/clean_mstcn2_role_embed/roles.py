@@ -24,8 +24,6 @@ GAP_FILL = 8
 SCALES = (2, 5, 10, 20)
 CTRL_SMOOTH = 15
 FALLBACK_H = 0.25
-ROLE_COLUMNS = ["feed/present", "scope/present", "both_roles"] + [
-    f"dyn/{q}_s{s}" for s in SCALES for q in ("speed", "valid")]
 
 
 def fill(values, valid, max_gap=None):
