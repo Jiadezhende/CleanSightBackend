@@ -71,8 +71,34 @@ def test_frames_are_not_copied_or_modified():
     assert kept[0] is frames[0] and kept[1] is frames[2]
 
 
-def test_input_fps_is_median_rate_robust_to_sparse_drops():
-    ts = [i / 15 for i in range(30) if i not in (7, 19)]  # 零星丢两帧
-    assert input_fps(_frames(ts)) == pytest.approx(15.0)
+def test_input_fps_counts_dropped_frames_but_not_outages():
+    ts = [i / 15 for i in range(30) if i not in (7, 19)]  # 丢两帧：真实平均帧率确实降了
+    assert input_fps(_frames(ts)) == pytest.approx(27 / (29 / 15))
     assert input_fps(_frames([1.0])) is None
     assert input_fps(_frames([1.0, 1.0])) is None
+
+
+def _rhythm_25fps_source(n):
+    """25fps 源补帧到 30fps 再隔帧抽：间隔 80/80/40ms 循环，中位数 80ms 但均值正好 15fps。"""
+    ts, t = [], 0.0
+    for i in range(n):
+        ts.append(round(t, 6))
+        t += (0.08, 0.08, 0.04)[i % 3]
+    return _frames(ts)
+
+
+def test_strict_judges_rate_by_mean_not_median():
+    frames = _rhythm_25fps_source(91)  # 90 个间隔 = 30 个完整节律
+    assert resample_by_ts(frames, 15.0, strict=True) == frames
+    assert input_fps(frames) == pytest.approx(15.0)
+
+
+def test_strict_ignores_outage_gap_when_judging_rate():
+    frames = _frames([i / 15 for i in range(150)] + [20 + i / 15 for i in range(150)])
+    assert len(resample_by_ts(frames, 15.0, strict=True)) == 300
+    assert input_fps(frames) == pytest.approx(15.0)
+
+
+def test_strict_still_rejects_real_undersampling():
+    with pytest.raises(ValueError, match="低于契约帧率"):
+        resample_by_ts(_frames([i / 10 for i in range(60)]), 15.0, strict=True)

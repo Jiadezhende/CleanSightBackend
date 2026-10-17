@@ -130,6 +130,7 @@ read_detections(run)                                   15 fps
   13fps 输入时这些窗口在时间上拉长约 15%、速度类特征按帧换算会偏低约 13%；这次没有评估对段级 F1 的影响。
   线上若长期低于 15fps，应先查在线推理为什么掉帧，而不是继续调低下限。
 - **自测**：新增 / 改写用例（12.99 / 5fps 只告警不失败、15fps 无告警、`input_fps` 对零星丢帧稳健）；全量 `pytest tests/` 1068 passed。
+- **更正（[20261017_RESAMPLE_RATE_BY_STEADY_MEAN.md](20261017_RESAMPLE_RATE_BY_STEADY_MEAN.md)）**：12.994fps 很可能是 25fps 源的 80/80/40 ms 到达节律被中位数误判，平均帧率其实是 15fps；上面「13fps 会拉长窗口」只在真实欠采样时成立。判据已改为剔缺口平均间隔。
 
 ## 追加（2026-10-17）：模型改名 mstcn2-role-embed
 

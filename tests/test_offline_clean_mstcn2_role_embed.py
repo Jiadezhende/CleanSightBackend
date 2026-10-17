@@ -182,6 +182,12 @@ class TestContract:
         seg_mod._warn_low_rate([_frame(t / 15.0) for t in range(30)])
         assert caplog.text == ""
 
+    def test_25fps_source_rhythm_is_not_low_rate(self, caplog):
+        """线上「12.994fps」的成因：25fps 源补帧再隔帧抽，间隔 80/80/40ms，均值仍是 15fps，不该告警。"""
+        ts = np.cumsum([0.0] + [(0.08, 0.08, 0.04)[i % 3] for i in range(90)])
+        seg_mod._warn_low_rate([_frame(float(t)) for t in ts])
+        assert caplog.text == ""
+
     @pytest.mark.parametrize("kw", [
         {"device": "mps"}, {"max_crops_per_s": 0}, {"batch_size": 0}, {"min_segment_frames": -1},
         {"max_duration_s": 0},
