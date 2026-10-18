@@ -26,7 +26,7 @@ admin 离线推理页 fetchOfflineResult(task, step, track)
   └ fetchOffAlarms → GET /admin-f3m8/offline/alarms/{task}/{step}?track=  单独取，失败不影响分割结果展示
         resolve_timeline(run, track) + storage.read_alarms(run)
         → {checked, items: [{rule_id, metric, alarm_level, alarm_message, media_ms}]}
-  侧栏：未核对 / 无违规疑似 / 告警列表（点击 seekOff(media_ms)）
+  侧栏：未核对 / 无违规疑似 / 告警列表（带时刻的点击 seekOff(media_ms)；整段判定的显示「整段」、不可点）
 作业表：「告警」列 = OfflineJob.alarm_count
 ```
 
@@ -62,10 +62,10 @@ admin 离线推理页 fetchOfflineResult(task, step, track)
 
 | 项 | 结果 |
 |----|------|
-| `tests/test_admin_offline_alarms.py` | 媒体刻度换算（含断流吸附）、只出 5 个字段、未核对 vs 核对过为空、无录像轨 404 |
+| `tests/test_admin_offline_alarms.py` | 媒体刻度换算（含断流吸附）、整段判定告警 `media_ms` 为 null、只出 5 个字段、未核对 vs 核对过为空、无录像轨 404 |
 | `tests/test_storage_inference.py::TestAlarms` | 缺失读出 `None`、空文件读出 `[]`、读缺失不建目录 |
 | admin 页脚本 | `node --check` 语法通过；**未在浏览器里实际打开验证** |
-| 全量 `pytest tests/` | 1175 passed |
+| 全量 `pytest tests/` | 1176 passed |
 
 ## 遗留风险 / 后续任务
 

@@ -413,12 +413,14 @@
               </div>
               <!-- 过渡期：离线盘上告警（GET /admin-f3m8/offline/alarms），告警入库后整块删除 -->
               <div class="side-item">
-                <div class="side-key">规则告警（点击跳转）</div>
+                <div class="side-key">规则告警（带时刻的可点击跳转）</div>
                 <div v-if="!offAlarmsChecked" class="side-sub">未核对（未配规则 / 无逐帧概率 / 判定失败）</div>
                 <div v-else-if="!offAlarms.length" class="side-sub">无违规疑似</div>
                 <div v-else class="label-list">
-                  <div v-for="(a, i) in offAlarms" :key="i" class="label-item" :title="a.rule_id" @click="seekOff(a.media_ms)">
-                    <span :class="'alarm-level level-' + a.alarm_level">{{ fmtMediaMs(a.media_ms) }}</span>{{ a.alarm_message }}
+                  <div v-for="(a, i) in offAlarms" :key="i" class="label-item" :title="a.rule_id"
+                       :style="a.media_ms == null ? { cursor: 'default' } : null"
+                       @click="a.media_ms != null && seekOff(a.media_ms)">
+                    <span :class="'alarm-level level-' + a.alarm_level">{{ a.media_ms == null ? '整段' : fmtMediaMs(a.media_ms) }}</span>{{ a.alarm_message }}
                   </div>
                 </div>
               </div>

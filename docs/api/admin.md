@@ -394,7 +394,8 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
       "metric": "STEP_WAIT",           // STEP_MISSING / STEP_DURATION / STEP_COUNT / STEP_ORDER / STEP_WAIT
       "alarm_level": "warning",
       "alarm_message": "灌注清洗液后 8 s 即开始刷洗（01:12），不足 15 s，请回看确认",
-      "media_ms": 72000                // 违规时刻的媒体刻度（ms，= <video>.currentTime × 1000）
+      "media_ms": 72000                // 违规时刻的媒体刻度（ms，= <video>.currentTime × 1000）；
+                                       // 整段判定的告警（STEP_MISSING / STEP_DURATION / STEP_COUNT）没有时刻，为 null，不该做跳转
     }
   ]
 }

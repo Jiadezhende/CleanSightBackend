@@ -270,7 +270,9 @@ def get_offline_alarms(
     run_id: Optional[int] = Query(None),
     track: Literal["raw", "processed"] = Query("raw"),
 ):
-    """该 run 的 `alarms.jsonl`，告警时刻换算到 `track` 轨的媒体刻度；`checked=false` = 没核对过。
+    """该 run 的 `alarms.jsonl`，违规时刻换算到 `track` 轨的媒体刻度；`checked=false` = 没核对过。
+
+    整段判定的告警（漏步 / 时长 / 次数）没有可定位的时刻，`media_ms` 为 None。
 
     无可见 run 或该轨无录像段 → 404（同 `/ai/temporal`）。
     """
@@ -282,7 +284,7 @@ def get_offline_alarms(
             "metric": a.metric.value,
             "alarm_level": a.alarm_level,
             "alarm_message": a.alarm_message,
-            "media_ms": timeline.media_ms_at(int(round(a.timestamp * 1000))),
+            "media_ms": None if a.metadata.get("at_ms") is None else timeline.media_ms_at(a.metadata["at_ms"]),
         }
         for a in alarms or []
     ]
