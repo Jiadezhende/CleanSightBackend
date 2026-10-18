@@ -136,6 +136,12 @@ BUDGET = {
     # 离线 CLI 是独立进程入口：`_isolate()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
+    # 规则判定（LAYER_PACKAGES 白名单包，逐模块登记）：numpy + storage，不许 torch
+    "app.services.inference.offline.compliance":          (set(), 0.50),
+    "app.services.inference.offline.compliance.config":   (set(), 0.50),
+    "app.services.inference.offline.compliance.evidence": (set(), 0.50),
+    "app.services.inference.offline.compliance.rules":    (set(), 0.50),
+    "app.services.inference.offline.compliance.checker":  (set(), 0.50),
     "app.services.alarm":       (set(), 1.0),
     # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
     "app.daemons":              (set(), 0.20),
@@ -189,6 +195,12 @@ LAYER_PACKAGES = {
     # `name == ok or name.startswith(ok + ".")`，兄弟包差的正是那个点。
     "app/services/utils": (
         "app.services.utils", "app.storage", "app.types", "app.settings",
+    ),
+    # 离线规则判定：只读盘上的离线产物做判定，与同包的动作分割互不 import（分割侧见
+    # test_offline_segmentation_does_not_import_compliance），只由 offline/cli.py 串起来；
+    # 规则表由 cli 从 stage 配置取出、以 dict 传入，故连 inference.config 都不许碰。
+    "app/services/inference/offline/compliance": (
+        "app.services.inference.offline.compliance", "app.storage", "app.types",
     ),
 }
 
@@ -396,7 +408,8 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
 
 
 # 离线策略实现：每个策略一个包（或单文件模块），只许依赖框架契约；兄弟策略之间零 import。
-OFFLINE_IMPL_DIR = APP_DIR / "services" / "inference" / "offline" / "impl"
+OFFLINE_DIR = APP_DIR / "services" / "inference" / "offline"
+OFFLINE_IMPL_DIR = OFFLINE_DIR / "impl"
 OFFLINE_IMPL_ALLOWED = (
     "app.services.inference.offline.segmenter",
     "app.services.inference.resample",
@@ -491,6 +504,20 @@ def test_services_do_not_import_daemons():
     violations = _imports_under(APP_DIR / "services", "app.daemons")
     assert not violations, (
         "services 依赖了 daemons：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_offline_segmentation_does_not_import_compliance():
+    """离线包里动作分割（segmenter / runner / materials / service / impl）不得 import 规则判定：
+    两个功能模块只在 `offline/cli.py` 汇合；判定侧由 LAYER_PACKAGES 白名单守。"""
+    allowed = ("app/services/inference/offline/cli.py:", "app/services/inference/offline/compliance/")
+    violations = [
+        v for v in _imports_under(OFFLINE_DIR, "app.services.inference.offline.compliance")
+        if not v.startswith(allowed)
+    ]
+    assert not violations, (
+        "离线分割侧 import 了规则判定：\n  " + "\n  ".join(violations)
+        + "\n两者只在 offline/cli.py 串联；需要的结果请经盘上产物交接。"
     )
 
 

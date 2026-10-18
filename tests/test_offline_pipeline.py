@@ -338,16 +338,43 @@ class TestCli:
         默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
         + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
         """
+        from app.services.inference import config as config_mod
         from app.services.inference.offline import runner as runner_mod
         _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        monkeypatch.setattr(config_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         last = capsys.readouterr().out.strip().splitlines()[-1]
         assert rc == 0
         assert json.loads(last) == {
-            "status": "completed", "producer": "BrushRulesSegmenter", "segment_count": 1, "message": "",
+            "status": "completed", "producer": "BrushRulesSegmenter", "segment_count": 1, "alarm_count": None,
+            "message": "",
         }
+
+    def test_run_check_failure_keeps_completed(self, tmp_storage, monkeypatch, capsys):
+        """规则核对失败（这里是类表不符）只进 message：分割结果照常 completed、退出码 0、alarm_count 为 null。"""
+        from app.services.inference import config as config_mod
+        from app.services.inference.offline import runner as runner_mod
+        _write_detections(1, 2)
+        cfg = InferenceConfig({"stages": {"2": {
+            "offline": {"class": f"{__name__}.ProbsSegmenter"},
+            "compliance": {
+                "evidence": {"episodes": {"strict": {"p_on": 0.6, "p_off": 0.4, "merge_gap_s": 1, "min_len_s": 1},
+                                          "lenient": {"p_on": 0.4, "p_off": 0.2, "merge_gap_s": 1, "min_len_s": 1}}},
+                "groups": {"flush": ["flush"]},
+                "rules": [{"id": "m", "type": "presence", "group": "flush", "present_s": 1, "absent_s": 0,
+                           "message": "x"}],
+            },
+        }}})
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: cfg)
+        monkeypatch.setattr(config_mod, "load_stage_config", lambda *a, **k: cfg)
+        from app.services.inference.offline import cli
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert rc == 0
+        assert (payload["status"], payload["alarm_count"]) == ("completed", None)
+        assert payload["message"].startswith("规则核对失败") and not (_inference_dir(1, 2) / "alarms.jsonl").exists()
 
     def test_run_strategy_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
         from app.services.inference.offline import runner as runner_mod
