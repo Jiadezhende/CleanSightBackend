@@ -69,6 +69,7 @@ BUDGET = {
     "app.storage.inference._layout":    (set(), 0.40),   # stdlib only
     "app.storage.inference._temporal":  (set(), 0.40),   # numpy（LabelProbs / npz）
     "app.storage.inference._cache":     (set(), 0.40),   # numpy（npz）
+    "app.storage.inference._alarm":     (set(), 0.40),   # stdlib + app.types.alarm
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
     # 这条盯的是**整个域**的模块级依赖。写侧编码走 ffmpeg 子进程（`_fmp4.encode`），不用 cv2；
     # 谁把 cv2 塞回模块级，这条会连同 `app.storage.hls._encode` 一起红。
