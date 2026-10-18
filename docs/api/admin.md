@@ -1,8 +1,8 @@
 # `/admin-f3m8` — 运维 Admin
 
-运维面板 API：聚合仪表盘、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业。
+运维面板 API：聚合仪表盘、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业、离线盘上告警（过渡期）。
 数据全部来自**进程内存**（`client_service` 快照 + Prometheus REGISTRY + 离线作业状态表），非 DB，是**实时**状态，进程重启即清零。
-均**无鉴权**；除离线作业三个端点（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
+均**无鉴权**；除离线作业三个端点与离线盘上告警（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
 
 静态运维 UI（SPA）：`GET /ui-f3m8/admin/`（HTML 页面，非本文档描述的 JSON 端点）。
 
@@ -273,7 +273,7 @@
 admin「离线推理」tab 用这三个端点提交离线推理，并查看执行进度。
 
 - **执行方式**：作业**串行**执行，同一时刻只跑一个，每个作业起一个子进程跑离线 CLI。
-- **结果去哪看**：跑完的结果落盘在该 run 的 `temporal.jsonl` / `label_probs.npz`（配了合规规则的 step 另有 `alarms.jsonl`，暂无读取端点），仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab-f3m8/label-probs`](lab.md) 读取（带同一个 `run_id`）。
+- **结果去哪看**：跑完的结果落盘在该 run 的 `temporal.jsonl` / `label_probs.npz`（配了合规规则的 step 另有 `alarms.jsonl`，见本文末节「离线盘上告警（过渡期）」），仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab-f3m8/label-probs`](lab.md) 读取（带同一个 `run_id`）。
 - **状态保存**：作业状态只存在进程内存里，后端重启后，排队中的作业和历史记录都会丢失（已落盘的结果不受影响）。
 - **作业锁定一个 run**（规则见 [README › run 定位](README.md#run-定位可选-run_id)）：提交时解析一次，整个作业只读写这个 run。该 run 正在运行 → 409（检测结果还在写）；跑的过程中同一 step 重新开跑，新一轮是另一个 run，互不影响；该 run 被 TTL 回收 → `reclaimed`，不写任何东西。
 
@@ -369,3 +369,48 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | 不带 `run_id` 轮询，状态突然 404 | 同 step 起了新 run，缺省解析到新 run，而作业是提交给旧 run 的；轮询时带上提交响应里的 `run_id` |
 
 参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `runOffline` / `fetchOffJobs`。
+
+---
+
+## GET /admin-f3m8/offline/alarms/{task_id}/{step_id}（过渡期）
+
+离线规则判定写在该 run 盘上的告警（`alarms.jsonl`），时刻已换算到录像媒体刻度，供离线推理页点击跳转回看。
+**过渡期端点**：离线告警稳定后改为直接入库，届时走 [`GET /task/{task_id}/alarms`](task.md)，本端点删除；不要在 admin 页以外依赖它。
+
+查询参数：`run_id`（int，可选；缺省 = 该 step 最新可见 run）、`track`（`raw` / `processed`，缺省 `raw`；须与播放器当前轨一致）。
+
+### 响应 `200`
+
+```jsonc
+{
+  "task_id": 123,
+  "step_id": 2,
+  "run_id": 1751799990000,
+  "track": "raw",
+  "checked": true,                 // false = 该 run 没跑过规则判定（未配规则 / 无逐帧概率 / 判定失败），items 恒为 []
+  "items": [
+    {
+      "rule_id": "clean.flush.wait",   // 规则表里的 id
+      "metric": "STEP_WAIT",           // STEP_MISSING / STEP_DURATION / STEP_COUNT / STEP_ORDER / STEP_WAIT
+      "alarm_level": "warning",
+      "alarm_message": "灌注清洗液后 8 s 即开始刷洗（01:12），不足 15 s，请回看确认",
+      "media_ms": 72000                // 违规时刻的媒体刻度（ms，= <video>.currentTime × 1000）
+    }
+  ]
+}
+```
+
+### 错误
+
+| status | 何时 |
+|--------|------|
+| 404 | 无可见 run，或该轨没有录像段（`resource_type: "Segments"`，同 `/ai/temporal`）；显式 `run_id` 的目录不存在（`resource_type: "Run"`） |
+
+### 静默失败
+
+| 现象 | 后端实际状态 |
+|------|------------|
+| `checked: true` 但 `items` 为空 | 判定跑过，没有违规疑似 |
+| 重跑分割后告警没变 | 规则判定失败或被跳过时不覆盖旧文件（看离线作业的 `message`）；修好后 `python -m app.services.inference.offline.cli check` 重跑 |
+
+参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `fetchOfflineResult`。
