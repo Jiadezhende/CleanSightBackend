@@ -585,11 +585,15 @@ class TestAlarms:
         assert [a.alarm_message for a in inference.read_alarms(_run(1, 2))] == ["new"]
 
     def test_missing_vs_empty(self, tmp_storage):
-        """缺失 = 没核对过，空文件 = 核对过、无告警；读侧都是 []，靠文件在不在区分。"""
-        assert inference.read_alarms(_run(1, 2)) == []
-        assert not _alarms_file(tmp_storage, 1, 2).exists()
+        """缺失 = 没核对过（None），空文件 = 核对过、无告警（[]）。"""
+        assert inference.read_alarms(_run(1, 2)) is None
         inference.write_alarms(_run(1, 2), [])
         assert _alarms_file(tmp_storage, 1, 2).read_text(encoding="utf-8") == ""
+        assert inference.read_alarms(_run(1, 2)) == []
+
+    def test_read_missing_creates_nothing(self, tmp_storage):
+        assert inference.read_alarms(RunIdentity(9, 9, RUN_ID)) is None
+        assert list(tmp_storage.iterdir()) == []
 
     def test_skips_bad_lines_without_losing_the_rest(self, tmp_storage):
         inference.write_alarms(_run(1, 2), [_alarm("a")])

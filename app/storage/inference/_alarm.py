@@ -1,9 +1,9 @@
 """离线规则层的告警 —— `{run}/inference/alarms.jsonl` 的读写。
 
     write_alarms(run, alarms)     整体替换（路线 C）
-    read_alarms(run)              回读，落盘序；文件不存在返回 []
+    read_alarms(run)              回读，落盘序；文件不存在返回 None
 
-货币是 `app.types.alarm.Alarm`。文件缺失 = 没核对过；空文件 = 核对过、无告警。
+货币是 `app.types.alarm.Alarm`。文件缺失（读出 None）= 没核对过；空文件（读出 []）= 核对过、无告警。
 只由离线规则层写；在线告警不落这里（它走 alarm 服务入库）。
 
 依赖上界：`app.types.alarm` + stdlib。
@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from app.types.alarm import Alarm, AlarmMetric, AlarmType
 from app.types.run import RunIdentity
@@ -66,9 +66,11 @@ def _record_to_alarm(rec: Mapping[str, Any]) -> Alarm:
     )
 
 
-def read_alarms(run: RunIdentity) -> List[Alarm]:
-    """回读该 run 的告警，按落盘顺序。文件不存在返回 `[]`；坏行与形状不对的 record 跳过 + warning。"""
+def read_alarms(run: RunIdentity) -> Optional[List[Alarm]]:
+    """回读该 run 的告警，按落盘顺序。文件不存在返回 `None`（没核对过）；坏行与形状不对的 record 跳过 + warning。"""
     path = _layout.domain_dir(run) / _layout.ALARMS_NAME
+    if not path.exists():
+        return None
     alarms: List[Alarm] = []
     for rec in _jsonl.decode(path):
         try:
