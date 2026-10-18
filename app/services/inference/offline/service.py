@@ -124,7 +124,7 @@ class OfflineJobService:
     def _preflight_materials(self) -> None:
         """启动时核对激活策略的物料：缺失只告警（不影响在线，提交该 step 的作业时才会失败）。"""
         try:
-            from .materials import check_materials
+            from .segmentation.materials import check_materials
 
             config = self._config if self._config is not None else load_stage_config()
             missing = [s for s in check_materials(config) if not s.exists]

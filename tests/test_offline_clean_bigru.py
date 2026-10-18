@@ -11,8 +11,8 @@ import pytest
 from factories import make_det_box, make_frame_detection
 
 from app.types.detection import DetectorOutput
-from app.services.inference.offline.impl.clean_bigru.contract import LABELS
-from app.services.inference.offline.impl.clean_bigru.segmenter import CleanBiGRUSegmenter
+from app.services.inference.offline.segmentation.impl.clean_bigru.contract import LABELS
+from app.services.inference.offline.segmentation.impl.clean_bigru.segmenter import CleanBiGRUSegmenter
 
 
 def _frames(ts_list):

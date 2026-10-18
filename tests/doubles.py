@@ -22,7 +22,7 @@ import numpy as np
 from app.types.detection import DetBox, DetectorOutput, FrameDetection
 from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 from app.types.temporal import TemporalSegment
-from app.services.inference.offline.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
 from app.services.inference.online.detection.detector import Detector
 
 _MOCK_CLASS_ID = 0

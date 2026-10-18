@@ -133,6 +133,7 @@ BUDGET = {
     "app.services.inference.online.visualization.render_child": (set(), 0.40),
     "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
+    "app.services.inference.offline.segmentation": (set(), 1.0),
     # 离线 CLI 是独立进程入口：`_isolate()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
@@ -196,7 +197,7 @@ LAYER_PACKAGES = {
     "app/services/utils": (
         "app.services.utils", "app.storage", "app.types", "app.settings",
     ),
-    # 离线规则判定：只读盘上的离线产物做判定，与同包的动作分割互不 import（分割侧见
+    # 离线规则判定：只读盘上的离线产物做判定，与同级的 offline/segmentation 互不 import（分割侧见
     # test_offline_segmentation_does_not_import_compliance），只由 offline/cli.py 串起来；
     # 规则表由 cli 从 stage 配置取出、以 dict 传入，故连 inference.config 都不许碰。
     "app/services/inference/offline/compliance": (
@@ -409,9 +410,9 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
 
 # 离线策略实现：每个策略一个包（或单文件模块），只许依赖框架契约；兄弟策略之间零 import。
 OFFLINE_DIR = APP_DIR / "services" / "inference" / "offline"
-OFFLINE_IMPL_DIR = OFFLINE_DIR / "impl"
+OFFLINE_IMPL_DIR = OFFLINE_DIR / "segmentation" / "impl"
 OFFLINE_IMPL_ALLOWED = (
-    "app.services.inference.offline.segmenter",
+    "app.services.inference.offline.segmentation.segmenter",
     "app.services.inference.resample",
     "app.types",
 )
@@ -422,9 +423,9 @@ def _offline_impl_units():
         if path.name.startswith("__"):
             continue
         if path.is_dir():
-            yield f"app.services.inference.offline.impl.{path.name}", sorted(path.rglob("*.py"))
+            yield f"app.services.inference.offline.segmentation.impl.{path.name}", sorted(path.rglob("*.py"))
         elif path.suffix == ".py":
-            yield f"app.services.inference.offline.impl.{path.stem}", [path]
+            yield f"app.services.inference.offline.segmentation.impl.{path.stem}", [path]
 
 
 @pytest.mark.parametrize("unit,files", list(_offline_impl_units()), ids=lambda v: v if isinstance(v, str) else "")
@@ -507,16 +508,17 @@ def test_services_do_not_import_daemons():
     )
 
 
+def test_offline_impl_units_found():
+    """策略包门禁按目录参数化：目录挪了而这里没跟上，门禁会因零用例静默变绿。"""
+    assert list(_offline_impl_units()), f"{OFFLINE_IMPL_DIR} 下没有找到任何策略包"
+
+
 def test_offline_segmentation_does_not_import_compliance():
-    """离线包里动作分割（segmenter / runner / materials / service / impl）不得 import 规则判定：
-    两个功能模块只在 `offline/cli.py` 汇合；判定侧由 LAYER_PACKAGES 白名单守。"""
-    allowed = ("app/services/inference/offline/cli.py:", "app/services/inference/offline/compliance/")
-    violations = [
-        v for v in _imports_under(OFFLINE_DIR, "app.services.inference.offline.compliance")
-        if not v.startswith(allowed)
-    ]
+    """离线包里 `segmentation/` 与 `compliance/` 两个功能模块互不 import，只在 `offline/cli.py` 汇合；
+    本条守分割侧，判定侧由 LAYER_PACKAGES 白名单守。"""
+    violations = _imports_under(OFFLINE_DIR / "segmentation", "app.services.inference.offline.compliance")
     assert not violations, (
-        "离线分割侧 import 了规则判定：\n  " + "\n  ".join(violations)
+        "离线分割 import 了规则判定：\n  " + "\n  ".join(violations)
         + "\n两者只在 offline/cli.py 串联；需要的结果请经盘上产物交接。"
     )
 

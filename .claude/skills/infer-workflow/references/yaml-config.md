@@ -71,4 +71,4 @@ stages:
 
 ## 无需改 `__init__.py`
 
-各 `impl/__init__.py`（`detection/impl` / `temporal/impl` / `offline/impl` 各一个）是**纯包标记**，不 re-export。StageFactory 用 `class` 全路径 importlib 实例化，消费方走单文件深路径导入（`from app.services.inference.online.detection.impl.bubble import BubbleDetector`）。**别**往 `__init__.py` 加 import / `__all__`——那会让 import 本包即 eager 拉起全部任务模块。
+各 `impl/__init__.py`（`detection/impl` / `temporal/impl` / `offline/segmentation/impl` 各一个）是**纯包标记**，不 re-export。StageFactory 用 `class` 全路径 importlib 实例化，消费方走单文件深路径导入（`from app.services.inference.online.detection.impl.bubble import BubbleDetector`）。**别**往 `__init__.py` 加 import / `__all__`——那会让 import 本包即 eager 拉起全部任务模块。

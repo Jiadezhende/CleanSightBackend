@@ -25,7 +25,7 @@ online 与 offline 互不 import；共用的东西只能放本层。
 
 一个检测点（业务）的三段实现放各契约包 impl/ 下，以业务名对齐：
 `online/detection/impl/<x>.py`(Detector) + `online/temporal/impl/<x>.py`(Operator) +
-可选 `offline/impl/<x>_<模型>/`(Segmenter)；业务聚合由 config stage 绑定表达
+可选 `offline/segmentation/impl/<x>_<模型>/`(Segmenter)；业务聚合由 config stage 绑定表达
 （见 config/inference_config.yaml）。
 
 本 `__init__` 刻意**不做任何 re-export**（只留 docstring + 下面的 `lifespan()`）：与 [online/instance.py] 的

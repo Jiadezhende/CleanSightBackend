@@ -8,9 +8,9 @@ import pytest
 
 from factories import make_det_box, make_detector_output, make_frame_detection
 
-from app.services.inference.offline.impl.clean_mstcn2_bundle import segmenter as seg_mod
-from app.services.inference.offline.impl.clean_mstcn2_bundle.contract import ACTION_NAMES, FEATURE_COLUMNS
-from app.services.inference.offline.impl.clean_mstcn2_bundle.segmenter import CleanMSTCN2BundleSegmenter
+from app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle import segmenter as seg_mod
+from app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle.contract import ACTION_NAMES, FEATURE_COLUMNS
+from app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle.segmenter import CleanMSTCN2BundleSegmenter
 
 
 def _frame(ts, *boxes):
@@ -36,7 +36,7 @@ def test_pp20_merges_short_runs_and_skips_idle(monkeypatch, tmp_path):
     labels = np.array([3] * 25 + [4] * 5 + [3] * 25 + [0] * 25)
     probs = np.full((labels.size, len(ACTION_NAMES)), 0.02, np.float32)
     probs[np.arange(labels.size), labels] = 0.9
-    from app.services.inference.offline.impl.clean_mstcn2_bundle import model as model_mod
+    from app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle import model as model_mod
     monkeypatch.setattr(model_mod, "load_model", lambda path: None)
     monkeypatch.setattr(model_mod, "predict_probs", lambda model, x: probs)
     seg = CleanMSTCN2BundleSegmenter(model_dir=str(tmp_path))

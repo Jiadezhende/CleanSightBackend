@@ -54,7 +54,7 @@ def _isolate(num_threads: int) -> None:
 def _run(args: argparse.Namespace) -> int:
     _isolate(args.threads)
     # runner / 策略 import 放在隔离之后：策略模块的 torch import 此时才发生
-    from .runner import OfflineRunner, OfflineRunSpec
+    from .segmentation.runner import OfflineRunner, OfflineRunSpec
 
     try:
         result = OfflineRunner().run(
@@ -160,7 +160,7 @@ def _query(args: argparse.Namespace) -> int:
 
 def _materials(args: argparse.Namespace) -> int:
     """各 stage 激活的离线策略要哪些物料、在不在；有缺失退出码 1（部署核对用）。"""
-    from .materials import check_materials
+    from .segmentation.materials import check_materials
     from app.services.inference.config import load_stage_config
 
     statuses = check_materials(load_stage_config())

@@ -10,11 +10,11 @@ import pytest
 from factories import make_det_box, make_detector_output, make_frame_detection
 
 from app.types.frame import Frame
-from app.services.inference.offline.segmenter import OfflineContext
-from app.services.inference.offline.impl.clean_mstcn2_role_embed import segmenter as seg_mod
-from app.services.inference.offline.impl.clean_mstcn2_role_embed.contract import ACTION_NAMES
-from app.services.inference.offline.impl.clean_mstcn2_role_embed.frames import detection_rows
-from app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter import CleanMSTCN2RoleEmbedSegmenter
+from app.services.inference.offline.segmentation.segmenter import OfflineContext
+from app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed import segmenter as seg_mod
+from app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed.contract import ACTION_NAMES
+from app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed.frames import detection_rows
+from app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed.segmenter import CleanMSTCN2RoleEmbedSegmenter
 
 
 def _det(name, bbox):

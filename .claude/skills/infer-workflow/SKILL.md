@@ -7,7 +7,7 @@ description: "Create a new detection workflow for CleanSightBackend. Use this sk
 
 一个检测任务 = **流源 Detector + 流算子 Operator**，由 YAML 的 `detectors[]` + `rules[]` 装配。
 
-**落点（一文件一基类，同业务同名文件）**：Detector 写 `detection/impl/<业务>.py`，Operator 写 `temporal/impl/<业务>.py`，可选离线 Segmenter 写 `offline/impl/<业务>.py`。三者靠同名文件 + config stage 绑定表达业务聚合（不再有单独的 `workflows/` 目录，也别把 Detector 和 Operator 塞进同一文件）。
+**落点（一文件一基类，同业务同名文件）**：Detector 写 `detection/impl/<业务>.py`，Operator 写 `temporal/impl/<业务>.py`，可选离线 Segmenter 写 `offline/segmentation/impl/<业务>.py`。三者靠同名文件 + config stage 绑定表达业务聚合（不再有单独的 `workflows/` 目录，也别把 Detector 和 Operator 塞进同一文件）。
 
 骨架在 [references/templates.md](references/templates.md)，字段在 [references/data-models.md](references/data-models.md)，装配在 [references/yaml-config.md](references/yaml-config.md)。**架构原理（为什么两层、流源/流算子怎么分）见 [DESIGN_DETECTION_WORKFLOW.md](../../../docs/kb/DESIGN_DETECTION_WORKFLOW.md) 与 [operator.py](../../../app/services/inference/online/temporal/operator.py) docstring，本 skill 只讲怎么做。** 内嵌时序模型（GRU/Transformer）的算子接入另见 `/temporal-review`。
 

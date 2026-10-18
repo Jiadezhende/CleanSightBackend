@@ -11,7 +11,7 @@
 # 开发者只需：
 # 1. 创建 Detector 子类（detection/impl/<业务>.py，实现 infer + prepare_visualization_data），detectors[] 加一行
 # 2. 创建 Operator 子类（temporal/impl/<业务>.py，实现 analyze + judge，可选 override finalize），rules[] 加一行并声明 subscribes
-#    （离线 Segmenter 一个策略一个包，放 offline/impl/<业务>_<模型>/；class 用全限定路径）
+#    （离线 Segmenter 一个策略一个包，放 offline/segmentation/impl/<业务>_<模型>/；class 用全限定路径）
 
 stages:
   # 主键 = step_id（task.current_step，字符串）；alias = 可读名（写告警 step_name + 可视化叠字）
@@ -102,7 +102,7 @@ stages:
             6: short_brush
             7: brush_tip_out
     offline:                         # 离线段（stage 粒度）：class 指定离线模型，缺省/空块 = 不可跑
-      class: app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
+      class: app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
       # 换 class 须同时换 params（物料与特征 recipe 一一对应）。历史策略各自一个包，可直接粘贴的 YAML 片段写在
       # impl/<包>/segmenter.py 的 docstring：clean_mstcn_bilstm / clean_asformer / clean_bigru / clean_gru_nodep（上一版默认）/
       # clean_mstcn2_bundle。物料核对：python -m app.services.inference.offline.cli materials

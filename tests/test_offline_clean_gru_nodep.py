@@ -11,9 +11,9 @@ import pytest
 from factories import make_det_box, make_frame_detection
 
 from app.types.detection import DetectorOutput
-from app.services.inference.offline.impl.clean_gru_nodep.contract import LABELS
-from app.services.inference.offline.impl.clean_gru_nodep.model import causal_windows
-from app.services.inference.offline.impl.clean_gru_nodep.segmenter import CleanGRUNodepSegmenter
+from app.services.inference.offline.segmentation.impl.clean_gru_nodep.contract import LABELS
+from app.services.inference.offline.segmentation.impl.clean_gru_nodep.model import causal_windows
+from app.services.inference.offline.segmentation.impl.clean_gru_nodep.segmenter import CleanGRUNodepSegmenter
 
 
 def _frames(ts_list):

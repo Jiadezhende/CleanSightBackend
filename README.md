@@ -33,7 +33,7 @@ app/
 │   ├── utils/           # 服务层通用：串行队列 / 线程自愈 / 压力日志 / Prometheus 指标 / VOD m3u8 / 媒体轴
 │   ├── client/          # ClientService 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
-│   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
+│   ├── inference/       # 推理：online/（detection/ temporal/ visualization/）+ offline/（segmentation/ 动作分割、compliance/ 规则判定）；契约包的业务实现放 impl/
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
 │   ├── alarm/           # 告警上报（队列 + worker 池 + 重试）
 │   ├── lab/             # 送标裁剪 + Label Studio 上传
@@ -152,7 +152,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 - **LEAK**（step `"1"`）：`bubble`（气泡，出生率滑窗 3s、`birth_rate>0.5` 实时告警）+ `bending`（弯折，去抖 5 帧、合格需 4 次弯曲，结算告警）
 - **CLEAN**（step `"2"`）：`clean_large` + `clean_small` 检测 → `clean_monitor`（GRU 动作识别，10s 窗口，`gru-final.pt`）叠加动作事件；当前 `rules: []` 不产告警
 
-各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanMSTCN2RoleEmbedSegmenter`（物料目录 `app/data/clean-offline-mstcn2-role-embed/` + 骨干 `app/data/backbones/dinov2_vits14/`）。离线策略一个模型一个包（`app/services/inference/offline/impl/clean_<模型>/`），物料一个模型一个目录（`app/data/clean-offline-<模型>/`），历史策略都保留可切换；`python -m app.services.inference.offline.cli materials` 核对当前激活策略的物料。
+各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanMSTCN2RoleEmbedSegmenter`（物料目录 `app/data/clean-offline-mstcn2-role-embed/` + 骨干 `app/data/backbones/dinov2_vits14/`）。离线策略一个模型一个包（`app/services/inference/offline/segmentation/impl/clean_<模型>/`），物料一个模型一个目录（`app/data/clean-offline-<模型>/`），历史策略都保留可切换；`python -m app.services.inference.offline.cli materials` 核对当前激活策略的物料。
 
 **新增检测点**：用 `/infer-workflow` skill 生成 Detector + Operator 框架，规范见 [知识库](docs/kb/INDEX.md)。
 

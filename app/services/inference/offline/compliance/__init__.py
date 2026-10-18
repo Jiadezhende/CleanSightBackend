@@ -1,6 +1,6 @@
 """离线规则判定（合规核对）—— 读 run 的离线产物，按该 step 的规则表判定，违规疑似转 `Alarm` 落 `alarms.jsonl`。
 
-离线包里与动作分割并列的另一个功能模块：分割（`segmenter` / `runner` / `materials` / `impl/`）产出逐帧概率，
+离线包里与 `segmentation/`（动作分割）并列的另一个子模块：分割产出逐帧概率，
 本包只读盘上产物做判定，两边互不 import，只由 `offline/cli.py` 串起来（门禁见 `tests/test_import_hygiene.py`）。
 
     config.py    规则表 dict → ComplianceConfig
