@@ -52,6 +52,7 @@
     .level-high { color: #ef4444; }
     .level-medium { color: #f59e0b; }
     .level-low { color: #6b7280; }
+    .level-warning { color: #f59e0b; }
     .metric-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .metric-table th { background: #f9fafb; text-align: left; padding: 8px 12px; font-weight: 600; color: #6b7280; border-bottom: 2px solid #e5e7eb; font-size: 11px; text-transform: uppercase; }
     .metric-table td { padding: 8px 12px; border-bottom: 1px solid #f3f4f6; }
@@ -335,6 +336,7 @@
                   <th style="width:100px">状态</th>
                   <th style="width:190px">模型</th>
                   <th style="width:60px">段数</th>
+                  <th style="width:60px">告警</th>
                   <th style="width:80px">耗时</th>
                   <th style="width:150px">提交时间</th>
                   <th>说明</th>
@@ -348,12 +350,13 @@
                   <td><el-tag size="small" :type="offJobTag(j.status)">{{ j.status }}</el-tag></td>
                   <td class="mono">{{ j.producer || '—' }}</td>
                   <td>{{ j.status === 'completed' ? j.segment_count : '—' }}</td>
+                  <td>{{ j.status === 'completed' && j.alarm_count != null ? j.alarm_count : '—' }}</td>
                   <td>{{ offJobElapsed(j) }}</td>
                   <td>{{ formatTaskTime(j.submitted_at) }}</td>
                   <td :title="j.message">{{ j.message || '—' }}</td>
                 </tr>
                 <tr v-if="!offJobs.length">
-                  <td colspan="8" class="task-empty">暂无作业</td>
+                  <td colspan="9" class="task-empty">暂无作业</td>
                 </tr>
               </tbody>
             </table>
@@ -406,6 +409,17 @@
                   <div v-for="l in offLegend" :key="l" class="label-item"
                        :class="{ active: offSelected === l, dim: offSelected !== null && offSelected !== l }"
                        @click="selectOffLabel(l)"><i :style="{ background: offColor(l) }"></i>{{ l }}</div>
+                </div>
+              </div>
+              <!-- 过渡期：离线盘上告警（GET /admin-f3m8/offline/alarms），告警入库后整块删除 -->
+              <div class="side-item">
+                <div class="side-key">规则告警（点击跳转）</div>
+                <div v-if="!offAlarmsChecked" class="side-sub">未核对（未配规则 / 无逐帧概率 / 判定失败）</div>
+                <div v-else-if="!offAlarms.length" class="side-sub">无违规疑似</div>
+                <div v-else class="label-list">
+                  <div v-for="(a, i) in offAlarms" :key="i" class="label-item" :title="a.rule_id" @click="seekOff(a.media_ms)">
+                    <span :class="'alarm-level level-' + a.alarm_level">{{ fmtMediaMs(a.media_ms) }}</span>{{ a.alarm_message }}
+                  </div>
                 </div>
               </div>
             </div>
@@ -919,6 +933,8 @@ createApp({
     const offDuration = ref(0);        // 该轨媒体轴总长（ms）
     const offCurrentMs = ref(0);       // 播放头媒体刻度；timeupdate 驱动，约 4Hz
     const offProducer = ref('');
+    const offAlarms = ref([]);            // 过渡期：盘上告警，告警入库后删除
+    const offAlarmsChecked = ref(false);
     const offVideoEl = ref(null), offSegRef = ref(null), offProbRef = ref(null);
     let offSegItems = [], offProbData = null;   // 大数组不进响应式
     let offSegChart = null, offProbChart = null, offHls = null;
@@ -1004,6 +1020,8 @@ createApp({
       offSel.track = 'raw';
       offSelected.value = null;
       offCurrentMs.value = 0;
+      offAlarms.value = [];
+      offAlarmsChecked.value = false;
     }
 
     // ─── 离线作业 ───
@@ -1099,6 +1117,7 @@ createApp({
         await nextTick();
         attachOffVideo();
         renderOffCharts();
+        fetchOffAlarms(taskId, stepId, track);
         if (!seg.items.length && !prob.labels.length) {
           ElMessage.info('该 step 还没有离线结果，先点「运行离线推理」');
         }
@@ -1108,6 +1127,20 @@ createApp({
       } finally {
         offLoading.value = false;
       }
+    }
+
+    // 过渡期：盘上告警单独取、失败不影响分割结果展示；告警入库后整段删除
+    async function fetchOffAlarms(taskId, stepId, track) {
+      offAlarms.value = [];
+      offAlarmsChecked.value = false;
+      try {
+        const r = await fetch(api(`/admin-f3m8/offline/alarms/${taskId}/${stepId}?track=${track}`));
+        if (!r.ok) return;
+        const d = await r.json();
+        if (taskId !== offSel.taskId || stepId !== offSel.stepId || track !== offSel.track) return;
+        offAlarms.value = d.items || [];
+        offAlarmsChecked.value = !!d.checked;
+      } catch {}
     }
 
     function attachOffVideo() {
@@ -1339,6 +1372,7 @@ createApp({
       offTasks, offListLoading, offSel, offQuery, offForm, offLoading, offLoaded, offSegCount, offHasProbs,
       offLegend, offSelected, offDuration, offCurrentMs, offProducer, offVideoEl, offSegRef, offProbRef,
       offColor, offSegAt, fmtMediaMs, formatTaskTime, fetchOffTasks, selectOffTask, loadOffline, fetchOfflineResult, resetOffline, selectOffLabel,
+      offAlarms, offAlarmsChecked, seekOff,
       offJobs, offSubmitting, offJobTag, offJobElapsed, runOffline,
     };
   },
