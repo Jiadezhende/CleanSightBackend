@@ -27,7 +27,7 @@ class Verdict:
     rule_id: str
     rule_type: str
     state: str
-    at: Optional[float] = None                            # 违规时刻（epoch 秒），仅 SUSPECTED 有意义
+    at: Optional[float] = None                            # 违规时刻（epoch 秒）；整段判定的规则（presence / duration / count）为 None
     values: Dict[str, Any] = field(default_factory=dict)  # 判定用到的数值，也是 message 的占位来源
     reason: str = ""                                      # UNDETERMINED 的原因
 
@@ -73,7 +73,7 @@ class PresenceRule(Rule):
         if e >= self.present_s:
             return self._verdict(COMPLIANT, values)
         if e <= self.absent_s and vr >= self.min_visible_ratio:
-            return self._verdict(SUSPECTED, values, ev.coverage[1])
+            return self._verdict(SUSPECTED, values)
         return self._verdict(UNDETERMINED, values, reason="证据落在死区或可见率不足")
 
 
@@ -98,7 +98,7 @@ class DurationRule(Rule):
         if ds >= self.min_s:
             return self._verdict(COMPLIANT, values)
         if dl < self.min_s and vr >= self.min_visible_ratio:
-            return self._verdict(SUSPECTED, values, ev.coverage[1])
+            return self._verdict(SUSPECTED, values)
         return self._verdict(UNDETERMINED, values, reason="两套时长跨过阈值或可见率不足")
 
 
@@ -140,7 +140,7 @@ class CountRule(Rule):
         if cs >= self.min_count:
             return self._verdict(COMPLIANT, values)
         if cl < self.min_count and vr >= self.min_visible_ratio:
-            return self._verdict(SUSPECTED, values, ev.coverage[1])
+            return self._verdict(SUSPECTED, values)
         return self._verdict(UNDETERMINED, values, reason="两套计数跨过阈值或可见率不足")
 
 

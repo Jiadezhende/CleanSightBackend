@@ -59,7 +59,10 @@ def to_alarms(
     stage: str,
     producer: Optional[str],
 ) -> List[Alarm]:
-    """只把 SUSPECTED 转成告警；seq 为本 run 内序号。"""
+    """只把 SUSPECTED 转成告警；seq 为本 run 内序号。
+
+    `metadata["at_ms"]` 是违规时刻（可回看定位）；整段判定的规则没有时刻，为 None，`timestamp` 取覆盖末端。
+    """
     rules = {r.id: r for r in config.rules}
     alarms: List[Alarm] = []
     for v in verdicts:
@@ -74,6 +77,7 @@ def to_alarms(
             metadata={
                 "rule_id": v.rule_id,
                 "rule_type": v.rule_type,
+                "at_ms": None if v.at is None else _ms(v.at),
                 "producer": producer,
                 "coverage_start_ms": _ms(ev.coverage[0]),
                 "coverage_end_ms": _ms(ev.coverage[1]),

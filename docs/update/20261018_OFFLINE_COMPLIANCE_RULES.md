@@ -114,8 +114,8 @@ cli check --task-id T --step-id S [--run-id R] [--dry-run]    只重跑 2；--dr
 ### 4. 告警映射
 
 只映射 suspected：`alarm_type` = 流程违规；`metric` 按规则类型取 `STEP_MISSING` / `STEP_DURATION` / `STEP_COUNT` / `STEP_ORDER` /
-`STEP_WAIT`（与阶段无关，阶段看 `stage`）；`mode` = `SETTLEMENT`；`stage` = stage 别名；`seq` = run 内序号；`timestamp` = 违规时刻（presence / duration / count
-取覆盖末端，order 取长刷证据 10% 时刻，wait 取违规那次的刷洗起点）；`metadata` = `rule_id`、`rule_type`、`producer`（`temporal.jsonl`
+`STEP_WAIT`（与阶段无关，阶段看 `stage`）；`mode` = `SETTLEMENT`；`stage` = stage 别名；`seq` = run 内序号；`timestamp` = 违规时刻（order 取长刷证据 10% 时刻，wait 取违规那次的刷洗起点；presence / duration / count
+是整段判定、没有可定位的时刻，取覆盖末端）；`metadata` = `rule_id`、`rule_type`、`at_ms`（可回看定位的违规时刻，整段判定为 null）、`producer`（`temporal.jsonl`
 里分段的产出者）、覆盖区间与判定量（时刻为 `*_at_ms` int，浮点保留 3 位）。`{at}` 渲染为相对覆盖起点的 mm:ss。
 
 ### 5. `alarms.jsonl`

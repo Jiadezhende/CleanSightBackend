@@ -206,7 +206,8 @@ class TestRules:
         assert v.state == COMPLIANT
 
     def test_flush_missing(self):
-        assert _verdicts([COMPLIANT_RUN[0], *COMPLIANT_RUN[2:]])["clean.flush.missing"].state == SUSPECTED
+        v = _verdicts([COMPLIANT_RUN[0], *COMPLIANT_RUN[2:]])["clean.flush.missing"]
+        assert v.state == SUSPECTED and v.at is None   # 整段判定，没有可定位的时刻
 
     def test_flush_missing_but_mostly_hidden_is_undetermined(self):
         frames = _frames(120.0, hidden=[(0.0, 80.0)])
@@ -218,6 +219,14 @@ class TestRules:
         v = _verdicts(run)["clean.flush.wait"]
         assert v.state == SUSPECTED and v.values["wait_s"] < 15.0
         assert v.at == pytest.approx(T0 + 38.0, abs=1.0)
+
+    def test_wait_alarm_carries_moment(self):
+        run = [("short_brush_cleaning", 5.0, 17.0), ("flush", 20.0, 30.0), *_passes(4, start=38.0)]
+        config = parse_config(SPEC)
+        ev, verdicts = checker.evaluate(config, _probs(run, 120.0), _frames(120.0))
+        wait = [a for a in checker.to_alarms(config, verdicts, ev, stage="CLEAN", producer=None)
+                if a.metadata["rule_id"] == "clean.flush.wait"]
+        assert len(wait) == 1 and wait[0].metadata["at_ms"] == round(wait[0].timestamp * 1000)
 
     def test_wait_without_following_brush_is_undetermined(self):
         run = [("short_brush_cleaning", 5.0, 17.0), *_passes(4, start=30.0), ("flush", 100.0, 110.0)]
@@ -294,6 +303,7 @@ class TestCheckRun:
         assert a.metric is AlarmMetric.STEP_MISSING and a.alarm_type is AlarmType.PROCESS_VIOLATION
         assert (a.mode, a.stage, a.alarm_level) == (ALARM_MODE_SETTLEMENT, "CLEAN", "warning")
         assert a.metadata["producer"] == "Seg" and isinstance(a.metadata["coverage_end_ms"], int)
+        assert a.metadata["at_ms"] is None and round(a.timestamp * 1000) == a.metadata["coverage_end_ms"]
         assert a.alarm_message.startswith("未检测到灌注清洗液")
 
     def test_compliant_run_writes_empty_file(self, tmp_storage):
