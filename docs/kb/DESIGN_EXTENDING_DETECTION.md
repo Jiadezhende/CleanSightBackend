@@ -1,10 +1,10 @@
-> 更新时间：2026-10-17
+> 更新时间：2026-10-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # 新增检测任务
 
-新增检测点 = 一个 Detector 子类 + 一个 Operator 子类 + YAML 各加一条，可选再加一个离线 Segmenter。代码骨架、字段速查和逐项检查清单在 `/infer-workflow` skill（`.claude/skills/infer-workflow/`），接口签名见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)「Detector / Operator 框架接口」，分层判据见 [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)。本文只列步骤与容易静默出错的约束。
+新增检测点 = 一个 Detector 子类 + 一个 Operator 子类 + YAML 各加一条，可选再加一个离线 Segmenter。代码骨架照现有实现写（`online/detection/impl/`、`online/temporal/impl/` 下的 `bubble.py` / `bending.py` / `clean.py`），接口签名见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)「Detector / Operator 框架接口」，分层判据见 [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)。本文只列步骤与容易静默出错的约束。
 
 ## 落点：三段同名文件，一文件一基类
 
@@ -13,7 +13,7 @@
 ## 步骤
 
 1. **Detector**：YOLO 模型继承 `YOLODetector`（只需实现 `prepare_visualization_data`），否则继承 `Detector` 并实现 `infer_batch`。`name` 写死为产出流名。
-2. **Operator**：继承 `Operator`，`__init__` 完整初始化 `self._sm`（含游标 `last_ts`），实现 `analyze` / `judge`，结算逻辑 override `finalize`。内嵌时序模型时继承 `TemporalOperator`，接入走 `/temporal-review` 审查清单。
+2. **Operator**：继承 `Operator`，`__init__` 完整初始化 `self._sm`（含游标 `last_ts`），实现 `analyze` / `judge`，结算逻辑 override `finalize`。内嵌时序模型时继承 `TemporalOperator`，帧率与类别词表约束见下「容易静默出错的约束」。
 3. **YAML**：`config/inference_config.yaml` 对应 stage 的 `detectors[]` 加流源、`rules[]` 加算子（`name` / `subscribes` / `realtime` / `class` / `params`）。`name` 与 `subscribes` 由工厂注入，不写进 `params`。
 4. **新 stage**（新洗消步骤）：加一个 step_id 键并至少配一个 detector 才生效；`rules: []` 的 stage 只画检测框、不建 Actor。
 5. **告警指标**：新检测点需要新指标时，先在 `app/types/alarm.py::AlarmMetric` 补枚举，算子产 `Alarm` 时显式填 `metric`。

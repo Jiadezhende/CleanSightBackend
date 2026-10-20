@@ -1,4 +1,4 @@
-> 更新时间：2026-10-17
+> 更新时间：2026-10-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -99,7 +99,7 @@
 - [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)：四个异常边界层、重试 / 不重试判据、兜底只兜推理失败、旁路与局部预检不阻断主路径、停机交出原则。
 - [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)：`[PRESSURE]` / `[VIZ_THROUGHPUT]` / `[BACKPRESSURE]` 语义、判定规则（水位须高于周期消费批量）、日志量上界。
 - [DESIGN_DETECTION_WORKFLOW.md](DESIGN_DETECTION_WORKFLOW.md)：检测链路总览与设计判据：流源 / 流算子划分、游标、告警模式、在线还是离线。
-- [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md)：新增检测点与离线策略包（契约、物料目录、隔离门禁）的静默出错约束和测试清单；代码骨架见 `/infer-workflow` skill。
+- [DESIGN_EXTENDING_DETECTION.md](DESIGN_EXTENDING_DETECTION.md)：新增检测点与离线策略包（契约、物料目录、隔离门禁）的静默出错约束和测试清单。
 - [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)：墙钟 / 媒体两轴、EXTINF / tfdt / timescale 约束、帧经 stdin 编码的写法约束、MediaTimeline 换算与断流判据、`.idx` 帧反查。
 - [DESIGN_SEGMENT_CONCAT.md](DESIGN_SEGMENT_CONCAT.md)：fMP4 分段拼接选路（两条正交轴，禁 `-f concat`）；三种 exit 0 静默失败与按时长验收。
 - [TESTING_MAP.md](TESTING_MAP.md)：`tests/` 各文件覆盖面、测试基建约定、导入门禁、集成脚本、补测缺口。
