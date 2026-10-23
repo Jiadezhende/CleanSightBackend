@@ -39,5 +39,5 @@
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
-| `start_stream` / `stop_stream` 的 docstring 未写「只由 run_control 持任务锁调用」 | 新调用方绕过 run_control 时，同 task 的 start ∥ stop 仍可能新旧 decoder 短暂并存 | 随 `stop_stream` 改同步停时补注 |
-| `stop_stream` 仍起 `stop-decoder-{tid}` 线程异步停 | 拆除返回时 ffmpeg 未必已回收 | 改同步停（实测 Windows 各场景 p95 ≤ 21ms），单独一批 |
+| `start_stream` / `stop_stream` 的 docstring 未写「只由 run_control 持任务锁调用」 | 新调用方绕过 run_control 时，同 task 的 start ∥ stop 仍可能新旧 decoder 短暂并存 | 已处理，见 [20261024_STREAM_STOP_SYNC.md](20261024_STREAM_STOP_SYNC.md) |
+| `stop_stream` 仍起 `stop-decoder-{tid}` 线程异步停 | 拆除返回时 ffmpeg 未必已回收 | 已处理，见 [20261024_STREAM_STOP_SYNC.md](20261024_STREAM_STOP_SYNC.md) |
