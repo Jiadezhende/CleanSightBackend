@@ -209,7 +209,7 @@ SINGLETONS = {
 SINGLETON_EXCEPTIONS = {
     # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态做决策，
     # 天然要持五个协作者（client / stream / inference / recording，recording 那个只用来在断流
-    # 时登记一次残帧 flush；外加 run_control，生命周期写一律经它执行），import 均写在
+    # 时 flush 残帧；外加 run_control，生命周期写一律经它执行），import 均写在
     # `HealthMonitorWorker._resolve_deps()` 函数体内，不在模块级。
     "app/daemons/health_monitor/worker.py",
     # 告警落库 sink：inference 产告警 → alarm 服务上报。跨服务但方向正确（下游依赖），

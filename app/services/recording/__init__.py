@@ -7,8 +7,7 @@
       __init__.py     本文件：lifespan()
       instance.py     recording_service 单例
       service.py      RecordingService —— start / stop / collect_from /
-                                          submit_segment / flush_residual /
-                                          request_residual_flush
+                                          submit_segment / flush_residual
       config.py       RecordingConfig（config/recording_config.yaml）
     包内私有
       sweep_worker.py 节拍器：周期触发 service.collect_from，只由 RecordingService 构造

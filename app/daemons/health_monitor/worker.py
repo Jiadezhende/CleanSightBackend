@@ -54,7 +54,7 @@ class HealthMonitorWorker:
             inference_service: InferenceService 实例，None 时 start() 取全局单例
             config: 健康监控配置，None 时 start() 读 yaml
             recording_service: RecordingService 实例，None 时 start() 取全局单例。
-                本模块只用它一个方法：断流时登记残帧 flush（见 `_enter_reconnect_mode`）
+                本模块只用它一个方法：断流时 flush 残帧（见 `_enter_reconnect_mode`）
             run_control: RunControlService 实例，None 时 start() 取全局单例。
                 生命周期写（拆除、重启流、停孤儿 decoder）一律经它执行，本模块只做决策
         """
@@ -310,15 +310,15 @@ class HealthMonitorWorker:
         # `eff_fps` 仍落在合理带内不触发退化兜底，**全程无一条报警**。
         #
         # 两条时机约束：
-        # - 必须**在进入重连时**登记，不能等重连成功——成功的判据就是"已经来了新帧"，
+        # - 必须**在进入重连时** flush，不能等重连成功——成功的判据就是"已经来了新帧"，
         #   那时残批里已混进重连后的帧，段照样横跨 gap。
         # - 必须放在 `_reconnecting_clients` 赋值**之后**：`_check_all_clients` 对已在重连
-        #   表里的 task 直接 continue，放在这里 = 每次断流恰好登记一次；放到函数开头会因
-        #   上面 `stream_info` 缺失的早退而每 tick 重复登记。
+        #   表里的 task 直接 continue，放在这里 = 每次断流恰好 flush 一次；放到函数开头会因
+        #   上面 `stream_info` 缺失的早退而每 tick 重复 flush。
         #
-        # `last_frame_time` 是断流前最后一帧的 ts，用作栅栏：只切它之前的帧。真正的 drain
-        # 由 recording 的 sweeper 线程执行（运行期 CQ 的唯一 drain 者），不在本线程做。
-        self._recording_service.request_residual_flush(cq, fence_ts=last_frame_time)
+        # `last_frame_time` 是断流前最后一帧的 ts，用作栅栏：只切它之前的帧。就地执行即可：
+        # 与 sweeper / 拆除 flush 的先后由 recording 取帧锁串行，入队序仍是 ts 序。
+        self._recording_service.flush_residual(cq, until_ts=last_frame_time)
 
         logger.warning(
             "[HealthMonitorWorker] RECONNECT MODE: %s, decoder process dead; "
@@ -353,17 +353,17 @@ class HealthMonitorWorker:
                     "[HealthMonitorWorker] RECONNECT SUCCESS: %s, new frames detected", task_id
                 )
                 self._stats["reconnect_successes"] += 1  # 累计统计：重连成功的次数
-                # 用**同一个栅栏**再登记一次，捞走迟到的断流前帧。
+                # 用**同一个栅栏**再 flush 一次，捞走迟到的断流前帧。
                 #
                 # raw 轨由 decoder 直写，进重连那一刻队列内容就定了；processed 轨由 viz
                 # worker 按 tick 从推理结果渲染，ts 落后 raw 一个推理管线延迟。延迟超过
                 # 「检测 + sweeper 一个 tick」时，断流前的 processed 帧在首次 flush 之后
                 # 才入队，没人再切它们 → processed 轨照样产出横跨 gap 的慢放段。
                 #
-                # 重复登记是安全的：栅栏是时间戳，重连后的帧 ts 都大于它，第二次 flush
+                # 重复 flush 是安全的：栅栏是时间戳，重连后的帧 ts 都大于它，第二次 flush
                 # 只会捞走迟到的断流前帧；没有迟到帧时 drain 出空列表，什么都不提交。
-                self._recording_service.request_residual_flush(
-                    cq, fence_ts=state.last_frame_time_before_disconnect
+                self._recording_service.flush_residual(
+                    cq, until_ts=state.last_frame_time_before_disconnect
                 )
                 self._exit_reconnect_mode(task_id, cleanup=False)
                 return
