@@ -16,7 +16,7 @@ _COMPONENT = "client_queues"
 
 
 def _cfg():
-    from app.services.client.config import get_client_config
+    from .config import get_client_config
 
     return get_client_config()
 

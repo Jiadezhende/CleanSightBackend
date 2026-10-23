@@ -66,7 +66,7 @@ def topic_sizes(monkeypatch):
 
     只影响之后**新建**的 channel；已建好的 channel 容量不变。
     """
-    from app.services.client.config import ClientConfig
+    from app.services.session.config import ClientConfig
 
     def set_sizes(**sizes):
         for name, value in sizes.items():

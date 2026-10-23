@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 def _segment_len() -> int:
     """HLS 段长（帧）= ca_segment_seconds × raw_fps，按调用现取（同 RAW / PROCESSED 容量的口径）。"""
-    from app.services.client.config import get_client_config
+    from app.services.session.config import get_client_config
 
     return get_client_config().ca_segment_len
 

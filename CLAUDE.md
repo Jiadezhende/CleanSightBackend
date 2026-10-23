@@ -46,7 +46,7 @@ python integration_tests/test_single_client.py --scenario 1 --task_id 1  # 集�
 
 - **开发只跑 dev / test 环境，不碰 prod**（prod 写真实 DB、发真实告警）；即便在 dev/test，跑会写库或发告警的端到端测试前也先跟人确认（环境与端口见 `/deploy` skill 的 [runtime-config.md](.claude/skills/deploy/references/runtime-config.md)）。
 - **跑任何 python/pytest 前先激活项目 `.venv`**，别用裸 `python3`。
-- **先评估现有能力再设计，别重复造轮子**：动手前查 KB + 代码里已有什么（数据模型、服务、client 中台、工具函数），能复用或扩展就不新起一套；确实要新建，先说清现有的哪里不够。
+- **先评估现有能力再设计，别重复造轮子**：动手前查 KB + 代码里已有什么（数据模型、服务、session 中台、工具函数），能复用或扩展就不新起一套；确实要新建，先说清现有的哪里不够。
 
 **动手后**
 

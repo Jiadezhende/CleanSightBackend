@@ -1,6 +1,6 @@
 # 新增 session 模块：run 注册表 + 按 run 隔离的进程内 mq，替代 client 包与 ClientQueues
 
-> **变更状态**：提案（2026-10-22 立项，2026-10-24 重写）——批 0 已落地（见 [20261023_RUN_LIFECYCLE_FIXES](20261023_RUN_LIFECYCLE_FIXES.md)），待按批 1–8 落地
+> **变更状态**：已落地（2026-10-24）——批 0 见 [20261023_RUN_LIFECYCLE_FIXES](20261023_RUN_LIFECYCLE_FIXES.md)；批 1–8 各一份记录（`20261024_SESSION_*.md`），与本提案的偏差写在各批记录里
 > **知识库**：无需沉淀（提案本身；结论随各批记录沉淀）
 
 ## 概述

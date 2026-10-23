@@ -89,7 +89,7 @@ class InferenceService:
         # 比 ts，~µs 级，不增推理量）。raw_fps 是已有的跨模块真源，无需新旋钮。
         # 注：HLS processed 打标另由 eff_fps 从 ts 反推、模型输入另由 model_input_fps 契约重采样，均不借本值。
         from .visualization.visualization_worker import VisualizationWorkerPool
-        from app.services.client.config import get_client_config
+        from app.services.session.config import get_client_config
 
         frame_cfg = get_client_config().frame
         self.visualization_pool = VisualizationWorkerPool(

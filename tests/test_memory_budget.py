@@ -7,7 +7,7 @@ import pytest
 
 import factories
 from app import main as app_main
-from app.services.client.config import ClientConfig, FrameConfig, StateConfig
+from app.services.session.config import ClientConfig, FrameConfig, StateConfig
 from app.services.session.topics import RAW, READY
 from app.services.utils import memory_budget
 from app.services.utils.memory_budget import MemoryPlan, estimate, read_mem_available

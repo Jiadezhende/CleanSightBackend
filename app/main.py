@@ -96,7 +96,7 @@ def _check_memory_budget(settings) -> None:
     只做容量规划，不拦截 /api/start。非 Linux 读不到 MemAvailable，跳过。
     公式见 `app/services/utils/memory_budget.py`。
     """
-    from .services.client.config import get_client_config
+    from .services.session.config import get_client_config
     from .services.recording.config import get_recording_config
     from .services.stream.config import get_stream_config
     from .services.utils.memory_budget import MemoryPlan, estimate, read_mem_available

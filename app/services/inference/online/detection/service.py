@@ -12,7 +12,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from app.types.detection import FrameDetection
-from app.services.client.config import get_client_config
+from app.services.session.config import get_client_config
 from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION
 from app.services.session.instance import session_service
 from app.services.session.topics import DETECTIONS
@@ -87,7 +87,7 @@ class DetectionService:
         # 推理子进程代理：submit 批帧 → 子进程 _infer_models → collector 据 req_id 重组
         # FrameDetection 走 _write_back_results 落回主链路。写回回调注入本服务的单一写回口。
         # 先于 Dispatcher 构造：dispatcher 需注入它的 submit 作为唯一提交者。
-        # 送帧走共享内存环：单槽 = CQ 声明的帧尺寸，槽位数 = 在途批上限 × 最大批大小（环不先于在途上限耗尽）。
+        # 送帧走共享内存环：单槽 = client 配置声明的帧尺寸，槽位数 = 在途批上限 × 最大批大小（环不先于在途上限耗尽）。
         frame_cfg = get_client_config().frame
         max_batch = max(stage_batch_sizes.values(), default=max_batch_per_stage)
         self._proxy = RemoteInferProxy(

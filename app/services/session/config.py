@@ -1,7 +1,9 @@
-"""
-客户端队列配置加载器
+"""每 run 帧队列的配置（`config/client_config.yaml`，文件名沿用 CQ 时代）+ 由 settings 派生的帧数口径。
 
-统一管理客户端队列的各项参数
+    from app.services.session.config import get_client_config
+    get_client_config().ca_maxlen / ca_ready_maxlen / ca_segment_len / frame.resize_width
+
+topic 容量（`session/topics.py`）、录像段长（recording）、推理 / 渲染共享内存槽尺寸都从这里取。
 """
 
 import logging
@@ -33,7 +35,7 @@ class FrameConfig:
 class StateConfig:
     """状态配置"""
 
-    # 注意：stage 不在此配置——由 RunControlService 在 /api/start 时按 current_step 解析后传给 ClientQueues。
+    # 注意：stage 不在此配置——由 RunControlService 在 /api/start 时按 current_step 解析，写进 SessionInfo。
     heartbeat_timeout: int = 30  # 心跳超时（秒）
 
 
@@ -118,19 +120,6 @@ class ClientConfig:
         """检测抽帧降采样倍率（从 settings 单一真源读取；抽帧器「每 N 帧留 1」）"""
         from app.settings import settings
         return settings.inference_decimation
-
-    def cq_kwargs(self) -> Dict[str, Any]:
-        """组装 ClientQueues 构造参数（resize 属 client 配置，采样倍率/队列走 settings 单一真源）。
-
-        创建 CQ 的唯一配置出口：run 起始由 InferenceService 调用（早于起流），
-        避免"裸建默认值 + 起流时 kwargs 被丢弃"的 dead-kwargs 问题。
-        """
-        return {
-            "resize_width": self.frame.resize_width,
-            "resize_height": self.frame.resize_height,
-            "ca_maxlen": self.ca_maxlen,
-            "ca_segment_len": self.ca_segment_len,
-        }
 
     def _log_loaded_config(self):
         """输出加载的配置"""

@@ -603,7 +603,7 @@ class HealthMonitorWorker:
 
         职责边界：
         - 健康监控负责系统级别的状态汇总
-        - 整合来自多个模块的信息（ClientService、StreamService、InferenceService）
+        - 整合来自多个模块的信息（session 注册表、StreamService、InferenceService）
         - 提供统一的系统状态视图
 
         Returns:
