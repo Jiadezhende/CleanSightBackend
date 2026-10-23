@@ -161,12 +161,11 @@ recording 取帧锁（外层，RecordingService 自持）
 | #6 | `test_teardown_identity_fence`：fence 未命中放弃 / 命中重启；`test_full_reconnect_state_machine` 断言经 `run_control.restart_stream` 且带 `expected` | passed |
 | #7 | health_monitor 两处 flush 改断言 `flush_residual(cq, until_ts=...)`；删除挂起机制专属用例 9 条 | passed |
 | 全量 `pytest tests/` | — | 1117 passed |
-| dev 环境真流端到端（断流重连、拆除） | — | 未跑 |
+| dev 环境真流端到端（断流重连、拆除） | 人工 | 通过（2026-10-23） |
 
 ## 遗留风险 / 后续任务
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
-| #3 / #6 / #7 改了断流与拆除路径，单测只覆盖替身下的并发 | 真实时序下未验证 | 合入 dev 前在 dev 环境跑集成测试，并手动断流一次 |
 | 录像队列满时 `submit` 每段最多阻塞 1s，期间持取帧锁；断流 flush 现跑在 health_monitor 线程 | 过载时 `/terminate` 或一轮健康检查推迟几秒，不丢数据 | 观察；过载本身已有 `[recording]` 丢段告警 |
 | `/terminate` 正在重连的 run 后，`_reconnecting_clients` 条目残留 | 统计偏差；该 task 被排除在孤儿 decoder 检查外（#6 后不再因 respawn 竞态产生孤儿） | 随 session 重构用每 run 的重连状态替代该表；不重构则补每 tick 剔除 |
