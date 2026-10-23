@@ -1,21 +1,22 @@
 """
-运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针、离线推理作业
+运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针、离线推理作业、离线盘上告警（过渡期）
 路由前缀：/admin-f3m8（路径混淆，防自动扫描器命中）
 告警查询直接使用 GET /task/{task_id}/alarms（已有双源路由实现）
 """
 
 import time
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from app.services.client.instance import client_service
 from app.services.inference.offline.instance import offline_job_service
+from app.storage import inference as inference_store
 from app.types.exceptions import NotFoundError
 
-from .utils.runs import no_run, resolve_run
+from .utils.runs import no_run, resolve_run, resolve_timeline
 
 logger = logging.getLogger(__name__)
 
@@ -256,3 +257,38 @@ def get_offline_job(task_id: int, step_id: int, run_id: Optional[int] = Query(No
             resource_type="offline_job", resource_id=f"{task_id}/{step_id}",
         )
     return job.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# 离线规则判定的盘上告警（过渡期：告警入库后与 storage `alarms.jsonl`、admin 页告警块一起删除）
+# ---------------------------------------------------------------------------
+
+@router.get("/offline/alarms/{task_id}/{step_id}")
+def get_offline_alarms(
+    task_id: int,
+    step_id: int,
+    run_id: Optional[int] = Query(None),
+    track: Literal["raw", "processed"] = Query("raw"),
+):
+    """该 run 的 `alarms.jsonl`，违规时刻换算到 `track` 轨的媒体刻度；`checked=false` = 没核对过。
+
+    整段判定的告警（漏步 / 时长 / 次数）没有可定位的时刻，`media_ms` 为 None。
+
+    无可见 run 或该轨无录像段 → 404（同 `/ai/temporal`）。
+    """
+    run, timeline = resolve_timeline(task_id, step_id, run_id, track)
+    alarms = inference_store.read_alarms(run)
+    items = [
+        {
+            "rule_id": a.metadata.get("rule_id"),
+            "metric": a.metric.value,
+            "alarm_level": a.alarm_level,
+            "alarm_message": a.alarm_message,
+            "media_ms": None if a.metadata.get("at_ms") is None else timeline.media_ms_at(a.metadata["at_ms"]),
+        }
+        for a in alarms or []
+    ]
+    return {
+        "task_id": task_id, "step_id": step_id, "run_id": run.run_id, "track": track,
+        "checked": alarms is not None, "items": items,
+    }

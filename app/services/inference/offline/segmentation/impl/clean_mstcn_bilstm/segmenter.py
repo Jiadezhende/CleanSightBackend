@@ -1,9 +1,9 @@
-"""CLEAN 历史离线策略 BiGRU（YAML ``offline.class`` 指向 ``CleanBiGRUSegmenter``）。
+"""CLEAN 历史离线策略 MS-TCN + BiLSTM（YAML ``offline.class`` 指向 ``CleanMSTCNBiLSTMSegmenter``）。
 
     offline:
-      class: app.services.inference.offline.impl.clean_bigru.segmenter.CleanBiGRUSegmenter
+      class: app.services.inference.offline.segmentation.impl.clean_mstcn_bilstm.segmenter.CleanMSTCNBiLSTMSegmenter
       params:
-        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-bigru
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn-bilstm
         min_duration_s: 0.2
 
 物料 ``model_dir/model.pt``（格式见 contract.py）。逐帧 argmax → 合并连续同类帧（跳过 idle、丢弃短于 ``min_duration_s`` 的段）。
@@ -18,16 +18,16 @@ import numpy as np
 
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
-from app.services.inference.offline.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
 
 from .contract import FEATURE_DIM, FEATURE_VERSION, LABELS, MODEL_FILE
 from .features import ModelInput, build_features
 
 
-class CleanBiGRUSegmenter(OfflineSegmenter):
-    """BiGRU 整段离线模型（clean_bbox_v2_top1_impute+center_window+business_priors，249 维）。"""
+class CleanMSTCNBiLSTMSegmenter(OfflineSegmenter):
+    """MS-TCN + BiLSTM 整段离线模型（clean_bbox_v2_top1_impute，113 维）。"""
 
-    model_version = "clean_bigru_v1"
+    model_version = "clean_mstcn_bilstm_v1"
     labels: Tuple[str, ...] = LABELS
 
     def __init__(

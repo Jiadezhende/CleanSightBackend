@@ -69,6 +69,7 @@ BUDGET = {
     "app.storage.inference._layout":    (set(), 0.40),   # stdlib only
     "app.storage.inference._temporal":  (set(), 0.40),   # numpy（LabelProbs / npz）
     "app.storage.inference._cache":     (set(), 0.40),   # numpy（npz）
+    "app.storage.inference._alarm":     (set(), 0.40),   # stdlib + app.types.alarm
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
     # 这条盯的是**整个域**的模块级依赖。写侧编码走 ffmpeg 子进程（`_fmp4.encode`），不用 cv2；
     # 谁把 cv2 塞回模块级，这条会连同 `app.storage.hls._encode` 一起红。
@@ -132,9 +133,16 @@ BUDGET = {
     "app.services.inference.online.visualization.render_child": (set(), 0.40),
     "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
+    "app.services.inference.offline.segmentation": (set(), 1.0),
     # 离线 CLI 是独立进程入口：`_isolate()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
+    # 规则判定（LAYER_PACKAGES 白名单包，逐模块登记）：numpy + storage，不许 torch
+    "app.services.inference.offline.compliance":          (set(), 0.50),
+    "app.services.inference.offline.compliance.config":   (set(), 0.50),
+    "app.services.inference.offline.compliance.evidence": (set(), 0.50),
+    "app.services.inference.offline.compliance.rules":    (set(), 0.50),
+    "app.services.inference.offline.compliance.checker":  (set(), 0.50),
     "app.services.alarm":       (set(), 1.0),
     # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
     "app.daemons":              (set(), 0.20),
@@ -188,6 +196,12 @@ LAYER_PACKAGES = {
     # `name == ok or name.startswith(ok + ".")`，兄弟包差的正是那个点。
     "app/services/utils": (
         "app.services.utils", "app.storage", "app.types", "app.settings",
+    ),
+    # 离线规则判定：只读盘上的离线产物做判定，与同级的 offline/segmentation 互不 import（分割侧见
+    # test_offline_segmentation_does_not_import_compliance），只由 offline/cli.py 串起来；
+    # 规则表由 cli 从 stage 配置取出、以 dict 传入，故连 inference.config 都不许碰。
+    "app/services/inference/offline/compliance": (
+        "app.services.inference.offline.compliance", "app.storage", "app.types",
     ),
 }
 
@@ -394,9 +408,10 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
 
 
 # 离线策略实现：每个策略一个包（或单文件模块），只许依赖框架契约；兄弟策略之间零 import。
-OFFLINE_IMPL_DIR = APP_DIR / "services" / "inference" / "offline" / "impl"
+OFFLINE_DIR = APP_DIR / "services" / "inference" / "offline"
+OFFLINE_IMPL_DIR = OFFLINE_DIR / "segmentation" / "impl"
 OFFLINE_IMPL_ALLOWED = (
-    "app.services.inference.offline.segmenter",
+    "app.services.inference.offline.segmentation.segmenter",
     "app.services.inference.resample",
     "app.types",
 )
@@ -407,9 +422,9 @@ def _offline_impl_units():
         if path.name.startswith("__"):
             continue
         if path.is_dir():
-            yield f"app.services.inference.offline.impl.{path.name}", sorted(path.rglob("*.py"))
+            yield f"app.services.inference.offline.segmentation.impl.{path.name}", sorted(path.rglob("*.py"))
         elif path.suffix == ".py":
-            yield f"app.services.inference.offline.impl.{path.stem}", [path]
+            yield f"app.services.inference.offline.segmentation.impl.{path.stem}", [path]
 
 
 @pytest.mark.parametrize("unit,files", list(_offline_impl_units()), ids=lambda v: v if isinstance(v, str) else "")
@@ -489,6 +504,21 @@ def test_services_do_not_import_daemons():
     violations = _imports_under(APP_DIR / "services", "app.daemons")
     assert not violations, (
         "services 依赖了 daemons：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_offline_impl_units_found():
+    """策略包门禁按目录参数化：目录挪了而这里没跟上，门禁会因零用例静默变绿。"""
+    assert list(_offline_impl_units()), f"{OFFLINE_IMPL_DIR} 下没有找到任何策略包"
+
+
+def test_offline_segmentation_does_not_import_compliance():
+    """离线包里 `segmentation/` 与 `compliance/` 两个功能模块互不 import，只在 `offline/cli.py` 汇合；
+    本条守分割侧，判定侧由 LAYER_PACKAGES 白名单守。"""
+    violations = _imports_under(OFFLINE_DIR / "segmentation", "app.services.inference.offline.compliance")
+    assert not violations, (
+        "离线分割 import 了规则判定：\n  " + "\n  ".join(violations)
+        + "\n两者只在 offline/cli.py 串联；需要的结果请经盘上产物交接。"
     )
 
 

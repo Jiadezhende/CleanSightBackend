@@ -15,8 +15,8 @@ from factories import make_det_box, make_detector_output, make_frame_detection, 
 from app.types.detection import DetectorOutput
 from app.types.temporal import TemporalEvent, TemporalSegment
 from app.services.inference.config import InferenceConfig
-from app.services.inference.offline.segmenter import OfflineSegmenter
-from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
+from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmentation.runner import OfflineRunner, OfflineRunSpec
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
 from app.types.exceptions import ValidationError
@@ -204,7 +204,7 @@ class TestOfflineRunner:
 
     def test_context_strategy_gets_video_bound_to_locked_run(self, tmp_storage, monkeypatch):
         """`uses_context` 策略经 context.video 取帧：参数原样透传给 hls.iter_frames，run 是锁定的那个。"""
-        from app.services.inference.offline import runner as runner_mod
+        from app.services.inference.offline.segmentation import runner as runner_mod
 
         calls = []
         monkeypatch.setattr(runner_mod.hls, "iter_frames", lambda run, **kw: calls.append((run, kw)) or iter(()))
@@ -282,7 +282,7 @@ class TestRunLock:
         """跑到一半所在 step 过 TTL 被回收：写入 FileNotFoundError → reclaimed，不重建目录。"""
         import shutil
 
-        from app.services.inference.offline import runner as runner_mod
+        from app.services.inference.offline.segmentation import runner as runner_mod
         from app.storage.utils import root as _root
 
         _write_detections(1, 2)
@@ -338,19 +338,46 @@ class TestCli:
         默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
         + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
         """
-        from app.services.inference.offline import runner as runner_mod
+        from app.services.inference import config as config_mod
+        from app.services.inference.offline.segmentation import runner as runner_mod
         _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        monkeypatch.setattr(config_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         last = capsys.readouterr().out.strip().splitlines()[-1]
         assert rc == 0
         assert json.loads(last) == {
-            "status": "completed", "producer": "BrushRulesSegmenter", "segment_count": 1, "message": "",
+            "status": "completed", "producer": "BrushRulesSegmenter", "segment_count": 1, "alarm_count": None,
+            "message": "",
         }
 
+    def test_run_check_failure_keeps_completed(self, tmp_storage, monkeypatch, capsys):
+        """规则核对失败（这里是类表不符）只进 message：分割结果照常 completed、退出码 0、alarm_count 为 null。"""
+        from app.services.inference import config as config_mod
+        from app.services.inference.offline.segmentation import runner as runner_mod
+        _write_detections(1, 2)
+        cfg = InferenceConfig({"stages": {"2": {
+            "offline": {"class": f"{__name__}.ProbsSegmenter"},
+            "compliance": {
+                "evidence": {"episodes": {"strict": {"p_on": 0.6, "p_off": 0.4, "merge_gap_s": 1, "min_len_s": 1},
+                                          "lenient": {"p_on": 0.4, "p_off": 0.2, "merge_gap_s": 1, "min_len_s": 1}}},
+                "groups": {"flush": ["flush"]},
+                "rules": [{"id": "m", "type": "presence", "group": "flush", "present_s": 1, "absent_s": 0,
+                           "message": "x"}],
+            },
+        }}})
+        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: cfg)
+        monkeypatch.setattr(config_mod, "load_stage_config", lambda *a, **k: cfg)
+        from app.services.inference.offline import cli
+        rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert rc == 0
+        assert (payload["status"], payload["alarm_count"]) == ("completed", None)
+        assert payload["message"].startswith("规则核对失败") and not (_inference_dir(1, 2) / "alarms.jsonl").exists()
+
     def test_run_strategy_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
-        from app.services.inference.offline import runner as runner_mod
+        from app.services.inference.offline.segmentation import runner as runner_mod
         _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_BOOM))
         from app.services.inference.offline import cli
@@ -361,7 +388,7 @@ class TestCli:
 
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""
-        from app.services.inference.offline import runner as runner_mod
+        from app.services.inference.offline.segmentation import runner as runner_mod
         _write_detections(1, 2)
         monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
@@ -413,7 +440,7 @@ def _materials_config(tmp_path, *names):
 
 class TestMaterials:
     def test_lists_active_strategy_materials_per_stage(self, tmp_path):
-        from app.services.inference.offline.materials import check_materials
+        from app.services.inference.offline.segmentation.materials import check_materials
 
         statuses = check_materials(_materials_config(tmp_path, "have.pt", "gone.pt"))
         assert [(s.stage, s.producer, s.path.name, s.exists) for s in statuses] == [
@@ -421,7 +448,7 @@ class TestMaterials:
         ]
 
     def test_stage_without_offline_and_default_strategy_list_nothing(self):
-        from app.services.inference.offline.materials import check_materials
+        from app.services.inference.offline.segmentation.materials import check_materials
 
         assert check_materials(_config({})) == []
         assert check_materials(_config(_OFFLINE_OK)) == []

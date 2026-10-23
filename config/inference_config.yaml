@@ -11,7 +11,7 @@
 # 开发者只需：
 # 1. 创建 Detector 子类（detection/impl/<业务>.py，实现 infer + prepare_visualization_data），detectors[] 加一行
 # 2. 创建 Operator 子类（temporal/impl/<业务>.py，实现 analyze + judge，可选 override finalize），rules[] 加一行并声明 subscribes
-#    （离线 Segmenter 一个策略一个包，放 offline/impl/<业务>_<模型>/；class 用全限定路径）
+#    （离线 Segmenter 一个策略一个包，放 offline/segmentation/impl/<业务>_<模型>/；class 用全限定路径）
 
 stages:
   # 主键 = step_id（task.current_step，字符串）；alias = 可读名（写告警 step_name + 可视化叠字）
@@ -102,7 +102,7 @@ stages:
             6: short_brush
             7: brush_tip_out
     offline:                         # 离线段（stage 粒度）：class 指定离线模型，缺省/空块 = 不可跑
-      class: app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
+      class: app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
       # 换 class 须同时换 params（物料与特征 recipe 一一对应）。历史策略各自一个包，可直接粘贴的 YAML 片段写在
       # impl/<包>/segmenter.py 的 docstring：clean_mstcn_bilstm / clean_asformer / clean_bigru / clean_gru_nodep（上一版默认）/
       # clean_mstcn2_bundle。物料核对：python -m app.services.inference.offline.cli materials
@@ -113,6 +113,63 @@ stages:
         device: cuda                 # DINOv2 所用设备；卡号随在线推理（settings.cuda_device）。无 GPU 的机器配 cpu
         max_crops_per_s: 150         # DINOv2 限速（次裁剪/秒），与在线 YOLO 共卡时让出算力；null = 不限速
         max_duration_s: 900          # 只推理首帧起前 15 分钟，超出截断（限住超长 step 的资源占用）；null = 不截断
+    compliance:                      # 离线规则层：离线分割 completed 后核对，违规疑似落 run 的 alarms.jsonl；缺省 / rules 为空 = 不核对
+      # 只读 label_probs.npz + detections.jsonl；改规则后 `python -m app.services.inference.offline.cli check --dry-run` 重跑即可。
+      # 数值均为初值，待在已标注的 run 上标定。规则依据见 docs/update/20261018_OFFLINE_COMPLIANCE_RULES.md
+      evidence:
+        smooth_s: 1.0                # 组概率居中滑动平均窗
+        p_floor: 0.3                 # 平滑后组概率低于它的帧不计证据积分（挡住长 idle 段上的底噪）
+        visible_classes: [scope_control_body, scope_mid_section]   # ±visible_window_s 内任一检出即视为该帧可见
+        visible_window_s: 1.0
+        gap_s: 2.0                   # 逐帧时长上限，detections 断档不计入时长
+        episodes:                    # 实例切分两套参数：strict 偏少计 / 偏短，lenient 反之；两套都判违规才报
+          strict:  {p_on: 0.6, p_off: 0.4, merge_gap_s: 1.5, min_len_s: 1.5}
+          lenient: {p_on: 0.4, p_off: 0.25, merge_gap_s: 0.5, min_len_s: 0.5}
+      groups:                        # water_injection 未训练，不引用
+        brushing: [long_brush_insert, long_brush_withdraw]
+        insert: [long_brush_insert]
+        withdraw: [long_brush_withdraw]
+        short_brush: [short_brush_cleaning]
+        flush: [flush]
+      rules:
+        - id: clean.short_brush.duration
+          type: duration
+          group: short_brush
+          min_s: 10.0
+          min_visible_ratio: 0.6
+          message: "短毛刷刷洗约 {duration_s:.0f} s，不足 10 s，请回看确认"
+        - id: clean.long_brush.count
+          type: count
+          group: brushing
+          unit: round_trip           # 一次 = 一次完整的插入加拔出
+          forward: insert
+          backward: withdraw
+          min_count: 4
+          min_visible_ratio: 0.6
+          message: "长毛刷刷洗 {count} 次，少于 4 次，请回看确认"
+        - id: clean.brush.order
+          type: order
+          before: short_brush
+          after: brushing
+          before_q: 0.9              # 短刷累计证据 90% 的时刻
+          after_q: 0.1               # 长刷累计证据 10% 的时刻
+          present_s: 2.0
+          margin_s: 3.0
+          message: "长毛刷刷洗（{at} 起）早于短毛刷刷洗完成，请回看确认"
+        - id: clean.flush.missing
+          type: presence
+          group: flush
+          present_s: 5.0
+          absent_s: 1.0
+          min_visible_ratio: 0.6
+          message: "未检测到灌注清洗液（可见时长占比 {visible_ratio:.0%}），请回看确认"
+        - id: clean.flush.wait
+          type: wait
+          after: flush
+          until: [short_brush, brushing]
+          min_s: 15.0
+          min_visible_ratio: 0.8     # 等待区间内的可见率
+          message: "灌注清洗液后 {wait_s:.0f} s 即开始刷洗（{at}），不足 15 s，请回看确认"
 
 # ==================== 推理自有参数 ====================
 # 注意：跨模块共享参数（raw_fps / inference_fps / ca_maxlen / ca_segment_len）已上浮到

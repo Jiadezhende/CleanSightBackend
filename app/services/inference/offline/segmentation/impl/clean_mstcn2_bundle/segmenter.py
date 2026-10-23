@@ -1,7 +1,7 @@
 """CLEAN 历史离线策略 mstcn2-bundle（YAML ``offline.class`` 指向 ``CleanMSTCN2BundleSegmenter``）。
 
     offline:
-      class: app.services.inference.offline.impl.clean_mstcn2_bundle.segmenter.CleanMSTCN2BundleSegmenter
+      class: app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle.segmenter.CleanMSTCN2BundleSegmenter
       params:
         model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-bundle
 
@@ -20,7 +20,7 @@ import numpy as np
 
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
-from app.services.inference.offline.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
 from app.services.inference.resample import input_fps, resample_by_ts
 
 from .bundle import bundle_columns

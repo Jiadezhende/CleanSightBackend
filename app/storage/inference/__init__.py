@@ -9,8 +9,8 @@
 
 `run` 是 `RunIdentity`（来自 `app.storage.runs`），读写口都只收它。
 
-两份产物按**产出层**分模块：`_detection` 管目标检测产物（L1），`_temporal` 管时序分析产物
-（L3）+ 离线逐帧类别概率。共用 `_layout`（域根与文件名）和 `_jsonl`（行框定与原子写）。
+产物按**产出层**分模块：`_detection` 管目标检测产物（L1），`_temporal` 管时序分析产物
+（L3）+ 离线逐帧类别概率，`_alarm` 管离线规则层的告警（L4）。共用 `_layout`（域根与文件名）和 `_jsonl`（行框定与原子写）。
 
 ## 对外成员
 
@@ -18,10 +18,11 @@
     temporal.jsonl      read_temporal / write_temporal         路线 C（原子整体替换）
     label_probs.npz     read_label_probs / write_label_probs   路线 C（原子整体替换）
     cache_{name}.npz    read_offline_cache / write_offline_cache   路线 C；离线策略的中间产物，内容归策略
+    alarms.jsonl        read_alarms / write_alarms             路线 C；离线规则层的告警
     查询                query_has_offline_results              有分段事实或有逐帧概率
 
 货币是 `app.types` 的跨服务契约：`FrameDetection`（`app.types.detection`）与
-`TemporalEvent` / `TemporalSegment` / `LabelProbs`（`app.types.temporal`）。本域不出自己的类型——没有「从文件名
+`TemporalEvent` / `TemporalSegment` / `LabelProbs`（`app.types.temporal`）与 `Alarm`（`app.types.alarm`）。本域不出自己的类型——没有「从文件名
 解出来的身份」这种形状（对照 `hls.SegmentRef`），故没有 `types.py`。
 
 ## 两条调用方必须知道的约束
@@ -45,6 +46,7 @@
       temporal.jsonl      每条一行：`type` 判别 event / segment
       label_probs.npz     离线分割逐帧类别概率：ts [T] + probs [T,C] + labels [C]
       cache_{name}.npz    离线策略中间产物缓存（如 mstcn2-role-embed 的手部嵌入），随 run 目录 TTL 回收
+      alarms.jsonl        离线规则层告警，每条一行；缺失（读出 None）= 没核对过，空 = 核对过、无告警
       .{name}.tmp         路线 C 的暂存，换名后即消失
 
 ## 边界
@@ -53,6 +55,7 @@
 谁——全在调用方。**本域不持锁**：同一 run 的写由调用侧串行（规范 §6）。IO 失败一律 `OSError` 原样抛，包成什么由调用方定。
 """
 
+from ._alarm import read_alarms, write_alarms
 from ._cache import read_offline_cache, write_offline_cache
 from ._detection import append_detections, read_detections
 from ._temporal import (
@@ -66,10 +69,12 @@ from ._temporal import (
 __all__ = [
     "append_detections",
     "query_has_offline_results",
+    "read_alarms",
     "read_detections",
     "read_label_probs",
     "read_offline_cache",
     "read_temporal",
+    "write_alarms",
     "write_label_probs",
     "write_offline_cache",
     "write_temporal",

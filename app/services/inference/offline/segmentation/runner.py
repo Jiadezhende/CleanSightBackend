@@ -58,6 +58,7 @@ class OfflineRunResult:
     producer: Optional[str]
     segment_count: int
     message: str = ""
+    run_id: Optional[int] = None  # 实际锁定的 run；completed 时必有
 
 
 class OfflineRunner:
@@ -110,7 +111,7 @@ class OfflineRunner:
             "[OfflineRunner] completed task=%s step=%s run=%s producer=%s segments=%d",
             run.task_id, run.step_id, run.run_id, producer, len(validated),
         )
-        return OfflineRunResult("completed", producer, len(validated))
+        return OfflineRunResult("completed", producer, len(validated), run_id=run.run_id)
 
     @staticmethod
     def _context(run: RunIdentity) -> OfflineContext:

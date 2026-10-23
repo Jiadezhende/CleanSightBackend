@@ -1,8 +1,9 @@
-"""`app.storage.inference`：`{step}/{run_id}/inference/` 下三份推理产物的编解码与读写。
+"""`app.storage.inference`：`{step}/{run_id}/inference/` 下推理产物的编解码与读写。
 
     detections.jsonl      L1 检测结果，路线 B（追加）
     temporal.jsonl      L3 时序事实，路线 C（原子整体替换）
     label_probs.npz     离线逐帧类别概率，路线 C
+    alarms.jsonl        离线规则层告警，路线 C
 
 全程用 `tmp_storage` fixture（conftest）把存储根指到临时目录，不碰真实 `database/`。
 
@@ -21,6 +22,7 @@ import numpy as np
 import pytest
 
 from factories import make_det_box
+from app.types.alarm import ALARM_MODE_SETTLEMENT, Alarm, AlarmMetric, AlarmType
 from app.types.detection import DetBox, DetectorOutput, FrameDetection
 from app.types.run import RunIdentity
 from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
@@ -545,3 +547,79 @@ class TestOfflineCache:
         with pytest.raises(FileNotFoundError):
             inference.write_offline_cache(RunIdentity(1, 2, RUN_ID), "c", {"a": np.zeros(1)})
         assert list(tmp_storage.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# alarms.jsonl：离线规则层告警
+# ---------------------------------------------------------------------------
+
+
+def _alarm(message="漏刷", metric=AlarmMetric.STEP_MISSING, ts=1727000000.123, **kw) -> Alarm:
+    return Alarm(
+        alarm_type=AlarmType.PROCESS_VIOLATION, alarm_level="warning", alarm_message=message,
+        metric=metric, metadata=kw.pop("metadata", {"rule_id": "r", "evidence_s": 0.5}),
+        mode=ALARM_MODE_SETTLEMENT, stage="CLEAN", seq=kw.pop("seq", 0), timestamp=ts,
+    )
+
+
+def _alarms_file(root, task_id, step_id):
+    return _domain_dir(root, task_id, step_id) / "alarms.jsonl"
+
+
+class TestAlarms:
+    def test_roundtrip_to_the_millisecond(self, tmp_storage):
+        src = [_alarm(seq=0), _alarm("乱序", AlarmMetric.STEP_ORDER, ts=1727000001.5, seq=1)]
+        inference.write_alarms(_run(1, 2), src)
+        got = inference.read_alarms(_run(1, 2))
+        assert [(a.alarm_message, a.metric, a.seq, a.metadata) for a in got] == [
+            (a.alarm_message, a.metric, a.seq, a.metadata) for a in src
+        ]
+        assert [a.timestamp for a in got] == [1727000000.123, 1727000001.5]
+        assert got[0].alarm_type is AlarmType.PROCESS_VIOLATION and got[0].mode == ALARM_MODE_SETTLEMENT
+        rec = json.loads(_alarms_file(tmp_storage, 1, 2).read_text(encoding="utf-8").splitlines()[0])
+        assert rec["timestamp_ms"] == 1727000000123 and rec["metric"] == "STEP_MISSING"
+
+    def test_write_replaces_the_whole_file(self, tmp_storage):
+        inference.write_alarms(_run(1, 2), [_alarm("old"), _alarm("older")])
+        inference.write_alarms(_run(1, 2), [_alarm("new")])
+        assert [a.alarm_message for a in inference.read_alarms(_run(1, 2))] == ["new"]
+
+    def test_missing_vs_empty(self, tmp_storage):
+        """缺失 = 没核对过（None），空文件 = 核对过、无告警（[]）。"""
+        assert inference.read_alarms(_run(1, 2)) is None
+        inference.write_alarms(_run(1, 2), [])
+        assert _alarms_file(tmp_storage, 1, 2).read_text(encoding="utf-8") == ""
+        assert inference.read_alarms(_run(1, 2)) == []
+
+    def test_read_missing_creates_nothing(self, tmp_storage):
+        assert inference.read_alarms(RunIdentity(9, 9, RUN_ID)) is None
+        assert list(tmp_storage.iterdir()) == []
+
+    def test_skips_bad_lines_without_losing_the_rest(self, tmp_storage):
+        inference.write_alarms(_run(1, 2), [_alarm("a")])
+        with _alarms_file(tmp_storage, 1, 2).open("a", encoding="utf-8") as f:
+            f.write("{not json\n")
+            f.write(json.dumps({**_alarm_record(), "metric": "NO_SUCH_METRIC"}) + "\n")
+            f.write(json.dumps({"alarm_type": "流程违规"}) + "\n")
+        assert [a.alarm_message for a in inference.read_alarms(_run(1, 2))] == ["a"]
+
+    def test_unserializable_metadata_touches_nothing(self, tmp_storage):
+        with pytest.raises(TypeError):
+            inference.write_alarms(_run(1, 2), [_alarm(metadata={"x": object()})])
+        assert not _domain_dir(tmp_storage, 1, 2).exists()
+
+    def test_leaves_temporal_alone(self, tmp_storage):
+        inference.write_temporal(_run(1, 2), [_seg(label="a")])
+        inference.write_alarms(_run(1, 2), [_alarm()])
+        assert [f.label for f in inference.read_temporal(_run(1, 2))] == ["a"]
+
+    def test_reclaimed_run_write_fails_not_rebuilt(self, tmp_storage):
+        with pytest.raises(FileNotFoundError):
+            inference.write_alarms(RunIdentity(1, 2, RUN_ID), [_alarm()])
+        assert list(tmp_storage.iterdir()) == []
+
+
+def _alarm_record():
+    from app.storage.inference import _alarm as alarm_codec
+
+    return alarm_codec._alarm_to_record(_alarm())

@@ -12,14 +12,14 @@ import yaml
 from app.services.inference.config import InferenceConfig, _expand_env_vars
 from app.services.inference.stage_factory import StageFactory
 
-IMPL = Path(__file__).resolve().parents[1] / "app" / "services" / "inference" / "offline" / "impl"
+IMPL = Path(__file__).resolve().parents[1] / "app" / "services" / "inference" / "offline" / "segmentation" / "impl"
 PACKAGES = sorted(p.name for p in IMPL.iterdir() if p.is_dir() and (p / "segmenter.py").is_file())
 
 
 def _snippet(pkg):
     import importlib
 
-    doc = importlib.import_module(f"app.services.inference.offline.impl.{pkg}.segmenter").__doc__
+    doc = importlib.import_module(f"app.services.inference.offline.segmentation.impl.{pkg}.segmenter").__doc__
     block = "offline:" + doc.split("offline:", 1)[1].split("\n\n", 1)[0]
     return _expand_env_vars(yaml.safe_load(block))["offline"]
 
@@ -34,7 +34,7 @@ def test_every_strategy_package_is_listed():
 @pytest.mark.parametrize("pkg", PACKAGES)
 def test_docstring_yaml_builds_its_own_strategy(pkg):
     offline = _snippet(pkg)
-    assert offline["class"].startswith(f"app.services.inference.offline.impl.{pkg}.segmenter.")
+    assert offline["class"].startswith(f"app.services.inference.offline.segmentation.impl.{pkg}.segmenter.")
     seg = StageFactory(InferenceConfig({"stages": {"2": {"offline": offline}}})).create_offline_segmenter("2")
     assert type(seg).__name__ == offline["class"].rsplit(".", 1)[1]
     model_dir = Path(offline["params"]["model_dir"])

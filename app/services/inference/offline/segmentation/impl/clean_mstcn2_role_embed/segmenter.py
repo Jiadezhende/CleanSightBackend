@@ -1,7 +1,7 @@
 """CLEAN 新基准 mstcn2-role-embed 离线策略（YAML ``offline.class`` 指向 ``CleanMSTCN2RoleEmbedSegmenter``）。
 
     offline:
-      class: app.services.inference.offline.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
+      class: app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
       params:
         model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-role-embed
         backbone_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/backbones/dinov2_vits14
@@ -28,7 +28,7 @@ import numpy as np
 
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
-from app.services.inference.offline.segmenter import OfflineContext, OfflineSegmenter
+from app.services.inference.offline.segmentation.segmenter import OfflineContext, OfflineSegmenter
 from app.services.inference.resample import input_fps, resample_by_ts
 
 from .contract import ACTION_NAMES, HAND_STATE_FILE, HEIGHT, TEMPORAL_FILE, WIDTH

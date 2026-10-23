@@ -1,7 +1,7 @@
 """离线分割策略基类 —— 两段接缝：输入预处理层（预留）+ 模型推理分割。
 
 一个离线推理策略 = 一个 `OfflineSegmenter` 子类（对齐在线 Detector/Operator「加一子类」范式，
-见 docs/kb/DESIGN_EXTENDING_DETECTION.md）。策略实现在 `offline/impl/`，一个策略一个包；框架层
+见 docs/kb/DESIGN_EXTENDING_DETECTION.md）。策略实现在 `offline/segmentation/impl/`，一个策略一个包；框架层
 （segmenter/runner/materials/cli）不掺实现。
 
 管线两段：

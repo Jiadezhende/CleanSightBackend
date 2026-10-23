@@ -19,6 +19,12 @@ class AlarmMetric(str, Enum):
     BUBBLE = "BUBBLE"
     BENDING = "BENDING"
     TASK_TIMEOUT = "TASK_TIMEOUT"
+    # 离线规则判定（inference/offline/compliance），按规则类型分；阶段见 Alarm.stage
+    STEP_MISSING = "STEP_MISSING"
+    STEP_DURATION = "STEP_DURATION"
+    STEP_COUNT = "STEP_COUNT"
+    STEP_ORDER = "STEP_ORDER"
+    STEP_WAIT = "STEP_WAIT"
     UNKNOWN = "UNKNOWN"
 
 

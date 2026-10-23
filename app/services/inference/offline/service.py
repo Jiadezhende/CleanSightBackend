@@ -68,6 +68,7 @@ class OfflineJob:
     status: str = QUEUED
     producer: Optional[str] = None
     segment_count: int = 0
+    alarm_count: Optional[int] = None  # 规则核对产出的告警数；未核对为 None
     message: str = ""
     submitted_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
@@ -123,7 +124,7 @@ class OfflineJobService:
     def _preflight_materials(self) -> None:
         """启动时核对激活策略的物料：缺失只告警（不影响在线，提交该 step 的作业时才会失败）。"""
         try:
-            from .materials import check_materials
+            from .segmentation.materials import check_materials
 
             config = self._config if self._config is not None else load_stage_config()
             missing = [s for s in check_materials(config) if not s.exists]
@@ -273,6 +274,8 @@ class OfflineJobService:
         if returncode == 0 and result is not None and result.get("status") in _RUNNER_STATUSES:
             job.producer = result.get("producer")
             job.segment_count = int(result.get("segment_count") or 0)
+            alarm_count = result.get("alarm_count")
+            job.alarm_count = None if alarm_count is None else int(alarm_count)
             self._finish_locked(job, result["status"], str(result.get("message") or ""))
             return
         message = (result or {}).get("message") or err[-_STDERR_TAIL_CHARS:].strip()

@@ -11,8 +11,8 @@ import pytest
 from factories import make_det_box, make_frame_detection
 
 from app.types.detection import DetectorOutput
-from app.services.inference.offline.impl.clean_asformer.contract import LABELS
-from app.services.inference.offline.impl.clean_asformer.segmenter import CleanASFormerSegmenter
+from app.services.inference.offline.segmentation.impl.clean_asformer.contract import LABELS
+from app.services.inference.offline.segmentation.impl.clean_asformer.segmenter import CleanASFormerSegmenter
 
 
 def _frames(ts_list):
