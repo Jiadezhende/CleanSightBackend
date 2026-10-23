@@ -23,6 +23,7 @@ from app.services.inference.online.instance import inference_service
 from app.services.inference.online.temporal import alarm_sink
 from app.services.recording.instance import recording_service
 from app.services.stream.instance import stream_service
+from app.services.stream.service import internal_stream_url
 from app.types.exceptions import AppError, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -60,9 +61,10 @@ class RunControlService:
             if client_service.has_client(task_id):
                 old_cq = client_service.get(task_id)
                 if old_cq is not None:
+                    # decoder 记的是改写后的内部地址，入参先过同一改写再比
                     cur_url = (stream_service.get_stream_info(task_id) or {}).get("url")
                     # 完全相同（step / URL 均未变）才幂等返回，否则全量重建
-                    if old_cq.run.step_id == step_id and cur_url == rtsp_url:
+                    if old_cq.run.step_id == step_id and cur_url == internal_stream_url(rtsp_url):
                         logger.info(
                             "[RunControlService] start_run idempotent: task=%s", task_id
                         )

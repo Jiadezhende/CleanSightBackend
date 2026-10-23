@@ -47,6 +47,14 @@ def _rewrite_rtsp_url(url: str, proxy_port: int, internal_port: int) -> str:
     return urlunparse(parsed._replace(netloc=new_netloc))
 
 
+def internal_stream_url(url: str) -> str:
+    """入参 URL → decoder 实际拉流的地址（`get_stream_info()["url"]` 存的就是它）。
+
+    与 decoder 记录的 URL 比较前必须先过本函数，否则代理端口的 URL 永远判不等。
+    """
+    return _rewrite_rtsp_url(url, settings.mediamtx_proxy_port, settings.mediamtx_internal_port)
+
+
 # 导入配置加载器
 try:
     from app.services.client.config import get_client_config
@@ -129,11 +137,7 @@ class StreamService:
             logger.info(f"[{task_id}] Starting stream: url={stream_url}")
 
             # 内部拉流直连 MediaMTX，绕过 RTSPProxy
-            rewritten = _rewrite_rtsp_url(
-                stream_url,
-                settings.mediamtx_proxy_port,
-                settings.mediamtx_internal_port,
-            )
+            rewritten = internal_stream_url(stream_url)
             if rewritten != stream_url:
                 logger.info(f"[{task_id}] Rewrote stream URL: {stream_url} → {rewritten}")
                 stream_url = rewritten
