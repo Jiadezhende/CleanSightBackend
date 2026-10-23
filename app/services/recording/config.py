@@ -33,7 +33,7 @@ class RecordingConfig:
     # 默认 ≈ 15 路 raw + processed 各一段同时到期的突发量。须 ≥ 单段字节，否则段段被拒。
     queue_max_mb: int = 8192
 
-    # 从活跃 CQ 拉整段的扫描间隔（秒）。1s ≪ 段周期(≈10s) 且 ≪ CQ 缓冲容量(≈90s)。
+    # 从活跃 run 拉整段的扫描间隔（秒）。1s ≪ 段周期(≈10s) 且 ≪ 帧队列容量(≈90s)。
     sweep_interval_seconds: float = 1.0
 
     @classmethod

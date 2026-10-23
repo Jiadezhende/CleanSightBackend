@@ -8,7 +8,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from app.types.temporal import TemporalSegment
-from app.services.client.instance import client_service
+from app.services.session.instance import session_service
 from app.services.session.topics import RENDERED
 from app.storage import inference as inference_store
 
@@ -32,7 +32,7 @@ _WS_JPEG_QUALITY = 75
 async def websocket_video_endpoint(websocket: WebSocket):
     """
     WebSocket端点：两种并列的请求模式（互斥，task_id 优先），非新旧之分：
-    - `?task_id=xxx` → `client_service.get(task_id)`，锁定**某一次具体 run**（不可变运行键）；
+    - `?task_id=xxx` → `session_service.get(task_id)`，锁定**某一次具体 run**（不可变运行键）；
       run 结束即止、不跟随新任务。适合溯源 / 针对某次任务的监看。
     - `?client_id=<source_ip>` → 每轮 `find_by_source_ip` 解析该**点位**的当前 live run
       （命中多个取最晚启动者），任务来了显示、走了黑屏、换 run 自动跟随。适合大屏 / 固定点位常亮。
@@ -41,7 +41,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
     协议：帧为 `data:image/jpeg;base64,...` 文本；当从"曾推帧 → 无 run"跳变时
     额外发一次 `{"type":"idle"}` 控制帧，供大屏清屏黑屏（任务结束）。前端按前缀
     区分：`data:` 开头当图渲染，否则按 JSON 控制帧解析。持续无 run 期间保持静默
-    （不重复发 idle），任务中卡顿（cq 在但无新帧）保持最后一帧、不发 idle。
+    （不重复发 idle），任务中卡顿（run 在但无新帧）保持最后一帧、不发 idle。
     """
     # 双模解析（task_id 优先）：构造 per-loop 解析器 + 日志标签
     task_id_raw = websocket.query_params.get("task_id")
@@ -53,10 +53,10 @@ async def websocket_video_endpoint(websocket: WebSocket):
         except ValueError:
             await websocket.close(code=1008)
             return
-        resolve = lambda: client_service.get(task_id)  # noqa: E731
+        resolve = lambda: session_service.get(task_id)  # noqa: E731
         label = f"task_id={task_id}"
     elif client_id:
-        resolve = lambda: client_service.find_by_source_ip(client_id)  # noqa: E731
+        resolve = lambda: session_service.find_by_source_ip(client_id)  # noqa: E731
         label = f"client_id={client_id}"
     else:
         await websocket.close(code=1008)
@@ -98,12 +98,12 @@ async def websocket_video_endpoint(websocket: WebSocket):
     try:
         while not shutdown_event.is_set() and not disconnect_task.done():
             # 每轮解析当前 run（task_id 直查 / source_ip 匹配首个）
-            cq = resolve()
+            sess = resolve()
 
             # 无 run（无任务 / 任务已结束）：仅在"曾推帧 → 现无 run"跳变时发一次
             # idle 让大屏清屏黑屏；持续无 run 期间保持静默、不重复发（近零流量）。
-            # 与"任务中卡顿"区分：那时 cq 仍在，走下方分支保持最后一帧、不发 idle。
-            if cq is None:
+            # 与"任务中卡顿"区分：那时 run 仍在，走下方分支保持最后一帧、不发 idle。
+            if sess is None:
                 if streaming:
                     streaming = False
                     try:
@@ -113,9 +113,9 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 await asyncio.sleep(0.05)
                 continue
 
-            frame = cq.sess.channel(RENDERED).get()
+            frame = sess.channel(RENDERED).get()
             if frame is None:
-                # cq 在但暂无渲染帧（任务刚起 / 卡顿）：保持上一帧，不发 idle
+                # run 在但暂无渲染帧（任务刚起 / 卡顿）：保持上一帧，不发 idle
                 await asyncio.sleep(0.01)  # 减少轮询间隔
                 continue
 

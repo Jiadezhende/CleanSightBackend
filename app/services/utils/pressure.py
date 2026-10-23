@@ -7,7 +7,7 @@
 不做「进入/持续/恢复」的边沿状态机——链路尚未遇到真实压力，先要的是一条能 grep 的心跳，
 而不是精确到毫秒的压力窗口起止。代价是**瞬时尖峰可能被采样点错过**，接受。
 
-只有两类资源接它：`ClientQueues` 的三条 CA 队列、`StageAwareDispatcher` 的 stage deque。
+只有两类资源接它：session 的三条帧队列（READY / RAW / PROCESSED，`Fifo` 内自报）、`StageAwareDispatcher` 的 stage deque。
 其余位置（子进程死亡、落盘失败、读文件失败）是**事件**不是状态，照常直接打日志。
 
 **专用 logger `app.pressure`**（同 `app.startup_latency` 的做法）：所有压力行走同一个名字，

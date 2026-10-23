@@ -15,9 +15,8 @@ import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from app.services.client.instance import client_service
-from app.services.client.service import ClientService
 from app.services.inference.online.types import DetectionTask
+from app.services.session.instance import session_service
 from app.services.session.topics import READY
 from app.services.utils.metrics import frame_drop_total
 from app.services.utils.pressure import (
@@ -31,14 +30,14 @@ logger = logging.getLogger(__name__)
 
 
 class StageAwareDispatcher:
-    """Stage感知的帧调度器（直接引用 ClientService）。
+    """Stage感知的帧调度器（直接引用 session 注册表）。
 
     职责：
     - 轮询所有客户端的 ca_ready 队列，按 stage 分组入 deque（流间公平 Round-Robin）
     - 同一循环内 peek-commit 轮转排空组批、直接 submit 到推理子进程（单提交者）
 
     改进点：
-    - 直接引用全局 ClientService，实时获取客户端列表
+    - 直接引用全局 session 注册表，实时获取 run 列表
     - 无需手动刷新，自动同步客户端变化
     - 新客户端加入或离开无延迟
     """
@@ -47,7 +46,7 @@ class StageAwareDispatcher:
         self,
         max_batch_per_stage: int = 8,
         fetch_interval: float = 0.01,  # 10ms 轮询间隔
-        client_service_instance: Optional["ClientService"] = None,
+        sessions=None,
         *,
         active_stages: Optional[List[str]] = None,
         stage_batch_sizes: Optional[Dict[str, int]] = None,
@@ -57,14 +56,14 @@ class StageAwareDispatcher:
         Args:
             max_batch_per_stage: 每个 stage 最大 batch 大小
             fetch_interval: 轮询间隔（秒）
-            client_service_instance: ClientService 实例（可选，用于依赖注入测试）
+            sessions: run 注册表（提供 `snapshot()`；缺省取 session_service 单例，测试可注入）
             active_stages: 需提交的 stage 主键（有 detector 的 stage）；缺省则只取帧不提交。
             stage_batch_sizes: 各 stage 组批上限；未列出的 stage 用 max_batch_per_stage。
             submit_batch: 提交回调（= RemoteInferProxy.submit，返回是否接收）。本类是唯一提交者，
                 peek-commit 轮转：接了才 popleft、被拒即停（帧留 deque），不预读 proxy 的在途额度。
                 缺省（无 submit_batch）则只取帧不提交。
         """
-        self._client_service = client_service_instance or client_service
+        self._sessions = sessions if sessions is not None else session_service
         self.max_batch_per_stage = max_batch_per_stage
         self.fetch_interval = fetch_interval
 
@@ -98,7 +97,7 @@ class StageAwareDispatcher:
 
         # 压力日志（[PRESSURE] resource=stage_queue）：每 ~1s 采样，限频与 delta 记账在
         # PressureReporter 里（每 stage 每 10s 至多一条，平稳时静默）。
-        # **只报自己的 stage deque**：ca_processed 归 ClientQueues 自己报（每资源单一所有者）。
+        # **只报自己的 stage deque**：帧队列归各自 session channel 报（每资源单一所有者）。
         self._round_counter: int = 0
         self._check_every_rounds: int = max(1, int(1.0 / self.fetch_interval))
         self._pressure_queue_ratio: float = DEFAULT_HIGH_WATERMARK_RATIO
@@ -151,35 +150,34 @@ class StageAwareDispatcher:
         """一轮调度：轮询所有客户端，取帧并按 stage 分组。
 
         容错设计：
-        - 动态从 ClientService 获取最新客户端列表（实时同步）
+        - 动态从 session 注册表获取最新 run 列表（实时同步）
         - 客户端动态添加/移除自动生效，无延迟
         - 队列为空时跳过，不影响其他客户端
         """
         # 动态获取客户端列表（实时同步，无需刷新）
-        # ClientService.snapshot() 返回字典副本，迭代安全
-        clients = self._client_service.snapshot()
-        for task_id, cq in clients.items():
+        # snapshot() 返回不可变视图，迭代安全
+        sessions = self._sessions.snapshot()
+        for task_id, sess in sessions.items():
             # 从 READY 取一帧（FIFO，保证公平）
-            frame_data = cq.sess.channel(READY).pop()
+            frame_data = sess.channel(READY).pop()
             if frame_data is None:
                 # 队列为空或并发场景下被其他线程取走
                 continue
 
-            stage = cq.stage  # 不可变身份，直读
+            stage = sess.info.stage  # 不可变身份，直读
 
             # 背压反馈接缝（本次透明恒放行）：未来「入口降帧」在此据 _stage_backpressure[stage]
             # 按 ts 相位抽稀，把 drain 侧感知的下游压力回传到取帧侧。
             if not self._admit_to_stage(stage):
                 continue
 
-            # 构造推理请求：捕获该 CQ 句柄随请求同行，写回凭它投递、不反查
-            # （cq 即当前 snapshot 迭代出的对象，与上面取帧的 session 同源）。
+            # 构造推理请求：捕获该 run 的 session 随请求同行，写回凭它投递、不反查。
             req = DetectionTask(
                 task_id=task_id,
                 stage=stage,
                 timestamp=frame_data.timestamp,
                 frame=frame_data.frame,
-                cq=cq,
+                sess=sess,
             )
 
             # 按 stage 分组入队
@@ -275,7 +273,7 @@ class StageAwareDispatcher:
         都在 PressureReporter 里（见 app/services/utils/pressure.py）。
 
         **只报自己拥有的资源**：stage deque 是本类独有的积压点（proxy 拒收时帧留在这里、
-        满了静默淘汰最旧帧）。ca_processed 由 ClientQueues 在其 append 内自报，本类不代劳。
+        满了静默淘汰最旧帧）。帧队列由 session channel 在其 push 内自报，本类不代劳。
         `reject_total` 例外——那是本类调 submit 时看到的返回值，是提交侧的自有观测。
 
         日志失败绝不影响调度热路径——整体 try/except 包裹。

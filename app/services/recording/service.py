@@ -1,13 +1,13 @@
-"""录制服务 —— 落盘编排：把 CQ 里攒好的东西变成盘上的产物（HLS 段 + 检测结果）。
+"""录制服务 —— 落盘编排：把各 run 的 session 里攒好的东西变成盘上的产物（HLS 段 + 检测结果）。
 
     start() / stop()                          生命周期
-    collect_from(cq)                          取走该 CQ 此刻该落盘的一切（sweeper 每 tick 调）
-    submit_segment(cq, track, frames) -> bool 打包 + 入 hls 队列
-    submit_detections(cq, frames) -> bool     打包 + 入 detections 队列
-    flush_residual(cq, until_ts=None)         把残帧切完落盘（拆除期 RunControlService、断流期 health_monitor 调）
+    collect_from(sess)                          取走该 run 此刻该落盘的一切（sweeper 每 tick 调）
+    submit_segment(sess, track, frames) -> bool 打包 + 入 hls 队列
+    submit_detections(sess, frames) -> bool     打包 + 入 detections 队列
+    flush_residual(sess, until_ts=None)         把残帧切完落盘（拆除期 RunControlService、断流期 health_monitor 调）
 
 落盘格式全在 `app.storage.hls` / `app.storage.inference`；本模块只管何时拉、按什么顺序写。
-产物写进 `cq.run` 指向的 run 目录：每次 run 一个目录，换代隔离不归本模块。
+产物写进 `sess.info.run` 指向的 run 目录：每次 run 一个目录，换代隔离不归本模块。
 
 **两条队列，不是一条**：段写里有 ffmpeg 编码，detections 排在它后面会跟着
 一起被背压丢，而丢一次就是十几帧检测结果、静默。两条队列互不阻塞。
@@ -18,9 +18,9 @@
 1. **队列不能加 worker**（两条都是）：同一 run 内 tfdt 按执行顺序累计，并发会碰撞。配置里因此
    没有 `workers`。
 2. **取帧必须持 `_collect_lock`，且覆盖「取走 + 入队」**：sweeper、断流 flush、拆除 flush 三条
-   路径都从 CQ 队头取帧，锁让先取的先入队、段的 tfdt 与 ts 同序。
+   路径都从 RAW / PROCESSED 队头取帧，锁让先取的先入队、段的 tfdt 与 ts 同序。
 
-依赖：`app.storage.hls` / `app.storage.inference` + `app.services.utils.task_queue` + `client_service`，
+依赖：`app.storage.hls` / `app.storage.inference` + `app.services.utils.task_queue` + session 注册表，
 不依赖别的 service。
 """
 
@@ -43,13 +43,20 @@ from .config import RecordingConfig, get_recording_config
 
 logger = logging.getLogger(__name__)
 
+
+def _segment_len() -> int:
+    """HLS 段长（帧）= ca_segment_seconds × raw_fps，按调用现取（同 RAW / PROCESSED 容量的口径）。"""
+    from app.services.client.config import get_client_config
+
+    return get_client_config().ca_segment_len
+
 # 队列名（出现在线程名与所有队列日志里）。
 _HLS_QUEUE_NAME = "recording"
 _DETECTION_QUEUE_NAME = "recording-detections"
 
 
 class _SegmentJob(NamedTuple):
-    """一个待落盘的段。**打包形状，不是对外契约**——外面交 `cq` + 帧，拿不到也用不着它。"""
+    """一个待落盘的段。**打包形状，不是对外契约**——外面交 `sess` + 帧，拿不到也用不着它。"""
 
     run: RunIdentity
     track: str
@@ -84,23 +91,20 @@ class RecordingService:
         self,
         config: Optional[RecordingConfig] = None,
         *,
-        clients=None,
+        sessions=None,
     ) -> None:
         """
         Args:
             config: 不传则用全局单例配置。
-            clients: CQ 快照来源（sweeper 用），不传则用 `client_service`。**只注入这一个
-                协作者**：包一层 `snapshot_fn` / `current_owner_fn` 之类的窄回调只是
-                多两个要记的名字，单测直接塞一个假的 client_service 更短。
+            sessions: run 快照来源（sweeper 用，提供 `snapshot()`），不传则用 `session_service`。
+                **只注入这一个协作者**：单测直接塞一个假的注册表。
         """
         self.config = config if config is not None else get_recording_config()
-        if clients is None:
-            # 函数体内 import：写在模块级会把 client → numpy 那条链变成每个
-            # `import app.services.recording.*` 的过路费（同 AlarmService 的写法）。
-            from app.services.client.instance import client_service
+        if sessions is None:
+            from app.services.session.instance import session_service
 
-            clients = client_service
-        self._clients = clients
+            sessions = session_service
+        self._sessions = sessions
 
         # 落盘队列。**在 start() 里建**：SerialTaskQueue 是一次性的（stop() 之后不能再
         # start()），放构造函数会让单例在 start/stop 两轮之后炸。
@@ -118,8 +122,8 @@ class RecordingService:
         self._hls_inflight_lock = threading.Lock()
 
         # 取帧锁：`collect_from` / `flush_residual` 全程持有，「取走 + 入队」对所有取帧路径串行。
-        # 只护取走原子不够：入队在 CQ 锁外，后取的段可能先入队 → tfdt 倒序、画面丢一截。
-        # 锁序：本锁 → CQ 锁 / `_hls_inflight_lock`；生产方（decoder / 写回 / viz）不取本锁。
+        # 只护取走原子不够：入队在 session 锁外，后取的段可能先入队 → tfdt 倒序、画面丢一截。
+        # 锁序：本锁（L1）→ session 锁 / `_hls_inflight_lock`（L2）；生产方（decoder / 写回 / viz）不取本锁。
         self._collect_lock = threading.Lock()
 
     # ── 生命周期 ────────────────────────────────────────────────────────────────
@@ -135,7 +139,7 @@ class RecordingService:
         )
         self._detection_queue.start()
         self._sweep_worker = SegmentSweeper(
-            clients=self._clients,
+            sessions=self._sessions,
             service=self,
             interval_seconds=self.config.sweep_interval_seconds,
         )
@@ -146,7 +150,7 @@ class RecordingService:
         """停 sweeper 与两条队列。
 
         **顺序不能反**：先停 sweeper 不再拉新产物，再停队列让它们把已入队的排空。反过来
-        会在队列停机后继续拉，那些产物提交被拒、数据已经从 CQ 弹出去了 —— 真丢。
+        会在队列停机后继续拉，那些产物提交被拒、数据已经从 session 弹出去了 —— 真丢。
         两条队列之间没有顺序要求（写的是不同域的不同文件）。
         """
         if self._sweep_worker is not None:
@@ -162,11 +166,11 @@ class RecordingService:
 
     # ── 对外 ────────────────────────────────────────────────────────────────────
 
-    def submit_segment(self, cq, track: str, frames: Sequence[Frame]) -> bool:
+    def submit_segment(self, sess, track: str, frames: Sequence[Frame]) -> bool:
         """把一段帧打包成落盘任务交给队列。
 
         Args:
-            cq: 这段帧属于哪一次 run（`cq.run`）。
+            sess: 这段帧属于哪一次 run（`sess.info.run`）。
             track: `"raw"` 或 `"processed"`。
             frames: 该段的帧，按时间升序。
 
@@ -181,16 +185,17 @@ class RecordingService:
             logger.warning("[recording] 队列未启动，丢弃段: track=%s", track)
             return False
 
-        if cq.run is None:
-            # 裸建 / 未绑定 run 的 CQ 定位不到落盘目录。不抛：它是运行期的常态之一。
-            logger.warning("[recording] cq 未绑定 run，丢弃段: track=%s", track)
+        run = sess.info.run
+        if run is None:
+            # 未绑定 run 定位不到落盘目录。不抛：它是运行期的常态之一。
+            logger.warning("[recording] session 未绑定 run，丢弃段: track=%s", track)
             return False
         if not frames:
             # 空段在 storage 层是 ValueError（调用方算错了批次）。在这里拦掉，别让它变成
             # 队列里一条需要人去看的 error log。
             return False
 
-        job = _SegmentJob(run=cq.run, track=track, frames=list(frames))
+        job = _SegmentJob(run=run, track=track, frames=list(frames))
         nbytes = sum(f.frame.nbytes for f in job.frames)
         if not self._reserve_hls_bytes(nbytes):
             frame_drop_total.labels(reason="recording_budget").inc(len(job.frames))
@@ -217,11 +222,11 @@ class RecordingService:
         with self._hls_inflight_lock:
             self._hls_inflight_bytes -= nbytes
 
-    def submit_detections(self, cq, frames: Sequence[FrameDetection]) -> bool:
+    def submit_detections(self, sess, frames: Sequence[FrameDetection]) -> bool:
         """把一批帧检测结果打包成落盘任务交给 detections 队列。
 
         Args:
-            cq: 这批检测结果属于哪一次 run（`cq.run`）。
+            sess: 这批检测结果属于哪一次 run（`sess.info.run`）。
             frames: 帧级 `FrameDetection`，按时间升序（= 写回顺序）。
 
         Returns:
@@ -233,69 +238,71 @@ class RecordingService:
             logger.warning("[recording] detections 队列未启动，丢弃 %d 帧检测结果", len(frames))
             return False
 
-        if cq.run is None:
-            # 同 submit_segment：未绑定 run 的 CQ 定位不到落盘目录，不抛。
-            logger.warning("[recording] cq 未绑定 run，丢弃 %d 帧检测结果", len(frames))
+        run = sess.info.run
+        if run is None:
+            # 同 submit_segment：未绑定 run 定位不到落盘目录，不抛。
+            logger.warning("[recording] session 未绑定 run，丢弃 %d 帧检测结果", len(frames))
             return False
         if not frames:
             # 空批在 storage 层是 no-op，但排一个什么都不干的任务只会占队列。
             return False
 
-        job = _DetectionJob(run=cq.run, frames=list(frames))
+        job = _DetectionJob(run=run, frames=list(frames))
         return self._detection_queue.submit(
             lambda: self._write_detections(job), label=job.label
         )
 
-    def flush_residual(self, cq, until_ts: Optional[float] = None) -> None:
-        """落盘 CQ 残余产物：drain raw/processed 切段入队，再把剩下的 detections 一并交出。
+    def flush_residual(self, sess, until_ts: Optional[float] = None) -> None:
+        """落盘 run 残余产物：drain raw/processed 切段入队，再把剩下的 detections 一并交出。
 
         Args:
-            cq: 要收尾的 CQ。
+            sess: 要收尾的 run。
             until_ts: 时间戳栅栏。`None`（拆除期）= 全排空；给值（断流期）= 只切这一刻之前
                 的帧，重连后的新帧留在队列里等 sweeper 照常拉整段。
                 **栅栏只作用于段**：detections 无论哪条路径都是全排空，它没有"横跨 gap"的问题。
 
-        拆除期须在 `cq.close()` 释放帧之前调（RunControlService 保证）。切段口径与 sweeper 一致，
+        拆除期须在 session close 释放帧之前调（RunControlService 保证）。切段口径与 sweeper 一致，
         差别只是它拉的是"攒满的整段"、这里拉的是"剩下不足一段的那点"。任意线程可直接调：
         与 sweeper 的先后由取帧锁串行（模块不变式 2）。
         """
-        if cq.run is None:
-            logger.warning("[recording] flush_residual: cq 未绑定 run，跳过")
+        if sess.info.run is None:
+            logger.warning("[recording] flush_residual: session 未绑定 run，跳过")
             return
 
         with self._collect_lock:
-            seg_len = cq.ca_segment_len
+            seg_len = _segment_len()
             for track, frames in (
-                ("raw", cq.sess.channel(RAW).drain(until_ts)),
-                ("processed", cq.sess.channel(PROCESSED).drain(until_ts)),
+                ("raw", sess.channel(RAW).drain(until_ts)),
+                ("processed", sess.channel(PROCESSED).drain(until_ts)),
             ):
                 for i in range(0, len(frames), seg_len):
-                    self.submit_segment(cq, track, frames[i : i + seg_len])
+                    self.submit_segment(sess, track, frames[i : i + seg_len])
 
-            self.submit_detections(cq, cq.sess.channel(DETECTIONS).drain())
+            self.submit_detections(sess, sess.channel(DETECTIONS).drain())
 
-    def collect_from(self, cq) -> None:
-        """把这个 CQ 此刻攒满的整段与检测结果取走并入队。**由 sweeper 线程周期调用。**
+    def collect_from(self, sess) -> None:
+        """把这个 run 此刻攒满的整段与检测结果取走并入队。**由 sweeper 线程周期调用。**
 
             ① 拉 raw 整段   ② 拉 processed 整段   ③ 拉 detections
 
         ③ 与 ①② 之间没有顺序约束：detections 走另一条队列、写另一个域的另一个文件，与段的
         媒体轴无关。放最后只是因为它最不紧急。
 
-        **这套顺序属于本服务，不属于定时器**：`sweep_worker` 只负责"每隔 1 秒对每个活跃 CQ 调
+        **这套顺序属于本服务，不属于定时器**：`sweep_worker` 只负责"每隔 1 秒对每个活跃 run 调
         一次本方法"。
         """
-        if cq.run is None:
-            # 裸建 / 未绑定 run：定位不到落盘目录。**不取帧**——取了就只能丢。
+        if sess.info.run is None:
+            # 未绑定 run：定位不到落盘目录。**不取帧**——取了就只能丢。
             return
 
         with self._collect_lock:
-            while (seg := cq.sess.channel(RAW).take(cq.ca_segment_len)) is not None:
-                self.submit_segment(cq, "raw", seg)
-            while (seg := cq.sess.channel(PROCESSED).take(cq.ca_segment_len)) is not None:
-                self.submit_segment(cq, "processed", seg)
+            seg_len = _segment_len()
+            while (seg := sess.channel(RAW).take(seg_len)) is not None:
+                self.submit_segment(sess, "raw", seg)
+            while (seg := sess.channel(PROCESSED).take(seg_len)) is not None:
+                self.submit_segment(sess, "processed", seg)
 
-            self.submit_detections(cq, cq.sess.channel(DETECTIONS).drain())
+            self.submit_detections(sess, sess.channel(DETECTIONS).drain())
 
     # ── 队列任务体 ─────────────────────────────────────────────────────────────
 

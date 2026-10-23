@@ -1,12 +1,12 @@
 """RemoteInferProxy — 主进程侧推理子进程代理（req_id 异步管线 + 防泄漏 + 容错监督）。
 
 把 GPU 前向拆进独立进程（见 stage_worker.run_stages / 诊断文档）后，本类是主进程唯一对接口：
-  · submit(batch)：给整批帧分配 req_id、把 cq 等**轻量元数据**留在 pending、只把帧送子进程；
+  · submit(batch)：给整批帧分配 req_id、把 sess 等**轻量元数据**留在 pending、只把帧送子进程；
   · _collect_loop：单线程抽子进程响应，据 req_id `pending.pop` 组装 FrameDetection，走注入的
     write_back（= DetectionService._write_back_results）落回主链路，并在主进程发 Prometheus；
   · _supervise_loop：看门狗，子进程死亡/CUDA wedge → 清孤儿 pending（计丢帧）+ 退避重 spawn。
 
-**句柄不过进程边界**：cq 是进程内对象，留主进程按 req_id 关联即可（这正是本方案「架构改动最小」
+**句柄不过进程边界**：sess 是进程内对象，留主进程按 req_id 关联即可（这正是本方案「架构改动最小」
 的支点）。**防泄漏三重**：pending 有界（max_inflight，满则 submit 拒收计丢帧）、collect 每条
 响应 pop 移除、子进程失败时清空 pending 并计 `infer_child_restart`。
 
@@ -31,7 +31,7 @@ from app.services.utils.frame_ring import SharedFrameRing, SharedFrames
 from app.services.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
 if TYPE_CHECKING:
-    from app.services.client.queues import ClientQueues
+    from app.services.session.core import Session
     from app.types.detection import DetectorOutput
 
 logger = logging.getLogger(__name__)
@@ -41,10 +41,10 @@ logger = logging.getLogger(__name__)
 class _Pending:
     """在途批的每帧轻量记录：**不含 frame np.ndarray**（submit 后即弃引用，避免主/子双份帧内存）。
 
-    cq 留主进程用于写回路由；frame_width/height 在 submit 时从原始帧盖章，供组装 FrameDetection。
+    sess 留主进程用于写回路由；frame_width/height 在 submit 时从原始帧盖章，供组装 FrameDetection。
     """
 
-    cq: "ClientQueues"   # 写回路由句柄，不过进程边界
+    sess: "Session"   # 写回路由句柄，不过进程边界
     timestamp: float
     frame_width: int
     frame_height: int
@@ -194,7 +194,7 @@ class RemoteInferProxy:
         """排空在途批（写回落盘）→ 停两线程 → 杀子进程 → 剩余在途计丢帧。"""
         self._no_restart.set()  # 监督线程不再重启
 
-        # 1. 排空在途：子进程仍活着，让 collector 把在途批写回（进 cq 缓冲，由 recording 拉走）
+        # 1. 排空在途：子进程仍活着，让 collector 把在途批写回（进 DETECTIONS，由 recording 拉走）
         deadline = time.monotonic() + self._drain_timeout
         while time.monotonic() < deadline:
             with self._lock:
@@ -275,7 +275,7 @@ class RemoteInferProxy:
 
         **限流是 proxy 固有职责**：内部据 `inflight < max_inflight` 判定，满即返 False；调用方
         （dispatcher）据此把帧留 deque、背压沿链上传，不外泄 inflight 计数（无需 capacity 预读）。
-        cq 等留 pending，只把帧送子进程；submit 后不再持有 frame 引用（帧仅活在环槽位 / 子进程 + 在途队列）。
+        sess 等留 pending，只把帧送子进程；submit 后不再持有 frame 引用（帧仅活在环槽位 / 子进程 + 在途队列）。
         环槽位不够同样返回 False（与在途满同一种背压）。
         """
         if not batch:
@@ -301,7 +301,7 @@ class RemoteInferProxy:
             self._next_req_id += 1
             self._pending[req_id] = [
                 _Pending(
-                    cq=req.cq, timestamp=req.timestamp,
+                    sess=req.sess, timestamp=req.timestamp,
                     frame_width=int(req.frame.shape[1]), frame_height=int(req.frame.shape[0]),
                 )
                 for req in batch
@@ -373,9 +373,9 @@ class RemoteInferProxy:
             frames.append(FrameDetection(
                 ts=rec.timestamp, by_source=per_frame,
                 frame_width=rec.frame_width, frame_height=rec.frame_height,
-                cq=rec.cq,
+                sess=rec.sess,
             ))
-        # 写回主链路：其内 cq.is_active() 门挡迟到/跨 run；落盘侧代次隔离归 recording 的代次表
+        # 写回主链路：其内 sess.is_active() 门挡迟到/跨 run
         self._write_back(frames)
         self._emit_stats(merged, len(records))
 

@@ -47,7 +47,7 @@ def env(monkeypatch, fast_task_queue, tmp_storage, clients):
     for step_id in (2, 3):
         _visible_run(1, step_id)
     launcher = FakeLauncher()
-    svc = OfflineJobService(config=_CFG, launcher=launcher, clients=clients, poll_s=0.02)
+    svc = OfflineJobService(config=_CFG, launcher=launcher, sessions=clients, poll_s=0.02)
     svc.start()
     monkeypatch.setattr(admin, "offline_job_service", svc)
     yield launcher
@@ -118,7 +118,7 @@ async def test_unknown_run_id_404(client, env):
 async def test_running_run_409(client, env, clients):
     from types import SimpleNamespace
 
-    clients.registry[1] = SimpleNamespace(run=make_run(1, 2))
+    clients.registry[1] = SimpleNamespace(info=SimpleNamespace(run=make_run(1, 2)))
     r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2})
     assert r.status_code == 409
 

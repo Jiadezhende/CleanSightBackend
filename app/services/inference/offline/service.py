@@ -12,7 +12,7 @@
 **本模块不 import runner / torch**：CLI 只作为子进程命令出现。
 
 作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `--run-id`，
-不同 run 各跑各的；该 run 就是 `clients` 当前注册的 CQ 的 run → 409（输入还在写）。
+不同 run 各跑各的；该 run 就是注册表里当前在跑的 run → 409（输入还在写）。
 状态只在内存，重启丢失（结果本身已落盘）。
 """
 
@@ -79,23 +79,23 @@ class OfflineJob:
 
 
 class OfflineJobService:
-    """离线作业服务。`launcher` / `config` / `clients` 仅供测试注入（假 Popen / 推理配置 / 注册表）。"""
+    """离线作业服务。`launcher` / `config` / `sessions` 仅供测试注入（假 Popen / 推理配置 / 注册表）。"""
 
     def __init__(
         self,
         *,
         launcher: Callable[..., Any] = subprocess.Popen,
         config: Optional[InferenceConfig] = None,
-        clients=None,
+        sessions=None,
         job_timeout_s: float = JOB_TIMEOUT_S,
         poll_s: float = POLL_S,
     ) -> None:
-        if clients is None:
-            # 函数体内 import：同 RecordingService，别把 client → numpy 链摊给每个 import 本模块的人
-            from app.services.client.instance import client_service
+        if sessions is None:
+            # 函数体内 import：同 RecordingService，别把 session → numpy 链摊给每个 import 本模块的人
+            from app.services.session.instance import session_service
 
-            clients = client_service
-        self._clients = clients
+            sessions = session_service
+        self._sessions = sessions
         self._launcher = launcher
         self._config = config  # None = 提交时读 load_stage_config 单例
         self._job_timeout_s = job_timeout_s
@@ -157,8 +157,8 @@ class OfflineJobService:
         queue = self._queue
         if queue is None:
             raise ConflictError("离线作业服务未启动", task_id=task_id, step_id=step_id)
-        live = self._clients.get(task_id)
-        if live is not None and live.run == run:
+        live = self._sessions.get(task_id)
+        if live is not None and live.info.run == run:
             # 输入（detections.jsonl）还在写：按提交时已落盘的部分出结论就是错的
             raise ConflictError(
                 f"该 run 正在运行，停止后再提交离线作业: task={task_id} step={step_id} run={run.run_id}",

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.db import alarms as db_alarms
 from app.db import tasks as db_tasks
-from app.services.client.instance import client_service
+from app.services.session.instance import session_service
 from app.services.inference.online.temporal import alarm_sink
 from app.services.inference.online.topics import DETECTION_WINDOW, SIGNALS_WINDOW_SEC
 from app.storage import hls, runs
@@ -111,14 +111,14 @@ def _empty_alarm_payload(task_id: int) -> dict:
     }
 
 
-def _build_task_alarm_message(cq, since_seq: int) -> dict:
+def _build_task_alarm_message(sess, since_seq: int) -> dict:
     """装配前端实时告警消息：原子取告警增量 + 滑窗汇总，序列化域对象。"""
-    alarms, max_seq = alarm_sink.ledger_for(cq.sess).snapshot(since_seq)  # 原子 (增量, max_seq)
+    alarms, max_seq = alarm_sink.ledger_for(sess).snapshot(since_seq)  # 原子 (增量, max_seq)
     return {
-        "task_id": cq.run.task_id,
+        "task_id": sess.info.run.task_id,
         "max_seq": max_seq,
         "signals_10s": _build_signals_10s(
-            _summarize_window(cq.sess.channel(DETECTION_WINDOW).snapshot())
+            _summarize_window(sess.channel(DETECTION_WINDOW).snapshot())
         ),
         "alarms": [
             {
@@ -152,11 +152,11 @@ async def get_client_frontend_message(
     if since_seq < 0:
         raise HTTPException(status_code=400, detail="since_seq must be >= 0")
 
-    cq = client_service.get(task_id)  # 键即 task_id，O(1) 直取
-    if cq is None:
+    sess = session_service.get(task_id)  # 键即 task_id，O(1) 直取
+    if sess is None:
         return _empty_alarm_payload(task_id)
 
-    return _build_task_alarm_message(cq, since_seq)
+    return _build_task_alarm_message(sess, since_seq)
 
 
 # ---------------------------------------------------------------------------
@@ -185,13 +185,12 @@ def list_live_tasks():
     # 注册表是 COW 不可变 dict：原子读引用后迭代无需加锁
     tasks = [
         {
-            "task_id": cq.run.task_id,
-            "source_ip": cq.source_ip,
-            "step_id": cq.run.step_id,
-            "run_id": cq.run.run_id,
+            "task_id": s.info.run.task_id,
+            "source_ip": s.info.source_ip,
+            "step_id": s.info.run.step_id,
+            "run_id": s.info.run.run_id,
         }
-        for cq in client_service.snapshot().values()
-        if cq.run is not None
+        for s in session_service.snapshot().values()
     ]
     tasks.sort(key=lambda t: t["task_id"])
     return {"total": len(tasks), "tasks": tasks}
@@ -263,7 +262,7 @@ def list_history_tasks():
     低于第 10 名的排序键即可停——剩下的不可能再挤进来。粗筛与深扫之间任务可能刚起/刚停，
     清单可能短暂含一个刚起的 run 或漏一个刚停的——大屏下一轮轮询自愈，不加锁。
     """
-    active_ids = set(client_service.snapshot().keys())
+    active_ids = set(session_service.snapshot().keys())
 
     tasks: List[dict] = []
     scanned = 0

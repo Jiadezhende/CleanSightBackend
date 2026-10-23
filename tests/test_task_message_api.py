@@ -31,7 +31,7 @@ async def test_task_message_task_not_in_memory_returns_empty(monkeypatch):
 
     fake_manager = MagicMock()
     fake_manager.get.return_value = None
-    monkeypatch.setattr(task_router, "client_service", fake_manager)
+    monkeypatch.setattr(task_router, "session_service", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -50,23 +50,23 @@ async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
 
     from app.types.alarm import AlarmMetric
 
-    # 此处只验接线（按 task_id 取 CQ、since_seq 透传给原子快照入口）；
+    # 此处只验接线（按 task_id 取 session、since_seq 透传给原子快照入口）；
     # payload 字段（alarms/max_seq/signals_10s）由 test_task_message_assembler 覆盖。
     alarm = make_alarm(metric=AlarmMetric.BUBBLE, mode="REALTIME", seq=2, timestamp=1.0)
 
-    cq = MagicMock()
-    cq.run = RunIdentity(1, 1, 1)
+    sess = MagicMock()
+    sess.info.run = RunIdentity(1, 1, 1)
     ledger = MagicMock()
     ledger.snapshot.return_value = ([alarm], 2)
     from app.services.inference.online.temporal import alarm_sink
     monkeypatch.setattr(alarm_sink, "ledger_for", lambda sess: ledger)
-    cq.sess.channel.return_value.snapshot.return_value = [
+    sess.channel.return_value.snapshot.return_value = [
         make_frame_detection(source="bubble", n=1, ts=1.0)
     ]
 
     fake_manager = MagicMock()
-    fake_manager.get.return_value = cq
-    monkeypatch.setattr(task_router, "client_service", fake_manager)
+    fake_manager.get.return_value = sess
+    monkeypatch.setattr(task_router, "session_service", fake_manager)
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:

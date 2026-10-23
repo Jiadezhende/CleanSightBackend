@@ -11,16 +11,16 @@
 """
 
 import pytest
-from factories import make_cq, make_frame
+from factories import make_session, make_frame
 from app.services.session.topics import PROCESSED, RAW
 
 _TRACKS = pytest.mark.parametrize("track", [RAW, PROCESSED], ids=["raw", "processed"])
 
 
-def _fill(cq, timestamps):
+def _fill(sess, timestamps):
     for ts in timestamps:
-        cq.sess.channel(RAW).push(make_frame(ts=ts))
-        cq.sess.channel(PROCESSED).push(make_frame(ts=ts))
+        sess.channel(RAW).push(make_frame(ts=ts))
+        sess.channel(PROCESSED).push(make_frame(ts=ts))
 
 
 def _ts(frames):
@@ -30,18 +30,18 @@ def _ts(frames):
 @_TRACKS
 def test_none_fence_drains_everything(track):
     """拆除期语义不变：`None` = 全排空（那时队列不会再进新帧）。"""
-    cq = make_cq()
-    _fill(cq, [1700.0, 1700.1, 1700.2])
+    sess = make_session()
+    _fill(sess, [1700.0, 1700.1, 1700.2])
 
-    assert len(cq.sess.channel(track).drain()) == 3
-    assert len(cq.sess.channel(track)) == 0
+    assert len(sess.channel(track).drain()) == 3
+    assert len(sess.channel(track)) == 0
 
 
 @_TRACKS
 def test_fence_takes_only_the_prefix_before_it(track):
-    cq = make_cq()
-    _fill(cq, [1700.0, 1700.1, 1700.2, 1720.0, 1720.1])   # gap 20s
-    q = cq.sess.channel(track)
+    sess = make_session()
+    _fill(sess, [1700.0, 1700.1, 1700.2, 1720.0, 1720.1])   # gap 20s
+    q = sess.channel(track)
 
     taken = q.drain(until_ts=1700.2)
 
@@ -52,9 +52,9 @@ def test_fence_takes_only_the_prefix_before_it(track):
 
 @_TRACKS
 def test_fence_before_everything_takes_nothing(track):
-    cq = make_cq()
-    _fill(cq, [1700.0, 1700.1])
-    q = cq.sess.channel(track)
+    sess = make_session()
+    _fill(sess, [1700.0, 1700.1])
+    q = sess.channel(track)
 
     assert q.drain(until_ts=1699.0) == []
     assert len(q) == 2
@@ -66,9 +66,9 @@ def test_fence_stops_at_the_first_frame_past_it(track):
 
     写成筛选会在乱序 ts 下从队列中间挖走帧，留下的段首尾跨度失真。
     """
-    cq = make_cq()
-    _fill(cq, [1700.0, 1720.0, 1700.1])   # 第三帧 ts 回退（不该发生，但别静默挖洞）
-    q = cq.sess.channel(track)
+    sess = make_session()
+    _fill(sess, [1700.0, 1720.0, 1700.1])   # 第三帧 ts 回退（不该发生，但别静默挖洞）
+    q = sess.channel(track)
 
     assert _ts(q.drain(until_ts=1700.5)) == [1700.0]
     assert _ts(q.drain()) == [1720.0, 1700.1]
@@ -79,9 +79,9 @@ def test_fence_stops_at_the_first_frame_past_it(track):
 
 @_TRACKS
 def test_take_segment_pops_exactly_seg_len(track):
-    cq = make_cq()
-    _fill(cq, [1.0, 2.0, 3.0, 4.0])
-    q = cq.sess.channel(track)
+    sess = make_session()
+    _fill(sess, [1.0, 2.0, 3.0, 4.0])
+    q = sess.channel(track)
 
     assert _ts(q.take(3)) == [1.0, 2.0, 3.0]
     assert _ts(q.drain()) == [4.0]
@@ -89,9 +89,9 @@ def test_take_segment_pops_exactly_seg_len(track):
 
 @_TRACKS
 def test_take_segment_short_returns_none_and_keeps_residual(track):
-    cq = make_cq()
-    _fill(cq, [1.0, 2.0])
-    q = cq.sess.channel(track)
+    sess = make_session()
+    _fill(sess, [1.0, 2.0])
+    q = sess.channel(track)
 
     assert q.take(3) is None
     assert _ts(q.drain()) == [1.0, 2.0], "不足一段的残帧留给下一轮或断流 flush"
@@ -100,9 +100,9 @@ def test_take_segment_short_returns_none_and_keeps_residual(track):
 @_TRACKS
 def test_take_segment_drains_backlog_segment_by_segment(track):
     """积压多段时，录制侧 `while take() is not None` 能按序逐段全部拉走。"""
-    cq = make_cq()
-    _fill(cq, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-    q = cq.sess.channel(track)
+    sess = make_session()
+    _fill(sess, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    q = sess.channel(track)
 
     # 定次调用而非照抄 while：实现若回 [] 而非 None，照抄会死循环而不是红
     segs = [_ts(q.take(2)) for _ in range(3)]

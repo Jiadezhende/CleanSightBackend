@@ -1,6 +1,6 @@
 """前端消息装配层（router 侧）守卫。
 
-signals_10s 的「流名→metric 映射 + 空模板」与告警序列化已从 ClientQueues 下沉到
+signals_10s 的「流名→metric 映射 + 空模板」与告警序列化已从运行态存储下沉到
 app.routers.task 的装配函数；帧窗汇总（_summarize_window）也在 router。
 """
 
@@ -43,17 +43,17 @@ def test_build_task_alarm_message_assembles_via_atomic_snapshot(monkeypatch):
 
     alarm = make_alarm(metric=AlarmMetric.BUBBLE, mode="REALTIME", seq=2, timestamp=1.0)
 
-    cq = MagicMock()
-    cq.run = RunIdentity(7, 1, 1)
+    sess = MagicMock()
+    sess.info.run = RunIdentity(7, 1, 1)
     ledger = MagicMock()
     ledger.snapshot.return_value = ([alarm], 2)
     from app.services.inference.online.temporal import alarm_sink
     monkeypatch.setattr(alarm_sink, "ledger_for", lambda sess: ledger)
-    cq.sess.channel.return_value.snapshot.return_value = [
+    sess.channel.return_value.snapshot.return_value = [
         make_frame_detection(source="bubble", n=1, ts=1.0)
     ]
 
-    msg = _build_task_alarm_message(cq, since_seq=1)
+    msg = _build_task_alarm_message(sess, since_seq=1)
 
     assert msg["task_id"] == 7
     assert msg["max_seq"] == 2

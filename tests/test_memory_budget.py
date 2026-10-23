@@ -30,7 +30,7 @@ def test_client_config_derives_shallow_ready_cap():
 
 def test_ready_cap_is_independent_of_raw_cap(topic_sizes):
     topic_sizes(ca_maxlen=10, ca_ready_maxlen=2)
-    sess = factories.make_cq().sess
+    sess = factories.make_session()
     ready, raw = sess.channel(READY), sess.channel(RAW)
     for i in range(5):
         f = factories.make_frame(ts=float(i))

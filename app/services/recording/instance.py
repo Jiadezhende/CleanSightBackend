@@ -1,7 +1,7 @@
 """录制服务全局单例（唯一定义处）。
 
 与 `app/services/alarm/instance.py` 同一模式：`service.py` 只管类定义（测试自行
-构造并注入假的 `clients`），要那一个全局实例的人才 import 本模块。
+构造并注入假的 `sessions`），要那一个全局实例的人才 import 本模块。
 
 按规范 §6，本单例只许被 `run_control` / `routers/*` / 本包 `lifespan()` 引用，外加一处
 具名例外：`app/daemons/health_monitor/worker.py` 断流时要调 `flush_residual`（门禁

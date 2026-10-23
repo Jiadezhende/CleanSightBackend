@@ -243,7 +243,7 @@ def poll_until_cleaned(api: APIClient, client_id: str, timeout: int = AUTO_CLEAN
 def poll_until_reconnected(api: APIClient, client_id: str, timeout: int = RECONNECT_SUCCESS_TIMEOUT) -> bool:
     """
     轮询 GET /health/status，等待 client_id 重连成功：
-      - 出现在 queues 中（ClientQueues 存在）
+      - 出现在 queues 中（该 run 的 session 已注册）
       - 不再出现在 reconnecting_clients 中（连接已稳定）
 
     分两个阶段打印状态，便于观察状态机转换：

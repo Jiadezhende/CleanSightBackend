@@ -89,7 +89,7 @@ def test_one_failing_task_does_not_kill_the_queue(q):
 def test_stop_drains_pending_tasks(q):
     """已提交的任务在停机时必须落地。
 
-    它们代表已经从上游拿走的数据（录制段的帧已从 CQ 弹出），丢掉就是真丢。消费循环若
+    它们代表已经从上游拿走的数据（录制段的帧已从 session 弹出），丢掉就是真丢。消费循环若
     `while not stop_event.is_set()` 一置位就退出、不排空，队列里剩的任务直接没。
     """
     done = []

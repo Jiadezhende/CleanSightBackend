@@ -35,7 +35,7 @@ class ClientTemporalActor:
     def __init__(
         self,
         task_id: int,
-        cq,                              # ClientQueues
+        sess,                            # Session
         stage: str,
         operators: List[Operator],
         # tick 间隔（秒，时间域）= 全局唯一 tick 真源：manager 构造时不覆盖，默认即生产值。
@@ -43,7 +43,7 @@ class ClientTemporalActor:
         tick_interval: float = 0.5,
     ):
         self._task_id = task_id
-        self._cq = cq
+        self._sess = sess
         self._stage = stage
         # 别名前烧：stage 对本 run 不可变，构造期解析一次；产出告警即烧进 alarm.stage，
         # 下游持久化直接读 alarm.stage、不反向 import inference.naming。这是全仓唯一告警路径 alias 解析点。
@@ -71,7 +71,7 @@ class ClientTemporalActor:
         """停止 actor 线程，然后收集结算告警。
 
         调用方须确保在 stop_workflow() 流程中先调用此方法，
-        再清理 ClientQueues，保证 _sm 读取时无并发写入。
+        再关 session，保证 _sm 读取时无并发写入。
         """
         self._stop_event.set()
         self._thread.join(timeout=2.0)
@@ -102,7 +102,7 @@ class ClientTemporalActor:
         all_alarms: List[Alarm] = []
 
         # 帧窗快照（List[FrameDetection]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
-        windows = self._cq.sess.channel(DETECTION_WINDOW).snapshot()
+        windows = self._sess.channel(DETECTION_WINDOW).snapshot()
         for op in self._operators:
             try:
                 if not windows:
@@ -119,7 +119,7 @@ class ClientTemporalActor:
                 )
                 continue
 
-        self._cq.sess.channel(LATEST_TEMPORAL).set(all_events)
+        self._sess.channel(LATEST_TEMPORAL).set(all_events)
 
         if all_alarms:
             for a in all_alarms:
@@ -128,7 +128,7 @@ class ClientTemporalActor:
 
     def _persist_alarms(self, alarms: List[Alarm]) -> None:
         # 过闸 + 落库编排归 alarm_sink（别名已烧进 alarm.stage）
-        alarm_sink.persist_alarms(alarms, sess=self._cq.sess, mode=ALARM_MODE_REALTIME)
+        alarm_sink.persist_alarms(alarms, sess=self._sess, mode=ALARM_MODE_REALTIME)
 
     def _collect_settlement_alarms(self) -> List[Alarm]:
         alarms: List[Alarm] = []

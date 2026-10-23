@@ -2,7 +2,7 @@
 
 职责：
 - 按固定间隔（tick_interval）轮询所有活跃客户端
-- 从 ClientQueues 主动拉取三要素：
+- 从各 run 的 session 主动拉取三要素：
   - LATEST_DETECTION           → 原子推理快照（所有 task 同帧一致）
   - LATEST_RAW                 → 最新原始帧
   - LATEST_TEMPORAL            → 最新时序事件
@@ -29,7 +29,7 @@ from app.services.inference.online.naming import get_stage_alias
 from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL, VIZ_LAST_TS
 from app.services.session.topics import LATEST_RAW, PROCESSED, RENDERED
 from app.services.utils.startup_latency import log_milestone
-from app.services.client.instance import client_service
+from app.services.session.instance import session_service
 from app.services.utils.worker_guard import guarded_run
 from .visualizer import FixedVisualizer
 
@@ -45,7 +45,7 @@ class VisualizationWorker:
     """可视化工作线程（定时拉取模式）。
 
     独立于 TemporalWorker，按自己的节奏（tick_interval）遍历所有活跃客户端，
-    从 ClientQueues 拉取原子推理快照 + 最新帧 + 时序事件，渲染后写回。
+    从各 run 的 session 拉取原子推理快照 + 最新帧 + 时序事件，渲染后写回。
     """
 
     def __init__(
@@ -145,24 +145,22 @@ class VisualizationWorker:
 
         # 先收回子进程已渲染完的帧：写回后该 run 才能送下一帧（每 run 单飞）
         if self._render_proxy is not None:
-            for (task_id, cq, ts), annotated, render_s, _ok in self._render_proxy.drain():
+            for (task_id, sess, ts), annotated, render_s, _ok in self._render_proxy.drain():
                 self._note_render_time(render_s)
-                self._write_rendered(task_id, cq, ts, annotated)
+                self._write_rendered(task_id, sess, ts, annotated)
 
-        all_clients = client_service.snapshot()
-        for task_id, cq in all_clients.items():
+        for task_id, sess in session_service.snapshot().items():
             try:
-                self._process_client(task_id, cq, now)
+                self._process_client(task_id, sess, now)
             except Exception as e:
                 logger.error(
                     "[VisualizationWorker-%d] Error processing run %s: %s",
                     self.worker_id, task_id, e, exc_info=True,
                 )
 
-    def _process_client(self, task_id: int, cq, now: float) -> None:
+    def _process_client(self, task_id: int, sess, now: float) -> None:
         """处理单个 run 的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        sess = cq.sess
         inference: Optional[FrameDetection] = sess.channel(LATEST_DETECTION).get()
         if inference is None:
             return
@@ -195,8 +193,8 @@ class VisualizationWorker:
         # 5. 获取最新时序事件
         events = sess.channel(LATEST_TEMPORAL).get()
 
-        # 6. 渲染。stage 取自 cq 不可变身份（快照不再携 stage）。
-        stage = cq.stage
+        # 6. 渲染。stage 取自 session 不可变身份（快照不再携 stage）。
+        stage = sess.info.stage
         if proxy is not None:
             try:
                 specs = self._build_specs(stage, inference.by_source)
@@ -204,7 +202,7 @@ class VisualizationWorker:
                 logger.error("[VisualizationWorker] prepare_visualization_data failed: %s", e, exc_info=True)
                 specs = None
             if specs is not None and proxy.submit(
-                task_id, frame, specs, get_stage_alias(stage), events, ctx=(task_id, cq, inference.ts),
+                task_id, frame, specs, get_stage_alias(stage), events, ctx=(task_id, sess, inference.ts),
             ):
                 # 结果在下一 tick 由 drain 收回写回；去重时间戳此刻推进，同一推理结果不重送
                 sess.channel(VIZ_LAST_TS).set(inference.ts)
@@ -216,7 +214,7 @@ class VisualizationWorker:
         self._note_render_time(time.perf_counter() - t0)
 
         # 7. 写回 + 去重时间戳 + 计成帧数
-        self._write_rendered(task_id, cq, inference.ts, annotated_frame)
+        self._write_rendered(task_id, sess, inference.ts, annotated_frame)
 
     def _note_render_time(self, dt: float) -> None:
         """记单帧渲染耗时（判 render-bound 用）。子进程渲染时取子进程实测的渲染耗时。"""
@@ -225,9 +223,8 @@ class VisualizationWorker:
         if dt > self._render_time_max:
             self._render_time_max = dt
 
-    def _write_rendered(self, task_id: int, cq, ts: float, annotated: np.ndarray) -> None:
+    def _write_rendered(self, task_id: int, sess, ts: float, annotated: np.ndarray) -> None:
         """渲染结果写回 session（非 ACTIVE 由写门拒收）+ 推进去重时间戳 + 计成帧数。"""
-        sess = cq.sess
         frame_data = Frame(timestamp=ts, frame=annotated)
         sess.channel(PROCESSED).push(frame_data)
         rendered = sess.channel(RENDERED)

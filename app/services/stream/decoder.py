@@ -56,7 +56,7 @@ class FFmpegDecoder:
         task_id: int,     # 运行键（路由标识）
         stream_url: str,
         decoder_config: Optional[DecoderConfig] = None,
-        client_queues=None,
+        sess=None,
     ):
         self.manager = manager
         self.task_id = task_id
@@ -70,8 +70,8 @@ class FFmpegDecoder:
         self.pix_fmt = self.config.pix_fmt
         self.backpressure_ratio = self.config.backpressure_ratio
 
-        # 客户端队列实例：帧经 client_queues.sess 写进 RAW / LATEST_RAW / READY
-        self.client_queues = client_queues
+        # 该 run 的 session：帧写进 RAW / LATEST_RAW / READY（None = 空跑，测试用）
+        self.sess = sess
 
         # 检测抽帧「每 N 帧留 1」（N = settings.inference_decimation）。输入是 ffmpeg 规范化后的 CFR
         # 流，按帧计数即精确均匀降采样，不依赖墙钟。计数器只由读线程读写，不加锁。
@@ -115,12 +115,12 @@ class FFmpegDecoder:
         return cmd
 
     def _err_identity(self) -> dict:
-        """异常身份三元组：task_id（路由）+ step_id/source_ip（从 cq 派生，None 守卫）。"""
-        cq = self.client_queues
+        """异常身份三元组：task_id（路由）+ step_id/source_ip（从 session 派生，None 守卫）。"""
+        info = self.sess.info if self.sess is not None else None
         return {
             "task_id": self.task_id,
-            "step_id": cq.run.step_id if cq and cq.run else None,
-            "source_ip": cq.source_ip if cq else None,
+            "step_id": info.run.step_id if info and info.run else None,
+            "source_ip": info.source_ip if info else None,
         }
 
     def start(self):
@@ -370,7 +370,7 @@ class FFmpegDecoder:
             pending_count = self.manager.get_pending_count(self.task_id)
 
             # 获取队列容量
-            sess = self.client_queues.sess if self.client_queues is not None else None
+            sess = self.sess
             queue_capacity = sess.channel(READY).maxlen if sess is not None else 0
 
             # 判断是否应该丢帧（仅针对推理队列）
@@ -387,7 +387,7 @@ class FFmpegDecoder:
                         self.frames_dropped,
                     )
 
-            # 2. 写入队列（如果 client_queues 可用）
+            # 2. 写入队列（如果绑定了 session）
             if sess is not None:
                 now = time.time()
                 frame_data_obj = Frame(timestamp=now, frame=std)

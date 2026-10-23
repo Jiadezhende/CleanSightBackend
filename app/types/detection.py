@@ -47,6 +47,6 @@ class FrameDetection:
     # 供归一化/空间还原按真实尺寸换算。拆两字段（非 (w,h) 元组）避免隐式序混淆。缺省 None → 走默认兜底。
     frame_width: Optional[int] = None
     frame_height: Optional[int] = None
-    # 写回路由句柄（ClientQueues，domain 不依赖 services 故标 Any）：只在 collector → 写回口
+    # 写回路由句柄（该帧所属 run 的 Session，domain 不依赖 services 故标 Any）：只在 collector → 写回口
     # 这一段有值，写回口取走后置 None——留存下来的帧（帧窗 / 快照 / 落盘 / 离线）一律不带。
-    cq: Optional[Any] = field(default=None, repr=False, compare=False)
+    sess: Optional[Any] = field(default=None, repr=False, compare=False)

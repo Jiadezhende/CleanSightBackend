@@ -465,7 +465,7 @@ class TestMaterials:
     def test_service_start_warns_missing_but_starts(self, tmp_path, caplog):
         from app.services.inference.offline.service import OfflineJobService
 
-        svc = OfflineJobService(config=_materials_config(tmp_path, "have.pt", "gone.pt"), clients=object())
+        svc = OfflineJobService(config=_materials_config(tmp_path, "have.pt", "gone.pt"), sessions=object())
         svc.start()
         try:
             assert "离线物料缺失" in caplog.text and "gone.pt" in caplog.text and "have.pt" not in caplog.text

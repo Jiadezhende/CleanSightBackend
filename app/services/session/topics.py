@@ -59,3 +59,14 @@ DETECTIONS = Topic("DETECTIONS", _detections)
 PROCESSED = Topic("PROCESSED", lambda: _segment_fifo("ca_processed", "hls_backpressure"))
 # viz → `WS /ai/video`：最新渲染 Frame
 RENDERED = Topic("RENDERED", Latest)
+
+
+def queue_depths(sess) -> dict:
+    """admin / 状态汇总用的深度快照。键名沿用 CQ 时代（admin `queue_depths` 对外不变）。"""
+    return {
+        "ca_ready": len(sess.channel(READY)),
+        "ca_raw": len(sess.channel(RAW)),
+        "ca_processed": len(sess.channel(PROCESSED)),
+        "ca_detections": len(sess.channel(DETECTIONS)),
+        "has_rendered": sess.channel(RENDERED).get() is not None,
+    }

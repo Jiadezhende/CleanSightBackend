@@ -9,7 +9,7 @@
 数据流（topic 声明见 topics.py）：
 InferenceLoop → DETECTION_WINDOW + LATEST_DETECTION  [双写]
 TemporalActor (2Hz)  → DETECTION_WINDOW → operator.analyze() → operator.judge() → LATEST_TEMPORAL
-VisualizationWorker (~15Hz) → LATEST_DETECTION + LATEST_RAW + LATEST_TEMPORAL → render → cq
+VisualizationWorker (~15Hz) → LATEST_DETECTION + LATEST_RAW + LATEST_TEMPORAL → render → PROCESSED + RENDERED
 """
 
 import logging
@@ -17,8 +17,9 @@ import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.types.alarm import ALARM_MODE_SETTLEMENT, Alarm
-from app.services.client.instance import client_service
-from app.services.client.queues import ClientQueues
+from app.services.session.core import Session
+from app.services.session.instance import session_service
+from app.services.session.topics import queue_depths
 from app.types.exceptions import ValidationError
 from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
@@ -42,7 +43,7 @@ class InferenceService:
     - ClientTemporalActor（时序分析，2 Hz，per-client）
     - VisualizationWorkerPool（可视化，轮询 raw_fps~30 Hz 过采样，出帧随 inference_fps~15 FPS 去重）
 
-    三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。
+    三池通过各 run 的 session topic 通信，不通过队列串联。
     """
 
     def __init__(self):
@@ -101,8 +102,8 @@ class InferenceService:
             render_slots=max(32, 2 * settings.capacity_planned_streams),
         )
 
-        # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
-        # recording 的 sweeper 拉走写 `cq.run` 的 `inference/detections.jsonl`。本服务
+        # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 DETECTIONS，由
+        # recording 的 sweeper 拉走写该 run 的 `inference/detections.jsonl`。本服务
         # 因此不持有任何 store、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()
 
@@ -197,16 +198,14 @@ class InferenceService:
             f"step_id '{step_id}' 未配置在线检测（无 detector）", field="current_step", value=step_key,
         )
 
-    def start_workflow(self, cq: ClientQueues) -> bool:
+    def start_workflow(self, sess: Session) -> bool:
         """起该 run 的推理 workflow：建并启 actor（存储侧无起始钩子）。
 
-        入参是 RunControlService 已建好并**已注册**（client_service.set）的不可变身份 CQ
-        （一 CQ == 一 run）。调用方已持 lock_for(cq.run.task_id)，与 stop_workflow 互斥；重启路径下
-        RunControlService 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
-        RunControlService（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
-        resolve_stage 定死）。
+        入参是 RunControlService 已注册的 session。调用方已持 lock_for(task_id)，与 stop_workflow
+        互斥；重启路径下 RunControlService 先 stop_workflow 拆旧，故此处 _actors 槽已空。
+        stage 取自 session 身份（注册前经 resolve_stage 定死）。
         """
-        task_id = cq.run.task_id
+        task_id = sess.info.run.task_id
         # 防御：残留旧 actor（正常路径 stop_workflow 已 pop，不应命中）——信号停、丢弃、不结算。
         stale = self._actors.pop(task_id, None)
         if stale is not None:
@@ -218,7 +217,7 @@ class InferenceService:
         # 注：起始不碰存储。每次 run 由 `run_control` 分配自己的 run 目录，上一代产物原样保留。
 
         # 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
-        stage = cq.stage
+        stage = sess.info.stage
         stage_cfg = self._get_stage_configs().get(stage, {})
         specs = stage_cfg.get("operator_specs", [])
 
@@ -226,13 +225,13 @@ class InferenceService:
             operators = [cls(**kwargs) for cls, kwargs in specs]
             # 帧窗保留时长放宽到算子最大感受野（底线 10s 在 topic 声明里）；
             # 算子在 analyze 内自行 _clip 到各自感受野。
-            cq.sess.channel(DETECTION_WINDOW).extend_span(
+            sess.channel(DETECTION_WINDOW).extend_span(
                 max(op.window_seconds for op in operators)
             )
 
             actor = ClientTemporalActor(
                 task_id=task_id,
-                cq=cq,
+                sess=sess,
                 stage=stage,
                 operators=operators,
             )
@@ -250,15 +249,15 @@ class InferenceService:
 
         return True
 
-    def stop_workflow(self, cq: ClientQueues) -> List[Alarm]:
+    def stop_workflow(self, sess: Session) -> List[Alarm]:
         """停该 run 的推理 workflow：停 actor（收结算），返回 settlement 列表。
 
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
         交给 RunControlService 转 AlarmService；HLS 残段 / 剩余检测结果归 recording，告警落库归
         alarm，前端槽清零亦由 RunControlService 做）。调用方（RunControlService.stop_run）已持
-        lock_for(cq.run.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
+        lock_for(task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
-        task_id = cq.run.task_id
+        task_id = sess.info.run.task_id
         logger.info("[InferenceService] Stopping workflow: task=%s", task_id)
 
         settlement: List[Alarm] = []
@@ -271,15 +270,15 @@ class InferenceService:
                     "[InferenceService] finalize actor failed for task=%s: %s", task_id, e
                 )
 
-        # 注：这里**不收尾检测结果**。cq 落盘缓冲里剩下的那点由 RunControlService 紧接着调的
-        # `recording.flush_residual(cq)` 一并交出（它在本方法之后、cq.close() 之前）。
+        # 注：这里**不收尾检测结果**。DETECTIONS 里剩下的那点由 RunControlService 紧接着调的
+        # `recording.flush_residual(sess)` 一并交出（它在本方法之后、session close 之前）。
         logger.info("[InferenceService] Workflow stopped: task=%s", task_id)
         return settlement
 
     def status(self) -> Dict[str, Any]:
-        clients = client_service.snapshot()
-        stats = {task_id: cq.get_queue_depths() for task_id, cq in clients.items()}
-        return {"clients": len(clients), "queues": stats}
+        sessions = session_service.snapshot()
+        stats = {task_id: queue_depths(sess) for task_id, sess in sessions.items()}
+        return {"clients": len(sessions), "queues": stats}
 
     # ========== 启动/停止 ==========
 
@@ -328,10 +327,10 @@ class InferenceService:
             try:
                 settlement = actor.finalize_and_stop()
                 if settlement:
-                    cq = client_service.get(task_id)
-                    if cq:
+                    sess = session_service.get(task_id)
+                    if sess:
                         alarm_sink.persist_alarms(
-                            settlement, sess=cq.sess, mode=ALARM_MODE_SETTLEMENT
+                            settlement, sess=sess, mode=ALARM_MODE_SETTLEMENT
                         )
             except Exception as e:
                 logger.warning(

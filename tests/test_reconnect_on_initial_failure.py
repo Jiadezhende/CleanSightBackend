@@ -32,21 +32,19 @@ from app.daemons.health_monitor.topics import RECONNECT_STATE
 from factories import make_frame
 
 
-def _fake_cq(last_frame_ts: float) -> MagicMock:
-    """HM 读 cq.task_started_at 与 cq.sess（LATEST_RAW 的最后一帧 ts），其余 MagicMock 顶。"""
-    cq = MagicMock()
-    cq.task_started_at = 0.0
-    cq.sess = Session(SessionInfo(run=RunIdentity(1, 1, 1)))
-    _set_last_frame(cq, last_frame_ts)
-    return cq
+def _fake_cq(last_frame_ts: float) -> Session:
+    """一个不入注册表的 run，最后一帧 ts 写在 LATEST_RAW（started_at=0：不触发任务超时）。"""
+    sess = Session(SessionInfo(run=RunIdentity(1, 1, 1)))
+    _set_last_frame(sess, last_frame_ts)
+    return sess
 
 
-def _set_last_frame(cq, ts: float) -> None:
-    cq.sess.channel(LATEST_RAW).set(make_frame(ts=ts))
+def _set_last_frame(sess, ts: float) -> None:
+    sess.channel(LATEST_RAW).set(make_frame(ts=ts))
 
 
-def _last_frame(cq) -> float:
-    return cq.sess.channel(LATEST_RAW).get().ts
+def _last_frame(sess) -> float:
+    return sess.channel(LATEST_RAW).get().ts
 
 
 # ===========================================================================
@@ -64,7 +62,7 @@ def _make_monitor(
 
     Args:
         client_id: 被测客户端 ID
-        mock_cq: `_fake_cq` 造的 CQ 替身（最后一帧 ts 在其 session 的 LATEST_RAW）
+        mock_cq: `_fake_cq` 造的 run（最后一帧 ts 在其 LATEST_RAW）
         active_decoder_ids: 模拟 stream_service.get_all_task_ids()（注册即算，不看死活）
         decoder_alive: 模拟 stream_service.is_decoder_alive() 返回值（新判据核心）
     """
@@ -89,7 +87,7 @@ def _make_monitor(
     )
 
     return HealthMonitorWorker(
-        client_service=mock_cm,
+        session_service=mock_cm,
         stream_service=mock_ss,
         inference_service=MagicMock(),
         config=config,
@@ -112,7 +110,7 @@ class TestDecoderRegistration:
     def _start_with_failing_decoder(self, error):
         with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
              patch.object(
-                 self.service, "_get_client_queues", return_value=MagicMock()
+                 self.service, "_get_session", return_value=MagicMock()
              ):
 
             mock_dec = MockDecoder.return_value
@@ -285,9 +283,9 @@ class TestHealthMonitorReconnectPath:
         assert monitor._client_stats["orphan_streams"] == 1
 
     def test_orphan_decoder_is_stopped_via_run_control(self):
-        """有 decoder 无 CQ → 经 run_control.stop_orphan_decoder 停（锁内复查），不直调 stream。"""
+        """有 decoder 无 run → 经 run_control.stop_orphan_decoder 停（锁内复查），不直调 stream。"""
         monitor = _make_monitor("other", self._cq(), active_decoder_ids={"orphan"})
-        monitor._client_service.snapshot.return_value = {}
+        monitor._sessions.snapshot.return_value = {}
 
         monitor._check_all_clients()
 
@@ -391,7 +389,7 @@ class TestReconnectIdentityFence:
         )
 
         monitor._check_all_clients()
-        state = cq_a.sess.channel(RECONNECT_STATE).get()
+        state = cq_a.channel(RECONNECT_STATE).get()
         assert state.task_id == client_id
         assert state.last_frame_time_before_disconnect == _last_frame(cq_a)
 
@@ -409,14 +407,14 @@ class TestReconnectIdentityFence:
 
         # 模拟 /start 抢占重启：槽位换成全新 cq_B
         cq_b = self._cq()
-        monitor._client_service.snapshot.return_value = {client_id: cq_b}
+        monitor._sessions.snapshot.return_value = {client_id: cq_b}
 
         # Round 2：cq_B 没有重连状态，按新 run 从头判定（本轮才进入重连，不 respawn）
         monitor._run_control.restart_stream.reset_mock()
         monitor._check_all_clients()
 
         monitor._run_control.restart_stream.assert_not_called()
-        assert cq_b.sess.channel(RECONNECT_STATE).get().last_frame_time_before_disconnect == _last_frame(cq_b)
+        assert cq_b.channel(RECONNECT_STATE).get().last_frame_time_before_disconnect == _last_frame(cq_b)
 
     def test_reconnect_state_released_with_run(self):
         """`/terminate` 正在重连的 run：run 关闭即释放重连状态，统计不再计入、无残留条目。"""
@@ -428,8 +426,8 @@ class TestReconnectIdentityFence:
         monitor._check_all_clients()
         assert monitor.get_stats()["reconnecting_clients"] == [client_id]
 
-        cq_a.sess.close()
-        monitor._client_service.snapshot.return_value = {}
+        cq_a.close()
+        monitor._sessions.snapshot.return_value = {}
 
         assert monitor.get_stats()["reconnecting_count"] == 0
 

@@ -1,8 +1,8 @@
 """共享 fixture：包装 factories 的 factory-as-fixture + 真正跨文件共享的 setup。
 
 Hybrid 约定：
-- 主用法是直接 `from factories import make_cq`（可 @parametrize、可被 integration_tests 复用）；
-- 需要注入式书写的用例，用下方 factory-fixture：`def test_x(make_cq): cq = make_cq(task_id=2)`。
+- 主用法是直接 `from factories import make_session`（可 @parametrize、可被 integration_tests 复用）；
+- 需要注入式书写的用例，用下方 factory-fixture：`def test_x(make_session): s = make_session(task_id=2)`。
 两者同源（都指向 factories 里的纯函数），不产生第二份构造逻辑。
 """
 
@@ -16,8 +16,8 @@ from app.services.utils import task_queue
 # ---- factory-as-fixture：返回可调用的构造器（支持 override 参数）----
 
 @pytest.fixture
-def make_cq():
-    return factories.make_cq
+def make_session():
+    return factories.make_session
 
 
 @pytest.fixture
