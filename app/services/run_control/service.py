@@ -199,16 +199,31 @@ class RunControlService:
             #    ② alarm 服务上报 settlement 告警（别名已由 actor 烧进 alarm.stage）；
             #    ③ 清前端槽 + recording 落 HLS 残段与剩余检测结果。
             #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
-            #    （→cq.close 释放帧）——本 try 早于下方清理。
-            try:
-                if cq is not None:
+            #    （→cq.close 释放帧）——本段早于下方清理。
+            #    三步各自 try：结算或清槽抛错不能连带跳过 ③，否则残段不落盘就被 close 释放。
+            if cq is not None:
+                try:
                     settlement = inference_service.stop_workflow(cq)  # Inference owner
                     if settlement:
                         alarm_sink.persist_alarms(
                             settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT, log_each=True
                         )
+                except Exception as e:
+                    result["errors"].append(f"settlement: {e}")
+                    logger.error(
+                        "[RunControlService] settlement failed: %s - %s", task_id, e, exc_info=True
+                    )
+                try:
                     cq.set_latest_temporal([])   # 提前清前端槽，防 WS 读到结束后残留
                     cq.set_latest_rendered(None)
+                except Exception as e:
+                    result["errors"].append(f"frontend: {e}")
+                    logger.error(
+                        "[RunControlService] clear frontend slots failed: %s - %s",
+                        task_id, e, exc_info=True,
+                    )
+            try:
+                if cq is not None:
                     recording_service.flush_residual(cq)                    # Recording owner
                 result["data_flushed"] = True
             except Exception as e:
