@@ -1,0 +1,41 @@
+# PR 合入 dev / main 时推送飞书群消息
+# 需要的仓库 Secrets：FEISHU_WEBHOOK（必填）、FEISHU_SECRET（机器人开启签名校验时必填）
+name: Notify Feishu on PR merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [dev, main]
+
+jobs:
+  notify:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send to Feishu
+        env:
+          WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          SECRET: ${{ secrets.FEISHU_SECRET }}
+          TITLE: ${{ github.event.pull_request.title }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          URL: ${{ github.event.pull_request.html_url }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          MERGER: ${{ github.event.pull_request.merged_by.login }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          text=$(printf 'PR #%s 已合入 %s\n%s\n%s → %s | 作者 %s | 合入 %s\n%s' \
+            "$NUMBER" "$BASE" "$TITLE" "$HEAD" "$BASE" "$AUTHOR" "$MERGER" "$URL")
+
+          if [ -n "$SECRET" ]; then
+            ts=$(date +%s)
+            sign=$(printf '' | openssl dgst -sha256 -hmac "$(printf '%s\n%s' "$ts" "$SECRET")" -binary | base64)
+            body=$(jq -n --arg t "$text" --arg ts "$ts" --arg s "$sign" \
+              '{timestamp:$ts, sign:$s, msg_type:"text", content:{text:$t}}')
+          else
+            body=$(jq -n --arg t "$text" '{msg_type:"text", content:{text:$t}}')
+          fi
+
+          resp=$(curl -sS -X POST -H 'Content-Type: application/json' -d "$body" "$WEBHOOK")
+          echo "$resp"
+          echo "$resp" | jq -e '.code == 0' > /dev/null
