@@ -11,6 +11,7 @@
 cv2/ffmpeg，全部毫秒级。末尾一条端到端跑真队列 + 真 `storage.hls`，缺外部工具时 skip。
 """
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -466,6 +467,51 @@ class TestCollectFrom:
         svc.collect_from(cq)
 
         assert fake_hls.inserts == [("insert", 1, 2, "raw", 4)]
+
+
+class GateQueue:
+    """第一次 `submit` 卡在入队前，直到 `release` 置位——模拟 sweeper 取走一段、还没入队时被抢占。
+
+    `labels` 按**入队完成**的先后记录，即真队列的执行序。
+    """
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.labels = []
+        self._first = True
+
+    def submit(self, fn, *, label, timeout=1.0):
+        if self._first:
+            self._first = False
+            self.entered.set()
+            self.release.wait(timeout=5.0)
+        self.labels.append(label)
+        fn()
+        return True
+
+
+class TestCollectLock:
+    def test_teardown_flush_cannot_enqueue_ahead_of_a_taken_segment(self, fake_hls):
+        """sweeper 已取走整段、尚未入队时，拆除 flush 不得抢先入队残段（否则 tfdt 倒序）。"""
+        cq = FakeCQ(1, 2, ca_segment_len=10)
+        cq.raw_segments = [_frames(10, start=1700.0)]
+        cq.raw_residual = _frames(3, start=1710.0)
+        svc = _service(FakeClients({1: cq}))
+        q = GateQueue()
+        svc._hls_queue = q
+
+        sweeper = threading.Thread(target=svc.collect_from, args=(cq,))
+        sweeper.start()
+        assert q.entered.wait(timeout=5.0)
+        teardown = threading.Thread(target=svc.flush_residual, args=(cq,))
+        teardown.start()
+        teardown.join(timeout=0.2)          # 给拆除线程抢跑的机会
+        q.release.set()
+        sweeper.join(timeout=5.0)
+        teardown.join(timeout=5.0)
+
+        assert q.labels == ["seg:1/2/1/raw@1700000", "seg:1/2/1/raw@1710000"]
 
 
 class TestPendingFlushRequest:

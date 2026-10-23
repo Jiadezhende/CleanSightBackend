@@ -1,9 +1,8 @@
 """段拉取的**节拍器**：每隔一个 interval，对每个活跃 CQ 调一次 `service.collect_from`。
 
 **它只管什么时候拉，不管拉什么**——取哪几条队列、按什么顺序取、断流残帧怎么办，全在
-`RecordingService.collect_from`。本线程是运行期 CQ 的唯一 drain 者，别处直接调
-`collect_from` / `flush_residual` 会让入队顺序出现竞态（后果见 `service` 模块 docstring
-的不变式 2）。
+`RecordingService.collect_from`。与其他取帧路径的串行由 service 的取帧锁负责（见 `service`
+模块 docstring 的不变式 2），本线程不必知道。
 
 **包内私有**：只由 `RecordingService.start()` 构造，启停归服务。
 

@@ -18,8 +18,9 @@
 
 1. **队列不能加 worker**（两条都是）：同一 run 内 tfdt 按执行顺序累计，并发会碰撞。配置里因此
    没有 `workers`。
-2. **运行期 CQ 的 drain 者只能有 sweeper 一个**，入口是 `collect_from`；断流走
-   `request_residual_flush` 登记、由 sweeper 那一轮执行，不要在别的线程直接 drain。
+2. **取帧必须持 `_collect_lock`，且覆盖「取走 + 入队」**：`collect_from`（sweeper）与
+   `flush_residual`（拆除）都可能对同一 CQ 取帧，锁让先取的先入队、段的 tfdt 与 ts 同序。
+   断流仍走 `request_residual_flush` 登记、由 sweeper 那一轮执行。
 3. **`_pending_flush` 有三个线程碰**（health_monitor 写 / sweeper 取 / 拆除路径回收）。
    免锁靠 `dict` 的 `__setitem__`、`pop` 各自原子。它只服务 HLS：detections 没有"段横跨
    断流 gap"这回事，故不需要栅栏。
@@ -119,6 +120,12 @@ class RecordingService:
         # 加、队列线程减，故带锁。
         self._hls_inflight_bytes = 0
         self._hls_inflight_lock = threading.Lock()
+
+        # 取帧锁：`collect_from` / `flush_residual` 全程持有，「取走 + 入队」对所有取帧路径串行。
+        # 只护取走原子不够：入队在 CQ 锁外，后取的段可能先入队 → tfdt 倒序、画面丢一截。
+        # 可重入：`collect_from` 的断流分支在锁内调 `flush_residual`。
+        # 锁序：本锁 → CQ 锁 / `_hls_inflight_lock`；生产方（decoder / 写回 / viz）不取本锁。
+        self._collect_lock = threading.RLock()
 
         # (task_id, step_id) → (cq, fence_ts)：断流时挂起的「把这一刻之前的残帧切出来」请求。
         #
@@ -278,21 +285,22 @@ class RecordingService:
             logger.warning("[recording] flush_residual: cq 未绑定 run，跳过")
             return
 
-        if until_ts is None:
-            key = (cq.run.task_id, cq.run.step_id)
-            entry = self._pending_flush.get(key)
-            if entry is not None and entry[0] is cq:
-                self._pending_flush.pop(key, None)
+        with self._collect_lock:
+            if until_ts is None:
+                key = (cq.run.task_id, cq.run.step_id)
+                entry = self._pending_flush.get(key)
+                if entry is not None and entry[0] is cq:
+                    self._pending_flush.pop(key, None)
 
-        seg_len = cq.ca_segment_len
-        for track, frames in (
-            ("raw", cq.drain_ca_raw(until_ts)),
-            ("processed", cq.drain_ca_processed(until_ts)),
-        ):
-            for i in range(0, len(frames), seg_len):
-                self.submit_segment(cq, track, frames[i : i + seg_len])
+            seg_len = cq.ca_segment_len
+            for track, frames in (
+                ("raw", cq.drain_ca_raw(until_ts)),
+                ("processed", cq.drain_ca_processed(until_ts)),
+            ):
+                for i in range(0, len(frames), seg_len):
+                    self.submit_segment(cq, track, frames[i : i + seg_len])
 
-        self.submit_detections(cq, cq.drain_ca_detections())
+            self.submit_detections(cq, cq.drain_ca_detections())
 
     def collect_from(self, cq) -> None:
         """把这个 CQ 此刻该落盘的东西全部取走并入队。**由 sweeper 线程周期调用。**
@@ -318,17 +326,18 @@ class RecordingService:
             # 裸建 / 未绑定 run：定位不到落盘目录。**不取帧**——取了就只能丢。
             return
 
-        while (seg := cq.take_raw_segment()) is not None:
-            self.submit_segment(cq, "raw", seg)
-        while (seg := cq.take_processed_segment()) is not None:
-            self.submit_segment(cq, "processed", seg)
+        with self._collect_lock:
+            while (seg := cq.take_raw_segment()) is not None:
+                self.submit_segment(cq, "raw", seg)
+            while (seg := cq.take_processed_segment()) is not None:
+                self.submit_segment(cq, "processed", seg)
 
-        fence_ts = self._take_pending_flush(cq)
-        if fence_ts is not None:
-            self.flush_residual(cq, until_ts=fence_ts)
-            return  # flush_residual 末尾已经把 detections 一并交出，别再 drain 一次空的
+            fence_ts = self._take_pending_flush(cq)
+            if fence_ts is not None:
+                self.flush_residual(cq, until_ts=fence_ts)
+                return  # flush_residual 末尾已经把 detections 一并交出，别再 drain 一次空的
 
-        self.submit_detections(cq, cq.drain_ca_detections())
+            self.submit_detections(cq, cq.drain_ca_detections())
 
     def request_residual_flush(self, cq, fence_ts: float) -> None:
         """请求把 `fence_ts` 之前的残帧单独切成段（断流时由 health_monitor 调）。
