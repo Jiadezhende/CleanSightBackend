@@ -58,3 +58,19 @@ def tmp_storage(tmp_path, monkeypatch):
 def fast_task_queue(monkeypatch):
     """SerialTaskQueue 消费线程轮询 0.5s → 0.01s：`stop()` 不再每条队列白等半秒。"""
     monkeypatch.setattr(task_queue, "_POLL_INTERVAL", 0.01)
+
+
+@pytest.fixture
+def topic_sizes(monkeypatch):
+    """改 session topic 的容量口径（READY / RAW 等按 client 配置建）：`topic_sizes(ca_maxlen=10)`。
+
+    只影响之后**新建**的 channel；已建好的 channel 容量不变。
+    """
+    from app.services.client.config import ClientConfig
+
+    def set_sizes(**sizes):
+        for name, value in sizes.items():
+            assert name in ("ca_maxlen", "ca_ready_maxlen", "ca_segment_len"), name
+            monkeypatch.setattr(ClientConfig, name, property(lambda self, v=value: v))
+
+    return set_sizes

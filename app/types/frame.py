@@ -15,3 +15,8 @@ class Frame:
 
     timestamp: float  # Unix timestamp
     frame: np.ndarray  # 原始或处理后的帧（numpy 数组）
+
+    @property
+    def ts(self) -> float:
+        """数据时间（= timestamp），供 session 按时间取走的 channel 读。"""
+        return self.timestamp

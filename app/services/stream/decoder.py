@@ -14,7 +14,9 @@ from app.types.frame import Frame
 from .config import DecoderConfig
 from app.settings import settings
 from app.types.exceptions import FFmpegError, StreamConnectionError
+from app.services.session.topics import LATEST_RAW, RAW, READY
 from app.services.utils.metrics import frame_drop_total
+from app.services.utils.startup_latency import log_milestone
 
 DEFAULT_CHANNELS = 3
 
@@ -68,8 +70,13 @@ class FFmpegDecoder:
         self.pix_fmt = self.config.pix_fmt
         self.backpressure_ratio = self.config.backpressure_ratio
 
-        # 客户端队列实例（用于直接写入队列）
+        # 客户端队列实例：帧经 client_queues.sess 写进 RAW / LATEST_RAW / READY
         self.client_queues = client_queues
+
+        # 检测抽帧「每 N 帧留 1」（N = settings.inference_decimation）。输入是 ffmpeg 规范化后的 CFR
+        # 流，按帧计数即精确均匀降采样，不依赖墙钟。计数器只由读线程读写，不加锁。
+        self._decimation = max(1, settings.inference_decimation)
+        self._decimate_counter = 0
 
         self.frame_size = self.width * self.height * DEFAULT_CHANNELS
         self.proc: Optional[subprocess.Popen] = None
@@ -324,6 +331,14 @@ class FFmpegDecoder:
         arr.flags.writeable = False
         return arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
 
+    def _take_for_inference(self) -> bool:
+        """整数倍率选帧：每输入帧 +1，攒满 N 帧放行 1 帧（保留率精确 = 1/N）。"""
+        self._decimate_counter += 1
+        if self._decimate_counter < self._decimation:
+            return False
+        self._decimate_counter = 0
+        return True
+
     def _should_drop_frame(self, pending_count: int, queue_capacity: int) -> bool:
         """
         背压逻辑：根据 CA-Ready-Queue 的占用率决定是否丢帧
@@ -355,9 +370,8 @@ class FFmpegDecoder:
             pending_count = self.manager.get_pending_count(self.task_id)
 
             # 获取队列容量
-            queue_capacity = 0
-            if self.client_queues is not None:
-                queue_capacity = self.client_queues.ca_ready_maxlen
+            sess = self.client_queues.sess if self.client_queues is not None else None
+            queue_capacity = sess.channel(READY).maxlen if sess is not None else 0
 
             # 判断是否应该丢帧（仅针对推理队列）
             drop_inference = self._should_drop_frame(pending_count, queue_capacity)
@@ -374,24 +388,29 @@ class FFmpegDecoder:
                     )
 
             # 2. 写入队列（如果 client_queues 可用）
-            if self.client_queues is not None:
+            if sess is not None:
                 now = time.time()
                 frame_data_obj = Frame(timestamp=now, frame=std)
 
                 # 2.1 写入原始队列（全帧率，用于落盘；背压时也写入，保证 HLS 录制完整）
-                if self.client_queues.append_ca_raw(frame_data_obj):
+                if sess.channel(RAW).push(frame_data_obj):
                     self.frames_written_to_raw += 1
+                # 本 run 第一帧：LATEST_RAW 写之前为空（decoder 是唯一写方，重启后的新 decoder 也不重报）
+                first = sess.channel(LATEST_RAW).get() is None
+                if sess.channel(LATEST_RAW).set(frame_data_obj) and first:
+                    # 启动延迟埋点 A：拉流建立后首帧解码到手
+                    info = sess.info
+                    log_milestone(
+                        "first_frame", task_id=info.run.task_id, step_id=info.run.step_id,
+                        started_at=info.started_at,
+                    )
 
                 # 2.2 写入推理队列（降频；背压时跳过）
-                if not drop_inference:
-                    if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
+                if not drop_inference and self._take_for_inference():
+                    if sess.channel(READY).push(frame_data_obj):
                         self.frames_written_to_ready += 1
 
             self.frames_received += 1
-
-            # 启动延迟埋点 A：拉流建立后首帧解码到手（仅首帧触发一次）
-            if self.frames_received == 1 and self.client_queues is not None:
-                self.client_queues.mark_startup_milestone("first_frame")
 
             # log every N frames to observe liveness
             if self.frames_received % 300 == 0:

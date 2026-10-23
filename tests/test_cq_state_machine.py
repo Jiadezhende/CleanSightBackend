@@ -2,6 +2,7 @@
 
 from factories import make_alarm, make_cq, make_frame, make_frame_detection
 from app.services.client.queues import RunState
+from app.services.session.topics import LATEST_RAW, RAW, READY
 from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION, LATEST_TEMPORAL
 
 
@@ -34,8 +35,9 @@ def test_transitions_idempotent_and_monotonic():
 def test_frame_and_result_writes_blocked_when_not_active():
     cq = make_cq()
     cq.to_draining()
-    assert cq.append_ca_ready_with_throttle(make_frame()) is False
-    assert cq.append_ca_raw(make_frame()) is False
+    assert cq.sess.channel(READY).push(make_frame()) is False
+    assert cq.sess.channel(RAW).push(make_frame()) is False
+    assert cq.sess.channel(LATEST_RAW).set(make_frame()) is False
     cq.append_ca_processed(make_frame())
     assert len(cq.ca_processed) == 0
     cq.sess.channel(DETECTION_WINDOW).push(_det())
@@ -76,11 +78,11 @@ def test_clear_through_writes_allowed_when_not_active():
 def test_close_releases_payload_keeps_identity():
     cq = make_cq()
     cq.sess.channel(DETECTION_WINDOW).push(_det())
-    cq.append_ca_raw(make_frame())
+    cq.sess.channel(RAW).push(make_frame())
     cq.close()
     # payload 已释放
     assert cq.sess.channel(DETECTION_WINDOW).snapshot() == []
-    assert len(cq.ca_raw) == 0
+    assert len(cq.sess.channel(RAW)) == 0
     assert cq.get_recent_alarms() == []
     assert cq.sess.channel(LATEST_DETECTION).get() is None
     # 身份小壳保留（供 fence/日志）

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 from factories import make_bare_cq, make_frame
 from app.services.inference.online.detection.dispatcher import StageAwareDispatcher
+from app.services.session.topics import READY
 from app.services.utils.pressure import PRESSURE_LOGGER_NAME
 
 
@@ -25,9 +26,9 @@ def test_stage_queue_drop_counted_when_full():
     cm = MagicMock()
     dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
-    # 客户端：ca_ready 有一帧，stage 为 ClientQueues 裸建默认值
-    cq = make_bare_cq(ca_maxlen=10)
-    cq.ca_ready.append(_frame())
+    # 客户端：READY 有一帧，stage 为 ClientQueues 裸建默认值
+    cq = make_bare_cq()
+    cq.sess.channel(READY).push(_frame())
     cm.snapshot.return_value = {"c1": cq}
 
     # 预填满该 stage 队列到 maxlen
@@ -46,8 +47,8 @@ def test_stage_queue_no_drop_when_not_full():
     cm = MagicMock()
     dispatcher = StageAwareDispatcher(client_service_instance=cm)
 
-    cq = make_bare_cq(ca_maxlen=10)
-    cq.ca_ready.append(_frame())
+    cq = make_bare_cq()
+    cq.sess.channel(READY).push(_frame())
     cm.snapshot.return_value = {"c1": cq}
 
     dispatcher._fetch_and_dispatch_round()
@@ -94,8 +95,8 @@ def test_pressure_snapshot_logs_on_drop(caplog):
 
 def test_submit_rejection_counted_into_pressure_line(caplog):
     """proxy 拒收（submit 返 False）不再是静默布尔——提交侧计数并进周期压力行。"""
-    cq = make_bare_cq(ca_maxlen=10)
-    cq.ca_ready.append(make_frame(ts=time.time(), shape=(2, 2, 3)))
+    cq = make_bare_cq()
+    cq.sess.channel(READY).push(make_frame(ts=time.time(), shape=(2, 2, 3)))
     cm = MagicMock()
     cm.snapshot.return_value = {"c1": cq}
     stage = cq.stage

@@ -6,29 +6,24 @@ from __future__ import annotations
 
 import contextlib
 import enum
-import logging
 import threading
 import time
 from collections import deque
 from typing import Deque, Dict, List, Optional, Set, Tuple
-
-import numpy as np
 
 from app.types.alarm import Alarm
 from app.types.detection import FrameDetection
 from app.types.frame import Frame
 from app.types.run import RunIdentity
 from app.services.session.core import Session, SessionInfo
+from app.services.session.topics import RAW, READY
 from app.services.utils.metrics import frame_drop_total
 from app.services.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
     REASON_QUEUE_HIGH_WATERMARK,
     PressureReporter,
 )
-
-# 启动延迟埋点专用 logger（独立命名，便于 grep/单独调级）：
-# 拆「请求→首个产出」三段——拉流首帧 / 首个推理写回 / 首个告警。
-_startup_logger = logging.getLogger("app.startup_latency")
+from app.services.utils.startup_latency import log_milestone
 
 
 class RunState(enum.Enum):
@@ -39,8 +34,7 @@ class RunState(enum.Enum):
     - CLOSED：payload 已释放，一切写被拒；身份小壳仍可读（供 fence/日志）。
 
     门控在写入**时刻**判 state（非 dispatch 时刻）：迟到写落到 DRAINING/CLOSED 的旧 CQ 被拒，
-    不串台到新 run。状态读免锁（枚举原子读 + 单调）；`_state_lock` 仅串行/幂等转换本身，
-    绝不与 6 把 payload 锁互嵌——无新锁环。
+    不串台到新 run。状态读免锁（枚举原子读 + 单调）；`_state_lock` 仅串行/幂等转换本身。
     """
 
     ACTIVE = "ACTIVE"
@@ -51,21 +45,17 @@ class RunState(enum.Enum):
 class ClientQueues:
     """
     架构说明：
-    - CA-ReadyQueue: 从 RTMP 提取的原始帧，等待推理（设置最大长度防止溢出）
-    - CA-RawQueue: 原始帧副本，用于生成原始视频 HLS 段（设置最大长度防止溢出）
     - CA-ProcessedQueue: 推理后的处理帧（含标注），用于生成处理后 HLS 段（设置最大长度防止溢出）
     - CA-DetectionQueue: 帧级 FrameDetection 落盘缓冲，等 recording 周期拉走写 detections.jsonl
     - _latest_rendered: 单槽位，最新渲染帧，供前端 WebSocket 实时推流
-    （最新推理快照 / 时序叠字已迁成 topic，见 inference/online/topics.py）
+    （待推理帧 / 原始帧 / 最新原始帧、推理快照、时序叠字、帧窗已迁成 topic，见 session/topics.py、
+    inference/online/topics.py）
 
     内存保护：
     - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
-    - ca_raw / ca_processed 默认 900 帧，ca_ready 默认同值（生产值分别由
-      settings.ca_maxlen_seconds × raw_fps、ca_ready_seconds × inference_fps 派生，此默认仅裸建/测试兜底）
+    - ca_processed 默认 900 帧（生产值由 settings.ca_maxlen_seconds × raw_fps 派生，此默认仅裸建/测试兜底）
 
     锁清单（Lock Inventory）：
-      ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
-      _raw_lock         Lock   ca_raw + latest_raw_frame + latest_raw_timestamp
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
       _slide_window_lock Lock  ca_detections
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
@@ -73,7 +63,7 @@ class ClientQueues:
                                append_* 一律**先出队列锁再上报**，故不与上面任何锁互嵌
 
     全清顺序（clear() 同时持锁时的固定顺序，防死锁）：
-      _raw_lock → _viz_lock → _slide_window_lock → _alarm_lock
+      _viz_lock → _slide_window_lock → _alarm_lock
 
     身份（run/source_ip/stage）为构造定死的不可变值，热路径免锁直读。
     """
@@ -84,8 +74,6 @@ class ClientQueues:
         ca_maxlen: int = 900,
         resize_width: int = 640,
         resize_height: int = 480,
-        inference_decimation: int = 2,
-        ca_ready_maxlen: Optional[int] = None,
         *,
         # 不可变运行身份（一次 CQ == 一次 run，终生不变）。
         # 全默认 None/"" 供纯队列/算子单测裸建；生产由 RunControlService 传入 `runs.allocate`
@@ -99,20 +87,12 @@ class ClientQueues:
         self.resize_width = resize_width
         self.resize_height = resize_height
 
-        # 抽帧降采样倍率（每 N 帧留 1；N=raw_fps/检测率，如 30fps→15fps 取 N=2）。
-        # 抽帧器只需此整数倍率，不引用 raw_fps——源速率概念不进 CQ。
-        self.inference_decimation = inference_decimation
-        # 抽帧计数器：仅由 decoder 线程读写（append_ca_ready_with_throttle 内部），无并发，不加锁
-        self._decimate_counter: int = 0
-
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
-        self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
         self._viz_lock = threading.Lock()        # ca_processed + _latest_rendered
         self._slide_window_lock = threading.Lock()
         self._alarm_lock = threading.Lock()      # _alarm_log + _alarm_seq + _alarm_gate
 
-        # 运行状态机的锁（独立于下方 6 把 payload 锁：只串行/幂等本状态转换，
-        # 从不与任何 payload 锁互嵌，故不引入新锁环——见 RunState docstring）
+        # 运行状态机的锁（只串行/幂等本状态转换）
         self._state: RunState = RunState.ACTIVE
         self._state_lock = threading.Lock()
 
@@ -140,56 +120,29 @@ class ClientQueues:
 
         # 启动里程碑埋点（纯观测，first-wins 幂等）：记录每个里程碑首次到达相对
         # task_started_at 的耗时，仅记一次。无锁——每个 milestone 名字单一生产者线程
-        # （first_frame=decoder / first_inference=写回 / first_alarm=actor），同名无并发写；
-        # 三线程并发 add 的是不同 key，set 恒 ≤3 元素不触发 rehash，GIL 下逐个 add 原子
-        # （同 ca_ready 的无锁 SPSC 约定）。纯日志，不参与任何数据流。
+        # （first_inference=写回 / first_rendered=viz），同名无并发写。纯日志，不参与任何数据流。
+        # first_frame 由 decoder 自行判断首次（见 stream/decoder.py）。
         self._startup_marks: Set[str] = set()
 
-        # 最新原始帧缓存（由 _raw_lock 保护）
-        self.latest_raw_frame: Optional[np.ndarray] = None
-        self.latest_raw_timestamp: float = (
-            time.time()
-        )  # 初始化为创建时间，支持启动失败检测
-
-        # ca_raw / ca_processed 共用 ca_maxlen；ca_ready 独立浅上限（推理腿不需要深缓冲），
-        # 缺省同 ca_maxlen（裸建/测试）。公有属性直读，不提供 get_*_capacity 包装。
         self.ca_maxlen = ca_maxlen
-        self.ca_ready_maxlen = ca_ready_maxlen if ca_ready_maxlen is not None else ca_maxlen
-        # CA-ReadyQueue：无锁 SPSC deque（单生产者 decoder / 单消费者 dispatcher）
-        self.ca_ready: Deque[Frame] = deque(maxlen=self.ca_ready_maxlen)
-        self.frames_dropped_ready: int = 0
-        # CA-RawQueue（由 _raw_lock 保护）
-        self.ca_raw: Deque[Frame] = deque(maxlen=ca_maxlen)
-        self.frames_dropped_raw: int = 0
         # CA-ProcessedQueue（由 _viz_lock 保护）
         self.ca_processed: Deque[Frame] = deque(maxlen=ca_maxlen)
         self.frames_dropped_processed: int = 0
         self.ca_segment_len = ca_segment_len
 
-        # 压力日志（[PRESSURE]）：三条队列物理存于本对象，故由本对象上报（每资源单一所有者），
-        # 检查点在各 append_* 内部——不散到 decoder/viz worker 各生产者去，也不为此另起线程：
-        # 写者线程顺带驱动即可。周期快照形态（每 10s 至多一条、平稳时静默），
-        # 故只有 run 在跑（有人写队列）时才会汇报，run 停了自然静默。
-        # raw / processed 由 sweeper 整段拉走，深度在 0~1 段之间来回是常态：水位至少 1.5 段
-        # （sweeper 落后半段才算压力），否则段长 = 半缓存时每段都误报。不超过 ca_maxlen。
+        # 压力日志（[PRESSURE]）：processed 由 sweeper 整段拉走，深度在 0~1 段之间来回是常态：
+        # 水位至少 1.5 段（sweeper 落后半段才算压力），否则段长 = 半缓存时每段都误报。不超过 ca_maxlen。
         self._pressure_watermark: int = max(1, min(
             ca_maxlen,
             max(int(ca_maxlen * DEFAULT_HIGH_WATERMARK_RATIO), ca_segment_len * 3 // 2),
         ))
-        self._ready_watermark: int = max(1, int(self.ca_ready_maxlen * DEFAULT_HIGH_WATERMARK_RATIO))
-        _identity = {
-            "task_id": run.task_id if run else None,
-            "step_id": run.step_id if run else None,
-            "stage": stage,
-        }
-        self._ready_pressure = PressureReporter(
-            "client_queues", "ca_ready", identity=_identity,
-        )
-        self._raw_pressure = PressureReporter(
-            "client_queues", "ca_raw", identity=_identity,
-        )
         self._processed_pressure = PressureReporter(
-            "client_queues", "ca_processed", identity=_identity,
+            "client_queues", "ca_processed",
+            identity={
+                "task_id": run.task_id if run else None,
+                "step_id": run.step_id if run else None,
+                "stage": stage,
+            },
         )
 
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
@@ -213,115 +166,6 @@ class ClientQueues:
 
     # --- 封装操作方法 ---
 
-    def append_ca_ready_with_throttle(self, frame_data: Frame) -> bool:
-        """
-        添加帧到待推理队列（整数倍率均匀抽帧 + 背压）。
-
-        输入为 ffmpeg 规范化后的 CFR 流：CFR 已把时间烙成等距帧号，故按**帧计数**「每 N 帧
-        留 1」即精确均匀降采样（N=inference_decimation），不依赖 wall-clock —— 消除解码线程
-        调度抖动导致的真实率漂移（旧墙钟门把 15 漏成 ~12）。整数计数天然精确、无浮点累积误差。
-        （整数因子只命中 raw_fps 的整除率；非整除比走不了，模型侧另按 ts 重采样到契约帧率。）
-
-        ca_ready 为无锁 SPSC deque，decoder 是唯一写入方，dispatcher 是唯一消费方。
-        _decimate_counter 仅由本方法（decoder 线程）读写，无并发，不加锁。
-        """
-        # 写门：非 ACTIVE（拆除中/已关）拒写——在推进计数器之前拒，避免 late 帧扰动抽帧节奏。
-        if self._state is not RunState.ACTIVE:
-            return False
-
-        # 1. 整数倍率选帧：计数器每输入帧 +1，攒满 N 帧放行 1 帧（保留率精确 = 1/N）。
-        self._decimate_counter += 1
-        if self._decimate_counter < self.inference_decimation:
-            return False
-        self._decimate_counter = 0
-
-        # 2. 背压：仅对选中帧生效——推理队列满则丢（过载语义同旧）。
-        max_len = self.ca_ready.maxlen
-        if max_len is not None and len(self.ca_ready) >= max_len:
-            self.frames_dropped_ready += 1
-            self._observe_ready_pressure()
-            return False
-
-        self.ca_ready.append(frame_data)
-        self._observe_ready_pressure()
-        return True
-
-    def _observe_ready_pressure(self) -> None:
-        """ca_ready 压力观测（仅在放行/满拒两条路径调用，抽帧跳过的帧不观测）。
-
-        无锁 SPSC：读 len 与 [0] 都可能与 dispatcher 的 popleft 交错，取到的是"某一瞬间的
-        近似"——压力观测本就只需要量级，IndexError 兜住即可（比为它加锁划算得多）。
-
-        注：decoder 在写入**之前**还有一道自己的准入背压（占用率越线就主动丢，计
-        `ingress_backpressure`），那是它自己的决策与计数；本行只报队列积压本身。
-        """
-        depth = len(self.ca_ready)
-        oldest_ts = None
-        if depth >= self._ready_watermark:
-            try:
-                oldest_ts = self.ca_ready[0].timestamp
-            except IndexError:  # pragma: no cover - 与消费者 popleft 交错
-                pass
-        self._report_queue_pressure(
-            self._ready_pressure, depth, oldest_ts, self.frames_dropped_ready,
-            capacity=self.ca_ready_maxlen, watermark=self._ready_watermark,
-        )
-
-    def _report_queue_pressure(
-        self,
-        reporter: PressureReporter,
-        depth: int,
-        oldest_ts: Optional[float],
-        drop_total: int,
-        *,
-        capacity: Optional[int] = None,
-        watermark: Optional[int] = None,
-    ) -> None:
-        """三条 CA 队列共用的上报形状（**必须在队列锁外调用**）。
-
-        谓词只写水位；"累计丢帧仍在涨"由 reporter 自己并入判定（见 pressure.py）。
-        oldest_age_ms 用墙钟算（帧 ts 是墙钟），压力持续时间由 reporter 用单调钟算。
-        capacity / watermark 缺省取 ca_raw / ca_processed 的口径（ca_maxlen）。
-        """
-        if capacity is None:
-            capacity = self.ca_maxlen
-        if watermark is None:
-            watermark = self._pressure_watermark
-        reporter.observe(
-            depth >= watermark,
-            reason=REASON_QUEUE_HIGH_WATERMARK,
-            depth=depth,
-            capacity=capacity,
-            utilization=(depth / capacity) if capacity else None,
-            oldest_age_ms=((time.time() - oldest_ts) * 1000.0) if oldest_ts is not None else None,
-            drop_total=drop_total,
-        )
-
-    def append_ca_raw(self, frame_data: Frame) -> bool:
-        """
-        添加原始帧到落盘缓冲，同时更新最新原始帧缓存（纯缓冲，不触发落盘）。
-
-        分段落盘由 recording 的 SegmentSweeper 周期 take_raw_segment() 拉取，
-        本方法只管入队 + 丢帧计数 + 刷新 latest_raw_frame。返回是否入队（非 ACTIVE 拒）。
-        """
-        # 写门：非 ACTIVE 拒写（拆除中 raw 也停——残段由 recording 的 flush_residual 收尾）
-        if self._state is not RunState.ACTIVE:
-            return False
-        with self._raw_lock:
-            if self.ca_raw.maxlen is not None and len(self.ca_raw) >= self.ca_raw.maxlen:
-                self.frames_dropped_raw += 1
-                frame_drop_total.labels(reason="raw_backpressure").inc()
-            self.ca_raw.append(frame_data)
-            self.latest_raw_frame = frame_data.frame
-            self.latest_raw_timestamp = frame_data.timestamp
-            # 锁内只取标量快照（队头 ts 仅在越水位时多读一次，平稳期不付代价）
-            depth = len(self.ca_raw)
-            drops = self.frames_dropped_raw
-            oldest_ts = self.ca_raw[0].timestamp if depth >= self._pressure_watermark else None
-        # 锁外上报
-        self._report_queue_pressure(self._raw_pressure, depth, oldest_ts, drops)
-        return True
-
     def append_ca_processed(self, frame_data: Frame) -> None:
         """
         添加处理帧到落盘缓冲（纯缓冲，不触发落盘）。
@@ -340,14 +184,22 @@ class ClientQueues:
                 self.frames_dropped_processed += 1
                 frame_drop_total.labels(reason="hls_backpressure").inc()
             self.ca_processed.append(frame_data)
-            # 锁内只取标量快照（同 append_ca_raw）
+            # 锁内只取标量快照（队头 ts 仅在越水位时多读一次，平稳期不付代价）
             depth = len(self.ca_processed)
             drops = self.frames_dropped_processed
             oldest_ts = (
                 self.ca_processed[0].timestamp if depth >= self._pressure_watermark else None
             )
-        # 锁外上报
-        self._report_queue_pressure(self._processed_pressure, depth, oldest_ts, drops)
+        # 锁外上报：谓词只写水位，"累计丢帧仍在涨"由 reporter 并入判定（见 pressure.py）
+        self._processed_pressure.observe(
+            depth >= self._pressure_watermark,
+            reason=REASON_QUEUE_HIGH_WATERMARK,
+            depth=depth,
+            capacity=self.ca_maxlen,
+            utilization=(depth / self.ca_maxlen) if self.ca_maxlen else None,
+            oldest_age_ms=((time.time() - oldest_ts) * 1000.0) if oldest_ts is not None else None,
+            drop_total=drops,
+        )
 
     def set_latest_rendered(self, frame_data: Optional[Frame]) -> None:
         """更新最新渲染帧（由 VisualizationWorker 调用）。传 None 表示清空。
@@ -368,45 +220,22 @@ class ClientQueues:
         with self._viz_lock:
             return self._latest_rendered
 
-    def get_latest_frame(self) -> Optional[np.ndarray]:
-        """获取最新原始帧（用于可视化）。"""
-        with self._raw_lock:
-            if self.latest_raw_frame is not None:
-                return self.latest_raw_frame.copy()
-            return None
-
     def get_queue_depths(self) -> dict:
         return {
-            "ca_ready": len(self.ca_ready),
-            "ca_raw": len(self.ca_raw),
+            "ca_ready": len(self.sess.channel(READY)),
+            "ca_raw": len(self.sess.channel(RAW)),
             "ca_processed": len(self.ca_processed),
             "ca_detections": len(self.ca_detections),
             "has_rendered": self._latest_rendered is not None,
         }
 
-    def drain_ca_raw(self, until_ts: Optional[float] = None) -> List[Frame]:
-        """原子排空 ca_raw 队列（线程安全，供 flush 使用）。
+    def drain_ca_processed(self, until_ts: Optional[float] = None) -> List[Frame]:
+        """原子排空 ca_processed 队列（线程安全，供 flush 使用）。
 
         Args:
             until_ts: 时间戳栅栏（epoch 秒）。`None` = 全排空（拆除期语义，队列不会再进新帧）；
                 给值则只弹出队首那段 `timestamp <= until_ts` 的连续前缀，其余留在队列里。
-
-        栅栏是给**断流 flush** 用的：重连期队列仍在进新帧，全排空会把重连后的帧一起切进残段，
-        该段又横跨 gap（`effective_fps` 由首末帧跨度反推，被 gap 拉低 = 慢放），正是 flush
-        要消灭的东西。栅栏取"断流前最后一帧的 ts"，与调用时机、与此前拉走了多少整段都无关。
         """
-        with self._raw_lock:
-            if until_ts is None:
-                frames = list(self.ca_raw)
-                self.ca_raw.clear()
-                return frames
-            taken: List[Frame] = []
-            while self.ca_raw and self.ca_raw[0].timestamp <= until_ts:
-                taken.append(self.ca_raw.popleft())
-            return taken
-
-    def drain_ca_processed(self, until_ts: Optional[float] = None) -> List[Frame]:
-        """原子排空 ca_processed 队列（线程安全，供 flush 使用）。语义同 `drain_ca_raw`。"""
         with self._viz_lock:
             if until_ts is None:
                 frames = list(self.ca_processed)
@@ -416,17 +245,6 @@ class ClientQueues:
             while self.ca_processed and self.ca_processed[0].timestamp <= until_ts:
                 taken.append(self.ca_processed.popleft())
             return taken
-
-    def take_raw_segment(self) -> Optional[List[Frame]]:
-        """缓冲攒满一整段(ca_segment_len 帧)则原子弹出，否则 None。
-
-        供 recording 的 SegmentSweeper 周期拉取。与 append_ca_raw / drain_ca_raw /
-        _release_payload 同走 _raw_lock，互斥安全。
-        """
-        with self._raw_lock:
-            if len(self.ca_raw) < self.ca_segment_len:
-                return None
-            return [self.ca_raw.popleft() for _ in range(self.ca_segment_len)]
 
     def take_processed_segment(self) -> Optional[List[Frame]]:
         """缓冲攒满一整段则原子弹出，否则 None（供 recording 的 SegmentSweeper 周期拉取）。"""
@@ -449,25 +267,16 @@ class ClientQueues:
     def mark_startup_milestone(self, name: str) -> None:
         """记录某启动里程碑首次到达（相对 run 起始 task_started_at 的耗时），仅首次记录、幂等。
 
-        name ∈ {"first_frame"(拉流首帧) / "first_inference"(首个推理写回) / "first_rendered"(首个渲染帧就绪)}。
-        三条日志的 +Xms 相减即得启动延迟三段：A=first_frame（拉流建立，通常大头）、
-        B=first_inference−first_frame（首帧→推理）、C=first_rendered−first_inference（推理→
-        渲染标注→首个可供 WS 推送前端的画面）。三段合计 ≈ 用户从请求到「看到第一帧」的等待。
-        （告警段 = actor 相位 + 算子 window_seconds 算法固有累积，非启动优化对象，不埋。）
-
-        设计：无锁，已记录直接返回——每个 name 单一生产者线程，first-wins 天然无竞态；
-        故可在热路径每帧/每批自由调用，首次之后开销仅一次 set 查询；纯日志，不参与数据流。
-        task_started_at 未置（裸建单测）则跳过。
+        name ∈ {"first_inference"(首个推理写回) / "first_rendered"(首个渲染帧就绪)}；
+        first_frame 由 decoder 自行判断首次。task_started_at 未置（裸建单测）则跳过。
         """
         if name in self._startup_marks:
             return
         if self.task_started_at <= 0.0:
             return
         self._startup_marks.add(name)
-        elapsed_ms = (time.time() - self.task_started_at) * 1000.0
-        _startup_logger.info(
-            "[startup] task=%s step=%s %s +%.0fms",
-            self.run.task_id, self.run.step_id, name, elapsed_ms,
+        log_milestone(
+            name, task_id=self.run.task_id, step_id=self.run.step_id, started_at=self.task_started_at,
         )
 
     def to_draining(self) -> bool:
@@ -478,10 +287,11 @@ class ClientQueues:
         with self._state_lock:
             if self._state is RunState.ACTIVE:
                 self._state = RunState.DRAINING
-                self._reset_pressure()
                 changed = True
             else:
                 changed = False
+        if changed:
+            self._processed_pressure.reset()
         self.sess.seal()
         return changed
 
@@ -492,47 +302,30 @@ class ClientQueues:
         """
         with self._state_lock:
             self._state = RunState.CLOSED
-            self._reset_pressure()
+        self._processed_pressure.reset()
         self._release_payload()
         self.sess.close()
-
-    def _reset_pressure(self) -> None:
-        """run 拆除时静默清三条队列的压力计时与 delta 基线（不打日志）。"""
-        self._ready_pressure.reset()
-        self._raw_pressure.reset()
-        self._processed_pressure.reset()
 
     def clear(self) -> None:
         """兼容入口：等价 `close()`（供 ClientService.remove/remove_if/clear_all 调用）。"""
         self.close()
 
     def _release_payload(self) -> None:
-        """原子释放所有队列和重数据缓存（按全清顺序持 6 把 payload 锁）。
+        """原子释放所有队列和重数据缓存（按全清顺序持 payload 锁）。
 
         身份（task/task_id/step_id/source_ip/stage）不可变，不在此重置——仅释放
-        payload（帧/滑窗/告警/快照）回收内存（尤其大块 numpy 帧）。
+        payload（帧/告警/快照）回收内存（尤其大块 numpy 帧）。
         """
-        locks = [
-            self._raw_lock, self._viz_lock,
-            self._slide_window_lock, self._alarm_lock,
-        ]
+        locks = [self._viz_lock, self._slide_window_lock, self._alarm_lock]
         with contextlib.ExitStack() as stack:
             for lock in locks:
                 stack.enter_context(lock)
-            self.ca_ready.clear()
-            self.ca_raw.clear()
             self.ca_processed.clear()
-            self.latest_raw_frame = None
-            self.latest_raw_timestamp = time.time()
             self._latest_rendered = None
             self.ca_detections.clear()
             self._alarm_log.clear()
             self._alarm_seq = 0
             self._alarm_gate.clear()
-
-    def pop_ca_ready(self) -> Optional[Frame]:
-        """从推理队列弹出一帧（FIFO，无锁 SPSC）"""
-        return self.ca_ready.popleft() if self.ca_ready else None
 
     # 身份字段（task_id/step_id/source_ip/stage）均为构造定死的不可变
     # 公有属性，直读即可——不再提供 get_* 包装（避免只覆盖一部分、直连/getter 混用的不一致）。
@@ -562,7 +355,7 @@ class ClientQueues:
     def drain_ca_detections(self) -> List[FrameDetection]:
         """原子排空落盘缓冲（由 recording 的 sweeper 每 tick 调）。
 
-        **没有 `until_ts` 栅栏**，与 `drain_ca_raw` 的不对称是有意的：栅栏是给断流用的，
+        **没有 `until_ts` 栅栏**，与帧队列的不对称是有意的：栅栏是给断流用的，
         而它要挡的是"一段视频横跨 gap 被 `effective_fps` 反推成慢放"——detections 每帧一行、
         行间无依赖，断流在序列里就是一个 ts 空洞，离线按 ts 自行处理。
         """

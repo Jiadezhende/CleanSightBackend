@@ -8,6 +8,7 @@ import pytest
 import factories
 from app import main as app_main
 from app.services.client.config import ClientConfig, FrameConfig, StateConfig
+from app.services.session.topics import RAW, READY
 from app.services.utils import memory_budget
 from app.services.utils.memory_budget import MemoryPlan, estimate, read_mem_available
 
@@ -25,23 +26,19 @@ def test_client_config_derives_shallow_ready_cap():
     cfg = ClientConfig(frame=FrameConfig(), state=StateConfig())
     assert cfg.ca_maxlen == 20 * 30          # ca_maxlen_seconds=20 × raw_fps
     assert cfg.ca_ready_maxlen == 30         # 2s × inference_fps(15)
-    assert cfg.cq_kwargs()["ca_ready_maxlen"] == 30
 
 
-def test_ready_cap_is_independent_of_raw_cap():
-    cq = factories.make_cq(ca_maxlen=10, ca_ready_maxlen=2, inference_decimation=1)
+def test_ready_cap_is_independent_of_raw_cap(topic_sizes):
+    topic_sizes(ca_maxlen=10, ca_ready_maxlen=2)
+    sess = factories.make_cq().sess
+    ready, raw = sess.channel(READY), sess.channel(RAW)
     for i in range(5):
         f = factories.make_frame(ts=float(i))
-        cq.append_ca_raw(f)
-        cq.append_ca_ready_with_throttle(f)
-    assert len(cq.ca_ready) == 2
-    assert cq.frames_dropped_ready == 3
-    assert len(cq.ca_raw) == 5
-
-
-def test_ready_cap_defaults_to_ca_maxlen_for_bare_cq():
-    cq = factories.make_bare_cq(ca_maxlen=7)
-    assert cq.ca_ready.maxlen == 7
+        raw.push(f)
+        ready.push(f)
+    assert len(ready) == 2
+    assert ready.drops == 3
+    assert len(raw) == 5
 
 
 # ---------------------------------------------------------------------------

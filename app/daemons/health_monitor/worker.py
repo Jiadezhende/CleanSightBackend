@@ -8,7 +8,7 @@
 4. 检测孤儿流（有 ClientQueues 但没有 Decoder）
 
 职责：
-- 监控流健康（读取 ClientQueues.latest_raw_timestamp）
+- 监控流健康（读取 LATEST_RAW 的最后一帧 ts）
 - 自动重连（重启流解码器）
 - 孤儿流检测（定期清理无 Decoder 的客户端）
 - 完整清理（协调多个模块，类似 API 层）
@@ -23,6 +23,14 @@ from .config import HealthMonitorConfig
 from .types import ReconnectState
 
 logger = logging.getLogger(__name__)
+
+
+def _last_frame_ts(cq) -> float:
+    """该 run 最后一帧的 ts（epoch 秒）；还没来过帧则取 run 起始时刻。"""
+    from app.services.session.topics import LATEST_RAW
+
+    latest = cq.sess.channel(LATEST_RAW).get()
+    return latest.ts if latest is not None else cq.sess.info.started_at
 
 
 class HealthMonitorWorker:
@@ -256,7 +264,7 @@ class HealthMonitorWorker:
                 # 判据 = decoder 子进程死活（非帧 staleness）。实测：RTSP 断流时 ffmpeg 从 TCP
                 # 控制通道即收 EOF 退出（且 -timeout 兜底把真挂死也转成退出），故「进程是否活」
                 # 能干净区分：进程死=断流/崩溃(该重启)，进程活但无帧=等首个关键帧/瞬时停(该等)。
-                last_frame_time = cq.latest_raw_timestamp
+                last_frame_time = _last_frame_ts(cq)
                 idle_time = current_time - last_frame_time
 
                 if not self._stream_service.is_decoder_alive(task_id):
@@ -343,7 +351,7 @@ class HealthMonitorWorker:
 
         # 成功判定 = 真的来了新帧（不是「进程活着」——respawn 后新进程还在等首个关键帧时
         # 也活着但无帧，此刻不能判成功、更不能重杀）。新帧须足够新，避免读到陈旧 ts 误判。
-        new_frame_time = cq.latest_raw_timestamp
+        new_frame_time = _last_frame_ts(cq)
         if new_frame_time > state.last_frame_time_before_disconnect:
             frame_age = current_time - new_frame_time
             # 新鲜度阈值复用 heartbeat_timeout（此处直读而非另起别名：别名会把
@@ -530,9 +538,9 @@ class HealthMonitorWorker:
             cq: ClientQueues 实例
             current_time: 当前时间戳
         """
-        # 空闲时长直接由帧 ts 算（不另存"最后活跃时间"：cq.latest_raw_timestamp 本身就是它，
+        # 空闲时长直接由帧 ts 算（不另存"最后活跃时间"：最后一帧 ts 本身就是它，
         # 再存一份只会多一处要同步的状态）
-        idle_time = current_time - cq.latest_raw_timestamp
+        idle_time = current_time - _last_frame_ts(cq)
 
         # 如果超过孤儿流超时时间，执行完整清理
         if idle_time >= self.config.orphan_timeout:

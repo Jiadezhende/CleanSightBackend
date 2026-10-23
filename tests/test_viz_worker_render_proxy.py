@@ -7,6 +7,7 @@ import numpy as np
 from factories import make_cq, make_detector_output, make_frame, make_frame_detection
 from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 from app.services.inference.online.topics import LATEST_DETECTION, VIZ_LAST_TS
+from app.services.session.topics import LATEST_RAW
 from app.services.inference.online.visualization.visualization_worker import VisualizationWorker
 
 
@@ -51,7 +52,7 @@ class FakeClients:
 
 def _setup(monkeypatch, proxy, ts=10.0):
     cq = make_cq(task_id=1, stage="2")
-    cq.append_ca_raw(make_frame(ts=ts - 0.01, shape=(16, 16, 3)))
+    cq.sess.channel(LATEST_RAW).set(make_frame(ts=ts - 0.01, shape=(16, 16, 3)))
     cq.sess.channel(LATEST_DETECTION).set(make_frame_detection(
         ts=ts, by_source={"clean_large": make_detector_output(n=1, ts=ts)},
     ))

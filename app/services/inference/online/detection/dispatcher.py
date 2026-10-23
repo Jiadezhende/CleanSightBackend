@@ -18,6 +18,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 from app.services.client.instance import client_service
 from app.services.client.service import ClientService
 from app.services.inference.online.types import DetectionTask
+from app.services.session.topics import READY
 from app.services.utils.metrics import frame_drop_total
 from app.services.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
@@ -158,9 +159,8 @@ class StageAwareDispatcher:
         # ClientService.snapshot() 返回字典副本，迭代安全
         clients = self._client_service.snapshot()
         for task_id, cq in clients.items():
-            # 从 ca_ready 队列取一帧（FIFO，保证公平）
-            # 使用封装方法，避免直接访问内部队列
-            frame_data = cq.pop_ca_ready()
+            # 从 READY 取一帧（FIFO，保证公平）
+            frame_data = cq.sess.channel(READY).pop()
             if frame_data is None:
                 # 队列为空或并发场景下被其他线程取走
                 continue
@@ -173,7 +173,7 @@ class StageAwareDispatcher:
                 continue
 
             # 构造推理请求：捕获该 CQ 句柄随请求同行，写回凭它投递、不反查
-            # （cq 即当前 snapshot 迭代出的对象，与 pop_ca_ready() 同源）。
+            # （cq 即当前 snapshot 迭代出的对象，与上面取帧的 session 同源）。
             req = DetectionTask(
                 task_id=task_id,
                 stage=stage,

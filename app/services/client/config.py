@@ -128,9 +128,7 @@ class ClientConfig:
         return {
             "resize_width": self.frame.resize_width,
             "resize_height": self.frame.resize_height,
-            "inference_decimation": self.inference_decimation,
             "ca_maxlen": self.ca_maxlen,
-            "ca_ready_maxlen": self.ca_ready_maxlen,
             "ca_segment_len": self.ca_segment_len,
         }
 

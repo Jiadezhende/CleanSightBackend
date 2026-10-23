@@ -4,7 +4,7 @@
 - 按固定间隔（tick_interval）轮询所有活跃客户端
 - 从 ClientQueues 主动拉取三要素：
   - LATEST_DETECTION           → 原子推理快照（所有 task 同帧一致）
-  - cq.get_latest_frame()      → 最新原始帧
+  - LATEST_RAW                 → 最新原始帧
   - LATEST_TEMPORAL            → 最新时序事件
 - 渲染检测框、标注、文字信息到最新帧上：有渲染子进程池（render_proxy）时交给子进程，
   每 run 至多一个在途、下一 tick 收回结果；池未就绪 / 帧放不进槽位时在本线程用 FixedVisualizer 就地渲染
@@ -27,6 +27,7 @@ from app.services.inference.online.render import RenderSpec
 from app.types.frame import Frame
 from app.services.inference.online.naming import get_stage_alias
 from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL, VIZ_LAST_TS
+from app.services.session.topics import LATEST_RAW
 from app.services.client.instance import client_service
 from app.services.utils.worker_guard import guarded_run
 from .visualizer import FixedVisualizer
@@ -184,10 +185,11 @@ class VisualizationWorker:
         if proxy is not None and proxy.in_flight(task_id):
             return
 
-        # 4. 获取最新原始帧
-        frame = cq.get_latest_frame()
-        if frame is None:
+        # 4. 获取最新原始帧（拷一份：渲染不改原帧，但同一帧还在录像 / 推理队列里）
+        latest_raw = sess.channel(LATEST_RAW).get()
+        if latest_raw is None:
             return
+        frame = latest_raw.frame.copy()
 
         # 5. 获取最新时序事件
         events = sess.channel(LATEST_TEMPORAL).get()

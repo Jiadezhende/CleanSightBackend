@@ -34,6 +34,7 @@ from app.types.detection import FrameDetection
 from app.types.frame import Frame
 from app.types.run import RunIdentity
 from app.storage import hls, inference
+from app.services.session.topics import RAW
 from app.services.utils.task_queue import SerialTaskQueue
 from app.services.utils.metrics import frame_drop_total
 
@@ -265,7 +266,7 @@ class RecordingService:
         with self._collect_lock:
             seg_len = cq.ca_segment_len
             for track, frames in (
-                ("raw", cq.drain_ca_raw(until_ts)),
+                ("raw", cq.sess.channel(RAW).drain(until_ts)),
                 ("processed", cq.drain_ca_processed(until_ts)),
             ):
                 for i in range(0, len(frames), seg_len):
@@ -289,7 +290,7 @@ class RecordingService:
             return
 
         with self._collect_lock:
-            while (seg := cq.take_raw_segment()) is not None:
+            while (seg := cq.sess.channel(RAW).take(cq.ca_segment_len)) is not None:
                 self.submit_segment(cq, "raw", seg)
             while (seg := cq.take_processed_segment()) is not None:
                 self.submit_segment(cq, "processed", seg)

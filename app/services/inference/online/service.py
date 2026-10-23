@@ -9,7 +9,7 @@
 数据流（topic 声明见 topics.py）：
 InferenceLoop → DETECTION_WINDOW + LATEST_DETECTION  [双写]
 TemporalActor (2Hz)  → DETECTION_WINDOW → operator.analyze() → operator.judge() → LATEST_TEMPORAL
-VisualizationWorker (~15Hz) → LATEST_DETECTION + get_latest_frame() + LATEST_TEMPORAL → render → cq
+VisualizationWorker (~15Hz) → LATEST_DETECTION + LATEST_RAW + LATEST_TEMPORAL → render → cq
 """
 
 import logging

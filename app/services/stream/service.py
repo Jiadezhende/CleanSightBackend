@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
 from app.services.client.instance import client_service
+from app.services.session.topics import READY
 from app.settings import settings
 from app.types.exceptions import ConflictError, StreamConnectionError
 
@@ -367,26 +368,10 @@ class StreamService:
         原因：CA-Raw-Queue 用于落盘，即使满了也不应阻塞拉流
               CA-Ready-Queue 用于推理，如果满了说明推理跟不上，需要丢帧
         """
-        # 先检查客户端是否存在
-        if not client_service.has_client(task_id):
-            return 0
-
         client_queues = client_service.get(task_id)
         if client_queues is None:
-            logger.warning(
-                f"[BACKPRESSURE] client_queues is None for task_id={task_id}"
-            )
             return 0
-
-        depths = client_queues.get_queue_depths()
-        if not depths:
-            logger.warning(
-                f"[BACKPRESSURE] get_queue_depths returned empty for task_id={task_id}"
-            )
-            return 0
-
-        # 返回 CA-Ready-Queue（推理队列）深度
-        return depths.get("ca_ready", 0)
+        return len(client_queues.sess.channel(READY))
 
     def shutdown(self):
         """优雅关闭服务，同步等待所有 FFmpeg 解码器退出。

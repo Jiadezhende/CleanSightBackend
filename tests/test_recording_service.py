@@ -18,6 +18,7 @@ import pytest
 
 import factories
 from app.types.run import RunIdentity
+from app.services.session.topics import RAW
 from app.services.recording import service as recording_service_module
 from app.services.recording.sweep_worker import SegmentSweeper
 from app.services.recording.config import RecordingConfig
@@ -30,6 +31,32 @@ from app.settings import settings
 # ---------------------------------------------------------------------------
 
 
+class _FakeFrameChannel:
+    """帧 Fifo 替身：`take(n)` 依次弹出预置的整段，`drain(until_ts)` 按栅栏取残帧。"""
+
+    def __init__(self, cq, track):
+        self._cq = cq
+        self._track = track
+
+    def take(self, n):
+        segs = getattr(self._cq, f"{self._track}_segments")
+        return segs.pop(0) if segs else None
+
+    def drain(self, until_ts=None):
+        attr = f"{self._track}_residual"
+        left, out = _split_at_fence(getattr(self._cq, attr), until_ts)
+        setattr(self._cq, attr, left)
+        return out
+
+
+class _FakeSession:
+    def __init__(self, cq):
+        self._channels = {RAW: _FakeFrameChannel(cq, "raw")}
+
+    def channel(self, topic):
+        return self._channels[topic]
+
+
 class FakeCQ:
     """够用的 CQ：`run` 身份 + 取段 / drain 残帧。`bound=False` 造未绑定 run 的 CQ。"""
 
@@ -40,24 +67,18 @@ class FakeCQ:
         self.run = run
         self.ca_segment_len = ca_segment_len
         self.name = name
-        self.raw_segments = []          # take_raw_segment 依次弹出
+        self.raw_segments = []          # RAW.take 依次弹出
         self.processed_segments = []
-        self.raw_residual = []          # drain_ca_raw 一次性取走
+        self.raw_residual = []          # RAW.drain 按栅栏取走
         self.processed_residual = []
         self.detections = []              # drain_ca_detections 一次性取走
+        self.sess = _FakeSession(self)
 
     def __repr__(self):                 # 让失败信息可读
         return f"<FakeCQ {self.name} run={self.run}>"
 
-    def take_raw_segment(self):
-        return self.raw_segments.pop(0) if self.raw_segments else None
-
     def take_processed_segment(self):
         return self.processed_segments.pop(0) if self.processed_segments else None
-
-    def drain_ca_raw(self, until_ts=None):
-        self.raw_residual, out = _split_at_fence(self.raw_residual, until_ts)
-        return out
 
     def drain_ca_processed(self, until_ts=None):
         self.processed_residual, out = _split_at_fence(self.processed_residual, until_ts)
@@ -69,7 +90,7 @@ class FakeCQ:
 
 
 def _split_at_fence(residual, until_ts):
-    """复刻 `ClientQueues.drain_ca_*` 的栅栏语义：`None` 全取，否则只取队首前缀。
+    """复刻帧队列 drain 的栅栏语义：`None` 全取，否则只取队首前缀。
 
     返回 `(留下的, 取走的)`。
     """

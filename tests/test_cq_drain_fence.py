@@ -1,23 +1,28 @@
-"""`ClientQueues.drain_ca_*` 的时间戳栅栏 —— 断流 flush 的切点。
+"""帧队列的时间戳栅栏 —— 断流 flush 的切点（raw 轨走 `RAW` topic，processed 轨仍在 CQ）。
 
-栅栏是 P1-a（进重连时切出残帧段）的落点：重连**不拆除** CQ，所以 flush 的那一刻队列还在
+栅栏是 P1-a（进重连时切出残帧段）的落点：重连**不拆除** run，所以 flush 的那一刻队列还在
 进新帧。全排空会把重连后的帧跟断流前的帧拼进同一段，而 `effective_fps` 由首末帧跨度反推、
 跨度里混着整个 gap —— 10 秒画面被写成 30 秒慢放，且 fps 仍落在合理带 [1,60] 内、不触发
 退化兜底，全程无一条报警。
 
 栅栏取"断流前最后一帧的 ts"，与调用时机、与此前拉走了多少整段都无关。
 
-文件末尾附 `take_*_segment`：录制周期拉整段的另一条出队路径（drain 只切残段）。
+文件末尾附整段拉取：录制周期拉整段的另一条出队路径（drain 只切残段）。
 """
 
 import pytest
 from factories import make_cq, make_frame
+from app.services.session.topics import RAW
 
 
 def _fill(cq, timestamps):
     for ts in timestamps:
-        cq.append_ca_raw(make_frame(ts=ts))
+        cq.sess.channel(RAW).push(make_frame(ts=ts))
         cq.append_ca_processed(make_frame(ts=ts))
+
+
+def _raw(cq):
+    return cq.sess.channel(RAW)
 
 
 def test_none_fence_drains_everything():
@@ -25,9 +30,9 @@ def test_none_fence_drains_everything():
     cq = make_cq()
     _fill(cq, [1700.0, 1700.1, 1700.2])
 
-    assert len(cq.drain_ca_raw()) == 3
+    assert len(_raw(cq).drain()) == 3
     assert len(cq.drain_ca_processed()) == 3
-    assert len(cq.ca_raw) == 0
+    assert len(_raw(cq)) == 0
     assert len(cq.ca_processed) == 0
 
 
@@ -35,11 +40,11 @@ def test_fence_takes_only_the_prefix_before_it():
     cq = make_cq()
     _fill(cq, [1700.0, 1700.1, 1700.2, 1720.0, 1720.1])   # gap 20s
 
-    taken = cq.drain_ca_raw(until_ts=1700.2)
+    taken = _raw(cq).drain(until_ts=1700.2)
 
     # 闭区间：栅栏值就是断流前最后一帧的 ts，那一帧必须被取走
     assert [f.timestamp for f in taken] == [1700.0, 1700.1, 1700.2]
-    assert [f.timestamp for f in cq.ca_raw] == [1720.0, 1720.1], (
+    assert [f.timestamp for f in _raw(cq).drain()] == [1720.0, 1720.1], (
         "重连后的帧必须留在队列里，等 sweeper 照常拉整段"
     )
 
@@ -48,8 +53,8 @@ def test_fence_before_everything_takes_nothing():
     cq = make_cq()
     _fill(cq, [1700.0, 1700.1])
 
-    assert cq.drain_ca_raw(until_ts=1699.0) == []
-    assert len(cq.ca_raw) == 2
+    assert _raw(cq).drain(until_ts=1699.0) == []
+    assert len(_raw(cq)) == 2
 
 
 def test_fence_stops_at_the_first_frame_past_it():
@@ -60,10 +65,10 @@ def test_fence_stops_at_the_first_frame_past_it():
     cq = make_cq()
     _fill(cq, [1700.0, 1720.0, 1700.1])   # 第三帧 ts 回退（不该发生，但别静默挖洞）
 
-    taken = cq.drain_ca_raw(until_ts=1700.5)
+    taken = _raw(cq).drain(until_ts=1700.5)
 
     assert [f.timestamp for f in taken] == [1700.0]
-    assert [f.timestamp for f in cq.ca_raw] == [1720.0, 1700.1]
+    assert [f.timestamp for f in _raw(cq).drain()] == [1720.0, 1700.1]
 
 
 def test_processed_track_uses_the_same_fence():
@@ -76,11 +81,21 @@ def test_processed_track_uses_the_same_fence():
     assert [f.timestamp for f in cq.ca_processed] == [1720.0]
 
 
-# --- 整段拉取：take_*_segment（录制周期拉取，攒满 ca_segment_len 才出队）---
+# --- 整段拉取（录制周期拉取，攒满段长才出队）---
 
-_TRACKS = pytest.mark.parametrize(
-    "take, queue", [("take_raw_segment", "ca_raw"), ("take_processed_segment", "ca_processed")],
-)
+_TRACKS = pytest.mark.parametrize("track", ["raw", "processed"])
+
+
+def _take(cq, track):
+    if track == "raw":
+        return _raw(cq).take(cq.ca_segment_len)
+    return cq.take_processed_segment()
+
+
+def _left(cq, track):
+    if track == "raw":
+        return [f.timestamp for f in _raw(cq).drain()]
+    return [f.timestamp for f in cq.ca_processed]
 
 
 def _ts(frames):
@@ -88,32 +103,32 @@ def _ts(frames):
 
 
 @_TRACKS
-def test_take_segment_pops_exactly_seg_len(take, queue):
+def test_take_segment_pops_exactly_seg_len(track):
     cq = make_cq(ca_segment_len=3)
     _fill(cq, [1.0, 2.0, 3.0, 4.0])
 
-    assert _ts(getattr(cq, take)()) == [1.0, 2.0, 3.0]
-    assert _ts(getattr(cq, queue)) == [4.0]
+    assert _ts(_take(cq, track)) == [1.0, 2.0, 3.0]
+    assert _left(cq, track) == [4.0]
 
 
 @_TRACKS
-def test_take_segment_short_returns_none_and_keeps_residual(take, queue):
+def test_take_segment_short_returns_none_and_keeps_residual(track):
     cq = make_cq(ca_segment_len=3)
     _fill(cq, [1.0, 2.0])
 
-    assert getattr(cq, take)() is None
-    assert _ts(getattr(cq, queue)) == [1.0, 2.0], "不足一段的残帧留给下一轮或断流 flush"
+    assert _take(cq, track) is None
+    assert _left(cq, track) == [1.0, 2.0], "不足一段的残帧留给下一轮或断流 flush"
 
 
 @_TRACKS
-def test_take_segment_drains_backlog_segment_by_segment(take, queue):
+def test_take_segment_drains_backlog_segment_by_segment(track):
     """积压多段时，录制侧 `while take() is not None` 能按序逐段全部拉走。"""
     cq = make_cq(ca_segment_len=2)
     _fill(cq, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
     # 定次调用而非照抄 while：实现若回 [] 而非 None，照抄会死循环而不是红
-    segs = [_ts(getattr(cq, take)()) for _ in range(3)]
+    segs = [_ts(_take(cq, track)) for _ in range(3)]
 
     assert segs == [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    assert getattr(cq, take)() is None
-    assert len(getattr(cq, queue)) == 0
+    assert _take(cq, track) is None
+    assert _left(cq, track) == []

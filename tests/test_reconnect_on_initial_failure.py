@@ -25,6 +25,27 @@ from app.daemons.health_monitor.config import HealthMonitorConfig
 from app.daemons.health_monitor.worker import HealthMonitorWorker
 from app.services.stream.service import StreamService
 from app.types.exceptions import FFmpegError
+from app.types.run import RunIdentity
+from app.services.session.core import Session, SessionInfo
+from app.services.session.topics import LATEST_RAW
+from factories import make_frame
+
+
+def _fake_cq(last_frame_ts: float) -> MagicMock:
+    """HM 读 cq.task_started_at 与 cq.sess（LATEST_RAW 的最后一帧 ts），其余 MagicMock 顶。"""
+    cq = MagicMock()
+    cq.task_started_at = 0.0
+    cq.sess = Session(SessionInfo(run=RunIdentity(1, 1, 1)))
+    _set_last_frame(cq, last_frame_ts)
+    return cq
+
+
+def _set_last_frame(cq, ts: float) -> None:
+    cq.sess.channel(LATEST_RAW).set(make_frame(ts=ts))
+
+
+def _last_frame(cq) -> float:
+    return cq.sess.channel(LATEST_RAW).get().ts
 
 
 # ===========================================================================
@@ -42,7 +63,7 @@ def _make_monitor(
 
     Args:
         client_id: 被测客户端 ID
-        mock_cq: mock 的 ClientQueues（需设置 latest_raw_timestamp）
+        mock_cq: `_fake_cq` 造的 CQ 替身（最后一帧 ts 在其 session 的 LATEST_RAW）
         active_decoder_ids: 模拟 stream_service.get_all_task_ids()（注册即算，不看死活）
         decoder_alive: 模拟 stream_service.is_decoder_alive() 返回值（新判据核心）
     """
@@ -141,10 +162,7 @@ class TestHealthMonitorReconnectPath:
     """进程死 → 重连；进程活 → 只等（不看帧 staleness）；未注册 → orphan。"""
 
     def _cq(self, seconds_ago: float = 10.0) -> MagicMock:
-        cq = MagicMock()
-        cq.latest_raw_timestamp = time.time() - seconds_ago
-        cq.task_started_at = 0.0
-        return cq
+        return _fake_cq(time.time() - seconds_ago)
 
     def test_enters_reconnect_when_decoder_process_dead(self):
         """decoder 已注册但进程已退出（is_decoder_alive=False）→ 进入重连模式。"""
@@ -175,7 +193,7 @@ class TestHealthMonitorReconnectPath:
         """
         client_id = "monitor_flush_request"
         mock_cq = self._cq(seconds_ago=10.0)
-        last_frame_ts = mock_cq.latest_raw_timestamp
+        last_frame_ts = _last_frame(mock_cq)
 
         monitor = _make_monitor(
             client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
@@ -203,14 +221,14 @@ class TestHealthMonitorReconnectPath:
         """
         client_id = "monitor_flush_on_success"
         mock_cq = self._cq(seconds_ago=10.0)
-        fence = mock_cq.latest_raw_timestamp
+        fence = _last_frame(mock_cq)
 
         monitor = _make_monitor(
             client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
         )
         monitor._check_all_clients()                     # 进重连，flush 第一次
 
-        mock_cq.latest_raw_timestamp = time.time()       # 新帧来了 → 判定重连成功
+        _set_last_frame(mock_cq, time.time())       # 新帧来了 → 判定重连成功
         monitor._check_all_clients()
 
         assert client_id not in monitor._reconnecting_clients
@@ -292,9 +310,7 @@ class TestFullReconnectScenario:
         client_id = "full_scenario_client"
         base_timestamp = time.time() - 10.0
 
-        mock_cq = MagicMock()
-        mock_cq.latest_raw_timestamp = base_timestamp
-        mock_cq.task_started_at = 0.0
+        mock_cq = _fake_cq(base_timestamp)
 
         monitor = _make_monitor(
             client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
@@ -313,7 +329,7 @@ class TestFullReconnectScenario:
         monitor._stream_service.restart_stream.assert_not_called()
 
         # 模拟推流端就绪，新帧到来
-        mock_cq.latest_raw_timestamp = time.time()
+        _set_last_frame(mock_cq, time.time())
 
         # Round 3：来了新帧 → 退出重连
         monitor._check_all_clients()
@@ -327,9 +343,7 @@ class TestFullReconnectScenario:
         # 帧已 25s 没更新（> cleanup_timeout 20s）
         base_timestamp = time.time() - 25.0
 
-        mock_cq = MagicMock()
-        mock_cq.latest_raw_timestamp = base_timestamp
-        mock_cq.task_started_at = 0.0
+        mock_cq = _fake_cq(base_timestamp)
 
         monitor = _make_monitor(
             client_id, mock_cq, active_decoder_ids={client_id}, decoder_alive=False
@@ -351,10 +365,7 @@ class TestReconnectIdentityFence:
     """进入重连捕获 cq_A；槽位被 /start 换成新 run 时，重连按对象身份放弃。"""
 
     def _cq(self, seconds_ago: float = 10.0) -> MagicMock:
-        cq = MagicMock()
-        cq.latest_raw_timestamp = time.time() - seconds_ago
-        cq.task_started_at = 0.0
-        return cq
+        return _fake_cq(time.time() - seconds_ago)
 
     def test_alive_but_silent_give_up_carries_fence(self):
         """decoder 活着但无帧超 cleanup_timeout → 放弃时必须带 expected=本轮 cq，防误拆换代后的新 run。"""
