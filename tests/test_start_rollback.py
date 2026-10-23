@@ -12,6 +12,7 @@ import pytest
 from app.types.run import RunIdentity
 from app.services.client.instance import client_service
 from app.services.run_control.instance import run_control_service
+from app.services.session.instance import session_service
 from app.types.exceptions import ValidationError
 
 
@@ -26,8 +27,12 @@ def test_start_run_rolls_back_cq_on_workflow_failure():
     mock_cq.stage = "0"
     mock_cq.source_ip = "10.9.9.9"
 
+    def build_cq(**kw):
+        mock_cq.sess = kw["sess"]   # 挂上 start_run 注册的那个 session，回滚才摘得掉它
+        return mock_cq
+
     with (
-        patch("app.services.run_control.service.ClientQueues", return_value=mock_cq),
+        patch("app.services.run_control.service.ClientQueues", side_effect=build_cq),
         patch("app.services.run_control.service.inference_service") as mock_inf,
         patch("app.services.run_control.service.stream_service"),
         patch("app.services.run_control.service.recording_service"),
@@ -43,6 +48,7 @@ def test_start_run_rolls_back_cq_on_workflow_failure():
 
     # 回滚已注销:CQ 不泄漏在注册表(修复前:set 在 start_workflow 内,失败后无人 remove → 泄漏)
     assert not client_service.has_client(task_id)
+    assert not session_service.has(task_id)
 
     # 清理本用例建的 per-task 锁,避免跨用例残留
     client_service._task_locks.pop(task_id, None)

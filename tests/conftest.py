@@ -39,6 +39,14 @@ def _isolate_storage_root(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path_factory.mktemp("storage")))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_session_registry(monkeypatch):
+    """session 注册表每个用例从空表开始：`open` 遇同 task 已注册即抛，残留会串到后续用例。"""
+    from app.services.session.instance import session_service
+
+    monkeypatch.setattr(session_service, "_runs", {})
+
+
 @pytest.fixture
 def tmp_storage(tmp_path, monkeypatch):
     """把 settings.storage_dir 指到隔离临时目录，读写两侧同源、用例间不串。"""

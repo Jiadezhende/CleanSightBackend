@@ -12,6 +12,7 @@ CQ 构造职责在此（编排者建 CQ → start_workflow(cq)）；source_ip �
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from app.types.alarm import ALARM_MODE_SETTLEMENT
@@ -22,6 +23,8 @@ from app.services.client.queues import ClientQueues
 from app.services.inference.online.instance import inference_service
 from app.services.inference.online.temporal import alarm_sink
 from app.services.recording.instance import recording_service
+from app.services.session.core import SessionInfo
+from app.services.session.instance import session_service
 from app.services.stream.instance import stream_service
 from app.services.stream.service import internal_stream_url
 from app.types.exceptions import AppError, ValidationError
@@ -93,13 +96,21 @@ class RunControlService:
                     source_ip=source_ip,
                 ) from e
 
-            # 2c. 建 CQ（构造上移编排者）
-            cq = ClientQueues(
-                run=run,
-                source_ip=source_ip,
-                stage=stage,
-                **get_client_config().cq_kwargs(),
-            )
+            # 2c. 注册 session，建挂着它的 CQ（迁移桥：已迁的数据经 cq.sess 读写）
+            sess = session_service.open(SessionInfo(
+                run=run, source_ip=source_ip, stage=stage, started_at=time.time(),
+            ))
+            try:
+                cq = ClientQueues(
+                    run=run,
+                    source_ip=source_ip,
+                    stage=stage,
+                    sess=sess,
+                    **get_client_config().cq_kwargs(),
+                )
+            except Exception:
+                session_service.close(sess)
+                raise
 
             # 2d. 注册 CQ（COW 发布）。CQ 的 set/remove 均归 RunControlService，与 stop_run 的
             #   client_service.remove 对称（set 先、remove 后，镜像）。set 后的所有 setup 步
@@ -182,6 +193,7 @@ class RunControlService:
             #     迟到写落到本 CQ 被门拒、不串台到后续新 run；settlement 告警 + HLS flush 仍放行。
             if cq is not None:
                 cq.to_draining()
+                session_service.seal(cq.sess)
 
             # 1. 停 decoder（owner=StreamService）
             if not skip_decoder:
@@ -248,6 +260,15 @@ class RunControlService:
                 logger.error(
                     "[RunControlService] clean registry failed: %s - %s", task_id, e, exc_info=True
                 )
+            # 3b. 摘出 session 注册表并释放（与上一步各自 try：任一失败不连带另一边泄漏）
+            if cq is not None:
+                try:
+                    session_service.close(cq.sess)
+                except Exception as e:
+                    result["errors"].append(f"session: {e}")
+                    logger.error(
+                        "[RunControlService] close session failed: %s - %s", task_id, e, exc_info=True
+                    )
 
             if result["errors"]:
                 logger.warning(

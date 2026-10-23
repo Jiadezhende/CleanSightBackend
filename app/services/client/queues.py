@@ -18,6 +18,7 @@ from app.types.alarm import Alarm
 from app.types.detection import FrameDetection
 from app.types.frame import Frame
 from app.types.run import RunIdentity
+from app.services.session.core import Session, SessionInfo
 from app.services.utils.metrics import frame_drop_total
 from app.services.utils.pressure import (
     DEFAULT_HIGH_WATERMARK_RATIO,
@@ -99,6 +100,7 @@ class ClientQueues:
         run: Optional[RunIdentity] = None,
         source_ip: str = "",
         stage: str = "",
+        sess: Optional[Session] = None,
     ):
         # 尺寸配置
         self.resize_width = resize_width
@@ -134,7 +136,16 @@ class ClientQueues:
         # run 起始时刻：供 HealthMonitorWorker 的 task_max_duration 看门狗判定跑飞任务并超时拆除
         # （daemons/health_monitor/worker.py 用 now - task_started_at ≥ task_max_duration 触发 _handle_task_timeout）。
         # 同时作为启动延迟埋点的公共参考钟（mark_startup_milestone 相对它计耗时）。
-        self.task_started_at: float = time.time() if run is not None else 0.0
+        self.task_started_at: float = (
+            sess.info.started_at if sess is not None
+            else time.time() if run is not None else 0.0
+        )
+
+        # 迁移桥：已迁成 topic 的数据经 `cq.sess.channel(T)` 读写。生产由 RunControlService 传入
+        # 已注册的 session；裸建（测试）现造一个不入注册表的。状态随 to_draining / close 同步。
+        self.sess: Session = sess if sess is not None else Session(SessionInfo(
+            run=run, source_ip=source_ip, stage=stage, started_at=self.task_started_at,
+        ))
 
         # 启动里程碑埋点（纯观测，first-wins 幂等）：记录每个里程碑首次到达相对
         # task_started_at 的耗时，仅记一次。无锁——每个 milestone 名字单一生产者线程
@@ -507,8 +518,11 @@ class ClientQueues:
             if self._state is RunState.ACTIVE:
                 self._state = RunState.DRAINING
                 self._reset_pressure()
-                return True
-            return False
+                changed = True
+            else:
+                changed = False
+        self.sess.seal()
+        return changed
 
     def close(self) -> None:
         """置 CLOSED（幂等）并释放重数据 payload，保留不可变身份小壳。
@@ -519,6 +533,7 @@ class ClientQueues:
             self._state = RunState.CLOSED
             self._reset_pressure()
         self._release_payload()
+        self.sess.close()
 
     def _reset_pressure(self) -> None:
         """run 拆除时静默清三条队列的压力计时与 delta 基线（不打日志）。"""
