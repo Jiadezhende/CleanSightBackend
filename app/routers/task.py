@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.db import alarms as db_alarms
 from app.db import tasks as db_tasks
 from app.services.client.instance import client_service
+from app.services.inference.online.temporal import alarm_sink
 from app.services.inference.online.topics import DETECTION_WINDOW, SIGNALS_WINDOW_SEC
 from app.storage import hls, runs
 from app.storage import tasks as step_tasks
@@ -112,7 +113,7 @@ def _empty_alarm_payload(task_id: int) -> dict:
 
 def _build_task_alarm_message(cq, since_seq: int) -> dict:
     """装配前端实时告警消息：原子取告警增量 + 滑窗汇总，序列化域对象。"""
-    alarms, max_seq = cq.get_alarm_snapshot(since_seq)  # 原子 (增量, max_seq)
+    alarms, max_seq = alarm_sink.ledger_for(cq.sess).snapshot(since_seq)  # 原子 (增量, max_seq)
     return {
         "task_id": cq.run.task_id,
         "max_seq": max_seq,

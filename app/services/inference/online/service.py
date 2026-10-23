@@ -331,7 +331,7 @@ class InferenceService:
                     cq = client_service.get(task_id)
                     if cq:
                         alarm_sink.persist_alarms(
-                            settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT
+                            settlement, sess=cq.sess, mode=ALARM_MODE_SETTLEMENT
                         )
             except Exception as e:
                 logger.warning(

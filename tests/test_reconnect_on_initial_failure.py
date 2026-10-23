@@ -28,6 +28,7 @@ from app.types.exceptions import FFmpegError
 from app.types.run import RunIdentity
 from app.services.session.core import Session, SessionInfo
 from app.services.session.topics import LATEST_RAW
+from app.daemons.health_monitor.topics import RECONNECT_STATE
 from factories import make_frame
 
 
@@ -174,8 +175,8 @@ class TestHealthMonitorReconnectPath:
         )
 
         monitor._check_all_clients()
-        assert client_id in monitor._reconnecting_clients, (
-            "decoder 进程已死，应进入重连模式（_reconnecting_clients）"
+        assert client_id in monitor._reconnecting_ids(), (
+            "decoder 进程已死，应进入重连模式（RECONNECT_STATE）"
         )
 
         # _client_stats 在每轮开始快照，第二轮才反映本轮进入重连的客户端
@@ -189,7 +190,7 @@ class TestHealthMonitorReconnectPath:
         不 flush 的后果是静默的：断流那刻攒在 CA 队列里的半批帧会被重连后的帧补满，拼成一个
         横跨 gap 的段，`eff_fps` 被 gap 拉低 → 10 秒画面写成 30 秒慢放，且 fps 仍在合理带
         内、不触发退化兜底。**只能发生一次**——重复 flush 本身无害（栅栏是时间戳），但每 tick
-        重复意味着它被放错了位置（早退分支之前），那时 `_reconnecting_clients` 还没置上。
+        重复意味着它被放错了位置（早退分支之前），那时重连状态还没写上。
         """
         client_id = "monitor_flush_request"
         mock_cq = self._cq(seconds_ago=10.0)
@@ -231,7 +232,7 @@ class TestHealthMonitorReconnectPath:
         _set_last_frame(mock_cq, time.time())       # 新帧来了 → 判定重连成功
         monitor._check_all_clients()
 
-        assert client_id not in monitor._reconnecting_clients
+        assert client_id not in monitor._reconnecting_ids()
         calls = monitor._recording_service.flush_residual.call_args_list
         assert len(calls) == 2
         assert calls[0] == calls[1], "第二次必须用同一个栅栏，否则会切进重连后的帧"
@@ -250,7 +251,7 @@ class TestHealthMonitorReconnectPath:
         monitor._check_all_clients()
         monitor._check_all_clients()
 
-        assert client_id not in monitor._reconnecting_clients
+        assert client_id not in monitor._reconnecting_ids()
         monitor._recording_service.flush_residual.assert_not_called()
 
     def test_no_reconnect_when_decoder_alive_even_if_frames_stale(self):
@@ -264,7 +265,7 @@ class TestHealthMonitorReconnectPath:
         )
 
         monitor._check_all_clients()
-        assert client_id not in monitor._reconnecting_clients, (
+        assert client_id not in monitor._reconnecting_ids(), (
             "进程活着时即便帧陈旧也不应进入重连（等首帧不能被杀）"
         )
         # 未超 cleanup_timeout(20s)，也不应清理
@@ -280,7 +281,7 @@ class TestHealthMonitorReconnectPath:
         )
 
         monitor._check_all_clients()
-        assert client_id not in monitor._reconnecting_clients
+        assert client_id not in monitor._reconnecting_ids()
         assert monitor._client_stats["orphan_streams"] == 1
 
     def test_orphan_decoder_is_stopped_via_run_control(self):
@@ -318,7 +319,7 @@ class TestFullReconnectScenario:
 
         # Round 1：进程死 → 进入重连
         monitor._check_all_clients()
-        assert client_id in monitor._reconnecting_clients, "Round 1: 应进入重连模式"
+        assert client_id in monitor._reconnecting_ids(), "Round 1: 应进入重连模式"
 
         # Round 2：仍死 + 节流窗到 → respawn
         monitor._check_all_clients()
@@ -333,7 +334,7 @@ class TestFullReconnectScenario:
 
         # Round 3：来了新帧 → 退出重连
         monitor._check_all_clients()
-        assert client_id not in monitor._reconnecting_clients, (
+        assert client_id not in monitor._reconnecting_ids(), (
             "Round 3: 有新帧后应退出重连模式"
         )
 
@@ -352,17 +353,17 @@ class TestFullReconnectScenario:
 
         # Round 1：进程死 → 进入重连
         monitor._check_all_clients()
-        assert client_id in monitor._reconnecting_clients
+        assert client_id in monitor._reconnecting_ids()
 
         # Round 2：_handle 中 idle(25s) >= cleanup_timeout(20s) → FAILED → cleanup → 退出
         monitor._check_all_clients()
-        assert client_id not in monitor._reconnecting_clients, (
+        assert client_id not in monitor._reconnecting_ids(), (
             "无帧超 cleanup_timeout 后应退出重连模式（执行 cleanup）"
         )
 
 
 class TestReconnectIdentityFence:
-    """进入重连捕获 cq_A；槽位被 /start 换成新 run 时，重连按对象身份放弃。"""
+    """重连状态挂在 run 上；放弃 / respawn 经 run_control 时带决策时所持的 cq 作 fence。"""
 
     def _cq(self, seconds_ago: float = 10.0) -> MagicMock:
         return _fake_cq(time.time() - seconds_ago)
@@ -381,8 +382,8 @@ class TestReconnectIdentityFence:
         cleanup.assert_called_once()
         assert cleanup.call_args.kwargs["expected"] is cq_a
 
-    def test_reconnect_captures_cq_on_entry(self):
-        """进入重连时把当前槽位 cq 存进 ReconnectState.cq（fence 基准）。"""
+    def test_reconnect_state_lives_on_the_run(self):
+        """进入重连时，重连状态写在该 run 的 RECONNECT_STATE 上（不在 monitor 自建的表里）。"""
         client_id = "fence_capture"
         cq_a = self._cq()
         monitor = _make_monitor(
@@ -390,31 +391,47 @@ class TestReconnectIdentityFence:
         )
 
         monitor._check_all_clients()
-        assert monitor._reconnecting_clients[client_id].cq is cq_a
+        state = cq_a.sess.channel(RECONNECT_STATE).get()
+        assert state.task_id == client_id
+        assert state.last_frame_time_before_disconnect == _last_frame(cq_a)
 
-    def test_reconnect_abandoned_when_slot_replaced(self):
-        """次轮槽位已换成新 cq_B → 放弃本次重连，不误动新 run。"""
+    def test_reconnect_state_does_not_follow_slot_replacement(self):
+        """槽位换成新 cq_B：旧 run 的重连状态留在 cq_A 上，不套用到新 run，不对新 run 发起 respawn。"""
         client_id = "fence_swap"
         cq_a = self._cq()
         monitor = _make_monitor(
             client_id, cq_a, active_decoder_ids={client_id}, decoder_alive=False
         )
 
-        # Round 1：进入重连，捕获 cq_A
+        # Round 1：cq_A 进入重连
         monitor._check_all_clients()
-        assert client_id in monitor._reconnecting_clients
+        assert client_id in monitor._reconnecting_ids()
 
         # 模拟 /start 抢占重启：槽位换成全新 cq_B
         cq_b = self._cq()
         monitor._client_service.snapshot.return_value = {client_id: cq_b}
 
-        # Round 2：当前 cq(cq_B) 非捕获的 cq_A → 放弃重连，且不对新 run 发起 restart
+        # Round 2：cq_B 没有重连状态，按新 run 从头判定（本轮才进入重连，不 respawn）
         monitor._run_control.restart_stream.reset_mock()
         monitor._check_all_clients()
 
-        assert client_id not in monitor._reconnecting_clients
         monitor._run_control.restart_stream.assert_not_called()
+        assert cq_b.sess.channel(RECONNECT_STATE).get().last_frame_time_before_disconnect == _last_frame(cq_b)
 
+    def test_reconnect_state_released_with_run(self):
+        """`/terminate` 正在重连的 run：run 关闭即释放重连状态，统计不再计入、无残留条目。"""
+        client_id = "terminate_while_reconnecting"
+        cq_a = self._cq()
+        monitor = _make_monitor(
+            client_id, cq_a, active_decoder_ids={client_id}, decoder_alive=False
+        )
+        monitor._check_all_clients()
+        assert monitor.get_stats()["reconnecting_clients"] == [client_id]
+
+        cq_a.sess.close()
+        monitor._client_service.snapshot.return_value = {}
+
+        assert monitor.get_stats()["reconnecting_count"] == 0
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

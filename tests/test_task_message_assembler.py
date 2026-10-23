@@ -45,7 +45,10 @@ def test_build_task_alarm_message_assembles_via_atomic_snapshot(monkeypatch):
 
     cq = MagicMock()
     cq.run = RunIdentity(7, 1, 1)
-    cq.get_alarm_snapshot.return_value = ([alarm], 2)
+    ledger = MagicMock()
+    ledger.snapshot.return_value = ([alarm], 2)
+    from app.services.inference.online.temporal import alarm_sink
+    monkeypatch.setattr(alarm_sink, "ledger_for", lambda sess: ledger)
     cq.sess.channel.return_value.snapshot.return_value = [
         make_frame_detection(source="bubble", n=1, ts=1.0)
     ]
@@ -59,4 +62,4 @@ def test_build_task_alarm_message_assembles_via_atomic_snapshot(monkeypatch):
     assert msg["alarms"][0]["metric"] == AlarmMetric.BUBBLE
     assert msg["alarms"][0]["ts"] == 1
     # 走原子入口，since_seq 透传
-    cq.get_alarm_snapshot.assert_called_once_with(1)
+    ledger.snapshot.assert_called_once_with(1)

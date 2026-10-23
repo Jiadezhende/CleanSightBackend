@@ -220,7 +220,7 @@ class RunControlService:
                     settlement = inference_service.stop_workflow(cq)  # Inference owner
                     if settlement:
                         alarm_sink.persist_alarms(
-                            settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT, log_each=True
+                            settlement, sess=cq.sess, mode=ALARM_MODE_SETTLEMENT, log_each=True
                         )
                 except Exception as e:
                     result["errors"].append(f"settlement: {e}")

@@ -17,6 +17,7 @@ from app.services.client.service import ClientService
 from app.services.client.config import get_client_config
 from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION
 from app.services.session.topics import DETECTIONS
+from app.services.utils.startup_latency import log_milestone
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
@@ -182,9 +183,15 @@ class DetectionService:
             # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。
             cq.sess.channel(DETECTION_WINDOW).push(frame)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）
-            cq.sess.channel(LATEST_DETECTION).set(frame)
-            # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）
-            cq.mark_startup_milestone("first_inference")
+            latest = cq.sess.channel(LATEST_DETECTION)
+            first = latest.get() is None
+            if latest.set(frame) and first:
+                # 启动延迟埋点 B：本 run 首个推理结果写回（写回线程是 LATEST_DETECTION 唯一写方）
+                info = cq.sess.info
+                log_milestone(
+                    "first_inference", task_id=info.run.task_id, step_id=info.run.step_id,
+                    started_at=info.started_at,
+                )
             # Path 3: 落盘缓冲（offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
             # 由 recording 的 sweeper 每 tick 拉走写 detections.jsonl。落的是同一份帧级
             # FrameDetection（与帧窗/快照共用一个对象）。

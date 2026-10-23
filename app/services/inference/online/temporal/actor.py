@@ -7,7 +7,7 @@ actor 由 InferenceService 在 start_workflow() 时创建，在 stop_workflow() 
 - 注册该 client 所有流算子 Operator（每个 Operator 自带共享状态机 self._sm）
 - 按固定间隔（tick_interval）执行：按 subscribes 收集各订阅流 → operator.analyze 推进状态
   → operator.judge 出告警；per-operator 异常隔离，一个算子炸不影响同 tick 其余
-- 告警 → alarm 服务 + ClientQueues.alarm_log；事实是离线概念（detections.jsonl + 离线 worker）
+- 告警 → alarm 服务 + 本 run 的告警账本（alarm_sink）；事实是离线概念（detections.jsonl + 离线 worker）
 - 在 finalize_and_stop() 时收集 operator 结算告警
 """
 
@@ -128,7 +128,7 @@ class ClientTemporalActor:
 
     def _persist_alarms(self, alarms: List[Alarm]) -> None:
         # 过闸 + 落库编排归 alarm_sink（别名已烧进 alarm.stage）
-        alarm_sink.persist_alarms(alarms, cq=self._cq, mode=ALARM_MODE_REALTIME)
+        alarm_sink.persist_alarms(alarms, sess=self._cq.sess, mode=ALARM_MODE_REALTIME)
 
     def _collect_settlement_alarms(self) -> List[Alarm]:
         alarms: List[Alarm] = []

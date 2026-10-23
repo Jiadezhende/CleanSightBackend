@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.services.client.instance import client_service
 from app.services.inference.offline.instance import offline_job_service
+from app.services.inference.online.temporal import alarm_sink
 from app.storage import inference as inference_store
 from app.types.exceptions import NotFoundError
 
@@ -182,7 +183,7 @@ def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
     if not client_service.has_client(client_id):
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
     cq = client_service.get(client_id)
-    alarms = cq.get_recent_alarms(n=n)
+    alarms = alarm_sink.ledger_for(cq.sess).recent(n)
     return {
         "client_id": client_id,
         "alarms": [

@@ -14,6 +14,7 @@
 - 完整清理（协调多个模块，类似 API 层）
 """
 
+import dataclasses
 import logging
 import threading
 import time
@@ -31,6 +32,13 @@ def _last_frame_ts(cq) -> float:
 
     latest = cq.sess.channel(LATEST_RAW).get()
     return latest.ts if latest is not None else cq.sess.info.started_at
+
+
+def _reconnect(cq):
+    """该 run 的 RECONNECT_STATE channel（topic 模块拉 session 基建，函数体内 import 保持包导入零副作用）。"""
+    from .topics import RECONNECT_STATE
+
+    return cq.sess.channel(RECONNECT_STATE)
 
 
 class HealthMonitorWorker:
@@ -83,8 +91,7 @@ class HealthMonitorWorker:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # 重连状态（键 = task_id）
-        self._reconnecting_clients: Dict[int, ReconnectState] = {}
+        # 重连状态不在本对象：挂在各 run 的 RECONNECT_STATE topic 上，随 run 关闭释放。
 
         # 累计统计（生命周期内的总计）。三个重连计数是一组，读法：
         # 检测到断线 disconnects 次 → 发起 respawn reconnects 次 → 恢复 reconnect_successes 次。
@@ -222,7 +229,8 @@ class HealthMonitorWorker:
 
         # 获取所有活跃的解码器
         active_decoders = set(self._stream_service.get_all_task_ids())
-        reconnecting_set = set(self._reconnecting_clients.keys())
+        reconnect_states = {tid: _reconnect(cq).get() for tid, cq in all_clients.items()}
+        reconnecting_set = {tid for tid, st in reconnect_states.items() if st is not None}
 
         # 集中统计所有客户端状态（确保分类互斥）
         self._client_stats = {
@@ -244,8 +252,9 @@ class HealthMonitorWorker:
         # 第一轮：检查有队列的客户端
         for task_id, cq in all_clients.items():
             # 1. 检查是否在重连模式
-            if task_id in self._reconnecting_clients:
-                self._handle_reconnecting_client(task_id, cq, current_time)
+            state = reconnect_states[task_id]
+            if state is not None:
+                self._handle_reconnecting_client(task_id, cq, current_time, state)
                 continue
 
             # 2. 检查任务运行时长是否超过最大限制
@@ -285,15 +294,13 @@ class HealthMonitorWorker:
                 # 无解码器：检查是否为孤儿流（有队列但无解码器）
                 self._handle_potential_orphan(task_id, cq, current_time)
 
-        # 第二轮：检查孤儿解码器（有解码器但无队列）
+        # 第二轮：检查孤儿解码器（有解码器但无队列）。重连状态挂在 run 上，没有 run 就不可能在重连中
         orphan_decoders = active_decoders - set(all_clients.keys())
         for task_id in orphan_decoders:
-            # 跳过重连中的客户端（它们可能暂时没有队列）
-            if task_id not in self._reconnecting_clients:
-                self._handle_orphan_decoder(task_id)
+            self._handle_orphan_decoder(task_id)
 
     def _enter_reconnect_mode(self, task_id: int, last_frame_time: float, cq):
-        """进入重连模式：decoder 进程已死，起 respawn 循环（捕获 cq 作对象身份 fence 基准）。"""
+        """进入重连模式：decoder 进程已死，在该 run 上记下重连状态，起 respawn 循环。"""
         # 从 StreamService 获取流配置
         stream_info = self._stream_service.get_stream_info(task_id)
         if not stream_info:
@@ -302,13 +309,15 @@ class HealthMonitorWorker:
             )
             return
 
-        self._reconnecting_clients[task_id] = ReconnectState(
+        entered = _reconnect(cq).set(ReconnectState(
             task_id=task_id,
             stream_url=stream_info["url"],
             last_attempt_time=0,  # 初始为 0，表示还未尝试
             last_frame_time_before_disconnect=last_frame_time,  # 记录断流前的最后帧时间
-            cq=cq,  # 捕获进入重连时的 CQ，作为拆除时的对象身份核对基准
-        )
+        ))
+        if not entered:
+            # run 已封闸（stop_run 正在拆）：残帧由拆除 flush 收尾，这里什么都不做
+            return
 
         # 断点残帧：让空洞落到**段边界**，而不是被某一段吞进去。
         #
@@ -320,9 +329,9 @@ class HealthMonitorWorker:
         # 两条时机约束：
         # - 必须**在进入重连时** flush，不能等重连成功——成功的判据就是"已经来了新帧"，
         #   那时残批里已混进重连后的帧，段照样横跨 gap。
-        # - 必须放在 `_reconnecting_clients` 赋值**之后**：`_check_all_clients` 对已在重连
-        #   表里的 task 直接 continue，放在这里 = 每次断流恰好 flush 一次；放到函数开头会因
-        #   上面 `stream_info` 缺失的早退而每 tick 重复 flush。
+        # - 必须放在写入重连状态**之后**：`_check_all_clients` 对已在重连中的 run 直接走重连
+        #   分支，放在这里 = 每次断流恰好 flush 一次；放到函数开头会因上面 `stream_info`
+        #   缺失的早退而每 tick 重复 flush。
         #
         # `last_frame_time` 是断流前最后一帧的 ts，用作栅栏：只切它之前的帧。就地执行即可：
         # 与 sweeper / 拆除 flush 的先后由 recording 取帧锁串行，入队序仍是 ts 序。
@@ -335,20 +344,9 @@ class HealthMonitorWorker:
         )
         self._stats["disconnects"] += 1  # 累计统计：检测到断线、进入重连模式的次数
 
-    def _handle_reconnecting_client(self, task_id: int, cq, current_time: float):
-        """处理重连中的客户端"""
-        state = self._reconnecting_clients[task_id]
-
-        # 对象身份 fence：当前槽位 cq 已非进入重连时捕获的 cq_A（被 /start 重启换槽），
-        # 说明本次重连针对的 run 已被新 run 取代——放弃本次重连，绝不误动新 run。
-        if state.cq is not None and cq is not state.cq:
-            logger.info(
-                "[HealthMonitorWorker] Reconnect abandoned (slot replaced by newer run): %s",
-                task_id,
-            )
-            del self._reconnecting_clients[task_id]
-            return
-
+    def _handle_reconnecting_client(self, task_id: int, cq, current_time: float, state: ReconnectState):
+        """处理重连中的 run。重连状态就挂在 `cq` 的 session 上：`/start` 换代后新 run 没有它，
+        旧 run 的状态随旧 run 关闭释放，不必再核对槽位身份。"""
         # 成功判定 = 真的来了新帧（不是「进程活着」——respawn 后新进程还在等首个关键帧时
         # 也活着但无帧，此刻不能判成功、更不能重杀）。新帧须足够新，避免读到陈旧 ts 误判。
         new_frame_time = _last_frame_ts(cq)
@@ -373,7 +371,7 @@ class HealthMonitorWorker:
                 self._recording_service.flush_residual(
                     cq, until_ts=state.last_frame_time_before_disconnect
                 )
-                self._exit_reconnect_mode(task_id, cleanup=False)
+                self._exit_reconnect_mode(task_id, cq, cleanup=False)
                 return
 
         # 放弃判定 = 纯时间：无帧时长 ≥ cleanup_timeout（不再数重连次数）。
@@ -384,7 +382,7 @@ class HealthMonitorWorker:
                 "(>= cleanup_timeout %.0fs), giving up",
                 task_id, idle_time, self.config.cleanup_timeout
             )
-            self._exit_reconnect_mode(task_id, cleanup=True)
+            self._exit_reconnect_mode(task_id, cq, cleanup=True)
             return
 
         # 进程活着但还没来帧（respawn 已起活进程、正等首个关键帧 / 连接中）→ 只等，
@@ -395,7 +393,7 @@ class HealthMonitorWorker:
         # 进程仍死：按 reconnect_interval 节流后 respawn（无次数上限，由上面的 cleanup_timeout 收口）。
         if current_time - state.last_attempt_time < self.config.reconnect_interval:
             return
-        state.last_attempt_time = current_time
+        _reconnect(cq).set(dataclasses.replace(state, last_attempt_time=current_time))
         self._stats["reconnects"] += 1  # 累计统计：respawn 次数
 
         # respawn dead decoder，经 run_control 持任务锁核对 fence（注册项已换代则放弃）。
@@ -405,24 +403,16 @@ class HealthMonitorWorker:
         logger.info(
             "[HealthMonitorWorker] RECONNECT ATTEMPT: %s (respawn dead decoder)", task_id
         )
-        self._run_control.restart_stream(task_id, state.stream_url, expected=state.cq)
+        self._run_control.restart_stream(task_id, state.stream_url, expected=cq)
 
-    def _exit_reconnect_mode(self, task_id: int, cleanup: bool):
-        """退出重连模式
-
-        Args:
-            task_id: 客户端ID
-            cleanup: 是否执行完整清理
-        """
-        # 捕获进入重连时的 cq_A（在删除 state 前取），作为拆除时的对象身份核对基准。
-        state = self._reconnecting_clients.pop(task_id, None)
+    def _exit_reconnect_mode(self, task_id: int, cq, cleanup: bool):
+        """退出重连模式：清掉该 run 的重连状态；`cleanup=True` 时以 `cq` 作 fence 拆除该 run。"""
+        _reconnect(cq).clear()
 
         if cleanup:
             # 重连失败，执行完整清理（类似 /api/terminate）
             self._stats["cleanups"] += 1  # 累计统计：清理操作的次数
-            self._cleanup_failed_client(
-                task_id, expected=state.cq if state else None
-            )
+            self._cleanup_failed_client(task_id, expected=cq)
 
     def cleanup_client(
         self,
@@ -471,10 +461,7 @@ class HealthMonitorWorker:
             task_id, reason, skip_decoder
         )
 
-        # 步骤 0: 清理监控器自身的客户端状态（HealthMonitor 专属，防内存泄漏）
-        self._reconnecting_clients.pop(task_id, None)
-
-        # 步骤 1-3: 委托给 RunControlService（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
+        # 委托给 RunControlService（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
         return self._run_control.stop_run(
             task_id, reason, skip_decoder=skip_decoder, expected=expected
         )
@@ -486,7 +473,7 @@ class HealthMonitorWorker:
         - 此方法只是 cleanup_client() 的包装器
         - 实际清理逻辑集中在 cleanup_client() 中
 
-        `expected`：进入重连时捕获的 cq_A，透传给 stop_run 作对象身份 fence。
+        `expected`：决策时所持的 cq，透传给 stop_run 作对象身份 fence。
         """
         logger.error(
             "[HealthMonitorWorker] STREAM CONNECTION FAILED: %s | "
@@ -593,12 +580,22 @@ class HealthMonitorWorker:
                 "[HealthMonitorWorker] Failed to stop orphan decoder: %s - %s", task_id, e, exc_info=True
             )
 
+    def _reconnecting_ids(self) -> List[int]:
+        """此刻处于重连中的 task（现查各 run 的 RECONNECT_STATE；未 start 时为空）。"""
+        if self._client_service is None:
+            return []
+        return [
+            tid for tid, cq in self._client_service.snapshot().items()
+            if _reconnect(cq).get() is not None
+        ]
+
     def get_stats(self):
         """获取监控统计信息"""
+        reconnecting = self._reconnecting_ids()
         return {
             **self._stats,
-            "reconnecting_count": len(self._reconnecting_clients),
-            "reconnecting_clients": list(self._reconnecting_clients.keys()),
+            "reconnecting_count": len(reconnecting),
+            "reconnecting_clients": reconnecting,
         }
 
     def get_system_status(self) -> Dict[str, Any]:
@@ -633,6 +630,6 @@ class HealthMonitorWorker:
             "clients": self._client_stats,
             "monitor_stats": {
                 **self._stats,
-                "reconnecting_clients": list(self._reconnecting_clients.keys()),
+                "reconnecting_clients": self._reconnecting_ids(),
             },
         }

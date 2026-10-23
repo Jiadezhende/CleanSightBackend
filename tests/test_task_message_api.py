@@ -56,7 +56,10 @@ async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
 
     cq = MagicMock()
     cq.run = RunIdentity(1, 1, 1)
-    cq.get_alarm_snapshot.return_value = ([alarm], 2)
+    ledger = MagicMock()
+    ledger.snapshot.return_value = ([alarm], 2)
+    from app.services.inference.online.temporal import alarm_sink
+    monkeypatch.setattr(alarm_sink, "ledger_for", lambda sess: ledger)
     cq.sess.channel.return_value.snapshot.return_value = [
         make_frame_detection(source="bubble", n=1, ts=1.0)
     ]
@@ -71,4 +74,4 @@ async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
 
     assert resp.status_code == 200
     fake_manager.get.assert_called_once_with(1)
-    cq.get_alarm_snapshot.assert_called_once_with(1)
+    ledger.snapshot.assert_called_once_with(1)

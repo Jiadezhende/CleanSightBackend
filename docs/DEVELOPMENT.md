@@ -151,7 +151,7 @@
 |----|------|------|
 | L0 编排锁 | 一次 run 的生命周期事务 | run_control 任务锁 `lock_for(task_id)`（每 task 一把，唯一允许可重入） |
 | L1 外层锁 | 覆盖多步操作，或锁内做 IO / 起停子进程 | recording `_collect_lock`；infer_proxy `_lock` / `_proc_lock`；render_proxy `_lock` / `_proc_lock`；decoder `lock`；离线作业 `_lock`；lab `runtime_config._LOCK`；懒加载锁（detector / operator `_model_load_lock`、media_token `_DEFAULT_LOCK`、gateway `_init_lock`） |
-| L2 叶子锁 | 只护本对象的几个字段 | session 锁；session / client 注册表写锁；client `_task_locks_guard`；CQ 各 payload 锁与 `_state_lock`；recording `_hls_inflight_lock`；frame_ring `_lock`；PressureReporter `_lock`；dispatcher `_lock`；stream `lock`；gateway 三个 Store 锁；`queue.Queue` 内部锁 |
+| L2 叶子锁 | 只护本对象的几个字段 | session 锁；session / client 注册表写锁；client `_task_locks_guard`；CQ `_state_lock`；告警账本 `_lock`、alarm_sink `_ledgers_lock`；recording `_hls_inflight_lock`；frame_ring `_lock`；PressureReporter `_lock`；dispatcher `_lock`；stream `lock`；gateway 三个 Store 锁；`queue.Queue` 内部锁 |
 
 1. 只能在持有高层锁时获取低层锁，反向禁止。
 2. 同层不嵌套。L1 之间确需嵌套的，登记为固定有向对（当前无）。

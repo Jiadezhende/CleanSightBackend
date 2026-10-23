@@ -48,12 +48,18 @@ def test_frame_and_result_writes_blocked_when_not_active():
 
 # --- settlement 非对称：DRAINING 放行、CLOSED 拒 ---
 
-def test_settlement_alarm_allowed_in_draining_rejected_when_closed():
+def test_settlement_alarm_allowed_in_draining_rejected_when_closed(monkeypatch):
+    from app.services.inference.online.temporal import alarm_sink
+
+    persisted = []
+    monkeypatch.setattr(alarm_sink.alarm_service, "persist_alarm", persisted.append)
     cq = make_cq()
     cq.to_draining()
-    assert cq.append_alarm_record_with_gate(make_alarm(), "SETTLEMENT") is True  # DRAINING 放行
+    alarm_sink.persist_alarms([make_alarm()], sess=cq.sess, mode="SETTLEMENT")  # DRAINING 放行
     cq.close()
-    assert cq.append_alarm_record_with_gate(make_alarm(metric="X"), "SETTLEMENT") is False  # CLOSED 拒
+    alarm_sink.persist_alarms([make_alarm(metric="X")], sess=cq.sess, mode="SETTLEMENT")  # CLOSED 拒
+    assert len(persisted) == 1
+    assert [a.seq for a in alarm_sink.ledger_for(cq.sess).recent()] == [1]
 
 
 # --- 清空写放行（拆除期清前端残帧/事件）---
@@ -83,7 +89,6 @@ def test_close_releases_payload_keeps_identity():
     # payload 已释放
     assert cq.sess.channel(DETECTION_WINDOW).snapshot() == []
     assert len(cq.sess.channel(RAW)) == 0
-    assert cq.get_recent_alarms() == []
     assert cq.sess.channel(LATEST_DETECTION).get() is None
     # 身份小壳保留（供 fence/日志）
     assert cq.run.task_id == 1

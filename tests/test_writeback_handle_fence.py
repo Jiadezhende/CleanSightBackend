@@ -97,3 +97,17 @@ def test_degraded_frame_not_buffered_for_persistence():
     assert cq.sess.channel(DETECTION_WINDOW).snapshot() == [degraded, ok]
     assert cq.sess.channel(LATEST_DETECTION).get() is ok
     assert cq.sess.channel(DETECTIONS).drain() == [ok]
+
+
+def test_first_inference_logged_once_per_run(caplog):
+    """启动埋点 B：本 run 首个推理写回只打一次（写回线程是 LATEST_DETECTION 唯一写方）。"""
+    import logging
+
+    svc = _bare_service()
+    cq = make_cq(task_id=30, step_id=3, source_ip="ipF", stage="3")
+    with caplog.at_level(logging.INFO, logger="app.startup_latency"):
+        svc._write_back_results([_result(cq, ts=1.0)])
+        svc._write_back_results([_result(cq, ts=2.0)])
+
+    lines = [r.getMessage() for r in caplog.records if "first_inference" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].startswith("[startup] task=30 step=3 first_inference +")
