@@ -10,6 +10,7 @@ from app.services.inference.config import InferenceConfig, load_stage_config
 from app.types.alarm import Alarm
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.online.temporal.operator import Operator
+from app.services.inference.online.topics import DETECTION_WINDOW
 
 
 def _out(ts: float, n: int = 1):
@@ -116,19 +117,19 @@ def test_subscribes_required():
 def test_stream_buffer_floor_10s():
     cq = make_bare_cq()
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
-        cq.push_detection(make_frame_detection(source="x", ts=t))
+        cq.sess.channel(DETECTION_WINDOW).push(make_frame_detection(source="x", ts=t))
     # 未配感受野 → 底线 10s：cutoff=20-10=10 → 保留 10,15,20
-    win = cq.get_slide_window()
+    win = cq.sess.channel(DETECTION_WINDOW).snapshot()
     assert [f.ts for f in win] == [10.0, 15.0, 20.0]
 
 
 def test_stream_buffer_extends_with_receptive_field():
     cq = make_bare_cq()
-    cq.set_stream_windows({"x": 30.0})  # 感受野 30s > 底线
+    cq.sess.channel(DETECTION_WINDOW).extend_span(30.0)  # 感受野 30s > 底线
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
-        cq.push_detection(make_frame_detection(source="x", ts=t))
+        cq.sess.channel(DETECTION_WINDOW).push(make_frame_detection(source="x", ts=t))
     # retain=max(10,30)=30：cutoff=20-30=-10 → 全保留
-    win = cq.get_slide_window()
+    win = cq.sess.channel(DETECTION_WINDOW).snapshot()
     assert [f.ts for f in win] == [0.0, 5.0, 10.0, 15.0, 20.0]
 
 
@@ -155,7 +156,7 @@ def test_per_operator_isolation():
     from app.services.inference.online.temporal.actor import ClientTemporalActor
 
     cq = MagicMock()
-    cq.get_slide_window.return_value = [make_frame_detection(source="s", ts=1.0)]
+    cq.sess.channel.return_value.snapshot.return_value = [make_frame_detection(source="s", ts=1.0)]
     captured: List[Alarm] = []
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)

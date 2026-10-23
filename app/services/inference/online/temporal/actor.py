@@ -17,7 +17,7 @@ from typing import List
 
 from app.types.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.online.naming import get_stage_alias
-from app.services.inference.online.topics import LATEST_TEMPORAL
+from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_TEMPORAL
 from . import alarm_sink
 from .operator import Operator
 from app.services.utils.worker_guard import guarded_run
@@ -102,7 +102,7 @@ class ClientTemporalActor:
         all_alarms: List[Alarm] = []
 
         # 帧窗快照（List[FrameDetection]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
-        windows = self._cq.get_slide_window()
+        windows = self._cq.sess.channel(DETECTION_WINDOW).snapshot()
         for op in self._operators:
             try:
                 if not windows:

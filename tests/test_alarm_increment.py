@@ -7,7 +7,7 @@
 
 from unittest.mock import patch
 
-from factories import make_alarm, make_bare_cq, make_cq, make_frame_detection
+from factories import make_alarm, make_cq, make_frame_detection
 
 
 def _cq_with_task():
@@ -74,10 +74,13 @@ def test_blocked_alarm_not_recorded():
 
 # --- 滑窗汇总（纯访问器，按流名键；metric 映射在 router 装配层测） ---
 
-def test_slide_window_summary():
-    cq = make_bare_cq()
-    cq.push_detection(make_frame_detection(source="bubble", n=1, class_name="bubble", ts=10.0))
-    summary = cq.get_slide_window_summary()
+def test_window_summary():
+    from app.routers.task import _summarize_window
+
+    summary = _summarize_window([
+        make_frame_detection(source="bubble", n=1, class_name="bubble", ts=-0.5),  # 10s 之外
+        make_frame_detection(source="bubble", n=1, class_name="bubble", ts=10.0),
+    ])
     assert summary["bubble"]["active"] is True
     assert summary["bubble"]["hit_count"] == 1
     assert "bending" not in summary  # 未推过的流不出现

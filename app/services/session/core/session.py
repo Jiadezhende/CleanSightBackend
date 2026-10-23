@@ -19,7 +19,7 @@ from __future__ import annotations
 import enum
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Dict, Generic, List, Optional, TypeVar
+from typing import TYPE_CHECKING, Callable, Dict, Generic, List, TypeVar
 
 from app.types.run import RunIdentity
 

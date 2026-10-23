@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -25,9 +25,6 @@ from app.services.utils.pressure import (
     REASON_QUEUE_HIGH_WATERMARK,
     PressureReporter,
 )
-
-# signals_10s 聚合底线（固定 10s），与帧窗保留时长（可 ≥10s）解耦。
-_SIGNALS_WINDOW_SEC = 10.0
 
 # 启动延迟埋点专用 logger（独立命名，便于 grep/单独调级）：
 # 拆「请求→首个产出」三段——拉流首帧 / 首个推理写回 / 首个告警。
@@ -70,8 +67,7 @@ class ClientQueues:
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
       _raw_lock         Lock   ca_raw + latest_raw_frame + latest_raw_timestamp
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
-      _slide_window_lock Lock  _slide_window + ca_detections（写回口对同一帧连写两者，
-                               同 _viz_lock 护 ca_processed + _latest_rendered 的理由）
+      _slide_window_lock Lock  ca_detections
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
       *_pressure 内建锁  Lock   叶子锁（PressureReporter 自持，只护其几个标量）：
                                append_* 一律**先出队列锁再上报**，故不与上面任何锁互嵌
@@ -199,15 +195,8 @@ class ClientQueues:
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
         self._latest_rendered: Optional[Frame] = None
 
-        # 滑动窗口：帧级 FrameDetection 环形缓冲（一帧一条，多流已对齐，由 _slide_window_lock 保护）。
-        # 写回口物化 FrameDetection 后单次 push_detection；算子/ signals 统一从此读，无需按 ts 拼帧。
-        self._slide_window: Deque[FrameDetection] = deque()
-        # 帧窗保留时长（秒）：= max(_SIGNALS_WINDOW_SEC 底线, 各算子最大感受野)，由 set_stream_windows 配置。
-        # 只向上扩展；signals_10s 聚合另按固定 10s 底线裁窗，二者解耦。
-        self._slide_window_seconds: float = _SIGNALS_WINDOW_SEC
-
         # CA-DetectionQueue：帧级 FrameDetection 落盘缓冲（由 _slide_window_lock 保护）。
-        # 与 _slide_window 是同一份数据的两个去处——前者供算子消费（按感受野裁剪、会丢），
+        # 与帧窗 DETECTION_WINDOW 是同一份数据的两个去处——前者供算子消费（按感受野裁剪、会丢），
         # 后者等 recording 每 tick 拉走落盘（只在满时丢最旧）。**不能合并**：裁剪口径归算子
         # 配置，拿它当落盘缓冲会随某个 stage 调小 window_seconds 而静默丢检测结果。
         # 容量复用 ca_maxlen（900 条 ≈ 60s @15fps ≈ 2MB，远小于 ca_raw 的像素帧）。
@@ -536,7 +525,6 @@ class ClientQueues:
             self.latest_raw_frame = None
             self.latest_raw_timestamp = time.time()
             self._latest_rendered = None
-            self._slide_window.clear()
             self.ca_detections.clear()
             self._alarm_log.clear()
             self._alarm_seq = 0
@@ -549,40 +537,7 @@ class ClientQueues:
     # 身份字段（task_id/step_id/source_ip/stage）均为构造定死的不可变
     # 公有属性，直读即可——不再提供 get_* 包装（避免只覆盖一部分、直连/getter 混用的不一致）。
 
-    # --- slide_window 操作 ---
-
-    def set_stream_windows(self, windows: Dict[str, float]) -> None:
-        """配置帧窗保留时长 = max(10s 底线, 各算子最大感受野)。
-
-        由 InferenceService 在算子实例化后调用（入参 {流名: 最大 window_seconds}）：
-        单条帧窗保留所有算子里最长的感受野，各算子自行 _clip 到自身 window_seconds；
-        感受野只向上扩展，signals_10s 另按固定 10s 底线裁窗，不受影响。
-        """
-        with self._slide_window_lock:
-            self._slide_window_seconds = max(
-                [_SIGNALS_WINDOW_SEC] + list(windows.values())
-            )
-
-    def push_detection(self, frame: FrameDetection) -> None:
-        """将一帧对齐后的 FrameDetection 追加到帧窗，按保留时长淘汰过期条目。
-
-        写回口一帧一次（多流已在 FrameDetection.by_source 内对齐），不再逐 detector。
-        写门：非 ACTIVE 拒——迟到写回落到旧 CQ 被拒。
-        """
-        if self._state is not RunState.ACTIVE:
-            return
-        with self._slide_window_lock:
-            self._slide_window.append(frame)
-            cutoff = frame.ts - self._slide_window_seconds
-            while self._slide_window and self._slide_window[0].ts < cutoff:
-                self._slide_window.popleft()
-
-    def get_slide_window(self) -> List[FrameDetection]:
-        """返回帧窗的快照副本（线程安全）；每条 = 一帧多流对齐检测。"""
-        with self._slide_window_lock:
-            return list(self._slide_window)
-
-    # --- ca_detections 操作（落盘缓冲，与 slide_window 共用 _slide_window_lock）---
+    # --- ca_detections 操作（落盘缓冲）---
 
     def append_ca_detections(self, frame: FrameDetection) -> None:
         """把一帧 FrameDetection 放进落盘缓冲（纯缓冲，不触发落盘）。
@@ -590,8 +545,7 @@ class ClientQueues:
         落盘由 recording 的 sweeper 周期 `drain_ca_detections()` 拉走，本方法只管入队 + 丢帧计数。
         写门：非 ACTIVE 拒写——迟到写回落到旧 CQ 被拒，不串台。
 
-        与 `push_detection` 是写回口对同一帧的两次投递（消费 / 落盘），故意分两个方法：
-        合并会让"落盘"挂在一个名字完全不提落盘的方法上。
+        与帧窗 DETECTION_WINDOW 是写回口对同一帧的两次投递（消费 / 落盘）。
         """
         if self._state is not RunState.ACTIVE:
             return
@@ -658,35 +612,3 @@ class ClientQueues:
         with self._alarm_lock:
             alarms = [a for a in self._alarm_log if a.seq > since_seq]
             return alarms, self._alarm_seq
-
-    def get_slide_window_summary(self) -> Dict[str, Dict[str, Any]]:
-        """每条流(stream_name)在其窗口内的检测汇总（线程安全，纯数据）。
-
-        {stream_name: {"active": bool, "hit_count": int, "max_conf": float}}
-        —— 只按流名聚合，不做流名→metric 映射（那是 inference 展示知识，归 router 装配）。
-        """
-        acc: Dict[str, Dict[str, float]] = {}
-        with self._slide_window_lock:
-            if not self._slide_window:
-                return {}
-            # signals_10s 固定按 10s 底线裁窗（帧窗可保留更长感受野，此处不受影响）。
-            cutoff = self._slide_window[-1].ts - _SIGNALS_WINDOW_SEC
-            for feat in self._slide_window:
-                if feat.ts < cutoff:
-                    continue
-                for src, fd in feat.by_source.items():
-                    if fd is None:
-                        continue
-                    a = acc.setdefault(src, {"hit": 0.0, "max_conf": 0.0})
-                    if fd.boxes:
-                        a["hit"] += 1
-                        frame_max_conf = max(d.confidence for d in fd.boxes)
-                        a["max_conf"] = max(a["max_conf"], frame_max_conf)
-        return {
-            src: {
-                "active": a["hit"] > 0,
-                "hit_count": int(a["hit"]),
-                "max_conf": round(float(a["max_conf"]), 4),
-            }
-            for src, a in acc.items()
-        }

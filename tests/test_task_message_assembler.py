@@ -1,12 +1,12 @@
 """前端消息装配层（router 侧）守卫。
 
 signals_10s 的「流名→metric 映射 + 空模板」与告警序列化已从 ClientQueues 下沉到
-app.routers.task 的装配函数；CQ 只出纯数据（get_slide_window_summary / get_alarm_snapshot）。
+app.routers.task 的装配函数；帧窗汇总（_summarize_window）也在 router。
 """
 
 from unittest.mock import MagicMock
 
-from factories import make_alarm
+from factories import make_alarm, make_frame_detection
 
 import app.services.inference.online.naming as naming
 from app.types.run import RunIdentity
@@ -46,9 +46,9 @@ def test_build_task_alarm_message_assembles_via_atomic_snapshot(monkeypatch):
     cq = MagicMock()
     cq.run = RunIdentity(7, 1, 1)
     cq.get_alarm_snapshot.return_value = ([alarm], 2)
-    cq.get_slide_window_summary.return_value = {
-        "bubble": {"active": True, "hit_count": 1, "max_conf": 0.8}
-    }
+    cq.sess.channel.return_value.snapshot.return_value = [
+        make_frame_detection(source="bubble", n=1, ts=1.0)
+    ]
 
     msg = _build_task_alarm_message(cq, since_seq=1)
 

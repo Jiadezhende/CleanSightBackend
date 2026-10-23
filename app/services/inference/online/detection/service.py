@@ -15,7 +15,7 @@ from app.types.detection import FrameDetection
 from app.services.client.instance import client_service
 from app.services.client.service import ClientService
 from app.services.client.config import get_client_config
-from app.services.inference.online.topics import LATEST_DETECTION
+from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
@@ -141,7 +141,7 @@ class DetectionService:
         """将推理结果双写到**捕获的 CQ 句柄**（frame.cq），不按 client_id 反查。
 
         双写策略：
-        - slide_window（per-task 拆分）：供 TemporalWorker 历史窗口分析
+        - DETECTION_WINDOW（帧窗）：供 TemporalWorker 历史窗口分析
         - latest_detection（原子快照）：供 VisualizationWorker 直接读取，保证同帧一致性
 
         句柄化写回：dispatcher pop 帧时捕获该 run 的 CQ 句柄随 batch 同行，此处直接写它。
@@ -179,7 +179,7 @@ class DetectionService:
                     )
             # 帧窗 / 原子快照 / 落盘缓冲共用 collector 组装的这一份（pool 每帧新建、无别名突变），不复制。
             # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。
-            cq.push_detection(frame)
+            cq.sess.channel(DETECTION_WINDOW).push(frame)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）
             cq.sess.channel(LATEST_DETECTION).set(frame)
             # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）

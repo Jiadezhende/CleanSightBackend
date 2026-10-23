@@ -4,13 +4,14 @@
 """
 
 import logging
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Query
 
 from app.db import alarms as db_alarms
 from app.db import tasks as db_tasks
 from app.services.client.instance import client_service
+from app.services.inference.online.topics import DETECTION_WINDOW, SIGNALS_WINDOW_SEC
 from app.storage import hls, runs
 from app.storage import tasks as step_tasks
 
@@ -53,11 +54,40 @@ async def get_task_alarms(task_id: int):
     return {"task_id": task_id, "total": len(alarms), "alarms": alarms}
 
 
+def _summarize_window(window: List[Any]) -> Dict[str, Dict[str, Any]]:
+    """帧窗最近 10s 内每条流的检测汇总：{stream_name: {active, hit_count, max_conf}}。
+
+    帧窗可能保留更长的感受野，这里固定按最新一帧往前 10s 裁。只按流名聚合，metric 映射见下。
+    """
+    if not window:
+        return {}
+    acc: Dict[str, Dict[str, float]] = {}
+    cutoff = window[-1].ts - SIGNALS_WINDOW_SEC
+    for feat in window:
+        if feat.ts < cutoff:
+            continue
+        for src, fd in feat.by_source.items():
+            if fd is None:
+                continue
+            a = acc.setdefault(src, {"hit": 0.0, "max_conf": 0.0})
+            if fd.boxes:
+                a["hit"] += 1
+                a["max_conf"] = max(a["max_conf"], max(d.confidence for d in fd.boxes))
+    return {
+        src: {
+            "active": a["hit"] > 0,
+            "hit_count": int(a["hit"]),
+            "max_conf": round(float(a["max_conf"]), 4),
+        }
+        for src, a in acc.items()
+    }
+
+
 def _build_signals_10s(stream_summary: dict) -> dict:
-    """把 CQ 的按流名汇总（{stream_name: {active,hit_count,max_conf}}）映射为
+    """把帧窗的按流名汇总（{stream_name: {active,hit_count,max_conf}}）映射为
     前端 signals_10s（按 metric.value 键组织，含全量空模板）。
 
-    metric 映射是 inference 展示知识，收敛在 router 装配层；CQ 只出纯流名汇总。
+    metric 映射是 inference 展示知识，收敛在 router 装配层。
     """
     from app.services.inference.online.naming import get_task_metric_map
 
@@ -86,7 +116,9 @@ def _build_task_alarm_message(cq, since_seq: int) -> dict:
     return {
         "task_id": cq.run.task_id,
         "max_seq": max_seq,
-        "signals_10s": _build_signals_10s(cq.get_slide_window_summary()),
+        "signals_10s": _build_signals_10s(
+            _summarize_window(cq.sess.channel(DETECTION_WINDOW).snapshot())
+        ),
         "alarms": [
             {
                 "seq": a.seq,

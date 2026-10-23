@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from factories import make_alarm
+from factories import make_alarm, make_frame_detection
 from httpx import ASGITransport, AsyncClient
 
 from app.types.run import RunIdentity
@@ -57,9 +57,9 @@ async def test_task_message_running_passes_since_seq_to_snapshot(monkeypatch):
     cq = MagicMock()
     cq.run = RunIdentity(1, 1, 1)
     cq.get_alarm_snapshot.return_value = ([alarm], 2)
-    cq.get_slide_window_summary.return_value = {
-        "bubble": {"active": True, "hit_count": 1, "max_conf": 0.8}
-    }
+    cq.sess.channel.return_value.snapshot.return_value = [
+        make_frame_detection(source="bubble", n=1, ts=1.0)
+    ]
 
     fake_manager = MagicMock()
     fake_manager.get.return_value = cq

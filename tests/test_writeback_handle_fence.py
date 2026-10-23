@@ -14,7 +14,7 @@ import pytest
 from factories import make_cq, make_detector_output, make_frame_detection
 from app.services.client.queues import ClientQueues
 from app.services.inference.online.detection.service import DetectionService
-from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL
+from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION
 from app.services.utils.metrics import frame_drop_total
 
 
@@ -39,7 +39,7 @@ def test_active_run_write_back_lands():
     svc._write_back_results([res])
 
     assert cq.sess.channel(LATEST_DETECTION).get() is res  # 快照 = collector 组装的同一份 FrameDetection
-    assert cq.get_slide_window() == [res]  # 检测入滑窗
+    assert cq.sess.channel(DETECTION_WINDOW).snapshot() == [res]  # 检测入滑窗
     # 落盘缓冲拿到同一份帧级 FrameDetection（不复制）
     buffered = cq.drain_ca_detections()
     assert buffered == [res] and buffered[0] is res
@@ -57,7 +57,7 @@ def test_non_active_run_write_back_blocked_and_counted(seal):
     svc._write_back_results([_result(cq)])
 
     assert cq.sess.channel(LATEST_DETECTION).get() is None  # 快照未落
-    assert cq.get_slide_window() == []  # 滑窗未落
+    assert cq.sess.channel(DETECTION_WINDOW).snapshot() == []  # 滑窗未落
     assert cq.drain_ca_detections() == []  # 落盘缓冲这条腿也被挡
     assert _stale_drops() - before == 1.0
 
@@ -93,6 +93,6 @@ def test_degraded_frame_not_buffered_for_persistence():
 
     svc._write_back_results([degraded, ok])
 
-    assert cq.get_slide_window() == [degraded, ok]
+    assert cq.sess.channel(DETECTION_WINDOW).snapshot() == [degraded, ok]
     assert cq.sess.channel(LATEST_DETECTION).get() is ok
     assert cq.drain_ca_detections() == [ok]

@@ -2,7 +2,7 @@
 
 from factories import make_alarm, make_cq, make_frame, make_frame_detection
 from app.services.client.queues import RunState
-from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL
+from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION, LATEST_TEMPORAL
 
 
 # 本地薄别名：保留原用例可读性，构造逻辑收敛在 factories。
@@ -38,8 +38,8 @@ def test_frame_and_result_writes_blocked_when_not_active():
     assert cq.append_ca_raw(make_frame()) is False
     cq.append_ca_processed(make_frame())
     assert len(cq.ca_processed) == 0
-    cq.push_detection(_det())
-    assert cq.get_slide_window() == []
+    cq.sess.channel(DETECTION_WINDOW).push(_det())
+    assert cq.sess.channel(DETECTION_WINDOW).snapshot() == []
     assert cq.sess.channel(LATEST_DETECTION).set(make_frame_detection()) is False
     assert cq.sess.channel(LATEST_DETECTION).get() is None
 
@@ -75,11 +75,11 @@ def test_clear_through_writes_allowed_when_not_active():
 
 def test_close_releases_payload_keeps_identity():
     cq = make_cq()
-    cq.push_detection(_det())
+    cq.sess.channel(DETECTION_WINDOW).push(_det())
     cq.append_ca_raw(make_frame())
     cq.close()
     # payload 已释放
-    assert cq.get_slide_window() == []
+    assert cq.sess.channel(DETECTION_WINDOW).snapshot() == []
     assert len(cq.ca_raw) == 0
     assert cq.get_recent_alarms() == []
     assert cq.sess.channel(LATEST_DETECTION).get() is None

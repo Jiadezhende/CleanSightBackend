@@ -1,11 +1,12 @@
 """CQ 的 detections 落盘缓冲（`ca_detections`）—— 与 `ca_raw` / `ca_processed` 同族的第三条。
 
 守四件事：写门（非 ACTIVE 拒）、满时丢最旧并计数、`drain` 原子全排空、`close` 释放。
-它与 `_slide_window` 共用 `_slide_window_lock` 但**语义相反**：滑窗按算子感受野裁剪、会丢，
+它与帧窗 `DETECTION_WINDOW` 是同一帧的两个去处，但**语义相反**：滑窗按算子感受野裁剪、会丢，
 缓冲只在满时丢——所以两者不能合并，这里也各测各的。
 """
 
 from factories import make_cq, make_frame_detection
+from app.services.inference.online.topics import DETECTION_WINDOW
 from app.services.utils.metrics import frame_drop_total
 
 
@@ -55,11 +56,10 @@ def test_close_releases_the_buffer():
 def test_slide_window_and_buffer_are_independent():
     """滑窗被裁不影响缓冲：落盘序列不该随算子感受野缩水。"""
     cq = make_cq(task_id=1, step_id=2, source_ip="ip")
-    cq.set_stream_windows({"op": 0.0})   # 底线 10s 感受野
 
     for ts in (1.0, 2.0, 100.0):         # 第三帧把前两帧挤出滑窗
-        cq.push_detection(make_frame_detection(ts=ts))
+        cq.sess.channel(DETECTION_WINDOW).push(make_frame_detection(ts=ts))
         cq.append_ca_detections(make_frame_detection(ts=ts))
 
-    assert [f.ts for f in cq.get_slide_window()] == [100.0]
+    assert [f.ts for f in cq.sess.channel(DETECTION_WINDOW).snapshot()] == [100.0]
     assert [f.ts for f in cq.drain_ca_detections()] == [1.0, 2.0, 100.0]

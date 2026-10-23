@@ -4,11 +4,11 @@
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
 2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），2Hz tick
 3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
-4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 LATEST_DETECTION（最新快照）
+4. 双写 + 原子快照：推理结果同时写入 DETECTION_WINDOW（历史）和 LATEST_DETECTION（最新快照）
 
 数据流（topic 声明见 topics.py）：
-InferenceLoop → cq.push_detection() + LATEST_DETECTION  [双写]
-TemporalActor (2Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → LATEST_TEMPORAL
+InferenceLoop → DETECTION_WINDOW + LATEST_DETECTION  [双写]
+TemporalActor (2Hz)  → DETECTION_WINDOW → operator.analyze() → operator.judge() → LATEST_TEMPORAL
 VisualizationWorker (~15Hz) → LATEST_DETECTION + get_latest_frame() + LATEST_TEMPORAL → render → cq
 """
 
@@ -22,6 +22,7 @@ from app.services.client.queues import ClientQueues
 from app.types.exceptions import ValidationError
 from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
+from .topics import DETECTION_WINDOW
 
 # 两个只在 `_build_components()` 里实例化的重组件走 TYPE_CHECKING + 函数体内导入
 # （规范 §2 通路 2）：`visualization.visualization_worker` → visualizer 顶层 `import cv2`，
@@ -223,15 +224,11 @@ class InferenceService:
 
         if specs:
             operators = [cls(**kwargs) for cls, kwargs in specs]
-            # 按感受野配置每条流的缓冲长度：max(底线, 订阅该流的算子最大 window_seconds)。
-            # 算子在 analyze 内自行 _clip 到各自感受野；底线保证 signals_10s 仍见 10s。
-            stream_windows: Dict[str, float] = {}
-            for op in operators:
-                for src in op.subscribes:
-                    stream_windows[src] = max(
-                        stream_windows.get(src, 0.0), op.window_seconds
-                    )
-            cq.set_stream_windows(stream_windows)
+            # 帧窗保留时长放宽到算子最大感受野（底线 10s 在 topic 声明里）；
+            # 算子在 analyze 内自行 _clip 到各自感受野。
+            cq.sess.channel(DETECTION_WINDOW).extend_span(
+                max(op.window_seconds for op in operators)
+            )
 
             actor = ClientTemporalActor(
                 task_id=task_id,
