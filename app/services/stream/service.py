@@ -312,7 +312,7 @@ class StreamService:
             stream_url: RTSP 流 URL
 
         Returns:
-            True 表示重启成功，False 表示失败
+            True 表示重启成功；False 表示失败，或停旧期间槽位被并发改过而放弃
 
         异常处理：
             - 捕获所有异常，记录日志，返回 False
@@ -320,8 +320,7 @@ class StreamService:
         """
         try:
             # 直接调用实现，不包重试
-            self._restart_stream_impl(task_id, stream_url)
-            return True
+            return self._restart_stream_impl(task_id, stream_url)
 
         except Exception as e:
             # 记录异常，返回 False（健康监控器会在下一个周期重试）
@@ -340,7 +339,7 @@ class StreamService:
             stream_url: RTSP 流 URL
 
         Returns:
-            True表示重启成功
+            True表示重启成功；False表示停旧期间槽位被并发改过，已放弃
 
         Raises:
             StreamConnectionError: 重启失败
@@ -358,6 +357,15 @@ class StreamService:
 
         # 2. 清理旧记录并创建新decoder（在锁内执行）
         with self.lock:
+            # 乐观核对：锁外停旧期间槽位被并发 start/stop 改过 → 放弃。否则会弹走别人刚注册的
+            # decoder 而不停它（漏停），或在 stop 之后又起一个。经 run_control 持任务锁调用时不会命中。
+            if self.decoders.get(task_id) is not old_dec:
+                logger.warning(
+                    "[StreamService] restart_stream skipped: task=%s decoder slot changed during stop",
+                    task_id,
+                )
+                return False
+
             self._cleanup_dead_decoder_unsafe(task_id)
 
             # 3. 获取现有的ClientQueues（不创建新的）
