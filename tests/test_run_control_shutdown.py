@@ -39,3 +39,28 @@ def test_shutdown_stops_every_run():
     finally:
         for tid in cqs:
             client_service._task_locks.pop(tid, None)
+
+
+def test_stop_run_flushes_residual_even_if_settlement_fails():
+    """结算告警上报抛错：残段仍须落盘、CQ 仍须注销，错误记进 result。"""
+    tid = 5153
+    cq = _fake_cq(tid)
+    client_service.set(tid, cq)
+
+    with (
+        patch("app.services.run_control.service.stream_service"),
+        patch("app.services.run_control.service.inference_service") as inference,
+        patch("app.services.run_control.service.recording_service") as recording,
+        patch("app.services.run_control.service.alarm_sink") as alarm_sink,
+    ):
+        inference.stop_workflow.return_value = ["settlement"]
+        alarm_sink.persist_alarms.side_effect = RuntimeError("alarm queue down")
+        result = run_control_service.stop_run(tid, reason="test")
+
+    try:
+        recording.flush_residual.assert_called_once_with(cq)
+        assert result["data_flushed"] is True
+        assert any(e.startswith("settlement:") for e in result["errors"])
+        assert not client_service.has_client(tid)
+    finally:
+        client_service._task_locks.pop(tid, None)

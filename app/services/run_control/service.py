@@ -23,6 +23,7 @@ from app.services.inference.online.instance import inference_service
 from app.services.inference.online.temporal import alarm_sink
 from app.services.recording.instance import recording_service
 from app.services.stream.instance import stream_service
+from app.services.stream.service import internal_stream_url
 from app.types.exceptions import AppError, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -60,9 +61,10 @@ class RunControlService:
             if client_service.has_client(task_id):
                 old_cq = client_service.get(task_id)
                 if old_cq is not None:
+                    # decoder 记的是改写后的内部地址，入参先过同一改写再比
                     cur_url = (stream_service.get_stream_info(task_id) or {}).get("url")
                     # 完全相同（step / URL 均未变）才幂等返回，否则全量重建
-                    if old_cq.run.step_id == step_id and cur_url == rtsp_url:
+                    if old_cq.run.step_id == step_id and cur_url == internal_stream_url(rtsp_url):
                         logger.info(
                             "[RunControlService] start_run idempotent: task=%s", task_id
                         )
@@ -197,16 +199,31 @@ class RunControlService:
             #    ② alarm 服务上报 settlement 告警（别名已由 actor 烧进 alarm.stage）；
             #    ③ 清前端槽 + recording 落 HLS 残段与剩余检测结果。
             #    顺序保证：actor.finalize 天然先于①落 settlement；③ flush 先于 step 3 registry.remove
-            #    （→cq.close 释放帧）——本 try 早于下方清理。
-            try:
-                if cq is not None:
+            #    （→cq.close 释放帧）——本段早于下方清理。
+            #    三步各自 try：结算或清槽抛错不能连带跳过 ③，否则残段不落盘就被 close 释放。
+            if cq is not None:
+                try:
                     settlement = inference_service.stop_workflow(cq)  # Inference owner
                     if settlement:
                         alarm_sink.persist_alarms(
                             settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT, log_each=True
                         )
+                except Exception as e:
+                    result["errors"].append(f"settlement: {e}")
+                    logger.error(
+                        "[RunControlService] settlement failed: %s - %s", task_id, e, exc_info=True
+                    )
+                try:
                     cq.set_latest_temporal([])   # 提前清前端槽，防 WS 读到结束后残留
                     cq.set_latest_rendered(None)
+                except Exception as e:
+                    result["errors"].append(f"frontend: {e}")
+                    logger.error(
+                        "[RunControlService] clear frontend slots failed: %s - %s",
+                        task_id, e, exc_info=True,
+                    )
+            try:
+                if cq is not None:
                     recording_service.flush_residual(cq)                    # Recording owner
                 result["data_flushed"] = True
             except Exception as e:
@@ -242,6 +259,36 @@ class RunControlService:
                     "[RunControlService] stop_run(reason=%r) completed: %s", reason, task_id
                 )
             return result
+
+    def restart_stream(self, task_id: int, stream_url: str, *, expected: ClientQueues) -> bool:
+        """重连 respawn：注册项仍是 `expected` 才重启 decoder。返回是否发起了重启且成功。
+
+        HealthMonitor 进入重连时捕获 `expected`，respawn 前 `/start` 可能已换代；锁内核对不过即放弃，
+        不停新 run 的 decoder、不把旧 URL 的 decoder 绑到新 CQ 上。持锁期间注册项不变，
+        stream 侧按 task_id 取到的 CQ 即 `expected`。
+        """
+        with client_service.lock_for(task_id):
+            if client_service.get(task_id) is not expected:
+                logger.info(
+                    "[RunControlService] restart_stream skipped by identity fence: task=%s", task_id
+                )
+                return False
+            return stream_service.restart_stream(task_id=task_id, stream_url=stream_url)
+
+    def stop_orphan_decoder(self, task_id: int) -> bool:
+        """停孤儿 decoder（有 decoder 无 CQ）。返回是否真的停了。
+
+        HealthMonitor 在锁外判定「孤儿」，拿锁前 `/start` 可能已为该 task 建好 CQ 与新 decoder；
+        故锁内复查注册表，有 CQ 即放弃，不碰新 run 的 decoder。
+        """
+        with client_service.lock_for(task_id):
+            if client_service.has_client(task_id):
+                logger.info(
+                    "[RunControlService] stop_orphan_decoder skipped: task=%s now has a run", task_id
+                )
+                return False
+            stream_service.stop_stream(task_id)
+            return True
 
     def shutdown(self) -> None:
         """进程停机：逐个 stop_run 在跑的 run，交出 settlement / HLS 残段 / 剩余检测结果。

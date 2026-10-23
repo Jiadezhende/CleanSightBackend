@@ -129,3 +129,55 @@ def test_stop_run_expected_miss_skips_and_spares_new_run(_clean_registry):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --- 3. 孤儿 decoder：锁内复查注册表，有 run 即放弃 ---
+
+def test_stop_orphan_decoder_spares_a_task_that_now_has_a_run(_clean_registry):
+    """HM 判孤儿后、拿锁前 /start 已建好 CQ 与新 decoder → 放弃，不停新 run 的 decoder。"""
+    tid = _clean_registry
+    client_service.set(tid, make_cq(task_id=tid))
+
+    with patch("app.services.run_control.service.stream_service") as mock_stream:
+        stopped = run_control_service.stop_orphan_decoder(tid)
+
+    assert stopped is False
+    mock_stream.stop_stream.assert_not_called()
+
+
+def test_stop_orphan_decoder_stops_when_still_orphan(_clean_registry):
+    tid = _clean_registry
+
+    with patch("app.services.run_control.service.stream_service") as mock_stream:
+        stopped = run_control_service.stop_orphan_decoder(tid)
+
+    assert stopped is True
+    mock_stream.stop_stream.assert_called_once_with(tid)
+
+
+# --- 4. 重连 respawn：锁内核对注册项仍是 expected ---
+
+def test_restart_stream_fence_miss_spares_new_run(_clean_registry):
+    """HM 进入重连后 /start 已换代 → 放弃 respawn，不停新 run 的 decoder、不把旧 URL 绑到新 CQ。"""
+    tid = _clean_registry
+    cq_old = make_cq(task_id=tid)
+    client_service.set(tid, make_cq(task_id=tid))
+
+    with patch("app.services.run_control.service.stream_service") as mock_stream:
+        ok = run_control_service.restart_stream(tid, "rtsp://old", expected=cq_old)
+
+    assert ok is False
+    mock_stream.restart_stream.assert_not_called()
+
+
+def test_restart_stream_fence_hit_restarts(_clean_registry):
+    tid = _clean_registry
+    cq = make_cq(task_id=tid)
+    client_service.set(tid, cq)
+
+    with patch("app.services.run_control.service.stream_service") as mock_stream:
+        mock_stream.restart_stream.return_value = True
+        ok = run_control_service.restart_stream(tid, "rtsp://x", expected=cq)
+
+    assert ok is True
+    mock_stream.restart_stream.assert_called_once_with(task_id=tid, stream_url="rtsp://x")
