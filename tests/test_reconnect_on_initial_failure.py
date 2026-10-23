@@ -72,6 +72,7 @@ def _make_monitor(
         inference_service=MagicMock(),
         config=config,
         recording_service=MagicMock(),
+        run_control=MagicMock(),
     )
 
 
@@ -263,6 +264,16 @@ class TestHealthMonitorReconnectPath:
         monitor._check_all_clients()
         assert client_id not in monitor._reconnecting_clients
         assert monitor._client_stats["orphan_streams"] == 1
+
+    def test_orphan_decoder_is_stopped_via_run_control(self):
+        """有 decoder 无 CQ → 经 run_control.stop_orphan_decoder 停（锁内复查），不直调 stream。"""
+        monitor = _make_monitor("other", self._cq(), active_decoder_ids={"orphan"})
+        monitor._client_service.snapshot.return_value = {}
+
+        monitor._check_all_clients()
+
+        monitor._run_control.stop_orphan_decoder.assert_called_once_with("orphan")
+        monitor._stream_service.stop_stream.assert_not_called()
 
 
 # ===========================================================================

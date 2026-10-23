@@ -39,10 +39,11 @@ class HealthMonitorWorker:
         inference_service=None,
         config: Optional[HealthMonitorConfig] = None,
         recording_service=None,
+        run_control=None,
     ):
         """初始化全局健康监控
 
-        五个入参**一律可缺省**：构造期不解析、不读 yaml、不碰全局单例，缺省者推迟到
+        六个入参**一律可缺省**：构造期不解析、不读 yaml、不碰全局单例，缺省者推迟到
         `start()` 现取（见该方法）。这样 `instance.py` 里那句模块级构造是零副作用的，
         import 本包不会连带拉起 client / stream / inference / recording 四条链。
         测试传入的 mock 会原样保留，`start()` 不覆盖已注入的值。
@@ -54,11 +55,14 @@ class HealthMonitorWorker:
             config: 健康监控配置，None 时 start() 读 yaml
             recording_service: RecordingService 实例，None 时 start() 取全局单例。
                 本模块只用它一个方法：断流时登记残帧 flush（见 `_enter_reconnect_mode`）
+            run_control: RunControlService 实例，None 时 start() 取全局单例。
+                生命周期写（拆除、停孤儿 decoder）一律经它执行，本模块只做决策
         """
         self._client_service = client_service
         self._stream_service = stream_service
         self._inference_service = inference_service
         self._recording_service = recording_service
+        self._run_control = run_control
 
         # 配置：各阈值一律在用处直读 `self.config.*`，**不在此摊成同名实例属性**。
         # 那层拷贝原是给 cleanup_timeout 的派生式（heartbeat + interval×attempts）安身的；
@@ -152,7 +156,7 @@ class HealthMonitorWorker:
     def _resolve_deps(self):
         """把构造期缺省的协作者与配置补齐（已注入的不动）
 
-        四个 import 一律写在函数体内：本模块顶层拉 inference 单例会把 torch/YOLO 链
+        各 import 一律写在函数体内：本模块顶层拉 inference 单例会把 torch/YOLO 链
         一并拽进来（recording 则拽 numpy/cv2），那是 import 期不该付的钱。
         """
         if self.config is None:
@@ -175,6 +179,10 @@ class HealthMonitorWorker:
             from app.services.recording.instance import recording_service
 
             self._recording_service = recording_service
+        if self._run_control is None:
+            from app.services.run_control.instance import run_control_service
+
+            self._run_control = run_control_service
 
     def stop(self):
         """停止监控线程"""
@@ -459,9 +467,7 @@ class HealthMonitorWorker:
         self._reconnecting_clients.pop(task_id, None)
 
         # 步骤 1-3: 委托给 RunControlService（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
-        from app.services.run_control.instance import run_control_service
-
-        return run_control_service.stop_run(
+        return self._run_control.stop_run(
             task_id, reason, skip_decoder=skip_decoder, expected=expected
         )
 
@@ -569,15 +575,11 @@ class HealthMonitorWorker:
         )
         self._stats["orphans_detected"] += 1
 
-        # 无条件调用 stop_stream()：即使进程已死（is_alive=False），
-        # 仍需从 decoders 字典中移除条目，否则下一轮检查会重复检测到孤儿。
-        # 绕过 stop_run（无 CQ），故显式持 lock_for 防与并发 start 撞。
+        # 进程已死（is_alive=False）也要停：要把条目从 decoders 移除，否则下一轮重复检测到孤儿。
+        # 经 run_control 执行：锁内复查无 CQ 才停，防误停 /start 刚起的新 decoder。
         try:
-            with self._client_service.lock_for(task_id):
-                self._stream_service.stop_stream(task_id)
-            logger.info(
-                f"[HealthMonitorWorker] Orphan decoder stopped: {task_id}"
-            )
+            if self._run_control.stop_orphan_decoder(task_id):
+                logger.info("[HealthMonitorWorker] Orphan decoder stopped: %s", task_id)
         except Exception as e:
             logger.error(
                 "[HealthMonitorWorker] Failed to stop orphan decoder: %s - %s", task_id, e, exc_info=True

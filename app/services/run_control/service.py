@@ -260,6 +260,21 @@ class RunControlService:
                 )
             return result
 
+    def stop_orphan_decoder(self, task_id: int) -> bool:
+        """停孤儿 decoder（有 decoder 无 CQ）。返回是否真的停了。
+
+        HealthMonitor 在锁外判定「孤儿」，拿锁前 `/start` 可能已为该 task 建好 CQ 与新 decoder；
+        故锁内复查注册表，有 CQ 即放弃，不碰新 run 的 decoder。
+        """
+        with client_service.lock_for(task_id):
+            if client_service.has_client(task_id):
+                logger.info(
+                    "[RunControlService] stop_orphan_decoder skipped: task=%s now has a run", task_id
+                )
+                return False
+            stream_service.stop_stream(task_id)
+            return True
+
     def shutdown(self) -> None:
         """进程停机：逐个 stop_run 在跑的 run，交出 settlement / HLS 残段 / 剩余检测结果。
 
