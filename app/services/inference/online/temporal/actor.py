@@ -17,6 +17,7 @@ from typing import List
 
 from app.types.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.online.naming import get_stage_alias
+from app.services.inference.online.topics import LATEST_TEMPORAL
 from . import alarm_sink
 from .operator import Operator
 from app.services.utils.worker_guard import guarded_run
@@ -118,7 +119,7 @@ class ClientTemporalActor:
                 )
                 continue
 
-        self._cq.set_latest_temporal(all_events)
+        self._cq.sess.channel(LATEST_TEMPORAL).set(all_events)
 
         if all_alarms:
             for a in all_alarms:

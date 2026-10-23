@@ -22,6 +22,7 @@ from app.services.client.instance import client_service
 from app.services.client.queues import ClientQueues
 from app.services.inference.online.instance import inference_service
 from app.services.inference.online.temporal import alarm_sink
+from app.services.inference.online.topics import LATEST_TEMPORAL
 from app.services.recording.instance import recording_service
 from app.services.session.core import SessionInfo
 from app.services.session.instance import session_service
@@ -226,7 +227,7 @@ class RunControlService:
                         "[RunControlService] settlement failed: %s - %s", task_id, e, exc_info=True
                     )
                 try:
-                    cq.set_latest_temporal([])   # 提前清前端槽，防 WS 读到结束后残留
+                    cq.sess.channel(LATEST_TEMPORAL).clear()   # 提前清前端槽，防 WS 读到结束后残留
                     cq.set_latest_rendered(None)
                 except Exception as e:
                     result["errors"].append(f"frontend: {e}")

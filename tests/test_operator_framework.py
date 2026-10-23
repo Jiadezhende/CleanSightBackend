@@ -170,8 +170,9 @@ def test_per_operator_isolation():
     assert len(captured) == 1
     # 别名前烧：告警 .stage 在产出处（_tick）即被烧成 actor 构造期解析的别名，早于 _persist_alarms
     assert captured[0].stage == actor._stage_alias
-    cq.set_latest_temporal.assert_called_once()
-    assert cq.set_latest_temporal.call_args[0][0] == ["good"]
+    published = cq.sess.channel.return_value.set
+    published.assert_called_once()
+    assert published.call_args[0][0] == ["good"]
 
 
 if __name__ == "__main__":

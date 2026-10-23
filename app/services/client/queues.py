@@ -59,7 +59,7 @@ class ClientQueues:
     - CA-ProcessedQueue: 推理后的处理帧（含标注），用于生成处理后 HLS 段（设置最大长度防止溢出）
     - CA-DetectionQueue: 帧级 FrameDetection 落盘缓冲，等 recording 周期拉走写 detections.jsonl
     - _latest_rendered: 单槽位，最新渲染帧，供前端 WebSocket 实时推流
-    - _latest_detection: 单槽位，最新推理结果原子快照，供 VisualizationWorker 读取
+    （最新推理快照 / 时序叠字已迁成 topic，见 inference/online/topics.py）
 
     内存保护：
     - 所有队列都设置了 maxlen 限制，当队列满时自动丢弃最旧的帧
@@ -70,8 +70,6 @@ class ClientQueues:
       ca_ready          无锁   SPSC deque：单生产者 decoder / 单消费者 dispatcher，GIL 保证原子性
       _raw_lock         Lock   ca_raw + latest_raw_frame + latest_raw_timestamp
       _viz_lock         Lock   ca_processed + _latest_rendered（VizWorker 对同帧连续写两者）
-      _detection_lock   Lock   _latest_detection（原子推理快照槽）
-      _frontend_lock    Lock   _latest_temporal（前端时序事件，低频写）
       _slide_window_lock Lock  _slide_window + ca_detections（写回口对同一帧连写两者，
                                同 _viz_lock 护 ca_processed + _latest_rendered 的理由）
       _alarm_lock       Lock   _alarm_log + _alarm_seq + _alarm_gate（告警生命周期）
@@ -79,8 +77,7 @@ class ClientQueues:
                                append_* 一律**先出队列锁再上报**，故不与上面任何锁互嵌
 
     全清顺序（clear() 同时持锁时的固定顺序，防死锁）：
-      _raw_lock → _viz_lock → _detection_lock
-      → _frontend_lock → _slide_window_lock → _alarm_lock
+      _raw_lock → _viz_lock → _slide_window_lock → _alarm_lock
 
     身份（run/source_ip/stage）为构造定死的不可变值，热路径免锁直读。
     """
@@ -115,8 +112,6 @@ class ClientQueues:
         # --- 锁声明（顺序同 Lock Inventory 全清顺序）---
         self._raw_lock = threading.Lock()        # ca_raw + 帧缓存
         self._viz_lock = threading.Lock()        # ca_processed + _latest_rendered
-        self._detection_lock = threading.Lock()  # _latest_detection
-        self._frontend_lock = threading.Lock()   # _latest_temporal
         self._slide_window_lock = threading.Lock()
         self._alarm_lock = threading.Lock()      # _alarm_log + _alarm_seq + _alarm_gate
 
@@ -204,9 +199,6 @@ class ClientQueues:
         # 最新渲染帧（单槽位，由 _viz_lock 保护，供前端 WebSocket 实时推流）
         self._latest_rendered: Optional[Frame] = None
 
-        # 最新推理快照：帧级 FrameDetection（由 _detection_lock 保护，供 Viz 原子读同帧一致）
-        self._latest_detection: Optional[FrameDetection] = None
-
         # 滑动窗口：帧级 FrameDetection 环形缓冲（一帧一条，多流已对齐，由 _slide_window_lock 保护）。
         # 写回口物化 FrameDetection 后单次 push_detection；算子/ signals 统一从此读，无需按 ts 拼帧。
         self._slide_window: Deque[FrameDetection] = deque()
@@ -221,9 +213,6 @@ class ClientQueues:
         # 容量复用 ca_maxlen（900 条 ≈ 60s @15fps ≈ 2MB，远小于 ca_raw 的像素帧）。
         self.ca_detections: Deque[FrameDetection] = deque(maxlen=ca_maxlen)
         self.frames_dropped_detections: int = 0
-
-        # 最新时序事件列表（由 _frontend_lock 保护，与 _stage 合并）
-        self._latest_temporal: List[str] = []
 
         # 告警日志（由 _alarm_lock 保护）
         self._alarm_log: Deque[Alarm] = deque(maxlen=100)
@@ -390,23 +379,6 @@ class ClientQueues:
         with self._viz_lock:
             return self._latest_rendered
 
-    # --- latest_detection 操作（原子推理快照）---
-
-    def set_latest_detection(self, result: FrameDetection) -> None:
-        """原子写入最新推理快照 FrameDetection（由 InferenceLoop 调用）。
-
-        写门：非 ACTIVE 拒——迟到推理结果落到旧 CQ 被拒，不串台。
-        """
-        if self._state is not RunState.ACTIVE:
-            return
-        with self._detection_lock:
-            self._latest_detection = result
-
-    def get_latest_detection(self) -> Optional[FrameDetection]:
-        """原子读取最新推理结果（由 VisualizationWorker 调用）。"""
-        with self._detection_lock:
-            return self._latest_detection
-
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """获取最新原始帧（用于可视化）。"""
         with self._raw_lock:
@@ -553,7 +525,6 @@ class ClientQueues:
         """
         locks = [
             self._raw_lock, self._viz_lock,
-            self._detection_lock, self._frontend_lock,
             self._slide_window_lock, self._alarm_lock,
         ]
         with contextlib.ExitStack() as stack:
@@ -565,8 +536,6 @@ class ClientQueues:
             self.latest_raw_frame = None
             self.latest_raw_timestamp = time.time()
             self._latest_rendered = None
-            self._latest_detection = None
-            self._latest_temporal = []
             self._slide_window.clear()
             self.ca_detections.clear()
             self._alarm_log.clear()
@@ -647,23 +616,6 @@ class ClientQueues:
             frames = list(self.ca_detections)
             self.ca_detections.clear()
             return frames
-
-    # --- latest_temporal 操作 ---
-
-    def set_latest_temporal(self, events: List[str]) -> None:
-        """覆写最新时序事件列表（由 TemporalWorker 调用）。
-
-        写门：非 ACTIVE 拒**非空**写；清空([])放行——拆除期允许清掉前端残留事件。
-        """
-        if events and self._state is not RunState.ACTIVE:
-            return
-        with self._frontend_lock:
-            self._latest_temporal = events
-
-    def get_latest_temporal(self) -> List[str]:
-        """读取最新时序事件列表。"""
-        with self._frontend_lock:
-            return list(self._latest_temporal)
 
     # --- alarm_log 操作 ---
 

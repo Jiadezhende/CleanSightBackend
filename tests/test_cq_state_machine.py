@@ -2,6 +2,7 @@
 
 from factories import make_alarm, make_cq, make_frame, make_frame_detection
 from app.services.client.queues import RunState
+from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL
 
 
 # 本地薄别名：保留原用例可读性，构造逻辑收敛在 factories。
@@ -39,8 +40,8 @@ def test_frame_and_result_writes_blocked_when_not_active():
     assert len(cq.ca_processed) == 0
     cq.push_detection(_det())
     assert cq.get_slide_window() == []
-    cq.set_latest_detection(make_frame_detection())
-    assert cq.get_latest_detection() is None
+    assert cq.sess.channel(LATEST_DETECTION).set(make_frame_detection()) is False
+    assert cq.sess.channel(LATEST_DETECTION).get() is None
 
 
 # --- settlement 非对称：DRAINING 放行、CLOSED 拒 ---
@@ -58,16 +59,16 @@ def test_settlement_alarm_allowed_in_draining_rejected_when_closed():
 def test_clear_through_writes_allowed_when_not_active():
     cq = make_cq()
     cq.set_latest_rendered(make_frame())
-    cq.set_latest_temporal(["e1"])
+    cq.sess.channel(LATEST_TEMPORAL).set(["e1"])
     cq.to_draining()
     # 非空写被拒
     cq.set_latest_rendered(make_frame())
-    cq.set_latest_temporal(["e2"])
+    cq.sess.channel(LATEST_TEMPORAL).set(["e2"])
     # 清空写放行
     cq.set_latest_rendered(None)
-    cq.set_latest_temporal([])
+    cq.sess.channel(LATEST_TEMPORAL).clear()
     assert cq.get_latest_rendered() is None
-    assert cq.get_latest_temporal() == []
+    assert cq.sess.channel(LATEST_TEMPORAL).get() == []
 
 
 # --- close 释放 payload、保留身份 ---
@@ -81,7 +82,7 @@ def test_close_releases_payload_keeps_identity():
     assert cq.get_slide_window() == []
     assert len(cq.ca_raw) == 0
     assert cq.get_recent_alarms() == []
-    assert cq.get_latest_detection() is None
+    assert cq.sess.channel(LATEST_DETECTION).get() is None
     # 身份小壳保留（供 fence/日志）
     assert cq.run.task_id == 1
     assert cq.run.step_id == 1

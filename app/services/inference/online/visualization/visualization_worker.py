@@ -3,9 +3,9 @@
 职责：
 - 按固定间隔（tick_interval）轮询所有活跃客户端
 - 从 ClientQueues 主动拉取三要素：
-  - cq.get_latest_detection()  → 原子推理快照（所有 task 同帧一致）
+  - LATEST_DETECTION           → 原子推理快照（所有 task 同帧一致）
   - cq.get_latest_frame()      → 最新原始帧
-  - cq.get_latest_temporal()   → 最新时序事件
+  - LATEST_TEMPORAL            → 最新时序事件
 - 渲染检测框、标注、文字信息到最新帧上：有渲染子进程池（render_proxy）时交给子进程，
   每 run 至多一个在途、下一 tick 收回结果；池未就绪 / 帧放不进槽位时在本线程用 FixedVisualizer 就地渲染
 - 写回 ClientQueues（ca_processed + _latest_rendered）
@@ -26,6 +26,7 @@ from app.types.detection import DetectorOutput, FrameDetection
 from app.services.inference.online.render import RenderSpec
 from app.types.frame import Frame
 from app.services.inference.online.naming import get_stage_alias
+from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL, VIZ_LAST_TS
 from app.services.client.instance import client_service
 from app.services.utils.worker_guard import guarded_run
 from .visualizer import FixedVisualizer
@@ -78,9 +79,6 @@ class VisualizationWorker:
         )
         self.fixed_visualizer = FixedVisualizer()
 
-        # 去重：记录每个 run(键=task_id) 上次渲染的推理时间戳，避免重复渲染同一帧
-        self._last_rendered_ts: Dict[int, float] = {}
-
         # 吞吐量观测（[VIZ_THROUGHPUT]）：每 ~10s 评估一次，仅在有压力时才打印，
         # 平稳时静默以免刷屏。定位三件事：viz 线程本身转没转够（tick 率）、
         # processed 成帧率不足是"上游供帧慢"(supply-bound) 还是"单帧渲染慢"(render-bound)。
@@ -92,7 +90,7 @@ class VisualizationWorker:
         # 任一端拿窗界代替都会把出帧率算低而误报 supply-bound。
         self._first_seen: Dict[int, float] = {}
         self._last_seen: Dict[int, float] = {}
-        # 两个统计字典与 _first_seen/_last_rendered_ts 同键（task_id），标注对齐实际键型
+        # 两个统计字典与 _first_seen 同键（task_id），标注对齐实际键型
         self._stat_rendered: Dict[int, int] = defaultdict(int)  # 实际渲染（=新推理结果）帧数
         self._stat_stale: Dict[int, int] = defaultdict(int)     # 有推理但无新结果而空转的 tick 数
         self._render_time_sum: float = 0.0    # 渲染耗时累计（秒）
@@ -159,15 +157,11 @@ class VisualizationWorker:
                     self.worker_id, task_id, e, exc_info=True,
                 )
 
-        # 自清理：移除已不在 ClientService 中的客户端去重记录（防止内存泄漏）
-        stale_ids = self._last_rendered_ts.keys() - all_clients.keys()
-        for stale_id in stale_ids:
-            del self._last_rendered_ts[stale_id]
-
     def _process_client(self, task_id: int, cq, now: float) -> None:
         """处理单个 run 的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[FrameDetection] = cq.get_latest_detection()
+        sess = cq.sess
+        inference: Optional[FrameDetection] = sess.channel(LATEST_DETECTION).get()
         if inference is None:
             return
 
@@ -178,8 +172,8 @@ class VisualizationWorker:
             self._first_seen[task_id] = now
         self._last_seen[task_id] = now
 
-        # 2. 去重：跳过已渲染过的同一推理结果
-        last_ts = self._last_rendered_ts.get(task_id, 0.0)
+        # 2. 去重：跳过已渲染过的同一推理结果（上次送渲染的 ts 记在本 run 的 VIZ_LAST_TS）
+        last_ts = sess.channel(VIZ_LAST_TS).get()
         if inference.ts <= last_ts:
             # 有推理快照但无新结果 → tick 空转。占比高即"上游供帧慢"的直接信号。
             self._stat_stale[task_id] += 1
@@ -196,7 +190,7 @@ class VisualizationWorker:
             return
 
         # 5. 获取最新时序事件
-        events = cq.get_latest_temporal()
+        events = sess.channel(LATEST_TEMPORAL).get()
 
         # 6. 渲染。stage 取自 cq 不可变身份（快照不再携 stage）。
         stage = cq.stage
@@ -210,7 +204,7 @@ class VisualizationWorker:
                 task_id, frame, specs, get_stage_alias(stage), events, ctx=(task_id, cq, inference.ts),
             ):
                 # 结果在下一 tick 由 drain 收回写回；去重时间戳此刻推进，同一推理结果不重送
-                self._last_rendered_ts[task_id] = inference.ts
+                sess.channel(VIZ_LAST_TS).set(inference.ts)
                 return
             # 池未就绪 / 槽满 / 帧放不进槽位 / 无需渲染：本线程就地渲染
 
@@ -233,8 +227,9 @@ class VisualizationWorker:
         frame_data = Frame(timestamp=ts, frame=annotated)
         cq.append_ca_processed(frame_data)
         cq.set_latest_rendered(frame_data)
-        if ts > self._last_rendered_ts.get(task_id, 0.0):
-            self._last_rendered_ts[task_id] = ts
+        last = cq.sess.channel(VIZ_LAST_TS)
+        if ts > last.get():
+            last.set(ts)
         self._stat_rendered[task_id] += 1
 
     def _render(

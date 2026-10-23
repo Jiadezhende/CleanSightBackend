@@ -14,6 +14,7 @@ import pytest
 from factories import make_cq, make_detector_output, make_frame_detection
 from app.services.client.queues import ClientQueues
 from app.services.inference.online.detection.service import DetectionService
+from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL
 from app.services.utils.metrics import frame_drop_total
 
 
@@ -37,7 +38,7 @@ def test_active_run_write_back_lands():
     res = _result(cq)
     svc._write_back_results([res])
 
-    assert cq.get_latest_detection() is res  # 快照 = collector 组装的同一份 FrameDetection
+    assert cq.sess.channel(LATEST_DETECTION).get() is res  # 快照 = collector 组装的同一份 FrameDetection
     assert cq.get_slide_window() == [res]  # 检测入滑窗
     # 落盘缓冲拿到同一份帧级 FrameDetection（不复制）
     buffered = cq.drain_ca_detections()
@@ -55,7 +56,7 @@ def test_non_active_run_write_back_blocked_and_counted(seal):
     before = _stale_drops()
     svc._write_back_results([_result(cq)])
 
-    assert cq.get_latest_detection() is None  # 快照未落
+    assert cq.sess.channel(LATEST_DETECTION).get() is None  # 快照未落
     assert cq.get_slide_window() == []  # 滑窗未落
     assert cq.drain_ca_detections() == []  # 落盘缓冲这条腿也被挡
     assert _stale_drops() - before == 1.0
@@ -72,8 +73,8 @@ def test_stale_and_active_in_same_batch_isolated():
     res_active = _result(cq_active)
     svc._write_back_results([res_stale, res_active])
 
-    assert cq_stale.get_latest_detection() is None
-    assert cq_active.get_latest_detection() is res_active
+    assert cq_stale.sess.channel(LATEST_DETECTION).get() is None
+    assert cq_active.sess.channel(LATEST_DETECTION).get() is res_active
     assert cq_stale.drain_ca_detections() == []  # 仅 active 进缓冲
     active_buffered = cq_active.drain_ca_detections()
     assert len(active_buffered) == 1
@@ -93,5 +94,5 @@ def test_degraded_frame_not_buffered_for_persistence():
     svc._write_back_results([degraded, ok])
 
     assert cq.get_slide_window() == [degraded, ok]
-    assert cq.get_latest_detection() is ok
+    assert cq.sess.channel(LATEST_DETECTION).get() is ok
     assert cq.drain_ca_detections() == [ok]

@@ -4,12 +4,12 @@
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
 2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），2Hz tick
 3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
-4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_detection（最新快照）
+4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 LATEST_DETECTION（最新快照）
 
-数据流：
-InferenceLoop → cq.push_detection() + cq.set_latest_detection()  [双写]
-TemporalActor (2Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
-VisualizationWorker (~15Hz) → cq.get_latest_detection() + get_latest_frame() + get_latest_temporal() → render → cq
+数据流（topic 声明见 topics.py）：
+InferenceLoop → cq.push_detection() + LATEST_DETECTION  [双写]
+TemporalActor (2Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → LATEST_TEMPORAL
+VisualizationWorker (~15Hz) → LATEST_DETECTION + get_latest_frame() + LATEST_TEMPORAL → render → cq
 """
 
 import logging

@@ -15,6 +15,7 @@ from app.types.detection import FrameDetection
 from app.services.client.instance import client_service
 from app.services.client.service import ClientService
 from app.services.client.config import get_client_config
+from app.services.inference.online.topics import LATEST_DETECTION
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
@@ -180,7 +181,7 @@ class DetectionService:
             # Path 1: 帧窗（temporal 需要历史窗口）——一帧一条 push。
             cq.push_detection(frame)
             # Path 2: 原子快照（visualization 只需最新，保证所有 task 同帧一致；无 cq，不成自引用环）
-            cq.set_latest_detection(frame)
+            cq.sess.channel(LATEST_DETECTION).set(frame)
             # 启动延迟埋点 B：该 run 首个推理结果写回（幂等，仅首帧触发）
             cq.mark_startup_milestone("first_inference")
             # Path 3: 落盘缓冲（offline 链路硬需求）——本线程不碰盘，只入 cq 缓冲，
