@@ -86,6 +86,9 @@ class StreamService:
         decoder 注册成功后立即返回，不等待流连接结果。
         首次 start() 若失败，健康监控会在下一个心跳周期发起重连。
 
+        只由 `RunControlService` 持任务锁调用：本服务的锁只保护 decoder 注册表，
+        同一 task 的 start / stop / restart 之间的串行靠任务锁。
+
         Args:
             task_id: 运行键（路由标识）
             stream_url: RTSP 流 URL
@@ -186,17 +189,14 @@ class StreamService:
 
     def stop_stream(self, task_id: int):
         """
-        停止流解码（业务代码，纯净）
+        停止流解码（业务代码，纯净）。返回时 ffmpeg 已被杀并回收、读线程已 join。
 
-        注意：
-        - decoder 进程的停止是异步的（避免阻塞 API 响应）
-        - ClientService 由 InferenceService 统一清理
+        只由 `RunControlService` 持任务锁调用（同 `start_stream`）；CQ 注销也归它。
 
         Args:
             task_id: 运行键（路由标识）
         """
         # 1. 从字典中移除decoder（在锁内）
-        dec = None
         with self.lock:
             dec = self.decoders.pop(task_id, None)
             if not dec:
@@ -205,45 +205,11 @@ class StreamService:
 
             logger.info(f"[{task_id}] Stopping stream")
 
-        # 2. 异步停止decoder进程（避免阻塞）。terminal 路径：无新 run 复用该 CQ，
-        #    迟到帧由 CQ 写门（DRAINING/CLOSED）拦截，故异步安全。
-        if dec:
-            self._stop_decoder_async(dec, task_id)
+        # 2. 锁外同步停（kill + reap + join reader，实测 ms 级；超时上界约 6s）：
+        #    不占全局锁，最坏只拖住本 task 的任务锁。
+        dec.stop()
 
         logger.info(f"[{task_id}] Stream stopped")
-
-    def _stop_decoder_async(self, decoder: FFmpegDecoder, task_id: int):
-        """
-        业务代码：异步停止解码器（避免阻塞）
-
-        Args:
-            decoder: FFmpegDecoder 实例
-            task_id: 运行键（路由标识）
-        """
-
-        def stop_decoder_worker():
-            """
-            Worker 线程（边界层 1）
-
-            职责：
-            1. 停止解码器进程
-            2. 捕获所有异常，防止线程崩溃
-            """
-            try:
-                # 业务逻辑：停止解码器（kill + reap + join reader）
-                decoder.stop()
-                logger.debug(f"[{task_id}] FFmpeg process stopped")
-            except Exception as e:
-                # 边界层 1 捕获异常
-                logger.error(
-                    f"[BoundaryLayer1] Failed to stop FFmpeg for {task_id}: {e}",
-                    exc_info=True,
-                )
-
-        stop_thread = threading.Thread(
-            target=stop_decoder_worker, daemon=True, name=f"stop-decoder-{task_id}"
-        )
-        stop_thread.start()
 
     def _cleanup_dead_decoder_unsafe(self, task_id: int):
         """
