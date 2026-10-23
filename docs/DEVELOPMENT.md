@@ -140,3 +140,20 @@
 > 前两条不是风格偏好：单例引用面与分层白名单两条门禁都按模块名判定依赖，同一条依赖若有两种写法就有绕过的口子。
 
 背景与推导见 [update/20260903_PACKAGE_LAYOUT_SPEC.md](update/20260903_PACKAGE_LAYOUT_SPEC.md)、[update/20260922_IMPORT_CONVENTION.md](update/20260922_IMPORT_CONVENTION.md)。
+
+---
+
+## 9. 锁序
+
+三层，高 → 低：
+
+| 层 | 含义 | 成员 |
+|----|------|------|
+| L0 编排锁 | 一次 run 的生命周期事务 | run_control 任务锁 `lock_for(task_id)`（每 task 一把，唯一允许可重入） |
+| L1 外层锁 | 覆盖多步操作，或锁内做 IO / 起停子进程 | recording `_collect_lock`；infer_proxy `_lock` / `_proc_lock`；render_proxy `_lock` / `_proc_lock`；decoder `lock`；离线作业 `_lock`；lab `runtime_config._LOCK`；懒加载锁（detector / operator `_model_load_lock`、media_token `_DEFAULT_LOCK`、gateway `_init_lock`） |
+| L2 叶子锁 | 只护本对象的几个字段 | session 锁；session / client 注册表写锁；client `_task_locks_guard`；CQ 各 payload 锁与 `_state_lock`；recording `_hls_inflight_lock`；frame_ring `_lock`；PressureReporter `_lock`；dispatcher `_lock`；stream `lock`；gateway 三个 Store 锁；`queue.Queue` 内部锁 |
+
+1. 只能在持有高层锁时获取低层锁，反向禁止。
+2. 同层不嵌套。L1 之间确需嵌套的，登记为固定有向对（当前无）。
+3. 持有 L2 期间不获取任何锁，不调其他模块的代码（回调、上报、Prometheus 计数、IO）。
+4. 新增锁在定义处注释层级，并登记进上表。
