@@ -250,7 +250,7 @@ class TestHealthMonitorReconnectPath:
             "进程活着时即便帧陈旧也不应进入重连（等首帧不能被杀）"
         )
         # 未超 cleanup_timeout(20s)，也不应清理
-        monitor._stream_service.restart_stream.assert_not_called()
+        monitor._run_control.restart_stream.assert_not_called()
 
     def test_enters_orphan_when_decoder_not_registered(self):
         """decoder 未注册（has_decoder=False）→ 走 orphan 路径，不进重连。"""
@@ -306,9 +306,11 @@ class TestFullReconnectScenario:
 
         # Round 2：仍死 + 节流窗到 → respawn
         monitor._check_all_clients()
-        assert monitor._stream_service.restart_stream.called, (
-            "Round 2: 应已调用 restart_stream() 做 respawn"
+        assert monitor._run_control.restart_stream.called, (
+            "Round 2: 应已经 run_control.restart_stream() 做 respawn"
         )
+        assert monitor._run_control.restart_stream.call_args.kwargs["expected"] is mock_cq
+        monitor._stream_service.restart_stream.assert_not_called()
 
         # 模拟推流端就绪，新帧到来
         mock_cq.latest_raw_timestamp = time.time()
@@ -396,11 +398,11 @@ class TestReconnectIdentityFence:
         monitor._client_service.snapshot.return_value = {client_id: cq_b}
 
         # Round 2：当前 cq(cq_B) 非捕获的 cq_A → 放弃重连，且不对新 run 发起 restart
-        monitor._stream_service.restart_stream.reset_mock()
+        monitor._run_control.restart_stream.reset_mock()
         monitor._check_all_clients()
 
         assert client_id not in monitor._reconnecting_clients
-        monitor._stream_service.restart_stream.assert_not_called()
+        monitor._run_control.restart_stream.assert_not_called()
 
 
 if __name__ == "__main__":

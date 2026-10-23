@@ -260,6 +260,21 @@ class RunControlService:
                 )
             return result
 
+    def restart_stream(self, task_id: int, stream_url: str, *, expected: ClientQueues) -> bool:
+        """重连 respawn：注册项仍是 `expected` 才重启 decoder。返回是否发起了重启且成功。
+
+        HealthMonitor 进入重连时捕获 `expected`，respawn 前 `/start` 可能已换代；锁内核对不过即放弃，
+        不停新 run 的 decoder、不把旧 URL 的 decoder 绑到新 CQ 上。持锁期间注册项不变，
+        stream 侧按 task_id 取到的 CQ 即 `expected`。
+        """
+        with client_service.lock_for(task_id):
+            if client_service.get(task_id) is not expected:
+                logger.info(
+                    "[RunControlService] restart_stream skipped by identity fence: task=%s", task_id
+                )
+                return False
+            return stream_service.restart_stream(task_id=task_id, stream_url=stream_url)
+
     def stop_orphan_decoder(self, task_id: int) -> bool:
         """停孤儿 decoder（有 decoder 无 CQ）。返回是否真的停了。
 

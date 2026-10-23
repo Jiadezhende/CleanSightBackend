@@ -56,7 +56,7 @@ class HealthMonitorWorker:
             recording_service: RecordingService 实例，None 时 start() 取全局单例。
                 本模块只用它一个方法：断流时登记残帧 flush（见 `_enter_reconnect_mode`）
             run_control: RunControlService 实例，None 时 start() 取全局单例。
-                生命周期写（拆除、停孤儿 decoder）一律经它执行，本模块只做决策
+                生命周期写（拆除、重启流、停孤儿 decoder）一律经它执行，本模块只做决策
         """
         self._client_service = client_service
         self._stream_service = stream_service
@@ -390,14 +390,14 @@ class HealthMonitorWorker:
         state.last_attempt_time = current_time
         self._stats["reconnects"] += 1  # 累计统计：respawn 次数
 
-        # respawn dead decoder。restart_stream 自带成功("Stream restarted successfully")/
-        # 失败("restart_stream failed: <error>")日志，此处不再重复记，避免一次 attempt 打双 WARNING。
+        # respawn dead decoder，经 run_control 持任务锁核对 fence（注册项已换代则放弃）。
+        # stream 侧自带成功 / 失败日志，此处不再重复记，避免一次 attempt 打双 WARNING。
         # 成功 → 下一 tick 检测到新帧走 RECONNECT SUCCESS；失败 → 下个 reconnect_interval 再试，
         # 无帧满 cleanup_timeout 收口。
         logger.info(
             "[HealthMonitorWorker] RECONNECT ATTEMPT: %s (respawn dead decoder)", task_id
         )
-        self._stream_service.restart_stream(task_id=task_id, stream_url=state.stream_url)
+        self._run_control.restart_stream(task_id, state.stream_url, expected=state.cq)
 
     def _exit_reconnect_mode(self, task_id: int, cleanup: bool):
         """退出重连模式

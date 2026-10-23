@@ -295,6 +295,9 @@ class StreamService:
         """
         服务层方法：重启流（自动重连用，不能阻塞）
 
+        只由 `RunControlService.restart_stream` 持任务锁调用：锁内按 task_id 取到的 CQ 即
+        fence 核对过的那一个。
+
         职责边界：
         - start_stream() 与本方法都不包重试
         - 健康监控器负责重试逻辑（在自己的时间间隔内）
