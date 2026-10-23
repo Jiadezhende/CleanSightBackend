@@ -96,6 +96,38 @@ async def test_restart_with_same_step_and_url_is_idempotent():
     mock_stream.stop_stream.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_same_proxy_url_is_idempotent():
+    """入参走代理端口：decoder 记的是改写后的内部地址，重复 start 仍须幂等（不拆旧、不另开 run）。"""
+    from app.settings import settings
+
+    db_task = _make_db_task(task_id=1, source_ip="10.0.0.1")
+    proxy_url = f"rtsp://10.0.0.1:{settings.mediamtx_proxy_port}/live/cam"
+    internal_url = f"rtsp://127.0.0.1:{settings.mediamtx_internal_port}/live/cam"
+
+    with (
+        patch.object(db_tasks, "query_task", return_value=db_task),
+        patch("app.services.run_control.service.inference_service") as mock_inference,
+        patch("app.services.run_control.service.stream_service") as mock_stream,
+        patch("app.services.run_control.service.recording_service"),
+        patch("app.services.run_control.service.ClientQueues", side_effect=_new_cq),
+    ):
+        mock_inference.start_workflow.return_value = True
+        mock_inference.resolve_stage.return_value = "0"
+        mock_stream.get_stream_info.return_value = {"url": internal_url}
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            payload = {"task_id": 1, "rtsp_url": proxy_url}
+            first = await ac.post("/api/start", json=payload)
+            second = await ac.post("/api/start", json=payload)
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert "idempotent" in second.json()["message"]
+    mock_stream.stop_stream.assert_not_called()
+    mock_stream.start_stream.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # Test 2: 同 task 改 url → 触发重启清理
 # ---------------------------------------------------------------------------

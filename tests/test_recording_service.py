@@ -1,16 +1,17 @@
-"""`app.services.recording`：按 run 打包落盘任务 + 取帧顺序 + 断流 flush 的登记与回收。
+"""`app.services.recording`：按 run 打包落盘任务 + 取帧顺序 + 取帧锁。
 
 格式怎么落盘不在这里测（那是 `test_storage_hls.py`）。这里只钉**编排**：
 
 1. **按 run 落盘**——每批产物写进提交时 `cq.run` 指向的 run。同 step 重启后旧一代迟到的段
    写进它自己的 run，不丢、不串进新 run。
 2. **打包与拒收**——未绑定 run、空批、队列未起 / 满，直接拒收不入队。
-3. **取帧顺序与断流 flush**——整段先于残段；挂起请求一次性、按身份核对，拆除时回收。
+3. **取帧锁**——sweeper / 断流 flush / 拆除 flush 三条取帧路径串行，入队序即 ts 序。
 
 主体用例把队列换成同步执行的替身、把 `hls` 换成记录调用的替身，因此不碰线程、不碰
 cv2/ffmpeg，全部毫秒级。末尾一条端到端跑真队列 + 真 `storage.hls`，缺外部工具时 skip。
 """
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -387,7 +388,7 @@ class TestFlushResidual:
 
 
 class TestCollectFrom:
-    """运行期取帧的唯一入口：拉两轨整段 → 断流残帧，顺序固定。
+    """sweeper 每 tick 的取帧：拉两轨整段，残帧留在缓冲里等攒满。
 
     这几条原先挂在 `TestSweeper` 上。逻辑从定时器搬回 service 之后，用例跟着搬——断言留在
     定时器那边就等于承认定时器该懂这套顺序。
@@ -418,33 +419,7 @@ class TestCollectFrom:
         assert fake_hls.calls == []
         assert len(cq.raw_segments) == 1
 
-    def test_pending_flush_runs_after_the_full_segments_on_both_tracks(self, fake_hls):
-        """残段的 ts 晚于本轮所有整段，**必须后提交**——反过来清单 ts 就逆序了。
-
-        入队序即执行序，而每段的 tfdt = 执行时读到的累计 EXTINF：顺序一乱，后写的段会在
-        媒体轴上盖掉先写的，不报错、只是画面丢一截。
-
-        **两轨都要断言**：只给 raw 的话，把残帧那步挪到两个 `while` 之间（raw 整段之后、
-        processed 整段之前）照样绿，而那样 processed 清单就逆序了。
-        """
-        cq = FakeCQ(1, 2, ca_segment_len=10, name="A")
-        cq.raw_segments = [_frames(10, start=1700.0)]
-        cq.processed_segments = [_frames(10, start=1700.0)]
-        cq.raw_residual = _frames(4, start=1701.0)
-        cq.processed_residual = _frames(4, start=1701.0)
-        svc = _service(FakeClients({}))
-        svc.request_residual_flush(cq, fence_ts=1709.0)
-
-        svc.collect_from(cq)
-
-        assert fake_hls.inserts == [
-            ("insert", 1, 2, "raw", 10),                   # 先把两轨的整段拉完
-            ("insert", 1, 2, "processed", 10),
-            ("insert", 1, 2, "raw", 4),                    # 残段才轮到
-            ("insert", 1, 2, "processed", 4),
-        ]
-
-    def test_no_pending_request_means_only_full_segments(self, fake_hls):
+    def test_takes_only_full_segments(self, fake_hls):
         cq = FakeCQ(1, 2, ca_segment_len=10, name="A")
         cq.raw_segments = [_frames(10)]
         cq.raw_residual = _frames(4)
@@ -453,79 +428,53 @@ class TestCollectFrom:
         svc.collect_from(cq)
 
         assert fake_hls.inserts == [("insert", 1, 2, "raw", 10)]
-        assert len(cq.raw_residual) == 4, "没有断流请求时残帧照旧留在缓冲里等攒满"
-
-    def test_pending_request_is_consumed_once(self, fake_hls):
-        """挂起请求是一次性的：下一轮 sweep 不该再切一遍。"""
-        cq = FakeCQ(1, 2, ca_segment_len=10, name="A")
-        cq.raw_residual = _frames(4, start=1700.0)
-        svc = _service(FakeClients({}))
-        svc.request_residual_flush(cq, fence_ts=1709.0)
-
-        svc.collect_from(cq)
-        svc.collect_from(cq)
-
-        assert fake_hls.inserts == [("insert", 1, 2, "raw", 4)]
+        assert len(cq.raw_residual) == 4, "残帧照旧留在缓冲里等攒满"
 
 
-class TestPendingFlushRequest:
-    """断流 flush 的登记 / 取走 —— 生产者是 health_monitor 线程，消费者是 sweeper 线程。"""
+class GateQueue:
+    """第一次 `submit` 卡在入队前，直到 `release` 置位——模拟 sweeper 取走一段、还没入队时被抢占。
 
-    def test_request_then_take_returns_the_fence_once(self):
-        cq = FakeCQ(1, 2)
-        svc = _service(FakeClients({}))
+    `labels` 按**入队完成**的先后记录，即真队列的执行序。
+    """
 
-        svc.request_residual_flush(cq, fence_ts=1700.5)
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.labels = []
+        self._first = True
 
-        assert svc._take_pending_flush(cq) == 1700.5
-        assert svc._take_pending_flush(cq) is None, "一次性：取走即消费"
+    def submit(self, fn, *, label, timeout=1.0):
+        if self._first:
+            self._first = False
+            self.entered.set()
+            self.release.wait(timeout=5.0)
+        self.labels.append(label)
+        fn()
+        return True
 
-    def test_identity_fence_drops_the_previous_generation_request(self):
-        """同一 (task, step) 换代后，上一代挂起的请求不能落到新一代的 CQ 上。"""
-        old = FakeCQ(1, 2, name="A")
-        new = FakeCQ(1, 2, name="B")
-        svc = _service(FakeClients({}))
 
-        svc.request_residual_flush(old, fence_ts=1700.5)
+class TestCollectLock:
+    @pytest.mark.parametrize("until_ts", [None, 1720.0], ids=["teardown", "disconnect-fence"])
+    def test_flush_cannot_enqueue_ahead_of_a_taken_segment(self, fake_hls, until_ts):
+        """sweeper 已取走整段、尚未入队时，拆除 / 断流 flush 不得抢先入队残段（否则 tfdt 倒序）。"""
+        cq = FakeCQ(1, 2, ca_segment_len=10)
+        cq.raw_segments = [_frames(10, start=1700.0)]
+        cq.raw_residual = _frames(3, start=1710.0)
+        svc = _service(FakeClients({1: cq}))
+        q = GateQueue()
+        svc._hls_queue = q
 
-        assert svc._take_pending_flush(new) is None
-        assert svc._take_pending_flush(old) is None, "身份不符的条目一并丢弃，不留给旧 CQ"
+        sweeper = threading.Thread(target=svc.collect_from, args=(cq,))
+        sweeper.start()
+        assert q.entered.wait(timeout=5.0)
+        teardown = threading.Thread(target=svc.flush_residual, args=(cq, until_ts))
+        teardown.start()
+        teardown.join(timeout=0.2)          # 给 flush 线程抢跑的机会
+        q.release.set()
+        sweeper.join(timeout=5.0)
+        teardown.join(timeout=5.0)
 
-    def test_cq_without_run_is_skipped(self):
-        svc = _service(FakeClients({}))
-        svc.request_residual_flush(FakeCQ(bound=False), fence_ts=1700.5)
-        assert svc._pending_flush == {}
-
-    def test_teardown_flush_reclaims_the_unconsumed_request(self, fake_hls):
-        """没被 sweeper 消费的请求在拆除时回收，否则它连着 cq 引用一直留着。"""
-        cq = FakeCQ(1, 2)
-        svc = _service(FakeClients({}))
-        svc.request_residual_flush(cq, fence_ts=1700.5)
-
-        svc.flush_residual(cq)              # 拆除路径（until_ts=None）
-
-        assert svc._pending_flush == {}
-
-    def test_teardown_flush_keeps_another_generation_request(self, fake_hls):
-        """按身份回收：拆旧 CQ 不能把新一代同键的请求一起吞掉（那次断流的残帧就切不出来了）。"""
-        old = FakeCQ(1, 2, name="A", run_id=5)
-        new = FakeCQ(1, 2, name="B", run_id=6)
-        svc = _service(FakeClients({1: new}))
-        svc.request_residual_flush(new, fence_ts=1800.5)
-
-        svc.flush_residual(old)
-
-        assert svc._take_pending_flush(new) == 1800.5
-
-    def test_fenced_flush_does_not_reclaim(self, fake_hls):
-        """断流期的 flush（给了 until_ts）不是拆除，不回收挂起请求。"""
-        cq = FakeCQ(1, 2)
-        svc = _service(FakeClients({}))
-        svc.request_residual_flush(cq, fence_ts=1700.5)
-
-        svc.flush_residual(cq, until_ts=1700.5)
-
-        assert svc._take_pending_flush(cq) == 1700.5
+        assert q.labels == ["seg:1/2/1/raw@1700000", "seg:1/2/1/raw@1710000"]
 
 
 # ---------------------------------------------------------------------------
@@ -650,18 +599,6 @@ class TestCollectAndFlushDetections:
         svc.flush_residual(cq)
 
         assert fake_inference.appends == [("append", 1, 2, 2)]
-
-    def test_pending_flush_path_drains_detections_once(self, fake_hls, fake_inference):
-        """断流那条路：collect_from 走 flush_residual 分支，检测结果只被交出一次。"""
-        cq = FakeCQ(1, 2)
-        cq.detections = _dets(n=2)
-        svc = _service(FakeClients({1: cq}))
-        svc.request_residual_flush(cq, fence_ts=1700.5)
-
-        svc.collect_from(cq)
-
-        assert fake_inference.appends == [("append", 1, 2, 2)]
-
 
 # ---------------------------------------------------------------------------
 # 生命周期（真队列，真线程）

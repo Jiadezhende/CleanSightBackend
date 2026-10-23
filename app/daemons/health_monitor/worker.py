@@ -39,10 +39,11 @@ class HealthMonitorWorker:
         inference_service=None,
         config: Optional[HealthMonitorConfig] = None,
         recording_service=None,
+        run_control=None,
     ):
         """初始化全局健康监控
 
-        五个入参**一律可缺省**：构造期不解析、不读 yaml、不碰全局单例，缺省者推迟到
+        六个入参**一律可缺省**：构造期不解析、不读 yaml、不碰全局单例，缺省者推迟到
         `start()` 现取（见该方法）。这样 `instance.py` 里那句模块级构造是零副作用的，
         import 本包不会连带拉起 client / stream / inference / recording 四条链。
         测试传入的 mock 会原样保留，`start()` 不覆盖已注入的值。
@@ -53,12 +54,15 @@ class HealthMonitorWorker:
             inference_service: InferenceService 实例，None 时 start() 取全局单例
             config: 健康监控配置，None 时 start() 读 yaml
             recording_service: RecordingService 实例，None 时 start() 取全局单例。
-                本模块只用它一个方法：断流时登记残帧 flush（见 `_enter_reconnect_mode`）
+                本模块只用它一个方法：断流时 flush 残帧（见 `_enter_reconnect_mode`）
+            run_control: RunControlService 实例，None 时 start() 取全局单例。
+                生命周期写（拆除、重启流、停孤儿 decoder）一律经它执行，本模块只做决策
         """
         self._client_service = client_service
         self._stream_service = stream_service
         self._inference_service = inference_service
         self._recording_service = recording_service
+        self._run_control = run_control
 
         # 配置：各阈值一律在用处直读 `self.config.*`，**不在此摊成同名实例属性**。
         # 那层拷贝原是给 cleanup_timeout 的派生式（heartbeat + interval×attempts）安身的；
@@ -152,7 +156,7 @@ class HealthMonitorWorker:
     def _resolve_deps(self):
         """把构造期缺省的协作者与配置补齐（已注入的不动）
 
-        四个 import 一律写在函数体内：本模块顶层拉 inference 单例会把 torch/YOLO 链
+        各 import 一律写在函数体内：本模块顶层拉 inference 单例会把 torch/YOLO 链
         一并拽进来（recording 则拽 numpy/cv2），那是 import 期不该付的钱。
         """
         if self.config is None:
@@ -175,6 +179,10 @@ class HealthMonitorWorker:
             from app.services.recording.instance import recording_service
 
             self._recording_service = recording_service
+        if self._run_control is None:
+            from app.services.run_control.instance import run_control_service
+
+            self._run_control = run_control_service
 
     def stop(self):
         """停止监控线程"""
@@ -257,12 +265,13 @@ class HealthMonitorWorker:
                     self._enter_reconnect_mode(task_id, last_frame_time, cq)
                 elif last_frame_time > 0 and idle_time >= self.config.cleanup_timeout:
                     # 进程活着却长时间无帧（真挂死正常已被 decoder 的 -timeout 转成进程死，
-                    # 此为最后防线）→ 放弃清理。
+                    # 此为最后防线）→ 放弃清理。不在重连表里，fence 用本轮 snapshot 的 cq。
                     logger.warning(
                         "[HealthMonitorWorker] TIMEOUT: %s alive but no frames for %.1fs, giving up",
                         task_id, idle_time
                     )
-                    self._exit_reconnect_mode(task_id, cleanup=True)
+                    self._stats["cleanups"] += 1
+                    self._cleanup_failed_client(task_id, expected=cq)
                 # else: 进程活着且无帧未超时（等首帧/恢复中）→ 只等，不动
             else:
                 # 无解码器：检查是否为孤儿流（有队列但无解码器）
@@ -301,15 +310,15 @@ class HealthMonitorWorker:
         # `eff_fps` 仍落在合理带内不触发退化兜底，**全程无一条报警**。
         #
         # 两条时机约束：
-        # - 必须**在进入重连时**登记，不能等重连成功——成功的判据就是"已经来了新帧"，
+        # - 必须**在进入重连时** flush，不能等重连成功——成功的判据就是"已经来了新帧"，
         #   那时残批里已混进重连后的帧，段照样横跨 gap。
         # - 必须放在 `_reconnecting_clients` 赋值**之后**：`_check_all_clients` 对已在重连
-        #   表里的 task 直接 continue，放在这里 = 每次断流恰好登记一次；放到函数开头会因
-        #   上面 `stream_info` 缺失的早退而每 tick 重复登记。
+        #   表里的 task 直接 continue，放在这里 = 每次断流恰好 flush 一次；放到函数开头会因
+        #   上面 `stream_info` 缺失的早退而每 tick 重复 flush。
         #
-        # `last_frame_time` 是断流前最后一帧的 ts，用作栅栏：只切它之前的帧。真正的 drain
-        # 由 recording 的 sweeper 线程执行（运行期 CQ 的唯一 drain 者），不在本线程做。
-        self._recording_service.request_residual_flush(cq, fence_ts=last_frame_time)
+        # `last_frame_time` 是断流前最后一帧的 ts，用作栅栏：只切它之前的帧。就地执行即可：
+        # 与 sweeper / 拆除 flush 的先后由 recording 取帧锁串行，入队序仍是 ts 序。
+        self._recording_service.flush_residual(cq, until_ts=last_frame_time)
 
         logger.warning(
             "[HealthMonitorWorker] RECONNECT MODE: %s, decoder process dead; "
@@ -344,17 +353,17 @@ class HealthMonitorWorker:
                     "[HealthMonitorWorker] RECONNECT SUCCESS: %s, new frames detected", task_id
                 )
                 self._stats["reconnect_successes"] += 1  # 累计统计：重连成功的次数
-                # 用**同一个栅栏**再登记一次，捞走迟到的断流前帧。
+                # 用**同一个栅栏**再 flush 一次，捞走迟到的断流前帧。
                 #
                 # raw 轨由 decoder 直写，进重连那一刻队列内容就定了；processed 轨由 viz
                 # worker 按 tick 从推理结果渲染，ts 落后 raw 一个推理管线延迟。延迟超过
                 # 「检测 + sweeper 一个 tick」时，断流前的 processed 帧在首次 flush 之后
                 # 才入队，没人再切它们 → processed 轨照样产出横跨 gap 的慢放段。
                 #
-                # 重复登记是安全的：栅栏是时间戳，重连后的帧 ts 都大于它，第二次 flush
+                # 重复 flush 是安全的：栅栏是时间戳，重连后的帧 ts 都大于它，第二次 flush
                 # 只会捞走迟到的断流前帧；没有迟到帧时 drain 出空列表，什么都不提交。
-                self._recording_service.request_residual_flush(
-                    cq, fence_ts=state.last_frame_time_before_disconnect
+                self._recording_service.flush_residual(
+                    cq, until_ts=state.last_frame_time_before_disconnect
                 )
                 self._exit_reconnect_mode(task_id, cleanup=False)
                 return
@@ -381,14 +390,14 @@ class HealthMonitorWorker:
         state.last_attempt_time = current_time
         self._stats["reconnects"] += 1  # 累计统计：respawn 次数
 
-        # respawn dead decoder。restart_stream 自带成功("Stream restarted successfully")/
-        # 失败("restart_stream failed: <error>")日志，此处不再重复记，避免一次 attempt 打双 WARNING。
+        # respawn dead decoder，经 run_control 持任务锁核对 fence（注册项已换代则放弃）。
+        # stream 侧自带成功 / 失败日志，此处不再重复记，避免一次 attempt 打双 WARNING。
         # 成功 → 下一 tick 检测到新帧走 RECONNECT SUCCESS；失败 → 下个 reconnect_interval 再试，
         # 无帧满 cleanup_timeout 收口。
         logger.info(
             "[HealthMonitorWorker] RECONNECT ATTEMPT: %s (respawn dead decoder)", task_id
         )
-        self._stream_service.restart_stream(task_id=task_id, stream_url=state.stream_url)
+        self._run_control.restart_stream(task_id, state.stream_url, expected=state.cq)
 
     def _exit_reconnect_mode(self, task_id: int, cleanup: bool):
         """退出重连模式
@@ -458,9 +467,7 @@ class HealthMonitorWorker:
         self._reconnecting_clients.pop(task_id, None)
 
         # 步骤 1-3: 委托给 RunControlService（唯一拆除实现：封闸 → 停 decoder → 落盘 → 清 registry）
-        from app.services.run_control.instance import run_control_service
-
-        return run_control_service.stop_run(
+        return self._run_control.stop_run(
             task_id, reason, skip_decoder=skip_decoder, expected=expected
         )
 
@@ -568,15 +575,11 @@ class HealthMonitorWorker:
         )
         self._stats["orphans_detected"] += 1
 
-        # 无条件调用 stop_stream()：即使进程已死（is_alive=False），
-        # 仍需从 decoders 字典中移除条目，否则下一轮检查会重复检测到孤儿。
-        # 绕过 stop_run（无 CQ），故显式持 lock_for 防与并发 start 撞。
+        # 进程已死（is_alive=False）也要停：要把条目从 decoders 移除，否则下一轮重复检测到孤儿。
+        # 经 run_control 执行：锁内复查无 CQ 才停，防误停 /start 刚起的新 decoder。
         try:
-            with self._client_service.lock_for(task_id):
-                self._stream_service.stop_stream(task_id)
-            logger.info(
-                f"[HealthMonitorWorker] Orphan decoder stopped: {task_id}"
-            )
+            if self._run_control.stop_orphan_decoder(task_id):
+                logger.info("[HealthMonitorWorker] Orphan decoder stopped: %s", task_id)
         except Exception as e:
             logger.error(
                 "[HealthMonitorWorker] Failed to stop orphan decoder: %s - %s", task_id, e, exc_info=True

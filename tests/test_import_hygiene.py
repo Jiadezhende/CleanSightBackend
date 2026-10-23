@@ -221,11 +221,10 @@ SINGLETONS = {
 # 允许 import 单例的文件（相对 REPO_ROOT）。前三类由规则表达（见 _is_allowed_importer），
 # 这里只列**具名例外**——每条都得有理由，加新的先想清楚为什么不能走 run_control。
 SINGLETON_EXCEPTIONS = {
-    # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态并发起重连/清理，
-    # 天然要持四个协作者（client / stream / inference / recording，recording 那个只用来在断流
-    # 时登记一次残帧 flush），四处 import 均写在 `HealthMonitorWorker._resolve_deps()` 函数体内；
-    # 另有 `cleanup_client()` 函数体内一处 run_control_service，是反向指回编排中枢做拆除。
-    # 均不在模块级。
+    # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态做决策，
+    # 天然要持五个协作者（client / stream / inference / recording，recording 那个只用来在断流
+    # 时 flush 残帧；外加 run_control，生命周期写一律经它执行），import 均写在
+    # `HealthMonitorWorker._resolve_deps()` 函数体内，不在模块级。
     "app/daemons/health_monitor/worker.py",
     # 告警落库 sink：inference 产告警 → alarm 服务上报。跨服务但方向正确（下游依赖），
     # 且 sink 就是为这条方向存在的唯一窄接口。

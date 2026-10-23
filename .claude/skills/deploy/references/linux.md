@@ -1,6 +1,6 @@
 # Linux + NVIDIA：install.sh 路径（生产、备用机、Linux 开发机通用）
 
-本地机和远程机都走这一套，差别只在「要不要传仓库 + 配免密」。角色（prod / dev / test）只影响 [4]、[5] 两步。
+本机和远程机都走这一套，**缺省本机**；用户点名远程机才做 [1][2]（传仓库 + 配免密）。下文命令按远程写成 `ssh cleansight-deploy '...'`，本机部署去掉 ssh 包装直接在项目目录执行。角色（prod / dev / test）只影响 [6]–[9]，装依赖与角色无关。
 
 ## 固定约束
 
@@ -15,15 +15,16 @@
 ## 总体流程
 
 ```text
-[0] 仓库已在目标机？否则远程传（§1、§2）
+[0] 缺省本机；用户点名远程机才做 [1][2]
 [1] SSH 免密（远程才需要）
 [2] git archive + scp 送仓库（绕开 GitHub 限速）
 [3] 目标机预检
 [4] 确认源机分发服务在线
-[5] nohup 跑 install.sh，轮询日志
-[6] 写 .env*（runtime-config.md）
+[5] BASE_URL=<用户给的> nohup 跑 install.sh，轮询日志
+[6] 配 .env*：写非敏感项 → 交接用户填敏感项 → 键检查（runtime-config.md）
 [7] 端口空闲 → 启动 → /health/status
-[8] e2e（有副作用，先问）
+[8] 权重核对，缺的请用户从魔搭补齐（runtime-config.md）
+[9] e2e（有副作用，先问）
 ```
 
 ---
@@ -60,7 +61,7 @@ ssh cleansight-deploy 'mkdir -p ~/CleanSightBackend && tar xzf ~/cleansight.tar.
 
 ## [3] 目标机预检
 
-一条 SSH 全查，全绿再往下：
+一条 SSH 全查，全绿再往下。`<BASE_URL>` 用用户给的源机地址，没给就用 `install.sh` 开头的默认值：
 
 ```bash
 ssh cleansight-deploy 'echo "== OS/arch =="; uname -m; . /etc/os-release && echo "$PRETTY_NAME"
@@ -69,12 +70,12 @@ echo "== ensurepip =="; python3 -c "import ensurepip; print(\"OK\")" 2>&1 | tail
 echo "== GPU =="; nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1
 echo "== curl =="; command -v curl >/dev/null && echo OK || echo MISSING
 echo "== disk =="; df -h ~ | tail -1
-echo "== 源机连通 =="; curl -m 8 -sI http://49.234.120.241:8088/wheelhouse/SHA256SUMS | head -1'
+echo "== 源机连通 =="; curl -m 8 -sI <BASE_URL>/wheelhouse/SHA256SUMS | head -1'
 ```
 
 ## [4] 确认源机分发服务在线
 
-预检里源机返回 `200` 即已开。超时则去源机启（服务名、别名见 [materials.md](materials.md)）：
+预检里源机返回 `200` 即已开。超时则去源机启（下面是默认源机 `49.234.120.241` 的做法；用户给的是别的源机就请用户去开）（服务名、别名见 [materials.md](materials.md)）：
 
 ```bash
 ssh label-studio 'sudo systemctl start cleansight-dist && systemctl is-active cleansight-dist'
@@ -86,7 +87,7 @@ torch + 全套 CUDA wheel 走 HTTP 流式拉（几个 GB、`--no-cache-dir` 不�
 
 ```bash
 ssh cleansight-deploy 'cd ~/CleanSightBackend && rm -f install.log \
-  && nohup ./install.sh > install.log 2>&1 & echo "PID: $!"'   # 换源机才加 env BASE_URL=http://...
+  && BASE_URL=<BASE_URL> nohup ./install.sh > install.log 2>&1 & echo "PID: $!"'   # 用户没给就去掉 BASE_URL=
 ```
 
 ```bash
@@ -111,9 +112,9 @@ mediamtx ... v1.15.5
 mediamtx/mediamtx          # 只更新二进制；同目录 mediamtx.yml 随仓库走，不覆盖
 ```
 
-## [6] 写 .env*
+## [6] 配 .env*
 
-见 [runtime-config.md](runtime-config.md)。prod 用 `.env`，dev 用 `.env.dev`，test 用 `.env.test`。三个文件都在 `.gitignore` 里，`git archive` 不传，目标机要自己建。DB 凭据、告警 URL 找用户要，不要瞎填。
+按 [runtime-config.md](runtime-config.md) 三步走：按场景写非敏感项 → 交接给用户填敏感项 → 键检查全「已填」。prod 用 `.env`，dev 用 `.env.dev`，test 用 `.env.test`。三个文件都在 `.gitignore` 里，`git archive` 不传，目标机上要新建。**DB 凭据、告警 URL 不向用户要、不读**，由用户自己写进文件。
 
 ## [7] 启动 + 验证
 
@@ -128,15 +129,23 @@ ssh cleansight-deploy 'cd ~/CleanSightBackend \
 
 ```bash
 ssh cleansight-deploy 'pgrep -f "[a]pp.main" >/dev/null && echo "PROC UP" || echo DOWN; \
-  curl -s -m 5 http://localhost:8000/health/status; echo; \
-  ss -ltn | grep -E ":8004|:18004"; tail -5 ~/CleanSightBackend/backend.log'
+  curl -s -m 5 http://localhost:8000/health/status | head -c 300; echo; \
+  ss -ltn | grep -E ":8004|:18004"; \
+  grep -oE "Application startup complete|ValidationError|OperationalError|password authentication failed|Connection refused|timeout expired|Traceback" \
+    ~/CleanSightBackend/backend.log | sort | uniq -c'
 ```
 
-成功标志：日志 `Application startup complete.`，`/health/status` 返回 `{"status":"running",...}`，**8004 与 18004 都在听**（只看 8004 会漏判：MediaMTX 没起时 8004 能 accept 但转发失败）。
+日志只用 `grep -o` 取关键字计数，不 `tail` 原文：启动日志会打 DB 地址，连库报错会带 host 与用户名。
+
+成功标志：关键字只有 `Application startup complete`，`/health/status` 返回 `{"status":"running",...}`，**8004 与 18004 都在听**（只看 8004 会漏判：MediaMTX 没起时 8004 能 accept 但转发失败）。出现连库类关键字就请用户核对自己填的 DB 五项；要看完整报错，让用户自己 `tail -50 backend.log`，脱敏后贴回。
 
 常驻方式：nohup 或 tmux（后端一个会话），两者都不抗重启，要开机自启得配 systemd。换 tmux 前先用坑 6 的括号技巧停掉 nohup 进程。
 
-## [8] 端到端验证
+## [8] 权重核对
+
+按 [runtime-config.md](runtime-config.md)「模型权重」一节核对，缺的列给用户从魔搭补齐，补完再核一次。没过这步不跑 [9]、不交付真实任务。
+
+## [9] 端到端验证
 
 有副作用：会向 DB 建测试任务、推流跑推理、可能向告警端点发请求。目标库或告警端点是共享资源时**先问用户**。测试正常结束会自动删自己建的任务，中途异常退出可能留残留。
 
@@ -206,11 +215,13 @@ sleep 2; ss -ltn | grep -E ":8000|:8004|:18004" || echo "全部已释放"
 
 ## 部署完成检查清单
 
-- [ ] 仓库已在目标机（archive，非整目录 tar）
+- [ ] 仓库已在目标机（本机，或远程用 archive 送达，非整目录 tar）
 - [ ] 预检全绿（py3.10 / GPU / ensurepip / curl / 源机 200）
 - [ ] 源机分发服务在线
 - [ ] `install.sh` 自检通过（torch+CUDA OK / ffmpeg / mediamtx）
-- [ ] 对应角色的 `.env*` 已填（六项必填 + prod 的 `MEDIA_TOKEN_SECRET`）
+- [ ] 对应角色的 `.env*` 非敏感项按场景写好，键检查全「已填」（prod 含 `MEDIA_TOKEN_SECRET`，`.env` 权限 600）
+- [ ] 全程未读取 `.env*` 的值、未输出后端日志原文
 - [ ] 五个端口空闲，`/health/status` 返回 `running`，8004 与 18004 都在听
+- [ ] 权重核对无缺失（或缺失清单已交给用户，并在汇报里列为未完成）
 - [ ] e2e 前已与用户确认可写测试数据，带 `CLEANSIGHT_ENV` 跑通
 - [ ] 部署窗口结束，源机分发服务已关

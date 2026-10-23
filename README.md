@@ -154,7 +154,7 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 
 各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanMSTCN2RoleEmbedSegmenter`（物料目录 `app/data/clean-offline-mstcn2-role-embed/` + 骨干 `app/data/backbones/dinov2_vits14/`）。离线策略一个模型一个包（`app/services/inference/offline/segmentation/impl/clean_<模型>/`），物料一个模型一个目录（`app/data/clean-offline-<模型>/`），历史策略都保留可切换；`python -m app.services.inference.offline.cli materials` 核对当前激活策略的物料。
 
-**新增检测点**：用 `/infer-workflow` skill 生成 Detector + Operator 框架，规范见 [知识库](docs/kb/INDEX.md)。
+**新增检测点**：步骤与容易静默出错的约束见 [DESIGN_EXTENDING_DETECTION.md](docs/kb/DESIGN_EXTENDING_DETECTION.md)，接口签名见 [SERVICE_INFERENCE.md](docs/kb/SERVICE_INFERENCE.md)。
 
 ---
 
