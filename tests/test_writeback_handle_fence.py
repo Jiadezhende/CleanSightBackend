@@ -2,7 +2,7 @@
 
 守两条不变式：
 1. 迟到结果握旧 CQ 句柄 → 旧 CQ 非 ACTIVE（DRAINING/CLOSED）→ 三写（slide_window /
-   latest_detection / ca_detections 落盘缓冲）全被挡，落 stale_run 计数，碰不到别的 run；
+   LATEST_DETECTION / DETECTIONS 落盘缓冲）全被挡，落 stale_run 计数，碰不到别的 run；
 2. 同一 batch 内，stale run 被挡不殃及同批 ACTIVE run 的正常写回（跨 run 隔离）；
 3. 推理降级帧（任一 source success=False）照常进帧窗 / 快照，但不进落盘缓冲。
 
@@ -15,6 +15,7 @@ from factories import make_cq, make_detector_output, make_frame_detection
 from app.services.client.queues import ClientQueues
 from app.services.inference.online.detection.service import DetectionService
 from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION
+from app.services.session.topics import DETECTIONS
 from app.services.utils.metrics import frame_drop_total
 
 
@@ -41,7 +42,7 @@ def test_active_run_write_back_lands():
     assert cq.sess.channel(LATEST_DETECTION).get() is res  # 快照 = collector 组装的同一份 FrameDetection
     assert cq.sess.channel(DETECTION_WINDOW).snapshot() == [res]  # 检测入滑窗
     # 落盘缓冲拿到同一份帧级 FrameDetection（不复制）
-    buffered = cq.drain_ca_detections()
+    buffered = cq.sess.channel(DETECTIONS).drain()
     assert buffered == [res] and buffered[0] is res
     # 留存的帧不带写回句柄：写回口取走后置 None
     assert res.cq is None
@@ -58,7 +59,7 @@ def test_non_active_run_write_back_blocked_and_counted(seal):
 
     assert cq.sess.channel(LATEST_DETECTION).get() is None  # 快照未落
     assert cq.sess.channel(DETECTION_WINDOW).snapshot() == []  # 滑窗未落
-    assert cq.drain_ca_detections() == []  # 落盘缓冲这条腿也被挡
+    assert cq.sess.channel(DETECTIONS).drain() == []  # 落盘缓冲这条腿也被挡
     assert _stale_drops() - before == 1.0
 
 
@@ -75,8 +76,8 @@ def test_stale_and_active_in_same_batch_isolated():
 
     assert cq_stale.sess.channel(LATEST_DETECTION).get() is None
     assert cq_active.sess.channel(LATEST_DETECTION).get() is res_active
-    assert cq_stale.drain_ca_detections() == []  # 仅 active 进缓冲
-    active_buffered = cq_active.drain_ca_detections()
+    assert cq_stale.sess.channel(DETECTIONS).drain() == []  # 仅 active 进缓冲
+    active_buffered = cq_active.sess.channel(DETECTIONS).drain()
     assert len(active_buffered) == 1
     assert active_buffered[0] is res_active
 
@@ -95,4 +96,4 @@ def test_degraded_frame_not_buffered_for_persistence():
 
     assert cq.sess.channel(DETECTION_WINDOW).snapshot() == [degraded, ok]
     assert cq.sess.channel(LATEST_DETECTION).get() is ok
-    assert cq.drain_ca_detections() == [ok]
+    assert cq.sess.channel(DETECTIONS).drain() == [ok]

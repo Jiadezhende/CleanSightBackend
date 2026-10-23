@@ -8,7 +8,7 @@
   - LATEST_TEMPORAL            → 最新时序事件
 - 渲染检测框、标注、文字信息到最新帧上：有渲染子进程池（render_proxy）时交给子进程，
   每 run 至多一个在途、下一 tick 收回结果；池未就绪 / 帧放不进槽位时在本线程用 FixedVisualizer 就地渲染
-- 写回 ClientQueues（ca_processed + _latest_rendered）
+- 写回 PROCESSED（落 processed 轨）+ RENDERED（前端实时画面）
 
 VisualizationWorker：拉取 + 渲染循环；VisualizationWorkerPool：按 target_fps 启停单条
 VisualizationWorker 线程（及渲染子进程池）。渲染逻辑在 visualizer.py（FixedVisualizer）。
@@ -27,7 +27,8 @@ from app.services.inference.online.render import RenderSpec
 from app.types.frame import Frame
 from app.services.inference.online.naming import get_stage_alias
 from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL, VIZ_LAST_TS
-from app.services.session.topics import LATEST_RAW
+from app.services.session.topics import LATEST_RAW, PROCESSED, RENDERED
+from app.services.utils.startup_latency import log_milestone
 from app.services.client.instance import client_service
 from app.services.utils.worker_guard import guarded_run
 from .visualizer import FixedVisualizer
@@ -225,11 +226,20 @@ class VisualizationWorker:
             self._render_time_max = dt
 
     def _write_rendered(self, task_id: int, cq, ts: float, annotated: np.ndarray) -> None:
-        """渲染结果写回 cq（非 ACTIVE 的 cq 由其写门拒收）+ 推进去重时间戳 + 计成帧数。"""
+        """渲染结果写回 session（非 ACTIVE 由写门拒收）+ 推进去重时间戳 + 计成帧数。"""
+        sess = cq.sess
         frame_data = Frame(timestamp=ts, frame=annotated)
-        cq.append_ca_processed(frame_data)
-        cq.set_latest_rendered(frame_data)
-        last = cq.sess.channel(VIZ_LAST_TS)
+        sess.channel(PROCESSED).push(frame_data)
+        rendered = sess.channel(RENDERED)
+        first = rendered.get() is None
+        if rendered.set(frame_data) and first:
+            # 启动延迟埋点 C：本 run 首个可供 WS 推给前端的画面（viz 是 RENDERED 唯一写方）
+            info = sess.info
+            log_milestone(
+                "first_rendered", task_id=info.run.task_id, step_id=info.run.step_id,
+                started_at=info.started_at,
+            )
+        last = sess.channel(VIZ_LAST_TS)
         if ts > last.get():
             last.set(ts)
         self._stat_rendered[task_id] += 1

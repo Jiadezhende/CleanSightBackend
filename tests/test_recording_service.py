@@ -18,7 +18,7 @@ import pytest
 
 import factories
 from app.types.run import RunIdentity
-from app.services.session.topics import RAW
+from app.services.session.topics import DETECTIONS, PROCESSED, RAW
 from app.services.recording import service as recording_service_module
 from app.services.recording.sweep_worker import SegmentSweeper
 from app.services.recording.config import RecordingConfig
@@ -49,9 +49,22 @@ class _FakeFrameChannel:
         return out
 
 
+class _FakeDetectionsChannel:
+    def __init__(self, cq):
+        self._cq = cq
+
+    def drain(self, until_ts=None):
+        out, self._cq.detections = list(self._cq.detections), []
+        return out
+
+
 class _FakeSession:
     def __init__(self, cq):
-        self._channels = {RAW: _FakeFrameChannel(cq, "raw")}
+        self._channels = {
+            RAW: _FakeFrameChannel(cq, "raw"),
+            PROCESSED: _FakeFrameChannel(cq, "processed"),
+            DETECTIONS: _FakeDetectionsChannel(cq),
+        }
 
     def channel(self, topic):
         return self._channels[topic]
@@ -68,25 +81,15 @@ class FakeCQ:
         self.ca_segment_len = ca_segment_len
         self.name = name
         self.raw_segments = []          # RAW.take 依次弹出
-        self.processed_segments = []
+        self.processed_segments = []    # PROCESSED.take 依次弹出
         self.raw_residual = []          # RAW.drain 按栅栏取走
-        self.processed_residual = []
-        self.detections = []              # drain_ca_detections 一次性取走
+        self.processed_residual = []    # PROCESSED.drain 按栅栏取走
+        self.detections = []            # DETECTIONS.drain 一次性取走
         self.sess = _FakeSession(self)
 
     def __repr__(self):                 # 让失败信息可读
         return f"<FakeCQ {self.name} run={self.run}>"
 
-    def take_processed_segment(self):
-        return self.processed_segments.pop(0) if self.processed_segments else None
-
-    def drain_ca_processed(self, until_ts=None):
-        self.processed_residual, out = _split_at_fence(self.processed_residual, until_ts)
-        return out
-
-    def drain_ca_detections(self):
-        out, self.detections = list(self.detections), []
-        return out
 
 
 def _split_at_fence(residual, until_ts):

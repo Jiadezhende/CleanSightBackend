@@ -34,7 +34,7 @@ from app.types.detection import FrameDetection
 from app.types.frame import Frame
 from app.types.run import RunIdentity
 from app.storage import hls, inference
-from app.services.session.topics import RAW
+from app.services.session.topics import DETECTIONS, PROCESSED, RAW
 from app.services.utils.task_queue import SerialTaskQueue
 from app.services.utils.metrics import frame_drop_total
 
@@ -267,12 +267,12 @@ class RecordingService:
             seg_len = cq.ca_segment_len
             for track, frames in (
                 ("raw", cq.sess.channel(RAW).drain(until_ts)),
-                ("processed", cq.drain_ca_processed(until_ts)),
+                ("processed", cq.sess.channel(PROCESSED).drain(until_ts)),
             ):
                 for i in range(0, len(frames), seg_len):
                     self.submit_segment(cq, track, frames[i : i + seg_len])
 
-            self.submit_detections(cq, cq.drain_ca_detections())
+            self.submit_detections(cq, cq.sess.channel(DETECTIONS).drain())
 
     def collect_from(self, cq) -> None:
         """把这个 CQ 此刻攒满的整段与检测结果取走并入队。**由 sweeper 线程周期调用。**
@@ -292,10 +292,10 @@ class RecordingService:
         with self._collect_lock:
             while (seg := cq.sess.channel(RAW).take(cq.ca_segment_len)) is not None:
                 self.submit_segment(cq, "raw", seg)
-            while (seg := cq.take_processed_segment()) is not None:
+            while (seg := cq.sess.channel(PROCESSED).take(cq.ca_segment_len)) is not None:
                 self.submit_segment(cq, "processed", seg)
 
-            self.submit_detections(cq, cq.drain_ca_detections())
+            self.submit_detections(cq, cq.sess.channel(DETECTIONS).drain())
 
     # ── 队列任务体 ─────────────────────────────────────────────────────────────
 

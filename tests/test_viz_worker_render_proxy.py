@@ -7,7 +7,7 @@ import numpy as np
 from factories import make_cq, make_detector_output, make_frame, make_frame_detection
 from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 from app.services.inference.online.topics import LATEST_DETECTION, VIZ_LAST_TS
-from app.services.session.topics import LATEST_RAW
+from app.services.session.topics import LATEST_RAW, PROCESSED, RENDERED
 from app.services.inference.online.visualization.visualization_worker import VisualizationWorker
 
 
@@ -73,16 +73,31 @@ def test_submits_to_proxy_and_writes_back_on_drain(monkeypatch):
 
     w._tick(100.0)
     assert proxy.submitted == [(1, 10.0, "CLEAN", 1)]
-    assert len(cq.ca_processed) == 0                    # 结果还没回来
+    assert len(cq.sess.channel(PROCESSED)) == 0          # 结果还没回来
 
     annotated = np.full((16, 16, 3), 77, dtype=np.uint8)
     proxy.completions = [((1, cq, 10.0), annotated, 0.003, True)]
     w._tick(100.1)
 
-    assert [f.timestamp for f in cq.ca_processed] == [10.0]
-    assert cq.get_latest_rendered().frame[0, 0, 0] == 77
+    assert [f.timestamp for f in cq.sess.channel(PROCESSED).drain()] == [10.0]
+    assert cq.sess.channel(RENDERED).get().frame[0, 0, 0] == 77
     assert w._stat_rendered[1] == 1 and w._render_calls == 1
     assert len(proxy.submitted) == 1                    # 同一推理结果不重送
+
+
+def test_first_rendered_logged_once_per_run(monkeypatch, caplog):
+    import logging
+
+    w, cq = _setup(monkeypatch, FakeProxy(accept=False))
+    with caplog.at_level(logging.INFO, logger="app.startup_latency"):
+        w._tick(100.0)
+        cq.sess.channel(LATEST_DETECTION).set(make_frame_detection(
+            ts=11.0, by_source={"clean_large": make_detector_output(n=1, ts=11.0)},
+        ))
+        w._tick(100.1)
+
+    assert len(cq.sess.channel(PROCESSED)) == 2
+    assert sum("first_rendered" in r.getMessage() for r in caplog.records) == 1
 
 
 def test_dedup_ts_lives_on_session_and_is_released_with_it(monkeypatch):
@@ -102,7 +117,7 @@ def test_in_flight_run_is_not_resubmitted_or_rendered_locally(monkeypatch):
 
     w._tick(100.0)
 
-    assert proxy.submitted == [] and len(cq.ca_processed) == 0
+    assert proxy.submitted == [] and len(cq.sess.channel(PROCESSED)) == 0
 
 
 def test_proxy_rejection_falls_back_to_local_render(monkeypatch):
@@ -110,7 +125,7 @@ def test_proxy_rejection_falls_back_to_local_render(monkeypatch):
 
     w._tick(100.0)
 
-    assert [f.timestamp for f in cq.ca_processed] == [10.0]
+    assert [f.timestamp for f in cq.sess.channel(PROCESSED).drain()] == [10.0]
     assert w._stat_rendered[1] == 1
 
 
@@ -123,4 +138,4 @@ def test_late_result_for_closed_run_is_rejected_by_cq(monkeypatch):
 
     w._tick(100.1)
 
-    assert len(cq.ca_processed) == 0
+    assert len(cq.sess.channel(PROCESSED)) == 0

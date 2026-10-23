@@ -26,6 +26,7 @@ from app.services.inference.online.topics import LATEST_TEMPORAL
 from app.services.recording.instance import recording_service
 from app.services.session.core import SessionInfo
 from app.services.session.instance import session_service
+from app.services.session.topics import RENDERED
 from app.services.stream.instance import stream_service
 from app.services.stream.service import internal_stream_url
 from app.types.exceptions import AppError, ValidationError
@@ -228,7 +229,7 @@ class RunControlService:
                     )
                 try:
                     cq.sess.channel(LATEST_TEMPORAL).clear()   # 提前清前端槽，防 WS 读到结束后残留
-                    cq.set_latest_rendered(None)
+                    cq.sess.channel(RENDERED).clear()
                 except Exception as e:
                     result["errors"].append(f"frontend: {e}")
                     logger.error(

@@ -68,3 +68,33 @@ def test_cq_state_mirrors_to_session():
     assert cq.sess.state is SessionState.DRAINING
     cq.close()
     assert cq.sess.state is SessionState.CLOSED
+
+
+def test_residual_frames_still_readable_at_flush_then_released(tid):
+    """残帧交接：flush_residual 时 session 已封闸但未关，RAW / PROCESSED / DETECTIONS 都还在；拆完才释放。"""
+    from factories import make_frame, make_frame_detection
+    from app.services.session.topics import DETECTIONS, PROCESSED, RAW
+
+    cq = make_cq(task_id=tid)
+    client_service.set(tid, cq)
+    sess = cq.sess
+    sess.channel(RAW).push(make_frame(ts=1.0))
+    sess.channel(PROCESSED).push(make_frame(ts=1.0))
+    sess.channel(DETECTIONS).push(make_frame_detection(ts=1.0))
+
+    seen = {}
+
+    def flush(_cq):
+        s = _cq.sess
+        seen["state"] = s.state
+        seen["sizes"] = (len(s.channel(RAW)), len(s.channel(PROCESSED)), len(s.channel(DETECTIONS)))
+
+    p_inf, p_stream, p_rec = _patched()
+    with p_inf as inf, p_stream, p_rec as rec:
+        inf.stop_workflow.return_value = []
+        rec.flush_residual.side_effect = flush
+        run_control_service.stop_run(tid, reason="test")
+
+    assert seen == {"state": SessionState.DRAINING, "sizes": (1, 1, 1)}
+    assert sess.state is SessionState.CLOSED
+    assert len(sess.channel(RAW)) == 0

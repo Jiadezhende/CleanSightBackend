@@ -33,17 +33,29 @@ def _ready() -> Fifo:
     )
 
 
-def _raw() -> Fifo:
+def _segment_fifo(resource: str, drop_reason: str) -> Fifo:
     cfg = _cfg()
     return Fifo(
-        maxlen=cfg.ca_maxlen, on_full=Fifo.EVICT, drop_reason="raw_backpressure",
-        pressure=PressureSpec(_COMPONENT, "ca_raw", _segment_watermark(cfg.ca_maxlen, cfg.ca_segment_len)),
+        maxlen=cfg.ca_maxlen, on_full=Fifo.EVICT, drop_reason=drop_reason,
+        pressure=PressureSpec(_COMPONENT, resource, _segment_watermark(cfg.ca_maxlen, cfg.ca_segment_len)),
     )
+
+
+def _detections() -> Fifo:
+    # 容量复用 ca_maxlen（600 条 FrameDetection ≈ 40s @15fps，远小于像素帧）；不报压力（同 CQ 时代）
+    return Fifo(maxlen=_cfg().ca_maxlen, on_full=Fifo.EVICT, drop_reason="detection_backpressure")
 
 
 # decoder → dispatcher：抽帧后待推理的 Frame。满拒新（推理跟不上就丢新帧）
 READY = Topic("READY", _ready)
 # decoder → recording：全帧率原始 Frame，sweeper 整段取走落 raw 轨。满挤旧
-RAW = Topic("RAW", _raw)
+RAW = Topic("RAW", lambda: _segment_fifo("ca_raw", "raw_backpressure"))
 # decoder → viz（叠框底图）、health_monitor（最后一帧 ts）：最新原始 Frame
 LATEST_RAW = Topic("LATEST_RAW", Latest)
+# 写回 → recording：帧级 FrameDetection 落盘缓冲，sweeper 每 tick 全部取走写 detections.jsonl。满挤旧。
+# 与帧窗 DETECTION_WINDOW 是同一帧的两个去处，不能合并：帧窗按算子感受野裁剪，落盘只在满时丢
+DETECTIONS = Topic("DETECTIONS", _detections)
+# viz → recording：渲染后的 Frame，sweeper 整段取走落 processed 轨。满挤旧
+PROCESSED = Topic("PROCESSED", lambda: _segment_fifo("ca_processed", "hls_backpressure"))
+# viz → `WS /ai/video`：最新渲染 Frame
+RENDERED = Topic("RENDERED", Latest)

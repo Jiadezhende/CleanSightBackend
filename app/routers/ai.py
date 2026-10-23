@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.types.temporal import TemporalSegment
 from app.services.client.instance import client_service
+from app.services.session.topics import RENDERED
 from app.storage import inference as inference_store
 
 from .utils.runs import resolve_timeline
@@ -112,7 +113,7 @@ async def websocket_video_endpoint(websocket: WebSocket):
                 await asyncio.sleep(0.05)
                 continue
 
-            frame = cq.get_latest_rendered()
+            frame = cq.sess.channel(RENDERED).get()
             if frame is None:
                 # cq 在但暂无渲染帧（任务刚起 / 卡顿）：保持上一帧，不发 idle
                 await asyncio.sleep(0.01)  # 减少轮询间隔

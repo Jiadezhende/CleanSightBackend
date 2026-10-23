@@ -16,6 +16,7 @@ from app.services.client.instance import client_service
 from app.services.client.service import ClientService
 from app.services.client.config import get_client_config
 from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION
+from app.services.session.topics import DETECTIONS
 from .dispatcher import StageAwareDispatcher
 from .infer_proxy import RemoteInferProxy
 from app.settings import settings
@@ -190,5 +191,5 @@ class DetectionService:
             # 降级帧不落：落盘格式不带 success，空框会被离线当成「没检出」。失败时段在离线侧
             # 是时间空洞；整个 run 全失败则该 step 无检测结果（离线 skipped）。
             if not degraded:
-                cq.append_ca_detections(frame)
+                cq.sess.channel(DETECTIONS).push(frame)
 

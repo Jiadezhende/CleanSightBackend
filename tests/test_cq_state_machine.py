@@ -2,7 +2,7 @@
 
 from factories import make_alarm, make_cq, make_frame, make_frame_detection
 from app.services.client.queues import RunState
-from app.services.session.topics import LATEST_RAW, RAW, READY
+from app.services.session.topics import DETECTIONS, LATEST_RAW, PROCESSED, RAW, READY, RENDERED
 from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_DETECTION, LATEST_TEMPORAL
 
 
@@ -38,8 +38,8 @@ def test_frame_and_result_writes_blocked_when_not_active():
     assert cq.sess.channel(READY).push(make_frame()) is False
     assert cq.sess.channel(RAW).push(make_frame()) is False
     assert cq.sess.channel(LATEST_RAW).set(make_frame()) is False
-    cq.append_ca_processed(make_frame())
-    assert len(cq.ca_processed) == 0
+    assert cq.sess.channel(PROCESSED).push(make_frame()) is False
+    assert cq.sess.channel(DETECTIONS).push(_det()) is False
     cq.sess.channel(DETECTION_WINDOW).push(_det())
     assert cq.sess.channel(DETECTION_WINDOW).snapshot() == []
     assert cq.sess.channel(LATEST_DETECTION).set(make_frame_detection()) is False
@@ -60,16 +60,16 @@ def test_settlement_alarm_allowed_in_draining_rejected_when_closed():
 
 def test_clear_through_writes_allowed_when_not_active():
     cq = make_cq()
-    cq.set_latest_rendered(make_frame())
+    cq.sess.channel(RENDERED).set(make_frame())
     cq.sess.channel(LATEST_TEMPORAL).set(["e1"])
     cq.to_draining()
     # 非空写被拒
-    cq.set_latest_rendered(make_frame())
+    cq.sess.channel(RENDERED).set(make_frame())
     cq.sess.channel(LATEST_TEMPORAL).set(["e2"])
     # 清空写放行
-    cq.set_latest_rendered(None)
+    cq.sess.channel(RENDERED).clear()
     cq.sess.channel(LATEST_TEMPORAL).clear()
-    assert cq.get_latest_rendered() is None
+    assert cq.sess.channel(RENDERED).get() is None
     assert cq.sess.channel(LATEST_TEMPORAL).get() == []
 
 
