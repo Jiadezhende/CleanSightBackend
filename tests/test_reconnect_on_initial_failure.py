@@ -343,6 +343,20 @@ class TestReconnectIdentityFence:
         cq.task_started_at = 0.0
         return cq
 
+    def test_alive_but_silent_give_up_carries_fence(self):
+        """decoder 活着但无帧超 cleanup_timeout → 放弃时必须带 expected=本轮 cq，防误拆换代后的新 run。"""
+        client_id = "fence_alive_silent"
+        cq_a = self._cq(seconds_ago=25.0)
+        monitor = _make_monitor(
+            client_id, cq_a, active_decoder_ids={client_id}, decoder_alive=True
+        )
+
+        with patch.object(monitor, "cleanup_client", return_value={"errors": []}) as cleanup:
+            monitor._check_all_clients()
+
+        cleanup.assert_called_once()
+        assert cleanup.call_args.kwargs["expected"] is cq_a
+
     def test_reconnect_captures_cq_on_entry(self):
         """进入重连时把当前槽位 cq 存进 ReconnectState.cq（fence 基准）。"""
         client_id = "fence_capture"

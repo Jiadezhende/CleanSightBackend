@@ -257,12 +257,13 @@ class HealthMonitorWorker:
                     self._enter_reconnect_mode(task_id, last_frame_time, cq)
                 elif last_frame_time > 0 and idle_time >= self.config.cleanup_timeout:
                     # 进程活着却长时间无帧（真挂死正常已被 decoder 的 -timeout 转成进程死，
-                    # 此为最后防线）→ 放弃清理。
+                    # 此为最后防线）→ 放弃清理。不在重连表里，fence 用本轮 snapshot 的 cq。
                     logger.warning(
                         "[HealthMonitorWorker] TIMEOUT: %s alive but no frames for %.1fs, giving up",
                         task_id, idle_time
                     )
-                    self._exit_reconnect_mode(task_id, cleanup=True)
+                    self._stats["cleanups"] += 1
+                    self._cleanup_failed_client(task_id, expected=cq)
                 # else: 进程活着且无帧未超时（等首帧/恢复中）→ 只等，不动
             else:
                 # 无解码器：检查是否为孤儿流（有队列但无解码器）
