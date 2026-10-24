@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class AlarmReporter:
-    """告警上报器（无状态）。去重由 ClientQueues.append_alarm_record_with_gate 统一控制。"""
+    """告警上报器（无状态）。去重由每 run 的告警账本（alarm_sink.ledger_for(sess).record）统一控制。"""
 
     def __init__(self):
         pass

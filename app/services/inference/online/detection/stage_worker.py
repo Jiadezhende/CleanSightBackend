@@ -36,7 +36,7 @@ class StageWorker:
     """单个 stage 的多模型串行推理单元（非线程池——无并发/复用，故不叫 Pool）。
 
     - 持一个 stage 的多个 Detector，逐模型对整批帧串行跑一遍并按帧 merge
-    - `_infer_models` 是纯数据切口（无 cq、无 Prometheus），子进程 `run_stages` 按 stage 路由到它
+    - `_infer_models` 是纯数据切口（无 session、无 Prometheus），子进程 `run_stages` 按 stage 路由到它
     """
 
     def __init__(
@@ -63,7 +63,7 @@ class StageWorker:
     ) -> List[Dict[str, DetectorOutput]]:
         """逐模型串行推理：每个模型对整批帧跑一次，结果按帧索引合并。
 
-        **纯数据进出、无 cq、无 Prometheus 副作用**——这是进程边界的天然切口：子进程调它、
+        **纯数据进出、无 session、无 Prometheus 副作用**——这是进程边界的天然切口：子进程调它、
         回传 `merged`，主进程 collector 直接据 merged 里的 `DetectorOutput` 发埋点（跨进程
         registry 无效，故埋点上移主进程）。单模型失败就地降级为 success=False（不上抛，batch
         跨多 run）。
@@ -165,7 +165,7 @@ class StageWorker:
 # multiprocessing spawn target：子进程独占 GIL 跑 YOLO GPU 前向（根因见
 # docs/update/20260726_INFER_LAUNCH_BOUND_DIAGNOSIS.md：kernel 发射线程在主进程被
 # viz/temporal/HLS/dispatcher 抢 GIL 饿到，GPU 时钟满却 SM 空转、前向读数被吹大）。
-# 只负责「收批帧 → 按 stage 路由到 StageWorker._infer_models → 回结果」，**不碰 cq / 写回 /
+# 只负责「收批帧 → 按 stage 路由到 StageWorker._infer_models → 回结果」，**不碰 session / 写回 /
 # 落盘缓冲**——那些留主进程按 req_id 关联（见 infer_proxy.RemoteInferProxy）。
 #
 # 进程边界只过纯数据（均 picklable）：

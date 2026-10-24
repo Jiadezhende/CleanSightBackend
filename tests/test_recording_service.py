@@ -13,11 +13,13 @@ cv2/ffmpeg，全部毫秒级。末尾一条端到端跑真队列 + 真 `storage.
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import factories
 from app.types.run import RunIdentity
+from app.services.session.topics import DETECTIONS, PROCESSED, RAW
 from app.services.recording import service as recording_service_module
 from app.services.recording.sweep_worker import SegmentSweeper
 from app.services.recording.config import RecordingConfig
@@ -30,46 +32,66 @@ from app.settings import settings
 # ---------------------------------------------------------------------------
 
 
-class FakeCQ:
-    """够用的 CQ：`run` 身份 + 取段 / drain 残帧。`bound=False` 造未绑定 run 的 CQ。"""
+class _FakeFrameChannel:
+    """帧 Fifo 替身：`take(n)` 依次弹出预置的整段，`drain(until_ts)` 按栅栏取残帧。"""
 
-    def __init__(self, task_id=1, step_id=2, ca_segment_len=3, name="cq", run_id=1, run=None,
-                 bound=True):
+    def __init__(self, cq, track):
+        self._cq = cq
+        self._track = track
+
+    def take(self, n):
+        segs = getattr(self._cq, f"{self._track}_segments")
+        return segs.pop(0) if segs else None
+
+    def drain(self, until_ts=None):
+        attr = f"{self._track}_residual"
+        left, out = _split_at_fence(getattr(self._cq, attr), until_ts)
+        setattr(self._cq, attr, left)
+        return out
+
+
+class _FakeDetectionsChannel:
+    def __init__(self, cq):
+        self._cq = cq
+
+    def drain(self, until_ts=None):
+        out, self._cq.detections = list(self._cq.detections), []
+        return out
+
+
+class FakeCQ:
+    """够用的 session 替身：`info.run` 身份 + 按 topic 取段 / drain 残帧。`bound=False` 造未绑定 run 的。
+
+    段长不在替身上：recording 现取 client 配置的段长，要改用 `topic_sizes(ca_segment_len=…)`。
+    """
+
+    def __init__(self, task_id=1, step_id=2, name="cq", run_id=1, run=None, bound=True):
         if run is None and bound:
             run = RunIdentity(task_id, step_id, run_id)
         self.run = run
-        self.ca_segment_len = ca_segment_len
+        self.info = SimpleNamespace(run=run)
         self.name = name
-        self.raw_segments = []          # take_raw_segment 依次弹出
-        self.processed_segments = []
-        self.raw_residual = []          # drain_ca_raw 一次性取走
-        self.processed_residual = []
-        self.detections = []              # drain_ca_detections 一次性取走
+        self.raw_segments = []          # RAW.take 依次弹出
+        self.processed_segments = []    # PROCESSED.take 依次弹出
+        self.raw_residual = []          # RAW.drain 按栅栏取走
+        self.processed_residual = []    # PROCESSED.drain 按栅栏取走
+        self.detections = []            # DETECTIONS.drain 一次性取走
+        self._channels = {
+            RAW: _FakeFrameChannel(self, "raw"),
+            PROCESSED: _FakeFrameChannel(self, "processed"),
+            DETECTIONS: _FakeDetectionsChannel(self),
+        }
+
+    def channel(self, topic):
+        return self._channels[topic]
 
     def __repr__(self):                 # 让失败信息可读
         return f"<FakeCQ {self.name} run={self.run}>"
 
-    def take_raw_segment(self):
-        return self.raw_segments.pop(0) if self.raw_segments else None
-
-    def take_processed_segment(self):
-        return self.processed_segments.pop(0) if self.processed_segments else None
-
-    def drain_ca_raw(self, until_ts=None):
-        self.raw_residual, out = _split_at_fence(self.raw_residual, until_ts)
-        return out
-
-    def drain_ca_processed(self, until_ts=None):
-        self.processed_residual, out = _split_at_fence(self.processed_residual, until_ts)
-        return out
-
-    def drain_ca_detections(self):
-        out, self.detections = list(self.detections), []
-        return out
 
 
 def _split_at_fence(residual, until_ts):
-    """复刻 `ClientQueues.drain_ca_*` 的栅栏语义：`None` 全取，否则只取队首前缀。
+    """复刻帧队列 drain 的栅栏语义：`None` 全取，否则只取队首前缀。
 
     返回 `(留下的, 取走的)`。
     """
@@ -82,7 +104,7 @@ def _split_at_fence(residual, until_ts):
 
 
 class FakeClients:
-    """CQ 注册表（sweeper 从它取活跃 CQ）。"""
+    """run 注册表（sweeper 从它取活跃 run）。"""
 
     def __init__(self, registry=None):
         self.registry = dict(registry or {})
@@ -167,14 +189,14 @@ def live_service(fast_task_queue):
     """真队列、真线程的服务构造器（sweeper 间隔拉长，不自己跑）。队列轮询已调快，`stop()` 不白等。"""
     def build(clients) -> RecordingService:
         return RecordingService(
-            config=RecordingConfig(sweep_interval_seconds=60.0), clients=clients
+            config=RecordingConfig(sweep_interval_seconds=60.0), sessions=clients
         )
     return build
 
 
 def _service(clients, *, accept=True) -> RecordingService:
     """一个装好两条同步队列的服务（不起线程）。"""
-    svc = RecordingService(config=RecordingConfig(), clients=clients)
+    svc = RecordingService(config=RecordingConfig(), sessions=clients)
     svc._hls_queue = InlineQueue(accept=accept)
     svc._detection_queue = InlineQueue(accept=accept)
     return svc
@@ -211,7 +233,7 @@ class TestRunIsolation:
         assert fake_hls.runs == [old.run, new.run]
 
     def test_unregistered_cq_still_writes(self, fake_hls):
-        """拆除后（CQ 已出注册表）才执行的残段照常写进自己的 run。"""
+        """拆除后（run 已出注册表）才执行的残段照常写进自己的 run。"""
         cq = FakeCQ(1, 2)
         svc = _service(FakeClients({}))
 
@@ -227,7 +249,7 @@ class TestRunIsolation:
 
 class TestSubmitRejections:
     def test_queue_not_started(self, fake_hls):
-        svc = RecordingService(config=RecordingConfig(), clients=FakeClients({}))
+        svc = RecordingService(config=RecordingConfig(), sessions=FakeClients({}))
         assert svc.submit_segment(FakeCQ(), "raw", _frames()) is False
         assert fake_hls.calls == []
 
@@ -276,7 +298,7 @@ def _big_frames(n, start=1700.0):
 
 
 def _budget_service(queue) -> RecordingService:
-    svc = RecordingService(config=RecordingConfig(queue_max_mb=1), clients=FakeClients({}))
+    svc = RecordingService(config=RecordingConfig(queue_max_mb=1), sessions=FakeClients({}))
     svc._hls_queue = queue
     svc._detection_queue = InlineQueue()
     return svc
@@ -325,8 +347,9 @@ class TestHlsByteBudget:
 
 
 class TestFlushResidual:
-    def test_slices_by_ca_segment_len(self, fake_hls):
-        cq = FakeCQ(1, 2, ca_segment_len=2)
+    def test_slices_by_ca_segment_len(self, fake_hls, topic_sizes):
+        topic_sizes(ca_segment_len=2)
+        cq = FakeCQ(1, 2)
         cq.raw_residual = _frames(5)
         cq.processed_residual = _frames(3)
         svc = _service(FakeClients({}))
@@ -355,9 +378,10 @@ class TestFlushResidual:
 
         assert svc._hls_queue.labels == []
 
-    def test_residual_carries_its_own_run(self, fake_hls):
+    def test_residual_carries_its_own_run(self, fake_hls, topic_sizes):
         """残段写进**自己那一代**的 run：拆除后注册表已换人也不会串台。"""
-        old = FakeCQ(1, 2, ca_segment_len=2, name="A", run_id=5)
+        topic_sizes(ca_segment_len=2)
+        old = FakeCQ(1, 2, name="A", run_id=5)
         old.raw_residual = _frames(2)
         svc = _service(FakeClients({1: FakeCQ(1, 2, name="B", run_id=6)}))
 
@@ -365,13 +389,14 @@ class TestFlushResidual:
 
         assert fake_hls.runs == [old.run]
 
-    def test_fence_leaves_post_reconnect_frames_in_the_queue(self, fake_hls):
+    def test_fence_leaves_post_reconnect_frames_in_the_queue(self, fake_hls, topic_sizes):
         """断流 flush 只切栅栏之前的帧。
 
         全排空的后果是静默的：重连后的帧会跟断流前的帧拼进同一段，该段 `eff_fps` 由首末帧
         跨度反推、跨度里混着整个 gap → 慢放。栅栏取"断流前最后一帧 ts"，正是那个切点。
         """
-        cq = FakeCQ(1, 2, ca_segment_len=10)
+        topic_sizes(ca_segment_len=10)
+        cq = FakeCQ(1, 2)
         before = _frames(3, start=1700.0)            # 断流前
         after = _frames(2, start=1720.0)             # 重连后（gap 20s）
         cq.raw_residual = before + after
@@ -420,7 +445,7 @@ class TestCollectFrom:
         assert len(cq.raw_segments) == 1
 
     def test_takes_only_full_segments(self, fake_hls):
-        cq = FakeCQ(1, 2, ca_segment_len=10, name="A")
+        cq = FakeCQ(1, 2, name="A")
         cq.raw_segments = [_frames(10)]
         cq.raw_residual = _frames(4)
         svc = _service(FakeClients({}))
@@ -455,9 +480,10 @@ class GateQueue:
 
 class TestCollectLock:
     @pytest.mark.parametrize("until_ts", [None, 1720.0], ids=["teardown", "disconnect-fence"])
-    def test_flush_cannot_enqueue_ahead_of_a_taken_segment(self, fake_hls, until_ts):
+    def test_flush_cannot_enqueue_ahead_of_a_taken_segment(self, fake_hls, topic_sizes, until_ts):
         """sweeper 已取走整段、尚未入队时，拆除 / 断流 flush 不得抢先入队残段（否则 tfdt 倒序）。"""
-        cq = FakeCQ(1, 2, ca_segment_len=10)
+        topic_sizes(ca_segment_len=10)
+        cq = FakeCQ(1, 2)
         cq.raw_segments = [_frames(10, start=1700.0)]
         cq.raw_residual = _frames(3, start=1710.0)
         svc = _service(FakeClients({1: cq}))
@@ -503,14 +529,14 @@ class TestSweeper:
         a, b = FakeCQ(1, 2, name="A"), FakeCQ(9, 2, name="B")
         spy = RecordingSpy()
 
-        SegmentSweeper(clients=FakeClients({1: a, 9: b}), service=spy)._sweep()
+        SegmentSweeper(sessions=FakeClients({1: a, 9: b}), service=spy)._sweep()
 
         assert sorted(spy.collected) == ["A", "B"]
 
     def test_empty_registry_is_a_no_op(self):
         spy = RecordingSpy()
 
-        SegmentSweeper(clients=FakeClients({}), service=spy)._sweep()
+        SegmentSweeper(sessions=FakeClients({}), service=spy)._sweep()
 
         assert spy.collected == []
 
@@ -543,7 +569,7 @@ class TestSubmitDetections:
         assert fake_hls.calls == []
 
     def test_queue_not_started(self, fake_inference):
-        svc = RecordingService(config=RecordingConfig(), clients=FakeClients({}))
+        svc = RecordingService(config=RecordingConfig(), sessions=FakeClients({}))
         assert svc.submit_detections(FakeCQ(), _dets()) is False
         assert fake_inference.calls == []
 
@@ -607,7 +633,7 @@ class TestCollectAndFlushDetections:
 
 class TestLifecycle:
     def test_stop_drains_what_was_submitted(self, fake_hls, live_service):
-        """已提交的段代表已经从 CQ 弹出去的帧，停机必须把它们写完再退。"""
+        """已提交的段代表已经从 session 弹出去的帧，停机必须把它们写完再退。"""
         cq = FakeCQ(1, 2)
         svc = live_service(FakeClients({1: cq}))
         svc.start()

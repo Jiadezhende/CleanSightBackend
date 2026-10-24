@@ -106,8 +106,8 @@
 | `reason` | string | 固定 `"API termination request"` |
 | `decoder_stopped` | bool | decoder 是否已停 |
 | `data_flushed` | bool | 结算 + HLS + feature 落盘是否完成 |
-| `client_cleaned` | bool | registry 中的 CQ 是否已注销 |
-| `errors` | string[] | 失败子步列表，形如 `"decoder: ..."`、`"flush: ..."`、`"client_service: ..."`；全成功则 `[]` |
+| `client_cleaned` | bool | 该 run 是否已从注册表注销（键名沿用旧名） |
+| `errors` | string[] | 失败子步列表，形如 `"decoder: ..."`、`"settlement: ..."`、`"frontend: ..."`、`"flush: ..."`、`"session: ..."`；全成功则 `[]` |
 
 > 注意：命中 run 的成功响应体里**没有** `task_id` 字段（那是 no-op 响应才有的）；命中路径用 `client_id`（= source_ip）标识。别假设两条 200 路径 body 同构。
 

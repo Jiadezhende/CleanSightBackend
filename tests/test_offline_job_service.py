@@ -42,7 +42,7 @@ class _Clients:
 def env(fast_task_queue):
     launcher = FakeLauncher()
     clients = _Clients()
-    svc = OfflineJobService(config=_CFG, launcher=launcher, clients=clients, poll_s=0.02)
+    svc = OfflineJobService(config=_CFG, launcher=launcher, sessions=clients, poll_s=0.02)
     svc.start()
     yield SimpleNamespace(svc=svc, launcher=launcher, clients=clients)
     svc.stop(timeout=5.0)
@@ -95,14 +95,14 @@ class TestSerial:
 class TestSubmit:
     def test_running_run_is_409(self, env):
         """该 run 就是注册表里正在跑的那个：输入还在写，拒收且不留作业记录。"""
-        env.clients.registry[1] = SimpleNamespace(run=_r(1, 2))
+        env.clients.registry[1] = SimpleNamespace(info=SimpleNamespace(run=_r(1, 2)))
         with pytest.raises(ConflictError, match="正在运行"):
             env.svc.submit(_r(1, 2))
         assert env.svc.get(_r(1, 2)) is None
         assert env.launcher.procs == []
 
     def test_older_run_of_a_running_step_is_accepted(self, env):
-        env.clients.registry[1] = SimpleNamespace(run=_r(1, 2, run_id=2))
+        env.clients.registry[1] = SimpleNamespace(info=SimpleNamespace(run=_r(1, 2, run_id=2)))
         assert env.svc.submit(_r(1, 2, run_id=1)).status == "queued"
 
     def test_different_runs_of_one_step_are_separate_jobs(self, env):

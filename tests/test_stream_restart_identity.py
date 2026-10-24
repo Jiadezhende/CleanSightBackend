@@ -18,9 +18,8 @@ URL = "rtsp://127.0.0.1:18004/live"
 def svc():
     s = StreamService()
     with patch("app.services.stream.service.FFmpegDecoder") as MockDecoder, \
-         patch("app.services.stream.service.client_service") as mock_cs:
-        mock_cs.has_client.return_value = True
-        mock_cs.get.return_value = MagicMock()
+         patch("app.services.stream.service.session_service") as mock_ss:
+        mock_ss.get.return_value = MagicMock()
         s.MockDecoder = MockDecoder
         yield s
 

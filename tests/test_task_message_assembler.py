@@ -1,12 +1,12 @@
 """前端消息装配层（router 侧）守卫。
 
-signals_10s 的「流名→metric 映射 + 空模板」与告警序列化已从 ClientQueues 下沉到
-app.routers.task 的装配函数；CQ 只出纯数据（get_slide_window_summary / get_alarm_snapshot）。
+signals_10s 的「流名→metric 映射 + 空模板」与告警序列化已从运行态存储下沉到
+app.routers.task 的装配函数；帧窗汇总（_summarize_window）也在 router。
 """
 
 from unittest.mock import MagicMock
 
-from factories import make_alarm
+from factories import make_alarm, make_frame_detection
 
 import app.services.inference.online.naming as naming
 from app.types.run import RunIdentity
@@ -43,14 +43,17 @@ def test_build_task_alarm_message_assembles_via_atomic_snapshot(monkeypatch):
 
     alarm = make_alarm(metric=AlarmMetric.BUBBLE, mode="REALTIME", seq=2, timestamp=1.0)
 
-    cq = MagicMock()
-    cq.run = RunIdentity(7, 1, 1)
-    cq.get_alarm_snapshot.return_value = ([alarm], 2)
-    cq.get_slide_window_summary.return_value = {
-        "bubble": {"active": True, "hit_count": 1, "max_conf": 0.8}
-    }
+    sess = MagicMock()
+    sess.info.run = RunIdentity(7, 1, 1)
+    ledger = MagicMock()
+    ledger.snapshot.return_value = ([alarm], 2)
+    from app.services.inference.online.temporal import alarm_sink
+    monkeypatch.setattr(alarm_sink, "ledger_for", lambda sess: ledger)
+    sess.channel.return_value.snapshot.return_value = [
+        make_frame_detection(source="bubble", n=1, ts=1.0)
+    ]
 
-    msg = _build_task_alarm_message(cq, since_seq=1)
+    msg = _build_task_alarm_message(sess, since_seq=1)
 
     assert msg["task_id"] == 7
     assert msg["max_seq"] == 2
@@ -59,4 +62,4 @@ def test_build_task_alarm_message_assembles_via_atomic_snapshot(monkeypatch):
     assert msg["alarms"][0]["metric"] == AlarmMetric.BUBBLE
     assert msg["alarms"][0]["ts"] == 1
     # 走原子入口，since_seq 透传
-    cq.get_alarm_snapshot.assert_called_once_with(1)
+    ledger.snapshot.assert_called_once_with(1)

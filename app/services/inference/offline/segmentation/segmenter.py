@@ -15,7 +15,7 @@
 
 约束：
 - `frames` 只读，不得原地修改；
-- 策略不访问存储 / ClientService / CQ / 数据库（纯算法）；要原始画面的策略声明 `uses_context = True`，
+- 策略不访问存储 / 运行态注册表 / 数据库（纯算法）；要原始画面的策略声明 `uses_context = True`，
   由 Runner 以 `preprocess(frames, context)` 注入 `OfflineContext`，经它取 run 级资源；
 - 输出每条 `TemporalSegment.producer` 必须等于本策略 `name`（= 类名）；`start <= end`、时间为有限数、
   `0 <= conf <= 1`（由 Runner 统一校验，见 runner.py）。

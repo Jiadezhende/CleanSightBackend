@@ -5,11 +5,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from factories import make_alarm, make_bare_cq, make_detector_output, make_frame_detection
+from factories import make_alarm, make_session, make_detector_output, make_frame_detection
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.types.alarm import Alarm
 from app.services.inference.stage_factory import StageFactory
 from app.services.inference.online.temporal.operator import Operator
+from app.services.inference.online.topics import DETECTION_WINDOW
 
 
 def _out(ts: float, n: int = 1):
@@ -114,21 +115,21 @@ def test_subscribes_required():
 
 
 def test_stream_buffer_floor_10s():
-    cq = make_bare_cq()
+    cq = make_session()
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
-        cq.push_detection(make_frame_detection(source="x", ts=t))
+        cq.channel(DETECTION_WINDOW).push(make_frame_detection(source="x", ts=t))
     # 未配感受野 → 底线 10s：cutoff=20-10=10 → 保留 10,15,20
-    win = cq.get_slide_window()
+    win = cq.channel(DETECTION_WINDOW).snapshot()
     assert [f.ts for f in win] == [10.0, 15.0, 20.0]
 
 
 def test_stream_buffer_extends_with_receptive_field():
-    cq = make_bare_cq()
-    cq.set_stream_windows({"x": 30.0})  # 感受野 30s > 底线
+    cq = make_session()
+    cq.channel(DETECTION_WINDOW).extend_span(30.0)  # 感受野 30s > 底线
     for t in [0.0, 5.0, 10.0, 15.0, 20.0]:
-        cq.push_detection(make_frame_detection(source="x", ts=t))
+        cq.channel(DETECTION_WINDOW).push(make_frame_detection(source="x", ts=t))
     # retain=max(10,30)=30：cutoff=20-30=-10 → 全保留
-    win = cq.get_slide_window()
+    win = cq.channel(DETECTION_WINDOW).snapshot()
     assert [f.ts for f in win] == [0.0, 5.0, 10.0, 15.0, 20.0]
 
 
@@ -155,12 +156,12 @@ def test_per_operator_isolation():
     from app.services.inference.online.temporal.actor import ClientTemporalActor
 
     cq = MagicMock()
-    cq.get_slide_window.return_value = [make_frame_detection(source="s", ts=1.0)]
+    cq.channel.return_value.snapshot.return_value = [make_frame_detection(source="s", ts=1.0)]
     captured: List[Alarm] = []
 
     bad = _BadOperator(name="bad", subscribes=["s"], window_seconds=3.0)
     good = _GoodOperator(name="good", subscribes=["s"], window_seconds=3.0)
-    actor = ClientTemporalActor(task_id=1, cq=cq, stage="1", operators=[bad, good])
+    actor = ClientTemporalActor(task_id=1, sess=cq, stage="1", operators=[bad, good])
     actor._persist_alarms = lambda alarms: captured.extend(alarms)
 
     actor._tick()
@@ -170,8 +171,9 @@ def test_per_operator_isolation():
     assert len(captured) == 1
     # 别名前烧：告警 .stage 在产出处（_tick）即被烧成 actor 构造期解析的别名，早于 _persist_alarms
     assert captured[0].stage == actor._stage_alias
-    cq.set_latest_temporal.assert_called_once()
-    assert cq.set_latest_temporal.call_args[0][0] == ["good"]
+    published = cq.channel.return_value.set
+    published.assert_called_once()
+    assert published.call_args[0][0] == ["good"]
 
 
 if __name__ == "__main__":

@@ -11,8 +11,10 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from app.services.client.instance import client_service
+from app.services.session.instance import session_service
+from app.services.session.topics import queue_depths
 from app.services.inference.offline.instance import offline_job_service
+from app.services.inference.online.temporal import alarm_sink
 from app.storage import inference as inference_store
 from app.types.exceptions import NotFoundError
 
@@ -27,14 +29,13 @@ router = APIRouter(prefix="/admin-f3m8", tags=["admin"])
 # 内部工具函数
 # ---------------------------------------------------------------------------
 
-def _client_info(client_id: int, client_queues) -> dict:
-    depths = client_queues.get_queue_depths()
+def _client_info(client_id: int, sess) -> dict:
     return {
         "client_id": client_id,  # 注册表键 = task_id(int)
-        "task_id": client_queues.run.task_id,
-        "source_ip": client_queues.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
-        "step_id": client_queues.run.step_id,
-        "queue_depths": depths,
+        "task_id": sess.info.run.task_id,
+        "source_ip": sess.info.source_ip,  # /ai/video 按 source_ip 路由，前端据此连 WS
+        "step_id": sess.info.run.step_id,
+        "queue_depths": queue_depths(sess),
     }
 
 
@@ -150,8 +151,7 @@ def get_overview():
     换键后注册表键即 task_id，一条目 = 一个活跃 run；响应键 `clients`/`client_id`
     沿用旧名（admin 页 wire，值为 task_id），语义已是 run/任务。
     """
-    all_clients = client_service.snapshot()
-    clients_info = [_client_info(cid, q) for cid, q in all_clients.items()]
+    clients_info = [_client_info(tid, s) for tid, s in session_service.snapshot().items()]
     total_queued = sum(
         d["queue_depths"].get("ca_ready", 0)
         + d["queue_depths"].get("ca_raw", 0)
@@ -170,19 +170,18 @@ def get_overview():
 def get_clients():
     """活跃 run（任务）列表（轻量），供前端下拉框使用。
 
-    一 run 一 CQ = `registry[task_id]`；响应/路径的 `clients`·`client_id` 为 admin 页 wire 旧名（值=task_id）。
+    一 run 一 session = `registry[task_id]`；响应/路径的 `clients`·`client_id` 为 admin 页 wire 旧名（值=task_id）。
     """
-    all_clients = client_service.snapshot()
-    return [_client_info(cid, q) for cid, q in all_clients.items()]
+    return [_client_info(tid, s) for tid, s in session_service.snapshot().items()]
 
 
 @router.get("/clients/{client_id}/alarms")
 def get_client_alarms(client_id: int, n: int = Query(20, ge=1, le=100)):
     """从内存告警日志读取该 run（task_id）最近 n 条告警（不走 DB）。"""
-    if not client_service.has_client(client_id):
+    sess = session_service.get(client_id)
+    if sess is None:
         return {"client_id": client_id, "alarms": [], "error": "client_not_found"}
-    cq = client_service.get(client_id)
-    alarms = cq.get_recent_alarms(n=n)
+    alarms = alarm_sink.ledger_for(sess).recent(n)
     return {
         "client_id": client_id,
         "alarms": [

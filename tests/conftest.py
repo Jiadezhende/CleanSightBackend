@@ -1,8 +1,8 @@
 """共享 fixture：包装 factories 的 factory-as-fixture + 真正跨文件共享的 setup。
 
 Hybrid 约定：
-- 主用法是直接 `from factories import make_cq`（可 @parametrize、可被 integration_tests 复用）；
-- 需要注入式书写的用例，用下方 factory-fixture：`def test_x(make_cq): cq = make_cq(task_id=2)`。
+- 主用法是直接 `from factories import make_session`（可 @parametrize、可被 integration_tests 复用）；
+- 需要注入式书写的用例，用下方 factory-fixture：`def test_x(make_session): s = make_session(task_id=2)`。
 两者同源（都指向 factories 里的纯函数），不产生第二份构造逻辑。
 """
 
@@ -16,8 +16,8 @@ from app.services.utils import task_queue
 # ---- factory-as-fixture：返回可调用的构造器（支持 override 参数）----
 
 @pytest.fixture
-def make_cq():
-    return factories.make_cq
+def make_session():
+    return factories.make_session
 
 
 @pytest.fixture
@@ -39,6 +39,14 @@ def _isolate_storage_root(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path_factory.mktemp("storage")))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_session_registry(monkeypatch):
+    """session 注册表每个用例从空表开始：`open` 遇同 task 已注册即抛，残留会串到后续用例。"""
+    from app.services.session.instance import session_service
+
+    monkeypatch.setattr(session_service, "_runs", {})
+
+
 @pytest.fixture
 def tmp_storage(tmp_path, monkeypatch):
     """把 settings.storage_dir 指到隔离临时目录，读写两侧同源、用例间不串。"""
@@ -50,3 +58,19 @@ def tmp_storage(tmp_path, monkeypatch):
 def fast_task_queue(monkeypatch):
     """SerialTaskQueue 消费线程轮询 0.5s → 0.01s：`stop()` 不再每条队列白等半秒。"""
     monkeypatch.setattr(task_queue, "_POLL_INTERVAL", 0.01)
+
+
+@pytest.fixture
+def topic_sizes(monkeypatch):
+    """改 session topic 的容量口径（READY / RAW 等按 client 配置建）：`topic_sizes(ca_maxlen=10)`。
+
+    只影响之后**新建**的 channel；已建好的 channel 容量不变。
+    """
+    from app.services.session.config import ClientConfig
+
+    def set_sizes(**sizes):
+        for name, value in sizes.items():
+            assert name in ("ca_maxlen", "ca_ready_maxlen", "ca_segment_len"), name
+            monkeypatch.setattr(ClientConfig, name, property(lambda self, v=value: v))
+
+    return set_sizes

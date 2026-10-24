@@ -28,6 +28,7 @@ review 都只会看到「一个工具包」。那比三份重复实现更坏—�
     task_queue.py       SerialTaskQueue（单消费者串行队列）
     worker_guard.py     guarded_run（线程主循环级自愈）
     pressure.py         PressureReporter（`[PRESSURE]` 周期快照日志）
+    startup_latency.py  log_milestone（`[startup]` 启动延迟埋点日志）
     metrics.py          Prometheus 指标
 
 本包是**标记型** `__init__.py`（规范 §3）：纯 docstring、零 re-export，消费方走深路径。

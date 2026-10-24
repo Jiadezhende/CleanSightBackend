@@ -112,6 +112,7 @@ BUDGET = {
     "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
     "app.services.utils.pressure":     (set(), 0.20),   # stdlib only
     "app.services.utils.memory_budget": (set(), 0.20),  # stdlib only
+    "app.services.utils.startup_latency": (set(), 0.20),  # stdlib only
     "app.services.utils.frame_ring":    (set(), 0.40),  # numpy + multiprocessing.shared_memory
     "app.services.utils.metrics":      (set(), 0.40),   # prometheus_client（实测 ~0.09s）
     # 算法服务。cv2 在 grader.py 里一律函数体内 import（规范 §2 通路 2）——它经 `service`
@@ -125,7 +126,16 @@ BUDGET = {
     "app.services.algorithm.colorstrip.grader": (set(), 0.60),   # numpy
     "app.services.algorithm.colorstrip.cli":    (set(), 0.60),   # 同上；argparse 不加码
     "app.services.lab.service":  (set(), 0.60),   # routers/lab 模块级 import 它；经 clip_builder 拽 hls（numpy），实测 ~0.17s
-    "app.services.client":      (set(), 1.0),
+    # session（LAYER_PACKAGES 白名单包，逐模块登记）：channels 经 utils.metrics 拉起 prometheus_client，
+    # config 吃 yaml，别的只有 stdlib + app.types
+    "app.services.session":               (set(), 0.20),   # 标记型 __init__
+    "app.services.session.core":          (set(), 0.40),
+    "app.services.session.core.channels": (set(), 0.40),
+    "app.services.session.core.session":  (set(), 0.40),
+    "app.services.session.service":       (set(), 0.40),
+    "app.services.session.instance":      (set(), 0.40),
+    "app.services.session.topics":        (set(), 0.40),
+    "app.services.session.config":        (set(), 0.40),
     "app.services.inference":   (set(), 1.0),
     # online / offline 两个子包的 `__init__` 都是标记型：import 子包不该拉起任何一段链路。
     "app.services.inference.online":  (set(), 1.0),
@@ -203,10 +213,19 @@ LAYER_PACKAGES = {
     "app/services/inference/offline/compliance": (
         "app.services.inference.offline.compliance", "app.storage", "app.types",
     ),
+    # session：run 注册表 + 进程内 mq，所有 service 的共同下游。只许向下依赖工具与契约——
+    # import 任何 service 就成了 service → service 依赖的后门，也背上了业务名词。
+    "app/services/session": (
+        "app.services.session", "app.services.utils", "app.types", "app.settings",
+    ),
+    # session 基建（Session / Topic / 三种语义）再严一档：不认识 topic 声明与配置，连 settings 都不碰。
+    "app/services/session/core": (
+        "app.services.session.core", "app.services.utils", "app.types",
+    ),
 }
 
-# 服务单例 → 定义它的模块。client_service **不在此列**：它是零跨服务依赖的中台 leaf，
-# 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
+# 服务单例 → 定义它的模块。session_service **不在此列**：它是零跨服务依赖的中台 leaf
+# （由 LAYER_PACKAGES 白名单守），谁都可以向下依赖它，限制它的引用面没有意义。
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",
     "inference_service": "app.services.inference.online.instance",
@@ -222,7 +241,7 @@ SINGLETONS = {
 # 这里只列**具名例外**——每条都得有理由，加新的先想清楚为什么不能走 run_control。
 SINGLETON_EXCEPTIONS = {
     # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态做决策，
-    # 天然要持五个协作者（client / stream / inference / recording，recording 那个只用来在断流
+    # 天然要持五个协作者（session / stream / inference / recording，recording 那个只用来在断流
     # 时 flush 残帧；外加 run_control，生命周期写一律经它执行），import 均写在
     # `HealthMonitorWorker._resolve_deps()` 函数体内，不在模块级。
     "app/daemons/health_monitor/worker.py",

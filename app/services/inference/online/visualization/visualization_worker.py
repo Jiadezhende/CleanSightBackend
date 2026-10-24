@@ -2,13 +2,13 @@
 
 职责：
 - 按固定间隔（tick_interval）轮询所有活跃客户端
-- 从 ClientQueues 主动拉取三要素：
-  - cq.get_latest_detection()  → 原子推理快照（所有 task 同帧一致）
-  - cq.get_latest_frame()      → 最新原始帧
-  - cq.get_latest_temporal()   → 最新时序事件
+- 从各 run 的 session 主动拉取三要素：
+  - LATEST_DETECTION           → 原子推理快照（所有 task 同帧一致）
+  - LATEST_RAW                 → 最新原始帧
+  - LATEST_TEMPORAL            → 最新时序事件
 - 渲染检测框、标注、文字信息到最新帧上：有渲染子进程池（render_proxy）时交给子进程，
   每 run 至多一个在途、下一 tick 收回结果；池未就绪 / 帧放不进槽位时在本线程用 FixedVisualizer 就地渲染
-- 写回 ClientQueues（ca_processed + _latest_rendered）
+- 写回 PROCESSED（落 processed 轨）+ RENDERED（前端实时画面）
 
 VisualizationWorker：拉取 + 渲染循环；VisualizationWorkerPool：按 target_fps 启停单条
 VisualizationWorker 线程（及渲染子进程池）。渲染逻辑在 visualizer.py（FixedVisualizer）。
@@ -26,7 +26,10 @@ from app.types.detection import DetectorOutput, FrameDetection
 from app.services.inference.online.render import RenderSpec
 from app.types.frame import Frame
 from app.services.inference.online.naming import get_stage_alias
-from app.services.client.instance import client_service
+from app.services.inference.online.topics import LATEST_DETECTION, LATEST_TEMPORAL, VIZ_LAST_TS
+from app.services.session.topics import LATEST_RAW, PROCESSED, RENDERED
+from app.services.utils.startup_latency import log_milestone
+from app.services.session.instance import session_service
 from app.services.utils.worker_guard import guarded_run
 from .visualizer import FixedVisualizer
 
@@ -42,7 +45,7 @@ class VisualizationWorker:
     """可视化工作线程（定时拉取模式）。
 
     独立于 TemporalWorker，按自己的节奏（tick_interval）遍历所有活跃客户端，
-    从 ClientQueues 拉取原子推理快照 + 最新帧 + 时序事件，渲染后写回。
+    从各 run 的 session 拉取原子推理快照 + 最新帧 + 时序事件，渲染后写回。
     """
 
     def __init__(
@@ -78,9 +81,6 @@ class VisualizationWorker:
         )
         self.fixed_visualizer = FixedVisualizer()
 
-        # 去重：记录每个 run(键=task_id) 上次渲染的推理时间戳，避免重复渲染同一帧
-        self._last_rendered_ts: Dict[int, float] = {}
-
         # 吞吐量观测（[VIZ_THROUGHPUT]）：每 ~10s 评估一次，仅在有压力时才打印，
         # 平稳时静默以免刷屏。定位三件事：viz 线程本身转没转够（tick 率）、
         # processed 成帧率不足是"上游供帧慢"(supply-bound) 还是"单帧渲染慢"(render-bound)。
@@ -92,7 +92,7 @@ class VisualizationWorker:
         # 任一端拿窗界代替都会把出帧率算低而误报 supply-bound。
         self._first_seen: Dict[int, float] = {}
         self._last_seen: Dict[int, float] = {}
-        # 两个统计字典与 _first_seen/_last_rendered_ts 同键（task_id），标注对齐实际键型
+        # 两个统计字典与 _first_seen 同键（task_id），标注对齐实际键型
         self._stat_rendered: Dict[int, int] = defaultdict(int)  # 实际渲染（=新推理结果）帧数
         self._stat_stale: Dict[int, int] = defaultdict(int)     # 有推理但无新结果而空转的 tick 数
         self._render_time_sum: float = 0.0    # 渲染耗时累计（秒）
@@ -145,29 +145,23 @@ class VisualizationWorker:
 
         # 先收回子进程已渲染完的帧：写回后该 run 才能送下一帧（每 run 单飞）
         if self._render_proxy is not None:
-            for (task_id, cq, ts), annotated, render_s, _ok in self._render_proxy.drain():
+            for (task_id, sess, ts), annotated, render_s, _ok in self._render_proxy.drain():
                 self._note_render_time(render_s)
-                self._write_rendered(task_id, cq, ts, annotated)
+                self._write_rendered(task_id, sess, ts, annotated)
 
-        all_clients = client_service.snapshot()
-        for task_id, cq in all_clients.items():
+        for task_id, sess in session_service.snapshot().items():
             try:
-                self._process_client(task_id, cq, now)
+                self._process_client(task_id, sess, now)
             except Exception as e:
                 logger.error(
                     "[VisualizationWorker-%d] Error processing run %s: %s",
                     self.worker_id, task_id, e, exc_info=True,
                 )
 
-        # 自清理：移除已不在 ClientService 中的客户端去重记录（防止内存泄漏）
-        stale_ids = self._last_rendered_ts.keys() - all_clients.keys()
-        for stale_id in stale_ids:
-            del self._last_rendered_ts[stale_id]
-
-    def _process_client(self, task_id: int, cq, now: float) -> None:
+    def _process_client(self, task_id: int, sess, now: float) -> None:
         """处理单个 run 的可视化。"""
         # 1. 原子读取推理快照（所有 task 同帧一致）
-        inference: Optional[FrameDetection] = cq.get_latest_detection()
+        inference: Optional[FrameDetection] = sess.channel(LATEST_DETECTION).get()
         if inference is None:
             return
 
@@ -178,8 +172,8 @@ class VisualizationWorker:
             self._first_seen[task_id] = now
         self._last_seen[task_id] = now
 
-        # 2. 去重：跳过已渲染过的同一推理结果
-        last_ts = self._last_rendered_ts.get(task_id, 0.0)
+        # 2. 去重：跳过已渲染过的同一推理结果（上次送渲染的 ts 记在本 run 的 VIZ_LAST_TS）
+        last_ts = sess.channel(VIZ_LAST_TS).get()
         if inference.ts <= last_ts:
             # 有推理快照但无新结果 → tick 空转。占比高即"上游供帧慢"的直接信号。
             self._stat_stale[task_id] += 1
@@ -190,16 +184,17 @@ class VisualizationWorker:
         if proxy is not None and proxy.in_flight(task_id):
             return
 
-        # 4. 获取最新原始帧
-        frame = cq.get_latest_frame()
-        if frame is None:
+        # 4. 获取最新原始帧（拷一份：渲染不改原帧，但同一帧还在录像 / 推理队列里）
+        latest_raw = sess.channel(LATEST_RAW).get()
+        if latest_raw is None:
             return
+        frame = latest_raw.frame.copy()
 
         # 5. 获取最新时序事件
-        events = cq.get_latest_temporal()
+        events = sess.channel(LATEST_TEMPORAL).get()
 
-        # 6. 渲染。stage 取自 cq 不可变身份（快照不再携 stage）。
-        stage = cq.stage
+        # 6. 渲染。stage 取自 session 不可变身份（快照不再携 stage）。
+        stage = sess.info.stage
         if proxy is not None:
             try:
                 specs = self._build_specs(stage, inference.by_source)
@@ -207,10 +202,10 @@ class VisualizationWorker:
                 logger.error("[VisualizationWorker] prepare_visualization_data failed: %s", e, exc_info=True)
                 specs = None
             if specs is not None and proxy.submit(
-                task_id, frame, specs, get_stage_alias(stage), events, ctx=(task_id, cq, inference.ts),
+                task_id, frame, specs, get_stage_alias(stage), events, ctx=(task_id, sess, inference.ts),
             ):
                 # 结果在下一 tick 由 drain 收回写回；去重时间戳此刻推进，同一推理结果不重送
-                self._last_rendered_ts[task_id] = inference.ts
+                sess.channel(VIZ_LAST_TS).set(inference.ts)
                 return
             # 池未就绪 / 槽满 / 帧放不进槽位 / 无需渲染：本线程就地渲染
 
@@ -219,7 +214,7 @@ class VisualizationWorker:
         self._note_render_time(time.perf_counter() - t0)
 
         # 7. 写回 + 去重时间戳 + 计成帧数
-        self._write_rendered(task_id, cq, inference.ts, annotated_frame)
+        self._write_rendered(task_id, sess, inference.ts, annotated_frame)
 
     def _note_render_time(self, dt: float) -> None:
         """记单帧渲染耗时（判 render-bound 用）。子进程渲染时取子进程实测的渲染耗时。"""
@@ -228,13 +223,22 @@ class VisualizationWorker:
         if dt > self._render_time_max:
             self._render_time_max = dt
 
-    def _write_rendered(self, task_id: int, cq, ts: float, annotated: np.ndarray) -> None:
-        """渲染结果写回 cq（非 ACTIVE 的 cq 由其写门拒收）+ 推进去重时间戳 + 计成帧数。"""
+    def _write_rendered(self, task_id: int, sess, ts: float, annotated: np.ndarray) -> None:
+        """渲染结果写回 session（非 ACTIVE 由写门拒收）+ 推进去重时间戳 + 计成帧数。"""
         frame_data = Frame(timestamp=ts, frame=annotated)
-        cq.append_ca_processed(frame_data)
-        cq.set_latest_rendered(frame_data)
-        if ts > self._last_rendered_ts.get(task_id, 0.0):
-            self._last_rendered_ts[task_id] = ts
+        sess.channel(PROCESSED).push(frame_data)
+        rendered = sess.channel(RENDERED)
+        first = rendered.get() is None
+        if rendered.set(frame_data) and first:
+            # 启动延迟埋点 C：本 run 首个可供 WS 推给前端的画面（viz 是 RENDERED 唯一写方）
+            info = sess.info
+            log_milestone(
+                "first_rendered", task_id=info.run.task_id, step_id=info.run.step_id,
+                started_at=info.started_at,
+            )
+        last = sess.channel(VIZ_LAST_TS)
+        if ts > last.get():
+            last.set(ts)
         self._stat_rendered[task_id] += 1
 
     def _render(

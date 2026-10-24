@@ -4,15 +4,15 @@
 _parse_metrics_json（REGISTRY→结构化 JSON）。WS/端点/中间件属集成范畴，不在此。
 """
 
-from factories import make_cq
+from factories import make_session
 from app.routers.admin import _client_info, _parse_metrics_json, _quantile
 
 
 # ---- _client_info：换键后载荷含 task_id + source_ip（前端据 source_ip 连 WS）----
 
 def test_client_info_shape_carries_task_id_and_source_ip():
-    cq = make_cq(task_id=7, step_id=2, source_ip="1.2.3.4", stage="2")
-    info = _client_info(7, cq)
+    sess = make_session(task_id=7, step_id=2, source_ip="1.2.3.4", stage="2")
+    info = _client_info(7, sess)
     assert info["client_id"] == 7          # 注册表键 = task_id(int)
     assert info["task_id"] == 7
     assert info["source_ip"] == "1.2.3.4"  # 换键回归修复的字段

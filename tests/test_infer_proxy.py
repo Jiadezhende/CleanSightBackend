@@ -14,13 +14,13 @@ from app.services.inference.online.types import DetectionTask
 from app.services.inference.online.detection.infer_proxy import RemoteInferProxy
 from app.services.utils.metrics import frame_drop_total, infer_failure_total, infer_latency_ms
 
-from factories import make_cq, make_detector_output
+from factories import make_session, make_detector_output
 
 
 def _task(cq, ts: float, *, w: int = 8, h: int = 4) -> DetectionTask:
     return DetectionTask(
-        task_id=cq.run.task_id, stage=cq.stage, timestamp=ts,
-        frame=np.zeros((h, w, 3), dtype=np.uint8), cq=cq,
+        task_id=cq.info.run.task_id, stage=cq.info.stage, timestamp=ts,
+        frame=np.zeros((h, w, 3), dtype=np.uint8), sess=cq,
     )
 
 
@@ -41,14 +41,14 @@ def _drop(reason: str) -> float:
 
 def test_submit_stores_pending_and_ships_frames():
     p, _ = _proxy()
-    cq = make_cq(task_id=1, stage="1")
+    cq = make_session(task_id=1, stage="1")
     assert p.submit([_task(cq, 1.0), _task(cq, 2.0)]) is True
 
     assert p._inflight == 1
     assert len(p._pending) == 1
     (req_id, records), = p._pending.items()
     assert [r.timestamp for r in records] == [1.0, 2.0]
-    assert records[0].cq is cq
+    assert records[0].sess is cq
     # 送进子进程的是 (req_id, stage, frames, timestamps)
     req_id2, stage, frames, ts = p._req_q.get_nowait()
     assert req_id2 == req_id and stage == "1"
@@ -57,7 +57,7 @@ def test_submit_stores_pending_and_ships_frames():
 
 def test_collect_pops_pending_and_writes_back_assembled():
     p, captured = _proxy()
-    cq = make_cq(task_id=7, step_id=3, stage="1")
+    cq = make_session(task_id=7, step_id=3, stage="1")
     p.submit([_task(cq, 1.0, w=8, h=4), _task(cq, 2.0, w=8, h=4)])
     (req_id, _), = p._pending.items()
 
@@ -68,11 +68,11 @@ def test_collect_pops_pending_and_writes_back_assembled():
 
     # pending 清空、inflight 归零（pop 生效）
     assert p._pending == {} and p._inflight == 0
-    # write_back 收到 2 条正确组装的 FrameDetection（cq 贴回、ts/wh 对齐）
+    # write_back 收到 2 条正确组装的 FrameDetection（sess 贴回、ts/wh 对齐）
     assert len(captured) == 1
     frames = captured[0]
     assert [f.ts for f in frames] == [1.0, 2.0]
-    assert all(f.cq is cq for f in frames)
+    assert all(f.sess is cq for f in frames)
     assert all((f.frame_width, f.frame_height) == (8, 4) for f in frames)
     assert frames[0].by_source["clean"] is fd0
     assert frames[1].by_source["clean"] is fd1
@@ -80,7 +80,7 @@ def test_collect_pops_pending_and_writes_back_assembled():
 
 def test_max_inflight_backpressure_rejects():
     p, _ = _proxy(max_inflight=2)
-    cq = make_cq(stage="1")
+    cq = make_session(stage="1")
     assert p.submit([_task(cq, 1.0)]) is True
     assert p.submit([_task(cq, 2.0)]) is True
     # 第三批：在途已满 → 拒收
@@ -91,7 +91,7 @@ def test_max_inflight_backpressure_rejects():
 def test_submit_rejected_when_child_not_ready():
     p, _ = _proxy()
     p._child_ready.clear()
-    cq = make_cq(stage="1")
+    cq = make_session(stage="1")
     assert p.submit([_task(cq, 1.0)]) is False
     assert p._inflight == 0 and p._pending == {}
 
@@ -99,7 +99,7 @@ def test_submit_rejected_when_child_not_ready():
 def test_leak_bound_partial_responses():
     """submit N 批、只回 M 批 → pending == N-M（无泄漏、无残留）。"""
     p, _ = _proxy(max_inflight=16)
-    cq = make_cq(stage="1")
+    cq = make_session(stage="1")
     for i in range(5):
         assert p.submit([_task(cq, float(i))]) is True
     assert p._inflight == 5
@@ -113,7 +113,7 @@ def test_leak_bound_partial_responses():
 def test_child_failure_clears_pending_and_counts_restart_drops():
     p, _ = _proxy(max_inflight=16)
     p._no_restart.set()  # 阻止真重启（本测只验清理）
-    cq = make_cq(stage="1")
+    cq = make_session(stage="1")
     p.submit([_task(cq, 1.0), _task(cq, 2.0)])  # 2 帧
     p.submit([_task(cq, 3.0)])                   # 1 帧 → 共 3 在途帧
 
@@ -180,7 +180,7 @@ def test_orphan_response_ignored():
 def test_failure_metric_derived_from_framedetections():
     """失败埋点直接从 merged 里 success=False 的 DetectorOutput 派生（metadata.error_type 作 label）。"""
     p, _ = _proxy()
-    cq = make_cq(stage="1")
+    cq = make_session(stage="1")
     p.submit([_task(cq, 1.0)])
     (req_id, _), = p._pending.items()
 
@@ -197,7 +197,7 @@ def test_failure_metric_derived_from_framedetections():
 def test_latency_metric_derived_from_framedetections_metadata():
     """成功埋点从 merged 里 DetectorOutput.metadata["infer_ms"] 派生（每模型每批一次，除以帧数）。"""
     p, _ = _proxy()
-    cq = make_cq(stage="1")
+    cq = make_session(stage="1")
     p.submit([_task(cq, 1.0), _task(cq, 2.0)])  # 2 帧
     (req_id, _), = p._pending.items()
 
@@ -227,9 +227,9 @@ def _ring_proxy(*, slots: int = 4, max_inflight: int = 8):
 def test_ring_submit_ships_slot_handles_not_arrays():
     p, _ = _ring_proxy()
     try:
-        cq = make_cq(stage="1")
+        cq = make_session(stage="1")
         frame = np.full((4, 8, 3), 5, dtype=np.uint8)
-        task = DetectionTask(task_id=1, stage="1", timestamp=1.0, frame=frame, cq=cq)
+        task = DetectionTask(task_id=1, stage="1", timestamp=1.0, frame=frame, sess=cq)
         assert p.submit([task]) is True
 
         req_id, _, payload, _ = p._req_q.get_nowait()
@@ -247,7 +247,7 @@ def test_ring_submit_ships_slot_handles_not_arrays():
 def test_ring_slots_released_on_response():
     p, _ = _ring_proxy()
     try:
-        cq = make_cq(stage="1")
+        cq = make_session(stage="1")
         p.submit([_task(cq, 1.0), _task(cq, 2.0)])
         (req_id, _), = p._pending.items()
         p._handle_response((req_id, [{}, {}]))
@@ -259,7 +259,7 @@ def test_ring_slots_released_on_response():
 def test_ring_exhausted_rejects_like_inflight_full():
     p, _ = _ring_proxy(slots=2)
     try:
-        cq = make_cq(stage="1")
+        cq = make_session(stage="1")
         assert p.submit([_task(cq, 1.0), _task(cq, 2.0)]) is True
         assert p.submit([_task(cq, 3.0)]) is False      # 槽位用尽 → 背压
         assert p._inflight == 1 and len(p._pending) == 1
@@ -271,7 +271,7 @@ def test_ring_reset_on_child_failure():
     p, _ = _ring_proxy()
     p._no_restart.set()
     try:
-        cq = make_cq(stage="1")
+        cq = make_session(stage="1")
         p.submit([_task(cq, 1.0), _task(cq, 2.0)])
         p._handle_child_failure(dead=True, wedged=False, not_ready=False)
         assert p._ring.free_count == 4 and p._req_slots == {}
@@ -283,7 +283,7 @@ def test_ring_slots_released_when_put_fails():
     p, _ = _ring_proxy()
     try:
         p._req_q = SimpleNamespace(put=lambda *a, **k: (_ for _ in ()).throw(queue.Full()))
-        cq = make_cq(stage="1")
+        cq = make_session(stage="1")
         assert p.submit([_task(cq, 1.0)]) is False
         assert p._ring.free_count == 4 and p._pending == {} and p._inflight == 0
     finally:
@@ -294,7 +294,7 @@ def test_oversize_frames_fall_back_to_inline():
     """帧尺寸超出槽位（配置不符）：整批走 pickle 直送，不能卡死在拒收上。"""
     p, _ = _ring_proxy()
     try:
-        cq = make_cq(stage="1")
+        cq = make_session(stage="1")
         assert p.submit([_task(cq, 1.0, w=16, h=8)]) is True
         _, _, payload, _ = p._req_q.get_nowait()
         assert isinstance(payload, list) and payload[0].shape == (8, 16, 3)

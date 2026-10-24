@@ -1,14 +1,15 @@
-"""测试数据构造的单一真源：领域对象 + 运行态 CQ + 推理消息。
+"""测试数据构造的单一真源：领域对象 + 运行态 session + 推理消息。
 
 纯函数、**无 pytest 依赖** —— 可被 tests/ 直接 `from factories import ...`（pytest prepend
 模式把 tests/ 目录插进 sys.path），也可被 integration_tests/ 复用。
 
 设计约定：
 - 每个 builder 带"最常见良性态"默认值，用例只写它关心的偏差（关键字 override）。
-- 契约一变（如 CQ 构造签名、FrameDetection 加字段），只改这一处，不再扫散点。
-- MagicMock 化的 CQ / DB 会话属于"单文件专用替身"，不在此集中（集中无收益）。
+- 契约一变（如 SessionInfo 字段、FrameDetection 加字段），只改这一处，不再扫散点。
+- MagicMock 化的 session / DB 会话属于"单文件专用替身"，不在此集中（集中无收益）。
 """
 
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -17,15 +18,15 @@ from app.types.alarm import Alarm
 from app.types.detection import DetBox, DetectorOutput, FrameDetection
 from app.types.frame import Frame
 from app.types.run import RunIdentity
-from app.services.client.queues import ClientQueues
+from app.services.session.core import Session, SessionInfo
 
 __all__ = [
     "make_det_box",
     "make_detector_output",
     "make_frame_detection",
     "make_frame",
-    "make_cq",
-    "make_bare_cq",
+    "make_session",
+    "open_session",
     "make_alarm",
     "seed_hls_segments",
 ]
@@ -63,19 +64,19 @@ def make_frame_detection(
     source: str = "bubble", n: int = 1, class_name: str = "bubble",
     metadata: Optional[Dict] = None,
     frame_width: Optional[int] = None, frame_height: Optional[int] = None,
-    cq: Optional[ClientQueues] = None,
+    sess: Optional[Session] = None,
 ) -> FrameDetection:
     """一帧多流对齐的检测结果。by_source 缺省单流 {source: <n 个框>}。
 
     frame_width/frame_height 为帧级分辨率，缺省 None（消费方走默认兜底）。
-    cq 缺省 None（留存态）；写回句柄 fence 类测试传 cq=<句柄> 模拟 collector 刚组装的帧。
+    sess 缺省 None（留存态）；写回句柄 fence 类测试传 sess=<句柄> 模拟 collector 刚组装的帧。
     """
     if by_source is None:
         by_source = {
             source: make_detector_output(n=n, class_name=class_name, ts=ts, metadata=metadata)
         }
     return FrameDetection(
-        ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height, cq=cq,
+        ts=ts, by_source=by_source, frame_width=frame_width, frame_height=frame_height, sess=sess,
     )
 
 
@@ -84,24 +85,40 @@ def make_frame(*, ts: float = 1.0, shape=(4, 4, 3)) -> Frame:
     return Frame(timestamp=ts, frame=np.zeros(shape, dtype=np.uint8))
 
 
-def make_cq(
-    *, task_id: int = 1, step_id: Optional[int] = 1, run_id: int = 1,
-    run: Optional[RunIdentity] = None,
-    source_ip: str = "c1", stage: str = "1", **kw,
-) -> ClientQueues:
-    """带不可变运行身份的 CQ（一 CQ == 一 run）。透传 ca_maxlen 等队列参数。
-
-    给了 `run` 就用它（要真落盘时传 `runs.allocate` 的结果）；否则按 task/step/run_id 现拼，
-    `step_id=None` 得到未绑定 run 的 CQ。
-    """
+def _session_info(
+    task_id: int, step_id: Optional[int], run_id: int, run: Optional[RunIdentity],
+    source_ip: str, stage: str, started_at: Optional[float],
+) -> SessionInfo:
     if run is None and step_id is not None:
         run = RunIdentity(task_id, step_id, run_id)
-    return ClientQueues(run=run, source_ip=source_ip, stage=stage, **kw)
+    return SessionInfo(
+        run=run, source_ip=source_ip, stage=stage,
+        started_at=time.time() if started_at is None else started_at,
+    )
 
 
-def make_bare_cq(**kw) -> ClientQueues:
-    """无身份裸建（算子/纯队列单测，task_id/step_id/stage 均为空默认值）。"""
-    return ClientQueues(**kw)
+def make_session(
+    *, task_id: int = 1, step_id: Optional[int] = 1, run_id: int = 1,
+    run: Optional[RunIdentity] = None,
+    source_ip: str = "c1", stage: str = "1", started_at: Optional[float] = None,
+) -> Session:
+    """一次 run 的 session（**不入注册表**）。
+
+    给了 `run` 就用它（要真落盘时传 `runs.allocate` 的结果）；否则按 task/step/run_id 现拼，
+    `step_id=None` 得到未绑定 run 的 session。`started_at` 缺省取当前时刻，传 0 关掉启动埋点。
+    """
+    return Session(_session_info(task_id, step_id, run_id, run, source_ip, stage, started_at))
+
+
+def open_session(
+    *, task_id: int = 1, step_id: int = 1, run_id: int = 1,
+    run: Optional[RunIdentity] = None,
+    source_ip: str = "c1", stage: str = "1", started_at: Optional[float] = None,
+) -> Session:
+    """同 `make_session`，但注册进全局 `session_service`（pytest 下每个用例的注册表是空的）。"""
+    from app.services.session.instance import session_service
+
+    return session_service.open(_session_info(task_id, step_id, run_id, run, source_ip, stage, started_at))
 
 
 def make_alarm(

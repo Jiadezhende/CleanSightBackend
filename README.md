@@ -31,7 +31,7 @@ app/
 ├── services/
 │   ├── run_control/     # RunControlService — 跨服务起停一次 run 的单一编排出口
 │   ├── utils/           # 服务层通用：串行队列 / 线程自愈 / 压力日志 / Prometheus 指标 / VOD m3u8 / 媒体轴
-│   ├── client/          # ClientService 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
+│   ├── session/         # run 注册表（int task_id 键）+ 每 run 的 Session（身份 / 状态机 / topic）+ 进程内 mq 基建
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
 │   ├── inference/       # 推理：online/（detection/ temporal/ visualization/）+ offline/（segmentation/ 动作分割、compliance/ 规则判定）；契约包的业务实现放 impl/
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
@@ -111,7 +111,7 @@ CleanSight 采用**流 / 推理 / 持久化解耦**架构，`RunControlService` 
 ```mermaid
 graph LR
     A[RTSP 流] --> B[StreamService / FFmpegDecoder]
-    B --> C[ClientQueues]
+    B --> C[Session topics]
     C --> D[Inference：Detector 检测→特征聚合/落盘→Operator 时序判定 1Hz→可视化]
     D --> E[RecordingService]
     D --> F[WebSocket 前端轮询]
@@ -125,15 +125,15 @@ graph LR
 ```
 RTSP (30fps)
   ↓ [FFmpegDecoder 自持读循环，ffmpeg 输出规范化 CFR raw_fps]
-ca_ready（SPSC 无锁 deque，Bresenham 抽帧至 inference_fps）   ca_raw（完整录制缓冲）
-  ↓ [Detector 检测 → 多流对齐成帧并落盘 detections.jsonl → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
-ca_processed → [HLS 分段：recording 周期 PULL 拉取整段]
-_latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
+READY（整数倍率抽帧至 inference_fps）   RAW（完整录制缓冲）   LATEST_RAW（最新原始帧）
+  ↓ [Detector 检测 → 多流对齐成帧 → DETECTION_WINDOW / LATEST_DETECTION / DETECTIONS（落 detections.jsonl）
+     → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
+PROCESSED → [HLS 分段：recording 周期 PULL 拉取整段]
+RENDERED 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 ```
 
-- `ca_ready`：待推理帧，无锁 SPSC deque（decoder 单产 / dispatcher 单消）
-- `ca_raw` / `ca_processed`：raw / processed HLS 纯缓冲，recording 主动拉取分段
-- `_latest_rendered` / `_latest_detection` / `_slide_window` / `_latest_temporal`：渲染帧 / 推理快照 / 检测滑窗 / 时序事件
+- 上面大写的都是挂在每个 run 的 `Session` 上的 topic（`sess.channel(T)` 读写，run 关闭整体释放），声明在 `app/services/session/topics.py` 与 `app/services/inference/online/topics.py`
+- `READY` / `RAW` / `PROCESSED` / `DETECTIONS`：有界 Fifo；`LATEST_*` / `RENDERED`：只留最新值；`DETECTION_WINDOW`：按帧 ts 保留的时间窗
 
 线程角色：检测（StageAwareDispatcher + 每 stage 推理线程，可选 CUDA Stream）、时序（`ClientTemporalActor` per-run ~1Hz）、可视化（独立线程）、录制（段 sweeper + 一条 SerialTaskQueue 消费线程）、持久化（Alarm Worker×1 + 清理 worker）。详见 [知识库](docs/kb/INDEX.md)。
 
