@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -67,7 +67,7 @@ EXTINF − ts 跨度 = Δ̄ − gap_边界
 `_encode.effective_fps(frames) = (N-1) / (ts_last - ts_first)`，不引用任何上游 fps。退化段
 （`span<=0`、单帧、反推值落在 `[1.0, 60.0]` 外）回落 `_DEGENERATE_FALLBACK_FPS = 15.0`。
 
-**同一个 fps 同时喂给 `cv2.VideoWriter` 和 `EXTINF`**（`EXTINF = N / eff_fps`），写入帧率与声明时长
+**同一个 fps 同时喂给 ffmpeg `-framerate` 和 `EXTINF`**（`EXTINF = N / eff_fps`），写入帧率与声明时长
 才一致。用固定 fps 写入实际帧数更少的段会快放（实测 2x）；用墙钟帧 ts 差当 EXTINF 会造成 hls.js
 段尾 MSE 缓冲洞、卡死和总时长缩水。退化段仍自洽（tfdt / mdhd / EXTINF 一致，播放不出洞），只是
 墙钟↔媒体换算失真。
@@ -92,18 +92,29 @@ pin 之后 timescale 与编码 fps 解耦，tfdt 累计偏移可按常量换算 
 
 ### tfdt 只能 hex-patch
 
-每段由独立 ffmpeg 进程转码、输入从 PTS=0 起，不补偏移则所有 fragment 落点都是 0，播到第一段末尾
+每段由独立 ffmpeg 进程编码、输入从 PTS=0 起，不补偏移则所有 fragment 落点都是 0，播到第一段末尾
 就不前进。ffmpeg 8.x 的 HLS muxer + fmp4 在 `-start_number 0` 下强制清零 tfdt，`-output_ts_offset`、
 `-itsoffset`+`-copyts`、`-muxdelay` 均无效（8.x 实测；现钉版 n7.1.4 未单独复测，待核验）。
-所以转码完直接改 `moof/traf/tfdt.baseMediaDecodeTime`，写入「已入清单的累计 EXTINF × 90000」；
+所以编码完直接改 `moof/traf/tfdt.baseMediaDecodeTime`，写入「已入清单的累计 EXTINF × 90000」；
 box 结构与 size 不变。找不到 box 或 v0 装不下时**整段作废**，不放行落点错误的 fragment。
 
-### 转码子进程 `cwd=输出目录`，输出参数只给 basename
+### 编码子进程 `cwd=输出目录`，输出参数只给 basename
 
 两个 ffmpeg 大版本对 `-hls_fmp4_init_filename` 的路径解析正好相反：8.x 把 basename 解析到进程 cwd；
 4.x 把绝对路径当相对路径拼到 playlist 目录前（得到 `/dir/foo/dir/foo/init.mp4` → ENOENT）。唯一兼容
 写法是子进程 `cwd` 落在输出目录（stage 目录）、所有输出只给文件名。改成绝对路径只在换版本或换发行版时
 才炸。现在 Linux / Windows 都用 `.ffmpeg/bin` 钉版 n7.1.4，这条仍保留，防换版踩坑。
+
+### 帧经 stdin 灌 ffmpeg：四条不遵守就静默出错或卡死
+
+段编码是 `-f rawvideo -pix_fmt bgr24 -s WxH -framerate <eff_fps> -i pipe:0` 一次编码成 fMP4（`_fmp4.encode`），
+不落中间文件。
+
+- **stderr 不走管道**，写进 stage 里的日志文件：一边写 stdin、一边不读 stderr 管道，ffmpeg 报错多时双方互相堵死。
+- **写前校验帧尺寸一致且 3 通道**：rawvideo 按首帧尺寸切帧，混进异尺寸帧整段错位而不报错，所以起 ffmpeg 前就抛 `ValueError`。
+- **非 C 连续的帧先转连续**再写，否则字节错乱。
+- **必须带超时**：`threading.Timer` 到 `_TIMEOUT_S`（15 s）kill ffmpeg、抛 `TimeoutExpired`；写端因 ffmpeg 提前退出报的
+  BrokenPipe / EINVAL 吞掉，统一按退出码报错。段写是单消费线程，一个卡住的 ffmpeg 堵的是所有 task 的录制。
 
 ---
 
@@ -182,8 +193,8 @@ gap = 下一段起点 − (本段起点 + EXTINF) > GAP_THRESHOLD_MS
 可能是在途段，也可能是登记失败的段（段已就位、清单追加抛 `OSError`）。喂给播放器会出现 MSE 缓冲洞；
 喂给 ffmpeg 会 exit 0、无日志、产出少一截的 mp4（[DESIGN_SEGMENT_CONCAT.md](DESIGN_SEGMENT_CONCAT.md) §5.3）。
 
-- 写侧在 `.stage_{track}_{ts_ms}/` 里编码转码，commit 后才出现在正式位置，所以没有在途段窗口
-  （原地编码会留下「文件在、但还是 mp4v」的窗口，实测 ~260ms）。
+- 写侧在 `.stage_{track}_{ts_ms}/` 里编码，commit 后才出现在正式位置，所以没有在途段窗口
+  （原地编码会留下「文件在、但还没编完」的窗口）。
 - 清单只追加，顺序即时序。`list_segments` 仍按 `ts_ms` 排一次（下游 `bisect_right - 1` 依赖升序），
   **真出现逆序时记 warning**：tfdt 是按清单顺序累加的，静默重排会让读侧媒体偏移与文件里的 tfdt 对不上，
   seek 到错帧也不报错。
@@ -193,7 +204,7 @@ gap = 下一段起点 − (本段起点 + EXTINF) > GAP_THRESHOLD_MS
 ## 6. init 按轨分存
 
 `raw_init.mp4` / `processed_init.mp4` 分存：两轨是两条独立 playlist，各有各的 `#EXT-X-MAP`，共用文件名
-会变成「谁先转码谁定」。init 只在该轨首次写入时落盘，已存在则丢弃新的（同轨编码参数一致，换新的只会
+会变成「谁先编码谁定」。init 只在该轨首次写入时落盘，已存在则丢弃新的（同轨编码参数一致，换新的只会
 让已发布清单换 init）。
 
 缺 init 时回放与整段导出返回 **503**（此 run 暂不可用，不是资源不存在）。判定顺序上，「一个段都没有」
@@ -278,7 +289,7 @@ init 先于清单头        清单头的 EXT-X-MAP 指向不存在的文件 = �
 
 ## 代码来源
 
-- `app/storage/hls/`：`_encode`（eff_fps / mp4v）、`_fmp4`（转码 + tfdt hex-patch + `TIMESCALE`）、
+- `app/storage/hls/`：`_encode`（`effective_fps` / `media_duration`）、`_fmp4`（stdin 编码 + tfdt hex-patch + `TIMESCALE`）、
   `_m3u8`（EXTINF 格式与累计）、`_idx`（sidecar）、`_layout`（命名、`ts_to_ms`）、`_read`（清单枚举、
   `query_timeline` / `query_span`）、`_timeline`（`MediaTimeline`）、`_write`（stage/commit）、
   `_decode`（解码与两级裁剪）、`types`（`Segment` / `SegmentRef` / `HlsSpan`）

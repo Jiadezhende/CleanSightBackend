@@ -7,7 +7,7 @@ actor 由 InferenceService 在 start_workflow() 时创建，在 stop_workflow() 
 - 注册该 client 所有流算子 Operator（每个 Operator 自带共享状态机 self._sm）
 - 按固定间隔（tick_interval）执行：按 subscribes 收集各订阅流 → operator.analyze 推进状态
   → operator.judge 出告警；per-operator 异常隔离，一个算子炸不影响同 tick 其余
-- 告警 → alarm 服务 + ClientQueues.alarm_log；事实是离线概念（detections.jsonl + 离线 worker）
+- 告警 → alarm 服务 + 本 run 的告警账本（alarm_sink）；事实是离线概念（detections.jsonl + 离线 worker）
 - 在 finalize_and_stop() 时收集 operator 结算告警
 """
 
@@ -17,6 +17,7 @@ from typing import List
 
 from app.types.alarm import ALARM_MODE_REALTIME, Alarm
 from app.services.inference.online.naming import get_stage_alias
+from app.services.inference.online.topics import DETECTION_WINDOW, LATEST_TEMPORAL
 from . import alarm_sink
 from .operator import Operator
 from app.services.utils.worker_guard import guarded_run
@@ -34,7 +35,7 @@ class ClientTemporalActor:
     def __init__(
         self,
         task_id: int,
-        cq,                              # ClientQueues
+        sess,                            # Session
         stage: str,
         operators: List[Operator],
         # tick 间隔（秒，时间域）= 全局唯一 tick 真源：manager 构造时不覆盖，默认即生产值。
@@ -42,7 +43,7 @@ class ClientTemporalActor:
         tick_interval: float = 0.5,
     ):
         self._task_id = task_id
-        self._cq = cq
+        self._sess = sess
         self._stage = stage
         # 别名前烧：stage 对本 run 不可变，构造期解析一次；产出告警即烧进 alarm.stage，
         # 下游持久化直接读 alarm.stage、不反向 import inference.naming。这是全仓唯一告警路径 alias 解析点。
@@ -70,7 +71,7 @@ class ClientTemporalActor:
         """停止 actor 线程，然后收集结算告警。
 
         调用方须确保在 stop_workflow() 流程中先调用此方法，
-        再清理 ClientQueues，保证 _sm 读取时无并发写入。
+        再关 session，保证 _sm 读取时无并发写入。
         """
         self._stop_event.set()
         self._thread.join(timeout=2.0)
@@ -101,7 +102,7 @@ class ClientTemporalActor:
         all_alarms: List[Alarm] = []
 
         # 帧窗快照（List[FrameDetection]，多流已在写回口对齐）——各算子自行 _clip / 投影订阅流。
-        windows = self._cq.get_slide_window()
+        windows = self._sess.channel(DETECTION_WINDOW).snapshot()
         for op in self._operators:
             try:
                 if not windows:
@@ -118,7 +119,7 @@ class ClientTemporalActor:
                 )
                 continue
 
-        self._cq.set_latest_temporal(all_events)
+        self._sess.channel(LATEST_TEMPORAL).set(all_events)
 
         if all_alarms:
             for a in all_alarms:
@@ -127,7 +128,7 @@ class ClientTemporalActor:
 
     def _persist_alarms(self, alarms: List[Alarm]) -> None:
         # 过闸 + 落库编排归 alarm_sink（别名已烧进 alarm.stage）
-        alarm_sink.persist_alarms(alarms, cq=self._cq, mode=ALARM_MODE_REALTIME)
+        alarm_sink.persist_alarms(alarms, sess=self._sess, mode=ALARM_MODE_REALTIME)
 
     def _collect_settlement_alarms(self) -> List[Alarm]:
         alarms: List[Alarm] = []

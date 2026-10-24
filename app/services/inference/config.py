@@ -36,8 +36,10 @@ class StageConfig:
         self.detectors: List[Dict[str, Any]] = config_dict.get("detectors") or []
         # 流算子：rule 条目（name/subscribes/class/params/realtime），一条规则一个 Operator
         self.rules: List[Dict[str, Any]] = config_dict.get("rules") or []
-        # 离线段（segmenter）占位，本次不实现
+        # 离线段（segmenter）：class + params
         self.offline: Dict[str, Any] = config_dict.get("offline") or {}
+        # 离线规则判定（offline/compliance）：evidence / groups / rules，原样交给 compliance.config.parse_config
+        self.compliance: Dict[str, Any] = config_dict.get("compliance") or {}
 
     def __repr__(self):
         return (

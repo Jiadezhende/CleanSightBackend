@@ -1,10 +1,12 @@
-"""离线段 (offline) —— 全序列动作分割。
+"""离线段 (offline) —— run 结束后对整段检测序列做的两件事，分两个子模块，互不 import：
 
-调用方显式给出 `(task_id, step_id)`，从 `app.storage.inference` 读取完整检测序列
-（`FrameDetection`），经 stage 配置实例化 `OfflineSegmenter` 产出 `TemporalSegment`，幂等写回 temporal.jsonl。
+    segmentation/   动作分割   detections.jsonl → OfflineSegmenter → temporal.jsonl + label_probs.npz
+    compliance/     规则判定   label_probs.npz + detections.jsonl → 规则表 → alarms.jsonl
 
-离线链路只识别稳定存储键 `(task_id, step_id)`，不接 client/CQ/在线 Operator/告警；
-独立进程跑（见 cli.py）。策略实现全部收在 `offline/impl/`。
+    service / instance   离线作业服务（排队、起子进程、状态）
+    cli                  子进程入口：run = 分割后接判定，check = 只重跑判定
 
-纯包标记，不做 re-export——消费方按需走深路径导入（`.runner` / `.segmenter`）。
+调用方显式给出 `(task_id, step_id)`，离线链路只识别这对稳定存储键；不接 client/CQ/在线 Operator/alarm 服务。
+
+纯包标记，不做 re-export——消费方走深路径（`.segmentation.runner` / `.compliance.checker`）。
 """

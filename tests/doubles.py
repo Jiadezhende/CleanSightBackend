@@ -22,7 +22,7 @@ import numpy as np
 from app.types.detection import DetBox, DetectorOutput, FrameDetection
 from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
 from app.types.temporal import TemporalSegment
-from app.services.inference.offline.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
 from app.services.inference.online.detection.detector import Detector
 
 _MOCK_CLASS_ID = 0
@@ -197,9 +197,10 @@ class FakeLauncher:
         return proc
 
 
-def offline_result(status="completed", producer="P", segment_count=3, message=""):
+def offline_result(status="completed", producer="P", segment_count=3, message="", alarm_count=None):
     """CLI stdout 末行的结果 JSON。"""
-    return {"status": status, "producer": producer, "segment_count": segment_count, "message": message}
+    return {"status": status, "producer": producer, "segment_count": segment_count, "alarm_count": alarm_count,
+            "message": message}
 
 
 # ---------------------------------------------------------------------------

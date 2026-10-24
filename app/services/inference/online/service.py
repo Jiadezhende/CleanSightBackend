@@ -4,12 +4,12 @@
 1. 推理与可视化解耦：推理线程只负责推理，可视化独立定时拉取
 2. 时序分析独立：ClientTemporalActor 持有 Operator 流算子（per-client），2Hz tick
 3. 三池独立时钟：推理、时序分析、可视化各自独立节奏，不通过队列串联
-4. 双写 + 原子快照：推理结果同时写入 slide_window（历史）和 latest_detection（最新快照）
+4. 双写 + 原子快照：推理结果同时写入 DETECTION_WINDOW（历史）和 LATEST_DETECTION（最新快照）
 
-数据流：
-InferenceLoop → cq.push_detection() + cq.set_latest_detection()  [双写]
-TemporalActor (2Hz)  → cq.get_slide_window() → operator.analyze() → operator.judge() → cq.set_latest_temporal()
-VisualizationWorker (~15Hz) → cq.get_latest_detection() + get_latest_frame() + get_latest_temporal() → render → cq
+数据流（topic 声明见 topics.py）：
+InferenceLoop → DETECTION_WINDOW + LATEST_DETECTION  [双写]
+TemporalActor (2Hz)  → DETECTION_WINDOW → operator.analyze() → operator.judge() → LATEST_TEMPORAL
+VisualizationWorker (~15Hz) → LATEST_DETECTION + LATEST_RAW + LATEST_TEMPORAL → render → PROCESSED + RENDERED
 """
 
 import logging
@@ -17,11 +17,13 @@ import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.types.alarm import ALARM_MODE_SETTLEMENT, Alarm
-from app.services.client.instance import client_service
-from app.services.client.queues import ClientQueues
+from app.services.session.core import Session
+from app.services.session.instance import session_service
+from app.services.session.topics import queue_depths
 from app.types.exceptions import ValidationError
 from .temporal import alarm_sink
 from .temporal.actor import ClientTemporalActor
+from .topics import DETECTION_WINDOW
 
 # 两个只在 `_build_components()` 里实例化的重组件走 TYPE_CHECKING + 函数体内导入
 # （规范 §2 通路 2）：`visualization.visualization_worker` → visualizer 顶层 `import cv2`，
@@ -41,7 +43,7 @@ class InferenceService:
     - ClientTemporalActor（时序分析，2 Hz，per-client）
     - VisualizationWorkerPool（可视化，轮询 raw_fps~30 Hz 过采样，出帧随 inference_fps~15 FPS 去重）
 
-    三池通过 ClientQueues 上的原子槽位通信，不通过队列串联。
+    三池通过各 run 的 session topic 通信，不通过队列串联。
     """
 
     def __init__(self):
@@ -87,15 +89,21 @@ class InferenceService:
         # 比 ts，~µs 级，不增推理量）。raw_fps 是已有的跨模块真源，无需新旋钮。
         # 注：HLS processed 打标另由 eff_fps 从 ts 反推、模型输入另由 model_input_fps 契约重采样，均不借本值。
         from .visualization.visualization_worker import VisualizationWorkerPool
+        from app.services.session.config import get_client_config
 
+        frame_cfg = get_client_config().frame
         self.visualization_pool = VisualizationWorkerPool(
             target_fps=settings.raw_fps,          # 轮询率：源视频帧率，对 inference 流 2× 过采样
             output_fps=settings.inference_fps,    # 期望出帧率：吞吐告警判速率亏空的基准（与轮询率解耦）
             stage_configs=None,
+            # 渲染挪进子进程（GIL 争用下单线程渲染撑不住多路），槽位按规划路数留 2 倍余量
+            render_processes=settings.viz_processes,
+            frame_bytes=frame_cfg.resize_width * frame_cfg.resize_height * 3,
+            render_slots=max(32, 2 * settings.capacity_planned_streams),
         )
 
-        # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 cq 的落盘缓冲，由
-        # recording 的 sweeper 拉走写 `cq.run` 的 `inference/detections.jsonl`。本服务
+        # 注：L1 检测结果落盘不在本服务——写回口把 FrameDetection 放进 DETECTIONS，由
+        # recording 的 sweeper 拉走写该 run 的 `inference/detections.jsonl`。本服务
         # 因此不持有任何 store、不管 flush。
         self._model_worker_service = self._create_async_model_worker_service()
 
@@ -190,16 +198,14 @@ class InferenceService:
             f"step_id '{step_id}' 未配置在线检测（无 detector）", field="current_step", value=step_key,
         )
 
-    def start_workflow(self, cq: ClientQueues) -> bool:
+    def start_workflow(self, sess: Session) -> bool:
         """起该 run 的推理 workflow：建并启 actor（存储侧无起始钩子）。
 
-        入参是 RunControlService 已建好并**已注册**（client_service.set）的不可变身份 CQ
-        （一 CQ == 一 run）。调用方已持 lock_for(cq.run.task_id)，与 stop_workflow 互斥；重启路径下
-        RunControlService 先 stop_workflow 拆旧，故此处 _actors 槽已空。CQ 的 set/remove 均归
-        RunControlService（与 stop_run 对称），本方法不再碰注册表。stage 由 cq 派生（构造时经
-        resolve_stage 定死）。
+        入参是 RunControlService 已注册的 session。调用方已持 lock_for(task_id)，与 stop_workflow
+        互斥；重启路径下 RunControlService 先 stop_workflow 拆旧，故此处 _actors 槽已空。
+        stage 取自 session 身份（注册前经 resolve_stage 定死）。
         """
-        task_id = cq.run.task_id
+        task_id = sess.info.run.task_id
         # 防御：残留旧 actor（正常路径 stop_workflow 已 pop，不应命中）——信号停、丢弃、不结算。
         stale = self._actors.pop(task_id, None)
         if stale is not None:
@@ -211,25 +217,21 @@ class InferenceService:
         # 注：起始不碰存储。每次 run 由 `run_control` 分配自己的 run 目录，上一代产物原样保留。
 
         # 按 stage 实例化流算子 Operator + actor（绑定该 CQ）
-        stage = cq.stage
+        stage = sess.info.stage
         stage_cfg = self._get_stage_configs().get(stage, {})
         specs = stage_cfg.get("operator_specs", [])
 
         if specs:
             operators = [cls(**kwargs) for cls, kwargs in specs]
-            # 按感受野配置每条流的缓冲长度：max(底线, 订阅该流的算子最大 window_seconds)。
-            # 算子在 analyze 内自行 _clip 到各自感受野；底线保证 signals_10s 仍见 10s。
-            stream_windows: Dict[str, float] = {}
-            for op in operators:
-                for src in op.subscribes:
-                    stream_windows[src] = max(
-                        stream_windows.get(src, 0.0), op.window_seconds
-                    )
-            cq.set_stream_windows(stream_windows)
+            # 帧窗保留时长放宽到算子最大感受野（底线 10s 在 topic 声明里）；
+            # 算子在 analyze 内自行 _clip 到各自感受野。
+            sess.channel(DETECTION_WINDOW).extend_span(
+                max(op.window_seconds for op in operators)
+            )
 
             actor = ClientTemporalActor(
                 task_id=task_id,
-                cq=cq,
+                sess=sess,
                 stage=stage,
                 operators=operators,
             )
@@ -247,15 +249,15 @@ class InferenceService:
 
         return True
 
-    def stop_workflow(self, cq: ClientQueues) -> List[Alarm]:
+    def stop_workflow(self, sess: Session) -> List[Alarm]:
         """停该 run 的推理 workflow：停 actor（收结算），返回 settlement 列表。
 
         单一 per-run 拆除口——一把停掉本 run 的全部 inference 自有组件，**不持久化**（settlement
         交给 RunControlService 转 AlarmService；HLS 残段 / 剩余检测结果归 recording，告警落库归
         alarm，前端槽清零亦由 RunControlService 做）。调用方（RunControlService.stop_run）已持
-        lock_for(cq.run.task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
+        lock_for(task_id)，与 start_workflow 互斥。无 actor 返 []；别名已由 actor 烧进 alarm.stage。
         """
-        task_id = cq.run.task_id
+        task_id = sess.info.run.task_id
         logger.info("[InferenceService] Stopping workflow: task=%s", task_id)
 
         settlement: List[Alarm] = []
@@ -268,15 +270,15 @@ class InferenceService:
                     "[InferenceService] finalize actor failed for task=%s: %s", task_id, e
                 )
 
-        # 注：这里**不收尾检测结果**。cq 落盘缓冲里剩下的那点由 RunControlService 紧接着调的
-        # `recording.flush_residual(cq)` 一并交出（它在本方法之后、cq.close() 之前）。
+        # 注：这里**不收尾检测结果**。DETECTIONS 里剩下的那点由 RunControlService 紧接着调的
+        # `recording.flush_residual(sess)` 一并交出（它在本方法之后、session close 之前）。
         logger.info("[InferenceService] Workflow stopped: task=%s", task_id)
         return settlement
 
     def status(self) -> Dict[str, Any]:
-        clients = client_service.snapshot()
-        stats = {task_id: cq.get_queue_depths() for task_id, cq in clients.items()}
-        return {"clients": len(clients), "queues": stats}
+        sessions = session_service.snapshot()
+        stats = {task_id: queue_depths(sess) for task_id, sess in sessions.items()}
+        return {"clients": len(sessions), "queues": stats}
 
     # ========== 启动/停止 ==========
 
@@ -325,10 +327,10 @@ class InferenceService:
             try:
                 settlement = actor.finalize_and_stop()
                 if settlement:
-                    cq = client_service.get(task_id)
-                    if cq:
+                    sess = session_service.get(task_id)
+                    if sess:
                         alarm_sink.persist_alarms(
-                            settlement, cq=cq, mode=ALARM_MODE_SETTLEMENT
+                            settlement, sess=sess, mode=ALARM_MODE_SETTLEMENT
                         )
             except Exception as e:
                 logger.warning(

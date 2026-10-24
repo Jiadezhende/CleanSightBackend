@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.db import tasks as db_tasks
 from app.main import app
-from factories import make_cq, make_run, seed_hls_segments
+from factories import make_session, make_run, seed_hls_segments
 from app.storage import runs
 
 
@@ -40,9 +40,9 @@ def _install_registry(monkeypatch, cqs):
     """替换活跃注册表快照（决定 /live 出什么、/history 排除谁）。"""
     from app.routers import task as task_router
 
-    runs = {cq.run.task_id: cq for cq in cqs}
+    runs = {s.info.run.task_id: s for s in cqs}
     monkeypatch.setattr(
-        task_router.client_service, "snapshot", lambda: runs, raising=True
+        task_router.session_service, "snapshot", lambda: runs, raising=True
     )
 
 
@@ -81,8 +81,8 @@ class TestLiveList:
         _install_registry(
             monkeypatch,
             [
-                make_cq(task_id=202, step_id=1, run_id=7, source_ip="10.0.0.2"),
-                make_cq(task_id=101, step_id=2, run_id=9, source_ip="10.0.0.1"),
+                make_session(task_id=202, step_id=1, run_id=7, source_ip="10.0.0.2"),
+                make_session(task_id=101, step_id=2, run_id=9, source_ip="10.0.0.1"),
             ],
         )
 
@@ -162,7 +162,7 @@ class TestHistoryList:
         """磁盘有段但还在跑 → 不算历史（本次「已完成」判定的核心）。"""
         _write_segments(101, 1, ts_ms=1_000)
         _write_segments(202, 1, ts_ms=2_000)
-        _install_registry(monkeypatch, [make_cq(task_id=202, step_id=1)])
+        _install_registry(monkeypatch, [make_session(task_id=202, step_id=1)])
         _install_db(monkeypatch, [])
 
         payload = (await _get("/task/history")).json()

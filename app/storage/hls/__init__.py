@@ -9,7 +9,7 @@
 `run` 是 `RunIdentity`（来自 `app.storage.runs`），读写口都只收它。
 
 对外**两个动作 + 一组定位/枚举函数**。调用方交出内存里的 `Frame` 序列，拿回这段的身份键；
-cv2 编码、ffmpeg 转 fMP4、tfdt 修补、sidecar、init、playlist 六件事全在域内，一件都
+ffmpeg 编码 fMP4、tfdt 修补、sidecar、init、playlist 五件事全在域内，一件都
 不出现在签名上。`read_segment` / `iter_frames` 是
 读向的对称件：给身份键或墙钟区间，拿回带原始 ts 的 `Frame`，**只服务 raw 轨**
 （processed 不落 sidecar）。
@@ -54,7 +54,7 @@ detection 不在本域落盘——它由 `inference` 域按帧 ts 单源写入�
 
 段的编码帧率由帧 ts 反推（`(N-1)/span`），它同时决定三个值，**必须同源**：
 
-    编码帧率   cv2.VideoWriter 按它写 N 帧 → 媒体时长 = N/fps
+    编码帧率   ffmpeg -framerate 按它编 N 帧 → 媒体时长 = N/fps
     EXTINF     清单里声明的段时长，= N/fps
     tfdt       该段在媒体轴上的落点，= 此前所有 EXTINF 之和 × 90000
 
@@ -64,7 +64,7 @@ detection 不在本域落盘——它由 `inference` 域按帧 ts 单源写入�
 ## 边界
 
 **进本域**：文件名、目录布局、m3u8 文本、fMP4 字节、`.idx` 二进制、编解码，以及为编解码起
-cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、谁来调、并发几个。
+ffmpeg。**不进**：切多长一段、失败重试几次、留多久、谁来调、并发几个。
 
 **并发**：本域不持锁。同一 `(run, track)` 的写必须串行——由调用侧的 `SerialTaskQueue` 构造，失效表现见 `_write` 的「并发」一节。
 
@@ -76,9 +76,9 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
     types.py     本域的资源容器：SegmentRef / Segment / HlsSpan
                  （stdlib only、不 import 同包任何模块 —— 它是子包的底）
     _layout.py   域根 / 文件名 / 轨道白名单 / stage 目录（域名在此只出现一次；不枚举目录）
-    _encode.py   帧序列 → mp4v，以及 eff_fps 反推（cv2 在函数体内 import）
+    _encode.py   eff_fps 反推与媒体时长
     _decode.py   段 → 帧序列（ffmpeg），帧号 ↔ sidecar 下标对齐，帧级裁剪
-    _fmp4.py     mp4v → fMP4 fragment + init（ffmpeg），tfdt hex-patch
+    _fmp4.py     帧序列经 stdin → fMP4 fragment + init（ffmpeg），tfdt hex-patch
     _m3u8.py     LIVE 清单文本：写侧（头 / 条目 / 累计）+ 读侧（逐段 EXTINF）
     _idx.py      sidecar 的 float64 布局
     _write.py    写侧对外动作：insert_segment（stage → adjust → commit）
@@ -87,7 +87,7 @@ cv2 / ffmpeg。**不进**：切多长一段、失败重试几次、留多久、�
 
 本文件是 **facade**（re-export 域的公开面）：调用方分不出 `hls` 是包还是模块。代价是
 re-export 会连带加载上面这些实现模块，故它们的**模块级必须保持 stdlib + `app.types`**，
-重依赖（cv2）一律函数体内 import，导入预算才守得住。
+重依赖（cv2）不进本域模块级，导入预算才守得住。
 
 规范见 `docs/kb/DESIGN_STORAGE_LAYER.md`。
 """

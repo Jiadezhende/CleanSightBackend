@@ -34,7 +34,7 @@
 data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 ```
 
-编码链：`app.types` `Frame` → `cv2.imencode(".jpg", ...)` → base64 → 前缀 `data:image/jpeg;base64,`（ai.py:149-152）。可直接作 `<img src>`。
+编码链：`app.types` `Frame` → `cv2.imencode(".jpg", ...)`（质量 `_WS_JPEG_QUALITY=75`）→ base64 → 前缀 `data:image/jpeg;base64,`。可直接作 `<img src>`。640×480 下每帧约 55KB，15fps 约 6.4Mbps。本通道画质只用于实时观看，录像与送标走各自的 libx264 编码，不受影响。
 
 **② 控制帧** —— 仅一种：
 
@@ -136,7 +136,7 @@ HLS 时间轴与 `temporal.jsonl` 取自同一个 run，不会出现新录像配
       "start_media_ms": 12040,
       "end_media_ms": 15880,
       "conf": 0.912,
-      "producer": "CleanMSTCNBiLSTMSegmenter"
+      "producer": "CleanMSTCN2RoleEmbedSegmenter"
     }
   ]
 }

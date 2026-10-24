@@ -15,4 +15,4 @@ alarm:
   queue_size: 200                 # 告警队列最大长度
 
   # 注意：告警上报重试写死在 app/services/alarm/alarm_worker.py（3次，指数退避）
-  # 注意：告警降频由 ClientQueues.try_pass_alarm_gate 统一控制（5s 固定冷却窗口）
+  # 注意：告警降频由每 run 的告警账本统一控制（alarm_sink → AlarmLedger.record，5s 固定冷却窗口）

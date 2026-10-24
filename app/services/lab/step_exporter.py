@@ -106,8 +106,8 @@ class StepExporter:
         self._sweep_orphans()
 
         # 一次读清单同时回答"有哪些段"与"各自多长"：EXTINF 是时长唯一真值（不能用文件名
-        # ts 差重推），而清单本身就是段集合——没有条目的段是在途段（mp4v 已落、
-        # transcode+append 未完成）或登记失败的段，喂给 ffmpeg 会静默截短。
+        # ts 差重推），而清单本身就是段集合——没有条目的段是在途段（编码 +
+        # 登记未完成）或登记失败的段，喂给 ffmpeg 会静默截短。
         task_id, step_id = run.task_id, run.step_id
         segments = hls.list_segments(run, track)
         if not segments:
@@ -120,7 +120,7 @@ class StepExporter:
 
         init_path = hls.init_path(run, track)
         if not init_path.exists():
-            # 与 traceback._build_vod_playlist 同一判据：缺 init = 首段仍在 transcode。
+            # 与 traceback._build_vod_playlist 同一判据：缺 init = 首段仍在编码。
             raise StepExportInitMissing(
                 f"{hls.init_name(track)} not found for task {task_id} step {step_id}. "
                 "The first segment is still transcoding; it cannot be exported yet."

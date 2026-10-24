@@ -8,7 +8,6 @@ decoder:
   # default_fps 不在此设置：解码 CFR = 生产者源，单一真源 settings.raw_fps（env CLEANSIGHT_RAW_FPS）。
   # 在此写死会重造第二个独立 fps 源、与 settings 漂移。
   pix_fmt: "bgr24"
-  chunk_read_size: 32768     # 每次读取字节数
 
   # 背压控制
   backpressure_ratio: 0.90   # 队列达到90%时丢帧

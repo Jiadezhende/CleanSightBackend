@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -15,11 +15,11 @@ decoder → cq.ca_ready → StageAwareDispatcher → 推理子进程：各 Detec
       │                          ├─ overlay 文案 → 可视化叠字
       │                          └─ 实时告警 → alarm_sink（5s 闸）→ alarm_service 上报
       ├─ 最新快照 → VisualizationWorker 渲染 → _latest_rendered（/ai/video WS）+ ca_processed（HLS processed 轨）
-      └─ 落盘缓冲 → recording → detections.jsonl → 离线 OfflineSegmenter → temporal.jsonl
+      └─ 落盘缓冲 → recording → detections.jsonl → 离线 OfflineSegmenter（可另读 raw 录像）→ temporal.jsonl
 run 拆除（stop_run）→ Operator.finalize → 结算告警 → alarm_sink
 ```
 
-GPU 只做无状态的逐帧检测；跟踪、状态机、告警判定都在主进程 CPU 上。
+在线 GPU 只做无状态的逐帧检测；跟踪、状态机、告警判定都在主进程 CPU 上。离线作业可以用同一张卡（如逐手部裁剪的骨干嵌入），但必须由策略自带限速，给在线检测让出算力。
 
 ## 逐帧前向归 Detector，跨帧状态归 Operator
 
@@ -57,7 +57,7 @@ GPU 只做无状态的逐帧检测；跟踪、状态机、告警判定都在主�
 ## 在线还是离线：看模型是否因果
 
 - 在线 `TemporalOperator` 只能用因果模型（只看过去帧），每 tick 基于有限窗口出结果。需要未来帧或整段特征的模型（双向 RNN、MS-TCN、整段归一化特征）走离线 `OfflineSegmenter`。
-- 离线只产分段事实与概率旁路，不判合规、不产告警；在线不写 `temporal.jsonl`。两条链只共用 `FrameDetection` 这一种输入。
+- 离线只产分段事实与概率旁路，不判合规、不产告警；在线不写 `temporal.jsonl`。两条链共用的契约输入是 `FrameDetection`；要像素的离线策略另经 `OfflineContext` 取同一 run 的 raw 录像（帧 ts 与 detections 位级相等），不取 processed 轨（那是渲染结果）。
 - **入模帧率是模型契约**，与检测帧率解耦：`model_input_fps` 必须等于训练帧率，入模前按帧 ts 重采样。重采样只能降采样；配错不崩、静默误分类，所以必须显式配置并在构造期校验。
 
 ## 配置错误在边界失败，不降级

@@ -15,7 +15,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.db import tasks as db_tasks
-from app.services.client.instance import client_service
+from app.services.session.instance import session_service
 from app.services.run_control.instance import run_control_service
 from app.types.exceptions import NotFoundError, ValidationError
 
@@ -87,7 +87,7 @@ async def terminate(
 ):
     """统一终止（双模，task_id 优先）。
 
-    - body `{ task_id }`（新，首选）→ `client_service.get(task_id)` 直查运行键，与 start 对称。
+    - body `{ task_id }`（新，首选）→ `session_service.get(task_id)` 直查运行键，与 start 对称。
     - query `?client_id=`（老，即 source_ip）→ `find_by_source_ip` 扫描回当前 run，兼容期保留。
     两者皆缺 → ValidationError。查不到 run（已停/从未起）→ success no-op
     （对齐运行时 client_not_found 语义）。
@@ -95,32 +95,33 @@ async def terminate(
     task_id = body.task_id if body else None
     if task_id is not None:
         logger.info(f"[terminate] Terminating by task_id: {task_id}")
-        cq = client_service.get(task_id)
+        sess = session_service.get(task_id)
         no_op_id = {"task_id": task_id}
     elif client_id:
         logger.info(f"[terminate] Terminating by source_ip: {client_id}")
-        cq = client_service.find_by_source_ip(client_id)
+        sess = session_service.find_by_source_ip(client_id)
         no_op_id = {"client_id": client_id}
     else:
         raise ValidationError(
             message="task_id or client_id required", field="task_id", value=None
         )
 
-    if cq is None:
+    if sess is None:
         logger.info(f"[terminate] No active run for {no_op_id}, no-op")
         return {"status": "success", **no_op_id, "message": "no active run"}
 
+    run_task_id = sess.info.run.task_id
     result = await asyncio.to_thread(
-        run_control_service.stop_run, cq.run.task_id, "API termination request"
+        run_control_service.stop_run, run_task_id, "API termination request"
     )
 
     if result["errors"]:
         result["status"] = "partial_success"
         logger.warning(
-            f"[terminate] Completed with errors: task={cq.run.task_id} - {result['errors']}"
+            f"[terminate] Completed with errors: task={run_task_id} - {result['errors']}"
         )
     else:
         result["status"] = "success"
-        logger.info(f"[terminate] Terminated successfully: task={cq.run.task_id}")
+        logger.info(f"[terminate] Terminated successfully: task={run_task_id}")
 
     return result

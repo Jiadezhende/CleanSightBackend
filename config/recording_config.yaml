@@ -7,4 +7,5 @@
 #       自适应反推，此处不配任何时长或帧率——配了也是死值，且会误导。
 
 queue_size: 100          # 队列排队上限；满了丢这一段并告警
+queue_max_mb: 8192       # HLS 段队列在途字节上限（MB）；超了丢这一段并告警。≈15 路 raw+processed 各一段的突发量
 sweep_interval_seconds: 1.0   # 从活跃 CQ 拉走已攒满整段的扫描间隔（秒）

@@ -42,7 +42,7 @@ class _Clients:
 def env(fast_task_queue):
     launcher = FakeLauncher()
     clients = _Clients()
-    svc = OfflineJobService(config=_CFG, launcher=launcher, clients=clients, poll_s=0.02)
+    svc = OfflineJobService(config=_CFG, launcher=launcher, sessions=clients, poll_s=0.02)
     svc.start()
     yield SimpleNamespace(svc=svc, launcher=launcher, clients=clients)
     svc.stop(timeout=5.0)
@@ -66,14 +66,15 @@ class TestSerial:
         assert len(env.launcher.procs) == 1
         assert (_status(env, 1, 2), _status(env, 1, 3)) == ("running", "queued")
 
-        first.finish(0, offline_result())
+        first.finish(0, offline_result(alarm_count=2))
         second = _wait_launched(env, 2)
         assert "--step-id" in second.cmd and second.cmd[second.cmd.index("--step-id") + 1] == "3"
         second.finish(0, offline_result(segment_count=0))
         wait_until(lambda: _status(env, 1, 3) == "completed")
 
         job = env.svc.get(_r(1, 2))
-        assert (job.status, job.producer, job.segment_count) == ("completed", "P", 3)
+        assert (job.status, job.producer, job.segment_count, job.alarm_count) == ("completed", "P", 3, 2)
+        assert env.svc.get(_r(1, 3)).alarm_count is None
         assert job.started_at is not None and job.finished_at is not None
 
     def test_command_is_cli_run(self, env):
@@ -94,14 +95,14 @@ class TestSerial:
 class TestSubmit:
     def test_running_run_is_409(self, env):
         """该 run 就是注册表里正在跑的那个：输入还在写，拒收且不留作业记录。"""
-        env.clients.registry[1] = SimpleNamespace(run=_r(1, 2))
+        env.clients.registry[1] = SimpleNamespace(info=SimpleNamespace(run=_r(1, 2)))
         with pytest.raises(ConflictError, match="正在运行"):
             env.svc.submit(_r(1, 2))
         assert env.svc.get(_r(1, 2)) is None
         assert env.launcher.procs == []
 
     def test_older_run_of_a_running_step_is_accepted(self, env):
-        env.clients.registry[1] = SimpleNamespace(run=_r(1, 2, run_id=2))
+        env.clients.registry[1] = SimpleNamespace(info=SimpleNamespace(run=_r(1, 2, run_id=2)))
         assert env.svc.submit(_r(1, 2, run_id=1)).status == "queued"
 
     def test_different_runs_of_one_step_are_separate_jobs(self, env):

@@ -1,6 +1,6 @@
 # 物料：源机分发与 build.sh 重建
 
-三类物料、三条来源，每条只有一个出口：
+三类物料、三条来源，每条只有一个出口。**模型权重不在此列**：用户从魔搭手动下载，见 [runtime-config.md](runtime-config.md)「模型权重」。
 
 ```text
 构建机 ./build.sh（开头配置块：上游 URL + TORCH_PKGS）

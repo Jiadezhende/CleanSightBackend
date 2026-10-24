@@ -8,7 +8,7 @@
 
 ## 段内帧号 = sidecar 下标
 
-写侧逐帧写 ts、cv2 按 N 帧写出 N 帧，两者 1:1。读侧要维持它，解码命令**三处不能动**：
+写侧逐帧写 ts、ffmpeg 按 N 帧编出 N 帧，两者 1:1。读侧要维持它，解码命令**三处不能动**：
 
     concat:{raw_init.mp4}|{raw_segment_*.mp4}   拼 init 才解得开 fragment
     -vf select=between(n,k1,k2)                 按**帧号**选，不是按时间
@@ -92,7 +92,7 @@ def _build_cmd(
     四处不能动：`concat:` 拼 init、`select` 按帧号、**没有 `-ss`**（前三条见模块 docstring）、
     `select` 排在 `scale` 之前（反过来会把注定丢弃的帧也缩放一遍）。
     """
-    from app.settings import settings  # 同 `_fmp4.transcode`
+    from app.settings import settings  # 同 `_fmp4.encode`
 
     init = _layout.init_path(run, _RAW_TRACK)
     segment = _layout.segment_path(run, ref)

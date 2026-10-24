@@ -68,11 +68,13 @@ BUDGET = {
     "app.storage.inference._jsonl":     (set(), 0.40),   # stdlib only
     "app.storage.inference._layout":    (set(), 0.40),   # stdlib only
     "app.storage.inference._temporal":  (set(), 0.40),   # numpy（LabelProbs / npz）
+    "app.storage.inference._cache":     (set(), 0.40),   # numpy（npz）
+    "app.storage.inference._alarm":     (set(), 0.40),   # stdlib + app.types.alarm
     # hls 是子包，facade `__init__` 会连带加载下面每个实现模块 —— 所以 `app.storage.hls`
-    # 这条盯的是**整个域**的模块级依赖。cv2 必须留在 `_encode.write_mp4v` 的函数体内，
-    # 塞回模块级会让这条连同 `app.storage.hls._encode` 一起红。
+    # 这条盯的是**整个域**的模块级依赖。写侧编码走 ffmpeg 子进程（`_fmp4.encode`），不用 cv2；
+    # 谁把 cv2 塞回模块级，这条会连同 `app.storage.hls._encode` 一起红。
     "app.storage.hls":          (set(), 0.40),   # 域货币 Frame → app.types（numpy）
-    "app.storage.hls._encode":  (set(), 0.40),   # 同上；cv2 在函数体内
+    "app.storage.hls._encode":  (set(), 0.40),   # 同上
     # 解码侧：货币是 Frame + sidecar 的 float64 数组，故吃 app.types + numpy。ffmpeg 是
     # **运行时**依赖（D5），import 时不该出现任何重依赖 —— 尤其不该有 cv2：解码走 ffmpeg
     # 管道，一旦有人图省事换成 cv2.VideoCapture，这条会连同 `app.storage.hls` 一起红。
@@ -109,6 +111,9 @@ BUDGET = {
     "app.services.utils.task_queue":   (set(), 0.20),   # stdlib only
     "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
     "app.services.utils.pressure":     (set(), 0.20),   # stdlib only
+    "app.services.utils.memory_budget": (set(), 0.20),  # stdlib only
+    "app.services.utils.startup_latency": (set(), 0.20),  # stdlib only
+    "app.services.utils.frame_ring":    (set(), 0.40),  # numpy + multiprocessing.shared_memory
     "app.services.utils.metrics":      (set(), 0.40),   # prometheus_client（实测 ~0.09s）
     # 算法服务。cv2 在 grader.py 里一律函数体内 import（规范 §2 通路 2）——它经 `service`
     # 被 `routers/algorithm.py` 模块级 import，挪回顶层会让这条连同 `app.main` 一起红。
@@ -121,14 +126,33 @@ BUDGET = {
     "app.services.algorithm.colorstrip.grader": (set(), 0.60),   # numpy
     "app.services.algorithm.colorstrip.cli":    (set(), 0.60),   # 同上；argparse 不加码
     "app.services.lab.service":  (set(), 0.60),   # routers/lab 模块级 import 它；经 clip_builder 拽 hls（numpy），实测 ~0.17s
-    "app.services.client":      (set(), 1.0),
+    # session（LAYER_PACKAGES 白名单包，逐模块登记）：channels 经 utils.metrics 拉起 prometheus_client，
+    # config 吃 yaml，别的只有 stdlib + app.types
+    "app.services.session":               (set(), 0.20),   # 标记型 __init__
+    "app.services.session.core":          (set(), 0.40),
+    "app.services.session.core.channels": (set(), 0.40),
+    "app.services.session.core.session":  (set(), 0.40),
+    "app.services.session.service":       (set(), 0.40),
+    "app.services.session.instance":      (set(), 0.40),
+    "app.services.session.topics":        (set(), 0.40),
+    "app.services.session.config":        (set(), 0.40),
     "app.services.inference":   (set(), 1.0),
     # online / offline 两个子包的 `__init__` 都是标记型：import 子包不该拉起任何一段链路。
     "app.services.inference.online":  (set(), 1.0),
+    # 渲染子进程的 import 链：只许 cv2（+ PIL），拉起 torch 就是每个渲染子进程几百 MB 常驻
+    "app.services.inference.online.visualization.render_child": (set(), 0.40),
+    "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
-    # 离线 CLI 是独立进程入口：`_isolate_cpu()` 必须先于任何 torch import，故模块级不许有
+    "app.services.inference.offline.segmentation": (set(), 1.0),
+    # 离线 CLI 是独立进程入口：`_isolate()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
+    # 规则判定（LAYER_PACKAGES 白名单包，逐模块登记）：numpy + storage，不许 torch
+    "app.services.inference.offline.compliance":          (set(), 0.50),
+    "app.services.inference.offline.compliance.config":   (set(), 0.50),
+    "app.services.inference.offline.compliance.evidence": (set(), 0.50),
+    "app.services.inference.offline.compliance.rules":    (set(), 0.50),
+    "app.services.inference.offline.compliance.checker":  (set(), 0.50),
     "app.services.alarm":       (set(), 1.0),
     # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
     "app.daemons":              (set(), 0.20),
@@ -183,10 +207,25 @@ LAYER_PACKAGES = {
     "app/services/utils": (
         "app.services.utils", "app.storage", "app.types", "app.settings",
     ),
+    # 离线规则判定：只读盘上的离线产物做判定，与同级的 offline/segmentation 互不 import（分割侧见
+    # test_offline_segmentation_does_not_import_compliance），只由 offline/cli.py 串起来；
+    # 规则表由 cli 从 stage 配置取出、以 dict 传入，故连 inference.config 都不许碰。
+    "app/services/inference/offline/compliance": (
+        "app.services.inference.offline.compliance", "app.storage", "app.types",
+    ),
+    # session：run 注册表 + 进程内 mq，所有 service 的共同下游。只许向下依赖工具与契约——
+    # import 任何 service 就成了 service → service 依赖的后门，也背上了业务名词。
+    "app/services/session": (
+        "app.services.session", "app.services.utils", "app.types", "app.settings",
+    ),
+    # session 基建（Session / Topic / 三种语义）再严一档：不认识 topic 声明与配置，连 settings 都不碰。
+    "app/services/session/core": (
+        "app.services.session.core", "app.services.utils", "app.types",
+    ),
 }
 
-# 服务单例 → 定义它的模块。client_service **不在此列**：它是零跨服务依赖的中台 leaf，
-# 谁都可以向下依赖它（见 docs/kb 的 client 中台约定），限制它的引用面没有意义。
+# 服务单例 → 定义它的模块。session_service **不在此列**：它是零跨服务依赖的中台 leaf
+# （由 LAYER_PACKAGES 白名单守），谁都可以向下依赖它，限制它的引用面没有意义。
 SINGLETONS = {
     "stream_service": "app.services.stream.instance",
     "inference_service": "app.services.inference.online.instance",
@@ -201,11 +240,10 @@ SINGLETONS = {
 # 允许 import 单例的文件（相对 REPO_ROOT）。前三类由规则表达（见 _is_allowed_importer），
 # 这里只列**具名例外**——每条都得有理由，加新的先想清楚为什么不能走 run_control。
 SINGLETON_EXCEPTIONS = {
-    # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态并发起重连/清理，
-    # 天然要持四个协作者（client / stream / inference / recording，recording 那个只用来在断流
-    # 时登记一次残帧 flush），四处 import 均写在 `HealthMonitorWorker._resolve_deps()` 函数体内；
-    # 另有 `cleanup_client()` 函数体内一处 run_control_service，是反向指回编排中枢做拆除。
-    # 均不在模块级。
+    # 健康监控是与 run_control 并列的自动化协调者：它按秒轮询各服务状态做决策，
+    # 天然要持五个协作者（session / stream / inference / recording，recording 那个只用来在断流
+    # 时 flush 残帧；外加 run_control，生命周期写一律经它执行），import 均写在
+    # `HealthMonitorWorker._resolve_deps()` 函数体内，不在模块级。
     "app/daemons/health_monitor/worker.py",
     # 告警落库 sink：inference 产告警 → alarm 服务上报。跨服务但方向正确（下游依赖），
     # 且 sink 就是为这条方向存在的唯一窄接口。
@@ -288,8 +326,9 @@ def test_layer_package_modules_are_all_budgeted(package):
 
 
 def _iter_app_py_files():
+    # app/data 是推理物料目录（权重、模型骨干自带的第三方代码），不是本仓源码
     for path in sorted(APP_DIR.rglob("*.py")):
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or path.is_relative_to(APP_DIR / "data"):
             continue
         yield path
 
@@ -387,6 +426,59 @@ def test_layer_package_imports_only_whitelisted_app_modules(package):
     )
 
 
+# 离线策略实现：每个策略一个包（或单文件模块），只许依赖框架契约；兄弟策略之间零 import。
+OFFLINE_DIR = APP_DIR / "services" / "inference" / "offline"
+OFFLINE_IMPL_DIR = OFFLINE_DIR / "segmentation" / "impl"
+OFFLINE_IMPL_ALLOWED = (
+    "app.services.inference.offline.segmentation.segmenter",
+    "app.services.inference.resample",
+    "app.types",
+)
+
+
+def _offline_impl_units():
+    for path in sorted(OFFLINE_IMPL_DIR.iterdir()):
+        if path.name.startswith("__"):
+            continue
+        if path.is_dir():
+            yield f"app.services.inference.offline.segmentation.impl.{path.name}", sorted(path.rglob("*.py"))
+        elif path.suffix == ".py":
+            yield f"app.services.inference.offline.segmentation.impl.{path.stem}", [path]
+
+
+@pytest.mark.parametrize("unit,files", list(_offline_impl_units()), ids=lambda v: v if isinstance(v, str) else "")
+def test_offline_impl_imports_only_framework_contract(unit, files):
+    """一个离线策略只许 import 自己与框架契约（`OFFLINE_IMPL_ALLOWED`）。
+
+    历史策略要长期保留做对照：特征 / 后处理随权重冻结，策略间共享一份代码，改一处就会让别的历史模型静默漂移。
+    宁可复制，不许跨包 import；存储、client、其他 service 一律经 Runner 注入的 `OfflineContext`。
+    """
+    def ok(name):
+        return any(name == a or name.startswith(a + ".") for a in (unit, *OFFLINE_IMPL_ALLOWED))
+
+    violations = []
+    for path in files:
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = _abs_module(path, node)
+                if not module.startswith("app.") or ok(module):
+                    continue
+                bad = [f"{module}.{a.name}" for a in node.names if not ok(f"{module}.{a.name}")]
+            elif isinstance(node, ast.Import):
+                bad = [a.name for a in node.names if a.name.startswith("app.") and not ok(a.name)]
+            else:
+                continue
+            violations += [f"{rel}:{node.lineno} → {name}" for name in bad]
+    assert not violations, (
+        f"离线策略 {unit} import 了框架契约以外的 app 模块：\n  " + "\n  ".join(violations)
+        + f"\n允许：自身 + {list(OFFLINE_IMPL_ALLOWED)}。要用别的策略的代码就复制一份进本包。"
+    )
+
+
 def _imports_under(src_dir: Path, forbidden: str) -> list:
     """`src_dir` 下所有 import 了 `forbidden`（含子模块）的位置，相对导入先还原成绝对。"""
     violations = []
@@ -431,6 +523,21 @@ def test_services_do_not_import_daemons():
     violations = _imports_under(APP_DIR / "services", "app.daemons")
     assert not violations, (
         "services 依赖了 daemons：\n  " + "\n  ".join(violations)
+    )
+
+
+def test_offline_impl_units_found():
+    """策略包门禁按目录参数化：目录挪了而这里没跟上，门禁会因零用例静默变绿。"""
+    assert list(_offline_impl_units()), f"{OFFLINE_IMPL_DIR} 下没有找到任何策略包"
+
+
+def test_offline_segmentation_does_not_import_compliance():
+    """离线包里 `segmentation/` 与 `compliance/` 两个功能模块互不 import，只在 `offline/cli.py` 汇合；
+    本条守分割侧，判定侧由 LAYER_PACKAGES 白名单守。"""
+    violations = _imports_under(OFFLINE_DIR / "segmentation", "app.services.inference.offline.compliance")
+    assert not violations, (
+        "离线分割 import 了规则判定：\n  " + "\n  ".join(violations)
+        + "\n两者只在 offline/cli.py 串联；需要的结果请经盘上产物交接。"
     )
 
 

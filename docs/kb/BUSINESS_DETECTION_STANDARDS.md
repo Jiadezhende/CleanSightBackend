@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -68,9 +68,14 @@ birth_rate > birth_rate_threshold 且未锁存 → 告警「持续产生新气�
 
 ### 离线动作分割：手动提交，结果只供回看
 
-默认 `CleanNodepGRUSegmenter`（`clean-offline-gru-nodep.pt`，`model_input_fps: 7.5`、`confidence_override: 1.0`、`min_duration_s: 0.2`）。run 结束后经 admin「运行离线推理」手动提交（自动触发未实现），逐帧分为 6 类（idle / water_injection / flush / long_brush_insert / long_brush_withdraw / short_brush_cleaning），idle 为背景不成段，短于 `min_duration_s` 的段丢弃。结果写 `temporal.jsonl` 与逐帧概率 `label_probs.npz`，不判合规、不产告警、不入库。
+默认 `CleanMSTCN2RoleEmbedSegmenter`（mstcn2-role-embed：检测框 + 手部裁剪过 DINOv2 与手部状态分类器 → 106 维特征 → MS-TCN2，物料目录 `clean-offline-mstcn2-role-embed`）。run 结束后经 admin「运行离线推理」手动提交（自动触发未实现），逐帧分为 6 类（idle / water_injection / flush / long_brush_insert / long_brush_withdraw / short_brush_cleaning），idle 为背景不成段，短于 20 帧（15fps 下 1.33 s）的段并入相邻较长段。结果写 `temporal.jsonl` 与逐帧概率 `label_probs.npz`，不判合规、不产告警、不入库。
 
-可调位置：`stages."2".offline`。换 `class` 须同时换 `params`（备选类 ↔ 权重映射见 YAML 注释）；`model_input_fps` / `confidence_override` 须与训练口径一致（当前取值的训练口径待核验）。
+- **要 raw 录像**：每只手按检测框从 raw 轨裁剪，raw 录像缺任何一帧有手的画面即整次失败（不跳手）；只接受 640×480。
+- **只看前 15 分钟**：`max_duration_s: 900`，从首个检测帧起截断，之后的动作不出分段（超长 step 后段的漏步 / 乱序看不到）；需要时调大或配 `null`。
+- **检测帧率低于 15fps 只告警、照常推理**：模型窗口按 15fps 标定，真实欠采样时结果会偏，需先查在线推理掉帧。
+- 交付包主指标（insert / withdraw 段级 F1@0.25 均值，后处理 pp20）79.8，上一版基准 70.7；上线的是折权重 fold0-seed42（只见过 4/5 训练视频），实际效果可能略低，全量重训版待训练侧交付。
+
+可调位置：`stages."2".offline`。换 `class` 须同时换 `params`，历史策略（`CleanGRUNodepSegmenter` 上一版默认、`CleanMSTCN2BundleSegmenter` 等）可粘贴的 YAML 片段在各策略包 `segmenter.py` 的 docstring；DINOv2 限速 `max_crops_per_s`（默认 150，与在线 YOLO 共卡时让出算力）。策略细节见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)。
 
 ## 试纸比色：独立图片判定，不走 stage 路由
 
@@ -86,7 +91,7 @@ birth_rate > birth_rate_threshold 且未锁存 → 告警「持续产生新气�
 - `app/services/inference/online/service.py`（`resolve_stage`）、`app/services/inference/config.py`（`require_offline`）
 - `app/services/inference/online/detection/impl/{bubble,bending,clean}.py`
 - `app/services/inference/online/temporal/impl/{bubble,bending,clean}.py`
-- `app/services/inference/offline/impl/clean.py`
+- `app/services/inference/offline/impl/clean_mstcn2_role_embed/`（默认离线策略）、`offline/impl/clean_*/`
 - `app/services/inference/stage_factory.py`（`build_task_metric_map`）
 - `app/services/inference/online/temporal/alarm_sink.py`、`app/services/client/queues.py`
 - `app/services/algorithm/colorstrip/{grader.py,params.yaml}`

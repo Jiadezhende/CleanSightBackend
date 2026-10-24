@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -29,15 +29,33 @@ CleanSight Backend 是一个 FastAPI 主进程加若干外部组件的实时视�
 | 数据层 | `app/storage/` | 内存模型 ↔ 盘上字节，见 [DESIGN_STORAGE_LAYER.md](DESIGN_STORAGE_LAYER.md) |
 | 平台 DB | `app/db/` | 只读 ORM + `query_*`；只有 routers 调用 |
 
+主进程之外由后端自己拉起的子进程（均 spawn）：在线推理子进程 1 个（`RemoteInferProxy`）、渲染子进程 `settings.viz_processes` 个（默认 2，`RemoteRenderProxy`；0 = 在 viz 线程内渲染）、离线作业每次一个独立 CLI 进程，另有每 run 一个 ffmpeg 解码进程与每段一个 ffmpeg 编码进程。主进程与推理、渲染子进程之间的帧经共享内存环传递，队列只传槽位号（见 [SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)）。
+
 `services/utils/`、`types/` 等基础包的成员与边界见 [ARCHITECTURE_PACKAGE_LAYERS.md](ARCHITECTURE_PACKAGE_LAYERS.md)。
 
 ## 外部组件
 
 - **MediaMTX + RTSP 网关**：独立进程 `mediamtx_gateway`，只开 RTSP，见 [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)。
-- **FFmpeg**：后端以子进程拉流并解码为 rawvideo；HLS 段转码也用它。
+- **FFmpeg**：后端以子进程拉流并解码为 rawvideo；HLS 段编码也用它（帧以 rawvideo 经 stdin 单次编码成 fMP4）。
 - **Postgres**：只读，经 `app/db/` 访问，映射 `clean_task`（`DBTask`）、`clean_alarm`（`DBAlarm`）。
 - **外部告警接口**：`settings.alarm_report_url`。
 - **Label Studio**：Lab 模块经 HTTP API 上传裁剪视频。
+
+## 启动先过内存自检：按规划路数估最坏帧缓存，超 MemAvailable 拒绝启动
+
+lifespan 起任何服务之前先调 `app/main.py::_check_memory_budget`。按 `capacity_planned_streams`（默认 15）路、单帧 W×H×3 估帧缓存，几种停滞不会同时发生，所以取最大值而不是相加（公式在 `app/services/utils/memory_budget.py`）：
+
+```text
+稳态          normal = N × 2 × segment_len × fb             raw / processed 各攒满一段
+转码停滞      normal + recording queue_max_mb                sweeper 照常拉段，堆在录像队列
+推理停滞      normal + N × ca_ready_maxlen × fb
+sweeper 停滞  N × 2 × ca_maxlen × fb + N × ca_ready_maxlen × fb
+最坏 = max(三种停滞) + memory_baseline_mb（默认 6144，估计值）
+```
+
+- 最坏 > `MemAvailable` → 默认 `RuntimeError` 拒绝启动；`memory_check_enforce=false`（env `CLEANSIGHT_MEMORY_CHECK_ENFORCE`）时只告警。读不到 `MemAvailable`（非 Linux）跳过。日志带分项，调参看它。
+- 只做容量规划，不拦截 `/api/start`（不改对外契约）。
+- 默认参数下 15 路最坏 ≈ 21.8GiB，按 32GB 机器规划；内存更小的测试机须调小规划路数或关 enforce。
 
 ## lifespan 嵌套顺序即依赖：run_control 最内层，停机时先拆 run
 
@@ -71,9 +89,9 @@ algorithm、lab 无活体，不在 lifespan 里。单次 run 的起停不走 lif
 
 ## 代码来源
 
-- `app/main.py`（lifespan 嵌套、`shutdown_event`、`/metrics`）
+- `app/main.py`（lifespan 嵌套、`shutdown_event`、`/metrics`、`_check_memory_budget`）、`app/services/utils/memory_budget.py`
 - `app/services/run_control/{__init__,service}.py`（`lifespan()` / `shutdown()` / `stop_run`）
 - `app/services/inference/__init__.py`、`app/services/inference/online/service.py`（`stop()` Phase 2 兜底）
 - `app/services/{recording,alarm,stream}/__init__.py`、`app/daemons/{cleanup,health_monitor}/__init__.py`
 - `app/db/{database,tasks,alarms}.py`
-- `tests/test_run_control_shutdown.py`
+- `tests/test_run_control_shutdown.py`、`tests/test_memory_budget.py`

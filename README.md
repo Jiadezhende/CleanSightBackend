@@ -31,9 +31,9 @@ app/
 ├── services/
 │   ├── run_control/     # RunControlService — 跨服务起停一次 run 的单一编排出口
 │   ├── utils/           # 服务层通用：串行队列 / 线程自愈 / 压力日志 / Prometheus 指标 / VOD m3u8 / 媒体轴
-│   ├── client/          # ClientService 注册表（int task_id 键）+ ClientQueues（per-run 不可变 + 状态机）
+│   ├── session/         # run 注册表（int task_id 键）+ 每 run 的 Session（身份 / 状态机 / topic）+ 进程内 mq 基建
 │   ├── stream/          # FFmpegDecoder（自持读循环，RTSP-only）+ StreamService
-│   ├── inference/       # 分层推理：detection/ feature/ temporal/ visualization/ offline/（各契约包 impl/ 放业务实现）
+│   ├── inference/       # 推理：online/（detection/ temporal/ visualization/）+ offline/（segmentation/ 动作分割、compliance/ 规则判定）；契约包的业务实现放 impl/
 │   ├── recording/       # HLS 录制编排：何时拉、按什么顺序写、算哪一代的产物
 │   ├── alarm/           # 告警上报（队列 + worker 池 + 重试）
 │   ├── lab/             # 送标裁剪 + Label Studio 上传
@@ -111,7 +111,7 @@ CleanSight 采用**流 / 推理 / 持久化解耦**架构，`RunControlService` 
 ```mermaid
 graph LR
     A[RTSP 流] --> B[StreamService / FFmpegDecoder]
-    B --> C[ClientQueues]
+    B --> C[Session topics]
     C --> D[Inference：Detector 检测→特征聚合/落盘→Operator 时序判定 1Hz→可视化]
     D --> E[RecordingService]
     D --> F[WebSocket 前端轮询]
@@ -125,15 +125,15 @@ graph LR
 ```
 RTSP (30fps)
   ↓ [FFmpegDecoder 自持读循环，ffmpeg 输出规范化 CFR raw_fps]
-ca_ready（SPSC 无锁 deque，Bresenham 抽帧至 inference_fps）   ca_raw（完整录制缓冲）
-  ↓ [Detector 检测 → 多流对齐成帧并落盘 detections.jsonl → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
-ca_processed → [HLS 分段：recording 周期 PULL 拉取整段]
-_latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
+READY（整数倍率抽帧至 inference_fps）   RAW（完整录制缓冲）   LATEST_RAW（最新原始帧）
+  ↓ [Detector 检测 → 多流对齐成帧 → DETECTION_WINDOW / LATEST_DETECTION / DETECTIONS（落 detections.jsonl）
+     → Operator（~1Hz，analyze+judge 合一，状态在内存 _sm）出告警 → 可视化]
+PROCESSED → [HLS 分段：recording 周期 PULL 拉取整段]
+RENDERED 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 ```
 
-- `ca_ready`：待推理帧，无锁 SPSC deque（decoder 单产 / dispatcher 单消）
-- `ca_raw` / `ca_processed`：raw / processed HLS 纯缓冲，recording 主动拉取分段
-- `_latest_rendered` / `_latest_detection` / `_slide_window` / `_latest_temporal`：渲染帧 / 推理快照 / 检测滑窗 / 时序事件
+- 上面大写的都是挂在每个 run 的 `Session` 上的 topic（`sess.channel(T)` 读写，run 关闭整体释放），声明在 `app/services/session/topics.py` 与 `app/services/inference/online/topics.py`
+- `READY` / `RAW` / `PROCESSED` / `DETECTIONS`：有界 Fifo；`LATEST_*` / `RENDERED`：只留最新值；`DETECTION_WINDOW`：按帧 ts 保留的时间窗
 
 线程角色：检测（StageAwareDispatcher + 每 stage 推理线程，可选 CUDA Stream）、时序（`ClientTemporalActor` per-run ~1Hz）、可视化（独立线程）、录制（段 sweeper + 一条 SerialTaskQueue 消费线程）、持久化（Alarm Worker×1 + 清理 worker）。详见 [知识库](docs/kb/INDEX.md)。
 
@@ -152,9 +152,9 @@ _latest_rendered 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 - **LEAK**（step `"1"`）：`bubble`（气泡，出生率滑窗 3s、`birth_rate>0.5` 实时告警）+ `bending`（弯折，去抖 5 帧、合格需 4 次弯曲，结算告警）
 - **CLEAN**（step `"2"`）：`clean_large` + `clean_small` 检测 → `clean_monitor`（GRU 动作识别，10s 窗口，`gru-final.pt`）叠加动作事件；当前 `rules: []` 不产告警
 
-各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanNodepGRUSegmenter`（权重 `clean-offline-gru-nodep.pt`）。
+各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanMSTCN2RoleEmbedSegmenter`（物料目录 `app/data/clean-offline-mstcn2-role-embed/` + 骨干 `app/data/backbones/dinov2_vits14/`）。离线策略一个模型一个包（`app/services/inference/offline/segmentation/impl/clean_<模型>/`），物料一个模型一个目录（`app/data/clean-offline-<模型>/`），历史策略都保留可切换；`python -m app.services.inference.offline.cli materials` 核对当前激活策略的物料。
 
-**新增检测点**：用 `/infer-workflow` skill 生成 Detector + Operator 框架，规范见 [知识库](docs/kb/INDEX.md)。
+**新增检测点**：步骤与容易静默出错的约束见 [DESIGN_EXTENDING_DETECTION.md](docs/kb/DESIGN_EXTENDING_DETECTION.md)，接口签名见 [SERVICE_INFERENCE.md](docs/kb/SERVICE_INFERENCE.md)。
 
 ---
 

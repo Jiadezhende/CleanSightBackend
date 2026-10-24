@@ -28,32 +28,35 @@
   - 单元 & 组件测试在 `tests/`，`pytest` 运行（先激活 `.venv`）。
   - 端到端集成测试在 `integration_tests/`，需要真实 RTSP 流与可写数据库，不在 `pytest` 默认跑。
 - **测试数据构造单一真源**：
-  - `tests/factories.py` 是构造真源——纯函数、**无 pytest 依赖**，`tests/` 直接 `from factories import make_cq` 复用，`integration_tests/` 也可复用。
-  - `tests/conftest.py` 把 factories 包成 factory-as-fixture（如 `make_cq`），供需要注入式书写的用例用。
-  - 契约一变（CQ 构造签名、`FrameDetection` 加字段等）**只改 factories 一处**，不扫散点。
+  - `tests/factories.py` 是构造真源——纯函数、**无 pytest 依赖**，`tests/` 直接 `from factories import make_session` 复用，`integration_tests/` 也可复用。
+  - `tests/conftest.py` 把 factories 包成 factory-as-fixture（如 `make_session`），供需要注入式书写的用例用。
+  - 契约一变（`SessionInfo` 字段、`FrameDetection` 加字段等）**只改 factories 一处**，不扫散点。
 - **I/O 边界故意集成-only**：子进程 ffmpeg、CUDA、WebSocket、真实 RTSP 这类外部 I/O 不硬写单测——把纯逻辑抽成 seam 单独测（如 URL 改写、去抖、时间轴计算），I/O 编排留给集成测试。
 - **不追覆盖率数字**：按 [kb/TESTING_MAP.md](kb/TESTING_MAP.md) 的「建议补测」补关键路径。典型：新增检测点补 Detector/Operator 单测 + YAML 加载测试；改 HLS 写入补 playlist EXTINF、在途段过滤、timeline 测试；改清理流程补结算告警归属测试。
 
 ---
 
-## 3. 模块内聚 + client 中台解耦
+## 3. 模块内聚 + session 中台解耦
 
 各 service（stream / inference / alarm / recording / lab …）功能内聚，只做自己的事；**不建 service 对 service 的直接依赖**。跨服务协作靠两个中台：
 
-- **共享状态走 client 中台层**：跨服务需要读写的运行态统一放 `ClientService`（COW 注册表，`int task_id` 键）+ `ClientQueues`（一次 run 的不可变身份 + 队列/快照），各服务只与 client 层打交道。
-  - client 层是**零跨服务依赖的 leaf**、哑存储：本身**不构造 CQ**，CQ 由 `RunControlService` 建好后 `set` 换槽。
-  - client 层**只吐自有词汇的原始数据**（如按流名聚合的信号）；流名 → 展示 metric 的翻译/映射**上移到 router 装配层**，不下沉进 client。
-- **跨服务起停编排走 `RunControlService`**：一次 run 的 start/stop/restart、per-task 锁、拆机顺序、对象身份 fence 都归 RunControlService，不下沉到 client 或各 service。
+- **跨服务运行数据走 topic**：一次 run 的运行数据挂在它的 `Session` 上（`app/services/session/`），经 `sess.channel(TOPIC)` 读写。
+  - topic 由使用方模块声明：只在本模块内交接的放本模块的 `topics.py`，跨模块共享的放 `session/topics.py`。
+  - 写方在构造时或取到工作时捕获 `Session`，之后只对它读写；查注册表（`session_service`）只在入口（routers、health_monitor、run_control、worker 遍历）。channel 现取现用，不缓存。
+  - 每 run 的辅助状态也放 topic，随 run 关闭释放；服务内不建 `task_id → 状态` 表。唯一例外是告警账本（`alarm_sink` 以 `Session` 为键的弱引用表）。
+  - session 基建不认识业务名词：容量、丢帧 reason、压力日志名由声明方算好放进 topic 工厂。
+  - 流名 → 展示 metric 的翻译 / 映射在 router 装配层。
+- **跨服务起停编排走 `RunControlService`**：session open / seal / close、decoder 启停、actor 增删、per-task 锁、拆机顺序、对象身份 fence（`expected=sess`）都归 RunControlService，不下沉到 session 或各 service。
 
 判断落点的经验法则：一段逻辑若需要「知道另一个服务」，八成放错了。
 
-依据 KB：[kb/SERVICE_CLIENT_STATE.md](kb/SERVICE_CLIENT_STATE.md)、[kb/SERVICE_RUN_CONTROL.md](kb/SERVICE_RUN_CONTROL.md)。
+依据：[update/20261022_SESSION_MQ_PROPOSAL.md](update/20261022_SESSION_MQ_PROPOSAL.md)、[kb/SERVICE_RUN_CONTROL.md](kb/SERVICE_RUN_CONTROL.md)。
 
 ---
 
 ## 4. 日志规范
 
-- **格式** `[ModuleName] message`：方括号内 **PascalCase**（`[ClientService]`、`[InferenceService]`）；Worker 用 `[Name-N]`（`[HLSWorker-0]`）。禁止 `print()` 代替 `logger`。
+- **格式** `[ModuleName] message`：方括号内 **PascalCase**（`[SessionService]`、`[InferenceService]`）；Worker 用 `[Name-N]`（`[HLSWorker-0]`）。禁止 `print()` 代替 `logger`。
 - **参数惰性格式化**：用 `%` 占位符传参，**不用 f-string**：
   ```python
   logger.info("[StreamDecoder] Connected to %s | %dx%d", url, w, h)   # ✓
@@ -73,7 +76,7 @@
 
 ## 5. 检测点 / Workflow 契约
 
-新建检测任务、Detector、Analyzer、Judge 走 `/infer-workflow` skill（含完整模板与 checklist）。两条会**静默出错**的红线单列在此：
+新建检测任务（Detector / Operator / 离线 Segmenter）的步骤与检查清单见 [kb/DESIGN_EXTENDING_DETECTION.md](kb/DESIGN_EXTENDING_DETECTION.md)。两条会**静默出错**的红线单列在此：
 
 - **`class_name` 不做归一化**：直接取自模型 `result.names`，配置/代码里的匹配串须与训练类别名严格一致——写错不报错，静默漏检。
 - **统一检测契约是 `DetBox`（单框）→ `DetectorOutput`（单检测器单帧）→ `FrameDetection`（多流对齐的整帧）**，见 [app/types/detection.py](../app/types/detection.py)。别为单个检测点往契约里塞领域字段（如 `xxx_detected` / `xxx_count`）：派生量放 `DetBox.extra` 或 `DetectorOutput.metadata`，时序统计交给 L3 Analyzer。
@@ -129,7 +132,7 @@
   # app/services/inference/online/service.py
   from .naming import get_stage_alias                # ✓ 同目录
   from .temporal.actor import ClientTemporalActor    # ✓ 本包子包
-  from app.services.client.instance import client_service   # ✓ 跨包（跨服务依赖一眼可见）
+  from app.services.session.instance import session_service  # ✓ 跨包（跨服务依赖一眼可见）
   from app.services.inference.online.render import RenderSpec    # ✗ 包内却写了绝对
   ```
 
@@ -140,3 +143,20 @@
 > 前两条不是风格偏好：单例引用面与分层白名单两条门禁都按模块名判定依赖，同一条依赖若有两种写法就有绕过的口子。
 
 背景与推导见 [update/20260903_PACKAGE_LAYOUT_SPEC.md](update/20260903_PACKAGE_LAYOUT_SPEC.md)、[update/20260922_IMPORT_CONVENTION.md](update/20260922_IMPORT_CONVENTION.md)。
+
+---
+
+## 9. 锁序
+
+三层，高 → 低：
+
+| 层 | 含义 | 成员 |
+|----|------|------|
+| L0 编排锁 | 一次 run 的生命周期事务 | run_control 任务锁 `lock_for(task_id)`（每 task 一把，唯一允许可重入） |
+| L1 外层锁 | 覆盖多步操作，或锁内做 IO / 起停子进程 | recording `_collect_lock`；infer_proxy `_lock` / `_proc_lock`；render_proxy `_lock` / `_proc_lock`；decoder `lock`；离线作业 `_lock`；lab `runtime_config._LOCK`；懒加载锁（detector / operator `_model_load_lock`、media_token `_DEFAULT_LOCK`、gateway `_init_lock`） |
+| L2 叶子锁 | 只护本对象的几个字段 | session 锁；session 注册表写锁；run_control `_task_locks_guard`；告警账本 `_lock`、alarm_sink `_ledgers_lock`；recording `_hls_inflight_lock`；frame_ring `_lock`；PressureReporter `_lock`；dispatcher `_lock`；stream `lock`；gateway 三个 Store 锁；`queue.Queue` 内部锁 |
+
+1. 只能在持有高层锁时获取低层锁，反向禁止。
+2. 同层不嵌套。L1 之间确需嵌套的，登记为固定有向对（当前无）。
+3. 持有 L2 期间不获取任何锁，不调其他模块的代码（回调、上报、Prometheus 计数、IO）。
+4. 新增锁在定义处注释层级，并登记进上表。

@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -29,7 +29,7 @@ CleanSight Backend 是内镜人工清洗流程的 AI 视觉巡检后端：接入
 
 ## 业务边界
 
-- 只有 `LEAK` 阶段产告警（气泡检测 + 弯折动作检测）。`CLEAN` 的在线时序算子 `clean_monitor` 只做动作识别叠字；离线整段动作分割 `CleanNodepGRUSegmenter` 手动触发，不判合规、不产告警。
+- 只有 `LEAK` 阶段产告警（气泡检测 + 弯折动作检测）。`CLEAN` 的在线时序算子 `clean_monitor` 只做动作识别叠字；离线整段动作分割（默认 `CleanMSTCN2RoleEmbedSegmenter`）手动触发，不判合规、不产告警。
 - 追溯只按 `task_id + step_id`（+ 可选 `run_id`）定位，不用 `source_ip`（该字段可能被业务侧覆写）。
 - Lab 只从 raw 轨送标，后端职责止于把 clip 推给 Label Studio，不负责导出标注或转训练集。
 - 试纸比色不关联 task / step，不落库、不告警、不留证据；定位是防误操作与留痕，不是精密定量，也不防蓄意伪造。

@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -57,7 +57,7 @@
 | VOD 清单文本 | `app/services/utils/vod_playlist.py` | 装配产物，不是资源元数据（§2） |
 | Label Studio 运行时配置 | `app/services/lab/runtime_config.py` | 是配置不是产物，没有 run 身份键 |
 
-常被误认为不属于这里、实际**在层内**的：ffmpeg 转码参数 / tfdt hex-patch / timescale pin、`cv2.VideoWriter` 与 `eff_fps` 反推、段解码、为编解码起外部工具子进程。放在层外会静默出错：`eff_fps` 一个值同时决定媒体时长、EXTINF、tfdt（见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)），在层外算就要分三条路跨边界传，写岔一个都不报错。
+常被误认为不属于这里、实际**在层内**的：ffmpeg 编码参数 / tfdt hex-patch / timescale pin、`eff_fps` 反推、段解码、为编解码起外部工具子进程。放在层外会静默出错：`eff_fps` 一个值同时决定媒体时长、EXTINF、tfdt（见 [DESIGN_HLS_TIMELINE.md](DESIGN_HLS_TIMELINE.md)），在层外算就要分三条路跨边界传，写岔一个都不报错。
 
 ---
 
@@ -65,7 +65,7 @@
 
 对外按域分，不按读写分。`read.py` / `write.py` 会把「盘上有哪些 step」与「这个 step 有哪些段」两个抽象层级挤进同一模块；按域分则每个函数自带域限定词，`hls.*` 不可能被要求回答 `detections.jsonl` 在哪。现有域：`hls/`、`inference/`（子包）、`tasks.py` / `runs.py`（跨域单文件）、`lab.py`（未落地）、`utils/`（包内私有底座）。
 
-- **子包按产出层切模块，不按产物拆平级域**：`inference/` 的两份产物有两对独立 codec、两条写路线（B / C），故 `_detection` / `_temporal` 分文件；但它们共用时间轴与行框定，拆成平级域反而要跨域配对。
+- **子包按产出层切模块，不按产物拆平级域**：`inference/` 的几份产物各有独立 codec 与写路线（检测结果 B、离线结果 C、离线中间产物缓存 C），故 `_detection` / `_temporal` / `_cache` 分文件；但它们共用 run 与时间轴，拆成平级域反而要跨域配对。
 - **薄域单文件、重域子包，对外看不出区别**：调用方分不出 `hls` 是包还是模块，薄域变重是非破坏性升级。代价：facade `__init__` 的 re-export 会连带加载实现模块，故实现模块的**模块级只许 stdlib + `app.types`**（D1）。
 - **域读写口以 `run: RunIdentity` 开头且只收它**，不收 `(task_id, step_id)` 散标量。传错在 `utils.root.domain_dir` 即 `TypeError`，且不建目录。`RunIdentity` 只由 `runs.allocate` / `runs.query` 产出，调用方拼不出不存在的身份。
 - **跨域模块不出定位能力**：`tasks` / `runs` 只在跨所有域时出面，以 `task_id` 或 `(task_id, step_id)` 开头。本层不提供脱离身份键的产物读写。
@@ -249,7 +249,7 @@ run 的分配          由调用方的串行点构造（allocate 在 lock_for �
 |---|---|
 | T1 | **每个 codec 必须有往返测试**：写进去的内存对象读回来要相等，链条一直闭合到「段」这一档 |
 | T2 | `ts_to_ms` 往返在 **ms 域**闭合：`parse(name(ts)).ts_ms == floor(Fraction(ts) * 1000)`，且 `Fraction(ms, 1000) <= Fraction(ts) < Fraction(ms + 1, 1000)`。不是 `== ts`，也不能用 `int(ts * 1000)` 作期望值（`0.29 * 1000 == 290.0`，而 0.29 精确值略小）。读侧段级定位的 `bisect_right - 1` 建立在「段名 ≤ 首帧」上 |
-| T3 | **事务不变式必须能脱离外部工具测**：把外部工具那一步打桩（`tests/test_storage_hls.py::fake_pipeline` 替换 `_encode.write_mp4v` / `_fmp4.transcode`），断言 W2 / W4 / W8。否则 CI 缺二进制时最该测的断言静默失效 |
+| T3 | **事务不变式必须能脱离外部工具测**：把外部工具那一步打桩（`tests/test_storage_hls.py::fake_pipeline` 替换 `_fmp4.encode`），断言 W2 / W4 / W8。否则 CI 缺二进制时最该测的断言静默失效 |
 | T4 | **需要外部二进制的测试单独分档**，缺料即跳过（现为 `skipif(not _external_tools_available())`）。主体测试必须毫秒级、无外部依赖 |
 | T5 | **并发要有一条真测试**：多线程同时写同一冲突键，断言产物齐备、清单行数正确、tfdt 不碰撞。T3 / T5 碰私有面是正当的——被测的是内部不变式 |
 
@@ -278,7 +278,7 @@ run 的分配          由调用方的串行点构造（allocate 在 lock_for �
 | T1 / T2 往返、T3 事务不变式 | ✅ |
 | L2 外部输入经 `parse_*` | ✅ `parse_segment_name` / `parse_init_name` 对 `../`、绝对路径、非法 track、非数字 ts 返回 `None` |
 | T5 并发真测试 | ❌ 未实现（`tests/test_storage_hls.py` 模块 docstring 注明本期无断言） |
-| D3 子进程带超时 | ⚠️ 只靠 review，无自动门禁。现有两处都带：`_fmp4.transcode` 传 `timeout=`，`_decode` 用 `threading.Timer` 看门狗 |
+| D3 子进程带超时 | ⚠️ 只靠 review，无自动门禁。现有两处都带：`_fmp4.encode` 与 `_decode` 都用 `threading.Timer` 看门狗（写 stdin / 读 stdout 的子进程不能用 `subprocess.run(timeout=)`） |
 | D3 另两条、R1 / R3 | ⚠️ 类型标注 + review |
 | L5 `settings.storage_base_dir` 访问面收敛 | ⏳ 未加。层外仍直读：lab 临时件根与运行时配置、cleanup 扫描根 |
 | 文件名字面量不出层 | ⏳ 未加。只能 AST 扫 `ast.Constant` 并跳过 docstring，不能 grep（`_segment_` 会大量命中 `ca_segment_len`） |

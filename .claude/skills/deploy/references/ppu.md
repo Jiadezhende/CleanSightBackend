@@ -26,7 +26,7 @@ source /usr/local/PPU_SDK/envsetup.sh          # 每次必须，否则 PPU 内�
 ffmpeg / MediaMTX 手动从源机拉（复刻 `install.sh` 的 [2]、[3] 两段）：
 
 ```bash
-BASE=http://49.234.120.241:8088
+BASE=<用户给的源机地址>        # 没给就用 install.sh 开头的默认值
 curl -fL -o /tmp/ff.tar.xz $BASE/vendor/ffmpeg/ffmpeg-linux-x64.tar.xz && xz -t /tmp/ff.tar.xz
 mkdir -p /tmp/ff && tar xf /tmp/ff.tar.xz -C /tmp/ff && rm -rf .ffmpeg && mv /tmp/ff/ffmpeg-* .ffmpeg
 curl -fL -o /tmp/mtx.tar.gz $BASE/vendor/mediamtx/mediamtx-linux-x64.tar.gz && gzip -t /tmp/mtx.tar.gz
@@ -53,7 +53,7 @@ export YOLO_CONFIG_DIR=$PWD/.ultralytics
 ./start_backend.sh <prod|test|dev>
 ```
 
-角色与 `.env*` 见 [runtime-config.md](runtime-config.md)。
+启动前按 [runtime-config.md](runtime-config.md) 配好对应角色的 `.env*`（共享机器：`CLEANSIGHT_CUDA_DEVICE` 锁单卡，网关保持开启）；启动通过后按其「模型权重」一节核对，缺的请用户从魔搭补齐。
 
 ## 已知坑
 
@@ -69,4 +69,6 @@ export YOLO_CONFIG_DIR=$PWD/.ultralytics
 - [ ] `.ffmpeg/bin/ffmpeg` 为 n7.1.4，`mediamtx/mediamtx` 为 v1.15.5
 - [ ] 启动前已 `source envsetup.sh` 并锁 `CUDA_VISIBLE_DEVICES`
 - [ ] 端口在平台映射窗口内，外部端口号等于内部端口号
+- [ ] `.env*` 键检查全「已填」，全程未读值
 - [ ] `/health/status` 返回 `running`，对外 RTSP 口与 MediaMTX 口都在听
+- [ ] 权重核对无缺失（或缺失清单已交给用户）

@@ -8,11 +8,11 @@
     cancel(run) -> bool                       排队中的直接取消，运行中的 kill 子进程
 
 执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 起子进程
-`python -m app.services.inference.offline.cli run`（CPU 隔离 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
+`python -m app.services.inference.offline.cli run`（钉卡 + 限核 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
 **本模块不 import runner / torch**：CLI 只作为子进程命令出现。
 
 作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `--run-id`，
-不同 run 各跑各的；该 run 就是 `clients` 当前注册的 CQ 的 run → 409（输入还在写）。
+不同 run 各跑各的；该 run 就是注册表里当前在跑的 run → 409（输入还在写）。
 状态只在内存，重启丢失（结果本身已落盘）。
 """
 
@@ -68,6 +68,7 @@ class OfflineJob:
     status: str = QUEUED
     producer: Optional[str] = None
     segment_count: int = 0
+    alarm_count: Optional[int] = None  # 规则核对产出的告警数；未核对为 None
     message: str = ""
     submitted_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
@@ -78,23 +79,23 @@ class OfflineJob:
 
 
 class OfflineJobService:
-    """离线作业服务。`launcher` / `config` / `clients` 仅供测试注入（假 Popen / 推理配置 / 注册表）。"""
+    """离线作业服务。`launcher` / `config` / `sessions` 仅供测试注入（假 Popen / 推理配置 / 注册表）。"""
 
     def __init__(
         self,
         *,
         launcher: Callable[..., Any] = subprocess.Popen,
         config: Optional[InferenceConfig] = None,
-        clients=None,
+        sessions=None,
         job_timeout_s: float = JOB_TIMEOUT_S,
         poll_s: float = POLL_S,
     ) -> None:
-        if clients is None:
-            # 函数体内 import：同 RecordingService，别把 client → numpy 链摊给每个 import 本模块的人
-            from app.services.client.instance import client_service
+        if sessions is None:
+            # 函数体内 import：同 RecordingService，别把 session → numpy 链摊给每个 import 本模块的人
+            from app.services.session.instance import session_service
 
-            clients = client_service
-        self._clients = clients
+            sessions = session_service
+        self._sessions = sessions
         self._launcher = launcher
         self._config = config  # None = 提交时读 load_stage_config 单例
         self._job_timeout_s = job_timeout_s
@@ -118,6 +119,20 @@ class OfflineJobService:
         self._queue = SerialTaskQueue("offline", maxsize=QUEUE_SIZE)
         self._queue.start()
         logger.info("[offline] 作业服务已启动")
+        self._preflight_materials()
+
+    def _preflight_materials(self) -> None:
+        """启动时核对激活策略的物料：缺失只告警（不影响在线，提交该 step 的作业时才会失败）。"""
+        try:
+            from .segmentation.materials import check_materials
+
+            config = self._config if self._config is not None else load_stage_config()
+            missing = [s for s in check_materials(config) if not s.exists]
+        except Exception as e:
+            logger.warning("[offline] 物料预检未完成: %s", e)
+            return
+        for s in missing:
+            logger.warning("[offline] 离线物料缺失 | stage=%s | producer=%s | %s", s.stage, s.producer, s.path)
 
     def stop(self, timeout: float = 10.0) -> None:
         """kill 运行中的子进程，排队中的在排空时逐个记 cancelled（不会被「排空」拖住）。"""
@@ -142,8 +157,8 @@ class OfflineJobService:
         queue = self._queue
         if queue is None:
             raise ConflictError("离线作业服务未启动", task_id=task_id, step_id=step_id)
-        live = self._clients.get(task_id)
-        if live is not None and live.run == run:
+        live = self._sessions.get(task_id)
+        if live is not None and live.info.run == run:
             # 输入（detections.jsonl）还在写：按提交时已落盘的部分出结论就是错的
             raise ConflictError(
                 f"该 run 正在运行，停止后再提交离线作业: task={task_id} step={step_id} run={run.run_id}",
@@ -259,6 +274,8 @@ class OfflineJobService:
         if returncode == 0 and result is not None and result.get("status") in _RUNNER_STATUSES:
             job.producer = result.get("producer")
             job.segment_count = int(result.get("segment_count") or 0)
+            alarm_count = result.get("alarm_count")
+            job.alarm_count = None if alarm_count is None else int(alarm_count)
             self._finish_locked(job, result["status"], str(result.get("message") or ""))
             return
         message = (result or {}).get("message") or err[-_STDERR_TAIL_CHARS:].strip()
@@ -311,8 +328,7 @@ def _priority_kwargs() -> Dict[str, Any]:
 
 
 def _child_env() -> Dict[str, str]:
-    env = dict(os.environ)  # 含 CLEANSIGHT_ENV 与已加载的 .env，子进程落到同一个存储根
-    env["CUDA_VISIBLE_DEVICES"] = ""
+    env = dict(os.environ)  # 含 CLEANSIGHT_ENV 与已加载的 .env，子进程落到同一个存储根、钉同一张卡（cli._isolate）
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 

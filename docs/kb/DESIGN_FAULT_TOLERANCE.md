@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析（`app/types/exceptions.py` + `app/services/utils/worker_guard.py` + `app/services/alarm/alarm_worker.py` + `app/main.py` 异常处理器 + 调用点统计）
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -31,7 +31,7 @@
 | `NotFoundError` / `ValidationError` / `ConflictError` | — | — | 客户端错误，纯 HTTP 语义 |
 
 - 两个标志是类属性；基类 `AppError` 经 `**kwargs` 允许实例级覆盖，`DatabaseError` / `ModelInferenceError` / `PersistenceError` 的构造函数显式收 `retryable=`。
-- 所有异常都带运行坐标 `task_id` / `step_id`（排障主键）与辅助的 `source_ip`，`__str__` 连同 `[retryable]` / `[FATAL]` 标记拼进消息。**各子类构造函数的关键字参数是封闭的**，传错名字（如 `client_id`）会变成 `TypeError`，绕过整个重试判据——告警上报正踩在这里，见 [SERVICE_ALARM.md](SERVICE_ALARM.md)。
+- 所有异常都带运行坐标 `task_id` / `step_id`（排障主键）与辅助的 `source_ip`，`__str__` 连同 `[retryable]` / `[FATAL]` 标记拼进消息。**各子类构造函数的关键字参数是封闭的**，传错名字（如 `client_id`）会变成 `TypeError`，绕过整个重试判据。只用手工构造的异常测重试策略覆盖不到这类错误，重试路径必须有一条从真实抛出点出发的用例（告警上报曾因此静默不重试，回归用例 `test_reporter_http_failure_is_retried`）。
 - 丢帧不走异常，由 `frame_drop_total{reason}` 在真实丢帧点计数。
 
 ## 重试判据：只认自家异常的标志，非幂等写不重试
@@ -53,7 +53,9 @@
 | 降级产物 | 格式区分不了「失败」与「没检出」时，失败帧不落盘 | `detections.jsonl` 不带 `success`，任一源失败的帧不进 `ca_detections`；离线侧见时间空洞，整 run 全失败则 `skipped` |
 | 参数错误 | 服务边界 400，不路由到兜底实现 | `resolve_stage` 对未配置 step 抛 `ValidationError`，锁外、动旧 run 之前校验；离线 `require_offline` 400 |
 | 配置错误 | 启动即失败，不静默少组件 | `StageFactory` 任一组件构造失败即抛，`InferenceService` 包成 `RuntimeError`，后端起不来 |
-| 无可用性要求的路径 | 不兜底，失败让人看见 | 离线 Runner 未配置 → `ValidationError`；算法异常作业 `failed`；缺 `model_path` 直接 `ValueError` |
+| 无可用性要求的路径 | 不兜底，失败让人看见 | 离线 Runner 未配置 → `ValidationError`；算法异常作业 `failed`；离线权重缺失 → `FileNotFoundError`（先于 import torch）；mstcn2-role-embed 缺 raw 帧整次失败、不跳手 |
+| 加速用的旁路（缓存） | 永远不让主作业失败：读坏当未命中重算，写失败只告警 | 离线 `OfflineContext.load_cache` / `save_cache`（[SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)） |
+| 只影响局部的启动预检 | 只告警、不阻断启动；能阻断的只有全局资源不足 | 离线物料缺失逐条 WARNING（只影响该 stage 的离线作业）；启动内存自检超预算默认拒绝启动（[ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)） |
 
 **反例**：兜底 stage 把未知 step 静默跑成透传——配置错误与「真打错 step」混在一起谁都看不见，兜底产出的空结果还会被当成真实数据落盘、被下游消费。
 
@@ -61,7 +63,8 @@
 
 推理侧 worker 不走 `AppError` 体系，捕获裸 `Exception`、打日志后继续：
 
-- **推理子进程死亡 / wedge / 久不就绪**（`RemoteInferProxy`）：停止接收提交、kill 子进程、清孤儿在途帧（计 `frame_drop_total{reason="infer_child_restart"}`），指数退避重 spawn，超过最大重启次数 critical 后放弃。
+- **推理子进程死亡 / wedge / 久不就绪**（`RemoteInferProxy`）：停止接收提交、kill 子进程、清孤儿在途帧（计 `frame_drop_total{reason="infer_child_restart"}`）并重置共享内存环，指数退避重 spawn，超过最大重启次数 critical 后放弃。
+- **渲染子进程池**（`RemoteRenderProxy`）：任一子进程死亡 / 最老在途超时 / 久不就绪即整组 kill、清在途（计 `viz_child_down`）、重置环、重建队列后退避重起；池不可用期间 viz 线程就地渲染，画面不断。
 - **主循环**（dispatcher 调度轮、Actor tick、可视化 tick、告警 worker）：循环体内 `except Exception` 打 error 后进入下一轮，外层再包 `guarded_run` 兜住循环控制逻辑本身。
 - **流与健康监控**：ffmpeg 秒退按 stderr 区分 `StreamConnectionError` 与 `FFmpegError`，首启失败 decoder 仍注册；断流重连、超时拆除、孤儿清理全由健康监控按时钟驱动（[SERVICE_STREAM.md](SERVICE_STREAM.md)、[SERVICE_HEALTH_MONITOR.md](SERVICE_HEALTH_MONITOR.md)）。
 
@@ -76,7 +79,7 @@
 
 - `app/types/exceptions.py`（8 个异常与 retryable / fatal）
 - `app/services/alarm/{alarm_worker,reporter}.py`（`_report_with_retry` / `_should_retry` / `_retry_delay`）
-- `app/services/utils/{worker_guard,task_queue}.py`
+- `app/services/utils/{worker_guard,task_queue}.py`、`app/services/inference/online/visualization/render_proxy.py`、`app/services/inference/offline/{runner,service}.py`
 - `app/main.py`（10 个 exception handler、`main()` fail-fast、lifespan 嵌套）、`app/services/run_control/{__init__,service}.py`（停机拆 run）
 - `app/services/inference/__init__.py`、`app/services/inference/online/service.py`（`stop`、`resolve_stage`、构造失败包 `RuntimeError`）
 - `app/services/inference/online/detection/{stage_worker,infer_proxy,service}.py`、`app/services/inference/stage_factory.py`、`app/services/inference/config.py`（`require_offline`）

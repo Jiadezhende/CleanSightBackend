@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -13,8 +13,9 @@
 RTSP
   -> StreamService / FFmpegDecoder（自持读循环线程；ffmpeg 输出规范化 CFR raw_fps 流）
   -> ClientQueues.ca_raw（raw HLS 纯缓冲）
-  -> ClientQueues.ca_ready（SPSC deque，每 N 帧留 1，N = inference_decimation）
-  -- L1 --> StageAwareDispatcher（唯一提交者，捕获 CQ 句柄）-> RemoteInferProxy.submit -> 推理子进程
+  -> ClientQueues.ca_ready（SPSC deque，每 N 帧留 1，N = inference_decimation；独立浅上限 2 s）
+  -- L1 --> StageAwareDispatcher（唯一提交者，捕获 CQ 句柄）-> RemoteInferProxy.submit
+             -> 帧拷进共享内存环，队列只传槽位号 -> 推理子进程
              -> collector 组装 FrameDetection（带 cq 句柄）
              DetectionService._write_back_results（单入口，判 cq.is_active()）三写：
                ├─ push_detection -> _slide_window        （-> L3）
@@ -23,9 +24,10 @@ RTSP
   -- L3/L4 --> ClientTemporalActor（2Hz tick）-> Operator.analyze()/judge()
                  -> set_latest_temporal（前端事件）
                  -> alarm_sink.persist_alarms（过闸 + 入 alarm 队列上报）
-  -- Viz --> VisualizationWorker（独立线程，轮询快照渲染）
+  -- Viz --> VisualizationWorker（独立线程，轮询快照、生成 RenderSpec）
+             -> RemoteRenderProxy -> 渲染子进程池（共享内存槽，结果下一 tick 收回；池不可用时本线程就地渲染）
                ├─ append_ca_processed -> ca_processed（processed HLS 纯缓冲）
-               └─ set_latest_rendered -> _latest_rendered 快照（WS /ai/video 由前端轮询，非后端 push）
+               └─ set_latest_rendered -> _latest_rendered 快照（WS /ai/video 发送循环轮询它、JPEG 质量 75 推给前端；Viz 不主动推）
   -- PULL --> recording.SegmentSweeper 每 1s collect_from(cq)
                  ├─ ca_raw / ca_processed -> "recording" 队列            -> {run}/hls/
                  └─ drain_ca_detections   -> "recording-detections" 队列 -> {run}/inference/detections.jsonl
@@ -37,14 +39,15 @@ RTSP
 ## 输入与解码
 
 每个 `task_id` 一个 `FFmpegDecoder`。ffmpeg 以 `scale=W:H,fps=raw_fps` + `-vsync` 输出 CFR rawvideo；读循环线程
-逐帧取墙钟 `time.time()` 作 `Frame.timestamp`，写 `ca_raw`、经 `append_ca_ready_with_throttle`（整数降采样 + 背压）写
-`ca_ready`，并更新 `latest_raw_frame/timestamp`（健康监控、可视化用）。
+每帧新建数组、`readinto` 读满（拼帧不持 GIL），读满即置只读，逐帧取墙钟 `time.time()` 作 `Frame.timestamp`，写 `ca_raw`、
+经 `append_ca_ready_with_throttle`（整数降采样 + 背压）写 `ca_ready`，并更新 `latest_raw_frame/timestamp`（健康监控、
+可视化用）。同一只读帧数组被录像、推理、实时画面共用，下游要改像素必须先拷贝。
 
 ## 推理与时序（L1→L4）：帧捕获 ts 是全链路对齐锚点
 
 - **单提交者**：`StageAwareDispatcher` 从各 run 的 `ca_ready` 取帧、按 stage 捕获 CQ 句柄入 `_stage_queues`，
-  轮转提交给 `RemoteInferProxy`（布尔背压，拒收即帧留 deque）。GPU 前向在 spawn 子进程串行执行。
-- **cq 句柄不过进程边界**：子进程只收纯数据（`_infer_models`）；collector 线程从 `_Pending` 把 cq 与分辨率盖回 `FrameDetection`。
+  轮转提交给 `RemoteInferProxy`（布尔背压，拒收即帧留 deque；共享内存环耗尽也是拒收）。GPU 前向在 spawn 子进程串行执行。
+- **cq 句柄不过进程边界**：子进程只收纯数据（共享内存槽位号，附着后拷出帧，再 `_infer_models`）；collector 线程从 `_Pending` 把 cq 与分辨率盖回 `FrameDetection`。
 - **ts 锚点**：`Frame.timestamp` 穿透到 `detector.infer_batch(frames, timestamps)` 并写入各流
   `DetectorOutput.timestamp`，同帧多流 ts 精确相等，`FrameDetection.by_source` 据此对齐；detector 不得自造时间戳。
 - **写回单入口、零 IO**：`_write_back_results` 取走 `frame.cq` 并置 None，判 `cq.is_active()`——迟到写落到
@@ -65,7 +68,8 @@ CQ 的 `ca_raw` / `ca_processed` / `ca_detections` 都是纯缓冲，不触发�
 - `recording`：HLS 段写入 `{run}/hls/`，格式归 `app.storage.hls`；
 - `recording-detections`：`inference.append_detections(cq.run, frames)` 追加 `detections.jsonl`，格式归 `app.storage.inference`。
 
-分两条是因为段写含 ffmpeg 转码（单段 0.26–3 s），检测结果排在后面会被一起背压丢弃且无声。产物只写进 `cq.run`
+分两条是因为段写含 ffmpeg 编码（帧经 stdin 单次编码，单段约 0.2 s 起），检测结果排在后面会被一起背压丢弃且无声。
+段队列另按在途字节限额（`queue_max_mb`），超了丢段而不是堆到 OOM。产物只写进 `cq.run`
 指向的目录，旧 run 的迟到写落回旧目录。
 
 **残帧 flush 只在 `stop_run` 发生**：`stop_run` 依次 `stop_workflow`（收结算告警）→ `recording.flush_residual(cq)`
@@ -85,13 +89,14 @@ CQ 的 `ca_raw` / `ca_processed` / `ca_detections` 都是纯缓冲，不触发�
 {run}/inference/detections.jsonl
   -> OfflineRunner.run(OfflineRunSpec{task_id, step_id, run_id?})
        require_offline(step_id) → 解析并锁定一个 run → read_detections → segmenter → 校验
+         （uses_context 策略另经 OfflineContext 读 {run}/hls/ 的 raw 帧、读写 {run}/inference/cache_{name}.npz）
        → ① label_probs.npz（可选旁路）→ ② temporal.jsonl（丢旧 TemporalSegment、保留 TemporalEvent、原子写回）
 ```
 
-- **独立 OS 进程**，不进 uvicorn：CLI 在 torch import 前置 `CUDA_VISIBLE_DEVICES=""` 并限线程。入口有两个：手动
+- **独立 OS 进程**，不进 uvicorn：CLI 在 torch import 前把 `CUDA_VISIBLE_DEVICES` 钉成 `settings.cuda_device`（与在线推理同一张卡）并限线程；用不用 GPU、限速多少由策略参数决定（默认策略 DINOv2 限速 150 次裁剪/s）。入口有两个：手动
   `python -m app.services.inference.offline.cli run|query --task-id T --step-id S [--run-id R]`；admin 页
   `POST /admin-f3m8/offline/jobs` → `OfflineJobService`（串行、起 CLI 子进程、超时 kill）。
-- **写方唯一**：`detections.jsonl` 只由 recording 写；`temporal.jsonl` / `label_probs.npz` 只由离线 Runner 写。
+- **写方唯一**：`detections.jsonl` 只由 recording 写；`temporal.jsonl` / `label_probs.npz` / `cache_{name}.npz` 只由离线 Runner 写。
   同一 run 跨进程并发跑离线无互斥。
 - **复用在线契约**：输入 `FrameDetection`，输出 `TemporalSegment` / `LabelProbs`；ts 为帧捕获墙钟浮点秒（毫秒规则的具名例外）。
 - **读口**：`POST /ai/temporal`（分段 → 媒体毫秒）、`POST /lab-f3m8/label-probs`（逐帧概率），都经 `resolve_timeline`
@@ -104,7 +109,7 @@ Runner 各步的失败语义（skipped / reclaimed / 校验规则）见 [SERVICE
 
 - `app/services/stream/decoder.py`、`app/services/client/queues.py`
 - `app/services/inference/online/detection/{dispatcher,infer_proxy,stage_worker,service}.py`
-- `app/services/inference/online/temporal/{actor,alarm_sink}.py`、`app/services/inference/online/visualization/visualization_worker.py`
+- `app/services/inference/online/temporal/{actor,alarm_sink}.py`、`app/services/inference/online/visualization/{visualization_worker,render_proxy}.py`、`app/services/utils/frame_ring.py`、`app/routers/ai.py`
 - `app/services/inference/offline/{runner,cli,service}.py`、`app/services/inference/config.py`
 - `app/services/recording/{service,sweep_worker}.py`、`app/services/run_control/service.py`（`start_run` / `stop_run` / `shutdown`）
 - `app/storage/{hls,inference}/`、`app/storage/runs.py`、`app/types/{detection,temporal,run}.py`

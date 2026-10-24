@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -56,11 +56,38 @@
 
 推理、时序、可视化各按自己的节奏跑，经 per-run 状态对象交接：推理写帧窗、最新检测与落盘缓冲；时序读帧窗、写时序事件与告警；可视化读最新帧与检测、写渲染帧与 processed 缓冲。时序分析或渲染慢不会阻塞 GPU 推理热路径。
 
+### GIL 是多路并发的第一瓶颈：持 GIL 的整帧工作只能挪出主进程
+
+- **判据**：加线程吞吐不涨（1/2/4/8 线程总吞吐持平），旁边多一个忙线程吞吐就塌，说明卡在 GIL 而不是工作本身。这时加线程无效，只有让工作不持 GIL：交给内核（`readinto` 直写数组）、外部进程（ffmpeg 经 stdin 编码），或挪进子进程。
+- **共享帧缓冲不复用**：下游各处持有同一帧引用（录像缓冲、推理队列、最新帧快照）时，复用读缓冲会静默覆盖在排的帧；每帧新建并**置只读**，把「误原地写污染全部下游」变成当场 `ValueError`。
+- 例证：decoder 每帧 `np.empty` + `readinto`（[SERVICE_STREAM.md](SERVICE_STREAM.md)）、渲染子进程池（[SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)）。
+
+### 跨进程传大块数据：共享内存环，队列只传槽位号
+
+`mp.Queue` 每帧 pickle 并分块写管道，成本全在发送方 GIL 上；TCP 回环更慢。共享内存环只剩一次 memcpy。不出错的前提：
+
+- **槽位生命周期只归生产方**：消费方从不归还，生产方收到答复才复用、判定对端已死时整体 `reset()`。这样不需要跨进程同步空闲表。
+- **消费方一律拷出**：不持有共享内存视图，生产方复用槽位改不到已读出的数据；拷贝发生在消费进程，不占生产方 GIL。
+- **分配要么全给要么不给**，不够即按背压返回 False，与「在途已满」走同一条路径；环大小 ≥ 在途上限 × 最大批大小，正常时不先于在途上限耗尽。
+- **放不进槽位就退回旧路径，不能拒收**：上游对被拒的同一批会无限重试，拒收等于卡死。
+- **槽位归还 / 重置与在途记账在同一把锁里**：空闲表 `release` 只追加不查重时，归还落到 `reset()` 之后会产生重复槽位，同一槽位同时分给两批、后写覆盖先写，结果算错对象且不报错。锁顺序单向（代理锁 → 环锁），环不回调代理。
+- 例证：`app/services/utils/frame_ring.py`，推理代理与渲染代理共用。
+
+### 子进程池：共享请求队列时故障整组重启
+
+- P 个子进程共享一条请求队列能自然负载均衡，代价是判不出卡住的请求在哪个子进程上，被杀的子进程还可能持着队列读锁——所以故障时 kill 全部、清在途、重建队列再起，不做单个重启。
+- 有序性要求（如同一 run 的帧按 ts 进缓冲）用「每键单飞」保证：同一键同时最多一个在途请求。
+- 子进程忽略 SIGINT / SIGBREAK：终端 Ctrl-C / Ctrl-Break 广播给整个进程组，子进程先死会被监督线程误判为故障；停机统一由父进程 `terminate` 驱动。
+- 完成结果由调用方线程非阻塞拉取（`drain`），代理不设收集线程，下游统计状态仍只有一个线程访问。
+
 ### 一条队列一个语义，慢度不同的 IO 不共用
 
 慢 IO 一律经有界队列异步化，上游只付入队成本。慢度差一个量级的两类工作放进同一条队列，快的会被慢的一起背压丢掉，而且静默。
 
 - 队列满即丢任务并 warning，这是背压与容量告警的观察点；**不给无界选项**——无界只是把「丢一段」换成「吃光内存」。
+- **大对象队列按在途字节限额，不只按条数**：条数上限 × 单条最大字节才是真实内存上限，单条几百 MB 时 OOM 会先于丢任务发生。入队记账、执行完不论成败归还、入队失败当场归还；条数上限保留作双保险。例证：录制段队列 `queue_max_mb`（[SERVICE_RECORDING.md](SERVICE_RECORDING.md)）。
+- **缓冲深度只给需要的那一腿**：推理只要最新帧，积压的陈帧无用，深缓冲留给不许丢帧的录像腿；两腿共用一个上限会让停滞时多占一整份内存。
+- **容量规划按「几种停滞不同时发生」取最大，不相加**，并在启动时与可用内存比对、超了拒绝启动（[ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)）。
 - 可丢任务用短入队超时；不许丢的任务传大超时并检查返回值、失败时降级同步执行。
 - 例证：录制段 / 检测结果 / 告警 / 离线作业各一条队列（`recording`、`recording-detections`、`alarm_queue`、`offline`）。
 
@@ -80,13 +107,14 @@
 - **`task_queue.SerialTaskQueue`**：一条有界队列 + 一个消费线程；一次性（`stop()` 后不能再 `start()`）；谁用谁 new，不建全局注册表统一起停（停机顺序属于域）。任务异常在 `_execute` 记 error 吞掉，所以消费线程不包 `guarded_run`；不做重试、优先级、取消、结果回传。
 - **`worker_guard.guarded_run`**：包常驻 worker 的整个主循环，崩溃后冷却 2 s 重启、最多连续 3 次，`stop_event` 已置位则不再重启。与函数级重试互补；覆盖不了 segfault 与死锁。用在 `AlarmWorkerPool`、dispatcher、`ClientTemporalActor`、`VisualizationWorkerPool` 四处（容错分层见 [DESIGN_FAULT_TOLERANCE.md](DESIGN_FAULT_TOLERANCE.md)）。
 - **`pressure.PressureReporter`**：只描述、不决策的 `[PRESSURE]` 周期快照；只接状态型资源，事件照常直接打日志（见 [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md)）。
+- **`frame_ring.SharedFrameRing` / `SharedFrameRingView`**：跨进程送帧的共享内存环（上节原则的实现）；同时支持请求-应答式原地写回。
 
 ## 代码来源
 
 - `app/routers/api.py`（`asyncio.to_thread` 桥接）
 - `app/services/run_control/service.py`、`app/services/client/{service,queues}.py`
-- `app/services/inference/online/detection/{dispatcher,infer_proxy}.py`
+- `app/services/inference/online/detection/{dispatcher,infer_proxy}.py`、`app/services/inference/online/visualization/{render_proxy,render_child}.py`
 - `app/services/recording/{service,sweep_worker}.py`、`app/services/alarm/{service,alarm_worker}.py`、`app/services/inference/offline/service.py`
-- `app/services/utils/{task_queue,worker_guard,pressure}.py`
+- `app/services/utils/{task_queue,worker_guard,pressure,frame_ring}.py`
 - `app/services/stream/decoder.py`（SIGKILL `stop()`）、`app/main.py`（lifespan 嵌套）
 - `tests/test_api_concurrency.py`、`tests/test_teardown_identity_fence.py`、`tests/test_task_queue.py`

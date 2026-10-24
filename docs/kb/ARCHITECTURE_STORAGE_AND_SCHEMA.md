@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-10-17
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -23,7 +23,7 @@
 
 `FrameDetection` = `ts` + `by_source: Dict[流名, DetectorOutput]` + `frame_width` / `frame_height: Optional[int]` + 写回路由句柄 `cq`。三粒度：`DetBox`（一个框）→ `DetectorOutput`（一个检测器 × 一帧）→ `FrameDetection`（所有检测器 × 一帧）。
 
-- **分辨率沿每帧轴透传，不是检测器输出**：唯一采集点是 `RemoteInferProxy.submit` 从原始帧 `shape` 盖章进 `_Pending`（`online/detection/infer_proxy.py`），随 collector 组装、写回、落盘、回读走。缺省 None，消费方走默认兜底。online `temporal/impl/clean.py::_adapt_to_features` 与 offline `impl/clean.py::_collect_object_arrays` 都从这里读。
+- **分辨率沿每帧轴透传，不是检测器输出**：唯一采集点是 `RemoteInferProxy.submit` 从原始帧 `shape` 盖章进 `_Pending`（`online/detection/infer_proxy.py`），随 collector 组装、写回、落盘、回读走。缺省 None，消费方走默认兜底。online `temporal/impl/clean.py::_adapt_to_features` 与各离线策略包的特征读入层（如 `offline/impl/clean_bigru/features.py::_collect_object_arrays`）都从这里读；mstcn2-role-embed 只接受 640×480，不符即失败。
 - `DetectorOutput.metadata` 只装检测器级数据（`model`、失败时的 `error`）；`DetBox.extra` 当前零写者、不落盘。
 - **`cq` 只在 collector → 写回口这一段有值**：`online/detection/service.py::_write_back_results` 取走后置 None，留存的帧一律不带。
 
@@ -69,7 +69,7 @@
                 raw_segment_{ts_ms}.idx       raw 轨逐帧 ts sidecar（float64 原值），仅供离线反查
                 .stage_{track}_{ts_ms}/       insert_segment 暂存，事务结束即删
                 .clip_*.m3u8 / .export_*.m3u8 lab 临时 VOD 清单，用完即删（不匹配段名正则）
-    inference/  detections.jsonl / temporal.jsonl / label_probs.npz
+    inference/  detections.jsonl / temporal.jsonl / label_probs.npz / cache_{name}.npz
                 .{name}.tmp                   路线 C 暂存，换名后即消失
   .trash/                                 回收区（utils.fs.remove 的 rename 目标）
   .lab_exports/                           lab 临时件（位置可由 settings.lab_export_temp_dir 改）
@@ -120,13 +120,14 @@
 
 ### `inference/`：推理产物
 
-`_detection` 管检测层（L1）产物，`_temporal` 管时序层（L3）产物与逐帧概率。对外 7 个成员只收 `RunIdentity`：`append_detections` / `read_detections` / `read_temporal` / `write_temporal` / `read_label_probs` / `write_label_probs` / `query_has_offline_results`。刻意没有：`append_temporal`（`TemporalEvent` 零生产者）、`iter_detections`、`*_path`、删除成员。
+`_detection` 管检测层（L1）产物，`_temporal` 管时序层（L3）产物与逐帧概率，`_cache` 管离线策略的中间产物缓存。对外 9 个成员只收 `RunIdentity`：`append_detections` / `read_detections` / `read_temporal` / `write_temporal` / `read_label_probs` / `write_label_probs` / `read_offline_cache` / `write_offline_cache` / `query_has_offline_results`。刻意没有：`append_temporal`（`TemporalEvent` 零生产者）、`iter_detections`、`*_path`、删除成员。
 
 | 产物 | 货币 | 写路线 | 写者 | 读者 |
 |---|---|---|---|---|
 | `detections.jsonl` | `FrameDetection` | B（空批 no-op 且不建目录） | `RecordingService._write_detections`（detections 队列线程） | `OfflineRunner`；`runs` 可见判据 |
 | `temporal.jsonl` | `TemporalEvent \| TemporalSegment` | C；空序列照写空文件 | `OfflineRunner._replace_segments`（唯一写者） | `POST /ai/temporal`（只取 Segment）、`offline.cli query`、`query_has_offline_results` |
 | `label_probs.npz` | `LabelProbs` | C | `OfflineRunner._maybe_write_label_probs` | `POST /lab-f3m8/label-probs`、`query_has_offline_results` |
+| `cache_{name}.npz` | `{键: ndarray}`（内容归策略） | C | `OfflineRunner._save_cache`（经 `OfflineContext.save_cache`） | `OfflineRunner._load_cache`（经 `OfflineContext.load_cache`） |
 
 `detections.jsonl` 每行一帧（`_detection.py` 的 `_frame_to_record` / `_record_to_frame`）：
 
@@ -145,7 +146,13 @@
 - `temporal.jsonl` 每条一行，`type: "event" | "segment"` 判别；`read_temporal` 不排序（两型无共同时间键）。
 - **`write_temporal` 是整体替换**，调用方须 read → 合并 → write。`_replace_segments` 丢**全部**旧 `TemporalSegment`、保留 `TemporalEvent`（一个 stage 至多一个离线模型）。同 run 跨进程并发跑离线无互斥；「该 run 正在运行」由作业服务在提交时 409 挡。
 - `label_probs.npz`：`ts` float64（无损）、`probs` **float16**（有损，读回 float32）、`labels` unicode；`allow_pickle=False`；不存在返回 None，损坏直接抛。Runner 先写它、后写 `temporal.jsonl`：事实落盘即表示本次运行完成，旁路必须先到。
-- `query_has_offline_results`：`temporal.jsonl` 里有 `TemporalSegment`，或 `label_probs.npz` 存在（只判存在）；只有 `TemporalEvent` 不算。消费方：lab 任务列表的 `offline_steps`。
+- `query_has_offline_results`：`temporal.jsonl` 里有 `TemporalSegment`，或 `label_probs.npz` 存在（只判存在）；只有 `TemporalEvent` 不算，缓存也不算（缓存不是结果）。消费方：lab 任务列表的 `offline_steps`。
+
+`cache_{name}.npz`（`_cache.py`，`_layout.cache_name`）：
+
+- `name` 只许小写字母、数字、下划线，否则 `ValueError`。现有一份：mstcn2-role-embed 的 `cache_hand_embeddings.npz`（10 分钟 step 约 26 MiB）。
+- **存储层不认识内容**：键、dtype、是否仍有效都归写它的策略。盘上只许数值与定长字符串——写时拒对象数组（`ValueError`），读时 `allow_pickle=False`；损坏抛 `ValueError`。Runner 把读失败降级成「未命中」、写失败降级成 WARNING，缓存永远不让作业失败（[SERVICE_INFERENCE.md](SERVICE_INFERENCE.md)）。
+- 整体原子替换；不另设清理，随 run 目录 TTL 整 step 回收。
 
 ### 跨域 `tasks.py` 与读侧 `query_*`
 
@@ -182,7 +189,7 @@
 
 - `app/db/{database,tasks,alarms}.py`、`app/types/*.py`、`app/settings.py`（`storage_dir` / `storage_base_dir` / `lab_export_temp_dir`）
 - `app/storage/utils/{root,fs}.py`、`app/storage/{tasks,runs}.py`、`app/storage/hls/`、`app/storage/inference/`
-- `app/services/run_control/service.py`（`runs.allocate` 唯一调用点）、`app/services/recording/service.py`（hls 与 detections 写者）、`app/services/inference/offline/runner.py`（temporal / label_probs 写者）
+- `app/services/run_control/service.py`（`runs.allocate` 唯一调用点）、`app/services/recording/service.py`（hls 与 detections 写者）、`app/services/inference/offline/runner.py`（temporal / label_probs / cache 写者）
 - `app/services/inference/online/detection/{infer_proxy,service}.py`（分辨率盖章、写回口、降级帧不落盘）、`app/routers/utils/runs.py`
 - `app/services/lab/{clip_builder,step_exporter,runtime_config,service}.py`（`.lab_exports`、临时清单、孤儿扫描）
 - `app/daemons/cleanup/`、`config/persistence_config.yaml`

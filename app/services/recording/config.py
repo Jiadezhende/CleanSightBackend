@@ -1,6 +1,6 @@
 """recording 服务配置（`config/recording_config.yaml`）。
 
-两个旋钮，故是一个扁平 dataclass —— alarm 那边的三层嵌套是因为它有 storage / hls /
+三个旋钮，故是一个扁平 dataclass —— alarm 那边的三层嵌套是因为它有 storage / hls /
 alarm 三组参数，这里没有分组可言。
 
 **刻意没有 `workers`**：落盘走的 `SerialTaskQueue` 恒为一个消费线程，「同一 step 的写按提交序执行」
@@ -28,7 +28,12 @@ class RecordingConfig:
     # 所以不给无界选项：无界只是把"丢一段录像"换成"吃光内存"。
     queue_size: int = 100
 
-    # 从活跃 CQ 拉整段的扫描间隔（秒）。1s ≪ 段周期(≈10s) 且 ≪ CQ 缓冲容量(≈90s)。
+    # HLS 段队列在途字节上限（MB）。段是像素帧（10s × 30fps × 0.92MB ≈ 285MB/段），只按段数限长时
+    # 编码一停滞就先吃满内存才丢段；超过本值 `submit_segment` 拒收（丢段 + 告警，语义同队列满）。
+    # 默认 ≈ 15 路 raw + processed 各一段同时到期的突发量。须 ≥ 单段字节，否则段段被拒。
+    queue_max_mb: int = 8192
+
+    # 从活跃 run 拉整段的扫描间隔（秒）。1s ≪ 段周期(≈10s) 且 ≪ 帧队列容量(≈90s)。
     sweep_interval_seconds: float = 1.0
 
     @classmethod

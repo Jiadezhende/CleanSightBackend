@@ -88,7 +88,8 @@ frame_drop_total = Counter(
 - reason: 丢弃成因，在真丢帧点就地打标：
     'ingress_backpressure'（入口背压丢推理帧）、'decode_error'（解码/解析异常帧）、
     'infer_backlog'（推理阶段队列淘汰）、'raw_backpressure'（ca_raw 录制满）、
-    'hls_backpressure'（ca_processed HLS 满）、'stale_run'（拆除中 run 的迟到结果）
+    'hls_backpressure'（ca_processed HLS 满）、'stale_run'（拆除中 run 的迟到结果）、
+    'recording_budget'（段队列在途字节超预算，整段丢弃，按帧计）
 
 用途：
 - 监控丢帧率、按成因分组定位瓶颈（入口 / 推理 / 录制 / HLS）

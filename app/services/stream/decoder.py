@@ -14,7 +14,9 @@ from app.types.frame import Frame
 from .config import DecoderConfig
 from app.settings import settings
 from app.types.exceptions import FFmpegError, StreamConnectionError
+from app.services.session.topics import LATEST_RAW, RAW, READY
 from app.services.utils.metrics import frame_drop_total
+from app.services.utils.startup_latency import log_milestone
 
 DEFAULT_CHANNELS = 3
 
@@ -54,7 +56,7 @@ class FFmpegDecoder:
         task_id: int,     # 运行键（路由标识）
         stream_url: str,
         decoder_config: Optional[DecoderConfig] = None,
-        client_queues=None,
+        sess=None,
     ):
         self.manager = manager
         self.task_id = task_id
@@ -66,14 +68,17 @@ class FFmpegDecoder:
         self.height = self.config.default_height
         self.fps = self.config.default_fps
         self.pix_fmt = self.config.pix_fmt
-        self.chunk_read_size = self.config.chunk_read_size
         self.backpressure_ratio = self.config.backpressure_ratio
 
-        # 客户端队列实例（用于直接写入队列）
-        self.client_queues = client_queues
+        # 该 run 的 session：帧写进 RAW / LATEST_RAW / READY（None = 空跑，测试用）
+        self.sess = sess
+
+        # 检测抽帧「每 N 帧留 1」（N = settings.inference_decimation）。输入是 ffmpeg 规范化后的 CFR
+        # 流，按帧计数即精确均匀降采样，不依赖墙钟。计数器只由读线程读写，不加锁。
+        self._decimation = max(1, settings.inference_decimation)
+        self._decimate_counter = 0
 
         self.frame_size = self.width * self.height * DEFAULT_CHANNELS
-        self.buffer = bytearray()
         self.proc: Optional[subprocess.Popen] = None
         self._stop_event = threading.Event()
         self._stderr_thread: Optional[threading.Thread] = None
@@ -110,12 +115,12 @@ class FFmpegDecoder:
         return cmd
 
     def _err_identity(self) -> dict:
-        """异常身份三元组：task_id（路由）+ step_id/source_ip（从 cq 派生，None 守卫）。"""
-        cq = self.client_queues
+        """异常身份三元组：task_id（路由）+ step_id/source_ip（从 session 派生，None 守卫）。"""
+        info = self.sess.info if self.sess is not None else None
         return {
             "task_id": self.task_id,
-            "step_id": cq.run.step_id if cq and cq.run else None,
-            "source_ip": cq.source_ip if cq else None,
+            "step_id": info.run.step_id if info and info.run else None,
+            "source_ip": info.source_ip if info else None,
         }
 
     def start(self):
@@ -123,7 +128,6 @@ class FFmpegDecoder:
             if self.proc is not None and self.proc.poll() is None:
                 return
             self._stop_event.clear()
-            self.buffer = bytearray()
             cmd = self._build_cmd()
             try:
                 self.logger.info("starting ffmpeg: %s", " ".join(cmd))
@@ -297,16 +301,43 @@ class FFmpegDecoder:
         stdout = proc.stdout
         try:
             while not self._stop_event.is_set():
-                chunk = stdout.read(self.chunk_read_size)
-                if not chunk:
+                std = self._read_frame(stdout)
+                if std is None:
                     self.logger.debug("stream ended")
                     break
-                self.buffer.extend(chunk)
-                self._process_frames()
+                self._process_frame(std)
         except ValueError:
             pass  # pipe closed during stop() — expected on reconnect/shutdown
         except Exception:
             self.logger.exception("reader loop error")
+
+    def _read_frame(self, stdout) -> Optional[np.ndarray]:
+        """读满一整帧并返回 (H, W, C) 视图；EOF 返回 None（不足一帧的残帧丢弃）。
+
+        每帧**新建**数组、readinto 直写：内核拷贝期间不持 GIL，Python 侧不再拼帧。
+        不可复用同一块缓冲——ca_raw / ca_ready / 快照 / 录像都持有帧引用，复用会静默覆盖在排的帧。
+        依据见 docs/update/20261013_DECODER_READINTO.md。
+        """
+        arr = np.empty(self.frame_size, dtype=np.uint8)
+        view = memoryview(arr)
+        got = 0
+        while got < self.frame_size:
+            n = stdout.readinto(view[got:])
+            if not n:
+                return None
+            got += n
+        view.release()
+        # 读满即封为只读：同一数组被录像 / 推理 / 实时画面共用，误写一处会静默污染全部下游
+        arr.flags.writeable = False
+        return arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
+
+    def _take_for_inference(self) -> bool:
+        """整数倍率选帧：每输入帧 +1，攒满 N 帧放行 1 帧（保留率精确 = 1/N）。"""
+        self._decimate_counter += 1
+        if self._decimate_counter < self._decimation:
+            return False
+        self._decimate_counter = 0
+        return True
 
     def _should_drop_frame(self, pending_count: int, queue_capacity: int) -> bool:
         """
@@ -325,78 +356,72 @@ class FFmpegDecoder:
         ratio = pending_count / float(queue_capacity)
         return ratio >= self.backpressure_ratio
 
-    def _process_frames(self):
+    def _process_frame(self, std: np.ndarray):
         """
-        处理帧数据：解码 → 背压检测 → 写入队列
+        处理一帧：背压检测 → 写入队列
 
-        架构改进：
-        1. 直接从 buffer 解析完整帧
-        2. 根据 CA-Ready-Queue（推理队列）的占用率决定是否丢帧
-        3. 写入两个队列：
+        1. 根据 CA-Ready-Queue（推理队列）的占用率决定是否丢帧
+        2. 写入两个队列：
            - CA-Raw-Queue: 原始帧（用于落盘生成 HLS）
            - CA-Ready-Queue: 原始帧（用于推理）
         """
-        while len(self.buffer) >= self.frame_size:
-            frame_bytes = bytes(self.buffer[: self.frame_size])
-            del self.buffer[: self.frame_size]
+        try:
+            # 1. 背压检测（检查 CA-Ready-Queue 而非 CA-Raw-Queue）
+            pending_count = self.manager.get_pending_count(self.task_id)
 
-            try:
-                # 1. 解析帧
-                arr = np.frombuffer(frame_bytes, dtype=np.uint8)
-                std = arr.reshape((self.height, self.width, DEFAULT_CHANNELS))
+            # 获取队列容量
+            sess = self.sess
+            queue_capacity = sess.channel(READY).maxlen if sess is not None else 0
 
-                # 2. 背压检测（检查 CA-Ready-Queue 而非 CA-Raw-Queue）
-                pending_count = self.manager.get_pending_count(self.task_id)
-
-                # 获取队列容量
-                queue_capacity = 0
-                if self.client_queues is not None:
-                    queue_capacity = self.client_queues.ca_maxlen
-
-                # 判断是否应该丢帧（仅针对推理队列）
-                drop_inference = self._should_drop_frame(pending_count, queue_capacity)
-                if drop_inference:
-                    self.frames_dropped += 1
-                    frame_drop_total.labels(reason="ingress_backpressure").inc()
-                    # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
-                    if self.frames_dropped % 100 == 0:
-                        self.logger.debug(
-                            "[BACKPRESSURE] dropping inference frame (pending=%s/%s, dropped=%s)",
-                            pending_count,
-                            queue_capacity,
-                            self.frames_dropped,
-                        )
-
-                # 3. 写入队列（如果 client_queues 可用）
-                if self.client_queues is not None:
-                    now = time.time()
-                    frame_data_obj = Frame(timestamp=now, frame=std)
-
-                    # 3.1 写入原始队列（全帧率，用于落盘；背压时也写入，保证 HLS 录制完整）
-                    if self.client_queues.append_ca_raw(frame_data_obj):
-                        self.frames_written_to_raw += 1
-
-                    # 3.2 写入推理队列（降频；背压时跳过）
-                    if not drop_inference:
-                        if self.client_queues.append_ca_ready_with_throttle(frame_data_obj):
-                            self.frames_written_to_ready += 1
-
-                self.frames_received += 1
-
-                # 启动延迟埋点 A：拉流建立后首帧解码到手（仅首帧触发一次）
-                if self.frames_received == 1 and self.client_queues is not None:
-                    self.client_queues.mark_startup_milestone("first_frame")
-
-                # log every N frames to observe liveness
-                if self.frames_received % 300 == 0:
-                    self.logger.info(
-                        "received %s frames (raw=%s, ready=%s, dropped=%s)",
-                        self.frames_received,
-                        self.frames_written_to_raw,
-                        self.frames_written_to_ready,
+            # 判断是否应该丢帧（仅针对推理队列）
+            drop_inference = self._should_drop_frame(pending_count, queue_capacity)
+            if drop_inference:
+                self.frames_dropped += 1
+                frame_drop_total.labels(reason="ingress_backpressure").inc()
+                # 仅在每100帧打印一次（避免日志洪水），使用 DEBUG 级别
+                if self.frames_dropped % 100 == 0:
+                    self.logger.debug(
+                        "[BACKPRESSURE] dropping inference frame (pending=%s/%s, dropped=%s)",
+                        pending_count,
+                        queue_capacity,
                         self.frames_dropped,
                     )
-            except Exception:
-                self.frames_dropped += 1
-                frame_drop_total.labels(reason="decode_error").inc()
-                self.logger.exception("error processing frame bytes")
+
+            # 2. 写入队列（如果绑定了 session）
+            if sess is not None:
+                now = time.time()
+                frame_data_obj = Frame(timestamp=now, frame=std)
+
+                # 2.1 写入原始队列（全帧率，用于落盘；背压时也写入，保证 HLS 录制完整）
+                if sess.channel(RAW).push(frame_data_obj):
+                    self.frames_written_to_raw += 1
+                # 本 run 第一帧：LATEST_RAW 写之前为空（decoder 是唯一写方，重启后的新 decoder 也不重报）
+                first = sess.channel(LATEST_RAW).get() is None
+                if sess.channel(LATEST_RAW).set(frame_data_obj) and first:
+                    # 启动延迟埋点 A：拉流建立后首帧解码到手
+                    info = sess.info
+                    log_milestone(
+                        "first_frame", task_id=info.run.task_id, step_id=info.run.step_id,
+                        started_at=info.started_at,
+                    )
+
+                # 2.2 写入推理队列（降频；背压时跳过）
+                if not drop_inference and self._take_for_inference():
+                    if sess.channel(READY).push(frame_data_obj):
+                        self.frames_written_to_ready += 1
+
+            self.frames_received += 1
+
+            # log every N frames to observe liveness
+            if self.frames_received % 300 == 0:
+                self.logger.info(
+                    "received %s frames (raw=%s, ready=%s, dropped=%s)",
+                    self.frames_received,
+                    self.frames_written_to_raw,
+                    self.frames_written_to_ready,
+                    self.frames_dropped,
+                )
+        except Exception:
+            self.frames_dropped += 1
+            frame_drop_total.labels(reason="decode_error").inc()
+            self.logger.exception("error processing frame")
