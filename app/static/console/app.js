@@ -6,6 +6,7 @@ import { fmtWall } from './core/format.js';
 import { go, route } from './core/router.js';
 import { dropToast, ui } from './core/ui.js';
 import { pendingPage } from './pages/pending.js';
+import { RunPage, runCrumbs } from './pages/run.js';
 import { TasksPage, tasksCrumbs } from './pages/tasks.js';
 
 const { createApp, ref, computed, watch, onMounted } = Vue;
@@ -22,7 +23,7 @@ const ICON = {
 const PAGES = {
   tasks: { component: TasksPage, crumbs: tasksCrumbs },
   live: { component: pendingPage('实时监控', '/ui-f3m8/admin/'), crumbs: () => [{ t: '实时监控' }] },
-  run: { component: pendingPage('回放工作台', '/ui-f3m8/lab/'), crumbs: () => [{ t: '任务总览', to: '/tasks' }, { t: '回放' }] },
+  run: { component: RunPage, crumbs: runCrumbs, fill: true },
   offline: { component: pendingPage('分析作业', '/ui-f3m8/admin/'), crumbs: () => [{ t: '分析作业' }] },
   system: { component: pendingPage('系统运维', '/ui-f3m8/admin/'), crumbs: () => [{ t: '系统运维' }] },
 };

@@ -29,3 +29,21 @@ export function indexJobs(jobs) {
   }
   return out;
 }
+
+/** timeline 的告警事件 → 事件行（与离线违规共用一种形状）。媒体刻度取请求的那条轨（raw）。 */
+export function adaptTimelineAlarm(e) {
+  return {
+    id: `alarm:${e.alarm_id}`,
+    source: 'alarm',
+    kind: e.alarm_type,
+    level: e.severity,
+    message: e.message,
+    mediaMs: e.media_offset_ms,
+    wallMs: e.ts_ms,
+  };
+}
+
+/** timeline 的断流点：媒体轴上宽度为零的位置 + 墙钟空洞两端。 */
+export function adaptGap(g) {
+  return { mediaMs: g.media_ms, wallFromMs: g.wall_from_ms, wallToMs: g.wall_to_ms, gapMs: g.gap_ms };
+}
