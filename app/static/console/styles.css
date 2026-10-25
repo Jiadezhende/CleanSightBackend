@@ -184,3 +184,21 @@ table.tb { width: 100%; border-collapse: collapse; }
 .ev .src { color: var(--muted); font-size: 11px; margin-left: auto; }
 .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
 .box { background: #f6f7f9; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+
+/* ===== 送标面板 ===== */
+.ls-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2); margin-bottom: 12px; }
+.sinp { height: 26px; width: 70px; border-radius: 6px; border: 1px solid var(--line); padding: 0 6px; text-align: center; }
+.dk-sec { margin-bottom: 16px; }
+.dk-sec h5 { margin: 0 0 8px; font-size: 12px; color: var(--text2); font-weight: 500; display: flex; align-items: center; gap: 8px; }
+.stb { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+.stb th { color: var(--text2); font-weight: 500; text-align: left; padding: 6px; border-bottom: 1px solid var(--line); }
+.stb td { padding: 7px 6px; border-bottom: 1px solid var(--line2); vertical-align: middle; }
+.stb tr:hover td { background: #f6f7f9; }
+.stb tr.sub-row td { padding-top: 0; font-size: 11.5px; }
+.stb tr:has(+ .sub-row) td { border-bottom: 0; }
+.st-ok { color: var(--ok); }
+.st-ok a { color: var(--ok); }
+.st-bad { color: var(--bad); }
+.st-new { color: var(--accent); }
+.st-send { color: var(--warn); }
+.errline { margin: 0 0 8px; padding: 7px 10px; border-radius: 8px; background: #fef2f2; border: 1px solid #fecaca; color: var(--bad); font-size: 12px; }

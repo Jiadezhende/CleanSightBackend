@@ -1,4 +1,4 @@
-// 回放工作台 #/run/{task}/{step}/{run|latest}?t=&mode=raw|processed|sbs&ev=
+// 回放工作台 #/run/{task}/{step}/{run|latest}?t=&mode=raw|processed|sbs&ev=&panel=review|label
 // 进入时把 run 落成具体 run_id 写回 URL，之后本页所有请求都带这个 run_id。
 import { adaptGap, adaptTimelineAlarm } from '../api/adapters.js';
 import { stageOf } from '../api/catalog.js';
@@ -10,6 +10,7 @@ import { fmtDur, fmtMedia, fmtWall, fmtWallMs } from '../core/format.js';
 import { lvCls, lvColor } from '../core/levels.js';
 import { replacePath, replaceQuery, route } from '../core/router.js';
 import { toast } from '../core/ui.js';
+import { useLabel } from './run-label.js';
 
 const { ref, shallowRef, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } = Vue;
 
@@ -110,13 +111,15 @@ export const RunPage = {
           <div v-for="(l, i) in hover.lines" :key="i" :class="i === 0 ? 't1' : 't2'">{{ l }}</div>
         </div>
       </div>
-      <div class="keys">空格 播放/暂停 · ←/→ 前后 1 秒 · 滚轮缩放、拖动平移</div>
+      <div class="keys">空格 播放/暂停 · ←/→ 前后 1 秒 · 滚轮缩放、拖动平移 · 在「送标片段」上拖选即生成片段，拖边缘微调</div>
     </div>
 
     <aside class="dock">
       <div class="dock-tabs">
-        <button class="on">事件 <span class="cnt" :class="{hot: events.length}">{{ events.length }}</span></button>
+        <button :class="{on: panel==='review'}" @click="setPanel('review')">事件 <span class="cnt" :class="{hot: events.length}">{{ events.length }}</span></button>
+        <button :class="{on: panel==='label'}" @click="setPanel('label')">送标 <span class="cnt">{{ label.clips.value.length }}</span></button>
       </div>
+      <template v-if="panel==='review'">
       <div class="dock-body">
         <div v-for="ev in events" :key="ev.id" class="ev" :class="{on: selEv === ev.id}" @click="pickEvent(ev)">
           <span class="ico" :class="ev.source">{{ ev.source === 'alarm' ? '▼' : '◆' }}</span>
@@ -127,6 +130,62 @@ export const RunPage = {
         </div>
         <div v-if="!events.length" class="empty">{{ loading ? '加载中…' : '本 run 没有事件' }}</div>
       </div>
+      <div class="dock-foot" v-if="selEvObj && selEvObj.mediaMs != null">
+        <button class="sbtn primary" style="width:100%;justify-content:center" :disabled="!canMark()" @click="label.clipFromEvent(selEvObj)">生成前后 5 秒的送标片段</button>
+        <div class="note" v-if="!canMark()">processed 视图下不能打点：送标只裁 raw，切回 raw 或并排对照。</div>
+      </div>
+      </template>
+
+      <template v-if="panel==='label'">
+        <div class="dock-body">
+          <div class="ls-row">
+            <i class="dot" :class="lsDot"></i>{{ lsText }}
+            <span style="margin-left:auto">project</span>
+            <input class="sinp mono" type="number" min="0" v-model.number="label.project.value" title="默认值取自 LS 配置">
+          </div>
+          <div class="dk-sec">
+            <h5>送标片段 <span class="mono" style="margin-left:auto">{{ label.clips.value.length }}/{{ label.limits.max_clips }} · {{ fmtDur(label.clipTotal.value) }}/{{ fmtDur(label.limits.max_total_ms) }}</span></h5>
+            <table class="stb" v-if="label.clips.value.length">
+              <thead><tr><th>#</th><th>区间</th><th>时长</th><th>状态</th><th></th></tr></thead>
+              <tbody>
+                <template v-for="(c, i) in label.clips.value" :key="c.id">
+                  <tr @click="seek(c.s)" style="cursor:pointer">
+                    <td class="mono">{{ i + 1 }}</td>
+                    <td class="mono">{{ fmtMedia(c.s) }}–{{ fmtMedia(c.e) }}</td>
+                    <td class="mono">{{ fmtDur(c.e - c.s) }}</td>
+                    <td>
+                      <span v-if="c.status==='ok'" class="st-ok">✓ <a v-if="label.lsTaskUrl(c)" :href="label.lsTaskUrl(c)" target="_blank" @click.stop>LS#{{ c.lsId }}</a><span v-else>LS#{{ c.lsId }}</span></span>
+                      <span v-else-if="c.status==='fail'" class="st-bad">✗ 失败</span>
+                      <span v-else-if="c.status==='sending'" class="st-send">上传中…</span>
+                      <span v-else class="st-new">待提交</span>
+                    </td>
+                    <td style="text-align:right">
+                      <span v-if="c.status==='ok'" class="sub">已锁定</span>
+                      <a v-else-if="c.status!=='sending'" class="sub" @click.stop="label.removeClip(i)" title="删除">✕</a>
+                    </td>
+                  </tr>
+                  <tr v-if="c.status!=='ok' && c.status!=='sending' && (c.status==='fail' || label.gapsIn(c.s, c.e).length)" class="sub-row">
+                    <td></td>
+                    <td colspan="4">
+                      <span :class="c.status==='fail' ? 'st-bad' : 'st-send'">{{ c.status==='fail' ? c.errMsg : '跨越断流，提交会失败' }}</span>
+                      <a v-if="label.gapsIn(c.s, c.e).length" style="margin-left:10px" @click.stop="label.splitClip(i)">按断点拆分</a>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <div v-else class="box sub">还没有片段。在时间轴「送标片段」上拖选，或在「事件」里选一条后生成。</div>
+          </div>
+        </div>
+        <div class="dock-foot">
+          <div class="errline" v-if="label.clipErr.value">{{ label.clipErr.value }}</div>
+          <button class="sbtn primary" style="width:100%;justify-content:center;height:34px"
+            :disabled="label.submitting.value || !label.todoCount.value || !!label.clipErr.value" @click="label.submit()">
+            {{ label.submitting.value ? '裁剪并上传中… 已等待 ' + label.waited.value + 's'
+              : (label.doneCount.value ? '提交未成功的 ' + label.todoCount.value + ' 段' : '提交送标（' + label.todoCount.value + ' 段）') }}
+          </button>
+        </div>
+      </template>
     </aside>
   </div>
 </div>`,
@@ -145,6 +204,7 @@ export const RunPage = {
     const drift = ref(null);
     const procHasFrame = ref(true);
     const selEv = ref(null);
+    const panel = ref(route.query.panel === 'label' ? 'label' : 'review');
     const gapFlash = ref(null);
     const hover = ref(null);
     const dlOpen = ref(false);
@@ -159,6 +219,20 @@ export const RunPage = {
     let loadSeq = 0;
 
     const alias = computed(() => stageOf(ids.step).alias);
+    const selEvObj = computed(() => events.value.find((e) => e.id === selEv.value) || null);
+    const canMark = () => mode.value !== 'processed';
+    const label = useLabel({
+      ids, gaps, canMark,
+      durationMs: () => (meta.value ? meta.value.durationMs : 0),
+      invalidate: () => { if (timeline) timeline.invalidate(); },
+    });
+    const lsDot = computed(() => (label.ls.reachable ? '' : (label.ls.configured === null && !label.ls.error ? 'off' : 'bad')));
+    const lsText = computed(() => {
+      const s = label.ls;
+      if (s.reachable) return 'LS 可达';
+      if (s.configured === false) return 'LS 未配置';
+      return s.error ? `LS 不可达：${s.error}` : 'LS 检查中…';
+    });
     const wallNow = computed(() => (maps.value.raw ? maps.value.raw.wallAt(pos.value) : null));
     const noFrameReason = computed(() => {
       const { raw, processed: p } = maps.value;
@@ -186,6 +260,7 @@ export const RunPage = {
         if (tl.run_id == null || !tl.media_duration_ms) throw new Error('该 step 没有可回放的 raw 录像');
         if (String(tl.run_id) !== runParam) replacePath(`/run/${task}/${step}/${tl.run_id}`);
         Object.assign(ids, { task: Number(task), step: Number(step), run: tl.run_id });
+        label.load();
 
         const rawText = await api.playlistText(task, step, tl.run_id, 'raw');
         const procText = await api.playlistText(task, step, tl.run_id, 'processed').catch((e) => {
@@ -242,6 +317,17 @@ export const RunPage = {
       player.setMode(m);
       mode.value = m;
       replaceQuery({ mode: m });
+    }
+
+    function setPanel(p) {
+      panel.value = p;
+      replaceQuery({ panel: p });
+      if (p === 'label') label.checkLs();
+    }
+
+    function onPick(item) {
+      if (item.kind === 'clip') seek(item.clip.s);
+      else pickEvent(item);
     }
 
     function pickEvent(ev) {
@@ -316,11 +402,12 @@ export const RunPage = {
       player.onError = (msg) => toast(msg, 'bad', null, 6000);
       timeline = new Timeline(tlCv.value, tlWrap.value, {
         onSeek: seek,
-        onPick: pickEvent,
+        onPick,
         onHover: (h) => { hover.value = h; },
         wallAt: (m) => (maps.value.raw ? maps.value.raw.wallAt(m) : null),
       });
-      timeline.setLanes([eventLane(() => events.value, () => selEv.value)]);
+      timeline.setLanes([eventLane(() => events.value, () => selEv.value), label.lane]);
+      if (panel.value === 'label') label.checkLs();
       window.addEventListener('keydown', onKey);
       document.addEventListener('click', closeDl);
       raf = requestAnimationFrame(loop);
@@ -331,12 +418,13 @@ export const RunPage = {
       window.removeEventListener('keydown', onKey);
       document.removeEventListener('click', closeDl);
       if (player) player.destroy();
+      label.dispose();
     });
 
     return {
       ids, meta, gaps, events, loading, error, mode, hasProc, playing, pos, rate, drift, procHasFrame, selEv, gapFlash, hover,
-      dlOpen, rawV, procV, tlCv, tlWrap, alias, wallNow, noFrameReason,
-      toggle, setMode, pickEvent, fit, downloadUrl, onDownload,
+      dlOpen, rawV, procV, tlCv, tlWrap, alias, wallNow, noFrameReason, panel, selEvObj, label, lsDot, lsText,
+      toggle, setMode, setPanel, pickEvent, seek, canMark, fit, downloadUrl, onDownload,
       fmtDur, fmtMedia, fmtWall, fmtWallMs, lvCls,
     };
   },

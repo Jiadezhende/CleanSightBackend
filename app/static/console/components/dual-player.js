@@ -137,8 +137,7 @@ export class DualPlayer {
     const url = this.urls[track];
     const seekOnReady = () => { if (startSec > 0) video.currentTime = startSec; };
     if (window.Hls && window.Hls.isSupported()) {
-      const hls = new window.Hls({ maxBufferLength: 30 });
-      hls.on(window.Hls.Events.MANIFEST_PARSED, seekOnReady);
+      const hls = new window.Hls({ maxBufferLength: 30, startPosition: startSec > 0 ? startSec : -1 });
       hls.on(window.Hls.Events.ERROR, (_e, data) => this._onHlsError(track, data));
       hls.loadSource(url);
       hls.attachMedia(video);
