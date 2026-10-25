@@ -1,0 +1,1835 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CleanSight 控制台 · 交互样例（假数据）</title>
+<style>
+:root{
+  --bg:#f4f5f7; --card:#fff; --line:#e5e7eb; --line2:#f0f1f4; --text:#111827; --text2:#4b5563; --muted:#9ca3af;
+  --side:#0b1220; --side2:#131c30; --accent:#2563eb; --accent-weak:#eef3ff;
+  --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
+  --s0:#f4f5f7; --s1:#ffffff; --s2:#f6f7f9; --s3:#eceff3; --sline:#e5e7eb; --stext:#111827; --smuted:#6b7280;
+  --lv-high:#e5484d; --lv-med:#f76b15; --lv-warn:#e5a50a; --lv-info:#8b93a1;
+  --mono:"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--text);background:var(--bg)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+button,select,input{font:inherit;color:inherit}
+a{color:var(--accent);text-decoration:none;cursor:pointer}
+[v-cloak]{display:none}
+
+/* ===== 外壳 ===== */
+.app{display:grid;grid-template-columns:68px 1fr;height:100vh}
+.side{background:var(--side);display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:4px}
+.logo{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,#3b82f6,#06b6d4);display:grid;place-items:center;color:#fff;font-weight:800;letter-spacing:.5px;margin-bottom:14px}
+.nav{position:relative;width:54px;height:54px;border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;color:#7f8aa1;cursor:pointer;font-size:11px;user-select:none}
+.nav:hover{background:var(--side2);color:#dbe2f0}
+.nav.on{background:#1b2945;color:#fff}
+.nbadge{position:absolute;top:5px;right:6px;min-width:16px;height:16px;border-radius:8px;background:#2563eb;color:#fff;font-size:10px;display:grid;place-items:center;padding:0 4px}
+.dl-menu{position:absolute;right:0;top:34px;background:var(--s1);border:1px solid var(--sline);border-radius:8px;padding:4px;z-index:20;min-width:170px;box-shadow:0 10px 24px rgba(0,0,0,.12)}
+.dl-menu a{display:block;padding:7px 10px;border-radius:6px;color:var(--stext)}
+.dl-menu a:hover{background:var(--s3)}
+.dl-menu a.dis{opacity:.4;cursor:not-allowed}
+.nav .ico{width:20px;height:20px;display:block}
+.nav .ico svg{width:20px;height:20px;display:block}
+.side-foot{margin-top:auto;position:relative}
+.demo-btn{width:46px;height:26px;border-radius:7px;border:1px dashed #3a4762;background:transparent;color:#8792aa;font-size:11px;cursor:pointer}
+.demo-pop{position:absolute;left:56px;bottom:0;width:250px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:12px;z-index:80;color:var(--text)}
+.demo-pop h4{margin:0 0 8px;font-size:12px;color:var(--text2)}
+.demo-pop label{display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.top{height:50px;flex:none;background:var(--card);border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 20px;gap:12px}
+.crumb{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text2);white-space:nowrap}
+.crumb b{color:var(--text);font-weight:600}
+.crumb .sep{color:#c4c9d2}
+.lights{margin-left:auto;display:flex;gap:8px}
+.light{display:flex;align-items:center;gap:7px;padding:4px 11px;border-radius:999px;border:1px solid var(--line);cursor:pointer;color:var(--text2);font-size:12px;position:relative;background:#fff}
+.light:hover{border-color:#cfd5de}
+.light.bad{border-color:#f5c2c2;background:#fff5f5;color:var(--bad)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--ok);flex:none}
+.dot.bad{background:var(--bad);box-shadow:0 0 0 3px #fde2e2;animation:pulse 1.4s infinite}
+.dot.warn{background:var(--warn)}
+.dot.off{background:#cbd2dc}
+.dot.live{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.2);animation:pulse 1.4s infinite}
+@keyframes pulse{50%{opacity:.45}}
+.pop{position:absolute;right:0;top:36px;width:360px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.14);padding:14px;z-index:60;cursor:default;color:var(--text);font-size:12px;line-height:1.7}
+.pop h4{margin:0 0 6px;font-size:13px}
+.pop .row{display:flex;justify-content:space-between;gap:12px;border-top:1px solid var(--line2);padding:4px 0}
+.pop .row span:first-child{color:var(--text2)}
+.content{flex:1;overflow:auto;min-height:0}
+.content.studio{background:var(--s0);overflow:hidden}
+.page{padding:18px 22px 40px;max-width:1520px;margin:0 auto}
+.page-h{display:flex;align-items:center;gap:12px;margin:2px 0 14px}
+.page-h h2{margin:0;font-size:18px}
+.sub{color:var(--muted);font-size:12px}
+
+/* ===== 通用控件 ===== */
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px}
+.card-h{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line2)}
+.card-h h3{margin:0;font-size:14px}
+.card-b{padding:14px 16px}
+.btn{height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.btn:hover{border-color:#c7cdd6;background:#fafbfc}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#1d4ed8}
+.btn.danger{color:var(--bad)}
+.btn.sm{height:24px;padding:0 8px;font-size:12px;border-radius:6px}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+.seg button{border:0;background:transparent;padding:0 12px;height:28px;cursor:pointer;color:var(--text2);border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--accent-weak);color:var(--accent);font-weight:600}
+.inp{height:30px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:#fff;outline:none}
+.inp:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.lv{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:5px;font-size:11px;font-weight:600;white-space:nowrap}
+.lv.high{background:rgba(229,72,77,.12);color:var(--lv-high)}
+.lv.med{background:rgba(247,107,21,.12);color:var(--lv-med)}
+.lv.warn{background:rgba(229,165,10,.15);color:#b7820a}
+.lv.info{background:rgba(139,147,161,.15);color:#6b7280}
+.tag{display:inline-flex;flex-wrap:nowrap;vertical-align:middle;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:6px;font-size:12px;background:#f1f3f6;color:var(--text2);white-space:nowrap}
+.tag.tg-run{background:#fee2e2;color:#b91c1c}
+.tag.ok{background:#dcfce7;color:#15803d}
+.tag.q{background:#e0e7ff;color:#4338ca}
+.tag.bad{background:#fee2e2;color:#b91c1c}
+.tag.mute{background:#f1f3f6;color:#8a93a3}
+table.tb{width:100%;border-collapse:collapse}
+.tb th{font-weight:500;color:var(--text2);font-size:12px;text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);background:#fafbfc;position:sticky;top:0}
+.tb td{padding:10px 12px;border-bottom:1px solid var(--line2);vertical-align:middle}
+.tb tr.click{cursor:pointer}
+.tb tr.click:hover td{background:#f8faff}
+.tb tr.flash td{animation:rowflash 2.4s}
+@keyframes rowflash{0%,40%{background:#e8f7ee}}
+.empty{padding:28px;text-align:center;color:var(--muted)}
+
+/* ===== 总览 ===== */
+.toolbar{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line2);flex-wrap:wrap}
+.chk{display:inline-flex;align-items:center;gap:6px;color:var(--text2);cursor:pointer;user-select:none}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 4px 0 9px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;font-size:12px;white-space:nowrap;transition:.12s}
+.chip:hover{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.08)}
+.chip .sid{font-weight:650;color:var(--text)}
+.chip .al{color:var(--text2)}
+.chip .tr{color:var(--muted);font-size:11px}
+.chip .off{height:20px;border-radius:5px;padding:0 6px;display:inline-flex;align-items:center;gap:3px;font-size:11px}
+.off.done{background:#dcfce7;color:#15803d}
+.off.viol{background:#fef3c7;color:#a16207}
+.off.running{background:#dbeafe;color:#1d4ed8}
+.off.queued{background:#e0e7ff;color:#4338ca}
+.off.failed{background:#fee2e2;color:#b91c1c}
+.off.none{background:#f3f4f6;color:#9ca3af}
+.off.live{background:#fee2e2;color:#b91c1c}
+
+/* ===== 工作台 ===== */
+.wb{display:flex;flex-direction:column;height:100%;color:var(--stext)}
+.run-head{display:flex;align-items:center;gap:14px;padding:10px 18px;border-bottom:1px solid var(--sline);background:var(--s1);flex:none}
+.rh-title{display:flex;align-items:center;gap:8px;font-size:14px;white-space:nowrap}
+.rh-title b{color:var(--text)}
+.alias{font-size:11px;font-weight:700;letter-spacing:.5px;padding:2px 7px;border-radius:5px;background:#e0e7ff;color:#3730a3}
+.run-sel{height:28px;border-radius:7px;background:var(--s2);border:1px solid var(--sline);color:var(--stext);padding:0 8px}
+.rh-meta{color:var(--smuted);font-size:12px;white-space:nowrap}
+.gapinfo{color:var(--bad)}
+.sseg{display:inline-flex;border:1px solid var(--sline);border-radius:8px;overflow:hidden;margin-left:auto}
+.sseg button{border:0;background:var(--s2);padding:0 12px;height:28px;cursor:pointer;color:var(--smuted);border-right:1px solid var(--sline)}
+.sseg button:last-child{border-right:0}
+.sseg button.on{background:var(--accent-weak);color:var(--accent);font-weight:600}
+.sseg button:disabled{opacity:.35;cursor:not-allowed}
+.sbtn{height:28px;padding:0 10px;border-radius:7px;border:1px solid var(--sline);background:var(--s2);color:var(--stext);cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.sbtn:hover{background:var(--s3)}
+.sbtn.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+.sbtn.primary:hover{background:#1d4ed8}
+.sbtn.sm{height:24px;padding:0 8px;font-size:12px}
+.sbtn:disabled{opacity:.4;cursor:not-allowed}
+.run-body{flex:1;display:grid;grid-template-columns:1fr 390px;min-height:0}
+.stage{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:auto;padding:12px 14px 10px}
+.players{display:grid;gap:10px;position:relative}
+.players.sbs{grid-template-columns:1fr 1fr}
+.players.raw,.players.processed{grid-template-columns:1fr;max-width:calc(46vh * 16 / 9);width:100%;margin:0 auto}
+.pv{position:relative;border-radius:10px;overflow:hidden;background:#000;aspect-ratio:16/9}
+.pv canvas{width:100%;height:100%;display:block}
+.pv-tag{position:absolute;left:10px;top:9px;font-size:11px;font-weight:700;letter-spacing:.6px;padding:2px 8px;border-radius:5px;background:rgba(0,0,0,.55);color:#e5e7eb}
+.pv-tag.main{background:rgba(37,99,235,.85);color:#fff}
+.gap-flash{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:rgba(220,38,38,.92);color:#fff;padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600;z-index:3}
+.transport{display:flex;align-items:center;gap:10px;padding:10px 2px 8px}
+.play{width:34px;height:34px;border-radius:50%;border:0;background:var(--accent);color:#fff;cursor:pointer;display:grid;place-items:center;font-size:14px}
+.tnow{font-size:15px;color:var(--text);font-weight:600}
+.tdur{color:var(--smuted)}
+.twall{color:var(--smuted);font-size:12px;padding:2px 8px;border:1px solid var(--sline);border-radius:6px}
+.tl-wrap{position:relative;border:1px solid var(--sline);border-radius:10px;overflow:hidden;background:var(--s1);flex:none}
+.tl-wrap canvas{display:block;width:100%;touch-action:none}
+.tl-tip{position:absolute;pointer-events:none;background:rgba(10,14,22,.96);border:1px solid #33405c;border-radius:8px;padding:7px 10px;font-size:12px;color:#e5e7eb;white-space:nowrap;z-index:5;box-shadow:0 8px 20px rgba(0,0,0,.35)}
+.tl-tip .t1{color:#fff;font-weight:600}
+.tl-tip .t2{color:#9aa4b8}
+.keys{color:var(--muted);font-size:11.5px;padding:8px 2px 0;display:flex;flex-wrap:wrap;gap:4px 14px}
+
+.dock{border-left:1px solid var(--sline);background:var(--s1);display:flex;flex-direction:column;min-height:0}
+.dock-tabs{display:flex;border-bottom:1px solid var(--sline);flex:none}
+.dock-tabs button{flex:1;height:42px;border:0;background:transparent;color:var(--smuted);cursor:pointer;border-bottom:2px solid transparent;display:flex;align-items:center;justify-content:center;gap:6px}
+.dock-tabs button.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.cnt{font-size:11px;min-width:18px;height:18px;border-radius:9px;background:var(--s3);color:var(--text2);display:inline-grid;place-items:center;padding:0 5px}
+.cnt.hot{background:#fee2e2;color:#b91c1c}
+.dock-body{flex:1;overflow:auto;padding:12px 14px;min-height:0}
+.dock-foot{flex:none;border-top:1px solid var(--sline);padding:12px 14px;background:var(--s1)}
+.ev{display:grid;grid-template-columns:16px 58px 1fr;gap:4px 8px;padding:9px 10px;border-radius:9px;cursor:pointer;border:1px solid transparent;margin-bottom:4px}
+.ev:hover{background:var(--s2)}
+.ev.on{background:var(--accent-weak);border-color:#bfd0f5}
+.ev .ico{font-size:12px;line-height:20px;text-align:center}
+.ev .ico.alarm{color:var(--bad)}
+.ev .ico.viol{color:#d97706}
+.ev .et{line-height:20px;color:var(--text2);font-size:12px}
+.ev .et.whole{color:var(--smuted)}
+.ev .em{grid-column:2/4;color:var(--text2);font-size:12.5px}
+.ev .ek{display:flex;align-items:center;gap:6px;line-height:20px}
+.ev .ek .kn{color:var(--text);font-weight:600;font-size:12.5px}
+.ev .src{color:var(--smuted);font-size:11px;margin-left:auto}
+.dk-sec{margin-bottom:16px}
+.dk-sec h5{margin:0 0 8px;font-size:12px;color:var(--smuted);font-weight:500;display:flex;align-items:center;gap:8px}
+.kv{display:grid;grid-template-columns:76px 1fr;gap:4px 10px;font-size:12.5px}
+.kv span:nth-child(odd){color:var(--smuted)}
+.box{background:var(--s2);border:1px solid var(--sline);border-radius:10px;padding:10px 12px}
+.legend{display:flex;flex-direction:column;gap:4px}
+.lg{display:grid;grid-template-columns:12px 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:7px;cursor:pointer;font-size:12.5px}
+.lg:hover{background:var(--s2)}
+.lg.on{background:var(--accent-weak);outline:1px solid #bfd0f5}
+.lg.dim{opacity:.4}
+.lg i{width:12px;height:12px;border-radius:3px;display:block}
+.lg em{font-style:normal;color:var(--smuted);font-size:11.5px}
+.prog{height:6px;border-radius:3px;background:var(--s3);overflow:hidden;margin-top:8px}
+.prog i{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#22d3ee);transition:width .4s}
+.prog.ind i{width:40%!important;animation:ind 1.2s infinite linear}
+@keyframes ind{from{transform:translateX(-100%)}to{transform:translateX(260%)}}
+.stb{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}
+.stb tr.sub-row td{padding-top:0;font-size:11.5px}
+.stb tr:has(+ .sub-row) td{border-bottom:0}
+.stb th{color:var(--smuted);font-weight:500;text-align:left;padding:6px;border-bottom:1px solid var(--sline)}
+.stb td{padding:7px 6px;border-bottom:1px solid var(--line2);vertical-align:middle}
+.stb tr.sel td{background:var(--accent-weak)}
+.stb tr:hover td{background:var(--s2)}
+.st-ok{color:var(--ok)}
+.st-bad{color:var(--bad)}
+.st-new{color:var(--accent)}
+.st-send{color:var(--warn)}
+.errline{margin-top:8px;padding:7px 10px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:var(--bad);font-size:12px}
+.note{color:var(--smuted);font-size:12px;margin-top:6px}
+.ls-row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--smuted)}
+
+/* ===== 实时 ===== */
+.live-grid{display:grid;grid-template-columns:320px 1fr;gap:16px}
+.lv-item{padding:12px 14px;border-bottom:1px solid var(--line2);cursor:pointer}
+.lv-item:hover{background:#f8faff}
+.lv-item.on{background:var(--accent-weak);box-shadow:inset 3px 0 0 var(--accent)}
+.lv-item .l1{display:flex;align-items:center;gap:8px}
+.lv-item .l2{display:flex;align-items:center;gap:10px;margin-top:6px;color:var(--text2);font-size:12px}
+.sig{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2)}
+.sig .b{width:8px;height:8px;border-radius:50%;background:#d1d5db}
+.sig .b.on{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.18)}
+.screen-box{background:#000;border-radius:12px 12px 0 0}
+.screen{position:relative;background:#000;overflow:hidden;aspect-ratio:16/9;max-width:calc(56vh * 16 / 9);margin:0 auto}
+.screen canvas{width:100%;height:100%;display:block}
+.screen .ovl{position:absolute;inset:0;background:rgba(5,8,14,.72);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:#e5e7eb}
+.screen .ovl b{font-size:18px}
+.screen .stall{position:absolute;top:12px;right:12px;background:rgba(217,119,6,.95);color:#fff;border-radius:999px;padding:3px 12px;font-size:12px;font-weight:600}
+.sbar{white-space:nowrap;display:flex;align-items:center;gap:14px;padding:9px 14px;background:#0f172a;color:#cbd5e1;font-size:12px;border-radius:0 0 12px 12px}
+.sigrow{display:flex;gap:10px;flex-wrap:wrap}
+.sigcard{flex:1;min-width:200px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px}
+.sigcard .b{width:12px;height:12px;border-radius:50%;background:#d1d5db}
+.sigcard .b.on{background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,.18);animation:pulse 1s infinite}
+.astream .r{display:grid;grid-template-columns:70px 50px 90px 1fr auto;gap:10px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line2)}
+.astream .r.new{animation:rowflash 2.4s}
+
+/* ===== 运维 ===== */
+.grid2{display:grid;grid-template-columns:1.4fr 1fr;gap:16px}
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.tile{border:1px solid var(--line2);border-radius:10px;padding:8px 12px;background:#fafbfc}
+.tile .k{font-size:11.5px;color:var(--text2)}
+.tile .v{font-size:18px;font-weight:650;font-family:var(--mono)}
+.tile.warn .v{color:var(--warn)}
+.hist{display:flex;align-items:flex-end;gap:2px;height:110px;padding-top:6px;border-bottom:1px solid var(--line)}
+.hist i{flex:1;background:#93b4f5;border-radius:3px 3px 0 0;min-height:1px}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;cursor:pointer}
+.opt.on{border-color:var(--accent);background:var(--accent-weak)}
+.opt input{margin-top:3px}
+.form{display:grid;grid-template-columns:110px 1fr;gap:10px 12px;align-items:center}
+.lgd{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text2)}
+.lgd span{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.lgd span.off{opacity:.35}
+.lgd i{width:14px;height:3px;border-radius:2px;display:block}
+
+/* ===== 浮层 ===== */
+.toasts{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);align-items:center;display:flex;flex-direction:column;gap:8px;z-index:100}
+.toast{min-width:280px;max-width:520px;background:#111827;border:1px solid #2f3b56;color:#f3f4f6;border-radius:10px;padding:10px 14px;box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;align-items:center;gap:10px;font-size:13px;animation:tin .2s}
+.toast.ok{border-left:3px solid #22c55e}
+.toast.warn{border-left:3px solid #f59e0b}
+.toast.bad{border-left:3px solid #ef4444}
+.toast.info{border-left:3px solid #3b82f6}
+.toast a{color:#93c5fd;margin-left:auto;white-space:nowrap}
+@keyframes tin{from{transform:translateY(-6px);opacity:0}}
+.mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:grid;place-items:center;z-index:120}
+.modal{width:420px;background:#fff;border-radius:14px;padding:20px 22px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.modal h3{margin:0 0 8px;font-size:16px}
+.modal p{margin:0 0 18px;color:var(--text2);line-height:1.7}
+.modal .acts{display:flex;justify-content:flex-end;gap:8px}
+.banner{background:#fff7ed;border-bottom:1px solid #fed7aa;color:#9a3412;padding:7px 20px;font-size:12.5px;display:flex;gap:10px;align-items:center}
+</style>
+</head>
+<body>
+<div id="app" v-cloak></div>
+
+<!-- ======================= 外壳 ======================= -->
+<script type="text/x-template" id="tpl-root">
+<div class="app">
+  <aside class="side">
+    <div class="logo">CS</div>
+    <div v-for="n in NAV" :key="n.key" class="nav" :class="{on: activeNav===n.key}" @click="navTo(n.key)" :title="n.tip">
+      <span class="ico" v-html="n.icon"></span><span>{{ n.name }}</span>
+      <span class="nbadge" v-if="n.key==='offline' && offBusy">{{ offBusy }}</span>
+    </div>
+    <div class="side-foot">
+      <button class="demo-btn" @click="demoOpen=!demoOpen">演示</button>
+      <div class="demo-pop" v-if="demoOpen">
+        <h4>演示控制（样例专用，正式版没有）</h4>
+        <label><input type="checkbox" v-model="store.demo.backendDown" @change="applyDemo"> 模拟后端轮询失败</label>
+        <label><input type="checkbox" v-model="store.demo.lsDown" @change="applyDemo"> 模拟 Label Studio 不可达</label>
+        <label><input type="checkbox" v-model="store.demo.dbDown"> 模拟平台库不可达</label>
+        <label><input type="checkbox" v-model="store.demo.stall"> 实时页：模拟画面停滞</label>
+        <label><input type="checkbox" v-model="store.demo.ended"> 实时页：模拟 run 结束</label>
+        <div class="sub" style="margin-top:6px">页面数据全部为前端假数据，不连后端。</div>
+      </div>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="top">
+      <div class="crumb">
+        <template v-for="(c,i) in crumbs" :key="i">
+          <span v-if="i" class="sep">›</span>
+          <a v-if="c.to" @click="go(c.to)">{{ c.t }}</a><b v-else>{{ c.t }}</b>
+        </template>
+      </div>
+      <div class="lights">
+        <div class="light" :class="{bad: store.health.backend!=='ok'}" @click.stop="pop = pop==='be'?null:'be'">
+          <i class="dot" :class="{bad: store.health.backend!=='ok'}"></i>后端{{ store.health.backend==='ok' ? '正常' : '异常' }}
+          <div class="pop" v-if="pop==='be'" @click.stop>
+            <h4>后端连接</h4>
+            <div v-if="store.health.backend!=='ok'" style="color:var(--bad);margin-bottom:6px">{{ store.health.backendMsg }}</div>
+            <div class="row" v-for="p in store.pollers" :key="p.ep"><span class="mono">{{ p.ep }}</span><span :style="{color: p.ok?'var(--ok)':'var(--bad)'}">{{ p.ok ? p.every : '失败 ×3' }}</span></div>
+            <div class="sub" style="margin-top:6px">任一轮询连续 3 次失败即变红；恢复后自动转绿。</div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <div class="banner" v-if="store.health.backend!=='ok' && route.name!=='run'">
+      ⚠ 后端轮询失败，页面数据停在 {{ fmtWall(store.health.lastOk) }}，以下内容可能过期。
+    </div>
+    <div class="content" :class="{studio: route.name==='run'}" @click="pop=null">
+      <component :is="pageComp" />
+    </div>
+  </div>
+</div>
+<div class="toasts">
+  <div v-for="t in store.toasts" :key="t.id" class="toast" :class="t.type">
+    <span>{{ t.msg }}</span><a v-if="t.action" @click="t.action.fn(); dropToast(t.id)">{{ t.action.label }}</a>
+  </div>
+</div>
+<div class="mask" v-if="store.modal">
+  <div class="modal">
+    <h3>{{ store.modal.title }}</h3>
+    <p>{{ store.modal.body }}</p>
+    <div class="acts">
+      <button class="btn" @click="store.modal.cancel()">{{ store.modal.cancelText }}</button>
+      <button class="btn primary" @click="store.modal.ok()">{{ store.modal.okText }}</button>
+    </div>
+  </div>
+</div>
+</script>
+
+<!-- ======================= 任务总览 ======================= -->
+<script type="text/x-template" id="tpl-tasks">
+<div class="page">
+  <div class="card">
+    <div class="toolbar">
+      <div class="seg">
+        <button :class="{on: tab==='online'}" @click="setTab('online')">在线 {{ liveCount }}</button>
+        <button :class="{on: tab==='all'}" @click="setTab('all')">全部</button>
+      </div>
+      <input class="inp" style="width:260px" v-model="q" placeholder="搜索 task_id / 点位 IP" />
+      <span v-if="tab==='all' && src==='storage'" class="tag" :class="store.taskSource==='db' ? 'bad' : 'mute'">
+        {{ store.taskSource==='db' ? '平台库连不上，已退回仅磁盘：点位 IP、状态暂缺' : '仅磁盘模式：点位 IP、状态为空' }}</span>
+      <span class="sub" style="margin-left:auto">只列有录像的任务 · 点 step 进入回放 · 共 {{ rows.length }} 条</span>
+    </div>
+    <table class="tb">
+      <thead><tr>
+        <th style="width:90px">任务</th><th style="width:130px">点位 IP</th><th style="width:110px">状态</th>
+        <th>steps</th><th style="width:160px">更新时间</th>
+      </tr></thead>
+      <tbody>
+        <tr v-for="t in rows" :key="t.task_id">
+          <td class="mono"><b>{{ t.task_id }}</b></td>
+          <td class="mono">{{ showDb(t) ? t.ip : '—' }}</td>
+          <td><span class="tag" :class="{'tg-run': isLive(t)}"><i v-if="isLive(t)" class="dot live" style="width:6px;height:6px"></i>{{ showDb(t) ? t.status : (isLive(t) ? '在线' : '—') }}</span></td>
+          <td>
+            <div class="chips">
+              <div v-for="s in shownSteps(t)" :key="s.step_id" class="chip" @click="openStep(t, s)">
+                <span class="sid">{{ s.step_id }}</span><span class="al">{{ stageOf(s.step_id).alias }}</span>
+                <span v-if="chipOff(t, s)" class="off" :class="chipOff(t, s).cls">{{ chipOff(t, s).text }}</span>
+              </div>
+            </div>
+          </td>
+          <td class="mono sub">{{ fmtWall(t.updated, true) }}</td>
+        </tr>
+        <tr v-if="!rows.length"><td colspan="5" class="empty">没有符合条件的任务</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</script>
+
+<!-- ======================= Run 工作台 ======================= -->
+<script type="text/x-template" id="tpl-run">
+<div class="wb" v-if="R">
+  <div class="run-head">
+    <div class="rh-title">
+      <span class="alias">{{ stageOf(st.step).alias }}</span>
+      任务 <b class="mono">{{ st.task }}</b> · step {{ st.step }}
+      <select v-if="stepObj.runs.length>1" class="run-sel mono" :value="st.runId" @change="switchRun($event.target.value)">
+        <option v-for="(r,i) in stepObj.runs" :key="r" :value="r">run {{ fmtWall(r, true) }}{{ i===0 ? '（最新）' : '' }}</option>
+      </select>
+    </div>
+    <div class="rh-meta mono">
+      时长 {{ fmtClock(R.duration) }} · 墙钟 {{ fmtWall(R.start) }}–{{ fmtWall(R.end) }}
+      <span v-if="R.gaps.length" class="gapinfo"> · 断流 {{ R.gaps.length }} 处 共 {{ fmtDur(R.gapTotal) }}</span>
+    </div>
+    <div class="sseg">
+      <button :class="{on: mode==='raw'}" @click="setMode('raw')">raw</button>
+      <button :class="{on: mode==='processed'}" :disabled="!R.hasProc" @click="setMode('processed')">processed</button>
+      <button :class="{on: mode==='sbs'}" :disabled="!R.hasProc" @click="setMode('sbs')">并排对照</button>
+    </div>
+    <div style="position:relative">
+      <button class="sbtn" @click.stop="dlOpen=!dlOpen">⬇ 下载 ▾</button>
+      <div class="dl-menu" v-if="dlOpen" @click.stop>
+        <a @click="download('raw')">raw 整段 mp4</a>
+        <a :class="{dis: !R.hasProc}" @click="R.hasProc && download('processed')">processed 整段 mp4</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="run-body">
+    <div class="stage">
+      <div class="players" :class="mode">
+        <div class="pv" v-show="mode!=='processed'">
+          <canvas ref="rawCv" width="640" height="360"></canvas>
+          <span class="pv-tag main">RAW</span>
+        </div>
+        <div class="pv" v-show="mode!=='raw'">
+          <canvas ref="procCv" width="640" height="360"></canvas>
+          <span class="pv-tag" :class="{main: mode==='processed'}">PROCESSED</span>
+        </div>
+        <div class="gap-flash" v-if="gapFlash">⚡ 跨越断流 {{ fmtDur(gapFlash.dur) }}</div>
+      </div>
+
+      <div class="transport">
+        <button class="play" @click="togglePlay" :title="playing?'暂停':'播放'">{{ playing ? '❚❚' : '▶' }}</button>
+        <span class="mono"><span class="tnow">{{ fmtMedia(t) }}</span> <span class="tdur">/ {{ fmtMedia(R.duration) }}</span></span>
+        <span class="twall mono" title="当前帧墙钟时刻">🕒 {{ fmtWallMs(curWall) }}</span>
+        <select class="run-sel" v-model.number="rate"><option :value="1">1×</option><option :value="2">2×</option><option :value="4">4×</option></select>
+        <span style="margin-left:auto"></span>
+        <button class="sbtn sm" @click="fit">适应全程</button>
+      </div>
+
+      <div class="tl-wrap" ref="tlWrap" @pointerleave="hover=null; hoverX=null">
+        <canvas ref="tlCv" @pointerdown="onDown" @pointermove="onMove" @pointerup="onUp" :style="{cursor: cursor}"></canvas>
+        <div class="tl-tip" v-if="hover" :style="{left: hover.x+'px', top: hover.y+'px'}">
+          <div v-for="(l,i) in hover.lines" :key="i" :class="i===0?'t1':'t2'">{{ l }}</div>
+        </div>
+      </div>
+      <div class="keys">空格 播放/暂停 · ←/→ 前后 1 秒 · 滚轮缩放、拖动平移 · 在「送标片段」上拖选即生成片段，拖边缘微调</div>
+    </div>
+
+    <aside class="dock">
+      <div class="dock-tabs">
+        <button :class="{on: panel==='review'}" @click="setPanel('review')">事件 <span class="cnt" :class="{hot: events.length}">{{ events.length }}</span></button>
+        <button :class="{on: panel==='offline'}" @click="setPanel('offline')">离线分析
+          <span class="cnt" v-if="job && (job.status==='running'||job.status==='queued')">…</span></button>
+        <button :class="{on: panel==='label'}" @click="setPanel('label')">送标 <span class="cnt">{{ clips.length }}</span></button>
+      </div>
+
+      <!-- 事件 -->
+      <template v-if="panel==='review'">
+        <div class="dock-body">
+          <div v-for="ev in events" :key="ev.id" class="ev" :class="{on: selEv===ev.id}" @click="pickEvent(ev)">
+            <span class="ico" :class="ev.source">{{ ev.source==='alarm' ? '▼' : '◆' }}</span>
+            <span class="et mono" :class="{whole: ev.media_ms==null}">{{ ev.media_ms==null ? '整段' : fmtMedia(ev.media_ms) }}</span>
+            <span class="ek"><span class="lv" :class="lvCls(ev.level)">{{ ev.level }}</span><span class="kn">{{ ev.kind }}</span>
+              <span class="src">{{ ev.source==='alarm' ? '平台告警' : '离线违规' }}</span></span>
+            <span class="em">{{ ev.message }}</span>
+          </div>
+          <div v-if="!events.length" class="empty" style="color:var(--smuted)">本 run 没有事件</div>
+          <div class="note" v-if="stageOf(st.step).has_offline_model && !offlineReady">离线违规：{{ violEmptyText }}</div>
+        </div>
+        <div class="dock-foot" v-if="selEvObj && selEvObj.media_ms!=null">
+          <button class="sbtn primary" style="width:100%;justify-content:center" :disabled="!canMark" @click="clipFromEvent(selEvObj)">生成前后 5 秒的送标片段</button>
+          <div class="note" v-if="!canMark">processed 视图下不能打点，切回 raw 或并排对照。</div>
+        </div>
+      </template>
+
+      <!-- 离线分析 -->
+      <template v-if="panel==='offline'">
+        <div class="dock-body">
+          <div v-if="!stageOf(st.step).has_offline_model" class="box" style="color:var(--smuted)">{{ stageOf(st.step).alias }} 没有离线模型。</div>
+          <template v-else>
+            <div class="dk-sec">
+              <div class="box">
+                <div class="kv">
+                  <span>状态</span><span><span class="tag" :class="jobTagCls(job)">{{ jobStatusName(job) }}</span>
+                    <span class="sub" style="color:var(--smuted);margin-left:6px" v-if="job && job.status==='completed'">{{ fmtWall(job.finished, true) }} · 耗时 {{ fmtDur(job.elapsed) }}</span></span>
+                  <template v-if="offlineReady"><span>结果</span><span>{{ R.segments.length }} 段 · 违规 {{ viols.length }} 条</span></template>
+                  <template v-if="job && job.status==='failed'"><span>原因</span><span style="color:var(--bad)">{{ job.msg }}</span></template>
+                </div>
+                <div class="prog" v-if="job && job.status==='running'"><i :style="{width: jobProgress + '%'}"></i></div>
+                <div class="prog ind" v-if="job && job.status==='queued'"><i></i></div>
+                <button class="sbtn" style="margin-top:10px" :class="{primary: !offlineReady}" :disabled="job && (job.status==='running'||job.status==='queued')" @click="runOffline">
+                  {{ offlineReady ? '重跑离线推理' : '运行离线推理' }}</button>
+              </div>
+            </div>
+            <div class="dk-sec" v-if="offlineReady">
+              <h5>动作类别（点击高亮）</h5>
+              <div class="legend">
+                <div v-for="k in R.labels" :key="k" class="lg" :class="{on: hl===k, dim: hl && hl!==k}" @click="hl = hl===k ? null : k">
+                  <i :style="{background: labelColor(R.labels, k)}"></i><span class="mono">{{ k }}</span>
+                  <em class="mono">×{{ labelStat[k].n }} · {{ fmtDur(labelStat[k].ms) }}</em>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- 送标 -->
+      <template v-if="panel==='label'">
+        <div class="dock-body">
+          <div class="ls-row" style="margin-bottom:12px">
+            <i class="dot" :class="{bad: store.health.ls!=='ok'}"></i>LS {{ store.health.ls==='ok' ? '可达' : '不可达' }}
+            <span style="margin-left:auto">project</span>
+            <input class="sinp mono" type="number" v-model.number="project" title="默认值取自 LS 配置">
+          </div>
+          <div class="dk-sec">
+            <h5>送标片段 <span class="mono" style="margin-left:auto">{{ clips.length }}/{{ limits.max_clips }} · {{ fmtDur(clipTotal) }}/{{ fmtDur(limits.max_total_ms) }}</span></h5>
+            <table class="stb" v-if="clips.length">
+              <thead><tr><th>#</th><th>区间</th><th>时长</th><th>状态</th><th></th></tr></thead>
+              <tbody>
+                <template v-for="(c,i) in clips" :key="c.id">
+                  <tr @click="seek(c.s)" style="cursor:pointer">
+                    <td class="mono">{{ i+1 }}</td>
+                    <td class="mono">{{ fmtMedia(c.s) }}–{{ fmtMedia(c.e) }}</td>
+                    <td class="mono">{{ fmtDur(c.e-c.s) }}</td>
+                    <td>
+                      <span v-if="c.status==='ok'" class="st-ok">✓ <a style="color:var(--ok)" @click.stop="lsLink(c)">LS#{{ c.ls }}</a></span>
+                      <span v-else-if="c.status==='fail'" class="st-bad">✗ 失败</span>
+                      <span v-else-if="c.status==='sending'" class="st-send">上传中…</span>
+                      <span v-else class="st-new">待提交</span>
+                    </td>
+                    <td style="text-align:right">
+                      <span v-if="c.status==='ok'" class="sub" style="color:var(--smuted)">已锁定</span>
+                      <a v-else-if="c.status!=='sending'" style="color:var(--smuted)" @click.stop="removeClip(i)" title="删除">✕</a>
+                    </td>
+                  </tr>
+                  <tr v-if="c.status!=='ok' && c.status!=='sending' && (c.status==='fail' || gapsIn(c.s,c.e).length)" class="sub-row">
+                    <td></td>
+                    <td colspan="4">
+                      <span :class="c.status==='fail' ? 'st-bad' : 'st-send'">{{ c.status==='fail' ? c.errMsg : '跨越断流，提交会失败' }}</span>
+                      <a v-if="gapsIn(c.s,c.e).length" style="margin-left:10px" @click.stop="splitClip(i)">按断点拆分</a>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <div v-else class="box" style="color:var(--smuted);font-size:12px">还没有片段。在时间轴「送标片段」上拖选，或在「事件」里选一条后生成。</div>
+          </div>
+        </div>
+        <div class="dock-foot">
+          <div class="errline" v-if="clipErr" style="margin:0 0 8px">{{ clipErr }}</div>
+          <button class="sbtn primary" style="width:100%;justify-content:center;height:34px" :disabled="submitting || !todoCount || !!clipErr" @click="submit">
+            {{ submitting ? `裁剪并上传中… 已等待 ${waited}s` : (doneCount ? `提交未成功的 ${todoCount} 段` : `提交送标（${todoCount} 段）`) }}
+          </button>
+        </div>
+      </template>
+    </aside>
+  </div>
+</div>
+<div v-else class="page" style="color:var(--stext)">未找到该 run。<a @click="go('/tasks')">回任务总览</a></div>
+</script>
+
+<!-- ======================= 实时监控 ======================= -->
+<script type="text/x-template" id="tpl-live">
+<div class="page">
+  <div class="live-grid">
+    <div class="card" style="align-self:start">
+      <div class="card-h"><h3>在线 run</h3><span class="sub">{{ lives.length }} 路 · overview 3s</span></div>
+      <div v-for="l in lives" :key="l.task.task_id" class="lv-item" :class="{on: focus && focus.task.task_id===l.task.task_id}" @click="go('/live/'+l.task.task_id)">
+        <div class="l1">
+          <i class="dot live"></i><b class="mono">{{ l.task.task_id }}</b>
+          <span class="alias" style="font-size:10px">{{ stageOf(l.step.step_id).alias }}</span>
+          <span class="mono sub">{{ l.task.ip }}</span>
+          <span style="margin-left:auto" class="tag" :class="{'tg-run': (S.alarms[l.task.task_id]||[]).length}">告警 {{ (S.alarms[l.task.task_id]||[]).length }}</span>
+        </div>
+        <div class="l2">
+          <span v-for="(v,k) in S.sig[l.task.task_id]" :key="k" class="sig"><i class="b" :class="{on: v.active}"></i>{{ k }}</span>
+          <span v-if="!Object.keys(S.sig[l.task.task_id]).length" class="sub">无实时信号</span>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="focus">
+      <div class="card" style="overflow:hidden">
+        <div class="screen-box"><div class="screen">
+          <canvas ref="cv" width="640" height="360"></canvas>
+          <div class="stall" v-if="!ended && sinceFrame>3000">画面停滞 {{ (sinceFrame/1000).toFixed(1) }}s</div>
+          <div class="ovl" v-if="ended">
+            <b>run 已结束</b><span class="sub" style="color:#cbd5e1">收到 idle：task {{ focus.task.task_id }} 的本次 run 已停止推流</span>
+            <button class="btn primary" @click="openReplay()">打开回放工作台</button>
+          </div>
+        </div></div>
+        <div class="sbar mono">
+          <span><i class="dot" :class="ended ? 'off' : (sinceFrame>3000 ? 'warn' : 'live')" style="margin-right:6px"></i>{{ ended ? '已结束' : (sinceFrame>3000 ? '停滞' : '直播') }}</span>
+          <span>{{ fps.toFixed(1) }} fps</span>
+          <span>末帧 {{ (sinceFrame/1000).toFixed(1) }}s 前</span>
+          <span>WS /ai/video?task_id={{ focus.task.task_id }}</span>
+          <span style="margin-left:auto">run {{ fmtWall(focus.step.runs[0], true) }}</span>
+          <button class="btn sm" style="color:#111827" @click="openReplay()">打开回放</button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-h"><h3>信号（近 10s）</h3><span class="sub">/task/message · 1Hz</span>
+        </div>
+        <div class="card-b">
+          <div class="sigrow" v-if="Object.keys(S.sig[focus.task.task_id]).length">
+            <div class="sigcard" v-for="(v,k) in S.sig[focus.task.task_id]" :key="k">
+              <i class="b" :class="{on: v.active}"></i>
+              <div><b class="mono">{{ k }}</b><div class="mono sub">命中 {{ v.hit }} · max {{ v.max.toFixed(2) }}</div></div>
+            </div>
+          </div>
+          <div v-else class="sub">本 step 无实时信号（signals_10s 为空）。</div>
+        </div>
+      </div>
+
+      <div class="card astream" style="margin-top:14px">
+        <div class="card-h"><h3>告警流</h3><span class="sub">本 run 内存增量 · 按 max_seq 续拉</span></div>
+        <div v-for="a in (S.alarms[focus.task.task_id]||[])" :key="a.seq" class="r" :class="{new: a.fresh}">
+          <span class="mono">{{ fmtWall(a.ts) }}</span>
+          <span class="lv" :class="lvCls(a.level)">{{ a.level }}</span>
+          <span class="mono">{{ a.metric }}</span>
+          <span>{{ a.message }}</span>
+          <a @click="openReplay(a.ts)">回放此刻 →</a>
+        </div>
+        <div v-if="!(S.alarms[focus.task.task_id]||[]).length" class="empty">暂无告警</div>
+      </div>
+    </div>
+    <div v-else class="card empty">当前没有在线 run</div>
+  </div>
+</div>
+</script>
+
+<!-- ======================= 离线推理 ======================= -->
+<script type="text/x-template" id="tpl-offline">
+<div class="page">
+  <div class="page-h"><h2>分析作业</h2><span class="sub">作业在回放工作台的「离线分析」里提交；本页看队列与历史</span></div>
+  <div class="card">
+    <div class="toolbar">
+      <div class="seg">
+        <button v-for="f in FILTERS" :key="f.k" :class="{on: flt===f.k}" @click="flt=f.k">{{ f.n }} {{ countOf(f.k) }}</button>
+      </div>
+      <span class="sub" style="margin-left:auto">GET /admin-f3m8/offline/jobs · 2s · 行点击进入工作台离线面板</span>
+    </div>
+    <table class="tb">
+      <thead><tr><th>任务</th><th>step</th><th>run</th><th>状态</th><th>模型</th><th>段</th><th>违规</th><th>耗时</th><th>提交时间</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr v-for="j in jobs" :key="j.id" class="click" :class="{flash: j.flashUntil && j.flashUntil>clock}" @click="go(`/run/${j.task}/${j.step}/${j.run}?panel=offline`)">
+          <td class="mono"><b>{{ j.task }}</b></td>
+          <td>{{ j.step }} {{ stageOf(j.step).alias }}</td>
+          <td class="mono sub">{{ fmtWall(j.run, true) }}</td>
+          <td><span class="tag" :class="jobTagCls(j)">{{ jobStatusName(j) }}</span></td>
+          <td class="mono sub">{{ j.status==='queued' ? '—' : j.model }}</td>
+          <td class="mono">{{ j.status==='completed' ? j.segs : '—' }}</td>
+          <td class="mono"><span v-if="j.status==='completed'" :style="{color: j.viol ? 'var(--warn)' : 'inherit'}">{{ j.viol }}</span><span v-else>—</span></td>
+          <td class="mono">{{ j.status==='running' ? fmtDur(clock - j.started) : (j.elapsed ? fmtDur(j.elapsed) : '—') }}</td>
+          <td class="mono sub">{{ fmtWall(j.submitted, true) }}</td>
+          <td class="sub">{{ j.msg || '' }}</td>
+        </tr>
+        <tr v-if="!jobs.length"><td colspan="10" class="empty">没有此状态的作业</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+</script>
+
+<!-- ======================= 系统运维 ======================= -->
+<script type="text/x-template" id="tpl-system">
+<div class="page">
+  <div class="page-h"><h2>系统运维</h2><span class="sub">指标 · 健康监控 · 队列 · 延迟探测 · 配置</span></div>
+  <div class="grid2">
+    <div class="card">
+      <div class="card-h"><h3>推理延迟（按模型）</h3>
+        <div class="seg" style="margin-left:auto"><button v-for="q in ['p50','p95','p99']" :key="q" :class="{on: quant===q}" @click="quant=q">{{ q.toUpperCase() }}</button></div>
+      </div>
+      <div class="card-b">
+        <div class="lgd" style="margin-bottom:8px">
+          <span v-for="(m,i) in MODELS" :key="m.k" :class="{off: hidden.has(m.k)}" @click="toggleModel(m.k)"><i :style="{background: PALETTE[i % PALETTE.length]}"></i>{{ m.k }}</span>
+          <span class="sub" style="margin-left:auto;cursor:default">/metrics/json · 5s · 灰带 = 离开本页期间未采样</span>
+        </div>
+        <svg viewBox="0 0 640 210" style="width:100%;height:auto;display:block">
+          <g font-size="10" fill="#9ca3af" font-family="Consolas,monospace">
+            <template v-for="y in [0,50,100,150]" :key="y">
+              <line x1="40" x2="632" :y1="190 - y*1.1" :y2="190 - y*1.1" stroke="#eef0f3"/>
+              <text x="34" :y="193 - y*1.1" text-anchor="end">{{ y }}</text>
+            </template>
+            <text x="40" y="206">-4m</text><text x="632" y="206" text-anchor="end">现在</text>
+            <text x="10" y="12">ms</text>
+          </g>
+          <rect :x="40 + 20*xStep" y="20" :width="8*xStep" height="170" fill="#f3f4f6"/>
+          <text :x="40 + 24*xStep" y="105" font-size="11" fill="#9ca3af" text-anchor="middle">未采样</text>
+          <path v-for="(m,i) in MODELS" :key="m.k" v-show="!hidden.has(m.k)" :d="pathOf(m.k)" fill="none" :stroke="PALETTE[i % PALETTE.length]" stroke-width="1.8"/>
+        </svg>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h3>核心计数器</h3><span class="sub">累计值 · 进程启动以来</span></div>
+      <table class="tb">
+        <thead><tr><th>指标</th><th>总数</th><th>明细</th></tr></thead>
+        <tbody>
+          <tr v-for="c in COUNTERS" :key="c.name"><td class="mono">{{ c.name }}</td><td class="mono">{{ c.total }}</td>
+            <td class="sub mono">{{ Object.entries(c.by).map(([k, v]) => `${k}:${v}`).join(' · ') }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>健康监控</h3><span class="sub">/health/status · /health/monitor/*</span></div>
+      <div class="card-b">
+        <div class="tiles">
+          <div class="tile" v-for="x in HEALTH" :key="x.k" :class="{warn: x.warn}"><div class="k">{{ x.k }}</div><div class="v">{{ x.v }}</div></div>
+        </div>
+        <div class="sub" style="margin:12px 0 6px">监控配置（秒）</div>
+        <div class="chips"><span class="tag" v-for="(v,k) in MONCFG" :key="k"><span class="mono">{{ k }}</span> {{ v }}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h3>各路队列深度</h3><span class="sub">/admin-f3m8/overview 的 queue_depths · 3s · 当前值（帧）</span></div>
+      <table class="tb">
+        <thead><tr><th>任务</th><th>step</th><th>点位</th><th v-for="k in QKEYS" :key="k" class="mono">{{ k }}</th></tr></thead>
+        <tbody>
+          <tr v-for="c in QUEUES" :key="c.task_id">
+            <td class="mono"><b>{{ c.task_id }}</b></td><td>{{ c.step_id }} {{ stageOf(c.step_id).alias }}</td><td class="mono sub">{{ c.source_ip }}</td>
+            <td v-for="k in QKEYS" :key="k" class="mono">{{ c.queue_depths[k] }}</td>
+          </tr>
+          <tr v-if="!QUEUES.length"><td :colspan="3 + QKEYS.length" class="empty">没有在线 run</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-h"><h3>延迟探测</h3></div>
+      <div class="card-b">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select class="inp" v-model="probe.ep"><option>/ping</option><option>/health/status</option><option>/admin-f3m8/overview</option><option>/task/live</option></select>
+          <span class="sub">次数</span><input class="inp mono" style="width:70px" type="number" v-model.number="probe.n">
+          <span class="sub">并发</span><input class="inp mono" style="width:60px" type="number" v-model.number="probe.c">
+          <button class="btn primary" :disabled="probe.busy" @click="runProbe">{{ probe.busy ? '测试中…' : '开始' }}</button>
+        </div>
+        <template v-if="probe.res">
+          <div class="tiles" style="margin-top:12px;grid-template-columns:repeat(6,1fr)">
+            <div class="tile" v-for="(v,k) in probe.res.stat" :key="k"><div class="k">{{ k }}</div><div class="v" style="font-size:15px">{{ v }}</div></div>
+          </div>
+          <div class="hist" style="margin-top:10px"><i v-for="(h,i) in probe.res.bins" :key="i" :style="{height: (h/probe.res.maxBin*100)+'%'}" :title="h"></i></div>
+          <div class="sub mono" style="display:flex;justify-content:space-between"><span>{{ probe.res.lo }} ms</span><span>{{ probe.res.hi }} ms</span></div>
+        </template>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>Label Studio 配置</h3><span class="sub">写入 lab_runtime_config.json · 整体覆盖</span></div>
+      <div class="card-b">
+        <div class="form">
+          <span class="sub">LS 地址</span><input class="inp mono" v-model="ls.url">
+          <span class="sub">默认 project</span><input class="inp mono" style="width:120px" v-model="ls.pid">
+          <span class="sub">Token</span><span class="sub">已配置（只能在 .env 设置）</span>
+          <span></span><div><button class="btn primary" @click="saveLs">保存</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>任务清单来源</h3><span class="sub">决定任务总览「全部」列哪些任务</span></div>
+      <div class="card-b">
+        <label class="opt" :class="{on: ls.src==='db'}"><input type="radio" value="db" v-model="ls.src">
+          <div><b>磁盘 + 平台库</b> <span class="sub">默认</span>
+            <div class="sub">以磁盘上有录像的任务为准，再用平台库过滤一遍，并补全点位 IP、状态。平台库连不上时自动退回「仅磁盘」。</div></div></label>
+        <label class="opt" :class="{on: ls.src==='storage'}"><input type="radio" value="storage" v-model="ls.src">
+          <div><b>仅磁盘</b>
+            <div class="sub">不查平台库，列出磁盘上所有有录像的任务；点位 IP、状态为空。用于没有平台库的环境。</div></div></label>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+          <span class="sub">当前生效</span>
+          <span class="tag" :class="effTag.cls">{{ effTag.text }}</span>
+          <button class="btn primary" style="margin-left:auto" @click="saveSrc">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</script>
+
+<script src="../../app/static/vendor/vue.global.prod.js"></script>
+<script>
+const { createApp, reactive, ref, computed, watch, onMounted, onBeforeUnmount, nextTick } = Vue;
+
+/* =========================================================
+ * 工具
+ * ======================================================= */
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function fmtMedia(ms, dec = true) {
+  if (ms == null) return '整段';
+  const s = Math.max(0, ms) / 1000, m = Math.floor(s / 60), sec = s - m * 60;
+  return dec ? `${pad(m)}:${sec.toFixed(1).padStart(4, '0')}` : `${pad(m)}:${pad(Math.floor(sec))}`;
+}
+const fmtClock = ms => fmtMedia(ms, false);
+function fmtWall(ms, withDate = false) {
+  const d = new Date(ms), hms = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return withDate ? `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hms}` : hms;
+}
+function fmtWallMs(ms) { const d = new Date(ms); return `${d.getFullYear()}-${fmtWall(ms, true)}.${pad(d.getMilliseconds(), 3)}`; }
+function fmtDur(ms) {
+  if (ms == null) return '—';
+  const s = ms / 1000;
+  if (s < 60) return (s < 10 ? s.toFixed(1) : Math.round(s)) + 's';
+  const m = Math.floor(s / 60);
+  return `${m}m${pad(Math.round(s - m * 60))}s`;
+}
+function rng(seed) { let s = seed >>> 0 || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+function rr(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+
+/* =========================================================
+ * 假后端：正式版以下内容全部来自接口，前端不写任何业务字段
+ * ======================================================= */
+const BACKEND = {
+  // GET /admin-f3m8/stages（B2）
+  stages: [
+    { step_id: 1, alias: 'LEAK', has_offline_model: false },
+    { step_id: 2, alias: 'CLEAN', has_offline_model: true },
+  ],
+  // GET /lab-f3m8/config；limits 为 B4 新增
+  labConfig: {
+    label_studio_url: 'http://10.0.0.5:8080', default_project_id: 12, task_source: 'db', token_configured: true,
+    limits: { max_clips: 20, max_clip_ms: 300000, max_total_ms: 1800000 },
+  },
+  // 离线分割模型的类别表（POST /lab-f3m8/label-probs 的 labels[]）
+  labels: ['idle', 'air_injection', 'flush', 'long_brush_insert', 'long_brush_withdraw'],
+};
+
+/* =========================================================
+ * 展示层：只有通用配色；文字一律原样显示后端给的值
+ * ======================================================= */
+const LEVEL_CLS = { critical: 'high', high: 'high', medium: 'med', warning: 'warn', low: 'warn' };
+const LV_COLOR = { high: '#f05a5f', med: '#f7843a', warn: '#eab308', info: '#8b93a1' };
+const lvCls = l => LEVEL_CLS[l] || 'info';
+const lvColor = l => LV_COLOR[lvCls(l)];
+const PALETTE = ['#64748b', '#38bdf8', '#22c55e', '#a855f7', '#f472b6', '#f59e0b', '#14b8a6', '#ef4444'];
+const labelColor = (labels, k) => { const i = labels.indexOf(k); return i < 0 ? '#64748b' : PALETTE[i % PALETTE.length]; };
+const stageOf = id => store.stages.find(x => x.step_id === +id) || { step_id: +id, alias: `step ${id}`, has_offline_model: false };
+const isLive = t => t.steps.some(x => x.live);
+// 假后端 /lab-f3m8/tasks 响应里的实际来源（B3）：db 模式下平台库不通会自动退回 storage
+const effectiveSource = () => (store.taskSource === 'storage' || store.demo.dbDown) ? 'storage' : 'db';
+
+/* =========================================================
+ * 假数据：任务清单
+ * ======================================================= */
+const D = (d, h, m, s) => new Date(2026, 9, d, h, m, s).getTime();
+const NOW0 = Date.now();
+const TASKS = [
+  { task_id: 129, ip: '10.0.0.13', status: '进行中', updated: NOW0 - 4000, steps: [
+    { step_id: 1, runs: [NOW0 - 26 * 60e3], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [NOW0 - 9 * 60e3], tracks: ['raw', 'processed'], live: true }] },
+  { task_id: 128, ip: '10.0.0.12', status: '进行中', updated: NOW0 - 2000, steps: [
+    { step_id: 1, runs: [NOW0 - 5 * 60e3], tracks: ['raw', 'processed'], live: true }] },
+  { task_id: 127, ip: '10.0.0.11', status: '已完成', updated: D(24, 14, 16, 2), steps: [
+    { step_id: 1, runs: [D(24, 13, 48, 2)], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [D(24, 14, 3, 11), D(24, 13, 59, 40)], tracks: ['raw', 'processed'] }] },
+  { task_id: 126, ip: '10.0.0.12', status: '已完成', updated: D(24, 11, 40, 0), steps: [
+    { step_id: 1, runs: [D(24, 11, 2, 0)], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [D(24, 11, 20, 9)], tracks: ['raw', 'processed'] }] },
+  { task_id: 125, ip: '10.0.0.14', status: '已完成', updated: D(24, 10, 5, 0), steps: [
+    { step_id: 1, runs: [D(24, 9, 31, 0)], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [D(24, 9, 47, 30)], tracks: ['raw', 'processed'] }] },
+  { task_id: 124, ip: '10.0.0.11', status: '已完成', updated: D(23, 17, 12, 0), steps: [
+    { step_id: 1, runs: [D(23, 16, 40, 0)], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [D(23, 16, 55, 0)], tracks: ['raw'] }] },
+  { task_id: 123, ip: '10.0.0.13', status: '已完成', updated: D(23, 15, 2, 0), steps: [
+    { step_id: 1, runs: [D(23, 14, 30, 0)], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [D(23, 14, 46, 0)], tracks: ['raw', 'processed'] }] },
+  { task_id: 122, ip: '10.0.0.14', status: '已中止', updated: D(23, 11, 20, 0), steps: [
+    { step_id: 1, runs: [D(23, 11, 12, 0)], tracks: ['raw'] }] },
+  { task_id: 121, ip: '10.0.0.12', status: '已完成', updated: D(23, 10, 40, 0), steps: [
+    { step_id: 1, runs: [D(23, 10, 2, 0)], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [D(23, 10, 19, 0)], tracks: ['raw', 'processed'] }] },
+  { task_id: 119, ip: '10.0.0.13', status: '已中止', updated: D(22, 15, 1, 0), steps: [
+    { step_id: 1, runs: [D(22, 15, 0, 30)], tracks: [] }] },
+  { task_id: 120, ip: '10.0.0.11', status: '已完成', updated: D(22, 16, 30, 0), steps: [
+    { step_id: 1, runs: [D(22, 15, 58, 0)], tracks: ['raw', 'processed'] },
+    { step_id: 2, runs: [D(22, 16, 12, 0)], tracks: ['raw', 'processed'] }] },
+];
+const findStep = (task, step) => TASKS.find(t => t.task_id === +task)?.steps.find(s => s.step_id === +step);
+
+/* =========================================================
+ * 假数据：单个 run（录像锚点、断流、告警、离线结果）
+ * ======================================================= */
+const SEG_SPEC = [['idle', 14000], ['air_injection', 31000], ['flush', 62000], ['idle', 70000], ['long_brush_insert', 96000], ['long_brush_withdraw', 121000],
+  ['idle', 130000], ['long_brush_insert', 158000], ['long_brush_withdraw', 181000], ['idle', 195000], ['flush', 240000], ['idle', 251000],
+  ['long_brush_insert', 290000], ['long_brush_withdraw', 322000], ['idle', 340000], ['long_brush_insert', 372000], ['long_brush_withdraw', 401000],
+  ['idle', 420000], ['air_injection', 445000], ['flush', 505000], ['idle', 520000], ['long_brush_insert', 560000], ['long_brush_withdraw', 598000],
+  ['idle', 615000], ['long_brush_insert', 650000], ['idle', 672000], ['air_injection', 700000], ['idle', 760000]];
+
+function mediaToWall(pieces, m) {
+  let p = pieces[0];
+  for (const q of pieces) if (q.media <= m) p = q;
+  return p.wall + (m - p.media);
+}
+function wallToMedia(pieces, w) {
+  for (const p of pieces) if (w >= p.wall && w < p.wall + p.dur) return p.media + (w - p.wall);
+  return null;
+}
+function segAt(segs, m) {
+  let lo = 0, hi = segs.length - 1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (segs[mid].end <= m) lo = mid + 1; else if (segs[mid].start > m) hi = mid - 1; else return segs[mid]; }
+  return segs[segs.length - 1] || null;
+}
+
+const runCache = {};
+function buildRun(task, step, runId) {
+  const key = `${task}/${step}/${runId}`;
+  if (runCache[key]) return runCache[key];
+  const isLeak = step === 1;
+  const sp = findStep(task, step);
+  const rnd = rng(task * 131 + step * 17 + (runId % 997));
+  const lay = isLeak ? [[0, 140000], [9000, 220000]] : [[0, 182000], [23000, 273000], [15000, 305000]];
+  const W0 = runId + 800;
+  const raw = []; let wall = W0, media = 0;
+  for (const [gap, dur] of lay) { wall += gap; raw.push({ wall, media, dur }); wall += dur; media += dur; }
+  const duration = media;
+  const offs = isLeak ? [1900, 400] : [2400, 600, 0];
+  const proc = []; let pm = 0;
+  raw.forEach((p, i) => { const o = offs[i] || 0; proc.push({ wall: p.wall + o, media: pm, dur: p.dur - o }); pm += p.dur - o; });
+  const gaps = raw.slice(1).map((p, i) => {
+    const from = raw[i].wall + raw[i].dur;
+    return { media: p.media, wall_from: from, wall_to: p.wall, dur: p.wall - from };
+  });
+  let segments = [];
+  if (!isLeak) {
+    let s = 0;
+    segments = SEG_SPEC.map(([label, end]) => { const seg = { label, start: s, end, conf: 0.72 + rnd() * 0.26 }; s = end; return seg; });
+  }
+  const mk = (id, source, kind, level, media_ms, message) => ({ id, source, kind, level, media_ms, message, wall_ms: media_ms == null ? null : mediaToWall(raw, media_ms) });
+  const base = task * 1000 + step * 100;
+  const alarms = isLeak ? [
+    mk(base + 1, 'alarm', '流程违规', 'high', 52000, '气泡持续 3.2s（置信 0.86）'),
+    mk(base + 2, 'alarm', '流程违规', 'high', 201000, '气泡持续 2.6s（置信 0.81）'),
+    mk(base + 3, 'alarm', '流程违规', 'high', 318500, '气泡持续 4.1s（置信 0.90）'),
+    mk(base + 4, 'alarm', '流程违规', 'medium', 357000, '结算：全程未检出弯折动作'),
+  ] : [mk(base + 1, 'alarm', '任务超时', 'medium', 745000, '任务超时：step 运行已超过 12 分钟')];
+  const violations = isLeak ? [] : [
+    mk(base + 51, 'viol', 'STEP_DURATION', 'warning', 195000, '灌注时长 45.0s，低于要求 60s'),
+    mk(base + 52, 'viol', 'STEP_MISSING', 'warning', 650000, '第 6 次插刷后缺少抽刷'),
+    mk(base + 53, 'viol', 'STEP_COUNT', 'warning', null, '完整插刷—抽刷配对 5 次，要求 ≥ 6 次'),
+  ];
+  const probs = isLeak ? null : genProbs(segments, duration, rnd);
+  const last = raw[raw.length - 1];
+  const r = { task, step, runId, raw, proc, hasProc: sp.tracks.includes('processed'), duration, gaps,
+    gapTotal: gaps.reduce((a, g) => a + g.dur, 0), start: raw[0].wall, end: last.wall + last.dur, segments, probs, alarms, violations,
+    labels: isLeak ? [] : BACKEND.labels, simBubbleAt: isLeak ? [52000, 201000, 318500] : [] };
+  runCache[key] = r;
+  return r;
+}
+
+function genProbs(segs, dur, rnd) {
+  const dt = 500, T = Math.floor(dur / dt) + 1, keys = BACKEND.labels;
+  const hard = keys.map(() => new Float32Array(T));
+  for (let i = 0; i < T; i++) {
+    const s = segAt(segs, i * dt);
+    keys.forEach((k, c) => { hard[c][i] = k === s.label ? 1 : 0; });
+    if (i * dt > 640000 && i * dt < 668000) hard[keys.indexOf('long_brush_withdraw')][i] += 0.45 * Math.sin((i * dt - 640000) / 28000 * Math.PI);
+  }
+  const R = 4, p = keys.map(() => new Float32Array(T));
+  for (let c = 0; c < keys.length; c++) for (let i = 0; i < T; i++) {
+    let s = 0, n = 0;
+    for (let j = i - R; j <= i + R; j++) if (j >= 0 && j < T) { s += hard[c][j]; n++; }
+    p[c][i] = Math.max(0, (s / n) * 0.86 + 0.03 + (rnd() - 0.5) * 0.07);
+  }
+  for (let i = 0; i < T; i++) { let s = 0; for (let c = 0; c < keys.length; c++) s += p[c][i]; for (let c = 0; c < keys.length; c++) p[c][i] /= s; }
+  return { dt, T, keys, p };
+}
+
+/* =========================================================
+ * 全局 store：健康、toast、离线作业、弹窗
+ * ======================================================= */
+const store = reactive({
+  health: { backend: 'ok', backendMsg: '', ls: 'ok', lastOk: Date.now() },
+  pollers: [
+    { ep: '/admin-f3m8/overview', every: '3s', ok: true },
+    { ep: '/admin-f3m8/offline/jobs', every: '2s', ok: true },
+    { ep: '/task/message', every: '1s', ok: true },
+  ],
+  demo: { backendDown: false, lsDown: false, stall: false, ended: false, dbDown: false },
+  taskSource: BACKEND.labConfig.task_source,
+  stages: BACKEND.stages, labConfig: BACKEND.labConfig,
+  toasts: [], modal: null, jobs: [], lastRun: '/run/127/2/latest', leaveGuard: null,
+});
+let toastSeq = 0;
+function toast(msg, type = 'info', action = null, ms = 4200) {
+  const id = ++toastSeq; store.toasts.push({ id, msg, type, action });
+  setTimeout(() => dropToast(id), ms);
+}
+function dropToast(id) { const i = store.toasts.findIndex(t => t.id === id); if (i >= 0) store.toasts.splice(i, 1); }
+function confirmBox(title, body, okText = '确定', cancelText = '取消') {
+  return new Promise(res => {
+    store.modal = { title, body, okText, cancelText, ok: () => { store.modal = null; res(true); }, cancel: () => { store.modal = null; res(false); } };
+  });
+}
+function applyDemo() {
+  const d = store.demo;
+  store.health.backend = d.backendDown ? 'bad' : 'ok';
+  store.health.backendMsg = d.backendDown ? 'GET /admin-f3m8/overview 连续 3 次失败：TypeError: Failed to fetch（ECONNREFUSED）' : '';
+  store.pollers.forEach((p, i) => { p.ok = !d.backendDown || i > 1; });
+  if (!d.backendDown) store.health.lastOk = Date.now();
+  store.health.ls = d.lsDown ? 'bad' : 'ok';
+}
+const clock = ref(Date.now());
+setInterval(() => { clock.value = Date.now(); if (store.health.backend === 'ok') store.health.lastOk = clock.value; }, 1000);
+
+let jobSeq = 0;
+function addJob(j) { const job = reactive({ id: ++jobSeq, model: 'MSTCN2-RoleEmbed', ...j }); store.jobs.unshift(job); return job; }
+addJob({ task: 121, step: 2, run: D(23, 10, 19, 0), status: 'completed', segs: 25, viol: 0, submitted: D(23, 10, 41, 0), finished: D(23, 10, 41, 39), elapsed: 39000 });
+addJob({ task: 125, step: 2, run: D(24, 9, 47, 30), status: 'failed', submitted: D(24, 10, 6, 0), elapsed: 1800000, msg: '子进程超时（30 min）' });
+addJob({ task: 127, step: 2, run: D(24, 14, 3, 11), status: 'completed', segs: 28, viol: 3, submitted: D(24, 15, 19, 40), finished: D(24, 15, 20, 22), elapsed: 42000 });
+addJob({ task: 123, step: 2, run: D(23, 14, 46, 0), status: 'queued', submitted: NOW0 - 20000 });
+const j126 = addJob({ task: 126, step: 2, run: D(24, 11, 20, 9), status: 'running', submitted: NOW0 - 40000, started: NOW0 - 31000 });
+// 演示：后台作业陆续完成
+setTimeout(() => finishJob(j126, 28, 2), 22000);
+setTimeout(() => { const j = store.jobs.find(x => x.task === 123); if (j) { j.status = 'running'; j.started = Date.now(); setTimeout(() => finishJob(j, 26, 1), 9000); } }, 23000);
+
+function latestJob(task, step, run) { return store.jobs.find(j => j.task === +task && j.step === +step && (run == null || j.run === +run)); }
+function finishJob(j, segs, viol) {
+  j.status = 'completed'; j.segs = segs; j.viol = viol; j.finished = Date.now(); j.elapsed = Date.now() - j.started; j.flashUntil = Date.now() + 2500;
+  toast(`任务 ${j.task} · step ${j.step} 离线推理完成：${segs} 段 · 违规 ${viol}`, 'ok', { label: '查看结果', fn: () => go(`/run/${j.task}/${j.step}/${j.run}?panel=offline`) }, 6000);
+}
+function submitOffline(task, step, run, quiet = false) {
+  const ex = latestJob(task, step, run);
+  if (ex && (ex.status === 'queued' || ex.status === 'running')) { if (!quiet) toast(`任务 ${task} · step ${step} 已在队列中`, 'warn'); return false; }
+  if (store.health.backend !== 'ok') { toast('后端不可达，提交失败', 'bad'); return false; }
+  const j = addJob({ task: +task, step: +step, run: +run, status: 'queued', submitted: Date.now() });
+  setTimeout(() => { j.status = 'running'; j.started = Date.now(); }, 1200);
+  setTimeout(() => finishJob(j, 28, 3), 6500);
+  if (!quiet) toast(`已提交离线推理：任务 ${task} · step ${step}`, 'info');
+  return true;
+}
+const jobStatusName = j => !j ? '未跑' : ({ queued: '排队中', running: '运行中', completed: '已完成', skipped: '已跳过', failed: '失败', cancelled: '已取消', reclaimed: '已回收' })[j.status];
+const jobTagCls = j => !j ? 'mute' : ({ queued: 'q', running: 'tg-run', completed: 'ok', skipped: 'mute', failed: 'bad' })[j.status] || 'mute';
+
+/* =========================================================
+ * hash 路由（含离开保护）
+ * ======================================================= */
+const route = reactive({ name: 'tasks', parts: [], query: {} });
+function parseHash(h) {
+  const raw = (h || '').replace(/^#/, '') || '/tasks';
+  const [p, q = ''] = raw.split('?');
+  const parts = p.split('/').filter(Boolean);
+  return { name: parts[0] || 'tasks', parts: parts.slice(1), query: Object.fromEntries(new URLSearchParams(q)) };
+}
+function go(path) { location.hash = path; }
+function replaceQuery(patch) {
+  const q = { ...route.query, ...patch };
+  Object.keys(q).forEach(k => (q[k] == null || q[k] === '') && delete q[k]);
+  const qs = new URLSearchParams(q).toString();
+  const h = '#/' + [route.name, ...route.parts].join('/') + (qs ? '?' + qs : '');
+  history.replaceState(null, '', h); lastHash = h; route.query = q;
+}
+function replacePath(path) {
+  const qs = new URLSearchParams(route.query).toString();
+  const h = '#' + path + (qs ? '?' + qs : '');
+  history.replaceState(null, '', h); lastHash = h;
+  Object.assign(route, parseHash(h));
+}
+let lastHash = location.hash, bypass = false;
+async function onHash() {
+  const next = parseHash(location.hash), cur = route;
+  const runKey = r => r.name === 'run' ? r.parts.join('/') : null;
+  if (!bypass && store.leaveGuard && runKey(cur) && runKey(cur) !== runKey(next)) {
+    const n = store.leaveGuard();
+    if (n > 0) {
+      const target = location.hash;
+      history.replaceState(null, '', lastHash);
+      const ok = await confirmBox('离开当前 run？', `有 ${n} 段送标片段尚未提交。它们已暂存在本标签页，回到这个 run 时会恢复。`, '仍要离开', '留下');
+      if (!ok) return;
+      bypass = true; location.hash = target; return;
+    }
+  }
+  bypass = false; lastHash = location.hash;
+  Object.assign(route, next);
+  if (route.name === 'run') store.lastRun = '/' + ['run', ...route.parts].join('/');
+}
+window.addEventListener('hashchange', onHash);
+Object.assign(route, parseHash(location.hash));
+
+/* =========================================================
+ * 画面模拟（代替 <video>，用来演示双轨对时）
+ * ======================================================= */
+function drawScene(ctx, o) {
+  const W = 640, H = 360;
+  if (o.noFrame) {
+    ctx.fillStyle = '#05070b'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#a3abbd'; ctx.font = '600 22px system-ui';
+    ctx.fillText('此刻无标注画面', W / 2, H / 2 - 6);
+    ctx.font = '14px system-ui'; ctx.fillStyle = '#6b7487'; ctx.fillText(o.reason, W / 2, H / 2 + 22);
+    ctx.textAlign = 'left';
+    overlayClock(ctx, o); return;
+  }
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#22343a'); g.addColorStop(1, '#0e1719');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#2c3f45'; rr(ctx, 30, 190, 580, 140, 16); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.035)'; for (let i = 1; i < 8; i++) ctx.fillRect(30 + i * 72, 190, 1, 140);
+  const boxes = [];
+  if (o.step === 1) {
+    ctx.fillStyle = '#1d4a5e'; rr(ctx, 120, 112, 400, 196, 16); ctx.fill();
+    ctx.fillStyle = 'rgba(120,200,230,.16)'; rr(ctx, 132, 142, 376, 156, 12); ctx.fill();
+    ctx.strokeStyle = '#a9b8bc'; ctx.lineWidth = 7; ctx.beginPath(); ctx.ellipse(320, 226, 120, 44, 0, 0, Math.PI * 2); ctx.stroke();
+    const k = Math.floor(o.mediaRaw / 300), r = rng(k * 7 + 3), n = o.bubble ? 16 : 3;
+    let bx0 = 1e9, by0 = 1e9, bx1 = 0, by1 = 0;
+    ctx.strokeStyle = 'rgba(230,250,255,.85)'; ctx.lineWidth = 1.4;
+    for (let i = 0; i < n; i++) {
+      const x = o.bubble ? 330 + r() * 70 : 180 + r() * 280, y = 160 + r() * 120, rad = 2 + r() * 4.5;
+      ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.stroke();
+      bx0 = Math.min(bx0, x - rad); by0 = Math.min(by0, y - rad); bx1 = Math.max(bx1, x + rad); by1 = Math.max(by1, y + rad);
+    }
+    if (o.bubble) boxes.push([bx0 - 6, by0 - 6, bx1 - bx0 + 12, by1 - by0 + 12, 'bubble 0.86']);
+    boxes.push([196, 178, 248, 98, 'scope 0.93']);
+  } else {
+    const ty = x => 250 - 18 * Math.sin((x - 60) / 520 * Math.PI);
+    const tube = (w, col) => { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.beginPath(); for (let x = 60; x <= 580; x += 10) x === 60 ? ctx.moveTo(x, ty(x)) : ctx.lineTo(x, ty(x)); ctx.stroke(); };
+    tube(11, '#9fb0b4'); tube(5, '#56676c');
+    ctx.fillStyle = '#c9d4d6'; rr(ctx, 38, 233, 26, 32, 5); ctx.fill();
+    const lab = o.seg?.label || 'idle';
+    const p = o.seg ? clamp((o.mediaRaw - o.seg.start) / (o.seg.end - o.seg.start), 0, 1) : 0;
+    let bp = 0.04;
+    if (lab === 'long_brush_insert') bp = 0.04 + 0.86 * p; else if (lab === 'long_brush_withdraw') bp = 0.9 - 0.86 * p;
+    const bx = 60 + bp * 520, by = ty(bx);
+    if (lab === 'flush') { ctx.fillStyle = 'rgba(91,192,235,.95)'; for (let i = 0; i < 14; i++) { const x = 60 + ((o.mediaRaw / 7 + i * 37) % 520); ctx.beginPath(); ctx.arc(x, ty(x), 3.2, 0, 7); ctx.fill(); } }
+    if (lab === 'air_injection') { ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1.5; for (let i = 0; i < 9; i++) { const x = 60 + ((o.mediaRaw / 4 + i * 58) % 520); ctx.beginPath(); ctx.arc(x, ty(x), 4.5, 0, 7); ctx.stroke(); } }
+    ctx.strokeStyle = 'rgba(222,170,70,.9)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(14, 196); ctx.quadraticCurveTo(44, 214, 60, ty(60));
+    for (let x = 60; x <= bx; x += 8) ctx.lineTo(x, ty(x)); ctx.stroke();
+    ctx.save(); ctx.translate(bx, by); ctx.fillStyle = '#f2c46d'; ctx.fillRect(-8, -6, 16, 12);
+    ctx.strokeStyle = '#f7dca0'; ctx.lineWidth = 1; for (let i = -7; i <= 7; i += 3) { ctx.beginPath(); ctx.moveTo(i, -10); ctx.lineTo(i, 10); ctx.stroke(); } ctx.restore();
+    const brushing = lab.startsWith('long_brush');
+    if (brushing || lab === 'flush' || lab === 'air_injection') { ctx.fillStyle = '#4f7cd9'; ctx.beginPath(); ctx.ellipse(46, 208, 28, 17, -0.3, 0, 7); ctx.fill(); boxes.push([14, 186, 66, 46, 'hand 0.88']); }
+    if (brushing) boxes.push([bx - 18, by - 17, 36, 34, 'brush_head 0.91']);
+    if (lab === 'flush') boxes.push([30, 226, 44, 46, 'syringe 0.84']);
+    boxes.push([32, 228, 38, 42, 'port 0.95']);
+  }
+  if (o.kind === 'processed') {
+    ctx.lineWidth = 2; ctx.font = '600 11px Consolas,monospace';
+    for (const [x, y, w, h, t] of boxes) {
+      ctx.strokeStyle = '#22c55e'; ctx.strokeRect(x, y, w, h);
+      const tw = ctx.measureText(t).width + 8; ctx.fillStyle = '#22c55e'; ctx.fillRect(x, y - 15, tw, 15);
+      ctx.fillStyle = '#04210f'; ctx.fillText(t, x + 4, y - 4);
+    }
+  }
+  overlayClock(ctx, o);
+}
+function overlayClock(ctx, o) {
+  const W = 640, H = 360;
+  ctx.font = '600 13px Consolas,monospace';
+  const t1 = fmtWallMs(o.wall);
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; rr(ctx, 10, H - 32, ctx.measureText(t1).width + 16, 22, 5); ctx.fill();
+  ctx.fillStyle = '#e8f0f2'; ctx.fillText(t1, 18, H - 16);
+  if (o.media != null) {
+    const t2 = `${o.kind === 'raw' ? 'raw' : 'proc'} media ${fmtMedia(o.media)}`;
+    const w2 = ctx.measureText(t2).width + 16;
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; rr(ctx, W - w2 - 10, H - 32, w2, 22, 5); ctx.fill();
+    ctx.fillStyle = '#9fb3bd'; ctx.fillText(t2, W - w2 - 2, H - 16);
+  }
+}
+
+/* =========================================================
+ * 页面：任务总览
+ * ======================================================= */
+const PageTasks = {
+  template: '#tpl-tasks',
+  setup() {
+    const tab = ref(route.query.tab === 'online' ? 'online' : 'all'), q = ref('');
+    const setTab = v => { tab.value = v; replaceQuery({ tab: v }); };
+    // 无录像的 step 不出现；一个都没有的任务整行不出现
+    const shownSteps = t => t.steps.filter(s => s.tracks.length);
+    function chipOff(t, s) {
+      if (s.live) return { cls: 'live', text: '● 直播' };
+      if (!stageOf(s.step_id).has_offline_model) return null;
+      const j = latestJob(t.task_id, s.step_id, s.runs[0]);
+      if (!j) return { cls: 'none', text: '未跑' };
+      if (j.status === 'completed') return j.viol ? { cls: 'viol', text: `✓${j.segs} ⚠${j.viol}` } : { cls: 'done', text: `✓${j.segs}` };
+      return { cls: j.status, text: { running: '◐ 运行', queued: '◌ 排队', failed: '✗ 失败' }[j.status] || j.status };
+    }
+    const rows = computed(() => {
+      let r = TASKS.filter(t => shownSteps(t).length);
+      if (tab.value === 'online') r = r.filter(isLive);
+      const kw = q.value.trim();
+      if (kw) r = r.filter(t => String(t.task_id).includes(kw) || (showDb(t) && t.ip.includes(kw)));
+      return r;
+    });
+    function openStep(t, s) {
+      if (s.live) return go('/live/' + t.task_id);
+      go(`/run/${t.task_id}/${s.step_id}/latest`);
+    }
+    const liveCount = computed(() => TASKS.filter(t => isLive(t) && shownSteps(t).length).length);
+    const src = computed(effectiveSource);
+    // 「在线」来自 overview，总有 IP；「全部」退回仅磁盘时没有平台库字段
+    const showDb = t => tab.value === 'online' || src.value === 'db';
+    return { tab, q, setTab, shownSteps, chipOff, rows, openStep, liveCount, src, showDb };
+  },
+};
+
+/* =========================================================
+ * 页面：Run 工作台
+ * ======================================================= */
+const LBL = 92, PR = 10;
+const PageRun = {
+  template: '#tpl-run',
+  setup() {
+    const st = reactive({ task: 0, step: 0, runId: 0 });
+    const R = ref(null);
+    const stepObj = computed(() => findStep(st.task, st.step));
+    const t = ref(0), playing = ref(false), rate = ref(1), mode = ref('sbs'), panel = ref('review');
+    const view = reactive({ v0: 0, v1: 1 });
+    const hl = ref(null), selEv = ref(null);
+    const draft = reactive({ s: null, e: null });
+    const clips = ref([]);
+    const probsOpen = ref(false), submitting = ref(false), waited = ref(0), project = ref(store.labConfig.default_project_id), dlOpen = ref(false);
+    const gapFlash = ref(null), hover = ref(null), hoverX = ref(null), cursor = ref('default');
+    const rawCv = ref(null), procCv = ref(null), tlCv = ref(null), tlWrap = ref(null);
+    let dirty = true, flashUntil = 0;
+    const storeKey = () => `cs-console-clips:${st.task}/${st.step}/${st.runId}`;
+    const saveClips = () => sessionStorage.setItem(storeKey(), JSON.stringify(clips.value.filter(c => c.status !== 'sending')));
+
+    function load() {
+      if (route.name !== 'run') return;
+      const [task, step, runParam] = route.parts;
+      const sp = findStep(task, step);
+      if (!sp) { R.value = null; return; }
+      const runId = (!runParam || runParam === 'latest') ? sp.runs[0] : +runParam;
+      if (String(runId) !== runParam) replacePath(`/run/${task}/${step}/${runId}`);
+      if (st.task === +task && st.step === +step && st.runId === runId && R.value) return;
+      Object.assign(st, { task: +task, step: +step, runId });
+      R.value = buildRun(+task, +step, runId);
+      playing.value = false;
+      t.value = clamp(+(route.query.t || 0), 0, R.value.duration);
+      mode.value = R.value.hasProc ? (route.query.mode || 'sbs') : 'raw';
+      panel.value = route.query.panel || 'review';
+      view.v0 = 0; view.v1 = R.value.duration;
+      if (route.query.t) centerOn(t.value, 120000);
+      hl.value = null; draft.s = draft.e = null;
+      selEv.value = route.query.ev ? +route.query.ev : null;
+      try { clips.value = JSON.parse(sessionStorage.getItem(storeKey()) || '[]'); } catch { clips.value = []; }
+      if (clips.value.length) toast(`已恢复本 run 暂存的 ${clips.value.length} 段送标片段`, 'info');
+      dirty = true;
+    }
+    watch(() => route.parts.join('/'), load);
+    watch(() => route.query.t, v => { if (v != null && R.value && Math.abs(+v - t.value) > 50) { seek(+v); if (route.query.ev) { selEv.value = +route.query.ev; panel.value = 'review'; } } });
+    load();
+
+    /* ---- 派生 ---- */
+    const job = computed(() => latestJob(st.task, st.step, st.runId));
+    const offlineReady = computed(() => stageOf(st.step).has_offline_model && job.value && ['completed', 'skipped'].includes(job.value.status));
+    const segs = computed(() => offlineReady.value ? R.value.segments : []);
+    const viols = computed(() => offlineReady.value ? R.value.violations : []);
+    const violEmptyText = computed(() => {
+      if (!stageOf(st.step).has_offline_model) return `${stageOf(st.step).alias} 无离线模型`;
+      const j = job.value;
+      if (!j) return '未跑离线推理';
+      return { queued: '离线推理排队中…', running: '离线推理运行中…', failed: '离线推理失败' }[j.status] || '';
+    });
+    const events = computed(() => [...R.value.alarms, ...viols.value].sort((a, b) => (a.media_ms ?? 1e12) - (b.media_ms ?? 1e12)));
+    const selEvObj = computed(() => events.value.find(e => e.id === selEv.value));
+    const curWall = computed(() => R.value ? mediaToWall(R.value.raw, t.value) : 0);
+    const labelStat = computed(() => {
+      const o = Object.fromEntries(R.value.labels.map(k => [k, { n: 0, ms: 0 }]));
+      segs.value.forEach(s => { o[s.label].n++; o[s.label].ms += s.end - s.start; });
+      return o;
+    });
+    const jobProgress = computed(() => job.value?.status === 'running' ? clamp((clock.value - job.value.started) / 5300 * 100, 5, 96) : 0);
+    const canMark = computed(() => mode.value !== 'processed');
+    const gapsIn = (s, e) => R.value.gaps.filter(g => g.media > s && g.media < e);
+    const clipTotal = computed(() => clips.value.reduce((a, c) => a + c.e - c.s, 0));
+    const limits = store.labConfig.limits;
+    const clipErr = computed(() => clipTotal.value > limits.max_total_ms ? `总时长超过 ${fmtDur(limits.max_total_ms)}` : '');
+    const todoCount = computed(() => clips.value.filter(c => c.status !== 'ok').length);
+    const doneCount = computed(() => clips.value.filter(c => c.status === 'ok').length);
+
+    store.leaveGuard = () => todoCount.value;
+    watch(() => job.value?.status, (nv, ov) => { if (nv === 'completed' && ov && ov !== 'completed') { flashUntil = performance.now() + 1600; } });
+    watch([segs, viols, clips, () => draft.s, () => draft.e, hl, probsOpen, mode, () => view.v0, () => view.v1, selEv], () => { dirty = true; }, { deep: true });
+
+    /* ---- 播放控制 ---- */
+    function centerOn(m, span) {
+      const dur = R.value.duration; span = Math.min(span ?? (view.v1 - view.v0), dur);
+      setView(m - span / 2, m + span / 2);
+    }
+    function seek(m) {
+      if (!R.value) return;
+      t.value = clamp(m, 0, R.value.duration);
+      if (t.value < view.v0 || t.value > view.v1) centerOn(t.value);
+      replaceQuery({ t: Math.round(t.value) });
+    }
+    function togglePlay() { if (t.value >= R.value.duration) t.value = 0; playing.value = !playing.value; if (!playing.value) replaceQuery({ t: Math.round(t.value) }); }
+    function setMode(m) { if (m !== 'raw' && !R.value.hasProc) return toast('该 step 只落了 raw 轨', 'warn'); mode.value = m; replaceQuery({ mode: m }); }
+    function setPanel(p) { panel.value = p; replaceQuery({ panel: p }); }
+    function switchRun(id) { go(`/run/${st.task}/${st.step}/${id}`); }
+    async function download(track) {
+      dlOpen.value = false;
+      toast(`正在准备 ${track} 整段 mp4（服务端 remux 中）…`, 'info', null, 2500);
+      await sleep(1600);
+      toast(`task${st.task}_step${st.step}_${track}.mp4 已开始下载（样例不产生文件）`, 'ok');
+    }
+
+    /* ---- 事件 ---- */
+    function pickEvent(ev) {
+      selEv.value = ev.id; panel.value = 'review';
+      if (ev.media_ms != null) seek(ev.media_ms);
+      replaceQuery({ ev: ev.id });
+    }
+
+    /* ---- 送标 ---- */
+    function addClip(s, e) {
+      const dur = R.value.duration;
+      s = Math.round(clamp(s, 0, dur)); e = Math.round(clamp(e, 0, dur));
+      if (e - s < 1000) { toast('片段不足 1 秒，未加入', 'warn'); return false; }
+      if (e - s > limits.max_clip_ms) { e = s + limits.max_clip_ms; toast(`单段上限 ${fmtDur(limits.max_clip_ms)}，已截断`, 'warn'); }
+      const i = clips.value.findIndex(c => c.s < e && s < c.e);
+      if (i >= 0) { toast(`与片段 #${i + 1} 重叠，未加入`, 'warn'); return false; }
+      if (clips.value.length >= limits.max_clips) { toast(`最多 ${limits.max_clips} 段`, 'warn'); return false; }
+      clips.value.push({ id: Date.now() + Math.random(), s, e, status: 'new' });
+      clips.value.sort((a, b) => a.s - b.s); saveClips();
+      return true;
+    }
+    function clipFromEvent(ev) {
+      const m = ev.media_ms;
+      let s = Math.max(0, m - 5000), e = Math.min(R.value.duration, m + 5000), cut = false;
+      for (const g of gapsIn(s, e)) { cut = true; if (g.media <= m) s = g.media; else e = g.media; }
+      if (addClip(s, e)) toast(`已加入送标片段 ${fmtMedia(s)}–${fmtMedia(e)}${cut ? '（已在断点处截短）' : ''}`, 'ok', { label: '去送标', fn: () => setPanel('label') });
+    }
+    function removeClip(i) { clips.value.splice(i, 1); saveClips(); }
+    function splitClip(i) {
+      const c = clips.value[i], pts = [c.s, ...gapsIn(c.s, c.e).map(g => g.media), c.e];
+      const parts = []; for (let k = 0; k < pts.length - 1; k++) if (pts[k + 1] - pts[k] >= 1000) parts.push({ id: Date.now() + k, s: pts[k], e: pts[k + 1], status: 'new' });
+      clips.value.splice(i, 1, ...parts); saveClips();
+      toast(`已按断点拆成 ${parts.length} 段`, 'ok');
+    }
+    async function submit() {
+      if (store.health.ls !== 'ok') return toast('Label Studio 不可达，无法送标', 'bad', { label: '去配置', fn: () => go('/system') });
+      const todo = clips.value.filter(c => c.status !== 'ok');
+      submitting.value = true; waited.value = 0;
+      const tm = setInterval(() => waited.value++, 1000);
+      todo.forEach(c => { c.status = 'sending'; });
+      await sleep(2600);
+      clearInterval(tm);
+      let ok = 0;
+      todo.forEach(c => {
+        const g = gapsIn(c.s, c.e);
+        // 模拟后端 /submit 的 per-clip 结果：error_code + error 文案，前端原样显示 error
+        if (g.length) { c.status = 'fail'; c.err = 'range_gap'; c.errMsg = `片段跨越断流（${fmtMedia(g[0].media)} 处无录像 ${fmtDur(g[0].dur)}）`; c.errAt = g[0].media; }
+        else { c.status = 'ok'; c.ls = 5500 + Math.floor(Math.random() * 400); ok++; }
+      });
+      submitting.value = false; saveClips();
+      if (ok === todo.length) toast(`送标完成：${ok} 段全部成功`, 'ok');
+      else toast(`送标部分成功：${ok}/${todo.length}，失败的段可修正后单独重提`, 'warn', null, 6000);
+    }
+    const lsLink = c => toast(`样例：打开 ${store.labConfig.label_studio_url}/projects/${project.value}/data?task=${c.ls}`, 'info');
+
+    /* ---- 离线 ---- */
+    function runOffline() { submitOffline(st.task, st.step, st.runId); }
+
+    /* ---- 键盘：只保留播放与前后 1 秒 ---- */
+    function onKey(e) {
+      if (route.name !== 'run' || store.modal) return;
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (['input', 'select', 'textarea'].includes(tag)) return;
+      if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); seek(t.value + (e.key === 'ArrowLeft' ? -1000 : 1000)); }
+    }
+
+    /* ---- 时间轴 ---- */
+    let layout = [], tlW = 0, staticCv = null, drag = null;
+    function computeLayout() {
+      const L = []; let y = 0;
+      const push = (key, h, name) => { L.push({ key, name, y, h }); y += h; };
+      push('ruler', 32); push('event', 28, '事件'); push('seg', 26, '分割段');
+      push('prob', probsOpen.value ? 76 : 18, probsOpen.value ? '概率 ▾' : '概率 ▸'); push('clip', 30, '送标片段');
+      layout = L; return y;
+    }
+    const lane = k => layout.find(l => l.key === k);
+    const laneAt = y => layout.find(l => y >= l.y && y < l.y + l.h);
+    const inner = () => tlW - LBL - PR;
+    const m2x = m => LBL + (m - view.v0) / (view.v1 - view.v0) * inner();
+    const x2m = x => view.v0 + (x - LBL) / inner() * (view.v1 - view.v0);
+    function setView(a, b) {
+      const dur = R.value.duration; let span = clamp(b - a, 4000, dur);
+      a = clamp(a, 0, dur - span); view.v0 = a; view.v1 = a + span;
+    }
+    function zoomBy(k, m) { m = m ?? t.value; const span = (view.v1 - view.v0) * k; const r = clamp((m - view.v0) / (view.v1 - view.v0), 0, 1); setView(m - r * span, m - r * span + span); }
+    const fit = () => setView(0, R.value.duration);
+
+    function drawStatic(c, W, H) {
+      const r = R.value;
+      c.clearRect(0, 0, W, H);
+      layout.forEach((l, i) => {
+        c.fillStyle = l.key === 'ruler' ? '#f8f9fb' : (i % 2 ? '#ffffff' : '#fbfcfd'); c.fillRect(0, l.y, W, l.h);
+        c.fillStyle = '#eef0f3'; c.fillRect(0, l.y + l.h - 1, W, 1);
+        if (l.name) { c.fillStyle = '#6b7280'; c.font = '12px system-ui'; c.textBaseline = 'middle'; c.fillText(l.name, 12, l.y + l.h / 2); }
+      });
+      c.fillStyle = '#e5e7eb'; c.fillRect(LBL - 1, 0, 1, H);
+      c.save(); c.beginPath(); c.rect(LBL, 0, W - LBL - PR, H); c.clip();
+      // 刻度
+      const span = view.v1 - view.v0, ppm = inner() / span;
+      const stp = [1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000].find(s => s * ppm >= 84) || 300000;
+      const minor = stp / 5, ru = lane('ruler');
+      c.textBaseline = 'alphabetic';
+      for (let m = Math.ceil(view.v0 / minor) * minor; m <= view.v1; m += minor) {
+        const x = Math.round(m2x(m)) + 0.5, major = Math.round(m) % stp === 0;
+        c.fillStyle = major ? '#9ca3af' : '#d1d5db'; c.fillRect(x, major ? ru.y + 18 : ru.y + 25, 1, major ? 14 : 7);
+        if (major) {
+          c.fillStyle = '#f0f2f5'; c.fillRect(x, ru.y + ru.h, 1, H - ru.h);
+          c.fillStyle = '#6b7280'; c.font = '11px Consolas,monospace'; c.fillText(fmtMedia(m, stp < 5000), x + 4, ru.y + 13);
+        }
+      }
+      // 断流：刻度尺上的红色标签 + 贯穿各泳道的竖线
+      r.gaps.forEach(g => {
+        const x = Math.round(m2x(g.media)) + 0.5;
+        c.fillStyle = 'rgba(239,68,68,.55)'; c.fillRect(x - 0.5, ru.y + ru.h, 1.5, H - ru.h);
+        const txt = `断流 ${fmtDur(g.dur)}`; c.font = '600 10.5px system-ui';
+        const w = c.measureText(txt).width + 10;
+        c.fillStyle = '#dc2626'; rr(c, x - w / 2, ru.y + 17, w, 14, 3); c.fill();
+        c.fillStyle = '#fff'; c.textBaseline = 'middle'; c.fillText(txt, x - w / 2 + 5, ru.y + 24.5); c.textBaseline = 'alphabetic';
+      });
+      // 事件：平台告警 ▼ + 离线违规 ◆
+      const el = lane('event'), cy = el.y + el.h / 2;
+      const ring = id => { if (selEv.value === id) return true; };
+      r.alarms.forEach(a => {
+        const x = m2x(a.media_ms);
+        if (ring(a.id)) { c.fillStyle = 'rgba(96,165,250,.28)'; c.beginPath(); c.arc(x, cy, 11, 0, 7); c.fill(); }
+        c.fillStyle = lvColor(a.level);
+        c.beginPath(); c.moveTo(x - 6, cy - 6); c.lineTo(x + 6, cy - 6); c.lineTo(x, cy + 6); c.closePath(); c.fill();
+      });
+      viols.value.forEach(v => {
+        if (v.media_ms == null) return;
+        const x = m2x(v.media_ms);
+        if (ring(v.id)) { c.fillStyle = 'rgba(96,165,250,.28)'; c.beginPath(); c.arc(x, cy, 11, 0, 7); c.fill(); }
+        c.fillStyle = lvColor(v.level);
+        c.beginPath(); c.moveTo(x, cy - 7); c.lineTo(x + 6, cy); c.lineTo(x, cy + 7); c.lineTo(x - 6, cy); c.closePath(); c.fill();
+      });
+      // 分割段
+      const sl = lane('seg');
+      segs.value.forEach(s => {
+        if (s.end < view.v0 || s.start > view.v1) return;
+        const x0 = m2x(s.start), x1 = m2x(s.end);
+        c.globalAlpha = hl.value && hl.value !== s.label ? 0.16 : 0.92;
+        c.fillStyle = labelColor(r.labels, s.label); c.fillRect(x0, sl.y + 4, Math.max(1, x1 - x0 - 1), sl.h - 8);
+        if (x1 - x0 > 70) { c.fillStyle = '#fff'; c.font = '11px system-ui'; c.textBaseline = 'middle'; c.fillText(s.label, x0 + 5, sl.y + sl.h / 2 + 1); }
+        c.globalAlpha = 1;
+      });
+      // 概率（默认折叠）
+      const pl = lane('prob');
+      if (probsOpen.value && segs.value.length && r.probs) {
+        const P = r.probs, i0 = Math.max(0, Math.floor(view.v0 / P.dt) - 1), i1 = Math.min(P.T - 1, Math.ceil(view.v1 / P.dt) + 1);
+        const stepI = Math.max(1, Math.floor((i1 - i0) / (inner() * 1.5)));
+        const order = P.keys.map((k, ci) => ci).sort((a, b) => (P.keys[a] === hl.value) - (P.keys[b] === hl.value));
+        for (const ci of order) {
+          const k = P.keys[ci], on = hl.value === k;
+          c.globalAlpha = hl.value && !on ? 0.13 : 0.9; c.strokeStyle = labelColor(r.labels, k); c.lineWidth = on ? 2.2 : 1.2;
+          c.beginPath();
+          for (let i = i0; i <= i1; i += stepI) { const x = m2x(i * P.dt), y = pl.y + pl.h - 4 - P.p[ci][i] * (pl.h - 8); i === i0 ? c.moveTo(x, y) : c.lineTo(x, y); }
+          c.stroke();
+        }
+        c.globalAlpha = 1;
+      }
+      // 送标片段
+      const cl = lane('clip');
+      clips.value.forEach((cp, i) => {
+        const x0 = m2x(cp.s), x1 = m2x(cp.e), w = Math.max(2, x1 - x0);
+        const col = cp.status === 'ok' ? '#16a34a' : cp.status === 'fail' ? '#dc2626' : cp.status === 'sending' ? '#ca8a04' : '#2563eb';
+        c.fillStyle = col + '22'; c.strokeStyle = col; c.lineWidth = 1.5;
+        rr(c, x0, cl.y + 5, w, cl.h - 10, 4); c.fill(); c.stroke();
+        if (cp.status !== 'ok') { c.fillStyle = col; c.fillRect(x0, cl.y + 5, 3, cl.h - 10); c.fillRect(x1 - 3, cl.y + 5, 3, cl.h - 10); }
+        if (w > 20) { c.fillStyle = col; c.font = '600 11px system-ui'; c.textBaseline = 'middle'; c.fillText(`#${i + 1}${cp.status === 'ok' ? ' ✓' : ''}`, x0 + 6, cl.y + cl.h / 2 + 1); }
+      });
+      if (draft.s != null && draft.e != null) {
+        const x0 = m2x(draft.s), x1 = m2x(draft.e);
+        c.strokeStyle = '#f59e0b'; c.setLineDash([4, 3]); c.lineWidth = 1.5; c.fillStyle = 'rgba(245,158,11,.14)';
+        c.fillRect(x0, cl.y + 5, Math.max(2, x1 - x0), cl.h - 10); c.strokeRect(x0, cl.y + 5, Math.max(2, x1 - x0), cl.h - 10); c.setLineDash([]);
+      }
+      c.restore();
+      // 空状态与右侧注记
+      c.font = '12px system-ui'; c.fillStyle = '#9ca3af'; c.textBaseline = 'middle';
+      const left = (l, txt) => c.fillText(txt, LBL + 12, l.y + l.h / 2 + 1);
+      const right = (l, txt, col) => { c.textAlign = 'right'; c.fillStyle = col; c.fillText(txt, W - PR - 6, l.y + l.h / 2 + 1); c.textAlign = 'left'; c.fillStyle = '#9ca3af'; };
+      const timed = r.alarms.length + viols.value.filter(v => v.media_ms != null).length;
+      if (!timed) left(el, '本 run 没有带时刻的事件');
+      const whole = viols.value.filter(v => v.media_ms == null).length;
+      if (whole) right(el, `◆ 整段违规 ×${whole}`, '#b45309');
+      else if (stageOf(st.step).has_offline_model && !offlineReady.value) right(el, `离线违规：${violEmptyText.value}`, '#9ca3af');
+      if (!segs.value.length) { left(sl, violEmptyText.value); if (probsOpen.value) left(pl, violEmptyText.value); }
+      if (!clips.value.length && draft.s == null) left(cl, canMark.value ? '在此拖选即生成送标片段' : 'processed 视图下不可打点');
+    }
+
+    function renderTimeline(now) {
+      const cv = tlCv.value, wrap = tlWrap.value; if (!cv || !wrap || !R.value) return;
+      const W = wrap.clientWidth, H = computeLayout(), dpr = window.devicePixelRatio || 1;
+      if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+        cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); cv.style.height = H + 'px'; staticCv = null;
+      }
+      tlW = W;
+      if (dirty || !staticCv) {
+        staticCv = staticCv || document.createElement('canvas'); staticCv.width = cv.width; staticCv.height = cv.height;
+        const sc = staticCv.getContext('2d'); sc.setTransform(dpr, 0, 0, dpr, 0, 0); drawStatic(sc, W, H); dirty = false;
+      }
+      const c = cv.getContext('2d');
+      c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, cv.width, cv.height); c.drawImage(staticCv, 0, 0);
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (now < flashUntil) {
+        const a = (flashUntil - now) / 1600 * 0.35, el = lane('event'), pl = lane('prob');
+        c.fillStyle = `rgba(59,130,246,${a})`; c.fillRect(LBL, el.y, inner(), pl.y + pl.h - el.y);
+      }
+      if (hoverX.value != null && hoverX.value > LBL) { c.fillStyle = 'rgba(17,24,39,.15)'; c.fillRect(hoverX.value, 0, 1, H); }
+      const x = m2x(t.value);
+      if (x >= LBL - 1 && x <= W - PR + 1) {
+        c.fillStyle = '#111827'; c.fillRect(x - 0.75, 6, 1.5, H - 6);
+        c.beginPath(); c.moveTo(x - 6, 0); c.lineTo(x + 6, 0); c.lineTo(x, 8); c.closePath(); c.fill();
+      }
+    }
+
+    function renderFrames() {
+      const r = R.value; if (!r) return;
+      const wall = mediaToWall(r.raw, t.value);
+      const seg = r.segments.length ? segAt(r.segments, t.value) : null;
+      const bubble = r.simBubbleAt.some(m => Math.abs(m - t.value) < 2500);  // 只供假画面
+      if (rawCv.value && mode.value !== 'processed')
+        drawScene(rawCv.value.getContext('2d'), { kind: 'raw', wall, media: t.value, mediaRaw: t.value, seg, step: r.step, bubble });
+      if (procCv.value && mode.value !== 'raw') {
+        const pm = wallToMedia(r.proc, wall);
+        if (pm == null) {
+          const reason = wall < r.proc[0].wall ? `processed 首段晚于 raw ${fmtDur(r.proc[0].wall - r.raw[0].wall)}（推理预热）` : '断流恢复后 processed 尚未出帧';
+          drawScene(procCv.value.getContext('2d'), { kind: 'processed', noFrame: true, reason, wall, media: null });
+        } else drawScene(procCv.value.getContext('2d'), { kind: 'processed', wall, media: pm, mediaRaw: t.value, seg, step: r.step, bubble });
+      }
+    }
+
+    let raf = 0, last = performance.now();
+    function loop(now) {
+      const dt = Math.min(100, now - last); last = now;
+      const r = R.value;
+      if (r && playing.value) {
+        const prev = t.value; let nt = prev + dt * rate.value;
+        if (nt >= r.duration) { nt = r.duration; playing.value = false; }
+        for (const g of r.gaps) if (prev < g.media && nt >= g.media) gapFlash.value = { ...g, until: now + 1800 };
+        t.value = nt;
+        const span = view.v1 - view.v0;
+        if (nt > view.v1 - span * 0.03 && view.v1 < r.duration) setView(nt - span * 0.1, nt + span * 0.9);
+      }
+      if (gapFlash.value && now > gapFlash.value.until) gapFlash.value = null;
+      renderFrames(); renderTimeline(now);
+      raf = requestAnimationFrame(loop);
+    }
+
+    /* ---- 指针交互 ---- */
+    const pos = e => { const b = tlCv.value.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
+    function eventHit(x, laneKey) {
+      if (laneKey !== 'event') return null;
+      let best = null, bd = 8;
+      [...R.value.alarms, ...viols.value.filter(v => v.media_ms != null)].forEach(e => { const d = Math.abs(m2x(e.media_ms) - x); if (d < bd) { bd = d; best = e; } });
+      return best;
+    }
+    function gapHit(x) { return R.value.gaps.find(g => Math.abs(m2x(g.media) - x) < 30); }
+    function clipEdgeHit(x) {
+      for (let i = 0; i < clips.value.length; i++) {
+        const c = clips.value[i]; if (c.status === 'ok' || c.status === 'sending') continue;
+        if (Math.abs(m2x(c.s) - x) < 6) return { i, edge: 's' };
+        if (Math.abs(m2x(c.e) - x) < 6) return { i, edge: 'e' };
+      }
+      return null;
+    }
+    const clipHit = x => clips.value.findIndex(c => x >= m2x(c.s) && x <= m2x(c.e));
+    function onDown(e) {
+      const p = pos(e), l = laneAt(p.y); if (!l) return;
+      try { tlCv.value.setPointerCapture(e.pointerId); } catch { /* 合成事件无 pointer */ }
+      if (p.x < LBL) { if (l.key === 'prob') probsOpen.value = !probsOpen.value; return; }
+      if (l.key === 'clip' && canMark.value) {
+        const h = clipEdgeHit(p.x); if (h) { drag = { type: 'resize', ...h }; return; }
+        if (clipHit(p.x) < 0) { drag = { type: 'create', x0: p.x, m0: clamp(x2m(p.x), 0, R.value.duration), moved: false, lane: 'clip' }; return; }
+      }
+      drag = { type: 'pan', x0: p.x, v0: view.v0, v1: view.v1, moved: false, lane: l.key };
+    }
+    function onMove(e) {
+      const p = pos(e); updateHover(p);
+      if (!drag) return;
+      if (drag.type === 'pan') {
+        if (Math.abs(p.x - drag.x0) > 3) drag.moved = true;
+        if (drag.moved) { const dm = (p.x - drag.x0) / inner() * (drag.v1 - drag.v0); setView(drag.v0 - dm, drag.v1 - dm); }
+      } else if (drag.type === 'create') {
+        if (Math.abs(p.x - drag.x0) > 3) drag.moved = true;
+        if (drag.moved) { const m = clamp(x2m(p.x), 0, R.value.duration); draft.s = Math.min(drag.m0, m); draft.e = Math.max(drag.m0, m); }
+      } else if (drag.type === 'resize') {
+        const c = clips.value[drag.i], m = Math.round(clamp(x2m(p.x), 0, R.value.duration));
+        const prevE = drag.i > 0 ? clips.value[drag.i - 1].e : 0, nextS = drag.i < clips.value.length - 1 ? clips.value[drag.i + 1].s : R.value.duration;
+        if (drag.edge === 's') c.s = clamp(m, prevE, c.e - 1000); else c.e = clamp(m, c.s + 1000, nextS);
+        if (c.status === 'fail') c.status = 'new';
+        dirty = true;
+      }
+    }
+    function onUp(e) {
+      const p = pos(e), d = drag; drag = null; if (!d) return;
+      if (d.type === 'resize') { saveClips(); return; }
+      if (d.type === 'create' && d.moved) {
+        const s = draft.s, en = draft.e; draft.s = draft.e = null;
+        if (addClip(s, en) && panel.value !== 'label') setPanel('label');
+        return;
+      }
+      if (!d.moved) {
+        const ev = eventHit(p.x, d.lane); if (ev) return pickEvent(ev);
+        seek(clamp(x2m(p.x), 0, R.value.duration));
+      }
+    }
+    function onWheel(e) {
+      if (!R.value) return; e.preventDefault();
+      const p = pos(e);
+      if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        const dm = (e.deltaX || e.deltaY) / inner() * (view.v1 - view.v0); setView(view.v0 + dm, view.v1 + dm); return;
+      }
+      zoomBy(Math.exp(e.deltaY * 0.0015), clamp(x2m(Math.max(LBL, p.x)), 0, R.value.duration));
+    }
+    function updateHover(p) {
+      const l = laneAt(p.y);
+      if (!l || p.x < LBL) { hover.value = null; hoverX.value = null; cursor.value = l && p.x < LBL && l.key === 'prob' ? 'pointer' : 'default'; return; }
+      hoverX.value = p.x;
+      const m = clamp(x2m(p.x), 0, R.value.duration), r = R.value;
+      const lines = [`${fmtMedia(m)}  ·  墙钟 ${fmtWall(mediaToWall(r.raw, m))}`];
+      cursor.value = l.key === 'clip' && canMark.value ? (clipEdgeHit(p.x) ? 'ew-resize' : 'crosshair') : 'default';
+      if (l.key === 'ruler') { const g = gapHit(p.x); if (g) lines.push(`断流 ${fmtDur(g.dur)}：${fmtWall(g.wall_from)} → ${fmtWall(g.wall_to)}`, '跨过此点的片段送标会失败'); }
+      if (l.key === 'event') {
+        const ev = eventHit(p.x, l.key);
+        if (ev) { lines.push(`${ev.source === 'alarm' ? '平台告警' : '离线违规'} · ${ev.level} · ${ev.kind}`, ev.message); cursor.value = 'pointer'; }
+      }
+      if (l.key === 'seg' && segs.value.length) { const s = segAt(segs.value, m); lines.push(`${s.label}  ${fmtMedia(s.start)}–${fmtMedia(s.end)} · conf ${s.conf.toFixed(2)}`); }
+      if (l.key === 'prob' && probsOpen.value && segs.value.length && r.probs) {
+        const i = clamp(Math.round(m / r.probs.dt), 0, r.probs.T - 1);
+        r.probs.keys.map((k, ci) => [k, r.probs.p[ci][i]]).sort((a, b) => b[1] - a[1]).slice(0, 3).forEach(([k, v]) => lines.push(`${k}  ${v.toFixed(2)}`));
+      }
+      if (l.key === 'clip') { const i = clipHit(p.x); if (i >= 0) { const c = clips.value[i]; lines.push(`片段 #${i + 1} ${fmtMedia(c.s)}–${fmtMedia(c.e)} · ${fmtDur(c.e - c.s)}`); } }
+      const W = tlW, tx = p.x + 14 > W - 300 ? p.x - 310 : p.x + 14;
+      const ty = l.y < 60 ? l.y + l.h + 4 : l.y - (lines.length * 18 + 18);
+      hover.value = { x: Math.max(4, tx), y: Math.max(4, ty), lines };
+    }
+
+    const closeDl = () => { dlOpen.value = false; };
+    onMounted(() => {
+      window.addEventListener('keydown', onKey);
+      document.addEventListener('click', closeDl);
+      tlCv.value?.addEventListener('wheel', onWheel, { passive: false });
+      raf = requestAnimationFrame(loop);
+    });
+    onBeforeUnmount(() => { cancelAnimationFrame(raf); window.removeEventListener('keydown', onKey); document.removeEventListener('click', closeDl); store.leaveGuard = null; });
+
+    return {
+      st, R, stepObj, t, playing, rate, mode, panel, view, hl, selEv, selEvObj, clips, probsOpen, submitting, waited, project, dlOpen,
+      gapFlash, hover, hoverX, cursor, rawCv, procCv, tlCv, tlWrap, job, offlineReady, segs, viols, violEmptyText, events, curWall, labelStat,
+      jobProgress, canMark, gapsIn, clipTotal, clipErr, todoCount, doneCount,
+      limits, seek, togglePlay, setMode, setPanel, switchRun, download, pickEvent, clipFromEvent, removeClip, splitClip, submit, lsLink,
+      runOffline, onDown, onMove, onUp, fit,
+    };
+  },
+};
+
+/* =========================================================
+ * 页面：实时监控
+ * ======================================================= */
+const liveState = reactive({ alarms: {}, sig: {} });
+let liveSeq = 0;
+TASKS.filter(isLive).forEach(t => {
+  // 假后端 /task/message 的 signals_10s：键由后端给，LEAK 有两个指标，CLEAN 为空
+  const liveStep = t.steps.find(x => x.live).step_id;
+  liveState.sig[t.task_id] = liveStep === 1 ? { BUBBLE: { active: false, hit: 0, max: 0 }, BENDING: { active: false, hit: 0, max: 0 } } : {};
+  liveState.alarms[t.task_id] = [];
+});
+liveState.alarms[128] = [
+  { seq: ++liveSeq, ts: NOW0 - 140000, level: 'high', metric: 'BUBBLE', message: '气泡持续 3.0s（置信 0.84）' },
+  { seq: ++liveSeq, ts: NOW0 - 230000, level: 'high', metric: 'BUBBLE', message: '气泡持续 2.4s（置信 0.80）' },
+];
+setInterval(() => {
+  const s = liveState.sig[128]; if (!s) return;
+  const on = Math.random() < 0.25; s.BUBBLE.active = on;
+  if (on) { s.BUBBLE.hit = Math.min(30, s.BUBBLE.hit + 1 + Math.floor(Math.random() * 3)); s.BUBBLE.max = Math.max(s.BUBBLE.max, 0.6 + Math.random() * 0.3); }
+  else s.BUBBLE.hit = Math.max(0, s.BUBBLE.hit - 1);
+  if (on && Math.random() < 0.35) {
+    liveState.alarms[128].unshift({ seq: ++liveSeq, ts: Date.now(), level: 'high', metric: 'BUBBLE', message: `气泡持续 ${(2 + Math.random() * 2).toFixed(1)}s（置信 ${(0.78 + Math.random() * 0.15).toFixed(2)}）`, fresh: true });
+    if (liveState.alarms[128].length > 50) liveState.alarms[128].pop();
+  }
+}, 1000);
+
+const PageLive = {
+  template: '#tpl-live',
+  setup() {
+    const lives = computed(() => TASKS.filter(isLive).map(t => ({ task: t, step: t.steps.find(s => s.live) })));
+    const focus = computed(() => { const id = +(route.parts[0] || 0); return lives.value.find(l => l.task.task_id === id) || lives.value[0]; });
+    const cv = ref(null), fps = ref(12.4), lastFrame = ref(Date.now());
+    const stall = computed(() => store.demo.stall), ended = computed(() => store.demo.ended);
+    const sinceFrame = computed(() => Math.max(0, clock.value - lastFrame.value));
+    watch(() => focus.value?.task.task_id, () => { store.demo.stall = false; store.demo.ended = false; lastFrame.value = Date.now(); });
+    let frames = 0;
+    const tm = setInterval(() => {
+      const f = focus.value; if (!f || !cv.value || stall.value || ended.value) return;
+      const r = buildRun(f.task.task_id, f.step.step_id, f.step.runs[0]);
+      const media = (Date.now() - f.step.runs[0]) % r.duration;
+      const seg = r.segments.length ? segAt(r.segments, media) : null;
+      const bubble = !!liveState.sig[f.task.task_id].BUBBLE?.active;  // 只供假画面
+      drawScene(cv.value.getContext('2d'), { kind: 'processed', wall: Date.now(), media: null, mediaRaw: media, seg, step: f.step.step_id, bubble });
+      frames++; lastFrame.value = Date.now();
+    }, 80);
+    const tf = setInterval(() => { fps.value = frames; frames = 0; }, 1000);
+    onBeforeUnmount(() => { clearInterval(tm); clearInterval(tf); });
+    function openReplay(ts) {
+      const f = focus.value, r = buildRun(f.task.task_id, f.step.step_id, f.step.runs[0]);
+      let q = '';
+      if (ts) {
+        const m = ts - f.step.runs[0];
+        if (m > r.duration) toast('运行中 run 的回放清单偏短，已定位到可回放的末尾', 'info');
+        q = `?panel=review&t=${Math.round(clamp(m, 0, r.duration))}`;
+      }
+      go(`/run/${f.task.task_id}/${f.step.step_id}/${f.step.runs[0]}${q}`);
+    }
+    return { lives, focus, cv, stall, ended, fps, sinceFrame, openReplay, S: liveState };
+  },
+};
+
+/* =========================================================
+ * 页面：离线推理
+ * ======================================================= */
+const PageOffline = {
+  template: '#tpl-offline',
+  setup() {
+    const FILTERS = [{ k: 'all', n: '全部' }, { k: 'running', n: '运行中' }, { k: 'queued', n: '排队' }, { k: 'completed', n: '已完成' }, { k: 'failed', n: '失败' }];
+    const flt = ref('all');
+    const countOf = k => k === 'all' ? store.jobs.length : store.jobs.filter(j => j.status === k).length;
+    const jobs = computed(() => flt.value === 'all' ? store.jobs : store.jobs.filter(j => j.status === flt.value));
+    return { FILTERS, flt, countOf, jobs, clock };
+  },
+};
+
+/* =========================================================
+ * 页面：系统运维
+ * ======================================================= */
+const PageSystem = {
+  template: '#tpl-system',
+  setup() {
+    // 假后端 /metrics/json：模型名与计数器名都由后端给，前端按出现顺序配色
+    const MODELS = [{ k: 'clean_large', b: 38 }, { k: 'clean_small', b: 22 }, { k: 'bubble', b: 30 }, { k: 'bending', b: 17 }];
+    const COUNTERS = [
+      { name: 'inference_failures_total', total: 3, by: { clean_small: 2, bubble: 1 } },
+      { name: 'frames_dropped_total', total: 1284, by: { ca_raw: 1102, ca_processed: 182 } },
+      { name: 'retries_total', total: 7, by: { decoder: 5, ls_upload: 2 } },
+    ];
+    const N = 48, xStep = 592 / (N - 1);
+    const series = {}; const r = rng(7);
+    MODELS.forEach(m => { series[m.k] = Array.from({ length: N }, (_, i) => (i >= 20 && i < 28) ? null : m.b * (0.85 + r() * 0.3) + (i > 36 ? 8 * r() : 0)); });
+    const quant = ref('p95'), hidden = reactive(new Set());
+    const mult = { p50: 1, p95: 1.6, p99: 2.3 };
+    function pathOf(k) {
+      let d = '', pen = false;
+      series[k].forEach((v, i) => {
+        if (v == null) { pen = false; return; }
+        const x = 40 + i * xStep, y = 190 - Math.min(170, v * mult[quant.value]) * 1.1;
+        d += (pen ? 'L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1); pen = true;
+      });
+      return d;
+    }
+    const toggleModel = k => hidden.has(k) ? hidden.delete(k) : hidden.add(k);
+    // 假后端 /admin-f3m8/overview 的 clients[]：队列键由后端给，跳过 bool 型的 has_rendered
+    const QUEUES = TASKS.filter(isLive).map(t => ({ task_id: t.task_id, source_ip: t.ip, step_id: t.steps.find(x => x.live).step_id,
+      queue_depths: { ca_raw: 30 + t.task_id % 7, ca_ready: 5 + t.task_id % 3, ca_processed: 12 + t.task_id % 5, has_rendered: true } }));
+    const QKEYS = QUEUES.length ? Object.keys(QUEUES[0].queue_depths).filter(k => typeof QUEUES[0].queue_depths[k] === 'number') : [];
+    const HEALTH = [
+      { k: '总客户端', v: 2 }, { k: '活跃流', v: 2 }, { k: '重连中', v: 0 }, { k: '孤儿流', v: 0 }, { k: '孤儿解码器', v: 0 }, { k: '检测轮数', v: '18,234' },
+      { k: '断流次数', v: 3, warn: true }, { k: '清理次数', v: 2 }, { k: '重连成功', v: '4/5' },
+    ];
+    const MONCFG = { check_interval: 5, heartbeat_timeout: 15, reconnect_interval: 10, cleanup_timeout: 60, orphan_timeout: 120 };
+    const probe = reactive({ ep: '/ping', n: 100, c: 5, busy: false, res: null });
+    async function runProbe() {
+      probe.busy = true; await sleep(900);
+      const xs = Array.from({ length: probe.n }, () => Math.exp(Math.log(probe.ep === '/ping' ? 3 : 14) + (Math.random() - 0.3) * 0.9)).sort((a, b) => a - b);
+      const q = p => xs[Math.min(xs.length - 1, Math.floor(p * xs.length))].toFixed(1);
+      const lo = xs[0], hi = xs[xs.length - 1], bins = Array(20).fill(0);
+      xs.forEach(x => bins[Math.min(19, Math.floor((x - lo) / (hi - lo + 1e-9) * 20))]++);
+      probe.res = { stat: { 最小: lo.toFixed(1), 平均: (xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(1), 最大: hi.toFixed(1), P50: q(0.5), P95: q(0.95), 错误: 0 }, bins, maxBin: Math.max(...bins), lo: lo.toFixed(1), hi: hi.toFixed(1) };
+      probe.busy = false;
+    }
+    const cfg = store.labConfig;
+    const ls = reactive({ url: cfg.label_studio_url, pid: String(cfg.default_project_id), src: store.taskSource });
+    const saveLs = () => toast('已保存 Label Studio 配置（样例未真正写入）', 'ok');
+    const saveSrc = () => { store.taskSource = ls.src; toast('已保存任务清单来源', 'ok'); };
+    const effTag = computed(() => {
+      if (store.taskSource === 'storage') return { cls: 'mute', text: '仅磁盘' };
+      return store.demo.dbDown ? { cls: 'bad', text: '平台库连不上，已退回仅磁盘' } : { cls: 'ok', text: '磁盘 + 平台库' };
+    });
+    return { MODELS, COUNTERS, PALETTE, QUEUES, QKEYS, xStep, quant, hidden, pathOf, toggleModel, HEALTH, MONCFG, probe, runProbe, ls, saveLs, saveSrc, effTag };
+  },
+};
+
+/* =========================================================
+ * 外壳
+ * ======================================================= */
+const ICON = {
+  tasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
+  live: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="M17 10l5-3v10l-5-3z"/></svg>',
+  run: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l5.5-3.5z" fill="currentColor"/></svg>',
+  offline: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h10M4 17h6"/><circle cx="18" cy="16" r="3"/></svg>',
+  system: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>',
+};
+const NAV = [
+  { key: 'tasks', name: '总览', icon: ICON.tasks, tip: '任务总览' },
+  { key: 'live', name: '实时', icon: ICON.live, tip: '实时监控' },
+  { key: 'run', name: '回放', icon: ICON.run, tip: 'Run 工作台（最近一次打开的 run）' },
+  { key: 'offline', name: '分析', icon: ICON.offline, tip: '分析作业队列' },
+  { key: 'system', name: '运维', icon: ICON.system, tip: '系统运维' },
+];
+
+const app = createApp({
+  template: '#tpl-root',
+  setup() {
+    const pages = { tasks: PageTasks, run: PageRun, live: PageLive, offline: PageOffline, system: PageSystem };
+    const pageComp = computed(() => pages[route.name] || PageTasks);
+    const activeNav = computed(() => route.name);
+    const demoOpen = ref(false), pop = ref(null);
+    function navTo(k) { demoOpen.value = false; go(k === 'run' ? store.lastRun : '/' + k); }
+    const crumbs = computed(() => {
+      const n = route.name, p = route.parts;
+      if (n === 'run') {
+        const sp = findStep(p[0], p[1]); const run = p[2] && p[2] !== 'latest' ? +p[2] : sp?.runs[0];
+        return [{ t: '任务总览', to: '/tasks' }, { t: `任务 ${p[0]}` }, { t: `step ${p[1]} ${stageOf(p[1]).alias}` }, { t: run ? `run ${fmtWall(run, true)}` : 'run' }];
+      }
+      if (n === 'live') return [{ t: '实时监控', to: '/live' }, ...(p[0] ? [{ t: `任务 ${p[0]}` }] : [])];
+      return [{ t: { tasks: '任务总览', offline: '分析作业', system: '系统运维' }[n] || '任务总览' }];
+    });
+    document.addEventListener('click', () => { pop.value = null; });
+    const offBusy = computed(() => store.jobs.filter(j => j.status === 'running' || j.status === 'queued').length);
+    return { route, store, pageComp, activeNav, demoOpen, pop, navTo, crumbs, NAV, applyDemo, dropToast, offBusy };
+  },
+});
+Object.assign(app.config.globalProperties, { fmtMedia, fmtClock, fmtWall, fmtWallMs, fmtDur, stageOf, labelColor, isLive, lvCls, go, store, route, jobStatusName, jobTagCls });
+app.mount('#app');
+</script>
+</body>
+</html>
