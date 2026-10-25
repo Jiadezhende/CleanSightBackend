@@ -51,6 +51,6 @@ gateway 宽松档默认值   …,/admin/,…                     ← 原 /admin-
 
 | 风险 / 待办 | 影响 | 处理计划 |
 |------------|------|---------|
-| 部署机 `.env` 若自己写了 `CLEANSIGHT_GATEWAY_RELAXED_PREFIXES`（含旧的 `/admin-f3m8`） | 升级后 `/admin/` 不在宽松档，控制台运维页约 60 次/分的轮询撞普通档 60/60s，429 后还可能升级封禁 | 部署时检查该变量，有则把 `/admin-f3m8` 换成 `/admin/` 并追加 `/ui-f3m8` |
+| 网关启用（`CLEANSIGHT_GATEWAY_ENABLED=true`）且部署机 `.env` 自己写了 `CLEANSIGHT_GATEWAY_RELAXED_PREFIXES`（含旧的 `/admin-f3m8`）时；生产目前网关未启用（人告知，2026-10-25），不受影响 | 升级后 `/admin/` 不在宽松档，控制台运维页约 60 次/分的轮询撞普通档 60/60s，429 后还可能升级封禁 | 部署时检查该变量，有则把 `/admin-f3m8` 换成 `/admin/` 并追加 `/ui-f3m8` |
 | 有人在脚本 / 收藏里直接调 `/admin-f3m8/*`、`/lab-f3m8/*` | 404 | 通知改新路径 |
 | 后台接口仍无鉴权 | 见 `PUT /lab/config` 可改 LS 地址导致 token 外泄等 | 待人选定方案（后台接口单独 IP 白名单 / 鉴权 / 仅内网） |
