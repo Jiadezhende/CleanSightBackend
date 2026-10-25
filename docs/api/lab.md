@@ -6,7 +6,7 @@
 
 另有一条**模型调试读口**：`POST /label-probs` 读某个 step 的离线分割模型逐帧类别概率（admin 离线推理 tab 画概率曲线用）。
 
-- 数据源：任务列表来自 **DB**（`clean_task` 表）或 **磁盘**（枚举 raw 段目录），由运行时开关 `task_source` 决定；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id, run_id)` 文件约定）。
+- 数据源：任务列表以**磁盘**（有 raw 段的任务）为准，`task_source=db` 时再用平台库（`clean_task` 表）过滤并补字段，库连不上自动退回仅磁盘；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id, run_id)` 文件约定）。
 - submit / download / label-probs 都收可选 `run_id`（缺省 = 该 step 最新可见 run），JSON 响应回显实际读的 `run_id`。规则见 [README › run 定位](README.md#run-定位可选-run_id)。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
 - 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
@@ -40,13 +40,19 @@
 
 ## GET /lab-f3m8/tasks
 
-**用途**：给送标页面列出「有 raw 段、可送标」的任务，让操作员选 `task_id` + `step_id`。数据来自 DB 或磁盘（见下）。
+**用途**：列出磁盘上「有 raw 段、可送标 / 可回放」的任务，让操作员选 `task_id` + `step_id`。
+
+| `task_source`（`GET /config`） | 列哪些任务 | 字段 |
+|------|------|------|
+| `db`（默认） | 磁盘上有 raw 段、**且平台库 `clean_task` 里有**的任务 | IP / 状态 / 时间取平台库 |
+| `db`，但平台库连不上 | 退回下一行，响应 `source="storage"` | 同下一行 |
+| `storage` | 磁盘上有 raw 段的全部任务，不碰平台库 | 平台库字段为 null / `"unknown"` |
 
 **查询参数**：
 
 | 参数 | 类型 | 必填 | 默认 | 范围/说明 |
 |------|------|------|------|-----------|
-| `q` | string | 否 | null | 子串过滤，**≤64 字符**（超长 → 422）。DB 模式匹配 `task_id`/`source_ip`/`status`；storage 模式只匹配 `str(task_id)` |
+| `q` | string | 否 | null | 子串过滤，**≤64 字符**（超长 → 422），两端空白忽略。`source="db"` 时大小写不敏感匹配 `task_id`/`source_ip`/`status`；`source="storage"` 时只匹配 `str(task_id)` |
 | `limit` | int | 否 | 50 | **1–200**，越界 → 422 |
 | `offset` | int | 否 | 0 | **≥0**，负数 → 422 |
 
@@ -57,6 +63,7 @@
 ```jsonc
 {
   "total": 12,                         // 过滤后总数（分页前）
+  "source": "db",                      // 本次实际来源："db" | "storage"（含平台库连不上的退回）
   "tasks": [
     {
       "task_id": 123,
@@ -80,6 +87,7 @@
 | 字段 | 类型 | 说明（含 null 条件） |
 |------|------|---------------------|
 | `total` | int | 过滤后、分页前的总数 |
+| `source` | string | 本次实际来源。`db`：平台库已过滤并补字段；`storage`：配置为仅磁盘，**或配置为 db 但平台库连不上已退回** |
 | `tasks[].task_id` | int | → `POST /submit` 的 `task_id` |
 | `tasks[].source_ip` | string \| null | DB 模式取自表（表值本身可为 null）；**storage 模式恒 null** |
 | `tasks[].current_step` | string \| null | DB 模式为 `current_step` 字符串；行内为 null 或 **storage 模式恒 null** |
@@ -96,29 +104,28 @@
 
 排序：`updated_time desc, task_id desc`。空结果返回 `{"total":0,"tasks":[]}`，不报错。
 
-> storage 模式设计意图：DB 挂了也能列任务送标，代价是丢失所有 DB 才有的字段（IP/状态/当前步）。前端切到 storage 模式时须容忍上述字段为 null / "unknown"。
+> 上表「storage 模式」指响应 `source="storage"`（含退回）：丢失所有平台库才有的字段（IP/状态/当前步），前端须容忍 null / `"unknown"`。
 
 ### 错误
 
 | 状态 | 触发条件 | 响应体形态 |
 |------|---------|-----------|
 | `422` | `q` 超 64 / `limit` 越界 / `offset<0` | FastAPI 校验体（`{"detail":[...]}`） |
-| `503` | **仅 DB 模式**：查库抛 `SQLAlchemyError` | `{"error":"Failed to list lab tasks","retryable":true,...}` |
 
-> storage 模式完全不碰 DB，故 DB 挂时不报 503——这正是它存在的理由。
+> 平台库挂了不报 503：`db` 模式自动退回仅磁盘，响应 `source="storage"`，后端日志 `[Lab] 平台库不可达，任务清单退回仅磁盘`。
 
 ### 前端坑点
 
 - 时间是 **epoch 毫秒墙钟**，与 `/submit` 请求的媒体毫秒不同轴，别拿去当区间入参。
-- storage 模式下大量字段退化，务必先 `GET /config` 读 `task_source` 再决定 UI 展示。
+- 按响应的 `source`（而不是 `GET /config` 的 `task_source`）决定 UI 展示：配置为 db 时也可能因平台库连不上退回 storage。
 - 分页 `total` 是过滤后总数；翻页用 `offset += limit`。
 
 ### 静默失败
 
 | 现象 | 后端实际状态 |
 |------|------------|
-| 列表为空但你确信有任务 | 该 task 各 step 的最新可见 run 都无 raw 段（storage 模式直接不收）；或 `q` 过滤掉了 |
-| 某任务字段全是 null/"unknown" | 当前处于 **storage 模式**，非 bug |
+| 列表为空但你确信有任务 | 该 task 各 step 的最新可见 run 都无 raw 段；`source="db"` 时还可能是平台库里没有这个 task；或 `q` 过滤掉了 |
+| 某任务字段全是 null/"unknown" | 响应 `source="storage"`（配置为仅磁盘或平台库连不上），非 bug |
 
 ---
 
@@ -418,7 +425,7 @@
 {
   "label_studio_url": "http://...",    // 生效 url，"" 表示未配置
   "default_project_id": 5,             // 0 表示无默认
-  "task_source": "db",                 // "db" | "storage"，控制 /tasks 数据源
+  "task_source": "db",                 // "db"（磁盘 + 平台库）| "storage"（仅磁盘），控制 /tasks 数据源
   "token_configured": true,            // env 里是否设了 token（不回明文）
   "source": "file"                     // "file"（PUT 改过、来自持久化文件）| "env"（回退环境变量）
 }
@@ -428,7 +435,7 @@
 |------|------|------|
 | `label_studio_url` | string | 空串 = 未配置（不是 null） |
 | `default_project_id` | int | 0 = 无默认 |
-| `task_source` | string | `db` \| `storage` |
+| `task_source` | string | `db`（磁盘 + 平台库，库连不上自动退回仅磁盘）\| `storage`（仅磁盘） |
 | `token_configured` | bool | env `CLEANSIGHT_LABEL_STUDIO_TOKEN` 是否非空；token 明文不外露 |
 | `source` | string | `file`（存在持久化 JSON、以其为准）\| `env`（无文件或读文件失败，回退 settings） |
 
@@ -474,7 +481,7 @@
 ### 前端坑点
 
 - 想「禁用 LS」就传 `label_studio_url=""`；传别的非法串会 400。
-- 只改数据源模式（DB 挂了切 storage）时，`label_studio_url` 必须一并回传当前值，否则会被默认 `""` 冲掉（该字段默认空串，缺省即清空 url）。`task_source` 缺省不改，url/project_id 缺省会覆盖。
+- 只改数据源模式时，`label_studio_url` 必须一并回传当前值，否则会被默认 `""` 冲掉（该字段默认空串，缺省即清空 url）。`task_source` 缺省不改，url/project_id 缺省会覆盖。
 
 ### 静默失败
 
