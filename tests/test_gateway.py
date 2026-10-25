@@ -323,9 +323,12 @@ class TestGatewayMiddlewareHTTP:
         assert resp.status_code == 429
         assert resp.json()["error"] == "Too Many Requests"
 
-    @pytest.mark.parametrize("path", ["/health/status", "/task/message/123", "/admin-f3m8/overview"])
+    @pytest.mark.parametrize(
+        "path", ["/health/status", "/task/message/123", "/admin-f3m8/overview", "/ui-f3m8/console/app.js"],
+    )
     async def test_relaxed_prefix_uses_relaxed_limit(self, gw, init_gw, path):
-        """生产默认宽松前缀下，健康检查、任务结束后前端持续轮询的 /task/message、admin 页数据接口不被限流或封禁"""
+        """生产默认宽松前缀下，健康检查、任务结束后前端持续轮询的 /task/message、admin 页数据接口、
+        控制台静态资产（一次开页十几个 module）不被限流或封禁"""
         init_gw(
             gw,
             gateway_relaxed_prefixes=_PROD_RELAXED_PREFIXES,
