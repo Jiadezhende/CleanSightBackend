@@ -146,6 +146,32 @@ class TestQuerySourceIps:
 
 
 # ---------------------------------------------------------------------------
+# query_tasks
+# ---------------------------------------------------------------------------
+
+
+class TestQueryTasks:
+    def test_maps_found_ids_to_rows_and_skips_missing(self, db):
+        _seed(db, _task(1, source_ip="a", status="running"), _task(2, source_ip=None), _task(3))
+
+        rows = db_tasks.query_tasks((1, 2, 404))
+        assert sorted(rows) == [1, 2]
+        assert (rows[1].source_ip, rows[1].status) == ("a", "running")
+        assert rows[2].source_ip is None
+        _assert_all_closed()
+
+    def test_empty_input_does_not_open_session(self, db):
+        assert db_tasks.query_tasks([]) == {}
+        assert _TrackingSession.opened == []
+
+    def test_sqlalchemy_error_becomes_database_error(self, broken_db):
+        with pytest.raises(DatabaseError) as ei:
+            db_tasks.query_tasks([1])
+        assert ei.value.message == "Database error: Failed to query tasks"
+        _assert_all_closed()
+
+
+# ---------------------------------------------------------------------------
 # query_task_page
 # ---------------------------------------------------------------------------
 

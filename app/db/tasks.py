@@ -3,6 +3,7 @@
     from app.db import tasks as db_tasks
     row = db_tasks.query_task(42)                         # Optional[DBTask]
     ips = db_tasks.query_source_ips([1, 2])               # {task_id: source_ip}
+    rows = db_tasks.query_tasks([1, 2])                   # {task_id: DBTask}
     total, rows = db_tasks.query_task_page("10.0", limit=50, offset=0)
 
 - 每个 `query_*` 自开自关一个 session；返回的是**会话已关闭**的 ORM 实例（无 relationship、
@@ -75,6 +76,28 @@ def query_source_ips(task_ids: Sequence[int]) -> Dict[int, Optional[str]]:
             message="Failed to query source_ip for tasks",
             retryable=True,
             query="SELECT task_id, source_ip FROM clean_task WHERE task_id IN (...)",
+        ) from e
+
+
+def query_tasks(task_ids: Sequence[int]) -> Dict[int, DBTask]:
+    """批量取 task_id → 整行（单次 IN 查询）；DB 里没有的 task_id 不出现在结果里。
+
+    空输入直接返回 {}，不开 session。
+
+    Raises:
+        DatabaseError: "Failed to query tasks"
+    """
+    if not task_ids:
+        return {}
+    try:
+        with SessionLocal() as s:
+            rows = s.query(DBTask).filter(DBTask.task_id.in_(list(task_ids))).all()
+            return {int(r.task_id): r for r in rows}
+    except SQLAlchemyError as e:
+        raise DatabaseError(
+            message="Failed to query tasks",
+            retryable=True,
+            query="SELECT ... FROM clean_task WHERE task_id IN (...)",
         ) from e
 
 
