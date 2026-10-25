@@ -122,6 +122,14 @@ async def test_playlist_vod_generation(client, media_root):
     assert body.count("#EXTINF:") == 3
     assert body.count("/media/segment/") == 3
 
+    # 每段前带墙钟起点（文件名里的 ts_ms），前端用它对齐两轨
+    pdt = [line for line in body.splitlines() if line.startswith("#EXT-X-PROGRAM-DATE-TIME:")]
+    assert pdt == [
+        "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:01.000Z",
+        "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:11.000Z",
+        "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:21.000Z",
+    ]
+
 
 @pytest.mark.asyncio
 async def test_playlist_503_when_init_missing(client, media_root):
@@ -364,6 +372,7 @@ async def test_timeline_gap_total_is_zero_without_a_gap(client, media_root, monk
         body = (await client.get(f"/traceback/task/8/timeline?step_id=1&track={track}")).json()
         assert body["gap_total_ms"] == 0, f"{track} 轨零断流却报了空洞"
         assert body["has_gap"] is False
+        assert body["gaps"] == []
         assert body["media_duration_ms"] == 20_000
         # 并集墙钟跨度 35s 远大于任一单轨的 20s —— 相减法在这里会算出 15s 的假空洞
         assert body["duration_ms"] == 35_000
@@ -378,6 +387,10 @@ async def test_timeline_gap_total_counts_a_real_gap(client, media_root, monkeypa
 
     assert body["gap_total_ms"] == 20_000
     assert body["has_gap"] is True
+    # 断点在媒体轴第 10s（首段 EXTINF 10s 之后），墙钟空洞 [首段尾, 次段首)
+    assert body["gaps"] == [
+        {"media_ms": 10_000, "wall_from_ms": _TS0_MS + 10_000, "wall_to_ms": _TS0_MS + 30_000, "gap_ms": 20_000},
+    ]
 
 
 @pytest.mark.asyncio

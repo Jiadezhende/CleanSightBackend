@@ -31,7 +31,8 @@ hls 域的读侧只出**两种产出**：段容器（`SegmentRef` / `Segment`，
 from __future__ import annotations
 
 import math
-from typing import NamedTuple, Sequence
+from datetime import datetime, timezone
+from typing import NamedTuple, Optional, Sequence
 
 
 class VodEntry(NamedTuple):
@@ -42,10 +43,20 @@ class VodEntry(NamedTuple):
 
     `duration_s` 一律取清单的 EXTINF（`hls.list_segments` 给），三个消费方都是。
     **不能用相邻段 ts 差重推**——那是墙钟量，断流时会把整个停顿算进段长。
+
+    `wall_ms` 是该段墙钟起点（epoch ms）：给了就在该段前写 `#EXT-X-PROGRAM-DATE-TIME`，
+    浏览器据此把两轨对到同一墙钟。喂 ffmpeg 的清单不填。
     """
 
     uri: str
     duration_s: float
+    wall_ms: Optional[int] = None
+
+
+def _program_date_time(wall_ms: int) -> str:
+    """epoch ms → `2026-10-24T06:03:11.800Z`（RFC 8216 要求带时区的 ISO 8601）。"""
+    dt = datetime.fromtimestamp(wall_ms / 1000, tz=timezone.utc)
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def render_vod(entries: Sequence[VodEntry], *, map_uri: str) -> str:
@@ -82,6 +93,8 @@ def render_vod(entries: Sequence[VodEntry], *, map_uri: str) -> str:
         f'#EXT-X-MAP:URI="{map_uri}"',
     ]
     for e in entries:
+        if e.wall_ms is not None:
+            lines.append(f"#EXT-X-PROGRAM-DATE-TIME:{_program_date_time(e.wall_ms)}")
         lines.append(f"#EXTINF:{e.duration_s:.3f},")
         lines.append(e.uri)
     lines.append("#EXT-X-ENDLIST")

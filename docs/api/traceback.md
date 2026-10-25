@@ -46,18 +46,21 @@
 #EXT-X-TARGETDURATION:76
 #EXT-X-MEDIA-SEQUENCE:0
 #EXT-X-MAP:URI="http://<host>:8000/media/init/<init_token>"
+#EXT-X-PROGRAM-DATE-TIME:2025-07-06T11:06:40.000Z
 #EXTINF:70.666,
 http://<host>:8000/media/segment/<token>
+#EXT-X-PROGRAM-DATE-TIME:2025-07-06T11:08:10.000Z
 #EXTINF:75.644,
 http://<host>:8000/media/segment/<token>
 #EXT-X-ENDLIST
 ```
 
-动态生成（不是 serve 落盘文件），四个性质：
+动态生成（不是 serve 落盘文件），五个性质：
 
 - **VOD**（带 `#EXT-X-ENDLIST`），即使任务未封档也当完整点播处理。
 - **fMP4**，`#EXT-X-MAP` 的 init 段不可缺——**裸的 `/media/segment/{token}` 单独播不了**，浏览器解不了无 init 的 fragment。init 段**按轨各一份**（`raw_init.mp4` / `processed_init.mp4`），同轨内所有段共享；两轨是独立 playlist，不可互指。
 - 段 / init URL 都是 **token 化绝对地址**，host 取自请求。token 里签入了本次解析到的 `run_id`：播放途中同 step 起了新 run，段与 init 仍取自原 run；原 run 被回收则段请求 404。
+- **每段前带 `#EXT-X-PROGRAM-DATE-TIME`**：该段的墙钟起点（段文件名里的 `ts_ms`，UTC，毫秒精度）。两轨的媒体轴原点不同（processed 首段常晚于 raw），断流时墙钟还会跳；要把两轨对到同一时刻，用「段起点墙钟 + 段内偏移」逐段换算，**不要**用「首段墙钟 + currentTime」——那只在从没断过流时成立。媒体轴上的段起点 = 之前所有段 EXTINF 之和。
 - **只收「写入侧 playlist 里已有 `#EXTINF`」的段**，在途段（mp4v 已落盘但转码+append 未完成）被过滤——放进去只能填估算时长，会与 fMP4 内部 tfdt 时间戳对不上产生 hls.js 缓冲洞。EXTINF 时长直接回读写入侧 playlist，不重新推导。
 
 **任务进行中拉到的 playlist 短于实际已录时长**：在途段被过滤是刻意的；进行中重复拉取会逐渐变长。
@@ -104,7 +107,7 @@ http://<host>:8000/media/segment/<token>
 | 口径 | 字段 | 回答 |
 |------|------|------|
 | **墙钟** | `start_ms` / `end_ms` / `duration_ms` / `events[].ts_ms` | 「这件事几点发生的」——审计、检索、跨 step 对照 |
-| **媒体** | `media_duration_ms` / `gap_total_ms` / `events[].media_offset_ms` | 「在播放器的第几秒」——进度条、标记落点、跳转 |
+| **媒体** | `media_duration_ms` / `gap_total_ms` / `gaps[].media_ms` / `events[].media_offset_ms` | 「在播放器的第几秒」——进度条、标记落点、跳转 |
 
 **进度条必须用媒体坐标。** `<video>.currentTime` 与 `duration` 都是媒体量，而告警的 `ts_ms` 是墙钟；两者混用就是「比例不同尺」——一个断流 20s 的 step 里，指针按墙钟全长走到底也只到 96.7%，告警标记还与画面差整整一个断流时长。媒体轴是**压紧的**墙钟（段间空隙在它上面不存在），换算要清单，只有后端做得了，所以 `media_offset_ms` 由本端点给。
 
@@ -124,6 +127,14 @@ http://<host>:8000/media/segment/<token>
   "media_duration_ms": 40000,    // 该轨 Σ EXTINF，= <video>.duration；无段时为 0
   "gap_total_ms": 0,             // 该轨累计断流时长（逐段精确判据，不是两数相减）
   "has_gap": false,              // gap_total_ms > 0
+  "gaps": [                      // 每一处断流；无断流为 []
+    {
+      "media_ms": 20000,         // 断点在该轨媒体轴上的位置（宽度为零：前后两段在媒体轴上首尾相接）
+      "wall_from_ms": 1751800020000,  // 空洞起点 = 前段起点 + 其 EXTINF，epoch 毫秒
+      "wall_to_ms": 1751800043000,    // 空洞终点 = 后段起点，epoch 毫秒
+      "gap_ms": 23000                 // wall_to_ms − wall_from_ms
+    }
+  ],
   "events": [
     {
       "ts_ms": 1751800015000,    // 告警时间，epoch 毫秒（已归一化）
@@ -148,6 +159,7 @@ http://<host>:8000/media/segment/<token>
 | `events` | array | 该 step 中落在**该 run 存续期** `[run_id 时刻, 同 step 下一个 run 的 run_id 时刻)` 内的告警（`run_id` 即 epoch 毫秒，直接与 `ts_ms` 比较；最新 run 无上界），按 `ts_ms` 升序。**无告警或 DB 不可用时为 `[]`**。DB 告警没有 run 维度，故按时间切；结算告警时间戳是停止时刻（晚于最后一段、早于下一个 run 分配），仍落在本区间，`media_offset_ms` 吸附到进度条末端 |
 | `media_duration_ms` | int | 该 `track` 的 Σ EXTINF，**与 `<video>.duration` 同源**。无段时 `0` |
 | `gap_total_ms` / `has_gap` | int / bool | 该轨累计断流时长：所有满足 `下一段起点 − (本段起点 + EXTINF) > 0.5s` 的空隙之和。无段时 `0` / `false` |
+| `gaps` | array | 该轨每一处断流，按时序；判据同 `gap_total_ms`（Σ `gaps[].gap_ms` = `gap_total_ms`），与 [`/lab-f3m8/submit`](lab.md#post-lab-f3m8submit) 报 `range_gap` 同源——跨过 `media_ms` 的送标区间会失败。**前端不要自己用阈值重算断流** |
 | `events[].ts_ms` | int | epoch **毫秒**（`detected_at` 为 null 的告警被跳过，不进 events） |
 | `events[].media_offset_ms` | int | 该告警在**媒体轴**上的位置（ms），随 `track` 变。落进断流空洞的墙钟吸附到下一段段首——那段时间在媒体轴上宽度为零，没有对应刻度 |
 | `events[].type` | string | 目前恒 `"alarm"` |
