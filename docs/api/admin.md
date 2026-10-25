@@ -4,7 +4,7 @@
 数据来自**进程内存**（`session_service` 快照 + Prometheus REGISTRY + 离线作业状态表）与推理配置（step 能力表），非 DB，是**实时**状态，进程重启即清零。
 均**无鉴权**；除离线作业三个端点与离线盘上告警（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
 
-静态页面（非本文档描述的 JSON 端点）：控制台 `GET /ui-f3m8/console/`；旧运维页 `GET /ui-f3m8/admin/`（控制台迁完后删除）。
+静态页面（非本文档描述的 JSON 端点）：控制台 `GET /ui-f3m8/console/`。
 
 > **告警字段名用全称**（`alarm_type` / `alarm_level` / `alarm_message`），与 `/task/message` 的短名（`type` / `level` / `message`）不同，前端两处别混用。
 > **时间戳单位不一致**：本组 `overview.timestamp`、`alarms[].timestamp` 与离线作业的 `*_at` 是 epoch **秒**；`ping.server_time_ms` 是 epoch **毫秒**；而告警历史（`/task`、`/traceback`）用毫秒。对接时逐字段核对单位。
@@ -139,7 +139,7 @@ step 能力表：推理配置（`config/inference_config.yaml` 的 `stages`）�
 
 ## GET /admin-f3m8/clients/{client_id}/alarms
 
-读取某个 run（`task_id`）**内存告警环形缓冲**里最近 n 条告警（**不走 DB**，进程重启清零）。前端用它在 admin 页展示某 run 的近期告警。
+读取某个 run（`task_id`）**内存告警环形缓冲**里最近 n 条告警（**不走 DB**，进程重启清零）。控制台目前不用它（实时页走 `/task/message`）。
 
 **路径参数**：`client_id`（int，= `task_id`）。
 **查询参数**：
@@ -403,14 +403,14 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | `skipped` 后结果没变 | 本次没写任何东西，展示的仍是上一次的结果（如果有） |
 | 不带 `run_id` 轮询，状态突然 404 | 同 step 起了新 run，缺省解析到新 run，而作业是提交给旧 run 的；轮询时带上提交响应里的 `run_id` |
 
-参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `runOffline` / `fetchOffJobs`。
+参考实现：控制台 [pages/run-offline.js](../../app/static/console/pages/run-offline.js) 的 `submit`、[api/jobs.js](../../app/static/console/api/jobs.js) 的作业轮询。
 
 ---
 
 ## GET /admin-f3m8/offline/alarms/{task_id}/{step_id}（过渡期）
 
 离线规则判定写在该 run 盘上的告警（`alarms.jsonl`），时刻已换算到录像媒体刻度，供离线推理页点击跳转回看。
-**过渡期端点**：离线告警稳定后改为直接入库，届时走 [`GET /task/{task_id}/alarms`](task.md)，本端点删除；不要在 admin 页以外依赖它。
+**过渡期端点**：离线告警稳定后改为直接入库，届时走 [`GET /task/{task_id}/alarms`](task.md)，本端点删除；不要在控制台以外依赖它（控制台只在 `api/endpoints.js` 的 `offlineAlarms` 一处读它）。
 
 查询参数：`run_id`（int，可选；缺省 = 该 step 最新可见 run）、`track`（`raw` / `processed`，缺省 `raw`；须与播放器当前轨一致）。
 
@@ -449,4 +449,4 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | `checked: true` 但 `items` 为空 | 判定跑过，没有违规疑似 |
 | 重跑分割后告警没变 | 规则判定失败或被跳过时不覆盖旧文件（看离线作业的 `message`）；修好后 `python -m app.services.inference.offline.cli check` 重跑 |
 
-参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `fetchOfflineResult`。
+参考实现：控制台 [pages/run-offline.js](../../app/static/console/pages/run-offline.js) 的 `load`。

@@ -4,13 +4,13 @@
 
 另提供一条**旁路**：`GET /download` 把整个 step 的某一轨 remux 成单个 mp4 直接下载，不经 LS，用于取汇报素材/原片。
 
-另有一条**模型调试读口**：`POST /label-probs` 读某个 step 的离线分割模型逐帧类别概率（admin 离线推理 tab 画概率曲线用）。
+另有一条**模型调试读口**：`POST /label-probs` 读某个 step 的离线分割模型逐帧类别概率（控制台回放工作台的概率泳道用）。
 
 - 数据源：任务列表以**磁盘**（有 raw 段的任务）为准，`task_source=db` 时再用平台库（`clean_task` 表）过滤并补字段，库连不上自动退回仅磁盘；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id, run_id)` 文件约定）。
 - submit / download / label-probs 都收可选 `run_id`（缺省 = 该 step 最新可见 run），JSON 响应回显实际读的 `run_id`。规则见 [README › run 定位](README.md#run-定位可选-run_id)。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
 - 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
-- 静态 UI：`GET /ui-f3m8/lab/`（`app/static/lab`，经 `/ui-f3m8` 统一挂载 `app/static`，`html=True`）。
+- 静态 UI：控制台 `GET /ui-f3m8/console/` 的回放工作台「送标」面板（`app/static/console`，经 `/ui-f3m8` 统一挂载 `app/static`，`html=True`）。
 - 通用约定（Base URL / Gateway / 错误模型 / 枚举）见 [README](README.md)。
 
 > **本组有三套时间口径，逐字段已标注，别混用**：
@@ -247,7 +247,7 @@
 | 全成功却 `job_dir=null` | 正常——成功即清理产物，只有失败+keep 才保留 |
 | 反复 `ls_unreachable`/`ls_auth` | LS 配置/网络/token 问题，先走 `GET /health` 定位 |
 
-参考实现：仓库内消费本接口的送标页面见 [app/static/lab/index.html](../../app/static/lab/index.html)。
+参考实现：控制台 [pages/run-label.js](../../app/static/console/pages/run-label.js) 的 `submit`。
 
 ---
 
@@ -320,7 +320,7 @@
 
 ## POST /lab-f3m8/label-probs
 
-读取某个 step 的离线分割模型**逐帧类别概率**（每帧对各类的 softmax），给 admin 离线推理 tab 画概率曲线。
+读取某个 step 的离线分割模型**逐帧类别概率**（每帧对各类的 softmax），给控制台回放工作台画概率泳道。
 这是模型调试旁路，不是对外推理结果（正式结果是分割段，见 [`POST /ai/temporal`](ai.md#post-aitemporal)）。
 帧时间已换算为该轨**媒体刻度**（= `<video>.currentTime × 1000`）。身份键走 JSON body，约定见 [README](README.md)。
 

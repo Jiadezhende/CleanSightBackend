@@ -42,7 +42,7 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 {"type": "idle"}
 ```
 
-前端**按前缀分流**：`data:` 开头 → 当图渲染；否则按 JSON 控制帧解析（参考实现见 admin/index.html 的 `videoWs.onmessage`）。
+前端**按前缀分流**：`data:` 开头 → 当图渲染；否则按 JSON 控制帧解析（参考实现见控制台 [pages/live.js](../../app/static/console/pages/live.js) 的 `connect`）。
 
 **`idle` 何时发（edge-triggered，务必理解）**：
 
@@ -52,7 +52,7 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 - **首次连上若从来没有 run**：**不发 idle**（从未进入推帧态，无跳变沿）——前端此时只会看到"连上但一直无消息"，靠占位图兜住。
 - **任务中卡顿**（run 仍在、但暂无新渲染帧）：**不发 idle**，服务端保持最后一帧不动（前端画面定格，非黑屏）。这与"任务结束"是两种不同现象，见下方静默失败表。
 
-前端收到 idle 的正确处理：清空画面回占位（"等待画面"），**不要断开、不要重连**（参考 admin/index.html 的 `videoWs.onmessage` idle 分支：把 `liveFrame` 置空、`liveIdle=true`）。
+前端收到 idle 的正确处理：清空画面回占位（"等待画面"），**不要断开、不要重连**（参考控制台 `pages/live.js` 的 `connect`：idle 时清空画面并显示「run 已结束」）。
 
 ### 帧率与去重
 
@@ -60,7 +60,7 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 - **按 `frame.timestamp` 去重**：`current_timestamp <= last_sent_timestamp` 的帧跳过、不重复编码发送（ai.py:134-137）。所以**同一时刻帧只会到达一次**。
 - **30fps 是传输带宽上限，不是目标帧率**：常量 `_WS_MAX_SEND_FPS=30`（ai.py:19），只是兜住突发的传输层节流（发送间隔 ≥ 1/30 s，ai.py:141-145），源率下极少触发。别把它当作"应该收到 30fps"。
 - **本端点只下发 JPEG data-URL，不带每帧 timestamp**（帧 ts 仅服务端用于去重，ai.py:134-137，不下发）。因此前端**无法在本通道做精确帧率估算或按帧时间轴对齐**——能测的只有"每秒到达帧数"这一粗略吞吐，且它受网络抖动 / 传输节流 / 突发影响，不等于真实推理帧率。
-- **别假设固定帧率**：不要把 30fps 上限当成应收帧率，也不要用收包数反推推理帧率。参考实现 admin/index.html 用"每秒收包计数"（`fpsFrameCount`，每 1s 归零一次）显示的就是这个粗略吞吐值，仅供展示。
+- **别假设固定帧率**：不要把 30fps 上限当成应收帧率，也不要用收包数反推推理帧率。控制台实时页用"每秒收包计数"（每 1s 归零一次）显示的就是这个粗略吞吐值，仅供展示。
 
 ### 关闭 / 错误
 
@@ -76,7 +76,7 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 
 - **二选一、别都传**：都传时 `client_id` 被静默忽略（`task_id` 优先），不会报错。
 - **`task_id` 语义 = 钉死某次 run**：run 一结束画面就停（`task_id` 模式下之后是持续静默，且因曾推过帧会先收到一次 idle）；要"点位常亮、自动跟随下一次任务"用 `client_id`。
-- **`client_id` 值是 `source_ip`**，不是别处的 client 名。参考实现在 `startLive()` 里从 `liveClientInfo.source_ip` 取值（admin/index.html）；某任务 `source_ip` 为 null 时无法连流。
+- **`client_id` 值是 `source_ip`**，不是别处的 client 名。某任务 `source_ip` 为 null 时无法用这种模式连流（控制台实时页用 `task_id` 模式，不受影响）。
 - **收到 idle 别重连**：它是"任务结束/无 run"的正常信号，连接仍活，新任务会自动恢复推帧（`client_id` 模式）。
 - **画面定格 ≠ 断线**：run 卡顿时服务端保持最后一帧、不发任何帧也不发 idle；前端若需"卡顿检测"，自己用"最近一次收帧时间"判超时，别指望服务端通知。
 - **无内置心跳**：本端点不发 ping/idle 心跳（idle 只在 run 消失跳变时发一次）。长时间无 run 会长时间静默，靠 TCP/WS 层保活或前端超时兜底。
@@ -95,14 +95,14 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ...
 | `onclose` 立刻触发、`onopen` 从未触发（码 1008） | 参数错误：`task_id`/`client_id` 都缺，或 `task_id` 非整数。在 `accept()` 前就被关。 |
 | 帧率明显低于预期（每秒 1–2 帧） | 正常：事件驱动、按 ts 去重，推速跟随源渲染率（≈ `inference_fps`）。30fps 只是上限非目标。 |
 
-> 仓库内消费本接口的参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `startLive`（约 528 行起），含 data-URL 渲染、idle 清屏、按前缀分流。
+> 仓库内消费本接口的参考实现：控制台 [pages/live.js](../../app/static/console/pages/live.js) 的 `connect`（`task_id` 模式），含 data-URL 渲染、idle 处理、按前缀分流。
 
 ---
 
 ## POST /ai/temporal
 
 读取某个 step 的时序分析结果，给回放页在视频下方画分割段。时间已换算为该轨的**媒体刻度**（与 `<video>.currentTime × 1000` 同轴），前端不用再做墙钟换算。
-结果由离线推理产出（admin 页提交作业，见 [admin.md](admin.md#离线推理作业)；或手动 `python -m app.services.inference.offline.cli run --task-id T --step-id S`），本端点只读。
+结果由离线推理产出（控制台回放工作台「离线分析」提交作业，见 [admin.md](admin.md#离线推理作业)；或手动 `python -m app.services.inference.offline.cli run --task-id T --step-id S`），本端点只读。
 
 **请求体**（JSON）：
 

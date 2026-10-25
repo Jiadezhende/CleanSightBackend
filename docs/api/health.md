@@ -78,7 +78,7 @@
 - 判可用性只看 `status`，不看 HTTP code（永远 200）。
 - `clients` 是缓存快照（每 `check_interval` 刷新，默认 1 秒），不是实时；`reconnecting_clients` 才是实时列表。
 - 字段名与直觉/旧版不符：客户端总数是 `total_clients`（不是 `total`）；进入重连累计是 `disconnects`（**旧版叫 `suspects`，已改名**，别再按老字段解析）。
-- 参考实现：`/admin` 概览页消费逻辑见 [app/static/admin/index.html](../../app/static/admin/index.html)（`fetchHealth()`）。
+- 参考实现：控制台系统运维页 [pages/system.js](../../app/static/console/pages/system.js)（`healthPoll`）。
 
 ---
 
@@ -193,4 +193,4 @@
 | `monitor_stats` 里没有 `reconnecting_count` | 该字段是 `/monitor/stats` 独有；`/health/status` 只给 `reconnecting_clients` 列表，数量取 `.length` |
 | 各累计计数长期为 0 | 系统一直健康、无断流/无孤儿，监控没触发过任何动作（只有 `checks` 会随循环增长）——正常，非埋点失效 |
 
-参考实现：`/admin` 概览页消费 `/health/status` 的逻辑见 [app/static/admin/index.html](../../app/static/admin/index.html)（`fetchHealth()`）。
+参考实现：控制台系统运维页消费 `/health/status` 与 `/health/monitor/config` 的逻辑见 [pages/system.js](../../app/static/console/pages/system.js)。

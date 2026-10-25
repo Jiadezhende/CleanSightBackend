@@ -13,7 +13,7 @@
 | 数据库任务 | `task_id` 不存在则脚本自动创建（结束自动删除）；已存在且 `current_step` 不一致会 fail-fast 报错（见下） |
 
 > 运行解释器：仓库使用 `.venv`。示例里写 `python`，按需替换为 `.venv/bin/python`（macOS/Linux）。
-> **当前测试环境**：`--server 111.14.140.60 --api-port 8100 --rtsp-port 8104`。观测面板 `http://111.14.140.60:8100/ui-f3m8/admin/`。
+> **当前测试环境**：`--server 111.14.140.60 --api-port 8100 --rtsp-port 8104`。观测面板 `http://111.14.140.60:8100/ui-f3m8/console/`。
 
 ## 文件结构
 
@@ -27,7 +27,7 @@ integration_tests/
 └── logs/                   # 多客户端测试子进程日志
 ```
 
-> **观测统一走后端自带的 admin 运维面板** `http://{server}:{api-port}/ui-f3m8/admin/`，见下方[「观测：admin 运维面板」](#观测admin-运维面板)。旧的 `viewer.html` / `frontend.html` / `client_viewer.py` / `visualize_inference.py`（OpenCV 窗口）已删除，功能被 admin 面板覆盖。
+> **观测统一走后端自带的控制台** `http://{server}:{api-port}/ui-f3m8/console/`，见下方[「观测：控制台」](#观测控制台)。旧的 `viewer.html` / `frontend.html` / `client_viewer.py` / `visualize_inference.py`（OpenCV 窗口）已删除，功能被控制台覆盖。
 
 ---
 
@@ -74,7 +74,7 @@ integration_tests/
 推流 → /api/start → 等待 duration → /api/terminate
 ```
 
-验证完整正向流程：FFmpeg 推流、后端推理、admin 面板观测、正常退出。
+验证完整正向流程：FFmpeg 推流、后端推理、控制台观测、正常退出。
 
 ```bash
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
@@ -228,7 +228,7 @@ python integration_tests/test_single_client.py \
 ## 多客户端并发测试 `test_multi_client.py`
 
 从数据库查询多个任务，并发运行场景 1，子进程日志写入 `logs/`。
-观测走 admin 面板：「总览」tab 看各客户端队列/健康的聚合，「实时监控」tab 逐个选客户端看画面。
+观测走控制台：「运维」页看各路队列/健康，「实时」页逐路看画面。
 
 ### 参数
 
@@ -244,9 +244,9 @@ python integration_tests/test_single_client.py \
 
 > **每路的 `source_ip` 必须互异**——它既是推流路径 `rtsp://…/live/{source_ip}`，也是后端路由键；
 > 撞了就是两路推同一个地址。自建任务用 `test.s{task_id}` 天然互异，复用真实任务时需自行确认。
-| `--api-port` | `8000` | 后端 API 端口（用于拼 admin 面板 URL） |
+| `--api-port` | `8000` | 后端 API 端口（用于拼控制台 URL） |
 
-启动后脚本打印 admin 面板 URL，在「总览」tab 看各客户端队列/健康，「实时监控」tab 逐个选客户端看画面。
+启动后脚本打印控制台 URL，在「运维」页看各路队列/健康，「实时」页逐路看画面。
 
 ```bash
 # 本地 3 客户端并发
@@ -258,27 +258,27 @@ python integration_tests/test_multi_client.py --server 117.50.241.174 --max-task
 
 ---
 
-## 观测：admin 运维面板
+## 观测：控制台
 
-集成测试只**驱动**场景（推流 + 调 API + 跑生命周期），**观测**统一走后端自带的 admin 运维面板——无需另起服务、与后端同源同端口、支持多客户端聚合。测试脚本启动后会自动打印面板 URL（端口取自 `--api-port`）：
+集成测试只**驱动**场景（推流 + 调 API + 跑生命周期），**观测**统一走后端自带的控制台——无需另起服务、与后端同源同端口、支持多客户端聚合。测试脚本启动后会自动打印控制台 URL（端口取自 `--api-port`）：
 
 ```
-http://{server}:{api-port}/ui-f3m8/admin/
+http://{server}:{api-port}/ui-f3m8/console/
 ```
 
-> 该路径做过混淆（`/admin-f3m8/`）以防扫描器误触，随后端 [app/main.py](../app/main.py) 的挂载点为准；若改过挂载路径，以代码为准。
+> 该路径做过混淆（`/ui-f3m8/`）以防扫描器误触，随后端 [app/main.py](../app/main.py) 的挂载点为准；若改过挂载路径，以代码为准。
 
-打开后按 tab 观测：
+侧栏五页：
 
-| tab | 看什么 | 数据来源 |
+| 页 | 看什么 | 数据来源 |
 |---|---|---|
-| **总览** | 各客户端队列深度、活跃数、系统健康 | `/admin-f3m8/overview` + `/health/status` |
-| **实时监控** | 选中客户端的实时画面 + FPS + 实时告警 | WS `/ai/video` + `/task/message/{task_id}` |
-| **指标监控** | 推理延迟 P50/P95/P99、失败/丢帧/OOM/重试计数 | `/admin-f3m8/metrics/json` |
-| **告警列表** | 按 task_id 查历史告警，点「证据」看回溯视频 | `/task/{task_id}/alarms` + `/traceback/*` |
-| **延迟测试** | 手动压接口延迟直方图 | `/admin-f3m8/ping` 等 |
+| **总览** | 在线 / 全部任务，点 step 进回放 | `/admin-f3m8/overview` + `/lab-f3m8/tasks` |
+| **实时** | 聚焦一路的实时画面 + 近 10s 信号 + 实时告警（可跳回放） | WS `/ai/video?task_id=` + `/task/message/{task_id}` |
+| **回放** | 双轨回放、断流与告警标记、离线分析、送标 | `/traceback/*` + `/ai/temporal` + `/lab-f3m8/*` |
+| **分析** | 离线推理作业队列与历史 | `/admin-f3m8/offline/jobs` |
+| **运维** | 推理延迟按模型、计数器、健康监控、队列深度、延迟探测 | `/admin-f3m8/metrics/json` + `/health/*` + `/admin-f3m8/ping` 等 |
 
-看某次 run 的画面：进「实时监控」tab，从下拉里选与本次 `--task_id` 对应的客户端，点「连接」。任务结束后画面转为「等待画面」占位。
+看某次 run 的画面：进「实时」页，左侧点与本次 `--task_id` 对应的那一路。run 结束后画面显示「run 已结束」并给回放入口。
 
 ---
 

@@ -8,7 +8,7 @@
   task_id + step_id [+ run_id] ──→ task/playlist.m3u8（回放） / timeline（打点）
 ```
 
-> **按 `alarm_id` 反查证据段的两个端点（`/alarm/{id}/evidence`、`/alarm/{id}/playlist.m3u8`）已于 2026-09-08 下线**，不再存在（请求得 404）。同一需求走 lab 页面：task 级 VOD 回放 + `timeline` 的告警打点 + 帧级 seek，粒度比原来的「触发段 ± N 段」更细。详见 [20260908_ALARM_EVIDENCE_RETIRE.md](../update/20260908_ALARM_EVIDENCE_RETIRE.md)。
+> **按 `alarm_id` 反查证据段的两个端点（`/alarm/{id}/evidence`、`/alarm/{id}/playlist.m3u8`）已于 2026-09-08 下线**，不再存在（请求得 404）。同一需求走控制台回放工作台：task 级 VOD 回放 + `timeline` 的告警打点 + 帧级 seek，粒度比原来的「触发段 ± N 段」更细。详见 [20260908_ALARM_EVIDENCE_RETIRE.md](../update/20260908_ALARM_EVIDENCE_RETIRE.md)。
 
 几处贯穿全组的约定，下面各端点不再重复：
 
@@ -206,4 +206,4 @@ http://<host>:8000/media/segment/<token>
 | `/timeline` 的 `events` 一直为空 | ①该 step 确实没告警；②DB 不可用已降级（时长仍在，事件为空）。二者从本端点响应无法区分，用 `/task/{id}/alarms`（DB 挂会 503）交叉判断 |
 | `/timeline` 的 `start_ms`/`end_ms`/`duration_ms` 全 0 | 所解析的 run 磁盘上无段（起流即失败 / 同 step 刚重启、新 run 首段未出），或该 step 没有可见 run（此时 `run_id: null`） |
 
-> 消费本组接口的参考实现：lab 前端 [app/static/lab/index.html](../../app/static/lab/index.html)（`attachVideo` / `switchTrack`，hls.js + token 过期重拉 playlist）。
+> 消费本组接口的参考实现：控制台 [api/playlist.js](../../app/static/console/api/playlist.js)（PROGRAM-DATE-TIME 逐段换算）、[components/dual-player.js](../../app/static/console/components/dual-player.js)（hls.js 双轨对时 + token 过期重拉 playlist）。

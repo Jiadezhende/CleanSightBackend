@@ -25,7 +25,7 @@
    凡后端**不报错、只是没数据**的情况（返回 200 空数组 / 降级 / WS 静默），前端会误判为 bug。端点末尾用一张「现象 → 后端实际状态」对照表兜住。
 
 6. **能指就指参考实现。**
-   仓库内若有消费该端点的代码（如 [app/static/lab/index.html](../../app/static/lab/index.html) 的 `attachVideo`），在文末链过去——比任何文字都准。
+   仓库内若有消费该端点的代码（如控制台 [components/dual-player.js](../../app/static/console/components/dual-player.js) 的 `_attach`），在文末链过去——比任何文字都准。
 
 > 契约以 `app/routers/*.py` 现码为准；字段变更同步改本目录对应文件。
 
