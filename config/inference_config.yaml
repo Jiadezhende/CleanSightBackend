@@ -29,7 +29,7 @@ stages:
         class: app.services.inference.online.detection.impl.bubble.BubbleDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/bubble-best.pt
-          conf_threshold: 0.6
+          conf_threshold: 0.25
           iou_threshold: 0.45
           enabled: true
       - name: bending
@@ -65,7 +65,7 @@ stages:
         class: app.services.inference.online.detection.impl.clean.CleanLargeDetector
         params:
           model_path: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-large-best.pt
-          conf_threshold: 0.25
+          conf_threshold: 0.3
           iou_threshold: 0.45
           enabled: true
       - name: clean_small       # 小目标组：syringe / air_gun / scope_distal_end

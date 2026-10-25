@@ -1,5 +1,5 @@
 """
-Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）：送标任务清单、逐帧类别概率、送标、整段下载、LS 探活 / 配置。
+Lab API（`/lab/*`）：送标任务清单、逐帧类别概率、送标、整段下载、LS 探活 / 配置。
 
 - 送标（POST /submit）：在一个 step 的 raw 轨上选 N 段不重叠的媒体区间，剪成 mp4 提交到 Label Studio；
   流程在 `services/lab/service.py`，router 只做检查顺序（503 → 400 → 400 → 404）与 DTO 映射。
@@ -34,11 +34,11 @@ from app.storage import hls
 from app.storage import inference as inference_store
 from app.storage import runs
 from app.storage import tasks as step_tasks
-from app.types.exceptions import NotFoundError, ValidationError
+from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
 
 from .utils.runs import resolve_run, resolve_timeline
 
-router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
+router = APIRouter(prefix="/lab", tags=["lab"])
 logger = logging.getLogger(__name__)
 
 
@@ -111,12 +111,19 @@ class LabHealthResponse(BaseModel):
     default_project_id: int
 
 
+class LabSubmitLimits(BaseModel):
+    max_clips: int        # 一次提交最多几段
+    max_clip_ms: int      # 单段时长上限（媒体 ms）
+    max_total_ms: int     # 一次提交总时长上限（媒体 ms）
+
+
 class LabConfigResponse(BaseModel):
     label_studio_url: str
     default_project_id: int
-    task_source: str                # "db"（按数据库）| "storage"（按实际存储）
+    task_source: str                # "db"（磁盘 + 平台库，库不通自动退回）| "storage"（仅磁盘）
     token_configured: bool          # token 是否已配置（不返回明文）
     source: str                     # "file"（页面改过）| "env"（回退环境变量）
+    limits: LabSubmitLimits         # 送标上限，与 POST /submit 的校验同一组值
 
 
 class LabConfigUpdateRequest(BaseModel):
@@ -126,7 +133,7 @@ class LabConfigUpdateRequest(BaseModel):
     default_project_id: int = Field(0, ge=0, description="默认 project_id；0 表示无默认值")
     task_source: Optional[str] = Field(
         None,
-        description='任务列表数据来源 "db" | "storage"；不传表示不修改（DB 挂了可切 storage）',
+        description='任务清单来源 "db"（磁盘 + 平台库，库不通自动退回仅磁盘）| "storage"（仅磁盘）；不传表示不修改',
     )
 
 
@@ -150,6 +157,8 @@ class LabTaskItem(BaseModel):
 class LabTaskListResponse(BaseModel):
     total: int
     tasks: List[LabTaskItem]
+    # 本次实际来源：task_source=db 时平台库连不上会退回 "storage"
+    source: Literal["db", "storage"]
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +191,9 @@ def _list_offline_steps(raw_runs: List[RunIdentity]) -> List[int]:
     return [run.step_id for run in raw_runs if inference_store.query_has_offline_results(run)]
 
 
-def _task_row_to_item(row: db_tasks.DBTask) -> LabTaskItem:
+def _task_row_to_item(row: db_tasks.DBTask, raw_runs: List[RunIdentity]) -> LabTaskItem:
     task_id = int(row.task_id)
     step_id = _optional_int(row.current_step)
-    raw_runs = _list_raw_runs(task_id)
     raw_steps = [run.step_id for run in raw_runs]
     has_current_step_raw = step_id is not None and step_id in raw_steps
 
@@ -232,6 +240,38 @@ def _storage_task_to_item(task_id: int, raw_runs: List[RunIdentity]) -> LabTaskI
     )
 
 
+def _matches(row: db_tasks.DBTask, needle: str) -> bool:
+    """`needle`（已 strip + lower）为空即命中；否则 task_id / source_ip / status 任一含子串。"""
+    if not needle:
+        return True
+    return any(
+        needle in (str(v).lower() if v is not None else "")
+        for v in (row.task_id, row.source_ip, row.status)
+    )
+
+
+def _list_db_tasks(
+    q: Optional[str], limit: int, offset: int
+) -> tuple[int, List[LabTaskItem]]:
+    """「磁盘 + 平台库」：以磁盘上有 raw 段的任务为准，再用平台库过滤一遍（库里没有的不列），
+    补全 IP / 状态 / 时间。
+
+    排序 updated_time desc, task_id desc，再 offset/limit 切片；`total` 按过滤后计。
+    平台库查询失败原样抛 `DatabaseError`，退回仅磁盘由调用方决定。
+    """
+    raw_by_task: Dict[int, List[RunIdentity]] = {}
+    for task_id in step_tasks.list_task_ids():
+        raw_runs = _list_raw_runs(task_id)
+        if raw_runs:
+            raw_by_task[task_id] = raw_runs
+
+    needle = (q or "").strip().lower()
+    rows = [row for row in db_tasks.query_tasks(list(raw_by_task)).values() if _matches(row, needle)]
+    rows.sort(key=lambda r: (_optional_int(r.updated_time) or 0, int(r.task_id)), reverse=True)
+    page = rows[offset : offset + limit]
+    return len(rows), [_task_row_to_item(row, raw_by_task[int(row.task_id)]) for row in page]
+
+
 def _list_storage_tasks(
     q: Optional[str], limit: int, offset: int
 ) -> tuple[int, List[LabTaskItem]]:
@@ -268,21 +308,20 @@ async def list_lab_tasks(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> LabTaskListResponse:
-    """列出送标页面的任务。
+    """列出磁盘上有 raw 段的任务。
 
-    数据来源由运行时开关 task_source 决定（GET/PUT /lab-f3m8/config）：
-    - "db"（默认）：查 clean_task 表 + 文件系统补 raw 段信息（原行为）
-    - "storage"：直接枚举存储目录，不碰 DB（业务库挂了时的兜底）
+    数据来源由运行时开关 task_source 决定（GET/PUT /lab/config）：
+    - "db"（默认）：磁盘 + 平台库过滤并补字段；平台库连不上时退回 "storage"，响应 `source` 标明
+    - "storage"：只枚举磁盘，不碰平台库（用于没有平台库的环境）
     """
-    if lab_config.get_task_source() == "storage":
-        total, tasks = _list_storage_tasks(q, limit, offset)
-        return LabTaskListResponse(total=total, tasks=tasks)
-
-    total, rows = db_tasks.query_task_page(q, limit=limit, offset=offset)
-    return LabTaskListResponse(
-        total=total,
-        tasks=[_task_row_to_item(row) for row in rows],
-    )
+    if lab_config.get_task_source() != "storage":
+        try:
+            total, tasks = _list_db_tasks(q, limit, offset)
+            return LabTaskListResponse(total=total, tasks=tasks, source="db")
+        except DatabaseError as e:
+            logger.warning("[Lab] 平台库不可达，任务清单退回仅磁盘 | %s", e)
+    total, tasks = _list_storage_tasks(q, limit, offset)
+    return LabTaskListResponse(total=total, tasks=tasks, source="storage")
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +450,7 @@ async def download_step_video(
     段落盘时已是 H.264/yuv420p，这里纯 `-c copy` 换容器——磁盘速度、零 CPU、
     零二次画质损失，产物是通用 mp4（faststart，可拖动 seek）。
 
-    要 ms 精度区间请走 `/lab-f3m8/submit` 那条（ClipBuilder + libx264），
+    要 ms 精度区间请走 `/lab/submit` 那条（ClipBuilder + libx264），
     与本接口的零成本 remux 性质不同，不合并。
 
     step 仍在录制时下载 = 拿到当前已落盘的部分（在途段被过滤，不会产出坏文件）。
@@ -502,7 +541,7 @@ async def get_lab_config() -> LabConfigResponse:
 
     不返回 token 明文，只返回 token_configured 表示 env 里是否已配置。
     """
-    return LabConfigResponse(**lab_config.snapshot())
+    return LabConfigResponse(**lab_config.snapshot(), limits=lab_service.submit_limits())
 
 
 @router.put("/config", response_model=LabConfigResponse)
@@ -517,7 +556,7 @@ async def update_lab_config(req: LabConfigUpdateRequest) -> LabConfigResponse:
         )
     except ValueError as e:
         raise ValidationError(str(e), field="label_studio_url")
-    return LabConfigResponse(**snap)
+    return LabConfigResponse(**snap, limits=lab_service.submit_limits())
 
 
 # ---------------------------------------------------------------------------

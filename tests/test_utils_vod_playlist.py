@@ -34,6 +34,17 @@ class TestRenderVod:
             "#EXT-X-ENDLIST",
         ])
 
+    def test_wall_ms_writes_program_date_time_before_its_segment(self):
+        """浏览器清单逐段带墙钟起点（UTC、毫秒）；没给 wall_ms 的段不写（喂 ffmpeg 的清单）。"""
+        entries = [
+            VodEntry("a.mp4", 1.0, wall_ms=1_792_821_791_800),
+            VodEntry("b.mp4", 1.0),
+        ]
+        body = render_vod(entries, map_uri="raw_init.mp4").splitlines()
+        i = body.index("a.mp4")
+        assert body[i - 2:i] == ["#EXT-X-PROGRAM-DATE-TIME:2026-10-24T06:03:11.800Z", "#EXTINF:1.000,"]
+        assert sum(line.startswith("#EXT-X-PROGRAM-DATE-TIME") for line in body) == 1
+
     def test_empty_entries_raises(self):
         with pytest.raises(ValueError):
             render_vod([], map_uri="raw_init.mp4")

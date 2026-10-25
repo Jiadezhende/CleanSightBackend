@@ -1,16 +1,16 @@
-# `/lab-f3m8` — 送标导出（Label Studio）
+# `/lab` — 送标导出（Label Studio）
 
 让操作员在某个 step 的 raw 整段视频上圈选 N 段 `[start_media_ms, end_media_ms]`，后端 ffmpeg 剪出 mp4 并上传到 Label Studio（LS）创建标注任务。
 
 另提供一条**旁路**：`GET /download` 把整个 step 的某一轨 remux 成单个 mp4 直接下载，不经 LS，用于取汇报素材/原片。
 
-另有一条**模型调试读口**：`POST /label-probs` 读某个 step 的离线分割模型逐帧类别概率（admin 离线推理 tab 画概率曲线用）。
+另有一条**模型调试读口**：`POST /label-probs` 读某个 step 的离线分割模型逐帧类别概率（控制台回放工作台的概率泳道用）。
 
-- 数据源：任务列表来自 **DB**（`clean_task` 表）或 **磁盘**（枚举 raw 段目录），由运行时开关 `task_source` 决定；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id, run_id)` 文件约定）。
+- 数据源：任务列表以**磁盘**（有 raw 段的任务）为准，`task_source=db` 时再用平台库（`clean_task` 表）过滤并补字段，库连不上自动退回仅磁盘；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id, run_id)` 文件约定）。
 - submit / download / label-probs 都收可选 `run_id`（缺省 = 该 step 最新可见 run），JSON 响应回显实际读的 `run_id`。规则见 [README › run 定位](README.md#run-定位可选-run_id)。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
-- 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
-- 静态 UI：`GET /ui-f3m8/lab/`（`app/static/lab`，经 `/ui-f3m8` 统一挂载 `app/static`，`html=True`）。
+- 本组所有端点**均无鉴权、正常返回 200**。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
+- 静态 UI：控制台 `GET /ui-f3m8/console/` 的回放工作台「送标」面板（`app/static/console`，经 `/ui-f3m8` 统一挂载 `app/static`，`html=True`）。
 - 通用约定（Base URL / Gateway / 错误模型 / 枚举）见 [README](README.md)。
 
 > **本组有三套时间口径，逐字段已标注，别混用**：
@@ -38,15 +38,21 @@
 
 ---
 
-## GET /lab-f3m8/tasks
+## GET /lab/tasks
 
-**用途**：给送标页面列出「有 raw 段、可送标」的任务，让操作员选 `task_id` + `step_id`。数据来自 DB 或磁盘（见下）。
+**用途**：列出磁盘上「有 raw 段、可送标 / 可回放」的任务，让操作员选 `task_id` + `step_id`。
+
+| `task_source`（`GET /config`） | 列哪些任务 | 字段 |
+|------|------|------|
+| `db`（默认） | 磁盘上有 raw 段、**且平台库 `clean_task` 里有**的任务 | IP / 状态 / 时间取平台库 |
+| `db`，但平台库连不上 | 退回下一行，响应 `source="storage"` | 同下一行 |
+| `storage` | 磁盘上有 raw 段的全部任务，不碰平台库 | 平台库字段为 null / `"unknown"` |
 
 **查询参数**：
 
 | 参数 | 类型 | 必填 | 默认 | 范围/说明 |
 |------|------|------|------|-----------|
-| `q` | string | 否 | null | 子串过滤，**≤64 字符**（超长 → 422）。DB 模式匹配 `task_id`/`source_ip`/`status`；storage 模式只匹配 `str(task_id)` |
+| `q` | string | 否 | null | 子串过滤，**≤64 字符**（超长 → 422），两端空白忽略。`source="db"` 时大小写不敏感匹配 `task_id`/`source_ip`/`status`；`source="storage"` 时只匹配 `str(task_id)` |
 | `limit` | int | 否 | 50 | **1–200**，越界 → 422 |
 | `offset` | int | 否 | 0 | **≥0**，负数 → 422 |
 
@@ -57,6 +63,7 @@
 ```jsonc
 {
   "total": 12,                         // 过滤后总数（分页前）
+  "source": "db",                      // 本次实际来源："db" | "storage"（含平台库连不上的退回）
   "tasks": [
     {
       "task_id": 123,
@@ -80,6 +87,7 @@
 | 字段 | 类型 | 说明（含 null 条件） |
 |------|------|---------------------|
 | `total` | int | 过滤后、分页前的总数 |
+| `source` | string | 本次实际来源。`db`：平台库已过滤并补字段；`storage`：配置为仅磁盘，**或配置为 db 但平台库连不上已退回** |
 | `tasks[].task_id` | int | → `POST /submit` 的 `task_id` |
 | `tasks[].source_ip` | string \| null | DB 模式取自表（表值本身可为 null）；**storage 模式恒 null** |
 | `tasks[].current_step` | string \| null | DB 模式为 `current_step` 字符串；行内为 null 或 **storage 模式恒 null** |
@@ -96,33 +104,32 @@
 
 排序：`updated_time desc, task_id desc`。空结果返回 `{"total":0,"tasks":[]}`，不报错。
 
-> storage 模式设计意图：DB 挂了也能列任务送标，代价是丢失所有 DB 才有的字段（IP/状态/当前步）。前端切到 storage 模式时须容忍上述字段为 null / "unknown"。
+> 上表「storage 模式」指响应 `source="storage"`（含退回）：丢失所有平台库才有的字段（IP/状态/当前步），前端须容忍 null / `"unknown"`。
 
 ### 错误
 
 | 状态 | 触发条件 | 响应体形态 |
 |------|---------|-----------|
 | `422` | `q` 超 64 / `limit` 越界 / `offset<0` | FastAPI 校验体（`{"detail":[...]}`） |
-| `503` | **仅 DB 模式**：查库抛 `SQLAlchemyError` | `{"error":"Failed to list lab tasks","retryable":true,...}` |
 
-> storage 模式完全不碰 DB，故 DB 挂时不报 503——这正是它存在的理由。
+> 平台库挂了不报 503：`db` 模式自动退回仅磁盘，响应 `source="storage"`，后端日志 `[Lab] 平台库不可达，任务清单退回仅磁盘`。
 
 ### 前端坑点
 
 - 时间是 **epoch 毫秒墙钟**，与 `/submit` 请求的媒体毫秒不同轴，别拿去当区间入参。
-- storage 模式下大量字段退化，务必先 `GET /config` 读 `task_source` 再决定 UI 展示。
+- 按响应的 `source`（而不是 `GET /config` 的 `task_source`）决定 UI 展示：配置为 db 时也可能因平台库连不上退回 storage。
 - 分页 `total` 是过滤后总数；翻页用 `offset += limit`。
 
 ### 静默失败
 
 | 现象 | 后端实际状态 |
 |------|------------|
-| 列表为空但你确信有任务 | 该 task 各 step 的最新可见 run 都无 raw 段（storage 模式直接不收）；或 `q` 过滤掉了 |
-| 某任务字段全是 null/"unknown" | 当前处于 **storage 模式**，非 bug |
+| 列表为空但你确信有任务 | 该 task 各 step 的最新可见 run 都无 raw 段；`source="db"` 时还可能是平台库里没有这个 task；或 `q` 过滤掉了 |
+| 某任务字段全是 null/"unknown" | 响应 `source="storage"`（配置为仅磁盘或平台库连不上），非 bug |
 
 ---
 
-## POST /lab-f3m8/submit
+## POST /lab/submit
 
 **用途**：把圈选的 N 段裁成 mp4 并逐段上传 LS。**整个流程同步**（ffmpeg + 上传都在请求线程池里跑完，段多/段长会明显阻塞）。**单段失败不拖垮整请求**：HTTP 仍 200，逐段在 `clips[]` 里带 `success`/`error_code`。
 
@@ -226,7 +233,7 @@
 
 ### 前端坑点
 
-- 单段上限 5 min、总时长 30 min、最多 20 段（默认值，以后端 settings 为准）；圈选时前端最好先本地拦一道，减少 400。
+- 单段上限 5 min、总时长 30 min、最多 20 段是默认值，实际取 [`GET /config`](#get-labconfig) 的 `limits`；圈选时前端按它先本地拦一道，减少 400。
 - 段重叠是**排序后**判的，`clips` 顺序无所谓，但两段时间区间不能相交。
 - `job_dir` 非空 = 有段失败且要求了保留；此目录**没有 TTL / 自动清理**，会一直留在 `{temp_dir}/{nonce}`（默认 `{storage_base_dir}/.lab_exports`）直到人工/运维清。别指望它过期自动消失。
 - 同步端点，段多时响应慢，前端请给足超时、加 loading。
@@ -240,11 +247,11 @@
 | 全成功却 `job_dir=null` | 正常——成功即清理产物，只有失败+keep 才保留 |
 | 反复 `ls_unreachable`/`ls_auth` | LS 配置/网络/token 问题，先走 `GET /health` 定位 |
 
-参考实现：仓库内消费本接口的送标页面见 [app/static/lab/index.html](../../app/static/lab/index.html)。
+参考实现：控制台 [pages/run-label.js](../../app/static/console/pages/run-label.js) 的 `submit`。
 
 ---
 
-## GET /lab-f3m8/download
+## GET /lab/download
 
 **用途**：把某个 `(task_id, step_id)` 某一轨**已落盘的全部段**导出为单个 mp4 直接下载。取汇报素材 / 原片用，不经 LS。
 
@@ -311,9 +318,9 @@
 
 ---
 
-## POST /lab-f3m8/label-probs
+## POST /lab/label-probs
 
-读取某个 step 的离线分割模型**逐帧类别概率**（每帧对各类的 softmax），给 admin 离线推理 tab 画概率曲线。
+读取某个 step 的离线分割模型**逐帧类别概率**（每帧对各类的 softmax），给控制台回放工作台画概率泳道。
 这是模型调试旁路，不是对外推理结果（正式结果是分割段，见 [`POST /ai/temporal`](ai.md#post-aitemporal)）。
 帧时间已换算为该轨**媒体刻度**（= `<video>.currentTime × 1000`）。身份键走 JSON body，约定见 [README](README.md)。
 
@@ -369,7 +376,7 @@
 
 ---
 
-## GET /lab-f3m8/health
+## GET /lab/health
 
 **用途**：送标前探测 LS 是否**已配置**、是否**可达**、token 是否有效。**不抛异常**——未配置返回 `configured=false`，探测失败返回 `reachable=false` + `error`，HTTP 恒 200。
 
@@ -408,7 +415,7 @@
 
 ---
 
-## GET /lab-f3m8/config
+## GET /lab/config
 
 **用途**：读当前 LS 连接配置，供页面回显。**不做网络探测**（探测走 `/health`），**不返回 token 明文**。
 
@@ -418,9 +425,14 @@
 {
   "label_studio_url": "http://...",    // 生效 url，"" 表示未配置
   "default_project_id": 5,             // 0 表示无默认
-  "task_source": "db",                 // "db" | "storage"，控制 /tasks 数据源
+  "task_source": "db",                 // "db"（磁盘 + 平台库）| "storage"（仅磁盘），控制 /tasks 数据源
   "token_configured": true,            // env 里是否设了 token（不回明文）
-  "source": "file"                     // "file"（PUT 改过、来自持久化文件）| "env"（回退环境变量）
+  "source": "file",                    // "file"（PUT 改过、来自持久化文件）| "env"（回退环境变量）
+  "limits": {                          // 送标上限，与 POST /submit 的校验同一组值
+    "max_clips": 20,
+    "max_clip_ms": 300000,
+    "max_total_ms": 1800000
+  }
 }
 ```
 
@@ -428,9 +440,12 @@
 |------|------|------|
 | `label_studio_url` | string | 空串 = 未配置（不是 null） |
 | `default_project_id` | int | 0 = 无默认 |
-| `task_source` | string | `db` \| `storage` |
+| `task_source` | string | `db`（磁盘 + 平台库，库连不上自动退回仅磁盘）\| `storage`（仅磁盘） |
 | `token_configured` | bool | env `CLEANSIGHT_LABEL_STUDIO_TOKEN` 是否非空；token 明文不外露 |
 | `source` | string | `file`（存在持久化 JSON、以其为准）\| `env`（无文件或读文件失败，回退 settings） |
+| `limits.max_clips` | int | 一次 `POST /submit` 最多几段（settings `lab_export_max_clips_per_submit`） |
+| `limits.max_clip_ms` | int | 单段时长上限，媒体 ms（`lab_export_max_clip_ms`） |
+| `limits.max_total_ms` | int | 一次提交总时长上限，媒体 ms（`lab_export_max_total_ms`） |
 
 > token 永远只来自 env、页面不可改；`token_configured` 是唯一可见信号。
 
@@ -446,7 +461,7 @@
 
 ---
 
-## PUT /lab-f3m8/config
+## PUT /lab/config
 
 **用途**：改 LS `url` / `default_project_id` / `task_source` 并**持久化到 JSON 文件**（`{storage_base_dir}/lab_runtime_config.json`），即时生效、跨重启保留。**token 不在此管理**（仅 env）。
 
@@ -460,7 +475,7 @@
 
 ### 响应 `200`
 
-同 GET 的 `LabConfigResponse`，其中 `source` 更新后**恒为 `file`**。
+同 GET 的 `LabConfigResponse`（含 `limits`），其中 `source` 更新后**恒为 `file`**。
 
 ### 错误
 
@@ -474,7 +489,7 @@
 ### 前端坑点
 
 - 想「禁用 LS」就传 `label_studio_url=""`；传别的非法串会 400。
-- 只改数据源模式（DB 挂了切 storage）时，`label_studio_url` 必须一并回传当前值，否则会被默认 `""` 冲掉（该字段默认空串，缺省即清空 url）。`task_source` 缺省不改，url/project_id 缺省会覆盖。
+- 只改数据源模式时，`label_studio_url` 必须一并回传当前值，否则会被默认 `""` 冲掉（该字段默认空串，缺省即清空 url）。`task_source` 缺省不改，url/project_id 缺省会覆盖。
 
 ### 静默失败
 

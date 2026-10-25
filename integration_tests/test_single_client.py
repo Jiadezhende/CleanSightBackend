@@ -1,5 +1,5 @@
 """
-单客户端集成测试 - 覆盖 9 种使用场景（观测走 admin 运维面板 /ui-f3m8/admin/）
+单客户端集成测试 - 覆盖 9 种使用场景（观测走控制台 /ui-f3m8/console/）
 
 用法:
     python integration_tests/test_single_client.py --scenario <1-9> --task_id <id> [options]
@@ -204,7 +204,7 @@ def do_start(api: APIClient, args, pull_url: str, *, label: str = ""):
 
 
 def watch_or_sleep(args, client_id: str, duration: int):
-    """运行 duration 秒；观测走 admin 运维面板（打印一次面板 URL）。"""
+    """运行 duration 秒；观测走控制台（打印一次面板 URL）。"""
     print_admin_url(args.server, args.api_port, args.task_id)
     print(f"运行中（{duration}s）...")
     time.sleep(duration)
@@ -285,15 +285,15 @@ _admin_url_printed = False
 
 
 def print_admin_url(server: str, api_port: int, task_id: int):
-    """打印 admin 运维面板 URL（观测唯一入口），每次运行只打印一次。"""
+    """打印控制台 URL（观测唯一入口），每次运行只打印一次。"""
     global _admin_url_printed
     if _admin_url_printed:
         return
     _admin_url_printed = True
-    print(f"\n观测走 admin 运维面板（后端自带，同源同端口）:")
-    print(f"  http://{server}:{api_port}/ui-f3m8/admin/")
-    print(f"  → 「实时监控」tab 选择 task_id={task_id} 对应的客户端并点「连接」")
-    print(f"  → 告警/指标/证据回溯见其余 tab\n")
+    print(f"\n观测走控制台（后端自带，同源同端口）:")
+    print(f"  http://{server}:{api_port}/ui-f3m8/console/")
+    print(f"  → 「实时」页左侧点 task_id={task_id} 那一路看画面")
+    print(f"  → 告警回放 / 指标见「回放」「运维」页\n")
 
 
 # ---------------------------------------------------------------------------

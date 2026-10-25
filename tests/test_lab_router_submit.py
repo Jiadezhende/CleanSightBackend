@@ -1,4 +1,4 @@
-"""`/lab-f3m8/submit`、`/download`、`/health` 的 HTTP 层：检查顺序、错误体、service 结果到 DTO 的映射。
+"""`/lab/submit`、`/download`、`/health` 的 HTTP 层：检查顺序、错误体、service 结果到 DTO 的映射。
 
 送标 / 导出 / 探活的业务逻辑在 `services/lab/service.py`（见 test_lab_service.py）；这里把
 `lab_service.submit_clips` / `export_step` / `ping_label_studio` 换成替身，不跑 ffmpeg、不连 LS。
@@ -48,7 +48,7 @@ def _body(**overrides):
 async def test_submit_not_configured_is_503_before_param_checks(client, monkeypatch, tmp_storage):
     _configure_ls(monkeypatch, token="")
     # project_id 缺、区间重叠、无段——全都错，仍先报 503
-    r = await client.post("/lab-f3m8/submit", json=_body(project_id=None, clips=[
+    r = await client.post("/lab/submit", json=_body(project_id=None, clips=[
         {"start_media_ms": 0, "end_media_ms": 1_000}, {"start_media_ms": 500, "end_media_ms": 900},
     ]))
     assert r.status_code == 503
@@ -62,7 +62,7 @@ async def test_submit_not_configured_is_503_before_param_checks(client, monkeypa
 @pytest.mark.asyncio
 async def test_submit_project_id_checked_before_clips(client, monkeypatch, tmp_storage):
     _configure_ls(monkeypatch)
-    r = await client.post("/lab-f3m8/submit", json=_body(project_id=None, clips=[
+    r = await client.post("/lab/submit", json=_body(project_id=None, clips=[
         {"start_media_ms": 0, "end_media_ms": 1_000}, {"start_media_ms": 500, "end_media_ms": 900},
     ]))
     assert r.status_code == 400
@@ -72,7 +72,7 @@ async def test_submit_project_id_checked_before_clips(client, monkeypatch, tmp_s
 @pytest.mark.asyncio
 async def test_submit_clips_checked_before_segments(client, monkeypatch, tmp_storage):
     _configure_ls(monkeypatch)
-    r = await client.post("/lab-f3m8/submit", json=_body(clips=[
+    r = await client.post("/lab/submit", json=_body(clips=[
         {"start_media_ms": 500, "end_media_ms": 900}, {"start_media_ms": 0, "end_media_ms": 1_000},
     ]))
     assert r.status_code == 400
@@ -85,7 +85,7 @@ async def test_submit_clips_checked_before_segments(client, monkeypatch, tmp_sto
 async def test_submit_without_raw_segments_is_404(client, monkeypatch, tmp_storage):
     _configure_ls(monkeypatch, default_pid=7)
     seed_hls_segments(1, 2, [_TS0_US], track="processed")   # 有 run、raw 轨无段
-    r = await client.post("/lab-f3m8/submit", json=_body(project_id=None))
+    r = await client.post("/lab/submit", json=_body(project_id=None))
     assert r.status_code == 404
     d = r.json()
     assert d["detail"] == "No raw segments for task_id=1, step_id=2"
@@ -114,7 +114,7 @@ async def test_submit_maps_outcome_to_response(client, monkeypatch, tmp_storage)
         ])
 
     monkeypatch.setattr(lab_service, "submit_clips", _fake_submit)
-    r = await client.post("/lab-f3m8/submit", json=_body(
+    r = await client.post("/lab/submit", json=_body(
         clips=[{"start_media_ms": 2_000, "end_media_ms": 3_000},
                {"start_media_ms": 0, "end_media_ms": 1_000}],
         keep_artifacts_on_failure=False,
@@ -144,7 +144,7 @@ async def test_submit_job_dir_none_stays_null(client, monkeypatch, tmp_storage):
     seed_hls_segments(1, 2, [_TS0_US])
     monkeypatch.setattr(lab_service, "submit_clips",
                         lambda run, clips, **kw: SubmitOutcome(job_dir=None, clips=[]))
-    r = await client.post("/lab-f3m8/submit", json=_body())
+    r = await client.post("/lab/submit", json=_body())
     assert r.status_code == 200
     assert r.json()["job_dir"] is None
 
@@ -160,7 +160,7 @@ async def test_download_without_run_is_404_without_exporting(client, monkeypatch
         raise AssertionError("no run → must not export")
 
     monkeypatch.setattr(lab_service, "export_step", _boom)
-    r = await client.get("/lab-f3m8/download", params={"task_id": 1, "step_id": 2, "track": "raw"})
+    r = await client.get("/lab/download", params={"task_id": 1, "step_id": 2, "track": "raw"})
     assert r.status_code == 404
     d = r.json()
     assert d["detail"] == "No raw segments for task_id=1, step_id=2"
@@ -172,7 +172,7 @@ async def test_health_uses_ping(client, monkeypatch, tmp_storage):
     _configure_ls(monkeypatch, default_pid=3)
     monkeypatch.setattr(lab_service, "ping_label_studio",
                         lambda url, token: (False, f"ConnectionError: {url} {token}"))
-    r = await client.get("/lab-f3m8/health")
+    r = await client.get("/lab/health")
     assert r.status_code == 200
     assert r.json() == {
         "configured": True, "reachable": False, "error": "ConnectionError: http://ls tok",

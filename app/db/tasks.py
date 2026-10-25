@@ -3,16 +3,16 @@
     from app.db import tasks as db_tasks
     row = db_tasks.query_task(42)                         # Optional[DBTask]
     ips = db_tasks.query_source_ips([1, 2])               # {task_id: source_ip}
-    total, rows = db_tasks.query_task_page("10.0", limit=50, offset=0)
+    rows = db_tasks.query_tasks([1, 2])                   # {task_id: DBTask}
 
 - 每个 `query_*` 自开自关一个 session；返回的是**会话已关闭**的 ORM 实例（无 relationship、
   不 commit，列属性照常可读）——别对它们做写操作。
 - 失败一律抛 `app.types.exceptions.DatabaseError`（边界层转 503）；降级策略归调用方。
 """
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence
 
-from sqlalchemy import BigInteger, Column, String, Text, or_
+from sqlalchemy import BigInteger, Column, String, Text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.types.exceptions import DatabaseError
@@ -78,50 +78,23 @@ def query_source_ips(task_ids: Sequence[int]) -> Dict[int, Optional[str]]:
         ) from e
 
 
-def query_task_page(
-    needle: Optional[str], *, limit: int, offset: int
-) -> Tuple[int, List[DBTask]]:
-    """按关键字筛 → (命中总数, 本页行)，updated_time、task_id 双降序。
+def query_tasks(task_ids: Sequence[int]) -> Dict[int, DBTask]:
+    """批量取 task_id → 整行（单次 IN 查询）；DB 里没有的 task_id 不出现在结果里。
 
-    `needle` 先 strip，空则不筛；非空时 source_ip / status 大小写不敏感子串匹配，能转整数时
-    再 OR 上 task_id 相等。count 与翻页在同一 session 内。
+    空输入直接返回 {}，不开 session。
 
     Raises:
-        DatabaseError: "Failed to list lab tasks"
+        DatabaseError: "Failed to query tasks"
     """
+    if not task_ids:
+        return {}
     try:
         with SessionLocal() as s:
-            query = s.query(DBTask)
-            needle = (needle or "").strip()
-            if needle:
-                filters = [
-                    DBTask.source_ip.ilike(f"%{needle}%"),
-                    DBTask.status.ilike(f"%{needle}%"),
-                ]
-                task_id = _as_int(needle)
-                if task_id is not None:
-                    filters.append(DBTask.task_id == task_id)
-                query = query.filter(or_(*filters))
-
-            total = query.count()
-            rows = (
-                query
-                .order_by(DBTask.updated_time.desc(), DBTask.task_id.desc())
-                .offset(offset)
-                .limit(limit)
-                .all()
-            )
-            return int(total), rows
+            rows = s.query(DBTask).filter(DBTask.task_id.in_(list(task_ids))).all()
+            return {int(r.task_id): r for r in rows}
     except SQLAlchemyError as e:
         raise DatabaseError(
-            message="Failed to list lab tasks",
+            message="Failed to query tasks",
             retryable=True,
-            query="SELECT ... FROM clean_task",
+            query="SELECT ... FROM clean_task WHERE task_id IN (...)",
         ) from e
-
-
-def _as_int(value: str) -> Optional[int]:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None

@@ -2,7 +2,7 @@
 多客户端并发集成测试（Scenario 6）
 
 从数据库查询最多 max-tasks 个任务，并发运行 scenario 1（正常流程）。
-观测走 admin 运维面板（http://{server}:{api_port}/ui-f3m8/admin/ 「总览」/「实时监控」tab）。
+观测走控制台（http://{server}:{api_port}/ui-f3m8/console/ 「实时」/「运维」页）。
 
 用法:
     python integration_tests/test_multi_client.py [options]
@@ -161,9 +161,9 @@ def main():
 
     print(f"\n找到 {len(tasks)} 个任务: {[t[0] for t in tasks]}")
 
-    print(f"\n观测走 admin 运维面板（后端自带，同源同端口）:")
-    print(f"  http://{args.server}:{args.api_port}/ui-f3m8/admin/")
-    print(f"  → 「总览」看各客户端队列/健康，「实时监控」逐个选客户端看画面\n")
+    print(f"\n观测走控制台（后端自带，同源同端口）:")
+    print(f"  http://{args.server}:{args.api_port}/ui-f3m8/console/")
+    print(f"  → 「运维」页看各路队列/健康，「实时」页逐路看画面\n")
 
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)

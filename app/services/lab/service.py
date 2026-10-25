@@ -3,6 +3,7 @@
     ls_url, ls_token = require_label_studio()            # 未配置 → LabelStudioNotConfiguredError
     project_id = resolve_project_id(requested)           # → ValidationError
     clips = validate_clips(ranges)                       # → ValidationError；返回按起点排序后的列表
+    limits = submit_limits()                             # 校验用的那组上限，供前端显示与预检
     out = submit_clips(run, clips, project_id=project_id, ls_url=ls_url, ls_token=ls_token,
                        keep_artifacts_on_failure=True)   # 阻塞：ffmpeg + urlopen，别在事件循环上调
     path = export_step(run, track)                       # 阻塞；产物归调用方删
@@ -16,7 +17,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.types.exceptions import ValidationError
 from app.types.run import RunIdentity
@@ -67,16 +68,26 @@ def resolve_project_id(requested: Optional[int]) -> int:
     return int(pid)
 
 
+def submit_limits() -> Dict[str, int]:
+    """送标上限 `{max_clips, max_clip_ms, max_total_ms}`，取 settings；`validate_clips` 用的就是这一组。"""
+    from app.settings import settings
+
+    return {
+        "max_clips": settings.lab_export_max_clips_per_submit,
+        "max_clip_ms": settings.lab_export_max_clip_ms,
+        "max_total_ms": settings.lab_export_max_total_ms,
+    }
+
+
 def validate_clips(clips: Sequence[ClipRange]) -> List[ClipRange]:
-    """按 `start_media_ms` 升序排好并校验数量、单段时长、不重叠、总时长；上限取 settings。
+    """按 `start_media_ms` 升序排好并校验数量、单段时长、不重叠、总时长；上限取 `submit_limits()`。
 
     空列表原样放行（HTTP 层 `min_length=1` 已拦）。
     """
-    from app.settings import settings
-
-    max_clips = settings.lab_export_max_clips_per_submit
-    max_clip_ms = settings.lab_export_max_clip_ms
-    max_total_ms = settings.lab_export_max_total_ms
+    limits = submit_limits()
+    max_clips = limits["max_clips"]
+    max_clip_ms = limits["max_clip_ms"]
+    max_total_ms = limits["max_total_ms"]
 
     if len(clips) > max_clips:
         raise ValidationError(

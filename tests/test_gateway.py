@@ -323,9 +323,12 @@ class TestGatewayMiddlewareHTTP:
         assert resp.status_code == 429
         assert resp.json()["error"] == "Too Many Requests"
 
-    @pytest.mark.parametrize("path", ["/health/status", "/task/message/123", "/admin-f3m8/overview"])
+    @pytest.mark.parametrize(
+        "path", ["/health/status", "/task/message/123", "/admin/overview", "/ui-f3m8/console/app.js"],
+    )
     async def test_relaxed_prefix_uses_relaxed_limit(self, gw, init_gw, path):
-        """生产默认宽松前缀下，健康检查、任务结束后前端持续轮询的 /task/message、admin 页数据接口不被限流或封禁"""
+        """生产默认宽松前缀下，健康检查、任务结束后前端持续轮询的 /task/message、控制台数据接口（/admin/）、
+        控制台静态资产（一次开页十几个 module）不被限流或封禁"""
         init_gw(
             gw,
             gateway_relaxed_prefixes=_PROD_RELAXED_PREFIXES,
@@ -337,6 +340,21 @@ class TestGatewayMiddlewareHTTP:
             for _ in range(10):
                 resp = await client.get(path)
         assert resp.status_code not in (403, 429)
+
+    @pytest.mark.parametrize("path", ["/admin", "/admin.php", "/administrator/index.php"])
+    async def test_admin_lookalike_probes_stay_in_normal_tier(self, gw, init_gw, path):
+        """宽松档只放 `/admin/` 下的接口：扫描器最常探的 /admin*、/administrator 仍走普通档、照常限流"""
+        init_gw(
+            gw,
+            gateway_relaxed_prefixes=_PROD_RELAXED_PREFIXES,
+            gateway_rate_limit=2,
+            gateway_relaxed_rate_limit=100,
+            gateway_scan_threshold=1000,
+        )
+        async with await self._client("127.0.0.1") as client:
+            for _ in range(3):
+                resp = await client.get(path)
+        assert resp.status_code == 429
 
     async def test_bypass_prefix_skips_rate_limit(self, gw, init_gw):
         """bypass 前缀（如 /media）完全跳过速率限制，token 鉴权由路由层负责"""

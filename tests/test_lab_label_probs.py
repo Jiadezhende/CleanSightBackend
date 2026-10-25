@@ -1,4 +1,4 @@
-"""`POST /lab-f3m8/label-probs` 与 lab 任务清单的 `offline_steps`。"""
+"""`POST /lab/label-probs` 与 lab 任务清单的 `offline_steps`。"""
 
 import numpy as np
 import pytest
@@ -42,7 +42,7 @@ async def test_probs_by_class_on_media_axis(client, tmp_storage):
         [[0.9, 0.05, 0.05], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]],
     ))
 
-    r = await client.post("/lab-f3m8/label-probs", json={"task_id": 1, "step_id": 2})
+    r = await client.post("/lab/label-probs", json={"task_id": 1, "step_id": 2})
 
     assert r.status_code == 200
     d = r.json()
@@ -56,7 +56,7 @@ async def test_probs_by_class_on_media_axis(client, tmp_storage):
 @pytest.mark.asyncio
 async def test_no_probs_yields_empty_arrays(client, tmp_storage):
     _seed_gapped_raw()
-    r = await client.post("/lab-f3m8/label-probs", json={"task_id": 1, "step_id": 2})
+    r = await client.post("/lab/label-probs", json={"task_id": 1, "step_id": 2})
     assert r.status_code == 200
     d = r.json()
     assert (d["labels"], d["media_ms"], d["probs"]) == ([], [], [])
@@ -66,14 +66,14 @@ async def test_no_probs_yields_empty_arrays(client, tmp_storage):
 async def test_track_without_segments_is_404(client, tmp_storage):
     _seed_gapped_raw()
     r = await client.post(
-        "/lab-f3m8/label-probs", json={"task_id": 1, "step_id": 2, "track": "processed"},
+        "/lab/label-probs", json={"task_id": 1, "step_id": 2, "track": "processed"},
     )
     assert r.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_missing_identity_is_422(client, tmp_storage):
-    r = await client.post("/lab-f3m8/label-probs", json={"task_id": 1})
+    r = await client.post("/lab/label-probs", json={"task_id": 1})
     assert r.status_code == 422
 
 

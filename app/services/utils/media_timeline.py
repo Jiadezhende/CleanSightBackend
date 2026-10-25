@@ -3,6 +3,7 @@
     tl = hls.query_timeline(run, "raw")
     first_gap(tl.select(a, b))   # 这段区间里有没有断流 → (前段, 后段, 空洞 ms) / None
     total_gap_ms(tl)             # 本轨累计断流时长
+    list(gaps(tl))               # 每一处断流 (前段, 后段, 空洞 ms)
 
 媒体轴本身（段落点、墙钟↔媒体换算、不带阈值的 `wall_gaps()`）在 `app/storage/hls/_timeline.py`；
 本模块只加阈值这一条判断。
@@ -28,7 +29,8 @@ from app.storage.hls import MediaTimeline, PlacedSegment
 GAP_THRESHOLD_MS = 500
 
 
-def _gaps(tl: MediaTimeline) -> Iterator[Tuple[PlacedSegment, PlacedSegment, int]]:
+def gaps(tl: MediaTimeline) -> Iterator[Tuple[PlacedSegment, PlacedSegment, int]]:
+    """每一处真实录制停顿 `(前段, 后段, 空洞 ms)`，按时序。断点在媒体轴上的位置 = 后段的 `media_start_ms`。"""
     for cur, nxt, gap_ms in tl.wall_gaps():
         if gap_ms > GAP_THRESHOLD_MS:
             yield cur, nxt, gap_ms
@@ -42,7 +44,7 @@ def first_gap(tl: MediaTimeline) -> Optional[Tuple[PlacedSegment, PlacedSegment,
     两项都是真值：起点是文件名里的实测墙钟，EXTINF 是清单里的段媒体时长。fps 漂移天然
     被吸收——漂移同时压低 `eff_fps` 与段内帧数，`EXTINF = N/eff_fps` 跟着变长。
     """
-    for cur, nxt, gap_ms in _gaps(tl):
+    for cur, nxt, gap_ms in gaps(tl):
         return cur, nxt, gap_ms
     return None
 
@@ -54,4 +56,4 @@ def total_gap_ms(tl: MediaTimeline) -> int:
     跨度，Σ EXTINF 是**单轨**的，差值里混着「两轨起止不对齐」这一项——推理起步晚于取流时
     processed 首段本就晚于 raw 首段，零断流的 step 也会算出一个假空洞。
     """
-    return sum(gap_ms for _, _, gap_ms in _gaps(tl))
+    return sum(gap_ms for _, _, gap_ms in gaps(tl))

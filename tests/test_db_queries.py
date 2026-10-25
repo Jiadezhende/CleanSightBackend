@@ -146,71 +146,28 @@ class TestQuerySourceIps:
 
 
 # ---------------------------------------------------------------------------
-# query_task_page
+# query_tasks
 # ---------------------------------------------------------------------------
 
 
-class TestQueryTaskPage:
-    @pytest.fixture
-    def seeded(self, db):
-        _seed(
-            db,
-            _task(101, source_ip="10.0.0.1", status="running", updated_time=300),
-            _task(7, source_ip="cam-x101y", status="paused", updated_time=200),
-            _task(8, source_ip="192.168.1.8", status="completed", updated_time=200),
-            _task(9, source_ip="192.168.1.9", status="RUNNING", updated_time=100),
-        )
-        return db
+class TestQueryTasks:
+    def test_maps_found_ids_to_rows_and_skips_missing(self, db):
+        _seed(db, _task(1, source_ip="a", status="running"), _task(2, source_ip=None), _task(3))
 
-    @staticmethod
-    def _ids(rows):
-        return [r.task_id for r in rows]
-
-    @pytest.mark.parametrize("needle", [None, "", "   "])
-    def test_blank_needle_lists_all_ordered(self, seeded, needle):
-        total, rows = db_tasks.query_task_page(needle, limit=50, offset=0)
-        assert total == 4
-        # updated_time 降序，同值再按 task_id 降序
-        assert self._ids(rows) == [101, 8, 7, 9]
+        rows = db_tasks.query_tasks((1, 2, 404))
+        assert sorted(rows) == [1, 2]
+        assert (rows[1].source_ip, rows[1].status) == ("a", "running")
+        assert rows[2].source_ip is None
         _assert_all_closed()
 
-    def test_source_ip_substring(self, seeded):
-        total, rows = db_tasks.query_task_page("192.168", limit=50, offset=0)
-        assert (total, self._ids(rows)) == (2, [8, 9])
-
-    def test_status_case_insensitive(self, seeded):
-        total, rows = db_tasks.query_task_page("run", limit=50, offset=0)
-        assert (total, self._ids(rows)) == (2, [101, 9])
-
-    def test_integer_needle_adds_task_id_equality(self, seeded):
-        # 101 命中 task_id 相等；7 命中 source_ip 子串 "x101y"
-        total, rows = db_tasks.query_task_page(" 101 ", limit=50, offset=0)
-        assert (total, self._ids(rows)) == (2, [101, 7])
-
-    def test_integer_needle_matches_id_without_text_hit(self, seeded):
-        # 没有任何 source_ip / status 含 "7"，只能靠 task_id 相等命中
-        total, rows = db_tasks.query_task_page("7", limit=50, offset=0)
-        assert (total, self._ids(rows)) == (1, [7])
-
-    def test_non_integer_needle_skips_task_id_branch(self, seeded):
-        total, rows = db_tasks.query_task_page("paused", limit=50, offset=0)
-        assert (total, self._ids(rows)) == (1, [7])
-
-    def test_no_match_is_empty(self, seeded):
-        assert db_tasks.query_task_page("nope", limit=50, offset=0) == (0, [])
-
-    def test_total_counts_all_matches_while_page_is_sliced(self, seeded):
-        total, rows = db_tasks.query_task_page(None, limit=2, offset=1)
-        assert total == 4
-        assert self._ids(rows) == [8, 7]
-        # count 与翻页同一 session
-        _assert_all_closed(expected_count=1)
+    def test_empty_input_does_not_open_session(self, db):
+        assert db_tasks.query_tasks([]) == {}
+        assert _TrackingSession.opened == []
 
     def test_sqlalchemy_error_becomes_database_error(self, broken_db):
         with pytest.raises(DatabaseError) as ei:
-            db_tasks.query_task_page("x", limit=10, offset=0)
-        assert str(ei.value) == "Database error: Failed to list lab tasks [retryable]"
-        assert ei.value.query == "SELECT ... FROM clean_task"
+            db_tasks.query_tasks([1])
+        assert ei.value.message == "Database error: Failed to query tasks"
         _assert_all_closed()
 
 

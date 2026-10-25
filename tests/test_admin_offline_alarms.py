@@ -1,4 +1,4 @@
-"""`GET /admin-f3m8/offline/alarms/{task_id}/{step_id}`（过渡期）：盘上告警 + 墙钟 → 媒体刻度，区分没核对过。"""
+"""`GET /admin/offline/alarms/{task_id}/{step_id}`（过渡期）：盘上告警 + 墙钟 → 媒体刻度，区分没核对过。"""
 
 import pytest
 import pytest_asyncio
@@ -11,7 +11,7 @@ from factories import make_run, seed_hls_segments
 
 T0 = 1_700_000_000
 _TS0_MS = T0 * 1000
-URL = "/admin-f3m8/offline/alarms/1/2"
+URL = "/admin/offline/alarms/1/2"
 
 
 def _alarm(ts, metric=AlarmMetric.STEP_MISSING, rule_id="clean.flush.missing", at_ms=None):

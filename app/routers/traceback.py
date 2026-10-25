@@ -23,7 +23,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.db import alarms as db_alarms
 from app.types.run import RunIdentity
-from app.services.utils.media_timeline import total_gap_ms
+from app.services.utils.media_timeline import gaps, total_gap_ms
 from app.services.utils.vod_playlist import VodEntry, render_vod
 from app.storage import hls, runs
 from app.types.exceptions import DatabaseError, NotFoundError
@@ -109,6 +109,8 @@ def _build_vod_playlist(request: Request, run: RunIdentity, track: str) -> str:
                 )
             ),
             duration_s=s.duration_s,
+            # 段墙钟起点 → PROGRAM-DATE-TIME：前端据此把 raw / processed 对到同一墙钟
+            wall_ms=s.ref.ts_ms,
         )
         for s in segments
     ]
@@ -273,5 +275,15 @@ async def get_task_timeline(
         "media_duration_ms": timeline.duration_ms,
         "gap_total_ms": gap_total_ms,
         "has_gap": gap_total_ms > 0,
+        # 每一处断流：媒体轴上的断点（宽度为零）+ 墙钟上的空洞两端。判据与送标报 range_gap 同源
+        "gaps": [
+            {
+                "media_ms": nxt.media_start_ms,
+                "wall_from_ms": cur.wall_end_ms,
+                "wall_to_ms": nxt.wall_start_ms,
+                "gap_ms": gap_ms,
+            }
+            for cur, nxt, gap_ms in gaps(timeline)
+        ],
         "events": events,
     }

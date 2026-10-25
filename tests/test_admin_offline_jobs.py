@@ -1,4 +1,4 @@
-"""`/admin-f3m8/offline/jobs`：提交 202 / 未配置 400 / 查询 404 / 列表倒序。
+"""`/admin/offline/jobs`：提交 202 / 未配置 400 / 查询 404 / 列表倒序。
 
 服务换成注入假子进程的实例（同 test_offline_job_service），不起真进程。去重等服务语义
 在 test_offline_job_service 里测，路由只是透传。
@@ -64,7 +64,7 @@ async def client():
 @pytest.mark.asyncio
 async def test_submit_then_poll_to_completed(client, env):
     launcher = env
-    r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2})
+    r = await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 2})
     assert r.status_code == 202
     run = make_run(1, 2)
     assert (r.json()["task_id"], r.json()["step_id"], r.json()["run_id"]) == (1, 2, run.run_id)
@@ -74,42 +74,42 @@ async def test_submit_then_poll_to_completed(client, env):
     launcher.procs[0].finish(0, offline_result(segment_count=4))
     wait_until(lambda: admin.offline_job_service.get(run).status == "completed")
 
-    r = await client.get("/admin-f3m8/offline/jobs/1/2")
+    r = await client.get("/admin/offline/jobs/1/2")
     assert r.status_code == 200
     assert (r.json()["status"], r.json()["segment_count"]) == ("completed", 4)
 
 
 @pytest.mark.asyncio
 async def test_unconfigured_step_400(client, env):
-    r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 99})
+    r = await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 99})
     assert r.status_code == 400
     assert r.json()["field"] == "step_id"
 
 
 @pytest.mark.asyncio
 async def test_unknown_job_404(client, env):
-    r = await client.get("/admin-f3m8/offline/jobs/9/9")
+    r = await client.get("/admin/offline/jobs/9/9")
     assert r.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_list_newest_first(client, env):
-    await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2})
-    await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 3})
-    r = await client.get("/admin-f3m8/offline/jobs")
+    await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 2})
+    await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 3})
+    r = await client.get("/admin/offline/jobs")
     assert [j["step_id"] for j in r.json()["jobs"]] == [3, 2]
 
 
 @pytest.mark.asyncio
 async def test_step_without_visible_run_404(client, env):
-    r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 5, "step_id": 2})
+    r = await client.post("/admin/offline/jobs", json={"task_id": 5, "step_id": 2})
     assert r.status_code == 404
     assert r.json()["resource_type"] == "Run"
 
 
 @pytest.mark.asyncio
 async def test_unknown_run_id_404(client, env):
-    r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2, "run_id": 123})
+    r = await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 2, "run_id": 123})
     assert r.status_code == 404
     assert r.json()["resource_type"] == "Run"
 
@@ -119,14 +119,14 @@ async def test_running_run_409(client, env, clients):
     from types import SimpleNamespace
 
     clients.registry[1] = SimpleNamespace(info=SimpleNamespace(run=make_run(1, 2)))
-    r = await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2})
+    r = await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 2})
     assert r.status_code == 409
 
 
 @pytest.mark.asyncio
 async def test_get_by_run_id(client, env):
     run = make_run(1, 2)
-    await client.post("/admin-f3m8/offline/jobs", json={"task_id": 1, "step_id": 2, "run_id": run.run_id})
-    r = await client.get(f"/admin-f3m8/offline/jobs/1/2?run_id={run.run_id}")
+    await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 2, "run_id": run.run_id})
+    r = await client.get(f"/admin/offline/jobs/1/2?run_id={run.run_id}")
     assert r.status_code == 200
     assert r.json()["run_id"] == run.run_id

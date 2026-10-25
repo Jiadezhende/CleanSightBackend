@@ -1,17 +1,17 @@
-# `/admin-f3m8` — 运维 Admin
+# `/admin` — 运维 Admin
 
-运维面板 API：聚合仪表盘、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业、离线盘上告警（过渡期）。
-数据全部来自**进程内存**（`session_service` 快照 + Prometheus REGISTRY + 离线作业状态表），非 DB，是**实时**状态，进程重启即清零。
-均**无鉴权**；除离线作业三个端点与离线盘上告警（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
+运维面板 API：聚合仪表盘、step 能力表、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业、离线盘上告警（过渡期）。
+数据来自**进程内存**（`session_service` 快照 + Prometheus REGISTRY + 离线作业状态表）与推理配置（step 能力表），非 DB，是**实时**状态，进程重启即清零。
+均**无鉴权**；除离线作业三个端点与离线盘上告警（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。其余全局约定见 [README](README.md)。
 
-静态运维 UI（SPA）：`GET /ui-f3m8/admin/`（HTML 页面，非本文档描述的 JSON 端点）。
+静态页面（非本文档描述的 JSON 端点）：控制台 `GET /ui-f3m8/console/`。
 
 > **告警字段名用全称**（`alarm_type` / `alarm_level` / `alarm_message`），与 `/task/message` 的短名（`type` / `level` / `message`）不同，前端两处别混用。
 > **时间戳单位不一致**：本组 `overview.timestamp`、`alarms[].timestamp` 与离线作业的 `*_at` 是 epoch **秒**；`ping.server_time_ms` 是 epoch **毫秒**；而告警历史（`/task`、`/traceback`）用毫秒。对接时逐字段核对单位。
 
 ---
 
-## GET /admin-f3m8/overview
+## GET /admin/overview
 
 聚合仪表盘：当前活跃 run（任务）数、各 run 队列深度、全局待处理帧总数。前端用它做首屏概览，**建议 ~3s 轮询**。
 
@@ -68,7 +68,42 @@
 
 ---
 
-## GET /admin-f3m8/clients
+## GET /admin/stages
+
+step 能力表：推理配置（`config/inference_config.yaml` 的 `stages`）里每个 step 的别名、有无离线模型、有无离线规则判定。前端据此显示 step 名、决定是否给离线推理入口，**不在前端写死**。配置只在启动时加载，**拉一次即可**，无需轮询。
+
+**请求参数**：无。
+
+### 响应 `200`
+
+```jsonc
+{
+  "stages": [
+    {"step_id": 1, "alias": "LEAK",  "has_offline_model": false, "has_compliance": false},
+    {"step_id": 2, "alias": "CLEAN", "has_offline_model": true,  "has_compliance": true}
+  ]
+}
+```
+
+| 字段 | 类型 | 说明（含缺省/空条件） |
+|------|------|---------------------|
+| `stages` | array | 按 `step_id` 升序；配置里主键不是整数的 stage 不列 |
+| `stages[].step_id` | int | stage 主键（= `clean_task.current_step` 解析成的 int） |
+| `stages[].alias` | string | 可读别名（告警 `step_name`、可视化叠字用的同一个名字）；配置没写时回退主键字符串 |
+| `stages[].has_offline_model` | bool | 配了离线分割模型（`offline` 段非空）。为 false 时 `POST /offline/jobs` 会 400 |
+| `stages[].has_compliance` | bool | 配了离线规则判定（`compliance.rules` 非空）；为 false 时离线作业不产违规告警 |
+
+### 错误
+
+无。永远返回 200。
+
+### 前端坑点
+
+- 不在表里的 `step_id`（任务清单里出现了配置没有的 step）按「无别名、无离线模型」处理，显示主键即可。
+
+---
+
+## GET /admin/clients
 
 活跃 run（任务）**轻量列表**，供前端下拉框选择。元素结构与 `overview.clients[]` 完全一致。
 
@@ -102,9 +137,9 @@
 
 ---
 
-## GET /admin-f3m8/clients/{client_id}/alarms
+## GET /admin/clients/{client_id}/alarms
 
-读取某个 run（`task_id`）**内存告警环形缓冲**里最近 n 条告警（**不走 DB**，进程重启清零）。前端用它在 admin 页展示某 run 的近期告警。
+读取某个 run（`task_id`）**内存告警环形缓冲**里最近 n 条告警（**不走 DB**，进程重启清零）。控制台目前不用它（实时页走 `/task/message`）。
 
 **路径参数**：`client_id`（int，= `task_id`）。
 **查询参数**：
@@ -177,7 +212,7 @@
 
 ---
 
-## GET /admin-f3m8/metrics/json
+## GET /admin/metrics/json
 
 把 Prometheus 4 个核心指标从 REGISTRY 解析为**结构化 JSON**（免前端自己解析 `/metrics` 文本）。前端用它做指标看板，**建议 ~5s 刷新**。
 
@@ -240,7 +275,7 @@
 
 ---
 
-## GET /admin-f3m8/ping
+## GET /admin/ping
 
 延迟探针：立即返回服务端时间戳，前端用 `本地接收时刻 - server_time_ms` 估算 RTT / 时钟偏差。
 
@@ -273,7 +308,7 @@
 admin「离线推理」tab 用这三个端点提交离线推理，并查看执行进度。
 
 - **执行方式**：作业**串行**执行，同一时刻只跑一个，每个作业起一个子进程跑离线 CLI。
-- **结果去哪看**：跑完的结果落盘在该 run 的 `temporal.jsonl` / `label_probs.npz`（配了合规规则的 step 另有 `alarms.jsonl`，见本文末节「离线盘上告警（过渡期）」），仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab-f3m8/label-probs`](lab.md) 读取（带同一个 `run_id`）。
+- **结果去哪看**：跑完的结果落盘在该 run 的 `temporal.jsonl` / `label_probs.npz`（配了合规规则的 step 另有 `alarms.jsonl`，见本文末节「离线盘上告警（过渡期）」），仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab/label-probs`](lab.md) 读取（带同一个 `run_id`）。
 - **状态保存**：作业状态只存在进程内存里，后端重启后，排队中的作业和历史记录都会丢失（已落盘的结果不受影响）。
 - **作业锁定一个 run**（规则见 [README › run 定位](README.md#run-定位可选-run_id)）：提交时解析一次，整个作业只读写这个 run。该 run 正在运行 → 409（检测结果还在写）；跑的过程中同一 step 重新开跑，新一轮是另一个 run，互不影响；该 run 被 TTL 回收 → `reclaimed`，不写任何东西。
 
@@ -307,7 +342,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 
 ---
 
-## POST /admin-f3m8/offline/jobs
+## POST /admin/offline/jobs
 
 提交一个 run 的离线推理作业。
 
@@ -334,7 +369,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 
 ---
 
-## GET /admin-f3m8/offline/jobs
+## GET /admin/offline/jobs
 
 列出在途作业和最近结束的作业（最多保留 200 条已结束的），**按提交时间倒序，新提交的在前**。admin tab 在离线推理页可见时每 2 秒轮询一次。
 
@@ -346,7 +381,7 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 
 ---
 
-## GET /admin-f3m8/offline/jobs/{task_id}/{step_id}
+## GET /admin/offline/jobs/{task_id}/{step_id}
 
 查询某个 run 最近一次作业的状态。查询参数 `run_id`（int，可选；缺省 = 该 step 最新可见 run）。
 
@@ -368,14 +403,14 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | `skipped` 后结果没变 | 本次没写任何东西，展示的仍是上一次的结果（如果有） |
 | 不带 `run_id` 轮询，状态突然 404 | 同 step 起了新 run，缺省解析到新 run，而作业是提交给旧 run 的；轮询时带上提交响应里的 `run_id` |
 
-参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `runOffline` / `fetchOffJobs`。
+参考实现：控制台 [pages/run-offline.js](../../app/static/console/pages/run-offline.js) 的 `submit`、[api/jobs.js](../../app/static/console/api/jobs.js) 的作业轮询。
 
 ---
 
-## GET /admin-f3m8/offline/alarms/{task_id}/{step_id}（过渡期）
+## GET /admin/offline/alarms/{task_id}/{step_id}（过渡期）
 
 离线规则判定写在该 run 盘上的告警（`alarms.jsonl`），时刻已换算到录像媒体刻度，供离线推理页点击跳转回看。
-**过渡期端点**：离线告警稳定后改为直接入库，届时走 [`GET /task/{task_id}/alarms`](task.md)，本端点删除；不要在 admin 页以外依赖它。
+**过渡期端点**：离线告警稳定后改为直接入库，届时走 [`GET /task/{task_id}/alarms`](task.md)，本端点删除；不要在控制台以外依赖它（控制台只在 `api/endpoints.js` 的 `offlineAlarms` 一处读它）。
 
 查询参数：`run_id`（int，可选；缺省 = 该 step 最新可见 run）、`track`（`raw` / `processed`，缺省 `raw`；须与播放器当前轨一致）。
 
@@ -414,4 +449,4 @@ admin「离线推理」tab 用这三个端点提交离线推理，并查看执�
 | `checked: true` 但 `items` 为空 | 判定跑过，没有违规疑似 |
 | 重跑分割后告警没变 | 规则判定失败或被跳过时不覆盖旧文件（看离线作业的 `message`）；修好后 `python -m app.services.inference.offline.cli check` 重跑 |
 
-参考实现：[app/static/admin/index.html](../../app/static/admin/index.html) 的 `fetchOfflineResult`。
+参考实现：控制台 [pages/run-offline.js](../../app/static/console/pages/run-offline.js) 的 `load`。

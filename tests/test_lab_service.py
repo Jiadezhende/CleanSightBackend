@@ -198,6 +198,9 @@ class TestValidateClips:
         clips = [ClipRange(0, 8_000), ClipRange(10_000, 18_000)]
         assert self._msg(clips) == "Total duration 16000 ms exceeds max 15000 ms"
 
+    def test_limits_are_the_ones_validated_against(self):
+        assert lab_service.submit_limits() == {"max_clips": 3, "max_clip_ms": 10_000, "max_total_ms": 15_000}
+
 
 # ---------------------------------------------------------------------------
 # submit_clips

@@ -209,7 +209,7 @@
 
 - **两种画面模式选错会体验不符**：`task_id` 锁一次 run（结束即止），`client_id` 跟点位（自动换 run）。常亮大屏要 `client_id`。
 - **`step_id` 别拿去路由画面**：它只是当前阶段的展示值；实时画面按 `task_id`/`client_id` 路由，历史回放的 `step_id` 要从 `/task/history` 的 `steps[]` 里取。
-- **与 `/admin-f3m8/clients` 同源**：同一份注册表快照，本接口是大屏版——去掉了队列深度等运维字段。
+- **与 `/admin/clients` 同源**：同一份注册表快照，本接口是大屏版——去掉了队列深度等运维字段。
 
 ---
 
@@ -276,7 +276,7 @@ GET /traceback/task/{task_id}/timeline?step_id={step_id}&run_id={run_id}
 - **`track` 必须从 `steps[].tracks` 里挑**。playlist 的 `track` 默认 `processed`，而只落了 raw 的 step 照默认打过去就是 **404**。
 - **`start_ms` / `last_segment_ms` 是双轨并集**，与 timeline 的 `start_ms`/`end_ms` 同口径——两轨段边界不一定对齐，某一轨的实际范围可能比这里窄（实测有过 20+ 秒的差）。它表达的是「这个 step 有画面的时间跨度」，别拿它跟单轨播放进度做逐帧对齐。
 - **`last_segment_ms` 是最后一段的起点**，比 step 真正结束早一个段长（`last_segment_ms + 该段 EXTINF = timeline 的 end_ms`）。要精确时长用 timeline 的 `duration_ms`。
-- **没有 `total`、没有分页**：固定最多 10 条。要带过滤/分页的完整任务列表用 [`GET /lab-f3m8/tasks`](lab.md)（送标页口径，只枚举 raw 轨）。
+- **没有 `total`、没有分页**：固定最多 10 条。要带过滤/分页的完整任务列表用 [`GET /lab/tasks`](lab.md)（送标页口径，只枚举 raw 轨）。
 - **回放要带 `steps[].run_id`**：不带时 playlist / timeline 各自解析「最新可见 run」，与本清单描述的 run 可能不是同一个（详见 [traceback › 前端坑点](traceback.md#前端坑点)）。
 - **清单边缘可能短暂不一致**：粗筛与深扫之间任务可能刚起/刚停，清单可能短暂含一个刚起的 run 或漏一个刚停的——下一轮轮询自愈，别据此报错。
 
