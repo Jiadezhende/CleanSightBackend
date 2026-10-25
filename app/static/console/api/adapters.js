@@ -1,6 +1,6 @@
 // 后端形状 → 页面形状。秒/毫秒在这里统一成毫秒，页面只见毫秒；文字一律原样保留后端的值。
 
-/** 离线作业（/admin-f3m8/offline/jobs）：*_at 是 epoch 秒。 */
+/** 离线作业（/admin/offline/jobs）：*_at 是 epoch 秒。 */
 export function adaptJob(j) {
   const ms = (sec) => (sec == null ? null : Math.round(sec * 1000));
   return {

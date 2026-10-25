@@ -1,4 +1,4 @@
-"""送标任务清单接口（GET /lab-f3m8/tasks）测试。
+"""送标任务清单接口（GET /lab/tasks）测试。
 
 落盘约定：`{root}/{task_id}/{step_id}/{run_id}/hls/`（`app.storage.hls` 域）；存储根由 conftest 的
 `tmp_storage` fixture 指到临时目录（改的是 settings.storage_dir 单一真源）。
@@ -37,7 +37,7 @@ def _db_rows(monkeypatch, rows):
 async def _get_tasks(**params):
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/lab-f3m8/tasks", params=params)
+        resp = await client.get("/lab/tasks", params=params)
     assert resp.status_code == 200
     return resp.json()
 
@@ -149,7 +149,7 @@ async def test_storage_mode_lists_tasks_with_raw_segments(monkeypatch, tmp_stora
 
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/lab-f3m8/tasks")
+        resp = await client.get("/lab/tasks")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -184,18 +184,18 @@ async def test_storage_mode_sort_paginate_and_filter(monkeypatch, tmp_storage):
     transport = ASGITransport(app=app, client=("127.0.0.1", 9999))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # 排序 updated_time desc：303, 302, 301
-        resp = await client.get("/lab-f3m8/tasks")
+        resp = await client.get("/lab/tasks")
         ids = [t["task_id"] for t in resp.json()["tasks"]]
         assert ids == [303, 302, 301]
 
         # 分页：limit=1 offset=1 → 第二名 302
-        resp = await client.get("/lab-f3m8/tasks", params={"limit": 1, "offset": 1})
+        resp = await client.get("/lab/tasks", params={"limit": 1, "offset": 1})
         page = resp.json()
         assert page["total"] == 3
         assert [t["task_id"] for t in page["tasks"]] == [302]
 
         # q 子串过滤 task_id
-        resp = await client.get("/lab-f3m8/tasks", params={"q": "302"})
+        resp = await client.get("/lab/tasks", params={"q": "302"})
         filtered = resp.json()
         assert filtered["total"] == 1
         assert filtered["tasks"][0]["task_id"] == 302

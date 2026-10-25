@@ -68,7 +68,7 @@ export const TasksPage = {
     const loading = ref(false);
     const taskSource = ref('db');
     const live = reactive({ list: [] });                       // overview.clients
-    const all = reactive({ items: [], total: 0, source: 'db' });  // /lab-f3m8/tasks 已加载的页
+    const all = reactive({ items: [], total: 0, source: 'db' });  // /lab/tasks 已加载的页
 
     const liveByTask = computed(() => Object.fromEntries(live.list.map((c) => [c.task_id, c])));
 
@@ -145,7 +145,7 @@ export const TasksPage = {
       go(`/run/${t.taskId}/${s.stepId}/${s.runId ?? 'latest'}`);
     }
 
-    const overview = createPoller('/admin-f3m8/overview', 3000, async () => {
+    const overview = createPoller('/admin/overview', 3000, async () => {
       live.list = (await api.overview()).clients;
     });
 

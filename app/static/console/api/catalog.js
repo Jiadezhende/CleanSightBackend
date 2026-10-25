@@ -1,4 +1,4 @@
-// step 能力表（GET /admin-f3m8/stages）：启动时拉一次，前端不写死 step 别名与能力。
+// step 能力表（GET /admin/stages）：启动时拉一次，前端不写死 step 别名与能力。
 import { api } from './endpoints.js';
 
 const { reactive } = Vue;

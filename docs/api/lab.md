@@ -1,4 +1,4 @@
-# `/lab-f3m8` — 送标导出（Label Studio）
+# `/lab` — 送标导出（Label Studio）
 
 让操作员在某个 step 的 raw 整段视频上圈选 N 段 `[start_media_ms, end_media_ms]`，后端 ffmpeg 剪出 mp4 并上传到 Label Studio（LS）创建标注任务。
 
@@ -9,7 +9,7 @@
 - 数据源：任务列表以**磁盘**（有 raw 段的任务）为准，`task_source=db` 时再用平台库（`clean_task` 表）过滤并补字段，库连不上自动退回仅磁盘；裁剪素材来自磁盘 raw 段（复用 traceback 的 `(task_id, step_id, run_id)` 文件约定）。
 - submit / download / label-probs 都收可选 `run_id`（缺省 = 该 step 最新可见 run），JSON 响应回显实际读的 `run_id`。规则见 [README › run 定位](README.md#run-定位可选-run_id)。
 - 无任何持久化状态（除失败时保留的临时 `job_dir`）；无新表。
-- 本组所有端点**均无鉴权、正常返回 200**；前缀 `lab-f3m8` 含混淆串防自动扫描器。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
+- 本组所有端点**均无鉴权、正常返回 200**。除 `GET /download` 返回二进制 mp4 外，其余均为 JSON。
 - 静态 UI：控制台 `GET /ui-f3m8/console/` 的回放工作台「送标」面板（`app/static/console`，经 `/ui-f3m8` 统一挂载 `app/static`，`html=True`）。
 - 通用约定（Base URL / Gateway / 错误模型 / 枚举）见 [README](README.md)。
 
@@ -38,7 +38,7 @@
 
 ---
 
-## GET /lab-f3m8/tasks
+## GET /lab/tasks
 
 **用途**：列出磁盘上「有 raw 段、可送标 / 可回放」的任务，让操作员选 `task_id` + `step_id`。
 
@@ -129,7 +129,7 @@
 
 ---
 
-## POST /lab-f3m8/submit
+## POST /lab/submit
 
 **用途**：把圈选的 N 段裁成 mp4 并逐段上传 LS。**整个流程同步**（ffmpeg + 上传都在请求线程池里跑完，段多/段长会明显阻塞）。**单段失败不拖垮整请求**：HTTP 仍 200，逐段在 `clips[]` 里带 `success`/`error_code`。
 
@@ -233,7 +233,7 @@
 
 ### 前端坑点
 
-- 单段上限 5 min、总时长 30 min、最多 20 段是默认值，实际取 [`GET /config`](#get-lab-f3m8config) 的 `limits`；圈选时前端按它先本地拦一道，减少 400。
+- 单段上限 5 min、总时长 30 min、最多 20 段是默认值，实际取 [`GET /config`](#get-labconfig) 的 `limits`；圈选时前端按它先本地拦一道，减少 400。
 - 段重叠是**排序后**判的，`clips` 顺序无所谓，但两段时间区间不能相交。
 - `job_dir` 非空 = 有段失败且要求了保留；此目录**没有 TTL / 自动清理**，会一直留在 `{temp_dir}/{nonce}`（默认 `{storage_base_dir}/.lab_exports`）直到人工/运维清。别指望它过期自动消失。
 - 同步端点，段多时响应慢，前端请给足超时、加 loading。
@@ -251,7 +251,7 @@
 
 ---
 
-## GET /lab-f3m8/download
+## GET /lab/download
 
 **用途**：把某个 `(task_id, step_id)` 某一轨**已落盘的全部段**导出为单个 mp4 直接下载。取汇报素材 / 原片用，不经 LS。
 
@@ -318,7 +318,7 @@
 
 ---
 
-## POST /lab-f3m8/label-probs
+## POST /lab/label-probs
 
 读取某个 step 的离线分割模型**逐帧类别概率**（每帧对各类的 softmax），给控制台回放工作台画概率泳道。
 这是模型调试旁路，不是对外推理结果（正式结果是分割段，见 [`POST /ai/temporal`](ai.md#post-aitemporal)）。
@@ -376,7 +376,7 @@
 
 ---
 
-## GET /lab-f3m8/health
+## GET /lab/health
 
 **用途**：送标前探测 LS 是否**已配置**、是否**可达**、token 是否有效。**不抛异常**——未配置返回 `configured=false`，探测失败返回 `reachable=false` + `error`，HTTP 恒 200。
 
@@ -415,7 +415,7 @@
 
 ---
 
-## GET /lab-f3m8/config
+## GET /lab/config
 
 **用途**：读当前 LS 连接配置，供页面回显。**不做网络探测**（探测走 `/health`），**不返回 token 明文**。
 
@@ -461,7 +461,7 @@
 
 ---
 
-## PUT /lab-f3m8/config
+## PUT /lab/config
 
 **用途**：改 LS `url` / `default_project_id` / `task_source` 并**持久化到 JSON 文件**（`{storage_base_dir}/lab_runtime_config.json`），即时生效、跨重启保留。**token 不在此管理**（仅 env）。
 

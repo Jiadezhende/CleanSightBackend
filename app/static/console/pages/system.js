@@ -15,7 +15,7 @@ const COUNTERS = [                           // /metrics/json 的计数器族 �
   ['frame_drop_total', 'by_reason'],
   ['retry_total', 'by_operation'],
 ];
-const PROBE_ENDPOINTS = ['/admin-f3m8/ping', '/health/status', '/admin-f3m8/overview', '/task/live'];
+const PROBE_ENDPOINTS = ['/admin/ping', '/health/status', '/admin/overview', '/task/live'];
 const CHART = { w: 640, h: 210, left: 40, right: 8, top: 14, bottom: 22 };
 
 export const SystemPage = {
@@ -30,7 +30,7 @@ export const SystemPage = {
       <div class="card-b">
         <div class="lgd">
           <span v-for="m in models" :key="m" :class="{off: hidden.has(m)}" @click="toggleModel(m)"><i :style="{background: color(m)}"></i>{{ m }}</span>
-          <span class="sub" style="margin-left:auto;cursor:default">/admin-f3m8/metrics/json · 5s · 页面不可见期间不采样（曲线断开）</span>
+          <span class="sub" style="margin-left:auto;cursor:default">/admin/metrics/json · 5s · 页面不可见期间不采样（曲线断开）</span>
         </div>
         <svg :viewBox="'0 0 ' + CHART.w + ' ' + CHART.h" style="width:100%;height:auto;display:block">
           <g font-size="10" fill="#9ca3af" font-family="Consolas,monospace">
@@ -75,7 +75,7 @@ export const SystemPage = {
       </div>
     </div>
     <div class="card">
-      <div class="card-h"><h3>各路队列深度</h3><span class="sub">/admin-f3m8/overview · 3s · 当前值（帧）</span></div>
+      <div class="card-h"><h3>各路队列深度</h3><span class="sub">/admin/overview · 3s · 当前值（帧）</span></div>
       <table class="tb">
         <thead><tr><th>任务</th><th>step</th><th>点位</th><th v-for="k in queueKeys" :key="k" class="mono">{{ k }}</th></tr></thead>
         <tbody>
@@ -200,7 +200,7 @@ export const SystemPage = {
       return cfg.effective === 'db' ? { cls: 'ok', text: '磁盘 + 平台库' } : { cls: 'mute', text: '检查中…' };
     });
 
-    const metrics = createPoller('/admin-f3m8/metrics/json', METRICS_MS, async () => {
+    const metrics = createPoller('/admin/metrics/json', METRICS_MS, async () => {
       const d = await api.metricsJson();
       lastMetrics.value = d;
       history.value = [...history.value, { at: Date.now(), latency: d.infer_latency_ms || {} }].slice(-HISTORY);
@@ -211,7 +211,7 @@ export const SystemPage = {
       health.clients = d.clients || {};
       health.monitor = d.monitor_stats || {};
     });
-    const overview = createPoller('/admin-f3m8/overview', 3000, async () => { queues.value = (await api.overview()).clients; });
+    const overview = createPoller('/admin/overview', 3000, async () => { queues.value = (await api.overview()).clients; });
 
     async function loadConfig() {
       try {

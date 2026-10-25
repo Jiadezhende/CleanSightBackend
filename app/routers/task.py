@@ -179,7 +179,7 @@ def list_live_tasks():
     `step_id` 仅供展示当前洗消阶段，不参与画面路由。`run_id` 是这次 run 的身份，回放 / 时间轴
     带上它即锁定这一次 run。
 
-    注：本接口是 admin 页 `/admin-f3m8/clients` 的大屏版——同一份注册表快照，
+    注：本接口是 admin 页 `/admin/clients` 的大屏版——同一份注册表快照，
     去掉队列深度等运维字段。
     """
     # 注册表是 COW 不可变 dict：原子读引用后迭代无需加锁

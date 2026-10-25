@@ -139,11 +139,12 @@ class Settings(BaseSettings):
     # 宽松路径前缀（逗号分隔）。大屏侧 /task/live、/task/history、/traceback 必须在列：
     # 前两者是跨 origin 轮询，浏览器的 CORS 预检 OPTIONS 与实际请求各计一次数，普通
     # 配额（60/60s）撑不住；/traceback 的 404 是正常业务态（只落了 raw 的 step 按默认
-    # track=processed 查即 404），不该被反扫描当扫描特征累计。/admin-f3m8 是 admin 页的
-    # 数据接口，单页轮询约 62 次/分并带延迟测试突发。/ui-f3m8 是静态页：控制台按 ES module
+    # track=processed 查即 404），不该被反扫描当扫描特征累计。/admin/ 是控制台的
+    # 数据接口，运维页轮询约 60 次/分并带延迟测试突发；带尾斜杠，免得 /admin、/admin.php、
+    # /administrator 这类扫描器探测也进宽松档、不计反扫描。/ui-f3m8 是静态页：控制台按 ES module
     # 分文件，开一次页就拉十几个资产，刷新几次就会撞普通配额。
     gateway_relaxed_prefixes: str = (
-        "/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/metrics,/ui-f3m8"
+        "/health,/task/message,/task/live,/task/history,/traceback,/admin/,/metrics,/ui-f3m8"
     )
     gateway_relaxed_rate_limit: int = 600    # 宽松路径每窗口最大请求数
     gateway_bypass_prefixes: str = "/media"  # 完全绕过速率限制与反扫描的前缀（仅靠路由层 token 鉴权），逗号分隔

@@ -15,8 +15,8 @@
 | [traceback.md](traceback.md) | `/traceback` | 任务 VOD playlist / 时间轴 |
 | [media.md](media.md) | `/media` | token 化媒体访问（段 / `{track}_init.mp4`） |
 | [health.md](health.md) | `/health` | 健康状态与监控统计 |
-| [admin.md](admin.md) | `/admin-f3m8` | 运维 Admin |
-| [lab.md](lab.md) | `/lab-f3m8` | 送标导出 + Label Studio + 离线模型逐帧概率 |
+| [admin.md](admin.md) | `/admin` | 运维 Admin |
+| [lab.md](lab.md) | `/lab` | 送标导出 + Label Studio + 离线模型逐帧概率 |
 | [algorithm.md](algorithm.md) | `/algorithm` | 算法类纯计算（图进结论出，不读库不写盘） |
 
 ## 通用约定
@@ -33,7 +33,7 @@
 | 档 | 默认前缀 | 行为 |
 |---|---|---|
 | 绕过 | `/media` | 完全跳过限流与反扫描，仅查 IP 白名单/封禁。段请求自带 HMAC token，token 验不过即 403，无可枚举面 |
-| 宽松 | `/health`、`/task/message`、`/task/live`、`/task/history`、`/traceback`、`/admin-f3m8`、`/metrics` | 独立高配额 bucket（默认 600/60s），不计入封禁升级与反扫描计数 |
+| 宽松 | `/health`、`/task/message`、`/task/live`、`/task/history`、`/traceback`、`/admin/`、`/metrics`、`/ui-f3m8` | 独立高配额 bucket（默认 600/60s），不计入封禁升级与反扫描计数 |
 | 普通 | 其余全部 | 默认 60/60s；窗口内 404/405 达 10 次/300s 触发反扫描封禁 1h |
 
 > 高频轮询与「404 属正常业务态」的路径必须在宽松档：大屏清单是跨 origin 轮询（CORS 预检 OPTIONS 与实际请求各计一次），`/traceback` 的 404 是正常态（只落了 raw 的 step 按默认 `track=processed` 查即 404），不该被当扫描特征累计。
@@ -52,7 +52,7 @@
 - 读取某个 step 推理产物的端点用 `POST` + JSON body，body 携带身份键 `task_id`、`step_id` 与选择项（`type`、`track` 等）；路径只表达资源类别，不带身份。
 - 同一资源类别再分形状时用 body 的 `type` 区分，不拆路径；取值与落盘判别字段同值（如 `/ai/temporal` 的 `type: "segment"`）。
 - 缺字段、类型不对、枚举值非法：**422**（FastAPI 请求校验，响应体是框架的 `{"detail": [...]}`，不是上表的业务错误形状）。
-- 存量例外（本约定之前的 GET 端点，不迁）：`/traceback/task/{task_id}/playlist.m3u8?step_id=`、`/traceback/task/{task_id}/timeline?step_id=`、`/lab-f3m8/download?task_id=&step_id=`。
+- 存量例外（本约定之前的 GET 端点，不迁）：`/traceback/task/{task_id}/playlist.m3u8?step_id=`、`/traceback/task/{task_id}/timeline?step_id=`、`/lab/download?task_id=&step_id=`。
 
 ### run 定位：可选 `run_id`
 
@@ -64,8 +64,8 @@
 | 显式 | 就是这个 run | **404** `{"error":"Resource not found","detail":"...","resource_type":"Run","resource_id":"task=..,step=..,run=.."}`：id 写错，或该 run 已被 TTL 回收 |
 
 - `run_id` = 该 run 分配时刻的 epoch **毫秒**（int，≈1.8e12），同 step 内严格递增；当不透明身份用即可。
-- 取值来源：[`/task/live`](task.md#get-tasklive) `tasks[].run_id`、[`/task/history`](task.md#get-taskhistory) `steps[].run_id`、[`/lab-f3m8/tasks`](lab.md#get-lab-f3m8tasks) `run_ids`；各读端点响应也回显实际读的 `run_id`。
-- 适用端点：`/traceback` playlist / timeline、`/media/*`（run 锁在 token 里）、`POST /ai/temporal`、`/lab-f3m8` 的 submit / download / label-probs。
+- 取值来源：[`/task/live`](task.md#get-tasklive) `tasks[].run_id`、[`/task/history`](task.md#get-taskhistory) `steps[].run_id`、[`/lab/tasks`](lab.md#get-labtasks) `run_ids`；各读端点响应也回显实际读的 `run_id`。
+- 适用端点：`/traceback` playlist / timeline、`/media/*`（run 锁在 token 里）、`POST /ai/temporal`、`/lab` 的 submit / download / label-probs。
 - 纯增量：不带 `run_id` 的老客户端照常工作。**同一页面的多个请求要带同一个 `run_id`**，否则可能各自解析到不同 run，见 [traceback › 前端坑点](traceback.md#前端坑点)。
 
 ### 错误模型

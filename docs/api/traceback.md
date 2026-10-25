@@ -90,7 +90,7 @@ http://<host>:8000/media/segment/<token>
 - **段一路 200 突然全 403**：token 过期或服务重启换了 secret，重拉本 playlist 换新 token（详见 [media.md](media.md)），不是鉴权配错。
 - **反代下 m3u8 拉到但段全失败**：host 取自请求，反代未透传 `X-Forwarded-*`，播放器在请求内网地址。
 - **`track` 取值范围**：只有 `raw` / `processed` 两值；一个 step 未必两轨都落盘，硬写默认的 `processed` 而该 step 只有 raw 会 404。可播轨道从 [`GET /task/history`](task.md) 的 `steps[].tracks` 里取（该清单只覆盖最近 10 个已完成任务）；不在清单里的任务仍需按 404 兜底或两轨都试。
-- **同一页面的请求要带同一个 `run_id`**：不带时 playlist、timeline、[`POST /ai/temporal`](ai.md#post-aitemporal) 是各自独立解析「最新可见 run」的请求，两次请求之间同 step 起了新 run，页面就拼出了不同 run 的录像和打点。`run_id` 从清单端点取（`/task/history` 的 `steps[].run_id`、`/task/live` 的 `tasks[].run_id`、`/lab-f3m8/tasks` 的 `run_ids`），带给该页面的每个请求。
+- **同一页面的请求要带同一个 `run_id`**：不带时 playlist、timeline、[`POST /ai/temporal`](ai.md#post-aitemporal) 是各自独立解析「最新可见 run」的请求，两次请求之间同 step 起了新 run，页面就拼出了不同 run 的录像和打点。`run_id` 从清单端点取（`/task/history` 的 `steps[].run_id`、`/task/live` 的 `tasks[].run_id`、`/lab/tasks` 的 `run_ids`），带给该页面的每个请求。
 - **同 step 刚重启时，不带 `run_id` 看不到上一段录像**：新 run 约 1s 后（首批检测结果落盘）就可见，但首个 HLS 段要 10s 以上；这段窗口里不带 `run_id` 的请求解析到新 run，得到 404 / 空时间轴而不是上一次的录像。要继续看上一次，显式带它的 `run_id`。
 
 ---
@@ -159,7 +159,7 @@ http://<host>:8000/media/segment/<token>
 | `events` | array | 该 step 中落在**该 run 存续期** `[run_id 时刻, 同 step 下一个 run 的 run_id 时刻)` 内的告警（`run_id` 即 epoch 毫秒，直接与 `ts_ms` 比较；最新 run 无上界），按 `ts_ms` 升序。**无告警或 DB 不可用时为 `[]`**。DB 告警没有 run 维度，故按时间切；结算告警时间戳是停止时刻（晚于最后一段、早于下一个 run 分配），仍落在本区间，`media_offset_ms` 吸附到进度条末端 |
 | `media_duration_ms` | int | 该 `track` 的 Σ EXTINF，**与 `<video>.duration` 同源**。无段时 `0` |
 | `gap_total_ms` / `has_gap` | int / bool | 该轨累计断流时长：所有满足 `下一段起点 − (本段起点 + EXTINF) > 0.5s` 的空隙之和。无段时 `0` / `false` |
-| `gaps` | array | 该轨每一处断流，按时序；判据同 `gap_total_ms`（Σ `gaps[].gap_ms` = `gap_total_ms`），与 [`/lab-f3m8/submit`](lab.md#post-lab-f3m8submit) 报 `range_gap` 同源——跨过 `media_ms` 的送标区间会失败。**前端不要自己用阈值重算断流** |
+| `gaps` | array | 该轨每一处断流，按时序；判据同 `gap_total_ms`（Σ `gaps[].gap_ms` = `gap_total_ms`），与 [`/lab/submit`](lab.md#post-labsubmit) 报 `range_gap` 同源——跨过 `media_ms` 的送标区间会失败。**前端不要自己用阈值重算断流** |
 | `events[].ts_ms` | int | epoch **毫秒**（`detected_at` 为 null 的告警被跳过，不进 events） |
 | `events[].media_offset_ms` | int | 该告警在**媒体轴**上的位置（ms），随 `track` 变。落进断流空洞的墙钟吸附到下一段段首——那段时间在媒体轴上宽度为零，没有对应刻度 |
 | `events[].type` | string | 目前恒 `"alarm"` |

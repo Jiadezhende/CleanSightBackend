@@ -1,4 +1,4 @@
-"""`GET /admin-f3m8/stages`：推理配置 → step 能力表（别名 / 离线模型 / 离线规则判定）。"""
+"""`GET /admin/stages`：推理配置 → step 能力表（别名 / 离线模型 / 离线规则判定）。"""
 
 import pytest
 import pytest_asyncio
@@ -30,7 +30,7 @@ async def test_stages_from_config_sorted_by_step_id(client, monkeypatch):
         "1": {"alias": "LEAK", "offline": {}},
     })
 
-    d = (await client.get("/admin-f3m8/stages")).json()
+    d = (await client.get("/admin/stages")).json()
 
     assert d == {"stages": [
         {"step_id": 1, "alias": "LEAK", "has_offline_model": False, "has_compliance": False},
@@ -46,7 +46,7 @@ async def test_alias_falls_back_to_key_and_non_integer_keys_skipped(client, monk
         "debug": {"alias": "DBG"},
     })
 
-    d = (await client.get("/admin-f3m8/stages")).json()
+    d = (await client.get("/admin/stages")).json()
 
     assert d == {"stages": [
         {"step_id": 3, "alias": "3", "has_offline_model": False, "has_compliance": False},
@@ -56,7 +56,7 @@ async def test_alias_falls_back_to_key_and_non_integer_keys_skipped(client, monk
 @pytest.mark.asyncio
 async def test_real_config_lists_known_steps(client):
     """仓库里的 config/inference_config.yaml 至少声明了 step 1 / 2，字段齐全。"""
-    d = (await client.get("/admin-f3m8/stages")).json()
+    d = (await client.get("/admin/stages")).json()
     by_id = {s["step_id"]: s for s in d["stages"]}
     assert {1, 2} <= set(by_id)
     assert all(set(s) == {"step_id", "alias", "has_offline_model", "has_compliance"} for s in d["stages"])

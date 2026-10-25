@@ -1,5 +1,5 @@
 """
-Lab API（`/lab-f3m8/*`，路径混淆防自动扫描器）：送标任务清单、逐帧类别概率、送标、整段下载、LS 探活 / 配置。
+Lab API（`/lab/*`）：送标任务清单、逐帧类别概率、送标、整段下载、LS 探活 / 配置。
 
 - 送标（POST /submit）：在一个 step 的 raw 轨上选 N 段不重叠的媒体区间，剪成 mp4 提交到 Label Studio；
   流程在 `services/lab/service.py`，router 只做检查顺序（503 → 400 → 400 → 404）与 DTO 映射。
@@ -38,7 +38,7 @@ from app.types.exceptions import DatabaseError, NotFoundError, ValidationError
 
 from .utils.runs import resolve_run, resolve_timeline
 
-router = APIRouter(prefix="/lab-f3m8", tags=["lab"])
+router = APIRouter(prefix="/lab", tags=["lab"])
 logger = logging.getLogger(__name__)
 
 
@@ -310,7 +310,7 @@ async def list_lab_tasks(
 ) -> LabTaskListResponse:
     """列出磁盘上有 raw 段的任务。
 
-    数据来源由运行时开关 task_source 决定（GET/PUT /lab-f3m8/config）：
+    数据来源由运行时开关 task_source 决定（GET/PUT /lab/config）：
     - "db"（默认）：磁盘 + 平台库过滤并补字段；平台库连不上时退回 "storage"，响应 `source` 标明
     - "storage"：只枚举磁盘，不碰平台库（用于没有平台库的环境）
     """
@@ -450,7 +450,7 @@ async def download_step_video(
     段落盘时已是 H.264/yuv420p，这里纯 `-c copy` 换容器——磁盘速度、零 CPU、
     零二次画质损失，产物是通用 mp4（faststart，可拖动 seek）。
 
-    要 ms 精度区间请走 `/lab-f3m8/submit` 那条（ClipBuilder + libx264），
+    要 ms 精度区间请走 `/lab/submit` 那条（ClipBuilder + libx264），
     与本接口的零成本 remux 性质不同，不合并。
 
     step 仍在录制时下载 = 拿到当前已落盘的部分（在途段被过滤，不会产出坏文件）。

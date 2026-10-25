@@ -272,11 +272,11 @@ http://{server}:{api-port}/ui-f3m8/console/
 
 | 页 | 看什么 | 数据来源 |
 |---|---|---|
-| **总览** | 在线 / 全部任务，点 step 进回放 | `/admin-f3m8/overview` + `/lab-f3m8/tasks` |
+| **总览** | 在线 / 全部任务，点 step 进回放 | `/admin/overview` + `/lab/tasks` |
 | **实时** | 聚焦一路的实时画面 + 近 10s 信号 + 实时告警（可跳回放） | WS `/ai/video?task_id=` + `/task/message/{task_id}` |
-| **回放** | 双轨回放、断流与告警标记、离线分析、送标 | `/traceback/*` + `/ai/temporal` + `/lab-f3m8/*` |
-| **分析** | 离线推理作业队列与历史 | `/admin-f3m8/offline/jobs` |
-| **运维** | 推理延迟按模型、计数器、健康监控、队列深度、延迟探测 | `/admin-f3m8/metrics/json` + `/health/*` + `/admin-f3m8/ping` 等 |
+| **回放** | 双轨回放、断流与告警标记、离线分析、送标 | `/traceback/*` + `/ai/temporal` + `/lab/*` |
+| **分析** | 离线推理作业队列与历史 | `/admin/offline/jobs` |
+| **运维** | 推理延迟按模型、计数器、健康监控、队列深度、延迟探测 | `/admin/metrics/json` + `/health/*` + `/admin/ping` 等 |
 
 看某次 run 的画面：进「实时」页，左侧点与本次 `--task_id` 对应的那一路。run 结束后画面显示「run 已结束」并给回放入口。
 

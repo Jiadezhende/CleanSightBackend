@@ -60,7 +60,7 @@ export const backendError = computed(() => {
 
 /**
  * 页面可见时每 intervalMs 调一次 fn；同一时刻只有一个在途请求。
- * const p = createPoller('/admin-f3m8/overview', 3000, async () => { ... }); p.start(); ... p.stop();
+ * const p = createPoller('/admin/overview', 3000, async () => { ... }); p.start(); ... p.stop();
  */
 export function createPoller(name, intervalMs, fn) {
   let timer = null;

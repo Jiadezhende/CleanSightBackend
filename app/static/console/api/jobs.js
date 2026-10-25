@@ -49,7 +49,7 @@ function announceFinished(list) {
   seen = now;
 }
 
-const poller = createPoller('/admin-f3m8/offline/jobs', 3000, async () => {
+const poller = createPoller('/admin/offline/jobs', 3000, async () => {
   const d = await api.offlineJobs();
   const list = d.jobs.map(adaptJob);
   announceFinished(list);
