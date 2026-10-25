@@ -1,5 +1,5 @@
 """
-运维 Admin API — 聚合仪表盘、Prometheus 指标、延迟探针、离线推理作业、离线盘上告警（过渡期）
+运维 Admin API — 聚合仪表盘、step 能力表、Prometheus 指标、延迟探针、离线推理作业、离线盘上告警（过渡期）
 路由前缀：/admin-f3m8（路径混淆，防自动扫描器命中）
 告警查询直接使用 GET /task/{task_id}/alarms（已有双源路由实现）
 """
@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.services.session.instance import session_service
 from app.services.session.topics import queue_depths
+from app.services.inference.config import load_stage_config
 from app.services.inference.offline.instance import offline_job_service
 from app.services.inference.online.temporal import alarm_sink
 from app.storage import inference as inference_store
@@ -164,6 +165,25 @@ def get_overview():
         "total_queued_frames": total_queued,
         "clients": clients_info,
     }
+
+
+@router.get("/stages")
+def list_stages():
+    """推理配置里的 step 能力表：别名、有无离线模型、有无离线规则判定，按 step_id 升序。
+
+    前端据此显示 step 名、决定是否给离线入口，不自己写死。主键不是整数的 stage 不列（step_id 是 int）。
+    """
+    stages = []
+    for key, stage in load_stage_config().stages.items():
+        if not key.isdigit():
+            continue
+        stages.append({
+            "step_id": int(key),
+            "alias": stage.alias,
+            "has_offline_model": bool(stage.offline),
+            "has_compliance": bool(stage.compliance.get("rules")),
+        })
+    return {"stages": sorted(stages, key=lambda x: x["step_id"])}
 
 
 @router.get("/clients")

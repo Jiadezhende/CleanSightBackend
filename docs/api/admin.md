@@ -1,10 +1,10 @@
 # `/admin-f3m8` — 运维 Admin
 
-运维面板 API：聚合仪表盘、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业、离线盘上告警（过渡期）。
-数据全部来自**进程内存**（`session_service` 快照 + Prometheus REGISTRY + 离线作业状态表），非 DB，是**实时**状态，进程重启即清零。
+运维面板 API：聚合仪表盘、step 能力表、活跃 run 列表、内存告警、Prometheus 指标结构化、延迟探针、离线推理作业、离线盘上告警（过渡期）。
+数据来自**进程内存**（`session_service` 快照 + Prometheus REGISTRY + 离线作业状态表）与推理配置（step 能力表），非 DB，是**实时**状态，进程重启即清零。
 均**无鉴权**；除离线作业三个端点与离线盘上告警（202 / 409 / 404，见各节）外，正常路径**永远返回 200**。前缀 `/admin-f3m8` 含混淆串（防自动扫描器命中），其余全局约定见 [README](README.md)。
 
-静态运维 UI（SPA）：`GET /ui-f3m8/admin/`（HTML 页面，非本文档描述的 JSON 端点）。
+静态页面（非本文档描述的 JSON 端点）：控制台 `GET /ui-f3m8/console/`；旧运维页 `GET /ui-f3m8/admin/`（控制台迁完后删除）。
 
 > **告警字段名用全称**（`alarm_type` / `alarm_level` / `alarm_message`），与 `/task/message` 的短名（`type` / `level` / `message`）不同，前端两处别混用。
 > **时间戳单位不一致**：本组 `overview.timestamp`、`alarms[].timestamp` 与离线作业的 `*_at` 是 epoch **秒**；`ping.server_time_ms` 是 epoch **毫秒**；而告警历史（`/task`、`/traceback`）用毫秒。对接时逐字段核对单位。
@@ -65,6 +65,41 @@
 - `timestamp` 是 epoch **秒**，`alarms[].timestamp` 也是秒，但 `/task`、`/traceback` 的时间戳是毫秒——跨端点显示时间时逐个核对，别统一乘 1000。
 - `queue_depths.has_rendered` 是 bool，遍历求和时要跳过，否则 `total` 被污染（后端已只累加 3 个计数键）。
 - `client_id` 与 `task_id` 恒等，任取其一即可。
+
+---
+
+## GET /admin-f3m8/stages
+
+step 能力表：推理配置（`config/inference_config.yaml` 的 `stages`）里每个 step 的别名、有无离线模型、有无离线规则判定。前端据此显示 step 名、决定是否给离线推理入口，**不在前端写死**。配置只在启动时加载，**拉一次即可**，无需轮询。
+
+**请求参数**：无。
+
+### 响应 `200`
+
+```jsonc
+{
+  "stages": [
+    {"step_id": 1, "alias": "LEAK",  "has_offline_model": false, "has_compliance": false},
+    {"step_id": 2, "alias": "CLEAN", "has_offline_model": true,  "has_compliance": true}
+  ]
+}
+```
+
+| 字段 | 类型 | 说明（含缺省/空条件） |
+|------|------|---------------------|
+| `stages` | array | 按 `step_id` 升序；配置里主键不是整数的 stage 不列 |
+| `stages[].step_id` | int | stage 主键（= `clean_task.current_step` 解析成的 int） |
+| `stages[].alias` | string | 可读别名（告警 `step_name`、可视化叠字用的同一个名字）；配置没写时回退主键字符串 |
+| `stages[].has_offline_model` | bool | 配了离线分割模型（`offline` 段非空）。为 false 时 `POST /offline/jobs` 会 400 |
+| `stages[].has_compliance` | bool | 配了离线规则判定（`compliance.rules` 非空）；为 false 时离线作业不产违规告警 |
+
+### 错误
+
+无。永远返回 200。
+
+### 前端坑点
+
+- 不在表里的 `step_id`（任务清单里出现了配置没有的 step）按「无别名、无离线模型」处理，显示主键即可。
 
 ---
 
