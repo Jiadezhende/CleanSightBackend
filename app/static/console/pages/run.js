@@ -1,4 +1,4 @@
-// 回放工作台 #/run/{task}/{step}/{run|latest}?t=&mode=raw|processed|sbs&ev=&panel=review|label
+// 回放工作台 #/run/{task}/{step}/{run|latest}?t=&mode=raw|processed|sbs&ev=&panel=review|offline|label
 // 进入时把 run 落成具体 run_id 写回 URL，之后本页所有请求都带这个 run_id。
 import { adaptGap, adaptTimelineAlarm } from '../api/adapters.js';
 import { stageOf } from '../api/catalog.js';
@@ -10,12 +10,15 @@ import { fmtDur, fmtMedia, fmtWall, fmtWallMs } from '../core/format.js';
 import { lvCls, lvColor } from '../core/levels.js';
 import { replacePath, replaceQuery, route } from '../core/router.js';
 import { toast } from '../core/ui.js';
+import { jobStatusName, jobTagCls } from '../api/jobs.js';
 import { useLabel } from './run-label.js';
+import { useOffline } from './run-offline.js';
 
 const { ref, shallowRef, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } = Vue;
 
 function eventLane(getEvents, getSelected) {
   const timed = () => getEvents().filter((e) => e.mediaMs != null);
+  const whole = () => getEvents().filter((e) => e.mediaMs == null).length;
   return {
     key: 'event',
     name: '事件',
@@ -33,6 +36,11 @@ function eventLane(getEvents, getSelected) {
         if (ev.source === 'alarm') { c.moveTo(x - 6, cy - 6); c.lineTo(x + 6, cy - 6); c.lineTo(x, cy + 6); }
         else { c.moveTo(x, cy - 7); c.lineTo(x + 6, cy); c.lineTo(x, cy + 7); c.lineTo(x - 6, cy); }
         c.closePath(); c.fill();
+      }
+      if (whole()) {
+        c.textAlign = 'right'; c.fillStyle = '#b45309'; c.font = '12px system-ui'; c.textBaseline = 'middle';
+        c.fillText(`◆ 整段违规 ×${whole()}`, tl.W - 16, cy + 1);
+        c.textAlign = 'left';
       }
     },
     hit(x, tl) {
@@ -117,6 +125,7 @@ export const RunPage = {
     <aside class="dock">
       <div class="dock-tabs">
         <button :class="{on: panel==='review'}" @click="setPanel('review')">事件 <span class="cnt" :class="{hot: events.length}">{{ events.length }}</span></button>
+        <button :class="{on: panel==='offline'}" @click="setPanel('offline')">离线分析 <span class="cnt" v-if="offline.busy.value">…</span></button>
         <button :class="{on: panel==='label'}" @click="setPanel('label')">送标 <span class="cnt">{{ label.clips.value.length }}</span></button>
       </div>
       <template v-if="panel==='review'">
@@ -129,11 +138,54 @@ export const RunPage = {
           <span class="em">{{ ev.message }}</span>
         </div>
         <div v-if="!events.length" class="empty">{{ loading ? '加载中…' : '本 run 没有事件' }}</div>
+        <div class="note" v-if="violNote">{{ violNote }}</div>
       </div>
       <div class="dock-foot" v-if="selEvObj && selEvObj.mediaMs != null">
         <button class="sbtn primary" style="width:100%;justify-content:center" :disabled="!canMark()" @click="label.clipFromEvent(selEvObj)">生成前后 5 秒的送标片段</button>
         <div class="note" v-if="!canMark()">processed 视图下不能打点：送标只裁 raw，切回 raw 或并排对照。</div>
       </div>
+      </template>
+
+      <template v-if="panel==='offline'">
+        <div class="dock-body">
+          <div v-if="!offline.stage.value.has_offline_model" class="box sub">{{ offline.stage.value.alias }} 没有离线模型。</div>
+          <template v-else>
+            <div class="dk-sec">
+              <div class="box">
+                <div class="kv">
+                  <span>状态</span>
+                  <span>
+                    <span class="tag" :class="offline.job.value ? jobTagCls(offline.job.value) : (offline.hasResult.value ? 'ok' : 'mute')">
+                      {{ offline.job.value ? jobStatusName(offline.job.value) : (offline.hasResult.value ? '已有结果' : '未跑') }}</span>
+                    <span class="sub" v-if="offline.job.value && offline.job.value.finishedMs && offline.job.value.startedMs">
+                      {{ fmtWall(offline.job.value.finishedMs, true) }} · 耗时 {{ fmtDur(offline.job.value.finishedMs - offline.job.value.startedMs) }}</span>
+                  </span>
+                  <template v-if="offline.hasResult.value">
+                    <span>结果</span>
+                    <span>{{ offline.segs.value.length }} 段 · {{ offline.checked.value ? '违规 ' + offline.viols.value.length + ' 条' : '规则未核对' }}</span>
+                  </template>
+                  <template v-if="offline.job.value && offline.job.value.producer"><span>模型</span><span class="mono">{{ offline.job.value.producer }}</span></template>
+                  <template v-if="offline.job.value && offline.job.value.message"><span>说明</span><span>{{ offline.job.value.message }}</span></template>
+                </div>
+                <div class="prog" v-if="offline.busy.value"><i></i></div>
+                <button class="sbtn" style="margin-top:10px" :class="{primary: !offline.hasResult.value}"
+                  :disabled="offline.busy.value || offline.submitting.value" @click="offline.submit()">
+                  {{ offline.hasResult.value ? '重跑离线推理' : '运行离线推理' }}</button>
+              </div>
+            </div>
+            <div class="dk-sec" v-if="offline.labels.value.length">
+              <h5>动作类别（点击高亮）<a v-if="offline.hl.value" style="margin-left:auto" @click="offline.hl.value = null">取消高亮</a></h5>
+              <div class="legend">
+                <div v-for="k in offline.labels.value" :key="k" class="lg"
+                  :class="{on: offline.hl.value === k, dim: offline.hl.value && offline.hl.value !== k}"
+                  @click="offline.hl.value = offline.hl.value === k ? null : k">
+                  <i :style="{background: offline.color(k)}"></i><span class="mono">{{ k }}</span>
+                  <em class="mono" v-if="offline.labelStat.value[k] && offline.labelStat.value[k].n">×{{ offline.labelStat.value[k].n }} · {{ fmtDur(offline.labelStat.value[k].ms) }}</em>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </template>
 
       <template v-if="panel==='label'">
@@ -193,7 +245,7 @@ export const RunPage = {
     const ids = reactive({ task: 0, step: 0, run: 0 });
     const meta = ref(null);            // { durationMs, startMs, endMs, gapTotalMs }
     const gaps = ref([]);
-    const events = ref([]);
+    const alarms = ref([]);            // 平台告警（timeline.events）
     const loading = ref(true);
     const error = ref('');
     const mode = ref('raw');
@@ -204,7 +256,7 @@ export const RunPage = {
     const drift = ref(null);
     const procHasFrame = ref(true);
     const selEv = ref(null);
-    const panel = ref(route.query.panel === 'label' ? 'label' : 'review');
+    const panel = ref(['offline', 'label'].includes(route.query.panel) ? route.query.panel : 'review');
     const gapFlash = ref(null);
     const hover = ref(null);
     const dlOpen = ref(false);
@@ -219,6 +271,15 @@ export const RunPage = {
     let loadSeq = 0;
 
     const alias = computed(() => stageOf(ids.step).alias);
+    const offline = useOffline({ ids, invalidate: () => { if (timeline) timeline.invalidate(); } });
+    // 事件 = 平台告警 + 离线违规，按时刻排序，整段判定（无时刻）的排最后
+    const events = computed(() => [...alarms.value, ...offline.viols.value]
+      .sort((a, b) => (a.mediaMs ?? Infinity) - (b.mediaMs ?? Infinity)));
+    const violNote = computed(() => {
+      if (!offline.stage.value.has_offline_model) return '';
+      if (!offline.hasResult.value) return `离线违规：${offline.emptyReason.value}`;
+      return offline.checked.value ? '' : '离线违规：规则未核对';
+    });
     const selEvObj = computed(() => events.value.find((e) => e.id === selEv.value) || null);
     const canMark = () => mode.value !== 'processed';
     const label = useLabel({
@@ -246,11 +307,12 @@ export const RunPage = {
       if (route.name !== 'run') return;
       const [task, step, runParam] = route.parts;
       if (!task || !step) { error.value = '从任务总览点一个 step 打开回放'; loading.value = false; return; }
+      if (['review', 'offline', 'label'].includes(route.query.panel)) panel.value = route.query.panel;
       const seq = ++loadSeq;
       loading.value = true;
       error.value = '';
       meta.value = null;
-      events.value = [];
+      alarms.value = [];
       gaps.value = [];
       player.pause();
       try {
@@ -261,6 +323,7 @@ export const RunPage = {
         if (String(tl.run_id) !== runParam) replacePath(`/run/${task}/${step}/${tl.run_id}`);
         Object.assign(ids, { task: Number(task), step: Number(step), run: tl.run_id });
         label.load();
+        offline.load();
 
         const rawText = await api.playlistText(task, step, tl.run_id, 'raw');
         const procText = await api.playlistText(task, step, tl.run_id, 'processed').catch((e) => {
@@ -275,7 +338,7 @@ export const RunPage = {
 
         meta.value = { durationMs: tl.media_duration_ms, startMs: tl.start_ms, endMs: tl.end_ms, gapTotalMs: tl.gap_total_ms };
         gaps.value = tl.gaps.map(adaptGap);
-        events.value = tl.events.map(adaptTimelineAlarm);
+        alarms.value = tl.events.map(adaptTimelineAlarm);
         selEv.value = route.query.ev || null;
 
         mode.value = hasProc.value ? (['raw', 'processed', 'sbs'].includes(route.query.mode) ? route.query.mode : 'sbs') : 'raw';
@@ -406,7 +469,7 @@ export const RunPage = {
         onHover: (h) => { hover.value = h; },
         wallAt: (m) => (maps.value.raw ? maps.value.raw.wallAt(m) : null),
       });
-      timeline.setLanes([eventLane(() => events.value, () => selEv.value), label.lane]);
+      timeline.setLanes([eventLane(() => events.value, () => selEv.value), ...offline.lanes, label.lane]);
       if (panel.value === 'label') label.checkLs();
       window.addEventListener('keydown', onKey);
       document.addEventListener('click', closeDl);
@@ -424,6 +487,7 @@ export const RunPage = {
     return {
       ids, meta, gaps, events, loading, error, mode, hasProc, playing, pos, rate, drift, procHasFrame, selEv, gapFlash, hover,
       dlOpen, rawV, procV, tlCv, tlWrap, alias, wallNow, noFrameReason, panel, selEvObj, label, lsDot, lsText,
+      offline, violNote, jobStatusName, jobTagCls,
       toggle, setMode, setPanel, pickEvent, seek, canMark, fit, downloadUrl, onDownload,
       fmtDur, fmtMedia, fmtWall, fmtWallMs, lvCls,
     };

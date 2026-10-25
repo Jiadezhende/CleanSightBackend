@@ -43,6 +43,24 @@ export function adaptTimelineAlarm(e) {
   };
 }
 
+/** /ai/temporal 的分割段（闭区间，媒体刻度）。 */
+export function adaptSegment(it) {
+  return { label: it.label, startMs: it.start_media_ms, endMs: it.end_media_ms, conf: it.conf, producer: it.producer };
+}
+
+/** 离线规则判定的盘上告警（过渡期端点，入库后只改这里）→ 事件行。整段判定的没有时刻（mediaMs = null）。 */
+export function adaptViolation(it, i) {
+  return {
+    id: `viol:${i}:${it.rule_id}`,
+    source: 'viol',
+    kind: it.metric,
+    level: it.alarm_level,
+    message: it.alarm_message,
+    mediaMs: it.media_ms,
+    wallMs: null,
+  };
+}
+
 /** timeline 的断流点：媒体轴上宽度为零的位置 + 墙钟空洞两端。 */
 export function adaptGap(g) {
   return { mediaMs: g.media_ms, wallFromMs: g.wall_from_ms, wallToMs: g.wall_to_ms, gapMs: g.gap_ms };

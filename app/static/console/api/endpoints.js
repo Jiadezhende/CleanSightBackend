@@ -14,6 +14,12 @@ export const api = {
   labConfig: () => get('/lab-f3m8/config'),
   labHealth: () => get('/lab-f3m8/health'),
   labSubmit: (body) => post('/lab-f3m8/submit', body),
+  labelProbs: ({ task_id, step_id, run_id, track }) => post('/lab-f3m8/label-probs', { task_id, step_id, run_id, track }),
+  temporal: ({ task_id, step_id, run_id, track }) => post('/ai/temporal', { task_id, step_id, run_id, track, type: 'segment' }),
+  // 过渡期：离线违规入库后改读 /task/{id}/alarms，只改这一处与 adaptViolation
+  offlineAlarms: ({ task_id, step_id, run_id, track }) =>
+    get(`/admin-f3m8/offline/alarms/${task_id}/${step_id}`, { run_id, track }),
+  submitOfflineJob: (body) => post('/admin-f3m8/offline/jobs', body),
 
   /** runId 为 null 时后端解析该 step 最新可见 run，响应回显 run_id。 */
   timeline: (taskId, stepId, runId, track = 'raw') =>

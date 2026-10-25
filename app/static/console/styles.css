@@ -73,6 +73,7 @@ a { color: var(--accent); text-decoration: none; cursor: pointer; }
 .tag.tg-run { background: #fee2e2; color: #b91c1c; }
 .tag.ok { background: #dcfce7; color: #15803d; }
 .tag.q { background: #e0e7ff; color: #4338ca; }
+.tag.busy { background: #dbeafe; color: #1d4ed8; }
 .tag.bad { background: #fee2e2; color: #b91c1c; }
 .tag.mute { background: #f1f3f6; color: #8a93a3; }
 table.tb { width: 100%; border-collapse: collapse; }
@@ -202,3 +203,17 @@ table.tb { width: 100%; border-collapse: collapse; }
 .st-new { color: var(--accent); }
 .st-send { color: var(--warn); }
 .errline { margin: 0 0 8px; padding: 7px 10px; border-radius: 8px; background: #fef2f2; border: 1px solid #fecaca; color: var(--bad); font-size: 12px; }
+
+/* ===== 离线分析面板 ===== */
+.kv { display: grid; grid-template-columns: 52px 1fr; gap: 6px 10px; font-size: 12.5px; align-items: center; }
+.kv > span:nth-child(odd) { color: var(--text2); }
+.legend { display: flex; flex-direction: column; gap: 2px; }
+.lg { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center; padding: 5px 8px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+.lg:hover { background: #f6f7f9; }
+.lg.on { background: var(--accent-weak); outline: 1px solid #bfd0f5; }
+.lg.dim { opacity: .4; }
+.lg i { width: 12px; height: 12px; border-radius: 3px; display: block; }
+.lg em { font-style: normal; color: var(--muted); font-size: 11.5px; }
+.prog { height: 6px; border-radius: 3px; background: #eceff3; overflow: hidden; margin-top: 10px; }
+.prog i { display: block; height: 100%; width: 40%; background: linear-gradient(90deg, #3b82f6, #22d3ee); animation: ind 1.2s infinite linear; }
+@keyframes ind { from { transform: translateX(-100%); } to { transform: translateX(260%); } }

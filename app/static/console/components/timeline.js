@@ -93,8 +93,8 @@ export class Timeline {
     if (this.dirty) {
       const sc = this.staticCv.getContext('2d');
       sc.setTransform(dpr, 0, 0, dpr, 0, 0);
+      this.dirty = false;            // 先清：泳道在 draw 里 invalidate()（如闪烁动画）表示下一帧还要重画
       this._drawStatic(sc);
-      this.dirty = false;
     }
     const c = this.cv.getContext('2d');
     c.setTransform(1, 0, 0, 1, 0, 0);
