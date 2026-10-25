@@ -1,5 +1,5 @@
 // 各 router 的读写函数；契约见 docs/api/。时间单位在 adapters.js 统一成毫秒，这里原样返回。
-import { get, post, request } from './http.js';
+import { get, post, put, request } from './http.js';
 
 function playlistUrl(taskId, stepId, runId, track) {
   const q = new URLSearchParams({ step_id: stepId, track, run_id: runId });
@@ -8,10 +8,19 @@ function playlistUrl(taskId, stepId, runId, track) {
 
 export const api = {
   overview: () => get('/admin-f3m8/overview'),
+  metricsJson: () => get('/admin-f3m8/metrics/json'),
+  healthStatus: () => get('/health/status'),
+  monitorConfig: () => get('/health/monitor/config'),
+  taskLive: () => get('/task/live'),
+  taskMessage: (taskId, sinceSeq) => get(`/task/message/${taskId}`, { since_seq: sinceSeq }),
+  /** 延迟探测用：任意 GET，不解析业务含义。 */
+  raw: (path) => request('GET', path),
   stages: () => get('/admin-f3m8/stages'),
   offlineJobs: () => get('/admin-f3m8/offline/jobs'),
   labTasks: ({ q, limit, offset }) => get('/lab-f3m8/tasks', { q, limit, offset }),
   labConfig: () => get('/lab-f3m8/config'),
+  /** PUT 是整体覆盖 url / project；task_source 传 null 表示不改。 */
+  putLabConfig: (body) => put('/lab-f3m8/config', body),
   labHealth: () => get('/lab-f3m8/health'),
   labSubmit: (body) => post('/lab-f3m8/submit', body),
   labelProbs: ({ task_id, step_id, run_id, track }) => post('/lab-f3m8/label-probs', { task_id, step_id, run_id, track }),

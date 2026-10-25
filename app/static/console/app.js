@@ -5,9 +5,10 @@ import { busyJobCount, startJobs } from './api/jobs.js';
 import { fmtWall } from './core/format.js';
 import { go, route } from './core/router.js';
 import { dropToast, ui } from './core/ui.js';
-import { pendingPage } from './pages/pending.js';
+import { LivePage, liveCrumbs } from './pages/live.js';
 import { OfflinePage, offlineCrumbs } from './pages/offline.js';
 import { RunPage, runCrumbs } from './pages/run.js';
+import { SystemPage, systemCrumbs } from './pages/system.js';
 import { TasksPage, tasksCrumbs } from './pages/tasks.js';
 
 const { createApp, ref, computed, watch, onMounted } = Vue;
@@ -23,10 +24,10 @@ const ICON = {
 // 路由名 → 页面。crumbs(route) 给面包屑；fill = 页面自己管滚动（工作台）。
 const PAGES = {
   tasks: { component: TasksPage, crumbs: tasksCrumbs },
-  live: { component: pendingPage('实时监控', '/ui-f3m8/admin/'), crumbs: () => [{ t: '实时监控' }] },
+  live: { component: LivePage, crumbs: liveCrumbs },
   run: { component: RunPage, crumbs: runCrumbs, fill: true },
   offline: { component: OfflinePage, crumbs: offlineCrumbs },
-  system: { component: pendingPage('系统运维', '/ui-f3m8/admin/'), crumbs: () => [{ t: '系统运维' }] },
+  system: { component: SystemPage, crumbs: systemCrumbs },
 };
 
 const NAV = [

@@ -1,4 +1,5 @@
-// 回放工作台 #/run/{task}/{step}/{run|latest}?t=&mode=raw|processed|sbs&ev=&panel=review|offline|label
+// 回放工作台 #/run/{task}/{step}/{run|latest}?t=&at=&mode=raw|processed|sbs&ev=&panel=review|offline|label
+// t = raw 媒体刻度 ms；at = 墙钟 ms（只知道「几点发生」时用，进页后按清单换算成 t）。
 // 进入时把 run 落成具体 run_id 写回 URL，之后本页所有请求都带这个 run_id。
 import { adaptGap, adaptTimelineAlarm } from '../api/adapters.js';
 import { stageOf } from '../api/catalog.js';
@@ -342,7 +343,7 @@ export const RunPage = {
         selEv.value = route.query.ev || null;
 
         mode.value = hasProc.value ? (['raw', 'processed', 'sbs'].includes(route.query.mode) ? route.query.mode : 'sbs') : 'raw';
-        const t = Math.min(Number(route.query.t || 0), meta.value.durationMs);
+        const t = Math.min(startOf(rawMap), meta.value.durationMs);
         player.load({
           rawUrl: api.playlistUrl(task, step, tl.run_id, 'raw'),
           procUrl: hasProc.value ? api.playlistUrl(task, step, tl.run_id, 'processed') : null,
@@ -361,6 +362,16 @@ export const RunPage = {
       } finally {
         if (seq === loadSeq) loading.value = false;
       }
+    }
+
+    /** URL 要求的起点：at（墙钟）优先，换算后改写成 t。 */
+    function startOf(rawMap) {
+      if (route.query.at) {
+        const t = rawMap.mediaAtSnapped(Number(route.query.at));
+        replaceQuery({ at: null, t: Math.round(t) });
+        return t;
+      }
+      return Number(route.query.t || 0);
     }
 
     function seek(ms) {
@@ -416,8 +427,9 @@ export const RunPage = {
     });
     watch([events, selEv], () => timeline && timeline.invalidate());
     // 同一个 run 内从别处带着 t / ev 跳进来（如「回放此刻」）：不重载，只定位
-    watch(() => [route.query.t, route.query.ev], ([t, ev]) => {
+    watch(() => [route.query.t, route.query.ev, route.query.at], ([t, ev, at]) => {
       if (route.name !== 'run' || !meta.value) return;
+      if (at) { t = startOf(maps.value.raw); }
       if (ev && ev !== selEv.value) selEv.value = ev;
       if (t != null && Math.abs(Number(t) - pos.value) > 500) {
         player.seek(Number(t));
