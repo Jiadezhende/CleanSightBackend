@@ -233,7 +233,7 @@
 
 ### 前端坑点
 
-- 单段上限 5 min、总时长 30 min、最多 20 段（默认值，以后端 settings 为准）；圈选时前端最好先本地拦一道，减少 400。
+- 单段上限 5 min、总时长 30 min、最多 20 段是默认值，实际取 [`GET /config`](#get-lab-f3m8config) 的 `limits`；圈选时前端按它先本地拦一道，减少 400。
 - 段重叠是**排序后**判的，`clips` 顺序无所谓，但两段时间区间不能相交。
 - `job_dir` 非空 = 有段失败且要求了保留；此目录**没有 TTL / 自动清理**，会一直留在 `{temp_dir}/{nonce}`（默认 `{storage_base_dir}/.lab_exports`）直到人工/运维清。别指望它过期自动消失。
 - 同步端点，段多时响应慢，前端请给足超时、加 loading。
@@ -427,7 +427,12 @@
   "default_project_id": 5,             // 0 表示无默认
   "task_source": "db",                 // "db"（磁盘 + 平台库）| "storage"（仅磁盘），控制 /tasks 数据源
   "token_configured": true,            // env 里是否设了 token（不回明文）
-  "source": "file"                     // "file"（PUT 改过、来自持久化文件）| "env"（回退环境变量）
+  "source": "file",                    // "file"（PUT 改过、来自持久化文件）| "env"（回退环境变量）
+  "limits": {                          // 送标上限，与 POST /submit 的校验同一组值
+    "max_clips": 20,
+    "max_clip_ms": 300000,
+    "max_total_ms": 1800000
+  }
 }
 ```
 
@@ -438,6 +443,9 @@
 | `task_source` | string | `db`（磁盘 + 平台库，库连不上自动退回仅磁盘）\| `storage`（仅磁盘） |
 | `token_configured` | bool | env `CLEANSIGHT_LABEL_STUDIO_TOKEN` 是否非空；token 明文不外露 |
 | `source` | string | `file`（存在持久化 JSON、以其为准）\| `env`（无文件或读文件失败，回退 settings） |
+| `limits.max_clips` | int | 一次 `POST /submit` 最多几段（settings `lab_export_max_clips_per_submit`） |
+| `limits.max_clip_ms` | int | 单段时长上限，媒体 ms（`lab_export_max_clip_ms`） |
+| `limits.max_total_ms` | int | 一次提交总时长上限，媒体 ms（`lab_export_max_total_ms`） |
 
 > token 永远只来自 env、页面不可改；`token_configured` 是唯一可见信号。
 
@@ -467,7 +475,7 @@
 
 ### 响应 `200`
 
-同 GET 的 `LabConfigResponse`，其中 `source` 更新后**恒为 `file`**。
+同 GET 的 `LabConfigResponse`（含 `limits`），其中 `source` 更新后**恒为 `file`**。
 
 ### 错误
 

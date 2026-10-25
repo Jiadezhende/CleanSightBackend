@@ -111,12 +111,19 @@ class LabHealthResponse(BaseModel):
     default_project_id: int
 
 
+class LabSubmitLimits(BaseModel):
+    max_clips: int        # 一次提交最多几段
+    max_clip_ms: int      # 单段时长上限（媒体 ms）
+    max_total_ms: int     # 一次提交总时长上限（媒体 ms）
+
+
 class LabConfigResponse(BaseModel):
     label_studio_url: str
     default_project_id: int
     task_source: str                # "db"（磁盘 + 平台库，库不通自动退回）| "storage"（仅磁盘）
     token_configured: bool          # token 是否已配置（不返回明文）
     source: str                     # "file"（页面改过）| "env"（回退环境变量）
+    limits: LabSubmitLimits         # 送标上限，与 POST /submit 的校验同一组值
 
 
 class LabConfigUpdateRequest(BaseModel):
@@ -534,7 +541,7 @@ async def get_lab_config() -> LabConfigResponse:
 
     不返回 token 明文，只返回 token_configured 表示 env 里是否已配置。
     """
-    return LabConfigResponse(**lab_config.snapshot())
+    return LabConfigResponse(**lab_config.snapshot(), limits=lab_service.submit_limits())
 
 
 @router.put("/config", response_model=LabConfigResponse)
@@ -549,7 +556,7 @@ async def update_lab_config(req: LabConfigUpdateRequest) -> LabConfigResponse:
         )
     except ValueError as e:
         raise ValidationError(str(e), field="label_studio_url")
-    return LabConfigResponse(**snap)
+    return LabConfigResponse(**snap, limits=lab_service.submit_limits())
 
 
 # ---------------------------------------------------------------------------
