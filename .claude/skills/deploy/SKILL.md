@@ -49,7 +49,7 @@ DB 连接、告警端点、Label Studio token、白名单 IP **不是输入**：
 |------|------|----------|--------|
 | **Linux + NVIDIA**（x86_64） | `uname -m` 为 x86_64，`nvidia-smi` 头部 `NVIDIA-SMI` | `./install.sh` | [references/linux.md](references/linux.md) |
 | **Windows + NVIDIA** | 目标是本机或某台 Windows，PowerShell | `.\install.ps1` | [references/windows.md](references/windows.md) |
-| **阿里 PPU** | `nvidia-smi` 头部 `PPU-SMI`，`/dev/alixpu_ppu*`，`/usr/local/PPU_SDK` 存在 | 无脚本，手动 | [references/ppu.md](references/ppu.md) |
+| **阿里 PPU** | `/dev/alixpu_ppu*`、`/usr/local/PPU_SDK` 存在；`ppu-smi` 头部 `PPU-SMI`（可能没有 `nvidia-smi`） | 无脚本，手动 | [references/ppu.md](references/ppu.md) |
 | **构建机打物料** | 用户要重建 wheelhouse / vendor、升级版本、源机缺物料 | `./build.sh` | [references/materials.md](references/materials.md) |
 
 没有 CPU-only 路径，已淘汰。

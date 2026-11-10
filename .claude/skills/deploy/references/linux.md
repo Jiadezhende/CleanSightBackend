@@ -17,7 +17,7 @@
 ```text
 [0] 缺省本机；用户点名远程机才做 [1][2]
 [1] SSH 免密（远程才需要）
-[2] git archive + scp 送仓库（绕开 GitHub 限速）
+[2] 送仓库：目标机能通 GitHub 就浅克隆，否则 git archive + scp
 [3] 目标机预检
 [4] 确认源机分发服务在线
 [5] BASE_URL=<用户给的> nohup 跑 install.sh，轮询日志
@@ -47,7 +47,15 @@ Host cleansight-deploy <目标IP>
 
 ## [2] 把仓库送上目标机
 
-不要让目标机 `git clone` GitHub（出境常被限到 ~17 KiB/s），也不要 `tar` 整个工作树（HLS 录像、`.venv`、`__pycache__` 几百 MB 全是垃圾）。用 `git archive` 只导出版本控制的文件：
+不要 `tar` 整个工作树（HLS 录像、`.venv`、`__pycache__` 几百 MB 全是垃圾），也不要全量 `git clone`（~95MB，出境常被限到几十 KiB/s，会超时）。
+
+**首选浅克隆**：目标机 `git ls-remote https://github.com/Jiadezhende/CleanSightBackend.git refs/heads/<分支>` 能通时，直接在目标机执行下面这条（~14MB，限速下约 3 分钟），得到的是能 `git pull` 的真仓库：
+
+```bash
+git clone --depth 1 --single-branch -b <分支名> https://github.com/Jiadezhende/CleanSightBackend.git ~/CleanSightBackend
+```
+
+**GitHub 不通时**，用 `git archive` 在本地只导出版本控制的文件：
 
 ```bash
 # 本地
@@ -215,7 +223,7 @@ sleep 2; ss -ltn | grep -E ":8000|:8004|:18004" || echo "全部已释放"
 
 ## 部署完成检查清单
 
-- [ ] 仓库已在目标机（本机，或远程用 archive 送达，非整目录 tar）
+- [ ] 仓库已在目标机（本机，或远程浅克隆 / archive 送达，非整目录 tar）
 - [ ] 预检全绿（py3.10 / GPU / ensurepip / curl / 源机 200）
 - [ ] 源机分发服务在线
 - [ ] `install.sh` 自检通过（torch+CUDA OK / ffmpeg / mediamtx）

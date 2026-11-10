@@ -38,7 +38,7 @@
 | `CLEANSIGHT_GATEWAY_ENABLED` | `false` | `true` | `true` | `true`。`false` 关掉白名单、限流、封禁、反扫描整层 |
 | `CLEANSIGHT_GATEWAY_ALLOWED_IPS` | — | — | 用户填（交接时提示） | 空 = 不限制来源 IP |
 | `CLEANSIGHT_MEDIA_TOKEN_SECRET` | — | — | AI 生成 | 空 = 启动时随机生成，**重启后已发出的媒体 URL 全部 403** |
-| `CLEANSIGHT_STORAGE_DIR` | — | — | AI 列各盘剩余空间给建议，用户确认后写 | `./database`，HLS 段与告警图都落这里，持续增长 |
+| `CLEANSIGHT_STORAGE_DIR` | — | — | AI 列各盘剩余空间给建议，用户确认后写 | `./database`，HLS 段与告警图都落这里，持续增长。**必须是 POSIX 完整、重启不丢的盘**（块存储 / NAS）；ossfs 等对象存储 FUSE 不支持随机写，推理缓存与 mp4 导出必坏，判据见 ppu.md「存储」 |
 | `CLEANSIGHT_CUDA_DEVICE` | 共享卡时锁卡 | 共享卡时锁卡 | 共享卡时锁卡 | `0` |
 | `CLEANSIGHT_CAPACITY_PLANNED_STREAMS` | — | 同 prod | 按实际最大路数 | `15`。启动内存自检按它估最坏占用，**不限制实际路数** |
 | `CLEANSIGHT_MEMORY_CHECK_ENFORCE` | — | 内存不足 32GB 时 `false` | — | `true`：最坏占用超过 `MemAvailable` 拒绝启动，仅 Linux 生效 |
