@@ -36,7 +36,7 @@ prod / test 各一个目录、各自的 venv 与本地端口改动；数据用�
   后端 20016 / RTSP 20017 / MediaMTX 18104 / RTP,RTCP 8102,8103
 ```
 
-- 卡号：按部署时 `ppu-smi` 选占用最少的卡，prod / test 分卡，写进各自 `.env*` 的 `CLEANSIGHT_CUDA_DEVICE`（外层 `CUDA_VISIBLE_DEVICES` 管不到推理子进程）。2026-11-10 为 prod 3、test 1。
+- 卡号：按部署时 `ppu-smi` 避开跑大模型的卡（其他租户会随时换卡，每次重看）；只剩一张时 prod / test 同卡。写进各自 `.env*` 的 `CLEANSIGHT_CUDA_DEVICE`（外层 `CUDA_VISIBLE_DEVICES` 管不到推理子进程）。2026-11-11 两套都在卡 3（0/1/2 被 qwen_image、ComfyUI 等占用）。
 - 端口：平台只 1:1 映射 `20010–20020` 段，容不下默认端口与 test +2 偏移，所以每个目录的 `start_backend.sh` 写绝对端口、`OFFSET=0`，留 git 本地 diff。
 
 ## 安装
