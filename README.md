@@ -18,9 +18,9 @@ CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同
 ## 项目结构
 
 ```
-install.sh / install.ps1          # 装环境（Linux / Windows），物料从源机拉
+.claude/skills/deploy/             # 显式 /deploy 编排依赖安装与验证
 start_backend.sh / start_backend.ps1  # 一条命令拉起网关（含 MediaMTX）+ 后端，端口在此声明
-build.sh                          # 构建机打物料（wheelhouse + vendor），只在升级版本时跑
+build.sh                          # 准备第三方二进制 vendor 归档
 app/
 ├── main.py              # FastAPI 入口，lifespan 启停各 Service 单例
 ├── settings.py          # 全局配置（Pydantic Settings，读 .env）
@@ -91,7 +91,7 @@ docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口�
 .\start_backend.ps1 dev          # Windows
 ```
 
-一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，不要再单独起 MediaMTX。装环境走 `./install.sh` / `.\install.ps1`，细节见 `/deploy` skill。
+一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，不要再单独起 MediaMTX。安装依赖显式调用 `/deploy` skill，Python 包走镜像或官方索引，第三方二进制从源机获取。安装验证完成后再单独配置并启动服务。
 
 起流后打开后端自带的**控制台**观测运行状态（任务总览 / 实时画面 / 回放 / 指标）：`http://localhost:8000/ui-f3m8/console/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
 
@@ -192,7 +192,7 @@ python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      
 
 | 现象 | 排查 |
 |------|------|
-| `ffmpeg not found` | 后端只认项目内 `.ffmpeg/bin/ffmpeg`，不回退系统 PATH；重跑 `install.sh` / `install.ps1` 从源机拉钉版 ffmpeg，别装系统版 |
+| `ffmpeg not found` | 后端只认项目内 `.ffmpeg/bin/ffmpeg`，不回退系统 PATH；通过 `/deploy` 从源机重新安装钉版 FFmpeg，别装系统版 |
 | 数据库连接失败 | 检查 `.env` 数据库配置、服务是否运行、网络/防火墙 |
 | `CUDA not available` | `nvidia-smi` 查驱动，`torch.cuda.is_available()` 验证；否则自动降级 CPU |
 | 推流超时 / Stream not found | 确认 8004 与 18004 都在听（网关日志看 MediaMTX 是否起来）、URL `rtsp://<host>:8004/live/<name>` |

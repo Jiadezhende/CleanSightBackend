@@ -159,7 +159,7 @@ class TestLoadConfig:
         conf = _load_config()
 
         assert conf["mediamtx_bin"] == ""           # 留空 = 纯代理模式
-        assert conf["mediamtx_config"] == "mediamtx.yml"
+        assert conf["mediamtx_config"] == "config/mediamtx.yml"
         assert conf["listen_port"] == 8004
         assert conf["target_port"] == 18004
         assert conf["allowed_ips"] == ""
@@ -182,6 +182,19 @@ class TestLoadConfig:
         assert conf["allowed_ips"] == "10.0.0.1,10.0.0.2"
         assert conf["ban_duration"] == 7200
         assert conf["target_port"] == 18004   # 未覆盖的保持默认
+
+    def test_installed_binary_and_config_paths(self, monkeypatch, tmp_path):
+        root = gw_main._PROJECT_ROOT
+        monkeypatch.chdir(tmp_path)
+        name = "mediamtx.exe" if gw_main.os.name == "nt" else "mediamtx"
+        assert gw_main._resolve_mediamtx_bin("auto") == str(root / ".mediamtx" / name)
+        assert gw_main._resolve_mediamtx_bin("") == ""
+        assert gw_main._resolve_mediamtx_bin("custom/mediamtx") == str(root / "custom" / "mediamtx")
+        absolute = str(root / "external" / name)
+        assert gw_main._resolve_mediamtx_bin(absolute) == absolute
+        monkeypatch.delenv("GATEWAY_MEDIAMTX_CONFIG", raising=False)
+        assert gw_main._resolve_path(_load_config()["mediamtx_config"]) == str(root / "config" / "mediamtx.yml")
+        assert (root / "config" / "mediamtx.yml").is_file()
 
 
 # ===========================================================================

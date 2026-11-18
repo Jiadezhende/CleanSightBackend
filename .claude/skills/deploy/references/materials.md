@@ -1,110 +1,42 @@
-# 物料：源机分发与 build.sh 重建
+# 第三方二进制物料
 
-三类物料、三条来源，每条只有一个出口。**模型权重不在此列**：用户从魔搭手动下载，见 [runtime-config.md](runtime-config.md)「模型权重」。
+FFmpeg 是社区快照构建，上游链接可能过期，各平台构建分别验证。MediaMTX 使用固定发行版，两者统一归档到源机，安装从该归档获取。
 
-```text
-构建机 ./build.sh（开头配置块：上游 URL + TORCH_PKGS）
-   ├─ wheelhouse/   torch 闭包 + SHA256SUMS（自动生成，~6GB，cp310）
-   └─ vendor/       ffmpeg / mediamtx 的 linux + win 四个包
-         │ rsync
-         ▼
-源机 http://49.234.120.241:8088（systemd cleansight-dist，部署时起、部署完关）
-         ├─ install.sh   torch ← wheelhouse（--require-hashes 逐 wheel 校）；ffmpeg / mediamtx ← vendor
-         ├─ install.ps1  ffmpeg / mediamtx ← vendor（torch 走 cu128 索引在线）
-         └─ PPU 手动     ffmpeg / mediamtx ← vendor
-```
+## 已归档路径
 
-## 源机
+源机地址由用户在 `/deploy` 请求中提供；当前任务中已提供则复用，下载前缺失则询问，不预设主机或端口。路径相对于分发根目录：
 
 ```text
-SSH 别名：label-studio        公网 IP：49.234.120.241
-内部主机：VM-32-133-ubuntu    用户：ubuntu
-分发端口：8088               （8080 被 Label Studio 占用）
+vendor/ffmpeg/ffmpeg-linux-x64.tar.xz
+vendor/ffmpeg/ffmpeg-win-x64.zip
+vendor/mediamtx/mediamtx-linux-x64.tar.gz
+vendor/mediamtx/mediamtx-win-x64.zip
 ```
 
-分发服务由 systemd 管理，`static`、**不开机自启**，只在部署窗口手动开关：
+源机已有归档应复用，无需每次重新运行构建。源机是否开启由用户确认；需要远程启动分发服务时，先确认目标、访问方式及操作授权，由管理员按该源机的管理方式处理。
+
+## 更新物料
+
+根目录 `build.sh` 保存各平台上游 URL，当前 FFmpeg 为 n7.1.4 系列构建、MediaMTX 为 v1.15.5。脚本仅下载归档，不构建 Python 环境。运行需 Bash、curl 和足够磁盘空间。
 
 ```bash
-sudo systemctl start cleansight-dist    # 部署窗口开始
-sudo systemctl status cleansight-dist
-sudo systemctl stop  cleansight-dist    # 部署窗口结束，务必关闭
+bash build.sh
 ```
 
-```ini
-# /etc/systemd/system/cleansight-dist.service
-ExecStart=/usr/bin/python3 -m http.server 8088 --bind 0.0.0.0 --directory /srv/cleansight-dist
-User=ubuntu
-Restart=on-failure
-```
+已存在的归档跳过，断点保存在 `.part`。上游快照失效时获取对应平台兼容构建并更新 URL；删除待替换归档前保留旧包用于回退。固定归档名仅表示安装接口，具体构建版本以维护者已验证内容为准。
 
-服务根目录只放物料软链，不暴露代码仓库和 `.env`：
+在对应平台用安装工具运行二进制版本命令并按需要验证编解码后，再发布到源机。新归档先上传临时文件，完成后再替换分发文件，避免安装者下载半包。Python 包不再通过源机分发；旧 wheelhouse 不再使用，本轮不删除远程物料。
 
-```text
-/srv/cleansight-dist/
-  wheelhouse -> /data/cleansight-offline/wheelhouse
-  vendor     -> /data/cleansight-offline/vendor
-```
+## 安装与结果
 
-自检：
+在项目根目录，以项目虚拟环境 Python 执行：
 
 ```bash
-curl -I http://49.234.120.241:8088/wheelhouse/SHA256SUMS
-curl -I http://49.234.120.241:8088/vendor/ffmpeg/ffmpeg-linux-x64.tar.xz
-curl -I http://49.234.120.241:8088/vendor/mediamtx/mediamtx-linux-x64.tar.gz
+python .claude/skills/deploy/scripts/install_binaries.py all --base-url "<源机地址>"
 ```
 
-已就位的固定名物料（`install.sh` / `install.ps1` 从 `BASE_URL` 派生这些路径）：
+执行前将占位符替换为用户提供的 URL。FFmpeg 写入 `.ffmpeg/`，MediaMTX 写入 `.mediamtx/`。新包检查成功前保留旧安装。可分别指定 `ffmpeg` 或 `mediamtx`，适用于只补缺项或失败后重试。
 
-```text
-vendor/ffmpeg/ffmpeg-linux-x64.tar.xz     vendor/ffmpeg/ffmpeg-win-x64.zip
-vendor/mediamtx/mediamtx-linux-x64.tar.gz vendor/mediamtx/mediamtx-win-x64.zip
-```
+只有安装目录中可用的二进制才可复用；从旧 `mediamtx/mediamtx(.exe)` 布局升级时，重新安装 MediaMTX。受版本控制的配置位于 `config/mediamtx.yml`，原 `mediamtx/LICENSE` 继续保留。
 
-该服务绑 `0.0.0.0:8088`、明文无鉴权，`ufw` 未启用时只靠云安全组挡。**不要长期裸跑在公网**；长期分发应交管理员用 nginx / 对象存储托管并限制来源。
-
-## build.sh：只在这几种情况跑
-
-- 调整 torch / torchvision 版本或 CUDA wheel 来源
-- 升级 ffmpeg 或 MediaMTX
-- 首次准备源机物料
-
-其余时候复用同一批 `wheelhouse/` 与 `vendor/`。它依赖外部 URL 下载（GitHub、南大镜像），地址可能失效，所以是「物料重建工具」不是日常发布步骤。
-
-```bash
-./build.sh   # 需 Linux x86_64 + Python 3.10（与生产一致）+ python3/pip/curl/sha256sum
-```
-
-逐物料幂等：文件在就跳过下载，中断后可安全重跑（`.part` 断点续传）。torch 闭包下完会用 `pip install --dry-run --no-index` 模拟目标机全新 venv 离线解析，不完整就报错，避免把半包封进 SHA256SUMS。
-
-产物已在 `.gitignore`，不要提交：
-
-```text
-wheelhouse/SHA256SUMS + *.whl
-vendor/ffmpeg/{ffmpeg-linux-x64.tar.xz, ffmpeg-win-x64.zip}
-vendor/mediamtx/{mediamtx-linux-x64.tar.gz, mediamtx-win-x64.zip}
-```
-
-## 升级 ffmpeg / MediaMTX
-
-1. 改 `build.sh` 开头的 `FFMPEG_URL` / `FFMPEG_WIN_URL`（或 `MEDIAMTX_*`）
-2. 删掉 `vendor/` 下的旧包（幂等逻辑文件在就跳过）
-3. 在构建机跑 `./build.sh`
-4. `rsync -av vendor/ label-studio:/data/cleansight-offline/vendor/`
-
-ffmpeg 必须钉版：4.x / 8.x 对 `-hls_fmp4_init_filename` 解析差异巨大，见 `docs/kb/DESIGN_HLS_TIMELINE.md`。vendor 不做 SHA 钉版比对，包只在构建机下载一次、经源机分发，下坏了由 install 侧的 `xz -t` / `gzip -t` 当场抓出来。
-
-## 升级 torch
-
-版本出现在两处，**一起改**：`build.sh` 开头的 `TORCH_PKGS`（产出 prod 的 wheelhouse）与 `requirements/gpu.txt`（Windows 在线装）。改完重跑 `build.sh`，`rsync -av wheelhouse/ label-studio:/data/cleansight-offline/wheelhouse/`。`wheelhouse/SHA256SUMS` 由 build.sh 自动生成，是 6GB wheel 走 HTTP 流式安装时唯一的完整性保障。
-
-## 配置在哪：每个脚本开头一块
-
-没有共享的配置文件（原 `deploy.conf` 已删）：
-
-| 脚本 | 配置块 |
-|---|---|
-| `build.sh` | 上游 `FFMPEG_URL` / `MEDIAMTX_URL` 与两个 `*_WIN_URL`、`TORCH_PKGS`、torch 索引 |
-| `install.sh` | 源机 `BASE_URL`、清华源地址。不含 torch 版本，wheelhouse 目录本身即钉版 |
-| `install.ps1` | 源机 `BASE_URL`、清华源地址。torch 版本与 cu128 索引在 `requirements/gpu.txt` |
-
-依赖清单按部署路径分：`requirements/base.txt` 是平台无关底座，`prod.txt` / `gpu.txt` / `ppu.txt` 各 `-r base.txt` 后只补自己那份 numpy 与 torch。改依赖只改 `base.txt`，除非改的就是 torch / numpy 本身。
+安装与版本自检不需要应用环境文件和服务端口。源机只暴露物料目录，不暴露源码、运行配置或密钥。

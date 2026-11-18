@@ -8,7 +8,7 @@
 |---|---|
 | 后端服务 | `http://{server}:{api-port}` 可访问（本地默认 8000；**当前测试环境 `111.14.140.60:8100`**） |
 | MediaMTX / RTSPProxy | RTSP 服务运行于 `rtsp://{server}:{rtsp-port}`（本地默认 8004；**当前测试环境 `111.14.140.60:8104`**） |
-| FFmpeg | 本地推流由 `FFmpegController` 调用项目内置 `.ffmpeg/bin/ffmpeg`（与后端同源 `settings.ffmpeg_path`）。**推流前须保证该二进制存在**：Linux 由 `install.sh` / Windows 由 `install.ps1` 部署；mac 本地开发若没跑 install，手动 `ln -s $(which ffmpeg) .ffmpeg/bin/ffmpeg` 即可。缺失时脚本会直接报错（非静默）；也可用 `CLEANSIGHT_FFMPEG_PATH` 覆写 |
+| FFmpeg | 本地推流由 `FFmpegController` 调用项目内置 `.ffmpeg/bin/ffmpeg`（与后端同源 `settings.ffmpeg_path`）。**推流前须保证该二进制存在**：通过显式 `/deploy` 安装源机归档；当前归档覆盖 Linux／Windows x86_64。缺失时脚本会直接报错（非静默）；也可用 `CLEANSIGHT_FFMPEG_PATH` 覆写 |
 | 测试视频 | `integration_tests/fixtures/test_video.mp4`（可通过 `--video_path` 覆盖，如 `integration_tests/fixtures/clean-test.mp4`） |
 | 数据库任务 | `task_id` 不存在则脚本自动创建（结束自动删除）；已存在且 `current_step` 不一致会 fail-fast 报错（见下） |
 

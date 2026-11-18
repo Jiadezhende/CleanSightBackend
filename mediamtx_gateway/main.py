@@ -28,7 +28,7 @@ logger = logging.getLogger("mediamtx_gateway")
 
 _CONFIG_PATH = Path(__file__).parent / "config.ini"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_MEDIAMTX_DIR = _PROJECT_ROOT / "mediamtx"
+_MEDIAMTX_DIR = _PROJECT_ROOT / ".mediamtx"
 _MAX_RESTARTS = 5
 
 
@@ -45,7 +45,7 @@ def _load_config() -> dict:
 
     return {
         "mediamtx_bin":    get("mediamtx_bin",    ""),          # 留空 = 不管理 MediaMTX 进程
-        "mediamtx_config": get("mediamtx_config",  "mediamtx.yml"),
+        "mediamtx_config": get("mediamtx_config",  "config/mediamtx.yml"),
         "listen_port":     get("listen_port",       8004, int),  # 对外暴露的 RTSP 端口
         "target_port":     get("target_port",       18004, int), # MediaMTX 内部端口
         "allowed_ips":     get("allowed_ips",       ""),         # 逗号分隔，空 = 允许所有
@@ -65,7 +65,7 @@ def _resolve_mediamtx_bin(configured: str) -> str:
     """解析 MediaMTX 可执行文件路径。
 
       - ""      → 纯代理模式（不管理 MediaMTX），原样返回空串
-      - "auto"  → 按当前平台选择 mediamtx/mediamtx(.exe)
+      - "auto"  → 按当前平台选择 .mediamtx/mediamtx(.exe)
       - 其它    → 视为路径（相对项目根目录或绝对路径）
     """
     if not configured:

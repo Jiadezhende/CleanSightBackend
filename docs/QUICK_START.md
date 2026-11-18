@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- 已按 `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）装完环境：`install.sh` / `install.ps1` 会把 FFmpeg 与 MediaMTX 装进项目内的 `.ffmpeg/` 与 `mediamtx/`，不依赖系统 PATH
+- 已按 `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）装完环境：安装工具会把 FFmpeg 与 MediaMTX 装进项目内的 `.ffmpeg/` 与 `.mediamtx/`，不依赖系统 PATH
 - `.env.dev` 已填（六项必填见 skill 的 runtime-config.md）
 
 ---
