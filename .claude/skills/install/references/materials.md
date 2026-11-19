@@ -4,7 +4,7 @@ FFmpeg 是社区快照构建，上游链接可能过期，各平台构建分别�
 
 ## 已归档路径
 
-源机地址由用户在 `/deploy` 请求中提供；当前任务中已提供则复用，下载前缺失则询问，不预设主机或端口。路径相对于分发根目录：
+源机地址由用户在 `/install` 请求中提供；当前任务中已提供则复用，下载前缺失则询问，不预设主机或端口。路径相对于分发根目录：
 
 ```text
 vendor/ffmpeg/ffmpeg-linux-x64.tar.xz
@@ -32,7 +32,7 @@ bash build.sh
 在项目根目录，以项目虚拟环境 Python 执行：
 
 ```bash
-python .claude/skills/deploy/scripts/install_binaries.py all --base-url "<源机地址>"
+python .claude/skills/install/scripts/install_binaries.py all --base-url "<源机地址>"
 ```
 
 执行前将占位符替换为用户提供的 URL。FFmpeg 写入 `.ffmpeg/`，MediaMTX 写入 `.mediamtx/`。新包检查成功前保留旧安装。可分别指定 `ffmpeg` 或 `mediamtx`，适用于只补缺项或失败后重试。

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 准备 Windows / Linux 第三方二进制归档，上传源机后供 deploy skill 使用。
+# 准备 Windows / Linux 第三方二进制归档，上传源机后供 install skill 使用。
 # FFmpeg 上游快照可能过期；复用已验证的源机归档，更新时分别确认各平台构建。
 set -euo pipefail
 cd "$(dirname "$0")"

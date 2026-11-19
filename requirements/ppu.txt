@@ -1,5 +1,5 @@
 # PPU 补充依赖。必需的 torch / torchvision / numpy 由厂商系统环境提供。
 # 本文件需配合该环境使用，单独安装不能得到完整的 PPU 运行环境。
-# deploy skill 使用 --system-site-packages 并按系统 NumPy 生成安装约束。
-# 不在此添加官方 CUDA 包，具体步骤见 .claude/skills/deploy/references/ppu.md。
+# install skill 使用 --system-site-packages 并按系统 NumPy 生成安装约束。
+# 不在此添加官方 CUDA 包，具体步骤见 .claude/skills/install/references/ppu.md。
 -r base.txt

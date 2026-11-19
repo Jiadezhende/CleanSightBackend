@@ -42,7 +42,7 @@ class FFmpegController:
         self.ffmpeg_path = self._find_ffmpeg()
 
     def _find_ffmpeg(self) -> str:
-        """使用项目自包含的 ffmpeg（与后端同源 settings.ffmpeg_path，deploy skill 安装到 .ffmpeg/bin/）。
+        """使用项目自包含的 ffmpeg（与后端同源 settings.ffmpeg_path，install skill 安装到 .ffmpeg/bin/）。
 
         不再走系统 PATH / Chocolatey：统一用项目内钉版二进制，避免测试与生产 ffmpeg 版本漂移。
         可用 CLEANSIGHT_FFMPEG_PATH 覆写（逃生口，如裸名走 PATH）。
@@ -55,7 +55,7 @@ class FFmpegController:
         if has_sep and not Path(ffmpeg).exists():
             raise FileNotFoundError(
                 f"未找到项目内 ffmpeg: {ffmpeg}\n"
-                f"请先通过 /deploy 安装 .ffmpeg/，"
+                f"请先通过 /install 安装 .ffmpeg/，"
                 f"或设置 CLEANSIGHT_FFMPEG_PATH 指向可用 ffmpeg"
             )
         return ffmpeg

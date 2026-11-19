@@ -1,12 +1,12 @@
 ---
-name: deploy
-description: "仅在用户显式调用 /deploy 请求准备 CleanSightBackend 安装依赖或第三方二进制物料时使用。"
+name: install
+description: "仅在用户显式调用 /install 请求准备 CleanSightBackend 安装依赖或第三方二进制物料时使用。"
 disable-model-invocation: true
 ---
 
 # CleanSight 依赖安装
 
-仅在用户显式输入 `/deploy <任务>` 时启用。普通讨论和语法引用不触发；用户补充信息可继续用于同一任务。
+仅在用户显式输入 `/install <任务>` 时启用。普通讨论和语法引用不触发；用户补充信息可继续用于同一任务。
 
 ## 输入与边界
 
@@ -21,15 +21,15 @@ disable-model-invocation: true
 - 准备或更新源机第三方二进制读 [物料维护](references/materials.md)。
 - Python 安装后共用 [OpenCV 修复及验证](references/common.md)。设备计算验证留在平台 reference。
 
-运行配置的历史说明仍保留在 `references/runtime-config.md`，本轮安装不执行该流程。
+运行配置的历史说明暂存于 `references/runtime-config.md`，安装流程不执行该部分。
 
 ## 流程
 
 1. 确认目标并按平台预检。命令在项目根目录执行。已有 `.venv` 先检查解释器路径、3.10–3.12 范围和 `pyvenv.cfg` 的系统包继承方式，NVIDIA 必须 false，PPU 必须 true。不匹配时停止并说明，询问如何处理现有环境。
 2. 按平台安装 Python 依赖。普通包默认清华镜像，PPU 默认阿里镜像；访问失败时查明错误再选可用来源，不擅自改变依赖版本。无需无条件升级 pip。
 3. 按 common reference 检查 OpenCV，仅不健康时修复。
-4. 根据 [物料维护](references/materials.md) 确认用户提供的源机归档可用。使用目标 `.venv` 的 Python 执行 `python .claude/skills/deploy/scripts/install_binaries.py all --base-url "<源机地址>"`，替换占位符后执行。可只安装 `ffmpeg` 或 `mediamtx`；可用的既有二进制无需重装，此时无需提供源机地址。
-5. 使用同一 Python 执行 `python .claude/skills/deploy/scripts/verify_environment.py`，再执行平台设备计算检查。
+4. 根据 [物料维护](references/materials.md) 确认用户提供的源机归档可用。使用目标 `.venv` 的 Python 执行 `python .claude/skills/install/scripts/install_binaries.py all --base-url "<源机地址>"`，替换占位符后执行。可只安装 `ffmpeg` 或 `mediamtx`；可用的既有二进制无需重装，此时无需提供源机地址。
+5. 使用同一 Python 执行 `python .claude/skills/install/scripts/verify_environment.py`，再执行平台设备计算检查。
 6. 报告环境验证结果、未完成项和真实执行范围；不要据此宣称业务服务可用。
 
 通用工具不导入应用模块。下载、解压、命令或验证失败即停止对应步骤，不继续覆盖可用环境。辅助脚本同时执行 `all` 时逐组件提交，第二个组件失败会保留第一个已安装的组件，修复后单独重试失败组件。

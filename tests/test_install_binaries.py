@@ -11,7 +11,7 @@ import zipfile
 import pytest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / ".claude/skills/deploy/scripts/install_binaries.py"
+SCRIPT = Path(__file__).resolve().parents[1] / ".claude/skills/install/scripts/install_binaries.py"
 spec = importlib.util.spec_from_file_location("install_binaries", SCRIPT)
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)

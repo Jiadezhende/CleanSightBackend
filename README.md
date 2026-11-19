@@ -18,7 +18,7 @@ CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同
 ## 项目结构
 
 ```
-.claude/skills/deploy/             # 显式 /deploy 编排依赖安装与验证
+.claude/skills/install/             # 显式 /install 编排依赖安装与验证
 start_backend.sh / start_backend.ps1  # 一条命令拉起网关（含 MediaMTX）+ 后端，端口在此声明
 build.sh                          # 准备第三方二进制 vendor 归档
 app/
@@ -43,7 +43,7 @@ app/
 │   └── cleanup/         # 存储 TTL 清理（只依赖 storage）
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
 ├── db/                  # 平台 DB（PostgreSQL，只读）：database 连接池 + 一张表一个 ORM 模块 tasks / alarms
-├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 deploy skill
+├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 install skill
 └── utils/               # 日志装饰器
 config/                  # 运维要改的配置：六份服务 YAML + uvicorn 日志 logging.json
 requirements/            # 依赖清单：base.txt 底座 + 按部署路径分的 prod / gpu / ppu
@@ -52,7 +52,7 @@ tests/                   # 单元 & 组件测试（裸 pytest 只跑这里）
 integration_tests/       # 端到端集成测试（需真实 RTSP 流），fixtures/ 放测试视频
 scripts/                 # 偶尔手动跑的运维工具（迁移 / SQL）；hospital_sync/ 是医院数据同步的独立交付物，不属后端主链路
 docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口契约，外加开发规范与快速开始
-.claude/skills/deploy/   # 部署规范唯一入口：先定平台与角色，再读对应 references
+.claude/skills/install/   # 部署规范唯一入口：先定平台与角色，再读对应 references
 ```
 
 根目录只放**每台机器都要跑的生命周期入口**（装、起、打物料）；偶尔跑的工具进 `scripts/`。
@@ -80,7 +80,7 @@ docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口�
 - 日志：`config/logging.json`（uvicorn dictConfig，路径硬编码、无环境变量开关）
 - Python 工具配置（pytest / 覆盖率）：`pyproject.toml`
 
-> 部署（Linux / Windows / PPU 装环境、物料、`.env` 与端口）见 `/deploy` skill：[.claude/skills/deploy/SKILL.md](.claude/skills/deploy/SKILL.md)；开发规范（分支/测试/模块解耦）见 [开发指南](docs/DEVELOPMENT.md)。
+> 部署（Linux / Windows / PPU 装环境、物料、`.env` 与端口）见 `/install` skill：[.claude/skills/install/SKILL.md](.claude/skills/install/SKILL.md)；开发规范（分支/测试/模块解耦）见 [开发指南](docs/DEVELOPMENT.md)。
 
 ---
 
@@ -91,7 +91,7 @@ docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口�
 .\start_backend.ps1 dev          # Windows
 ```
 
-一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，不要再单独起 MediaMTX。安装依赖显式调用 `/deploy` skill，Python 包走镜像或官方索引，第三方二进制从源机获取。安装验证完成后再单独配置并启动服务。
+一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，不要再单独起 MediaMTX。安装依赖显式调用 `/install` skill，Python 包走镜像或官方索引，第三方二进制从源机获取。安装验证完成后再单独配置并启动服务。
 
 起流后打开后端自带的**控制台**观测运行状态（任务总览 / 实时画面 / 回放 / 指标）：`http://localhost:8000/ui-f3m8/console/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
 
@@ -192,13 +192,13 @@ python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      
 
 | 现象 | 排查 |
 |------|------|
-| `ffmpeg not found` | 后端只认项目内 `.ffmpeg/bin/ffmpeg`，不回退系统 PATH；通过 `/deploy` 从源机重新安装钉版 FFmpeg，别装系统版 |
+| `ffmpeg not found` | 后端只认项目内 `.ffmpeg/bin/ffmpeg`，不回退系统 PATH；通过 `/install` 从源机重新安装钉版 FFmpeg，别装系统版 |
 | 数据库连接失败 | 检查 `.env` 数据库配置、服务是否运行、网络/防火墙 |
 | `CUDA not available` | `nvidia-smi` 查驱动，`torch.cuda.is_available()` 验证；否则自动降级 CPU |
 | 推流超时 / Stream not found | 确认 8004 与 18004 都在听（网关日志看 MediaMTX 是否起来）、URL `rtsp://<host>:8004/live/<name>` |
 | WebSocket 断开 | 检查网络、客户端超时、后端日志 |
 
-日志按模块 `[Module]` 前缀着色输出（`config/logging.json`）。更多帮助见 [知识库](docs/kb/INDEX.md) 与 `/deploy` skill。
+日志按模块 `[Module]` 前缀着色输出（`config/logging.json`）。更多帮助见 [知识库](docs/kb/INDEX.md) 与 `/install` skill。
 
 ---
 

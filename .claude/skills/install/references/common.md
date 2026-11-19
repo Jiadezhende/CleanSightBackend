@@ -5,7 +5,7 @@
 ## OpenCV
 
 ```bash
-python .claude/skills/deploy/scripts/verify_environment.py --opencv-only
+python .claude/skills/install/scripts/verify_environment.py --opencv-only
 ```
 
 检查成功则跳过修复。检查失败先看原因；Python 范围错误应先处理解释器。只有 OpenCV 包冲突、导入失败或 GUI 构建时，执行以下修复：
@@ -22,7 +22,7 @@ PPU 默认使用 `https://mirrors.aliyun.com/pypi/simple/`。修复只修改项�
 FFmpeg／MediaMTX 按入口使用源机归档安装后执行：
 
 ```bash
-python .claude/skills/deploy/scripts/verify_environment.py
+python .claude/skills/install/scripts/verify_environment.py
 ```
 
 该命令检查关键依赖导入、headless 和两个二进制可执行性，创建项目 `.ultralytics` 供导入使用，不加载应用配置。最后执行平台 reference 中的设备验证。失败时报告具体步骤，深入的依赖审计按故障需要执行。

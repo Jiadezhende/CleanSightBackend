@@ -1,5 +1,5 @@
 # Linux / Windows NVIDIA 完整依赖（Python 3.10–3.12）。
-# 安装时需提供 cu128 wheel 索引，命令见 deploy skill 的 NVIDIA reference。
+# 安装时需提供 cu128 wheel 索引，命令见 install skill 的 NVIDIA reference。
 -r base.txt
 torch==2.8.0+cu128
 torchvision==0.23.0+cu128

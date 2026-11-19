@@ -267,10 +267,10 @@ class Settings(BaseSettings):
         """ffmpeg_path 为空时指向项目自包含的钉版静态包，消除「install 装到固定位置却要人手抄进 .env」的负担：
 
         - 项目自包含第三方服务：ffmpeg 与 mediamtx 同为项目内 vendored 二进制，唯一来源是
-          项目根下的 .ffmpeg/bin/（deploy skill 安装；Linux 名 ffmpeg，Windows 名 ffmpeg.exe）。
+          项目根下的 .ffmpeg/bin/（install skill 安装；Linux 名 ffmpeg，Windows 名 ffmpeg.exe）。
           钉版保证 HLS fmp4 行为正确，见 docs/HLS_TIMELINE_PITFALL.md。
         - 不回退 PATH：一处明确来源、失败即报（缺料时由 FFmpegDecoder 抛 FFmpegError，
-          报出确切路径，提示通过 /deploy 安装）。
+          报出确切路径，提示通过 /install 安装）。
         - 显式设了 CLEANSIGHT_FFMPEG_PATH 则尊重之（逃生口，如 Mac 开发机指向 homebrew ffmpeg）。
 
         路径与安装工具各自从「项目根」推导 .ffmpeg/bin/，无共享绝对路径耦合。

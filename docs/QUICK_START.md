@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- 已按 `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）装完环境：安装工具会把 FFmpeg 与 MediaMTX 装进项目内的 `.ffmpeg/` 与 `.mediamtx/`，不依赖系统 PATH
+- 已按 `/install` skill（[.claude/skills/install/SKILL.md](../.claude/skills/install/SKILL.md)）装完环境：安装工具会把 FFmpeg 与 MediaMTX 装进项目内的 `.ffmpeg/` 与 `.mediamtx/`，不依赖系统 PATH
 - `.env.dev` 已填（六项必填见 skill 的 runtime-config.md）
 
 ---
@@ -128,5 +128,5 @@ python integration_tests/test_single_client.py --scenario 3 --task_id 2 --durati
 
 ## 相关文档
 
-- `/deploy` skill（[.claude/skills/deploy/SKILL.md](../.claude/skills/deploy/SKILL.md)）— 装环境、物料、`.env` 与端口
+- `/install` skill（[.claude/skills/install/SKILL.md](../.claude/skills/install/SKILL.md)）— 装环境、物料、`.env` 与端口
 - [知识库](kb/INDEX.md) — 架构、服务内部、API 清单、配置等描述性内容的单一入口
