@@ -130,18 +130,7 @@ class Settings(BaseSettings):
     gateway_rate_window: int = 60            # 速率窗口大小（秒）
     gateway_rate_ban_threshold: int = 5      # 速率超限违规次数阈值（达到后封禁，0=不封禁）
     gateway_rate_ban_window: int = 60        # 速率超限违规计数窗口（秒）
-    # 宽松路径前缀（逗号分隔）。大屏侧 /task/live、/task/history、/traceback 必须在列：
-    # 前两者是跨 origin 轮询，浏览器的 CORS 预检 OPTIONS 与实际请求各计一次数，普通
-    # 配额（60/60s）撑不住；/traceback 的 404 是正常业务态（只落了 raw 的 step 按默认
-    # track=processed 查即 404），不该被反扫描当扫描特征累计。/admin/ 是控制台的
-    # 数据接口，运维页轮询约 60 次/分并带延迟测试突发；带尾斜杠，免得 /admin、/admin.php、
-    # /administrator 这类扫描器探测也进宽松档、不计反扫描。/ui-f3m8 是静态页：控制台按 ES module
-    # 分文件，开一次页就拉十几个资产，刷新几次就会撞普通配额。
-    gateway_relaxed_prefixes: str = (
-        "/health,/task/message,/task/live,/task/history,/traceback,/admin/,/metrics,/ui-f3m8"
-    )
     gateway_relaxed_rate_limit: int = 600    # 宽松路径每窗口最大请求数
-    gateway_bypass_prefixes: str = "/media"  # 完全绕过速率限制与反扫描的前缀（仅靠路由层 token 鉴权），逗号分隔
     gateway_scan_threshold: int = 10         # 触发封禁的 404/405 次数（路径/方法枚举扫描）
     gateway_scan_window: int = 300           # 扫描计数窗口（秒）
     gateway_ban_duration: int = 3600         # 封禁时长（秒）
@@ -155,10 +144,6 @@ class Settings(BaseSettings):
     label_studio_token: str = ""              # LS Legacy Token（Authorization: Token <...>）
     label_studio_default_project_id: int = 0  # 默认 project_id；0 表示未配置（请求需显式传 project_id）
     lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage_base_dir}/.lab_exports
-    lab_export_ffmpeg_preset: str = "veryfast"
-    lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
-    lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
-    lab_export_max_clips_per_submit: int = 20
 
     @property
     def inference_fps(self) -> float:

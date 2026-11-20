@@ -1,4 +1,4 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-11-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -42,7 +42,7 @@ Lab 有三条路径：从一次 run 的 raw 轨裁剪区间送 Label Studio（Cl
 
 1. `require_label_studio()`：LS url / token 未配置 → 503。
 2. `resolve_project_id()`：请求值优先（0 / None 视为未传），否则取运行时默认值；都没有 → 400。
-3. `validate_clips()`：上限来自 `settings.lab_export_max_*` → 400。
+3. `validate_clips()`：上限来自 Lab service 的内部导出策略，与 submit_limits() 返回值一致 → 400。
 4. `resolve_run` + `hls.query_has_segments(run, "raw")`：点名 run 不在 → 404 Run；无可见 run 或无 raw 段 → 404 Segments。
 5. `submit_clips`：逐段 `ClipBuilder.build_one` 后上传 LS。单段失败不让整请求失败：HTTP 仍 200，每段带 `success` / `error_code`；LS 失败优先透传客户端的 `ls_unreachable` / `ls_auth` 等码，缺省 `ls_bad_response`。
 6. 全成功或 `keep_artifacts_on_failure=false` → 删 job_dir；否则保留并回传路径。非 `ClipBuildError` 的异常直接冒出，job_dir 不清理。
@@ -119,11 +119,12 @@ fps 漂移同时反映在起点与 EXTINF 上而被吸收。500 ms 落在正常�
 
 LS import 在文件上传模式下只读 `request.FILES`，非文件字段一律忽略，所以 clip 不带元数据；素材侧溯源只剩文件名里的墙钟区间。后端职责止于推 clip，不负责从 LS 导出标注或转训练集。
 
-## 配置：url / project_id / task_source 可在页面改，token 只来自 env
+## 配置：页面配置覆盖部署默认值，导出策略由模块维护
 
 - 运行时可改并持久化（`runtime_config.py`，`{storage_base_dir}/lab_runtime_config.json`，文件值优先、回退 env）：`label_studio_url`、`default_project_id`、`task_source`。
 - LS token 只来自 `settings.label_studio_token`，页面不可见、不可改。`/health` 由 router 直接读 `lab_config.get_url / get_token / get_default_project_id`，再调 `ping_label_studio`（超时 10 s，异常折成 `(False, 消息)`，不抛）。
-- 其余参数在 `settings`：`lab_export_temp_dir`（空则 `{storage_base_dir}/.lab_exports`）、`lab_export_ffmpeg_preset`、`lab_export_max_clip_ms` / `lab_export_max_total_ms` / `lab_export_max_clips_per_submit`。
+- Settings 保留 lab_export_temp_dir（空则 {storage_base_dir}/.lab_exports）与 Label Studio 连接信息，支持单份 YAML 和进程变量，见 [SERVICE_SETTINGS.md](SERVICE_SETTINGS.md)。
+- 编码 preset 和提交上限归 service.py 内部常量维护：veryfast、单段 5 分钟、总时长 30 分钟、最多 20 段；不再使用 lab_export_ffmpeg_preset／lab_export_max_* 配置字段。
 
 ## 代码来源
 

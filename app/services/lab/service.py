@@ -43,6 +43,13 @@ from .types import (
 )
 
 
+# 导出策略由 Lab 维护；接口返回和提交校验共用同一组上限。
+_EXPORT_FFMPEG_PRESET = "veryfast"
+_EXPORT_MAX_CLIP_MS = 300_000
+_EXPORT_MAX_TOTAL_MS = 1_800_000
+_EXPORT_MAX_CLIPS_PER_SUBMIT = 20
+
+
 class LabelStudioNotConfiguredError(Exception):
     """LS url 或 token 未配置（url 在送标页面设，token 只来自 env）。"""
 
@@ -69,13 +76,11 @@ def resolve_project_id(requested: Optional[int]) -> int:
 
 
 def submit_limits() -> Dict[str, int]:
-    """送标上限 `{max_clips, max_clip_ms, max_total_ms}`，取 settings；`validate_clips` 用的就是这一组。"""
-    from app.settings import settings
-
+    """送标上限 `{max_clips, max_clip_ms, max_total_ms}`，与 `validate_clips` 共用。"""
     return {
-        "max_clips": settings.lab_export_max_clips_per_submit,
-        "max_clip_ms": settings.lab_export_max_clip_ms,
-        "max_total_ms": settings.lab_export_max_total_ms,
+        "max_clips": _EXPORT_MAX_CLIPS_PER_SUBMIT,
+        "max_clip_ms": _EXPORT_MAX_CLIP_MS,
+        "max_total_ms": _EXPORT_MAX_TOTAL_MS,
     }
 
 
@@ -145,8 +150,8 @@ def submit_clips(
     builder = ClipBuilder(
         ffmpeg_bin=s.ffmpeg_path,
         temp_root=temp_root,
-        preset=s.lab_export_ffmpeg_preset,
-        max_duration_ms=s.lab_export_max_clip_ms,
+        preset=_EXPORT_FFMPEG_PRESET,
+        max_duration_ms=_EXPORT_MAX_CLIP_MS,
     )
     ls = LabelStudioClient(
         base_url=ls_url,

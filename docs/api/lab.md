@@ -221,11 +221,11 @@
 
 **`400` 全部触发条件**（`app/services/lab/service.py` 的 `validate_clips` / `resolve_project_id`，整请求级、任一即拒）：
 
-- `clips` 段数 > `lab_export_max_clips_per_submit`（默认 20），`field=clips`；
+- `clips` 段数 > Lab 内部数量上限（20），`field=clips`；
 - 某段 `end_media_ms ≤ start_media_ms`，`field=clips`；
-- 某段时长（`end_media_ms-start_media_ms`）> `lab_export_max_clip_ms`（默认 300000 ms = 5 min），`field=clips`；
+- 某段时长（`end_media_ms-start_media_ms`）> Lab 内部单段上限（300000 ms = 5 min），`field=clips`；
 - 按 `start_media_ms` 排序后相邻段**重叠**（`start_media_ms < 前一段 end_media_ms`），`field=clips`；
-- 各段时长之和 > `lab_export_max_total_ms`（默认 1800000 ms = 30 min），`field=clips`；
+- 各段时长之和 > Lab 内部总时长上限（1800000 ms = 30 min），`field=clips`；
 - `project_id` 缺失（req 未传且无 default），`field=project_id`。
 
 > 校验顺序：先查 LS 配置（**503**）→ 再算 project_id/校验 clips（**400**）→ 再解析 run、查段存在性（**404**）。故未配置 LS 时即便入参也非法，也先返回 503。
@@ -443,9 +443,9 @@
 | `task_source` | string | `db`（磁盘 + 平台库，库连不上自动退回仅磁盘）\| `storage`（仅磁盘） |
 | `token_configured` | bool | env `CLEANSIGHT_LABEL_STUDIO_TOKEN` 是否非空；token 明文不外露 |
 | `source` | string | `file`（存在持久化 JSON、以其为准）\| `env`（无文件或读文件失败，回退 settings） |
-| `limits.max_clips` | int | 一次 `POST /submit` 最多几段（settings `lab_export_max_clips_per_submit`） |
-| `limits.max_clip_ms` | int | 单段时长上限，媒体 ms（`lab_export_max_clip_ms`） |
-| `limits.max_total_ms` | int | 一次提交总时长上限，媒体 ms（`lab_export_max_total_ms`） |
+| `limits.max_clips` | int | 一次 `POST /submit` 最多几段（Lab 内部策略，当前 20） |
+| `limits.max_clip_ms` | int | 单段时长上限，媒体 ms（Lab 内部策略，当前 300000） |
+| `limits.max_total_ms` | int | 一次提交总时长上限，媒体 ms（Lab 内部策略，当前 1800000） |
 
 > token 永远只来自 env、页面不可改；`token_configured` 是唯一可见信号。
 

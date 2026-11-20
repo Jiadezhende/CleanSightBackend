@@ -23,6 +23,15 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
+# 路径分类随路由代码维护；配额仍由 Settings 配置。
+# 高频轮询、正常业务 404 和控制台资产使用宽松档；/admin/ 保留尾斜杠排除扫描探测。
+_RELAXED_PREFIXES = (
+    "/health", "/task/message", "/task/live", "/task/history",
+    "/traceback", "/admin/", "/metrics", "/ui-f3m8",
+)
+# 媒体路由自行校验 HMAC token，跳过限流及反扫描，仍检查 IP 白名单与封禁。
+_BYPASS_PREFIXES = ("/media",)
+
 
 # ============================================================================
 # Store: IP 白名单 + 动态封禁
@@ -260,12 +269,12 @@ class GatewayMiddleware:
     Starlette 逆序包装，最后注册的最先执行，因此注册在 CORSMiddleware 之后即可。
 
     宽松路径（relaxed paths）：
-      匹配 gateway_relaxed_prefixes 前缀的路径使用宽松速率 bucket，且不计入
+      匹配 _RELAXED_PREFIXES 前缀的路径使用宽松速率 bucket，且不计入
       反扫描检测和封禁升级。用于高频轮询接口（/health/、/task/message/ 等），
       避免正常业务调用被误封。
 
     绕过路径（bypass paths）：
-      匹配 gateway_bypass_prefixes 前缀的路径**完全跳过**速率限制与反扫描计数，
+      匹配 _BYPASS_PREFIXES 前缀的路径**完全跳过**速率限制与反扫描计数，
       仅保留 IP 白名单/封禁检查。用于自带强鉴权的路由（如 /media/* 的 HMAC token），
       避免合法 HLS 高频段请求被打爆。
     """
@@ -278,8 +287,6 @@ class GatewayMiddleware:
         self._whitelist: IPWhitelistStore | None = None
         self._ratelimit: RateLimitStore | None = None
         self._relaxed_ratelimit: RateLimitStore | None = None
-        self._relaxed_prefixes: tuple[str, ...] = ()
-        self._bypass_prefixes: tuple[str, ...] = ()
         self._antiscan: AntiScanStore | None = None
 
     # ------------------------------------------------------------------
@@ -309,12 +316,6 @@ class GatewayMiddleware:
             self._relaxed_ratelimit = RateLimitStore(
                 limit=s.gateway_relaxed_rate_limit,
                 window=s.gateway_rate_window,
-            )
-            self._relaxed_prefixes = tuple(
-                p.strip() for p in s.gateway_relaxed_prefixes.split(",") if p.strip()
-            )
-            self._bypass_prefixes = tuple(
-                p.strip() for p in s.gateway_bypass_prefixes.split(",") if p.strip()
             )
             self._antiscan = AntiScanStore(
                 threshold=s.gateway_scan_threshold,
@@ -346,9 +347,9 @@ class GatewayMiddleware:
         path = scope.get("path", "")
 
         # 判断路径分类：bypass > relaxed > normal
-        is_bypass = any(path.startswith(prefix) for prefix in self._bypass_prefixes)
+        is_bypass = any(path.startswith(prefix) for prefix in _BYPASS_PREFIXES)
         is_relaxed = (not is_bypass) and any(
-            path.startswith(prefix) for prefix in self._relaxed_prefixes
+            path.startswith(prefix) for prefix in _RELAXED_PREFIXES
         )
 
         # 1. IP 白名单 / 封禁检查（所有路径都做，bypass 也不例外）

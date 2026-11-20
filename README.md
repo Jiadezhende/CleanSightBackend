@@ -77,6 +77,7 @@ docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口�
 ### 配置文件
 
 - 运行配置：`config/settings.yaml` 使用 Settings 小写字段名；`CLEANSIGHT_*` 进程环境变量优先覆盖，字段定义见 `app/settings.py`。
+- 常规部署使用 `config/settings.example.yaml`；完整字段、加载规则及升级迁移见 [配置说明](docs/kb/SERVICE_SETTINGS.md)。
 - 服务 YAML：`config/` 下 `inference_config.yaml`、`stream_config.yaml`、`persistence_config.yaml`、`recording_config.yaml`、`client_config.yaml`、`health_monitor_config.yaml`
 - 日志：`config/logging.json`（uvicorn dictConfig，路径硬编码、无环境变量开关）
 - Python 工具配置（pytest / 覆盖率）：`pyproject.toml`

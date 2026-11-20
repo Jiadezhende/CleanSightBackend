@@ -9,7 +9,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-from app.settings import Settings, settings
+from app.settings import settings
 from app.gateway import AntiScanStore, GatewayMiddleware, IPWhitelistStore, RateLimitStore
 
 
@@ -18,7 +18,7 @@ from app.gateway import AntiScanStore, GatewayMiddleware, IPWhitelistStore, Rate
 # ---------------------------------------------------------------------------
 
 
-# 各用例的基线配置：显式写死，不随 .env.* 漂移；用例只覆盖自己关心的字段
+# 各用例的基线配置：显式写死，不随运行配置漂移；用例只覆盖自己关心的字段
 _BASELINE = dict(
     gateway_enabled=True,
     gateway_allowed_ips="",           # 空 = 不限制
@@ -26,16 +26,11 @@ _BASELINE = dict(
     gateway_rate_window=60,
     gateway_rate_ban_threshold=5,     # 速率超限违规 5 次触发封禁
     gateway_rate_ban_window=60,
-    gateway_relaxed_prefixes="/health,/task/message",
     gateway_relaxed_rate_limit=600,
-    gateway_bypass_prefixes="/media",
     gateway_scan_threshold=10,
     gateway_scan_window=300,
     gateway_ban_duration=3600,
 )
-
-# 生产默认宽松前缀（Settings 字段默认值，不受 .env.* 覆盖）
-_PROD_RELAXED_PREFIXES = Settings.model_fields["gateway_relaxed_prefixes"].default
 
 
 def _reset(gw: GatewayMiddleware) -> None:
@@ -44,8 +39,6 @@ def _reset(gw: GatewayMiddleware) -> None:
     gw._whitelist = None
     gw._ratelimit = None
     gw._relaxed_ratelimit = None
-    gw._relaxed_prefixes = ()
-    gw._bypass_prefixes = ()
     gw._antiscan = None
 
 
@@ -327,11 +320,10 @@ class TestGatewayMiddlewareHTTP:
         "path", ["/health/status", "/task/message/123", "/admin/overview", "/ui-f3m8/console/app.js"],
     )
     async def test_relaxed_prefix_uses_relaxed_limit(self, gw, init_gw, path):
-        """生产默认宽松前缀下，健康检查、任务结束后前端持续轮询的 /task/message、控制台数据接口（/admin/）、
+        """代码内宽松前缀下，健康检查、任务结束后前端持续轮询的 /task/message、控制台数据接口（/admin/）、
         控制台静态资产（一次开页十几个 module）不被限流或封禁"""
         init_gw(
             gw,
-            gateway_relaxed_prefixes=_PROD_RELAXED_PREFIXES,
             gateway_rate_limit=2,         # 普通路径很紧：第 3 次即 429
             gateway_relaxed_rate_limit=100,
             gateway_scan_threshold=1000,  # 防干扰
@@ -346,7 +338,6 @@ class TestGatewayMiddlewareHTTP:
         """宽松档只放 `/admin/` 下的接口：扫描器最常探的 /admin*、/administrator 仍走普通档、照常限流"""
         init_gw(
             gw,
-            gateway_relaxed_prefixes=_PROD_RELAXED_PREFIXES,
             gateway_rate_limit=2,
             gateway_relaxed_rate_limit=100,
             gateway_scan_threshold=1000,
@@ -362,7 +353,6 @@ class TestGatewayMiddlewareHTTP:
             gw,
             gateway_rate_limit=1,           # 普通路径极紧
             gateway_relaxed_rate_limit=1,   # 宽松也极紧
-            gateway_bypass_prefixes="/media",
             gateway_scan_threshold=1000,
         )
         async with await self._client("127.0.0.1") as client:
@@ -379,7 +369,6 @@ class TestGatewayMiddlewareHTTP:
             gateway_scan_window=60,
             gateway_ban_duration=3600,
             gateway_rate_limit=1000,
-            gateway_bypass_prefixes="/media",
         )
         async with await self._client("127.0.0.1") as client:
             # /media/* 的 404/403 应该不计入反扫描
@@ -423,16 +412,16 @@ class TestGatewayMiddlewareHTTP:
             gateway_scan_threshold=1000,    # 防止 405 干扰
         )
         # 普通路径走 _ratelimit，有封禁升级；宽松路径走 _relaxed_ratelimit，没有。
-        # /metrics 在生产默认宽松前缀里，这里靠基线前缀（/health,/task/message）当普通路径用
+        # GET /api/start 属于普通档，路由返回 405，不触发业务启动。
         async with await self._client("127.0.0.1") as client:
             # 消耗配额（2 次正常）
             for _ in range(2):
-                await client.get("/metrics")
+                await client.get("/api/start")
             # 连续超限 3 次 → 触发封禁
             for _ in range(3):
-                await client.get("/metrics")
+                await client.get("/api/start")
             # IP 已封禁，返回 403（不再是 429）
-            resp = await client.get("/metrics")
+            resp = await client.get("/api/start")
         assert resp.status_code == 403
 
 
