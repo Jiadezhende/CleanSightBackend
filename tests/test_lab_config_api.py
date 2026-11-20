@@ -1,4 +1,4 @@
-"""`GET` / `PUT /lab/config`：响应带送标上限 `limits`（与 `/submit` 校验同一组 settings）。"""
+"""`GET` / `PUT /lab/config`：响应带送标上限 `limits`（与 `/submit` 校验同一组 Lab 策略）。"""
 
 import pytest
 import pytest_asyncio
@@ -6,7 +6,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.services.lab import runtime_config
-from app.settings import settings
+from app.services.lab import service as lab_service
 
 
 @pytest_asyncio.fixture
@@ -18,9 +18,9 @@ async def client():
 
 @pytest.fixture(autouse=True)
 def _limits(monkeypatch):
-    monkeypatch.setattr(settings, "lab_export_max_clips_per_submit", 7)
-    monkeypatch.setattr(settings, "lab_export_max_clip_ms", 60_000)
-    monkeypatch.setattr(settings, "lab_export_max_total_ms", 120_000)
+    monkeypatch.setattr(lab_service, "_EXPORT_MAX_CLIPS_PER_SUBMIT", 7)
+    monkeypatch.setattr(lab_service, "_EXPORT_MAX_CLIP_MS", 60_000)
+    monkeypatch.setattr(lab_service, "_EXPORT_MAX_TOTAL_MS", 120_000)
 
 
 _LIMITS = {"max_clips": 7, "max_clip_ms": 60_000, "max_total_ms": 120_000}

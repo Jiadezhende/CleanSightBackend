@@ -1,0 +1,30 @@
+# 复制为 config/settings.yaml；每个部署目录仅维护这一份运行配置。
+# CLEANSIGHT_* 进程变量优先覆盖。密码、token 和设备编号使用引号。
+# 完整字段见 docs/kb/SERVICE_SETTINGS.md；不需要修改的字段可省略，使用代码默认值。
+
+# 必填：数据库与告警目标
+db_host: "your_db_host"
+db_port: 5432
+db_name: "your_db_name"
+db_user: "your_db_user"
+db_password: "your_db_password"
+alarm_report_url: "http://your-server/api/alarm_report"
+strict: true
+
+# 监听地址与端口，按平台映射和本机占用情况调整
+host: "0.0.0.0"
+port: 8000
+mediamtx_proxy_port: 8004
+mediamtx_internal_port: 18004
+mediamtx_rtp_port: 8002
+mediamtx_rtcp_port: 8003
+
+# 部署资源：共享机器明确指定卡号；当前空字符串会回退默认值，详见完整说明
+cuda_device: "0"
+model_path: "./app/data"
+storage_dir: "./database"
+
+# 可选：访问控制。空白名单不限制来源，HTTP 与 RTSP 共用。
+# gateway_allowed_ips: "10.0.0.1,10.0.0.2"
+# 需要重启后已有媒体 URL 继续有效时，填写稳定的随机密钥。
+# media_token_secret: ""

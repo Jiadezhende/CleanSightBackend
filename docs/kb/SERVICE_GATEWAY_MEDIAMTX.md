@@ -1,12 +1,11 @@
-> 更新时间：2026-09-30
+> 更新时间：2026-11-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Gateway And MediaMTX
 
-仓库有两个 gateway：后端进程内的 FastAPI `GatewayMiddleware`，和独立进程 `mediamtx_gateway`（RTSP TCP 代理）。
-二者共用 `app/gateway.py` 的 `IPWhitelistStore` / `RateLimitStore` 实现，但各持独立实例，IP 规则与封禁互不影响。
-`app/gateway.py` 放在 `app/` 根，正因为两个进程都要用它。
+HTTP GatewayMiddleware 与 RTSP TCP 代理同属后端进程，RTSP 代理和 MediaMTX 子进程由 app/daemons/mediamtx 的 lifespan 管理。
+二者共用 app/gateway.py 的 Store 实现和 Settings 策略字段，但各持独立计数与封禁状态。完整配置见 [SERVICE_SETTINGS.md](SERVICE_SETTINGS.md)。
 
 ## FastAPI GatewayMiddleware
 
@@ -17,11 +16,11 @@
 
 | 档 | 限流 | 反扫描计数 | IP 白名单 / 封禁 | 默认前缀 |
 |----|------|:-:|:-:|------|
-| normal | `gateway_rate_limit`（60 / 60s）；窗口内超限 `gateway_rate_ban_threshold`（5）次即升级封禁 | 计 | 查 | 其余全部（含 `/api`、`/ai`、`/lab-f3m8`、`/ui-f3m8`、`/algorithm`） |
-| relaxed | `gateway_relaxed_rate_limit`（600 / 60s），独立 bucket；不升级封禁 | 不计 | 查 | `/health`、`/task/message`、`/task/live`、`/task/history`、`/traceback`、`/admin-f3m8`、`/metrics` |
+| normal | `gateway_rate_limit`（60 / 60s）；窗口内超限 `gateway_rate_ban_threshold`（5）次即升级封禁 | 计 | 查 | 其余全部（含 `/api`、`/ai`、`/lab`、`/algorithm`） |
+| relaxed | `gateway_relaxed_rate_limit`（600 / 60s），独立 bucket；不升级封禁 | 不计 | 查 | `/health`、`/task/message`、`/task/live`、`/task/history`、`/traceback`、`/admin/`、`/metrics`、`/ui-f3m8` |
 | bypass | 跳过 | 不计 | 查 | `/media` |
 
-前缀默认值定在 `app/settings.py`（`.env` 可覆盖），大屏自封是生产正确性问题，不依赖部署手工配置。
+前缀固定在 app/gateway.py 的 _RELAXED_PREFIXES／_BYPASS_PREFIXES，随路由代码维护，不接受 YAML／环境变量覆盖。配额仍来自 Settings。
 
 反扫描：`_TRACKED_CODES = {404, 405}`，`gateway_scan_threshold=10` / `gateway_scan_window=300` → 300s 内 10 次即封
 `gateway_ban_duration=3600s`。
@@ -35,35 +34,28 @@
   播放端逐个 HEAD 探 playlist，若计数会正好撞线。
 - **`/task/live`、`/task/history` 用 relaxed**：大屏跨 origin 轮询，CORS 预检 `OPTIONS` 与实际请求各计一次，3s 一轮即
   40 次 / 分，普通档撑不住。
-- **`/admin-f3m8` 用 relaxed**：admin 页数据接口，单页轮询 overview（3s）/ metrics/json（5s）/ offline/jobs（2s）约
-  62 次 / 分；页内延迟测试默认向 `/admin-f3m8/ping` 发 100 个请求、并发 5。
-- **`/ui-f3m8` 留在 normal**：静态页开一次只拉 5~6 个资产（`index.html` + vendor），普通档足够；页面的高频请求都打在
-  `/admin-f3m8` 等宽松前缀上。
+- **`/admin/` 用 relaxed**：运维页高频轮询并带延迟测试突发；保留尾斜杠，避免 /admin.php、/administrator 等探测路径进入宽松档。
+- **`/ui-f3m8` 用 relaxed**：控制台以 ES module 分文件加载，开页和刷新会产生集中资产请求。
 - **`/algorithm` 留在 normal**：比色端点没有轮询需求。
 
-## MediaMTX Gateway（`mediamtx_gateway/`）
+## MediaMTX daemon（app/daemons/mediamtx/）
 
-- **职责**：可选拉起并守护 MediaMTX 子进程；在 MediaMTX RTSP 端口前放 TCP 代理（`rtsp_proxy.py::RTSPProxy`），对入站连接
-  查 IP 白名单与限流；MediaMTX 异常退出时指数退避重启（`min(2^n, 30)` 秒，最多 5 次，超限停网关）。
-- **防护比后端弱**：只有白名单 + 每 IP 连接限流（默认 30 次 / 60s），`RateLimitStore` 未挂 ban_store，超限只拒绝、不升级
-  封禁；没有反扫描。
-- **配置优先级**：`GATEWAY_*` 环境变量 > `mediamtx_gateway/config.ini` > 代码默认值。`mediamtx_bin = auto` 按平台选
-  `mediamtx/mediamtx(.exe)`，留空为纯代理模式。
-- **启动方式只有一种**：在仓库根执行 `python -m mediamtx_gateway.main`（从 `app.gateway` 取 Store，需要仓库根在
-  `sys.path` 上）。模块 import 无副作用，`logging.basicConfig` 在 `_main()` 里。
-- **与后端同一套工具链**：导入门禁 `test_intra_package_relative_cross_package_absolute` 覆盖 `mediamtx_gateway/*.py`；覆盖率
-  `source = ["app", "mediamtx_gateway"]`（`pyproject.toml`），须用不带值的 `pytest tests/ --cov`，`--cov=app` 会漏掉网关。
+- 构造不启动后台工作；后端内存预算检查后进入 daemon lifespan，先启动、最后停止。托管启动 5 秒内确认内部 RTSP 可连接，失败回滚并阻止后端就绪。
+- RTSP 每 IP 默认 30 次连接／60 秒，窗口内持续超限 5 次升级封禁；与 HTTP 独立计数。没有 HTTP 反扫描。gateway_enabled 统一控制两种协议的访问检查。
+- 非零异常退出最多重启 5 次，退避为 2、4、8、16、30 秒；意外零退出直接标记失败。最终失败关闭 RTSP 入口，保留后端及离线任务；健康接口返回 503／degraded。重试状态和故障代码见 [health API](../api/health.md)。
+- 停止时关闭连接并回收限流清理线程；子进程终止等待 5 秒后强制结束。起停支持重复调用。
+- auto 二进制位于 .mediamtx/；配置来自 Settings，旧 GATEWAY_*／INI 不再加载。worker 支持纯代理，但常规配置入口的空字符串限制见 SERVICE_SETTINGS.md。
+- Python 代码统一在 app/ 下，导入预算及覆盖率检查随 daemon 迁移，不再单独启动网关 Python 进程。
 
 ## MediaMTX 只开 RTSP，后端拉流绕过代理直连
 
-- `mediamtx/mediamtx.yml` 里 `rtmp` / `hls` / `webrtc` / `srt` / `api` / `metrics` / `playback` 均为 `no`，只开 RTSP；
-  `rtspAddress` 与 RTP / RTCP 地址都绑 `127.0.0.1`（端口由启动脚本经 `MTX_*` 覆盖），对外只经网关代理。
+- config/mediamtx.yml 只开 RTSP；内部 RTSP 与 RTP／RTCP 地址由 worker 通过子进程 MTX_* 设置为 127.0.0.1 和对应 Settings 端口，对外经代理。
 - 后端拉 RTSP 时，若 URL 端口等于 `mediamtx_proxy_port`，`app/services/stream/service.py::_rewrite_rtsp_url` 把地址改写为
   `127.0.0.1:{mediamtx_internal_port}`，绕过 RTSPProxy 直连 MediaMTX。对外端口经 NAT 映射时必须 1:1，否则改写失效。
 
 ## 代码来源
 
 - `app/gateway.py`（`GatewayMiddleware` / `RateLimitStore` / `AntiScanStore`）、`app/settings.py`（`gateway_*` 默认值）
-- `mediamtx_gateway/main.py`（`_load_config` / `_run_mediamtx` / `_main`）、`mediamtx_gateway/rtsp_proxy.py`、`mediamtx_gateway/config.ini`
-- `mediamtx/mediamtx.yml`、`pyproject.toml`
-- `tests/test_gateway.py`、`tests/test_mediamtx_gateway.py`、`tests/test_import_hygiene.py`
+- `app/daemons/mediamtx/{config,worker,proxy,instance,__init__}.py`、`app/main.py`
+- `config/mediamtx.yml`、`pyproject.toml`
+- `tests/test_gateway.py`、`tests/test_mediamtx_daemon.py`、`tests/test_rtsp_proxy.py`、`tests/test_import_hygiene.py`

@@ -1,61 +1,49 @@
+"""Application settings schema, YAML loading, shared instance and port validation."""
+
 import os
 from pathlib import Path
+import re
+from threading import Lock
+from typing import Collection, MutableMapping, Optional
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import yaml
 
 
-def _load_env_files():
-    """根据 CLEANSIGHT_ENV 环境变量加载对应的配置文件
+def runtime_config_path(root: Path) -> Path:
+    return root / "config" / "settings.yaml"
 
-    - CLEANSIGHT_ENV=dev  → 加载 .env.dev（默认）
-    - CLEANSIGHT_ENV=test → 加载 .env.test
-    - CLEANSIGHT_ENV=prod → 加载 .env
 
-    该函数会把键值对注入到 `os.environ`，以便 Pydantic 从环境读取。
+def read_runtime_config(path: Path) -> dict:
+    values = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(values, dict):
+        raise ValueError("Runtime configuration must be a mapping")
+    for key, value in values.items():
+        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
+            raise ValueError("Runtime configuration keys must use lowercase settings field names")
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ValueError("Runtime configuration values must be scalars")
+    return values
 
-    优先级：**已存在的环境变量 > 文件值**（`setdefault`，不覆盖）。启动脚本按机器/环境
-    解析出的端口是以 export 形式传进来的，若在此被文件值反向覆盖，脚本与后端会绑到
-    不同端口且无任何报错。这也与网关侧「环境变量 > config.ini > 默认值」的约定一致。
-    """
-    base = Path(__file__).parent.parent
-    env = os.environ.get("CLEANSIGHT_ENV", "dev").lower()
 
-    # 根据环境变量确定配置文件
-    env_files = {"dev": ".env.dev", "test": ".env.test", "prod": ".env"}
-
-    env_file_name = env_files.get(env, ".env.dev")
-    env_path = base / env_file_name
-
-    # 记录是否为开发模式（供后续校验逻辑判断）
-    global _LOADED_DEV
-    _LOADED_DEV = env == "dev"
-
-    # 加载环境文件
-    if not env_path.exists():
-        print(f"[Settings] Warning: Environment file '{env_file_name}' not found")
+def load_runtime_environment(
+    root: Path,
+    environ: Optional[MutableMapping[str, str]] = None,
+    known_fields: Optional[Collection[str]] = None,
+) -> None:
+    environ = os.environ if environ is None else environ
+    path = runtime_config_path(root)
+    if not path.exists():
         return
-
-    candidates = [env_path]
-    for p in candidates:
-        try:
-            p = Path(p)
-            if not p.exists():
-                continue
-            with p.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip('"').strip("'")
-                    os.environ.setdefault(k, v)
-        except Exception:
-            # 不要在导入阶段让 .env 文件加载失败阻塞应用
-            continue
+    values = read_runtime_config(path)
+    if known_fields is not None and values.keys() - set(known_fields):
+        raise ValueError("Unknown runtime configuration field; check against settings.example.yaml and Settings")
+    for key, value in values.items():
+        if value is not None:
+            # Settings and downstream ${CLEANSIGHT_*} expansion share the same values.
+            rendered = str(value).lower() if isinstance(value, bool) else str(value)
+            environ.setdefault("CLEANSIGHT_" + key.upper(), rendered)
 
 
 class Settings(BaseSettings):
@@ -127,27 +115,22 @@ class Settings(BaseSettings):
 
     # MediaMTX 端口映射（内部拉流时绕过 RTSPProxy 直连 MediaMTX）
     mediamtx_proxy_port: int = 8004      # RTSPProxy 对外暴露端口
+    mediamtx_rtp_port: int = 8002       # MediaMTX RTP（UDP）
+    mediamtx_rtcp_port: int = 8003      # MediaMTX RTCP（UDP）
     mediamtx_internal_port: int = 18004  # MediaMTX 实际监听端口
+
+    mediamtx_bin: str = "auto"
+    mediamtx_config: str = "config/mediamtx.yml"
 
     # Gateway / 安全
     gateway_enabled: bool = True
     gateway_allowed_ips: str = ""            # 逗号分隔白名单，空=不限制
+    rtsp_rate_limit: int = 30           # RTSP 每窗口连接数
     gateway_rate_limit: int = 60             # 普通路径每窗口最大请求数
     gateway_rate_window: int = 60            # 速率窗口大小（秒）
     gateway_rate_ban_threshold: int = 5      # 速率超限违规次数阈值（达到后封禁，0=不封禁）
     gateway_rate_ban_window: int = 60        # 速率超限违规计数窗口（秒）
-    # 宽松路径前缀（逗号分隔）。大屏侧 /task/live、/task/history、/traceback 必须在列：
-    # 前两者是跨 origin 轮询，浏览器的 CORS 预检 OPTIONS 与实际请求各计一次数，普通
-    # 配额（60/60s）撑不住；/traceback 的 404 是正常业务态（只落了 raw 的 step 按默认
-    # track=processed 查即 404），不该被反扫描当扫描特征累计。/admin/ 是控制台的
-    # 数据接口，运维页轮询约 60 次/分并带延迟测试突发；带尾斜杠，免得 /admin、/admin.php、
-    # /administrator 这类扫描器探测也进宽松档、不计反扫描。/ui-f3m8 是静态页：控制台按 ES module
-    # 分文件，开一次页就拉十几个资产，刷新几次就会撞普通配额。
-    gateway_relaxed_prefixes: str = (
-        "/health,/task/message,/task/live,/task/history,/traceback,/admin/,/metrics,/ui-f3m8"
-    )
     gateway_relaxed_rate_limit: int = 600    # 宽松路径每窗口最大请求数
-    gateway_bypass_prefixes: str = "/media"  # 完全绕过速率限制与反扫描的前缀（仅靠路由层 token 鉴权），逗号分隔
     gateway_scan_threshold: int = 10         # 触发封禁的 404/405 次数（路径/方法枚举扫描）
     gateway_scan_window: int = 300           # 扫描计数窗口（秒）
     gateway_ban_duration: int = 3600         # 封禁时长（秒）
@@ -161,10 +144,6 @@ class Settings(BaseSettings):
     label_studio_token: str = ""              # LS Legacy Token（Authorization: Token <...>）
     label_studio_default_project_id: int = 0  # 默认 project_id；0 表示未配置（请求需显式传 project_id）
     lab_export_temp_dir: str = ""             # 临时输出目录；空则用 {storage_base_dir}/.lab_exports
-    lab_export_ffmpeg_preset: str = "veryfast"
-    lab_export_max_clip_ms: int = 300_000     # 单段时长上限（5 min）
-    lab_export_max_total_ms: int = 1_800_000  # 一次提交总时长上限（30 min）
-    lab_export_max_clips_per_submit: int = 20
 
     @property
     def inference_fps(self) -> float:
@@ -182,11 +161,6 @@ class Settings(BaseSettings):
         if not self.gateway_allowed_ips.strip():
             return frozenset()
         return frozenset(ip.strip() for ip in self.gateway_allowed_ips.split(",") if ip.strip())
-
-    @property
-    def env(self) -> str:
-        """当前环境（dev/test/prod），由启动脚本通过 CLEANSIGHT_ENV 设定"""
-        return os.environ.get("CLEANSIGHT_ENV", "dev").lower()
 
     @property
     def database_url(self) -> str:
@@ -219,10 +193,8 @@ class Settings(BaseSettings):
         """验证必需配置是否完整
 
         - 严格模式（CLEANSIGHT_STRICT=1）：缺失配置时抛出异常，阻止启动
-        - 开发模式（CLEANSIGHT_STRICT=0）：只警告，允许继续运行
+        - 非严格模式（CLEANSIGHT_STRICT=0）：只警告，允许继续运行
         """
-        is_dev = globals().get("_LOADED_DEV", False)
-
         # 检查必需配置
         missing_fields = []
 
@@ -245,18 +217,18 @@ class Settings(BaseSettings):
         if missing_fields:
             msg = f"缺少必需配置: {', '.join(missing_fields)}"
 
-            if self.strict and not is_dev:
-                # 生产模式且开启严格检查：抛出异常
+            if self.strict:
+                # 开启严格检查时直接拒绝缺失配置
                 raise ValueError(
                     f"[配置错误] {msg}\n"
-                    f"请检查环境变量或 .env 文件\n"
-                    f"参考 .env.example 文件查看所需配置"
+                    f"请检查环境变量或 config/settings.yaml\n"
+                    f"参考 config/settings.example.yaml 查看所需配置"
                 )
             else:
-                # 开发模式或未开启严格检查：只警告
+                # 未开启严格检查时仅警告
                 print(f"\n{'='*60}")
                 print(f"[Settings] ⚠️  警告: {msg}")
-                print(f"[Settings] 当前为开发模式，允许继续运行")
+                print(f"[Settings] 严格检查已关闭，允许继续运行")
                 print(f"[Settings] 部分功能（如数据库操作）可能不可用")
                 print(f"{'='*60}\n")
 
@@ -264,16 +236,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_ffmpeg_path(self):
-        """ffmpeg_path 为空时指向项目自包含的钉版静态包，消除「install 装到固定位置却要人手抄进 .env」的负担：
+        """ffmpeg_path 为空时指向项目自包含的钉版静态包，消除「install 装到固定位置却要人手抄进 settings.yaml」的负担：
 
         - 项目自包含第三方服务：ffmpeg 与 mediamtx 同为项目内 vendored 二进制，唯一来源是
-          项目根下的 .ffmpeg/bin/（install.sh/install.ps1 部署；Linux 名 ffmpeg，Windows 名 ffmpeg.exe）。
+          项目根下的 .ffmpeg/bin/（install skill 安装；Linux 名 ffmpeg，Windows 名 ffmpeg.exe）。
           钉版保证 HLS fmp4 行为正确，见 docs/HLS_TIMELINE_PITFALL.md。
         - 不回退 PATH：一处明确来源、失败即报（缺料时由 FFmpegDecoder 抛 FFmpegError，
-          报出确切路径，提示先跑 install 脚本）。
+          报出确切路径，提示通过 /install 安装）。
         - 显式设了 CLEANSIGHT_FFMPEG_PATH 则尊重之（逃生口，如 Mac 开发机指向 homebrew ffmpeg）。
 
-        路径与 install 脚本各自从「项目根」推导 .ffmpeg/bin/，无共享绝对路径耦合。
+        路径与安装工具各自从「项目根」推导 .ffmpeg/bin/，无共享绝对路径耦合。
         """
         if not self.ffmpeg_path:
             bin_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
@@ -290,9 +262,25 @@ class Settings(BaseSettings):
     )
 
 
-# 在实例化 Settings 前，先把 .env/.env.dev 加载到环境中
-_load_env_files()
-settings = Settings()
+# Schema and file helpers can be imported before credentials are configured.
+_settings_lock = Lock()
+
+
+def get_settings() -> Settings:
+    with _settings_lock:
+        if "settings" not in globals():
+            load_runtime_environment(
+                Path(__file__).resolve().parent.parent, known_fields=Settings.model_fields,
+            )
+            globals()["settings"] = Settings()
+        return globals()["settings"]
+
+
+def __getattr__(name):
+    if name == "settings":
+        return get_settings()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # YOLO_CONFIG_DIR 是 ultralytics 的全局变量；系统级设置会劫持同机其他模型任务。
 # 故仅在本进程内锁死为项目内 .ultralytics（由安装位置自动得出、必然可写），不外溢、不可配。
@@ -304,3 +292,13 @@ os.environ["YOLO_CONFIG_DIR"] = _yolo_cfg_dir
 # 默认落在仓库根 runs/detect/，每次 warmup/推理都残留空目录。把 predict 的 project
 # 钉进上面已 gitignore 的 .ultralytics，令这些空目录不再污染仓库根。detector 引用此常量。
 YOLO_RUNS_PROJECT = str(Path(_yolo_cfg_dir) / "runs" / "detect")
+
+
+def validate_ports(settings) -> None:
+    ports = (settings.port, settings.mediamtx_proxy_port, settings.mediamtx_internal_port,
+             settings.mediamtx_rtp_port, settings.mediamtx_rtcp_port)
+    if any(not 1 <= port <= 65535 for port in ports):
+        raise ValueError("Service ports must be between 1 and 65535")
+    tcp = (settings.port, settings.mediamtx_proxy_port, settings.mediamtx_internal_port)
+    if len(set(tcp)) != len(tcp) or settings.mediamtx_rtp_port == settings.mediamtx_rtcp_port:
+        raise ValueError("Service ports overlap within the same transport")

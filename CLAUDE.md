@@ -2,7 +2,7 @@
 
 AI 视觉巡检后端系统，对实时 RTSP 流提供推理、HLS 录制、告警上报和回放分析服务。
 应用服务入口 [app/main.py](app/main.py) → FastAPI lifespan 依次启动各 Service 单例。
-视频推流入口 [mediamtx_gateway/main.py](mediamtx_gateway/main.py)
+视频推流由 [MediaMTX daemon](app/daemons/mediamtx/__init__.py) 管理。
 
 本文件只做**导航与硬约束**，描述性内容一律去下列文档。
 
@@ -15,7 +15,8 @@ AI 视觉巡检后端系统，对实时 RTSP 流提供推理、HLS 录制、告�
 | 懂架构 / 数据流 / 各服务内部 / schema（描述性） | 先读知识库 [docs/kb/INDEX.md](docs/kb/INDEX.md)，**再扫 [docs/update/](docs/update/) 里晚于 KB 更新时间的增量**（见下方注） |
 | 对外 HTTP / WS 端点契约（请求响应 schema、字段语义、错误码） | [docs/api/](docs/api/)（按 router 分文件，README 是索引 + 全局约定）；路由怎么接线属架构，去 KB |
 | 开发规范：分支提交、测试、模块内聚与解耦、日志、检测点契约、演进原则（先最简再完善）与重构流程、导入写法 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
-| 部署：装环境、物料分发、`.env` / 端口、启动验证（Linux / Windows / PPU） | `/deploy` skill（[.claude/skills/deploy/SKILL.md](.claude/skills/deploy/SKILL.md)，先定平台与角色再读对应 references） |
+| 用户显式调用 `/install <任务>` 准备安装依赖或二进制物料 | `/install` skill（[.claude/skills/install/SKILL.md](.claude/skills/install/SKILL.md)，先定平台再读对应 references）；普通部署讨论不自动触发 |
+| 用户显式调用 `/run <任务>` 配置与运行服务 | `/run` skill（[.claude/skills/run/SKILL.md](.claude/skills/run/SKILL.md)，确认目标资源后配置、核对物料并按授权启动验证） |
 | 定位代码：目录结构 → [README.md](README.md) 项目结构；某个服务内部 → KB 对应 `SERVICE_*.md` | — |
 
 > **KB 不是最新的**：INDEX 顶部有「更新时间」，`docs/update/` 里文件名日期晚于它的都是尚未融合的增量——KB 结论要用这些增量校正后再采信。写文档的细则见 [KB_MAINTENANCE.md](docs/kb/KB_MAINTENANCE.md)。
@@ -25,12 +26,11 @@ AI 视觉巡检后端系统，对实时 RTSP 流提供推理、HLS 录制、告�
 ## 快速启动
 
 ```bash
-./start_backend.sh dev          # Linux（加载 .env.dev，脚本内已后台拉起网关）
-.\start_backend.ps1 dev         # Windows
+./start_backend.sh              # Linux（加载 config/settings.yaml，由 lifespan 管理网关）
+.\start_backend.ps1             # Windows
 
-# 不走脚本时两个进程都要起
-python -m mediamtx_gateway.main # RTSP 网关：TCP 代理 + 拉起并守护 MediaMTX
-python -m app.main              # 后端
+# 不走脚本时直接运行后端，lifespan 会管理 MediaMTX daemon
+python -m app.main
 
 pytest tests/                                        # 单元 & 组件测试
 python integration_tests/test_single_client.py --scenario 1 --task_id 1  # 集成测试（需真实 RTSP 流）
@@ -44,7 +44,7 @@ python integration_tests/test_single_client.py --scenario 1 --task_id 1  # 集�
 
 **动手前**
 
-- **开发只跑 dev / test 环境，不碰 prod**（prod 写真实 DB、发真实告警）；即便在 dev/test，跑会写库或发告警的端到端测试前也先跟人确认（环境与端口见 `/deploy` skill 的 [runtime-config.md](.claude/skills/deploy/references/runtime-config.md)）。
+- **开发只使用开发数据库与测试上报端点，生产资源须由用户明确授权**；跑会写库或发告警的端到端测试前也先跟人确认（环境与端口见 `/run` skill 的 [runtime-config.md](.claude/skills/run/references/runtime-config.md)）。
 - **跑任何 python/pytest 前先激活项目 `.venv`**，别用裸 `python3`。
 - **先评估现有能力再设计，别重复造轮子**：动手前查 KB + 代码里已有什么（数据模型、服务、session 中台、工具函数），能复用或扩展就不新起一套；确实要新建，先说清现有的哪里不够。
 

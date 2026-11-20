@@ -1,12 +1,12 @@
-> 更新时间：2026-10-17
+> 更新时间：2026-11-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
 # Configuration Service
 
-配置由三部分组成：`app/settings.py`（Pydantic settings，env 前缀 `CLEANSIGHT_`）、`config/*.yaml`（启动时只读）、
-少量页面可改的运行时配置文件。各角色 `.env*` 取值、端口表与部署操作见 deploy skill 的
-[runtime-config.md](../../.claude/skills/deploy/references/runtime-config.md)。
+配置由三部分组成：`app/settings.py`（加载单份 config/settings.yaml，支持 CLEANSIGHT_* 进程变量覆盖）、服务 YAML、
+少量页面可改的运行时配置文件。Settings 全部字段、加载规则、默认值及迁移说明统一见
+[SERVICE_SETTINGS.md](SERVICE_SETTINGS.md)，运行操作见显式 [/run](../../.claude/skills/run/SKILL.md)。
 
 ## fps / 时间配置分三层，衍生量永不进 yaml
 
@@ -49,7 +49,7 @@
   `storage_base_dir`（env `CLEANSIGHT_STORAGE_DIR`），各方都读它、不互相灌值。七个服务 loader
   （`app/services/{client,inference,recording,stream,alarm}/config.py`、`app/daemons/{health_monitor,cleanup}/config.py`）
   一律 `settings.config_dir / "xxx.yaml"`；唯一例外是 `app/services/algorithm/colorstrip/config.py` 读同目录 `params.yaml`。
-- **媒体 token**：`media_token_secret`（空则启动时随机生成）、`media_token_ttl = 300`。
+- **媒体 token**：`media_token_secret`（空则首次使用时随机生成）、`media_token_ttl = 1800`。
 
 ## 容量与进程数（15 路规划）
 
@@ -65,21 +65,16 @@
 
 ## 环境文件与必填项
 
-- `CLEANSIGHT_ENV` 选文件：`dev` → `.env.dev`（缺省）、`test` → `.env.test`、`prod` → `.env`。
-- `_load_env_files()` 用 `os.environ.setdefault` 注入，**已存在的环境变量压过文件值**——启动脚本 export 的端口因此
-  能压住 `.env*` 同名键。
+- 固定读取 config/settings.yaml，不选择环境角色，不加载旧 .env*。文件值以 setdefault 注入 CLEANSIGHT_*，已有进程变量优先。
 - **必填六项**（`db_host` / `db_port` / `db_name` / `db_user` / `db_password` / `alarm_report_url`）没有默认值：
-  缺任一项，`import app.settings` 即抛 pydantic `ValidationError`，与 `strict` 无关（`env_ignore_empty=True`，空值等同缺失）。
-  `check_required_fields` 的 strict 分支（`strict=True` 且非 dev 才抛）实际只可能拦到 `CLEANSIGHT_DB_PORT=0`。
+  首次获取共享 settings 时校验，缺任一项即抛 ValidationError，与 strict 无关。strict 开启额外必需值检查，不再有 dev 绕过。
+  空字符串加载限制及导入 schema 的行为见 SERVICE_SETTINGS.md。
 
-## 端口的唯一声明处是启动脚本
+## 端口由 Settings 统一提供
 
-`start_backend.sh` 的 `BASE_*` / `start_backend.ps1` 的 `$Base*` 五行是端口唯一真源（两份脚本各自声明，改端口需同步）。
-脚本导出 `CLEANSIGHT_PORT`、`CLEANSIGHT_MEDIAMTX_PROXY_PORT` / `_INTERNAL_PORT`、`GATEWAY_LISTEN_PORT` /
-`GATEWAY_TARGET_PORT`、`MTX_RTSPADDRESS` / `MTX_RTPADDRESS` / `MTX_RTCPADDRESS`。`.env*` 不含端口项；`settings.py`
-的 `port` / `mediamtx_*_port`、`mediamtx.yml`、网关 `config.ini` 里的端口只是脱离脚本单独跑时的回退值。
-`CLEANSIGHT_PORT` 必须导出，否则 `python -m app.main` 读到的 `settings.port` 会与脚本不一致。端口表、NAT 1:1 约束见
-[runtime-config.md](../../.claude/skills/deploy/references/runtime-config.md)。
+HTTP 与 MediaMTX 端口来自 Settings，YAML 和进程变量遵从同一覆盖顺序。启动脚本只运行 app.main；
+app/daemons/mediamtx/worker.py 将内部 RTSP／RTP／RTCP 地址通过 MTX_* 传给子进程，不向 shell 导出桥接变量。
+端口范围、冲突检查与默认值见 SERVICE_SETTINGS.md。
 
 ## YAML 配置
 
@@ -125,29 +120,28 @@ app/data/
 
 ## Gateway 配置
 
-FastAPI Gateway（`app/gateway.py`）的配置全在 settings：
+FastAPI Gateway（`app/gateway.py`）的可部署配置来自 Settings，路径分类由网关代码维护：
 
 - 开关与白名单：`gateway_enabled`、`gateway_allowed_ips`（逗号分隔，空 = 不限制）
 - 普通档：`gateway_rate_limit` / `gateway_rate_window`，持续超限升级封禁 `gateway_rate_ban_threshold` / `gateway_rate_ban_window`
-- 宽松档：`gateway_relaxed_prefixes`（默认 `/health,/task/message,/task/live,/task/history,/traceback,/admin-f3m8,/metrics`）+ `gateway_relaxed_rate_limit`
-- 绕过档：`gateway_bypass_prefixes`（默认 `/media`）
+- 宽松档：代码内 _RELAXED_PREFIXES + 可配置的 gateway_relaxed_rate_limit
+- 绕过档：代码内 _BYPASS_PREFIXES（/media）
 - 反扫描：`gateway_scan_threshold` / `gateway_scan_window` / `gateway_ban_duration`
 
-分档行为见 [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)。MediaMTX 网关读 `GATEWAY_*` 环境变量或
-`mediamtx_gateway/config.ini`。
+HTTP／RTSP 共用白名单、窗口与升级封禁参数，各自计数。RTSP 使用 rtsp_rate_limit，配置由 daemon 从 Settings 解析；
+旧 GATEWAY_* 和独立 INI 不再加载。字段完整说明见 SERVICE_SETTINGS.md。
 
 ## Lab 配置
 
-- 静态 settings：`label_studio_token`（只在 env，页面不可见）、`label_studio_url` / `label_studio_default_project_id`
-  （运行时配置的 env 回退值）、`lab_export_*`（临时目录、ffmpeg preset、单段 / 总时长 / 段数上限）。
+- 静态 Settings：label_studio_token（页面不可见）、label_studio_url／label_studio_default_project_id（页面配置回退值）、lab_export_temp_dir。
+  编码 preset、单段／总时长／数量上限收回 app/services/lab/service.py 内部常量，不再接受运行配置覆盖。
 - 运行时配置（`app/services/lab/runtime_config.py`，不是 `config.py`）：Label Studio URL、默认 project_id、任务列表
   数据源（`db` / `storage`）。持久化在 `{storage_base_dir}/lab_runtime_config.json`，文件存在用文件值、否则回退 env；
   改完即时生效、重启保留；读写经模块锁。
 
 ## 日志配置
 
-- `config/logging.json` 由 uvicorn `--log-config` 加载（dictConfig），app 代码不调 `dictConfig`。路径是字面量，写在三处：
-  `app/main.py` 的 `uvicorn.run`、`start_backend.sh`、`start_backend.ps1`。
+- config/logging.json 通过 app/main.py 的 uvicorn.run(log_config=...) 加载，启动脚本不再维护独立日志参数。
 - 内容：console handler（`colorlog.ColoredFormatter`）+ `file_info` / `file_warning` / `file_error` 三个
   `ConcurrentTimedRotatingFileHandler`（按级别分文件、按时间轮转）；root level `INFO`。
 - `CLEANSIGHT_LOG_LEVEL`（`settings.log_level`，默认 `INFO`）在 `app/main.py` lifespan 开头设置 root logger 级别，
@@ -162,8 +156,8 @@ FastAPI Gateway（`app/gateway.py`）的配置全在 settings：
 
 ## 代码来源
 
-- `app/settings.py`（真旋钮、`rtsp_read_timeout_s`、`storage_base_dir` / `config_dir`、`_load_env_files`、`check_required_fields`、gateway 前缀、Lab 项）
-- `start_backend.sh` / `start_backend.ps1`（`BASE_*` / `$Base*`）、`.env.example`
+- `app/settings.py`（真旋钮、路径派生、YAML 加载、必需值校验与共享实例）
+- `start_backend.sh` / `start_backend.ps1`、`config/settings.example.yaml`
 - `app/main.py`（`log_level` 设 root 级别、`uvicorn.run(log_config=...)`）
 - `app/services/{client,stream,recording,alarm,inference}/config.py`、`app/daemons/{cleanup,health_monitor}/config.py`
 - `app/services/inference/stage_factory.py`（`create_offline_segmenter`）、`app/services/inference/online/temporal/operator.py`、`app/services/inference/offline/{materials,cli}.py`、`app/services/inference/offline/impl/clean_*/`

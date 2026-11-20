@@ -151,9 +151,9 @@ class TestResolveProjectId:
 class TestValidateClips:
     @pytest.fixture(autouse=True)
     def _limits(self, monkeypatch):
-        monkeypatch.setattr(settings, "lab_export_max_clips_per_submit", 3)
-        monkeypatch.setattr(settings, "lab_export_max_clip_ms", 10_000)
-        monkeypatch.setattr(settings, "lab_export_max_total_ms", 15_000)
+        monkeypatch.setattr(lab_service, "_EXPORT_MAX_CLIPS_PER_SUBMIT", 3)
+        monkeypatch.setattr(lab_service, "_EXPORT_MAX_CLIP_MS", 10_000)
+        monkeypatch.setattr(lab_service, "_EXPORT_MAX_TOTAL_MS", 15_000)
 
     def _msg(self, clips) -> str:
         with pytest.raises(ValidationError) as ei:
@@ -208,9 +208,9 @@ class TestValidateClips:
 
 
 class TestSubmitClips:
-    def test_constructs_from_settings_with_real_signatures(self, fakes, monkeypatch):
-        monkeypatch.setattr(settings, "lab_export_ffmpeg_preset", "ultrafast")
-        monkeypatch.setattr(settings, "lab_export_max_clip_ms", 123_000)
+    def test_constructs_from_deployment_and_lab_policy_with_real_signatures(self, fakes, monkeypatch):
+        monkeypatch.setattr(lab_service, "_EXPORT_FFMPEG_PRESET", "ultrafast")
+        monkeypatch.setattr(lab_service, "_EXPORT_MAX_CLIP_MS", 123_000)
         _submit([ClipRange(0, 1_000)])
 
         kw = FakeBuilder.instances[0].kwargs

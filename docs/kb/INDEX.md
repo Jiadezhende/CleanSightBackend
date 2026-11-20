@@ -1,4 +1,4 @@
-> 更新时间：2026-10-20
+> 更新时间：2026-11-20
 > 依据来源：代码分析
 > 可信级别：以当前仓库代码、配置、测试为准；旧 docs 仅作待核验参考
 
@@ -86,7 +86,8 @@
 - [SERVICE_TRACEBACK_MEDIA.md](SERVICE_TRACEBACK_MEDIA.md)：回放 / 时间轴端点、读侧 run 锁定、MediaToken 与 `/media` 防穿越、VOD 清单生成。
 - [SERVICE_LAB.md](SERVICE_LAB.md)：Lab router / service 分工、ClipBuilder 裁剪送标、StepExporter 整段导出、LS 客户端与运行时配置。
 - [SERVICE_GATEWAY_MEDIAMTX.md](SERVICE_GATEWAY_MEDIAMTX.md)：后端 Gateway 三档路径及判据、RTSP 网关代理、MediaMTX 仅开本机 RTSP。
-- [SERVICE_CONFIG.md](SERVICE_CONFIG.md)：fps 三层模型、容量与进程数配置、各 yaml 与 offline 段（物料一个模型一个目录）、env 加载与必填项、Gateway / Lab / 日志配置。
+- [SERVICE_CONFIG.md](SERVICE_CONFIG.md)：fps 三层模型、容量与进程数配置、各服务 YAML 与 offline 段、Gateway / Lab / 日志配置归属。
+- [SERVICE_SETTINGS.md](SERVICE_SETTINGS.md)：Settings 全部 48 个字段、类型与默认值，YAML／进程变量覆盖顺序、路径与端口约束、升级迁移。
 - [SERVICE_ALGORITHM.md](SERVICE_ALGORITHM.md)：试纸比色无状态服务：调用链、零 `app.*` 依赖、`params.yaml`、判定语义与验收工装。
 
 ## 设计原则与最佳实践

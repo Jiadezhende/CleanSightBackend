@@ -156,6 +156,8 @@ BUDGET = {
     "app.services.alarm":       (set(), 1.0),
     # daemons：包根标记型；cleanup 只依赖 storage（stdlib）+ yaml
     "app.daemons":              (set(), 0.20),
+    "app.daemons.mediamtx": (set(), 0.20),
+    "app.daemons.mediamtx.instance": (set(), 0.50),
     "app.daemons.cleanup":      (set(), 0.20),
     # health_monitor 的协作者单例全在函数体内取：import 包 / 单例不拉起任何 app.services（实测 ~0.02s / ~0.05s）
     "app.daemons.health_monitor":          (set(), 0.20),
@@ -232,6 +234,7 @@ SINGLETONS = {
     "offline_job_service": "app.services.inference.offline.instance",
     "alarm_service": "app.services.alarm.instance",
     "cleanup_worker": "app.daemons.cleanup.instance",
+    "mediamtx_worker": "app.daemons.mediamtx.instance",
     "recording_service": "app.services.recording.instance",
     "health_monitor_worker": "app.daemons.health_monitor.instance",
     "run_control_service": "app.services.run_control.instance",
@@ -559,7 +562,7 @@ def test_intra_package_relative_cross_package_absolute():
     """
     up_level, should_be_relative, should_be_absolute = [], [], []
 
-    for path in list(_iter_app_py_files()) + sorted((REPO_ROOT / "mediamtx_gateway").glob("*.py")):
+    for path in _iter_app_py_files():
         if "__pycache__" in path.parts:
             continue
         rel = path.relative_to(REPO_ROOT).as_posix()

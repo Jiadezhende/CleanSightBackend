@@ -148,11 +148,16 @@ async def get_system_status():
 
     GET /health/status
     """
-    if not health_monitor_worker.is_running:
-        return {
-            "status": "not_initialized",
-            "message": "Health monitor not initialized",
-        }
+    from fastapi.responses import JSONResponse
+    from app.daemons.mediamtx.instance import mediamtx_worker
 
-    system_status = health_monitor_worker.get_system_status()
-    return {"status": "running", **system_status}
+    media_status = mediamtx_worker.get_status()
+    if not health_monitor_worker.is_running:
+        result = {"status": "not_initialized", "message": "Health monitor not initialized"}
+    else:
+        result = {"status": "running", **health_monitor_worker.get_system_status()}
+    result["mediamtx"] = media_status
+    if media_status["state"] == "failed":
+        result["status"] = "degraded"
+        return JSONResponse(result, status_code=503)
+    return result

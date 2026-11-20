@@ -226,7 +226,7 @@ class FFmpegDecoder:
                 # 无条件 SIGKILL + wait 回收：poll 已结束的进程 wait 立即返回，
                 # 不再把僵尸留给 GC/subprocess._cleanup。直接 SIGKILL 依据：
                 # 1) 此 ffmpeg 仅解码到 pipe（不写文件），强杀无产物损坏风险；
-                # 2) RTSP 对端是自有 mediamtx_gateway，对断连(RST)会超时回收会话，不需优雅 TEARDOWN；
+                # 2) RTSP 对端是自有 MediaMTX daemon 代理，对断连(RST)会超时回收会话，不需优雅 TEARDOWN；
                 # 3) 拆流多在流已不健康时发生，此时 ffmpeg 卡在死 socket 读上、收不到 SIGTERM，
                 #    优雅等待只会白耗满 wait 秒（实测 ~2s）后照样 kill。
                 if self.proc.poll() is None:

@@ -1,27 +1,5 @@
-# 阿里 PPU-ZW810E 平台（非 NVIDIA）。
-#
-# 适用机器：CUDA 兼容层为 /usr/local/PPU_SDK/CUDA_SDK 的阿里 PPU 实例。
-# 判别方式：设备节点 /dev/alixpu_ppu*；source envsetup.sh 后 ppu-smi 头部为 "PPU-SMI"（可能没有 nvidia-smi）。
-# 主线 install.sh（cp310 + 官方 CUDA wheel）在此类机器上不可用。
-#
-# 用法（完整步骤与自检见 .claude/skills/deploy/references/ppu.md）：
-#   source /usr/local/PPU_SDK/envsetup.sh                        # 缺此步 PPU 内核编译会 abort
-#   /usr/local/bin/python3 -m venv --system-site-packages .venv   # 不带则 PPU torch 不可见
-#   I=https://mirrors.aliyun.com/pypi/simple/
-#   echo "numpy==$(/usr/local/bin/python3 -c 'import numpy;print(numpy.__version__)')" > /tmp/np-pin.txt
-#   .venv/bin/pip install -i $I -c /tmp/np-pin.txt -r requirements/ppu.txt
-#   .venv/bin/pip uninstall -y opencv-python opencv-python-headless
-#   .venv/bin/pip install -i $I --no-deps --force-reinstall "opencv-python-headless<4.12.0"
-#
-# 【本文件相对 base.txt 只做减法，不做加法】—— torch / torchvision / torchaudio 与 numpy
-# 由系统 site-packages 提供（厂商定制版，版本随平台镜像变），装进 venv 会 shadow 掉、PPU 立刻不可用。
-# 这两项本就不在 base.txt 里，所以这里只 `-r base.txt` 就够。
-#
-# 两步补救都不能省：
-#   -c 钉系统 numpy   系统缺 matplotlib / GUI 版 opencv，ultralytics 补装的最新版要求 numpy>=2，
-#                     不钉会往 venv 装 numpy 2.x 压掉系统那份
-#   重铺 headless     ultralytics 拉入的 opencv-python 与 headless 共用 cv2/，服务端须为 headless
-#
-# 验证记录见 docs/update/20260912_PPU_PLATFORM_DEPS.md。
-
+# PPU 补充依赖。必需的 torch / torchvision / numpy 由厂商系统环境提供。
+# 本文件需配合该环境使用，单独安装不能得到完整的 PPU 运行环境。
+# install skill 使用 --system-site-packages 并按系统 NumPy 生成安装约束。
+# 不在此添加官方 CUDA 包，具体步骤见 .claude/skills/install/references/ppu.md。
 -r base.txt

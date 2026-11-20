@@ -1,14 +1,14 @@
 # `/health` — 健康与监控
 
-一组只读 GET 端点，前端用来观察后端全局健康状态：当前有多少客户端在跑、有没有流在重连、监控循环累计干了多少活。数据全部来自内存中的 `HealthMonitorWorker` 单例（`app/daemons/health_monitor/worker.py`），不查 DB、不落盘。
+一组只读 GET 端点，前端用来观察后端全局健康状态：当前有多少客户端在跑、有没有流在重连、监控循环累计干了多少活。数据来自内存中的 HealthMonitorWorker 和 MediaMTXWorker，只读查询，不查 DB、不落盘。
 
-三个端点均无鉴权、正常返回 **200**，且**永不抛异常**：判断可用性只看 `status` 字段（`running` / `not_initialized`），不要靠 HTTP 状态码。通用约定见 [README](README.md)。
+监控 stats／config 端点正常返回 200。`/health/status` 在 MediaMTX 最终失败时返回 503 和 `degraded`，保留现有统计与故障状态。通用约定见 [README](README.md)。
 
-> **健康监控未就绪时**（进程刚起、lifespan 尚未构造监控单例，或异常未初始化），三个端点**统一**返回：
+> **健康监控未就绪时**（进程刚起、lifespan 尚未构造监控单例，或异常未初始化），stats／config 端点返回：
 > ```jsonc
 > { "status": "not_initialized", "message": "Health monitor not initialized" }
 > ```
-> 此时不含任何 `clients` / `config` / 统计字段。前端必须先判 `status === "running"` 再读后续字段，否则会读到 `undefined`。
+> 此时不含监控统计字段。`/health/status` 还包含 mediamtx；其 state 为 failed 时优先返回 503／degraded。前端必须先判 `status === "running"` 再读后续字段，否则会读到 `undefined`。
 
 ---
 
@@ -26,6 +26,7 @@
 ```jsonc
 {
   "status": "running",
+  "mediamtx": {"state": "running", "managed": true, "restart_count": 0, "error_code": null},
   "clients": {
     "total_clients": 2,      // 有队列（ClientQueues）的客户端总数
     "active_streams": 2,     // 有解码器且不在重连中的客户端数
@@ -47,7 +48,11 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `status` | string | `running`；未就绪时为 `not_initialized`（见顶部说明） |
+| `status` | string | running／not_initialized；MediaMTX 失败时为 degraded |
+| `mediamtx.state` | string | stopped／starting／running／restarting／failed |
+| `mediamtx.managed` | bool | 是否由后端托管 MediaMTX 子进程 |
+| `mediamtx.restart_count` | int | 本次 daemon 启动以来的重启次数，最多 5 次 |
+| `mediamtx.error_code` | string 或 null | 脱敏故障代码，正常为 null |
 | `clients.total_clients` | int | 有队列的客户端总数。**注意字段名是 `total_clients` 不是 `total`**（缓存快照，每轮检查刷新） |
 | `clients.active_streams` | int | 有解码器且不在重连中的客户端数 |
 | `clients.reconnecting` | int | 正在重连中的客户端数 |
@@ -65,17 +70,23 @@
 
 **分类互斥关系**：`total_clients = active_streams + reconnecting + orphan_streams`（`orphan_decoders` 统计的是「有解码器但无队列」，不在这条等式里，因为它不属于「有队列的客户端」）。
 
-> **不包含 `queues` 字段。** `/health/status` 的响应**只有** `clients` 和 `monitor_stats` 两块（见 `worker.py` `get_system_status()`），没有各客户端逐条队列深度（`raw_queue_size` / `ready_queue_size` 等）。要逐客户端队列详情走别的途径（`/admin` 相关端点或 InferenceService 统计），别指望这里有。
+> **不包含 `queues` 字段。** `/health/status` 包含 `clients`、`monitor_stats` 和 `mediamtx`（见 `worker.py` `get_system_status()`），没有各客户端逐条队列深度（`raw_queue_size` / `ready_queue_size` 等）。要逐客户端队列详情走别的途径（`/admin` 相关端点或 InferenceService 统计），别指望这里有。
 >
 > `monitor_stats` 里**没有** `reconnecting_count`（那是 `/monitor/stats` 独有的），这里只给 `reconnecting_clients` 列表——数量自己取 `.length`。
 
 ### 错误
 
-无。永不抛异常；不可用时返回 200 + `{"status":"not_initialized"}`（见顶部）。
+MediaMTX 运行中重试耗尽、意外正常退出或监督失败时，返回 503 + degraded；RTSP 入口关闭，后端运维和已有离线任务继续运行。其余已有统计保留，监控未初始化时使用 not_initialized。
+
+error_code 包括 startup_failed、unexpected_exit、retries_exhausted、supervision_failed、supervision_cancelled。启动失败会阻止应用就绪并回滚，通常不会开放 HTTP。纯代理模式 managed=false，running 表示代理已监听；外部 MediaMTX 和模型就绪需另行验证。
+
+```json
+{"status":"degraded","mediamtx":{"state":"failed","managed":true,"restart_count":5,"error_code":"retries_exhausted"}}
+```
 
 ### 前端坑点
 
-- 判可用性只看 `status`，不看 HTTP code（永远 200）。
+- 处理 HTTP 503 的 degraded 响应体，继续显示监控统计与 MediaMTX 故障状态。
 - `clients` 是缓存快照（每 `check_interval` 刷新，默认 1 秒），不是实时；`reconnecting_clients` 才是实时列表。
 - 字段名与直觉/旧版不符：客户端总数是 `total_clients`（不是 `total`）；进入重连累计是 `disconnects`（**旧版叫 `suspects`，已改名**，别再按老字段解析）。
 - 参考实现：控制台系统运维页 [pages/system.js](../../app/static/console/pages/system.js)（`healthPoll`）。
