@@ -64,7 +64,8 @@ export const SystemPage = {
     <div class="card">
       <div class="card-h"><h3>健康监控</h3><span class="sub">/health/status · /health/monitor/config</span></div>
       <div class="card-b">
-        <div v-if="health.status && health.status !== 'running'" class="sub">健康监控未就绪（{{ health.status }}）</div>
+        <div v-if="health.status === 'degraded'" class="sub">RTSP 服务不可用（{{ health.mediamtx.error_code }}），后端继续运行</div>
+        <div v-else-if="health.status && health.status !== 'running'" class="sub">健康监控未就绪（{{ health.status }}）</div>
         <div class="tiles">
           <div class="tile" v-for="(v, k) in health.clients" :key="'c' + k"><div class="k mono">{{ k }}</div><div class="v">{{ v }}</div></div>
           <div class="tile" v-for="(v, k) in monitorNumbers" :key="'m' + k"><div class="k mono">{{ k }}</div><div class="v">{{ v }}</div></div>
@@ -141,7 +142,7 @@ export const SystemPage = {
     const lastMetrics = ref({});
     const quant = ref('p95');
     const hidden = reactive(new Set());
-    const health = reactive({ status: null, clients: {}, monitor: {} });
+    const health = reactive({ status: null, clients: {}, monitor: {}, mediamtx: {} });
     const monitorConfig = ref({});
     const queues = ref([]);
     const probe = reactive({ ep: PROBE_ENDPOINTS[0], n: 50, c: 5, busy: false, res: null });
@@ -206,10 +207,19 @@ export const SystemPage = {
       history.value = [...history.value, { at: Date.now(), latency: d.infer_latency_ms || {} }].slice(-HISTORY);
     });
     const healthPoll = createPoller('/health/status', 5000, async () => {
-      const d = await api.healthStatus();
+      let failure = null;
+      const d = await api.healthStatus().catch((error) => {
+        if (error.status === 503 && error.body?.status === 'degraded') {
+          failure = error;
+          return error.body;
+        }
+        throw error;
+      });
       health.status = d.status;
       health.clients = d.clients || {};
       health.monitor = d.monitor_stats || {};
+      health.mediamtx = d.mediamtx || {};
+      if (failure) throw failure;  // 保留统计展示，同时让轮询健康灯记录服务降级。
     });
     const overview = createPoller('/admin/overview', 3000, async () => { queues.value = (await api.overview()).clients; });
 

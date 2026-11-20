@@ -12,7 +12,7 @@ disable-model-invocation: true
 
 目标默认当前机器与项目目录；远程安装由用户提供访问方式和目录。需要下载二进制时，使用用户本次或当前任务中已提供的源机地址；未提供则先询问，不内置默认地址。预检获取 OS、架构、Python、加速器，无法判断则先询问。Python 范围为 3.10–3.12，二进制归档支持 Linux／Windows x86_64。
 
-本 skill 仅准备与验证依赖环境，不选择 dev／prod、不读取或生成 `.env*`、不配置或探测服务端口、不启动服务、不连接业务数据库、不执行端到端测试。模型准备与运行配置留给后续任务。
+本 skill 仅准备与验证依赖环境，不读取或生成 `.env*`、不配置或探测服务端口、不启动服务、不连接业务数据库、不执行端到端测试。模型准备与运行配置留给后续任务。
 
 ## 路由
 
@@ -21,7 +21,7 @@ disable-model-invocation: true
 - 准备或更新源机第三方二进制读 [物料维护](references/materials.md)。
 - Python 安装后共用 [OpenCV 修复及验证](references/common.md)。设备计算验证留在平台 reference。
 
-运行配置的历史说明暂存于 `references/runtime-config.md`，安装流程不执行该部分。
+运行环境配置、权重和启动验证由显式 `/run` skill 处理。
 
 ## 流程
 

@@ -65,7 +65,12 @@ class RTSPProxy:
         target_port: int,
         whitelist: IPWhitelistStore,
         ratelimit: RateLimitStore,
+        access_checks: bool = True,
     ) -> None:
+        self._access_checks = access_checks
+        self._clients = set()
+        self._writers = set()
+        self._closing = False
         self._listen_port = listen_port
         self._target_port = target_port
         self._whitelist = whitelist
@@ -73,6 +78,7 @@ class RTSPProxy:
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
+        self._closing = False
         self._server = await asyncio.start_server(
             self._handle,
             "0.0.0.0",
@@ -85,18 +91,34 @@ class RTSPProxy:
             self._target_port,
         )
 
-    async def _handle(
+    def _handle(self, reader, writer) -> None:
+        if self._closing:
+            writer.close()
+            return
+        task = asyncio.create_task(self._forward(reader, writer))
+        self._clients.add(task)
+        self._writers.add(writer)
+        task.add_done_callback(lambda finished: self._finish_client(finished, writer))
+
+    def _finish_client(self, task, writer) -> None:
+        self._clients.discard(task)
+        self._writers.discard(writer)
+        writer.close()
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("[RTSPProxy] Forwarding failed (%s)", type(task.exception()).__name__)
+
+    async def _forward(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         peername = writer.get_extra_info("peername")
         ip: str = peername[0] if peername else "unknown"
 
-        if not self._whitelist.is_allowed(ip):
+        if self._access_checks and not self._whitelist.is_allowed(ip):
             logger.warning("[RTSPProxy] Blocked (whitelist/ban): %s", ip)
             _abort(writer)
             return
 
-        if not self._ratelimit.is_allowed(ip):
+        if self._access_checks and not self._ratelimit.is_allowed(ip):
             logger.warning("[RTSPProxy] Blocked (rate limit): %s", ip)
             _abort(writer)
             return
@@ -119,13 +141,29 @@ class RTSPProxy:
                     _abort(writer)
                     return
 
-        await asyncio.gather(
-            _pipe(reader, target_writer),
-            _pipe(target_reader, writer),
-            return_exceptions=True,
-        )
+        tasks = [asyncio.create_task(_pipe(reader, target_writer)),
+                 asyncio.create_task(_pipe(target_reader, writer))]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def stop(self) -> None:
+        self.close()
+        if self._server:
+            await self._server.wait_closed()
+            self._server = None
+        for writer in tuple(self._writers):
+            writer.close()
+        tasks = tuple(self._clients)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def close(self) -> None:
+        self._closing = True
         if self._server:
             self._server.close()
             logger.info("[RTSPProxy] Stopped")

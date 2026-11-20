@@ -98,9 +98,11 @@ class RateLimitStore:
         self._ban_window = ban_window
         self._violations: dict[str, deque] = {}
         self._lock = threading.Lock()
-        threading.Thread(
+        self._stop_cleanup = threading.Event()
+        self._cleanup_thread = threading.Thread(
             target=self._cleanup_loop, daemon=True, name="RateLimitStore-cleanup"
-        ).start()
+        )
+        self._cleanup_thread.start()
 
     def is_allowed(self, ip: str) -> bool:
         with self._lock:
@@ -144,9 +146,13 @@ class RateLimitStore:
             return True
         return False
 
+    def close(self) -> None:
+        """Stop this store's cleanup thread; repeated calls are safe."""
+        self._stop_cleanup.set()
+        self._cleanup_thread.join(timeout=1)
+
     def _cleanup_loop(self) -> None:
-        while True:
-            time.sleep(self._window)
+        while not self._stop_cleanup.wait(self._window):
             self._sweep()
 
     def _sweep(self) -> None:

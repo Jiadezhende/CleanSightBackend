@@ -5,7 +5,7 @@
 ## 前置条件
 
 - 已按 `/install` skill（[.claude/skills/install/SKILL.md](../.claude/skills/install/SKILL.md)）装完环境：安装工具会把 FFmpeg 与 MediaMTX 装进项目内的 `.ffmpeg/` 与 `.mediamtx/`，不依赖系统 PATH
-- `.env.dev` 已填（六项必填见 skill 的 runtime-config.md）
+- `config/settings.yaml` 已填（六项必填见 /run 的 runtime-config.md）
 
 ---
 
@@ -14,8 +14,8 @@
 ### 1. 启动后端（终端 1）
 
 ```bash
-./start_backend.sh dev      # Linux（加载 .env.dev）
-.\start_backend.ps1 dev     # Windows
+./start_backend.sh          # Linux（加载config/settings.yaml）
+.\start_backend.ps1         # Windows
 ```
 
 一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，**不要再单独起 MediaMTX**，会撞 18004。
@@ -128,5 +128,7 @@ python integration_tests/test_single_client.py --scenario 3 --task_id 2 --durati
 
 ## 相关文档
 
-- `/install` skill（[.claude/skills/install/SKILL.md](../.claude/skills/install/SKILL.md)）— 装环境、物料、`.env` 与端口
+- `/install` skill（[.claude/skills/install/SKILL.md](../.claude/skills/install/SKILL.md)）— 安装依赖与二进制物料
 - [知识库](kb/INDEX.md) — 架构、服务内部、API 清单、配置等描述性内容的单一入口
+
+每个部署目录只使用一份 `config/settings.yaml`，配置与启动验证见 [/run](../.claude/skills/run/SKILL.md)。所有环境关闭 reload，端口从环境配置读取，旧 `.env` / `.env.dev` / `.env.prod` / `.env.test` 不再自动加载。

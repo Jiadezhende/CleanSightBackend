@@ -1,7 +1,7 @@
 # CleanSight Backend 开发规范
 
 本文是 CleanSight Backend 的开发**约定**。
-环境安装与物料准备见显式调用的 `/install` skill（[.claude/skills/install/SKILL.md](../.claude/skills/install/SKILL.md)）；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
+环境安装与物料准备见显式调用的 `/install` skill（[.claude/skills/install/SKILL.md](../.claude/skills/install/SKILL.md)），运行配置与启动验证见 [/run](../.claude/skills/run/SKILL.md)；架构、数据流、各服务内部等描述性内容以知识库 [kb/INDEX.md](kb/INDEX.md) 为准。
 
 ---
 
@@ -124,7 +124,7 @@
 
 ## 8. 导入规范
 
-四条硬规则，全部由 [tests/test_import_hygiene.py](../tests/test_import_hygiene.py) 门禁执行（`app/` 与 `mediamtx_gateway/` 同等适用）：
+四条硬规则，全部由 [tests/test_import_hygiene.py](../tests/test_import_hygiene.py) 门禁执行（覆盖 `app/`）：
 
 - **包内一律相对、跨包一律绝对**。判据是「目标是不是我这个包的后代」，不是目录深浅：
 

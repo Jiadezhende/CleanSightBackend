@@ -120,6 +120,7 @@ celerybeat.pid
 # Environments
 .env
 .env.dev
+.env.prod
 .env.test
 .venv*/
 env/
@@ -197,3 +198,8 @@ mediamtx/mediamtx.exe
 .ffmpeg/
 
 ref/
+
+# 本机运行配置包含凭据，模板 settings.example.yaml 随源码分发
+/config/settings.yaml
+# 旧运行配置也可能包含凭据
+/config/runtime.yaml

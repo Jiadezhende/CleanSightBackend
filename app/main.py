@@ -13,7 +13,7 @@ from .gateway import GatewayMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from .routers import admin, ai, api, health, lab, media, task, algorithm, traceback as traceback_router
-from .daemons import cleanup, health_monitor
+from .daemons import cleanup, health_monitor, mediamtx
 from .services import alarm, inference, recording, run_control, stream
 from .types.exceptions import (
     AppError,
@@ -42,14 +42,7 @@ async def lifespan(app: FastAPI):
     logger.info("CleanSight Backend 配置检查")
     logger.info("=" * 60)
 
-    # 显示当前环境
-    env_names = {
-        "dev": "开发环境 (.env.dev)",
-        "test": "测试环境 (.env.test)",
-        "prod": "生产环境 (.env)",
-    }
-    env_display = env_names.get(settings.env, f"未知环境 ({settings.env})")
-    logger.info("[CleanSight] Environment: %s", env_display)
+    logger.info("[CleanSight] Runtime configuration: config/settings.yaml and process environment")
 
     # 显示关键配置
     logger.info("[CleanSight] Database: %s:%s/%s", settings.db_host, settings.db_port, settings.db_name)
@@ -64,7 +57,8 @@ async def lifespan(app: FastAPI):
 
     # 按服务模块启动生命周期（起序 = 嵌套顺序，停序 = 逆序）。每个服务的起停都归它自己
     # 包内的 lifespan()，此处只表达**相对顺序**：
-    # 1. 健康监控（最外层：最先起、最后停，全程有人看着下面几个）
+    # 0. MediaMTX（先提供 RTSP 入口，任务和录制清理后最后停止）
+    # 1. 健康监控（贯穿内部服务起停）
     # 2. 流服务（懒启动、只收尸——decoder 由 run_control 按 run 现起）
     # 3. 存储 TTL 清理（独立时钟，不依赖下面任何服务；停在告警之后）
     # 4. 告警（须先于 inference 起、后于 inference 停，以承接停机拆 run 交出的
@@ -75,18 +69,19 @@ async def lifespan(app: FastAPI):
     #    帧已经从 CQ 弹出去了，是真丢。）
     # 6. AI 推理
     # 7. 运行控制（最里层：停机时最先退出，趁推理 / 录制 / 告警都还活着逐个 stop_run）
-    async with health_monitor.lifespan():
-        async with stream.lifespan():
-            async with cleanup.lifespan(), alarm.lifespan():
-                async with recording.lifespan():
-                    async with inference.lifespan():
-                        async with run_control.lifespan():
-                            try:
-                                yield
-                            finally:
-                                # yield 返回时立即通知 WebSocket 退出，不等待后续清理
-                                # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
-                                shutdown_event.set()
+    async with mediamtx.lifespan():
+        async with health_monitor.lifespan():
+            async with stream.lifespan():
+                async with cleanup.lifespan(), alarm.lifespan():
+                    async with recording.lifespan():
+                        async with inference.lifespan():
+                            async with run_control.lifespan():
+                                try:
+                                    yield
+                                finally:
+                                    # yield 返回时立即通知 WebSocket 退出，不等待后续清理
+                                    # 否则：WebSocket 等 shutdown_event → 清理等 WebSocket → 死锁
+                                    shutdown_event.set()
 
 
 
@@ -532,7 +527,7 @@ def main():
             host=settings.host,
             port=settings.port,
             log_config="config/logging.json",
-            reload=False,  # 生产环境禁用热重载
+            reload=False,  # 所有运行环境统一手动重启
         )
 
     except KeyboardInterrupt:

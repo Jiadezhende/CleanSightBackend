@@ -19,12 +19,12 @@ CleanSight 基于图像识别，检测内镜人工清洗流程的规范性，同
 
 ```
 .claude/skills/install/             # 显式 /install 编排依赖安装与验证
-start_backend.sh / start_backend.ps1  # 一条命令拉起网关（含 MediaMTX）+ 后端，端口在此声明
+start_backend.sh / start_backend.ps1  # 后端入口，daemon 统一由 lifespan 管理
 build.sh                          # 准备第三方二进制 vendor 归档
 app/
 ├── main.py              # FastAPI 入口，lifespan 启停各 Service 单例
-├── settings.py          # 全局配置（Pydantic Settings，读 .env）
-├── gateway.py           # ASGI 网关中间件 + IP 白名单 / 限流（mediamtx_gateway 进程共用）
+├── settings.py          # 全局配置（读取 config/settings.yaml）
+├── gateway.py           # ASGI 网关中间件 + IP 白名单 / 限流（HTTP 与 RTSP 复用规则实现）
 ├── types/               # 跨层共用契约（纯 dataclass）+ AppError 异常体系：frame / detection / temporal / alarm / run / exceptions
 ├── routers/             # HTTP/WS 路由：api / ai / task / health / traceback / media / lab / admin / algorithm
 │   └── utils/           # 本层通用：run 解析 / 媒体 token 签发与校验
@@ -40,19 +40,20 @@ app/
 │   └── algorithm/       # 无状态算法服务（试纸比色），与主流程无关，只被 /algorithm/* 调用
 ├── daemons/             # 按时钟自驱的后台任务：可依赖 services，routers 只读其状态
 │   ├── health_monitor/  # 断流重连 / 任务超时 / 孤儿清理（委托 RunControlService）
-│   └── cleanup/         # 存储 TTL 清理（只依赖 storage）
+│   ├── cleanup/         # 存储 TTL 清理（只依赖 storage）
+│   └── mediamtx/        # RTSP 代理、MediaMTX 子进程和状态
 ├── storage/             # 数据层：盘上产物怎么读写，按资源域分 hls/ 与 inference/
 ├── db/                  # 平台 DB（PostgreSQL，只读）：database 连接池 + 一张表一个 ORM 模块 tasks / alarms
-├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 install skill
+├── data/                # 模型权重（.pt）——不随 git 分发，从模型库取用，见 run skill
 └── utils/               # 日志装饰器
 config/                  # 运维要改的配置：六份服务 YAML + uvicorn 日志 logging.json
-requirements/            # 依赖清单：base.txt 底座 + 按部署路径分的 prod / gpu / ppu
-mediamtx_gateway/        # RTSP TCP 代理网关（独立进程，对外部署可选）
+requirements/            # 依赖清单：base.txt 底座 + 按平台分的 gpu / ppu
 tests/                   # 单元 & 组件测试（裸 pytest 只跑这里）
 integration_tests/       # 端到端集成测试（需真实 RTSP 流），fixtures/ 放测试视频
 scripts/                 # 偶尔手动跑的运维工具（迁移 / SQL）；hospital_sync/ 是医院数据同步的独立交付物，不属后端主链路
 docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口契约，外加开发规范与快速开始
-.claude/skills/install/   # 部署规范唯一入口：先定平台与角色，再读对应 references
+.claude/skills/install/   # 显式 /install：准备与验证依赖
+.claude/skills/run/       # 显式 /run：环境、权重、配置与启动验证
 ```
 
 根目录只放**每台机器都要跑的生命周期入口**（装、起、打物料）；偶尔跑的工具进 `scripts/`。
@@ -75,23 +76,23 @@ docs/                    # kb/ 知识库 · update/ 变更记录 · api/ 接口�
 
 ### 配置文件
 
-- 环境变量：`.env` / `.env.dev` / `.env.test`（`CLEANSIGHT_` 前缀，单一真源 `app/settings.py`）
+- 运行配置：`config/settings.yaml` 使用 Settings 小写字段名；`CLEANSIGHT_*` 进程环境变量优先覆盖，字段定义见 `app/settings.py`。
 - 服务 YAML：`config/` 下 `inference_config.yaml`、`stream_config.yaml`、`persistence_config.yaml`、`recording_config.yaml`、`client_config.yaml`、`health_monitor_config.yaml`
 - 日志：`config/logging.json`（uvicorn dictConfig，路径硬编码、无环境变量开关）
 - Python 工具配置（pytest / 覆盖率）：`pyproject.toml`
 
-> 部署（Linux / Windows / PPU 装环境、物料、`.env` 与端口）见 `/install` skill：[.claude/skills/install/SKILL.md](.claude/skills/install/SKILL.md)；开发规范（分支/测试/模块解耦）见 [开发指南](docs/DEVELOPMENT.md)。
+> 依赖安装见 [/install](.claude/skills/install/SKILL.md)，运行配置与启动验证见 [/run](.claude/skills/run/SKILL.md)；开发规范（分支/测试/模块解耦）见 [开发指南](docs/DEVELOPMENT.md)。
 
 ---
 
 ## 快速开始
 
 ```bash
-./start_backend.sh dev           # Linux（加载 .env.dev）
-.\start_backend.ps1 dev          # Windows
+./start_backend.sh               # Linux（加载 config/settings.yaml）
+.\start_backend.ps1              # Windows
 ```
 
-一条命令拉起 RTSP 网关（网关再拉起 MediaMTX）+ 后端，不要再单独起 MediaMTX。安装依赖显式调用 `/install` skill，Python 包走镜像或官方索引，第三方二进制从源机获取。安装验证完成后再单独配置并启动服务。
+后端 lifespan 统一管理 RTSP 代理和 MediaMTX 子进程。安装依赖显式调用 `/install` skill，Python 包走镜像或官方索引，第三方二进制从源机获取。安装验证完成后调用 `/run` 配置环境、核对权重并启动验证。所有实例统一关闭 reload，保存代码后手动重启。
 
 起流后打开后端自带的**控制台**观测运行状态（任务总览 / 实时画面 / 回放 / 指标）：`http://localhost:8000/ui-f3m8/console/`。上手流程与接口调用示例见 [快速开始指南](docs/QUICK_START.md)。
 
@@ -162,7 +163,7 @@ RENDERED 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 
 ```bash
 pytest                                              # 单元 & 组件测试
-pytest --cov --cov-report=html                      # 覆盖率报告（app/ + mediamtx_gateway/）
+pytest --cov --cov-report=html                      # 覆盖率报告（app/，含 daemon）
 
 # 端到端（需真实 RTSP；观测走控制台 /ui-f3m8/console/）
 python integration_tests/test_single_client.py --scenario 1 --task_id 1 --duration 30
@@ -193,7 +194,7 @@ python integration_tests/test_multi_client.py --max-tasks 10 --duration 60      
 | 现象 | 排查 |
 |------|------|
 | `ffmpeg not found` | 后端只认项目内 `.ffmpeg/bin/ffmpeg`，不回退系统 PATH；通过 `/install` 从源机重新安装钉版 FFmpeg，别装系统版 |
-| 数据库连接失败 | 检查 `.env` 数据库配置、服务是否运行、网络/防火墙 |
+| 数据库连接失败 | 检查当前 `config/settings.yaml` 数据库配置、服务是否运行、网络/防火墙 |
 | `CUDA not available` | `nvidia-smi` 查驱动，`torch.cuda.is_available()` 验证；否则自动降级 CPU |
 | 推流超时 / Stream not found | 确认 8004 与 18004 都在听（网关日志看 MediaMTX 是否起来）、URL `rtsp://<host>:8004/live/<name>` |
 | WebSocket 断开 | 检查网络、客户端超时、后端日志 |
