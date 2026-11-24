@@ -1,4 +1,4 @@
-"""离线分割入口测试：分段替换 / 配置工厂 / Runner / clean 策略 / 离线可跑校验 / CLI。
+"""离线分割入口测试：分段替换 / 配置工厂 / Worker / clean 策略 / 离线可跑校验 / CLI。
 
 不依赖 GPU / RTSP / DB / 网络；storage 与 config 全用临时件，用例间不串。
 """
@@ -18,8 +18,8 @@ from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
 from app.services.inference.offline.segmentation.utils import FrameInputContract
-from app.services.inference.offline import runner as runner_mod
-from app.services.inference.offline.runner import OfflineRunner, OfflineRunSpec
+from app.services.inference.offline import worker as worker_mod
+from app.services.inference.offline.worker import OfflineRunSpec, OfflineWorker
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
 from app.types.exceptions import ValidationError
@@ -41,11 +41,11 @@ def _seg(producer="p", label="x", start=0.0, end=1.0):
 
 
 class TestReplaceSegments:
-    """Runner 的 read → 合并 → write：数据层只管整体替换，保留谁是这里的事。"""
+    """Worker 的 read → 合并 → write：数据层只管整体替换，保留谁是这里的事。"""
 
     def test_empty_clears_segments(self, tmp_storage):
-        OfflineRunner._replace_segments(make_run(1, 1), [_seg()])
-        OfflineRunner._replace_segments(make_run(1, 1), [])  # 空 → 清该 step 分段
+        OfflineWorker._replace_segments(make_run(1, 1), [_seg()])
+        OfflineWorker._replace_segments(make_run(1, 1), [])  # 空 → 清该 step 分段
         segs = [f for f in inference_store.read_temporal(make_run(1, 1)) if isinstance(f, TemporalSegment)]
         assert segs == []
 
@@ -115,10 +115,10 @@ class TestRequireOffline:
             cfg.require_offline(step_id)
 
 
-# ============================ Runner ============================
+# ============================ Worker ============================
 
-def _runner(offline):
-    return OfflineRunner(config=_config(offline))
+def _worker(offline):
+    return OfflineWorker(config=_config(offline))
 
 
 def _inference_dir(task_id, step_id):
@@ -146,22 +146,22 @@ def _write_detections(task_id, step_id):
     ])
 
 
-class TestOfflineRunner:
+class TestOfflineWorker:
     def test_unconfigured_step_raises_no_write(self, tmp_storage):
         _write_detections(1, 999)
         with pytest.raises(ValidationError):
-            _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=999))
+            _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=999))
         assert not _facts_path(tmp_storage, step_id=999).exists()
 
     def test_missing_input_skips_writes_and_compliance(self, tmp_storage, monkeypatch):
-        monkeypatch.setattr(runner_mod.checker, "check_run", lambda *a, **kw: pytest.fail("跳过时不应核对"))
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+        monkeypatch.setattr(worker_mod.checker, "check_run", lambda *a, **kw: pytest.fail("跳过时不应核对"))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "skipped"
         assert not _facts_path(tmp_storage).exists()
 
     def test_completed_writes_facts(self, tmp_storage):
         _write_detections(1, 2)
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert res.producer == "BrushRulesSegmenter"
         assert res.segment_count == 1
@@ -173,7 +173,7 @@ class TestOfflineRunner:
 
     def test_rerun_idempotent(self, tmp_storage):
         _write_detections(1, 2)
-        r = _runner(_OFFLINE_OK)
+        r = _worker(_OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         segs = [f for f in inference_store.read_temporal(make_run(1, 2)) if isinstance(f, TemporalSegment)]
@@ -182,15 +182,15 @@ class TestOfflineRunner:
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
         _write_detections(1, 2)
         with pytest.raises(RuntimeError):
-            _runner(_BOOM).run(OfflineRunSpec(task_id=1, step_id=2))
+            _worker(_BOOM).run(OfflineRunSpec(task_id=1, step_id=2))
         assert not _facts_path(tmp_storage).exists()
 
     def test_model_swap_replaces_old_segments_keeps_eventfact(self, tmp_storage):
         """换模型重跑：旧类名的分段整体被替换，TemporalEvent 保留。"""
         _write_detections(1, 2)
         inference_store.write_temporal(make_run(1, 2), [TemporalEvent(producer="clean_monitor", signal="sig", value=1, ts=1.0)])
-        assert _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
-        res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
+        res = _worker(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.producer == "MarkerSegmenter"
         loaded = inference_store.read_temporal(make_run(1, 2))
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
@@ -199,7 +199,7 @@ class TestOfflineRunner:
     def test_label_probs_bypass_written_with_facts(self, tmp_storage):
         """策略产逐帧概率：temporal.jsonl 与 label_probs.npz 都落盘，概率原样（float16 精度内）。"""
         _write_detections(1, 2)
-        res = _runner({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
+        res = _worker({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
         assert (res.status, res.segment_count) == ("completed", 1)
         probs = inference_store.read_label_probs(make_run(1, 2))
         assert probs.labels == ("idle", "x") and probs.ts.tolist() == [1.0, 2.0]
@@ -208,9 +208,9 @@ class TestOfflineRunner:
     def test_context_strategy_gets_video_bound_to_locked_run(self, tmp_storage, monkeypatch):
         """策略经 context.video 取帧，参数原样透传给锁定 run 的 hls.iter_frames。"""
         calls = []
-        monkeypatch.setattr(runner_mod.hls, "iter_frames", lambda run, **kw: calls.append((run, kw)) or iter(()))
+        monkeypatch.setattr(worker_mod.hls, "iter_frames", lambda run, **kw: calls.append((run, kw)) or iter(()))
         _write_detections(1, 2)
-        res = _runner(_CONTEXT).run(OfflineRunSpec(task_id=1, step_id=2))
+        res = _worker(_CONTEXT).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert calls == [(make_run(1, 2), {"width": 640, "height": 480})]
 
@@ -220,13 +220,13 @@ class TestOfflineRunner:
 
         _write_detections(1, 2)
         run = make_run(1, 2)
-        ctx = OfflineRunner._build_run_context(run)
+        ctx = OfflineWorker._build_run_context(run)
         assert ctx.load_cache("c") is None
         ctx.save_cache("c", {"a": np.arange(3)})
         assert ctx.load_cache("c")["a"].tolist() == [0, 1, 2]
         (_inference_dir(1, 2) / "cache_c.npz").write_bytes(b"broken")
         assert ctx.load_cache("c") is None
-        OfflineRunner._build_run_context(RunIdentity(1, 2, run.run_id + 1)).save_cache("c", {"a": np.zeros(1)})
+        OfflineWorker._build_run_context(RunIdentity(1, 2, run.run_id + 1)).save_cache("c", {"a": np.zeros(1)})
 
     def test_invalid_label_probs_fail_before_postprocess_and_preserve_results(self, tmp_storage):
         _write_detections(1, 2)
@@ -241,7 +241,7 @@ class TestOfflineRunner:
         original_probs = probs_path.read_bytes()
         offline = {"class": f"{__name__}.BadProbsSegmenter"}
         with pytest.raises(ValueError, match="ts 与 probs 行数不等"):
-            _runner(offline).run(OfflineRunSpec(task_id=1, step_id=2))
+            _worker(offline).run(OfflineRunSpec(task_id=1, step_id=2))
         assert facts_path.read_bytes() == original_facts
         assert probs_path.read_bytes() == original_probs
 
@@ -251,7 +251,7 @@ class TestOfflineRunner:
 
         _write_detections(1, 2)
         monkeypatch.setattr(inference_store, "write_label_probs", fail_write)
-        result = _runner({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
+        result = _worker({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
         assert (result.status, result.segment_count) == ("completed", 1)
         assert _facts_path(tmp_storage).exists() and not _probs_path(tmp_storage).exists()
         assert "npz write failed" in caplog.text
@@ -316,7 +316,7 @@ class ContextSegmenter(OfflineSegmenter):
 class TestRunLock:
     def test_named_missing_run_is_reclaimed_and_writes_nothing(self, tmp_storage):
         _write_detections(1, 2)
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=123))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=123))
         assert (res.status, res.segment_count) == ("reclaimed", 0)
         assert not _facts_path(tmp_storage).exists()
 
@@ -330,15 +330,15 @@ class TestRunLock:
         run = make_run(1, 2)
         step_dir = _root.path(1, 2).resolve()
         assert tmp_storage.resolve() in step_dir.parents
-        replace_segments = OfflineRunner._replace_segments
+        replace_segments = OfflineWorker._replace_segments
 
         def reclaim_then_replace_segments(run, segments):
             shutil.rmtree(step_dir)
             replace_segments(run, segments)
 
-        monkeypatch.setattr(OfflineRunner, "_replace_segments", staticmethod(reclaim_then_replace_segments))
-        monkeypatch.setattr(runner_mod.checker, "check_run", lambda *a, **kw: pytest.fail("run 回收后不应核对"))
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=run.run_id))
+        monkeypatch.setattr(OfflineWorker, "_replace_segments", staticmethod(reclaim_then_replace_segments))
+        monkeypatch.setattr(worker_mod.checker, "check_run", lambda *a, **kw: pytest.fail("run 回收后不应核对"))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=run.run_id))
         assert res.status == "reclaimed"
         assert not _root.path(1, 2).exists()
 
@@ -366,11 +366,11 @@ class TestRunLock:
             checks.append((run, spec, stage, dry_run))
             assert inference_store.read_label_probs(run) is not None
             assert [f.producer for f in inference_store.read_temporal(run)] == ["ProbsSegmenter"]
-            return runner_mod.checker.CheckResult("completed", 4)
+            return worker_mod.checker.CheckResult("completed", 4)
 
-        monkeypatch.setattr(runner_mod, "load_stage_config", load_config)
-        monkeypatch.setattr(runner_mod.checker, "check_run", check_run)
-        result = OfflineRunner().run(OfflineRunSpec(task_id=1, step_id=2, run_id=old.run_id))
+        monkeypatch.setattr(worker_mod, "load_stage_config", load_config)
+        monkeypatch.setattr(worker_mod.checker, "check_run", check_run)
+        result = OfflineWorker().run(OfflineRunSpec(task_id=1, step_id=2, run_id=old.run_id))
 
         assert (result.status, result.run_id, result.alarm_count) == ("completed", old.run_id, 4)
         assert config_loads == [None]
@@ -399,11 +399,11 @@ class TestCli:
     def test_run_completed_json_last_line(self, tmp_storage, monkeypatch, capsys):
         """stdout 末行恒为结果 JSON（作业服务按此解析）。
 
-        默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
-        + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
+        默认路径：OfflineWorker() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
+        + worker 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
         """
         _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         last = capsys.readouterr().out.strip().splitlines()[-1]
@@ -426,7 +426,7 @@ class TestCli:
                            "message": "x"}],
             },
         }}})
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: cfg)
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: cfg)
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -436,7 +436,7 @@ class TestCli:
 
     def test_run_strategy_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
         _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_BOOM))
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: _config(_BOOM))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -446,7 +446,7 @@ class TestCli:
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""
         _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         assert cli.main(["run", "--task-id", "1", "--step-id", "2"]) == 0
         capsys.readouterr()  # 清 run 的输出

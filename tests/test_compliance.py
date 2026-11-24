@@ -342,10 +342,10 @@ def _alarms_path(root):
 class TestCheckCli:
     def _patch_config(self, monkeypatch, spec=SPEC):
         from app.services.inference.config import InferenceConfig
-        from app.services.inference.offline import runner
+        from app.services.inference.offline import worker
 
         cfg = InferenceConfig({"stages": {"2": {"alias": "CLEAN", "compliance": spec}}})
-        monkeypatch.setattr(runner, "load_stage_config", lambda *a, **k: cfg)
+        monkeypatch.setattr(worker, "load_stage_config", lambda *a, **k: cfg)
 
     def test_check_writes_alarms(self, tmp_storage, monkeypatch, capsys):
         from app.services.inference.offline import cli

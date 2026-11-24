@@ -61,7 +61,7 @@ class OfflineCheckResult:
     verdicts: Sequence[Verdict] = ()
 
 
-class OfflineRunner:
+class OfflineWorker:
     """同步执行一次离线分析或规则判定。"""
 
     def __init__(
@@ -106,7 +106,7 @@ class OfflineRunner:
         checked = self._check_compliance(run, stage)
         message = f"规则核对失败: {checked.message}" if checked.status == "error" else checked.message
         logger.info(
-            "[OfflineRunner] completed task=%s step=%s run=%s producer=%s segments=%d",
+            "[OfflineWorker] completed task=%s step=%s run=%s producer=%s segments=%d",
             run.task_id, run.step_id, run.run_id, producer, len(segments),
         )
         return OfflineRunResult("completed", producer, len(segments), message, run.run_id, checked.alarm_count)
@@ -176,7 +176,7 @@ class OfflineRunner:
             raise  # run 已被回收：交给 run() 判成 reclaimed
         except Exception as e:
             logger.warning(
-                "[OfflineRunner] label_probs 落盘失败 task=%s step=%s: %s",
+                "[OfflineWorker] label_probs 落盘失败 task=%s step=%s: %s",
                 run.task_id, run.step_id, e,
             )
 
@@ -186,7 +186,7 @@ def _read_run_cache(run: RunIdentity, name: str) -> Optional[Dict[str, np.ndarra
     try:
         return inference_store.read_offline_cache(run, name)
     except (OSError, ValueError, KeyError) as e:
-        logger.warning("[OfflineRunner] 缓存不可读，按未命中处理 task=%s step=%s name=%s: %s",
+        logger.warning("[OfflineWorker] 缓存不可读，按未命中处理 task=%s step=%s name=%s: %s",
                        run.task_id, run.step_id, name, e)
         return None
 
@@ -196,5 +196,5 @@ def _try_write_run_cache(run: RunIdentity, name: str, arrays: Mapping[str, np.nd
     try:
         inference_store.write_offline_cache(run, name, arrays)
     except OSError as e:
-        logger.warning("[OfflineRunner] 缓存写失败 task=%s step=%s name=%s: %s",
+        logger.warning("[OfflineWorker] 缓存写失败 task=%s step=%s name=%s: %s",
                        run.task_id, run.step_id, name, e)

@@ -8,10 +8,10 @@
 设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动。
 `run` 的隔离在**任何 torch import 之前**生效：`CUDA_VISIBLE_DEVICES` 钉成 `settings.cuda_device`（与在线
 推理子进程同一张卡，不碰机器上别的卡；""=CPU）+ `torch.set_num_threads`（限核，默认 2），故必须先
-`_configure_run_process()` 再 import 触发策略 torch 加载的 runner/策略模块。用不用 GPU、限多少速由策略参数定。
+`_configure_run_process()` 再 import 触发策略 torch 加载的 worker/策略模块。用不用 GPU、限多少速由策略参数定。
 `run` 分割 completed 后接着跑规则判定（`compliance.checker.check_run`），写 alarms.jsonl；核对失败只记进 message，
 不改分割结果的 status 与退出码。`check` 只重跑核对（`--dry-run` 逐行打印全部判定、不写盘）。
-`query` 只读 temporal.jsonl，不碰 torch/runner。
+`query` 只读 temporal.jsonl，不碰 torch/worker。
 
 step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（无兜底）。
 `--run-id` 缺省 = 该 step 最新可见 run；入口解析一次，之后整次运行只读写这个 run。
@@ -53,11 +53,11 @@ def _configure_run_process(num_threads: int) -> None:
 
 def _handle_run(args: argparse.Namespace) -> int:
     _configure_run_process(args.threads)
-    # runner / 策略 import 放在隔离之后：策略模块的 torch import 此时才发生
-    from .runner import OfflineRunner, OfflineRunSpec
+    # worker / 策略 import 放在隔离之后：策略模块的 torch import 此时才发生
+    from .worker import OfflineRunSpec, OfflineWorker
 
     try:
-        result = OfflineRunner().run(
+        result = OfflineWorker().run(
             OfflineRunSpec(task_id=args.task_id, step_id=args.step_id, run_id=args.run_id)
         )
     except Exception as e:  # 配置/输入/策略/写失败 → 非 0
@@ -83,9 +83,9 @@ def _handle_check(args: argparse.Namespace) -> int:
     """只重跑规则核对。末行 JSON `{status, run_id, alarm_count, message}`；`--dry-run` 先逐行打印每条判定。"""
     from dataclasses import asdict
 
-    from .runner import OfflineRunner, OfflineRunSpec
+    from .worker import OfflineRunSpec, OfflineWorker
 
-    result = OfflineRunner().check(
+    result = OfflineWorker().check(
         OfflineRunSpec(task_id=args.task_id, step_id=args.step_id, run_id=args.run_id), dry_run=args.dry_run,
     )
     if args.dry_run:
@@ -98,7 +98,7 @@ def _handle_check(args: argparse.Namespace) -> int:
 
 
 def _handle_query(args: argparse.Namespace) -> int:
-    """轻量查询：读 temporal.jsonl 里的 TemporalSegment 时间线打印（不碰 torch/runner）。"""
+    """轻量查询：读 temporal.jsonl 里的 TemporalSegment 时间线打印（不碰 torch/worker）。"""
     from dataclasses import asdict
 
     from app.types.temporal import TemporalSegment

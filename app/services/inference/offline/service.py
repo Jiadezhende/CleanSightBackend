@@ -9,7 +9,7 @@
 
 执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 起子进程
 `python -m app.services.inference.offline.cli run`（钉卡 + 限核 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
-**本模块不 import runner / torch**：CLI 只作为子进程命令出现。
+**本模块不 import worker / torch**：CLI 只作为子进程命令出现。
 
 作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `--run-id`，
 不同 run 各跑各的；该 run 就是注册表里当前在跑的 run → 409（输入还在写）。
@@ -55,7 +55,7 @@ QUEUED, RUNNING = "queued", "running"
 COMPLETED, SKIPPED, RECLAIMED = "completed", "skipped", "reclaimed"
 FAILED, CANCELLED = "failed", "cancelled"
 _ACTIVE = (QUEUED, RUNNING)
-_RUNNER_STATUSES = (COMPLETED, SKIPPED, RECLAIMED)  # CLI 退出码 0 时的合法结果
+_CLI_SUCCESS_STATUSES = (COMPLETED, SKIPPED, RECLAIMED)
 
 
 @dataclass
@@ -271,7 +271,7 @@ class OfflineJobService:
 
     def _finish_from_output(self, job: OfflineJob, returncode: int, out: str, err: str) -> None:
         result = _last_json(out)
-        if returncode == 0 and result is not None and result.get("status") in _RUNNER_STATUSES:
+        if returncode == 0 and result is not None and result.get("status") in _CLI_SUCCESS_STATUSES:
             job.producer = result.get("producer")
             job.segment_count = int(result.get("segment_count") or 0)
             alarm_count = result.get("alarm_count")

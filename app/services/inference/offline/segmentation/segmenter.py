@@ -22,7 +22,7 @@ VideoSource = Callable[..., Iterator[Frame]]
 
 @dataclass(frozen=True)
 class OfflineContext:
-    """Runner 注入的 run 级资源；策略经它取数据。
+    """离线 worker 注入的 run 级资源；策略经它取数据。
 
     缓存是该 run 的中间产物（`{name: ndarray}`，随 run 目录 TTL 回收）：没有或读坏了 `load_cache` 返回 None；
     `save_cache` 写失败只告警。内容是否仍有效由策略自己核对。
