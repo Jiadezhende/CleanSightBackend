@@ -8,9 +8,9 @@ import pytest
 
 from factories import make_det_box, make_detector_output, make_frame_detection
 
-from app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle import segmenter as seg_mod
 from app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle.contract import ACTION_NAMES, FEATURE_COLUMNS
 from app.services.inference.offline.segmentation.impl.clean_mstcn2_bundle.segmenter import CleanMSTCN2BundleSegmenter
+from app.services.inference.offline.segmentation.utils import prepare_frames
 
 
 def _frame(ts, *boxes):
@@ -25,13 +25,13 @@ def _frames(n, fps=15.0):
                    make_det_box(class_name="scope_mid_section", bbox=[300, 200, 380, 260])) for t in range(n)]
 
 
-def test_features_follow_training_column_order():
-    mi = CleanMSTCN2BundleSegmenter(model_dir="m").preprocess(_frames(30))
+def test_features_follow_training_column_order(offline_context):
+    mi = CleanMSTCN2BundleSegmenter(model_dir="m")._build_model_input(_frames(30), offline_context)
     assert mi.features.shape == (30, 94) and len(FEATURE_COLUMNS) == 94
     assert np.isfinite(mi.features).all()
 
 
-def test_pp20_merges_short_runs_and_skips_idle(monkeypatch, tmp_path):
+def test_pp20_merges_short_runs_and_skips_idle(monkeypatch, tmp_path, offline_context):
     (tmp_path / "model.pt").write_bytes(b"x")
     labels = np.array([3] * 25 + [4] * 5 + [3] * 25 + [0] * 25)
     probs = np.full((labels.size, len(ACTION_NAMES)), 0.02, np.float32)
@@ -40,22 +40,25 @@ def test_pp20_merges_short_runs_and_skips_idle(monkeypatch, tmp_path):
     monkeypatch.setattr(model_mod, "load_model", lambda path: None)
     monkeypatch.setattr(model_mod, "predict_probs", lambda model, x: probs)
     seg = CleanMSTCN2BundleSegmenter(model_dir=str(tmp_path))
-    segs = seg.segment(seg.preprocess(_frames(labels.size)))
+    segs, label_probs = seg.infer(_frames(labels.size), offline_context)
     assert [(s.producer, s.label) for s in segs] == [("CleanMSTCN2BundleSegmenter", "long_brush_insert")]
-    assert seg.label_probs().probs.shape == (80, 6)
+    assert label_probs.probs.shape == (80, 6)
 
 
 def test_low_rate_only_warns(caplog):
-    CleanMSTCN2BundleSegmenter(model_dir="m").preprocess(_frames(30, fps=10.0))
+    seg = CleanMSTCN2BundleSegmenter(model_dir="m")
+    prepare_frames(_frames(30, fps=10.0), seg.frame_contract, producer=seg.name)
     assert "低于训练帧率" in caplog.text
 
 
-def test_missing_weights_fail_before_loading_torch(tmp_path):
+def test_infer_rejects_missing_weights(tmp_path, offline_context):
     seg = CleanMSTCN2BundleSegmenter(model_dir=str(tmp_path))
     with pytest.raises(FileNotFoundError, match="model.pt"):
-        seg.segment(seg.preprocess(_frames(5)))
+        seg.infer(_frames(5), offline_context)
 
 
 def test_materials_is_model_file():
-    assert [p.as_posix() for p in CleanMSTCN2BundleSegmenter(model_dir="m").materials()] == ["m/model.pt"]
-    assert seg_mod.FPS == 15.0
+    seg = CleanMSTCN2BundleSegmenter(model_dir="m")
+    assert [p.as_posix() for p in seg.materials()] == ["m/model.pt"]
+    assert seg.frame_contract.target_fps == 15.0
+    assert seg.frame_contract.expected_size is None

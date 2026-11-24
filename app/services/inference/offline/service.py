@@ -328,7 +328,7 @@ def _priority_kwargs() -> Dict[str, Any]:
 
 
 def _child_env() -> Dict[str, str]:
-    env = dict(os.environ)  # 含 CLEANSIGHT_ENV 与已加载的 .env，子进程落到同一个存储根、钉同一张卡（cli._isolate）
+    env = dict(os.environ)  # 继承运行配置，CLI 子进程使用相同存储根和 CUDA 设备
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 

@@ -144,7 +144,7 @@ BUDGET = {
     "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
     "app.services.inference.offline.segmentation": (set(), 1.0),
-    # 离线 CLI 是独立进程入口：`_isolate()` 必须先于任何 torch import，故模块级不许有
+    # 离线 CLI 是独立进程入口：`_configure_run_process()` 必须先于任何 torch import，故模块级不许有
     # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
     # 规则判定（LAYER_PACKAGES 白名单包，逐模块登记）：numpy + storage，不许 torch
@@ -434,6 +434,7 @@ OFFLINE_DIR = APP_DIR / "services" / "inference" / "offline"
 OFFLINE_IMPL_DIR = OFFLINE_DIR / "segmentation" / "impl"
 OFFLINE_IMPL_ALLOWED = (
     "app.services.inference.offline.segmentation.segmenter",
+    "app.services.inference.offline.segmentation.utils",
     "app.services.inference.resample",
     "app.types",
 )
@@ -540,7 +541,7 @@ def test_offline_segmentation_does_not_import_compliance():
     violations = _imports_under(OFFLINE_DIR / "segmentation", "app.services.inference.offline.compliance")
     assert not violations, (
         "离线分割 import 了规则判定：\n  " + "\n  ".join(violations)
-        + "\n两者只在 offline/cli.py 串联；需要的结果请经盘上产物交接。"
+        + "\n两者由 offline/runner.py 串联；需要的结果请经盘上产物交接。"
     )
 
 
