@@ -11,27 +11,23 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Sequence
 
 import numpy as np
 
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
-from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
-from app.services.inference.resample import input_fps, resample_by_ts
+from app.services.inference.offline.segmentation.segmenter import OfflineContext, OfflineSegmenter
+from app.services.inference.offline.segmentation.utils import FrameInputContract
 
 from .bundle import bundle_columns
 from .contract import ACTION_NAMES, FEATURE_COLUMNS, MODEL_FILE
 from .frames import FPS, detection_rows
 from .postprocess import PP_MIN_LEN, merge_short_segments
 
-logger = logging.getLogger(__name__)
-
 WIDTH, HEIGHT = 640, 480  # 检测框归一化用的画面尺寸（训练视频 640×480）
-_RATE_SLACK = 0.01  # 帧率比较的相对余量，吸收 ts 舍入与抖动（同 resample）
 
 
 @dataclass(frozen=True)
@@ -40,9 +36,10 @@ class BundleInput:
     features: np.ndarray  # [T, 94] float32
 
 
-class CleanMSTCN2BundleSegmenter(OfflineSegmenter):
+class CleanMSTCN2BundleSegmenter(OfflineSegmenter[BundleInput]):
     """ama-v5-bundle-94d 特征 + 整段 MS-TCN2 + pp20。"""
 
+    frame_contract = FrameInputContract(target_fps=FPS)
     labels = ACTION_NAMES
 
     def __init__(self, model_dir: str, *, min_segment_frames: int = PP_MIN_LEN):
@@ -50,37 +47,30 @@ class CleanMSTCN2BundleSegmenter(OfflineSegmenter):
             raise ValueError(f"min_segment_frames 不能为负: {min_segment_frames}")
         self.model_dir = Path(model_dir)
         self.min_segment_frames = int(min_segment_frames)
-        self._last_probs: Optional[LabelProbs] = None
 
     def materials(self) -> Sequence[Path]:
         return (self.model_dir / MODEL_FILE,)
 
-    def preprocess(self, frames: Sequence[FrameDetection]) -> BundleInput:
-        _warn_low_rate(frames)
-        frames = resample_by_ts(frames, FPS)
+    def _build_model_input(self, frames: Sequence[FrameDetection], context: OfflineContext) -> BundleInput:
         ts = np.asarray([f.ts for f in frames], dtype=np.float64)
-        if len(frames) == 0:
-            return BundleInput(ts=ts, features=np.zeros((0, len(FEATURE_COLUMNS)), dtype=np.float32))
         cols = bundle_columns(detection_rows(frames, width=WIDTH, height=HEIGHT))
         return BundleInput(ts=ts, features=np.stack([cols[c] for c in FEATURE_COLUMNS], axis=1).astype(np.float32))
 
-    def segment(self, model_input: BundleInput) -> List[TemporalSegment]:
-        if len(model_input.ts) == 0:
-            return []
+    def _predict(self, model_input: BundleInput) -> LabelProbs:
         path = self.model_dir / MODEL_FILE
         if not path.exists():
             raise FileNotFoundError(f"clean 离线模型权重不存在: {path}")
         from .model import load_model, predict_probs  # torch 只在真正前向时拉起
 
         probs = predict_probs(load_model(path), model_input.features)
+        return LabelProbs(ts=model_input.ts, probs=probs, labels=self.labels)
+
+    def _postprocess(self, label_probs: LabelProbs) -> List[TemporalSegment]:
+        probs = label_probs.probs
         labels = merge_short_segments(probs.argmax(axis=1), self.min_segment_frames)
-        self._last_probs = LabelProbs(ts=model_input.ts, probs=probs, labels=self.labels)
-        return self._segments(model_input.ts, labels, probs)
+        return self._labels_to_segments(label_probs.ts, labels, probs)
 
-    def label_probs(self) -> Optional[LabelProbs]:
-        return self._last_probs
-
-    def _segments(self, ts: np.ndarray, labels: np.ndarray, probs: np.ndarray) -> List[TemporalSegment]:
+    def _labels_to_segments(self, ts: np.ndarray, labels: np.ndarray, probs: np.ndarray) -> List[TemporalSegment]:
         """连续同标签帧 → 一段（跳过 idle）；conf = 段内该标签概率的均值。"""
         bounds = np.flatnonzero(np.diff(labels)) + 1
         starts = np.concatenate([[0], bounds])
@@ -99,11 +89,3 @@ class CleanMSTCN2BundleSegmenter(OfflineSegmenter):
                 meta={"model": self.model_dir.name},
             ))
         return out
-
-
-def _warn_low_rate(frames: Sequence[FrameDetection]) -> None:
-    """检测帧率随在线负载波动：低于训练帧率只告警、不失败（按帧计的窗口与速度会相应拉长）。"""
-    rate = input_fps(frames)
-    if rate is None or rate >= FPS * (1 - _RATE_SLACK):
-        return
-    logger.warning("[CleanMSTCN2BundleSegmenter] 输入帧率 %.3ffps 低于训练帧率 %.1ffps，照常推理", rate, FPS)

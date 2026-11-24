@@ -1,4 +1,4 @@
-"""离线分割入口测试：分段替换 / 配置工厂 / Runner / clean 策略 / 离线可跑校验 / CLI。
+"""离线分割入口测试：分段替换 / 配置工厂 / Worker / clean 策略 / 离线可跑校验 / CLI。
 
 不依赖 GPU / RTSP / DB / 网络；storage 与 config 全用临时件，用例间不串。
 """
@@ -7,16 +7,19 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from doubles import BrushRulesSegmenter
 from factories import make_det_box, make_detector_output, make_frame_detection, make_run
 
 from app.types.detection import DetectorOutput
-from app.types.temporal import TemporalEvent, TemporalSegment
+from app.types.temporal import LabelProbs, TemporalEvent, TemporalSegment
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
-from app.services.inference.offline.segmentation.runner import OfflineRunner, OfflineRunSpec
+from app.services.inference.offline.segmentation.utils import FrameInputContract
+from app.services.inference.offline import worker as worker_mod
+from app.services.inference.offline.worker import OfflineRunSpec, OfflineWorker
 from app.services.inference.stage_factory import StageFactory
 from app.storage import inference as inference_store
 from app.types.exceptions import ValidationError
@@ -25,7 +28,7 @@ _RULES_CLASS = "doubles.BrushRulesSegmenter"  # 测试替身，见 tests/doubles
 
 
 def _frames(per_source):
-    """{src: [DetectorOutput 按 ts]} → List[FrameDetection]（按 ts 对齐+升序），供直调 preprocess。"""
+    """{src: [DetectorOutput 按 ts]} → List[FrameDetection]（按 ts 对齐+升序）。"""
     by_ts: dict = {}
     for src, fds in per_source.items():
         for fd in fds:
@@ -38,11 +41,11 @@ def _seg(producer="p", label="x", start=0.0, end=1.0):
 
 
 class TestReplaceSegments:
-    """Runner 的 read → 合并 → write：数据层只管整体替换，保留谁是这里的事。"""
+    """Worker 的 read → 合并 → write：数据层只管整体替换，保留谁是这里的事。"""
 
     def test_empty_clears_segments(self, tmp_storage):
-        OfflineRunner._replace_segments(make_run(1, 1), [_seg()])
-        OfflineRunner._replace_segments(make_run(1, 1), [])  # 空 → 清该 step 分段
+        OfflineWorker._replace_segments(make_run(1, 1), [_seg()])
+        OfflineWorker._replace_segments(make_run(1, 1), [])  # 空 → 清该 step 分段
         segs = [f for f in inference_store.read_temporal(make_run(1, 1)) if isinstance(f, TemporalSegment)]
         assert segs == []
 
@@ -60,7 +63,7 @@ _OFFLINE_OK = {
     "class": _RULES_CLASS,
     "params": {"label": "brushing"},
 }
-# 测试替身策略（定义在本文件下方）：Boom 抛异常，Marker 验证 preprocess 预留层
+# 测试替身策略（定义在本文件下方）：Boom 抛异常，Marker 验证输入构建与前向衔接
 _BOOM = {"class": "test_offline_pipeline.BoomSegmenter"}
 _MARKER = {"class": "test_offline_pipeline.MarkerSegmenter"}
 _CONTEXT = {"class": "test_offline_pipeline.ContextSegmenter"}
@@ -112,10 +115,10 @@ class TestRequireOffline:
             cfg.require_offline(step_id)
 
 
-# ============================ Runner ============================
+# ============================ Worker ============================
 
-def _runner(offline):
-    return OfflineRunner(config=_config(offline))
+def _worker(offline):
+    return OfflineWorker(config=_config(offline))
 
 
 def _inference_dir(task_id, step_id):
@@ -143,21 +146,22 @@ def _write_detections(task_id, step_id):
     ])
 
 
-class TestOfflineRunner:
+class TestOfflineWorker:
     def test_unconfigured_step_raises_no_write(self, tmp_storage):
         _write_detections(1, 999)
         with pytest.raises(ValidationError):
-            _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=999))
+            _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=999))
         assert not _facts_path(tmp_storage, step_id=999).exists()
 
-    def test_missing_input_skipped_no_write(self, tmp_storage):
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+    def test_missing_input_skips_writes_and_compliance(self, tmp_storage, monkeypatch):
+        monkeypatch.setattr(worker_mod.checker, "check_run", lambda *a, **kw: pytest.fail("跳过时不应核对"))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "skipped"
         assert not _facts_path(tmp_storage).exists()
 
     def test_completed_writes_facts(self, tmp_storage):
         _write_detections(1, 2)
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert res.producer == "BrushRulesSegmenter"
         assert res.segment_count == 1
@@ -165,12 +169,11 @@ class TestOfflineRunner:
         assert len(segs) == 1
         assert segs[0].producer == "BrushRulesSegmenter"
         assert segs[0].label == "brushing"
-        # BrushRulesSegmenter.label_probs() 为 None → 不落 label_probs.npz
-        assert not _probs_path(tmp_storage).exists()
+        assert inference_store.read_label_probs(make_run(1, 2)).labels == ("idle", "brushing")
 
     def test_rerun_idempotent(self, tmp_storage):
         _write_detections(1, 2)
-        r = _runner(_OFFLINE_OK)
+        r = _worker(_OFFLINE_OK)
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         r.run(OfflineRunSpec(task_id=1, step_id=2))
         segs = [f for f in inference_store.read_temporal(make_run(1, 2)) if isinstance(f, TemporalSegment)]
@@ -179,15 +182,15 @@ class TestOfflineRunner:
     def test_strategy_exception_propagates_no_write(self, tmp_storage):
         _write_detections(1, 2)
         with pytest.raises(RuntimeError):
-            _runner(_BOOM).run(OfflineRunSpec(task_id=1, step_id=2))
+            _worker(_BOOM).run(OfflineRunSpec(task_id=1, step_id=2))
         assert not _facts_path(tmp_storage).exists()
 
     def test_model_swap_replaces_old_segments_keeps_eventfact(self, tmp_storage):
         """换模型重跑：旧类名的分段整体被替换，TemporalEvent 保留。"""
         _write_detections(1, 2)
         inference_store.write_temporal(make_run(1, 2), [TemporalEvent(producer="clean_monitor", signal="sig", value=1, ts=1.0)])
-        assert _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
-        res = _runner(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2)).producer == "BrushRulesSegmenter"
+        res = _worker(_MARKER).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.producer == "MarkerSegmenter"
         loaded = inference_store.read_temporal(make_run(1, 2))
         assert {f.producer for f in loaded if isinstance(f, TemporalSegment)} == {"MarkerSegmenter"}
@@ -196,77 +199,116 @@ class TestOfflineRunner:
     def test_label_probs_bypass_written_with_facts(self, tmp_storage):
         """策略产逐帧概率：temporal.jsonl 与 label_probs.npz 都落盘，概率原样（float16 精度内）。"""
         _write_detections(1, 2)
-        res = _runner({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
+        res = _worker({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
         assert (res.status, res.segment_count) == ("completed", 1)
         probs = inference_store.read_label_probs(make_run(1, 2))
         assert probs.labels == ("idle", "x") and probs.ts.tolist() == [1.0, 2.0]
         assert probs.probs[:, 1].tolist() == [0.75, 0.75]
 
     def test_context_strategy_gets_video_bound_to_locked_run(self, tmp_storage, monkeypatch):
-        """`uses_context` 策略经 context.video 取帧：参数原样透传给 hls.iter_frames，run 是锁定的那个。"""
-        from app.services.inference.offline.segmentation import runner as runner_mod
-
+        """策略经 context.video 取帧，参数原样透传给锁定 run 的 hls.iter_frames。"""
         calls = []
-        monkeypatch.setattr(runner_mod.hls, "iter_frames", lambda run, **kw: calls.append((run, kw)) or iter(()))
+        monkeypatch.setattr(worker_mod.hls, "iter_frames", lambda run, **kw: calls.append((run, kw)) or iter(()))
         _write_detections(1, 2)
-        res = _runner(_CONTEXT).run(OfflineRunSpec(task_id=1, step_id=2))
+        res = _worker(_CONTEXT).run(OfflineRunSpec(task_id=1, step_id=2))
         assert res.status == "completed"
         assert calls == [(make_run(1, 2), {"width": 640, "height": 480})]
 
     def test_context_cache_roundtrips_and_degrades_to_miss(self, tmp_storage):
         """缓存经 context 存取；读坏了当未命中，写失败（run 已回收）只告警不抛。"""
-        import numpy as np
         from app.types.run import RunIdentity
 
         _write_detections(1, 2)
         run = make_run(1, 2)
-        ctx = OfflineRunner._context(run)
+        ctx = OfflineWorker._build_run_context(run)
         assert ctx.load_cache("c") is None
         ctx.save_cache("c", {"a": np.arange(3)})
         assert ctx.load_cache("c")["a"].tolist() == [0, 1, 2]
         (_inference_dir(1, 2) / "cache_c.npz").write_bytes(b"broken")
         assert ctx.load_cache("c") is None
-        OfflineRunner._context(RunIdentity(1, 2, run.run_id + 1)).save_cache("c", {"a": np.zeros(1)})
+        OfflineWorker._build_run_context(RunIdentity(1, 2, run.run_id + 1)).save_cache("c", {"a": np.zeros(1)})
 
-    def test_bad_label_probs_shape_skips_bypass_keeps_facts(self, tmp_storage):
-        """旁路形状不一致：不落 npz，事实照常写（旁路不影响主结果）。"""
+    def test_invalid_label_probs_fail_before_postprocess_and_preserve_results(self, tmp_storage):
         _write_detections(1, 2)
+        run = make_run(1, 2)
+        inference_store.write_temporal(run, [_seg()])
+        inference_store.write_label_probs(run, LabelProbs(
+            ts=np.array([1.0, 2.0]), probs=np.array([[0.25, 0.75], [0.5, 0.5]]), labels=("idle", "x"),
+        ))
+        facts_path = _facts_path(tmp_storage)
+        probs_path = _probs_path(tmp_storage)
+        original_facts = facts_path.read_bytes()
+        original_probs = probs_path.read_bytes()
         offline = {"class": f"{__name__}.BadProbsSegmenter"}
-        res = _runner(offline).run(OfflineRunSpec(task_id=1, step_id=2))
-        assert res.status == "completed"
-        assert not _probs_path(tmp_storage).exists()
-        assert _facts_path(tmp_storage).exists()
+        with pytest.raises(ValueError, match="ts 与 probs 行数不等"):
+            _worker(offline).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert facts_path.read_bytes() == original_facts
+        assert probs_path.read_bytes() == original_probs
+
+    def test_probability_write_error_keeps_segments(self, tmp_storage, monkeypatch, caplog):
+        def fail_write(run, probs):
+            raise OSError("npz write failed")
+
+        _write_detections(1, 2)
+        monkeypatch.setattr(inference_store, "write_label_probs", fail_write)
+        result = _worker({"class": f"{__name__}.ProbsSegmenter"}).run(OfflineRunSpec(task_id=1, step_id=2))
+        assert (result.status, result.segment_count) == ("completed", 1)
+        assert _facts_path(tmp_storage).exists() and not _probs_path(tmp_storage).exists()
+        assert "npz write failed" in caplog.text
+
+
+def test_infer_rejects_invalid_segments(offline_context, monkeypatch):
+    segmenter = ProbsSegmenter()
+    monkeypatch.setattr(segmenter, "_postprocess", lambda _: [_seg(producer=segmenter.name, start=2.0, end=1.0)])
+
+    with pytest.raises(ValueError, match="start > end"):
+        segmenter.infer([make_frame_detection(ts=1.0)], offline_context)
 
 
 class BoomSegmenter(OfflineSegmenter):
-    def preprocess(self, frames):
+    frame_contract = FrameInputContract()
+
+    def _build_model_input(self, frames, context):
         return frames
 
-    def segment(self, model_input):
+    def _predict(self, model_input):
         raise RuntimeError("boom")
+
+    def _postprocess(self, label_probs):
+        return []
 
 
 class MarkerSegmenter(OfflineSegmenter):
-    """验证 preprocess 预留层被 runner 调用：preprocess 打标，segment 据标产段。"""
+    """验证构建的模型输入传给前向，预测标签传给后处理。"""
 
-    def preprocess(self, frames):
+    frame_contract = FrameInputContract()
+
+    def _build_model_input(self, frames, context):
         return {"marked": True, "frames": frames}
 
-    def segment(self, model_input):
-        assert model_input.get("marked") is True  # runner 确实先调了 preprocess
-        return [TemporalSegment(producer=self.name, label="m", start=0.0, end=1.0)]
+    def _predict(self, model_input):
+        assert model_input.get("marked") is True
+        ts = np.array([frame.ts for frame in model_input["frames"]], dtype=np.float64)
+        return LabelProbs(ts=ts, probs=np.ones((len(ts), 1)), labels=("m",))
+
+    def _postprocess(self, label_probs):
+        return [TemporalSegment(producer=self.name, label=label_probs.labels[0], start=0.0, end=1.0)]
 
 
 class ContextSegmenter(OfflineSegmenter):
-    """`uses_context`：preprocess 收第二个参数，并真的经它取一次帧。"""
+    """构建模型输入时经 context 取一次帧。"""
 
-    uses_context = True
+    frame_contract = FrameInputContract()
 
-    def preprocess(self, frames, context):
-        return list(context.video(width=640, height=480))
+    def _build_model_input(self, frames, context):
+        list(context.video(width=640, height=480))
+        return np.array([frame.ts for frame in frames], dtype=np.float64)
 
-    def segment(self, model_input):
-        return [TemporalSegment(producer=self.name, label="c", start=0.0, end=1.0)]
+    def _predict(self, model_input):
+        return LabelProbs(ts=model_input, probs=np.ones((len(model_input), 1)), labels=("c",))
+
+    def _postprocess(self, label_probs):
+        return [TemporalSegment(producer=self.name, label=label_probs.labels[0], start=0.0, end=1.0)]
 
 
 # ============================ CLI ============================
@@ -274,7 +316,7 @@ class ContextSegmenter(OfflineSegmenter):
 class TestRunLock:
     def test_named_missing_run_is_reclaimed_and_writes_nothing(self, tmp_storage):
         _write_detections(1, 2)
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=123))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=123))
         assert (res.status, res.segment_count) == ("reclaimed", 0)
         assert not _facts_path(tmp_storage).exists()
 
@@ -282,24 +324,26 @@ class TestRunLock:
         """跑到一半所在 step 过 TTL 被回收：写入 FileNotFoundError → reclaimed，不重建目录。"""
         import shutil
 
-        from app.services.inference.offline.segmentation import runner as runner_mod
         from app.storage.utils import root as _root
 
         _write_detections(1, 2)
         run = make_run(1, 2)
-        real_validate = runner_mod.OfflineRunner._validate
+        step_dir = _root.path(1, 2).resolve()
+        assert tmp_storage.resolve() in step_dir.parents
+        replace_segments = OfflineWorker._replace_segments
 
-        def reclaim_then_validate(facts, producer):
-            shutil.rmtree(_root.path(1, 2))
-            return real_validate(facts, producer)
+        def reclaim_then_replace_segments(run, segments):
+            shutil.rmtree(step_dir)
+            replace_segments(run, segments)
 
-        monkeypatch.setattr(runner_mod.OfflineRunner, "_validate", staticmethod(reclaim_then_validate))
-        res = _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=run.run_id))
+        monkeypatch.setattr(OfflineWorker, "_replace_segments", staticmethod(reclaim_then_replace_segments))
+        monkeypatch.setattr(worker_mod.checker, "check_run", lambda *a, **kw: pytest.fail("run 回收后不应核对"))
+        res = _worker(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=run.run_id))
         assert res.status == "reclaimed"
         assert not _root.path(1, 2).exists()
 
-    def test_named_older_run_is_the_one_written(self, tmp_storage):
-        """锁定点名的 run：同 step 已有更新的 run，结果仍写回旧 run。"""
+    def test_named_older_run_is_committed_then_checked(self, tmp_storage, monkeypatch):
+        """分割与判定共享锁定的 run 和 stage 配置。"""
         from app.types.run import RunIdentity
         from app.storage.utils import root as _root
 
@@ -309,40 +353,57 @@ class TestRunLock:
         _root.run_path(new).mkdir()
         inference_store.append_detections(new, [make_frame_detection(ts=9.0)])
 
-        _runner(_OFFLINE_OK).run(OfflineRunSpec(task_id=1, step_id=2, run_id=old.run_id))
+        config = _config({"class": f"{__name__}.ProbsSegmenter"})
+        stage = config.stages["2"]
+        config_loads = []
+        checks = []
 
-        assert [f.producer for f in inference_store.read_temporal(old)] == ["BrushRulesSegmenter"]
+        def load_config(path):
+            config_loads.append(path)
+            return config
+
+        def check_run(run, spec, *, stage, dry_run):
+            checks.append((run, spec, stage, dry_run))
+            assert inference_store.read_label_probs(run) is not None
+            assert [f.producer for f in inference_store.read_temporal(run)] == ["ProbsSegmenter"]
+            return worker_mod.checker.CheckResult("completed", 4)
+
+        monkeypatch.setattr(worker_mod, "load_stage_config", load_config)
+        monkeypatch.setattr(worker_mod.checker, "check_run", check_run)
+        result = OfflineWorker().run(OfflineRunSpec(task_id=1, step_id=2, run_id=old.run_id))
+
+        assert (result.status, result.run_id, result.alarm_count) == ("completed", old.run_id, 4)
+        assert config_loads == [None]
+        assert checks == [(old, stage.compliance, stage.alias, False)]
+        assert checks[0][1] is stage.compliance
         assert inference_store.read_temporal(new) == []
 
 
 class TestCli:
     @pytest.fixture(autouse=True)
-    def _no_isolation(self, monkeypatch):
-        # _isolate 会在 pytest 主进程里永久改 CUDA_VISIBLE_DEVICES 与 torch 线程数，污染后续用例
+    def _skip_run_process_configuration(self, monkeypatch):
+        # 避免在 pytest 主进程配置 CUDA_VISIBLE_DEVICES 和 torch 线程数。
         from app.services.inference.offline import cli
-        monkeypatch.setattr(cli, "_isolate", lambda num_threads: None)
+        monkeypatch.setattr(cli, "_configure_run_process", lambda num_threads: None)
 
-    def test_pin_device_uses_online_inference_card(self, monkeypatch):
+    def test_pin_cuda_device_uses_online_inference_card(self, monkeypatch):
         """离线子进程与在线推理子进程钉同一张卡（settings.cuda_device），不碰机器上别的卡。"""
         from app.services.inference.offline import cli
         from app.settings import settings
 
         monkeypatch.setattr(settings, "cuda_device", "1")
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
-        cli._pin_device()
+        cli._pin_cuda_device()
         assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
     def test_run_completed_json_last_line(self, tmp_storage, monkeypatch, capsys):
         """stdout 末行恒为结果 JSON（作业服务按此解析）。
 
-        默认路径：OfflineRunner() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
-        + runner 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
+        默认路径：OfflineWorker() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
+        + worker 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
         """
-        from app.services.inference import config as config_mod
-        from app.services.inference.offline.segmentation import runner as runner_mod
         _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
-        monkeypatch.setattr(config_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         last = capsys.readouterr().out.strip().splitlines()[-1]
@@ -354,8 +415,6 @@ class TestCli:
 
     def test_run_check_failure_keeps_completed(self, tmp_storage, monkeypatch, capsys):
         """规则核对失败（这里是类表不符）只进 message：分割结果照常 completed、退出码 0、alarm_count 为 null。"""
-        from app.services.inference import config as config_mod
-        from app.services.inference.offline.segmentation import runner as runner_mod
         _write_detections(1, 2)
         cfg = InferenceConfig({"stages": {"2": {
             "offline": {"class": f"{__name__}.ProbsSegmenter"},
@@ -367,8 +426,7 @@ class TestCli:
                            "message": "x"}],
             },
         }}})
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: cfg)
-        monkeypatch.setattr(config_mod, "load_stage_config", lambda *a, **k: cfg)
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: cfg)
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -377,9 +435,8 @@ class TestCli:
         assert payload["message"].startswith("规则核对失败") and not (_inference_dir(1, 2) / "alarms.jsonl").exists()
 
     def test_run_strategy_error_exit_nonzero(self, tmp_storage, monkeypatch, capsys):
-        from app.services.inference.offline.segmentation import runner as runner_mod
         _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_BOOM))
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: _config(_BOOM))
         from app.services.inference.offline import cli
         rc = cli.main(["run", "--task-id", "1", "--step-id", "2"])
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -388,9 +445,8 @@ class TestCli:
 
     def test_query_roundtrip(self, tmp_storage, monkeypatch, capsys):
         """run 写出 facts 后，query 子命令能读回时间线。"""
-        from app.services.inference.offline.segmentation import runner as runner_mod
         _write_detections(1, 2)
-        monkeypatch.setattr(runner_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
+        monkeypatch.setattr(worker_mod, "load_stage_config", lambda *a, **k: _config(_OFFLINE_OK))
         from app.services.inference.offline import cli
         assert cli.main(["run", "--task-id", "1", "--step-id", "2"]) == 0
         capsys.readouterr()  # 清 run 的输出
@@ -404,21 +460,24 @@ class TestCli:
 class ProbsSegmenter(OfflineSegmenter):
     """产逐帧概率的替身：一段 + 与输入帧对齐的 label_probs。"""
 
-    def preprocess(self, frames):
+    frame_contract = FrameInputContract()
+
+    def _build_model_input(self, frames, context):
         return [f.ts for f in frames]
 
-    def segment(self, ts):
-        import numpy as np
-        from app.types.temporal import LabelProbs
-        self._probs = LabelProbs(ts=np.asarray(ts), probs=np.tile([0.25, 0.75], (len(ts), 1)), labels=("idle", "x"))
-        return [TemporalSegment(producer=self.name, label="x", start=ts[0], end=ts[-1], conf=0.75)]
+    def _predict(self, model_input):
+        ts = np.asarray(model_input, dtype=np.float64)
+        return LabelProbs(ts=ts, probs=np.tile([0.25, 0.75], (len(ts), 1)), labels=("idle", "x"))
 
-    def label_probs(self):
-        return self._probs
+    def _postprocess(self, label_probs):
+        return [TemporalSegment(producer=self.name, label=label_probs.labels[1], start=float(label_probs.ts[0]),
+                                end=float(label_probs.ts[-1]), conf=0.75)]
 
 
 class MaterialSegmenter(OfflineSegmenter):
     """声明物料的替身：`files` 原样作为 materials()。"""
+
+    frame_contract = FrameInputContract()
 
     def __init__(self, files=()):
         self.files = [Path(f) for f in files]
@@ -426,10 +485,13 @@ class MaterialSegmenter(OfflineSegmenter):
     def materials(self):
         return self.files
 
-    def preprocess(self, frames):
+    def _build_model_input(self, frames, context):
         return frames
 
-    def segment(self, model_input):
+    def _predict(self, model_input):
+        raise NotImplementedError
+
+    def _postprocess(self, label_probs):
         return []
 
 
@@ -474,15 +536,15 @@ class TestMaterials:
 
 
 class BadProbsSegmenter(OfflineSegmenter):
-    """label_probs 行数与 ts 对不上的策略：验证 Runner 旁路防护。"""
+    """产出时间戳与矩阵行数不匹配的逐帧概率。"""
 
-    def preprocess(self, frames):
+    frame_contract = FrameInputContract()
+
+    def _build_model_input(self, frames, context):
         return frames
 
-    def segment(self, model_input):
-        return []
-
-    def label_probs(self):
-        import numpy as np
-        from app.types.temporal import LabelProbs
+    def _predict(self, model_input):
         return LabelProbs(ts=np.array([1.0, 2.0]), probs=np.zeros((3, 2)), labels=("a", "b"))
+
+    def _postprocess(self, label_probs):
+        pytest.fail("概率形状无效时不应执行后处理")

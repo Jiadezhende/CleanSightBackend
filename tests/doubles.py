@@ -15,14 +15,15 @@ import json
 import subprocess
 import threading
 import time
-from typing import Any, Callable, List, Sequence
+from typing import Callable, List, Sequence
 
 import numpy as np
 
 from app.types.detection import DetBox, DetectorOutput, FrameDetection
 from app.services.inference.online.render import RenderItem, RenderSpec, RenderType
-from app.types.temporal import TemporalSegment
-from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
+from app.types.temporal import LabelProbs, TemporalSegment
+from app.services.inference.offline.segmentation.segmenter import OfflineContext, OfflineSegmenter
+from app.services.inference.offline.segmentation.utils import FrameInputContract
 from app.services.inference.online.detection.detector import Detector
 
 _MOCK_CLASS_ID = 0
@@ -111,30 +112,39 @@ class MockDetector(Detector):
         )
 
 
-class BrushRulesSegmenter(OfflineSegmenter):
+class BrushRulesSegmenter(OfflineSegmenter[Sequence[FrameDetection]]):
     """纯规则 Mock 分段器。
 
     Args:
         label: active 片段写出的动作标签，默认 `mock_action`。
     """
 
+    frame_contract = FrameInputContract()
+
     def __init__(self, label: str = "mock_action"):
         self.label = label
 
-    def preprocess(self, frames: Sequence[FrameDetection]) -> Sequence[FrameDetection]:
+    def _build_model_input(self, frames: Sequence[FrameDetection], context: OfflineContext) -> Sequence[FrameDetection]:
         """Mock 不做特征工程，直接把帧序列交给规则逻辑。"""
         return frames
 
-    def segment(self, model_input: Any) -> List[TemporalSegment]:
-        frames: Sequence[FrameDetection] = model_input
+    def _predict(self, model_input: Sequence[FrameDetection]) -> LabelProbs:
+        active = np.array([any(out.boxes for out in frame.by_source.values()) for frame in model_input], dtype=bool)
+        return LabelProbs(
+            ts=np.array([frame.ts for frame in model_input], dtype=np.float64),
+            probs=np.stack((~active, active), axis=1).astype(np.float32),
+            labels=("idle", self.label),
+        )
+
+    def _postprocess(self, label_probs: LabelProbs) -> List[TemporalSegment]:
         segments: List[TemporalSegment] = []
         run_start: float | None = None
         run_last = 0.0
-        for ff in frames:  # load 已按 ts 升序
-            if any(fd.boxes for fd in ff.by_source.values()):
+        for ts, active in zip(label_probs.ts.tolist(), label_probs.probs[:, 1]):
+            if active:
                 if run_start is None:
-                    run_start = ff.ts
-                run_last = ff.ts
+                    run_start = ts
+                run_last = ts
                 continue
             if run_start is not None:
                 segments.append(self._make(run_start, run_last))

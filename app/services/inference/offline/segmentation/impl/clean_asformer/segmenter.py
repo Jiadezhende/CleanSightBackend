@@ -12,23 +12,25 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple
 
 import numpy as np
 
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
-from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
+from app.services.inference.offline.segmentation.segmenter import OfflineContext, OfflineSegmenter
+from app.services.inference.offline.segmentation.utils import FrameInputContract
 
 from .contract import FEATURE_DIM, FEATURE_VERSION, LABELS, MODEL_FILE
 from .features import ModelInput, build_features
 
 
-class CleanASFormerSegmenter(OfflineSegmenter):
+class CleanASFormerSegmenter(OfflineSegmenter[ModelInput]):
     """ASFormer 风格 整段离线模型（clean_bbox_v2_top1_impute+business_priors，121 维）。"""
 
     model_version = "clean_asformer_v1"
     labels: Tuple[str, ...] = LABELS
+    frame_contract = FrameInputContract()
 
     def __init__(
         self,
@@ -45,38 +47,31 @@ class CleanASFormerSegmenter(OfflineSegmenter):
         self.frame_height = max(1, int(frame_height))
         self._model = None
         self._normalizer: Tuple[Any, Any] | None = None
-        self._last_probs: LabelProbs | None = None
 
     def materials(self) -> Sequence[Path]:
         return (self.model_dir / MODEL_FILE,)
 
-    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
+    def _build_model_input(self, frames: Sequence[FrameDetection], context: OfflineContext) -> ModelInput:
         return build_features(frames, self.fps, self.frame_width, self.frame_height)
 
-    def segment(self, model_input: ModelInput) -> List[TemporalSegment]:
-        """跑模型得到逐帧标签，解码成 TemporalSegment。"""
-        if model_input.frame_count == 0:
-            return []
+    def _predict(self, model_input: ModelInput) -> LabelProbs:
         if model_input.feature_dim != FEATURE_DIM or model_input.feature_version != FEATURE_VERSION:
             raise AssertionError(f"特征 {model_input.feature_version}/{model_input.feature_dim} 与契约不符")
 
-        probs = self._predict_with_model(model_input)
-        labels = probs.argmax(axis=1).astype("int64").tolist()
-        confs = probs.max(axis=1).astype("float32").tolist()
-
-        segments = self._labels_to_segments(model_input.timestamps, labels, confs)
-        self._last_probs = LabelProbs(
+        probs = self._predict_label_probs(model_input)
+        return LabelProbs(
             ts=np.asarray(model_input.timestamps, dtype=np.float64),
             probs=probs,
             labels=self.labels,
         )
-        return segments
 
-    def label_probs(self) -> Optional[LabelProbs]:
-        """最近一次 segment() 的逐帧 softmax（未跑过为 None），供可视化旁路落盘。"""
-        return self._last_probs
+    def _postprocess(self, label_probs: LabelProbs) -> List[TemporalSegment]:
+        probs = label_probs.probs
+        labels = probs.argmax(axis=1).astype("int64").tolist()
+        confs = probs.max(axis=1).astype("float32").tolist()
+        return self._labels_to_segments(label_probs.ts, labels, confs)
 
-    def _predict_with_model(self, model_input: ModelInput) -> np.ndarray:
+    def _predict_label_probs(self, model_input: ModelInput) -> np.ndarray:
         """惰性加载权重，归一化+finite 兜底后前向，返回逐帧 softmax `[T, len(self.labels)]`。"""
         import torch
 

@@ -4,9 +4,10 @@
     compliance/     规则判定   label_probs.npz + detections.jsonl → 规则表 → alarms.jsonl
 
     service / instance   离线作业服务（排队、起子进程、状态）
-    cli                  子进程入口：run = 分割后接判定，check = 只重跑判定
+    worker               编排分割、结果提交与规则判定
+    cli                  子进程入口：参数解析、进程隔离与输出
 
 调用方显式给出 `(task_id, step_id)`，离线链路只识别这对稳定存储键；不接 client/CQ/在线 Operator/alarm 服务。
 
-纯包标记，不做 re-export——消费方走深路径（`.segmentation.runner` / `.compliance.checker`）。
+纯包标记，消费方走深路径（`.worker` / `.compliance.checker`）。
 """

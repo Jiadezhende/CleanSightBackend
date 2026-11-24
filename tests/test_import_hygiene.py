@@ -144,8 +144,8 @@ BUDGET = {
     "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
     "app.services.inference.offline.segmentation": (set(), 1.0),
-    # 离线 CLI 是独立进程入口：`_isolate()` 必须先于任何 torch import，故模块级不许有
-    # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 runner/策略拉起）。实测 ~0.03s。
+    # 离线 CLI 是独立进程入口：`_configure_run_process()` 必须先于任何 torch import，故模块级不许有
+    # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 worker/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
     # 规则判定（LAYER_PACKAGES 白名单包，逐模块登记）：numpy + storage，不许 torch
     "app.services.inference.offline.compliance":          (set(), 0.50),
@@ -337,7 +337,7 @@ def _iter_app_py_files():
 
 
 def _own_package(path: Path) -> str:
-    """文件所属包的点分名（`app/services/x/manager.py` 与 `app/services/x/__init__.py` 同为 `app.services.x`）。"""
+    """文件所属包的点分名（`app/services/x/service.py` 与 `app/services/x/__init__.py` 同为 `app.services.x`）。"""
     parts = path.relative_to(REPO_ROOT).with_suffix("").parts
     return ".".join(parts[:-1])
 
@@ -434,6 +434,7 @@ OFFLINE_DIR = APP_DIR / "services" / "inference" / "offline"
 OFFLINE_IMPL_DIR = OFFLINE_DIR / "segmentation" / "impl"
 OFFLINE_IMPL_ALLOWED = (
     "app.services.inference.offline.segmentation.segmenter",
+    "app.services.inference.offline.segmentation.utils",
     "app.services.inference.resample",
     "app.types",
 )
@@ -454,7 +455,7 @@ def test_offline_impl_imports_only_framework_contract(unit, files):
     """一个离线策略只许 import 自己与框架契约（`OFFLINE_IMPL_ALLOWED`）。
 
     历史策略要长期保留做对照：特征 / 后处理随权重冻结，策略间共享一份代码，改一处就会让别的历史模型静默漂移。
-    宁可复制，不许跨包 import；存储、client、其他 service 一律经 Runner 注入的 `OfflineContext`。
+    宁可复制，不许跨包 import；存储、client、其他 service 一律经离线 worker 注入的 `OfflineContext`。
     """
     def ok(name):
         return any(name == a or name.startswith(a + ".") for a in (unit, *OFFLINE_IMPL_ALLOWED))
@@ -540,7 +541,7 @@ def test_offline_segmentation_does_not_import_compliance():
     violations = _imports_under(OFFLINE_DIR / "segmentation", "app.services.inference.offline.compliance")
     assert not violations, (
         "离线分割 import 了规则判定：\n  " + "\n  ".join(violations)
-        + "\n两者只在 offline/cli.py 串联；需要的结果请经盘上产物交接。"
+        + "\n两者由 offline/worker.py 串联；需要的结果请经盘上产物交接。"
     )
 
 

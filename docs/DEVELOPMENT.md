@@ -138,11 +138,32 @@
 
 - **相对导入不上翻**：只许 `from .x import`，禁止 `from ..x` / `from ...x`。要引用兄弟包或父包，写绝对路径。
 - **重依赖（`torch` / `ultralytics` / `cv2`）不写在模块顶层**，写进函数体内；例外只有 `impl/` 下经 `importlib` 按配置加载的实现模块。新增分层包模块要同步在门禁的 `BUDGET` 里登记一行。
-- **`__init__.py` 不 re-export 单例 / manager / impl**：模块级只允许 import 轻量类型；指向 `instance` / `manager` 的 import 写在 `lifespan()` 等函数体内。
+- **`__init__.py` 不 re-export 单例或 `impl`**。模块级只允许 import 轻量类型。指向 `instance` 的 import 写在 `lifespan()` 等函数体内。
 
 > 前两条不是风格偏好：单例引用面与分层白名单两条门禁都按模块名判定依赖，同一条依赖若有两种写法就有绕过的口子。
 
 背景与推导见 [update/20260903_PACKAGE_LAYOUT_SPEC.md](update/20260903_PACKAGE_LAYOUT_SPEC.md)、[update/20260922_IMPORT_CONVENTION.md](update/20260922_IMPORT_CONVENTION.md)。
+
+### 文件名与职责
+
+按职责选用下列文件名。包只需包含实际承担这些职责的文件。
+
+| 文件或目录 | 职责与边界 |
+| --- | --- |
+| `service.py` | 服务的业务入口。定义服务类及其对外操作，或为无常驻状态的服务提供模块级函数。 |
+| `worker.py` / `<职责>_worker.py` | 定义守护进程组件，或执行后台任务，包括持续运行的工作循环和独立进程中的一次性任务。需要区分多个工作模块时，在文件名中加职责前缀。 |
+| `instance.py` | 服务或守护进程的进程级单例的唯一定义处。从 `service.py` 或 `worker.py` 导入类并构造共享实例。构造时不启动线程、子进程或监听器，也不连接数据库。 |
+| `__init__.py` | 声明包的用途。需要参与应用启停的包在这里提供 `lifespan()`，并在函数体内导入单例。存储域可以在这里集中导出公开接口。 |
+| `app/main.py` | 装配 FastAPI 应用、注册路由并安排各组件的启动和关闭顺序。 |
+| `app/settings.py` / `config.py` | 前者管理应用级配置，后者处理所属包的配置读取、默认值、解析与校验。 |
+| `runtime_config.py` | Lab 的运行时配置，负责读取和持久化页面可修改的设置。 |
+| `types.py` / `app/types/` | `types.py` 声明所属包的数据类型，跨层共享的数据契约与异常放在 `app/types/`。 |
+| `topics.py` | 声明 session channel 的 topic 及其工厂。包内自用的 topic 放在所属包，跨服务共享的放在 `session/topics.py`（见第 3 节）。 |
+| `cli.py` | `python -m` 命令入口，负责解析参数、调用业务逻辑、输出结果和返回退出码。包内其他模块不得导入 CLI。 |
+| `impl/`（推理契约包） | 放置按配置加载的具体实现。离线分割策略的 `contract.py` 记录与权重绑定的类序、特征和物料约定，`model.py` 定义模型结构与构建函数，可同时提供权重加载。 |
+| `utils.py` / `utils/` | 放置包内共用的辅助逻辑。这里定义的函数和方法只能由直接包含该 `utils` 的包及其子包使用。包外代码不得导入或调用这些函数和方法，所属包也不得将它们重新导出为公开接口。 |
+
+离线分析由 `offline/worker.py` 编排分割、产物提交和合规核对。
 
 ---
 

@@ -55,6 +55,17 @@ def tmp_storage(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def offline_context():
+    """纯检测策略的测试上下文，访问 run 资源视为失败。"""
+    from app.services.inference.offline.segmentation.segmenter import OfflineContext
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("纯检测策略不应访问 raw 或中间缓存")
+
+    return OfflineContext(unexpected, unexpected, unexpected)
+
+
+@pytest.fixture
 def fast_task_queue(monkeypatch):
     """SerialTaskQueue 消费线程轮询 0.5s → 0.01s：`stop()` 不再每条队列白等半秒。"""
     monkeypatch.setattr(task_queue, "_POLL_INTERVAL", 0.01)

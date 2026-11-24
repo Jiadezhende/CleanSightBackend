@@ -56,7 +56,7 @@ def test_handless_frames_need_no_raw_or_backbone(segmenter):
     context = OfflineContext(_unexpected, _unexpected, _unexpected)
     segmenter.materials()[1].unlink()
     segmenter.materials()[2].unlink()
-    result = segmenter.preprocess([_frame(2.0)], context)
+    result = segmenter._build_model_input([_frame(2.0)], context)
     np.testing.assert_array_equal(result.ts, [2.0])
     np.testing.assert_array_equal(result.features[0, 89:], np.zeros(EMBED_DIM, dtype=np.float32))
 
@@ -65,11 +65,11 @@ def test_missing_checkpoint_fails_before_raw_or_model_import(segmenter, monkeypa
     segmenter.materials()[0].unlink()
     monkeypatch.setitem(sys.modules, f"{seg_mod.__package__}.model", None)
     with pytest.raises(FileNotFoundError, match="model.pt"):
-        segmenter.preprocess(
+        segmenter.infer(
             [_frame(1.0, [100, 100, 200, 200])], OfflineContext(_unexpected, _unexpected, _unexpected),
         )
     with pytest.raises(FileNotFoundError, match="model.pt"):
-        segmenter.segment(seg_mod.DINOv2ConcatInput(np.array([1.0]), np.zeros((1, FEATURE_DIM))))
+        segmenter._predict(seg_mod.DINOv2ConcatInput(np.array([1.0]), np.zeros((1, FEATURE_DIM))))
 
 
 @pytest.fixture
@@ -86,7 +86,7 @@ def raw_context(monkeypatch):
 
     monkeypatch.setattr(seg_mod, "load_dino", lambda *_: None)
     monkeypatch.setattr(seg_mod, "embed_crops", embed)
-    monkeypatch.setattr(seg_mod.CleanDINOv2ConcatSegmenter, "_resolve_device", lambda self: "cpu")
+    monkeypatch.setattr(seg_mod.CleanDINOv2ConcatSegmenter, "_require_device", lambda self: "cpu")
     return OfflineContext(video, store.get, store.__setitem__), store, calls
 
 
@@ -94,8 +94,8 @@ def raw_context(monkeypatch):
 def test_cache_reuse_and_invalidation(segmenter, raw_context, stale_key):
     context, store, calls = raw_context
     frames = [_frame(1.0, [100, 100, 200, 200]), _frame(2.0), _frame(3.0, [100, 100, 200, 200])]
-    first = segmenter.preprocess(frames, context)
-    second = segmenter.preprocess(frames, context)
+    first = segmenter._build_model_input(frames, context)
+    second = segmenter._build_model_input(frames, context)
     np.testing.assert_array_equal(first.features[:, 89], [10, 0, 30])
     np.testing.assert_array_equal(first.features, second.features)
     assert calls == [{"width": 640, "height": 480, "start_ts": 1.0, "end_ts": 3.0}]
@@ -104,7 +104,7 @@ def test_cache_reuse_and_invalidation(segmenter, raw_context, stale_key):
     cached = store[seg_mod.CACHE_NAME]
     original = cached[stale_key].copy()
     cached[stale_key] = np.asarray("different") if stale_key == "backbone" else original + 1
-    third = segmenter.preprocess(frames, context)
+    third = segmenter._build_model_input(frames, context)
     assert len(calls) == 2
     np.testing.assert_array_equal(store[seg_mod.CACHE_NAME][stale_key], original)
     np.testing.assert_array_equal(third.features, first.features)
@@ -114,7 +114,7 @@ def test_missing_raw_frame_fails_without_caching_partial_embeddings(segmenter, r
     context, store, _ = raw_context
     frames = [_frame(1.0, [100, 100, 200, 200]), _frame(4.0, [100, 100, 200, 200])]
     with pytest.raises(ValueError, match="raw 录像缺 1/2"):
-        segmenter.preprocess(frames, context)
+        segmenter.infer(frames, context)
     assert store == {}
 
 
@@ -127,12 +127,15 @@ def test_decode_uses_pp5_and_keeps_raw_five_class_probabilities(segmenter, monke
         SimpleNamespace(load_model=lambda path: None, predict_probs=lambda model, features: probs),
     )
     ts = np.arange(len(raw)) / 15
-    segments = segmenter.segment(seg_mod.DINOv2ConcatInput(ts, np.zeros((len(raw), FEATURE_DIM))))
+    frames = [_frame(t) for t in ts]
+    context = OfflineContext(_unexpected, _unexpected, _unexpected)
+    segments, label_probs = segmenter.infer(frames, context)
     assert [(s.label, s.start, s.end, s.producer) for s in segments] == [
         ("long_brush_insert", ts[5], ts[20], "CleanDINOv2ConcatSegmenter"),
     ]
-    assert segmenter.label_probs().labels == ACTION_NAMES
-    np.testing.assert_array_equal(segmenter.label_probs().probs, probs)
+    assert label_probs.labels == ACTION_NAMES
+    np.testing.assert_array_equal(label_probs.probs, probs)
+    assert segmenter.infer([], context) == ([], None)
 
 
 def test_shipped_yaml_selects_dinov2_concat_for_clean():
@@ -142,7 +145,7 @@ def test_shipped_yaml_selects_dinov2_concat_for_clean():
 
     config = load_stage_config()
     seg = StageFactory(config).create_offline_segmenter("2")
-    assert isinstance(seg, seg_mod.CleanDINOv2ConcatSegmenter) and seg.uses_context
+    assert isinstance(seg, seg_mod.CleanDINOv2ConcatSegmenter)
     assert (seg.model_dir.name, seg.backbone_dir.name) == ("clean-offline-dinov2-concat", "dinov2_vits14")
     assert (seg.min_segment_frames, seg.max_duration_s) == (5, 900.0)
     compliance = parse_config(config.get_stage_config("2").compliance)

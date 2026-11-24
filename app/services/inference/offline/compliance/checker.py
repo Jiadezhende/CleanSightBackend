@@ -5,7 +5,7 @@
 
 约束：
 - 规则表缺省或 `rules` 为空 → skipped；没有 `label_probs.npz` → skipped。skipped 不碰 `alarms.jsonl`
-  （同离线 Runner「跳过不覆盖旧事实」）。
+  （同离线 worker「跳过不覆盖旧事实」）。
 - 配置非法、类表不符 → `ValueError` 上抛；落盘失败 `OSError` 上抛。
 - 只读盘上产物（经 `app.storage.inference`），不 import inference、不 import torch。
 """

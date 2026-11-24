@@ -15,20 +15,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
-from app.services.inference.offline.segmentation.segmenter import OfflineSegmenter
-from app.services.inference.resample import resample_by_ts
+from app.services.inference.offline.segmentation.segmenter import OfflineContext, OfflineSegmenter
+from app.services.inference.offline.segmentation.utils import FrameInputContract
 
 from .contract import FEATURE_DIM, LABELS, MODEL_FILE, STRUCTURE, WINDOW
 from .features import ModelInput, build_nodep_concat_features
 
 
-class CleanGRUNodepSegmenter(OfflineSegmenter):
+class CleanGRUNodepSegmenter(OfflineSegmenter[ModelInput]):
     """因果滑窗 GRU 离线模型（ama-v3-concat23-nodep-226d，6 类）。"""
 
     model_version = "clean_gru_nodep226d"
@@ -50,51 +50,40 @@ class CleanGRUNodepSegmenter(OfflineSegmenter):
             raise ValueError(f"confidence_override 必须在 0..1: {confidence_override}")
         self.model_dir = Path(model_dir)
         self.fps = float(model_input_fps)
+        self.frame_contract = FrameInputContract(target_fps=self.fps, low_rate="error")
         self.min_duration_s = max(0.0, float(min_duration_s))
         self.confidence_override = None if confidence_override is None else float(confidence_override)
         self.frame_width = max(1, int(frame_width))
         self.frame_height = max(1, int(frame_height))
         self._model = None
-        self._last_probs: LabelProbs | None = None
 
     def materials(self) -> Sequence[Path]:
         return (self.model_dir / MODEL_FILE,)
 
-    def preprocess(self, frames: Sequence[FrameDetection]) -> ModelInput:
-        """按 ts 降采样到 model_input_fps（只挑真实帧，ts 与 detections.jsonl 位级相等）→ 226 维特征。
-
-        检测帧率低于 model_input_fps 即 ValueError（strict）：只能降采样，放行会静默错配时间密度。
-        """
+    def _build_model_input(self, frames: Sequence[FrameDetection], context: OfflineContext) -> ModelInput:
         return build_nodep_concat_features(
-            resample_by_ts(frames, self.fps, strict=True),
+            frames,
             self.fps,
             self.frame_width,
             self.frame_height,
             self.confidence_override,
         )
 
-    def segment(self, model_input: ModelInput) -> List[TemporalSegment]:
-        """跑模型得到逐帧标签，解码成 TemporalSegment。"""
-        if model_input.frame_count == 0:
-            return []
-
-        probs = self._predict_with_model(model_input)
-        labels = probs.argmax(axis=1).astype("int64").tolist()
-        confs = probs.max(axis=1).astype("float32").tolist()
-
-        segments = self._labels_to_segments(model_input.timestamps, labels, confs)
-        self._last_probs = LabelProbs(
+    def _predict(self, model_input: ModelInput) -> LabelProbs:
+        probs = self._predict_label_probs(model_input)
+        return LabelProbs(
             ts=np.asarray(model_input.timestamps, dtype=np.float64),
             probs=probs,
             labels=self.labels,
         )
-        return segments
 
-    def label_probs(self) -> Optional[LabelProbs]:
-        """最近一次 segment() 的逐帧 softmax（未跑过为 None），供可视化旁路落盘。"""
-        return self._last_probs
+    def _postprocess(self, label_probs: LabelProbs) -> List[TemporalSegment]:
+        probs = label_probs.probs
+        labels = probs.argmax(axis=1).astype("int64").tolist()
+        confs = probs.max(axis=1).astype("float32").tolist()
+        return self._labels_to_segments(label_probs.ts, labels, confs)
 
-    def _predict_with_model(self, model_input: ModelInput) -> np.ndarray:
+    def _predict_label_probs(self, model_input: ModelInput) -> np.ndarray:
         """每帧取以它为末帧的窗口前向，返回逐帧 softmax `[T, len(self.labels)]`。"""
         import torch
 

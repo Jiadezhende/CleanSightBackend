@@ -29,7 +29,7 @@ import numpy as np
 from app.types.detection import FrameDetection
 from app.types.temporal import LabelProbs, TemporalSegment
 from app.services.inference.offline.segmentation.segmenter import OfflineContext, OfflineSegmenter
-from app.services.inference.resample import input_fps, resample_by_ts
+from app.services.inference.offline.segmentation.utils import FrameInputContract
 
 from .contract import ACTION_NAMES, EMBED_DIM, FPS, HEIGHT, MODEL_FILE, WIDTH
 from .features import build_features
@@ -42,7 +42,6 @@ from .postprocess import PP_MIN_LEN, merge_short_segments
 logger = logging.getLogger(__name__)
 
 CACHE_NAME = "dinov2_base_857d_hand_embeddings"
-_RATE_SLACK = 0.01  # 帧率比较的相对余量，吸收 ts 舍入与抖动（同 resample）
 
 
 @dataclass(frozen=True)
@@ -51,10 +50,10 @@ class DINOv2ConcatInput:
     features: np.ndarray  # [T, 857] float32
 
 
-class CleanDINOv2ConcatSegmenter(OfflineSegmenter):
+class CleanDINOv2ConcatSegmenter(OfflineSegmenter[DINOv2ConcatInput]):
     """89 维几何 + 768 维同帧手部嵌入均值 → MS-TCN2 → pp5。"""
 
-    uses_context = True
+    frame_contract = FrameInputContract(target_fps=FPS, unique_ts=True, expected_size=(WIDTH, HEIGHT))
     labels = ACTION_NAMES
 
     def __init__(
@@ -85,32 +84,28 @@ class CleanDINOv2ConcatSegmenter(OfflineSegmenter):
         self.batch_size = int(batch_size)
         self.min_segment_frames = int(min_segment_frames)
         self.max_duration_s = None if max_duration_s is None else float(max_duration_s)
-        self._last_probs: Optional[LabelProbs] = None
 
-    def preprocess(self, frames: Sequence[FrameDetection], context: OfflineContext) -> DINOv2ConcatInput:
-        if frames:
-            _require_file(self.model_dir / MODEL_FILE)
-        frames = _truncate(frames, self.max_duration_s)
-        _warn_low_rate(frames)
-        frames = _dedup_ts(resample_by_ts(frames, FPS))
-        _check_resolution(frames)
+    def _validate_required_materials(self) -> None:
+        _require_file(self.model_dir / MODEL_FILE)
+
+    def _build_model_input(self, frames: Sequence[FrameDetection], context: OfflineContext) -> DINOv2ConcatInput:
         ts = np.asarray([f.ts for f in frames], dtype=np.float64)
         rows = detection_rows(frames, width=WIDTH, height=HEIGHT)
         hands = [[row[1:] for row in frame_rows if row[0] == HAND] for frame_rows in rows]
-        embeddings = self._embed(ts, hands, context)
+        embeddings = self._get_hand_embeddings(ts, hands, context)
         return DINOv2ConcatInput(ts, build_features(rows, [len(boxes) for boxes in hands], embeddings))
 
-    def segment(self, model_input: DINOv2ConcatInput) -> List[TemporalSegment]:
-        self._last_probs = None
-        if len(model_input.ts) == 0:
-            return []
+    def _predict(self, model_input: DINOv2ConcatInput) -> LabelProbs:
         path = _require_file(self.model_dir / MODEL_FILE)
         from .model import load_model, predict_probs  # torch 只在真正前向时拉起
 
         probs = predict_probs(load_model(path), model_input.features)
+        return LabelProbs(ts=model_input.ts, probs=probs, labels=self.labels)
+
+    def _postprocess(self, label_probs: LabelProbs) -> List[TemporalSegment]:
+        probs = label_probs.probs
         labels = merge_short_segments(probs.argmax(axis=1), self.min_segment_frames)
-        self._last_probs = LabelProbs(ts=model_input.ts, probs=probs, labels=self.labels)
-        return self._segments(model_input.ts, labels, probs)
+        return self._labels_to_segments(label_probs.ts, labels, probs)
 
     def materials(self) -> Sequence[Path]:
         return (
@@ -119,10 +114,7 @@ class CleanDINOv2ConcatSegmenter(OfflineSegmenter):
             self.backbone_dir / DINO_WEIGHTS,
         )
 
-    def label_probs(self) -> Optional[LabelProbs]:
-        return self._last_probs
-
-    def _segments(self, ts: np.ndarray, labels: np.ndarray, probs: np.ndarray) -> List[TemporalSegment]:
+    def _labels_to_segments(self, ts: np.ndarray, labels: np.ndarray, probs: np.ndarray) -> List[TemporalSegment]:
         """连续同标签帧 → 一段（跳过 idle）；conf = 段内该标签概率的均值。"""
         bounds = np.flatnonzero(np.diff(labels)) + 1
         starts = np.concatenate([[0], bounds])
@@ -142,7 +134,7 @@ class CleanDINOv2ConcatSegmenter(OfflineSegmenter):
             ))
         return out
 
-    def _embed(self, ts: np.ndarray, hands: List[List[tuple]], context: OfflineContext) -> np.ndarray:
+    def _get_hand_embeddings(self, ts: np.ndarray, hands: List[List[tuple]], context: OfflineContext) -> np.ndarray:
         """嵌入依次按帧和帧内手框顺序排列。"""
         row_ts = np.asarray([t for t, boxes in zip(ts, hands) for _ in boxes], dtype=np.float64)
         row_boxes = np.asarray([b for boxes in hands for b in boxes], dtype=np.float64).reshape(-1, 4)
@@ -151,19 +143,19 @@ class CleanDINOv2ConcatSegmenter(OfflineSegmenter):
         _require_file(self.backbone_dir / DINO_WEIGHTS)
         key = backbone_key(self.backbone_dir)
         cached = context.load_cache(CACHE_NAME)
-        if _cache_matches(cached, row_ts, row_boxes, key):
+        if _embedding_cache_matches(cached, row_ts, row_boxes, key):
             logger.info("[CleanDINOv2ConcatSegmenter] 手部嵌入命中缓存 | hands=%d", len(row_ts))
             return cached["emb"]
-        emb = self._compute_embeddings(ts, hands, context)
+        emb = self._compute_hand_embeddings(ts, hands, context)
         context.save_cache(CACHE_NAME, {"ts": row_ts, "boxes": row_boxes, "emb": emb, "backbone": np.array(key)})
         return emb
 
-    def _compute_embeddings(self, ts: np.ndarray, hands: List[List[tuple]], context: OfflineContext) -> np.ndarray:
+    def _compute_hand_embeddings(self, ts: np.ndarray, hands: List[List[tuple]], context: OfflineContext) -> np.ndarray:
         """按 ts 从 raw 轨取有手的帧，逐只手裁剪嵌入；缺任何一帧即失败，不跳手。"""
         wanted = {float(t): boxes for t, boxes in zip(ts, hands) if boxes}
         total = sum(len(b) for b in wanted.values())
         _require_file(self.backbone_dir / "hubconf.py")
-        device = self._resolve_device()
+        device = self._require_device()
         started = time.monotonic()
         net = load_dino(self.backbone_dir, device)
         found = set()
@@ -190,7 +182,7 @@ class CleanDINOv2ConcatSegmenter(OfflineSegmenter):
         )
         return emb
 
-    def _resolve_device(self) -> str:
+    def _require_device(self) -> str:
         import torch
 
         if self.device.startswith("cuda") and not torch.cuda.is_available():
@@ -207,7 +199,7 @@ def _require_file(path: Path) -> Path:
     return path
 
 
-def _cache_matches(cached, row_ts: np.ndarray, row_boxes: np.ndarray, key: str) -> bool:
+def _embedding_cache_matches(cached, row_ts: np.ndarray, row_boxes: np.ndarray, key: str) -> bool:
     """缓存与本次的手逐行一致（ts、框）且来自同一骨干与裁剪口径。"""
     if not cached or not {"ts", "boxes", "emb", "backbone"} <= cached.keys():
         return False
@@ -218,47 +210,3 @@ def _cache_matches(cached, row_ts: np.ndarray, row_boxes: np.ndarray, key: str) 
         and np.array_equal(cached["ts"], row_ts)
         and np.array_equal(cached["boxes"], row_boxes)
     )
-
-
-def _truncate(frames: Sequence[FrameDetection], max_duration_s: Optional[float]) -> Sequence[FrameDetection]:
-    """只留首帧起 ``max_duration_s`` 内的帧（闭区间），限住超长 step 的取帧 / 嵌入开销。"""
-    if max_duration_s is None or not frames or frames[-1].ts - frames[0].ts <= max_duration_s:
-        return frames
-    cutoff = frames[0].ts + max_duration_s
-    kept = [f for f in frames if f.ts <= cutoff]
-    logger.warning(
-        "[CleanDINOv2ConcatSegmenter] 检测时长 %.0fs 超过上限 %.0fs，只推理前 %.0fs | frames %d → %d",
-        frames[-1].ts - frames[0].ts, max_duration_s, max_duration_s, len(frames), len(kept),
-    )
-    return kept
-
-
-def _dedup_ts(frames: Sequence[FrameDetection]) -> Sequence[FrameDetection]:
-    """按已排序的帧序列保留每个时间戳首次出现的帧。"""
-    kept = []
-    for frame in frames:
-        if not kept or frame.ts != kept[-1].ts:
-            kept.append(frame)
-    if len(kept) == len(frames):
-        return frames
-    logger.warning(
-        "[CleanDINOv2ConcatSegmenter] 检测有重复 ts，同 ts 只留首帧 | frames %d → %d",
-        len(frames), len(kept),
-    )
-    return kept
-
-
-def _warn_low_rate(frames: Sequence[FrameDetection]) -> None:
-    """检测帧率随在线负载波动：低于训练帧率只告警、不失败（按帧计的窗口与速度会相应拉长）。"""
-    rate = input_fps(frames)
-    if rate is None or rate >= FPS * (1 - _RATE_SLACK):
-        return
-    logger.warning("[CleanDINOv2ConcatSegmenter] 输入帧率 %.3ffps 低于训练帧率 %.1ffps，照常推理", rate, FPS)
-
-
-def _check_resolution(frames: Sequence[FrameDetection]) -> None:
-    for f in frames:
-        if (f.frame_width, f.frame_height) not in ((None, None), (WIDTH, HEIGHT)):
-            raise ValueError(
-                f"dinov2-concat 只接受 {WIDTH}×{HEIGHT} 输入，得到 {f.frame_width}×{f.frame_height}"
-            )

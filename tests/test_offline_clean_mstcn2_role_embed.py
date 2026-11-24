@@ -79,7 +79,7 @@ class TestEmbed:
         self.loads = []
         monkeypatch.setattr(seg_mod, "load_dino", lambda backbone_dir, device: self.loads.append(device))
         monkeypatch.setattr(seg_mod, "backbone_key", lambda backbone_dir: "key-a")
-        monkeypatch.setattr(CleanMSTCN2RoleEmbedSegmenter, "_resolve_device", lambda self: "cpu")
+        monkeypatch.setattr(CleanMSTCN2RoleEmbedSegmenter, "_require_device", lambda self: "cpu")
 
         def embed(net, crops, device, batch_size, max_crops_per_s):
             rows = [np.full(768, crop[112, 112, 0], np.float16) for crop in crops]
@@ -94,7 +94,7 @@ class TestEmbed:
     def test_rows_follow_frame_then_box_order_and_skip_handless_frames(self):
         calls = []
         ctx, store = _context(_video(self._PIXELS, calls))
-        emb = _segmenter()._embed(self._TS, self._HANDS, ctx)
+        emb = _segmenter()._get_hand_embeddings(self._TS, self._HANDS, ctx)
         assert emb[:, 0].tolist() == [10, 10, 30]
         assert calls == [{"width": 640, "height": 480, "start_ts": 1.0, "end_ts": 3.0}]
         saved = store["hand_embeddings"]
@@ -103,24 +103,24 @@ class TestEmbed:
 
     def test_matching_cache_skips_video_and_backbone(self):
         ctx, store = _context(_video(self._PIXELS))
-        _segmenter()._embed(self._TS, self._HANDS, ctx)
+        _segmenter()._get_hand_embeddings(self._TS, self._HANDS, ctx)
         calls = []
         again, _ = _context(_video(self._PIXELS, calls), store)
-        emb = _segmenter()._embed(self._TS, self._HANDS, again)
+        emb = _segmenter()._get_hand_embeddings(self._TS, self._HANDS, again)
         assert emb[:, 0].tolist() == [10, 10, 30]
         assert calls == [] and len(self.loads) == 1
 
     @pytest.mark.parametrize("change", ["backbone", "boxes"])
     def test_stale_cache_is_recomputed_and_overwritten(self, monkeypatch, change):
         ctx, store = _context(_video(self._PIXELS))
-        _segmenter()._embed(self._TS, self._HANDS, ctx)
+        _segmenter()._get_hand_embeddings(self._TS, self._HANDS, ctx)
         hands = self._HANDS
         if change == "backbone":
             monkeypatch.setattr(seg_mod, "backbone_key", lambda backbone_dir: "key-b")
         else:
             hands = [hands[0], [], [(0.4, 0.4, 0.1, 0.1)]]
         again, _ = _context(_video(self._PIXELS), store)
-        _segmenter()._embed(self._TS, hands, again)
+        _segmenter()._get_hand_embeddings(self._TS, hands, again)
         assert len(self.loads) == 2
         saved = store["hand_embeddings"]
         assert str(saved["backbone"]) == ("key-b" if change == "backbone" else "key-a")
@@ -130,13 +130,13 @@ class TestEmbed:
         hands = [[(0.5, 0.5, 0.1, 0.1)], [(0.5, 0.5, 0.1, 0.1)]]
         ctx, store = _context(_video([(1.0, 10)]))
         with pytest.raises(ValueError, match="缺 1/2"):
-            _segmenter()._embed(np.array([1.0, 2.0]), hands, ctx)
+            _segmenter()._get_hand_embeddings(np.array([1.0, 2.0]), hands, ctx)
         assert store == {}
 
     def test_no_hands_never_touches_video_backbone_or_cache(self):
         calls = []
         ctx, store = _context(_video([], calls))
-        emb = _segmenter()._embed(np.array([1.0]), [[]], ctx)
+        emb = _segmenter()._get_hand_embeddings(np.array([1.0]), [[]], ctx)
         assert emb.shape == (0, 768) and calls == [] and self.loads == [] and store == {}
 
 
@@ -146,7 +146,7 @@ class TestSegments:
         probs = np.zeros((7, len(ACTION_NAMES)), np.float32)
         probs[np.arange(7), labels] = [1, 0.5, 0.7, 0.9, 1, 0.6, 0.8]
         ts = np.arange(7, dtype=np.float64) / 15
-        segs = _segmenter()._segments(ts, labels, probs)
+        segs = _segmenter()._labels_to_segments(ts, labels, probs)
         assert [(s.label, s.start, s.end) for s in segs] == [
             ("long_brush_insert", ts[1], ts[3]),
             ("long_brush_withdraw", ts[5], ts[6]),
@@ -159,47 +159,7 @@ class TestContract:
     def test_rejects_non_640x480(self):
         frames = [_frame(t / 15, w=1280, h=720) for t in range(3)]
         with pytest.raises(ValueError, match="640×480"):
-            _segmenter().preprocess(frames, _context(_video([]))[0])
-
-    @pytest.mark.parametrize("rate", [12.994, 5.0])
-    def test_low_rate_only_warns_never_fails(self, caplog, rate):
-        """线上检测帧率随负载波动（实测 12.99fps）：再低也照常跑，只告警。"""
-        seg_mod._warn_low_rate([_frame(t / rate) for t in range(30)])
-        assert "低于训练帧率" in caplog.text
-
-    def test_long_run_truncated_to_first_max_duration(self, caplog):
-        frames = [_frame(1000.0 + t) for t in range(0, 1201, 60)]  # 20 分钟，每分钟一帧
-        kept = seg_mod._truncate(frames, 900.0)
-        assert [f.ts - 1000.0 for f in kept] == [float(t) for t in range(0, 901, 60)]
-        assert "只推理前 900s" in caplog.text
-
-    def test_short_run_or_no_cap_untouched(self):
-        frames = [_frame(float(t)) for t in range(10)]
-        assert seg_mod._truncate(frames, 900.0) is frames
-        assert seg_mod._truncate(frames, None) is frames
-
-    def test_duplicate_ts_keeps_first_frame(self, caplog):
-        """5fps 输入下 resample 放行重复 ts；同 ts 多帧会让嵌入行数与手行数对不上，只留首帧。"""
-        first, second = _det("hand", [0, 0, 64, 48]), _det("syringe", [0, 0, 64, 48])
-        frames = [_frame(0.0), _frame(0.2, first), _frame(0.2, second), _frame(0.4)]
-        kept = seg_mod._dedup_ts(seg_mod.resample_by_ts(frames, 15))
-        assert [f.ts for f in kept] == [0.0, 0.2, 0.4]
-        assert kept[1].by_source["clean_large"].boxes == [first]
-        assert "重复 ts" in caplog.text
-
-    def test_unique_ts_untouched(self, caplog):
-        frames = [_frame(t / 15) for t in range(5)]
-        assert seg_mod._dedup_ts(frames) is frames and caplog.text == ""
-
-    def test_contract_rate_does_not_warn(self, caplog):
-        seg_mod._warn_low_rate([_frame(t / 15.0) for t in range(30)])
-        assert caplog.text == ""
-
-    def test_25fps_source_rhythm_is_not_low_rate(self, caplog):
-        """线上「12.994fps」的成因：25fps 源补帧再隔帧抽，间隔 80/80/40ms，均值仍是 15fps，不该告警。"""
-        ts = np.cumsum([0.0] + [(0.08, 0.08, 0.04)[i % 3] for i in range(90)])
-        seg_mod._warn_low_rate([_frame(float(t)) for t in ts])
-        assert caplog.text == ""
+            _segmenter().infer(frames, _context(_video([]))[0])
 
     @pytest.mark.parametrize("kw", [
         {"device": "mps"}, {"max_crops_per_s": 0}, {"batch_size": 0}, {"min_segment_frames": -1},
