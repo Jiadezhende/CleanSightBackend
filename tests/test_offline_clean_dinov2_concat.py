@@ -133,3 +133,17 @@ def test_decode_uses_pp5_and_keeps_raw_five_class_probabilities(segmenter, monke
     ]
     assert segmenter.label_probs().labels == ACTION_NAMES
     np.testing.assert_array_equal(segmenter.label_probs().probs, probs)
+
+
+def test_shipped_yaml_selects_dinov2_concat_for_clean():
+    from app.services.inference.config import load_stage_config
+    from app.services.inference.stage_factory import StageFactory
+    from app.services.inference.offline.compliance.config import parse_config
+
+    config = load_stage_config()
+    seg = StageFactory(config).create_offline_segmenter("2")
+    assert isinstance(seg, seg_mod.CleanDINOv2ConcatSegmenter) and seg.uses_context
+    assert (seg.model_dir.name, seg.backbone_dir.name) == ("clean-offline-dinov2-concat", "dinov2_vits14")
+    assert (seg.min_segment_frames, seg.max_duration_s) == (5, 900.0)
+    compliance = parse_config(config.get_stage_config("2").compliance)
+    assert {label for labels in compliance.groups.values() for label in labels} <= set(seg.labels)

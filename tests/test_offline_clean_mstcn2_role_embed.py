@@ -213,12 +213,3 @@ class TestContract:
         assert [p.as_posix() for p in _segmenter().materials()] == [
             "m/temporal.pt", "m/hand_state.npz", "b/hubconf.py", "b/dinov2_vits14_pretrain.pth",
         ]
-
-    def test_shipped_yaml_builds_mstcn2_role_embed(self):
-        from app.services.inference.config import load_stage_config
-        from app.services.inference.stage_factory import StageFactory
-
-        seg = StageFactory(load_stage_config()).create_offline_segmenter("2")
-        assert isinstance(seg, CleanMSTCN2RoleEmbedSegmenter) and seg.uses_context
-        assert (seg.model_dir.name, seg.backbone_dir.name) == ("clean-offline-mstcn2-role-embed", "dinov2_vits14")
-        assert seg.max_duration_s == 900.0

@@ -102,17 +102,17 @@ stages:
             6: short_brush
             7: brush_tip_out
     offline:                         # 离线段（stage 粒度）：class 指定离线模型，缺省/空块 = 不可跑
-      class: app.services.inference.offline.segmentation.impl.clean_mstcn2_role_embed.segmenter.CleanMSTCN2RoleEmbedSegmenter
-      # 换 class 须同时换 params（物料与特征 recipe 一一对应）。历史策略各自一个包，可直接粘贴的 YAML 片段写在
-      # impl/<包>/segmenter.py 的 docstring：clean_mstcn_bilstm / clean_asformer / clean_bigru / clean_gru_nodep（上一版默认）/
-      # clean_mstcn2_bundle。物料核对：python -m app.services.inference.offline.cli materials
+      class: app.services.inference.offline.segmentation.impl.clean_dinov2_concat.segmenter.CleanDINOv2ConcatSegmenter
+      # 换 class 须同时换 params。各策略的 YAML 片段见 impl/<包>/segmenter.py 的 docstring。
+      # 上一版默认策略为 clean_mstcn2_role_embed。物料核对：python -m app.services.inference.offline.cli materials
       params:
         # 物料一个模型一个目录，目录内文件名由策略类写死
-        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-mstcn2-role-embed          # temporal.pt + hand_state.npz
+        model_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/clean-offline-dinov2-concat  # model.pt
         backbone_dir: ${CLEANSIGHT_MODEL_PATH:./app/data}/backbones/dinov2_vits14     # dinov2 hub 代码 + 权重
         device: cuda                 # DINOv2 所用设备；卡号随在线推理（settings.cuda_device）。无 GPU 的机器配 cpu
         max_crops_per_s: 150         # DINOv2 限速（次裁剪/秒），与在线 YOLO 共卡时让出算力；null = 不限速
         max_duration_s: 900          # 只推理首帧起前 15 分钟，超出截断（限住超长 step 的资源占用）；null = 不截断
+        min_segment_frames: 5       # pp5：短于 5 帧的动作段并入相邻较长段
     compliance:                      # 离线规则层：离线分割 completed 后核对，违规疑似落 run 的 alarms.jsonl；缺省 / rules 为空 = 不核对
       # 只读 label_probs.npz + detections.jsonl；改规则后 `python -m app.services.inference.offline.cli check --dry-run` 重跑即可。
       # 数值均为初值，待在已标注的 run 上标定。规则依据见 docs/update/20261018_OFFLINE_COMPLIANCE_RULES.md
