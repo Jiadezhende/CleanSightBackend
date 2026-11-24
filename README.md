@@ -154,7 +154,7 @@ RENDERED 快照 → [WebSocket 前端 ~10ms 轮询，非后端 push]
 - **LEAK**（step `"1"`）：`bubble`（气泡，出生率滑窗 3s、`birth_rate>0.5` 实时告警）+ `bending`（弯折，去抖 5 帧、合格需 4 次弯曲，结算告警）
 - **CLEAN**（step `"2"`）：`clean_large` + `clean_small` 检测 → `clean_monitor`（GRU 动作识别，10s 窗口，`gru-final.pt`）叠加动作事件；当前 `rules: []` 不产告警
 
-各 stage 的 `offline` 块只含 `class` + `params`（离线分段 producer = 类名，缺省/空块 = 不可跑）；CLEAN 默认启用 `CleanMSTCN2RoleEmbedSegmenter`（物料目录 `app/data/clean-offline-mstcn2-role-embed/` + 骨干 `app/data/backbones/dinov2_vits14/`）。离线策略一个模型一个包（`app/services/inference/offline/segmentation/impl/clean_<模型>/`），物料一个模型一个目录（`app/data/clean-offline-<模型>/`），历史策略都保留可切换；`python -m app.services.inference.offline.cli materials` 核对当前激活策略的物料。
+各 stage 的 `offline` 块只含 `class` 和 `params`，缺省或留空时该 stage 不提供离线推理。离线分段的 `producer` 为策略类名。CLEAN 默认启用 `CleanDINOv2ConcatSegmenter`（857 维、五类、pp5），物料目录为 `app/data/clean-offline-dinov2-concat/` 和 `app/data/backbones/dinov2_vits14/`。每个策略在 `app/services/inference/offline/segmentation/impl/` 有独立包，物料也按模型分目录。历史策略可通过各自的 YAML 片段切换。运行 `python -m app.services.inference.offline.cli materials` 核对当前策略的物料。
 
 **新增检测点**：步骤与容易静默出错的约束见 [DESIGN_EXTENDING_DETECTION.md](docs/kb/DESIGN_EXTENDING_DETECTION.md)，接口签名见 [SERVICE_INFERENCE.md](docs/kb/SERVICE_INFERENCE.md)。
 

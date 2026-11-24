@@ -26,7 +26,8 @@ def _snippet(pkg):
 
 def test_every_strategy_package_is_listed():
     assert PACKAGES == [
-        "clean_asformer", "clean_bigru", "clean_gru_nodep", "clean_mstcn2_bundle", "clean_mstcn2_role_embed",
+        "clean_asformer", "clean_bigru", "clean_dinov2_concat", "clean_gru_nodep",
+        "clean_mstcn2_bundle", "clean_mstcn2_role_embed",
         "clean_mstcn_bilstm",
     ]
 
