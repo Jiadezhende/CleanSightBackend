@@ -13,7 +13,7 @@ from app.routers import admin
 from app.services.inference.config import InferenceConfig
 from app.services.inference.offline.service import OfflineJobService
 from app.storage import inference as inference_store
-from doubles import FakeLauncher, offline_result, wait_until
+from doubles import FakeSpawner, offline_result, wait_until
 from factories import make_frame_detection, make_run
 
 # step 2 / 3 配了离线模型（class 不会被 import，子进程才实例化）；其余 step 一律未配置
@@ -46,11 +46,11 @@ def clients():
 def env(monkeypatch, fast_task_queue, tmp_storage, clients):
     for step_id in (2, 3):
         _visible_run(1, step_id)
-    launcher = FakeLauncher()
-    svc = OfflineJobService(config=_CFG, launcher=launcher, sessions=clients, poll_s=0.02)
+    spawner = FakeSpawner()
+    svc = OfflineJobService(config=_CFG, spawner=spawner, sessions=clients, poll_s=0.02)
     svc.start()
     monkeypatch.setattr(admin, "offline_job_service", svc)
-    yield launcher
+    yield spawner
     svc.stop(timeout=5.0)
 
 
@@ -63,15 +63,15 @@ async def client():
 
 @pytest.mark.asyncio
 async def test_submit_then_poll_to_completed(client, env):
-    launcher = env
+    spawner = env
     r = await client.post("/admin/offline/jobs", json={"task_id": 1, "step_id": 2})
     assert r.status_code == 202
     run = make_run(1, 2)
     assert (r.json()["task_id"], r.json()["step_id"], r.json()["run_id"]) == (1, 2, run.run_id)
     assert r.json()["status"] in ("queued", "running")
 
-    wait_until(lambda: len(launcher.procs) == 1)
-    launcher.procs[0].finish(0, offline_result(segment_count=4))
+    wait_until(lambda: len(spawner.procs) == 1)
+    spawner.procs[0].finish(0, offline_result(segment_count=4))
     wait_until(lambda: admin.offline_job_service.get(run).status == "completed")
 
     r = await client.get("/admin/offline/jobs/1/2")

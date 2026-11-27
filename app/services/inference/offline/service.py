@@ -7,35 +7,31 @@
     list_jobs() -> List[OfflineJob]           在途 + 最近结束的，按提交序
     cancel(run) -> bool                       排队中的直接取消，运行中的 kill 子进程
 
-执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 起子进程
-`python -m app.services.inference.offline.cli run`（钉卡 + 限核 + 降优先级 + 可 kill），解析其 stdout 末行 JSON。
-**本模块不 import worker / torch**：CLI 只作为子进程命令出现。
+执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 用 `analysis_proxy.spawn` 起一个 daemon
+子进程直接执行 `OfflineWorker.run(spec)`（子进程内钉卡 + 限核 + 降优先级 + 可 kill），结果经
+单向 Pipe 回传，本模块按结构化结果收口状态。
+**本模块不 import worker / torch**：子进程侧在 analysis_child，父侧句柄在 analysis_proxy。
 
-作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `--run-id`，
+作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `run_id`，
 不同 run 各跑各的；该 run 就是注册表里当前在跑的 run → 409（输入还在写）。
 状态只在内存，重启丢失（结果本身已落盘）。
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.types.run import RunIdentity
 from app.services.inference.config import InferenceConfig, load_stage_config
 from app.types.exceptions import ConflictError
 from app.services.utils.task_queue import SerialTaskQueue
+
+from .analysis_proxy import WorkerProcess, spawn
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +41,14 @@ THREADS = 2              # 子进程 torch 线程数
 QUEUE_SIZE = 20          # 排队上限（不含运行中的那个）
 JOB_TIMEOUT_S = 1800.0   # 单个 job 墙钟上限，超时 kill → failed
 HISTORY = 200            # 已结束的 job 最多保留几条
-POLL_S = 1.0             # 监视子进程的间隔：超时最多延迟这么久被发现
-
-_CLI_MODULE = "app.services.inference.offline.cli"
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_STDERR_TAIL_CHARS = 2000
+POLL_S = 1.0             # 等子进程 / 读结果的间隔：超时最多延迟这么久被发现
+KILL_GRACE_S = 5.0       # kill 后等子进程退出的宽限；仍不退则放弃回收，不卡队列
 
 QUEUED, RUNNING = "queued", "running"
 COMPLETED, SKIPPED, RECLAIMED = "completed", "skipped", "reclaimed"
 FAILED, CANCELLED = "failed", "cancelled"
 _ACTIVE = (QUEUED, RUNNING)
-_CLI_SUCCESS_STATUSES = (COMPLETED, SKIPPED, RECLAIMED)
+_SUCCESS_STATUSES = (COMPLETED, SKIPPED, RECLAIMED)
 
 
 @dataclass
@@ -79,12 +72,12 @@ class OfflineJob:
 
 
 class OfflineJobService:
-    """离线作业服务。`launcher` / `config` / `sessions` 仅供测试注入（假 Popen / 推理配置 / 注册表）。"""
+    """离线作业服务。`spawner` / `config` / `sessions` 仅供测试注入（假子进程 / 推理配置 / 注册表）。"""
 
     def __init__(
         self,
         *,
-        launcher: Callable[..., Any] = subprocess.Popen,
+        spawner: Callable[..., WorkerProcess] = spawn,
         config: Optional[InferenceConfig] = None,
         sessions=None,
         job_timeout_s: float = JOB_TIMEOUT_S,
@@ -96,7 +89,7 @@ class OfflineJobService:
 
             sessions = session_service
         self._sessions = sessions
-        self._launcher = launcher
+        self._spawner = spawner
         self._config = config  # None = 提交时读 load_stage_config 单例
         self._job_timeout_s = job_timeout_s
         self._poll_s = poll_s
@@ -107,8 +100,8 @@ class OfflineJobService:
         # 「起子进程」与「取消 + kill」在同一把锁下，故取消不会漏掉刚起的子进程。
         self._lock = threading.Lock()
         self._jobs: "OrderedDict[RunIdentity, OfflineJob]" = OrderedDict()
-        self._running: Optional[Tuple[OfflineJob, Any]] = None  # (job, proc)
-        self._abort: Optional[Tuple[str, str]] = None           # 运行中 job 的终止原因 (status, message)
+        self._running: Optional[Tuple[OfflineJob, WorkerProcess]] = None  # (job, handle)
+        self._abort: Optional[Tuple[str, str]] = None                      # 运行中 job 的终止原因 (status, message)
         self._stopping = False
 
     # ── 生命周期 ────────────────────────────────────────────────────────────────
@@ -208,9 +201,8 @@ class OfflineJobService:
     # ── 队列任务体 ─────────────────────────────────────────────────────────────
 
     def _execute(self, job: OfflineJob) -> None:
-        """在队列线程上跑一个 job：起子进程 → 监视 → 解析结果。异常不出本函数。"""
-        stdout = tempfile.TemporaryFile()
-        stderr = tempfile.TemporaryFile()
+        """在队列线程上跑一个 job：起子进程 → 等结果 → 收口状态。异常不出本函数。"""
+        handle: Optional[WorkerProcess] = None
         try:
             with self._lock:
                 if job.status != QUEUED:  # 排队期间已被取消
@@ -219,29 +211,26 @@ class OfflineJobService:
                     self._finish_locked(job, CANCELLED, "服务停机")
                     return
                 try:
-                    proc = self._launcher(
-                        _command(job), cwd=str(_REPO_ROOT), env=_child_env(),
-                        stdout=stdout, stderr=stderr, **_priority_kwargs(),
-                    )
+                    handle = self._spawner(job.task_id, job.step_id, job.run_id, THREADS)
                 except Exception as e:
                     self._finish_locked(job, FAILED, f"子进程启动失败: {e}")
                     return
                 job.status = RUNNING
                 job.started_at = time.time()
-                self._running = (job, proc)
+                self._running = (job, handle)
                 self._abort = None
 
             logger.info(
                 "[offline] 开始 task=%s step=%s run=%s pid=%s",
-                job.task_id, job.step_id, job.run_id, proc.pid,
+                job.task_id, job.step_id, job.run_id, handle.pid,
             )
-            self._watch(proc)
+            result, exitcode = self._watch(handle)
             with self._lock:
                 abort, self._abort, self._running = self._abort, None, None
                 if abort is not None:
                     self._finish_locked(job, *abort)
                 else:
-                    self._finish_from_output(job, proc.returncode, _read(stdout), _read(stderr))
+                    self._finish_from_result(job, exitcode, result)
         except Exception as e:  # 兜底：job 不能卡在 running
             logger.error("[offline] 执行异常 task=%s step=%s: %s", job.task_id, job.step_id, e, exc_info=True)
             with self._lock:
@@ -249,37 +238,73 @@ class OfflineJobService:
                 if job.status in _ACTIVE:
                     self._finish_locked(job, FAILED, f"执行异常: {e}")
         finally:
-            stdout.close()
-            stderr.close()
+            if handle is not None:
+                handle.close()
             logger.info(
                 "[offline] 结束 task=%s step=%s status=%s %s",
                 job.task_id, job.step_id, job.status, job.message,
             )
 
-    def _watch(self, proc) -> None:
-        """等子进程退出；超时 kill。取消与停机由调用方直接 kill。"""
-        deadline = time.monotonic() + self._job_timeout_s
-        while True:
-            try:
-                proc.wait(timeout=self._poll_s)
-                return
-            except subprocess.TimeoutExpired:
-                pass
-            if time.monotonic() >= deadline:
-                with self._lock:
-                    self._abort_locked(FAILED, f"超时（>{self._job_timeout_s:.0f}s）")
+    def _watch(self, handle: WorkerProcess) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+        """等子进程退出并取回结果；超时 kill，kill 后给有限宽限回收。
 
-    def _finish_from_output(self, job: OfflineJob, returncode: int, out: str, err: str) -> None:
-        result = _last_json(out)
-        if returncode == 0 and result is not None and result.get("status") in _CLI_SUCCESS_STATUSES:
-            job.producer = result.get("producer")
-            job.segment_count = int(result.get("segment_count") or 0)
-            alarm_count = result.get("alarm_count")
-            job.alarm_count = None if alarm_count is None else int(alarm_count)
-            self._finish_locked(job, result["status"], str(result.get("message") or ""))
+        子进程存活期间持续 poll 结果通道：结果（含长 message）不会让子进程堵在 send 上。
+        取消与停机由调用方直接 kill（见 `_abort_locked`），其终止原因优先于结果。
+        """
+        deadline = time.monotonic() + self._job_timeout_s
+        result: Optional[Dict[str, Any]] = None
+        while handle.is_alive():
+            if result is None and not handle.at_eof:
+                result = handle.poll_result(self._poll_s)
+            else:
+                handle.join(self._poll_s)
+            if not handle.is_alive():
+                break
+            if time.monotonic() < deadline:
+                continue
+            with self._lock:
+                self._abort_locked(FAILED, f"超时（>{self._job_timeout_s:.0f}s）")
+            if not self._join_within(handle, KILL_GRACE_S):
+                logger.error(
+                    "[offline] 子进程 kill 后 %.0fs 未退出，放弃回收并先收口 pid=%s",
+                    KILL_GRACE_S, handle.pid,
+                )
+                return result, None
+            break
+        handle.join(0)
+        if result is None and not handle.at_eof:
+            result = handle.poll_result(0.1)  # 退出后把已缓冲的结果读完
+        return result, handle.exitcode
+
+    def _join_within(self, handle: WorkerProcess, timeout: float) -> bool:
+        """在 timeout 秒内等子进程退出；返回是否已退出。"""
+        deadline = time.monotonic() + timeout
+        while handle.is_alive():
+            handle.join(max(0.0, min(self._poll_s, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                return not handle.is_alive()
+        return True
+
+    def _finish_from_result(
+        self, job: OfflineJob, exitcode: Optional[int], result: Optional[Dict[str, Any]],
+    ) -> None:
+        """按「有效结果 + 正常退出」登记 Worker 状态，其余一律 failed。"""
+        if result is not None:
+            status = result.get("status")
+            if exitcode == 0 and status in _SUCCESS_STATUSES:
+                job.producer = result.get("producer")
+                job.segment_count = int(result.get("segment_count") or 0)
+                alarm_count = result.get("alarm_count")
+                job.alarm_count = None if alarm_count is None else int(alarm_count)
+                self._finish_locked(job, status, str(result.get("message") or ""))
+                return
+            message = str(result.get("message") or "")
+            self._finish_locked(job, FAILED, message or f"子进程退出码 {exitcode}")
             return
-        message = (result or {}).get("message") or err[-_STDERR_TAIL_CHARS:].strip()
-        self._finish_locked(job, FAILED, message or f"子进程退出码 {returncode}")
+        if exitcode is None:
+            self._finish_locked(job, FAILED, "子进程未退出，未回传结果")
+            return
+        self._finish_locked(job, FAILED, f"子进程异常退出（exitcode={exitcode}），未回传结果")
 
     # ── 锁内小工具（调用方持 `_lock`）────────────────────────────────────────────
 
@@ -288,10 +313,7 @@ class OfflineJobService:
         if self._running is None or self._abort is not None:
             return
         self._abort = (status, message)
-        try:
-            self._running[1].kill()
-        except OSError:
-            pass  # 已自行退出
+        self._running[1].kill()
 
     @staticmethod
     def _finish_locked(job: OfflineJob, status: str, message: str) -> None:
@@ -306,43 +328,3 @@ class OfflineJobService:
 
     def _stage_config(self) -> InferenceConfig:
         return self._config if self._config is not None else load_stage_config()
-
-
-# ── 子进程 ─────────────────────────────────────────────────────────────────────
-
-
-def _command(job: OfflineJob) -> List[str]:
-    cmd = [
-        sys.executable, "-m", _CLI_MODULE, "run",
-        "--task-id", str(job.task_id), "--step-id", str(job.step_id), "--run-id", str(job.run_id),
-        "--threads", str(THREADS),
-    ]
-    nice = shutil.which("nice") if os.name != "nt" else None
-    return [nice, "-n", "15", *cmd] if nice else cmd
-
-
-def _priority_kwargs() -> Dict[str, Any]:
-    if os.name == "nt":
-        return {"creationflags": subprocess.BELOW_NORMAL_PRIORITY_CLASS}
-    return {}  # POSIX 走命令前缀 `nice`（preexec_fn 在多线程进程里不安全）
-
-
-def _child_env() -> Dict[str, str]:
-    env = dict(os.environ)  # 继承运行配置，CLI 子进程使用相同存储根和 CUDA 设备
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
-
-
-def _read(f) -> str:
-    f.seek(0)
-    return f.read().decode("utf-8", errors="replace")
-
-
-def _last_json(out: str) -> Optional[Dict[str, Any]]:
-    for line in reversed(out.strip().splitlines()):
-        try:
-            payload = json.loads(line)
-        except ValueError:
-            continue
-        return payload if isinstance(payload, dict) else None
-    return None

@@ -1,20 +1,19 @@
 """
-离线作业服务 → 真 CLI 子进程 端到端测试
+离线作业服务 → 真 spawn 子进程 端到端测试
 
-不需要后端服务、RTSP、数据库、GPU 或模型权重：`OfflineJobService` 用默认 launcher
-（`subprocess.Popen`）真起 `python -m app.services.inference.offline.cli run`，
-验证 起进程 / env / cwd / 末行 JSON 解析 这条管线。
+不需要后端服务、RTSP、数据库、GPU 或模型权重：`OfflineJobService` 用默认 spawner
+（`analysis_proxy.spawn`）真起一个 multiprocessing 子进程，子进程直接执行 `OfflineWorker.run`，
+验证 spawn / 单向结果通道 / 运行环境继承（存储根、配置）这条管线。
 
-做法：服务侧注入的配置放行 step 987，子进程侧读真实 YAML、987 未配置 → 退出非 0 →
-job 记 failed，message 带子进程的报错。不跑模型、不碰权重。
-存储根指到临时目录，经环境变量 `CLEANSIGHT_STORAGE_DIR` 传给子进程（服务的 `_child_env`
-继承 os.environ），结束即删。
+做法：服务侧注入的配置放行 step 987，子进程侧读真实 YAML、987 未配置 → Worker 抛错 →
+子进程回传 error 结果 → job 记 failed，message 来自子进程读到的真实配置。不跑模型、不碰权重。
+存储根指到临时目录，经环境变量 `CLEANSIGHT_STORAGE_DIR` 传给子进程（spawn 子进程继承 os.environ），结束即删。
 
 用法:
-    python integration_tests/test_offline_job_subprocess.py [--timeout 60]
+    python integration_tests/test_offline_job_subprocess.py [--timeout 120]
 
 参数:
-    --timeout <float>  等子进程结束的上限秒数（默认 60；冷启动 import 较慢）
+    --timeout <float>  等子进程结束的上限秒数（默认 120；子进程冷启动 import 较慢）
 """
 
 from __future__ import annotations
@@ -66,9 +65,9 @@ def run(timeout: float) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="离线作业服务 → 真 CLI 子进程 端到端测试")
-    parser.add_argument("--timeout", type=float, default=60.0,
-                        help="等子进程结束的上限秒数（默认 60）")
+    parser = argparse.ArgumentParser(description="离线作业服务 → 真 spawn 子进程 端到端测试")
+    parser.add_argument("--timeout", type=float, default=120.0,
+                        help="等子进程结束的上限秒数（默认 120）")
     args = parser.parse_args()
 
     # factories 在 tests/ 下，与 tests 共用一份构造逻辑

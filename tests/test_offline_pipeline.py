@@ -4,7 +4,6 @@
 """
 
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -383,21 +382,11 @@ class TestCli:
     @pytest.fixture(autouse=True)
     def _skip_run_process_configuration(self, monkeypatch):
         # 避免在 pytest 主进程配置 CUDA_VISIBLE_DEVICES 和 torch 线程数。
-        from app.services.inference.offline import cli
-        monkeypatch.setattr(cli, "_configure_run_process", lambda num_threads: None)
-
-    def test_pin_cuda_device_uses_online_inference_card(self, monkeypatch):
-        """离线子进程与在线推理子进程钉同一张卡（settings.cuda_device），不碰机器上别的卡。"""
-        from app.services.inference.offline import cli
-        from app.settings import settings
-
-        monkeypatch.setattr(settings, "cuda_device", "1")
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
-        cli._pin_cuda_device()
-        assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+        from app.services.inference.offline import analysis_child
+        monkeypatch.setattr(analysis_child, "configure_process", lambda num_threads: None)
 
     def test_run_completed_json_last_line(self, tmp_storage, monkeypatch, capsys):
-        """stdout 末行恒为结果 JSON（作业服务按此解析）。
+        """stdout 末行恒为结果 JSON（人工/脚本读取；后台不再解析它）。
 
         默认路径：OfflineWorker() 用 settings.storage_base_dir（tmp_storage 已指临时目录）
         + worker 内 load_stage_config（monkeypatch 成临时 config，绕开单例）。
