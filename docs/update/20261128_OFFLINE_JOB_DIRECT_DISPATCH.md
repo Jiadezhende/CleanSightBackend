@@ -114,10 +114,10 @@ submit → SerialTaskQueue（串行，一次一个） → analysis_proxy.spawn(t
 
 | 项 | 结果 |
 |----|------|
-| 相关单测（离线作业服务 / admin 路由 / 两个新模块 / CLI） | 81 passed |
+| 相关单测（离线作业服务 / admin 路由 / 两个新模块 / CLI） | 80 passed |
 | 导入纪律门禁（新增 `analysis_child`、`analysis_proxy` 两条预算 + 禁 worker 连带） | 108 passed |
 | `integration_tests/test_offline_job_subprocess.py`（真 spawn） | PASS：子进程读真实 YAML 报「step 987 未在推理配置中定义」→ 作业 `failed`，message 来自结果通道 |
-| 全量 `pytest tests/` | 1306 passed |
+| 全量 `pytest tests/` | 1305 passed |
 | CLI 冒烟：`materials` / 未配置 step 的 `run` | 退出码 0（物料齐全）；未配置 step → 末行 error JSON + 退出码 1 |
 
 ## 遗留风险 / 后续任务

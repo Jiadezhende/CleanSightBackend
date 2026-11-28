@@ -59,25 +59,21 @@ def execute(task_id: int, step_id: int, run_id: Optional[int], threads: int) -> 
         result = OfflineWorker().run(
             OfflineRunSpec(task_id=task_id, step_id=step_id, run_id=run_id)
         )
-    except Exception as e:  # 配置 / 输入 / 策略 / 写失败
+    except Exception as e:  # 配置 / 输入 / 策略 / 写失败 → 与成功结果同形状
         logger.error("运行失败 task=%s step=%s: %s", task_id, step_id, e, exc_info=True)
-        return _error_payload(str(e))
+        return {
+            "status": "error",
+            "producer": None,
+            "segment_count": 0,
+            "alarm_count": None,
+            "message": str(e),
+        }
     return {
         "status": result.status,
         "producer": result.producer,
         "segment_count": result.segment_count,
         "alarm_count": result.alarm_count,
         "message": result.message,
-    }
-
-
-def _error_payload(message: str) -> Dict[str, Any]:
-    return {
-        "status": "error",
-        "producer": None,
-        "segment_count": 0,
-        "alarm_count": None,
-        "message": message,
     }
 
 
@@ -115,34 +111,25 @@ def _configure_child_process() -> None:
 
 
 def _lower_priority() -> None:
-    """平台相应的低优先级；失败只告警（降优先级不是正确性条件）。"""
+    """平台相应的低优先级；失败只告警（降优先级不是正确性条件）。
+
+    - Windows：`SetPriorityClass(BELOW_NORMAL)`。`HANDLE` 是 64 位，必须显式声明 Win32
+      原型，否则 ctypes 按 C int 把 `GetCurrentProcess` 的伪句柄截断（x64 属未定义行为）。
+    - POSIX：`nice +15`，等价原 CLI 子进程的 `nice -n 15` 命令前缀（只影响本进程）。
+    """
     try:
         if os.name == "nt":
-            _lower_priority_windows()
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel32.SetPriorityClass.restype = wintypes.BOOL
+            kernel32.SetPriorityClass(
+                kernel32.GetCurrentProcess(), _WINDOWS_BELOW_NORMAL_PRIORITY_CLASS,
+            )
         else:
-            _lower_priority_posix()
+            os.nice(_NICE_INCREMENT)
     except Exception as e:
         logger.warning("降低进程优先级失败: %s", e)
-
-
-def _lower_priority_windows() -> None:
-    """`SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL)`。
-
-    `HANDLE` 是 64 位：不声明原型时 ctypes 按 C int 处理，`GetCurrentProcess` 的伪句柄
-    会被截断（x64 上属未定义行为）。这里按 Win32 原型钉死类型后再调。
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.windll.kernel32
-    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-    kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    kernel32.SetPriorityClass.restype = wintypes.BOOL
-    kernel32.SetPriorityClass(
-        kernel32.GetCurrentProcess(), _WINDOWS_BELOW_NORMAL_PRIORITY_CLASS,
-    )
-
-
-def _lower_priority_posix() -> None:
-    """`nice +15`，等价原 CLI 子进程的 `nice -n 15` 命令前缀（只影响本进程）。"""
-    os.nice(_NICE_INCREMENT)
