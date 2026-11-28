@@ -58,7 +58,7 @@ submit → SerialTaskQueue（串行，一次一个） → analysis_proxy.spawn(t
 - `configure_process(threads)`：原 CLI 的 `_pin_cuda_device` + `_configure_run_process` 合并，顺序不变（钉卡 → 首次 `import torch` → `set_num_threads`）。
 - `execute(task, step, run, threads) -> dict`：先配置再 `from .worker import OfflineWorker`，跑一次 `run()`；异常在此转成 `status="error"` 的 5 字段结果（CLI 与子进程共用，异常→失败只此一处）。
 - `worker_main(send_conn, …)`：spawn target。初始化子进程（忽略 SIGINT、`logging.basicConfig` 走继承的 stderr、`os.chdir(仓库根)` 保住模型相对路径契约、平台相应的低优先级）→ `execute` → `send` → 关闭写端 → 按 `status` 退出 0/1。
-- 低优先级：Windows `SetPriorityClass(BELOW_NORMAL)`，POSIX `os.nice(15)`，等价原 `nice -n 15` 命令前缀；失败只告警。
+- 低优先级：Windows `SetPriorityClass(BELOW_NORMAL)`（按 Win32 原型声明 `HANDLE` / `DWORD`，避免 64 位伪句柄被 ctypes 按 C int 截断），POSIX `os.nice(15)`，等价原 `nice -n 15` 命令前缀；两条平台分支失败都只告警、不影响作业。
 
 ### 2. `analysis_proxy.py` — 父侧句柄与 spawn（全景第 2 步收尾）
 
@@ -114,10 +114,10 @@ submit → SerialTaskQueue（串行，一次一个） → analysis_proxy.spawn(t
 
 | 项 | 结果 |
 |----|------|
-| 相关单测（离线作业服务 / admin 路由 / 两个新模块 / CLI） | 80 passed |
+| 相关单测（离线作业服务 / admin 路由 / 两个新模块 / CLI） | 81 passed |
 | 导入纪律门禁（新增 `analysis_child`、`analysis_proxy` 两条预算 + 禁 worker 连带） | 108 passed |
 | `integration_tests/test_offline_job_subprocess.py`（真 spawn） | PASS：子进程读真实 YAML 报「step 987 未在推理配置中定义」→ 作业 `failed`，message 来自结果通道 |
-| 全量 `pytest tests/` | 1305 passed |
+| 全量 `pytest tests/` | 1306 passed |
 | CLI 冒烟：`materials` / 未配置 step 的 `run` | 退出码 0（物料齐全）；未配置 step → 末行 error JSON + 退出码 1 |
 
 ## 遗留风险 / 后续任务

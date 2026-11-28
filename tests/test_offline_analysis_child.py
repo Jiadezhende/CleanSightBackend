@@ -117,3 +117,15 @@ def test_worker_main_send_failure_does_not_raise(monkeypatch):
         analysis_child.worker_main(conn, 1, 2, 3, 4)
     assert exc.value.code == 0
     assert conn.closed
+
+
+def test_lower_priority_failure_is_non_fatal(monkeypatch):
+    """降优先级是尽力而为：当前平台分支失败（权限 / 原型 / 缺 API）不能影响作业。"""
+
+    def boom(*args, **kwargs):
+        raise OSError("denied")
+
+    monkeypatch.setattr(analysis_child, "_lower_priority_windows", boom)
+    monkeypatch.setattr(analysis_child, "_lower_priority_posix", boom)
+
+    analysis_child._lower_priority()  # 不抛
