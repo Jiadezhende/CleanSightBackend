@@ -177,7 +177,7 @@ class StageWorker:
 #   控制哨兵：req 端收到 None → 优雅退出循环。
 #
 # 导入序契约见模块 docstring：本模块顶层不 import torch；torch/ultralytics 一律在下方钉
-# CUDA_VISIBLE_DEVICES 之后惰性 import（镜像 offline/cli.py 的隔离序，方向相反——那边置空
+# CUDA_VISIBLE_DEVICES 之后惰性 import（镜像 offline/analysis_child.py 的隔离序，方向相反——那边置空
 # 强制 CPU，这边钉到目标卡）。
 
 

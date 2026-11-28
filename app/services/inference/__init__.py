@@ -8,7 +8,7 @@
     config.py         stage 配置（online / offline 同源）
     stage_factory.py  按 stage 实例化 Detector / Operator / OfflineSegmenter
     online/           实时链路：service / instance / naming / types + 下列子包
-    offline/          离线全序列分割：runner / cli + 下列契约包
+    offline/          离线全序列分割：worker / analysis_child / cli + 下列契约包
 
 online 与 offline 互不 import；共用的东西只能放本层。
 

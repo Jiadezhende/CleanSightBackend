@@ -5,19 +5,22 @@
     python -m app.services.inference.offline.cli query --task-id 100 --step-id 2 [--run-id R]
     python -m app.services.inference.offline.cli materials            # 各 stage 激活策略的物料核对，缺失退出码 1
 
-设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动。
-`run` 的隔离在**任何 torch import 之前**生效：`CUDA_VISIBLE_DEVICES` 钉成 `settings.cuda_device`（与在线
-推理子进程同一张卡，不碰机器上别的卡；""=CPU）+ `torch.set_num_threads`（限核，默认 2），故必须先
-`_configure_run_process()` 再 import 触发策略 torch 加载的 worker/策略模块。用不用 GPU、限多少速由策略参数定。
-`run` 分割 completed 后接着跑规则判定（`compliance.checker.check_run`），写 alarms.jsonl；核对失败只记进 message，
-不改分割结果的 status 与退出码。`check` 只重跑核对（`--dry-run` 逐行打印全部判定、不写盘）。
+设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动。**后台作业服务
+不调用本模块**：它自己 spawn 子进程直接执行 `OfflineWorker`，本模块只服务人工测试、排障和查询。
+`run` 与后台共用 `analysis_child.execute`，运行环境隔离与结果形状只有一处实现。
+
+`run` 的隔离在**任何 torch import 之前**生效（见 `analysis_child.configure_process`）：
+`CUDA_VISIBLE_DEVICES` 钉成 `settings.cuda_device`（与在线推理子进程同一张卡，""=CPU）+
+`torch.set_num_threads`（限核，默认 2）。用不用 GPU、限多少速由策略参数定。
+`run` 分割 completed 后接着跑规则判定（`compliance.checker.check_run`），写 alarms.jsonl；核对失败
+只记进 message，不改分割结果的 status 与退出码。`check` 只重跑核对（`--dry-run` 逐行打印全部判定、不写盘）。
 `query` 只读 temporal.jsonl，不碰 torch/worker。
 
 step_id 恒为**数字存储键**（--step-id int）；未配置 / 无离线模型的 step 直接报错（无兜底）。
 `--run-id` 缺省 = 该 step 最新可见 run；入口解析一次，之后整次运行只读写这个 run。
 
-输出：stdout 末行恒为一行结果 JSON `{status, producer, segment_count, alarm_count, message}`（失败时 status="error"；
-未核对时 alarm_count 为 null），作业服务（offline/service.py）以子进程调用时解析它。
+输出：stdout 末行恒为一行结果 JSON `{status, producer, segment_count, alarm_count, message}`（失败时
+status="error"；未核对时 alarm_count 为 null），供人工与脚本读取。
 退出码：completed / skipped / reclaimed（点名的 run 已被回收）→ 0；step 未配置 / 输入损坏 /
 策略异常 / 写失败 → 非 0。
 """
@@ -27,56 +30,20 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 from typing import Optional, Sequence
 
 logger = logging.getLogger("offline.cli")
 
 
-def _pin_cuda_device() -> None:
-    """可见卡钉成在线推理子进程那一张（`settings.cuda_device`，""=CPU）。"""
-    from app.settings import settings
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = settings.cuda_device
-
-
-def _configure_run_process(num_threads: int) -> None:
-    """钉卡 + 限 torch 线程。**须在任何 torch import 之前调用。**"""
-    _pin_cuda_device()
-    try:
-        import torch  # 此处才首次 import torch，CUDA_VISIBLE_DEVICES 已钉好
-        torch.set_num_threads(max(1, num_threads))
-    except Exception:  # torch 未安装 / 占位策略不需要 torch —— 不阻断
-        pass
-
-
 def _handle_run(args: argparse.Namespace) -> int:
-    _configure_run_process(args.threads)
-    # worker / 策略 import 放在隔离之后：策略模块的 torch import 此时才发生
-    from .worker import OfflineRunSpec, OfflineWorker
+    # 函数体内 import：保持 CLI 顶层轻量；隔离（钉卡/限线程）在 analysis_child 里先于 worker import
+    from .analysis_child import execute
 
-    try:
-        result = OfflineWorker().run(
-            OfflineRunSpec(task_id=args.task_id, step_id=args.step_id, run_id=args.run_id)
-        )
-    except Exception as e:  # 配置/输入/策略/写失败 → 非 0
-        logger.error("运行失败 task=%s step=%s: %s", args.task_id, args.step_id, e, exc_info=True)
-        _print_run_result("error", None, 0, None, str(e))
-        return 1
-    _print_run_result(result.status, result.producer, result.segment_count, result.alarm_count, result.message)
-    return 0
-
-
-def _print_run_result(
-    status: str, producer: Optional[str], segment_count: int, alarm_count: Optional[int], message: str
-) -> None:
-    # 人读与作业服务共用这一行，故不转义中文；作业服务给子进程置了 PYTHONIOENCODING=utf-8 并按 utf-8 解码。
-    print(json.dumps(
-        {"status": status, "producer": producer, "segment_count": segment_count, "alarm_count": alarm_count,
-         "message": message},
-        ensure_ascii=False,
-    ))
+    payload = execute(args.task_id, args.step_id, args.run_id, args.threads)
+    # 人读与脚本共用这一行，故不转义中文
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0 if payload["status"] != "error" else 1
 
 
 def _handle_check(args: argparse.Namespace) -> int:

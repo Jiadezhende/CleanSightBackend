@@ -307,7 +307,7 @@ step 能力表：推理配置（`config/inference_config.yaml` 的 `stages`）�
 
 admin「离线推理」tab 用这三个端点提交离线推理，并查看执行进度。
 
-- **执行方式**：作业**串行**执行，同一时刻只跑一个，每个作业起一个子进程跑离线 CLI。
+- **执行方式**：作业**串行**执行，同一时刻只跑一个，每个作业起一个子进程直接执行 `OfflineWorker`（子进程内钉卡、限线程、降优先级，可被终止）。命令行 `python -m app.services.inference.offline.cli` 仅供人工测试、排障和查询。
 - **结果去哪看**：跑完的结果落盘在该 run 的 `temporal.jsonl` / `label_probs.npz`（配了合规规则的 step 另有 `alarms.jsonl`，见本文末节「离线盘上告警（过渡期）」），仍用 [`POST /ai/temporal`](ai.md) 与 [`POST /lab/label-probs`](lab.md) 读取（带同一个 `run_id`）。
 - **状态保存**：作业状态只存在进程内存里，后端重启后，排队中的作业和历史记录都会丢失（已落盘的结果不受影响）。
 - **作业锁定一个 run**（规则见 [README › run 定位](README.md#run-定位可选-run_id)）：提交时解析一次，整个作业只读写这个 run。该 run 正在运行 → 409（检测结果还在写）；跑的过程中同一 step 重新开跑，新一轮是另一个 run，互不影响；该 run 被 TTL 回收 → `reclaimed`，不写任何东西。

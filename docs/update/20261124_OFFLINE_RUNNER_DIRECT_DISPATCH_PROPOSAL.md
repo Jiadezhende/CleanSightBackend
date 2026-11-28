@@ -1,10 +1,16 @@
 # 离线作业服务直接调度 Worker 提案
 
-> **变更状态**：提案（2026-11-24；2026-11-28 按当天落地的分割流程更新现状，执行类改名 `OfflineWorker`）
+> **变更状态**：生效中（2026-11-28，按本提案落地）
+>
+> **落地记录**：[20261128_OFFLINE_JOB_DIRECT_DISPATCH](20261128_OFFLINE_JOB_DIRECT_DISPATCH.md)（模块切分、结果通道与验证结果以落地记录为准）
+>
+> **知识库**：待沉淀
 
 `OfflineJobService` 为每个作业启动独立子进程，直接调用 `OfflineWorker.run(spec)`。服务通过进程间通道接收结构化结果。CLI 保留为人工测试、排障和查询入口，和服务共用 Worker。
 
-## 现状
+## 落地前现状
+
+> 以下为 2026-11-24 提案时的状态；2026-11-28 已按本提案落地，现行实现见上方落地记录。
 
 - **提交。** `OfflineJobService` 把指定 `RunIdentity` 的作业放入串行队列。 [提交与状态管理](../../app/services/inference/offline/service.py#L154)
 - **执行。** 服务拼接 `python -m ...offline.cli run` 及参数。CLI 先钉卡和限线程，再调用 `OfflineWorker.run()`，由它完成分割、落盘和规则判定。 [子进程命令](../../app/services/inference/offline/service.py#L316) · [CLI 执行入口](../../app/services/inference/offline/cli.py#L54)

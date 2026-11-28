@@ -3,7 +3,7 @@
 
     MockDetector         纯 numpy 亮度启发式 Detector（中心区灰度均值 < 阈值即出框）
     BrushRulesSegmenter  纯规则离线分段（任一 source 有框即 active，连续 active 帧并段）
-    FakeLauncher         离线作业服务的子进程启动器；FakeProc 由用例手动 `finish()`
+    FakeSpawner          离线作业服务的子进程启动器；FakeWorkerProcess 由用例手动 `finish()`
     wait_until           轮询直到条件成立，超时即断言失败
 
 测试 config 里按模块名引用：`{"class": "doubles.BrushRulesSegmenter"}`（tests/ 在 sys.path 上）。
@@ -11,8 +11,6 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
 import threading
 import time
 from typing import Callable, List, Sequence
@@ -170,45 +168,68 @@ class BrushRulesSegmenter(OfflineSegmenter[Sequence[FrameDetection]]):
 # ---------------------------------------------------------------------------
 
 
-class FakeProc:
-    def __init__(self, cmd, stdout, stderr):
-        self.cmd = cmd
-        self.pid = 4242
-        self.returncode = None
-        self.killed = False
-        self._stdout = stdout
-        self._stderr = stderr
-        self._done = threading.Event()
+class FakeWorkerProcess:
+    """离线作业子进程替身：用例手动 `finish()` / `kill()`，不起真进程、不碰 torch。
 
-    def finish(self, returncode=0, result=None, stderr=b""):
+    `send_result()` 只置结果、不置退出，用来复现「结果先到、进程后退出」的真实次序。
+    """
+
+    def __init__(self, spawn_args):
+        self.args = spawn_args  # spawner 收到的 (task_id, step_id, run_id, threads)
+        self.pid = 4242
+        self.exitcode = None
+        self.killed = False
+        self._result = None
+        self._at_eof = False
+        self._done = threading.Event()
+        self._closed = False
+
+    def send_result(self, result):
+        self._result = result
+
+    def finish(self, exitcode=0, result=None):
         if result is not None:
-            self._stdout.write(b"log line\n" + json.dumps(result).encode() + b"\n")
-        self._stderr.write(stderr)
-        self.returncode = returncode
+            self._result = result
+        self.exitcode = exitcode
+        self._at_eof = True  # 子进程退出即关闭写端 / 管道 EOF
         self._done.set()
 
-    def wait(self, timeout=None):
-        if not self._done.wait(timeout):
-            raise subprocess.TimeoutExpired(self.cmd, timeout)
-        return self.returncode
+    def is_alive(self):
+        return not self._done.is_set()
+
+    def join(self, timeout=None):
+        self._done.wait(timeout)
+
+    def poll_result(self, timeout):
+        if self._result is not None:
+            return self._result
+        self._done.wait(timeout)
+        return self._result
+
+    @property
+    def at_eof(self):
+        return self._at_eof
 
     def kill(self):
         self.killed = True
-        self.finish(returncode=-9)
+        self.finish(exitcode=-9)
+
+    def close(self):
+        self._closed = True
 
 
-class FakeLauncher:
+class FakeSpawner:
     def __init__(self):
-        self.procs = []
+        self.procs: List[FakeWorkerProcess] = []
 
-    def __call__(self, cmd, *, stdout, stderr, **kwargs):
-        proc = FakeProc(cmd, stdout, stderr)
+    def __call__(self, task_id, step_id, run_id, threads):
+        proc = FakeWorkerProcess((task_id, step_id, run_id, threads))
         self.procs.append(proc)
         return proc
 
 
 def offline_result(status="completed", producer="P", segment_count=3, message="", alarm_count=None):
-    """CLI stdout 末行的结果 JSON。"""
+    """子进程结果通道 / CLI 末行 JSON 的 payload。"""
     return {"status": status, "producer": producer, "segment_count": segment_count, "alarm_count": alarm_count,
             "message": message}
 

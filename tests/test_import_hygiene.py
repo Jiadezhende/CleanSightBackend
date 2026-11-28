@@ -110,6 +110,8 @@ BUDGET = {
     "app.services.utils.media_timeline": (set(), 0.40),
     "app.services.utils.task_queue":   (set(), 0.20),   # stdlib only
     "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
+    # 收尸只调传进来的 Process / Queue 方法，自己不 import multiprocessing
+    "app.services.utils.process_group": (set(), 0.20),  # stdlib only
     "app.services.utils.pressure":     (set(), 0.20),   # stdlib only
     "app.services.utils.memory_budget": (set(), 0.20),  # stdlib only
     "app.services.utils.startup_latency": (set(), 0.20),  # stdlib only
@@ -144,9 +146,13 @@ BUDGET = {
     "app.services.inference.online.visualization.visualizer":   ({"cv2"}, 1.5),
     "app.services.inference.offline": (set(), 1.0),
     "app.services.inference.offline.segmentation": (set(), 1.0),
-    # 离线 CLI 是独立进程入口：`_configure_run_process()` 必须先于任何 torch import，故模块级不许有
-    # 重依赖（torch 只能在 `run` 子命令里、隔离之后由 worker/策略拉起）。实测 ~0.03s。
+    # 离线 CLI 是独立进程入口：运行环境隔离在 analysis_child.execute()（其模块级必须 torch-free），
+    # 故 cli 模块级同样不许有重依赖（torch 只能在 `run` 子命令里、隔离之后由 worker/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
+    # 离线作业子进程入口：spawn 会在 target 执行前先 import 本模块，故模块级不许有任何重依赖
+    # （torch 只能在 analysis_child.execute() 里、隔离之后由 worker/策略拉起）。父侧的 spawn /
+    # 进程句柄已并入 offline/service.py，其 torch-free 由 app.main 的预算（无 HEAVY）覆盖。
+    "app.services.inference.offline.analysis_child": (set(), 0.40),
     # 规则判定（LAYER_PACKAGES 白名单包，逐模块登记）：numpy + storage，不许 torch
     "app.services.inference.offline.compliance":          (set(), 0.50),
     "app.services.inference.offline.compliance.config":   (set(), 0.50),
@@ -176,6 +182,10 @@ FORBIDDEN_APP_IMPORTS = {
     # 离线 CLI 与在线后端零代码耦合（见其 docstring）：import 期不得拉起后端装配或在线链路
     "app.services.inference.offline.cli": (
         "app.main", "app.routers", "app.services.inference.online", "app.services.stream",
+    ),
+    # 离线作业子进程入口：模块级拉起 worker 就等于把 torch 装在钉卡之前（子进程先 import 本模块）
+    "app.services.inference.offline.analysis_child": (
+        "app.services.inference.offline.worker",
     ),
 }
 
@@ -210,8 +220,8 @@ LAYER_PACKAGES = {
         "app.services.utils", "app.storage", "app.types", "app.settings",
     ),
     # 离线规则判定：只读盘上的离线产物做判定，与同级的 offline/segmentation 互不 import（分割侧见
-    # test_offline_segmentation_does_not_import_compliance），只由 offline/cli.py 串起来；
-    # 规则表由 cli 从 stage 配置取出、以 dict 传入，故连 inference.config 都不许碰。
+    # test_offline_segmentation_does_not_import_compliance），只由 offline/worker.py 串联；
+    # 规则表由 worker 从 stage 配置取出、以 dict 传入，故连 inference.config 都不许碰。
     "app/services/inference/offline/compliance": (
         "app.services.inference.offline.compliance", "app.storage", "app.types",
     ),
