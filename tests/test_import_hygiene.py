@@ -110,6 +110,8 @@ BUDGET = {
     "app.services.utils.media_timeline": (set(), 0.40),
     "app.services.utils.task_queue":   (set(), 0.20),   # stdlib only
     "app.services.utils.worker_guard": (set(), 0.20),   # stdlib only
+    # 收尸只调传进来的 Process / Queue 方法，自己不 import multiprocessing
+    "app.services.utils.process_group": (set(), 0.20),  # stdlib only
     "app.services.utils.pressure":     (set(), 0.20),   # stdlib only
     "app.services.utils.memory_budget": (set(), 0.20),  # stdlib only
     "app.services.utils.startup_latency": (set(), 0.20),  # stdlib only

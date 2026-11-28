@@ -26,6 +26,7 @@ review 都只会看到「一个工具包」。那比三份重复实现更坏—�
     vod_playlist.py     VOD 形态 m3u8 的条目形状与文本渲染
     media_timeline.py   断流判定：GAP_THRESHOLD_MS / first_gap / total_gap_ms（媒体轴本身在 storage.hls）
     task_queue.py       SerialTaskQueue（单消费者串行队列）
+    process_group.py    子进程组收尸：kill 全部子进程 + 断读端 / 撤 join / 关队列
     worker_guard.py     guarded_run（线程主循环级自愈）
     pressure.py         PressureReporter（`[PRESSURE]` 周期快照日志）
     startup_latency.py  log_milestone（`[startup]` 启动延迟埋点日志）

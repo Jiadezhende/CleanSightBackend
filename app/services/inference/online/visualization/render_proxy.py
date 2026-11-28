@@ -25,6 +25,7 @@ import numpy as np
 
 from app.services.utils.frame_ring import SharedFrameRing
 from app.services.utils.metrics import frame_drop_total
+from app.services.utils.process_group import kill_process_group
 from .render_child import run_renderer
 
 logger = logging.getLogger(__name__)
@@ -153,30 +154,15 @@ class RemoteRenderProxy:
             )
 
     def _kill_children(self) -> None:
-        """terminate→join→kill→join；队列断读端 + 撤 join + 关（理由同 RemoteInferProxy._kill_child）。"""
+        """收掉全部子进程并拆队列（三步法见 `app/services/utils/process_group.py`）。"""
         with self._proc_lock:
-            for p in self._procs:
-                try:
-                    if p.is_alive():
-                        p.terminate()
-                        p.join(timeout=2.0)
-                    if p.is_alive():
-                        p.kill()
-                        p.join(timeout=2.0)
-                except Exception as e:  # pragma: no cover
-                    logger.warning("[RemoteRenderProxy] kill child failed: %s", e)
-            if self._req_q is not None:
-                try:
-                    self._req_q._reader.close()
-                except Exception:  # pragma: no cover
-                    pass
-            for q in (self._req_q, self._resp_q):
-                try:
-                    if q is not None:
-                        q.cancel_join_thread()
-                        q.close()
-                except Exception:  # pragma: no cover
-                    pass
+            kill_process_group(
+                self._procs,
+                queues=(self._req_q, self._resp_q),
+                break_reader_of=self._req_q,
+                logger=logger,
+                label="RemoteRenderProxy",
+            )
             self._procs = []
 
     def _clear_inflight(self) -> int:
