@@ -1,8 +1,8 @@
 """
 离线作业服务 → 真 spawn 子进程 端到端测试
 
-不需要后端服务、RTSP、数据库、GPU 或模型权重：`OfflineJobService` 用默认 spawner
-（`analysis_proxy.spawn`）真起一个 multiprocessing 子进程，子进程直接执行 `OfflineWorker.run`，
+不需要后端服务、RTSP、数据库、GPU 或模型权重：`OfflineJobService` 用默认 spawner（服务内的
+`_spawn`）真起一个 multiprocessing 子进程，子进程直接执行 `OfflineWorker.run`，
 验证 spawn / 单向结果通道 / 运行环境继承（存储根、配置）这条管线。
 
 做法：服务侧注入的配置放行 step 987，子进程侧读真实 YAML、987 未配置 → Worker 抛错 →

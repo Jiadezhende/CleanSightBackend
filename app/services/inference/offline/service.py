@@ -7,10 +7,11 @@
     list_jobs() -> List[OfflineJob]           在途 + 最近结束的，按提交序
     cancel(run) -> bool                       排队中的直接取消，运行中的 kill 子进程
 
-执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 用 `analysis_proxy.spawn` 起一个 daemon
-子进程直接执行 `OfflineWorker.run(spec)`（子进程内钉卡 + 限核 + 降优先级 + 可 kill），结果经
-单向 Pipe 回传，本模块按结构化结果收口状态。
-**本模块不 import worker / torch**：子进程侧在 analysis_child，父侧句柄在 analysis_proxy。
+执行：一条 `SerialTaskQueue`（一次只跑一个），每个 job 用本模块的 `_spawn` 起一个 daemon 子进程
+直接执行 `OfflineWorker.run(spec)`（子进程内钉卡 + 限核 + 降优先级 + 可 kill），结果经单向 Pipe
+回传，本模块按结构化结果收口状态。`WorkerProcess` 是父侧进程句柄（等结果 / kill / 回收），只被本
+服务使用，故不单拆模块。
+**本模块不 import worker / torch**；子进程侧入口（钉卡顺序契约）在 analysis_child。
 
 作业锁定一个 run（`RunIdentity`，由调用方经 `runs.query` 解析后传入）：子进程总带 `run_id`，
 不同 run 各跑各的；该 run 就是注册表里当前在跑的 run → 409（输入还在写）。
@@ -20,10 +21,12 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, replace
+from multiprocessing.connection import Connection
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.types.run import RunIdentity
@@ -31,7 +34,7 @@ from app.services.inference.config import InferenceConfig, load_stage_config
 from app.types.exceptions import ConflictError
 from app.services.utils.task_queue import SerialTaskQueue
 
-from .analysis_proxy import WorkerProcess, spawn
+from .analysis_child import worker_main
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +74,106 @@ class OfflineJob:
         return asdict(self)
 
 
+# ── 子进程（父侧：spawn + 句柄；只有本服务用，不单拆模块）───────────────────────
+
+
+class WorkerProcess:
+    """一次离线作业的子进程句柄：读结果、等退出、kill 与回收。"""
+
+    def __init__(self, proc, conn: Connection) -> None:
+        self._proc = proc
+        self._conn = conn
+        self._result: Optional[Dict[str, Any]] = None
+        self._at_eof = False
+        self._closed = False
+
+    @property
+    def pid(self) -> Optional[int]:
+        return self._proc.pid
+
+    @property
+    def exitcode(self) -> Optional[int]:
+        return self._proc.exitcode
+
+    @property
+    def at_eof(self) -> bool:
+        """结果通道已 EOF（子进程关闭写端或已退出）。"""
+        return self._at_eof
+
+    def is_alive(self) -> bool:
+        return self._proc.is_alive()
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        self._proc.join(timeout)
+
+    def kill(self) -> None:
+        try:
+            if self._proc.is_alive():
+                self._proc.kill()
+        except (OSError, ValueError):  # 已退出 / 句柄已关
+            pass
+
+    def poll_result(self, timeout: float) -> Optional[Dict[str, Any]]:
+        """最多等 timeout 秒取结果：取到后重复调用返回同一份；超时 / EOF / 非 dict → None。"""
+        if self._result is not None:
+            return self._result
+        if self._at_eof:
+            return None
+        try:
+            if not self._conn.poll(timeout):
+                return None
+            payload = self._conn.recv()
+        except (EOFError, OSError):
+            self._at_eof = True
+            return None
+        self._result = payload if isinstance(payload, dict) else None
+        return self._result
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._conn.close()
+        except Exception:  # pragma: no cover - 关闭失败无后续影响
+            pass
+        try:
+            if not self._proc.is_alive():
+                self._proc.close()
+        except (OSError, ValueError):  # pragma: no cover - 已关 / 仍在跑
+            pass
+
+
+def _spawn(
+    task_id: int, step_id: int, run_id: Optional[int], threads: int,
+) -> WorkerProcess:
+    """起一个 spawn 子进程跑一次 run；父进程只留读端（子进程退出即 EOF）。"""
+    ctx = multiprocessing.get_context("spawn")
+    recv_conn, send_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(
+        target=worker_main,
+        args=(send_conn, task_id, step_id, run_id, threads),
+        name=f"OfflineWorker-{task_id}/{step_id}/{run_id}",
+        daemon=True,
+    )
+    try:
+        proc.start()
+    except BaseException:
+        recv_conn.close()
+        send_conn.close()
+        raise
+    # 父进程不能留着写端：否则子进程退出后父进程永远读不到 EOF。
+    send_conn.close()
+    return WorkerProcess(proc, recv_conn)
+
+
 class OfflineJobService:
     """离线作业服务。`spawner` / `config` / `sessions` 仅供测试注入（假子进程 / 推理配置 / 注册表）。"""
 
     def __init__(
         self,
         *,
-        spawner: Callable[..., WorkerProcess] = spawn,
+        spawner: Callable[..., WorkerProcess] = _spawn,
         config: Optional[InferenceConfig] = None,
         sessions=None,
         job_timeout_s: float = JOB_TIMEOUT_S,

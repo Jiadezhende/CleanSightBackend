@@ -147,10 +147,10 @@ BUDGET = {
     # 离线 CLI 是独立进程入口：运行环境隔离在 analysis_child.execute()（其模块级必须 torch-free），
     # 故 cli 模块级同样不许有重依赖（torch 只能在 `run` 子命令里、隔离之后由 worker/策略拉起）。实测 ~0.03s。
     "app.services.inference.offline.cli": (set(), 0.20),
-    # 离线作业子进程两侧：spawn 子进程会在 target 执行前先 import 这两个模块，故模块级不许有
-    # 任何重依赖（torch 只能在 analysis_child.execute() 里、隔离之后由 worker/策略拉起）。
+    # 离线作业子进程入口：spawn 会在 target 执行前先 import 本模块，故模块级不许有任何重依赖
+    # （torch 只能在 analysis_child.execute() 里、隔离之后由 worker/策略拉起）。父侧的 spawn /
+    # 进程句柄已并入 offline/service.py，其 torch-free 由 app.main 的预算（无 HEAVY）覆盖。
     "app.services.inference.offline.analysis_child": (set(), 0.40),
-    "app.services.inference.offline.analysis_proxy": (set(), 0.40),
     # 规则判定（LAYER_PACKAGES 白名单包，逐模块登记）：numpy + storage，不许 torch
     "app.services.inference.offline.compliance":          (set(), 0.50),
     "app.services.inference.offline.compliance.config":   (set(), 0.50),
@@ -181,12 +181,9 @@ FORBIDDEN_APP_IMPORTS = {
     "app.services.inference.offline.cli": (
         "app.main", "app.routers", "app.services.inference.online", "app.services.stream",
     ),
-    # 离线作业子进程两侧：模块级拉起 worker 就等于把 torch 装在钉卡之前（子进程先 import 本模块）
+    # 离线作业子进程入口：模块级拉起 worker 就等于把 torch 装在钉卡之前（子进程先 import 本模块）
     "app.services.inference.offline.analysis_child": (
         "app.services.inference.offline.worker",
-    ),
-    "app.services.inference.offline.analysis_proxy": (
-        "app.services.inference.offline.worker", "app.services.inference.online",
     ),
 }
 

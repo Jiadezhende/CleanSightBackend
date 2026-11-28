@@ -6,8 +6,8 @@
     python -m app.services.inference.offline.cli materials            # 各 stage 激活策略的物料核对，缺失退出码 1
 
 设计：本进程与在线后端（uvicorn）、mediamtx 网关无任何代码/进程耦合——独立启动。**后台作业服务
-不调用本模块**：它经 `analysis_proxy` spawn 子进程直接执行 `OfflineWorker`，本模块只服务人工测试、
-排障和查询。`run` 与后台共用 `analysis_child.execute`，运行环境隔离与结果形状只有一处实现。
+不调用本模块**：它自己 spawn 子进程直接执行 `OfflineWorker`，本模块只服务人工测试、排障和查询。
+`run` 与后台共用 `analysis_child.execute`，运行环境隔离与结果形状只有一处实现。
 
 `run` 的隔离在**任何 torch import 之前**生效（见 `analysis_child.configure_process`）：
 `CUDA_VISIBLE_DEVICES` 钉成 `settings.cuda_device`（与在线推理子进程同一张卡，""=CPU）+

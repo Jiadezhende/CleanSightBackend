@@ -1,7 +1,7 @@
-"""离线作业服务：串行、去重、取消 / 停机 / 超时 kill、结果收口。
+"""离线作业服务：串行、去重、取消 / 停机 / 超时 kill、结果收口、spawn 接线与进程句柄。
 
-子进程全用假件（doubles.FakeSpawner）：FakeWorkerProcess 由用例手动 `finish()`，不起真进程、不碰 torch。
-真 spawn 子进程的端到端验证见 integration_tests/test_offline_job_subprocess.py。
+子进程全用假件（doubles.FakeSpawner / 本文件的假 ctx & Connection）：用例手动 `finish()`，
+不起真进程、不碰 torch。真 spawn 子进程的端到端验证见 integration_tests/test_offline_job_subprocess.py。
 """
 
 import time
@@ -13,7 +13,9 @@ from doubles import FakeSpawner, offline_result, wait_until
 
 from app.types.run import RunIdentity
 from app.services.inference.config import InferenceConfig
-from app.services.inference.offline.service import THREADS, OfflineJobService
+from app.services.inference.offline import analysis_child
+from app.services.inference.offline import service as service_module
+from app.services.inference.offline.service import THREADS, OfflineJobService, WorkerProcess
 from app.types.exceptions import ConflictError, ValidationError
 
 # 提交校验只看「step 在配置里且 offline 非空」，class 不会被 import（子进程才实例化）。
@@ -279,3 +281,141 @@ class TestStop:
             assert svc.submit(_r(1, 2)).status == "queued"
         finally:
             svc.stop(timeout=5.0)
+
+
+# ── spawn 接线与进程句柄（假 ctx / Connection / Process，不起真进程）──────────────
+
+
+class _FakeConn:
+    def __init__(self, payload=None, eof=False):
+        self.payload = payload
+        self.eof = eof
+        self.closed = False
+
+    def poll(self, timeout=None):
+        return self.payload is not None or self.eof
+
+    def recv(self):
+        if self.payload is None:
+            raise EOFError
+        payload, self.payload = self.payload, None
+        return payload
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeProc:
+    def __init__(self, pid=7, alive=False):
+        self.pid = pid
+        self.exitcode = None
+        self.closed = False
+        self.killed = False
+        self.started = False
+        self._alive = alive
+
+    def start(self):
+        self.started = True
+        self._alive = True
+
+    def is_alive(self):
+        return self._alive
+
+    def join(self, timeout=None):
+        return
+
+    def kill(self):
+        self.killed = True
+        self._alive = False
+        self.exitcode = -9
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeCtx:
+    def __init__(self, proc, recv_conn, send_conn):
+        self.proc = proc
+        self.recv_conn = recv_conn
+        self.send_conn = send_conn
+        self.process_kwargs = None
+
+    def Pipe(self, duplex):
+        assert duplex is False
+        return self.recv_conn, self.send_conn
+
+    def Process(self, **kwargs):
+        self.process_kwargs = kwargs
+        return self.proc
+
+
+def _patch_ctx(monkeypatch, ctx):
+    monkeypatch.setattr(service_module.multiprocessing, "get_context", lambda method: ctx)
+
+
+def test_spawn_wires_child_and_closes_parent_write_end(monkeypatch):
+    proc = _FakeProc()
+    recv_conn, send_conn = _FakeConn(), _FakeConn()
+    ctx = _FakeCtx(proc, recv_conn, send_conn)
+    _patch_ctx(monkeypatch, ctx)
+
+    handle = service_module._spawn(1, 2, 3, 4)
+
+    assert proc.started
+    assert ctx.process_kwargs["target"] is analysis_child.worker_main
+    assert ctx.process_kwargs["args"] == (send_conn, 1, 2, 3, 4)
+    assert ctx.process_kwargs["daemon"] is True
+    assert send_conn.closed  # 父进程不留写端，否则永远读不到 EOF
+    assert handle.pid == proc.pid
+
+
+def test_spawn_start_failure_closes_both_ends(monkeypatch):
+    class _BoomProc(_FakeProc):
+        def start(self):
+            raise OSError("no fork")
+
+    recv_conn, send_conn = _FakeConn(), _FakeConn()
+    _patch_ctx(monkeypatch, _FakeCtx(_BoomProc(), recv_conn, send_conn))
+    with pytest.raises(OSError, match="no fork"):
+        service_module._spawn(1, 2, 3, 4)
+    assert recv_conn.closed and send_conn.closed
+
+
+def test_poll_result_returns_payload_once_then_caches():
+    payload = {"status": "completed"}
+    handle = WorkerProcess(_FakeProc(alive=True), _FakeConn(payload=payload))
+    assert handle.poll_result(0.01) == payload
+    assert handle.poll_result(0.0) == payload
+
+
+def test_poll_result_timeout_returns_none():
+    handle = WorkerProcess(_FakeProc(alive=True), _FakeConn())
+    assert handle.poll_result(0.0) is None
+    assert handle.at_eof is False
+
+
+def test_eof_marks_at_eof():
+    handle = WorkerProcess(_FakeProc(), _FakeConn(eof=True))
+    assert handle.poll_result(0.0) is None
+    assert handle.at_eof is True
+
+
+def test_kill_only_when_alive():
+    dead = _FakeProc(alive=False)
+    WorkerProcess(dead, _FakeConn()).kill()
+    assert dead.killed is False
+
+    alive = _FakeProc(alive=True)
+    WorkerProcess(alive, _FakeConn()).kill()
+    assert alive.killed is True
+
+
+def test_close_releases_conn_and_only_closes_exited_process():
+    alive = _FakeProc(alive=True)
+    conn = _FakeConn()
+    WorkerProcess(alive, conn).close()
+    assert conn.closed and alive.closed is False
+
+    dead = _FakeProc(alive=False)
+    WorkerProcess(dead, _FakeConn()).close()
+    assert dead.closed is True
